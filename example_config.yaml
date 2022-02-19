@@ -1,0 +1,19 @@
+general:
+  wallet:
+    import_private_key: "aaaaaaa"
+
+# assets:
+#   - anonq:
+#     network_id: 56
+#     network_name: "bsc"
+#     pair: "bnb"
+#     pair_address:
+#     router_address:
+
+# networks:
+#   - bsc:
+#     name: "bsc"
+#     symbol: "bnb"
+#     chain_id: 56
+#     rpc_url:
+#     blockexplorer_url: 
