@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -10,8 +12,34 @@ pub struct General {
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
+pub struct Asset {
+    network_id: String,
+    pair: String,
+    pair_address: String,
+    exchange_id: String,
+}
+
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+pub struct Network {
+    name: String,
+    symbol: String,
+    chain_id: u32,
+    rpc_url: String,
+    blockexplorer_url: String,
+}
+
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+pub struct Exchange {
+    name: String,
+    router_address: String,
+}
+
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Config {
     general: General,
+    assets: HashMap<String, Asset>,
+    networks: HashMap<String, Network>,
+    exchanges: HashMap<String, Exchange>,
 }
 
 impl Config {

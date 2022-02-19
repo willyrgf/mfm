@@ -3,7 +3,7 @@ general:
     import_private_key: "aaaaaaa"
 
 assets:
-  anonq:
+  cake:
     network_id: "bsc"
     pair: "bnb"
     pair_address:
@@ -25,6 +25,7 @@ networks:
 
 exchanges:
   pancake_swap_v2:
+    name: "pancake_swap_v2"
     router_address:
 
 
