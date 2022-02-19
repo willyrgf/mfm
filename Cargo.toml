@@ -9,3 +9,5 @@ edition = "2021"
 clap = { version = "3.1.0", features = ["derive"] }
 serde_yaml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
+ethsign = "0.8"
+rustc-hex = "2.1.0"
