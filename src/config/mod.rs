@@ -14,7 +14,8 @@ pub struct General {
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Asset {
     network_id: String,
-    pair: String,
+    base: String,
+    quote: String,
     pair_address: String,
     exchange_id: String,
 }
