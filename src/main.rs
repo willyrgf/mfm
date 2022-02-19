@@ -6,7 +6,7 @@ use mfm::config::Config;
 #[clap(author, version, about, long_about = None)]
 struct Args {
     // filename with the mfm configurations
-    #[clap(short, long)]
+    #[clap(short, long, default_value = "config.yaml")]
     config_filename: String,
 }
 
