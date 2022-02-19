@@ -2,18 +2,29 @@ general:
   wallet:
     import_private_key: "aaaaaaa"
 
-# assets:
-#   - anonq:
-#     network_id: 56
-#     network_name: "bsc"
-#     pair: "bnb"
-#     pair_address:
-#     router_address:
+assets:
+  anonq:
+    network_id: "bsc"
+    pair: "bnb"
+    pair_address:
+    exchange_id: "pancake_swap_v2"
+  bnb:
+    network_id: "bsc"
+    pair: "busd"
+    pair_address:
+    exchange_id: "pancake_swap_v2"
+  
 
-# networks:
-#   - bsc:
-#     name: "bsc"
-#     symbol: "bnb"
-#     chain_id: 56
-#     rpc_url:
-#     blockexplorer_url: 
+networks:
+  bsc:
+    name: "bsc"
+    symbol: "bnb"
+    chain_id: 56
+    rpc_url:
+    blockexplorer_url: 
+
+exchanges:
+  pancake_swap_v2:
+    router_address:
+
+
