@@ -1,6 +1,31 @@
 general:
   wallets:
-    import_private_key: "YOUR_PRIVATE_KEY"
+    test-wallet:
+      import_private_key: "YOUR_PRIVATE_KEY"
+
+assets:
+  bnb:
+    network_id: "bsc"
+    base: "bnb"
+    quote: "busd"
+    pair_address: 0x58f876857a02d6762e0101bb5c46a8c1ed44dc16
+    exchange_id: "pancake_swap_v2"
+
+networks:
+  bsc:
+    name: "bsc"
+    symbol: "bnb"
+    chain_id: 56
+    rpc_url: https://bsc-dataseed.binance.org
+    blockexplorer_url: https://bscscan.com
+
+exchanges:
+  pancake_swap_v2:
+    name: "pancake_swap_v2"
+    router_address: "0x10ED43C718714eb63d5aA57B78B54704E256024E"
+
+
+
 
 assets:
   bnb:

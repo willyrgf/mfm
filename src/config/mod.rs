@@ -8,7 +8,7 @@ pub struct Wallet {
 }
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct General {
-    wallet: Wallet,
+    wallets: HashMap<String, Wallet>,
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
