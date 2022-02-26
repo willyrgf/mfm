@@ -28,11 +28,8 @@ async fn main() -> web3::contract::Result<()> {
     let bsc_network = config.networks.get("bsc");
     let anonq_asset = config.assets.get("anonq");
 
-    // TODO: move it to exchange
+    // TODO: move it to config::exchange mod
     let abi_path = |name: &str| format!("./res/exchanges/{}/abi.json", name);
-    // let abi_path = |name: &str| -> &str { format!("../exchanges/{}/abi.json", name).as_str() };
-
-    let pk_exchange = config.exchanges.get(anonq_asset.exchange_id());
 
     let secp = Secp256k1::new();
     let public = PublicKey::from_secret_key(&secp, &secret);
@@ -41,18 +38,21 @@ async fn main() -> web3::contract::Result<()> {
     let client = web3::Web3::new(http);
     let address = Address::from_str(anonq_asset.address()).unwrap();
 
+    // TODO: move it to config::exchange mod
     let abi_json = |path: &str| -> String {
         let reader = std::fs::File::open(path).unwrap();
         let json: serde_json::Value = serde_json::from_reader(reader).unwrap();
         json.to_string()
     };
 
+    let pk_exchange = config.exchanges.get(anonq_asset.exchange_id());
     let path = abi_path(pk_exchange.name());
     let json = abi_json(path.as_str());
 
     let contract = Contract::from_json(client.eth(), address, json.as_bytes()).unwrap();
     let account_address = signing::public_key_address(&public);
 
+    // TODO: move it to a async func and let main without async
     let result = contract.query(
         "balanceOf",
         (account_address,),
