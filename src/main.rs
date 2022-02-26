@@ -1,5 +1,5 @@
 use clap::Parser;
-use mfm::{config::Config, sign};
+use mfm::{config::Config, signing};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use std::str::FromStr;
 use web3::{
@@ -66,7 +66,7 @@ async fn main() -> web3::contract::Result<()> {
     // let my_account = Address::from_str("0x327bd0E528c4c1a883F0fC25ABEbf2A07a9433cE").unwrap();
     // let x = public_key_address(&public);
     // let acc = web3::signing::feature_gated::public_key_address(public);
-    let acc = sign::public_key_address(&public);
+    let acc = signing::public_key_address(&public);
 
     // let account = hex!(public.address());
     // let my_account = hex!("d028d24f16a8893bd078259d413372ac01580769").into();
