@@ -10,6 +10,12 @@ clap = { version = "3.1.0", features = ["derive"] }
 serde_yaml = "0.8"
 serde_json = "1.0.79"
 serde = { version = "1.0", features = ["derive"] }
-ethsign = "0.8"
 rustc-hex = "2.1.0"
-web3 = "0.18.0"
+tokio = { version = "1.17.0", features = ["full"] }
+secp256k1 =  "0.21"
+# secp256k1 = { version = "0.21", features = ["recovery"], optional = true }
+# once_cell = { version = "1.8.0", optional = true }
+web3 = { version = "0.18.0" }
+
+# [features]
+# signing = ["secp256k1", "once_cell"]
