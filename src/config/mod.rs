@@ -6,15 +6,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Asset {
     network_id: String,
-    base: String,
-    quote: String,
-    pair_address: String,
+    address: String,
     exchange_id: String,
 }
 
 impl Asset {
-    pub fn pair_address(&self) -> &str {
-        self.pair_address.as_str()
+    pub fn address(&self) -> &str {
+        self.address.as_str()
     }
     pub fn exchange_id(&self) -> &str {
         self.exchange_id.as_str()
@@ -37,6 +35,9 @@ pub struct Wallet {
 impl Wallet {
     pub fn to_raw(&self) -> Vec<u8> {
         self.private_key.from_hex().unwrap()
+    }
+    pub fn private_key(&self) -> String {
+        self.private_key.clone()
     }
 }
 

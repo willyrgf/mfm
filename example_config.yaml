@@ -1,15 +1,20 @@
-general:
-  wallets:
-    test-wallet:
-      import_private_key: "YOUR_PRIVATE_KEY"
+wallets:
+  test-wallet:
+    private_key: "YOUR_PRIVATE_KEY"
 
 assets:
-  bnb:
+  anonq:
     network_id: "bsc"
-    base: "bnb"
-    quote: "busd"
-    pair_address: 0x58f876857a02d6762e0101bb5c46a8c1ed44dc16
     exchange_id: "pancake_swap_v2"
+    address: "0xf393138616cd6DD367171eaA59c2eaEE420a32b9"
+  busd:
+    network_id: "bsc"
+    exchange_id: "pancake_swap_v2"
+    address: "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56"
+  wbnb:
+    network_id: "bsc"
+    exchange_id: "pancake_swap_v2"
+    address: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
 
 networks:
   bsc:
