@@ -1,10 +1,16 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 
-use rustc_hex::FromHex;
+use rustc_hex::{FromHex, FromHexError};
 use serde::{Deserialize, Serialize};
-
+use web3::{
+    transports::Http,
+    contract::{Contract},
+    types::{Address, H160},
+};
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Asset {
+    pub name: String,
     network_id: String,
     address: String,
     exchange_id: String,
@@ -14,13 +20,39 @@ impl Asset {
     pub fn address(&self) -> &str {
         self.address.as_str()
     }
+
+    pub fn as_address(&self) -> Result<H160, FromHexError> {
+        Address::from_str(self.address())
+    }
+
     pub fn exchange_id(&self) -> &str {
         self.exchange_id.as_str()
+    }
+
+    pub fn abi_path(&self) -> String {
+        format!(
+            "./res/assets/{}/{}/{}/abi.json",
+            self.network_id.as_str(),
+            self.exchange_id.as_str(),
+            self.name.as_str()
+        )
+    }
+
+    pub fn abi_json_string(&self) -> String {
+        let reader = std::fs::File::open(self.abi_path()).unwrap();
+        let json: serde_json::Value = serde_json::from_reader(reader).unwrap();
+        json.to_string()
+    }
+
+    pub fn contract(&self, client: web3::Web3<Http>) -> Contract<Http> {
+        let contract_address = self.as_address().unwrap();
+        let json_abi = self.abi_json_string();
+        Contract::from_json(client.eth(), contract_address, json_abi.as_bytes()).unwrap()
     }
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
-pub struct Assets(HashMap<String, Asset>);
+pub struct Assets(pub HashMap<String, Asset>);
 impl Assets {
     pub fn get(&self, key: &str) -> &Asset {
         self.0.get(key).unwrap()
