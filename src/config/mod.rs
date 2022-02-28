@@ -5,8 +5,8 @@ use rustc_hex::{FromHex, FromHexError};
 use serde::{Deserialize, Serialize};
 use web3::{
     transports::Http,
-    contract::{Contract},
-    types::{Address, H160},
+    contract::{Contract, Options},
+    types::{Address, H160, U256}
 };
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Asset {
@@ -48,6 +48,20 @@ impl Asset {
         let contract_address = self.as_address().unwrap();
         let json_abi = self.abi_json_string();
         Contract::from_json(client.eth(), contract_address, json_abi.as_bytes()).unwrap()
+    }
+
+    pub async fn balance_of(&self, client: web3::Web3<Http>, account: H160) -> U256 {
+        let contract = self.contract(client);
+        let result = contract.query(
+        "balanceOf",
+        (account,),
+        None,
+        Options::default(),
+        None,
+        );
+
+        let result_balance: U256 = result.await.unwrap();
+        result_balance
     }
 }
 

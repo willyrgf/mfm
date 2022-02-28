@@ -749,6 +749,7 @@ name = "mfm"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "futures",
  "rustc-hex",
  "secp256k1",
  "serde",

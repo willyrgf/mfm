@@ -2,10 +2,6 @@ use clap::Parser;
 use mfm::{config::Config, signing};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use std::str::FromStr;
-use web3::{
-    contract::{Options},
-    types::{U256}
-};
 
 // multiverse finance machine cli
 #[derive(Parser, Debug)]
@@ -53,15 +49,7 @@ async fn main() -> web3::contract::Result<()> {
 
     // TODO: move it to a async func and let main without async
     for (_,asset) in config.assets.0.iter() {
-        let asset_contract = asset.contract(client.clone());
-        let result = asset_contract.query(
-            "balanceOf",
-            (account_address,),
-            None,
-            Options::default(),
-            None,
-        );
-        let balance_of: U256 = result.await?;
+        let balance_of = asset.balance_of(client.clone(), account_address).await;
         println!("asset: {} balance_of: {:?}", asset.name, balance_of);
     }
 
