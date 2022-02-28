@@ -10,13 +10,17 @@ use web3::{
 };
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Asset {
-    pub name: String,
+    name: String,
     network_id: String,
     address: String,
     exchange_id: String,
 }
 
 impl Asset {
+    pub fn name(&self) -> String {
+        self.name.clone()
+    }
+
     pub fn address(&self) -> &str {
         self.address.as_str()
     }
@@ -66,8 +70,11 @@ impl Asset {
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
-pub struct Assets(pub HashMap<String, Asset>);
+pub struct Assets(HashMap<String, Asset>);
 impl Assets {
+    pub fn hashmap(&self) -> &HashMap<String, Asset> {
+        &self.0
+    }
     pub fn get(&self, key: &str) -> &Asset {
         self.0.get(key).unwrap()
     }

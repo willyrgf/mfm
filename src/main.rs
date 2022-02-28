@@ -48,9 +48,9 @@ async fn main() -> web3::contract::Result<()> {
     let account_address = signing::public_key_address(&public);
 
     // TODO: move it to a async func and let main without async
-    for (_,asset) in config.assets.0.iter() {
+    for (_,asset) in config.assets.hashmap().iter() {
         let balance_of = asset.balance_of(client.clone(), account_address).await;
-        println!("asset: {} balance_of: {:?}", asset.name, balance_of);
+        println!("asset: {} balance_of: {:?}", asset.name(), balance_of);
     }
 
 
