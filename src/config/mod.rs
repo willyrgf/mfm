@@ -17,8 +17,8 @@ pub struct Asset {
 }
 
 impl Asset {
-    pub fn name(&self) -> String {
-        self.name.clone()
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn address(&self) -> &str {
@@ -54,6 +54,19 @@ impl Asset {
         Contract::from_json(client.eth(), contract_address, json_abi.as_bytes()).unwrap()
     }
 
+    pub async fn decimals(&self, client: web3::Web3<Http>) -> u8 {
+        let contract = self.contract(client);
+        let result = contract.query(
+            "decimals",
+            (),
+            None,
+            Options::default(),
+            None
+        );
+        let result_decimals: u8 = result.await.unwrap();
+        result_decimals
+    }
+
     pub async fn balance_of(&self, client: web3::Web3<Http>, account: H160) -> U256 {
         let contract = self.contract(client);
         let result = contract.query(
@@ -63,7 +76,6 @@ impl Asset {
         Options::default(),
         None,
         );
-
         let result_balance: U256 = result.await.unwrap();
         result_balance
     }
@@ -75,6 +87,7 @@ impl Assets {
     pub fn hashmap(&self) -> &HashMap<String, Asset> {
         &self.0
     }
+
     pub fn get(&self, key: &str) -> &Asset {
         self.0.get(key).unwrap()
     }
@@ -134,6 +147,47 @@ pub struct Exchange {
 impl Exchange {
     pub fn name(&self) -> &str {
         self.name.as_str()
+    }
+
+    pub fn router_address(&self) -> &str {
+        self.router_address.as_str()
+    }
+
+    pub fn as_router_address(&self) -> Result<H160, FromHexError> {
+        Address::from_str(self.router_address())
+    }
+
+    pub fn router_abi_path(&self) -> String {
+        format!(
+            "./res/exchanges/{}/abi.json",
+            self.name.as_str()
+        )
+    }
+
+    pub fn router_abi_json_string(&self) -> String {
+        let reader = std::fs::File::open(self.router_abi_path()).unwrap();
+        let json: serde_json::Value = serde_json::from_reader(reader).unwrap();
+        json.to_string()
+    }
+
+    pub fn router_contract(&self, client: web3::Web3<Http>) -> Contract<Http> {
+        let contract_address = self.as_router_address().unwrap();
+        let json_abi = self.router_abi_json_string();
+        Contract::from_json(client.eth(), contract_address, json_abi.as_bytes()).unwrap()
+    }
+
+    pub async fn get_amounts_out(&self, client: web3::Web3<Http>, decimals: u8, assets_path: Vec<H160>) -> Vec<U256> {
+        let contract = self.router_contract(client);
+        let amount: U256 = (1*10_i32.pow(decimals.into())).into();
+        let result = contract.query(
+        "getAmountsOut",
+        (amount, assets_path),
+        None,
+        Options::default(),
+        None,
+        );
+        let result_amounts_out: Vec<U256> = result.await.unwrap();
+        result_amounts_out
     }
 }
 

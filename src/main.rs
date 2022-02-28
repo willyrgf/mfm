@@ -1,7 +1,7 @@
 use clap::Parser;
 use mfm::{config::Config, signing};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
-use std::str::FromStr;
+use std::{str::FromStr, result};
 
 // multiverse finance machine cli
 #[derive(Parser, Debug)]
@@ -16,41 +16,41 @@ struct Args {
 async fn main() -> web3::contract::Result<()> {
     let args = Args::parse();
     let config = Config::from_file(&args.config_filename);
-
     let wallet = config.wallets.get("test-wallet");
-
     let secret = SecretKey::from_str(&wallet.private_key()).unwrap();
-
     let bsc_network = config.networks.get("bsc");
-
-    // TODO: move it to config::exchange mod
-    // let abi_path = |name: &str| format!("./res/exchanges/{}/abi.json", name);
 
     let secp = Secp256k1::new();
     let public = PublicKey::from_secret_key(&secp, &secret);
 
     let http = web3::transports::Http::new(bsc_network.rpc_url()).unwrap();
     let client = web3::Web3::new(http);
-    // let address = Address::from_str(anonq_asset.address()).unwrap();
-
-    // TODO: move it to config::exchange mod
-    // let abi_json = |path: &str| -> String {
-    //     let reader = std::fs::File::open(path).unwrap();
-    //     let json: serde_json::Value = serde_json::from_reader(reader).unwrap();
-    //     json.to_string()
-    // };
-
-    //let pk_exchange = config.exchanges.get(anonq_asset.exchange_id());
-    //let path = abi_path(pk_exchange.name());
-    //let json = abi_json(path.as_str());
-
-    //let contract = Contract::from_json(client.eth(), address, json.as_bytes()).unwrap();
     let account_address = signing::public_key_address(&public);
-
     // TODO: move it to a async func and let main without async
     for (_,asset) in config.assets.hashmap().iter() {
         let balance_of = asset.balance_of(client.clone(), account_address).await;
-        println!("asset: {} balance_of: {:?}", asset.name(), balance_of);
+        println!("asset: {}, balance_of: {:?}", asset.name(), balance_of);
+
+        if asset.name() == "anonq" {
+            let decimals = asset.decimals(client.clone()).await;
+            let exchange = config.exchanges.get(asset.exchange_id());
+            let wbnb = config.assets.get("wbnb");
+            let busd = config.assets.get("busd");
+            let path = vec![
+                asset.as_address().unwrap(),
+                wbnb.as_address().unwrap(),
+                busd.as_address().unwrap()
+            ];
+            println!("path: {:?}", path);
+
+            let result_amounts_out = exchange.get_amounts_out(
+                client.clone(),
+                decimals,
+                path
+            ).await;
+
+            println!("getAmountsOut: {:?}", result_amounts_out);
+        }
     }
 
 
