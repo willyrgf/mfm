@@ -1,33 +1,33 @@
 wallets:
   test-wallet:
-    private_key: "YOUR_PRIVATE_KEY"
+    private_key: YOUR_PRIVATE_KEY
 
 assets:
   anonq:
-    name: "anonq"
-    network_id: "bsc"
-    exchange_id: "pancake_swap_v2"
-    address: "0xf393138616cd6DD367171eaA59c2eaEE420a32b9"
+    name: anonq
+    network_id: bsc
+    exchange_id: pancake_swap_v2
+    address: 0xf393138616cd6DD367171eaA59c2eaEE420a32b9
   busd:
-    name: "busd"
-    network_id: "bsc"
-    exchange_id: "pancake_swap_v2"
-    address: "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56"
+    name: busd
+    network_id: bsc
+    exchange_id: pancake_swap_v2
+    address: 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56
   wbnb:
-    name: "wbnb"
-    network_id: "bsc"
-    exchange_id: "pancake_swap_v2"
-    address: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+    name: wbnb
+    network_id: bsc
+    exchange_id: pancake_swap_v2
+    address: 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c
 
 networks:
   bsc:
-    name: "bsc"
-    symbol: "bnb"
+    name: bsc
+    symbol: bnb
     chain_id: 56
     rpc_url: https://bsc-dataseed.binance.org
     blockexplorer_url: https://bscscan.com
 
 exchanges:
   pancake_swap_v2:
-    name: "pancake_swap_v2"
-    router_address: "0x10ED43C718714eb63d5aA57B78B54704E256024E"
+    name: pancake_swap_v2
+    router_address: 0x10ED43C718714eb63d5aA57B78B54704E256024E
