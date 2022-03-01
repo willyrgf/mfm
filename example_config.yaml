@@ -4,17 +4,17 @@ wallets:
 
 assets:
   anonq:
-    name: 'anonq'
+    name: "anonq"
     network_id: "bsc"
     exchange_id: "pancake_swap_v2"
     address: "0xf393138616cd6DD367171eaA59c2eaEE420a32b9"
   busd:
-    name: 'busd'
+    name: "busd"
     network_id: "bsc"
     exchange_id: "pancake_swap_v2"
     address: "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56"
   wbnb:
-    name: 'wbnb'
+    name: "wbnb"
     network_id: "bsc"
     exchange_id: "pancake_swap_v2"
     address: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
