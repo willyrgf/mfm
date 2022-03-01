@@ -29,7 +29,13 @@ async fn main() -> web3::contract::Result<()> {
     // TODO: move it to a async func and let main without async
     for (_, asset) in config.assets.hashmap().iter() {
         let balance_of = asset.balance_of(client.clone(), account_address).await;
-        println!("asset: {}, balance_of: {:?}", asset.name(), balance_of);
+        let decimals = asset.decimals(client.clone()).await;
+        println!(
+            "asset: {}, balance_of: {:?}, decimals: {}",
+            asset.name(),
+            balance_of,
+            decimals
+        );
 
         if asset.name() == "anonq" {
             let decimals = asset.decimals(client.clone()).await;
@@ -41,6 +47,12 @@ async fn main() -> web3::contract::Result<()> {
                 wbnb.as_address().unwrap(),
                 busd.as_address().unwrap(),
             ];
+            let route = config.routes.search(asset, busd);
+            println!(
+                "route: {:?}; real_path: {:?}",
+                route,
+                route.build_path(&config.assets)
+            );
             println!("path: {:?}", path);
 
             let result_amounts_out = exchange
