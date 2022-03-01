@@ -19,6 +19,16 @@ assets:
     exchange_id: pancake_swap_v2
     address: 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c
 
+routes: 
+  anonq-busd:
+    base: anonq
+    quote: busd
+    path: [wbnb]
+  busd-anonq:
+    base: busd
+    quote: anonq
+    path: [wbnb]
+
 networks:
   bsc:
     name: bsc
