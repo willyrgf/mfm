@@ -4,9 +4,9 @@ use std::str::FromStr;
 use rustc_hex::{FromHex, FromHexError};
 use serde::{Deserialize, Serialize};
 use web3::{
-    transports::Http,
     contract::{Contract, Options},
-    types::{Address, H160, U256}
+    transports::Http,
+    types::{Address, H160, U256},
 };
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Asset {
@@ -56,26 +56,14 @@ impl Asset {
 
     pub async fn decimals(&self, client: web3::Web3<Http>) -> u8 {
         let contract = self.contract(client);
-        let result = contract.query(
-            "decimals",
-            (),
-            None,
-            Options::default(),
-            None
-        );
+        let result = contract.query("decimals", (), None, Options::default(), None);
         let result_decimals: u8 = result.await.unwrap();
         result_decimals
     }
 
     pub async fn balance_of(&self, client: web3::Web3<Http>, account: H160) -> U256 {
         let contract = self.contract(client);
-        let result = contract.query(
-        "balanceOf",
-        (account,),
-        None,
-        Options::default(),
-        None,
-        );
+        let result = contract.query("balanceOf", (account,), None, Options::default(), None);
         let result_balance: U256 = result.await.unwrap();
         result_balance
     }
@@ -158,10 +146,7 @@ impl Exchange {
     }
 
     pub fn router_abi_path(&self) -> String {
-        format!(
-            "./res/exchanges/{}/abi.json",
-            self.name.as_str()
-        )
+        format!("./res/exchanges/{}/abi.json", self.name.as_str())
     }
 
     pub fn router_abi_json_string(&self) -> String {
@@ -176,15 +161,21 @@ impl Exchange {
         Contract::from_json(client.eth(), contract_address, json_abi.as_bytes()).unwrap()
     }
 
-    pub async fn get_amounts_out(&self, client: web3::Web3<Http>, decimals: u8, assets_path: Vec<H160>) -> Vec<U256> {
+    pub async fn get_amounts_out(
+        &self,
+        client: web3::Web3<Http>,
+        decimals: u8,
+        assets_path: Vec<H160>,
+    ) -> Vec<U256> {
         let contract = self.router_contract(client);
-        let amount: U256 = (1*10_i32.pow(decimals.into())).into();
+        let quantity = 1;
+        let amount: U256 = (quantity * 10_i32.pow(decimals.into())).into();
         let result = contract.query(
-        "getAmountsOut",
-        (amount, assets_path),
-        None,
-        Options::default(),
-        None,
+            "getAmountsOut",
+            (amount, assets_path),
+            None,
+            Options::default(),
+            None,
         );
         let result_amounts_out: Vec<U256> = result.await.unwrap();
         result_amounts_out

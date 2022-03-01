@@ -1,7 +1,7 @@
 use clap::Parser;
 use mfm::{config::Config, signing};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
-use std::{str::FromStr, result};
+use std::str::FromStr;
 
 // multiverse finance machine cli
 #[derive(Parser, Debug)]
@@ -27,7 +27,7 @@ async fn main() -> web3::contract::Result<()> {
     let client = web3::Web3::new(http);
     let account_address = signing::public_key_address(&public);
     // TODO: move it to a async func and let main without async
-    for (_,asset) in config.assets.hashmap().iter() {
+    for (_, asset) in config.assets.hashmap().iter() {
         let balance_of = asset.balance_of(client.clone(), account_address).await;
         println!("asset: {}, balance_of: {:?}", asset.name(), balance_of);
 
@@ -39,20 +39,17 @@ async fn main() -> web3::contract::Result<()> {
             let path = vec![
                 asset.as_address().unwrap(),
                 wbnb.as_address().unwrap(),
-                busd.as_address().unwrap()
+                busd.as_address().unwrap(),
             ];
             println!("path: {:?}", path);
 
-            let result_amounts_out = exchange.get_amounts_out(
-                client.clone(),
-                decimals,
-                path
-            ).await;
+            let result_amounts_out = exchange
+                .get_amounts_out(client.clone(), decimals, path)
+                .await;
 
             println!("getAmountsOut: {:?}", result_amounts_out);
         }
     }
-
 
     Ok(())
 }
