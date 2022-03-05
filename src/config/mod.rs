@@ -1,5 +1,5 @@
+use std::collections::HashMap;
 use std::str::FromStr;
-use std::{collections::HashMap, fmt::format};
 
 use rustc_hex::{FromHex, FromHexError};
 use serde::{Deserialize, Serialize};
@@ -110,6 +110,7 @@ pub struct Network {
     chain_id: u32,
     rpc_url: String,
     blockexplorer_url: String,
+    min_balance_coin: f64,
 }
 
 impl Network {
