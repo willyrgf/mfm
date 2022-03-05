@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 use web3::{
     contract::{Contract, Options},
     transports::Http,
-    types::{Address, H160, U256},
+    types::{Address, Bytes, TransactionParameters, H160, U256},
 };
+
+use super::wallet::Wallet;
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Asset {
     name: String,
@@ -70,6 +72,70 @@ impl Asset {
 
     pub fn build_path_for_coin(&self, coin_address: H160) -> Vec<H160> {
         vec![coin_address, self.as_address().unwrap()]
+    }
+
+    pub async fn wrap(
+        &self,
+        client: web3::Web3<Http>,
+        from_wallet: &Wallet,
+        amount: U256,
+        gas_price: U256,
+    ) {
+        let estimate_gas = self
+            .contract(client.clone())
+            .estimate_gas(
+                "deposit",
+                (),
+                from_wallet.address(),
+                web3::contract::Options {
+                    value: Some(amount),
+                    gas_price: Some(gas_price),
+                    // gas: Some(500_000.into()),
+                    // gas: Some(gas_price),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        println!("wrap called estimate_gas: {:?}", estimate_gas);
+
+        let deposit_data = self
+            .contract(client.clone())
+            .abi()
+            .function("deposit")
+            .unwrap()
+            .encode_input(&[])
+            .unwrap();
+        println!("wrap(): deposit_data: {:?}", deposit_data);
+
+        let nonce = from_wallet.nonce(client.clone()).await;
+        println!("wrap(): nonce: {:?}", nonce);
+
+        let transaction_obj = TransactionParameters {
+            nonce: Some(nonce),
+            to: Some(self.as_address().unwrap()),
+            value: amount,
+            gas_price: Some(gas_price),
+            gas: estimate_gas,
+            data: Bytes(deposit_data),
+            ..Default::default()
+        };
+        println!("wrap(): transaction_obj: {:?}", transaction_obj);
+
+        let secret = from_wallet.secret();
+        let signed_transaction = client
+            .accounts()
+            .sign_transaction(transaction_obj, &secret)
+            .await
+            .unwrap();
+        println!("wrap(): signed_transaction: {:?}", signed_transaction);
+
+        let tx_address = client
+            .eth()
+            .send_raw_transaction(signed_transaction.raw_transaction)
+            .await
+            .unwrap();
+        println!("wrap(): tx_adress: {}", tx_address);
     }
 }
 
