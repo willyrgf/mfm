@@ -1,4 +1,4 @@
-use clap::{Command, Parser};
+use clap::Command;
 use mfm::config::Config;
 use web3::types::U256;
 
@@ -16,11 +16,21 @@ async fn main() -> web3::contract::Result<()> {
         )
         .subcommand_required(true)
         .subcommand(
-            Command::new("wrap").about("Wrap a coin to a token").arg(
-                clap::arg!(--"network" <bsc>)
-                    .required(false)
-                    .allow_invalid_utf8(true),
-            ),
+            Command::new("wrap")
+                .about("Wrap a coin to a token")
+                .arg(
+                    clap::arg!(--"network" <bsc> "Network to wrap coin to token")
+                        .required(true),
+                )
+                .arg(
+                    clap::arg!(--"wallet" <WALLET_NAME> "Wallet id from config file")
+                        .required(true),
+                )
+                .arg(
+                    clap::arg!(--"amount" <AMMOUNT> "Amount to wrap coin into token, default: (balance-min_balance_coin)")
+                        .required(false)
+                        ,
+                ),
         );
 
     let cmd_matches = cmd.get_matches();
@@ -31,27 +41,44 @@ async fn main() -> web3::contract::Result<()> {
     };
 
     match cmd_matches.subcommand() {
-        Some(("wrap", _matches)) => {
-            let wallet = config.wallets.get("test-wallet");
-            let bsc_network = config.networks.get("bsc");
-
-            let http = web3::transports::Http::new(bsc_network.rpc_url()).unwrap();
+        Some(("wrap", args)) => {
+            let network = match args.value_of("network") {
+                Some(n) => config.networks.get(n),
+                None => panic!("--network not supported"),
+            };
+            let http = web3::transports::Http::new(network.rpc_url()).unwrap();
             let client = web3::Web3::new(http);
+
+            let wrapped_asset = network.get_wrapped_asset(&config.assets);
+            let wrapped_asset_decimals = wrapped_asset.decimals(client.clone()).await;
+
+            let wallet = match args.value_of("wallet") {
+                Some(w) => config.wallets.get(w),
+                None => panic!("--wallet doesnt exist"),
+            };
+            let amount_in = match args.value_of("amount") {
+                Some(a) => {
+                    let q = a.parse::<f64>().unwrap();
+                    let qe = (q * 10_f64.powf(wrapped_asset_decimals.into())) as i64;
+                    U256::from(qe)
+                }
+                None => {
+                    let balance = client.eth().balance(wallet.address(), None).await.unwrap();
+                    let min = network.get_min_balance_coin(wrapped_asset_decimals);
+                    if min > balance {
+                        panic!("balance: {} is not sufficient, min: {}", balance, min);
+                    }
+                    balance - min
+                }
+            };
 
             let n = wallet.nonce(client.clone()).await;
             println!("nonce: {}", n);
 
-            let wbnb = config.assets.get("wbnb");
-            let exchange = config.exchanges.get(wbnb.exchange_id());
-            let decimals_wbnb = wbnb.decimals(client.clone()).await;
-            let quantity = 0.005;
-            let quantity_exp = (quantity * 10_f64.powf(decimals_wbnb.into())) as i64;
             let gas_price = client.eth().gas_price().await.unwrap();
 
-            let amount_in = U256::from(quantity_exp);
-
-            exchange
-                .wrap(client.clone(), wbnb, wallet, amount_in, gas_price)
+            wrapped_asset
+                .wrap(client.clone(), wallet, amount_in, gas_price)
                 .await;
         }
         _ => panic!("cmd_matches None"),
