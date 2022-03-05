@@ -37,6 +37,7 @@ networks:
     rpc_url: https://bsc-dataseed.binance.org
     blockexplorer_url: https://bscscan.com
     min_balance_coin: 0.1
+    wrapped_asset: wbnb
 
 exchanges:
   pancake_swap_v2:
