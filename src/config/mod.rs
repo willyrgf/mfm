@@ -67,6 +67,10 @@ impl Asset {
         let result_balance: U256 = result.await.unwrap();
         result_balance
     }
+
+    pub fn build_path_for_coin(&self, coin_address: H160) -> Vec<H160> {
+        vec![coin_address, self.as_address().unwrap()]
+    }
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -165,12 +169,13 @@ impl Exchange {
     pub async fn get_amounts_out(
         &self,
         client: web3::Web3<Http>,
-        decimals: u8,
+        // decimals: u8,
+        amount: U256,
         assets_path: Vec<H160>,
     ) -> Vec<U256> {
         let contract = self.router_contract(client);
-        let quantity = 1;
-        let amount: U256 = (quantity * 10_i32.pow(decimals.into())).into();
+        // let quantity = 1;
+        // let amount: U256 = (quantity * 10_i32.pow(decimals.into())).into();
         let result = contract.query(
             "getAmountsOut",
             (amount, assets_path),
