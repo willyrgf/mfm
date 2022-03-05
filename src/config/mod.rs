@@ -1,6 +1,6 @@
-pub mod network;
-pub mod exchange;
 pub mod asset;
+pub mod exchange;
+pub mod network;
 pub mod route;
 pub mod wallet;
 

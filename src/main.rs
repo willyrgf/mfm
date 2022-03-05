@@ -7,7 +7,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use web3::{
-    contract::{Contract, Options, tokens::Tokenize},
+    contract::{tokens::Tokenize, Contract, Options},
     ethabi::Token,
     transports::Http,
     types::{Address, H160, U256},
@@ -37,7 +37,11 @@ async fn main() -> web3::contract::Result<()> {
 
     let http = web3::transports::Http::new(bsc_network.rpc_url()).unwrap();
     let client = web3::Web3::new(http);
-    let account_address = signing::public_key_address(&public);
+    let account_address: Address = signing::public_key_address(&public);
+
+    let n = wallet.nonce(client.clone()).await;
+    println!("nonce: {}", n);
+
     // TODO: move it to a async func and let main without async
     for (_, asset) in config.assets.hashmap().iter() {
         let balance_of = asset.balance_of(client.clone(), account_address).await;
@@ -49,7 +53,7 @@ async fn main() -> web3::contract::Result<()> {
             decimals
         );
 
-        if asset.name() == "anonq" {
+        if asset.name() == "wbnb2" {
             let exchange = config.exchanges.get(asset.exchange_id());
             let exchange_contract = exchange.router_contract(client.clone());
             let wbnb = config.assets.get("wbnb");
@@ -74,13 +78,9 @@ async fn main() -> web3::contract::Result<()> {
 
             let amount_in = U256::from(quantity_exp);
             println!("amount_in: {} ", amount_in);
-            exchange.wrap(
-                client.clone(),
-                wbnb,
-                account_address,
-                amount_in,
-                gas_price
-            ).await;
+            exchange
+                .wrap(client.clone(), wbnb, wallet, amount_in, gas_price)
+                .await;
 
             // let paths = busd.build_path_for_coin(wbnb.as_address().unwrap());
             // let amounts_out = exchange
@@ -91,15 +91,14 @@ async fn main() -> web3::contract::Result<()> {
             // let u256_default = U256::default();
             // let amount_out: U256 = amounts_out.last().unwrap_or(&u256_default).into();
 
-
             println!("gas_price: {}", gas_price);
             println!("decimals: {}", decimals);
             println!("decimals_wbnb: {}", decimals_wbnb);
 
             let wrapped_addr: Address = exchange_contract
-            .query("WETH", (), None, Options::default(), None)
-            .await
-            .unwrap();
+                .query("WETH", (), None, Options::default(), None)
+                .await
+                .unwrap();
             println!("wrapped_addr: {}", wrapped_addr);
             // let token_address: Vec<Token> = paths
             //     .into_iter()
