@@ -1,7 +1,12 @@
 use clap::Parser;
 use mfm::{config::Config, signing};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
-use std::str::FromStr;
+use std::{
+    str::FromStr,
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use web3::{contract::tokens::Tokenize, ethabi::Token, types::U256};
 
 // multiverse finance machine cli
 #[derive(Parser, Debug)]
@@ -11,6 +16,8 @@ struct Args {
     #[clap(short, long, default_value = "config.yaml")]
     config_filename: String,
 }
+
+//TODO: handle with all unwraps
 
 #[tokio::main]
 async fn main() -> web3::contract::Result<()> {
@@ -38,9 +45,10 @@ async fn main() -> web3::contract::Result<()> {
         );
 
         if asset.name() == "anonq" {
-            let decimals = asset.decimals(client.clone()).await;
             let exchange = config.exchanges.get(asset.exchange_id());
+            let exchange_contract = exchange.router_contract(client.clone());
             let wbnb = config.assets.get("wbnb");
+            let decimals_wbnb = wbnb.decimals(client.clone()).await;
             let busd = config.assets.get("busd");
             let path = vec![
                 asset.as_address().unwrap(),
@@ -55,11 +63,147 @@ async fn main() -> web3::contract::Result<()> {
             );
             println!("path: {:?}", path);
 
-            let result_amounts_out = exchange
-                .get_amounts_out(client.clone(), decimals, path)
-                .await;
+            // TODO: validate quantity_exp?
+            let quantity = 0.005;
+            let quantity_exp = (quantity * 10_f64.powf(decimals_wbnb.into())) as i64;
 
-            println!("getAmountsOut: {:?}", result_amounts_out);
+            let amount_in = U256::from(quantity_exp);
+            println!("amount_in: {} ", amount_in);
+
+            // let paths = busd.build_path_for_coin(wbnb.as_address().unwrap());
+            // let amounts_out = exchange
+            //     .get_amounts_out(client.clone(), amount_in, vec![wbnb.as_address().unwrap()])
+            //     .await;
+            // println!("amounts_out: {:?}", amounts_out);
+
+            // let u256_default = U256::default();
+            // let amount_out: U256 = amounts_out.last().unwrap_or(&u256_default).into();
+
+            let gas_price = client.eth().gas_price().await.unwrap();
+            println!("gas_price: {}", gas_price);
+            println!("decimals: {}", decimals);
+            println!("decimals_wbnb: {}", decimals_wbnb);
+            // let token_address: Vec<Token> = paths
+            //     .into_iter()
+            //     .map(|p| Token::Address(p))
+            //     .collect::<Vec<_>>();
+
+            // let valid_timestamp = get_valid_timestamp(300000);
+
+            let estimate_gas = wbnb
+                .contract(client.clone())
+                .estimate_gas(
+                    "deposit",
+                    (),
+                    account_address,
+                    web3::contract::Options {
+                        value: Some(amount_in),
+                        gas_price: Some(gas_price),
+                        gas: Some(500_000.into()),
+                        // gas: Some(gas_price),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            println!("estimate_gas: {:?}", estimate_gas);
+
+            // let estimate_gas = exchange_contract
+            //     .estimate_gas(
+            //         "swapExactETHForTokensSupportingFeeOnTransferTokens",
+            //         (
+            //             amount_out,
+            //             // paths,
+            //             vec![wbnb.as_address().unwrap()],
+            //             account_address,
+            //             U256::from_dec_str(&valid_timestamp.to_string()).unwrap(),
+            //         ),
+            //         account_address,
+            //         web3::contract::Options {
+            //             value: Some(amount_in),
+            //             gas_price: Some(gas_price),
+            //             gas: Some(500_000.into()),
+            //             // gas: Some(gas_price),
+            //             ..Default::default()
+            //         },
+            //     )
+            //     .await
+            //     .unwrap();
+            // println!("estimate_gas: {:?}", estimate_gas);
+
+            // let estimate_gas = exchange_contract
+            //     .estimate_gas(
+            //         "swapTokensForExactTokens",
+            //         (
+            //             amount_out,
+            //             amount_in,
+            //             paths,
+            //             account_address,
+            //             U256::from_dec_str(&valid_timestamp.to_string()).unwrap(),
+            //         ),
+            //         account_address,
+            //         web3::contract::Options {
+            //             // value: Some(amount_in),
+            //             gas_price: Some(gas_price),
+            //             // gas: Some(500_000.into()),
+            //             // gas: Some(gas_price),
+            //             ..Default::default()
+            //         },
+            //     )
+            //     .await
+            //     .unwrap();
+            // println!("estimate_gas: {:?}", estimate_gas);
+
+            let estimate_gas_in_bnb = estimate_gas * gas_price;
+            println!("estimate_gas_in_bnb: {:?}", estimate_gas_in_bnb);
+
+            // let swap_data = exchange_contract
+            //     .abi()
+            //     .functions
+            //     .get("swapExactETHForTokensSupportingFeeOnTransferTokens")
+            //     .unwrap()
+            //     .get(0)
+            //     .unwrap()
+            //     .encode_input(
+            //         &(
+            //             Token::Int(amount_out),
+            //             Token::Array(token_address),
+            //             Token::Address(account_address),
+            //             Token::Int(U256::from(300000000000000_u64)),
+            //         )
+            //             .into_tokens(),
+            //     )
+            //     .unwrap();
+
+            // println!("swap_data: {:?}", swap_data);
+
+            //     let mut iteration = 0;
+            //     let mut estimate_gas = U256::default();
+            //     while iteration < 10 {
+            //         estimate_gas = match client
+            //             .eth()
+            //             .estimate_gas(
+            //                 web3::types::CallRequest {
+            //                     from: Some(account_address),
+            //                     to: Some(exchange.as_router_address().unwrap()),
+            //                     gas_price: Some(gas_price),
+            //                     data: swap_data.
+            //                     ..Default::default()
+            //                 },
+            //                 None,
+            //             )
+            //             .await
+            //         {
+            //             Ok(e) => e,
+            //             Err(err) => {
+            //                 println!("estimate_gas err: {}", err);
+            //                 U256::default()
+            //             }
+            //         };
+            //         iteration = iteration + 1;
+            //         thread::sleep(Duration::new(5, 0));
+            //     }
+            //     println!("estimate_gas: {}", estimate_gas)
         }
     }
 
@@ -83,3 +227,20 @@ async fn main() -> web3::contract::Result<()> {
 // impl Handle {
 //     pub fn next_step() {}
 // }
+
+// wbnb 18
+// 0.000000000000000001
+// 1000000000000000000
+// 100000000000000
+//               10000
+// (0,1 * 1)*1e18
+//
+// let quantity = 0.1;
+
+fn get_valid_timestamp(future_millis: u128) -> u128 {
+    let start = SystemTime::now();
+    let since_epoch = start.duration_since(UNIX_EPOCH).unwrap();
+    let time_millis = since_epoch.as_millis().checked_add(future_millis).unwrap();
+
+    time_millis
+}
