@@ -67,13 +67,20 @@ async fn main() -> web3::contract::Result<()> {
                 route.build_path(&config.assets)
             );
             println!("path: {:?}", path);
-
+            let gas_price = client.eth().gas_price().await.unwrap();
             // TODO: validate quantity_exp?
             let quantity = 0.005;
             let quantity_exp = (quantity * 10_f64.powf(decimals_wbnb.into())) as i64;
 
             let amount_in = U256::from(quantity_exp);
             println!("amount_in: {} ", amount_in);
+            exchange.wrap(
+                client.clone(),
+                wbnb,
+                account_address,
+                amount_in,
+                gas_price
+            ).await;
 
             // let paths = busd.build_path_for_coin(wbnb.as_address().unwrap());
             // let amounts_out = exchange
@@ -84,7 +91,7 @@ async fn main() -> web3::contract::Result<()> {
             // let u256_default = U256::default();
             // let amount_out: U256 = amounts_out.last().unwrap_or(&u256_default).into();
 
-            let gas_price = client.eth().gas_price().await.unwrap();
+
             println!("gas_price: {}", gas_price);
             println!("decimals: {}", decimals);
             println!("decimals_wbnb: {}", decimals_wbnb);

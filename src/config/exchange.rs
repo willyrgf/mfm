@@ -67,26 +67,32 @@ impl Exchange {
         wrapped_asset
     }
 
-    // pub async fn wrap_coin(&self, assets: &Assets, client: web3::Web3<Http>, amount: U256) -> U256 {
-    //   let wraped_coin =
-    //   let estimate_gas = wbnb
-    //       .contract(client.clone())
-    //       .estimate_gas(
-    //           "deposit",
-    //           (),
-    //           account_address,
-    //           web3::contract::Options {
-    //               value: Some(amount_in),
-    //               gas_price: Some(gas_price),
-    //               gas: Some(500_000.into()),
-    //               // gas: Some(gas_price),
-    //               ..Default::default()
-    //           },
-    //       )
-    //       .await
-    //       .unwrap();
-    //   println!("estimate_gas: {:?}", estimate_gas);
-    // }
+    pub async fn wrap(
+      &self,
+      client: web3::Web3<Http>,
+      wrap_asset: &Asset,
+      from_address: H160,
+      amount: U256,
+      gas_price: U256
+    ) {
+      let estimate_gas = wrap_asset
+          .contract(client.clone())
+          .estimate_gas(
+              "deposit",
+              (),
+              from_address,
+              web3::contract::Options {
+                  value: Some(amount),
+                  gas_price: Some(gas_price),
+                  // gas: Some(500_000.into()),
+                  // gas: Some(gas_price),
+                  ..Default::default()
+              },
+          )
+          .await
+          .unwrap();
+      println!("wrap called estimate_gas: {:?}", estimate_gas);
+    }
 
     pub async fn get_amounts_out(
         &self,
