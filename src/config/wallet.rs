@@ -27,12 +27,10 @@ impl Wallet {
     pub fn public(&self) -> PublicKey {
         let secp = Secp256k1::new();
         let s = self.secret();
-        let public = PublicKey::from_secret_key(&secp, &s);
-        public
+        PublicKey::from_secret_key(&secp, &s)
     }
     pub fn address(&self) -> Address {
-        let a = signing::public_key_address(&self.public());
-        a
+        signing::public_key_address(&self.public())
     }
     pub async fn nonce(&self, client: web3::Web3<Http>) -> U256 {
         let n = client

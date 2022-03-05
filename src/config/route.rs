@@ -3,9 +3,7 @@ use crate::config::asset::{Asset, Assets};
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use web3::{
-    types::{H160},
-};
+use web3::types::H160;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Route {

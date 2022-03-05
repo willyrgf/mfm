@@ -8,10 +8,8 @@ use serde::{Deserialize, Serialize};
 use web3::{
     contract::{Contract, Options},
     transports::Http,
-    types::{Address, Bytes, TransactionParameters, H160, U256},
+    types::{Address, H160, U256},
 };
-
-use super::wallet::Wallet;
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Exchange {
