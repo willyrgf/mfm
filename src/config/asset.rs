@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use rustc_hex::{FromHexError};
+use rustc_hex::FromHexError;
 use serde::{Deserialize, Serialize};
 use web3::{
     contract::{Contract, Options},
@@ -84,12 +84,12 @@ impl Assets {
         self.0.get(key).unwrap()
     }
 
-    pub fn find_by_address(&self, address: &str) -> Asset {
-      let asset = self.0
-      .iter()
-      .values()
-      .find(|&value| value.address == address.to_string()).unwrap().clone();
+    pub fn find_by_address(&self, address: &str) -> &Asset {
+        let asset = match self.0.iter().filter(|(_, a)| a.address() == address).last() {
+            Some((_, a)) => a,
+            None => panic!("find_by_address() address: {} doesnt exist", address),
+        };
 
-      asset.into()
+        asset
     }
 }

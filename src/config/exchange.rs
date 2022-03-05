@@ -1,11 +1,9 @@
-use crate::config::asset::{
-  Asset, Assets
-};
+use crate::config::asset::{Asset, Assets};
 
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use rustc_hex::{FromHexError};
+use rustc_hex::FromHexError;
 use serde::{Deserialize, Serialize};
 use web3::{
     contract::{Contract, Options},
@@ -49,20 +47,24 @@ impl Exchange {
     }
 
     pub async fn wrapper_address(&self, client: web3::Web3<Http>) -> H160 {
-      let router_contract = self.router_contract(client);
+        let router_contract = self.router_contract(client);
 
-      let wrapped_addr: Address = router_contract
-      .query("WETH", (), None, Options::default(), None)
-      .await
-      .unwrap();
+        let wrapped_addr = router_contract
+            .query("WETH", (), None, Options::default(), None)
+            .await
+            .unwrap();
 
-      wrapped_addr
+        wrapped_addr
     }
 
-    pub async fn wrapped_asset(&self, assets: &Assets, client: web3::Web3<Http>) -> Asset {
-      let wrapped_address = self.wrapper_address(client).await.to_string();
-      let wrapped_asset = assets.find_by_address(wrapped_address.as_str());
-      wrapped_asset
+    pub async fn wrapped_asset<'a>(
+        &self,
+        assets: &'a Assets,
+        client: web3::Web3<Http>,
+    ) -> &'a Asset {
+        let wrapped_address = self.wrapper_address(client).await.to_string();
+        let wrapped_asset = assets.find_by_address(wrapped_address.as_str());
+        wrapped_asset
     }
 
     // pub async fn wrap_coin(&self, assets: &Assets, client: web3::Web3<Http>, amount: U256) -> U256 {
@@ -85,7 +87,6 @@ impl Exchange {
     //       .unwrap();
     //   println!("estimate_gas: {:?}", estimate_gas);
     // }
-
 
     pub async fn get_amounts_out(
         &self,
