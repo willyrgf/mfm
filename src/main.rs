@@ -6,7 +6,12 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use web3::{contract::tokens::Tokenize, ethabi::Token, types::U256};
+use web3::{
+    contract::{Contract, Options, tokens::Tokenize},
+    ethabi::Token,
+    transports::Http,
+    types::{Address, H160, U256},
+};
 
 // multiverse finance machine cli
 #[derive(Parser, Debug)]
@@ -83,6 +88,12 @@ async fn main() -> web3::contract::Result<()> {
             println!("gas_price: {}", gas_price);
             println!("decimals: {}", decimals);
             println!("decimals_wbnb: {}", decimals_wbnb);
+
+            let wrapped_addr: Address = exchange_contract
+            .query("WETH", (), None, Options::default(), None)
+            .await
+            .unwrap();
+            println!("wrapped_addr: {}", wrapped_addr);
             // let token_address: Vec<Token> = paths
             //     .into_iter()
             //     .map(|p| Token::Address(p))
@@ -90,23 +101,23 @@ async fn main() -> web3::contract::Result<()> {
 
             // let valid_timestamp = get_valid_timestamp(300000);
 
-            let estimate_gas = wbnb
-                .contract(client.clone())
-                .estimate_gas(
-                    "deposit",
-                    (),
-                    account_address,
-                    web3::contract::Options {
-                        value: Some(amount_in),
-                        gas_price: Some(gas_price),
-                        gas: Some(500_000.into()),
-                        // gas: Some(gas_price),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            println!("estimate_gas: {:?}", estimate_gas);
+            // let estimate_gas = wbnb
+            //     .contract(client.clone())
+            //     .estimate_gas(
+            //         "deposit",
+            //         (),
+            //         account_address,
+            //         web3::contract::Options {
+            //             value: Some(amount_in),
+            //             gas_price: Some(gas_price),
+            //             gas: Some(500_000.into()),
+            //             // gas: Some(gas_price),
+            //             ..Default::default()
+            //         },
+            //     )
+            //     .await
+            //     .unwrap();
+            // println!("estimate_gas: {:?}", estimate_gas);
 
             // let estimate_gas = exchange_contract
             //     .estimate_gas(
@@ -154,8 +165,8 @@ async fn main() -> web3::contract::Result<()> {
             //     .unwrap();
             // println!("estimate_gas: {:?}", estimate_gas);
 
-            let estimate_gas_in_bnb = estimate_gas * gas_price;
-            println!("estimate_gas_in_bnb: {:?}", estimate_gas_in_bnb);
+            // let estimate_gas_in_bnb = estimate_gas * gas_price;
+            // println!("estimate_gas_in_bnb: {:?}", estimate_gas_in_bnb);
 
             // let swap_data = exchange_contract
             //     .abi()
