@@ -1,33 +1,7 @@
-use clap::{ArgEnum, Command};
+use crate::config;
+use clap::{ArgMatches, Command};
 
-// clap::arg_enum!(
-//     #[derive(Debug)]
-//     pub enum Foo {
-//         Bar,
-//         Baz,
-//         Qx,
-//     }
-// );
-
-pub struct Wrap {}
-
-impl Runnable for Wrap {
-    fn run() {}
-}
-
-pub trait Runnable {
-    fn run();
-}
-
-// pub enum CommandRun<R: Runnable> {
-//     Wrap(R),
-pub enum CommandRun {
-    Wrap(Wrap),
-}
-
-pub fn test_new_enum_cmd() {
-    let r = CommandRun::Wrap(Wrap {});
-}
+pub mod wrap;
 
 pub fn new() -> clap::Command<'static> {
     Command::new("mfm")
@@ -39,7 +13,7 @@ pub fn new() -> clap::Command<'static> {
         )
         .subcommand_required(true)
         .subcommand(
-            Command::new("wrap")
+            Command::new(wrap::WRAP_COMMAND)
                 .about("Wrap a coin to a token")
                 .arg(
                     clap::arg!(--"network" <bsc> "Network to wrap coin to token")
@@ -80,4 +54,13 @@ pub fn new() -> clap::Command<'static> {
                 ),
 
         )
+}
+
+pub async fn handle_sub_commands(matches: ArgMatches, config: config::Config) {
+    match matches.subcommand() {
+        Some((wrap::WRAP_COMMAND, sub_matches)) => {
+            wrap::handle_sub_commands(sub_matches, config).await;
+        }
+        _ => panic!("command not registred"),
+    }
 }
