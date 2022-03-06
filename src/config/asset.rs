@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use rustc_hex::FromHexError;
 use serde::{Deserialize, Serialize};
+use web3::ethabi::Token;
 use web3::{
     contract::{Contract, Options},
     transports::Http,
@@ -72,6 +73,89 @@ impl Asset {
 
     pub fn build_path_for_coin(&self, coin_address: H160) -> Vec<H160> {
         vec![coin_address, self.as_address().unwrap()]
+    }
+
+    pub async fn allowance(&self, client: web3::Web3<Http>, owner: H160, spender: H160) -> U256 {
+        let result: U256 = self
+            .contract(client.clone())
+            .query(
+                "allowance",
+                (owner, spender),
+                None,
+                Options::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        result
+    }
+
+    pub async fn approve_spender(
+        &self,
+        client: web3::Web3<Http>,
+        gas_price: U256,
+        from_wallet: &Wallet,
+        spender: H160,
+        amount: U256,
+    ) {
+        let estimate_gas = self
+            .contract(client.clone())
+            .estimate_gas(
+                "approve",
+                (spender, amount),
+                from_wallet.address(),
+                web3::contract::Options {
+                    //value: Some(amount),
+                    gas_price: Some(gas_price),
+                    // gas: Some(500_000.into()),
+                    // gas: Some(gas_price),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        println!("approve_spender called estimate_gas: {:?}", estimate_gas);
+
+        let func_data = self
+            .contract(client.clone())
+            .abi()
+            .function("approve")
+            .unwrap()
+            .encode_input(&[Token::Address(spender), Token::Uint(amount)])
+            .unwrap();
+        println!("approve_spender(): func_data: {:?}", func_data);
+
+        let nonce = from_wallet.nonce(client.clone()).await;
+        println!("approve_spender(): nonce: {:?}", nonce);
+
+        let transaction_obj = TransactionParameters {
+            nonce: Some(nonce),
+            to: Some(self.as_address().unwrap()),
+            value: U256::from(0_i32),
+            gas_price: Some(gas_price),
+            gas: estimate_gas,
+            data: Bytes(func_data),
+            ..Default::default()
+        };
+        println!("approve_spender(): transaction_obj: {:?}", transaction_obj);
+
+        let secret = from_wallet.secret();
+        let signed_transaction = client
+            .accounts()
+            .sign_transaction(transaction_obj, &secret)
+            .await
+            .unwrap();
+        println!(
+            "approve_spender(): signed_transaction: {:?}",
+            signed_transaction
+        );
+
+        let tx_address = client
+            .eth()
+            .send_raw_transaction(signed_transaction.raw_transaction)
+            .await
+            .unwrap();
+        println!("approve_spender(): tx_adress: {}", tx_address);
     }
 
     pub async fn wrap(

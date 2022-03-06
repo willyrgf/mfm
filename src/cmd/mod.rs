@@ -31,7 +31,7 @@ pub fn new() -> clap::Command<'static> {
         )
         .subcommand(
             Command::new("swaptt")
-                .about("Swap Tokens for Tokens")
+                .about("Swap Tokens for Tokens supporting fees on transfer")
                 .arg(
                     clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router")
                         .required(true),
@@ -51,8 +51,48 @@ pub fn new() -> clap::Command<'static> {
                 .arg(
                     clap::arg!(-o --"token_output" <TOKEN_OUTPUT> "Asset of output token")
                         .required(false)
-                ),
-
+                )
+                .arg(
+                    clap::arg!(-s --"slippage" <SLIPPAGE> "Slippage (default 0.5)")
+                        .required(false)
+                        .default_value("0.5")
+                )
+        )
+        .subcommand(
+            Command::new("allowance")
+                .about("Get allowance for an token")
+                .arg(
+                    clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router")
+                        .required(true),
+                )
+                .arg(
+                    clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file")
+                        .required(true),
+                )
+                .arg(
+                    clap::arg!(-a --"asset" <ASSET> "Asset to check allowance")
+                        .required(true)
+                )
+        )
+        .subcommand(
+            Command::new("approve_spender")
+                .about("Approve token spending (needed to swap tokens)")
+                .arg(
+                    clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router as spender")
+                        .required(true),
+                )
+                .arg(
+                    clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file")
+                        .required(true),
+                )
+                .arg(
+                    clap::arg!(-a --"asset" <ASSET> "Asset to approve spender")
+                        .required(true)
+                )
+                .arg(
+                    clap::arg!(-v --"value" <VALUE> "Value to allow spending")
+                        .required(true)
+                )
         )
 }
 

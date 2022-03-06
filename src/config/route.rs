@@ -3,6 +3,7 @@ use crate::config::asset::{Asset, Assets};
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use web3::ethabi::Token;
 use web3::types::H160;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -31,6 +32,21 @@ impl Route {
         v.push(quote.as_address().unwrap());
 
         v
+    }
+    pub fn build_path_using_tokens(&self, assets: &Assets) -> Token {
+        let mut v = vec![];
+
+        let base = assets.get(self.base.as_str());
+        let quote = assets.get(self.quote.as_str());
+
+        v.push(Token::Address(base.as_address().unwrap()));
+        self.path.iter().for_each(|p| {
+            let a = assets.get(p.as_str());
+            v.push(Token::Address(a.as_address().unwrap()));
+        });
+        v.push(Token::Address(quote.as_address().unwrap()));
+
+        Token::Array(v)
     }
 }
 
