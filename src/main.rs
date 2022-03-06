@@ -1,6 +1,7 @@
 use core::panic;
 
 use mfm::{cmd, config::Config};
+use web3::ethabi::Token;
 use web3::types::U256;
 
 //TODO: handle with all unwraps
@@ -155,6 +156,7 @@ async fn main() -> web3::contract::Result<()> {
 
             let asset_path = config.routes.search(input_token, output_token);
             let path = asset_path.build_path(&config.assets);
+            let path_token: Token = asset_path.build_path_using_tokens(&config.assets);
             let amount_min_out: U256 = exchange
                 .get_amounts_out(client.clone(), amount_in, path.clone())
                 .await
@@ -162,22 +164,14 @@ async fn main() -> web3::contract::Result<()> {
                 .unwrap()
                 .into();
             let gas_price = client.eth().gas_price().await.unwrap();
-
             println!("amount_mint_out: {:?}", amount_min_out);
-            let output_exp: usize = (input_token_decimals + output_token_decimals).into();
-            println!("output_exp {:?}", output_exp);
 
-            let u256_out_exp = U256::exp10(output_exp);
-            println!("u256_out_exp {:?}", u256_out_exp);
-
-            println!("slippage: {:?}", slippage);
             let slippage_amount =
                 (amount_min_out * slippage) / U256::exp10(output_token_decimals.into());
             println!("slippage_amount {:?}", slippage_amount);
 
             let amount_out_slippage: U256 = amount_min_out - slippage_amount;
             println!("amount_out_slippage : {:?}", amount_out_slippage);
-            println!("path : {:?}", path);
             exchange
                 .swap_tokens_for_tokens(
                     client.clone(),
@@ -185,7 +179,7 @@ async fn main() -> web3::contract::Result<()> {
                     gas_price,
                     amount_in,
                     amount_out_slippage,
-                    path,
+                    path_token,
                 )
                 .await;
         }

@@ -8,8 +8,9 @@ use rustc_hex::FromHexError;
 use serde::{Deserialize, Serialize};
 use web3::{
     contract::{Contract, Options},
+    ethabi::Token,
     transports::Http,
-    types::{Address, H160, U256},
+    types::{Address, Bytes, TransactionParameters, H160, U256},
 };
 
 use super::network::{Network, Networks};
@@ -109,11 +110,11 @@ impl Exchange {
     pub async fn swap_tokens_for_tokens(
         &self,
         client: web3::Web3<Http>,
-        wallet: &Wallet,
+        from_wallet: &Wallet,
         gas_price: U256,
         amount_in: U256,
         amount_min_out: U256,
-        asset_path: Vec<H160>,
+        asset_path: Token,
     ) {
         let valid_timestamp = self.get_valid_timestamp(300000);
         let estimate_gas = self
@@ -123,11 +124,11 @@ impl Exchange {
                 (
                     amount_in,
                     amount_min_out,
-                    asset_path,
-                    wallet.address(),
+                    asset_path.clone(),
+                    from_wallet.address(),
                     U256::from_dec_str(&valid_timestamp.to_string()).unwrap(),
                 ),
-                wallet.address(),
+                from_wallet.address(),
                 web3::contract::Options {
                     //value: Some(amount_in),
                     gas_price: Some(gas_price),
@@ -139,7 +140,57 @@ impl Exchange {
             .await
             .unwrap();
 
-        println!("swap_tokens_for_tokens: {}", estimate_gas);
+        println!("swap_tokens_for_tokens estimate_gas: {}", estimate_gas);
+
+        let func_data = self
+            .router_contract(client.clone())
+            .abi()
+            .function("swapExactTokensForTokensSupportingFeeOnTransferTokens")
+            .unwrap()
+            .encode_input(&[
+                Token::Uint(amount_in),
+                Token::Uint(amount_min_out),
+                asset_path,
+                Token::Address(from_wallet.address()),
+                Token::Uint(U256::from_dec_str(&valid_timestamp.to_string()).unwrap()),
+            ])
+            .unwrap();
+        println!("swap_tokens_for_tokens(): func_data: {:?}", func_data);
+
+        let nonce = from_wallet.nonce(client.clone()).await;
+        println!("swap_tokens_for_tokens(): nonce: {:?}", nonce);
+
+        let transaction_obj = TransactionParameters {
+            nonce: Some(nonce),
+            to: Some(self.as_router_address().unwrap()),
+            value: U256::from(0_i32),
+            gas_price: Some(gas_price),
+            gas: estimate_gas,
+            data: Bytes(func_data),
+            ..Default::default()
+        };
+        println!(
+            "swap_tokens_for_tokens(): transaction_obj: {:?}",
+            transaction_obj
+        );
+
+        let secret = from_wallet.secret();
+        let signed_transaction = client
+            .accounts()
+            .sign_transaction(transaction_obj, &secret)
+            .await
+            .unwrap();
+        println!(
+            "swap_tokens_for_tokens(): signed_transaction: {:?}",
+            signed_transaction
+        );
+
+        let tx_address = client
+            .eth()
+            .send_raw_transaction(signed_transaction.raw_transaction)
+            .await
+            .unwrap();
+        println!("approve_spender(): tx_adress: {}", tx_address);
     }
 }
 
