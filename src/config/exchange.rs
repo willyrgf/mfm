@@ -1,7 +1,8 @@
 use crate::config::asset::{Asset, Assets};
 
-use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::UNIX_EPOCH;
+use std::{collections::HashMap, time::SystemTime};
 
 use rustc_hex::FromHexError;
 use serde::{Deserialize, Serialize};
@@ -11,10 +12,14 @@ use web3::{
     types::{Address, H160, U256},
 };
 
+use super::network::{Network, Networks};
+use super::wallet::Wallet;
+
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Exchange {
     name: String,
     router_address: String,
+    network_id: String,
 }
 
 impl Exchange {
@@ -86,6 +91,55 @@ impl Exchange {
         );
         let result_amounts_out: Vec<U256> = result.await.unwrap();
         result_amounts_out
+    }
+
+    fn get_valid_timestamp(&self, future_millis: u128) -> u128 {
+        let start = SystemTime::now();
+        let since_epoch = start.duration_since(UNIX_EPOCH).unwrap();
+        let time_millis = since_epoch.as_millis().checked_add(future_millis).unwrap();
+
+        time_millis
+    }
+
+    pub fn get_network<'a>(&self, networks: &'a Networks) -> &'a Network {
+        let network = networks.get(self.network_id.as_str());
+        network
+    }
+
+    pub async fn swap_tokens_for_tokens(
+        &self,
+        client: web3::Web3<Http>,
+        wallet: &Wallet,
+        gas_price: U256,
+        amount_in: U256,
+        amount_min_out: U256,
+        asset_path: Vec<H160>,
+    ) {
+        let valid_timestamp = self.get_valid_timestamp(300000);
+        let estimate_gas = self
+            .router_contract(client.clone())
+            .estimate_gas(
+                "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+                (
+                    amount_in,
+                    amount_min_out,
+                    asset_path,
+                    wallet.address(),
+                    U256::from_dec_str(&valid_timestamp.to_string()).unwrap(),
+                ),
+                wallet.address(),
+                web3::contract::Options {
+                    //value: Some(amount_in),
+                    gas_price: Some(gas_price),
+                    // gas: Some(500_000.into()),
+                    // gas: Some(gas_price),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        println!("swap_tokens_for_tokens: {}", estimate_gas);
     }
 }
 
