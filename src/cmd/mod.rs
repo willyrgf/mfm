@@ -28,7 +28,7 @@ pub fn new() -> clap::Command<'static> {
         )
         .subcommand(
             Command::new("swaptt")
-                .about("Swap Tokens for Tokens")
+                .about("Swap Tokens for Tokens supporting fees on transfer")
                 .arg(
                     clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router")
                         .required(true),
@@ -63,8 +63,27 @@ pub fn new() -> clap::Command<'static> {
                 )
                 .arg(
                     clap::arg!(-a --"asset" <ASSET> "Asset to check allowance")
-                        .required(false)
+                        .required(true)
                 )
-
+        )
+        .subcommand(
+            Command::new("approve_spender")
+                .about("Approve token spending (needed to swap tokens)")
+                .arg(
+                    clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router as spender")
+                        .required(true),
+                )
+                .arg(
+                    clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file")
+                        .required(true),
+                )
+                .arg(
+                    clap::arg!(-a --"asset" <ASSET> "Asset to approve spender")
+                        .required(true)
+                )
+                .arg(
+                    clap::arg!(-v --"value" <VALUE> "Value to allow spending")
+                        .required(true)
+                )
         )
 }
