@@ -48,7 +48,12 @@ pub fn new() -> clap::Command<'static> {
                 .arg(
                     clap::arg!(-o --"token_output" <TOKEN_OUTPUT> "Asset of output token")
                         .required(false)
-                ),
+                )
+                .arg(
+                    clap::arg!(-s --"slippage" <SLIPPAGE> "Slippage (default 0.5)")
+                        .required(false)
+                        .default_value("0.5")
+                )
         )
         .subcommand(
             Command::new("allowance")
