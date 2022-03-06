@@ -74,6 +74,21 @@ impl Asset {
         vec![coin_address, self.as_address().unwrap()]
     }
 
+    pub async fn allowance(&self, client: web3::Web3<Http>, owner: H160, spender: H160) -> U256 {
+        let result: U256 = self
+            .contract(client.clone())
+            .query(
+                "allowance",
+                (owner, spender),
+                None,
+                Options::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        result
+    }
+
     pub async fn wrap(
         &self,
         client: web3::Web3<Http>,

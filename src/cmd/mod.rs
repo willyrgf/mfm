@@ -49,6 +49,22 @@ pub fn new() -> clap::Command<'static> {
                     clap::arg!(-o --"token_output" <TOKEN_OUTPUT> "Asset of output token")
                         .required(false)
                 ),
+        )
+        .subcommand(
+            Command::new("allowance")
+                .about("Get allowance for an token")
+                .arg(
+                    clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router")
+                        .required(true),
+                )
+                .arg(
+                    clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file")
+                        .required(true),
+                )
+                .arg(
+                    clap::arg!(-a --"asset" <ASSET> "Asset to check allowance")
+                        .required(false)
+                )
 
         )
 }
