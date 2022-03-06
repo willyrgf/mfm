@@ -1,4 +1,33 @@
-use clap::Command;
+use clap::{ArgEnum, Command};
+
+// clap::arg_enum!(
+//     #[derive(Debug)]
+//     pub enum Foo {
+//         Bar,
+//         Baz,
+//         Qx,
+//     }
+// );
+
+pub struct Wrap {}
+
+impl Runnable for Wrap {
+    fn run() {}
+}
+
+pub trait Runnable {
+    fn run();
+}
+
+// pub enum CommandRun<R: Runnable> {
+//     Wrap(R),
+pub enum CommandRun {
+    Wrap(Wrap),
+}
+
+pub fn test_new_enum_cmd() {
+    let r = CommandRun::Wrap(Wrap {});
+}
 
 pub fn new() -> clap::Command<'static> {
     Command::new("mfm")
