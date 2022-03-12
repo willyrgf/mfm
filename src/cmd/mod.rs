@@ -1,6 +1,8 @@
 use crate::config;
 use clap::{ArgMatches, Command};
 
+pub mod allowance;
+pub mod approve;
 pub mod swap;
 pub mod wrap;
 
@@ -97,12 +99,18 @@ pub fn new() -> clap::Command<'static> {
         )
 }
 
-pub async fn handle_sub_commands(matches: ArgMatches, config: config::Config) {
+pub async fn handle_sub_commands(matches: &ArgMatches, config: &config::Config) {
     match matches.subcommand() {
         Some((wrap::WRAP_COMMAND, sub_matches)) => {
             wrap::handle_sub_commands(sub_matches, config).await;
         }
         Some((swap::SWAP_COMMAND, sub_matches)) => {
+            swap::handle_sub_commands(sub_matches, config).await;
+        }
+        Some((allowance::ALLOWANCE_COMMAND, sub_matches)) => {
+            swap::handle_sub_commands(sub_matches, config).await;
+        }
+        Some((approve::APPROVE_COMMAND, sub_matches)) => {
             swap::handle_sub_commands(sub_matches, config).await;
         }
         _ => panic!("command not registred"),
