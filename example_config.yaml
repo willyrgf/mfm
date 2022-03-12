@@ -2,6 +2,22 @@ wallets:
   test-wallet:
     private_key: YOUR_PRIVATE_KEY
 
+networks:
+  bsc:
+    name: bsc
+    symbol: bnb
+    chain_id: 56
+    rpc_url: https://bsc-dataseed.binance.org
+    blockexplorer_url: https://bscscan.com
+    min_balance_coin: 0.1
+    wrapped_asset: wbnb
+
+exchanges:
+  pancake_swap_v2:
+    name: pancake_swap_v2
+    router_address: 0x10ED43C718714eb63d5aA57B78B54704E256024E
+    network_id: bsc
+
 assets:
   anonq:
     name: anonq
@@ -28,18 +44,35 @@ routes:
     base: busd
     quote: anonq
     path: [wbnb]
+  wbnb-anonq:
+    base: wbnb
+    quote: anonq
+    path: []
+  wbnb-busd:
+    base: wbnb
+    quote: busd
+    path: []
+  busd-wbnb:
+    base: busd
+    quote: wbnb
+    path: []
+  anonq-wbnb:
+    base: anonq
+    quote: wbnb
+    path: []
 
-networks:
-  bsc:
-    name: bsc
-    symbol: bnb
-    chain_id: 56
-    rpc_url: https://bsc-dataseed.binance.org
-    blockexplorer_url: https://bscscan.com
-    min_balance_coin: 0.1
-    wrapped_asset: wbnb
-
-exchanges:
-  pancake_swap_v2:
-    name: pancake_swap_v2
-    router_address: 0x10ED43C718714eb63d5aA57B78B54704E256024E
+rebalancers:
+  test-anonq-busd:
+    wallet_id: test-wallet
+    name: test-anonq-busd
+    portfolio:
+      anonq:
+        percent: 50
+      busd: 
+        percent: 25
+      wbnb:
+        percent: 25
+    # if zero, always run
+    threshold_percent: 2 
+    quoted_in: busd
+    parking_asset_id: busd
