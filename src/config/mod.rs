@@ -1,6 +1,7 @@
 pub mod asset;
 pub mod exchange;
 pub mod network;
+pub mod rebalancer;
 pub mod route;
 pub mod wallet;
 
