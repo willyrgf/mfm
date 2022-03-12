@@ -1,6 +1,6 @@
 use crate::{cmd, config};
 use clap::ArgMatches;
-use web3::types::U256;
+//use web3::types::U256;
 
 pub const BALANCES_COMMAND: &'static str = "balances";
 

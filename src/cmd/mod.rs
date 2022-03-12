@@ -1,10 +1,14 @@
-use crate::config::{asset::Asset, exchange::Exchange, network::Network, wallet::Wallet, Config};
+use crate::config::{
+    asset::Asset, exchange::Exchange, network::Network, rebalancer::Rebalancer, wallet::Wallet,
+    Config,
+};
 use clap::{ArgMatches, Command};
 use web3::types::U256;
 
 pub mod allowance;
 pub mod approve;
 pub mod balances;
+pub mod rebalancer;
 pub mod swap;
 pub mod wrap;
 
@@ -109,6 +113,14 @@ pub fn new() -> clap::Command<'static> {
                         .required(true),
                 )
         )
+        .subcommand(
+            Command::new("rebalancer")
+                .about("Fires a rebalancer")
+                .arg(
+                    clap::arg!(-n --"name" <REBALANCER_NAME> "Rebalancer name from config file")
+                        .required(true),
+                )
+        )
 }
 
 pub async fn call_sub_commands(matches: &ArgMatches, config: &Config) {
@@ -126,6 +138,9 @@ pub async fn call_sub_commands(matches: &ArgMatches, config: &Config) {
             approve::call_sub_commands(sub_matches, config).await;
         }
         Some((balances::BALANCES_COMMAND, sub_matches)) => {
+            balances::call_sub_commands(sub_matches, config).await;
+        }
+        Some((balances::REBALANCER_COMMAND, sub_matches)) => {
             balances::call_sub_commands(sub_matches, config).await;
         }
         _ => panic!("command not registred"),
@@ -208,5 +223,12 @@ pub fn get_slippage<'a>(args: &'a ArgMatches, asset_decimals: u8) -> U256 {
             U256::from(qe)
         }
         None => panic!("missing slippage"),
+    }
+}
+
+pub fn get_rebalancer<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Rebalancer {
+    match args.value_of("name") {
+        Some(i) => config.rebalancers.get(i),
+        None => panic!("--name not supported"),
     }
 }

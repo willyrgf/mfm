@@ -14,3 +14,11 @@ pub struct Rebalancer {
     quoted_in: String,
     portfolio: Portfolio,
 }
+
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+pub struct Rebalancers(HashMap<String, Rebalancer>);
+impl Rebalancers {
+    pub fn get(&self, key: &str) -> &Rebalancer {
+        self.0.get(key).unwrap()
+    }
+}

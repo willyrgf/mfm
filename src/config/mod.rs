@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use asset::Assets;
 use exchange::Exchanges;
 use network::Networks;
+use rebalancer::Rebalancers;
 use route::Routes;
 use wallet::Wallets;
 
@@ -20,6 +21,7 @@ pub struct Config {
     pub networks: Networks,
     pub exchanges: Exchanges,
     pub routes: Routes,
+    pub rebalancers: Rebalancers,
 }
 
 impl Config {
