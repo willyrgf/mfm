@@ -10,8 +10,10 @@ use web3::{
     types::{Address, Bytes, TransactionParameters, H160, U256},
 };
 
+use super::exchange::Exchange;
 use super::network::{Network, Networks};
 use super::wallet::Wallet;
+use super::Config;
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Asset {
     name: String,
@@ -35,6 +37,10 @@ impl Asset {
 
     pub fn exchange_id(&self) -> &str {
         self.exchange_id.as_str()
+    }
+
+    pub fn get_exchange<'a>(&self, config: &'a Config) -> &'a Exchange {
+        config.exchanges.get(self.exchange_id())
     }
 
     pub fn abi_path(&self) -> String {
@@ -78,6 +84,32 @@ impl Asset {
 
     pub fn build_path_for_coin(&self, coin_address: H160) -> Vec<H160> {
         vec![coin_address, self.as_address().unwrap()]
+    }
+
+    pub async fn balance_of_quoted_in(
+        &self,
+        client: web3::Web3<Http>,
+        config: &Config,
+        wallet: &Wallet,
+        quoted: &Asset,
+    ) -> U256 {
+        let account = wallet.address();
+        let exchange = self.get_exchange(config);
+        let base_balance = self.balance_of(client.clone(), account).await;
+
+        if self.name() == quoted.name() {
+            return base_balance;
+        }
+
+        let route = config.routes.search(self, quoted);
+        let assets_path = route.build_path(&config.assets);
+
+        exchange
+            .get_amounts_out(client.clone(), base_balance, assets_path)
+            .await
+            .last()
+            .unwrap()
+            .into()
     }
 
     pub async fn allowance(&self, client: web3::Web3<Http>, owner: H160, spender: H160) -> U256 {

@@ -54,7 +54,13 @@ impl Route {
 pub struct Routes(HashMap<String, Route>);
 impl Routes {
     pub fn get(&self, key: &str) -> &Route {
-        self.0.get(key).unwrap()
+        match self.0.get(key) {
+            Some(r) => r,
+            None => {
+                log::error!("routes.get(): key: {} not found", key);
+                panic!()
+            }
+        }
     }
     pub fn search(&self, base: &Asset, quote: &Asset) -> &Route {
         let key = format!("{}-{}", base.name(), quote.name());

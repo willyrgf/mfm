@@ -80,6 +80,13 @@ impl Exchange {
         amount: U256,
         assets_path: Vec<H160>,
     ) -> Vec<U256> {
+        let zero = U256::from(0);
+
+        //TODO: check if the amount is sufficient
+        if amount == zero {
+            return vec![zero];
+        }
+
         let contract = self.router_contract(client);
         // let quantity = 1;
         // let amount: U256 = (quantity * 10_i32.pow(decimals.into())).into();
@@ -90,7 +97,16 @@ impl Exchange {
             Options::default(),
             None,
         );
-        let result_amounts_out: Vec<U256> = result.await.unwrap();
+        let result_amounts_out: Vec<U256> = match result.await {
+            Ok(a) => a,
+            Err(e) => {
+                log::error!(
+                    "get_amounts_out(): result err: {:?}, return zeroed value",
+                    e
+                );
+                vec![zero]
+            }
+        };
         result_amounts_out
     }
 
