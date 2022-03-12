@@ -10,6 +10,7 @@ use web3::{
     types::{Address, Bytes, TransactionParameters, H160, U256},
 };
 
+use super::network::{Network, Networks};
 use super::wallet::Wallet;
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Asset {
@@ -49,6 +50,10 @@ impl Asset {
         let reader = std::fs::File::open(self.abi_path()).unwrap();
         let json: serde_json::Value = serde_json::from_reader(reader).unwrap();
         json.to_string()
+    }
+
+    pub fn get_network<'a>(&self, networks: &'a Networks) -> &'a Network {
+        networks.get(self.network_id.as_str())
     }
 
     pub fn contract(&self, client: web3::Web3<Http>) -> Contract<Http> {

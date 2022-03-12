@@ -4,6 +4,7 @@ use web3::types::U256;
 
 pub mod allowance;
 pub mod approve;
+pub mod balances;
 pub mod swap;
 pub mod wrap;
 
@@ -100,6 +101,14 @@ pub fn new() -> clap::Command<'static> {
                         .required(true)
                 )
         )
+        .subcommand(
+            Command::new("balances")
+                .about("Check balances from all assets listed on config")
+                .arg(
+                    clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file")
+                        .required(true),
+                )
+        )
 }
 
 pub async fn call_sub_commands(matches: &ArgMatches, config: &Config) {
@@ -115,6 +124,9 @@ pub async fn call_sub_commands(matches: &ArgMatches, config: &Config) {
         }
         Some((approve::APPROVE_COMMAND, sub_matches)) => {
             approve::call_sub_commands(sub_matches, config).await;
+        }
+        Some((balances::BALANCES_COMMAND, sub_matches)) => {
+            balances::call_sub_commands(sub_matches, config).await;
         }
         _ => panic!("command not registred"),
     }
