@@ -8,7 +8,7 @@ pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
         Some(n) => config.exchanges.get(n),
         None => panic!("--exchange not supported"),
     };
-    println!("exchange: {:?}", exchange);
+    log::debug!("exchange: {:?}", exchange);
     let network = exchange.get_network(&config.networks);
 
     let http = web3::transports::Http::new(network.rpc_url()).unwrap();
@@ -31,8 +31,9 @@ pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
             exchange.as_router_address().unwrap(),
         )
         .await;
-    println!(
+    log::debug!(
         "allowance remaning to spend: {:?}, asset_decimals: {}",
-        remaning, asset_decimals
+        remaning,
+        asset_decimals
     );
 }

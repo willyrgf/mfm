@@ -779,6 +779,7 @@ dependencies = [
  "clap",
  "env_logger",
  "futures",
+ "log",
  "rustc-hex",
  "secp256k1",
  "serde",

@@ -114,7 +114,7 @@ impl Asset {
             )
             .await
             .unwrap();
-        println!("approve_spender called estimate_gas: {:?}", estimate_gas);
+        log::debug!("approve_spender called estimate_gas: {:?}", estimate_gas);
 
         let func_data = self
             .contract(client.clone())
@@ -123,10 +123,10 @@ impl Asset {
             .unwrap()
             .encode_input(&[Token::Address(spender), Token::Uint(amount)])
             .unwrap();
-        println!("approve_spender(): func_data: {:?}", func_data);
+        log::debug!("approve_spender(): func_data: {:?}", func_data);
 
         let nonce = from_wallet.nonce(client.clone()).await;
-        println!("approve_spender(): nonce: {:?}", nonce);
+        log::debug!("approve_spender(): nonce: {:?}", nonce);
 
         let transaction_obj = TransactionParameters {
             nonce: Some(nonce),
@@ -137,7 +137,7 @@ impl Asset {
             data: Bytes(func_data),
             ..Default::default()
         };
-        println!("approve_spender(): transaction_obj: {:?}", transaction_obj);
+        log::debug!("approve_spender(): transaction_obj: {:?}", transaction_obj);
 
         let secret = from_wallet.secret();
         let signed_transaction = client
@@ -145,7 +145,7 @@ impl Asset {
             .sign_transaction(transaction_obj, &secret)
             .await
             .unwrap();
-        println!(
+        log::debug!(
             "approve_spender(): signed_transaction: {:?}",
             signed_transaction
         );
@@ -155,7 +155,7 @@ impl Asset {
             .send_raw_transaction(signed_transaction.raw_transaction)
             .await
             .unwrap();
-        println!("approve_spender(): tx_adress: {}", tx_address);
+        log::debug!("approve_spender(): tx_adress: {}", tx_address);
     }
 
     pub async fn wrap(
@@ -181,7 +181,7 @@ impl Asset {
             )
             .await
             .unwrap();
-        println!("wrap called estimate_gas: {:?}", estimate_gas);
+        log::debug!("wrap called estimate_gas: {:?}", estimate_gas);
 
         let deposit_data = self
             .contract(client.clone())
@@ -190,10 +190,10 @@ impl Asset {
             .unwrap()
             .encode_input(&[])
             .unwrap();
-        println!("wrap(): deposit_data: {:?}", deposit_data);
+        log::debug!("wrap(): deposit_data: {:?}", deposit_data);
 
         let nonce = from_wallet.nonce(client.clone()).await;
-        println!("wrap(): nonce: {:?}", nonce);
+        log::debug!("wrap(): nonce: {:?}", nonce);
 
         let transaction_obj = TransactionParameters {
             nonce: Some(nonce),
@@ -204,7 +204,7 @@ impl Asset {
             data: Bytes(deposit_data),
             ..Default::default()
         };
-        println!("wrap(): transaction_obj: {:?}", transaction_obj);
+        log::debug!("wrap(): transaction_obj: {:?}", transaction_obj);
 
         let secret = from_wallet.secret();
         let signed_transaction = client
@@ -212,14 +212,14 @@ impl Asset {
             .sign_transaction(transaction_obj, &secret)
             .await
             .unwrap();
-        println!("wrap(): signed_transaction: {:?}", signed_transaction);
+        log::debug!("wrap(): signed_transaction: {:?}", signed_transaction);
 
         let tx_address = client
             .eth()
             .send_raw_transaction(signed_transaction.raw_transaction)
             .await
             .unwrap();
-        println!("wrap(): tx_adress: {}", tx_address);
+        log::debug!("wrap(): tx_adress: {}", tx_address);
     }
 }
 

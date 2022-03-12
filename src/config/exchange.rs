@@ -140,7 +140,7 @@ impl Exchange {
             .await
             .unwrap();
 
-        println!("swap_tokens_for_tokens estimate_gas: {}", estimate_gas);
+        log::debug!("swap_tokens_for_tokens estimate_gas: {}", estimate_gas);
 
         let func_data = self
             .router_contract(client.clone())
@@ -155,10 +155,10 @@ impl Exchange {
                 Token::Uint(U256::from_dec_str(&valid_timestamp.to_string()).unwrap()),
             ])
             .unwrap();
-        println!("swap_tokens_for_tokens(): func_data: {:?}", func_data);
+        log::debug!("swap_tokens_for_tokens(): func_data: {:?}", func_data);
 
         let nonce = from_wallet.nonce(client.clone()).await;
-        println!("swap_tokens_for_tokens(): nonce: {:?}", nonce);
+        log::debug!("swap_tokens_for_tokens(): nonce: {:?}", nonce);
 
         let transaction_obj = TransactionParameters {
             nonce: Some(nonce),
@@ -169,7 +169,7 @@ impl Exchange {
             data: Bytes(func_data),
             ..Default::default()
         };
-        println!(
+        log::debug!(
             "swap_tokens_for_tokens(): transaction_obj: {:?}",
             transaction_obj
         );
@@ -180,7 +180,7 @@ impl Exchange {
             .sign_transaction(transaction_obj, &secret)
             .await
             .unwrap();
-        println!(
+        log::debug!(
             "swap_tokens_for_tokens(): signed_transaction: {:?}",
             signed_transaction
         );
@@ -190,7 +190,7 @@ impl Exchange {
             .send_raw_transaction(signed_transaction.raw_transaction)
             .await
             .unwrap();
-        println!("approve_spender(): tx_adress: {}", tx_address);
+        log::debug!("approve_spender(): tx_adress: {}", tx_address);
     }
 }
 

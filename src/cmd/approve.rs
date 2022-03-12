@@ -9,7 +9,7 @@ pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
         Some(n) => config.exchanges.get(n),
         None => panic!("--exchange not supported"),
     };
-    println!("exchange: {:?}", exchange);
+    log::debug!("exchange: {:?}", exchange);
     let network = exchange.get_network(&config.networks);
 
     let http = web3::transports::Http::new(network.rpc_url()).unwrap();
@@ -35,7 +35,7 @@ pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
     };
 
     let gas_price = client.eth().gas_price().await.unwrap();
-    println!("amount_int: {:?}", amount_in);
+    log::debug!("amount_int: {:?}", amount_in);
 
     asset
         .approve_spender(
@@ -53,8 +53,9 @@ pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
             exchange.as_router_address().unwrap(),
         )
         .await;
-    println!(
+    log::debug!(
         "approved_spender allowance remaning to spend: {:?}, asset_decimals: {}",
-        remaning, asset_decimals
+        remaning,
+        asset_decimals
     );
 }

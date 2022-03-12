@@ -9,7 +9,7 @@ pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
         Some(n) => config.exchanges.get(n),
         None => panic!("--exchange not supported"),
     };
-    println!("exchange: {:?}", exchange);
+    log::debug!("exchange: {:?}", exchange);
     let network = exchange.get_network(&config.networks);
 
     let http = web3::transports::Http::new(network.rpc_url()).unwrap();
@@ -19,13 +19,13 @@ pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
         Some(i) => config.assets.get(i),
         None => panic!("--token_input not supported"),
     };
-    println!("input_token: {:?}", input_token);
+    log::debug!("input_token: {:?}", input_token);
 
     let output_token = match args.value_of("token_output") {
         Some(i) => config.assets.get(i),
         None => panic!("--token_output not supported"),
     };
-    println!("output_token: {:?}", output_token);
+    log::debug!("output_token: {:?}", output_token);
 
     let wallet = match args.value_of("wallet") {
         Some(w) => config.wallets.get(w),
@@ -63,13 +63,13 @@ pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
         .unwrap()
         .into();
     let gas_price = client.eth().gas_price().await.unwrap();
-    println!("amount_mint_out: {:?}", amount_min_out);
+    log::debug!("amount_mint_out: {:?}", amount_min_out);
 
     let slippage_amount = (amount_min_out * slippage) / U256::exp10(output_token_decimals.into());
-    println!("slippage_amount {:?}", slippage_amount);
+    log::debug!("slippage_amount {:?}", slippage_amount);
 
     let amount_out_slippage: U256 = amount_min_out - slippage_amount;
-    println!("amount_out_slippage : {:?}", amount_out_slippage);
+    log::debug!("amount_out_slippage : {:?}", amount_out_slippage);
     exchange
         .swap_tokens_for_tokens(
             client.clone(),

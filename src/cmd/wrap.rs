@@ -36,7 +36,7 @@ pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
     };
 
     let n = wallet.nonce(client.clone()).await;
-    println!("nonce: {}", n);
+    log::debug!("nonce: {}", n);
 
     let gas_price = client.eth().gas_price().await.unwrap();
 
