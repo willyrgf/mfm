@@ -17,5 +17,13 @@
 ```
 ### swap tokens for tokens supporting fees on transfer
 ```
- cargo run -- swaptt -a 0.0006 -e pancake_swap_v2 -w test-wallet -i wbnb -o busd
+ cargo run -- swap -a 0.0006 -e pancake_swap_v2 -w test-wallet -i wbnb -o busd
+```
+### get balances of assets from wallet
+```
+ cargo run -- balances -w test-wallet
+```
+### run rebalancer
+```
+ cargo run -- rebalancer -n test-rebalancer
 ```
