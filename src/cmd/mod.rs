@@ -1,4 +1,4 @@
-use crate::config;
+use crate::config::Config;
 use clap::{ArgMatches, Command};
 
 pub mod allowance;
@@ -99,7 +99,7 @@ pub fn new() -> clap::Command<'static> {
         )
 }
 
-pub async fn handle_sub_commands(matches: &ArgMatches, config: &config::Config) {
+pub async fn handle_sub_commands(matches: &ArgMatches, config: &Config) {
     match matches.subcommand() {
         Some((wrap::WRAP_COMMAND, sub_matches)) => {
             wrap::handle_sub_commands(sub_matches, config).await;
@@ -108,11 +108,23 @@ pub async fn handle_sub_commands(matches: &ArgMatches, config: &config::Config) 
             swap::handle_sub_commands(sub_matches, config).await;
         }
         Some((allowance::ALLOWANCE_COMMAND, sub_matches)) => {
-            swap::handle_sub_commands(sub_matches, config).await;
+            allowance::handle_sub_commands(sub_matches, config).await;
         }
         Some((approve::APPROVE_COMMAND, sub_matches)) => {
-            swap::handle_sub_commands(sub_matches, config).await;
+            approve::handle_sub_commands(sub_matches, config).await;
         }
         _ => panic!("command not registred"),
     }
+}
+
+pub async fn run(cmd: clap::Command<'static>) {
+    let cmd_matches = cmd.get_matches();
+    log::debug!("matches: {:?}", cmd_matches);
+
+    let config = match cmd_matches.value_of("config_filename") {
+        Some(f) => Config::from_file(f),
+        None => panic!("--config_filename is invalid"),
+    };
+
+    handle_sub_commands(&cmd_matches, &config).await
 }
