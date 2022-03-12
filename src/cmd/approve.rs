@@ -4,7 +4,7 @@ use web3::types::U256;
 
 pub const APPROVE_COMMAND: &'static str = "approve";
 
-pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
+pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
     let (exchange, client, wallet, asset) = cmd::get_exchange_client_wallet_asset(args, config);
 
     let asset_decimals = asset.decimals(client.clone()).await;

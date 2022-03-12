@@ -102,19 +102,19 @@ pub fn new() -> clap::Command<'static> {
         )
 }
 
-pub async fn handle_sub_commands(matches: &ArgMatches, config: &Config) {
+pub async fn call_sub_commands(matches: &ArgMatches, config: &Config) {
     match matches.subcommand() {
         Some((wrap::WRAP_COMMAND, sub_matches)) => {
-            wrap::handle_sub_commands(sub_matches, config).await;
+            wrap::call_sub_commands(sub_matches, config).await;
         }
         Some((swap::SWAP_COMMAND, sub_matches)) => {
-            swap::handle_sub_commands(sub_matches, config).await;
+            swap::call_sub_commands(sub_matches, config).await;
         }
         Some((allowance::ALLOWANCE_COMMAND, sub_matches)) => {
-            allowance::handle_sub_commands(sub_matches, config).await;
+            allowance::call_sub_commands(sub_matches, config).await;
         }
         Some((approve::APPROVE_COMMAND, sub_matches)) => {
-            approve::handle_sub_commands(sub_matches, config).await;
+            approve::call_sub_commands(sub_matches, config).await;
         }
         _ => panic!("command not registred"),
     }
@@ -129,7 +129,7 @@ pub async fn run(cmd: clap::Command<'static>) {
         None => panic!("--config_filename is invalid"),
     };
 
-    handle_sub_commands(&cmd_matches, &config).await
+    call_sub_commands(&cmd_matches, &config).await
 }
 
 pub fn get_exchange_client_wallet_asset<'a>(

@@ -28,21 +28,4 @@ impl Config {
 
         config
     }
-
-    // pub fn get_exchange_client_wallet_asset(
-    //     &self,
-    //     exchange: &str,
-    //     wallet: &str,
-    //     asset: &str,
-    // ) -> (&Exchange, &Web3<Http>, &Wallet, &Asset) {
-    //     let e = self.exchanges.get(exchange);
-    //     let n = e.get_network(&self.networks);
-
-    //     let c = Web3::new(Http::new(n.rpc_url()).unwrap());
-
-    //     let a = self.assets.get(asset);
-
-    //     let w = self.wallets.get(wallet);
-    //     (e, &c, w, a)
-    // }
 }
