@@ -1,52 +1,11 @@
 use crate::config::{asset::Asset, exchange::Exchange, network::Network, wallet::Wallet, Config};
 use clap::{ArgMatches, Command};
-use web3::{transports::Http, Web3};
+use web3::types::U256;
 
 pub mod allowance;
 pub mod approve;
 pub mod swap;
 pub mod wrap;
-
-pub struct CmdState {
-    config: &Config,
-    exchange: Option(&Exchange),
-    network: Option(&Network),
-    client: Option(&Web3<Http>),
-    wallet: Option(&Wallet),
-    asset: Option(&Asset),
-}
-
-impl CmdState {
-    pub fn from_args(args: &ArgMatches, config: &Config) -> Self {
-        let exchange_obj = match args.value_of("exchange") {
-            Some(n) => Some(config.exchanges.get(n)),
-            None => None,
-        };
-        log::debug!("load_exchange_to: {:?}", exchange_obj);
-        let network_obj = Some(exchange_obj.get_network(&config.networks));
-
-        let client =
-            Some(Web3::new(web3::transports::Http::new(network_obj.rpc_url()).unwrap()).to_owned());
-
-        let asset_obj = match args.value_of("asset") {
-            Some(i) => Some(config.assets.get(i)),
-            None => panic!("--asset not supported"),
-        };
-        let wallet_obj = match args.value_of("wallet") {
-            Some(w) => Some(config.wallets.get(w)),
-            None => panic!("--wallet doesnt exist"),
-        };
-
-        CmdState {
-            config: config,
-            exchange: exchange_obj,
-            network: network_obj,
-            client: client,
-            wallet: wallet_obj,
-            asset: asset_obj,
-        }
-    }
-}
 
 pub const CLI_NAME: &'static str = "mfm";
 
@@ -137,7 +96,7 @@ pub fn new() -> clap::Command<'static> {
                         .required(true)
                 )
                 .arg(
-                    clap::arg!(-v --"value" <VALUE> "Value to allow spending")
+                    clap::arg!(-v --"amount" <VALUE> "Amount to allow spending")
                         .required(true)
                 )
         )
@@ -173,40 +132,69 @@ pub async fn run(cmd: clap::Command<'static>) {
     call_sub_commands(&cmd_matches, &config).await
 }
 
-pub fn get_exchange_client_wallet_asset<'a>(
-    args: &'a ArgMatches,
-    config: &'a Config,
-) -> (&'a Exchange, Web3<Http>, &'a Wallet, &'a Asset) {
-    let exchange_obj = match args.value_of("exchange") {
+pub fn get_exchange<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Exchange {
+    match args.value_of("exchange") {
         Some(n) => config.exchanges.get(n),
         None => panic!("--exchange not supported"),
-    };
-    log::debug!("exchange: {:?}", exchange_obj);
-    let network_obj = exchange_obj.get_network(&config.networks);
-
-    //TODO: understand better the borrowed that happens when try return &Web3<Http>
-    let client = Web3::new(web3::transports::Http::new(network_obj.rpc_url()).unwrap()).to_owned();
-
-    let asset_obj = match args.value_of("asset") {
-        Some(i) => config.assets.get(i),
-        None => panic!("--asset not supported"),
-    };
-    let wallet_obj = match args.value_of("wallet") {
-        Some(w) => config.wallets.get(w),
-        None => panic!("--wallet doesnt exist"),
-    };
-    (exchange_obj, client.clone(), wallet_obj, asset_obj)
+    }
 }
 
-pub fn get_exchange_client_wallet_asset_network<'a>(
-    args: &'a ArgMatches,
-    config: &'a Config,
-) -> (&'a Exchange, Web3<Http>, &'a Wallet, &'a Asset, &'a Network) {
-    let network = match args.value_of("network") {
+pub fn get_network<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Network {
+    match args.value_of("network") {
         Some(n) => config.networks.get(n),
         None => panic!("--network not supported"),
-    };
+    }
+}
 
-    let (e, c, w, a) = get_exchange_client_wallet_asset(args, config);
-    (e, c, w, a, network)
+pub fn get_wallet<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Wallet {
+    match args.value_of("wallet") {
+        Some(w) => config.wallets.get(w),
+        None => panic!("--wallet doesnt exist"),
+    }
+}
+
+pub fn get_asset<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
+    match args.value_of("asset") {
+        Some(a) => config.assets.get(a),
+        None => panic!("--asset not supported"),
+    }
+}
+
+pub fn get_amount<'a>(args: &'a ArgMatches, asset_decimals: u8) -> U256 {
+    //TODO: need to review usage from i128
+    match args.value_of("asset") {
+        Some(a) => {
+            //TODO: move it to a helper function
+            let q = a.parse::<f64>().unwrap();
+            let qe = (q * 10_f64.powf(asset_decimals.into())) as i128;
+            U256::from(qe)
+        }
+        None => panic!("--amount not supported"),
+    }
+}
+
+pub fn get_token_input<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
+    match args.value_of("token_input") {
+        Some(i) => config.assets.get(i),
+        None => panic!("--token_input not supported"),
+    }
+}
+
+pub fn get_token_output<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
+    match args.value_of("token_output") {
+        Some(i) => config.assets.get(i),
+        None => panic!("--token_output not supported"),
+    }
+}
+
+pub fn get_slippage<'a>(args: &'a ArgMatches, asset_decimals: u8) -> U256 {
+    //TODO: review i128
+    match args.value_of("slippage") {
+        Some(a) => {
+            let q = a.parse::<f64>().unwrap();
+            let qe = ((q / 100.0) * 10_f64.powf(asset_decimals.into())) as i64;
+            U256::from(qe)
+        }
+        None => panic!("missing slippage"),
+    }
 }
