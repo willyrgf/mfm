@@ -1,12 +1,17 @@
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 struct AssetConfig {
     asset_id: String,
     percent: f64,
 }
 
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 struct Portfolio(HashMap<String, AssetConfig>);
 
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Rebalancer {
     name: String,
     wallet_id: String,

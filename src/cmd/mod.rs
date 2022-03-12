@@ -140,8 +140,8 @@ pub async fn call_sub_commands(matches: &ArgMatches, config: &Config) {
         Some((balances::BALANCES_COMMAND, sub_matches)) => {
             balances::call_sub_commands(sub_matches, config).await;
         }
-        Some((balances::REBALANCER_COMMAND, sub_matches)) => {
-            balances::call_sub_commands(sub_matches, config).await;
+        Some((rebalancer::REBALANCER_COMMAND, sub_matches)) => {
+            rebalancer::call_sub_commands(sub_matches, config).await;
         }
         _ => panic!("command not registred"),
     }
