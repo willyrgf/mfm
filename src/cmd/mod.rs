@@ -7,6 +7,47 @@ pub mod approve;
 pub mod swap;
 pub mod wrap;
 
+pub struct CmdState {
+    config: &Config,
+    exchange: Option(&Exchange),
+    network: Option(&Network),
+    client: Option(&Web3<Http>),
+    wallet: Option(&Wallet),
+    asset: Option(&Asset),
+}
+
+impl CmdState {
+    pub fn from_args(args: &ArgMatches, config: &Config) -> Self {
+        let exchange_obj = match args.value_of("exchange") {
+            Some(n) => Some(config.exchanges.get(n)),
+            None => None,
+        };
+        log::debug!("load_exchange_to: {:?}", exchange_obj);
+        let network_obj = Some(exchange_obj.get_network(&config.networks));
+
+        let client =
+            Some(Web3::new(web3::transports::Http::new(network_obj.rpc_url()).unwrap()).to_owned());
+
+        let asset_obj = match args.value_of("asset") {
+            Some(i) => Some(config.assets.get(i)),
+            None => panic!("--asset not supported"),
+        };
+        let wallet_obj = match args.value_of("wallet") {
+            Some(w) => Some(config.wallets.get(w)),
+            None => panic!("--wallet doesnt exist"),
+        };
+
+        CmdState {
+            config: config,
+            exchange: exchange_obj,
+            network: network_obj,
+            client: client,
+            wallet: wallet_obj,
+            asset: asset_obj,
+        }
+    }
+}
+
 pub const CLI_NAME: &'static str = "mfm";
 
 pub fn new() -> clap::Command<'static> {
