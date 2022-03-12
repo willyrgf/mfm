@@ -1,19 +1,11 @@
-use crate::config;
+use crate::{cmd, config};
 use clap::ArgMatches;
 use web3::types::U256;
 
 pub const SWAP_COMMAND: &'static str = "swap";
 
 pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
-    let exchange = match args.value_of("exchange") {
-        Some(n) => config.exchanges.get(n),
-        None => panic!("--exchange not supported"),
-    };
-    log::debug!("exchange: {:?}", exchange);
-    let network = exchange.get_network(&config.networks);
-
-    let http = web3::transports::Http::new(network.rpc_url()).unwrap();
-    let client = web3::Web3::new(http);
+    let (exchange, client, wallet, _) = cmd::get_exchange_client_wallet_asset(args, config);
 
     let input_token = match args.value_of("token_input") {
         Some(i) => config.assets.get(i),
@@ -27,14 +19,10 @@ pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
     };
     log::debug!("output_token: {:?}", output_token);
 
-    let wallet = match args.value_of("wallet") {
-        Some(w) => config.wallets.get(w),
-        None => panic!("--wallet doesnt exist"),
-    };
-
     let input_token_decimals = input_token.decimals(client.clone()).await;
     let output_token_decimals = output_token.decimals(client.clone()).await;
-    //#TODO: review i128
+
+    //TODO: review i128
     let amount_in = match args.value_of("amount") {
         Some(a) => {
             let q = a.parse::<f64>().unwrap();
@@ -43,7 +31,7 @@ pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
         }
         None => panic!("missing amount"),
     };
-    //#TODO: review i128
+    //TODO: review i128
     let slippage = match args.value_of("slippage") {
         Some(a) => {
             let q = a.parse::<f64>().unwrap();

@@ -1,14 +1,17 @@
-use crate::config::Config;
+use crate::config::{asset::Asset, exchange::Exchange, network::Network, wallet::Wallet, Config};
 use clap::{ArgMatches, Command};
+use web3::{transports::Http, Web3};
 
 pub mod allowance;
 pub mod approve;
 pub mod swap;
 pub mod wrap;
 
+pub const CLI_NAME: &'static str = "mfm";
+
 pub fn new() -> clap::Command<'static> {
-    Command::new("mfm")
-        .bin_name("mfm")
+    Command::new(CLI_NAME)
+        .bin_name(CLI_NAME)
         .arg(
             clap::arg!(-c - -config_filename <PATH> "Config file path")
                 .required(false)
@@ -127,4 +130,42 @@ pub async fn run(cmd: clap::Command<'static>) {
     };
 
     handle_sub_commands(&cmd_matches, &config).await
+}
+
+pub fn get_exchange_client_wallet_asset<'a>(
+    args: &'a ArgMatches,
+    config: &'a Config,
+) -> (&'a Exchange, Web3<Http>, &'a Wallet, &'a Asset) {
+    let exchange_obj = match args.value_of("exchange") {
+        Some(n) => config.exchanges.get(n),
+        None => panic!("--exchange not supported"),
+    };
+    log::debug!("exchange: {:?}", exchange_obj);
+    let network_obj = exchange_obj.get_network(&config.networks);
+
+    //TODO: understand better the borrowed that happens when try return &Web3<Http>
+    let client = Web3::new(web3::transports::Http::new(network_obj.rpc_url()).unwrap()).to_owned();
+
+    let asset_obj = match args.value_of("asset") {
+        Some(i) => config.assets.get(i),
+        None => panic!("--asset not supported"),
+    };
+    let wallet_obj = match args.value_of("wallet") {
+        Some(w) => config.wallets.get(w),
+        None => panic!("--wallet doesnt exist"),
+    };
+    (exchange_obj, client.clone(), wallet_obj, asset_obj)
+}
+
+pub fn get_exchange_client_wallet_asset_network<'a>(
+    args: &'a ArgMatches,
+    config: &'a Config,
+) -> (&'a Exchange, Web3<Http>, &'a Wallet, &'a Asset, &'a Network) {
+    let network = match args.value_of("network") {
+        Some(n) => config.networks.get(n),
+        None => panic!("--network not supported"),
+    };
+
+    let (e, c, w, a) = get_exchange_client_wallet_asset(args, config);
+    (e, c, w, a, network)
 }
