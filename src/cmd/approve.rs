@@ -1,25 +1,21 @@
 use crate::{cmd, config};
 use clap::ArgMatches;
-use web3::types::U256;
 
 pub const APPROVE_COMMAND: &'static str = "approve";
 
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
-    let (exchange, client, wallet, asset) = cmd::get_exchange_client_wallet_asset(args, config);
+    let exchange = cmd::get_exchange(args, config);
+    let wallet = cmd::get_wallet(args, config);
+    let asset = cmd::get_asset(args, config);
+    let client = exchange
+        .get_network(&config.networks)
+        .get_web3_client_http();
 
     let asset_decimals = asset.decimals(client.clone()).await;
-    //TODO: need to review usage from i128
-    let amount_in = match args.value_of("value") {
-        Some(a) => {
-            let q = a.parse::<f64>().unwrap();
-            let qe = (q * 10_f64.powf(asset_decimals.into())) as i128;
-            U256::from(qe)
-        }
-        None => panic!("--value is missing"),
-    };
+    let amount = cmd::get_amount(args, asset_decimals);
+    log::debug!("amount: {:?}", amount);
 
     let gas_price = client.eth().gas_price().await.unwrap();
-    log::debug!("amount_int: {:?}", amount_in);
 
     asset
         .approve_spender(
@@ -27,7 +23,7 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
             gas_price,
             wallet,
             exchange.as_router_address().unwrap(),
-            amount_in,
+            amount,
         )
         .await;
 

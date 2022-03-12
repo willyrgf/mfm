@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use web3::types::U256;
+use web3::{transports::Http, types::U256, Web3};
 
 use super::asset::{Asset, Assets};
 
@@ -25,6 +25,10 @@ impl Network {
     pub fn get_min_balance_coin(&self, decimals: u8) -> U256 {
         let qe = (self.min_balance_coin * 10_f64.powf(decimals.into())) as i64;
         U256::from(qe)
+    }
+
+    pub fn get_web3_client_http(&self) -> Web3<Http> {
+        Web3::new(web3::transports::Http::new(self.rpc_url()).unwrap())
     }
 }
 

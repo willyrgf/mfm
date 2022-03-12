@@ -5,12 +5,14 @@ use web3::types::U256;
 pub const WRAP_COMMAND: &'static str = "wrap";
 
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
-    let (_, client, wallet, _, network) =
-        cmd::get_exchange_client_wallet_asset_network(args, config);
+    let network = cmd::get_network(args, config);
+    let wallet = cmd::get_wallet(args, config);
+    let client = network.get_web3_client_http();
 
     let wrapped_asset = network.get_wrapped_asset(&config.assets);
     let wrapped_asset_decimals = wrapped_asset.decimals(client.clone()).await;
 
+    //TODO: doc the calc and the None case
     let amount_in = match args.value_of("amount") {
         Some(a) => {
             let q = a.parse::<f64>().unwrap();

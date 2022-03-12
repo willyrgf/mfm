@@ -5,41 +5,22 @@ use web3::types::U256;
 pub const SWAP_COMMAND: &'static str = "swap";
 
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
-    let (exchange, client, wallet, _) = cmd::get_exchange_client_wallet_asset(args, config);
+    let exchange = cmd::get_exchange(args, config);
+    let wallet = cmd::get_wallet(args, config);
+    let client = exchange
+        .get_network(&config.networks)
+        .get_web3_client_http();
 
-    let input_token = match args.value_of("token_input") {
-        Some(i) => config.assets.get(i),
-        None => panic!("--token_input not supported"),
-    };
+    let input_token = cmd::get_token_input(args, config);
     log::debug!("input_token: {:?}", input_token);
-
-    let output_token = match args.value_of("token_output") {
-        Some(i) => config.assets.get(i),
-        None => panic!("--token_output not supported"),
-    };
+    let output_token = cmd::get_token_output(args, config);
     log::debug!("output_token: {:?}", output_token);
 
     let input_token_decimals = input_token.decimals(client.clone()).await;
     let output_token_decimals = output_token.decimals(client.clone()).await;
 
-    //TODO: review i128
-    let amount_in = match args.value_of("amount") {
-        Some(a) => {
-            let q = a.parse::<f64>().unwrap();
-            let qe = (q * 10_f64.powf(input_token_decimals.into())) as i128;
-            U256::from(qe)
-        }
-        None => panic!("missing amount"),
-    };
-    //TODO: review i128
-    let slippage = match args.value_of("slippage") {
-        Some(a) => {
-            let q = a.parse::<f64>().unwrap();
-            let qe = ((q / 100.0) * 10_f64.powf(output_token_decimals.into())) as i64;
-            U256::from(qe)
-        }
-        None => panic!("missing slippage"),
-    };
+    let amount_in = cmd::get_amount(args, input_token_decimals);
+    let slippage = cmd::get_slippage(args, output_token_decimals);
 
     let asset_path = config.routes.search(input_token, output_token);
     let path = asset_path.build_path(&config.assets);
