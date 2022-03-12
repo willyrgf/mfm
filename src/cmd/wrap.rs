@@ -4,7 +4,7 @@ use web3::types::U256;
 
 pub const WRAP_COMMAND: &'static str = "wrap";
 
-pub async fn handle_sub_commands(args: &ArgMatches, config: config::Config) {
+pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
     let network = match args.value_of("network") {
         Some(n) => config.networks.get(n),
         None => panic!("--network not supported"),

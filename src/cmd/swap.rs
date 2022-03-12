@@ -4,7 +4,7 @@ use web3::types::U256;
 
 pub const SWAP_COMMAND: &'static str = "swap";
 
-pub async fn handle_sub_commands(args: &ArgMatches, config: config::Config) {
+pub async fn handle_sub_commands(args: &ArgMatches, config: &config::Config) {
     let exchange = match args.value_of("exchange") {
         Some(n) => config.exchanges.get(n),
         None => panic!("--exchange not supported"),
