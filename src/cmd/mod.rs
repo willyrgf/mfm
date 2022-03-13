@@ -95,7 +95,7 @@ pub fn new() -> clap::Command<'static> {
                 )
         )
         .subcommand(
-            Command::new("approve_spender")
+            Command::new("approve")
                 .about("Approve token spending (needed to swap tokens)")
                 .arg(
                     clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router as spender")

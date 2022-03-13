@@ -139,6 +139,7 @@ impl Exchange {
             .router_contract(client.clone())
             .estimate_gas(
                 "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+                // "swapExactTokensForTokens",
                 (
                     amount_in,
                     amount_min_out,
@@ -164,6 +165,7 @@ impl Exchange {
             .router_contract(client.clone())
             .abi()
             .function("swapExactTokensForTokensSupportingFeeOnTransferTokens")
+            // .function("swapExactTokensForTokens")
             .unwrap()
             .encode_input(&[
                 Token::Uint(amount_in),

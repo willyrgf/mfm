@@ -173,10 +173,13 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
         let network = exchange.get_network(&config.networks);
         let client = network.get_web3_client_http();
         let asset_route = config.routes.search(parking_asset, ab.asset);
+        log::debug!("asset_route: {:?}", asset_route);
         let parking_slip = parking_asset.slippage_u256(ab.asset_decimals);
         let parking_amount =
             ab.desired_parking_to_move(total_parking_balance, parking_asset_decimals);
         log::debug!("desired_parking_to_move: {}", parking_amount);
+        log::debug!("build_path: {:?}", asset_route.build_path(&config.assets));
+
         let asset_amount_out: U256 = exchange
             .get_amounts_out(
                 client.clone(),

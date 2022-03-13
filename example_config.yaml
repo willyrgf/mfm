@@ -24,18 +24,81 @@ assets:
     network_id: bsc
     exchange_id: pancake_swap_v2
     address: 0xf393138616cd6DD367171eaA59c2eaEE420a32b9
+    slippage: 2
   busd:
     name: busd
     network_id: bsc
     exchange_id: pancake_swap_v2
     address: 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56
+    slippage: 1
   wbnb:
     name: wbnb
     network_id: bsc
     exchange_id: pancake_swap_v2
     address: 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c
+    slippage: 1
+  eth:
+    name: eth
+    network_id: bsc
+    exchange_id: pancake_swap_v2
+    address: 0x2170ed0880ac9a755fd29b2688956bd959f933f8
+    slippage: 2
+  btcb:
+    name: btcb
+    network_id: bsc
+    exchange_id: pancake_swap_v2
+    address: 0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c
+    slippage: 2
 
-routes: 
+routes:
+  busd-btcb:
+    base: busd
+    quote: btcb
+    path: []
+  busd-eth:
+    base: busd
+    quote: eth
+    path: []
+  wbnb-btcb:
+    base: wbnb
+    quote: btcb
+    path: []
+  wbnb-eth:
+    base: wbnb
+    quote: eth
+    path: []
+  btcb-wbnb:
+    base: btcb
+    quote: wbnb
+    path: []
+  eth-wbnb:
+    base: eth
+    quote: wbnb
+    path: []
+  btcb-busd:
+    base: btcb
+    quote: busd
+    path: []
+  eth-busd:
+    base: eth
+    quote: busd
+    path: []
+  btcb-anonq:
+    base: btcb
+    quote: anonq
+    path: [wbnb]
+  eth-anonq:
+    base: eth
+    quote: anonq
+    path: [wbnb]
+  anonq-btcb:
+    base: anonq
+    quote: btcb
+    path: [wbnb]
+  anonq-eth:
+    base: anonq
+    quote: eth
+    path: [wbnb]
   anonq-busd:
     base: anonq
     quote: busd
@@ -62,17 +125,22 @@ routes:
     path: []
 
 rebalancers:
-  test-anonq-busd:
+  test-rebalancer:
     wallet_id: test-wallet
     name: test-anonq-busd
     portfolio:
       anonq:
-        percent: 50
-      busd: 
+        percent: 40
+      busd:
         percent: 25
       wbnb:
         percent: 25
+      eth:
+        percent: 5
+      btcb:
+        percent: 5
     # if zero, always run
-    threshold_percent: 2 
+    threshold_percent: 2
     quoted_in: busd
     parking_asset_id: busd
+    parking_asset_min_move: 0.01
