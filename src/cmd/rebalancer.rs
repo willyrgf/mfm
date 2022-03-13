@@ -53,6 +53,13 @@ impl<'a> AssetBalances<'a> {
             (total_quoted_balance * U256::from(p)) / U256::exp10(self.quoted_asset_decimals.into());
         rb
     }
+
+    pub fn desired_parking_to_move(&self, total_parking_balance: U256, decimals: u8) -> U256 {
+        //self.quoted_balance / total_quoted_balance
+        let p = ((self.percent / 100.0) * 10_f64.powf(decimals.into())) as u128;
+        let rb = (total_parking_balance * U256::from(p)) / U256::exp10(decimals.into());
+        rb
+    }
 }
 
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
@@ -95,7 +102,14 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
         .fold(U256::from(0_i32), |acc, x| acc + x.quoted_balance);
     log::debug!("total_quoted_balance: {:?}", total_quoted_balance);
 
-    // let _: Vec<bool> = futures::future::join_all(assets_balances.iter().map(|ab| async move {
+    let from_wallet = rebalancer.get_wallet(&config);
+    let parking_asset = rebalancer.get_parking_asset(&config.assets);
+    let parking_asset_exchange = parking_asset.get_exchange(&config);
+    let parking_asset_network = parking_asset_exchange.get_network(&config.networks);
+    let parking_asset_client = parking_asset_network.get_web3_client_http();
+    let gas_price = parking_asset_client.eth().gas_price().await.unwrap();
+    let parking_asset_decimals = parking_asset.decimals(parking_asset_client.clone()).await;
+    // move all balances to parking asset
     for ab in assets_balances.iter() {
         if ab.asset.name() == rebalancer.parking_asset_id() {
             continue;
@@ -103,10 +117,7 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
         let exchange = ab.asset.get_exchange(&config);
         let network = exchange.get_network(&config.networks);
         let client = network.get_web3_client_http();
-        let from_wallet = rebalancer.get_wallet(&config);
-        let gas_price = client.eth().gas_price().await.unwrap();
-        let parking_asset = rebalancer.get_parking_asset(&config.assets);
-        let parking_asset_decimals = parking_asset.decimals(client.clone()).await;
+        let parking_slip = parking_asset.slippage_u256(parking_asset_decimals);
         let parking_route = config.routes.search(ab.asset, parking_asset);
 
         let parking_amount_out: U256 = exchange
@@ -120,7 +131,6 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
             .unwrap()
             .into();
         let ab_slip = ab.asset.slippage_u256(parking_asset_decimals);
-        let parking_slip = parking_asset.slippage_u256(parking_asset_decimals);
         let slippage = ab_slip + parking_slip;
         let slippage_amount =
             (parking_amount_out * slippage) / U256::exp10(parking_asset_decimals.into());
@@ -131,11 +141,12 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
         log::debug!("asset_balance: {:?}, desired_quoted_in_balance: {}", ab, rb);
         let min_move = rebalancer.parking_asset_min_move_u256(parking_asset_decimals);
         if min_move >= parking_amount_out_slip {
-            log::debug!(
+            log::error!(
                 "min_move not sattisfied: min_move {}, parking_amounts_out {}",
                 min_move,
                 parking_amount_out_slip
             );
+            continue;
         }
         exchange
             .swap_tokens_for_tokens(
@@ -145,6 +156,64 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
                 ab.balance,
                 parking_amount_out_slip,
                 parking_route.build_path_using_tokens(&config.assets),
+            )
+            .await;
+    }
+
+    let total_parking_balance: U256 = parking_asset
+        .balance_of(parking_asset_client.clone(), from_wallet.address())
+        .await;
+    log::debug!("total_parking_balance: {}", total_parking_balance);
+    //move parking to assets
+    for ab in assets_balances.iter() {
+        if ab.asset.name() == rebalancer.parking_asset_id() {
+            continue;
+        }
+        let exchange = ab.asset.get_exchange(&config);
+        let network = exchange.get_network(&config.networks);
+        let client = network.get_web3_client_http();
+        let asset_route = config.routes.search(parking_asset, ab.asset);
+        let parking_slip = parking_asset.slippage_u256(ab.asset_decimals);
+        let parking_amount =
+            ab.desired_parking_to_move(total_parking_balance, parking_asset_decimals);
+        log::debug!("desired_parking_to_move: {}", parking_amount);
+        let asset_amount_out: U256 = exchange
+            .get_amounts_out(
+                client.clone(),
+                parking_amount,
+                asset_route.build_path(&config.assets),
+            )
+            .await
+            .last()
+            .unwrap()
+            .into();
+        log::debug!("asset_amount_out: {:?}", asset_amount_out);
+        let ab_slip = ab.asset.slippage_u256(ab.asset_decimals);
+        let slippage = ab_slip + parking_slip;
+        log::debug!("slippage: {:?}", slippage);
+        let slippage_amount = (asset_amount_out * slippage) / U256::exp10(ab.asset_decimals.into());
+        log::debug!("slippage_amount: {:?}", slippage_amount);
+        let asset_amount_out_slip = asset_amount_out - slippage_amount;
+        log::debug!("asset_amount_out_slip: {:?}", asset_amount_out_slip);
+        // let rb = ab.desired_quoted_in_balance(total_quoted_balance);
+        // log::debug!("asset_balance: {:?}, desired_quoted_in_balance: {}", ab, rb);
+        let min_move = rebalancer.parking_asset_min_move_u256(parking_asset_decimals);
+        if min_move >= parking_amount {
+            log::error!(
+                "min_move not sattisfied: min_move {}, parking_amounts_out {}",
+                min_move,
+                parking_amount
+            );
+            continue;
+        }
+        exchange
+            .swap_tokens_for_tokens(
+                client.clone(),
+                from_wallet,
+                gas_price,
+                parking_amount,
+                asset_amount_out_slip,
+                asset_route.build_path_using_tokens(&config.assets),
             )
             .await;
     }

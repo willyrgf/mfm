@@ -231,7 +231,7 @@ pub async fn wait_receipt(client: web3::Web3<Http>, tx_address: H256) -> Transac
         match client.eth().transaction_receipt(tx_address).await {
             Ok(Some(receipt)) => return receipt,
             Ok(None) => {
-                thread::sleep(time::Duration::from_secs(2));
+                thread::sleep(time::Duration::from_secs(5));
                 continue;
             }
             Err(e) => {
