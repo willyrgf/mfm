@@ -199,7 +199,7 @@ pub fn get_asset<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
     }
 }
 
-pub fn get_txn_id<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
+pub fn get_txn_id<'a>(args: &'a ArgMatches) -> &'a str {
     match args.value_of("txn_id") {
         Some(a) => a,
         None => panic!("--txn_id not supported"),
