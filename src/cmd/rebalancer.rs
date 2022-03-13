@@ -3,7 +3,6 @@ use crate::{
     config::{self, asset::Asset, rebalancer::Rebalancer, Config},
 };
 use clap::ArgMatches;
-use std::{thread, time};
 use web3::{transports::Http, types::U256};
 
 pub const REBALANCER_COMMAND: &'static str = "rebalancer";
@@ -148,10 +147,6 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
                 parking_route.build_path_using_tokens(&config.assets),
             )
             .await;
-
-        //TODO: implement a new way to watcher the transaction
-        let duration = time::Duration::from_secs(180);
-        thread::sleep(duration);
     }
     // calc how much we need for each asset
     // calc the diff of expect with current balance per asset

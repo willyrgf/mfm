@@ -3,9 +3,11 @@ use crate::config::asset::{Asset, Assets};
 use std::str::FromStr;
 use std::time::UNIX_EPOCH;
 use std::{collections::HashMap, time::SystemTime};
+use std::{thread, time};
 
 use rustc_hex::FromHexError;
 use serde::{Deserialize, Serialize};
+use web3::types::{TransactionReceipt, H256};
 use web3::{
     contract::{Contract, Options},
     ethabi::Token,
@@ -208,7 +210,11 @@ impl Exchange {
             .send_raw_transaction(signed_transaction.raw_transaction)
             .await
             .unwrap();
+
         log::debug!("swap_tokens_for_tokens(): tx_adress: {}", tx_address);
+
+        let receipt = wait_receipt(client.clone(), tx_address).await;
+        log::debug!("receipt: {:?}", receipt);
     }
 }
 
@@ -217,5 +223,21 @@ pub struct Exchanges(HashMap<String, Exchange>);
 impl Exchanges {
     pub fn get(&self, key: &str) -> &Exchange {
         self.0.get(key).unwrap()
+    }
+}
+
+pub async fn wait_receipt(client: web3::Web3<Http>, tx_address: H256) -> TransactionReceipt {
+    loop {
+        match client.eth().transaction_receipt(tx_address).await {
+            Ok(Some(receipt)) => return receipt,
+            Ok(None) => {
+                thread::sleep(time::Duration::from_secs(2));
+                continue;
+            }
+            Err(e) => {
+                log::error!("wait_receipt() err: {:?}", e);
+                panic!()
+            }
+        }
     }
 }

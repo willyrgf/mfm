@@ -10,6 +10,7 @@ pub mod approve;
 pub mod balances;
 pub mod rebalancer;
 pub mod swap;
+pub mod transaction;
 pub mod wrap;
 
 pub const CLI_NAME: &'static str = "mfm";
@@ -67,6 +68,14 @@ pub fn new() -> clap::Command<'static> {
                     clap::arg!(-s --"slippage" <SLIPPAGE> "Slippage (default 0.5)")
                         .required(false)
                         .default_value("0.5")
+                )
+        )
+        .subcommand(
+            Command::new("transaction")
+                .about("Get transaction details")
+                .arg(
+                    clap::arg!(-n --"network" <bsc> "Network to search transaction")
+                        .required(true),
                 )
         )
         .subcommand(
@@ -143,6 +152,9 @@ pub async fn call_sub_commands(matches: &ArgMatches, config: &Config) {
         Some((rebalancer::REBALANCER_COMMAND, sub_matches)) => {
             rebalancer::call_sub_commands(sub_matches, config).await;
         }
+        Some((transaction::TRANSACTION_COMMAND, sub_matches)) => {
+            rebalancer::call_sub_commands(sub_matches, config).await;
+        }
         _ => panic!("command not registred"),
     }
 }
@@ -184,6 +196,13 @@ pub fn get_asset<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
     match args.value_of("asset") {
         Some(a) => config.assets.get(a),
         None => panic!("--asset not supported"),
+    }
+}
+
+pub fn get_txn_id<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
+    match args.value_of("txn_id") {
+        Some(a) => a
+        None => panic!("--txn_id not supported"),
     }
 }
 
