@@ -20,9 +20,16 @@ pub struct Asset {
     network_id: String,
     address: String,
     exchange_id: String,
+    slippage: f64,
 }
 
 impl Asset {
+    pub fn slippage_u256(&self, asset_decimals: u8) -> U256 {
+        //TODO: review u128
+        let qe = ((self.slippage / 100.0) * 10_f64.powf(asset_decimals.into())) as u128;
+        U256::from(qe)
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }

@@ -189,7 +189,7 @@ pub fn get_asset<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
 
 pub fn get_amount<'a>(args: &'a ArgMatches, asset_decimals: u8) -> U256 {
     //TODO: need to review usage from i128
-    match args.value_of("asset") {
+    match args.value_of("amount") {
         Some(a) => {
             //TODO: move it to a helper function
             let q = a.parse::<f64>().unwrap();
@@ -215,11 +215,11 @@ pub fn get_token_output<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Ass
 }
 
 pub fn get_slippage<'a>(args: &'a ArgMatches, asset_decimals: u8) -> U256 {
-    //TODO: review i128
+    //TODO: review u128
     match args.value_of("slippage") {
         Some(a) => {
             let q = a.parse::<f64>().unwrap();
-            let qe = ((q / 100.0) * 10_f64.powf(asset_decimals.into())) as i64;
+            let qe = ((q / 100.0) * 10_f64.powf(asset_decimals.into())) as u128;
             U256::from(qe)
         }
         None => panic!("missing slippage"),

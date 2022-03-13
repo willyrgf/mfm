@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use web3::types::U256;
 
 use super::{
     asset::{Asset, Assets},
@@ -27,9 +28,15 @@ pub struct Rebalancer {
     quoted_in: String,
     parking_asset_id: String,
     portfolio: Portfolio,
+    parking_asset_min_move: f64,
 }
 
 impl Rebalancer {
+    pub fn parking_asset_min_move_u256(&self, decimals: u8) -> U256 {
+        //TODO: review u128
+        let qe = (self.parking_asset_min_move * 10_f64.powf(decimals.into())) as u128;
+        U256::from(qe)
+    }
     pub fn name(&self) -> String {
         self.name.clone()
     }
@@ -69,8 +76,16 @@ impl Rebalancer {
         self.quoted_in.as_str()
     }
 
+    pub fn parking_asset_id(&self) -> &str {
+        self.parking_asset_id.as_str()
+    }
+
     pub fn get_quoted_asset<'a>(&self, config_assets: &'a Assets) -> &'a Asset {
         config_assets.get(self.quoted_in())
+    }
+
+    pub fn get_parking_asset<'a>(&self, config_assets: &'a Assets) -> &'a Asset {
+        config_assets.get(self.parking_asset_id())
     }
 
     pub fn get_wallet<'a>(&self, config: &'a Config) -> &'a Wallet {

@@ -132,7 +132,7 @@ impl Exchange {
         amount_min_out: U256,
         asset_path: Token,
     ) {
-        let valid_timestamp = self.get_valid_timestamp(300000);
+        let valid_timestamp = self.get_valid_timestamp(30000000);
         let estimate_gas = self
             .router_contract(client.clone())
             .estimate_gas(
@@ -176,12 +176,14 @@ impl Exchange {
         let nonce = from_wallet.nonce(client.clone()).await;
         log::debug!("swap_tokens_for_tokens(): nonce: {:?}", nonce);
 
+        let estimate_with_margin =
+            (estimate_gas * (U256::from(10000_i32) + U256::from(1000_i32))) / U256::from(10000_i32);
         let transaction_obj = TransactionParameters {
             nonce: Some(nonce),
             to: Some(self.as_router_address().unwrap()),
             value: U256::from(0_i32),
             gas_price: Some(gas_price),
-            gas: estimate_gas,
+            gas: estimate_with_margin,
             data: Bytes(func_data),
             ..Default::default()
         };
@@ -206,7 +208,7 @@ impl Exchange {
             .send_raw_transaction(signed_transaction.raw_transaction)
             .await
             .unwrap();
-        log::debug!("approve_spender(): tx_adress: {}", tx_address);
+        log::debug!("swap_tokens_for_tokens(): tx_adress: {}", tx_address);
     }
 }
 
