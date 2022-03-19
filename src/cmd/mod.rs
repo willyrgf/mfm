@@ -195,6 +195,9 @@ pub async fn call_sub_commands(matches: &ArgMatches, config: &Config) {
         Some((transaction::TRANSACTION_COMMAND, sub_matches)) => {
             transaction::call_sub_commands(sub_matches, config).await;
         }
+        Some((yield_farm::YIELD_FARM_COMMAND, sub_matches)) => {
+            yield_farm::call_sub_commands(sub_matches, config).await;
+        }
         Some((withdraw::WITHDRAW_COMMAND, sub_matches)) => {
             withdraw::call_sub_commands(sub_matches, config).await;
         }

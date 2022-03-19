@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
-use web3::{contract::Contract, transports::Http, types::Address};
+use web3::{
+    contract::Contract,
+    transports::Http,
+    types::{Address, U256},
+};
 
 use super::{
     network::{Network, Networks},
@@ -26,7 +30,7 @@ impl YieldFarm {
     }
 
     pub fn get_wallet<'a>(&self, config: &'a Config) -> &'a Wallet {
-        let wallet = config.wallets.get(self.network_id.as_str());
+        let wallet = config.wallets.get(self.wallet_id.as_str());
         wallet
     }
 
@@ -53,6 +57,15 @@ impl YieldFarm {
         let contract_address = self.as_address();
         let json_abi = self.abi_json_string();
         Contract::from_json(client.eth(), contract_address, json_abi.as_bytes()).unwrap()
+    }
+
+    pub async fn get_pending_rewards(&self, config: &Config, client: web3::Web3<Http>) -> U256 {
+        match self.operation.as_str() {
+            "posi_farm_bnb_posi" => {
+                posi_farm_bnb_posi::get_pending_rewards(config, &self, client.clone()).await
+            }
+            _ => panic!("operation not implemented {:?}", self.operation),
+        }
     }
 }
 
