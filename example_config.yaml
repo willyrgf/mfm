@@ -2,6 +2,10 @@ wallets:
   test-wallet:
     private_key: YOUR_PRIVATE_KEY
 
+withdraw_wallets:
+  test-wallet2:
+    address: YOUR_PUBLIC_ADDRESS
+
 networks:
   bsc:
     name: bsc
