@@ -4,11 +4,9 @@ use crate::config::asset::{Asset, Assets};
 use std::str::FromStr;
 use std::time::UNIX_EPOCH;
 use std::{collections::HashMap, time::SystemTime};
-use std::{thread, time};
 
 use rustc_hex::FromHexError;
 use serde::{Deserialize, Serialize};
-use web3::types::{TransactionReceipt, H256};
 use web3::{
     contract::{Contract, Options},
     ethabi::Token,
