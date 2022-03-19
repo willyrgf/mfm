@@ -20,7 +20,7 @@ use yield_farm::YieldFarms;
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Config {
-    pub wallets: Wallets,
+    pub wallets: wallet::WalletsConfig,
     pub withdraw_wallets: WithdrawWallets,
     pub assets: Assets,
     pub networks: Networks,
