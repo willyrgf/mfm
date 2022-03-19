@@ -5,6 +5,7 @@ pub mod rebalancer;
 pub mod route;
 pub mod wallet;
 pub mod withdraw_wallet;
+pub mod yield_farm;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +16,7 @@ use rebalancer::Rebalancers;
 use route::Routes;
 use wallet::Wallets;
 use withdraw_wallet::WithdrawWallets;
+use yield_farm::YieldFarms;
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Config {
@@ -25,6 +27,7 @@ pub struct Config {
     pub exchanges: Exchanges,
     pub routes: Routes,
     pub rebalancers: Rebalancers,
+    pub yield_farms: YieldFarms,
 }
 
 impl Config {
