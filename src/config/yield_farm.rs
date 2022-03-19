@@ -14,6 +14,7 @@ use super::{
 };
 
 pub mod posi_farm_bnb_posi;
+pub mod posi_farm_busd_posi;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct YieldFarm {
@@ -63,6 +64,9 @@ impl YieldFarm {
         match self.operation.as_str() {
             "posi_farm_bnb_posi" => {
                 posi_farm_bnb_posi::get_pending_rewards(config, &self, client.clone()).await
+            }
+            "posi_farm_busd_posi" => {
+                posi_farm_busd_posi::get_pending_rewards(config, &self, client.clone()).await
             }
             _ => panic!("operation not implemented {:?}", self.operation),
         }
