@@ -1,3 +1,4 @@
+use crate::cmd;
 use crate::config::asset::{Asset, Assets};
 
 use std::str::FromStr;
@@ -215,7 +216,7 @@ impl Exchange {
 
         log::debug!("swap_tokens_for_tokens(): tx_adress: {}", tx_address);
 
-        let receipt = wait_receipt(client.clone(), tx_address).await;
+        let receipt = cmd::wait_receipt(client.clone(), tx_address).await;
         log::debug!("receipt: {:?}", receipt);
     }
 }
@@ -225,21 +226,5 @@ pub struct Exchanges(HashMap<String, Exchange>);
 impl Exchanges {
     pub fn get(&self, key: &str) -> &Exchange {
         self.0.get(key).unwrap()
-    }
-}
-
-pub async fn wait_receipt(client: web3::Web3<Http>, tx_address: H256) -> TransactionReceipt {
-    loop {
-        match client.eth().transaction_receipt(tx_address).await {
-            Ok(Some(receipt)) => return receipt,
-            Ok(None) => {
-                thread::sleep(time::Duration::from_secs(5));
-                continue;
-            }
-            Err(e) => {
-                log::error!("wait_receipt() err: {:?}", e);
-                panic!()
-            }
-        }
     }
 }
