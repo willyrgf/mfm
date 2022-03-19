@@ -10,9 +10,12 @@ use web3::{
     types::{Address, Bytes, TransactionParameters, H160, U256},
 };
 
+use crate::cmd;
+
 use super::exchange::Exchange;
 use super::network::{Network, Networks};
 use super::wallet::Wallet;
+use super::withdraw_wallet::WithdrawWallet;
 use super::Config;
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Asset {
@@ -264,6 +267,73 @@ impl Asset {
             .await
             .unwrap();
         log::debug!("wrap(): tx_adress: {}", tx_address);
+    }
+
+    pub async fn withdraw(
+        &self,
+        client: web3::Web3<Http>,
+        wallet: &Wallet,
+        withdraw_wallet: &WithdrawWallet,
+        amount: U256,
+        gas_price: U256,
+    ) {
+        let estimate_gas = self
+            .contract(client.clone())
+            .estimate_gas(
+                "transfer",
+                (withdraw_wallet.as_address(), amount),
+                wallet.address(),
+                web3::contract::Options {
+                    gas_price: Some(gas_price),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        log::debug!("withdraw called estimate_gas: {:?}", estimate_gas);
+
+        let func_data = self
+            .contract(client.clone())
+            .abi()
+            .function("transfer")
+            .unwrap()
+            .encode_input(&[
+                Token::Address(withdraw_wallet.as_address()),
+                Token::Uint(amount),
+            ])
+            .unwrap();
+        log::debug!("withdraw(): func_data: {:?}", func_data);
+
+        let nonce = wallet.nonce(client.clone()).await;
+        log::debug!("withdraw(): nonce: {:?}", nonce);
+
+        let transaction_obj = TransactionParameters {
+            nonce: Some(nonce),
+            to: Some(self.as_address().unwrap()),
+            gas_price: Some(gas_price),
+            gas: estimate_gas,
+            data: Bytes(func_data),
+            ..Default::default()
+        };
+        log::debug!("withdraw(): transaction_obj: {:?}", transaction_obj);
+
+        let secret = wallet.secret();
+        let signed_transaction = client
+            .accounts()
+            .sign_transaction(transaction_obj, &secret)
+            .await
+            .unwrap();
+        log::debug!("withdraw(): signed_transaction: {:?}", signed_transaction);
+
+        let tx_address = client
+            .eth()
+            .send_raw_transaction(signed_transaction.raw_transaction)
+            .await
+            .unwrap();
+        log::debug!("withdraw(): tx_adress: {}", tx_address);
+
+        let receipt = cmd::wait_receipt(client.clone(), tx_address).await;
+        log::debug!("withdraw(): receipt: {:?}", receipt);
     }
 }
 

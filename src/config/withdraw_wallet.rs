@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
+use web3::types::Address;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct WithdrawWallet {
@@ -10,6 +12,10 @@ pub struct WithdrawWallet {
 impl WithdrawWallet {
     pub fn address(&self) -> String {
         self.address.clone()
+    }
+
+    pub fn as_address(&self) -> Address {
+        Address::from_str(&self.address()).unwrap()
     }
 }
 

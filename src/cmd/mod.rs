@@ -1,9 +1,15 @@
+use core::time;
+use std::thread;
+
 use crate::config::{
     asset::Asset, exchange::Exchange, network::Network, rebalancer::Rebalancer, wallet::Wallet,
-    Config,
+    withdraw_wallet::WithdrawWallet, Config,
 };
 use clap::{ArgMatches, Command};
-use web3::types::U256;
+use web3::{
+    transports::Http,
+    types::{TransactionReceipt, H256, U256},
+};
 
 pub mod allowance;
 pub mod approve;
@@ -11,6 +17,7 @@ pub mod balances;
 pub mod rebalancer;
 pub mod swap;
 pub mod transaction;
+pub mod withdraw;
 pub mod wrap;
 
 pub const CLI_NAME: &'static str = "mfm";
@@ -130,6 +137,30 @@ pub fn new() -> clap::Command<'static> {
                         .required(true),
                 )
         )
+        .subcommand(
+                    Command::new(withdraw::WITHDRAW_COMMAND)
+                        .about("Withdraw to a wallet")
+                        .arg(
+                            clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file")
+                                .required(true),
+                        )
+                .arg(
+                    clap::arg!(-n --"network" <bsc> "Network to wrap coin to token")
+                        .required(true),
+                )
+                .arg(
+                    clap::arg!(-t --"withdraw-wallet" <WITHDRAW_WALLET_NAME> "Withdraw wallet to receive the transfer")
+                        .required(true),
+                )
+                        .arg(
+                            clap::arg!(-a --"asset" <ASSET> "Asset to withdraw")
+                                .required(true)
+                        )
+                        .arg(
+                            clap::arg!(-v --"amount" <VALUE> "Amount to withdraw")
+                                .required(true)
+                        )
+                )
 }
 
 pub async fn call_sub_commands(matches: &ArgMatches, config: &Config) {
@@ -153,7 +184,10 @@ pub async fn call_sub_commands(matches: &ArgMatches, config: &Config) {
             rebalancer::call_sub_commands(sub_matches, config).await;
         }
         Some((transaction::TRANSACTION_COMMAND, sub_matches)) => {
-            rebalancer::call_sub_commands(sub_matches, config).await;
+            transaction::call_sub_commands(sub_matches, config).await;
+        }
+        Some((withdraw::WITHDRAW_COMMAND, sub_matches)) => {
+            withdraw::call_sub_commands(sub_matches, config).await;
         }
         _ => panic!("command not registred"),
     }
@@ -170,6 +204,9 @@ pub async fn run(cmd: clap::Command<'static>) {
 
     call_sub_commands(&cmd_matches, &config).await
 }
+
+//TODO: add constants to all keys in value_of
+//
 
 pub fn get_exchange<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Exchange {
     match args.value_of("exchange") {
@@ -249,5 +286,28 @@ pub fn get_rebalancer<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Rebal
     match args.value_of("name") {
         Some(i) => config.rebalancers.get(i),
         None => panic!("--name not supported"),
+    }
+}
+
+pub fn get_withdraw_wallet<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a WithdrawWallet {
+    match args.value_of("withdraw-wallet") {
+        Some(w) => config.withdraw_wallets.get(w),
+        None => panic!("--withdraw-wallet not supported"),
+    }
+}
+
+pub async fn wait_receipt(client: web3::Web3<Http>, tx_address: H256) -> TransactionReceipt {
+    loop {
+        match client.eth().transaction_receipt(tx_address).await {
+            Ok(Some(receipt)) => return receipt,
+            Ok(None) => {
+                thread::sleep(time::Duration::from_secs(5));
+                continue;
+            }
+            Err(e) => {
+                log::error!("wait_receipt() err: {:?}", e);
+                panic!()
+            }
+        }
     }
 }
