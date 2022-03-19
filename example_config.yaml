@@ -150,7 +150,9 @@ rebalancers:
     parking_asset_min_move: 0.01
 
 yield_farms:
-  test-yf:
+  test-posi-farm:
+    contract_name: position_stake_manager
+    address: 0x0c54b0b7d61de871db47c3ad3f69feb0f2c8db0b
     wallet_id: test-wallet
-    address: ADDRESS
-    operation: pending_harverst
+    network_id: bsc
+    operation: posi_farm_bnb_posi

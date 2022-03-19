@@ -3,7 +3,7 @@ use std::thread;
 
 use crate::config::{
     asset::Asset, exchange::Exchange, network::Network, rebalancer::Rebalancer, wallet::Wallet,
-    withdraw_wallet::WithdrawWallet, Config,
+    withdraw_wallet::WithdrawWallet, yield_farm::YieldFarm, Config,
 };
 use clap::{ArgMatches, Command};
 use web3::{
@@ -19,6 +19,7 @@ pub mod swap;
 pub mod transaction;
 pub mod withdraw;
 pub mod wrap;
+pub mod yield_farm;
 
 pub const CLI_NAME: &'static str = "mfm";
 
@@ -136,6 +137,14 @@ pub fn new() -> clap::Command<'static> {
                     clap::arg!(-n --"name" <REBALANCER_NAME> "Rebalancer name from config file")
                         .required(true),
                 )
+        )
+        .subcommand(
+            Command::new(yield_farm::YIELD_FARM_COMMAND)
+            .about("Haverst some YieldFarm")
+            .arg(
+                clap::arg!(-y --"yield-farm" <YIELD_FARM_NAME> "Yield farm name in config file")
+                    .required(true)
+            )
         )
         .subcommand(
                     Command::new(withdraw::WITHDRAW_COMMAND)
@@ -293,6 +302,13 @@ pub fn get_withdraw_wallet<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a 
     match args.value_of("withdraw-wallet") {
         Some(w) => config.withdraw_wallets.get(w),
         None => panic!("--withdraw-wallet not supported"),
+    }
+}
+
+pub fn get_yield_farm<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a YieldFarm {
+    match args.value_of("yield-farm") {
+        Some(w) => config.yield_farms.get(w),
+        None => panic!("--yield-farm not supported"),
     }
 }
 
