@@ -53,8 +53,30 @@ assets:
     exchange_id: pancake_swap_v2
     address: 0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c
     slippage: 2
+  cake:
+    name: cake
+    network_id: bsc
+    exchange_id: pancake_swap_v2
+    address: 0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82
+    slippage: 2
 
 routes:
+  busd-cake:
+    base: busd
+    quote: cake
+    path: []
+  cake-busd:
+    base: cake
+    quote: busd
+    path: []
+  busd-posi:
+    base: busd
+    quote: posi
+    path: []
+  posi-busd:
+    base: posi
+    quote: busd
+    path: []
   busd-btcb:
     base: busd
     quote: btcb
@@ -166,5 +188,14 @@ yield_farms:
     asset_id: posi
     network_id: bsc
     operation: posi_farm_busd_posi
+    min_rewards_required: 10
+    #quoted_asset_id: busd
+  auto-cake:
+    contract_name: pancake_swap_auto_cake_pool
+    address: 0xa80240eb5d7e05d3f250cf000eec0891d00b51cc
+    wallet_id: farm-wallet
+    asset_id: cake
+    network_id: bsc
+    operation: cake_auto_pool
     min_rewards_required: 10
     #quoted_asset_id: busd

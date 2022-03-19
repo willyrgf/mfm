@@ -9,6 +9,7 @@ use web3::{
 
 use super::{asset::Asset, network::Network, wallet::Wallet, Config};
 
+pub mod pancake_swap_auto_cake_pool;
 pub mod posi_farm_bnb_posi;
 pub mod posi_farm_busd_posi;
 pub mod position_stake_manager;
@@ -84,6 +85,10 @@ impl YieldFarm {
             "posi_farm_busd_posi" => {
                 posi_farm_busd_posi::get_pending_rewards(config, &self, client.clone()).await
             }
+            "cake_auto_pool" => {
+                pancake_swap_auto_cake_pool::get_pending_rewards(config, &self, client.clone())
+                    .await
+            }
             _ => panic!("operation not implemented {:?}", self.operation),
         }
     }
@@ -95,6 +100,9 @@ impl YieldFarm {
             }
             "posi_farm_busd_posi" => {
                 posi_farm_busd_posi::harvest(config, &self, client.clone()).await
+            }
+            "cake_auto_pool" => {
+                pancake_swap_auto_cake_pool::harvest(config, &self, client.clone()).await
             }
             _ => panic!("operation not implemented {:?}", self.operation),
         }
