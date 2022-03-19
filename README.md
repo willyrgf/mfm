@@ -28,6 +28,11 @@
  cargo run -- rebalancer -n test-rebalancer
 ```
 
+### run withdraw
+```
+cargo watch -x 'run -- withdraw --wallet test-wallet -t test-wallet2 -v 0.008 -a wbnb -n bsc'
+```
+
 # todo
 
 - [ ] add withdraw with wallets whilelist
