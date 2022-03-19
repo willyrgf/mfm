@@ -13,7 +13,6 @@ pub struct AssetBalances<'a> {
     asset_decimals: u8,
     percent: f64,
     balance: U256,
-    quoted_asset: &'a Asset,
     quoted_asset_decimals: u8,
     quoted_balance: U256,
 }
@@ -33,7 +32,6 @@ impl<'a> AssetBalances<'a> {
             balance: asset
                 .balance_of(client.clone(), rebalancer.get_wallet(config).address())
                 .await,
-            quoted_asset: quoted_asset,
             quoted_asset_decimals: quoted_asset.decimals(client.clone()).await,
             quoted_balance: asset
                 .balance_of_quoted_in(

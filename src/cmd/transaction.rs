@@ -5,7 +5,7 @@ pub const TRANSACTION_COMMAND: &'static str = "transaction";
 
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
     let network = cmd::get_network(args, config);
-    let client = network.get_web3_client_http();
+    let _client = network.get_web3_client_http();
 
     // let transaction_receipt = client.eth().transaction_receipt();
 
