@@ -62,46 +62,48 @@ impl<'a> AssetBalances<'a> {
     }
 }
 
-pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
-    let rebalancer = cmd::get_rebalancer(args, config);
-    log::debug!("rebalancer: {:?}", rebalancer);
+pub async fn get_assets_balances<'a>(
+    config: &'a config::Config,
+    rebalancer: &'a Rebalancer,
+    assets: &Vec<&'a Asset>,
+) -> Vec<AssetBalances<'a>> {
+    let assets_balances = futures::future::join_all(assets.iter().map(|&asset| {
+        let exchange = asset.get_exchange(config);
+        let client = exchange
+            .get_network(&config.networks)
+            .get_web3_client_http();
 
-    if !rebalancer.is_valid_portfolio_total_percentage() {
-        log::error!(
-            "rebalancer: {}, sum of portfolio percent should be 100, current is: {}",
-            rebalancer.name(),
-            rebalancer.total_percentage()
-        );
+        AssetBalances::new(client, config, rebalancer, asset)
+    }))
+    .await;
 
-        panic!()
-    }
+    assets_balances
+}
 
-    let assets = rebalancer.get_assets(&config.assets);
-
-    assets.iter().for_each(|&a| log::debug!("asset: {:?}", &a));
-
-    let assets_balances: Vec<AssetBalances> =
-        futures::future::join_all(assets.iter().map(|&asset| {
-            let exchange = asset.get_exchange(config);
-            let client = exchange
-                .get_network(&config.networks)
-                .get_web3_client_http();
-
-            AssetBalances::new(client, config, rebalancer, asset)
-        }))
-        .await;
-
-    log::debug!("assets_balances: {:?}", assets_balances);
-
-    // get balance per asset
-    // get balance quoted_in asset
-    // get total_balance
-
-    let total_quoted_balance: U256 = assets_balances
+pub fn get_total_quoted_balance(assets_balances: &Vec<AssetBalances>) -> U256 {
+    let total = assets_balances
         .iter()
         .fold(U256::from(0_i32), |acc, x| acc + x.quoted_balance);
-    log::debug!("total_quoted_balance: {:?}", total_quoted_balance);
 
+    total
+}
+
+pub async fn get_total_parking_balance(
+    parking_asset: &Asset,
+    from_wallet: &config::wallet::Wallet,
+    client: web3::Web3<Http>,
+) -> U256 {
+    parking_asset
+        .balance_of(client.clone(), from_wallet.address())
+        .await
+}
+
+pub async fn move_assets_to_parking<'a>(
+    total_quoted_balance: U256,
+    assets_balances: &Vec<AssetBalances<'a>>,
+    rebalancer: &Rebalancer,
+    config: &Config,
+) {
     let from_wallet = rebalancer.get_wallet(&config);
     let parking_asset = rebalancer.get_parking_asset(&config.assets);
     let parking_asset_exchange = parking_asset.get_exchange(&config);
@@ -109,7 +111,7 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
     let parking_asset_client = parking_asset_network.get_web3_client_http();
     let gas_price = parking_asset_client.eth().gas_price().await.unwrap();
     let parking_asset_decimals = parking_asset.decimals(parking_asset_client.clone()).await;
-    // move all balances to parking asset
+
     for ab in assets_balances.iter() {
         if ab.asset.name() == rebalancer.parking_asset_id() {
             continue;
@@ -159,12 +161,22 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
             )
             .await;
     }
+}
 
-    let total_parking_balance: U256 = parking_asset
-        .balance_of(parking_asset_client.clone(), from_wallet.address())
-        .await;
-    log::debug!("total_parking_balance: {}", total_parking_balance);
-    //move parking to assets
+pub async fn move_parking_to_assets<'a>(
+    total_parking_balance: U256,
+    assets_balances: &Vec<AssetBalances<'a>>,
+    rebalancer: &Rebalancer,
+    config: &Config,
+) {
+    let from_wallet = rebalancer.get_wallet(&config);
+    let parking_asset = rebalancer.get_parking_asset(&config.assets);
+    let parking_asset_exchange = parking_asset.get_exchange(&config);
+    let parking_asset_network = parking_asset_exchange.get_network(&config.networks);
+    let parking_asset_client = parking_asset_network.get_web3_client_http();
+    let gas_price = parking_asset_client.eth().gas_price().await.unwrap();
+    let parking_asset_decimals = parking_asset.decimals(parking_asset_client.clone()).await;
+
     for ab in assets_balances.iter() {
         if ab.asset.name() == rebalancer.parking_asset_id() {
             continue;
@@ -220,6 +232,54 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
             )
             .await;
     }
+}
+
+pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
+    let rebalancer = cmd::get_rebalancer(args, config);
+    log::debug!("rebalancer: {:?}", rebalancer);
+
+    if !rebalancer.is_valid_portfolio_total_percentage() {
+        log::error!(
+            "rebalancer: {}, sum of portfolio percent should be 100, current is: {}",
+            rebalancer.name(),
+            rebalancer.total_percentage()
+        );
+
+        panic!()
+    }
+
+    let assets = rebalancer.get_assets(&config.assets);
+    let assets_balances = get_assets_balances(&config, &rebalancer, &assets).await;
+    log::debug!("assets_balances: {:?}", assets_balances);
+
+    let total_quoted_balance: U256 = get_total_quoted_balance(&assets_balances);
+    log::debug!("total_quoted_balance: {:?}", total_quoted_balance);
+
+    let from_wallet = rebalancer.get_wallet(&config);
+    let parking_asset = rebalancer.get_parking_asset(&config.assets);
+    let parking_asset_exchange = parking_asset.get_exchange(&config);
+    let parking_asset_network = parking_asset_exchange.get_network(&config.networks);
+    let parking_asset_client = parking_asset_network.get_web3_client_http();
+    // move all balances to parking asset
+    move_assets_to_parking(
+        total_quoted_balance.clone(),
+        &assets_balances,
+        &rebalancer,
+        &config,
+    )
+    .await;
+
+    let total_parking_balance =
+        get_total_parking_balance(parking_asset, from_wallet, parking_asset_client).await;
+    log::debug!("total_parking_balance: {}", total_parking_balance);
+    //move parking to assets
+    move_parking_to_assets(
+        total_parking_balance,
+        &assets_balances,
+        &rebalancer,
+        &config,
+    )
+    .await;
     // calc how much we need for each asset
     // calc the diff of expect with current balance per asset
     // swap the balances of all assets to the parking_asset
