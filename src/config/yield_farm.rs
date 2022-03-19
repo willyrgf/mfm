@@ -7,7 +7,7 @@ use web3::{
     types::{Address, U256},
 };
 
-use super::{network::Network, wallet::Wallet, Config};
+use super::{asset::Asset, network::Network, wallet::Wallet, Config};
 
 pub mod posi_farm_bnb_posi;
 pub mod posi_farm_busd_posi;
@@ -20,12 +20,31 @@ pub struct YieldFarm {
     address: String,
     operation: String,
     network_id: String,
+    asset_id: String,
+    min_rewards_required: f64,
+    //quoted_asset_id: String,
 }
 
 impl YieldFarm {
     pub fn address(&self) -> String {
         self.address.clone()
     }
+
+    pub fn get_asset<'a>(&self, config: &'a Config) -> &'a Asset {
+        let asset = config.assets.get(self.asset_id.as_str());
+        asset
+    }
+
+    pub fn get_min_rewards_required_u256(&self, asset_decimals: u8) -> U256 {
+        let q = self.min_rewards_required;
+        let qe = (q * 10_f64.powf(asset_decimals.into())) as u128;
+        U256::from(qe)
+    }
+
+    // pub fn get_quoted_asset<'a>(&self, config: &'a Config) -> &'a Asset {
+    //     let quoted_asset = config.assets.get(self.quoted_asset_id.as_str());
+    //     quoted_asset
+    // }
 
     pub fn get_wallet<'a>(&self, config: &'a Config) -> &'a Wallet {
         let wallet = config.wallets.get(self.wallet_id.as_str());

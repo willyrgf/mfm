@@ -150,9 +150,21 @@ rebalancers:
     parking_asset_min_move: 0.01
 
 yield_farms:
-  test-posi-farm:
+  posi-farm-bnb-posi:
     contract_name: position_stake_manager
     address: 0x0c54b0b7d61de871db47c3ad3f69feb0f2c8db0b
-    wallet_id: test-wallet
+    wallet_id: farm-wallet
+    asset_id: posi
     network_id: bsc
     operation: posi_farm_bnb_posi
+    min_rewards_required: 10
+    #quoted_asset_id: busd
+  posi-farm-busd-posi:
+    contract_name: position_stake_manager
+    address: 0x0c54b0b7d61de871db47c3ad3f69feb0f2c8db0b
+    wallet_id: farm-wallet
+    asset_id: posi
+    network_id: bsc
+    operation: posi_farm_busd_posi
+    min_rewards_required: 10
+    #quoted_asset_id: busd
