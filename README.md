@@ -34,3 +34,4 @@
 - [ ] add harverst for yield farms
 - [ ] implement rebalancer threshold
 - [ ] implement a checker for token limit transfer (max-tx-amount)
+- [ ] implement a fallback to a bep20 abi
