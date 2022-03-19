@@ -27,3 +27,10 @@
 ```
  cargo run -- rebalancer -n test-rebalancer
 ```
+
+# todo
+
+- [ ] add withdraw with wallets whilelist
+- [ ] add harverst for yield farms
+- [ ] implement rebalancer threshold
+- [ ] implement a checker for token limit transfer (max-tx-amount)
