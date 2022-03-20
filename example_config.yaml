@@ -173,6 +173,7 @@ rebalancers:
 
 yield_farms:
   posi-farm-bnb-posi:
+    name: posi-farm-bnb-posi
     contract_name: position_stake_manager
     address: 0x0c54b0b7d61de871db47c3ad3f69feb0f2c8db0b
     wallet_id: farm-wallet
@@ -182,6 +183,7 @@ yield_farms:
     min_rewards_required: 10
     #quoted_asset_id: busd
   posi-farm-busd-posi:
+    name: posi-farm-busd-posi
     contract_name: position_stake_manager
     address: 0x0c54b0b7d61de871db47c3ad3f69feb0f2c8db0b
     wallet_id: farm-wallet
@@ -189,13 +191,12 @@ yield_farms:
     network_id: bsc
     operation: posi_farm_busd_posi
     min_rewards_required: 10
-    #quoted_asset_id: busd
   auto-cake:
+    name: auto-cake
     contract_name: pancake_swap_auto_cake_pool
     address: 0xa80240eb5d7e05d3f250cf000eec0891d00b51cc
     wallet_id: farm-wallet
     asset_id: cake
     network_id: bsc
     operation: cake_auto_pool
-    min_rewards_required: 10
-    #quoted_asset_id: busd
+    min_rewards_required: 1
