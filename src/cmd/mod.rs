@@ -243,6 +243,13 @@ pub fn get_asset<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
     }
 }
 
+pub fn get_quoted_asset<'a>(args: &'a ArgMatches, config: &'a Config) -> Option<&'a Asset> {
+    match args.value_of("quoted-asset") {
+        Some(a) => Some(config.assets.get(a)),
+        None => None,
+    }
+}
+
 pub fn get_force_harvest(args: &ArgMatches) -> bool {
     match args.value_of("force-harvest") {
         Some(a) => a.parse::<bool>().unwrap(),

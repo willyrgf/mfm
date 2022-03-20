@@ -117,3 +117,7 @@ pub async fn wait_receipt(client: web3::Web3<Http>, tx_address: H256) -> Transac
         }
     }
 }
+
+pub fn display_amount_to_float(amount: U256, decimals: u8) -> f64 {
+    amount.low_u64() as f64 / 10_u64.pow(decimals.into()) as f64
+}

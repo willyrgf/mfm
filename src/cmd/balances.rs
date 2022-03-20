@@ -1,4 +1,4 @@
-use crate::{cmd, config};
+use crate::{cmd, config, shared};
 use clap::ArgMatches;
 use prettytable::{cell, row, Table};
 //use web3::types::U256;
@@ -15,7 +15,7 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
         let decimals = asset.decimals(client.clone()).await;
         table.add_row(row![
             asset.name(),
-            balance_of.low_u64() as f64 / 10_u64.pow(decimals.into()) as f64,
+            shared::blockchain_utils::display_amount_to_float(balance_of, decimals),
             balance_of,
             decimals
         ]);

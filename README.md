@@ -64,6 +64,10 @@ cargo run -- withdraw --wallet test-wallet -t test-wallet2 -v 0.008 -a wbnb -n b
 cargo run -- yield-farm info
 ```
 
+```bash
+cargo run -- yield-farm info --quoted-asset busd
+```
+
 to filter by yield farm name
 
 ```bash
