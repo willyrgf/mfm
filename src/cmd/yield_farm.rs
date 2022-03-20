@@ -1,6 +1,6 @@
 use crate::{cmd, config};
 use clap::ArgMatches;
-use prettytable::*;
+use prettytable::{cell, row, Table};
 
 pub const YIELD_FARM_COMMAND: &str = "yield-farm";
 
