@@ -208,6 +208,12 @@ impl Exchange {
 pub struct Exchanges(HashMap<String, Exchange>);
 impl Exchanges {
     pub fn get(&self, key: &str) -> &Exchange {
-        self.0.get(key).unwrap()
+        match self.0.get(key) {
+            Some(e) => e,
+            None => {
+                log::error!("get(): key {} doesnt exist", key);
+                panic!();
+            }
+        }
     }
 }
