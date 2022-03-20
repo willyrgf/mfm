@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::str::FromStr;
 
 use rustc_hex::FromHexError;
@@ -54,12 +55,17 @@ impl Asset {
     }
 
     pub fn abi_path(&self) -> String {
-        format!(
+        let path = format!(
             "./res/assets/{}/{}/{}/abi.json",
             self.network_id.as_str(),
             self.exchange_id.as_str(),
             self.name.as_str()
-        )
+        );
+        let fallback_path = format!("./res/assets/{}/bep20_abi.json", self.network_id.as_str());
+        if Path::new(&path).exists() {
+            return path;
+        }
+        fallback_path
     }
 
     pub fn abi_json_string(&self) -> String {
