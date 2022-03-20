@@ -121,16 +121,22 @@ impl Rebalancer {
 
             threshold = 0,02 = 0,02
 
-            amount_in_cake
-
-            amount_pending
-            shares
-
             threshold-percent_diff = -0,28
         ```
     */
     pub fn reach_min_threshold(&self, assets_balances: &Vec<AssetBalances>) -> bool {
+        // TODO: abstract this
+        // abs for U256
+        let u256_abs_diff = |qap: U256, pn: U256| {
+            if qap.ge(&pn) {
+                qap - pn
+            } else {
+                pn - qap
+            }
+        };
+
         let quoted_asset_decimals = assets_balances.last().unwrap().quoted_asset_decimals();
+        let max_percent_u256 = U256::from(100_i32) * U256::exp10(quoted_asset_decimals.into());
 
         let thresold_percent_u256 = U256::from(
             (self.threshold_percent * 10_f64.powf(quoted_asset_decimals.into())) as u128,
@@ -145,41 +151,37 @@ impl Rebalancer {
             .fold(U256::from(0_i32), |acc, x| acc + x.quoted_balance());
         log::debug!("reach_min_threshold(): total_quoted: {:?}", total_quoted);
 
-        let sum_percent_diff = assets_balances.iter().fold(U256::from(0_i32), |acc, b| {
-            if b.quoted_balance() <= U256::from(0_i32) {
-                return acc;
-            }
+        let sum_percent_diff =
+            assets_balances
+                .iter()
+                .fold(U256::from(0_i32), |acc, asset_balances| {
+                    if asset_balances.quoted_balance() <= U256::from(0_i32) {
+                        return acc;
+                    }
 
-            let quoted_asset_percent = b.quoted_asset_percent_u256();
-            log::debug!(
-                "reach_min_threshold(): quoted_asset_percent_u256: {:?}",
-                quoted_asset_percent
-            );
+                    let quoted_asset_percent = asset_balances.quoted_asset_percent_u256();
+                    log::debug!(
+                        "reach_min_threshold(): quoted_asset_percent_u256: {:?}",
+                        quoted_asset_percent
+                    );
 
-            // percent_now_bnb = now_bnb_quoted/now_total = 0,4
-            let percent_now =
-                (b.quoted_balance() * U256::exp10(b.quoted_asset_decimals().into())) / total_quoted;
-            log::debug!("reach_min_threshold(): percent_now: {:?}", percent_now);
+                    let p_now = (asset_balances.quoted_balance()
+                        * U256::exp10(asset_balances.quoted_asset_decimals().into()))
+                        / total_quoted;
+                    log::debug!("reach_min_threshold(): p_now: {:?}", p_now);
 
-            // TODO: abstract this
-            // abs for U256
-            let p_diff = if quoted_asset_percent.ge(&percent_now) {
-                quoted_asset_percent - percent_now
-            } else {
-                percent_now - quoted_asset_percent
-            };
+                    let p_diff = u256_abs_diff(quoted_asset_percent, p_now);
 
-            log::debug!("reach_min_threshold(): p_diff: {:?}", p_diff);
-            acc + p_diff
-        });
+                    log::debug!("reach_min_threshold(): p_diff: {:?}", p_diff);
+                    acc + p_diff
+                });
 
         log::debug!(
             "reach_min_threshold(): sum_percent_diff: {:?}",
             sum_percent_diff
         );
 
-        let percent_diff =
-            (U256::from(100_i32) * U256::exp10(quoted_asset_decimals.into())) - sum_percent_diff;
+        let percent_diff = max_percent_u256 - sum_percent_diff;
         log::debug!("reach_min_threshold(): percent_diff: {:?}", percent_diff);
 
         percent_diff.gt(&thresold_percent_u256)

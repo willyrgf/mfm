@@ -10,7 +10,7 @@ use web3::{
     types::{Address, Bytes, TransactionParameters, H160, U256},
 };
 
-use crate::{cmd, shared};
+use crate::shared;
 
 use super::exchange::Exchange;
 use super::network::{Network, Networks};
