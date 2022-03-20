@@ -108,44 +108,26 @@ pub async fn harvest(config: &Config, yield_farm: &YieldFarm, client: web3::Web3
     .await;
     log::debug!("harvest called estimate_gas: {:?}", estimate_gas);
 
-    let func_data = yield_farm
-        .contract(client.clone())
-        .abi()
-        .function("withdraw")
-        .unwrap()
-        .encode_input(&[Token::Uint(pending_shares)])
-        .unwrap();
+    let func_data = shared::blockchain_utils::generate_func_data(
+        &contract,
+        "withdraw",
+        &[Token::Uint(pending_shares)],
+    );
     log::debug!("harvest(): func_data: {:?}", func_data);
 
     let nonce = from_wallet.nonce(client.clone()).await;
     log::debug!("harvest(): nonce: {:?}", nonce);
 
-    let transaction_obj = TransactionParameters {
-        nonce: Some(nonce),
-        to: Some(yield_farm.as_address()),
-        value: U256::from(0_i32),
-        gas_price: Some(gas_price),
-        gas: estimate_gas,
-        data: Bytes(func_data),
-        ..Default::default()
-    };
+    let transaction_obj = shared::blockchain_utils::build_transaction_params(
+        nonce,
+        yield_farm.as_address(),
+        U256::from(0_i32),
+        gas_price,
+        estimate_gas,
+        Bytes(func_data),
+    );
     log::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
 
-    let secret = from_wallet.secret();
-    let signed_transaction = client
-        .accounts()
-        .sign_transaction(transaction_obj, &secret)
-        .await
-        .unwrap();
-    log::debug!("harvest(): signed_transaction: {:?}", signed_transaction);
-
-    let tx_address = client
-        .eth()
-        .send_raw_transaction(signed_transaction.raw_transaction)
-        .await
-        .unwrap();
-    log::debug!("harvest(): tx_adress: {}", tx_address);
-
-    let receipt = cmd::wait_receipt(client.clone(), tx_address).await;
-    log::debug!("receipt: {:?}", receipt);
+    shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
+        .await;
 }
