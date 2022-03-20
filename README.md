@@ -37,7 +37,6 @@ cargo watch -x 'run -- withdraw --wallet test-wallet -t test-wallet2 -v 0.008 -a
 
 - [x] add withdraw with wallets whilelist
 - [x] add harverst for yield farms
-- [ ] implement rebalancer threshold
+- [x] implement rebalancer threshold
 - [ ] implement a checker for token limit transfer (max-tx-amount)
 - [ ] implement a fallback to a bep20 abi
-- [ ] implement 
