@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use web3::types::U256;
 
+use crate::cmd::rebalancer::AssetBalances;
+
 use super::{
     asset::{Asset, Assets},
     wallet::Wallet,
@@ -90,6 +92,97 @@ impl Rebalancer {
 
     pub fn get_wallet<'a>(&self, config: &'a Config) -> &'a Wallet {
         config.wallets.get(&self.wallet_id)
+    }
+
+    pub fn threshold_percent(&self) -> f64 {
+        self.threshold_percent
+    }
+
+    /*
+        Returns true if the percentual difference between current portfolio tokes amount
+        and the expected.
+
+        A algorithm to get percent diff between current and expected portfolio tokens:
+        ```numi.app
+            each_percent=0,25 = 0,25
+
+            now_btc_quoted=250 = 250
+            now_eth_quoted=250 = 250
+            now_anonq_quoted=250 = 250
+            now_bnb_quoted=500 = 500
+            now_total=now_btc_quoted+now_eth_quoted+now_anonq_quoted+now_bnb_quoted = 1.250
+
+            percent_now_btc = now_btc_quoted/now_total = 0,2
+            percent_now_eth = now_eth_quoted/now_total = 0,2
+            percent_now_anonq = now_anonq_quoted/now_total = 0,2
+            percent_now_bnb = now_bnb_quoted/now_total = 0,4
+
+            percent_diff=abs(percent_now_btc-each_percent)+abs(percent_now_eth-each_percent)+abs(percent_now_anonq-each_percent)+abs(percent_now_bnb-each_percent) = 0,3
+
+            threshold = 0,02 = 0,02
+
+            amount_in_cake
+
+            amount_pending
+            shares
+
+            threshold-percent_diff = -0,28
+        ```
+    */
+    pub fn reach_min_threshold(&self, assets_balances: &Vec<AssetBalances>) -> bool {
+        let quoted_asset_decimals = assets_balances.last().unwrap().quoted_asset_decimals();
+
+        let thresold_percent_u256 = U256::from(
+            (self.threshold_percent * 10_f64.powf(quoted_asset_decimals.into())) as u128,
+        );
+        log::debug!(
+            "reach_min_threshold(): thresold_percent_u256: {:?}",
+            thresold_percent_u256
+        );
+
+        let total_quoted = assets_balances
+            .iter()
+            .fold(U256::from(0_i32), |acc, x| acc + x.quoted_balance());
+        log::debug!("reach_min_threshold(): total_quoted: {:?}", total_quoted);
+
+        let sum_percent_diff = assets_balances.iter().fold(U256::from(0_i32), |acc, b| {
+            if b.quoted_balance() <= U256::from(0_i32) {
+                return acc;
+            }
+
+            let quoted_asset_percent = b.quoted_asset_percent_u256();
+            log::debug!(
+                "reach_min_threshold(): quoted_asset_percent_u256: {:?}",
+                quoted_asset_percent
+            );
+
+            // percent_now_bnb = now_bnb_quoted/now_total = 0,4
+            let percent_now =
+                (b.quoted_balance() * U256::exp10(b.quoted_asset_decimals().into())) / total_quoted;
+            log::debug!("reach_min_threshold(): percent_now: {:?}", percent_now);
+
+            // TODO: abstract this
+            // abs for U256
+            let p_diff = if quoted_asset_percent.ge(&percent_now) {
+                quoted_asset_percent - percent_now
+            } else {
+                percent_now - quoted_asset_percent
+            };
+
+            log::debug!("reach_min_threshold(): p_diff: {:?}", p_diff);
+            acc + p_diff
+        });
+
+        log::debug!(
+            "reach_min_threshold(): sum_percent_diff: {:?}",
+            sum_percent_diff
+        );
+
+        let percent_diff =
+            (U256::from(100_i32) * U256::exp10(quoted_asset_decimals.into())) - sum_percent_diff;
+        log::debug!("reach_min_threshold(): percent_diff: {:?}", percent_diff);
+
+        percent_diff.gt(&thresold_percent_u256)
     }
 }
 
