@@ -3,7 +3,7 @@ use crate::{
     config::{self, asset::Asset, rebalancer::Rebalancer, Config},
 };
 use clap::ArgMatches;
-use web3::{transports::Http, types::U256};
+use web3::{ethabi::Token, transports::Http, types::U256};
 
 pub const REBALANCER_COMMAND: &str = "rebalancer";
 
@@ -128,14 +128,12 @@ pub async fn move_assets_to_parking<'a>(
         let network = exchange.get_network(&config.networks);
         let client = network.get_web3_client_http();
         let parking_slip = parking_asset.slippage_u256(parking_asset_decimals);
-        let parking_route = config.routes.search(ab.asset, parking_asset);
+        let parking_asset_path = exchange
+            .build_route_for(config, client.clone(), ab.asset, parking_asset)
+            .await;
 
         let parking_amount_out: U256 = exchange
-            .get_amounts_out(
-                client.clone(),
-                ab.balance,
-                parking_route.build_path(&config.assets),
-            )
+            .get_amounts_out(client.clone(), ab.balance, parking_asset_path.clone())
             .await
             .last()
             .unwrap()
@@ -158,6 +156,11 @@ pub async fn move_assets_to_parking<'a>(
             );
             continue;
         }
+        let parking_asset_path_tokens: Vec<Token> = parking_asset_path
+            .clone()
+            .into_iter()
+            .map(|p| Token::Address(p))
+            .collect::<Vec<_>>();
         exchange
             .swap_tokens_for_tokens(
                 client.clone(),
@@ -165,7 +168,7 @@ pub async fn move_assets_to_parking<'a>(
                 gas_price,
                 ab.balance,
                 parking_amount_out_slip,
-                parking_route.build_path_using_tokens(&config.assets),
+                Token::Array(parking_asset_path_tokens),
             )
             .await;
     }
@@ -192,20 +195,16 @@ pub async fn move_parking_to_assets<'a>(
         let exchange = ab.asset.get_exchange(config);
         let network = exchange.get_network(&config.networks);
         let client = network.get_web3_client_http();
-        let asset_route = config.routes.search(parking_asset, ab.asset);
-        log::debug!("asset_route: {:?}", asset_route);
+        let asset_route = exchange
+            .build_route_for(config, client.clone(), parking_asset, ab.asset)
+            .await;
         let parking_slip = parking_asset.slippage_u256(ab.asset_decimals);
         let parking_amount =
             ab.desired_parking_to_move(total_parking_balance, parking_asset_decimals);
         log::debug!("desired_parking_to_move: {}", parking_amount);
-        log::debug!("build_path: {:?}", asset_route.build_path(&config.assets));
 
         let asset_amount_out: U256 = exchange
-            .get_amounts_out(
-                client.clone(),
-                parking_amount,
-                asset_route.build_path(&config.assets),
-            )
+            .get_amounts_out(client.clone(), parking_amount, asset_route.clone())
             .await
             .last()
             .unwrap()
@@ -229,6 +228,11 @@ pub async fn move_parking_to_assets<'a>(
             );
             continue;
         }
+        let asset_route_token: Vec<Token> = asset_route
+            .clone()
+            .into_iter()
+            .map(|p| Token::Address(p))
+            .collect::<Vec<_>>();
         exchange
             .swap_tokens_for_tokens(
                 client.clone(),
@@ -236,7 +240,7 @@ pub async fn move_parking_to_assets<'a>(
                 gas_price,
                 parking_amount,
                 asset_amount_out_slip,
-                asset_route.build_path_using_tokens(&config.assets),
+                Token::Array(asset_route_token),
             )
             .await;
     }

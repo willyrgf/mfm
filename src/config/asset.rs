@@ -117,8 +117,9 @@ impl Asset {
             return base_balance;
         }
 
-        let route = config.routes.search(self, quoted);
-        let assets_path = route.build_path(&config.assets);
+        let assets_path = exchange
+            .build_route_for(config, client.clone(), &self, quoted)
+            .await;
 
         exchange
             .get_amounts_out(client.clone(), base_balance, assets_path)

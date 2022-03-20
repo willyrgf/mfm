@@ -2,7 +2,6 @@ pub mod asset;
 pub mod exchange;
 pub mod network;
 pub mod rebalancer;
-pub mod route;
 pub mod wallet;
 pub mod withdraw_wallet;
 pub mod yield_farm;
@@ -13,7 +12,6 @@ use asset::Assets;
 use exchange::Exchanges;
 use network::Networks;
 use rebalancer::Rebalancers;
-use route::Routes;
 use wallet::Wallets;
 use withdraw_wallet::WithdrawWallets;
 use yield_farm::YieldFarms;
@@ -25,7 +23,6 @@ pub struct Config {
     pub assets: Assets,
     pub networks: Networks,
     pub exchanges: Exchanges,
-    pub routes: Routes,
     pub rebalancers: Rebalancers,
     pub yield_farms: YieldFarms,
 }
