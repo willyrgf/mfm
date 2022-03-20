@@ -1,5 +1,5 @@
-use crate::cmd;
 use crate::config::asset::{Asset, Assets};
+use crate::{cmd, shared};
 
 use std::str::FromStr;
 use std::time::UNIX_EPOCH;
@@ -195,27 +195,12 @@ impl Exchange {
             transaction_obj
         );
 
-        let secret = from_wallet.secret();
-        let signed_transaction = client
-            .accounts()
-            .sign_transaction(transaction_obj, &secret)
-            .await
-            .unwrap();
-        log::debug!(
-            "swap_tokens_for_tokens(): signed_transaction: {:?}",
-            signed_transaction
-        );
-
-        let tx_address = client
-            .eth()
-            .send_raw_transaction(signed_transaction.raw_transaction)
-            .await
-            .unwrap();
-
-        log::debug!("swap_tokens_for_tokens(): tx_adress: {}", tx_address);
-
-        let receipt = cmd::wait_receipt(client.clone(), tx_address).await;
-        log::debug!("receipt: {:?}", receipt);
+        shared::blockchain_utils::sign_send_and_wait_txn(
+            client.clone(),
+            transaction_obj,
+            from_wallet,
+        )
+        .await;
     }
 }
 
