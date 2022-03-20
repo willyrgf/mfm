@@ -21,7 +21,7 @@ pub mod withdraw;
 pub mod wrap;
 pub mod yield_farm;
 
-pub const CLI_NAME: &'static str = "mfm";
+pub const CLI_NAME: &str = "mfm";
 
 pub fn new() -> clap::Command<'static> {
     Command::new(CLI_NAME)
@@ -253,14 +253,14 @@ pub fn get_asset<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
     }
 }
 
-pub fn get_txn_id<'a>(args: &'a ArgMatches) -> &'a str {
+pub fn get_txn_id(args: &ArgMatches) -> &str {
     match args.value_of("txn_id") {
         Some(a) => a,
         None => panic!("--txn_id not supported"),
     }
 }
 
-pub fn get_amount<'a>(args: &'a ArgMatches, asset_decimals: u8) -> U256 {
+pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> U256 {
     //TODO: need to review usage from i128
     match args.value_of("amount") {
         Some(a) => {
@@ -287,7 +287,7 @@ pub fn get_token_output<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Ass
     }
 }
 
-pub fn get_slippage<'a>(args: &'a ArgMatches, asset_decimals: u8) -> U256 {
+pub fn get_slippage(args: &ArgMatches, asset_decimals: u8) -> U256 {
     //TODO: review u128
     match args.value_of("slippage") {
         Some(a) => {

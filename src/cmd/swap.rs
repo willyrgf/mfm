@@ -2,7 +2,7 @@ use crate::{cmd, config};
 use clap::ArgMatches;
 use web3::types::U256;
 
-pub const SWAP_COMMAND: &'static str = "swap";
+pub const SWAP_COMMAND: &str = "swap";
 
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
     let exchange = cmd::get_exchange(args, config);

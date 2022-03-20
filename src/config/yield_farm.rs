@@ -80,14 +80,13 @@ impl YieldFarm {
     pub async fn get_pending_rewards(&self, config: &Config, client: web3::Web3<Http>) -> U256 {
         match self.operation.as_str() {
             "posi_farm_bnb_posi" => {
-                posi_farm_bnb_posi::get_pending_rewards(config, &self, client.clone()).await
+                posi_farm_bnb_posi::get_pending_rewards(config, self, client.clone()).await
             }
             "posi_farm_busd_posi" => {
-                posi_farm_busd_posi::get_pending_rewards(config, &self, client.clone()).await
+                posi_farm_busd_posi::get_pending_rewards(config, self, client.clone()).await
             }
             "cake_auto_pool" => {
-                pancake_swap_auto_cake_pool::get_pending_rewards(config, &self, client.clone())
-                    .await
+                pancake_swap_auto_cake_pool::get_pending_rewards(config, self, client.clone()).await
             }
             _ => panic!("operation not implemented {:?}", self.operation),
         }
@@ -95,14 +94,12 @@ impl YieldFarm {
 
     pub async fn harvest(&self, config: &Config, client: web3::Web3<Http>) {
         match self.operation.as_str() {
-            "posi_farm_bnb_posi" => {
-                posi_farm_bnb_posi::harvest(config, &self, client.clone()).await
-            }
+            "posi_farm_bnb_posi" => posi_farm_bnb_posi::harvest(config, self, client.clone()).await,
             "posi_farm_busd_posi" => {
-                posi_farm_busd_posi::harvest(config, &self, client.clone()).await
+                posi_farm_busd_posi::harvest(config, self, client.clone()).await
             }
             "cake_auto_pool" => {
-                pancake_swap_auto_cake_pool::harvest(config, &self, client.clone()).await
+                pancake_swap_auto_cake_pool::harvest(config, self, client.clone()).await
             }
             _ => panic!("operation not implemented {:?}", self.operation),
         }

@@ -1,13 +1,11 @@
-use std::str::FromStr;
 use web3::{
     contract::{Contract, Options},
     ethabi::Token,
     transports::Http,
-    types::{Address, Bytes, TransactionParameters, U256},
+    types::{Bytes, U256},
 };
 
 use crate::{
-    cmd,
     config::{wallet::Wallet, Config},
     shared,
 };
@@ -59,13 +57,13 @@ pub async fn get_pending_rewards_amounts(
     asset_decimals: u8,
 ) -> (U256, U256, U256) {
     let price_per_full_share: U256 = get_price_per_full_share(contract.clone()).await;
-    let total_pending_cake_rewards: U256 = get_total_pending_cake_rewards(contract.clone()).await;
+    // let total_pending_cake_rewards: U256 = get_total_pending_cake_rewards(contract.clone()).await;
     let (shares, _, cake_at_last_user_action, _): (U256, U256, U256, U256) =
         get_user_info(contract.clone(), wallet).await;
     let amount_in_cake = (shares * price_per_full_share) / U256::exp10(asset_decimals.into());
     let pending_rewards = amount_in_cake - cake_at_last_user_action;
     let pending_shares =
-        ((pending_rewards * U256::exp10(asset_decimals.into())) / price_per_full_share);
+        (pending_rewards * U256::exp10(asset_decimals.into())) / price_per_full_share;
 
     (pending_shares, pending_rewards, amount_in_cake)
 }
@@ -81,7 +79,7 @@ pub async fn get_pending_rewards(
     let wallet = yield_farm.get_wallet(config);
 
     let (_, pending_rewards, _): (U256, U256, U256) =
-        get_pending_rewards_amounts(&contract, &wallet, asset_decimals).await;
+        get_pending_rewards_amounts(&contract, wallet, asset_decimals).await;
 
     pending_rewards
 }
@@ -92,7 +90,7 @@ pub async fn harvest(config: &Config, yield_farm: &YieldFarm, client: web3::Web3
     let contract = yield_farm.contract(client.clone());
     let from_wallet = yield_farm.get_wallet(config);
     let (pending_shares, _, _): (U256, U256, U256) =
-        get_pending_rewards_amounts(&contract, &from_wallet, asset_decimals).await;
+        get_pending_rewards_amounts(&contract, from_wallet, asset_decimals).await;
 
     let gas_price = client.eth().gas_price().await.unwrap();
     let estimate_gas = shared::blockchain_utils::estimate_gas(

@@ -1,4 +1,4 @@
-use web3::{contract::Options, transports::Http, types::U256};
+use web3::{transports::Http, types::U256};
 
 use crate::config::Config;
 

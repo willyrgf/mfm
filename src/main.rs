@@ -1,4 +1,3 @@
-#[macro_use]
 extern crate prettytable;
 use env_logger::Env;
 use mfm::cmd;

@@ -1,7 +1,7 @@
 use web3::{transports::Http, types::U256};
 
 use super::position_stake_manager;
-use crate::{cmd, config::Config};
+use crate::config::Config;
 
 use super::YieldFarm;
 

@@ -1,7 +1,7 @@
 use crate::{cmd, config};
 use clap::ArgMatches;
 
-pub const ALLOWANCE_COMMAND: &'static str = "allowance";
+pub const ALLOWANCE_COMMAND: &str = "allowance";
 
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
     let exchange = cmd::get_exchange(args, config);

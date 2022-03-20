@@ -2,7 +2,7 @@ use crate::{cmd, config};
 use clap::ArgMatches;
 use prettytable::*;
 
-pub const YIELD_FARM_COMMAND: &'static str = "yield-farm";
+pub const YIELD_FARM_COMMAND: &str = "yield-farm";
 
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
     let yield_farm = cmd::get_yield_farm(args, config);

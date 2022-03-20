@@ -1,5 +1,5 @@
 use crate::config::asset::{Asset, Assets};
-use crate::{cmd, shared};
+use crate::shared;
 
 use std::str::FromStr;
 use std::time::UNIX_EPOCH;
@@ -114,9 +114,7 @@ impl Exchange {
     fn get_valid_timestamp(&self, future_millis: u128) -> u128 {
         let start = SystemTime::now();
         let since_epoch = start.duration_since(UNIX_EPOCH).unwrap();
-        let time_millis = since_epoch.as_millis().checked_add(future_millis).unwrap();
-
-        time_millis
+        since_epoch.as_millis().checked_add(future_millis).unwrap()
     }
 
     pub fn get_network<'a>(&self, networks: &'a Networks) -> &'a Network {

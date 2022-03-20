@@ -3,13 +3,13 @@ use clap::ArgMatches;
 use prettytable::*;
 //use web3::types::U256;
 
-pub const BALANCES_COMMAND: &'static str = "balances";
+pub const BALANCES_COMMAND: &str = "balances";
 
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
     let wallet = cmd::get_wallet(args, config);
     let mut table = Table::new();
     table.add_row(row!["Asset", "Balance", "Decimals"]);
-    for (_, asset) in config.assets.hashmap() {
+    for asset in config.assets.hashmap().values() {
         let client = asset.get_network(&config.networks).get_web3_client_http();
         let balance_of = asset.balance_of(client.clone(), wallet.address()).await;
         table.add_row(row![

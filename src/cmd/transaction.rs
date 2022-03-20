@@ -1,7 +1,7 @@
 use crate::{cmd, config};
 use clap::ArgMatches;
 
-pub const TRANSACTION_COMMAND: &'static str = "transaction";
+pub const TRANSACTION_COMMAND: &str = "transaction";
 
 //TODO: finish it
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {

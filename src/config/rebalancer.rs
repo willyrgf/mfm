@@ -124,7 +124,7 @@ impl Rebalancer {
             threshold-percent_diff = -0,28
         ```
     */
-    pub fn reach_min_threshold(&self, assets_balances: &Vec<AssetBalances>) -> bool {
+    pub fn reach_min_threshold(&self, assets_balances: &[AssetBalances]) -> bool {
         // TODO: abstract this
         // abs for U256
         let u256_abs_diff = |qap: U256, pn: U256| {

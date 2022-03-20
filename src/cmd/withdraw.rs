@@ -1,7 +1,7 @@
 use crate::{cmd, config};
 use clap::ArgMatches;
 
-pub const WITHDRAW_COMMAND: &'static str = "withdraw";
+pub const WITHDRAW_COMMAND: &str = "withdraw";
 
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
     let wallet = cmd::get_wallet(args, config);

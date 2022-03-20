@@ -2,10 +2,7 @@ use core::time;
 use std::thread;
 
 use web3::{
-    contract::{
-        tokens::{Tokenizable, Tokenize},
-        Contract, Options,
-    },
+    contract::{tokens::Tokenize, Contract, Options},
     ethabi::Token,
     transports::Http,
     types::{
@@ -55,17 +52,15 @@ pub fn build_transaction_params(
     estimate_gas: U256,
     func_data: Bytes,
 ) -> TransactionParameters {
-    let transaction_obj = TransactionParameters {
+    TransactionParameters {
         nonce: Some(nonce),
         to: Some(to),
-        value: value,
+        value,
         gas_price: Some(gas_price),
         gas: estimate_gas,
         data: func_data,
         ..Default::default()
-    };
-
-    transaction_obj
+    }
 }
 
 pub async fn sign_transaction(

@@ -2,7 +2,7 @@ use crate::{cmd, config};
 use clap::ArgMatches;
 use web3::types::U256;
 
-pub const WRAP_COMMAND: &'static str = "wrap";
+pub const WRAP_COMMAND: &str = "wrap";
 
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
     let network = cmd::get_network(args, config);

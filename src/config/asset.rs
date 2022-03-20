@@ -7,7 +7,7 @@ use web3::ethabi::Token;
 use web3::{
     contract::{Contract, Options},
     transports::Http,
-    types::{Address, Bytes, TransactionParameters, H160, U256},
+    types::{Address, Bytes, H160, U256},
 };
 
 use crate::shared;

@@ -1,7 +1,7 @@
 use crate::{cmd, config};
 use clap::ArgMatches;
 
-pub const APPROVE_COMMAND: &'static str = "approve";
+pub const APPROVE_COMMAND: &str = "approve";
 
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
     let exchange = cmd::get_exchange(args, config);
