@@ -1,6 +1,7 @@
-use crate::{cmd, config};
+use crate::{cmd, config, shared};
 use clap::ArgMatches;
-use web3::types::U256;
+use prettytable::{cell, row, Table};
+use web3::{ethabi::Token, types::U256};
 
 pub const SWAP_COMMAND: &str = "swap";
 
@@ -22,11 +23,17 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
     let amount_in = cmd::get_amount(args, input_token_decimals);
     let slippage = cmd::get_slippage(args, output_token_decimals);
 
-    let asset_path = config.routes.search(input_token, output_token);
-    let path = asset_path.build_path(&config.assets);
-    let path_token = asset_path.build_path_using_tokens(&config.assets);
+    //let asset_path = config.routes.search(input_token, output_token);
+    let asset_path = exchange
+        .build_route_for(config, client.clone(), input_token, output_token)
+        .await;
+    let path_token: Vec<Token> = asset_path
+        .clone()
+        .into_iter()
+        .map(|p| Token::Address(p))
+        .collect::<Vec<_>>();
     let amount_min_out: U256 = exchange
-        .get_amounts_out(client.clone(), amount_in, path.clone())
+        .get_amounts_out(client.clone(), amount_in, asset_path.clone())
         .await
         .last()
         .unwrap()
@@ -46,7 +53,24 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
             gas_price,
             amount_in,
             amount_out_slippage,
-            path_token,
+            Token::Array(path_token),
         )
         .await;
+    let mut table = Table::new();
+    table.add_row(row![
+        "From Asset",
+        "From Asset Amount",
+        "To Asset",
+        "To Asset Amount",
+    ]);
+    table.add_row(row![
+        input_token.name(),
+        shared::blockchain_utils::display_amount_to_float(amount_in, input_token_decimals),
+        output_token.name(),
+        shared::blockchain_utils::display_amount_to_float(
+            amount_out_slippage,
+            output_token_decimals
+        ),
+    ]);
+    table.printstd();
 }
