@@ -139,17 +139,7 @@ pub fn new() -> clap::Command<'static> {
                 )
         )
         .subcommand(
-            Command::new(yield_farm::YIELD_FARM_COMMAND)
-            .about("Haverst some YieldFarm")
-            .arg(
-                clap::arg!(-y --"yield-farm" <YIELD_FARM_NAME> "Yield farm name in config file")
-                    .required(true)
-            )
-            .arg(
-                clap::arg!(-p --"only-view-pending-rewards" <true_false> "If true only show pending rewards")
-                    .required(false)
-                    .default_value("false")
-            )
+            yield_farm::generate_cmd()
         )
         .subcommand(
                     Command::new(withdraw::WITHDRAW_COMMAND)
@@ -250,6 +240,13 @@ pub fn get_asset<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
     match args.value_of("asset") {
         Some(a) => config.assets.get(a),
         None => panic!("--asset not supported"),
+    }
+}
+
+pub fn get_force_harvest(args: &ArgMatches) -> bool {
+    match args.value_of("force-harvest") {
+        Some(a) => a.parse::<bool>().unwrap(),
+        None => panic!("--force-harvest supported"),
     }
 }
 

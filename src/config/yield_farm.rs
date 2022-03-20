@@ -16,6 +16,7 @@ pub mod position_stake_manager;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct YieldFarm {
+    name: String,
     contract_name: String,
     wallet_id: String,
     address: String,
@@ -27,6 +28,9 @@ pub struct YieldFarm {
 }
 
 impl YieldFarm {
+    pub fn name(&self) -> &String {
+        &self.name
+    }
     pub fn address(&self) -> String {
         self.address.clone()
     }
@@ -110,6 +114,9 @@ impl YieldFarm {
 pub struct YieldFarms(HashMap<String, YieldFarm>);
 
 impl YieldFarms {
+    pub fn hashmap(&self) -> &HashMap<String, YieldFarm> {
+        &self.0
+    }
     pub fn get(&self, key: &str) -> &YieldFarm {
         self.0.get(key).unwrap()
     }
