@@ -1,5 +1,6 @@
 use crate::{cmd, config};
 use clap::ArgMatches;
+use prettytable::*;
 
 pub const YIELD_FARM_COMMAND: &'static str = "yield-farm";
 
@@ -22,4 +23,9 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
         log::info!("harvesting yield farm: {:?}", yield_farm);
         yield_farm.harvest(config, client.clone()).await;
     }
+
+    let mut table = Table::new();
+
+    table.add_row(row!["Amount in pending rewards", pending_rewards]);
+    table.printstd();
 }

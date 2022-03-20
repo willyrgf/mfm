@@ -145,6 +145,11 @@ pub fn new() -> clap::Command<'static> {
                 clap::arg!(-y --"yield-farm" <YIELD_FARM_NAME> "Yield farm name in config file")
                     .required(true)
             )
+            .arg(
+                clap::arg!(-p --"only-view-pending-rewards" <true_false> "If true only show pending rewards")
+                    .required(false)
+                    .default_value("false")
+            )
         )
         .subcommand(
                     Command::new(withdraw::WITHDRAW_COMMAND)
