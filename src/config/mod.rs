@@ -34,7 +34,8 @@ impl Config {
     pub fn from_file(f: &str) -> Self {
         let reader = std::fs::File::open(f).unwrap();
         let config: Config = serde_yaml::from_reader(reader).unwrap();
-        log::debug!("from_file(): config: {:?}", config);
+        //TODO: before log, need filter some fields
+        //log::debug!("from_file(): config: {:?}", config);
 
         config
     }
