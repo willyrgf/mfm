@@ -58,6 +58,19 @@ impl<'a> AssetBalances<'a> {
         let rb = (total_parking_balance * U256::from(p)) / U256::exp10(decimals.into());
         rb
     }
+
+    pub fn quoted_balance(&self) -> U256 {
+        self.quoted_balance
+    }
+    pub fn quoted_asset_decimals(&self) -> u8 {
+        self.quoted_asset_decimals
+    }
+    pub fn percent(&self) -> f64 {
+        self.percent
+    }
+    pub fn quoted_asset_percent_u256(&self) -> U256 {
+        U256::from((self.percent * 10_f64.powf(self.quoted_asset_decimals.into())) as u128)
+    }
 }
 
 pub async fn get_assets_balances<'a>(
@@ -242,13 +255,20 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
             rebalancer.name(),
             rebalancer.total_percentage()
         );
-
         panic!()
     }
 
     let assets = rebalancer.get_assets(&config.assets);
     let assets_balances = get_assets_balances(&config, &rebalancer, &assets).await;
     log::debug!("assets_balances: {:?}", assets_balances);
+
+    if !rebalancer.reach_min_threshold(&assets_balances) {
+        log::error!(
+            "rebalancer: {}, the minimum threshold configured was not reached",
+            rebalancer.name()
+        );
+        panic!();
+    }
 
     let total_quoted_balance: U256 = get_total_quoted_balance(&assets_balances);
     log::debug!("total_quoted_balance: {:?}", total_quoted_balance);
