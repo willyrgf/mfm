@@ -77,7 +77,9 @@ impl Rebalancer {
             .0
             .iter()
             .map(|(name, _)| {
-                config_assets.find_by_name_and_network(name.as_str(), self.network_id.as_str())
+                config_assets
+                    .find_by_name_and_network(name.as_str(), self.network_id.as_str())
+                    .unwrap()
             })
             .collect()
     }
