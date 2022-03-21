@@ -307,6 +307,26 @@ impl Assets {
         self.0.get(key).unwrap()
     }
 
+    //TODO: use this function to get assets of the current network
+    pub fn find_by_name_and_network(&self, name: &str, network: &str) -> Option<&Asset> {
+        let result = self
+            .hashmap()
+            .iter()
+            .filter(|(_, a)| a.name == name && a.network_id == network);
+
+        if result.clone().count() > 1 {
+            log::error!("Same asset multiples times for a network");
+            return None;
+        }
+
+        let r = match result.last() {
+            Some((_, a)) => Some(a),
+            _ => None,
+        };
+
+        r
+    }
+
     pub fn find_by_address(&self, address: &str) -> &Asset {
         let asset = match self.0.iter().filter(|(_, a)| a.address() == address).last() {
             Some((_, a)) => a,

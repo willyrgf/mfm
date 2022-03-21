@@ -243,9 +243,13 @@ pub fn get_asset<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
     }
 }
 
-pub fn get_quoted_asset<'a>(args: &'a ArgMatches, config: &'a Config) -> Option<&'a Asset> {
+pub fn get_quoted_asset<'a>(
+    args: &'a ArgMatches,
+    config: &'a Config,
+    network_id: &str,
+) -> Option<&'a Asset> {
     match args.value_of("quoted-asset") {
-        Some(a) => Some(config.assets.get(a)),
+        Some(a) => config.assets.find_by_name_and_network(a, network_id),
         None => None,
     }
 }

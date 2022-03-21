@@ -28,6 +28,7 @@ pub struct Rebalancer {
     wallet_id: String,
     threshold_percent: f64,
     quoted_in: String,
+    network_id: String,
     parking_asset_id: String,
     portfolio: Portfolio,
     parking_asset_min_move: f64,
@@ -39,6 +40,11 @@ impl Rebalancer {
         let qe = (self.parking_asset_min_move * 10_f64.powf(decimals.into())) as u128;
         U256::from(qe)
     }
+
+    pub fn network_id(&self) -> &str {
+        self.network_id.as_str()
+    }
+
     pub fn name(&self) -> String {
         self.name.clone()
     }
@@ -70,7 +76,9 @@ impl Rebalancer {
         self.portfolio
             .0
             .iter()
-            .map(|(name, _)| config_assets.get(name))
+            .map(|(name, _)| {
+                config_assets.find_by_name_and_network(name.as_str(), self.network_id.as_str())
+            })
             .collect()
     }
 
@@ -83,7 +91,9 @@ impl Rebalancer {
     }
 
     pub fn get_quoted_asset<'a>(&self, config_assets: &'a Assets) -> &'a Asset {
-        config_assets.get(self.quoted_in())
+        config_assets
+            .find_by_name_and_network(self.quoted_in(), self.network_id.as_str())
+            .unwrap()
     }
 
     pub fn get_parking_asset<'a>(&self, config_assets: &'a Assets) -> &'a Asset {

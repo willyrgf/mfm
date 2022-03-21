@@ -88,6 +88,7 @@ assets:
 
 rebalancers:
   test-rebalancer:
+    network_id: bsc
     wallet_id: test-wallet
     name: test-anonq-busd
     portfolio:

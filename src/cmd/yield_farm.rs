@@ -66,6 +66,7 @@ pub fn get_farms_to_look<'a>(
 pub async fn call_info_cmd(args: &ArgMatches, config: &config::Config) {
     let mut table = Table::new();
     table.add_row(row![
+        "Network",
         "Farm",
         "Pending rewards",
         "Asset",
@@ -74,12 +75,12 @@ pub async fn call_info_cmd(args: &ArgMatches, config: &config::Config) {
         "Decimals",
         "Min rewards required"
     ]);
-    let quoted_asset = cmd::get_quoted_asset(args, config).unwrap();
-    let exchange = quoted_asset.get_exchange(config);
 
     for yield_farm in get_farms_to_look(args, config) {
         let network = yield_farm.get_network(config);
         let client = network.get_web3_client_http();
+        let quoted_asset = cmd::get_quoted_asset(args, config, yield_farm.network_id()).unwrap();
+        let exchange = quoted_asset.get_exchange(config);
         let quoted_asset_decimal = quoted_asset.decimals(client.clone()).await;
         let yield_farm_asset = yield_farm.get_asset(config);
         let yield_farm_asset_decimals = yield_farm_asset.decimals(client.clone()).await;
@@ -100,7 +101,9 @@ pub async fn call_info_cmd(args: &ArgMatches, config: &config::Config) {
 
         let min_rewards_required =
             yield_farm.get_min_rewards_required_u256(yield_farm_asset_decimals);
+
         table.add_row(row![
+            yield_farm.network_id(),
             yield_farm.name(),
             shared::blockchain_utils::display_amount_to_float(
                 pending_rewards,
