@@ -1,6 +1,8 @@
 extern crate prettytable;
 use env_logger::Env;
 use mfm::cmd;
+use mfm::config;
+
 
 //TODO: handle with all unwraps
 fn main() {

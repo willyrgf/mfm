@@ -5,6 +5,7 @@ use std::str::FromStr;
 use rustc_hex::FromHexError;
 use serde::{Deserialize, Serialize};
 use web3::ethabi::Token;
+use web3::Web3;
 use web3::{
     contract::{Contract, Options},
     transports::Http,
@@ -18,7 +19,7 @@ use super::network::{Network, Networks};
 use super::wallet::Wallet;
 use super::withdraw_wallet::WithdrawWallet;
 use super::Config;
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Asset {
     name: String,
     network_id: String,
@@ -80,6 +81,10 @@ impl Asset {
 
     pub fn get_network<'a>(&self, networks: &'a Networks) -> &'a Network {
         networks.get(self.network_id.as_str())
+    }
+
+    pub fn get_web3_client_http(&self, config: &Config) -> Web3<Http> {
+        self.get_network(&config.networks).get_web3_client_http()
     }
 
     pub fn contract(&self, client: web3::Web3<Http>) -> Contract<Http> {
@@ -296,7 +301,7 @@ impl Asset {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Assets(HashMap<String, Asset>);
 impl Assets {
     pub fn hashmap(&self) -> &HashMap<String, Asset> {

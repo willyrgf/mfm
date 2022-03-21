@@ -4,7 +4,7 @@ use web3::{transports::Http, types::U256, Web3};
 
 use super::asset::{Asset, Assets};
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Network {
     name: String,
     symbol: String,
@@ -32,7 +32,7 @@ impl Network {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Networks(HashMap<String, Network>);
 impl Networks {
     pub fn get(&self, key: &str) -> &Network {

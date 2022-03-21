@@ -1,11 +1,12 @@
-use crate::{cmd, config, shared};
+use crate::{cmd, config::Config, shared};
 use clap::ArgMatches;
 use prettytable::{cell, row, Table};
 //use web3::types::U256;
 
 pub const BALANCES_COMMAND: &str = "balances";
 
-pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
+pub async fn call_sub_commands(args: &ArgMatches) {
+    let config = Config::global();
     let wallet = cmd::get_wallet(args, config);
     let mut table = Table::new();
     table.add_row(row![

@@ -11,7 +11,7 @@ use super::{
     Config,
 };
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 struct AssetConfig {
     // asset_id: String,
     percent: f64,
@@ -19,10 +19,10 @@ struct AssetConfig {
 
 // TODO: validate portfolio max percent
 // TODO: validate that all routes (n-to-n) to the assets exist
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 struct Portfolio(HashMap<String, AssetConfig>);
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Rebalancer {
     name: String,
     wallet_id: String,
@@ -200,7 +200,7 @@ impl Rebalancer {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Rebalancers(HashMap<String, Rebalancer>);
 impl Rebalancers {
     pub fn get(&self, key: &str) -> &Rebalancer {

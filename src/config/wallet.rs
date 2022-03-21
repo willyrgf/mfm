@@ -9,7 +9,7 @@ use web3::{
     types::{Address, U256},
 };
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Wallet {
     private_key: String,
 }
@@ -42,7 +42,7 @@ impl Wallet {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Wallets(HashMap<String, Wallet>);
 impl Wallets {
     pub fn get(&self, key: &str) -> &Wallet {

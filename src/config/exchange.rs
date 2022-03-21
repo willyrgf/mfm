@@ -20,7 +20,7 @@ use super::wallet::Wallet;
 use super::Config;
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Exchange {
     name: String,
     router_address: String,
@@ -301,7 +301,7 @@ impl Exchange {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Exchanges(HashMap<String, Exchange>);
 impl Exchanges {
     pub fn get(&self, key: &str) -> &Exchange {

@@ -182,7 +182,7 @@ pub async fn call_sub_commands(matches: &ArgMatches, config: &Config) {
             approve::call_sub_commands(sub_matches, config).await;
         }
         Some((balances::BALANCES_COMMAND, sub_matches)) => {
-            balances::call_sub_commands(sub_matches, config).await;
+            balances::call_sub_commands(sub_matches).await;
         }
         Some((rebalancer::REBALANCER_COMMAND, sub_matches)) => {
             rebalancer::call_sub_commands(sub_matches, config).await;

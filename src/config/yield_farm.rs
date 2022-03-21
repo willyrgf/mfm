@@ -14,7 +14,7 @@ pub mod posi_farm_bnb_posi;
 pub mod posi_farm_busd_posi;
 pub mod position_stake_manager;
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct YieldFarm {
     name: String,
     contract_name: String,
@@ -115,7 +115,7 @@ impl YieldFarm {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct YieldFarms(HashMap<String, YieldFarm>);
 
 impl YieldFarms {

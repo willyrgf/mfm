@@ -6,6 +6,7 @@ pub mod wallet;
 pub mod withdraw_wallet;
 pub mod yield_farm;
 
+use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 
 use asset::Assets;
@@ -16,7 +17,9 @@ use wallet::Wallets;
 use withdraw_wallet::WithdrawWallets;
 use yield_farm::YieldFarms;
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+static GLOBAL_CONFIG: OnceCell<Config> = OnceCell::new();
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Config {
     pub wallets: Wallets,
     pub withdraw_wallets: WithdrawWallets,
@@ -28,9 +31,14 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn global() -> &'static Config {
+        GLOBAL_CONFIG.get().expect("CONFIG not loaded")
+    }
+
     pub fn from_file(f: &str) -> Self {
         let reader = std::fs::File::open(f).unwrap();
         let config: Config = serde_yaml::from_reader(reader).unwrap();
+        GLOBAL_CONFIG.set(config.clone()).unwrap();
         //TODO: before log, need filter some fields
         //log::debug!("from_file(): config: {:?}", config);
 

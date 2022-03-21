@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use web3::types::Address;
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WithdrawWallet {
     address: String,
 }
@@ -19,7 +19,7 @@ impl WithdrawWallet {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WithdrawWallets(HashMap<String, WithdrawWallet>);
 
 impl WithdrawWallets {
