@@ -8,12 +8,19 @@ pub const BALANCES_COMMAND: &str = "balances";
 pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
     let wallet = cmd::get_wallet(args, config);
     let mut table = Table::new();
-    table.add_row(row!["Asset", "Balance in float", "Balance", "Decimals"]);
+    table.add_row(row![
+        "Network",
+        "Asset",
+        "Balance in float",
+        "Balance",
+        "Decimals"
+    ]);
     for asset in config.assets.hashmap().values() {
         let client = asset.get_network(&config.networks).get_web3_client_http();
         let balance_of = asset.balance_of(client.clone(), wallet.address()).await;
         let decimals = asset.decimals(client.clone()).await;
         table.add_row(row![
+            asset.network_id(),
             asset.name(),
             shared::blockchain_utils::display_amount_to_float(balance_of, decimals),
             balance_of,

@@ -46,6 +46,10 @@ impl Asset {
         Address::from_str(self.address())
     }
 
+    pub fn network_id(&self) -> &str {
+        self.network_id.as_str()
+    }
+
     pub fn exchange_id(&self) -> &str {
         self.exchange_id.as_str()
     }
@@ -61,7 +65,7 @@ impl Asset {
             self.exchange_id.as_str(),
             self.name.as_str()
         );
-        let fallback_path = format!("./res/assets/{}/bep20_abi.json", self.network_id.as_str());
+        let fallback_path = format!("./res/assets/erc20_abi.json");
         if Path::new(&path).exists() {
             return path;
         }

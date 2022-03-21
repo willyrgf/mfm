@@ -1,6 +1,7 @@
 use crate::config::asset::{Asset, Assets};
 use crate::shared;
 
+use std::path::Path;
 use std::str::FromStr;
 use std::time::UNIX_EPOCH;
 use std::{collections::HashMap, time::SystemTime};
@@ -49,11 +50,21 @@ impl Exchange {
     }
 
     pub fn router_abi_path(&self) -> String {
-        format!("./res/exchanges/{}/abi.json", self.name.as_str())
+        let path = format!("./res/exchanges/{}/abi.json", self.name.as_str());
+        let fallback_path = format!("./res/exchanges/uniswap_v2_router_abi.json");
+        if Path::new(&path).exists() {
+            return path;
+        }
+        fallback_path
     }
 
     pub fn factory_abi_path(&self) -> String {
-        format!("./res/exchanges/{}/factory_abi.json", self.name.as_str())
+        let path = format!("./res/exchanges/{}/factory_abi.json", self.name.as_str());
+        let fallback_path = format!("./res/exchanges/uniswap_v2_factory_abi.json");
+        if Path::new(&path).exists() {
+            return path;
+        }
+        fallback_path
     }
 
     pub fn router_abi_json_string(&self) -> String {
