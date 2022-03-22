@@ -1,15 +1,15 @@
-use crate::{cmd, config};
+use crate::cmd;
 use clap::ArgMatches;
 use web3::types::U256;
 
 pub const WRAP_COMMAND: &str = "wrap";
 
-pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
-    let network = cmd::get_network(args, config);
-    let wallet = cmd::get_wallet(args, config);
+pub async fn call_sub_commands(args: &ArgMatches) {
+    let network = cmd::get_network(args);
+    let wallet = cmd::get_wallet(args);
     let client = network.get_web3_client_http();
 
-    let wrapped_asset = network.get_wrapped_asset(&config.assets);
+    let wrapped_asset = network.get_wrapped_asset();
     let wrapped_asset_decimals = wrapped_asset.decimals(client.clone()).await;
 
     //TODO: doc the calc and the None case

@@ -1,20 +1,18 @@
-use crate::{cmd, config, shared};
+use crate::{cmd, shared};
 use clap::ArgMatches;
 use prettytable::{cell, row, Table};
 use web3::{ethabi::Token, types::U256};
 
 pub const SWAP_COMMAND: &str = "swap";
 
-pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
-    let exchange = cmd::get_exchange(args, config);
-    let wallet = cmd::get_wallet(args, config);
-    let client = exchange
-        .get_network(&config.networks)
-        .get_web3_client_http();
+pub async fn call_sub_commands(args: &ArgMatches) {
+    let exchange = cmd::get_exchange(args);
+    let wallet = cmd::get_wallet(args);
+    let client = exchange.get_network().get_web3_client_http();
 
-    let input_token = cmd::get_token_input(args, config);
+    let input_token = cmd::get_token_input(args);
     log::debug!("input_token: {:?}", input_token);
-    let output_token = cmd::get_token_output(args, config);
+    let output_token = cmd::get_token_output(args);
     log::debug!("output_token: {:?}", output_token);
 
     let input_token_decimals = input_token.decimals(client.clone()).await;
@@ -23,9 +21,8 @@ pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
     let amount_in = cmd::get_amount(args, input_token_decimals);
     let slippage = cmd::get_slippage(args, output_token_decimals);
 
-    //let asset_path = config.routes.search(input_token, output_token);
     let asset_path = exchange
-        .build_route_for(config, client.clone(), input_token, output_token)
+        .build_route_for(client.clone(), input_token, output_token)
         .await;
     let path_token: Vec<Token> = asset_path
         .clone()

@@ -1,11 +1,11 @@
-use crate::{cmd, config};
+use crate::cmd;
 use clap::ArgMatches;
 
 pub const TRANSACTION_COMMAND: &str = "transaction";
 
 //TODO: finish it
-pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
-    let network = cmd::get_network(args, config);
+pub async fn call_sub_commands(args: &ArgMatches) {
+    let network = cmd::get_network(args);
     let _client = network.get_web3_client_http();
 
     // let transaction_receipt = client.eth().transaction_receipt();

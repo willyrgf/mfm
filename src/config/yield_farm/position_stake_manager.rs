@@ -6,18 +6,17 @@ use web3::{
     types::{Address, Bytes, TransactionParameters, U256},
 };
 
-use crate::{cmd, config::Config};
+use crate::cmd;
 
 use super::YieldFarm;
 
 pub async fn get_pending_rewards(
     pool_id: i32,
-    config: &Config,
     yield_farm: &YieldFarm,
     client: web3::Web3<Http>,
 ) -> U256 {
     let contract = yield_farm.contract(client.clone());
-    let wallet = yield_farm.get_wallet(config);
+    let wallet = yield_farm.get_wallet();
     let result = contract.query(
         "pendingPosition",
         (U256::from(pool_id), wallet.address()),
@@ -29,13 +28,8 @@ pub async fn get_pending_rewards(
     pending_balance
 }
 
-pub async fn harvest(
-    pool_id: i32,
-    config: &Config,
-    yield_farm: &YieldFarm,
-    client: web3::Web3<Http>,
-) {
-    let from_wallet = yield_farm.get_wallet(config);
+pub async fn harvest(pool_id: i32, yield_farm: &YieldFarm, client: web3::Web3<Http>) {
+    let from_wallet = yield_farm.get_wallet();
     let gas_price = client.eth().gas_price().await.unwrap();
     let referrer_address: Address =
         Address::from_str("0x0000000000000000000000000000000000000000").unwrap();

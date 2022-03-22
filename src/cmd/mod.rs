@@ -167,34 +167,34 @@ pub fn new() -> clap::Command<'static> {
                 )
 }
 
-pub async fn call_sub_commands(matches: &ArgMatches, config: &Config) {
+pub async fn call_sub_commands(matches: &ArgMatches) {
     match matches.subcommand() {
         Some((wrap::WRAP_COMMAND, sub_matches)) => {
-            wrap::call_sub_commands(sub_matches, config).await;
+            wrap::call_sub_commands(sub_matches).await;
         }
         Some((swap::SWAP_COMMAND, sub_matches)) => {
-            swap::call_sub_commands(sub_matches, config).await;
+            swap::call_sub_commands(sub_matches).await;
         }
         Some((allowance::ALLOWANCE_COMMAND, sub_matches)) => {
-            allowance::call_sub_commands(sub_matches, config).await;
+            allowance::call_sub_commands(sub_matches).await;
         }
         Some((approve::APPROVE_COMMAND, sub_matches)) => {
-            approve::call_sub_commands(sub_matches, config).await;
+            approve::call_sub_commands(sub_matches).await;
         }
         Some((balances::BALANCES_COMMAND, sub_matches)) => {
             balances::call_sub_commands(sub_matches).await;
         }
         Some((rebalancer::REBALANCER_COMMAND, sub_matches)) => {
-            rebalancer::call_sub_commands(sub_matches, config).await;
+            rebalancer::call_sub_commands(sub_matches).await;
         }
         Some((transaction::TRANSACTION_COMMAND, sub_matches)) => {
-            transaction::call_sub_commands(sub_matches, config).await;
+            transaction::call_sub_commands(sub_matches).await;
         }
         Some((yield_farm::YIELD_FARM_COMMAND, sub_matches)) => {
-            yield_farm::call_sub_commands(sub_matches, config).await;
+            yield_farm::call_sub_commands(sub_matches).await;
         }
         Some((withdraw::WITHDRAW_COMMAND, sub_matches)) => {
-            withdraw::call_sub_commands(sub_matches, config).await;
+            withdraw::call_sub_commands(sub_matches).await;
         }
         _ => panic!("command not registred"),
     }
@@ -204,50 +204,51 @@ pub async fn run(cmd: clap::Command<'static>) {
     let cmd_matches = cmd.get_matches();
     log::debug!("matches: {:?}", cmd_matches);
 
-    let config = match cmd_matches.value_of("config_filename") {
+    match cmd_matches.value_of("config_filename") {
         Some(f) => Config::from_file(f),
         None => panic!("--config_filename is invalid"),
     };
 
-    call_sub_commands(&cmd_matches, &config).await
+    call_sub_commands(&cmd_matches).await
 }
 
 //TODO: add constants to all keys in value_of
 //
 
-pub fn get_exchange<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Exchange {
+pub fn get_exchange<'a>(args: &'a ArgMatches) -> &'a Exchange {
+    let config = Config::global();
     match args.value_of("exchange") {
         Some(n) => config.exchanges.get(n),
         None => panic!("--exchange not supported"),
     }
 }
 
-pub fn get_network<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Network {
+pub fn get_network<'a>(args: &'a ArgMatches) -> &'a Network {
+    let config = Config::global();
     match args.value_of("network") {
         Some(n) => config.networks.get(n),
         None => panic!("--network not supported"),
     }
 }
 
-pub fn get_wallet<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Wallet {
+pub fn get_wallet<'a>(args: &'a ArgMatches) -> &'a Wallet {
+    let config = Config::global();
     match args.value_of("wallet") {
         Some(w) => config.wallets.get(w),
         None => panic!("--wallet doesnt exist"),
     }
 }
 
-pub fn get_asset<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
+pub fn get_asset<'a>(args: &'a ArgMatches) -> &'a Asset {
+    let config = Config::global();
     match args.value_of("asset") {
         Some(a) => config.assets.get(a),
         None => panic!("--asset not supported"),
     }
 }
 
-pub fn get_quoted_asset<'a>(
-    args: &'a ArgMatches,
-    config: &'a Config,
-    network_id: &str,
-) -> Option<&'a Asset> {
+pub fn get_quoted_asset<'a>(args: &'a ArgMatches, network_id: &str) -> Option<&'a Asset> {
+    let config = Config::global();
     match args.value_of("quoted-asset") {
         Some(a) => config.assets.find_by_name_and_network(a, network_id),
         None => None,
@@ -281,14 +282,16 @@ pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> U256 {
     }
 }
 
-pub fn get_token_input<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
+pub fn get_token_input<'a>(args: &'a ArgMatches) -> &'a Asset {
+    let config = Config::global();
     match args.value_of("token_input") {
         Some(i) => config.assets.get(i),
         None => panic!("--token_input not supported"),
     }
 }
 
-pub fn get_token_output<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Asset {
+pub fn get_token_output<'a>(args: &'a ArgMatches) -> &'a Asset {
+    let config = Config::global();
     match args.value_of("token_output") {
         Some(i) => config.assets.get(i),
         None => panic!("--token_output not supported"),
@@ -307,21 +310,24 @@ pub fn get_slippage(args: &ArgMatches, asset_decimals: u8) -> U256 {
     }
 }
 
-pub fn get_rebalancer<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a Rebalancer {
+pub fn get_rebalancer<'a>(args: &'a ArgMatches) -> &'a Rebalancer {
+    let config = Config::global();
     match args.value_of("name") {
         Some(i) => config.rebalancers.get(i),
         None => panic!("--name not supported"),
     }
 }
 
-pub fn get_withdraw_wallet<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a WithdrawWallet {
+pub fn get_withdraw_wallet<'a>(args: &'a ArgMatches) -> &'a WithdrawWallet {
+    let config = Config::global();
     match args.value_of("withdraw-wallet") {
         Some(w) => config.withdraw_wallets.get(w),
         None => panic!("--withdraw-wallet not supported"),
     }
 }
 
-pub fn get_yield_farm<'a>(args: &'a ArgMatches, config: &'a Config) -> &'a YieldFarm {
+pub fn get_yield_farm<'a>(args: &'a ArgMatches) -> &'a YieldFarm {
+    let config = Config::global();
     match args.value_of("yield-farm") {
         Some(w) => config.yield_farms.get(w),
         None => panic!("--yield-farm not supported"),

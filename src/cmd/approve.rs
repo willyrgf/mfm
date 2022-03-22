@@ -1,15 +1,14 @@
-use crate::{cmd, config};
+use crate::cmd;
 use clap::ArgMatches;
 
 pub const APPROVE_COMMAND: &str = "approve";
 
-pub async fn call_sub_commands(args: &ArgMatches, config: &config::Config) {
-    let exchange = cmd::get_exchange(args, config);
-    let wallet = cmd::get_wallet(args, config);
-    let asset = cmd::get_asset(args, config);
-    let client = exchange
-        .get_network(&config.networks)
-        .get_web3_client_http();
+pub async fn call_sub_commands(args: &ArgMatches) {
+    let exchange = cmd::get_exchange(args);
+    let wallet = cmd::get_wallet(args);
+    let asset = cmd::get_asset(args);
+
+    let client = exchange.get_network().get_web3_client_http();
 
     let asset_decimals = asset.decimals(client.clone()).await;
     let amount = cmd::get_amount(args, asset_decimals);

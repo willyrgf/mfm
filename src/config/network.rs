@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use web3::{transports::Http, types::U256, Web3};
 
-use super::asset::{Asset, Assets};
+use super::{asset::Asset, Config};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Network {
@@ -19,8 +19,8 @@ impl Network {
     pub fn rpc_url(&self) -> &str {
         self.rpc_url.as_str()
     }
-    pub fn get_wrapped_asset<'a>(&self, assets: &'a Assets) -> &'a Asset {
-        assets.get(self.wrapped_asset.as_str())
+    pub fn get_wrapped_asset<'a>(&self) -> &'a Asset {
+        Config::global().assets.get(self.wrapped_asset.as_str())
     }
     pub fn get_min_balance_coin(&self, decimals: u8) -> U256 {
         let qe = (self.min_balance_coin * 10_f64.powf(decimals.into())) as i64;

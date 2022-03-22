@@ -7,7 +7,7 @@ pub const BALANCES_COMMAND: &str = "balances";
 
 pub async fn call_sub_commands(args: &ArgMatches) {
     let config = Config::global();
-    let wallet = cmd::get_wallet(args, config);
+    let wallet = cmd::get_wallet(args);
     let mut table = Table::new();
     table.add_row(row![
         "Network",
@@ -17,7 +17,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         "Decimals"
     ]);
     for asset in config.assets.hashmap().values() {
-        let client = asset.get_network(&config.networks).get_web3_client_http();
+        let client = asset.get_network().get_web3_client_http();
         let balance_of = asset.balance_of(client.clone(), wallet.address()).await;
         let decimals = asset.decimals(client.clone()).await;
         table.add_row(row![

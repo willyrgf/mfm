@@ -15,7 +15,7 @@ use web3::{
     types::{Address, Bytes, TransactionParameters, H160, U256},
 };
 
-use super::network::{Network, Networks};
+use super::network::Network;
 use super::wallet::Wallet;
 use super::Config;
 
@@ -142,7 +142,6 @@ impl Exchange {
 
     pub async fn build_route_for(
         &self,
-        config: &Config,
         client: web3::Web3<Http>,
         input_asset: &Asset,
         output_asset: &Asset,
@@ -153,8 +152,8 @@ impl Exchange {
         //         //     .map(|p| Token::Address(p))
         //         //     .collect::<Vec<_>>();
         let mut v = vec![];
-        let network = self.get_network(&config.networks);
-        let wrapped_asset = network.get_wrapped_asset(&config.assets);
+        let network = self.get_network();
+        let wrapped_asset = network.get_wrapped_asset();
         let wrapped_is_output = wrapped_asset.address() == output_asset.address();
         let has_direct_route = match self
             .get_factory_pair(client.clone(), input_asset, output_asset)
@@ -216,9 +215,8 @@ impl Exchange {
         since_epoch.as_millis().checked_add(future_millis).unwrap()
     }
 
-    pub fn get_network<'a>(&self, networks: &'a Networks) -> &'a Network {
-        let network = networks.get(self.network_id.as_str());
-        network
+    pub fn get_network<'a>(&self) -> &'a Network {
+        Config::global().networks.get(self.network_id.as_str())
     }
 
     pub async fn swap_tokens_for_tokens(

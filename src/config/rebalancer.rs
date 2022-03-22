@@ -5,11 +5,7 @@ use web3::types::U256;
 
 use crate::cmd::rebalancer::AssetBalances;
 
-use super::{
-    asset::{Asset, Assets},
-    wallet::Wallet,
-    Config,
-};
+use super::{asset::Asset, wallet::Wallet, Config};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 struct AssetConfig {
@@ -72,12 +68,13 @@ impl Rebalancer {
         }
     }
 
-    pub fn get_assets<'a>(&self, config_assets: &'a Assets) -> Vec<&'a Asset> {
+    pub fn get_assets<'a>(&self) -> Vec<&'a Asset> {
         self.portfolio
             .0
             .iter()
             .map(|(name, _)| {
-                config_assets
+                Config::global()
+                    .assets
                     .find_by_name_and_network(name.as_str(), self.network_id.as_str())
                     .unwrap()
             })
@@ -92,18 +89,19 @@ impl Rebalancer {
         self.parking_asset_id.as_str()
     }
 
-    pub fn get_quoted_asset<'a>(&self, config_assets: &'a Assets) -> &'a Asset {
-        config_assets
+    pub fn get_quoted_asset<'a>(&self) -> &'a Asset {
+        Config::global()
+            .assets
             .find_by_name_and_network(self.quoted_in(), self.network_id.as_str())
             .unwrap()
     }
 
-    pub fn get_parking_asset<'a>(&self, config_assets: &'a Assets) -> &'a Asset {
-        config_assets.get(self.parking_asset_id())
+    pub fn get_parking_asset<'a>(&self) -> &'a Asset {
+        Config::global().assets.get(self.parking_asset_id())
     }
 
-    pub fn get_wallet<'a>(&self, config: &'a Config) -> &'a Wallet {
-        config.wallets.get(&self.wallet_id)
+    pub fn get_wallet<'a>(&self) -> &'a Wallet {
+        Config::global().wallets.get(&self.wallet_id)
     }
 
     pub fn threshold_percent(&self) -> f64 {

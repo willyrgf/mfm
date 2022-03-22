@@ -15,7 +15,7 @@ use web3::{
 use crate::shared;
 
 use super::exchange::Exchange;
-use super::network::{Network, Networks};
+use super::network::Network;
 use super::wallet::Wallet;
 use super::withdraw_wallet::WithdrawWallet;
 use super::Config;
@@ -55,8 +55,8 @@ impl Asset {
         self.exchange_id.as_str()
     }
 
-    pub fn get_exchange<'a>(&self, config: &'a Config) -> &'a Exchange {
-        config.exchanges.get(self.exchange_id())
+    pub fn get_exchange<'a>(&self) -> &'a Exchange {
+        Config::global().exchanges.get(self.exchange_id())
     }
 
     pub fn abi_path(&self) -> String {
@@ -79,12 +79,12 @@ impl Asset {
         json.to_string()
     }
 
-    pub fn get_network<'a>(&self, networks: &'a Networks) -> &'a Network {
-        networks.get(self.network_id.as_str())
+    pub fn get_network<'a>(&self) -> &'a Network {
+        Config::global().networks.get(&self.network_id.as_str())
     }
 
-    pub fn get_web3_client_http(&self, config: &Config) -> Web3<Http> {
-        self.get_network(&config.networks).get_web3_client_http()
+    pub fn get_web3_client_http(&self) -> Web3<Http> {
+        self.get_network().get_web3_client_http()
     }
 
     pub fn contract(&self, client: web3::Web3<Http>) -> Contract<Http> {
@@ -114,12 +114,11 @@ impl Asset {
     pub async fn balance_of_quoted_in(
         &self,
         client: web3::Web3<Http>,
-        config: &Config,
         wallet: &Wallet,
         quoted: &Asset,
     ) -> U256 {
         let account = wallet.address();
-        let exchange = self.get_exchange(config);
+        let exchange = self.get_exchange();
         let base_balance = self.balance_of(client.clone(), account).await;
 
         if self.name() == quoted.name() {
@@ -127,7 +126,7 @@ impl Asset {
         }
 
         let assets_path = exchange
-            .build_route_for(config, client.clone(), &self, quoted)
+            .build_route_for(client.clone(), &self, quoted)
             .await;
 
         exchange
