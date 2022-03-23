@@ -74,8 +74,6 @@ pub async fn call_info_cmd(args: &ArgMatches) {
     ]);
 
     for yield_farm in get_farms_to_look(args) {
-        let network = yield_farm.get_network();
-        let client = network.get_web3_client_http();
         let quoted_asset =
             cmd::get_quoted_asset_in_network_from_args(args, yield_farm.network_id()).unwrap();
         let exchange = quoted_asset.get_exchange();
@@ -87,7 +85,7 @@ pub async fn call_info_cmd(args: &ArgMatches) {
             .build_route_for(yield_farm_asset, quoted_asset)
             .await;
 
-        let pending_rewards = yield_farm.get_pending_rewards(client.clone()).await;
+        let pending_rewards = yield_farm.get_pending_rewards().await;
         let quoted_price = match exchange
             .get_amounts_out(pending_rewards, quote_asset_path)
             .await
@@ -129,12 +127,10 @@ pub async fn call_run_cmd(args: &ArgMatches) {
         "Min rewards required"
     ]);
     for yield_farm in get_farms_to_look(args) {
-        let network = yield_farm.get_network();
-        let client = network.get_web3_client_http();
         let yield_farm_asset = yield_farm.get_asset();
         let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
 
-        let pending_rewards = yield_farm.get_pending_rewards(client.clone()).await;
+        let pending_rewards = yield_farm.get_pending_rewards().await;
         let min_rewards_required =
             yield_farm.get_min_rewards_required_u256(yield_farm_asset_decimals);
         log::info!("yield_farm pending rewards: {:?}", pending_rewards);
@@ -146,7 +142,7 @@ pub async fn call_run_cmd(args: &ArgMatches) {
         let can_harvest = pending_rewards >= min_rewards_required;
         if can_harvest || force_harvest {
             log::info!("harvesting yield farm: {:?}", yield_farm);
-            yield_farm.harvest(client.clone()).await;
+            yield_farm.harvest().await;
         }
 
         table.add_row(row![

@@ -2,7 +2,6 @@ use std::str::FromStr;
 use web3::{
     contract::Options,
     ethabi::Token,
-    transports::Http,
     types::{Address, Bytes, TransactionParameters, U256},
 };
 
@@ -10,12 +9,8 @@ use crate::cmd;
 
 use super::YieldFarm;
 
-pub async fn get_pending_rewards(
-    pool_id: i32,
-    yield_farm: &YieldFarm,
-    client: web3::Web3<Http>,
-) -> U256 {
-    let contract = yield_farm.contract(client.clone());
+pub async fn get_pending_rewards(pool_id: i32, yield_farm: &YieldFarm) -> U256 {
+    let contract = yield_farm.contract();
     let wallet = yield_farm.get_wallet();
     let result = contract.query(
         "pendingPosition",
@@ -28,14 +23,15 @@ pub async fn get_pending_rewards(
     pending_balance
 }
 
-pub async fn harvest(pool_id: i32, yield_farm: &YieldFarm, client: web3::Web3<Http>) {
+pub async fn harvest(pool_id: i32, yield_farm: &YieldFarm) {
+    let client = yield_farm.get_web3_client_http();
     let from_wallet = yield_farm.get_wallet();
     let gas_price = client.eth().gas_price().await.unwrap();
     let referrer_address: Address =
         Address::from_str("0x0000000000000000000000000000000000000000").unwrap();
 
     let estimate_gas = yield_farm
-        .contract(client.clone())
+        .contract()
         .estimate_gas(
             "deposit",
             (U256::from(pool_id), U256::from(0_i32), referrer_address),
@@ -53,7 +49,7 @@ pub async fn harvest(pool_id: i32, yield_farm: &YieldFarm, client: web3::Web3<Ht
     log::debug!("harvest called estimate_gas: {:?}", estimate_gas);
 
     let func_data = yield_farm
-        .contract(client.clone())
+        .contract()
         .abi()
         .function("deposit")
         .unwrap()

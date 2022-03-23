@@ -192,13 +192,10 @@ impl Asset {
         .await;
     }
 
-    pub async fn wrap(
-        &self,
-        client: web3::Web3<Http>,
-        from_wallet: &Wallet,
-        amount: U256,
-        gas_price: U256,
-    ) {
+    pub async fn wrap(&self, from_wallet: &Wallet, amount: U256) {
+        let client = self.get_web3_client_http();
+        let gas_price = client.eth().gas_price().await.unwrap();
+
         let estimate_gas = shared::blockchain_utils::estimate_gas(
             &self.contract(),
             from_wallet,
@@ -238,14 +235,10 @@ impl Asset {
         .await;
     }
 
-    pub async fn withdraw(
-        &self,
-        client: web3::Web3<Http>,
-        wallet: &Wallet,
-        withdraw_wallet: &WithdrawWallet,
-        amount: U256,
-        gas_price: U256,
-    ) {
+    pub async fn withdraw(&self, wallet: &Wallet, withdraw_wallet: &WithdrawWallet, amount: U256) {
+        let client = self.get_web3_client_http();
+        let gas_price = client.eth().gas_price().await.unwrap();
+
         let estimate_gas = shared::blockchain_utils::estimate_gas(
             &self.contract(),
             wallet,

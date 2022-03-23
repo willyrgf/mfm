@@ -19,6 +19,11 @@ impl Network {
     pub fn rpc_url(&self) -> &str {
         self.rpc_url.as_str()
     }
+
+    pub fn get_name(&self) -> &str {
+        self.name.as_str()
+    }
+
     pub fn get_wrapped_asset<'a>(&self) -> &'a Asset {
         Config::global()
             .assets
