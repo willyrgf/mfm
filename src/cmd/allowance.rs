@@ -6,7 +6,7 @@ pub const ALLOWANCE_COMMAND: &str = "allowance";
 pub async fn call_sub_commands(args: &ArgMatches) {
     let exchange = cmd::get_exchange(args);
     let wallet = cmd::get_wallet(args);
-    let asset = cmd::get_asset(args);
+    let asset = cmd::get_asset_in_network_from_args(args, exchange.network_id());
 
     let asset_decimals = asset.decimals().await;
     let remaning = asset

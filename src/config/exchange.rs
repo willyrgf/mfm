@@ -8,6 +8,7 @@ use std::{collections::HashMap, time::SystemTime};
 
 use rustc_hex::FromHexError;
 use serde::{Deserialize, Serialize};
+use web3::Web3;
 use web3::{
     contract::{Contract, Options},
     ethabi::Token,
@@ -83,20 +84,22 @@ impl Exchange {
         json.to_string()
     }
 
-    pub fn router_contract(&self, client: web3::Web3<Http>) -> Contract<Http> {
+    pub fn router_contract(&self) -> Contract<Http> {
+        let client = self.get_web3_client_http();
         let contract_address = self.as_router_address().unwrap();
         let json_abi = self.router_abi_json_string();
         Contract::from_json(client.eth(), contract_address, json_abi.as_bytes()).unwrap()
     }
 
-    pub fn factory_contract(&self, client: web3::Web3<Http>) -> Contract<Http> {
+    pub fn factory_contract(&self) -> Contract<Http> {
+        let client = self.get_web3_client_http();
         let contract_address = self.as_factory_address();
         let json_abi = self.factory_abi_json_string();
         Contract::from_json(client.eth(), contract_address, json_abi.as_bytes()).unwrap()
     }
 
-    pub async fn wrapper_address(&self, client: web3::Web3<Http>) -> H160 {
-        let router_contract = self.router_contract(client);
+    pub async fn wrapper_address(&self) -> H160 {
+        let router_contract = self.router_contract();
 
         let wrapped_addr = router_contract
             .query("WETH", (), None, Options::default(), None)
@@ -106,12 +109,8 @@ impl Exchange {
         wrapped_addr
     }
 
-    pub async fn wrapped_asset<'a>(
-        &self,
-        assets: &'a Assets,
-        client: web3::Web3<Http>,
-    ) -> &'a Asset {
-        let wrapped_address = self.wrapper_address(client).await;
+    pub async fn wrapped_asset<'a>(&self, assets: &'a Assets) -> &'a Asset {
+        let wrapped_address = self.wrapper_address().await;
         log::debug!("wrapped_asset(): {:?}", wrapped_address);
         let wrapped_asset = assets.find_by_address(wrapped_address.to_string().as_str());
         wrapped_asset
@@ -119,11 +118,10 @@ impl Exchange {
 
     pub async fn get_factory_pair(
         &self,
-        client: web3::Web3<Http>,
         input_asset: &Asset,
         output_asset: &Asset,
     ) -> Option<Address> {
-        let contract = self.factory_contract(client.clone());
+        let contract = self.factory_contract();
 
         let result = contract.query(
             "getPair",
@@ -144,12 +142,7 @@ impl Exchange {
         address
     }
 
-    pub async fn build_route_for(
-        &self,
-        client: web3::Web3<Http>,
-        input_asset: &Asset,
-        output_asset: &Asset,
-    ) -> Vec<H160> {
+    pub async fn build_route_for(&self, input_asset: &Asset, output_asset: &Asset) -> Vec<H160> {
         // Example to transform this result into tokens
         // Vec<Token> = paths
         //         //     .into_iter()
@@ -159,10 +152,7 @@ impl Exchange {
         let network = self.get_network();
         let wrapped_asset = network.get_wrapped_asset();
         let wrapped_is_output = wrapped_asset.address() == output_asset.address();
-        let has_direct_route = match self
-            .get_factory_pair(client.clone(), input_asset, output_asset)
-            .await
-        {
+        let has_direct_route = match self.get_factory_pair(input_asset, output_asset).await {
             Some(a) => (a.to_string().as_str() != ZERO_ADDRESS),
             _ => false,
         };
@@ -178,19 +168,18 @@ impl Exchange {
 
     pub async fn get_amounts_out(
         &self,
-        client: web3::Web3<Http>,
         // decimals: u8,
         amount: U256,
         assets_path: Vec<H160>,
     ) -> Vec<U256> {
-        let zero = U256::from(0);
+        let zero = U256::from(0_i32);
 
         //TODO: check if the amount is sufficient
         if amount == zero {
             return vec![zero];
         }
 
-        let contract = self.router_contract(client);
+        let contract = self.router_contract();
         // let quantity = 1;
         // let amount: U256 = (quantity * 10_i32.pow(decimals.into())).into();
         let result = contract.query(
@@ -223,18 +212,22 @@ impl Exchange {
         Config::global().networks.get(self.network_id.as_str())
     }
 
+    pub fn get_web3_client_http(&self) -> Web3<Http> {
+        self.get_network().get_web3_client_http()
+    }
+
     pub async fn swap_tokens_for_tokens(
         &self,
-        client: web3::Web3<Http>,
         from_wallet: &Wallet,
-        gas_price: U256,
         amount_in: U256,
         amount_min_out: U256,
         asset_path: Token,
     ) {
+        let client = self.get_web3_client_http();
+        let gas_price = client.eth().gas_price().await.unwrap();
         let valid_timestamp = self.get_valid_timestamp(30000000);
         let estimate_gas = self
-            .router_contract(client.clone())
+            .router_contract()
             .estimate_gas(
                 "swapExactTokensForTokensSupportingFeeOnTransferTokens",
                 // "swapExactTokensForTokens",
@@ -260,7 +253,7 @@ impl Exchange {
         log::debug!("swap_tokens_for_tokens estimate_gas: {}", estimate_gas);
 
         let func_data = self
-            .router_contract(client.clone())
+            .router_contract()
             .abi()
             .function("swapExactTokensForTokensSupportingFeeOnTransferTokens")
             // .function("swapExactTokensForTokens")

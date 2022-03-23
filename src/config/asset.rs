@@ -112,12 +112,7 @@ impl Asset {
         vec![coin_address, self.as_address().unwrap()]
     }
 
-    pub async fn balance_of_quoted_in(
-        &self,
-        client: web3::Web3<Http>,
-        wallet: &Wallet,
-        quoted: &Asset,
-    ) -> U256 {
+    pub async fn balance_of_quoted_in(&self, wallet: &Wallet, quoted: &Asset) -> U256 {
         let account = wallet.address();
         let exchange = self.get_exchange();
         let base_balance = self.balance_of(account).await;
@@ -126,12 +121,10 @@ impl Asset {
             return base_balance;
         }
 
-        let assets_path = exchange
-            .build_route_for(client.clone(), &self, quoted)
-            .await;
+        let assets_path = exchange.build_route_for(&self, quoted).await;
 
         exchange
-            .get_amounts_out(client.clone(), base_balance, assets_path)
+            .get_amounts_out(base_balance, assets_path)
             .await
             .last()
             .unwrap()

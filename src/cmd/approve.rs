@@ -1,4 +1,4 @@
-use crate::{cmd, config::Config};
+use crate::cmd;
 use clap::ArgMatches;
 
 pub const APPROVE_COMMAND: &str = "approve";
@@ -6,13 +6,7 @@ pub const APPROVE_COMMAND: &str = "approve";
 pub async fn call_sub_commands(args: &ArgMatches) {
     let exchange = cmd::get_exchange(args);
     let wallet = cmd::get_wallet(args);
-    let asset = match args.value_of("asset") {
-        Some(a) => Config::global()
-            .assets
-            .find_by_name_and_network(a, exchange.network_id())
-            .unwrap(),
-        None => panic!("can't find asset in the exchange network"),
-    };
+    let asset = cmd::get_asset_in_network_from_args(args, exchange.network_id());
 
     let asset_decimals = asset.decimals().await;
     let amount = cmd::get_amount(args, asset_decimals);
