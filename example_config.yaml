@@ -38,7 +38,7 @@ exchanges:
 
 assets:
   dquick:
-    name: wmatic
+    name: dquick
     network_id: polygon
     exchange_id: quickswap_v2
     address: 0xf28164a485b0b2c90639e47b0f377b4a438a16b1
@@ -78,6 +78,12 @@ assets:
     network_id: bsc
     exchange_id: pancake_swap_v2
     address: 0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c
+    slippage: 2
+  posi:
+    name: posi
+    network_id: bsc
+    exchange_id: pancake_swap_v2
+    address: 0x5ca42204cdaa70d5c773946e69de942b85ca6706
     slippage: 2
   cake:
     name: cake
@@ -127,7 +133,7 @@ yield_farms:
     asset_id: posi
     network_id: bsc
     operation: posi_farm_busd_posi
-    min_rewards_required: 10
+    min_rewards_required: 7
   auto-cake:
     name: auto-cake
     contract_name: pancake_swap_auto_cake_pool
@@ -137,8 +143,9 @@ yield_farms:
     network_id: bsc
     operation: cake_auto_pool
     min_rewards_required: 1
-# machine:
+# machines:
 #   farm-all-to-busd-vault:
+#     name: farm-all-to-busd-vault
 #     operations:
 #       collect_farms_and_swap:
 #         swap_to_asset_id: busd

@@ -19,8 +19,16 @@ impl Network {
     pub fn rpc_url(&self) -> &str {
         self.rpc_url.as_str()
     }
+
+    pub fn get_name(&self) -> &str {
+        self.name.as_str()
+    }
+
     pub fn get_wrapped_asset<'a>(&self) -> &'a Asset {
-        Config::global().assets.get(self.wrapped_asset.as_str())
+        Config::global()
+            .assets
+            .find_by_name_and_network(self.wrapped_asset.as_str(), self.name.as_str())
+            .unwrap()
     }
     pub fn get_min_balance_coin(&self, decimals: u8) -> U256 {
         let qe = (self.min_balance_coin * 10_f64.powf(decimals.into())) as i64;

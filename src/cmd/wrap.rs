@@ -10,7 +10,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let client = network.get_web3_client_http();
 
     let wrapped_asset = network.get_wrapped_asset();
-    let wrapped_asset_decimals = wrapped_asset.decimals(client.clone()).await;
+    let wrapped_asset_decimals = wrapped_asset.decimals().await;
 
     //TODO: doc the calc and the None case
     let amount_in = match args.value_of("amount") {
@@ -32,9 +32,5 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let n = wallet.nonce(client.clone()).await;
     log::debug!("nonce: {}", n);
 
-    let gas_price = client.eth().gas_price().await.unwrap();
-
-    wrapped_asset
-        .wrap(client.clone(), wallet, amount_in, gas_price)
-        .await;
+    wrapped_asset.wrap(wallet, amount_in).await;
 }

@@ -31,7 +31,7 @@ pub struct Asset {
 impl Asset {
     pub fn slippage_u256(&self, asset_decimals: u8) -> U256 {
         //TODO: review u128
-        let qe = ((self.slippage / 100.0) * 10_f64.powf(asset_decimals.into())) as u128;
+        let qe = ((&self.slippage / 100.0) * 10_f64.powf(asset_decimals.into())) as u128;
         U256::from(qe)
     }
 
@@ -56,7 +56,7 @@ impl Asset {
     }
 
     pub fn get_exchange<'a>(&self) -> &'a Exchange {
-        Config::global().exchanges.get(self.exchange_id())
+        Config::global().exchanges.get(&self.exchange_id())
     }
 
     pub fn abi_path(&self) -> String {
@@ -88,21 +88,22 @@ impl Asset {
         self.get_network().get_web3_client_http()
     }
 
-    pub fn contract(&self, client: web3::Web3<Http>) -> Contract<Http> {
+    pub fn contract(&self) -> Contract<Http> {
+        let client = self.get_web3_client_http();
         let contract_address = self.as_address().unwrap();
         let json_abi = self.abi_json_string();
         Contract::from_json(client.eth(), contract_address, json_abi.as_bytes()).unwrap()
     }
 
-    pub async fn decimals(&self, client: web3::Web3<Http>) -> u8 {
-        let contract = self.contract(client);
+    pub async fn decimals(&self) -> u8 {
+        let contract = &self.contract();
         let result = contract.query("decimals", (), None, Options::default(), None);
         let result_decimals: u8 = result.await.unwrap();
         result_decimals
     }
 
-    pub async fn balance_of(&self, client: web3::Web3<Http>, account: H160) -> U256 {
-        let contract = self.contract(client);
+    pub async fn balance_of(&self, account: H160) -> U256 {
+        let contract = &self.contract();
         let result = contract.query("balanceOf", (account,), None, Options::default(), None);
         let result_balance: U256 = result.await.unwrap();
         result_balance
@@ -112,35 +113,28 @@ impl Asset {
         vec![coin_address, self.as_address().unwrap()]
     }
 
-    pub async fn balance_of_quoted_in(
-        &self,
-        client: web3::Web3<Http>,
-        wallet: &Wallet,
-        quoted: &Asset,
-    ) -> U256 {
+    pub async fn balance_of_quoted_in(&self, wallet: &Wallet, quoted: &Asset) -> U256 {
         let account = wallet.address();
         let exchange = self.get_exchange();
-        let base_balance = self.balance_of(client.clone(), account).await;
+        let base_balance = self.balance_of(account).await;
 
         if self.name() == quoted.name() {
             return base_balance;
         }
 
-        let assets_path = exchange
-            .build_route_for(client.clone(), &self, quoted)
-            .await;
+        let assets_path = exchange.build_route_for(&self, quoted).await;
 
         exchange
-            .get_amounts_out(client.clone(), base_balance, assets_path)
+            .get_amounts_out(base_balance, assets_path)
             .await
             .last()
             .unwrap()
             .into()
     }
 
-    pub async fn allowance(&self, client: web3::Web3<Http>, owner: H160, spender: H160) -> U256 {
+    pub async fn allowance(&self, owner: H160, spender: H160) -> U256 {
         let result: U256 = self
-            .contract(client.clone())
+            .contract()
             .query(
                 "allowance",
                 (owner, spender),
@@ -153,16 +147,12 @@ impl Asset {
         result
     }
 
-    pub async fn approve_spender(
-        &self,
-        client: web3::Web3<Http>,
-        gas_price: U256,
-        from_wallet: &Wallet,
-        spender: H160,
-        amount: U256,
-    ) {
+    pub async fn approve_spender(&self, from_wallet: &Wallet, spender: H160, amount: U256) {
+        let client = self.get_web3_client_http();
+        let gas_price = client.eth().gas_price().await.unwrap();
+
         let estimate_gas = shared::blockchain_utils::estimate_gas(
-            &self.contract(client.clone()),
+            &self.contract(),
             from_wallet,
             "approve",
             (spender, amount),
@@ -176,7 +166,7 @@ impl Asset {
         log::debug!("approve_spender called estimate_gas: {:?}", estimate_gas);
 
         let func_data = shared::blockchain_utils::generate_func_data(
-            &self.contract(client.clone()),
+            &self.contract(),
             "approve",
             &[Token::Address(spender), Token::Uint(amount)],
         );
@@ -203,15 +193,12 @@ impl Asset {
         .await;
     }
 
-    pub async fn wrap(
-        &self,
-        client: web3::Web3<Http>,
-        from_wallet: &Wallet,
-        amount: U256,
-        gas_price: U256,
-    ) {
+    pub async fn wrap(&self, from_wallet: &Wallet, amount: U256) {
+        let client = self.get_web3_client_http();
+        let gas_price = client.eth().gas_price().await.unwrap();
+
         let estimate_gas = shared::blockchain_utils::estimate_gas(
-            &self.contract(client.clone()),
+            &self.contract(),
             from_wallet,
             "deposit",
             (),
@@ -224,11 +211,8 @@ impl Asset {
         .await;
         log::debug!("wrap called estimate_gas: {:?}", estimate_gas);
 
-        let func_data = shared::blockchain_utils::generate_func_data(
-            &self.contract(client.clone()),
-            "deposit",
-            &[],
-        );
+        let func_data =
+            shared::blockchain_utils::generate_func_data(&self.contract(), "deposit", &[]);
         log::debug!("wrap(): deposit_data: {:?}", func_data);
 
         let nonce = from_wallet.nonce(client.clone()).await;
@@ -252,16 +236,12 @@ impl Asset {
         .await;
     }
 
-    pub async fn withdraw(
-        &self,
-        client: web3::Web3<Http>,
-        wallet: &Wallet,
-        withdraw_wallet: &WithdrawWallet,
-        amount: U256,
-        gas_price: U256,
-    ) {
+    pub async fn withdraw(&self, wallet: &Wallet, withdraw_wallet: &WithdrawWallet, amount: U256) {
+        let client = self.get_web3_client_http();
+        let gas_price = client.eth().gas_price().await.unwrap();
+
         let estimate_gas = shared::blockchain_utils::estimate_gas(
-            &self.contract(client.clone()),
+            &self.contract(),
             wallet,
             "transfer",
             (withdraw_wallet.as_address(), amount),
@@ -274,7 +254,7 @@ impl Asset {
         log::debug!("withdraw called estimate_gas: {:?}", estimate_gas);
 
         let func_data = shared::blockchain_utils::generate_func_data(
-            &self.contract(client.clone()),
+            &self.contract(),
             "transfer",
             &[
                 Token::Address(withdraw_wallet.as_address()),

@@ -6,32 +6,18 @@ pub const APPROVE_COMMAND: &str = "approve";
 pub async fn call_sub_commands(args: &ArgMatches) {
     let exchange = cmd::get_exchange(args);
     let wallet = cmd::get_wallet(args);
-    let asset = cmd::get_asset(args);
+    let asset = cmd::get_asset_in_network_from_args(args, exchange.network_id());
 
-    let client = exchange.get_network().get_web3_client_http();
-
-    let asset_decimals = asset.decimals(client.clone()).await;
+    let asset_decimals = asset.decimals().await;
     let amount = cmd::get_amount(args, asset_decimals);
     log::debug!("amount: {:?}", amount);
 
-    let gas_price = client.eth().gas_price().await.unwrap();
-
     asset
-        .approve_spender(
-            client.clone(),
-            gas_price,
-            wallet,
-            exchange.as_router_address().unwrap(),
-            amount,
-        )
+        .approve_spender(wallet, exchange.as_router_address().unwrap(), amount)
         .await;
 
     let remaning = asset
-        .allowance(
-            client.clone(),
-            wallet.address(),
-            exchange.as_router_address().unwrap(),
-        )
+        .allowance(wallet.address(), exchange.as_router_address().unwrap())
         .await;
     log::debug!(
         "approved_spender allowance remaning to spend: {:?}, asset_decimals: {}",

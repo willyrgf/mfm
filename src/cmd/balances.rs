@@ -17,9 +17,8 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         "Decimals"
     ]);
     for asset in config.assets.hashmap().values() {
-        let client = asset.get_network().get_web3_client_http();
-        let balance_of = asset.balance_of(client.clone(), wallet.address()).await;
-        let decimals = asset.decimals(client.clone()).await;
+        let balance_of = asset.balance_of(wallet.address()).await;
+        let decimals = asset.decimals().await;
         table.add_row(row![
             asset.network_id(),
             asset.name(),

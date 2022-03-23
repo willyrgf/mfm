@@ -247,7 +247,20 @@ pub fn get_asset<'a>(args: &'a ArgMatches) -> &'a Asset {
     }
 }
 
-pub fn get_quoted_asset<'a>(args: &'a ArgMatches, network_id: &str) -> Option<&'a Asset> {
+pub fn get_asset_in_network_from_args<'a>(args: &'a ArgMatches, network_id: &str) -> &'a Asset {
+    match args.value_of("asset") {
+        Some(a) => Config::global()
+            .assets
+            .find_by_name_and_network(a, network_id)
+            .unwrap(),
+        None => panic!("--asset not supported"),
+    }
+}
+
+pub fn get_quoted_asset_in_network_from_args<'a>(
+    args: &'a ArgMatches,
+    network_id: &str,
+) -> Option<&'a Asset> {
     let config = Config::global();
     match args.value_of("quoted-asset") {
         Some(a) => config.assets.find_by_name_and_network(a, network_id),
@@ -290,11 +303,37 @@ pub fn get_token_input<'a>(args: &'a ArgMatches) -> &'a Asset {
     }
 }
 
+pub fn get_token_input_in_network_from_args<'a>(
+    args: &'a ArgMatches,
+    network_id: &str,
+) -> &'a Asset {
+    match args.value_of("token_input") {
+        Some(i) => Config::global()
+            .assets
+            .find_by_name_and_network(i, network_id)
+            .unwrap(),
+        None => panic!("--token_input not supported on current network"),
+    }
+}
+
 pub fn get_token_output<'a>(args: &'a ArgMatches) -> &'a Asset {
     let config = Config::global();
     match args.value_of("token_output") {
         Some(i) => config.assets.get(i),
         None => panic!("--token_output not supported"),
+    }
+}
+
+pub fn get_token_output_in_network_from_args<'a>(
+    args: &'a ArgMatches,
+    network_id: &str,
+) -> &'a Asset {
+    match args.value_of("token_output") {
+        Some(i) => Config::global()
+            .assets
+            .find_by_name_and_network(i, network_id)
+            .unwrap(),
+        None => panic!("--token_output not supported on current network"),
     }
 }
 
