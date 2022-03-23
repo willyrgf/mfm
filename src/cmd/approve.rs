@@ -1,7 +1,19 @@
 use crate::cmd;
-use clap::ArgMatches;
+use clap::{ArgMatches, Command};
 
 pub const APPROVE_COMMAND: &str = "approve";
+
+pub fn generate_cmd<'a>() -> Command<'a> {
+    Command::new(APPROVE_COMMAND)
+        .about("Approve token spending (needed to swap tokens)")
+        .arg(
+            clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router as spender")
+                .required(true),
+        )
+        .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
+        .arg(clap::arg!(-a --"asset" <ASSET> "Asset to approve spender").required(true))
+        .arg(clap::arg!(-v --"amount" <VALUE> "Amount to allow spending").required(true))
+}
 
 pub async fn call_sub_commands(args: &ArgMatches) {
     let exchange = cmd::get_exchange(args);

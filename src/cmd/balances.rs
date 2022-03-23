@@ -1,9 +1,15 @@
 use crate::{cmd, config::Config, shared};
-use clap::ArgMatches;
+use clap::{ArgMatches, Command};
 use prettytable::{cell, row, Table};
 //use web3::types::U256;
 
 pub const BALANCES_COMMAND: &str = "balances";
+
+pub fn generate_cmd<'a>() -> Command<'a> {
+    Command::new(BALANCES_COMMAND)
+        .about("Check balances from all assets listed on config")
+        .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
+}
 
 pub async fn call_sub_commands(args: &ArgMatches) {
     let config = Config::global();

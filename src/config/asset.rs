@@ -56,7 +56,7 @@ impl Asset {
     }
 
     pub fn get_exchange<'a>(&self) -> &'a Exchange {
-        Config::global().exchanges.get(&self.exchange_id())
+        Config::global().exchanges.get(self.exchange_id())
     }
 
     pub fn abi_path(&self) -> String {
@@ -67,7 +67,7 @@ impl Asset {
             self.name.as_str()
         );
         // TODO: move it to const static
-        let fallback_path = format!("./res/assets/erc20_abi.json");
+        let fallback_path = "./res/assets/erc20_abi.json".to_string();
         if Path::new(&path).exists() {
             return path;
         }
@@ -81,7 +81,7 @@ impl Asset {
     }
 
     pub fn get_network<'a>(&self) -> &'a Network {
-        Config::global().networks.get(&self.network_id.as_str())
+        Config::global().networks.get(self.network_id.as_str())
     }
 
     pub fn get_web3_client_http(&self) -> Web3<Http> {
@@ -122,7 +122,7 @@ impl Asset {
             return base_balance;
         }
 
-        let assets_path = exchange.build_route_for(&self, quoted).await;
+        let assets_path = exchange.build_route_for(self, quoted).await;
 
         exchange
             .get_amounts_out(base_balance, assets_path)
@@ -305,12 +305,10 @@ impl Assets {
             return None;
         }
 
-        let r = match result.last() {
+        match result.last() {
             Some((_, a)) => Some(a),
             _ => None,
-        };
-
-        r
+        }
     }
 
     pub fn find_by_address(&self, address: &str) -> &Asset {

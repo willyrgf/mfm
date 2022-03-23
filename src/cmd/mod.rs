@@ -32,139 +32,15 @@ pub fn new() -> clap::Command<'static> {
                 .default_value("config.yaml"),
         )
         .subcommand_required(true)
-        .subcommand(
-            Command::new(wrap::WRAP_COMMAND)
-                .about("Wrap a coin to a token")
-                .arg(
-                    clap::arg!(--"network" <bsc> "Network to wrap coin to token")
-                        .required(true),
-                )
-                .arg(
-                    clap::arg!(--"wallet" <WALLET_NAME> "Wallet id from config file")
-                        .required(true),
-                )
-                .arg(
-                    clap::arg!(--"amount" <AMMOUNT> "Amount to wrap coin into token, default: (balance-min_balance_coin)")
-                        .required(false)
-                        ,
-                ),
-        )
-        .subcommand(
-            Command::new(swap::SWAP_COMMAND)
-                .about("Swap Tokens for Tokens supporting fees on transfer")
-                .arg(
-                    clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router")
-                        .required(true),
-                )
-                .arg(
-                    clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file")
-                        .required(true),
-                )
-                .arg(
-                    clap::arg!(-a --"amount" <AMMOUNT> "Amount of TokenA to swap to TokenB")
-                        .required(false)
-                )
-                .arg(
-                    clap::arg!(-i --"token_input" <TOKEN_INPUT> "Asset of input token")
-                        .required(false)
-                )
-                .arg(
-                    clap::arg!(-o --"token_output" <TOKEN_OUTPUT> "Asset of output token")
-                        .required(false)
-                )
-                .arg(
-                    clap::arg!(-s --"slippage" <SLIPPAGE> "Slippage (default 0.5)")
-                        .required(false)
-                        .default_value("0.5")
-                )
-        )
-        .subcommand(
-            Command::new("transaction")
-                .about("Get transaction details")
-                .arg(
-                    clap::arg!(-n --"network" <bsc> "Network to search transaction")
-                        .required(true),
-                )
-        )
-        .subcommand(
-            Command::new("allowance")
-                .about("Get allowance for an token")
-                .arg(
-                    clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router")
-                        .required(true),
-                )
-                .arg(
-                    clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file")
-                        .required(true),
-                )
-                .arg(
-                    clap::arg!(-a --"asset" <ASSET> "Asset to check allowance")
-                        .required(true)
-                )
-        )
-        .subcommand(
-            Command::new("approve")
-                .about("Approve token spending (needed to swap tokens)")
-                .arg(
-                    clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router as spender")
-                        .required(true),
-                )
-                .arg(
-                    clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file")
-                        .required(true),
-                )
-                .arg(
-                    clap::arg!(-a --"asset" <ASSET> "Asset to approve spender")
-                        .required(true)
-                )
-                .arg(
-                    clap::arg!(-v --"amount" <VALUE> "Amount to allow spending")
-                        .required(true)
-                )
-        )
-        .subcommand(
-            Command::new("balances")
-                .about("Check balances from all assets listed on config")
-                .arg(
-                    clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file")
-                        .required(true),
-                )
-        )
-        .subcommand(
-            Command::new("rebalancer")
-                .about("Fires a rebalancer")
-                .arg(
-                    clap::arg!(-n --"name" <REBALANCER_NAME> "Rebalancer name from config file")
-                        .required(true),
-                )
-        )
-        .subcommand(
-            yield_farm::generate_cmd()
-        )
-        .subcommand(
-                    Command::new(withdraw::WITHDRAW_COMMAND)
-                        .about("Withdraw to a wallet")
-                        .arg(
-                            clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file")
-                                .required(true),
-                        )
-                .arg(
-                    clap::arg!(-n --"network" <bsc> "Network to wrap coin to token")
-                        .required(true),
-                )
-                .arg(
-                    clap::arg!(-t --"withdraw-wallet" <WITHDRAW_WALLET_NAME> "Withdraw wallet to receive the transfer")
-                        .required(true),
-                )
-                        .arg(
-                            clap::arg!(-a --"asset" <ASSET> "Asset to withdraw")
-                                .required(true)
-                        )
-                        .arg(
-                            clap::arg!(-v --"amount" <VALUE> "Amount to withdraw")
-                                .required(true)
-                        )
-                )
+        .subcommand(wrap::generate_cmd())
+        .subcommand(swap::generate_cmd())
+        .subcommand(transaction::generate_cmd())
+        .subcommand(allowance::generate_cmd())
+        .subcommand(approve::generate_cmd())
+        .subcommand(balances::generate_cmd())
+        .subcommand(rebalancer::generate_cmd())
+        .subcommand(yield_farm::generate_cmd())
+        .subcommand(withdraw::generate_cmd())
 }
 
 pub async fn call_sub_commands(matches: &ArgMatches) {
@@ -365,7 +241,7 @@ pub fn get_withdraw_wallet<'a>(args: &'a ArgMatches) -> &'a WithdrawWallet {
     }
 }
 
-pub fn get_yield_farm<'a>(args: &'a ArgMatches) -> &'a YieldFarm {
+pub fn get_yield_farm(args: &ArgMatches) -> &YieldFarm {
     let config = Config::global();
     match args.value_of("yield-farm") {
         Some(w) => config.yield_farms.get(w),

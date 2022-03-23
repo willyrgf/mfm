@@ -1,8 +1,26 @@
 use crate::cmd;
-use clap::ArgMatches;
+use clap::{ArgMatches, Command};
 use web3::types::U256;
 
 pub const WRAP_COMMAND: &str = "wrap";
+
+pub fn generate_cmd<'a>() -> Command<'a> {
+    Command::new(WRAP_COMMAND)
+    .about("Wrap a coin to a token")
+    .arg(
+        clap::arg!(--"network" <bsc> "Network to wrap coin to token")
+            .required(true),
+    )
+    .arg(
+        clap::arg!(--"wallet" <WALLET_NAME> "Wallet id from config file")
+            .required(true),
+    )
+    .arg(
+        clap::arg!(--"amount" <AMMOUNT> "Amount to wrap coin into token, default: (balance-min_balance_coin)")
+            .required(false)
+            ,
+    )
+}
 
 pub async fn call_sub_commands(args: &ArgMatches) {
     let network = cmd::get_network(args);

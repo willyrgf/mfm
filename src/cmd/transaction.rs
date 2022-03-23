@@ -1,7 +1,13 @@
 use crate::cmd;
-use clap::ArgMatches;
+use clap::{ArgMatches, Command};
 
 pub const TRANSACTION_COMMAND: &str = "transaction";
+
+pub fn generate_cmd<'a>() -> Command<'a> {
+    Command::new("transaction")
+        .about("Get transaction details")
+        .arg(clap::arg!(-n --"network" <bsc> "Network to search transaction").required(true))
+}
 
 //TODO: finish it
 pub async fn call_sub_commands(args: &ArgMatches) {

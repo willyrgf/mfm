@@ -2,10 +2,19 @@ use crate::{
     cmd,
     config::{self, asset::Asset, rebalancer::Rebalancer},
 };
-use clap::ArgMatches;
+use clap::{ArgMatches, Command};
 use web3::{ethabi::Token, types::U256};
 
 pub const REBALANCER_COMMAND: &str = "rebalancer";
+
+pub fn generate_cmd<'a>() -> Command<'a> {
+    Command::new(REBALANCER_COMMAND)
+        .about("Fires a rebalancer")
+        .arg(
+            clap::arg!(-n --"name" <REBALANCER_NAME> "Rebalancer name from config file")
+                .required(true),
+        )
+}
 
 #[derive(Debug)]
 pub struct AssetBalances<'a> {
@@ -131,7 +140,7 @@ pub async fn move_assets_to_parking<'a>(
         let parking_asset_path_tokens: Vec<Token> = parking_asset_path
             .clone()
             .into_iter()
-            .map(|p| Token::Address(p))
+            .map(Token::Address)
             .collect::<Vec<_>>();
         exchange
             .swap_tokens_for_tokens(

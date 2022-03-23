@@ -1,7 +1,15 @@
 use crate::cmd;
-use clap::ArgMatches;
+use clap::{ArgMatches, Command};
 
 pub const ALLOWANCE_COMMAND: &str = "allowance";
+
+pub fn generate_cmd<'a>() -> Command<'a> {
+    Command::new(ALLOWANCE_COMMAND)
+        .about("Get allowance for an token")
+        .arg(clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router").required(true))
+        .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
+        .arg(clap::arg!(-a --"asset" <ASSET> "Asset to check allowance").required(true))
+}
 
 pub async fn call_sub_commands(args: &ArgMatches) {
     let exchange = cmd::get_exchange(args);

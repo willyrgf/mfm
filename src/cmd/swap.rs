@@ -1,9 +1,27 @@
 use crate::{cmd, shared};
-use clap::ArgMatches;
+use clap::{ArgMatches, Command};
 use prettytable::{cell, row, Table};
 use web3::{ethabi::Token, types::U256};
 
 pub const SWAP_COMMAND: &str = "swap";
+
+pub fn generate_cmd<'a>() -> Command<'a> {
+    Command::new(SWAP_COMMAND)
+        .about("Swap Tokens for Tokens supporting fees on transfer")
+        .arg(clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router").required(true))
+        .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
+        .arg(
+            clap::arg!(-a --"amount" <AMMOUNT> "Amount of TokenA to swap to TokenB")
+                .required(false),
+        )
+        .arg(clap::arg!(-i --"token_input" <TOKEN_INPUT> "Asset of input token").required(false))
+        .arg(clap::arg!(-o --"token_output" <TOKEN_OUTPUT> "Asset of output token").required(false))
+        .arg(
+            clap::arg!(-s --"slippage" <SLIPPAGE> "Slippage (default 0.5)")
+                .required(false)
+                .default_value("0.5"),
+        )
+}
 
 pub async fn call_sub_commands(args: &ArgMatches) {
     let exchange = cmd::get_exchange(args);

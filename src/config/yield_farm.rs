@@ -34,7 +34,7 @@ impl YieldFarm {
     }
 
     pub fn network_id(&self) -> &str {
-        &self.network_id.as_str()
+        self.network_id.as_str()
     }
 
     pub fn address(&self) -> String {
