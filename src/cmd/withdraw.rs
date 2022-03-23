@@ -10,7 +10,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let client = network.get_web3_client_http();
 
     let asset = cmd::get_asset(args);
-    let asset_decimals = asset.decimals(client.clone()).await;
+    let asset_decimals = asset.decimals().await;
     let amount = cmd::get_amount(args, asset_decimals);
 
     let gas_price = client.eth().gas_price().await.unwrap();

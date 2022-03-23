@@ -78,9 +78,9 @@ pub async fn call_info_cmd(args: &ArgMatches) {
         let client = network.get_web3_client_http();
         let quoted_asset = cmd::get_quoted_asset(args, yield_farm.network_id()).unwrap();
         let exchange = quoted_asset.get_exchange();
-        let quoted_asset_decimal = quoted_asset.decimals(client.clone()).await;
+        let quoted_asset_decimal = quoted_asset.decimals().await;
         let yield_farm_asset = yield_farm.get_asset();
-        let yield_farm_asset_decimals = yield_farm_asset.decimals(client.clone()).await;
+        let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
 
         let quote_asset_path = exchange
             .build_route_for(client.clone(), yield_farm_asset, quoted_asset)
@@ -131,7 +131,7 @@ pub async fn call_run_cmd(args: &ArgMatches) {
         let network = yield_farm.get_network();
         let client = network.get_web3_client_http();
         let yield_farm_asset = yield_farm.get_asset();
-        let yield_farm_asset_decimals = yield_farm_asset.decimals(client.clone()).await;
+        let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
 
         let pending_rewards = yield_farm.get_pending_rewards(client.clone()).await;
         let min_rewards_required =

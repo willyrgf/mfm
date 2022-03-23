@@ -15,8 +15,8 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let output_token = cmd::get_token_output(args);
     log::debug!("output_token: {:?}", output_token);
 
-    let input_token_decimals = input_token.decimals(client.clone()).await;
-    let output_token_decimals = output_token.decimals(client.clone()).await;
+    let input_token_decimals = input_token.decimals().await;
+    let output_token_decimals = output_token.decimals().await;
 
     let amount_in = cmd::get_amount(args, input_token_decimals);
     let slippage = cmd::get_slippage(args, output_token_decimals);

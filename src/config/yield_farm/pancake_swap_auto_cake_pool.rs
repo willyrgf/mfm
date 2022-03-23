@@ -67,7 +67,7 @@ pub async fn get_pending_rewards_amounts(
 
 pub async fn get_pending_rewards(yield_farm: &YieldFarm, client: web3::Web3<Http>) -> U256 {
     let asset = yield_farm.get_asset();
-    let asset_decimals = asset.decimals(client.clone()).await;
+    let asset_decimals = asset.decimals().await;
     let contract = yield_farm.contract(client.clone());
     let wallet = yield_farm.get_wallet();
 
@@ -79,7 +79,7 @@ pub async fn get_pending_rewards(yield_farm: &YieldFarm, client: web3::Web3<Http
 
 pub async fn harvest(yield_farm: &YieldFarm, client: web3::Web3<Http>) {
     let asset = yield_farm.get_asset();
-    let asset_decimals = asset.decimals(client.clone()).await;
+    let asset_decimals = asset.decimals().await;
     let contract = yield_farm.contract(client.clone());
     let from_wallet = yield_farm.get_wallet();
     let (pending_shares, _, _): (U256, U256, U256) =

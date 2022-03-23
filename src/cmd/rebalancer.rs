@@ -26,12 +26,10 @@ impl<'a> AssetBalances<'a> {
         let quoted_asset = rebalancer.get_quoted_asset();
         Self {
             asset,
-            asset_decimals: asset.decimals(client.clone()).await,
+            asset_decimals: asset.decimals().await,
             percent: rebalancer.get_asset_config_percent(asset.name()),
-            balance: asset
-                .balance_of(client.clone(), rebalancer.get_wallet().address())
-                .await,
-            quoted_asset_decimals: quoted_asset.decimals(client.clone()).await,
+            balance: asset.balance_of(rebalancer.get_wallet().address()).await,
+            quoted_asset_decimals: quoted_asset.decimals().await,
             quoted_balance: asset
                 .balance_of_quoted_in(client.clone(), rebalancer.get_wallet(), quoted_asset)
                 .await,
@@ -90,11 +88,8 @@ pub fn get_total_quoted_balance(assets_balances: &[AssetBalances]) -> U256 {
 pub async fn get_total_parking_balance(
     parking_asset: &Asset,
     from_wallet: &config::wallet::Wallet,
-    client: web3::Web3<Http>,
 ) -> U256 {
-    parking_asset
-        .balance_of(client.clone(), from_wallet.address())
-        .await
+    parking_asset.balance_of(from_wallet.address()).await
 }
 
 pub async fn move_assets_to_parking<'a>(
@@ -108,7 +103,7 @@ pub async fn move_assets_to_parking<'a>(
     let parking_asset_network = parking_asset_exchange.get_network();
     let parking_asset_client = parking_asset_network.get_web3_client_http();
     let gas_price = parking_asset_client.eth().gas_price().await.unwrap();
-    let parking_asset_decimals = parking_asset.decimals(parking_asset_client.clone()).await;
+    let parking_asset_decimals = parking_asset.decimals().await;
 
     for ab in assets_balances.iter() {
         if ab.asset.name() == rebalancer.parking_asset_id() {
@@ -175,7 +170,7 @@ pub async fn move_parking_to_assets<'a>(
     let parking_asset_network = parking_asset_exchange.get_network();
     let parking_asset_client = parking_asset_network.get_web3_client_http();
     let gas_price = parking_asset_client.eth().gas_price().await.unwrap();
-    let parking_asset_decimals = parking_asset.decimals(parking_asset_client.clone()).await;
+    let parking_asset_decimals = parking_asset.decimals().await;
 
     for ab in assets_balances.iter() {
         if ab.asset.name() == rebalancer.parking_asset_id() {
@@ -265,14 +260,10 @@ pub async fn call_sub_commands(args: &ArgMatches) {
 
     let from_wallet = rebalancer.get_wallet();
     let parking_asset = rebalancer.get_parking_asset();
-    let parking_asset_exchange = parking_asset.get_exchange();
-    let parking_asset_network = parking_asset_exchange.get_network();
-    let parking_asset_client = parking_asset_network.get_web3_client_http();
     // move all balances to parking asset
     move_assets_to_parking(total_quoted_balance, &assets_balances, rebalancer).await;
 
-    let total_parking_balance =
-        get_total_parking_balance(parking_asset, from_wallet, parking_asset_client).await;
+    let total_parking_balance = get_total_parking_balance(parking_asset, from_wallet).await;
     log::debug!("total_parking_balance: {}", total_parking_balance);
     //move parking to assets
     move_parking_to_assets(total_parking_balance, &assets_balances, rebalancer).await;

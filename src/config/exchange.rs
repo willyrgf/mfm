@@ -33,6 +33,10 @@ impl Exchange {
         self.name.as_str()
     }
 
+    pub fn network_id(&self) -> &str {
+        self.network_id.as_str()
+    }
+
     pub fn router_address(&self) -> &str {
         self.router_address.as_str()
     }

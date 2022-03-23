@@ -10,7 +10,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let client = network.get_web3_client_http();
 
     let wrapped_asset = network.get_wrapped_asset();
-    let wrapped_asset_decimals = wrapped_asset.decimals(client.clone()).await;
+    let wrapped_asset_decimals = wrapped_asset.decimals().await;
 
     //TODO: doc the calc and the None case
     let amount_in = match args.value_of("amount") {
