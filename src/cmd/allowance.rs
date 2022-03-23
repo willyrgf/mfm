@@ -12,9 +12,9 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 }
 
 pub async fn call_sub_commands(args: &ArgMatches) {
-    let exchange = cmd::get_exchange(args);
-    let wallet = cmd::get_wallet(args);
-    let asset = cmd::get_asset_in_network_from_args(args, exchange.network_id());
+    let exchange = cmd::helpers::get_exchange(args);
+    let wallet = cmd::helpers::get_wallet(args);
+    let asset = cmd::helpers::get_asset_in_network_from_args(args, exchange.network_id());
 
     let asset_decimals = asset.decimals().await;
     let remaning = asset

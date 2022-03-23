@@ -23,8 +23,8 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 }
 
 pub async fn call_sub_commands(args: &ArgMatches) {
-    let network = cmd::get_network(args);
-    let wallet = cmd::get_wallet(args);
+    let network = cmd::helpers::get_network(args);
+    let wallet = cmd::helpers::get_wallet(args);
     let client = network.get_web3_client_http();
 
     let wrapped_asset = network.get_wrapped_asset();

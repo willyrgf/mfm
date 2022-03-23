@@ -11,7 +11,7 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 
 //TODO: finish it
 pub async fn call_sub_commands(args: &ArgMatches) {
-    let network = cmd::get_network(args);
+    let network = cmd::helpers::get_network(args);
     let _client = network.get_web3_client_http();
 
     // let transaction_receipt = client.eth().transaction_receipt();

@@ -13,7 +13,7 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 
 pub async fn call_sub_commands(args: &ArgMatches) {
     let config = Config::global();
-    let wallet = cmd::get_wallet(args);
+    let wallet = cmd::helpers::get_wallet(args);
     let mut table = Table::new();
     table.add_row(row![
         "Network",

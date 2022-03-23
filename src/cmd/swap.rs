@@ -24,19 +24,21 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 }
 
 pub async fn call_sub_commands(args: &ArgMatches) {
-    let exchange = cmd::get_exchange(args);
-    let wallet = cmd::get_wallet(args);
+    let exchange = cmd::helpers::get_exchange(args);
+    let wallet = cmd::helpers::get_wallet(args);
 
-    let input_token = cmd::get_token_input_in_network_from_args(args, exchange.network_id());
+    let input_token =
+        cmd::helpers::get_token_input_in_network_from_args(args, exchange.network_id());
     log::debug!("input_token: {:?}", input_token);
-    let output_token = cmd::get_token_output_in_network_from_args(args, exchange.network_id());
+    let output_token =
+        cmd::helpers::get_token_output_in_network_from_args(args, exchange.network_id());
     log::debug!("output_token: {:?}", output_token);
 
     let input_token_decimals = input_token.decimals().await;
     let output_token_decimals = output_token.decimals().await;
 
-    let amount_in = cmd::get_amount(args, input_token_decimals);
-    let slippage = cmd::get_slippage(args, output_token_decimals);
+    let amount_in = cmd::helpers::get_amount(args, input_token_decimals);
+    let slippage = cmd::helpers::get_slippage(args, output_token_decimals);
 
     let asset_path = exchange.build_route_for(input_token, output_token).await;
     let path_token: Vec<Token> = asset_path

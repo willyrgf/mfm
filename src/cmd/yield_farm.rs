@@ -75,7 +75,8 @@ pub async fn call_info_cmd(args: &ArgMatches) {
 
     for yield_farm in get_farms_to_look(args) {
         let quoted_asset =
-            cmd::get_quoted_asset_in_network_from_args(args, yield_farm.network_id()).unwrap();
+            cmd::helpers::get_quoted_asset_in_network_from_args(args, yield_farm.network_id())
+                .unwrap();
         let exchange = quoted_asset.get_exchange();
         let quoted_asset_decimal = quoted_asset.decimals().await;
         let yield_farm_asset = yield_farm.get_asset();
@@ -117,7 +118,7 @@ pub async fn call_info_cmd(args: &ArgMatches) {
 
 pub async fn call_run_cmd(args: &ArgMatches) {
     let mut table = Table::new();
-    let force_harvest = cmd::get_force_harvest(args);
+    let force_harvest = cmd::helpers::get_force_harvest(args);
     table.add_row(row![
         "Harvested",
         "Farm",

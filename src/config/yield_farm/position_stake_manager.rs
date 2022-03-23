@@ -5,7 +5,7 @@ use web3::{
     types::{Address, Bytes, TransactionParameters, U256},
 };
 
-use crate::cmd;
+use crate::shared;
 
 use super::YieldFarm;
 
@@ -90,6 +90,6 @@ pub async fn harvest(pool_id: i32, yield_farm: &YieldFarm) {
         .unwrap();
     log::debug!("harvest(): tx_adress: {}", tx_address);
 
-    let receipt = cmd::wait_receipt(client.clone(), tx_address).await;
+    let receipt = shared::blockchain_utils::wait_receipt(client.clone(), tx_address).await;
     log::debug!("receipt: {:?}", receipt);
 }

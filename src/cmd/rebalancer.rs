@@ -215,7 +215,7 @@ pub async fn move_parking_to_assets<'a>(
 }
 
 pub async fn call_sub_commands(args: &ArgMatches) {
-    let rebalancer = cmd::get_rebalancer(args);
+    let rebalancer = cmd::helpers::get_rebalancer(args);
     log::debug!("rebalancer: {:?}", rebalancer);
 
     if !rebalancer.is_valid_portfolio_total_percentage() {
