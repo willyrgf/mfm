@@ -66,6 +66,7 @@ impl Asset {
             self.exchange_id.as_str(),
             self.name.as_str()
         );
+        // TODO: move it to const static
         let fallback_path = format!("./res/assets/erc20_abi.json");
         if Path::new(&path).exists() {
             return path;
@@ -318,6 +319,7 @@ impl Assets {
             .iter()
             .filter(|(_, a)| a.name == name && a.network_id == network);
 
+        // TODO: maybe validate it in the construction of assets in the new mod
         if result.clone().count() > 1 {
             log::error!("Same asset multiples times for a network");
             return None;

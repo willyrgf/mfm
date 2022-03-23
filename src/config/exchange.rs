@@ -51,6 +51,7 @@ impl Exchange {
 
     pub fn router_abi_path(&self) -> String {
         let path = format!("./res/exchanges/{}/abi.json", self.name.as_str());
+        // TODO: move it to const static
         let fallback_path = format!("./res/exchanges/uniswap_v2_router_abi.json");
         if Path::new(&path).exists() {
             return path;
@@ -60,6 +61,7 @@ impl Exchange {
 
     pub fn factory_abi_path(&self) -> String {
         let path = format!("./res/exchanges/{}/factory_abi.json", self.name.as_str());
+        // TODO: move it to const static
         let fallback_path = format!("./res/exchanges/uniswap_v2_factory_abi.json");
         if Path::new(&path).exists() {
             return path;
