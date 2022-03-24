@@ -1,6 +1,8 @@
 wallets:
   test-wallet:
     private_key: YOUR_PRIVATE_KEY
+  farm-wallet:
+    private_key: YOUR_PRIVATE_KEY
 
 withdraw_wallets:
   test-wallet2:
@@ -35,6 +37,84 @@ exchanges:
     router_address: 0xa5e0829caced8ffdd4de3c43696c57f7d7a678ff
     factory_address: 0x5757371414417b8c6caad45baef941abc7d3ab32
     network_id: polygon
+
+rebalancers:
+  test-rebalancer:
+    network_id: bsc
+    wallet_id: test-wallet
+    name: test-anonq-busd
+    portfolio:
+      anonq:
+        percent: 40
+      busd:
+        percent: 25
+      wbnb:
+        percent: 25
+      eth:
+        percent: 5
+      btcb:
+        percent: 5
+    # if zero, always run
+    threshold_percent: 2
+    quoted_in: busd
+    parking_asset_id: busd
+    parking_asset_min_move: 0.01
+
+yield_farms:
+  posi-farm-bnb-posi:
+    name: posi-farm-bnb-posi
+    contract_name: position_stake_manager
+    address: 0x0c54b0b7d61de871db47c3ad3f69feb0f2c8db0b
+    wallet_id: farm-wallet
+    asset_id: posi
+    network_id: bsc
+    operation: posi_farm_bnb_posi
+    min_rewards_required: 10
+    #quoted_asset_id: busd
+  posi-farm-busd-posi:
+    name: posi-farm-busd-posi
+    contract_name: position_stake_manager
+    address: 0x0c54b0b7d61de871db47c3ad3f69feb0f2c8db0b
+    wallet_id: farm-wallet
+    asset_id: posi
+    network_id: bsc
+    operation: posi_farm_busd_posi
+    min_rewards_required: 7
+  auto-cake:
+    name: auto-cake
+    contract_name: pancake_swap_auto_cake_pool
+    address: 0xa80240eb5d7e05d3f250cf000eec0891d00b51cc
+    wallet_id: farm-wallet
+    asset_id: cake
+    network_id: bsc
+    operation: cake_auto_pool
+    min_rewards_required: 1
+  auto-pacoca:
+    name: auto-pacoca
+    contract_name: pacoca_vault
+    address: 0x16205528a8f7510f4421009a7654835b541bb1b9
+    wallet_id: farm-wallet
+    asset_id: pacoca
+    network_id: bsc
+    operation: pacoca_auto_pool
+    min_rewards_required: 1
+
+machines:
+  farm-all-to-busd-vault:
+    name: farm-all-to-busd-vault
+    operations:
+      collect_farms_and_swap:
+        swap_to_asset_id: busd
+        yield-farms:
+          auto-cake:
+            yield_farm_id: auto-cake
+          posi-farm-bnb-posi:
+            yield_farm_id: posi-farm-bnb-posi
+          posi-farm-busd-posi:
+            yield_farm_id: posi-farm-busd-posi
+      withdraw:
+        wallet_id: farm-wallet
+        withdraw_wallet_id: busd-vault
 
 assets:
   dquick:
@@ -91,71 +171,9 @@ assets:
     exchange_id: pancake_swap_v2
     address: 0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82
     slippage: 2
-
-rebalancers:
-  test-rebalancer:
+  pacoca:
+    name: pacoca
     network_id: bsc
-    wallet_id: test-wallet
-    name: test-anonq-busd
-    portfolio:
-      anonq:
-        percent: 40
-      busd:
-        percent: 25
-      wbnb:
-        percent: 25
-      eth:
-        percent: 5
-      btcb:
-        percent: 5
-    # if zero, always run
-    threshold_percent: 2
-    quoted_in: busd
-    parking_asset_id: busd
-    parking_asset_min_move: 0.01
-
-yield_farms:
-  posi-farm-bnb-posi:
-    name: posi-farm-bnb-posi
-    contract_name: position_stake_manager
-    address: 0x0c54b0b7d61de871db47c3ad3f69feb0f2c8db0b
-    wallet_id: farm-wallet
-    asset_id: posi
-    network_id: bsc
-    operation: posi_farm_bnb_posi
-    min_rewards_required: 10
-    #quoted_asset_id: busd
-  posi-farm-busd-posi:
-    name: posi-farm-busd-posi
-    contract_name: position_stake_manager
-    address: 0x0c54b0b7d61de871db47c3ad3f69feb0f2c8db0b
-    wallet_id: farm-wallet
-    asset_id: posi
-    network_id: bsc
-    operation: posi_farm_busd_posi
-    min_rewards_required: 7
-  auto-cake:
-    name: auto-cake
-    contract_name: pancake_swap_auto_cake_pool
-    address: 0xa80240eb5d7e05d3f250cf000eec0891d00b51cc
-    wallet_id: farm-wallet
-    asset_id: cake
-    network_id: bsc
-    operation: cake_auto_pool
-    min_rewards_required: 1
-# machines:
-#   farm-all-to-busd-vault:
-#     name: farm-all-to-busd-vault
-#     operations:
-#       collect_farms_and_swap:
-#         swap_to_asset_id: busd
-#         yield-farms:
-#           auto-cake:
-#             yield_farm_id: auto-cake
-#           posi-farm-bnb-posi:
-#             yield_farm_id: posi-farm-bnb-posi
-#           posi-farm-busd-posi:
-#             yield_farm_id: posi-farm-busd-posi
-#       withdraw:
-#         wallet_id: farm-wallet
-#         withdraw_wallet_id: busd-vault
+    exchange_id: pancake_swap_v2
+    address: 0x55671114d774ee99d653d6c12460c780a67f1d18
+    slippage: 1

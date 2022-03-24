@@ -10,6 +10,8 @@ use web3::{
 
 use super::{asset::Asset, network::Network, wallet::Wallet, Config};
 
+pub mod pacoca_auto_pool;
+pub mod pacoca_vault;
 pub mod pancake_swap_auto_cake_pool;
 pub mod posi_farm_bnb_posi;
 pub mod posi_farm_busd_posi;
@@ -95,6 +97,7 @@ impl YieldFarm {
             "posi_farm_bnb_posi" => posi_farm_bnb_posi::get_pending_rewards(self).await,
             "posi_farm_busd_posi" => posi_farm_busd_posi::get_pending_rewards(self).await,
             "cake_auto_pool" => pancake_swap_auto_cake_pool::get_pending_rewards(self).await,
+            "pacoca_auto_pool" => pacoca_auto_pool::get_pending_rewards(self).await,
             _ => panic!("operation not implemented {:?}", self.operation),
         }
     }
@@ -104,6 +107,7 @@ impl YieldFarm {
             "posi_farm_bnb_posi" => posi_farm_bnb_posi::harvest(self).await,
             "posi_farm_busd_posi" => posi_farm_busd_posi::harvest(self).await,
             "cake_auto_pool" => pancake_swap_auto_cake_pool::harvest(self).await,
+            "pacoca_auto_pool" => pacoca_auto_pool::harvest(self).await,
             _ => panic!("operation not implemented {:?}", self.operation),
         }
     }
