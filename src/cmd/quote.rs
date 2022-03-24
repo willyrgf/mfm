@@ -1,7 +1,7 @@
 use crate::{cmd, shared};
 use clap::{ArgMatches, Command};
 use prettytable::{cell, row, Table};
-use web3::{ethabi::Token, types::U256};
+use web3::types::U256;
 
 pub const COMMAND: &str = "quote";
 

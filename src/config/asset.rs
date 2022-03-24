@@ -288,10 +288,6 @@ impl Assets {
         &self.0
     }
 
-    pub fn get(&self, key: &str) -> &Asset {
-        self.0.get(key).unwrap()
-    }
-
     //TODO: use this function to get assets of the current network
     pub fn find_by_name_and_network(&self, name: &str, network: &str) -> Option<&Asset> {
         let result = self

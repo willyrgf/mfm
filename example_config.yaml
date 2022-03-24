@@ -37,6 +37,11 @@ exchanges:
     router_address: 0xa5e0829caced8ffdd4de3c43696c57f7d7a678ff
     factory_address: 0x5757371414417b8c6caad45baef941abc7d3ab32
     network_id: polygon
+  sushi_swap_polygon:
+    name: susih_swap_polygon
+    router_address: 0x1b02da8cb0d097eb8d57a175b88c7d8b47997506
+    factory_address: 0xc35dadb65012ec5796536bd9864ed8773abc74c4
+    network_id: polygon
 
 rebalancers:
   test-rebalancer:
@@ -52,7 +57,7 @@ rebalancers:
         percent: 25
       eth:
         percent: 5
-      btcb:
+      btc:
         percent: 5
     # if zero, always run
     threshold_percent: 2
@@ -99,81 +104,105 @@ yield_farms:
     operation: pacoca_auto_pool
     min_rewards_required: 1
 
-machines:
-  farm-all-to-busd-vault:
-    name: farm-all-to-busd-vault
-    operations:
-      collect_farms_and_swap:
-        swap_to_asset_id: busd
-        yield-farms:
-          auto-cake:
-            yield_farm_id: auto-cake
-          posi-farm-bnb-posi:
-            yield_farm_id: posi-farm-bnb-posi
-          posi-farm-busd-posi:
-            yield_farm_id: posi-farm-busd-posi
-      withdraw:
-        wallet_id: farm-wallet
-        withdraw_wallet_id: busd-vault
+# machines:
+#   farm-all-to-busd-vault:
+#     name: farm-all-to-busd-vault
+#     operations:
+#       collect_farms_and_swap:
+#         swap_to_asset_id: busd
+#         yield-farms:
+#           auto-cake:
+#             yield_farm_id: auto-cake
+#           posi-farm-bnb-posi:
+#             yield_farm_id: posi-farm-bnb-posi
+#           posi-farm-busd-posi:
+#             yield_farm_id: posi-farm-busd-posi
+#       withdraw:
+#         wallet_id: farm-wallet
+#         withdraw_wallet_id: busd-vault
 
 assets:
-  dquick:
+  dquick-polygon:
     name: dquick
     network_id: polygon
     exchange_id: quickswap_v2
     address: 0xf28164a485b0b2c90639e47b0f377b4a438a16b1
     slippage: 2
-  wmatic:
+  wmatic-polygon:
     name: wmatic
     network_id: polygon
     exchange_id: quickswap_v2
     address: 0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270
     slippage: 2
-  anonq:
+  wmatic-bsc:
+    name: wmatic
+    network_id: bsc
+    exchange_id: pancake_swap_v2
+    address: 0xcc42724c6683b7e57334c4e856f4c9965ed682bd
+    slippage: 2
+  anonq-bsc:
     name: anonq
     network_id: bsc
     exchange_id: pancake_swap_v2
     address: 0xf393138616cd6DD367171eaA59c2eaEE420a32b9
     slippage: 2
-  busd:
+  busd-bsc:
     name: busd
     network_id: bsc
     exchange_id: pancake_swap_v2
     address: 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56
     slippage: 1
-  wbnb:
+  usdc-bsc:
+    name: usdc
+    network_id: bsc
+    exchange_id: pancake_swap_v2
+    address: 0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d
+    slippage: 1
+  usdc-polygon:
+    name: usdc
+    network_id: polygon
+    exchange_id: sushi_swap_polygon
+    address: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+    slippage: 1
+  wbnb-bsc:
     name: wbnb
     network_id: bsc
     exchange_id: pancake_swap_v2
     address: 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c
     slippage: 1
-  eth:
+  eth-bsc:
     name: eth
     network_id: bsc
     exchange_id: pancake_swap_v2
     address: 0x2170ed0880ac9a755fd29b2688956bd959f933f8
     slippage: 2
-  btcb:
-    name: btcb
+  btc-bsc:
+    name: btc
     network_id: bsc
     exchange_id: pancake_swap_v2
     address: 0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c
     slippage: 2
-  posi:
+  posi-bsc:
     name: posi
     network_id: bsc
     exchange_id: pancake_swap_v2
     address: 0x5ca42204cdaa70d5c773946e69de942b85ca6706
     slippage: 2
-  cake:
+  cake-bsc:
     name: cake
     network_id: bsc
     exchange_id: pancake_swap_v2
     address: 0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82
     slippage: 2
-  pacoca:
+  pacoca-bsc:
     name: pacoca
     network_id: bsc
     exchange_id: pancake_swap_v2
     address: 0x55671114d774ee99d653d6c12460c780a67f1d18
+    slippage: 1
+  grt-polygon:
+    name: grt
+    network_id: polygon
+    exchange_id: sushi_swap_polygon
+    address: 0x5fe2b58c013d7601147dcdd68c143a77499f5531
     slippage: 1

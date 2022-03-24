@@ -97,7 +97,10 @@ impl Rebalancer {
     }
 
     pub fn get_parking_asset<'a>(&self) -> &'a Asset {
-        Config::global().assets.get(self.parking_asset_id())
+        Config::global()
+            .assets
+            .find_by_name_and_network(self.parking_asset_id.as_str(), self.network_id.as_str())
+            .unwrap()
     }
 
     pub fn get_wallet<'a>(&self) -> &'a Wallet {

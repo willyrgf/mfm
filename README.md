@@ -26,6 +26,14 @@ cargo run -- wrap --network bsc --wallet test-wallet --amount 0.005
 
 ---
 
+### get a quote
+
+```bash
+ cargo run -- quote -a 1 -e pancake_swap_v2 -i wbnb -o busd
+```
+
+---
+
 ### swap tokens for tokens supporting fees on transfer
 
 ```bash
