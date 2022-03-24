@@ -33,7 +33,7 @@ pub async fn swap(
             ),
             from_wallet.address(),
             web3::contract::Options {
-                //value: Some(amount_in),
+                value: Some(U256::from(0_i32)),
                 gas_price: Some(gas_price),
                 // gas: Some(500_000.into()),
                 // gas: Some(gas_price),
