@@ -170,8 +170,14 @@ assets:
     exchange_id: pancake_swap_v2
     address: 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c
     slippage: 1
-  eth-bsc:
-    name: eth
+  weth-polygon:
+    name: weth
+    network_id: polygon
+    exchange_id: sushi_swap_polygon
+    address: 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619
+    slippage: 2
+  weth-bsc:
+    name: weth
     network_id: bsc
     exchange_id: pancake_swap_v2
     address: 0x2170ed0880ac9a755fd29b2688956bd959f933f8
