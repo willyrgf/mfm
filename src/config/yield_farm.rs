@@ -111,6 +111,14 @@ impl YieldFarm {
             _ => panic!("operation not implemented {:?}", self.operation),
         }
     }
+
+    pub async fn deposit(&self, amount: U256) {
+        match self.operation.as_str() {
+            "cake_auto_pool" => pancake_swap_auto_cake_pool::deposit(self, amount).await,
+            "pacoca_auto_pool" => pacoca_auto_pool::deposit(self, amount).await,
+            _ => panic!("operation not implemented {:?}", self.operation),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

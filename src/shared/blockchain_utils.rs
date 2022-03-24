@@ -28,8 +28,9 @@ where
         .estimate_gas(func_name, params, from_wallet.address(), options)
         .await
         .unwrap();
-
-    estimate_gas
+    let with_margin =
+        (estimate_gas * (U256::from(10000_i32) + U256::from(1000_i32))) / U256::from(10000_i32);
+    with_margin
 }
 
 pub fn generate_func_data(contract: &Contract<Http>, func_name: &str, input: &[Token]) -> Vec<u8> {

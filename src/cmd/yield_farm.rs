@@ -10,6 +10,20 @@ use web3::types::U256;
 pub const YIELD_FARM_COMMAND: &str = "yield-farm";
 pub const YIELD_FARM_RUN_COMMAND: &str = "run";
 pub const YIELD_FARM_INFO_COMMAND: &str = "info";
+pub const YIELD_FARM_DEPOSIT_COMMAND: &str = "deposit";
+
+pub fn generate_deposit_cmd<'a>() -> Command<'a> {
+    Command::new(YIELD_FARM_DEPOSIT_COMMAND)
+        .about("Deposit asset into farm")
+        .arg(
+            clap::arg!(-y --"yield-farm" <YIELD_FARM_NAME> "Yield farm name in config file")
+                .required(true),
+        )
+        .arg(
+            clap::arg!(-a --"amount" <AMOUNT> "Amount of yield farm deposit asset to deposit")
+                .required(true),
+        )
+}
 
 pub fn generate_info_cmd<'a>() -> Command<'a> {
     Command::new(YIELD_FARM_INFO_COMMAND)
@@ -44,6 +58,7 @@ pub fn generate_cmd<'a>() -> Command<'a> {
         .about("Haverst some YieldFarm")
         .subcommand(generate_info_cmd())
         .subcommand(generate_run_cmd())
+        .subcommand(generate_deposit_cmd())
 }
 
 pub fn get_farms_to_look(args: &ArgMatches) -> Vec<&YieldFarm> {
@@ -116,6 +131,30 @@ pub async fn call_info_cmd(args: &ArgMatches) {
     table.printstd();
 }
 
+pub async fn call_deposit_cmd(args: &ArgMatches) {
+    let mut table = Table::new();
+    table.add_row(row![
+        "Deposited Amount",
+        "Deposited Asset ",
+        "Farm",
+        "Decimals",
+    ]);
+    let yield_farm = cmd::helpers::get_yield_farm(args);
+    let yield_farm_asset = yield_farm.get_asset();
+    let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
+    let amount = cmd::helpers::get_amount(args, yield_farm_asset_decimals);
+
+    yield_farm.deposit(amount).await;
+
+    table.add_row(row![
+        amount,
+        yield_farm_asset.name(),
+        yield_farm.name(),
+        yield_farm_asset_decimals
+    ]);
+    table.printstd();
+}
+
 pub async fn call_run_cmd(args: &ArgMatches) {
     let mut table = Table::new();
     let force_harvest = cmd::helpers::get_force_harvest(args);
@@ -166,6 +205,9 @@ pub async fn call_sub_commands(args: &ArgMatches) {
 
         Some((YIELD_FARM_INFO_COMMAND, sub_args)) => {
             call_info_cmd(sub_args).await;
+        }
+        Some((YIELD_FARM_DEPOSIT_COMMAND, sub_args)) => {
+            call_deposit_cmd(sub_args).await;
         }
         _ => {
             log::error!("no sub cmd found");

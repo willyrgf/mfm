@@ -6,6 +6,7 @@ pub const APPROVE_COMMAND: &str = "approve";
 pub fn generate_cmd<'a>() -> Command<'a> {
     Command::new(APPROVE_COMMAND)
         .about("Approve token spending (needed to swap tokens)")
+        //TODO: add a custom spender arg to add another spenders lide yield-farms
         .arg(
             clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router as spender")
                 .required(true),
