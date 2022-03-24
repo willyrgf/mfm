@@ -193,6 +193,51 @@ impl Asset {
         .await;
     }
 
+    pub async fn unwrap(&self, from_wallet: &Wallet, amount: U256) {
+        let client = self.get_web3_client_http();
+        let gas_price = client.eth().gas_price().await.unwrap();
+
+        let estimate_gas = shared::blockchain_utils::estimate_gas(
+            &self.contract(),
+            from_wallet,
+            "withdraw",
+            (amount,),
+            web3::contract::Options {
+                gas_price: Some(gas_price),
+                ..Default::default()
+            },
+        )
+        .await;
+        log::debug!("unwrap called estimate_gas: {:?}", estimate_gas);
+
+        let func_data = shared::blockchain_utils::generate_func_data(
+            &self.contract(),
+            "withdraw",
+            &[Token::Uint(amount)],
+        );
+        log::debug!("unwrap(): deposit_data: {:?}", func_data);
+
+        let nonce = from_wallet.nonce(client.clone()).await;
+        log::debug!("unwrap(): nonce: {:?}", nonce);
+
+        let transaction_obj = shared::blockchain_utils::build_transaction_params(
+            nonce,
+            self.as_address().unwrap(),
+            U256::from(0_i32),
+            gas_price,
+            estimate_gas,
+            Bytes(func_data),
+        );
+        log::debug!("unwrap(): transaction_obj: {:?}", transaction_obj);
+
+        shared::blockchain_utils::sign_send_and_wait_txn(
+            client.clone(),
+            transaction_obj,
+            from_wallet,
+        )
+        .await;
+    }
+
     pub async fn wrap(&self, from_wallet: &Wallet, amount: U256) {
         let client = self.get_web3_client_http();
         let gas_price = client.eth().gas_price().await.unwrap();

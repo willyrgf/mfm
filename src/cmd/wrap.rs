@@ -1,22 +1,23 @@
 use crate::cmd;
 use clap::{ArgMatches, Command};
 use web3::types::U256;
-
+//TODO: Need to review this,  may we can use swaptokenstoeth
+// because in another networks the deposit does not act like another ones
 pub const WRAP_COMMAND: &str = "wrap";
 
 pub fn generate_cmd<'a>() -> Command<'a> {
     Command::new(WRAP_COMMAND)
     .about("Wrap a coin to a token")
     .arg(
-        clap::arg!(--"network" <bsc> "Network to wrap coin to token")
+        clap::arg!(-n --"network" <bsc> "Network to wrap coin to token")
             .required(true),
     )
     .arg(
-        clap::arg!(--"wallet" <WALLET_NAME> "Wallet id from config file")
+        clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file")
             .required(true),
     )
     .arg(
-        clap::arg!(--"amount" <AMMOUNT> "Amount to wrap coin into token, default: (balance-min_balance_coin)")
+        clap::arg!(-a --"amount" <AMMOUNT> "Amount to wrap coin into token, default: (balance-min_balance_coin)")
             .required(false)
             ,
     )
@@ -51,4 +52,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     log::debug!("nonce: {}", n);
 
     wrapped_asset.wrap(wallet, amount_in).await;
+    // exchange
+    //     .swap_eth_for_tokens(wallet, amount_in, amount_in, wrapped_asset)
+    //     .await
 }

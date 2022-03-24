@@ -1,5 +1,4 @@
 use crate::config::asset::{Asset, Assets};
-use crate::shared;
 
 use std::path::Path;
 use std::str::FromStr;
@@ -13,12 +12,15 @@ use web3::{
     contract::{Contract, Options},
     ethabi::Token,
     transports::Http,
-    types::{Address, Bytes, TransactionParameters, H160, U256},
+    types::{Address, H160, U256},
 };
 
 use super::network::Network;
 use super::wallet::Wallet;
 use super::Config;
+
+pub mod swap_eth_for_tokens;
+pub mod swap_tokens_for_tokens;
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -219,6 +221,29 @@ impl Exchange {
         self.get_network().get_web3_client_http()
     }
 
+    // pub async fn swap_eth_for_tokens(
+    //     &self,
+    //     from_wallet: &Wallet,
+    //     amount_in: U256,
+    //     amount_min_out: U256,
+    //     asset: &Asset,
+    // ) {
+    //     let asset_path = vec![asset.as_address().unwrap()]
+    //         .clone()
+    //         .into_iter()
+    //         .map(|p| Token::Address(p))
+    //         .collect::<Vec<_>>();
+
+    //     swap_eth_for_tokens::swap(
+    //         &self,
+    //         from_wallet,
+    //         amount_in,
+    //         amount_min_out,
+    //         Token::Array(asset_path),
+    //     )
+    //     .await
+    // }
+
     pub async fn swap_tokens_for_tokens(
         &self,
         from_wallet: &Wallet,
@@ -226,76 +251,8 @@ impl Exchange {
         amount_min_out: U256,
         asset_path: Token,
     ) {
-        let client = self.get_web3_client_http();
-        let gas_price = client.eth().gas_price().await.unwrap();
-        let valid_timestamp = self.get_valid_timestamp(30000000);
-        let estimate_gas = self
-            .router_contract()
-            .estimate_gas(
-                "swapExactTokensForTokensSupportingFeeOnTransferTokens",
-                // "swapExactTokensForTokens",
-                (
-                    amount_in,
-                    amount_min_out,
-                    asset_path.clone(),
-                    from_wallet.address(),
-                    U256::from_dec_str(&valid_timestamp.to_string()).unwrap(),
-                ),
-                from_wallet.address(),
-                web3::contract::Options {
-                    //value: Some(amount_in),
-                    gas_price: Some(gas_price),
-                    // gas: Some(500_000.into()),
-                    // gas: Some(gas_price),
-                    ..Default::default()
-                },
-            )
+        swap_tokens_for_tokens::swap(&self, from_wallet, amount_in, amount_min_out, asset_path)
             .await
-            .unwrap();
-
-        log::debug!("swap_tokens_for_tokens estimate_gas: {}", estimate_gas);
-
-        let func_data = self
-            .router_contract()
-            .abi()
-            .function("swapExactTokensForTokensSupportingFeeOnTransferTokens")
-            // .function("swapExactTokensForTokens")
-            .unwrap()
-            .encode_input(&[
-                Token::Uint(amount_in),
-                Token::Uint(amount_min_out),
-                asset_path,
-                Token::Address(from_wallet.address()),
-                Token::Uint(U256::from_dec_str(&valid_timestamp.to_string()).unwrap()),
-            ])
-            .unwrap();
-        log::debug!("swap_tokens_for_tokens(): func_data: {:?}", func_data);
-
-        let nonce = from_wallet.nonce(client.clone()).await;
-        log::debug!("swap_tokens_for_tokens(): nonce: {:?}", nonce);
-
-        let estimate_with_margin =
-            (estimate_gas * (U256::from(10000_i32) + U256::from(1000_i32))) / U256::from(10000_i32);
-        let transaction_obj = TransactionParameters {
-            nonce: Some(nonce),
-            to: Some(self.as_router_address().unwrap()),
-            value: U256::from(0_i32),
-            gas_price: Some(gas_price),
-            gas: estimate_with_margin,
-            data: Bytes(func_data),
-            ..Default::default()
-        };
-        log::debug!(
-            "swap_tokens_for_tokens(): transaction_obj: {:?}",
-            transaction_obj
-        );
-
-        shared::blockchain_utils::sign_send_and_wait_txn(
-            client.clone(),
-            transaction_obj,
-            from_wallet,
-        )
-        .await;
     }
 }
 

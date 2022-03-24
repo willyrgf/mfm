@@ -9,6 +9,7 @@ pub mod quote;
 pub mod rebalancer;
 pub mod swap;
 pub mod transaction;
+pub mod unwrap;
 pub mod withdraw;
 pub mod wrap;
 pub mod yield_farm;
@@ -25,6 +26,7 @@ pub fn new() -> clap::Command<'static> {
         )
         .subcommand_required(true)
         .subcommand(wrap::generate_cmd())
+        .subcommand(unwrap::generate_cmd())
         .subcommand(swap::generate_cmd())
         .subcommand(transaction::generate_cmd())
         .subcommand(allowance::generate_cmd())
@@ -40,6 +42,9 @@ pub async fn call_sub_commands(matches: &ArgMatches) {
     match matches.subcommand() {
         Some((wrap::WRAP_COMMAND, sub_matches)) => {
             wrap::call_sub_commands(sub_matches).await;
+        }
+        Some((unwrap::COMMAND, sub_matches)) => {
+            unwrap::call_sub_commands(sub_matches).await;
         }
         Some((swap::SWAP_COMMAND, sub_matches)) => {
             swap::call_sub_commands(sub_matches).await;
