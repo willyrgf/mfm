@@ -154,13 +154,14 @@ impl Exchange {
         let network = self.get_network();
         let wrapped_asset = network.get_wrapped_asset();
         let wrapped_is_output = wrapped_asset.address() == output_asset.address();
+        let wrapped_is_input = wrapped_asset.address() == input_asset.address();
         let has_direct_route = match self.get_factory_pair(input_asset, output_asset).await {
             Some(a) => (a.to_string().as_str() != ZERO_ADDRESS),
             _ => false,
         };
 
         v.push(input_asset.as_address().unwrap());
-        if !has_direct_route && !wrapped_is_output {
+        if !has_direct_route && !wrapped_is_output && !wrapped_is_input {
             v.push(wrapped_asset.as_address().unwrap());
         }
         v.push(output_asset.as_address().unwrap());

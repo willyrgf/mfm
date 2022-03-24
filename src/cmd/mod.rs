@@ -5,6 +5,7 @@ pub mod allowance;
 pub mod approve;
 pub mod balances;
 pub mod helpers;
+pub mod quote;
 pub mod rebalancer;
 pub mod swap;
 pub mod transaction;
@@ -32,6 +33,7 @@ pub fn new() -> clap::Command<'static> {
         .subcommand(rebalancer::generate_cmd())
         .subcommand(yield_farm::generate_cmd())
         .subcommand(withdraw::generate_cmd())
+        .subcommand(quote::generate_cmd())
 }
 
 pub async fn call_sub_commands(matches: &ArgMatches) {
@@ -62,6 +64,9 @@ pub async fn call_sub_commands(matches: &ArgMatches) {
         }
         Some((withdraw::WITHDRAW_COMMAND, sub_matches)) => {
             withdraw::call_sub_commands(sub_matches).await;
+        }
+        Some((quote::COMMAND, sub_matches)) => {
+            quote::call_sub_commands(sub_matches).await;
         }
         _ => panic!("command not registred"),
     }
