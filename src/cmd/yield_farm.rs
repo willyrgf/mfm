@@ -46,7 +46,7 @@ pub fn generate_cmd<'a>() -> Command<'a> {
         .subcommand(generate_run_cmd())
 }
 
-pub fn get_farms_to_look<'a>(args: &'a ArgMatches) -> Vec<&'a YieldFarm> {
+pub fn get_farms_to_look(args: &ArgMatches) -> Vec<&YieldFarm> {
     let farms_to_look: Vec<&YieldFarm> = match args.value_of("yield-farm") {
         Some(y) => vec![Config::global().yield_farms.get(y)],
         None => Config::global()

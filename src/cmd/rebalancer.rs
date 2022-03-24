@@ -201,7 +201,7 @@ pub async fn move_parking_to_assets<'a>(
         let asset_route_token: Vec<Token> = asset_route
             .clone()
             .into_iter()
-            .map(|p| Token::Address(p))
+            .map(Token::Address)
             .collect::<Vec<_>>();
         exchange
             .swap_tokens_for_tokens(

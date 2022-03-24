@@ -8,7 +8,7 @@ use web3::types::U256;
 //TODO: add constants to all keys in value_of
 //
 
-pub fn get_exchange<'a>(args: &'a ArgMatches) -> &'a Exchange {
+pub fn get_exchange(args: &ArgMatches) -> &Exchange {
     let config = Config::global();
     match args.value_of("exchange") {
         Some(n) => config.exchanges.get(n),
@@ -16,7 +16,7 @@ pub fn get_exchange<'a>(args: &'a ArgMatches) -> &'a Exchange {
     }
 }
 
-pub fn get_network<'a>(args: &'a ArgMatches) -> &'a Network {
+pub fn get_network(args: &ArgMatches) -> &Network {
     let config = Config::global();
     match args.value_of("network") {
         Some(n) => config.networks.get(n),
@@ -24,7 +24,7 @@ pub fn get_network<'a>(args: &'a ArgMatches) -> &'a Network {
     }
 }
 
-pub fn get_wallet<'a>(args: &'a ArgMatches) -> &'a Wallet {
+pub fn get_wallet(args: &ArgMatches) -> &Wallet {
     let config = Config::global();
     match args.value_of("wallet") {
         Some(w) => config.wallets.get(w),
@@ -118,7 +118,7 @@ pub fn get_slippage(args: &ArgMatches, asset_decimals: u8) -> U256 {
     }
 }
 
-pub fn get_rebalancer<'a>(args: &'a ArgMatches) -> &'a Rebalancer {
+pub fn get_rebalancer(args: &ArgMatches) -> &Rebalancer {
     let config = Config::global();
     match args.value_of("name") {
         Some(i) => config.rebalancers.get(i),
@@ -126,7 +126,7 @@ pub fn get_rebalancer<'a>(args: &'a ArgMatches) -> &'a Rebalancer {
     }
 }
 
-pub fn get_withdraw_wallet<'a>(args: &'a ArgMatches) -> &'a WithdrawWallet {
+pub fn get_withdraw_wallet(args: &ArgMatches) -> &WithdrawWallet {
     let config = Config::global();
     match args.value_of("withdraw-wallet") {
         Some(w) => config.withdraw_wallets.get(w),

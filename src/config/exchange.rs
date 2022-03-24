@@ -251,8 +251,7 @@ impl Exchange {
         amount_min_out: U256,
         asset_path: Token,
     ) {
-        swap_tokens_for_tokens::swap(&self, from_wallet, amount_in, amount_min_out, asset_path)
-            .await
+        swap_tokens_for_tokens::swap(self, from_wallet, amount_in, amount_min_out, asset_path).await
     }
 }
 

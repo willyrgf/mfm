@@ -44,7 +44,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let path_token: Vec<Token> = asset_path
         .clone()
         .into_iter()
-        .map(|p| Token::Address(p))
+        .map(Token::Address)
         .collect::<Vec<_>>();
     let amount_min_out: U256 = exchange
         .get_amounts_out(amount_in, asset_path.clone())
