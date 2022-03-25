@@ -16,6 +16,8 @@ pub mod pancake_swap_auto_cake_pool;
 pub mod posi_farm_bnb_posi;
 pub mod posi_farm_busd_posi;
 pub mod position_stake_manager;
+pub mod qi_dao_staking_pool;
+pub mod qi_dao_staking_pool_qi_wmatic;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct YieldFarm {
@@ -98,6 +100,9 @@ impl YieldFarm {
             "posi_farm_busd_posi" => posi_farm_busd_posi::get_pending_rewards(self).await,
             "cake_auto_pool" => pancake_swap_auto_cake_pool::get_pending_rewards(self).await,
             "pacoca_auto_pool" => pacoca_auto_pool::get_pending_rewards(self).await,
+            "qi_dao_staking_pool_qi_wmatic" => {
+                qi_dao_staking_pool_qi_wmatic::get_pending_rewards(self).await
+            }
             _ => panic!("operation not implemented {:?}", self.operation),
         }
     }

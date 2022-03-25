@@ -35,7 +35,7 @@ pub fn generate_info_cmd<'a>() -> Command<'a> {
         .arg(
             clap::arg!(-q --"quoted-asset" <busd> "Asset to quote rewards")
                 .required(false)
-                .default_value("busd"),
+                .default_value("usdc"),
         )
 }
 
