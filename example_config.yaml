@@ -141,99 +141,154 @@ yield_farms:
 #         withdraw_wallet_id: busd-vault
 
 assets:
-  qidao-polygon:
-    name: qidao
-    network_id: polygon
-    exchange_id: quickswap_v2
-    address: 0x580a84c73811e1839f75d86d75d88cca0c241ff4
-    slippage: 1
-  dquick-polygon:
-    name: dquick
-    network_id: polygon
-    exchange_id: quickswap_v2
-    address: 0xf28164a485b0b2c90639e47b0f377b4a438a16b1
-    slippage: 2
-  wmatic-polygon:
-    name: wmatic
-    network_id: polygon
-    exchange_id: quickswap_v2
-    address: 0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270
-    slippage: 2
-  wmatic-bsc:
-    name: wmatic
-    network_id: bsc
-    exchange_id: pancake_swap_v2
-    address: 0xcc42724c6683b7e57334c4e856f4c9965ed682bd
-    slippage: 2
-  anonq-bsc:
-    name: anonq
-    network_id: bsc
-    exchange_id: pancake_swap_v2
-    address: 0xf393138616cd6DD367171eaA59c2eaEE420a32b9
-    slippage: 2
-  busd-bsc:
-    name: busd
-    network_id: bsc
-    exchange_id: pancake_swap_v2
-    address: 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56
-    slippage: 1
-  usdc-bsc:
-    name: usdc
-    network_id: bsc
-    exchange_id: pancake_swap_v2
-    address: 0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d
-    slippage: 1
-  usdc-polygon:
-    name: usdc
-    network_id: polygon
-    exchange_id: sushi_swap_polygon
-    address: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
-    slippage: 1
-  wbnb-bsc:
-    name: wbnb
-    network_id: bsc
-    exchange_id: pancake_swap_v2
-    address: 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c
-    slippage: 1
-  weth-polygon:
-    name: weth
-    network_id: polygon
-    exchange_id: sushi_swap_polygon
-    address: 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619
-    slippage: 2
-  weth-bsc:
-    name: weth
-    network_id: bsc
-    exchange_id: pancake_swap_v2
-    address: 0x2170ed0880ac9a755fd29b2688956bd959f933f8
-    slippage: 2
-  btc-bsc:
-    name: btc
-    network_id: bsc
-    exchange_id: pancake_swap_v2
-    address: 0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c
-    slippage: 2
-  posi-bsc:
-    name: posi
-    network_id: bsc
-    exchange_id: pancake_swap_v2
-    address: 0x5ca42204cdaa70d5c773946e69de942b85ca6706
-    slippage: 2
-  cake-bsc:
-    name: cake
-    network_id: bsc
-    exchange_id: pancake_swap_v2
-    address: 0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82
-    slippage: 2
-  pacoca-bsc:
-    name: pacoca
-    network_id: bsc
-    exchange_id: pancake_swap_v2
-    address: 0x55671114d774ee99d653d6c12460c780a67f1d18
-    slippage: 1
-  grt-polygon:
-    name: grt
-    network_id: polygon
-    exchange_id: sushi_swap_polygon
-    address: 0x5fe2b58c013d7601147dcdd68c143a77499f5531
-    slippage: 1
+  qidao:
+    kind: token
+    networks:
+      polygon:
+        name: qidao
+        network_id: polygon
+        exchange_id: quickswap_v2
+        address: 0x580a84c73811e1839f75d86d75d88cca0c241ff4
+        slippage: 2
+        path_asset: weth
+  dquick:
+    kind: token
+    networks:
+      polygon:
+        name: dquick
+        network_id: polygon
+        exchange_id: quickswap_v2
+        address: 0xf28164a485b0b2c90639e47b0f377b4a438a16b1
+        slippage: 2
+        path_asset: weth
+  wmatic:
+    kind: token
+    networks:
+      bsc:
+        name: wmatic
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0xcc42724c6683b7e57334c4e856f4c9965ed682bd
+        slippage: 2
+        path_asset: wbnb
+      polygon:
+        name: wmatic
+        network_id: polygon
+        exchange_id: sushi_swap_polygon
+        address: 0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270
+        slippage: 2
+        path_asset: weth 
+  anonq:
+    kind: token
+    networks:
+      bsc:
+        name: anonq
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0xf393138616cd6DD367171eaA59c2eaEE420a32b9
+        slippage: 2
+        path_asset: wbnb
+  busd:
+    kind: token
+    networks:
+      bsc:
+        name: busd
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56
+        slippage: 2
+        path_asset: wbnb
+  wbnb:
+    kind: token
+    networks:
+      bsc:
+        name: wbnb
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c
+        slippage: 2
+        path_asset: wbnb
+  weth:
+    kind: token
+    networks:
+      bsc:
+        name: weth
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x2170ed0880ac9a755fd29b2688956bd959f933f8
+        slippage: 2
+        path_asset: wbnb
+      polygon:
+        name: weth
+        network_id: polygon
+        exchange_id: sushi_swap_polygon
+        address: 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619
+        slippage: 2
+        path_asset: weth 
+  btc:
+    kind: token
+    networks:
+      bsc:
+        name: btc
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c
+        slippage: 2
+        path_asset: wbnb
+  posi:
+    kind: token
+    networks:
+      bsc:
+        name: posi
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x5ca42204cdaa70d5c773946e69de942b85ca6706
+        slippage: 2
+        path_asset: wbnb
+  cake:
+    kind: token
+    networks:
+      bsc:
+        name: cake
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82
+        slippage: 2
+        path_asset: wbnb
+  pacoca:
+    kind: token
+    networks:
+      bsc:
+        name: pacoca
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x55671114d774ee99d653d6c12460c780a67f1d18
+        slippage: 1
+        path_asset: wbnb
+  grt:
+    kind: token
+    networks:
+      polygon:
+        name: grt
+        network_id: polygon
+        exchange_id: sushi_swap_polygon
+        address: 0x5fe2b58c013d7601147dcdd68c143a77499f5531
+        slippage: 1
+        path_asset: weth
+  usdc:
+    kind: token
+    networks:
+      polygon:
+        name: usdc
+        network_id: polygon
+        exchange_id: sushi_swap_polygon
+        address: 0x2791bca1f2de4661ed88a30c99a7a9449aa84174
+        slippage: 1
+        path_asset: wmatic
+      bsc:
+        name: usdc
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d
+        slippage: 1
+        path_asset: wbnb
