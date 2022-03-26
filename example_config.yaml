@@ -7,7 +7,7 @@ wallets:
 withdraw_wallets:
   test-wallet2:
     address: YOUR_PUBLIC_ADDRESS
-#TODO: think in a way to do another default route wrapped coin
+
 networks:
   bsc:
     name: bsc
@@ -17,7 +17,6 @@ networks:
     blockexplorer_url: https://bscscan.com
     min_balance_coin: 0.1
     wrapped_asset: wbnb
-    # wrapped_asset_route: wbnb
   polygon:
     name: polygon
     symbol: matic
@@ -26,7 +25,6 @@ networks:
     blockexplorer_url: https://polygonscan.com/
     min_balance_coin: 1
     wrapped_asset: wmatic
-    # wrapped_asset_route: weth
 
 exchanges:
   pancake_swap_v2:
@@ -96,6 +94,7 @@ yield_farms:
     network_id: bsc
     operation: cake_auto_pool
     min_rewards_required: 1
+  #TODO: fazer o approve do contrato de farms
   auto-pacoca:
     name: auto-pacoca
     contract_name: pacoca_vault
@@ -104,7 +103,25 @@ yield_farms:
     asset_id: pacoca
     network_id: bsc
     operation: pacoca_auto_pool
-    min_rewards_required: 1
+    min_rewards_required: 100
+  maifinance-qi-wmatic:
+    name: maifinance-qi-wmatic
+    contract_name: qi_dao_staking_pool
+    address: 0x574fe4e8120c4da1741b5fd45584de7a5b521f0f
+    wallet_id: polygon-wallet
+    asset_id: qidao
+    network_id: polygon
+    operation: qi_dao_staking_pool_qi_wmatic
+    min_rewards_required: 10
+  # quickswap-dual-matic-usdc:
+  #   name: quickswap-dual-matic-usdc
+  #   contract_name: quickswap_dual_rewards
+  #   address: 0x14977e7e263ff79c4c3159f497d9551fbe769625
+  #   wallet_id: polygon-wallet
+  #   asset_id: qidao
+  #   network_id: polygon
+  #   operation: qi_dao_staking_pool_qi_wmatic
+  #   min_rewards_required: 1
 
 # machines:
 #   farm-all-to-busd-vault:
@@ -124,6 +141,12 @@ yield_farms:
 #         withdraw_wallet_id: busd-vault
 
 assets:
+  qidao-polygon:
+    name: qidao
+    network_id: polygon
+    exchange_id: quickswap_v2
+    address: 0x580a84c73811e1839f75d86d75d88cca0c241ff4
+    slippage: 1
   dquick-polygon:
     name: dquick
     network_id: polygon
