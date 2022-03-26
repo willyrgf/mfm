@@ -1,4 +1,9 @@
-use crate::{cmd, config::Config, shared};
+use crate::{
+    asset::Asset,
+    cmd,
+    config::{wallet::Wallet, Config},
+    shared,
+};
 use clap::{ArgMatches, Command};
 use prettytable::{cell, row, Table};
 use web3::types::U256;
@@ -34,31 +39,36 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         "Decimals"
     ]);
 
-    let assets = config
-        .assets
-        .hashmap()
-        .values()
-        .map(|asset_config| asset_config.new_assets_list())
-        .flatten()
-        .collect();
-
-    for asset_config in config.assets.hashmap().values() {
-        // for
-        let balance_of = asset.balance_of(wallet.address()).await;
-        let decimals = asset.decimals().await;
-        if !(hide_zero && balance_of == U256::from(0_i32)) {
-            table.add_row(row![
-                asset.network_id(),
-                asset.name(),
-                shared::blockchain_utils::display_amount_to_float(balance_of, decimals),
-                balance_of,
-                decimals
-            ]);
-        }
-        //let asset_decimals = asset.decimals(client.clone()).await;
-        //let amount_balance: f64 = (balance_of / U256::exp10(asset_decimals.into())).into();
-        log::info!("{} -> balance {}", asset.name(), balance_of)
-    }
+    futures::future::join_all(
+        config
+            .assets
+            .hashmap()
+            .values()
+            .map(|asset_config| asset_config.new_assets_list())
+            .flatten()
+            .map(|asset| async {
+                let balance_of = asset.balance_of(wallet.address()).await;
+                balance_of
+            }),
+    )
+    .await;
+    // .await;
 
     table.printstd();
+}
+
+pub async fn print_balance(asset: &Asset, wallet: &Wallet, hide_zero: bool) -> U256 {
+    let mut table = Table::new();
+    let balance_of = asset.balance_of(wallet.address()).await;
+    let decimals = asset.decimals().await;
+    if !(hide_zero && balance_of == U256::from(0_i32)) {
+        table.add_row(row![
+            asset.network_id(),
+            asset.name(),
+            shared::blockchain_utils::display_amount_to_float(balance_of, decimals),
+            balance_of,
+            decimals
+        ]);
+    }
+    balance_of
 }
