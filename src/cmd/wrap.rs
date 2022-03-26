@@ -1,6 +1,7 @@
 use crate::cmd;
 use clap::{ArgMatches, Command};
 use web3::types::U256;
+
 //TODO: Need to review this,  may we can use swaptokenstoeth
 // because in another networks the deposit does not act like another ones
 pub const WRAP_COMMAND: &str = "wrap";
@@ -24,7 +25,13 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 }
 
 pub async fn call_sub_commands(args: &ArgMatches) {
-    let network = cmd::helpers::get_network(args);
+    let network = match cmd::helpers::get_network(args) {
+        Some(n) => n,
+        None => {
+            log::error!("--network not found");
+            panic!()
+        }
+    };
     let wallet = cmd::helpers::get_wallet(args);
     let client = network.get_web3_client_http();
 

@@ -1,7 +1,9 @@
 use crate::{
+    asset::Asset,
     cmd,
-    config::{self, asset::Asset, rebalancer::Rebalancer},
+    config::{self, rebalancer::Rebalancer},
 };
+
 use clap::{ArgMatches, Command};
 use web3::{ethabi::Token, types::U256};
 
@@ -17,8 +19,8 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 }
 
 #[derive(Debug)]
-pub struct AssetBalances<'a> {
-    asset: &'a Asset,
+pub struct AssetBalances {
+    asset: Asset,
     asset_decimals: u8,
     percent: f64,
     balance: U256,
@@ -26,17 +28,17 @@ pub struct AssetBalances<'a> {
     quoted_balance: U256,
 }
 
-impl<'a> AssetBalances<'a> {
-    pub async fn new(rebalancer: &'a Rebalancer, asset: &'a Asset) -> AssetBalances<'a> {
+impl AssetBalances {
+    pub async fn new(rebalancer: &Rebalancer, asset: Asset) -> AssetBalances {
         let quoted_asset = rebalancer.get_quoted_asset();
         Self {
-            asset,
+            asset: asset.clone(),
             asset_decimals: asset.decimals().await,
             percent: rebalancer.get_asset_config_percent(asset.name()),
             balance: asset.balance_of(rebalancer.get_wallet().address()).await,
             quoted_asset_decimals: quoted_asset.decimals().await,
             quoted_balance: asset
-                .balance_of_quoted_in(rebalancer.get_wallet(), quoted_asset)
+                .balance_of_quoted_in(rebalancer.get_wallet(), &quoted_asset)
                 .await,
         }
     }
@@ -67,14 +69,14 @@ impl<'a> AssetBalances<'a> {
     }
 }
 
-pub async fn get_assets_balances<'a>(
-    rebalancer: &'a Rebalancer,
-    assets: &[&'a Asset],
-) -> Vec<AssetBalances<'a>> {
+pub async fn get_assets_balances(
+    rebalancer: &Rebalancer,
+    assets: Vec<Asset>,
+) -> Vec<AssetBalances> {
     let assets_balances = futures::future::join_all(
         assets
-            .iter()
-            .map(|&asset| AssetBalances::new(rebalancer, asset)),
+            .into_iter()
+            .map(|asset| AssetBalances::new(rebalancer, asset)),
     )
     .await;
 
@@ -96,9 +98,9 @@ pub async fn get_total_parking_balance(
     parking_asset.balance_of(from_wallet.address()).await
 }
 
-pub async fn move_assets_to_parking<'a>(
+pub async fn move_assets_to_parking(
     total_quoted_balance: U256,
-    assets_balances: &[AssetBalances<'a>],
+    assets_balances: &[AssetBalances],
     rebalancer: &Rebalancer,
 ) {
     let from_wallet = rebalancer.get_wallet();
@@ -111,7 +113,7 @@ pub async fn move_assets_to_parking<'a>(
         }
         let exchange = ab.asset.get_exchange();
         let parking_slip = parking_asset.slippage_u256(parking_asset_decimals);
-        let parking_asset_path = exchange.build_route_for(ab.asset, parking_asset).await;
+        let parking_asset_path = exchange.build_route_for(&ab.asset, &parking_asset).await;
 
         let parking_amount_out: U256 = exchange
             .get_amounts_out(ab.balance, parking_asset_path.clone())
@@ -153,9 +155,9 @@ pub async fn move_assets_to_parking<'a>(
     }
 }
 
-pub async fn move_parking_to_assets<'a>(
+pub async fn move_parking_to_assets(
     total_parking_balance: U256,
-    assets_balances: &[AssetBalances<'a>],
+    assets_balances: &[AssetBalances],
     rebalancer: &Rebalancer,
 ) {
     let from_wallet = rebalancer.get_wallet();
@@ -167,7 +169,7 @@ pub async fn move_parking_to_assets<'a>(
             continue;
         }
         let exchange = ab.asset.get_exchange();
-        let asset_route = exchange.build_route_for(parking_asset, ab.asset).await;
+        let asset_route = exchange.build_route_for(&parking_asset, &ab.asset).await;
         let parking_slip = parking_asset.slippage_u256(ab.asset_decimals);
         let parking_amount =
             ab.desired_parking_to_move(total_parking_balance, parking_asset_decimals);
@@ -228,7 +230,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     }
 
     let assets = rebalancer.get_assets();
-    let assets_balances = get_assets_balances(rebalancer, &assets).await;
+    let assets_balances = get_assets_balances(rebalancer, assets).await;
     log::debug!("assets_balances: {:?}", assets_balances);
 
     if !rebalancer.reach_min_threshold(&assets_balances) {
@@ -247,7 +249,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     // move all balances to parking asset
     move_assets_to_parking(total_quoted_balance, &assets_balances, rebalancer).await;
 
-    let total_parking_balance = get_total_parking_balance(parking_asset, from_wallet).await;
+    let total_parking_balance = get_total_parking_balance(&parking_asset, from_wallet).await;
     log::debug!("total_parking_balance: {}", total_parking_balance);
     //move parking to assets
     move_parking_to_assets(total_parking_balance, &assets_balances, rebalancer).await;

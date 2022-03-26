@@ -38,7 +38,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let amount_in = cmd::helpers::get_amount(args, input_token_decimals);
     let slippage = cmd::helpers::get_slippage(args, output_token_decimals);
 
-    let asset_path = exchange.build_route_for(input_token, output_token).await;
+    let asset_path = exchange.build_route_for(&input_token, &output_token).await;
 
     log::debug!("asset_path: {:?}", asset_path);
 

@@ -1,9 +1,4 @@
-use crate::{
-    asset::Asset,
-    cmd,
-    config::{wallet::Wallet, Config},
-    shared,
-};
+use crate::{cmd, config::Config, shared};
 use clap::{ArgMatches, Command};
 use prettytable::{cell, row, Table};
 use web3::types::U256;
@@ -46,29 +41,25 @@ pub async fn call_sub_commands(args: &ArgMatches) {
             .values()
             .map(|asset_config| asset_config.new_assets_list())
             .flatten()
-            .map(|asset| async {
+            .map(|asset| async move {
                 let balance_of = asset.balance_of(wallet.address()).await;
-                balance_of
+                let decimals = asset.decimals().await;
+                (asset, balance_of, decimals)
             }),
     )
-    .await;
-    // .await;
+    .await
+    .into_iter()
+    .for_each(|(asset, balance_of, decimals)| {
+        if !(hide_zero && balance_of == U256::from(0_i32)) {
+            table.add_row(row![
+                asset.network_id(),
+                asset.name(),
+                shared::blockchain_utils::display_amount_to_float(balance_of, decimals),
+                balance_of,
+                decimals
+            ]);
+        }
+    });
 
     table.printstd();
-}
-
-pub async fn print_balance(asset: &Asset, wallet: &Wallet, hide_zero: bool) -> U256 {
-    let mut table = Table::new();
-    let balance_of = asset.balance_of(wallet.address()).await;
-    let decimals = asset.decimals().await;
-    if !(hide_zero && balance_of == U256::from(0_i32)) {
-        table.add_row(row![
-            asset.network_id(),
-            asset.name(),
-            shared::blockchain_utils::display_amount_to_float(balance_of, decimals),
-            balance_of,
-            decimals
-        ]);
-    }
-    balance_of
 }

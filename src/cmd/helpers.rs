@@ -1,6 +1,9 @@
-use crate::config::{
-    asset::Asset, exchange::Exchange, network::Network, rebalancer::Rebalancer, wallet::Wallet,
-    withdraw_wallet::WithdrawWallet, yield_farm::YieldFarm, Config,
+use crate::{
+    asset::Asset,
+    config::{
+        exchange::Exchange, network::Network, rebalancer::Rebalancer, wallet::Wallet,
+        withdraw_wallet::WithdrawWallet, yield_farm::YieldFarm, Config,
+    },
 };
 use clap::ArgMatches;
 use web3::types::U256;
@@ -31,7 +34,7 @@ pub fn get_wallet(args: &ArgMatches) -> &Wallet {
     }
 }
 
-pub fn get_asset_in_network_from_args<'a>(args: &'a ArgMatches, network_id: &str) -> &'a Asset {
+pub fn get_asset_in_network_from_args(args: &ArgMatches, network_id: &str) -> Asset {
     match args.value_of("asset") {
         Some(a) => Config::global()
             .assets
@@ -41,10 +44,7 @@ pub fn get_asset_in_network_from_args<'a>(args: &'a ArgMatches, network_id: &str
     }
 }
 
-pub fn get_quoted_asset_in_network_from_args<'a>(
-    args: &'a ArgMatches,
-    network_id: &str,
-) -> Option<&'a Asset> {
+pub fn get_quoted_asset_in_network_from_args(args: &ArgMatches, network_id: &str) -> Option<Asset> {
     let config = Config::global();
     match args.value_of("quoted-asset") {
         Some(a) => config.assets.find_by_name_and_network(a, network_id),
@@ -79,10 +79,7 @@ pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> U256 {
     }
 }
 
-pub fn get_token_input_in_network_from_args<'a>(
-    args: &'a ArgMatches,
-    network_id: &str,
-) -> &'a Asset {
+pub fn get_token_input_in_network_from_args(args: &ArgMatches, network_id: &str) -> Asset {
     match args.value_of("token_input") {
         Some(i) => Config::global()
             .assets
@@ -92,10 +89,7 @@ pub fn get_token_input_in_network_from_args<'a>(
     }
 }
 
-pub fn get_token_output_in_network_from_args<'a>(
-    args: &'a ArgMatches,
-    network_id: &str,
-) -> &'a Asset {
+pub fn get_token_output_in_network_from_args(args: &ArgMatches, network_id: &str) -> Asset {
     match args.value_of("token_output") {
         Some(i) => Config::global()
             .assets

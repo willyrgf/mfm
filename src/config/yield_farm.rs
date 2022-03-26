@@ -8,6 +8,8 @@ use web3::{
     Web3,
 };
 
+use crate::asset::Asset;
+
 use super::{network::Network, wallet::Wallet, Config};
 
 pub mod pacoca_auto_pool;
@@ -45,7 +47,7 @@ impl YieldFarm {
         self.address.clone()
     }
 
-    pub fn get_asset<'a>(&self) -> &'a Asset {
+    pub fn get_asset(&self) -> Asset {
         match Config::global()
             .assets
             .find_by_name_and_network(self.asset_id.as_str(), self.network_id.as_str())

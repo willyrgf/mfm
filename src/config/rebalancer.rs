@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use web3::types::U256;
 
-use crate::cmd::rebalancer::AssetBalances;
+use crate::{asset::Asset, cmd::rebalancer::AssetBalances};
 
-use super::{asset::Asset, wallet::Wallet, Config};
+use super::{wallet::Wallet, Config};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 struct AssetConfig {
@@ -68,7 +68,7 @@ impl Rebalancer {
         }
     }
 
-    pub fn get_assets<'a>(&self) -> Vec<&'a Asset> {
+    pub fn get_assets(&self) -> Vec<Asset> {
         self.portfolio
             .0
             .iter()
@@ -89,14 +89,14 @@ impl Rebalancer {
         self.parking_asset_id.as_str()
     }
 
-    pub fn get_quoted_asset<'a>(&self) -> &'a Asset {
+    pub fn get_quoted_asset(&self) -> Asset {
         Config::global()
             .assets
             .find_by_name_and_network(self.quoted_in(), self.network_id.as_str())
             .unwrap()
     }
 
-    pub fn get_parking_asset<'a>(&self) -> &'a Asset {
+    pub fn get_parking_asset(&self) -> Asset {
         Config::global()
             .assets
             .find_by_name_and_network(self.parking_asset_id.as_str(), self.network_id.as_str())

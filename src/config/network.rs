@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use web3::{transports::Http, types::U256, Web3};
 
-use super::{asset::Asset, Config};
+use super::Config;
+use crate::asset::Asset;
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Network {
@@ -24,7 +25,7 @@ impl Network {
         self.name.as_str()
     }
 
-    pub fn get_wrapped_asset<'a>(&self) -> &'a Asset {
+    pub fn get_wrapped_asset(&self) -> Asset {
         Config::global()
             .assets
             .find_by_name_and_network(self.wrapped_asset.as_str(), self.name.as_str())

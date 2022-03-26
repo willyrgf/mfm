@@ -19,6 +19,7 @@ use crate::config::{
 };
 use config::AssetConfig;
 
+#[derive(Debug, Clone)]
 pub struct Asset {
     name: String,
     kind: String,
@@ -35,13 +36,13 @@ impl Asset {
         let asset_network = asset_config.networks.get(n.get_name());
         let network: Network = (*n).clone();
         Asset {
-            name: asset_network.name,
-            kind: asset_config.kind,
-            network_id: asset_network.network_id,
-            address: asset_network.address,
-            exchange_id: asset_network.exchange_id,
-            slippage: asset_network.slippage,
-            path_asset: asset_network.path_asset,
+            name: asset_network.name.clone(),
+            kind: asset_config.kind.clone(),
+            network_id: asset_network.network_id.clone(),
+            address: asset_network.address.clone(),
+            exchange_id: asset_network.exchange_id.clone(),
+            slippage: asset_network.slippage.clone(),
+            path_asset: asset_network.path_asset.clone(),
             network,
         }
     }

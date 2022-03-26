@@ -100,7 +100,7 @@ pub async fn call_info_cmd(args: &ArgMatches) {
         let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
 
         let quote_asset_path = exchange
-            .build_route_for(yield_farm_asset, quoted_asset)
+            .build_route_for(&yield_farm_asset, &quoted_asset)
             .await;
 
         let pending_rewards = yield_farm.get_pending_rewards().await;

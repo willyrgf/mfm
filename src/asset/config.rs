@@ -35,13 +35,13 @@ pub struct AssetConfig {
 }
 
 impl AssetConfig {
-    pub fn new_assets_list(&self) -> Vec<&Asset> {
+    pub fn new_assets_list(&self) -> Vec<Asset> {
         self.networks
             .hashmap()
             .values()
             .map(|a| {
                 let network = Config::global().networks.get(&a.network_id).unwrap();
-                &Asset::new(self, network)
+                Asset::new(self, network)
             })
             .collect()
     }
@@ -59,7 +59,7 @@ impl AssetsConfig {
     }
 
     //TODO: use this function to get assets of the current network
-    pub fn find_by_name_and_network(&self, name: &str, network: &str) -> Option<&Asset> {
+    pub fn find_by_name_and_network(&self, name: &str, network: &str) -> Option<Asset> {
         let config = Config::global();
         let asset_config = match self.get(name) {
             Some(a) => a,
@@ -70,6 +70,7 @@ impl AssetsConfig {
             None => return None,
         };
 
-        Some(&Asset::new(asset_config, network))
+        let a = Asset::new(asset_config, network);
+        Some(a.clone())
     }
 }

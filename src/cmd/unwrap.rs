@@ -13,8 +13,15 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 }
 
 pub async fn call_sub_commands(args: &ArgMatches) {
-    let network = cmd::helpers::get_network(args);
     let wallet = cmd::helpers::get_wallet(args);
+
+    let network = match cmd::helpers::get_network(args) {
+        Some(n) => n,
+        None => {
+            log::error!("--network not found");
+            panic!()
+        }
+    };
 
     let wrapped_asset = network.get_wrapped_asset();
     let wrapped_asset_decimals = wrapped_asset.decimals().await;
