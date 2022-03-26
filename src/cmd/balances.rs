@@ -2,7 +2,6 @@ use crate::{cmd, config::Config, shared};
 use clap::{ArgMatches, Command};
 use prettytable::{cell, row, Table};
 use web3::types::U256;
-//use web3::types::U256;
 
 pub const BALANCES_COMMAND: &str = "balances";
 
@@ -39,8 +38,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
             .assets
             .hashmap()
             .values()
-            .map(|asset_config| asset_config.new_assets_list())
-            .flatten()
+            .flat_map(|asset_config| asset_config.new_assets_list())
             .map(|asset| async move {
                 let balance_of = asset.balance_of(wallet.address()).await;
                 let decimals = asset.decimals().await;

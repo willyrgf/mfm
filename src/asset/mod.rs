@@ -41,7 +41,7 @@ impl Asset {
             network_id: asset_network.network_id.clone(),
             address: asset_network.address.clone(),
             exchange_id: asset_network.exchange_id.clone(),
-            slippage: asset_network.slippage.clone(),
+            slippage: asset_network.slippage,
             path_asset: asset_network.path_asset.clone(),
             network,
         }

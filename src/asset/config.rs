@@ -71,6 +71,6 @@ impl AssetsConfig {
         };
 
         let a = Asset::new(asset_config, network);
-        Some(a.clone())
+        Some(a)
     }
 }
