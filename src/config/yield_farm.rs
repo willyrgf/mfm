@@ -8,7 +8,7 @@ use web3::{
     Web3,
 };
 
-use super::{asset::Asset, network::Network, wallet::Wallet, Config};
+use super::{network::Network, wallet::Wallet, Config};
 
 pub mod pacoca_auto_pool;
 pub mod pacoca_vault;
@@ -66,7 +66,10 @@ impl YieldFarm {
     }
 
     pub fn get_network<'a>(&self) -> &'a Network {
-        Config::global().networks.get(self.network_id.as_str())
+        Config::global()
+            .networks
+            .get(self.network_id.as_str())
+            .unwrap()
     }
 
     pub fn get_web3_client_http(&self) -> Web3<Http> {

@@ -33,7 +33,17 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         "Balance",
         "Decimals"
     ]);
-    for asset in config.assets.hashmap().values() {
+
+    let assets = config
+        .assets
+        .hashmap()
+        .values()
+        .map(|asset_config| asset_config.new_assets_list())
+        .flatten()
+        .collect();
+
+    for asset_config in config.assets.hashmap().values() {
+        // for
         let balance_of = asset.balance_of(wallet.address()).await;
         let decimals = asset.decimals().await;
         if !(hide_zero && balance_of == U256::from(0_i32)) {

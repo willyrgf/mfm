@@ -16,11 +16,10 @@ pub fn get_exchange(args: &ArgMatches) -> &Exchange {
     }
 }
 
-pub fn get_network(args: &ArgMatches) -> &Network {
-    let config = Config::global();
+pub fn get_network(args: &ArgMatches) -> Option<&Network> {
     match args.value_of("network") {
-        Some(n) => config.networks.get(n),
-        None => panic!("--network not supported"),
+        Some(n) => Config::global().networks.get(n),
+        None => None,
     }
 }
 

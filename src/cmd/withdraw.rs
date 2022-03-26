@@ -30,8 +30,15 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 
 pub async fn call_sub_commands(args: &ArgMatches) {
     let wallet = cmd::helpers::get_wallet(args);
-    let network = cmd::helpers::get_network(args);
     let withdraw_wallet = cmd::helpers::get_withdraw_wallet(args);
+
+    let network = match cmd::helpers::get_network(args) {
+        Some(n) => n,
+        None => {
+            log::error!("--network not found");
+            panic!()
+        }
+    };
 
     let asset = cmd::helpers::get_asset_in_network_from_args(args, network.get_name());
     let asset_decimals = asset.decimals().await;

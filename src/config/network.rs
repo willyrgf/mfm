@@ -36,14 +36,14 @@ impl Network {
     }
 
     pub fn get_web3_client_http(&self) -> Web3<Http> {
-        Web3::new(web3::transports::Http::new(self.rpc_url()).unwrap())
+        Web3::new(Http::new(self.rpc_url()).unwrap())
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Networks(HashMap<String, Network>);
 impl Networks {
-    pub fn get(&self, key: &str) -> &Network {
-        self.0.get(key).unwrap()
+    pub fn get(&self, key: &str) -> Option<&Network> {
+        self.0.get(key)
     }
 }

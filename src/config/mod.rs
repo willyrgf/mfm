@@ -1,4 +1,4 @@
-pub mod asset;
+// pub mod asset;
 pub mod exchange;
 pub mod network;
 pub mod rebalancer;
@@ -9,7 +9,11 @@ pub mod yield_farm;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 
-use asset::Assets;
+// use asset::Assets;
+// use mfm::
+// use mfm::
+// use crate::asset::AssetConfig;
+use crate::asset::config::AssetsConfig;
 use exchange::Exchanges;
 use network::Networks;
 use rebalancer::Rebalancers;
@@ -23,7 +27,7 @@ static GLOBAL_CONFIG: OnceCell<Config> = OnceCell::new();
 pub struct Config {
     pub wallets: Wallets,
     pub withdraw_wallets: WithdrawWallets,
-    pub assets: Assets,
+    pub assets: AssetsConfig,
     pub networks: Networks,
     pub exchanges: Exchanges,
     pub rebalancers: Rebalancers,

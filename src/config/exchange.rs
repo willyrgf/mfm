@@ -1,4 +1,5 @@
-use crate::config::asset::{Asset, Assets};
+use crate::asset::Asset;
+// use crate::config::asset::{Asset, Assets};
 
 use std::path::Path;
 use std::str::FromStr;
@@ -23,6 +24,8 @@ pub mod swap_eth_for_tokens;
 pub mod swap_tokens_for_tokens;
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+
+//TODO: validate the fields in the new mod initialization
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Exchange {
     name: String,
@@ -111,13 +114,6 @@ impl Exchange {
             .unwrap();
 
         wrapped_addr
-    }
-
-    pub async fn wrapped_asset<'a>(&self, assets: &'a Assets) -> &'a Asset {
-        let wrapped_address = self.wrapper_address().await;
-        log::debug!("wrapped_asset(): {:?}", wrapped_address);
-        let wrapped_asset = assets.find_by_address(wrapped_address.to_string().as_str());
-        wrapped_asset
     }
 
     pub async fn get_factory_pair(
@@ -214,7 +210,10 @@ impl Exchange {
     }
 
     pub fn get_network<'a>(&self) -> &'a Network {
-        Config::global().networks.get(self.network_id.as_str())
+        Config::global()
+            .networks
+            .get(self.network_id.as_str())
+            .unwrap()
     }
 
     pub fn get_web3_client_http(&self) -> Web3<Http> {
