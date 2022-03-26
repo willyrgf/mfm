@@ -77,6 +77,18 @@ pub async fn get_pending_rewards(yield_farm: &YieldFarm) -> U256 {
     pending_rewards
 }
 
+pub async fn get_deposited_amount(yield_farm: &YieldFarm) -> U256 {
+    let asset = yield_farm.get_asset();
+    let asset_decimals = asset.decimals().await;
+    let contract = yield_farm.contract();
+    let wallet = yield_farm.get_wallet();
+
+    let (_, _, deposited_amount): (U256, U256, U256) =
+        get_pending_rewards_amounts(&contract, wallet, asset_decimals).await;
+
+    deposited_amount
+}
+
 pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
     let client = yield_farm.get_web3_client_http();
     let contract = yield_farm.contract();

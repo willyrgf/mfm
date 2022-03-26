@@ -14,3 +14,7 @@ pub async fn harvest(yield_farm: &YieldFarm) {
 pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
     pacoca_vault::deposit(yield_farm, amount).await
 }
+
+pub async fn get_deposited_amount(yield_farm: &YieldFarm) -> U256 {
+    pacoca_vault::get_deposited_amount(yield_farm).await
+}

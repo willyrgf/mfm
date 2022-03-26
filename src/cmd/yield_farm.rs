@@ -80,9 +80,11 @@ pub async fn call_info_cmd(args: &ArgMatches) {
     table.add_row(row![
         "Network",
         "Farm",
+        "Deposit Amount",
         "Pending rewards",
         "Asset",
         "Quoted pending rewards",
+        // "Quoted deposit Amount",
         "Quoted Asset",
         "Decimals",
         "Min rewards required"
@@ -114,9 +116,15 @@ pub async fn call_info_cmd(args: &ArgMatches) {
         let min_rewards_required =
             yield_farm.get_min_rewards_required_u256(yield_farm_asset_decimals);
 
+        let deposited_amount = yield_farm.get_deposited_amount().await;
+
         table.add_row(row![
             yield_farm.network_id(),
             yield_farm.name(),
+            shared::blockchain_utils::display_amount_to_float(
+                deposited_amount,
+                yield_farm_asset_decimals
+            ),
             shared::blockchain_utils::display_amount_to_float(
                 pending_rewards,
                 yield_farm_asset_decimals

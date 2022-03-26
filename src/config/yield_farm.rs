@@ -124,6 +124,17 @@ impl YieldFarm {
             _ => panic!("operation not implemented {:?}", self.operation),
         }
     }
+
+    pub async fn get_deposited_amount(&self) -> U256 {
+        match self.operation.as_str() {
+            "cake_auto_pool" => pancake_swap_auto_cake_pool::get_deposited_amount(self).await,
+            "pacoca_auto_pool" => pacoca_auto_pool::get_deposited_amount(self).await,
+            _ => {
+                log::error!("get_deposited_amount not implemented for operation");
+                U256::from(0_i32)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
