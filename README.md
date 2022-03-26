@@ -118,5 +118,5 @@ cargo run -- yield-farm run --force-harvest true
 - [x] add withdraw with wallets whilelist
 - [x] add harverst for yield farms
 - [x] implement rebalancer threshold
+- [x] implement a fallback to a bep20 abi
 - [ ] implement a checker for token limit transfer (max-tx-amount)
-- [ ] implement a fallback to a bep20 abi
