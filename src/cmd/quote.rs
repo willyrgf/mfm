@@ -61,12 +61,14 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         "From Asset Amount",
         "To Asset",
         "To Asset Amount",
+        "To Asset Amount Slippage",
     ]);
     table.add_row(row![
         exchange.name(),
         input_token.name(),
         shared::blockchain_utils::display_amount_to_float(amount_in, input_token_decimals),
         output_token.name(),
+        shared::blockchain_utils::display_amount_to_float(amount_min_out, output_token_decimals),
         shared::blockchain_utils::display_amount_to_float(
             amount_out_slippage,
             output_token_decimals

@@ -265,6 +265,16 @@ assets:
         address: 0x55671114d774ee99d653d6c12460c780a67f1d18
         slippage: 1
         path_asset: wbnb
+  safemoon:
+    kind: token
+    networks:
+      bsc:
+        name: safemoon
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x42981d0bfbAf196529376EE702F2a9Eb9092fcB5
+        slippage: 1
+        path_asset: wbnb
   grt:
     kind: token
     networks:

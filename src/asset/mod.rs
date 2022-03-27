@@ -150,6 +150,25 @@ impl Asset {
             .into()
     }
 
+    pub fn exist_max_tx_amount(&self) -> bool {
+        self.contract().abi().function("_maxTxAmount").is_ok()
+    }
+
+    pub async fn max_tx_amount(&self) -> Option<U256> {
+        if !self.exist_max_tx_amount() {
+            return None;
+        }
+
+        match self
+            .contract()
+            .query("_maxTxAmount", (), None, Options::default(), None)
+            .await
+        {
+            Ok(m) => Some(m),
+            _ => None,
+        }
+    }
+
     pub async fn allowance(&self, owner: H160, spender: H160) -> U256 {
         let result: U256 = self
             .contract()
