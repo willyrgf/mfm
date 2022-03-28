@@ -90,7 +90,7 @@ pub async fn call_info_cmd(args: &ArgMatches) {
         "Min rewards required"
     ]);
 
-    for yield_farm in get_farms_to_look(args) {
+    futures::future::join_all(get_farms_to_look(args).iter().map(|&yield_farm| async {
         let quoted_asset =
             cmd::helpers::get_quoted_asset_in_network_from_args(args, yield_farm.network_id())
                 .unwrap();
@@ -118,24 +118,45 @@ pub async fn call_info_cmd(args: &ArgMatches) {
 
         let deposited_amount = yield_farm.get_deposited_amount().await;
 
+        let result = YieldFarmInfoCmdOutput {
+            network_id: yield_farm.network_id().into(),
+            yield_farm_name: yield_farm.name().into(),
+            deposited_amount: deposited_amount,
+            pending_rewards: pending_rewards,
+            yield_farm_asset_name: yield_farm_asset.name().into(),
+            quoted_price: quoted_price,
+            quoted_asset_name: quoted_asset.name().into(),
+            yield_farm_asset_decimals: yield_farm_asset_decimals,
+            quoted_asset_decimal: quoted_asset_decimal,
+            min_rewards_required: min_rewards_required,
+        };
+
+        result
+    }))
+    .await
+    .into_iter()
+    .for_each(|cmd_output| {
         table.add_row(row![
-            yield_farm.network_id(),
-            yield_farm.name(),
+            cmd_output.network_id,
+            cmd_output.yield_farm_name,
             shared::blockchain_utils::display_amount_to_float(
-                deposited_amount,
-                yield_farm_asset_decimals
+                cmd_output.deposited_amount,
+                cmd_output.yield_farm_asset_decimals
             ),
             shared::blockchain_utils::display_amount_to_float(
-                pending_rewards,
-                yield_farm_asset_decimals
+                cmd_output.pending_rewards,
+                cmd_output.yield_farm_asset_decimals
             ),
-            yield_farm_asset.name(),
-            shared::blockchain_utils::display_amount_to_float(quoted_price, quoted_asset_decimal),
-            quoted_asset.name(),
-            yield_farm_asset_decimals,
-            min_rewards_required
+            cmd_output.yield_farm_asset_name,
+            shared::blockchain_utils::display_amount_to_float(
+                cmd_output.quoted_price,
+                cmd_output.quoted_asset_decimal
+            ),
+            cmd_output.quoted_asset_name,
+            cmd_output.yield_farm_asset_decimals,
+            cmd_output.min_rewards_required
         ]);
-    }
+    });
     table.printstd();
 }
 
@@ -223,3 +244,41 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct YieldFarmInfoCmdOutput {
+    network_id: String,
+    yield_farm_name: String,
+    deposited_amount: U256,
+    pending_rewards: U256,
+    yield_farm_asset_name: String,
+    quoted_price: U256,
+    quoted_asset_name: String,
+    yield_farm_asset_decimals: u8,
+    quoted_asset_decimal: u8,
+    min_rewards_required: U256,
+}
+
+// impl YieldFarmInfoCmdOutput {
+//     pub fn new() -> YieldFarmInfoCmdOutput {
+
+//     }
+// }
+
+// table.add_row(row![
+//     yield_farm.network_id(),
+//     yield_farm.name(),
+//     shared::blockchain_utils::display_amount_to_float(
+//         deposited_amount,
+//         yield_farm_asset_decimals
+//     ),
+//     shared::blockchain_utils::display_amount_to_float(
+//         pending_rewards,
+//         yield_farm_asset_decimals
+//     ),
+//     yield_farm_asset.name(),
+//     shared::blockchain_utils::display_amount_to_float(quoted_price, quoted_asset_decimal),
+//     quoted_asset.name(),
+//     yield_farm_asset_decimals,
+//     min_rewards_required
+// ]);
