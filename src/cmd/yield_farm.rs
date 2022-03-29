@@ -121,14 +121,14 @@ pub async fn call_info_cmd(args: &ArgMatches) {
         let result = YieldFarmInfoCmdOutput {
             network_id: yield_farm.network_id().into(),
             yield_farm_name: yield_farm.name().into(),
-            deposited_amount: deposited_amount,
-            pending_rewards: pending_rewards,
+            deposited_amount,
+            pending_rewards,
             yield_farm_asset_name: yield_farm_asset.name().into(),
-            quoted_price: quoted_price,
+            quoted_price,
             quoted_asset_name: quoted_asset.name().into(),
-            yield_farm_asset_decimals: yield_farm_asset_decimals,
-            quoted_asset_decimal: quoted_asset_decimal,
-            min_rewards_required: min_rewards_required,
+            yield_farm_asset_decimals,
+            quoted_asset_decimal,
+            min_rewards_required,
         };
 
         result
