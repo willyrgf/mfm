@@ -111,6 +111,18 @@ yield_farms:
     min_rewards_required: 1
     deposit_asset_id: cake
     reward_asset_id: cake
+  auto-baby:
+    name: auto-baby
+    contract_name: pancake_swap_auto_cake_pool
+    address: 0x3e1ead5cbe817689f4bdb96bceeb112fdbe94dbc
+    wallet_id: farm-wallet
+    asset_id: baby
+    network_id: bsc
+    operation: baby_auto_baby_pool
+    min_rewards_required: 1
+    deposit_asset_id: baby
+    reward_asset_id: baby
+
   #TODO: fazer o approve do contrato de farms
   auto-pacoca:
     name: auto-pacoca

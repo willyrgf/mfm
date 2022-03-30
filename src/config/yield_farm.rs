@@ -12,6 +12,7 @@ use crate::asset::Asset;
 
 use super::{network::Network, wallet::Wallet, Config};
 
+pub mod baby_auto_baby_pool;
 pub mod pacoca_auto_pool;
 pub mod pacoca_vault;
 pub mod pancake_swap_auto_cake_pool;
@@ -129,6 +130,7 @@ impl YieldFarm {
                 qi_dao_staking_pool_qi_wmatic::get_pending_rewards(self).await
             }
             "posi_pool_baby" => posi_smartchief::get_pending_rewards(self).await,
+            "baby_auto_baby_pool" => baby_auto_baby_pool::get_pending_rewards(self).await,
             _ => {
                 log::error!("operation not implemented {:?}", self.operation);
                 U256::from(0_i32)
@@ -142,6 +144,7 @@ impl YieldFarm {
             "posi_farm_busd_posi" => posi_farm_busd_posi::harvest(self).await,
             "cake_auto_pool" => pancake_swap_auto_cake_pool::harvest(self).await,
             "pacoca_auto_pool" => pacoca_auto_pool::harvest(self).await,
+            "baby_auto_baby_pool" => baby_auto_baby_pool::harvest(self).await,
             _ => log::error!("operation not implemented {:?}", self.operation),
         }
     }
@@ -151,6 +154,7 @@ impl YieldFarm {
             "cake_auto_pool" => pancake_swap_auto_cake_pool::deposit(self, amount).await,
             "pacoca_auto_pool" => pacoca_auto_pool::deposit(self, amount).await,
             "posi_pool_baby" => posi_smartchief::deposit(self, amount).await,
+            "baby_auto_baby_pool" => baby_auto_baby_pool::deposit(self, amount).await,
             _ => log::error!("operation not implemented {:?}", self.operation),
         }
     }
@@ -160,8 +164,12 @@ impl YieldFarm {
             "cake_auto_pool" => pancake_swap_auto_cake_pool::get_deposited_amount(self).await,
             "pacoca_auto_pool" => pacoca_auto_pool::get_deposited_amount(self).await,
             "posi_pool_baby" => posi_smartchief::get_deposited_amount(self).await,
+            "baby_auto_baby_pool" => baby_auto_baby_pool::get_deposited_amount(self).await,
             _ => {
-                log::error!("get_deposited_amount not implemented for operation");
+                log::error!(
+                    "get_deposited_amount not implemented for operation: {:?}",
+                    self.operation
+                );
                 U256::from(0_i32)
             }
         }
