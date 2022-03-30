@@ -17,6 +17,7 @@ pub mod pacoca_vault;
 pub mod pancake_swap_auto_cake_pool;
 pub mod posi_farm_bnb_posi;
 pub mod posi_farm_busd_posi;
+pub mod posi_smartchief;
 pub mod position_stake_manager;
 pub mod qi_dao_staking_pool;
 pub mod qi_dao_staking_pool_qi_wmatic;
@@ -31,7 +32,8 @@ pub struct YieldFarm {
     network_id: String,
     asset_id: String,
     min_rewards_required: f64,
-    //quoted_asset_id: String,
+    deposit_asset_id: Option<String>,
+    reward_asset_id: Option<String>, //quoted_asset_id: String,
 }
 
 impl YieldFarm {
@@ -47,15 +49,33 @@ impl YieldFarm {
         self.address.clone()
     }
 
-    pub fn get_asset(&self) -> Asset {
-        match Config::global()
-            .assets
-            .find_by_name_and_network(self.asset_id.as_str(), self.network_id.as_str())
-        {
-            Some(a) => a,
-            _ => panic!("can't find asset"),
+    pub fn get_deposit_asset(&self) -> Option<Asset> {
+        match &self.deposit_asset_id {
+            Some(a) => Config::global()
+                .assets
+                .find_by_name_and_network(a.as_str(), self.network_id.as_str()),
+            None => None,
         }
     }
+
+    pub fn get_reward_asset(&self) -> Option<Asset> {
+        match &self.reward_asset_id {
+            Some(a) => Config::global()
+                .assets
+                .find_by_name_and_network(a.as_str(), self.network_id.as_str()),
+            None => None,
+        }
+    }
+
+    // pub fn get_asset(&self) -> Asset {
+    //     match Config::global()
+    //         .assets
+    //         .find_by_name_and_network(self.asset_id.as_str(), self.network_id.as_str())
+    //     {
+    //         Some(a) => a,
+    //         _ => panic!("can't find asset"),
+    //     }
+    // }
 
     pub fn get_min_rewards_required_u256(&self, asset_decimals: u8) -> U256 {
         let q = self.min_rewards_required;
@@ -108,7 +128,11 @@ impl YieldFarm {
             "qi_dao_staking_pool_qi_wmatic" => {
                 qi_dao_staking_pool_qi_wmatic::get_pending_rewards(self).await
             }
-            _ => panic!("operation not implemented {:?}", self.operation),
+            "posi_pool_baby" => posi_smartchief::get_pending_rewards(self).await,
+            _ => {
+                log::error!("operation not implemented {:?}", self.operation);
+                U256::from(0_i32)
+            }
         }
     }
 
@@ -118,7 +142,7 @@ impl YieldFarm {
             "posi_farm_busd_posi" => posi_farm_busd_posi::harvest(self).await,
             "cake_auto_pool" => pancake_swap_auto_cake_pool::harvest(self).await,
             "pacoca_auto_pool" => pacoca_auto_pool::harvest(self).await,
-            _ => panic!("operation not implemented {:?}", self.operation),
+            _ => log::error!("operation not implemented {:?}", self.operation),
         }
     }
 
@@ -126,7 +150,8 @@ impl YieldFarm {
         match self.operation.as_str() {
             "cake_auto_pool" => pancake_swap_auto_cake_pool::deposit(self, amount).await,
             "pacoca_auto_pool" => pacoca_auto_pool::deposit(self, amount).await,
-            _ => panic!("operation not implemented {:?}", self.operation),
+            "posi_pool_baby" => posi_smartchief::deposit(self, amount).await,
+            _ => log::error!("operation not implemented {:?}", self.operation),
         }
     }
 
@@ -134,6 +159,7 @@ impl YieldFarm {
         match self.operation.as_str() {
             "cake_auto_pool" => pancake_swap_auto_cake_pool::get_deposited_amount(self).await,
             "pacoca_auto_pool" => pacoca_auto_pool::get_deposited_amount(self).await,
+            "posi_pool_baby" => posi_smartchief::get_deposited_amount(self).await,
             _ => {
                 log::error!("get_deposited_amount not implemented for operation");
                 U256::from(0_i32)

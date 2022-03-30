@@ -66,7 +66,13 @@ pub async fn get_pending_rewards_amounts(
 }
 
 pub async fn get_pending_rewards(yield_farm: &YieldFarm) -> U256 {
-    let asset = yield_farm.get_asset();
+    let asset = match yield_farm.get_reward_asset() {
+        Some(a) => a,
+        None => {
+            log::error!("missing reward asset in assets");
+            return U256::from(0_i32);
+        }
+    };
     let asset_decimals = asset.decimals().await;
     let contract = yield_farm.contract();
     let wallet = yield_farm.get_wallet();
@@ -78,7 +84,13 @@ pub async fn get_pending_rewards(yield_farm: &YieldFarm) -> U256 {
 }
 
 pub async fn get_deposited_amount(yield_farm: &YieldFarm) -> U256 {
-    let asset = yield_farm.get_asset();
+    let asset = match yield_farm.get_deposit_asset() {
+        Some(a) => a,
+        None => {
+            log::error!("missing reward asset in assets");
+            return U256::from(0_i32);
+        }
+    };
     let asset_decimals = asset.decimals().await;
     let contract = yield_farm.contract();
     let wallet = yield_farm.get_wallet();
@@ -136,7 +148,13 @@ pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
 
 pub async fn harvest(yield_farm: &YieldFarm) {
     let client = yield_farm.get_web3_client_http();
-    let asset = yield_farm.get_asset();
+    let asset = match yield_farm.get_reward_asset() {
+        Some(a) => a,
+        None => {
+            log::error!("missing reward asset in assets");
+            return;
+        }
+    };
     let asset_decimals = asset.decimals().await;
     let contract = yield_farm.contract();
     let from_wallet = yield_farm.get_wallet();

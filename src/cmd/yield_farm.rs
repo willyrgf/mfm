@@ -80,11 +80,11 @@ pub async fn call_info_cmd(args: &ArgMatches) {
     table.add_row(row![
         "Network",
         "Farm",
+        "Deposit Asset",
         "Deposit Amount",
         "Pending rewards",
-        "Asset",
+        "Reward Asset",
         "Quoted pending rewards",
-        // "Quoted deposit Amount",
         "Quoted Asset",
         "Decimals",
         "Min rewards required"
@@ -96,9 +96,27 @@ pub async fn call_info_cmd(args: &ArgMatches) {
                 .unwrap();
         let exchange = quoted_asset.get_exchange();
         let quoted_asset_decimal = quoted_asset.decimals().await;
-        let yield_farm_asset = yield_farm.get_asset();
+        let yield_farm_asset = yield_farm.get_reward_asset().unwrap();
         let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
+        let deposit_asset = yield_farm.get_deposit_asset();
+        let deposit_asset_decimals = match deposit_asset.clone() {
+            Some(a) => a.decimals().await,
+            None => 0_u8,
+        };
+        let reward_asset = yield_farm.get_reward_asset();
+        let reward_asset_decimals = match reward_asset.clone() {
+            Some(a) => a.decimals().await,
+            None => 0_u8,
+        };
 
+        let deposit_asset_name: String = match deposit_asset.clone() {
+            Some(a) => a.name().into(),
+            None => "".to_string(),
+        };
+        let reward_asset_name: String = match reward_asset.clone() {
+            Some(a) => a.name().into(),
+            None => "".to_string(),
+        };
         let quote_asset_path = exchange
             .build_route_for(&yield_farm_asset, &quoted_asset)
             .await;
@@ -119,6 +137,10 @@ pub async fn call_info_cmd(args: &ArgMatches) {
         let deposited_amount = yield_farm.get_deposited_amount().await;
 
         let result = YieldFarmInfoCmdOutput {
+            deposit_asset_name,
+            reward_asset_name,
+            deposit_asset_decimals,
+            reward_asset_decimals,
             network_id: yield_farm.network_id().into(),
             yield_farm_name: yield_farm.name().into(),
             deposited_amount,
@@ -139,6 +161,7 @@ pub async fn call_info_cmd(args: &ArgMatches) {
         table.add_row(row![
             cmd_output.network_id,
             cmd_output.yield_farm_name,
+            cmd_output.deposit_asset_name,
             shared::blockchain_utils::display_amount_to_float(
                 cmd_output.deposited_amount,
                 cmd_output.yield_farm_asset_decimals
@@ -147,7 +170,7 @@ pub async fn call_info_cmd(args: &ArgMatches) {
                 cmd_output.pending_rewards,
                 cmd_output.yield_farm_asset_decimals
             ),
-            cmd_output.yield_farm_asset_name,
+            cmd_output.reward_asset_name,
             shared::blockchain_utils::display_amount_to_float(
                 cmd_output.quoted_price,
                 cmd_output.quoted_asset_decimal
@@ -169,7 +192,7 @@ pub async fn call_deposit_cmd(args: &ArgMatches) {
         "Decimals",
     ]);
     let yield_farm = cmd::helpers::get_yield_farm(args);
-    let yield_farm_asset = yield_farm.get_asset();
+    let yield_farm_asset = yield_farm.get_deposit_asset().unwrap();
     let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
     let amount = cmd::helpers::get_amount(args, yield_farm_asset_decimals);
 
@@ -196,7 +219,7 @@ pub async fn call_run_cmd(args: &ArgMatches) {
         "Min rewards required"
     ]);
     for yield_farm in get_farms_to_look(args) {
-        let yield_farm_asset = yield_farm.get_asset();
+        let yield_farm_asset = yield_farm.get_reward_asset().unwrap();
         let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
 
         let pending_rewards = yield_farm.get_pending_rewards().await;
@@ -247,6 +270,10 @@ pub async fn call_sub_commands(args: &ArgMatches) {
 
 #[derive(Debug, Clone)]
 pub struct YieldFarmInfoCmdOutput {
+    deposit_asset_name: String,
+    reward_asset_name: String,
+    deposit_asset_decimals: u8,
+    reward_asset_decimals: u8,
     network_id: String,
     yield_farm_name: String,
     deposited_amount: U256,

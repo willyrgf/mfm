@@ -10,6 +10,14 @@ cargo run -- wrap --network bsc --wallet test-wallet --amount 0.005
 
 ---
 
+### unwrap token (ex: in bsc wbnb -> bnb, in eth weth -> eth, in polygon wmatic -> matic )
+
+```bash
+cargo run -- unwrap --network bsc --wallet test-wallet --amount 0.005
+```
+
+---
+
 ### check allowance data for an asset
 
 ```bash
@@ -93,6 +101,8 @@ cargo run -- yield-farm info -y auto-cake
 | Position Farm BNB/POSI    | posi_farm_bnb_posi  | 0x0c54b0b7d61de871db47c3ad3f69feb0f2c8db0b |
 | Position Farm BUSD/POSI   | posi_farm_busd_posi | 0x0c54b0b7d61de871db47c3ad3f69feb0f2c8db0b |
 | PancakeSwap AutoCake Pool | cake_auto_pool      | 0xa80240eb5d7e05d3f250cf000eec0891d00b51cc |
+| Paçoca Auto Paçoca Pool | pacoca_auto_pool      | 0x16205528a8f7510f4421009a7654835b541bb1b9 |
+| QI DAO QI-MATIC Pool  | qi_dao_staking_pool_qi_wmatic | 0x574fe4e8120c4da1741b5fd45584de7a5b521f0f |
 
 use run to run over all farms configured
 
