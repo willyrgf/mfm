@@ -71,48 +71,72 @@ yield_farms:
     contract_name: position_stake_manager
     address: 0x0c54b0b7d61de871db47c3ad3f69feb0f2c8db0b
     wallet_id: farm-wallet
-    asset_id: posi
     network_id: bsc
     operation: posi_farm_bnb_posi
     min_rewards_required: 10
-    #quoted_asset_id: busd
+    reward_asset_id: posi
   posi-farm-busd-posi:
     name: posi-farm-busd-posi
     contract_name: position_stake_manager
     address: 0x0c54b0b7d61de871db47c3ad3f69feb0f2c8db0b
     wallet_id: farm-wallet
-    asset_id: posi
     network_id: bsc
     operation: posi_farm_busd_posi
+    min_rewards_required: 10
+    deposit_asset_id:
+    reward_asset_id: posi
+  posi-baby-pool:
+    name: posi-baby-pool
+    contract_name: posi_smartchief
+    address: 0xac1538061ad0694e2c0ef68b7fb94a091d448d99
+    wallet_id: farm-wallet
+    network_id: bsc
+    operation: posi_pool_baby
     min_rewards_required: 7
+    deposit_asset_id: posi
+    reward_asset_id: baby
   auto-cake:
     name: auto-cake
     contract_name: pancake_swap_auto_cake_pool
     address: 0xa80240eb5d7e05d3f250cf000eec0891d00b51cc
     wallet_id: farm-wallet
-    asset_id: cake
     network_id: bsc
     operation: cake_auto_pool
     min_rewards_required: 1
-  #TODO: fazer o approve do contrato de farms
+    deposit_asset_id: cake
+    reward_asset_id: cake
+  auto-baby:
+    name: auto-baby
+    contract_name: pancake_swap_auto_cake_pool
+    address: 0x3e1ead5cbe817689f4bdb96bceeb112fdbe94dbc
+    wallet_id: farm-wallet
+    network_id: bsc
+    operation: baby_auto_baby_pool
+    min_rewards_required: 1
+    deposit_asset_id: baby
+    reward_asset_id: baby
+
+  #TODO: change the allowance to use different types of address, including farms
   auto-pacoca:
     name: auto-pacoca
     contract_name: pacoca_vault
     address: 0x16205528a8f7510f4421009a7654835b541bb1b9
     wallet_id: farm-wallet
-    asset_id: pacoca
     network_id: bsc
     operation: pacoca_auto_pool
     min_rewards_required: 100
+    deposit_asset_id: pacoca
+    reward_asset_id: pacoca
   maifinance-qi-wmatic:
     name: maifinance-qi-wmatic
     contract_name: qi_dao_staking_pool
     address: 0x574fe4e8120c4da1741b5fd45584de7a5b521f0f
     wallet_id: polygon-wallet
-    asset_id: qidao
     network_id: polygon
     operation: qi_dao_staking_pool_qi_wmatic
     min_rewards_required: 10
+    deposit_asset_id:
+    reward_asset_id: qidao
   # quickswap-dual-matic-usdc:
   #   name: quickswap-dual-matic-usdc
   #   contract_name: quickswap_dual_rewards
@@ -177,7 +201,7 @@ assets:
         exchange_id: sushi_swap_polygon
         address: 0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270
         slippage: 2
-        path_asset: weth 
+        path_asset: weth
   anonq:
     kind: token
     networks:
@@ -224,7 +248,7 @@ assets:
         exchange_id: sushi_swap_polygon
         address: 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619
         slippage: 2
-        path_asset: weth 
+        path_asset: weth
   btc:
     kind: token
     networks:
@@ -302,3 +326,23 @@ assets:
         address: 0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d
         slippage: 1
         path_asset: wbnb
+  usdt:
+    kind: token
+    networks:
+      bsc:
+        name: usdt
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x55d398326f99059ff775485246999027b3197955
+        slippage: 1
+        path_asset: wbnb
+  baby:
+    kind: token
+    networks:
+      bsc:
+        name: baby
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x53e562b9b7e5e94b81f10e96ee70ad06df3d2657
+        slippage: 1
+        path_asset: usdt

@@ -143,11 +143,9 @@ impl Exchange {
     }
 
     pub async fn build_route_for(&self, input_asset: &Asset, output_asset: &Asset) -> Vec<H160> {
-        // Example to transform this result into tokens
-        // Vec<Token> = paths
-        //         //     .into_iter()
-        //         //     .map(|p| Token::Address(p))
-        //         //     .collect::<Vec<_>>();
+        //TODO: use path_asset from input and output asset
+        // input -> path_asset -> path_asset from output -> output
+        //TODO: check liquidity of directly path
         let mut v = vec![];
         let network = self.get_network();
         let wrapped_asset = network.get_wrapped_asset();

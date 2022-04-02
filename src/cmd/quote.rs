@@ -61,7 +61,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         "From Asset Amount",
         "To Asset",
         "To Asset Amount",
-        "To Asset Amount Slippage",
+        "To Asset Amount with Slippage",
     ]);
     table.add_row(row![
         exchange.name(),
