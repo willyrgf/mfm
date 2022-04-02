@@ -5,7 +5,7 @@ use crate::{
 };
 
 use clap::{ArgMatches, Command};
-use web3::{ethabi::Token, types::U256};
+use web3::types::U256;
 
 pub const REBALANCER_COMMAND: &str = "rebalancer";
 
@@ -139,17 +139,15 @@ pub async fn move_assets_to_parking(
             );
             continue;
         }
-        let parking_asset_path_tokens: Vec<Token> = parking_asset_path
-            .clone()
-            .into_iter()
-            .map(Token::Address)
-            .collect::<Vec<_>>();
+
         exchange
             .swap_tokens_for_tokens(
                 from_wallet,
                 ab.balance,
                 parking_amount_out_slip,
-                Token::Array(parking_asset_path_tokens),
+                ab.asset.clone(),
+                parking_asset.clone(),
+                Some(slippage),
             )
             .await;
     }
@@ -200,17 +198,15 @@ pub async fn move_parking_to_assets(
             );
             continue;
         }
-        let asset_route_token: Vec<Token> = asset_route
-            .clone()
-            .into_iter()
-            .map(Token::Address)
-            .collect::<Vec<_>>();
+
         exchange
             .swap_tokens_for_tokens(
                 from_wallet,
                 parking_amount,
                 asset_amount_out_slip,
-                Token::Array(asset_route_token),
+                parking_asset.clone(),
+                ab.asset.clone(),
+                Some(slippage),
             )
             .await;
     }

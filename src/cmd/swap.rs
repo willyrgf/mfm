@@ -1,7 +1,7 @@
 use crate::{cmd, shared};
 use clap::{ArgMatches, Command};
 use prettytable::{cell, row, Table};
-use web3::{ethabi::Token, types::U256};
+use web3::types::U256;
 
 pub const SWAP_COMMAND: &str = "swap";
 
@@ -41,14 +41,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let slippage = cmd::helpers::get_slippage(args, output_asset_decimals);
 
     let asset_path_in = exchange.build_route_for(&input_asset, &output_asset).await;
-    let asset_path_out = exchange.build_route_for(&output_asset, &input_asset).await;
 
-    // TODO: move address->token transformation to swap
-    let path_token: Vec<Token> = asset_path_in
-        .clone()
-        .into_iter()
-        .map(Token::Address)
-        .collect::<Vec<_>>();
     let amount_min_out: U256 = exchange
         .get_amounts_out(amount_in, asset_path_in.clone())
         .await
@@ -57,198 +50,19 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         .into();
     log::debug!("amount_mint_out: {:?}", amount_min_out);
 
-    // TODO: move it to a func an test it
-    // check what input asset max tx amount limit is lower to use
-    //
-    // anonq 10000  = 1USD
-    // anonqv2 1000 = 1USD
-    // (anonq/anonqv2)*10000 = 10000
-    // (anonqv2/anonqv2)*1000 = 1000 // use it
-    //
-    // anonq 10000  = 1USD
-    // anonqv2 1000 = 20USD
-    // (anonq/anonqv2)*10000 = 500 // use it
-    // (anonqv2/anonqv2)*1000 = 1000
-    //
-    // amount_min_out = 0,05
-    // amount_min_out*1000 = 50
-    let i_max_tx_amount = input_asset.max_tx_amount().await;
-    let o_max_tx_amount = output_asset.max_tx_amount().await;
-    log::debug!("cmd::swap() i_max_tx_amount: {:?}", i_max_tx_amount);
-    log::debug!("cmd::swap() o_max_tx_amount: {:?}", o_max_tx_amount);
-    let limit_max_input = match (i_max_tx_amount, o_max_tx_amount) {
-        (Some(il), Some(ol)) => {
-            // anonq =        10_000 = 10000anonq
-            // safemoon = 10_000_000 = 249410anonq
-            // 10000*11000 = 111_000
-            // 10_000*11000 = (10000*11000)*6,17 = 678_000
-
-            // 10000000*6,17 = 61.7MM
-            // 10000*1 = 10000
-
-            let limit_amount_out: U256 = exchange
-                .get_amounts_out(ol, asset_path_out.clone())
-                .await
-                .last()
-                .unwrap()
-                .into();
-
-            log::debug!(
-                "cmd::swap(): limit_amount_out: {:?}, limit_amount_out: {:?}",
-                limit_amount_out,
-                shared::blockchain_utils::display_amount_to_float(
-                    limit_amount_out,
-                    input_asset_decimals
-                )
-            );
-
-            if il > limit_amount_out {
-                Some(limit_amount_out)
-            } else {
-                Some(il)
-            }
-        }
-        (None, Some(ol)) => {
-            let limit_amount_in: U256 = exchange
-                .get_amounts_out(ol, asset_path_out.clone())
-                .await
-                .last()
-                .unwrap()
-                .into();
-            log::debug!("cmd::swap() limit_amount_in: {:?}", limit_amount_in);
-            Some(limit_amount_in)
-        }
-        (Some(il), None) => Some(il),
-        (None, None) => None,
-    };
-
-    log::debug!("cmd::swap() limit_max_output: {:?}", limit_max_input);
-
-    //     let h = match limit_max_input {
-    //         Some(limit) if amount_in > limit => {
-    //             let amount_in_plus_two_decimals = amount_in * U256::exp10(2);
-    //             (((amount_in_plus_two_decimals / limit).as_u128() as f64) / 100_f64).ceil() as u64
-    //         }
-    //         _ => 1_u64,
-    //     };
-
-    //     let mut total = amount_in;
-    //     for _ in 0..h {
-    //         if total > limit {
-    //             //TODO: calc amount_min_out
-    //             total -= limit;
-    //             log::debug!(
-    //                 "cmd::swap() inside total > limit: total: {:?}, limit: {:?}",
-    //                 total,
-    //                 limit
-    //             );
-    //             let hop_amount_out = exchange
-    //                 .get_amounts_out(limit, asset_path_in.clone())
-    //                 .await
-    //                 .last()
-    //                 .unwrap()
-    //                 .into();
-    //             log::debug!(
-    //                 "cmd::swap() inside total > limit: hop_amount_out: {:?}",
-    //                 hop_amount_out
-    //             );
-
-    //             v.push((limit, hop_amount_out));
-    //         } else {
-    //             let hop_amount_out: U256 = exchange
-    //                 .get_amounts_out(total, asset_path_in.clone())
-    //                 .await
-    //                 .last()
-    //                 .unwrap()
-    //                 .into();
-
-    //             v.push((total, hop_amount_out));
-    //         }
-    //     }
-
-    //     log::debug!("cmd::swap() inside amount_in > limit: v: {:?}", v);
-
-    //     v
-    // }
-
-    match limit_max_input {
-        Some(limit) if amount_in > limit => {
-            // TODO: resolv this calc with U256 exp10  or numbigint
-            let mut total = amount_in;
-            let amount_in_plus_two_decimals = amount_in * U256::exp10(2);
-            let number_hops =
-                (((amount_in_plus_two_decimals / limit).as_u128() as f64) / 100_f64).ceil() as u64;
-
-            // for (0..number_hops) {
-            for _ in 0..number_hops {
-                let mut ai = U256::default();
-                let mut ao = U256::default();
-
-                if total > limit {
-                    //TODO: calc amount_min_out
-                    total -= limit;
-                    log::debug!(
-                        "cmd::swap() inside total > limit: total: {:?}, limit: {:?}",
-                        total,
-                        limit
-                    );
-
-                    ai = limit;
-                    ao = exchange
-                        .get_amounts_out(limit, asset_path_in.clone())
-                        .await
-                        .last()
-                        .unwrap()
-                        .into();
-
-                    log::debug!("cmd::swap() inside total > limit: ao: {:?}", ao);
-                } else {
-                    ai = total;
-                    ao = exchange
-                        .get_amounts_out(total, asset_path_in.clone())
-                        .await
-                        .last()
-                        .unwrap()
-                        .into();
-
-                    log::debug!("cmd::swap() inside total > limit: ao: {:?}", ao);
-                }
-
-                let slippage_amount = (ao * slippage) / U256::exp10(output_asset_decimals.into());
-                log::debug!("slippage_amount {:?}", slippage_amount);
-
-                let amount_out_slippage: U256 = ao - slippage_amount;
-                log::debug!("amount_out_slippage : {:?}", amount_out_slippage);
-                exchange
-                    .swap_tokens_for_tokens(
-                        wallet,
-                        ai,
-                        amount_out_slippage,
-                        Token::Array(path_token.clone()),
-                    )
-                    .await;
-            }
-        }
-        _ => {
-            let slippage_amount =
-                (amount_min_out * slippage) / U256::exp10(output_asset_decimals.into());
-            log::debug!("slippage_amount {:?}", slippage_amount);
-
-            let amount_out_slippage: U256 = amount_min_out - slippage_amount;
-            log::debug!("amount_out_slippage : {:?}", amount_out_slippage);
-            exchange
-                .swap_tokens_for_tokens(
-                    wallet,
-                    amount_in,
-                    amount_out_slippage,
-                    Token::Array(path_token.clone()),
-                )
-                .await;
-        }
-    };
-
     let slippage_amount = (amount_min_out * slippage) / U256::exp10(output_asset_decimals.into());
     let amount_out_slippage = amount_min_out - slippage_amount;
+    log::debug!("amount_out_slippage : {:?}", amount_out_slippage);
+    exchange
+        .swap_tokens_for_tokens(
+            wallet,
+            amount_in,
+            amount_out_slippage,
+            input_asset.clone(),
+            output_asset.clone(),
+            Some(slippage),
+        )
+        .await;
 
     let mut table = Table::new();
     table.add_row(row![

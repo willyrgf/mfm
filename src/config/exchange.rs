@@ -1,4 +1,5 @@
 use crate::asset::Asset;
+use crate::shared;
 // use crate::config::asset::{Asset, Assets};
 
 use std::path::Path;
@@ -246,9 +247,163 @@ impl Exchange {
         from_wallet: &Wallet,
         amount_in: U256,
         amount_min_out: U256,
-        asset_path: Token,
+        input_asset: Asset,
+        output_asset: Asset,
+        slippage_opt: Option<U256>,
     ) {
-        swap_tokens_for_tokens::swap(self, from_wallet, amount_in, amount_min_out, asset_path).await
+        let asset_path = Token::Array(
+            self.build_route_for(&input_asset, &output_asset)
+                .await
+                .into_iter()
+                .map(Token::Address)
+                .collect::<Vec<_>>(),
+        );
+
+        let asset_path_out = self.build_route_for(&output_asset, &input_asset).await;
+        let asset_path_in = self.build_route_for(&input_asset, &output_asset).await;
+
+        let input_asset_decimals = input_asset.decimals().await;
+        let output_asset_decimals = output_asset.decimals().await;
+
+        //TODO: review this model of use slippage
+        let slippage = match slippage_opt {
+            Some(s) => s,
+            None => {
+                let ais = input_asset.slippage_u256(input_asset_decimals);
+                let aos = output_asset.slippage_u256(output_asset_decimals);
+
+                ais + aos
+            }
+        };
+
+        // TODO: move it to a func an test it
+        // check what input asset max tx amount limit is lower to use
+        //
+        // anonq 10000  = 1USD
+        // anonqv2 1000 = 1USD
+        // (anonq/anonqv2)*10000 = 10000
+        // (anonqv2/anonqv2)*1000 = 1000 // use it
+        //
+        // anonq 10000  = 1USD
+        // anonqv2 1000 = 20USD
+        // (anonq/anonqv2)*10000 = 500 // use it
+        // (anonqv2/anonqv2)*1000 = 1000
+        //
+        // amount_min_out = 0,05
+        // amount_min_out*1000 = 50
+        let i_max_tx_amount = input_asset.max_tx_amount().await;
+        let o_max_tx_amount = output_asset.max_tx_amount().await;
+        log::debug!("cmd::swap() i_max_tx_amount: {:?}", i_max_tx_amount);
+        log::debug!("cmd::swap() o_max_tx_amount: {:?}", o_max_tx_amount);
+        let limit_max_input = match (i_max_tx_amount, o_max_tx_amount) {
+            (Some(il), Some(ol)) => {
+                // anonq =        10_000 = 10000anonq
+                // safemoon = 10_000_000 = 249410anonq
+                // 10000*11000 = 111_000
+                // 10_000*11000 = (10000*11000)*6,17 = 678_000
+
+                // 10000000*6,17 = 61.7MM
+                // 10000*1 = 10000
+                let limit_amount_out: U256 = self
+                    .get_amounts_out(ol, asset_path_out.clone())
+                    .await
+                    .last()
+                    .unwrap()
+                    .into();
+
+                log::debug!(
+                    "cmd::swap(): limit_amount_out: {:?}, limit_amount_out: {:?}",
+                    limit_amount_out,
+                    shared::blockchain_utils::display_amount_to_float(
+                        limit_amount_out,
+                        input_asset_decimals
+                    )
+                );
+
+                if il > limit_amount_out {
+                    Some(limit_amount_out)
+                } else {
+                    Some(il)
+                }
+            }
+            (None, Some(ol)) => {
+                let limit_amount_in: U256 = self
+                    .get_amounts_out(ol, asset_path_out.clone())
+                    .await
+                    .last()
+                    .unwrap()
+                    .into();
+                log::debug!("cmd::swap() limit_amount_in: {:?}", limit_amount_in);
+                Some(limit_amount_in)
+            }
+            (Some(il), None) => Some(il),
+            (None, None) => None,
+        };
+
+        log::debug!("cmd::swap() limit_max_output: {:?}", limit_max_input);
+
+        match limit_max_input {
+            Some(limit) if amount_in > limit => {
+                // TODO: resolv this calc with U256 exp10  or numbigint
+                let mut total = amount_in;
+                let amount_in_plus_two_decimals = amount_in * U256::exp10(2);
+                let number_hops = (((amount_in_plus_two_decimals / limit).as_u128() as f64)
+                    / 100_f64)
+                    .ceil() as u64;
+
+                for _ in 0..number_hops {
+                    let ai: U256;
+                    let ao: U256;
+
+                    if total > limit {
+                        //TODO: calc amount_min_out
+                        total -= limit;
+                        log::debug!(
+                            "cmd::swap() inside total > limit: total: {:?}, limit: {:?}",
+                            total,
+                            limit
+                        );
+
+                        ai = limit;
+                        ao = self
+                            .get_amounts_out(limit, asset_path_in.clone())
+                            .await
+                            .last()
+                            .unwrap()
+                            .into();
+
+                        log::debug!("cmd::swap() inside total > limit: ao: {:?}", ao);
+                    } else {
+                        ai = total;
+                        ao = self
+                            .get_amounts_out(total, asset_path_in.clone())
+                            .await
+                            .last()
+                            .unwrap()
+                            .into();
+
+                        log::debug!("cmd::swap() inside total > limit: ao: {:?}", ao);
+                    }
+
+                    let slippage_amount =
+                        (ao * slippage) / U256::exp10(output_asset_decimals.into());
+                    log::debug!("slippage_amount {:?}", slippage_amount);
+
+                    swap_tokens_for_tokens::swap(self, from_wallet, ai, ao, asset_path.clone())
+                        .await;
+                }
+            }
+            _ => {
+                swap_tokens_for_tokens::swap(
+                    self,
+                    from_wallet,
+                    amount_in,
+                    amount_min_out,
+                    asset_path,
+                )
+                .await;
+            }
+        }
     }
 }
 

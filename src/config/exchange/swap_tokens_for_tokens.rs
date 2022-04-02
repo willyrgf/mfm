@@ -16,8 +16,6 @@ pub async fn swap(
     amount_min_out: U256,
     asset_path: Token,
 ) {
-    let contract = exchange.router_contract();
-    let exist_max_tx_amount = contract.abi().function("_maxTxAmount").is_ok();
     let client = exchange.get_web3_client_http();
     let gas_price = client.eth().gas_price().await.unwrap();
     let valid_timestamp = exchange.get_valid_timestamp(30000000);
