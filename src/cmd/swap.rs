@@ -124,36 +124,92 @@ pub async fn call_sub_commands(args: &ArgMatches) {
 
     log::debug!("cmd::swap() limit_max_output: {:?}", limit_max_input);
 
-    let hops = match limit_max_input {
-        Some(limit) => {
-            let limited_amount_in = limit;
-            // let amount_min_out: U256 = exchange
-            // .get_amounts_out(amount_in, asset_path.clone())
-            // .await
-            // .last()
-            // .unwrap()
-            // .into();
+    let hops: Vec<(U256, U256)> = match limit_max_input {
+        Some(limit) if amount_in > limit => {
+            // TODO: resolv this calc with U256 exp10  or numbigint
+            let mut total = amount_in;
+            let amount_in_plus_two_decimals = amount_in * U256::exp10(2);
+            let number_hops =
+                (((amount_in_plus_two_decimals / limit).as_u128() as f64) / 100_f64).ceil() as u64;
 
-            vec![(amount_in, amount_min_out)]
+            let mut v = vec![];
+
+            // for (0..number_hops) {
+            for _ in 0..number_hops {
+                if total > limit {
+                    //TODO: calc amount_min_out
+                    total -= limit;
+                    log::debug!(
+                        "cmd::swap() inside total > limit: total: {:?}, limit: {:?}",
+                        total,
+                        limit
+                    );
+                    let hop_amount_out = exchange
+                        .get_amounts_out(limit, asset_path_in.clone())
+                        .await
+                        .last()
+                        .unwrap()
+                        .into();
+                    log::debug!(
+                        "cmd::swap() inside total > limit: hop_amount_out: {:?}",
+                        hop_amount_out
+                    );
+
+                    v.push((limit, hop_amount_out));
+                } else {
+                    let hop_amount_out: U256 = exchange
+                        .get_amounts_out(total, asset_path_in.clone())
+                        .await
+                        .last()
+                        .unwrap()
+                        .into();
+
+                    v.push((total, hop_amount_out));
+                }
+            }
+
+            log::debug!("cmd::swap() inside amount_in > limit: v: {:?}", v);
+
+            v
         }
-        None => vec![(amount_in, amount_min_out)],
+        _ => vec![(amount_in, amount_min_out)],
     };
 
-    panic!();
+    // panic();
+
+    for (ai, ao) in hops.iter() {
+        let slippage_amount = (ao * slippage) / U256::exp10(output_asset_decimals.into());
+        log::debug!("slippage_amount {:?}", slippage_amount);
+
+        let amount_out_slippage: U256 = ao - slippage_amount;
+        log::debug!("amount_out_slippage : {:?}", amount_out_slippage);
+        exchange
+            .swap_tokens_for_tokens(
+                wallet,
+                ai.into(),
+                amount_out_slippage,
+                Token::Array(path_token.clone()),
+            )
+            .await;
+    }
+
+    // let slippage_amount = (amount_min_out * slippage) / U256::exp10(output_asset_decimals.into());
+    // log::debug!("slippage_amount {:?}", slippage_amount);
+
+    // let amount_out_slippage: U256 = amount_min_out - slippage_amount;
+    // log::debug!("amount_out_slippage : {:?}", amount_out_slippage);
+    // exchange
+    //     .swap_tokens_for_tokens(
+    //         wallet,
+    //         amount_in,
+    //         amount_out_slippage,
+    //         Token::Array(path_token),
+    //     )
+    //     .await;
 
     let slippage_amount = (amount_min_out * slippage) / U256::exp10(output_asset_decimals.into());
-    log::debug!("slippage_amount {:?}", slippage_amount);
+    let amount_out_slippage = amount_min_out - slippage_amount;
 
-    let amount_out_slippage: U256 = amount_min_out - slippage_amount;
-    log::debug!("amount_out_slippage : {:?}", amount_out_slippage);
-    exchange
-        .swap_tokens_for_tokens(
-            wallet,
-            amount_in,
-            amount_out_slippage,
-            Token::Array(path_token),
-        )
-        .await;
     let mut table = Table::new();
     table.add_row(row![
         "From Asset",
