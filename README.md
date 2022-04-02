@@ -124,9 +124,12 @@ cargo run -- yield-farm run --force-harvest true
 
 ---
 ## todo
-
+- [ ] add a rebalance that use only the diff between the assets to rebalance the portfolio
+- [ ] refactor of the config mods to be first class module (like asset)
+- [ ] refactor all the U256 calc to use numbigint in testable functions
+- [ ] refactor wallet and withdraw-wallet to be wallet with private and public address supporting encrypted files with the keys
 - [x] add withdraw with wallets whilelist
 - [x] add harverst for yield farms
 - [x] implement rebalancer threshold
 - [x] implement a fallback to a bep20 abi
-- [ ] implement a checker for token limit transfer (max-tx-amount)
+- [x] implement a checker for token limit transfer (max-tx-amount)
