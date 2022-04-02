@@ -82,6 +82,7 @@ pub async fn call_info_cmd(args: &ArgMatches) {
         "Farm",
         "Deposit Asset",
         "Deposit Amount",
+        "Deposit Amount in Quoted",
         "Pending rewards",
         "Reward Asset",
         "Quoted pending rewards",
@@ -121,6 +122,14 @@ pub async fn call_info_cmd(args: &ArgMatches) {
             .build_route_for(&yield_farm_asset, &quoted_asset)
             .await;
 
+        let deposited_quote_asset_path = match deposit_asset.clone() {
+            Some(a) => {
+                let path = exchange.build_route_for(&a, &quoted_asset).await;
+                Some(path)
+            }
+            None => None,
+        };
+
         let pending_rewards = yield_farm.get_pending_rewards().await;
         let quoted_price = match exchange
             .get_amounts_out(pending_rewards, quote_asset_path)
@@ -131,15 +140,27 @@ pub async fn call_info_cmd(args: &ArgMatches) {
             _ => U256::from(0_i32),
         };
 
+        let deposited_amount = yield_farm.get_deposited_amount().await;
+
+        let deposited_amount_in_quoted = match deposited_amount {
+            z if z == U256::from(0_i32) => U256::default(),
+            a => match deposited_quote_asset_path.clone() {
+                Some(p) => match exchange.get_amounts_out(a, p).await.last() {
+                    Some(&u) => u,
+                    _ => U256::from(0_i32),
+                },
+                None => U256::default(),
+            },
+        };
+
         let min_rewards_required =
             yield_farm.get_min_rewards_required_u256(yield_farm_asset_decimals);
-
-        let deposited_amount = yield_farm.get_deposited_amount().await;
 
         let result = YieldFarmInfoCmdOutput {
             deposit_asset_name,
             reward_asset_name,
             deposit_asset_decimals,
+            deposited_amount_in_quoted,
             reward_asset_decimals,
             network_id: yield_farm.network_id().into(),
             yield_farm_name: yield_farm.name().into(),
@@ -165,6 +186,10 @@ pub async fn call_info_cmd(args: &ArgMatches) {
             shared::blockchain_utils::display_amount_to_float(
                 cmd_output.deposited_amount,
                 cmd_output.yield_farm_asset_decimals
+            ),
+            shared::blockchain_utils::display_amount_to_float(
+                cmd_output.deposited_amount_in_quoted,
+                cmd_output.quoted_asset_decimal
             ),
             shared::blockchain_utils::display_amount_to_float(
                 cmd_output.pending_rewards,
@@ -277,6 +302,7 @@ pub struct YieldFarmInfoCmdOutput {
     network_id: String,
     yield_farm_name: String,
     deposited_amount: U256,
+    deposited_amount_in_quoted: U256,
     pending_rewards: U256,
     yield_farm_asset_name: String,
     quoted_price: U256,
