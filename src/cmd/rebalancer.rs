@@ -98,11 +98,7 @@ pub async fn get_total_parking_balance(
     parking_asset.balance_of(from_wallet.address()).await
 }
 
-pub async fn move_assets_to_parking(
-    total_quoted_balance: U256,
-    assets_balances: &[AssetBalances],
-    rebalancer: &Rebalancer,
-) {
+pub async fn move_assets_to_parking(assets_balances: &[AssetBalances], rebalancer: &Rebalancer) {
     let from_wallet = rebalancer.get_wallet();
     let parking_asset = rebalancer.get_parking_asset();
     let parking_asset_decimals = parking_asset.decimals().await;
@@ -121,15 +117,14 @@ pub async fn move_assets_to_parking(
             .last()
             .unwrap()
             .into();
+
         let ab_slip = ab.asset.slippage_u256(parking_asset_decimals);
         let slippage = ab_slip + parking_slip;
         let slippage_amount =
             (parking_amount_out * slippage) / U256::exp10(parking_asset_decimals.into());
         let parking_amount_out_slip = parking_amount_out - slippage_amount;
-        log::debug!("parking_amount_out: {:?}", parking_amount_out);
         log::debug!("parking_amount_out_slip: {:?}", parking_amount_out_slip);
-        let rb = ab.desired_quoted_in_balance(total_quoted_balance);
-        log::debug!("asset_balance: {:?}, desired_quoted_in_balance: {}", ab, rb);
+
         let min_move = rebalancer.parking_asset_min_move_u256(parking_asset_decimals);
         if min_move >= parking_amount_out_slip {
             log::error!(
@@ -153,14 +148,12 @@ pub async fn move_assets_to_parking(
     }
 }
 
-pub async fn move_parking_to_assets(
-    total_parking_balance: U256,
-    assets_balances: &[AssetBalances],
-    rebalancer: &Rebalancer,
-) {
+pub async fn move_parking_to_assets(assets_balances: &[AssetBalances], rebalancer: &Rebalancer) {
     let from_wallet = rebalancer.get_wallet();
     let parking_asset = rebalancer.get_parking_asset();
     let parking_asset_decimals = parking_asset.decimals().await;
+
+    let total_parking_balance = parking_asset.balance_of(from_wallet.address()).await;
 
     for ab in assets_balances.iter() {
         if ab.asset.name() == rebalancer.parking_asset_id() {
@@ -180,15 +173,17 @@ pub async fn move_parking_to_assets(
             .unwrap()
             .into();
         log::debug!("asset_amount_out: {:?}", asset_amount_out);
+
         let ab_slip = ab.asset.slippage_u256(ab.asset_decimals);
         let slippage = ab_slip + parking_slip;
         log::debug!("slippage: {:?}", slippage);
+
         let slippage_amount = (asset_amount_out * slippage) / U256::exp10(ab.asset_decimals.into());
         log::debug!("slippage_amount: {:?}", slippage_amount);
+
         let asset_amount_out_slip = asset_amount_out - slippage_amount;
         log::debug!("asset_amount_out_slip: {:?}", asset_amount_out_slip);
-        // let rb = ab.desired_quoted_in_balance(total_quoted_balance);
-        // log::debug!("asset_balance: {:?}, desired_quoted_in_balance: {}", ab, rb);
+
         let min_move = rebalancer.parking_asset_min_move_u256(parking_asset_decimals);
         if min_move >= parking_amount {
             log::error!(
@@ -242,13 +237,15 @@ pub async fn call_sub_commands(args: &ArgMatches) {
 
     let from_wallet = rebalancer.get_wallet();
     let parking_asset = rebalancer.get_parking_asset();
+
     // move all balances to parking asset
-    move_assets_to_parking(total_quoted_balance, &assets_balances, rebalancer).await;
+    move_assets_to_parking(&assets_balances, rebalancer).await;
 
     let total_parking_balance = get_total_parking_balance(&parking_asset, from_wallet).await;
     log::debug!("total_parking_balance: {}", total_parking_balance);
     //move parking to assets
-    move_parking_to_assets(total_parking_balance, &assets_balances, rebalancer).await;
+    move_parking_to_assets(&assets_balances, rebalancer).await;
+
     // calc how much we need for each asset
     // calc the diff of expect with current balance per asset
     // swap the balances of all assets to the parking_asset

@@ -219,29 +219,6 @@ impl Exchange {
         self.get_network().get_web3_client_http()
     }
 
-    // pub async fn swap_eth_for_tokens(
-    //     &self,
-    //     from_wallet: &Wallet,
-    //     amount_in: U256,
-    //     amount_min_out: U256,
-    //     asset: &Asset,
-    // ) {
-    //     let asset_path = vec![asset.as_address().unwrap()]
-    //         .clone()
-    //         .into_iter()
-    //         .map(|p| Token::Address(p))
-    //         .collect::<Vec<_>>();
-
-    //     swap_eth_for_tokens::swap(
-    //         &self,
-    //         from_wallet,
-    //         amount_in,
-    //         amount_min_out,
-    //         Token::Array(asset_path),
-    //     )
-    //     .await
-    // }
-
     pub async fn swap_tokens_for_tokens(
         &self,
         from_wallet: &Wallet,
