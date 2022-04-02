@@ -74,9 +74,7 @@ yield_farms:
     network_id: bsc
     operation: posi_farm_bnb_posi
     min_rewards_required: 10
-    deposit_asset_id:
     reward_asset_id: posi
-    #quoted_asset_id: busd
   posi-farm-busd-posi:
     name: posi-farm-busd-posi
     contract_name: position_stake_manager
@@ -118,7 +116,7 @@ yield_farms:
     deposit_asset_id: baby
     reward_asset_id: baby
 
-  #TODO: fazer o approve do contrato de farms
+  #TODO: change the allowance to use different types of address, including farms
   auto-pacoca:
     name: auto-pacoca
     contract_name: pacoca_vault
