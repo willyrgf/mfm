@@ -45,9 +45,9 @@ exchanges:
 
 rebalancers:
   test-rebalancer:
+    name: test-anonq-busd
     network_id: bsc
     wallet_id: test-wallet
-    name: test-anonq-busd
     portfolio:
       anonq:
         percent: 40
@@ -59,6 +59,7 @@ rebalancers:
         percent: 5
       btc:
         percent: 5
+    strategy: full_parking #diff_parking
     # if zero, always run
     threshold_percent: 2
     quoted_in: busd

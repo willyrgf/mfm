@@ -1,7 +1,10 @@
 use crate::{
     asset::Asset,
     cmd,
-    config::{self, rebalancer::Rebalancer},
+    config::{
+        self,
+        rebalancer::{Rebalancer, Strategy},
+    },
 };
 
 use clap::{ArgMatches, Command};
@@ -238,20 +241,31 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let from_wallet = rebalancer.get_wallet();
     let parking_asset = rebalancer.get_parking_asset();
 
-    // move all balances to parking asset
-    move_assets_to_parking(&assets_balances, rebalancer).await;
+    match rebalancer.strategy() {
+        Strategy::FullParking => {
+            //TODO: doc it
+            // the general idea of a full parking
+            // calc how much we need for each asset
+            // calc the diff of expect with current balance per asset
+            // swap the balances of all assets to the parking_asset
+            // calc quoted_balance of the parking_asset
+            // buy from parking_asset the percent of each asset
+            // check if the portfolio is balanced
 
-    let total_parking_balance = get_total_parking_balance(&parking_asset, from_wallet).await;
-    log::debug!("total_parking_balance: {}", total_parking_balance);
-    //move parking to assets
-    move_parking_to_assets(&assets_balances, rebalancer).await;
+            // move all balances to parking asset
+            move_assets_to_parking(&assets_balances, rebalancer).await;
 
-    // calc how much we need for each asset
-    // calc the diff of expect with current balance per asset
-    // swap the balances of all assets to the parking_asset
-    // calc quoted_balance of the parking_asset
-    // buy from parking_asset the percent of each asset
-    // check if the portfolio is balanced
+            let total_parking_balance =
+                get_total_parking_balance(&parking_asset, from_wallet).await;
+            log::debug!("total_parking_balance: {}", total_parking_balance);
+
+            //move parking to assets
+            move_parking_to_assets(&assets_balances, rebalancer).await;
+        }
+        Strategy::DiffParking => {
+            unimplemented!()
+        }
+    };
 }
 
 /*

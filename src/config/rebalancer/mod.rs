@@ -1,11 +1,14 @@
-use std::collections::HashMap;
-
+use super::{wallet::Wallet, Config};
+use crate::{asset::Asset, cmd::rebalancer::AssetBalances};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use web3::types::U256;
 
-use crate::{asset::Asset, cmd::rebalancer::AssetBalances};
-
-use super::{wallet::Wallet, Config};
+#[derive(Debug)]
+pub enum Strategy {
+    FullParking,
+    DiffParking,
+}
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 struct AssetConfig {
@@ -22,11 +25,12 @@ struct Portfolio(HashMap<String, AssetConfig>);
 pub struct Rebalancer {
     name: String,
     wallet_id: String,
+    network_id: String,
+    portfolio: Portfolio,
+    strategy: String, // TODO: move it to a enum
     threshold_percent: f64,
     quoted_in: String,
-    network_id: String,
     parking_asset_id: String,
-    portfolio: Portfolio,
     parking_asset_min_move: f64,
 }
 
@@ -43,6 +47,17 @@ impl Rebalancer {
 
     pub fn name(&self) -> String {
         self.name.clone()
+    }
+
+    pub fn strategy(&self) -> Strategy {
+        match self.strategy.as_str() {
+            "full_parking" => Strategy::FullParking,
+            "diff_parking" => Strategy::DiffParking,
+            _ => {
+                log::debug!("rebalancer: strategy(): strategy configured is not supported, using default: {:?}", Strategy::FullParking);
+                Strategy::FullParking
+            }
+        }
     }
 
     pub fn total_percentage(&self) -> f64 {
