@@ -52,12 +52,12 @@ pub async fn call_sub_commands(args: &ArgMatches) {
 
     let slippage_amount = (amount_min_out * slippage) / U256::exp10(output_asset_decimals.into());
     let amount_out_slippage = amount_min_out - slippage_amount;
-    log::debug!("amount_out_slippage : {:?}", amount_out_slippage);
+    //log::debug!("amount_out_slippage : {:?}", amount_out_slippage);
     exchange
         .swap_tokens_for_tokens(
             wallet,
             amount_in,
-            amount_out_slippage,
+            amount_min_out,
             input_asset.clone(),
             output_asset.clone(),
             Some(slippage),

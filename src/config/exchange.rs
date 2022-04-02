@@ -364,10 +364,17 @@ impl Exchange {
 
                     let slippage_amount =
                         (ao * slippage) / U256::exp10(output_asset_decimals.into());
+                    let amount_min_out_slippage = ao - slippage_amount;
                     log::debug!("slippage_amount {:?}", slippage_amount);
 
-                    swap_tokens_for_tokens::swap(self, from_wallet, ai, ao, asset_path.clone())
-                        .await;
+                    swap_tokens_for_tokens::swap(
+                        self,
+                        from_wallet,
+                        ai,
+                        amount_min_out_slippage,
+                        asset_path.clone(),
+                    )
+                    .await;
                 }
             }
             _ => {
