@@ -106,6 +106,7 @@ pub async fn move_assets_to_parking(assets_balances: &[AssetBalances], rebalance
     let parking_asset = rebalancer.get_parking_asset();
     let parking_asset_decimals = parking_asset.decimals().await;
 
+    //TODO: do it to until all the balance are in the parking asset
     for ab in assets_balances.iter() {
         if ab.asset.name() == rebalancer.parking_asset_id() {
             continue;
@@ -156,8 +157,10 @@ pub async fn move_parking_to_assets(assets_balances: &[AssetBalances], rebalance
     let parking_asset = rebalancer.get_parking_asset();
     let parking_asset_decimals = parking_asset.decimals().await;
 
+    //TODO: check if doenst exist balance in other assets
     let total_parking_balance = parking_asset.balance_of(from_wallet.address()).await;
 
+    //TODO: do it to until all the parking balance are in the respective assets
     for ab in assets_balances.iter() {
         if ab.asset.name() == rebalancer.parking_asset_id() {
             continue;
@@ -263,6 +266,41 @@ pub async fn call_sub_commands(args: &ArgMatches) {
             move_parking_to_assets(&assets_balances, rebalancer).await;
         }
         Strategy::DiffParking => {
+            log::debug!("rebalancer::call_sub_commands() Strategy::DiffParking");
+
+            // let t
+            // ab.
+            let total_quoted_balance = assets_balances
+                .iter()
+                .fold(U256::from(0_i32), |acc, x| acc + x.quoted_balance());
+
+            log::debug!(
+                "diff_parking: total_quoted_balance: {}",
+                total_quoted_balance
+            );
+
+            //TODO: create a mod to carry this things
+            // U256 -> BigUint
+            // BigUint -> U256
+            let mut bytes: [u8; 32] = [0; 32];
+            total_quoted_balance.to_little_endian(&mut bytes);
+            let n = num_bigint::BigUint::from_bytes_le(&bytes);
+
+            log::debug!("diff_parking: n: {}", n);
+
+            for ab in assets_balances {
+                let (diff, b) = ab.quoted_balance().overflowing_sub(total_quoted_balance);
+                let percent_diff = diff / total_quoted_balance;
+                log::debug!(
+                    "diff_parking: ab: {}, percent_diff: {}, diff: {}, b: {}",
+                    ab.asset.name(),
+                    percent_diff,
+                    diff,
+                    b
+                )
+                // log::debug!("ab: {:?}", ab)
+            }
+
             unimplemented!()
         }
     };
