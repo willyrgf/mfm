@@ -57,7 +57,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         .swap_tokens_for_tokens(
             wallet,
             amount_in,
-            amount_min_out,
+            amount_out_slippage,
             input_asset.clone(),
             output_asset.clone(),
             Some(slippage),
