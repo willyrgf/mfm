@@ -7,7 +7,10 @@ use crate::{
     },
 };
 
+// extern crate num_traits;
+
 use clap::{ArgMatches, Command};
+use num_bigint::{BigInt, Sign};
 use web3::types::U256;
 
 pub const REBALANCER_COMMAND: &str = "rebalancer";
@@ -279,31 +282,54 @@ pub async fn call_sub_commands(args: &ArgMatches) {
                 total_quoted_balance
             );
 
-            //TODO: create a mod to carry this things
-            // U256 -> BigUint
-            // BigUint -> U256
-            let mut bytes: [u8; 32] = [0; 32];
-            total_quoted_balance.to_little_endian(&mut bytes);
-            let n = num_bigint::BigUint::from_bytes_le(&bytes);
+            let tqb = u256_to_bigint(total_quoted_balance);
+            log::debug!("diff_parking: tqb: {}", tqb);
 
-            log::debug!("diff_parking: n: {}", n);
+            let mut total = BigInt::from(0);
 
             for ab in assets_balances {
-                let (diff, b) = ab.quoted_balance().overflowing_sub(total_quoted_balance);
-                let percent_diff = diff / total_quoted_balance;
+                let quoted_balance = u256_to_bigint(ab.quoted_balance());
+                let diff = tqb.clone() - quoted_balance.clone();
+
+                let pow = 10_u32.pow(4);
+                // let percent_diff = (diff.clone() * pow) / quoted_balance.clone();
+                let percent: BigInt = ((quoted_balance.clone() * pow) / tqb.clone()) * 100;
+                let percent_to_buy = (ab.percent() * 10_f64.powf(4.0)) as u32 - percent.clone();
+                // ((2730469751527576947)*((35,68/100)*1e18))/1e18
+                let amount_to_trade: BigInt = (tqb.clone()
+                    * (percent_to_buy.clone() * 10_u128.pow((ab.asset_decimals - 4 - 2).into())))
+                    / 10_u128.pow(ab.asset_decimals.into());
+
+                total = total + amount_to_trade.clone();
+
                 log::debug!(
-                    "diff_parking: ab: {}, percent_diff: {}, diff: {}, b: {}",
+                    "diff_parking: ab: {}, quoted_balance: {}, ab.percent(): {}, percent: {}, diff: {}, percent_to_buy: {}, amount_to_trade: {}, total: {}",
                     ab.asset.name(),
-                    percent_diff,
+                    quoted_balance,
+                    ab.percent(),
+                    percent,
                     diff,
-                    b
-                )
-                // log::debug!("ab: {:?}", ab)
+                    percent_to_buy,
+                    amount_to_trade,
+                    total,
+                );
+
+                // log::debug!("diff_parking: percent_to_buy: {}", percent_to_buy);
+                // log::debug!("diff_parking: amount_to_trade: {}", amount_to_trade)
             }
 
             unimplemented!()
         }
     };
+}
+
+//TODO: create a mod to carry this things
+// U256 -> BigUint
+// BigUint -> U256
+pub fn u256_to_bigint(u: U256) -> BigInt {
+    let mut bytes: [u8; 32] = [0; 32];
+    u.to_little_endian(&mut bytes);
+    BigInt::from_bytes_le(Sign::Plus, &bytes)
 }
 
 /*
