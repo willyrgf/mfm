@@ -7,8 +7,6 @@ use crate::{
     },
 };
 
-// extern crate num_traits;
-
 use clap::{ArgMatches, Command};
 use num_bigint::{BigInt, Sign};
 use web3::types::U256;
@@ -24,14 +22,90 @@ pub fn generate_cmd<'a>() -> Command<'a> {
         )
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AssetBalances {
+    //TODO add a equal operation for Asset
     asset: Asset,
     asset_decimals: u8,
     percent: f64,
     balance: U256,
     quoted_asset_decimals: u8,
     quoted_balance: U256,
+}
+
+#[derive(Debug, Clone)]
+pub struct RebalancerParking {
+    kind: String, //to_parking, from_parking
+    rebalancer: Rebalancer,
+    asset_balances: AssetBalances,
+    quoted_amount_to_trade: U256,
+    asset_amount_to_trade: U256,
+    parking_amount_to_trade: U256,
+}
+
+impl RebalancerParking {
+    //TODO: refact this initialization
+    pub async fn new(
+        rebalancer: Rebalancer,
+        kind: String,
+        asset_balances: AssetBalances,
+        quoted_amount_to_trade: U256,
+    ) -> Option<Self> {
+        let quoted_asset = rebalancer.get_quoted_asset();
+
+        let quoted_asset_path = asset_balances
+            .asset
+            .get_exchange()
+            .build_route_for(&quoted_asset, &asset_balances.asset)
+            .await;
+
+        let quoted_parking_asset_path = rebalancer
+            .get_parking_asset()
+            .get_exchange()
+            .build_route_for(&quoted_asset, &rebalancer.get_parking_asset())
+            .await;
+
+        let parking_amount_to_trade: U256 = rebalancer
+            .get_parking_asset()
+            .get_exchange()
+            .get_amounts_out(quoted_amount_to_trade, quoted_parking_asset_path.clone())
+            .await
+            .last()
+            .unwrap()
+            .into();
+
+        let asset_amount_to_trade: U256 = asset_balances
+            .asset
+            .get_exchange()
+            .get_amounts_out(quoted_amount_to_trade, quoted_asset_path.clone())
+            .await
+            .last()
+            .unwrap()
+            .into();
+
+        let min_move =
+            rebalancer.parking_asset_min_move_u256(rebalancer.get_parking_asset().decimals().await);
+
+        log::debug!(
+            "RebalancerParking::new(): quoted_amount_to_trade: {} min_move: {}, parking_amount_to_trade: {}",
+            quoted_amount_to_trade,
+            min_move,
+            parking_amount_to_trade
+        );
+
+        if min_move >= parking_amount_to_trade {
+            return None;
+        }
+
+        Some(Self {
+            kind,
+            rebalancer,
+            asset_balances,
+            quoted_amount_to_trade,
+            asset_amount_to_trade,
+            parking_amount_to_trade,
+        })
+    }
 }
 
 impl AssetBalances {
@@ -87,6 +161,21 @@ pub async fn get_assets_balances(
     .await;
 
     assets_balances
+}
+
+pub async fn add_parking_asset(
+    rebalancer: &Rebalancer,
+    ab: Vec<AssetBalances>,
+) -> Vec<AssetBalances> {
+    let parking_asset = rebalancer.get_parking_asset();
+
+    if ab.iter().any(|a| a.asset.name() == parking_asset.name()) {
+        return ab;
+    }
+
+    let pab = AssetBalances::new(rebalancer, parking_asset).await;
+
+    ab.into_iter().chain(vec![pab].into_iter()).collect()
 }
 
 pub fn get_total_quoted_balance(assets_balances: &[AssetBalances]) -> U256 {
@@ -247,6 +336,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let from_wallet = rebalancer.get_wallet();
     let parking_asset = rebalancer.get_parking_asset();
 
+    //TODO: consider parking_asset to get the total balance and rebalance
     match rebalancer.strategy() {
         Strategy::FullParking => {
             //TODO: doc it
@@ -285,22 +375,45 @@ pub async fn call_sub_commands(args: &ArgMatches) {
             let tqb = u256_to_bigint(total_quoted_balance);
             log::debug!("diff_parking: tqb: {}", tqb);
 
-            let mut total = BigInt::from(0);
+            let mut total = BigInt::from(0_i32);
 
-            for ab in assets_balances {
+            let assets_balances_with_parking = add_parking_asset(rebalancer, assets_balances).await;
+            let mut asset_to_parking = vec![];
+            for ab in assets_balances_with_parking {
                 let quoted_balance = u256_to_bigint(ab.quoted_balance());
                 let diff = tqb.clone() - quoted_balance.clone();
 
                 let pow = 10_u32.pow(4);
                 // let percent_diff = (diff.clone() * pow) / quoted_balance.clone();
-                let percent: BigInt = ((quoted_balance.clone() * pow) / tqb.clone()) * 100;
+                let percent: BigInt = ((quoted_balance.clone() * pow) / tqb.clone()) * 100_i32;
                 let percent_to_buy = (ab.percent() * 10_f64.powf(4.0)) as u32 - percent.clone();
                 // ((2730469751527576947)*((35,68/100)*1e18))/1e18
                 let amount_to_trade: BigInt = (tqb.clone()
                     * (percent_to_buy.clone() * 10_u128.pow((ab.asset_decimals - 4 - 2).into())))
                     / 10_u128.pow(ab.asset_decimals.into());
 
-                total = total + amount_to_trade.clone();
+                total += amount_to_trade.clone();
+
+                let quoted_amount_to_trade = bigint_to_u256(amount_to_trade.clone());
+
+                if amount_to_trade < BigInt::from(0_i32) {
+                    match RebalancerParking::new(
+                        rebalancer.clone(),
+                        "to_parking".to_string(),
+                        ab.clone(),
+                        quoted_amount_to_trade,
+                    )
+                    .await
+                    {
+                        Some(rp) => asset_to_parking.push(rp),
+                        None => {
+                            log::info!(
+                                "diff_parking: rebalancer_parking cant be created, continue."
+                            );
+                            continue;
+                        }
+                    }
+                }
 
                 log::debug!(
                     "diff_parking: ab: {}, quoted_balance: {}, ab.percent(): {}, percent: {}, diff: {}, percent_to_buy: {}, amount_to_trade: {}, total: {}",
@@ -318,6 +431,8 @@ pub async fn call_sub_commands(args: &ArgMatches) {
                 // log::debug!("diff_parking: amount_to_trade: {}", amount_to_trade)
             }
 
+            log::debug!("diff_parking: asset_to_parking: {:?}", asset_to_parking);
+
             unimplemented!()
         }
     };
@@ -330,6 +445,21 @@ pub fn u256_to_bigint(u: U256) -> BigInt {
     let mut bytes: [u8; 32] = [0; 32];
     u.to_little_endian(&mut bytes);
     BigInt::from_bytes_le(Sign::Plus, &bytes)
+}
+
+pub fn bigint_to_u256(b: BigInt) -> U256 {
+    let bytes = b.to_signed_bytes_le();
+    if b < BigInt::from(0) {
+        assert!(
+            bytes.len() <= 32,
+            "BigInt value does not fit into signed U256"
+        );
+        let mut i_bytes: [u8; 32] = [255; 32];
+        i_bytes[..bytes.len()].copy_from_slice(&bytes);
+        U256::from_little_endian(&i_bytes)
+    } else {
+        U256::from_little_endian(&bytes)
+    }
 }
 
 /*
