@@ -438,7 +438,8 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     };
 }
 
-//TODO: create a mod to carry this things
+//TODO: create a mod to carry all the U256 ops
+// https://github.com/graphprotocol/graph-node/blob/master/graph/src/data/store/scalar.rs
 // U256 -> BigUint
 // BigUint -> U256
 pub fn u256_to_bigint(u: U256) -> BigInt {
