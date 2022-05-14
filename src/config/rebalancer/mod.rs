@@ -88,10 +88,20 @@ impl Rebalancer {
             .0
             .iter()
             .map(|(name, _)| {
-                Config::global()
+                match Config::global()
                     .assets
                     .find_by_name_and_network(name.as_str(), self.network_id.as_str())
-                    .unwrap()
+                {
+                    Some(a) => a,
+                    None => {
+                        log::error!(
+                            "get_assets(): doesnt exist asset by find_by_name_and_network(): name: {}, network: {}",
+                            name.as_str(),
+                            self.network_id.as_str()
+                        );
+                        panic!()
+                    }
+                }
             })
             .collect()
     }
