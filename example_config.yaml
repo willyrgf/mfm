@@ -186,6 +186,56 @@ assets:
         address: 0xf28164a485b0b2c90639e47b0f377b4a438a16b1
         slippage: 2
         path_asset: weth
+  xrp:
+    kind: token
+    networks:
+      bsc:
+        name: xrp
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x1D2F0da169ceB9fC7B3144628dB156f3F6c60dBE
+        slippage: 2
+        path_asset: wbnb
+  link:
+    kind: token
+    networks:
+      bsc:
+        name: link 
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0xF8A0BF9cF54Bb92F17374d9e9A321E6a111a51bD
+        slippage: 2
+        path_asset: wbnb
+  gala:
+    kind: token
+    networks:
+      bsc:
+        name: gala 
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x7dDEE176F665cD201F93eEDE625770E2fD911990
+        slippage: 2
+        path_asset: wbnb
+  near:
+    kind: token
+    networks:
+      bsc:
+        name: near 
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x1Fa4a73a3F0133f0025378af00236f3aBDEE5D63
+        slippage: 2
+        path_asset: wbnb
+  luna:
+    kind: token
+    networks:
+      bsc:
+        name: luna 
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x156ab3346823B651294766e23e6Cf87254d68962
+        slippage: 2
+        path_asset: wbnb
   wmatic:
     kind: token
     networks:
@@ -258,6 +308,16 @@ assets:
         network_id: bsc
         exchange_id: pancake_swap_v2
         address: 0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c
+        slippage: 2
+        path_asset: wbnb
+  sol: 
+    kind: token
+    networks:
+      bsc:
+        name: sol 
+        network_id: bsc
+        exchange_id: pancake_swap_v2
+        address: 0x570A5D26f7765Ecb712C0924E4De545B89fD43dF
         slippage: 2
         path_asset: wbnb
   posi:
