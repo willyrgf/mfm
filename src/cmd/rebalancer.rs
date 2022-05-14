@@ -65,6 +65,7 @@ impl RebalancerParking {
             .build_route_for(&quoted_asset, &rebalancer.get_parking_asset())
             .await;
 
+        log::debug!("RebalancerParking::new(): parking_amount_to_trade: quoted_amount_to_trade: {}, asset: {:?}", quoted_amount_to_trade, asset_balances.asset.clone());
         let parking_amount_to_trade: U256 = rebalancer
             .get_parking_asset()
             .get_exchange()
@@ -74,6 +75,7 @@ impl RebalancerParking {
             .unwrap()
             .into();
 
+        log::debug!("RebalancerParking::new(): asset_amount_to_trade: quoted_amount_to_trade: {}, asset: {:?}", quoted_amount_to_trade, asset_balances.asset.clone());
         let asset_amount_to_trade: U256 = asset_balances
             .asset
             .get_exchange()
@@ -193,10 +195,39 @@ pub async fn get_total_parking_balance(
     parking_asset.balance_of(from_wallet.address()).await
 }
 
-pub async fn move_assets_to_parking(assets_balances: &[AssetBalances], rebalancer: &Rebalancer) {
+pub async fn move_asset_with_slippage(
+    rebalancer: &Rebalancer,
+    asset_in: Asset,
+    asset_out: Asset,
+    amount_in: U256,
+    amount_out: U256,
+) {
     let from_wallet = rebalancer.get_wallet();
+    let exchange = asset_in.get_exchange();
+
+    let asset_out_decimals = asset_out.decimals().await;
+    let amount_in_slippage = asset_in.slippage_u256(asset_out_decimals);
+    let amount_out_slippage = asset_out.slippage_u256(asset_out_decimals);
+
+    let slippage = amount_in_slippage + amount_out_slippage;
+    let slippage_amount = (amount_out * slippage) / U256::exp10(asset_out_decimals.into());
+    let asset_out_amount_slip = amount_out - slippage_amount;
+    log::debug!("asset_out_amount_slip: {:?}", asset_out_amount_slip);
+
+    exchange
+        .swap_tokens_for_tokens(
+            from_wallet,
+            amount_in,
+            asset_out_amount_slip,
+            asset_in.clone(),
+            asset_out.clone(),
+            Some(slippage),
+        )
+        .await;
+}
+
+pub async fn move_assets_to_parking(assets_balances: &[AssetBalances], rebalancer: &Rebalancer) {
     let parking_asset = rebalancer.get_parking_asset();
-    let parking_asset_decimals = parking_asset.decimals().await;
 
     //TODO: do it to until all the balance are in the parking asset
     for ab in assets_balances.iter() {
@@ -204,7 +235,6 @@ pub async fn move_assets_to_parking(assets_balances: &[AssetBalances], rebalance
             continue;
         }
         let exchange = ab.asset.get_exchange();
-        let parking_slip = parking_asset.slippage_u256(parking_asset_decimals);
         let parking_asset_path = exchange.build_route_for(&ab.asset, &parking_asset).await;
 
         let parking_amount_out: U256 = exchange
@@ -214,33 +244,25 @@ pub async fn move_assets_to_parking(assets_balances: &[AssetBalances], rebalance
             .unwrap()
             .into();
 
-        let ab_slip = ab.asset.slippage_u256(parking_asset_decimals);
-        let slippage = ab_slip + parking_slip;
-        let slippage_amount =
-            (parking_amount_out * slippage) / U256::exp10(parking_asset_decimals.into());
-        let parking_amount_out_slip = parking_amount_out - slippage_amount;
-        log::debug!("parking_amount_out_slip: {:?}", parking_amount_out_slip);
-
-        let min_move = rebalancer.parking_asset_min_move_u256(parking_asset_decimals);
-        if min_move >= parking_amount_out_slip {
+        let min_move = rebalancer.parking_asset_min_move_u256(parking_asset.decimals().await);
+        if min_move >= parking_amount_out {
             log::error!(
-                "min_move not sattisfied: min_move {}, parking_amounts_out {}",
+                "min_move not sattisfied: min_move {}, parking_amount_out {}",
                 min_move,
-                parking_amount_out_slip
+                parking_amount_out
             );
-            continue;
+            //TODO: return this error
+            return;
         }
 
-        exchange
-            .swap_tokens_for_tokens(
-                from_wallet,
-                ab.balance,
-                parking_amount_out_slip,
-                ab.asset.clone(),
-                parking_asset.clone(),
-                Some(slippage),
-            )
-            .await;
+        move_asset_with_slippage(
+            rebalancer,
+            ab.asset.clone(),
+            parking_asset.clone(),
+            ab.balance,
+            parking_amount_out,
+        )
+        .await;
     }
 }
 
@@ -361,8 +383,45 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         Strategy::DiffParking => {
             log::debug!("rebalancer::call_sub_commands() Strategy::DiffParking");
 
-            // let t
-            // ab.
+            // TODO: turn it on a func or method
+            let run_rebalancer_to_kind = |ar: Vec<RebalancerParking>, kind: String| async move {
+                for rp in ar {
+                    if rp.kind != kind {
+                        continue;
+                    }
+
+                    let (asset_in, asset_out, amount_in, amount_out) = match rp.kind.as_str() {
+                        "to_parking" => (
+                            rp.asset_balances.asset,
+                            rebalancer.get_parking_asset(),
+                            rp.asset_amount_to_trade,
+                            rp.parking_amount_to_trade,
+                        ),
+                        "from_parking" => (
+                            rebalancer.get_parking_asset(),
+                            rp.asset_balances.asset,
+                            rp.parking_amount_to_trade,
+                            rp.asset_amount_to_trade,
+                        ),
+                        _ => {
+                            log::error!("rp.kind: {} doesnt valid", rp.kind);
+                            panic!();
+                        }
+                    };
+
+                    log::debug!("diff_parking: parking_to_asset: asset_in.name: {}, asset_out.name: {}, amount_in: {:?}, amount_out: {:?}", asset_in.name(), asset_out.name(), amount_in, amount_out);
+
+                    move_asset_with_slippage(
+                        rebalancer,
+                        asset_in.clone(),
+                        asset_out.clone(),
+                        amount_in,
+                        amount_out,
+                    )
+                    .await
+                }
+            };
+
             let total_quoted_balance = assets_balances
                 .iter()
                 .fold(U256::from(0_i32), |acc, x| acc + x.quoted_balance());
@@ -378,64 +437,87 @@ pub async fn call_sub_commands(args: &ArgMatches) {
             let mut total = BigInt::from(0_i32);
 
             let assets_balances_with_parking = add_parking_asset(rebalancer, assets_balances).await;
-            let mut asset_to_parking = vec![];
-            for ab in assets_balances_with_parking {
-                let quoted_balance = u256_to_bigint(ab.quoted_balance());
-                let diff = tqb.clone() - quoted_balance.clone();
+            let mut assets_to_rebalancer = vec![];
 
-                let pow = 10_u32.pow(4);
-                // let percent_diff = (diff.clone() * pow) / quoted_balance.clone();
-                let percent: BigInt = ((quoted_balance.clone() * pow) / tqb.clone()) * 100_i32;
-                let percent_to_buy = (ab.percent() * 10_f64.powf(4.0)) as u32 - percent.clone();
-                // ((2730469751527576947)*((35,68/100)*1e18))/1e18
-                let amount_to_trade: BigInt = (tqb.clone()
-                    * (percent_to_buy.clone() * 10_u128.pow((ab.asset_decimals - 4 - 2).into())))
-                    / 10_u128.pow(ab.asset_decimals.into());
+            let mut done = false;
 
-                total += amount_to_trade.clone();
+            while !done {
+                for ab in assets_balances_with_parking.clone() {
+                    let quoted_balance = u256_to_bigint(ab.quoted_balance());
+                    let diff = tqb.clone() - quoted_balance.clone();
 
-                let quoted_amount_to_trade = bigint_to_u256(amount_to_trade.clone());
+                    let pow = 10_u32.pow(4);
+                    // let percent_diff = (diff.clone() * pow) / quoted_balance.clone();
+                    let percent: BigInt = ((quoted_balance.clone() * pow) / tqb.clone()) * 100_i32;
+                    let percent_to_buy = (ab.percent() * 10_f64.powf(4.0)) as u32 - percent.clone();
+                    // ((2730469751527576947)*((35,68/100)*1e18))/1e18
+                    // TODO: may add slippage in this calcs
+                    let amount_to_trade: BigInt = (tqb.clone()
+                        * (percent_to_buy.clone()
+                            * 10_u128.pow((ab.asset_decimals - 4 - 2).into())))
+                        / 10_u128.pow(ab.asset_decimals.into());
 
-                if amount_to_trade < BigInt::from(0_i32) {
+                    total += amount_to_trade.clone();
+
+                    let quoted_amount_to_trade = bigint_to_u256(amount_to_trade.clone());
+
+                    // TODO: convert it to enum
+                    let kind = match amount_to_trade <= BigInt::from(0_i32) {
+                        true => "to_parking".to_string(),
+                        false => "from_parking".to_string(),
+                    };
+
                     match RebalancerParking::new(
                         rebalancer.clone(),
-                        "to_parking".to_string(),
+                        kind,
                         ab.clone(),
                         quoted_amount_to_trade,
                     )
                     .await
                     {
-                        Some(rp) => asset_to_parking.push(rp),
+                        Some(rp) if ab.asset.name() != rebalancer.get_parking_asset().name() => {
+                            assets_to_rebalancer.push(rp)
+                        }
+                        Some(_) => {
+                            log::info!("diff_parking: ignore same asset ab.asset: {} rebalancer.get_parking_asset():{}", ab.asset.name(), rebalancer.get_parking_asset().name())
+                        }
                         None => {
                             log::info!(
                                 "diff_parking: rebalancer_parking cant be created, continue."
                             );
-                            continue;
                         }
-                    }
+                    };
+
+                    log::debug!("diff_parking: ab: {}, quoted_balance: {}, ab.percent(): {}, percent: {}, diff: {}, percent_to_buy: {}, amount_to_trade: {}, total: {}",
+                        ab.asset.name(),
+                        quoted_balance,
+                        ab.percent(),
+                        percent,
+                        diff,
+                        percent_to_buy,
+                        amount_to_trade,
+                        total,
+                    );
                 }
 
-                log::debug!(
-                    "diff_parking: ab: {}, quoted_balance: {}, ab.percent(): {}, percent: {}, diff: {}, percent_to_buy: {}, amount_to_trade: {}, total: {}",
-                    ab.asset.name(),
-                    quoted_balance,
-                    ab.percent(),
-                    percent,
-                    diff,
-                    percent_to_buy,
-                    amount_to_trade,
-                    total,
-                );
+                log::debug!("diff_parking: asset_to_parking: {:?}", assets_to_rebalancer);
 
-                // log::debug!("diff_parking: percent_to_buy: {}", percent_to_buy);
-                // log::debug!("diff_parking: amount_to_trade: {}", amount_to_trade)
+                let exists_to_parking = assets_to_rebalancer
+                    .iter()
+                    .any(|rp| rp.kind == "to_parking");
+
+                if exists_to_parking {
+                    run_rebalancer_to_kind(assets_to_rebalancer.clone(), "to_parking".to_string())
+                        .await;
+                    continue;
+                }
+
+                run_rebalancer_to_kind(assets_to_rebalancer.clone(), "from_parking".to_string())
+                    .await;
+                done = true;
             }
-
-            log::debug!("diff_parking: asset_to_parking: {:?}", asset_to_parking);
-
-            unimplemented!()
         }
-    };
+    }
 }
 
 //TODO: create a mod to carry all the U256 ops
@@ -449,18 +531,9 @@ pub fn u256_to_bigint(u: U256) -> BigInt {
 }
 
 pub fn bigint_to_u256(b: BigInt) -> U256 {
-    let bytes = b.to_signed_bytes_le();
-    if b < BigInt::from(0) {
-        assert!(
-            bytes.len() <= 32,
-            "BigInt value does not fit into signed U256"
-        );
-        let mut i_bytes: [u8; 32] = [255; 32];
-        i_bytes[..bytes.len()].copy_from_slice(&bytes);
-        U256::from_little_endian(&i_bytes)
-    } else {
-        U256::from_little_endian(&bytes)
-    }
+    let (_, unb) = b.into_parts();
+    let bytes = unb.to_bytes_le();
+    U256::from_little_endian(&bytes)
 }
 
 /*
