@@ -422,6 +422,8 @@ pub async fn call_sub_commands(args: &ArgMatches) {
                 }
             };
 
+            //TODO: add thresould per position
+
             let total_quoted_balance = assets_balances
                 .iter()
                 .fold(U256::from(0_i32), |acc, x| acc + x.quoted_balance());
