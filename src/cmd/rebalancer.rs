@@ -442,6 +442,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
             let mut assets_to_rebalancer = vec![];
 
             let mut done = false;
+            let mut done_to_parking = false;
 
             while !done {
                 for ab in assets_balances_with_parking.clone() {
@@ -508,9 +509,10 @@ pub async fn call_sub_commands(args: &ArgMatches) {
                     .iter()
                     .any(|rp| rp.kind == "to_parking");
 
-                if exists_to_parking {
+                if exists_to_parking && !done_to_parking {
                     run_rebalancer_to_kind(assets_to_rebalancer.clone(), "to_parking".to_string())
                         .await;
+                    done_to_parking = true;
                     continue;
                 }
 
