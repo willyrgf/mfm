@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::{config::Config, rebalancer};
 use clap::{ArgMatches, Command};
 
 pub mod allowance;
@@ -6,7 +6,6 @@ pub mod approve;
 pub mod balances;
 pub mod helpers;
 pub mod quote;
-pub mod rebalancer;
 pub mod swap;
 pub mod transaction;
 pub mod unwrap;
@@ -32,7 +31,7 @@ pub fn new() -> clap::Command<'static> {
         .subcommand(allowance::generate_cmd())
         .subcommand(approve::generate_cmd())
         .subcommand(balances::generate_cmd())
-        .subcommand(rebalancer::generate_cmd())
+        .subcommand(rebalancer::cmd::generate_cmd())
         .subcommand(yield_farm::generate_cmd())
         .subcommand(withdraw::generate_cmd())
         .subcommand(quote::generate_cmd())
@@ -58,8 +57,8 @@ pub async fn call_sub_commands(matches: &ArgMatches) {
         Some((balances::BALANCES_COMMAND, sub_matches)) => {
             balances::call_sub_commands(sub_matches).await;
         }
-        Some((rebalancer::REBALANCER_COMMAND, sub_matches)) => {
-            rebalancer::call_sub_commands(sub_matches).await;
+        Some((rebalancer::cmd::REBALANCER_COMMAND, sub_matches)) => {
+            rebalancer::cmd::call_sub_commands(sub_matches).await;
         }
         Some((transaction::TRANSACTION_COMMAND, sub_matches)) => {
             transaction::call_sub_commands(sub_matches).await;

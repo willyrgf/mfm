@@ -1,16 +1,19 @@
-use super::{wallet::Wallet, Config};
-use crate::{asset::Asset, cmd::rebalancer::AssetBalances};
+use crate::asset::Asset;
+use crate::{config::wallet::Wallet, config::Config};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use web3::types::U256;
 
-#[derive(Debug)]
+use super::AssetBalances;
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Strategy {
     FullParking,
     DiffParking,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 struct AssetConfig {
     // asset_id: String,
     percent: f64,
@@ -22,19 +25,19 @@ struct AssetConfig {
 struct Portfolio(HashMap<String, AssetConfig>);
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub struct Rebalancer {
+pub struct RebalancerConfig {
     name: String,
     wallet_id: String,
     network_id: String,
     portfolio: Portfolio,
-    strategy: String, // TODO: move it to a enum
+    strategy: Strategy,
     threshold_percent: f64,
     quoted_in: String,
     parking_asset_id: String,
     parking_asset_min_move: f64,
 }
 
-impl Rebalancer {
+impl RebalancerConfig {
     pub fn parking_asset_min_move_u256(&self, decimals: u8) -> U256 {
         //TODO: review u128
         let qe = (self.parking_asset_min_move * 10_f64.powf(decimals.into())) as u128;
@@ -50,14 +53,7 @@ impl Rebalancer {
     }
 
     pub fn strategy(&self) -> Strategy {
-        match self.strategy.as_str() {
-            "full_parking" => Strategy::FullParking,
-            "diff_parking" => Strategy::DiffParking,
-            _ => {
-                log::debug!("rebalancer: strategy(): strategy configured is not supported, using default: {:?}", Strategy::FullParking);
-                Strategy::FullParking
-            }
-        }
+        self.strategy.clone()
     }
 
     pub fn total_percentage(&self) -> f64 {
@@ -162,7 +158,7 @@ impl Rebalancer {
             threshold-percent_diff = -0,28
         ```
     */
-    pub fn reach_min_threshold(&self, assets_balances: &[AssetBalances]) -> bool {
+    pub fn reach_min_threshold(&self, assets_balances: &Vec<AssetBalances>) -> bool {
         // TODO: abstract this
         // abs for U256
         let u256_abs_diff = |qap: U256, pn: U256| {
@@ -227,9 +223,9 @@ impl Rebalancer {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub struct Rebalancers(HashMap<String, Rebalancer>);
-impl Rebalancers {
-    pub fn get(&self, key: &str) -> &Rebalancer {
+pub struct RebalancersConfig(HashMap<String, RebalancerConfig>);
+impl RebalancersConfig {
+    pub fn get(&self, key: &str) -> &RebalancerConfig {
         self.0.get(key).unwrap()
     }
 }

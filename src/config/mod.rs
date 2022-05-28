@@ -1,7 +1,7 @@
 // pub mod asset;
 pub mod exchange;
 pub mod network;
-pub mod rebalancer;
+// pub mod rebalancer;
 pub mod wallet;
 pub mod withdraw_wallet;
 pub mod yield_farm;
@@ -9,14 +9,9 @@ pub mod yield_farm;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 
-// use asset::Assets;
-// use mfm::
-// use mfm::
-// use crate::asset::AssetConfig;
-use crate::asset::config::AssetsConfig;
+use crate::{asset::config::AssetsConfig, rebalancer::config::RebalancersConfig};
 use exchange::Exchanges;
 use network::Networks;
-use rebalancer::Rebalancers;
 use wallet::Wallets;
 use withdraw_wallet::WithdrawWallets;
 use yield_farm::YieldFarms;
@@ -30,7 +25,7 @@ pub struct Config {
     pub assets: AssetsConfig,
     pub networks: Networks,
     pub exchanges: Exchanges,
-    pub rebalancers: Rebalancers,
+    pub rebalancers: RebalancersConfig,
     pub yield_farms: YieldFarms,
 }
 

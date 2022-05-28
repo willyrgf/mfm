@@ -1,10 +1,7 @@
-use std::collections::HashMap;
-
-use serde::{Deserialize, Serialize};
-
-use crate::config::Config;
-
 use super::Asset;
+use crate::config::Config;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct AssetNetwork {

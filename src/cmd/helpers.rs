@@ -1,15 +1,15 @@
 use crate::{
     asset::Asset,
     config::{
-        exchange::Exchange, network::Network, rebalancer::Rebalancer, wallet::Wallet,
-        withdraw_wallet::WithdrawWallet, yield_farm::YieldFarm, Config,
+        exchange::Exchange, network::Network, wallet::Wallet, withdraw_wallet::WithdrawWallet,
+        yield_farm::YieldFarm, Config,
     },
+    rebalancer::config::RebalancerConfig,
 };
 use clap::ArgMatches;
 use web3::types::U256;
 
 //TODO: add constants to all keys in value_of
-//
 
 pub fn get_exchange(args: &ArgMatches) -> &Exchange {
     let config = Config::global();
@@ -111,7 +111,7 @@ pub fn get_slippage(args: &ArgMatches, asset_decimals: u8) -> U256 {
     }
 }
 
-pub fn get_rebalancer(args: &ArgMatches) -> &Rebalancer {
+pub fn get_rebalancer(args: &ArgMatches) -> &RebalancerConfig {
     let config = Config::global();
     match args.value_of("name") {
         Some(i) => config.rebalancers.get(i),
