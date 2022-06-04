@@ -73,6 +73,13 @@ impl Asset {
         self.exchange_id.as_str()
     }
 
+    pub fn get_path_asset(&self) -> Asset {
+        Config::global()
+            .assets
+            .find_by_name_and_network(self.path_asset.as_str(), self.network_id.as_str())
+            .unwrap()
+    }
+
     pub fn get_exchange<'a>(&self) -> &'a Exchange {
         Config::global().exchanges.get(self.exchange_id())
     }

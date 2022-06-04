@@ -148,19 +148,35 @@ impl Exchange {
         // input -> path_asset -> path_asset from output -> output
         //TODO: check liquidity of directly path
         let mut v = vec![];
-        let network = self.get_network();
-        let wrapped_asset = network.get_wrapped_asset();
-        let wrapped_is_output = wrapped_asset.address() == output_asset.address();
-        let wrapped_is_input = wrapped_asset.address() == input_asset.address();
-        let has_direct_route = match self.get_factory_pair(input_asset, output_asset).await {
-            Some(a) => (a.to_string().as_str() != ZERO_ADDRESS),
-            _ => false,
-        };
+        //let network = self.get_network();
+        // let wrapped_asset = network.get_wrapped_asset();
+        let input_path_asset = input_asset.get_path_asset();
+        let output_path_asset = output_asset.get_path_asset();
+        let same_input_output_path_asset =
+            input_path_asset.address() == output_path_asset.address();
+        let input_asset_is_same_of_some_asset_path = input_asset.address()
+            == input_path_asset.address()
+            || input_asset.address() == output_path_asset.address();
+        let output_asset_is_same_of_some_asset_path = output_asset.address()
+            == input_path_asset.address()
+            || output_asset.address() == output_path_asset.address();
+        // let has_direct_route = match self.get_factory_pair(input_asset, output_asset).await {
+        //     Some(a) => (a.to_string().as_str() != ZERO_ADDRESS),
+        //     _ => false,
+        // };
 
         v.push(input_asset.as_address().unwrap());
-        if !has_direct_route && !wrapped_is_output && !wrapped_is_input {
-            v.push(wrapped_asset.as_address().unwrap());
+        if !input_asset_is_same_of_some_asset_path && !output_asset_is_same_of_some_asset_path {
+            if same_input_output_path_asset {
+                v.push(input_path_asset.as_address().unwrap());
+            } else {
+                v.push(input_path_asset.as_address().unwrap());
+                v.push(output_path_asset.as_address().unwrap());
+            }
         }
+        // if !has_direct_route && !wrapped_is_output && !wrapped_is_input {
+        //     v.push(wrapped_asset.as_address().unwrap());
+        // }
         v.push(output_asset.as_address().unwrap());
 
         v
