@@ -1,7 +1,7 @@
 use crate::{
     cmd,
     config::Config,
-    rebalancer::{self, config::Strategy},
+    rebalancer::{self, config::Strategy, generate_asset_rebalances},
     shared,
     shared::blockchain_utils::{amount_in_quoted, display_amount_to_float},
 };
@@ -80,45 +80,55 @@ async fn cmd_info(args: &ArgMatches) {
 
     let hide_zero = true;
     let config = cmd::helpers::get_rebalancer(args);
-    let wallet = config.get_wallet();
     let asset_quoted = &config.get_quoted_asset();
-    // let asset_quoted_decimals = asset_quoted.decimals().await;
-    let asset_quoted_decimals = 18;
 
     let mut table = Table::new();
     table.add_row(row![
         "Network",
         "Asset",
-        "Decimals",
-        "Balance in float",
         "Balance",
         "Quoted In",
         "Balance in quoted",
-        "Balance in quoted in float"
+        "Amount to trade",
+        "Quoted amount to trade"
     ]);
 
-    futures::future::join_all(config.get_assets().into_iter().map(|asset| async move {
-        let balance_of = asset.balance_of(wallet.address()).await;
-        let decimals = asset.decimals().await;
-        let amount_in_quoted = amount_in_quoted(&asset, &asset_quoted, balance_of).await;
-        (asset, balance_of, decimals, amount_in_quoted)
-    }))
-    .await
-    .into_iter()
-    .for_each(|(asset, balance_of, decimals, amount_in_quoted)| {
-        if !(hide_zero && balance_of == U256::from(0_i32)) {
-            table.add_row(row![
-                asset.network_id(),
-                asset.name(),
-                decimals,
-                display_amount_to_float(balance_of, decimals),
-                balance_of,
-                config.quoted_in(),
-                amount_in_quoted,
-                display_amount_to_float(amount_in_quoted, asset_quoted_decimals)
-            ]);
-        }
-    });
+    generate_asset_rebalances(config)
+        .await
+        .iter()
+        .for_each(|ar| {
+            let balance_of = ar.asset_balances.balance;
+            let asset = ar.asset_balances.asset.clone();
+            let decimals = ar.asset_balances.asset_decimals;
+            let amount_in_quoted = ar.asset_balances.quoted_balance;
+            let asset_quoted_decimals = ar.asset_balances.quoted_asset_decimals;
+
+            let sign = match ar.kind.as_str() {
+                "to_parking" => "-",
+                _ => "+",
+            };
+
+            if !(hide_zero && balance_of == U256::from(0_i32)) {
+                table.add_row(row![
+                    asset.network_id(),
+                    asset.name(),
+                    display_amount_to_float(balance_of, decimals),
+                    config.quoted_in(),
+                    display_amount_to_float(amount_in_quoted, asset_quoted_decimals),
+                    //TODO: put it in a method of ar
+                    format!(
+                        "{}{}",
+                        sign,
+                        display_amount_to_float(ar.asset_amount_to_trade, decimals)
+                    ),
+                    format!(
+                        "{}{}",
+                        sign,
+                        display_amount_to_float(ar.quoted_amount_to_trade, asset_quoted_decimals)
+                    )
+                ]);
+            }
+        });
 
     table.printstd();
 }

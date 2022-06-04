@@ -18,7 +18,8 @@ pub struct AssetBalances {
 }
 
 #[derive(Debug, Clone)]
-pub struct RebalancerParking {
+pub struct AssetRebalancer {
+    kind: String, //to_parking, from_parking TODO: to enum
     rebalancer_config: RebalancerConfig,
     asset_balances: AssetBalances,
     quoted_amount_to_trade: U256,
@@ -26,9 +27,10 @@ pub struct RebalancerParking {
     parking_amount_to_trade: U256,
 }
 
-impl RebalancerParking {
+impl AssetRebalancer {
     //TODO: refact this initialization
     pub async fn new(
+        kind: String,
         rebalancer_config: RebalancerConfig,
         asset_balances: AssetBalances,
         quoted_amount_to_trade: U256,
@@ -67,21 +69,8 @@ impl RebalancerParking {
             .unwrap()
             .into();
 
-        let min_move = rebalancer_config
-            .parking_asset_min_move_u256(rebalancer_config.get_parking_asset().decimals().await);
-
-        log::debug!(
-					"RebalancerParking::new(): quoted_amount_to_trade: {} min_move: {}, parking_amount_to_trade: {}",
-					quoted_amount_to_trade,
-					min_move,
-					parking_amount_to_trade
-			);
-
-        if min_move >= parking_amount_to_trade {
-            return None;
-        }
-
         Some(Self {
+            kind,
             rebalancer_config,
             asset_balances,
             quoted_amount_to_trade,
@@ -177,8 +166,8 @@ pub async fn get_total_parking_balance(parking_asset: &Asset, from_wallet: &Wall
 
 pub async fn move_asset_with_slippage(
     rebalancer_config: &RebalancerConfig,
-    asset_in: Asset,
-    asset_out: Asset,
+    asset_in: &Asset,
+    asset_out: &Asset,
     amount_in: U256,
     amount_out: U256,
 ) {
@@ -241,8 +230,8 @@ pub async fn move_assets_to_parking(
 
         move_asset_with_slippage(
             rebalancer_config,
-            ab.asset.clone(),
-            parking_asset.clone(),
+            &ab.asset,
+            &parking_asset,
             ab.balance,
             parking_amount_out,
         )
@@ -386,43 +375,46 @@ pub async fn run_full_parking(config: &RebalancerConfig) {
 pub async fn run_diff_parking_per_kind(
     config: &RebalancerConfig,
     kind: String,
-    ar: Vec<RebalancerParking>,
+    ar: Vec<AssetRebalancer>,
 ) {
     //TODO: when from_parking, check if weve balance from parking, if not, use all balance
-    for rp in ar {
+    for ar in ar.iter().filter(|ar| ar.kind == kind) {
+        let parking_asset = config.get_parking_asset();
+
         let (asset_in, asset_out, amount_in, amount_out) = match kind.as_str() {
             "to_parking" => (
-                rp.asset_balances.asset,
-                config.get_parking_asset(),
-                rp.asset_amount_to_trade,
-                rp.parking_amount_to_trade,
+                &ar.asset_balances.asset,
+                &parking_asset,
+                ar.asset_amount_to_trade,
+                ar.parking_amount_to_trade,
             ),
             "from_parking" => (
-                config.get_parking_asset(),
-                rp.asset_balances.asset,
-                rp.parking_amount_to_trade,
-                rp.asset_amount_to_trade,
+                &parking_asset,
+                &ar.asset_balances.asset,
+                ar.parking_amount_to_trade,
+                ar.asset_amount_to_trade,
             ),
             _ => {
-                log::error!("rp.kind: {} doesnt valid", kind);
+                log::error!("ar.kind: {} doesnt valid", kind);
                 panic!();
             }
         };
 
+        let min_move =
+            config.parking_asset_min_move_u256(config.get_parking_asset().decimals().await);
+
+        if min_move >= ar.parking_amount_to_trade {
+            log::debug!("run_diff_parking_per_kind(): min_move >= ar.parking_amount_to_trade, min_move: {}, ar.parking_amount_to_trade: {}", min_move, ar.parking_amount_to_trade);
+            continue;
+        }
+
         log::debug!("diff_parking: parking_to_asset: asset_in.name: {}, asset_out.name: {}, amount_in: {:?}, amount_out: {:?}", asset_in.name(), asset_out.name(), amount_in, amount_out);
 
-        move_asset_with_slippage(
-            config,
-            asset_in.clone(),
-            asset_out.clone(),
-            amount_in,
-            amount_out,
-        )
-        .await
+        move_asset_with_slippage(config, asset_in, asset_out, amount_in, amount_out).await
     }
 }
 
-pub async fn run_diff_parking(config: &RebalancerConfig) {
+pub async fn generate_asset_rebalances(config: &RebalancerConfig) -> Vec<AssetRebalancer> {
     let assets = config.get_assets();
 
     //TODO: add thresould per position
@@ -441,8 +433,7 @@ pub async fn run_diff_parking(config: &RebalancerConfig) {
         total_quoted_balance
     );
 
-    let mut rp_to_parking = vec![];
-    let mut rp_from_parking = vec![];
+    let mut asset_rebalances = vec![];
 
     let tqb = u256_to_bigint(total_quoted_balance);
     log::debug!("diff_parking: tqb: {}", tqb);
@@ -466,10 +457,17 @@ pub async fn run_diff_parking(config: &RebalancerConfig) {
 
         let quoted_amount_to_trade = bigint_to_u256(amount_to_trade.clone());
 
-        let rp = match RebalancerParking::new(config.clone(), ab.clone(), quoted_amount_to_trade)
-            .await
-        {
-            Some(rp) if ab.asset.name() != config.get_parking_asset().name() => rp,
+        // if amount_to_trade is negative, move to parking
+        let kind = if amount_to_trade <= BigInt::from(0_i32) {
+            "to_parking".to_string()
+        } else {
+            "from_parking".to_string()
+        };
+
+        match AssetRebalancer::new(kind, config.clone(), ab.clone(), quoted_amount_to_trade).await {
+            Some(ar) if ab.asset.name() != config.get_parking_asset().name() => {
+                asset_rebalances.push(ar)
+            }
             Some(_) => {
                 log::info!("diff_parking: ignore same asset ab.asset: {} rebalancer.get_parking_asset():{}", ab.asset.name(), config.get_parking_asset().name());
                 continue;
@@ -478,13 +476,6 @@ pub async fn run_diff_parking(config: &RebalancerConfig) {
                 log::info!("diff_parking: rebalancer_parking cant be created, continue.");
                 continue;
             }
-        };
-
-        // if amount_to_trade is negative, move to parking
-        if amount_to_trade <= BigInt::from(0_i32) {
-            rp_to_parking.push(rp);
-        } else {
-            rp_from_parking.push(rp);
         };
 
         log::debug!("diff_parking: ab: {}, quoted_balance: {}, ab.percent(): {}, percent: {}, diff: {}, percent_to_buy: {}, amount_to_trade: {}, total: {}",
@@ -499,6 +490,12 @@ pub async fn run_diff_parking(config: &RebalancerConfig) {
             );
     }
 
-    run_diff_parking_per_kind(config, "to_parking".to_string(), rp_to_parking.clone()).await;
-    run_diff_parking_per_kind(config, "from_parking".to_string(), rp_from_parking.clone()).await;
+    asset_rebalances
+}
+
+pub async fn run_diff_parking(config: &RebalancerConfig) {
+    let asset_balances = generate_asset_rebalances(config).await;
+
+    run_diff_parking_per_kind(config, "to_parking".to_string(), asset_balances.clone()).await;
+    run_diff_parking_per_kind(config, "from_parking".to_string(), asset_balances.clone()).await;
 }
