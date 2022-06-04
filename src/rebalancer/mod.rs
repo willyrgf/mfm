@@ -1,7 +1,7 @@
 pub mod cmd;
 pub mod config;
 
-use crate::{asset::Asset, config::wallet::Wallet, rebalancer::config::RebalancerConfig};
+use crate::{asset::Asset, config::wallet::Wallet, rebalancer::config::RebalancerConfig, shared};
 
 use num_bigint::{BigInt, Sign};
 use web3::types::U256;
@@ -183,7 +183,7 @@ pub async fn move_asset_with_slippage(
     amount_out: U256,
 ) {
     let from_wallet = rebalancer_config.get_wallet();
-    let exchange = asset_in.get_exchange();
+    let exchange = shared::blockchain_utils::exchange_to_use(&asset_in, &asset_out);
 
     let asset_out_decimals = asset_out.decimals().await;
     let amount_in_slippage = asset_in.slippage_u256(asset_out_decimals);
