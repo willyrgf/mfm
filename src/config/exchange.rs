@@ -166,6 +166,7 @@ impl Exchange {
         v
     }
 
+    //TODO: return error with value vec![zero]
     pub async fn get_amounts_out(
         &self,
         // decimals: u8,

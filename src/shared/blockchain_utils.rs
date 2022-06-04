@@ -11,7 +11,7 @@ use web3::{
     Web3,
 };
 
-use crate::config::wallet::Wallet;
+use crate::{asset::Asset, config::wallet::Wallet};
 
 pub async fn estimate_gas<P>(
     contract: &Contract<Http>,
@@ -120,4 +120,13 @@ pub async fn wait_receipt(client: web3::Web3<Http>, tx_address: H256) -> Transac
 
 pub fn display_amount_to_float(amount: U256, decimals: u8) -> f64 {
     amount.low_u128() as f64 / 10_u64.pow(decimals.into()) as f64
+}
+
+pub async fn amount_in_quoted(asset_in: &Asset, asset_quoted: &Asset, amount_in: U256) -> U256 {
+    let exchange = asset_in.get_exchange();
+    let path = exchange.build_route_for(asset_in, asset_quoted).await;
+    match exchange.get_amounts_out(amount_in, path).await.last() {
+        Some(p) => *p,
+        None => U256::default(),
+    }
 }
