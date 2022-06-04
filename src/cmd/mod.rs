@@ -1,5 +1,5 @@
 use crate::{config::Config, rebalancer};
-use clap::{ArgMatches, Command};
+use clap::{crate_version, ArgMatches, Command};
 
 pub mod allowance;
 pub mod approve;
@@ -18,6 +18,7 @@ pub const CLI_NAME: &str = "mfm";
 pub fn new() -> clap::Command<'static> {
     Command::new(CLI_NAME)
         .bin_name(CLI_NAME)
+        .version(crate_version!())
         .arg(
             clap::arg!(-c - -config_filename <PATH> "Config file path")
                 .required(false)
