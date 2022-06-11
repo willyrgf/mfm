@@ -168,11 +168,19 @@ pub async fn move_asset_with_slippage(
     rebalancer_config: &RebalancerConfig,
     asset_in: &Asset,
     asset_out: &Asset,
-    amount_in: U256,
-    amount_out: U256,
+    mut amount_in: U256,
+    mut amount_out: U256,
 ) {
     let from_wallet = rebalancer_config.get_wallet();
     let exchange = shared::blockchain_utils::exchange_to_use(&asset_in, &asset_out);
+    let balance = asset_in.balance_of(from_wallet.address()).await;
+
+    //TODO: handle with it before in another place
+    if  balance < amount_in {
+        amount_in = balance;
+        let p = exchange.build_route_for(asset_in, asset_out).await;
+        amount_out = exchange.get_amounts_out(amount_in, p).await.last().unwrap().into();
+    }
 
     let asset_out_decimals = asset_out.decimals().await;
     let amount_in_slippage = asset_in.slippage_u256(asset_out_decimals);
