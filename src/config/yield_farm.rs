@@ -12,6 +12,8 @@ use crate::asset::Asset;
 
 use super::{network::Network, wallet::Wallet, Config};
 
+include!(concat!(env!("OUT_DIR"), "/res.rs"));
+
 pub mod baby_auto_baby_pool;
 pub mod pacoca_auto_pool;
 pub mod pacoca_vault;
@@ -36,6 +38,7 @@ pub struct YieldFarm {
     deposit_asset_id: Option<String>,
     reward_asset_id: Option<String>, //quoted_asset_id: String,
 }
+
 
 impl YieldFarm {
     pub fn name(&self) -> &String {
@@ -94,12 +97,12 @@ impl YieldFarm {
     }
 
     pub fn abi_path(&self) -> String {
-        format!("./res/yield_farms/{}/abi.json", self.contract_name.as_str())
+        format!("res/yield_farms/{}/abi.json", self.contract_name.as_str())
     }
 
     pub fn abi_json_string(&self) -> String {
-        let reader = std::fs::File::open(self.abi_path()).unwrap();
-        let json: serde_json::Value = serde_json::from_reader(reader).unwrap();
+        let file_string = RES.get(&self.abi_path()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(file_string).unwrap();
         json.to_string()
     }
 

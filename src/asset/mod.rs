@@ -19,6 +19,10 @@ use crate::config::{
 };
 use config::AssetConfig;
 
+
+//TODO: where put it???
+include!(concat!(env!("OUT_DIR"), "/res.rs"));
+
 #[derive(Debug, Clone)]
 pub struct Asset {
     name: String,
@@ -86,13 +90,13 @@ impl Asset {
 
     pub fn abi_path(&self) -> String {
         let path = format!(
-            "./res/assets/{}/{}/{}/abi.json",
+            "res/assets/{}/{}/{}/abi.json",
             self.network_id.as_str(),
             self.exchange_id.as_str(),
             self.name.as_str()
         );
         // TODO: move it to const static
-        let fallback_path = "./res/assets/erc20_abi.json".to_string();
+        let fallback_path = "res/assets/erc20_abi.json".to_string();
         if Path::new(&path).exists() {
             return path;
         }
@@ -100,8 +104,8 @@ impl Asset {
     }
 
     pub fn abi_json_string(&self) -> String {
-        let reader = std::fs::File::open(self.abi_path()).unwrap();
-        let json: serde_json::Value = serde_json::from_reader(reader).unwrap();
+        let file_string = RES.get(&self.abi_path()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(file_string).unwrap();
         json.to_string()
     }
 

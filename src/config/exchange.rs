@@ -21,6 +21,9 @@ use super::network::Network;
 use super::wallet::Wallet;
 use super::Config;
 
+//TODO: where put it???
+include!(concat!(env!("OUT_DIR"), "/res.rs"));
+
 pub mod swap_eth_for_tokens;
 pub mod swap_tokens_for_tokens;
 
@@ -34,6 +37,7 @@ pub struct Exchange {
     factory_address: String,
     network_id: String,
 }
+
 
 impl Exchange {
     pub fn name(&self) -> &str {
@@ -61,9 +65,9 @@ impl Exchange {
     }
 
     pub fn router_abi_path(&self) -> String {
-        let path = format!("./res/exchanges/{}/abi.json", self.name.as_str());
+        let path = format!("res/exchanges/{}/abi.json", self.name.as_str());
         // TODO: move it to const static
-        let fallback_path = "./res/exchanges/uniswap_v2_router_abi.json".to_string();
+        let fallback_path = "res/exchanges/uniswap_v2_router_abi.json".to_string();
         if Path::new(&path).exists() {
             return path;
         }
@@ -71,9 +75,9 @@ impl Exchange {
     }
 
     pub fn factory_abi_path(&self) -> String {
-        let path = format!("./res/exchanges/{}/factory_abi.json", self.name.as_str());
+        let path = format!("res/exchanges/{}/factory_abi.json", self.name.as_str());
         // TODO: move it to const static
-        let fallback_path = "./res/exchanges/uniswap_v2_factory_abi.json".to_string();
+        let fallback_path = "res/exchanges/uniswap_v2_factory_abi.json".to_string();
         if Path::new(&path).exists() {
             return path;
         }
@@ -81,14 +85,16 @@ impl Exchange {
     }
 
     pub fn router_abi_json_string(&self) -> String {
-        let reader = std::fs::File::open(self.router_abi_path()).unwrap();
-        let json: serde_json::Value = serde_json::from_reader(reader).unwrap();
+        let file_string = RES.get(&self.router_abi_path()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(file_string).unwrap();
         json.to_string()
     }
 
     pub fn factory_abi_json_string(&self) -> String {
-        let reader = std::fs::File::open(self.factory_abi_path()).unwrap();
-        let json: serde_json::Value = serde_json::from_reader(reader).unwrap();
+        //TODO: use or compiled resource as a default and try on fs before, in all of that type
+        // let reader = std::fs::File::open(self.factory_abi_path()).unwrap();
+        let file_string = RES.get(&self.router_abi_path()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(file_string).unwrap();
         json.to_string()
     }
 

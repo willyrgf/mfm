@@ -29,6 +29,7 @@ pub struct Config {
     pub yield_farms: YieldFarms,
 }
 
+
 impl Config {
     pub fn global() -> &'static Config {
         GLOBAL_CONFIG.get().expect("CONFIG not loaded")
