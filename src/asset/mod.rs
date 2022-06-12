@@ -19,7 +19,6 @@ use crate::config::{
 };
 use config::AssetConfig;
 
-
 //TODO: where put it???
 include!(concat!(env!("OUT_DIR"), "/res.rs"));
 
@@ -97,7 +96,8 @@ impl Asset {
         );
         // TODO: move it to const static
         let fallback_path = "res/assets/erc20_abi.json".to_string();
-        if Path::new(&path).exists() {
+
+        if RES.contains_key(path.as_str()) {
             return path;
         }
         fallback_path

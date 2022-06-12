@@ -38,7 +38,6 @@ pub struct Exchange {
     network_id: String,
 }
 
-
 impl Exchange {
     pub fn name(&self) -> &str {
         self.name.as_str()
@@ -68,7 +67,7 @@ impl Exchange {
         let path = format!("res/exchanges/{}/abi.json", self.name.as_str());
         // TODO: move it to const static
         let fallback_path = "res/exchanges/uniswap_v2_router_abi.json".to_string();
-        if Path::new(&path).exists() {
+        if RES.contains_key(path.as_str()) {
             return path;
         }
         fallback_path
@@ -78,7 +77,7 @@ impl Exchange {
         let path = format!("res/exchanges/{}/factory_abi.json", self.name.as_str());
         // TODO: move it to const static
         let fallback_path = "res/exchanges/uniswap_v2_factory_abi.json".to_string();
-        if Path::new(&path).exists() {
+        if RES.contains_key(path.as_str()) {
             return path;
         }
         fallback_path
