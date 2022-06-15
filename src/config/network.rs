@@ -9,6 +9,7 @@ use crate::asset::Asset;
 pub struct Network {
     name: String,
     symbol: String,
+    decimals: Option<u8>,
     chain_id: u32,
     rpc_url: String,
     blockexplorer_url: String,
@@ -23,6 +24,18 @@ impl Network {
 
     pub fn get_name(&self) -> &str {
         self.name.as_str()
+    }
+
+    pub fn get_symbol(&self) -> &str {
+        self.symbol.as_str()
+    }
+
+    // TODO: try get this value from some request in the blockchain
+    pub fn coin_decimals(&self) -> u8 {
+        match self.decimals {
+            Some(n) => n,
+            _ => 18_u8,
+        }
     }
 
     pub fn get_wrapped_asset(&self) -> Asset {

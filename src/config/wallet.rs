@@ -7,6 +7,7 @@ use std::{collections::HashMap, str::FromStr};
 use web3::{
     transports::Http,
     types::{Address, U256},
+    Web3,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -39,6 +40,13 @@ impl Wallet {
             .await
             .unwrap();
         n
+    }
+
+    pub async fn coin_balance(&self, client: web3::Web3<Http>) -> U256 {
+        match client.eth().balance(self.address(), None).await {
+            Ok(n) => n,
+            Err(_) => U256::default(),
+        }
     }
 }
 

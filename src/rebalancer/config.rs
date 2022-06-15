@@ -1,4 +1,5 @@
 use crate::asset::Asset;
+use crate::config::network::Network;
 use crate::{config::wallet::Wallet, config::Config};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -126,6 +127,13 @@ impl RebalancerConfig {
 
     pub fn get_wallet<'a>(&self) -> &'a Wallet {
         Config::global().wallets.get(&self.wallet_id)
+    }
+
+    pub fn get_network(&self) -> &Network {
+        match Config::global().networks.get(self.network_id()) {
+            Some(n) => n,
+            _ => panic!("missing network for rebalancer"),
+        }
     }
 
     pub fn threshold_percent(&self) -> f64 {

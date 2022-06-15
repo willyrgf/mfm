@@ -131,4 +131,16 @@ async fn cmd_info(args: &ArgMatches) {
         });
 
     table.printstd();
+
+    let network = config.get_network();
+    let client = network.get_web3_client_http();
+    let rebalancer_wallet = config.get_wallet();
+    let coin_balance = rebalancer_wallet.coin_balance(client).await;
+    let mut coin_balance_table = Table::new();
+    coin_balance_table.add_row(row![
+        "Coin balance",
+        display_amount_to_float(coin_balance, network.coin_decimals()),
+        network.get_symbol()
+    ]);
+    coin_balance_table.printstd();
 }
