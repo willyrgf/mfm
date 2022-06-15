@@ -81,6 +81,8 @@ async fn cmd_info(args: &ArgMatches) {
     let hide_zero = true;
     let config = cmd::helpers::get_rebalancer(args);
     let asset_quoted = &config.get_quoted_asset();
+    let asset_quoted_decimals = asset_quoted.decimals().await;
+    let mut portifolio_balance = U256::default();
 
     let mut table = Table::new();
     table.add_row(row![
@@ -103,6 +105,7 @@ async fn cmd_info(args: &ArgMatches) {
             let amount_in_quoted = ar.asset_balances.quoted_balance;
             let asset_quoted_decimals = ar.asset_balances.quoted_asset_decimals;
             let quoted_unit_price = ar.asset_balances.quoted_unit_price;
+            portifolio_balance += amount_in_quoted;
 
             let sign = match ar.kind.as_str() {
                 "to_parking" => "-",
@@ -137,11 +140,18 @@ async fn cmd_info(args: &ArgMatches) {
     let client = network.get_web3_client_http();
     let rebalancer_wallet = config.get_wallet();
     let coin_balance = rebalancer_wallet.coin_balance(client).await;
-    let mut coin_balance_table = Table::new();
-    coin_balance_table.add_row(row![
+    let mut balances_table = Table::new();
+
+    balances_table.add_row(row![
+        "Portifolio balance",
+        display_amount_to_float(portifolio_balance, asset_quoted_decimals),
+        asset_quoted.name()
+    ]);
+
+    balances_table.add_row(row![
         "Coin balance",
         display_amount_to_float(coin_balance, network.coin_decimals()),
         network.get_symbol()
     ]);
-    coin_balance_table.printstd();
+    balances_table.printstd();
 }
