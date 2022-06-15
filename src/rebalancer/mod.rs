@@ -15,6 +15,7 @@ pub struct AssetBalances {
     balance: U256,
     quoted_asset_decimals: u8,
     quoted_balance: U256,
+    quoted_unit_price: U256,
 }
 
 #[derive(Debug, Clone)]
@@ -83,9 +84,23 @@ impl AssetRebalancer {
 impl AssetBalances {
     pub async fn new(rebalancer_config: &RebalancerConfig, asset: Asset) -> AssetBalances {
         let quoted_asset = rebalancer_config.get_quoted_asset();
+        let quoted_asset_path = asset
+            .get_exchange()
+            .build_route_for(&asset, &quoted_asset)
+            .await;
+        let asset_decimals = asset.decimals().await;
+        let unit_amount = U256::from(1_u32) * U256::exp10(asset_decimals.into());
+        let quoted_unit_price: U256 = asset
+            .get_exchange()
+            .get_amounts_out(unit_amount, quoted_asset_path.clone())
+            .await
+            .last()
+            .unwrap()
+            .into();
         Self {
             asset: asset.clone(),
-            asset_decimals: asset.decimals().await,
+            quoted_unit_price,
+            asset_decimals,
             percent: rebalancer_config.get_asset_config_percent(asset.name()),
             balance: asset
                 .balance_of(rebalancer_config.get_wallet().address())
@@ -176,10 +191,15 @@ pub async fn move_asset_with_slippage(
     let balance = asset_in.balance_of(from_wallet.address()).await;
 
     //TODO: handle with it before in another place
-    if  balance < amount_in {
+    if balance < amount_in {
         amount_in = balance;
         let p = exchange.build_route_for(asset_in, asset_out).await;
-        amount_out = exchange.get_amounts_out(amount_in, p).await.last().unwrap().into();
+        amount_out = exchange
+            .get_amounts_out(amount_in, p)
+            .await
+            .last()
+            .unwrap()
+            .into();
     }
 
     let asset_out_decimals = asset_out.decimals().await;

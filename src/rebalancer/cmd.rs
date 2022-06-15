@@ -84,8 +84,8 @@ async fn cmd_info(args: &ArgMatches) {
 
     let mut table = Table::new();
     table.add_row(row![
-        "Network",
         "Asset",
+        "Price",
         "Balance",
         "Quoted In",
         "Balance in quoted",
@@ -102,6 +102,7 @@ async fn cmd_info(args: &ArgMatches) {
             let decimals = ar.asset_balances.asset_decimals;
             let amount_in_quoted = ar.asset_balances.quoted_balance;
             let asset_quoted_decimals = ar.asset_balances.quoted_asset_decimals;
+            let quoted_unit_price = ar.asset_balances.quoted_unit_price;
 
             let sign = match ar.kind.as_str() {
                 "to_parking" => "-",
@@ -110,8 +111,8 @@ async fn cmd_info(args: &ArgMatches) {
 
             if !(hide_zero && balance_of == U256::from(0_i32)) {
                 table.add_row(row![
-                    asset.network_id(),
                     asset.name(),
+                    display_amount_to_float(quoted_unit_price, asset_quoted_decimals),
                     display_amount_to_float(balance_of, decimals),
                     config.quoted_in(),
                     display_amount_to_float(amount_in_quoted, asset_quoted_decimals),
