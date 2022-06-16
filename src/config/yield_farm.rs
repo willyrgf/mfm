@@ -8,11 +8,9 @@ use web3::{
     Web3,
 };
 
-use crate::asset::Asset;
+use crate::{asset::Asset, shared::resources::get_resource_file_fs_or_res};
 
 use super::{network::Network, wallet::Wallet, Config};
-
-include!(concat!(env!("OUT_DIR"), "/res.rs"));
 
 pub mod baby_auto_baby_pool;
 pub mod pacoca_auto_pool;
@@ -101,8 +99,8 @@ impl YieldFarm {
     }
 
     pub fn abi_json_string(&self) -> String {
-        let file_string = RES.get(&self.abi_path()).unwrap();
-        let json: serde_json::Value = serde_json::from_str(file_string).unwrap();
+        let file_string = get_resource_file_fs_or_res(self.abi_path()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(file_string.as_str()).unwrap();
         json.to_string()
     }
 

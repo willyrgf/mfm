@@ -1,5 +1,6 @@
 use crate::asset::Asset;
 use crate::shared;
+use crate::shared::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
 // use crate::config::asset::{Asset, Assets};
 
 use std::path::Path;
@@ -21,13 +22,12 @@ use super::network::Network;
 use super::wallet::Wallet;
 use super::Config;
 
-//TODO: where put it???
-include!(concat!(env!("OUT_DIR"), "/res.rs"));
-
 pub mod swap_eth_for_tokens;
 pub mod swap_tokens_for_tokens;
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+const FALLBACK_FACTORY_ABI_PATH: &str = "res/exchanges/uniswap_v2_factory_abi.json";
+const FALLBACK_ROUTER_ABI_PATH: &str = "res/exchanges/uniswap_v2_router_abi.json";
 
 //TODO: validate the fields in the new mod initialization
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -65,35 +65,30 @@ impl Exchange {
 
     pub fn router_abi_path(&self) -> String {
         let path = format!("res/exchanges/{}/abi.json", self.name.as_str());
-        // TODO: move it to const static
-        let fallback_path = "res/exchanges/uniswap_v2_router_abi.json".to_string();
-        if RES.contains_key(path.as_str()) {
+        if exists_resource_file_fs_or_res(path.as_str()) {
             return path;
         }
-        fallback_path
+        FALLBACK_ROUTER_ABI_PATH.to_string()
     }
+
 
     pub fn factory_abi_path(&self) -> String {
         let path = format!("res/exchanges/{}/factory_abi.json", self.name.as_str());
-        // TODO: move it to const static
-        let fallback_path = "res/exchanges/uniswap_v2_factory_abi.json".to_string();
-        if RES.contains_key(path.as_str()) {
+        if exists_resource_file_fs_or_res(path.as_str()) {
             return path;
         }
-        fallback_path
+        FALLBACK_FACTORY_ABI_PATH.to_string()
     }
 
     pub fn router_abi_json_string(&self) -> String {
-        let file_string = RES.get(&self.router_abi_path()).unwrap();
-        let json: serde_json::Value = serde_json::from_str(file_string).unwrap();
+        let file_string = get_resource_file_fs_or_res(self.router_abi_path()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(file_string.as_str()).unwrap();
         json.to_string()
     }
 
     pub fn factory_abi_json_string(&self) -> String {
-        //TODO: use or compiled resource as a default and try on fs before, in all of that type
-        // let reader = std::fs::File::open(self.factory_abi_path()).unwrap();
-        let file_string = RES.get(&self.router_abi_path()).unwrap();
-        let json: serde_json::Value = serde_json::from_str(file_string).unwrap();
+        let file_string = get_resource_file_fs_or_res(self.factory_abi_path()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(file_string.as_str()).unwrap();
         json.to_string()
     }
 

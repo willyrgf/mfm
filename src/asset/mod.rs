@@ -17,10 +17,10 @@ use crate::shared;
 use crate::config::{
     exchange::Exchange, network::Network, wallet::Wallet, withdraw_wallet::WithdrawWallet, Config,
 };
+use crate::shared::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
 use config::AssetConfig;
 
-//TODO: where put it???
-include!(concat!(env!("OUT_DIR"), "/res.rs"));
+const FALLBACK_ABI_PATH: &str = "res/assets/erc20_abi.json";
 
 #[derive(Debug, Clone)]
 pub struct Asset {
@@ -94,18 +94,16 @@ impl Asset {
             self.exchange_id.as_str(),
             self.name.as_str()
         );
-        // TODO: move it to const static
-        let fallback_path = "res/assets/erc20_abi.json".to_string();
 
-        if RES.contains_key(path.as_str()) {
+        if exists_resource_file_fs_or_res(path.as_str()) {
             return path;
         }
-        fallback_path
+        FALLBACK_ABI_PATH.to_string()
     }
 
     pub fn abi_json_string(&self) -> String {
-        let file_string = RES.get(&self.abi_path()).unwrap();
-        let json: serde_json::Value = serde_json::from_str(file_string).unwrap();
+        let file_string = get_resource_file_fs_or_res(self.abi_path()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(file_string.as_str()).unwrap();
         json.to_string()
     }
 
