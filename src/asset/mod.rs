@@ -1,6 +1,5 @@
 pub mod config;
 
-use std::path::Path;
 use std::str::FromStr;
 
 use rustc_hex::FromHexError;

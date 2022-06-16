@@ -7,7 +7,6 @@ use std::{collections::HashMap, str::FromStr};
 use web3::{
     transports::Http,
     types::{Address, U256},
-    Web3,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -4,26 +4,28 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use walkdir::WalkDir;
 
-//TODO: need improve
 fn main() {
     let path = Path::new(&env::var("OUT_DIR").unwrap()).join("res.rs");
-    let mut file = BufWriter::new(File::create(&path).unwrap());
-
+    let mut file_dest = BufWriter::new(File::create(&path).unwrap());
     let mut map = phf_codegen::Map::new();
 
-    for dir_entry in WalkDir::new("res").into_iter().filter_map(|e| e.ok()) {
-        let p = dir_entry.path();
-        let path = p.to_str().unwrap().to_owned();
-        if !dir_entry.file_type().is_file() {
-            continue;
-        }
+    for dir_entry in WalkDir::new("res").into_iter().filter_map(|dir| match dir {
+        Ok(d) if d.file_type().is_file() => Some(d),
+        Ok(_) => None,
+        Err(_) => None,
+    }) {
+        let path = dir_entry.path().to_str().unwrap().to_owned();
         let file = std::fs::read_to_string(path.clone()).unwrap();
-        map.entry(path.to_owned(), &format!("\"{}\"", file.as_str().escape_default().to_string().as_str()));
+        map.entry(
+            path.to_owned(),
+            &format!("\"{}\"", file.as_str().escape_default()),
+        );
     }
 
     writeln!(
-        &mut file,
-            "static RES: phf::Map<&'static str, &'static str> = \n{};",
-            map.build()
-    ).unwrap();
+        &mut file_dest,
+        "static RES: phf::Map<&'static str, &'static str> = \n{};",
+        map.build()
+    )
+    .unwrap();
 }

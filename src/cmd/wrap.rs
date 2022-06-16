@@ -49,6 +49,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
             let balance = client.eth().balance(wallet.address(), None).await.unwrap();
             let min = network.get_min_balance_coin(wrapped_asset_decimals);
             if min > balance {
+                //TODO: review all panics like that
                 panic!("balance: {} is not sufficient, min: {}", balance, min);
             }
             balance - min

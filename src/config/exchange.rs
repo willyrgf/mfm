@@ -1,9 +1,7 @@
 use crate::asset::Asset;
 use crate::shared;
 use crate::shared::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
-// use crate::config::asset::{Asset, Assets};
 
-use std::path::Path;
 use std::str::FromStr;
 use std::time::UNIX_EPOCH;
 use std::{collections::HashMap, time::SystemTime};
@@ -70,7 +68,6 @@ impl Exchange {
         }
         FALLBACK_ROUTER_ABI_PATH.to_string()
     }
-
 
     pub fn factory_abi_path(&self) -> String {
         let path = format!("res/exchanges/{}/factory_abi.json", self.name.as_str());

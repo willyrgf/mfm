@@ -1,9 +1,7 @@
 use crate::{
     cmd,
-    config::Config,
     rebalancer::{self, config::Strategy, generate_asset_rebalances},
-    shared,
-    shared::blockchain_utils::{amount_in_quoted, display_amount_to_float},
+    shared::blockchain_utils::display_amount_to_float,
 };
 use clap::{ArgMatches, Command};
 use prettytable::{cell, row, Table};
@@ -107,11 +105,6 @@ async fn cmd_info(args: &ArgMatches) {
             let quoted_unit_price = ar.asset_balances.quoted_unit_price;
             portifolio_balance += amount_in_quoted;
 
-            let sign = match ar.kind.as_str() {
-                "to_parking" => "-",
-                _ => "+",
-            };
-
             if !(hide_zero && balance_of == U256::from(0_i32)) {
                 table.add_row(row![
                     asset.name(),
@@ -119,17 +112,8 @@ async fn cmd_info(args: &ArgMatches) {
                     display_amount_to_float(balance_of, decimals),
                     config.quoted_in(),
                     display_amount_to_float(amount_in_quoted, asset_quoted_decimals),
-                    //TODO: put it in a method of ar
-                    format!(
-                        "{}{}",
-                        sign,
-                        display_amount_to_float(ar.asset_amount_to_trade, decimals)
-                    ),
-                    format!(
-                        "{}{}",
-                        sign,
-                        display_amount_to_float(ar.quoted_amount_to_trade, asset_quoted_decimals)
-                    )
+                    ar.display_amount_with_sign(ar.asset_amount_to_trade, decimals),
+                    ar.display_amount_with_sign(ar.quoted_amount_to_trade, asset_quoted_decimals),
                 ]);
             }
         });

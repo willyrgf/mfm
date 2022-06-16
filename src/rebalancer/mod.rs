@@ -1,7 +1,12 @@
 pub mod cmd;
 pub mod config;
 
-use crate::{asset::Asset, config::wallet::Wallet, rebalancer::config::RebalancerConfig, shared};
+use crate::{
+    asset::Asset,
+    config::wallet::Wallet,
+    rebalancer::config::RebalancerConfig,
+    shared::blockchain_utils::{display_amount_to_float, exchange_to_use},
+};
 
 use num_bigint::{BigInt, Sign};
 use web3::types::U256;
@@ -18,9 +23,15 @@ pub struct AssetBalances {
     quoted_unit_price: U256,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Kind {
+    ToParking,
+    FromParking,
+}
+
 #[derive(Debug, Clone)]
 pub struct AssetRebalancer {
-    kind: String, //to_parking, from_parking TODO: to enum
+    kind: Kind,
     rebalancer_config: RebalancerConfig,
     asset_balances: AssetBalances,
     quoted_amount_to_trade: U256,
@@ -29,9 +40,9 @@ pub struct AssetRebalancer {
 }
 
 impl AssetRebalancer {
-    //TODO: refact this initialization
+    //TODO: refact this initialization to split initialization, build and validations
     pub async fn new(
-        kind: String,
+        kind: Kind,
         rebalancer_config: RebalancerConfig,
         asset_balances: AssetBalances,
         quoted_amount_to_trade: U256,
@@ -78,6 +89,13 @@ impl AssetRebalancer {
             asset_amount_to_trade,
             parking_amount_to_trade,
         })
+    }
+
+    pub fn display_amount_with_sign(&self, amount: U256, decimals: u8) -> String {
+        match self.kind {
+            Kind::ToParking => format!("-{}", display_amount_to_float(amount, decimals)),
+            Kind::FromParking => format!("+{}", display_amount_to_float(amount, decimals)),
+        }
     }
 }
 
@@ -187,7 +205,7 @@ pub async fn move_asset_with_slippage(
     mut amount_out: U256,
 ) {
     let from_wallet = rebalancer_config.get_wallet();
-    let exchange = shared::blockchain_utils::exchange_to_use(&asset_in, &asset_out);
+    let exchange = exchange_to_use(asset_in, asset_out);
     let balance = asset_in.balance_of(from_wallet.address()).await;
 
     //TODO: handle with it before in another place
@@ -402,30 +420,26 @@ pub async fn run_full_parking(config: &RebalancerConfig) {
 
 pub async fn run_diff_parking_per_kind(
     config: &RebalancerConfig,
-    kind: String,
+    kind: Kind,
     ar: Vec<AssetRebalancer>,
 ) {
     //TODO: when from_parking, check if weve balance from parking, if not, use all balance
     for ar in ar.iter().filter(|ar| ar.kind == kind) {
         let parking_asset = config.get_parking_asset();
 
-        let (asset_in, asset_out, amount_in, amount_out) = match kind.as_str() {
-            "to_parking" => (
+        let (asset_in, asset_out, amount_in, amount_out) = match kind {
+            Kind::ToParking => (
                 &ar.asset_balances.asset,
                 &parking_asset,
                 ar.asset_amount_to_trade,
                 ar.parking_amount_to_trade,
             ),
-            "from_parking" => (
+            Kind::FromParking => (
                 &parking_asset,
                 &ar.asset_balances.asset,
                 ar.parking_amount_to_trade,
                 ar.asset_amount_to_trade,
             ),
-            _ => {
-                log::error!("ar.kind: {} doesnt valid", kind);
-                panic!();
-            }
         };
 
         let min_move =
@@ -452,6 +466,7 @@ pub async fn generate_asset_rebalances(config: &RebalancerConfig) -> Vec<AssetRe
     let assets_balances = get_assets_balances(config, assets.clone()).await;
     let assets_balances_with_parking = add_parking_asset(config, assets_balances).await;
 
+    //TODO: add a sum_U256 in the module of U256 ops
     let total_quoted_balance = assets_balances_with_parking
         .iter()
         .fold(U256::from(0_i32), |acc, x| acc + x.quoted_balance());
@@ -487,9 +502,9 @@ pub async fn generate_asset_rebalances(config: &RebalancerConfig) -> Vec<AssetRe
 
         // if amount_to_trade is negative, move to parking
         let kind = if amount_to_trade <= BigInt::from(0_i32) {
-            "to_parking".to_string()
+            Kind::ToParking
         } else {
-            "from_parking".to_string()
+            Kind::FromParking
         };
 
         match AssetRebalancer::new(kind, config.clone(), ab.clone(), quoted_amount_to_trade).await {
@@ -497,11 +512,11 @@ pub async fn generate_asset_rebalances(config: &RebalancerConfig) -> Vec<AssetRe
                 asset_rebalances.push(ar)
             }
             Some(_) => {
-                log::info!("diff_parking: ignore same asset ab.asset: {} rebalancer.get_parking_asset():{}", ab.asset.name(), config.get_parking_asset().name());
+                log::debug!("diff_parking: ignore same asset ab.asset: {} rebalancer.get_parking_asset():{}", ab.asset.name(), config.get_parking_asset().name());
                 continue;
             }
             None => {
-                log::info!("diff_parking: rebalancer_parking cant be created, continue.");
+                log::debug!("diff_parking: rebalancer_parking cant be created, continue.");
                 continue;
             }
         };
@@ -524,6 +539,6 @@ pub async fn generate_asset_rebalances(config: &RebalancerConfig) -> Vec<AssetRe
 pub async fn run_diff_parking(config: &RebalancerConfig) {
     let asset_balances = generate_asset_rebalances(config).await;
 
-    run_diff_parking_per_kind(config, "to_parking".to_string(), asset_balances.clone()).await;
-    run_diff_parking_per_kind(config, "from_parking".to_string(), asset_balances.clone()).await;
+    run_diff_parking_per_kind(config, Kind::ToParking, asset_balances.clone()).await;
+    run_diff_parking_per_kind(config, Kind::FromParking, asset_balances.clone()).await;
 }
