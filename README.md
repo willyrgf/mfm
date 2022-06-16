@@ -1,5 +1,13 @@
 # MFM
 
+## res/ directory
+This directory will carry all the abi files used as default in this project.
+All these abi files in this directory will be add in the binary in compilation time (`build.rs`).
+
+To access this files we've a `shared::resources` module that will always condering your currently
+filesystem `res/` directory and the default `static RES` compiled in the binary (`build.rs`), 
+following this order  of priority respectively.
+
 <!-- TODO: add install doc and res folder -->
 
 ## cmd examples
@@ -131,7 +139,7 @@ cargo run -- yield-farm run --force-harvest true
 - [ ] refactor all the U256 calc to use numbigint in testable functions
 - [ ] refactor wallet and withdraw-wallet to be wallet with private and public address supporting encrypted files with the keys
 - [ ] doc new rebalancer diff parking
-- [ ] compile /res resources assets/networks/exchanges configs and fallback to local configs
+- [x] compile /res resources assets/networks/exchanges configs and fallback to local configs
 - [x] add a rebalance that use only the diff between the assets to rebalance the portfolio
 - [x] add withdraw with wallets whilelist
 - [x] add harverst for yield farms
