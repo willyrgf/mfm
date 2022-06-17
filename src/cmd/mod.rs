@@ -4,6 +4,7 @@ use clap::{crate_version, ArgMatches, Command};
 pub mod allowance;
 pub mod approve;
 pub mod balances;
+pub mod enc;
 pub mod helpers;
 pub mod quote;
 pub mod swap;
@@ -36,6 +37,7 @@ pub fn new() -> clap::Command<'static> {
         .subcommand(yield_farm::generate_cmd())
         .subcommand(withdraw::generate_cmd())
         .subcommand(quote::generate_cmd())
+        .subcommand(enc::generate_cmd())
 }
 
 pub async fn call_sub_commands(matches: &ArgMatches) {
@@ -72,6 +74,9 @@ pub async fn call_sub_commands(matches: &ArgMatches) {
         }
         Some((quote::COMMAND, sub_matches)) => {
             quote::call_sub_commands(sub_matches).await;
+        }
+        Some((enc::COMMAND, sub_matches)) => {
+            enc::call_sub_commands(sub_matches).await;
         }
         _ => panic!("command not registred"),
     }

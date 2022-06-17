@@ -1,6 +1,7 @@
 wallets:
   test-wallet:
     private_key: YOUR_PRIVATE_KEY
+    encrypted: true
   farm-wallet:
     private_key: YOUR_PRIVATE_KEY
 

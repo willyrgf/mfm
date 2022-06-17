@@ -11,7 +11,8 @@ use web3::{
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Wallet {
-    private_key: String,
+    pub(crate) private_key: String,
+    pub(crate) encrypted: Option<bool>,
 }
 
 impl Wallet {
@@ -50,9 +51,20 @@ impl Wallet {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub struct Wallets(HashMap<String, Wallet>);
+pub struct Wallets(pub(crate) HashMap<String, Wallet>);
 impl Wallets {
     pub fn get(&self, key: &str) -> &Wallet {
         self.0.get(key).unwrap()
+    }
+
+    pub fn hashmap(&self) -> &HashMap<String, Wallet> {
+        &self.0
+    }
+
+    pub fn any_encrypted(&self) -> bool {
+        self.0
+            .values()
+            .map(|wallet| wallet.encrypted.unwrap_or(false))
+            .any(|b| b == true)
     }
 }
