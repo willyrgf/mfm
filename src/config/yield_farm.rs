@@ -37,7 +37,6 @@ pub struct YieldFarm {
     reward_asset_id: Option<String>, //quoted_asset_id: String,
 }
 
-
 impl YieldFarm {
     pub fn name(&self) -> &String {
         &self.name

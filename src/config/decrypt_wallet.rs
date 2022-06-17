@@ -10,14 +10,14 @@ pub fn decrypt_wallets_from_config(c: Config) -> Config {
         .wallets
         .hashmap()
         .iter()
-        .filter(|(_, v)| v.encrypted.unwrap_or(false) == true)
+        .filter(|(_, v)| v.encrypted.unwrap_or(false))
     {
         let mut n_wallet = wallet.clone();
         let decrypted = ask_password_and_decrypt(wallet.private_key.clone());
         n_wallet.private_key = decrypted;
         wallets.insert(k.clone(), n_wallet);
     }
-    config.wallets = Wallets { 0: wallets };
+    config.wallets = Wallets(wallets);
     config
 }
 

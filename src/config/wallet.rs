@@ -65,6 +65,6 @@ impl Wallets {
         self.0
             .values()
             .map(|wallet| wallet.encrypted.unwrap_or(false))
-            .any(|b| b == true)
+            .any(|b| b)
     }
 }
