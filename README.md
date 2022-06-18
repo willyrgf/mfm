@@ -137,8 +137,10 @@ cargo run -- yield-farm run --force-harvest true
 ## todo
 - [ ] refactor of the config mods to be first class module (like asset)
 - [ ] refactor all the U256 calc to use numbigint in testable functions
-- [ ] refactor wallet and withdraw-wallet to be wallet with private and public address supporting encrypted files with the keys
+- [ ] check the better exchange based on liquidity `exchange_to_use()`
 - [ ] doc new rebalancer diff parking
+- [ ] doc encrypted wallet
+- [x] refactor wallet and withdraw-wallet to be wallet with private and public address supporting encrypted files with the keys
 - [x] compile /res resources assets/networks/exchanges configs and fallback to local configs
 - [x] add a rebalance that use only the diff between the assets to rebalance the portfolio
 - [x] add withdraw with wallets whilelist
