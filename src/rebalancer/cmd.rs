@@ -134,31 +134,38 @@ async fn cmd_info(args: &ArgMatches) {
         network.get_symbol()
     ]);
 
-    let input_asset = match asset_rebalances.clone().first() {
-        Some(ar) => ar.asset_balances.asset.clone(),
-        None => panic!("No input asset to calculate swap cost"),
-    };
-    let gas_price = client.clone().eth().gas_price().await.unwrap();
     let parking_asset = config.get_parking_asset();
     let parking_asset_exchange = parking_asset.get_exchange();
     let from_wallet = config.get_wallet();
+
+    let input_asset = match asset_rebalances
+        .clone()
+        .iter()
+        .filter(|ar| {
+            (ar.asset_balances.asset.name() != parking_asset.name())
+                && ar.asset_balances.max_tx_amount.is_none()
+        })
+        .last()
+    {
+        Some(ar) => ar.asset_balances.asset.clone(),
+        None => panic!("No input asset to calculate swap cost"),
+    };
+
+    let gas_price = client.clone().eth().gas_price().await.unwrap();
     let swap_cost = parking_asset_exchange
-        .swap_cost(from_wallet, input_asset, parking_asset)
+        .estimate_swap_cost(from_wallet, input_asset, parking_asset)
         .await;
     // let swap_cost = U256::default();
     let total_ops = U256::from(asset_rebalances.len());
 
     balances_table.add_row(row![
         "Total Swap cost",
-        display_amount_to_float(
-            ((swap_cost * gas_price) * total_ops),
-            network.coin_decimals()
-        ),
+        display_amount_to_float((swap_cost * gas_price) * total_ops, network.coin_decimals()),
         network.get_symbol()
     ]);
     balances_table.add_row(row![
         "Swap cost",
-        display_amount_to_float((swap_cost * gas_price), network.coin_decimals()),
+        display_amount_to_float(swap_cost * gas_price, network.coin_decimals()),
         network.get_symbol()
     ]);
     balances_table.add_row(row![

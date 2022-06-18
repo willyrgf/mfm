@@ -21,6 +21,7 @@ pub struct AssetBalances {
     quoted_asset_decimals: u8,
     quoted_balance: U256,
     quoted_unit_price: U256,
+    max_tx_amount: Option<U256>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +128,7 @@ impl AssetBalances {
             quoted_balance: asset
                 .balance_of_quoted_in(rebalancer_config.get_wallet(), &quoted_asset)
                 .await,
+            max_tx_amount: asset.max_tx_amount().await,
         }
     }
 

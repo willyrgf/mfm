@@ -135,6 +135,8 @@ pub async fn amount_in_quoted(asset_in: &Asset, asset_quoted: &Asset, amount_in:
 }
 
 // TODO: check the factory for a pair address with liquidity
+// use pair contract to get reserve and check which exchange have the better liquidity
+// https://github.com/Uniswap/v2-core/blob/master/contracts/UniswapV2Pair.sol
 pub fn exchange_to_use<'a>(asset_in: &'a Asset, asset_out: &'a Asset) -> &'a Exchange {
     if asset_in.exchange_id() == asset_out.exchange_id() {
         asset_in.get_exchange()

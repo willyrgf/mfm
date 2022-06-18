@@ -1,6 +1,7 @@
 use crate::shared;
 
 use web3::{
+    contract::Error,
     ethabi::Token,
     types::{Bytes, TransactionParameters, U256},
 };
@@ -15,11 +16,11 @@ pub async fn estimate_gas(
     amount_in: U256,
     amount_min_out: U256,
     asset_path: Token,
-) -> U256 {
+) -> Result<U256, Error> {
     let client = exchange.get_web3_client_http();
     let gas_price = client.eth().gas_price().await.unwrap();
     let valid_timestamp = exchange.get_valid_timestamp(30000000);
-    let estimate_gas = exchange
+    exchange
         .router_contract()
         .estimate_gas(
             "swapExactTokensForTokensSupportingFeeOnTransferTokens",
@@ -41,9 +42,6 @@ pub async fn estimate_gas(
             },
         )
         .await
-        .unwrap();
-
-    estimate_gas
 }
 
 pub async fn swap(

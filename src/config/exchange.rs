@@ -233,7 +233,7 @@ impl Exchange {
         self.get_network().get_web3_client_http()
     }
 
-    pub async fn swap_cost(
+    pub async fn estimate_swap_cost(
         &self,
         from_wallet: &Wallet,
         input_asset: Asset,
@@ -257,7 +257,6 @@ impl Exchange {
 
         let input_asset_decimals = input_asset.decimals().await;
         let output_asset_decimals = output_asset.decimals().await;
-        //let amount_in = U256::from(1_u32) * U256::exp10(input_asset_decimals.into());
         let amount_in = input_asset.balance_of(from_wallet.address()).await;
 
         //TODO: review this model of use slippage
@@ -276,20 +275,32 @@ impl Exchange {
             .into();
 
         //TODO: fix the arithmetic operation overflow
-        //let slippage_amount = (amount_out * slippage) / U256::exp10(output_asset_decimals.into());
-        // let amount_min_out_slippage = amount_out - slippage_amount;
-        let amount_min_out_slippage = amount_out;
+        let slippage_amount = (amount_out * slippage) / U256::exp10(output_asset_decimals.into());
+        let amount_min_out_slippage = amount_out - slippage_amount;
+        // let amount_min_out_slippage = amount_out;
 
-        let estimate_gas = swap_tokens_for_tokens::estimate_gas(
+        match swap_tokens_for_tokens::estimate_gas(
             self,
             from_wallet,
             amount_in,
             amount_min_out_slippage,
             asset_path_token,
         )
-        .await;
-
-        estimate_gas
+        .await
+        {
+            Ok(gas) => gas,
+            Err(e) => {
+                log::error!(
+                    "swap_cost() estimate_gas(): error: {}, input_asset: {:?}, amount_in: {:?}, amount_out: {:?} amount_min_out_slippage: {:?}",
+                    e,
+                    input_asset,
+                    amount_in,
+                    amount_out,
+                    amount_min_out_slippage
+                );
+                panic!();
+            }
+        }
     }
 
     pub async fn swap_tokens_for_tokens(
