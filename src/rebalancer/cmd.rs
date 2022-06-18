@@ -145,6 +145,7 @@ async fn cmd_info(args: &ArgMatches) {
     let swap_cost = parking_asset_exchange
         .swap_cost(from_wallet, input_asset, parking_asset)
         .await;
+    // let swap_cost = U256::default();
     let total_ops = U256::from(asset_rebalances.len());
 
     balances_table.add_row(row![

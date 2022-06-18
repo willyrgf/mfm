@@ -268,15 +268,17 @@ impl Exchange {
             ais + aos
         };
 
-        let amount_out = &self
+        let amount_out: U256 = self
             .get_amounts_out(amount_in, asset_path.clone())
             .await
             .last()
             .unwrap()
             .into();
 
-        let slippage_amount = (amount_out * slippage) / U256::exp10(output_asset_decimals.into());
-        let amount_min_out_slippage = amount_out - slippage_amount;
+        //TODO: fix the arithmetic operation overflow
+        //let slippage_amount = (amount_out * slippage) / U256::exp10(output_asset_decimals.into());
+        // let amount_min_out_slippage = amount_out - slippage_amount;
+        let amount_min_out_slippage = amount_out;
 
         let estimate_gas = swap_tokens_for_tokens::estimate_gas(
             self,
