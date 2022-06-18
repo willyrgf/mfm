@@ -233,6 +233,63 @@ impl Exchange {
         self.get_network().get_web3_client_http()
     }
 
+    pub async fn swap_cost(
+        &self,
+        from_wallet: &Wallet,
+        input_asset: Asset,
+        output_asset: Asset,
+    ) -> U256 {
+        let asset_path = self
+            .build_route_for(&input_asset, &output_asset)
+            .await
+            .into_iter()
+            .collect::<Vec<_>>();
+        let asset_path_token = Token::Array(
+            asset_path
+                .clone()
+                .into_iter()
+                .map(Token::Address)
+                .collect::<Vec<_>>(),
+        );
+
+        // let asset_path_out = self.build_route_for(&output_asset, &input_asset).await;
+        // let asset_path_in = self.build_route_for(&input_asset, &output_asset).await;
+
+        let input_asset_decimals = input_asset.decimals().await;
+        let output_asset_decimals = output_asset.decimals().await;
+        //let amount_in = U256::from(1_u32) * U256::exp10(input_asset_decimals.into());
+        let amount_in = input_asset.balance_of(from_wallet.address()).await;
+
+        //TODO: review this model of use slippage
+        let slippage = {
+            let ais = input_asset.slippage_u256(input_asset_decimals);
+            let aos = output_asset.slippage_u256(output_asset_decimals);
+
+            ais + aos
+        };
+
+        let amount_out = &self
+            .get_amounts_out(amount_in, asset_path.clone())
+            .await
+            .last()
+            .unwrap()
+            .into();
+
+        let slippage_amount = (amount_out * slippage) / U256::exp10(output_asset_decimals.into());
+        let amount_min_out_slippage = amount_out - slippage_amount;
+
+        let estimate_gas = swap_tokens_for_tokens::estimate_gas(
+            self,
+            from_wallet,
+            amount_in,
+            amount_min_out_slippage,
+            asset_path_token,
+        )
+        .await;
+
+        estimate_gas
+    }
+
     pub async fn swap_tokens_for_tokens(
         &self,
         from_wallet: &Wallet,

@@ -93,37 +93,33 @@ async fn cmd_info(args: &ArgMatches) {
         "Quoted amount to trade"
     ]);
 
-    generate_asset_rebalances(config)
-        .await
-        .iter()
-        .for_each(|ar| {
-            let balance_of = ar.asset_balances.balance;
-            let asset = ar.asset_balances.asset.clone();
-            let decimals = ar.asset_balances.asset_decimals;
-            let amount_in_quoted = ar.asset_balances.quoted_balance;
-            let asset_quoted_decimals = ar.asset_balances.quoted_asset_decimals;
-            let quoted_unit_price = ar.asset_balances.quoted_unit_price;
-            portifolio_balance += amount_in_quoted;
+    let asset_rebalances = generate_asset_rebalances(config).await;
+    asset_rebalances.clone().iter().for_each(|ar| {
+        let balance_of = ar.asset_balances.balance;
+        let asset = ar.asset_balances.asset.clone();
+        let decimals = ar.asset_balances.asset_decimals;
+        let amount_in_quoted = ar.asset_balances.quoted_balance;
+        let asset_quoted_decimals = ar.asset_balances.quoted_asset_decimals;
+        let quoted_unit_price = ar.asset_balances.quoted_unit_price;
+        portifolio_balance += amount_in_quoted;
 
-            if !(hide_zero && balance_of == U256::from(0_i32)) {
-                table.add_row(row![
-                    asset.name(),
-                    display_amount_to_float(quoted_unit_price, asset_quoted_decimals),
-                    display_amount_to_float(balance_of, decimals),
-                    config.quoted_in(),
-                    display_amount_to_float(amount_in_quoted, asset_quoted_decimals),
-                    ar.display_amount_with_sign(ar.asset_amount_to_trade, decimals),
-                    ar.display_amount_with_sign(ar.quoted_amount_to_trade, asset_quoted_decimals),
-                ]);
-            }
-        });
-
-    table.printstd();
+        if !(hide_zero && balance_of == U256::from(0_i32)) {
+            table.add_row(row![
+                asset.name(),
+                display_amount_to_float(quoted_unit_price, asset_quoted_decimals),
+                display_amount_to_float(balance_of, decimals),
+                config.quoted_in(),
+                display_amount_to_float(amount_in_quoted, asset_quoted_decimals),
+                ar.display_amount_with_sign(ar.asset_amount_to_trade, decimals),
+                ar.display_amount_with_sign(ar.quoted_amount_to_trade, asset_quoted_decimals),
+            ]);
+        }
+    });
 
     let network = config.get_network();
     let client = network.get_web3_client_http();
     let rebalancer_wallet = config.get_wallet();
-    let coin_balance = rebalancer_wallet.coin_balance(client).await;
+    let coin_balance = rebalancer_wallet.coin_balance(client.clone()).await;
     let mut balances_table = Table::new();
 
     balances_table.add_row(row![
@@ -137,5 +133,39 @@ async fn cmd_info(args: &ArgMatches) {
         display_amount_to_float(coin_balance, network.coin_decimals()),
         network.get_symbol()
     ]);
+
+    let input_asset = match asset_rebalances.clone().first() {
+        Some(ar) => ar.asset_balances.asset.clone(),
+        None => panic!("No input asset to calculate swap cost"),
+    };
+    let gas_price = client.clone().eth().gas_price().await.unwrap();
+    let parking_asset = config.get_parking_asset();
+    let parking_asset_exchange = parking_asset.get_exchange();
+    let from_wallet = config.get_wallet();
+    let swap_cost = parking_asset_exchange
+        .swap_cost(from_wallet, input_asset, parking_asset)
+        .await;
+    let total_ops = U256::from(asset_rebalances.len());
+
+    balances_table.add_row(row![
+        "Total Swap cost",
+        display_amount_to_float(
+            ((swap_cost * gas_price) * total_ops),
+            network.coin_decimals()
+        ),
+        network.get_symbol()
+    ]);
+    balances_table.add_row(row![
+        "Swap cost",
+        display_amount_to_float((swap_cost * gas_price), network.coin_decimals()),
+        network.get_symbol()
+    ]);
+    balances_table.add_row(row![
+        "Gas price",
+        display_amount_to_float(gas_price, network.coin_decimals()),
+        network.get_symbol()
+    ]);
+
+    table.printstd();
     balances_table.printstd();
 }

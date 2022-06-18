@@ -9,6 +9,43 @@ use crate::config::wallet::Wallet;
 
 use super::Exchange;
 
+pub async fn estimate_gas(
+    exchange: &Exchange,
+    from_wallet: &Wallet,
+    amount_in: U256,
+    amount_min_out: U256,
+    asset_path: Token,
+) -> U256 {
+    let client = exchange.get_web3_client_http();
+    let gas_price = client.eth().gas_price().await.unwrap();
+    let valid_timestamp = exchange.get_valid_timestamp(30000000);
+    let estimate_gas = exchange
+        .router_contract()
+        .estimate_gas(
+            "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+            // "swapExactTokensForTokens",
+            (
+                amount_in,
+                amount_min_out,
+                asset_path.clone(),
+                from_wallet.address(),
+                U256::from_dec_str(&valid_timestamp.to_string()).unwrap(),
+            ),
+            from_wallet.address(),
+            web3::contract::Options {
+                value: Some(U256::from(0_i32)),
+                gas_price: Some(gas_price),
+                // gas: Some(500_000.into()),
+                // gas: Some(gas_price),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    estimate_gas
+}
+
 pub async fn swap(
     exchange: &Exchange,
     from_wallet: &Wallet,
