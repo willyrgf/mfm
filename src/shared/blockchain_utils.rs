@@ -13,7 +13,10 @@ use web3::{
 
 use crate::{
     asset::Asset,
-    config::{exchange::Exchange, wallet::Wallet},
+    config::{
+        exchange::{Exchange, ZERO_ADDRESS},
+        wallet::Wallet,
+    },
 };
 
 pub async fn estimate_gas<P>(
@@ -132,6 +135,70 @@ pub async fn amount_in_quoted(asset_in: &Asset, asset_quoted: &Asset, amount_in:
         Some(p) => *p,
         None => U256::default(),
     }
+}
+
+pub async fn exchange_better_liquidity<'a>(
+    input_asset: &'a Asset,
+    output_asset: &'a Asset,
+) -> Option<&'a Exchange> {
+    let input_asset_exchange = input_asset.get_exchange();
+    let output_asset_exchange = output_asset.get_exchange();
+    let input_path_asset = input_asset.get_path_asset();
+    let output_path_asset = output_asset.get_path_asset();
+
+    let input_path_asset_address_input_asset_exchange = match input_asset_exchange
+        .get_factory_pair(input_asset, &input_path_asset)
+        .await
+    {
+        Some(a) if a.to_string().as_str() != ZERO_ADDRESS => Some(a),
+        _ => None,
+    };
+
+    let output_path_asset_address_input_asset_exchange = match input_asset_exchange
+        .get_factory_pair(&input_path_asset, output_asset)
+        .await
+    {
+        Some(a) if a.to_string().as_str() != ZERO_ADDRESS => Some(a),
+        _ => None,
+    };
+
+    let input_path_asset_address_output_asset_exchange = match output_asset_exchange
+        .get_factory_pair(input_asset, &input_path_asset)
+        .await
+    {
+        Some(a) if a.to_string().as_str() != ZERO_ADDRESS => Some(a),
+        _ => None,
+    };
+
+    let output_path_asset_address_output_asset_exchange = match output_asset_exchange
+        .get_factory_pair(&input_path_asset, output_asset)
+        .await
+    {
+        Some(a) if a.to_string().as_str() != ZERO_ADDRESS => Some(a),
+        _ => None,
+    };
+
+    match (
+        input_path_asset_address_input_asset_exchange,
+        output_path_asset_address_input_asset_exchange,
+        input_path_asset_address_output_asset_exchange,
+        output_path_asset_address_output_asset_exchange,
+    ) {
+        (Some(_), Some(_), Some(_), Some(_)) => {
+            // TODO: continue from here
+            // cargo watch -x 'run -- quote -e quickswap_v2 -a 1 -i grt -o usdc'
+        }
+        (None, None, Some(_), Some(_)) => return Some(output_asset_exchange),
+        (Some(_), Some(_), None, None) => return Some(input_asset_exchange),
+        _ => {
+            log::error!("")
+        }
+    };
+
+    // input_exchange:
+    //
+
+    unimplemented!()
 }
 
 // TODO: check the factory for a pair address with liquidity
