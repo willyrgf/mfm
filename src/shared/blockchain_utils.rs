@@ -140,74 +140,49 @@ pub async fn amount_in_quoted(asset_in: &Asset, asset_quoted: &Asset, amount_in:
 pub async fn exchange_better_liquidity<'a>(
     input_asset: &'a Asset,
     output_asset: &'a Asset,
+    amount_in: U256,
 ) -> Option<&'a Exchange> {
     let input_asset_exchange = input_asset.get_exchange();
     let output_asset_exchange = output_asset.get_exchange();
-    let input_path_asset = input_asset.get_path_asset();
-    let output_path_asset = output_asset.get_path_asset();
 
-    let input_path_asset_address_input_asset_exchange = match input_asset_exchange
-        .get_factory_pair(input_asset, &input_path_asset)
-        .await
-    {
-        Some(a) if a.to_string().as_str() != ZERO_ADDRESS => Some(a),
-        _ => None,
+    let input_asset_exchange_amounts_out = {
+        let input_asset_exchange_asset_path = input_asset_exchange
+            .build_route_for(input_asset, output_asset)
+            .await;
+
+        input_asset_exchange
+            .get_amounts_out(amount_in, input_asset_exchange_asset_path)
+            .await
     };
 
-    let output_path_asset_address_input_asset_exchange = match input_asset_exchange
-        .get_factory_pair(&input_path_asset, output_asset)
-        .await
-    {
-        Some(a) if a.to_string().as_str() != ZERO_ADDRESS => Some(a),
-        _ => None,
-    };
+    let output_asset_exchange_amounts_out = {
+        let output_asset_exchange_asset_path = output_asset_exchange
+            .build_route_for(input_asset, output_asset)
+            .await;
 
-    let input_path_asset_address_output_asset_exchange = match output_asset_exchange
-        .get_factory_pair(input_asset, &input_path_asset)
-        .await
-    {
-        Some(a) if a.to_string().as_str() != ZERO_ADDRESS => Some(a),
-        _ => None,
-    };
-
-    let output_path_asset_address_output_asset_exchange = match output_asset_exchange
-        .get_factory_pair(&input_path_asset, output_asset)
-        .await
-    {
-        Some(a) if a.to_string().as_str() != ZERO_ADDRESS => Some(a),
-        _ => None,
+        output_asset_exchange
+            .get_amounts_out(amount_in, output_asset_exchange_asset_path)
+            .await
     };
 
     match (
-        input_path_asset_address_input_asset_exchange,
-        output_path_asset_address_input_asset_exchange,
-        input_path_asset_address_output_asset_exchange,
-        output_path_asset_address_output_asset_exchange,
+        input_asset_exchange_amounts_out.last(),
+        output_asset_exchange_amounts_out.last(),
     ) {
-        (Some(_), Some(_), Some(_), Some(_)) => {
-            // TODO: continue from here
-            // cargo watch -x 'run -- quote -e quickswap_v2 -a 1 -i grt -o usdc'
+        (Some(ie_amount_out), Some(oe_amount_out)) if ie_amount_out > oe_amount_out => {
+            Some(input_asset_exchange)
         }
-        (None, None, Some(_), Some(_)) => return Some(output_asset_exchange),
-        (Some(_), Some(_), None, None) => return Some(input_asset_exchange),
-        _ => {
-            log::error!("")
+        (Some(ie_amount_out), Some(oe_amount_out)) if ie_amount_out <= oe_amount_out => {
+            Some(output_asset_exchange)
         }
-    };
-
-    // input_exchange:
-    //
-
-    unimplemented!()
+        _ => None,
+    }
 }
 
-// TODO: check the factory for a pair address with liquidity
-// use pair contract to get reserve and check which exchange have the better liquidity
-// https://github.com/Uniswap/v2-core/blob/master/contracts/UniswapV2Pair.sol
-pub fn exchange_to_use<'a>(asset_in: &'a Asset, asset_out: &'a Asset) -> &'a Exchange {
-    if asset_in.exchange_id() == asset_out.exchange_id() {
-        asset_in.get_exchange()
-    } else {
-        asset_out.get_exchange()
-    }
+pub async fn exchange_to_use<'a>(
+    asset_in: &'a Asset,
+    asset_out: &'a Asset,
+    amount_in: U256,
+) -> Option<&'a Exchange> {
+    exchange_better_liquidity(asset_in, asset_out, amount_in).await
 }
