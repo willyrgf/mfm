@@ -45,6 +45,11 @@ exchanges:
     router_address: 0x1b02da8cb0d097eb8d57a175b88c7d8b47997506
     factory_address: 0xc35dadb65012ec5796536bd9864ed8773abc74c4
     network_id: polygon
+  biswap:
+    name: biswap
+    router_address: 0x3a6d8ca21d1cf76f653a67577fa0d27453350dd8
+    factory_address: 0x858e3312ed3a876947ea49d572a7c42de08af7ee
+    network_id: bsc
 
 rebalancers:
   test-rebalancer:

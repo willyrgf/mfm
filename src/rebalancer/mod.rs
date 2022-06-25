@@ -207,8 +207,17 @@ pub async fn move_asset_with_slippage(
     mut amount_out: U256,
 ) {
     let from_wallet = rebalancer_config.get_wallet();
-    let exchange = exchange_to_use(asset_in, asset_out);
     let balance = asset_in.balance_of(from_wallet.address()).await;
+    let exchange = exchange_to_use(asset_in, asset_out, amount_in)
+        .await
+        .unwrap_or_else(|| {
+            log::error!(
+                "move_asset_with_slippage(): exchange_to_use(): None, asset_in: {:?}, asset_out: {:?}",
+                asset_in,
+                asset_out
+            );
+            panic!()
+        });
 
     //TODO: handle with it before in another place
     if balance < amount_in {

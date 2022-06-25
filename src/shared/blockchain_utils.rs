@@ -13,7 +13,10 @@ use web3::{
 
 use crate::{
     asset::Asset,
-    config::{exchange::Exchange, wallet::Wallet},
+    config::{
+        exchange::{Exchange, ZERO_ADDRESS},
+        wallet::Wallet,
+    },
 };
 
 pub async fn estimate_gas<P>(
@@ -134,13 +137,52 @@ pub async fn amount_in_quoted(asset_in: &Asset, asset_quoted: &Asset, amount_in:
     }
 }
 
-// TODO: check the factory for a pair address with liquidity
-// use pair contract to get reserve and check which exchange have the better liquidity
-// https://github.com/Uniswap/v2-core/blob/master/contracts/UniswapV2Pair.sol
-pub fn exchange_to_use<'a>(asset_in: &'a Asset, asset_out: &'a Asset) -> &'a Exchange {
-    if asset_in.exchange_id() == asset_out.exchange_id() {
-        asset_in.get_exchange()
-    } else {
-        asset_out.get_exchange()
+pub async fn exchange_better_liquidity<'a>(
+    input_asset: &'a Asset,
+    output_asset: &'a Asset,
+    amount_in: U256,
+) -> Option<&'a Exchange> {
+    let input_asset_exchange = input_asset.get_exchange();
+    let output_asset_exchange = output_asset.get_exchange();
+
+    let input_asset_exchange_amounts_out = {
+        let input_asset_exchange_asset_path = input_asset_exchange
+            .build_route_for(input_asset, output_asset)
+            .await;
+
+        input_asset_exchange
+            .get_amounts_out(amount_in, input_asset_exchange_asset_path)
+            .await
+    };
+
+    let output_asset_exchange_amounts_out = {
+        let output_asset_exchange_asset_path = output_asset_exchange
+            .build_route_for(input_asset, output_asset)
+            .await;
+
+        output_asset_exchange
+            .get_amounts_out(amount_in, output_asset_exchange_asset_path)
+            .await
+    };
+
+    match (
+        input_asset_exchange_amounts_out.last(),
+        output_asset_exchange_amounts_out.last(),
+    ) {
+        (Some(ie_amount_out), Some(oe_amount_out)) if ie_amount_out > oe_amount_out => {
+            Some(input_asset_exchange)
+        }
+        (Some(ie_amount_out), Some(oe_amount_out)) if ie_amount_out <= oe_amount_out => {
+            Some(output_asset_exchange)
+        }
+        _ => None,
     }
+}
+
+pub async fn exchange_to_use<'a>(
+    asset_in: &'a Asset,
+    asset_out: &'a Asset,
+    amount_in: U256,
+) -> Option<&'a Exchange> {
+    exchange_better_liquidity(asset_in, asset_out, amount_in).await
 }
