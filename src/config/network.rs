@@ -61,6 +61,48 @@ impl Network {
             .filter(|e| e.network_id() == self.name)
             .collect()
     }
+
+    pub async fn get_exchange_by_liquidity(
+        &self,
+        input_asset: &Asset,
+        output_asset: &Asset,
+        amount_in: U256,
+    ) -> Option<&Exchange> {
+        match self.get_exchanges().split_first() {
+            Some((h, t)) if t.is_empty() => Some(*h),
+            Some((h, t)) => {
+                let mut current_amount_out = {
+                    let path = h.build_route_for(input_asset, output_asset).await;
+                    h.get_amounts_out(amount_in, path).await
+                };
+
+                futures::future::join_all(t.iter().map(|e| async move {
+                    let current_amount = {
+                        let path = e.build_route_for(input_asset, output_asset).await;
+                        e.get_amounts_out(amount_in, path).await
+                    };
+                    (Some(*e), current_amount)
+                }))
+                .await
+                .into_iter()
+                .fold(
+                    Some(*h),
+                    |current_exchange, (next_exchange, next_amount)| {
+                        if next_amount > current_amount_out {
+                            current_amount_out = next_amount;
+                            next_exchange
+                        } else {
+                            current_exchange
+                        }
+                    },
+                )
+            }
+            _ => {
+                log::debug!("Network::get_exchange_by_liquidity(): not exchange found, input_asset: {:?}, output_asset: {:?}", input_asset, output_asset);
+                None
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
