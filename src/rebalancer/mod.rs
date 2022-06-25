@@ -433,10 +433,13 @@ pub async fn run_diff_parking_per_kind(
     kind: Kind,
     ar: Vec<AssetRebalancer>,
 ) {
-    //TODO: when from_parking, check if weve balance from parking, if not, use all balance
-    for ar in ar.iter().filter(|ar| ar.kind == kind) {
-        let parking_asset = config.get_parking_asset();
+    let parking_asset = config.get_parking_asset();
 
+    //TODO: when from_parking, check if weve balance from parking, if not, use all balance
+    for ar in ar
+        .iter()
+        .filter(|ar| ar.kind == kind && ar.asset_balances.asset.name() != parking_asset.name())
+    {
         let (asset_in, asset_out, amount_in, amount_out) = match kind {
             Kind::ToParking => (
                 &ar.asset_balances.asset,
