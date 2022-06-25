@@ -13,9 +13,7 @@ use web3::{
 
 use crate::shared;
 
-use crate::config::{
-    exchange::Exchange, network::Network, wallet::Wallet, withdraw_wallet::WithdrawWallet, Config,
-};
+use crate::config::{network::Network, wallet::Wallet, withdraw_wallet::WithdrawWallet, Config};
 use crate::shared::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
 use config::AssetConfig;
 
@@ -27,7 +25,6 @@ pub struct Asset {
     kind: String,
     network_id: String,
     address: String,
-    exchange_id: String,
     slippage: f64,
     path_asset: String,
     network: Network,
@@ -42,7 +39,6 @@ impl Asset {
             kind: asset_config.kind.clone(),
             network_id: asset_network.network_id.clone(),
             address: asset_network.address.clone(),
-            exchange_id: asset_network.exchange_id.clone(),
             slippage: asset_network.slippage,
             path_asset: asset_network.path_asset.clone(),
             network,
@@ -71,10 +67,6 @@ impl Asset {
         self.network_id.as_str()
     }
 
-    pub fn exchange_id(&self) -> &str {
-        self.exchange_id.as_str()
-    }
-
     pub fn get_path_asset(&self) -> Asset {
         Config::global()
             .assets
@@ -82,15 +74,10 @@ impl Asset {
             .unwrap()
     }
 
-    pub fn get_exchange<'a>(&self) -> &'a Exchange {
-        Config::global().exchanges.get(self.exchange_id())
-    }
-
     pub fn abi_path(&self) -> String {
         let path = format!(
-            "res/assets/{}/{}/{}/abi.json",
+            "res/assets/{}/{}/abi.json",
             self.network_id.as_str(),
-            self.exchange_id.as_str(),
             self.name.as_str()
         );
 
@@ -141,8 +128,18 @@ impl Asset {
 
     pub async fn balance_of_quoted_in(&self, wallet: &Wallet, quoted: &Asset) -> U256 {
         let account = wallet.address();
-        let exchange = self.get_exchange();
         let base_balance = self.balance_of(account).await;
+        let exchange = self
+            .get_network()
+            .get_exchange_by_liquidity(self, quoted, base_balance)
+            .await.unwrap_or_else(||{
+                log::error!(
+                    "Asset::balance_of_quoted_in(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
+                    self,
+                    quoted
+                );
+                panic!()
+            });
 
         if self.name() == quoted.name() {
             return base_balance;

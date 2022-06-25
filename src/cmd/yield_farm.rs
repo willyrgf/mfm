@@ -95,7 +95,6 @@ pub async fn call_info_cmd(args: &ArgMatches) {
         let quoted_asset =
             cmd::helpers::get_quoted_asset_in_network_from_args(args, yield_farm.network_id())
                 .unwrap();
-        let exchange = quoted_asset.get_exchange();
         let quoted_asset_decimal = quoted_asset.decimals().await;
         let yield_farm_asset = yield_farm.get_reward_asset().unwrap();
         let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
@@ -109,6 +108,21 @@ pub async fn call_info_cmd(args: &ArgMatches) {
             Some(a) => a.decimals().await,
             None => 0_u8,
         };
+
+        let pending_rewards = yield_farm.get_pending_rewards().await;
+
+        let exchange = yield_farm_asset
+            .get_network()
+            .get_exchange_by_liquidity(&yield_farm_asset,&quoted_asset, pending_rewards)
+            .await.
+            unwrap_or_else(||{
+                log::error!(
+                    "call_info_cmd(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
+                    yield_farm_asset,
+                    quoted_asset
+                );
+                panic!()
+        });
 
         let deposit_asset_name: String = match deposit_asset.clone() {
             Some(a) => a.name().into(),
@@ -130,7 +144,6 @@ pub async fn call_info_cmd(args: &ArgMatches) {
             None => None,
         };
 
-        let pending_rewards = yield_farm.get_pending_rewards().await;
         let quoted_price = match exchange
             .get_amounts_out(pending_rewards, quote_asset_path)
             .await

@@ -257,11 +257,11 @@ impl Exchange {
     pub async fn estimate_swap_cost(
         &self,
         from_wallet: &Wallet,
-        input_asset: Asset,
-        output_asset: Asset,
+        input_asset: &Asset,
+        output_asset: &Asset,
     ) -> U256 {
         let asset_path = self
-            .build_route_for(&input_asset, &output_asset)
+            .build_route_for(input_asset, output_asset)
             .await
             .into_iter()
             .collect::<Vec<_>>();

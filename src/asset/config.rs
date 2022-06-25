@@ -8,7 +8,6 @@ pub struct AssetNetwork {
     pub(crate) name: String,
     pub(crate) network_id: String,
     pub(crate) address: String,
-    pub(crate) exchange_id: String,
     pub(crate) slippage: f64,
     pub(crate) path_asset: String,
 }

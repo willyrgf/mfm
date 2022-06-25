@@ -135,7 +135,6 @@ async fn cmd_info(args: &ArgMatches) {
     ]);
 
     let parking_asset = config.get_parking_asset();
-    let parking_asset_exchange = parking_asset.get_exchange();
     let from_wallet = config.get_wallet();
 
     let input_asset = match asset_rebalances
@@ -151,9 +150,22 @@ async fn cmd_info(args: &ArgMatches) {
         None => panic!("No input asset to calculate swap cost"),
     };
 
+    let amount_in = input_asset.balance_of(from_wallet.address()).await;
+    let parking_asset_exchange = input_asset
+        .get_network()
+        .get_exchange_by_liquidity(&input_asset, &parking_asset, amount_in)
+        .await.unwrap_or_else(||{
+            log::error!(
+                "cmd_info(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
+                input_asset.clone(),
+                parking_asset
+            );
+            panic!()
+        });
+
     let gas_price = client.clone().eth().gas_price().await.unwrap();
     let swap_cost = parking_asset_exchange
-        .estimate_swap_cost(from_wallet, input_asset, parking_asset)
+        .estimate_swap_cost(from_wallet, &input_asset, &parking_asset)
         .await;
     // let swap_cost = U256::default();
     let total_ops = U256::from(asset_rebalances.len());

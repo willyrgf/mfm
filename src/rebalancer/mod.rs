@@ -2,10 +2,8 @@ pub mod cmd;
 pub mod config;
 
 use crate::{
-    asset::Asset,
-    config::wallet::Wallet,
-    rebalancer::config::RebalancerConfig,
-    shared::blockchain_utils::{display_amount_to_float, exchange_to_use},
+    asset::Asset, config::wallet::Wallet, rebalancer::config::RebalancerConfig,
+    shared::blockchain_utils::display_amount_to_float,
 };
 
 use num_bigint::{BigInt, Sign};
@@ -49,33 +47,48 @@ impl AssetRebalancer {
         quoted_amount_to_trade: U256,
     ) -> Option<Self> {
         let quoted_asset = rebalancer_config.get_quoted_asset();
+        let parking_asset = rebalancer_config.get_parking_asset();
 
-        let quoted_asset_path = asset_balances
-            .asset
-            .get_exchange()
+        let asset_exchange = asset_balances.asset
+            .get_network()
+            .get_exchange_by_liquidity(&asset_balances.asset, &quoted_asset, asset_balances.balance)
+            .await.unwrap_or_else(||{
+                log::error!(
+                    "AssetRebalancer::new(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
+                    &asset_balances.asset,
+                    quoted_asset
+                );
+                panic!()
+            });
+
+        let parking_exchange = quoted_asset
+            .get_network()
+            .get_exchange_by_liquidity(&quoted_asset, &parking_asset, quoted_amount_to_trade)
+            .await.unwrap_or_else(||{
+                log::error!(
+                    "AssetRebalancer::new(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
+                    quoted_asset,
+                    parking_asset
+                );
+                panic!()
+            });
+
+        let quoted_asset_path = asset_exchange
             .build_route_for(&quoted_asset, &asset_balances.asset)
             .await;
 
-        let quoted_parking_asset_path = rebalancer_config
-            .get_parking_asset()
-            .get_exchange()
+        let quoted_parking_asset_path = parking_exchange
             .build_route_for(&quoted_asset, &rebalancer_config.get_parking_asset())
             .await;
 
-        log::debug!("RebalancerParking::new(): parking_amount_to_trade: quoted_amount_to_trade: {}, asset: {:?}", quoted_amount_to_trade, asset_balances.asset.clone());
-        let parking_amount_to_trade: U256 = rebalancer_config
-            .get_parking_asset()
-            .get_exchange()
+        let parking_amount_to_trade: U256 = parking_exchange
             .get_amounts_out(quoted_amount_to_trade, quoted_parking_asset_path.clone())
             .await
             .last()
             .unwrap()
             .into();
 
-        log::debug!("RebalancerParking::new(): asset_amount_to_trade: quoted_amount_to_trade: {}, asset: {:?}", quoted_amount_to_trade, asset_balances.asset.clone());
-        let asset_amount_to_trade: U256 = asset_balances
-            .asset
-            .get_exchange()
+        let asset_amount_to_trade: U256 = asset_exchange
             .get_amounts_out(quoted_amount_to_trade, quoted_asset_path.clone())
             .await
             .last()
@@ -103,19 +116,29 @@ impl AssetRebalancer {
 impl AssetBalances {
     pub async fn new(rebalancer_config: &RebalancerConfig, asset: Asset) -> AssetBalances {
         let quoted_asset = rebalancer_config.get_quoted_asset();
-        let quoted_asset_path = asset
-            .get_exchange()
-            .build_route_for(&asset, &quoted_asset)
-            .await;
         let asset_decimals = asset.decimals().await;
         let unit_amount = U256::from(1_u32) * U256::exp10(asset_decimals.into());
-        let quoted_unit_price: U256 = asset
-            .get_exchange()
+
+        let exchange = asset
+            .get_network()
+            .get_exchange_by_liquidity(&asset, &quoted_asset, unit_amount)
+            .await.unwrap_or_else(||{
+                log::error!(
+                    "AssetBalances::new(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
+                    asset,
+                    quoted_asset
+                );
+                panic!()
+            });
+
+        let quoted_asset_path = exchange.build_route_for(&asset, &quoted_asset).await;
+        let quoted_unit_price: U256 = exchange
             .get_amounts_out(unit_amount, quoted_asset_path.clone())
             .await
             .last()
             .unwrap()
             .into();
+
         Self {
             asset: asset.clone(),
             quoted_unit_price,
@@ -262,7 +285,19 @@ pub async fn move_assets_to_parking(
         if ab.asset.name() == rebalancer_config.parking_asset_id() {
             continue;
         }
-        let exchange = ab.asset.get_exchange();
+
+        let exchange = ab.asset
+            .get_network()
+            .get_exchange_by_liquidity(&ab.asset, &parking_asset, ab.balance)
+            .await.unwrap_or_else(||{
+                log::error!(
+                    "move_assets_to_parking(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
+                    ab.asset,
+                    parking_asset
+                );
+                panic!()
+            });
+
         let parking_asset_path = exchange.build_route_for(&ab.asset, &parking_asset).await;
 
         let parking_amount_out: U256 = exchange
@@ -311,12 +346,25 @@ pub async fn move_parking_to_assets(
         if ab.asset.name() == rebalancer_config.parking_asset_id() {
             continue;
         }
-        let exchange = ab.asset.get_exchange();
-        let asset_route = exchange.build_route_for(&parking_asset, &ab.asset).await;
+
         let parking_slip = parking_asset.slippage_u256(ab.asset_decimals);
         let parking_amount =
             ab.desired_parking_to_move(total_parking_balance, parking_asset_decimals);
         log::debug!("desired_parking_to_move: {}", parking_amount);
+
+        let exchange = ab.asset
+            .get_network()
+            .get_exchange_by_liquidity(&parking_asset, &ab.asset, parking_amount)
+            .await.unwrap_or_else(||{
+                log::error!(
+                    "move_parking_to_assets(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
+                    parking_asset,
+                    ab.asset
+                );
+                panic!()
+            });
+
+        let asset_route = exchange.build_route_for(&parking_asset, &ab.asset).await;
 
         let asset_amount_out: U256 = exchange
             .get_amounts_out(parking_amount, asset_route.clone())
