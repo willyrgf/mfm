@@ -74,7 +74,7 @@ impl RebalancerConfig {
         match self.portfolio.0.get(name) {
             Some(a) => a.percent,
             None => {
-                log::error!("asset_name {} doesnt exist", name);
+                log::error!("RebalancerConfig::get_asset_config_percent(): asset_name {} doesnt exist in portfolio", name);
                 panic!()
             }
         }

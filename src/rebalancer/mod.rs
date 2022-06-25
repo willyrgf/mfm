@@ -519,13 +519,7 @@ pub async fn generate_asset_rebalances(config: &RebalancerConfig) -> Vec<AssetRe
         };
 
         match AssetRebalancer::new(kind, config.clone(), ab.clone(), quoted_amount_to_trade).await {
-            Some(ar) if ab.asset.name() != config.get_parking_asset().name() => {
-                asset_rebalances.push(ar)
-            }
-            Some(_) => {
-                log::debug!("diff_parking: ignore same asset ab.asset: {} rebalancer.get_parking_asset():{}", ab.asset.name(), config.get_parking_asset().name());
-                continue;
-            }
+            Some(ar) => asset_rebalances.push(ar),
             None => {
                 log::debug!("diff_parking: rebalancer_parking cant be created, continue.");
                 continue;
