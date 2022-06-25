@@ -30,10 +30,10 @@ const FALLBACK_ROUTER_ABI_PATH: &str = "res/exchanges/uniswap_v2_router_abi.json
 //TODO: validate the fields in the new mod initialization
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Exchange {
-    name: String,
-    router_address: String,
-    factory_address: String,
-    network_id: String,
+    pub(crate) name: String,
+    pub(crate) router_address: String,
+    pub(crate) factory_address: String,
+    pub(crate) network_id: String,
 }
 
 impl Exchange {
@@ -479,6 +479,9 @@ impl Exchange {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Exchanges(HashMap<String, Exchange>);
 impl Exchanges {
+    pub fn hashmap(&self) -> &HashMap<String, Exchange> {
+        &self.0
+    }
     pub fn get(&self, key: &str) -> &Exchange {
         match self.0.get(key) {
             Some(e) => e,

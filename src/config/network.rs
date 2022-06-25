@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use web3::{transports::Http, types::U256, Web3};
 
-use super::Config;
+use super::{exchange::Exchange, Config};
 use crate::asset::Asset;
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -51,6 +51,15 @@ impl Network {
 
     pub fn get_web3_client_http(&self) -> Web3<Http> {
         Web3::new(Http::new(self.rpc_url()).unwrap())
+    }
+
+    pub fn get_exchanges(&self) -> Vec<&Exchange> {
+        Config::global()
+            .exchanges
+            .hashmap()
+            .values()
+            .filter(|e| e.network_id() == &self.name)
+            .collect()
     }
 }
 
