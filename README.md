@@ -140,6 +140,7 @@ cargo run -- yield-farm run --force-harvest true
 - [ ] check the better exchange based on liquidity `exchange_to_use()`
 - [ ] doc new rebalancer diff parking
 - [ ] doc encrypted wallet
+- [ ] receive the password to encrypted wallet from env and doc 
 - [x] refactor wallet and withdraw-wallet to be wallet with private and public address supporting encrypted files with the keys
 - [x] compile /res resources assets/networks/exchanges configs and fallback to local configs
 - [x] add a rebalance that use only the diff between the assets to rebalance the portfolio

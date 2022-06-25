@@ -276,13 +276,14 @@ impl Exchange {
         // let asset_path_out = self.build_route_for(&output_asset, &input_asset).await;
         // let asset_path_in = self.build_route_for(&input_asset, &output_asset).await;
 
-        let input_asset_decimals = input_asset.decimals().await;
+        //let input_asset_decimals = input_asset.decimals().await;
         let output_asset_decimals = output_asset.decimals().await;
         let amount_in = input_asset.balance_of(from_wallet.address()).await;
 
         //TODO: review this model of use slippage
+        // review another usage to change to use always the output asset decimals
         let slippage = {
-            let ais = input_asset.slippage_u256(input_asset_decimals);
+            let ais = input_asset.slippage_u256(output_asset_decimals);
             let aos = output_asset.slippage_u256(output_asset_decimals);
 
             ais + aos
@@ -298,7 +299,7 @@ impl Exchange {
         //TODO: fix the arithmetic operation overflow
         let slippage_amount = (amount_out * slippage) / U256::exp10(output_asset_decimals.into());
         let amount_min_out_slippage = amount_out - slippage_amount;
-        // let amount_min_out_slippage = amount_out;
+        //let amount_min_out_slippage = amount_out;
 
         match swap_tokens_for_tokens::estimate_gas(
             self,
@@ -351,7 +352,7 @@ impl Exchange {
         let slippage = match slippage_opt {
             Some(s) => s,
             None => {
-                let ais = input_asset.slippage_u256(input_asset_decimals);
+                let ais = input_asset.slippage_u256(output_asset_decimals);
                 let aos = output_asset.slippage_u256(output_asset_decimals);
 
                 ais + aos
