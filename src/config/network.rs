@@ -58,7 +58,7 @@ impl Network {
             .exchanges
             .hashmap()
             .values()
-            .filter(|e| e.network_id() == &self.name)
+            .filter(|e| e.network_id() == self.name)
             .collect()
     }
 }

@@ -13,10 +13,7 @@ use web3::{
 
 use crate::{
     asset::Asset,
-    config::{
-        exchange::{Exchange, ZERO_ADDRESS},
-        wallet::Wallet,
-    },
+    config::{exchange::Exchange, wallet::Wallet},
 };
 
 pub async fn estimate_gas<P>(
