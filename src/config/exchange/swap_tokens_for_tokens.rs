@@ -54,7 +54,7 @@ pub async fn swap(
     let client = exchange.get_web3_client_http();
     let gas_price = client.eth().gas_price().await.unwrap();
     let valid_timestamp = exchange.get_valid_timestamp(30000000);
-    let estimate_gas = exchange
+    let estimate_gas = match exchange
         .router_contract()
         .estimate_gas(
             "swapExactTokensForTokensSupportingFeeOnTransferTokens",
@@ -76,7 +76,14 @@ pub async fn swap(
             },
         )
         .await
-        .unwrap();
+    {
+        Ok(e) => e,
+        Err(err) => {
+            // TODO: return error
+            log::error!("swap(): estimate_gas(): err: {}, asset_path: {:?}, amount_in: {:?}, amount_min_out: {:?}", err, asset_path, amount_in, amount_min_out);
+            panic!()
+        }
+    };
 
     log::debug!("swap_tokens_for_tokens estimate_gas: {}", estimate_gas);
 
