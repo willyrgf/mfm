@@ -103,17 +103,17 @@ async fn cmd_info(args: &ArgMatches) {
         let quoted_unit_price = ar.asset_balances.quoted_unit_price;
         portifolio_balance += amount_in_quoted;
 
-        if !(hide_zero && balance_of == U256::from(0_i32)) {
-            table.add_row(row![
-                asset.name(),
-                display_amount_to_float(quoted_unit_price, asset_quoted_decimals),
-                display_amount_to_float(balance_of, decimals),
-                config.quoted_in(),
-                display_amount_to_float(amount_in_quoted, asset_quoted_decimals),
-                ar.display_amount_with_sign(ar.asset_amount_to_trade, decimals),
-                ar.display_amount_with_sign(ar.quoted_amount_to_trade, asset_quoted_decimals),
-            ]);
-        }
+        //if !(hide_zero && balance_of == U256::from(0_i32)) {
+        table.add_row(row![
+            asset.name(),
+            display_amount_to_float(quoted_unit_price, asset_quoted_decimals),
+            display_amount_to_float(balance_of, decimals),
+            config.quoted_in(),
+            display_amount_to_float(amount_in_quoted, asset_quoted_decimals),
+            ar.display_amount_with_sign(ar.asset_amount_to_trade, decimals),
+            ar.display_amount_with_sign(ar.quoted_amount_to_trade, asset_quoted_decimals),
+        ]);
+        //}
     });
 
     let network = config.get_network();
@@ -143,6 +143,7 @@ async fn cmd_info(args: &ArgMatches) {
         .filter(|ar| {
             (ar.asset_balances.asset.name() != parking_asset.name())
                 && ar.asset_balances.max_tx_amount.is_none()
+                && ar.asset_balances.balance > U256::from(0)
         })
         .last()
     {
