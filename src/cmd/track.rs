@@ -11,19 +11,21 @@ use web3::types::U256;
 pub const TRACK_COMMAND: &str = "track";
 
 //TODO: change the name of the tables like this
-// struct AssetCollection {
-//     asset: Asset,
-//     price: f64,
-//     balance: f64,
-//     quoted_asset: Asset,
-//     quoted_balance: f64,
-//     amount_to_trade: f64,
-//     quoted_amount_to_trade: f64,
-// }
+#[derive(Deserialize, Serialize, Clone)]
+struct TrackAsset {
+    asset: Asset,
+    price: f64,
+    balance: f64,
+    quoted_asset: Asset,
+    quoted_balance: f64,
+    amount_to_trade: f64,
+    quoted_amount_to_trade: f64,
+}
+
 #[derive(Deserialize, Serialize, Clone)]
 pub struct TrackPortfolioStateData {
     portfolio_name: String,
-    asset_rebalancers: Vec<AssetRebalancer>,
+    track_assets: Vec<TrackAsset>,
     quoted_portfolio_asset: Asset,
     quoted_portfolio_balance: f64,
     coin_balance: f64,
@@ -71,6 +73,35 @@ async fn cmd_run(_args: &ArgMatches) {
         let asset_quoted_decimals = quoted_portfolio_asset.decimals().await;
 
         let asset_rebalancers = generate_asset_rebalances(rebalancer_config).await;
+
+        let track_assets = asset_rebalancers
+            .clone()
+            .iter()
+            .map(|ar| TrackAsset {
+                asset: ar.asset_balances.asset.clone(),
+                price: display_amount_to_float(
+                    ar.asset_balances.quoted_unit_price,
+                    asset_quoted_decimals,
+                ),
+                balance: display_amount_to_float(
+                    ar.asset_balances.balance,
+                    ar.asset_balances.asset_decimals,
+                ),
+                quoted_asset: ar.rebalancer_config.get_quoted_asset(),
+                quoted_balance: display_amount_to_float(
+                    ar.asset_balances.quoted_balance,
+                    asset_quoted_decimals,
+                ),
+                amount_to_trade: display_amount_to_float(
+                    ar.asset_amount_to_trade,
+                    ar.asset_balances.asset_decimals,
+                ),
+                quoted_amount_to_trade: display_amount_to_float(
+                    ar.quoted_amount_to_trade,
+                    asset_quoted_decimals,
+                ),
+            })
+            .collect();
 
         let quoted_portfolio_balance_u256 =
             asset_rebalancers
@@ -137,7 +168,7 @@ async fn cmd_run(_args: &ArgMatches) {
         let track_portfolio_state = {
             let data = TrackPortfolioStateData {
                 portfolio_name: rebalancer_name.to_string(),
-                asset_rebalancers,
+                track_assets,
                 quoted_portfolio_asset,
                 quoted_portfolio_balance,
                 coin_balance,
