@@ -8,6 +8,7 @@ pub mod enc;
 pub mod helpers;
 pub mod quote;
 pub mod swap;
+pub mod track;
 pub mod transaction;
 pub mod unwrap;
 pub mod withdraw;
@@ -38,6 +39,7 @@ pub fn new() -> clap::Command<'static> {
         .subcommand(withdraw::generate_cmd())
         .subcommand(quote::generate_cmd())
         .subcommand(enc::generate_cmd())
+        .subcommand(track::generate_cmd())
 }
 
 pub async fn call_sub_commands(matches: &ArgMatches) {
@@ -77,6 +79,9 @@ pub async fn call_sub_commands(matches: &ArgMatches) {
         }
         Some((enc::COMMAND, sub_matches)) => {
             enc::call_sub_commands(sub_matches).await;
+        }
+        Some((track::TRACK_COMMAND, sub_matches)) => {
+            track::call_sub_commands(sub_matches).await;
         }
         _ => panic!("command not registred"),
     }
