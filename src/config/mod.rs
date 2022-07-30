@@ -22,7 +22,14 @@ use self::decrypt_wallet::decrypt_wallets_from_config;
 static GLOBAL_CONFIG: OnceCell<Config> = OnceCell::new();
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct Server {
+    pub api_url: String,
+    pub api_token: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Config {
+    pub server: Option<Server>,
     pub wallets: Wallets,
     pub withdraw_wallets: WithdrawWallets,
     pub assets: AssetsConfig,

@@ -7,35 +7,36 @@ use crate::{
 };
 
 use num_bigint::{BigInt, Sign};
+use serde::{Deserialize, Serialize};
 use web3::types::U256;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetBalances {
     //TODO add a equal operation for Asset
-    asset: Asset,
-    asset_decimals: u8,
-    percent: f64,
-    balance: U256,
-    quoted_asset_decimals: u8,
-    quoted_balance: U256,
-    quoted_unit_price: U256,
-    max_tx_amount: Option<U256>,
+    pub(crate) asset: Asset,
+    pub(crate) asset_decimals: u8,
+    pub(crate) percent: f64,
+    pub(crate) balance: U256,
+    pub(crate) quoted_asset_decimals: u8,
+    pub(crate) quoted_balance: U256,
+    pub(crate) quoted_unit_price: U256,
+    pub(crate) max_tx_amount: Option<U256>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Kind {
     ToParking,
     FromParking,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetRebalancer {
-    kind: Kind,
-    rebalancer_config: RebalancerConfig,
-    asset_balances: AssetBalances,
-    quoted_amount_to_trade: U256,
-    asset_amount_to_trade: U256,
-    parking_amount_to_trade: U256,
+    pub(crate) kind: Kind,
+    pub(crate) rebalancer_config: RebalancerConfig,
+    pub(crate) asset_balances: AssetBalances,
+    pub(crate) quoted_amount_to_trade: U256,
+    pub(crate) asset_amount_to_trade: U256,
+    pub(crate) parking_amount_to_trade: U256,
 }
 
 impl AssetRebalancer {
@@ -423,6 +424,7 @@ pub fn bigint_to_u256(b: BigInt) -> U256 {
     U256::from_little_endian(&bytes)
 }
 
+//TODO: break validation and threshold
 pub async fn validate(config: &RebalancerConfig) {
     if !config.is_valid_portfolio_total_percentage() {
         log::error!(

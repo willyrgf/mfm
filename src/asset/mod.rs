@@ -3,6 +3,7 @@ pub mod config;
 use std::str::FromStr;
 
 use rustc_hex::FromHexError;
+use serde::{Deserialize, Serialize};
 use web3::ethabi::Token;
 use web3::Web3;
 use web3::{
@@ -19,7 +20,7 @@ use config::AssetConfig;
 
 const FALLBACK_ABI_PATH: &str = "res/assets/erc20_abi.json";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
     name: String,
     kind: String,

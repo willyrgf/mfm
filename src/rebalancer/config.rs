@@ -233,6 +233,9 @@ impl RebalancerConfig {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct RebalancersConfig(HashMap<String, RebalancerConfig>);
 impl RebalancersConfig {
+    pub fn hashmap(&self) -> &HashMap<String, RebalancerConfig> {
+        &self.0
+    }
     pub fn get(&self, key: &str) -> &RebalancerConfig {
         self.0.get(key).unwrap()
     }
