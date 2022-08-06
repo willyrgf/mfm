@@ -1,5 +1,7 @@
-use crate::{config::Config, rebalancer};
-use clap::{crate_version, ArgMatches, Command};
+use crate::{config::Config, rebalancer, APP_NAME};
+use anyhow::{anyhow, Context};
+use clap::{crate_version, Arg, ArgMatches, Command};
+use serde::{Deserialize, Serialize};
 
 pub mod allowance;
 pub mod approve;
@@ -15,11 +17,47 @@ pub mod withdraw;
 pub mod wrap;
 pub mod yield_farm;
 
-pub const CLI_NAME: &str = "mfm";
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Commands {
+    Balances,
+    Wrap,
+    Unwrap,
+    Swap,
+    Allowance,
+    Approve,
+    Rebalancer,
+    Transaction,
+    YieldFarm,
+    Withdraw,
+    Quote,
+    Enc,
+    Track,
+}
+
+impl Commands {
+    pub async fn run(&self, args: &ArgMatches) {
+        match &self {
+            Self::Balances => balances::call_sub_commands(args).await,
+            Self::Wrap => wrap::call_sub_commands(args).await,
+            Self::Unwrap => unwrap::call_sub_commands(args).await,
+            Self::Swap => swap::call_sub_commands(args).await,
+            Self::Allowance => allowance::call_sub_commands(args).await,
+            Self::Approve => approve::call_sub_commands(args).await,
+            Self::Rebalancer => rebalancer::cmd::call_sub_commands(args).await,
+            Self::Transaction => transaction::call_sub_commands(args).await,
+            Self::YieldFarm => yield_farm::call_sub_commands(args).await,
+            Self::Withdraw => withdraw::call_sub_commands(args).await,
+            Self::Quote => quote::call_sub_commands(args).await,
+            Self::Enc => enc::call_sub_commands(args).await,
+            Self::Track => track::call_sub_commands(args).await,
+        }
+    }
+}
 
 pub fn new() -> clap::Command<'static> {
-    Command::new(CLI_NAME)
-        .bin_name(CLI_NAME)
+    Command::new(APP_NAME)
+        .bin_name(APP_NAME)
         .version(crate_version!())
         .arg(
             clap::arg!(-c - -config_filename <PATH> "Config file path")
@@ -42,60 +80,39 @@ pub fn new() -> clap::Command<'static> {
         .subcommand(track::generate_cmd())
 }
 
-//TODO: refactor it to have a Trait Command and each type implement it
-pub async fn call_sub_commands(matches: &ArgMatches) {
+#[tracing::instrument(name = "lookup command from cli")]
+pub fn lookup_command(cmd: &str) -> Result<Commands, anyhow::Error> {
+    let json_cmd = format!("\"{}\"", cmd);
+    serde_json::from_str(json_cmd.as_str()).map_err(|e| anyhow::anyhow!(e))
+}
+
+#[tracing::instrument(name = "call commands")]
+pub async fn call_sub_commands(matches: &ArgMatches) -> Result<(), anyhow::Error> {
     match matches.subcommand() {
-        Some((wrap::WRAP_COMMAND, sub_matches)) => {
-            wrap::call_sub_commands(sub_matches).await;
+        Some((cmd, sub_matches)) => {
+            lookup_command(cmd)?.run(sub_matches).await;
+            Ok(())
         }
-        Some((unwrap::COMMAND, sub_matches)) => {
-            unwrap::call_sub_commands(sub_matches).await;
-        }
-        Some((swap::SWAP_COMMAND, sub_matches)) => {
-            swap::call_sub_commands(sub_matches).await;
-        }
-        Some((allowance::ALLOWANCE_COMMAND, sub_matches)) => {
-            allowance::call_sub_commands(sub_matches).await;
-        }
-        Some((approve::APPROVE_COMMAND, sub_matches)) => {
-            approve::call_sub_commands(sub_matches).await;
-        }
-        Some((balances::BALANCES_COMMAND, sub_matches)) => {
-            balances::call_sub_commands(sub_matches).await;
-        }
-        Some((rebalancer::cmd::REBALANCER_COMMAND, sub_matches)) => {
-            rebalancer::cmd::call_sub_commands(sub_matches).await;
-        }
-        Some((transaction::TRANSACTION_COMMAND, sub_matches)) => {
-            transaction::call_sub_commands(sub_matches).await;
-        }
-        Some((yield_farm::YIELD_FARM_COMMAND, sub_matches)) => {
-            yield_farm::call_sub_commands(sub_matches).await;
-        }
-        Some((withdraw::WITHDRAW_COMMAND, sub_matches)) => {
-            withdraw::call_sub_commands(sub_matches).await;
-        }
-        Some((quote::COMMAND, sub_matches)) => {
-            quote::call_sub_commands(sub_matches).await;
-        }
-        Some((enc::COMMAND, sub_matches)) => {
-            enc::call_sub_commands(sub_matches).await;
-        }
-        Some((track::TRACK_COMMAND, sub_matches)) => {
-            track::call_sub_commands(sub_matches).await;
-        }
-        _ => panic!("command not registred"),
+        _ => Err(anyhow::anyhow!("subcommand is required")),
     }
 }
 
+#[tracing::instrument(name = "cli run command", skip(cmd))]
 pub async fn run(cmd: clap::Command<'static>) {
     let cmd_matches = cmd.get_matches();
-    tracing::debug!("matches: {:?}", cmd_matches);
 
     match cmd_matches.value_of("config_filename") {
         Some(f) => Config::from_file(f),
-        None => panic!("--config_filename is invalid"),
+        None => {
+            tracing::error!("--config_filename is invalid");
+            panic!()
+        }
     };
 
-    call_sub_commands(&cmd_matches).await
+    match call_sub_commands(&cmd_matches).await {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!("call subcommand failed, err: {}", e)
+        }
+    }
 }
