@@ -1,10 +1,16 @@
 extern crate prettytable;
-use env_logger::Env;
-use mfm::cmd;
+use mfm::{
+    cmd,
+    telemetry::{get_subscriber, init_subscriber},
+};
+
+const APP_NAME: &str = "mfm";
+const DEFAULT_LOG_LEVEL: &str = "info";
 
 //TODO: handle with all unwraps
 fn main() {
-    env_logger::Builder::from_env(Env::default().default_filter_or("debug")).init();
+    let subscriber = get_subscriber(APP_NAME.into(), DEFAULT_LOG_LEVEL.into(), std::io::stdout);
+    init_subscriber(subscriber);
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

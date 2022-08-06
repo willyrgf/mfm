@@ -99,7 +99,7 @@ pub async fn sign_send_and_wait_txn(
     let tx_address = send_raw_transaction(client.clone(), signed_transaction).await;
 
     let receipt = wait_receipt(client.clone(), tx_address).await;
-    log::debug!("receipt: {:?}", receipt);
+    tracing::debug!("receipt: {:?}", receipt);
 }
 
 pub async fn wait_receipt(client: web3::Web3<Http>, tx_address: H256) -> TransactionReceipt {
@@ -111,7 +111,7 @@ pub async fn wait_receipt(client: web3::Web3<Http>, tx_address: H256) -> Transac
                 continue;
             }
             Err(e) => {
-                log::error!("wait_receipt() err: {:?}", e);
+                tracing::error!("wait_receipt() err: {:?}", e);
                 panic!()
             }
         }
@@ -128,7 +128,7 @@ pub async fn amount_in_quoted(asset_in: &Asset, asset_quoted: &Asset, amount_in:
         .get_exchange_by_liquidity(asset_in,asset_quoted, amount_in)
         .await.
         unwrap_or_else(||{
-            log::error!("move_parking_to_assets(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",asset_in,asset_quoted);
+            tracing::error!("move_parking_to_assets(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",asset_in,asset_quoted);
             panic!()
         });
 

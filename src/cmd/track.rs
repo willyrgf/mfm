@@ -55,7 +55,7 @@ async fn cmd_run(_args: &ArgMatches) {
     let (api_token, api_address) = match &config.server {
         Some(s) => (s.api_token.clone(), s.api_url.clone()),
         None => {
-            log::error!("track::cmd_run() config.server missing");
+            tracing::error!("track::cmd_run() config.server missing");
             panic!()
         }
     };
@@ -63,14 +63,14 @@ async fn cmd_run(_args: &ArgMatches) {
     for (rebalancer_name, rebalancer_config) in match config.rebalancers.clone() {
         Some(rebalancers) => rebalancers,
         None => {
-            log::error!("track::cmd_run(): rebalancer is not configured");
+            tracing::error!("track::cmd_run(): rebalancer is not configured");
             panic!()
         }
     }
     .hashmap()
     .iter()
     {
-        log::info!(
+        tracing::info!(
             "track::cmd_run(): rebalancer_name: {:?}, rebalancer_config: {:?}",
             rebalancer_name,
             rebalancer_config
@@ -152,7 +152,7 @@ async fn cmd_run(_args: &ArgMatches) {
             .get_exchange_by_liquidity(&input_asset, &parking_asset, amount_in)
             .await
             .unwrap_or_else(|| {
-                log::error!(
+                tracing::error!(
 					"cmd_info(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
 					input_asset.clone(),
 					parking_asset
@@ -204,10 +204,10 @@ async fn cmd_run(_args: &ArgMatches) {
                 .await
         } {
             Ok(response) => {
-                log::info!("track::cmd_run() http request response: {:?}", response);
+                tracing::info!("track::cmd_run() http request response: {:?}", response);
             }
             Err(e) => {
-                log::error!("track::cmd_run() http request error: {:?}", e);
+                tracing::error!("track::cmd_run() http request error: {:?}", e);
                 panic!()
             }
         }

@@ -42,6 +42,7 @@ pub fn new() -> clap::Command<'static> {
         .subcommand(track::generate_cmd())
 }
 
+//TODO: refactor it to have a Trait Command and each type implement it
 pub async fn call_sub_commands(matches: &ArgMatches) {
     match matches.subcommand() {
         Some((wrap::WRAP_COMMAND, sub_matches)) => {
@@ -89,7 +90,7 @@ pub async fn call_sub_commands(matches: &ArgMatches) {
 
 pub async fn run(cmd: clap::Command<'static>) {
     let cmd_matches = cmd.get_matches();
-    log::debug!("matches: {:?}", cmd_matches);
+    tracing::debug!("matches: {:?}", cmd_matches);
 
     match cmd_matches.value_of("config_filename") {
         Some(f) => Config::from_file(f),

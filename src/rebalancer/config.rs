@@ -74,7 +74,7 @@ impl RebalancerConfig {
         match self.portfolio.0.get(name) {
             Some(a) => a.percent,
             None => {
-                log::error!("RebalancerConfig::get_asset_config_percent(): asset_name {} doesnt exist in portfolio", name);
+                tracing::error!("RebalancerConfig::get_asset_config_percent(): asset_name {} doesnt exist in portfolio", name);
                 panic!()
             }
         }
@@ -91,7 +91,7 @@ impl RebalancerConfig {
                 {
                     Some(a) => a,
                     None => {
-                        log::error!(
+                        tracing::error!(
                             "get_assets(): doesnt exist asset by find_by_name_and_network(): name: {}, network: {}",
                             name.as_str(),
                             self.network_id.as_str()
@@ -183,7 +183,7 @@ impl RebalancerConfig {
         let thresold_percent_u256 = U256::from(
             (self.threshold_percent * 10_f64.powf(quoted_asset_decimals.into())) as u128,
         );
-        log::debug!(
+        tracing::debug!(
             "reach_min_threshold(): thresold_percent_u256: {:?}",
             thresold_percent_u256
         );
@@ -191,7 +191,7 @@ impl RebalancerConfig {
         let total_quoted = assets_balances
             .iter()
             .fold(U256::from(0_i32), |acc, x| acc + x.quoted_balance());
-        log::debug!("reach_min_threshold(): total_quoted: {:?}", total_quoted);
+        tracing::debug!("reach_min_threshold(): total_quoted: {:?}", total_quoted);
 
         let sum_percent_diff =
             assets_balances
@@ -202,7 +202,7 @@ impl RebalancerConfig {
                     }
 
                     let quoted_asset_percent = asset_balances.quoted_asset_percent_u256();
-                    log::debug!(
+                    tracing::debug!(
                         "reach_min_threshold(): quoted_asset_percent_u256: {:?}",
                         quoted_asset_percent
                     );
@@ -210,21 +210,21 @@ impl RebalancerConfig {
                     let p_now = (asset_balances.quoted_balance()
                         * U256::exp10(asset_balances.quoted_asset_decimals().into()))
                         / total_quoted;
-                    log::debug!("reach_min_threshold(): p_now: {:?}", p_now);
+                    tracing::debug!("reach_min_threshold(): p_now: {:?}", p_now);
 
                     let p_diff = u256_abs_diff(quoted_asset_percent, p_now);
 
-                    log::debug!("reach_min_threshold(): p_diff: {:?}", p_diff);
+                    tracing::debug!("reach_min_threshold(): p_diff: {:?}", p_diff);
                     acc + p_diff
                 });
 
-        log::debug!(
+        tracing::debug!(
             "reach_min_threshold(): sum_percent_diff: {:?}",
             sum_percent_diff
         );
 
         let percent_diff = max_percent_u256 - sum_percent_diff;
-        log::debug!("reach_min_threshold(): percent_diff: {:?}", percent_diff);
+        tracing::debug!("reach_min_threshold(): percent_diff: {:?}", percent_diff);
 
         percent_diff.gt(&thresold_percent_u256)
     }

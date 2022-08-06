@@ -56,7 +56,7 @@ impl Config {
         // overwrite in memory config with the private key decrypted
         GLOBAL_CONFIG.set(config.clone()).unwrap();
         //TODO: before log, need filter some fields
-        //log::debug!("from_file(): config: {:?}", config);
+        //tracing::debug!("from_file(): config: {:?}", config);
 
         config
     }

@@ -16,6 +16,7 @@ pub fn generate_cmd<'a>() -> Command<'a> {
         )
 }
 
+#[tracing::instrument(name = "balances call command")]
 pub async fn call_sub_commands(args: &ArgMatches) {
     let config = Config::global();
     let wallet = cmd::helpers::get_wallet(args);

@@ -67,7 +67,7 @@ pub fn get_farms_to_look(args: &ArgMatches) -> Vec<YieldFarm> {
             let yieldfarms = match Config::global().yield_farms.clone() {
                 Some(yf) => yf,
                 None => {
-                    log::error!("get_farms_to_look(): yield_farms is not configured");
+                    tracing::error!("get_farms_to_look(): yield_farms is not configured");
                     panic!()
                 }
             };
@@ -80,7 +80,7 @@ pub fn get_farms_to_look(args: &ArgMatches) -> Vec<YieldFarm> {
                 .map(|(_k, v)| v.clone())
                 .collect::<Vec<YieldFarm>>(),
             None => {
-                log::error!("get_farms_to_look(): yield_farms is not configured");
+                tracing::error!("get_farms_to_look(): yield_farms is not configured");
                 panic!()
             }
         },
@@ -130,7 +130,7 @@ pub async fn call_info_cmd(args: &ArgMatches) {
             .get_exchange_by_liquidity(&yield_farm_asset,&quoted_asset, pending_rewards)
             .await.
             unwrap_or_else(||{
-                log::error!(
+                tracing::error!(
                     "call_info_cmd(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
                     yield_farm_asset,
                     quoted_asset
@@ -277,15 +277,15 @@ pub async fn call_run_cmd(args: &ArgMatches) {
         let pending_rewards = yield_farm.get_pending_rewards().await;
         let min_rewards_required =
             yield_farm.get_min_rewards_required_u256(yield_farm_asset_decimals);
-        log::info!("yield_farm pending rewards: {:?}", pending_rewards);
-        log::info!(
+        tracing::info!("yield_farm pending rewards: {:?}", pending_rewards);
+        tracing::info!(
             "yield_farm min rewards required: {:?}",
             min_rewards_required
         );
 
         let can_harvest = pending_rewards >= min_rewards_required;
         if can_harvest || force_harvest {
-            log::info!("harvesting yield farm: {:?}", yield_farm);
+            tracing::info!("harvesting yield farm: {:?}", yield_farm);
             yield_farm.harvest().await;
         }
 
@@ -314,7 +314,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
             call_deposit_cmd(sub_args).await;
         }
         _ => {
-            log::error!("no sub cmd found");
+            tracing::error!("no sub cmd found");
             panic!("sub_cmd_not_found");
         }
     }

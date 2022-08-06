@@ -62,16 +62,16 @@ pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
         },
     )
     .await;
-    log::debug!("harvest called estimate_gas: {:?}", estimate_gas);
+    tracing::debug!("harvest called estimate_gas: {:?}", estimate_gas);
     // let estimate_gas = (estimate_gas_from_helper * (U256::from(30000_i32) + U256::from(3000_i32)))
     //     / U256::from(30000_i32);
 
     let func_data =
         shared::blockchain_utils::generate_func_data(&contract, "deposit", &[Token::Uint(amount)]);
-    log::debug!("harvest(): func_data: {:?}", func_data);
+    tracing::debug!("harvest(): func_data: {:?}", func_data);
 
     let nonce = from_wallet.nonce(client.clone()).await;
-    log::debug!("harvest(): nonce: {:?}", nonce);
+    tracing::debug!("harvest(): nonce: {:?}", nonce);
 
     let transaction_obj = shared::blockchain_utils::build_transaction_params(
         nonce,
@@ -81,7 +81,7 @@ pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
         estimate_gas,
         Bytes(func_data),
     );
-    log::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
+    tracing::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
 
     shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
         .await;
@@ -104,17 +104,17 @@ pub async fn harvest(yield_farm: &YieldFarm) {
         },
     )
     .await;
-    log::debug!("harvest called estimate_gas: {:?}", estimate_gas);
+    tracing::debug!("harvest called estimate_gas: {:?}", estimate_gas);
 
     let func_data = shared::blockchain_utils::generate_func_data(
         &contract,
         "withdraw",
         &[Token::Uint(U256::from(0_i32))],
     );
-    log::debug!("harvest(): func_data: {:?}", func_data);
+    tracing::debug!("harvest(): func_data: {:?}", func_data);
 
     let nonce = from_wallet.nonce(client.clone()).await;
-    log::debug!("harvest(): nonce: {:?}", nonce);
+    tracing::debug!("harvest(): nonce: {:?}", nonce);
 
     let transaction_obj = shared::blockchain_utils::build_transaction_params(
         nonce,
@@ -124,7 +124,7 @@ pub async fn harvest(yield_farm: &YieldFarm) {
         estimate_gas,
         Bytes(func_data),
     );
-    log::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
+    tracing::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
 
     shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
         .await;

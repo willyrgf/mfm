@@ -227,7 +227,7 @@ impl Exchange {
         let result_amounts_out: Vec<U256> = match result.await {
             Ok(a) => a,
             Err(e) => {
-                log::error!(
+                tracing::error!(
                     "get_amounts_out(): result err: {:?}, return zeroed value",
                     e
                 );
@@ -312,7 +312,7 @@ impl Exchange {
         {
             Ok(gas) => gas,
             Err(e) => {
-                log::error!(
+                tracing::error!(
                     "swap_cost() estimate_gas(): error: {}, input_asset: {:?}, amount_in: {:?}, amount_out: {:?} amount_min_out_slippage: {:?}",
                     e,
                     input_asset,
@@ -376,8 +376,8 @@ impl Exchange {
         // amount_min_out*1000 = 50
         let i_max_tx_amount = input_asset.max_tx_amount().await;
         let o_max_tx_amount = output_asset.max_tx_amount().await;
-        log::debug!("cmd::swap() i_max_tx_amount: {:?}", i_max_tx_amount);
-        log::debug!("cmd::swap() o_max_tx_amount: {:?}", o_max_tx_amount);
+        tracing::debug!("cmd::swap() i_max_tx_amount: {:?}", i_max_tx_amount);
+        tracing::debug!("cmd::swap() o_max_tx_amount: {:?}", o_max_tx_amount);
         let limit_max_input = match (i_max_tx_amount, o_max_tx_amount) {
             (Some(il), Some(ol)) => {
                 // anonq =        10_000 = 10000anonq
@@ -394,7 +394,7 @@ impl Exchange {
                     .unwrap()
                     .into();
 
-                log::debug!(
+                tracing::debug!(
                     "cmd::swap(): limit_amount_out: {:?}, limit_amount_out: {:?}",
                     limit_amount_out,
                     shared::blockchain_utils::display_amount_to_float(
@@ -416,14 +416,14 @@ impl Exchange {
                     .last()
                     .unwrap()
                     .into();
-                log::debug!("cmd::swap() limit_amount_in: {:?}", limit_amount_in);
+                tracing::debug!("cmd::swap() limit_amount_in: {:?}", limit_amount_in);
                 Some(limit_amount_in)
             }
             (Some(il), None) => Some(il),
             (None, None) => None,
         };
 
-        log::debug!("cmd::swap() limit_max_output: {:?}", limit_max_input);
+        tracing::debug!("cmd::swap() limit_max_output: {:?}", limit_max_input);
 
         match limit_max_input {
             Some(limit) if amount_in > limit => {
@@ -441,7 +441,7 @@ impl Exchange {
                     if total > limit {
                         //TODO: calc amount_min_out
                         total -= limit;
-                        log::debug!(
+                        tracing::debug!(
                             "cmd::swap() inside total > limit: total: {:?}, limit: {:?}",
                             total,
                             limit
@@ -455,7 +455,7 @@ impl Exchange {
                             .unwrap()
                             .into();
 
-                        log::debug!("cmd::swap() inside total > limit: ao: {:?}", ao);
+                        tracing::debug!("cmd::swap() inside total > limit: ao: {:?}", ao);
                     } else {
                         ai = total;
                         ao = self
@@ -465,13 +465,13 @@ impl Exchange {
                             .unwrap()
                             .into();
 
-                        log::debug!("cmd::swap() inside total > limit: ao: {:?}", ao);
+                        tracing::debug!("cmd::swap() inside total > limit: ao: {:?}", ao);
                     }
 
                     let slippage_amount =
                         (ao * slippage) / U256::exp10(output_asset_decimals.into());
                     let amount_min_out_slippage = ao - slippage_amount;
-                    log::debug!("slippage_amount {:?}", slippage_amount);
+                    tracing::debug!("slippage_amount {:?}", slippage_amount);
 
                     swap_tokens_for_tokens::swap(
                         self,
@@ -507,7 +507,7 @@ impl Exchanges {
         match self.0.get(key) {
             Some(e) => e,
             None => {
-                log::error!("get(): key {} doesnt exist", key);
+                tracing::error!("get(): key {} doesnt exist", key);
                 panic!();
             }
         }

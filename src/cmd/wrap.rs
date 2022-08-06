@@ -28,7 +28,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let network = match cmd::helpers::get_network(args) {
         Some(n) => n,
         None => {
-            log::error!("--network not found");
+            tracing::error!("--network not found");
             panic!()
         }
     };
@@ -57,7 +57,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     };
 
     let n = wallet.nonce(client.clone()).await;
-    log::debug!("nonce: {}", n);
+    tracing::debug!("nonce: {}", n);
 
     wrapped_asset.wrap(wallet, amount_in).await;
     // exchange

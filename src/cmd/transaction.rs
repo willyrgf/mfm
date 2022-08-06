@@ -14,7 +14,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let network = match cmd::helpers::get_network(args) {
         Some(n) => n,
         None => {
-            log::error!("--network not found");
+            tracing::error!("--network not found");
             panic!()
         }
     };
@@ -31,7 +31,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     //         exchange.as_router_address().unwrap(),
     //     )
     //     .await;
-    // log::debug!(
+    // tracing::debug!(
     //     "allowance remaning to spend: {:?}, asset_decimals: {}",
     //     remaning,
     //     asset_decimals

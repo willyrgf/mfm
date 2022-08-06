@@ -16,7 +16,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let mut table = Table::new();
     table.add_row(row!["Exchange", "Asset", "Balance", "Allowance"]);
     let network = cmd::helpers::get_network(args).unwrap_or_else(|| {
-        log::error!("allowance can't find network");
+        tracing::error!("allowance can't find network");
         panic!()
     });
     let wallet = cmd::helpers::get_wallet(args);

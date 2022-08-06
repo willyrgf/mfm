@@ -12,7 +12,7 @@ pub fn get_resource_file_fs_or_res(path: String) -> Option<String> {
     match std::fs::read_to_string(path.clone()) {
         Ok(file_string) => Some(file_string),
         Err(e) => {
-            log::debug!("get_resource_file_fs_or_res(): std::fs::read_to_string(path): Error: {}, trying on RES.", e);
+            tracing::debug!("get_resource_file_fs_or_res(): std::fs::read_to_string(path): Error: {}, trying on RES.", e);
 
             RES.get(path.as_str()).map(|s| s.to_string())
         }

@@ -123,7 +123,7 @@ impl YieldFarm {
             "baby_auto_baby_pool" => baby_auto_baby_pool::get_pending_rewards(self).await,
             "posi_nft_pool" => posi_nft_pool::get_pending_rewards(self).await,
             _ => {
-                log::error!("operation not implemented {:?}", self.operation);
+                tracing::error!("operation not implemented {:?}", self.operation);
                 U256::from(0_i32)
             }
         }
@@ -136,7 +136,7 @@ impl YieldFarm {
             "cake_auto_pool" => pancake_swap_auto_cake_pool::harvest(self).await,
             "pacoca_auto_pool" => pacoca_auto_pool::harvest(self).await,
             "baby_auto_baby_pool" => baby_auto_baby_pool::harvest(self).await,
-            _ => log::error!("operation not implemented {:?}", self.operation),
+            _ => tracing::error!("operation not implemented {:?}", self.operation),
         }
     }
 
@@ -146,7 +146,7 @@ impl YieldFarm {
             "pacoca_auto_pool" => pacoca_auto_pool::deposit(self, amount).await,
             "posi_pool_baby" => posi_smartchief::deposit(self, amount).await,
             "baby_auto_baby_pool" => baby_auto_baby_pool::deposit(self, amount).await,
-            _ => log::error!("operation not implemented {:?}", self.operation),
+            _ => tracing::error!("operation not implemented {:?}", self.operation),
         }
     }
 
@@ -158,7 +158,7 @@ impl YieldFarm {
             "baby_auto_baby_pool" => baby_auto_baby_pool::get_deposited_amount(self).await,
             "posi_nft_pool" => posi_nft_pool::get_deposited_amount(self).await,
             _ => {
-                log::error!(
+                tracing::error!(
                     "get_deposited_amount not implemented for operation: {:?}",
                     self.operation
                 );

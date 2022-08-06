@@ -69,7 +69,7 @@ pub async fn get_pending_rewards(yield_farm: &YieldFarm) -> U256 {
     let asset = match yield_farm.get_reward_asset() {
         Some(a) => a,
         None => {
-            log::error!("missing reward asset in assets");
+            tracing::error!("missing reward asset in assets");
             return U256::from(0_i32);
         }
     };
@@ -87,7 +87,7 @@ pub async fn get_deposited_amount(yield_farm: &YieldFarm) -> U256 {
     let asset = match yield_farm.get_deposit_asset() {
         Some(a) => a,
         None => {
-            log::error!("missing reward asset in assets");
+            tracing::error!("missing reward asset in assets");
             return U256::from(0_i32);
         }
     };
@@ -118,7 +118,7 @@ pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
         },
     )
     .await;
-    log::debug!(
+    tracing::debug!(
         "harvest called estimate_gas: {:?}",
         estimate_gas_from_helper
     );
@@ -127,10 +127,10 @@ pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
 
     let func_data =
         shared::blockchain_utils::generate_func_data(&contract, "deposit", &[Token::Uint(amount)]);
-    log::debug!("harvest(): func_data: {:?}", func_data);
+    tracing::debug!("harvest(): func_data: {:?}", func_data);
 
     let nonce = from_wallet.nonce(client.clone()).await;
-    log::debug!("harvest(): nonce: {:?}", nonce);
+    tracing::debug!("harvest(): nonce: {:?}", nonce);
 
     let transaction_obj = shared::blockchain_utils::build_transaction_params(
         nonce,
@@ -140,7 +140,7 @@ pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
         estimate_gas,
         Bytes(func_data),
     );
-    log::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
+    tracing::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
 
     shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
         .await;
@@ -151,7 +151,7 @@ pub async fn harvest(yield_farm: &YieldFarm) {
     let asset = match yield_farm.get_reward_asset() {
         Some(a) => a,
         None => {
-            log::error!("missing reward asset in assets");
+            tracing::error!("missing reward asset in assets");
             return;
         }
     };
@@ -173,17 +173,17 @@ pub async fn harvest(yield_farm: &YieldFarm) {
         },
     )
     .await;
-    log::debug!("harvest called estimate_gas: {:?}", estimate_gas);
+    tracing::debug!("harvest called estimate_gas: {:?}", estimate_gas);
 
     let func_data = shared::blockchain_utils::generate_func_data(
         &contract,
         "withdraw",
         &[Token::Uint(pending_shares)],
     );
-    log::debug!("harvest(): func_data: {:?}", func_data);
+    tracing::debug!("harvest(): func_data: {:?}", func_data);
 
     let nonce = from_wallet.nonce(client.clone()).await;
-    log::debug!("harvest(): nonce: {:?}", nonce);
+    tracing::debug!("harvest(): nonce: {:?}", nonce);
 
     let transaction_obj = shared::blockchain_utils::build_transaction_params(
         nonce,
@@ -193,7 +193,7 @@ pub async fn harvest(yield_farm: &YieldFarm) {
         estimate_gas,
         Bytes(func_data),
     );
-    log::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
+    tracing::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
 
     shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
         .await;

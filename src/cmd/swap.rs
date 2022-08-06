@@ -29,10 +29,10 @@ pub async fn call_sub_commands(args: &ArgMatches) {
 
     let input_asset =
         cmd::helpers::get_token_input_in_network_from_args(args, exchange.network_id());
-    log::debug!("input_token: {:?}", input_asset);
+    tracing::debug!("input_token: {:?}", input_asset);
     let output_asset =
         cmd::helpers::get_token_output_in_network_from_args(args, exchange.network_id());
-    log::debug!("output_token: {:?}", output_asset);
+    tracing::debug!("output_token: {:?}", output_asset);
 
     let input_asset_decimals = input_asset.decimals().await;
     let output_asset_decimals = output_asset.decimals().await;
@@ -48,11 +48,11 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         .last()
         .unwrap()
         .into();
-    log::debug!("amount_mint_out: {:?}", amount_min_out);
+    tracing::debug!("amount_mint_out: {:?}", amount_min_out);
 
     let slippage_amount = (amount_min_out * slippage) / U256::exp10(output_asset_decimals.into());
     let amount_out_slippage = amount_min_out - slippage_amount;
-    //log::debug!("amount_out_slippage : {:?}", amount_out_slippage);
+    //tracing::debug!("amount_out_slippage : {:?}", amount_out_slippage);
     exchange
         .swap_tokens_for_tokens(
             wallet,

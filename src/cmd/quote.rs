@@ -27,10 +27,10 @@ pub async fn call_sub_commands(args: &ArgMatches) {
 
     let input_token =
         cmd::helpers::get_token_input_in_network_from_args(args, exchange.network_id());
-    log::debug!("input_token: {:?}", input_token);
+    tracing::debug!("input_token: {:?}", input_token);
     let output_token =
         cmd::helpers::get_token_output_in_network_from_args(args, exchange.network_id());
-    log::debug!("output_token: {:?}", output_token);
+    tracing::debug!("output_token: {:?}", output_token);
 
     let input_token_decimals = input_token.decimals().await;
     let output_token_decimals = output_token.decimals().await;
@@ -40,7 +40,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
 
     let asset_path = exchange.build_route_for(&input_token, &output_token).await;
 
-    log::debug!("asset_path: {:?}", asset_path);
+    tracing::debug!("asset_path: {:?}", asset_path);
 
     let amount_min_out: U256 = exchange
         .get_amounts_out(amount_in, asset_path.clone())

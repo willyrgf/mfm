@@ -54,7 +54,7 @@ impl AssetRebalancer {
             .get_network()
             .get_exchange_by_liquidity(&asset_balances.asset, &quoted_asset, asset_balances.balance)
             .await.unwrap_or_else(||{
-                log::error!(
+                tracing::error!(
                     "AssetRebalancer::new(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
                     &asset_balances.asset,
                     quoted_asset
@@ -66,7 +66,7 @@ impl AssetRebalancer {
             .get_network()
             .get_exchange_by_liquidity(&quoted_asset, &parking_asset, quoted_amount_to_trade)
             .await.unwrap_or_else(||{
-                log::error!(
+                tracing::error!(
                     "AssetRebalancer::new(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
                     quoted_asset,
                     parking_asset
@@ -124,7 +124,7 @@ impl AssetBalances {
             .get_network()
             .get_exchange_by_liquidity(&asset, &quoted_asset, unit_amount)
             .await.unwrap_or_else(||{
-                log::error!(
+                tracing::error!(
                     "AssetBalances::new(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
                     asset,
                     quoted_asset
@@ -234,7 +234,7 @@ pub async fn move_asset_with_slippage(
     let balance = asset_in.balance_of(from_wallet.address()).await;
     let exchange = rebalancer_config.get_network().get_exchange_by_liquidity(asset_in, asset_out, amount_in).await
         .unwrap_or_else(|| {
-            log::error!(
+            tracing::error!(
                 "move_asset_with_slippage(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
                 asset_in,
                 asset_out
@@ -261,7 +261,7 @@ pub async fn move_asset_with_slippage(
     let slippage = amount_in_slippage + amount_out_slippage;
     let slippage_amount = (amount_out * slippage) / U256::exp10(asset_out_decimals.into());
     let asset_out_amount_slip = amount_out - slippage_amount;
-    log::debug!("asset_out_amount_slip: {:?}", asset_out_amount_slip);
+    tracing::debug!("asset_out_amount_slip: {:?}", asset_out_amount_slip);
 
     exchange
         .swap_tokens_for_tokens(
@@ -291,7 +291,7 @@ pub async fn move_assets_to_parking(
             .get_network()
             .get_exchange_by_liquidity(&ab.asset, &parking_asset, ab.balance)
             .await.unwrap_or_else(||{
-                log::error!(
+                tracing::error!(
                     "move_assets_to_parking(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
                     ab.asset,
                     parking_asset
@@ -311,7 +311,7 @@ pub async fn move_assets_to_parking(
         let min_move =
             rebalancer_config.parking_asset_min_move_u256(parking_asset.decimals().await);
         if min_move >= parking_amount_out {
-            log::error!(
+            tracing::error!(
                 "min_move not sattisfied: min_move {}, parking_amount_out {}",
                 min_move,
                 parking_amount_out
@@ -351,13 +351,13 @@ pub async fn move_parking_to_assets(
         let parking_slip = parking_asset.slippage_u256(ab.asset_decimals);
         let parking_amount =
             ab.desired_parking_to_move(total_parking_balance, parking_asset_decimals);
-        log::debug!("desired_parking_to_move: {}", parking_amount);
+        tracing::debug!("desired_parking_to_move: {}", parking_amount);
 
         let exchange = ab.asset
             .get_network()
             .get_exchange_by_liquidity(&parking_asset, &ab.asset, parking_amount)
             .await.unwrap_or_else(||{
-                log::error!(
+                tracing::error!(
                     "move_parking_to_assets(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
                     parking_asset,
                     ab.asset
@@ -373,21 +373,21 @@ pub async fn move_parking_to_assets(
             .last()
             .unwrap()
             .into();
-        log::debug!("asset_amount_out: {:?}", asset_amount_out);
+        tracing::debug!("asset_amount_out: {:?}", asset_amount_out);
 
         let ab_slip = ab.asset.slippage_u256(ab.asset_decimals);
         let slippage = ab_slip + parking_slip;
-        log::debug!("slippage: {:?}", slippage);
+        tracing::debug!("slippage: {:?}", slippage);
 
         let slippage_amount = (asset_amount_out * slippage) / U256::exp10(ab.asset_decimals.into());
-        log::debug!("slippage_amount: {:?}", slippage_amount);
+        tracing::debug!("slippage_amount: {:?}", slippage_amount);
 
         let asset_amount_out_slip = asset_amount_out - slippage_amount;
-        log::debug!("asset_amount_out_slip: {:?}", asset_amount_out_slip);
+        tracing::debug!("asset_amount_out_slip: {:?}", asset_amount_out_slip);
 
         let min_move = rebalancer_config.parking_asset_min_move_u256(parking_asset_decimals);
         if min_move >= parking_amount {
-            log::error!(
+            tracing::error!(
                 "min_move not sattisfied: min_move {}, parking_amounts_out {}",
                 min_move,
                 parking_amount
@@ -427,7 +427,7 @@ pub fn bigint_to_u256(b: BigInt) -> U256 {
 //TODO: break validation and threshold
 pub async fn validate(config: &RebalancerConfig) {
     if !config.is_valid_portfolio_total_percentage() {
-        log::error!(
+        tracing::error!(
             "rebalancer: {}, sum of portfolio percent should be 100, current is: {}",
             config.name(),
             config.total_percentage()
@@ -439,7 +439,7 @@ pub async fn validate(config: &RebalancerConfig) {
     let assets_balances = get_assets_balances(config, assets).await;
 
     if !config.reach_min_threshold(&assets_balances) {
-        log::error!(
+        tracing::error!(
             "rebalancer: {}, the minimum threshold configured was not reached",
             config.name()
         );
@@ -464,7 +464,7 @@ pub async fn run_full_parking(config: &RebalancerConfig) {
     move_assets_to_parking(config, &assets_balances).await;
 
     let total_parking_balance = get_total_parking_balance(&parking_asset, from_wallet).await;
-    log::debug!(
+    tracing::debug!(
         "run_rebalancer_full_parking(): after move assets_to_parking: total_parking_balance: {}",
         total_parking_balance
     );
@@ -472,7 +472,7 @@ pub async fn run_full_parking(config: &RebalancerConfig) {
     move_parking_to_assets(config, &assets_balances).await;
 
     let total_parking_balance = get_total_parking_balance(&parking_asset, from_wallet).await;
-    log::debug!(
+    tracing::debug!(
         "run_rebalancer_full_parking(): after move parking_to_assets: total_parking_balance: {}",
         total_parking_balance
     );
@@ -509,11 +509,11 @@ pub async fn run_diff_parking_per_kind(
             config.parking_asset_min_move_u256(config.get_parking_asset().decimals().await);
 
         if min_move >= ar.parking_amount_to_trade {
-            log::debug!("run_diff_parking_per_kind(): min_move >= ar.parking_amount_to_trade, min_move: {}, ar.parking_amount_to_trade: {}", min_move, ar.parking_amount_to_trade);
+            tracing::debug!("run_diff_parking_per_kind(): min_move >= ar.parking_amount_to_trade, min_move: {}, ar.parking_amount_to_trade: {}", min_move, ar.parking_amount_to_trade);
             continue;
         }
 
-        log::debug!("diff_parking: parking_to_asset: asset_in.name: {}, asset_out.name: {}, amount_in: {:?}, amount_out: {:?}", asset_in.name(), asset_out.name(), amount_in, amount_out);
+        tracing::debug!("diff_parking: parking_to_asset: asset_in.name: {}, asset_out.name: {}, amount_in: {:?}, amount_out: {:?}", asset_in.name(), asset_out.name(), amount_in, amount_out);
 
         move_asset_with_slippage(config, asset_in, asset_out, amount_in, amount_out).await
     }
@@ -534,7 +534,7 @@ pub async fn generate_asset_rebalances(config: &RebalancerConfig) -> Vec<AssetRe
         .iter()
         .fold(U256::from(0_i32), |acc, x| acc + x.quoted_balance());
 
-    log::debug!(
+    tracing::debug!(
         "diff_parking: total_quoted_balance: {}",
         total_quoted_balance
     );
@@ -542,7 +542,7 @@ pub async fn generate_asset_rebalances(config: &RebalancerConfig) -> Vec<AssetRe
     let mut asset_rebalances = vec![];
 
     let tqb = u256_to_bigint(total_quoted_balance);
-    log::debug!("diff_parking: tqb: {}", tqb);
+    tracing::debug!("diff_parking: tqb: {}", tqb);
 
     // TODO: break this for in functions to return rp_to_parking rp_from_parking
     for ab in assets_balances_with_parking.clone() {
@@ -573,12 +573,12 @@ pub async fn generate_asset_rebalances(config: &RebalancerConfig) -> Vec<AssetRe
         match AssetRebalancer::new(kind, config.clone(), ab.clone(), quoted_amount_to_trade).await {
             Some(ar) => asset_rebalances.push(ar),
             None => {
-                log::debug!("diff_parking: rebalancer_parking cant be created, continue.");
+                tracing::debug!("diff_parking: rebalancer_parking cant be created, continue.");
                 continue;
             }
         };
 
-        log::debug!("diff_parking: ab: {}, quoted_balance: {}, ab.percent(): {}, percent: {}, diff: {}, percent_to_buy: {}, amount_to_trade: {}, total: {}",
+        tracing::debug!("diff_parking: ab: {}, quoted_balance: {}, ab.percent(): {}, percent: {}, diff: {}, percent_to_buy: {}, amount_to_trade: {}, total: {}",
 				ab.asset.name(),
 				quoted_balance,
 				ab.percent(),

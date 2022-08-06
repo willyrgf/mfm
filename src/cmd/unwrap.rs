@@ -18,7 +18,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let network = match cmd::helpers::get_network(args) {
         Some(n) => n,
         None => {
-            log::error!("--network not found");
+            tracing::error!("--network not found");
             panic!()
         }
     };

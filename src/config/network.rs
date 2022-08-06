@@ -98,7 +98,7 @@ impl Network {
                 )
             }
             _ => {
-                log::debug!("Network::get_exchange_by_liquidity(): not exchange found, input_asset: {:?}, output_asset: {:?}", input_asset, output_asset);
+                tracing::debug!("Network::get_exchange_by_liquidity(): not exchange found, input_asset: {:?}, output_asset: {:?}", input_asset, output_asset);
                 None
             }
         }

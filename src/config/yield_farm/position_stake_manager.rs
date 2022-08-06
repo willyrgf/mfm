@@ -46,7 +46,7 @@ pub async fn harvest(pool_id: i32, yield_farm: &YieldFarm) {
         )
         .await
         .unwrap();
-    log::debug!("harvest called estimate_gas: {:?}", estimate_gas);
+    tracing::debug!("harvest called estimate_gas: {:?}", estimate_gas);
 
     let func_data = yield_farm
         .contract()
@@ -59,10 +59,10 @@ pub async fn harvest(pool_id: i32, yield_farm: &YieldFarm) {
             Token::Address(referrer_address),
         ])
         .unwrap();
-    log::debug!("harvest(): func_data: {:?}", func_data);
+    tracing::debug!("harvest(): func_data: {:?}", func_data);
 
     let nonce = from_wallet.nonce(client.clone()).await;
-    log::debug!("harvest(): nonce: {:?}", nonce);
+    tracing::debug!("harvest(): nonce: {:?}", nonce);
 
     let transaction_obj = TransactionParameters {
         nonce: Some(nonce),
@@ -73,7 +73,7 @@ pub async fn harvest(pool_id: i32, yield_farm: &YieldFarm) {
         data: Bytes(func_data),
         ..Default::default()
     };
-    log::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
+    tracing::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
 
     let secret = from_wallet.secret();
     let signed_transaction = client
@@ -81,15 +81,15 @@ pub async fn harvest(pool_id: i32, yield_farm: &YieldFarm) {
         .sign_transaction(transaction_obj, &secret)
         .await
         .unwrap();
-    log::debug!("harvest(): signed_transaction: {:?}", signed_transaction);
+    tracing::debug!("harvest(): signed_transaction: {:?}", signed_transaction);
 
     let tx_address = client
         .eth()
         .send_raw_transaction(signed_transaction.raw_transaction)
         .await
         .unwrap();
-    log::debug!("harvest(): tx_adress: {}", tx_address);
+    tracing::debug!("harvest(): tx_adress: {}", tx_address);
 
     let receipt = shared::blockchain_utils::wait_receipt(client.clone(), tx_address).await;
-    log::debug!("receipt: {:?}", receipt);
+    tracing::debug!("receipt: {:?}", receipt);
 }

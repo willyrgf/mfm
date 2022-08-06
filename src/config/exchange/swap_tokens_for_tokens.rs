@@ -80,12 +80,12 @@ pub async fn swap(
         Ok(e) => e,
         Err(err) => {
             // TODO: return error
-            log::error!("swap(): estimate_gas(): err: {}, asset_path: {:?}, amount_in: {:?}, amount_min_out: {:?}", err, asset_path, amount_in, amount_min_out);
+            tracing::error!("swap(): estimate_gas(): err: {}, asset_path: {:?}, amount_in: {:?}, amount_min_out: {:?}", err, asset_path, amount_in, amount_min_out);
             panic!()
         }
     };
 
-    log::debug!("swap_tokens_for_tokens estimate_gas: {}", estimate_gas);
+    tracing::debug!("swap_tokens_for_tokens estimate_gas: {}", estimate_gas);
 
     let func_data = exchange
         .router_contract()
@@ -101,10 +101,10 @@ pub async fn swap(
             Token::Uint(U256::from_dec_str(&valid_timestamp.to_string()).unwrap()),
         ])
         .unwrap();
-    log::debug!("swap_tokens_for_tokens(): func_data: {:?}", func_data);
+    tracing::debug!("swap_tokens_for_tokens(): func_data: {:?}", func_data);
 
     let nonce = from_wallet.nonce(client.clone()).await;
-    log::debug!("swap_tokens_for_tokens(): nonce: {:?}", nonce);
+    tracing::debug!("swap_tokens_for_tokens(): nonce: {:?}", nonce);
 
     let estimate_with_margin =
         (estimate_gas * (U256::from(10000_i32) + U256::from(1000_i32))) / U256::from(10000_i32);
@@ -117,7 +117,7 @@ pub async fn swap(
         data: Bytes(func_data),
         ..Default::default()
     };
-    log::debug!(
+    tracing::debug!(
         "swap_tokens_for_tokens(): transaction_obj: {:?}",
         transaction_obj
     );

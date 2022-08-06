@@ -23,7 +23,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
 
     let asset_decimals = asset.decimals().await;
     let amount = cmd::helpers::get_amount(args, asset_decimals);
-    log::debug!("amount: {:?}", amount);
+    tracing::debug!("amount: {:?}", amount);
 
     asset
         .approve_spender(wallet, exchange.as_router_address().unwrap(), amount)
@@ -32,7 +32,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let remaning = asset
         .allowance(wallet.address(), exchange.as_router_address().unwrap())
         .await;
-    log::debug!(
+    tracing::debug!(
         "approved_spender allowance remaning to spend: {:?}, asset_decimals: {}",
         remaning,
         asset_decimals

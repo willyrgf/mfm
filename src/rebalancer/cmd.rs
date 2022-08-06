@@ -46,7 +46,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
             cmd_info(sub_args).await;
         }
         _ => {
-            log::error!("no sub cmd found");
+            tracing::error!("no sub cmd found");
             panic!("sub_cmd_not_found");
         }
     }
@@ -54,7 +54,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
 
 async fn cmd_run(args: &ArgMatches) {
     let config = cmd::helpers::get_rebalancer(args);
-    log::debug!(
+    tracing::debug!(
         "rebalancer::cmd::call_sub_commands(): rebalancer_config: {:?}",
         config
     );
@@ -63,18 +63,18 @@ async fn cmd_run(args: &ArgMatches) {
 
     match config.strategy() {
         Strategy::FullParking => {
-            log::debug!("rebalancer::cmd::call_sub_commands() Strategy::FullParking");
+            tracing::debug!("rebalancer::cmd::call_sub_commands() Strategy::FullParking");
             rebalancer::run_full_parking(&config).await;
         }
         Strategy::DiffParking => {
-            log::debug!("rebalancer::cmd::call_sub_commands() Strategy::DiffParking");
+            tracing::debug!("rebalancer::cmd::call_sub_commands() Strategy::DiffParking");
             rebalancer::run_diff_parking(&config).await;
         }
     }
 }
 
 async fn cmd_info(args: &ArgMatches) {
-    log::debug!("cmd_info()");
+    tracing::debug!("cmd_info()");
 
     let hide_zero = true;
     let config = cmd::helpers::get_rebalancer(args);
@@ -156,7 +156,7 @@ async fn cmd_info(args: &ArgMatches) {
         .get_network()
         .get_exchange_by_liquidity(&input_asset, &parking_asset, amount_in)
         .await.unwrap_or_else(||{
-            log::error!(
+            tracing::error!(
                 "cmd_info(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
                 input_asset.clone(),
                 parking_asset

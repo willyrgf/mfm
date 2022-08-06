@@ -117,7 +117,7 @@ pub fn get_rebalancer(args: &ArgMatches) -> RebalancerConfig {
         Some(i) => match config.rebalancers.clone() {
             Some(rebalancers) => rebalancers.get(i).clone(),
             None => {
-                log::error!("get_rebalancer() rebalancers is not configured");
+                tracing::error!("get_rebalancer() rebalancers is not configured");
                 panic!()
             }
         },
@@ -131,7 +131,7 @@ pub fn get_withdraw_wallet(args: &ArgMatches) -> WithdrawWallet {
         Some(w) => match config.withdraw_wallets.clone() {
             Some(withdraw_wallets) => withdraw_wallets.get(w).clone(),
             None => {
-                log::error!("get_withdraw_wallet() withdraw_wallet is not configured");
+                tracing::error!("get_withdraw_wallet() withdraw_wallet is not configured");
                 panic!()
             }
         },
@@ -145,7 +145,7 @@ pub fn get_yield_farm(args: &ArgMatches) -> YieldFarm {
         Some(y) => match config.yield_farms.clone() {
             Some(yield_farms) => yield_farms.get(y).clone(),
             None => {
-                log::error!("get_yield_farm() yield_farm is not configured");
+                tracing::error!("get_yield_farm() yield_farm is not configured");
                 panic!()
             }
         },
