@@ -31,12 +31,12 @@ pub struct Server {
 pub struct Config {
     pub server: Option<Server>,
     pub wallets: Wallets,
-    pub withdraw_wallets: WithdrawWallets,
-    pub assets: AssetsConfig,
+    pub withdraw_wallets: Option<WithdrawWallets>,
     pub networks: Networks,
     pub exchanges: Exchanges,
-    pub rebalancers: RebalancersConfig,
-    pub yield_farms: YieldFarms,
+    pub assets: AssetsConfig,
+    pub yield_farms: Option<YieldFarms>,
+    pub rebalancers: Option<RebalancersConfig>,
 }
 
 impl Config {

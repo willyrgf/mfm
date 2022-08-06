@@ -55,29 +55,6 @@ exchanges:
     factory_address: 0x858e3312ed3a876947ea49d572a7c42de08af7ee
     network_id: bsc
 
-rebalancers:
-  test-rebalancer:
-    name: test-anonq-busd
-    network_id: bsc
-    wallet_id: test-wallet
-    portfolio:
-      anonq:
-        percent: 40
-      busd:
-        percent: 25
-      wbnb:
-        percent: 25
-      eth:
-        percent: 5
-      btc:
-        percent: 5
-    strategy: full_parking #diff_parking
-    # if zero, always run
-    threshold_percent: 2
-    quoted_in: busd
-    parking_asset_id: busd
-    parking_asset_min_move: 0.01
-
 yield_farms:
   posi-farm-bnb-posi:
     name: posi-farm-bnb-posi
@@ -394,3 +371,27 @@ assets:
         address: 0x53e562b9b7e5e94b81f10e96ee70ad06df3d2657
         slippage: 1
         path_asset: usdt
+
+rebalancers:
+  test-rebalancer:
+    name: test-anonq-busd
+    network_id: bsc
+    wallet_id: test-wallet
+    portfolio:
+      anonq:
+        percent: 40
+      busd:
+        percent: 25
+      wbnb:
+        percent: 25
+      eth:
+        percent: 5
+      btc:
+        percent: 5
+    strategy: full_parking #diff_parking
+    # if zero, always run
+    threshold_percent: 2
+    quoted_in: busd
+    parking_asset_id: busd
+    parking_asset_min_move: 0.01
+

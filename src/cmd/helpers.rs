@@ -111,26 +111,44 @@ pub fn get_slippage(args: &ArgMatches, asset_decimals: u8) -> U256 {
     }
 }
 
-pub fn get_rebalancer(args: &ArgMatches) -> &RebalancerConfig {
+pub fn get_rebalancer(args: &ArgMatches) -> RebalancerConfig {
     let config = Config::global();
     match args.value_of("name") {
-        Some(i) => config.rebalancers.get(i),
+        Some(i) => match config.rebalancers.clone() {
+            Some(rebalancers) => rebalancers.get(i).clone(),
+            None => {
+                log::error!("get_rebalancer() rebalancers is not configured");
+                panic!()
+            }
+        },
         None => panic!("--name not supported"),
     }
 }
 
-pub fn get_withdraw_wallet(args: &ArgMatches) -> &WithdrawWallet {
+pub fn get_withdraw_wallet(args: &ArgMatches) -> WithdrawWallet {
     let config = Config::global();
     match args.value_of("withdraw-wallet") {
-        Some(w) => config.withdraw_wallets.get(w),
+        Some(w) => match config.withdraw_wallets.clone() {
+            Some(withdraw_wallets) => withdraw_wallets.get(w).clone(),
+            None => {
+                log::error!("get_withdraw_wallet() withdraw_wallet is not configured");
+                panic!()
+            }
+        },
         None => panic!("--withdraw-wallet not supported"),
     }
 }
 
-pub fn get_yield_farm(args: &ArgMatches) -> &YieldFarm {
+pub fn get_yield_farm(args: &ArgMatches) -> YieldFarm {
     let config = Config::global();
     match args.value_of("yield-farm") {
-        Some(w) => config.yield_farms.get(w),
+        Some(y) => match config.yield_farms.clone() {
+            Some(yield_farms) => yield_farms.get(y).clone(),
+            None => {
+                log::error!("get_yield_farm() yield_farm is not configured");
+                panic!()
+            }
+        },
         None => panic!("--yield-farm not supported"),
     }
 }

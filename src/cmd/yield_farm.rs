@@ -61,18 +61,32 @@ pub fn generate_cmd<'a>() -> Command<'a> {
         .subcommand(generate_deposit_cmd())
 }
 
-pub fn get_farms_to_look(args: &ArgMatches) -> Vec<&YieldFarm> {
-    let farms_to_look: Vec<&YieldFarm> = match args.value_of("yield-farm") {
-        Some(y) => vec![Config::global().yield_farms.get(y)],
-        None => Config::global()
-            .yield_farms
-            .hashmap()
-            .iter()
-            .map(|(_k, v)| v)
-            .collect::<Vec<&YieldFarm>>(),
+pub fn get_farms_to_look(args: &ArgMatches) -> Vec<YieldFarm> {
+    let farms_to_look = match args.value_of("yield-farm") {
+        Some(y) => {
+            let yieldfarms = match Config::global().yield_farms.clone() {
+                Some(yf) => yf,
+                None => {
+                    log::error!("get_farms_to_look(): yield_farms is not configured");
+                    panic!()
+                }
+            };
+            vec![yieldfarms.get(y).clone()]
+        }
+        None => match Config::global().yield_farms.clone() {
+            Some(yf) => yf
+                .hashmap()
+                .into_iter()
+                .map(|(_k, v)| v.clone())
+                .collect::<Vec<YieldFarm>>(),
+            None => {
+                log::error!("get_farms_to_look(): yield_farms is not configured");
+                panic!()
+            }
+        },
     };
 
-    farms_to_look
+    farms_to_look.clone()
 }
 
 pub async fn call_info_cmd(args: &ArgMatches) {
@@ -91,7 +105,7 @@ pub async fn call_info_cmd(args: &ArgMatches) {
         "Min rewards required"
     ]);
 
-    futures::future::join_all(get_farms_to_look(args).iter().map(|&yield_farm| async {
+    futures::future::join_all(get_farms_to_look(args).iter().map(|yield_farm| async {
         let quoted_asset =
             cmd::helpers::get_quoted_asset_in_network_from_args(args, yield_farm.network_id())
                 .unwrap();

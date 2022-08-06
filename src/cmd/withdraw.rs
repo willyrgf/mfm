@@ -44,5 +44,5 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let asset_decimals = asset.decimals().await;
     let amount = cmd::helpers::get_amount(args, asset_decimals);
 
-    asset.withdraw(wallet, withdraw_wallet, amount).await;
+    asset.withdraw(wallet, &withdraw_wallet, amount).await;
 }

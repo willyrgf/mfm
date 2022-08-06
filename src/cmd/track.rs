@@ -60,7 +60,16 @@ async fn cmd_run(_args: &ArgMatches) {
         }
     };
 
-    for (rebalancer_name, rebalancer_config) in config.rebalancers.hashmap().iter() {
+    for (rebalancer_name, rebalancer_config) in match config.rebalancers.clone() {
+        Some(rebalancers) => rebalancers,
+        None => {
+            log::error!("track::cmd_run(): rebalancer is not configured");
+            panic!()
+        }
+    }
+    .hashmap()
+    .iter()
+    {
         log::info!(
             "track::cmd_run(): rebalancer_name: {:?}, rebalancer_config: {:?}",
             rebalancer_name,

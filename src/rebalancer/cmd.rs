@@ -59,16 +59,16 @@ async fn cmd_run(args: &ArgMatches) {
         config
     );
 
-    rebalancer::validate(config).await;
+    rebalancer::validate(&config).await;
 
     match config.strategy() {
         Strategy::FullParking => {
             log::debug!("rebalancer::cmd::call_sub_commands() Strategy::FullParking");
-            rebalancer::run_full_parking(config).await;
+            rebalancer::run_full_parking(&config).await;
         }
         Strategy::DiffParking => {
             log::debug!("rebalancer::cmd::call_sub_commands() Strategy::DiffParking");
-            rebalancer::run_diff_parking(config).await;
+            rebalancer::run_diff_parking(&config).await;
         }
     }
 }
@@ -93,7 +93,7 @@ async fn cmd_info(args: &ArgMatches) {
         "Quoted amount to trade"
     ]);
 
-    let asset_rebalances = generate_asset_rebalances(config).await;
+    let asset_rebalances = generate_asset_rebalances(&config).await;
     asset_rebalances.clone().iter().for_each(|ar| {
         let balance_of = ar.asset_balances.balance;
         let asset = ar.asset_balances.asset.clone();
