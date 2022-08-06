@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use web3::types::U256;
 
 pub const TRACK_COMMAND: &str = "track";
+const API_TOKEN_HEADER: &str = "X-Api-Token";
 
 //TODO: change the name of the tables like this
 #[derive(Deserialize, Serialize, Clone)]
@@ -36,7 +37,6 @@ pub struct TrackPortfolioStateData {
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct TrackPortfolioState {
-    token_id: String,
     rebalancer_label: String,
     data: TrackPortfolioStateData,
 }
@@ -177,7 +177,6 @@ async fn cmd_run(_args: &ArgMatches) {
                 gas_price,
             };
             TrackPortfolioState {
-                token_id: api_token.clone(),
                 rebalancer_label: rebalancer_name.to_string(),
                 data,
             }
@@ -190,6 +189,7 @@ async fn cmd_run(_args: &ArgMatches) {
             client
                 .post(&format!("{}/portfolio_state", api_address))
                 .header("Content-Type", "application/json")
+                .header(API_TOKEN_HEADER, api_token.clone())
                 .body(string_body)
                 .send()
                 .await
