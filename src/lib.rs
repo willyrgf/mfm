@@ -1,4 +1,5 @@
 pub mod asset;
+pub mod balances;
 pub mod cmd;
 pub mod config;
 pub mod rebalancer;

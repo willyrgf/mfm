@@ -1,32 +1,17 @@
-use crate::{cmd, config::Config, shared};
-use clap::{ArgMatches, Command};
-use prettytable::{cell, row, Table};
+use crate::{config::Config, shared};
+use clap::ArgMatches;
+use prettytable::{cell, row, table};
 use web3::types::U256;
 
-pub const BALANCES_COMMAND: &str = "balances";
+pub mod cmd;
 
-pub fn generate_cmd<'a>() -> Command<'a> {
-    Command::new(BALANCES_COMMAND)
-        .about("Check balances from all assets listed on config")
-        .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
-        .arg(
-            clap::arg!(-z --"hide-zero" <TRUE_FALSE> "hide zero balances")
-                .required(false)
-                .default_value("false"),
-        )
-}
-
-#[tracing::instrument(name = "balances call command")]
-pub async fn call_sub_commands(args: &ArgMatches) {
+#[tracing::instrument(name = "run balances")]
+async fn run(args: &ArgMatches) {
     let config = Config::global();
-    let wallet = cmd::helpers::get_wallet(args);
-    let hide_zero = match args.value_of("hide-zero") {
-        Some(b) => b.parse::<bool>().unwrap(),
-        _ => false,
-    };
+    let wallet = crate::cmd::helpers::get_wallet(args);
+    let hide_zero = crate::cmd::helpers::get_hide_zero(args);
 
-    let mut table = Table::new();
-    table.add_row(row![
+    let mut table = table!([
         "Network",
         "Asset",
         "Balance in float",

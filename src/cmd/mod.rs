@@ -1,11 +1,10 @@
-use crate::{config::Config, rebalancer, APP_NAME};
-use anyhow::{anyhow, Context};
-use clap::{crate_version, Arg, ArgMatches, Command};
+use crate::{balances, rebalancer};
+use crate::{config::Config, APP_NAME};
+use clap::{crate_version, ArgMatches, Command};
 use serde::{Deserialize, Serialize};
 
 pub mod allowance;
 pub mod approve;
-pub mod balances;
 pub mod enc;
 pub mod helpers;
 pub mod quote;
@@ -38,7 +37,7 @@ pub enum Commands {
 impl Commands {
     pub async fn run(&self, args: &ArgMatches) {
         match &self {
-            Self::Balances => balances::call_sub_commands(args).await,
+            Self::Balances => balances::cmd::call_sub_commands(args).await,
             Self::Wrap => wrap::call_sub_commands(args).await,
             Self::Unwrap => unwrap::call_sub_commands(args).await,
             Self::Swap => swap::call_sub_commands(args).await,
@@ -71,7 +70,7 @@ pub fn new() -> clap::Command<'static> {
         .subcommand(transaction::generate_cmd())
         .subcommand(allowance::generate_cmd())
         .subcommand(approve::generate_cmd())
-        .subcommand(balances::generate_cmd())
+        .subcommand(balances::cmd::generate())
         .subcommand(rebalancer::cmd::generate_cmd())
         .subcommand(yield_farm::generate_cmd())
         .subcommand(withdraw::generate_cmd())
