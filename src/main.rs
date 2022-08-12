@@ -2,12 +2,9 @@ extern crate prettytable;
 use mfm::{
     cmd,
     telemetry::{get_subscriber, init_subscriber},
+    APP_NAME, DEFAULT_LOG_LEVEL,
 };
 
-const APP_NAME: &str = "mfm";
-const DEFAULT_LOG_LEVEL: &str = "info";
-
-//TODO: handle with all unwraps
 fn main() {
     let subscriber = get_subscriber(APP_NAME.into(), DEFAULT_LOG_LEVEL.into(), std::io::stdout);
     init_subscriber(subscriber);

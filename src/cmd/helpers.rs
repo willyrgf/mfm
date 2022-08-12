@@ -152,3 +152,37 @@ pub fn get_yield_farm(args: &ArgMatches) -> YieldFarm {
         None => panic!("--yield-farm not supported"),
     }
 }
+
+pub fn get_hide_zero(args: &ArgMatches) -> bool {
+    match args.value_of("hide-zero") {
+        Some(b) => b.parse().unwrap_or(false),
+        _ => false,
+    }
+}
+
+mod test {
+    use clap::{ArgMatches, Command};
+
+    fn _get_arg_matches(cmd: Command, argv: &'static str) -> ArgMatches {
+        cmd.try_get_matches_from(argv.split(' ').collect::<Vec<_>>())
+            .unwrap()
+    }
+
+    #[test]
+    fn get_hide_zero_working() {
+        use super::get_hide_zero;
+
+        let cmd = crate::balances::cmd::generate();
+
+        let test_cases = [
+            ("balances --wallet zero --hide-zero=true", true),
+            ("balances --wallet zero --hide-zero=false", false),
+            ("balances --wallet zero --hide-zero=invalid-false", false),
+        ];
+
+        for (argv, expected) in test_cases {
+            let arg_matches = _get_arg_matches(cmd.clone(), argv);
+            assert_eq!(get_hide_zero(&arg_matches), expected);
+        }
+    }
+}

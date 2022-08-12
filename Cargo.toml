@@ -27,6 +27,9 @@ tracing = { version = "0.1", features = [ "log" ] }
 tracing-subscriber = { version = "0.3", features = [ "registry", "env-filter" ] }
 tracing-bunyan-formatter = "0.3"
 tracing-log = "0.1"
+# anyhow = "1.0.59"
+anyhow = { version = "1.0", default-features = false }
+
 
 [build-dependencies]
 phf_codegen = "0.10.0"
