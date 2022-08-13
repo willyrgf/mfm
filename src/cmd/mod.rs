@@ -1,4 +1,4 @@
-use crate::{balances, rebalancer};
+use crate::{balances, rebalancer, wrap};
 use crate::{config::Config, APP_NAME};
 use clap::{crate_version, ArgMatches, Command};
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,6 @@ pub mod track;
 pub mod transaction;
 pub mod unwrap;
 pub mod withdraw;
-pub mod wrap;
 pub mod yield_farm;
 
 #[derive(Serialize, Deserialize)]
@@ -38,7 +37,7 @@ impl Commands {
     pub async fn run(&self, args: &ArgMatches) {
         match &self {
             Self::Balances => balances::cmd::call_sub_commands(args).await,
-            Self::Wrap => wrap::call_sub_commands(args).await,
+            Self::Wrap => wrap::cmd::call_sub_commands(args).await,
             Self::Unwrap => unwrap::call_sub_commands(args).await,
             Self::Swap => swap::call_sub_commands(args).await,
             Self::Allowance => allowance::call_sub_commands(args).await,
@@ -64,14 +63,14 @@ pub fn new() -> clap::Command<'static> {
                 .default_value("config.yaml"),
         )
         .subcommand_required(true)
-        .subcommand(wrap::generate_cmd())
+        .subcommand(wrap::cmd::generate())
         .subcommand(unwrap::generate_cmd())
         .subcommand(swap::generate_cmd())
         .subcommand(transaction::generate_cmd())
         .subcommand(allowance::generate_cmd())
         .subcommand(approve::generate_cmd())
         .subcommand(balances::cmd::generate())
-        .subcommand(rebalancer::cmd::generate_cmd())
+        .subcommand(rebalancer::cmd::generate())
         .subcommand(yield_farm::generate_cmd())
         .subcommand(withdraw::generate_cmd())
         .subcommand(quote::generate_cmd())

@@ -80,25 +80,14 @@ impl RebalancerConfig {
         }
     }
 
-    pub fn get_assets(&self) -> Vec<Asset> {
+    pub fn get_assets(&self) -> Result<Vec<Asset>, anyhow::Error> {
         self.portfolio
             .0
             .iter()
             .map(|(name, _)| {
-                match Config::global()
+                Config::global()
                     .assets
                     .find_by_name_and_network(name.as_str(), self.network_id.as_str())
-                {
-                    Some(a) => a,
-                    None => {
-                        tracing::error!(
-                            "get_assets(): doesnt exist asset by find_by_name_and_network(): name: {}, network: {}",
-                            name.as_str(),
-                            self.network_id.as_str()
-                        );
-                        panic!()
-                    }
-                }
             })
             .collect()
     }
@@ -125,8 +114,9 @@ impl RebalancerConfig {
             .unwrap()
     }
 
+    // TODO: refactor RebalancerConfig to carry the wallet and avoid panic here
     pub fn get_wallet<'a>(&self) -> &'a Wallet {
-        Config::global().wallets.get(&self.wallet_id)
+        Config::global().wallets.get(&self.wallet_id).unwrap()
     }
 
     pub fn get_network(&self) -> &Network {

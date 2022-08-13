@@ -50,21 +50,21 @@ impl YieldFarm {
         self.address.clone()
     }
 
-    pub fn get_deposit_asset(&self) -> Option<Asset> {
+    pub fn get_deposit_asset(&self) -> Result<Asset, anyhow::Error> {
         match &self.deposit_asset_id {
             Some(a) => Config::global()
                 .assets
                 .find_by_name_and_network(a.as_str(), self.network_id.as_str()),
-            None => None,
+            None => Err(anyhow::anyhow!("deposit_asset_id is not configured")),
         }
     }
 
-    pub fn get_reward_asset(&self) -> Option<Asset> {
+    pub fn get_reward_asset(&self) -> Result<Asset, anyhow::Error> {
         match &self.reward_asset_id {
             Some(a) => Config::global()
                 .assets
                 .find_by_name_and_network(a.as_str(), self.network_id.as_str()),
-            None => None,
+            None => Err(anyhow::anyhow!("reward_asset_id is not configured")),
         }
     }
 
@@ -74,8 +74,12 @@ impl YieldFarm {
         U256::from(qe)
     }
 
+    // TODO: refactor YieldFarm to carry the wallet and avoid panic here
     pub fn get_wallet<'a>(&self) -> &'a Wallet {
-        Config::global().wallets.get(self.wallet_id.as_str())
+        Config::global()
+            .wallets
+            .get(self.wallet_id.as_str())
+            .unwrap()
     }
 
     pub fn get_network<'a>(&self) -> &'a Network {
@@ -114,7 +118,10 @@ impl YieldFarm {
         match self.operation.as_str() {
             "posi_farm_bnb_posi" => posi_farm_bnb_posi::get_pending_rewards(self).await,
             "posi_farm_busd_posi" => posi_farm_busd_posi::get_pending_rewards(self).await,
-            "cake_auto_pool" => pancake_swap_auto_cake_pool::get_pending_rewards(self).await,
+            //TODO: remove all unwraps and return anyhow::Error
+            "cake_auto_pool" => pancake_swap_auto_cake_pool::get_pending_rewards(self)
+                .await
+                .unwrap(),
             "pacoca_auto_pool" => pacoca_auto_pool::get_pending_rewards(self).await,
             "qi_dao_staking_pool_qi_wmatic" => {
                 qi_dao_staking_pool_qi_wmatic::get_pending_rewards(self).await
@@ -152,7 +159,10 @@ impl YieldFarm {
 
     pub async fn get_deposited_amount(&self) -> U256 {
         match self.operation.as_str() {
-            "cake_auto_pool" => pancake_swap_auto_cake_pool::get_deposited_amount(self).await,
+            //TODO: remove all unwraps and return anyhow::Error
+            "cake_auto_pool" => pancake_swap_auto_cake_pool::get_deposited_amount(self)
+                .await
+                .unwrap(),
             "pacoca_auto_pool" => pacoca_auto_pool::get_deposited_amount(self).await,
             "posi_pool_baby" => posi_smartchief::get_deposited_amount(self).await,
             "baby_auto_baby_pool" => baby_auto_baby_pool::get_deposited_amount(self).await,

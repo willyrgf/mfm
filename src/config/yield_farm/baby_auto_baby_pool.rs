@@ -8,7 +8,10 @@ pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
 }
 
 pub async fn get_pending_rewards(yield_farm: &YieldFarm) -> U256 {
-    pancake_swap_auto_cake_pool::get_pending_rewards(yield_farm).await
+    //TODO: remove all unwraps and return anyhow::Error
+    pancake_swap_auto_cake_pool::get_pending_rewards(yield_farm)
+        .await
+        .unwrap()
 }
 
 pub async fn harvest(yield_farm: &YieldFarm) {
@@ -16,5 +19,8 @@ pub async fn harvest(yield_farm: &YieldFarm) {
 }
 
 pub async fn get_deposited_amount(yield_farm: &YieldFarm) -> U256 {
-    pancake_swap_auto_cake_pool::get_deposited_amount(yield_farm).await
+    //TODO: remove all unwraps and return anyhow::Error
+    pancake_swap_auto_cake_pool::get_deposited_amount(yield_farm)
+        .await
+        .unwrap()
 }

@@ -1,3 +1,4 @@
+use crate::cmd::helpers;
 use crate::{config::Config, shared};
 use clap::ArgMatches;
 use prettytable::{cell, row, table};
@@ -8,8 +9,11 @@ pub mod cmd;
 #[tracing::instrument(name = "run balances")]
 async fn run(args: &ArgMatches) {
     let config = Config::global();
-    let wallet = crate::cmd::helpers::get_wallet(args);
-    let hide_zero = crate::cmd::helpers::get_hide_zero(args);
+    let wallet = helpers::get_wallet(args).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
+    let hide_zero = helpers::get_hide_zero(args);
 
     let mut table = table!([
         "Network",
@@ -24,7 +28,7 @@ async fn run(args: &ArgMatches) {
             .assets
             .hashmap()
             .values()
-            .flat_map(|asset_config| asset_config.new_assets_list())
+            .flat_map(|asset_config| asset_config.new_assets_list().unwrap())
             .map(|asset| async move {
                 let balance_of = asset.balance_of(wallet.address()).await;
                 let decimals = asset.decimals().await;

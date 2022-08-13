@@ -19,7 +19,7 @@ pub async fn estimate_gas<P>(
     func_name: &str,
     params: P,
     options: Options,
-) -> U256
+) -> Result<U256, anyhow::Error>
 where
     P: Tokenize,
 {
@@ -27,21 +27,27 @@ where
     let estimate_gas = contract
         .estimate_gas(func_name, params, from_wallet.address(), options)
         .await
-        .unwrap();
+        .map_err(|e| anyhow::anyhow!("failed to execute estimate_gas, got: {:?}", e))?;
 
-    (estimate_gas * (U256::from(10000_i32) + U256::from(1000_i32))) / U256::from(10000_i32)
+    Ok((estimate_gas * (U256::from(10000_i32) + U256::from(1000_i32))) / U256::from(10000_i32))
 }
 
-pub fn generate_func_data(contract: &Contract<Http>, func_name: &str, input: &[Token]) -> Vec<u8> {
-    // let gas_price = client.eth().gas_price().await.unwrap();
-    let func_data = contract
+pub fn generate_func_data(
+    contract: &Contract<Http>,
+    func_name: &str,
+    input: &[Token],
+) -> Result<Vec<u8>, anyhow::Error> {
+    contract
         .abi()
         .function(func_name)
         .unwrap()
         .encode_input(input)
-        .unwrap();
-
-    func_data
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to generate with this input to this func, got: {:?}",
+                e
+            )
+        })
 }
 
 pub fn build_transaction_params(
@@ -80,40 +86,40 @@ pub async fn sign_transaction(
 pub async fn send_raw_transaction(
     client: Web3<Http>,
     signed_transaction: SignedTransaction,
-) -> H256 {
-    let tx_address = client
+) -> Result<H256, anyhow::Error> {
+    client
         .eth()
         .send_raw_transaction(signed_transaction.raw_transaction)
         .await
-        .unwrap();
-
-    tx_address
+        .map_err(|e| anyhow::anyhow!("failed to send raw transaction, got: {:?}", e))
 }
 
 pub async fn sign_send_and_wait_txn(
     client: Web3<Http>,
     transaction_obj: TransactionParameters,
     from_wallet: &Wallet,
-) {
+) -> Result<(), anyhow::Error> {
     let signed_transaction = sign_transaction(client.clone(), transaction_obj, from_wallet).await;
-    let tx_address = send_raw_transaction(client.clone(), signed_transaction).await;
+    let tx_address = send_raw_transaction(client.clone(), signed_transaction).await?;
 
-    let receipt = wait_receipt(client.clone(), tx_address).await;
+    let receipt = wait_receipt(client.clone(), tx_address).await?;
     tracing::debug!("receipt: {:?}", receipt);
+
+    Ok(())
 }
 
-pub async fn wait_receipt(client: web3::Web3<Http>, tx_address: H256) -> TransactionReceipt {
+pub async fn wait_receipt(
+    client: web3::Web3<Http>,
+    tx_address: H256,
+) -> Result<TransactionReceipt, anyhow::Error> {
     loop {
         match client.eth().transaction_receipt(tx_address).await {
-            Ok(Some(receipt)) => return receipt,
+            Ok(Some(receipt)) => return Ok(receipt),
             Ok(None) => {
                 thread::sleep(time::Duration::from_secs(5));
                 continue;
             }
-            Err(e) => {
-                tracing::error!("wait_receipt() err: {:?}", e);
-                panic!()
-            }
+            Err(e) => return Err(anyhow::anyhow!(e)),
         }
     }
 }

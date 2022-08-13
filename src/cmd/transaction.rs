@@ -11,13 +11,14 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 
 //TODO: finish it
 pub async fn call_sub_commands(args: &ArgMatches) {
-    let network = match cmd::helpers::get_network(args) {
-        Some(n) => n,
-        None => {
-            tracing::error!("--network not found");
-            panic!()
-        }
-    };
+    let network = cmd::helpers::get_network(args).unwrap();
+    // let network = match cmd::helpers::get_network(args) {
+    //     Some(n) => n,
+    //     None => {
+    //         tracing::error!("--network not found");
+    //         panic!()
+    //     }
+    // };
 
     let _client = network.get_web3_client_http();
 

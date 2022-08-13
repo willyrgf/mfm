@@ -65,14 +65,8 @@ pub async fn get_pending_rewards_amounts(
     (pending_shares, pending_rewards, amount_in_cake)
 }
 
-pub async fn get_pending_rewards(yield_farm: &YieldFarm) -> U256 {
-    let asset = match yield_farm.get_reward_asset() {
-        Some(a) => a,
-        None => {
-            tracing::error!("missing reward asset in assets");
-            return U256::from(0_i32);
-        }
-    };
+pub async fn get_pending_rewards(yield_farm: &YieldFarm) -> Result<U256, anyhow::Error> {
+    let asset = yield_farm.get_reward_asset()?;
     let asset_decimals = asset.decimals().await;
     let contract = yield_farm.contract();
     let wallet = yield_farm.get_wallet();
@@ -80,17 +74,11 @@ pub async fn get_pending_rewards(yield_farm: &YieldFarm) -> U256 {
     let (_, pending_rewards, _): (U256, U256, U256) =
         get_pending_rewards_amounts(&contract, wallet, asset_decimals).await;
 
-    pending_rewards
+    Ok(pending_rewards)
 }
 
-pub async fn get_deposited_amount(yield_farm: &YieldFarm) -> U256 {
-    let asset = match yield_farm.get_deposit_asset() {
-        Some(a) => a,
-        None => {
-            tracing::error!("missing reward asset in assets");
-            return U256::from(0_i32);
-        }
-    };
+pub async fn get_deposited_amount(yield_farm: &YieldFarm) -> Result<U256, anyhow::Error> {
+    let asset = yield_farm.get_deposit_asset()?;
     let asset_decimals = asset.decimals().await;
     let contract = yield_farm.contract();
     let wallet = yield_farm.get_wallet();
@@ -98,7 +86,7 @@ pub async fn get_deposited_amount(yield_farm: &YieldFarm) -> U256 {
     let (_, _, deposited_amount): (U256, U256, U256) =
         get_pending_rewards_amounts(&contract, wallet, asset_decimals).await;
 
-    deposited_amount
+    Ok(deposited_amount)
 }
 
 pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
@@ -117,7 +105,8 @@ pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
             ..Default::default()
         },
     )
-    .await;
+    .await
+    .unwrap();
     tracing::debug!(
         "harvest called estimate_gas: {:?}",
         estimate_gas_from_helper
@@ -126,10 +115,14 @@ pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
         / U256::from(30000_i32);
 
     let func_data =
-        shared::blockchain_utils::generate_func_data(&contract, "deposit", &[Token::Uint(amount)]);
+        shared::blockchain_utils::generate_func_data(&contract, "deposit", &[Token::Uint(amount)])
+            .unwrap();
     tracing::debug!("harvest(): func_data: {:?}", func_data);
 
-    let nonce = from_wallet.nonce(client.clone()).await;
+    let nonce = from_wallet.nonce(client.clone()).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
     tracing::debug!("harvest(): nonce: {:?}", nonce);
 
     let transaction_obj = shared::blockchain_utils::build_transaction_params(
@@ -143,18 +136,16 @@ pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
     tracing::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
 
     shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
-        .await;
+        .await
+        .unwrap();
 }
 
 pub async fn harvest(yield_farm: &YieldFarm) {
     let client = yield_farm.get_web3_client_http();
-    let asset = match yield_farm.get_reward_asset() {
-        Some(a) => a,
-        None => {
-            tracing::error!("missing reward asset in assets");
-            return;
-        }
-    };
+    let asset = yield_farm.get_reward_asset().unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
     let asset_decimals = asset.decimals().await;
     let contract = yield_farm.contract();
     let from_wallet = yield_farm.get_wallet();
@@ -172,17 +163,22 @@ pub async fn harvest(yield_farm: &YieldFarm) {
             ..Default::default()
         },
     )
-    .await;
+    .await
+    .unwrap();
     tracing::debug!("harvest called estimate_gas: {:?}", estimate_gas);
 
     let func_data = shared::blockchain_utils::generate_func_data(
         &contract,
         "withdraw",
         &[Token::Uint(pending_shares)],
-    );
+    )
+    .unwrap();
     tracing::debug!("harvest(): func_data: {:?}", func_data);
 
-    let nonce = from_wallet.nonce(client.clone()).await;
+    let nonce = from_wallet.nonce(client.clone()).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
     tracing::debug!("harvest(): nonce: {:?}", nonce);
 
     let transaction_obj = shared::blockchain_utils::build_transaction_params(
@@ -196,5 +192,6 @@ pub async fn harvest(yield_farm: &YieldFarm) {
     tracing::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
 
     shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
-        .await;
+        .await
+        .unwrap();
 }

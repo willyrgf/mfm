@@ -29,20 +29,26 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 }
 
 pub async fn call_sub_commands(args: &ArgMatches) {
-    let wallet = cmd::helpers::get_wallet(args);
+    let wallet = cmd::helpers::get_wallet(args).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
     let withdraw_wallet = cmd::helpers::get_withdraw_wallet(args);
 
-    let network = match cmd::helpers::get_network(args) {
-        Some(n) => n,
-        None => {
-            tracing::error!("--network not found");
-            panic!()
-        }
-    };
+    let network = cmd::helpers::get_network(args).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
 
     let asset = cmd::helpers::get_asset_in_network_from_args(args, network.get_name());
     let asset_decimals = asset.decimals().await;
-    let amount = cmd::helpers::get_amount(args, asset_decimals);
+    let amount = cmd::helpers::get_amount(args, asset_decimals).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
 
-    asset.withdraw(wallet, &withdraw_wallet, amount).await;
+    asset
+        .withdraw(wallet, &withdraw_wallet, amount)
+        .await
+        .unwrap();
 }

@@ -29,7 +29,7 @@ pub fn generate_run_cmd() -> Command<'static> {
         )
 }
 
-pub fn generate_cmd() -> Command<'static> {
+pub fn generate() -> Command<'static> {
     Command::new(REBALANCER_COMMAND)
         .about("Fires a rebalancer")
         .subcommand(generate_run_cmd())
@@ -59,24 +59,30 @@ async fn cmd_run(args: &ArgMatches) {
         config
     );
 
-    rebalancer::validate(&config).await;
+    rebalancer::validate(&config).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
 
     match config.strategy() {
         Strategy::FullParking => {
             tracing::debug!("rebalancer::cmd::call_sub_commands() Strategy::FullParking");
-            rebalancer::run_full_parking(&config).await;
+            rebalancer::run_full_parking(&config).await
         }
         Strategy::DiffParking => {
             tracing::debug!("rebalancer::cmd::call_sub_commands() Strategy::DiffParking");
-            rebalancer::run_diff_parking(&config).await;
+            rebalancer::run_diff_parking(&config).await
         }
     }
+    .unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
 }
 
 async fn cmd_info(args: &ArgMatches) {
     tracing::debug!("cmd_info()");
 
-    let hide_zero = true;
     let config = cmd::helpers::get_rebalancer(args);
     let asset_quoted = &config.get_quoted_asset();
     let asset_quoted_decimals = asset_quoted.decimals().await;
@@ -93,7 +99,12 @@ async fn cmd_info(args: &ArgMatches) {
         "Quoted amount to trade"
     ]);
 
-    let asset_rebalances = generate_asset_rebalances(&config).await;
+    let asset_rebalances = generate_asset_rebalances(&config)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e);
+            panic!()
+        });
     asset_rebalances.clone().iter().for_each(|ar| {
         let balance_of = ar.asset_balances.balance;
         let asset = ar.asset_balances.asset.clone();

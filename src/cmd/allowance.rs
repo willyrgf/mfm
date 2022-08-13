@@ -1,6 +1,6 @@
 use crate::{cmd, config::Config, shared};
 use clap::{ArgMatches, Command};
-use prettytable::{cell, row, Table};
+use prettytable::{cell, row, table};
 
 pub const ALLOWANCE_COMMAND: &str = "allowance";
 
@@ -13,30 +13,33 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 
 pub async fn call_sub_commands(args: &ArgMatches) {
     let config = Config::global();
-    let mut table = Table::new();
-    table.add_row(row!["Exchange", "Asset", "Balance", "Allowance"]);
-    let network = cmd::helpers::get_network(args).unwrap_or_else(|| {
-        tracing::error!("allowance can't find network");
+    let mut table = table!(["Exchange", "Asset", "Balance", "Allowance"]);
+
+    let network = cmd::helpers::get_network(args).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
         panic!()
     });
-    let wallet = cmd::helpers::get_wallet(args);
+    let wallet = cmd::helpers::get_wallet(args).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
 
     for exchange in network.get_exchanges().into_iter() {
-        futures::future::join_all(
-            config
-                .assets
-                .hashmap()
-                .values()
-                .flat_map(|asset_config| asset_config.new_assets_list())
-                .map(|asset| async move {
-                    let balance_of = asset.balance_of(wallet.address()).await;
-                    let decimals = asset.decimals().await;
-                    let allowance = asset
-                        .allowance(wallet.address(), exchange.as_router_address().unwrap())
-                        .await;
-                    (asset, balance_of, decimals, allowance, exchange)
-                }),
-        )
+        let assets_list = config.assets.hashmap().values().flat_map(|asset_config| {
+            asset_config.new_assets_list().unwrap_or_else(|e| {
+                tracing::error!(error = %e);
+                panic!()
+            })
+        });
+
+        futures::future::join_all(assets_list.map(|asset| async move {
+            let balance_of = asset.balance_of(wallet.address()).await;
+            let decimals = asset.decimals().await;
+            let allowance = asset
+                .allowance(wallet.address(), exchange.as_router_address().unwrap())
+                .await;
+            (asset, balance_of, decimals, allowance, exchange)
+        }))
         .await
         .into_iter()
         .for_each(|(asset, balance_of, decimals, allowance, exchange)| {

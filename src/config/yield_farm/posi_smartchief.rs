@@ -61,16 +61,21 @@ pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
             ..Default::default()
         },
     )
-    .await;
+    .await
+    .unwrap();
     tracing::debug!("harvest called estimate_gas: {:?}", estimate_gas);
     // let estimate_gas = (estimate_gas_from_helper * (U256::from(30000_i32) + U256::from(3000_i32)))
     //     / U256::from(30000_i32);
 
     let func_data =
-        shared::blockchain_utils::generate_func_data(&contract, "deposit", &[Token::Uint(amount)]);
+        shared::blockchain_utils::generate_func_data(&contract, "deposit", &[Token::Uint(amount)])
+            .unwrap();
     tracing::debug!("harvest(): func_data: {:?}", func_data);
 
-    let nonce = from_wallet.nonce(client.clone()).await;
+    let nonce = from_wallet.nonce(client.clone()).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
     tracing::debug!("harvest(): nonce: {:?}", nonce);
 
     let transaction_obj = shared::blockchain_utils::build_transaction_params(
@@ -84,7 +89,8 @@ pub async fn deposit(yield_farm: &YieldFarm, amount: U256) {
     tracing::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
 
     shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
-        .await;
+        .await
+        .unwrap();
 }
 
 pub async fn harvest(yield_farm: &YieldFarm) {
@@ -103,17 +109,22 @@ pub async fn harvest(yield_farm: &YieldFarm) {
             ..Default::default()
         },
     )
-    .await;
+    .await
+    .unwrap();
     tracing::debug!("harvest called estimate_gas: {:?}", estimate_gas);
 
     let func_data = shared::blockchain_utils::generate_func_data(
         &contract,
         "withdraw",
         &[Token::Uint(U256::from(0_i32))],
-    );
+    )
+    .unwrap();
     tracing::debug!("harvest(): func_data: {:?}", func_data);
 
-    let nonce = from_wallet.nonce(client.clone()).await;
+    let nonce = from_wallet.nonce(client.clone()).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
     tracing::debug!("harvest(): nonce: {:?}", nonce);
 
     let transaction_obj = shared::blockchain_utils::build_transaction_params(
@@ -127,5 +138,6 @@ pub async fn harvest(yield_farm: &YieldFarm) {
     tracing::debug!("harvest(): transaction_obj: {:?}", transaction_obj);
 
     shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
-        .await;
+        .await
+        .unwrap();
 }

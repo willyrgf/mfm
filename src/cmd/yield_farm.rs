@@ -76,7 +76,7 @@ pub fn get_farms_to_look(args: &ArgMatches) -> Vec<YieldFarm> {
         None => match Config::global().yield_farms.clone() {
             Some(yf) => yf
                 .hashmap()
-                .into_iter()
+                .iter()
                 .map(|(_k, v)| v.clone())
                 .collect::<Vec<YieldFarm>>(),
             None => {
@@ -86,7 +86,7 @@ pub fn get_farms_to_look(args: &ArgMatches) -> Vec<YieldFarm> {
         },
     };
 
-    farms_to_look.clone()
+    farms_to_look
 }
 
 pub async fn call_info_cmd(args: &ArgMatches) {
@@ -110,18 +110,21 @@ pub async fn call_info_cmd(args: &ArgMatches) {
             cmd::helpers::get_quoted_asset_in_network_from_args(args, yield_farm.network_id())
                 .unwrap();
         let quoted_asset_decimal = quoted_asset.decimals().await;
-        let yield_farm_asset = yield_farm.get_reward_asset().unwrap();
+        let yield_farm_asset = yield_farm.get_reward_asset().unwrap_or_else(|e| {
+            tracing::error!(error = %e);
+            panic!()
+        });
         let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
-        let deposit_asset = yield_farm.get_deposit_asset();
-        let deposit_asset_decimals = match deposit_asset.clone() {
-            Some(a) => a.decimals().await,
-            None => 0_u8,
-        };
-        let reward_asset = yield_farm.get_reward_asset();
-        let reward_asset_decimals = match reward_asset.clone() {
-            Some(a) => a.decimals().await,
-            None => 0_u8,
-        };
+        let deposit_asset = yield_farm.get_deposit_asset().unwrap_or_else(|e| {
+            tracing::error!(error = %e);
+            panic!()
+        });
+        let deposit_asset_decimals = deposit_asset.decimals().await;
+        let reward_asset = yield_farm.get_reward_asset().unwrap_or_else(|e| {
+            tracing::error!(error = %e);
+            panic!()
+        });
+        let reward_asset_decimals = reward_asset.decimals().await;
 
         let pending_rewards = yield_farm.get_pending_rewards().await;
 
@@ -138,26 +141,14 @@ pub async fn call_info_cmd(args: &ArgMatches) {
                 panic!()
         });
 
-        let deposit_asset_name: String = match deposit_asset.clone() {
-            Some(a) => a.name().into(),
-            None => "".to_string(),
-        };
-        let reward_asset_name: String = match reward_asset.clone() {
-            Some(a) => a.name().into(),
-            None => "".to_string(),
-        };
+        let deposit_asset_name: String = deposit_asset.name().into();
+        let reward_asset_name: String = reward_asset.name().into();
+
         let quote_asset_path = exchange
             .build_route_for(&yield_farm_asset, &quoted_asset)
             .await;
 
-        let deposited_quote_asset_path = match deposit_asset.clone() {
-            Some(a) => {
-                let path = exchange.build_route_for(&a, &quoted_asset).await;
-                Some(path)
-            }
-            None => None,
-        };
-
+        let deposited_quote_asset_path = exchange.build_route_for(&deposit_asset, &quoted_asset).await;
         let quoted_price = match exchange
             .get_amounts_out(pending_rewards, quote_asset_path)
             .await
@@ -171,12 +162,9 @@ pub async fn call_info_cmd(args: &ArgMatches) {
 
         let deposited_amount_in_quoted = match deposited_amount {
             z if z == U256::from(0_i32) => U256::default(),
-            a => match deposited_quote_asset_path.clone() {
-                Some(p) => match exchange.get_amounts_out(a, p).await.last() {
-                    Some(&u) => u,
-                    _ => U256::from(0_i32),
-                },
-                None => U256::default(),
+            a =>  match exchange.get_amounts_out(a, deposited_quote_asset_path).await.last() {
+                Some(&u) => u,
+                _ => U256::from(0_i32),
             },
         };
 
@@ -246,7 +234,10 @@ pub async fn call_deposit_cmd(args: &ArgMatches) {
     let yield_farm = cmd::helpers::get_yield_farm(args);
     let yield_farm_asset = yield_farm.get_deposit_asset().unwrap();
     let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
-    let amount = cmd::helpers::get_amount(args, yield_farm_asset_decimals);
+    let amount = cmd::helpers::get_amount(args, yield_farm_asset_decimals).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
 
     yield_farm.deposit(amount).await;
 
@@ -320,7 +311,6 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct YieldFarmInfoCmdOutput {
     deposit_asset_name: String,
     reward_asset_name: String,

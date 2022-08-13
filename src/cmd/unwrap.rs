@@ -5,7 +5,7 @@ use clap::{ArgMatches, Command};
 pub const COMMAND: &str = "unwrap";
 
 pub fn generate_cmd<'a>() -> Command<'a> {
-    Command::new(COMMAND)
+    Command::new("unwrap")
         .about("Unwrap a wrapped coin to coin")
         .arg(clap::arg!(-n --"network" <bsc> "Network to unwrap token to coin").required(true))
         .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
@@ -13,20 +13,26 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 }
 
 pub async fn call_sub_commands(args: &ArgMatches) {
-    let wallet = cmd::helpers::get_wallet(args);
+    let wallet = cmd::helpers::get_wallet(args).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
 
-    let network = match cmd::helpers::get_network(args) {
-        Some(n) => n,
-        None => {
-            tracing::error!("--network not found");
-            panic!()
-        }
-    };
+    let network = cmd::helpers::get_network(args).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
 
-    let wrapped_asset = network.get_wrapped_asset();
+    let wrapped_asset = network.get_wrapped_asset().unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
     let wrapped_asset_decimals = wrapped_asset.decimals().await;
 
-    let amount_in = cmd::helpers::get_amount(args, wrapped_asset_decimals);
+    let amount_in = cmd::helpers::get_amount(args, wrapped_asset_decimals).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
 
-    wrapped_asset.unwrap(wallet, amount_in).await;
+    wrapped_asset.unwrap(wallet, amount_in).await.unwrap();
 }

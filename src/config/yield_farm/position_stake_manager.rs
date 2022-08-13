@@ -61,7 +61,10 @@ pub async fn harvest(pool_id: i32, yield_farm: &YieldFarm) {
         .unwrap();
     tracing::debug!("harvest(): func_data: {:?}", func_data);
 
-    let nonce = from_wallet.nonce(client.clone()).await;
+    let nonce = from_wallet.nonce(client.clone()).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
     tracing::debug!("harvest(): nonce: {:?}", nonce);
 
     let transaction_obj = TransactionParameters {

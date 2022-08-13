@@ -425,7 +425,7 @@ pub fn bigint_to_u256(b: BigInt) -> U256 {
 }
 
 //TODO: break validation and threshold
-pub async fn validate(config: &RebalancerConfig) {
+pub async fn validate(config: &RebalancerConfig) -> Result<(), anyhow::Error> {
     if !config.is_valid_portfolio_total_percentage() {
         tracing::error!(
             "rebalancer: {}, sum of portfolio percent should be 100, current is: {}",
@@ -435,19 +435,20 @@ pub async fn validate(config: &RebalancerConfig) {
         panic!()
     }
 
-    let assets = config.get_assets();
+    let assets = config.get_assets()?;
     let assets_balances = get_assets_balances(config, assets).await;
 
     if !config.reach_min_threshold(&assets_balances) {
-        tracing::error!(
+        return Err(anyhow::anyhow!(format!(
             "rebalancer: {}, the minimum threshold configured was not reached",
             config.name()
-        );
-        panic!();
+        )));
     }
+
+    Ok(())
 }
 
-pub async fn run_full_parking(config: &RebalancerConfig) {
+pub async fn run_full_parking(config: &RebalancerConfig) -> Result<(), anyhow::Error> {
     //TODO: doc it
     // the general idea of a full parking
     // calc how much we need for each asset
@@ -458,7 +459,7 @@ pub async fn run_full_parking(config: &RebalancerConfig) {
     // check if the portfolio is balanced
     let from_wallet = config.get_wallet();
     let parking_asset = config.get_parking_asset();
-    let assets = config.get_assets();
+    let assets = config.get_assets()?;
     let assets_balances = get_assets_balances(config, assets).await;
 
     move_assets_to_parking(config, &assets_balances).await;
@@ -476,6 +477,8 @@ pub async fn run_full_parking(config: &RebalancerConfig) {
         "run_rebalancer_full_parking(): after move parking_to_assets: total_parking_balance: {}",
         total_parking_balance
     );
+
+    Ok(())
 }
 
 pub async fn run_diff_parking_per_kind(
@@ -519,8 +522,10 @@ pub async fn run_diff_parking_per_kind(
     }
 }
 
-pub async fn generate_asset_rebalances(config: &RebalancerConfig) -> Vec<AssetRebalancer> {
-    let assets = config.get_assets();
+pub async fn generate_asset_rebalances(
+    config: &RebalancerConfig,
+) -> Result<Vec<AssetRebalancer>, anyhow::Error> {
+    let assets = config.get_assets()?;
 
     //TODO: add thresould per position
 
@@ -590,12 +595,14 @@ pub async fn generate_asset_rebalances(config: &RebalancerConfig) -> Vec<AssetRe
             );
     }
 
-    asset_rebalances
+    Ok(asset_rebalances)
 }
 
-pub async fn run_diff_parking(config: &RebalancerConfig) {
-    let asset_balances = generate_asset_rebalances(config).await;
+pub async fn run_diff_parking(config: &RebalancerConfig) -> Result<(), anyhow::Error> {
+    let asset_balances = generate_asset_rebalances(config).await?;
 
     run_diff_parking_per_kind(config, Kind::ToParking, asset_balances.clone()).await;
     run_diff_parking_per_kind(config, Kind::FromParking, asset_balances.clone()).await;
+
+    Ok(())
 }

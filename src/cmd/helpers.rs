@@ -6,6 +6,7 @@ use crate::{
     },
     rebalancer::config::RebalancerConfig,
 };
+use anyhow::Context;
 use clap::ArgMatches;
 use web3::types::U256;
 
@@ -19,18 +20,29 @@ pub fn get_exchange(args: &ArgMatches) -> &Exchange {
     }
 }
 
-pub fn get_network(args: &ArgMatches) -> Option<&Network> {
+#[tracing::instrument(name = "get network from command args")]
+pub fn get_network(args: &ArgMatches) -> Result<&Network, anyhow::Error> {
     match args.value_of("network") {
-        Some(n) => Config::global().networks.get(n),
-        None => None,
+        Some(n) => {
+            let network = Config::global()
+                .networks
+                .get(n)
+                .context("network not found")?;
+            Ok(network)
+        }
+        None => Err(anyhow::anyhow!("--network is required")),
     }
 }
 
-pub fn get_wallet(args: &ArgMatches) -> &Wallet {
+#[tracing::instrument(name = "get wallet from command args")]
+pub fn get_wallet(args: &ArgMatches) -> Result<&Wallet, anyhow::Error> {
     let config = Config::global();
     match args.value_of("wallet") {
-        Some(w) => config.wallets.get(w),
-        None => panic!("--wallet doesnt exist"),
+        Some(n) => {
+            let wallet = config.wallets.get(n).context("wallet not found")?;
+            Ok(wallet)
+        }
+        None => Err(anyhow::anyhow!("--wallet is required")),
     }
 }
 
@@ -44,11 +56,14 @@ pub fn get_asset_in_network_from_args(args: &ArgMatches, network_id: &str) -> As
     }
 }
 
-pub fn get_quoted_asset_in_network_from_args(args: &ArgMatches, network_id: &str) -> Option<Asset> {
+pub fn get_quoted_asset_in_network_from_args(
+    args: &ArgMatches,
+    network_id: &str,
+) -> Result<Asset, anyhow::Error> {
     let config = Config::global();
     match args.value_of("quoted-asset") {
         Some(a) => config.assets.find_by_name_and_network(a, network_id),
-        None => None,
+        None => Err(anyhow::anyhow!("--quoted-asset is required")),
     }
 }
 
@@ -66,16 +81,18 @@ pub fn get_txn_id(args: &ArgMatches) -> &str {
     }
 }
 
-pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> U256 {
+pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow::Error> {
     //TODO: need to review usage from i128
     match args.value_of("amount") {
         Some(a) => {
             //TODO: move it to a helper function
-            let q = a.parse::<f64>().unwrap();
+            let q = a
+                .parse::<f64>()
+                .map_err(|e| anyhow::anyhow!("cant parse the amount value to f64, got {:?}", e))?;
             let qe = (q * 10_f64.powf(asset_decimals.into())) as i128;
-            U256::from(qe)
+            Ok(U256::from(qe))
         }
-        None => panic!("--amount not supported"),
+        None => Err(anyhow::anyhow!("--amount is required")),
     }
 }
 
@@ -153,6 +170,7 @@ pub fn get_yield_farm(args: &ArgMatches) -> YieldFarm {
     }
 }
 
+#[tracing::instrument(name = "get hide zero from command args")]
 pub fn get_hide_zero(args: &ArgMatches) -> bool {
     match args.value_of("hide-zero") {
         Some(b) => b.parse().unwrap_or(false),
@@ -172,17 +190,43 @@ mod test {
     fn get_hide_zero_working() {
         use super::get_hide_zero;
 
-        let cmd = crate::balances::cmd::generate();
+        let cmd = Command::new("app").arg(
+            clap::arg!(-z --"hide-zero" <TRUE_FALSE> "hide zero balances")
+                .required(false)
+                .default_value("false"),
+        );
 
         let test_cases = [
-            ("balances --wallet zero --hide-zero=true", true),
-            ("balances --wallet zero --hide-zero=false", false),
-            ("balances --wallet zero --hide-zero=invalid-false", false),
+            ("app --hide-zero=true", true),
+            ("app --hide-zero=false", false),
+            ("app --hide-zero=invalid-false", false),
         ];
 
         for (argv, expected) in test_cases {
             let arg_matches = _get_arg_matches(cmd.clone(), argv);
             assert_eq!(get_hide_zero(&arg_matches), expected);
+        }
+    }
+
+    #[test]
+    fn get_network_working() {
+        use super::get_network;
+        use crate::config::Config;
+
+        Config::from_file("test_config.yaml");
+
+        let cmd = Command::new("app")
+            .arg(clap::arg!(-n --"network" <bsc> "Network to wrap coin to token").required(true));
+
+        let test_cases = [
+            ("app --network=bsc", true),
+            ("app --network=false", false),
+            ("app --network=invalid-false", false),
+        ];
+
+        for (argv, expected) in test_cases {
+            let arg_matches = _get_arg_matches(cmd.clone(), argv);
+            assert_eq!(get_network(&arg_matches).is_ok(), expected);
         }
     }
 }

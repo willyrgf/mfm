@@ -103,7 +103,10 @@ pub async fn swap(
         .unwrap();
     tracing::debug!("swap_tokens_for_tokens(): func_data: {:?}", func_data);
 
-    let nonce = from_wallet.nonce(client.clone()).await;
+    let nonce = from_wallet.nonce(client.clone()).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
     tracing::debug!("swap_tokens_for_tokens(): nonce: {:?}", nonce);
 
     let estimate_with_margin =
@@ -123,5 +126,6 @@ pub async fn swap(
     );
 
     shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
-        .await;
+        .await
+        .unwrap();
 }

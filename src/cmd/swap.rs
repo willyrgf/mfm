@@ -25,7 +25,10 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 
 pub async fn call_sub_commands(args: &ArgMatches) {
     let exchange = cmd::helpers::get_exchange(args);
-    let wallet = cmd::helpers::get_wallet(args);
+    let wallet = cmd::helpers::get_wallet(args).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
 
     let input_asset =
         cmd::helpers::get_token_input_in_network_from_args(args, exchange.network_id());
@@ -37,7 +40,10 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     let input_asset_decimals = input_asset.decimals().await;
     let output_asset_decimals = output_asset.decimals().await;
 
-    let amount_in = cmd::helpers::get_amount(args, input_asset_decimals);
+    let amount_in = cmd::helpers::get_amount(args, input_asset_decimals).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
     let slippage = cmd::helpers::get_slippage(args, output_asset_decimals);
 
     let asset_path_in = exchange.build_route_for(&input_asset, &output_asset).await;

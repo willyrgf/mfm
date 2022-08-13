@@ -56,7 +56,10 @@ pub async fn swap(
         ])
         .unwrap();
 
-    let nonce = from_wallet.nonce(client.clone()).await;
+    let nonce = from_wallet.nonce(client.clone()).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
 
     let estimate_with_margin =
         (estimate_gas * (U256::from(10000_i32) + U256::from(1000_i32))) / U256::from(10000_i32);
@@ -71,5 +74,6 @@ pub async fn swap(
     };
 
     shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
-        .await;
+        .await
+        .unwrap();
 }

@@ -33,13 +33,12 @@ impl Wallet {
     pub fn address(&self) -> Address {
         signing::public_key_address(&self.public())
     }
-    pub async fn nonce(&self, client: web3::Web3<Http>) -> U256 {
-        let n = client
+    pub async fn nonce(&self, client: web3::Web3<Http>) -> Result<U256, anyhow::Error> {
+        client
             .eth()
             .transaction_count(self.address(), None)
             .await
-            .unwrap();
-        n
+            .map_err(|e| anyhow::anyhow!("failed to fetch nonce, got: {:?}", e))
     }
 
     pub async fn coin_balance(&self, client: web3::Web3<Http>) -> U256 {
@@ -53,8 +52,8 @@ impl Wallet {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Wallets(pub(crate) HashMap<String, Wallet>);
 impl Wallets {
-    pub fn get(&self, key: &str) -> &Wallet {
-        self.0.get(key).unwrap()
+    pub fn get(&self, key: &str) -> Option<&Wallet> {
+        self.0.get(key)
     }
 
     pub fn hashmap(&self) -> &HashMap<String, Wallet> {

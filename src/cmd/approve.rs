@@ -18,16 +18,23 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 
 pub async fn call_sub_commands(args: &ArgMatches) {
     let exchange = cmd::helpers::get_exchange(args);
-    let wallet = cmd::helpers::get_wallet(args);
+    let wallet = cmd::helpers::get_wallet(args).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
     let asset = cmd::helpers::get_asset_in_network_from_args(args, exchange.network_id());
 
     let asset_decimals = asset.decimals().await;
-    let amount = cmd::helpers::get_amount(args, asset_decimals);
+    let amount = cmd::helpers::get_amount(args, asset_decimals).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
     tracing::debug!("amount: {:?}", amount);
 
     asset
         .approve_spender(wallet, exchange.as_router_address().unwrap(), amount)
-        .await;
+        .await
+        .unwrap();
 
     let remaning = asset
         .allowance(wallet.address(), exchange.as_router_address().unwrap())

@@ -1,7 +1,5 @@
 use crate::{
-    asset::Asset,
-    config::Config,
-    rebalancer::{generate_asset_rebalances, AssetRebalancer},
+    asset::Asset, config::Config, rebalancer::generate_asset_rebalances,
     shared::blockchain_utils::display_amount_to_float,
 };
 use clap::{ArgMatches, Command};
@@ -81,7 +79,12 @@ async fn cmd_run(_args: &ArgMatches) {
         let quoted_portfolio_asset = rebalancer_config.get_quoted_asset();
         let asset_quoted_decimals = quoted_portfolio_asset.decimals().await;
 
-        let asset_rebalancers = generate_asset_rebalances(rebalancer_config).await;
+        let asset_rebalancers = generate_asset_rebalances(rebalancer_config)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e);
+                panic!()
+            });
 
         let track_assets = asset_rebalancers
             .clone()
