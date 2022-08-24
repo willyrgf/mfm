@@ -34,7 +34,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
 
         futures::future::join_all(assets_list.map(|asset| async move {
             let balance_of = asset.balance_of(wallet.address()).await;
-            let decimals = asset.decimals().await;
+            let decimals = asset.decimals().await.unwrap();
             let allowance = asset
                 .allowance(wallet.address(), exchange.as_router_address().unwrap())
                 .await;

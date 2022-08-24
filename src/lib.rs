@@ -6,6 +6,7 @@ pub mod rebalancer;
 pub mod shared;
 pub mod signing;
 pub mod telemetry;
+pub mod unwrap;
 pub mod wrap;
 
 pub const APP_NAME: &str = "mfm";

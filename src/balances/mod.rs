@@ -31,7 +31,7 @@ async fn run(args: &ArgMatches) {
             .flat_map(|asset_config| asset_config.new_assets_list().unwrap())
             .map(|asset| async move {
                 let balance_of = asset.balance_of(wallet.address()).await;
-                let decimals = asset.decimals().await;
+                let decimals = asset.decimals().await.unwrap();
                 (asset, balance_of, decimals)
             }),
     )

@@ -117,7 +117,7 @@ impl AssetRebalancer {
 impl AssetBalances {
     pub async fn new(rebalancer_config: &RebalancerConfig, asset: Asset) -> AssetBalances {
         let quoted_asset = rebalancer_config.get_quoted_asset();
-        let asset_decimals = asset.decimals().await;
+        let asset_decimals = asset.decimals().await.unwrap();
         let unit_amount = U256::from(1_u32) * U256::exp10(asset_decimals.into());
 
         let exchange = asset
@@ -148,7 +148,7 @@ impl AssetBalances {
             balance: asset
                 .balance_of(rebalancer_config.get_wallet().address())
                 .await,
-            quoted_asset_decimals: quoted_asset.decimals().await,
+            quoted_asset_decimals: quoted_asset.decimals().await.unwrap(),
             quoted_balance: asset
                 .balance_of_quoted_in(rebalancer_config.get_wallet(), &quoted_asset)
                 .await,
@@ -254,7 +254,7 @@ pub async fn move_asset_with_slippage(
             .into();
     }
 
-    let asset_out_decimals = asset_out.decimals().await;
+    let asset_out_decimals = asset_out.decimals().await.unwrap();
     let amount_in_slippage = asset_in.slippage_u256(asset_out_decimals);
     let amount_out_slippage = asset_out.slippage_u256(asset_out_decimals);
 
@@ -309,7 +309,7 @@ pub async fn move_assets_to_parking(
             .into();
 
         let min_move =
-            rebalancer_config.parking_asset_min_move_u256(parking_asset.decimals().await);
+            rebalancer_config.parking_asset_min_move_u256(parking_asset.decimals().await.unwrap());
         if min_move >= parking_amount_out {
             tracing::error!(
                 "min_move not sattisfied: min_move {}, parking_amount_out {}",
@@ -337,7 +337,7 @@ pub async fn move_parking_to_assets(
 ) {
     let from_wallet = rebalancer_config.get_wallet();
     let parking_asset = rebalancer_config.get_parking_asset();
-    let parking_asset_decimals = parking_asset.decimals().await;
+    let parking_asset_decimals = parking_asset.decimals().await.unwrap();
 
     //TODO: check if doenst exist balance in other assets
     let total_parking_balance = parking_asset.balance_of(from_wallet.address()).await;
@@ -508,8 +508,8 @@ pub async fn run_diff_parking_per_kind(
             ),
         };
 
-        let min_move =
-            config.parking_asset_min_move_u256(config.get_parking_asset().decimals().await);
+        let min_move = config
+            .parking_asset_min_move_u256(config.get_parking_asset().decimals().await.unwrap());
 
         if min_move >= ar.parking_amount_to_trade {
             tracing::debug!("run_diff_parking_per_kind(): min_move >= ar.parking_amount_to_trade, min_move: {}, ar.parking_amount_to_trade: {}", min_move, ar.parking_amount_to_trade);

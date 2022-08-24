@@ -19,5 +19,8 @@ pub fn generate<'a>() -> Command<'a> {
 
 #[tracing::instrument(name = "wrap call command")]
 pub async fn call_sub_commands(args: &ArgMatches) {
-    super::run(args).await
+    super::run(args).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
 }

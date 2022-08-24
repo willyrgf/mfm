@@ -67,7 +67,7 @@ pub async fn get_pending_rewards_amounts(
 
 pub async fn get_pending_rewards(yield_farm: &YieldFarm) -> Result<U256, anyhow::Error> {
     let asset = yield_farm.get_reward_asset()?;
-    let asset_decimals = asset.decimals().await;
+    let asset_decimals = asset.decimals().await.unwrap();
     let contract = yield_farm.contract();
     let wallet = yield_farm.get_wallet();
 
@@ -79,7 +79,7 @@ pub async fn get_pending_rewards(yield_farm: &YieldFarm) -> Result<U256, anyhow:
 
 pub async fn get_deposited_amount(yield_farm: &YieldFarm) -> Result<U256, anyhow::Error> {
     let asset = yield_farm.get_deposit_asset()?;
-    let asset_decimals = asset.decimals().await;
+    let asset_decimals = asset.decimals().await.unwrap();
     let contract = yield_farm.contract();
     let wallet = yield_farm.get_wallet();
 
@@ -146,7 +146,7 @@ pub async fn harvest(yield_farm: &YieldFarm) {
         tracing::error!(error = %e);
         panic!()
     });
-    let asset_decimals = asset.decimals().await;
+    let asset_decimals = asset.decimals().await.unwrap();
     let contract = yield_farm.contract();
     let from_wallet = yield_farm.get_wallet();
     let (pending_shares, _, _): (U256, U256, U256) =

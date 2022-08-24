@@ -277,7 +277,7 @@ impl Exchange {
         // let asset_path_in = self.build_route_for(&input_asset, &output_asset).await;
 
         //let input_asset_decimals = input_asset.decimals().await;
-        let output_asset_decimals = output_asset.decimals().await;
+        let output_asset_decimals = output_asset.decimals().await.unwrap();
         let amount_in = input_asset.balance_of(from_wallet.address()).await;
 
         //TODO: review this model of use slippage
@@ -345,8 +345,8 @@ impl Exchange {
         let asset_path_out = self.build_route_for(&output_asset, &input_asset).await;
         let asset_path_in = self.build_route_for(&input_asset, &output_asset).await;
 
-        let input_asset_decimals = input_asset.decimals().await;
-        let output_asset_decimals = output_asset.decimals().await;
+        let input_asset_decimals = input_asset.decimals().await.unwrap();
+        let output_asset_decimals = output_asset.decimals().await.unwrap();
 
         //TODO: review this model of use slippage
         let slippage = match slippage_opt {

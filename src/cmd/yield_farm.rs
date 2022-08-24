@@ -109,22 +109,22 @@ pub async fn call_info_cmd(args: &ArgMatches) {
         let quoted_asset =
             cmd::helpers::get_quoted_asset_in_network_from_args(args, yield_farm.network_id())
                 .unwrap();
-        let quoted_asset_decimal = quoted_asset.decimals().await;
+        let quoted_asset_decimal = quoted_asset.decimals().await.unwrap();
         let yield_farm_asset = yield_farm.get_reward_asset().unwrap_or_else(|e| {
             tracing::error!(error = %e);
             panic!()
         });
-        let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
+        let yield_farm_asset_decimals = yield_farm_asset.decimals().await.unwrap();
         let deposit_asset = yield_farm.get_deposit_asset().unwrap_or_else(|e| {
             tracing::error!(error = %e);
             panic!()
         });
-        let deposit_asset_decimals = deposit_asset.decimals().await;
+        let deposit_asset_decimals = deposit_asset.decimals().await.unwrap();
         let reward_asset = yield_farm.get_reward_asset().unwrap_or_else(|e| {
             tracing::error!(error = %e);
             panic!()
         });
-        let reward_asset_decimals = reward_asset.decimals().await;
+        let reward_asset_decimals = reward_asset.decimals().await.unwrap();
 
         let pending_rewards = yield_farm.get_pending_rewards().await;
 
@@ -233,7 +233,7 @@ pub async fn call_deposit_cmd(args: &ArgMatches) {
     ]);
     let yield_farm = cmd::helpers::get_yield_farm(args);
     let yield_farm_asset = yield_farm.get_deposit_asset().unwrap();
-    let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
+    let yield_farm_asset_decimals = yield_farm_asset.decimals().await.unwrap();
     let amount = cmd::helpers::get_amount(args, yield_farm_asset_decimals).unwrap_or_else(|e| {
         tracing::error!(error = %e);
         panic!()
@@ -263,7 +263,7 @@ pub async fn call_run_cmd(args: &ArgMatches) {
     ]);
     for yield_farm in get_farms_to_look(args) {
         let yield_farm_asset = yield_farm.get_reward_asset().unwrap();
-        let yield_farm_asset_decimals = yield_farm_asset.decimals().await;
+        let yield_farm_asset_decimals = yield_farm_asset.decimals().await.unwrap();
 
         let pending_rewards = yield_farm.get_pending_rewards().await;
         let min_rewards_required =

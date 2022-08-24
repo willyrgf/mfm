@@ -24,7 +24,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     });
     let asset = cmd::helpers::get_asset_in_network_from_args(args, exchange.network_id());
 
-    let asset_decimals = asset.decimals().await;
+    let asset_decimals = asset.decimals().await.unwrap();
     let amount = cmd::helpers::get_amount(args, asset_decimals).unwrap_or_else(|e| {
         tracing::error!(error = %e);
         panic!()

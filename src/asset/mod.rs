@@ -1,9 +1,7 @@
-pub mod config;
-
-use std::str::FromStr;
-
+use anyhow::Context;
 use rustc_hex::FromHexError;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use web3::ethabi::Token;
 use web3::Web3;
 use web3::{
@@ -17,6 +15,8 @@ use crate::shared;
 use crate::config::{network::Network, wallet::Wallet, withdraw_wallet::WithdrawWallet, Config};
 use crate::shared::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
 use config::AssetConfig;
+
+pub mod config;
 
 const FALLBACK_ABI_PATH: &str = "res/assets/erc20_abi.json";
 
@@ -109,11 +109,12 @@ impl Asset {
     }
 
     // TODO: validate it in the initialization of Asset
-    pub async fn decimals(&self) -> u8 {
-        let contract = &self.contract();
-        let result = contract.query("decimals", (), None, Options::default(), None);
-        let result_decimals: u8 = result.await.unwrap();
-        result_decimals
+    #[tracing::instrument(name = "get decimals from asset contract")]
+    pub async fn decimals(&self) -> Result<u8, anyhow::Error> {
+        self.contract()
+            .query("decimals", (), None, Options::default(), None)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to fetch gas_price, got: {:?}", e))
     }
 
     pub async fn balance_of(&self, account: H160) -> U256 {

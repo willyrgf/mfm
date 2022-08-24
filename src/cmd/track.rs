@@ -77,7 +77,7 @@ async fn cmd_run(_args: &ArgMatches) {
         // rebalancer::validate(rebalancer_config).await;
 
         let quoted_portfolio_asset = rebalancer_config.get_quoted_asset();
-        let asset_quoted_decimals = quoted_portfolio_asset.decimals().await;
+        let asset_quoted_decimals = quoted_portfolio_asset.decimals().await.unwrap();
 
         let asset_rebalancers = generate_asset_rebalances(rebalancer_config)
             .await

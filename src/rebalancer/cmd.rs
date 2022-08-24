@@ -85,7 +85,7 @@ async fn cmd_info(args: &ArgMatches) {
 
     let config = cmd::helpers::get_rebalancer(args);
     let asset_quoted = &config.get_quoted_asset();
-    let asset_quoted_decimals = asset_quoted.decimals().await;
+    let asset_quoted_decimals = asset_quoted.decimals().await.unwrap();
     let mut portifolio_balance = U256::default();
 
     let mut table = Table::new();

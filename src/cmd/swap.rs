@@ -37,8 +37,8 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         cmd::helpers::get_token_output_in_network_from_args(args, exchange.network_id());
     tracing::debug!("output_token: {:?}", output_asset);
 
-    let input_asset_decimals = input_asset.decimals().await;
-    let output_asset_decimals = output_asset.decimals().await;
+    let input_asset_decimals = input_asset.decimals().await.unwrap();
+    let output_asset_decimals = output_asset.decimals().await.unwrap();
 
     let amount_in = cmd::helpers::get_amount(args, input_asset_decimals).unwrap_or_else(|e| {
         tracing::error!(error = %e);
