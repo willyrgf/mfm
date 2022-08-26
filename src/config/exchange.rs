@@ -503,13 +503,7 @@ impl Exchanges {
     pub fn hashmap(&self) -> &HashMap<String, Exchange> {
         &self.0
     }
-    pub fn get(&self, key: &str) -> &Exchange {
-        match self.0.get(key) {
-            Some(e) => e,
-            None => {
-                tracing::error!("get(): key {} doesnt exist", key);
-                panic!();
-            }
-        }
+    pub fn get(&self, key: &str) -> Option<&Exchange> {
+        self.0.get(key)
     }
 }

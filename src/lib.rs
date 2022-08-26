@@ -2,6 +2,7 @@ pub mod asset;
 pub mod balances;
 pub mod cmd;
 pub mod config;
+pub mod quote;
 pub mod rebalancer;
 pub mod shared;
 pub mod signing;

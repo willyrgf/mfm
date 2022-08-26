@@ -12,11 +12,17 @@ use web3::types::U256;
 
 //TODO: add constants to all keys in value_of
 
-pub fn get_exchange(args: &ArgMatches) -> &Exchange {
-    let config = Config::global();
+#[tracing::instrument(name = "get exchange from command args")]
+pub fn get_exchange(args: &ArgMatches) -> Result<&Exchange, anyhow::Error> {
     match args.value_of("exchange") {
-        Some(n) => config.exchanges.get(n),
-        None => panic!("--exchange not supported"),
+        Some(n) => {
+            let network = Config::global()
+                .exchanges
+                .get(n)
+                .context("exchange not found")?;
+            Ok(network)
+        }
+        None => Err(anyhow::anyhow!("--exchange is required")),
     }
 }
 
@@ -81,6 +87,7 @@ pub fn get_txn_id(args: &ArgMatches) -> &str {
     }
 }
 
+#[tracing::instrument(name = "get amount from command args")]
 pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow::Error> {
     //TODO: need to review usage from i128
     match args.value_of("amount") {
@@ -96,35 +103,46 @@ pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow:
     }
 }
 
-pub fn get_token_input_in_network_from_args(args: &ArgMatches, network_id: &str) -> Asset {
-    match args.value_of("token_input") {
-        Some(i) => Config::global()
-            .assets
-            .find_by_name_and_network(i, network_id)
-            .unwrap(),
-        None => panic!("--token_input not supported on current network"),
-    }
-}
-
-pub fn get_token_output_in_network_from_args(args: &ArgMatches, network_id: &str) -> Asset {
-    match args.value_of("token_output") {
-        Some(i) => Config::global()
-            .assets
-            .find_by_name_and_network(i, network_id)
-            .unwrap(),
-        None => panic!("--token_output not supported on current network"),
-    }
-}
-
-pub fn get_slippage(args: &ArgMatches, asset_decimals: u8) -> U256 {
+#[tracing::instrument(name = "get slippage from command args")]
+pub fn get_slippage(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow::Error> {
     //TODO: review u128
     match args.value_of("slippage") {
         Some(a) => {
             let q = a.parse::<f64>().unwrap();
             let qe = ((q / 100.0) * 10_f64.powf(asset_decimals.into())) as u128;
-            U256::from(qe)
+            Ok(U256::from(qe))
         }
-        None => panic!("missing slippage"),
+        None => Err(anyhow::anyhow!("--slippage is required")),
+    }
+}
+
+#[tracing::instrument(name = "get input token in network from command args")]
+pub fn get_token_input_in_network_from_args(
+    args: &ArgMatches,
+    network_id: &str,
+) -> Result<Asset, anyhow::Error> {
+    match args.value_of("token_input") {
+        Some(i) => Config::global()
+            .assets
+            .find_by_name_and_network(i, network_id),
+        None => Err(anyhow::anyhow!(
+            "--token_input not supported on current network"
+        )),
+    }
+}
+
+#[tracing::instrument(name = "get output token in network from command args")]
+pub fn get_token_output_in_network_from_args(
+    args: &ArgMatches,
+    network_id: &str,
+) -> Result<Asset, anyhow::Error> {
+    match args.value_of("token_output") {
+        Some(i) => Config::global()
+            .assets
+            .find_by_name_and_network(i, network_id),
+        None => Err(anyhow::anyhow!(
+            "--token_output not supported on current network"
+        )),
     }
 }
 

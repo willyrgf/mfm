@@ -24,17 +24,17 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 }
 
 pub async fn call_sub_commands(args: &ArgMatches) {
-    let exchange = cmd::helpers::get_exchange(args);
+    let exchange = cmd::helpers::get_exchange(args).unwrap();
     let wallet = cmd::helpers::get_wallet(args).unwrap_or_else(|e| {
         tracing::error!(error = %e);
         panic!()
     });
 
     let input_asset =
-        cmd::helpers::get_token_input_in_network_from_args(args, exchange.network_id());
+        cmd::helpers::get_token_input_in_network_from_args(args, exchange.network_id()).unwrap();
     tracing::debug!("input_token: {:?}", input_asset);
     let output_asset =
-        cmd::helpers::get_token_output_in_network_from_args(args, exchange.network_id());
+        cmd::helpers::get_token_output_in_network_from_args(args, exchange.network_id()).unwrap();
     tracing::debug!("output_token: {:?}", output_asset);
 
     let input_asset_decimals = input_asset.decimals().await.unwrap();
@@ -44,7 +44,7 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         tracing::error!(error = %e);
         panic!()
     });
-    let slippage = cmd::helpers::get_slippage(args, output_asset_decimals);
+    let slippage = cmd::helpers::get_slippage(args, output_asset_decimals).unwrap();
 
     let asset_path_in = exchange.build_route_for(&input_asset, &output_asset).await;
 

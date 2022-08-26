@@ -1,4 +1,3 @@
-use anyhow::Context;
 use rustc_hex::FromHexError;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;

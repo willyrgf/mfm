@@ -17,7 +17,7 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 }
 
 pub async fn call_sub_commands(args: &ArgMatches) {
-    let exchange = cmd::helpers::get_exchange(args);
+    let exchange = cmd::helpers::get_exchange(args).unwrap();
     let wallet = cmd::helpers::get_wallet(args).unwrap_or_else(|e| {
         tracing::error!(error = %e);
         panic!()

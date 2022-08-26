@@ -1,4 +1,4 @@
-use crate::{balances, rebalancer, unwrap, wrap};
+use crate::{balances, quote, rebalancer, unwrap, wrap};
 use crate::{config::Config, APP_NAME};
 use clap::{crate_version, ArgMatches, Command};
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,6 @@ pub mod allowance;
 pub mod approve;
 pub mod enc;
 pub mod helpers;
-pub mod quote;
 pub mod swap;
 pub mod track;
 pub mod transaction;
@@ -45,7 +44,7 @@ impl Commands {
             Self::Transaction => transaction::call_sub_commands(args).await,
             Self::YieldFarm => yield_farm::call_sub_commands(args).await,
             Self::Withdraw => withdraw::call_sub_commands(args).await,
-            Self::Quote => quote::call_sub_commands(args).await,
+            Self::Quote => quote::cmd::call_sub_commands(args).await,
             Self::Enc => enc::call_sub_commands(args).await,
             Self::Track => track::call_sub_commands(args).await,
         }
@@ -72,7 +71,7 @@ pub fn new() -> clap::Command<'static> {
         .subcommand(rebalancer::cmd::generate())
         .subcommand(yield_farm::generate_cmd())
         .subcommand(withdraw::generate_cmd())
-        .subcommand(quote::generate_cmd())
+        .subcommand(quote::cmd::generate())
         .subcommand(enc::generate_cmd())
         .subcommand(track::generate_cmd())
 }
