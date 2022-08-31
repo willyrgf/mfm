@@ -29,6 +29,7 @@ const FALLBACK_PAIR_ABI_PATH: &str = "res/exchanges/uniswap_v2_pair_abi.json";
 const FALLBACK_ROUTER_ABI_PATH: &str = "res/exchanges/uniswap_v2_router_abi.json";
 
 //TODO: validate the fields in the new mod initialization
+// do it building a new type using a ExchangeConfig
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Exchange {
     pub(crate) name: String,
@@ -161,6 +162,8 @@ impl Exchange {
         address
     }
 
+    // TODO: it can be generic enough to use get_exchange_by_liquidity?
+    // may just use the same algorithm
     pub async fn build_route_for(&self, input_asset: &Asset, output_asset: &Asset) -> Vec<H160> {
         //TODO: use path_asset from input and output asset
         // input -> path_asset -> path_asset from output -> output
@@ -237,6 +240,7 @@ impl Exchange {
         result_amounts_out
     }
 
+    // TODO: take it to a shared module about blockchain
     fn get_valid_timestamp(&self, future_millis: u128) -> u128 {
         let start = SystemTime::now();
         let since_epoch = start.duration_since(UNIX_EPOCH).unwrap();
@@ -296,7 +300,8 @@ impl Exchange {
             .unwrap()
             .into();
 
-        //TODO: fix the arithmetic operation overflow
+        //TODO: move this kind of logic to the U256 module
+        //FIXME: fix the arithmetic operation overflow
         let slippage_amount = (amount_out * slippage) / U256::exp10(output_asset_decimals.into());
         let amount_min_out_slippage = amount_out - slippage_amount;
         //let amount_min_out_slippage = amount_out;

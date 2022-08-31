@@ -9,7 +9,7 @@ pub fn generate_cmd<'a>() -> Command<'a> {
         .arg(clap::arg!(-n --"network" <bsc> "Network to search transaction").required(true))
 }
 
-//TODO: finish it
+//FIXME: finish it
 pub async fn call_sub_commands(args: &ArgMatches) {
     let network = cmd::helpers::get_network(args).unwrap();
     // let network = match cmd::helpers::get_network(args) {

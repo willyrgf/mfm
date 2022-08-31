@@ -135,12 +135,12 @@ cargo run -- yield-farm run --force-harvest true
 ---
 
 ## todo
-- [ ] refactor of the config mods to be first class module (like asset)
 - [ ] refactor all the U256 calc to use numbigint in testable functions
+- [ ] refactor of the config mods to be first class module (like asset)
 - [ ] doc new rebalancer diff parking
-- [ ] doc encrypted wallet
-- [ ] receive the password to encrypted wallet from env and doc 
+- [ ] refactor the encrypted wallet and document it (may like that https://github.com/tari-project/tari/blob/c86727969ef3fffc124ab706d44c8845addbf415/applications/tari_console_wallet/src/cli.rs#L54)
 - [ ] use `get_better_exchange` in swap mod when exchange is not provided
+- [ ] start to release the app and document the process to update and run locally
 - [x] check the better exchange based on liquidity `exchange_to_use()`
 - [x] refactor wallet and withdraw-wallet to be wallet with private and public address supporting encrypted files with the keys
 - [x] compile /res resources assets/networks/exchanges configs and fallback to local configs
