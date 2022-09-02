@@ -11,4 +11,4 @@ pub mod unwrap;
 pub mod wrap;
 
 pub const APP_NAME: &str = "mfm";
-pub const DEFAULT_LOG_LEVEL: &str = "info";
+pub const DEFAULT_LOG_LEVEL: &str = "warn";
