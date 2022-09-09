@@ -134,7 +134,7 @@ cargo run -- yield-farm run --force-harvest true
 
 ---
 
-## todo
+## TODO
 - [ ] refactor all the U256 calc to use numbigint in testable functions
 - [ ] refactor of the config mods to be first class module (like asset)
 - [ ] refactor the encrypted wallet and document it (may like that https://github.com/tari-project/tari/blob/c86727969ef3fffc124ab706d44c8845addbf415/applications/tari_console_wallet/src/cli.rs#L54)

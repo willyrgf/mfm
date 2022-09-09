@@ -460,7 +460,7 @@ mod test {
     use super::{BigDecimal, BigInt};
 
     #[test]
-    fn from_f64_to_bigdecimal() {
+    fn f64_bigdecimal() {
         let test_cases = vec![
             (1.354, BigDecimal::try_from(1.354).unwrap(), "1.354"),
             (11.0, BigDecimal::try_from(11).unwrap(), "11"),
@@ -471,6 +471,28 @@ mod test {
         for (fnumber, fbigdecimal, snumber) in test_cases {
             assert_eq!(fnumber, fbigdecimal.to_f64().unwrap());
             assert_eq!(fbigdecimal.normalized().to_string().as_str(), snumber);
+        }
+    }
+
+    #[test]
+    #[warn(clippy::unnecessary_cast)]
+    fn u256_bigdecimal() {
+        let test_cases = vec![
+            (
+                U256::from(132397000000000000000_u128),
+                BigDecimal::from_unsigned_u256(&U256::from(132397000000000000000_u128), 18),
+                "132.397",
+            ),
+            (
+                U256::from(9300002397000000000000000_u128),
+                BigDecimal::from_unsigned_u256(&U256::from(9300002397000000000000000_u128), 18),
+                "9300002.397",
+            ),
+        ];
+
+        for (n, nbigdecimal, snumber) in test_cases {
+            assert_eq!(n, nbigdecimal.to_unsigned_u256());
+            assert_eq!(nbigdecimal.normalized().to_string().as_str(), snumber);
         }
     }
 
@@ -503,31 +525,6 @@ mod test {
             assert_eq!(bigdecimal_from_u256.to_f64().unwrap(), fnumber);
         }
     }
-
-    #[test]
-    #[warn(clippy::unnecessary_cast)]
-    fn u256_bigdecimal() {
-        let test_cases = vec![
-            (
-                U256::from(132397000000000000000_u128),
-                BigDecimal::from_unsigned_u256(&U256::from(132397000000000000000_u128), 18),
-                "132.397",
-            ),
-            (
-                U256::from(9300002397000000000000000_u128),
-                BigDecimal::from_unsigned_u256(&U256::from(9300002397000000000000000_u128), 18),
-                "9300002.397",
-            ),
-        ];
-
-        for (n, nbigdecimal, snumber) in test_cases {
-            assert_eq!(n, nbigdecimal.to_unsigned_u256());
-            assert_eq!(nbigdecimal.normalized().to_string().as_str(), snumber);
-        }
-    }
-
-    // slippage simulation
-    // percent simulation
 
     #[test]
     fn normalize() {
