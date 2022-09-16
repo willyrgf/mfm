@@ -141,6 +141,7 @@ cargo run -- yield-farm run --force-harvest true
 - [ ] use `get_better_exchange` in swap mod when exchange is not provided
 - [ ] start to release the app and document the process to update and run locally
 - [ ] add a shutdown control to signals (may like that https://github.com/tari-project/tari/blob/77bb10d42e8c004406d0ddd69b65575f0e111cd1/applications/tari_console_wallet/src/main.rs#L139)
+- [ ] add a transaction command to check status of a transaction id in the blockchain (feat/transaction)
 - [ ] doc commands
 - [x] check the better exchange based on liquidity `exchange_to_use()`
 - [x] refactor wallet and withdraw-wallet to be wallet with private and public address supporting encrypted files with the keys

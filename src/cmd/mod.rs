@@ -9,7 +9,6 @@ pub mod enc;
 pub mod helpers;
 pub mod swap;
 pub mod track;
-pub mod transaction;
 pub mod withdraw;
 pub mod yield_farm;
 
@@ -23,7 +22,6 @@ pub enum Commands {
     Allowance,
     Approve,
     Rebalancer,
-    Transaction,
     YieldFarm,
     Withdraw,
     Quote,
@@ -41,7 +39,6 @@ impl Commands {
             Self::Allowance => allowance::call_sub_commands(args).await,
             Self::Approve => approve::call_sub_commands(args).await,
             Self::Rebalancer => rebalancer::cmd::call_sub_commands(args).await,
-            Self::Transaction => transaction::call_sub_commands(args).await,
             Self::YieldFarm => yield_farm::call_sub_commands(args).await,
             Self::Withdraw => withdraw::call_sub_commands(args).await,
             Self::Quote => quote::cmd::call_sub_commands(args).await,
@@ -64,7 +61,6 @@ pub fn new() -> clap::Command<'static> {
         .subcommand(wrap::cmd::generate())
         .subcommand(unwrap::cmd::generate())
         .subcommand(swap::generate_cmd())
-        .subcommand(transaction::generate_cmd())
         .subcommand(allowance::generate_cmd())
         .subcommand(approve::generate_cmd())
         .subcommand(balances::cmd::generate())
