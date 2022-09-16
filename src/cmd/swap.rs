@@ -1,4 +1,4 @@
-use crate::{cmd, shared};
+use crate::{cmd, utils};
 use clap::{ArgMatches, Command};
 use prettytable::{cell, row, Table};
 use web3::types::U256;
@@ -79,12 +79,9 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     ]);
     table.add_row(row![
         input_asset.name(),
-        shared::blockchain_utils::display_amount_to_float(amount_in, input_asset_decimals),
+        utils::blockchain::display_amount_to_float(amount_in, input_asset_decimals),
         output_asset.name(),
-        shared::blockchain_utils::display_amount_to_float(
-            amount_out_slippage,
-            output_asset_decimals
-        ),
+        utils::blockchain::display_amount_to_float(amount_out_slippage, output_asset_decimals),
     ]);
     table.printstd();
 }

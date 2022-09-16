@@ -1,6 +1,6 @@
 use crate::{
     asset::Asset, config::Config, rebalancer::generate_asset_rebalances,
-    shared::blockchain_utils::display_amount_to_float,
+    utils::blockchain::display_amount_to_float,
 };
 use clap::{ArgMatches, Command};
 use serde::{Deserialize, Serialize};

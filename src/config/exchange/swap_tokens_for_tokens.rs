@@ -1,4 +1,4 @@
-use crate::shared;
+use crate::utils;
 
 use web3::{
     contract::Error,
@@ -125,7 +125,7 @@ pub async fn swap(
         transaction_obj
     );
 
-    shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
+    utils::blockchain::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
         .await
         .unwrap();
 }

@@ -1,5 +1,5 @@
 use crate::cmd::helpers;
-use crate::{config::Config, shared};
+use crate::{config::Config, utils};
 use clap::ArgMatches;
 use prettytable::{cell, row, table};
 use web3::types::U256;
@@ -42,7 +42,7 @@ async fn run(args: &ArgMatches) {
             table.add_row(row![
                 asset.network_id(),
                 asset.name(),
-                shared::blockchain_utils::display_amount_to_float(balance_of, decimals),
+                utils::blockchain::display_amount_to_float(balance_of, decimals),
                 balance_of,
                 decimals
             ]);

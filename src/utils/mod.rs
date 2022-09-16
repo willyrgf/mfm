@@ -1,3 +1,3 @@
-pub mod blockchain_utils;
+pub mod blockchain;
 pub mod resources;
 pub mod scalar;

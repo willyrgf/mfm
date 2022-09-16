@@ -1,6 +1,6 @@
 use crate::asset::Asset;
-use crate::shared;
-use crate::shared::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
+use crate::utils;
+use crate::utils::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
 
 use std::str::FromStr;
 use std::time::UNIX_EPOCH;
@@ -402,7 +402,7 @@ impl Exchange {
                 tracing::debug!(
                     "cmd::swap(): limit_amount_out: {:?}, limit_amount_out: {:?}",
                     limit_amount_out,
-                    shared::blockchain_utils::display_amount_to_float(
+                    utils::blockchain::display_amount_to_float(
                         limit_amount_out,
                         input_asset_decimals
                     )

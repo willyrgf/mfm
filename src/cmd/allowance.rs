@@ -1,4 +1,4 @@
-use crate::{cmd, config::Config, shared};
+use crate::{cmd, config::Config, utils};
 use clap::{ArgMatches, Command};
 use prettytable::{cell, row, table};
 
@@ -46,8 +46,8 @@ pub async fn call_sub_commands(args: &ArgMatches) {
             table.add_row(row![
                 exchange.name,
                 asset.name(),
-                shared::blockchain_utils::display_amount_to_float(balance_of, decimals),
-                shared::blockchain_utils::display_amount_to_float(allowance, decimals),
+                utils::blockchain::display_amount_to_float(balance_of, decimals),
+                utils::blockchain::display_amount_to_float(allowance, decimals),
             ]);
         });
     }

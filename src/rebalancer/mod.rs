@@ -3,7 +3,7 @@ pub mod config;
 
 use crate::{
     asset::Asset, config::wallet::Wallet, rebalancer::config::RebalancerConfig,
-    shared::blockchain_utils::display_amount_to_float,
+    utils::blockchain::display_amount_to_float,
 };
 
 use num_bigint::{BigInt, Sign};

@@ -1,4 +1,4 @@
-use crate::{cmd::helpers, shared};
+use crate::{cmd::helpers, utils};
 use clap::ArgMatches;
 use prettytable::{cell, row, Table};
 use web3::types::U256;
@@ -43,13 +43,10 @@ async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
     table.add_row(row![
         exchange.name(),
         input_token.name(),
-        shared::blockchain_utils::display_amount_to_float(amount_in, input_token_decimals),
+        utils::blockchain::display_amount_to_float(amount_in, input_token_decimals),
         output_token.name(),
-        shared::blockchain_utils::display_amount_to_float(amount_min_out, output_token_decimals),
-        shared::blockchain_utils::display_amount_to_float(
-            amount_out_slippage,
-            output_token_decimals
-        ),
+        utils::blockchain::display_amount_to_float(amount_min_out, output_token_decimals),
+        utils::blockchain::display_amount_to_float(amount_out_slippage, output_token_decimals),
     ]);
     table.printstd();
 

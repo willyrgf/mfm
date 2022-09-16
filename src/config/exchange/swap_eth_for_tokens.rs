@@ -1,4 +1,4 @@
-use crate::shared;
+use crate::utils;
 
 use web3::{
     ethabi::Token,
@@ -73,7 +73,7 @@ pub async fn swap(
         ..Default::default()
     };
 
-    shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
+    utils::blockchain::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
         .await
         .unwrap();
 }

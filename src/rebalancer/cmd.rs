@@ -1,7 +1,7 @@
 use crate::{
     cmd,
     rebalancer::{self, config::Strategy, generate_asset_rebalances},
-    shared::blockchain_utils::display_amount_to_float,
+    utils::blockchain::display_amount_to_float,
 };
 use clap::{ArgMatches, Command};
 use prettytable::{cell, row, Table};

@@ -9,10 +9,10 @@ use web3::{
     types::{Address, Bytes, H160, U256},
 };
 
-use crate::shared;
+use crate::utils;
 
 use crate::config::{network::Network, wallet::Wallet, withdraw_wallet::WithdrawWallet, Config};
-use crate::shared::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
+use crate::utils::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
 use config::AssetConfig;
 
 pub mod config;
@@ -199,7 +199,7 @@ impl Asset {
         let client = self.get_web3_client_http();
         let gas_price = client.eth().gas_price().await.unwrap();
 
-        let estimate_gas = shared::blockchain_utils::estimate_gas(
+        let estimate_gas = utils::blockchain::estimate_gas(
             &self.contract(),
             from_wallet,
             "approve",
@@ -213,7 +213,7 @@ impl Asset {
 
         tracing::debug!("approve_spender called estimate_gas: {:?}", estimate_gas);
 
-        let func_data = shared::blockchain_utils::generate_func_data(
+        let func_data = utils::blockchain::generate_func_data(
             &self.contract(),
             "approve",
             &[Token::Address(spender), Token::Uint(amount)],
@@ -226,7 +226,7 @@ impl Asset {
         });
         tracing::debug!("approve_spender(): nonce: {:?}", nonce);
 
-        let transaction_obj = shared::blockchain_utils::build_transaction_params(
+        let transaction_obj = utils::blockchain::build_transaction_params(
             nonce,
             self.as_address().unwrap(),
             U256::from(0_i32),
@@ -236,12 +236,8 @@ impl Asset {
         );
         tracing::debug!("approve_spender(): transaction_obj: {:?}", transaction_obj);
 
-        shared::blockchain_utils::sign_send_and_wait_txn(
-            client.clone(),
-            transaction_obj,
-            from_wallet,
-        )
-        .await?;
+        utils::blockchain::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
+            .await?;
 
         Ok(())
     }
@@ -250,7 +246,7 @@ impl Asset {
         let client = self.get_web3_client_http();
         let gas_price = client.eth().gas_price().await.unwrap();
 
-        let estimate_gas = shared::blockchain_utils::estimate_gas(
+        let estimate_gas = utils::blockchain::estimate_gas(
             &self.contract(),
             from_wallet,
             "withdraw",
@@ -263,7 +259,7 @@ impl Asset {
         .await?;
         tracing::debug!("unwrap called estimate_gas: {:?}", estimate_gas);
 
-        let func_data = shared::blockchain_utils::generate_func_data(
+        let func_data = utils::blockchain::generate_func_data(
             &self.contract(),
             "withdraw",
             &[Token::Uint(amount)],
@@ -276,7 +272,7 @@ impl Asset {
         });
         tracing::debug!("unwrap(): nonce: {:?}", nonce);
 
-        let transaction_obj = shared::blockchain_utils::build_transaction_params(
+        let transaction_obj = utils::blockchain::build_transaction_params(
             nonce,
             self.as_address().unwrap(),
             U256::from(0_i32),
@@ -286,12 +282,8 @@ impl Asset {
         );
         tracing::debug!("unwrap(): transaction_obj: {:?}", transaction_obj);
 
-        shared::blockchain_utils::sign_send_and_wait_txn(
-            client.clone(),
-            transaction_obj,
-            from_wallet,
-        )
-        .await?;
+        utils::blockchain::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
+            .await?;
 
         Ok(())
     }
@@ -304,7 +296,7 @@ impl Asset {
             .await
             .map_err(|e| anyhow::anyhow!("failed to fetch gas_price, got: {:?}", e))?;
 
-        let estimate_gas = shared::blockchain_utils::estimate_gas(
+        let estimate_gas = utils::blockchain::estimate_gas(
             &self.contract(),
             from_wallet,
             "deposit",
@@ -318,14 +310,13 @@ impl Asset {
         .await?;
         tracing::debug!("wrap called estimate_gas: {:?}", estimate_gas);
 
-        let func_data =
-            shared::blockchain_utils::generate_func_data(&self.contract(), "deposit", &[])?;
+        let func_data = utils::blockchain::generate_func_data(&self.contract(), "deposit", &[])?;
         tracing::debug!("wrap(): deposit_data: {:?}", func_data);
 
         let nonce = from_wallet.nonce(client.clone()).await?;
         tracing::debug!("wrap(): nonce: {:?}", nonce);
 
-        let transaction_obj = shared::blockchain_utils::build_transaction_params(
+        let transaction_obj = utils::blockchain::build_transaction_params(
             nonce,
             self.as_address().unwrap(),
             amount,
@@ -335,12 +326,8 @@ impl Asset {
         );
         tracing::debug!("wrap(): transaction_obj: {:?}", transaction_obj);
 
-        shared::blockchain_utils::sign_send_and_wait_txn(
-            client.clone(),
-            transaction_obj,
-            from_wallet,
-        )
-        .await?;
+        utils::blockchain::sign_send_and_wait_txn(client.clone(), transaction_obj, from_wallet)
+            .await?;
 
         Ok(())
     }
@@ -354,7 +341,7 @@ impl Asset {
         let client = self.get_web3_client_http();
         let gas_price = client.eth().gas_price().await.unwrap();
 
-        let estimate_gas = shared::blockchain_utils::estimate_gas(
+        let estimate_gas = utils::blockchain::estimate_gas(
             &self.contract(),
             wallet,
             "transfer",
@@ -367,7 +354,7 @@ impl Asset {
         .await?;
         tracing::debug!("withdraw called estimate_gas: {:?}", estimate_gas);
 
-        let func_data = shared::blockchain_utils::generate_func_data(
+        let func_data = utils::blockchain::generate_func_data(
             &self.contract(),
             "transfer",
             &[
@@ -380,7 +367,7 @@ impl Asset {
         let nonce = wallet.nonce(client.clone()).await?;
         tracing::debug!("withdraw(): nonce: {:?}", nonce);
 
-        let transaction_obj = shared::blockchain_utils::build_transaction_params(
+        let transaction_obj = utils::blockchain::build_transaction_params(
             nonce,
             self.as_address().unwrap(),
             U256::from(0_i32),
@@ -390,8 +377,7 @@ impl Asset {
         );
         tracing::debug!("withdraw(): transaction_obj: {:?}", transaction_obj);
 
-        shared::blockchain_utils::sign_send_and_wait_txn(client.clone(), transaction_obj, wallet)
-            .await?;
+        utils::blockchain::sign_send_and_wait_txn(client.clone(), transaction_obj, wallet).await?;
 
         Ok(())
     }
