@@ -2,7 +2,7 @@ use crate::{
     asset::Asset,
     config::{
         exchange::Exchange, network::Network, wallet::Wallet, withdraw_wallet::WithdrawWallet,
-        yield_farm::YieldFarm, Config,
+        Config,
     },
     rebalancer::config::RebalancerConfig,
 };
@@ -171,20 +171,6 @@ pub fn get_withdraw_wallet(args: &ArgMatches) -> WithdrawWallet {
             }
         },
         None => panic!("--withdraw-wallet not supported"),
-    }
-}
-
-pub fn get_yield_farm(args: &ArgMatches) -> YieldFarm {
-    let config = Config::global();
-    match args.value_of("yield-farm") {
-        Some(y) => match config.yield_farms.clone() {
-            Some(yield_farms) => yield_farms.get(y).clone(),
-            None => {
-                tracing::error!("get_yield_farm() yield_farm is not configured");
-                panic!()
-            }
-        },
-        None => panic!("--yield-farm not supported"),
     }
 }
 

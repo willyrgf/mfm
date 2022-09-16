@@ -10,7 +10,6 @@ pub mod helpers;
 pub mod swap;
 pub mod track;
 pub mod withdraw;
-pub mod yield_farm;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,7 +21,6 @@ pub enum Commands {
     Allowance,
     Approve,
     Rebalancer,
-    YieldFarm,
     Withdraw,
     Quote,
     Enc,
@@ -39,7 +37,6 @@ impl Commands {
             Self::Allowance => allowance::call_sub_commands(args).await,
             Self::Approve => approve::call_sub_commands(args).await,
             Self::Rebalancer => rebalancer::cmd::call_sub_commands(args).await,
-            Self::YieldFarm => yield_farm::call_sub_commands(args).await,
             Self::Withdraw => withdraw::call_sub_commands(args).await,
             Self::Quote => quote::cmd::call_sub_commands(args).await,
             Self::Enc => enc::call_sub_commands(args).await,
@@ -65,7 +62,6 @@ pub fn new() -> clap::Command<'static> {
         .subcommand(approve::generate_cmd())
         .subcommand(balances::cmd::generate())
         .subcommand(rebalancer::cmd::generate())
-        .subcommand(yield_farm::generate_cmd())
         .subcommand(withdraw::generate_cmd())
         .subcommand(quote::cmd::generate())
         .subcommand(enc::generate_cmd())

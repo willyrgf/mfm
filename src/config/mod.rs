@@ -5,7 +5,6 @@ pub mod network;
 // pub mod rebalancer;
 pub mod wallet;
 pub mod withdraw_wallet;
-pub mod yield_farm;
 
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
@@ -15,7 +14,6 @@ use exchange::Exchanges;
 use network::Networks;
 use wallet::Wallets;
 use withdraw_wallet::WithdrawWallets;
-use yield_farm::YieldFarms;
 
 use self::decrypt_wallet::decrypt_wallets_from_config;
 
@@ -35,7 +33,6 @@ pub struct Config {
     pub networks: Networks,
     pub exchanges: Exchanges,
     pub assets: AssetsConfig,
-    pub yield_farms: Option<YieldFarms>,
     pub rebalancers: Option<RebalancersConfig>,
 }
 
