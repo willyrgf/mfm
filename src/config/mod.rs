@@ -41,9 +41,14 @@ impl Config {
         GLOBAL_CONFIG.get().expect("CONFIG not loaded")
     }
 
-    pub fn from_file(f: &str) -> Self {
-        let reader = std::fs::File::open(f).unwrap();
-        let mut config: Config = serde_yaml::from_reader(reader).unwrap();
+    pub fn from_file(f: &str) -> Result<Self, anyhow::Error> {
+        let reader = std::fs::File::open(f)
+            .map_err(|e| anyhow::anyhow!("failed to open a file, err: {:?}", e))?;
+
+        let mut config: Config = serde_yaml::from_reader(reader).map_err(|e| {
+            anyhow::anyhow!("failed to deserialize the file to a Config, err: {:?}", e)
+        })?;
+
         // TODO: modify the config checking for wallets that are encrypted
         if config.wallets.any_encrypted() {
             config = decrypt_wallets_from_config(config)
@@ -55,6 +60,6 @@ impl Config {
         //TODO: before log, need filter some fields
         //tracing::debug!("from_file(): config: {:?}", config);
 
-        config
+        Ok(config)
     }
 }

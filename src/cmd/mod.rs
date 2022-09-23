@@ -86,21 +86,16 @@ pub async fn call_sub_commands(matches: &ArgMatches) -> Result<(), anyhow::Error
 }
 
 #[tracing::instrument(name = "cli run command", skip(cmd))]
-pub async fn run(cmd: clap::Command<'static>) {
+pub async fn run(cmd: clap::Command<'static>) -> Result<(), anyhow::Error> {
     let cmd_matches = cmd.get_matches();
 
     match cmd_matches.value_of("config_filename") {
-        Some(f) => Config::from_file(f),
-        None => {
-            tracing::error!("--config_filename is invalid");
-            panic!()
-        }
+        Some(f) => Config::from_file(f)?,
+        None => return Err(anyhow::anyhow!("--config_filename is invalid")),
     };
 
     match call_sub_commands(&cmd_matches).await {
-        Ok(_) => {}
-        Err(e) => {
-            tracing::error!("call subcommand failed, err: {}", e)
-        }
+        Ok(_) => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("call subcommand failed, err: {}", e)),
     }
 }

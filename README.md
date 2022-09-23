@@ -85,6 +85,7 @@ cargo run -- withdraw --wallet test-wallet -t test-wallet2 -v 0.008 -a wbnb -n b
 ---
 
 ## TODO
+- [ ] use exitable main to return to the OS the exit code (like here https://github.com/firecracker-microvm/firecracker/blob/main/src/firecracker/src/main.rs#L406)
 - [ ] refactor all the U256 calc to use numbigint in testable functions
 - [ ] refactor of the config mods to be first class module (like asset)
 - [ ] refactor the encrypted wallet and document it (may like that https://github.com/tari-project/tari/blob/c86727969ef3fffc124ab706d44c8845addbf415/applications/tari_console_wallet/src/cli.rs#L54)
