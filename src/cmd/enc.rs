@@ -1,10 +1,10 @@
-extern crate magic_crypt;
-extern crate rpassword; // use crate::{cmd, shared};
-
 use clap::{ArgMatches, Command};
 use magic_crypt::{new_magic_crypt, MagicCryptTrait};
 use rpassword::read_password;
-use std::io::Write;
+use std::io::{Read, Write};
+use zeroize::Zeroizing;
+
+use crate::utils;
 // use prettytable::{cell, row, Table};
 // use web3::types::U256;
 
@@ -15,16 +15,29 @@ pub fn generate_cmd<'a>() -> Command<'a> {
 }
 
 pub async fn call_sub_commands(_: &ArgMatches) {
-    println!("Type a password: ");
-    std::io::stdout().flush().unwrap();
-    let password = read_password().unwrap();
-    //println!("The password is: '{}'", password);
+    let str_password = {
+        let password = utils::password::prompt_password("Type a password: ").unwrap_or_else(|e| {
+            tracing::error!(error = %e);
+            panic!()
+        });
 
-    println!("Paste the wallet private key: ");
-    let private_key = read_password().unwrap();
+        let bytes = password.reveal().to_vec();
+        Zeroizing::new(String::from_utf8(bytes).unwrap())
+    };
 
-    let mc = new_magic_crypt!(password, 256);
-    let base64 = mc.encrypt_str_to_base64(private_key);
+    let str_private_key_password = {
+        let private_key = utils::password::prompt_password("Paste the wallet private key: ")
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e);
+                panic!()
+            });
 
-    print!("ecrypted key as base64: {}", base64);
+        let bytes = private_key.reveal().to_vec();
+        Zeroizing::new(String::from_utf8(bytes).unwrap())
+    };
+
+    let mc = new_magic_crypt!(str_password, 256);
+    let base64 = mc.encrypt_str_to_base64(str_private_key_password);
+
+    println!("Encrypted key as base64: {}", base64);
 }

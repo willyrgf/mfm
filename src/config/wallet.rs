@@ -1,4 +1,4 @@
-use crate::signing;
+use crate::{signing, utils::password::SafePassword};
 
 use rustc_hex::FromHex;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
@@ -8,21 +8,22 @@ use web3::{
     transports::Http,
     types::{Address, U256},
 };
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Wallet {
-    pub(crate) private_key: String,
+    pub(crate) private_key: SafePassword,
+    pub(crate) env_password: Option<String>,
     pub(crate) encrypted: Option<bool>,
 }
 
 impl Wallet {
-    pub fn to_raw(&self) -> Vec<u8> {
-        self.private_key.from_hex().unwrap()
-    }
-    pub fn private_key(&self) -> String {
-        self.private_key.clone()
+    pub fn private_key(&self) -> Zeroizing<String> {
+        let bytes = self.private_key.reveal().to_vec();
+        Zeroizing::new(String::from_utf8(bytes).unwrap())
     }
     pub fn secret(&self) -> SecretKey {
+        // TODO: add a wrap to zeroize the secret key too
         SecretKey::from_str(&self.private_key()).unwrap()
     }
     pub fn public(&self) -> PublicKey {
