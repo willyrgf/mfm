@@ -1,6 +1,6 @@
+mod decrypt_wallet;
 pub mod exchange;
 pub mod network;
-// pub mod rebalancer;
 pub mod wallet;
 pub mod withdraw_wallet;
 
@@ -41,9 +41,13 @@ impl Config {
         let reader = std::fs::File::open(f)
             .map_err(|e| anyhow::anyhow!("failed to open a file, err: {:?}", e))?;
 
-        let config: Config = serde_yaml::from_reader(reader).map_err(|e| {
+        let mut config: Config = serde_yaml::from_reader(reader).map_err(|e| {
             anyhow::anyhow!("failed to deserialize the file to a Config, err: {:?}", e)
         })?;
+
+        if config.wallets.any_encrypted() {
+            config = decrypt_wallet::decrypt_wallets_from_config(config);
+        }
 
         // ask user password for each wallet
         // decrypt private key
