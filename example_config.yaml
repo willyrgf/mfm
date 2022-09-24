@@ -7,6 +7,8 @@ wallets:
     private_key: YOUR_PRIVATE_KEY
   farm-wallet:
     private_key: YOUR_PRIVATE_KEY
+      # encrypted: true
+      # env_password: MFM_TEST_WALLET_PASSWORD # default is MFM_WALLET_PASSWORD if `encrypted`` is true
 
 withdraw_wallets:
   test-wallet2:
