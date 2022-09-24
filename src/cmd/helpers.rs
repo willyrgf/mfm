@@ -217,7 +217,7 @@ mod test {
         use super::get_network;
         use crate::config::Config;
 
-        Config::from_file("test_config.yaml");
+        Config::from_file("test_config.yaml").unwrap();
 
         let cmd = Command::new("app")
             .arg(clap::arg!(-n --"network" <bsc> "Network to wrap coin to token").required(true));

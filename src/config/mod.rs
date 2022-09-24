@@ -1,5 +1,3 @@
-// pub mod asset;
-mod decrypt_wallet;
 pub mod exchange;
 pub mod network;
 // pub mod rebalancer;
@@ -15,11 +13,9 @@ use network::Networks;
 use wallet::Wallets;
 use withdraw_wallet::WithdrawWallets;
 
-use self::decrypt_wallet::decrypt_wallets_from_config;
-
 static GLOBAL_CONFIG: OnceCell<Config> = OnceCell::new();
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Server {
     pub api_url: String,
     pub api_token: String,
@@ -45,14 +41,10 @@ impl Config {
         let reader = std::fs::File::open(f)
             .map_err(|e| anyhow::anyhow!("failed to open a file, err: {:?}", e))?;
 
-        let mut config: Config = serde_yaml::from_reader(reader).map_err(|e| {
+        let config: Config = serde_yaml::from_reader(reader).map_err(|e| {
             anyhow::anyhow!("failed to deserialize the file to a Config, err: {:?}", e)
         })?;
 
-        // TODO: modify the config checking for wallets that are encrypted
-        if config.wallets.any_encrypted() {
-            config = decrypt_wallets_from_config(config)
-        }
         // ask user password for each wallet
         // decrypt private key
         // overwrite in memory config with the private key decrypted

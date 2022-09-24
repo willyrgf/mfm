@@ -23,7 +23,7 @@ pub struct AssetBalances {
     pub(crate) max_tx_amount: Option<U256>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Kind {
     ToParking,
     FromParking,
@@ -186,14 +186,12 @@ pub async fn get_assets_balances(
     rebalancer_config: &RebalancerConfig,
     assets: Vec<Asset>,
 ) -> Vec<AssetBalances> {
-    let assets_balances = futures::future::join_all(
+    futures::future::join_all(
         assets
             .into_iter()
             .map(|asset| AssetBalances::new(rebalancer_config, asset)),
     )
-    .await;
-
-    assets_balances
+    .await
 }
 
 pub async fn add_parking_asset(

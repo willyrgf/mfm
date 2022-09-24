@@ -19,7 +19,7 @@ pub const DEFAULT_LOG_LEVEL: &str = "warn";
 /// copied from https://github.com/firecracker-microvm/firecracker/blob/9b165839f7c3593e165ce35ae13b3c48f7bb661e/src/vmm/src/lib.rs#L73
 /// TODO: refactor it based on our needs
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitCode {
     /// Success exit code.
     Ok = 0,

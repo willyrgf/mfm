@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 pub mod allowance;
 pub mod approve;
-pub mod enc;
 pub mod helpers;
 pub mod swap;
 pub mod track;
@@ -23,7 +22,6 @@ pub enum Commands {
     Rebalancer,
     Withdraw,
     Quote,
-    Enc,
     Track,
 }
 
@@ -39,7 +37,6 @@ impl Commands {
             Self::Rebalancer => rebalancer::cmd::call_sub_commands(args).await,
             Self::Withdraw => withdraw::call_sub_commands(args).await,
             Self::Quote => quote::cmd::call_sub_commands(args).await,
-            Self::Enc => enc::call_sub_commands(args).await,
             Self::Track => track::call_sub_commands(args).await,
         }
     }
@@ -64,7 +61,6 @@ pub fn new() -> clap::Command<'static> {
         .subcommand(rebalancer::cmd::generate())
         .subcommand(withdraw::generate_cmd())
         .subcommand(quote::cmd::generate())
-        .subcommand(enc::generate_cmd())
         .subcommand(track::generate_cmd())
 }
 

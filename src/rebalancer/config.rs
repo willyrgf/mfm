@@ -7,7 +7,7 @@ use web3::types::U256;
 
 use super::AssetBalances;
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Strategy {
     FullParking,

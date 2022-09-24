@@ -75,12 +75,11 @@ pub async fn sign_transaction(
     from_wallet: &Wallet,
 ) -> SignedTransaction {
     let secret = from_wallet.secret();
-    let signed_transaction = client
+    client
         .accounts()
         .sign_transaction(transaction_obj, &secret)
         .await
-        .unwrap();
-    signed_transaction
+        .unwrap()
 }
 
 pub async fn send_raw_transaction(

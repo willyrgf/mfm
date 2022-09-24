@@ -30,7 +30,7 @@ const FALLBACK_ROUTER_ABI_PATH: &str = "res/exchanges/uniswap_v2_router_abi.json
 
 //TODO: validate the fields in the new mod initialization
 // do it building a new type using a ExchangeConfig
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Exchange {
     pub(crate) name: String,
     pub(crate) router_address: String,
@@ -128,12 +128,10 @@ impl Exchange {
     pub async fn wrapper_address(&self) -> H160 {
         let router_contract = self.router_contract();
 
-        let wrapped_addr = router_contract
+        router_contract
             .query("WETH", (), None, Options::default(), None)
             .await
-            .unwrap();
-
-        wrapped_addr
+            .unwrap()
     }
 
     pub async fn get_factory_pair(
@@ -154,12 +152,10 @@ impl Exchange {
             None,
         );
 
-        let address = match result.await {
-            Ok(a) => Some(a),
+        match result.await {
+            Ok(address) => Some(address),
             _ => None,
-        };
-
-        address
+        }
     }
 
     // TODO: it can be generic enough to use get_exchange_by_liquidity?
@@ -502,7 +498,7 @@ impl Exchange {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Exchanges(HashMap<String, Exchange>);
 impl Exchanges {
     pub fn hashmap(&self) -> &HashMap<String, Exchange> {
