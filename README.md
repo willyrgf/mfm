@@ -1,5 +1,21 @@
 # MFM
 
+## Fast local install & update using releases
+
+### *nix (?)
+```sh
+# may need adjust for some systems
+LATEST_APP_URL="$( \
+	curl -s https://api.github.com/repos/willyrgf/mfm/releases/latest | 
+	grep 'browser_download_url' | 
+	grep "$(uname | tr '[[:upper:]]' '[[:lower:]]')" | 
+	awk -F '"' '!/.sha256sum/ {print $4}' \
+)"
+curl -s -L $LATEST_APP_URL -O
+unzip -qo ${LATEST_APP_URL##*/}
+
+```
+
 ## res/ directory
 This directory will carry all the abi files used as default in this project.
 All these abi files in this directory will be add in the binary in compilation time (`build.rs`).
