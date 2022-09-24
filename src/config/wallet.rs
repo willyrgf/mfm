@@ -12,9 +12,19 @@ use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Wallet {
+    #[serde(deserialize_with = "deserialize_safe_password")]
     pub(crate) private_key: SafePassword,
     pub(crate) env_password: Option<String>,
     pub(crate) encrypted: Option<bool>,
+}
+
+// TODO: take it to password mod
+fn deserialize_safe_password<'de, D>(deserializer: D) -> Result<SafePassword, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let password: String = Deserialize::deserialize(deserializer)?;
+    Ok(SafePassword::from(password))
 }
 
 impl Wallet {
