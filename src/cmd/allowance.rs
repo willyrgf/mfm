@@ -1,6 +1,6 @@
 use crate::{cmd, config::Config, utils};
 use clap::{ArgMatches, Command};
-use prettytable::{cell, row, table};
+use prettytable::{row, table};
 
 pub const ALLOWANCE_COMMAND: &str = "allowance";
 

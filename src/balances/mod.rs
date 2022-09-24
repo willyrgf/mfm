@@ -1,7 +1,7 @@
 use crate::cmd::helpers;
 use crate::{config::Config, utils};
 use clap::ArgMatches;
-use prettytable::{cell, row, table};
+use prettytable::{row, table};
 use web3::types::U256;
 
 pub mod cmd;

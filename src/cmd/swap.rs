@@ -1,6 +1,6 @@
 use crate::{cmd, utils};
 use clap::{ArgMatches, Command};
-use prettytable::{cell, row, Table};
+use prettytable::{row, Table};
 use web3::types::U256;
 
 pub const SWAP_COMMAND: &str = "swap";

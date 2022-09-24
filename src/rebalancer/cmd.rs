@@ -4,7 +4,7 @@ use crate::{
     utils::blockchain::display_amount_to_float,
 };
 use clap::{ArgMatches, Command};
-use prettytable::{cell, row, Table};
+use prettytable::{row, Table};
 use web3::types::U256;
 
 pub const REBALANCER_COMMAND: &str = "rebalancer";

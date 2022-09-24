@@ -1,6 +1,6 @@
 use crate::{cmd::helpers, utils};
 use clap::ArgMatches;
-use prettytable::{cell, row, Table};
+use prettytable::{row, Table};
 use web3::types::U256;
 
 pub mod cmd;
