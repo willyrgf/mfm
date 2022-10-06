@@ -4,14 +4,14 @@ use prettytable::{row, table};
 
 pub const ALLOWANCE_COMMAND: &str = "allowance";
 
-pub fn generate_cmd<'a>() -> Command<'a> {
+pub fn generate_cmd() -> Command {
     Command::new(ALLOWANCE_COMMAND)
         .about("Get allowance for an network and wallet")
         .arg(clap::arg!(-n --"network" <bsc> "Network to use, ex (bsc, polygon)").required(true))
         .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
 }
 
-pub async fn call_sub_commands(args: &ArgMatches) {
+pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let config = Config::global();
     let mut table = table!(["Exchange", "Asset", "Balance", "Allowance"]);
 
@@ -53,4 +53,6 @@ pub async fn call_sub_commands(args: &ArgMatches) {
     }
 
     table.printstd();
+
+    Ok(())
 }

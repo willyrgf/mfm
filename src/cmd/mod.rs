@@ -26,7 +26,7 @@ pub enum Commands {
 }
 
 impl Commands {
-    pub async fn run(&self, args: &ArgMatches) {
+    pub async fn run(&self, args: &ArgMatches) -> Result<(), anyhow::Error> {
         match &self {
             Self::Balances => balances::cmd::call_sub_commands(args).await,
             Self::Wrap => wrap::cmd::call_sub_commands(args).await,
@@ -42,7 +42,7 @@ impl Commands {
     }
 }
 
-pub fn new() -> clap::Command<'static> {
+pub fn new() -> Command {
     Command::new(APP_NAME)
         .bin_name(APP_NAME)
         .version(crate_version!())
@@ -73,25 +73,22 @@ pub fn lookup_command(cmd: &str) -> Result<Commands, anyhow::Error> {
 #[tracing::instrument(name = "call commands")]
 pub async fn call_sub_commands(matches: &ArgMatches) -> Result<(), anyhow::Error> {
     match matches.subcommand() {
-        Some((cmd, sub_matches)) => {
-            lookup_command(cmd)?.run(sub_matches).await;
-            Ok(())
-        }
+        Some((cmd, sub_matches)) => lookup_command(cmd)?.run(sub_matches).await,
         _ => Err(anyhow::anyhow!("subcommand is required")),
     }
 }
 
 #[tracing::instrument(name = "cli run command", skip(cmd))]
-pub async fn run(cmd: clap::Command<'static>) -> Result<(), anyhow::Error> {
+pub async fn run(cmd: Command) -> Result<(), anyhow::Error> {
     let cmd_matches = cmd.get_matches();
 
-    match cmd_matches.value_of("config_filename") {
+    match cmd_matches.get_one::<String>("config_filename") {
         Some(f) => Config::from_file(f)?,
         None => return Err(anyhow::anyhow!("--config_filename is invalid")),
     };
 
-    match call_sub_commands(&cmd_matches).await {
-        Ok(_) => Ok(()),
-        Err(e) => Err(anyhow::anyhow!("call subcommand failed, err: {}", e)),
-    }
+    call_sub_commands(&cmd_matches).await.map_err(|e| {
+        tracing::error!(error = %e);
+        anyhow::anyhow!("call subcommand failed, err: {}", e)
+    })
 }

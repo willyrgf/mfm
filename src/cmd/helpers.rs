@@ -14,7 +14,7 @@ use web3::types::U256;
 
 #[tracing::instrument(name = "get exchange from command args")]
 pub fn get_exchange(args: &ArgMatches) -> Result<&Exchange, anyhow::Error> {
-    match args.value_of("exchange") {
+    match args.get_one::<String>("exchange") {
         Some(n) => {
             let network = Config::global()
                 .exchanges
@@ -28,7 +28,7 @@ pub fn get_exchange(args: &ArgMatches) -> Result<&Exchange, anyhow::Error> {
 
 #[tracing::instrument(name = "get network from command args")]
 pub fn get_network(args: &ArgMatches) -> Result<&Network, anyhow::Error> {
-    match args.value_of("network") {
+    match args.get_one::<String>("network") {
         Some(n) => {
             let network = Config::global()
                 .networks
@@ -43,7 +43,7 @@ pub fn get_network(args: &ArgMatches) -> Result<&Network, anyhow::Error> {
 #[tracing::instrument(name = "get wallet from command args")]
 pub fn get_wallet(args: &ArgMatches) -> Result<&Wallet, anyhow::Error> {
     let config = Config::global();
-    match args.value_of("wallet") {
+    match args.get_one::<String>("wallet") {
         Some(n) => {
             let wallet = config.wallets.get(n).context("wallet not found")?;
             Ok(wallet)
@@ -53,7 +53,7 @@ pub fn get_wallet(args: &ArgMatches) -> Result<&Wallet, anyhow::Error> {
 }
 
 pub fn get_asset_in_network_from_args(args: &ArgMatches, network_id: &str) -> Asset {
-    match args.value_of("asset") {
+    match args.get_one::<String>("asset") {
         Some(a) => Config::global()
             .assets
             .find_by_name_and_network(a, network_id)
@@ -67,21 +67,21 @@ pub fn get_quoted_asset_in_network_from_args(
     network_id: &str,
 ) -> Result<Asset, anyhow::Error> {
     let config = Config::global();
-    match args.value_of("quoted-asset") {
+    match args.get_one::<String>("quoted-asset") {
         Some(a) => config.assets.find_by_name_and_network(a, network_id),
         None => Err(anyhow::anyhow!("--quoted-asset is required")),
     }
 }
 
 pub fn get_force_harvest(args: &ArgMatches) -> bool {
-    match args.value_of("force-harvest") {
-        Some(a) => a.parse::<bool>().unwrap(),
+    match args.get_one::<bool>("force-harvest") {
+        Some(a) => *a,
         None => panic!("--force-harvest supported"),
     }
 }
 
 pub fn get_txn_id(args: &ArgMatches) -> &str {
-    match args.value_of("txn_id") {
+    match args.get_one::<String>("txn_id") {
         Some(a) => a,
         None => panic!("--txn_id not supported"),
     }
@@ -90,7 +90,7 @@ pub fn get_txn_id(args: &ArgMatches) -> &str {
 #[tracing::instrument(name = "get amount from command args")]
 pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow::Error> {
     //TODO: need to review usage from i128
-    match args.value_of("amount") {
+    match args.get_one::<String>("amount") {
         Some(a) => {
             //TODO: move it to a helper function
             let q = a
@@ -106,9 +106,9 @@ pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow:
 #[tracing::instrument(name = "get slippage from command args")]
 pub fn get_slippage(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow::Error> {
     //TODO: review u128
-    match args.value_of("slippage") {
-        Some(a) => {
-            let q = a.parse::<f64>().unwrap();
+    match args.get_one::<f64>("slippage") {
+        Some(q) => {
+            // let q = a.parse::<f64>().unwrap();
             let qe = ((q / 100.0) * 10_f64.powf(asset_decimals.into())) as u128;
             Ok(U256::from(qe))
         }
@@ -121,7 +121,7 @@ pub fn get_token_input_in_network_from_args(
     args: &ArgMatches,
     network_id: &str,
 ) -> Result<Asset, anyhow::Error> {
-    match args.value_of("token_input") {
+    match args.get_one::<String>("token_input") {
         Some(i) => Config::global()
             .assets
             .find_by_name_and_network(i, network_id),
@@ -136,7 +136,7 @@ pub fn get_token_output_in_network_from_args(
     args: &ArgMatches,
     network_id: &str,
 ) -> Result<Asset, anyhow::Error> {
-    match args.value_of("token_output") {
+    match args.get_one::<String>("token_output") {
         Some(i) => Config::global()
             .assets
             .find_by_name_and_network(i, network_id),
@@ -148,7 +148,7 @@ pub fn get_token_output_in_network_from_args(
 
 pub fn get_rebalancer(args: &ArgMatches) -> RebalancerConfig {
     let config = Config::global();
-    match args.value_of("name") {
+    match args.get_one::<String>("name") {
         Some(i) => match config.rebalancers.clone() {
             Some(rebalancers) => rebalancers.get(i).clone(),
             None => {
@@ -162,7 +162,7 @@ pub fn get_rebalancer(args: &ArgMatches) -> RebalancerConfig {
 
 pub fn get_withdraw_wallet(args: &ArgMatches) -> WithdrawWallet {
     let config = Config::global();
-    match args.value_of("withdraw-wallet") {
+    match args.get_one::<String>("withdraw-wallet") {
         Some(w) => match config.withdraw_wallets.clone() {
             Some(withdraw_wallets) => withdraw_wallets.get(w).clone(),
             None => {
@@ -176,7 +176,7 @@ pub fn get_withdraw_wallet(args: &ArgMatches) -> WithdrawWallet {
 
 #[tracing::instrument(name = "get hide zero from command args")]
 pub fn get_hide_zero(args: &ArgMatches) -> bool {
-    match args.value_of("hide-zero") {
+    match args.get_one::<String>("hide-zero") {
         Some(b) => b.parse().unwrap_or(false),
         _ => false,
     }

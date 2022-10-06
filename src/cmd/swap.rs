@@ -5,7 +5,7 @@ use web3::types::U256;
 
 pub const SWAP_COMMAND: &str = "swap";
 
-pub fn generate_cmd<'a>() -> Command<'a> {
+pub fn generate_cmd() -> Command {
     Command::new(SWAP_COMMAND)
         .about("Swap Tokens for Tokens supporting fees on transfer")
         .arg(clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router").required(true))
@@ -23,7 +23,7 @@ pub fn generate_cmd<'a>() -> Command<'a> {
         )
 }
 
-pub async fn call_sub_commands(args: &ArgMatches) {
+pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let exchange = cmd::helpers::get_exchange(args).unwrap();
     let wallet = cmd::helpers::get_wallet(args).unwrap_or_else(|e| {
         tracing::error!(error = %e);
@@ -84,4 +84,6 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         utils::blockchain::display_amount_to_float(amount_out_slippage, output_asset_decimals),
     ]);
     table.printstd();
+
+    Ok(())
 }

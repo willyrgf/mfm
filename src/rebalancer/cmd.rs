@@ -11,7 +11,7 @@ pub const REBALANCER_COMMAND: &str = "rebalancer";
 pub const REBALANCER_RUN_COMMAND: &str = "run";
 pub const REBALANCER_INFO_COMMAND: &str = "info";
 
-pub fn generate_info_cmd() -> Command<'static> {
+pub fn generate_info_cmd() -> Command {
     Command::new(REBALANCER_INFO_COMMAND)
         .about("Infos about rebalancer")
         .arg(
@@ -20,7 +20,7 @@ pub fn generate_info_cmd() -> Command<'static> {
         )
 }
 
-pub fn generate_run_cmd() -> Command<'static> {
+pub fn generate_run_cmd() -> Command {
     Command::new(REBALANCER_RUN_COMMAND)
         .about("Run rebalancer")
         .arg(
@@ -29,26 +29,24 @@ pub fn generate_run_cmd() -> Command<'static> {
         )
 }
 
-pub fn generate() -> Command<'static> {
+pub fn generate() -> Command {
     Command::new(REBALANCER_COMMAND)
         .about("Fires a rebalancer")
         .subcommand(generate_run_cmd())
         .subcommand(generate_info_cmd())
 }
 
-pub async fn call_sub_commands(args: &ArgMatches) {
+pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
     match args.subcommand() {
         Some((REBALANCER_RUN_COMMAND, sub_args)) => {
             cmd_run(sub_args).await;
+            Ok(())
         }
-
         Some((REBALANCER_INFO_COMMAND, sub_args)) => {
             cmd_info(sub_args).await;
+            Ok(())
         }
-        _ => {
-            tracing::error!("no sub cmd found");
-            panic!("sub_cmd_not_found");
-        }
+        _ => Err(anyhow::anyhow!("no sub cmd found")),
     }
 }
 

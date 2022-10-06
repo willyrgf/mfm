@@ -3,7 +3,7 @@ use clap::{ArgMatches, Command};
 
 pub const APPROVE_COMMAND: &str = "approve";
 
-pub fn generate_cmd<'a>() -> Command<'a> {
+pub fn generate_cmd() -> Command {
     Command::new(APPROVE_COMMAND)
         .about("Approve token spending (needed to swap tokens)")
         //TODO: add a custom spender arg to add another spenders lide yield-farms
@@ -16,7 +16,7 @@ pub fn generate_cmd<'a>() -> Command<'a> {
         .arg(clap::arg!(-v --"amount" <VALUE> "Amount to allow spending").required(true))
 }
 
-pub async fn call_sub_commands(args: &ArgMatches) {
+pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let exchange = cmd::helpers::get_exchange(args).unwrap();
     let wallet = cmd::helpers::get_wallet(args).unwrap_or_else(|e| {
         tracing::error!(error = %e);
@@ -44,4 +44,6 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         remaning,
         asset_decimals
     );
+
+    Ok(())
 }

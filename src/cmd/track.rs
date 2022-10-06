@@ -39,12 +39,13 @@ pub struct TrackPortfolioState {
     data: TrackPortfolioStateData,
 }
 
-pub fn generate_cmd() -> Command<'static> {
+pub fn generate_cmd() -> Command {
     Command::new(TRACK_COMMAND).about("Track all information to server")
 }
 
-pub async fn call_sub_commands(args: &ArgMatches) {
+pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
     cmd_run(args).await;
+    Ok(())
 }
 
 async fn cmd_run(_args: &ArgMatches) {

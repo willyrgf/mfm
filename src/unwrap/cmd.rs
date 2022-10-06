@@ -1,6 +1,6 @@
 use clap::{ArgMatches, Command};
 
-pub fn generate<'a>() -> Command<'a> {
+pub fn generate() -> Command {
     Command::new("unwrap")
         .about("Unwrap a wrapped coin to coin")
         .arg(clap::arg!(-n --"network" <bsc> "Network to unwrap token to coin").required(true))
@@ -9,9 +9,6 @@ pub fn generate<'a>() -> Command<'a> {
 }
 
 #[tracing::instrument(name = "unwrap call command")]
-pub async fn call_sub_commands(args: &ArgMatches) {
-    super::run(args).await.unwrap_or_else(|e| {
-        tracing::error!(error = %e);
-        panic!()
-    });
+pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
+    super::run(args).await
 }

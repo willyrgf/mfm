@@ -3,7 +3,7 @@ use clap::{ArgMatches, Command};
 
 pub const WITHDRAW_COMMAND: &str = "withdraw";
 
-pub fn generate_cmd<'a>() -> Command<'a> {
+pub fn generate_cmd() -> Command {
     Command::new(WITHDRAW_COMMAND)
     .about("Withdraw to a wallet")
     .arg(
@@ -28,7 +28,7 @@ pub fn generate_cmd<'a>() -> Command<'a> {
     )
 }
 
-pub async fn call_sub_commands(args: &ArgMatches) {
+pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let wallet = cmd::helpers::get_wallet(args).unwrap_or_else(|e| {
         tracing::error!(error = %e);
         panic!()
@@ -51,4 +51,6 @@ pub async fn call_sub_commands(args: &ArgMatches) {
         .withdraw(wallet, &withdraw_wallet, amount)
         .await
         .unwrap();
+
+    Ok(())
 }

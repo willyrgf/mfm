@@ -15,8 +15,7 @@ async fn main() {
     //
     // https://doc.rust-lang.org/std/process/fn.exit.html
     //
-    // See process_exitable() method of Subscriber trait for what triggers the exit_code.
-    //
+
     let exit_code = main_exitable().await;
     std::process::exit(exit_code as i32);
 }
