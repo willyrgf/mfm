@@ -61,6 +61,7 @@ impl Network {
             .collect()
     }
 
+    // TODO: add test to avoid the bugs of like in the choice of exchange
     pub async fn get_exchange_by_liquidity(
         &self,
         input_asset: &Asset,
@@ -72,13 +73,13 @@ impl Network {
             Some((h, t)) => {
                 let mut current_amount_out = {
                     let path = h.build_route_for(input_asset, output_asset).await;
-                    h.get_amounts_out(amount_in, path).await
+                    *h.get_amounts_out(amount_in, path).await.last().unwrap()
                 };
 
                 futures::future::join_all(t.iter().map(|e| async move {
                     let current_amount = {
                         let path = e.build_route_for(input_asset, output_asset).await;
-                        e.get_amounts_out(amount_in, path).await
+                        *e.get_amounts_out(amount_in, path).await.last().unwrap()
                     };
                     (Some(*e), current_amount)
                 }))

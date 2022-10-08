@@ -136,6 +136,9 @@ async fn cmd_run(_args: &ArgMatches) {
         let parking_asset = rebalancer_config.get_parking_asset();
         let from_wallet = rebalancer_config.get_wallet();
 
+        // TODO: handle with the possibility to have just one asset.
+        // By example, using a rebalancer exit command and just have a parking asset.
+        // May a network default wrapped asset.
         let input_asset = match asset_rebalancers
             .clone()
             .iter()

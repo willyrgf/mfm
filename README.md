@@ -55,7 +55,17 @@ cargo run -- unwrap --network bsc --wallet test-wallet --amount 0.005
 ### approve spender for an asset
 
 ```bash
- cargo run -- approve_spender -e pancake_swap_v2 -w test-wallet -a wbnb -v 10
+ cargo run -- approve -e pancake_swap_v2 -w test-wallet -a wbnb -v 10
+```
+
+
+#### To approve all assets
+```bash
+cargo run -- allowance --network polygon --wallet test-wallet | 
+	grep ^\| | 
+	grep -v Exchange | 
+	awk -F '|' '{print $2 $3}' | 
+	xargs -n 2 bash -c 'cargo run -- approve --exchange $0 -w test-wallet --asset $1 --amount 10000000'
 ```
 
 ---
@@ -101,6 +111,8 @@ cargo run -- withdraw --wallet test-wallet -t test-wallet2 -v 0.008 -a wbnb -n b
 ---
 
 ## TODO
+- [ ] FIX: problem on select a better exchanged based on liquidity in some assets (like bal with quickswap vs sushi_swap)
+- [ ] validate network and exchange in the build of the config
 - [ ] use exitable main to return to the OS the exit code (like here https://github.com/firecracker-microvm/firecracker/blob/main/src/firecracker/src/main.rs#L406)
 - [ ] refactor all the U256 calc to use numbigint in testable functions
 - [ ] refactor of the config mods to be first class module (like asset)
