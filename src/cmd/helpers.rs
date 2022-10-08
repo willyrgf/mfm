@@ -106,9 +106,9 @@ pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow:
 #[tracing::instrument(name = "get slippage from command args")]
 pub fn get_slippage(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow::Error> {
     //TODO: review u128
-    match args.get_one::<f64>("slippage") {
-        Some(q) => {
-            // let q = a.parse::<f64>().unwrap();
+    match args.get_one::<String>("slippage") {
+        Some(a) => {
+            let q = a.parse::<f64>().unwrap();
             let qe = ((q / 100.0) * 10_f64.powf(asset_decimals.into())) as u128;
             Ok(U256::from(qe))
         }
