@@ -107,28 +107,3 @@ cargo run -- allowance --network polygon --wallet test-wallet |
 ```bash
 cargo run -- withdraw --wallet test-wallet -t test-wallet2 -v 0.008 -a wbnb -n bsc
 ```
-
----
-
-## TODO
-- [ ] FIX: problem on select a better exchanged based on liquidity in some assets (like bal with quickswap vs sushi_swap)
-- [ ] validate network and exchange in the build of the config
-- [ ] use exitable main to return to the OS the exit code (like here https://github.com/firecracker-microvm/firecracker/blob/main/src/firecracker/src/main.rs#L406)
-- [ ] refactor all the U256 calc to use numbigint in testable functions
-- [ ] refactor of the config mods to be first class module (like asset)
-- [ ] refactor the encrypted wallet and document it (may like that https://github.com/tari-project/tari/blob/c86727969ef3fffc124ab706d44c8845addbf415/applications/tari_console_wallet/src/cli.rs#L54)
-- [ ] use `get_better_exchange` in swap mod when exchange is not provided
-- [ ] start to release the app and document the process to update and run locally
-- [ ] add a shutdown control to signals (may like that https://github.com/tari-project/tari/blob/77bb10d42e8c004406d0ddd69b65575f0e111cd1/applications/tari_console_wallet/src/main.rs#L139)
-- [ ] add a transaction command to check status of a transaction id in the blockchain (feat/transaction)
-- [ ] add a yield farm module to interact with yield farm contracts (feat/yield-farm)
-- [ ] doc commands
-- [x] check the better exchange based on liquidity `exchange_to_use()`
-- [x] refactor wallet and withdraw-wallet to be wallet with private and public address supporting encrypted files with the keys
-- [x] compile /res resources assets/networks/exchanges configs and fallback to local configs
-- [x] add a rebalance that use only the diff between the assets to rebalance the portfolio
-- [x] add withdraw with wallets whilelist
-- [x] add harverst for yield farms
-- [x] implement rebalancer threshold
-- [x] implement a fallback to a bep20 abi
-- [x] implement a checker for token limit transfer (max-tx-amount)
