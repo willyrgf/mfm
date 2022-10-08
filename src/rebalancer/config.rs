@@ -35,7 +35,9 @@ pub struct RebalancerConfig {
     threshold_percent: f64,
     quoted_in: String,
     parking_asset_id: String,
-    parking_asset_min_move: f64,
+    // TODO: refactor the move_assets_to_parking function to be reusable and have another function
+    // to exit command.
+    pub(crate) parking_asset_min_move: f64,
 }
 
 impl RebalancerConfig {

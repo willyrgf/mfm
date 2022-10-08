@@ -309,13 +309,13 @@ pub async fn move_assets_to_parking(
         let min_move =
             rebalancer_config.parking_asset_min_move_u256(parking_asset.decimals().await.unwrap());
         if min_move >= parking_amount_out {
-            tracing::error!(
-                "min_move not sattisfied: min_move {}, parking_amount_out {}",
+            tracing::warn!(
+                "min_move not satisfied: min_move {}, parking_amount_out {}",
                 min_move,
                 parking_amount_out
             );
-            //TODO: return this error
-            return;
+            //TODO: return this error?
+            continue;
         }
 
         move_asset_with_slippage(

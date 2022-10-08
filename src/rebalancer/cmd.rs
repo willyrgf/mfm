@@ -10,6 +10,7 @@ use web3::types::U256;
 pub const REBALANCER_COMMAND: &str = "rebalancer";
 pub const REBALANCER_RUN_COMMAND: &str = "run";
 pub const REBALANCER_INFO_COMMAND: &str = "info";
+pub const REBALANCER_EXIT_COMMAND: &str = "exit";
 
 pub fn generate_info_cmd() -> Command {
     Command::new(REBALANCER_INFO_COMMAND)
@@ -29,11 +30,21 @@ pub fn generate_run_cmd() -> Command {
         )
 }
 
+pub fn generate_exit_cmd() -> Command {
+    Command::new(REBALANCER_EXIT_COMMAND)
+        .about("Exit all positions of the portfolio to parking asset")
+        .arg(
+            clap::arg!(-n --"name" <REBALANCER_NAME> "Rebalancer name from config file")
+                .required(true),
+        )
+}
+
 pub fn generate() -> Command {
     Command::new(REBALANCER_COMMAND)
         .about("Fires a rebalancer")
         .subcommand(generate_run_cmd())
         .subcommand(generate_info_cmd())
+        .subcommand(generate_exit_cmd())
 }
 
 pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
@@ -46,8 +57,27 @@ pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
             cmd_info(sub_args).await;
             Ok(())
         }
+        Some((REBALANCER_EXIT_COMMAND, sub_args)) => cmd_exit(sub_args).await,
         _ => Err(anyhow::anyhow!("no sub cmd found")),
     }
+}
+
+async fn cmd_exit(args: &ArgMatches) -> Result<(), anyhow::Error> {
+    let mut config = cmd::helpers::get_rebalancer(args);
+    tracing::debug!(
+        "rebalancer::cmd::call_sub_commands(): rebalancer_config: {:?}",
+        config
+    );
+
+    // TODO: a guarantee to try to move
+    config.parking_asset_min_move = -0.1;
+
+    let assets = config.get_assets()?;
+    let assets_balances = rebalancer::get_assets_balances(&config, assets).await;
+
+    rebalancer::move_assets_to_parking(&config, &assets_balances).await;
+
+    Ok(())
 }
 
 async fn cmd_run(args: &ArgMatches) {
@@ -146,6 +176,9 @@ async fn cmd_info(args: &ArgMatches) {
     let parking_asset = config.get_parking_asset();
     let from_wallet = config.get_wallet();
 
+    // TODO: handle with the possibility to have just one asset.
+    // By example, using a rebalancer exit command and just have a parking asset.
+    // May a network default wrapped asset.
     let input_asset = match asset_rebalances
         .clone()
         .iter()
@@ -156,12 +189,16 @@ async fn cmd_info(args: &ArgMatches) {
         })
         .last()
     {
-        Some(ar) => ar.asset_balances.asset.clone(),
-        None => panic!("No input asset to calculate swap cost"),
+        Some(ar) => Some(ar.asset_balances.asset.clone()),
+        None => {
+            tracing::warn!("No input asset to calculate swap cost");
+            None
+        }
     };
 
-    let amount_in = input_asset.balance_of(from_wallet.address()).await;
-    let parking_asset_exchange = input_asset
+    if let Some(input_asset) = input_asset {
+        let amount_in = input_asset.balance_of(from_wallet.address()).await;
+        let parking_asset_exchange = input_asset
         .get_network()
         .get_exchange_by_liquidity(&input_asset, &parking_asset, amount_in)
         .await.unwrap_or_else(||{
@@ -173,28 +210,29 @@ async fn cmd_info(args: &ArgMatches) {
             panic!()
         });
 
-    let gas_price = client.clone().eth().gas_price().await.unwrap();
-    let swap_cost = parking_asset_exchange
-        .estimate_swap_cost(from_wallet, &input_asset, &parking_asset)
-        .await;
-    // let swap_cost = U256::default();
-    let total_ops = U256::from(asset_rebalances.len());
+        let gas_price = client.clone().eth().gas_price().await.unwrap();
+        let swap_cost = parking_asset_exchange
+            .estimate_swap_cost(from_wallet, &input_asset, &parking_asset)
+            .await;
+        // let swap_cost = U256::default();
+        let total_ops = U256::from(asset_rebalances.len());
 
-    balances_table.add_row(row![
-        "Total Swap cost",
-        display_amount_to_float((swap_cost * gas_price) * total_ops, network.coin_decimals()),
-        network.get_symbol()
-    ]);
-    balances_table.add_row(row![
-        "Swap cost",
-        display_amount_to_float(swap_cost * gas_price, network.coin_decimals()),
-        network.get_symbol()
-    ]);
-    balances_table.add_row(row![
-        "Gas price",
-        display_amount_to_float(gas_price, network.coin_decimals()),
-        network.get_symbol()
-    ]);
+        balances_table.add_row(row![
+            "Total Swap cost",
+            display_amount_to_float((swap_cost * gas_price) * total_ops, network.coin_decimals()),
+            network.get_symbol()
+        ]);
+        balances_table.add_row(row![
+            "Swap cost",
+            display_amount_to_float(swap_cost * gas_price, network.coin_decimals()),
+            network.get_symbol()
+        ]);
+        balances_table.add_row(row![
+            "Gas price",
+            display_amount_to_float(gas_price, network.coin_decimals()),
+            network.get_symbol()
+        ]);
+    }
 
     table.printstd();
     balances_table.printstd();
