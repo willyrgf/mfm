@@ -1,5 +1,14 @@
 # MFM
 
+MFM (Multiverse Finance Machine) is a CLI to managing portfolio of cryptoassets directly in Blockchain using DEXs.
+
+> **WARNING**: This project is in an alpha stage. It has not been audited and may contain bugs and security flaws. This implementation is NOT ready for production use.
+
+## Big features coming
+- [ ] Support LP's as a asset type and handle with them in the portfolio
+- [ ] Support Yielf Farms and Harvest rewards
+- [ ] Add machine command within a module using state-machine logic to run sequencially and conditionally multiples commands as workflows
+
 ## Fast local install & update using releases
 
 ### *nix (?)
