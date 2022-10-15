@@ -1,4 +1,4 @@
-use crate::{cmd, utils};
+use crate::{cmd::helpers, utils};
 use clap::{ArgMatches, Command};
 use prettytable::{row, Table};
 use web3::types::U256;
@@ -9,7 +9,7 @@ pub fn generate_cmd() -> Command {
     Command::new(SWAP_COMMAND)
         .about("Swap Tokens for Tokens supporting fees on transfer")
         .arg(clap::arg!(-n --"network" <bsc> "Network to use, ex (bsc, polygon)").required(true))
-        .arg(clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router").required(true))
+        .arg(clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router").required(false))
         .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
         .arg(
             clap::arg!(-a --"amount" <AMMOUNT> "Amount of TokenA to swap to TokenB")
@@ -25,27 +25,41 @@ pub fn generate_cmd() -> Command {
 }
 
 pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
-    let exchange = cmd::helpers::get_exchange(args).unwrap();
-    let wallet = cmd::helpers::get_wallet(args).unwrap_or_else(|e| {
-        tracing::error!(error = %e);
-        panic!()
-    });
+    let network = helpers::get_network(args)?;
 
     let input_asset =
-        cmd::helpers::get_token_input_in_network_from_args(args, exchange.network_id()).unwrap();
+        helpers::get_token_input_in_network_from_args(args, network.get_name()).unwrap();
     tracing::debug!("input_token: {:?}", input_asset);
     let output_asset =
-        cmd::helpers::get_token_output_in_network_from_args(args, exchange.network_id()).unwrap();
+        helpers::get_token_output_in_network_from_args(args, network.get_name()).unwrap();
     tracing::debug!("output_token: {:?}", output_asset);
 
     let input_asset_decimals = input_asset.decimals().await.unwrap();
     let output_asset_decimals = output_asset.decimals().await.unwrap();
 
-    let amount_in = cmd::helpers::get_amount(args, input_asset_decimals).unwrap_or_else(|e| {
+    let amount_in = helpers::get_amount(args, input_asset_decimals).unwrap_or_else(|e| {
         tracing::error!(error = %e);
         panic!()
     });
-    let slippage = cmd::helpers::get_slippage(args, output_asset_decimals).unwrap();
+
+    let exchange = match helpers::get_exchange(args) {
+        Ok(e) => e,
+        Err(_) => {
+            tracing::warn!("exchange not found in args, try to use the best liquidity exchange");
+
+            network
+                .get_exchange_by_liquidity(&input_asset, &output_asset, amount_in)
+                .await
+                .unwrap()
+        }
+    };
+
+    let wallet = helpers::get_wallet(args).unwrap_or_else(|e| {
+        tracing::error!(error = %e);
+        panic!()
+    });
+
+    let slippage = helpers::get_slippage(args, output_asset_decimals).unwrap();
 
     let asset_path_in = exchange.build_route_for(&input_asset, &output_asset).await;
 
@@ -59,7 +73,7 @@ pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
 
     let slippage_amount = (amount_min_out * slippage) / U256::exp10(output_asset_decimals.into());
     let amount_out_slippage = amount_min_out - slippage_amount;
-    //tracing::debug!("amount_out_slippage : {:?}", amount_out_slippage);
+
     exchange
         .swap_tokens_for_tokens(
             wallet,
