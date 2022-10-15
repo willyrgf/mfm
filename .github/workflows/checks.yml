@@ -23,6 +23,8 @@ jobs:
       run: cargo test --verbose --lib
     - name: Run doc tests
       run: cargo test --verbose --doc
+    - name: Run integration tests
+      run: cargo test --test '*'
     - uses: actions/checkout@v1
     - run: rustup component add clippy
     - uses: actions-rs/clippy-check@v1
