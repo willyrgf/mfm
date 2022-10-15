@@ -73,7 +73,7 @@ cargo run -- allowance --network polygon --wallet test-wallet |
 ### get a quote
 
 ```bash
- cargo run -- quote -a 1 -e pancake_swap_v2 -i wbnb -o busd
+ cargo run -- quote --network bsc --exchange pancake_swap_v2  -i wbnb -o busd -a 1.0
 ```
 
 ---
@@ -81,7 +81,7 @@ cargo run -- allowance --network polygon --wallet test-wallet |
 ### swap tokens for tokens supporting fees on transfer
 
 ```bash
- cargo run -- swap -a 0.0006 -e pancake_swap_v2 -w test-wallet -i wbnb -o busd
+ cargo run -- swap -w test-wallet -n bsc -e pancake_swap_v2 -i wbnb -o busd -a 0.0006 
 ```
 
 ---
@@ -105,5 +105,5 @@ cargo run -- allowance --network polygon --wallet test-wallet |
 ### run withdraw
 
 ```bash
-cargo run -- withdraw --wallet test-wallet -t test-wallet2 -v 0.008 -a wbnb -n bsc
+cargo run -- withdraw --wallet test-wallet --network bsc --withdraw-wallet test-wallet2 -v 0.008 -a wbnb
 ```

@@ -10,10 +10,7 @@ pub fn generate_cmd() -> Command {
         clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file")
             .required(true),
     )
-    .arg(
-        clap::arg!(-n --"network" <bsc> "Network to wrap coin to token")
-            .required(true),
-    )
+    .arg(clap::arg!(-n --"network" <bsc> "Network to use, ex (bsc, polygon)").required(true))
     .arg(
         clap::arg!(-t --"withdraw-wallet" <WITHDRAW_WALLET_NAME> "Withdraw wallet to receive the transfer")
             .required(true),
