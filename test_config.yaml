@@ -44,7 +44,7 @@ exchanges:
     factory_address: 0x5757371414417b8c6caad45baef941abc7d3ab32
     network_id: polygon
   sushi_swap_polygon:
-    name: susih_swap_polygon
+    name: sushi_swap_polygon
     router_address: 0x1b02da8cb0d097eb8d57a175b88c7d8b47997506
     factory_address: 0xc35dadb65012ec5796536bd9864ed8773abc74c4
     network_id: polygon
@@ -53,23 +53,6 @@ exchanges:
     router_address: 0x3a6d8ca21d1cf76f653a67577fa0d27453350dd8
     factory_address: 0x858e3312ed3a876947ea49d572a7c42de08af7ee
     network_id: bsc
-
-# machines:
-#   farm-all-to-busd-vault:
-#     name: farm-all-to-busd-vault
-#     operations:
-#       collect_farms_and_swap:
-#         swap_to_asset_id: busd
-#         yield-farms:
-#           auto-cake:
-#             yield_farm_id: auto-cake
-#           posi-farm-bnb-posi:
-#             yield_farm_id: posi-farm-bnb-posi
-#           posi-farm-busd-posi:
-#             yield_farm_id: posi-farm-busd-posi
-#       withdraw:
-#         wallet_id: farm-wallet
-#         withdraw_wallet_id: busd-vault
 
 assets:
   qidao:
@@ -210,6 +193,12 @@ assets:
         address: 0x570A5D26f7765Ecb712C0924E4De545B89fD43dF
         slippage: 2
         path_asset: wbnb
+      polygon:
+        name: sol
+        network_id: polygon
+        address: 0x7dff46370e9ea5f0bad3c4e29711ad50062ea7a4
+        slippage: 2
+        path_asset: weth
   posi:
     kind: token
     networks:
@@ -288,6 +277,24 @@ assets:
         address: 0x53e562b9b7e5e94b81f10e96ee70ad06df3d2657
         slippage: 1
         path_asset: usdt
+  bal:
+    kind: token
+    networks:
+      polygon:
+        name: bal
+        network_id: polygon
+        address: 0x9a71012B13CA4d3D0Cdc72A177DF3ef03b0E76A3
+        slippage: 3
+        path_asset: weth
+  avax:
+    kind: token
+    networks:
+      polygon:
+        name: avax
+        network_id: polygon
+        address: 0x2c89bbc92bd86f8075d1decc58c7f4e0107f286b
+        slippage: 2
+        path_asset: weth
 
 rebalancers:
   test-rebalancer:
