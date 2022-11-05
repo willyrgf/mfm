@@ -1,6 +1,6 @@
 use crate::asset::Asset;
-use crate::utils;
 use crate::utils::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
+use crate::utils::{self, math};
 
 use std::str::FromStr;
 use std::time::UNIX_EPOCH;
@@ -273,21 +273,8 @@ impl Exchange {
                 .collect::<Vec<_>>(),
         );
 
-        // let asset_path_out = self.build_route_for(&output_asset, &input_asset).await;
-        // let asset_path_in = self.build_route_for(&input_asset, &output_asset).await;
-
-        //let input_asset_decimals = input_asset.decimals().await;
         let output_asset_decimals = output_asset.decimals().await.unwrap();
         let amount_in = input_asset.balance_of(from_wallet.address()).await;
-
-        //TODO: review this model of use slippage
-        // review another usage to change to use always the output asset decimals
-        let slippage = {
-            let ais = input_asset.slippage_u256(output_asset_decimals);
-            let aos = output_asset.slippage_u256(output_asset_decimals);
-
-            ais + aos
-        };
 
         let amount_out: U256 = self
             .get_amounts_out(amount_in, asset_path.clone())
@@ -296,11 +283,13 @@ impl Exchange {
             .unwrap()
             .into();
 
-        //TODO: move this kind of logic to the U256 module
-        //FIXME: fix the arithmetic operation overflow
-        let slippage_amount = (amount_out * slippage) / U256::exp10(output_asset_decimals.into());
+        // Sum the slippage of the both assets the input and output.
+        let slippage = input_asset.slippage() + output_asset.slippage();
+
+        let slippage_amount =
+            math::get_slippage_amount(amount_out, slippage, output_asset_decimals);
+
         let amount_min_out_slippage = amount_out - slippage_amount;
-        //let amount_min_out_slippage = amount_out;
 
         match swap_tokens_for_tokens::estimate_gas(
             self,
@@ -353,10 +342,8 @@ impl Exchange {
         let slippage = match slippage_opt {
             Some(s) => s,
             None => {
-                let ais = input_asset.slippage_u256(output_asset_decimals);
-                let aos = output_asset.slippage_u256(output_asset_decimals);
-
-                ais + aos
+                input_asset.slippage_u256(output_asset_decimals)
+                    + output_asset.slippage_u256(output_asset_decimals)
             }
         };
 
@@ -471,6 +458,7 @@ impl Exchange {
 
                     let slippage_amount =
                         (ao * slippage) / U256::exp10(output_asset_decimals.into());
+
                     let amount_min_out_slippage = ao - slippage_amount;
                     tracing::debug!("slippage_amount {:?}", slippage_amount);
 

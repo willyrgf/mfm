@@ -253,11 +253,12 @@ pub async fn move_asset_with_slippage(
     }
 
     let asset_out_decimals = asset_out.decimals().await.unwrap();
-    let amount_in_slippage = asset_in.slippage_u256(asset_out_decimals);
-    let amount_out_slippage = asset_out.slippage_u256(asset_out_decimals);
 
-    let slippage = amount_in_slippage + amount_out_slippage;
+    let slippage =
+        asset_in.slippage_u256(asset_out_decimals) + asset_out.slippage_u256(asset_out_decimals);
+
     let slippage_amount = (amount_out * slippage) / U256::exp10(asset_out_decimals.into());
+
     let asset_out_amount_slip = amount_out - slippage_amount;
     tracing::debug!("asset_out_amount_slip: {:?}", asset_out_amount_slip);
 
@@ -346,7 +347,7 @@ pub async fn move_parking_to_assets(
             continue;
         }
 
-        let parking_slip = parking_asset.slippage_u256(ab.asset_decimals);
+        let parking_slippage = parking_asset.slippage_u256(ab.asset_decimals);
         let parking_amount =
             ab.desired_parking_to_move(total_parking_balance, parking_asset_decimals);
         tracing::debug!("desired_parking_to_move: {}", parking_amount);
@@ -373,8 +374,8 @@ pub async fn move_parking_to_assets(
             .into();
         tracing::debug!("asset_amount_out: {:?}", asset_amount_out);
 
-        let ab_slip = ab.asset.slippage_u256(ab.asset_decimals);
-        let slippage = ab_slip + parking_slip;
+        let ab_slippage = ab.asset.slippage_u256(ab.asset_decimals);
+        let slippage = ab_slippage + parking_slippage;
         tracing::debug!("slippage: {:?}", slippage);
 
         let slippage_amount = (asset_amount_out * slippage) / U256::exp10(ab.asset_decimals.into());

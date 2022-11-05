@@ -305,6 +305,7 @@ impl BigInt {
         );
         U256::from_little_endian(&bytes)
     }
+
     pub fn pow(self, exponent: u8) -> Self {
         use num_traits::pow::Pow;
 
@@ -336,6 +337,12 @@ impl From<i32> for BigInt {
 
 impl From<u64> for BigInt {
     fn from(i: u64) -> BigInt {
+        BigInt(i.into())
+    }
+}
+
+impl From<u8> for BigInt {
+    fn from(i: u8) -> BigInt {
         BigInt(i.into())
     }
 }

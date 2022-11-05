@@ -1,4 +1,7 @@
-use crate::{cmd::helpers, utils};
+use crate::{
+    cmd::helpers,
+    utils::{self, math},
+};
 use clap::{ArgMatches, Command};
 use prettytable::{row, Table};
 use web3::types::U256;
@@ -20,7 +23,8 @@ pub fn generate_cmd() -> Command {
         .arg(
             clap::arg!(-s --"slippage" <SLIPPAGE> "Slippage (default 0.5)")
                 .required(false)
-                .default_value("0.5"),
+                .default_value("0.5")
+                .value_parser(clap::value_parser!(f64)),
         )
 }
 
@@ -54,12 +58,12 @@ pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
         }
     };
 
-    let wallet = helpers::get_wallet(args).unwrap_or_else(|e| {
+    let from_wallet = helpers::get_wallet(args).unwrap_or_else(|e| {
         tracing::error!(error = %e);
         panic!()
     });
 
-    let slippage = helpers::get_slippage(args, output_asset_decimals).unwrap();
+    let slippage = helpers::get_slippage(args)?;
 
     let asset_path_in = exchange.build_route_for(&input_asset, &output_asset).await;
 
@@ -71,17 +75,21 @@ pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
         .into();
     tracing::debug!("amount_mint_out: {:?}", amount_min_out);
 
-    let slippage_amount = (amount_min_out * slippage) / U256::exp10(output_asset_decimals.into());
+    let slippage_amount =
+        math::get_slippage_amount(amount_min_out, slippage, output_asset_decimals);
     let amount_out_slippage = amount_min_out - slippage_amount;
 
     exchange
         .swap_tokens_for_tokens(
-            wallet,
+            from_wallet,
             amount_in,
             amount_out_slippage,
             input_asset.clone(),
             output_asset.clone(),
-            Some(slippage),
+            Some(math::transform_slippage_u256(
+                slippage,
+                output_asset_decimals,
+            )),
         )
         .await;
 

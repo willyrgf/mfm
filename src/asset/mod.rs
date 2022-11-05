@@ -9,7 +9,7 @@ use web3::{
     types::{Address, Bytes, H160, U256},
 };
 
-use crate::utils;
+use crate::utils::{self, math};
 
 use crate::config::{network::Network, wallet::Wallet, withdraw_wallet::WithdrawWallet, Config};
 use crate::utils::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
@@ -33,6 +33,16 @@ pub struct Asset {
 impl Asset {
     pub fn new(asset_config: &AssetConfig, network: &Network) -> Result<Self, anyhow::Error> {
         let asset_network = asset_config.networks.get(network.get_name())?;
+
+        // TODO: add a validator for the builders
+
+        if !(asset_network.slippage > 0.0 && asset_network.slippage <= 100.0) {
+            return Err(anyhow::anyhow!(
+                "Asset::new(): asset_name: {}; slippage needs to be between 0 and 100",
+                asset_network.name
+            ));
+        }
+
         Ok(Asset {
             name: asset_network.name.clone(),
             kind: asset_config.kind.clone(),
@@ -44,10 +54,12 @@ impl Asset {
         })
     }
 
+    pub fn slippage(&self) -> f64 {
+        self.slippage
+    }
+
     pub fn slippage_u256(&self, asset_decimals: u8) -> U256 {
-        //TODO: review u128
-        let qe = ((&self.slippage / 100.0) * 10_f64.powf(asset_decimals.into())) as u128;
-        U256::from(qe)
+        math::transform_slippage_u256(self.slippage, asset_decimals)
     }
 
     pub fn name(&self) -> &str {

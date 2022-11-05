@@ -14,7 +14,8 @@ pub fn generate() -> Command {
         .arg(
             clap::arg!(-s --"slippage" <SLIPPAGE> "Slippage (default 0.5)")
                 .required(false)
-                .default_value("0.5"),
+                .default_value("0.5")
+                .value_parser(clap::value_parser!(f64)),
         )
 }
 

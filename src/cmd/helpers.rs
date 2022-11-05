@@ -103,17 +103,14 @@ pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow:
     }
 }
 
-#[tracing::instrument(name = "get slippage from command args")]
-pub fn get_slippage(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow::Error> {
-    //TODO: review u128
-    match args.get_one::<String>("slippage") {
-        Some(a) => {
-            let q = a.parse::<f64>().unwrap();
-            let qe = ((q / 100.0) * 10_f64.powf(asset_decimals.into())) as u128;
-            Ok(U256::from(qe))
-        }
-        None => Err(anyhow::anyhow!("--slippage is required")),
-    }
+// TODO: validate all slippage is  n > 0 and n <= 100
+#[tracing::instrument(name = "get slippage in f64 from command args")]
+pub fn get_slippage(args: &ArgMatches) -> Result<f64, anyhow::Error> {
+    let Some(f) = args.get_one::<f64>("slippage") else {
+        return Err(anyhow::anyhow!("--slippage is not a number"))
+    };
+
+    Ok(*f)
 }
 
 #[tracing::instrument(name = "get input token in network from command args")]
