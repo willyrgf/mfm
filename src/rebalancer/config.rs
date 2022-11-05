@@ -1,5 +1,6 @@
 use crate::asset::Asset;
 use crate::config::network::Network;
+use crate::utils::math;
 use crate::{config::wallet::Wallet, config::Config};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -42,9 +43,7 @@ pub struct RebalancerConfig {
 
 impl RebalancerConfig {
     pub fn parking_asset_min_move_u256(&self, decimals: u8) -> U256 {
-        //TODO: review u128
-        let qe = (self.parking_asset_min_move * 10_f64.powf(decimals.into())) as u128;
-        U256::from(qe)
+        math::f64_to_u256(self.parking_asset_min_move, decimals)
     }
 
     pub fn network_id(&self) -> &str {

@@ -5,6 +5,7 @@ use crate::{
         Config,
     },
     rebalancer::config::RebalancerConfig,
+    utils::math,
 };
 use anyhow::Context;
 use clap::ArgMatches;
@@ -89,28 +90,32 @@ pub fn get_txn_id(args: &ArgMatches) -> &str {
 
 #[tracing::instrument(name = "get amount from command args")]
 pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow::Error> {
-    //TODO: need to review usage from i128
-    match args.get_one::<String>("amount") {
-        Some(a) => {
-            //TODO: move it to a helper function
-            let q = a
-                .parse::<f64>()
-                .map_err(|e| anyhow::anyhow!("cant parse the amount value to f64, got {:?}", e))?;
-            let qe = (q * 10_f64.powf(asset_decimals.into())) as i128;
-            Ok(U256::from(qe))
-        }
-        None => Err(anyhow::anyhow!("--amount is required")),
-    }
+    let Some(amount) = args.get_one::<f64>("amount") else {
+        return Err(anyhow::anyhow!("--amount is not a number"))
+    };
+
+    Ok(math::f64_to_u256(*amount, asset_decimals))
 }
 
-// TODO: validate all slippage is  n > 0 and n <= 100
-#[tracing::instrument(name = "get slippage in f64 from command args")]
-pub fn get_slippage(args: &ArgMatches) -> Result<f64, anyhow::Error> {
-    let Some(f) = args.get_one::<f64>("slippage") else {
-        return Err(anyhow::anyhow!("--slippage is not a number"))
+#[tracing::instrument(name = "get amount in f64 from command args")]
+pub fn get_amount_f64(args: &ArgMatches) -> Result<f64, anyhow::Error> {
+    let Some(f) = args.get_one::<f64>("amount") else {
+        return Err(anyhow::anyhow!("--amount is not a number"))
     };
 
     Ok(*f)
+}
+
+#[tracing::instrument(name = "get slippage in f64 from command args")]
+pub fn get_slippage(args: &ArgMatches) -> Result<f64, anyhow::Error> {
+    match args.get_one::<f64>("slippage") {
+        Some(f) if *f > 0.0 && *f <= 100.0 => Ok(*f),
+        Some(f) => Err(anyhow::anyhow!(
+            "--slippage needs to be between 0 and 100. f: {}",
+            f
+        )),
+        None => Err(anyhow::anyhow!("--slippage is not a number")),
+    }
 }
 
 #[tracing::instrument(name = "get input token in network from command args")]

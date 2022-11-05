@@ -1,7 +1,9 @@
 use crate::asset::Asset;
 use crate::utils::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
+use crate::utils::scalar::BigDecimal;
 use crate::utils::{self, math};
 
+use std::ops::Div;
 use std::str::FromStr;
 use std::time::UNIX_EPOCH;
 use std::{collections::HashMap, time::SystemTime};
@@ -214,8 +216,6 @@ impl Exchange {
         }
 
         let contract = self.router_contract();
-        // let quantity = 1;
-        // let amount: U256 = (quantity * 10_i32.pow(decimals.into())).into();
         let result = contract.query(
             "getAmountsOut",
             (amount, assets_path),
@@ -338,7 +338,6 @@ impl Exchange {
         let input_asset_decimals = input_asset.decimals().await.unwrap();
         let output_asset_decimals = output_asset.decimals().await.unwrap();
 
-        //TODO: review this model of use slippage
         let slippage = match slippage_opt {
             Some(s) => s,
             None => {
@@ -415,12 +414,13 @@ impl Exchange {
 
         match limit_max_input {
             Some(limit) if amount_in > limit => {
-                // TODO: resolv this calc with U256 exp10  or numbigint
                 let mut total = amount_in;
-                let amount_in_plus_two_decimals = amount_in * U256::exp10(2);
-                let number_hops = (((amount_in_plus_two_decimals / limit).as_u128() as f64)
-                    / 100_f64)
-                    .ceil() as u64;
+
+                let amount_in_bd =
+                    BigDecimal::from_unsigned_u256(&amount_in, input_asset_decimals.into());
+                let limit_bd = BigDecimal::from_unsigned_u256(&limit, input_asset_decimals.into());
+
+                let number_hops = amount_in_bd.div(limit_bd).to_f64().unwrap().ceil() as u64;
 
                 for _ in 0..number_hops {
                     let ai: U256;

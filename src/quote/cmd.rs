@@ -6,8 +6,9 @@ pub fn generate() -> Command {
         .arg(clap::arg!(-n --"network" <bsc> "Network to use, ex (bsc, polygon)").required(true))
         .arg(clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router").required(false))
         .arg(
-            clap::arg!(-a --"amount" <AMMOUNT> "Amount of TokenA to swap to TokenB")
-                .required(false),
+            clap::arg!(-a --"amount" <AMOUNT> "Amount of TokenA to swap to TokenB")
+                .required(false)
+                .value_parser(clap::value_parser!(f64)),
         )
         .arg(clap::arg!(-i --"token_input" <TOKEN_INPUT> "Asset of input token").required(false))
         .arg(clap::arg!(-o --"token_output" <TOKEN_OUTPUT> "Asset of output token").required(false))

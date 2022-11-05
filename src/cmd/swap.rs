@@ -16,7 +16,8 @@ pub fn generate_cmd() -> Command {
         .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
         .arg(
             clap::arg!(-a --"amount" <AMMOUNT> "Amount of TokenA to swap to TokenB")
-                .required(false),
+                .required(false)
+                .value_parser(clap::value_parser!(f64)),
         )
         .arg(clap::arg!(-i --"token_input" <TOKEN_INPUT> "Asset of input token").required(false))
         .arg(clap::arg!(-o --"token_output" <TOKEN_OUTPUT> "Asset of output token").required(false))
@@ -41,10 +42,7 @@ pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let input_asset_decimals = input_asset.decimals().await.unwrap();
     let output_asset_decimals = output_asset.decimals().await.unwrap();
 
-    let amount_in = helpers::get_amount(args, input_asset_decimals).unwrap_or_else(|e| {
-        tracing::error!(error = %e);
-        panic!()
-    });
+    let amount_in = helpers::get_amount(args, input_asset_decimals)?;
 
     let exchange = match helpers::get_exchange(args) {
         Ok(e) => e,
@@ -86,10 +84,7 @@ pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
             amount_out_slippage,
             input_asset.clone(),
             output_asset.clone(),
-            Some(math::transform_slippage_u256(
-                slippage,
-                output_asset_decimals,
-            )),
+            Some(math::f64_to_u256(slippage, output_asset_decimals)),
         )
         .await;
 

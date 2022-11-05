@@ -407,21 +407,21 @@ pub async fn move_parking_to_assets(
     }
 }
 
-//TODO: create a mod to carry all the U256 ops
-// https://github.com/graphprotocol/graph-node/blob/master/graph/src/data/store/scalar.rs
-// U256 -> BigUint
-// BigUint -> U256
-pub fn u256_to_bigint(u: U256) -> BigInt {
-    let mut bytes: [u8; 32] = [0; 32];
-    u.to_little_endian(&mut bytes);
-    BigInt::from_bytes_le(Sign::Plus, &bytes)
-}
+// //TODO: create a mod to carry all the U256 ops
+// // https://github.com/graphprotocol/graph-node/blob/master/graph/src/data/store/scalar.rs
+// // U256 -> BigUint
+// // BigUint -> U256
+// pub fn u256_to_bigint(u: U256) -> BigInt {
+//     let mut bytes: [u8; 32] = [0; 32];
+//     u.to_little_endian(&mut bytes);
+//     BigInt::from_bytes_le(Sign::Plus, &bytes)
+// }
 
-pub fn bigint_to_u256(b: BigInt) -> U256 {
-    let (_, unb) = b.into_parts();
-    let bytes = unb.to_bytes_le();
-    U256::from_little_endian(&bytes)
-}
+// pub fn bigint_to_u256(b: BigInt) -> U256 {
+//     let (_, unb) = b.into_parts();
+//     let bytes = unb.to_bytes_le();
+//     U256::from_little_endian(&bytes)
+// }
 
 //TODO: break validation and threshold
 pub async fn validate(config: &RebalancerConfig) -> Result<(), anyhow::Error> {

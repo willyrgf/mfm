@@ -22,6 +22,7 @@ pub fn generate_cmd() -> Command {
     .arg(
         clap::arg!(-v --"amount" <VALUE> "Amount to withdraw")
             .required(true)
+            .value_parser(clap::value_parser!(f64))
     )
 }
 

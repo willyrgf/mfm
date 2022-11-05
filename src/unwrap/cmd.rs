@@ -5,7 +5,11 @@ pub fn generate() -> Command {
         .about("Unwrap a wrapped coin to coin")
         .arg(clap::arg!(-n --"network" <bsc> "Network to unwrap token to coin").required(true))
         .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
-        .arg(clap::arg!(-a --"amount" <AMMOUNT> "Amount to unwrap token into coin").required(false))
+        .arg(
+            clap::arg!(-a --"amount" <AMMOUNT> "Amount to unwrap token into coin")
+                .required(false)
+                .value_parser(clap::value_parser!(f64)),
+        )
 }
 
 #[tracing::instrument(name = "unwrap call command")]

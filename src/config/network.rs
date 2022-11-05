@@ -61,7 +61,6 @@ impl Network {
             .collect()
     }
 
-    // TODO: add test to avoid the bugs of like in the choice of exchange
     pub async fn get_exchange_by_liquidity(
         &self,
         input_asset: &Asset,
