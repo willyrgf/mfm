@@ -65,6 +65,10 @@ impl BigDecimal {
         self.0.as_bigint_and_exponent()
     }
 
+    pub fn abs(&self) -> BigDecimal {
+        BigDecimal::from(self.0.abs())
+    }
+
     pub fn to_unsigned_u256(&self) -> U256 {
         let (bigint, _) = self.as_bigint_and_exponent();
         BigInt::from(bigint).to_unsigned_u256()
@@ -473,6 +477,7 @@ mod test {
             (11.0, BigDecimal::try_from(11).unwrap(), "11"),
             (0.0, BigDecimal::try_from(0).unwrap(), "0"),
             (0.33, BigDecimal::try_from(0.33).unwrap(), "0.33"),
+            (-0.33, BigDecimal::try_from(-0.33).unwrap(), "-0.33"),
         ];
 
         for (fnumber, fbigdecimal, snumber) in test_cases {

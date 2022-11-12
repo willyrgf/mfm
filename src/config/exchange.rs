@@ -288,7 +288,6 @@ impl Exchange {
 
         let slippage_amount =
             math::get_slippage_amount(amount_out, slippage, output_asset_decimals);
-
         let amount_min_out_slippage = amount_out - slippage_amount;
 
         match swap_tokens_for_tokens::estimate_gas(

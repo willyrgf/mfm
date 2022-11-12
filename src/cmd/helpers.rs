@@ -90,20 +90,18 @@ pub fn get_txn_id(args: &ArgMatches) -> &str {
 
 #[tracing::instrument(name = "get amount from command args")]
 pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow::Error> {
-    let Some(amount) = args.get_one::<f64>("amount") else {
-        return Err(anyhow::anyhow!("--amount is not a number"))
-    };
-
-    Ok(math::f64_to_u256(*amount, asset_decimals))
+    match args.get_one::<f64>("amount") {
+        Some(amount) => Ok(math::f64_to_u256(*amount, asset_decimals)),
+        None => Err(anyhow::anyhow!("--amount is not a number")),
+    }
 }
 
 #[tracing::instrument(name = "get amount in f64 from command args")]
 pub fn get_amount_f64(args: &ArgMatches) -> Result<f64, anyhow::Error> {
-    let Some(f) = args.get_one::<f64>("amount") else {
-        return Err(anyhow::anyhow!("--amount is not a number"))
-    };
-
-    Ok(*f)
+    match args.get_one::<f64>("amount") {
+        Some(amount) => Ok(*amount),
+        None => Err(anyhow::anyhow!("--amount is not a number")),
+    }
 }
 
 #[tracing::instrument(name = "get slippage in f64 from command args")]

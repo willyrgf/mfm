@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use web3::{transports::Http, types::U256, Web3};
 
 use super::{exchange::Exchange, Config};
-use crate::asset::Asset;
+use crate::{asset::Asset, utils::scalar::BigDecimal};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Network {
@@ -43,9 +43,13 @@ impl Network {
             .assets
             .find_by_name_and_network(self.wrapped_asset.as_str(), self.name.as_str())
     }
+
+    //TODO: validate min_balance_coin in the build of the type
     pub fn get_min_balance_coin(&self, decimals: u8) -> U256 {
-        let qe = (self.min_balance_coin * 10_f64.powf(decimals.into())) as i64;
-        U256::from(qe)
+        BigDecimal::try_from(self.min_balance_coin)
+            .unwrap()
+            .with_scale(decimals.into())
+            .to_unsigned_u256()
     }
 
     pub fn get_web3_client_http(&self) -> Web3<Http> {

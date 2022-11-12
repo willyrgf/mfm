@@ -59,7 +59,7 @@ impl Asset {
     }
 
     pub fn slippage_u256(&self, asset_decimals: u8) -> U256 {
-        math::slippage_to_u256(self.slippage, asset_decimals)
+        math::percent_to_u256(self.slippage, asset_decimals)
     }
 
     pub fn name(&self) -> &str {

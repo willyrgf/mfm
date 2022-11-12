@@ -1,12 +1,15 @@
 pub mod cmd;
 pub mod config;
 
+use std::ops::{Mul, Sub};
+
 use crate::{
-    asset::Asset, config::wallet::Wallet, rebalancer::config::RebalancerConfig,
-    utils::blockchain::display_amount_to_float,
+    asset::Asset,
+    config::wallet::Wallet,
+    rebalancer::config::RebalancerConfig,
+    utils::{blockchain::display_amount_to_float, math::percent_to_u256, scalar::BigDecimal},
 };
 
-use num_bigint::{BigInt, Sign};
 use serde::{Deserialize, Serialize};
 use web3::types::U256;
 
@@ -156,16 +159,8 @@ impl AssetBalances {
         }
     }
 
-    pub fn desired_quoted_in_balance(&self, total_quoted_balance: U256) -> U256 {
-        //self.quoted_balance / total_quoted_balance
-        let p = ((self.percent / 100.0) * 10_f64.powf(self.quoted_asset_decimals.into())) as u128;
-        (total_quoted_balance * U256::from(p)) / U256::exp10(self.quoted_asset_decimals.into())
-    }
-
-    pub fn desired_parking_to_move(&self, total_parking_balance: U256, decimals: u8) -> U256 {
-        //self.quoted_balance / total_quoted_balance
-        let p = ((self.percent / 100.0) * 10_f64.powf(decimals.into())) as u128;
-        (total_parking_balance * U256::from(p)) / U256::exp10(decimals.into())
+    pub fn get_amount_by_percent(&self, total_balance: U256, decimals: u8) -> U256 {
+        get_amount_to_trade(total_balance, U256::zero(), self.percent, decimals).to_unsigned_u256()
     }
 
     pub fn quoted_balance(&self) -> U256 {
@@ -178,8 +173,24 @@ impl AssetBalances {
         self.percent
     }
     pub fn quoted_asset_percent_u256(&self) -> U256 {
-        U256::from((self.percent * 10_f64.powf(self.quoted_asset_decimals.into())) as u128)
+        percent_to_u256(self.percent, self.quoted_asset_decimals)
     }
+}
+
+pub fn get_amount_to_trade(
+    total_balance: U256,
+    balance: U256,
+    percent: f64,
+    decimals: u8,
+) -> BigDecimal {
+    let total_balance_bd = BigDecimal::from_unsigned_u256(&total_balance, decimals.into());
+    let balance_bd = BigDecimal::from_unsigned_u256(&balance, decimals.into());
+    let percent_bd = BigDecimal::try_from(percent / 100.0).unwrap();
+
+    total_balance_bd
+        .mul(percent_bd)
+        .sub(balance_bd)
+        .with_scale(decimals.into())
 }
 
 pub async fn get_assets_balances(
@@ -349,7 +360,7 @@ pub async fn move_parking_to_assets(
 
         let parking_slippage = parking_asset.slippage_u256(ab.asset_decimals);
         let parking_amount =
-            ab.desired_parking_to_move(total_parking_balance, parking_asset_decimals);
+            ab.get_amount_by_percent(total_parking_balance, parking_asset_decimals);
         tracing::debug!("desired_parking_to_move: {}", parking_amount);
 
         let exchange = ab.asset
@@ -406,22 +417,6 @@ pub async fn move_parking_to_assets(
             .await;
     }
 }
-
-// //TODO: create a mod to carry all the U256 ops
-// // https://github.com/graphprotocol/graph-node/blob/master/graph/src/data/store/scalar.rs
-// // U256 -> BigUint
-// // BigUint -> U256
-// pub fn u256_to_bigint(u: U256) -> BigInt {
-//     let mut bytes: [u8; 32] = [0; 32];
-//     u.to_little_endian(&mut bytes);
-//     BigInt::from_bytes_le(Sign::Plus, &bytes)
-// }
-
-// pub fn bigint_to_u256(b: BigInt) -> U256 {
-//     let (_, unb) = b.into_parts();
-//     let bytes = unb.to_bytes_le();
-//     U256::from_little_endian(&bytes)
-// }
 
 //TODO: break validation and threshold
 pub async fn validate(config: &RebalancerConfig) -> Result<(), anyhow::Error> {
@@ -528,12 +523,11 @@ pub async fn generate_asset_rebalances(
 
     //TODO: add thresould per position
 
-    let mut total = BigInt::from(0_i32);
+    let mut total = BigDecimal::zero();
 
     let assets_balances = get_assets_balances(config, assets.clone()).await;
     let assets_balances_with_parking = add_parking_asset(config, assets_balances).await;
 
-    //TODO: add a sum_U256 in the module of U256 ops
     let total_quoted_balance = assets_balances_with_parking
         .iter()
         .fold(U256::from(0_i32), |acc, x| acc + x.quoted_balance());
@@ -545,36 +539,36 @@ pub async fn generate_asset_rebalances(
 
     let mut asset_rebalances = vec![];
 
-    let tqb = u256_to_bigint(total_quoted_balance);
-    tracing::debug!("diff_parking: tqb: {}", tqb);
-
     // TODO: break this for in functions to return rp_to_parking rp_from_parking
     for ab in assets_balances_with_parking.clone() {
-        let quoted_balance = u256_to_bigint(ab.quoted_balance());
-        let diff = tqb.clone() - quoted_balance.clone();
+        tracing::debug!(
+            "generate_asset_rebalances(): loop assets_balances_with_parking; ab: {:?}",
+            ab
+        );
+        let amount_to_trade = get_amount_to_trade(
+            total_quoted_balance,
+            ab.quoted_balance,
+            ab.percent,
+            ab.quoted_asset_decimals,
+        );
 
-        let pow = 10_u32.pow(4);
-        // let percent_diff = (diff.clone() * pow) / quoted_balance.clone();
-        let percent: BigInt = ((quoted_balance.clone() * pow) / tqb.clone()) * 100_i32;
-        let percent_to_buy = (ab.percent() * 10_f64.powf(4.0)) as u32 - percent.clone();
-        // ((2730469751527576947)*((35,68/100)*1e18))/1e18
-        // TODO: may add slippage in this calcs
-        let amount_to_trade: BigInt = (tqb.clone()
-            * (percent_to_buy.clone() * 10_u128.pow((ab.asset_decimals - 4 - 2).into())))
-            / 10_u128.pow(ab.asset_decimals.into());
-
-        total += amount_to_trade.clone();
-
-        let quoted_amount_to_trade = bigint_to_u256(amount_to_trade.clone());
+        total = total + amount_to_trade.clone();
 
         // if amount_to_trade is negative, move to parking
-        let kind = if amount_to_trade <= BigInt::from(0_i32) {
+        let kind = if amount_to_trade <= BigDecimal::zero() {
             Kind::ToParking
         } else {
             Kind::FromParking
         };
 
-        match AssetRebalancer::new(kind, config.clone(), ab.clone(), quoted_amount_to_trade).await {
+        match AssetRebalancer::new(
+            kind,
+            config.clone(),
+            ab.clone(),
+            amount_to_trade.abs().to_unsigned_u256(),
+        )
+        .await
+        {
             Some(ar) => asset_rebalances.push(ar),
             None => {
                 tracing::debug!("diff_parking: rebalancer_parking cant be created, continue.");
@@ -582,13 +576,10 @@ pub async fn generate_asset_rebalances(
             }
         };
 
-        tracing::debug!("diff_parking: ab: {}, quoted_balance: {}, ab.percent(): {}, percent: {}, diff: {}, percent_to_buy: {}, amount_to_trade: {}, total: {}",
+        tracing::debug!("diff_parking: ab: {}, quoted_balance: {}, ab.percent(): {}, amount_to_trade: {}, total: {}",
 				ab.asset.name(),
-				quoted_balance,
-				ab.percent(),
-				percent,
-				diff,
-				percent_to_buy,
+				ab.quoted_balance,
+				ab.percent,
 				amount_to_trade,
 				total,
             );
@@ -598,10 +589,68 @@ pub async fn generate_asset_rebalances(
 }
 
 pub async fn run_diff_parking(config: &RebalancerConfig) -> Result<(), anyhow::Error> {
-    let asset_balances = generate_asset_rebalances(config).await?;
+    let asset_rebalancers = generate_asset_rebalances(config).await?;
 
-    run_diff_parking_per_kind(config, Kind::ToParking, asset_balances.clone()).await;
-    run_diff_parking_per_kind(config, Kind::FromParking, asset_balances.clone()).await;
+    run_diff_parking_per_kind(config, Kind::ToParking, asset_rebalancers.clone()).await;
+    run_diff_parking_per_kind(config, Kind::FromParking, asset_rebalancers.clone()).await;
 
     Ok(())
+}
+
+mod test {
+    #[test]
+    fn get_amount_to_trade_test() {
+        use crate::rebalancer::get_amount_to_trade;
+        use crate::utils::scalar::BigDecimal;
+        use web3::types::U256;
+
+        struct TestCase {
+            total_balance: U256,
+            balance: U256,
+            percent: f64,
+            decimals: u8,
+            expected: BigDecimal,
+        }
+
+        let test_cases = vec![
+            TestCase {
+                total_balance: BigDecimal::from(20000_i32)
+                    .with_scale(18)
+                    .to_unsigned_u256(),
+                balance: BigDecimal::from(100_i32).with_scale(18).to_unsigned_u256(),
+                percent: 10.0,
+                decimals: 18_u8,
+                expected: BigDecimal::from(1900_i32),
+            },
+            TestCase {
+                total_balance: BigDecimal::from(17333_i32)
+                    .with_scale(18)
+                    .to_unsigned_u256(),
+                balance: BigDecimal::from(97_i32).with_scale(18).to_unsigned_u256(),
+                percent: 2.5,
+                decimals: 18_u8,
+                expected: BigDecimal::try_from(336.325).unwrap(),
+            },
+            TestCase {
+                total_balance: BigDecimal::from(20000_i32)
+                    .with_scale(18)
+                    .to_unsigned_u256(),
+                balance: BigDecimal::from(2000_i32).with_scale(18).to_unsigned_u256(),
+                percent: 2.0,
+                decimals: 18_u8,
+                expected: BigDecimal::from(-1600_i32),
+            },
+        ];
+
+        for test_case in test_cases {
+            let amount_to_trade = get_amount_to_trade(
+                test_case.total_balance,
+                test_case.balance,
+                test_case.percent,
+                test_case.decimals,
+            );
+
+            assert_eq!(test_case.expected, amount_to_trade)
+        }
+    }
 }
