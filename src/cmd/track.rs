@@ -1,7 +1,5 @@
-use crate::{
-    asset::Asset, config::Config, rebalancer::generate_asset_rebalances,
-    utils::blockchain::display_amount_to_float,
-};
+use super::rebalancer::generate_asset_rebalances;
+use crate::{asset::Asset, config::Config, utils::blockchain::display_amount_to_float};
 use clap::{ArgMatches, Command};
 use serde::{Deserialize, Serialize};
 use web3::types::U256;
