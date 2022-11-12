@@ -1,5 +1,6 @@
 use crate::asset::Asset;
 use crate::config::network::Network;
+use crate::utils::math::{self, percent_to_u256};
 use crate::{config::wallet::Wallet, config::Config};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -42,9 +43,7 @@ pub struct RebalancerConfig {
 
 impl RebalancerConfig {
     pub fn parking_asset_min_move_u256(&self, decimals: u8) -> U256 {
-        //TODO: review u128
-        let qe = (self.parking_asset_min_move * 10_f64.powf(decimals.into())) as u128;
-        U256::from(qe)
+        math::f64_to_u256(self.parking_asset_min_move, decimals)
     }
 
     pub fn network_id(&self) -> &str {
@@ -158,6 +157,7 @@ impl RebalancerConfig {
             threshold-percent_diff = -0,28
         ```
     */
+    // TODO: add tests and refactor this function
     pub fn reach_min_threshold(&self, assets_balances: &[AssetBalances]) -> bool {
         // TODO: abstract this
         // abs for U256
@@ -170,11 +170,9 @@ impl RebalancerConfig {
         };
 
         let quoted_asset_decimals = assets_balances.last().unwrap().quoted_asset_decimals();
-        let max_percent_u256 = U256::from(100_i32) * U256::exp10(quoted_asset_decimals.into());
+        let max_percent_u256 = percent_to_u256(100.0, quoted_asset_decimals);
 
-        let thresold_percent_u256 = U256::from(
-            (self.threshold_percent * 10_f64.powf(quoted_asset_decimals.into())) as u128,
-        );
+        let thresold_percent_u256 = percent_to_u256(self.threshold_percent, quoted_asset_decimals);
         tracing::debug!(
             "reach_min_threshold(): thresold_percent_u256: {:?}",
             thresold_percent_u256

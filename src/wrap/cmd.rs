@@ -12,8 +12,9 @@ pub fn generate() -> Command {
             .required(true),
     )
     .arg(
-        clap::arg!(-a --"amount" <AMMOUNT> "Amount to wrap coin into token, default: (balance-min_balance_coin)")
-            .required(false),
+        clap::arg!(-a --"amount" <AMOUNT> "Amount to wrap coin into token, default: (balance-min_balance_coin)")
+            .required(false)
+            .value_parser(clap::value_parser!(f64)),
     )
 }
 

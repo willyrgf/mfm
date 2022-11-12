@@ -17,7 +17,7 @@ static TRACING: Lazy<()> = Lazy::new(|| {
 });
 
 pub struct App {
-    command: Command,
+    _command: Command,
     config: Config,
 }
 
@@ -27,16 +27,16 @@ impl App {
         Self::default()
     }
 
-    pub fn command(&self) -> Command {
-        self.command.clone()
+    pub fn _command(&self) -> Command {
+        self._command.clone()
     }
 
     pub fn config(&self) -> Config {
         self.config.clone()
     }
 
-    pub fn get_arg_matches(&self, argv: &'static str) -> ArgMatches {
-        get_arg_matches(self.command(), argv)
+    pub fn _get_arg_matches(&self, argv: &'static str) -> ArgMatches {
+        _get_arg_matches(self._command(), argv)
     }
 }
 
@@ -45,13 +45,13 @@ impl Default for App {
         Lazy::force(&TRACING);
 
         App {
-            command: cmd::new(),
+            _command: cmd::new(),
             config: Config::from_file(DEFAULT_CONFIG_FILE).unwrap(),
         }
     }
 }
 
-pub fn get_arg_matches(cmd: Command, argv: &'static str) -> ArgMatches {
+pub fn _get_arg_matches(cmd: Command, argv: &'static str) -> ArgMatches {
     cmd.try_get_matches_from(argv.split(' ').collect::<Vec<_>>())
         .unwrap()
 }

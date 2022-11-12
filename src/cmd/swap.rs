@@ -1,4 +1,7 @@
-use crate::{cmd::helpers, utils};
+use crate::{
+    cmd::helpers,
+    utils::{self, math},
+};
 use clap::{ArgMatches, Command};
 use prettytable::{row, Table};
 use web3::types::U256;
@@ -13,14 +16,16 @@ pub fn generate_cmd() -> Command {
         .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
         .arg(
             clap::arg!(-a --"amount" <AMMOUNT> "Amount of TokenA to swap to TokenB")
-                .required(false),
+                .required(false)
+                .value_parser(clap::value_parser!(f64)),
         )
         .arg(clap::arg!(-i --"token_input" <TOKEN_INPUT> "Asset of input token").required(false))
         .arg(clap::arg!(-o --"token_output" <TOKEN_OUTPUT> "Asset of output token").required(false))
         .arg(
             clap::arg!(-s --"slippage" <SLIPPAGE> "Slippage (default 0.5)")
                 .required(false)
-                .default_value("0.5"),
+                .default_value("0.5")
+                .value_parser(clap::value_parser!(f64)),
         )
 }
 
@@ -37,10 +42,7 @@ pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let input_asset_decimals = input_asset.decimals().await.unwrap();
     let output_asset_decimals = output_asset.decimals().await.unwrap();
 
-    let amount_in = helpers::get_amount(args, input_asset_decimals).unwrap_or_else(|e| {
-        tracing::error!(error = %e);
-        panic!()
-    });
+    let amount_in = helpers::get_amount(args, input_asset_decimals)?;
 
     let exchange = match helpers::get_exchange(args) {
         Ok(e) => e,
@@ -54,12 +56,12 @@ pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
         }
     };
 
-    let wallet = helpers::get_wallet(args).unwrap_or_else(|e| {
+    let from_wallet = helpers::get_wallet(args).unwrap_or_else(|e| {
         tracing::error!(error = %e);
         panic!()
     });
 
-    let slippage = helpers::get_slippage(args, output_asset_decimals).unwrap();
+    let slippage = helpers::get_slippage(args)?;
 
     let asset_path_in = exchange.build_route_for(&input_asset, &output_asset).await;
 
@@ -71,17 +73,18 @@ pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
         .into();
     tracing::debug!("amount_mint_out: {:?}", amount_min_out);
 
-    let slippage_amount = (amount_min_out * slippage) / U256::exp10(output_asset_decimals.into());
+    let slippage_amount =
+        math::get_slippage_amount(amount_min_out, slippage, output_asset_decimals);
     let amount_out_slippage = amount_min_out - slippage_amount;
 
     exchange
         .swap_tokens_for_tokens(
-            wallet,
+            from_wallet,
             amount_in,
             amount_out_slippage,
             input_asset.clone(),
             output_asset.clone(),
-            Some(slippage),
+            Some(math::f64_to_u256(slippage, output_asset_decimals)),
         )
         .await;
 

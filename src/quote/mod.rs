@@ -1,4 +1,7 @@
-use crate::{cmd::helpers, utils};
+use crate::{
+    cmd::helpers,
+    utils::{self, math},
+};
 use clap::ArgMatches;
 use prettytable::{row, Table};
 use web3::types::U256;
@@ -28,7 +31,7 @@ async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
         }
     };
 
-    let slippage = helpers::get_slippage(args, output_asset_decimals)?;
+    let slippage = helpers::get_slippage(args)?;
 
     let asset_path = exchange.build_route_for(&input_asset, &output_asset).await;
 
@@ -39,8 +42,8 @@ async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
         .unwrap()
         .into();
 
-    // TODO: move this calc for the new mod of U256
-    let slippage_amount = (amount_min_out * slippage) / U256::exp10(output_asset_decimals.into());
+    let slippage_amount =
+        math::get_slippage_amount(amount_min_out, slippage, output_asset_decimals);
     let amount_out_slippage: U256 = amount_min_out - slippage_amount;
 
     let mut table = Table::new();

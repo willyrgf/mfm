@@ -6,7 +6,7 @@ MFM (Multiverse Finance Machine) is a CLI to managing portfolio of cryptoassets 
 
 ## Big features coming
 - [ ] Support LP's as a asset type and handle with them in the portfolio
-- [ ] Support Yielf Farms and Harvest rewards
+- [ ] Support Yield Farms and Harvest rewards
 - [ ] Add machine command within a module using state-machine logic to run sequencially and conditionally multiples commands as workflows
 
 ## Fast local install & update using releases
