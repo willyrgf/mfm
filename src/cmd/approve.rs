@@ -13,7 +13,11 @@ pub fn generate_cmd() -> Command {
         )
         .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
         .arg(clap::arg!(-a --"asset" <ASSET> "Asset to approve spender").required(true))
-        .arg(clap::arg!(-v --"amount" <VALUE> "Amount to allow spending").required(true))
+        .arg(
+            clap::arg!(-v --"amount" <VALUE> "Amount to allow spending")
+                .required(true)
+                .value_parser(clap::value_parser!(f64)),
+        )
 }
 
 pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {

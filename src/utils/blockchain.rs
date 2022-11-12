@@ -13,6 +13,8 @@ use web3::{
 
 use crate::{asset::Asset, config::wallet::Wallet};
 
+use super::scalar::BigDecimal;
+
 pub async fn estimate_gas<P>(
     contract: &Contract<Http>,
     from_wallet: &Wallet,
@@ -124,7 +126,9 @@ pub async fn wait_receipt(
 }
 
 pub fn display_amount_to_float(amount: U256, decimals: u8) -> f64 {
-    amount.low_u128() as f64 / 10_u64.pow(decimals.into()) as f64
+    BigDecimal::from_unsigned_u256(&amount, decimals.into())
+        .to_f64()
+        .unwrap()
 }
 
 pub async fn amount_in_quoted(asset_in: &Asset, asset_quoted: &Asset, amount_in: U256) -> U256 {
