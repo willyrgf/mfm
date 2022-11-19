@@ -114,4 +114,7 @@ impl Networks {
     pub fn get(&self, key: &str) -> Option<&Network> {
         self.0.get(key)
     }
+    pub fn hashmap(&self) -> &HashMap<String, Network> {
+        &self.0
+    }
 }
