@@ -1,7 +1,9 @@
+use std::ops::Div;
+
 use crate::{
     cmd,
     rebalancer::{self, config::Strategy, generate_asset_rebalances},
-    utils::blockchain::display_amount_to_float,
+    utils::{blockchain::display_amount_to_float, scalar::BigDecimal},
 };
 use clap::{ArgMatches, Command};
 use prettytable::{row, Table};
@@ -139,16 +141,27 @@ async fn cmd_info(args: &ArgMatches) {
         let decimals = ar.asset_balances.asset_decimals;
         let amount_in_quoted = ar.asset_balances.quoted_balance;
         let asset_quoted_decimals = ar.asset_balances.quoted_asset_decimals;
-        let quoted_unit_price = ar.asset_balances.quoted_unit_price;
+
+        let amount_in_quoted_bd = BigDecimal::from_unsigned_u256(
+            &ar.asset_balances.quoted_balance,
+            asset_quoted_decimals.into(),
+        );
+        let balance_of_bd = BigDecimal::from_unsigned_u256(&balance_of, decimals.into());
+        //let quoted_unit_price = ar.asset_balances.quoted_unit_price;
         portifolio_balance += amount_in_quoted;
 
         //if !(hide_zero && balance_of == U256::from(0_i32)) {
         table.add_row(row![
             asset.name(),
-            display_amount_to_float(quoted_unit_price, asset_quoted_decimals),
-            display_amount_to_float(balance_of, decimals),
+            amount_in_quoted_bd
+                .clone()
+                .div(balance_of_bd.clone())
+                .with_scale(asset_quoted_decimals.into())
+                .to_f64()
+                .unwrap(),
+            balance_of_bd.to_f64().unwrap(),
             config.quoted_in(),
-            display_amount_to_float(amount_in_quoted, asset_quoted_decimals),
+            amount_in_quoted_bd.to_f64().unwrap(),
             ar.display_amount_with_sign(ar.asset_amount_to_trade, decimals),
             ar.display_amount_with_sign(ar.quoted_amount_to_trade, asset_quoted_decimals),
         ]);
