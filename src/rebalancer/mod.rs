@@ -7,7 +7,7 @@ use crate::{
     asset::Asset,
     config::wallet::Wallet,
     rebalancer::config::RebalancerConfig,
-    utils::{blockchain::display_amount_to_float, math::percent_to_u256, scalar::BigDecimal},
+    utils::{math::percent_to_u256, scalar::BigDecimal},
 };
 
 use serde::{Deserialize, Serialize};
@@ -110,9 +110,11 @@ impl AssetRebalancer {
     }
 
     pub fn display_amount_with_sign(&self, amount: U256, decimals: u8) -> String {
+        let amount_bd = BigDecimal::from_unsigned_u256(&amount, decimals.into());
+        let amount_f64 = amount_bd.with_scale(decimals.into()).to_f64().unwrap();
         match self.kind {
-            Kind::ToParking => format!("-{}", display_amount_to_float(amount, decimals)),
-            Kind::FromParking => format!("+{}", display_amount_to_float(amount, decimals)),
+            Kind::ToParking => format!("-{}", amount_f64),
+            Kind::FromParking => format!("+{}", amount_f64),
         }
     }
 }
