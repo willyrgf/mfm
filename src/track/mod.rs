@@ -1,12 +1,11 @@
-use crate::{
-    asset::Asset, config::Config, rebalancer::generate_asset_rebalances,
-    utils::blockchain::display_amount_to_float,
-};
-use clap::{ArgMatches, Command};
+use super::rebalancer::generate_asset_rebalances;
+use crate::{asset::Asset, config::Config, utils::blockchain::display_amount_to_float};
+use clap::ArgMatches;
 use serde::{Deserialize, Serialize};
 use web3::types::U256;
 
-pub const TRACK_COMMAND: &str = "track";
+pub mod cmd;
+
 const API_TOKEN_HEADER: &str = "X-Api-Token";
 
 //TODO: change the name of the tables like this
@@ -39,16 +38,8 @@ pub struct TrackPortfolioState {
     data: TrackPortfolioStateData,
 }
 
-pub fn generate_cmd() -> Command {
-    Command::new(TRACK_COMMAND).about("Track all information to server")
-}
-
-pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
-    cmd_run(args).await;
-    Ok(())
-}
-
-async fn cmd_run(_args: &ArgMatches) {
+#[tracing::instrument(name = "run track")]
+async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let config = Config::global();
 
     let (api_token, api_address) = match &config.server {
@@ -219,4 +210,6 @@ async fn cmd_run(_args: &ArgMatches) {
             }
         }
     }
+
+    Ok(())
 }

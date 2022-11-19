@@ -1,4 +1,4 @@
-use crate::{signing, utils::password::SafePassword};
+use crate::utils::{password::SafePassword, signing};
 
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -31,18 +31,22 @@ impl Wallet {
         let bytes = self.private_key.reveal().to_vec();
         Zeroizing::new(String::from_utf8(bytes).unwrap())
     }
+
     pub fn secret(&self) -> SecretKey {
         // TODO: add a wrap to zeroize the secret key too
         SecretKey::from_str(self.private_key().as_str()).unwrap()
     }
+
     pub fn public(&self) -> PublicKey {
         let secp = Secp256k1::new();
         let s = self.secret();
         PublicKey::from_secret_key(&secp, &s)
     }
+
     pub fn address(&self) -> Address {
         signing::public_key_address(&self.public())
     }
+
     pub async fn nonce(&self, client: web3::Web3<Http>) -> Result<U256, anyhow::Error> {
         client
             .eth()
