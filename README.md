@@ -8,6 +8,8 @@ MFM (Multiverse Finance Machine) is a CLI to managing portfolio of cryptoassets 
 - [ ] Support LP's as a asset type and handle with them in the portfolio
 - [ ] Support Yield Farms and Harvest rewards
 - [ ] Add machine command within a module using state-machine logic to run sequencially and conditionally multiples commands as workflows
+- [ ] Automatic hedge with pancakeswap / position exchange futures
+- [ ] Trading strategies with TA (daemon)
 
 ## Fast local install & update using releases
 
@@ -15,9 +17,9 @@ MFM (Multiverse Finance Machine) is a CLI to managing portfolio of cryptoassets 
 ```sh
 # may need adjust for some systems
 LATEST_APP_URL="$( \
-	curl -s https://api.github.com/repos/willyrgf/mfm/releases/latest | 
-	grep 'browser_download_url' | 
-	grep "$(uname | tr '[[:upper:]]' '[[:lower:]]')" | 
+	curl -s https://api.github.com/repos/willyrgf/mfm/releases/latest |
+	grep 'browser_download_url' |
+	grep "$(uname | tr '[[:upper:]]' '[[:lower:]]')" |
 	awk -F '"' '!/.sha256sum/ {print $4}' \
 )"
 curl -s -L $LATEST_APP_URL -O
@@ -30,7 +32,7 @@ This directory will carry all the abi files used as default in this project.
 All these abi files in this directory will be add in the binary in compilation time (`build.rs`).
 
 To access this files we've a `shared::resources` module that will always condering your currently
-filesystem `res/` directory and the default `static RES` compiled in the binary (`build.rs`), 
+filesystem `res/` directory and the default `static RES` compiled in the binary (`build.rs`),
 following this order  of priority respectively.
 
 <!-- TODO: add install doc and res folder -->
@@ -70,10 +72,10 @@ cargo run -- unwrap --network bsc --wallet test-wallet --amount 0.005
 
 #### To approve all assets
 ```bash
-cargo run -- allowance --network polygon --wallet test-wallet | 
-	grep ^\| | 
-	grep -v Exchange | 
-	awk -F '|' '{print $2 $3}' | 
+cargo run -- allowance --network polygon --wallet test-wallet |
+	grep ^\| |
+	grep -v Exchange |
+	awk -F '|' '{print $2 $3}' |
 	xargs -n 2 bash -c 'cargo run -- approve --exchange $0 -w test-wallet --asset $1 --amount 10000000'
 ```
 
@@ -90,7 +92,7 @@ cargo run -- allowance --network polygon --wallet test-wallet |
 ### swap tokens for tokens supporting fees on transfer
 
 ```bash
- cargo run -- swap -w test-wallet -n bsc -e pancake_swap_v2 -i wbnb -o busd -a 0.0006 
+ cargo run -- swap -w test-wallet -n bsc -e pancake_swap_v2 -i wbnb -o busd -a 0.0006
 ```
 
 ---

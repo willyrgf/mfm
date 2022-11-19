@@ -1,8 +1,9 @@
-use std::ops::Div;
+use chrono::prelude::*;
+use std::ops::{Div, Mul};
 
 use crate::{
     cmd,
-    rebalancer::{self, config::Strategy, generate_asset_rebalances},
+    rebalancer::{self, config::Strategy, generate_asset_rebalances, AssetBalances},
     utils::{blockchain::display_amount_to_float, scalar::BigDecimal},
 };
 use clap::{ArgMatches, Command};
@@ -119,6 +120,17 @@ async fn cmd_info(args: &ArgMatches) {
     let mut portifolio_balance = U256::default();
 
     let mut table = Table::new();
+    let mut wallet_table = Table::new();
+
+    let utc_time = Local::now();
+
+    wallet_table.add_row(row![
+        "wallet",
+        format!("{:?}", config.get_wallet().address()),
+        "running_at",
+        utc_time.to_rfc2822()
+    ]);
+
     table.add_row(row![
         "Asset",
         "Price",
@@ -146,19 +158,31 @@ async fn cmd_info(args: &ArgMatches) {
             &ar.asset_balances.quoted_balance,
             asset_quoted_decimals.into(),
         );
+
         let balance_of_bd = BigDecimal::from_unsigned_u256(&balance_of, decimals.into());
-        //let quoted_unit_price = ar.asset_balances.quoted_unit_price;
         portifolio_balance += amount_in_quoted;
 
-        //if !(hide_zero && balance_of == U256::from(0_i32)) {
+        let price = {
+            if balance_of_bd == BigDecimal::zero() {
+                BigDecimal::from_unsigned_u256(
+                    &ar.asset_balances.quoted_unit_price,
+                    asset_quoted_decimals.into(),
+                )
+                .to_f64()
+                .unwrap()
+            } else {
+                amount_in_quoted_bd
+                    .clone()
+                    .div(balance_of_bd.clone())
+                    .with_scale(asset_quoted_decimals.into())
+                    .to_f64()
+                    .unwrap()
+            }
+        };
+
         table.add_row(row![
             asset.name(),
-            amount_in_quoted_bd
-                .clone()
-                .div(balance_of_bd.clone())
-                .with_scale(asset_quoted_decimals.into())
-                .to_f64()
-                .unwrap(),
+            price,
             balance_of_bd.to_f64().unwrap(),
             config.quoted_in(),
             amount_in_quoted_bd.to_f64().unwrap(),
@@ -167,6 +191,30 @@ async fn cmd_info(args: &ArgMatches) {
         ]);
         //}
     });
+
+    let mut info_table = Table::new();
+    info_table.add_row(row!["Min threshold", config.threshold_percent, "%"]);
+
+    let asset_balances: Vec<AssetBalances> = asset_rebalances
+        .clone()
+        .into_iter()
+        .map(|ar| ar.asset_balances)
+        .collect();
+
+    info_table.add_row(row![
+        "Current threshold",
+        config
+            .current_percent_diff(&asset_balances)
+            .mul(BigDecimal::try_from(100.0_f64).unwrap())
+            .with_scale(4),
+        "%"
+    ]);
+
+    info_table.add_row(row![
+        "Current amount to trade",
+        config.current_total_amount_to_trade(&asset_rebalances),
+        asset_quoted.name()
+    ]);
 
     let network = config.get_network();
     let client = network.get_web3_client_http();
@@ -230,6 +278,8 @@ async fn cmd_info(args: &ArgMatches) {
         // let swap_cost = U256::default();
         let total_ops = U256::from(asset_rebalances.len());
 
+        // current_total_amount_to_trade
+
         balances_table.add_row(row![
             "Total Swap cost",
             display_amount_to_float((swap_cost * gas_price) * total_ops, network.coin_decimals()),
@@ -247,6 +297,8 @@ async fn cmd_info(args: &ArgMatches) {
         ]);
     }
 
+    wallet_table.printstd();
     table.printstd();
+    info_table.printstd();
     balances_table.printstd();
 }
