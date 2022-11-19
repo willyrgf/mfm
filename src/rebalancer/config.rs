@@ -1,12 +1,14 @@
 use crate::asset::Asset;
 use crate::config::network::Network;
-use crate::utils::math::{self, percent_to_u256};
+use crate::utils::math;
+use crate::utils::scalar::BigDecimal;
 use crate::{config::wallet::Wallet, config::Config};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ops::{Add, Div, Sub};
 use web3::types::U256;
 
-use super::AssetBalances;
+use super::{AssetBalances, AssetRebalancer, Kind};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -24,18 +26,18 @@ struct AssetConfig {
 // TODO: validate portfolio max percent
 // TODO: validate that all routes (n-to-n) to the assets exist
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-struct Portfolio(HashMap<String, AssetConfig>);
+pub struct Portfolio(HashMap<String, AssetConfig>);
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct RebalancerConfig {
-    name: String,
-    wallet_id: String,
-    network_id: String,
-    portfolio: Portfolio,
-    strategy: Strategy,
-    threshold_percent: f64,
-    quoted_in: String,
-    parking_asset_id: String,
+    pub(crate) name: String,
+    pub(crate) wallet_id: String,
+    pub(crate) network_id: String,
+    pub(crate) portfolio: Portfolio,
+    pub(crate) strategy: Strategy,
+    pub(crate) threshold_percent: f64,
+    pub(crate) quoted_in: String,
+    pub(crate) parking_asset_id: String,
     // TODO: refactor the move_assets_to_parking function to be reusable and have another function
     // to exit command.
     pub(crate) parking_asset_min_move: f64,
@@ -157,66 +159,86 @@ impl RebalancerConfig {
             threshold-percent_diff = -0,28
         ```
     */
-    // TODO: add tests and refactor this function
-    pub fn reach_min_threshold(&self, assets_balances: &[AssetBalances]) -> bool {
-        // TODO: abstract this
-        // abs for U256
-        let u256_abs_diff = |qap: U256, pn: U256| {
-            if qap.ge(&pn) {
-                qap - pn
-            } else {
-                pn - qap
-            }
-        };
 
-        let quoted_asset_decimals = assets_balances.last().unwrap().quoted_asset_decimals();
-        let max_percent_u256 = percent_to_u256(100.0, quoted_asset_decimals);
+    pub fn u256_abs_diff(&self, qap: U256, pn: U256) -> U256 {
+        if qap.ge(&pn) {
+            qap - pn
+        } else {
+            pn - qap
+        }
+    }
 
-        let thresold_percent_u256 = percent_to_u256(self.threshold_percent, quoted_asset_decimals);
-        tracing::debug!(
-            "reach_min_threshold(): thresold_percent_u256: {:?}",
-            thresold_percent_u256
-        );
+    pub fn current_total_amount_to_trade(
+        &self,
+        assets_rebalances: &[AssetRebalancer],
+    ) -> BigDecimal {
+        assets_rebalances
+            .iter()
+            .fold(BigDecimal::from(0_i32), |acc, x| {
+                let quoted_amount_to_trade = BigDecimal::from_unsigned_u256(
+                    &x.quoted_amount_to_trade,
+                    x.asset_balances.quoted_asset_decimals().into(),
+                );
 
+                match x.kind {
+                    Kind::FromParking => acc.add(quoted_amount_to_trade),
+                    _ => acc.add(BigDecimal::zero()),
+                }
+            })
+    }
+
+    pub fn current_percent_diff(&self, assets_balances: &[AssetBalances]) -> BigDecimal {
         let total_quoted = assets_balances
             .iter()
-            .fold(U256::from(0_i32), |acc, x| acc + x.quoted_balance());
-        tracing::debug!("reach_min_threshold(): total_quoted: {:?}", total_quoted);
+            .fold(BigDecimal::from(0_i32), |acc, x| {
+                acc + BigDecimal::from_unsigned_u256(
+                    &x.quoted_balance(),
+                    x.quoted_asset_decimals().into(),
+                )
+            });
 
         let sum_percent_diff =
             assets_balances
                 .iter()
-                .fold(U256::from(0_i32), |acc, asset_balances| {
-                    if asset_balances.quoted_balance() <= U256::from(0_i32) {
+                .fold(BigDecimal::from(0_i32), |acc, asset_balances| {
+                    let quoted_balance_bd = BigDecimal::from_unsigned_u256(
+                        &asset_balances.quoted_balance(),
+                        asset_balances.quoted_asset_decimals().into(),
+                    );
+
+                    if quoted_balance_bd <= BigDecimal::from(0_i32) {
                         return acc;
                     }
 
-                    let quoted_asset_percent = asset_balances.quoted_asset_percent_u256();
-                    tracing::debug!(
-                        "reach_min_threshold(): quoted_asset_percent_u256: {:?}",
-                        quoted_asset_percent
+                    let quoted_asset_percent_bd = math::percent_to_bigdecimal(
+                        asset_balances.percent(),
+                        asset_balances.quoted_asset_decimals(),
                     );
 
-                    let p_now = (asset_balances.quoted_balance()
-                        * U256::exp10(asset_balances.quoted_asset_decimals().into()))
-                        / total_quoted;
-                    tracing::debug!("reach_min_threshold(): p_now: {:?}", p_now);
+                    let p_now_bd = quoted_balance_bd.div(total_quoted.clone());
+                    let p_diff_bd = quoted_asset_percent_bd.sub(p_now_bd).abs();
 
-                    let p_diff = u256_abs_diff(quoted_asset_percent, p_now);
-
-                    tracing::debug!("reach_min_threshold(): p_diff: {:?}", p_diff);
-                    acc + p_diff
+                    acc + p_diff_bd
                 });
 
-        tracing::debug!(
-            "reach_min_threshold(): sum_percent_diff: {:?}",
-            sum_percent_diff
-        );
+        //max_percent.sub(sum_percent_diff).with_scale(4)
+        let total_sides = BigDecimal::from(2_i32);
+        let round_scale = 4_u8;
+        sum_percent_diff
+            .div(total_sides)
+            .with_scale(round_scale.into())
+    }
 
-        let percent_diff = max_percent_u256 - sum_percent_diff;
-        tracing::debug!("reach_min_threshold(): percent_diff: {:?}", percent_diff);
+    // TODO: add tests and refactor this function
+    pub fn reach_min_threshold(&self, assets_balances: &[AssetBalances]) -> bool {
+        let percent_decimal = 4_u8;
+        let threshold_percent =
+            math::percent_to_bigdecimal(self.threshold_percent(), percent_decimal);
+        let current_percent_diff = self
+            .current_percent_diff(assets_balances)
+            .with_scale(percent_decimal.into());
 
-        percent_diff.gt(&thresold_percent_u256)
+        current_percent_diff.ge(&threshold_percent)
     }
 }
 
