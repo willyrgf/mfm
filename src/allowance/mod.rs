@@ -1,25 +1,19 @@
-use crate::{cmd, config::Config, utils};
-use clap::{ArgMatches, Command};
+use crate::{cmd::helpers, config::Config, utils};
+use clap::ArgMatches;
 use prettytable::{row, table};
 
-pub const ALLOWANCE_COMMAND: &str = "allowance";
+pub mod cmd;
 
-pub fn generate_cmd() -> Command {
-    Command::new(ALLOWANCE_COMMAND)
-        .about("Get allowance for an network and wallet")
-        .arg(clap::arg!(-n --"network" <bsc> "Network to use, ex (bsc, polygon)").required(true))
-        .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
-}
-
-pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
+#[tracing::instrument(name = "run allowance")]
+async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let config = Config::global();
     let mut table = table!(["Exchange", "Asset", "Balance", "Allowance"]);
 
-    let network = cmd::helpers::get_network(args).unwrap_or_else(|e| {
+    let network = helpers::get_network(args).unwrap_or_else(|e| {
         tracing::error!(error = %e);
         panic!()
     });
-    let wallet = cmd::helpers::get_wallet(args).unwrap_or_else(|e| {
+    let wallet = helpers::get_wallet(args).unwrap_or_else(|e| {
         tracing::error!(error = %e);
         panic!()
     });

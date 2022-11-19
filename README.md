@@ -8,8 +8,8 @@ MFM (Multiverse Finance Machine) is a CLI to managing portfolio of cryptoassets 
 - [ ] Support LP's as a asset type and handle with them in the portfolio
 - [ ] Support Yield Farms and Harvest rewards
 - [ ] Add machine command within a module using state-machine logic to run sequencially and conditionally multiples commands as workflows
-- [ ] Automatic hedge with pancakeswap / position exchange futures
-- [ ] Trading strategies with TA (daemon)
+- [ ] Add automatic hedge using levarage derivatives (futures/options)
+- [ ] Trading strategies with TA (in [mfm_server](https://github.com/willyrgf/mfm_server)?) to adjust dynamic portfolio positions
 
 ## Fast local install & update using releases
 

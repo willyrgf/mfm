@@ -2,34 +2,14 @@ use crate::{
     cmd::helpers,
     utils::{self, math},
 };
-use clap::{ArgMatches, Command};
+use clap::ArgMatches;
 use prettytable::{row, Table};
 use web3::types::U256;
 
-pub const SWAP_COMMAND: &str = "swap";
+pub mod cmd;
 
-pub fn generate_cmd() -> Command {
-    Command::new(SWAP_COMMAND)
-        .about("Swap Tokens for Tokens supporting fees on transfer")
-        .arg(clap::arg!(-n --"network" <bsc> "Network to use, ex (bsc, polygon)").required(true))
-        .arg(clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router").required(false))
-        .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
-        .arg(
-            clap::arg!(-a --"amount" <AMMOUNT> "Amount of TokenA to swap to TokenB")
-                .required(false)
-                .value_parser(clap::value_parser!(f64)),
-        )
-        .arg(clap::arg!(-i --"token_input" <TOKEN_INPUT> "Asset of input token").required(false))
-        .arg(clap::arg!(-o --"token_output" <TOKEN_OUTPUT> "Asset of output token").required(false))
-        .arg(
-            clap::arg!(-s --"slippage" <SLIPPAGE> "Slippage (default 0.5)")
-                .required(false)
-                .default_value("0.5")
-                .value_parser(clap::value_parser!(f64)),
-        )
-}
-
-pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
+#[tracing::instrument(name = "run swap")]
+async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let network = helpers::get_network(args)?;
 
     let input_asset =

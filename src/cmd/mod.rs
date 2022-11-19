@@ -1,14 +1,9 @@
-use crate::{balances, quote, rebalancer, unwrap, wrap};
+use crate::{allowance, approve, balances, quote, rebalancer, swap, track, unwrap, withdraw, wrap};
 use crate::{config::Config, APP_NAME};
 use clap::{crate_version, ArgMatches, Command};
 use serde::{Deserialize, Serialize};
 
-pub mod allowance;
-pub mod approve;
 pub mod helpers;
-pub mod swap;
-pub mod track;
-pub mod withdraw;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,13 +26,13 @@ impl Commands {
             Self::Balances => balances::cmd::call_sub_commands(args).await,
             Self::Wrap => wrap::cmd::call_sub_commands(args).await,
             Self::Unwrap => unwrap::cmd::call_sub_commands(args).await,
-            Self::Swap => swap::call_sub_commands(args).await,
-            Self::Allowance => allowance::call_sub_commands(args).await,
-            Self::Approve => approve::call_sub_commands(args).await,
+            Self::Swap => swap::cmd::call_sub_commands(args).await,
+            Self::Allowance => allowance::cmd::call_sub_commands(args).await,
+            Self::Approve => approve::cmd::call_sub_commands(args).await,
             Self::Rebalancer => rebalancer::cmd::call_sub_commands(args).await,
-            Self::Withdraw => withdraw::call_sub_commands(args).await,
+            Self::Withdraw => withdraw::cmd::call_sub_commands(args).await,
             Self::Quote => quote::cmd::call_sub_commands(args).await,
-            Self::Track => track::call_sub_commands(args).await,
+            Self::Track => track::cmd::call_sub_commands(args).await,
         }
     }
 }
@@ -54,14 +49,14 @@ pub fn new() -> Command {
         .subcommand_required(true)
         .subcommand(wrap::cmd::generate())
         .subcommand(unwrap::cmd::generate())
-        .subcommand(swap::generate_cmd())
-        .subcommand(allowance::generate_cmd())
-        .subcommand(approve::generate_cmd())
+        .subcommand(swap::cmd::generate())
+        .subcommand(allowance::cmd::generate())
+        .subcommand(approve::cmd::generate())
         .subcommand(balances::cmd::generate())
         .subcommand(rebalancer::cmd::generate())
-        .subcommand(withdraw::generate_cmd())
+        .subcommand(withdraw::cmd::generate())
         .subcommand(quote::cmd::generate())
-        .subcommand(track::generate_cmd())
+        .subcommand(track::cmd::generate())
 }
 
 #[tracing::instrument(name = "lookup command from cli")]
