@@ -1,5 +1,7 @@
 use super::rebalancer::generate_asset_rebalances;
-use crate::{asset::Asset, config::Config, utils::blockchain::display_amount_to_float};
+use crate::{
+    asset::Asset, cmd::helpers, config::Config, utils::blockchain::display_amount_to_float,
+};
 use clap::ArgMatches;
 use serde::{Deserialize, Serialize};
 use web3::types::U256;
@@ -38,10 +40,9 @@ pub struct TrackPortfolioState {
     data: TrackPortfolioStateData,
 }
 
-#[tracing::instrument(name = "run track")]
-async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
+#[tracing::instrument(name = "wrapped run track")]
+pub(crate) async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let config = Config::global();
-
     let (api_token, api_address) = match &config.server {
         Some(s) => (s.api_token.clone(), s.api_url.clone()),
         None => {
@@ -212,4 +213,18 @@ async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
     }
 
     Ok(())
+}
+
+#[tracing::instrument(name = "run track")]
+async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
+    let run_every = helpers::get_run_every(args);
+
+    match run_every {
+        Some(every_seconds) => loop {
+            wrapped_run(args).await?;
+            let duration = std::time::Duration::from_secs((*every_seconds).into());
+            std::thread::sleep(duration);
+        },
+        None => wrapped_run(args).await,
+    }
 }

@@ -182,6 +182,19 @@ pub fn get_hide_zero(args: &ArgMatches) -> bool {
     }
 }
 
+#[tracing::instrument(name = "get run every from command args")]
+pub fn get_run_every(args: &ArgMatches) -> Option<&u32> {
+    args.get_one::<u32>("run-every")
+}
+
+#[tracing::instrument(name = "get track from command args")]
+pub fn get_track(args: &ArgMatches) -> bool {
+    match args.get_one::<String>("track") {
+        Some(b) => b.parse().unwrap_or(false),
+        _ => false,
+    }
+}
+
 mod test {
     use clap::{ArgMatches, Command};
 

@@ -4,6 +4,7 @@ use std::ops::{Div, Mul};
 use crate::{
     cmd,
     rebalancer::{self, config::Strategy, generate_asset_rebalances, AssetBalances},
+    track,
     utils::{blockchain::display_amount_to_float, scalar::BigDecimal},
 };
 use clap::{ArgMatches, Command};
@@ -21,6 +22,15 @@ pub fn generate_info_cmd() -> Command {
         .arg(
             clap::arg!(-n --"name" <REBALANCER_NAME> "Rebalancer name from config file")
                 .required(true),
+        )
+        .arg(
+            clap::arg!(-s --"run-every" <TIME_IN_SECONDS> "Run continuously at every number of seconds")
+            .value_parser(clap::value_parser!(u32)),
+        )
+        .arg(
+            clap::arg!(-t --"track" <TRUE_FALSE> "Run track command after the info")
+            .required(false)
+            .default_value("false"),
         )
 }
 
@@ -111,9 +121,7 @@ async fn cmd_run(args: &ArgMatches) {
     });
 }
 
-async fn cmd_info(args: &ArgMatches) {
-    tracing::debug!("cmd_info()");
-
+async fn wrapped_cmd_info(args: &ArgMatches) {
     let config = cmd::helpers::get_rebalancer(args);
     let asset_quoted = &config.get_quoted_asset();
     let asset_quoted_decimals = asset_quoted.decimals().await.unwrap();
@@ -189,7 +197,6 @@ async fn cmd_info(args: &ArgMatches) {
             ar.display_amount_with_sign(ar.asset_amount_to_trade, decimals),
             ar.display_amount_with_sign(ar.quoted_amount_to_trade, asset_quoted_decimals),
         ]);
-        //}
     });
 
     let mut info_table = Table::new();
@@ -275,10 +282,8 @@ async fn cmd_info(args: &ArgMatches) {
         let swap_cost = parking_asset_exchange
             .estimate_swap_cost(from_wallet, &input_asset, &parking_asset)
             .await;
-        // let swap_cost = U256::default();
-        let total_ops = U256::from(asset_rebalances.len());
 
-        // current_total_amount_to_trade
+        let total_ops = U256::from(asset_rebalances.len());
 
         balances_table.add_row(row![
             "Total Swap cost",
@@ -301,4 +306,35 @@ async fn cmd_info(args: &ArgMatches) {
     table.printstd();
     info_table.printstd();
     balances_table.printstd();
+
+    let track = cmd::helpers::get_track(args);
+    if track {
+        // TODO: fix it when refactor rebalancer to handling errors
+        #[allow(unused_must_use)]
+        {
+            track::wrapped_run(args).await.map_err(|e| {
+                tracing::error!(error = %e);
+                anyhow::anyhow!("cmd info running track failed, err: {}", e)
+            });
+        }
+    }
+}
+
+async fn cmd_info(args: &ArgMatches) {
+    tracing::debug!("cmd_info()");
+
+    let run_every = cmd::helpers::get_run_every(args);
+
+    match run_every {
+        Some(every_seconds) => loop {
+            wrapped_cmd_info(args).await;
+
+            let duration = std::time::Duration::from_secs((*every_seconds).into());
+            std::thread::sleep(duration);
+
+            // breaking line in the terminal to the possible next call
+            print!("\n\n");
+        },
+        None => wrapped_cmd_info(args).await,
+    }
 }
