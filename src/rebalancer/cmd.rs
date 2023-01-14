@@ -3,7 +3,9 @@ use std::ops::{Div, Mul};
 
 use crate::{
     cmd,
-    rebalancer::{self, config::Strategy, generate_asset_rebalances, AssetBalances},
+    rebalancer::{
+        self, config::Strategy, generate_asset_rebalances, get_total_quoted_balance, AssetBalances,
+    },
     track,
     utils::{blockchain::display_amount_to_float, scalar::BigDecimal},
 };
@@ -141,12 +143,14 @@ async fn wrapped_cmd_info(args: &ArgMatches) {
 
     table.add_row(row![
         "Asset",
+        "Percent",
         "Price",
         "Balance",
         "Quoted In",
         "Balance in quoted",
         "Amount to trade",
-        "Quoted amount to trade"
+        "Quoted amount to trade",
+        "Current Percent"
     ]);
 
     let asset_rebalances = generate_asset_rebalances(&config)
@@ -155,6 +159,15 @@ async fn wrapped_cmd_info(args: &ArgMatches) {
             tracing::error!(error = %e);
             panic!()
         });
+
+    let assets_balances: Vec<AssetBalances> = asset_rebalances
+        .clone()
+        .iter()
+        .map(|ar| ar.asset_balances.clone())
+        .collect();
+
+    let total_quoted = get_total_quoted_balance(assets_balances.as_slice());
+
     asset_rebalances.clone().iter().for_each(|ar| {
         let balance_of = ar.asset_balances.balance;
         let asset = ar.asset_balances.asset.clone();
@@ -190,12 +203,18 @@ async fn wrapped_cmd_info(args: &ArgMatches) {
 
         table.add_row(row![
             asset.name(),
+            ar.asset_balances.percent(),
             price,
             balance_of_bd.to_f64().unwrap(),
             config.quoted_in(),
             amount_in_quoted_bd.to_f64().unwrap(),
             ar.display_amount_with_sign(ar.asset_amount_to_trade, decimals),
             ar.display_amount_with_sign(ar.quoted_amount_to_trade, asset_quoted_decimals),
+            (amount_in_quoted_bd.to_f64().unwrap()
+                / BigDecimal::from_unsigned_u256(&total_quoted, asset_quoted_decimals.into())
+                    .to_f64()
+                    .unwrap())
+                * 100.0
         ]);
     });
 
