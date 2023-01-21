@@ -97,14 +97,12 @@ pub(crate) async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> 
                     ar.asset_balances.quoted_balance,
                     asset_quoted_decimals,
                 ),
-                amount_to_trade: display_amount_to_float(
+                amount_to_trade: ar.amount_f64_with_sign(
                     ar.asset_amount_to_trade,
                     ar.asset_balances.asset_decimals,
                 ),
-                quoted_amount_to_trade: display_amount_to_float(
-                    ar.quoted_amount_to_trade,
-                    asset_quoted_decimals,
-                ),
+                quoted_amount_to_trade: ar
+                    .amount_f64_with_sign(ar.quoted_amount_to_trade, asset_quoted_decimals),
             })
             .collect();
 

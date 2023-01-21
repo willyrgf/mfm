@@ -109,12 +109,12 @@ impl AssetRebalancer {
         })
     }
 
-    pub fn display_amount_with_sign(&self, amount: U256, decimals: u8) -> String {
+    pub fn amount_f64_with_sign(&self, amount: U256, decimals: u8) -> f64 {
         let amount_bd = BigDecimal::from_unsigned_u256(&amount, decimals.into());
         let amount_f64 = amount_bd.with_scale(decimals.into()).to_f64().unwrap();
         match self.kind {
-            Kind::ToParking => format!("-{}", amount_f64),
-            Kind::FromParking => format!("+{}", amount_f64),
+            Kind::ToParking => amount_f64.mul(-1.0),
+            Kind::FromParking => amount_f64.mul(1.0),
         }
     }
 }

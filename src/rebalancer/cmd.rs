@@ -208,8 +208,8 @@ async fn wrapped_cmd_info(args: &ArgMatches) {
             balance_of_bd.to_f64().unwrap(),
             config.quoted_in(),
             amount_in_quoted_bd.to_f64().unwrap(),
-            ar.display_amount_with_sign(ar.asset_amount_to_trade, decimals),
-            ar.display_amount_with_sign(ar.quoted_amount_to_trade, asset_quoted_decimals),
+            ar.amount_f64_with_sign(ar.asset_amount_to_trade, decimals),
+            ar.amount_f64_with_sign(ar.quoted_amount_to_trade, asset_quoted_decimals),
             (amount_in_quoted_bd.to_f64().unwrap()
                 / BigDecimal::from_unsigned_u256(&total_quoted, asset_quoted_decimals.into())
                     .to_f64()
