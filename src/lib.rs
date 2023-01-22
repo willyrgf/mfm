@@ -4,6 +4,7 @@ pub mod asset;
 pub mod balances;
 pub mod cmd;
 pub mod config;
+pub mod encrypt;
 pub mod quote;
 pub mod rebalancer;
 pub mod swap;

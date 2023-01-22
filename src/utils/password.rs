@@ -111,3 +111,32 @@ pub fn decrypt_private_key(
         _ => Err(anyhow::anyhow!("invalid password")),
     }
 }
+
+pub fn encrypt_private_key_to_base64(password: SafePassword, private_key: SafePassword) -> String {
+    let str_password = {
+        let bytes = password.reveal().to_vec();
+        Zeroizing::new(String::from_utf8(bytes).unwrap())
+    };
+
+    let mc = new_magic_crypt!(str_password, 256);
+
+    mc.encrypt_bytes_to_base64(private_key.reveal())
+}
+
+mod test {
+    #[test]
+    fn test_encrypt_decrypt() {
+        use super::{decrypt_private_key, encrypt_private_key_to_base64, SafePassword};
+
+        let password = SafePassword::from("some pass".to_string());
+        let private_key =
+            SafePassword::from("10ED43C718714eb63d5aA57B78B54704E256024E".to_string());
+
+        let encrypted_base64 = encrypt_private_key_to_base64(password.clone(), private_key.clone());
+
+        let decrypted_private_key =
+            decrypt_private_key(password, SafePassword::from(encrypted_base64)).unwrap();
+
+        assert_eq!(private_key, decrypted_private_key)
+    }
+}
