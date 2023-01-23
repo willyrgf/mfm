@@ -1,4 +1,6 @@
-use crate::{allowance, approve, balances, quote, rebalancer, swap, track, unwrap, withdraw, wrap};
+use crate::{
+    allowance, approve, balances, encrypt, quote, rebalancer, swap, track, unwrap, withdraw, wrap,
+};
 use crate::{config::Config, APP_NAME};
 use clap::{crate_version, ArgMatches, Command};
 use serde::{Deserialize, Serialize};
@@ -18,6 +20,7 @@ pub enum Commands {
     Withdraw,
     Quote,
     Track,
+    Encrypt,
 }
 
 impl Commands {
@@ -31,6 +34,7 @@ impl Commands {
             Self::Approve => approve::cmd::call_sub_commands(args).await,
             Self::Rebalancer => rebalancer::cmd::call_sub_commands(args).await,
             Self::Withdraw => withdraw::cmd::call_sub_commands(args).await,
+            Self::Encrypt => encrypt::cmd::call_sub_commands(args).await,
             Self::Quote => quote::cmd::call_sub_commands(args).await,
             Self::Track => track::cmd::call_sub_commands(args).await,
         }
@@ -54,6 +58,7 @@ pub fn new() -> Command {
         .subcommand(approve::cmd::generate())
         .subcommand(balances::cmd::generate())
         .subcommand(rebalancer::cmd::generate())
+        .subcommand(encrypt::cmd::generate())
         .subcommand(withdraw::cmd::generate())
         .subcommand(quote::cmd::generate())
         .subcommand(track::cmd::generate())
