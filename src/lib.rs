@@ -14,6 +14,7 @@ pub mod unwrap;
 pub mod utils;
 pub mod withdraw;
 pub mod wrap;
+pub mod watcher;
 
 pub const APP_NAME: &str = "mfm";
 pub const DEFAULT_LOG_LEVEL: &str = "warn";

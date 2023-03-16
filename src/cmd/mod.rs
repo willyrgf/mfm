@@ -1,5 +1,5 @@
 use crate::{
-    allowance, approve, balances, encrypt, quote, rebalancer, swap, track, unwrap, withdraw, wrap,
+    allowance, approve, balances, encrypt, quote, rebalancer, swap, track, unwrap, withdraw, wrap, watcher,
 };
 use crate::{config::Config, APP_NAME};
 use clap::{crate_version, ArgMatches, Command};
@@ -21,6 +21,7 @@ pub enum Commands {
     Quote,
     Track,
     Encrypt,
+    Watcher,
 }
 
 impl Commands {
@@ -37,6 +38,7 @@ impl Commands {
             Self::Encrypt => encrypt::cmd::call_sub_commands(args).await,
             Self::Quote => quote::cmd::call_sub_commands(args).await,
             Self::Track => track::cmd::call_sub_commands(args).await,
+            Self::Watcher => watcher::cmd::call_sub_commands(args).await,
         }
     }
 }
@@ -62,6 +64,7 @@ pub fn new() -> Command {
         .subcommand(withdraw::cmd::generate())
         .subcommand(quote::cmd::generate())
         .subcommand(track::cmd::generate())
+        .subcommand(watcher::cmd::generate())
 }
 
 #[tracing::instrument(name = "lookup command from cli")]
