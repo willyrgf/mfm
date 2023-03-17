@@ -29,6 +29,7 @@ networks:
     symbol: matic
     chain_id: 137
     rpc_url: https://polygon-rpc.com/
+    node_url: wss://rpc-mainnet.matic.network # optional, will be used to filter logs if exists
     blockexplorer_url: https://polygonscan.com/
     min_balance_coin: 1
     wrapped_asset: wmatic

@@ -32,7 +32,7 @@ pub struct Asset {
 
 impl Asset {
     pub fn new(asset_config: &AssetConfig, network: &Network) -> Result<Self, anyhow::Error> {
-        let asset_network = asset_config.networks.get(network.get_name())?;
+        let asset_network = asset_config.networks.get(network.name())?;
 
         // TODO: add a validator for the builders
 

@@ -40,8 +40,8 @@ async fn run(args: &ArgMatches) {
                     Err(_) => U256::default(),
                 };
                 (
-                    network.get_name(),
-                    network.get_symbol(),
+                    network.name(),
+                    network.symbol(),
                     balance_of,
                     network.coin_decimals(),
                 )
