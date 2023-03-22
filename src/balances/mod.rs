@@ -31,7 +31,7 @@ async fn run(args: &ArgMatches) {
             .values()
             .map(|network| async move {
                 let balance_of = match network
-                    .get_web3_client_http()
+                    .get_web3_client_rpc()
                     .eth()
                     .balance(wallet.address(), None)
                     .await

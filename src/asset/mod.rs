@@ -109,7 +109,7 @@ impl Asset {
     }
 
     pub fn get_web3_client_http(&self) -> Web3<Http> {
-        self.get_network().get_web3_client_http()
+        self.get_network().get_web3_client_rpc()
     }
 
     pub fn contract(&self) -> Contract<Http> {

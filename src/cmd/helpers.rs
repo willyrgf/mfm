@@ -47,7 +47,7 @@ pub fn get_network(args: &ArgMatches) -> Result<&Network, anyhow::Error> {
 pub fn get_address(args: &ArgMatches) -> Result<H160, anyhow::Error> {
     match args.get_one::<String>("address") {
         Some(a) => Address::from_str(a).map_err(|e| anyhow::anyhow!(e)),
-        None => Err(anyhow::anyhow!("--network is required")),
+        None => Err(anyhow::anyhow!("--address is required")),
     }
 }
 

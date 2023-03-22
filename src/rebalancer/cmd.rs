@@ -243,7 +243,7 @@ async fn wrapped_cmd_info(args: &ArgMatches) {
     ]);
 
     let network = config.get_network();
-    let client = network.get_web3_client_http();
+    let client = network.get_web3_client_rpc();
     let rebalancer_wallet = config.get_wallet();
     let coin_balance = rebalancer_wallet.coin_balance(client.clone()).await;
     let mut balances_table = Table::new();

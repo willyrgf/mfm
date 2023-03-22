@@ -251,7 +251,7 @@ impl Exchange {
     }
 
     pub fn get_web3_client_http(&self) -> Web3<Http> {
-        self.get_network().get_web3_client_http()
+        self.get_network().get_web3_client_rpc()
     }
 
     pub async fn estimate_swap_cost(

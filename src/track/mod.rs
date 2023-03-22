@@ -118,7 +118,7 @@ pub(crate) async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> 
             display_amount_to_float(quoted_portfolio_balance_u256, asset_quoted_decimals);
 
         let network = rebalancer_config.get_network();
-        let client = network.get_web3_client_http();
+        let client = network.get_web3_client_rpc();
         let rebalancer_wallet = rebalancer_config.get_wallet();
         let coin_balance_u256 = rebalancer_wallet.coin_balance(client.clone()).await;
         let coin_balance = display_amount_to_float(coin_balance_u256, network.coin_decimals());
