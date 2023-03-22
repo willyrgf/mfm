@@ -1,61 +1,24 @@
-use std::time::{self, Duration};
+use crate::cmd::helpers;
 
-use crate::{cmd::helpers, config::Config};
+use bigdecimal::Zero;
 use clap::ArgMatches;
 use futures::StreamExt;
-use web3::types::{FilterBuilder, TransactionId};
+use std::time::Duration;
+use web3::types::FilterBuilder;
 
 pub mod cmd;
 
 #[tracing::instrument(name = "wrapped run watcher")]
 async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> {
-    let config = Config::global();
-
     let address = helpers::get_address(args)?;
     let network = helpers::get_network(args)?;
 
-    if network.node_url().is_some() {
-        let ws_web3 = network.get_web3_client_ws().await?;
+    let url = match network.node_url() {
+        Some(url) => url,
+        None => return Err(anyhow::anyhow!("node_url is missing")),
+    };
 
-        // Build a filter for new transactions to the given address
-        let filter = FilterBuilder::default().address(vec![address]).build();
-
-        // Create a new event stream for new transactions to the given address
-        let mut event_stream = ws_web3
-            .eth_subscribe()
-            .subscribe_logs(filter)
-            .await
-            .unwrap();
-
-        // Start a loop to watch for new transactions
-        loop {
-            // Wait for a new event to be received
-            let event_txn_hash = event_stream
-                .next()
-                .await
-                .unwrap()
-                .unwrap()
-                .transaction_hash
-                .unwrap();
-
-            // Print out the details of the new transaction
-            let transaction = ws_web3
-                .eth()
-                .transaction(TransactionId::Hash(event_txn_hash))
-                .await
-                .unwrap();
-            println!("New transaction: {:?}", transaction);
-
-            // Wait for 5 seconds before checking for new events again
-            std::thread::sleep(Duration::from_secs(5));
-        }
-    }
-
-    println!("config: {:?}", config);
-    println!("address: {:?}", address);
-    println!("network: {:?}", network);
-
-    let web3 = network.get_web3_client_http();
+    let web3 = network.get_web3_client_http(url.as_str()).unwrap();
 
     let filter = FilterBuilder::default().address(vec![address]).build();
 
@@ -65,12 +28,20 @@ async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> {
         .await
         .map_err(|e| anyhow::anyhow!("failed to create a log filter, got {:?}", e))?;
 
-    let log_stream = filter.stream(time::Duration::from_secs(1));
-    futures::pin_mut!(log_stream);
+    loop {
+        let logs = filter.logs().await.unwrap();
+        logs.iter().for_each(|log| println!("{:?}", log));
 
-    let log = log_stream.next().await.unwrap();
+        if !logs.len().is_zero() {
+            break;
+        }
+    }
+    // let log_stream = filter.stream(Duration::from_secs(1));
+    // futures::pin_mut!(log_stream);
 
-    println!("log: {:?}", log);
+    // let log = log_stream.next().await.unwrap();
+
+    // println!("log: {:?}", log);
 
     Ok(())
 }

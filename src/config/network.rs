@@ -16,7 +16,7 @@ pub struct Network {
     decimals: Option<u8>,
     chain_id: u32,
     rpc_url: String,
-    node_url: Option<String>,
+    node_url_http: Option<String>,
     blockexplorer_url: String,
     min_balance_coin: f64,
     wrapped_asset: String,
@@ -36,7 +36,7 @@ impl Network {
     }
 
     pub fn node_url(&self) -> Option<String> {
-        self.node_url.clone()
+        self.node_url_http.clone()
     }
 
     // TODO: try get this value from some request in the blockchain
@@ -61,8 +61,13 @@ impl Network {
             .to_unsigned_u256()
     }
 
-    pub fn get_web3_client_http(&self) -> Web3<Http> {
-        Web3::new(Http::new(self.rpc_url()).unwrap())
+    pub fn get_web3_client_rpc(&self) -> Web3<Http> {
+        self.get_web3_client_http(self.rpc_url()).unwrap()
+    }
+
+    pub fn get_web3_client_http(&self, url: &str) -> Result<Web3<Http>, anyhow::Error> {
+        let http = Http::new(url).map_err(|e| anyhow::anyhow!(e))?;
+        Ok(Web3::new(http))
     }
 
     pub async fn get_web3_client_ws(&self) -> Result<Web3<WebSocket>, anyhow::Error> {
