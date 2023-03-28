@@ -35,6 +35,12 @@ To access this files we've a `shared::resources` module that will always conderi
 filesystem `res/` directory and the default `static RES` compiled in the binary (`build.rs`),
 following this order  of priority respectively.
 
+## run GETH server locally
+```sh
+ docker build -t geth_local tests/blockchains/gethnet
+ docker run --name geth_local -d  -p 8545:8545 -p 8546:8546 geth_local
+```
+
 <!-- TODO: add install doc and res folder -->
 
 ## cmd examples
