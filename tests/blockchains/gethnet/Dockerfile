@@ -21,6 +21,6 @@ ENTRYPOINT [ "geth", "--dev", "--dev.period", "1", "--miner.gaslimit", "30000000
   "--http", "--http.api", "eth,web3,personal,net,txpool", "--http.addr", "0.0.0.0", "--http.port=8545", "--http.corsdomain", "*", \
   "--ws", "--ws.origins", "*", "--ws.addr", "0.0.0.0", "--ws.port=8546", "--graphql", "--graphql.corsdomain", "*", \
   "--authrpc.vhosts", "*", "--http.vhosts", "*", \
-  "--allow-insecure-unlock", "--rpc.allow-unprotected-txs", "--vmdebug", "--networkid=1337", "--rpc.txfeecap", "0", \
+  "--allow-insecure-unlock", "--rpc.allow-unprotected-txs", "--vmdebug", "--networkid=11077", "--rpc.txfeecap", "0", \
   "--unlock", "0x4E22e05C29A7165Aeee0D813bE03Af17F129A2d1" \
 ]
