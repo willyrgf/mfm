@@ -17,9 +17,9 @@ pub struct Network {
     chain_id: u32,
     rpc_url: String,
     node_url_http: Option<String>,
-    blockexplorer_url: String,
+    blockexplorer_url: Option<String>,
     min_balance_coin: f64,
-    wrapped_asset: String,
+    wrapped_asset: Option<String>,
 }
 
 impl Network {
@@ -48,9 +48,12 @@ impl Network {
     }
 
     pub fn get_wrapped_asset(&self) -> Result<Asset, anyhow::Error> {
-        Config::global()
-            .assets
-            .find_by_name_and_network(self.wrapped_asset.as_str(), self.name.as_str())
+        match &self.wrapped_asset {
+            Some(wrapped_asset) => Config::global()
+                .assets
+                .find_by_name_and_network(wrapped_asset.as_str(), self.name.as_str()),
+            None => Err(anyhow::anyhow!("wrapped_asset not found")),
+        }
     }
 
     //TODO: validate min_balance_coin in the build of the type
