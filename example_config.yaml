@@ -6,9 +6,12 @@ wallets:
   test-wallet:
     private_key: YOUR_PRIVATE_KEY
   farm-wallet:
-    private_key: YOUR_PRIVATE_KEY
+    private_key:
+      YOUR_PRIVATE_KEY
       # encrypted: true
       # env_password: MFM_TEST_WALLET_PASSWORD # default is MFM_WALLET_PASSWORD if `encrypted`` is true
+  geth-wallet:
+    private_key: afcaf34d4647a3e50b39029fb34aa94b59ae75606f57d78e4bcb286948ed4816
 
 withdraw_wallets:
   test-wallet2:
@@ -33,6 +36,14 @@ networks:
     blockexplorer_url: https://polygonscan.com/
     min_balance_coin: 1
     wrapped_asset: wmatic
+    decimals: 18
+  geth:
+    name: geth
+    symbol: eth
+    chain_id: 1337
+    rpc_url: http://127.0.0.1:8545
+    node_url_http: http://127.0.0.1:8545
+    min_balance_coin: 1
     decimals: 18
 
 exchanges:
@@ -314,4 +325,3 @@ rebalancers:
     quoted_in: busd
     parking_asset_id: busd
     parking_asset_min_move: 0.01
-

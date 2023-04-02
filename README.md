@@ -35,11 +35,28 @@ To access this files we've a `shared::resources` module that will always conderi
 filesystem `res/` directory and the default `static RES` compiled in the binary (`build.rs`),
 following this order  of priority respectively.
 
-## run GETH server locally
+## Local test environment
+
+### run GETH server
 ```sh
  docker build -t geth_local tests/blockchains/gethnet
  docker run --name geth_local -d  -p 8545:8545 -p 8546:8546 geth_local
 ```
+
+### stop & drop GETH server
+```sh
+docker stop geth_local && docker rm geth_local
+```
+
+### extract base wallet private key
+```sh
+$ ethkey inspect --private --passwordfile tests/blockchains/gethnet/password.txt tests/blockchains/gethnet/data/keystore/UTC--2023-03-28T01-13-34.803419000Z--4e22e05c29a7165aeee0d813be03af17f129a2d1
+Address:        0x4E22e05C29A7165Aeee0D813bE03Af17F129A2d1
+Public key:     04bf840d4f25bda6e5cf46dfe8177f33f8ea5ab5e90d17992272c6b3a931976f3a6328d513e943becbc4f9e46d89bce4f9c9654698252d7b09469015ea2c36862d
+Private key:    afcaf34d4647a3e50b39029fb34aa94b59ae75606f57d78e4bcb286948ed4816
+```
+
+
 
 <!-- TODO: add install doc and res folder -->
 
