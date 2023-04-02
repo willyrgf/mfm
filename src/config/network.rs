@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use web3::{transports::Http, types::U256, Web3};
+use web3::{
+    transports::{Http, WebSocket},
+    types::U256,
+    Web3,
+};
 
 use super::{exchange::Exchange, Config};
 use crate::{asset::Asset, utils::scalar::BigDecimal};
@@ -12,9 +16,10 @@ pub struct Network {
     decimals: Option<u8>,
     chain_id: u32,
     rpc_url: String,
-    blockexplorer_url: String,
+    node_url_http: Option<String>,
+    blockexplorer_url: Option<String>,
     min_balance_coin: f64,
-    wrapped_asset: String,
+    wrapped_asset: Option<String>,
 }
 
 impl Network {
@@ -22,12 +27,16 @@ impl Network {
         self.rpc_url.as_str()
     }
 
-    pub fn get_name(&self) -> &str {
+    pub fn name(&self) -> &str {
         self.name.as_str()
     }
 
-    pub fn get_symbol(&self) -> &str {
+    pub fn symbol(&self) -> &str {
         self.symbol.as_str()
+    }
+
+    pub fn node_url(&self) -> Option<String> {
+        self.node_url_http.clone()
     }
 
     // TODO: try get this value from some request in the blockchain
@@ -39,9 +48,12 @@ impl Network {
     }
 
     pub fn get_wrapped_asset(&self) -> Result<Asset, anyhow::Error> {
-        Config::global()
-            .assets
-            .find_by_name_and_network(self.wrapped_asset.as_str(), self.name.as_str())
+        match &self.wrapped_asset {
+            Some(wrapped_asset) => Config::global()
+                .assets
+                .find_by_name_and_network(wrapped_asset.as_str(), self.name.as_str()),
+            None => Err(anyhow::anyhow!("wrapped_asset not found")),
+        }
     }
 
     //TODO: validate min_balance_coin in the build of the type
@@ -52,8 +64,20 @@ impl Network {
             .to_unsigned_u256()
     }
 
-    pub fn get_web3_client_http(&self) -> Web3<Http> {
-        Web3::new(Http::new(self.rpc_url()).unwrap())
+    pub fn get_web3_client_rpc(&self) -> Web3<Http> {
+        self.get_web3_client_http(self.rpc_url()).unwrap()
+    }
+
+    pub fn get_web3_client_http(&self, url: &str) -> Result<Web3<Http>, anyhow::Error> {
+        let http = Http::new(url).map_err(|e| anyhow::anyhow!(e))?;
+        Ok(Web3::new(http))
+    }
+
+    pub async fn get_web3_client_ws(&self) -> Result<Web3<WebSocket>, anyhow::Error> {
+        match self.node_url() {
+            Some(n) => Ok(Web3::new(WebSocket::new(n.as_str()).await.unwrap())),
+            None => Err(anyhow::anyhow!("missing network.node_url configuration")),
+        }
     }
 
     pub fn get_exchanges(&self) -> Vec<&Exchange> {

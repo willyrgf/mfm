@@ -5,6 +5,7 @@ pub mod balances;
 pub mod cmd;
 pub mod config;
 pub mod encrypt;
+pub mod notification;
 pub mod quote;
 pub mod rebalancer;
 pub mod swap;
@@ -12,6 +13,7 @@ pub mod telemetry;
 pub mod track;
 pub mod unwrap;
 pub mod utils;
+pub mod watcher;
 pub mod withdraw;
 pub mod wrap;
 

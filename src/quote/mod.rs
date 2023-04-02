@@ -12,8 +12,8 @@ pub mod cmd;
 async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let network = helpers::get_network(args)?;
 
-    let input_asset = helpers::get_token_input_in_network_from_args(args, network.get_name())?;
-    let output_asset = helpers::get_token_output_in_network_from_args(args, network.get_name())?;
+    let input_asset = helpers::get_token_input_in_network_from_args(args, network.name())?;
+    let output_asset = helpers::get_token_output_in_network_from_args(args, network.name())?;
 
     let input_asset_decimals = input_asset.decimals().await?;
     let output_asset_decimals = output_asset.decimals().await?;

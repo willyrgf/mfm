@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use crate::{
     asset::Asset,
     config::{
@@ -9,7 +11,7 @@ use crate::{
 };
 use anyhow::Context;
 use clap::ArgMatches;
-use web3::types::U256;
+use web3::types::{Address, H160, U256};
 
 //TODO: add constants to all keys in value_of
 
@@ -38,6 +40,14 @@ pub fn get_network(args: &ArgMatches) -> Result<&Network, anyhow::Error> {
             Ok(network)
         }
         None => Err(anyhow::anyhow!("--network is required")),
+    }
+}
+
+#[tracing::instrument(name = "get address from command args")]
+pub fn get_address(args: &ArgMatches) -> Result<H160, anyhow::Error> {
+    match args.get_one::<String>("address") {
+        Some(a) => Address::from_str(a).map_err(|e| anyhow::anyhow!(e)),
+        None => Err(anyhow::anyhow!("--address is required")),
     }
 }
 

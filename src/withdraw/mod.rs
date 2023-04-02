@@ -16,7 +16,7 @@ async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
         panic!()
     });
 
-    let asset = helpers::get_asset_in_network_from_args(args, network.get_name());
+    let asset = helpers::get_asset_in_network_from_args(args, network.name());
     let asset_decimals = asset.decimals().await.unwrap();
     let amount = helpers::get_amount(args, asset_decimals).unwrap_or_else(|e| {
         tracing::error!(error = %e);

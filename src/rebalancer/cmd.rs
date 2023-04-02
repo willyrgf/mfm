@@ -243,7 +243,7 @@ async fn wrapped_cmd_info(args: &ArgMatches) {
     ]);
 
     let network = config.get_network();
-    let client = network.get_web3_client_http();
+    let client = network.get_web3_client_rpc();
     let rebalancer_wallet = config.get_wallet();
     let coin_balance = rebalancer_wallet.coin_balance(client.clone()).await;
     let mut balances_table = Table::new();
@@ -257,7 +257,7 @@ async fn wrapped_cmd_info(args: &ArgMatches) {
     balances_table.add_row(row![
         "Coin balance",
         display_amount_to_float(coin_balance, network.coin_decimals()),
-        network.get_symbol()
+        network.symbol()
     ]);
 
     let parking_asset = config.get_parking_asset();
@@ -307,17 +307,17 @@ async fn wrapped_cmd_info(args: &ArgMatches) {
         balances_table.add_row(row![
             "Total Swap cost",
             display_amount_to_float((swap_cost * gas_price) * total_ops, network.coin_decimals()),
-            network.get_symbol()
+            network.symbol()
         ]);
         balances_table.add_row(row![
             "Swap cost",
             display_amount_to_float(swap_cost * gas_price, network.coin_decimals()),
-            network.get_symbol()
+            network.symbol()
         ]);
         balances_table.add_row(row![
             "Gas price",
             display_amount_to_float(gas_price, network.coin_decimals()),
-            network.get_symbol()
+            network.symbol()
         ]);
     }
 

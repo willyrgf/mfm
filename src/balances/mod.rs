@@ -31,7 +31,7 @@ async fn run(args: &ArgMatches) {
             .values()
             .map(|network| async move {
                 let balance_of = match network
-                    .get_web3_client_http()
+                    .get_web3_client_rpc()
                     .eth()
                     .balance(wallet.address(), None)
                     .await
@@ -40,8 +40,8 @@ async fn run(args: &ArgMatches) {
                     Err(_) => U256::default(),
                 };
                 (
-                    network.get_name(),
-                    network.get_symbol(),
+                    network.name(),
+                    network.symbol(),
                     balance_of,
                     network.coin_decimals(),
                 )

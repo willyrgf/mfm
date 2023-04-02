@@ -12,11 +12,10 @@ pub mod cmd;
 async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let network = helpers::get_network(args)?;
 
-    let input_asset =
-        helpers::get_token_input_in_network_from_args(args, network.get_name()).unwrap();
+    let input_asset = helpers::get_token_input_in_network_from_args(args, network.name()).unwrap();
     tracing::debug!("input_token: {:?}", input_asset);
     let output_asset =
-        helpers::get_token_output_in_network_from_args(args, network.get_name()).unwrap();
+        helpers::get_token_output_in_network_from_args(args, network.name()).unwrap();
     tracing::debug!("output_token: {:?}", output_asset);
 
     let input_asset_decimals = input_asset.decimals().await.unwrap();

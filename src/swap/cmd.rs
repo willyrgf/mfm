@@ -4,7 +4,7 @@ pub fn generate() -> Command {
     Command::new("swap")
         .about("Swap Tokens for Tokens supporting fees on transfer")
         .arg(clap::arg!(-n --"network" <bsc> "Network to use, ex (bsc, polygon)").required(true))
-        .arg(clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router").required(false))
+        .arg(clap::arg!(-e --"exchange" <pancake_swap_v2> "Exchange to use router. If not provided, try to use best liquidity exchange").required(false))
         .arg(clap::arg!(-w --"wallet" <WALLET_NAME> "Wallet id from config file").required(true))
         .arg(
             clap::arg!(-a --"amount" <AMMOUNT> "Amount of TokenA to swap to TokenB")
