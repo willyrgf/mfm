@@ -1,10 +1,10 @@
-use super::Notification;
+use super::Notifier;
 
 #[derive(Default)]
-pub struct DebugNotification {}
+pub struct DebugNotifier {}
 
-impl Notification for DebugNotification {
-    fn notify(&self, message: String) -> Result<(), anyhow::Error> {
+impl Notifier for DebugNotifier {
+    fn send(&self, message: String) -> Result<(), anyhow::Error> {
         tracing::info!("{}", message);
         Ok(())
     }
