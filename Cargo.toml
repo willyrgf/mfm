@@ -36,6 +36,7 @@ num-traits = "0.2.15"
 zeroize = "1.5.7"
 orion = "0.17.2"
 chrono = "0.4.23"
+teloxide = "0.12.2"
 
 
 

@@ -1,7 +1,4 @@
-use crate::{
-    cmd::helpers,
-    notification::{debug, Notification},
-};
+use crate::{cmd::helpers, config::Config, notification::notify_all};
 
 use clap::ArgMatches;
 use futures::StreamExt;
@@ -12,7 +9,12 @@ pub mod cmd;
 
 #[tracing::instrument(name = "wrapped run watcher")]
 async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> {
-    let notification: &dyn Notification = &debug::DebugNotification::default();
+    let notifiers = Config::global()
+        .notifications
+        .as_ref()
+        .unwrap()
+        .all_notifiers();
+
     let address = helpers::get_address(args)?;
     let network = helpers::get_network(args)?;
 
@@ -22,8 +24,6 @@ async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> {
     };
 
     let web3 = network.get_web3_client_http(url.as_str())?;
-
-    let block_number = web3.eth().block_number().await.unwrap();
 
     let filter = web3.eth_filter().create_blocks_filter().await.unwrap();
 
@@ -51,16 +51,12 @@ async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> {
 
             match (txn.to, txn.from) {
                 (Some(to), Some(from)) if to == address || from == address => {
-                    // TODO: fix this notification to notify_all(notifications)
-                    // TODO: fix this format to better fit any kind of txn
-                    notification.notify(format!("MFM [watcher]: matches the filter of address ({}) in the transaction hash ({}), found with from ({}) and to ({}), value of {:.18} and gas_price of {}.\n", address, tx_hash, from, to, txn.value, txn.gas_price.unwrap())).unwrap();
+                    notify_all(&notifiers, format!("MFM [watcher]: matches the filter of address ({}) in the transaction hash ({}), found with from ({}) and to ({}), value of {:.18} and gas_price of {}.\n", address, tx_hash, from, to, txn.value, txn.gas_price.unwrap())).unwrap();
                 }
                 _ => continue,
             }
         }
     }
-
-    Ok(())
 }
 
 #[tracing::instrument(name = "run watcher")]
