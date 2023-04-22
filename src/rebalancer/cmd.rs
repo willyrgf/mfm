@@ -95,17 +95,14 @@ async fn cmd_exit(args: &ArgMatches) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn cmd_run(args: &ArgMatches) {
+async fn cmd_run(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let config = cmd::helpers::get_rebalancer(args);
     tracing::debug!(
         "rebalancer::cmd::call_sub_commands(): rebalancer_config: {:?}",
         config
     );
 
-    rebalancer::validate(&config).await.unwrap_or_else(|e| {
-        tracing::error!(error = %e);
-        panic!()
-    });
+    rebalancer::validate(&config).await?;
 
     match config.strategy() {
         Strategy::FullParking => {
@@ -117,13 +114,9 @@ async fn cmd_run(args: &ArgMatches) {
             rebalancer::run_diff_parking(&config).await
         }
     }
-    .unwrap_or_else(|e| {
-        tracing::error!(error = %e);
-        panic!()
-    });
 }
 
-async fn wrapped_cmd_info(args: &ArgMatches) {
+async fn wrapped_cmd_info(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let config = cmd::helpers::get_rebalancer(args);
     let asset_quoted = &config.get_quoted_asset();
     let asset_quoted_decimals = asset_quoted.decimals().await.unwrap();
@@ -326,27 +319,26 @@ async fn wrapped_cmd_info(args: &ArgMatches) {
     info_table.printstd();
     balances_table.printstd();
 
-    let track = cmd::helpers::get_track(args);
-    if track {
-        // TODO: fix it when refactor rebalancer to handling errors
-        #[allow(unused_must_use)]
-        {
-            track::wrapped_run(args).await.map_err(|e| {
-                tracing::error!(error = %e);
-                anyhow::anyhow!("cmd info running track failed, err: {}", e)
-            });
-        }
+    match cmd::helpers::get_track(args) {
+        true => track::wrapped_run(args).await,
+        false => Ok(()),
     }
 }
 
-async fn cmd_info(args: &ArgMatches) {
+async fn cmd_info(args: &ArgMatches) -> Result<(), anyhow::Error> {
     tracing::debug!("cmd_info()");
 
     let run_every = cmd::helpers::get_run_every(args);
 
     match run_every {
         Some(every_seconds) => loop {
-            wrapped_cmd_info(args).await;
+            match wrapped_cmd_info(args).await {
+                Ok(_) => {}
+                Err(e) => tracing::error!(
+                    "ignored by run_every config, error running wrapped_cmd_info(): {:?}",
+                    e
+                ),
+            }
 
             let duration = std::time::Duration::from_secs((*every_seconds).into());
             std::thread::sleep(duration);

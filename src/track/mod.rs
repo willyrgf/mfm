@@ -219,7 +219,13 @@ async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
 
     match run_every {
         Some(every_seconds) => loop {
-            wrapped_run(args).await?;
+            match wrapped_run(args).await {
+                Ok(_) => {}
+                Err(e) => tracing::error!(
+                    "ignored by run_every config, error running wrapped_run(): {:?}",
+                    e
+                ),
+            }
             let duration = std::time::Duration::from_secs((*every_seconds).into());
             std::thread::sleep(duration);
         },
