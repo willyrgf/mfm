@@ -64,14 +64,8 @@ pub fn generate() -> Command {
 
 pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
     match args.subcommand() {
-        Some((REBALANCER_RUN_COMMAND, sub_args)) => {
-            cmd_run(sub_args).await;
-            Ok(())
-        }
-        Some((REBALANCER_INFO_COMMAND, sub_args)) => {
-            cmd_info(sub_args).await;
-            Ok(())
-        }
+        Some((REBALANCER_RUN_COMMAND, sub_args)) => cmd_run(sub_args).await,
+        Some((REBALANCER_INFO_COMMAND, sub_args)) => cmd_info(sub_args).await,
         Some((REBALANCER_EXIT_COMMAND, sub_args)) => cmd_exit(sub_args).await,
         _ => Err(anyhow::anyhow!("no sub cmd found")),
     }
