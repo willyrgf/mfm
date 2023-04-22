@@ -63,8 +63,8 @@ impl RebalancerConfig {
     pub fn total_percentage(&self) -> f64 {
         self.portfolio
             .0
-            .iter()
-            .map(|(_, asset_config)| asset_config.percent)
+            .values()
+            .map(|asset_config| asset_config.percent)
             .sum()
     }
 
@@ -86,8 +86,8 @@ impl RebalancerConfig {
     pub fn get_assets(&self) -> Result<Vec<Asset>, anyhow::Error> {
         self.portfolio
             .0
-            .iter()
-            .map(|(name, _)| {
+            .keys()
+            .map(|name| {
                 Config::global()
                     .assets
                     .find_by_name_and_network(name.as_str(), self.network_id.as_str())

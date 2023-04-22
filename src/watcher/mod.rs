@@ -61,5 +61,12 @@ async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> {
 
 #[tracing::instrument(name = "run watcher")]
 async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
-    wrapped_run(args).await
+    loop {
+        match wrapped_run(args).await {
+            Ok(_) => {}
+            Err(e) => tracing::error!("ignored by watcher, error running wrapped_run(): {:?}", e),
+        }
+        let duration = std::time::Duration::from_secs(1);
+        std::thread::sleep(duration);
+    }
 }
