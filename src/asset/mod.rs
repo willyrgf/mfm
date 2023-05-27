@@ -128,20 +128,25 @@ impl Asset {
             .map_err(|e| anyhow::anyhow!("failed to fetch gas_price, got: {:?}", e))
     }
 
-    pub async fn balance_of(&self, account: H160) -> U256 {
+    pub async fn balance_of(&self, account: H160) -> Result<U256, anyhow::Error> {
         let contract = &self.contract();
-        let result = contract.query("balanceOf", (account,), None, Options::default(), None);
-        let result_balance: U256 = result.await.unwrap();
-        result_balance
+        contract
+            .query("balanceOf", (account,), None, Options::default(), None)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to fetch balance, got: {:?}", e))
     }
 
     pub fn build_path_for_coin(&self, coin_address: H160) -> Vec<H160> {
         vec![coin_address, self.as_address().unwrap()]
     }
 
-    pub async fn balance_of_quoted_in(&self, wallet: &Wallet, quoted: &Asset) -> U256 {
+    pub async fn balance_of_quoted_in(
+        &self,
+        wallet: &Wallet,
+        quoted: &Asset,
+    ) -> Result<U256, anyhow::Error> {
         let account = wallet.address();
-        let base_balance = self.balance_of(account).await;
+        let base_balance = self.balance_of(account).await?;
         let exchange = self
             .get_network()
             .get_exchange_by_liquidity(self, quoted, base_balance)
@@ -155,17 +160,17 @@ impl Asset {
             });
 
         if self.name() == quoted.name() {
-            return base_balance;
+            return Ok(base_balance);
         }
 
         let assets_path = exchange.build_route_for(self, quoted).await;
 
-        exchange
+        Ok(exchange
             .get_amounts_out(base_balance, assets_path)
             .await
             .last()
             .unwrap()
-            .into()
+            .into())
     }
 
     pub fn exist_max_tx_amount(&self) -> bool {

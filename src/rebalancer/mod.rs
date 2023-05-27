@@ -145,6 +145,7 @@ impl AssetBalances {
             .unwrap()
             .into();
 
+        //TODO: refactor it to dont need to unwraps from the query functions
         Self {
             asset: asset.clone(),
             quoted_unit_price,
@@ -152,11 +153,13 @@ impl AssetBalances {
             percent: rebalancer_config.get_asset_config_percent(asset.name()),
             balance: asset
                 .balance_of(rebalancer_config.get_wallet().address())
-                .await,
+                .await
+                .unwrap(),
             quoted_asset_decimals: quoted_asset.decimals().await.unwrap(),
             quoted_balance: asset
                 .balance_of_quoted_in(rebalancer_config.get_wallet(), &quoted_asset)
-                .await,
+                .await
+                .unwrap(),
             max_tx_amount: asset.max_tx_amount().await,
         }
     }
@@ -230,10 +233,6 @@ pub fn get_total_quoted_balance(assets_balances: &[AssetBalances]) -> U256 {
     total
 }
 
-pub async fn get_total_parking_balance(parking_asset: &Asset, from_wallet: &Wallet) -> U256 {
-    parking_asset.balance_of(from_wallet.address()).await
-}
-
 pub async fn move_asset_with_slippage(
     rebalancer_config: &RebalancerConfig,
     asset_in: &Asset,
@@ -242,7 +241,7 @@ pub async fn move_asset_with_slippage(
     mut amount_out: U256,
 ) {
     let from_wallet = rebalancer_config.get_wallet();
-    let balance = asset_in.balance_of(from_wallet.address()).await;
+    let balance = asset_in.balance_of(from_wallet.address()).await.unwrap();
     let exchange = rebalancer_config.get_network().get_exchange_by_liquidity(asset_in, asset_out, amount_in).await
         .unwrap_or_else(|| {
             tracing::error!(
@@ -352,7 +351,10 @@ pub async fn move_parking_to_assets(
     let parking_asset_decimals = parking_asset.decimals().await.unwrap();
 
     //TODO: check if doenst exist balance in other assets
-    let total_parking_balance = parking_asset.balance_of(from_wallet.address()).await;
+    let total_parking_balance = parking_asset
+        .balance_of(from_wallet.address())
+        .await
+        .unwrap();
 
     //TODO: do it to until all the parking balance are in the respective assets
     for ab in assets_balances.iter() {
@@ -460,7 +462,7 @@ pub async fn run_full_parking(config: &RebalancerConfig) -> Result<(), anyhow::E
 
     move_assets_to_parking(config, &assets_balances).await;
 
-    let total_parking_balance = get_total_parking_balance(&parking_asset, from_wallet).await;
+    let total_parking_balance = parking_asset.balance_of(from_wallet.address()).await?;
     tracing::debug!(
         "run_rebalancer_full_parking(): after move assets_to_parking: total_parking_balance: {}",
         total_parking_balance
@@ -468,7 +470,7 @@ pub async fn run_full_parking(config: &RebalancerConfig) -> Result<(), anyhow::E
 
     move_parking_to_assets(config, &assets_balances).await;
 
-    let total_parking_balance = get_total_parking_balance(&parking_asset, from_wallet).await;
+    let total_parking_balance = parking_asset.balance_of(from_wallet.address()).await?;
     tracing::debug!(
         "run_rebalancer_full_parking(): after move parking_to_assets: total_parking_balance: {}",
         total_parking_balance

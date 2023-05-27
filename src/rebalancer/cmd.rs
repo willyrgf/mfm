@@ -271,7 +271,7 @@ async fn wrapped_cmd_info(args: &ArgMatches) -> Result<(), anyhow::Error> {
     };
 
     if let Some(input_asset) = input_asset {
-        let amount_in = input_asset.balance_of(from_wallet.address()).await;
+        let amount_in = input_asset.balance_of(from_wallet.address()).await?;
         let parking_asset_exchange = input_asset
         .get_network()
         .get_exchange_by_liquidity(&input_asset, &parking_asset, amount_in)
@@ -287,7 +287,7 @@ async fn wrapped_cmd_info(args: &ArgMatches) -> Result<(), anyhow::Error> {
         let gas_price = client.clone().eth().gas_price().await.unwrap();
         let swap_cost = parking_asset_exchange
             .estimate_swap_cost(from_wallet, &input_asset, &parking_asset)
-            .await;
+            .await?;
 
         let total_ops = U256::from(asset_rebalances.len());
 

@@ -143,7 +143,7 @@ pub(crate) async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> 
             None => panic!("No input asset to calculate swap cost"),
         };
 
-        let amount_in = input_asset.balance_of(from_wallet.address()).await;
+        let amount_in = input_asset.balance_of(from_wallet.address()).await?;
         let parking_asset_exchange = input_asset
             .get_network()
             .get_exchange_by_liquidity(&input_asset, &parking_asset, amount_in)
@@ -160,7 +160,7 @@ pub(crate) async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> 
         let gas_price_u256 = client.clone().eth().gas_price().await.unwrap();
         let swap_cost = parking_asset_exchange
             .estimate_swap_cost(from_wallet, &input_asset, &parking_asset)
-            .await;
+            .await?;
         let total_ops = U256::from(asset_rebalancers.len());
 
         let total_estimate_swap_cost = display_amount_to_float(
