@@ -5,7 +5,6 @@ use std::ops::{Mul, Sub};
 
 use crate::{
     asset::Asset,
-    config::wallet::Wallet,
     rebalancer::config::RebalancerConfig,
     utils::{math::percent_to_u256, scalar::BigDecimal},
 };
@@ -120,22 +119,19 @@ impl AssetRebalancer {
 }
 
 impl AssetBalances {
-    pub async fn new(rebalancer_config: &RebalancerConfig, asset: Asset) -> AssetBalances {
+    pub async fn new(
+        rebalancer_config: &RebalancerConfig,
+        asset: Asset,
+    ) -> Result<AssetBalances, anyhow::Error> {
         let quoted_asset = rebalancer_config.get_quoted_asset();
-        let asset_decimals = asset.decimals().await.unwrap();
+        let asset_decimals = asset.decimals().await?;
         let unit_amount = U256::from(1_u32) * U256::exp10(asset_decimals.into());
 
         let exchange = asset
             .get_network()
             .get_exchange_by_liquidity(&asset, &quoted_asset, unit_amount)
-            .await.unwrap_or_else(||{
-                tracing::error!(
-                    "AssetBalances::new(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
-                    asset,
-                    quoted_asset
-                );
-                panic!()
-            });
+            .await
+            .unwrap();
 
         let quoted_asset_path = exchange.build_route_for(&asset, &quoted_asset).await;
         let quoted_unit_price: U256 = exchange
@@ -146,22 +142,21 @@ impl AssetBalances {
             .into();
 
         //TODO: refactor it to dont need to unwraps from the query functions
-        Self {
+        Ok(Self {
             asset: asset.clone(),
             quoted_unit_price,
             asset_decimals,
             percent: rebalancer_config.get_asset_config_percent(asset.name()),
             balance: asset
                 .balance_of(rebalancer_config.get_wallet().address())
-                .await
-                .unwrap(),
-            quoted_asset_decimals: quoted_asset.decimals().await.unwrap(),
+                .await?,
+            quoted_asset_decimals: quoted_asset.decimals().await?,
             quoted_balance: asset
                 .balance_of_quoted_in(rebalancer_config.get_wallet(), &quoted_asset)
                 .await
                 .unwrap(),
             max_tx_amount: asset.max_tx_amount().await,
-        }
+        })
     }
 
     pub fn get_amount_by_percent(&self, total_balance: U256, decimals: u8) -> U256 {
@@ -201,28 +196,30 @@ pub fn get_amount_to_trade(
 pub async fn get_assets_balances(
     rebalancer_config: &RebalancerConfig,
     assets: Vec<Asset>,
-) -> Vec<AssetBalances> {
+) -> Result<Vec<AssetBalances>, anyhow::Error> {
+    // TODO: revisit this two maps in the future
     futures::future::join_all(
         assets
             .into_iter()
-            .map(|asset| AssetBalances::new(rebalancer_config, asset)),
-    )
-    .await
+            .map(|asset| {
+                AssetBalances::new(rebalancer_config, asset)
+            })
+    ).await.into_iter().map(|ab| ab).collect()
 }
 
 pub async fn add_parking_asset(
     rebalancer_config: &RebalancerConfig,
     ab: Vec<AssetBalances>,
-) -> Vec<AssetBalances> {
+) -> Result<Vec<AssetBalances>, anyhow::Error> {
     let parking_asset = rebalancer_config.get_parking_asset();
 
     if ab.iter().any(|a| a.asset.name() == parking_asset.name()) {
-        return ab;
+        return Ok(ab);
     }
 
-    let pab = AssetBalances::new(rebalancer_config, parking_asset).await;
+    let pab = AssetBalances::new(rebalancer_config, parking_asset).await?;
 
-    ab.into_iter().chain(vec![pab].into_iter()).collect()
+    Ok(ab.into_iter().chain(vec![pab].into_iter()).collect())
 }
 
 pub fn get_total_quoted_balance(assets_balances: &[AssetBalances]) -> U256 {
@@ -434,7 +431,7 @@ pub async fn validate(config: &RebalancerConfig) -> Result<(), anyhow::Error> {
     }
 
     let assets = config.get_assets()?;
-    let assets_balances = get_assets_balances(config, assets).await;
+    let assets_balances = get_assets_balances(config, assets).await?;
 
     if !config.reach_min_threshold(&assets_balances) {
         return Err(anyhow::anyhow!(format!(
@@ -458,7 +455,7 @@ pub async fn run_full_parking(config: &RebalancerConfig) -> Result<(), anyhow::E
     let from_wallet = config.get_wallet();
     let parking_asset = config.get_parking_asset();
     let assets = config.get_assets()?;
-    let assets_balances = get_assets_balances(config, assets).await;
+    let assets_balances = get_assets_balances(config, assets).await?;
 
     move_assets_to_parking(config, &assets_balances).await;
 
@@ -529,8 +526,8 @@ pub async fn generate_asset_rebalances(
 
     let mut total = BigDecimal::zero();
 
-    let assets_balances = get_assets_balances(config, assets.clone()).await;
-    let assets_balances_with_parking = add_parking_asset(config, assets_balances).await;
+    let assets_balances = get_assets_balances(config, assets.clone()).await?;
+    let assets_balances_with_parking = add_parking_asset(config, assets_balances).await?;
 
     let total_quoted_balance = assets_balances_with_parking
         .iter()
