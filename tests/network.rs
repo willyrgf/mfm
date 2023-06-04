@@ -36,7 +36,7 @@ async fn test_get_exchange_by_liquidity() {
 
         let input_asset_config = config.assets.get(test_case.input_asset_name).unwrap();
         let input_asset_assets: Vec<Asset> = input_asset_config
-            .new_assets_list()
+            .assets_list_by_network()
             .unwrap()
             .into_iter()
             .filter(|a| a.network_id() == test_case.network_name)
@@ -46,7 +46,7 @@ async fn test_get_exchange_by_liquidity() {
 
         let output_asset_config = config.assets.get(test_case.output_asset_name).unwrap();
         let output_asset_assets: Vec<Asset> = output_asset_config
-            .new_assets_list()
+            .assets_list_by_network()
             .unwrap()
             .into_iter()
             .filter(|a| a.network_id() == test_case.network_name)

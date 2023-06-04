@@ -227,7 +227,7 @@ impl Exchange {
             Ok(a) => a,
             Err(e) => {
                 tracing::error!(
-                    "get_amounts_out(): result err: {:?}, return zeroed value",
+                    "get_amounts_out(): error return zeroed value, result err: {:?},",
                     e
                 );
                 vec![zero]
@@ -259,7 +259,7 @@ impl Exchange {
         from_wallet: &Wallet,
         input_asset: &Asset,
         output_asset: &Asset,
-    ) -> U256 {
+    ) -> Result<U256, anyhow::Error> {
         let asset_path = self
             .build_route_for(input_asset, output_asset)
             .await
@@ -273,8 +273,8 @@ impl Exchange {
                 .collect::<Vec<_>>(),
         );
 
-        let output_asset_decimals = output_asset.decimals().await.unwrap();
-        let amount_in = input_asset.balance_of(from_wallet.address()).await;
+        let output_asset_decimals = output_asset.decimals().await?;
+        let amount_in = input_asset.balance_of(from_wallet.address()).await?;
 
         let amount_out: U256 = self
             .get_amounts_out(amount_in, asset_path.clone())
@@ -299,7 +299,7 @@ impl Exchange {
         )
         .await
         {
-            Ok(gas) => gas,
+            Ok(gas) => Ok(gas),
             Err(e) => {
                 tracing::error!(
                     "swap_cost() estimate_gas(): error: {}, input_asset: {:?}, amount_in: {:?}, amount_out: {:?} amount_min_out_slippage: {:?}",
@@ -309,7 +309,7 @@ impl Exchange {
                     amount_out,
                     amount_min_out_slippage
                 );
-                panic!();
+                Err(anyhow::anyhow!(e))
             }
         }
     }

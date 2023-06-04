@@ -1,5 +1,5 @@
 use super::Asset;
-use crate::config::Config;
+use crate::config::{network::Network, Config};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -32,7 +32,7 @@ pub struct AssetConfig {
 }
 
 impl AssetConfig {
-    pub fn new_assets_list(&self) -> Result<Vec<Asset>, anyhow::Error> {
+    pub fn assets_list_by_network(&self) -> Result<Vec<Asset>, anyhow::Error> {
         self.networks
             .hashmap()
             .values()
@@ -56,6 +56,16 @@ impl AssetsConfig {
 
     pub fn get(&self, key: &str) -> Option<&AssetConfig> {
         self.0.get(key)
+    }
+
+    //TODO: use this function to get assets of the current network
+    pub fn assets_by_network(&self, network: &Network) -> Result<Vec<Asset>, anyhow::Error> {
+        let assets_config = self
+            .0
+            .values()
+            .filter(|&a| a.networks.get(network.name()).is_ok());
+
+        assets_config.map(|ac| Asset::new(ac, network)).collect()
     }
 
     //TODO: use this function to get assets of the current network

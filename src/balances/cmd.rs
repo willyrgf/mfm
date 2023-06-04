@@ -14,6 +14,5 @@ pub fn generate() -> Command {
 
 #[tracing::instrument(name = "balances call command")]
 pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
-    super::run(args).await;
-    Ok(())
+    super::run(args).await
 }

@@ -4,7 +4,7 @@ use std::ops::{Div, Mul};
 use crate::{
     cmd,
     rebalancer::{
-        self, config::Strategy, generate_asset_rebalances, get_total_quoted_balance, AssetBalances,
+        self, config::Strategy, generate_asset_rebalances, get_total_quoted_balance, AssetBalances, move_asset_with_slippage
     },
     track,
     utils::{blockchain::display_amount_to_float, scalar::BigDecimal},
@@ -82,10 +82,62 @@ async fn cmd_exit(args: &ArgMatches) -> Result<(), anyhow::Error> {
     config.parking_asset_min_move = -0.1;
 
     let assets = config.get_assets()?;
-    let assets_balances = rebalancer::get_assets_balances(&config, assets).await;
+    let assets_balances = rebalancer::get_assets_balances(&config, assets).await?;
 
-    rebalancer::move_assets_to_parking(&config, &assets_balances).await;
+    {
+        let rebalancer_config = &config;
+        let assets_balances = &assets_balances;
+        let parking_asset = rebalancer_config.get_parking_asset();
 
+        //TODO: do it to until all the balance are in the parking asset
+        for ab in assets_balances.iter() {
+            if ab.asset.name() == rebalancer_config.parking_asset_id() {
+                continue;
+            }
+
+            let exchange = ab.asset
+                .get_network()
+                .get_exchange_by_liquidity(&ab.asset, &parking_asset, ab.balance)
+                .await.unwrap_or_else(||{
+                    tracing::error!(
+                        "move_assets_to_parking(): network.get_exchange_by_liquidity(): None, asset_in: {:?}, asset_out: {:?}",
+                        ab.asset,
+                        parking_asset
+                    );
+                    panic!()
+                });
+
+            let parking_asset_path = exchange.build_route_for(&ab.asset, &parking_asset).await;
+
+            let parking_amount_out: U256 = exchange
+                .get_amounts_out(ab.balance, parking_asset_path.clone())
+                .await
+                .last()
+                .unwrap()
+                .into();
+
+            let min_move =
+                rebalancer_config.parking_asset_min_move_u256(parking_asset.decimals().await.unwrap());
+            if min_move >= parking_amount_out {
+                tracing::warn!(
+                    "min_move not satisfied: min_move {}, parking_amount_out {}",
+                    min_move,
+                    parking_amount_out
+                );
+                //TODO: return this error?
+                continue;
+            }
+
+            move_asset_with_slippage(
+                rebalancer_config,
+                &ab.asset,
+                &parking_asset,
+                ab.balance,
+                parking_amount_out,
+            )
+            .await;
+        }
+    };
     Ok(())
 }
 
@@ -271,7 +323,7 @@ async fn wrapped_cmd_info(args: &ArgMatches) -> Result<(), anyhow::Error> {
     };
 
     if let Some(input_asset) = input_asset {
-        let amount_in = input_asset.balance_of(from_wallet.address()).await;
+        let amount_in = input_asset.balance_of(from_wallet.address()).await?;
         let parking_asset_exchange = input_asset
         .get_network()
         .get_exchange_by_liquidity(&input_asset, &parking_asset, amount_in)
@@ -287,7 +339,7 @@ async fn wrapped_cmd_info(args: &ArgMatches) -> Result<(), anyhow::Error> {
         let gas_price = client.clone().eth().gas_price().await.unwrap();
         let swap_cost = parking_asset_exchange
             .estimate_swap_cost(from_wallet, &input_asset, &parking_asset)
-            .await;
+            .await?;
 
         let total_ops = U256::from(asset_rebalances.len());
 

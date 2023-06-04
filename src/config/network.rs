@@ -6,7 +6,7 @@ use web3::{
     Web3,
 };
 
-use super::{exchange::Exchange, Config};
+use super::{exchange::Exchange, wallet::Wallet, Config};
 use crate::{asset::Asset, utils::scalar::BigDecimal};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -87,6 +87,15 @@ impl Network {
             .values()
             .filter(|e| e.network_id() == self.name)
             .collect()
+    }
+
+    pub async fn balance_coin(&self, wallet: &Wallet) -> Result<U256, anyhow::Error> {
+        self
+            .get_web3_client_rpc()
+            .eth()
+            .balance(wallet.address(), None)
+            .await
+            .map_err(|e| anyhow::anyhow!("error fetch balance from network: {:?}", e))
     }
 
     pub async fn get_exchange_by_liquidity(

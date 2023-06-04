@@ -1,6 +1,5 @@
-use crate::cmd::helpers;
 use crate::config::Config;
-use crate::utils::scalar::BigDecimal;
+use crate::{cmd::helpers, utils};
 use clap::ArgMatches;
 use prettytable::{row, table};
 use web3::types::U256;
@@ -8,12 +7,9 @@ use web3::types::U256;
 pub mod cmd;
 
 #[tracing::instrument(name = "run balances")]
-async fn run(args: &ArgMatches) {
+async fn run(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let config = Config::global();
-    let wallet = helpers::get_wallet(args).unwrap_or_else(|e| {
-        tracing::error!(error = %e);
-        panic!()
-    });
+    let wallet = helpers::get_wallet(args)?;
     let hide_zero = helpers::get_hide_zero(args);
 
     let mut table = table!([
@@ -24,74 +20,41 @@ async fn run(args: &ArgMatches) {
         "Decimals"
     ]);
 
-    futures::future::join_all(
-        config
-            .networks
-            .hashmap()
-            .values()
-            .map(|network| async move {
-                let balance_of = match network
-                    .get_web3_client_rpc()
-                    .eth()
-                    .balance(wallet.address(), None)
-                    .await
-                {
-                    Ok(n) => n,
-                    Err(_) => U256::default(),
-                };
-                (
-                    network.name(),
-                    network.symbol(),
-                    balance_of,
-                    network.coin_decimals(),
-                )
-            }),
-    )
-    .await
-    .into_iter()
-    .for_each(|(network_name, symbol, balance_of, decimals)| {
-        let balance_of_bd = BigDecimal::from_unsigned_u256(&balance_of, decimals.into());
-        let balance_of_f64 = balance_of_bd.with_scale(decimals.into()).to_f64().unwrap();
+    let networks = config.networks.hashmap().values();
 
+    for network in networks.clone() {
+        let network_name = network.name();
+        let symbol = network.symbol();
+        let decimals = network.coin_decimals();
+        let balance_of = network.balance_coin(wallet).await?;
         if !(hide_zero && balance_of == U256::from(0_i32)) {
             table.add_row(row![
                 network_name,
                 symbol,
-                balance_of_f64,
+                utils::blockchain::display_amount_to_float(balance_of, decimals),
                 balance_of,
                 decimals
             ]);
         }
-    });
+    }
 
-    futures::future::join_all(
-        config
-            .assets
-            .hashmap()
-            .values()
-            .flat_map(|asset_config| asset_config.new_assets_list().unwrap())
-            .map(|asset| async move {
-                let balance_of = asset.balance_of(wallet.address()).await;
-                let decimals = asset.decimals().await.unwrap();
-                (asset, balance_of, decimals)
-            }),
-    )
-    .await
-    .into_iter()
-    .for_each(|(asset, balance_of, decimals)| {
-        let balance_of_bd = BigDecimal::from_unsigned_u256(&balance_of, decimals.into());
-        let balance_of_f64 = balance_of_bd.with_scale(decimals.into()).to_f64().unwrap();
-
-        if !(hide_zero && balance_of == U256::from(0_i32)) {
-            table.add_row(row![
-                asset.network_id(),
-                asset.name(),
-                balance_of_f64,
-                balance_of,
-                decimals
-            ]);
+    for network in networks.clone() {
+        let assets_list = config.assets.assets_by_network(network)?;
+        for asset in assets_list.into_iter() {
+            let balance_of = asset.balance_of(wallet.address()).await?;
+            let decimals = asset.decimals().await?;
+            if !(hide_zero && balance_of == U256::from(0_i32)) {
+                table.add_row(row![
+                    asset.network_id(),
+                    asset.name(),
+                    utils::blockchain::display_amount_to_float(balance_of, decimals),
+                    balance_of,
+                    decimals
+                ]);
+            }
         }
-    });
+    }
 
     table.printstd();
+    Ok(())
 }
