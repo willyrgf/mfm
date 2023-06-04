@@ -45,17 +45,15 @@ pub(crate) async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> 
     let config = Config::global();
     let (api_token, api_address) = match &config.server {
         Some(s) => (s.api_token.clone(), s.api_url.clone()),
-        None => {
-            tracing::error!("track::cmd_run() config.server missing");
-            panic!()
-        }
+        None => return Err(anyhow::anyhow!("track::cmd_run(): config.server missing")),
     };
 
     for (rebalancer_name, rebalancer_config) in match config.rebalancers.clone() {
         Some(rebalancers) => rebalancers,
         None => {
-            tracing::error!("track::cmd_run(): rebalancer is not configured");
-            panic!()
+            return Err(anyhow::anyhow!(
+                "track::cmd_run(): rebalancer is not configured"
+            ))
         }
     }
     .hashmap()
@@ -70,14 +68,9 @@ pub(crate) async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> 
         // rebalancer::validate(rebalancer_config).await;
 
         let quoted_portfolio_asset = rebalancer_config.get_quoted_asset();
-        let asset_quoted_decimals = quoted_portfolio_asset.decimals().await.unwrap();
+        let asset_quoted_decimals = quoted_portfolio_asset.decimals().await?;
 
-        let asset_rebalancers = generate_asset_rebalances(rebalancer_config)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e);
-                panic!()
-            });
+        let asset_rebalancers = generate_asset_rebalances(rebalancer_config).await?;
 
         let track_assets = asset_rebalancers
             .clone()
@@ -140,7 +133,7 @@ pub(crate) async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> 
             .last()
         {
             Some(ar) => ar.asset_balances.asset.clone(),
-            None => panic!("No input asset to calculate swap cost"),
+            None => return Err(anyhow::anyhow!("no input asset to calculate swap cost")),
         };
 
         let amount_in = input_asset.balance_of(from_wallet.address()).await?;
@@ -157,10 +150,16 @@ pub(crate) async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> 
                 panic!()
             });
 
-        let gas_price_u256 = client.clone().eth().gas_price().await.unwrap();
+        let gas_price_u256 = client
+            .clone()
+            .eth()
+            .gas_price()
+            .await
+            .map_err(|e| anyhow::anyhow!("error on getch gas_price, got: {:?}", e))?;
         let swap_cost = parking_asset_exchange
             .estimate_swap_cost(from_wallet, &input_asset, &parking_asset)
             .await?;
+
         let total_ops = U256::from(asset_rebalancers.len());
 
         let total_estimate_swap_cost = display_amount_to_float(
@@ -191,6 +190,7 @@ pub(crate) async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> 
         let string_body = serde_json::to_string(&track_portfolio_state).unwrap();
 
         match {
+            // TODO: should have a mod to handle with mfm-server (bindings)
             let client = reqwest::Client::new();
             client
                 .post(&format!("{}/portfolio_state", api_address))
@@ -204,8 +204,10 @@ pub(crate) async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> 
                 tracing::info!("track::cmd_run() http request response: {:?}", response);
             }
             Err(e) => {
-                tracing::error!("track::cmd_run() http request error: {:?}", e);
-                panic!()
+                return Err(anyhow::anyhow!(
+                    "track::cmd_run() http request failed, got: {:?}",
+                    e
+                ))
             }
         }
     }
