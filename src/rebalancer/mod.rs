@@ -197,14 +197,13 @@ pub async fn get_assets_balances(
     rebalancer_config: &RebalancerConfig,
     assets: Vec<Asset>,
 ) -> Result<Vec<AssetBalances>, anyhow::Error> {
-    // TODO: revisit this two maps in the future
     futures::future::join_all(
         assets
             .into_iter()
             .map(|asset| {
                 AssetBalances::new(rebalancer_config, asset)
             })
-    ).await.into_iter().map(|ab| ab).collect()
+    ).await.into_iter().collect()
 }
 
 pub async fn add_parking_asset(

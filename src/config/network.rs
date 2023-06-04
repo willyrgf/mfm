@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use web3::{
-    signing::Key,
     transports::{Http, WebSocket},
     types::U256,
     Web3,
@@ -91,12 +90,12 @@ impl Network {
     }
 
     pub async fn balance_coin(&self, wallet: &Wallet) -> Result<U256, anyhow::Error> {
-        Ok(self
+        self
             .get_web3_client_rpc()
             .eth()
             .balance(wallet.address(), None)
             .await
-            .map_err(|e| anyhow::anyhow!("error fetch balance from network: {:?}", e))?)
+            .map_err(|e| anyhow::anyhow!("error fetch balance from network: {:?}", e))
     }
 
     pub async fn get_exchange_by_liquidity(
