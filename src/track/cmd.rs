@@ -9,7 +9,7 @@ pub fn generate() -> Command {
         )
 }
 
-#[tracing::instrument(name = "track call command")]
+#[tracing::instrument(name = "track call command", level = "debug")]
 pub async fn call_sub_commands(args: &ArgMatches) -> Result<(), anyhow::Error> {
     super::run(args).await
 }

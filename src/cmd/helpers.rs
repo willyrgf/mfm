@@ -15,7 +15,7 @@ use web3::types::{Address, H160, U256};
 
 //TODO: add constants to all keys in value_of
 
-#[tracing::instrument(name = "get exchange from command args")]
+#[tracing::instrument(name = "get exchange from command args",  level = "debug", skip(args))]
 pub fn get_exchange(args: &ArgMatches) -> Result<&Exchange, anyhow::Error> {
     match args.get_one::<String>("exchange") {
         Some(n) => {
@@ -29,7 +29,7 @@ pub fn get_exchange(args: &ArgMatches) -> Result<&Exchange, anyhow::Error> {
     }
 }
 
-#[tracing::instrument(name = "get network from command args")]
+#[tracing::instrument(name = "get network from command args",  level = "debug", skip(args))]
 pub fn get_network(args: &ArgMatches) -> Result<&Network, anyhow::Error> {
     match args.get_one::<String>("network") {
         Some(n) => {
@@ -43,7 +43,7 @@ pub fn get_network(args: &ArgMatches) -> Result<&Network, anyhow::Error> {
     }
 }
 
-#[tracing::instrument(name = "get address from command args")]
+#[tracing::instrument(name = "get address from command args",  level = "debug", skip(args))]
 pub fn get_address(args: &ArgMatches) -> Result<H160, anyhow::Error> {
     match args.get_one::<String>("address") {
         Some(a) => Address::from_str(a).map_err(|e| anyhow::anyhow!(e)),
@@ -51,7 +51,7 @@ pub fn get_address(args: &ArgMatches) -> Result<H160, anyhow::Error> {
     }
 }
 
-#[tracing::instrument(name = "get wallet from command args")]
+#[tracing::instrument(name = "get wallet from command args",  level = "debug", skip(args))]
 pub fn get_wallet(args: &ArgMatches) -> Result<&Wallet, anyhow::Error> {
     let config = Config::global();
     match args.get_one::<String>("wallet") {
@@ -98,7 +98,7 @@ pub fn get_txn_id(args: &ArgMatches) -> &str {
     }
 }
 
-#[tracing::instrument(name = "get amount from command args")]
+#[tracing::instrument(name = "get amount from command args", skip(args), level = "debug")]
 pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow::Error> {
     match args.get_one::<f64>("amount") {
         Some(amount) => Ok(math::f64_to_u256(*amount, asset_decimals)),
@@ -106,7 +106,7 @@ pub fn get_amount(args: &ArgMatches, asset_decimals: u8) -> Result<U256, anyhow:
     }
 }
 
-#[tracing::instrument(name = "get amount in f64 from command args")]
+#[tracing::instrument(name = "get amount in f64 from command args",  level = "debug", skip(args))]
 pub fn get_amount_f64(args: &ArgMatches) -> Result<f64, anyhow::Error> {
     match args.get_one::<f64>("amount") {
         Some(amount) => Ok(*amount),
@@ -114,7 +114,7 @@ pub fn get_amount_f64(args: &ArgMatches) -> Result<f64, anyhow::Error> {
     }
 }
 
-#[tracing::instrument(name = "get slippage in f64 from command args")]
+#[tracing::instrument(name = "get slippage in f64 from command args",  level = "debug", skip(args))]
 pub fn get_slippage(args: &ArgMatches) -> Result<f64, anyhow::Error> {
     match args.get_one::<f64>("slippage") {
         Some(f) if *f > 0.0 && *f <= 100.0 => Ok(*f),
@@ -126,7 +126,7 @@ pub fn get_slippage(args: &ArgMatches) -> Result<f64, anyhow::Error> {
     }
 }
 
-#[tracing::instrument(name = "get input token in network from command args")]
+#[tracing::instrument(name = "get input token in network from command args",  level = "debug", skip(args))]
 pub fn get_token_input_in_network_from_args(
     args: &ArgMatches,
     network_id: &str,
@@ -141,7 +141,7 @@ pub fn get_token_input_in_network_from_args(
     }
 }
 
-#[tracing::instrument(name = "get output token in network from command args")]
+#[tracing::instrument(name = "get output token in network from command args",  level = "debug", skip(args))]
 pub fn get_token_output_in_network_from_args(
     args: &ArgMatches,
     network_id: &str,
@@ -184,7 +184,7 @@ pub fn get_withdraw_wallet(args: &ArgMatches) -> WithdrawWallet {
     }
 }
 
-#[tracing::instrument(name = "get hide zero from command args")]
+#[tracing::instrument(name = "get hide zero from command args",  level = "debug", skip(args))]
 pub fn get_hide_zero(args: &ArgMatches) -> bool {
     match args.get_one::<String>("hide-zero") {
         Some(b) => b.parse().unwrap_or(false),
@@ -192,12 +192,12 @@ pub fn get_hide_zero(args: &ArgMatches) -> bool {
     }
 }
 
-#[tracing::instrument(name = "get run every from command args")]
+#[tracing::instrument(name = "get run every from command args",  level = "debug", skip(args))]
 pub fn get_run_every(args: &ArgMatches) -> Option<&u32> {
     args.get_one::<u32>("run-every")
 }
 
-#[tracing::instrument(name = "get track from command args")]
+#[tracing::instrument(name = "get track from command args",  level = "debug", skip(args))]
 pub fn get_track(args: &ArgMatches) -> bool {
     match args.get_one::<String>("track") {
         Some(b) => b.parse().unwrap_or(false),

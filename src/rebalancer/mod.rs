@@ -512,6 +512,7 @@ pub async fn run_diff_parking_per_kind(
 
         tracing::debug!("diff_parking: parking_to_asset: asset_in.name: {}, asset_out.name: {}, amount_in: {:?}, amount_out: {:?}", asset_in.name(), asset_out.name(), amount_in, amount_out);
 
+        tracing::info!("run_diff_parking_per_kind: move_asset_with_slippage: asset_in ({}), asset_out ({}), amount_in ({:?}), amount_out ({:?})", asset_in.name(), asset_out.name(), amount_in, amount_out);
         move_asset_with_slippage(config, asset_in, asset_out, amount_in, amount_out).await
     }
 }
