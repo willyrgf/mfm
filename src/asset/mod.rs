@@ -120,7 +120,7 @@ impl Asset {
     }
 
     // TODO: validate it in the initialization of Asset
-    #[tracing::instrument(name = "get decimals from asset contract")]
+    #[tracing::instrument(name = "get decimals from asset contract", level = "debug")]
     pub async fn decimals(&self) -> Result<u8, anyhow::Error> {
         self.contract()
             .query("decimals", (), None, Options::default(), None)

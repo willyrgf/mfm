@@ -1,5 +1,5 @@
 use crate::{
-    allowance, approve, balances, encrypt, quote, rebalancer, swap, track, unwrap, withdraw, wrap, watcher,
+    allowance, approve, balances, encrypt, quote, rebalancer, swap, track, unwrap, withdraw, wrap, watcher, approve_all,
 };
 use crate::{config::Config, APP_NAME};
 use clap::{crate_version, ArgMatches, Command};
@@ -22,6 +22,8 @@ pub enum Commands {
     Track,
     Encrypt,
     Watcher,
+    #[serde(rename = "approve-all")]
+    ApproveAll,
 }
 
 impl Commands {
@@ -39,6 +41,7 @@ impl Commands {
             Self::Quote => quote::cmd::call_sub_commands(args).await,
             Self::Track => track::cmd::call_sub_commands(args).await,
             Self::Watcher => watcher::cmd::call_sub_commands(args).await,
+            Self::ApproveAll => approve_all::cmd::call_sub_commands(args).await,
         }
     }
 }
@@ -65,15 +68,16 @@ pub fn new() -> Command {
         .subcommand(quote::cmd::generate())
         .subcommand(track::cmd::generate())
         .subcommand(watcher::cmd::generate())
+        .subcommand(approve_all::cmd::generate())
 }
 
-#[tracing::instrument(name = "lookup command from cli")]
+#[tracing::instrument(name = "lookup command from cli", level = "debug")]
 pub fn lookup_command(cmd: &str) -> Result<Commands, anyhow::Error> {
     let json_cmd = format!("\"{}\"", cmd);
     serde_json::from_str(json_cmd.as_str()).map_err(|e| anyhow::anyhow!(e))
 }
 
-#[tracing::instrument(name = "call commands")]
+#[tracing::instrument(name = "call commands", level = "debug")]
 pub async fn call_sub_commands(matches: &ArgMatches) -> Result<(), anyhow::Error> {
     match matches.subcommand() {
         Some((cmd, sub_matches)) => lookup_command(cmd)?.run(sub_matches).await,
@@ -81,7 +85,7 @@ pub async fn call_sub_commands(matches: &ArgMatches) -> Result<(), anyhow::Error
     }
 }
 
-#[tracing::instrument(name = "cli run command", skip(cmd))]
+#[tracing::instrument(name = "cli run command", level = "debug")]
 pub async fn run(cmd: Command) -> Result<(), anyhow::Error> {
     let cmd_matches = cmd.get_matches();
 
