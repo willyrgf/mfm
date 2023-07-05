@@ -157,6 +157,7 @@ async fn cmd_run(args: &ArgMatches) -> Result<(), anyhow::Error> {
         }
         Strategy::DiffParking => {
             tracing::debug!("rebalancer::cmd::call_sub_commands() Strategy::DiffParking");
+            tracing::info!("running run_diff_parking by Strategy::DiffParking");
             rebalancer::run_diff_parking(&config).await
         }
     }

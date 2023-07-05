@@ -40,7 +40,7 @@ pub struct TrackPortfolioState {
     data: TrackPortfolioStateData,
 }
 
-#[tracing::instrument(name = "wrapped run track")]
+#[tracing::instrument(name = "wrapped run track", level = "debug")]
 pub(crate) async fn wrapped_run(args: &ArgMatches) -> Result<(), anyhow::Error> {
     let config = Config::global();
     let (api_token, api_address) = match &config.server {

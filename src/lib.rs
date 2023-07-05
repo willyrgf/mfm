@@ -16,9 +16,10 @@ pub mod utils;
 pub mod watcher;
 pub mod withdraw;
 pub mod wrap;
+pub mod approve_all;
 
 pub const APP_NAME: &str = "mfm";
-pub const DEFAULT_LOG_LEVEL: &str = "warn";
+pub const DEFAULT_LOG_LEVEL: &str = "info";
 
 // Since the exit code names e.g. `SIGBUS` are most appropriate yet trigger a test error with the
 // clippy lint `upper_case_acronyms` we have disabled this lint for this enum.
