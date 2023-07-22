@@ -35,6 +35,7 @@ const FALLBACK_ROUTER_ABI_PATH: &str = "res/exchanges/uniswap_v2_router_abi.json
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Exchange {
     pub(crate) name: String,
+    pub(crate) kind: String,
     pub(crate) router_address: String,
     pub(crate) factory_address: String,
     pub(crate) network_id: String,
@@ -43,6 +44,10 @@ pub struct Exchange {
 impl Exchange {
     pub fn name(&self) -> &str {
         self.name.as_str()
+    }
+
+    pub fn kind(&self) -> &str {
+        self.kind.as_str()
     }
 
     pub fn network_id(&self) -> &str {
