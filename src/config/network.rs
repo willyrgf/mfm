@@ -65,6 +65,7 @@ impl Network {
     }
 
     pub fn get_web3_client_rpc(&self) -> Web3<Http> {
+        // FIXME: handle propery with rpc
         self.get_web3_client_http(self.rpc_url()).unwrap()
     }
 
@@ -90,8 +91,7 @@ impl Network {
     }
 
     pub async fn balance_coin(&self, wallet: &Wallet) -> Result<U256, anyhow::Error> {
-        self
-            .get_web3_client_rpc()
+        self.get_web3_client_rpc()
             .eth()
             .balance(wallet.address(), None)
             .await
