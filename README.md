@@ -11,7 +11,12 @@ MFM (Multiverse Finance Machine) is a CLI to managing portfolio of cryptoassets 
 - [ ] Add automatic hedge using levarage derivatives (futures/options)
 - [ ] Trading strategies with TA (in [mfm_server](https://github.com/willyrgf/mfm_server)?) to adjust dynamic portfolio positions
 
-## Fast local install & update using releases
+## Install via Nix profile
+```sh
+nix profile install github:willyrgf/mfm
+```
+
+## Local install & update using releases
 
 ### *nix (?)
 ```sh
@@ -24,7 +29,6 @@ LATEST_APP_URL="$( \
 )"
 curl -s -L $LATEST_APP_URL -O
 unzip -qo ${LATEST_APP_URL##*/}
-
 ```
 
 ## res/ directory
