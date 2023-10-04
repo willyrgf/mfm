@@ -1,4 +1,5 @@
 use crate::asset::Asset;
+use crate::config::Config;
 use crate::utils::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
 use crate::utils::scalar::BigDecimal;
 use crate::utils::{self, math};
@@ -20,7 +21,6 @@ use web3::{
 
 use crate::config::network::Network;
 use crate::config::wallet::Wallet;
-use crate::config::Config;
 
 use super::swap_tokens_for_tokens;
 
@@ -179,18 +179,23 @@ impl ExchangeConfig {
         // input -> path_asset -> path_asset from output -> output
         //TODO: check liquidity of directly path
         let mut v = vec![];
+
         //let network = self.get_network();
         // let wrapped_asset = network.get_wrapped_asset();
         let input_path_asset = input_asset.get_path_asset();
         let output_path_asset = output_asset.get_path_asset();
+
         let same_input_output_path_asset =
             input_path_asset.address() == output_path_asset.address();
+
         let input_asset_is_same_of_some_asset_path = input_asset.address()
             == input_path_asset.address()
             || input_asset.address() == output_path_asset.address();
+
         let output_asset_is_same_of_some_asset_path = output_asset.address()
             == input_path_asset.address()
             || output_asset.address() == output_path_asset.address();
+
         // let has_direct_route = match self.get_factory_pair(input_asset, output_asset).await {
         //     Some(a) => (a.to_string().as_str() != ZERO_ADDRESS),
         //     _ => false,
@@ -498,12 +503,77 @@ impl ExchangeConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Exchanges(HashMap<String, ExchangeConfig>);
-impl Exchanges {
+pub struct ExchangesConfig(HashMap<String, ExchangeConfig>);
+impl ExchangesConfig {
     pub fn hashmap(&self) -> &HashMap<String, ExchangeConfig> {
         &self.0
     }
     pub fn get(&self, key: &str) -> Option<&ExchangeConfig> {
         self.0.get(key)
     }
+}
+
+
+#[cfg(test)]
+mod test {
+    use crate::asset::Asset;
+    use crate::config::Config;
+
+    use super::ExchangeConfig;
+
+    fn get_exchange() -> &'static ExchangeConfig{
+        Config::global().exchanges.0.values().last().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_same_path_assets() {
+        let route_builder = get_exchange();
+
+        // TODO: remove this generation of data, use the test_config.yaml
+        // FIXME: continue from here
+        let input_asset = Asset::dummy_asset("0x1", "0x2");
+        let output_asset = Asset::dummy_asset("0x3", "0x2");
+
+        let result = route_builder.build_route_for(&input_asset, &output_asset).await;
+        let expected = vec!["0x1", "0x2", "0x3"];
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn test_input_asset_is_path_asset() {
+        let route_builder = ...; // instantiate your struct
+
+        let input_asset = dummy_asset("0x2", "0x2");  // input_asset is its own path_asset
+        let output_asset = dummy_asset("0x3", "0x4");
+
+        let result = route_builder.build_route_for(&input_asset, &output_asset).await;
+        let expected = vec!["0x2", "0x3"];
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn test_output_asset_is_path_asset() {
+        let route_builder = ...; // instantiate your struct
+
+        let input_asset = dummy_asset("0x1", "0x2");
+        let output_asset = dummy_asset("0x4", "0x4"); // output_asset is its own path_asset
+
+        let result = route_builder.build_route_for(&input_asset, &output_asset).await;
+        let expected = vec!["0x1", "0x4"];
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn test_generic_case() {
+        let route_builder = ...; // instantiate your struct
+
+        let input_asset = dummy_asset("0x1", "0x2");
+        let output_asset = dummy_asset("0x3", "0x4");
+
+        let result = route_builder.build_route_for(&input_asset, &output_asset).await;
+        let expected = vec!["0x1", "0x2", "0x4", "0x3"];
+        assert_eq!(result, expected);
+    }
+
+    // ... Other test cases
 }

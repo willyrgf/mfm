@@ -47,7 +47,7 @@ impl Exchange {
     }
 
     pub fn kind(&self) -> &str {
-        self.kind.as_str()
+        self..as_str()
     }
 
     pub fn network_id(&self) -> &str {

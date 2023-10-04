@@ -1,5 +1,4 @@
 mod decrypt_wallet;
-pub mod exchange;
 pub mod network;
 pub mod wallet;
 pub mod withdraw_wallet;
@@ -8,10 +7,10 @@ use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    asset::config::AssetsConfig, notification::config::Notifications,
-    rebalancer::config::RebalancersConfig,
+    asset::config::AssetsConfig, exchange::config::ExchangesConfig,
+    notification::config::Notifications, rebalancer::config::RebalancersConfig,
 };
-use exchange::Exchanges;
+
 use network::Networks;
 use wallet::Wallets;
 use withdraw_wallet::WithdrawWallets;
@@ -30,7 +29,7 @@ pub struct Config {
     pub wallets: Wallets,
     pub withdraw_wallets: Option<WithdrawWallets>,
     pub networks: Networks,
-    pub exchanges: Exchanges,
+    pub exchanges: ExchangesConfig,
     pub assets: AssetsConfig,
     pub rebalancers: Option<RebalancersConfig>,
     pub notifications: Option<Notifications>,
