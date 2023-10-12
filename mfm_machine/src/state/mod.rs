@@ -1,13 +1,79 @@
+use anyhow::{Error, Result};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
+trait ContextReader {
+    type Output: Deserialize<'static>;
+    fn read(&self) -> Self::Output;
+}
+
+trait ContextWriter {
+    type Input: Serialize;
+    fn write(&self, ctx_input: &Self::Input);
+}
+
+trait Context: ContextReader + ContextWriter {}
+
+trait StateHandler {
+    type InputContext: ContextReader;
+    type OutputContext: ContextWriter;
+
+    fn handler(&self, context: Self::InputContext) -> Result<Self::OutputContext, Error>;
+}
+
+// Those states are mfm-specific states, and should be moved to the app side
 #[derive(Debug)]
-enum States<T: StateHandler> {
+enum States<T> {
     Setup(T),
     Report(T),
 }
 
-trait StateHandler {
-    fn handler(&self);
+#[derive(Debug)]
+struct ContextInput {}
+
+#[derive(Debug)]
+struct ContextOutput {}
+
+impl ContextReader for ContextInput {
+    type Output = String;
+    fn read(&self) -> Self::Output {
+        "hello".to_string()
+    }
+}
+
+impl ContextWriter for ContextOutput {
+    type Input = String;
+    fn write(&self, ctx_input: &Self::Input) {
+        let _x = ctx_input;
+    }
+}
+
+struct SetupState;
+impl StateHandler for SetupState {
+    type InputContext = ContextInput;
+    type OutputContext = ContextOutput;
+
+    fn handler(&self, context: ContextInput) -> Result<ContextOutput, Error> {
+        let _data = context.read();
+        let data = "some new data".to_string();
+        let ctx_output = ContextOutput {};
+        ctx_output.write(&data);
+        Ok(ctx_output)
+    }
+}
+
+struct ReportState;
+impl StateHandler for ReportState {
+    type InputContext = ContextInput;
+    type OutputContext = ContextOutput;
+
+    fn handler(&self, context: ContextInput) -> Result<ContextOutput, Error> {
+        let _data = context.read();
+        let data = "some new data".to_string();
+        let ctx_output = ContextOutput {};
+        ctx_output.write(&data);
+        Ok(ctx_output)
+    }
 }
 
 #[derive(Debug)]
@@ -54,20 +120,6 @@ impl fmt::Display for StateError {
 
 impl std::error::Error for StateError {}
 
-struct SetupState;
-impl StateHandler for SetupState {
-    fn handler(&self) {
-        println!("handling setup state")
-    }
-}
-
-struct ReportState;
-impl StateHandler for ReportState {
-    fn handler(&self) {
-        println!("handling report state")
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -75,8 +127,12 @@ mod test {
     #[test]
     fn setup_state_initialization() {
         let state: States<SetupState> = States::Setup(SetupState);
+        let ctx_input = ContextInput {};
         match state {
-            States::Setup(t) => t.handler(),
+            States::Setup(t) => match t.handler(ctx_input) {
+                Ok(ctx_output) => println!("got an ctx_output: {:?}", ctx_output),
+                Err(e) => println!("got an error: {:?}", e),
+            },
             _ => panic!("expected Setup state"),
         }
     }
