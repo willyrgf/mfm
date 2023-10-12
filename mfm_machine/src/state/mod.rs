@@ -2,21 +2,17 @@ use anyhow::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-trait ContextReader {
+trait Context {
     type Output: Deserialize<'static>;
-    fn read(&self) -> Self::Output;
-}
-
-trait ContextWriter {
     type Input: Serialize;
+
+    fn read(&self) -> Self::Output;
     fn write(&self, ctx_input: &Self::Input);
 }
 
-trait Context: ContextReader + ContextWriter {}
-
 trait StateHandler {
-    type InputContext: ContextReader;
-    type OutputContext: ContextWriter;
+    type InputContext: Context;
+    type OutputContext: Context;
 
     fn handler(&self, context: Self::InputContext) -> Result<Self::OutputContext, Error>;
 }
@@ -34,15 +30,27 @@ struct ContextInput {}
 #[derive(Debug)]
 struct ContextOutput {}
 
-impl ContextReader for ContextInput {
+impl Context for ContextInput {
     type Output = String;
+    type Input = String;
+
     fn read(&self) -> Self::Output {
         "hello".to_string()
     }
+
+    fn write(&self, ctx_input: &Self::Input) {
+        let _x = ctx_input;
+    }
 }
 
-impl ContextWriter for ContextOutput {
+impl Context for ContextOutput {
     type Input = String;
+    type Output = String;
+
+    fn read(&self) -> Self::Output {
+        "hello".to_string()
+    }
+
     fn write(&self, ctx_input: &Self::Input) {
         let _x = ctx_input;
     }
@@ -139,7 +147,7 @@ mod test {
 
     #[test]
     fn custom_error_to_anyhow_error() {
-        let f = |error: StateError| -> anyhow::Error { error.into() };
-        f(StateError::Unknown(StateErrorRecoverability::Unrecoverable));
+        let state_error_to_anyhow = |error: StateError| -> anyhow::Error { error.into() };
+        state_error_to_anyhow(StateError::Unknown(StateErrorRecoverability::Unrecoverable));
     }
 }
