@@ -45,12 +45,19 @@ impl Label {
     }
 }
 
-trait StateMetadata {
-    fn label(&self) -> &Label;
-    fn tags(&self) -> &[Tag];
+#[derive(Debug, Clone)]
+enum DependencyStrategy {
+    Latest,
 }
 
-trait StateHandler: StateMetadata {
+trait StateConfig {
+    fn label(&self) -> &Label;
+    fn tags(&self) -> &[Tag];
+    fn depends_on(&self) -> &[Tag];
+    fn depends_on_strategy(&self) -> &DependencyStrategy;
+}
+
+trait StateHandler: StateConfig {
     type InputContext: Context;
     type OutputContext: Context;
 
