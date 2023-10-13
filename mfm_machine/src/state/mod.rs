@@ -1,16 +1,56 @@
-use anyhow::{Error, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::{anyhow, Error, Result};
 use std::fmt;
 
-trait Context {
-    type Output: Deserialize<'static>;
-    type Input: Serialize;
+pub mod context;
+pub mod state_machine;
+pub mod states;
 
-    fn read(&self) -> Self::Output;
-    fn write(&self, ctx_input: &Self::Input);
+use context::Context;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+struct Tag(String);
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+struct Label(String);
+
+fn ensure_nonempty_ascii_lowercase_underscore(input: &str) -> Result<String, Error> {
+    if input.is_empty() {
+        return Err(anyhow!("empty string; this string should be non empty, lowercase and use underscore as separator"));
+    }
+
+    if !input.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+        return Err(anyhow!("invalid char in '{}'; this string should be non empty, lowercase and use underscore as separator", input));
+    }
+
+    Ok(input.to_string())
 }
 
-trait StateHandler {
+impl Tag {
+    pub fn new<S: AsRef<str>>(s: S) -> Result<Self, Error> {
+        let input = s.as_ref();
+        match ensure_nonempty_ascii_lowercase_underscore(input) {
+            Ok(validated_input) => Ok(Self(validated_input)),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl Label {
+    pub fn new<S: AsRef<str>>(s: S) -> Result<Self, Error> {
+        let input = s.as_ref();
+        match ensure_nonempty_ascii_lowercase_underscore(input) {
+            Ok(validated_input) => Ok(Self(validated_input)),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+trait StateMetadata {
+    fn label(&self) -> &Label;
+    fn tags(&self) -> &[Tag];
+}
+
+trait StateHandler: StateMetadata {
     type InputContext: Context;
     type OutputContext: Context;
 
@@ -19,69 +59,9 @@ trait StateHandler {
 
 // Those states are mfm-specific states, and should be moved to the app side
 #[derive(Debug)]
-enum States<T> {
+enum State<T> {
     Setup(T),
     Report(T),
-}
-
-#[derive(Debug)]
-struct ContextInput {}
-
-#[derive(Debug)]
-struct ContextOutput {}
-
-impl Context for ContextInput {
-    type Output = String;
-    type Input = String;
-
-    fn read(&self) -> Self::Output {
-        "hello".to_string()
-    }
-
-    fn write(&self, ctx_input: &Self::Input) {
-        let _x = ctx_input;
-    }
-}
-
-impl Context for ContextOutput {
-    type Input = String;
-    type Output = String;
-
-    fn read(&self) -> Self::Output {
-        "hello".to_string()
-    }
-
-    fn write(&self, ctx_input: &Self::Input) {
-        let _x = ctx_input;
-    }
-}
-
-struct SetupState;
-impl StateHandler for SetupState {
-    type InputContext = ContextInput;
-    type OutputContext = ContextOutput;
-
-    fn handler(&self, context: ContextInput) -> Result<ContextOutput, Error> {
-        let _data = context.read();
-        let data = "some new data".to_string();
-        let ctx_output = ContextOutput {};
-        ctx_output.write(&data);
-        Ok(ctx_output)
-    }
-}
-
-struct ReportState;
-impl StateHandler for ReportState {
-    type InputContext = ContextInput;
-    type OutputContext = ContextOutput;
-
-    fn handler(&self, context: ContextInput) -> Result<ContextOutput, Error> {
-        let _data = context.read();
-        let data = "some new data".to_string();
-        let ctx_output = ContextOutput {};
-        ctx_output.write(&data);
-        Ok(ctx_output)
-    }
 }
 
 #[derive(Debug)]
@@ -133,21 +113,44 @@ mod test {
     use super::*;
 
     #[test]
-    fn setup_state_initialization() {
-        let state: States<SetupState> = States::Setup(SetupState);
-        let ctx_input = ContextInput {};
-        match state {
-            States::Setup(t) => match t.handler(ctx_input) {
-                Ok(ctx_output) => println!("got an ctx_output: {:?}", ctx_output),
-                Err(e) => println!("got an error: {:?}", e),
-            },
-            _ => panic!("expected Setup state"),
-        }
-    }
-
-    #[test]
     fn custom_error_to_anyhow_error() {
         let state_error_to_anyhow = |error: StateError| -> anyhow::Error { error.into() };
         state_error_to_anyhow(StateError::Unknown(StateErrorRecoverability::Unrecoverable));
+    }
+
+    #[test]
+    fn test_valid_input_ensure_nonempty_ascii_lowercase_underscore() {
+        let inputs = vec![
+            "this_should_work".to_string(),
+            "this_should_work_also".to_string(),
+            "thisalso".to_string(),
+        ];
+
+        inputs.iter().for_each(|input| {
+            let result = ensure_nonempty_ascii_lowercase_underscore(input);
+            assert!(result.is_ok());
+            assert_eq!(&result.unwrap(), input);
+        })
+    }
+
+    #[test]
+    fn test_invalid_spaces_input_ensure_nonempty_ascii_lowercase_underscore() {
+        let s = "this should work".to_string();
+        let result = ensure_nonempty_ascii_lowercase_underscore(&s);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_input_ensure_nonempty_ascii_lowercase_underscore() {
+        let s = "".to_string();
+        let result = ensure_nonempty_ascii_lowercase_underscore(&s);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_special_char_input_ensure_nonempty_ascii_lowercase_underscore() {
+        let s = "this_should_not_work_@".to_string();
+        let result = ensure_nonempty_ascii_lowercase_underscore(&s);
+        assert!(result.is_err());
     }
 }
