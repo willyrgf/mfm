@@ -1,9 +1,10 @@
 use anyhow::Error;
+use serde_derive::{Deserialize, Serialize};
 
 use crate::state::{Label, StateConfig, StateHandler, Tag};
 
 use super::{
-    context::{Context, ContextInput, ContextOutput},
+    context::{Context, RawContext},
     DependencyStrategy,
 };
 
@@ -25,16 +26,14 @@ impl SetupState {
     }
 }
 
-impl StateHandler for SetupState {
-    type InputContext = ContextInput;
-    type OutputContext = ContextOutput;
+#[derive(Debug, Deserialize, Serialize)]
+struct SetupStateData {}
 
-    fn handler(&self, context: ContextInput) -> Result<ContextOutput, Error> {
-        let _data = context.read();
+impl StateHandler for SetupState {
+    fn handler<C: Context>(&self, context: &mut C) -> Result<(), Error> {
+        let _data: SetupStateData = context.read().unwrap();
         let data = "some new data".to_string();
-        let ctx_output = ContextOutput {};
-        ctx_output.write(&data);
-        Ok(ctx_output)
+        context.write(&data)
     }
 }
 
@@ -75,15 +74,10 @@ impl ReportState {
 }
 
 impl StateHandler for ReportState {
-    type InputContext = ContextInput;
-    type OutputContext = ContextOutput;
-
-    fn handler(&self, context: ContextInput) -> Result<ContextOutput, Error> {
-        let _data = context.read();
+    fn handler<C: Context>(&self, context: &mut C) -> Result<(), Error> {
+        let _data: String = context.read().unwrap();
         let data = "some new data".to_string();
-        let ctx_output = ContextOutput {};
-        ctx_output.write(&data);
-        Ok(ctx_output)
+        context.write(&data)
     }
 }
 
@@ -116,10 +110,10 @@ mod test {
         let label = Label::new("setup_state").unwrap();
         let tags = vec![Tag::new("setup").unwrap()];
         let state: State<SetupState> = State::Setup(SetupState::new());
-        let ctx_input = ContextInput {};
+        let mut ctx_input = RawContext::new();
         match state {
             State::Setup(t) => {
-                let result = t.handler(ctx_input);
+                let result = t.handler(&mut ctx_input);
                 assert!(result.is_ok());
                 assert_eq!(t.label(), &label);
                 assert_eq!(t.tags(), &tags);

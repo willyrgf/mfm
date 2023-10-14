@@ -58,10 +58,7 @@ trait StateConfig {
 }
 
 trait StateHandler: StateConfig {
-    type InputContext: Context;
-    type OutputContext: Context;
-
-    fn handler(&self, context: Self::InputContext) -> Result<Self::OutputContext, Error>;
+    fn handler<C: Context>(&self, context: &mut C) -> Result<(), Error>;
 }
 
 // Those states are mfm-specific states, and should be moved to the app side
