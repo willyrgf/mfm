@@ -1,41 +1,31 @@
+use anyhow::{anyhow, Error};
 use serde::{Deserialize, Serialize};
 
 pub trait Context {
-    type Output: Deserialize<'static>;
-    type Input: Serialize;
-
-    fn read(&self) -> Self::Output;
-    fn write(&self, ctx_input: &Self::Input);
+    fn read<T: for<'de> Deserialize<'de>>(&self) -> Result<T, Error>;
+    fn write<T: Serialize>(&mut self, data: &T) -> Result<(), Error>;
 }
 
 #[derive(Debug)]
-pub struct ContextInput {}
+pub struct RawContext {
+    data: String,
+}
 
-#[derive(Debug)]
-pub struct ContextOutput {}
-
-impl Context for ContextInput {
-    type Output = String;
-    type Input = String;
-
-    fn read(&self) -> Self::Output {
-        "hello".to_string()
-    }
-
-    fn write(&self, ctx_input: &Self::Input) {
-        let _x = ctx_input;
+impl RawContext {
+    pub fn new() -> Self {
+        Self {
+            data: "{}".to_string(),
+        }
     }
 }
 
-impl Context for ContextOutput {
-    type Input = String;
-    type Output = String;
-
-    fn read(&self) -> Self::Output {
-        "hello".to_string()
+impl Context for RawContext {
+    fn read<T: for<'de> Deserialize<'de>>(&self) -> Result<T, Error> {
+        serde_json::from_str(&self.data).map_err(|e| anyhow!("error on deserialize: {}", e))
     }
 
-    fn write(&self, ctx_input: &Self::Input) {
-        let _x = ctx_input;
+    fn write<T: Serialize>(&mut self, data: &T) -> Result<(), Error> {
+        self.data = serde_json::to_string(data)?;
+        Ok(())
     }
 }
