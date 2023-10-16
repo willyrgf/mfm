@@ -1,9 +1,7 @@
 use anyhow::Error;
 use serde_derive::{Deserialize, Serialize};
 
-use crate::state::{Label, StateConfig, StateHandler, Tag};
-
-use super::{context::Context, DependencyStrategy};
+use crate::state::{context::Context, DependencyStrategy, Label, StateConfig, StateHandler, Tag};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Setup {
@@ -75,7 +73,7 @@ impl Report {
 impl StateHandler for Report {
     fn handler<C: Context>(&self, context: &mut C) -> Result<(), Error> {
         let _data: String = context.read().unwrap();
-        let data = "some new data".to_string();
+        let data = "some new data reported".to_string();
         context.write(&data)
     }
 }
