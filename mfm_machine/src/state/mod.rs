@@ -8,10 +8,10 @@ pub mod states;
 use context::Context;
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
-struct Tag(String);
+pub struct Tag(String);
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
-struct Label(String);
+pub struct Label(String);
 
 fn ensure_nonempty_ascii_lowercase_underscore(input: &str) -> Result<String, Error> {
     if input.is_empty() {
@@ -45,27 +45,55 @@ impl Label {
     }
 }
 
-#[derive(Debug, Clone)]
-enum DependencyStrategy {
+#[derive(Debug, Clone, PartialEq)]
+pub enum DependencyStrategy {
     Latest,
 }
 
-trait StateConfig {
+pub trait StateConfig {
     fn label(&self) -> &Label;
     fn tags(&self) -> &[Tag];
     fn depends_on(&self) -> &[Tag];
     fn depends_on_strategy(&self) -> &DependencyStrategy;
 }
 
-trait StateHandler: StateConfig {
+pub trait StateHandler: StateConfig {
     fn handler<C: Context>(&self, context: &mut C) -> Result<(), Error>;
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct StateWrapper<T: StateHandler>(T);
+impl<T: StateHandler> StateWrapper<T> {
+    fn new(state: T) -> Self {
+        Self(state)
+    }
+
+    fn handler<C: Context>(&self, context: &mut C) -> Result<(), Error> {
+        self.0.handler(context)
+    }
+
+    fn label(&self) -> &Label {
+        self.0.label()
+    }
+
+    fn tags(&self) -> &[Tag] {
+        self.0.tags()
+    }
+
+    fn depends_on(&self) -> &[Tag] {
+        self.0.depends_on()
+    }
+
+    fn depends_on_strategy(&self) -> &DependencyStrategy {
+        self.0.depends_on_strategy()
+    }
+}
+
 // Those states are mfm-specific states, and should be moved to the app side
-#[derive(Debug)]
-enum State<T> {
-    Setup(T),
-    Report(T),
+#[derive(Debug, Clone, PartialEq)]
+enum State {
+    Setup(StateWrapper<states::Setup>),
+    Report(StateWrapper<states::Report>),
 }
 
 #[derive(Debug)]

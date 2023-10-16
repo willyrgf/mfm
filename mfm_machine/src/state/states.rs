@@ -3,19 +3,17 @@ use serde_derive::{Deserialize, Serialize};
 
 use crate::state::{Label, StateConfig, StateHandler, Tag};
 
-use super::{
-    context::{Context, RawContext},
-    DependencyStrategy,
-};
+use super::{context::Context, DependencyStrategy};
 
-struct SetupState {
+#[derive(Debug, Clone, PartialEq)]
+pub struct Setup {
     label: Label,
     tags: Vec<Tag>,
     depends_on: Vec<Tag>,
     depends_on_strategy: DependencyStrategy,
 }
 
-impl SetupState {
+impl Setup {
     pub fn new() -> Self {
         Self {
             label: Label::new("setup_state").unwrap(),
@@ -29,7 +27,7 @@ impl SetupState {
 #[derive(Debug, Deserialize, Serialize)]
 struct SetupStateData {}
 
-impl StateHandler for SetupState {
+impl StateHandler for Setup {
     fn handler<C: Context>(&self, context: &mut C) -> Result<(), Error> {
         let _data: SetupStateData = context.read().unwrap();
         let data = "some new data".to_string();
@@ -37,7 +35,7 @@ impl StateHandler for SetupState {
     }
 }
 
-impl StateConfig for SetupState {
+impl StateConfig for Setup {
     fn label(&self) -> &Label {
         &self.label
     }
@@ -55,14 +53,15 @@ impl StateConfig for SetupState {
     }
 }
 
-struct ReportState {
+#[derive(Debug, Clone, PartialEq)]
+pub struct Report {
     label: Label,
     tags: Vec<Tag>,
     depends_on: Vec<Tag>,
     depends_on_strategy: DependencyStrategy,
 }
 
-impl ReportState {
+impl Report {
     pub fn new() -> Self {
         Self {
             label: Label::new("report_state").unwrap(),
@@ -73,7 +72,7 @@ impl ReportState {
     }
 }
 
-impl StateHandler for ReportState {
+impl StateHandler for Report {
     fn handler<C: Context>(&self, context: &mut C) -> Result<(), Error> {
         let _data: String = context.read().unwrap();
         let data = "some new data".to_string();
@@ -81,7 +80,7 @@ impl StateHandler for ReportState {
     }
 }
 
-impl StateConfig for ReportState {
+impl StateConfig for Report {
     fn label(&self) -> &Label {
         &self.label
     }
@@ -101,7 +100,7 @@ impl StateConfig for ReportState {
 
 #[cfg(test)]
 mod test {
-    use crate::state::State;
+    use crate::state::{context::RawContext, State, StateWrapper};
 
     use super::*;
 
@@ -109,7 +108,7 @@ mod test {
     fn test_setup_state_initialization() {
         let label = Label::new("setup_state").unwrap();
         let tags = vec![Tag::new("setup").unwrap()];
-        let state: State<SetupState> = State::Setup(SetupState::new());
+        let state = State::Setup(StateWrapper::new(Setup::new()));
         let mut ctx_input = RawContext::new();
         match state {
             State::Setup(t) => {
