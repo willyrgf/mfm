@@ -5,8 +5,16 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[workspace]
+members = [
+    ".",
+    "mfm_machine_macros",
+]
+
+
 [dependencies]
 anyhow = "1.0.75"
 serde = "1.0.188"
 serde_derive = "1.0.189"
 serde_json = "1.0.107"
+mfm_machine_macros = { path = "./mfm_machine_macros" }

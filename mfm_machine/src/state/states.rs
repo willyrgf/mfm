@@ -1,9 +1,10 @@
 use anyhow::Error;
+use mfm_machine_macros::StateReqs;
 use serde_derive::{Deserialize, Serialize};
 
 use crate::state::{context::Context, DependencyStrategy, Label, StateConfig, StateHandler, Tag};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, StateReqs)]
 pub struct Setup {
     label: Label,
     tags: Vec<Tag>,
@@ -33,25 +34,7 @@ impl StateHandler for Setup {
     }
 }
 
-impl StateConfig for Setup {
-    fn label(&self) -> &Label {
-        &self.label
-    }
-
-    fn tags(&self) -> &[Tag] {
-        &self.tags
-    }
-
-    fn depends_on(&self) -> &[Tag] {
-        &self.depends_on
-    }
-
-    fn depends_on_strategy(&self) -> &DependencyStrategy {
-        &self.depends_on_strategy
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, StateReqs)]
 pub struct Report {
     label: Label,
     tags: Vec<Tag>,
@@ -75,24 +58,6 @@ impl StateHandler for Report {
         let _data: String = context.read().unwrap();
         let data = "some new data reported".to_string();
         context.write(&data)
-    }
-}
-
-impl StateConfig for Report {
-    fn label(&self) -> &Label {
-        &self.label
-    }
-
-    fn tags(&self) -> &[Tag] {
-        &self.tags
-    }
-
-    fn depends_on(&self) -> &[Tag] {
-        &self.depends_on
-    }
-
-    fn depends_on_strategy(&self) -> &DependencyStrategy {
-        &self.depends_on_strategy
     }
 }
 
