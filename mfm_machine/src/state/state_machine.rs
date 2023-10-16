@@ -2,17 +2,14 @@ use std::usize;
 
 use anyhow::{anyhow, Error};
 
-use super::{context::Context, State, StateError, StateHandler};
+use super::{context::Context, State, StateError, StateHandler, StateWrapper};
 
-struct StateMachine<T> {
-    states: Vec<State<T>>,
+struct StateMachine {
+    states: Vec<State>,
 }
 
-impl<T> StateMachine<T>
-where
-    T: StateHandler,
-{
-    pub fn new(initial_states: Vec<State<T>>) -> Self {
+impl StateMachine {
+    pub fn new(initial_states: Vec<State>) -> Self {
         Self {
             states: initial_states,
         }
@@ -54,5 +51,28 @@ where
                 }
             }
         }
+    }
+}
+
+mod test {
+    #[test]
+    fn test_state_machine_execute() {
+        use super::*;
+        use crate::state::{context::RawContext, states};
+
+        let initial_states = vec![
+            State::Setup(StateWrapper::new(states::Setup::new())),
+            State::Report(StateWrapper::new(states::Report::new())),
+        ];
+
+        let state_machine = StateMachine::new(initial_states.clone());
+
+        let mut context = RawContext::new();
+        let result = state_machine.execute(&mut context, 0);
+        let last_ctx_message: String = context.read().unwrap();
+
+        assert_eq!(state_machine.states, initial_states);
+        assert!(result.is_ok());
+        assert_eq!(last_ctx_message, "some new data".to_string());
     }
 }
