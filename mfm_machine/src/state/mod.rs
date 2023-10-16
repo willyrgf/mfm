@@ -167,7 +167,7 @@ mod test {
 
     #[test]
     fn test_invalid_spaces_input_ensure_nonempty_ascii_lowercase_underscore() {
-        let s = "this should work".to_string();
+        let s = "this shouldnt work".to_string();
         let result = ensure_nonempty_ascii_lowercase_underscore(&s);
         assert!(result.is_err());
     }
