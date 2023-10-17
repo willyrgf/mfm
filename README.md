@@ -1,5 +1,11 @@
 # MFM
 
+
+**WARNING: this v0.1.x is not being in development anymore due to an [in-progress full refactor for a v0.2](https://github.com/willyrgf/mfm/pull/59)**
+
+---
+
+
 MFM (Multiverse Finance Machine) is a CLI to managing portfolio of cryptoassets directly in Blockchain using DEXs.
 
 > **WARNING**: This project is in an alpha stage. It has not been audited and may contain bugs and security flaws. This implementation is NOT ready for production use.
