@@ -1,10 +1,10 @@
 use anyhow::Error;
-use mfm_machine_macros::StateReqs;
+use mfm_machine_macros::StateConfigReqs;
 use serde_derive::{Deserialize, Serialize};
 
 use crate::state::{context::Context, DependencyStrategy, Label, StateConfig, StateHandler, Tag};
 
-#[derive(Debug, Clone, PartialEq, StateReqs)]
+#[derive(Debug, Clone, PartialEq, StateConfigReqs)]
 pub struct Setup {
     label: Label,
     tags: Vec<Tag>,
@@ -34,7 +34,7 @@ impl StateHandler for Setup {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, StateReqs)]
+#[derive(Debug, Clone, PartialEq, StateConfigReqs)]
 pub struct Report {
     label: Label,
     tags: Vec<Tag>,
