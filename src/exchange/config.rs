@@ -1,4 +1,5 @@
 use crate::asset::Asset;
+use crate::config::Config;
 use crate::utils::resources::{exists_resource_file_fs_or_res, get_resource_file_fs_or_res};
 use crate::utils::scalar::BigDecimal;
 use crate::utils::{self, math};
@@ -18,36 +19,42 @@ use web3::{
     types::{Address, H160, U256},
 };
 
-use super::network::Network;
-use super::wallet::Wallet;
-use super::Config;
+use crate::config::network::Network;
+use crate::config::wallet::Wallet;
 
-pub mod swap_eth_for_tokens;
-pub mod swap_tokens_for_tokens;
+use super::swap_tokens_for_tokens;
 
 pub const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const FALLBACK_FACTORY_ABI_PATH: &str = "res/exchanges/uniswap_v2_factory_abi.json";
 const FALLBACK_PAIR_ABI_PATH: &str = "res/exchanges/uniswap_v2_pair_abi.json";
 const FALLBACK_ROUTER_ABI_PATH: &str = "res/exchanges/uniswap_v2_router_abi.json";
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    UniswapV2, //uniswap_v2
+    UniswapV3, //uniswap_v3
+    UniswapV4, //uniswap_v4
+}
+
 //TODO: validate the fields in the new mod initialization
 // do it building a new type using a ExchangeConfig
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Exchange {
+pub struct ExchangeConfig {
     pub(crate) name: String,
-    pub(crate) kind: String,
+    pub(crate) kind: Kind,
     pub(crate) router_address: String,
     pub(crate) factory_address: String,
     pub(crate) network_id: String,
 }
 
-impl Exchange {
+impl ExchangeConfig {
     pub fn name(&self) -> &str {
         self.name.as_str()
     }
 
-    pub fn kind(&self) -> &str {
-        self..as_str()
+    pub fn kind(&self) -> &Kind {
+        &self.kind
     }
 
     pub fn network_id(&self) -> &str {
@@ -172,18 +179,23 @@ impl Exchange {
         // input -> path_asset -> path_asset from output -> output
         //TODO: check liquidity of directly path
         let mut v = vec![];
+
         //let network = self.get_network();
         // let wrapped_asset = network.get_wrapped_asset();
         let input_path_asset = input_asset.get_path_asset();
         let output_path_asset = output_asset.get_path_asset();
+
         let same_input_output_path_asset =
             input_path_asset.address() == output_path_asset.address();
+
         let input_asset_is_same_of_some_asset_path = input_asset.address()
             == input_path_asset.address()
             || input_asset.address() == output_path_asset.address();
+
         let output_asset_is_same_of_some_asset_path = output_asset.address()
             == input_path_asset.address()
             || output_asset.address() == output_path_asset.address();
+
         // let has_direct_route = match self.get_factory_pair(input_asset, output_asset).await {
         //     Some(a) => (a.to_string().as_str() != ZERO_ADDRESS),
         //     _ => false,
@@ -242,7 +254,7 @@ impl Exchange {
     }
 
     // TODO: take it to a shared module about blockchain
-    fn get_valid_timestamp(&self, future_millis: u128) -> u128 {
+    pub fn get_valid_timestamp(&self, future_millis: u128) -> u128 {
         let start = SystemTime::now();
         let since_epoch = start.duration_since(UNIX_EPOCH).unwrap();
         since_epoch.as_millis().checked_add(future_millis).unwrap()
@@ -491,12 +503,77 @@ impl Exchange {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Exchanges(HashMap<String, Exchange>);
-impl Exchanges {
-    pub fn hashmap(&self) -> &HashMap<String, Exchange> {
+pub struct ExchangesConfig(HashMap<String, ExchangeConfig>);
+impl ExchangesConfig {
+    pub fn hashmap(&self) -> &HashMap<String, ExchangeConfig> {
         &self.0
     }
-    pub fn get(&self, key: &str) -> Option<&Exchange> {
+    pub fn get(&self, key: &str) -> Option<&ExchangeConfig> {
         self.0.get(key)
     }
+}
+
+
+#[cfg(test)]
+mod test {
+    use crate::asset::Asset;
+    use crate::config::Config;
+
+    use super::ExchangeConfig;
+
+    fn get_exchange() -> &'static ExchangeConfig{
+        Config::global().exchanges.0.values().last().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_same_path_assets() {
+        let route_builder = get_exchange();
+
+        // TODO: remove this generation of data, use the test_config.yaml
+        // FIXME: continue from here
+        let input_asset = Asset::dummy_asset("0x1", "0x2");
+        let output_asset = Asset::dummy_asset("0x3", "0x2");
+
+        let result = route_builder.build_route_for(&input_asset, &output_asset).await;
+        let expected = vec!["0x1", "0x2", "0x3"];
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn test_input_asset_is_path_asset() {
+        let route_builder = ...; // instantiate your struct
+
+        let input_asset = dummy_asset("0x2", "0x2");  // input_asset is its own path_asset
+        let output_asset = dummy_asset("0x3", "0x4");
+
+        let result = route_builder.build_route_for(&input_asset, &output_asset).await;
+        let expected = vec!["0x2", "0x3"];
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn test_output_asset_is_path_asset() {
+        let route_builder = ...; // instantiate your struct
+
+        let input_asset = dummy_asset("0x1", "0x2");
+        let output_asset = dummy_asset("0x4", "0x4"); // output_asset is its own path_asset
+
+        let result = route_builder.build_route_for(&input_asset, &output_asset).await;
+        let expected = vec!["0x1", "0x4"];
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn test_generic_case() {
+        let route_builder = ...; // instantiate your struct
+
+        let input_asset = dummy_asset("0x1", "0x2");
+        let output_asset = dummy_asset("0x3", "0x4");
+
+        let result = route_builder.build_route_for(&input_asset, &output_asset).await;
+        let expected = vec!["0x1", "0x2", "0x4", "0x3"];
+        assert_eq!(result, expected);
+    }
+
+    // ... Other test cases
 }

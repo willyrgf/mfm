@@ -6,8 +6,8 @@ use web3::{
     Web3,
 };
 
-use super::{exchange::Exchange, wallet::Wallet, Config};
-use crate::{asset::Asset, utils::scalar::BigDecimal};
+use super::{wallet::Wallet, Config};
+use crate::{asset::Asset, exchange::Exchange, utils::scalar::BigDecimal};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Network {
@@ -20,6 +20,14 @@ pub struct Network {
     blockexplorer_url: Option<String>,
     min_balance_coin: f64,
     wrapped_asset: Option<String>,
+}
+
+impl Default for Network {
+    fn default() -> Self {
+        Self {
+            ..Default::default()
+        }
+    }
 }
 
 impl Network {
@@ -65,6 +73,7 @@ impl Network {
     }
 
     pub fn get_web3_client_rpc(&self) -> Web3<Http> {
+        // FIXME: handle propery with rpc
         self.get_web3_client_http(self.rpc_url()).unwrap()
     }
 
@@ -85,13 +94,13 @@ impl Network {
             .exchanges
             .hashmap()
             .values()
-            .filter(|e| e.network_id() == self.name)
+            .filter(|exchange_config| exchange_config.network_id() == self.name)
+            .map(|config| &Exchange::new(config))
             .collect()
     }
 
     pub async fn balance_coin(&self, wallet: &Wallet) -> Result<U256, anyhow::Error> {
-        self
-            .get_web3_client_rpc()
+        self.get_web3_client_rpc()
             .eth()
             .balance(wallet.address(), None)
             .await

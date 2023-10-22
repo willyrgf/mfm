@@ -54,6 +54,20 @@ impl Asset {
         })
     }
 
+    #[cfg(test)]
+    pub fn dummy_asset(address: &str, path_asset_address: &str) -> Self {
+        let network = Network::default();
+        Asset {
+            name: "dummy".to_string(),
+            kind: "dummy".to_string(),
+            network_id: network.name().to_string(),
+            address: address.to_string(),
+            slippage: 0.0,
+            path_asset: path_asset_address.to_string(),
+            network: Network::default(),
+        }
+    }
+
     pub fn slippage(&self) -> f64 {
         self.slippage
     }

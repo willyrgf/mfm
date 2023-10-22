@@ -1,10 +1,12 @@
 pub mod allowance;
 pub mod approve;
+pub mod approve_all;
 pub mod asset;
 pub mod balances;
 pub mod cmd;
 pub mod config;
 pub mod encrypt;
+pub mod exchange;
 pub mod notification;
 pub mod quote;
 pub mod rebalancer;
@@ -16,7 +18,6 @@ pub mod utils;
 pub mod watcher;
 pub mod withdraw;
 pub mod wrap;
-pub mod approve_all;
 
 pub const APP_NAME: &str = "mfm";
 pub const DEFAULT_LOG_LEVEL: &str = "info";
