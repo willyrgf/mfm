@@ -73,11 +73,6 @@ impl StateMachine {
 
         let result = current_state.handler(context);
 
-        // let result = match current_state {
-        //     State::Setup(h) => h.handler(context),
-        //     State::Report(h) => h.handler(context),
-        // };
-
         self.execute_rec(context, next_state_index, Option::Some(result))
     }
 
@@ -90,9 +85,36 @@ mod test {
     use crate::state::{
         context::Context, DependencyStrategy, Label, StateConfig, StateHandler, Tag,
     };
+    use anyhow::anyhow;
     use anyhow::Error;
     use mfm_machine_macros::StateConfigReqs;
-    use serde_json::json;
+    use serde_derive::{Deserialize, Serialize};
+    use serde_json::{json, Value};
+
+    #[derive(Serialize, Deserialize)]
+    struct ContextA {
+        a: String,
+        b: u64,
+    }
+
+    impl ContextA {
+        fn _new(a: String, b: u64) -> Self {
+            Self { a, b }
+        }
+    }
+
+    impl Context for ContextA {
+        fn read_input(&self) -> Result<Value, Error> {
+            serde_json::to_value(self).map_err(|e| anyhow!(e))
+        }
+
+        fn write_output(&mut self, value: &Value) -> Result<(), Error> {
+            let ctx: ContextA = serde_json::from_value(value.clone()).map_err(|e| anyhow!(e))?;
+            self.a = ctx.a;
+            self.b = ctx.b;
+            Ok(())
+        }
+    }
 
     #[derive(Debug, Clone, PartialEq, StateConfigReqs)]
     pub struct Setup {
@@ -115,8 +137,8 @@ mod test {
 
     impl StateHandler for Setup {
         fn handler(&self, context: &mut dyn Context) -> Result<(), Error> {
-            let _data = context.read_input().unwrap();
-            let data = json!({ "data": "some new data".to_string() });
+            let _data: ContextA = serde_json::from_value(context.read_input().unwrap()).unwrap();
+            let data = json!({ "a": "setting up", "b": 1 });
             context.write_output(&data)
         }
     }
@@ -142,22 +164,21 @@ mod test {
 
     impl StateHandler for Report {
         fn handler(&self, context: &mut dyn Context) -> Result<(), Error> {
-            let _data = context.read_input().unwrap();
-            let data = json!({ "data": "some new data reported".to_string() });
+            let _data: ContextA = serde_json::from_value(context.read_input().unwrap()).unwrap();
+            let data = json!({ "a": "some new data reported", "b": 7 });
             context.write_output(&data)
         }
     }
 
     #[test]
     fn test_setup_state_initialization() {
-        use crate::state::context::MyContext;
-
         let label = Label::new("setup_state").unwrap();
         let tags = vec![Tag::new("setup").unwrap()];
         let state = Setup::new();
-        let mut ctx_input = MyContext::new();
+        let mut ctx_input = ContextA::_new(String::from("hello"), 7);
 
         let result = state.handler(&mut ctx_input);
+
         assert!(result.is_ok());
         assert_eq!(state.label(), &label);
         assert_eq!(state.tags(), &tags);
@@ -166,7 +187,6 @@ mod test {
     #[test]
     fn test_state_machine_execute() {
         use super::*;
-        use crate::state::context::MyContext;
 
         let setup_state = Box::new(Setup::new());
         let report_state = Box::new(Report::new());
@@ -190,7 +210,7 @@ mod test {
 
         let state_machine = StateMachine::new(initial_states);
 
-        let mut context = MyContext::new();
+        let mut context = ContextA::_new(String::from("hello"), 7);
         let result = state_machine.execute(&mut context);
         let last_ctx_message = context.read_input().unwrap();
 
@@ -206,6 +226,9 @@ mod test {
         );
 
         assert!(result.is_ok());
-        assert_eq!(last_ctx_message, json!({"data": "some new data reported"}));
+        assert_eq!(
+            last_ctx_message,
+            json!({"a": "some new data reported", "b": 7})
+        );
     }
 }
