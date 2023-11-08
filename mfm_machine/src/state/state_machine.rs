@@ -2,16 +2,16 @@ use std::usize;
 
 use anyhow::{anyhow, Error};
 
-use super::{context::Context, State, StateError};
+use super::{context::Context, StateError, StateHandler};
 
 struct StateMachine {
-    states: Vec<State>,
+    states: Vec<Box<dyn StateHandler>>,
 }
 
 type StateResult = Result<(), Error>;
 
 impl StateMachine {
-    pub fn new(initial_states: Vec<State>) -> Self {
+    pub fn new(initial_states: Vec<Box<dyn StateHandler>>) -> Self {
         Self {
             states: initial_states,
         }
@@ -71,10 +71,12 @@ impl StateMachine {
 
         let current_state = &self.states[next_state_index];
 
-        let result = match current_state {
-            State::Setup(h) => h.handler(context),
-            State::Report(h) => h.handler(context),
-        };
+        let result = current_state.handler(context);
+
+        // let result = match current_state {
+        //     State::Setup(h) => h.handler(context),
+        //     State::Report(h) => h.handler(context),
+        // };
 
         self.execute_rec(context, next_state_index, Option::Some(result))
     }
@@ -85,24 +87,125 @@ impl StateMachine {
 }
 
 mod test {
+    use crate::state::{
+        context::Context, DependencyStrategy, Label, StateConfig, StateHandler, Tag,
+    };
+    use anyhow::Error;
+    use mfm_machine_macros::StateConfigReqs;
+    use serde_json::json;
+
+    #[derive(Debug, Clone, PartialEq, StateConfigReqs)]
+    pub struct Setup {
+        label: Label,
+        tags: Vec<Tag>,
+        depends_on: Vec<Tag>,
+        depends_on_strategy: DependencyStrategy,
+    }
+
+    impl Setup {
+        pub fn new() -> Self {
+            Self {
+                label: Label::new("setup_state").unwrap(),
+                tags: vec![Tag::new("setup").unwrap()],
+                depends_on: vec![Tag::new("setup").unwrap()],
+                depends_on_strategy: DependencyStrategy::Latest,
+            }
+        }
+    }
+
+    impl StateHandler for Setup {
+        fn handler(&self, context: &mut dyn Context) -> Result<(), Error> {
+            let _data = context.read_input().unwrap();
+            let data = json!({ "data": "some new data".to_string() });
+            context.write_output(&data)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, StateConfigReqs)]
+    pub struct Report {
+        label: Label,
+        tags: Vec<Tag>,
+        depends_on: Vec<Tag>,
+        depends_on_strategy: DependencyStrategy,
+    }
+
+    impl Report {
+        pub fn new() -> Self {
+            Self {
+                label: Label::new("report_state").unwrap(),
+                tags: vec![Tag::new("report").unwrap()],
+                depends_on: vec![Tag::new("setup").unwrap()],
+                depends_on_strategy: DependencyStrategy::Latest,
+            }
+        }
+    }
+
+    impl StateHandler for Report {
+        fn handler(&self, context: &mut dyn Context) -> Result<(), Error> {
+            let _data = context.read_input().unwrap();
+            let data = json!({ "data": "some new data reported".to_string() });
+            context.write_output(&data)
+        }
+    }
+
+    #[test]
+    fn test_setup_state_initialization() {
+        use crate::state::context::MyContext;
+
+        let label = Label::new("setup_state").unwrap();
+        let tags = vec![Tag::new("setup").unwrap()];
+        let state = Setup::new();
+        let mut ctx_input = MyContext::new();
+
+        let result = state.handler(&mut ctx_input);
+        assert!(result.is_ok());
+        assert_eq!(state.label(), &label);
+        assert_eq!(state.tags(), &tags);
+    }
+
     #[test]
     fn test_state_machine_execute() {
         use super::*;
-        use crate::state::{context::RawContext, states, StateWrapper};
+        use crate::state::context::MyContext;
 
-        let initial_states = vec![
-            State::Setup(StateWrapper::new(states::Setup::new())),
-            State::Report(StateWrapper::new(states::Report::new())),
-        ];
+        let setup_state = Box::new(Setup::new());
+        let report_state = Box::new(Report::new());
 
-        let state_machine = StateMachine::new(initial_states.clone());
+        let initial_states: Vec<Box<dyn StateHandler>> =
+            vec![setup_state.clone(), report_state.clone()];
 
-        let mut context = RawContext::new();
+        let states: Vec<Box<dyn StateHandler>> = vec![setup_state.clone(), report_state.clone()];
+
+        let iss: Vec<(Label, &[Tag], &[Tag], DependencyStrategy)> = states
+            .iter()
+            .map(|is| {
+                (
+                    is.label().clone(),
+                    is.tags().clone(),
+                    is.depends_on().clone(),
+                    is.depends_on_strategy().clone(),
+                )
+            })
+            .collect();
+
+        let state_machine = StateMachine::new(initial_states);
+
+        let mut context = MyContext::new();
         let result = state_machine.execute(&mut context);
-        let last_ctx_message: String = context.read().unwrap();
+        let last_ctx_message = context.read_input().unwrap();
 
-        assert_eq!(state_machine.states, initial_states);
+        assert_eq!(state_machine.states.len(), iss.len());
+
+        state_machine.states.iter().zip(iss.iter()).for_each(
+            |(s, (label, tags, depends_on, depends_on_strategy))| {
+                assert_eq!(s.label(), label);
+                assert_eq!(s.tags(), *tags);
+                assert_eq!(s.depends_on(), *depends_on);
+                assert_eq!(s.depends_on_strategy(), depends_on_strategy);
+            },
+        );
+
         assert!(result.is_ok());
-        assert_eq!(last_ctx_message, "some new data reported".to_string());
+        assert_eq!(last_ctx_message, json!({"data": "some new data reported"}));
     }
 }
