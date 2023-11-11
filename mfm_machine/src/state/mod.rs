@@ -56,7 +56,7 @@ pub trait StateConfig {
     fn depends_on_strategy(&self) -> &DependencyStrategy;
 }
 
-type StateResult = Result<(), StateError>;
+pub type StateResult = Result<(), StateError>;
 
 pub trait StateHandler: StateConfig + Send + Sync {
     fn handler(&self, context: &mut dyn Context) -> StateResult;

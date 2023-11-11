@@ -5,7 +5,7 @@ use anyhow::anyhow;
 use super::{context::Context, StateHandler, StateResult};
 
 pub struct StateMachine {
-    states: Arc<[Box<dyn StateHandler>]>,
+    pub states: Arc<[Box<dyn StateHandler>]>,
 }
 
 #[derive(Debug)]
