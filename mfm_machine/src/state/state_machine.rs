@@ -1,17 +1,22 @@
-use std::usize;
+use std::{sync::Arc, usize};
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
 
-use super::{context::Context, StateError, StateHandler};
+use super::{context::Context, StateHandler, StateResult};
 
-struct StateMachine {
-    states: Vec<Box<dyn StateHandler>>,
+pub struct StateMachine {
+    states: Arc<[Box<dyn StateHandler>]>,
 }
 
-type StateResult = Result<(), Error>;
+#[derive(Debug)]
+pub enum StateMachineError {
+    EmptyState((), anyhow::Error),
+    InternalError(StateResult, anyhow::Error),
+    StateError(StateResult, anyhow::Error),
+}
 
 impl StateMachine {
-    pub fn new(initial_states: Vec<Box<dyn StateHandler>>) -> Self {
+    pub fn new(initial_states: Arc<[Box<dyn StateHandler>]>) -> Self {
         Self {
             states: initial_states,
         }
@@ -27,9 +32,12 @@ impl StateMachine {
         _context: &mut impl Context,
         state_index: usize,
         last_state_result: Option<StateResult>,
-    ) -> Result<usize, Error> {
+    ) -> Result<usize, StateMachineError> {
         if !self.has_state(0) {
-            return Err(anyhow!("no states defined to execute"));
+            return Err(StateMachineError::EmptyState(
+                (),
+                anyhow!("there no state to execute"),
+            ));
         }
 
         // if thats true, means that no state was executed before and this is the first one
@@ -43,15 +51,14 @@ impl StateMachine {
         match state_result {
             Ok(()) => Ok(state_index + 1),
             Err(e) => {
-                match e.downcast::<StateError>() {
-                    Ok(se) if se.is_recoverable() => {
-                        // TODO: replay based on depends_on logic
-                        // TODO: extract it to an generic func
-                        Err(se.into())
-                    }
-                    Ok(se) => Err(se.into()),
-                    // TODO: what we want to return in this case?
-                    Err(ed) => Err(ed),
+                if e.is_recoverable() {
+                    // TODO: design the possible state recoverability and default cases
+                    Ok(state_index)
+                } else {
+                    Err(StateMachineError::StateError(
+                        Err(e),
+                        anyhow!("an unrecoverable error happened inside a state handler"),
+                    ))
                 }
             }
         }
@@ -62,7 +69,7 @@ impl StateMachine {
         context: &mut impl Context,
         state_index: usize,
         last_state_result: Option<StateResult>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), StateMachineError> {
         let next_state_index = self.transition(context, state_index, last_state_result)?;
 
         if !self.has_state(next_state_index) {
@@ -76,20 +83,24 @@ impl StateMachine {
         self.execute_rec(context, next_state_index, Option::Some(result))
     }
 
-    pub fn execute(&self, context: &mut impl Context) -> Result<(), Error> {
+    pub fn execute(&self, context: &mut impl Context) -> Result<(), StateMachineError> {
         self.execute_rec(context, 0, Option::None)
     }
 }
 
+#[cfg(test)]
 mod test {
     use crate::state::{
         context::Context, DependencyStrategy, Label, StateConfig, StateHandler, Tag,
     };
+    use crate::state::{StateError, StateErrorRecoverability};
     use anyhow::anyhow;
     use anyhow::Error;
     use mfm_machine_macros::StateConfigReqs;
     use serde_derive::{Deserialize, Serialize};
     use serde_json::{json, Value};
+
+    use super::StateResult;
 
     #[derive(Serialize, Deserialize)]
     struct ContextA {
@@ -125,7 +136,7 @@ mod test {
     }
 
     impl Setup {
-        pub fn new() -> Self {
+        fn new() -> Self {
             Self {
                 label: Label::new("setup_state").unwrap(),
                 tags: vec![Tag::new("setup").unwrap()],
@@ -136,10 +147,16 @@ mod test {
     }
 
     impl StateHandler for Setup {
-        fn handler(&self, context: &mut dyn Context) -> Result<(), Error> {
+        fn handler(&self, context: &mut dyn Context) -> StateResult {
             let _data: ContextA = serde_json::from_value(context.read_input().unwrap()).unwrap();
             let data = json!({ "a": "setting up", "b": 1 });
-            context.write_output(&data)
+            match context.write_output(&data) {
+                Ok(()) => Ok(()),
+                Err(e) => Err(StateError::StorageAccess(
+                    StateErrorRecoverability::Recoverable,
+                    e,
+                )),
+            }
         }
     }
 
@@ -151,6 +168,7 @@ mod test {
         depends_on_strategy: DependencyStrategy,
     }
 
+    #[cfg(test)]
     impl Report {
         pub fn new() -> Self {
             Self {
@@ -163,15 +181,23 @@ mod test {
     }
 
     impl StateHandler for Report {
-        fn handler(&self, context: &mut dyn Context) -> Result<(), Error> {
+        fn handler(&self, context: &mut dyn Context) -> StateResult {
             let _data: ContextA = serde_json::from_value(context.read_input().unwrap()).unwrap();
             let data = json!({ "a": "some new data reported", "b": 7 });
-            context.write_output(&data)
+            match context.write_output(&data) {
+                Ok(()) => Ok(()),
+                Err(e) => Err(StateError::StorageAccess(
+                    StateErrorRecoverability::Recoverable,
+                    e,
+                )),
+            }
         }
     }
 
     #[test]
     fn test_setup_state_initialization() {
+        use super::*;
+
         let label = Label::new("setup_state").unwrap();
         let tags = vec![Tag::new("setup").unwrap()];
         let state = Setup::new();
@@ -191,12 +217,11 @@ mod test {
         let setup_state = Box::new(Setup::new());
         let report_state = Box::new(Report::new());
 
-        let initial_states: Vec<Box<dyn StateHandler>> =
-            vec![setup_state.clone(), report_state.clone()];
+        let initial_states: Arc<[Box<dyn StateHandler>]> =
+            Arc::new([setup_state.clone(), report_state.clone()]);
+        let initial_states_cloned = initial_states.clone();
 
-        let states: Vec<Box<dyn StateHandler>> = vec![setup_state.clone(), report_state.clone()];
-
-        let iss: Vec<(Label, &[Tag], &[Tag], DependencyStrategy)> = states
+        let iss: Vec<(Label, &[Tag], &[Tag], DependencyStrategy)> = initial_states_cloned
             .iter()
             .map(|is| {
                 (

@@ -3,7 +3,6 @@ use std::fmt;
 
 pub mod context;
 pub mod state_machine;
-pub mod states;
 
 use context::Context;
 
@@ -57,35 +56,37 @@ pub trait StateConfig {
     fn depends_on_strategy(&self) -> &DependencyStrategy;
 }
 
-pub trait StateHandler: StateConfig {
-    fn handler(&self, context: &mut dyn Context) -> Result<(), Error>;
+type StateResult = Result<(), StateError>;
+
+pub trait StateHandler: StateConfig + Send + Sync {
+    fn handler(&self, context: &mut dyn Context) -> StateResult;
 }
 
-#[derive(Debug)]
-enum StateErrorRecoverability {
+#[derive(Debug, Clone)]
+pub enum StateErrorRecoverability {
     Recoverable,
     Unrecoverable,
 }
 
 #[derive(Debug)]
-enum StateError {
-    Unknown(StateErrorRecoverability),
-    RpcConnection(StateErrorRecoverability),
-    StorageAccess(StateErrorRecoverability),
-    OnChainError(StateErrorRecoverability),
-    OffChainError(StateErrorRecoverability),
-    ParsingInput(StateErrorRecoverability),
+pub enum StateError {
+    Unknown(StateErrorRecoverability, anyhow::Error),
+    ParsingInput(StateErrorRecoverability, anyhow::Error),
+    OnChainError(StateErrorRecoverability, anyhow::Error),
+    OffChainError(StateErrorRecoverability, anyhow::Error),
+    RpcConnection(StateErrorRecoverability, anyhow::Error),
+    StorageAccess(StateErrorRecoverability, anyhow::Error),
 }
 
 impl StateError {
     pub fn is_recoverable(&self) -> bool {
         match self {
-            Self::Unknown(recov) => matches!(recov, StateErrorRecoverability::Recoverable),
-            Self::RpcConnection(recov) => matches!(recov, StateErrorRecoverability::Recoverable),
-            Self::StorageAccess(recov) => matches!(recov, StateErrorRecoverability::Recoverable),
-            Self::OnChainError(recov) => matches!(recov, StateErrorRecoverability::Recoverable),
-            Self::OffChainError(recov) => matches!(recov, StateErrorRecoverability::Recoverable),
-            Self::ParsingInput(recov) => matches!(recov, StateErrorRecoverability::Recoverable),
+            Self::Unknown(recov, _) => matches!(recov, StateErrorRecoverability::Recoverable),
+            Self::RpcConnection(recov, _) => matches!(recov, StateErrorRecoverability::Recoverable),
+            Self::StorageAccess(recov, _) => matches!(recov, StateErrorRecoverability::Recoverable),
+            Self::OnChainError(recov, _) => matches!(recov, StateErrorRecoverability::Recoverable),
+            Self::OffChainError(recov, _) => matches!(recov, StateErrorRecoverability::Recoverable),
+            Self::ParsingInput(recov, _) => matches!(recov, StateErrorRecoverability::Recoverable),
         }
     }
 }
@@ -93,12 +94,36 @@ impl StateError {
 impl fmt::Display for StateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unknown(_) => write!(f, "unknown error"),
-            Self::RpcConnection(_) => write!(f, "RPC connection error"),
-            Self::StorageAccess(_) => write!(f, "storage access error"),
-            Self::OnChainError(_) => write!(f, "on-chain error"),
-            Self::OffChainError(_) => write!(f, "off-chain error"),
-            Self::ParsingInput(_) => write!(f, "parsing input error"),
+            Self::Unknown(r, e) => write!(
+                f,
+                "unknown error; recoverability: {:?}; source error: {:?}",
+                r, e
+            ),
+            Self::RpcConnection(r, e) => write!(
+                f,
+                "RPC connection error; recoverability: {:?}; source error: {:?}",
+                r, e
+            ),
+            Self::StorageAccess(r, e) => write!(
+                f,
+                "storage access error; recoverability: {:?}; source error: {:?}",
+                r, e
+            ),
+            Self::OnChainError(r, e) => write!(
+                f,
+                "on-chain error; recoverability: {:?}; source error: {:?}",
+                r, e
+            ),
+            Self::OffChainError(r, e) => write!(
+                f,
+                "off-chain error; recoverability: {:?}; source error: {:?}",
+                r, e
+            ),
+            Self::ParsingInput(r, e) => write!(
+                f,
+                "parsing input error; recoverability: {:?}; source error: {:?}",
+                r, e
+            ),
         }
     }
 }
@@ -112,7 +137,10 @@ mod test {
     #[test]
     fn custom_error_to_anyhow_error() {
         let state_error_to_anyhow = |error: StateError| -> anyhow::Error { error.into() };
-        state_error_to_anyhow(StateError::Unknown(StateErrorRecoverability::Unrecoverable));
+        state_error_to_anyhow(StateError::Unknown(
+            StateErrorRecoverability::Unrecoverable,
+            anyhow!("test error"),
+        ));
     }
 
     #[test]
