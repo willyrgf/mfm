@@ -2,10 +2,43 @@ use std::{sync::Arc, usize};
 
 use anyhow::anyhow;
 
-use super::{context::Context, StateHandler, StateResult};
+use crate::state::{context::Context, StateHandler, StateResult};
+
+use self::tracker::{HashMapTracker, Index, Tracker};
+
+pub mod tracker;
+
+pub struct StateMachineBuilder {
+    pub states: Arc<[Box<dyn StateHandler>]>,
+    pub tracker: Option<Box<dyn Tracker>>,
+}
+
+impl StateMachineBuilder {
+    pub fn new(states: Arc<[Box<dyn StateHandler>]>) -> Self {
+        Self {
+            states,
+            tracker: None,
+        }
+    }
+
+    pub fn tracker(mut self, tracker: Box<dyn Tracker>) -> Self {
+        self.tracker = Some(tracker);
+        self
+    }
+
+    pub fn build(self) -> StateMachine {
+        StateMachine {
+            states: self.states,
+            tracker: self
+                .tracker
+                .unwrap_or_else(|| Box::new(HashMapTracker::new())),
+        }
+    }
+}
 
 pub struct StateMachine {
     pub states: Arc<[Box<dyn StateHandler>]>,
+    pub tracker: Box<dyn Tracker>,
 }
 
 #[derive(Debug)]
@@ -16,9 +49,10 @@ pub enum StateMachineError {
 }
 
 impl StateMachine {
-    pub fn new(initial_states: Arc<[Box<dyn StateHandler>]>) -> Self {
+    pub fn new(states: Arc<[Box<dyn StateHandler>]>) -> Self {
         Self {
-            states: initial_states,
+            states,
+            tracker: Box::new(HashMapTracker::new()),
         }
     }
 
@@ -28,8 +62,8 @@ impl StateMachine {
 
     // TODO: add logging, instrumentation
     fn transition(
-        &self,
-        _context: &mut impl Context,
+        &mut self,
+        context: &mut dyn Context,
         state_index: usize,
         last_state_result: Option<StateResult>,
     ) -> Result<usize, StateMachineError> {
@@ -39,6 +73,15 @@ impl StateMachine {
                 anyhow!("there no state to execute"),
             ));
         }
+
+        let state = &self.states[state_index];
+        let tracker = self.tracker.as_mut();
+        // TODO: should state.label() return an &Label or Label?
+        // TODO: remove this unwrap for proper handling
+        tracker.track(
+            Index::new(state_index, *state.label()),
+            context.read_input().unwrap(),
+        );
 
         // if thats true, means that no state was executed before and this is the first one
         if last_state_result.is_none() {
@@ -65,8 +108,8 @@ impl StateMachine {
     }
 
     fn execute_rec(
-        &self,
-        context: &mut impl Context,
+        &mut self,
+        context: &mut dyn Context,
         state_index: usize,
         last_state_result: Option<StateResult>,
     ) -> Result<(), StateMachineError> {
@@ -83,7 +126,7 @@ impl StateMachine {
         self.execute_rec(context, next_state_index, Option::Some(result))
     }
 
-    pub fn execute(&self, context: &mut impl Context) -> Result<(), StateMachineError> {
+    pub fn execute(&mut self, context: &mut dyn Context) -> Result<(), StateMachineError> {
         self.execute_rec(context, 0, Option::None)
     }
 }
@@ -226,14 +269,14 @@ mod test {
             .map(|is| {
                 (
                     is.label().clone(),
-                    is.tags().clone(),
-                    is.depends_on().clone(),
+                    is.tags(),
+                    is.depends_on(),
                     is.depends_on_strategy().clone(),
                 )
             })
             .collect();
 
-        let state_machine = StateMachine::new(initial_states);
+        let mut state_machine = StateMachine::new(initial_states);
 
         let mut context = ContextA::_new(String::from("hello"), 7);
         let result = state_machine.execute(&mut context);

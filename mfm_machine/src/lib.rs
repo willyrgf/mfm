@@ -1,4 +1,5 @@
 pub mod state;
+pub mod state_machine;
 pub use mfm_machine_macros::StateConfigReqs;
 
 //FIXME: reorganize library to be more ergonomic to use

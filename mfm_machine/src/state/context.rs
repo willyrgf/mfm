@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Error};
+use anyhow::Error;
 use serde_json::Value;
 
 pub trait Context {
@@ -6,7 +6,9 @@ pub trait Context {
     fn write_output(&mut self, value: &Value) -> Result<(), Error>;
 }
 
+#[cfg(test)]
 mod test {
+    use anyhow::anyhow;
     use serde_derive::{Deserialize, Serialize};
 
     use super::*;
