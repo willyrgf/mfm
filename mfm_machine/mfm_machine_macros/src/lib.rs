@@ -7,9 +7,8 @@ use syn::{parse_macro_input, DeriveInput};
 #[proc_macro_derive(StateConfigReqs)]
 pub fn state_reqs_derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-
     let ident = &input.ident;
-    //FIXME: import and fix paths for mfm_machine lib
+
     let expanded = quote! {
         impl StateConfig for #ident {
             fn label(&self) -> &Label {
