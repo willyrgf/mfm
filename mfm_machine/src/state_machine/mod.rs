@@ -2,7 +2,10 @@ use std::{sync::Arc, usize};
 
 use anyhow::anyhow;
 
-use crate::state::{context::Context, StateHandler, StateResult};
+use crate::state::{
+    context::{Context, InternalContext},
+    StateHandler, StateResult,
+};
 
 use self::tracker::{HashMapTracker, Index, Tracker};
 
@@ -79,7 +82,7 @@ impl StateMachine {
         // TODO: should state.label() return an &Label or Label?
         // TODO: remove this unwrap for proper handling
         tracker.track(
-            Index::new(state_index, *state.label()),
+            Index::new(state_index, state.label(), state.tags()),
             context.read_input().unwrap(),
         );
 
@@ -95,6 +98,20 @@ impl StateMachine {
             Ok(()) => Ok(state_index + 1),
             Err(e) => {
                 if e.is_recoverable() {
+                    // FIXME: we're looking just for the first depends_on of a state
+                    // we should implement an well defined rule for the whole dependency
+                    // system between states, and follow this definition here as well.
+                    let state_depends_on = state.depends_on();
+                    let indexes_state_deps =
+                        tracker.search_by_tag(state_depends_on.first().unwrap());
+
+                    let last_index_state_ctx_value = tracker
+                        .recover(indexes_state_deps.last().unwrap().clone())
+                        .unwrap();
+
+                    let ctx: &mut dyn Context =
+                        &mut InternalContext::new(last_index_state_ctx_value);
+
                     // TODO: design the possible state recoverability and default cases
                     Ok(state_index)
                 } else {
@@ -249,8 +266,8 @@ mod test {
         let result = state.handler(&mut ctx_input);
 
         assert!(result.is_ok());
-        assert_eq!(state.label(), &label);
-        assert_eq!(state.tags(), &tags);
+        assert_eq!(state.label(), label);
+        assert_eq!(state.tags(), tags);
     }
 
     #[test]
@@ -264,14 +281,14 @@ mod test {
             Arc::new([setup_state.clone(), report_state.clone()]);
         let initial_states_cloned = initial_states.clone();
 
-        let iss: Vec<(Label, &[Tag], &[Tag], DependencyStrategy)> = initial_states_cloned
+        let iss: Vec<(Label, Vec<Tag>, Vec<Tag>, DependencyStrategy)> = initial_states_cloned
             .iter()
             .map(|is| {
                 (
-                    is.label().clone(),
+                    is.label(),
                     is.tags(),
                     is.depends_on(),
-                    is.depends_on_strategy().clone(),
+                    is.depends_on_strategy(),
                 )
             })
             .collect();
@@ -286,10 +303,10 @@ mod test {
 
         state_machine.states.iter().zip(iss.iter()).for_each(
             |(s, (label, tags, depends_on, depends_on_strategy))| {
-                assert_eq!(s.label(), label);
+                assert_eq!(s.label(), *label);
                 assert_eq!(s.tags(), *tags);
                 assert_eq!(s.depends_on(), *depends_on);
-                assert_eq!(s.depends_on_strategy(), depends_on_strategy);
+                assert_eq!(s.depends_on_strategy(), *depends_on_strategy);
             },
         );
 
