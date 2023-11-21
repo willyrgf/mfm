@@ -5,7 +5,7 @@ pub mod context;
 
 use context::Context;
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct Tag(&'static str);
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
@@ -43,16 +43,16 @@ impl Label {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Copy)]
 pub enum DependencyStrategy {
     Latest,
 }
 
 pub trait StateConfig {
-    fn label(&self) -> &Label;
-    fn tags(&self) -> &[Tag];
-    fn depends_on(&self) -> &[Tag];
-    fn depends_on_strategy(&self) -> &DependencyStrategy;
+    fn label(&self) -> Label;
+    fn tags(&self) -> Vec<Tag>;
+    fn depends_on(&self) -> Vec<Tag>;
+    fn depends_on_strategy(&self) -> DependencyStrategy;
 }
 
 pub type StateResult = Result<(), StateError>;

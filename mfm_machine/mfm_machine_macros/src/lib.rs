@@ -11,20 +11,20 @@ pub fn state_reqs_derive(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl StateConfig for #ident {
-            fn label(&self) -> &Label {
-                &self.label
+            fn label(&self) -> Label {
+                self.label
             }
 
-            fn tags(&self) -> &[Tag] {
-                &self.tags
+            fn tags(&self) -> Vec<Tag> {
+                self.tags.clone()
             }
 
-            fn depends_on(&self) -> &[Tag] {
-                &self.depends_on
+            fn depends_on(&self) -> Vec<Tag> {
+                self.depends_on.clone()
             }
 
-            fn depends_on_strategy(&self) -> &DependencyStrategy {
-                &self.depends_on_strategy
+            fn depends_on_strategy(&self) -> DependencyStrategy {
+                self.depends_on_strategy
             }
         }
     };

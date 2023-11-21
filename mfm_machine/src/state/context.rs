@@ -6,6 +6,27 @@ pub trait Context {
     fn write_output(&mut self, value: &Value) -> Result<(), Error>;
 }
 
+pub struct InternalContext {
+    value: Value,
+}
+
+impl InternalContext {
+    pub fn new(value: Value) -> Self {
+        Self { value }
+    }
+}
+
+impl Context for InternalContext {
+    fn read_input(&self) -> Result<Value, Error> {
+        Ok(self.value.clone())
+    }
+
+    fn write_output(&mut self, value: &Value) -> Result<(), Error> {
+        self.value = value.clone();
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use anyhow::anyhow;

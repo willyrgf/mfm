@@ -7,7 +7,6 @@ use mfm_machine::state::Label;
 use mfm_machine::state::StateHandler;
 use mfm_machine::state::Tag;
 use mfm_machine::state_machine::StateMachine;
-use serde_json::json;
 
 #[test]
 fn test_state_machine_execute() {
@@ -20,7 +19,7 @@ fn test_state_machine_execute() {
         Arc::new([setup_state.clone(), report_state.clone()]);
     let initial_states_cloned = initial_states.clone();
 
-    let iss: Vec<(Label, &[Tag], &[Tag], DependencyStrategy)> = initial_states_cloned
+    let iss: Vec<(Label, Vec<Tag>, Vec<Tag>, DependencyStrategy)> = initial_states_cloned
         .iter()
         .map(|is| {
             (
@@ -42,10 +41,10 @@ fn test_state_machine_execute() {
 
     state_machine.states.iter().zip(iss.iter()).for_each(
         |(s, (label, tags, depends_on, depends_on_strategy))| {
-            assert_eq!(s.label(), label);
+            assert_eq!(s.label(), *label);
             assert_eq!(s.tags(), *tags);
             assert_eq!(s.depends_on(), *depends_on);
-            assert_eq!(s.depends_on_strategy(), depends_on_strategy);
+            assert_eq!(s.depends_on_strategy(), *depends_on_strategy);
         },
     );
 
