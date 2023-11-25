@@ -1,15 +1,19 @@
+use std::sync::Arc;
+use std::sync::Mutex;
+
 use anyhow::anyhow;
 use anyhow::Error;
 use mfm_machine::state::context::Context;
+use mfm_machine::state::context::ContextWrapper;
 use mfm_machine::state::DependencyStrategy;
 use mfm_machine::state::Label;
-use mfm_machine::state::StateConfig;
 use mfm_machine::state::StateError;
 use mfm_machine::state::StateErrorRecoverability;
 use mfm_machine::state::StateHandler;
+use mfm_machine::state::StateMetadata;
 use mfm_machine::state::StateResult;
 use mfm_machine::state::Tag;
-use mfm_machine::StateConfigReqs;
+use mfm_machine_macros::StateMetadataReqs;
 use rand::Rng;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -39,7 +43,7 @@ impl Context for ContextA {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, StateConfigReqs)]
+#[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
 pub struct Setup {
     label: Label,
     tags: Vec<Tag>,
@@ -52,7 +56,6 @@ impl Default for Setup {
         Self::new()
     }
 }
-
 impl Setup {
     pub fn new() -> Self {
         Self {
@@ -65,11 +68,14 @@ impl Setup {
 }
 
 impl StateHandler for Setup {
-    fn handler(&self, context: &mut dyn Context) -> StateResult {
-        let _data: ContextA = serde_json::from_value(context.read_input().unwrap()).unwrap();
+    fn handler(&self, context: ContextWrapper) -> StateResult {
+        let value = context.lock().unwrap().read_input().unwrap();
+        let _data: ContextA = serde_json::from_value(value).unwrap();
+
         let mut rng = rand::thread_rng();
         let data = json!({ "a": "setting up", "b": rng.gen_range(0..9) });
-        match context.write_output(&data) {
+
+        match context.lock().as_mut().unwrap().write_output(&data) {
             Ok(()) => Ok(()),
             Err(e) => Err(StateError::StorageAccess(
                 StateErrorRecoverability::Recoverable,
@@ -79,7 +85,7 @@ impl StateHandler for Setup {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, StateConfigReqs)]
+#[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
 pub struct ComputePrice {
     label: Label,
     tags: Vec<Tag>,
@@ -92,7 +98,6 @@ impl Default for ComputePrice {
         Self::new()
     }
 }
-
 impl ComputePrice {
     pub fn new() -> Self {
         Self {
@@ -105,8 +110,9 @@ impl ComputePrice {
 }
 
 impl StateHandler for ComputePrice {
-    fn handler(&self, context: &mut dyn Context) -> StateResult {
-        let _data: ContextA = serde_json::from_value(context.read_input().unwrap()).unwrap();
+    fn handler(&self, context: ContextWrapper) -> StateResult {
+        let value = context.lock().unwrap().read_input().unwrap();
+        let _data: ContextA = serde_json::from_value(value).unwrap();
         if _data.b % 2 == 0 {
             return Err(StateError::ParsingInput(
                 StateErrorRecoverability::Recoverable,
@@ -115,7 +121,7 @@ impl StateHandler for ComputePrice {
         }
 
         let data = json!({ "a": "the input number is odd", "b": _data.b });
-        match context.write_output(&data) {
+        match context.lock().as_mut().unwrap().write_output(&data) {
             Ok(()) => Ok(()),
             Err(e) => Err(StateError::StorageAccess(
                 StateErrorRecoverability::Unrecoverable,
@@ -125,7 +131,7 @@ impl StateHandler for ComputePrice {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, StateConfigReqs)]
+#[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
 pub struct Report {
     label: Label,
     tags: Vec<Tag>,
@@ -138,7 +144,6 @@ impl Default for Report {
         Self::new()
     }
 }
-
 impl Report {
     pub fn new() -> Self {
         Self {
@@ -151,11 +156,12 @@ impl Report {
 }
 
 impl StateHandler for Report {
-    fn handler(&self, context: &mut dyn Context) -> StateResult {
-        let _data: ContextA = serde_json::from_value(context.read_input().unwrap()).unwrap();
+    fn handler(&self, context: ContextWrapper) -> StateResult {
+        let value = context.lock().unwrap().read_input().unwrap();
+        let _data: ContextA = serde_json::from_value(value).unwrap();
         let data =
             json!({ "a": format!("{}: {}", "some new data reported", _data.a), "b": _data.b });
-        match context.write_output(&data) {
+        match context.lock().as_mut().unwrap().write_output(&data) {
             Ok(()) => Ok(()),
             Err(e) => Err(StateError::StorageAccess(
                 StateErrorRecoverability::Recoverable,

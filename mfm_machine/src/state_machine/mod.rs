@@ -104,21 +104,10 @@ impl StateMachine {
 
                     let last_index_of_first_dep = indexes_state_deps.last().unwrap().clone();
 
-                    println!(
-                        "trying to recover it from {:?}::{} to {:?}::{}",
-                        state.label(),
-                        state_index,
-                        last_index_of_first_dep.state_label,
-                        last_index_of_first_dep.state_index
-                    );
-
                     let last_index_state_ctx =
                         tracker.recover(last_index_of_first_dep.clone()).unwrap();
 
-                    println!("are we waiting for some lock here??");
                     context = last_index_state_ctx.clone();
-
-                    println!("are we waiting for some lock here???");
 
                     // TODO: design the possible state recoverability and default cases
                     Ok((last_index_of_first_dep.state_index, context))

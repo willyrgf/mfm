@@ -8,6 +8,8 @@ pub mod context;
 
 use context::Context;
 
+use self::context::ContextWrapper;
+
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct Tag(&'static str);
 
@@ -61,7 +63,7 @@ pub trait StateMetadata {
 pub type StateResult = Result<(), StateError>;
 
 pub trait StateHandler: StateMetadata + Send + Sync {
-    fn handler(&self, context: Arc<Mutex<Box<dyn Context>>>) -> StateResult;
+    fn handler(&self, context: ContextWrapper) -> StateResult;
 }
 
 pub type States = Arc<[Box<dyn StateHandler>]>;
