@@ -1,10 +1,10 @@
 mod default_impls;
 
 use default_impls::{ContextA, Report, Setup};
-use mfm_machine::state::context::Context;
+use mfm_machine::state::context::wrap_context;
 use mfm_machine::state::DependencyStrategy;
 use mfm_machine::state::Label;
-use mfm_machine::state::StateHandler;
+use mfm_machine::state::States;
 use mfm_machine::state::Tag;
 use mfm_machine::state_machine::StateMachine;
 
@@ -15,8 +15,7 @@ fn test_state_machine_execute() {
     let setup_state = Box::new(Setup::new());
     let report_state = Box::new(Report::new());
 
-    let initial_states: Arc<[Box<dyn StateHandler>]> =
-        Arc::new([setup_state.clone(), report_state.clone()]);
+    let initial_states: States = Arc::new([setup_state.clone(), report_state.clone()]);
     let initial_states_cloned = initial_states.clone();
 
     let iss: Vec<(Label, Vec<Tag>, Vec<Tag>, DependencyStrategy)> = initial_states_cloned
@@ -33,9 +32,9 @@ fn test_state_machine_execute() {
 
     let mut state_machine = StateMachine::new(initial_states);
 
-    let context: &mut dyn Context = &mut ContextA::new(String::from("hello"), 7);
-    let result = state_machine.execute(context);
-    let last_ctx_message = context.read_input().unwrap();
+    let context = wrap_context(ContextA::new(String::from("hello"), 7));
+    let result = state_machine.execute(context.clone());
+    let last_ctx_message = context.lock().unwrap().read_input().unwrap();
 
     assert_eq!(state_machine.states.len(), iss.len());
 
