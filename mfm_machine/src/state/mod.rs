@@ -1,5 +1,8 @@
 use anyhow::{anyhow, Error, Result};
-use std::fmt;
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+};
 
 pub mod context;
 
@@ -48,7 +51,7 @@ pub enum DependencyStrategy {
     Latest,
 }
 
-pub trait StateConfig {
+pub trait StateMetadata {
     fn label(&self) -> Label;
     fn tags(&self) -> Vec<Tag>;
     fn depends_on(&self) -> Vec<Tag>;
@@ -57,9 +60,11 @@ pub trait StateConfig {
 
 pub type StateResult = Result<(), StateError>;
 
-pub trait StateHandler: StateConfig + Send + Sync {
-    fn handler(&self, context: &mut dyn Context) -> StateResult;
+pub trait StateHandler: StateMetadata + Send + Sync {
+    fn handler(&self, context: Arc<Mutex<Box<dyn Context>>>) -> StateResult;
 }
+
+pub type States = Arc<[Box<dyn StateHandler>]>;
 
 #[derive(Debug, Clone)]
 pub enum StateErrorRecoverability {

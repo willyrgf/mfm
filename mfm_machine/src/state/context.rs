@@ -1,30 +1,17 @@
+use std::sync::{Arc, Mutex};
+
 use anyhow::Error;
 use serde_json::Value;
+
+pub type ContextWrapper = Arc<Mutex<Box<dyn Context>>>;
 
 pub trait Context {
     fn read_input(&self) -> Result<Value, Error>;
     fn write_output(&mut self, value: &Value) -> Result<(), Error>;
 }
 
-pub struct InternalContext {
-    value: Value,
-}
-
-impl InternalContext {
-    pub fn new(value: Value) -> Self {
-        Self { value }
-    }
-}
-
-impl Context for InternalContext {
-    fn read_input(&self) -> Result<Value, Error> {
-        Ok(self.value.clone())
-    }
-
-    fn write_output(&mut self, value: &Value) -> Result<(), Error> {
-        self.value = value.clone();
-        Ok(())
-    }
+pub fn wrap_context<C: Context + 'static>(context: C) -> ContextWrapper {
+    Arc::new(Mutex::new(Box::new(context)))
 }
 
 #[cfg(test)]

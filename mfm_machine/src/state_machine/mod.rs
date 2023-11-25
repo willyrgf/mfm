@@ -2,22 +2,19 @@ use std::{sync::Arc, usize};
 
 use anyhow::anyhow;
 
-use crate::state::{
-    context::{Context, InternalContext},
-    StateHandler, StateResult,
-};
+use crate::state::{context::ContextWrapper, StateHandler, StateResult, States};
 
 use self::tracker::{HashMapTracker, Index, Tracker};
 
 pub mod tracker;
 
 pub struct StateMachineBuilder {
-    pub states: Arc<[Box<dyn StateHandler>]>,
+    pub states: States,
     pub tracker: Option<Box<dyn Tracker>>,
 }
 
 impl StateMachineBuilder {
-    pub fn new(states: Arc<[Box<dyn StateHandler>]>) -> Self {
+    pub fn new(states: States) -> Self {
         Self {
             states,
             tracker: None,
@@ -40,7 +37,7 @@ impl StateMachineBuilder {
 }
 
 pub struct StateMachine {
-    pub states: Arc<[Box<dyn StateHandler>]>,
+    pub states: States,
     pub tracker: Box<dyn Tracker>,
 }
 
@@ -52,7 +49,7 @@ pub enum StateMachineError {
 }
 
 impl StateMachine {
-    pub fn new(states: Arc<[Box<dyn StateHandler>]>) -> Self {
+    pub fn new(states: States) -> Self {
         Self {
             states,
             tracker: Box::new(HashMapTracker::new()),
@@ -66,10 +63,10 @@ impl StateMachine {
     // TODO: add logging, instrumentation
     fn transition(
         &mut self,
-        context: &mut dyn Context,
+        mut context: ContextWrapper,
         state_index: usize,
         last_state_result: Option<StateResult>,
-    ) -> Result<usize, StateMachineError> {
+    ) -> Result<(usize, ContextWrapper), StateMachineError> {
         if !self.has_state(0) {
             return Err(StateMachineError::EmptyState(
                 (),
@@ -83,19 +80,19 @@ impl StateMachine {
         // TODO: remove this unwrap for proper handling
         tracker.track(
             Index::new(state_index, state.label(), state.tags()),
-            context.read_input().unwrap(),
+            context.clone(),
         );
 
         // if thats true, means that no state was executed before and this is the first one
         if last_state_result.is_none() {
-            return Ok(state_index);
+            return Ok((state_index, context));
         }
 
         let state_result = last_state_result.unwrap();
 
         // TODO: it may be the transition
         match state_result {
-            Ok(()) => Ok(state_index + 1),
+            Ok(()) => Ok((state_index + 1, context)),
             Err(e) => {
                 if e.is_recoverable() {
                     // FIXME: we're looking just for the first depends_on of a state
@@ -105,15 +102,26 @@ impl StateMachine {
                     let indexes_state_deps =
                         tracker.search_by_tag(state_depends_on.first().unwrap());
 
-                    let last_index_state_ctx_value = tracker
-                        .recover(indexes_state_deps.last().unwrap().clone())
-                        .unwrap();
+                    let last_index_of_first_dep = indexes_state_deps.last().unwrap().clone();
 
-                    let ctx: &mut dyn Context =
-                        &mut InternalContext::new(last_index_state_ctx_value);
+                    println!(
+                        "trying to recover it from {:?}::{} to {:?}::{}",
+                        state.label(),
+                        state_index,
+                        last_index_of_first_dep.state_label,
+                        last_index_of_first_dep.state_index
+                    );
+
+                    let last_index_state_ctx =
+                        tracker.recover(last_index_of_first_dep.clone()).unwrap();
+
+                    println!("are we waiting for some lock here??");
+                    context = last_index_state_ctx.clone();
+
+                    println!("are we waiting for some lock here???");
 
                     // TODO: design the possible state recoverability and default cases
-                    Ok(state_index)
+                    Ok((last_index_of_first_dep.state_index, context))
                 } else {
                     Err(StateMachineError::StateError(
                         Err(e),
@@ -126,11 +134,12 @@ impl StateMachine {
 
     fn execute_rec(
         &mut self,
-        context: &mut dyn Context,
+        context: ContextWrapper,
         state_index: usize,
         last_state_result: Option<StateResult>,
     ) -> Result<(), StateMachineError> {
-        let next_state_index = self.transition(context, state_index, last_state_result)?;
+        let (next_state_index, context) =
+            self.transition(context.clone(), state_index, last_state_result)?;
 
         if !self.has_state(next_state_index) {
             return Ok(());
@@ -138,25 +147,26 @@ impl StateMachine {
 
         let current_state = &self.states[next_state_index];
 
-        let result = current_state.handler(context);
+        let result = current_state.handler(context.clone());
 
         self.execute_rec(context, next_state_index, Option::Some(result))
     }
 
-    pub fn execute(&mut self, context: &mut dyn Context) -> Result<(), StateMachineError> {
+    pub fn execute(&mut self, context: ContextWrapper) -> Result<(), StateMachineError> {
         self.execute_rec(context, 0, Option::None)
     }
 }
 
 #[cfg(test)]
 mod test {
+    use crate::state::context::{wrap_context, ContextWrapper};
     use crate::state::{
-        context::Context, DependencyStrategy, Label, StateConfig, StateHandler, Tag,
+        context::Context, DependencyStrategy, Label, StateHandler, StateMetadata, Tag,
     };
     use crate::state::{StateError, StateErrorRecoverability};
     use anyhow::anyhow;
     use anyhow::Error;
-    use mfm_machine_macros::StateConfigReqs;
+    use mfm_machine_macros::StateMetadataReqs;
     use serde_derive::{Deserialize, Serialize};
     use serde_json::{json, Value};
 
@@ -169,7 +179,7 @@ mod test {
     }
 
     impl ContextA {
-        fn _new(a: String, b: u64) -> Self {
+        fn new(a: String, b: u64) -> Self {
             Self { a, b }
         }
     }
@@ -187,7 +197,7 @@ mod test {
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, StateConfigReqs)]
+    #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
     pub struct Setup {
         label: Label,
         tags: Vec<Tag>,
@@ -207,10 +217,11 @@ mod test {
     }
 
     impl StateHandler for Setup {
-        fn handler(&self, context: &mut dyn Context) -> StateResult {
-            let _data: ContextA = serde_json::from_value(context.read_input().unwrap()).unwrap();
+        fn handler(&self, context: ContextWrapper) -> StateResult {
+            let value = context.lock().unwrap().read_input().unwrap();
+            let _data: ContextA = serde_json::from_value(value).unwrap();
             let data = json!({ "a": "setting up", "b": 1 });
-            match context.write_output(&data) {
+            match context.lock().as_mut().unwrap().write_output(&data) {
                 Ok(()) => Ok(()),
                 Err(e) => Err(StateError::StorageAccess(
                     StateErrorRecoverability::Recoverable,
@@ -220,7 +231,7 @@ mod test {
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, StateConfigReqs)]
+    #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
     pub struct Report {
         label: Label,
         tags: Vec<Tag>,
@@ -241,10 +252,11 @@ mod test {
     }
 
     impl StateHandler for Report {
-        fn handler(&self, context: &mut dyn Context) -> StateResult {
-            let _data: ContextA = serde_json::from_value(context.read_input().unwrap()).unwrap();
+        fn handler(&self, context: ContextWrapper) -> StateResult {
+            let value = context.lock().unwrap().read_input().unwrap();
+            let _data: ContextA = serde_json::from_value(value).unwrap();
             let data = json!({ "a": "some new data reported", "b": 7 });
-            match context.write_output(&data) {
+            match context.lock().as_mut().unwrap().write_output(&data) {
                 Ok(()) => Ok(()),
                 Err(e) => Err(StateError::StorageAccess(
                     StateErrorRecoverability::Recoverable,
@@ -261,9 +273,9 @@ mod test {
         let label = Label::new("setup_state").unwrap();
         let tags = vec![Tag::new("setup").unwrap()];
         let state = Setup::new();
-        let mut ctx_input = ContextA::_new(String::from("hello"), 7);
+        let ctx_input = wrap_context(ContextA::new(String::from("hello"), 7));
 
-        let result = state.handler(&mut ctx_input);
+        let result = state.handler(ctx_input);
 
         assert!(result.is_ok());
         assert_eq!(state.label(), label);
@@ -277,8 +289,7 @@ mod test {
         let setup_state = Box::new(Setup::new());
         let report_state = Box::new(Report::new());
 
-        let initial_states: Arc<[Box<dyn StateHandler>]> =
-            Arc::new([setup_state.clone(), report_state.clone()]);
+        let initial_states: States = Arc::new([setup_state.clone(), report_state.clone()]);
         let initial_states_cloned = initial_states.clone();
 
         let iss: Vec<(Label, Vec<Tag>, Vec<Tag>, DependencyStrategy)> = initial_states_cloned
@@ -295,9 +306,9 @@ mod test {
 
         let mut state_machine = StateMachine::new(initial_states);
 
-        let mut context = ContextA::_new(String::from("hello"), 7);
-        let result = state_machine.execute(&mut context);
-        let last_ctx_message = context.read_input().unwrap();
+        let context = wrap_context(ContextA::new(String::from("hello"), 7));
+        let result = state_machine.execute(context.clone());
+        let last_ctx_message = context.lock().unwrap().read_input().unwrap();
 
         assert_eq!(state_machine.states.len(), iss.len());
 
