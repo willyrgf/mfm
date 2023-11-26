@@ -34,7 +34,7 @@ fn test_state_machine_execute() {
 
     let context = wrap_context(ContextA::new(String::from("hello"), 7));
     let result = state_machine.execute(context.clone());
-    let last_ctx_message = context.lock().unwrap().read_input().unwrap();
+    let last_ctx_message = context.lock().unwrap().read().unwrap();
 
     assert_eq!(state_machine.states.len(), iss.len());
 

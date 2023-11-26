@@ -6,8 +6,8 @@ use serde_json::Value;
 pub type ContextWrapper = Arc<Mutex<Box<dyn Context>>>;
 
 pub trait Context {
-    fn read_input(&self) -> Result<Value, Error>;
-    fn write_output(&mut self, value: &Value) -> Result<(), Error>;
+    fn read(&self) -> Result<Value, Error>;
+    fn write(&mut self, value: &Value) -> Result<(), Error>;
 }
 
 pub fn wrap_context<C: Context + 'static>(context: C) -> ContextWrapper {
@@ -35,11 +35,11 @@ mod test {
     }
 
     impl Context for ContextA {
-        fn read_input(&self) -> Result<Value, Error> {
+        fn read(&self) -> Result<Value, Error> {
             serde_json::to_value(self).map_err(|e| anyhow!(e))
         }
 
-        fn write_output(&mut self, value: &Value) -> Result<(), Error> {
+        fn write(&mut self, value: &Value) -> Result<(), Error> {
             let ctx: ContextA = serde_json::from_value(value.clone()).map_err(|e| anyhow!(e))?;
             self.a = ctx.a;
             self.b = ctx.b;
@@ -52,18 +52,10 @@ mod test {
         let context_a: &mut dyn Context = &mut ContextA::_new(String::from("hello"), 7);
         let context_b: &dyn Context = &ContextA::_new(String::from("hellow"), 9);
 
-        assert_ne!(
-            context_a.read_input().unwrap(),
-            context_b.read_input().unwrap()
-        );
+        assert_ne!(context_a.read().unwrap(), context_b.read().unwrap());
 
-        context_a
-            .write_output(&context_b.read_input().unwrap())
-            .unwrap();
+        context_a.write(&context_b.read().unwrap()).unwrap();
 
-        assert_eq!(
-            context_a.read_input().unwrap(),
-            context_b.read_input().unwrap()
-        );
+        assert_eq!(context_a.read().unwrap(), context_b.read().unwrap());
     }
 }

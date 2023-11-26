@@ -75,13 +75,6 @@ impl StateMachine {
         }
 
         let state = &self.states[state_index];
-        let tracker = self.tracker.as_mut();
-        // TODO: should state.label() return an &Label or Label?
-        // TODO: remove this unwrap for proper handling
-        tracker.track(
-            Index::new(state_index, state.label(), state.tags()),
-            context.clone(),
-        );
 
         // if thats true, means that no state was executed before and this is the first one
         if last_state_result.is_none() {
@@ -99,13 +92,16 @@ impl StateMachine {
                     // we should implement an well defined rule for the whole dependency
                     // system between states, and follow this definition here as well.
                     let state_depends_on = state.depends_on();
-                    let indexes_state_deps =
-                        tracker.search_by_tag(state_depends_on.first().unwrap());
+                    let indexes_state_deps = self
+                        .tracker
+                        .search_by_tag(state_depends_on.first().unwrap());
 
                     let last_index_of_first_dep = indexes_state_deps.last().unwrap().clone();
 
-                    let last_index_state_ctx =
-                        tracker.recover(last_index_of_first_dep.clone()).unwrap();
+                    let last_index_state_ctx = self
+                        .tracker
+                        .recover(last_index_of_first_dep.clone())
+                        .unwrap();
 
                     context = last_index_state_ctx.clone();
 
@@ -134,9 +130,13 @@ impl StateMachine {
             return Ok(());
         }
 
-        let current_state = &self.states[next_state_index];
+        let state = &self.states[next_state_index];
 
-        let result = current_state.handler(context.clone());
+        let result = state.handler(context.clone());
+        self.tracker.as_mut().track(
+            Index::new(next_state_index, state.label(), state.tags()),
+            context.clone(),
+        );
 
         self.execute_rec(context, next_state_index, Option::Some(result))
     }
@@ -176,11 +176,11 @@ mod test {
     }
 
     impl Context for ContextA {
-        fn read_input(&self) -> Result<Value, Error> {
+        fn read(&self) -> Result<Value, Error> {
             serde_json::to_value(self).map_err(|e| anyhow!(e))
         }
 
-        fn write_output(&mut self, value: &Value) -> Result<(), Error> {
+        fn write(&mut self, value: &Value) -> Result<(), Error> {
             let ctx: ContextA = serde_json::from_value(value.clone()).map_err(|e| anyhow!(e))?;
             self.a = ctx.a;
             self.b = ctx.b;
@@ -209,10 +209,10 @@ mod test {
 
     impl StateHandler for Setup {
         fn handler(&self, context: ContextWrapper) -> StateResult {
-            let value = context.lock().unwrap().read_input().unwrap();
+            let value = context.lock().unwrap().read().unwrap();
             let _data: ContextA = serde_json::from_value(value).unwrap();
             let data = json!({ "a": "setting up", "b": 1 });
-            match context.lock().as_mut().unwrap().write_output(&data) {
+            match context.lock().as_mut().unwrap().write(&data) {
                 Ok(()) => Ok(()),
                 Err(e) => Err(StateError::StorageAccess(
                     StateErrorRecoverability::Recoverable,
@@ -244,10 +244,10 @@ mod test {
 
     impl StateHandler for Report {
         fn handler(&self, context: ContextWrapper) -> StateResult {
-            let value = context.lock().unwrap().read_input().unwrap();
+            let value = context.lock().unwrap().read().unwrap();
             let _data: ContextA = serde_json::from_value(value).unwrap();
             let data = json!({ "a": "some new data reported", "b": 7 });
-            match context.lock().as_mut().unwrap().write_output(&data) {
+            match context.lock().as_mut().unwrap().write(&data) {
                 Ok(()) => Ok(()),
                 Err(e) => Err(StateError::StorageAccess(
                     StateErrorRecoverability::Recoverable,
@@ -297,7 +297,7 @@ mod test {
 
         let context = wrap_context(ContextA::new(String::from("hello"), 7));
         let result = state_machine.execute(context.clone());
-        let last_ctx_message = context.lock().unwrap().read_input().unwrap();
+        let last_ctx_message = context.lock().unwrap().read().unwrap();
 
         assert_eq!(state_machine.states.len(), iss.len());
 

@@ -28,11 +28,11 @@ impl ContextA {
 }
 
 impl Context for ContextA {
-    fn read_input(&self) -> Result<Value, anyhow::Error> {
+    fn read(&self) -> Result<Value, anyhow::Error> {
         serde_json::to_value(self).map_err(|e| anyhow!(e))
     }
 
-    fn write_output(&mut self, value: &Value) -> Result<(), Error> {
+    fn write(&mut self, value: &Value) -> Result<(), Error> {
         let ctx: ContextA = serde_json::from_value(value.clone()).map_err(|e| anyhow!(e))?;
         self.a = ctx.a;
         self.b = ctx.b;
@@ -66,13 +66,13 @@ impl Setup {
 
 impl StateHandler for Setup {
     fn handler(&self, context: ContextWrapper) -> StateResult {
-        let value = context.lock().unwrap().read_input().unwrap();
+        let value = context.lock().unwrap().read().unwrap();
         let _data: ContextA = serde_json::from_value(value).unwrap();
 
         let mut rng = rand::thread_rng();
         let data = json!({ "a": "setting up", "b": rng.gen_range(0..9) });
 
-        match context.lock().as_mut().unwrap().write_output(&data) {
+        match context.lock().as_mut().unwrap().write(&data) {
             Ok(()) => Ok(()),
             Err(e) => Err(StateError::StorageAccess(
                 StateErrorRecoverability::Recoverable,
@@ -108,7 +108,7 @@ impl ComputePrice {
 
 impl StateHandler for ComputePrice {
     fn handler(&self, context: ContextWrapper) -> StateResult {
-        let value = context.lock().unwrap().read_input().unwrap();
+        let value = context.lock().unwrap().read().unwrap();
         let _data: ContextA = serde_json::from_value(value).unwrap();
         if _data.b % 2 == 0 {
             return Err(StateError::ParsingInput(
@@ -118,7 +118,7 @@ impl StateHandler for ComputePrice {
         }
 
         let data = json!({ "a": "the input number is odd", "b": _data.b });
-        match context.lock().as_mut().unwrap().write_output(&data) {
+        match context.lock().as_mut().unwrap().write(&data) {
             Ok(()) => Ok(()),
             Err(e) => Err(StateError::StorageAccess(
                 StateErrorRecoverability::Unrecoverable,
@@ -154,11 +154,11 @@ impl Report {
 
 impl StateHandler for Report {
     fn handler(&self, context: ContextWrapper) -> StateResult {
-        let value = context.lock().unwrap().read_input().unwrap();
+        let value = context.lock().unwrap().read().unwrap();
         let _data: ContextA = serde_json::from_value(value).unwrap();
         let data =
             json!({ "a": format!("{}: {}", "some new data reported", _data.a), "b": _data.b });
-        match context.lock().as_mut().unwrap().write_output(&data) {
+        match context.lock().as_mut().unwrap().write(&data) {
             Ok(()) => Ok(()),
             Err(e) => Err(StateError::StorageAccess(
                 StateErrorRecoverability::Recoverable,
