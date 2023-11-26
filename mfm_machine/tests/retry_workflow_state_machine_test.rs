@@ -24,5 +24,10 @@ fn test_retry_workflow_state_machine() {
 
     let result = state_machine.execute(context);
 
+    println!(
+        "state machine execution history: \n{:?}",
+        state_machine.track_history()
+    );
+
     assert!(result.is_ok());
 }

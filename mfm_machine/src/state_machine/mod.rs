@@ -4,7 +4,7 @@ use anyhow::anyhow;
 
 use crate::state::{context::ContextWrapper, StateResult, States};
 
-use self::tracker::{HashMapTracker, Index, Tracker};
+use self::tracker::{HashMapTracker, Index, Tracker, TrackerHistory};
 
 pub mod tracker;
 
@@ -54,6 +54,10 @@ impl StateMachine {
             states,
             tracker: Box::new(HashMapTracker::new()),
         }
+    }
+
+    pub fn track_history(&self) -> TrackerHistory {
+        self.tracker.history()
     }
 
     fn has_state(&self, state_index: usize) -> bool {
