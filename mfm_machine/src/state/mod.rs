@@ -1,12 +1,7 @@
 use anyhow::{anyhow, Error, Result};
-use std::{
-    fmt,
-    sync::{Arc, Mutex},
-};
+use std::{fmt, sync::Arc};
 
 pub mod context;
-
-use context::Context;
 
 use self::context::ContextWrapper;
 
@@ -30,8 +25,7 @@ fn ensure_nonempty_ascii_lowercase_underscore(input: &'static str) -> Result<&'s
 
 impl Tag {
     pub fn new(s: &'static str) -> Result<Self, Error> {
-        let input = s.as_ref();
-        match ensure_nonempty_ascii_lowercase_underscore(input) {
+        match ensure_nonempty_ascii_lowercase_underscore(s) {
             Ok(validated_input) => Ok(Self(validated_input)),
             Err(e) => Err(e),
         }
@@ -40,9 +34,8 @@ impl Tag {
 
 impl Label {
     pub fn new(s: &'static str) -> Result<Self, Error> {
-        let input = s.as_ref();
-        match ensure_nonempty_ascii_lowercase_underscore(input) {
-            Ok(validated_input) => Ok(Self(validated_input.into())),
+        match ensure_nonempty_ascii_lowercase_underscore(s) {
+            Ok(validated_input) => Ok(Self(validated_input)),
             Err(e) => Err(e),
         }
     }
@@ -151,33 +144,33 @@ mod test {
 
     #[test]
     fn test_valid_input_ensure_nonempty_ascii_lowercase_underscore() {
-        let inputs = vec!["this_should_work", "this_should_work_also", "thisalso"];
-
-        inputs.iter().for_each(|input| {
-            let result = ensure_nonempty_ascii_lowercase_underscore(input);
-            assert!(result.is_ok());
-            assert_eq!(&result.unwrap(), input);
-        })
+        ["this_should_work", "this_should_work_also", "thisalso"]
+            .iter()
+            .for_each(|input| {
+                let result = ensure_nonempty_ascii_lowercase_underscore(input);
+                assert!(result.is_ok());
+                assert_eq!(&result.unwrap(), input);
+            })
     }
 
     #[test]
     fn test_invalid_spaces_input_ensure_nonempty_ascii_lowercase_underscore() {
         let s = "this shouldnt work";
-        let result = ensure_nonempty_ascii_lowercase_underscore(&s);
+        let result = ensure_nonempty_ascii_lowercase_underscore(s);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_empty_input_ensure_nonempty_ascii_lowercase_underscore() {
         let s = "";
-        let result = ensure_nonempty_ascii_lowercase_underscore(&s);
+        let result = ensure_nonempty_ascii_lowercase_underscore(s);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_invalid_special_char_input_ensure_nonempty_ascii_lowercase_underscore() {
         let s = "this_should_not_work_@";
-        let result = ensure_nonempty_ascii_lowercase_underscore(&s);
+        let result = ensure_nonempty_ascii_lowercase_underscore(s);
         assert!(result.is_err());
     }
 }

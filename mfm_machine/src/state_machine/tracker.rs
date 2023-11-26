@@ -42,18 +42,23 @@ impl HashMapTracker {
     }
 }
 
+impl Default for HashMapTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Tracker for HashMapTracker {
     fn track(&mut self, index: Index, context: ContextWrapper) -> Result<bool, Error> {
         Ok(self.0.insert(index, context).is_none())
     }
 
     fn recover(&self, index: Index) -> Result<ContextWrapper, Error> {
-        Ok(self
-            .0
+        self.0
             .get(&index)
             .cloned()
             .clone()
-            .ok_or(anyhow!("index not found"))?)
+            .ok_or(anyhow!("index not found"))
     }
 
     fn search_by_tag(&self, tag: &Tag) -> Vec<Index> {
