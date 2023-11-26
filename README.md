@@ -1,7 +1,7 @@
 # MFM
 
 
-**WARNING: this v0.1.x is not being in development anymore due to an [in-progress full refactor for a v0.2](https://github.com/willyrgf/mfm/pull/59)**
+**WARNING: this v0.1.x is not being in development anymore due to an [in-progress full refactor for a v0.2]([https://github.com/willyrgf/mfm/pull/59](https://github.com/willyrgf/mfm/tree/v0.2-dev))**
 
 ---
 
