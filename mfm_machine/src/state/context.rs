@@ -11,6 +11,7 @@ pub trait Context {
 }
 
 pub fn wrap_context<C: Context + 'static>(context: C) -> ContextWrapper {
+    #[allow(clippy::arc_with_non_send_sync)]
     Arc::new(Mutex::new(Box::new(context)))
 }
 

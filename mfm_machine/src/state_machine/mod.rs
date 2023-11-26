@@ -1,8 +1,8 @@
-use std::{sync::Arc, usize};
+use std::usize;
 
 use anyhow::anyhow;
 
-use crate::state::{context::ContextWrapper, StateHandler, StateResult, States};
+use crate::state::{context::ContextWrapper, StateResult, States};
 
 use self::tracker::{HashMapTracker, Index, Tracker};
 
@@ -148,6 +148,8 @@ impl StateMachine {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use crate::state::context::{wrap_context, ContextWrapper};
     use crate::state::{
         context::Context, DependencyStrategy, Label, StateHandler, StateMetadata, Tag,
@@ -155,7 +157,7 @@ mod test {
     use crate::state::{StateError, StateErrorRecoverability};
     use anyhow::anyhow;
     use anyhow::Error;
-    use mfm_machine_macros::StateMetadataReqs;
+    use mfm_machine_derive::StateMetadataReqs;
     use serde_derive::{Deserialize, Serialize};
     use serde_json::{json, Value};
 
@@ -257,8 +259,6 @@ mod test {
 
     #[test]
     fn test_setup_state_initialization() {
-        use super::*;
-
         let label = Label::new("setup_state").unwrap();
         let tags = vec![Tag::new("setup").unwrap()];
         let state = Setup::new();
