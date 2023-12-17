@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 serde = "1.0.193"
+zeroize = "1.7.0"
