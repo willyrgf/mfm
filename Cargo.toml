@@ -6,4 +6,5 @@ members = [
 	"mfm_cli",
 	"mfm_machine",
 	"mfm_machine_derive",
+	"mfm_core",
 ]
