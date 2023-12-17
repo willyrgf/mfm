@@ -1,6 +1,6 @@
 /// ! A wrapper to conceal secrets when output into logs or displayed.
 //
-use serde::{Deserialize, Serialize};
+use serde_derive::{Deserialize, Serialize};
 use std::{fmt, ops::DerefMut};
 
 /// A simple struct with a single inner value to wrap content of any type.

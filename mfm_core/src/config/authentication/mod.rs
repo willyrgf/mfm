@@ -1,6 +1,6 @@
 pub mod wallet;
 
-use serde::{Deserialize, Serialize};
+use serde_derive::{Deserialize, Serialize};
 
 use self::wallet::Wallet;
 

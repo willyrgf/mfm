@@ -6,5 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+mfm_machine_derive = { path = "../mfm_machine_derive" }
+mfm_machine = { path = "../mfm_machine" }
 serde = "1.0.193"
 zeroize = "1.7.0"
+serde_json = "1.0.108"
+serde_derive = "1.0.193"
+anyhow = "1.0.75"

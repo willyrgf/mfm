@@ -1,5 +1,5 @@
 use crate::hidden::Hidden;
-use serde::{Deserialize, Serialize};
+use serde_derive::{Deserialize, Serialize};
 use std::{error::Error, fmt, str::FromStr};
 use zeroize::Zeroize;
 
@@ -54,6 +54,8 @@ pub fn deserialize_safe_password<'de, D>(deserializer: D) -> Result<SafePassword
 where
     D: serde::Deserializer<'de>,
 {
+    use serde::Deserialize;
+
     let password: String = Deserialize::deserialize(deserializer)?;
     Ok(SafePassword::from(password))
 }
