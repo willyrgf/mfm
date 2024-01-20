@@ -15,6 +15,7 @@ pub struct TrackerHistory(Vec<(usize, Index, ContextWrapper)>);
 
 impl Debug for TrackerHistory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // TODO: add a way to see the context at tracker history
         self.0
             .iter()
             .map(|(history_id, index, _)| {
@@ -51,8 +52,6 @@ impl IntoIterator for TrackerHistory {
     }
 }
 
-//TODO: should consider add an state_metadata where the state have
-// flexibility to say what kind of execution data he wants to store
 pub trait Tracker: TrackerMetadata {
     fn track(&mut self, index: Index, context: ContextWrapper) -> Result<bool, Error>;
     fn recover(&self, index: Index) -> Result<ContextWrapper, Error>;

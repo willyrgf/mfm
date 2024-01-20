@@ -7,7 +7,7 @@ use serde_json::Value;
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigSource {
-    File(String),
+    TomlFile(String),
 }
 
 impl Context for ConfigSource {

@@ -87,6 +87,16 @@ impl StateMachine {
 
         let state_result = last_state_result.unwrap();
 
+        let value = context.lock().unwrap().read().unwrap();
+
+        println!(
+            "state: {:?}; state_index: {}; state_result: {:?}; value: {:?}",
+            state.label(),
+            state_index,
+            state_result,
+            value,
+        );
+
         // TODO: it may be the transition
         match state_result {
             Ok(()) => Ok((state_index + 1, context)),
