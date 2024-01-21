@@ -1,10 +1,10 @@
-use super::token::Token;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Kind {
-    EVM,
+    Evm,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -14,11 +14,11 @@ pub struct Network {
     pub symbol: String,
     pub decimals: Option<u8>,
     pub chain_id: u32,
-    pub node_url: String,
-    pub node_url_failover: Option<String>,
+    pub node_url_http: Option<String>,
+    pub node_url_grpc: Option<String>,
     pub blockexplorer_url: Option<String>,
     pub min_balance_coin: f64,
-    pub wrapped_asset: Option<Token>,
+    pub wrapped_token: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
