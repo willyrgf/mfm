@@ -1,6 +1,4 @@
 use anyhow::anyhow;
-use anyhow::Error;
-use mfm_machine::state::context::Context;
 use mfm_machine::state::context::ContextWrapper;
 use mfm_machine::state::DependencyStrategy;
 use mfm_machine::state::Label;
@@ -13,32 +11,7 @@ use mfm_machine::state::Tag;
 use mfm_machine_derive::StateMetadataReqs;
 use rand::Rng;
 use serde_derive::{Deserialize, Serialize};
-use serde_json::{json, Value};
-
-#[derive(Serialize, Deserialize)]
-pub struct ContextA {
-    pub a: String,
-    pub b: u64,
-}
-
-impl ContextA {
-    pub fn new(a: String, b: u64) -> Self {
-        Self { a, b }
-    }
-}
-
-impl Context for ContextA {
-    fn read(&self) -> Result<Value, anyhow::Error> {
-        serde_json::to_value(self).map_err(|e| anyhow!(e))
-    }
-
-    fn write(&mut self, value: &Value) -> Result<(), Error> {
-        let ctx: ContextA = serde_json::from_value(value.clone()).map_err(|e| anyhow!(e))?;
-        self.a = ctx.a;
-        self.b = ctx.b;
-        Ok(())
-    }
-}
+use serde_json::json;
 
 #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
 pub struct Setup {
@@ -46,6 +19,12 @@ pub struct Setup {
     tags: Vec<Tag>,
     depends_on: Vec<Tag>,
     depends_on_strategy: DependencyStrategy,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SetupCtx {
+    a: String,
+    b: u32,
 }
 
 impl Default for Setup {
@@ -66,13 +45,18 @@ impl Setup {
 
 impl StateHandler for Setup {
     fn handler(&self, context: ContextWrapper) -> StateResult {
-        let value = context.lock().unwrap().read().unwrap();
-        let _data: ContextA = serde_json::from_value(value).unwrap();
-
         let mut rng = rand::thread_rng();
-        let data = json!({ "a": "setting up", "b": rng.gen_range(0..9) });
+        let data = SetupCtx {
+            a: "setup_b".to_string(),
+            b: rng.gen_range(0..9),
+        };
 
-        match context.lock().as_mut().unwrap().write(&data) {
+        match context
+            .lock()
+            .as_mut()
+            .unwrap()
+            .write("setup".to_string(), &json!(data))
+        {
             Ok(()) => Ok(()),
             Err(e) => Err(StateError::StorageAccess(
                 StateErrorRecoverability::Recoverable,
@@ -80,6 +64,12 @@ impl StateHandler for Setup {
             )),
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ComputePriceCtx {
+    msg: String,
+    b: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
@@ -108,8 +98,8 @@ impl ComputePrice {
 
 impl StateHandler for ComputePrice {
     fn handler(&self, context: ContextWrapper) -> StateResult {
-        let value = context.lock().unwrap().read().unwrap();
-        let _data: ContextA = serde_json::from_value(value).unwrap();
+        let value = context.lock().unwrap().read("setup".to_string()).unwrap();
+        let _data: SetupCtx = serde_json::from_value(value).unwrap();
         if _data.b % 2 == 0 {
             return Err(StateError::ParsingInput(
                 StateErrorRecoverability::Recoverable,
@@ -117,8 +107,16 @@ impl StateHandler for ComputePrice {
             ));
         }
 
-        let data = json!({ "a": "the input number is odd", "b": _data.b });
-        match context.lock().as_mut().unwrap().write(&data) {
+        let data = ComputePriceCtx {
+            msg: "the input number is odd".to_string(),
+            b: _data.b,
+        };
+        match context
+            .lock()
+            .as_mut()
+            .unwrap()
+            .write("compute".to_string(), &json!(data))
+        {
             Ok(()) => Ok(()),
             Err(e) => Err(StateError::StorageAccess(
                 StateErrorRecoverability::Unrecoverable,
@@ -126,6 +124,12 @@ impl StateHandler for ComputePrice {
             )),
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ReportCtx {
+    pub report_msg: String,
+    pub report_value: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
@@ -154,11 +158,35 @@ impl Report {
 
 impl StateHandler for Report {
     fn handler(&self, context: ContextWrapper) -> StateResult {
-        let value = context.lock().unwrap().read().unwrap();
-        let _data: ContextA = serde_json::from_value(value).unwrap();
-        let data =
-            json!({ "a": format!("{}: {}", "some new data reported", _data.a), "b": _data.b });
-        match context.lock().as_mut().unwrap().write(&data) {
+        let value = {
+            let compute_ctx = context.lock().unwrap().read("compute".to_string());
+            if let Ok(value) = compute_ctx {
+                value
+            } else {
+                context.lock().unwrap().read("setup".to_string()).unwrap()
+            }
+        };
+
+        let data = match serde_json::from_value::<ComputePriceCtx>(value.clone()) {
+            Ok(computer_ctx) => json!(ReportCtx {
+                report_msg: format!("{}: {}", "some new data reported", computer_ctx.msg),
+                report_value: computer_ctx.b
+            }),
+            Err(_) => {
+                let setup_ctx: SetupCtx = serde_json::from_value(value).unwrap();
+                json!(ReportCtx {
+                    report_msg: format!("{}: {}", "some new data reported", setup_ctx.a),
+                    report_value: setup_ctx.b
+                })
+            }
+        };
+
+        match context
+            .lock()
+            .as_mut()
+            .unwrap()
+            .write("report".to_string(), &data)
+        {
             Ok(()) => Ok(()),
             Err(e) => Err(StateError::StorageAccess(
                 StateErrorRecoverability::Recoverable,
@@ -181,59 +209,11 @@ pub struct ConfigStateCtx {
     pub c: String,
 }
 
-impl ConfigStateCtx {
-    pub fn new(config: Config) -> Self {
-        Self {
-            config,
-            c: String::new(),
-        }
-    }
-}
-
-impl Context for ConfigStateCtx {
-    fn read(&self) -> Result<Value, anyhow::Error> {
-        serde_json::to_value(self).map_err(|e| anyhow!(e))
-    }
-
-    fn write(&mut self, value: &Value) -> Result<(), Error> {
-        let ctx: ConfigStateCtx = serde_json::from_value(value.clone()).map_err(|e| anyhow!(e))?;
-        self.config = ctx.config;
-        self.c = ctx.c;
-        Ok(())
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 pub struct OnChainValuesCtx {
     pub config: Config,
     pub c: String,
     pub values: Vec<String>,
-}
-
-impl OnChainValuesCtx {
-    // TODO: may be a from?
-    pub fn new(config_ctx: ConfigStateCtx) -> Self {
-        Self {
-            config: config_ctx.config,
-            c: config_ctx.c,
-            values: vec![],
-        }
-    }
-}
-
-impl Context for OnChainValuesCtx {
-    fn read(&self) -> Result<Value, anyhow::Error> {
-        serde_json::to_value(self).map_err(|e| anyhow!(e))
-    }
-
-    fn write(&mut self, value: &Value) -> Result<(), Error> {
-        let ctx: OnChainValuesCtx =
-            serde_json::from_value(value.clone()).map_err(|e| anyhow!(e))?;
-        self.config = ctx.config;
-        self.c = ctx.c;
-        self.values = ctx.values;
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
@@ -243,6 +223,8 @@ pub struct ConfigState {
     depends_on: Vec<Tag>,
     depends_on_strategy: DependencyStrategy,
 }
+
+pub const CONFIG: &str = "config";
 
 impl Default for ConfigState {
     fn default() -> Self {
@@ -262,18 +244,21 @@ impl ConfigState {
 
 impl StateHandler for ConfigState {
     fn handler(&self, context: ContextWrapper) -> StateResult {
-        //let value = context.lock().unwrap().read().unwrap();
-        //let _data: ConfigStateCtx = serde_json::from_value(value).unwrap();
-
         let config = Config {
             a: "config_a".to_string(),
             b: "config_b".to_string(),
         };
-        let config_state_ctx = ConfigStateCtx::new(config);
+        let c = "".to_string();
+        let config_state_ctx = ConfigStateCtx { config, c };
 
         let data = serde_json::to_value(config_state_ctx).unwrap();
 
-        match context.lock().as_mut().unwrap().write(&data) {
+        match context
+            .lock()
+            .as_mut()
+            .unwrap()
+            .write(CONFIG.to_string(), &data)
+        {
             Ok(()) => Ok(()),
             Err(e) => Err(StateError::StorageAccess(
                 StateErrorRecoverability::Recoverable,
@@ -290,6 +275,7 @@ pub struct OnChainValuesState {
     depends_on: Vec<Tag>,
     depends_on_strategy: DependencyStrategy,
 }
+pub const ONCHAINVALUES: &str = "onchain_values";
 
 impl Default for OnChainValuesState {
     fn default() -> Self {
@@ -310,15 +296,23 @@ impl OnChainValuesState {
 
 impl StateHandler for OnChainValuesState {
     fn handler(&self, context: ContextWrapper) -> StateResult {
-        let value = context.lock().unwrap().read().unwrap();
+        let value = context.lock().unwrap().read(CONFIG.to_string()).unwrap();
         let _data: ConfigStateCtx = serde_json::from_value(value).unwrap();
 
-        let mut onchain_value_ctx = OnChainValuesCtx::new(_data);
-        onchain_value_ctx.values = vec!["txn1".to_string(), "txn2".to_string()];
+        let onchain_value_ctx = OnChainValuesCtx {
+            config: _data.config,
+            c: _data.c,
+            values: vec!["txn1".to_string(), "txn2".to_string()],
+        };
 
         let data = serde_json::to_value(onchain_value_ctx).unwrap();
 
-        match context.lock().as_mut().unwrap().write(&data) {
+        match context
+            .lock()
+            .as_mut()
+            .unwrap()
+            .write(ONCHAINVALUES.to_string(), &data)
+        {
             Ok(()) => Ok(()),
             Err(e) => Err(StateError::StorageAccess(
                 StateErrorRecoverability::Unrecoverable,
