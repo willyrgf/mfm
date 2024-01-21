@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fmt::Debug};
 
 use anyhow::{anyhow, Error};
+use serde_json::Value;
 
 use crate::state::{context::ContextWrapper, Label, Tag};
 
@@ -10,40 +11,43 @@ pub trait TrackerMetadata {
     fn history(&self) -> TrackerHistory;
 }
 
-#[derive(Clone)]
-pub struct TrackerHistory(Vec<(usize, Index, ContextWrapper)>);
+#[derive(Default, Clone)]
+pub struct TrackerHistory(Vec<(usize, Index, Value)>);
 
 impl Debug for TrackerHistory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0
-            .iter()
-            .map(|(history_id, index, _)| {
-                writeln!(
-                    f,
-                    "history_id ({}); index ({:?}); context (ptr)",
-                    history_id, index
-                )
-            })
-            .collect()
+        // TODO: add a way to see the context at tracker history
+        self.0.iter().try_for_each(|(history_id, index, value)| {
+            writeln!(
+                f,
+                "history_id ({}); index ({:?}); context ({:?})",
+                history_id, index, value
+            )
+        })
     }
 }
 
 impl TrackerHistory {
-    pub fn new() -> Self {
-        TrackerHistory(Vec::new())
+    pub fn new(v: Vec<(usize, Index, Value)>) -> Self {
+        TrackerHistory(v)
     }
 
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn push(&mut self, index: Index, context: ContextWrapper) {
-        self.0.push((self.len(), index, context))
+        self.0
+            .push((self.len(), index, context.lock().unwrap().dump().unwrap()))
     }
 }
 
 impl IntoIterator for TrackerHistory {
-    type Item = (usize, Index, ContextWrapper);
+    type Item = (usize, Index, Value);
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -51,8 +55,6 @@ impl IntoIterator for TrackerHistory {
     }
 }
 
-//TODO: should consider add an state_metadata where the state have
-// flexibility to say what kind of execution data he wants to store
 pub trait Tracker: TrackerMetadata {
     fn track(&mut self, index: Index, context: ContextWrapper) -> Result<bool, Error>;
     fn recover(&self, index: Index) -> Result<ContextWrapper, Error>;
@@ -85,7 +87,7 @@ impl HashMapTracker {
     pub fn new() -> Self {
         Self {
             tracker: HashMap::new(),
-            history: TrackerHistory::new(),
+            history: TrackerHistory::default(),
         }
     }
 }
@@ -132,49 +134,25 @@ impl TrackerMetadata for HashMapTracker {
 
 #[cfg(test)]
 mod test {
-    use anyhow::{anyhow, Error};
-    use serde_derive::{Deserialize, Serialize};
-    use serde_json::Value;
+    use std::collections::HashMap;
+
+    use serde_json::json;
 
     use crate::state::{
-        context::{wrap_context, Context, ContextWrapper},
+        context::{wrap_context, ContextWrapper, Local},
         Label, Tag,
     };
 
     use super::{HashMapTracker, Index, Tracker};
 
-    #[derive(Serialize, Deserialize)]
-    struct ContextA {
-        a: String,
-        b: u64,
-    }
-
-    impl ContextA {
-        fn new(a: String, b: u64) -> Self {
-            Self { a, b }
-        }
-    }
-
-    impl Context for ContextA {
-        fn read(&self) -> Result<Value, Error> {
-            serde_json::to_value(self).map_err(|e| anyhow!(e))
-        }
-
-        fn write(&mut self, value: &Value) -> Result<(), Error> {
-            let ctx: ContextA = serde_json::from_value(value.clone()).map_err(|e| anyhow!(e))?;
-            self.a = ctx.a;
-            self.b = ctx.b;
-            Ok(())
-        }
-    }
     #[test]
     fn test_tracker() {
         let tracker: &mut dyn Tracker = &mut HashMapTracker::new();
 
         let contexts: Vec<ContextWrapper> = vec![
-            wrap_context(ContextA::new("value".to_string(), 1)),
-            wrap_context(ContextA::new("value".to_string(), 2)),
-            wrap_context(ContextA::new("value".to_string(), 3)),
+            wrap_context(Local::new(HashMap::from([("value".to_string(), json!(1))]))),
+            wrap_context(Local::new(HashMap::from([("value".to_string(), json!(2))]))),
+            wrap_context(Local::new(HashMap::from([("value".to_string(), json!(3))]))),
         ];
         let indexes = vec![
             Index::new(
@@ -203,8 +181,8 @@ mod test {
         for i in 0..indexes.len() {
             let context_recovered = tracker.recover(indexes[i].clone()).unwrap();
 
-            let value_recovered = context_recovered.lock().unwrap().read().unwrap();
-            let value_expected = contexts[i].lock().unwrap().read().unwrap();
+            let value_recovered = context_recovered.lock().unwrap().dump().unwrap();
+            let value_expected = contexts[i].lock().unwrap().dump().unwrap();
 
             assert_eq!(value_expected, value_recovered);
         }
@@ -215,9 +193,9 @@ mod test {
         let tracker: &mut dyn Tracker = &mut HashMapTracker::new();
 
         let contexts: Vec<ContextWrapper> = vec![
-            wrap_context(ContextA::new("value".to_string(), 1)),
-            wrap_context(ContextA::new("value".to_string(), 2)),
-            wrap_context(ContextA::new("value".to_string(), 3)),
+            wrap_context(Local::new(HashMap::from([("value".to_string(), json!(1))]))),
+            wrap_context(Local::new(HashMap::from([("value".to_string(), json!(2))]))),
+            wrap_context(Local::new(HashMap::from([("value".to_string(), json!(3))]))),
         ];
         let indexes = vec![
             Index::new(
@@ -257,9 +235,9 @@ mod test {
         let tracker: &mut dyn Tracker = &mut HashMapTracker::new();
 
         let contexts: Vec<ContextWrapper> = vec![
-            wrap_context(ContextA::new("value".to_string(), 1)),
-            wrap_context(ContextA::new("value".to_string(), 2)),
-            wrap_context(ContextA::new("value".to_string(), 3)),
+            wrap_context(Local::new(HashMap::from([("value".to_string(), json!(1))]))),
+            wrap_context(Local::new(HashMap::from([("value".to_string(), json!(2))]))),
+            wrap_context(Local::new(HashMap::from([("value".to_string(), json!(3))]))),
         ];
         let indexes = vec![
             Index::new(

@@ -11,18 +11,32 @@ pub mod tracker;
 pub struct StateMachineBuilder {
     pub states: States,
     pub tracker: Option<Box<dyn Tracker>>,
+    pub max_recoveries: usize,
+}
+
+pub const MAX_RECOVERIES_MULT: usize = 3;
+
+// default_max_recoveries is number of states * MAX_RECOVERIES_MULT + 1
+pub fn default_max_recoveries(states: States) -> usize {
+    states.len() * MAX_RECOVERIES_MULT + 1
 }
 
 impl StateMachineBuilder {
     pub fn new(states: States) -> Self {
         Self {
-            states,
+            states: states.clone(),
             tracker: None,
+            max_recoveries: default_max_recoveries(states),
         }
     }
 
     pub fn tracker(mut self, tracker: Box<dyn Tracker>) -> Self {
         self.tracker = Some(tracker);
+        self
+    }
+
+    pub fn max_recoveries(mut self, max: usize) -> Self {
+        self.max_recoveries = max;
         self
     }
 
@@ -32,6 +46,7 @@ impl StateMachineBuilder {
             tracker: self
                 .tracker
                 .unwrap_or_else(|| Box::new(HashMapTracker::new())),
+            max_recoveries: self.max_recoveries,
         }
     }
 }
@@ -39,10 +54,12 @@ impl StateMachineBuilder {
 pub struct StateMachine {
     pub states: States,
     pub tracker: Box<dyn Tracker>,
+    max_recoveries: usize,
 }
 
 #[derive(Debug)]
 pub enum StateMachineError {
+    ReachedMaxRecoveries((), anyhow::Error),
     EmptyState((), anyhow::Error),
     InternalError(StateResult, anyhow::Error),
     StateError(StateResult, anyhow::Error),
@@ -51,8 +68,9 @@ pub enum StateMachineError {
 impl StateMachine {
     pub fn new(states: States) -> Self {
         Self {
-            states,
+            states: states.clone(),
             tracker: Box::new(HashMapTracker::new()),
+            max_recoveries: default_max_recoveries(states),
         }
     }
 
@@ -62,6 +80,11 @@ impl StateMachine {
 
     fn has_state(&self, state_index: usize) -> bool {
         self.states.len() > state_index
+    }
+
+    fn reached_max_recoveries(&self) -> (bool, usize) {
+        let steps = self.track_history().len();
+        (steps >= self.max_recoveries, steps)
     }
 
     // TODO: add logging, instrumentation
@@ -78,6 +101,13 @@ impl StateMachine {
             ));
         }
 
+        if let (true, steps) = self.reached_max_recoveries() {
+            return Err(StateMachineError::ReachedMaxRecoveries(
+                (),
+                anyhow!("reached max recoveries ({})", steps),
+            ));
+        }
+
         let state = &self.states[state_index];
 
         // if thats true, means that no state was executed before and this is the first one
@@ -86,6 +116,16 @@ impl StateMachine {
         }
 
         let state_result = last_state_result.unwrap();
+
+        // //FIXME: state_machine.track_history() show be enough
+        // let value = context.lock().unwrap().dump().unwrap();
+        // println!(
+        //     "state: {:?}; state_index: {}; state_result: {:?}; value: {:?}",
+        //     state.label(),
+        //     state_index,
+        //     state_result,
+        //     value,
+        // );
 
         // TODO: it may be the transition
         match state_result {
@@ -137,7 +177,7 @@ impl StateMachine {
         let state = &self.states[next_state_index];
 
         let result = state.handler(context.clone());
-        self.tracker.as_mut().track(
+        let _ = self.tracker.as_mut().track(
             Index::new(next_state_index, state.label(), state.tags()),
             context.clone(),
         );
@@ -154,43 +194,14 @@ impl StateMachine {
 mod test {
     use std::sync::Arc;
 
-    use crate::state::context::{wrap_context, ContextWrapper};
-    use crate::state::{
-        context::Context, DependencyStrategy, Label, StateHandler, StateMetadata, Tag,
-    };
+    use crate::state::context::{wrap_context, Context, ContextWrapper, Local};
+    use crate::state::{DependencyStrategy, Label, StateHandler, StateMetadata, Tag};
     use crate::state::{StateError, StateErrorRecoverability};
-    use anyhow::anyhow;
-    use anyhow::Error;
     use mfm_machine_derive::StateMetadataReqs;
     use serde_derive::{Deserialize, Serialize};
-    use serde_json::{json, Value};
+    use serde_json::json;
 
     use super::StateResult;
-
-    #[derive(Serialize, Deserialize)]
-    struct ContextA {
-        a: String,
-        b: u64,
-    }
-
-    impl ContextA {
-        fn new(a: String, b: u64) -> Self {
-            Self { a, b }
-        }
-    }
-
-    impl Context for ContextA {
-        fn read(&self) -> Result<Value, Error> {
-            serde_json::to_value(self).map_err(|e| anyhow!(e))
-        }
-
-        fn write(&mut self, value: &Value) -> Result<(), Error> {
-            let ctx: ContextA = serde_json::from_value(value.clone()).map_err(|e| anyhow!(e))?;
-            self.a = ctx.a;
-            self.b = ctx.b;
-            Ok(())
-        }
-    }
 
     #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
     pub struct Setup {
@@ -211,12 +222,24 @@ mod test {
         }
     }
 
+    #[derive(Serialize, Deserialize)]
+    struct SetupCtx {
+        a: String,
+        b: u32,
+    }
+
     impl StateHandler for Setup {
         fn handler(&self, context: ContextWrapper) -> StateResult {
-            let value = context.lock().unwrap().read().unwrap();
-            let _data: ContextA = serde_json::from_value(value).unwrap();
-            let data = json!({ "a": "setting up", "b": 1 });
-            match context.lock().as_mut().unwrap().write(&data) {
+            let data = SetupCtx {
+                a: "setup_b".to_string(),
+                b: 1,
+            };
+            match context
+                .lock()
+                .as_mut()
+                .unwrap()
+                .write("setup".to_string(), &json!(data))
+            {
                 Ok(()) => Ok(()),
                 Err(e) => Err(StateError::StorageAccess(
                     StateErrorRecoverability::Recoverable,
@@ -224,6 +247,12 @@ mod test {
                 )),
             }
         }
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub struct ReportCtx {
+        pub report_msg: String,
+        pub report_value: u32,
     }
 
     #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
@@ -248,10 +277,19 @@ mod test {
 
     impl StateHandler for Report {
         fn handler(&self, context: ContextWrapper) -> StateResult {
-            let value = context.lock().unwrap().read().unwrap();
-            let _data: ContextA = serde_json::from_value(value).unwrap();
-            let data = json!({ "a": "some new data reported", "b": 7 });
-            match context.lock().as_mut().unwrap().write(&data) {
+            let setup_ctx: SetupCtx =
+                serde_json::from_value(context.lock().unwrap().read("setup".to_string()).unwrap())
+                    .unwrap();
+            let data = json!(ReportCtx {
+                report_msg: format!("{}: {}", "some new data reported", setup_ctx.a),
+                report_value: setup_ctx.b
+            });
+            match context
+                .lock()
+                .as_mut()
+                .unwrap()
+                .write("report".to_string(), &data)
+            {
                 Ok(()) => Ok(()),
                 Err(e) => Err(StateError::StorageAccess(
                     StateErrorRecoverability::Recoverable,
@@ -266,7 +304,7 @@ mod test {
         let label = Label::new("setup_state").unwrap();
         let tags = vec![Tag::new("setup").unwrap()];
         let state = Setup::new();
-        let ctx_input = wrap_context(ContextA::new(String::from("hello"), 7));
+        let ctx_input = wrap_context(Local::default());
 
         let result = state.handler(ctx_input);
 
@@ -299,9 +337,9 @@ mod test {
 
         let mut state_machine = StateMachine::new(initial_states);
 
-        let context = wrap_context(ContextA::new(String::from("hello"), 7));
+        let context = wrap_context(Local::default());
         let result = state_machine.execute(context.clone());
-        let last_ctx_message = context.lock().unwrap().read().unwrap();
+        let last_ctx_message = context.lock().unwrap().dump().unwrap();
 
         assert_eq!(state_machine.states.len(), iss.len());
 
@@ -314,10 +352,18 @@ mod test {
             },
         );
 
+        let last_ctx_data: Local = serde_json::from_value(last_ctx_message).unwrap();
+        let report_ctx: ReportCtx =
+            serde_json::from_value(last_ctx_data.read("report".to_string()).unwrap()).unwrap();
+
+        println!("report_msg: {}", report_ctx.report_msg);
+
         assert!(result.is_ok());
         assert_eq!(
-            last_ctx_message,
-            json!({"a": "some new data reported", "b": 7})
+            report_ctx.report_msg,
+            String::from("some new data reported: setup_b")
         );
+
+        assert_eq!(report_ctx.report_value, 1);
     }
 }
