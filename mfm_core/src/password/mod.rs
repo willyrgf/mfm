@@ -1,8 +1,8 @@
-use crate::hidden::Hidden;
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt, str::FromStr};
 use zeroize::Zeroize;
 
+use crate::hidden::Hidden;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct SafePassword {
@@ -48,14 +48,4 @@ impl FromStr for SafePassword {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Self::from(s.to_owned()))
     }
-}
-
-pub fn deserialize_safe_password<'de, D>(deserializer: D) -> Result<SafePassword, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize;
-
-    let password: String = Deserialize::deserialize(deserializer)?;
-    Ok(SafePassword::from(password))
 }

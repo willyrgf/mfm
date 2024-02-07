@@ -1,5 +1,7 @@
 auth_methods:
-  - { type: wallet, private_key: YOUR_PRIVATE_KEY }
+  - type: wallet
+    private_key: "YOUR_PRIVATE_KEY"
+    not_encrypted: false
 
 networks:
   bsc:

@@ -67,11 +67,22 @@ impl StateHandler for ReadConfig {
             config,
         };
 
+        let value = serde_json::to_value(config_ctx.clone()).unwrap();
+
         context
             .lock()
             .unwrap()
-            .write(CONFIG_CTX.into(), &json!(config_ctx))
+            .write(CONFIG_CTX.into(), &value.clone())
             .unwrap();
+
+        // let config_value = context.lock().unwrap().read(CONFIG_CTX.into()).unwrap();
+        //
+        // println!("value: \n{:?}", value);
+        // println!("config_value: \n{:?}", config_value);
+        //
+        // let config_from_ctx: ConfigCtx = serde_json::from_value(config_value.clone()).unwrap();
+        // //assert_eq!(config_value, value);
+        // //assert_eq!(config_ctx, config_from_ctx);
 
         Ok(())
     }
@@ -87,22 +98,31 @@ mod test {
     };
     use serde_json::json;
 
-    use crate::contexts::{ConfigSource, CONFIG_SOURCE_CTX};
+    use crate::{
+        config::Config,
+        contexts::{ConfigCtx, ConfigSource, CONFIG_CTX, CONFIG_SOURCE_CTX},
+        read_yaml,
+    };
 
     use super::ReadConfig;
 
     #[test]
     fn test_readconfig_from_source_file() {
         let state = ReadConfig::default();
+        let path = "test_config.yml".to_string();
         let ctx_input = wrap_context(Local::new(HashMap::from([(
             CONFIG_SOURCE_CTX.into(),
-            json!(ConfigSource::YamlFile("test_config.yml".to_string())),
+            json!(ConfigSource::YamlFile(path.clone())),
         )])));
         let result = state.handler(ctx_input.clone());
 
-        let dump = ctx_input.lock().unwrap().dump().unwrap();
+        let config_value = ctx_input.lock().unwrap().read(CONFIG_CTX.into()).unwrap();
+        let config_from_ctx: ConfigCtx = serde_json::from_value(config_value.clone()).unwrap();
+        assert_eq!(json!(config_value), json!(""));
+        let config_from_file: Config = read_yaml(path).unwrap();
+
         assert!(result.is_ok());
-        assert_eq!(dump, json!(""));
+        assert_eq!(config_from_ctx.config, config_from_file);
     }
 
     // TODO: add a test transitioning between states and contexts.
