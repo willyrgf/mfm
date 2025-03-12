@@ -4,7 +4,6 @@ use mfm_machine::state::{
     context::ContextWrapper, DependencyStrategy, Label, StateHandler, StateMetadata, StateResult,
     Tag,
 };
-use serde_json::json;
 
 use crate::{
     config::Config,

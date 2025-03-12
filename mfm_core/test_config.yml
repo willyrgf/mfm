@@ -1,7 +1,15 @@
+# auth_methods:
+#   - method: wallet
+#     wallet:
+#       private_key: ""
+#       not_encrypted: false
+
 auth_methods:
-  - type: wallet
+  - method: wallet
     private_key: "YOUR_PRIVATE_KEY"
     not_encrypted: false
+    env_password: "OPTIONAL_ENV_PASSWORD"
+  - method: meta_mask
 
 networks:
   bsc:

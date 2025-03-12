@@ -2,9 +2,7 @@ use std::{fs::File, io::Read};
 
 pub mod config;
 pub mod contexts;
-pub mod hidden;
 pub mod operations;
-pub mod password;
 pub mod states;
 
 use anyhow::Error;
