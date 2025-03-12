@@ -20,6 +20,16 @@ pub struct TokenNetwork {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct TokenNetworks(HashMap<String, TokenNetwork>);
 
+impl TokenNetworks {
+    pub fn hashmap(&self) -> &HashMap<String, TokenNetwork> {
+        &self.0
+    }
+
+    pub fn get(&self, key: &str) -> Option<&TokenNetwork> {
+        self.0.get(key)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Token {
     // TODO: rethink tokens to be any kind of token, but each

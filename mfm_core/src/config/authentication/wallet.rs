@@ -1,55 +1,36 @@
+use crate::config::authentication::encryption::Encryption;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tari_utilities::SafePassword;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Wallet {
-    #[serde(deserialize_with = "deserialize_safe_password")]
-    pub private_key: SafePassword,
+    pub private_key_path: PathBuf,
     pub not_encrypted: Option<bool>,
-    pub env_password: Option<String>,
 }
 
 impl PartialEq for Wallet {
     fn eq(&self, other: &Self) -> bool {
-        self.not_encrypted == other.not_encrypted && self.env_password == other.env_password
+        self.private_key_path == other.private_key_path && self.not_encrypted == other.not_encrypted
     }
 }
 
 impl Eq for Wallet {}
 
-fn deserialize_safe_password<'de, D>(deserializer: D) -> Result<SafePassword, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let v: Value = Deserialize::deserialize(deserializer)?;
-    println!("Raw Value: {:?}", v);
+impl Wallet {
+    pub fn read_private_key(
+        &self,
+        password: Option<&str>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let private_key = std::fs::read_to_string(&self.private_key_path)?;
 
-    // let password: String = Deserialize::deserialize(deserializer)?;
-    // println!("password: {}", password);
-    // Ok(SafePassword::from(password))
-    Ok(SafePassword::from(""))
-}
+        if self.not_encrypted.unwrap_or(false) {
+            return Ok(private_key.trim().to_string());
+        }
 
-#[cfg(test)]
-mod test {
-    use super::Wallet;
-    //use super::deserialize_safe_password;
-    //use serde::{Deserialize, Serialize};
-    //use tari_utilities::SafePassword;
+        let password = password.ok_or("Password required for encrypted private key")?;
+        let mut encryption = Encryption::new(password);
+        let decrypted = encryption.decrypt(&private_key)?;
 
-    // #[derive(Debug, Serialize, Deserialize)]
-    // struct Wallet {
-    //     #[serde(deserialize_with = "deserialize_safe_password")]
-    //     private_key: SafePassword,
-    // }
-
-    #[test]
-    fn test_wallet_deserializer() {
-        let yaml_data = r#"
-            private_key: "YOUR_PRIVATE_KEY"
-        "#;
-        let wallet: Wallet = serde_yaml::from_str(yaml_data).expect("Failed to deserialize");
-        println!("wallet: {:?}", wallet.private_key.reveal());
+        Ok(decrypted.as_str().to_string())
     }
 }
