@@ -2173,6 +2173,7 @@ version = "0.1.29"
 dependencies = [
  "clap",
  "ethers",
+ "hex",
  "mfm_core",
  "serde",
  "serde_json",

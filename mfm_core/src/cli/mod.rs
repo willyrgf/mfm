@@ -132,12 +132,54 @@ impl CliContext {
         to_token: &str,
         amount: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let from_addr = Address::from_str(from_token)?;
-        let to_addr = Address::from_str(to_token)?;
+        // Get token addresses from config
+        let from_token_config = self
+            .portfolio
+            .config
+            .tokens
+            .get(from_token)
+            .ok_or_else(|| format!("Token {} not found in config", from_token))?;
+        let from_token_network = from_token_config
+            .networks
+            .get(&self.portfolio.config.network.name)
+            .ok_or_else(|| {
+                format!(
+                    "Token {} not configured for network {}",
+                    from_token, self.portfolio.config.network.name
+                )
+            })?;
 
-        // Convert decimal amount to wei (assuming 18 decimals)
+        let to_token_config = self
+            .portfolio
+            .config
+            .tokens
+            .get(to_token)
+            .ok_or_else(|| format!("Token {} not found in config", to_token))?;
+        let to_token_network = to_token_config
+            .networks
+            .get(&self.portfolio.config.network.name)
+            .ok_or_else(|| {
+                format!(
+                    "Token {} not configured for network {}",
+                    to_token, self.portfolio.config.network.name
+                )
+            })?;
+
+        let from_addr = Address::from_str(&from_token_network.address)?;
+        let to_addr = Address::from_str(&to_token_network.address)?;
+
+        // Convert decimal amount to wei using the token's decimals
         let amount_float: f64 = amount.parse()?;
-        let amount_wei = U256::from_dec_str(&format!("{}", (amount_float * 1e18) as u64))?;
+        let decimals = from_token_network.decimals.unwrap_or(18);
+        let amount_wei = U256::from_dec_str(&format!(
+            "{}",
+            (amount_float * 10f64.powi(decimals as i32)) as u64
+        ))?;
+
+        eprintln!(
+            "Converting {} tokens to wei with {} decimals: {}",
+            amount_float, decimals, amount_wei
+        );
 
         self.portfolio
             .start_operation(PortfolioOperation::Swap {
@@ -147,7 +189,7 @@ impl CliContext {
             })
             .await?;
 
-        while matches!(self.portfolio.status, PortfolioStatus::Completed) {
+        while !matches!(self.portfolio.status, PortfolioStatus::Completed) {
             match self.portfolio.status {
                 PortfolioStatus::CheckingBalances => {
                     self.portfolio.check_balances().await?;

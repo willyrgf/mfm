@@ -27,6 +27,14 @@ pub enum BlockchainError {
     TransactionError(String),
     #[error("Arithmetic overflow")]
     Overflow,
+    #[error("Quote error: {0}")]
+    QuoteError(String),
+    #[error("Swap error: {0}")]
+    SwapError(String),
+    #[error("API error: {0}")]
+    ApiError(String),
+    #[error("Signing error: {0}")]
+    SigningError(String),
     #[error("Other error: {0}")]
     Other(String),
 }
