@@ -5,15 +5,18 @@ use std::collections::HashMap;
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     UniswapV2,
+    CowSwap,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Dex {
     pub name: String,
     pub kind: Kind,
-    pub router_address: String,
-    pub factory_address: String,
+    pub router_address: Option<String>,
+    pub factory_address: Option<String>,
     pub network_id: String,
+    pub settlement_contract: Option<String>,
+    pub api_url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]

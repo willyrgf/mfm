@@ -3,17 +3,22 @@ use std::{fs::File, io::Read};
 pub mod blockchain;
 pub mod cli;
 pub mod config;
+pub mod portfolio;
+
+pub use blockchain::{
+    cow_swap::CowSwapProvider,
+    dex::{DexError, DexProvider},
+    evm::{BlockchainError, BlockchainProvider},
+    EvmProvider,
+};
+
 pub mod contexts;
 pub mod operations;
-pub mod portfolio;
 pub mod states;
 
 use anyhow::Error;
 use serde::de::DeserializeOwned;
 
-pub use blockchain::{
-    BlockchainProvider, CowSwapProvider, DexProvider, EvmProvider, UniswapV3Provider,
-};
 pub use cli::{Cli, CliContext, Commands};
 pub use portfolio::{Portfolio, PortfolioOperation, PortfolioState, PortfolioStatus, TokenBalance};
 pub use states::*;

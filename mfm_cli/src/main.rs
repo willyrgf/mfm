@@ -1,16 +1,25 @@
+mod telemetry;
+
+pub const APP_NAME: &str = "mfm";
+pub const DEFAULT_LOG_LEVEL: &str = "info";
+
 use clap::Parser;
-use ethers::providers::{Http, Provider};
-use mfm::{
-    telemetry::{get_subscriber, init_subscriber},
-    ExitCode, APP_NAME, DEFAULT_LOG_LEVEL,
+use ethers::{
+    providers::{Http, Provider},
+    signers::LocalWallet,
 };
 use mfm_core::{
-    cli::{Cli, CliContext, Commands},
+    blockchain::{
+        dex::{CowSwapProvider, UniswapV3Provider},
+        evm::{ChainConfig, EvmProvider},
+    },
     config::{authentication::encryption::Encryption, Config},
+    Cli, CliContext, Commands,
 };
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use url::Url;
+
+use crate::telemetry::{get_subscriber, init_subscriber};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -54,27 +63,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let provider = Provider::new(Http::new(Url::parse(&config.network.rpc_url)?));
 
-            let blockchain_provider = Arc::new(Mutex::new(Box::new(
-                mfm_core::blockchain::EvmProvider::new(
-                    mfm_core::blockchain::ChainConfig {
-                        rpc_url: config.network.rpc_url.clone(),
-                        chain_id: config.network.chain_id,
-                        name: config.network.name.clone(),
-                    },
-                    wallet.get_private_key(),
-                )?,
-            )));
+            let blockchain_provider = Box::new(EvmProvider::new(
+                ChainConfig {
+                    rpc_url: config.network.rpc_url.clone(),
+                    chain_id: config.network.chain_id,
+                    name: config.network.name.clone(),
+                },
+                wallet.get_private_key().to_string(),
+            )?);
 
-            let dex_provider = Arc::new(Mutex::new(Box::new(
-                mfm_core::blockchain::UniswapV3Provider::new(provider.clone()),
-            )));
+            let dex_provider = Box::new(UniswapV3Provider::new(provider.clone()));
 
             // Create CLI context
-            let mut context = CliContext::new(
-                blockchain_provider.lock().await.clone(),
-                dex_provider.lock().await.clone(),
-                &config,
-            );
+            let mut context = CliContext::new(blockchain_provider, dex_provider, &config);
 
             context.handle_rebalance().await?;
         }
@@ -87,34 +88,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Load configuration
             let config = Config::load(&config)?;
 
+            // Get token addresses from config
+            let from_token_config = config
+                .tokens
+                .get(&from_token)
+                .ok_or_else(|| format!("Token {} not found in config", from_token))?;
+            let from_token_network = from_token_config
+                .networks
+                .get(&config.network.name)
+                .ok_or_else(|| {
+                    format!(
+                        "Token {} not configured for network {}",
+                        from_token, config.network.name
+                    )
+                })?;
+
+            let to_token_config = config
+                .tokens
+                .get(&to_token)
+                .ok_or_else(|| format!("Token {} not found in config", to_token))?;
+            let to_token_network = to_token_config
+                .networks
+                .get(&config.network.name)
+                .ok_or_else(|| {
+                    format!(
+                        "Token {} not configured for network {}",
+                        to_token, config.network.name
+                    )
+                })?;
+
             // Load wallet securely
             let wallet = config.load_wallet(Some("your_secure_password"))?;
 
             let provider = Provider::new(Http::new(Url::parse(&config.network.rpc_url)?));
+            let wallet_signer = LocalWallet::from_str(wallet.get_private_key())?
+                .with_chain_id(config.network.chain_id);
 
-            let blockchain_provider = Arc::new(Mutex::new(Box::new(
-                mfm_core::blockchain::EvmProvider::new(
-                    mfm_core::blockchain::ChainConfig {
-                        rpc_url: config.network.rpc_url.clone(),
-                        chain_id: config.network.chain_id,
-                        name: config.network.name.clone(),
-                    },
-                    wallet.get_private_key(),
-                )?,
-            )));
+            let blockchain_provider = Box::new(EvmProvider::new(
+                ChainConfig {
+                    rpc_url: config.network.rpc_url.clone(),
+                    chain_id: config.network.chain_id,
+                    name: config.network.name.clone(),
+                },
+                wallet.get_private_key().to_string(),
+            )?);
 
-            let dex_provider = Arc::new(Mutex::new(Box::new(
-                mfm_core::blockchain::UniswapV3Provider::new(provider.clone()),
-            )));
-
-            // Create CLI context
-            let mut context = CliContext::new(
-                blockchain_provider.lock().await.clone(),
-                dex_provider.lock().await.clone(),
-                &config,
+            let dex_provider = Box::new(
+                CowSwapProvider::new(provider.clone())
+                    .with_chain_id(config.network.chain_id)
+                    .with_signer(wallet_signer),
             );
 
-            context.handle_swap(&from_token, &to_token, &amount).await?;
+            // Create CLI context
+            let mut context = CliContext::new(blockchain_provider, dex_provider, &config);
+
+            // Convert amount to wei using the token's decimals
+            let amount_float: f64 = amount.parse()?;
+            let decimals = from_token_network.decimals.unwrap_or(18);
+            let amount_wei = format!("{}", (amount_float * 10f64.powi(decimals as i32)) as u64);
+
+            context
+                .handle_swap(
+                    &from_token_network.address,
+                    &to_token_network.address,
+                    &amount_wei,
+                )
+                .await?;
         }
         Commands::Status { config } => {
             // Load configuration
@@ -125,27 +164,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let provider = Provider::new(Http::new(Url::parse(&config.network.rpc_url)?));
 
-            let blockchain_provider = Arc::new(Mutex::new(Box::new(
-                mfm_core::blockchain::EvmProvider::new(
-                    mfm_core::blockchain::ChainConfig {
-                        rpc_url: config.network.rpc_url.clone(),
-                        chain_id: config.network.chain_id,
-                        name: config.network.name.clone(),
-                    },
-                    wallet.get_private_key(),
-                )?,
-            )));
+            let blockchain_provider = Box::new(EvmProvider::new(
+                ChainConfig {
+                    rpc_url: config.network.rpc_url.clone(),
+                    chain_id: config.network.chain_id,
+                    name: config.network.name.clone(),
+                },
+                wallet.get_private_key().to_string(),
+            )?);
 
-            let dex_provider = Arc::new(Mutex::new(Box::new(
-                mfm_core::blockchain::UniswapV3Provider::new(provider.clone()),
-            )));
+            let dex_provider = Box::new(UniswapV3Provider::new(provider.clone()));
 
             // Create CLI context
-            let mut context = CliContext::new(
-                blockchain_provider.lock().await.clone(),
-                dex_provider.lock().await.clone(),
-                &config,
-            );
+            let mut context = CliContext::new(blockchain_provider, dex_provider, &config);
 
             // Check balances and display status
             context.check_balances().await?;
@@ -160,27 +191,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let provider = Provider::new(Http::new(Url::parse(&config.network.rpc_url)?));
 
-            let blockchain_provider = Arc::new(Mutex::new(Box::new(
-                mfm_core::blockchain::EvmProvider::new(
-                    mfm_core::blockchain::ChainConfig {
-                        rpc_url: config.network.rpc_url.clone(),
-                        chain_id: config.network.chain_id,
-                        name: config.network.name.clone(),
-                    },
-                    wallet.get_private_key(),
-                )?,
-            )));
+            let blockchain_provider = Box::new(EvmProvider::new(
+                ChainConfig {
+                    rpc_url: config.network.rpc_url.clone(),
+                    chain_id: config.network.chain_id,
+                    name: config.network.name.clone(),
+                },
+                wallet.get_private_key().to_string(),
+            )?);
 
-            let dex_provider = Arc::new(Mutex::new(Box::new(
-                mfm_core::blockchain::UniswapV3Provider::new(provider.clone()),
-            )));
+            let dex_provider = Box::new(UniswapV3Provider::new(provider.clone()));
 
             // Create CLI context
-            let mut context = CliContext::new(
-                blockchain_provider.lock().await.clone(),
-                dex_provider.lock().await.clone(),
-                &config,
-            );
+            let mut context = CliContext::new(blockchain_provider, dex_provider, &config);
 
             context.handle_resume()?;
         }

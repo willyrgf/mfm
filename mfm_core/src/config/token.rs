@@ -15,6 +15,7 @@ pub struct TokenNetwork {
     pub address: String,
     pub slippage: f64,
     pub path_token: String,
+    pub decimals: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]

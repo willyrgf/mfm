@@ -1,10 +1,13 @@
 use crate::{
-    blockchain::{BlockchainProvider, DexProvider},
+    blockchain::{evm::BlockchainProvider, DexProvider},
     portfolio::{Portfolio, PortfolioOperation, PortfolioStatus},
 };
 use clap::{Parser, Subcommand};
 use ethers::types::{Address, U256};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::str::FromStr;
+use thiserror::Error;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -131,7 +134,10 @@ impl CliContext {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let from_addr = Address::from_str(from_token)?;
         let to_addr = Address::from_str(to_token)?;
-        let amount_wei = U256::from_str(amount)?;
+
+        // Convert decimal amount to wei (assuming 18 decimals)
+        let amount_float: f64 = amount.parse()?;
+        let amount_wei = U256::from_dec_str(&format!("{}", (amount_float * 1e18) as u64))?;
 
         self.portfolio
             .start_operation(PortfolioOperation::Swap {
@@ -187,4 +193,9 @@ impl CliContext {
         self.portfolio.resume()?;
         Ok(())
     }
+}
+
+#[derive(Debug, Error)]
+pub enum CliError {
+    // ... rest of the file ...
 }

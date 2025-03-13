@@ -1,4 +1,4 @@
-use crate::blockchain::{BlockchainProvider, DexProvider};
+use crate::blockchain::{evm::BlockchainProvider, DexProvider};
 use ethers::types::{Address, U256};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -7,9 +7,123 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum PortfolioError {
     #[error("Blockchain error: {0}")]
-    BlockchainError(#[from] crate::blockchain::BlockchainError),
-    #[error("DEX error: {0}")]
+    BlockchainError(#[from] crate::blockchain::evm::BlockchainError),
+    #[error("Dex error: {0}")]
     DexError(#[from] crate::blockchain::DexError),
+    #[error("Invalid token: {0}")]
+    InvalidToken(String),
+    #[error("Invalid amount: {0}")]
+    InvalidAmount(String),
+    #[error("Invalid operation: {0}")]
+    InvalidOperation(String),
+    #[error("Invalid status: {0}")]
+    InvalidStatus(String),
+    #[error("Invalid state: {0}")]
+    InvalidState(String),
+    #[error("Invalid portfolio: {0}")]
+    InvalidPortfolio(String),
+    #[error("Invalid config: {0}")]
+    InvalidConfig(String),
+    #[error("Invalid token balance: {0}")]
+    InvalidTokenBalance(String),
+    #[error("Invalid token allowance: {0}")]
+    InvalidTokenAllowance(String),
+    #[error("Invalid token decimals: {0}")]
+    InvalidTokenDecimals(String),
+    #[error("Invalid token symbol: {0}")]
+    InvalidTokenSymbol(String),
+    #[error("Invalid token name: {0}")]
+    InvalidTokenName(String),
+    #[error("Invalid token total supply: {0}")]
+    InvalidTokenTotalSupply(String),
+    #[error("Invalid token owner: {0}")]
+    InvalidTokenOwner(String),
+    #[error("Invalid token spender: {0}")]
+    InvalidTokenSpender(String),
+    #[error("Invalid token transfer: {0}")]
+    InvalidTokenTransfer(String),
+    #[error("Invalid token approval: {0}")]
+    InvalidTokenApproval(String),
+    #[error("Invalid token transfer from: {0}")]
+    InvalidTokenTransferFrom(String),
+    #[error("Invalid token approve: {0}")]
+    InvalidTokenApprove(String),
+    #[error("Invalid token increase allowance: {0}")]
+    InvalidTokenIncreaseAllowance(String),
+    #[error("Invalid token decrease allowance: {0}")]
+    InvalidTokenDecreaseAllowance(String),
+    #[error("Invalid token mint: {0}")]
+    InvalidTokenMint(String),
+    #[error("Invalid token burn: {0}")]
+    InvalidTokenBurn(String),
+    #[error("Invalid token pause: {0}")]
+    InvalidTokenPause(String),
+    #[error("Invalid token unpause: {0}")]
+    InvalidTokenUnpause(String),
+    #[error("Invalid token add minter: {0}")]
+    InvalidTokenAddMinter(String),
+    #[error("Invalid token remove minter: {0}")]
+    InvalidTokenRemoveMinter(String),
+    #[error("Invalid token add pauser: {0}")]
+    InvalidTokenAddPauser(String),
+    #[error("Invalid token remove pauser: {0}")]
+    InvalidTokenRemovePauser(String),
+    #[error("Invalid token renounce minter: {0}")]
+    InvalidTokenRenounceMinter(String),
+    #[error("Invalid token renounce pauser: {0}")]
+    InvalidTokenRenouncePauser(String),
+    #[error("Invalid token transfer ownership: {0}")]
+    InvalidTokenTransferOwnership(String),
+    #[error("Invalid token renounce ownership: {0}")]
+    InvalidTokenRenounceOwnership(String),
+    #[error("Invalid token set name: {0}")]
+    InvalidTokenSetName(String),
+    #[error("Invalid token set symbol: {0}")]
+    InvalidTokenSetSymbol(String),
+    #[error("Invalid token set decimals: {0}")]
+    InvalidTokenSetDecimals(String),
+    #[error("Invalid token set total supply: {0}")]
+    InvalidTokenSetTotalSupply(String),
+    #[error("Invalid token set owner: {0}")]
+    InvalidTokenSetOwner(String),
+    #[error("Invalid token set spender: {0}")]
+    InvalidTokenSetSpender(String),
+    #[error("Invalid token set transfer: {0}")]
+    InvalidTokenSetTransfer(String),
+    #[error("Invalid token set approval: {0}")]
+    InvalidTokenSetApproval(String),
+    #[error("Invalid token set transfer from: {0}")]
+    InvalidTokenSetTransferFrom(String),
+    #[error("Invalid token set approve: {0}")]
+    InvalidTokenSetApprove(String),
+    #[error("Invalid token set increase allowance: {0}")]
+    InvalidTokenSetIncreaseAllowance(String),
+    #[error("Invalid token set decrease allowance: {0}")]
+    InvalidTokenSetDecreaseAllowance(String),
+    #[error("Invalid token set mint: {0}")]
+    InvalidTokenSetMint(String),
+    #[error("Invalid token set burn: {0}")]
+    InvalidTokenSetBurn(String),
+    #[error("Invalid token set pause: {0}")]
+    InvalidTokenSetPause(String),
+    #[error("Invalid token set unpause: {0}")]
+    InvalidTokenSetUnpause(String),
+    #[error("Invalid token set add minter: {0}")]
+    InvalidTokenSetAddMinter(String),
+    #[error("Invalid token set remove minter: {0}")]
+    InvalidTokenSetRemoveMinter(String),
+    #[error("Invalid token set add pauser: {0}")]
+    InvalidTokenSetAddPauser(String),
+    #[error("Invalid token set remove pauser: {0}")]
+    InvalidTokenSetRemovePauser(String),
+    #[error("Invalid token set renounce minter: {0}")]
+    InvalidTokenSetRenounceMinter(String),
+    #[error("Invalid token set renounce pauser: {0}")]
+    InvalidTokenSetRenouncePauser(String),
+    #[error("Invalid token set transfer ownership: {0}")]
+    InvalidTokenSetTransferOwnership(String),
+    #[error("Invalid token set renounce ownership: {0}")]
+    InvalidTokenSetRenounceOwnership(String),
     #[error("Invalid state transition: {0}")]
     InvalidStateTransition(String),
     #[error("Operation interrupted: {0}")]

@@ -41,8 +41,9 @@ pub struct WalletConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DexConfig {
-    pub uniswap_v3: UniswapV3Config,
-    pub cowswap: CowSwapConfig,
+    pub provider: String,
+    pub uniswap_v3: Option<UniswapV3Config>,
+    pub cowswap: Option<CowSwapConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
