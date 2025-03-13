@@ -52,6 +52,9 @@ pub enum Commands {
         /// Amount to swap (in wei)
         #[arg(short, long)]
         amount: String,
+        /// Auto-approve exact amount instead of max amount
+        #[arg(long, default_value_t = false)]
+        exact_approval: bool,
     },
     /// Check the current portfolio status
     Status {
@@ -131,6 +134,7 @@ impl CliContext {
         from_token: &str,
         to_token: &str,
         amount: &str,
+        exact_approval: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Get token addresses from config
         let from_token_config = self
@@ -186,6 +190,7 @@ impl CliContext {
                 from_token: from_addr,
                 to_token: to_addr,
                 amount: amount_wei,
+                exact_approval,
             })
             .await?;
 

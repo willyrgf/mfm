@@ -6,6 +6,7 @@ use std::collections::HashMap;
 pub enum Kind {
     UniswapV2,
     CowSwap,
+    UniswapV3,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]

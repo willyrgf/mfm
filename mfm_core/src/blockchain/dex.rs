@@ -1,14 +1,27 @@
+use async_trait::async_trait;
 use ethers::{
+    prelude::*,
     providers::{Http, Provider},
     signers::{LocalWallet, Signer as EthersSigner},
-    types::{Address, U256},
+    types::{Address, H256, U256},
 };
 use hex;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 use thiserror::Error;
 
 use crate::blockchain::cow_swap::api::CowSwapApiClient;
+
+// ERC20 ABI for token approval
+abigen!(
+    IERC20,
+    r#"[
+        function approve(address spender, uint256 amount) external returns (bool)
+        function allowance(address owner, address spender) external view returns (uint256)
+        function balanceOf(address account) external view returns (uint256)
+    ]"#
+);
 
 #[derive(Debug, Error)]
 pub enum DexError {
@@ -26,6 +39,12 @@ pub enum DexError {
     SwapError(String),
     #[error("API error: {0}")]
     ApiError(String),
+    #[error("Token approval error: {0}")]
+    TokenApprovalError(String),
+    #[error("No signer configured")]
+    NoSignerConfigured,
+    #[error("Missing WETH address")]
+    MissingWethAddress,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +57,7 @@ pub struct SwapQuote {
     pub route: Vec<Address>,
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 pub trait DexProvider: fmt::Debug + Send + Sync {
     async fn get_quote(
         &self,
@@ -46,46 +65,16 @@ pub trait DexProvider: fmt::Debug + Send + Sync {
         to_token: Address,
         amount: U256,
     ) -> Result<SwapQuote, DexError>;
-    async fn execute_swap(
-        &self,
-        quote: SwapQuote,
-        wallet_address: Address,
-        min_amount_out: U256,
-    ) -> Result<String, DexError>;
-}
-
-#[derive(Debug, Clone)]
-pub struct UniswapV3Provider {
-    provider: Provider<Http>,
-}
-
-impl UniswapV3Provider {
-    pub fn new(provider: Provider<Http>) -> Self {
-        Self { provider }
-    }
-}
-
-#[async_trait::async_trait]
-impl DexProvider for UniswapV3Provider {
-    async fn get_quote(
-        &self,
-        _from_token: Address,
-        _to_token: Address,
-        _amount: U256,
-    ) -> Result<SwapQuote, DexError> {
-        // TODO: Implement Uniswap V3 quote
-        Err(DexError::QuoteError("Not implemented".to_string()))
-    }
 
     async fn execute_swap(
         &self,
-        _quote: SwapQuote,
-        _wallet_address: Address,
-        _min_amount_out: U256,
-    ) -> Result<String, DexError> {
-        // TODO: Implement Uniswap V3 swap
-        Err(DexError::SwapError("Not implemented".to_string()))
-    }
+        from_token: Address,
+        to_token: Address,
+        amount: U256,
+        exact_approval: bool,
+    ) -> Result<H256, DexError>;
+
+    async fn check_and_approve_token(&self, token: Address, amount: U256) -> Result<(), DexError>;
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +83,7 @@ pub struct CowSwapProvider {
     chain_id: u64,
     signer: Option<LocalWallet>,
     api_client: CowSwapApiClient,
+    settlement: Address,
 }
 
 impl CowSwapProvider {
@@ -103,6 +93,9 @@ impl CowSwapProvider {
             chain_id,
             signer: None,
             api_client: CowSwapApiClient::new(),
+            settlement: "0x9008D19f58AAbD9eD0D60971565AA8510560ab41"
+                .parse()
+                .unwrap(),
         }
     }
 
@@ -156,24 +149,28 @@ impl DexProvider for CowSwapProvider {
 
     async fn execute_swap(
         &self,
-        quote: SwapQuote,
-        wallet_address: Address,
-        min_amount_out: U256,
-    ) -> Result<String, DexError> {
+        from_token: Address,
+        to_token: Address,
+        amount: U256,
+        exact_approval: bool,
+    ) -> Result<H256, DexError> {
         if let Some(signer) = &self.signer {
             let cow_swap = crate::blockchain::cow_swap::CowSwapProvider::new(
-                self.provider.clone(),
+                Arc::new(self.provider.clone()),
                 self.chain_id,
-            )
-            .with_signer(signer.clone());
+                Some(signer.clone()),
+            );
+
+            // Get quote for minimum amount out
+            let quote = self.get_quote(from_token, to_token, amount).await?;
 
             let order = cow_swap
                 .create_order(
                     quote.from_token,
                     quote.to_token,
                     quote.from_amount,
-                    min_amount_out,
-                    Some(wallet_address),
+                    quote.to_amount,
+                    None,
                     None,
                 )
                 .await
@@ -191,18 +188,57 @@ impl DexProvider for CowSwapProvider {
                     order.buy_token,
                     order.sell_amount,
                     order.buy_amount,
-                    order.valid_to,
-                    format!("0x{}", hex::encode(order.app_data)),
+                    order.valid_to as u64,
+                    format!("0x{}", hex::encode(&order.app_data)),
                     order.fee_amount,
-                    signature,
-                    wallet_address,
+                    hex::encode(signature),
+                    signer.address(),
                 )
                 .await
                 .map_err(|e| DexError::SwapError(e.to_string()))?;
 
-            Ok(response.order_uid)
+            // Convert order_uid to H256
+            let order_uid = response
+                .order_uid
+                .strip_prefix("0x")
+                .unwrap_or(&response.order_uid);
+            let bytes = hex::decode(order_uid).map_err(|e| DexError::SwapError(e.to_string()))?;
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&bytes);
+            Ok(H256::from(hash))
         } else {
             Err(DexError::SwapError("No signer configured".to_string()))
         }
+    }
+
+    async fn check_and_approve_token(&self, token: Address, amount: U256) -> Result<(), DexError> {
+        let signer = self.signer.as_ref().ok_or(DexError::NoSignerConfigured)?;
+        let token_contract = IERC20::new(
+            token,
+            Arc::new(SignerMiddleware::new(
+                Arc::new(self.provider.clone()),
+                signer.clone(),
+            )),
+        );
+
+        let current_allowance = token_contract
+            .allowance(signer.address(), self.settlement)
+            .call()
+            .await
+            .map_err(|e| DexError::TokenApprovalError(e.to_string()))?;
+
+        if current_allowance < amount {
+            let approve_call = token_contract.approve(self.settlement, amount);
+            let pending_tx = approve_call
+                .send()
+                .await
+                .map_err(|e| DexError::TokenApprovalError(e.to_string()))?;
+
+            let _receipt = pending_tx
+                .await
+                .map_err(|e| DexError::TokenApprovalError(e.to_string()))?;
+        }
+
+        Ok(())
     }
 }

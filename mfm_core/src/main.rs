@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load(&cli.command.get_config_path())?;
 
     // Load wallet securely
-    let wallet = config.load_wallet()?;
+    let wallet = config.load_wallet(Some("your_secure_password"))?;
 
     let provider = Provider::new(Http::new(Url::parse(&config.network.rpc_url)?));
 
@@ -33,29 +33,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             chain_id: config.network.chain_id,
             name: config.network.name.clone(),
         },
-        wallet.get_private_key(),
+        wallet.get_private_key().to_string(),
     )?)));
 
     let dex_provider = Arc::new(Mutex::new(Box::new(blockchain::UniswapV3Provider::new(
-        provider.clone(),
+        Arc::new(provider.clone()),
+        config.network.chain_id,
+        None,
     ))));
 
     let portfolio = Portfolio::new(
         Box::new(blockchain::EvmProvider::new(
             blockchain::ChainConfig {
-                rpc_url: config.network.rpc_url,
+                rpc_url: config.network.rpc_url.clone(),
                 chain_id: config.network.chain_id,
-                name: config.network.name,
+                name: config.network.name.clone(),
             },
-            wallet.get_private_key(),
+            wallet.get_private_key().to_string(),
         )?),
-        Box::new(blockchain::UniswapV3Provider::new(provider)),
+        Box::new(blockchain::UniswapV3Provider::new(
+            Arc::new(provider.clone()),
+            config.network.chain_id,
+            None,
+        )),
+        &config,
     );
 
     // Create CLI context
     let mut context = CliContext::new(
         blockchain_provider.lock().await.clone(),
         dex_provider.lock().await.clone(),
+        &config,
     );
 
     // Handle commands
@@ -68,14 +76,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             from_token,
             to_token,
             amount,
+            exact_approval,
         } => {
-            context.handle_swap(&from_token, &to_token, &amount).await?;
+            context
+                .handle_swap(&from_token, &to_token, &amount, exact_approval)
+                .await?;
         }
         cli::Commands::Status { config: _ } => {
             context.handle_status()?;
         }
         cli::Commands::Resume { config: _ } => {
             context.handle_resume()?;
+        }
+        cli::Commands::Encrypt { .. } => {
+            // This command is handled directly in the CLI, not in the main function
+            unreachable!("Encrypt command should be handled in the CLI");
         }
     }
 

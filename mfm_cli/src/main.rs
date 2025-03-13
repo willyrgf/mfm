@@ -1,12 +1,17 @@
 use clap::Parser;
 use ethers::providers::{Http, Provider};
 use ethers::signers::{LocalWallet, Signer};
+use ethers::types::Address;
 use hex;
 use mfm::{
     telemetry::{get_subscriber, init_subscriber},
     ExitCode, APP_NAME, DEFAULT_LOG_LEVEL,
 };
-use mfm_core::blockchain::{evm::ChainConfig, CowSwapProvider, EvmProvider};
+use mfm_core::blockchain::cow_swap::CowSwapProvider;
+use mfm_core::blockchain::uniswap_v3::UniswapV3Provider;
+use mfm_core::blockchain::uniswap_v4::UniswapV4Provider;
+use mfm_core::blockchain::DexProvider;
+use mfm_core::blockchain::{evm::ChainConfig, EvmProvider};
 use mfm_core::{
     cli::{Cli, CliContext, Commands},
     config::{authentication::encryption::Encryption, Config},
@@ -69,10 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 wallet.get_private_key().to_string(),
             )?);
 
-            let dex_provider = Box::new(
-                CowSwapProvider::new(provider.clone(), config.network.chain_id)
-                    .with_signer(wallet_signer.clone()),
-            );
+            let dex_provider = create_dex_provider(&config, &provider, &wallet_signer)?;
 
             // Create CLI context
             let mut context = CliContext::new(blockchain_provider, dex_provider, &config);
@@ -84,6 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             from_token,
             to_token,
             amount,
+            exact_approval,
         } => {
             // Load configuration
             let config = Config::load(&config)?;
@@ -104,15 +107,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 wallet.get_private_key().to_string(),
             )?);
 
-            let dex_provider = Box::new(
-                CowSwapProvider::new(provider.clone(), config.network.chain_id)
-                    .with_signer(wallet_signer.clone()),
-            );
+            let dex_provider = create_dex_provider(&config, &provider, &wallet_signer)?;
 
             // Create CLI context
             let mut context = CliContext::new(blockchain_provider, dex_provider, &config);
 
-            context.handle_swap(&from_token, &to_token, &amount).await?;
+            context
+                .handle_swap(&from_token, &to_token, &amount, exact_approval)
+                .await?;
         }
         Commands::Status { config } => {
             // Load configuration
@@ -134,10 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 wallet.get_private_key().to_string(),
             )?);
 
-            let dex_provider = Box::new(
-                CowSwapProvider::new(provider.clone(), config.network.chain_id)
-                    .with_signer(wallet_signer.clone()),
-            );
+            let dex_provider = create_dex_provider(&config, &provider, &wallet_signer)?;
 
             // Create CLI context
             let mut context = CliContext::new(blockchain_provider, dex_provider, &config);
@@ -166,10 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 wallet.get_private_key().to_string(),
             )?);
 
-            let dex_provider = Box::new(
-                CowSwapProvider::new(provider.clone(), config.network.chain_id)
-                    .with_signer(wallet_signer.clone()),
-            );
+            let dex_provider = create_dex_provider(&config, &provider, &wallet_signer)?;
 
             // Create CLI context
             let mut context = CliContext::new(blockchain_provider, dex_provider, &config);
@@ -179,4 +175,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+// Helper function to create the appropriate DEX provider based on configuration
+fn create_dex_provider(
+    config: &Config,
+    provider: &Provider<Http>,
+    wallet_signer: &LocalWallet,
+) -> Result<Box<dyn DexProvider>, Box<dyn std::error::Error>> {
+    match config.dex.provider.as_str() {
+        "uniswap_v3" => {
+            // Get the DEX configuration
+            let dex_config = config
+                .dexes
+                .get("uniswap_v3")
+                .ok_or("Uniswap V3 configuration not found")?;
+
+            Ok(Box::new(UniswapV3Provider::new(
+                Arc::new(provider.clone()),
+                config.network.chain_id,
+                Some(wallet_signer.clone()),
+            )))
+        }
+        "cow_swap" => {
+            // Get the DEX configuration
+            let _dex_config = config
+                .dexes
+                .get("cow_swap")
+                .ok_or("CowSwap configuration not found")?;
+
+            Ok(Box::new(CowSwapProvider::new(
+                Arc::new(provider.clone()),
+                config.network.chain_id,
+                Some(wallet_signer.clone()),
+            )))
+        }
+        _ => {
+            // Default to Uniswap V4 (for backward compatibility)
+            Ok(Box::new(UniswapV4Provider::new(
+                Arc::new(provider.clone()),
+                config.network.chain_id,
+                Some(wallet_signer.clone()),
+            )))
+        }
+    }
 }

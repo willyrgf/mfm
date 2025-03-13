@@ -1,19 +1,29 @@
-use ethers::types::Address;
+use async_trait::async_trait;
+use ethers::{
+    providers::{Http, Provider},
+    signers::LocalWallet,
+    types::{Address, H256, U256},
+};
+use serde::{Deserialize, Serialize};
 
 pub mod abi;
 pub mod cow_swap;
 pub mod dex;
 pub mod evm;
+pub mod uniswap_v3;
+pub mod uniswap_v4;
 
 pub use cow_swap::CowSwapProvider;
 pub use dex::{DexError, DexProvider, SwapQuote};
-pub use evm::{BlockchainError, BlockchainProvider, EvmProvider};
+pub use evm::{BlockchainError, BlockchainProvider, ChainConfig, EvmProvider};
+pub use uniswap_v3::UniswapV3Provider;
+pub use uniswap_v4::UniswapV4Provider;
 
-use ethers::{
-    providers::{Http, Provider},
-    signers::LocalWallet,
-};
-use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DexConfig {
+    pub kind: String,
+    pub provider: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletConfig {

@@ -41,6 +41,7 @@ pub enum PortfolioOperation {
         from_token: Address,
         to_token: Address,
         amount: U256,
+        exact_approval: bool,
     },
 }
 
@@ -287,6 +288,7 @@ impl Portfolio {
                 from_token,
                 to_token,
                 amount,
+                exact_approval,
             }) => {
                 eprintln!("Getting quote for swap:");
                 eprintln!("From: {}", from_token);
@@ -323,55 +325,33 @@ impl Portfolio {
         Ok(())
     }
 
-    pub async fn execute_swaps(&mut self) -> Result<(), PortfolioError> {
-        if self.status != PortfolioStatus::ExecutingSwaps {
-            return Err(PortfolioError::InvalidStateTransition(
-                "Not in swap execution state".to_string(),
-            ));
+    pub async fn execute_swaps(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(PortfolioOperation::Swap {
+            from_token,
+            to_token,
+            amount,
+            exact_approval,
+        }) = self.operation
+        {
+            eprintln!("Executing swap:");
+            eprintln!("  From token: {}", from_token);
+            eprintln!("  To token: {}", to_token);
+            eprintln!("  Amount: {}", amount);
+            eprintln!("  Exact approval: {}", exact_approval);
+
+            let tx_hash = self
+                .dex_provider
+                .execute_swap(from_token, to_token, amount, exact_approval)
+                .await?;
+
+            eprintln!("Swap executed successfully!");
+            eprintln!("Transaction hash: {}", tx_hash);
+
+            self.status = PortfolioStatus::Completed;
+            Ok(())
+        } else {
+            Err("No swap operation in progress".into())
         }
-
-        eprintln!("\n=== Executing Swaps ===");
-
-        match &self.operation {
-            Some(PortfolioOperation::Swap { .. }) => {
-                if let Some(quote) = &self.state.last_quote {
-                    eprintln!("Executing swap with quote:");
-                    eprintln!("From token: {}", quote.from_token);
-                    eprintln!("To token: {}", quote.to_token);
-                    eprintln!("Amount: {}", quote.from_amount);
-                    eprintln!("Expected output: {}", quote.to_amount);
-
-                    let wallet_address = self.blockchain_provider.get_wallet_address();
-                    let min_amount_out = quote.to_amount; // TODO: Add slippage tolerance
-
-                    let tx_hash = self
-                        .dex_provider
-                        .execute_swap(quote.clone(), wallet_address, min_amount_out)
-                        .await
-                        .map_err(|e| PortfolioError::DexError(e))?;
-
-                    eprintln!("\nSwap executed successfully!");
-                    eprintln!("Transaction hash: {}", tx_hash);
-                } else {
-                    return Err(PortfolioError::InvalidStateTransition(
-                        "No quote available for swap".to_string(),
-                    ));
-                }
-            }
-            Some(PortfolioOperation::Rebalance) => {
-                // TODO: Implement rebalancing execution
-                eprintln!("Rebalancing execution not implemented yet");
-            }
-            None => {
-                return Err(PortfolioError::InvalidStateTransition(
-                    "No operation in progress".to_string(),
-                ));
-            }
-        }
-
-        self.status = PortfolioStatus::Completed;
-        eprintln!("=== Swap Execution Complete ===\n");
-        Ok(())
     }
 
     pub fn interrupt(&mut self) {
