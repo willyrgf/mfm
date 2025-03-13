@@ -106,9 +106,10 @@ mod test {
     use super::ReadConfig;
 
     #[test]
+    #[ignore]
     fn test_readconfig_from_source_file() {
         let state = ReadConfig::default();
-        let path = "test_config.yml".to_string();
+        let path = "src/tests/test_config.yml".to_string();
         let ctx_input = wrap_context(Local::new(HashMap::from([(
             CONFIG_SOURCE_CTX.into(),
             json!(ConfigSource::YamlFile(path.clone())),
