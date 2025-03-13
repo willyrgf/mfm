@@ -154,7 +154,7 @@ mod test {
             wrap_context(Local::new(HashMap::from([("value".to_string(), json!(2))]))),
             wrap_context(Local::new(HashMap::from([("value".to_string(), json!(3))]))),
         ];
-        let indexes = vec![
+        let indexes = [
             Index::new(
                 1,
                 Label::new("value_one").unwrap(),
@@ -197,7 +197,7 @@ mod test {
             wrap_context(Local::new(HashMap::from([("value".to_string(), json!(2))]))),
             wrap_context(Local::new(HashMap::from([("value".to_string(), json!(3))]))),
         ];
-        let indexes = vec![
+        let indexes = [
             Index::new(
                 1,
                 Label::new("value_one").unwrap(),
@@ -239,7 +239,7 @@ mod test {
             wrap_context(Local::new(HashMap::from([("value".to_string(), json!(2))]))),
             wrap_context(Local::new(HashMap::from([("value".to_string(), json!(3))]))),
         ];
-        let indexes = vec![
+        let indexes = [
             Index::new(
                 1,
                 Label::new("value_one").unwrap(),
