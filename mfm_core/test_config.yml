@@ -6,10 +6,30 @@
 
 auth_methods:
   - method: wallet
-    private_key: "YOUR_PRIVATE_KEY"
-    not_encrypted: false
-    env_password: "OPTIONAL_ENV_PASSWORD"
+    wallet:
+      private_key_path: "./private_key.txt"
+      not_encrypted: false
   - method: meta_mask
+
+network:
+  rpc_url: "https://mainnet.infura.io/v3/your-api-key"
+  chain_id: 1
+  name: "mainnet"
+
+wallet:
+  address: "0x0000000000000000000000000000000000000000"
+  private_key_path: "./private_key.txt"
+
+dex:
+  provider: "uniswap_v3"
+  uniswap_v3:
+    router_address: "0xE592427A0AEce92De3Edee1F18E0157C05861564"
+    pool_fee: 3000
+    factory_address: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+    quoter_address: "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"
+  cowswap:
+    settlement_contract: "0x9008D19f58AAbD9eD0D60971565AA8510560ab41"
+    api_url: "https://api.cow.fi/mainnet/api"
 
 networks:
   bsc:
@@ -18,8 +38,8 @@ networks:
     symbol: bnb
     chain_id: 56
     node_url_http: https://bsc-dataseed.binance.org
-    # node_url_grpc: 
-    # node_url_failover: 
+    # node_url_grpc:
+    # node_url_failover:
     blockexplorer_url: https://bscscan.com
     min_balance_coin: 0.1
     wrapped_token: wbnb
@@ -30,8 +50,8 @@ networks:
     symbol: matic
     chain_id: 137
     node_url_http: https://polygon-rpc.com/
-    # node_url_grpc: 
-    # node_url_failover: 
+    # node_url_grpc:
+    # node_url_failover:
     blockexplorer_url: https://polygonscan.com/
     min_balance_coin: 1
     wrapped_token: wmatic
