@@ -76,15 +76,16 @@ impl EvmProvider {
     pub fn new(config: ChainConfig, private_key: String) -> Result<Self, BlockchainError> {
         // Create a list of providers from all available RPC URLs
         let mut providers = Vec::new();
-        
+
         // First add the primary RPC URL if it's not empty
         if !config.rpc_url.is_empty() {
-            let provider = Provider::new(Http::new(Url::parse(&config.rpc_url).map_err(|e| {
-                BlockchainError::Other(format!("Invalid primary RPC URL: {}", e))
-            })?));
+            let provider =
+                Provider::new(Http::new(Url::parse(&config.rpc_url).map_err(|e| {
+                    BlockchainError::Other(format!("Invalid primary RPC URL: {}", e))
+                })?));
             providers.push(provider);
         }
-        
+
         // Then add all the additional RPC URLs
         for url in &config.rpc_urls {
             if !url.is_empty() && (config.rpc_url.is_empty() || url != &config.rpc_url) {
@@ -100,20 +101,22 @@ impl EvmProvider {
                 }
             }
         }
-        
+
         // Ensure we have at least one provider
         if providers.is_empty() {
-            return Err(BlockchainError::Other("No valid RPC URLs provided".to_string()));
+            return Err(BlockchainError::Other(
+                "No valid RPC URLs provided".to_string(),
+            ));
         }
-        
+
         let wallet = LocalWallet::from_str(&private_key)
             .map_err(|e| BlockchainError::WalletError(e.to_string()))?
             .with_chain_id(config.chain_id);
 
-        Ok(Self { 
-            providers, 
+        Ok(Self {
+            providers,
             active_provider_index: Arc::new(RwLock::new(0)),
-            wallet 
+            wallet,
         })
     }
 
@@ -122,7 +125,7 @@ impl EvmProvider {
         let index = *self.active_provider_index.read().await;
         self.providers[index].clone()
     }
-    
+
     // Try to use the next provider in the list
     async fn try_next_provider(&self) -> Result<Provider<Http>, BlockchainError> {
         let mut index = self.active_provider_index.write().await;
@@ -131,28 +134,36 @@ impl EvmProvider {
         Ok(self.providers[*index].clone())
     }
 
-    async fn call_contract_with_retry(&self, address: Address, data: Bytes, max_retries: usize) -> Result<Bytes, BlockchainError> {
-        self.call_contract_with_retry_internal(address, data, 0, max_retries).await
+    async fn call_contract_with_retry(
+        &self,
+        address: Address,
+        data: Bytes,
+        max_retries: usize,
+    ) -> Result<Bytes, BlockchainError> {
+        self.call_contract_with_retry_internal(address, data, 0, max_retries)
+            .await
     }
-    
+
     // Recursive implementation for retrying with different providers
     async fn call_contract_with_retry_internal(
-        &self, 
-        address: Address, 
-        data: Bytes, 
-        current_retry: usize, 
-        max_retries: usize
+        &self,
+        address: Address,
+        data: Bytes,
+        current_retry: usize,
+        max_retries: usize,
     ) -> Result<Bytes, BlockchainError> {
         if current_retry > max_retries {
-            return Err(BlockchainError::ContractError("Max retries exceeded".to_string()));
+            return Err(BlockchainError::ContractError(
+                "Max retries exceeded".to_string(),
+            ));
         }
-        
+
         let provider = self.get_provider().await;
         let tx = TransactionRequest::new()
             .to(address)
             .data(data.clone())
             .from(self.wallet.address());
-            
+
         match provider.call(&tx.into(), None).await {
             Ok(result) => Ok(result),
             Err(e) => {
@@ -161,11 +172,12 @@ impl EvmProvider {
                 self.try_next_provider().await?;
                 // Use Box::pin for recursive async call
                 Box::pin(self.call_contract_with_retry_internal(
-                    address, 
-                    data, 
-                    current_retry + 1, 
-                    max_retries
-                )).await
+                    address,
+                    data,
+                    current_retry + 1,
+                    max_retries,
+                ))
+                .await
             }
         }
     }
@@ -189,14 +201,14 @@ impl BlockchainProvider for EvmProvider {
                 let provider = self.get_provider().await;
                 let max_retries = 3;
                 let current_retry = 0;
-                
+
                 // Use recursion for retries following functional programming principles
                 async fn get_balance_with_retry(
                     provider: Provider<Http>,
                     address: Address,
                     current_retry: usize,
                     max_retries: usize,
-                    evm_provider: &EvmProvider
+                    evm_provider: &EvmProvider,
                 ) -> Result<U256, BlockchainError> {
                     match provider.get_balance(address, None).await {
                         Ok(balance) => Ok(balance),
@@ -204,39 +216,45 @@ impl BlockchainProvider for EvmProvider {
                             if current_retry >= max_retries {
                                 return Err(BlockchainError::ProviderError(e.to_string()));
                             }
-                            println!("RPC call failed for get_balance: {}. Trying next provider...", e);
+                            println!(
+                                "RPC call failed for get_balance: {}. Trying next provider...",
+                                e
+                            );
                             // Try the next provider
                             let new_provider = evm_provider.try_next_provider().await?;
                             // Use Box::pin for recursive async call
                             Box::pin(get_balance_with_retry(
-                                new_provider, 
-                                address, 
-                                current_retry + 1, 
-                                max_retries, 
-                                evm_provider
-                            )).await
+                                new_provider,
+                                address,
+                                current_retry + 1,
+                                max_retries,
+                                evm_provider,
+                            ))
+                            .await
                         }
                     }
                 }
-                
+
                 get_balance_with_retry(provider, address, current_retry, max_retries, self).await
             }
             Some(token_address) => {
                 // Get ERC20 token balance
                 let function_signature = "balanceOf(address)";
                 let selector = &keccak256(function_signature.as_bytes())[0..4];
-                
+
                 let params = ethers::abi::encode(&[ethers::abi::Token::Address(address)]);
                 let data = [&selector[..], &params[..]].concat();
-                
-                let result = self.call_contract_with_retry(token_address, data.into(), 3).await?;
-                
+
+                let result = self
+                    .call_contract_with_retry(token_address, data.into(), 3)
+                    .await?;
+
                 if result.len() < 32 {
                     return Err(BlockchainError::ContractError(
                         "Invalid response length for token balance".to_string(),
                     ));
                 }
-                
+
                 Ok(U256::from_big_endian(&result[..32]))
             }
         }

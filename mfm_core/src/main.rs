@@ -44,7 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Use the first URL for the ethers Provider
-    let provider_url = all_rpc_urls.first().unwrap_or(&"https://eth.llamarpc.com".to_string()).clone();
+    let provider_url = all_rpc_urls
+        .first()
+        .unwrap_or(&"https://eth.llamarpc.com".to_string())
+        .clone();
     let provider = Provider::new(Http::new(Url::parse(&provider_url)?));
 
     let blockchain_provider = Arc::new(Mutex::new(Box::new(blockchain::EvmProvider::new(
@@ -114,7 +117,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // This command is handled directly in the CLI, not in the main function
             unreachable!("Encrypt command should be handled in the CLI");
         }
-        cli::Commands::AaveHealth { config: _, wallet_address } => {
+        cli::Commands::AaveHealth {
+            config: _,
+            wallet_address,
+        } => {
             context.handle_aave_health(wallet_address).await?;
         }
     }

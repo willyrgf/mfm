@@ -68,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let blockchain_provider = Box::new(EvmProvider::new(
                 ChainConfig {
                     rpc_url: config.network.rpc_url.clone(),
+                    rpc_urls: config.network.rpc_urls.clone(),
                     chain_id: config.network.chain_id,
                     name: config.network.name.clone(),
                 },
@@ -101,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let blockchain_provider = Box::new(EvmProvider::new(
                 ChainConfig {
                     rpc_url: config.network.rpc_url.clone(),
+                    rpc_urls: config.network.rpc_urls.clone(),
                     chain_id: config.network.chain_id,
                     name: config.network.name.clone(),
                 },
@@ -130,6 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let blockchain_provider = Box::new(EvmProvider::new(
                 ChainConfig {
                     rpc_url: config.network.rpc_url.clone(),
+                    rpc_urls: config.network.rpc_urls.clone(),
                     chain_id: config.network.chain_id,
                     name: config.network.name.clone(),
                 },
@@ -161,6 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     rpc_url: config.network.rpc_url.clone(),
                     chain_id: config.network.chain_id,
                     name: config.network.name.clone(),
+                    rpc_urls: config.network.rpc_urls.clone(),
                 },
                 wallet.get_private_key().to_string(),
             )?);
@@ -172,7 +176,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             context.handle_resume()?;
         }
-        Commands::AaveHealth { config, wallet_address } => {
+        Commands::AaveHealth {
+            config,
+            wallet_address,
+        } => {
             // Load configuration
             let config = Config::load(&config)?;
 
@@ -186,6 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let blockchain_provider = Box::new(EvmProvider::new(
                 ChainConfig {
                     rpc_url: config.network.rpc_url.clone(),
+                    rpc_urls: config.network.rpc_urls.clone(),
                     chain_id: config.network.chain_id,
                     name: config.network.name.clone(),
                 },

@@ -6,15 +6,15 @@ use ethers::{
 };
 use serde::{Deserialize, Serialize};
 
-pub mod abi;
 pub mod aave;
+pub mod abi;
 pub mod cow_swap;
 pub mod dex;
 pub mod evm;
 pub mod uniswap_v3;
 pub mod uniswap_v4;
 
-pub use aave::{AaveEVMProvider, AaveHealthCheckResult, AaveProvider, create_aave_provider};
+pub use aave::{create_aave_provider, AaveEVMProvider, AaveHealthCheckResult, AaveProvider};
 pub use cow_swap::CowSwapProvider;
 pub use dex::{DexError, DexProvider, SwapQuote};
 pub use evm::{BlockchainError, BlockchainProvider, ChainConfig, EvmProvider};

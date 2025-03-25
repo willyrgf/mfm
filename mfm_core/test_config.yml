@@ -21,6 +21,10 @@ network:
   chain_id: 1
   name: "mainnet"
 
+wallet:
+  address: 0xd34d000000000000000000000000000000000000
+  private_key_path: "private_key.txt"
+
 dex:
   provider: "uniswap_v3"
   uniswap_v3:
