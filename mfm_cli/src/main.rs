@@ -172,6 +172,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             context.handle_resume()?;
         }
+        Commands::AaveHealth { config, wallet_address } => {
+            // Load configuration
+            let config = Config::load(&config)?;
+
+            // Load wallet securely
+            let wallet = config.load_wallet(Some("your_secure_password"))?;
+
+            let provider = Provider::new(Http::new(Url::parse(&config.network.rpc_url)?));
+            let wallet_signer = LocalWallet::from_bytes(&hex::decode(wallet.get_private_key())?)?
+                .with_chain_id(config.network.chain_id);
+
+            let blockchain_provider = Box::new(EvmProvider::new(
+                ChainConfig {
+                    rpc_url: config.network.rpc_url.clone(),
+                    chain_id: config.network.chain_id,
+                    name: config.network.name.clone(),
+                },
+                wallet.get_private_key().to_string(),
+            )?);
+
+            let dex_provider = create_dex_provider(&config, &provider, &wallet_signer)?;
+
+            // Create CLI context
+            let context = CliContext::new(blockchain_provider, dex_provider, &config);
+
+            // Handle AAVE health check
+            context.handle_aave_health(wallet_address).await?;
+        }
     }
 
     Ok(())
