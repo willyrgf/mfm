@@ -1,25 +1,59 @@
-use mfm::{
-    telemetry::{get_subscriber, init_subscriber},
-    ExitCode, APP_NAME, DEFAULT_LOG_LEVEL,
-};
+use clap::{Parser, Subcommand};
+use mfm_core::config::Config;
+use std::path::PathBuf;
+use tracing::{info, Level};
+use tracing_subscriber;
 
-fn main() {
-    // This idiom is the prescribed way to get a clean shutdown of Rust (that will report
-    // no leaks in Valgrind or sanitizers).  Calling `unsafe { libc::exit() }` does no
-    // cleanup, and std::process::exit() does more--but does not run destructors.  So the
-    // best thing to do is to is bubble up the exit code through the whole stack, and
-    // only exit when everything potentially destructible has cleaned itself up.
-    //
-    // https://doc.rust-lang.org/std/process/fn.exit.html
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+pub struct Cli {
+    /// Command to execute
+    #[command(subcommand)]
+    command: Commands,
 
-    let exit_code = main_exitable();
-    std::process::exit(exit_code as i32);
+    /// Log level
+    #[arg(long, default_value = "info")]
+    log_level: Option<Level>,
+
+    /// Configuration file path
+    #[arg(long, default_value = "config.toml")]
+    config: Option<PathBuf>,
 }
 
-#[tracing::instrument(name = "main exitable")]
-fn main_exitable() -> ExitCode {
-    let subscriber = get_subscriber(APP_NAME.into(), DEFAULT_LOG_LEVEL.into(), std::io::stdout);
-    init_subscriber(subscriber);
-
-    unimplemented!()
+#[derive(Subcommand)]
+enum Commands {
+    /// Check AAVE health factor for a wallet in a specific network
+    AaveHealth {
+        /// Network name (e.g., ethereum, polygon, arbitrum)
+        #[arg(long)]
+        network: String,
+    },
 }
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Parse command line arguments
+    let cli = Cli::parse();
+
+    // Initialize logging
+    tracing_subscriber::fmt()
+        .with_max_level(cli.log_level.unwrap_or(Level::INFO))
+        .init();
+
+    info!("mfm starting...");
+
+    // Load configuration
+    let config_path = cli.config.unwrap_or_else(|| PathBuf::from("config.toml"));
+    let config = Config::from_toml_file(&config_path)?;
+
+    // Execute subcommand
+    match cli.command {
+        Commands::AaveHealth { network } => {
+            crate::commands::aave::check_health(&config, &network).await?;
+        }
+    }
+
+    Ok(())
+}
+
+mod commands;

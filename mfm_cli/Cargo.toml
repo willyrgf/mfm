@@ -11,4 +11,12 @@ tracing = { version = "0.1", features = [ "log" ] }
 tracing-subscriber = { version = "0.3", features = [ "registry", "env-filter" ] }
 tracing-bunyan-formatter = "0.3"
 tracing-log = "0.1"
-
+mfm_core = { path = "../mfm_core" }
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+ethers = { version = "2.0", features = ["ws", "rustls"] }
+async-trait = "0.1"
+reqwest = { version = "0.11", features = ["json"] }
+toml = "0.8"
+hex = "0.4"
