@@ -2,25 +2,39 @@ use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Kind {
-    ERC20,
+    Erc20,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct TokenNetwork {
     pub name: String,
+    pub kind: Kind,
     pub network_id: String,
     pub address: String,
     pub slippage: f64,
-    pub path_asset: String,
+    pub path_token: String,
+    pub decimals: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct TokenNetworks(HashMap<String, TokenNetwork>);
 
+impl TokenNetworks {
+    pub fn hashmap(&self) -> &HashMap<String, TokenNetwork> {
+        &self.0
+    }
+
+    pub fn get(&self, key: &str) -> Option<&TokenNetwork> {
+        self.0.get(key)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Token {
-    pub kind: Kind,
+    // TODO: rethink tokens to be any kind of token, but each
+    // chain/network will may have an different token kind.
     pub networks: TokenNetworks,
 }
 

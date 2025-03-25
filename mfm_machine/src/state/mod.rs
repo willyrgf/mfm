@@ -5,11 +5,16 @@ pub mod context;
 
 use self::context::ContextWrapper;
 
+// TODO: rethink this pub on the private field of `Tag` and `Label`:
+// I'm making it public just to address the idea of having const/static Label
+// by context and/or states.
+// It may be better solved using procedural macros that can validate the string
+// at compiler time, and translate in a safe to `From` to `Label` using const fn.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct Tag(&'static str);
+pub struct Tag(pub &'static str);
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct Label(&'static str);
+pub struct Label(pub &'static str);
 
 fn ensure_nonempty_ascii_lowercase_underscore(input: &'static str) -> Result<&'static str, Error> {
     if input.is_empty() {
@@ -38,6 +43,12 @@ impl Label {
             Ok(validated_input) => Ok(Self(validated_input)),
             Err(e) => Err(e),
         }
+    }
+}
+
+impl From<Label> for String {
+    fn from(value: Label) -> Self {
+        value.0.to_owned()
     }
 }
 

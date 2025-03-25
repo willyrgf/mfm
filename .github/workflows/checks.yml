@@ -3,7 +3,8 @@ permissions:
   contents: read
   pull-requests: write
 
-on: [push]
+on:
+  [push]
   # push:
   #   branches: [main, master]
   # pull_request:
@@ -13,7 +14,7 @@ env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: true
   RUSTFLAGS: "-Dwarnings"
-  RUST_BACKTRACE: 1  # Added for better debugging
+  RUST_BACKTRACE: 1 # Added for better debugging
 
 jobs:
   build-and-test:
