@@ -85,7 +85,9 @@ impl Commands {
             Commands::Status { config } => config,
             Commands::Resume { config } => config,
             Commands::AaveHealth { config, .. } => config,
-            Commands::Encrypt { .. } => unreachable!(),
+            Commands::Encrypt {
+                private_key_path, ..
+            } => private_key_path,
         }
     }
 }
