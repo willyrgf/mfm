@@ -1,31 +1,31 @@
 use clap::Parser;
 use ethers::providers::{Http, Provider};
 use ethers::signers::{LocalWallet, Signer};
-use ethers::types::Address;
-use hex;
-use mfm::{
-    telemetry::{get_subscriber, init_subscriber},
-    ExitCode, APP_NAME, DEFAULT_LOG_LEVEL,
-};
+use std::sync::Arc;
+use tracing::info;
+use url::Url;
+
 use mfm_core::blockchain::cow_swap::CowSwapProvider;
 use mfm_core::blockchain::uniswap_v3::UniswapV3Provider;
-use mfm_core::blockchain::uniswap_v4::UniswapV4Provider;
 use mfm_core::blockchain::DexProvider;
 use mfm_core::blockchain::{evm::ChainConfig, EvmProvider};
-use mfm_core::{
-    cli::{Cli, CliContext, Commands},
-    config::{authentication::encryption::Encryption, Config},
-};
-use std::str::FromStr;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use url::Url;
+use mfm_core::cli::{Cli, CliContext, Commands};
+use mfm_core::config::authentication::encryption::Encryption;
+use mfm_core::config::Config;
+
+// Constants
+const APP_NAME: &str = "mfm";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let subscriber = get_subscriber(APP_NAME.into(), DEFAULT_LOG_LEVEL.into(), std::io::stdout);
-    init_subscriber(subscriber);
+    // Initialize logging
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
+    info!("{} starting...", APP_NAME);
+
+    // Parse CLI arguments
     let cli = Cli::parse();
 
     match cli.command {
@@ -54,9 +54,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("File already exists. Use --force to overwrite.");
             }
         }
-        Commands::Rebalance { config } => {
-            // Load configuration
-            let config = Config::load(&config)?;
+        Commands::Rebalance {
+            config: config_path,
+        } => {
+            let config = Config::load(&config_path)?;
 
             // Load wallet securely
             let wallet = config.load_wallet(Some("your_secure_password"))?;
@@ -68,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let blockchain_provider = Box::new(EvmProvider::new(
                 ChainConfig {
                     rpc_url: config.network.rpc_url.clone(),
+                    rpc_urls: config.network.rpc_urls.clone(),
                     chain_id: config.network.chain_id,
                     name: config.network.name.clone(),
                 },
@@ -82,14 +84,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             context.handle_rebalance().await?;
         }
         Commands::Swap {
-            config,
+            config: config_path,
             from_token,
             to_token,
             amount,
             exact_approval,
         } => {
-            // Load configuration
-            let config = Config::load(&config)?;
+            let config = Config::load(&config_path)?;
 
             // Load wallet securely
             let wallet = config.load_wallet(Some("your_secure_password"))?;
@@ -101,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let blockchain_provider = Box::new(EvmProvider::new(
                 ChainConfig {
                     rpc_url: config.network.rpc_url.clone(),
+                    rpc_urls: config.network.rpc_urls.clone(),
                     chain_id: config.network.chain_id,
                     name: config.network.name.clone(),
                 },
@@ -116,9 +118,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .handle_swap(&from_token, &to_token, &amount, exact_approval)
                 .await?;
         }
-        Commands::Status { config } => {
-            // Load configuration
-            let config = Config::load(&config)?;
+        Commands::Status {
+            config: config_path,
+        } => {
+            let config = Config::load(&config_path)?;
 
             // Load wallet securely
             let wallet = config.load_wallet(Some("your_secure_password"))?;
@@ -130,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let blockchain_provider = Box::new(EvmProvider::new(
                 ChainConfig {
                     rpc_url: config.network.rpc_url.clone(),
+                    rpc_urls: config.network.rpc_urls.clone(),
                     chain_id: config.network.chain_id,
                     name: config.network.name.clone(),
                 },
@@ -145,9 +149,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             context.check_balances().await?;
             context.handle_status()?;
         }
-        Commands::Resume { config } => {
-            // Load configuration
-            let config = Config::load(&config)?;
+        Commands::Resume {
+            config: config_path,
+        } => {
+            let config = Config::load(&config_path)?;
 
             // Load wallet securely
             let wallet = config.load_wallet(Some("your_secure_password"))?;
@@ -161,6 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     rpc_url: config.network.rpc_url.clone(),
                     chain_id: config.network.chain_id,
                     name: config.network.name.clone(),
+                    rpc_urls: config.network.rpc_urls.clone(),
                 },
                 wallet.get_private_key().to_string(),
             )?);
@@ -171,6 +177,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut context = CliContext::new(blockchain_provider, dex_provider, &config);
 
             context.handle_resume()?;
+        }
+        Commands::AaveHealth {
+            config: config_path,
+            wallet_address,
+        } => {
+            let config = Config::load(&config_path)?;
+
+            // Load wallet securely
+            let wallet = config.load_wallet(Some("your_secure_password"))?;
+
+            let provider = Provider::new(Http::new(Url::parse(&config.network.rpc_url)?));
+            let wallet_signer = LocalWallet::from_bytes(&hex::decode(wallet.get_private_key())?)?
+                .with_chain_id(config.network.chain_id);
+
+            let blockchain_provider = Box::new(EvmProvider::new(
+                ChainConfig {
+                    rpc_url: config.network.rpc_url.clone(),
+                    rpc_urls: config.network.rpc_urls.clone(),
+                    chain_id: config.network.chain_id,
+                    name: config.network.name.clone(),
+                },
+                wallet.get_private_key().to_string(),
+            )?);
+
+            let dex_provider = create_dex_provider(&config, &provider, &wallet_signer)?;
+
+            // Create CLI context
+            let context = CliContext::new(blockchain_provider, dex_provider, &config);
+
+            // Handle AAVE health check
+            context.handle_aave_health(wallet_address).await?;
         }
     }
 
@@ -186,7 +223,7 @@ fn create_dex_provider(
     match config.dex.provider.as_str() {
         "uniswap_v3" => {
             // Get the DEX configuration
-            let dex_config = config
+            let _dex_config = config
                 .dexes
                 .get("uniswap_v3")
                 .ok_or("Uniswap V3 configuration not found")?;
@@ -211,8 +248,8 @@ fn create_dex_provider(
             )))
         }
         _ => {
-            // Default to Uniswap V4 (for backward compatibility)
-            Ok(Box::new(UniswapV4Provider::new(
+            // Default to Uniswap V3
+            Ok(Box::new(UniswapV3Provider::new(
                 Arc::new(provider.clone()),
                 config.network.chain_id,
                 Some(wallet_signer.clone()),

@@ -27,9 +27,16 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NetworkConfig {
+    #[serde(default)]
+    pub rpc_urls: Vec<String>,
+    #[serde(default = "default_rpc_url")]
     pub rpc_url: String,
     pub chain_id: u64,
     pub name: String,
+}
+
+fn default_rpc_url() -> String {
+    "".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

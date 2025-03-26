@@ -1,7 +1,6 @@
-use ethers::types::{Address, H160, U256};
+use ethers::types::{Address, U256};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 const API_BASE_URL: &str = "https://api.cow.fi/mainnet/api/v1";
@@ -61,11 +60,11 @@ impl CowSwapApiClient {
         is_sell_order: bool,
     ) -> Result<QuoteResponse, String> {
         let url = format!(
-            "https://api.cow.fi/mainnet/api/v1/quote?sellToken={}&buyToken={}&amount={}&from={}&kind={}",
-            format!("0x{:x}", from_token),
-            format!("0x{:x}", to_token),
-            format!("0x{:x}", amount),
-            format!("0x{:x}", wallet_address),
+            "https://api.cow.fi/mainnet/api/v1/quote?sellToken=0x{:x}&buyToken=0x{:x}&amount=0x{:x}&from=0x{:x}&kind={}",
+            from_token,
+            to_token,
+            amount,
+            wallet_address,
             if is_sell_order { "sell" } else { "buy" }
         );
 
@@ -79,6 +78,7 @@ impl CowSwapApiClient {
         Ok(response)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn submit_order(
         &self,
         sell_token: Address,
@@ -107,7 +107,7 @@ impl CowSwapApiClient {
 
         let response = self
             .client
-            .post(&format!("{}/orders", API_BASE_URL))
+            .post(format!("{}/orders", API_BASE_URL))
             .json(&request)
             .send()
             .await
@@ -119,6 +119,12 @@ impl CowSwapApiClient {
         }
 
         response.json().await.map_err(|e| e.to_string())
+    }
+}
+
+impl Default for CowSwapApiClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

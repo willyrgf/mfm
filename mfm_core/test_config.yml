@@ -7,18 +7,23 @@
 auth_methods:
   - method: wallet
     wallet:
-      private_key_path: "./private_key.txt"
-      not_encrypted: false
+      private_key_path: "private_key.txt"
+      not_encrypted: true
   - method: meta_mask
 
 network:
-  rpc_url: "https://mainnet.infura.io/v3/your-api-key"
+  rpc_url: "https://eth.llamarpc.com"
+  rpc_urls:
+    - "https://eth.meowrpc.com"
+    - "https://ethereum.publicnode.com"
+    - "https://rpc.eth.gateway.fm"
+    - "https://rpc.ankr.com/eth"
   chain_id: 1
   name: "mainnet"
 
 wallet:
-  address: "0x0000000000000000000000000000000000000000"
-  private_key_path: "./private_key.txt"
+  address: 0xd34d000000000000000000000000000000000000
+  private_key_path: "private_key.txt"
 
 dex:
   provider: "uniswap_v3"
@@ -32,6 +37,16 @@ dex:
     api_url: "https://api.cow.fi/mainnet/api"
 
 networks:
+  ethereum:
+    kind: evm
+    name: ethereum
+    symbol: eth
+    chain_id: 1
+    node_url_http: https://eth.llamarpc.com
+    blockexplorer_url: https://etherscan.io
+    min_balance_coin: 0.1
+    wrapped_token: weth
+    decimals: 18
   bsc:
     kind: evm
     name: bsc
@@ -58,6 +73,13 @@ networks:
     decimals: 18
 
 dexes:
+  uniswap_v3:
+    name: uniswap_v3
+    kind: uniswap_v3
+    router_address: "0xE592427A0AEce92De3Edee1F18E0157C05861564"
+    factory_address: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+    quoter_address: "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"
+    network_id: ethereum
   pancake_swap_v2:
     name: pancake_swap_v2
     kind: uniswap_v2
@@ -217,6 +239,13 @@ tokens:
         address: 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619
         slippage: 2
         path_token: weth
+      ethereum:
+        name: weth
+        kind: erc20
+        network_id: ethereum
+        address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+        slippage: 1
+        path_token: eth
   btc:
     kind: token
     networks:
@@ -311,6 +340,13 @@ tokens:
         address: 0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d
         slippage: 1
         path_token: wbnb
+      ethereum:
+        name: usdc
+        kind: erc20
+        network_id: ethereum
+        address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        slippage: 1
+        path_token: eth
   usdt:
     kind: token
     networks:
@@ -351,3 +387,23 @@ tokens:
         address: 0x2c89bbc92bd86f8075d1decc58c7f4e0107f286b
         slippage: 2
         path_token: weth
+  eth:
+    kind: token
+    networks:
+      ethereum:
+        name: eth
+        kind: erc20
+        network_id: ethereum
+        address: "0x0000000000000000000000000000000000000000"
+        slippage: 1
+        path_token: weth
+  dai:
+    kind: token
+    networks:
+      ethereum:
+        name: dai
+        kind: erc20
+        network_id: ethereum
+        address: "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+        slippage: 1
+        path_token: eth

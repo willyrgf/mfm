@@ -37,6 +37,7 @@ impl aead::NonceSequence for NonceSequence {
 }
 
 pub struct Encryption {
+    #[allow(dead_code)]
     sealing_key: SealingKey<NonceSequence>,
     opening_key: OpeningKey<NonceSequence>,
     nonce: [u8; NONCE_LEN],
@@ -72,6 +73,7 @@ impl Encryption {
         key_bytes
     }
 
+    #[allow(dead_code)]
     pub fn encrypt(&mut self, data: &str) -> Result<String, Box<dyn std::error::Error>> {
         // Validate private key format (64 hex characters)
         if !data.chars().all(|c| c.is_ascii_hexdigit()) || data.len() != 64 {

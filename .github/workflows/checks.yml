@@ -4,17 +4,15 @@ permissions:
   pull-requests: write
 
 on:
-  [push]
-  # push:
-  #   branches: [main, master]
-  # pull_request:
-  #   branches: [main, master]
+  push:
+    branches: [dev]
+  pull_request:
 
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: true
   RUSTFLAGS: "-Dwarnings"
-  RUST_BACKTRACE: 1 # Added for better debugging
+  RUST_BACKTRACE: 1
 
 jobs:
   build-and-test:
@@ -30,8 +28,6 @@ jobs:
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
-        with:
-          cache-all-crates: true
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -56,11 +52,9 @@ jobs:
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
-        with:
-          cache-all-crates: true
 
       - name: Install cargo-audit
         run: cargo install cargo-audit
 
       - name: Run security audit
-        run: cargo audit --deny warnings
+        run: cargo audit

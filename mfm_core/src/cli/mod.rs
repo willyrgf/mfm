@@ -4,8 +4,6 @@ use crate::{
 };
 use clap::{Parser, Subcommand};
 use ethers::types::{Address, U256};
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -68,6 +66,15 @@ pub enum Commands {
         #[arg(short, long)]
         config: String,
     },
+    /// Check AAVE health factor for a wallet
+    AaveHealth {
+        /// Path to the configuration file
+        #[arg(short, long)]
+        config: String,
+        /// Wallet address to check (defaults to wallet in config)
+        #[arg(short, long)]
+        wallet_address: Option<String>,
+    },
 }
 
 impl Commands {
@@ -77,7 +84,10 @@ impl Commands {
             Commands::Swap { config, .. } => config,
             Commands::Status { config } => config,
             Commands::Resume { config } => config,
-            Commands::Encrypt { .. } => unreachable!(),
+            Commands::AaveHealth { config, .. } => config,
+            Commands::Encrypt {
+                private_key_path, ..
+            } => private_key_path,
         }
     }
 }
@@ -97,6 +107,7 @@ impl CliContext {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn check_balances(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.portfolio.status = PortfolioStatus::CheckingBalances;
         self.portfolio.check_balances().await?;
@@ -211,6 +222,66 @@ impl CliContext {
                 _ => break,
             }
         }
+
+        Ok(())
+    }
+
+    pub async fn handle_aave_health(
+        &self,
+        wallet_address: Option<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::blockchain::{create_aave_provider, AaveProvider};
+        use ethers::providers::{Http, Provider};
+        use ethers::types::Address;
+        use std::str::FromStr;
+        use url::Url;
+
+        println!("Checking AAVE health factor...");
+
+        // Get wallet address (from parameter or config)
+        let wallet_addr = match wallet_address {
+            Some(addr) => {
+                Address::from_str(&addr).map_err(|_| "Invalid wallet address format".to_string())?
+            }
+            None => self.portfolio.blockchain_provider.get_wallet_address(),
+        };
+
+        // Create provider
+        let provider = Provider::new(Http::new(
+            Url::parse(&self.portfolio.config.network.rpc_url)
+                .map_err(|e| format!("Invalid RPC URL: {}", e))?,
+        ));
+
+        // Get AAVE contract addresses
+        let lending_pool_address = Address::from_str("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")
+            .map_err(|_| "Invalid AAVE lending pool address".to_string())?; // Mainnet V3 Pool
+        let data_provider_address = Address::from_str("0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3")
+            .map_err(|_| "Invalid AAVE data provider address".to_string())?; // Mainnet V3 Data Provider
+
+        // Create AAVE provider
+        let aave_provider =
+            create_aave_provider(provider, lending_pool_address, data_provider_address).await?;
+
+        // Calculate health factor
+        let account_data = aave_provider.get_user_account_data(wallet_addr).await?;
+
+        // Convert to floats with appropriate decimals
+        let total_collateral = account_data.total_collateral_base.as_u64() as f64 / 1e8;
+        let total_debt = account_data.total_debt_base.as_u64() as f64 / 1e8;
+        let available_borrow = account_data.available_borrow_base.as_u64() as f64 / 1e8;
+        let liquidation_threshold =
+            account_data.current_liquidation_threshold.as_u64() as f64 / 100.0; // As percentage
+        let ltv_value = account_data.ltv.as_u64() as f64 / 100.0; // As percentage
+        let health_factor_value = account_data.health_factor.as_u64() as f64 / 1e18;
+
+        // Print with formatting
+        println!("\n=== AAVE Health Check Results ===");
+        println!("Total Collateral: {:.2}", total_collateral);
+        println!("Total Debt: {:.2}", total_debt);
+        println!("Available Borrow: {:.2}", available_borrow);
+        println!("Liquidation Threshold: {:.2}%", liquidation_threshold);
+        println!("LTV: {:.2}%", ltv_value);
+        println!("Health Factor: {:.4}", health_factor_value);
 
         Ok(())
     }

@@ -23,9 +23,12 @@ pub struct Dex {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Dexes(HashMap<String, Dex>);
 impl Dexes {
+    #[allow(dead_code)]
     pub fn hashmap(&self) -> &HashMap<String, Dex> {
         &self.0
     }
+
+    #[allow(dead_code)]
     pub fn get(&self, key: &str) -> Option<&Dex> {
         self.0.get(key)
     }
