@@ -24,9 +24,12 @@ pub struct Network {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Networks(HashMap<String, Network>);
 impl Networks {
+    #[allow(dead_code)]
     pub fn get(&self, key: &str) -> Option<&Network> {
         self.0.get(key)
     }
+
+    #[allow(dead_code)]
     pub fn hashmap(&self) -> &HashMap<String, Network> {
         &self.0
     }

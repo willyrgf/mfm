@@ -1,15 +1,10 @@
-use crate::blockchain::abi::uniswap_v3::i_swap_router::ExactInputSingleParams;
 use crate::blockchain::{
-    abi::uniswap_v3::{IQuoter, ISwapRouter},
-    dex::{self, DexError, DexProvider},
+    dex::{DexError, DexProvider, SwapQuote},
     evm::BlockchainError,
 };
 use ethers::{
-    abi::AbiEncode,
     prelude::*,
-    providers::{Http, Provider},
-    signers::{LocalWallet, Signer as EthersSigner},
-    types::{Address, Bytes, H256, U256},
+    types::{Address, H256, U256},
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -119,10 +114,13 @@ abigen!(
 #[derive(Debug, Clone)]
 pub struct UniswapV3Provider {
     pub provider: Arc<Provider<Http>>,
+    #[allow(dead_code)]
     pub chain_id: u64,
     pub signer: Option<LocalWallet>,
+    #[allow(dead_code)]
     factory: Address,
     router: Address,
+    #[allow(dead_code)]
     quoter: Address,
     weth_address: Option<Address>,
 }
@@ -174,6 +172,7 @@ impl UniswapV3Provider {
         Ok(receipt.unwrap().transaction_hash)
     }
 
+    #[allow(dead_code)]
     async fn check_and_approve_token_internal(
         &self,
         token: Address,
@@ -248,11 +247,8 @@ impl DexProvider for UniswapV3Provider {
         from_token: Address,
         to_token: Address,
         amount: U256,
-    ) -> Result<dex::SwapQuote, DexError> {
-        let quoter = IQuoter::new(
-            QUOTER_ADDRESS.parse::<Address>().unwrap(),
-            Arc::new(self.provider.clone()),
-        );
+    ) -> Result<SwapQuote, DexError> {
+        let quoter = IQuoter::new(self.quoter, Arc::new(self.provider.clone()));
 
         let amount_out = quoter
             .quote_exact_input_single(
@@ -266,7 +262,7 @@ impl DexProvider for UniswapV3Provider {
             .await
             .map_err(|e| DexError::SwapError(e.to_string()))?;
 
-        Ok(dex::SwapQuote {
+        Ok(SwapQuote {
             from_token,
             to_token,
             from_amount: amount,
@@ -281,7 +277,7 @@ impl DexProvider for UniswapV3Provider {
         from_token: Address,
         to_token: Address,
         amount: U256,
-        exact_approval: bool,
+        _exact_approval: bool,
     ) -> Result<H256, DexError> {
         // Get signer
         let signer = self

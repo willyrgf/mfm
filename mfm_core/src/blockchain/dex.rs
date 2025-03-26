@@ -71,7 +71,7 @@ pub trait DexProvider: fmt::Debug + Send + Sync {
         from_token: Address,
         to_token: Address,
         amount: U256,
-        exact_approval: bool,
+        _exact_approval: bool,
     ) -> Result<H256, DexError>;
 
     async fn check_and_approve_token(&self, token: Address, amount: U256) -> Result<(), DexError>;
@@ -152,7 +152,7 @@ impl DexProvider for CowSwapProvider {
         from_token: Address,
         to_token: Address,
         amount: U256,
-        exact_approval: bool,
+        _exact_approval: bool,
     ) -> Result<H256, DexError> {
         if let Some(signer) = &self.signer {
             let cow_swap = crate::blockchain::cow_swap::CowSwapProvider::new(

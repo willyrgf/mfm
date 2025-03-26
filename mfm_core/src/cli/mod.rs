@@ -4,8 +4,6 @@ use crate::{
 };
 use clap::{Parser, Subcommand};
 use ethers::types::{Address, U256};
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -107,6 +105,7 @@ impl CliContext {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn check_balances(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.portfolio.status = PortfolioStatus::CheckingBalances;
         self.portfolio.check_balances().await?;

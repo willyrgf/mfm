@@ -36,6 +36,8 @@ pub enum BlockchainError {
     ApiError(String),
     #[error("Signing error: {0}")]
     SigningError(String),
+    #[error("No signer configured")]
+    NoSignerConfigured,
     #[error("Other error: {0}")]
     Other(String),
 }
@@ -182,6 +184,7 @@ impl EvmProvider {
         }
     }
 
+    #[allow(dead_code)]
     async fn call_contract(&self, address: Address, data: Bytes) -> Result<Bytes, BlockchainError> {
         // Use 3 retries by default (will try up to 4 providers)
         self.call_contract_with_retry(address, data, 3).await
@@ -243,7 +246,7 @@ impl BlockchainProvider for EvmProvider {
                 let selector = &keccak256(function_signature.as_bytes())[0..4];
 
                 let params = ethers::abi::encode(&[ethers::abi::Token::Address(address)]);
-                let data = [&selector[..], &params[..]].concat();
+                let data = [selector, &params[..]].concat();
 
                 let result = self
                     .call_contract_with_retry(token_address, data.into(), 3)

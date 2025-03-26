@@ -1,9 +1,4 @@
-use async_trait::async_trait;
-use ethers::{
-    providers::{Http, Provider},
-    signers::LocalWallet,
-    types::{Address, H256, U256},
-};
+use ethers::types::Address;
 use serde::{Deserialize, Serialize};
 
 pub mod aave;
@@ -12,14 +7,11 @@ pub mod cow_swap;
 pub mod dex;
 pub mod evm;
 pub mod uniswap_v3;
-pub mod uniswap_v4;
 
-pub use aave::{create_aave_provider, AaveEVMProvider, AaveHealthCheckResult, AaveProvider};
-pub use cow_swap::CowSwapProvider;
-pub use dex::{DexError, DexProvider, SwapQuote};
+pub use aave::{create_aave_provider, AaveProvider};
+pub use dex::{DexError, DexProvider};
 pub use evm::{BlockchainError, BlockchainProvider, ChainConfig, EvmProvider};
 pub use uniswap_v3::UniswapV3Provider;
-pub use uniswap_v4::UniswapV4Provider;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DexConfig {

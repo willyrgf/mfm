@@ -1,14 +1,11 @@
 use crate::blockchain::{
-    abi::cow_swap::*,
     dex::{DexError, DexProvider, SwapQuote},
     evm::BlockchainError,
 };
 use ethers::{
-    abi::AbiEncode,
     prelude::*,
-    providers::{Http, Provider},
     types::{
-        transaction::eip712::{EIP712Domain as Eip712Domain, Eip712DomainType, TypedData},
+        transaction::eip712::{EIP712Domain, Eip712DomainType, TypedData},
         Address, Bytes, H256, U256,
     },
 };
@@ -21,7 +18,6 @@ use std::{
 };
 
 pub mod api;
-use api::{CowSwapApiClient, OrderRequest, OrderResponse, Quote, QuoteResponse};
 
 // ERC20 ABI for token approval
 abigen!(
@@ -33,7 +29,6 @@ abigen!(
 );
 
 const SETTLEMENT_ADDRESS: &str = "0x9008D19f58AAbD9eD0D60971565AA8510560ab41";
-const APP_DATA: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug)]
 pub struct CowSwapProvider {
@@ -69,6 +64,7 @@ impl CowSwapProvider {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_signer(mut self, signer: LocalWallet) -> Self {
         self.signer = Some(signer);
         self
@@ -111,7 +107,7 @@ impl CowSwapProvider {
 
     pub async fn sign_order(&self, order: &Order) -> Result<Bytes, BlockchainError> {
         if let Some(signer) = &self.signer {
-            let domain = Eip712Domain {
+            let domain = EIP712Domain {
                 name: Some("Gnosis Protocol".to_string()),
                 version: Some("v2".to_string()),
                 chain_id: Some(self.chain_id.into()),
@@ -260,9 +256,10 @@ impl CowSwapProvider {
         self.api_client
             .get_quote(from_token, to_token, amount, wallet_address, is_sell_order)
             .await
-            .map_err(|e| DexError::QuoteError(e))
+            .map_err(DexError::QuoteError)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn submit_order(
         &self,
         sell_token: Address,
@@ -289,7 +286,7 @@ impl CowSwapProvider {
                 from,
             )
             .await
-            .map_err(|e| DexError::SwapError(e))?;
+            .map_err(DexError::SwapError)?;
 
         // Convert order_uid to H256
         let order_uid = response
@@ -302,10 +299,19 @@ impl CowSwapProvider {
         Ok(H256::from(hash))
     }
 
-    async fn check_and_approve_token(&self, token: Address, amount: U256) -> Result<(), DexError> {
-        let signer = self.signer.as_ref().ok_or(DexError::NoSignerConfigured)?;
+    #[allow(dead_code)]
+    async fn check_and_approve_token(
+        &self,
+        token: Address,
+        amount: U256,
+    ) -> Result<(), BlockchainError> {
+        let _signer = self
+            .signer
+            .as_ref()
+            .ok_or(BlockchainError::NoSignerConfigured)?;
         self.check_and_approve_token_internal(token, self.settlement, amount)
             .await
+            .map_err(|e| BlockchainError::ContractError(format!("Failed to approve token: {}", e)))
     }
 
     async fn check_and_approve_token_internal(
@@ -370,7 +376,7 @@ impl DexProvider for CowSwapProvider {
         amount: U256,
         exact_approval: bool,
     ) -> Result<H256, DexError> {
-        let signer = self.signer.as_ref().ok_or(DexError::NoSignerConfigured)?;
+        let _signer = self.signer.as_ref().ok_or(DexError::NoSignerConfigured)?;
 
         // Check and approve token if needed
         self.check_and_approve_token_internal(
@@ -382,7 +388,7 @@ impl DexProvider for CowSwapProvider {
 
         // Get quote for minimum amount out
         let quote = self
-            .get_quote(from_token, to_token, amount, signer.address(), false)
+            .get_quote(from_token, to_token, amount, _signer.address(), false)
             .await?;
 
         // Create order
@@ -405,22 +411,23 @@ impl DexProvider for CowSwapProvider {
             .map_err(|e| DexError::SwapError(e.to_string()))?;
 
         // Submit order
+        let signature_hex = hex::encode(&signature);
         self.submit_order(
             order.sell_token,
             order.buy_token,
             order.sell_amount,
             order.buy_amount,
             order.valid_to as u64,
-            format!("0x{}", hex::encode(&order.app_data)),
+            format!("0x{}", signature_hex),
             order.fee_amount,
-            hex::encode(signature),
-            signer.address(),
+            format!("0x{}", signature_hex),
+            _signer.address(),
         )
         .await
     }
 
     async fn check_and_approve_token(&self, token: Address, amount: U256) -> Result<(), DexError> {
-        let signer = self.signer.as_ref().ok_or(DexError::NoSignerConfigured)?;
+        let _signer = self.signer.as_ref().ok_or(DexError::NoSignerConfigured)?;
         self.check_and_approve_token_internal(token, self.settlement, amount)
             .await
     }

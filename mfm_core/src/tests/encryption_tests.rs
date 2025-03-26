@@ -1,6 +1,5 @@
 use crate::config::authentication::encryption::Encryption;
 use std::fs;
-use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
 #[test]

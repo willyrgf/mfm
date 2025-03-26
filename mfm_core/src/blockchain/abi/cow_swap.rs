@@ -234,15 +234,21 @@ lazy_static! {
 }
 
 // Constants for order kinds
-pub const ORDER_KIND_SELL: &str =
-    "0x0000000000000000000000000000000000000000000000000000000000000000";
-pub const ORDER_KIND_BUY: &str =
-    "0xf3b277728b3fee749481eb3e0b3b48980dbbab78658fc419025cb16eee346775";
+#[allow(dead_code)]
+pub const ORDER_KIND_SELL: &str = "sell";
+
+// Constants for order kinds
+#[allow(dead_code)]
+pub const ORDER_KIND_BUY: &str = "buy";
 
 // Constants for token balance kinds
-pub const BALANCE_ERC20: &str =
-    "0x0000000000000000000000000000000000000000000000000000000000000000";
-pub const BALANCE_EXTERNAL: &str =
-    "0x1000000000000000000000000000000000000000000000000000000000000000";
-pub const BALANCE_INTERNAL: &str =
-    "0x2000000000000000000000000000000000000000000000000000000000000000";
+#[allow(dead_code)]
+pub const BALANCE_ERC20: &str = "erc20";
+
+// Constants for token balance kinds
+#[allow(dead_code)]
+pub const BALANCE_EXTERNAL: &str = "external";
+
+// Constants for token balance kinds
+#[allow(dead_code)]
+pub const BALANCE_INTERNAL: &str = "internal";

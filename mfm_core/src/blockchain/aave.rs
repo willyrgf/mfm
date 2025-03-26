@@ -71,10 +71,14 @@ pub trait AaveProvider: Send + Sync {
         &self,
         user: Address,
     ) -> Result<AaveUserAccountData, BlockchainError>;
+
+    #[allow(dead_code)]
     async fn get_user_reserves(
         &self,
         user: Address,
     ) -> Result<Vec<AaveUserReserveData>, BlockchainError>;
+
+    #[allow(dead_code)]
     async fn calculate_health_factor(
         &self,
         user: Address,
@@ -126,8 +130,9 @@ pub fn u256_to_f64(value: U256, decimals: u8) -> f64 {
 // Implementation for EVM provider
 #[derive(Debug, Clone)]
 pub struct AaveEVMProvider<M: Middleware + 'static> {
-    provider: M,
+    provider: Arc<M>,
     lending_pool_address: Address,
+    #[allow(dead_code)]
     data_provider_address: Address,
     rate_limiter: Arc<Mutex<RateLimiter>>,
 }
@@ -162,7 +167,7 @@ impl RateLimiter {
 impl<M: Middleware + 'static> AaveEVMProvider<M> {
     pub fn new(provider: M, lending_pool_address: Address, data_provider_address: Address) -> Self {
         Self {
-            provider,
+            provider: Arc::new(provider),
             lending_pool_address,
             data_provider_address,
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new(200))), // 200ms between calls
@@ -194,6 +199,7 @@ impl<M: Middleware + 'static> AaveEVMProvider<M> {
         }
     }
 
+    #[allow(dead_code)]
     async fn get_token_symbol(&self, token_address: Address) -> Result<String, BlockchainError> {
         let function_signature = "symbol()";
         let selector = &keccak256(function_signature.as_bytes())[0..4];
@@ -220,6 +226,7 @@ impl<M: Middleware + 'static> AaveEVMProvider<M> {
         }
     }
 
+    #[allow(dead_code)]
     async fn get_token_decimals(&self, token_address: Address) -> Result<u8, BlockchainError> {
         let function_signature = "decimals()";
         let selector = &keccak256(function_signature.as_bytes())[0..4];
@@ -358,26 +365,27 @@ impl<M: Middleware + Send + Sync + Clone + 'static> AaveProvider for AaveEVMProv
 
 impl<M: Middleware + 'static> AaveEVMProvider<M> {
     // Helper function to create AaveProvider from EvmProvider
-    pub fn create_aave_provider(
+    #[allow(dead_code)]
+    pub async fn create_aave_provider(
         provider: M,
         lending_pool_address: Address,
         data_provider_address: Address,
-    ) -> impl std::future::Future<Output = Result<AaveEVMProvider<M>, BlockchainError>> + Send {
-        async move {
-            Ok(AaveEVMProvider::new(
-                provider,
-                lending_pool_address,
-                data_provider_address,
-            ))
-        }
+    ) -> Result<Self, BlockchainError> {
+        Ok(AaveEVMProvider::new(
+            provider,
+            lending_pool_address,
+            data_provider_address,
+        ))
     }
 }
 
 // Helper function to get price with retry
+#[allow(dead_code)]
 async fn get_price_with_retry(asset: &str, max_retries: usize) -> Result<f64, BlockchainError> {
     get_price_with_retry_internal(asset, 0, max_retries).await
 }
 
+#[allow(dead_code)]
 async fn get_price_with_retry_internal(
     asset: &str,
     current_retry: usize,
@@ -416,16 +424,14 @@ async fn get_price_with_retry_internal(
     }
 }
 
-pub fn create_aave_provider<M: Middleware + Send + Sync + Clone + 'static>(
+pub async fn create_aave_provider<M: Middleware + Send + Sync + Clone + 'static>(
     provider: M,
     lending_pool_address: Address,
     data_provider_address: Address,
-) -> impl std::future::Future<Output = Result<AaveEVMProvider<M>, BlockchainError>> + Send {
-    async move {
-        Ok(AaveEVMProvider::new(
-            provider,
-            lending_pool_address,
-            data_provider_address,
-        ))
-    }
+) -> Result<AaveEVMProvider<M>, BlockchainError> {
+    Ok(AaveEVMProvider::new(
+        provider,
+        lending_pool_address,
+        data_provider_address,
+    ))
 }

@@ -86,8 +86,11 @@ impl<'de> Deserialize<'de> for Portfolio {
     {
         #[derive(Deserialize)]
         struct PortfolioHelper {
+            #[allow(dead_code)]
             state: PortfolioState,
+            #[allow(dead_code)]
             status: PortfolioStatus,
+            #[allow(dead_code)]
             operation: Option<PortfolioOperation>,
         }
 
@@ -196,9 +199,12 @@ impl Portfolio {
                 eprintln!("Native ETH balance: {}", eth_balance);
 
                 let token_value = eth_balance; // For ETH, value is the same as balance
-                total_value = total_value.checked_add(token_value).ok_or_else(|| {
-                    PortfolioError::BlockchainError(crate::blockchain::BlockchainError::Overflow)
-                })?;
+                total_value =
+                    total_value
+                        .checked_add(token_value)
+                        .ok_or(PortfolioError::BlockchainError(
+                            crate::blockchain::BlockchainError::Overflow,
+                        ))?;
 
                 balances.push(TokenBalance {
                     token: Address::zero(),
@@ -228,9 +234,12 @@ impl Portfolio {
 
                 eprintln!("Token value: {}", token_value);
 
-                total_value = total_value.checked_add(token_value).ok_or_else(|| {
-                    PortfolioError::BlockchainError(crate::blockchain::BlockchainError::Overflow)
-                })?;
+                total_value =
+                    total_value
+                        .checked_add(token_value)
+                        .ok_or(PortfolioError::BlockchainError(
+                            crate::blockchain::BlockchainError::Overflow,
+                        ))?;
 
                 balances.push(TokenBalance {
                     token: token_balance.token,
@@ -288,7 +297,7 @@ impl Portfolio {
                 from_token,
                 to_token,
                 amount,
-                exact_approval,
+                exact_approval: _exact_approval,
             }) => {
                 eprintln!("Getting quote for swap:");
                 eprintln!("From: {}", from_token);
@@ -299,7 +308,7 @@ impl Portfolio {
                     .dex_provider
                     .get_quote(*from_token, *to_token, *amount)
                     .await
-                    .map_err(|e| PortfolioError::DexError(e))?;
+                    .map_err(PortfolioError::DexError)?;
 
                 eprintln!("\nQuote received:");
                 eprintln!("To amount: {}", quote.to_amount);
@@ -354,6 +363,7 @@ impl Portfolio {
         }
     }
 
+    #[allow(dead_code)]
     pub fn interrupt(&mut self) {
         self.status = PortfolioStatus::Idle;
         self.operation = None;
