@@ -1,6 +1,6 @@
 use anyhow::anyhow;
-use mfm_machine::state::context::{wrap_context, ContextWrapper, Local};
-use mfm_machine::state::safe_context::SafeContext;
+use mfm_machine::state::context::Local;
+use mfm_machine::state::safe_context::{create_default_safe_context, SafeContext};
 use mfm_machine::state::{
     standard_tags, DependencyStrategy, Label, StateError, StateErrorRecoverability, StateHandler,
     StateMetadata, StateResult, Tag,

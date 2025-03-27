@@ -2,7 +2,8 @@ use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
 use crate::state::{
-    context::ContextWrapper, safe_context::SafeContext, StateError, StateHandler, States, Tag,
+    safe_context::SafeContext, DependencyStrategy, Label, StateError, StateHandler, StateMetadata,
+    StateResult, States, Tag,
 };
 
 use super::tracker::Tracker;
@@ -22,21 +23,6 @@ pub enum SchedulerError {
 
 /// A scheduler that determines the next state to execute based on the current state and context
 pub trait Scheduler: Send + Sync {
-    /// Determine the next state to execute
-    #[deprecated(
-        since = "1.0.0",
-        note = "Use next_state_safe instead for better safety guarantees"
-    )]
-    fn next_state(
-        &self,
-        current_index: usize,
-        states: &States,
-        context: &ContextWrapper,
-    ) -> Result<usize, SchedulerError> {
-        let safe_context = SafeContext::from_wrapper(context.clone());
-        self.next_state_safe(current_index, states, &safe_context)
-    }
-
     /// Determine the next state to execute using SafeContext
     fn next_state_safe(
         &self,
@@ -80,17 +66,6 @@ impl DefaultScheduler {
 }
 
 impl Scheduler for DefaultScheduler {
-    #[allow(deprecated)]
-    fn next_state(
-        &self,
-        current_index: usize,
-        states: &States,
-        context: &ContextWrapper,
-    ) -> Result<usize, SchedulerError> {
-        let safe_context = SafeContext::from_wrapper(context.clone());
-        self.next_state_safe(current_index, states, &safe_context)
-    }
-
     fn next_state_safe(
         &self,
         current_index: usize,
@@ -216,17 +191,6 @@ impl DependencyScheduler {
 }
 
 impl Scheduler for DependencyScheduler {
-    #[allow(deprecated)]
-    fn next_state(
-        &self,
-        current_index: usize,
-        states: &States,
-        context: &ContextWrapper,
-    ) -> Result<usize, SchedulerError> {
-        let safe_context = SafeContext::from_wrapper(context.clone());
-        self.next_state_safe(current_index, states, &safe_context)
-    }
-
     fn next_state_safe(
         &self,
         current_index: usize,
@@ -276,9 +240,8 @@ impl Default for DependencyScheduler {
 mod tests {
     use super::*;
     use crate::state::{
-        context::{wrap_context, Local},
-        DependencyStrategy, Label, StateError, StateErrorRecoverability, StateHandler,
-        StateMetadata, StateResult,
+        safe_context::create_default_safe_context, DependencyStrategy, Label, StateHandler,
+        StateResult,
     };
     use mfm_machine_derive::StateMetadataReqs;
 
@@ -338,8 +301,7 @@ mod tests {
     #[test]
     fn test_default_scheduler() {
         let scheduler = DefaultScheduler::new();
-        let context = wrap_context(Local::default());
-        let safe_context = SafeContext::from_wrapper(context.clone());
+        let safe_context = create_default_safe_context();
 
         let states: States = Arc::from(vec![
             Box::new(TestState1::new()) as Box<dyn StateHandler>,
@@ -360,8 +322,7 @@ mod tests {
     #[test]
     fn test_dependency_scheduler() {
         let scheduler = DependencyScheduler::new();
-        let context = wrap_context(Local::default());
-        let safe_context = SafeContext::from_wrapper(context.clone());
+        let safe_context = create_default_safe_context();
 
         let states: States = Arc::from(vec![
             Box::new(TestState1::new()) as Box<dyn StateHandler>,
