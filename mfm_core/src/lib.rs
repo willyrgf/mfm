@@ -13,8 +13,6 @@ pub mod config;
 pub mod portfolio;
 
 pub mod contexts;
-#[path = "old_safe_context.rs"]
-mod old_safe_context;
 pub mod operations;
 pub mod states;
 

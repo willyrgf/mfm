@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::contexts::{ConfigCtx, ConfigSource, CONFIG_CTX};
-use mfm_machine::state::context::{wrap_context, ContextWrapperExt, Local};
+use mfm_machine::state::safe_context::{create_default_safe_context, SafeContext};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -20,7 +20,7 @@ pub fn load_test_config() -> Config {
 }
 
 /// Create a context with the test configuration loaded
-pub fn create_test_context_with_config() -> mfm_machine::state::context::ContextWrapper {
+pub fn create_test_context_with_config() -> SafeContext {
     let config_path = test_config_path();
     let config = load_test_config();
 
@@ -30,7 +30,7 @@ pub fn create_test_context_with_config() -> mfm_machine::state::context::Context
     };
 
     // Set up context
-    let context = wrap_context(Local::default());
+    let context = create_default_safe_context();
     context
         .write_value(CONFIG_CTX.as_str(), &json!(config_ctx))
         .expect("Failed to write to context");

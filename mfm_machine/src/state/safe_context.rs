@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
-use super::context::{Context, ContextWrapper, Local, TypedContext};
+use super::context::{Context, ContextWrapper, Local};
 
 /// A safer context wrapper that doesn't expose locking details to callers
 /// and prevents deadlocks by ensuring safe lock patterns.

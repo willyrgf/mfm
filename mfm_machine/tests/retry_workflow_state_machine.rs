@@ -1,12 +1,8 @@
 mod default_impls;
 
 use default_impls::{ComputePrice, Report, Setup};
-use mfm_machine::state::context::{wrap_context, Local};
-use mfm_machine::state::safe_context::SafeContext;
-use mfm_machine::state::States;
+use mfm_machine::state::safe_context::{create_default_safe_context, SafeContext};
 use mfm_machine::state_machine::StateMachine;
-use serde_json::json;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::default_impls::{Config, ConfigState, OnChainValuesState, CONFIG};
@@ -29,10 +25,9 @@ fn test_retry_workflow_state_machine() {
     let states = Arc::from(states);
 
     let mut state_machine = StateMachine::new(states);
-    let context = wrap_context(Local::default());
-    let safe_context = SafeContext::from_wrapper(context.clone());
+    let context = create_default_safe_context();
 
-    let result = state_machine.execute_safe(safe_context);
+    let result = state_machine.execute_safe(context);
     assert!(result.is_ok());
 
     // Verify we can read the configuration

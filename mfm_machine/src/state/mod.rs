@@ -4,7 +4,6 @@ use std::{fmt, sync::Arc};
 pub mod context;
 pub mod safe_context;
 
-use self::context::ContextWrapper;
 use self::safe_context::SafeContext;
 
 /// A structured tag system for classifying states based on their purpose and behavior.
@@ -197,10 +196,13 @@ pub type StateResult = Result<(), StateError>;
 /// to process the context data.
 pub trait StateHandler: StateMetadata + Send + Sync {
     /// Executes this state's logic, potentially modifying the context
-    fn handler(&self, context: ContextWrapper) -> StateResult;
+    fn handler(&self, context: SafeContext) -> StateResult;
 
     /// Executes this state's logic using the safer context API, potentially modifying the context
-    fn handler_safe(&self, context: SafeContext) -> StateResult;
+    fn handler_safe(&self, context: SafeContext) -> StateResult {
+        // By default, just call the handler method
+        self.handler(context)
+    }
 }
 
 pub type States = Arc<[Box<dyn StateHandler>]>;
@@ -335,7 +337,7 @@ impl std::error::Error for StateError {}
 
 // Implement StateHandler for Box<dyn StateHandler>
 impl StateHandler for Box<dyn StateHandler> {
-    fn handler(&self, context: ContextWrapper) -> StateResult {
+    fn handler(&self, context: SafeContext) -> StateResult {
         (**self).handler(context)
     }
 

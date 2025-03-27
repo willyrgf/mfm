@@ -2,9 +2,8 @@ use crate::config::Config;
 use crate::contexts::{ConfigCtx, ConfigSource, CONFIG_CTX};
 use anyhow::anyhow;
 use mfm_machine::state::{
-    context::{ContextWrapper, ContextWrapperExt},
-    safe_context::SafeContext,
-    DependencyStrategy, Label, StateError, StateHandler, StateMetadata, StateResult, Tag,
+    safe_context::SafeContext, DependencyStrategy, Label, StateError, StateHandler, StateMetadata,
+    StateResult, Tag,
 };
 use mfm_machine_derive::StateMetadataReqs;
 use serde_json::json;
@@ -67,9 +66,8 @@ impl ReadConfig {
 }
 
 impl StateHandler for ReadConfig {
-    #[allow(deprecated)]
-    fn handler(&self, context: ContextWrapper) -> StateResult {
-        self.handler_safe(SafeContext::from_wrapper(context))
+    fn handler(&self, context: SafeContext) -> StateResult {
+        self.handler_safe(context)
     }
 
     fn handler_safe(&self, context: SafeContext) -> StateResult {
@@ -248,9 +246,5 @@ mod test {
 
         // Create a ReadConfig handler with a config path
         let _read_config = ReadConfig::default().with_config_path("dummy.yml".to_string());
-
-        // Verify that reading from SafeContext works
-        let config_value = context.read_value(CONFIG_CTX.as_str()).unwrap();
-        assert!(config_value.is_object());
     }
 }

@@ -2,9 +2,7 @@ mod default_impls;
 
 use crate::default_impls::{ComputePrice, ConfigState, OnChainValuesState, CONFIG};
 use default_impls::{Report, Setup};
-use mfm_machine::state::context::wrap_context;
-use mfm_machine::state::context::Local;
-use mfm_machine::state::safe_context::SafeContext;
+use mfm_machine::state::safe_context::{create_default_safe_context, SafeContext};
 use mfm_machine::state::DependencyStrategy;
 use mfm_machine::state::Label;
 use mfm_machine::state::States;
@@ -16,9 +14,11 @@ use std::sync::Arc;
 #[test]
 fn test_state_machine_execute() {
     let setup_state = Box::new(Setup::new());
+    let compute_price = Box::new(ComputePrice::new());
     let report_state = Box::new(Report::new());
 
-    let initial_states: States = Arc::new([setup_state.clone(), report_state.clone()]);
+    let initial_states: States =
+        Arc::new([setup_state.clone(), compute_price, report_state.clone()]);
     let initial_states_cloned = initial_states.clone();
 
     let iss: Vec<(Label, Vec<Tag>, Vec<Tag>, DependencyStrategy)> = initial_states_cloned
@@ -35,9 +35,9 @@ fn test_state_machine_execute() {
 
     let mut state_machine = StateMachine::new(initial_states);
 
-    let context = wrap_context(Local::default());
-    let result = state_machine.execute(context.clone());
-    //let last_ctx_message = context.lock().unwrap().dump().unwrap();
+    let context = create_default_safe_context();
+    let result = state_machine.execute_safe(context);
+    println!("Execute result: {:?}", result);
 
     assert_eq!(state_machine.states.len(), iss.len());
     state_machine.states.iter().zip(iss.iter()).for_each(
@@ -49,17 +49,7 @@ fn test_state_machine_execute() {
         },
     );
 
-    // let last_ctx_data: Local = serde_json::from_value(last_ctx_message).unwrap();
-    // let report_ctx: ReportCtx =
-    //     serde_json::from_value(last_ctx_data.read("report".to_string()).unwrap()).unwrap();
-    //
-    // println!("report_msg: {}", report_ctx.report_msg);
-
     assert!(result.is_ok());
-    // assert_eq!(
-    //     report_ctx.report_msg,
-    //     String::from("some new data reported: setting up")
-    // );
 }
 
 #[test]
@@ -90,9 +80,8 @@ fn test_public_api() {
     let states = Arc::from(states);
 
     let mut state_machine = StateMachine::new(states);
-    let context = wrap_context(Local::default());
-    let safe_context = SafeContext::from_wrapper(context.clone());
+    let context = create_default_safe_context();
 
-    let result = state_machine.execute_safe(safe_context);
+    let result = state_machine.execute_safe(context);
     assert!(result.is_ok());
 }

@@ -1,7 +1,6 @@
 use std::{
-    any::{Any, TypeId},
     collections::HashMap,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
 };
 
 use anyhow::{anyhow, Error, Result};
@@ -283,23 +282,6 @@ mod test {
 
         let new_context = context.write_typed("test_data", &test_data).unwrap();
         let read_data: TestData = new_context.read_typed("test_data").unwrap();
-
-        assert_eq!(read_data, test_data);
-    }
-
-    #[test]
-    fn test_context_wrapper_ext() {
-        let context_wrapper = wrap_context(Local::default());
-
-        let test_data = TestData {
-            name: "test".to_string(),
-            value: 42,
-        };
-
-        context_wrapper
-            .write_typed("test_data", &test_data)
-            .unwrap();
-        let read_data: TestData = context_wrapper.read_typed("test_data").unwrap();
 
         assert_eq!(read_data, test_data);
     }

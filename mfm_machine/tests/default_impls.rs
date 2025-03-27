@@ -42,12 +42,7 @@ impl Setup {
 }
 
 impl StateHandler for Setup {
-    #[allow(deprecated)]
-    fn handler(&self, context: ContextWrapper) -> StateResult {
-        self.handler_safe(SafeContext::from_wrapper(context))
-    }
-
-    fn handler_safe(&self, context: SafeContext) -> StateResult {
+    fn handler(&self, context: SafeContext) -> StateResult {
         let data = Config {
             a: "setup_b".to_string(),
             b: 1,
@@ -90,12 +85,7 @@ impl ComputePrice {
 }
 
 impl StateHandler for ComputePrice {
-    #[allow(deprecated)]
-    fn handler(&self, context: ContextWrapper) -> StateResult {
-        self.handler_safe(SafeContext::from_wrapper(context))
-    }
-
-    fn handler_safe(&self, context: SafeContext) -> StateResult {
+    fn handler(&self, context: SafeContext) -> StateResult {
         let config_data: Config = context
             .read_typed(CONFIG)
             .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
@@ -142,12 +132,7 @@ impl Report {
 }
 
 impl StateHandler for Report {
-    #[allow(deprecated)]
-    fn handler(&self, context: ContextWrapper) -> StateResult {
-        self.handler_safe(SafeContext::from_wrapper(context))
-    }
-
-    fn handler_safe(&self, context: SafeContext) -> StateResult {
+    fn handler(&self, context: SafeContext) -> StateResult {
         let price_data: Config = context
             .read_typed("price")
             .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
@@ -197,12 +182,8 @@ impl ConfigState {
 }
 
 impl StateHandler for ConfigState {
-    #[allow(deprecated)]
-    fn handler(&self, context: ContextWrapper) -> StateResult {
-        self.handler_safe(SafeContext::from_wrapper(context))
-    }
-
-    fn handler_safe(&self, _context: SafeContext) -> StateResult {
+    fn handler(&self, _context: SafeContext) -> StateResult {
+        // Always succeed
         Ok(())
     }
 }
@@ -235,12 +216,7 @@ impl OnChainValuesState {
 }
 
 impl StateHandler for OnChainValuesState {
-    #[allow(deprecated)]
-    fn handler(&self, context: ContextWrapper) -> StateResult {
-        self.handler_safe(SafeContext::from_wrapper(context))
-    }
-
-    fn handler_safe(&self, _context: SafeContext) -> StateResult {
+    fn handler(&self, _context: SafeContext) -> StateResult {
         Ok(())
     }
 }

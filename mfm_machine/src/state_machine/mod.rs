@@ -1,10 +1,8 @@
 use anyhow::{anyhow, Result};
-use std::sync::Arc;
 
 use crate::state::{
-    context::{ContextWrapper, ContextWrapperExt},
-    safe_context::SafeContext,
-    standard_tags, StateError, StateErrorRecoverability, StateHandler, StateResult, States,
+    context::ContextWrapper, safe_context::SafeContext, StateError, StateHandler, StateResult,
+    States,
 };
 
 use self::scheduler::{
@@ -459,12 +457,7 @@ mod test {
     }
 
     impl StateHandler for Setup {
-        #[allow(deprecated)]
-        fn handler(&self, context: ContextWrapper) -> StateResult {
-            self.handler_safe(SafeContext::from_wrapper(context))
-        }
-
-        fn handler_safe(&self, context: SafeContext) -> StateResult {
+        fn handler(&self, context: SafeContext) -> StateResult {
             let data = SetupCtx {
                 a: "setup_b".to_string(),
                 b: 1,
@@ -502,12 +495,7 @@ mod test {
     }
 
     impl StateHandler for Report {
-        #[allow(deprecated)]
-        fn handler(&self, context: ContextWrapper) -> StateResult {
-            self.handler_safe(SafeContext::from_wrapper(context))
-        }
-
-        fn handler_safe(&self, context: SafeContext) -> StateResult {
+        fn handler(&self, context: SafeContext) -> StateResult {
             let setup_data: SetupCtx = context
                 .read_typed("setup")
                 .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;

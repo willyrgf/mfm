@@ -303,11 +303,8 @@ mod tests {
     }
 
     impl StateHandler for TestState1 {
-        fn handler(&self, _context: ContextWrapper) -> StateResult {
-            Ok(())
-        }
-
-        fn handler_safe(&self, _context: crate::state::safe_context::SafeContext) -> StateResult {
+        fn handler(&self, _context: SafeContext) -> StateResult {
+            // State 1 always passes
             Ok(())
         }
     }
@@ -332,11 +329,8 @@ mod tests {
     }
 
     impl StateHandler for TestState2 {
-        fn handler(&self, _context: ContextWrapper) -> StateResult {
-            Ok(())
-        }
-
-        fn handler_safe(&self, _context: crate::state::safe_context::SafeContext) -> StateResult {
+        fn handler(&self, _context: SafeContext) -> StateResult {
+            // State 2 always passes
             Ok(())
         }
     }

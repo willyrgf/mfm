@@ -1,10 +1,10 @@
 use std::{collections::HashMap, fmt::Debug};
 
-use anyhow::{anyhow, Error};
+use anyhow::Error;
 use serde_json::Value;
 
 use crate::state::{
-    context::{ContextWrapper, ContextWrapperExt},
+    context::ContextWrapper,
     Label, Tag,
 };
 

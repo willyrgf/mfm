@@ -1,10 +1,12 @@
 use anyhow::Result;
 use ethers::types::{Address, U256};
 use mfm_machine::state::{
-    DependencyStrategy, Label, StateHandler, StateMetadata, StateResult, Tag,
+    safe_context::SafeContext, DependencyStrategy, Label, StateHandler, StateMetadata, StateResult,
+    Tag,
 };
 use mfm_machine_derive::StateMetadataReqs;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::blockchain::{BlockchainError, BlockchainProvider, DexProvider, SwapQuote};
 
@@ -56,18 +58,18 @@ impl Default for CheckBalance {
 }
 
 impl StateHandler for CheckBalance {
-    fn handler(&self, context: ContextWrapper) -> StateResult {
+    fn handler(&self, context: SafeContext) -> StateResult {
+        self.handler_safe(context)
+    }
+
+    fn handler_safe(&self, context: SafeContext) -> StateResult {
         let input: CheckBalanceInput = context
-            .lock()
-            .unwrap()
-            .read("check_balance_input".into())
-            .unwrap();
+            .read_value("check_balance_input")
+            .map_err(|e| anyhow::anyhow!("Failed to read check_balance_input: {}", e))?;
 
         let provider: Box<dyn BlockchainProvider> = context
-            .lock()
-            .unwrap()
-            .read("blockchain_provider".into())
-            .unwrap();
+            .read_value("blockchain_provider")
+            .map_err(|e| anyhow::anyhow!("Failed to read blockchain_provider: {}", e))?;
 
         let balance = tokio::runtime::Runtime::new()
             .unwrap()
@@ -80,10 +82,8 @@ impl StateHandler for CheckBalance {
 
         let output = CheckBalanceOutput { balance };
         context
-            .lock()
-            .unwrap()
-            .write("check_balance_output".into(), &output)
-            .unwrap();
+            .write_value("check_balance_output", &json!(output))
+            .map_err(|e| anyhow::anyhow!("Failed to write check_balance_output: {}", e))?;
 
         Ok(())
     }
@@ -141,17 +141,22 @@ impl Default for Swap {
 }
 
 impl StateHandler for Swap {
-    fn handler(&self, context: ContextWrapper) -> StateResult {
-        let input: SwapInput = context.lock().unwrap().read("swap_input".into()).unwrap();
+    fn handler(&self, context: SafeContext) -> StateResult {
+        self.handler_safe(context)
+    }
 
-        let dex_provider: Box<dyn DexProvider> =
-            context.lock().unwrap().read("dex_provider".into()).unwrap();
+    fn handler_safe(&self, context: SafeContext) -> StateResult {
+        let input: SwapInput = context
+            .read_value("swap_input")
+            .map_err(|e| anyhow::anyhow!("Failed to read swap_input: {}", e))?;
+
+        let dex_provider: Box<dyn DexProvider> = context
+            .read_value("dex_provider")
+            .map_err(|e| anyhow::anyhow!("Failed to read dex_provider: {}", e))?;
 
         let blockchain_provider: Box<dyn BlockchainProvider> = context
-            .lock()
-            .unwrap()
-            .read("blockchain_provider".into())
-            .unwrap();
+            .read_value("blockchain_provider")
+            .map_err(|e| anyhow::anyhow!("Failed to read blockchain_provider: {}", e))?;
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
@@ -216,10 +221,8 @@ impl StateHandler for Swap {
         };
 
         context
-            .lock()
-            .unwrap()
-            .write("swap_output".into(), &output)
-            .unwrap();
+            .write_value("swap_output", &json!(output))
+            .map_err(|e| anyhow::anyhow!("Failed to write swap_output: {}", e))?;
 
         Ok(())
     }

@@ -3,8 +3,7 @@ use std::sync::Arc;
 use default_impls::{ConfigState, OnChainValuesState};
 use mfm_machine::{
     state::{
-        context::{wrap_context, Local},
-        safe_context::SafeContext,
+        safe_context::{create_default_safe_context, SafeContext},
         States,
     },
     state_machine::StateMachine,
@@ -20,15 +19,13 @@ fn test_n_states_with_ctxs() {
     let config_state = Box::new(ConfigState::new());
     let onchain_value_state = Box::new(OnChainValuesState::new());
 
-    let config = Config {
+    let _config = Config {
         a: "zero".to_string(),
         b: 0,
     };
 
-    // starting with a useless context
-    // TODO: add an empty context impl
-    let context = wrap_context(Local::default());
-    let safe_context = SafeContext::from_wrapper(context);
+    // Create a default SafeContext
+    let safe_context = create_default_safe_context();
 
     // Verify we can use the context
     let dump = safe_context.dump().unwrap();
