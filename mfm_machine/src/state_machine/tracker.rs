@@ -3,11 +3,15 @@ use std::{collections::HashMap, fmt::Debug};
 use anyhow::{anyhow, Error};
 use serde_json::Value;
 
-use crate::state::{context::ContextWrapper, Label, Tag};
+use crate::state::{
+    context::{ContextWrapper, ContextWrapperExt},
+    Label, Tag,
+};
 
 pub trait TrackerMetadata {
     fn indexes(&self) -> Vec<Index>;
     fn search_by_tag(&self, tag: &Tag) -> Vec<Index>;
+    fn search_by_index(&self, index: &usize) -> Option<Index>;
     fn history(&self) -> TrackerHistory;
 }
 
@@ -41,8 +45,13 @@ impl TrackerHistory {
     }
 
     pub fn push(&mut self, index: Index, context: ContextWrapper) {
-        self.0
-            .push((self.len(), index, context.lock().unwrap().dump().unwrap()))
+        let value = context
+            .read()
+            .map(|ctx| ctx.dump())
+            .unwrap_or_else(|_| Ok(Value::Null))
+            .unwrap_or(Value::Null);
+
+        self.0.push((self.len(), index, value));
     }
 }
 
@@ -57,7 +66,7 @@ impl IntoIterator for TrackerHistory {
 
 pub trait Tracker: TrackerMetadata {
     fn track(&mut self, index: Index, context: ContextWrapper) -> Result<bool, Error>;
-    fn recover(&self, index: Index) -> Result<ContextWrapper, Error>;
+    fn recover(&self, index: Index) -> Option<ContextWrapper>;
 }
 
 // TODO: should it be public? may export methods to access it
@@ -105,12 +114,8 @@ impl Tracker for HashMapTracker {
         Ok(self.tracker.insert(index, context).is_none())
     }
 
-    fn recover(&self, index: Index) -> Result<ContextWrapper, Error> {
-        self.tracker
-            .get(&index)
-            .cloned()
-            .clone()
-            .ok_or(anyhow!("index not found"))
+    fn recover(&self, index: Index) -> Option<ContextWrapper> {
+        self.tracker.get(&index).cloned()
     }
 }
 
@@ -121,6 +126,13 @@ impl TrackerMetadata for HashMapTracker {
             .filter(|index| index.state_tags.contains(tag))
             .cloned()
             .collect()
+    }
+
+    fn search_by_index(&self, state_index: &usize) -> Option<Index> {
+        self.tracker
+            .keys()
+            .find(|index| index.state_index == *state_index)
+            .cloned()
     }
 
     fn indexes(&self) -> Vec<Index> {
@@ -139,7 +151,7 @@ mod test {
     use serde_json::json;
 
     use crate::state::{
-        context::{wrap_context, ContextWrapper, Local},
+        context::{wrap_context, ContextWrapper, ContextWrapperExt, Local},
         Label, Tag,
     };
 
@@ -181,8 +193,8 @@ mod test {
         for i in 0..indexes.len() {
             let context_recovered = tracker.recover(indexes[i].clone()).unwrap();
 
-            let value_recovered = context_recovered.lock().unwrap().dump().unwrap();
-            let value_expected = contexts[i].lock().unwrap().dump().unwrap();
+            let value_recovered = context_recovered.read_value("value").unwrap();
+            let value_expected = contexts[i].read_value("value").unwrap();
 
             assert_eq!(value_expected, value_recovered);
         }
@@ -263,10 +275,8 @@ mod test {
                 .unwrap();
         }
 
-        let indexes = tracker.indexes();
+        let tracker_indexes = tracker.indexes();
 
-        assert_eq!(indexes.len(), 3);
-
-        println!("indexes: {:?}", indexes);
+        assert_eq!(tracker_indexes.len(), 3);
     }
 }
