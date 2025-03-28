@@ -4,15 +4,33 @@ use crate::blockchain::adapter::signer::LocalWallet;
 use crate::blockchain::adapter::types::{Address, Bytes, U256};
 use alloy_primitives;
 use anyhow::{anyhow, Result};
+use lazy_static;
+use tiny_keccak::{Hasher, Keccak};
 
-// Define function selectors for ERC20 methods using fixed bytes
-const BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31]; // keccak256("balanceOf(address)")[0..4]
-const TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb]; // keccak256("transfer(address,uint256)")[0..4]
-const APPROVE_SELECTOR: [u8; 4] = [0x09, 0x5e, 0xa7, 0xb3]; // keccak256("approve(address,uint256)")[0..4]
-const ALLOWANCE_SELECTOR: [u8; 4] = [0xdd, 0x62, 0xed, 0x3e]; // keccak256("allowance(address,address)")[0..4]
-const NAME_SELECTOR: [u8; 4] = [0x06, 0xfd, 0xde, 0x03]; // keccak256("name()")[0..4]
-const SYMBOL_SELECTOR: [u8; 4] = [0x95, 0xd8, 0x9b, 0x41]; // keccak256("symbol()")[0..4]
-const DECIMALS_SELECTOR: [u8; 4] = [0x31, 0x3c, 0xe5, 0x67]; // keccak256("decimals()")[0..4]
+/// Compute a function selector from its signature
+///
+/// Takes a function signature string and computes the first 4 bytes
+/// of its keccak256 hash, which is the standard function selector in Ethereum
+fn compute_selector(signature: &str) -> [u8; 4] {
+    let mut selector = [0u8; 4];
+    let mut hasher = Keccak::v256();
+    hasher.update(signature.as_bytes());
+    let mut hash = [0u8; 32];
+    hasher.finalize(&mut hash);
+    selector.copy_from_slice(&hash[0..4]);
+    selector
+}
+
+// Define function selectors for ERC20 methods using the actual function signatures
+lazy_static::lazy_static! {
+    static ref BALANCE_OF_SELECTOR: [u8; 4] = compute_selector("balanceOf(address)");
+    static ref TRANSFER_SELECTOR: [u8; 4] = compute_selector("transfer(address,uint256)");
+    static ref APPROVE_SELECTOR: [u8; 4] = compute_selector("approve(address,uint256)");
+    static ref ALLOWANCE_SELECTOR: [u8; 4] = compute_selector("allowance(address,address)");
+    static ref NAME_SELECTOR: [u8; 4] = compute_selector("name()");
+    static ref SYMBOL_SELECTOR: [u8; 4] = compute_selector("symbol()");
+    static ref DECIMALS_SELECTOR: [u8; 4] = compute_selector("decimals()");
+}
 
 /// ERC20 token contract adapter
 #[derive(Debug, Clone)]
@@ -34,7 +52,7 @@ impl ERC20 {
         // Call the contract
         let result = self
             .provider
-            .call(self.address, Bytes(NAME_SELECTOR.to_vec()))
+            .call(self.address, Bytes((*NAME_SELECTOR).to_vec()))
             .await?;
 
         // decode the result using helper function
@@ -46,7 +64,7 @@ impl ERC20 {
         // Call the contract
         let result = self
             .provider
-            .call(self.address, Bytes(SYMBOL_SELECTOR.to_vec()))
+            .call(self.address, Bytes((*SYMBOL_SELECTOR).to_vec()))
             .await?;
 
         // decode the result using helper function
@@ -58,7 +76,7 @@ impl ERC20 {
         // Call the contract
         let result = self
             .provider
-            .call(self.address, Bytes(DECIMALS_SELECTOR.to_vec()))
+            .call(self.address, Bytes((*DECIMALS_SELECTOR).to_vec()))
             .await?;
 
         // Make sure we have enough data
@@ -148,7 +166,7 @@ impl ERC20 {
 
 // pure function to create balanceOf call data
 fn create_balance_of_call_data(account: &Address) -> Vec<u8> {
-    let mut call_data = BALANCE_OF_SELECTOR.to_vec();
+    let mut call_data = (*BALANCE_OF_SELECTOR).to_vec();
 
     // Pad the address to 32 bytes (EVM ABI encoding)
     let mut address_bytes = vec![0u8; 12]; // 12 zeros for padding
@@ -162,8 +180,8 @@ fn create_balance_of_call_data(account: &Address) -> Vec<u8> {
 fn create_transfer_call_data(to: &Address, amount: &U256) -> Vec<u8> {
     let mut call_data = Vec::with_capacity(68); // 4 + 32 + 32 bytes
 
-    // Function selector
-    call_data.extend_from_slice(&TRANSFER_SELECTOR);
+    // Function selector - dereference the lazy static ref
+    call_data.extend_from_slice(&*TRANSFER_SELECTOR);
 
     // Pad the address to 32 bytes
     let mut to_bytes = vec![0u8; 12]; // 12 zeros for padding
@@ -180,8 +198,8 @@ fn create_transfer_call_data(to: &Address, amount: &U256) -> Vec<u8> {
 fn create_approve_call_data(spender: &Address, amount: &U256) -> Vec<u8> {
     let mut call_data = Vec::with_capacity(68); // 4 + 32 + 32 bytes
 
-    // Function selector
-    call_data.extend_from_slice(&APPROVE_SELECTOR);
+    // Function selector - dereference the lazy static ref
+    call_data.extend_from_slice(&*APPROVE_SELECTOR);
 
     // Pad the address to 32 bytes
     let mut spender_bytes = vec![0u8; 12]; // 12 zeros for padding
@@ -196,7 +214,7 @@ fn create_approve_call_data(spender: &Address, amount: &U256) -> Vec<u8> {
 
 // pure function to create allowance call data
 fn create_allowance_call_data(owner: &Address, spender: &Address) -> Vec<u8> {
-    let mut call_data = ALLOWANCE_SELECTOR.to_vec();
+    let mut call_data = (*ALLOWANCE_SELECTOR).to_vec();
 
     // Pad both addresses to 32 bytes each (EVM ABI encoding)
     let mut owner_bytes = vec![0u8; 12]; // 12 zeros for padding

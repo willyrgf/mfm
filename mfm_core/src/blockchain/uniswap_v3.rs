@@ -9,20 +9,37 @@ use alloy_primitives::Address as AlloyAddress;
 use async_trait::async_trait;
 use std::str::FromStr;
 use std::sync::Arc;
+use tiny_keccak::{Hasher, Keccak};
+
+/// Compute a function selector from its signature
+///
+/// Takes a function signature string and computes the first 4 bytes
+/// of its keccak256 hash, which is the standard function selector in Ethereum
+fn compute_selector(signature: &str) -> [u8; 4] {
+    let mut selector = [0u8; 4];
+    let mut hasher = Keccak::v256();
+    hasher.update(signature.as_bytes());
+    let mut hash = [0u8; 32];
+    hasher.finalize(&mut hash);
+    selector.copy_from_slice(&hash[0..4]);
+    selector
+}
 
 // Function selectors for Uniswap V3 contracts
-// Router selectors
-const EXACT_INPUT_SINGLE_SELECTOR: [u8; 4] = [0x41, 0x4b, 0xf3, 0x89]; // keccak256("exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))")[0..4]
-#[allow(dead_code)]
-const EXACT_OUTPUT_SINGLE_SELECTOR: [u8; 4] = [0xdb, 0x3e, 0x24, 0x84]; // keccak256("exactOutputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))")[0..4]
+lazy_static::lazy_static! {
+    // Router selectors
+    static ref EXACT_INPUT_SINGLE_SELECTOR: [u8; 4] = compute_selector("exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))");
+    #[allow(dead_code)]
+    static ref EXACT_OUTPUT_SINGLE_SELECTOR: [u8; 4] = compute_selector("exactOutputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))");
 
-// Quoter selectors
-const QUOTE_EXACT_INPUT_SINGLE_SELECTOR: [u8; 4] = [0xf7, 0x72, 0x9d, 0x9d]; // keccak256("quoteExactInputSingle(address,address,uint24,uint256,uint160)")[0..4]
-#[allow(dead_code)]
-const QUOTE_EXACT_OUTPUT_SINGLE_SELECTOR: [u8; 4] = [0x30, 0xd8, 0xe8, 0x60]; // keccak256("quoteExactOutputSingle(address,address,uint24,uint256,uint160)")[0..4]
+    // Quoter selectors
+    static ref QUOTE_EXACT_INPUT_SINGLE_SELECTOR: [u8; 4] = compute_selector("quoteExactInputSingle(address,address,uint24,uint256,uint160)");
+    #[allow(dead_code)]
+    static ref QUOTE_EXACT_OUTPUT_SINGLE_SELECTOR: [u8; 4] = compute_selector("quoteExactOutputSingle(address,address,uint24,uint256,uint160)");
 
-// Factory selectors
-const GET_POOL_SELECTOR: [u8; 4] = [0x1e, 0x3d, 0xd1, 0x8b]; // keccak256("getPool(address,address,uint24)")[0..4]
+    // Factory selectors
+    static ref GET_POOL_SELECTOR: [u8; 4] = compute_selector("getPool(address,address,uint24)");
+}
 
 // Fee tiers for Uniswap V3 pools
 pub const FEE_TIER_LOW: u32 = 500; // 0.05%
@@ -94,7 +111,7 @@ impl UniswapV3Provider {
 
         for &fee in &fee_tiers {
             // Create the getPool call data
-            let mut call_data = GET_POOL_SELECTOR.to_vec();
+            let mut call_data = (*GET_POOL_SELECTOR).to_vec();
 
             // Add token A (padded to 32 bytes)
             let mut token_a_bytes = vec![0u8; 12]; // 12 zeros for padding
@@ -150,7 +167,7 @@ impl UniswapV3Provider {
         let fee = self.get_best_fee_tier(from_token, to_token).await?;
 
         // Create the quoteExactInputSingle call data
-        let mut call_data = QUOTE_EXACT_INPUT_SINGLE_SELECTOR.to_vec();
+        let mut call_data = (*QUOTE_EXACT_INPUT_SINGLE_SELECTOR).to_vec();
 
         // Add from_token (padded to 32 bytes)
         let mut from_token_bytes = vec![0u8; 12]; // 12 zeros for padding
@@ -266,7 +283,7 @@ impl DexProvider for UniswapV3Provider {
         // }
 
         // Create the call data
-        let mut call_data = EXACT_INPUT_SINGLE_SELECTOR.to_vec();
+        let mut call_data = (*EXACT_INPUT_SINGLE_SELECTOR).to_vec();
 
         // Build struct data - need to ABI encode a tuple
         let mut struct_data = Vec::new();

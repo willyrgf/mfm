@@ -4,29 +4,47 @@
 use crate::blockchain::adapter::{Address, Bytes, U256};
 use crate::blockchain::BlockchainError;
 use async_trait::async_trait;
+use lazy_static;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tiny_keccak::{Hasher, Keccak};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-// Define function selectors for Aave V3 protocol
-// Lending Pool functions
-const GET_USER_ACCOUNT_DATA_SELECTOR: [u8; 4] = [0x62, 0x89, 0x19, 0xd9]; // keccak256("getUserAccountData(address)")[0..4]
-#[allow(dead_code)]
-const WITHDRAW_SELECTOR: [u8; 4] = [0x69, 0x32, 0x8f, 0x2e]; // keccak256("withdraw(address,uint256,address)")[0..4]
-#[allow(dead_code)]
-const SUPPLY_SELECTOR: [u8; 4] = [0x61, 0x7b, 0xa0, 0x37]; // keccak256("supply(address,uint256,address,uint16)")[0..4]
-#[allow(dead_code)]
-const BORROW_SELECTOR: [u8; 4] = [0xa4, 0x15, 0xbc, 0xad]; // keccak256("borrow(address,uint256,uint256,uint16,address)")[0..4]
-#[allow(dead_code)]
-const REPAY_SELECTOR: [u8; 4] = [0x57, 0x3a, 0xed, 0xa8]; // keccak256("repay(address,uint256,uint256,address)")[0..4]
+/// Compute a function selector from its signature
+///
+/// Takes a function signature string and computes the first 4 bytes
+/// of its keccak256 hash, which is the standard function selector in Ethereum
+fn compute_selector(signature: &str) -> [u8; 4] {
+    let mut selector = [0u8; 4];
+    let mut hasher = Keccak::v256();
+    hasher.update(signature.as_bytes());
+    let mut hash = [0u8; 32];
+    hasher.finalize(&mut hash);
+    selector.copy_from_slice(&hash[0..4]);
+    selector
+}
 
-// Protocol Data Provider functions
-#[allow(dead_code)]
-const GET_RESERVE_DATA_SELECTOR: [u8; 4] = [0x35, 0xea, 0x6a, 0x75]; // keccak256("getReserveData(address)")[0..4]
-#[allow(dead_code)]
-const GET_USER_RESERVE_DATA_SELECTOR: [u8; 4] = [0x28, 0xdd, 0x2d, 0x01]; // keccak256("getUserReserveData(address,address)")[0..4]
+// Define function selectors for Aave V3 protocol
+// Lending Pool functions - these are now readable by showing the actual function signatures
+lazy_static::lazy_static! {
+    static ref GET_USER_ACCOUNT_DATA_SELECTOR: [u8; 4] = compute_selector("getUserAccountData(address)");
+    #[allow(dead_code)]
+    static ref WITHDRAW_SELECTOR: [u8; 4] = compute_selector("withdraw(address,uint256,address)");
+    #[allow(dead_code)]
+    static ref SUPPLY_SELECTOR: [u8; 4] = compute_selector("supply(address,uint256,address,uint16)");
+    #[allow(dead_code)]
+    static ref BORROW_SELECTOR: [u8; 4] = compute_selector("borrow(address,uint256,uint256,uint16,address)");
+    #[allow(dead_code)]
+    static ref REPAY_SELECTOR: [u8; 4] = compute_selector("repay(address,uint256,uint256,address)");
+
+    // Protocol Data Provider functions
+    #[allow(dead_code)]
+    static ref GET_RESERVE_DATA_SELECTOR: [u8; 4] = compute_selector("getReserveData(address)");
+    #[allow(dead_code)]
+    static ref GET_USER_RESERVE_DATA_SELECTOR: [u8; 4] = compute_selector("getUserReserveData(address,address)");
+}
 
 // Asset IDs for price fetching
 const ASSET_IDS: &[(&str, &str)] = &[
@@ -246,7 +264,7 @@ impl AaveProvider for AaveAdapterProvider {
         drop(rate_limiter);
 
         // Prepare the call data
-        let mut call_data = GET_USER_ACCOUNT_DATA_SELECTOR.to_vec();
+        let mut call_data = (*GET_USER_ACCOUNT_DATA_SELECTOR).to_vec();
 
         // Pad the address to 32 bytes (EVM ABI encoding)
         let mut address_bytes = vec![0u8; 12]; // 12 zeros for padding
