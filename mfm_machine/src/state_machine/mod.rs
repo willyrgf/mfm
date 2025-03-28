@@ -231,6 +231,7 @@ impl StateMachine {
                                 }
                             }
 
+                            // TODO: human: think if we want this or just throw error (config?)
                             // If all else fails, restart from beginning with original context
                             Ok((0, context))
                         }
@@ -268,6 +269,7 @@ impl StateMachine {
 
                 let state = &self.states[next_state_index];
 
+                // TODO: human: check this filtering
                 // Check if we should skip this state based on filtering conditions
                 if let Some(filter_tags) = self.scheduler.get_filter_tags() {
                     let state_tags = state.tags();
