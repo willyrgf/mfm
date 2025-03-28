@@ -1,5 +1,5 @@
+use crate::blockchain::adapter::types::{Address, U256};
 use anyhow::Result;
-use ethers::types::{Address, U256};
 use mfm_machine::state::{
     safe_context::SafeContext, DependencyStrategy, Label, StateHandler, StateMetadata, StateResult,
     Tag,

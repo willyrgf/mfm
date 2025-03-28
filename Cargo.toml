@@ -8,3 +8,20 @@ members = [
 	"mfm_machine_derive",
 	"mfm_core",
 ]
+
+# Core dependencies
+[workspace.dependencies]
+# Alloy blockchain library components
+alloy-primitives = "0.8"
+alloy-sol-types = "0.8"
+alloy-json-abi = "0.8"
+alloy-dyn-abi = "0.8"
+alloy-provider = "0.13"
+alloy-contract = "0.13"
+alloy-consensus = "0.13"
+alloy-network = "0.13"
+alloy-rpc-client = "0.13" 
+alloy-transport-http = "0.13"
+alloy-signer = "0.13"
+# Cryptography dependency
+ring = "0.17.14"

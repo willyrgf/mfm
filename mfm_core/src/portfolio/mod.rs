@@ -1,5 +1,6 @@
+use crate::blockchain::adapter::types::{Address, U256};
 use crate::blockchain::{BlockchainProvider, DexProvider};
-use ethers::types::{Address, U256};
+use alloy_primitives::address;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use thiserror::Error;
@@ -34,25 +35,43 @@ pub struct PortfolioState {
     pub last_quote: Option<crate::blockchain::dex::SwapQuote>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PortfolioOperation {
-    Rebalance,
-    Swap {
-        from_token: Address,
-        to_token: Address,
-        amount: U256,
-        exact_approval: bool,
-    },
+/// status of the portfolio operations
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PortfolioStatus {
+    /// initial state
+    Init,
+    /// checking token balances
+    CheckingBalances,
+    /// calculating quotes for swaps
+    CalculatingQuotes,
+    /// executing swaps
+    ExecutingSwaps,
+    /// operation completed
+    Completed,
+    /// operation failed with error
+    Error(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum PortfolioStatus {
-    Idle,
-    CheckingBalances,
-    CalculatingQuotes,
-    ExecutingSwaps,
-    Completed,
-    Error(String),
+/// type of operation to perform on the portfolio
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PortfolioOperation {
+    /// rebalance the portfolio
+    Rebalance,
+    /// execute a swap between tokens
+    Swap {
+        /// token to swap from
+        from_token: Address,
+        /// token to swap to
+        to_token: Address,
+        /// amount to swap
+        amount: U256,
+        /// whether to approve exact amount
+        exact_approval: bool,
+    },
+    /// check health of the portfolio
+    HealthCheck,
+    /// no operation
+    None,
 }
 
 #[derive(Debug)]
@@ -111,11 +130,13 @@ impl Portfolio {
     ) -> Self {
         let mut balances = Vec::new();
 
-        // Add ETH balance
+        // Add ETH balance using Zero address from alloy primitives
+        let zero_address = Address(address!("0000000000000000000000000000000000000000"));
+
         balances.push(TokenBalance {
-            token: Address::zero(), // ETH uses zero address
+            token: zero_address, // ETH uses zero address
             token_name: "ETH".to_string(),
-            balance: U256::zero(),
+            balance: U256::from(alloy_primitives::U256::ZERO),
             target_percentage: 0.0,
             current_percentage: 0.0,
         });
@@ -127,7 +148,7 @@ impl Portfolio {
                     balances.push(TokenBalance {
                         token: address,
                         token_name: token_key.to_uppercase(),
-                        balance: U256::zero(),
+                        balance: U256::from(alloy_primitives::U256::ZERO),
                         target_percentage: 0.0,
                         current_percentage: 0.0,
                     });
@@ -138,12 +159,12 @@ impl Portfolio {
         Self {
             state: PortfolioState {
                 balances,
-                total_value: U256::zero(),
+                total_value: U256::from(alloy_primitives::U256::ZERO),
                 last_operation: None,
                 last_error: None,
                 last_quote: None,
             },
-            status: PortfolioStatus::Idle,
+            status: PortfolioStatus::Init,
             operation: None,
             blockchain_provider,
             dex_provider,
@@ -155,7 +176,7 @@ impl Portfolio {
         &mut self,
         operation: PortfolioOperation,
     ) -> Result<(), PortfolioError> {
-        if self.status != PortfolioStatus::Idle {
+        if self.status != PortfolioStatus::Init {
             return Err(PortfolioError::InvalidStateTransition(
                 "Cannot start new operation while another is in progress".to_string(),
             ));
@@ -182,12 +203,16 @@ impl Portfolio {
         eprintln!("Using wallet address: {}", wallet_address);
 
         // Get balances for all tokens
-        let mut total_value = U256::zero();
+        let zero = U256::from(alloy_primitives::U256::ZERO);
+        let mut total_value = zero;
         let mut balances = Vec::new();
+
+        // Zero address constant
+        let zero_address = Address(address!("0000000000000000000000000000000000000000"));
 
         // Check balances for each configured token
         for token_balance in &self.state.balances {
-            if token_balance.token == Address::zero() {
+            if token_balance.token == zero_address {
                 // Handle native ETH
                 eprintln!("\n--- Checking Native ETH Balance ---");
                 eprintln!("Token: ETH ({})", token_balance.token);
@@ -199,15 +224,19 @@ impl Portfolio {
                 eprintln!("Native ETH balance: {}", eth_balance);
 
                 let token_value = eth_balance; // For ETH, value is the same as balance
-                total_value =
-                    total_value
-                        .checked_add(token_value)
-                        .ok_or(PortfolioError::BlockchainError(
+                total_value = match alloy_primitives::U256::from(total_value.0)
+                    .checked_add(alloy_primitives::U256::from(token_value.0))
+                {
+                    Some(sum) => U256(sum),
+                    None => {
+                        return Err(PortfolioError::BlockchainError(
                             crate::blockchain::BlockchainError::Overflow,
-                        ))?;
+                        ))
+                    }
+                };
 
                 balances.push(TokenBalance {
-                    token: Address::zero(),
+                    token: zero_address,
                     token_name: "ETH".to_string(),
                     balance: eth_balance,
                     target_percentage: token_balance.target_percentage,
@@ -234,12 +263,16 @@ impl Portfolio {
 
                 eprintln!("Token value: {}", token_value);
 
-                total_value =
-                    total_value
-                        .checked_add(token_value)
-                        .ok_or(PortfolioError::BlockchainError(
+                total_value = match alloy_primitives::U256::from(total_value.0)
+                    .checked_add(alloy_primitives::U256::from(token_value.0))
+                {
+                    Some(sum) => U256(sum),
+                    None => {
+                        return Err(PortfolioError::BlockchainError(
                             crate::blockchain::BlockchainError::Overflow,
-                        ))?;
+                        ))
+                    }
+                };
 
                 balances.push(TokenBalance {
                     token: token_balance.token,
@@ -255,9 +288,9 @@ impl Portfolio {
         eprintln!("Total portfolio value: {}", total_value);
 
         // Calculate current percentages
-        if total_value > U256::zero() {
+        if total_value > U256::from(alloy_primitives::U256::ZERO) {
             for balance in &mut balances {
-                let token_value = if balance.token == Address::zero() {
+                let token_value = if balance.token == zero_address {
                     balance.balance // For ETH, value is the same as balance
                 } else {
                     self.blockchain_provider
@@ -322,6 +355,13 @@ impl Portfolio {
                 // TODO: Implement rebalancing quotes
                 eprintln!("Rebalancing quotes not implemented yet");
             }
+            Some(PortfolioOperation::HealthCheck) => {
+                // TODO: Implement health check
+                eprintln!("Health check calculation not implemented yet");
+            }
+            Some(PortfolioOperation::None) => {
+                eprintln!("No operation specified, skipping quote calculation");
+            }
             None => {
                 return Err(PortfolioError::InvalidStateTransition(
                     "No operation in progress".to_string(),
@@ -365,7 +405,7 @@ impl Portfolio {
 
     #[allow(dead_code)]
     pub fn interrupt(&mut self) {
-        self.status = PortfolioStatus::Idle;
+        self.status = PortfolioStatus::Init;
         self.operation = None;
     }
 

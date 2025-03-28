@@ -1,4 +1,4 @@
-use ethers::types::Address;
+use crate::blockchain::adapter::types::Address;
 use serde_derive::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;

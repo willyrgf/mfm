@@ -1,9 +1,10 @@
-use crate::{
-    blockchain::{evm::BlockchainProvider, DexProvider},
-    portfolio::{Portfolio, PortfolioOperation, PortfolioStatus},
-};
+//! cli module for mfm
+
+use crate::blockchain::adapter::types::{Address, U256};
+use crate::blockchain::BlockchainProvider;
+use crate::blockchain::DexProvider;
+use crate::portfolio::{Portfolio, PortfolioOperation, PortfolioStatus};
 use clap::{Parser, Subcommand};
-use ethers::types::{Address, U256};
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -180,20 +181,23 @@ impl CliContext {
                 )
             })?;
 
-        let from_addr = Address::from_str(&from_token_network.address)?;
-        let to_addr = Address::from_str(&to_token_network.address)?;
+        // Parse the addresses using our adapter Address type
+        let from_addr =
+            Address::from_str(&from_token_network.address).unwrap_or_else(|_| Address::zero());
+        let to_addr =
+            Address::from_str(&to_token_network.address).unwrap_or_else(|_| Address::zero());
 
         // Convert decimal amount to wei using the token's decimals
         let amount_float: f64 = amount.parse()?;
         let decimals = from_token_network.decimals.unwrap_or(18);
-        let amount_wei = U256::from_dec_str(&format!(
-            "{}",
-            (amount_float * 10f64.powi(decimals as i32)) as u64
-        ))?;
+
+        // Using alloy_primitives::U256 to create our adapter U256
+        let amount_wei_raw = (amount_float * 10f64.powi(decimals as i32)) as u64;
+        let amount_wei = U256::from(alloy_primitives::U256::from(amount_wei_raw));
 
         eprintln!(
             "Converting {} tokens to wei with {} decimals: {}",
-            amount_float, decimals, amount_wei
+            amount_float, decimals, amount_wei.0
         );
 
         self.portfolio
@@ -226,17 +230,32 @@ impl CliContext {
         Ok(())
     }
 
+    // Helper function to convert U256 to f64 with decimals
+    fn u256_to_f64(&self, value: &crate::blockchain::adapter::types::U256, decimals: u8) -> f64 {
+        let divisor = 10u128.pow(decimals as u32);
+        let high_bits = ((value.0.as_limbs()[3] as u128) << 96)
+            | ((value.0.as_limbs()[2] as u128) << 64)
+            | ((value.0.as_limbs()[1] as u128) << 32)
+            | (value.0.as_limbs()[0] as u128);
+
+        high_bits as f64 / divisor as f64
+    }
+
     pub async fn handle_aave_health(
         &self,
         wallet_address: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use crate::blockchain::{create_aave_provider, AaveProvider};
-        use ethers::providers::{Http, Provider};
-        use ethers::types::Address;
+        use crate::blockchain::adapter::types::Address;
         use std::str::FromStr;
-        use url::Url;
 
         println!("Checking AAVE health factor...");
+
+        // Get the Aave provider from the blockchain provider
+        let aave_provider = self
+            .portfolio
+            .blockchain_provider
+            .get_aave_provider()
+            .await?;
 
         // Get wallet address (from parameter or config)
         let wallet_addr = match wallet_address {
@@ -246,42 +265,50 @@ impl CliContext {
             None => self.portfolio.blockchain_provider.get_wallet_address(),
         };
 
-        // Create provider
-        let provider = Provider::new(Http::new(
-            Url::parse(&self.portfolio.config.network.rpc_url)
-                .map_err(|e| format!("Invalid RPC URL: {}", e))?,
-        ));
-
-        // Get AAVE contract addresses
-        let lending_pool_address = Address::from_str("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")
-            .map_err(|_| "Invalid AAVE lending pool address".to_string())?; // Mainnet V3 Pool
-        let data_provider_address = Address::from_str("0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3")
-            .map_err(|_| "Invalid AAVE data provider address".to_string())?; // Mainnet V3 Data Provider
-
-        // Create AAVE provider
-        let aave_provider =
-            create_aave_provider(provider, lending_pool_address, data_provider_address).await?;
-
-        // Calculate health factor
+        // Get both the health check result and user account data
+        let health_result = aave_provider.calculate_health_factor(wallet_addr).await?;
         let account_data = aave_provider.get_user_account_data(wallet_addr).await?;
-
-        // Convert to floats with appropriate decimals
-        let total_collateral = account_data.total_collateral_base.as_u64() as f64 / 1e8;
-        let total_debt = account_data.total_debt_base.as_u64() as f64 / 1e8;
-        let available_borrow = account_data.available_borrow_base.as_u64() as f64 / 1e8;
-        let liquidation_threshold =
-            account_data.current_liquidation_threshold.as_u64() as f64 / 100.0; // As percentage
-        let ltv_value = account_data.ltv.as_u64() as f64 / 100.0; // As percentage
-        let health_factor_value = account_data.health_factor.as_u64() as f64 / 1e18;
 
         // Print with formatting
         println!("\n=== AAVE Health Check Results ===");
-        println!("Total Collateral: {:.2}", total_collateral);
-        println!("Total Debt: {:.2}", total_debt);
-        println!("Available Borrow: {:.2}", available_borrow);
+        println!(
+            "Total Collateral (USD): {:.2}",
+            health_result.total_collateral_usd
+        );
+        println!("Total Debt (USD): {:.2}", health_result.total_debt_usd);
+
+        // Convert available borrow from U256 to f64 (assuming 8 decimals like collateral/debt)
+        let available_borrow_usd = self.u256_to_f64(&account_data.available_borrow_base, 8);
+        println!("Available Borrow (USD): {:.2}", available_borrow_usd);
+
+        // Convert liquidation threshold and LTV from basis points to percentage
+        let liquidation_threshold =
+            self.u256_to_f64(&account_data.current_liquidation_threshold, 2);
         println!("Liquidation Threshold: {:.2}%", liquidation_threshold);
-        println!("LTV: {:.2}%", ltv_value);
-        println!("Health Factor: {:.4}", health_factor_value);
+
+        let ltv = self.u256_to_f64(&account_data.ltv, 2);
+        println!("Loan to Value (LTV): {:.2}%", ltv);
+
+        println!("Health Factor: {:.4}", health_result.health_factor);
+        println!(
+            "Max Collateral Decrease: {:.2}%",
+            health_result.max_decrease_percentage
+        );
+
+        if health_result.user_reserves.is_empty() {
+            println!("\nNo reserves found or not fully implemented yet.");
+        } else {
+            println!("\nReserves:");
+            for reserve in health_result.user_reserves {
+                println!(
+                    "{}: Balance: {}, Variable Debt: {}, USD Value: ${:.2}",
+                    reserve.symbol,
+                    reserve.current_atoken_balance,
+                    reserve.current_variable_debt,
+                    reserve.price_usd
+                );
+            }
+        }
 
         Ok(())
     }
