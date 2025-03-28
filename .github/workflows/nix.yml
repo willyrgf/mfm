@@ -1,0 +1,54 @@
+name: Nix CI
+permissions:
+  contents: read
+  pull-requests: write
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Install Nix
+        uses: cachix/install-nix-action@v22
+        with:
+          nix_path: nixpkgs=channel:nixpkgs-unstable
+          
+      - name: Cache Nix store
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/nix
+            /nix/store
+          key: ${{ runner.os }}-nix-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-nix-
+            
+      # Build and test the application
+      - name: Build and run help test
+        run: |
+          # Build the flake and run the help command
+          output=$(nix run .#default -- --help)
+          
+          # Echo the output for debugging
+          echo "Help output:"
+          echo "$output"
+          
+          # Check if the output contains expected text
+          if echo "$output" | grep -q '<COMMAND>'; then
+            echo "✓ Help text contains '<COMMAND>' as expected"
+          else
+            echo "✗ Help text does not contain '<COMMAND>'"
+            exit 1
+          fi
+          
+      - name: Verify basic execution
+        run: |
+          nix run .#default -- --help
