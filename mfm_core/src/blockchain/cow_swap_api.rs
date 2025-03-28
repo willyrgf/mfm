@@ -1,4 +1,4 @@
-use ethers::types::{Bytes, H160, U256};
+use crate::blockchain::adapter::types::{Address, Bytes, U256};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -78,15 +78,15 @@ impl CowSwapApiClient {
 
     pub async fn get_quote(
         &self,
-        sell_token: H160,
-        buy_token: H160,
+        sell_token: Address,
+        buy_token: Address,
         sell_amount: U256,
         partially_fillable: bool,
     ) -> Result<QuoteResponse, reqwest::Error> {
         let request = QuoteRequest {
-            sell_token: format!("0x{:x}", sell_token),
-            buy_token: format!("0x{:x}", buy_token),
-            sell_amount: format!("0x{:x}", sell_amount),
+            sell_token: format!("{}", sell_token),
+            buy_token: format!("{}", buy_token),
+            sell_amount: format!("{}", sell_amount),
             kind: "sell".to_string(),
             partially_fillable,
         };
@@ -105,28 +105,28 @@ impl CowSwapApiClient {
 
     pub async fn submit_order(
         &self,
-        sell_token: H160,
-        buy_token: H160,
+        sell_token: Address,
+        buy_token: Address,
         sell_amount: U256,
         buy_amount: U256,
         valid_to: u32,
         app_data: String,
         fee_amount: U256,
         signature: Bytes,
-        from: H160,
+        from: Address,
     ) -> Result<OrderResponse, reqwest::Error> {
         let request = OrderRequest {
-            sell_token: format!("0x{:x}", sell_token),
-            buy_token: format!("0x{:x}", buy_token),
-            sell_amount: format!("0x{:x}", sell_amount),
-            buy_amount: format!("0x{:x}", buy_amount),
+            sell_token: format!("{}", sell_token),
+            buy_token: format!("{}", buy_token),
+            sell_amount: format!("{}", sell_amount),
+            buy_amount: format!("{}", buy_amount),
             valid_to,
             app_data,
-            fee_amount: format!("0x{:x}", fee_amount),
+            fee_amount: format!("{}", fee_amount),
             kind: "sell".to_string(),
             partially_fillable: false,
-            signature: format!("0x{}", hex::encode(signature)),
-            from: format!("0x{:x}", from),
+            signature: format!("0x{}", hex::encode(signature.as_ref())),
+            from: format!("{}", from),
             sell_token_balance: "erc20".to_string(),
             buy_token_balance: "erc20".to_string(),
         };
@@ -134,6 +134,36 @@ impl CowSwapApiClient {
         let response = self
             .client
             .post(&format!("{}/orders", API_BASE_URL))
+            .json(&request)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        Ok(response)
+    }
+
+    // additional method for use with base_url parameter
+    pub async fn get_quote_with_base_url(
+        &self,
+        base_url: &str,
+        sell_token: Address,
+        buy_token: Address,
+        sell_amount: U256,
+        from_address: Address,
+        partially_fillable: bool,
+    ) -> Result<QuoteResponse, reqwest::Error> {
+        let request = QuoteRequest {
+            sell_token: format!("{}", sell_token),
+            buy_token: format!("{}", buy_token),
+            sell_amount: format!("{}", sell_amount),
+            kind: "sell".to_string(),
+            partially_fillable,
+        };
+
+        let response = self
+            .client
+            .post(&format!("{}/quote", base_url))
             .json(&request)
             .send()
             .await?

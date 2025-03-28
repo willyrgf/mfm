@@ -14,12 +14,11 @@ pub mod contexts;
 pub mod operations;
 pub mod states;
 
+use blockchain::adapter::Provider;
 use clap::Parser;
 use config::Config;
-use ethers::providers::{Http, Provider};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use url::Url;
 
 pub use cli::{Cli, CliContext, Commands};
 pub use portfolio::{Portfolio, PortfolioOperation, PortfolioState, PortfolioStatus, TokenBalance};
@@ -51,12 +50,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ];
     }
 
-    // Use the first URL for the ethers Provider
+    // Use the first URL for the Provider
     let provider_url = all_rpc_urls
         .first()
         .unwrap_or(&"https://eth.llamarpc.com".to_string())
         .clone();
-    let provider = Provider::new(Http::new(Url::parse(&provider_url)?));
+
+    // Connect using our adapter Provider
+    let provider = Provider::connect(&provider_url).await?;
 
     let blockchain_provider = Arc::new(Mutex::new(Box::new(blockchain::EvmProvider::new(
         blockchain::ChainConfig {
@@ -64,14 +65,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             rpc_urls: all_rpc_urls.clone(),
             chain_id: config.network.chain_id,
             name: config.network.name.clone(),
+            block_confirmations: 1,
+            gas_multiplier: 1.2,
+            gas_limit: Some(2000000),
+            gas_price: None,
+            max_fee_per_gas: None,
+            retry_attempts: 3,
         },
         wallet.get_private_key().to_string(),
     )?)));
 
+    // Create a UniswapV3Provider with all required parameters
     let dex_provider = Arc::new(Mutex::new(Box::new(blockchain::UniswapV3Provider::new(
         Arc::new(provider.clone()),
         config.network.chain_id,
         None,
+        Some(blockchain::adapter::types::Address::default()), // weth
+        Some(blockchain::adapter::types::Address::default()), // factory
+        Some(blockchain::adapter::types::Address::default()), // router
+        Some(blockchain::adapter::types::Address::default()), // quoter
     ))));
 
     let _portfolio = Portfolio::new(
@@ -81,6 +93,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rpc_urls: all_rpc_urls.clone(),
                 chain_id: config.network.chain_id,
                 name: config.network.name.clone(),
+                block_confirmations: 1,
+                gas_multiplier: 1.2,
+                gas_limit: Some(2000000),
+                gas_price: None,
+                max_fee_per_gas: None,
+                retry_attempts: 3,
             },
             wallet.get_private_key().to_string(),
         )?),
@@ -88,6 +106,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(provider.clone()),
             config.network.chain_id,
             None,
+            Some(blockchain::adapter::types::Address::default()), // weth
+            Some(blockchain::adapter::types::Address::default()), // factory
+            Some(blockchain::adapter::types::Address::default()), // router
+            Some(blockchain::adapter::types::Address::default()), // quoter
         )),
         &config,
     );

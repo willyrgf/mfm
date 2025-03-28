@@ -1,5 +1,3 @@
-pub mod telemetry;
-
 pub const APP_NAME: &str = "mfm";
 pub const DEFAULT_LOG_LEVEL: &str = "info";
 

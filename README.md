@@ -12,4 +12,3 @@
 - [`mfm_machine`](./mfm_machine): a recoverable state machine runner for contextualized state handlers.
 - [`mfm_machine_derive`](./mfm_machine_derive): an optionated set of macros to help implementing `mfm_machine` requirements.
 
-

@@ -1,237 +1,164 @@
-use ethers::abi::Abi;
-use lazy_static::lazy_static;
-use serde_json::json;
+//! cow swap abi module
+//! this module contains the abi for cow swap contracts
 
-lazy_static! {
-    // GPv2Settlement Contract ABI
-    pub static ref SETTLEMENT_ABI: Abi = serde_json::from_value(json!({
-        "abi": [
+/// settlement contract abi for cow swap
+pub const SETTLEMENT_ABI: &str = r#"[
+    {
+        "inputs": [
             {
-                "inputs": [
-                    {
-                        "internalType": "IERC20[]",
-                        "name": "tokens",
-                        "type": "address[]"
-                    },
-                    {
-                        "internalType": "uint256[]",
-                        "name": "clearingPrices",
-                        "type": "uint256[]"
-                    },
-                    {
-                        "components": [
-                            {
-                                "components": [
-                                    {
-                                        "internalType": "address",
-                                        "name": "sellToken",
-                                        "type": "address"
-                                    },
-                                    {
-                                        "internalType": "address",
-                                        "name": "buyToken",
-                                        "type": "address"
-                                    },
-                                    {
-                                        "internalType": "address",
-                                        "name": "receiver",
-                                        "type": "address"
-                                    },
-                                    {
-                                        "internalType": "uint256",
-                                        "name": "sellAmount",
-                                        "type": "uint256"
-                                    },
-                                    {
-                                        "internalType": "uint256",
-                                        "name": "buyAmount",
-                                        "type": "uint256"
-                                    },
-                                    {
-                                        "internalType": "uint32",
-                                        "name": "validTo",
-                                        "type": "uint32"
-                                    },
-                                    {
-                                        "internalType": "bytes32",
-                                        "name": "appData",
-                                        "type": "bytes32"
-                                    },
-                                    {
-                                        "internalType": "uint256",
-                                        "name": "feeAmount",
-                                        "type": "uint256"
-                                    },
-                                    {
-                                        "internalType": "bytes32",
-                                        "name": "kind",
-                                        "type": "bytes32"
-                                    },
-                                    {
-                                        "internalType": "bool",
-                                        "name": "partiallyFillable",
-                                        "type": "bool"
-                                    },
-                                    {
-                                        "internalType": "bytes32",
-                                        "name": "sellTokenBalance",
-                                        "type": "bytes32"
-                                    },
-                                    {
-                                        "internalType": "bytes32",
-                                        "name": "buyTokenBalance",
-                                        "type": "bytes32"
-                                    }
-                                ],
-                                "internalType": "struct GPv2Order.Data",
-                                "name": "order",
-                                "type": "tuple"
-                            },
-                            {
-                                "internalType": "bytes",
-                                "name": "signature",
-                                "type": "bytes"
-                            },
-                            {
-                                "internalType": "uint256",
-                                "name": "executedAmount",
-                                "type": "uint256"
-                            }
-                        ],
-                        "internalType": "struct GPv2Trade.Data[]",
-                        "name": "trades",
-                        "type": "tuple[]"
-                    },
-                    {
-                        "components": [
-                            {
-                                "internalType": "address",
-                                "name": "target",
-                                "type": "address"
-                            },
-                            {
-                                "internalType": "uint256",
-                                "name": "value",
-                                "type": "uint256"
-                            },
-                            {
-                                "internalType": "bytes",
-                                "name": "callData",
-                                "type": "bytes"
-                            }
-                        ],
-                        "internalType": "struct GPv2Interaction.Data[][3]",
-                        "name": "interactions",
-                        "type": "tuple[][3]"
-                    }
-                ],
-                "name": "settle",
-                "outputs": [],
-                "stateMutability": "nonpayable",
-                "type": "function"
+                "internalType": "contract IGnosisAllowListAuthentication",
+                "name": "_authenticator",
+                "type": "address"
             },
             {
-                "inputs": [
-                    {
-                        "internalType": "bytes",
-                        "name": "orderUid",
-                        "type": "bytes"
-                    }
-                ],
-                "name": "invalidateOrder",
-                "outputs": [],
-                "stateMutability": "nonpayable",
-                "type": "function"
-            },
-            {
-                "inputs": [
-                    {
-                        "internalType": "bytes",
-                        "name": "orderUid",
-                        "type": "bytes"
-                    },
-                    {
-                        "internalType": "bool",
-                        "name": "signed",
-                        "type": "bool"
-                    }
-                ],
-                "name": "setPreSignature",
-                "outputs": [],
-                "stateMutability": "nonpayable",
-                "type": "function"
+                "internalType": "contract IBlocklist",
+                "name": "_blocklist",
+                "type": "address"
             }
-        ]
-    })).unwrap();
-
-    // Order struct for type definitions
-    pub static ref ORDER_STRUCT: serde_json::Value = json!({
-        "components": [
-            {
-                "internalType": "address",
-                "name": "sellToken",
-                "type": "address"
-            },
-            {
-                "internalType": "address",
-                "name": "buyToken",
-                "type": "address"
-            },
-            {
-                "internalType": "address",
-                "name": "receiver",
-                "type": "address"
-            },
-            {
-                "internalType": "uint256",
-                "name": "sellAmount",
-                "type": "uint256"
-            },
-            {
-                "internalType": "uint256",
-                "name": "buyAmount",
-                "type": "uint256"
-            },
-            {
-                "internalType": "uint32",
-                "name": "validTo",
-                "type": "uint32"
-            },
-            {
-                "internalType": "bytes32",
-                "name": "appData",
-                "type": "bytes32"
-            },
-            {
-                "internalType": "uint256",
-                "name": "feeAmount",
-                "type": "uint256"
-            },
+        ],
+        "stateMutability": "nonpayable",
+        "type": "constructor"
+    },
+    {
+        "inputs": [],
+        "name": "GPv2Settlement__OrderMustHaveValidSeller",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "InvalidCallData",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "InvalidOrder",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "OnlyOwner",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "OrderNotValid",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "PreSignAlreadySet",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "DOMAIN_SEPARATOR",
+        "outputs": [
             {
                 "internalType": "bytes32",
-                "name": "kind",
-                "type": "bytes32"
-            },
-            {
-                "internalType": "bool",
-                "name": "partiallyFillable",
-                "type": "bool"
-            },
-            {
-                "internalType": "bytes32",
-                "name": "sellTokenBalance",
-                "type": "bytes32"
-            },
-            {
-                "internalType": "bytes32",
-                "name": "buyTokenBalance",
+                "name": "",
                 "type": "bytes32"
             }
         ],
-        "name": "order",
-        "type": "tuple"
-    });
-}
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes",
+                "name": "orderUid",
+                "type": "bytes"
+            }
+        ],
+        "name": "invalidateOrder",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes[]",
+                "name": "orderUids",
+                "type": "bytes[]"
+            }
+        ],
+        "name": "invalidateOrders",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes",
+                "name": "orderUid",
+                "type": "bytes"
+            }
+        ],
+        "name": "isOrderValid",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes",
+                "name": "orderUid",
+                "type": "bytes"
+            }
+        ],
+        "name": "isValidSignature",
+        "outputs": [
+            {
+                "internalType": "bytes4",
+                "name": "",
+                "type": "bytes4"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes",
+                "name": "orderUid",
+                "type": "bytes"
+            }
+        ],
+        "name": "preSignature",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "signed",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes",
+                "name": "orderUid",
+                "type": "bytes"
+            }
+        ],
+        "name": "setPreSignature",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    }
+]"#;
 
 // Constants for order kinds
 #[allow(dead_code)]
