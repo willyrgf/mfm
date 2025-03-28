@@ -220,3 +220,198 @@ impl StateHandler for OnChainValuesState {
         Ok(())
     }
 }
+
+#[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
+pub struct ValidationState {
+    label: Label,
+    tags: Vec<Tag>,
+    depends_on: Vec<Tag>,
+    depends_on_strategy: DependencyStrategy,
+}
+
+impl Default for ValidationState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ValidationState {
+    pub fn new() -> Self {
+        Self {
+            label: Label::new("validation_state").unwrap(),
+            tags: vec![Tag::new("validation").unwrap()],
+            depends_on: vec![Tag::new("compute_price").unwrap()],
+            depends_on_strategy: DependencyStrategy::Latest,
+        }
+    }
+}
+
+impl StateHandler for ValidationState {
+    fn handler(&self, context: SafeContext) -> StateResult {
+        let price_data: Config = context
+            .read_typed("price")
+            .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
+
+        // Validate the price calculations
+        if price_data.b < 2 {
+            return Err(StateError::Unknown(
+                StateErrorRecoverability::Recoverable,
+                anyhow!("Price value too low"),
+            ));
+        }
+
+        let validation_data = Config {
+            a: format!("{}_validated", price_data.a),
+            b: price_data.b,
+        };
+
+        context
+            .write_typed("validation", &validation_data)
+            .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
+pub struct NotificationState {
+    label: Label,
+    tags: Vec<Tag>,
+    depends_on: Vec<Tag>,
+    depends_on_strategy: DependencyStrategy,
+}
+
+impl Default for NotificationState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NotificationState {
+    pub fn new() -> Self {
+        Self {
+            label: Label::new("notification_state").unwrap(),
+            tags: vec![Tag::new("notification").unwrap()],
+            depends_on: vec![Tag::new("report").unwrap(), Tag::new("validation").unwrap()],
+            depends_on_strategy: DependencyStrategy::Latest,
+        }
+    }
+}
+
+impl StateHandler for NotificationState {
+    fn handler(&self, context: SafeContext) -> StateResult {
+        let report_data: Config = context
+            .read_typed("report")
+            .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
+
+        let validation_data: Config = context
+            .read_typed("validation")
+            .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
+
+        let notification_data = Config {
+            a: format!("{}_notified_{}", report_data.a, validation_data.a),
+            b: report_data.b + 10,
+        };
+
+        context
+            .write_typed("notification", &notification_data)
+            .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
+pub struct AnalyticsState {
+    label: Label,
+    tags: Vec<Tag>,
+    depends_on: Vec<Tag>,
+    depends_on_strategy: DependencyStrategy,
+}
+
+impl Default for AnalyticsState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AnalyticsState {
+    pub fn new() -> Self {
+        Self {
+            label: Label::new("analytics_state").unwrap(),
+            tags: vec![Tag::new("analytics").unwrap()],
+            depends_on: vec![
+                Tag::new("report").unwrap(),
+                Tag::new("notification").unwrap(),
+            ],
+            depends_on_strategy: DependencyStrategy::Latest,
+        }
+    }
+}
+
+impl StateHandler for AnalyticsState {
+    fn handler(&self, context: SafeContext) -> StateResult {
+        // Generate random analytics data
+        let mut rng = rand::thread_rng();
+        let analytics_value = rng.gen_range(100..1000);
+
+        let analytics_data = Config {
+            a: "analytics_processed".to_string(),
+            b: analytics_value,
+        };
+
+        context
+            .write_typed("analytics", &analytics_data)
+            .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
+pub struct FinalizeState {
+    label: Label,
+    tags: Vec<Tag>,
+    depends_on: Vec<Tag>,
+    depends_on_strategy: DependencyStrategy,
+}
+
+impl Default for FinalizeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FinalizeState {
+    pub fn new() -> Self {
+        Self {
+            label: Label::new("finalize_state").unwrap(),
+            tags: vec![Tag::new("finalize").unwrap()],
+            depends_on: vec![
+                Tag::new("report").unwrap(),
+                Tag::new("notification").unwrap(),
+                Tag::new("analytics").unwrap(),
+            ],
+            depends_on_strategy: DependencyStrategy::Latest,
+        }
+    }
+}
+
+impl StateHandler for FinalizeState {
+    fn handler(&self, context: SafeContext) -> StateResult {
+        let report_data: Config = context
+            .read_typed("report")
+            .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
+
+        let analytics_data: Config = context
+            .read_typed("analytics")
+            .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
+
+        let notification_data: Config = context
+            .read_typed("notification")
+            .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
+
+        let finalize_data = Config {
+            a: format!("finalized_workflow"),
+            b: report_data.b + analytics_data.b + notification_data.b,
+        };
+
+        context
+            .write_typed("finalized", &finalize_data)
+            .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))
+    }
+}
