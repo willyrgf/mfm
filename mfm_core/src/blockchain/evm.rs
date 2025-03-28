@@ -1,5 +1,7 @@
 use crate::blockchain::adapter::erc20::ERC20;
+use crate::blockchain::adapter::provider::{Transaction, TxHash};
 use crate::blockchain::adapter::{Address, Bytes, LocalWallet, Provider, U256};
+use alloy_primitives;
 use alloy_rpc_client::RpcClient;
 use alloy_transport_http::Http;
 use serde::{Deserialize, Serialize};
@@ -189,10 +191,22 @@ impl EvmProvider {
         let provider = self.current_provider().await;
 
         // Use the adapter's get_balance method
-        provider
+        let result = provider
             .get_balance(address)
             .await
-            .map_err(|e| BlockchainError::BalanceError(e.to_string()))
+            .map_err(|e| BlockchainError::BalanceError(e.to_string()));
+
+        if result.is_err() && self.providers.len() > 1 {
+            // Try switching providers and retry
+            self.try_switch_provider().await?;
+            let new_provider = self.current_provider().await;
+            return new_provider
+                .get_balance(address)
+                .await
+                .map_err(|e| BlockchainError::BalanceError(e.to_string()));
+        }
+
+        result
     }
 
     /// Call a contract at an address with the given data
@@ -205,11 +219,23 @@ impl EvmProvider {
         // Get the current provider
         let provider = self.current_provider().await;
 
-        // Use the adapter's call method
-        provider
-            .call(address, data)
+        // Call the contract
+        let result = provider
+            .call(address, data.clone())
             .await
-            .map_err(|e| BlockchainError::ContractCallError(e.to_string()))
+            .map_err(|e| BlockchainError::ContractCallError(e.to_string()));
+
+        if result.is_err() && self.providers.len() > 1 {
+            // Try switching providers and retry
+            self.try_switch_provider().await?;
+            let new_provider = self.current_provider().await;
+            return new_provider
+                .call(address, data)
+                .await
+                .map_err(|e| BlockchainError::ContractCallError(e.to_string()));
+        }
+
+        result
     }
 
     /// Get a token balance for an address
@@ -237,6 +263,333 @@ impl EvmProvider {
                 self.get_balance(address).await
             }
         }
+    }
+
+    /// Estimates gas for a transaction
+    pub async fn estimate_gas(
+        &self,
+        to: Address,
+        data: Bytes,
+        value: Option<U256>,
+    ) -> Result<U256, BlockchainError> {
+        // Get the current provider
+        let provider = self.current_provider().await;
+
+        // Create the transaction data for gas estimation
+        let tx = Transaction {
+            to: Some(to),
+            value,
+            data: data.clone(),
+            nonce: None,
+            gas_price: None,
+            gas: None,
+            chain_id: Some(self.config.chain_id),
+        };
+
+        // Estimate gas using the provider
+        let result = provider.estimate_gas(&tx).await.map_err(|e| {
+            BlockchainError::ContractCallError(format!("Gas estimation failed: {}", e))
+        });
+
+        if result.is_err() && self.providers.len() > 1 {
+            // Try switching providers and retry
+            self.try_switch_provider().await?;
+            let new_provider = self.current_provider().await;
+
+            // Try again with the new provider
+            return new_provider.estimate_gas(&tx).await.map_err(|e| {
+                BlockchainError::ContractCallError(format!("Gas estimation failed: {}", e))
+            });
+        }
+
+        result
+    }
+
+    /// Sends a transaction and returns the transaction hash
+    pub async fn send_transaction(
+        &self,
+        to: Address,
+        data: Bytes,
+        value: Option<U256>,
+        gas: Option<U256>,
+    ) -> Result<TxHash, BlockchainError> {
+        // Get the current provider
+        let provider = self.current_provider().await;
+
+        // Calculate gas limit either from parameter or estimate it
+        let gas_limit = match gas {
+            Some(g) => g,
+            None => {
+                let estimated_gas = self.estimate_gas(to, data.clone(), value).await?;
+                // Apply the gas multiplier from config
+                let multiplier = self.config.gas_multiplier;
+                let gas_value = estimated_gas.0.to::<u64>() as f64;
+                let gas_with_buffer = (gas_value * multiplier) as u64;
+                U256(alloy_primitives::U256::from(gas_with_buffer))
+            }
+        };
+
+        // Apply max gas limit from config if needed
+        if let Some(max_gas) = self.config.gas_limit {
+            // Using temporary variable to compare, but ignoring it since wallet.send_transaction
+            // will take care of gas estimation internally
+            let _ = std::cmp::min(gas_limit, U256(alloy_primitives::U256::from(max_gas)));
+        }
+
+        // Send the transaction using our wallet
+        let result = self
+            .wallet
+            .send_transaction(&provider, Some(to), value, data.clone())
+            .await
+            .map_err(|e| {
+                BlockchainError::TransactionError(format!("Failed to send transaction: {}", e))
+            });
+
+        if result.is_err() && self.providers.len() > 1 {
+            // Try switching providers and retry
+            self.try_switch_provider().await?;
+            let new_provider = self.current_provider().await;
+
+            // Try again with the new provider
+            return self
+                .wallet
+                .send_transaction(&new_provider, Some(to), value, data)
+                .await
+                .map_err(|e| {
+                    BlockchainError::TransactionError(format!("Failed to send transaction: {}", e))
+                });
+        }
+
+        result
+    }
+
+    /// Gets the transaction receipt for a transaction hash
+    pub async fn get_transaction_receipt(
+        &self,
+        tx_hash: TxHash,
+    ) -> Result<Option<serde_json::Value>, BlockchainError> {
+        // Get the current provider
+        let provider = self.current_provider().await;
+
+        // Call the eth_getTransactionReceipt RPC method
+        let result = provider
+            .inner()
+            .request::<_, serde_json::Value>("eth_getTransactionReceipt", [tx_hash.clone()])
+            .await
+            .map_err(|e| {
+                BlockchainError::Other(format!("Failed to get transaction receipt: {}", e))
+            });
+
+        if result.is_err() && self.providers.len() > 1 {
+            // Try switching providers and retry
+            self.try_switch_provider().await?;
+            let new_provider = self.current_provider().await;
+
+            // Try again with the new provider
+            return new_provider
+                .inner()
+                .request::<_, serde_json::Value>("eth_getTransactionReceipt", [tx_hash])
+                .await
+                .map_err(|e| {
+                    BlockchainError::Other(format!("Failed to get transaction receipt: {}", e))
+                })
+                .map(|receipt| {
+                    if receipt.is_null() {
+                        None
+                    } else {
+                        Some(receipt)
+                    }
+                });
+        }
+
+        let receipt = result?;
+
+        // Check if the receipt is null
+        if receipt.is_null() {
+            return Ok(None);
+        }
+
+        Ok(Some(receipt))
+    }
+
+    /// Wait for a transaction to be confirmed
+    pub async fn wait_for_transaction(
+        &self,
+        tx_hash: TxHash,
+        confirmations: Option<u64>,
+    ) -> Result<serde_json::Value, BlockchainError> {
+        // Get the confirmations from config or use the provided one
+        let conf = confirmations.unwrap_or(self.config.block_confirmations);
+
+        // Loop until we have enough confirmations
+        let mut attempts = 0;
+        let max_attempts = 50; // Prevent infinite loops
+
+        loop {
+            if attempts >= max_attempts {
+                return Err(BlockchainError::TransactionError(
+                    "Transaction not confirmed after max attempts".to_string(),
+                ));
+            }
+
+            // Wait a bit between checks
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+            // Get the current provider
+            let provider = self.current_provider().await;
+
+            // Get the transaction receipt
+            if let Some(receipt) = self.get_transaction_receipt(tx_hash.clone()).await? {
+                // Check if the receipt has a block number
+                if let Some(block_number) = receipt.get("blockNumber") {
+                    // Get the latest block number
+                    let latest_block = provider
+                        .inner()
+                        .request::<_, alloy_primitives::U256>("eth_blockNumber", ())
+                        .await
+                        .map_err(|e| {
+                            BlockchainError::Other(format!("Failed to get block number: {}", e))
+                        })?;
+
+                    // Parse the receipt block number
+                    let receipt_block_str = block_number.as_str().unwrap_or("0x0");
+                    let receipt_block = alloy_primitives::U256::from_str_radix(
+                        receipt_block_str.trim_start_matches("0x"),
+                        16,
+                    )
+                    .map_err(|e| {
+                        BlockchainError::Other(format!("Failed to parse block number: {}", e))
+                    })?;
+
+                    // Calculate confirmations
+                    let confirmation_blocks =
+                        latest_block.checked_sub(receipt_block).unwrap_or_default();
+
+                    if confirmation_blocks >= alloy_primitives::U256::from(conf) {
+                        return Ok(receipt);
+                    }
+                }
+            }
+
+            attempts += 1;
+        }
+    }
+
+    /// Transfer ETH to an address
+    pub async fn transfer_eth(&self, to: Address, amount: U256) -> Result<TxHash, BlockchainError> {
+        // Create an empty data field for a simple ETH transfer
+        let data = Bytes(Vec::new());
+
+        // Send the transaction with the ETH value
+        self.send_transaction(to, data, Some(amount), None).await
+    }
+
+    /// Transfer ERC20 tokens to an address
+    pub async fn transfer_erc20(
+        &self,
+        token_address: Address,
+        to: Address,
+        amount: U256,
+    ) -> Result<TxHash, BlockchainError> {
+        // Get the current provider
+        let provider = self.current_provider().await;
+
+        // Create an ERC20 contract instance - use as_ref() to get Provider from Arc<Provider>
+        let token_contract = ERC20::new(token_address, (*provider).clone());
+
+        // Check our balance before transferring
+        let balance = token_contract
+            .balance_of(self.wallet.address())
+            .await
+            .map_err(|e| BlockchainError::BalanceError(e.to_string()))?;
+
+        if balance < amount {
+            return Err(BlockchainError::InsufficientBalance(format!(
+                "Insufficient token balance. Required: {}, Available: {}",
+                amount.0, balance.0
+            )));
+        }
+
+        // Prepare the transfer call
+        let data = token_contract
+            .encode_transfer(to, amount)
+            .map_err(|e| BlockchainError::ContractError(e.to_string()))?;
+
+        // Send the transaction
+        self.send_transaction(token_address, data, None, None).await
+    }
+
+    /// Approve ERC20 tokens for a spender
+    pub async fn approve_erc20(
+        &self,
+        token_address: Address,
+        spender: Address,
+        amount: U256,
+    ) -> Result<TxHash, BlockchainError> {
+        // Get the current provider
+        let provider = self.current_provider().await;
+
+        // Create an ERC20 contract instance - use as_ref() to get Provider from Arc<Provider>
+        let token_contract = ERC20::new(token_address, (*provider).clone());
+
+        // Prepare the approve call
+        let data = token_contract
+            .encode_approve(spender, amount)
+            .map_err(|e| BlockchainError::ContractError(e.to_string()))?;
+
+        // Send the transaction
+        self.send_transaction(token_address, data, None, None).await
+    }
+
+    /// Check allowance for ERC20 tokens
+    pub async fn erc20_allowance(
+        &self,
+        token_address: Address,
+        owner: Address,
+        spender: Address,
+    ) -> Result<U256, BlockchainError> {
+        // Get the current provider
+        let provider = self.current_provider().await;
+
+        // Create an ERC20 contract instance - use as_ref() to get Provider from Arc<Provider>
+        let token_contract = ERC20::new(token_address, (*provider).clone());
+
+        // Call allowance on the token contract
+        token_contract
+            .allowance(owner, spender)
+            .await
+            .map_err(|e| BlockchainError::ContractError(e.to_string()))
+    }
+
+    /// Switch to a different provider if the current one fails
+    async fn try_switch_provider(&self) -> Result<(), BlockchainError> {
+        if self.providers.len() <= 1 {
+            return Err(BlockchainError::ProviderError(
+                "No alternative providers available".to_string(),
+            ));
+        }
+
+        let current_index = *self.active_provider_index.read().await;
+        let next_index = (current_index + 1) % self.providers.len();
+
+        // Update the active provider index
+        let mut index = self.active_provider_index.write().await;
+        *index = next_index;
+
+        println!("Switched to provider {}", next_index);
+        Ok(())
+    }
+
+    /// Get the chain ID from the provider
+    pub async fn get_chain_id(&self) -> Result<u64, BlockchainError> {
+        // Get the current provider
+        let provider = self.current_provider().await;
+
+        // Call the chain_id method
+        provider
+            .get_chainid()
+            .await
+            .map_err(|e| BlockchainError::ProviderError(format!("Failed to get chain ID: {}", e)))
     }
 }
 

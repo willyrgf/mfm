@@ -162,6 +162,24 @@ impl ERC20 {
         // Decode the result - ERC20 allowance() returns a uint256
         decode_uint256(&result.0)
     }
+
+    /// Encode a transfer call without executing it
+    pub fn encode_transfer(&self, to: Address, amount: U256) -> Result<Bytes> {
+        // Create the call data
+        let call_data = create_transfer_call_data(&to, &amount);
+
+        // Return as Bytes
+        Ok(Bytes(call_data))
+    }
+
+    /// Encode an approve call without executing it
+    pub fn encode_approve(&self, spender: Address, amount: U256) -> Result<Bytes> {
+        // Create the call data
+        let call_data = create_approve_call_data(&spender, &amount);
+
+        // Return as Bytes
+        Ok(Bytes(call_data))
+    }
 }
 
 // pure function to create balanceOf call data
