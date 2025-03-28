@@ -74,7 +74,7 @@ pub trait BlockchainProvider: std::fmt::Debug + Send + Sync {
 
     fn get_wallet_address(&self) -> Address;
 
-    fn get_aave_provider(
+    async fn get_aave_provider(
         &self,
     ) -> Result<Box<dyn crate::blockchain::AaveProvider>, BlockchainError>;
 }
@@ -286,15 +286,13 @@ impl BlockchainProvider for EvmProvider {
         self.wallet.address()
     }
 
-    fn get_aave_provider(
+    async fn get_aave_provider(
         &self,
     ) -> Result<Box<dyn crate::blockchain::AaveProvider>, BlockchainError> {
-        use crate::blockchain::aave::create_aave_provider;
         use std::str::FromStr;
 
-        // Get the current provider
-        let provider_fut = self.current_provider();
-        let provider = tokio::runtime::Handle::current().block_on(provider_fut);
+        // Get the current provider - now we can use await properly
+        let provider = self.current_provider().await;
 
         // Default Aave V3 mainnet addresses
         let lending_pool_address = Address::from_str("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")
@@ -307,10 +305,12 @@ impl BlockchainProvider for EvmProvider {
                 BlockchainError::InvalidAddress("Invalid Aave data provider address".to_string())
             })?;
 
-        // Create the Aave provider asynchronously but block on it since this method is synchronous
-        let aave_provider_fut =
-            create_aave_provider(provider, lending_pool_address, data_provider_address);
-        let aave_provider = tokio::runtime::Handle::current().block_on(aave_provider_fut)?;
+        // Create the Aave provider - we're removing the block_on calls that cause runtime nesting
+        let aave_provider = crate::blockchain::aave::AaveAdapterProvider::new(
+            provider,
+            lending_pool_address,
+            data_provider_address,
+        );
 
         // Box it and return
         Ok(Box::new(aave_provider))

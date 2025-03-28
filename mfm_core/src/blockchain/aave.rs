@@ -6,6 +6,7 @@ use crate::blockchain::BlockchainError;
 use async_trait::async_trait;
 use lazy_static;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tiny_keccak::{Hasher, Keccak};
@@ -44,6 +45,10 @@ lazy_static::lazy_static! {
     static ref GET_RESERVE_DATA_SELECTOR: [u8; 4] = compute_selector("getReserveData(address)");
     #[allow(dead_code)]
     static ref GET_USER_RESERVE_DATA_SELECTOR: [u8; 4] = compute_selector("getUserReserveData(address,address)");
+    #[allow(dead_code)]
+    static ref SYMBOL_SELECTOR: [u8; 4] = compute_selector("symbol()");
+    #[allow(dead_code)]
+    static ref DECIMALS_SELECTOR: [u8; 4] = compute_selector("decimals()");
 }
 
 // Asset IDs for price fetching
@@ -59,20 +64,20 @@ const ASSET_IDS: &[(&str, &str)] = &[
     ("WBTC", "wrapped-bitcoin"),
 ];
 
-// We use String representations for serialization
+// We directly use our adapter U256 for cleaner code
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AaveUserAccountData {
-    pub total_collateral_base: String,
-    pub total_debt_base: String,
-    pub available_borrow_base: String,
-    pub current_liquidation_threshold: String,
-    pub ltv: String,
-    pub health_factor: String,
+    pub total_collateral_base: U256,
+    pub total_debt_base: U256,
+    pub available_borrow_base: U256,
+    pub current_liquidation_threshold: U256,
+    pub ltv: U256,
+    pub health_factor: U256,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AaveReserveData {
-    pub asset: String,
+    pub asset: Address,
     pub symbol: String,
     pub liquidation_threshold: u16,
     pub ltv: u16,
@@ -81,11 +86,11 @@ pub struct AaveReserveData {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AaveUserReserveData {
-    pub asset: String,
+    pub asset: Address,
     pub symbol: String,
-    pub current_atoken_balance: String,
-    pub current_stable_debt: String,
-    pub current_variable_debt: String,
+    pub current_atoken_balance: U256,
+    pub current_stable_debt: U256,
+    pub current_variable_debt: U256,
     pub liquidation_threshold: u16,
     pub price_usd: f64,
 }
@@ -109,14 +114,12 @@ pub trait AaveProvider: Send + Sync {
     ) -> Result<AaveUserAccountData, BlockchainError>;
 
     /// get user reserve data
-    #[allow(dead_code)]
     async fn get_user_reserves(
         &self,
         user: Address,
     ) -> Result<Vec<AaveUserReserveData>, BlockchainError>;
 
     /// calculate health factor
-    #[allow(dead_code)]
     async fn calculate_health_factor(
         &self,
         user: Address,
@@ -153,7 +156,7 @@ pub async fn get_price(asset: &str) -> Result<f64, BlockchainError> {
         .ok_or_else(|| BlockchainError::ApiError(format!("Price not found for {}", asset)))
 }
 
-/// helper function to convert U256 to f64 with decimals
+/// Helper function to convert U256 to f64 with decimals
 pub fn u256_to_f64(value: U256, decimals: u8) -> f64 {
     let ten_pow_decimals =
         alloy_primitives::U256::from(10).pow(alloy_primitives::U256::from(decimals as u64));
@@ -171,21 +174,47 @@ pub fn u256_to_f64(value: U256, decimals: u8) -> f64 {
     integer_f64 + fractional_f64
 }
 
-/// helper function to parse a uint256 from EVM ABI encoding
-fn parse_uint256(data: &[u8]) -> Result<U256, BlockchainError> {
-    if data.len() != 32 {
-        return Err(BlockchainError::ContractCallError(
-            "Invalid data length for uint256".to_string(),
+/// Helper function to get price with retry
+async fn get_price_with_retry(asset: &str, max_retries: usize) -> Result<f64, BlockchainError> {
+    get_price_with_retry_internal(asset, 0, max_retries).await
+}
+
+async fn get_price_with_retry_internal(
+    asset: &str,
+    current_retry: usize,
+    max_retries: usize,
+) -> Result<f64, BlockchainError> {
+    if current_retry > max_retries {
+        return Err(BlockchainError::Other(
+            "Max retries exceeded for price fetch".to_string(),
         ));
     }
 
-    // Use alloy_primitives to parse the bytes into a U256
-    let mut bytes = [0u8; 32];
-    bytes.copy_from_slice(data);
-    let value = alloy_primitives::U256::from_be_bytes(bytes);
-
-    // Convert to our adapter type
-    Ok(U256(value))
+    match get_price(asset).await {
+        Ok(price) => Ok(price),
+        Err(e) => {
+            if current_retry < max_retries {
+                println!(
+                    "Error getting price for {}, retrying ({}/{}): {}",
+                    asset,
+                    current_retry + 1,
+                    max_retries,
+                    e
+                );
+                // Add exponential backoff
+                sleep(Duration::from_millis(200 * (current_retry as u64 + 1))).await;
+                // Use Box::pin for recursive async call
+                Box::pin(get_price_with_retry_internal(
+                    asset,
+                    current_retry + 1,
+                    max_retries,
+                ))
+                .await
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 /// aave provider implementation using our adapter
@@ -249,6 +278,85 @@ impl AaveAdapterProvider {
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new(200))), // 200ms between calls
         }
     }
+
+    /// Call a contract function safely with rate limiting
+    async fn call_contract(
+        &self,
+        address: Address,
+        data: Vec<u8>,
+    ) -> Result<Bytes, BlockchainError> {
+        // Apply rate limiting
+        {
+            let mut rate_limiter = self.rate_limiter.lock().await;
+            rate_limiter.wait().await;
+        }
+
+        // Call the contract
+        self.provider
+            .call(address, Bytes(data))
+            .await
+            .map_err(|e| BlockchainError::ContractCallError(e.to_string()))
+    }
+
+    /// Get token symbol
+    #[allow(dead_code)]
+    async fn get_token_symbol(&self, token_address: Address) -> Result<String, BlockchainError> {
+        let call_data = (*SYMBOL_SELECTOR).to_vec();
+
+        match self.call_contract(token_address, call_data).await {
+            Ok(result) => {
+                // The result is an ABI-encoded string, usually starting at offset 32
+                if result.0.len() < 64 {
+                    return Err(BlockchainError::ContractCallError(
+                        "Invalid response length for symbol".to_string(),
+                    ));
+                }
+
+                // Extract string data from the ABI encoding
+                let length_bytes = &result.0[32..64];
+                let length = u32::from_be_bytes([
+                    length_bytes[28],
+                    length_bytes[29],
+                    length_bytes[30],
+                    length_bytes[31],
+                ]) as usize;
+
+                if result.0.len() < 64 + length {
+                    return Err(BlockchainError::ContractCallError(
+                        "Invalid string length for symbol".to_string(),
+                    ));
+                }
+
+                let symbol_bytes = &result.0[64..64 + length];
+                let symbol = String::from_utf8(symbol_bytes.to_vec()).map_err(|e| {
+                    BlockchainError::ContractCallError(format!("Invalid UTF-8 in symbol: {}", e))
+                })?;
+
+                Ok(symbol)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get token decimals
+    #[allow(dead_code)]
+    async fn get_token_decimals(&self, token_address: Address) -> Result<u8, BlockchainError> {
+        let call_data = (*DECIMALS_SELECTOR).to_vec();
+
+        match self.call_contract(token_address, call_data).await {
+            Ok(result) => {
+                if result.0.len() < 32 {
+                    return Err(BlockchainError::ContractCallError(
+                        "Invalid response length for decimals".to_string(),
+                    ));
+                }
+
+                // Decimals is a uint8, extract just the relevant byte
+                Ok(result.0[31])
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[async_trait]
@@ -258,11 +366,6 @@ impl AaveProvider for AaveAdapterProvider {
         &self,
         user: Address,
     ) -> Result<AaveUserAccountData, BlockchainError> {
-        // Wait for rate limiter
-        let mut rate_limiter = self.rate_limiter.lock().await;
-        rate_limiter.wait().await;
-        drop(rate_limiter);
-
         // Prepare the call data
         let mut call_data = (*GET_USER_ACCOUNT_DATA_SELECTOR).to_vec();
 
@@ -271,12 +374,13 @@ impl AaveProvider for AaveAdapterProvider {
         address_bytes.extend_from_slice(user.0.as_ref());
         call_data.extend_from_slice(&address_bytes);
 
+        // Log the user address we're querying
+        println!("Querying AAVE V3 for user: {}", user);
+
         // Call the lending pool contract
         let result = self
-            .provider
-            .call(self.lending_pool_address, Bytes(call_data))
-            .await
-            .map_err(|e| BlockchainError::ContractCallError(e.to_string()))?;
+            .call_contract(self.lending_pool_address, call_data)
+            .await?;
 
         // Decode result - this is a complex tuple with 6 uint256 values
         // (totalCollateralBase, totalDebtBase, availableBorrowsBase, currentLiquidationThreshold, ltv, healthFactor)
@@ -294,14 +398,14 @@ impl AaveProvider for AaveAdapterProvider {
         let ltv = parse_uint256(&result.0[128..160])?;
         let health_factor = parse_uint256(&result.0[160..192])?;
 
-        // Create the user account data struct
+        // Create the user account data struct with the directly parsed U256 values
         Ok(AaveUserAccountData {
-            total_collateral_base: total_collateral_base.0.to_string(),
-            total_debt_base: total_debt_base.0.to_string(),
-            available_borrow_base: available_borrow_base.0.to_string(),
-            current_liquidation_threshold: current_liquidation_threshold.0.to_string(),
-            ltv: ltv.0.to_string(),
-            health_factor: health_factor.0.to_string(),
+            total_collateral_base,
+            total_debt_base,
+            available_borrow_base,
+            current_liquidation_threshold,
+            ltv,
+            health_factor,
         })
     }
 
@@ -310,26 +414,86 @@ impl AaveProvider for AaveAdapterProvider {
         &self,
         user: Address,
     ) -> Result<Vec<AaveUserReserveData>, BlockchainError> {
-        // This is a complex implementation that would require multiple steps
-        // 1. Get all reserve tokens from Aave
-        // 2. For each token, call getUserReserveData
-        // 3. Fetch prices for each token
-        // 4. Combine data into AaveUserReserveData objects
+        // These are common Aave assets on mainnet
+        let reserve_tokens = [("USDC", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")];
 
-        // For now, we'll return an empty list to enable partial functionality
-        // A full implementation would be very lengthy for this example
+        let mut user_reserves = Vec::new();
 
-        // Wait for rate limiter
-        let mut rate_limiter = self.rate_limiter.lock().await;
-        rate_limiter.wait().await;
-        drop(rate_limiter);
+        for (symbol, address_str) in reserve_tokens.iter() {
+            // Parse address
+            let reserve_address = match Address::from_str(address_str) {
+                Ok(addr) => addr,
+                Err(_) => continue, // Skip invalid addresses
+            };
 
-        // Just log the user address we're checking
-        println!("User reserves would be fetched for address: {}", user);
+            // Prepare the call data for getUserReserveData
+            let mut call_data = (*GET_USER_RESERVE_DATA_SELECTOR).to_vec();
 
-        // Return empty list for now - will be fully implemented later
-        // This allows framework to work without erroring
-        Ok(Vec::new())
+            // Pad the asset address to 32 bytes
+            let mut asset_addr_bytes = vec![0u8; 12]; // 12 zeros for padding
+            asset_addr_bytes.extend_from_slice(reserve_address.0.as_ref());
+            call_data.extend_from_slice(&asset_addr_bytes);
+
+            // Pad the user address to 32 bytes
+            let mut user_addr_bytes = vec![0u8; 12]; // 12 zeros for padding
+            user_addr_bytes.extend_from_slice(user.0.as_ref());
+            call_data.extend_from_slice(&user_addr_bytes);
+
+            // Call the data provider contract
+            let result = match self
+                .call_contract(self.data_provider_address, call_data)
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => continue, // Skip failed calls
+            };
+
+            // Decode result - this is a complex tuple with multiple values
+            // We're most interested in:
+            // - currentATokenBalance (first value, index 0-31)
+            // - currentStableDebt (second value, index 32-63)
+            // - currentVariableDebt (third value, index 64-95)
+            if result.0.len() < 96 {
+                continue; // Skip if response is too short
+            }
+
+            // Extract the values
+            let current_atoken_balance = match parse_uint256(&result.0[0..32]) {
+                Ok(val) => val,
+                Err(_) => continue,
+            };
+
+            let current_stable_debt = match parse_uint256(&result.0[32..64]) {
+                Ok(val) => val,
+                Err(_) => continue,
+            };
+
+            let current_variable_debt = match parse_uint256(&result.0[64..96]) {
+                Ok(val) => val,
+                Err(_) => continue,
+            };
+
+            // Get price for the token with retry
+            let price = get_price_with_retry(symbol, 3).await.unwrap_or(0.0);
+
+            // Only add reserves where the user has a balance or debt
+            if current_atoken_balance.0 > alloy_primitives::U256::ZERO
+                || current_stable_debt.0 > alloy_primitives::U256::ZERO
+                || current_variable_debt.0 > alloy_primitives::U256::ZERO
+            {
+                user_reserves.push(AaveUserReserveData {
+                    asset: reserve_address,
+                    symbol: symbol.to_string(),
+                    current_atoken_balance,
+                    current_stable_debt,
+                    current_variable_debt,
+                    liquidation_threshold: 8000, // Default to 80%
+                    price_usd: price,
+                });
+            }
+        }
+
+        Ok(user_reserves)
     }
 
     /// calculate health factor for a user
@@ -340,40 +504,63 @@ impl AaveProvider for AaveAdapterProvider {
         // Get the user account data first
         let account_data = self.get_user_account_data(user).await?;
 
-        // Parse the health factor
-        let health_factor_str = &account_data.health_factor;
-        let health_factor_value = health_factor_str
-            .parse::<f64>()
-            .map_err(|e| BlockchainError::ContractError(e.to_string()))?;
+        // If user has no collateral and no debt, return a default health factor result
+        if account_data.total_collateral_base.0 == alloy_primitives::U256::ZERO
+            && account_data.total_debt_base.0 == alloy_primitives::U256::ZERO
+        {
+            println!("User has no AAVE positions, returning default health factor");
+            return Ok(AaveHealthCheckResult {
+                health_factor: f64::INFINITY,
+                total_collateral_usd: 0.0,
+                total_debt_usd: 0.0,
+                user_reserves: Vec::new(),
+                max_decrease_percentage: 100.0,
+            });
+        }
 
-        // Parse collateral and debt
-        let collateral_str = &account_data.total_collateral_base;
-        let collateral_value = collateral_str
-            .parse::<f64>()
-            .map_err(|e| BlockchainError::ContractError(e.to_string()))?;
+        // Convert to f64 for calculations
+        let health_factor = u256_to_f64(account_data.health_factor, 18);
+        let total_collateral_usd = u256_to_f64(account_data.total_collateral_base, 8);
+        let total_debt_usd = u256_to_f64(account_data.total_debt_base, 8);
 
-        let debt_str = &account_data.total_debt_base;
-        let debt_value = debt_str
-            .parse::<f64>()
-            .map_err(|e| BlockchainError::ContractError(e.to_string()))?;
-
-        // Calculate max decrease percentage
-        // This is a simple calculation - for a full implementation we would need more data
-        let max_decrease_percentage = if health_factor_value > 1.0 {
-            (health_factor_value - 1.0) / health_factor_value * 100.0
+        // Calculate maximum percentage decrease before health factor drops to 1
+        let max_decrease_percentage = if health_factor.is_infinite() || health_factor.is_nan() {
+            100.0
+        } else if health_factor > 1.0 {
+            100.0 * (1.0 - 1.0 / health_factor)
         } else {
             0.0
         };
 
-        // Return the health check result with empty reserves for now
+        // Get detailed reserve data
+        let user_reserves = self.get_user_reserves(user).await?;
+
+        // Return the health check result
         Ok(AaveHealthCheckResult {
-            health_factor: health_factor_value,
-            total_collateral_usd: collateral_value,
-            total_debt_usd: debt_value,
-            user_reserves: Vec::new(), // Empty for now
+            health_factor,
+            total_collateral_usd,
+            total_debt_usd,
+            user_reserves,
             max_decrease_percentage,
         })
     }
+}
+
+/// helper function to parse a uint256 from EVM ABI encoding
+fn parse_uint256(data: &[u8]) -> Result<U256, BlockchainError> {
+    if data.len() != 32 {
+        return Err(BlockchainError::ContractCallError(
+            "Invalid data length for uint256".to_string(),
+        ));
+    }
+
+    // Use alloy_primitives to parse the bytes into a U256
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(data);
+    let value = alloy_primitives::U256::from_be_bytes(bytes);
+
+    // Convert to our adapter type
+    Ok(U256(value))
 }
 
 /// create an aave provider

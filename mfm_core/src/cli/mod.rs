@@ -240,7 +240,11 @@ impl CliContext {
         println!("Checking AAVE health factor...");
 
         // Get the Aave provider from the blockchain provider
-        let aave_provider = self.portfolio.blockchain_provider.get_aave_provider()?;
+        let aave_provider = self
+            .portfolio
+            .blockchain_provider
+            .get_aave_provider()
+            .await?;
 
         // Get wallet address (from parameter or config)
         let wallet_addr = match wallet_address {
