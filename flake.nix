@@ -26,10 +26,12 @@
             cargo
             rustc
             rustfmt
+            pkg-config
           ];
           
           buildInputs = with pkgs; [
             git
+            openssl
           ];
           
           # Skip tests if you don't want them
