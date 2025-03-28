@@ -1,190 +1,356 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, Result};
 
-use crate::state::{context::ContextWrapper, StateResult, States};
+use crate::state::{safe_context::SafeContext, StateError, StateHandler, StateResult, States};
 
+use self::scheduler::{
+    DefaultErrorHandler, DefaultScheduler, ErrorHandler, Scheduler, SchedulerError,
+};
 use self::tracker::{HashMapTracker, Index, Tracker, TrackerHistory};
 
+pub mod scheduler;
 pub mod tracker;
 
+/// Builder pattern for constructing a StateMachine with various configurations
 pub struct StateMachineBuilder {
     pub states: States,
     pub tracker: Option<Box<dyn Tracker>>,
+    pub scheduler: Option<Box<dyn Scheduler>>,
+    pub error_handler: Option<Box<dyn ErrorHandler>>,
     pub max_recoveries: usize,
 }
 
 pub const MAX_RECOVERIES_MULT: usize = 3;
 
-// default_max_recoveries is number of states * MAX_RECOVERIES_MULT + 1
+/// Default maximum number of recovery attempts allowed
+/// Calculated as number of states * MAX_RECOVERIES_MULT + 1
 pub fn default_max_recoveries(states: States) -> usize {
     states.len() * MAX_RECOVERIES_MULT + 1
 }
 
 impl StateMachineBuilder {
+    /// Create a new StateMachineBuilder with the provided states
     pub fn new(states: States) -> Self {
         Self {
             states: states.clone(),
             tracker: None,
+            scheduler: None,
+            error_handler: None,
             max_recoveries: default_max_recoveries(states),
         }
     }
 
+    /// Set a custom tracker for the state machine
     pub fn tracker(mut self, tracker: Box<dyn Tracker>) -> Self {
         self.tracker = Some(tracker);
         self
     }
 
+    /// Set a custom scheduler for the state machine
+    pub fn scheduler(mut self, scheduler: Box<dyn Scheduler>) -> Self {
+        self.scheduler = Some(scheduler);
+        self
+    }
+
+    /// Set a custom error handler for the state machine
+    pub fn error_handler(mut self, error_handler: Box<dyn ErrorHandler>) -> Self {
+        self.error_handler = Some(error_handler);
+        self
+    }
+
+    /// Set the maximum number of recovery attempts
     pub fn max_recoveries(mut self, max: usize) -> Self {
         self.max_recoveries = max;
         self
     }
 
+    /// Build the StateMachine with the configured options
     pub fn build(self) -> StateMachine {
         StateMachine {
             states: self.states,
             tracker: self
                 .tracker
                 .unwrap_or_else(|| Box::new(HashMapTracker::new())),
+            scheduler: self
+                .scheduler
+                .unwrap_or_else(|| Box::new(DefaultScheduler::new())),
+            error_handler: self
+                .error_handler
+                .unwrap_or_else(|| Box::new(DefaultErrorHandler::new())),
             max_recoveries: self.max_recoveries,
         }
     }
 }
 
+/// The state machine that executes a sequence of states
 pub struct StateMachine {
     pub states: States,
     pub tracker: Box<dyn Tracker>,
+    pub scheduler: Box<dyn Scheduler>,
+    pub error_handler: Box<dyn ErrorHandler>,
     max_recoveries: usize,
 }
 
+/// Errors that can occur during state machine execution
 #[derive(Debug)]
 pub enum StateMachineError {
-    ReachedMaxRecoveries((), anyhow::Error),
-    EmptyState((), anyhow::Error),
+    /// Maximum number of recovery attempts has been reached
+    ReachedMaxRecoveries(usize, anyhow::Error),
+    /// No states were provided to execute
+    EmptyState(anyhow::Error),
+    /// An internal error occurred in the state machine
     InternalError(StateResult, anyhow::Error),
+    /// An error occurred in a state handler
     StateError(StateResult, anyhow::Error),
+    /// An error occurred in the scheduler
+    SchedulerError(SchedulerError),
+    /// Custom error handler rejected continuing execution
+    ErrorHandlerRejectedContinuation(StateError),
+    /// Invalid state index
+    InvalidStateIndex(usize),
+    /// Invalid recovery state index
+    InvalidRecoveryStateIndex(usize),
+    /// Recovery error
+    RecoveryError(StateResult, SchedulerError),
+}
+
+impl From<SchedulerError> for StateMachineError {
+    fn from(error: SchedulerError) -> Self {
+        StateMachineError::SchedulerError(error)
+    }
 }
 
 impl StateMachine {
+    /// Create a new StateMachine with default tracker, scheduler, and error handler
     pub fn new(states: States) -> Self {
         Self {
             states: states.clone(),
             tracker: Box::new(HashMapTracker::new()),
+            scheduler: Box::new(DefaultScheduler::new()),
+            error_handler: Box::new(DefaultErrorHandler::new()),
             max_recoveries: default_max_recoveries(states),
         }
     }
 
+    /// Get the history of executed states
     pub fn track_history(&self) -> TrackerHistory {
         self.tracker.history()
     }
 
+    /// Check if the state machine has a state at the given index
     fn has_state(&self, state_index: usize) -> bool {
         self.states.len() > state_index
     }
 
+    /// Check if the maximum number of recovery attempts has been reached
     fn reached_max_recoveries(&self) -> (bool, usize) {
         let steps = self.track_history().len();
         (steps >= self.max_recoveries, steps)
     }
 
-    // TODO: add logging, instrumentation
+    /// Determine the next state and context based on the result of the previous state
     fn transition(
         &mut self,
-        mut context: ContextWrapper,
+        context: SafeContext,
         state_index: usize,
         last_state_result: Option<StateResult>,
-    ) -> Result<(usize, ContextWrapper), StateMachineError> {
+    ) -> Result<(usize, SafeContext), StateMachineError> {
+        // Check if we have any states
         if !self.has_state(0) {
-            return Err(StateMachineError::EmptyState(
-                (),
-                anyhow!("there no state to execute"),
-            ));
+            return Err(StateMachineError::EmptyState(anyhow!(
+                "There are no states to execute"
+            )));
         }
 
-        if let (true, steps) = self.reached_max_recoveries() {
+        // Check if we've exceeded the maximum number of recovery attempts
+        let (reached_max, steps) = self.reached_max_recoveries();
+        if reached_max {
             return Err(StateMachineError::ReachedMaxRecoveries(
-                (),
-                anyhow!("reached max recoveries ({})", steps),
+                steps,
+                anyhow!("Reached max recoveries ({})", steps),
             ));
         }
 
-        let state = &self.states[state_index];
-
-        // if thats true, means that no state was executed before and this is the first one
+        // If this is the first state execution
         if last_state_result.is_none() {
             return Ok((state_index, context));
         }
 
         let state_result = last_state_result.unwrap();
+        let state = if self.has_state(state_index) {
+            &self.states[state_index]
+        } else {
+            return Err(StateMachineError::InvalidStateIndex(state_index));
+        };
 
-        // //FIXME: state_machine.track_history() show be enough
-        // let value = context.lock().unwrap().dump().unwrap();
-        // println!(
-        //     "state: {:?}; state_index: {}; state_result: {:?}; value: {:?}",
-        //     state.label(),
-        //     state_index,
-        //     state_result,
-        //     value,
-        // );
-
-        // TODO: it may be the transition
         match state_result {
-            Ok(()) => Ok((state_index + 1, context)),
+            Ok(()) => {
+                // Successful execution - determine next state via scheduler
+                let next_index = self
+                    .scheduler
+                    .next_state(state_index, &self.states, &context)?;
+                Ok((next_index, context))
+            }
             Err(e) => {
+                // Handle error based on recoverability
                 if e.is_recoverable() {
-                    // FIXME: we're looking just for the first depends_on of a state
-                    // we should implement an well defined rule for the whole dependency
-                    // system between states, and follow this definition here as well.
-                    let state_depends_on = state.depends_on();
-                    let indexes_state_deps = self
-                        .tracker
-                        .search_by_tag(state_depends_on.first().unwrap());
+                    // Use error handler to determine recovery strategy
+                    let recovery_result = self.error_handler.handle_error(
+                        &e,
+                        state_index,
+                        state,
+                        &self.states,
+                        &self.tracker,
+                    );
 
-                    let last_index_of_first_dep = indexes_state_deps.last().unwrap().clone();
+                    match recovery_result {
+                        Ok(recovery_index) => {
+                            // Get the context from the recovery point
+                            if let Some(recovery_state_index) =
+                                self.tracker.search_by_index(&recovery_index)
+                            {
+                                if let Some(recovery_context) =
+                                    self.tracker.recover(recovery_state_index.clone())
+                                {
+                                    return Ok((recovery_index, recovery_context));
+                                }
+                            }
 
-                    let last_index_state_ctx = self
-                        .tracker
-                        .recover(last_index_of_first_dep.clone())
-                        .unwrap();
+                            // If we can't get context from the exact recovery point, try finding by tag
+                            let state_depends_on = state.depends_on();
+                            if !state_depends_on.is_empty() {
+                                let indexes_state_deps = self
+                                    .tracker
+                                    .search_by_tag(state_depends_on.first().unwrap());
 
-                    context = last_index_state_ctx.clone();
+                                if let Some(last_index) = indexes_state_deps.last() {
+                                    if let Some(recovery_context) =
+                                        self.tracker.recover(last_index.clone())
+                                    {
+                                        return Ok((last_index.state_index, recovery_context));
+                                    }
+                                }
+                            }
 
-                    // TODO: design the possible state recoverability and default cases
-                    Ok((last_index_of_first_dep.state_index, context))
+                            // TODO: human: think if we want this or just throw error (config?)
+                            // If all else fails, restart from beginning with original context
+                            Ok((0, context))
+                        }
+                        Err(_) => {
+                            // Error handler rejected continuing
+                            Err(StateMachineError::ErrorHandlerRejectedContinuation(e))
+                        }
+                    }
                 } else {
+                    // Unrecoverable error
                     Err(StateMachineError::StateError(
                         Err(e),
-                        anyhow!("an unrecoverable error happened inside a state handler"),
+                        anyhow!("An unrecoverable error occurred in a state handler"),
                     ))
                 }
             }
         }
     }
 
+    /// Recursively execute states
     fn execute_rec(
         &mut self,
-        context: ContextWrapper,
+        context: SafeContext,
         state_index: usize,
         last_state_result: Option<StateResult>,
-    ) -> Result<(), StateMachineError> {
-        let (next_state_index, context) =
-            self.transition(context.clone(), state_index, last_state_result)?;
+    ) -> Result<SafeContext, StateMachineError> {
+        let transition_result = self.transition(context.clone(), state_index, last_state_result);
 
-        if !self.has_state(next_state_index) {
-            return Ok(());
+        match transition_result {
+            Ok((next_state_index, context)) => {
+                // If there are no more states to execute, return the final context
+                if !self.has_state(next_state_index) {
+                    return Ok(context);
+                }
+
+                let state = &self.states[next_state_index];
+
+                // TODO: human: check this filtering
+                // Check if we should skip this state based on filtering conditions
+                if let Some(filter_tags) = self.scheduler.get_filter_tags() {
+                    let state_tags = state.tags();
+                    if filter_tags
+                        .iter()
+                        .any(|filter_tag| state_tags.contains(filter_tag))
+                    {
+                        println!(
+                            "Skipping state at index {} because of filter",
+                            next_state_index
+                        );
+                        // Skip this state and move to the next one
+                        // First we need to determine what the next state is
+                        let next_next_index = match self.scheduler.next_state(
+                            next_state_index,
+                            &self.states,
+                            &context,
+                        ) {
+                            Ok(idx) => idx,
+                            Err(SchedulerError::NoNextState) => {
+                                // No more states - we're done
+                                return Ok(context);
+                            }
+                            Err(err) => return Err(StateMachineError::SchedulerError(err)),
+                        };
+
+                        return self.execute_rec(context, next_next_index, Some(Ok(())));
+                    }
+                }
+
+                // Execute the state handler
+                let result = state.handler(context.clone());
+
+                // Track the execution
+                let _ = self.tracker.as_mut().track(
+                    Index::new(next_state_index, state.label(), state.tags()),
+                    context.clone(),
+                );
+
+                // Continue to the next state
+                self.execute_rec(context, next_state_index, Some(result))
+            }
+            Err(StateMachineError::SchedulerError(SchedulerError::NoNextState)) => {
+                // We've reached the end of states - this is a successful completion
+                Ok(context)
+            }
+            Err(err) => Err(err),
         }
-
-        let state = &self.states[next_state_index];
-
-        let result = state.handler(context.clone());
-        let _ = self.tracker.as_mut().track(
-            Index::new(next_state_index, state.label(), state.tags()),
-            context.clone(),
-        );
-
-        self.execute_rec(context, next_state_index, Option::Some(result))
     }
 
-    pub fn execute(&mut self, context: ContextWrapper) -> Result<(), StateMachineError> {
-        self.execute_rec(context, 0, Option::None)
+    /// Execute the state machine with the given SafeContext
+    pub fn execute(&mut self, context: SafeContext) -> Result<SafeContext, StateMachineError> {
+        self.execute_rec(context, 0, None)
+    }
+
+    /// Execute the state machine starting from a specific state index
+    pub fn execute_from(
+        &mut self,
+        context: SafeContext,
+        start_index: usize,
+    ) -> Result<SafeContext, StateMachineError> {
+        if !self.has_state(start_index) {
+            return Err(StateMachineError::EmptyState(anyhow!(
+                "Invalid start index: {}",
+                start_index
+            )));
+        }
+
+        self.execute_rec(context, start_index, None)
+    }
+
+    /// Execute the state machine, filtering out states with specific tags
+    pub fn execute_with_filter(
+        &mut self,
+        context: SafeContext,
+        filter_tags: Vec<crate::state::Tag>,
+    ) -> Result<SafeContext, StateMachineError> {
+        self.scheduler.set_filter_tags(Some(filter_tags));
+        let result = self.execute(context);
+        self.scheduler.set_filter_tags(None);
+        result
     }
 }
 
@@ -192,14 +358,13 @@ impl StateMachine {
 mod test {
     use std::sync::Arc;
 
-    use crate::state::context::{wrap_context, Context, ContextWrapper, Local};
-    use crate::state::{DependencyStrategy, Label, StateHandler, StateMetadata, Tag};
-    use crate::state::{StateError, StateErrorRecoverability};
+    use crate::state::safe_context::{create_default_safe_context, SafeContext};
+    use crate::state::{
+        standard_tags, DependencyStrategy, Label, StateError, StateErrorRecoverability,
+        StateHandler, StateMetadata, StateResult, Tag,
+    };
     use mfm_machine_derive::StateMetadataReqs;
     use serde_derive::{Deserialize, Serialize};
-    use serde_json::json;
-
-    use super::StateResult;
 
     #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
     pub struct Setup {
@@ -213,7 +378,7 @@ mod test {
         fn new() -> Self {
             Self {
                 label: Label::new("setup_state").unwrap(),
-                tags: vec![Tag::new("setup").unwrap()],
+                tags: vec![Tag::new("setup").unwrap(), standard_tags::CONFIG],
                 depends_on: vec![Tag::new("setup").unwrap()],
                 depends_on_strategy: DependencyStrategy::Latest,
             }
@@ -227,30 +392,22 @@ mod test {
     }
 
     impl StateHandler for Setup {
-        fn handler(&self, context: ContextWrapper) -> StateResult {
+        fn handler(&self, context: SafeContext) -> StateResult {
             let data = SetupCtx {
                 a: "setup_b".to_string(),
                 b: 1,
             };
-            match context
-                .lock()
-                .as_mut()
-                .unwrap()
-                .write("setup".to_string(), &json!(data))
-            {
-                Ok(()) => Ok(()),
-                Err(e) => Err(StateError::StorageAccess(
-                    StateErrorRecoverability::Recoverable,
-                    e,
-                )),
-            }
+
+            context
+                .write_typed("setup", &data)
+                .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))
         }
     }
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Serialize, Deserialize, Debug)]
     pub struct ReportCtx {
-        pub report_msg: String,
-        pub report_value: u32,
+        a: String,
+        c: u32,
     }
 
     #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
@@ -261,12 +418,11 @@ mod test {
         depends_on_strategy: DependencyStrategy,
     }
 
-    #[cfg(test)]
     impl Report {
-        pub fn new() -> Self {
+        fn new() -> Self {
             Self {
                 label: Label::new("report_state").unwrap(),
-                tags: vec![Tag::new("report").unwrap()],
+                tags: vec![Tag::new("report").unwrap(), standard_tags::REPORT],
                 depends_on: vec![Tag::new("setup").unwrap()],
                 depends_on_strategy: DependencyStrategy::Latest,
             }
@@ -274,94 +430,83 @@ mod test {
     }
 
     impl StateHandler for Report {
-        fn handler(&self, context: ContextWrapper) -> StateResult {
-            let setup_ctx: SetupCtx =
-                serde_json::from_value(context.lock().unwrap().read("setup".to_string()).unwrap())
-                    .unwrap();
-            let data = json!(ReportCtx {
-                report_msg: format!("{}: {}", "some new data reported", setup_ctx.a),
-                report_value: setup_ctx.b
-            });
-            match context
-                .lock()
-                .as_mut()
-                .unwrap()
-                .write("report".to_string(), &data)
-            {
-                Ok(()) => Ok(()),
-                Err(e) => Err(StateError::StorageAccess(
-                    StateErrorRecoverability::Recoverable,
-                    e,
-                )),
-            }
+        fn handler(&self, context: SafeContext) -> StateResult {
+            let setup_data: SetupCtx = context
+                .read_typed("setup")
+                .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
+
+            let report_data = ReportCtx {
+                a: format!("{}_handled", setup_data.a),
+                c: setup_data.b * 2,
+            };
+
+            context
+                .write_typed("report", &report_data)
+                .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))
         }
     }
 
     #[test]
-    fn test_setup_state_initialization() {
-        let label = Label::new("setup_state").unwrap();
-        let tags = vec![Tag::new("setup").unwrap()];
-        let state = Setup::new();
-        let ctx_input = wrap_context(Local::default());
+    fn test_state_machine_simple_flow() {
+        let setup = Setup::new();
+        let report = Report::new();
 
-        let result = state.handler(ctx_input);
+        let states: Vec<Box<dyn StateHandler>> = vec![
+            Box::new(setup) as Box<dyn StateHandler>,
+            Box::new(report) as Box<dyn StateHandler>,
+        ];
+        let states = Arc::from(states);
 
+        println!("Creating state machine...");
+        let mut state_machine = super::StateMachine::new(states);
+
+        println!("Creating context...");
+        let safe_context = create_default_safe_context();
+
+        println!("Executing state machine...");
+        let result = state_machine.execute(safe_context);
+
+        println!("Result: {:?}", result);
         assert!(result.is_ok());
-        assert_eq!(state.label(), label);
-        assert_eq!(state.tags(), tags);
+
+        let safe_result = result.unwrap();
+        println!("Reading report data...");
+        let report_data: ReportCtx = safe_result.read_typed("report").unwrap();
+        println!("Report data: {:?}", report_data);
+        assert_eq!(report_data.a, "setup_b_handled");
+        assert_eq!(report_data.c, 2);
     }
 
     #[test]
-    fn test_state_machine_execute() {
-        use super::*;
+    fn test_state_machine_with_filter() {
+        let setup = Setup::new();
+        let report = Report::new();
 
-        let setup_state = Box::new(Setup::new());
-        let report_state = Box::new(Report::new());
+        let states: Vec<Box<dyn StateHandler>> = vec![
+            Box::new(setup) as Box<dyn StateHandler>,
+            Box::new(report) as Box<dyn StateHandler>,
+        ];
+        let states = Arc::from(states);
 
-        let initial_states: States = Arc::new([setup_state.clone(), report_state.clone()]);
-        let initial_states_cloned = initial_states.clone();
+        println!("Creating state machine...");
+        let mut state_machine = super::StateMachine::new(states);
 
-        let iss: Vec<(Label, Vec<Tag>, Vec<Tag>, DependencyStrategy)> = initial_states_cloned
-            .iter()
-            .map(|is| {
-                (
-                    is.label(),
-                    is.tags(),
-                    is.depends_on(),
-                    is.depends_on_strategy(),
-                )
-            })
-            .collect();
+        println!("Creating context...");
+        let safe_context = create_default_safe_context();
 
-        let mut state_machine = StateMachine::new(initial_states);
+        println!("Setting filter tags: {:?}", standard_tags::REPORT);
+        // Use execute_with_filter
+        let result = state_machine.execute_with_filter(safe_context, vec![standard_tags::REPORT]);
 
-        let context = wrap_context(Local::default());
-        let result = state_machine.execute(context.clone());
-        let last_ctx_message = context.lock().unwrap().dump().unwrap();
-
-        assert_eq!(state_machine.states.len(), iss.len());
-
-        state_machine.states.iter().zip(iss.iter()).for_each(
-            |(s, (label, tags, depends_on, depends_on_strategy))| {
-                assert_eq!(s.label(), *label);
-                assert_eq!(s.tags(), *tags);
-                assert_eq!(s.depends_on(), *depends_on);
-                assert_eq!(s.depends_on_strategy(), *depends_on_strategy);
-            },
-        );
-
-        let last_ctx_data: Local = serde_json::from_value(last_ctx_message).unwrap();
-        let report_ctx: ReportCtx =
-            serde_json::from_value(last_ctx_data.read("report".to_string()).unwrap()).unwrap();
-
-        println!("report_msg: {}", report_ctx.report_msg);
-
+        println!("Result: {:?}", result);
         assert!(result.is_ok());
-        assert_eq!(
-            report_ctx.report_msg,
-            String::from("some new data reported: setup_b")
-        );
 
-        assert_eq!(report_ctx.report_value, 1);
+        // Report state should have been skipped, so no "report" data
+        let final_context = result.unwrap();
+        println!("Context keys: {:?}", final_context.dump().unwrap());
+        assert!(final_context.read_typed::<SetupCtx>("setup").is_ok());
+        println!("Setup context is present");
+        assert!(final_context.read_typed::<ReportCtx>("report").is_err());
+        println!("Report context is absent as expected");
     }
 }

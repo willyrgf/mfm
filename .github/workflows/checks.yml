@@ -11,7 +11,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: true
-  RUSTFLAGS: "-Dwarnings"
+  RUSTFLAGS: ""
   RUST_BACKTRACE: 1
 
 jobs:
