@@ -136,16 +136,41 @@ impl TrackerMetadata for HashMapTracker {
     }
 }
 
+// Implement TrackerMetadata for Box<dyn Tracker>
+impl TrackerMetadata for Box<dyn Tracker> {
+    fn indexes(&self) -> Vec<Index> {
+        (**self).indexes()
+    }
+
+    fn search_by_tag(&self, tag: &Tag) -> Vec<Index> {
+        (**self).search_by_tag(tag)
+    }
+
+    fn search_by_index(&self, index: &usize) -> Option<Index> {
+        (**self).search_by_index(index)
+    }
+
+    fn history(&self) -> TrackerHistory {
+        (**self).history()
+    }
+}
+
+// Implement Tracker for Box<dyn Tracker>
+impl Tracker for Box<dyn Tracker> {
+    fn track(&mut self, index: Index, context: SafeContext) -> Result<bool, Error> {
+        (**self).track(index, context)
+    }
+
+    fn recover(&self, index: Index) -> Option<SafeContext> {
+        (**self).recover(index)
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use std::collections::HashMap;
-
     use serde_json::json;
 
-    use crate::state::{
-        safe_context::{create_default_safe_context, SafeContext},
-        Label, Tag,
-    };
+    use crate::state::{safe_context::create_default_safe_context, Label, Tag};
 
     use super::{HashMapTracker, Index, Tracker};
 
@@ -163,7 +188,7 @@ mod test {
         let context3 = create_default_safe_context();
         context3.write_value("value", &json!(3)).unwrap();
 
-        let contexts = vec![context1, context2, context3];
+        let contexts = [context1, context2, context3];
 
         let indexes = [
             Index::new(
@@ -213,7 +238,7 @@ mod test {
         let context3 = create_default_safe_context();
         context3.write_value("value", &json!(3)).unwrap();
 
-        let contexts = vec![context1, context2, context3];
+        let contexts = [context1, context2, context3];
 
         let indexes = [
             Index::new(
@@ -224,12 +249,12 @@ mod test {
             Index::new(
                 2,
                 Label::new("value_two").unwrap(),
-                vec![Tag::new("tag_two").unwrap()],
+                vec![Tag::new("tag_two").unwrap(), Tag::new("tag_one").unwrap()],
             ),
             Index::new(
                 3,
                 Label::new("value_three").unwrap(),
-                vec![Tag::new("tag_three").unwrap()],
+                vec![Tag::new("tag_three").unwrap(), Tag::new("tag_one").unwrap()],
             ),
         ];
 
@@ -246,6 +271,11 @@ mod test {
             indexes_by_tag.first().unwrap().state_label,
             Label::new("value_two").unwrap()
         );
+
+        let search_results = tracker.search_by_tag(&Tag::new("tag_one").unwrap());
+
+        // Should find 3 states with tag_one
+        assert_eq!(search_results.len(), 3);
     }
 
     #[test]
@@ -262,7 +292,7 @@ mod test {
         let context3 = create_default_safe_context();
         context3.write_value("value", &json!(3)).unwrap();
 
-        let contexts = vec![context1, context2, context3];
+        let contexts = [context1, context2, context3];
 
         let indexes = [
             Index::new(

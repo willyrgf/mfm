@@ -1,15 +1,12 @@
 use anyhow::anyhow;
-use mfm_machine::state::context::Local;
-use mfm_machine::state::safe_context::{create_default_safe_context, SafeContext};
+use mfm_machine::state::safe_context::SafeContext;
 use mfm_machine::state::{
     standard_tags, DependencyStrategy, Label, StateError, StateErrorRecoverability, StateHandler,
     StateMetadata, StateResult, Tag,
 };
-use mfm_machine::state_machine::StateMachine;
 use mfm_machine_derive::StateMetadataReqs;
 use rand::Rng;
 use serde_derive::{Deserialize, Serialize};
-use serde_json::json;
 
 #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
 pub struct Setup {
@@ -195,8 +192,6 @@ pub struct OnChainValuesState {
     depends_on: Vec<Tag>,
     depends_on_strategy: DependencyStrategy,
 }
-
-pub const ONCHAINVALUES: &str = "onchain_values";
 
 impl Default for OnChainValuesState {
     fn default() -> Self {
@@ -406,7 +401,7 @@ impl StateHandler for FinalizeState {
             .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
 
         let finalize_data = Config {
-            a: format!("finalized_workflow"),
+            a: "finalized_workflow".to_string(),
             b: report_data.b + analytics_data.b + notification_data.b,
         };
 

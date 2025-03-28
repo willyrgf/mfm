@@ -1,7 +1,7 @@
 mod default_impls;
 
 use default_impls::{ComputePrice, Report, Setup};
-use mfm_machine::state::safe_context::{create_default_safe_context, SafeContext};
+use mfm_machine::state::safe_context::create_default_safe_context;
 use mfm_machine::state_machine::StateMachine;
 use std::sync::Arc;
 

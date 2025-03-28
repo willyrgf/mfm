@@ -1,9 +1,7 @@
 use anyhow::{anyhow, Result};
-use std::sync::Arc;
 
 use crate::state::{
-    safe_context::SafeContext, DependencyStrategy, Label, StateError, StateHandler, StateMetadata,
-    StateResult, States, Tag,
+    safe_context::SafeContext, StateError, StateHandler, StateMetadata, States, Tag,
 };
 
 use super::tracker::Tracker;
@@ -48,7 +46,7 @@ pub trait ErrorHandler: Send + Sync {
         current_index: usize,
         current_state: &dyn StateHandler,
         states: &States,
-        tracker: &Box<dyn Tracker>,
+        tracker: &dyn Tracker,
     ) -> Result<usize, SchedulerError>;
 }
 
@@ -76,11 +74,13 @@ impl Scheduler for DefaultScheduler {
             return Err(SchedulerError::NoStates);
         }
 
-        let next_index = current_index + 1;
+        if current_index >= states.len() {
+            return Err(SchedulerError::InvalidStateIndex(current_index));
+        }
 
+        // Just increment to the next state
+        let next_index = current_index + 1;
         if next_index >= states.len() {
-            // We've reached the end of the states
-            // Return NoNextState to indicate completion
             return Err(SchedulerError::NoNextState);
         }
 
@@ -102,14 +102,13 @@ impl Default for DefaultScheduler {
     }
 }
 
-/// A default implementation of the ErrorHandler trait
-/// This handler follows dependencies to determine recovery paths
-pub struct DefaultErrorHandler {}
+/// Default implementation of the ErrorHandler trait
+pub struct DefaultErrorHandler;
 
 impl DefaultErrorHandler {
     /// Create a new DefaultErrorHandler
     pub fn new() -> Self {
-        Self {}
+        Self
     }
 }
 
@@ -117,10 +116,10 @@ impl ErrorHandler for DefaultErrorHandler {
     fn handle_error(
         &self,
         error: &StateError,
-        current_index: usize,
+        _current_index: usize,
         current_state: &dyn StateHandler,
-        states: &States,
-        tracker: &Box<dyn Tracker>,
+        _states: &States,
+        tracker: &dyn Tracker,
     ) -> Result<usize, SchedulerError> {
         if !error.is_recoverable() {
             return Err(SchedulerError::Custom(anyhow!("Unrecoverable error")));
@@ -238,10 +237,12 @@ impl Default for DependencyScheduler {
 
 #[cfg(test)]
 mod tests {
+    use crate::state_machine::StateResult;
+    use std::sync::Arc;
+
     use super::*;
     use crate::state::{
         safe_context::create_default_safe_context, DependencyStrategy, Label, StateHandler,
-        StateResult,
     };
     use mfm_machine_derive::StateMetadataReqs;
 

@@ -5,15 +5,11 @@ use default_impls::{
     OnChainValuesState, Report, Setup, ValidationState,
 };
 use mfm_machine::{
-    state::{
-        safe_context::{create_default_safe_context, SafeContext},
-        States,
-    },
+    state::{safe_context::create_default_safe_context, States},
     state_machine::StateMachine,
 };
-use serde_json::json;
 
-use crate::default_impls::{Config, CONFIG};
+use crate::default_impls::Config;
 
 mod default_impls;
 

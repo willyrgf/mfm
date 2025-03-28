@@ -1,8 +1,8 @@
 mod default_impls;
 
-use crate::default_impls::{ComputePrice, ConfigState, OnChainValuesState, CONFIG};
+use crate::default_impls::{ComputePrice, ConfigState, OnChainValuesState};
 use default_impls::{Report, Setup};
-use mfm_machine::state::safe_context::{create_default_safe_context, SafeContext};
+use mfm_machine::state::safe_context::create_default_safe_context;
 use mfm_machine::state::DependencyStrategy;
 use mfm_machine::state::Label;
 use mfm_machine::state::States;

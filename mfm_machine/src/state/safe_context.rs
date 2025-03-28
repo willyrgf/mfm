@@ -99,10 +99,7 @@ impl SafeContext {
             Err(_) => return None,
         };
 
-        let history = match guard.history() {
-            Some(history) => history,
-            None => return None,
-        };
+        let history = guard.history()?;
 
         Some(
             history
@@ -122,10 +119,10 @@ pub fn create_default_safe_context() -> SafeContext {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_derive::{Deserialize, Serialize};
     use serde_json::Value;
-    use std::collections::HashMap;
+
+    use super::*;
 
     #[test]
     fn test_safe_context_read_write() {
