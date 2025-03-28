@@ -24,7 +24,7 @@ pub enum SchedulerError {
 /// A scheduler that determines the next state to execute based on the current state and context
 pub trait Scheduler: Send + Sync {
     /// Determine the next state to execute using SafeContext
-    fn next_state_safe(
+    fn next_state(
         &self,
         current_index: usize,
         states: &States,
@@ -66,7 +66,7 @@ impl DefaultScheduler {
 }
 
 impl Scheduler for DefaultScheduler {
-    fn next_state_safe(
+    fn next_state(
         &self,
         current_index: usize,
         states: &States,
@@ -191,7 +191,7 @@ impl DependencyScheduler {
 }
 
 impl Scheduler for DependencyScheduler {
-    fn next_state_safe(
+    fn next_state(
         &self,
         current_index: usize,
         states: &States,
@@ -309,13 +309,11 @@ mod tests {
         ]);
 
         // Test next state calculation
-        let next_index = scheduler
-            .next_state_safe(0, &states, &safe_context)
-            .unwrap();
+        let next_index = scheduler.next_state(0, &states, &safe_context).unwrap();
         assert_eq!(next_index, 1);
 
         // Test error at end of states
-        let result = scheduler.next_state_safe(1, &states, &safe_context);
+        let result = scheduler.next_state(1, &states, &safe_context);
         assert!(matches!(result, Err(SchedulerError::NoNextState)));
     }
 
@@ -330,9 +328,7 @@ mod tests {
         ]);
 
         // Test next state calculation
-        let next_index = scheduler
-            .next_state_safe(0, &states, &safe_context)
-            .unwrap();
+        let next_index = scheduler.next_state(0, &states, &safe_context).unwrap();
         assert_eq!(next_index, 1);
     }
 }

@@ -148,7 +148,7 @@ impl StateMachine {
     }
 
     /// Determine the next state and context based on the result of the previous state
-    fn transition_safe(
+    fn transition(
         &mut self,
         context: SafeContext,
         state_index: usize,
@@ -185,9 +185,9 @@ impl StateMachine {
         match state_result {
             Ok(()) => {
                 // Successful execution - determine next state via scheduler
-                let next_index =
-                    self.scheduler
-                        .next_state_safe(state_index, &self.states, &context)?;
+                let next_index = self
+                    .scheduler
+                    .next_state(state_index, &self.states, &context)?;
                 Ok((next_index, context))
             }
             Err(e) => {
@@ -250,15 +250,14 @@ impl StateMachine {
         }
     }
 
-    /// Recursively execute states using SafeContext
-    fn execute_rec_safe(
+    /// Recursively execute states
+    fn execute_rec(
         &mut self,
         context: SafeContext,
         state_index: usize,
         last_state_result: Option<StateResult>,
     ) -> Result<SafeContext, StateMachineError> {
-        let transition_result =
-            self.transition_safe(context.clone(), state_index, last_state_result);
+        let transition_result = self.transition(context.clone(), state_index, last_state_result);
 
         match transition_result {
             Ok((next_state_index, context)) => {
@@ -282,7 +281,7 @@ impl StateMachine {
                         );
                         // Skip this state and move to the next one
                         // First we need to determine what the next state is
-                        let next_next_index = match self.scheduler.next_state_safe(
+                        let next_next_index = match self.scheduler.next_state(
                             next_state_index,
                             &self.states,
                             &context,
@@ -295,12 +294,12 @@ impl StateMachine {
                             Err(err) => return Err(StateMachineError::SchedulerError(err)),
                         };
 
-                        return self.execute_rec_safe(context, next_next_index, Some(Ok(())));
+                        return self.execute_rec(context, next_next_index, Some(Ok(())));
                     }
                 }
 
                 // Execute the state handler
-                let result = state.handler_safe(context.clone());
+                let result = state.handler(context.clone());
 
                 // Track the execution
                 let _ = self.tracker.as_mut().track(
@@ -309,7 +308,7 @@ impl StateMachine {
                 );
 
                 // Continue to the next state
-                self.execute_rec_safe(context, next_state_index, Some(result))
+                self.execute_rec(context, next_state_index, Some(result))
             }
             Err(StateMachineError::SchedulerError(SchedulerError::NoNextState)) => {
                 // We've reached the end of states - this is a successful completion
@@ -320,12 +319,12 @@ impl StateMachine {
     }
 
     /// Execute the state machine with the given SafeContext
-    pub fn execute_safe(&mut self, context: SafeContext) -> Result<SafeContext, StateMachineError> {
-        self.execute_rec_safe(context, 0, None)
+    pub fn execute(&mut self, context: SafeContext) -> Result<SafeContext, StateMachineError> {
+        self.execute_rec(context, 0, None)
     }
 
     /// Execute the state machine starting from a specific state index
-    pub fn execute_from_safe(
+    pub fn execute_from(
         &mut self,
         context: SafeContext,
         start_index: usize,
@@ -337,17 +336,17 @@ impl StateMachine {
             )));
         }
 
-        self.execute_rec_safe(context, start_index, None)
+        self.execute_rec(context, start_index, None)
     }
 
-    /// Execute the state machine, filtering out states with specific tags, using SafeContext
-    pub fn execute_with_filter_safe(
+    /// Execute the state machine, filtering out states with specific tags
+    pub fn execute_with_filter(
         &mut self,
         context: SafeContext,
         filter_tags: Vec<crate::state::Tag>,
     ) -> Result<SafeContext, StateMachineError> {
         self.scheduler.set_filter_tags(Some(filter_tags));
-        let result = self.execute_safe(context);
+        let result = self.execute(context);
         self.scheduler.set_filter_tags(None);
         result
     }
@@ -463,7 +462,7 @@ mod test {
         let safe_context = create_default_safe_context();
 
         println!("Executing state machine...");
-        let result = state_machine.execute_safe(safe_context);
+        let result = state_machine.execute(safe_context);
 
         println!("Result: {:?}", result);
         assert!(result.is_ok());
@@ -494,9 +493,8 @@ mod test {
         let safe_context = create_default_safe_context();
 
         println!("Setting filter tags: {:?}", standard_tags::REPORT);
-        // Use the safe version with filter
-        let result =
-            state_machine.execute_with_filter_safe(safe_context, vec![standard_tags::REPORT]);
+        // Use execute_with_filter
+        let result = state_machine.execute_with_filter(safe_context, vec![standard_tags::REPORT]);
 
         println!("Result: {:?}", result);
         assert!(result.is_ok());

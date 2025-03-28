@@ -35,7 +35,9 @@ fn test_n_states_with_ctxs() {
 
     let mut state_machine = StateMachine::new(initial_states);
 
-    let result = state_machine.execute_safe(safe_context);
+    // Execute state machine
+    println!("Executing state machine...");
+    let result = state_machine.execute(safe_context);
 
     println!(
         "state machine execution history: \n{:?}",

@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
-use super::context::{Context, ContextWrapper, Local};
+use super::context::{Context, Local};
 
 /// A safer context wrapper that doesn't expose locking details to callers
 /// and prevents deadlocks by ensuring safe lock patterns.
@@ -15,7 +15,7 @@ pub struct SafeContext {
 impl fmt::Debug for SafeContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SafeContext")
-            .field("inner", &"ContextWrapper")
+            .field("inner", &"<context>")
             .finish()
     }
 }
@@ -26,16 +26,6 @@ impl SafeContext {
         Self {
             inner: Arc::new(RwLock::new(Box::new(context))),
         }
-    }
-
-    /// Create from an existing ContextWrapper
-    pub fn from_wrapper(wrapper: ContextWrapper) -> Self {
-        Self { inner: wrapper }
-    }
-
-    /// Convert to the underlying ContextWrapper
-    pub fn into_wrapper(self) -> ContextWrapper {
-        self.inner
     }
 
     /// Read a value atomically
@@ -128,18 +118,6 @@ impl SafeContext {
 /// Create a new safe context around a default Local context
 pub fn create_default_safe_context() -> SafeContext {
     SafeContext::new(Local::default())
-}
-
-impl From<ContextWrapper> for SafeContext {
-    fn from(wrapper: ContextWrapper) -> Self {
-        Self::from_wrapper(wrapper)
-    }
-}
-
-impl From<SafeContext> for ContextWrapper {
-    fn from(safe: SafeContext) -> Self {
-        safe.into_wrapper()
-    }
 }
 
 #[cfg(test)]

@@ -2,8 +2,8 @@ use crate::config::Config;
 use crate::contexts::{ConfigCtx, ConfigSource, CONFIG_CTX};
 use anyhow::anyhow;
 use mfm_machine::state::{
-    safe_context::SafeContext, DependencyStrategy, Label, StateError, StateHandler, StateMetadata,
-    StateResult, Tag,
+    safe_context::SafeContext, DependencyStrategy, Label, StateError, StateErrorRecoverability,
+    StateHandler, StateMetadata, StateResult, Tag,
 };
 use mfm_machine_derive::StateMetadataReqs;
 use serde_json::json;
@@ -67,18 +67,15 @@ impl ReadConfig {
 
 impl StateHandler for ReadConfig {
     fn handler(&self, context: SafeContext) -> StateResult {
-        self.handler_safe(context)
-    }
-
-    fn handler_safe(&self, context: SafeContext) -> StateResult {
         // Get the config path from the instance or from a context value
         let config_path = match &self.config_path {
             Some(path) => path.clone(),
             None => {
                 // No config path provided
-                return Err(StateError::unrecoverable_parsing_input(anyhow!(
-                    "Config path not provided"
-                )));
+                return Err(StateError::ParsingInput(
+                    StateErrorRecoverability::Unrecoverable,
+                    anyhow!("Config path not provided"),
+                ));
             }
         };
 
@@ -86,10 +83,10 @@ impl StateHandler for ReadConfig {
         let config = match Config::load(&config_path) {
             Ok(config) => config,
             Err(err) => {
-                return Err(StateError::unrecoverable_parsing_input(anyhow!(
-                    "Failed to load config file: {}",
-                    err
-                )));
+                return Err(StateError::ParsingInput(
+                    StateErrorRecoverability::Unrecoverable,
+                    anyhow!("Failed to load config file: {}", err),
+                ));
             }
         };
 
@@ -102,7 +99,7 @@ impl StateHandler for ReadConfig {
         // Store in context
         context
             .write_value(CONFIG_CTX.as_str(), &json!(config_ctx))
-            .map_err(|e| StateError::recoverable_storage_access(e))?;
+            .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
 
         Ok(())
     }
@@ -132,7 +129,6 @@ mod test {
 
     #[test]
     fn test_read_config() {
-        // Create a context using SafeContext instead of ContextWrapper
         let context = create_default_safe_context();
 
         // Create a Config using YAML deserialization, which works around the private fields issue

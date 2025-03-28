@@ -36,7 +36,7 @@ fn test_state_machine_execute() {
     let mut state_machine = StateMachine::new(initial_states);
 
     let context = create_default_safe_context();
-    let result = state_machine.execute_safe(context);
+    let result = state_machine.execute(context);
     println!("Execute result: {:?}", result);
 
     assert_eq!(state_machine.states.len(), iss.len());
@@ -82,6 +82,6 @@ fn test_public_api() {
     let mut state_machine = StateMachine::new(states);
     let context = create_default_safe_context();
 
-    let result = state_machine.execute_safe(context);
+    let result = state_machine.execute(context);
     assert!(result.is_ok());
 }

@@ -197,12 +197,6 @@ pub type StateResult = Result<(), StateError>;
 pub trait StateHandler: StateMetadata + Send + Sync {
     /// Executes this state's logic, potentially modifying the context
     fn handler(&self, context: SafeContext) -> StateResult;
-
-    /// Executes this state's logic using the safer context API, potentially modifying the context
-    fn handler_safe(&self, context: SafeContext) -> StateResult {
-        // By default, just call the handler method
-        self.handler(context)
-    }
 }
 
 pub type States = Arc<[Box<dyn StateHandler>]>;
@@ -339,10 +333,6 @@ impl std::error::Error for StateError {}
 impl StateHandler for Box<dyn StateHandler> {
     fn handler(&self, context: SafeContext) -> StateResult {
         (**self).handler(context)
-    }
-
-    fn handler_safe(&self, context: SafeContext) -> StateResult {
-        (**self).handler_safe(context)
     }
 }
 

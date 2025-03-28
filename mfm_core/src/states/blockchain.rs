@@ -59,10 +59,6 @@ impl Default for CheckBalance {
 
 impl StateHandler for CheckBalance {
     fn handler(&self, context: SafeContext) -> StateResult {
-        self.handler_safe(context)
-    }
-
-    fn handler_safe(&self, context: SafeContext) -> StateResult {
         let input: CheckBalanceInput = context
             .read_value("check_balance_input")
             .map_err(|e| anyhow::anyhow!("Failed to read check_balance_input: {}", e))?;
@@ -142,10 +138,6 @@ impl Default for Swap {
 
 impl StateHandler for Swap {
     fn handler(&self, context: SafeContext) -> StateResult {
-        self.handler_safe(context)
-    }
-
-    fn handler_safe(&self, context: SafeContext) -> StateResult {
         let input: SwapInput = context
             .read_value("swap_input")
             .map_err(|e| anyhow::anyhow!("Failed to read swap_input: {}", e))?;

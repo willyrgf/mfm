@@ -7,14 +7,6 @@ use anyhow::{anyhow, Error, Result};
 use serde_derive::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-/// A wrapper around the context that provides thread-safe access.
-/// The RwLock enables multiple readers but exclusive writers.
-#[deprecated(
-    since = "1.0.0",
-    note = "Use SafeContext instead for better safety guarantees"
-)]
-pub type ContextWrapper = Arc<RwLock<Box<dyn Context>>>;
-
 /// A trait for context storage implementations
 /// Contexts store data that gets passed between states
 pub trait Context: Send + Sync {
@@ -118,11 +110,6 @@ impl Context for Local {
     }
 }
 
-/// A generic way to create context wrappers
-pub fn wrap_context<C: Context + 'static>(context: C) -> ContextWrapper {
-    Arc::new(RwLock::new(Box::new(context)))
-}
-
 /// A trait for defining context operations in a type-safe way
 pub trait TypedContext<T: 'static> {
     /// Read a value of type T from the context
@@ -164,74 +151,6 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned + 'static> TypedContext<T
     fn write_typed(&self, key: &str, value: &T) -> Result<Box<dyn Context>, Error> {
         let json_value = serde_json::to_value(value)?;
         self.write(key.to_string(), &json_value)
-    }
-}
-
-/// Helper functions to work with ContextWrapper in a more ergonomic way
-#[deprecated(
-    since = "1.0.0",
-    note = "Use SafeContext instead for better safety guarantees"
-)]
-pub trait ContextWrapperExt {
-    /// Read a value from the context
-    fn read_value(&self, key: &str) -> Result<Value, Error>;
-
-    /// Write a value to the context
-    fn write_value(&self, key: &str, value: &Value) -> Result<(), Error>;
-
-    /// Read a typed value from the context
-    fn read_typed<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<T, Error>;
-
-    /// Write a typed value to the context
-    fn write_typed<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<(), Error>;
-
-    /// Get a snapshot of the current context
-    fn snapshot(&self) -> Result<ContextWrapper, Error>;
-}
-
-#[allow(deprecated)]
-impl ContextWrapperExt for ContextWrapper {
-    fn read_value(&self, key: &str) -> Result<Value, Error> {
-        self.read()
-            .map_err(|_| anyhow!("Failed to acquire read lock on context"))?
-            .read(key.to_string())
-    }
-
-    fn write_value(&self, key: &str, value: &Value) -> Result<(), Error> {
-        let current_context = self
-            .read()
-            .map_err(|_| anyhow!("Failed to acquire read lock on context"))?;
-
-        let new_context = current_context.write(key.to_string(), value)?;
-
-        let mut writable_context = self
-            .write()
-            .map_err(|_| anyhow!("Failed to acquire write lock on context"))?;
-
-        *writable_context = new_context;
-
-        Ok(())
-    }
-
-    fn read_typed<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<T, Error> {
-        let value = self.read_value(key)?;
-        let typed_value: T = serde_json::from_value(value)?;
-        Ok(typed_value)
-    }
-
-    fn write_typed<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<(), Error> {
-        let json_value = serde_json::to_value(value)?;
-        self.write_value(key, &json_value)
-    }
-
-    fn snapshot(&self) -> Result<ContextWrapper, Error> {
-        let current_context = self
-            .read()
-            .map_err(|_| anyhow!("Failed to acquire read lock on context"))?;
-
-        let snapshot = current_context.snapshot()?;
-
-        Ok(Arc::new(RwLock::new(snapshot)))
     }
 }
 

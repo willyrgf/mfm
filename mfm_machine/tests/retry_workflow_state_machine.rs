@@ -27,7 +27,7 @@ fn test_retry_workflow_state_machine() {
     let mut state_machine = StateMachine::new(states);
     let context = create_default_safe_context();
 
-    let result = state_machine.execute_safe(context);
+    let result = state_machine.execute(context);
     assert!(result.is_ok());
 
     // Verify we can read the configuration
