@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use hex;
 use serde_json;
 use std::sync::Arc;
+use tokio;
 use url::Url;
 
 /// Provider implementation for blockchain RPC interactions
@@ -185,5 +186,87 @@ impl Provider {
     /// Get an Arc to the inner provider
     pub fn inner_arc(&self) -> Arc<RpcClient> {
         self.inner.clone()
+    }
+
+    /// Get the transaction receipt for a transaction hash
+    pub async fn get_transaction_receipt(
+        &self,
+        tx_hash: &TxHash,
+    ) -> Result<Option<serde_json::Value>> {
+        // Call the eth_getTransactionReceipt RPC method
+        let receipt = self
+            .inner
+            .request::<_, serde_json::Value>("eth_getTransactionReceipt", [tx_hash])
+            .await
+            .map_err(|e| anyhow!("Failed to get transaction receipt: {}", e))?;
+
+        // Check if the receipt is null (transaction not yet mined)
+        if receipt.is_null() {
+            return Ok(None);
+        }
+
+        Ok(Some(receipt))
+    }
+
+    /// Get the latest block number
+    pub async fn get_block_number(&self) -> Result<U256> {
+        // Use eth_blockNumber RPC method
+        let block_number = self
+            .inner
+            .request::<_, alloy_primitives::U256>("eth_blockNumber", ())
+            .await
+            .map_err(|e| anyhow!("Failed to get block number: {}", e))?;
+
+        // Convert to our adapter type
+        Ok(U256(block_number))
+    }
+
+    /// Wait for a transaction to be confirmed
+    pub async fn wait_for_transaction(
+        &self,
+        tx_hash: &TxHash,
+        confirmations: u64,
+    ) -> Result<serde_json::Value> {
+        // Loop until we have enough confirmations
+        let mut attempts = 0;
+        let max_attempts = 50; // Prevent infinite loops
+
+        loop {
+            if attempts >= max_attempts {
+                return Err(anyhow!("Transaction not confirmed after max attempts"));
+            }
+
+            // Wait a bit between checks
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+            // Get the transaction receipt
+            if let Some(receipt) = self.get_transaction_receipt(tx_hash).await? {
+                // Check if the receipt has a block number
+                if let Some(block_number) = receipt.get("blockNumber") {
+                    // Get the latest block number
+                    let latest_block = self.get_block_number().await?;
+
+                    // Parse the receipt block number
+                    let receipt_block_str = block_number.as_str().unwrap_or("0x0");
+                    let receipt_block = alloy_primitives::U256::from_str_radix(
+                        receipt_block_str.trim_start_matches("0x"),
+                        16,
+                    )
+                    .map_err(|e| anyhow!("Failed to parse block number: {}", e))?;
+
+                    // Calculate confirmations
+                    let confirmation_blocks = latest_block
+                        .0
+                        .checked_sub(receipt_block)
+                        .unwrap_or_default();
+
+                    if confirmation_blocks >= alloy_primitives::U256::from(confirmations) {
+                        return Ok(receipt);
+                    }
+                }
+            }
+
+            attempts += 1;
+        }
     }
 }

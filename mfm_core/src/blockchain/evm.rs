@@ -371,10 +371,9 @@ impl EvmProvider {
         // Get the current provider
         let provider = self.current_provider().await;
 
-        // Call the eth_getTransactionReceipt RPC method
+        // Call the provider's get_transaction_receipt method
         let result = provider
-            .inner()
-            .request::<_, serde_json::Value>("eth_getTransactionReceipt", [tx_hash.clone()])
+            .get_transaction_receipt(&tx_hash)
             .await
             .map_err(|e| {
                 BlockchainError::Other(format!("Failed to get transaction receipt: {}", e))
@@ -387,29 +386,14 @@ impl EvmProvider {
 
             // Try again with the new provider
             return new_provider
-                .inner()
-                .request::<_, serde_json::Value>("eth_getTransactionReceipt", [tx_hash])
+                .get_transaction_receipt(&tx_hash)
                 .await
                 .map_err(|e| {
                     BlockchainError::Other(format!("Failed to get transaction receipt: {}", e))
-                })
-                .map(|receipt| {
-                    if receipt.is_null() {
-                        None
-                    } else {
-                        Some(receipt)
-                    }
                 });
         }
 
-        let receipt = result?;
-
-        // Check if the receipt is null
-        if receipt.is_null() {
-            return Ok(None);
-        }
-
-        Ok(Some(receipt))
+        result
     }
 
     /// Wait for a transaction to be confirmed
@@ -421,58 +405,35 @@ impl EvmProvider {
         // Get the confirmations from config or use the provided one
         let conf = confirmations.unwrap_or(self.config.block_confirmations);
 
-        // Loop until we have enough confirmations
-        let mut attempts = 0;
-        let max_attempts = 50; // Prevent infinite loops
+        // Get the current provider
+        let provider = self.current_provider().await;
 
-        loop {
-            if attempts >= max_attempts {
-                return Err(BlockchainError::TransactionError(
-                    "Transaction not confirmed after max attempts".to_string(),
-                ));
-            }
+        // Use the provider's wait_for_transaction method with error handling
+        let result = provider
+            .wait_for_transaction(&tx_hash, conf)
+            .await
+            .map_err(|e| {
+                BlockchainError::TransactionError(format!("Failed waiting for transaction: {}", e))
+            });
 
-            // Wait a bit between checks
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        if result.is_err() && self.providers.len() > 1 {
+            // Try switching providers and retry
+            self.try_switch_provider().await?;
+            let new_provider = self.current_provider().await;
 
-            // Get the current provider
-            let provider = self.current_provider().await;
-
-            // Get the transaction receipt
-            if let Some(receipt) = self.get_transaction_receipt(tx_hash.clone()).await? {
-                // Check if the receipt has a block number
-                if let Some(block_number) = receipt.get("blockNumber") {
-                    // Get the latest block number
-                    let latest_block = provider
-                        .inner()
-                        .request::<_, alloy_primitives::U256>("eth_blockNumber", ())
-                        .await
-                        .map_err(|e| {
-                            BlockchainError::Other(format!("Failed to get block number: {}", e))
-                        })?;
-
-                    // Parse the receipt block number
-                    let receipt_block_str = block_number.as_str().unwrap_or("0x0");
-                    let receipt_block = alloy_primitives::U256::from_str_radix(
-                        receipt_block_str.trim_start_matches("0x"),
-                        16,
-                    )
-                    .map_err(|e| {
-                        BlockchainError::Other(format!("Failed to parse block number: {}", e))
-                    })?;
-
-                    // Calculate confirmations
-                    let confirmation_blocks =
-                        latest_block.checked_sub(receipt_block).unwrap_or_default();
-
-                    if confirmation_blocks >= alloy_primitives::U256::from(conf) {
-                        return Ok(receipt);
-                    }
-                }
-            }
-
-            attempts += 1;
+            // Try again with the new provider
+            return new_provider
+                .wait_for_transaction(&tx_hash, conf)
+                .await
+                .map_err(|e| {
+                    BlockchainError::TransactionError(format!(
+                        "Failed waiting for transaction: {}",
+                        e
+                    ))
+                });
         }
+
+        result
     }
 
     /// Transfer ETH to an address
