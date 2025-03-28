@@ -230,6 +230,17 @@ impl CliContext {
         Ok(())
     }
 
+    // Helper function to convert U256 to f64 with decimals
+    fn u256_to_f64(&self, value: &crate::blockchain::adapter::types::U256, decimals: u8) -> f64 {
+        let divisor = 10u128.pow(decimals as u32);
+        let high_bits = ((value.0.as_limbs()[3] as u128) << 96)
+            | ((value.0.as_limbs()[2] as u128) << 64)
+            | ((value.0.as_limbs()[1] as u128) << 32)
+            | (value.0.as_limbs()[0] as u128);
+
+        high_bits as f64 / divisor as f64
+    }
+
     pub async fn handle_aave_health(
         &self,
         wallet_address: Option<String>,
@@ -254,8 +265,9 @@ impl CliContext {
             None => self.portfolio.blockchain_provider.get_wallet_address(),
         };
 
-        // Calculate health factor using the adapter
+        // Get both the health check result and user account data
         let health_result = aave_provider.calculate_health_factor(wallet_addr).await?;
+        let account_data = aave_provider.get_user_account_data(wallet_addr).await?;
 
         // Print with formatting
         println!("\n=== AAVE Health Check Results ===");
@@ -264,6 +276,19 @@ impl CliContext {
             health_result.total_collateral_usd
         );
         println!("Total Debt (USD): {:.2}", health_result.total_debt_usd);
+
+        // Convert available borrow from U256 to f64 (assuming 8 decimals like collateral/debt)
+        let available_borrow_usd = self.u256_to_f64(&account_data.available_borrow_base, 8);
+        println!("Available Borrow (USD): {:.2}", available_borrow_usd);
+
+        // Convert liquidation threshold and LTV from basis points to percentage
+        let liquidation_threshold =
+            self.u256_to_f64(&account_data.current_liquidation_threshold, 2);
+        println!("Liquidation Threshold: {:.2}%", liquidation_threshold);
+
+        let ltv = self.u256_to_f64(&account_data.ltv, 2);
+        println!("Loan to Value (LTV): {:.2}%", ltv);
+
         println!("Health Factor: {:.4}", health_result.health_factor);
         println!(
             "Max Collateral Decrease: {:.2}%",
