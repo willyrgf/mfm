@@ -12,7 +12,7 @@
         pkgs = import nixpkgs { inherit system; };
         
         # Define the Rust package
-        mfmcli = pkgs.rustPlatform.buildRustPackage {
+        mfm_cli = pkgs.rustPlatform.buildRustPackage {
           pname = "mfm_cli";
           version = "0.0.2";
           src = ./.;
@@ -39,13 +39,13 @@
         };
       in
       {
-        packages.mfmcli = mfmcli;
+        packages.mfm_cli = mfm_cli;
         
-        defaultPackage = self.packages.${system}.mfmcli;
+        defaultPackage = self.packages.${system}.mfm_cli;
         
         apps.default = {
           type = "app";
-          program = "${self.packages.${system}.mfmcli}/bin/mfm";
+          program = "${self.packages.${system}.mfm_cli}/bin/mfm_cli";
         };
         
         devShells.default = pkgs.mkShell {
