@@ -37,6 +37,7 @@ jobs:
       # Build and test the application
       - name: Build and run help test
         run: |
+          echo $MFM_CLI_NIX_CMD
           # Build the flake and run the help command
           output=$(eval $MFM_CLI_NIX_CMD)
 
@@ -54,4 +55,5 @@ jobs:
 
       - name: Verify basic execution
         run: |
+          echo $MFM_CLI_NIX_CMD
           eval $MFM_CLI_NIX_CMD
