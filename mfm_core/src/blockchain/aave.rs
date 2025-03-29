@@ -575,3 +575,88 @@ pub async fn create_aave_provider(
         data_provider_address,
     ))
 }
+
+/// A simple mock implementation of AaveProvider for testing
+#[derive(Clone, Debug)]
+pub struct MockAaveProvider {
+    user_address: Address,
+}
+
+impl MockAaveProvider {
+    pub fn new(user_address: Address) -> Self {
+        Self { user_address }
+    }
+}
+
+#[async_trait]
+impl AaveProvider for MockAaveProvider {
+    /// Mock implementation of get_user_account_data
+    async fn get_user_account_data(
+        &self,
+        user: Address,
+    ) -> Result<AaveUserAccountData, BlockchainError> {
+        // Simple check to make it look like it's doing something
+        if user != self.user_address {
+            println!(
+                "Mock provider: Querying for {}, expected {}",
+                user, self.user_address
+            );
+        }
+
+        // Return mock data
+        Ok(AaveUserAccountData {
+            total_collateral_base: U256(alloy_primitives::U256::from(1000000000000000000u128)), // 1 ETH
+            total_debt_base: U256(alloy_primitives::U256::from(500000000000000000u128)), // 0.5 ETH
+            available_borrow_base: U256(alloy_primitives::U256::from(300000000000000000u128)), // 0.3 ETH
+            current_liquidation_threshold: U256(alloy_primitives::U256::from(8500u64)), // 85%
+            ltv: U256(alloy_primitives::U256::from(7500u64)),                           // 75%
+            health_factor: U256(alloy_primitives::U256::from(2000000000000000000u128)), // 2.0
+        })
+    }
+
+    /// Mock implementation of get_user_reserves
+    async fn get_user_reserves(
+        &self,
+        _user: Address,
+    ) -> Result<Vec<AaveUserReserveData>, BlockchainError> {
+        // Return mock data
+        let usdc_addr = Address::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+
+        Ok(vec![AaveUserReserveData {
+            asset: usdc_addr,
+            symbol: "USDC".to_string(),
+            current_atoken_balance: U256(alloy_primitives::U256::from(1000000000u128)), // 1000 USDC (with 6 decimals)
+            current_stable_debt: U256(alloy_primitives::U256::from(0u64)),
+            current_variable_debt: U256(alloy_primitives::U256::from(500000000u128)), // 500 USDC
+            liquidation_threshold: 8000,                                              // 80%
+            price_usd: 1.0,
+        }])
+    }
+
+    /// Mock implementation of calculate_health_factor
+    async fn calculate_health_factor(
+        &self,
+        user: Address,
+    ) -> Result<AaveHealthCheckResult, BlockchainError> {
+        // Get user account data from our mock
+        let account_data = self.get_user_account_data(user).await?;
+
+        // Convert health factor to float (it's stored as 1e18 precision)
+        let health_factor = account_data.health_factor.0.as_limbs()[0] as f64 / 1e18;
+
+        // Get mock reserves
+        let reserves = self.get_user_reserves(user).await?;
+
+        // Calculate total values in USD for display
+        let total_collateral_usd = 2000.0; // $2000 worth of collateral
+        let total_debt_usd = 1000.0; // $1000 worth of debt
+
+        Ok(AaveHealthCheckResult {
+            health_factor,
+            total_collateral_usd,
+            total_debt_usd,
+            user_reserves: reserves,
+            max_decrease_percentage: 50.0, // 50% decrease allowed
+        })
+    }
+}

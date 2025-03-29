@@ -1,15 +1,16 @@
 use clap::Parser;
+use mfm::cli::Cli;
+use mfm::cli::Commands;
+use mfm::CliContext;
 use mfm_core::blockchain::adapter::LocalWallet;
 use mfm_core::blockchain::adapter::Provider;
-use std::sync::Arc;
-
 use mfm_core::blockchain::cow_swap::CowSwapProvider;
 use mfm_core::blockchain::uniswap_v3::UniswapV3Provider;
 use mfm_core::blockchain::DexProvider;
 use mfm_core::blockchain::{evm::ChainConfig, EvmProvider};
-use mfm_core::cli::{Cli, CliContext, Commands};
 use mfm_core::config::authentication::encryption::Encryption;
 use mfm_core::config::Config;
+use std::sync::Arc;
 use tracing::info;
 
 // Constants
@@ -164,7 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Check balances and display status
             context.check_balances().await?;
-            context.handle_status()?;
+            context.handle_status().await?;
         }
         Commands::Resume {
             config: config_path,
@@ -237,6 +238,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Handle AAVE health check
             context.handle_aave_health(wallet_address).await?;
+        }
+        Commands::TokenApprove {
+            config: config_path,
+            token,
+            spender,
+            amount,
+            exact,
+        } => {
+            let config = Config::load(&config_path)?;
+
+            // Load wallet securely
+            let wallet = config.load_wallet(Some("your_secure_password"))?;
+
+            let provider = Provider::connect(&config.network.rpc_url).await?;
+            let wallet_signer = LocalWallet::from_private_key(wallet.get_private_key())?
+                .with_chain_id(config.network.chain_id);
+
+            let blockchain_provider = Box::new(EvmProvider::new(
+                ChainConfig {
+                    rpc_url: config.network.rpc_url.clone(),
+                    rpc_urls: config.network.rpc_urls.clone(),
+                    chain_id: config.network.chain_id,
+                    name: config.network.name.clone(),
+                    block_confirmations: 1,
+                    gas_multiplier: 1.2,
+                    gas_limit: Some(2000000),
+                    gas_price: None,
+                    max_fee_per_gas: None,
+                    retry_attempts: 3,
+                },
+                wallet.get_private_key().to_string(),
+            )?);
+
+            let dex_provider = create_dex_provider(&config, &provider, &wallet_signer)?;
+
+            // Create CLI context
+            let context = CliContext::new(blockchain_provider, dex_provider, &config);
+
+            // Handle token approval
+            context
+                .handle_token_approval(&token, &spender, &amount, exact)
+                .await?;
         }
     }
 

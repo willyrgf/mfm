@@ -343,8 +343,8 @@ impl AnalyticsState {
 impl StateHandler for AnalyticsState {
     fn handler(&self, context: SafeContext) -> StateResult {
         // Generate random analytics data
-        let mut rng = rand::thread_rng();
-        let analytics_value = rng.gen_range(100..1000);
+        let mut rng = rand::rng();
+        let analytics_value = rng.random_range(100..1000);
 
         let analytics_data = Config {
             a: "analytics_processed".to_string(),
