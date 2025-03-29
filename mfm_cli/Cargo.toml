@@ -16,8 +16,15 @@ alloy-transport-http = { workspace = true }
 alloy-signer = { workspace = true }
 url = "2.5"
 mfm_core = { path = "../mfm_core" }
+mfm_machine = { path = "../mfm_machine" }
 hex = "0.4.3"
 ring = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+thiserror = "1.0"
+anyhow = "1.0.75"
+
+[[bin]]
+name = "mfm_cli"
+path = "src/main.rs"
 

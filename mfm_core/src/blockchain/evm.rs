@@ -79,6 +79,22 @@ pub trait BlockchainProvider: std::fmt::Debug + Send + Sync {
     async fn get_aave_provider(
         &self,
     ) -> Result<Box<dyn crate::blockchain::AaveProvider>, BlockchainError>;
+
+    /// Check token allowance for a spender
+    async fn check_token_allowance(
+        &self,
+        token_address: Address,
+        owner: Address,
+        spender: Address,
+    ) -> Result<U256, BlockchainError>;
+
+    /// Approve tokens for a spender
+    async fn approve_token(
+        &self,
+        token_address: Address,
+        spender: Address,
+        amount: U256,
+    ) -> Result<String, BlockchainError>;
 }
 
 #[derive(Debug, Clone)]
@@ -628,5 +644,52 @@ impl BlockchainProvider for EvmProvider {
 
         // Box it and return
         Ok(Box::new(aave_provider))
+    }
+
+    /// Check token allowance for a spender
+    async fn check_token_allowance(
+        &self,
+        token_address: Address,
+        owner: Address,
+        spender: Address,
+    ) -> Result<U256, BlockchainError> {
+        // Get the current provider
+        let provider = self.current_provider().await;
+
+        // Create an ERC20 contract instance - use as_ref() to get Provider from Arc<Provider>
+        let token_contract = ERC20::new(token_address, (*provider).clone());
+
+        // Call allowance on the token contract
+        token_contract
+            .allowance(owner, spender)
+            .await
+            .map_err(|e| BlockchainError::ContractError(e.to_string()))
+    }
+
+    /// Approve tokens for a spender
+    async fn approve_token(
+        &self,
+        token_address: Address,
+        spender: Address,
+        amount: U256,
+    ) -> Result<String, BlockchainError> {
+        // Get the current provider
+        let provider = self.current_provider().await;
+
+        // Create an ERC20 contract instance - use as_ref() to get Provider from Arc<Provider>
+        let token_contract = ERC20::new(token_address, (*provider).clone());
+
+        // Prepare the approve call
+        let data = token_contract
+            .encode_approve(spender, amount)
+            .map_err(|e| BlockchainError::ContractError(e.to_string()))?;
+
+        // Send the transaction
+        let tx_hash = self
+            .send_transaction(token_address, data, None, None)
+            .await?;
+
+        // Return the transaction hash as a string
+        Ok(tx_hash.to_string())
     }
 }

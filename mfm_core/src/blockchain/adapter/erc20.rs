@@ -174,10 +174,7 @@ impl ERC20 {
 
     /// Encode an approve call without executing it
     pub fn encode_approve(&self, spender: Address, amount: U256) -> Result<Bytes> {
-        // Create the call data
         let call_data = create_approve_call_data(&spender, &amount);
-
-        // Return as Bytes
         Ok(Bytes(call_data))
     }
 }
