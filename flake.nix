@@ -14,7 +14,7 @@
         # Define the Rust package
         mfmcli = pkgs.rustPlatform.buildRustPackage {
           pname = "mfm_cli";
-          version = "0.0.1";
+          version = "0.0.2";
           src = ./.;
           
           # Specify the cargo workspace root if needed

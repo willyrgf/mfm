@@ -4,25 +4,25 @@ version = "0.1.29"
 edition = "2021"
 
 [dependencies]
-serde_yaml = "0.9"
-serde_json = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-clap = { version = "4.4", features = ["derive"] }
-tokio = { version = "1.0", features = ["full"] }
+serde_yaml = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
 alloy-primitives = { workspace = true }
 alloy-provider = { workspace = true }
 alloy-rpc-client = { workspace = true }
 alloy-transport-http = { workspace = true }
 alloy-signer = { workspace = true }
-url = "2.5"
+url = { workspace = true }
 mfm_core = { path = "../mfm_core" }
 mfm_machine = { path = "../mfm_machine" }
-hex = "0.4.3"
+hex = { workspace = true }
 ring = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = "0.3"
-thiserror = "1.0"
-anyhow = "1.0.75"
+thiserror = { workspace = true }
+anyhow = { workspace = true }
 
 [[bin]]
 name = "mfm_cli"
