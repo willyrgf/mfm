@@ -23,8 +23,8 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+dirs = { workspace = true }
 
 [[bin]]
 name = "mfm_cli"
 path = "src/main.rs"
-

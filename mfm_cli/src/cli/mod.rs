@@ -3,6 +3,7 @@
 pub mod context;
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Parser)]
@@ -91,20 +92,82 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         exact: bool,
     },
+    /// Manage BLS12-381 keystores (ERC-2335)
+    Keystore {
+        #[command(subcommand)]
+        command: KeystoreCommands,
+    },
+}
+
+// helper function to determine the default keystore directory
+fn default_keystore_dir() -> PathBuf {
+    match dirs::home_dir() {
+        Some(mut path) => {
+            path.push(".local");
+            path.push("mfm");
+            path
+        }
+        None => {
+            // this case is unlikely on most systems.
+            // panicking is one option, or using a conventional fallback.
+            // for now, let's panic as it indicates a significant environment issue.
+            // TODO: AI: consider a more graceful fallback or error propagation if home_dir is None.
+            panic!("failed to determine home directory for default keystore path. please specify --keystore-path manually.");
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum KeystoreCommands {
+    /// Import a private key into the keystore
+    Import {
+        /// Path to the keystore directory.
+        /// Defaults to $HOME/.local/mfm/
+        #[arg(long, value_parser = clap::value_parser!(PathBuf), default_value_os_t = default_keystore_dir())]
+        keystore_path: PathBuf,
+        /// Private key to import (hex encoded)
+        #[arg(long)]
+        private_key: String,
+        /// Password to encrypt the key in the keystore
+        #[arg(long)]
+        password: String,
+    },
+    /// List all public keys in the keystore
+    List {
+        /// Path to the keystore directory.
+        /// Defaults to $HOME/.local/mfm/
+        #[arg(long, value_parser = clap::value_parser!(PathBuf), default_value_os_t = default_keystore_dir())]
+        keystore_path: PathBuf,
+    },
+    /// Delete a key from the keystore
+    Delete {
+        /// Path to the keystore directory.
+        /// Defaults to $HOME/.local/mfm/
+        #[arg(long, value_parser = clap::value_parser!(PathBuf), default_value_os_t = default_keystore_dir())]
+        keystore_path: PathBuf,
+        /// Public key to delete (hex encoded)
+        #[arg(long)]
+        pubkey: String,
+        /// Password to decrypt the keystore (if required for deletion, e.g. to verify)
+        #[arg(long)]
+        password: Option<String>,
+    },
 }
 
 impl Commands {
-    pub fn get_config_path(&self) -> &str {
+    pub fn get_config_path(&self) -> Option<&str> {
+        // AI: changed to option for keystore
         match self {
-            Commands::Rebalance { config } => config,
-            Commands::Swap { config, .. } => config,
-            Commands::Status { config } => config,
-            Commands::Resume { config } => config,
-            Commands::AaveHealth { config, .. } => config,
+            Commands::Rebalance { config } => Some(config),
+            Commands::Swap { config, .. } => Some(config),
+            Commands::Status { config } => Some(config),
+            Commands::Resume { config } => Some(config),
+            Commands::AaveHealth { config, .. } => Some(config),
             Commands::Encrypt {
                 private_key_path, ..
-            } => private_key_path,
-            Commands::TokenApprove { config, .. } => config,
+            } => Some(private_key_path),
+            Commands::TokenApprove { config, .. } => Some(config),
+            Commands::Keystore { .. } => None, // keystore commands use keystore_path directly
         }
     }
 }

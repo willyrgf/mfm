@@ -1,6 +1,5 @@
 use clap::Parser;
-use mfm::cli::Cli;
-use mfm::cli::Commands;
+use mfm::cli::{Cli, Commands, KeystoreCommands};
 use mfm::CliContext;
 use mfm_core::blockchain::adapter::LocalWallet;
 use mfm_core::blockchain::adapter::Provider;
@@ -10,6 +9,7 @@ use mfm_core::blockchain::DexProvider;
 use mfm_core::blockchain::{evm::ChainConfig, EvmProvider};
 use mfm_core::config::authentication::encryption::Encryption;
 use mfm_core::config::Config;
+use std::fs;
 use std::sync::Arc;
 use tracing::info;
 
@@ -281,6 +281,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .handle_token_approval(&token, &spender, &amount, exact)
                 .await?;
         }
+        Commands::Keystore { command } => match command {
+            KeystoreCommands::Import {
+                keystore_path,
+                private_key,
+                password,
+            } => {
+                // ensure the keystore directory exists
+                fs::create_dir_all(&keystore_path)?;
+                CliContext::handle_keystore_import(
+                    keystore_path
+                        .as_path()
+                        .to_str()
+                        .expect("Keystore path is not valid UTF-8"),
+                    &private_key,
+                    &password,
+                )
+                .await?;
+            }
+            KeystoreCommands::List { keystore_path } => {
+                // ensure the keystore directory exists
+                fs::create_dir_all(&keystore_path)?;
+                CliContext::handle_keystore_list(
+                    keystore_path
+                        .as_path()
+                        .to_str()
+                        .expect("Keystore path is not valid UTF-8"),
+                )
+                .await?;
+            }
+            KeystoreCommands::Delete {
+                keystore_path,
+                pubkey,
+                password,
+            } => {
+                // ensure the keystore directory exists
+                fs::create_dir_all(&keystore_path)?;
+                CliContext::handle_keystore_delete(
+                    keystore_path
+                        .as_path()
+                        .to_str()
+                        .expect("Keystore path is not valid UTF-8"),
+                    &pubkey,
+                    password,
+                )
+                .await?;
+            }
+        },
     }
 
     Ok(())

@@ -384,4 +384,86 @@ impl CliContext {
 
         Ok(())
     }
+
+    /// Handle keystore import command
+    pub async fn handle_keystore_import(
+        keystore_path: &str,
+        private_key: &str,
+        password: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use mfm_core::keystore::KeystoreManager;
+        println!(
+            "Attempting to import key into keystore at: {}",
+            keystore_path
+        );
+        let manager = KeystoreManager::new(keystore_path)?;
+        match manager.import_key(private_key, password).await {
+            Ok(pubkey) => {
+                // BlsPublicKey now wraps G1Projective. We can get its compressed bytes for hex encoding.
+                let pubkey_bytes = pubkey.0.to_affine().to_compressed();
+                let pubkey_hex = hex::encode(pubkey_bytes);
+                println!(
+                    "Key imported successfully. Public Key (hex): 0x{}",
+                    pubkey_hex
+                );
+                Ok(())
+            }
+            Err(e) => Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to import key: {}", e),
+            )) as Box<dyn std::error::Error>),
+        }
+    }
+
+    /// Handle keystore list command
+    pub async fn handle_keystore_list(
+        keystore_path: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use mfm_core::keystore::KeystoreManager;
+        println!("Listing keys from keystore at: {}", keystore_path);
+        let manager = KeystoreManager::new(keystore_path)?;
+        match manager.list_keys().await {
+            Ok(pubkeys) => {
+                if pubkeys.is_empty() {
+                    println!("No keys found in the keystore.");
+                } else {
+                    println!("Public Keys found:");
+                    for pubkey in pubkeys {
+                        let pubkey_bytes = pubkey.0.to_affine().to_compressed();
+                        let pubkey_hex = hex::encode(pubkey_bytes);
+                        println!("  - 0x{}", pubkey_hex);
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to list keys: {}", e),
+            )) as Box<dyn std::error::Error>),
+        }
+    }
+
+    /// Handle keystore delete command
+    pub async fn handle_keystore_delete(
+        keystore_path: &str,
+        pubkey: &str,
+        password: Option<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use mfm_core::keystore::KeystoreManager;
+        println!(
+            "Attempting to delete key {} from keystore at: {}",
+            pubkey, keystore_path
+        );
+        let manager = KeystoreManager::new(keystore_path)?;
+        match manager.delete_key(pubkey, password.as_deref()).await {
+            Ok(()) => {
+                println!("Key {} deleted successfully.", pubkey);
+                Ok(())
+            }
+            Err(e) => Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to delete key {}: {}", pubkey, e),
+            )) as Box<dyn std::error::Error>),
+        }
+    }
 }

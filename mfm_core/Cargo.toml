@@ -48,8 +48,19 @@ crypto-common = "0.1"
 cipher = "0.4"
 hex = { workspace = true }
 lazy_static = "1.5.0"
+chrono = { version = "0.4", features = [
+	"serde",
+] } # for timestamps in keystore filenames
+rand_core = "0.6" # for OsRng trait bounds
 reqwest = { version = "0.12.14", features = ["json"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
+uuid = { version = "1.8.0", features = [
+	"v4",
+	"serde",
+] } # For ERC-2335 keystore file UUIDs
+bls12_381 = { version = "0.8.0" } # For BLS12-381 key operations
+aes = "0.8.1" # For AES encryption in keystore
+scrypt = "0.11.0" # For Scrypt KDF in keystore
 
 [dev-dependencies]
 tempfile = "3.8"
