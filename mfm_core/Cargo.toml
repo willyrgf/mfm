@@ -51,5 +51,12 @@ lazy_static = "1.5.0"
 reqwest = { version = "0.12.14", features = ["json"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
 
+argon2 = "0.5"
+bip39 = "2.0.0"
+bip32 = { version = "0.5.3", features = ["secp256k1"] }
+uuid = { version = "1.8.0", features = ["v4", "serde"] }
+dirs-next = "2.0.0"
+chrono = { version = "0.4.38", features = ["serde"] }
+
 [dev-dependencies]
 tempfile = "3.8"
