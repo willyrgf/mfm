@@ -3,7 +3,8 @@ pub use mfm_machine::state::safe_context::{create_default_safe_context, SafeCont
 
 pub mod blockchain;
 pub mod config;
-// pub mod cli; // Moved to mfm_cli
+pub mod keystore; // new module for keystore management
+                  // pub mod cli; // Moved to mfm_cli
 pub mod portfolio;
 
 pub mod contexts;

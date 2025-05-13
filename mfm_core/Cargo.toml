@@ -51,5 +51,9 @@ lazy_static = "1.5.0"
 reqwest = { version = "0.12.14", features = ["json"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
 
+# bls keystore dependencies
+eth2_keystore = "0.4.0" # trying original name with a common version
+dirs-next = "2.0"
+
 [dev-dependencies]
 tempfile = "3.8"
