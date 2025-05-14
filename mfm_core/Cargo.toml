@@ -12,41 +12,41 @@ path = "src/lib.rs"
 [dependencies]
 mfm_machine_derive = { path = "../mfm_machine_derive" }
 mfm_machine = { path = "../mfm_machine" }
-serde = { workspace = true }
+serde = "1.0"
 zeroize = "1.7"
-serde_json = { workspace = true }
-serde_derive = { workspace = true }
-anyhow = { workspace = true }
-serde_yaml = { workspace = true }
+serde_json = "1.0"
+serde_derive = "1.0"
+anyhow = "1.0"
+serde_yaml = "0.9"
 tari_utilities = "0.8.0"
-alloy-primitives = { workspace = true }
-alloy-sol-types = { workspace = true }
-alloy-json-abi = { workspace = true }
-alloy-dyn-abi = { workspace = true }
-alloy-provider = { workspace = true }
-alloy-contract = { workspace = true }
-alloy-consensus = { workspace = true }
-alloy-network = { workspace = true }
-alloy-rpc-client = { workspace = true }
-alloy-transport-http = { workspace = true }
-alloy-signer = { workspace = true }
-tokio = { workspace = true }
-thiserror = { workspace = true }
-async-trait = { workspace = true }
-futures = { workspace = true }
-clap = { workspace = true }
-url = { workspace = true }
-ring = { workspace = true }
+alloy-primitives = "0.3.1"
+alloy-sol-types = "0.3.1"
+alloy-json-abi = "0.3.1"
+alloy-dyn-abi = "0.3.1"
+alloy-provider = "0.3.1"
+alloy-contract = "0.3.1"
+alloy-consensus = "0.3.1"
+alloy-network = "0.3.1"
+alloy-rpc-client = "0.3.1"
+alloy-transport-http = "0.3.1"
+alloy-signer = "0.3.1"
+tokio = { version = "1.0", features = ["full"] }
+thiserror = "1.0"
+async-trait = "0.1"
+futures = "0.3"
+clap = "4.0"
+url = "2.0"
+ring = "0.17"
 pbkdf2 = "0.12"
 base64 = "0.21"
-rand = { workspace = true }
+rand = "0.8"
 sha2 = "0.10"
 sha3 = "0.10"
 k256 = "0.13"
 generic-array = "0.14"
 crypto-common = "0.1"
 cipher = "0.4"
-hex = { workspace = true }
+hex = "0.4"
 lazy_static = "1.5.0"
 reqwest = { version = "0.12.14", features = ["json"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
