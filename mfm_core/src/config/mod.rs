@@ -1,4 +1,3 @@
-use crate::blockchain::adapter::types::Address;
 use serde_derive::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -41,7 +40,7 @@ fn default_rpc_url() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WalletConfig {
-    pub address: Address,
+    pub address: String, // TODO: move it to an actual address type
     #[serde(skip_serializing)]
     pub private_key_path: PathBuf,
 }
@@ -49,20 +48,6 @@ pub struct WalletConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DexConfig {
     pub provider: String,
-    pub uniswap_v3: Option<UniswapV3Config>,
-    pub cowswap: Option<CowSwapConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct UniswapV3Config {
-    pub router_address: Address,
-    pub pool_fee: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CowSwapConfig {
-    pub settlement_contract: Address,
-    pub api_url: String,
 }
 
 pub struct SecureWallet {
