@@ -3,60 +3,53 @@ name = "mfm_core"
 version = "0.1.29"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [lib]
 name = "mfm_core"
 path = "src/lib.rs"
 
 [dependencies]
-mfm_machine_derive = { path = "../mfm_machine_derive" }
-mfm_machine = { path = "../mfm_machine" }
-serde = { workspace = true }
-zeroize = "1.7"
-serde_json = { workspace = true }
-serde_derive = { workspace = true }
-anyhow = { workspace = true }
-serde_yaml = { workspace = true }
-tari_utilities = "0.8.0"
-alloy-primitives = { workspace = true }
-alloy-sol-types = { workspace = true }
-alloy-json-abi = { workspace = true }
-alloy-dyn-abi = { workspace = true }
-alloy-provider = { workspace = true }
-alloy-contract = { workspace = true }
-alloy-consensus = { workspace = true }
-alloy-network = { workspace = true }
-alloy-rpc-client = { workspace = true }
-alloy-transport-http = { workspace = true }
-alloy-signer = { workspace = true }
-tokio = { workspace = true }
-thiserror = { workspace = true }
-async-trait = { workspace = true }
-futures = { workspace = true }
-clap = { workspace = true }
-url = { workspace = true }
-ring = { workspace = true }
-pbkdf2 = "0.12"
+# mfm_core dependencies
+argon2 = "0.5.3"
+aes-gcm = "0.10"
+bip39 = "2.0"
+k256 = { version = "0.13", features = ["ecdsa", "serde"] }
+tiny-keccak = { version = "2.0", features = ["sha3"] }
+slip10 = "0.4"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+dirs-next = "2.0"
 base64 = "0.21"
-rand = { workspace = true }
-sha2 = "0.10"
-sha3 = "0.10"
-k256 = "0.13"
-generic-array = "0.14"
-crypto-common = "0.1"
-cipher = "0.4"
-hex = { workspace = true }
-lazy_static = "1.5.0"
-reqwest = { version = "0.12.14", features = ["json"] }
-tiny-keccak = { version = "2.0", features = ["keccak"] }
+rand_core = { version = "0.6" } # Added rng feature
+sha3 = "0.10" # Added missing dependency
+reqwest = { version = "0.12", features = ["json"] }
+lazy_static = "1.4" # Added missing dependency
+mfm_machine = { path = "../mfm_machine" } # Added path dependency
+mfm_machine_derive = { path = "../mfm_machine_derive" } # Added path dependency
+zeroize = { version = "1.8", features = ["derive"] } # Added zeroize with derive feature
+chrono = { version = "0.4", features = ["serde"] } # Added chrono with serde feature
 
-argon2 = "0.5"
-bip39 = "2.0.0"
-bip32 = { version = "0.5.3", features = ["secp256k1"] }
-uuid = { version = "1.8.0", features = ["v4", "serde"] }
-dirs-next = "2.0.0"
-chrono = { version = "0.4.38", features = ["serde"] }
-
-[dev-dependencies]
-tempfile = "3.8"
+# Dependencies moved from workspace
+alloy-primitives = "1.0.1"
+alloy-sol-types = "1.0.1"
+alloy-json-abi = "1.0.1"
+alloy-dyn-abi = "1.0.1"
+alloy-provider = "1.0.1"
+alloy-contract = "1.0.1"
+alloy-consensus = "1.0.1"
+alloy-network = "1.0.1"
+alloy-rpc-client = "1.0.1"
+alloy-transport-http = "1.0.1"
+alloy-signer = "1.0.1" # Removed local feature
+ring = "0.17.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.108"
+serde_yaml = "0.9"
+serde_derive = "1.0.193"
+anyhow = "1.0.75"
+tokio = { version = "1.44", features = ["full"] }
+clap = { version = "4.4", features = ["derive"] }
+url = "2.5"
+thiserror = "2.0"
+hex = "0.4"
+rand = "0.6"
+async-trait = "0.1"
+futures = "0.3"

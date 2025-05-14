@@ -4,5 +4,6 @@ config.yaml
 private_key.txt
 .cursor
 /*.md
+!plan_keystore.md
 mfm_core/doc
 result

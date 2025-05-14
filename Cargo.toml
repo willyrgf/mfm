@@ -8,34 +8,3 @@ members = [
 	"mfm_machine_derive",
 	"mfm_core",
 ]
-
-# Core dependencies
-[workspace.dependencies]
-# Alloy blockchain library components
-alloy-primitives = "0.8"
-alloy-sol-types = "0.8"
-alloy-json-abi = "0.8"
-alloy-dyn-abi = "0.8"
-alloy-provider = "0.13"
-alloy-contract = "0.13"
-alloy-consensus = "0.13"
-alloy-network = "0.13"
-alloy-rpc-client = "0.13" 
-alloy-transport-http = "0.13"
-alloy-signer = "0.13"
-# Cryptography dependency
-ring = "0.17.14"
-# Common dependencies
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.108"
-serde_yaml = "0.9"
-serde_derive = "1.0.193"
-anyhow = "1.0.75"
-tokio = { version = "1.44", features = ["full"] }
-clap = { version = "4.4", features = ["derive"] }
-url = "2.5"
-thiserror = "2.0"
-hex = "0.4"
-rand = "0.9"
-async-trait = "0.1"
-futures = "0.3"
