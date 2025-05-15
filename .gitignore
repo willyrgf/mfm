@@ -1,8 +1,4 @@
+.DS_Store
 /target
 config.yaml
-.DS_Store
-private_key.txt
-.cursor
-/*.md
-mfm_core/doc
 result
