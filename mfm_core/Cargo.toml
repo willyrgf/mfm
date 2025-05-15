@@ -13,13 +13,11 @@ path = "src/lib.rs"
 mfm_machine_derive = { path = "../mfm_machine_derive" }
 mfm_machine = { path = "../mfm_machine" }
 serde = { workspace = true }
-zeroize = "1.7"
 serde_json = { workspace = true }
 serde_derive = { workspace = true }
 anyhow = { workspace = true }
 serde_yaml = { workspace = true }
 tari_utilities = "0.8.0"
-alloy-primitives = { workspace = true }
 alloy-sol-types = { workspace = true }
 alloy-json-abi = { workspace = true }
 alloy-dyn-abi = { workspace = true }
@@ -28,8 +26,6 @@ alloy-contract = { workspace = true }
 alloy-consensus = { workspace = true }
 alloy-network = { workspace = true }
 alloy-rpc-client = { workspace = true }
-alloy-transport-http = { workspace = true }
-alloy-signer = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
@@ -38,18 +34,31 @@ clap = { workspace = true }
 url = { workspace = true }
 ring = { workspace = true }
 pbkdf2 = "0.12"
-base64 = "0.21"
 rand = { workspace = true }
 sha2 = "0.10"
 sha3 = "0.10"
-k256 = "0.13"
 generic-array = "0.14"
 crypto-common = "0.1"
 cipher = "0.4"
-hex = { workspace = true }
 lazy_static = "1.5.0"
 reqwest = { version = "0.12.14", features = ["json"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
+argon2 = "0.5.3"
+aes-gcm = "0.10.1"
+bip39 = "2.0.0"
+bip32 = "0.4.0"
+k256 = { version = "0.13", features = ["ecdsa"] }
+dirs-next = "2.0.0"
+uuid = { version = "1.8.0", features = ["serde", "v4"] }
+zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
+base64 = "0.22.1"
+chrono = { version = "0.4.38", features = ["serde"] }
+rand_core = "0.6.4"
+atomicwrites = "0.4.2"
+fs2 = "0.4.3"
+alloy-primitives = { workspace = true }
+alloy-signer = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.8"
