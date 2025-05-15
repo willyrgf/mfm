@@ -76,6 +76,7 @@ impl Keystore {
     pub fn list_keys(&self) -> Result<Vec<KeyInfo>, KeystoreError>;
     pub fn get_signer(&mut self, uuid: Uuid) -> Result<PrivateKeySigner, KeystoreError>;
     pub fn delete_key(&mut self, uuid: Uuid) -> Result<(), KeystoreError>;
+    pub fn verify_signature(&self, uuid: Uuid, message_hash: H256, signature: Signature) -> Result<bool, KeystoreError>;
 }
 ```
 
