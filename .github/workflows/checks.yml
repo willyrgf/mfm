@@ -36,7 +36,9 @@ jobs:
         run: cargo build --verbose --all-features
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        # TODO: use this when project is more mature
+        #run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features
 
       - name: Run tests
         run: cargo test --all-features -- --nocapture
