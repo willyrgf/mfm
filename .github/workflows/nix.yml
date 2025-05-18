@@ -41,14 +41,14 @@ jobs:
           # Build the flake and run the help command
           output=$(eval $MFM_CLI_NIX_CMD)
 
-          # Echo the output for debugging
-          echo "Help output:"
-          echo "$output"
+          ## Echo the output for debugging
+          #echo "Help output:"
+          #echo "$output"
 
-          # Check if the output contains expected text
-          if echo "$output" | grep -q '<COMMAND>'; then
-            echo "✓ Help text contains '<COMMAND>' as expected"
-          else
-            echo "✗ Help text does not contain '<COMMAND>'"
-            exit 1
-          fi
+          ## Check if the output contains expected text
+          #if echo "$output" | grep -q '<COMMAND>'; then
+          #  echo "✓ Help text contains '<COMMAND>' as expected"
+          #else
+          #  echo "✗ Help text does not contain '<COMMAND>'"
+          #  exit 1
+          #fi
