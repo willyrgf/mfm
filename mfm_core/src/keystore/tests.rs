@@ -473,6 +473,7 @@ fn test_verify_signature_success_and_failure() {
     let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
 
     let signing_key_k256 = ks.get_signer(id.clone()).unwrap();
+    // Now that get_signer returns SigningKey directly, we can use it without dereferencing
     let wallet = PrivateKeySigner::from(signing_key_k256);
 
     let message_hash = B256::from_slice(&[42u8; 32]);
