@@ -46,4 +46,18 @@ pub enum KeystoreError {
     AliasExists(String),
     #[error("Private key is invalid")]
     InvalidPrivateKey,
+    #[error("Invalid keystore configuration: {0}")]
+    ConfigError(String),
+    #[error("Invalid keystore file format: {0}")]
+    InvalidKeystoreFormat(String),
+    #[error("Master KDF parameters are missing when expected")]
+    MissingMasterKdfParams,
+    #[error("Failed to decrypt key entry (data may be corrupted or AAD mismatch)")]
+    EntryDecryptionFailed,
+    #[error("A lock was poisoned due to a panic in another thread holding the lock")]
+    LockPoisoned,
+    #[error("Migration attempted but not pending or no V1 data found")]
+    MigrationNotPending,
+    #[error("Password incorrect for V1 data migration or V1 data corrupted")]
+    MigrationV1DataError, // Covers decryption failure of V1 entries
 }

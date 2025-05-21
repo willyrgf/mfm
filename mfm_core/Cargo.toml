@@ -33,7 +33,7 @@ bip32 = "0.4.0"
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 dirs-next = "2.0.0"
 uuid = { version = "1.8.0", features = ["serde", "v4"] }
-zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
+zeroize = { version = "1.7.0", features = ["zeroize_derive", "alloc"] }
 base64 = "0.22.1"
 chrono = { version = "0.4.38", features = ["serde"] }
 rand_core = "0.6.4"
@@ -46,6 +46,14 @@ signature = "2.0.0"
 hex = "0.4.3"
 thiserror = "2.0.12"
 ring = "0.17.14"
+subtle = "2.5"
 
 [dev-dependencies]
 tempfile = "3.8"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3.9", features = [
+    "aclapi", "securitybaseapi", "winnt", "fileapi", 
+    "errhandlingapi", "processthreadsapi", "handleapi", 
+    "minwindef", "lmcons", "sddl", "accctrl"
+]}
