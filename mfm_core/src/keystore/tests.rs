@@ -1,3 +1,6 @@
+use crate::keystore::KeystoreConfig;
+use std::time::Duration;
+
 use super::error::KeystoreError;
 use super::Keystore;
 use alloy_primitives::{Signature as AlloySignature, B256, U256}; // Removed Address
@@ -99,29 +102,68 @@ fn test_unlock_lock_cycle() {
 
 #[test]
 fn test_unlock_with_wrong_password_on_existing_keystore() {
+    // Create a completely new temporary directory for this test to avoid rate-limiting state persistence
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+
+    // Create a keystore with a custom config that has minimal rate limiting for testing
+    let config = KeystoreConfig {
+        // KDF parameters
+        m_cost: 4096,   // Lower memory cost for faster tests
+        t_cost: 1,      // Lower time cost for faster tests
+        p_cost: 1,      // Default parallelism
+        output_len: 32, // Minimum required output length
+        // Session management
+        auto_lock_timeout: Duration::from_secs(300), // 5 minutes
+        // Rate limiting with minimal delays for testing
+        unlock_min_delay: Duration::from_millis(1),
+        unlock_max_attempts: 10,
+        unlock_backoff_factor: 1.0,
+    };
+
+    // Create and initialize a new keystore with the test password and custom config
+    let mut ks = Keystore::new_with_config(Some(keystore_path.clone()), config.clone()).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
 
-    ks.unlock(WRONG_PASSWORD)
-        .expect("Unlock with wrong password should derive a (wrong) key without erroring here");
+    // First, unlock with the correct password to ensure everything is set up properly
+    ks.unlock(TEST_PASSWORD).unwrap();
+    ks.lock();
 
+    // With the new security model, unlock with wrong password should fail
+    let unlock_result = ks.unlock(WRONG_PASSWORD);
+    assert!(
+        matches!(unlock_result, Err(KeystoreError::InvalidPassword)),
+        "Unlock with wrong password should fail with InvalidPassword"
+    );
+
+    // Keystore should remain locked
+    assert!(!ks.is_unlocked);
+
+    // Since unlock failed, import should also fail because keystore is locked
     let import_res =
         ks.import_private_key_hex(Some("key_with_wrong_pass".to_string()), DUMMY_PK_HEX);
     assert!(
-        import_res.is_ok(),
-        "Import with wrong key should appear to succeed as encryption uses this wrong key."
+        matches!(import_res, Err(KeystoreError::Locked)),
+        "Import should fail because keystore is locked after failed unlock"
     );
-    let (key_id_wrong_pass, _) = import_res.unwrap();
 
-    ks.lock();
-    ks.unlock(TEST_PASSWORD).unwrap();
+    // Create a completely new keystore in a different path with minimal rate limiting
+    let (_new_temp_dir, new_keystore_path) = create_temp_keystore_path();
+    let mut new_ks =
+        Keystore::new_with_config(Some(new_keystore_path.clone()), config.clone()).unwrap();
 
-    let get_signer_res = ks.get_signer(key_id_wrong_pass);
-    assert!(
-        matches!(get_signer_res, Err(KeystoreError::AesGcm(_))),
-        "get_signer should fail with AesGcm error due to wrong master key used for encryption"
-    );
+    // Initialize the new keystore
+    new_ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+
+    // Now unlock with correct password (should work as this is a fresh keystore)
+    new_ks.unlock(TEST_PASSWORD).unwrap();
+
+    // Import a key with correct password
+    let (id, _) = new_ks
+        .import_private_key_hex(Some("key_with_correct_pass".to_string()), DUMMY_PK_HEX)
+        .unwrap();
+
+    // Should be able to get signer for this key
+    assert!(new_ks.get_signer(id).is_ok());
 }
 
 #[test]
@@ -455,12 +497,18 @@ fn test_get_signer_with_wrong_password_unlock() {
     let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
     ks.lock();
 
-    // Unlock with wrong password
-    ks.unlock(WRONG_PASSWORD)
-        .expect("Unlock with wrong password should derive a key");
+    // Unlock with wrong password should now fail with InvalidPassword due to verification
+    let unlock_result = ks.unlock(WRONG_PASSWORD);
+    assert!(
+        matches!(unlock_result, Err(KeystoreError::InvalidPassword)),
+        "Unlock with wrong password should fail with InvalidPassword"
+    );
 
-    // get_signer should fail because the master key is wrong for decryption
-    assert!(matches!(ks.get_signer(id), Err(KeystoreError::AesGcm(_))));
+    // Keystore should remain locked
+    assert!(!ks.is_unlocked);
+
+    // get_signer should fail because the keystore is still locked
+    assert!(matches!(ks.get_signer(id), Err(KeystoreError::Locked)));
 }
 
 // --- Tests for verify_signature ---
@@ -472,9 +520,10 @@ fn test_verify_signature_success_and_failure() {
     ks.unlock(TEST_PASSWORD).unwrap();
     let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
 
-    let signing_key_k256 = ks.get_signer(id.clone()).unwrap();
-    // Now that get_signer returns SigningKey directly, we can use it without dereferencing
-    let wallet = PrivateKeySigner::from(signing_key_k256);
+    let zeroizing_signing_key = ks.get_signer(id.clone()).unwrap();
+    // Need to clone the inner SigningKey to pass by value to PrivateKeySigner::from
+    let signing_key = zeroizing_signing_key.as_ref().clone();
+    let wallet = PrivateKeySigner::from(signing_key);
 
     let message_hash = B256::from_slice(&[42u8; 32]);
     let alloy_signature = wallet
