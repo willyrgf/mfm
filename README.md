@@ -1,5 +1,6 @@
 # MFM
 
+A WIP platform for on-chain operations.
 
-### ALERT: Experimental project, don't use in production/mainnet; Mostly written by unsupervised AI models.
+### ALERT: Experimental project, not for production or mainnet use. Mostly AI-generated with barely any human review.
 
