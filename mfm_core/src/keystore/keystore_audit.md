@@ -33,4 +33,3 @@ The overall cryptographic design is modern and mostly correct. However, our revi
 * **Thread safety** – `Keystore` is not `Send + Sync`; race conditions possible in multi‑threaded apps.
 * **Unit‑test KDF parameters** – Tests lower Argon2 cost drastically; ensure production builds restore strong defaults via `cfg(not(test))`.
 * **KDF versioning** – Add `kdf_version` field so future parameter bumps won’t break old files.
-
