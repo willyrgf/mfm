@@ -1,108 +1,210 @@
-###  Executive Summary
+# Security Audit Report – `mfm_core::keystore`
 
-Your keystore is thoughtfully written—it uses modern primitives (Argon2 id, AES-256-GCM, HKDF-SHA-256, k256, Zeroize), stores only encrypted private keys on disk, and includes unit-tests that cover many abuse cases.
-However, our audit uncovered several **critical design flaws** that can lead to silent wallet corruption, unlimited offline-brute-force, and private-key leakage in memory.  We also found a number of high/medium-severity issues and opportunities to harden the implementation.
-
----
-
-## 1 – Findings by Severity
-
-| #        | Severity     | Area                            | Finding                                                                                                                                                                                                                                   |
-| -------- | ------------ | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **F-1**  | **Critical** | `unlock()` / authentication     | Unlocking **never verifies** the password; any string yields a “master key”. Keys imported after a wrong unlock are irreversibly encrypted with a bogus key (DoS / silent data loss).                                                     |
-| **F-2**  | **Critical** | Rate-limiting                   | `increment_unlock_attempts()` is only called for *empty* passwords. Wrong passwords therefore do **not** back-off, enabling unlimited offline brute-force.                                                                                |
-| **F-3**  | **Critical** | In-memory secrecy               | `ZeroizingSigningKey::zeroize()` zeroises an unused temp buffer, **not the secret scalar**. The raw `SigningKey` returned by `get_signer()` is never zeroised and can linger in memory.                                                   |
-| **F-4**  | **High**     | Cryptographic domain separation | `derive_entry_key()` uses HKDF with **empty salt**; this gives no domain separation between different master keys and removes HKDF’s collision-resistance properties.                                                                     |
-| **F-5**  | **High**     | Pepper misuse                   | `DEFAULT_PEPPER` is hard-coded and public. Appending a known string to the password adds no entropy but doubles the password’s memory footprint.                                                                                          |
-| **F-6**  | **High**     | Configurable KDF output         | `output_len` is user-configurable; values < 32 bytes produce AES-256 keys with only *n* × 8 bits of entropy.                                                                                                                              |
-| **F-7**  | **High**     | File-system locking             | You lock the **old** file handle, then atomically replace the path (`atomicwrites`). The lock no longer protects the new file—another process can open it concurrently, causing torn reads or time-of-check/time-of-use (TOCTOU) attacks. |
-| **F-8**  | **Medium**   | Nonce-misuse resistance         | A 96-bit random nonce is safe, but a defensive design would *derive* the nonce from `(masterKey, id, counter)` to make reuse cryptographically impossible.                                                                                |
-| **F-9**  | **Medium**   | Thread safety                   | `Keystore` is not `Send + Sync`; concurrent calls can produce inconsistent state (e.g., `entries` race with `auto_lock`).                                                                                                                 |
-| **F-10** | **Medium**   | Memory locking                  | Secrets can be swapped to disk; consider `mlock` / `memmap2` or OS-specific “locked page” APIs.                                                                                                                                           |
-| **F-11** | **Low**      | Cross-platform perms            | `chmod 600` only runs on Unix; Windows files inherit directory ACLs and may be world-readable.                                                                                                                                            |
-| **F-12** | **Low**      | Error wording                   | Detailed `AesGcm` errors leak whether decryption failed vs. AAD mismatch—this can be an oracle.                                                                                                                                           |
-| **F-13** | **Info**     | Code hygiene                    | Many intermediate `Vec<u8>` copies of secrets are not wrapped in `Zeroizing`, increasing the window for memory scraping.                                                                                                                  |
+*Author: Independent cryptographic‑security consultant*  
+*Date: 25 May 2025*
 
 ---
 
-## 2 – Detailed Discussion & Recommendations
+## 1. Executive Summary
 
-### F-1 / F-2 — Password Verification & Brute-Force
+The audited Rust module implements an **in‑process keystore** that stores blockchain wallet private keys encrypted with per‑entry Argon2‑derived keys and AES‑256‑GCM. Overall the design is **sound at a high level**, but several security issues were identified that could allow an attacker with local‑file access or crash‑dump access to recover secret material or mount effective offline‑password‑guessing attacks. None of the findings appear exploitable for *remote* compromise, yet they could lead to loss of funds in the event of device compromise.
 
-| Problem | Any password derives a key, so `unlock()` always “succeeds”; rate-limiting never trips.                                                                                                                                                                                                                                               |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Fix** | 1. Add a *password-verification tag* to the keystore header: e.g. `tag = AES-GCM(MK, nonce=0, AAD="verify", plaintext="ok")`.  <br>2. On `unlock()`, decrypt the tag; failure → wrong password, increment attempts, refuse to mark keystore `is_unlocked`. <br>3. Call `increment_unlock_attempts()` for **any** failed verification. |
+A total of **14 findings** were recorded:
 
-### F-3 — Zeroization Bugs
+| ID  | Severity | Title |
+|-----|----------|-------|
+| F‑1 | **High** | Static global “pepper” provides no real entropy and creates migration risk |
+| F‑2 | **High** | Private metadata (aliases, addresses, KDF params) stored in clear text |
+| F‑3 | **Medium** | `SigningKey` zeroisation is ineffective – scalar stays in memory |
+| F‑4 | **Medium** | Derived keys returned as `Vec<u8>` outside a zeroising wrapper |
+| F‑5 | **Medium** | No password‑strength policy or rate limiting – offline attack is cheap |
+| F‑6 | **Medium** | Windows ACL hardening left as TODO |
+| F‑7 | **Medium** | Error variants leak oracle information (Argon2 vs AES failure) |
+| F‑8 | **Low** | Missing integrity / authenticity check for the keystore file |
+| F‑9 | **Low** | Predictable keystore location aids targeted malware |
+| F‑10 | **Low** | Potential truncation risk during atomic write not rolled back |
+| F‑11 | **Low** | Memory pages with secrets can be swapped to disk (no `mlock`) |
+| F‑12 | **Low** | `password_with_pepper` uses `from_utf8().unwrap()` – latent panic |
+| F‑13 | **Info** | Argon2 parameters may be excessive for low‑RAM devices |
+| F‑14 | **Info** | Versioning schema lacks migration strategy |
 
-* Implement `Zeroize` correctly:
+Details and recommendations follow.
+
+---
+
+## 2. Architectural Overview
+
+```
+┌─────────────────────────┐      derive_key_for_entry()      ┌───────────────┐
+│  KeystoreFile (JSON)    │ ───────────────────────────────▶ │ Argon2id KDF   │
+└──────────┬──────────────┘                                  └──────┬────────┘
+           │ entries (id, alias, address, encrypted_pk, salt, …)    │ key
+           │                                                         ▼
+           │                                       ┌───────────────────────────┐
+           └──────────────────────────────────────▶│ AES‑256‑GCM (pk encrypt) │
+                                                   └───────────────────────────┘
+```
+
+Each entry is encrypted independently with a key derived **only** from the per‑entry password + static pepper + 16‑byte random salt. The resulting ciphertext, nonce, salt and parameters are stored verbatim in the same JSON file.
+
+---
+
+## 3. Detailed Findings & Mitigations
+
+### F‑1 (High) – Static build‑time pepper offers no protection
+
+```rust
+const DEFAULT_PEPPER: &'static [u8] = b"mfm_keystore_pepper_v1";
+…
+password_with_pepper.push_str(std::str::from_utf8(self.pepper).unwrap_or(""));
+```
+
+*Issue.* Because the pepper is hard‑coded and publicly known, it adds **zero entropy** but complicates future migrations (you cannot change it without invalidating all keys).
+
+*Recommendation.* Remove the pepper entirely **or** replace it with a *per‑installation* random value stored in the OS keychain / TPM / secure enclave. Salt already prevents rainbow‑table attacks.
+
+---
+
+### F‑2 (High) – Metadata stored in clear text
+
+*Issue.* `alias`, `address`, `salt`, `argon2` parameters and the 12‑byte `nonce` are written unencrypted. Possession of the file therefore discloses the wallet addresses and enables unconstrained offline dictionary attacks.
+
+*Recommendation.* Adopt a **two‑layer design**:
+1. Derive a *master key* from a **single** unlock password.
+2. Encrypt the entire `KeystoreFile` blob (or at least the per‑entry headers) with this master key.
+
+This keeps metadata confidential and allows global rate‑limiting.
+
+---
+
+### F‑3 (Medium) – `SigningKey` zeroisation is ineffective
 
 ```rust
 impl Zeroize for ZeroizingSigningKey {
     fn zeroize(&mut self) {
-        use k256::elliptic_curve::SecretKey;
-        // Convert to mutable bytes, zero them, then force re-randomisation of scalar
         let mut bytes = self.0.to_bytes();
         bytes.zeroize();
     }
 }
 ```
 
-* Expose only opaque signer objects; never hand out raw `SigningKey`.
-  Provide a `Signer` trait impl that signs internally and zeroises on drop.
+Calling `to_bytes()` creates **a copy**; the internal scalar inside `SigningKey` remains. In addition, `SigningKey` does **not** implement `Zeroize` itself.
 
-### F-4 — HKDF with Empty Salt
+*Recommendation.*
+- Store the secret as `k256::SecretKey` (which implements `ZeroizeOnDrop`) and construct `SigningKey` only when required for a signing operation.
+- Alternatively, wrap the scalar in your own `SecretKeyBytes([u8;32])` that implements `Zeroize`.
 
-Deriving keys with `salt=""` loses one of HKDF’s two inputs and weakens collision-resistance.
+---
 
-*Use*: `Salt = H(master_key || "entry-key-salt")` or simply reuse the per-keystore `salt`.
-Alternatively, prepend a fixed domain string in `info` to separate contexts.
+### F‑4 (Medium) – Derived keys live outside a zeroising container
 
-### F-5 — Pepper
+`derive_key_for_entry()` returns `Vec<u8>` that is then copied (`to_vec()`) by some callers. Only some call‑sites wrap it with `Zeroizing`. Missed callers will leave keys in heap memory after use.
 
-A global, published pepper is equivalent to none. Either:
+*Recommendation.* Return `Zeroizing<Vec<u8>>` directly and propagate the wrapper. Switch to the ✨`zeroize::Zeroizing`✨ type alias for ergonomics.
 
-* Remove it and clearly document that **only the user’s password** protects the keystore, *or*
-* Generate a **per-installation random pepper** on first run and store it in the OS key-chain/environment.
+---
 
-### F-6 — KDF Output Length
+### F‑5 (Medium) – No password policy or rate limiting
 
-Force `output_len >= 32` (or 64 if you may switch to XChaCha20-Poly1305 later).
+*Issue.* Empty strings are rejected, but **"123"** is accepted and an attacker can perform unlimited offline guesses with parameters visible in the file.
 
-### F-7 — File Lock vs. Atomic Rename
+*Recommendation.*
+- Enforce a *minimum entropy* policy (e.g. length ≥ 12 and at least 3 character classes).
+- Consider scrypt/Argon2 cost‑factor auto‑tuning.
+- Re‑introduce exponential back‑off on **online** unlock attempts when/if a global master password is restored (see F‑2).
 
-Lock a separate `.lock` file **in the target directory**, or switch to `flock`/`fcntl` on the final path *after* the rename.  Document that only one process may write concurrently.
+---
 
-### F-8 — Nonce Reuse
+### F‑6 (Medium) – Windows ACL hardening missing
 
-Nonce collisions are catastrophic for GCM.  You already store the nonce; to be extra-safe:
+Unix permissions are set to `0o600`, but `#[cfg(windows)]` block is `TODO`.
 
-```text
-nonce = HKDF(master_key, "nonce" || id || counter)[..12]
-```
+*Recommendation.* Call *SetNamedSecurityInfoW* or use `windows‑acl` crate to grant `FILE_GENERIC_READ|WRITE` only to the current SID.
 
-where `counter` is a per-entry u64 incremented on each re-encryption.
+---
 
-### F-9 — Thread Safety
+### F‑7 (Medium) – Error messages leak oracle information
 
-Wrap mutable state in `RwLock<KeystoreInner>` or require the caller to take an `&mut` reference *and* mark `KeystoreInner: !Send`.
+*Issue.* Decryption failures after wrong password yield either `Argon2Error` (if KDF fails) or `InvalidPassword` (if AES‑GCM tag mismatch). An attacker can therefore test guesses offline and distinguish malformed passwords from format errors.
 
-### F-10 — Memory Locking
+*Recommendation.* Return a **single** opaque error (`WrongCredentials`) for any failure stemming from user input.
 
-Consider [`secrecy::Secret`](https://docs.rs/secrecy) + [`mlock`](https://docs.rs/mlock) on Unix and `VirtualLock` on Windows.
+---
 
-### F-11 — Windows File ACLs
+### F‑8 (Low) – No file integrity/HMAC
 
-Call `winapi::um::aclapi::SetNamedSecurityInfoW` to grant only `FILE_GENERIC_READ | FILE_GENERIC_WRITE` to the current SID.
+If an attacker flips a single bit in the stored *ciphertext*, AES‑GCM detects it, but flipping metadata (e.g. `m_cost`) causes un‑checked behaviour and denial‑of‑service.
 
-### F-12 — Error Messages
+*Recommendation.* Add a *file‑level* MAC (or wrap JSON inside an AEAD envelope with associated data = constant string).
 
-Return a generic `KeystoreError::InvalidPassword` for decryption / AAD failures.
+---
 
-### F-13 — Additional Hardening
+### F‑9 (Low) – Predictable keystore path
 
-* **MAC then encrypt** metadata (id, address) to detect bit-flips early.
-* **Constant-time comparisons** for nonce, UUID matches.
-* Use `rand::rngs::EntropyRng` + `getrandom` for embedded/SGX builds.
-* CI: `cargo-audit`, `cargo-deny` and compile with `RUSTFLAGS="-C force-frame-pointers=yes"` for better post-mortem analysis.
+`dirs_next::data_dir()/"mfm/keystore_v1.json"` allows malware to watch or exfiltrate the file.
 
+*Recommendation.* Allow applications to supply a **custom path** outside default roaming profile and/or add an option to store inside OS key storage (Keychain, Credential Vault).
+
+---
+
+### F‑10 (Low) – Atomic write can leave truncated file on power loss
+
+`AtomicFile::write()` first writes to `*.swap` then renames. On some filesystems rename is not atomic across crashes, leaving the keystore missing.
+
+*Recommendation.* Keep timestamped *back‑ups* and verify after write.
+
+---
+
+### F‑11 (Low) – Secrets may be swapped to disk
+
+*Recommendation.* Use `memsec`, `ring::constant_time::verify_slices_are_equal`, or OS calls (`mlock`, `VirtualLock`) to pin critical buffers.
+
+---
+
+### F‑12 (Low) – Potential panic in `from_utf8().unwrap()`
+
+If `DEFAULT_PEPPER` is ever set to non‑UTF‑8 bytes, `.unwrap()` will panic and kill the process.
+
+*Recommendation.* Replace with `from_utf8().expect("pepper must be UTF‑8")` at compile time or avoid conversion.
+
+---
+
+### F‑13 (Info) – Argon2 parameters
+
+`m_cost=65 536 KiB` (≈ 64 MiB) is excellent for desktops but can starve embedded devices. Make them **configurable** at runtime or auto‑tune once.
+
+---
+
+### F‑14 (Info) – Version migration
+
+`version:"1.0.0"` is checked but no migration path is implemented. Future changes will fail with `InvalidFormat`.
+
+*Recommendation.* Plan a **semver‑aware migration layer** now.
+
+---
+
+## 4. Positive Observations
+
+- Uses **Argon2id v1.3** with independent 16‑byte salts – good choice.
+- Employs **AES‑256‑GCM** with per‑entry random nonces and AAD bound to UUID+address.
+- Secrets inside `Vec<u8>` are wrapped in `Zeroizing` in most critical paths.
+- File access is guarded by `fs2` advisory locks and `AtomicFile` to prevent torn writes.
+- Comprehensive unit‑test suite exercises typical flows.
+
+---
+
+## 5. Recommended Roadmap
+
+| Phase | Action Items |
+|-------|--------------|
+| **Immediate** | Remove static pepper, fix zeroisation of signing keys, collapse error variants, add Windows ACLs |
+| Short Term | Encrypt metadata with master key, enforce password policy, add integrity MAC |
+| Long Term | Memory‑lock secrets, introduce keystore migration layer, configurable KDF tuning |
+
+---
+
+## 6. Conclusion
+
+While the keystore achieves baseline cryptographic confidentiality for stored private keys, addressing the above findings will substantially raise resistance against local compromise and offline attacks. The most critical tasks are **eliminating the static pepper** and **securing metadata**, followed by rigorous secret‑zeroisation and consistent error handling.
+
+Please feel free to reach out for clarification or re‑assessment once fixes are implemented.
