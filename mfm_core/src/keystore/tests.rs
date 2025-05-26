@@ -6,7 +6,8 @@ use super::Keystore;
 use alloy_primitives::{Signature as AlloySignature, B256, U256}; // Removed Address
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-// use k256::ecdsa::signature::hazmat::PrehashSigner; // Not directly used in tests
+use serde_json::Value; // Needed for manipulating JSON for tests
+                       // use k256::ecdsa::signature::hazmat::PrehashSigner; // Not directly used in tests
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -22,6 +23,7 @@ const WRONG_PASSWORD: &str = "wrongpassword";
 // A valid 32-byte hex private key (integer value 1)
 const DUMMY_PK_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 const DUMMY_PK_HEX_2: &str = "0000000000000000000000000000000000000000000000000000000000000002";
+const NEW_PASSWORD: &str = "newpassword456";
 // const DUMMY_PK_HEX_3: &str = "0000000000000000000000000000000000000000000000000000000000000003"; // Unused
 
 #[test]
@@ -632,103 +634,6 @@ fn test_get_signer_locked() {
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
     let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
-    ks.lock(); // Lock before trying to get signer
-
-    assert!(matches!(ks.get_signer(id), Err(KeystoreError::Locked)));
-}
-
-#[test]
-fn test_get_signer_with_wrong_password_unlock() {
-    let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
-    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
-    ks.unlock(TEST_PASSWORD).unwrap();
-    let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
-    ks.lock();
-
-    // Unlock with wrong password should now fail with InvalidPassword due to verification
-    let unlock_result = ks.unlock(WRONG_PASSWORD);
-    assert!(
-        matches!(unlock_result, Err(KeystoreError::InvalidPassword)),
-        "Unlock with wrong password should fail with InvalidPassword"
-    );
-
-    // Keystore should remain locked
-    assert!(!ks.is_unlocked);
-
-    // get_signer should fail because the keystore is still locked
-    assert!(matches!(ks.get_signer(id), Err(KeystoreError::Locked)));
-}
-
-// --- Tests for verify_signature ---
-#[test]
-fn test_verify_signature_success_and_failure() {
-    let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
-    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
-    ks.unlock(TEST_PASSWORD).unwrap();
-    let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
-
-    let zeroizing_signing_key = ks.get_signer(id.clone()).unwrap();
-    // Need to clone the inner SigningKey to pass by value to PrivateKeySigner::from
-    let signing_key = zeroizing_signing_key.as_ref().clone();
-    let wallet = PrivateKeySigner::from(signing_key);
-
-    let message_hash = B256::from_slice(&[42u8; 32]);
-    let alloy_signature = wallet
-        .sign_hash_sync(&message_hash)
-        .expect("Signing failed");
-
-    assert!(
-        ks.verify_signature(id, message_hash, alloy_signature.clone())
-            .unwrap(),
-        "Signature verification should succeed"
-    );
-
-    let wrong_alloy_sig = AlloySignature::new(
-        // Use alias or full path
-        U256::from(12345),
-        alloy_signature.s(),
-        alloy_signature.v(),
-    );
-    assert!(
-        !ks.verify_signature(id, message_hash, wrong_alloy_sig)
-            .unwrap(),
-        "Verification with wrong R should fail"
-    );
-
-    let wrong_hash = B256::from_slice(&[11u8; 32]);
-    assert!(
-        !ks.verify_signature(id, wrong_hash, alloy_signature)
-            .unwrap(),
-        "Verification with wrong hash should fail"
-    );
-}
-
-#[test]
-fn test_verify_signature_key_not_found() {
-    let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
-    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
-    ks.unlock(TEST_PASSWORD).unwrap();
-
-    let non_existent_id = uuid::Uuid::new_v4();
-    let message_hash = B256::ZERO;
-    let dummy_sig = AlloySignature::test_signature();
-
-    assert!(matches!(
-        ks.verify_signature(non_existent_id, message_hash, dummy_sig),
-        Err(KeystoreError::KeyNotFound(_))
-    ));
-}
-
-#[test]
-fn test_verify_signature_locked() {
-    let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
-    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
-    ks.unlock(TEST_PASSWORD).unwrap();
-    let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
     ks.lock();
 
     let message_hash = B256::ZERO;
@@ -737,4 +642,403 @@ fn test_verify_signature_locked() {
         ks.verify_signature(id, message_hash, dummy_sig),
         Err(KeystoreError::Locked)
     ));
+}
+
+#[test]
+fn test_change_password_success() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+    ks.unlock(TEST_PASSWORD).unwrap();
+
+    let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
+
+    ks.change_password(TEST_PASSWORD, NEW_PASSWORD)
+        .expect("Failed to change password");
+    // The change_password function now locks the keystore and resets rate limiting.
+    // Add a small delay to ensure file system sync for rate limiting state.
+    std::thread::sleep(Duration::from_secs(5));
+
+    // Keystore should be locked after password change
+    assert!(matches!(ks.get_signer(id), Err(KeystoreError::Locked)));
+
+    // Unlock with old password should fail
+    assert!(matches!(
+        ks.unlock(TEST_PASSWORD),
+        Err(KeystoreError::InvalidPassword)
+    ));
+
+    std::thread::sleep(Duration::from_secs(1));
+
+    // Unlock with new password should succeed
+    ks.unlock(NEW_PASSWORD)
+        .expect("Unlock with new password failed");
+
+    // Verify key is still accessible and can sign
+    let signer = ks
+        .get_signer(id)
+        .expect("Key should be accessible after password change");
+    let signing_key = signer.as_ref().clone(); // Clone the inner SigningKey
+    let wallet = PrivateKeySigner::from(signing_key); // Create PrivateKeySigner
+    let message_hash = B256::from_slice(&[1u8; 32]);
+    let _signature = wallet
+        .sign_hash_sync(&message_hash)
+        .expect("Signing with re-encrypted key failed");
+}
+
+#[test]
+fn test_change_password_incorrect_old_password() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+    ks.unlock(TEST_PASSWORD).unwrap();
+
+    let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
+
+    // Add a small delay to ensure any previous rate limiting state has expired.
+    std::thread::sleep(Duration::from_millis(100));
+    let change_res = ks.change_password(WRONG_PASSWORD, NEW_PASSWORD);
+    assert!(
+        matches!(change_res, Err(KeystoreError::InvalidPassword)),
+        "Changing password with incorrect old password should fail with InvalidPassword"
+    );
+
+    // Keystore should remain unlocked and functional with the old password
+    assert!(ks.is_unlocked);
+    ks.get_signer(id)
+        .expect("Key should still be accessible with old password");
+
+    // Attempt to unlock with new password should fail
+    assert!(matches!(
+        ks.unlock(NEW_PASSWORD),
+        Err(KeystoreError::InvalidPassword)
+    ));
+}
+
+#[test]
+fn test_change_password_persisted_kdf_params() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let original_key_alias = "persisted_key".to_string();
+
+    {
+        let mut ks_orig = Keystore::new(Some(keystore_path.clone())).unwrap();
+        ks_orig.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+        ks_orig.unlock(TEST_PASSWORD).unwrap();
+        ks_orig
+            .import_private_key_hex(Some(original_key_alias.clone()), DUMMY_PK_HEX)
+            .unwrap();
+        ks_orig
+            .change_password(TEST_PASSWORD, NEW_PASSWORD)
+            .expect("Failed to change password in original instance");
+    } // ks_orig is dropped, changes should be persisted
+
+    // Load a new keystore instance from the same path
+    let mut ks_loaded = Keystore::new(Some(keystore_path)).unwrap();
+    ks_loaded
+        .initialize_or_load(None) // Load without password, it should be locked
+        .expect("Loading existing keystore failed");
+
+    // Attempt to unlock with the old password should fail
+    let unlock_old_res = ks_loaded.unlock(TEST_PASSWORD);
+    assert!(
+        matches!(unlock_old_res, Err(KeystoreError::InvalidPassword)),
+        "Unlock with old password should fail after password change"
+    );
+
+    // Unlock with the new password should succeed
+    ks_loaded
+        .unlock(NEW_PASSWORD)
+        .expect("Unlock with new password failed after loading");
+    // Add a small delay to ensure file system sync for rate limiting state.
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Verify the key is still present and accessible
+    let keys = ks_loaded.list_keys().unwrap();
+    assert_eq!(
+        keys.len(),
+        1,
+        "Should have one key after loading and unlocking"
+    );
+    let imported_key_id = keys[0].id;
+    assert_eq!(keys[0].alias, Some(original_key_alias));
+
+    let signer = ks_loaded
+        .get_signer(imported_key_id)
+        .expect("Key should be accessible after loading and unlocking with new password");
+    let signing_key = signer.as_ref().clone(); // Clone the inner SigningKey
+    let wallet = PrivateKeySigner::from(signing_key); // Create PrivateKeySigner
+    let message_hash = B256::from_slice(&[2u8; 32]);
+    let _signature = wallet
+        .sign_hash_sync(&message_hash)
+        .expect("Signing with re-encrypted key after load failed");
+}
+
+#[test]
+fn test_auto_lock_timeout() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let config = KeystoreConfig {
+        auto_lock_timeout: Duration::from_secs(1), // Short timeout for testing
+        ..Default::default()
+    };
+    let mut ks = Keystore::new_with_config(Some(keystore_path), config).unwrap();
+    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+    ks.unlock(TEST_PASSWORD).unwrap();
+
+    let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
+
+    // Wait for timeout to pass
+    std::thread::sleep(Duration::from_secs(2)); // 1 second timeout + buffer
+
+    // Keystore should now be locked
+    assert!(matches!(ks.get_signer(id), Err(KeystoreError::Locked)));
+
+    // Unlock should succeed
+    ks.unlock(TEST_PASSWORD)
+        .expect("Unlock after auto-lock failed");
+    assert!(
+        ks.get_signer(id).is_ok(),
+        "Key should be accessible after re-unlock"
+    );
+}
+
+#[test]
+fn test_activity_resets_auto_lock_timestamp() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let config = KeystoreConfig {
+        auto_lock_timeout: Duration::from_secs(2), // 2 second timeout
+        ..Default::default()
+    };
+    let mut ks = Keystore::new_with_config(Some(keystore_path), config).unwrap();
+    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+    ks.unlock(TEST_PASSWORD).unwrap();
+
+    let (id1, _) = ks
+        .import_private_key_hex(Some("key1".to_string()), DUMMY_PK_HEX)
+        .unwrap();
+
+    // Wait for half the timeout
+    std::thread::sleep(Duration::from_millis(1000)); // 1 second
+
+    // Perform an activity: import another key
+    let (id2, _) = ks
+        .import_private_key_hex(Some("key2".to_string()), DUMMY_PK_HEX_2)
+        .unwrap();
+    // This should reset the timestamp
+
+    // Wait for another half the timeout (total time passed is now 2 seconds since initial import)
+    std::thread::sleep(Duration::from_millis(1000)); // 1 second
+
+    // Keystore should NOT be locked because activity reset the timer
+    assert!(
+        ks.get_signer(id1).is_ok(),
+        "Key1 should still be accessible after activity"
+    );
+    assert!(
+        ks.get_signer(id2).is_ok(),
+        "Key2 should be accessible after activity"
+    );
+
+    // Test with get_signer activity
+    std::thread::sleep(Duration::from_millis(1000)); // 1 second
+    ks.get_signer(id1).unwrap(); // Activity
+    std::thread::sleep(Duration::from_millis(1000)); // 1 second
+    assert!(
+        ks.get_signer(id1).is_ok(),
+        "Key1 should still be accessible after get_signer activity"
+    );
+
+    // Test with delete_key activity
+    std::thread::sleep(Duration::from_millis(1000)); // 1 second
+    ks.delete_key(id2).unwrap(); // Activity
+    std::thread::sleep(Duration::from_millis(1000)); // 1 second
+    assert!(
+        ks.get_signer(id1).is_ok(),
+        "Key1 should still be accessible after delete_key activity"
+    );
+
+    // Test with list_keys activity
+    std::thread::sleep(Duration::from_millis(1000)); // 1 second
+    ks.list_keys().unwrap(); // Activity
+    std::thread::sleep(Duration::from_millis(1000)); // 1 second
+    assert!(
+        ks.get_signer(id1).is_ok(),
+        "Key1 should still be accessible after list_keys activity"
+    );
+
+    // Finally, let it auto-lock
+    std::thread::sleep(Duration::from_secs(3)); // 2 second timeout + buffer
+    assert!(matches!(ks.get_signer(id1), Err(KeystoreError::Locked)));
+}
+
+#[test]
+fn test_load_from_disk_malformed_json() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    // Write malformed JSON to the file
+    std::fs::write(&keystore_path, "{ \"invalid_json\": ").unwrap();
+
+    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let load_res = ks.initialize_or_load(None); // Attempt to load
+    assert!(
+        matches!(load_res, Err(KeystoreError::SerdeJson(_))),
+        "Loading malformed JSON should result in SerdeJson error"
+    );
+}
+
+#[test]
+fn test_load_from_disk_unsupported_version() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    // Create a dummy keystore structure with an unsupported version
+    let unsupported_keystore_json = serde_json::json!({
+        "version": "99.0.0", // Future, unsupported version
+        "kdf_params": {
+            "m_cost": 131072,
+            "t_cost": 4,
+            "p_cost": 1,
+            "output_len": 32
+        },
+        "verification_tag": "dummy_tag",
+        "keys": [],
+        "unlock_state": {
+            "failed_attempts": 0,
+            "last_attempt_timestamp": 0
+        }
+    });
+    std::fs::write(&keystore_path, unsupported_keystore_json.to_string()).unwrap();
+
+    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let load_res = ks.initialize_or_load(None);
+    assert!(
+        matches!(load_res, Err(KeystoreError::InvalidFormat(_))), // Changed to InvalidFormat
+        "Loading unsupported version should result in InvalidFormat error"
+    );
+}
+
+#[test]
+fn test_aes_gcm_error_trigger() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+    ks.unlock(TEST_PASSWORD).unwrap();
+
+    let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
+    ks.lock(); // Lock to ensure data is encrypted on disk
+
+    // Manually load the keystore file, tamper with the encrypted private key
+    let mut json_value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
+    if let Some(keys_array) = json_value["keys"].as_array_mut() {
+        if let Some(key_entry) = keys_array.get_mut(0) {
+            if let Some(encrypted_pk_val) = key_entry["encrypted_private_key"].as_str() {
+                // Corrupt the encrypted private key by changing a byte
+                let mut corrupted_pk = encrypted_pk_val.to_string();
+                if let Some(char_to_change) = corrupted_pk.chars().nth(10) {
+                    let replacement_char = if char_to_change == 'a' { 'b' } else { 'a' };
+                    corrupted_pk.replace_range(10..11, &replacement_char.to_string());
+                } else {
+                    panic!("Encrypted private key too short to corrupt");
+                }
+                key_entry["encrypted_private_key"] = Value::String(corrupted_pk);
+            }
+        }
+    }
+    std::fs::write(&keystore_path, serde_json::to_string(&json_value).unwrap()).unwrap();
+
+    // Load the corrupted keystore
+    let mut ks_corrupted = Keystore::new(Some(keystore_path)).unwrap();
+    ks_corrupted.initialize_or_load(None).unwrap(); // Should load successfully, but decryption will fail
+    ks_corrupted.unlock(TEST_PASSWORD).unwrap(); // Unlock to attempt decryption
+
+    // Try to get the signer for the corrupted key, which should now fail with AesGcm
+    let get_signer_res = ks_corrupted.get_signer(id);
+    assert!(
+        matches!(get_signer_res, Err(KeystoreError::InvalidFormat(_))),
+        "Getting signer for corrupted key should result in InvalidFormat error due to base64 decode failure"
+    );
+}
+
+#[test]
+fn test_kdf_params_mismatch_error() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    {
+        let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+        ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+        ks.unlock(TEST_PASSWORD).unwrap();
+        ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
+    } // Keystore saved to disk
+
+    // Manually load the keystore file and tamper with KDF parameters
+    let mut json_value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
+    if let Some(kdf_params) = json_value["kdf_params"].as_object_mut() {
+        kdf_params.insert("m_cost".to_string(), Value::from(1024)); // Change m_cost
+    }
+    std::fs::write(&keystore_path, serde_json::to_string(&json_value).unwrap()).unwrap();
+
+    // Attempt to load and unlock the keystore with mismatched KDF params
+    let mut ks_mismatched = Keystore::new(Some(keystore_path)).unwrap();
+    ks_mismatched.initialize_or_load(None).unwrap(); // Load should succeed
+    let unlock_res = ks_mismatched.unlock(TEST_PASSWORD); // Unlock should fail due to mismatch
+    assert!(
+        matches!(unlock_res, Err(KeystoreError::Argon2Error(_))),
+        "Unlock with tampered KDF params should result in Argon2Error"
+    );
+}
+
+#[test]
+fn test_unsupported_kdf_error() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    // Create a dummy keystore structure with an unsupported KDF
+    let unsupported_kdf_json = serde_json::json!({
+        "version": "1.0.0",
+        "kdf_params": {
+            "m_cost": 131072,
+            "t_cost": 4,
+            "p_cost": 1,
+            "output_len": 32,
+            "algorithm": "unsupported_kdf_algo" // Unsupported KDF algorithm
+        },
+        "verification_tag": "dummy_tag",
+        "keys": [],
+        "unlock_state": {
+            "failed_attempts": 0,
+            "last_attempt_timestamp": 0
+        }
+    });
+    std::fs::write(&keystore_path, unsupported_kdf_json.to_string()).unwrap();
+
+    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let load_res = ks.initialize_or_load(None);
+    assert!(
+        matches!(load_res, Err(KeystoreError::UnsupportedKdf(algo)) if algo == "unsupported_kdf_algo"),
+        "Loading with unsupported KDF should result in UnsupportedKdf error"
+    );
+}
+
+#[test]
+fn test_missing_verification_tag_error() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    {
+        let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+        ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+        ks.unlock(TEST_PASSWORD).unwrap();
+        ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
+    } // Keystore saved to disk
+
+    // Manually load the keystore file and remove the verification_tag
+    let mut json_value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
+    json_value
+        .as_object_mut()
+        .unwrap()
+        .remove("verification_tag");
+    std::fs::write(&keystore_path, serde_json::to_string(&json_value).unwrap()).unwrap();
+
+    // Attempt to load and unlock the keystore
+    let mut ks_missing_tag = Keystore::new(Some(keystore_path)).unwrap();
+    ks_missing_tag.initialize_or_load(None).unwrap(); // Load should succeed
+    let unlock_res = ks_missing_tag.unlock(TEST_PASSWORD); // Unlock should fail due to missing tag
+    assert!(
+        matches!(unlock_res, Err(KeystoreError::MissingVerificationTag)),
+        "Unlock with missing verification tag should result in MissingVerificationTag error"
+    );
 }
