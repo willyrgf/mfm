@@ -211,6 +211,15 @@ pub struct Keystore {
     verification_nonce: Option<String>,
 }
 
+// Helper struct for change_password to temporarily hold decrypted key data
+struct DecryptedData {
+    pk_material: Zeroizing<Vec<u8>>,
+    id: Uuid,
+    address: Address,
+    alias: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
 // --- Keystore Implementation ---
 
 impl Keystore {
@@ -989,52 +998,52 @@ impl Keystore {
         // Check auto-lock before proceeding
         self.check_auto_lock();
 
-        // Verify the old password is correct by attempting to unlock
-        if !self.is_unlocked {
-            self.unlock(old_password)?;
-        }
-
         if new_password.is_empty() {
             return Err(KeystoreError::InvalidPassword);
         }
 
-        // TODO: review this
-        // Generate new KDF parameters
-        let _new_kdf_params = Self::generate_kdf_params_with_config(&mut OsRng, &self.config)?;
+        // 1. Verify the old password explicitly, regardless of current unlocked state.
+        // This ensures the user knows the old password before changing it.
+        let kdf_params = self
+            .master_kdf_params
+            .as_ref()
+            .ok_or(KeystoreError::FsError(
+                "Keystore is not initialized with KDF parameters.".to_string(),
+            ))?;
 
-        // Derive new master key
-        let _new_master_key = self.derive_master_key(new_password, &_new_kdf_params)?;
-        let _new_master_key = Zeroizing::new(_new_master_key);
+        let old_derived_key = self.derive_master_key(old_password, kdf_params)?;
+        let old_derived_key_zeroizing = Zeroizing::new(old_derived_key);
 
-        // 1. Generate new KDF parameters and derive new master key
+        if let (Some(tag), Some(nonce)) =
+            (self.get_verification_tag(), self.get_verification_nonce())
+        {
+            if !self.verify_password(&old_derived_key_zeroizing, tag, nonce)? {
+                // If old password verification fails, return InvalidPassword
+                return Err(KeystoreError::InvalidPassword);
+            }
+        } else {
+            // This should not happen if the keystore is initialized, but handle defensively.
+            return Err(KeystoreError::MissingVerificationTag);
+        }
+
+        // At this point, old_password is confirmed correct.
+        // Now proceed with generating new KDF params and re-encrypting.
+
+        // 2. Generate new KDF parameters and derive new master key
         let new_kdf_params = Self::generate_kdf_params_with_config(&mut OsRng, &self.config)?;
         let new_master_key_material = self.derive_master_key(new_password, &new_kdf_params)?;
         let new_master_key_zeroizing = Zeroizing::new(new_master_key_material);
 
-        // 2. Take old master key from self.master_key
-        let old_master_key_opt = self.master_key.take();
-        if old_master_key_opt.is_none() {
-            // This case should ideally not be reached if unlock was successful and self.master_key was set.
-            return Err(KeystoreError::InvalidFormat(
-                "Old master key not found after unlock during password change.".to_string(),
-            ));
-        }
+        // 3. The old master key is currently in `old_derived_key_zeroizing`.
+        // We don't need to `take` from `self.master_key` here, as we derived it fresh.
+        // We will use `old_derived_key_zeroizing` for decryption.
 
-        // 3. Decrypt all private keys using the old master key and store them
-        struct DecryptedData {
-            pk_material: Zeroizing<Vec<u8>>,
-            id: Uuid,
-            address: Address,
-            alias: Option<String>,
-            created_at: DateTime<Utc>,
-        }
-        let mut temp_decrypted_data: Vec<DecryptedData> = Vec::new(); // Use new() as capacity is not known yet
+        // 4. Decrypt all private keys using the old_derived_key_zeroizing and store them
+        // Temporarily set self.master_key to old_derived_key_zeroizing for decrypt_pk calls
+        let original_master_key_state = self.master_key.take(); // Save current state
+        self.master_key = Some(old_derived_key_zeroizing); // Set to the key derived from old_password
 
-        // Temporarily assign the old master key back to self.master_key for decrypt_pk calls
-        // This clones the Option<Zeroizing<Vec<u8>>>, so the Zeroizing<Vec<u8>> itself is cloned once here.
-        self.master_key = old_master_key_opt.clone();
-
-        // Iterate over the *current* entries (which are still encrypted with the old password)
+        let mut temp_decrypted_data: Vec<DecryptedData> = Vec::new();
         for entry_to_decrypt in self.entries.iter() {
             let encrypted_pk_bytes = BASE64_STANDARD
                 .decode(&entry_to_decrypt.encrypted_pk)
@@ -1066,7 +1075,7 @@ impl Keystore {
                 &aes_nonce_bytes,
                 &entry_to_decrypt.id,
                 &entry_to_decrypt.address,
-                &entry_to_decrypt.hkdf_salt,
+                &entry_to_decrypt.hkdf_salt, // Corrected from `entry.hkdf_salt` to `entry_to_decrypt.hkdf_salt`
             )?;
             temp_decrypted_data.push(DecryptedData {
                 pk_material: decrypted_pk_material,
@@ -1077,9 +1086,8 @@ impl Keystore {
             });
         }
 
-        // 4. Explicitly drop/zeroize the old master key.
-        self.master_key.take(); // Clear self.master_key (which held the cloned old_master_key_opt)
-        drop(old_master_key_opt); // Drop the original Option<Zeroizing<Vec<u8>>> holding the old key
+        // Restore original master key state (if it was unlocked before)
+        self.master_key = original_master_key_state;
 
         // 5. Clear existing entries (they are still the old encrypted ones)
         self.entries.clear();

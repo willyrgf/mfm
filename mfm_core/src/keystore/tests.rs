@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::error::KeystoreError;
 use super::Keystore;
-use alloy_primitives::{Signature as AlloySignature, B256, U256}; // Removed Address
+use alloy_primitives::{Signature as AlloySignature, B256}; // Removed Address
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use serde_json::Value; // Needed for manipulating JSON for tests
@@ -704,9 +704,13 @@ fn test_change_password_incorrect_old_password() {
     );
 
     // Keystore should remain unlocked and functional with the old password
+    // Keystore should remain unlocked and functional with the old password
     assert!(ks.is_unlocked);
     ks.get_signer(id)
         .expect("Key should still be accessible with old password");
+
+    // Lock the keystore to force an actual unlock attempt with NEW_PASSWORD
+    ks.lock();
 
     // Attempt to unlock with new password should fail
     assert!(matches!(
