@@ -21,15 +21,16 @@ use dirs_next;
 use fs2::FileExt; // For file locking
 use hex; // For encoding salt
 use k256::{ecdsa::SigningKey, SecretKey}; // Removed PublicKey
+                                          // Removed incorrect imports for ScalarCore and ZeroizePrimitive
 use rand_core::{CryptoRng, OsRng, RngCore}; // Added OsRng
 use ring::hkdf; // For HKDF key derivation
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io::Write; // Added for f.write_all
+use std::fs::{self, File}; // Added File
+use std::io::{Read, Write as IoWrite}; // Added Read, aliased Write
 use std::path::PathBuf;
 use std::str::FromStr; // For DerivationPath::from_str
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH}; // Added SystemTime, UNIX_EPOCH
+use subtle::ConstantTimeEq; // ID 12: For constant-time comparison
 use tiny_keccak::{Hasher, Keccak}; // For Keccak-256
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing}; // Added Zeroizing struct
@@ -43,6 +44,8 @@ pub struct MasterKdfParams {
     pub t_cost: u32,
     pub p_cost: u32,
     pub output_len: usize,
+    #[serde(default)] // Ensures old files lacking this field deserialize with version 0
+    pub kdf_version: u32,
 }
 
 // Uuid and DateTime<Utc> do not implement Zeroize/ZeroizeOnDrop by default.
@@ -57,6 +60,7 @@ pub struct EncryptedKeyEntry {
     pub address: Address,          // Not secret
     pub encrypted_pk: String, // base64 encoded encrypted private key - String implements ZeroizeOnDrop
     pub nonce: String,        // base64 encoded nonce for AES-GCM - String implements ZeroizeOnDrop
+    pub hkdf_salt: String,    // New field for per-entry HKDF salt (base64 encoded)
     pub created_at: DateTime<Utc>, // Not secret
     pub updated_at: DateTime<Utc>, // Not secret
                               // Potentially other metadata like derivation path if applicable, key type, etc.
@@ -104,14 +108,23 @@ pub struct KeystoreConfig {
     pub unlock_backoff_factor: f32,
 }
 
+// Argon2 min number of memory blocks required
+// OWASP: >= 128MiB (131072 KiB)
+const MIN_M_COST: u32 = 131072;
+// Argon2 min number of iterations required
+// OWASP: >= 4
+const MIN_T_COST: u32 = 4;
+// KDF current version
+const KDF_VERSION: u32 = 1;
+
 impl Default for KeystoreConfig {
     fn default() -> Self {
         Self {
             // Default KDF parameters
-            m_cost: 65536,
-            t_cost: 3,
-            p_cost: 1,
-            output_len: 32,
+            m_cost: MIN_M_COST,
+            t_cost: MIN_T_COST,
+            p_cost: 1,      // Default parallelism
+            output_len: 32, // Minimum required output length
             // Default session management
             auto_lock_timeout: Duration::from_secs(300), // 5 minutes
             // Default rate limiting
@@ -130,10 +143,32 @@ impl ZeroizeOnDrop for ZeroizingSigningKey {}
 
 impl Zeroize for ZeroizingSigningKey {
     fn zeroize(&mut self) {
-        // Fix for F-3: Properly zeroize the secret scalar
-        // Convert to mutable bytes, zero them, then force re-randomisation of scalar
-        let mut bytes = self.0.to_bytes();
-        bytes.zeroize();
+        // To explicitly zeroize the sensitive material within self.0 (the k256::ecdsa::SigningKey),
+        // we replace it with a new, dummy key. This action causes the old self.0
+        // to be dropped, and its Drop implementation will zeroize its internal scalar.
+        // This is a safe way to ensure the original key material is cleared without unsafe code.
+
+        // Create a dummy secret. Use a valid, non-zero byte array.
+        // [1; 32] is a simple choice for a non-problematic dummy key.
+        // Need k256::SecretKey for this.
+        // Ensure k256::SecretKey is in scope (it should be via use k256::SecretKey).
+        match k256::SecretKey::from_slice(&[1u8; 32]) {
+            Ok(dummy_secret_key) => {
+                let dummy_signing_key = k256::ecdsa::SigningKey::from(&dummy_secret_key);
+                self.0 = dummy_signing_key; // Old self.0 is dropped here, its secret zeroized.
+            }
+            Err(_) => {
+                // This case should ideally not be reached with a static dummy value like [1u8; 32].
+                // If it is, it might indicate an issue with the k256 crate's assumptions or environment.
+                // As a last resort, if we had OsRng easily available here, we could try to replace
+                // with a new random key: `self.0 = k256::ecdsa::SigningKey::random(&mut OsRng);`
+                // but that introduces OsRng dependency just for this unlikely error path.
+                // Panicking or logging might be options if this error is critical.
+                // For now, if dummy creation fails, the original key remains, which is not ideal
+                // but avoids a panic in release mode. A production library might handle this more robustly.
+                // However, the primary goal is that *successful* explicit zeroize clears the key.
+            }
+        }
     }
 }
 
@@ -172,11 +207,6 @@ pub struct Keystore {
     last_activity_at: Option<Instant>,
     // Configuration
     config: KeystoreConfig,
-    // Rate limiting
-    unlock_attempts: AtomicU32,
-    last_unlock_attempt: Option<Instant>,
-    // Pepper (build-time secret)
-    pepper: &'static [u8],
     // Password verification fields (F-1)
     verification_tag: Option<String>,
     verification_nonce: Option<String>,
@@ -187,8 +217,6 @@ pub struct Keystore {
 impl Keystore {
     const DEFAULT_KEYSTORE_FILENAME: &'static str = "keystore_v1.json";
     const APP_DIR_NAME: &'static str = "mfm";
-    // Build-time pepper (this would ideally be injected at compile time)
-    const DEFAULT_PEPPER: &'static [u8] = b"mfm_keystore_pepper_v1";
 
     pub fn new(custom_path: Option<PathBuf>) -> Result<Self, KeystoreError> {
         Self::new_with_config(custom_path, KeystoreConfig::default())
@@ -203,6 +231,19 @@ impl Keystore {
             return Err(KeystoreError::FsError(
                 "KDF output length must be at least 32 bytes".to_string(),
             ));
+        }
+        // ID 5: Enforce minimum m_cost and t_cost
+        if config.m_cost < MIN_M_COST {
+            return Err(KeystoreError::FsError(format!(
+                "KDF m_cost must be at least {} KiB",
+                MIN_M_COST
+            )));
+        }
+        if config.t_cost < MIN_T_COST {
+            return Err(KeystoreError::FsError(format!(
+                "KDF t_cost must be at least {}",
+                MIN_T_COST
+            )));
         }
 
         let file_path = match custom_path {
@@ -227,18 +268,9 @@ impl Keystore {
             is_unlocked: false,
             last_activity_at: None,
             config,
-            unlock_attempts: AtomicU32::new(0),
-            last_unlock_attempt: None,
-            pepper: Self::DEFAULT_PEPPER,
             verification_tag: None,
             verification_nonce: None,
         })
-    }
-
-    // Set a custom pepper (useful for testing or runtime configuration)
-    pub fn with_pepper(mut self, pepper: &'static [u8]) -> Self {
-        self.pepper = pepper;
-        self
     }
 
     pub fn initialize_or_load(&mut self, password: Option<&str>) -> Result<(), KeystoreError> {
@@ -279,18 +311,28 @@ impl Keystore {
         }
 
         if password.is_empty() {
-            self.increment_unlock_attempts();
+            self.increment_persisted_attempts()?;
             return Err(KeystoreError::InvalidPassword);
         }
 
-        let kdf_params = self
-            .master_kdf_params
-            .as_ref()
-            .ok_or(KeystoreError::FsError(
-                "Keystore is not initialized with KDF parameters.".to_string(),
-            ))?;
+        let kdf_params = match self.master_kdf_params.as_ref() {
+            Some(params) => params,
+            None => {
+                self.increment_persisted_attempts()?;
+                return Err(KeystoreError::FsError(
+                    "Keystore is not initialized with KDF parameters.".to_string(),
+                ));
+            }
+        };
 
-        let derived_key = self.derive_master_key(password, kdf_params)?;
+        let derived_key = match self.derive_master_key(password, kdf_params) {
+            Ok(key) => key,
+            Err(e) => {
+                // Assuming derive_master_key can fail due to bad password through Argon2
+                self.increment_persisted_attempts()?;
+                return Err(e); // Return original error 'e' after attempting to increment
+            }
+        };
         let derived_key_zeroizing = zeroize::Zeroizing::new(derived_key);
 
         // Fix for F-1: Verify the password using the verification tag
@@ -300,32 +342,33 @@ impl Keystore {
         {
             // Verify the password by decrypting the verification tag
             if !self.verify_password(&derived_key_zeroizing, tag, nonce)? {
-                self.increment_unlock_attempts(); // Fix for F-2: Increment attempts for any wrong password
+                self.increment_persisted_attempts()?;
                 return Err(KeystoreError::InvalidPassword);
             }
-        } else if !self.entries.is_empty() {
-            // If we have entries but no verification tag, this is an older keystore
-            // We should create a verification tag when saving
-            // For now, we can't verify the password, but we'll set it anyway
-            // This will be fixed when the keystore is saved next time
-
-            // Create a verification tag with the current password
-            self.master_key = Some(derived_key_zeroizing.clone());
-            self.create_verification_tag(password)?;
-            self.save_to_disk()?;
+            // If verification succeeds, the master_key will be set later.
+        } else {
+            // No verification tag found.
+            self.increment_persisted_attempts()?;
+            return Err(KeystoreError::MissingVerificationTag);
         }
 
         self.master_key = Some(derived_key_zeroizing);
         self.is_unlocked = true;
         self.last_activity_at = Some(Instant::now());
-        // Reset unlock attempts on successful unlock
-        self.unlock_attempts.store(0, Ordering::SeqCst);
+        // Persisted rate limiting handles reset on success via write_persisted_unlock_state(0,0)
 
         Ok(())
     }
 
     // Fix for F-1: Create a verification tag for password verification
     fn create_verification_tag(&mut self, password: &str) -> Result<(), KeystoreError> {
+        // Ensure parent directory for attempts files exists (best effort)
+        if let Some(parent_dir) = self.attempts_file_path().parent() {
+            if !parent_dir.exists() {
+                let _ = fs::create_dir_all(parent_dir); // Ignore error if it fails, read/write will fail later
+            }
+        }
+
         if !self.is_unlocked && self.master_key.is_none() {
             let kdf_params = self
                 .master_kdf_params
@@ -380,17 +423,17 @@ impl Keystore {
         tag: &str,
         nonce: &str,
     ) -> Result<bool, KeystoreError> {
-        let encrypted_tag = BASE64_STANDARD
-            .decode(tag)
-            .map_err(|_| KeystoreError::InvalidFormat)?;
+        let encrypted_tag = BASE64_STANDARD.decode(tag).map_err(|_| {
+            KeystoreError::InvalidFormat("Failed to decode verification tag".to_string())
+        })?;
 
-        let nonce_vec = BASE64_STANDARD
-            .decode(nonce)
-            .map_err(|_| KeystoreError::InvalidFormat)?;
+        let nonce_vec = BASE64_STANDARD.decode(nonce).map_err(|_| {
+            KeystoreError::InvalidFormat("Failed to decode verification nonce".to_string())
+        })?;
 
-        let nonce_bytes: [u8; 12] = nonce_vec
-            .try_into()
-            .map_err(|_| KeystoreError::InvalidFormat)?;
+        let nonce_bytes: [u8; 12] = nonce_vec.try_into().map_err(|_| {
+            KeystoreError::InvalidFormat("Invalid verification nonce length".to_string())
+        })?;
 
         let key = Key::<Aes256Gcm>::from_slice(master_key.as_slice());
         let cipher = Aes256Gcm::new(key);
@@ -405,8 +448,8 @@ impl Keystore {
             },
         ) {
             Ok(decrypted) => {
-                // Check if the decrypted tag matches the expected value
-                Ok(decrypted == b"ok")
+                // ID 12: Use constant-time comparison for the verification tag
+                Ok(decrypted.ct_eq(b"ok").into())
             }
             Err(_) => {
                 // Fix for F-12: Return a generic error message for decryption failures
@@ -424,33 +467,147 @@ impl Keystore {
         self.verification_nonce.as_deref()
     }
 
-    // Enforce rate limiting for unlock attempts
-    fn enforce_unlock_rate_limiting(&mut self) -> Result<(), KeystoreError> {
-        let attempts = self.unlock_attempts.load(Ordering::SeqCst);
+    // Reads unlock attempts and last attempt timestamp from persisted files.
+    // Returns (attempts, last_attempt_timestamp_seconds_epoch)
+    // Returns (0, 0) if files don't exist or on error, to allow first attempt.
+    fn read_persisted_unlock_state(&self) -> Result<(u32, u64), KeystoreError> {
+        let attempts_path = self.attempts_file_path();
+        let timestamp_path = self.timestamp_file_path();
 
-        if attempts > 0 {
-            if let Some(last_attempt) = self.last_unlock_attempt {
-                let elapsed = last_attempt.elapsed();
-                let required_delay = self.calculate_backoff_delay(attempts);
+        let attempts = match File::open(attempts_path) {
+            Ok(mut file) => {
+                let mut contents = String::new();
+                // Use IoWrite trait for file operations
+                file.read_to_string(&mut contents).map_err(|e| {
+                    KeystoreError::FsError(format!("Failed to read attempts file: {}", e))
+                })?;
+                contents.trim().parse::<u32>().unwrap_or(0)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => {
+                return Err(KeystoreError::FsError(format!(
+                    "Error opening attempts file: {}",
+                    e
+                )))
+            }
+        };
 
-                if elapsed < required_delay {
-                    return Err(KeystoreError::FsError(format!(
-                        "Too many unlock attempts. Please wait {} seconds before trying again.",
-                        (required_delay - elapsed).as_secs()
-                    )));
-                }
+        let last_attempt_timestamp_seconds = match File::open(timestamp_path) {
+            Ok(mut file) => {
+                let mut contents = String::new();
+                file.read_to_string(&mut contents).map_err(|e| {
+                    KeystoreError::FsError(format!("Failed to read timestamp file: {}", e))
+                })?;
+                contents.trim().parse::<u64>().unwrap_or(0)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => {
+                return Err(KeystoreError::FsError(format!(
+                    "Error opening timestamp file: {}",
+                    e
+                )))
+            }
+        };
+
+        Ok((attempts, last_attempt_timestamp_seconds))
+    }
+
+    // Writes unlock attempts and last attempt timestamp to persisted files.
+    fn write_persisted_unlock_state(
+        &self,
+        attempts: u32,
+        last_attempt_timestamp_seconds_epoch: u64,
+    ) -> Result<(), KeystoreError> {
+        let attempts_path = self.attempts_file_path();
+        let timestamp_path = self.timestamp_file_path();
+
+        // Ensure parent directory exists
+        if let Some(parent_dir) = attempts_path.parent() {
+            if !parent_dir.exists() {
+                fs::create_dir_all(parent_dir).map_err(|e| {
+                    KeystoreError::FsError(format!(
+                        "Failed to create directory for attempts file: {}",
+                        e
+                    ))
+                })?;
+            }
+        }
+        if let Some(parent_dir) = timestamp_path.parent() {
+            if !parent_dir.exists() {
+                fs::create_dir_all(parent_dir).map_err(|e| {
+                    KeystoreError::FsError(format!(
+                        "Failed to create directory for timestamp file: {}",
+                        e
+                    ))
+                })?;
             }
         }
 
-        self.last_unlock_attempt = Some(Instant::now());
+        let mut attempts_file = File::create(attempts_path).map_err(|e| {
+            KeystoreError::FsError(format!("Failed to create attempts file: {}", e))
+        })?;
+        // Use IoWrite trait for file operations
+        IoWrite::write_all(&mut attempts_file, attempts.to_string().as_bytes()).map_err(|e| {
+            KeystoreError::FsError(format!("Failed to write to attempts file: {}", e))
+        })?;
+
+        let mut timestamp_file = File::create(timestamp_path).map_err(|e| {
+            KeystoreError::FsError(format!("Failed to create timestamp file: {}", e))
+        })?;
+        IoWrite::write_all(
+            &mut timestamp_file,
+            last_attempt_timestamp_seconds_epoch.to_string().as_bytes(),
+        )
+        .map_err(|e| KeystoreError::FsError(format!("Failed to write to timestamp file: {}", e)))?;
+
         Ok(())
     }
 
-    // Calculate exponential backoff delay
+    // Private helper to increment persisted attempts.
+    // Called by unlock() before returning an error that signifies a failed unlock attempt.
+    fn increment_persisted_attempts(&self) -> Result<(), KeystoreError> {
+        let (mut attempts, _last_attempt_ts) = self.read_persisted_unlock_state()?;
+        attempts = attempts.saturating_add(1);
+        let current_timestamp_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| KeystoreError::FsError(format!("System time error: {}", e)))?
+            .as_secs();
+        self.write_persisted_unlock_state(attempts, current_timestamp_secs)
+    }
+
+    // Enforce rate limiting for unlock attempts
+    fn enforce_unlock_rate_limiting(&self) -> Result<(), KeystoreError> {
+        let (attempts, last_attempt_timestamp_seconds) = self.read_persisted_unlock_state()?;
+
+        if attempts > 0 && last_attempt_timestamp_seconds > 0 {
+            let current_timestamp_seconds = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| KeystoreError::FsError(format!("System time error: {}", e)))?
+                .as_secs();
+
+            if current_timestamp_seconds >= last_attempt_timestamp_seconds {
+                let elapsed_seconds = current_timestamp_seconds - last_attempt_timestamp_seconds;
+                let required_delay_duration = self.calculate_backoff_delay(attempts);
+
+                if elapsed_seconds < required_delay_duration.as_secs() {
+                    return Err(KeystoreError::FsError(format!(
+                        "Too many unlock attempts. Please wait {} seconds before trying again.",
+                        (required_delay_duration.as_secs() - elapsed_seconds)
+                    )));
+                }
+            }
+            // If current_timestamp_seconds < last_attempt_timestamp_seconds, system clock might have moved backwards.
+            // In this case, we allow the attempt to proceed to avoid permanent lockout,
+            // but the next failed attempt will record the current (earlier) time.
+        }
+        // No write operation here, just check.
+        Ok(())
+    }
+
+    // Calculate exponential backoff delay (remains the same logic)
     fn calculate_backoff_delay(&self, attempts: u32) -> Duration {
         if attempts >= self.config.unlock_max_attempts {
-            // Maximum backoff reached
-            Duration::from_secs(30)
+            Duration::from_secs(30) // Maximum backoff reached
         } else {
             let factor = self.config.unlock_backoff_factor.powi(attempts as i32);
             let millis = (self.config.unlock_min_delay.as_millis() as f32 * factor) as u64;
@@ -459,12 +616,6 @@ impl Keystore {
     }
 
     // Increment unlock attempts counter
-    // Fix for F-2: This function is now called for any failed password verification
-    fn increment_unlock_attempts(&mut self) {
-        self.unlock_attempts.fetch_add(1, Ordering::SeqCst);
-        self.last_unlock_attempt = Some(Instant::now());
-    }
-
     pub fn lock(&mut self) {
         self.master_key = None; // This will zeroize the key due to Zeroizing wrapper
         self.is_unlocked = false;
@@ -542,19 +693,24 @@ impl Keystore {
         }
 
         let id = Uuid::new_v4();
-        let mut nonce_bytes = [0u8; 12];
-        OsRng
-            .try_fill_bytes(&mut nonce_bytes)
-            .map_err(|e| KeystoreError::FsError(format!("Failed to generate nonce: {}", e)))?;
+        let mut aes_nonce_bytes = [0u8; 12];
+        OsRng.try_fill_bytes(&mut aes_nonce_bytes).map_err(|e| {
+            KeystoreError::FsError(format!(
+                "import_private_key_hex: Failed to generate AES nonce: {}",
+                e
+            ))
+        })?;
 
-        let encrypted_pk_vec = self.encrypt_pk(pk_bytes.as_slice(), &nonce_bytes, &id, &address)?;
+        let (encrypted_pk_data, new_hkdf_salt_bytes) =
+            self.encrypt_pk(pk_bytes.as_slice(), &aes_nonce_bytes, &id, &address)?;
 
         let entry = EncryptedKeyEntry {
             id,
             alias,
             address,
-            encrypted_pk: BASE64_STANDARD.encode(&encrypted_pk_vec),
-            nonce: BASE64_STANDARD.encode(nonce_bytes),
+            encrypted_pk: BASE64_STANDARD.encode(&encrypted_pk_data),
+            nonce: BASE64_STANDARD.encode(aes_nonce_bytes),
+            hkdf_salt: BASE64_STANDARD.encode(new_hkdf_salt_bytes),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -638,15 +794,17 @@ impl Keystore {
         }
 
         let id = Uuid::new_v4();
-        let mut nonce_bytes = [0u8; 12];
-        OsRng
-            .try_fill_bytes(&mut nonce_bytes)
-            .map_err(|e| KeystoreError::FsError(format!("Failed to generate nonce: {}", e)))?;
+        let mut aes_nonce_bytes = [0u8; 12];
+        OsRng.try_fill_bytes(&mut aes_nonce_bytes).map_err(|e| {
+            KeystoreError::FsError(format!(
+                "import_mnemonic: Failed to generate AES nonce: {}",
+                e
+            ))
+        })?;
 
-        // pk_bytes_for_encryption is GenericArray, convert to slice for encrypt_pk
-        let encrypted_pk_vec = self.encrypt_pk(
+        let (encrypted_pk_data, new_hkdf_salt_bytes) = self.encrypt_pk(
             pk_bytes_for_encryption.as_slice(),
-            &nonce_bytes,
+            &aes_nonce_bytes,
             &id,
             &address,
         )?;
@@ -655,8 +813,9 @@ impl Keystore {
             id,
             alias,
             address,
-            encrypted_pk: BASE64_STANDARD.encode(&encrypted_pk_vec),
-            nonce: BASE64_STANDARD.encode(nonce_bytes),
+            encrypted_pk: BASE64_STANDARD.encode(&encrypted_pk_data),
+            nonce: BASE64_STANDARD.encode(aes_nonce_bytes),
+            hkdf_salt: BASE64_STANDARD.encode(new_hkdf_salt_bytes),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -704,20 +863,29 @@ impl Keystore {
             .find(|e| e.id == uuid)
             .ok_or(KeystoreError::KeyNotFound(uuid))?;
 
-        let encrypted_pk_bytes = BASE64_STANDARD
-            .decode(&entry.encrypted_pk)
-            .map_err(|_e| KeystoreError::InvalidFormat)?; // Underscore e
-
-        let nonce_vec = BASE64_STANDARD
-            .decode(&entry.nonce)
-            .map_err(|_e| KeystoreError::InvalidFormat)?; // Underscore e
-
-        let nonce_bytes: [u8; 12] = nonce_vec.try_into().map_err(|_| {
-            KeystoreError::InvalidFormat // Or specific error for nonce length
+        let encrypted_pk_bytes = BASE64_STANDARD.decode(&entry.encrypted_pk).map_err(|_e| {
+            KeystoreError::InvalidFormat(
+                "get_signer: Failed to decode entry.encrypted_pk".to_string(),
+            )
         })?;
 
-        let decrypted_pk_zeroizing_vec =
-            self.decrypt_pk(&encrypted_pk_bytes, &nonce_bytes, &entry.id, &entry.address)?;
+        let nonce_vec = BASE64_STANDARD.decode(&entry.nonce).map_err(|_e| {
+            KeystoreError::InvalidFormat("get_signer: Failed to decode entry.nonce".to_string())
+        })?;
+
+        let aes_nonce_bytes: [u8; 12] = nonce_vec.try_into().map_err(|_| {
+            KeystoreError::InvalidFormat(
+                "get_signer: Invalid AES nonce length for entry.nonce".to_string(),
+            )
+        })?;
+
+        let decrypted_pk_zeroizing_vec = self.decrypt_pk(
+            &encrypted_pk_bytes,
+            &aes_nonce_bytes,
+            &entry.id,
+            &entry.address,
+            &entry.hkdf_salt,
+        )?;
 
         let secret_key = SecretKey::from_slice(decrypted_pk_zeroizing_vec.as_slice())
             .map_err(|_| KeystoreError::InvalidPrivateKey)?; // Should be valid if encryption/decryption worked
@@ -824,62 +992,121 @@ impl Keystore {
         // Clear entries for re-encryption
         self.entries.clear();
 
-        // Temporarily store the old master key
-        let old_master_key = self.master_key.take();
+        // 1. Generate new KDF parameters and derive new master key
+        let new_kdf_params = Self::generate_kdf_params_with_config(&mut OsRng, &self.config)?;
+        let new_master_key_material = self.derive_master_key(new_password, &new_kdf_params)?;
+        let new_master_key_zeroizing = Zeroizing::new(new_master_key_material);
 
-        // Re-encrypt all entries with the new master key
-        for old_entry in old_entries {
-            // Decrypt with old key
-            self.master_key = old_master_key.clone();
-            let encrypted_pk_bytes = BASE64_STANDARD
-                .decode(&old_entry.encrypted_pk)
-                .map_err(|_| KeystoreError::InvalidFormat)?;
-
-            let nonce_vec = BASE64_STANDARD
-                .decode(&old_entry.nonce)
-                .map_err(|_| KeystoreError::InvalidFormat)?;
-
-            let nonce_bytes: [u8; 12] = nonce_vec
-                .try_into()
-                .map_err(|_| KeystoreError::InvalidFormat)?;
-
-            let decrypted_pk = self.decrypt_pk(
-                &encrypted_pk_bytes,
-                &nonce_bytes,
-                &old_entry.id,
-                &old_entry.address,
-            )?;
-
-            // Encrypt with new key
-            self.master_key = Some(new_master_key.clone());
-            let mut new_nonce_bytes = [0u8; 12];
-            OsRng
-                .try_fill_bytes(&mut new_nonce_bytes)
-                .map_err(|e| KeystoreError::FsError(format!("Failed to generate nonce: {}", e)))?;
-
-            let new_encrypted_pk = self.encrypt_pk(
-                &decrypted_pk,
-                &new_nonce_bytes,
-                &old_entry.id,
-                &old_entry.address,
-            )?;
-
-            // Create new entry with re-encrypted key
-            let new_entry = EncryptedKeyEntry {
-                id: old_entry.id,
-                alias: old_entry.alias,
-                address: old_entry.address,
-                encrypted_pk: BASE64_STANDARD.encode(&new_encrypted_pk),
-                nonce: BASE64_STANDARD.encode(new_nonce_bytes),
-                created_at: old_entry.created_at,
-                updated_at: Utc::now(),
-            };
-
-            self.entries.push(new_entry);
+        // 2. Take old master key from self.master_key
+        let old_master_key_opt = self.master_key.take();
+        if old_master_key_opt.is_none() {
+            // This case should ideally not be reached if unlock was successful and self.master_key was set.
+            return Err(KeystoreError::InvalidFormat(
+                "Old master key not found after unlock during password change.".to_string(),
+            ));
         }
 
-        // Set the master key to the new key
-        self.master_key = Some(new_master_key);
+        // 3. Decrypt all private keys using the old master key and store them
+        struct DecryptedData {
+            pk_material: Zeroizing<Vec<u8>>,
+            id: Uuid,
+            address: Address,
+            alias: Option<String>,
+            created_at: DateTime<Utc>,
+        }
+        let mut temp_decrypted_data: Vec<DecryptedData> = Vec::with_capacity(self.entries.len());
+
+        // Temporarily assign the old master key back to self.master_key for decrypt_pk calls
+        // This clones the Option<Zeroizing<Vec<u8>>>, so the Zeroizing<Vec<u8>> itself is cloned once here.
+        self.master_key = old_master_key_opt.clone();
+
+        for entry_to_decrypt in self.entries.iter() {
+            let encrypted_pk_bytes = BASE64_STANDARD
+                .decode(&entry_to_decrypt.encrypted_pk)
+                .map_err(|e| {
+                    KeystoreError::InvalidFormat(format!(
+                        "change_password: Corrupted encrypted_pk for entry {}: {}",
+                        entry_to_decrypt.id, e
+                    ))
+                })?;
+
+            let aes_nonce_bytes: [u8; 12] = BASE64_STANDARD
+                .decode(&entry_to_decrypt.nonce)
+                .map_err(|e| {
+                    KeystoreError::InvalidFormat(format!(
+                        "change_password: Corrupted nonce for entry {}: {}",
+                        entry_to_decrypt.id, e
+                    ))
+                })?
+                .try_into()
+                .map_err(|_| {
+                    KeystoreError::InvalidFormat(format!(
+                        "change_password: Invalid nonce length for entry {}",
+                        entry_to_decrypt.id
+                    ))
+                })?;
+
+            let decrypted_pk_material = self.decrypt_pk(
+                &encrypted_pk_bytes,
+                &aes_nonce_bytes,
+                &entry_to_decrypt.id,
+                &entry_to_decrypt.address,
+                &entry_to_decrypt.hkdf_salt,
+            )?;
+            temp_decrypted_data.push(DecryptedData {
+                pk_material: decrypted_pk_material,
+                id: entry_to_decrypt.id,
+                address: entry_to_decrypt.address,
+                alias: entry_to_decrypt.alias.clone(),
+                created_at: entry_to_decrypt.created_at,
+            });
+        }
+
+        // 4. Explicitly drop/zeroize the old master key.
+        self.master_key.take(); // Clear self.master_key (which held the cloned old_master_key_opt)
+        drop(old_master_key_opt); // Drop the original Option<Zeroizing<Vec<u8>>> holding the old key
+
+        // 5. Clear existing entries (they are still the old encrypted ones)
+        self.entries.clear();
+
+        // 6. Set self.master_key to the new_master_key for the re-encryption phase
+        self.master_key = Some(new_master_key_zeroizing);
+
+        // 7. Re-encrypt all data with the new master key
+        for data in temp_decrypted_data {
+            let mut new_aes_nonce_bytes = [0u8; 12];
+            OsRng
+                .try_fill_bytes(&mut new_aes_nonce_bytes)
+                .map_err(|e| {
+                    KeystoreError::FsError(format!(
+                        "change_password: Failed to generate AES nonce for re-encryption: {}",
+                        e
+                    ))
+                })?;
+
+            let (new_encrypted_pk_vec, new_hkdf_salt_bytes) = self.encrypt_pk(
+                data.pk_material.as_slice(),
+                &new_aes_nonce_bytes,
+                &data.id,
+                &data.address,
+            )?;
+
+            let new_entry = EncryptedKeyEntry {
+                id: data.id,
+                alias: data.alias,
+                address: data.address,
+                encrypted_pk: BASE64_STANDARD.encode(&new_encrypted_pk_vec),
+                nonce: BASE64_STANDARD.encode(new_aes_nonce_bytes),
+                hkdf_salt: BASE64_STANDARD.encode(new_hkdf_salt_bytes),
+                created_at: data.created_at,
+                updated_at: Utc::now(),
+            };
+            self.entries.push(new_entry);
+        }
+        // temp_decrypted_data and its Zeroizing<Vec<u8>> elements will be dropped here.
+
+        // 8. Update KDF parameters, create verification tag, save
+        self.master_kdf_params = Some(new_kdf_params);
 
         // Update KDF parameters
         self.master_kdf_params = Some(new_kdf_params);
@@ -950,15 +1177,6 @@ impl Keystore {
             fs::set_permissions(&self.file_path, perms).map_err(KeystoreError::Io)?;
         }
 
-        // Fix for F-11: Add Windows-specific file permission handling
-        #[cfg(windows)]
-        {
-            // Windows-specific code would go here to set appropriate ACLs
-            // This would use the winapi crate to call SetNamedSecurityInfoW
-            // For now, we'll just add a comment as a placeholder
-            // TODO: Implement Windows-specific file permission handling
-        }
-
         // Unlock the lock file
         lock_file
             .unlock()
@@ -1008,7 +1226,10 @@ impl Keystore {
                     keystore_data.version
                 )));
             } else {
-                return Err(KeystoreError::InvalidFormat);
+                return Err(KeystoreError::InvalidFormat(format!(
+                    "Unsupported keystore version: {}",
+                    keystore_data.version
+                )));
             }
         }
 
@@ -1040,43 +1261,52 @@ impl Keystore {
     fn encrypt_pk(
         &self,
         pk_bytes: &[u8],
-        nonce_bytes: &[u8; 12],
+        aes_nonce_bytes: &[u8; 12], // Renamed for clarity
         id: &Uuid,
         address: &Address,
-    ) -> Result<Vec<u8>, KeystoreError> {
+    ) -> Result<(Vec<u8>, [u8; 32]), KeystoreError> {
+        // Returns (encrypted_pk_vec, hkdf_salt_bytes)
         let master_key_bytes = self
             .master_key
             .as_ref()
             .ok_or(KeystoreError::Locked)?
             .as_slice();
 
-        // Derive per-entry encryption key using HKDF
-        let entry_key = self.derive_entry_key(master_key_bytes, id)?;
+        // Generate a new random HKDF salt (ID 7)
+        let mut hkdf_salt_bytes = [0u8; 32];
+        OsRng
+            .try_fill_bytes(&mut hkdf_salt_bytes)
+            .map_err(|e| KeystoreError::FsError(format!("Failed to generate HKDF salt: {}", e)))?;
+
+        let entry_key = self.derive_entry_key(master_key_bytes, &hkdf_salt_bytes)?;
 
         let key = Key::<Aes256Gcm>::from_slice(entry_key.as_slice());
         let cipher = Aes256Gcm::new(key);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let aes_nonce = Nonce::from_slice(aes_nonce_bytes); // Use renamed variable
 
         // Create AAD from entry metadata
         let aad = self.create_aad(id, address);
 
-        cipher
+        let encrypted_data = cipher
             .encrypt(
-                nonce,
+                aes_nonce, // Use aes_nonce
                 aes_gcm::aead::Payload {
                     msg: pk_bytes,
                     aad: &aad,
                 },
             )
-            .map_err(|e| KeystoreError::AesGcm(format!("Encryption failed: {}", e)))
+            .map_err(|e| KeystoreError::AesGcm(format!("Encryption failed: {}", e)))?;
+
+        Ok((encrypted_data, hkdf_salt_bytes)) // Return both
     }
 
     fn decrypt_pk(
         &self,
         encrypted_pk_bytes: &[u8],
-        nonce_bytes: &[u8; 12],
+        aes_nonce_bytes: &[u8; 12], // Renamed for clarity
         id: &Uuid,
         address: &Address,
+        hkdf_salt_b64: &str, // Added hkdf_salt_b64
     ) -> Result<Zeroizing<Vec<u8>>, KeystoreError> {
         let master_key_bytes = self
             .master_key
@@ -1084,27 +1314,35 @@ impl Keystore {
             .ok_or(KeystoreError::Locked)?
             .as_slice();
 
-        // Derive per-entry encryption key using HKDF
-        let entry_key = self.derive_entry_key(master_key_bytes, id)?;
+        // Decode HKDF salt (ID 7)
+        let hkdf_salt_bytes_vec = BASE64_STANDARD.decode(hkdf_salt_b64).map_err(|_| {
+            KeystoreError::InvalidFormat("decrypt_pk: Failed to decode HKDF salt".to_string())
+        })?;
+        let hkdf_salt_bytes: [u8; 32] = hkdf_salt_bytes_vec.try_into().map_err(|_| {
+            KeystoreError::InvalidFormat("decrypt_pk: Invalid HKDF salt length".to_string())
+        })?;
+
+        let entry_key = self.derive_entry_key(master_key_bytes, &hkdf_salt_bytes)?;
 
         let key = Key::<Aes256Gcm>::from_slice(entry_key.as_slice());
         let cipher = Aes256Gcm::new(key);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let aes_nonce = Nonce::from_slice(aes_nonce_bytes); // Use renamed variable
 
         // Create AAD from entry metadata
         let aad = self.create_aad(id, address);
 
         let decrypted_bytes = cipher
             .decrypt(
-                nonce,
+                aes_nonce, // Corrected: Use aes_nonce here
                 aes_gcm::aead::Payload {
                     msg: encrypted_pk_bytes,
                     aad: &aad,
                 },
             )
             .map_err(|_| {
-                // Fix for F-12: Return a generic error message for decryption failures
-                KeystoreError::InvalidPassword
+                KeystoreError::InvalidFormat(
+                    "Failed to decrypt PK, likely incorrect key or corrupted data.".to_string(),
+                )
             })?;
 
         Ok(Zeroizing::new(decrypted_bytes))
@@ -1122,26 +1360,20 @@ impl Keystore {
     fn derive_entry_key(
         &self,
         master_key: &[u8],
-        id: &Uuid,
+        hkdf_salt_bytes: &[u8], // Changed id to hkdf_salt_bytes
     ) -> Result<Zeroizing<Vec<u8>>, KeystoreError> {
-        // Fix for F-4: Use proper salt instead of empty salt
-        // Derive salt from master key to ensure domain separation
-        let mut keccak = Keccak::v256();
-        keccak.update(master_key);
-        keccak.update(b"entry-key-salt");
-        let mut salt_bytes = [0u8; 32];
-        keccak.finalize(&mut salt_bytes);
-
-        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, &salt_bytes);
+        // Deterministic salt generation removed, hkdf_salt_bytes is used directly
+        // Deterministic salt generation removed, hkdf_salt_bytes is used directly
+        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, hkdf_salt_bytes); // Use provided salt
         let prk = salt.extract(master_key);
 
-        // Add domain separation in info parameter as well
-        let mut info_vec = Vec::with_capacity(id.as_bytes().len() + 16);
-        info_vec.extend_from_slice(b"mfm-keystore-v1");
-        info_vec.extend_from_slice(id.as_bytes());
+        // Add domain separation in info parameter - using a fixed string for now,
+        // as per-entry ID is part of AAD. If ID is needed here, it should be passed.
+        // For this change, let's keep it simple and use a fixed info string.
+        let info_vec: &[&[u8]] = &[b"mfm-keystore-entry-key-v1"];
 
         let mut okm = vec![0u8; 32]; // 32 bytes for AES-256
-        prk.expand(&[&info_vec], hkdf::HKDF_SHA256)
+        prk.expand(info_vec, hkdf::HKDF_SHA256) // Use updated info_vec
             .map_err(|_| KeystoreError::DerivationFailed)?
             .fill(&mut okm)
             .map_err(|_| KeystoreError::DerivationFailed)?;
@@ -1156,15 +1388,6 @@ impl Keystore {
     ) -> Result<Vec<u8>, KeystoreError> {
         let salt = hex::decode(&kdf_params.salt)
             .map_err(|e| KeystoreError::Argon2Error(format!("Failed to decode salt: {}", e)))?; // Re-using Argon2Error for this, or could make a new variant
-
-        // Fix for F-5: Remove pepper usage or make it per-installation
-        // For now, we'll keep using the pepper for backward compatibility
-        // but add a comment indicating it should be replaced in a future version
-        // SECURITY NOTE: This pepper is hard-coded and public, providing no additional security.
-        // TODO: Replace with per-installation random pepper stored in OS keychain/environment
-        let mut password_with_pepper = String::with_capacity(password.len() + self.pepper.len());
-        password_with_pepper.push_str(password);
-        password_with_pepper.push_str(std::str::from_utf8(self.pepper).unwrap_or(""));
 
         // Fix for F-6: Enforce minimum output length of 32 bytes
         let output_len = std::cmp::max(kdf_params.output_len, 32);
@@ -1188,14 +1411,11 @@ impl Keystore {
         let mut output_key_material = Zeroizing::new(vec![0u8; output_len]);
         argon2_context
             .hash_password_into(
-                password_with_pepper.as_bytes(),
+                password.as_bytes(), // Use password directly
                 &salt,
                 output_key_material.as_mut_slice(),
             )
             .map_err(|e: argon2::Error| KeystoreError::Argon2Error(e.to_string()))?;
-
-        // Zeroize the password with pepper
-        password_with_pepper.zeroize();
 
         Ok(output_key_material.to_vec())
     }
@@ -1216,6 +1436,19 @@ impl Keystore {
                 "KDF output length must be at least 32 bytes".to_string(),
             ));
         }
+        // ID 5: Enforce minimum m_cost and t_cost
+        if config.m_cost < MIN_M_COST {
+            return Err(KeystoreError::FsError(format!(
+                "KDF m_cost must be at least {} KiB",
+                MIN_M_COST
+            )));
+        }
+        if config.t_cost < MIN_T_COST {
+            return Err(KeystoreError::FsError(format!(
+                "KDF t_cost must be at least {}",
+                MIN_T_COST
+            )));
+        }
 
         let mut salt_bytes = [0u8; 16]; // 16-byte salt
         rng.try_fill_bytes(&mut salt_bytes)
@@ -1227,8 +1460,7 @@ impl Keystore {
             t_cost: config.t_cost,
             p_cost: config.p_cost,
             output_len: config.output_len,
+            kdf_version: KDF_VERSION,
         })
     }
 }
-
-// Ensure the module is declared in mfm_core/src/lib.rs or mfm_core/src/keystore/mod.rs

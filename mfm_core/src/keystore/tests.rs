@@ -279,6 +279,155 @@ fn test_import_private_key_hex_invalid_key_format() {
 }
 
 #[test]
+fn test_persisted_rate_limiting_across_instances() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let fast_kdf_config = KeystoreConfig {
+        m_cost: 4096, // Low for speed
+        t_cost: 1,    // Low for speed
+        p_cost: 1,
+        output_len: 32,
+        unlock_min_delay: Duration::from_millis(100), // Slightly faster for test
+        unlock_max_attempts: 3,                       // Lower attempts to trigger faster
+        unlock_backoff_factor: 1.5,
+        ..Default::default()
+    };
+
+    // --- KS1: Trigger rate limiting ---
+    {
+        let mut ks1 =
+            Keystore::new_with_config(Some(keystore_path.clone()), fast_kdf_config.clone())
+                .unwrap();
+        ks1.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+        ks1.unlock(TEST_PASSWORD).unwrap(); // Initial successful unlock
+        ks1.lock();
+
+        for i in 0..fast_kdf_config.unlock_max_attempts {
+            let res = ks1.unlock(WRONG_PASSWORD);
+            assert!(
+                matches!(res, Err(KeystoreError::InvalidPassword)),
+                "Attempt {} should be InvalidPassword",
+                i + 1
+            );
+        }
+        // ks1 is now rate limited
+        let res_limit_ks1 = ks1.unlock(WRONG_PASSWORD);
+        assert!(
+            matches!(res_limit_ks1, Err(KeystoreError::FsError(msg)) if msg.contains("Too many unlock attempts")),
+            "ks1 should be rate limited"
+        );
+    } // ks1 is dropped, its persisted rate limit state should remain
+
+    // --- KS2: Should be rate limited by ks1's state ---
+    {
+        let mut ks2 =
+            Keystore::new_with_config(Some(keystore_path.clone()), fast_kdf_config.clone())
+                .unwrap();
+        // Must load existing state for rate limiting to be checked based on persisted files
+        ks2.initialize_or_load(None)
+            .expect("Loading existing keystore for ks2 failed");
+
+        // Attempt with wrong password - should hit persisted rate limit
+        let res_limit_ks2_wrong_pass = ks2.unlock(WRONG_PASSWORD);
+        assert!(
+            matches!(res_limit_ks2_wrong_pass, Err(KeystoreError::FsError(msg)) if msg.contains("Too many unlock attempts")),
+            "ks2 unlock with WRONG password should be immediately rate limited due to ks1's state"
+        );
+
+        // Attempt with correct password - should also hit persisted rate limit
+        let res_limit_ks2_correct_pass = ks2.unlock(TEST_PASSWORD);
+        assert!(
+            matches!(res_limit_ks2_correct_pass, Err(KeystoreError::FsError(msg)) if msg.contains("Too many unlock attempts")),
+            "ks2 unlock with CORRECT password should also be rate limited"
+        );
+
+        // Wait for backoff duration
+        // Max attempts is 3. Backoff delay will be unlock_min_delay * factor^2 for the 3rd failed attempt.
+        // Then for the 4th attempt (which res_limit_ks1 was), it's max backoff (30s by default, but here it's based on calculate_backoff_delay logic)
+        // The `calculate_backoff_delay` uses `unlock_max_attempts` for its ceiling.
+        // If attempts >= unlock_max_attempts, it's 30s.
+        // Here, unlock_max_attempts = 3. The 3rd failed attempt on ks1 sets the timestamp.
+        // The check on ks2 happens. Attempts count is 3. So, delay is 30s (default max).
+        // Let's use a more controlled delay based on our config.
+        // After 3 failed attempts, the 4th attempt (which is what ks2 experiences) will check against the 3rd attempt's state.
+        let required_delay = fast_kdf_config.unlock_min_delay.mul_f32(
+            fast_kdf_config
+                .unlock_backoff_factor
+                .powi(fast_kdf_config.unlock_max_attempts as i32 - 1),
+        );
+        // If unlock_max_attempts is 3, this is factor^2.
+        // Or, more generally, use the `calculate_backoff_delay` logic for the current attempt count
+        let (attempts, _last_ts) = ks2.read_persisted_unlock_state().unwrap();
+        let actual_delay_needed = ks2.calculate_backoff_delay(attempts);
+        std::thread::sleep(actual_delay_needed + Duration::from_millis(50)); // Add a small buffer
+
+        // Attempt with correct password - should now succeed
+        ks2.unlock(TEST_PASSWORD)
+            .expect("ks2 unlock with correct password after wait should succeed");
+        ks2.lock();
+
+        // --- KS2: Fail once more to set a new rate limit state (1 attempt) ---
+        let res_fail_once_ks2 = ks2.unlock(WRONG_PASSWORD);
+        assert!(
+            matches!(res_fail_once_ks2, Err(KeystoreError::InvalidPassword)),
+            "ks2 single fail should be InvalidPassword"
+        );
+    } // ks2 is dropped. State: 1 failed attempt.
+
+    // --- KS3: Should NOT be rate limited by ks2's single failed attempt if ks2 previously had a successful unlock ---
+    // The successful unlock in ks2 should have reset attempts to 0.
+    // The subsequent single failure in ks2 then sets attempts to 1.
+    // So ks3 should not be rate-limited.
+    {
+        let mut ks3 =
+            Keystore::new_with_config(Some(keystore_path.clone()), fast_kdf_config.clone())
+                .unwrap();
+        ks3.initialize_or_load(None)
+            .expect("Loading existing keystore for ks3 failed");
+
+        ks3.unlock(TEST_PASSWORD).expect(
+            "ks3 unlock with correct password should succeed as ks2 reset the main lockout",
+        );
+    }
+}
+
+#[test]
+fn test_argon2_param_minimums_new_with_config() {
+    let (_temp_dir1, temp_path_1) = create_temp_keystore_path();
+    let (_temp_dir2, temp_path_2) = create_temp_keystore_path();
+    let (_temp_dir3, temp_path_3) = create_temp_keystore_path();
+
+    let mut config = KeystoreConfig::default();
+
+    // Test too low m_cost
+    config.m_cost = 1000; // Way too low
+    let res_m_cost = Keystore::new_with_config(Some(temp_path_1), config.clone());
+    assert!(
+        matches!(res_m_cost, Err(KeystoreError::FsError(msg)) if msg.contains("KDF m_cost must be at least 131072")),
+        "Low m_cost check failed. Msg: {:?}",
+        res_m_cost.err()
+    );
+
+    // Test too low t_cost
+    config.m_cost = KeystoreConfig::default().m_cost; // Reset m_cost to valid
+    config.t_cost = 1; // Too low
+    let res_t_cost = Keystore::new_with_config(Some(temp_path_2), config.clone());
+    assert!(
+        matches!(res_t_cost, Err(KeystoreError::FsError(msg)) if msg.contains("KDF t_cost must be at least 4")),
+        "Low t_cost check failed. Msg: {:?}",
+        res_t_cost.err()
+    );
+
+    // Test valid params succeed
+    config.t_cost = KeystoreConfig::default().t_cost; // Reset t_cost to valid
+    let res_valid = Keystore::new_with_config(Some(temp_path_3), config.clone());
+    assert!(
+        res_valid.is_ok(),
+        "Valid params should succeed. Err: {:?}",
+        res_valid.err()
+    );
+}
+
+#[test]
 fn test_import_private_key_hex_keystore_locked() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     let mut ks = Keystore::new(Some(keystore_path)).unwrap();
