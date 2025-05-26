@@ -1006,12 +1006,6 @@ impl Keystore {
         let _new_master_key = self.derive_master_key(new_password, &_new_kdf_params)?;
         let _new_master_key = Zeroizing::new(_new_master_key);
 
-        // Store the current entries
-        let _old_entries = self.entries.clone();
-
-        // Clear entries for re-encryption
-        self.entries.clear();
-
         // 1. Generate new KDF parameters and derive new master key
         let new_kdf_params = Self::generate_kdf_params_with_config(&mut OsRng, &self.config)?;
         let new_master_key_material = self.derive_master_key(new_password, &new_kdf_params)?;
@@ -1034,12 +1028,13 @@ impl Keystore {
             alias: Option<String>,
             created_at: DateTime<Utc>,
         }
-        let mut temp_decrypted_data: Vec<DecryptedData> = Vec::with_capacity(self.entries.len());
+        let mut temp_decrypted_data: Vec<DecryptedData> = Vec::new(); // Use new() as capacity is not known yet
 
         // Temporarily assign the old master key back to self.master_key for decrypt_pk calls
         // This clones the Option<Zeroizing<Vec<u8>>>, so the Zeroizing<Vec<u8>> itself is cloned once here.
         self.master_key = old_master_key_opt.clone();
 
+        // Iterate over the *current* entries (which are still encrypted with the old password)
         for entry_to_decrypt in self.entries.iter() {
             let encrypted_pk_bytes = BASE64_STANDARD
                 .decode(&entry_to_decrypt.encrypted_pk)
@@ -1132,7 +1127,9 @@ impl Keystore {
         self.create_verification_tag(new_password)?;
 
         // Save the updated keystore
+        self.write_persisted_unlock_state(0, 0)?; // Reset rate limiting state
         self.save_to_disk()?;
+        self.lock(); // Lock the keystore after password change
         self.update_activity_timestamp();
 
         Ok(())
@@ -1352,11 +1349,7 @@ impl Keystore {
                     aad: &aad,
                 },
             )
-            .map_err(|_| {
-                KeystoreError::InvalidFormat(
-                    "Failed to decrypt PK, likely incorrect key or corrupted data.".to_string(),
-                )
-            })?;
+            .map_err(|e| KeystoreError::AesGcm(format!("Decryption failed: {}", e)))?;
 
         Ok(Zeroizing::new(decrypted_bytes))
     }
