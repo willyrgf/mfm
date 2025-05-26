@@ -657,7 +657,7 @@ fn test_change_password_success() {
         .expect("Failed to change password");
     // The change_password function now locks the keystore and resets rate limiting.
     // Add a small delay to ensure file system sync for rate limiting state.
-    std::thread::sleep(Duration::from_secs(5));
+    std::thread::sleep(Duration::from_secs(1));
 
     // Keystore should be locked after password change
     assert!(matches!(ks.get_signer(id), Err(KeystoreError::Locked)));
@@ -704,7 +704,6 @@ fn test_change_password_incorrect_old_password() {
     );
 
     // Keystore should remain unlocked and functional with the old password
-    // Keystore should remain unlocked and functional with the old password
     assert!(ks.is_unlocked);
     ks.get_signer(id)
         .expect("Key should still be accessible with old password");
@@ -735,6 +734,7 @@ fn test_change_password_persisted_kdf_params() {
             .change_password(TEST_PASSWORD, NEW_PASSWORD)
             .expect("Failed to change password in original instance");
     } // ks_orig is dropped, changes should be persisted
+    std::thread::sleep(Duration::from_secs(1));
 
     // Load a new keystore instance from the same path
     let mut ks_loaded = Keystore::new(Some(keystore_path)).unwrap();
@@ -748,13 +748,14 @@ fn test_change_password_persisted_kdf_params() {
         matches!(unlock_old_res, Err(KeystoreError::InvalidPassword)),
         "Unlock with old password should fail after password change"
     );
+    std::thread::sleep(Duration::from_secs(1));
 
     // Unlock with the new password should succeed
     ks_loaded
         .unlock(NEW_PASSWORD)
         .expect("Unlock with new password failed after loading");
     // Add a small delay to ensure file system sync for rate limiting state.
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(Duration::from_secs(1));
 
     // Verify the key is still present and accessible
     let keys = ks_loaded.list_keys().unwrap();
