@@ -1,6 +1,3 @@
-use clap::Parser;
-use mfm_core::config::Config;
-use std::sync::Arc;
 use tracing::info;
 
 // Constants

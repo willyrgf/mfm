@@ -18,7 +18,6 @@ use bip32::{DerivationPath, XPrv};
 use bip39::Mnemonic; // Ensure Seed is not imported from bip39
 use chrono::{DateTime, Utc};
 use dirs_next;
-use fs2::FileExt; // For file locking
 use hex; // For encoding salt
 use k256::{ecdsa::SigningKey, SecretKey}; // Removed PublicKey
                                           // Removed incorrect imports for ScalarCore and ZeroizePrimitive
@@ -217,6 +216,26 @@ pub struct Keystore {
 impl Keystore {
     const DEFAULT_KEYSTORE_FILENAME: &'static str = "keystore_v1.json";
     const APP_DIR_NAME: &'static str = "mfm";
+    const ATTEMPTS_FILENAME: &'static str = "unlock_attempts";
+    const TIMESTAMP_FILENAME: &'static str = "last_attempt_timestamp";
+
+    // Helper to get the directory for persisted rate limiting files
+    fn rate_limit_dir(&self) -> PathBuf {
+        self.file_path
+            .parent()
+            .unwrap_or(&self.file_path)
+            .join("rate_limit")
+    }
+
+    // Path to the file storing unlock attempts count
+    fn attempts_file_path(&self) -> PathBuf {
+        self.rate_limit_dir().join(Self::ATTEMPTS_FILENAME)
+    }
+
+    // Path to the file storing the timestamp of the last unlock attempt
+    fn timestamp_file_path(&self) -> PathBuf {
+        self.rate_limit_dir().join(Self::TIMESTAMP_FILENAME)
+    }
 
     pub fn new(custom_path: Option<PathBuf>) -> Result<Self, KeystoreError> {
         Self::new_with_config(custom_path, KeystoreConfig::default())
@@ -979,15 +998,16 @@ impl Keystore {
             return Err(KeystoreError::InvalidPassword);
         }
 
+        // TODO: review this
         // Generate new KDF parameters
-        let new_kdf_params = Self::generate_kdf_params_with_config(&mut OsRng, &self.config)?;
+        let _new_kdf_params = Self::generate_kdf_params_with_config(&mut OsRng, &self.config)?;
 
         // Derive new master key
-        let new_master_key = self.derive_master_key(new_password, &new_kdf_params)?;
-        let new_master_key = Zeroizing::new(new_master_key);
+        let _new_master_key = self.derive_master_key(new_password, &_new_kdf_params)?;
+        let _new_master_key = Zeroizing::new(_new_master_key);
 
         // Store the current entries
-        let old_entries = self.entries.clone();
+        let _old_entries = self.entries.clone();
 
         // Clear entries for re-encryption
         self.entries.clear();
@@ -1108,9 +1128,6 @@ impl Keystore {
         // 8. Update KDF parameters, create verification tag, save
         self.master_kdf_params = Some(new_kdf_params);
 
-        // Update KDF parameters
-        self.master_kdf_params = Some(new_kdf_params);
-
         // Fix for F-1: Create a new verification tag with the new password
         self.create_verification_tag(new_password)?;
 
@@ -1138,8 +1155,7 @@ impl Keystore {
             .map_err(KeystoreError::Io)?;
 
         // Lock the lock file to prevent concurrent access
-        lock_file
-            .lock_exclusive()
+        fs2::FileExt::lock_exclusive(&lock_file)
             .map_err(|e| KeystoreError::FsError(format!("Failed to lock file: {}", e)))?;
 
         let kdf_params = self
@@ -1178,8 +1194,7 @@ impl Keystore {
         }
 
         // Unlock the lock file
-        lock_file
-            .unlock()
+        fs2::FileExt::unlock(&lock_file)
             .map_err(|e| KeystoreError::FsError(format!("Failed to unlock file: {}", e)))?;
 
         Ok(())
@@ -1208,8 +1223,7 @@ impl Keystore {
             .map_err(KeystoreError::Io)?;
 
         // Acquire a shared lock on the lock file
-        lock_file
-            .lock_shared()
+        fs2::FileExt::lock_shared(&lock_file)
             .map_err(|e| KeystoreError::FsError(format!("Failed to lock file: {}", e)))?;
 
         let file_content = fs::read_to_string(&self.file_path)?;
@@ -1251,8 +1265,7 @@ impl Keystore {
         self.master_key = None;
 
         // Unlock the lock file
-        lock_file
-            .unlock()
+        fs2::FileExt::unlock(&lock_file)
             .map_err(|e| KeystoreError::FsError(format!("Failed to unlock file: {}", e)))?;
 
         Ok(())
@@ -1418,12 +1431,6 @@ impl Keystore {
             .map_err(|e: argon2::Error| KeystoreError::Argon2Error(e.to_string()))?;
 
         Ok(output_key_material.to_vec())
-    }
-
-    fn generate_kdf_params(
-        rng: &mut (impl CryptoRng + RngCore),
-    ) -> Result<MasterKdfParams, KeystoreError> {
-        Self::generate_kdf_params_with_config(rng, &KeystoreConfig::default())
     }
 
     fn generate_kdf_params_with_config(
