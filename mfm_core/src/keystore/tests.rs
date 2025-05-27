@@ -894,18 +894,18 @@ fn test_load_from_disk_unsupported_version() {
     // Create a dummy keystore structure with an unsupported version
     let unsupported_keystore_json = serde_json::json!({
         "version": "99.0.0", // Future, unsupported version
-        "kdf_params": {
+        "master_kdf": "unsupported_kdf_algo", // Set master_kdf at the root level
+        "master_kdf_params": { // Renamed from kdf_params to master_kdf_params
+            "salt": "00000000000000000000000000000000", // Dummy salt, hex encoded
             "m_cost": 131072,
             "t_cost": 4,
             "p_cost": 1,
-            "output_len": 32
+            "output_len": 32,
+            "kdf_version": 0 // Add kdf_version as it's part of MasterKdfParams
         },
         "verification_tag": "dummy_tag",
-        "keys": [],
-        "unlock_state": {
-            "failed_attempts": 0,
-            "last_attempt_timestamp": 0
-        }
+        "verification_nonce": "dummy_nonce", // Add verification_nonce
+        "entries": [] // Renamed from keys to entries
     });
     std::fs::write(&keystore_path, unsupported_keystore_json.to_string()).unwrap();
 
@@ -913,7 +913,8 @@ fn test_load_from_disk_unsupported_version() {
     let load_res = ks.initialize_or_load(None);
     assert!(
         matches!(load_res, Err(KeystoreError::InvalidFormat(_))), // Changed to InvalidFormat
-        "Loading unsupported version should result in InvalidFormat error"
+        "Loading unsupported version should result in InvalidFormat error, got {:?}",
+        load_res
     );
 }
 
@@ -974,18 +975,23 @@ fn test_kdf_params_mismatch_error() {
     // Manually load the keystore file and tamper with KDF parameters
     let mut json_value: Value =
         serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
-    if let Some(kdf_params) = json_value["kdf_params"].as_object_mut() {
+    println!("json_value: {:?}", json_value);
+    if let Some(kdf_params) = json_value["master_kdf_params"].as_object_mut() {
         kdf_params.insert("m_cost".to_string(), Value::from(1024)); // Change m_cost
     }
     std::fs::write(&keystore_path, serde_json::to_string(&json_value).unwrap()).unwrap();
 
+    let json_value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
+
+    println!("json_value: {:?}", json_value);
     // Attempt to load and unlock the keystore with mismatched KDF params
     let mut ks_mismatched = Keystore::new(Some(keystore_path)).unwrap();
-    ks_mismatched.initialize_or_load(None).unwrap(); // Load should succeed
-    let unlock_res = ks_mismatched.unlock(TEST_PASSWORD); // Unlock should fail due to mismatch
+    let load_res = ks_mismatched.initialize_or_load(None); // Load should now fail
     assert!(
-        matches!(unlock_res, Err(KeystoreError::Argon2Error(_))),
-        "Unlock with tampered KDF params should result in Argon2Error"
+        matches!(load_res, Err(KeystoreError::Argon2Error(_))),
+        "Loading with tampered KDF params should result in Argon2Error; got: {:?}",
+        load_res
     );
 }
 

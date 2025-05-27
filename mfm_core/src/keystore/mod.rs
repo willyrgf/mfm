@@ -371,6 +371,7 @@ impl Keystore {
             // Verify the password by decrypting the verification tag
             if !self.verify_password(&derived_key_zeroizing, tag, nonce)? {
                 self.increment_persisted_attempts()?;
+                println!("@@@ WTF ???");
                 return Err(KeystoreError::InvalidPassword);
             }
             // If verification succeeds, the master_key will be set later.
@@ -1260,8 +1261,31 @@ impl Keystore {
         }
 
         // Clone fields because KeystoreFile implements Drop
+        let loaded_kdf_params = keystore_data.master_kdf_params.clone();
+
+        // Validate loaded KDF parameters against minimums (ID 5)
+        if loaded_kdf_params.m_cost < MIN_M_COST {
+            return Err(KeystoreError::Argon2Error(format!(
+                "Loaded KDF m_cost ({}) is below minimum required ({} KiB)",
+                loaded_kdf_params.m_cost, MIN_M_COST
+            )));
+        }
+        if loaded_kdf_params.t_cost < MIN_T_COST {
+            return Err(KeystoreError::Argon2Error(format!(
+                "Loaded KDF t_cost ({}) is below minimum required ({})",
+                loaded_kdf_params.t_cost, MIN_T_COST
+            )));
+        }
+        // Fix for F-6: Enforce minimum output length of 32 bytes for loaded params
+        if loaded_kdf_params.output_len < 32 {
+            return Err(KeystoreError::Argon2Error(format!(
+                "Loaded KDF output length ({}) is below minimum required (32 bytes)",
+                loaded_kdf_params.output_len
+            )));
+        }
+
         self.entries = keystore_data.entries.clone();
-        self.master_kdf_params = Some(keystore_data.master_kdf_params.clone());
+        self.master_kdf_params = Some(loaded_kdf_params);
         // Fix for F-1: Load verification tag and nonce
         self.verification_tag = keystore_data.verification_tag.clone();
         self.verification_nonce = keystore_data.verification_nonce.clone();
