@@ -371,7 +371,6 @@ impl Keystore {
             // Verify the password by decrypting the verification tag
             if !self.verify_password(&derived_key_zeroizing, tag, nonce)? {
                 self.increment_persisted_attempts()?;
-                println!("@@@ WTF ???");
                 return Err(KeystoreError::InvalidPassword);
             }
             // If verification succeeds, the master_key will be set later.

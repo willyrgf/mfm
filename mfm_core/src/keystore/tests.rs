@@ -918,49 +918,49 @@ fn test_load_from_disk_unsupported_version() {
     );
 }
 
-// #[test]
-// fn test_aes_gcm_error_trigger() {
-//     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-//     let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
-//     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
-//     ks.unlock(TEST_PASSWORD).unwrap();
+#[test]
+fn test_aes_gcm_error_trigger() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+    ks.unlock(TEST_PASSWORD).unwrap();
 
-//     let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
-//     ks.lock(); // Lock to ensure data is encrypted on disk
+    let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
+    ks.lock(); // Lock to ensure data is encrypted on disk
 
-//     // Manually load the keystore file, tamper with the encrypted private key
-//     let mut json_value: Value =
-//         serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
-//     if let Some(keys_array) = json_value["keys"].as_array_mut() {
-//         if let Some(key_entry) = keys_array.get_mut(0) {
-//             if let Some(encrypted_pk_val) = key_entry["encrypted_private_key"].as_str() {
-//                 // Corrupt the encrypted private key by changing a byte
-//                 let mut corrupted_pk = encrypted_pk_val.to_string();
-//                 // Corrupt the encrypted private key by truncating it, causing an invalid length for base64 decoding
-//                 if corrupted_pk.len() > 1 {
-//                     // Ensure there's at least one character to remove
-//                     corrupted_pk.pop(); // Remove the last character
-//                 } else {
-//                     panic!("Encrypted private key too short to corrupt");
-//                 }
-//                 key_entry["encrypted_private_key"] = Value::String(corrupted_pk);
-//             }
-//         }
-//     }
-//     std::fs::write(&keystore_path, serde_json::to_string(&json_value).unwrap()).unwrap();
+    // Manually load the keystore file, tamper with the encrypted private key
+    let mut json_value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
+    if let Some(entries_array) = json_value["entries"].as_array_mut() {
+        if let Some(key_entry) = entries_array.get_mut(0) {
+            if let Some(encrypted_pk_val) = key_entry["encrypted_pk"].as_str() {
+                // Corrupt the encrypted private key by changing a byte
+                let mut corrupted_pk = encrypted_pk_val.to_string();
+                // Corrupt the encrypted private key by truncating it, causing an invalid length for base64 decoding
+                if corrupted_pk.len() > 1 {
+                    // Ensure there's at least one character to remove
+                    corrupted_pk.pop(); // Remove the last character
+                } else {
+                    panic!("Encrypted private key too short to corrupt");
+                }
+                key_entry["encrypted_pk"] = Value::String(corrupted_pk);
+            }
+        }
+    }
+    std::fs::write(&keystore_path, serde_json::to_string(&json_value).unwrap()).unwrap();
 
-//     // Load the corrupted keystore
-//     let mut ks_corrupted = Keystore::new(Some(keystore_path)).unwrap();
-//     ks_corrupted.initialize_or_load(None).unwrap(); // Should load successfully, but decryption will fail
-//     ks_corrupted.unlock(TEST_PASSWORD).unwrap(); // Unlock to attempt decryption
+    // Load the corrupted keystore
+    let mut ks_corrupted = Keystore::new(Some(keystore_path)).unwrap();
+    ks_corrupted.initialize_or_load(None).unwrap(); // Should load successfully, but decryption will fail
+    ks_corrupted.unlock(TEST_PASSWORD).unwrap(); // Unlock to attempt decryption
 
-//     // Try to get the signer for the corrupted key, which should now fail with InvalidFormat
-//     let get_signer_res = ks_corrupted.get_signer(id);
-//     assert!(
-//         matches!(get_signer_res, Err(KeystoreError::InvalidFormat(_))),
-//         "Getting signer for corrupted key should result in InvalidFormat error due to base64 decode failure"
-//     );
-// }
+    // Try to get the signer for the corrupted key, which should now fail with InvalidFormat
+    let get_signer_res = ks_corrupted.get_signer(id);
+    assert!(
+        matches!(get_signer_res, Err(KeystoreError::InvalidFormat(_))),
+        "Getting signer for corrupted key should result in InvalidFormat error due to base64 decode failure"
+    );
+}
 
 #[test]
 fn test_kdf_params_mismatch_error() {
