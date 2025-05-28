@@ -1283,6 +1283,14 @@ impl Keystore {
             )));
         }
 
+        if keystore_data.master_kdf != "argon2id" {
+            // Clone master_kdf because KeystoreFile implements Drop
+            return Err(KeystoreError::UnsupportedKdf(
+                keystore_data.master_kdf.clone(),
+            ));
+        }
+
+        // Clone fields because KeystoreFile implements Drop
         self.entries = keystore_data.entries.clone();
         self.master_kdf_params = Some(loaded_kdf_params);
         // Fix for F-1: Load verification tag and nonce
@@ -1495,3 +1503,5 @@ impl Keystore {
         })
     }
 }
+
+// Ensure the module is declared in mfm_core/src/lib.rs or mfm_core/src/keystore/mod.rs
