@@ -52,15 +52,18 @@ pub struct MasterKdfParams {
 // Address is a fixed-size array, which should be fine.
 // Removing ZeroizeOnDrop from EncryptedKeyEntry derive.
 // String fields within will handle their own zeroization as String implements ZeroizeOnDrop.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, ZeroizeOnDrop)]
 pub struct EncryptedKeyEntry {
-    pub id: Uuid,                  // Not secret
-    pub alias: Option<String>,     // String part will be zeroized on drop if Some
-    pub address: Address,          // Not secret
+    #[zeroize(skip)]
+    pub id: Uuid, // Not secret
+    pub alias: Option<String>, // String part will be zeroized on drop if Some
+    pub address: Address,      // Not secret
     pub encrypted_pk: String, // base64 encoded encrypted private key - String implements ZeroizeOnDrop
     pub nonce: String,        // base64 encoded nonce for AES-GCM - String implements ZeroizeOnDrop
     pub hkdf_salt: String,    // New field for per-entry HKDF salt (base64 encoded)
+    #[zeroize(skip)]
     pub created_at: DateTime<Utc>, // Not secret
+    #[zeroize(skip)]
     pub updated_at: DateTime<Utc>, // Not secret
                               // Potentially other metadata like derivation path if applicable, key type, etc.
 }
