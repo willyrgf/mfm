@@ -32,8 +32,8 @@ pub enum KeystoreError {
     DerivationFailed,
     #[error("File system error: {0}")]
     FsError(String),
-    #[error("Invalid keystore file format")]
-    InvalidFormat,
+    #[error("Invalid keystore file format: {0}")]
+    InvalidFormat(String),
     #[error("Master KDF parameters mismatch")]
     KdfParamsMismatch,
     #[error("Unsupported KDF: {0}")]
@@ -46,4 +46,6 @@ pub enum KeystoreError {
     AliasExists(String),
     #[error("Private key is invalid")]
     InvalidPrivateKey,
+    #[error("Keystore is missing a verification tag. Legacy formats are not supported.")]
+    MissingVerificationTag,
 }

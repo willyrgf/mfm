@@ -16,6 +16,7 @@ serde_json = "1.0"
 serde_derive = "1.0"
 serde_yaml = "0.9"
 anyhow = "1.0"
+subtle = "2.5"
 
 pbkdf2 = "0.12"
 sha2 = "0.10"
@@ -24,7 +25,6 @@ generic-array = "0.14"
 crypto-common = "0.1"
 cipher = "0.4"
 lazy_static = "1.5.0"
-reqwest = { version = "0.12.14", features = ["json"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
 argon2 = "0.5.3"
 aes-gcm = "0.10.1"
@@ -49,3 +49,4 @@ ring = "0.17.14"
 
 [dev-dependencies]
 tempfile = "3.8"
+
