@@ -195,13 +195,41 @@ impl std::ops::Deref for ZeroizingSigningKey {
     }
 }
 
+
+// --- MasterKey Struct ---
+// Wrapper for the master key to ensure it's zeroized on drop.
+#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
+pub struct MasterKey(Zeroizing<Vec<u8>>);
+
+impl MasterKey {
+    // Constructor that takes ownership of Zeroizing<Vec<u8>>.
+    // This is the primary way MasterKey instances will be created from derived key material.
+    fn from_zeroizing(key: Zeroizing<Vec<u8>>) -> Self {
+        MasterKey(key)
+    }
+}
+
+// Allows MasterKey to be used where a slice &[u8] is expected (e.g., for cryptographic operations).
+impl std::ops::Deref for MasterKey {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        &self.0 // Dereferences to the inner Zeroizing<Vec<u8>>, which then Derefs to Vec<u8>, then to [u8]
+    }
+}
+
+// Provides an explicit way to get a reference to the underlying byte slice.
+impl AsRef<[u8]> for MasterKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0 // Similar to Deref, gets the &[u8] from Zeroizing<Vec<u8>>
+    }
+}
+
 // --- Keystore Struct ---
 
 #[derive(Debug)] // Removed ZeroizeOnDrop from Keystore struct itself
 pub struct Keystore {
     file_path: PathBuf, // PathBuf does not need to be zeroized
-    // master_key is Option<Zeroizing<Vec<u8>>> which handles its own zeroization. No attribute needed.
-    master_key: Option<zeroize::Zeroizing<Vec<u8>>>,
+    master_key: Option<MasterKey>, // Changed type here. MasterKey handles its own zeroization.
     entries: Vec<EncryptedKeyEntry>,
     master_kdf_params: Option<MasterKdfParams>,
     is_unlocked: bool,
@@ -315,10 +343,13 @@ impl Keystore {
                 }
                 // New keystore, and password provided: initialize KDF params
                 let kdf_params = Self::generate_kdf_params_with_config(&mut OsRng, &self.config)?;
-                self.master_kdf_params = Some(kdf_params);
+                // Derive the master key using 'p' and the new kdf_params
+                let master_key_val = self.derive_master_key(p, &kdf_params)?;
+                self.master_key = Some(master_key_val); // Set the master key
+                self.master_kdf_params = Some(kdf_params); // Store kdf_params
 
                 // Fix for F-1: Create a verification tag for the new keystore
-                self.create_verification_tag(p)?;
+                self.create_verification_tag()?;
 
                 // Save the new keystore structure with KDF params (but no entries yet)
                 self.save_to_disk()?;
@@ -359,31 +390,29 @@ impl Keystore {
         let derived_key = match self.derive_master_key(password, kdf_params) {
             Ok(key) => key,
             Err(e) => {
-                // Assuming derive_master_key can fail due to bad password through Argon2
                 self.increment_persisted_attempts()?;
-                return Err(e); // Return original error 'e' after attempting to increment
+                return Err(e);
             }
         };
-        let derived_key_zeroizing = zeroize::Zeroizing::new(derived_key);
 
-        // Fix for F-1: Verify the password using the verification tag
-        // Only set master_key and is_unlocked if verification succeeds
-        if let (Some(tag), Some(nonce)) =
-            (self.get_verification_tag(), self.get_verification_nonce())
-        {
-            // Verify the password by decrypting the verification tag
-            if !self.verify_password(&derived_key_zeroizing, tag, nonce)? {
+        // F-1: Verify password using the tag
+        if let (Some(tag), Some(nonce)) = (
+            self.verification_tag.as_deref(),
+            self.verification_nonce.as_deref(),
+        ) {
+            // derived_key is MasterKey, verify_password expects &MasterKey
+            if !self.verify_password(&derived_key, tag, nonce)? {
                 self.increment_persisted_attempts()?;
                 return Err(KeystoreError::InvalidPassword);
             }
-            // If verification succeeds, the master_key will be set later.
         } else {
-            // No verification tag found.
+            // This case should ideally not be reached if keystore was initialized properly
+            // and has a verification tag. If not, it's a state inconsistency.
             self.increment_persisted_attempts()?;
             return Err(KeystoreError::MissingVerificationTag);
         }
 
-        self.master_key = Some(derived_key_zeroizing);
+        self.master_key = Some(derived_key); // Store MasterKey directly_zeroizing);
         self.is_unlocked = true;
         self.last_activity_at = Some(Instant::now());
         // Persisted rate limiting handles reset on success via write_persisted_unlock_state(0,0)
@@ -392,7 +421,7 @@ impl Keystore {
     }
 
     // Fix for F-1: Create a verification tag for password verification
-    fn create_verification_tag(&mut self, password: &str) -> Result<(), KeystoreError> {
+    fn create_verification_tag(&mut self) -> Result<(), KeystoreError> {
         // Ensure parent directory for attempts files exists (best effort)
         if let Some(parent_dir) = self.attempts_file_path().parent() {
             if !parent_dir.exists() {
@@ -400,17 +429,8 @@ impl Keystore {
             }
         }
 
-        if !self.is_unlocked && self.master_key.is_none() {
-            let kdf_params = self
-                .master_kdf_params
-                .as_ref()
-                .ok_or(KeystoreError::FsError(
-                    "Keystore is not initialized with KDF parameters.".to_string(),
-                ))?;
-
-            let derived_key = self.derive_master_key(password, kdf_params)?;
-            self.master_key = Some(Zeroizing::new(derived_key));
-        }
+        // The master_key must be set by the caller (e.g. initialize_or_load or change_password)
+        // before this function is invoked. This function uses self.master_key directly.
 
         // Generate a random nonce for the verification tag
         let mut nonce_bytes = [0u8; 12];
@@ -424,7 +444,7 @@ impl Keystore {
             .master_key
             .as_ref()
             .ok_or(KeystoreError::Locked)?
-            .as_slice();
+            .as_ref();
 
         let key = Key::<Aes256Gcm>::from_slice(master_key_bytes);
         let cipher = Aes256Gcm::new(key);
@@ -450,7 +470,7 @@ impl Keystore {
     // Fix for F-1: Verify the password using the verification tag
     fn verify_password(
         &self,
-        master_key: &Zeroizing<Vec<u8>>,
+        master_key: &MasterKey, // Changed type
         tag: &str,
         nonce: &str,
     ) -> Result<bool, KeystoreError> {
@@ -466,7 +486,7 @@ impl Keystore {
             KeystoreError::InvalidFormat("Invalid verification nonce length".to_string())
         })?;
 
-        let key = Key::<Aes256Gcm>::from_slice(master_key.as_slice());
+        let key = Key::<Aes256Gcm>::from_slice(master_key.as_ref());
         let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
@@ -1014,13 +1034,11 @@ impl Keystore {
                 "Keystore is not initialized with KDF parameters.".to_string(),
             ))?;
 
-        let old_derived_key = self.derive_master_key(old_password, kdf_params)?;
-        let old_derived_key_zeroizing = Zeroizing::new(old_derived_key);
-
+        let old_master_key = self.derive_master_key(old_password, kdf_params)?;
         if let (Some(tag), Some(nonce)) =
             (self.get_verification_tag(), self.get_verification_nonce())
         {
-            if !self.verify_password(&old_derived_key_zeroizing, tag, nonce)? {
+            if !self.verify_password(&old_master_key, tag, nonce)? {
                 // If old password verification fails, return InvalidPassword
                 return Err(KeystoreError::InvalidPassword);
             }
@@ -1034,8 +1052,7 @@ impl Keystore {
 
         // 2. Generate new KDF parameters and derive new master key
         let new_kdf_params = Self::generate_kdf_params_with_config(&mut OsRng, &self.config)?;
-        let new_master_key_material = self.derive_master_key(new_password, &new_kdf_params)?;
-        let new_master_key_zeroizing = Zeroizing::new(new_master_key_material);
+        let new_master_key = self.derive_master_key(new_password, &new_kdf_params)?;
 
         // 3. The old master key is currently in `old_derived_key_zeroizing`.
         // We don't need to `take` from `self.master_key` here, as we derived it fresh.
@@ -1044,7 +1061,7 @@ impl Keystore {
         // 4. Decrypt all private keys using the old_derived_key_zeroizing and store them
         // Temporarily set self.master_key to old_derived_key_zeroizing for decrypt_pk calls
         let original_master_key_state = self.master_key.take(); // Save current state
-        self.master_key = Some(old_derived_key_zeroizing); // Set to the key derived from old_password
+        self.master_key = Some(old_master_key.clone()); // Temporarily use old key (MasterKey is Clone)ived from old_password
 
         let mut temp_decrypted_data: Vec<DecryptedData> = Vec::new();
         for entry_to_decrypt in self.entries.iter() {
@@ -1096,7 +1113,7 @@ impl Keystore {
         self.entries.clear();
 
         // 6. Set self.master_key to the new_master_key for the re-encryption phase
-        self.master_key = Some(new_master_key_zeroizing);
+        self.master_key = Some(new_master_key);
 
         // 7. Re-encrypt all data with the new master key
         for data in temp_decrypted_data {
@@ -1135,7 +1152,7 @@ impl Keystore {
         self.master_kdf_params = Some(new_kdf_params);
 
         // Fix for F-1: Create a new verification tag with the new password
-        self.create_verification_tag(new_password)?;
+        self.create_verification_tag()?;
 
         // Save the updated keystore
         self.write_persisted_unlock_state(0, 0)?; // Reset rate limiting state
@@ -1322,7 +1339,7 @@ impl Keystore {
             .master_key
             .as_ref()
             .ok_or(KeystoreError::Locked)?
-            .as_slice();
+            .as_ref();
 
         // Generate a new random HKDF salt (ID 7)
         let mut hkdf_salt_bytes = [0u8; 32];
@@ -1364,7 +1381,7 @@ impl Keystore {
             .master_key
             .as_ref()
             .ok_or(KeystoreError::Locked)?
-            .as_slice();
+            .as_ref();
 
         // Decode HKDF salt (ID 7)
         let hkdf_salt_bytes_vec = BASE64_STANDARD.decode(hkdf_salt_b64).map_err(|_| {
@@ -1433,9 +1450,9 @@ impl Keystore {
         &self,
         password: &str,
         kdf_params: &MasterKdfParams,
-    ) -> Result<Vec<u8>, KeystoreError> {
+    ) -> Result<MasterKey, KeystoreError> { // Changed return type
         let salt = hex::decode(&kdf_params.salt)
-            .map_err(|e| KeystoreError::Argon2Error(format!("Failed to decode salt: {}", e)))?; // Re-using Argon2Error for this, or could make a new variant
+            .map_err(|e| KeystoreError::Argon2Error(format!("Failed to decode salt: {}", e)))?;
 
         // Fix for F-6: Enforce minimum output length of 32 bytes
         let output_len = std::cmp::max(kdf_params.output_len, 32);
@@ -1465,7 +1482,7 @@ impl Keystore {
             )
             .map_err(|e: argon2::Error| KeystoreError::Argon2Error(e.to_string()))?;
 
-        Ok(output_key_material.to_vec())
+        Ok(MasterKey::from_zeroizing(output_key_material)) // Changed return value
     }
 
     fn generate_kdf_params_with_config(
