@@ -1452,7 +1452,7 @@ impl Keystore {
             .try_fill_bytes(&mut hkdf_salt_bytes)
             .map_err(|e| KeystoreError::FsError(format!("Failed to generate HKDF salt: {}", e)))?;
 
-        let entry_key = self.derive_entry_key(master_key_bytes, &hkdf_salt_bytes)?;
+        let entry_key = self.derive_entry_key(master_key_bytes, &hkdf_salt_bytes, id, address)?;
 
         let key = Key::<Aes256Gcm>::from_slice(entry_key.as_slice());
         let cipher = Aes256Gcm::new(key);
@@ -1496,7 +1496,7 @@ impl Keystore {
             KeystoreError::InvalidFormat("decrypt_pk: Invalid HKDF salt length".to_string())
         })?;
 
-        let entry_key = self.derive_entry_key(master_key_bytes, &hkdf_salt_bytes)?;
+        let entry_key = self.derive_entry_key(master_key_bytes, &hkdf_salt_bytes, id, address)?;
 
         let key = Key::<Aes256Gcm>::from_slice(entry_key.as_slice());
         let cipher = Aes256Gcm::new(key);
@@ -1530,20 +1530,30 @@ impl Keystore {
     fn derive_entry_key(
         &self,
         master_key: &[u8],
-        hkdf_salt_bytes: &[u8], // Changed id to hkdf_salt_bytes
+        hkdf_salt_bytes: &[u8],
+        id: &Uuid,          // Added UUID parameter for domain separation
+        address: &Address,  // Added Address parameter for domain separation
     ) -> Result<Zeroizing<Vec<u8>>, KeystoreError> {
-        // Deterministic salt generation removed, hkdf_salt_bytes is used directly
-        // Deterministic salt generation removed, hkdf_salt_bytes is used directly
-        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, hkdf_salt_bytes); // Use provided salt
+        // Use the provided salt for HKDF
+        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, hkdf_salt_bytes);
         let prk = salt.extract(master_key);
 
-        // Add domain separation in info parameter - using a fixed string for now,
-        // as per-entry ID is part of AAD. If ID is needed here, it should be passed.
-        // For this change, let's keep it simple and use a fixed info string.
-        let info_vec: &[&[u8]] = &[b"mfm-keystore-entry-key-v1"];
+        // Create a single info buffer that includes:
+        // 1. A fixed version string prefix
+        // 2. The UUID of the key
+        // 3. The ethereum address
+        // This ensures domain separation even if salts collide
+        let prefix = b"mfm-keystore-entry-key-v1";
+        let mut info_buf = Vec::with_capacity(prefix.len() + 16 + 20); // version + UUID + Address
+        info_buf.extend_from_slice(prefix);
+        info_buf.extend_from_slice(id.as_bytes());
+        info_buf.extend_from_slice(address.as_slice());
+        
+        // Use the combined info buffer
+        let info_vec: &[&[u8]] = &[&info_buf];
 
         let mut okm = vec![0u8; 32]; // 32 bytes for AES-256
-        prk.expand(info_vec, hkdf::HKDF_SHA256) // Use updated info_vec
+        prk.expand(info_vec, hkdf::HKDF_SHA256)
             .map_err(|_| KeystoreError::DerivationFailed)?
             .fill(&mut okm)
             .map_err(|_| KeystoreError::DerivationFailed)?;
