@@ -313,7 +313,7 @@ fn test_persisted_rate_limiting_across_instances() {
         // ks1 is now rate limited
         let res_limit_ks1 = ks1.unlock(WRONG_PASSWORD);
         assert!(
-            matches!(res_limit_ks1, Err(KeystoreError::FsError(msg)) if msg.contains("Too many unlock attempts")),
+            matches!(res_limit_ks1, Err(KeystoreError::RateLimited(_))),
             "ks1 should be rate limited"
         );
     } // ks1 is dropped, its persisted rate limit state should remain
@@ -330,14 +330,14 @@ fn test_persisted_rate_limiting_across_instances() {
         // Attempt with wrong password - should hit persisted rate limit
         let res_limit_ks2_wrong_pass = ks2.unlock(WRONG_PASSWORD);
         assert!(
-            matches!(res_limit_ks2_wrong_pass, Err(KeystoreError::FsError(msg)) if msg.contains("Too many unlock attempts")),
+            matches!(res_limit_ks2_wrong_pass, Err(KeystoreError::RateLimited(_))),
             "ks2 unlock with WRONG password should be immediately rate limited due to ks1's state"
         );
 
         // Attempt with correct password - should also hit persisted rate limit
         let res_limit_ks2_correct_pass = ks2.unlock(TEST_PASSWORD);
         assert!(
-            matches!(res_limit_ks2_correct_pass, Err(KeystoreError::FsError(msg)) if msg.contains("Too many unlock attempts")),
+            matches!(res_limit_ks2_correct_pass, Err(KeystoreError::RateLimited(_))),
             "ks2 unlock with CORRECT password should also be rate limited"
         );
 

@@ -48,4 +48,6 @@ pub enum KeystoreError {
     InvalidPrivateKey,
     #[error("Keystore is missing a verification tag. Legacy formats are not supported.")]
     MissingVerificationTag,
+    #[error("Too many unlock attempts. Please wait {0} seconds before trying again.")]
+    RateLimited(u64),
 }
