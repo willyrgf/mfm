@@ -25,7 +25,7 @@ use rand_core::{CryptoRng, OsRng, RngCore}; // Added OsRng
 use ring::hkdf; // For HKDF key derivation
 use serde::{Deserialize, Serialize};
 use std::fs::{self}; // Removed unused File import
-use std::io::{Write as IoWrite}; // Removed unused Read import, kept Write alias
+use std::io::Write as IoWrite; // Removed unused Read import, kept Write alias
 use std::path::{Path, PathBuf};
 use std::str::FromStr; // For DerivationPath::from_str
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH}; // Added SystemTime, UNIX_EPOCH
@@ -209,7 +209,6 @@ impl std::ops::Deref for ZeroizingSigningKey {
     }
 }
 
-
 // --- MasterKey Struct ---
 // Wrapper for the master key to ensure it's zeroized on drop.
 #[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
@@ -242,7 +241,7 @@ impl AsRef<[u8]> for MasterKey {
 
 #[derive(Debug)] // Removed ZeroizeOnDrop from Keystore struct itself
 pub struct Keystore {
-    file_path: PathBuf, // PathBuf does not need to be zeroized
+    file_path: PathBuf,            // PathBuf does not need to be zeroized
     master_key: Option<MasterKey>, // Changed type here. MasterKey handles its own zeroization.
     entries: Vec<EncryptedKeyEntry>,
     master_kdf_params: Option<MasterKdfParams>,
@@ -270,7 +269,7 @@ struct DecryptedData {
 impl Keystore {
     const DEFAULT_KEYSTORE_FILENAME: &'static str = "keystore_v1.json";
     const APP_DIR_NAME: &'static str = "mfm";
-    
+
     // Initialize monotonic clock if not already initialized
     fn init_monotonic_clock() {
         PROGRAM_START_TIME.get_or_init(|| Instant::now());
@@ -281,21 +280,23 @@ impl Keystore {
                 .as_millis() as u64
         });
     }
-    
+
     // Get current monotonic timestamp in milliseconds
     fn get_monotonic_ms() -> u64 {
         Self::init_monotonic_clock();
         PROGRAM_START_TIME.get().unwrap().elapsed().as_millis() as u64
     }
-    
+
     // Convert monotonic time to wall clock time
     fn monotonic_to_wall_clock(monotonic_ms: u64, base_epoch_ms: u64) -> u64 {
         base_epoch_ms.saturating_add(monotonic_ms) / 1000 // Convert to seconds
     }
-    
+
     // Convert wall clock time to monotonic time using base reference
     fn wall_clock_to_monotonic(wall_clock_sec: u64, base_epoch_ms: u64) -> u64 {
-        ((wall_clock_sec * 1000) as i128).saturating_sub(base_epoch_ms as i128).max(0) as u64
+        ((wall_clock_sec * 1000) as i128)
+            .saturating_sub(base_epoch_ms as i128)
+            .max(0) as u64
     }
     /// Securely create a directory with 0o700 permissions.
     fn ensure_secure_dir(dir: &Path) -> Result<(), KeystoreError> {
@@ -454,7 +455,7 @@ impl Keystore {
         self.master_key = Some(derived_key); // Store MasterKey directly_zeroizing);
         self.is_unlocked = true;
         self.last_activity_at = Some(Instant::now());
-        
+
         // Reset rate limiting counters on successful unlock
         self.write_persisted_unlock_state(0, 0)?;
 
@@ -568,38 +569,41 @@ impl Keystore {
     fn read_persisted_unlock_state(&self) -> Result<(u32, u64), KeystoreError> {
         // Initialize the monotonic clock if not already done
         Self::init_monotonic_clock();
-        
+
         // Only read from the keystore file, no fallback
         if self.file_path.exists() {
             // Check if the keystore has been initialized with KDF params
             if !self.is_initialized() {
                 return Ok((0, 0)); // Return defaults for uninitialized keystore
             }
-            
+
             match fs::read_to_string(&self.file_path) {
                 Ok(file_content) => {
                     match serde_json::from_str::<KeystoreFile>(&file_content) {
                         Ok(keystore_data) => {
                             // Extract values if present, otherwise default to zero
                             let attempts = keystore_data.unlock_attempts.unwrap_or(0);
-                            
+
                             // Convert stored monotonic time to current monotonic time reference
                             // If base_instant_wall_time is missing, treat the timestamp as direct value
-                            let timestamp = match (keystore_data.last_attempt_timestamp, keystore_data.base_instant_wall_time) {
+                            let timestamp = match (
+                                keystore_data.last_attempt_timestamp,
+                                keystore_data.base_instant_wall_time,
+                            ) {
                                 (Some(timestamp), Some(_base_time)) => {
                                     // Timestamp is already in monotonic time, no conversion needed
                                     // No need to convert to wall clock since we'll keep working with monotonic time
                                     timestamp
-                                },
+                                }
                                 (Some(timestamp), None) => {
                                     // Legacy format: timestamp is wall clock time in seconds
                                     // Convert to monotonic time for our new system
                                     let base_epoch_ms = *PROGRAM_START_EPOCH.get().unwrap();
                                     Self::wall_clock_to_monotonic(timestamp, base_epoch_ms)
-                                },
+                                }
                                 _ => 0, // Default if no timestamp available
                             };
-                            
+
                             return Ok((attempts, timestamp));
                         }
                         Err(_) => {
@@ -670,7 +674,9 @@ impl Keystore {
 
         // Write back to file atomically
         let atomic_file = AtomicFile::new(&self.file_path, OverwriteBehavior::AllowOverwrite);
-        if let Err(_) = atomic_file.write(|f| f.write_all(json_data.as_bytes()).map_err(KeystoreError::Io)) {
+        if let Err(_) =
+            atomic_file.write(|f| f.write_all(json_data.as_bytes()).map_err(KeystoreError::Io))
+        {
             // If write fails, just return silently
             // This is a best-effort operation for rate limiting
             return Ok(());
@@ -685,7 +691,7 @@ impl Keystore {
                 let _ = fs::set_permissions(&self.file_path, perms);
             }
         }
-        
+
         Ok(())
     }
 
@@ -694,7 +700,7 @@ impl Keystore {
     fn increment_persisted_attempts(&self) -> Result<(), KeystoreError> {
         let (mut attempts, _) = self.read_persisted_unlock_state()?;
         attempts = attempts.saturating_add(1);
-        
+
         // Use monotonic time instead of wall clock time
         let current_monotonic_ms = Self::get_monotonic_ms();
         self.write_persisted_unlock_state(attempts, current_monotonic_ms)
@@ -704,7 +710,7 @@ impl Keystore {
     fn update_last_attempt_timestamp(&self) -> Result<(), KeystoreError> {
         // Read current state
         let (attempts, _) = self.read_persisted_unlock_state()?;
-        
+
         // Write updated state with current monotonic timestamp (milliseconds)
         let current_monotonic_ms = Self::get_monotonic_ms();
         self.write_persisted_unlock_state(attempts, current_monotonic_ms)
@@ -714,13 +720,13 @@ impl Keystore {
     fn enforce_unlock_rate_limiting(&self) -> Result<(), KeystoreError> {
         // Initialize monotonic clock if not already done
         Self::init_monotonic_clock();
-        
+
         let (attempts, last_attempt_timestamp_ms) = self.read_persisted_unlock_state()?;
 
         if attempts > 0 && last_attempt_timestamp_ms > 0 {
             // Get current monotonic time in milliseconds
             let current_monotonic_ms = Self::get_monotonic_ms();
-            
+
             // Calculate elapsed time in milliseconds using monotonic clock
             // This is guaranteed to always increase and cannot be manipulated by changing system clock
             if current_monotonic_ms >= last_attempt_timestamp_ms {
@@ -1282,7 +1288,7 @@ impl Keystore {
             Ok(state) => state,
             Err(_) => (0, 0), // Default to zero on error
         };
-        
+
         let keystore_data = KeystoreFile {
             version: "1.0.0".to_string(),
             master_kdf: "argon2id".to_string(),
@@ -1291,7 +1297,12 @@ impl Keystore {
             verification_nonce: self.verification_nonce.clone(),
             unlock_attempts: Some(attempts),
             last_attempt_timestamp: Some(last_timestamp),
-            base_instant_wall_time: Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()),
+            base_instant_wall_time: Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            ),
             entries: self.entries.clone(),
         };
 
@@ -1412,11 +1423,14 @@ impl Keystore {
         // Fix for F-1: Load verification tag and nonce
         self.verification_tag = keystore_data.verification_tag.clone();
         self.verification_nonce = keystore_data.verification_nonce.clone();
-        
+
         // Fix for KM-H-01: Load rate limiting data from keystore file
         // and write it to persistent storage for backward compatibility
         // during the transition period
-        if let (Some(attempts), Some(timestamp)) = (keystore_data.unlock_attempts, keystore_data.last_attempt_timestamp) {
+        if let (Some(attempts), Some(timestamp)) = (
+            keystore_data.unlock_attempts,
+            keystore_data.last_attempt_timestamp,
+        ) {
             // Store the loaded values back to persistent storage
             // This is to ensure a smooth transition from file-based to JSON-based storage
             let _ = self.write_persisted_unlock_state(attempts, timestamp);
@@ -1531,8 +1545,8 @@ impl Keystore {
         &self,
         master_key: &[u8],
         hkdf_salt_bytes: &[u8],
-        id: &Uuid,          // Added UUID parameter for domain separation
-        address: &Address,  // Added Address parameter for domain separation
+        id: &Uuid,         // Added UUID parameter for domain separation
+        address: &Address, // Added Address parameter for domain separation
     ) -> Result<Zeroizing<Vec<u8>>, KeystoreError> {
         // Use the provided salt for HKDF
         let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, hkdf_salt_bytes);
@@ -1548,7 +1562,7 @@ impl Keystore {
         info_buf.extend_from_slice(prefix);
         info_buf.extend_from_slice(id.as_bytes());
         info_buf.extend_from_slice(address.as_slice());
-        
+
         // Use the combined info buffer
         let info_vec: &[&[u8]] = &[&info_buf];
 
@@ -1565,7 +1579,8 @@ impl Keystore {
         &self,
         password: &str,
         kdf_params: &MasterKdfParams,
-    ) -> Result<MasterKey, KeystoreError> { // Changed return type
+    ) -> Result<MasterKey, KeystoreError> {
+        // Changed return type
         let salt = hex::decode(&kdf_params.salt)
             .map_err(|e| KeystoreError::Argon2Error(format!("Failed to decode salt: {}", e)))?;
 

@@ -337,7 +337,10 @@ fn test_persisted_rate_limiting_across_instances() {
         // Attempt with correct password - should also hit persisted rate limit
         let res_limit_ks2_correct_pass = ks2.unlock(TEST_PASSWORD);
         assert!(
-            matches!(res_limit_ks2_correct_pass, Err(KeystoreError::RateLimited(_))),
+            matches!(
+                res_limit_ks2_correct_pass,
+                Err(KeystoreError::RateLimited(_))
+            ),
             "ks2 unlock with CORRECT password should also be rate limited"
         );
 
