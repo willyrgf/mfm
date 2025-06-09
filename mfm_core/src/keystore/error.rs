@@ -32,6 +32,8 @@ pub enum KeystoreError {
     DerivationFailed,
     #[error("File system error: {0}")]
     FsError(String),
+    #[error("Persistence FsError: {0}")]
+    FsErrorPersistence(String),
     #[error("Invalid keystore file format: {0}")]
     InvalidFormat(String),
     #[error("Master KDF parameters mismatch")]
