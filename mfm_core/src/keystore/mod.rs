@@ -16,12 +16,13 @@ use atomicwrites::{AtomicFile, OverwriteBehavior};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _}; // For base64 encoding
 use bip32::{DerivationPath, XPrv};
 use bip39::Mnemonic; // Ensure Seed is not imported from bip39
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use dirs_next;
 use hex; // For encoding salt
-use k256::{ecdsa::SigningKey, SecretKey}; // Removed PublicKey
-                                          // Removed incorrect imports for ScalarCore and ZeroizePrimitive
-use rand_core::{CryptoRng, OsRng, RngCore}; // Added OsRng
+use k256::{ecdsa::SigningKey, SecretKey};
+use rand::TryRngCore;
+// Removed PublicKey
+// Removed incorrect imports for ScalarCore and ZeroizePrimitive
 use ring::hkdf; // For HKDF key derivation
 use serde::{Deserialize, Serialize};
 use std::fs::{self}; // Removed unused File import
@@ -173,17 +174,7 @@ impl Zeroize for ZeroizingSigningKey {
                 let dummy_signing_key = k256::ecdsa::SigningKey::from(&dummy_secret_key);
                 self.0 = dummy_signing_key; // Old self.0 is dropped here, its secret zeroized.
             }
-            Err(_) => {
-                // This case should ideally not be reached with a static dummy value like [1u8; 32].
-                // If it is, it might indicate an issue with the k256 crate's assumptions or environment.
-                // As a last resort, if we had OsRng easily available here, we could try to replace
-                // with a new random key: `self.0 = k256::ecdsa::SigningKey::random(&mut OsRng);`
-                // but that introduces OsRng dependency just for this unlikely error path.
-                // Panicking or logging might be options if this error is critical.
-                // For now, if dummy creation fails, the original key remains, which is not ideal
-                // but avoids a panic in release mode. A production library might handle this more robustly.
-                // However, the primary goal is that *successful* explicit zeroize clears the key.
-            }
+            Err(_) => {}
         }
     }
 }
@@ -272,7 +263,7 @@ impl Keystore {
 
     // Initialize monotonic clock if not already initialized
     fn init_monotonic_clock() {
-        PROGRAM_START_TIME.get_or_init(|| Instant::now());
+        PROGRAM_START_TIME.get_or_init(Instant::now);
         PROGRAM_START_EPOCH.get_or_init(|| {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -288,8 +279,15 @@ impl Keystore {
     }
 
     // Convert monotonic time to wall clock time
-    fn monotonic_to_wall_clock(monotonic_ms: u64, base_epoch_ms: u64) -> u64 {
-        base_epoch_ms.saturating_add(monotonic_ms) / 1000 // Convert to seconds
+    #[allow(dead_code)]
+    fn monotonic_to_wall_clock(monotonic_ms: u64, base_epoch_ms: u64) -> DateTime<Utc> {
+        Utc.timestamp_opt(
+            (base_epoch_ms.saturating_add(monotonic_ms) / 1000)
+                .try_into()
+                .unwrap(),
+            0,
+        )
+        .unwrap()
     }
 
     // Convert wall clock time to monotonic time using base reference
@@ -299,6 +297,7 @@ impl Keystore {
             .max(0) as u64
     }
     /// Securely create a directory with 0o700 permissions.
+    #[allow(dead_code)]
     fn ensure_secure_dir(dir: &Path) -> Result<(), KeystoreError> {
         if !dir.exists() {
             fs::create_dir_all(dir).map_err(|e| {
@@ -382,7 +381,7 @@ impl Keystore {
                     return Err(KeystoreError::InvalidPassword); // Or a specific error for empty password on init
                 }
                 // New keystore, and password provided: initialize KDF params
-                let kdf_params = Self::generate_kdf_params_with_config(&mut OsRng, &self.config)?;
+                let kdf_params = Self::generate_kdf_params_with_config(&self.config)?;
                 // Derive the master key using 'p' and the new kdf_params
                 let master_key_val = self.derive_master_key(p, &kdf_params)?;
                 self.master_key = Some(master_key_val); // Set the master key
@@ -476,7 +475,7 @@ impl Keystore {
 
         // Generate a random nonce for the verification tag
         let mut nonce_bytes = [0u8; 12];
-        OsRng
+        rand::rng()
             .try_fill_bytes(&mut nonce_bytes)
             .map_err(|e| KeystoreError::FsError(format!("Failed to generate nonce: {}", e)))?;
 
@@ -504,7 +503,7 @@ impl Keystore {
 
         // Store the verification tag and nonce
         self.verification_tag = Some(BASE64_STANDARD.encode(&encrypted_tag));
-        self.verification_nonce = Some(BASE64_STANDARD.encode(&nonce_bytes));
+        self.verification_nonce = Some(BASE64_STANDARD.encode(nonce_bytes));
 
         Ok(())
     }
@@ -545,8 +544,17 @@ impl Keystore {
                 Ok(decrypted.ct_eq(b"ok").into())
             }
             Err(_) => {
-                // Fix for F-12: Return a generic error message for decryption failures
-                Ok(false)
+                // Mitigate timing oracle (C-3):
+                // Always perform a constant-time comparison even if decryption fails.
+                // The expected plaintext is b"ok".
+                let expected_plaintext = b"ok";
+                // Create dummy data of the same length as the expected plaintext.
+                // The content of dummy_data doesn't matter, only its length and the ct_eq call.
+                let dummy_data = vec![0u8; expected_plaintext.len()];
+                // Perform a constant-time comparison. The result is irrelevant here
+                // as we already know verification failed, but the operation's timing is what matters.
+                let _ = dummy_data.ct_eq(expected_plaintext);
+                Ok(false) // Verification failed
             }
         }
     }
@@ -632,64 +640,75 @@ impl Keystore {
     ) -> Result<(), KeystoreError> {
         // Check if keystore is initialized with KDF parameters
         if !self.is_initialized() {
-            // For uninitialized keystore, we just ignore the write operation
-            // This handles the edge case in tests where keystore isn't initialized yet
+            // For uninitialized keystore, we ignore the write operation.
+            // This aligns with the recommendation to only allow silent ignore before the store is initialized.
             return Ok(());
         }
 
         if !self.file_path.exists() {
-            // No file to update yet, which is fine - rate limiting info will be added
-            // when the keystore file is first created during initialization
+            // If the file doesn't exist yet, it means the keystore hasn't been fully persisted.
+            // Rate limiting info will be added when the keystore file is first created.
+            // Silently returning Ok(()) here is acceptable as per audit recommendation.
             return Ok(());
         }
 
         // Read the current keystore file content
-        let file_content = match fs::read_to_string(&self.file_path) {
-            Ok(content) => content,
-            Err(_) => {
-                // If we can't read the file, just silently return
-                // This prevents rate limiting issues from blocking the main functionality
-                return Ok(());
-            }
-        };
+        let file_content = fs::read_to_string(&self.file_path).map_err(|e| {
+            KeystoreError::FsErrorPersistence(format!(
+                "Failed to read keystore file for rate limiting update: {}",
+                e
+            ))
+        })?;
 
         // Parse the JSON content
-        let mut keystore_data = match serde_json::from_str::<KeystoreFile>(&file_content) {
-            Ok(data) => data,
-            Err(_) => {
-                // If we can't parse the file, just silently return
-                return Ok(());
-            }
-        };
+        let mut keystore_data: KeystoreFile = serde_json::from_str(&file_content).map_err(|e| {
+            KeystoreError::FsErrorPersistence(format!(
+                "Failed to parse keystore file for rate limiting update: {}",
+                e
+            ))
+        })?;
 
         // Update the rate limiting fields
         keystore_data.unlock_attempts = Some(attempts);
         keystore_data.last_attempt_timestamp = Some(last_attempt_timestamp_seconds_epoch);
 
         // Serialize back to JSON
-        let json_data = match serde_json::to_string_pretty(&keystore_data) {
-            Ok(data) => data,
-            Err(_) => return Ok(()), // If serialization fails, just return silently
-        };
+        let json_data = serde_json::to_string_pretty(&keystore_data).map_err(|e| {
+            KeystoreError::FsErrorPersistence(format!(
+                "Failed to serialize keystore data for rate limiting update: {}",
+                e
+            ))
+        })?;
 
         // Write back to file atomically
         let atomic_file = AtomicFile::new(&self.file_path, OverwriteBehavior::AllowOverwrite);
-        if let Err(_) =
-            atomic_file.write(|f| f.write_all(json_data.as_bytes()).map_err(KeystoreError::Io))
-        {
-            // If write fails, just return silently
-            // This is a best-effort operation for rate limiting
-            return Ok(());
-        }
+        atomic_file
+            .write(|f| f.write_all(json_data.as_bytes()))
+            .map_err(|e: atomicwrites::Error<std::io::Error>| {
+                KeystoreError::FsErrorPersistence(format!(
+                    "Failed to write keystore file atomically for rate limiting update: {}",
+                    e
+                ))
+            })?;
 
         // Set secure file permissions (0o600 - owner read/write only)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(mut perms) = fs::metadata(&self.file_path).map(|m| m.permissions()) {
-                perms.set_mode(0o600);
-                let _ = fs::set_permissions(&self.file_path, perms);
-            }
+            let metadata = fs::metadata(&self.file_path).map_err(|e| {
+                KeystoreError::FsErrorPersistence(format!(
+                    "Failed to get metadata for setting permissions on keystore file: {}",
+                    e
+                ))
+            })?;
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&self.file_path, perms).map_err(|e| {
+                KeystoreError::FsErrorPersistence(format!(
+                    "Failed to set permissions on keystore file: {}",
+                    e
+                ))
+            })?;
         }
 
         Ok(())
@@ -707,6 +726,7 @@ impl Keystore {
     }
 
     // Updates the timestamp of the most recent unlock attempt without increasing attempts counter
+    #[allow(dead_code)]
     fn update_last_attempt_timestamp(&self) -> Result<(), KeystoreError> {
         // Read current state
         let (attempts, _) = self.read_persisted_unlock_state()?;
@@ -838,12 +858,14 @@ impl Keystore {
 
         let id = Uuid::new_v4();
         let mut aes_nonce_bytes = [0u8; 12];
-        OsRng.try_fill_bytes(&mut aes_nonce_bytes).map_err(|e| {
-            KeystoreError::FsError(format!(
-                "import_private_key_hex: Failed to generate AES nonce: {}",
-                e
-            ))
-        })?;
+        rand::rng()
+            .try_fill_bytes(&mut aes_nonce_bytes)
+            .map_err(|e| {
+                KeystoreError::FsError(format!(
+                    "import_private_key_hex: Failed to generate AES nonce: {}",
+                    e
+                ))
+            })?;
 
         let (encrypted_pk_data, new_hkdf_salt_bytes) =
             self.encrypt_pk(pk_bytes.as_slice(), &aes_nonce_bytes, &id, &address)?;
@@ -939,12 +961,14 @@ impl Keystore {
 
         let id = Uuid::new_v4();
         let mut aes_nonce_bytes = [0u8; 12];
-        OsRng.try_fill_bytes(&mut aes_nonce_bytes).map_err(|e| {
-            KeystoreError::FsError(format!(
-                "import_mnemonic: Failed to generate AES nonce: {}",
-                e
-            ))
-        })?;
+        rand::rng()
+            .try_fill_bytes(&mut aes_nonce_bytes)
+            .map_err(|e| {
+                KeystoreError::FsError(format!(
+                    "import_mnemonic: Failed to generate AES nonce: {}",
+                    e
+                ))
+            })?;
 
         let (encrypted_pk_data, new_hkdf_salt_bytes) = self.encrypt_pk(
             pk_bytes_for_encryption.as_slice(),
@@ -1144,7 +1168,7 @@ impl Keystore {
         // Now proceed with generating new KDF params and re-encrypting.
 
         // 2. Generate new KDF parameters and derive new master key
-        let new_kdf_params = Self::generate_kdf_params_with_config(&mut OsRng, &self.config)?;
+        let new_kdf_params = Self::generate_kdf_params_with_config(&self.config)?;
         let new_master_key = self.derive_master_key(new_password, &new_kdf_params)?;
 
         // 3. The old master key is currently in `old_derived_key_zeroizing`.
@@ -1211,7 +1235,7 @@ impl Keystore {
         // 7. Re-encrypt all data with the new master key
         for data in temp_decrypted_data {
             let mut new_aes_nonce_bytes = [0u8; 12];
-            OsRng
+            rand::rng()
                 .try_fill_bytes(&mut new_aes_nonce_bytes)
                 .map_err(|e| {
                     KeystoreError::FsError(format!(
@@ -1267,8 +1291,8 @@ impl Keystore {
         // Fix for F-7: Create a separate lock file in the target directory
         let lock_file_path = self.file_path.with_extension("lock");
         let lock_file = fs::OpenOptions::new()
-            .write(true)
             .create(true)
+            .append(true) // Use append for lock file to satisfy clippy, content is not relevant
             .open(&lock_file_path)
             .map_err(KeystoreError::Io)?;
 
@@ -1284,10 +1308,7 @@ impl Keystore {
             ))?;
 
         // Read current rate limiting data before saving
-        let (attempts, last_timestamp) = match self.read_persisted_unlock_state() {
-            Ok(state) => state,
-            Err(_) => (0, 0), // Default to zero on error
-        };
+        let (attempts, last_timestamp) = self.read_persisted_unlock_state().unwrap_or_default();
 
         let keystore_data = KeystoreFile {
             version: "1.0.0".to_string(),
@@ -1343,14 +1364,13 @@ impl Keystore {
             // A better approach might be for initialize_or_load to check existence first.
             // Let's make it return Ok if not found, and initialize_or_load will create new.
             return Ok(());
-        }
-
-        // Fix for F-7: Use the lock file for locking
+        } // Closes if !self.file_path.exists()
+          // Fix for F-7: Use the lock file for locking
         let lock_file_path = self.file_path.with_extension("lock");
         let lock_file = fs::OpenOptions::new()
             .read(true)
-            .write(true)
             .create(true)
+            .append(true) // Use append for lock file to satisfy clippy, content is not relevant
             .open(&lock_file_path)
             .map_err(KeystoreError::Io)?;
 
@@ -1433,18 +1453,25 @@ impl Keystore {
         ) {
             // Store the loaded values back to persistent storage
             // This is to ensure a smooth transition from file-based to JSON-based storage
-            let _ = self.write_persisted_unlock_state(attempts, timestamp);
-        }
-        // Keystore remains locked after loading. Unlock is a separate step.
+            match self.write_persisted_unlock_state(attempts, timestamp) {
+                Ok(_) => {}
+                Err(e) => return Err(e),
+            }
+        } // Closes 'if let (Some(attempts), Some(timestamp))' arm
+          // Keystore remains locked after loading. Unlock is a separate step.
         self.is_unlocked = false;
         self.master_key = None;
 
         // Unlock the lock file
-        fs2::FileExt::unlock(&lock_file)
-            .map_err(|e| KeystoreError::FsError(format!("Failed to unlock file: {}", e)))?;
+        match fs2::FileExt::unlock(&lock_file)
+            .map_err(|e| KeystoreError::FsError(format!("Failed to unlock file: {}", e)))
+        {
+            Ok(_) => {}
+            Err(e) => return Err(e),
+        }
 
         Ok(())
-    }
+    } // End of load_from_disk
 
     fn encrypt_pk(
         &self,
@@ -1462,7 +1489,7 @@ impl Keystore {
 
         // Generate a new random HKDF salt (ID 7)
         let mut hkdf_salt_bytes = [0u8; 32];
-        OsRng
+        rand::rng()
             .try_fill_bytes(&mut hkdf_salt_bytes)
             .map_err(|e| KeystoreError::FsError(format!("Failed to generate HKDF salt: {}", e)))?;
 
@@ -1616,7 +1643,6 @@ impl Keystore {
     }
 
     fn generate_kdf_params_with_config(
-        rng: &mut (impl CryptoRng + RngCore),
         config: &KeystoreConfig,
     ) -> Result<MasterKdfParams, KeystoreError> {
         // Fix for F-6: Enforce minimum output length of 32 bytes
@@ -1640,7 +1666,8 @@ impl Keystore {
         }
 
         let mut salt_bytes = [0u8; 16]; // 16-byte salt
-        rng.try_fill_bytes(&mut salt_bytes)
+        rand::rng()
+            .try_fill_bytes(&mut salt_bytes)
             .map_err(|e| KeystoreError::FsError(format!("Failed to generate salt: {}", e)))?;
 
         Ok(MasterKdfParams {
@@ -1652,6 +1679,5 @@ impl Keystore {
             kdf_version: KDF_VERSION,
         })
     }
-}
-
-// Ensure the module is declared in mfm_core/src/lib.rs or mfm_core/src/keystore/mod.rs
+} // Closing brace for impl Keystore
+  // Ensure the module is declared in mfm_core/src/lib.rs or mfm_core/src/keystore/mod.rs

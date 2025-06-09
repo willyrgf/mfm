@@ -21,7 +21,7 @@ subtle = "2.5"
 pbkdf2 = "0.12"
 sha2 = "0.10"
 sha3 = "0.10"
-generic-array = "0.14"
+generic-array = "1.2"
 crypto-common = "0.1"
 cipher = "0.4"
 lazy_static = "1.5.0"
@@ -29,14 +29,14 @@ tiny-keccak = { version = "2.0", features = ["keccak"] }
 argon2 = "0.5.3"
 aes-gcm = "0.10.1"
 bip39 = "2.0.0"
-bip32 = "0.4.0"
+bip32 = "0.5.3"
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 dirs-next = "2.0.0"
 uuid = { version = "1.8.0", features = ["serde", "v4"] }
 zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
 base64 = "0.22.1"
 chrono = { version = "0.4.38", features = ["serde"] }
-rand_core = "0.6.4"
+rand = "0.9.1"
 atomicwrites = "0.4.4"
 fs2 = "0.4.3"
 alloy-primitives = "1.1"
@@ -49,4 +49,3 @@ ring = "0.17.14"
 
 [dev-dependencies]
 tempfile = "3.8"
-

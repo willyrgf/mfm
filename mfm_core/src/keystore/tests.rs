@@ -392,10 +392,12 @@ fn test_argon2_param_minimums_new_with_config() {
     let (_temp_dir2, temp_path_2) = create_temp_keystore_path();
     let (_temp_dir3, temp_path_3) = create_temp_keystore_path();
 
-    let mut config = KeystoreConfig::default();
+    let mut config = KeystoreConfig {
+        m_cost: 1000,
+        ..KeystoreConfig::default()
+    };
 
     // Test too low m_cost
-    config.m_cost = 1000; // Way too low
     let res_m_cost = Keystore::new_with_config(Some(temp_path_1), config.clone());
     if let Err(KeystoreError::FsError(msg)) = res_m_cost {
         assert!(
