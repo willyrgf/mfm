@@ -19,9 +19,10 @@ use bip39::Mnemonic; // Ensure Seed is not imported from bip39
 use chrono::{DateTime, TimeZone, Utc};
 use dirs_next;
 use hex; // For encoding salt
-use k256::{ecdsa::SigningKey, SecretKey}; // Removed PublicKey
-                                          // Removed incorrect imports for ScalarCore and ZeroizePrimitive
-use rand_core::{CryptoRng, OsRng, RngCore}; // Added OsRng
+use k256::{ecdsa::SigningKey, SecretKey};
+use rand::TryRngCore;
+// Removed PublicKey
+// Removed incorrect imports for ScalarCore and ZeroizePrimitive
 use ring::hkdf; // For HKDF key derivation
 use serde::{Deserialize, Serialize};
 use std::fs::{self}; // Removed unused File import
@@ -173,17 +174,7 @@ impl Zeroize for ZeroizingSigningKey {
                 let dummy_signing_key = k256::ecdsa::SigningKey::from(&dummy_secret_key);
                 self.0 = dummy_signing_key; // Old self.0 is dropped here, its secret zeroized.
             }
-            Err(_) => {
-                // This case should ideally not be reached with a static dummy value like [1u8; 32].
-                // If it is, it might indicate an issue with the k256 crate's assumptions or environment.
-                // As a last resort, if we had OsRng easily available here, we could try to replace
-                // with a new random key: `self.0 = k256::ecdsa::SigningKey::random(&mut OsRng);`
-                // but that introduces OsRng dependency just for this unlikely error path.
-                // Panicking or logging might be options if this error is critical.
-                // For now, if dummy creation fails, the original key remains, which is not ideal
-                // but avoids a panic in release mode. A production library might handle this more robustly.
-                // However, the primary goal is that *successful* explicit zeroize clears the key.
-            }
+            Err(_) => {}
         }
     }
 }
@@ -390,7 +381,7 @@ impl Keystore {
                     return Err(KeystoreError::InvalidPassword); // Or a specific error for empty password on init
                 }
                 // New keystore, and password provided: initialize KDF params
-                let kdf_params = Self::generate_kdf_params_with_config(&mut OsRng, &self.config)?;
+                let kdf_params = Self::generate_kdf_params_with_config(&self.config)?;
                 // Derive the master key using 'p' and the new kdf_params
                 let master_key_val = self.derive_master_key(p, &kdf_params)?;
                 self.master_key = Some(master_key_val); // Set the master key
@@ -484,7 +475,7 @@ impl Keystore {
 
         // Generate a random nonce for the verification tag
         let mut nonce_bytes = [0u8; 12];
-        OsRng
+        rand::rng()
             .try_fill_bytes(&mut nonce_bytes)
             .map_err(|e| KeystoreError::FsError(format!("Failed to generate nonce: {}", e)))?;
 
@@ -867,12 +858,14 @@ impl Keystore {
 
         let id = Uuid::new_v4();
         let mut aes_nonce_bytes = [0u8; 12];
-        OsRng.try_fill_bytes(&mut aes_nonce_bytes).map_err(|e| {
-            KeystoreError::FsError(format!(
-                "import_private_key_hex: Failed to generate AES nonce: {}",
-                e
-            ))
-        })?;
+        rand::rng()
+            .try_fill_bytes(&mut aes_nonce_bytes)
+            .map_err(|e| {
+                KeystoreError::FsError(format!(
+                    "import_private_key_hex: Failed to generate AES nonce: {}",
+                    e
+                ))
+            })?;
 
         let (encrypted_pk_data, new_hkdf_salt_bytes) =
             self.encrypt_pk(pk_bytes.as_slice(), &aes_nonce_bytes, &id, &address)?;
@@ -968,12 +961,14 @@ impl Keystore {
 
         let id = Uuid::new_v4();
         let mut aes_nonce_bytes = [0u8; 12];
-        OsRng.try_fill_bytes(&mut aes_nonce_bytes).map_err(|e| {
-            KeystoreError::FsError(format!(
-                "import_mnemonic: Failed to generate AES nonce: {}",
-                e
-            ))
-        })?;
+        rand::rng()
+            .try_fill_bytes(&mut aes_nonce_bytes)
+            .map_err(|e| {
+                KeystoreError::FsError(format!(
+                    "import_mnemonic: Failed to generate AES nonce: {}",
+                    e
+                ))
+            })?;
 
         let (encrypted_pk_data, new_hkdf_salt_bytes) = self.encrypt_pk(
             pk_bytes_for_encryption.as_slice(),
@@ -1173,7 +1168,7 @@ impl Keystore {
         // Now proceed with generating new KDF params and re-encrypting.
 
         // 2. Generate new KDF parameters and derive new master key
-        let new_kdf_params = Self::generate_kdf_params_with_config(&mut OsRng, &self.config)?;
+        let new_kdf_params = Self::generate_kdf_params_with_config(&self.config)?;
         let new_master_key = self.derive_master_key(new_password, &new_kdf_params)?;
 
         // 3. The old master key is currently in `old_derived_key_zeroizing`.
@@ -1240,7 +1235,7 @@ impl Keystore {
         // 7. Re-encrypt all data with the new master key
         for data in temp_decrypted_data {
             let mut new_aes_nonce_bytes = [0u8; 12];
-            OsRng
+            rand::rng()
                 .try_fill_bytes(&mut new_aes_nonce_bytes)
                 .map_err(|e| {
                     KeystoreError::FsError(format!(
@@ -1494,7 +1489,7 @@ impl Keystore {
 
         // Generate a new random HKDF salt (ID 7)
         let mut hkdf_salt_bytes = [0u8; 32];
-        OsRng
+        rand::rng()
             .try_fill_bytes(&mut hkdf_salt_bytes)
             .map_err(|e| KeystoreError::FsError(format!("Failed to generate HKDF salt: {}", e)))?;
 
@@ -1648,7 +1643,6 @@ impl Keystore {
     }
 
     fn generate_kdf_params_with_config(
-        rng: &mut (impl CryptoRng + RngCore),
         config: &KeystoreConfig,
     ) -> Result<MasterKdfParams, KeystoreError> {
         // Fix for F-6: Enforce minimum output length of 32 bytes
@@ -1672,7 +1666,8 @@ impl Keystore {
         }
 
         let mut salt_bytes = [0u8; 16]; // 16-byte salt
-        rng.try_fill_bytes(&mut salt_bytes)
+        rand::rng()
+            .try_fill_bytes(&mut salt_bytes)
             .map_err(|e| KeystoreError::FsError(format!("Failed to generate salt: {}", e)))?;
 
         Ok(MasterKdfParams {

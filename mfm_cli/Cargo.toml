@@ -19,12 +19,11 @@ mfm_core = { path = "../mfm_core" }
 mfm_machine = { path = "../mfm_machine" }
 hex = { workspace = true }
 ring = { workspace = true }
-tracing = "0.1"
-tracing-subscriber = "0.3"
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [[bin]]
 name = "mfm_cli"
 path = "src/main.rs"
-
