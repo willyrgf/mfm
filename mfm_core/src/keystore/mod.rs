@@ -16,7 +16,7 @@ use atomicwrites::{AtomicFile, OverwriteBehavior};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _}; // For base64 encoding
 use bip32::{DerivationPath, XPrv};
 use bip39::Mnemonic; // Ensure Seed is not imported from bip39
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use dirs_next;
 use hex; // For encoding salt
 use k256::{ecdsa::SigningKey, SecretKey};
@@ -29,7 +29,7 @@ use std::fs::{self}; // Removed unused File import
 use std::io::Write as IoWrite; // Removed unused Read import, kept Write alias
 use std::path::{Path, PathBuf};
 use std::str::FromStr; // For DerivationPath::from_str
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH}; // Added SystemTime, UNIX_EPOCH
+use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq; // ID 12: For constant-time comparison
 use tiny_keccak::{Hasher, Keccak}; // For Keccak-256
 use uuid::Uuid;
@@ -80,10 +80,7 @@ struct KeystoreFile {
     // Password verification tag (F-1)
     verification_tag: Option<String>, // base64 encoded encrypted verification tag
     verification_nonce: Option<String>, // base64 encoded nonce for verification tag
-    // Rate limiting data (KM-H-01)
-    unlock_attempts: Option<u32>, // Number of failed unlock attempts
-    last_attempt_timestamp: Option<u64>, // Monotonic duration in milliseconds since program start
-    base_instant_wall_time: Option<u64>, // Wall clock reference for the monotonic clock
+    // Rate limiting data (KM-H-01) - REMOVED
     #[zeroize(skip)] // Skip entries vec, as EncryptedKeyEntry doesn't derive ZeroizeOnDrop itself.
     // Sensitive String fields within EncryptedKeyEntry will self-zeroize.
     entries: Vec<EncryptedKeyEntry>,
@@ -109,10 +106,7 @@ pub struct KeystoreConfig {
     pub output_len: usize,
     // Session management
     pub auto_lock_timeout: Duration,
-    // Rate limiting
-    pub unlock_min_delay: Duration,
-    pub unlock_max_attempts: u32,
-    pub unlock_backoff_factor: f32,
+    // Rate limiting - REMOVED
 }
 
 // Argon2 min number of memory blocks required
@@ -124,16 +118,6 @@ const MIN_T_COST: u32 = 4;
 // KDF current version
 const KDF_VERSION: u32 = 1;
 
-// Track application start time for monotonic clock implementation
-use std::sync::OnceLock;
-
-static PROGRAM_START_TIME: OnceLock<Instant> = OnceLock::new();
-static PROGRAM_START_EPOCH: OnceLock<u64> = OnceLock::new();
-
-// Constants for rate limiting
-const MAX_UNLOCK_ATTEMPTS: u32 = 5;
-const UNLOCK_TIMEOUT_SECONDS: u64 = 300; // 5 minutes
-
 impl Default for KeystoreConfig {
     fn default() -> Self {
         Self {
@@ -144,10 +128,7 @@ impl Default for KeystoreConfig {
             output_len: 32, // Minimum required output length
             // Default session management
             auto_lock_timeout: Duration::from_secs(300), // 5 minutes
-            // Default rate limiting
-            unlock_min_delay: Duration::from_millis(500),
-            unlock_max_attempts: 5,
-            unlock_backoff_factor: 2.0,
+                                                         // Default rate limiting - REMOVED
         }
     }
 }
@@ -255,47 +236,10 @@ struct DecryptedData {
     created_at: DateTime<Utc>,
 }
 
-// --- Keystore Implementation ---
-
 impl Keystore {
     const DEFAULT_KEYSTORE_FILENAME: &'static str = "keystore_v1.json";
     const APP_DIR_NAME: &'static str = "mfm";
 
-    // Initialize monotonic clock if not already initialized
-    fn init_monotonic_clock() {
-        PROGRAM_START_TIME.get_or_init(Instant::now);
-        PROGRAM_START_EPOCH.get_or_init(|| {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64
-        });
-    }
-
-    // Get current monotonic timestamp in milliseconds
-    fn get_monotonic_ms() -> u64 {
-        Self::init_monotonic_clock();
-        PROGRAM_START_TIME.get().unwrap().elapsed().as_millis() as u64
-    }
-
-    // Convert monotonic time to wall clock time
-    #[allow(dead_code)]
-    fn monotonic_to_wall_clock(monotonic_ms: u64, base_epoch_ms: u64) -> DateTime<Utc> {
-        Utc.timestamp_opt(
-            (base_epoch_ms.saturating_add(monotonic_ms) / 1000)
-                .try_into()
-                .unwrap(),
-            0,
-        )
-        .unwrap()
-    }
-
-    // Convert wall clock time to monotonic time using base reference
-    fn wall_clock_to_monotonic(wall_clock_sec: u64, base_epoch_ms: u64) -> u64 {
-        ((wall_clock_sec * 1000) as i128)
-            .saturating_sub(base_epoch_ms as i128)
-            .max(0) as u64
-    }
     /// Securely create a directory with 0o700 permissions.
     #[allow(dead_code)]
     fn ensure_secure_dir(dir: &Path) -> Result<(), KeystoreError> {
@@ -402,9 +346,6 @@ impl Keystore {
     }
 
     pub fn unlock(&mut self, password: &str) -> Result<(), KeystoreError> {
-        // Rate limiting implementation
-        self.enforce_unlock_rate_limiting()?;
-
         if self.is_unlocked {
             // Optionally, update last_activity_at or just return Ok
             self.last_activity_at = Some(Instant::now());
@@ -412,14 +353,12 @@ impl Keystore {
         }
 
         if password.is_empty() {
-            self.increment_persisted_attempts()?;
             return Err(KeystoreError::InvalidPassword);
         }
 
         let kdf_params = match self.master_kdf_params.as_ref() {
             Some(params) => params,
             None => {
-                self.increment_persisted_attempts()?;
                 return Err(KeystoreError::FsError(
                     "Keystore is not initialized with KDF parameters.".to_string(),
                 ));
@@ -429,7 +368,6 @@ impl Keystore {
         let derived_key = match self.derive_master_key(password, kdf_params) {
             Ok(key) => key,
             Err(e) => {
-                self.increment_persisted_attempts()?;
                 return Err(e);
             }
         };
@@ -441,22 +379,17 @@ impl Keystore {
         ) {
             // derived_key is MasterKey, verify_password expects &MasterKey
             if !self.verify_password(&derived_key, tag, nonce)? {
-                self.increment_persisted_attempts()?;
                 return Err(KeystoreError::InvalidPassword);
             }
         } else {
             // This case should ideally not be reached if keystore was initialized properly
             // and has a verification tag. If not, it's a state inconsistency.
-            self.increment_persisted_attempts()?;
             return Err(KeystoreError::MissingVerificationTag);
         }
 
         self.master_key = Some(derived_key); // Store MasterKey directly_zeroizing);
         self.is_unlocked = true;
         self.last_activity_at = Some(Instant::now());
-
-        // Reset rate limiting counters on successful unlock
-        self.write_persisted_unlock_state(0, 0)?;
 
         Ok(())
     }
@@ -568,218 +501,6 @@ impl Keystore {
         self.verification_nonce.as_deref()
     }
 
-    // Check if keystore has been initialized with KDF parameters
-    fn is_initialized(&self) -> bool {
-        self.master_kdf_params.is_some()
-    }
-
-    // Reads persisted unlock state (attempts and timestamp) from the encrypted keystore file.
-    fn read_persisted_unlock_state(&self) -> Result<(u32, u64), KeystoreError> {
-        // Initialize the monotonic clock if not already done
-        Self::init_monotonic_clock();
-
-        // Only read from the keystore file, no fallback
-        if self.file_path.exists() {
-            // Check if the keystore has been initialized with KDF params
-            if !self.is_initialized() {
-                return Ok((0, 0)); // Return defaults for uninitialized keystore
-            }
-
-            match fs::read_to_string(&self.file_path) {
-                Ok(file_content) => {
-                    match serde_json::from_str::<KeystoreFile>(&file_content) {
-                        Ok(keystore_data) => {
-                            // Extract values if present, otherwise default to zero
-                            let attempts = keystore_data.unlock_attempts.unwrap_or(0);
-
-                            // Convert stored monotonic time to current monotonic time reference
-                            // If base_instant_wall_time is missing, treat the timestamp as direct value
-                            let timestamp = match (
-                                keystore_data.last_attempt_timestamp,
-                                keystore_data.base_instant_wall_time,
-                            ) {
-                                (Some(timestamp), Some(_base_time)) => {
-                                    // Timestamp is already in monotonic time, no conversion needed
-                                    // No need to convert to wall clock since we'll keep working with monotonic time
-                                    timestamp
-                                }
-                                (Some(timestamp), None) => {
-                                    // Legacy format: timestamp is wall clock time in seconds
-                                    // Convert to monotonic time for our new system
-                                    let base_epoch_ms = *PROGRAM_START_EPOCH.get().unwrap();
-                                    Self::wall_clock_to_monotonic(timestamp, base_epoch_ms)
-                                }
-                                _ => 0, // Default if no timestamp available
-                            };
-
-                            return Ok((attempts, timestamp));
-                        }
-                        Err(_) => {
-                            // Return defaults if we can't parse the file
-                            // This allows for graceful handling of format changes
-                            return Ok((0, 0));
-                        }
-                    }
-                }
-                Err(_) => {
-                    // Return defaults if we can't read the file
-                    return Ok((0, 0));
-                }
-            }
-        }
-
-        // If keystore file doesn't exist, return default values
-        Ok((0, 0))
-    }
-
-    // Writes unlock attempts and last attempt timestamp securely to the encrypted keystore file.
-    fn write_persisted_unlock_state(
-        &self,
-        attempts: u32,
-        last_attempt_timestamp_seconds_epoch: u64,
-    ) -> Result<(), KeystoreError> {
-        // Check if keystore is initialized with KDF parameters
-        if !self.is_initialized() {
-            // For uninitialized keystore, we ignore the write operation.
-            // This aligns with the recommendation to only allow silent ignore before the store is initialized.
-            return Ok(());
-        }
-
-        if !self.file_path.exists() {
-            // If the file doesn't exist yet, it means the keystore hasn't been fully persisted.
-            // Rate limiting info will be added when the keystore file is first created.
-            // Silently returning Ok(()) here is acceptable as per audit recommendation.
-            return Ok(());
-        }
-
-        // Read the current keystore file content
-        let file_content = fs::read_to_string(&self.file_path).map_err(|e| {
-            KeystoreError::FsErrorPersistence(format!(
-                "Failed to read keystore file for rate limiting update: {}",
-                e
-            ))
-        })?;
-
-        // Parse the JSON content
-        let mut keystore_data: KeystoreFile = serde_json::from_str(&file_content).map_err(|e| {
-            KeystoreError::FsErrorPersistence(format!(
-                "Failed to parse keystore file for rate limiting update: {}",
-                e
-            ))
-        })?;
-
-        // Update the rate limiting fields
-        keystore_data.unlock_attempts = Some(attempts);
-        keystore_data.last_attempt_timestamp = Some(last_attempt_timestamp_seconds_epoch);
-
-        // Serialize back to JSON
-        let json_data = serde_json::to_string_pretty(&keystore_data).map_err(|e| {
-            KeystoreError::FsErrorPersistence(format!(
-                "Failed to serialize keystore data for rate limiting update: {}",
-                e
-            ))
-        })?;
-
-        // Write back to file atomically
-        let atomic_file = AtomicFile::new(&self.file_path, OverwriteBehavior::AllowOverwrite);
-        atomic_file
-            .write(|f| f.write_all(json_data.as_bytes()))
-            .map_err(|e: atomicwrites::Error<std::io::Error>| {
-                KeystoreError::FsErrorPersistence(format!(
-                    "Failed to write keystore file atomically for rate limiting update: {}",
-                    e
-                ))
-            })?;
-
-        // Set secure file permissions (0o600 - owner read/write only)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let metadata = fs::metadata(&self.file_path).map_err(|e| {
-                KeystoreError::FsErrorPersistence(format!(
-                    "Failed to get metadata for setting permissions on keystore file: {}",
-                    e
-                ))
-            })?;
-            let mut perms = metadata.permissions();
-            perms.set_mode(0o600);
-            fs::set_permissions(&self.file_path, perms).map_err(|e| {
-                KeystoreError::FsErrorPersistence(format!(
-                    "Failed to set permissions on keystore file: {}",
-                    e
-                ))
-            })?;
-        }
-
-        Ok(())
-    }
-
-    // Private helper to increment persisted attempts.
-    // Called by unlock() before returning an error that signifies a failed unlock attempt.
-    fn increment_persisted_attempts(&self) -> Result<(), KeystoreError> {
-        let (mut attempts, _) = self.read_persisted_unlock_state()?;
-        attempts = attempts.saturating_add(1);
-
-        // Use monotonic time instead of wall clock time
-        let current_monotonic_ms = Self::get_monotonic_ms();
-        self.write_persisted_unlock_state(attempts, current_monotonic_ms)
-    }
-
-    // Updates the timestamp of the most recent unlock attempt without increasing attempts counter
-    #[allow(dead_code)]
-    fn update_last_attempt_timestamp(&self) -> Result<(), KeystoreError> {
-        // Read current state
-        let (attempts, _) = self.read_persisted_unlock_state()?;
-
-        // Write updated state with current monotonic timestamp (milliseconds)
-        let current_monotonic_ms = Self::get_monotonic_ms();
-        self.write_persisted_unlock_state(attempts, current_monotonic_ms)
-    }
-
-    // Enforce rate limiting for unlock attempts using monotonic clock
-    fn enforce_unlock_rate_limiting(&self) -> Result<(), KeystoreError> {
-        // Initialize monotonic clock if not already done
-        Self::init_monotonic_clock();
-
-        let (attempts, last_attempt_timestamp_ms) = self.read_persisted_unlock_state()?;
-
-        if attempts > 0 && last_attempt_timestamp_ms > 0 {
-            // Get current monotonic time in milliseconds
-            let current_monotonic_ms = Self::get_monotonic_ms();
-
-            // Calculate elapsed time in milliseconds using monotonic clock
-            // This is guaranteed to always increase and cannot be manipulated by changing system clock
-            if current_monotonic_ms >= last_attempt_timestamp_ms {
-                let elapsed_ms = current_monotonic_ms - last_attempt_timestamp_ms;
-                let required_delay_duration = self.calculate_backoff_delay(attempts);
-                let required_delay_ms = required_delay_duration.as_millis() as u64;
-
-                if elapsed_ms < required_delay_ms {
-                    let remaining_ms = required_delay_ms - elapsed_ms;
-                    let remaining_seconds = (remaining_ms / 1000) + 1; // Round up to next second
-                    return Err(KeystoreError::RateLimited(remaining_seconds));
-                }
-            } else if attempts >= MAX_UNLOCK_ATTEMPTS {
-                // This should never happen with monotonic clock, but just in case
-                return Err(KeystoreError::RateLimited(UNLOCK_TIMEOUT_SECONDS));
-            }
-        }
-
-        Ok(())
-    }
-
-    // Calculate exponential backoff delay (remains the same logic)
-    fn calculate_backoff_delay(&self, attempts: u32) -> Duration {
-        if attempts >= self.config.unlock_max_attempts {
-            Duration::from_secs(30) // Maximum backoff reached
-        } else {
-            let factor = self.config.unlock_backoff_factor.powi(attempts as i32);
-            let millis = (self.config.unlock_min_delay.as_millis() as f32 * factor) as u64;
-            Duration::from_millis(millis)
-        }
-    }
-
-    // Increment unlock attempts counter
     pub fn lock(&mut self) {
         self.master_key = None; // This will zeroize the key due to Zeroizing wrapper
         self.is_unlocked = false;
@@ -1271,8 +992,6 @@ impl Keystore {
         // Fix for F-1: Create a new verification tag with the new password
         self.create_verification_tag()?;
 
-        // Save the updated keystore
-        self.write_persisted_unlock_state(0, 0)?; // Reset rate limiting state
         self.save_to_disk()?;
         self.lock(); // Lock the keystore after password change
         self.update_activity_timestamp();
@@ -1281,22 +1000,19 @@ impl Keystore {
     }
 
     fn save_to_disk(&mut self) -> Result<(), KeystoreError> {
-        // Create parent directories if they don't exist
         if let Some(parent) = self.file_path.parent() {
             if !parent.exists() {
                 fs::create_dir_all(parent).map_err(KeystoreError::Io)?;
             }
         }
 
-        // Fix for F-7: Create a separate lock file in the target directory
         let lock_file_path = self.file_path.with_extension("lock");
         let lock_file = fs::OpenOptions::new()
             .create(true)
-            .append(true) // Use append for lock file to satisfy clippy, content is not relevant
+            .append(true)
             .open(&lock_file_path)
             .map_err(KeystoreError::Io)?;
 
-        // Lock the lock file to prevent concurrent access
         fs2::FileExt::lock_exclusive(&lock_file)
             .map_err(|e| KeystoreError::FsError(format!("Failed to lock file: {}", e)))?;
 
@@ -1307,35 +1023,22 @@ impl Keystore {
                 "Keystore is not initialized with KDF parameters.".to_string(),
             ))?;
 
-        // Read current rate limiting data before saving
-        let (attempts, last_timestamp) = self.read_persisted_unlock_state().unwrap_or_default();
-
         let keystore_data = KeystoreFile {
             version: "1.0.0".to_string(),
             master_kdf: "argon2id".to_string(),
             master_kdf_params: kdf_params.clone(),
             verification_tag: self.verification_tag.clone(),
             verification_nonce: self.verification_nonce.clone(),
-            unlock_attempts: Some(attempts),
-            last_attempt_timestamp: Some(last_timestamp),
-            base_instant_wall_time: Some(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            ),
             entries: self.entries.clone(),
         };
 
         let json_data = serde_json::to_string_pretty(&keystore_data)?;
 
-        // Use AtomicFile for atomic writes
         let atomic_file = AtomicFile::new(&self.file_path, OverwriteBehavior::AllowOverwrite);
         atomic_file
             .write(|f| f.write_all(json_data.as_bytes()).map_err(KeystoreError::Io))
             .map_err(|e| KeystoreError::FsError(format!("Failed to write keystore file: {}", e)))?;
 
-        // Set file permissions to 0o600 (owner read/write only)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1346,7 +1049,6 @@ impl Keystore {
             fs::set_permissions(&self.file_path, perms).map_err(KeystoreError::Io)?;
         }
 
-        // Unlock the lock file
         fs2::FileExt::unlock(&lock_file)
             .map_err(|e| KeystoreError::FsError(format!("Failed to unlock file: {}", e)))?;
 
@@ -1406,10 +1108,9 @@ impl Keystore {
             ));
         }
 
-        // Clone fields because KeystoreFile implements Drop
         let loaded_kdf_params = keystore_data.master_kdf_params.clone();
 
-        // Validate loaded KDF parameters against minimums (ID 5)
+        // Validate loaded KDF parameters against minimums
         if loaded_kdf_params.m_cost < MIN_M_COST {
             return Err(KeystoreError::Argon2Error(format!(
                 "Loaded KDF m_cost ({}) is below minimum required ({} KiB)",
@@ -1422,7 +1123,7 @@ impl Keystore {
                 loaded_kdf_params.t_cost, MIN_T_COST
             )));
         }
-        // Fix for F-6: Enforce minimum output length of 32 bytes for loaded params
+        // Enforce minimum output length of 32 bytes for loaded params
         if loaded_kdf_params.output_len < 32 {
             return Err(KeystoreError::Argon2Error(format!(
                 "Loaded KDF output length ({}) is below minimum required (32 bytes)",
@@ -1430,45 +1131,18 @@ impl Keystore {
             )));
         }
 
-        if keystore_data.master_kdf != "argon2id" {
-            // Clone master_kdf because KeystoreFile implements Drop
-            return Err(KeystoreError::UnsupportedKdf(
-                keystore_data.master_kdf.clone(),
-            ));
-        }
-
-        // Clone fields because KeystoreFile implements Drop
-        self.entries = keystore_data.entries.clone();
         self.master_kdf_params = Some(loaded_kdf_params);
-        // Fix for F-1: Load verification tag and nonce
         self.verification_tag = keystore_data.verification_tag.clone();
         self.verification_nonce = keystore_data.verification_nonce.clone();
+        self.entries = keystore_data.entries.clone(); // Ensure this is assigned
 
-        // Fix for KM-H-01: Load rate limiting data from keystore file
-        // and write it to persistent storage for backward compatibility
-        // during the transition period
-        if let (Some(attempts), Some(timestamp)) = (
-            keystore_data.unlock_attempts,
-            keystore_data.last_attempt_timestamp,
-        ) {
-            // Store the loaded values back to persistent storage
-            // This is to ensure a smooth transition from file-based to JSON-based storage
-            match self.write_persisted_unlock_state(attempts, timestamp) {
-                Ok(_) => {}
-                Err(e) => return Err(e),
-            }
-        } // Closes 'if let (Some(attempts), Some(timestamp))' arm
-          // Keystore remains locked after loading. Unlock is a separate step.
+        // Keystore remains locked after loading. Unlock is a separate step.
         self.is_unlocked = false;
         self.master_key = None;
 
         // Unlock the lock file
-        match fs2::FileExt::unlock(&lock_file)
-            .map_err(|e| KeystoreError::FsError(format!("Failed to unlock file: {}", e)))
-        {
-            Ok(_) => {}
-            Err(e) => return Err(e),
-        }
+        fs2::FileExt::unlock(&lock_file)
+            .map_err(|e| KeystoreError::FsError(format!("Failed to unlock file: {}", e)))?;
 
         Ok(())
     } // End of load_from_disk
