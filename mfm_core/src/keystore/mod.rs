@@ -150,12 +150,9 @@ impl Zeroize for ZeroizingSigningKey {
         // [1; 32] is a simple choice for a non-problematic dummy key.
         // Need k256::SecretKey for this.
         // Ensure k256::SecretKey is in scope (it should be via use k256::SecretKey).
-        match k256::SecretKey::from_slice(&[1u8; 32]) {
-            Ok(dummy_secret_key) => {
-                let dummy_signing_key = k256::ecdsa::SigningKey::from(&dummy_secret_key);
-                self.0 = dummy_signing_key; // Old self.0 is dropped here, its secret zeroized.
-            }
-            Err(_) => {}
+        if let Ok(dummy_secret_key) = k256::SecretKey::from_slice(&[1u8; 32]) {
+            let dummy_signing_key = k256::ecdsa::SigningKey::from(&dummy_secret_key);
+            self.0 = dummy_signing_key; // Old self.0 is dropped here, its secret zeroized.
         }
     }
 }
@@ -406,11 +403,12 @@ impl Keystore {
         // The master_key must be set by the caller (e.g. initialize_or_load or change_password)
         // before this function is invoked. This function uses self.master_key directly.
 
-        // Generate a random nonce for the verification tag
-        let mut nonce_bytes = [0u8; 12];
-        rand::rng()
-            .try_fill_bytes(&mut nonce_bytes)
-            .map_err(|e| KeystoreError::FsError(format!("Failed to generate nonce: {}", e)))?;
+        // Generate a UUID-derived nonce for the verification tag
+        let new_uuid = Uuid::new_v4();
+        // A UUID is 16 bytes (128 bits). AES-GCM typically uses a 12-byte (96-bit) nonce.
+        // We'll take the first 12 bytes of the UUID.
+        let nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12].try_into()
+            .expect("UUID to 12-byte nonce conversion failed, this should not happen");
 
         // Create a verification tag by encrypting a known plaintext
         let plaintext = b"ok";
@@ -578,15 +576,11 @@ impl Keystore {
         }
 
         let id = Uuid::new_v4();
-        let mut aes_nonce_bytes = [0u8; 12];
-        rand::rng()
-            .try_fill_bytes(&mut aes_nonce_bytes)
-            .map_err(|e| {
-                KeystoreError::FsError(format!(
-                    "import_private_key_hex: Failed to generate AES nonce: {}",
-                    e
-                ))
-            })?;
+        let new_uuid = Uuid::new_v4();
+        // A UUID is 16 bytes (128 bits). AES-GCM typically uses a 12-byte (96-bit) nonce.
+        // We'll take the first 12 bytes of the UUID.
+        let aes_nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12].try_into()
+            .expect("UUID to 12-byte nonce conversion failed, this should not happen");
 
         let (encrypted_pk_data, new_hkdf_salt_bytes) =
             self.encrypt_pk(pk_bytes.as_slice(), &aes_nonce_bytes, &id, &address)?;
@@ -681,15 +675,11 @@ impl Keystore {
         }
 
         let id = Uuid::new_v4();
-        let mut aes_nonce_bytes = [0u8; 12];
-        rand::rng()
-            .try_fill_bytes(&mut aes_nonce_bytes)
-            .map_err(|e| {
-                KeystoreError::FsError(format!(
-                    "import_mnemonic: Failed to generate AES nonce: {}",
-                    e
-                ))
-            })?;
+        let new_uuid = Uuid::new_v4();
+        // A UUID is 16 bytes (128 bits). AES-GCM typically uses a 12-byte (96-bit) nonce.
+        // We'll take the first 12 bytes of the UUID.
+        let aes_nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12].try_into()
+            .expect("UUID to 12-byte nonce conversion failed, this should not happen");
 
         let (encrypted_pk_data, new_hkdf_salt_bytes) = self.encrypt_pk(
             pk_bytes_for_encryption.as_slice(),
@@ -955,15 +945,11 @@ impl Keystore {
 
         // 7. Re-encrypt all data with the new master key
         for data in temp_decrypted_data {
-            let mut new_aes_nonce_bytes = [0u8; 12];
-            rand::rng()
-                .try_fill_bytes(&mut new_aes_nonce_bytes)
-                .map_err(|e| {
-                    KeystoreError::FsError(format!(
-                        "change_password: Failed to generate AES nonce for re-encryption: {}",
-                        e
-                    ))
-                })?;
+            let new_uuid = Uuid::new_v4();
+            // A UUID is 16 bytes (128 bits). AES-GCM typically uses a 12-byte (96-bit) nonce.
+            // We'll take the first 12 bytes of the UUID.
+            let new_aes_nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12].try_into()
+                .expect("UUID to 12-byte nonce conversion failed, this should not happen");
 
             let (new_encrypted_pk_vec, new_hkdf_salt_bytes) = self.encrypt_pk(
                 data.pk_material.as_slice(),
