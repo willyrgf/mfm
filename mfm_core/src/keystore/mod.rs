@@ -20,6 +20,7 @@ use chrono::{DateTime, Utc};
 use dirs_next;
 use hex; // For encoding salt
 use k256::{ecdsa::SigningKey, SecretKey};
+use rand::rngs::OsRng;
 use rand::TryRngCore;
 // Removed PublicKey
 // Removed incorrect imports for ScalarCore and ZeroizePrimitive
@@ -407,7 +408,8 @@ impl Keystore {
         let new_uuid = Uuid::new_v4();
         // A UUID is 16 bytes (128 bits). AES-GCM typically uses a 12-byte (96-bit) nonce.
         // We'll take the first 12 bytes of the UUID.
-        let nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12].try_into()
+        let nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12]
+            .try_into()
             .expect("UUID to 12-byte nonce conversion failed, this should not happen");
 
         // Create a verification tag by encrypting a known plaintext
@@ -579,7 +581,8 @@ impl Keystore {
         let new_uuid = Uuid::new_v4();
         // A UUID is 16 bytes (128 bits). AES-GCM typically uses a 12-byte (96-bit) nonce.
         // We'll take the first 12 bytes of the UUID.
-        let aes_nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12].try_into()
+        let aes_nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12]
+            .try_into()
             .expect("UUID to 12-byte nonce conversion failed, this should not happen");
 
         let (encrypted_pk_data, new_hkdf_salt_bytes) =
@@ -678,7 +681,8 @@ impl Keystore {
         let new_uuid = Uuid::new_v4();
         // A UUID is 16 bytes (128 bits). AES-GCM typically uses a 12-byte (96-bit) nonce.
         // We'll take the first 12 bytes of the UUID.
-        let aes_nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12].try_into()
+        let aes_nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12]
+            .try_into()
             .expect("UUID to 12-byte nonce conversion failed, this should not happen");
 
         let (encrypted_pk_data, new_hkdf_salt_bytes) = self.encrypt_pk(
@@ -948,7 +952,8 @@ impl Keystore {
             let new_uuid = Uuid::new_v4();
             // A UUID is 16 bytes (128 bits). AES-GCM typically uses a 12-byte (96-bit) nonce.
             // We'll take the first 12 bytes of the UUID.
-            let new_aes_nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12].try_into()
+            let new_aes_nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12]
+                .try_into()
                 .expect("UUID to 12-byte nonce conversion failed, this should not happen");
 
             let (new_encrypted_pk_vec, new_hkdf_salt_bytes) = self.encrypt_pk(
@@ -1149,7 +1154,7 @@ impl Keystore {
 
         // Generate a new random HKDF salt (ID 7)
         let mut hkdf_salt_bytes = [0u8; 32];
-        rand::rng()
+        OsRng
             .try_fill_bytes(&mut hkdf_salt_bytes)
             .map_err(|e| KeystoreError::FsError(format!("Failed to generate HKDF salt: {}", e)))?;
 
@@ -1326,7 +1331,7 @@ impl Keystore {
         }
 
         let mut salt_bytes = [0u8; 16]; // 16-byte salt
-        rand::rng()
+        OsRng
             .try_fill_bytes(&mut salt_bytes)
             .map_err(|e| KeystoreError::FsError(format!("Failed to generate salt: {}", e)))?;
 
