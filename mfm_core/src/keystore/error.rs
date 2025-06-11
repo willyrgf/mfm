@@ -50,6 +50,14 @@ pub enum KeystoreError {
     InvalidPrivateKey,
     #[error("Keystore is missing a verification tag. Legacy formats are not supported.")]
     MissingVerificationTag,
+    #[error("MAC verification failed. Keystore data may have been tampered with.")]
+    MacVerificationFailure,
+    #[error("Internal error: {0}")]
+    InternalError(String),
+    #[error("Deserialization error: {0}")]
+    DeserializationError(String),
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
     #[error("Too many unlock attempts. Please wait {0} seconds before trying again.")]
     RateLimited(u64),
 }

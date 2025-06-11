@@ -13,7 +13,9 @@ use alloy_primitives::{Address, B256 as H256}; // Removed U256
 use alloy_signer::Signature;
 use argon2::{self, Argon2}; // Import argon2 module for Params
 use atomicwrites::{AtomicFile, OverwriteBehavior};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _}; // For base64 encoding
+use base64::Engine; // For encode/decode methods
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD; // For base64 encoding
+use base64::engine::general_purpose; // For H-1 MAC and protected data encoding
 use bip32::{DerivationPath, XPrv};
 use bip39::Mnemonic; // Ensure Seed is not imported from bip39
 use chrono::{DateTime, Utc};
@@ -24,7 +26,7 @@ use rand::rngs::OsRng;
 use rand::TryRngCore;
 // Removed PublicKey
 // Removed incorrect imports for ScalarCore and ZeroizePrimitive
-use ring::hkdf; // For HKDF key derivation
+use ring::{hkdf, hmac}; // For HKDF, HMAC
 use serde::{Deserialize, Serialize};
 use std::fs::{self}; // Removed unused File import
 use std::io::Write as IoWrite; // Removed unused Read import, kept Write alias
@@ -36,7 +38,43 @@ use tiny_keccak::{Hasher, Keccak}; // For Keccak-256
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing}; // Added Zeroizing struct
 
+const CURRENT_KEYSTORE_VERSION: &str = "H-1";
+
 // --- Structs for Keystore Data ---
+
+// Constants for MAC key derivation for H-1
+const HKDF_SALT_FOR_MAC_KEY_DERIVATION: &[u8] = b"mfm-mac-key-derivation-salt-v1";
+const HKDF_INFO_MAC_KEY: &[u8] = b"mfm-keystore-mac-key-v1";
+
+/// Top-level structure for the persisted keystore file, including a MAC (H-1).
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AuthenticatedKeystoreEnvelope {
+    // These fields are NOT MAC-protected but are necessary to derive the master_key,
+    // which is then used to derive the MAC key for verifying `mac_b64`.
+    pub master_kdf_params: MasterKdfParams,
+    pub verification_nonce: Option<String>, // Nonce for the verification_tag
+
+    // This data IS MAC-protected.
+    // It's the Base64 encoded JSON string of `ProtectedKeystorePart`.
+    pub protected_data_b64: String,
+    // Base64 encoded HMAC-SHA256 of the raw bytes of `protected_data_b64` (before it was base64 encoded itself).
+    // Correction: MAC is over the *raw JSON bytes* of ProtectedKeystorePart.
+    pub mac_b64: String,
+}
+
+/// Contains the part of the keystore that is integrity-protected by a MAC (H-1).
+#[derive(Serialize, Deserialize, Debug, Clone, ZeroizeOnDrop)]
+pub struct ProtectedKeystorePart {
+    pub version: String,
+    pub master_kdf_algo_name: String, // e.g., "argon2id"
+    pub verification_tag: Option<String>, // The verification_tag itself must be MAC-protected.
+    #[zeroize(skip)] // Skip entries vec, as EncryptedKeyEntry doesn't derive ZeroizeOnDrop itself.
+    // Sensitive String fields within EncryptedKeyEntry will self-zeroize.
+    pub entries: Vec<EncryptedKeyEntry>,
+    // Potentially other metadata like auto_lock_timeout if it needs to be protected.
+    // For now, auto_lock_timeout is part of KeystoreConfig, not persisted directly in this struct.
+}
+
 
 #[derive(Serialize, Deserialize, Debug, Clone, Zeroize, ZeroizeOnDrop)] // Zeroize for salt is fine
 pub struct MasterKdfParams {
@@ -70,22 +108,7 @@ pub struct EncryptedKeyEntry {
                               // Potentially other metadata like derivation path if applicable, key type, etc.
 }
 
-// KeystoreFile's ZeroizeOnDrop will apply to its String fields.
-// MasterKdfParams also derives ZeroizeOnDrop for its salt.
-// Vec<EncryptedKeyEntry> elements (Strings) will be zeroized when they are dropped.
-#[derive(Serialize, Deserialize, Debug, Clone, ZeroizeOnDrop)]
-struct KeystoreFile {
-    version: String,    // String implements ZeroizeOnDrop
-    master_kdf: String, // String implements ZeroizeOnDrop
-    master_kdf_params: MasterKdfParams,
-    // Password verification tag (F-1)
-    verification_tag: Option<String>, // base64 encoded encrypted verification tag
-    verification_nonce: Option<String>, // base64 encoded nonce for verification tag
-    // Rate limiting data (KM-H-01) - REMOVED
-    #[zeroize(skip)] // Skip entries vec, as EncryptedKeyEntry doesn't derive ZeroizeOnDrop itself.
-    // Sensitive String fields within EncryptedKeyEntry will self-zeroize.
-    entries: Vec<EncryptedKeyEntry>,
-}
+
 
 // Information about a key, returned by list_keys
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -211,18 +234,26 @@ impl AsRef<[u8]> for MasterKey {
 
 #[derive(Debug)] // Removed ZeroizeOnDrop from Keystore struct itself
 pub struct Keystore {
-    file_path: PathBuf,            // PathBuf does not need to be zeroized
-    master_key: Option<MasterKey>, // Changed type here. MasterKey handles its own zeroization.
+    file_path: PathBuf,
+    master_key: Option<MasterKey>,
+
+    // Fields populated from ProtectedKeystorePart after MAC verification
+    keystore_version: Option<String>,
+    master_kdf_algo: Option<String>,
     entries: Vec<EncryptedKeyEntry>,
-    master_kdf_params: Option<MasterKdfParams>,
+    verification_tag: Option<String>, // This is from ProtectedKeystorePart
+
+    // Fields populated from AuthenticatedKeystoreEnvelope (unprotected part)
+    master_kdf_params: Option<MasterKdfParams>, // From envelope
+    verification_nonce: Option<String>,      // From envelope
+
     is_unlocked: bool,
-    // last_activity_at does not need zeroization. No attribute needed.
     last_activity_at: Option<Instant>,
-    // Configuration
     config: KeystoreConfig,
-    // Password verification fields (F-1)
-    verification_tag: Option<String>,
-    verification_nonce: Option<String>,
+
+    // Temporary fields for data loaded from disk, pending MAC verification in unlock()
+    pending_protected_data_b64: Option<String>,
+    pending_mac_b64: Option<String>,
 }
 
 // Helper struct for change_password to temporarily hold decrypted key data
@@ -235,6 +266,19 @@ struct DecryptedData {
 }
 
 impl Keystore {
+    fn derive_mac_key(&self, master_key_bytes: &[u8]) -> Result<hmac::Key, KeystoreError> {
+        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, HKDF_SALT_FOR_MAC_KEY_DERIVATION);
+        let prk = salt.extract(master_key_bytes);
+        let mut mac_key_bytes = [0u8; 32]; // 256-bit key for HMAC-SHA256
+
+        prk.expand(&[HKDF_INFO_MAC_KEY], hkdf::HKDF_SHA256)
+            .map_err(|_| KeystoreError::InternalError("Failed to expand MAC key from PRK".to_string()))?
+            .fill(&mut mac_key_bytes)
+            .map_err(|_| KeystoreError::InternalError("Failed to fill MAC key bytes".to_string()))?;
+
+        Ok(hmac::Key::new(hmac::HMAC_SHA256, &mac_key_bytes))
+    }
+
     const DEFAULT_KEYSTORE_FILENAME: &'static str = "keystore_v1.json";
     const APP_DIR_NAME: &'static str = "mfm";
 
@@ -300,16 +344,20 @@ impl Keystore {
             }
         };
 
-        Ok(Self {
-            file_path,
+        Ok(Keystore {
+            file_path: file_path,
             master_key: None,
+            keystore_version: None,
+            master_kdf_algo: None,
             entries: Vec::new(),
-            master_kdf_params: None,
+            verification_tag: None, // This is from ProtectedKeystorePart
+            master_kdf_params: None, // From envelope
+            verification_nonce: None, // From envelope
             is_unlocked: false,
             last_activity_at: None,
             config,
-            verification_tag: None,
-            verification_nonce: None,
+            pending_protected_data_b64: None,
+            pending_mac_b64: None,
         })
     }
 
@@ -345,7 +393,6 @@ impl Keystore {
 
     pub fn unlock(&mut self, password: &str) -> Result<(), KeystoreError> {
         if self.is_unlocked {
-            // Optionally, update last_activity_at or just return Ok
             self.last_activity_at = Some(Instant::now());
             return Ok(());
         }
@@ -354,40 +401,66 @@ impl Keystore {
             return Err(KeystoreError::InvalidPassword);
         }
 
-        let kdf_params = match self.master_kdf_params.as_ref() {
-            Some(params) => params,
-            None => {
-                return Err(KeystoreError::FsError(
-                    "Keystore is not initialized with KDF parameters.".to_string(),
-                ));
-            }
-        };
+        let kdf_params = self.master_kdf_params.as_ref().ok_or_else(|| {
+            KeystoreError::InternalError("KDF parameters missing before unlock".to_string())
+        })?;
 
-        let derived_key = match self.derive_master_key(password, kdf_params) {
-            Ok(key) => key,
-            Err(e) => {
-                return Err(e);
-            }
-        };
+        // 1. Derive Master Key from password
+        let derived_master_key = self.derive_master_key(password, kdf_params)?;
 
-        // F-1: Verify password using the tag
-        if let (Some(tag), Some(nonce)) = (
-            self.verification_tag.as_deref(),
-            self.verification_nonce.as_deref(),
+        // 2. Retrieve pending protected data and MAC
+        let protected_data_b64 = self.pending_protected_data_b64.as_ref().ok_or_else(|| {
+            KeystoreError::InternalError("Pending protected data missing before unlock".to_string())
+        })?;
+        let expected_mac_b64 = self.pending_mac_b64.as_ref().ok_or_else(|| {
+            KeystoreError::InternalError("Pending MAC missing before unlock".to_string())
+        })?;
+
+        // 3. Decode Base64 data
+        let protected_data_json_bytes = general_purpose::STANDARD.decode(protected_data_b64)
+            .map_err(|e| KeystoreError::DeserializationError(format!("Failed to decode protected data: {}", e)))?;
+        let expected_mac_bytes = general_purpose::STANDARD.decode(expected_mac_b64)
+            .map_err(|e| KeystoreError::DeserializationError(format!("Failed to decode MAC: {}", e)))?;
+
+        // 4. Derive MAC Key from Master Key
+        let mac_signing_key = self.derive_mac_key(derived_master_key.as_ref())?;
+
+        // 5. Verify MAC
+        // The hmac::verify function takes the key, message (protected_data_json_bytes), and tag (expected_mac_bytes)
+        hmac::verify(&mac_signing_key, &protected_data_json_bytes, &expected_mac_bytes)
+            .map_err(|_| KeystoreError::MacVerificationFailure)?;
+
+        // 6. MAC verified, now deserialize ProtectedKeystorePart
+        let protected_part: ProtectedKeystorePart = serde_json::from_slice(&protected_data_json_bytes)
+            .map_err(|e| KeystoreError::DeserializationError(format!("Failed to deserialize protected part after MAC verification: {}", e)))?;
+
+        // 7. Populate keystore fields from the verified and deserialized protected part
+        self.keystore_version = Some(protected_part.version.clone());
+        self.master_kdf_algo = Some(protected_part.master_kdf_algo_name.clone());
+        self.verification_tag = protected_part.verification_tag.clone(); // This is Option<String>
+        self.entries = protected_part.entries.clone();
+
+        // 8. Verify password using the (now populated) verification tag
+        if let (Some(tag_str), Some(nonce_str)) = (
+            self.verification_tag.as_deref(), // Now correctly populated
+            self.verification_nonce.as_deref(), // Was populated by load_from_disk
         ) {
-            // derived_key is MasterKey, verify_password expects &MasterKey
-            if !self.verify_password(&derived_key, tag, nonce)? {
+            if !self.verify_password(&derived_master_key, tag_str, nonce_str)? {
                 return Err(KeystoreError::InvalidPassword);
             }
         } else {
-            // This case should ideally not be reached if keystore was initialized properly
-            // and has a verification tag. If not, it's a state inconsistency.
+            // If verification_tag is None after loading a supposedly valid keystore, it's an issue.
             return Err(KeystoreError::MissingVerificationTag);
         }
 
-        self.master_key = Some(derived_key); // Store MasterKey directly_zeroizing);
+        // 9. All checks passed, finalize unlock
+        self.master_key = Some(derived_master_key);
         self.is_unlocked = true;
         self.last_activity_at = Some(Instant::now());
+
+        // 10. Clear pending data
+        self.pending_protected_data_b64 = None;
+        self.pending_mac_b64 = None;
 
         Ok(())
     }
@@ -991,53 +1064,72 @@ impl Keystore {
     }
 
     fn save_to_disk(&mut self) -> Result<(), KeystoreError> {
-        if let Some(parent) = self.file_path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent).map_err(KeystoreError::Io)?;
-            }
-        }
-
-        let lock_file_path = self.file_path.with_extension("lock");
-        let lock_file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&lock_file_path)
-            .map_err(KeystoreError::Io)?;
-
-        fs2::FileExt::lock_exclusive(&lock_file)
-            .map_err(|e| KeystoreError::FsError(format!("Failed to lock file: {}", e)))?;
-
-        let kdf_params = self
-            .master_kdf_params
+        let master_key_bytes = self
+            .master_key
             .as_ref()
-            .ok_or(KeystoreError::FsError(
-                "Keystore is not initialized with KDF parameters.".to_string(),
-            ))?;
+            .ok_or(KeystoreError::Locked)?
+            .as_ref();
 
-        let keystore_data = KeystoreFile {
-            version: "1.0.0".to_string(),
-            master_kdf: "argon2id".to_string(),
-            master_kdf_params: kdf_params.clone(),
+        // When saving, master_kdf_params MUST exist.
+        let _kdf_params = self.master_kdf_params.as_ref().ok_or_else(|| {
+            KeystoreError::InternalError("Master KDF params missing during save".to_string())
+        })?;
+
+        let protected_part = ProtectedKeystorePart {
+            version: self.keystore_version.clone().unwrap_or_else(|| CURRENT_KEYSTORE_VERSION.to_string()),
+            master_kdf_algo_name: "argon2id".to_string(), // The only supported KDF
             verification_tag: self.verification_tag.clone(),
-            verification_nonce: self.verification_nonce.clone(),
             entries: self.entries.clone(),
         };
 
-        let json_data = serde_json::to_string_pretty(&keystore_data)?;
+        let protected_data_json_bytes = serde_json::to_vec(&protected_part)
+            .map_err(|e| KeystoreError::SerializationError(format!("Failed to serialize protected part: {}", e)))?;
+
+        let mac_key = self.derive_mac_key(master_key_bytes)?;
+        let mac_tag = hmac::sign(&mac_key, &protected_data_json_bytes);
+
+        let protected_data_b64 = general_purpose::STANDARD.encode(&protected_data_json_bytes);
+        let mac_b64 = general_purpose::STANDARD.encode(mac_tag.as_ref());
+
+        let envelope = AuthenticatedKeystoreEnvelope {
+            master_kdf_params: self.master_kdf_params.clone().ok_or_else(|| {
+                KeystoreError::InternalError("Master KDF params missing during save".to_string())
+            })?,
+            verification_nonce: self.verification_nonce.clone(),
+            protected_data_b64,
+            mac_b64,
+        };
+
+        let serialized_envelope = serde_json::to_string_pretty(&envelope)
+            .map_err(|e| KeystoreError::SerializationError(format!("Failed to serialize envelope: {}", e)))?;
+
+        // Ensure parent directory exists
+        if let Some(parent_dir) = self.file_path.parent() {
+            Self::ensure_secure_dir(parent_dir)?;
+        }
+
+        // File locking and atomic write
+        let lock_file_path = self.file_path.with_extension("lock");
+        let lock_file = fs::OpenOptions::new()
+            .create(true)
+            .append(true) // Keep append for lock file semantics if that's intended, or change to write
+            .open(&lock_file_path)
+            .map_err(|e| KeystoreError::FsError(format!("Failed to open lock file: {}", e)))?;
+
+        fs2::FileExt::lock_exclusive(&lock_file)
+            .map_err(|e| KeystoreError::FsError(format!("Failed to acquire exclusive lock: {}", e)))?;
 
         let atomic_file = AtomicFile::new(&self.file_path, OverwriteBehavior::AllowOverwrite);
         atomic_file
-            .write(|f| f.write_all(json_data.as_bytes()).map_err(KeystoreError::Io))
-            .map_err(|e| KeystoreError::FsError(format!("Failed to write keystore file: {}", e)))?;
+            .write(|f| f.write_all(serialized_envelope.as_bytes()))
+            .map_err(|e| KeystoreError::FsError(format!("Atomic write failed: {:?}", e)))?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&self.file_path)
-                .map_err(KeystoreError::Io)?
-                .permissions();
-            perms.set_mode(0o600);
-            fs::set_permissions(&self.file_path, perms).map_err(KeystoreError::Io)?;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            fs::set_permissions(&self.file_path, perms)
+                .map_err(|e| KeystoreError::FsError(format!("Failed to set permissions on {}: {}", self.file_path.display(), e)))?;
         }
 
         fs2::FileExt::unlock(&lock_file)
@@ -1048,95 +1140,57 @@ impl Keystore {
 
     fn load_from_disk(&mut self) -> Result<(), KeystoreError> {
         if !self.file_path.exists() {
-            // If the file doesn't exist, it might be a fresh keystore.
-            // The initialize_or_load function will handle creating a new one if needed.
-            // For load_from_disk, we assume it should exist if called.
-            // Or, we can return Ok and let initialize_or_load decide.
-            // For now, let's indicate it's not an error state for load_from_disk itself,
-            // but that no data was loaded. The caller can then decide.
-            // A better approach might be for initialize_or_load to check existence first.
-            // Let's make it return Ok if not found, and initialize_or_load will create new.
+            // If the file doesn't exist, it's not an error for load_from_disk itself.
+            // initialize_or_load will handle creating a new keystore if necessary.
             return Ok(());
-        } // Closes if !self.file_path.exists()
-          // Fix for F-7: Use the lock file for locking
+        }
+
+        // File locking for read
         let lock_file_path = self.file_path.with_extension("lock");
         let lock_file = fs::OpenOptions::new()
-            .read(true)
-            .create(true)
-            .append(true) // Use append for lock file to satisfy clippy, content is not relevant
+            .read(true) // Open for reading
+            .create(true) // Create if it doesn't exist (though it should for an existing keystore)
             .open(&lock_file_path)
-            .map_err(KeystoreError::Io)?;
+            .map_err(|e| KeystoreError::FsError(format!("Failed to open lock file for reading: {}", e)))?;
 
-        // Acquire a shared lock on the lock file
+        // Acquire a shared lock. If another process holds an exclusive lock (e.g., during save),
+        // this will block until the exclusive lock is released.
         fs2::FileExt::lock_shared(&lock_file)
-            .map_err(|e| KeystoreError::FsError(format!("Failed to lock file: {}", e)))?;
+            .map_err(|e| KeystoreError::FsError(format!("Failed to acquire shared lock: {}", e)))?;
 
-        let file_content = fs::read_to_string(&self.file_path)?;
-        let keystore_data: KeystoreFile = serde_json::from_str(&file_content)?;
+        let file_content_bytes = fs::read(&self.file_path)
+            .map_err(|e| KeystoreError::FsError(format!("Failed to read keystore file: {}", e)))?;
 
-        // Validate version and KDF
-        if keystore_data.version != "1.0.0" {
-            // Check if we support migration from this version
-            if keystore_data.version == "1.1.0" {
-                // Implement migration logic here
-                // For now, just return an error
-                return Err(KeystoreError::FsError(format!(
-                    "Keystore version {} requires migration. Please update your software.",
-                    keystore_data.version
-                )));
-            } else {
-                return Err(KeystoreError::InvalidFormat(format!(
-                    "Unsupported keystore version: {}",
-                    keystore_data.version
-                )));
-            }
-        }
+        // Attempt to deserialize into the new AuthenticatedKeystoreEnvelope structure
+        let envelope: AuthenticatedKeystoreEnvelope = serde_json::from_slice(&file_content_bytes)
+            .map_err(|e| {
+                // This error indicates a corrupted file or a format incompatible with H-1.
+                KeystoreError::InvalidFormat(format!(
+                    "Failed to deserialize H-1 keystore envelope. File may be corrupted or in an unsupported format: {}",
+                    e
+                ))
+            })?;
 
-        if keystore_data.master_kdf != "argon2id" {
-            // Clone master_kdf because KeystoreFile implements Drop
-            return Err(KeystoreError::UnsupportedKdf(
-                keystore_data.master_kdf.clone(),
-            ));
-        }
+        // Store the unprotected parts and the pending protected data + MAC
+        self.master_kdf_params = Some(envelope.master_kdf_params);
+        self.verification_nonce = envelope.verification_nonce;
+        self.pending_protected_data_b64 = Some(envelope.protected_data_b64);
+        self.pending_mac_b64 = Some(envelope.mac_b64);
 
-        let loaded_kdf_params = keystore_data.master_kdf_params.clone();
+        // IMPORTANT: Do NOT populate self.entries, self.keystore_version, self.master_kdf_algo, self.verification_tag yet.
+        // These will be populated in unlock() after MAC verification.
+        // Clear any potentially stale entries from a previous state (e.g., if Keystore instance is reused)
+        self.entries.clear();
+        self.keystore_version = None;
+        self.master_kdf_algo = None;
+        self.verification_tag = None;
 
-        // Validate loaded KDF parameters against minimums
-        if loaded_kdf_params.m_cost < MIN_M_COST {
-            return Err(KeystoreError::Argon2Error(format!(
-                "Loaded KDF m_cost ({}) is below minimum required ({} KiB)",
-                loaded_kdf_params.m_cost, MIN_M_COST
-            )));
-        }
-        if loaded_kdf_params.t_cost < MIN_T_COST {
-            return Err(KeystoreError::Argon2Error(format!(
-                "Loaded KDF t_cost ({}) is below minimum required ({})",
-                loaded_kdf_params.t_cost, MIN_T_COST
-            )));
-        }
-        // Enforce minimum output length of 32 bytes for loaded params
-        if loaded_kdf_params.output_len < 32 {
-            return Err(KeystoreError::Argon2Error(format!(
-                "Loaded KDF output length ({}) is below minimum required (32 bytes)",
-                loaded_kdf_params.output_len
-            )));
-        }
-
-        self.master_kdf_params = Some(loaded_kdf_params);
-        self.verification_tag = keystore_data.verification_tag.clone();
-        self.verification_nonce = keystore_data.verification_nonce.clone();
-        self.entries = keystore_data.entries.clone(); // Ensure this is assigned
-
-        // Keystore remains locked after loading. Unlock is a separate step.
-        self.is_unlocked = false;
-        self.master_key = None;
-
-        // Unlock the lock file
+        // Release the lock
         fs2::FileExt::unlock(&lock_file)
-            .map_err(|e| KeystoreError::FsError(format!("Failed to unlock file: {}", e)))?;
+            .map_err(|e| KeystoreError::FsError(format!("Failed to unlock file after reading: {}", e)))?;
 
         Ok(())
-    } // End of load_from_disk
+    }
 
     fn encrypt_pk(
         &self,
