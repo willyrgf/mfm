@@ -1,4 +1,5 @@
 use crate::keystore::KeystoreConfig;
+use base64::Engine;
 use std::time::Duration;
 
 use super::error::KeystoreError;
@@ -39,8 +40,8 @@ fn test_initialize_new_keystore_with_password() {
 
     let unlock_res_before_init = ks.unlock(TEST_PASSWORD);
     assert!(
-        matches!(unlock_res_before_init, Err(KeystoreError::FsError(_))),
-        "Unlock should fail before KDF params are set by initialize_or_load"
+        matches!(unlock_res_before_init, Err(KeystoreError::InternalError(_))),
+        "Unlock should fail with InternalError before KDF params are set"
     );
 
     ks.initialize_or_load(Some(TEST_PASSWORD))
@@ -75,8 +76,8 @@ fn test_initialize_new_keystore_no_password() {
 
     let unlock_res = ks.unlock(TEST_PASSWORD);
     assert!(
-        matches!(unlock_res, Err(KeystoreError::FsError(msg)) if msg.contains("Keystore is not initialized")),
-        "Unlock should fail as KDF params are not set"
+        matches!(unlock_res, Err(KeystoreError::InternalError(_))),
+        "Unlock should fail with InternalError as KDF params are not set"
     );
 }
 
@@ -121,23 +122,26 @@ fn test_unlock_with_wrong_password_on_existing_keystore() {
     let mut ks = Keystore::new_with_config(Some(keystore_path.clone()), config.clone()).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
 
-    // First, unlock with the correct password to ensure everything is set up properly
-    ks.unlock(TEST_PASSWORD).unwrap();
-    ks.lock();
+    // To properly test unlocking an existing keystore, we now create a new keystore instance
+    // and load from the same path.
+    let mut new_ks =
+        Keystore::new_with_config(Some(keystore_path.clone()), config.clone()).unwrap();
+    new_ks.initialize_or_load(None).unwrap(); // Load the previously saved keystore
 
-    // With the new security model, unlock with wrong password should fail
-    let unlock_result = ks.unlock(WRONG_PASSWORD);
+    // Now, attempt to unlock with the wrong password
+    let unlock_result = new_ks.unlock(WRONG_PASSWORD);
     assert!(
-        matches!(unlock_result, Err(KeystoreError::InvalidPassword)),
-        "Unlock with wrong password should fail with InvalidPassword"
+        matches!(unlock_result, Err(KeystoreError::MacVerificationFailure)),
+        "Unlock with wrong password should fail with MacVerificationFailure, but got {:?}",
+        unlock_result
     );
 
     // Keystore should remain locked
-    assert!(!ks.is_unlocked);
+    assert!(!new_ks.is_unlocked);
 
     // Since unlock failed, import should also fail because keystore is locked
     let import_res =
-        ks.import_private_key_hex(Some("key_with_wrong_pass".to_string()), DUMMY_PK_HEX);
+        new_ks.import_private_key_hex(Some("key_with_wrong_pass".to_string()), DUMMY_PK_HEX);
     assert!(
         matches!(import_res, Err(KeystoreError::Locked)),
         "Import should fail because keystore is locked after failed unlock"
@@ -193,7 +197,6 @@ fn test_load_existing_keystore() {
     assert_eq!(keys[0].alias, Some(original_key_alias));
 }
 
-
 #[test]
 fn test_h1_authenticated_keystore_round_trip() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
@@ -232,7 +235,6 @@ fn test_h1_authenticated_keystore_round_trip() {
     }
 }
 
-
 #[test]
 fn test_h1_mac_verification_failure_tampered_data() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
@@ -253,7 +255,20 @@ fn test_h1_mac_verification_failure_tampered_data() {
     .expect("Failed to parse keystore JSON");
 
     if let Some(Value::String(data_str)) = content_value.get_mut("protected_data_b64") {
-        data_str.push_str("tamper"); // Append some chars to invalidate Base64 or content
+        if !data_str.is_empty() {
+            let mut chars: Vec<char> = data_str.chars().collect();
+            // Change the first character to ensure the MAC will fail but base64 decoding still passes.
+            // If it's 'A', change to 'B'. Otherwise, change to 'A'.
+            if chars[0] == 'A' {
+                chars[0] = 'B';
+            } else {
+                chars[0] = 'A';
+            }
+            *data_str = chars.into_iter().collect();
+        } else {
+            // This should not happen for a valid keystore if data was written.
+            panic!("protected_data_b64 is empty, cannot tamper as intended for this test.");
+        }
     } else {
         panic!("protected_data_b64 field not found or not a string in keystore JSON");
     }
@@ -268,7 +283,7 @@ fn test_h1_mac_verification_failure_tampered_data() {
         let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
         ks2.initialize_or_load(None)
             .expect("Loading tampered keystore data should succeed (parsing envelope)");
-        
+
         let unlock_result = ks2.unlock(TEST_PASSWORD);
         assert!(
             matches!(unlock_result, Err(KeystoreError::MacVerificationFailure)),
@@ -277,7 +292,6 @@ fn test_h1_mac_verification_failure_tampered_data() {
         );
     }
 }
-
 
 #[test]
 fn test_h1_mac_verification_failure_tampered_mac() {
@@ -319,7 +333,7 @@ fn test_h1_mac_verification_failure_tampered_mac() {
         let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
         ks2.initialize_or_load(None)
             .expect("Loading tampered keystore data should succeed (parsing envelope)");
-        
+
         let unlock_result = ks2.unlock(TEST_PASSWORD);
         assert!(
             matches!(unlock_result, Err(KeystoreError::MacVerificationFailure)),
@@ -328,7 +342,6 @@ fn test_h1_mac_verification_failure_tampered_mac() {
         );
     }
 }
-
 
 #[test]
 fn test_h1_correct_mac_wrong_password() {
@@ -348,16 +361,15 @@ fn test_h1_correct_mac_wrong_password() {
         let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
         ks2.initialize_or_load(None) // Load the envelope
             .expect("Loading keystore data should succeed (parsing envelope)");
-        
+
         let unlock_result = ks2.unlock(WRONG_PASSWORD); // Use wrong password
         assert!(
-            matches!(unlock_result, Err(KeystoreError::InvalidPassword)),
-            "Unlock should fail with InvalidPassword, got {:?}",
+            matches!(unlock_result, Err(KeystoreError::MacVerificationFailure)),
+            "Unlock should fail with MacVerificationFailure, got {:?}",
             unlock_result
         );
     }
 }
-
 
 #[test]
 fn test_h1_invalid_envelope_format() {
@@ -372,7 +384,7 @@ fn test_h1_invalid_envelope_format() {
     {
         let mut ks = Keystore::new(Some(keystore_path)).unwrap();
         let load_result = ks.initialize_or_load(None);
-        
+
         assert!(
             matches!(load_result, Err(KeystoreError::InvalidFormat(_))),
             "Loading malformed keystore should fail with InvalidFormat, got {:?}",
@@ -380,7 +392,6 @@ fn test_h1_invalid_envelope_format() {
         );
     }
 }
-
 
 #[test]
 fn test_h1_change_password_interaction() {
@@ -395,7 +406,7 @@ fn test_h1_change_password_interaction() {
         let (key_id, _) = ks1
             .import_private_key_hex(Some(key_alias.to_string()), DUMMY_PK_HEX)
             .unwrap();
-        
+
         // Phase 2: Change password
         ks1.change_password(TEST_PASSWORD, NEW_PASSWORD)
             .expect("Password change failed");
@@ -412,17 +423,25 @@ fn test_h1_change_password_interaction() {
         // Try unlocking with the old password - should fail
         let unlock_old_pw_result = ks2.unlock(TEST_PASSWORD);
         assert!(
-            matches!(unlock_old_pw_result, Err(KeystoreError::InvalidPassword)),
-            "Unlock with old password should fail, got {:?}",
+            matches!(
+                unlock_old_pw_result,
+                Err(KeystoreError::MacVerificationFailure)
+            ),
+            "Unlock with old password should fail with MacVerificationFailure, got {:?}",
             unlock_old_pw_result
         );
-        assert!(!ks2.is_unlocked, "Keystore should remain locked after failed unlock attempt");
+        assert!(
+            !ks2.is_unlocked,
+            "Keystore should remain locked after failed unlock attempt"
+        );
 
         // Unlock with the new password - should succeed (and verify H-1 MAC)
         ks2.unlock(NEW_PASSWORD)
             .expect("Unlock with new password failed (H-1 MAC check implied)");
 
-        let keys = ks2.list_keys().expect("Listing keys after password change failed");
+        let keys = ks2
+            .list_keys()
+            .expect("Listing keys after password change failed");
         assert_eq!(keys.len(), 1, "Expected one key after password change");
         let loaded_key_info = &keys[0];
         assert_eq!(loaded_key_info.id, imported_key_id);
@@ -435,15 +454,17 @@ fn test_unlock_uninitialized_keystore() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     let mut ks = Keystore::new(Some(keystore_path)).unwrap();
     let unlock_result = ks.unlock("anypassword");
-    assert!(unlock_result.is_err());
-    if let Err(KeystoreError::FsError(msg)) = unlock_result {
-        assert!(msg.contains("Keystore is not initialized with KDF parameters."));
-    } else {
-        panic!(
-            "Expected FsError for uninitialized keystore unlock, got {:?}",
-            unlock_result
-        );
-    }
+
+    // The behavior is correct: trying to unlock a keystore that hasn't been initialized
+    // (i.e., no KDF params set) should fail because KDF params are missing.
+    assert!(
+        matches!(
+            unlock_result,
+            Err(KeystoreError::InternalError(ref msg)) if msg.contains("KDF parameters missing before unlock")
+        ),
+        "Expected InternalError for uninitialized keystore unlock, got {:?}",
+        unlock_result
+    );
 }
 
 // --- Tests for import_private_key_hex ---
@@ -795,7 +816,7 @@ fn test_change_password_success() {
     // Unlock with old password should fail
     assert!(matches!(
         ks.unlock(TEST_PASSWORD),
-        Err(KeystoreError::InvalidPassword)
+        Err(KeystoreError::MacVerificationFailure)
     ));
 
     std::thread::sleep(Duration::from_secs(1));
@@ -829,8 +850,8 @@ fn test_change_password_incorrect_old_password() {
     std::thread::sleep(Duration::from_millis(100));
     let change_res = ks.change_password(WRONG_PASSWORD, NEW_PASSWORD);
     assert!(
-        matches!(change_res, Err(KeystoreError::InvalidPassword)),
-        "Changing password with incorrect old password should fail with InvalidPassword"
+        matches!(change_res, Err(KeystoreError::MacVerificationFailure)),
+        "Changing password with incorrect old password should fail with MacVerificationFailure"
     );
 
     // Keystore should remain unlocked and functional with the old password
@@ -844,7 +865,7 @@ fn test_change_password_incorrect_old_password() {
     // Attempt to unlock with new password should fail
     assert!(matches!(
         ks.unlock(NEW_PASSWORD),
-        Err(KeystoreError::InvalidPassword)
+        Err(KeystoreError::MacVerificationFailure)
     ));
 }
 
@@ -875,8 +896,8 @@ fn test_change_password_persisted_kdf_params() {
     // Attempt to unlock with the old password should fail
     let unlock_old_res = ks_loaded.unlock(TEST_PASSWORD);
     assert!(
-        matches!(unlock_old_res, Err(KeystoreError::InvalidPassword)),
-        "Unlock with old password should fail after password change"
+        matches!(unlock_old_res, Err(KeystoreError::MacVerificationFailure)),
+        "Unlock with old password should fail with MacVerificationFailure after password change"
     );
     std::thread::sleep(Duration::from_secs(1));
 
@@ -1014,8 +1035,8 @@ fn test_load_from_disk_malformed_json() {
     let mut ks = Keystore::new(Some(keystore_path)).unwrap();
     let load_res = ks.initialize_or_load(None); // Attempt to load
     assert!(
-        matches!(load_res, Err(KeystoreError::SerdeJson(_))),
-        "Loading malformed JSON should result in SerdeJson error"
+        matches!(load_res, Err(KeystoreError::InvalidFormat(_))),
+        "Loading malformed JSON should result in InvalidFormat error"
     );
 }
 
@@ -1057,39 +1078,26 @@ fn test_aes_gcm_error_trigger() {
     ks.unlock(TEST_PASSWORD).unwrap();
 
     let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
-    ks.lock(); // Lock to ensure data is encrypted on disk
 
-    // Manually load the keystore file, tamper with the encrypted private key
-    let mut json_value: Value =
-        serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
-    if let Some(entries_array) = json_value["entries"].as_array_mut() {
-        if let Some(key_entry) = entries_array.get_mut(0) {
-            if let Some(encrypted_pk_val) = key_entry["encrypted_pk"].as_str() {
-                // Corrupt the encrypted private key by changing a byte
-                let mut corrupted_pk = encrypted_pk_val.to_string();
-                // Corrupt the encrypted private key by truncating it, causing an invalid length for base64 decoding
-                if corrupted_pk.len() > 1 {
-                    // Ensure there's at least one character to remove
-                    corrupted_pk.pop(); // Remove the last character
-                } else {
-                    panic!("Encrypted private key too short to corrupt");
-                }
-                key_entry["encrypted_pk"] = Value::String(corrupted_pk);
-            }
+    // Find the entry and corrupt its encrypted_pk in memory
+    if let Some(entry) = ks.entries.iter_mut().find(|e| e.id == id) {
+        let mut corrupted_pk = entry.encrypted_pk.clone();
+        if corrupted_pk.len() > 1 {
+            corrupted_pk.pop(); // Corrupt by truncating, causing base64 decode error
+        } else {
+            panic!("Encrypted private key too short to corrupt");
         }
+        entry.encrypted_pk = corrupted_pk;
+    } else {
+        panic!("Could not find imported key entry");
     }
-    std::fs::write(&keystore_path, serde_json::to_string(&json_value).unwrap()).unwrap();
-
-    // Load the corrupted keystore
-    let mut ks_corrupted = Keystore::new(Some(keystore_path)).unwrap();
-    ks_corrupted.initialize_or_load(None).unwrap(); // Should load successfully, but decryption will fail
-    ks_corrupted.unlock(TEST_PASSWORD).unwrap(); // Unlock to attempt decryption
 
     // Try to get the signer for the corrupted key, which should now fail with InvalidFormat
-    let get_signer_res = ks_corrupted.get_signer(id);
+    let get_signer_res = ks.get_signer(id);
     assert!(
         matches!(get_signer_res, Err(KeystoreError::InvalidFormat(_))),
-        "Getting signer for corrupted key should result in InvalidFormat error due to base64 decode failure"
+        "Getting signer for corrupted key should result in InvalidFormat error due to base64 decode failure. Got: {:?}",
+        get_signer_res
     );
 }
 
@@ -1129,29 +1137,36 @@ fn test_kdf_params_mismatch_error() {
 #[test]
 fn test_unsupported_kdf_error() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    // Create a dummy keystore structure with an unsupported KDF
-    let unsupported_kdf_json = serde_json::json!({
-        "version": "1.0.0",
-        "master_kdf": "unsupported_kdf_algo", // Set master_kdf at the root level
-        "master_kdf_params": { // Renamed from kdf_params to master_kdf_params
-            "salt": "00000000000000000000000000000000", // Dummy salt, hex encoded
-            "m_cost": 131072,
-            "t_cost": 4,
-            "p_cost": 1,
-            "output_len": 32,
-            "kdf_version": 0 // Add kdf_version as it's part of MasterKdfParams
-        },
-        "verification_tag": "dummy_tag",
-        "verification_nonce": "dummy_nonce", // Add verification_nonce
-        "entries": [] // Renamed from keys to entries
-    });
-    std::fs::write(&keystore_path, unsupported_kdf_json.to_string()).unwrap();
+    // 1. Create a valid keystore first.
+    {
+        let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+        ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+        ks.unlock(TEST_PASSWORD).unwrap();
+        ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
+        // Keystore is saved to disk on drop
+    }
 
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
-    let load_res = ks.initialize_or_load(None);
+    // 2. Manually load the keystore file and tamper with the master_kdf field.
+    let mut json_value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
+    if let Some(obj) = json_value.as_object_mut() {
+        obj.insert(
+            "master_kdf_algo_name".to_string(),
+            Value::String("unsupported_kdf_algo".to_string()),
+        );
+    }
+    std::fs::write(&keystore_path, serde_json::to_string(&json_value).unwrap()).unwrap();
+
+    // 3. Attempt to load and unlock the keystore with the unsupported KDF.
+    let mut ks_tampered = Keystore::new(Some(keystore_path)).unwrap();
+    ks_tampered.initialize_or_load(None).unwrap(); // Load should succeed.
+
+    // Unlock should fail because the KDF algorithm is not supported.
+    let unlock_res = ks_tampered.unlock(TEST_PASSWORD);
     assert!(
-        matches!(load_res, Err(KeystoreError::UnsupportedKdf(algo)) if algo == "unsupported_kdf_algo"),
-        "Loading with unsupported KDF should result in UnsupportedKdf error"
+        matches!(unlock_res, Err(KeystoreError::UnsupportedKdf(ref algo)) if algo == "unsupported_kdf_algo"),
+        "Unlock with unsupported KDF should result in UnsupportedKdf error, got {:?}",
+        unlock_res
     );
 }
 
@@ -1165,21 +1180,46 @@ fn test_missing_verification_tag_error() {
         ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
     } // Keystore saved to disk
 
-    // Manually load the keystore file and remove the verification_tag
-    let mut json_value: Value =
-        serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
-    json_value
+    // Manually load the keystore file and tamper with the protected data by removing the verification_tag
+    let keystore_json_str = std::fs::read_to_string(&keystore_path).unwrap();
+    let mut envelope_value: Value = serde_json::from_str(&keystore_json_str).unwrap();
+
+    // Decode the protected part
+    let protected_b64 = envelope_value["protected_data_b64"].as_str().unwrap();
+    let protected_json_bytes = base64::engine::general_purpose::STANDARD
+        .decode(protected_b64)
+        .unwrap();
+    let mut protected_value: Value = serde_json::from_slice(&protected_json_bytes).unwrap();
+
+    // Remove the verification tag from the protected data
+    protected_value
         .as_object_mut()
         .unwrap()
         .remove("verification_tag");
-    std::fs::write(&keystore_path, serde_json::to_string(&json_value).unwrap()).unwrap();
+
+    // Re-encode the tampered protected part
+    let tampered_protected_json_bytes = serde_json::to_vec(&protected_value).unwrap();
+    let tampered_protected_b64 =
+        base64::engine::general_purpose::STANDARD.encode(&tampered_protected_json_bytes);
+
+    // Put it back into the envelope
+    envelope_value["protected_data_b64"] = Value::String(tampered_protected_b64);
+
+    // Write the tampered envelope back. The MAC is now invalid because the protected data has changed.
+    std::fs::write(
+        &keystore_path,
+        serde_json::to_string(&envelope_value).unwrap(),
+    )
+    .unwrap();
 
     // Attempt to load and unlock the keystore
-    let mut ks_missing_tag = Keystore::new(Some(keystore_path)).unwrap();
-    ks_missing_tag.initialize_or_load(None).unwrap(); // Load should succeed
-    let unlock_res = ks_missing_tag.unlock(TEST_PASSWORD); // Unlock should fail due to missing tag
+    let mut ks_tampered = Keystore::new(Some(keystore_path)).unwrap();
+    ks_tampered.initialize_or_load(None).unwrap(); // Load should succeed as MAC is not checked here
+    let unlock_res = ks_tampered.unlock(TEST_PASSWORD); // Unlock should fail MAC verification
+
+    // Any tampering with authenticated data should result in a MAC verification failure.
     assert!(
-        matches!(unlock_res, Err(KeystoreError::MissingVerificationTag)),
-        "Unlock with missing verification tag should result in MissingVerificationTag error"
+        matches!(unlock_res, Err(KeystoreError::MacVerificationFailure)),
+        "Unlock with tampered protected data (missing tag) should result in MacVerificationFailure"
     );
 }
