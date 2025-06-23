@@ -208,6 +208,7 @@ impl MasterKey {
     // Constructor that takes ownership of Zeroizing<Vec<u8>>.
     // This is the primary way MasterKey instances will be created from derived key material.
     fn from_zeroizing(key: Zeroizing<Vec<u8>>) -> Self {
+        //TODO: doc warning non mlock for sensitive data on this module
         MasterKey(key)
     }
 }
@@ -571,32 +572,40 @@ impl Keystore {
         let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        // Try to decrypt the verification tag
-        match cipher.decrypt(
+        let expected_plaintext = b"ok";
+        let mut decrypted_buffer = Zeroizing::new(vec![0u8; expected_plaintext.len()]);
+        let mut decryption_succeeded = false;
+
+        // Attempt to decrypt the verification tag
+        let decrypt_result = cipher.decrypt(
             nonce,
             aes_gcm::aead::Payload {
                 msg: &encrypted_tag,
                 aad: b"verify",
             },
-        ) {
-            Ok(decrypted) => {
-                // ID 12: Use constant-time comparison for the verification tag
-                Ok(decrypted.ct_eq(b"ok").into())
-            }
-            Err(_) => {
-                // Mitigate timing oracle (C-3):
-                // Always perform a constant-time comparison even if decryption fails.
-                // The expected plaintext is b"ok".
-                let expected_plaintext = b"ok";
-                // Create dummy data of the same length as the expected plaintext.
-                // The content of dummy_data doesn't matter, only its length and the ct_eq call.
-                let dummy_data = vec![0u8; expected_plaintext.len()];
-                // Perform a constant-time comparison. The result is irrelevant here
-                // as we already know verification failed, but the operation's timing is what matters.
-                let _ = dummy_data.ct_eq(expected_plaintext);
-                Ok(false) // Verification failed
+        );
+
+        if let Ok(decrypted_data) = decrypt_result {
+            // If decryption succeeded, copy the actual decrypted data into the buffer.
+            // Ensure the length matches to prevent panic on copy_from_slice.
+            if decrypted_data.len() == expected_plaintext.len() {
+                decrypted_buffer.copy_from_slice(&decrypted_data);
+                decryption_succeeded = true;
             }
         }
+        // If decryption failed, decrypted_buffer remains filled with zeros (dummy data).
+        // decryption_succeeded remains false.
+
+        // Always perform a constant-time comparison on the `decrypted_buffer`
+        // against the `expected_plaintext`.
+        let content_matches = decrypted_buffer.ct_eq(expected_plaintext).into();
+
+        // The overall verification is successful only if decryption succeeded AND content matches.
+        // This ensures that the timing is consistent regardless of decryption success,
+        // as both the decrypt operation (which is assumed to be constant-time by the library,
+        // or at least we're forcing its execution path) and the constant-time comparison
+        // are always performed.
+        Ok(decryption_succeeded && content_matches)
     }
 
     // Helper methods to get verification tag and nonce
