@@ -30,7 +30,7 @@ use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
-use subtle::ConstantTimeEq; // For constant-time comparison
+// Removed: use subtle::ConstantTimeEq; // No longer needed with HMAC verification
 use tiny_keccak::{Hasher, Keccak}; // For Keccak-256
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -72,7 +72,7 @@ pub struct ProtectedKeystorePart {
     // For now, auto_lock_timeout is part of KeystoreConfig, not persisted directly in this struct.
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Zeroize, ZeroizeOnDrop)] // Zeroize for salt is fine
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Zeroize, ZeroizeOnDrop)] // Zeroize for salt is fine
 pub struct MasterKdfParams {
     pub salt: String, // hex_encoded_salt
     pub m_cost: u32,
@@ -264,25 +264,62 @@ struct DecryptedData {
 }
 
 impl Keystore {
+    // C-2 Fix: Include keystore-specific domain separation in MAC key derivation
     fn derive_mac_key(&self, master_key_bytes: &[u8]) -> Result<hmac::Key, KeystoreError> {
-        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, HKDF_SALT_FOR_MAC_KEY_DERIVATION);
+        let keystore_id = self.derive_keystore_id();
+        
+        // Use keystore ID as part of the salt for proper domain separation
+        let mut combined_salt = Vec::with_capacity(HKDF_SALT_FOR_MAC_KEY_DERIVATION.len() + 32);
+        combined_salt.extend_from_slice(HKDF_SALT_FOR_MAC_KEY_DERIVATION);
+        combined_salt.extend_from_slice(keystore_id.as_ref());
+        
+        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, &combined_salt);
         let prk = salt.extract(master_key_bytes);
-        let mut mac_key_bytes = [0u8; 32]; // 256-bit key for HMAC-SHA256
+        let mut mac_key_bytes = Zeroizing::new([0u8; 32]); // 256-bit key for HMAC-SHA256
 
-        prk.expand(&[HKDF_INFO_MAC_KEY], hkdf::HKDF_SHA256)
+        // Include keystore ID in info parameter for additional domain separation
+        let mut info_with_keystore = Vec::with_capacity(HKDF_INFO_MAC_KEY.len() + 32);
+        info_with_keystore.extend_from_slice(HKDF_INFO_MAC_KEY);
+        info_with_keystore.extend_from_slice(keystore_id.as_ref());
+
+        prk.expand(&[&info_with_keystore], hkdf::HKDF_SHA256)
             .map_err(|_| {
                 KeystoreError::InternalError("Failed to expand MAC key from PRK".to_string())
             })?
-            .fill(&mut mac_key_bytes)
+            .fill(mac_key_bytes.as_mut())
             .map_err(|_| {
                 KeystoreError::InternalError("Failed to fill MAC key bytes".to_string())
             })?;
 
-        Ok(hmac::Key::new(hmac::HMAC_SHA256, &mac_key_bytes))
+        Ok(hmac::Key::new(hmac::HMAC_SHA256, mac_key_bytes.as_ref()))
     }
 
     const DEFAULT_KEYSTORE_FILENAME: &'static str = "keystore_v1.json";
     const APP_DIR_NAME: &'static str = "mfm";
+
+    // C-2 Fix: Generate keystore-specific identifier for domain separation
+    fn derive_keystore_id(&self) -> Zeroizing<[u8; 32]> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        // Create a stable keystore identifier based on file path
+        // This ensures different keystores have different domain separation
+        let mut hasher = DefaultHasher::new();
+        self.file_path.hash(&mut hasher);
+        let path_hash = hasher.finish();
+        
+        // Use HKDF to derive a proper keystore ID from the path hash
+        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"mfm-keystore-id-derivation-v1");
+        let prk = salt.extract(&path_hash.to_be_bytes());
+        
+        let mut keystore_id = Zeroizing::new([0u8; 32]);
+        prk.expand(&[b"mfm-keystore-domain-separator-v1"], hkdf::HKDF_SHA256)
+            .expect("HKDF expand should not fail with valid inputs")
+            .fill(keystore_id.as_mut())
+            .expect("HKDF fill should not fail with valid inputs");
+            
+        keystore_id
+    }
 
     /// Securely create a directory with 0o700 permissions.
     #[allow(dead_code)]
@@ -500,7 +537,7 @@ impl Keystore {
         Ok(())
     }
 
-    // Fix for F-1: Create a verification tag for password verification
+    // C-1 Fix: Create HMAC-based password verification tag
     fn create_verification_tag(&mut self) -> Result<(), KeystoreError> {
         // Ensure parent directory exists (best effort)
         if let Some(parent_dir) = self.file_path.parent() {
@@ -512,100 +549,59 @@ impl Keystore {
         // The master_key must be set by the caller (e.g. initialize_or_load or change_password)
         // before this function is invoked. This function uses self.master_key directly.
 
-        // Generate a UUID-derived nonce for the verification tag
-        let new_uuid = Uuid::new_v4();
-        // A UUID is 16 bytes (128 bits). AES-GCM typically uses a 12-byte (96-bit) nonce.
-        // We'll take the first 12 bytes of the UUID.
-        let nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12]
-            .try_into()
-            .expect("UUID to 12-byte nonce conversion failed, this should not happen");
+        // Generate a cryptographically secure random nonce for HMAC verification
+        let mut nonce_bytes = Zeroizing::new([0u8; 32]); // Use 32 bytes for better security
+        OsRng
+            .try_fill_bytes(nonce_bytes.as_mut())
+            .map_err(|e| KeystoreError::FsError(format!("Failed to generate verification nonce: {}", e)))?;
 
-        // Create a verification tag by encrypting a known plaintext
-        let plaintext = b"ok";
         let master_key_bytes = self
             .master_key
             .as_ref()
             .ok_or(KeystoreError::Locked)?
             .as_ref();
 
-        let key = Key::<Aes256Gcm>::from_slice(master_key_bytes);
-        let cipher = Aes256Gcm::new(key);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-
-        let encrypted_tag = cipher
-            .encrypt(
-                nonce,
-                aes_gcm::aead::Payload {
-                    msg: plaintext,
-                    aad: b"verify",
-                },
-            )
-            .map_err(|e| KeystoreError::AesGcm(format!("Encryption failed: {}", e)))?;
+        // Create HMAC verification tag using the master key and random nonce
+        let verification_key = hmac::Key::new(hmac::HMAC_SHA256, master_key_bytes);
+        let verification_tag = hmac::sign(&verification_key, nonce_bytes.as_ref());
 
         // Store the verification tag and nonce
-        self.verification_tag = Some(BASE64_STANDARD.encode(&encrypted_tag));
-        self.verification_nonce = Some(BASE64_STANDARD.encode(nonce_bytes));
+        self.verification_tag = Some(BASE64_STANDARD.encode(verification_tag.as_ref()));
+        self.verification_nonce = Some(BASE64_STANDARD.encode(&nonce_bytes));
 
         Ok(())
     }
 
-    // Fix for F-1: Verify the password using the verification tag
+    // C-1 Fix: HMAC-based password verification for constant-time security
     fn verify_password(
         &self,
-        master_key: &MasterKey, // Changed type
-        tag: &str,
-        nonce: &str,
+        master_key: &MasterKey,
+        stored_tag: &str,
+        stored_nonce: &str,
     ) -> Result<bool, KeystoreError> {
-        let encrypted_tag = BASE64_STANDARD.decode(tag).map_err(|_| {
+        // Decode the stored verification tag and nonce
+        let verification_tag = BASE64_STANDARD.decode(stored_tag).map_err(|_| {
             KeystoreError::InvalidFormat("Failed to decode verification tag".to_string())
         })?;
 
-        let nonce_vec = BASE64_STANDARD.decode(nonce).map_err(|_| {
+        let nonce_bytes = BASE64_STANDARD.decode(stored_nonce).map_err(|_| {
             KeystoreError::InvalidFormat("Failed to decode verification nonce".to_string())
         })?;
 
-        let nonce_bytes: [u8; 12] = nonce_vec.try_into().map_err(|_| {
-            KeystoreError::InvalidFormat("Invalid verification nonce length".to_string())
-        })?;
-
-        let key = Key::<Aes256Gcm>::from_slice(master_key.as_ref());
-        let cipher = Aes256Gcm::new(key);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-
-        let expected_plaintext = b"ok";
-        let mut decrypted_buffer = Zeroizing::new(vec![0u8; expected_plaintext.len()]);
-        let mut decryption_succeeded = false;
-
-        // Attempt to decrypt the verification tag
-        let decrypt_result = cipher.decrypt(
-            nonce,
-            aes_gcm::aead::Payload {
-                msg: &encrypted_tag,
-                aad: b"verify",
-            },
-        );
-
-        if let Ok(decrypted_data) = decrypt_result {
-            // If decryption succeeded, copy the actual decrypted data into the buffer.
-            // Ensure the length matches to prevent panic on copy_from_slice.
-            if decrypted_data.len() == expected_plaintext.len() {
-                decrypted_buffer.copy_from_slice(&decrypted_data);
-                decryption_succeeded = true;
-            }
+        // Validate nonce length
+        if nonce_bytes.len() != 32 {
+            return Ok(false); // Constant-time: don't reveal the exact error
         }
-        // If decryption failed, decrypted_buffer remains filled with zeros (dummy data).
-        // decryption_succeeded remains false.
 
-        // Always perform a constant-time comparison on the `decrypted_buffer`
-        // against the `expected_plaintext`.
-        let content_matches = decrypted_buffer.ct_eq(expected_plaintext).into();
-
-        // The overall verification is successful only if decryption succeeded AND content matches.
-        // This ensures that the timing is consistent regardless of decryption success,
-        // as both the decrypt operation (which is assumed to be constant-time by the library,
-        // or at least we're forcing its execution path) and the constant-time comparison
-        // are always performed.
-        Ok(decryption_succeeded && content_matches)
+        // Create HMAC key from the master key
+        let verification_key = hmac::Key::new(hmac::HMAC_SHA256, master_key.as_ref());
+        
+        // Perform constant-time HMAC verification
+        // ring::hmac::verify is guaranteed to be constant-time
+        match hmac::verify(&verification_key, &nonce_bytes, &verification_tag) {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false), // Constant-time: always return same error type
+        }
     }
 
     // Helper methods to get verification tag and nonce
@@ -1195,18 +1191,102 @@ impl Keystore {
             Self::ensure_secure_dir(parent_dir)?;
         }
 
-        // File locking and atomic write
+        // C-3 Fix: Robust file locking with timeout and recovery mechanisms
+        self.save_with_file_locking(&envelope, &serialized_envelope)?;
+
+        Ok(())
+    }
+
+    // C-3 Fix: Robust file locking implementation with timeout and recovery
+    fn save_with_file_locking(
+        &mut self, 
+        envelope: &AuthenticatedKeystoreEnvelope, 
+        serialized_envelope: &Zeroizing<String>
+    ) -> Result<(), KeystoreError> {
+        use std::time::{Duration, Instant};
+        
+        const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+        const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+        
         let lock_file_path = self.file_path.with_extension("lock");
-        let lock_file = fs::OpenOptions::new()
-            .create(true)
-            .append(true) // Keep append for lock file semantics if that's intended, or change to write
-            .open(&lock_file_path)
-            .map_err(|e| KeystoreError::FsError(format!("Failed to open lock file: {}", e)))?;
-
-        fs2::FileExt::lock_exclusive(&lock_file).map_err(|e| {
-            KeystoreError::FsError(format!("Failed to acquire exclusive lock: {}", e))
-        })?;
-
+        let start_time = Instant::now();
+        
+        // Retry loop for lock acquisition with timeout
+        let _lock_file = loop {
+            match fs::OpenOptions::new()
+                .create_new(true) // Fail if lock file already exists (prevents races)
+                .write(true)
+                .open(&lock_file_path) 
+            {
+                Ok(file) => break file,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Lock file exists, check if we've timed out
+                    if start_time.elapsed() > LOCK_TIMEOUT {
+                        return Err(KeystoreError::FsError(format!(
+                            "Failed to acquire file lock within {} seconds", 
+                            LOCK_TIMEOUT.as_secs()
+                        )));
+                    }
+                    
+                    // Check if lock file is stale (older than timeout)
+                    if let Ok(metadata) = fs::metadata(&lock_file_path) {
+                        if let Ok(modified) = metadata.modified() {
+                            if let Ok(elapsed) = modified.elapsed() {
+                                if elapsed > LOCK_TIMEOUT {
+                                    // Remove stale lock file and retry
+                                    let _ = fs::remove_file(&lock_file_path);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Wait before retrying
+                    std::thread::sleep(LOCK_RETRY_INTERVAL);
+                }
+                Err(e) => return Err(KeystoreError::FsError(format!(
+                    "Failed to create lock file: {}", e
+                ))),
+            }
+        };
+        
+        // Ensure lock file is removed on drop (RAII)
+        struct LockFileGuard(PathBuf);
+        impl Drop for LockFileGuard {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let _lock_guard = LockFileGuard(lock_file_path.clone());
+        
+        // Perform atomic write with integrity verification
+        let write_result = self.atomic_write_with_verification(serialized_envelope);
+        
+        // Handle write result and update state
+        match write_result {
+            Ok(()) => {
+                // Update in-memory state only after successful write
+                self.pending_protected_data_b64 = Some(envelope.protected_data_b64.clone());
+                self.pending_mac_b64 = Some(envelope.mac_b64.clone());
+                Ok(())
+            }
+            Err(e) => {
+                // On failure, attempt to verify if file was actually written correctly
+                if self.verify_file_integrity(envelope).unwrap_or(false) {
+                    // File was written correctly despite error - update state
+                    self.pending_protected_data_b64 = Some(envelope.protected_data_b64.clone());
+                    self.pending_mac_b64 = Some(envelope.mac_b64.clone());
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            }
+        }
+        // Lock file is automatically removed by LockFileGuard drop
+    }
+    
+    // C-3 Fix: Atomic write with verification
+    fn atomic_write_with_verification(&self, serialized_envelope: &Zeroizing<String>) -> Result<(), KeystoreError> {
         let atomic_file = AtomicFile::new(&self.file_path, OverwriteBehavior::AllowOverwrite);
         atomic_file
             .write(|f| f.write_all(serialized_envelope.as_bytes()))
@@ -1224,17 +1304,26 @@ impl Keystore {
                 ))
             })?;
         }
-
-        // CRITICAL FIX: After saving, the in-memory `pending_` fields should reflect what was just written,
-        // as if it were loaded. This is especially important if `initialize_or_load` just created a new file.
-        // The `envelope` variable holds the `protected_data_b64` and `mac_b64` that were just written.
-        self.pending_protected_data_b64 = Some(envelope.protected_data_b64.clone());
-        self.pending_mac_b64 = Some(envelope.mac_b64.clone());
-
-        fs2::FileExt::unlock(&lock_file)
-            .map_err(|e| KeystoreError::FsError(format!("Failed to unlock file: {}", e)))?;
-
+        
         Ok(())
+    }
+    
+    // C-3 Fix: Verify file integrity after write
+    fn verify_file_integrity(&self, expected_envelope: &AuthenticatedKeystoreEnvelope) -> Result<bool, KeystoreError> {
+        if !self.file_path.exists() {
+            return Ok(false);
+        }
+        
+        let file_content = fs::read(&self.file_path)
+            .map_err(|_| KeystoreError::FsError("Failed to read file for verification".to_string()))?;
+            
+        let loaded_envelope: AuthenticatedKeystoreEnvelope = serde_json::from_slice(&file_content)
+            .map_err(|_| KeystoreError::InvalidFormat("File verification failed".to_string()))?;
+            
+        // Compare critical fields
+        Ok(loaded_envelope.protected_data_b64 == expected_envelope.protected_data_b64 &&
+           loaded_envelope.mac_b64 == expected_envelope.mac_b64 &&
+           loaded_envelope.master_kdf_params == expected_envelope.master_kdf_params)
     }
 
     fn load_from_disk(&mut self) -> Result<(), KeystoreError> {
@@ -1385,7 +1474,7 @@ impl Keystore {
         aad
     }
 
-    // Derive per-entry encryption key using HKDF
+    // C-2 Fix: Derive per-entry encryption key using HKDF with keystore domain separation
     fn derive_entry_key(
         &self,
         master_key: &[u8],
@@ -1393,18 +1482,26 @@ impl Keystore {
         id: &Uuid,         // Added UUID parameter for domain separation
         address: &Address, // Added Address parameter for domain separation
     ) -> Result<Zeroizing<[u8; 32]>, KeystoreError> {
-        // Use the provided salt for HKDF
-        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, hkdf_salt_bytes);
+        let keystore_id = self.derive_keystore_id();
+        
+        // Combine the provided salt with keystore ID for proper domain separation
+        let mut combined_salt = Vec::with_capacity(hkdf_salt_bytes.len() + 32);
+        combined_salt.extend_from_slice(hkdf_salt_bytes);
+        combined_salt.extend_from_slice(keystore_id.as_ref());
+        
+        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, &combined_salt);
         let prk = salt.extract(master_key);
 
         // Create a single info buffer that includes:
         // 1. A fixed version string prefix
-        // 2. The UUID of the key
-        // 3. The ethereum address
-        // This ensures domain separation even if salts collide
+        // 2. The keystore ID for domain separation
+        // 3. The UUID of the key
+        // 4. The ethereum address
+        // This ensures domain separation even if salts collide between keystores
         let prefix = b"mfm-keystore-entry-key-v1";
-        let mut info_buf = Zeroizing::new(Vec::with_capacity(prefix.len() + 16 + 20)); // version + UUID + Address
+        let mut info_buf = Zeroizing::new(Vec::with_capacity(prefix.len() + 32 + 16 + 20)); // version + keystore_id + UUID + Address
         info_buf.extend_from_slice(prefix);
+        info_buf.extend_from_slice(keystore_id.as_ref());
         info_buf.extend_from_slice(id.as_bytes());
         info_buf.extend_from_slice(address.as_slice());
 
