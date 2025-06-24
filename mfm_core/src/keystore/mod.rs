@@ -470,7 +470,7 @@ impl Keystore {
             })?;
 
         // 7. Populate keystore fields from the verified and deserialized protected part
-        self.keystore_version = Some(protected_part.version.clone());
+        self.keystore_version = Some(protected_part.version);
         self.verification_tag = protected_part.verification_tag.clone();
         self.entries = protected_part.entries.clone();
 
@@ -673,11 +673,12 @@ impl Keystore {
         let public_key = signing_key.verifying_key();
 
         // Compute the Ethereum address from the public key
+        // M-1 fix: Wrap temporary buffers with Zeroizing to prevent memory leakage
         let uncompressed_pk = public_key.to_encoded_point(false);
         let mut keccak = Keccak::v256();
         keccak.update(&uncompressed_pk.as_bytes()[1..]);
-        let mut hashed_pk = [0u8; 32];
-        keccak.finalize(&mut hashed_pk);
+        let mut hashed_pk = Zeroizing::new([0u8; 32]);
+        keccak.finalize(hashed_pk.as_mut());
         let address_bytes: [u8; 20] = hashed_pk[12..]
             .try_into()
             .map_err(|_| KeystoreError::DerivationFailed)?;
@@ -773,11 +774,12 @@ impl Keystore {
         let signing_key = SigningKey::from(&secret_key); // Use our project's k256::SecretKey
         let public_key = signing_key.verifying_key();
 
+        // M-1 fix: Wrap temporary buffers with Zeroizing to prevent memory leakage
         let uncompressed_pk = public_key.to_encoded_point(false);
         let mut keccak = Keccak::v256();
         keccak.update(&uncompressed_pk.as_bytes()[1..]);
-        let mut hashed_pk = [0u8; 32];
-        keccak.finalize(&mut hashed_pk);
+        let mut hashed_pk = Zeroizing::new([0u8; 32]);
+        keccak.finalize(hashed_pk.as_mut());
         let address_bytes: [u8; 20] = hashed_pk[12..]
             .try_into()
             .map_err(|_| KeystoreError::DerivationFailed)?;
@@ -1138,8 +1140,7 @@ impl Keystore {
         let protected_part = ProtectedKeystorePart {
             version: self
                 .keystore_version
-                .clone()
-                .unwrap_or_else(|| KEYSTORE_VERSION),
+                .unwrap_or(KEYSTORE_VERSION),
             verification_tag: self.verification_tag.clone(),
             entries: self.entries.clone(),
         };
@@ -1184,9 +1185,10 @@ impl Keystore {
             mac_b64,
         };
 
-        let serialized_envelope = serde_json::to_string_pretty(&envelope).map_err(|e| {
+        // M-1 fix: Wrap serialized data with Zeroizing to prevent memory leakage
+        let serialized_envelope = Zeroizing::new(serde_json::to_string_pretty(&envelope).map_err(|e| {
             KeystoreError::SerializationError(format!("Failed to serialize envelope: {}", e))
-        })?;
+        })?);
 
         // Ensure parent directory exists
         if let Some(parent_dir) = self.file_path.parent() {
@@ -1310,7 +1312,7 @@ impl Keystore {
 
         let entry_key = self.derive_entry_key(master_key_bytes, &hkdf_salt_bytes, id, address)?;
 
-        let key = Key::<Aes256Gcm>::from_slice(entry_key.as_slice());
+        let key = Key::<Aes256Gcm>::from_slice(entry_key.as_ref());
         let cipher = Aes256Gcm::new(key);
         let aes_nonce = Nonce::from_slice(aes_nonce_bytes); // Use renamed variable
 
@@ -1354,7 +1356,7 @@ impl Keystore {
 
         let entry_key = self.derive_entry_key(master_key_bytes, &hkdf_salt_bytes, id, address)?;
 
-        let key = Key::<Aes256Gcm>::from_slice(entry_key.as_slice());
+        let key = Key::<Aes256Gcm>::from_slice(entry_key.as_ref());
         let cipher = Aes256Gcm::new(key);
         let aes_nonce = Nonce::from_slice(aes_nonce_bytes); // Use renamed variable
 
@@ -1375,8 +1377,9 @@ impl Keystore {
     }
 
     // Create Additional Authenticated Data from entry metadata
-    fn create_aad(&self, id: &Uuid, address: &Address) -> Vec<u8> {
-        let mut aad = Vec::with_capacity(16 + 20); // UUID (16 bytes) + Address (20 bytes)
+    // M-1 fix: Wrap AAD buffer with Zeroizing to prevent memory leakage
+    fn create_aad(&self, id: &Uuid, address: &Address) -> Zeroizing<Vec<u8>> {
+        let mut aad = Zeroizing::new(Vec::with_capacity(16 + 20)); // UUID (16 bytes) + Address (20 bytes)
         aad.extend_from_slice(id.as_bytes());
         aad.extend_from_slice(address.as_slice());
         aad
@@ -1389,7 +1392,7 @@ impl Keystore {
         hkdf_salt_bytes: &[u8],
         id: &Uuid,         // Added UUID parameter for domain separation
         address: &Address, // Added Address parameter for domain separation
-    ) -> Result<Zeroizing<Vec<u8>>, KeystoreError> {
+    ) -> Result<Zeroizing<[u8; 32]>, KeystoreError> {
         // Use the provided salt for HKDF
         let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, hkdf_salt_bytes);
         let prk = salt.extract(master_key);
@@ -1400,7 +1403,7 @@ impl Keystore {
         // 3. The ethereum address
         // This ensures domain separation even if salts collide
         let prefix = b"mfm-keystore-entry-key-v1";
-        let mut info_buf = Vec::with_capacity(prefix.len() + 16 + 20); // version + UUID + Address
+        let mut info_buf = Zeroizing::new(Vec::with_capacity(prefix.len() + 16 + 20)); // version + UUID + Address
         info_buf.extend_from_slice(prefix);
         info_buf.extend_from_slice(id.as_bytes());
         info_buf.extend_from_slice(address.as_slice());
@@ -1408,13 +1411,14 @@ impl Keystore {
         // Use the combined info buffer
         let info_vec: &[&[u8]] = &[&info_buf];
 
-        let mut okm = vec![0u8; 32]; // 32 bytes for AES-256
+        // M-3 fix: Use [u8;32] on stack instead of Vec<u8> to prevent stack copy leakage
+        let mut okm = Zeroizing::new([0u8; 32]); // 32 bytes for AES-256 on stack
         prk.expand(info_vec, hkdf::HKDF_SHA256)
             .map_err(|_| KeystoreError::DerivationFailed)?
-            .fill(&mut okm)
+            .fill(okm.as_mut())
             .map_err(|_| KeystoreError::DerivationFailed)?;
 
-        Ok(Zeroizing::new(okm))
+        Ok(okm)
     }
 
     fn derive_master_key(
