@@ -768,25 +768,21 @@ impl Keystore {
         stored_nonce: &str,
     ) -> Result<bool, KeystoreError> {
         // Decode the stored verification tag and nonce
-        let verification_tag = BASE64_STANDARD.decode(stored_tag).map_err(|_| {
+        // H-3 Fix: Use zeroizing buffers for sensitive verification data
+        let verification_tag = Zeroizing::new(BASE64_STANDARD.decode(stored_tag).map_err(|_| {
             KeystoreError::InvalidFormat("Failed to decode verification tag".to_string())
-        })?;
+        })?);
 
-        let nonce_bytes = BASE64_STANDARD.decode(stored_nonce).map_err(|_| {
+        let nonce_bytes = Zeroizing::new(BASE64_STANDARD.decode(stored_nonce).map_err(|_| {
             KeystoreError::InvalidFormat("Failed to decode verification nonce".to_string())
-        })?;
-
-        // Validate nonce length
-        if nonce_bytes.len() != 32 {
-            return Ok(false); // Constant-time: don't reveal the exact error
-        }
+        })?);
 
         // Create HMAC key from the master key
         let verification_key = hmac::Key::new(hmac::HMAC_SHA256, master_key.as_ref());
 
         // Perform constant-time HMAC verification
         // ring::hmac::verify is guaranteed to be constant-time
-        match hmac::verify(&verification_key, &nonce_bytes, &verification_tag) {
+        match hmac::verify(&verification_key, nonce_bytes.as_slice(), verification_tag.as_slice()) {
             Ok(()) => Ok(true),
             Err(_) => Ok(false), // Constant-time: always return same error type
         }
@@ -1048,24 +1044,25 @@ impl Keystore {
             .find(|e| e.id == uuid)
             .ok_or(KeystoreError::KeyNotFound(uuid))?;
 
-        let encrypted_pk_bytes = BASE64_STANDARD.decode(&entry.encrypted_pk).map_err(|_e| {
+        // H-3 Fix: Use zeroizing buffers for sensitive encrypted data
+        let encrypted_pk_bytes = Zeroizing::new(BASE64_STANDARD.decode(&entry.encrypted_pk).map_err(|_e| {
             KeystoreError::InvalidFormat(
                 "get_signer: Failed to decode entry.encrypted_pk".to_string(),
             )
-        })?;
+        })?);
 
-        let nonce_vec = BASE64_STANDARD.decode(&entry.nonce).map_err(|_e| {
+        let nonce_vec = Zeroizing::new(BASE64_STANDARD.decode(&entry.nonce).map_err(|_e| {
             KeystoreError::InvalidFormat("get_signer: Failed to decode entry.nonce".to_string())
-        })?;
+        })?);
 
-        let aes_nonce_bytes: [u8; 12] = nonce_vec.try_into().map_err(|_| {
+        let aes_nonce_bytes: [u8; 12] = nonce_vec.as_slice().try_into().map_err(|_| {
             KeystoreError::InvalidFormat(
                 "get_signer: Invalid AES nonce length for entry.nonce".to_string(),
             )
         })?;
 
         let decrypted_pk_zeroizing_vec = self.decrypt_pk(
-            &encrypted_pk_bytes,
+            encrypted_pk_bytes.as_slice(),
             &aes_nonce_bytes,
             &entry.id,
             &entry.address,
@@ -1216,33 +1213,34 @@ impl Keystore {
 
         let mut temp_decrypted_data: Vec<DecryptedData> = Vec::new();
         for entry_to_decrypt in self.entries.iter() {
-            let encrypted_pk_bytes = BASE64_STANDARD
+            // H-3 Fix: Use zeroizing buffer for encrypted private key data
+            let encrypted_pk_bytes = Zeroizing::new(BASE64_STANDARD
                 .decode(&entry_to_decrypt.encrypted_pk)
                 .map_err(|e| {
                     KeystoreError::InvalidFormat(format!(
                         "change_password: Corrupted encrypted_pk for entry {}: {}",
                         entry_to_decrypt.id, e
                     ))
-                })?;
+                })?);
 
-            let aes_nonce_bytes: [u8; 12] = BASE64_STANDARD
+            let aes_nonce_vec = Zeroizing::new(BASE64_STANDARD
                 .decode(&entry_to_decrypt.nonce)
                 .map_err(|e| {
                     KeystoreError::InvalidFormat(format!(
                         "change_password: Corrupted nonce for entry {}: {}",
                         entry_to_decrypt.id, e
                     ))
-                })?
-                .try_into()
-                .map_err(|_| {
-                    KeystoreError::InvalidFormat(format!(
-                        "change_password: Invalid nonce length for entry {}",
-                        entry_to_decrypt.id
-                    ))
-                })?;
+                })?);
+
+            let aes_nonce_bytes: [u8; 12] = aes_nonce_vec.as_slice().try_into().map_err(|_| {
+                KeystoreError::InvalidFormat(format!(
+                    "change_password: Invalid nonce length for entry {}",
+                    entry_to_decrypt.id
+                ))
+            })?;
 
             let decrypted_pk_material = self.decrypt_pk(
-                &encrypted_pk_bytes,
+                encrypted_pk_bytes.as_slice(),
                 &aes_nonce_bytes,
                 &entry_to_decrypt.id,
                 &entry_to_decrypt.address,
@@ -1592,13 +1590,13 @@ impl Keystore {
             .ok_or(KeystoreError::Locked)?
             .as_ref();
 
-        // Generate a new random HKDF salt (ID 7)
-        let mut hkdf_salt_bytes = [0u8; 32];
+        // H-3 Fix: Generate a new random HKDF salt with zeroizing protection
+        let mut hkdf_salt_bytes = Zeroizing::new([0u8; 32]);
         OsRng
-            .try_fill_bytes(&mut hkdf_salt_bytes)
+            .try_fill_bytes(hkdf_salt_bytes.as_mut())
             .map_err(|e| KeystoreError::FsError(format!("Failed to generate HKDF salt: {}", e)))?;
 
-        let entry_key = self.derive_entry_key(master_key_bytes, &hkdf_salt_bytes, id, address)?;
+        let entry_key = self.derive_entry_key(master_key_bytes, hkdf_salt_bytes.as_ref(), id, address)?;
 
         let key = Key::<Aes256Gcm>::from_slice(entry_key.as_ref());
         let cipher = Aes256Gcm::new(key);
@@ -1617,7 +1615,7 @@ impl Keystore {
             )
             .map_err(|e| KeystoreError::AesGcm(format!("Encryption failed: {}", e)))?;
 
-        Ok((encrypted_data, hkdf_salt_bytes)) // Return both
+        Ok((encrypted_data, *hkdf_salt_bytes)) // H-3 Fix: Dereference zeroizing salt
     }
 
     fn decrypt_pk(
@@ -1634,11 +1632,11 @@ impl Keystore {
             .ok_or(KeystoreError::Locked)?
             .as_ref();
 
-        // Decode HKDF salt (ID 7)
-        let hkdf_salt_bytes_vec = BASE64_STANDARD.decode(hkdf_salt_b64).map_err(|_| {
+        // H-3 Fix: Decode HKDF salt with zeroizing protection
+        let hkdf_salt_bytes_vec = Zeroizing::new(BASE64_STANDARD.decode(hkdf_salt_b64).map_err(|_| {
             KeystoreError::InvalidFormat("decrypt_pk: Failed to decode HKDF salt".to_string())
-        })?;
-        let hkdf_salt_bytes: [u8; 32] = hkdf_salt_bytes_vec.try_into().map_err(|_| {
+        })?);
+        let hkdf_salt_bytes: [u8; 32] = hkdf_salt_bytes_vec.as_slice().try_into().map_err(|_| {
             KeystoreError::InvalidFormat("decrypt_pk: Invalid HKDF salt length".to_string())
         })?;
 
@@ -1728,8 +1726,17 @@ impl Keystore {
             return Err(KeystoreError::UnsupportedKdf(algo_name.to_string()));
         }
 
-        let salt = hex::decode(&kdf_params.salt)
-            .map_err(|e| KeystoreError::Argon2Error(format!("Failed to decode salt: {}", e)))?;
+        // H-3 Fix: Use zeroizing buffer for password bytes
+        let password_bytes = Zeroizing::new(password.as_bytes().to_vec());
+        
+        // H-3 Fix: Use zeroizing buffer for decoded salt
+        let salt = Zeroizing::new(hex::decode(&kdf_params.salt)
+            .map_err(|e| KeystoreError::Argon2Error(format!("Failed to decode salt: {}", e)))?);
+
+        // H-3 Fix: Ensure salt has proper size
+        if salt.len() < 16 {
+            return Err(KeystoreError::Argon2Error("Salt too short (minimum 16 bytes)".to_string()));
+        }
 
         // Fix for F-6: Enforce minimum output length of 32 bytes
         let output_len = std::cmp::max(kdf_params.output_len, 32);
@@ -1753,8 +1760,8 @@ impl Keystore {
         let mut output_key_material = Zeroizing::new(vec![0u8; output_len]);
         argon2_context
             .hash_password_into(
-                password.as_bytes(), // Use password directly
-                &salt,
+                password_bytes.as_slice(), // H-3 Fix: Use zeroizing password bytes
+                salt.as_slice(),
                 output_key_material.as_mut_slice(),
             )
             .map_err(|e: argon2::Error| KeystoreError::Argon2Error(e.to_string()))?;
@@ -1770,13 +1777,14 @@ impl Keystore {
             .validate_strength()
             .map_err(|e| KeystoreError::FsError(format!("Invalid KDF configuration: {}", e)))?;
 
-        let mut salt_bytes = [0u8; 16]; // 16-byte salt
+        // H-3 Fix: Use zeroizing buffer for salt generation
+        let mut salt_bytes = Zeroizing::new([0u8; 16]); // 16-byte salt
         OsRng
-            .try_fill_bytes(&mut salt_bytes)
+            .try_fill_bytes(salt_bytes.as_mut())
             .map_err(|e| KeystoreError::FsError(format!("Failed to generate salt: {}", e)))?;
 
         Ok(MasterKdfParams {
-            salt: hex::encode(salt_bytes),
+            salt: hex::encode(salt_bytes.as_ref()),
             m_cost: config.m_cost,
             t_cost: config.t_cost,
             p_cost: config.p_cost,
