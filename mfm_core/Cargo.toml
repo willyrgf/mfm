@@ -46,6 +46,7 @@ signature = "2.0.0"
 hex = "0.4.3"
 thiserror = "2.0.12"
 ring = "0.17.14"
+num_cpus = "1.16"
 
 [dev-dependencies]
 tempfile = "3.8"

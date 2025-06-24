@@ -30,7 +30,6 @@ use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
-// Removed: use subtle::ConstantTimeEq; // No longer needed with HMAC verification
 use tiny_keccak::{Hasher, Keccak}; // For Keccak-256
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -127,30 +126,101 @@ pub struct KeystoreConfig {
     // Rate limiting - REMOVED
 }
 
-// Argon2 min number of memory blocks required
-// OWASP: >= 128MiB (131072 KiB)
-const MIN_M_COST: u32 = 131072;
-// Argon2 min number of iterations required
-// OWASP: >= 3 iterations
-const MIN_T_COST: u32 = 4;
-// Argon2 min number of parallel threads
-// OWASP: 1 is a safe default, but can be increased on multi-core systems.
+//Mminimum memory cost to 256MiB (262144 KiB) for better resistance to attacks
+const MIN_M_COST: u32 = 262144;
+// Minimum iterations to 8 for enhanced time-based protection
+const MIN_T_COST: u32 = 8;
 const MIN_P_COST: u32 = 1;
+// Minimum parameter strength (time × memory product for validation)
+const MIN_PARAM_STRENGTH: u64 = MIN_T_COST as u64 * MIN_M_COST as u64;
 // KDF current version
 const KDF_VERSION: u8 = 1;
+
+// Rate limiting constants for memory-only protection
+const MAX_FAILED_ATTEMPTS: u32 = 5;
+const INITIAL_RATE_LIMIT_DELAY_MS: u64 = 1000; // 1 second
+const MAX_RATE_LIMIT_DELAY_MS: u64 = 30000; // 30 seconds
+const RATE_LIMIT_RESET_DURATION_MS: u64 = 300000; // 5 minutes
 
 impl Default for KeystoreConfig {
     fn default() -> Self {
         Self {
-            // Default KDF parameters
             m_cost: MIN_M_COST,
             t_cost: MIN_T_COST,
             p_cost: 1,      // Default parallelism
             output_len: 32, // Minimum required output length
             // Default session management
             auto_lock_timeout: Duration::from_secs(300), // 5 minutes
-                                                         // Default rate limiting - REMOVED
         }
+    }
+}
+
+// Production-grade parameter presets for different security levels
+impl KeystoreConfig {
+    /// Test configuration with very fast parameters for unit tests
+    #[cfg(test)]
+    pub fn test_fast() -> Self {
+        Self {
+            m_cost: 8192, // 8 MB - fast for tests
+            t_cost: 2,    // 2 iterations - fast for tests
+            p_cost: 1,
+            output_len: 32,
+            auto_lock_timeout: Duration::from_secs(300),
+        }
+    }
+
+    /// Validate parameter strength to ensure adequate security
+    /// Returns Ok if parameters meet minimum security requirements
+    pub fn validate_strength(&self) -> Result<(), String> {
+        self.validate_strength_with_mode(false)
+    }
+
+    /// Validate parameter strength with optional test mode
+    /// test_mode: if true, allows lower parameters for testing
+    #[cfg(test)]
+    pub fn validate_strength_test_mode(&self) -> Result<(), String> {
+        self.validate_strength_with_mode(true)
+    }
+
+    fn validate_strength_with_mode(&self, test_mode: bool) -> Result<(), String> {
+        let (min_m, min_t, min_p, min_strength) = if test_mode {
+            (8192u32, 2u32, 1u32, 8192u64 * 2u64) // Test minimums
+        } else {
+            (MIN_M_COST, MIN_T_COST, MIN_P_COST, MIN_PARAM_STRENGTH) // Production minimums
+        };
+        // Check individual minimums
+        if self.m_cost < min_m {
+            return Err(format!(
+                "Memory cost {} is below minimum {} KiB",
+                self.m_cost, min_m
+            ));
+        }
+        if self.t_cost < min_t {
+            return Err(format!(
+                "Time cost {} is below minimum {}",
+                self.t_cost, min_t
+            ));
+        }
+        if self.p_cost < min_p {
+            return Err(format!(
+                "Parallelism {} is below minimum {}",
+                self.p_cost, min_p
+            ));
+        }
+        if self.output_len < 32 {
+            return Err("Output length must be at least 32 bytes".to_string());
+        }
+
+        // Check parameter strength (time × memory product)
+        let param_strength = self.t_cost as u64 * self.m_cost as u64;
+        if param_strength < min_strength {
+            return Err(format!(
+                "Parameter strength {} is below minimum {} (time × memory product)",
+                param_strength, min_strength
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -230,7 +300,7 @@ impl AsRef<[u8]> for MasterKey {
 
 // --- Keystore Struct ---
 
-#[derive(Debug)] // Removed ZeroizeOnDrop from Keystore struct itself
+#[derive(Debug)]
 pub struct Keystore {
     file_path: PathBuf,
     master_key: Option<MasterKey>,
@@ -252,6 +322,12 @@ pub struct Keystore {
     // Temporary fields for data loaded from disk, pending MAC verification in unlock()
     pending_protected_data_b64: Option<String>,
     pending_mac_b64: Option<String>,
+
+    // Memory-only rate limiting for unlock attempts
+    // These fields track failed attempts during the current process lifetime only
+    failed_unlock_attempts: u32,
+    last_failed_attempt: Option<Instant>,
+    rate_limit_delay: Duration,
 }
 
 // Helper struct for change_password to temporarily hold decrypted key data
@@ -264,15 +340,14 @@ struct DecryptedData {
 }
 
 impl Keystore {
-    // C-2 Fix: Include keystore-specific domain separation in MAC key derivation
     fn derive_mac_key(&self, master_key_bytes: &[u8]) -> Result<hmac::Key, KeystoreError> {
         let keystore_id = self.derive_keystore_id();
-        
+
         // Use keystore ID as part of the salt for proper domain separation
         let mut combined_salt = Vec::with_capacity(HKDF_SALT_FOR_MAC_KEY_DERIVATION.len() + 32);
         combined_salt.extend_from_slice(HKDF_SALT_FOR_MAC_KEY_DERIVATION);
         combined_salt.extend_from_slice(keystore_id.as_ref());
-        
+
         let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, &combined_salt);
         let prk = salt.extract(master_key_bytes);
         let mut mac_key_bytes = Zeroizing::new([0u8; 32]); // 256-bit key for HMAC-SHA256
@@ -301,23 +376,23 @@ impl Keystore {
     fn derive_keystore_id(&self) -> Zeroizing<[u8; 32]> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         // Create a stable keystore identifier based on file path
         // This ensures different keystores have different domain separation
         let mut hasher = DefaultHasher::new();
         self.file_path.hash(&mut hasher);
         let path_hash = hasher.finish();
-        
+
         // Use HKDF to derive a proper keystore ID from the path hash
         let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"mfm-keystore-id-derivation-v1");
         let prk = salt.extract(&path_hash.to_be_bytes());
-        
+
         let mut keystore_id = Zeroizing::new([0u8; 32]);
         prk.expand(&[b"mfm-keystore-domain-separator-v1"], hkdf::HKDF_SHA256)
             .expect("HKDF expand should not fail with valid inputs")
             .fill(keystore_id.as_mut())
             .expect("HKDF fill should not fail with valid inputs");
-            
+
         keystore_id
     }
 
@@ -345,29 +420,59 @@ impl Keystore {
         Self::new_with_config(custom_path, KeystoreConfig::default())
     }
 
+    #[cfg(test)]
+    pub fn new_with_config_test_mode(
+        custom_path: Option<PathBuf>,
+        config: KeystoreConfig,
+    ) -> Result<Self, KeystoreError> {
+        // H-1 Fix: Use test mode validation for unit tests
+        config
+            .validate_strength_test_mode()
+            .map_err(|e| KeystoreError::FsError(format!("Invalid KDF configuration: {}", e)))?;
+
+        let file_path = match custom_path {
+            Some(path) => path,
+            None => {
+                let data_dir = dirs_next::data_dir().ok_or_else(|| {
+                    KeystoreError::FsError("Could not determine system data directory".to_string())
+                })?;
+                let app_data_dir = data_dir.join(Self::APP_DIR_NAME);
+                if !app_data_dir.exists() {
+                    fs::create_dir_all(&app_data_dir).map_err(KeystoreError::Io)?;
+                }
+                app_data_dir.join(Self::DEFAULT_KEYSTORE_FILENAME)
+            }
+        };
+
+        Ok(Keystore {
+            file_path,
+            master_key: None,
+            keystore_version: None,
+            master_kdf_algo: None,
+            entries: Vec::new(),
+            verification_tag: None,
+            master_kdf_params: None,
+            verification_nonce: None,
+            is_unlocked: false,
+            last_activity_at: None,
+            config,
+            pending_protected_data_b64: None,
+            pending_mac_b64: None,
+            // H-2 Fix: Initialize rate limiting fields for test mode
+            failed_unlock_attempts: 0,
+            last_failed_attempt: None,
+            rate_limit_delay: Duration::from_millis(INITIAL_RATE_LIMIT_DELAY_MS),
+        })
+    }
+
     fn new_with_config(
         custom_path: Option<PathBuf>,
         config: KeystoreConfig,
     ) -> Result<Self, KeystoreError> {
-        // Fix for F-6: Enforce minimum output length of 32 bytes
-        if config.output_len < 32 {
-            return Err(KeystoreError::FsError(
-                "KDF output length must be at least 32 bytes".to_string(),
-            ));
-        }
-        // ID 5: Enforce minimum m_cost and t_cost
-        if config.m_cost < MIN_M_COST {
-            return Err(KeystoreError::FsError(format!(
-                "KDF m_cost must be at least {} KiB",
-                MIN_M_COST
-            )));
-        }
-        if config.t_cost < MIN_T_COST {
-            return Err(KeystoreError::FsError(format!(
-                "KDF t_cost must be at least {}",
-                MIN_T_COST
-            )));
-        }
+        // H-1 Fix: Use comprehensive parameter strength validation
+        config
+            .validate_strength()
+            .map_err(|e| KeystoreError::FsError(format!("Invalid KDF configuration: {}", e)))?;
 
         let file_path = match custom_path {
             Some(path) => path,
@@ -397,6 +502,10 @@ impl Keystore {
             config,
             pending_protected_data_b64: None,
             pending_mac_b64: None,
+            // H-2 Fix: Initialize rate limiting fields
+            failed_unlock_attempts: 0,
+            last_failed_attempt: None,
+            rate_limit_delay: Duration::from_millis(INITIAL_RATE_LIMIT_DELAY_MS),
         })
     }
 
@@ -431,13 +540,85 @@ impl Keystore {
         Ok(())
     }
 
+    // H-2 Fix: Rate limiting methods for memory-only protection
+    fn check_rate_limit(&mut self) -> Result<(), KeystoreError> {
+        // Check if we need to reset the rate limiting due to timeout
+        if let Some(last_failed) = self.last_failed_attempt {
+            let elapsed = last_failed.elapsed();
+            if elapsed.as_millis() >= RATE_LIMIT_RESET_DURATION_MS as u128 {
+                // Reset period has elapsed, reset state and allow attempt
+                self.reset_rate_limiting();
+                return Ok(());
+            }
+        }
+
+        // Check if we've exceeded the maximum attempts
+        if self.failed_unlock_attempts >= MAX_FAILED_ATTEMPTS {
+            return Err(KeystoreError::RateLimited {
+                retry_after_ms: self.rate_limit_delay.as_millis() as u64,
+                attempts_remaining: 0,
+            });
+        }
+
+        // Check if we need to apply rate limiting delay
+        if self.failed_unlock_attempts > 0 {
+            if let Some(last_failed) = self.last_failed_attempt {
+                let elapsed = last_failed.elapsed();
+                if elapsed < self.rate_limit_delay {
+                    let remaining_delay = self.rate_limit_delay - elapsed;
+                    return Err(KeystoreError::RateLimited {
+                        retry_after_ms: remaining_delay.as_millis() as u64,
+                        attempts_remaining: MAX_FAILED_ATTEMPTS - self.failed_unlock_attempts,
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn record_failed_attempt_internal(&mut self) {
+        self.failed_unlock_attempts += 1;
+        self.last_failed_attempt = Some(Instant::now());
+
+        // Exponential backoff with cap
+        if self.failed_unlock_attempts > 1 {
+            let new_delay_ms = std::cmp::min(
+                self.rate_limit_delay.as_millis() as u64 * 2,
+                MAX_RATE_LIMIT_DELAY_MS,
+            );
+            self.rate_limit_delay = Duration::from_millis(new_delay_ms);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn record_failed_attempt(&mut self) {
+        self.record_failed_attempt_internal();
+    }
+
+    fn reset_rate_limiting(&mut self) {
+        self.failed_unlock_attempts = 0;
+        self.last_failed_attempt = None;
+        self.rate_limit_delay = Duration::from_millis(INITIAL_RATE_LIMIT_DELAY_MS);
+    }
+
+    // H-2 Fix: Test-only method to reset rate limiting for test scenarios
+    #[cfg(test)]
+    pub fn reset_rate_limiting_for_test(&mut self) {
+        self.reset_rate_limiting();
+    }
+
     pub fn unlock(&mut self, password: &str) -> Result<(), KeystoreError> {
+        // H-2 Fix: Check rate limiting before attempting unlock
+        self.check_rate_limit()?;
+
         if self.is_unlocked {
             self.last_activity_at = Some(Instant::now());
             return Ok(());
         }
 
         if password.is_empty() {
+            self.record_failed_attempt_internal();
             return Err(KeystoreError::InvalidPassword);
         }
 
@@ -494,8 +675,11 @@ impl Keystore {
         data_to_verify.extend_from_slice(&protected_data_json_bytes);
 
         // The hmac::verify function takes the key, message (data_to_verify), and tag (expected_mac_bytes)
-        hmac::verify(&mac_signing_key, &data_to_verify, &expected_mac_bytes)
-            .map_err(|_| KeystoreError::MacVerificationFailure)?;
+        if hmac::verify(&mac_signing_key, &data_to_verify, &expected_mac_bytes).is_err() {
+            // H-2 Fix: Record failed attempt for rate limiting on MAC failure
+            self.record_failed_attempt_internal();
+            return Err(KeystoreError::MacVerificationFailure);
+        }
 
         // 6. MAC verified, now deserialize ProtectedKeystorePart
         let protected_part: ProtectedKeystorePart =
@@ -517,6 +701,8 @@ impl Keystore {
             self.verification_nonce.as_deref(), // Was populated by load_from_disk
         ) {
             if !self.verify_password(&derived_master_key, tag_str, nonce_str)? {
+                // H-2 Fix: Record failed attempt for rate limiting
+                self.record_failed_attempt_internal();
                 // If the password-derived key fails to verify the tag, it's a MAC failure.
                 return Err(KeystoreError::MacVerificationFailure);
             }
@@ -526,6 +712,8 @@ impl Keystore {
         }
 
         // 9. All checks passed, finalize unlock
+        // H-2 Fix: Reset rate limiting on successful unlock
+        self.reset_rate_limiting();
         self.master_key = Some(derived_master_key);
         self.is_unlocked = true;
         self.last_activity_at = Some(Instant::now());
@@ -551,9 +739,9 @@ impl Keystore {
 
         // Generate a cryptographically secure random nonce for HMAC verification
         let mut nonce_bytes = Zeroizing::new([0u8; 32]); // Use 32 bytes for better security
-        OsRng
-            .try_fill_bytes(nonce_bytes.as_mut())
-            .map_err(|e| KeystoreError::FsError(format!("Failed to generate verification nonce: {}", e)))?;
+        OsRng.try_fill_bytes(nonce_bytes.as_mut()).map_err(|e| {
+            KeystoreError::FsError(format!("Failed to generate verification nonce: {}", e))
+        })?;
 
         let master_key_bytes = self
             .master_key
@@ -595,7 +783,7 @@ impl Keystore {
 
         // Create HMAC key from the master key
         let verification_key = hmac::Key::new(hmac::HMAC_SHA256, master_key.as_ref());
-        
+
         // Perform constant-time HMAC verification
         // ring::hmac::verify is guaranteed to be constant-time
         match hmac::verify(&verification_key, &nonce_bytes, &verification_tag) {
@@ -1134,9 +1322,7 @@ impl Keystore {
         })?;
 
         let protected_part = ProtectedKeystorePart {
-            version: self
-                .keystore_version
-                .unwrap_or(KEYSTORE_VERSION),
+            version: self.keystore_version.unwrap_or(KEYSTORE_VERSION),
             verification_tag: self.verification_tag.clone(),
             entries: self.entries.clone(),
         };
@@ -1182,9 +1368,10 @@ impl Keystore {
         };
 
         // M-1 fix: Wrap serialized data with Zeroizing to prevent memory leakage
-        let serialized_envelope = Zeroizing::new(serde_json::to_string_pretty(&envelope).map_err(|e| {
-            KeystoreError::SerializationError(format!("Failed to serialize envelope: {}", e))
-        })?);
+        let serialized_envelope =
+            Zeroizing::new(serde_json::to_string_pretty(&envelope).map_err(|e| {
+                KeystoreError::SerializationError(format!("Failed to serialize envelope: {}", e))
+            })?);
 
         // Ensure parent directory exists
         if let Some(parent_dir) = self.file_path.parent() {
@@ -1199,35 +1386,35 @@ impl Keystore {
 
     // C-3 Fix: Robust file locking implementation with timeout and recovery
     fn save_with_file_locking(
-        &mut self, 
-        envelope: &AuthenticatedKeystoreEnvelope, 
-        serialized_envelope: &Zeroizing<String>
+        &mut self,
+        envelope: &AuthenticatedKeystoreEnvelope,
+        serialized_envelope: &Zeroizing<String>,
     ) -> Result<(), KeystoreError> {
         use std::time::{Duration, Instant};
-        
+
         const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
         const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-        
+
         let lock_file_path = self.file_path.with_extension("lock");
         let start_time = Instant::now();
-        
+
         // Retry loop for lock acquisition with timeout
         let _lock_file = loop {
             match fs::OpenOptions::new()
                 .create_new(true) // Fail if lock file already exists (prevents races)
                 .write(true)
-                .open(&lock_file_path) 
+                .open(&lock_file_path)
             {
                 Ok(file) => break file,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     // Lock file exists, check if we've timed out
                     if start_time.elapsed() > LOCK_TIMEOUT {
                         return Err(KeystoreError::FsError(format!(
-                            "Failed to acquire file lock within {} seconds", 
+                            "Failed to acquire file lock within {} seconds",
                             LOCK_TIMEOUT.as_secs()
                         )));
                     }
-                    
+
                     // Check if lock file is stale (older than timeout)
                     if let Ok(metadata) = fs::metadata(&lock_file_path) {
                         if let Ok(modified) = metadata.modified() {
@@ -1240,16 +1427,19 @@ impl Keystore {
                             }
                         }
                     }
-                    
+
                     // Wait before retrying
                     std::thread::sleep(LOCK_RETRY_INTERVAL);
                 }
-                Err(e) => return Err(KeystoreError::FsError(format!(
-                    "Failed to create lock file: {}", e
-                ))),
+                Err(e) => {
+                    return Err(KeystoreError::FsError(format!(
+                        "Failed to create lock file: {}",
+                        e
+                    )))
+                }
             }
         };
-        
+
         // Ensure lock file is removed on drop (RAII)
         struct LockFileGuard(PathBuf);
         impl Drop for LockFileGuard {
@@ -1258,10 +1448,10 @@ impl Keystore {
             }
         }
         let _lock_guard = LockFileGuard(lock_file_path.clone());
-        
+
         // Perform atomic write with integrity verification
         let write_result = self.atomic_write_with_verification(serialized_envelope);
-        
+
         // Handle write result and update state
         match write_result {
             Ok(()) => {
@@ -1284,9 +1474,12 @@ impl Keystore {
         }
         // Lock file is automatically removed by LockFileGuard drop
     }
-    
+
     // C-3 Fix: Atomic write with verification
-    fn atomic_write_with_verification(&self, serialized_envelope: &Zeroizing<String>) -> Result<(), KeystoreError> {
+    fn atomic_write_with_verification(
+        &self,
+        serialized_envelope: &Zeroizing<String>,
+    ) -> Result<(), KeystoreError> {
         let atomic_file = AtomicFile::new(&self.file_path, OverwriteBehavior::AllowOverwrite);
         atomic_file
             .write(|f| f.write_all(serialized_envelope.as_bytes()))
@@ -1304,26 +1497,32 @@ impl Keystore {
                 ))
             })?;
         }
-        
+
         Ok(())
     }
-    
+
     // C-3 Fix: Verify file integrity after write
-    fn verify_file_integrity(&self, expected_envelope: &AuthenticatedKeystoreEnvelope) -> Result<bool, KeystoreError> {
+    fn verify_file_integrity(
+        &self,
+        expected_envelope: &AuthenticatedKeystoreEnvelope,
+    ) -> Result<bool, KeystoreError> {
         if !self.file_path.exists() {
             return Ok(false);
         }
-        
-        let file_content = fs::read(&self.file_path)
-            .map_err(|_| KeystoreError::FsError("Failed to read file for verification".to_string()))?;
-            
+
+        let file_content = fs::read(&self.file_path).map_err(|_| {
+            KeystoreError::FsError("Failed to read file for verification".to_string())
+        })?;
+
         let loaded_envelope: AuthenticatedKeystoreEnvelope = serde_json::from_slice(&file_content)
             .map_err(|_| KeystoreError::InvalidFormat("File verification failed".to_string()))?;
-            
+
         // Compare critical fields
-        Ok(loaded_envelope.protected_data_b64 == expected_envelope.protected_data_b64 &&
-           loaded_envelope.mac_b64 == expected_envelope.mac_b64 &&
-           loaded_envelope.master_kdf_params == expected_envelope.master_kdf_params)
+        Ok(
+            loaded_envelope.protected_data_b64 == expected_envelope.protected_data_b64
+                && loaded_envelope.mac_b64 == expected_envelope.mac_b64
+                && loaded_envelope.master_kdf_params == expected_envelope.master_kdf_params,
+        )
     }
 
     fn load_from_disk(&mut self) -> Result<(), KeystoreError> {
@@ -1483,12 +1682,12 @@ impl Keystore {
         address: &Address, // Added Address parameter for domain separation
     ) -> Result<Zeroizing<[u8; 32]>, KeystoreError> {
         let keystore_id = self.derive_keystore_id();
-        
+
         // Combine the provided salt with keystore ID for proper domain separation
         let mut combined_salt = Vec::with_capacity(hkdf_salt_bytes.len() + 32);
         combined_salt.extend_from_slice(hkdf_salt_bytes);
         combined_salt.extend_from_slice(keystore_id.as_ref());
-        
+
         let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, &combined_salt);
         let prk = salt.extract(master_key);
 
@@ -1566,25 +1765,10 @@ impl Keystore {
     fn generate_kdf_params_with_config(
         config: &KeystoreConfig,
     ) -> Result<MasterKdfParams, KeystoreError> {
-        // Fix for F-6: Enforce minimum output length of 32 bytes
-        if config.output_len < 32 {
-            return Err(KeystoreError::FsError(
-                "KDF output length must be at least 32 bytes".to_string(),
-            ));
-        }
-        // ID 5: Enforce minimum m_cost and t_cost
-        if config.m_cost < MIN_M_COST {
-            return Err(KeystoreError::FsError(format!(
-                "KDF m_cost must be at least {} KiB",
-                MIN_M_COST
-            )));
-        }
-        if config.t_cost < MIN_T_COST {
-            return Err(KeystoreError::FsError(format!(
-                "KDF t_cost must be at least {}",
-                MIN_T_COST
-            )));
-        }
+        // H-1 Fix: Use comprehensive parameter strength validation
+        config
+            .validate_strength()
+            .map_err(|e| KeystoreError::FsError(format!("Invalid KDF configuration: {}", e)))?;
 
         let mut salt_bytes = [0u8; 16]; // 16-byte salt
         OsRng
@@ -1600,4 +1784,4 @@ impl Keystore {
             kdf_version: KDF_VERSION,
         })
     }
-} // Closing brace for impl Keystore
+}

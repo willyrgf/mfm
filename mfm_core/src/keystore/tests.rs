@@ -18,6 +18,12 @@ fn create_temp_keystore_path() -> (tempfile::TempDir, PathBuf) {
     (dir, path)
 }
 
+// Helper to create a keystore with fast test parameters for performance
+fn create_test_keystore(path: Option<PathBuf>) -> Result<Keystore, KeystoreError> {
+    let config = KeystoreConfig::test_fast();
+    Keystore::new_with_config_test_mode(path, config)
+}
+
 const TEST_PASSWORD: &str = "testpassword123";
 const WRONG_PASSWORD: &str = "wrongpassword";
 // A valid 32-byte hex private key (integer value 1)
@@ -25,6 +31,35 @@ const DUMMY_PK_HEX: &str = "0000000000000000000000000000000000000000000000000000
 const DUMMY_PK_HEX_2: &str = "0000000000000000000000000000000000000000000000000000000000000002";
 const NEW_PASSWORD: &str = "newpassword456";
 // const DUMMY_PK_HEX_3: &str = "0000000000000000000000000000000000000000000000000000000000000003"; // Unused
+
+// H-2 Test: Test rate limiting functionality
+#[test]
+fn test_h2_rate_limiting_functionality() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    
+    // Initialize keystore with a password
+    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+    
+    // Reload keystore to test unlock with wrong password
+    let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
+    ks2.initialize_or_load(None).unwrap();
+    
+    // Manually trigger 5 failed attempts to reach the limit
+    for i in 1..=5 {
+        ks2.record_failed_attempt();
+        println!("Failed attempt {}: {} attempts recorded", i, ks2.failed_unlock_attempts);
+    }
+    
+    // Now the next attempt should be rate limited
+    let result = ks2.unlock(WRONG_PASSWORD);
+    assert!(matches!(result, Err(KeystoreError::RateLimited { .. })), "Should be rate limited after 5 failed attempts, got: {:?}", result);
+    
+    // Reset rate limiting and verify correct password works
+    ks2.reset_rate_limiting_for_test();
+    let result = ks2.unlock(TEST_PASSWORD);
+    assert!(result.is_ok(), "Correct password should work after rate limit reset");
+}
 
 #[test]
 fn test_new_keystore_creation() {
@@ -107,11 +142,11 @@ fn test_unlock_with_wrong_password_on_existing_keystore() {
     // Create a completely new temporary directory for this test to avoid rate-limiting state persistence
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
 
-    // Create a keystore with a custom config
+    // Create a keystore with a custom config that meets H-1 minimum requirements
     let config = KeystoreConfig {
-        // KDF parameters
-        m_cost: 131072, // Minimum required memory cost
-        t_cost: 4,      // Minimum required time cost
+        // KDF parameters - updated to meet H-1 minimums
+        m_cost: 262144, // 256 MB minimum required memory cost (H-1 fix)
+        t_cost: 8,      // 8 iterations minimum required time cost (H-1 fix)
         p_cost: 1,      // Default parallelism
         output_len: 32, // Minimum required output length
         // Session management
@@ -435,6 +470,9 @@ fn test_h1_change_password_interaction() {
             "Keystore should remain locked after failed unlock attempt"
         );
 
+        // H-2 Fix: Reset rate limiting for test to allow immediate retry with correct password
+        ks2.reset_rate_limiting_for_test();
+
         // Unlock with the new password - should succeed (and verify H-1 MAC)
         ks2.unlock(NEW_PASSWORD)
             .expect("Unlock with new password failed (H-1 MAC check implied)");
@@ -540,15 +578,15 @@ fn test_argon2_param_minimums_new_with_config() {
     let (_temp_dir3, temp_path_3) = create_temp_keystore_path();
 
     let mut config = KeystoreConfig {
-        m_cost: 1000,
+        m_cost: 1000, // Too low for new requirements
         ..KeystoreConfig::default()
     };
 
-    // Test too low m_cost
+    // Test too low m_cost (updated for new 256MB minimum)
     let res_m_cost = Keystore::new_with_config(Some(temp_path_1), config.clone());
     if let Err(KeystoreError::FsError(msg)) = res_m_cost {
         assert!(
-            msg.contains("KDF m_cost must be at least 131072"),
+            msg.contains("Memory cost 1000 is below minimum 262144"),
             "Low m_cost check failed. Msg: {:?}",
             msg
         );
@@ -556,13 +594,13 @@ fn test_argon2_param_minimums_new_with_config() {
         panic!("Expected FsError for low m_cost, got {:?}", res_m_cost);
     }
 
-    // Test too low t_cost
+    // Test too low t_cost (updated for new 8 iteration minimum)
     config.m_cost = KeystoreConfig::default().m_cost; // Reset m_cost to valid
-    config.t_cost = 1; // Too low
+    config.t_cost = 1; // Too low for new requirements
     let res_t_cost = Keystore::new_with_config(Some(temp_path_2), config.clone());
     if let Err(KeystoreError::FsError(msg)) = res_t_cost {
         assert!(
-            msg.contains("KDF t_cost must be at least 4"),
+            msg.contains("Time cost 1 is below minimum 8"),
             "Low t_cost check failed. Msg: {:?}",
             msg
         );

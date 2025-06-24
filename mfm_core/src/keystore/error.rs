@@ -58,6 +58,9 @@ pub enum KeystoreError {
     DeserializationError(String),
     #[error("Serialization error: {0}")]
     SerializationError(String),
-    #[error("Too many unlock attempts. Please wait {0} seconds before trying again.")]
-    RateLimited(u64),
+    #[error("Too many unlock attempts. Please wait {retry_after_ms} ms before trying again. Attempts remaining: {attempts_remaining}")]
+    RateLimited {
+        retry_after_ms: u64,
+        attempts_remaining: u32,
+    },
 }

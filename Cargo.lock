@@ -2676,6 +2676,7 @@ dependencies = [
  "lazy_static",
  "mfm_machine",
  "mfm_machine_derive",
+ "num_cpus",
  "pbkdf2",
  "rand 0.9.1",
  "ring",
