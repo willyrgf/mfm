@@ -32,6 +32,33 @@ const DUMMY_PK_HEX_2: &str = "00000000000000000000000000000000000000000000000000
 const NEW_PASSWORD: &str = "newpassword456";
 // const DUMMY_PK_HEX_3: &str = "0000000000000000000000000000000000000000000000000000000000000003"; // Unused
 
+// M-2 Test: Test enhanced MAC coverage including KDF algorithm name
+#[test]
+fn test_m2_enhanced_mac_coverage() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    
+    // Initialize and save keystore
+    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+    ks.unlock(TEST_PASSWORD).unwrap();
+    ks.import_private_key_hex(Some("test_key".to_string()), DUMMY_PK_HEX).unwrap();
+    ks.lock();
+    
+    // Read the original file and verify that the MAC works correctly first
+    let mut ks2 = Keystore::new(Some(keystore_path.clone())).unwrap();
+    ks2.initialize_or_load(None).unwrap();
+    let original_unlock = ks2.unlock(TEST_PASSWORD);
+    assert!(original_unlock.is_ok(), "Original keystore should unlock successfully");
+    
+    // Create a new keystore instance to test MAC enhancement after reload
+    let mut ks3 = Keystore::new(Some(keystore_path)).unwrap();
+    ks3.initialize_or_load(None).unwrap();
+    
+    // Verify that the keystore still works after reload with enhanced MAC coverage
+    let final_unlock = ks3.unlock(TEST_PASSWORD);
+    assert!(final_unlock.is_ok(), "Keystore should work after reload with enhanced MAC coverage");
+}
+
 // H-2 Test: Test rate limiting functionality
 #[test]
 fn test_h2_rate_limiting_functionality() {

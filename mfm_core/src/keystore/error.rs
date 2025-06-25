@@ -48,7 +48,7 @@ pub enum KeystoreError {
     AliasExists(String),
     #[error("Private key is invalid")]
     InvalidPrivateKey,
-    #[error("Keystore is missing a verification tag. Legacy formats are not supported.")]
+    #[error("Keystore is missing a verification tag. File may be corrupted.")]
     MissingVerificationTag,
     #[error("MAC verification failed. Keystore data may have been tampered with.")]
     MacVerificationFailure,

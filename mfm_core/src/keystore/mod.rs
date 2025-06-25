@@ -78,7 +78,6 @@ pub struct MasterKdfParams {
     pub t_cost: u32,
     pub p_cost: u32,
     pub output_len: usize,
-    #[serde(default)] // Ensures old files lacking this field deserialize with version 0
     pub kdf_version: u8,
 }
 
@@ -661,8 +660,8 @@ impl Keystore {
         let mac_signing_key = self.derive_mac_key(derived_master_key.as_ref())?;
 
         // 5. Verify MAC
+        // M-2 Fix: Include additional metadata in MAC verification for enhanced integrity protection
         // Serialize KDF params to include in MAC verification
-        // kdf_params is already retrieved and unwrapped earlier in the function
         let kdf_params_bytes = serde_json::to_vec(kdf_params).map_err(|e| {
             KeystoreError::SerializationError(format!(
                 "Failed to serialize KDF params for MAC verification: {}",
@@ -670,8 +669,15 @@ impl Keystore {
             ))
         })?;
 
-        // Concatenate KDF params bytes and protected data bytes
-        let mut data_to_verify = kdf_params_bytes;
+        // Include KDF algorithm name in MAC verification to prevent tampering
+        let kdf_algo_bytes = algo_name.as_bytes();
+
+        // Concatenate all metadata for MAC verification: KDF algo + KDF params + protected data
+        let mut data_to_verify = Vec::with_capacity(
+            kdf_algo_bytes.len() + kdf_params_bytes.len() + protected_data_json_bytes.len()
+        );
+        data_to_verify.extend_from_slice(kdf_algo_bytes);
+        data_to_verify.extend_from_slice(&kdf_params_bytes);
         data_to_verify.extend_from_slice(&protected_data_json_bytes);
 
         // The hmac::verify function takes the key, message (data_to_verify), and tag (expected_mac_bytes)
@@ -875,12 +881,12 @@ impl Keystore {
         }
 
         let id = Uuid::new_v4();
-        let new_uuid = Uuid::new_v4();
-        // A UUID is 16 bytes (128 bits). AES-GCM typically uses a 12-byte (96-bit) nonce.
-        // We'll take the first 12 bytes of the UUID.
-        let aes_nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12]
-            .try_into()
-            .expect("UUID to 12-byte nonce conversion failed, this should not happen");
+        
+        // M-1 Fix: Use OsRng directly for AES-GCM nonce generation instead of UUID
+        // AES-GCM requires a 12-byte (96-bit) nonce for optimal security
+        let mut aes_nonce_bytes = [0u8; 12];
+        OsRng.try_fill_bytes(&mut aes_nonce_bytes)
+            .map_err(|e| KeystoreError::FsError(format!("Failed to generate AES nonce: {}", e)))?;
 
         let (encrypted_pk_data, new_hkdf_salt_bytes) =
             self.encrypt_pk(pk_bytes.as_slice(), &aes_nonce_bytes, &id, &address)?;
@@ -976,12 +982,12 @@ impl Keystore {
         }
 
         let id = Uuid::new_v4();
-        let new_uuid = Uuid::new_v4();
-        // A UUID is 16 bytes (128 bits). AES-GCM typically uses a 12-byte (96-bit) nonce.
-        // We'll take the first 12 bytes of the UUID.
-        let aes_nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12]
-            .try_into()
-            .expect("UUID to 12-byte nonce conversion failed, this should not happen");
+        
+        // M-1 Fix: Use OsRng directly for AES-GCM nonce generation instead of UUID
+        // AES-GCM requires a 12-byte (96-bit) nonce for optimal security
+        let mut aes_nonce_bytes = [0u8; 12];
+        OsRng.try_fill_bytes(&mut aes_nonce_bytes)
+            .map_err(|e| KeystoreError::FsError(format!("Failed to generate AES nonce: {}", e)))?;
 
         let (encrypted_pk_data, new_hkdf_salt_bytes) = self.encrypt_pk(
             pk_bytes_for_encryption.as_slice(),
@@ -1027,9 +1033,7 @@ impl Keystore {
         Ok(key_infos)
     }
 
-    // Note: The plan mentions PrivateKeySigner, which comes from alloy-signer-local.
-    // We'll need to ensure this is correctly typed and handled.
-    // For now, returning a SigningKey directly for compatibility with tests.
+    /// Returns a ZeroizingSigningKey for the specified key entry
     pub fn get_signer(&mut self, uuid: Uuid) -> Result<ZeroizingSigningKey, KeystoreError> {
         // Check auto-lock before proceeding
         self.check_auto_lock();
@@ -1266,12 +1270,11 @@ impl Keystore {
 
         // 7. Re-encrypt all data with the new master key
         for data in temp_decrypted_data {
-            let new_uuid = Uuid::new_v4();
-            // A UUID is 16 bytes (128 bits). AES-GCM typically uses a 12-byte (96-bit) nonce.
-            // We'll take the first 12 bytes of the UUID.
-            let new_aes_nonce_bytes: [u8; 12] = new_uuid.as_bytes()[..12]
-                .try_into()
-                .expect("UUID to 12-byte nonce conversion failed, this should not happen");
+            // M-1 Fix: Use OsRng directly for AES-GCM nonce generation instead of UUID
+            // AES-GCM requires a 12-byte (96-bit) nonce for optimal security
+            let mut new_aes_nonce_bytes = [0u8; 12];
+            OsRng.try_fill_bytes(&mut new_aes_nonce_bytes)
+                .map_err(|e| KeystoreError::FsError(format!("Failed to generate AES nonce for re-encryption: {}", e)))?;
 
             let (new_encrypted_pk_vec, new_hkdf_salt_bytes) = self.encrypt_pk(
                 data.pk_material.as_slice(),
@@ -1331,6 +1334,7 @@ impl Keystore {
 
         let mac_key = self.derive_mac_key(master_key_bytes)?;
 
+        // M-2 Fix: Include additional metadata in MAC calculation for enhanced integrity protection
         // Serialize KDF params to include in MAC
         let kdf_params_for_mac = self.master_kdf_params.as_ref().ok_or_else(|| {
             KeystoreError::InternalError(
@@ -1344,8 +1348,16 @@ impl Keystore {
             ))
         })?;
 
-        // Concatenate KDF params bytes and protected data bytes
-        let mut data_to_mac = kdf_params_bytes;
+        // Include KDF algorithm name in MAC calculation to prevent tampering
+        let kdf_algo_name = self.master_kdf_algo.as_deref().unwrap_or("argon2id");
+        let kdf_algo_bytes = kdf_algo_name.as_bytes();
+
+        // Concatenate all metadata for MAC calculation: KDF algo + KDF params + protected data
+        let mut data_to_mac = Vec::with_capacity(
+            kdf_algo_bytes.len() + kdf_params_bytes.len() + protected_data_json_bytes.len()
+        );
+        data_to_mac.extend_from_slice(kdf_algo_bytes);
+        data_to_mac.extend_from_slice(&kdf_params_bytes);
         data_to_mac.extend_from_slice(&protected_data_json_bytes);
 
         let mac_tag = hmac::sign(&mac_key, &data_to_mac);
@@ -1533,12 +1545,12 @@ impl Keystore {
         let file_content_bytes = fs::read(&self.file_path)
             .map_err(|e| KeystoreError::FsError(format!("Failed to read keystore file: {}", e)))?;
 
-        // Attempt to deserialize into the new AuthenticatedKeystoreEnvelope structure
+        // Deserialize the keystore envelope structure
         let envelope: AuthenticatedKeystoreEnvelope = serde_json::from_slice(&file_content_bytes)
             .map_err(|e| {
-                // This error indicates a corrupted file or a format incompatible with H-1.
+                // This error indicates a corrupted file.
                 KeystoreError::InvalidFormat(format!(
-                    "Failed to deserialize H-1 keystore envelope. File may be corrupted or in an unsupported format: {}",
+                    "Failed to deserialize keystore envelope. File may be corrupted: {}",
                     e
                 ))
             })?;
