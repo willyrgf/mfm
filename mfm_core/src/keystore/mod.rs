@@ -72,6 +72,9 @@ const KEYSTORE_VERSION: u8 = 1;
 const CURRENT_ENCRYPTION_VERSION: u8 = 1; // Current encryption algorithm version
 const CURRENT_KDF_VERSION: u8 = 1; // Current KDF algorithm version
 
+// F-4: Strict output length enforcement
+const REQUIRED_OUTPUT_LEN: usize = 32; // Exact required output length - no flexibility
+
 // --- Structs for Keystore Data ---
 
 // Constants for MAC key derivation
@@ -206,7 +209,7 @@ impl Default for KeystoreConfig {
             m_cost: MIN_M_COST,
             t_cost: MIN_T_COST,
             p_cost: MIN_P_COST,
-            output_len: 32, // Minimum required output length
+            output_len: REQUIRED_OUTPUT_LEN, // F-4: Use strict constant
             // Default session management
             auto_lock_timeout: Duration::from_secs(300), // 5 minutes
         }
@@ -222,7 +225,7 @@ impl KeystoreConfig {
             m_cost: 8192, // 8 MB - fast for tests
             t_cost: 2,    // 2 iterations - fast for tests
             p_cost: 1,
-            output_len: 32,
+            output_len: REQUIRED_OUTPUT_LEN, // F-4: Use strict constant
             auto_lock_timeout: Duration::from_secs(300),
         }
     }
@@ -265,8 +268,12 @@ impl KeystoreConfig {
                 self.p_cost, min_p
             ));
         }
-        if self.output_len < 32 {
-            return Err("Output length must be at least 32 bytes".to_string());
+        // F-4 Fix: Strict output_len validation - must be exactly the required length
+        if self.output_len != REQUIRED_OUTPUT_LEN {
+            return Err(format!(
+                "Output length must be exactly {} bytes, got {}",
+                REQUIRED_OUTPUT_LEN, self.output_len
+            ));
         }
 
         // Check parameter strength (time × memory product)
@@ -530,7 +537,7 @@ impl Keystore {
         let file_path = match custom_path {
             Some(path) => path,
             None => {
-                let data_dir = dirs_next::data_dir().ok_or_else(|| {
+                let data_dir = dirs_next::data_local_dir().ok_or_else(|| {
                     KeystoreError::FsError("Could not determine system data directory".to_string())
                 })?;
                 let app_data_dir = data_dir.join(Self::APP_DIR_NAME);
@@ -585,7 +592,7 @@ impl Keystore {
         let file_path = match custom_path {
             Some(path) => path,
             None => {
-                let data_dir = dirs_next::data_dir().ok_or_else(|| {
+                let data_dir = dirs_next::data_local_dir().ok_or_else(|| {
                     KeystoreError::FsError("Could not determine system data directory".to_string())
                 })?;
                 let app_data_dir = data_dir.join(Self::APP_DIR_NAME);
@@ -2214,6 +2221,17 @@ impl Keystore {
             ));
         }
 
+        // F-4 Fix: Strict output_len validation - must be exactly the required length
+        if envelope.master_kdf_params.output_len != REQUIRED_OUTPUT_LEN {
+            return Err(KeystoreError::Argon2Error(
+                format!(
+                    "Invalid output_len loaded from disk: {} != required {}. Keystore was created with incompatible parameters and cannot be opened.",
+                    envelope.master_kdf_params.output_len, 
+                    REQUIRED_OUTPUT_LEN
+                )
+            ));
+        }
+
         // Store the loaded KDF params and protected part for unlock to use
         self.master_kdf_params = Some(envelope.master_kdf_params.clone()); // Store for later use by unlock or if no unlock is performed
         self.verification_nonce = envelope.verification_nonce.clone(); // This was the missing piece
@@ -2502,8 +2520,10 @@ impl Keystore {
             ));
         }
 
-        // Fix for F-6: Enforce minimum output length of 32 bytes
-        let output_len = std::cmp::max(kdf_params.output_len, 32);
+        // F-4 Fix: Use exact output_len without silent override
+        // Strict validation ensures output_len == REQUIRED_OUTPUT_LEN (32 bytes)
+        // No silent downgrades or upgrades - parameters must match exactly
+        let output_len = kdf_params.output_len;
 
         let params = argon2::Params::new(
             kdf_params.m_cost,
@@ -2552,7 +2572,7 @@ impl Keystore {
             m_cost: config.m_cost,
             t_cost: config.t_cost,
             p_cost: config.p_cost,
-            output_len: config.output_len,
+            output_len: config.output_len, // F-4: This will be validated to be REQUIRED_OUTPUT_LEN
             kdf_version: KDF_VERSION,
         })
     }

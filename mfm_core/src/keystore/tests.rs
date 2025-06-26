@@ -192,6 +192,34 @@ fn test_f1_nonce_collision_protection() {
     assert!(entry3.nonce_counter > entry2_counter, "New entry should have higher counter");
 }
 
+// F-4 Test: Test strict output_len validation
+#[test]
+fn test_f4_strict_output_len_validation() {
+    use crate::keystore::KeystoreConfig;
+    
+    // Test that configuration validation rejects non-standard output_len
+    let mut invalid_config = KeystoreConfig::default();
+    invalid_config.output_len = 16; // Less than required 32
+    
+    let validation_result = invalid_config.validate_strength();
+    assert!(validation_result.is_err(), "Should reject output_len < 32");
+    assert!(validation_result.unwrap_err().contains("exactly 32 bytes"), "Error should mention exact requirement");
+    
+    // Test with output_len > 32
+    let mut invalid_config2 = KeystoreConfig::default();
+    invalid_config2.output_len = 64; // More than required 32
+    
+    let validation_result2 = invalid_config2.validate_strength();
+    assert!(validation_result2.is_err(), "Should reject output_len > 32");
+    assert!(validation_result2.unwrap_err().contains("exactly 32 bytes"), "Error should mention exact requirement");
+    
+    // Test that valid config passes
+    let valid_config = KeystoreConfig::default();
+    assert_eq!(valid_config.output_len, 32, "Default should be 32");
+    let validation_result3 = valid_config.validate_strength();
+    assert!(validation_result3.is_ok(), "Valid config should pass validation");
+}
+
 // M-4 Test: Test key rotation framework
 #[test]
 fn test_m4_key_rotation_framework() {
