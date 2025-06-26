@@ -2691,6 +2691,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.12",
  "tiny-keccak",
+ "tracing",
  "uuid",
  "zeroize",
 ]

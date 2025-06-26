@@ -31,10 +31,12 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, Instant, SystemTime};
 use tiny_keccak::{Hasher, Keccak}; // For Keccak-256
+use tracing::{error, info, warn};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const KEYSTORE_VERSION: u8 = 1;
+
 
 // M-4: Key rotation framework constants
 const CURRENT_ENCRYPTION_VERSION: u8 = 1; // Current encryption algorithm version
@@ -318,7 +320,6 @@ impl AsRef<[u8]> for MasterKey {
 
 // --- Keystore Struct ---
 
-#[derive(Debug)]
 pub struct Keystore {
     file_path: PathBuf,
     master_key: Option<MasterKey>,
@@ -352,6 +353,19 @@ pub struct Keystore {
     session_created_at: Option<SystemTime>, // When session was created
     suspicious_activities: u32, // Count of suspicious activities
     last_suspicious_activity: Option<Instant>, // Last suspicious activity timestamp
+}
+
+// Simple Debug implementation for Keystore that doesn't expose sensitive data
+impl std::fmt::Debug for Keystore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Keystore")
+            .field("file_path", &self.file_path)
+            .field("is_unlocked", &self.is_unlocked)
+            .field("entries_count", &self.entries.len())
+            .field("has_master_key", &self.master_key.is_some())
+            .field("has_verification_tag", &self.verification_tag.is_some())
+            .finish()
+    }
 }
 
 // Helper struct for change_password to temporarily hold decrypted key data
@@ -443,6 +457,7 @@ impl Keystore {
     pub fn new(custom_path: Option<PathBuf>) -> Result<Self, KeystoreError> {
         Self::new_with_config(custom_path, KeystoreConfig::default())
     }
+
 
     #[cfg(test)]
     pub fn new_with_config_test_mode(
@@ -565,11 +580,29 @@ impl Keystore {
                 // Fix for F-1: Create a verification tag for the new keystore
                 self.create_verification_tag()?;
 
+                // L-2: Log keystore creation
+                info!(
+                    event = "keystore_created",
+                    kdf_algorithm = "argon2id",
+                    m_cost = self.config.m_cost,
+                    t_cost = self.config.t_cost,
+                    p_cost = self.config.p_cost,
+                    "New keystore created and initialized"
+                );
+
                 // Save the new keystore structure with KDF params (but no entries yet)
                 self.save_to_disk()?;
             }
             // If no password provided for a new keystore, it remains uninitialized.
             // It cannot be used until a password is set and KDF params are created.
+        } else {
+            // L-2: Log existing keystore loading
+            info!(
+                event = "keystore_loaded",
+                entry_count = self.entries.len(),
+                has_verification_tag = self.verification_tag.is_some(),
+                "Existing keystore loaded from disk"
+            );
         }
         // If master_kdf_params is Some, it means an existing keystore was loaded.
         // It remains locked. Unlocking is a separate step.
@@ -617,6 +650,15 @@ impl Keystore {
         self.failed_unlock_attempts += 1;
         self.last_failed_attempt = Some(Instant::now());
 
+        // L-2: Log failed unlock attempt
+        warn!(
+            event = "failed_unlock",
+            attempt = self.failed_unlock_attempts,
+            max_attempts = MAX_FAILED_ATTEMPTS,
+            "Failed unlock attempt {} of {}",
+            self.failed_unlock_attempts, MAX_FAILED_ATTEMPTS
+        );
+
         // Exponential backoff with cap
         if self.failed_unlock_attempts > 1 {
             let new_delay_ms = std::cmp::min(
@@ -624,6 +666,16 @@ impl Keystore {
                 MAX_RATE_LIMIT_DELAY_MS,
             );
             self.rate_limit_delay = Duration::from_millis(new_delay_ms);
+        }
+
+        // L-2: Log rate limiting if triggered
+        if self.failed_unlock_attempts >= MAX_FAILED_ATTEMPTS {
+            error!(
+                event = "rate_limit_triggered",
+                failed_attempts = MAX_FAILED_ATTEMPTS,
+                "Rate limiting triggered after {} failed attempts",
+                MAX_FAILED_ATTEMPTS
+            );
         }
     }
 
@@ -719,6 +771,11 @@ impl Keystore {
 
         // The hmac::verify function takes the key, message (data_to_verify), and tag (expected_mac_bytes)
         if hmac::verify(&mac_signing_key, &data_to_verify, &expected_mac_bytes).is_err() {
+            // L-2: Log MAC verification failure (critical security event)
+            error!(
+                event = "mac_verification_failed",
+                "MAC verification failed - keystore data may have been tampered with"
+            );
             // H-2 Fix: Record failed attempt for rate limiting on MAC failure
             self.record_failed_attempt_internal();
             return Err(KeystoreError::MacVerificationFailure);
@@ -763,6 +820,13 @@ impl Keystore {
 
         // M-3 Fix: Generate new session token on successful unlock
         self.generate_session_token()?;
+
+        // L-2: Log successful unlock  
+        info!(
+            event = "keystore_unlock",
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Keystore unlocked successfully"
+        );
 
         // 10. Clear pending data
         self.pending_protected_data_b64 = None;
@@ -850,6 +914,12 @@ impl Keystore {
         
         // M-3 Fix: Invalidate session on lock
         self.invalidate_session();
+
+        // L-2: Log keystore lock
+        info!(
+            event = "keystore_lock",
+            "Keystore locked manually"
+        );
     }
 
     // Check if auto-lock should be triggered
@@ -857,6 +927,13 @@ impl Keystore {
         if self.is_unlocked {
             if let Some(last_activity) = self.last_activity_at {
                 if last_activity.elapsed() > self.config.auto_lock_timeout {
+                    // L-2: Log auto-lock before locking
+                    info!(
+                        event = "auto_lock_triggered",
+                        timeout_seconds = self.config.auto_lock_timeout.as_secs(),
+                        "Auto-lock triggered after {} seconds of inactivity",
+                        self.config.auto_lock_timeout.as_secs()
+                    );
                     self.lock();
                 }
             }
@@ -906,12 +983,26 @@ impl Keystore {
         self.suspicious_activities += 1;
         self.last_suspicious_activity = Some(Instant::now());
 
-        // Log the suspicious activity (in a real implementation, this would go to a secure audit log)
-        eprintln!("Suspicious activity detected: {}", activity_description);
+        // L-2: Log suspicious activity
+        error!(
+            event = "suspicious_activity",
+            activity = activity_description,
+            count = self.suspicious_activities,
+            threshold = MAX_SUSPICIOUS_ACTIVITIES,
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Suspicious activity detected: {}",
+            activity_description
+        );
 
         // Invalidate session if threshold exceeded
         if self.suspicious_activities >= MAX_SUSPICIOUS_ACTIVITIES {
-            eprintln!("Session invalidated due to suspicious activity threshold exceeded");
+            error!(
+                event = "session_invalidated",
+                reason = "suspicious_activity_threshold",
+                activity_count = self.suspicious_activities,
+                session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+                "Session invalidated due to suspicious activity threshold exceeded"
+            );
             self.invalidate_session();
         }
     }
@@ -929,6 +1020,13 @@ impl Keystore {
                 // If session is very new (< 1 second) but we're making multiple rapid calls,
                 // this could indicate concurrent access attempts
                 if elapsed.as_millis() < 1000 && self.suspicious_activities > 0 {
+                    error!(
+                        event = "concurrent_access_detected",
+                        session_age_ms = elapsed.as_millis(),
+                        suspicious_activities = self.suspicious_activities,
+                        session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+                        "Potential concurrent session access detected"
+                    );
                     self.record_suspicious_activity("Potential concurrent session access");
                     return Err(KeystoreError::Locked);
                 }
@@ -936,6 +1034,13 @@ impl Keystore {
         }
 
         Ok(())
+    }
+
+    // L-2: Helper method for session correlation in logs
+    fn get_session_id_for_audit(&self) -> Option<String> {
+        self.session_token.as_ref().map(|token| {
+            hex::encode(&token[..4]) // First 4 bytes as hex (8 chars) for correlation
+        })
     }
 
     // M-4: Key rotation framework methods for future algorithm upgrades
@@ -1218,9 +1323,22 @@ impl Keystore {
             kdf_version: CURRENT_KDF_VERSION,
         };
 
+        // Capture alias before moving entry
+        let alias_for_log = entry.alias.clone();
         self.entries.push(entry);
         self.save_to_disk()?;
         self.update_activity_timestamp();
+
+        // L-2: Log successful key import
+        info!(
+            event = "key_imported",
+            key_id = %id,
+            key_alias = ?alias_for_log,
+            import_method = "hex",
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Private key imported from hex with alias: {:?}",
+            alias_for_log
+        );
 
         Ok((id, address))
     }
@@ -1326,9 +1444,22 @@ impl Keystore {
             kdf_version: CURRENT_KDF_VERSION,
         };
 
+        // Capture alias before moving entry
+        let alias_for_log = entry.alias.clone();
         self.entries.push(entry);
         self.save_to_disk()?;
         self.update_activity_timestamp();
+
+        // L-2: Log successful mnemonic import
+        info!(
+            event = "key_imported",
+            key_id = %id,
+            key_alias = ?alias_for_log,
+            import_method = "mnemonic",
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Private key imported from mnemonic with alias: {:?}",
+            alias_for_log
+        );
 
         Ok((id, address))
     }
@@ -1406,6 +1537,16 @@ impl Keystore {
         // This ensures the key will be properly zeroized when dropped
 
         self.update_activity_timestamp();
+
+        // L-2: Log key access
+        info!(
+            event = "key_accessed",
+            key_id = %uuid,
+            operation = "signing",
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Private key accessed for signing"
+        );
+
         Ok(ZeroizingSigningKey::from(signing_key))
     }
 
@@ -1635,6 +1776,14 @@ impl Keystore {
         self.create_verification_tag()?;
 
         self.save_to_disk()?;
+
+        // L-2: Log successful password change
+        info!(
+            event = "password_changed",
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Keystore password changed successfully"
+        );
+
         self.lock(); // Lock the keystore after password change
         self.update_activity_timestamp();
 

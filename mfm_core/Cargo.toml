@@ -47,6 +47,7 @@ hex = "0.4.3"
 thiserror = "2.0.12"
 ring = "0.17.14"
 num_cpus = "1.16"
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3.8"
