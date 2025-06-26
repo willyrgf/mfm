@@ -32,6 +32,72 @@ const DUMMY_PK_HEX_2: &str = "00000000000000000000000000000000000000000000000000
 const NEW_PASSWORD: &str = "newpassword456";
 // const DUMMY_PK_HEX_3: &str = "0000000000000000000000000000000000000000000000000000000000000003"; // Unused
 
+// M-4 Test: Test key rotation framework
+#[test]
+fn test_m4_key_rotation_framework() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    
+    // Initialize and unlock keystore
+    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+    ks.unlock(TEST_PASSWORD).unwrap();
+    
+    // Import a key
+    let (key_id, _address) = ks.import_private_key_hex(Some("test_key".to_string()), DUMMY_PK_HEX).unwrap();
+    
+    // Verify the key was created with current version
+    let keys = ks.list_keys().unwrap();
+    let imported_key = keys.iter().find(|k| k.id == key_id).unwrap();
+    assert_eq!(imported_key.encryption_version, 1, "New keys should use current encryption version");
+    assert_eq!(imported_key.kdf_version, 1, "New keys should use current KDF version");
+    
+    // Check that no keys need rotation initially
+    let keys_needing_rotation = ks.check_keys_needing_rotation();
+    assert!(keys_needing_rotation.is_empty(), "Newly created keys should not need rotation");
+    
+    // Test key rotation function (should be no-op since key is already current)
+    let rotation_result = ks.rotate_key(key_id);
+    assert!(rotation_result.is_ok(), "Rotating current key should succeed (no-op)");
+    
+    // Test rotating all keys (should be no-op)
+    let rotated_keys = ks.rotate_all_keys().unwrap();
+    assert!(rotated_keys.is_empty(), "No keys should need rotation");
+    
+    // Verify key still works after rotation attempt
+    let signer_result = ks.get_signer(key_id);
+    assert!(signer_result.is_ok(), "Key should still work after rotation attempt");
+}
+
+// M-3 Test: Test enhanced session management with proper invalidation
+#[test]
+fn test_m3_session_management() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    
+    // Initialize and unlock keystore
+    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+    ks.unlock(TEST_PASSWORD).unwrap();
+    
+    // Verify session token was created
+    assert!(ks.session_token.is_some(), "Session token should be generated on unlock");
+    assert!(ks.session_created_at.is_some(), "Session creation time should be recorded");
+    assert!(ks.validate_session(), "Session should be valid after unlock");
+    
+    // Test that operations work with valid session
+    let import_result = ks.import_private_key_hex(Some("test_key".to_string()), DUMMY_PK_HEX);
+    assert!(import_result.is_ok(), "Import should work with valid session");
+    
+    // Test session invalidation on lock
+    ks.lock();
+    assert!(ks.session_token.is_none(), "Session token should be cleared on lock");
+    assert!(ks.session_created_at.is_none(), "Session creation time should be cleared on lock");
+    assert!(!ks.validate_session(), "Session should be invalid after lock");
+    
+    // Test that operations fail after session invalidation
+    let get_signer_result = ks.get_signer(uuid::Uuid::new_v4());
+    assert!(matches!(get_signer_result, Err(KeystoreError::Locked)), "Operations should fail with invalid session");
+}
+
 // M-2 Test: Test enhanced MAC coverage including KDF algorithm name
 #[test]
 fn test_m2_enhanced_mac_coverage() {

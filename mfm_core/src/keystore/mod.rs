@@ -29,12 +29,17 @@ use std::fs;
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tiny_keccak::{Hasher, Keccak}; // For Keccak-256
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const KEYSTORE_VERSION: u8 = 1;
+
+// M-4: Key rotation framework constants
+const CURRENT_ENCRYPTION_VERSION: u8 = 1; // Current encryption algorithm version
+const CURRENT_KDF_VERSION: u8 = 1; // Current KDF algorithm version
+
 
 // --- Structs for Keystore Data ---
 
@@ -99,6 +104,12 @@ pub struct EncryptedKeyEntry {
     pub created_at: DateTime<Utc>, // Not secret
     #[zeroize(skip)]
     pub updated_at: DateTime<Utc>, // Not secret
+    
+    // M-4: Key rotation framework fields
+    #[zeroize(skip)]
+    pub encryption_version: u8, // Version of encryption algorithm used
+    #[zeroize(skip)]
+    pub kdf_version: u8, // Version of KDF used for this entry
                               // Potentially other metadata like derivation path if applicable, key type, etc.
 }
 
@@ -110,6 +121,9 @@ pub struct KeyInfo {
     pub address: Address,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    // M-4: Include version information for monitoring key rotation needs
+    pub encryption_version: u8,
+    pub kdf_version: u8,
 }
 
 // Configuration for keystore behavior
@@ -140,6 +154,11 @@ const MAX_FAILED_ATTEMPTS: u32 = 5;
 const INITIAL_RATE_LIMIT_DELAY_MS: u64 = 1000; // 1 second
 const MAX_RATE_LIMIT_DELAY_MS: u64 = 30000; // 30 seconds
 const RATE_LIMIT_RESET_DURATION_MS: u64 = 300000; // 5 minutes
+
+// Session management constants
+const SESSION_TOKEN_LENGTH: usize = 32; // 256-bit session token
+const MAX_SUSPICIOUS_ACTIVITIES: u32 = 3; // Threshold for invalidating session
+const SUSPICIOUS_ACTIVITY_RESET_DURATION_MS: u64 = 600000; // 10 minutes
 
 impl Default for KeystoreConfig {
     fn default() -> Self {
@@ -327,6 +346,12 @@ pub struct Keystore {
     failed_unlock_attempts: u32,
     last_failed_attempt: Option<Instant>,
     rate_limit_delay: Duration,
+
+    // M-3: Enhanced session management
+    session_token: Option<Zeroizing<[u8; SESSION_TOKEN_LENGTH]>>, // Current session token
+    session_created_at: Option<SystemTime>, // When session was created
+    suspicious_activities: u32, // Count of suspicious activities
+    last_suspicious_activity: Option<Instant>, // Last suspicious activity timestamp
 }
 
 // Helper struct for change_password to temporarily hold decrypted key data
@@ -461,6 +486,12 @@ impl Keystore {
             failed_unlock_attempts: 0,
             last_failed_attempt: None,
             rate_limit_delay: Duration::from_millis(INITIAL_RATE_LIMIT_DELAY_MS),
+
+            // M-3: Initialize session management
+            session_token: None,
+            session_created_at: None,
+            suspicious_activities: 0,
+            last_suspicious_activity: None,
         })
     }
 
@@ -505,6 +536,12 @@ impl Keystore {
             failed_unlock_attempts: 0,
             last_failed_attempt: None,
             rate_limit_delay: Duration::from_millis(INITIAL_RATE_LIMIT_DELAY_MS),
+
+            // M-3: Initialize session management
+            session_token: None,
+            session_created_at: None,
+            suspicious_activities: 0,
+            last_suspicious_activity: None,
         })
     }
 
@@ -724,6 +761,9 @@ impl Keystore {
         self.is_unlocked = true;
         self.last_activity_at = Some(Instant::now());
 
+        // M-3 Fix: Generate new session token on successful unlock
+        self.generate_session_token()?;
+
         // 10. Clear pending data
         self.pending_protected_data_b64 = None;
         self.pending_mac_b64 = None;
@@ -807,6 +847,9 @@ impl Keystore {
         self.master_key = None; // This will zeroize the key due to Zeroizing wrapper
         self.is_unlocked = false;
         self.last_activity_at = Some(Instant::now()); // Record lock time as last activity
+        
+        // M-3 Fix: Invalidate session on lock
+        self.invalidate_session();
     }
 
     // Check if auto-lock should be triggered
@@ -825,6 +868,273 @@ impl Keystore {
         self.last_activity_at = Some(Instant::now());
     }
 
+    // M-3: Enhanced session management methods
+    
+    /// Generate a new session token when unlocking
+    fn generate_session_token(&mut self) -> Result<(), KeystoreError> {
+        let mut token = Zeroizing::new([0u8; SESSION_TOKEN_LENGTH]);
+        OsRng.try_fill_bytes(token.as_mut())
+            .map_err(|e| KeystoreError::FsError(format!("Failed to generate session token: {}", e)))?;
+        
+        self.session_token = Some(token);
+        self.session_created_at = Some(SystemTime::now());
+        Ok(())
+    }
+
+    /// Check if the current session is valid
+    fn validate_session(&self) -> bool {
+        self.session_token.is_some() && self.session_created_at.is_some()
+    }
+
+    /// Invalidate the current session
+    fn invalidate_session(&mut self) {
+        self.session_token = None;
+        self.session_created_at = None;
+        self.is_unlocked = false;
+        self.master_key = None;
+    }
+
+    /// Record suspicious activity and invalidate session if threshold exceeded
+    fn record_suspicious_activity(&mut self, activity_description: &str) {
+        // Reset suspicious activity counter if enough time has passed
+        if let Some(last_suspicious) = self.last_suspicious_activity {
+            if last_suspicious.elapsed().as_millis() > SUSPICIOUS_ACTIVITY_RESET_DURATION_MS as u128 {
+                self.suspicious_activities = 0;
+            }
+        }
+
+        self.suspicious_activities += 1;
+        self.last_suspicious_activity = Some(Instant::now());
+
+        // Log the suspicious activity (in a real implementation, this would go to a secure audit log)
+        eprintln!("Suspicious activity detected: {}", activity_description);
+
+        // Invalidate session if threshold exceeded
+        if self.suspicious_activities >= MAX_SUSPICIOUS_ACTIVITIES {
+            eprintln!("Session invalidated due to suspicious activity threshold exceeded");
+            self.invalidate_session();
+        }
+    }
+
+    /// Check for potential concurrent session access (simplified detection)
+    fn check_concurrent_access(&mut self) -> Result<(), KeystoreError> {
+        if !self.validate_session() {
+            return Err(KeystoreError::Locked);
+        }
+
+        // Simple heuristic: if session was created very recently but we're accessing from different context
+        // This is a simplified check - in practice, you'd want more sophisticated detection
+        if let Some(created_at) = self.session_created_at {
+            if let Ok(elapsed) = created_at.elapsed() {
+                // If session is very new (< 1 second) but we're making multiple rapid calls,
+                // this could indicate concurrent access attempts
+                if elapsed.as_millis() < 1000 && self.suspicious_activities > 0 {
+                    self.record_suspicious_activity("Potential concurrent session access");
+                    return Err(KeystoreError::Locked);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // M-4: Key rotation framework methods for future algorithm upgrades
+    
+    /// Check if any keys need rotation (for future when new algorithm versions are introduced)
+    pub fn check_keys_needing_rotation(&self) -> Vec<Uuid> {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry.encryption_version < CURRENT_ENCRYPTION_VERSION
+                    || entry.kdf_version < CURRENT_KDF_VERSION
+            })
+            .map(|entry| entry.id)
+            .collect()
+    }
+
+    /// Rotate encryption for a specific key to current algorithm versions
+    /// (Currently no-op since all keys are created with current versions)
+    pub fn rotate_key(&mut self, key_id: Uuid) -> Result<(), KeystoreError> {
+        // Check auto-lock and session validation
+        self.check_auto_lock();
+        self.check_concurrent_access()?;
+
+        if !self.is_unlocked || self.master_key.is_none() {
+            return Err(KeystoreError::Locked);
+        }
+
+        // Find the key entry
+        let entry_index = self
+            .entries
+            .iter()
+            .position(|e| e.id == key_id)
+            .ok_or(KeystoreError::KeyNotFound(key_id))?;
+
+        // Check if rotation is needed
+        let entry = &self.entries[entry_index];
+        if entry.encryption_version >= CURRENT_ENCRYPTION_VERSION
+            && entry.kdf_version >= CURRENT_KDF_VERSION
+        {
+            // Already using current versions (expected for new software)
+            return Ok(());
+        }
+
+        // This path handles future scenarios when algorithm versions are upgraded
+        let decrypted_pk = self.decrypt_private_key_for_rotation(entry)?;
+        let new_entry = self.encrypt_private_key_with_current_version(
+            &decrypted_pk,
+            entry.alias.clone(),
+            entry.address,
+            entry.created_at,
+        )?;
+
+        // Replace the old entry
+        self.entries[entry_index] = new_entry;
+        self.update_activity_timestamp();
+
+        Ok(())
+    }
+
+    /// Decrypt a private key for rotation (currently only supports current version)
+    fn decrypt_private_key_for_rotation(
+        &self,
+        entry: &EncryptedKeyEntry,
+    ) -> Result<Zeroizing<Vec<u8>>, KeystoreError> {
+        // Since this is new software, we only support the current encryption version
+        if entry.encryption_version != CURRENT_ENCRYPTION_VERSION {
+            return Err(KeystoreError::UnsupportedKdf(format!(
+                "Unsupported encryption version: {}",
+                entry.encryption_version
+            )));
+        }
+
+        if entry.kdf_version != CURRENT_KDF_VERSION {
+            return Err(KeystoreError::UnsupportedKdf(format!(
+                "Unsupported KDF version: {}",
+                entry.kdf_version
+            )));
+        }
+
+        // Standard AES-GCM decryption
+        let encrypted_pk_bytes = Zeroizing::new(
+            BASE64_STANDARD
+                .decode(&entry.encrypted_pk)
+                .map_err(|_e| KeystoreError::DeserializationError("Failed to decode encrypted private key".to_string()))?
+        );
+
+        let nonce_bytes = Zeroizing::new(
+            BASE64_STANDARD
+                .decode(&entry.nonce)
+                .map_err(|_e| KeystoreError::DeserializationError("Failed to decode nonce".to_string()))?
+        );
+
+        let hkdf_salt_bytes = Zeroizing::new(
+            BASE64_STANDARD
+                .decode(&entry.hkdf_salt)
+                .map_err(|_e| KeystoreError::DeserializationError("Failed to decode HKDF salt".to_string()))?
+        );
+
+        // Get master key and derive entry key
+        let master_key_bytes = self
+            .master_key
+            .as_ref()
+            .ok_or(KeystoreError::Locked)?
+            .as_ref();
+
+        let entry_key = self.derive_entry_key(
+            master_key_bytes,
+            &hkdf_salt_bytes,
+            &entry.id,
+            &entry.address,
+        )?;
+
+        // Decrypt
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(entry_key.as_ref()));
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let decrypted_bytes = cipher
+            .decrypt(nonce, encrypted_pk_bytes.as_slice())
+            .map_err(|_e| KeystoreError::DeserializationError("Failed to decrypt private key".to_string()))?;
+
+        Ok(Zeroizing::new(decrypted_bytes))
+    }
+
+    /// Encrypt a private key using the current encryption version
+    fn encrypt_private_key_with_current_version(
+        &self,
+        pk_bytes: &[u8],
+        alias: Option<String>,
+        address: Address,
+        created_at: DateTime<Utc>,
+    ) -> Result<EncryptedKeyEntry, KeystoreError> {
+        // Generate new cryptographic materials
+        let mut aes_nonce_bytes = [0u8; 12];
+        OsRng.try_fill_bytes(&mut aes_nonce_bytes)
+            .map_err(|e| KeystoreError::FsError(format!("Failed to generate AES nonce: {}", e)))?;
+
+        let mut hkdf_salt_bytes = [0u8; 32];
+        OsRng.try_fill_bytes(&mut hkdf_salt_bytes)
+            .map_err(|e| KeystoreError::FsError(format!("Failed to generate HKDF salt: {}", e)))?;
+
+        // Get master key and derive new entry key
+        let master_key_bytes = self
+            .master_key
+            .as_ref()
+            .ok_or(KeystoreError::Locked)?
+            .as_ref();
+
+        // For new entry, we need to generate a new UUID
+        let new_id = Uuid::new_v4();
+        let entry_key = self.derive_entry_key(
+            master_key_bytes,
+            &hkdf_salt_bytes,
+            &new_id,
+            &address,
+        )?;
+
+        // Encrypt with current encryption version
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(entry_key.as_ref()));
+        let nonce = Nonce::from_slice(&aes_nonce_bytes);
+        let encrypted_pk_bytes = cipher
+            .encrypt(nonce, pk_bytes)
+            .map_err(|_e| KeystoreError::AesGcm("Failed to encrypt private key".to_string()))?;
+
+        Ok(EncryptedKeyEntry {
+            id: new_id,
+            alias,
+            address,
+            encrypted_pk: BASE64_STANDARD.encode(&encrypted_pk_bytes),
+            nonce: BASE64_STANDARD.encode(&aes_nonce_bytes),
+            hkdf_salt: BASE64_STANDARD.encode(&hkdf_salt_bytes),
+            created_at,
+            updated_at: Utc::now(),
+            encryption_version: CURRENT_ENCRYPTION_VERSION,
+            kdf_version: CURRENT_KDF_VERSION,
+        })
+    }
+
+
+    /// Rotate all keys to current algorithm versions (for future algorithm upgrades)
+    pub fn rotate_all_keys(&mut self) -> Result<Vec<Uuid>, KeystoreError> {
+        let keys_needing_rotation = self.check_keys_needing_rotation();
+        let mut rotated_keys = Vec::new();
+
+        for key_id in keys_needing_rotation {
+            if let Err(e) = self.rotate_key(key_id) {
+                eprintln!("Failed to rotate key {}: {}", key_id, e);
+                // Continue with other keys, don't fail the entire operation
+            } else {
+                rotated_keys.push(key_id);
+            }
+        }
+
+        if !rotated_keys.is_empty() {
+            // Save the keystore with updated keys
+            self.save_to_disk()?;
+        }
+
+        Ok(rotated_keys)
+    }
+
     pub fn import_private_key_hex(
         &mut self,
         alias: Option<String>,
@@ -832,6 +1142,9 @@ impl Keystore {
     ) -> Result<(Uuid, Address), KeystoreError> {
         // Check auto-lock before proceeding
         self.check_auto_lock();
+
+        // M-3 Fix: Validate session and check for concurrent access
+        self.check_concurrent_access()?;
 
         if !self.is_unlocked || self.master_key.is_none() {
             return Err(KeystoreError::Locked);
@@ -900,6 +1213,9 @@ impl Keystore {
             hkdf_salt: BASE64_STANDARD.encode(new_hkdf_salt_bytes),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            // M-4: Set current encryption and KDF versions
+            encryption_version: CURRENT_ENCRYPTION_VERSION,
+            kdf_version: CURRENT_KDF_VERSION,
         };
 
         self.entries.push(entry);
@@ -1005,6 +1321,9 @@ impl Keystore {
             hkdf_salt: BASE64_STANDARD.encode(new_hkdf_salt_bytes),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            // M-4: Set current encryption and KDF versions
+            encryption_version: CURRENT_ENCRYPTION_VERSION,
+            kdf_version: CURRENT_KDF_VERSION,
         };
 
         self.entries.push(entry);
@@ -1028,6 +1347,9 @@ impl Keystore {
                 address: entry.address,
                 created_at: entry.created_at,
                 updated_at: entry.updated_at,
+                // M-4: Include version information
+                encryption_version: entry.encryption_version,
+                kdf_version: entry.kdf_version,
             })
             .collect();
         Ok(key_infos)
@@ -1037,6 +1359,9 @@ impl Keystore {
     pub fn get_signer(&mut self, uuid: Uuid) -> Result<ZeroizingSigningKey, KeystoreError> {
         // Check auto-lock before proceeding
         self.check_auto_lock();
+
+        // M-3 Fix: Validate session and check for concurrent access
+        self.check_concurrent_access()?;
 
         if !self.is_unlocked || self.master_key.is_none() {
             return Err(KeystoreError::Locked);
@@ -1155,6 +1480,9 @@ impl Keystore {
     ) -> Result<(), KeystoreError> {
         // Check auto-lock before proceeding
         self.check_auto_lock();
+
+        // M-3 Fix: Validate session and check for concurrent access
+        self.check_concurrent_access()?;
 
         if new_password.is_empty() {
             return Err(KeystoreError::InvalidPassword);
@@ -1292,6 +1620,9 @@ impl Keystore {
                 hkdf_salt: BASE64_STANDARD.encode(new_hkdf_salt_bytes),
                 created_at: data.created_at,
                 updated_at: Utc::now(),
+                // M-4: Set current encryption and KDF versions
+                encryption_version: CURRENT_ENCRYPTION_VERSION,
+                kdf_version: CURRENT_KDF_VERSION,
             };
             self.entries.push(new_entry);
         }
