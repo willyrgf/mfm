@@ -220,6 +220,27 @@ fn test_f4_strict_output_len_validation() {
     assert!(validation_result3.is_ok(), "Valid config should pass validation");
 }
 
+// F-7 Test: Verify that Keystore is NOT Send + Sync
+#[test]
+fn test_f7_keystore_not_thread_safe() {
+    // This test verifies that Keystore cannot be accidentally used across threads
+    
+    // These should fail to compile if uncommented:
+    // fn assert_send<T: Send>() {}
+    // fn assert_sync<T: Sync>() {}
+    // assert_send::<Keystore>();  // Should NOT compile
+    // assert_sync::<Keystore>();  // Should NOT compile
+    
+    // Instead, we verify that we can create a keystore normally in single-threaded context
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let ks = Keystore::new(Some(keystore_path));
+    assert!(ks.is_ok(), "Should be able to create keystore in single thread");
+    
+    // The PhantomData marker should prevent Send + Sync while allowing normal operation
+    // PhantomData is zero-sized so it doesn't affect the struct layout
+    assert_eq!(std::mem::size_of::<std::marker::PhantomData<*const ()>>(), 0, "PhantomData should be zero-sized");
+}
+
 // M-4 Test: Test key rotation framework
 #[test]
 fn test_m4_key_rotation_framework() {

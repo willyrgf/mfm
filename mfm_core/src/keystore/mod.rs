@@ -28,6 +28,16 @@
 /// - No hardware security integration (for now) - maintains compatibility and reduces complexity
 /// - No network features - eliminates remote attack surface
 ///
+/// ## Thread Safety (F-7):
+/// **The Keystore is NOT thread-safe by design.**
+/// 
+/// - Keystore implements `!Send + !Sync` to prevent accidental concurrent access
+/// - Internal mutability is not synchronized - concurrent access causes undefined behavior
+/// - Each keystore instance must be used from a single thread only
+/// - For multi-threaded applications: create separate keystore instances per thread
+/// - Rationale: Keystores contain highly sensitive cryptographic state that should not
+///   be shared across threads without explicit synchronization by the application
+///
 // modules
 pub mod error;
 #[cfg(test)]
@@ -403,6 +413,10 @@ pub struct Keystore {
     // F-1: Nonce collision detection and monotonic counter tracking
     used_nonces: HashSet<[u8; 12]>, // Track used nonces in current session to detect collisions
     global_nonce_counter: u64,      // Global monotonic counter for nonce derivation
+
+    // F-7: Thread safety marker - keystore is NOT thread-safe by design
+    // Prevents accidental concurrent access that could cause memory races or data loss
+    _not_thread_safe: std::marker::PhantomData<*const ()>,
 }
 
 // Simple Debug implementation for Keystore that doesn't expose sensitive data
@@ -577,6 +591,9 @@ impl Keystore {
             // F-1: Initialize nonce collision detection and monotonic counter
             used_nonces: HashSet::new(),
             global_nonce_counter: 0,
+
+            // F-7: Initialize thread safety marker
+            _not_thread_safe: std::marker::PhantomData,
         })
     }
 
@@ -632,6 +649,9 @@ impl Keystore {
             // F-1: Initialize nonce collision detection and monotonic counter
             used_nonces: HashSet::new(),
             global_nonce_counter: 0,
+
+            // F-7: Initialize thread safety marker
+            _not_thread_safe: std::marker::PhantomData,
         })
     }
 
