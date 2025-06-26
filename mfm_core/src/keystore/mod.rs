@@ -39,7 +39,6 @@ use aes_gcm::{Aes256Gcm, Key, Nonce};
 use alloy_primitives::{Address, B256 as H256};
 use alloy_signer::Signature;
 use argon2::{self, Argon2}; // Import argon2 module for Params
-use atomicwrites::{AtomicFile, OverwriteBehavior};
 use base64::engine::general_purpose; // MAC and protected data encoding
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD; // For base64 encoding
 use base64::Engine; // For encode/decode methods
@@ -48,6 +47,7 @@ use bip39::Mnemonic; // Ensure Seed is not imported from bip39
 use chrono::{DateTime, Utc};
 use dirs_next;
 use error::KeystoreError;
+use fs2::FileExt;
 use hex; // For encoding salt
 use k256::ecdsa::signature::hazmat::PrehashVerifier;
 use k256::{ecdsa::SigningKey, SecretKey};
@@ -86,6 +86,10 @@ pub struct AuthenticatedKeystoreEnvelope {
     pub master_kdf_algo_name: String,
     pub master_kdf_params: MasterKdfParams,
     pub verification_nonce: Option<String>, // Nonce for the verification_tag
+
+    // F-2 Fix: Stable keystore identifier (256-bit random, generated once at creation)
+    // This replaces path-derived ID to prevent keystore from breaking when moved/renamed
+    pub keystore_id: String, // Base64-encoded 32-byte random identifier
 
     // This data IS MAC-protected.
     // It's the Base64 encoded JSON string of `ProtectedKeystorePart`.
@@ -367,6 +371,7 @@ pub struct Keystore {
     // Fields populated from AuthenticatedKeystoreEnvelope (unprotected part)
     master_kdf_params: Option<MasterKdfParams>, // From envelope
     verification_nonce: Option<String>,         // From envelope
+    keystore_id: Option<Zeroizing<[u8; 32]>>,   // F-2: Stable keystore ID from envelope
 
     is_unlocked: bool,
     last_activity_at: Option<Instant>,
@@ -389,8 +394,8 @@ pub struct Keystore {
     last_suspicious_activity: Option<Instant>, // Last suspicious activity timestamp
 
     // F-1: Nonce collision detection and monotonic counter tracking
-    used_nonces: HashSet<[u8; 12]>,    // Track used nonces in current session to detect collisions
-    global_nonce_counter: u64,         // Global monotonic counter for nonce derivation
+    used_nonces: HashSet<[u8; 12]>, // Track used nonces in current session to detect collisions
+    global_nonce_counter: u64,      // Global monotonic counter for nonce derivation
 }
 
 // Simple Debug implementation for Keystore that doesn't expose sensitive data
@@ -448,28 +453,44 @@ impl Keystore {
     const DEFAULT_KEYSTORE_FILENAME: &'static str = "keystore_v1.json";
     const APP_DIR_NAME: &'static str = "mfm";
 
-    // C-2 Fix: Generate keystore-specific identifier for domain separation
-    fn derive_keystore_id(&self) -> Zeroizing<[u8; 32]> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        // Create a stable keystore identifier based on file path
-        // This ensures different keystores have different domain separation
-        let mut hasher = DefaultHasher::new();
-        self.file_path.hash(&mut hasher);
-        let path_hash = hasher.finish();
-
-        // Use HKDF to derive a proper keystore ID from the path hash
-        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"mfm-keystore-id-derivation-v1");
-        let prk = salt.extract(&path_hash.to_be_bytes());
-
+    // F-2 Fix: Generate a stable 256-bit random keystore identifier
+    // This replaces the path-based approach to prevent keystore breakage on file moves/renames
+    fn generate_keystore_id() -> Result<Zeroizing<[u8; 32]>, KeystoreError> {
         let mut keystore_id = Zeroizing::new([0u8; 32]);
-        prk.expand(&[b"mfm-keystore-domain-separator-v1"], hkdf::HKDF_SHA256)
-            .expect("HKDF expand should not fail with valid inputs")
-            .fill(keystore_id.as_mut())
-            .expect("HKDF fill should not fail with valid inputs");
+        OsRng.try_fill_bytes(keystore_id.as_mut()).map_err(|e| {
+            KeystoreError::FsError(format!("Failed to generate keystore ID: {}", e))
+        })?;
 
-        keystore_id
+        info!(
+            event = "keystore_id_generated",
+            "Stable keystore ID generated for new keystore"
+        );
+
+        Ok(keystore_id)
+    }
+
+    // F-2 Fix: Get stable keystore identifier for domain separation
+    // Uses stored random ID instead of path-derived ID to survive file moves/renames
+    fn derive_keystore_id(&self) -> Zeroizing<[u8; 32]> {
+        match self.keystore_id.as_ref() {
+            Some(id) => {
+                // Return a copy of the stored stable ID
+                let mut id_copy = Zeroizing::new([0u8; 32]);
+                id_copy.copy_from_slice(id.as_ref());
+                id_copy
+            }
+            None => {
+                // This should not happen in normal operation, but provide a fallback
+                // for debugging or development scenarios
+                error!(
+                    event = "missing_keystore_id",
+                    "Stable keystore ID not available - this indicates an initialization error"
+                );
+
+                // Return a zero ID as emergency fallback (will cause MAC failures)
+                Zeroizing::new([0u8; 32])
+            }
+        }
     }
 
     /// Securely create a directory with 0o700 permissions.
@@ -529,6 +550,7 @@ impl Keystore {
             verification_tag: None,
             master_kdf_params: None,
             verification_nonce: None,
+            keystore_id: None, // F-2: Will be generated at keystore creation
             is_unlocked: false,
             last_activity_at: None,
             config,
@@ -583,6 +605,7 @@ impl Keystore {
             verification_tag: None,   // This is from ProtectedKeystorePart
             master_kdf_params: None,  // From envelope
             verification_nonce: None, // From envelope
+            keystore_id: None,        // F-2: Will be generated at keystore creation
             is_unlocked: false,
             last_activity_at: None,
             config,
@@ -621,6 +644,9 @@ impl Keystore {
                 self.master_key = Some(master_key_val); // Set the master key
                 self.master_kdf_params = Some(kdf_params); // Store kdf_params
                 self.master_kdf_algo = Some("argon2id".to_string());
+
+                // F-2 Fix: Generate stable keystore ID for new keystore
+                self.keystore_id = Some(Self::generate_keystore_id()?);
 
                 // Fix for F-1: Create a verification tag for the new keystore
                 self.create_verification_tag()?;
@@ -1258,7 +1284,7 @@ impl Keystore {
     ) -> Result<EncryptedKeyEntry, KeystoreError> {
         // For new entry, we need to generate a new UUID first
         let new_id = Uuid::new_v4();
-        
+
         // F-1 Fix: Use secure nonce generation with collision detection and monotonic counter
         let aes_nonce_bytes = self.generate_unique_nonce(&new_id)?;
         let nonce_counter = self.global_nonce_counter - 1; // Store the counter used for this entry
@@ -1996,6 +2022,17 @@ impl Keystore {
                 KeystoreError::InternalError("Master KDF params missing during save".to_string())
             })?,
             verification_nonce: self.verification_nonce.clone(),
+            // F-2 Fix: Include stable keystore ID in envelope
+            keystore_id: BASE64_STANDARD.encode(
+                self.keystore_id
+                    .as_ref()
+                    .ok_or_else(|| {
+                        KeystoreError::InternalError(
+                            "Stable keystore ID missing during save".to_string(),
+                        )
+                    })?
+                    .as_ref(),
+            ),
             protected_data_b64,
             mac_b64,
         };
@@ -2017,7 +2054,8 @@ impl Keystore {
         Ok(())
     }
 
-    // C-3 Fix: Robust file locking implementation with timeout and recovery
+    // F-3 Fix: Proper file descriptor locking with atomic rename
+    // Uses cross-platform exclusive file locks instead of race-prone advisory lock files
     fn save_with_file_locking(
         &mut self,
         envelope: &AuthenticatedKeystoreEnvelope,
@@ -2028,134 +2066,117 @@ impl Keystore {
         const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
         const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
-        let lock_file_path = self.file_path.with_extension("lock");
+        // F-3: Create a temporary file for atomic write
+        let temp_file_path = self.file_path.with_extension("tmp");
         let start_time = Instant::now();
 
-        // Retry loop for lock acquisition with timeout
-        let _lock_file = loop {
+        // F-3: Create and exclusively lock the temporary file
+        let temp_file = loop {
             match fs::OpenOptions::new()
-                .create_new(true) // Fail if lock file already exists (prevents races)
+                .create(true)
                 .write(true)
-                .open(&lock_file_path)
+                .truncate(true)
+                .open(&temp_file_path)
             {
-                Ok(file) => break file,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // Lock file exists, check if we've timed out
-                    if start_time.elapsed() > LOCK_TIMEOUT {
-                        return Err(KeystoreError::FsError(format!(
-                            "Failed to acquire file lock within {} seconds",
-                            LOCK_TIMEOUT.as_secs()
-                        )));
-                    }
-
-                    // Check if lock file is stale (older than timeout)
-                    if let Ok(metadata) = fs::metadata(&lock_file_path) {
-                        if let Ok(modified) = metadata.modified() {
-                            if let Ok(elapsed) = modified.elapsed() {
-                                if elapsed > LOCK_TIMEOUT {
-                                    // Remove stale lock file and retry
-                                    let _ = fs::remove_file(&lock_file_path);
-                                    continue;
-                                }
+                Ok(file) => {
+                    // F-3: Try to acquire exclusive lock on the file descriptor
+                    match file.try_lock_exclusive() {
+                        Ok(()) => break file,
+                        Err(e) => {
+                            if start_time.elapsed() > LOCK_TIMEOUT {
+                                return Err(KeystoreError::FsError(format!(
+                                    "Failed to acquire exclusive file lock within {} seconds: {}",
+                                    LOCK_TIMEOUT.as_secs(),
+                                    e
+                                )));
                             }
+                            // Wait before retrying
+                            std::thread::sleep(LOCK_RETRY_INTERVAL);
                         }
                     }
-
-                    // Wait before retrying
-                    std::thread::sleep(LOCK_RETRY_INTERVAL);
                 }
                 Err(e) => {
                     return Err(KeystoreError::FsError(format!(
-                        "Failed to create lock file: {}",
+                        "Failed to create temporary file: {}",
                         e
-                    )))
+                    )));
                 }
             }
         };
 
-        // Ensure lock file is removed on drop (RAII)
-        struct LockFileGuard(PathBuf);
-        impl Drop for LockFileGuard {
+        // F-3: Ensure proper cleanup with RAII guard that unlocks and removes temp file
+        struct FileGuard {
+            file: fs::File,
+            path: PathBuf,
+        }
+
+        impl Drop for FileGuard {
             fn drop(&mut self) {
-                let _ = fs::remove_file(&self.0);
+                // Unlock the file descriptor (automatic on close, but explicit is clearer)
+                let _ = FileExt::unlock(&self.file);
+                // Remove temporary file
+                let _ = fs::remove_file(&self.path);
             }
         }
-        let _lock_guard = LockFileGuard(lock_file_path.clone());
 
-        // Perform atomic write with integrity verification
-        let write_result = self.atomic_write_with_verification(serialized_envelope);
+        let file_guard = FileGuard {
+            file: temp_file,
+            path: temp_file_path.clone(),
+        };
 
-        // Handle write result and update state
+        // F-3: Write data to the locked temporary file
+        let write_result = {
+            let mut file = &file_guard.file;
+            file.write_all(serialized_envelope.as_bytes())
+                .and_then(|_| file.sync_all())
+                .map_err(|e| {
+                    KeystoreError::FsError(format!("Failed to write keystore data: {}", e))
+                })
+        };
+
         match write_result {
             Ok(()) => {
-                // Update in-memory state only after successful write
+                // F-3: Atomically move the temporary file to the final location
+                // This is atomic on most filesystems and prevents corruption from concurrent access
+                fs::rename(&temp_file_path, &self.file_path).map_err(|e| {
+                    KeystoreError::FsError(format!(
+                        "Failed to atomically rename keystore file: {}",
+                        e
+                    ))
+                })?;
+
+                // F-3: Set secure file permissions (Unix only)
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(0o600);
+                    fs::set_permissions(&self.file_path, perms).map_err(|e| {
+                        KeystoreError::FsError(format!(
+                            "Failed to set permissions on {}: {}",
+                            self.file_path.display(),
+                            e
+                        ))
+                    })?;
+                }
+
+                // Update in-memory state only after successful atomic write
                 self.pending_protected_data_b64 = Some(envelope.protected_data_b64.clone());
                 self.pending_mac_b64 = Some(envelope.mac_b64.clone());
+
+                info!(
+                    event = "keystore_saved",
+                    file_path = %self.file_path.display(),
+                    "Keystore saved successfully with exclusive file locking"
+                );
+
                 Ok(())
             }
             Err(e) => {
-                // On failure, attempt to verify if file was actually written correctly
-                if self.verify_file_integrity(envelope).unwrap_or(false) {
-                    // File was written correctly despite error - update state
-                    self.pending_protected_data_b64 = Some(envelope.protected_data_b64.clone());
-                    self.pending_mac_b64 = Some(envelope.mac_b64.clone());
-                    Ok(())
-                } else {
-                    Err(e)
-                }
+                // On write failure, temp file will be cleaned up by FileGuard
+                Err(e)
             }
         }
-        // Lock file is automatically removed by LockFileGuard drop
-    }
-
-    // C-3 Fix: Atomic write with verification
-    fn atomic_write_with_verification(
-        &self,
-        serialized_envelope: &Zeroizing<String>,
-    ) -> Result<(), KeystoreError> {
-        let atomic_file = AtomicFile::new(&self.file_path, OverwriteBehavior::AllowOverwrite);
-        atomic_file
-            .write(|f| f.write_all(serialized_envelope.as_bytes()))
-            .map_err(|e| KeystoreError::FsError(format!("Atomic write failed: {:?}", e)))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            fs::set_permissions(&self.file_path, perms).map_err(|e| {
-                KeystoreError::FsError(format!(
-                    "Failed to set permissions on {}: {}",
-                    self.file_path.display(),
-                    e
-                ))
-            })?;
-        }
-
-        Ok(())
-    }
-
-    // C-3 Fix: Verify file integrity after write
-    fn verify_file_integrity(
-        &self,
-        expected_envelope: &AuthenticatedKeystoreEnvelope,
-    ) -> Result<bool, KeystoreError> {
-        if !self.file_path.exists() {
-            return Ok(false);
-        }
-
-        let file_content = fs::read(&self.file_path).map_err(|_| {
-            KeystoreError::FsError("Failed to read file for verification".to_string())
-        })?;
-
-        let loaded_envelope: AuthenticatedKeystoreEnvelope = serde_json::from_slice(&file_content)
-            .map_err(|_| KeystoreError::InvalidFormat("File verification failed".to_string()))?;
-
-        // Compare critical fields
-        Ok(
-            loaded_envelope.protected_data_b64 == expected_envelope.protected_data_b64
-                && loaded_envelope.mac_b64 == expected_envelope.mac_b64
-                && loaded_envelope.master_kdf_params == expected_envelope.master_kdf_params,
-        )
+        // FileGuard automatically unlocks and cleans up temporary file
     }
 
     fn load_from_disk(&mut self) -> Result<(), KeystoreError> {
@@ -2197,6 +2218,20 @@ impl Keystore {
         self.master_kdf_params = Some(envelope.master_kdf_params.clone()); // Store for later use by unlock or if no unlock is performed
         self.verification_nonce = envelope.verification_nonce.clone(); // This was the missing piece
         self.master_kdf_algo = Some(envelope.master_kdf_algo_name.clone()); // Store the KDF algo name
+
+        // F-2 Fix: Load stable keystore ID from envelope
+        let keystore_id_bytes = BASE64_STANDARD.decode(&envelope.keystore_id).map_err(|e| {
+            KeystoreError::InvalidFormat(format!("Invalid keystore ID in envelope: {}", e))
+        })?;
+        if keystore_id_bytes.len() != 32 {
+            return Err(KeystoreError::InvalidFormat(
+                "Keystore ID must be exactly 32 bytes".to_string(),
+            ));
+        }
+        let mut id = Zeroizing::new([0u8; 32]);
+        id.copy_from_slice(&keystore_id_bytes);
+        self.keystore_id = Some(id);
+
         self.pending_protected_data_b64 = Some(envelope.protected_data_b64);
         self.pending_mac_b64 = Some(envelope.mac_b64);
 
@@ -2217,13 +2252,11 @@ impl Keystore {
     fn generate_unique_nonce(&mut self, entry_id: &Uuid) -> Result<[u8; 12], KeystoreError> {
         // F-1: Mitigation (b) - Use monotonic counter for provable uniqueness
         let counter = self.global_nonce_counter;
-        self.global_nonce_counter = self.global_nonce_counter
-            .checked_add(1)
-            .ok_or_else(|| {
-                KeystoreError::InternalError(
-                    "Nonce counter overflow - maximum number of entries reached".to_string()
-                )
-            })?;
+        self.global_nonce_counter = self.global_nonce_counter.checked_add(1).ok_or_else(|| {
+            KeystoreError::InternalError(
+                "Nonce counter overflow - maximum number of entries reached".to_string(),
+            )
+        })?;
 
         // Derive nonce using HMAC(counter || entry-UUID) as recommended
         let master_key_bytes = self
@@ -2234,7 +2267,7 @@ impl Keystore {
 
         // Create HMAC key for nonce derivation using master key
         let nonce_derivation_key = hmac::Key::new(hmac::HMAC_SHA256, master_key_bytes);
-        
+
         // Concatenate counter and entry UUID for uniqueness
         let mut input_data = Vec::with_capacity(8 + 16); // u64 + UUID
         input_data.extend_from_slice(&counter.to_be_bytes());
@@ -2242,7 +2275,7 @@ impl Keystore {
 
         // HMAC the combined data
         let hmac_tag = hmac::sign(&nonce_derivation_key, &input_data);
-        
+
         // Take first 12 bytes for AES-GCM nonce
         let mut nonce_bytes = [0u8; 12];
         nonce_bytes.copy_from_slice(&hmac_tag.as_ref()[..12]);
@@ -2251,7 +2284,8 @@ impl Keystore {
         if self.used_nonces.contains(&nonce_bytes) {
             // This should be extremely rare due to HMAC properties, but provides defense in depth
             return Err(KeystoreError::InternalError(
-                "Nonce collision detected - this indicates a serious cryptographic issue".to_string()
+                "Nonce collision detected - this indicates a serious cryptographic issue"
+                    .to_string(),
             ));
         }
 
@@ -2278,12 +2312,13 @@ impl Keystore {
             return;
         }
 
-        let max_counter = self.entries
+        let max_counter = self
+            .entries
             .iter()
             .map(|entry| entry.nonce_counter)
             .max()
             .expect("entries is not empty, so max should exist");
-        
+
         // Set counter to be one more than the highest existing counter
         self.global_nonce_counter = max_counter.saturating_add(1);
 
