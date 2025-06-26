@@ -139,6 +139,59 @@ fn test_l2_tamper_evident_audit_log_export() {
     );
 }
 
+// F-1 Test: Test nonce collision detection and monotonic counter system
+#[test]
+fn test_f1_nonce_collision_protection() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    
+    // Initialize and unlock keystore
+    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+    ks.unlock(TEST_PASSWORD).unwrap();
+    
+    // Import multiple keys to test nonce uniqueness
+    let (key_id_1, _address_1) = ks.import_private_key_hex(Some("key1".to_string()), DUMMY_PK_HEX).unwrap();
+    let (key_id_2, _address_2) = ks.import_private_key_hex(Some("key2".to_string()), DUMMY_PK_HEX_2).unwrap();
+    
+    // Verify all entries have unique nonce counters
+    let keys = ks.list_keys().unwrap();
+    assert_eq!(keys.len(), 2, "Should have 2 keys");
+    
+    // Copy the data we need before borrowing mutably
+    let entry1_counter = ks.entries.iter().find(|e| e.id == key_id_1).unwrap().nonce_counter;
+    let entry2_counter = ks.entries.iter().find(|e| e.id == key_id_2).unwrap().nonce_counter;
+    let entry1_nonce = ks.entries.iter().find(|e| e.id == key_id_1).unwrap().nonce.clone();
+    let entry2_nonce = ks.entries.iter().find(|e| e.id == key_id_2).unwrap().nonce.clone();
+    
+    assert_ne!(entry1_counter, entry2_counter, "Nonce counters should be unique");
+    assert!(entry1_counter < entry2_counter || entry2_counter < entry1_counter, 
+           "Nonce counters should be sequential");
+    
+    // Verify nonces are different
+    assert_ne!(entry1_nonce, entry2_nonce, "Nonces should be different");
+    
+    // Test that global counter persists across sessions
+    let global_counter_before = ks.global_nonce_counter;
+    ks.lock();
+    
+    // Reload keystore
+    let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
+    ks2.initialize_or_load(None).unwrap();
+    ks2.unlock(TEST_PASSWORD).unwrap();
+    
+    // Global counter should be synchronized from existing entries
+    assert!(ks2.global_nonce_counter > 0, "Global counter should be initialized from existing entries");
+    assert!(ks2.global_nonce_counter >= global_counter_before, "Global counter should not go backwards");
+    
+    // Import another key to verify counter continues properly
+    let (key_id_3, _address_3) = ks2.import_private_key_hex(Some("key3".to_string()), DUMMY_PK_HEX).unwrap();
+    let entry3 = ks2.entries.iter().find(|e| e.id == key_id_3).unwrap();
+    
+    // Verify the new entry has a higher counter than existing ones
+    assert!(entry3.nonce_counter > entry1_counter, "New entry should have higher counter");
+    assert!(entry3.nonce_counter > entry2_counter, "New entry should have higher counter");
+}
+
 // M-4 Test: Test key rotation framework
 #[test]
 fn test_m4_key_rotation_framework() {

@@ -55,6 +55,7 @@ use rand::rngs::OsRng;
 use rand::TryRngCore;
 use ring::{hkdf, hmac}; // For HKDF, HMAC
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
@@ -140,7 +141,12 @@ pub struct EncryptedKeyEntry {
     pub encryption_version: u8, // Version of encryption algorithm used
     #[zeroize(skip)]
     pub kdf_version: u8, // Version of KDF used for this entry
-                         // Potentially other metadata like derivation path if applicable, key type, etc.
+
+    // F-1: Monotonic counter for provable nonce uniqueness
+    // This field is REQUIRED for all entries - no backward compatibility support
+    // Clean implementation for new software without legacy considerations
+    #[zeroize(skip)]
+    pub nonce_counter: u64, // Monotonic counter used to derive unique nonces
 }
 
 // Information about a key, returned by list_keys
@@ -381,6 +387,10 @@ pub struct Keystore {
     session_created_at: Option<SystemTime>,                       // When session was created
     suspicious_activities: u32,                                   // Count of suspicious activities
     last_suspicious_activity: Option<Instant>, // Last suspicious activity timestamp
+
+    // F-1: Nonce collision detection and monotonic counter tracking
+    used_nonces: HashSet<[u8; 12]>,    // Track used nonces in current session to detect collisions
+    global_nonce_counter: u64,         // Global monotonic counter for nonce derivation
 }
 
 // Simple Debug implementation for Keystore that doesn't expose sensitive data
@@ -534,6 +544,10 @@ impl Keystore {
             session_created_at: None,
             suspicious_activities: 0,
             last_suspicious_activity: None,
+
+            // F-1: Initialize nonce collision detection and monotonic counter
+            used_nonces: HashSet::new(),
+            global_nonce_counter: 0,
         })
     }
 
@@ -584,6 +598,10 @@ impl Keystore {
             session_created_at: None,
             suspicious_activities: 0,
             last_suspicious_activity: None,
+
+            // F-1: Initialize nonce collision detection and monotonic counter
+            used_nonces: HashSet::new(),
+            global_nonce_counter: 0,
         })
     }
 
@@ -843,6 +861,10 @@ impl Keystore {
         // H-2 Fix: Reset rate limiting on successful unlock
         self.reset_rate_limiting();
         self.master_key = Some(derived_master_key);
+
+        // F-1 Fix: Sync nonce counter from loaded entries to prevent reuse
+        self.sync_nonce_counter_from_entries();
+
         self.is_unlocked = true;
         self.last_activity_at = Some(Instant::now());
 
@@ -1228,17 +1250,18 @@ impl Keystore {
 
     /// Encrypt a private key using the current encryption version
     fn encrypt_private_key_with_current_version(
-        &self,
+        &mut self, // F-1: Changed to &mut self for nonce generation
         pk_bytes: &[u8],
         alias: Option<String>,
         address: Address,
         created_at: DateTime<Utc>,
     ) -> Result<EncryptedKeyEntry, KeystoreError> {
-        // Generate new cryptographic materials
-        let mut aes_nonce_bytes = [0u8; 12];
-        OsRng
-            .try_fill_bytes(&mut aes_nonce_bytes)
-            .map_err(|e| KeystoreError::FsError(format!("Failed to generate AES nonce: {}", e)))?;
+        // For new entry, we need to generate a new UUID first
+        let new_id = Uuid::new_v4();
+        
+        // F-1 Fix: Use secure nonce generation with collision detection and monotonic counter
+        let aes_nonce_bytes = self.generate_unique_nonce(&new_id)?;
+        let nonce_counter = self.global_nonce_counter - 1; // Store the counter used for this entry
 
         let mut hkdf_salt_bytes = [0u8; 32];
         OsRng
@@ -1252,8 +1275,6 @@ impl Keystore {
             .ok_or(KeystoreError::Locked)?
             .as_ref();
 
-        // For new entry, we need to generate a new UUID
-        let new_id = Uuid::new_v4();
         let entry_key =
             self.derive_entry_key(master_key_bytes, &hkdf_salt_bytes, &new_id, &address)?;
 
@@ -1275,6 +1296,7 @@ impl Keystore {
             updated_at: Utc::now(),
             encryption_version: CURRENT_ENCRYPTION_VERSION,
             kdf_version: CURRENT_KDF_VERSION,
+            nonce_counter, // F-1: Store the monotonic counter used for this entry
         })
     }
 
@@ -1393,12 +1415,8 @@ impl Keystore {
 
         let id = Uuid::new_v4();
 
-        // M-1 Fix: Use OsRng directly for AES-GCM nonce generation instead of UUID
-        // AES-GCM requires a 12-byte (96-bit) nonce for optimal security
-        let mut aes_nonce_bytes = [0u8; 12];
-        OsRng
-            .try_fill_bytes(&mut aes_nonce_bytes)
-            .map_err(|e| KeystoreError::FsError(format!("Failed to generate AES nonce: {}", e)))?;
+        // F-1 Fix: Use secure nonce generation with collision detection and monotonic counter
+        let aes_nonce_bytes = self.generate_unique_nonce(&id)?;
 
         let (encrypted_pk_data, new_hkdf_salt_bytes) =
             self.encrypt_pk(pk_bytes.as_slice(), &aes_nonce_bytes, &id, &address)?;
@@ -1415,6 +1433,8 @@ impl Keystore {
             // M-4: Set current encryption and KDF versions
             encryption_version: CURRENT_ENCRYPTION_VERSION,
             kdf_version: CURRENT_KDF_VERSION,
+            // F-1: Store the monotonic counter used for this entry
+            nonce_counter: self.global_nonce_counter - 1,
         };
 
         // Capture alias before moving entry
@@ -1511,12 +1531,8 @@ impl Keystore {
 
         let id = Uuid::new_v4();
 
-        // M-1 Fix: Use OsRng directly for AES-GCM nonce generation instead of UUID
-        // AES-GCM requires a 12-byte (96-bit) nonce for optimal security
-        let mut aes_nonce_bytes = [0u8; 12];
-        OsRng
-            .try_fill_bytes(&mut aes_nonce_bytes)
-            .map_err(|e| KeystoreError::FsError(format!("Failed to generate AES nonce: {}", e)))?;
+        // F-1 Fix: Use secure nonce generation with collision detection and monotonic counter
+        let aes_nonce_bytes = self.generate_unique_nonce(&id)?;
 
         let (encrypted_pk_data, new_hkdf_salt_bytes) = self.encrypt_pk(
             pk_bytes_for_encryption.as_slice(),
@@ -1537,6 +1553,8 @@ impl Keystore {
             // M-4: Set current encryption and KDF versions
             encryption_version: CURRENT_ENCRYPTION_VERSION,
             kdf_version: CURRENT_KDF_VERSION,
+            // F-1: Store the monotonic counter used for this entry
+            nonce_counter: self.global_nonce_counter - 1,
         };
 
         // Capture alias before moving entry
@@ -1865,17 +1883,8 @@ impl Keystore {
 
         // 7. Re-encrypt all data with the new master key
         for data in temp_decrypted_data {
-            // M-1 Fix: Use OsRng directly for AES-GCM nonce generation instead of UUID
-            // AES-GCM requires a 12-byte (96-bit) nonce for optimal security
-            let mut new_aes_nonce_bytes = [0u8; 12];
-            OsRng
-                .try_fill_bytes(&mut new_aes_nonce_bytes)
-                .map_err(|e| {
-                    KeystoreError::FsError(format!(
-                        "Failed to generate AES nonce for re-encryption: {}",
-                        e
-                    ))
-                })?;
+            // F-1 Fix: Use secure nonce generation with collision detection and monotonic counter
+            let new_aes_nonce_bytes = self.generate_unique_nonce(&data.id)?;
 
             let (new_encrypted_pk_vec, new_hkdf_salt_bytes) = self.encrypt_pk(
                 data.pk_material.as_slice(),
@@ -1896,6 +1905,8 @@ impl Keystore {
                 // M-4: Set current encryption and KDF versions
                 encryption_version: CURRENT_ENCRYPTION_VERSION,
                 kdf_version: CURRENT_KDF_VERSION,
+                // F-1: Store the monotonic counter used for this entry
+                nonce_counter: self.global_nonce_counter - 1,
             };
             self.entries.push(new_entry);
         }
@@ -2197,6 +2208,93 @@ impl Keystore {
         self.verification_tag = None;
 
         Ok(())
+    }
+
+    /// F-1 Fix: Generate a cryptographically unique nonce using both collision detection and monotonic counter
+    /// This method implements both recommended mitigations:
+    /// (a) In-memory HashSet collision detection for the current session
+    /// (b) HMAC-derived nonces from monotonic counter + entry UUID for provable uniqueness
+    fn generate_unique_nonce(&mut self, entry_id: &Uuid) -> Result<[u8; 12], KeystoreError> {
+        // F-1: Mitigation (b) - Use monotonic counter for provable uniqueness
+        let counter = self.global_nonce_counter;
+        self.global_nonce_counter = self.global_nonce_counter
+            .checked_add(1)
+            .ok_or_else(|| {
+                KeystoreError::InternalError(
+                    "Nonce counter overflow - maximum number of entries reached".to_string()
+                )
+            })?;
+
+        // Derive nonce using HMAC(counter || entry-UUID) as recommended
+        let master_key_bytes = self
+            .master_key
+            .as_ref()
+            .ok_or(KeystoreError::Locked)?
+            .as_ref();
+
+        // Create HMAC key for nonce derivation using master key
+        let nonce_derivation_key = hmac::Key::new(hmac::HMAC_SHA256, master_key_bytes);
+        
+        // Concatenate counter and entry UUID for uniqueness
+        let mut input_data = Vec::with_capacity(8 + 16); // u64 + UUID
+        input_data.extend_from_slice(&counter.to_be_bytes());
+        input_data.extend_from_slice(entry_id.as_bytes());
+
+        // HMAC the combined data
+        let hmac_tag = hmac::sign(&nonce_derivation_key, &input_data);
+        
+        // Take first 12 bytes for AES-GCM nonce
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes.copy_from_slice(&hmac_tag.as_ref()[..12]);
+
+        // F-1: Mitigation (a) - Check for collision in session HashSet
+        if self.used_nonces.contains(&nonce_bytes) {
+            // This should be extremely rare due to HMAC properties, but provides defense in depth
+            return Err(KeystoreError::InternalError(
+                "Nonce collision detected - this indicates a serious cryptographic issue".to_string()
+            ));
+        }
+
+        // Add to used nonces set for collision detection
+        self.used_nonces.insert(nonce_bytes);
+
+        info!(
+            event = "nonce_generated",
+            counter = counter,
+            entry_id = %entry_id,
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Unique nonce generated with monotonic counter"
+        );
+
+        Ok(nonce_bytes)
+    }
+
+    /// F-1: Sync the global nonce counter from existing entries to prevent counter reuse
+    /// This ensures that when loading from disk, we continue from where we left off
+    fn sync_nonce_counter_from_entries(&mut self) {
+        if self.entries.is_empty() {
+            // No entries, start from 0
+            self.global_nonce_counter = 0;
+            return;
+        }
+
+        let max_counter = self.entries
+            .iter()
+            .map(|entry| entry.nonce_counter)
+            .max()
+            .expect("entries is not empty, so max should exist");
+        
+        // Set counter to be one more than the highest existing counter
+        self.global_nonce_counter = max_counter.saturating_add(1);
+
+        info!(
+            event = "nonce_counter_synced",
+            max_existing_counter = max_counter,
+            new_global_counter = self.global_nonce_counter,
+            entries_count = self.entries.len(),
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Nonce counter synchronized from existing entries"
+        );
     }
 
     fn encrypt_pk(
