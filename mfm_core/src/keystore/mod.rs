@@ -85,6 +85,102 @@ const CURRENT_KDF_VERSION: u8 = 1; // Current KDF algorithm version
 // F-4: Strict output length enforcement
 const REQUIRED_OUTPUT_LEN: usize = 32; // Exact required output length - no flexibility
 
+// C-1 Fix: Zeroizing wrappers for cryptographic objects
+// These ensure that key material is properly zeroized when dropped
+
+/// Zeroizing wrapper for AES-256-GCM cipher
+/// Ensures key material is cleared from memory on drop
+pub struct ZeroizingAes256Gcm {
+    cipher: Aes256Gcm,
+    key_material: Zeroizing<[u8; 32]>, // Keep track of key for zeroization
+}
+
+impl ZeroizingAes256Gcm {
+    pub fn new(key_bytes: &[u8]) -> Self {
+        let mut key_material = Zeroizing::new([0u8; 32]);
+        key_material.copy_from_slice(key_bytes);
+        let key = Key::<Aes256Gcm>::from_slice(key_material.as_ref());
+        let cipher = Aes256Gcm::new(key);
+
+        Self {
+            cipher,
+            key_material,
+        }
+    }
+
+    pub fn encrypt(&self, nonce_bytes: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+        let nonce = Nonce::from_slice(nonce_bytes);
+        self.cipher.encrypt(nonce, plaintext)
+    }
+
+    pub fn decrypt(
+        &self,
+        nonce_bytes: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, aes_gcm::Error> {
+        let nonce = Nonce::from_slice(nonce_bytes);
+        self.cipher.decrypt(nonce, ciphertext)
+    }
+
+    pub fn encrypt_with_aad(
+        &self,
+        nonce_bytes: &[u8],
+        payload: aes_gcm::aead::Payload,
+    ) -> Result<Vec<u8>, aes_gcm::Error> {
+        let nonce = Nonce::from_slice(nonce_bytes);
+        self.cipher.encrypt(nonce, payload)
+    }
+
+    pub fn decrypt_with_aad(
+        &self,
+        nonce_bytes: &[u8],
+        payload: aes_gcm::aead::Payload,
+    ) -> Result<Vec<u8>, aes_gcm::Error> {
+        let nonce = Nonce::from_slice(nonce_bytes);
+        self.cipher.decrypt(nonce, payload)
+    }
+}
+
+impl Drop for ZeroizingAes256Gcm {
+    fn drop(&mut self) {
+        // key_material is automatically zeroized due to Zeroizing wrapper
+        // We explicitly zeroize it again for extra safety
+        self.key_material.zeroize();
+    }
+}
+
+/// Zeroizing wrapper for HMAC keys
+/// Ensures key material is cleared from memory on drop  
+pub struct ZeroizingHmacKey {
+    key: hmac::Key,
+    key_material: Zeroizing<Vec<u8>>, // Keep track of key for zeroization
+}
+
+impl ZeroizingHmacKey {
+    pub fn new(algorithm: hmac::Algorithm, key_bytes: &[u8]) -> Self {
+        let key_material = Zeroizing::new(key_bytes.to_vec());
+        let key = hmac::Key::new(algorithm, key_material.as_ref());
+
+        Self { key, key_material }
+    }
+
+    pub fn sign(&self, data: &[u8]) -> hmac::Tag {
+        hmac::sign(&self.key, data)
+    }
+
+    pub fn verify(&self, data: &[u8], tag: &[u8]) -> Result<(), ring::error::Unspecified> {
+        hmac::verify(&self.key, data, tag)
+    }
+}
+
+impl Drop for ZeroizingHmacKey {
+    fn drop(&mut self) {
+        // key_material is automatically zeroized due to Zeroizing wrapper
+        // We explicitly zeroize it again for extra safety
+        self.key_material.zeroize();
+    }
+}
+
 // --- Structs for Keystore Data ---
 
 // Constants for MAC key derivation
@@ -98,7 +194,7 @@ pub struct AuthenticatedKeystoreEnvelope {
     // which is then used to derive the MAC key for verifying `mac_b64`.
     pub master_kdf_algo_name: String,
     pub master_kdf_params: MasterKdfParams,
-    pub verification_nonce: Option<String>, // Nonce for the verification_tag
+    pub verification_nonce: String, // Nonce for the verification_tag - REQUIRED field
 
     // F-2 Fix: Stable keystore identifier (256-bit random, generated once at creation)
     // This replaces path-derived ID to prevent keystore from breaking when moved/renamed
@@ -117,6 +213,12 @@ pub struct AuthenticatedKeystoreEnvelope {
 pub struct ProtectedKeystorePart {
     pub version: u8,
     pub verification_tag: Option<String>, // The verification_tag itself must be MAC-protected.
+
+    // C-4 Fix: Independent random salt for nonce derivation (forward secrecy)
+    // 256-bit random secret generated once at keystore creation, stored MAC-protected
+    // REQUIRED field - no backward compatibility for clean development code
+    pub nonce_derivation_salt: String, // Base64-encoded 32-byte random salt
+
     #[zeroize(skip)] // Skip entries vec, as EncryptedKeyEntry doesn't derive ZeroizeOnDrop itself.
     // Sensitive String fields within EncryptedKeyEntry will self-zeroize.
     pub entries: Vec<EncryptedKeyEntry>,
@@ -385,9 +487,13 @@ pub struct Keystore {
     entries: Vec<EncryptedKeyEntry>,
     verification_tag: Option<String>, // This is from ProtectedKeystorePart
 
+    // C-4 Fix: Independent random salt for nonce derivation (forward secrecy)
+    // REQUIRED field - no backward compatibility for clean development code
+    nonce_derivation_salt: Zeroizing<[u8; 32]>, // 256-bit random salt from ProtectedKeystorePart
+
     // Fields populated from AuthenticatedKeystoreEnvelope (unprotected part)
     master_kdf_params: Option<MasterKdfParams>, // From envelope
-    verification_nonce: Option<String>,         // From envelope
+    verification_nonce: String,                 // From envelope - REQUIRED field
     keystore_id: Option<Zeroizing<[u8; 32]>>,   // F-2: Stable keystore ID from envelope
 
     is_unlocked: bool,
@@ -442,7 +548,7 @@ struct DecryptedData {
 }
 
 impl Keystore {
-    fn derive_mac_key(&self, master_key_bytes: &[u8]) -> Result<hmac::Key, KeystoreError> {
+    fn derive_mac_key(&self, master_key_bytes: &[u8]) -> Result<ZeroizingHmacKey, KeystoreError> {
         let keystore_id = self.derive_keystore_id();
 
         // Use keystore ID as part of the salt for proper domain separation
@@ -468,7 +574,10 @@ impl Keystore {
                 KeystoreError::InternalError("Failed to fill MAC key bytes".to_string())
             })?;
 
-        Ok(hmac::Key::new(hmac::HMAC_SHA256, mac_key_bytes.as_ref()))
+        Ok(ZeroizingHmacKey::new(
+            hmac::HMAC_SHA256,
+            mac_key_bytes.as_ref(),
+        ))
     }
 
     const DEFAULT_KEYSTORE_FILENAME: &'static str = "keystore_v1.json";
@@ -488,6 +597,22 @@ impl Keystore {
         );
 
         Ok(keystore_id)
+    }
+
+    // C-4 Fix: Generate independent random salt for nonce derivation (forward secrecy)
+    // This 256-bit random salt is combined with the master key for nonce derivation
+    fn generate_nonce_derivation_salt() -> Result<Zeroizing<[u8; 32]>, KeystoreError> {
+        let mut nonce_salt = Zeroizing::new([0u8; 32]);
+        OsRng.try_fill_bytes(nonce_salt.as_mut()).map_err(|e| {
+            KeystoreError::FsError(format!("Failed to generate nonce derivation salt: {}", e))
+        })?;
+
+        info!(
+            event = "nonce_salt_generated",
+            "Independent nonce derivation salt generated for forward secrecy"
+        );
+
+        Ok(nonce_salt)
     }
 
     // F-2 Fix: Get stable keystore identifier for domain separation
@@ -569,9 +694,10 @@ impl Keystore {
             master_kdf_algo: None,
             entries: Vec::new(),
             verification_tag: None,
+            nonce_derivation_salt: Zeroizing::new([0u8; 32]), // C-4: Will be generated at keystore creation
             master_kdf_params: None,
-            verification_nonce: None,
-            keystore_id: None, // F-2: Will be generated at keystore creation
+            verification_nonce: String::new(), // Will be set when keystore is first used
+            keystore_id: None,                 // F-2: Will be generated at keystore creation
             is_unlocked: false,
             last_activity_at: None,
             config,
@@ -626,10 +752,11 @@ impl Keystore {
             keystore_version: None,
             master_kdf_algo: None,
             entries: Vec::new(),
-            verification_tag: None,   // This is from ProtectedKeystorePart
-            master_kdf_params: None,  // From envelope
-            verification_nonce: None, // From envelope
-            keystore_id: None,        // F-2: Will be generated at keystore creation
+            verification_tag: None, // This is from ProtectedKeystorePart
+            nonce_derivation_salt: Zeroizing::new([0u8; 32]), // C-4: Will be generated at keystore creation
+            master_kdf_params: None,                          // From envelope
+            verification_nonce: String::new(), // Will be set when keystore is first used // From envelope
+            keystore_id: None,                 // F-2: Will be generated at keystore creation
             is_unlocked: false,
             last_activity_at: None,
             config,
@@ -674,6 +801,9 @@ impl Keystore {
 
                 // F-2 Fix: Generate stable keystore ID for new keystore
                 self.keystore_id = Some(Self::generate_keystore_id()?);
+
+                // C-4 Fix: Generate independent nonce derivation salt for new keystore
+                self.nonce_derivation_salt = Self::generate_nonce_derivation_salt()?;
 
                 // Fix for F-1: Create a verification tag for the new keystore
                 self.create_verification_tag()?;
@@ -860,16 +990,33 @@ impl Keystore {
         // Include KDF algorithm name in MAC verification to prevent tampering
         let kdf_algo_bytes = algo_name.as_bytes();
 
-        // Concatenate all metadata for MAC verification: KDF algo + KDF params + protected data
+        // C-2 Fix: Include verification_nonce in MAC verification to prevent DoS attacks
+        let verification_nonce_bytes =
+            BASE64_STANDARD
+                .decode(&self.verification_nonce)
+                .map_err(|_| {
+                    KeystoreError::InvalidFormat(
+                        "Failed to decode verification nonce for MAC verification".to_string(),
+                    )
+                })?;
+
+        // Concatenate all metadata for MAC verification: KDF algo + KDF params + verification nonce + protected data
         let mut data_to_verify = Vec::with_capacity(
-            kdf_algo_bytes.len() + kdf_params_bytes.len() + protected_data_json_bytes.len(),
+            kdf_algo_bytes.len()
+                + kdf_params_bytes.len()
+                + verification_nonce_bytes.len()
+                + protected_data_json_bytes.len(),
         );
         data_to_verify.extend_from_slice(kdf_algo_bytes);
         data_to_verify.extend_from_slice(&kdf_params_bytes);
+        data_to_verify.extend_from_slice(&verification_nonce_bytes);
         data_to_verify.extend_from_slice(&protected_data_json_bytes);
 
         // The hmac::verify function takes the key, message (data_to_verify), and tag (expected_mac_bytes)
-        if hmac::verify(&mac_signing_key, &data_to_verify, &expected_mac_bytes).is_err() {
+        if mac_signing_key
+            .verify(&data_to_verify, &expected_mac_bytes)
+            .is_err()
+        {
             // L-2: Log MAC verification failure (critical security event)
             error!(
                 event = "mac_verification_failed",
@@ -894,12 +1041,26 @@ impl Keystore {
         self.verification_tag = protected_part.verification_tag.clone();
         self.entries = protected_part.entries.clone();
 
+        // C-4 Fix: Load nonce derivation salt from protected part (REQUIRED field)
+        let salt_bytes = BASE64_STANDARD
+            .decode(&protected_part.nonce_derivation_salt)
+            .map_err(|_| {
+                KeystoreError::InvalidFormat("Failed to decode nonce derivation salt".to_string())
+            })?;
+        if salt_bytes.len() == 32 {
+            let mut salt_array = Zeroizing::new([0u8; 32]);
+            salt_array.copy_from_slice(&salt_bytes);
+            self.nonce_derivation_salt = salt_array;
+        } else {
+            return Err(KeystoreError::InvalidFormat(
+                "Invalid nonce derivation salt length".to_string(),
+            ));
+        }
+
         // 8. Verify password using the (now populated) verification tag
-        if let (Some(tag_str), Some(nonce_str)) = (
-            self.verification_tag.as_deref(),   // Now correctly populated
-            self.verification_nonce.as_deref(), // Was populated by load_from_disk
-        ) {
-            if !self.verify_password(&derived_master_key, tag_str, nonce_str)? {
+        if let Some(tag_str) = self.verification_tag.as_deref() {
+            // verification_nonce is now required field - get from self
+            if !self.verify_password(&derived_master_key, tag_str, &self.verification_nonce)? {
                 // H-2 Fix: Record failed attempt for rate limiting
                 self.record_failed_attempt_internal();
                 // If the password-derived key fails to verify the tag, it's a MAC failure.
@@ -963,12 +1124,12 @@ impl Keystore {
             .as_ref();
 
         // Create HMAC verification tag using the master key and random nonce
-        let verification_key = hmac::Key::new(hmac::HMAC_SHA256, master_key_bytes);
-        let verification_tag = hmac::sign(&verification_key, nonce_bytes.as_ref());
+        let verification_key = ZeroizingHmacKey::new(hmac::HMAC_SHA256, master_key_bytes);
+        let verification_tag = verification_key.sign(nonce_bytes.as_ref());
 
         // Store the verification tag and nonce
         self.verification_tag = Some(BASE64_STANDARD.encode(verification_tag.as_ref()));
-        self.verification_nonce = Some(BASE64_STANDARD.encode(&nonce_bytes));
+        self.verification_nonce = BASE64_STANDARD.encode(&nonce_bytes);
 
         Ok(())
     }
@@ -992,15 +1153,11 @@ impl Keystore {
         })?);
 
         // Create HMAC key from the master key
-        let verification_key = hmac::Key::new(hmac::HMAC_SHA256, master_key.as_ref());
+        let verification_key = ZeroizingHmacKey::new(hmac::HMAC_SHA256, master_key.as_ref());
 
         // Perform constant-time HMAC verification
         // ring::hmac::verify is guaranteed to be constant-time
-        match hmac::verify(
-            &verification_key,
-            nonce_bytes.as_slice(),
-            verification_tag.as_slice(),
-        ) {
+        match verification_key.verify(nonce_bytes.as_slice(), verification_tag.as_slice()) {
             Ok(()) => Ok(true),
             Err(_) => Ok(false), // Constant-time: always return same error type
         }
@@ -1011,8 +1168,8 @@ impl Keystore {
         self.verification_tag.as_deref()
     }
 
-    fn get_verification_nonce(&self) -> Option<&str> {
-        self.verification_nonce.as_deref()
+    fn get_verification_nonce(&self) -> &str {
+        &self.verification_nonce
     }
 
     pub fn lock(&mut self) {
@@ -1290,10 +1447,9 @@ impl Keystore {
         )?;
 
         // Decrypt
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(entry_key.as_ref()));
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let cipher = ZeroizingAes256Gcm::new(entry_key.as_ref());
         let decrypted_bytes = cipher
-            .decrypt(nonce, encrypted_pk_bytes.as_slice())
+            .decrypt(&nonce_bytes, encrypted_pk_bytes.as_slice())
             .map_err(|_e| {
                 KeystoreError::DeserializationError("Failed to decrypt private key".to_string())
             })?;
@@ -1332,10 +1488,9 @@ impl Keystore {
             self.derive_entry_key(master_key_bytes, &hkdf_salt_bytes, &new_id, &address)?;
 
         // Encrypt with current encryption version
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(entry_key.as_ref()));
-        let nonce = Nonce::from_slice(&aes_nonce_bytes);
+        let cipher = ZeroizingAes256Gcm::new(entry_key.as_ref());
         let encrypted_pk_bytes = cipher
-            .encrypt(nonce, pk_bytes)
+            .encrypt(&aes_nonce_bytes, pk_bytes)
             .map_err(|_e| KeystoreError::AesGcm("Failed to encrypt private key".to_string()))?;
 
         Ok(EncryptedKeyEntry {
@@ -1840,9 +1995,8 @@ impl Keystore {
                 )
             })?,
         )?;
-        if let (Some(tag), Some(nonce)) =
-            (self.get_verification_tag(), self.get_verification_nonce())
-        {
+        if let Some(tag) = self.get_verification_tag() {
+            let nonce = self.get_verification_nonce(); // Now returns &str directly
             if !self.verify_password(&old_master_key, tag, nonce)? {
                 // If old password verification fails, return MacVerificationFailure consistent with unlock()
                 return Err(KeystoreError::MacVerificationFailure);
@@ -2001,6 +2155,8 @@ impl Keystore {
         let protected_part = ProtectedKeystorePart {
             version: self.keystore_version.unwrap_or(KEYSTORE_VERSION),
             verification_tag: self.verification_tag.clone(),
+            // C-4 Fix: Include nonce derivation salt in protected part (REQUIRED field)
+            nonce_derivation_salt: BASE64_STANDARD.encode(self.nonce_derivation_salt.as_ref()),
             entries: self.entries.clone(),
         };
 
@@ -2028,15 +2184,29 @@ impl Keystore {
         let kdf_algo_name = self.master_kdf_algo.as_deref().unwrap_or("argon2id");
         let kdf_algo_bytes = kdf_algo_name.as_bytes();
 
-        // Concatenate all metadata for MAC calculation: KDF algo + KDF params + protected data
+        // C-2 Fix: Include verification_nonce in MAC to prevent DoS attacks
+        let verification_nonce_bytes =
+            BASE64_STANDARD
+                .decode(&self.verification_nonce)
+                .map_err(|_| {
+                    KeystoreError::InvalidFormat(
+                        "Failed to decode verification nonce for MAC".to_string(),
+                    )
+                })?;
+
+        // Concatenate all metadata for MAC calculation: KDF algo + KDF params + verification nonce + protected data
         let mut data_to_mac = Vec::with_capacity(
-            kdf_algo_bytes.len() + kdf_params_bytes.len() + protected_data_json_bytes.len(),
+            kdf_algo_bytes.len()
+                + kdf_params_bytes.len()
+                + verification_nonce_bytes.len()
+                + protected_data_json_bytes.len(),
         );
         data_to_mac.extend_from_slice(kdf_algo_bytes);
         data_to_mac.extend_from_slice(&kdf_params_bytes);
+        data_to_mac.extend_from_slice(&verification_nonce_bytes);
         data_to_mac.extend_from_slice(&protected_data_json_bytes);
 
-        let mac_tag = hmac::sign(&mac_key, &data_to_mac);
+        let mac_tag = mac_key.sign(&data_to_mac);
 
         let protected_data_b64 = general_purpose::STANDARD.encode(&protected_data_json_bytes);
         let mac_b64 = general_purpose::STANDARD.encode(mac_tag.as_ref());
@@ -2303,8 +2473,19 @@ impl Keystore {
             .ok_or(KeystoreError::Locked)?
             .as_ref();
 
-        // Create HMAC key for nonce derivation using master key
-        let nonce_derivation_key = hmac::Key::new(hmac::HMAC_SHA256, master_key_bytes);
+        // C-4 Fix: Create HMAC key for nonce derivation using both master key and independent salt
+        // This prevents forward secrecy issues if master key is compromised
+        let nonce_salt_bytes = self.nonce_derivation_salt.as_ref();
+
+        // Combine master key and nonce salt for HMAC key derivation
+        let mut combined_key_material = Zeroizing::new(Vec::with_capacity(
+            master_key_bytes.len() + nonce_salt_bytes.len(),
+        ));
+        combined_key_material.extend_from_slice(master_key_bytes);
+        combined_key_material.extend_from_slice(nonce_salt_bytes);
+
+        let nonce_derivation_key =
+            ZeroizingHmacKey::new(hmac::HMAC_SHA256, combined_key_material.as_ref());
 
         // Concatenate counter and entry UUID for uniqueness
         let mut input_data = Vec::with_capacity(8 + 16); // u64 + UUID
@@ -2312,7 +2493,7 @@ impl Keystore {
         input_data.extend_from_slice(entry_id.as_bytes());
 
         // HMAC the combined data
-        let hmac_tag = hmac::sign(&nonce_derivation_key, &input_data);
+        let hmac_tag = nonce_derivation_key.sign(&input_data);
 
         // Take first 12 bytes for AES-GCM nonce
         let mut nonce_bytes = [0u8; 12];
@@ -2394,16 +2575,14 @@ impl Keystore {
         let entry_key =
             self.derive_entry_key(master_key_bytes, hkdf_salt_bytes.as_ref(), id, address)?;
 
-        let key = Key::<Aes256Gcm>::from_slice(entry_key.as_ref());
-        let cipher = Aes256Gcm::new(key);
-        let aes_nonce = Nonce::from_slice(aes_nonce_bytes); // Use renamed variable
+        let cipher = ZeroizingAes256Gcm::new(entry_key.as_ref());
 
         // Create AAD from entry metadata
         let aad = self.create_aad(id, address);
 
         let encrypted_data = cipher
-            .encrypt(
-                aes_nonce, // Use aes_nonce
+            .encrypt_with_aad(
+                aes_nonce_bytes, // Use aes_nonce_bytes
                 aes_gcm::aead::Payload {
                     msg: pk_bytes,
                     aad: &aad,
@@ -2440,16 +2619,14 @@ impl Keystore {
 
         let entry_key = self.derive_entry_key(master_key_bytes, &hkdf_salt_bytes, id, address)?;
 
-        let key = Key::<Aes256Gcm>::from_slice(entry_key.as_ref());
-        let cipher = Aes256Gcm::new(key);
-        let aes_nonce = Nonce::from_slice(aes_nonce_bytes); // Use renamed variable
+        let cipher = ZeroizingAes256Gcm::new(entry_key.as_ref());
 
         // Create AAD from entry metadata
         let aad = self.create_aad(id, address);
 
         let decrypted_bytes = cipher
-            .decrypt(
-                aes_nonce, // Corrected: Use aes_nonce here
+            .decrypt_with_aad(
+                aes_nonce_bytes, // Use aes_nonce_bytes
                 aes_gcm::aead::Payload {
                     msg: encrypted_pk_bytes,
                     aad: &aad,
@@ -2699,7 +2876,7 @@ impl Keystore {
 
     /// Helper: Derive a signing key for audit log tamper evidence
     /// F-5 Fix: Ensures proper zeroization of key material to prevent memory leaks
-    fn derive_audit_signing_key(&self) -> Result<hmac::Key, KeystoreError> {
+    fn derive_audit_signing_key(&self) -> Result<ZeroizingHmacKey, KeystoreError> {
         let master_key_bytes = self
             .master_key
             .as_ref()
@@ -2719,7 +2896,7 @@ impl Keystore {
             .map_err(|_| KeystoreError::InternalError("HKDF key derivation failed".to_string()))?;
 
         // Create HMAC key and let Zeroizing automatically clear the raw key material
-        Ok(hmac::Key::new(
+        Ok(ZeroizingHmacKey::new(
             hmac::HMAC_SHA256,
             signing_key_material.as_ref(),
         ))
@@ -2729,7 +2906,7 @@ impl Keystore {
     fn sign_audit_record(
         &self,
         record: &AuditLogRecord,
-        signing_key: &hmac::Key,
+        signing_key: &ZeroizingHmacKey,
     ) -> Result<String, KeystoreError> {
         let record_bytes = serde_json::to_vec(record).map_err(|e| {
             KeystoreError::SerializationError(format!(
@@ -2738,7 +2915,7 @@ impl Keystore {
             ))
         })?;
 
-        let signature = hmac::sign(signing_key, &record_bytes);
+        let signature = signing_key.sign(&record_bytes);
         Ok(base64::engine::general_purpose::STANDARD.encode(signature.as_ref()))
     }
 }
