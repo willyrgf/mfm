@@ -30,7 +30,7 @@
 ///
 /// ## Thread Safety (F-7):
 /// **The Keystore is NOT thread-safe by design.**
-/// 
+///
 /// - Keystore implements `!Send + !Sync` to prevent accidental concurrent access
 /// - Internal mutability is not synchronized - concurrent access causes undefined behavior
 /// - Each keystore instance must be used from a single thread only
@@ -2246,7 +2246,7 @@ impl Keystore {
             return Err(KeystoreError::Argon2Error(
                 format!(
                     "Invalid output_len loaded from disk: {} != required {}. Keystore was created with incompatible parameters and cannot be opened.",
-                    envelope.master_kdf_params.output_len, 
+                    envelope.master_kdf_params.output_len,
                     REQUIRED_OUTPUT_LEN
                 )
             ));
@@ -2698,6 +2698,7 @@ impl Keystore {
     }
 
     /// Helper: Derive a signing key for audit log tamper evidence
+    /// F-5 Fix: Ensures proper zeroization of key material to prevent memory leaks
     fn derive_audit_signing_key(&self) -> Result<hmac::Key, KeystoreError> {
         let master_key_bytes = self
             .master_key
@@ -2709,13 +2710,19 @@ impl Keystore {
         let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"mfm-audit-signing-salt-v1");
         let prk = salt.extract(master_key_bytes);
         let info = b"mfm-audit-log-signing-key-v1";
-        let mut signing_key_material = [0u8; 32];
+
+        // F-5 Fix: Use Zeroizing wrapper to ensure key material is cleared from memory
+        let mut signing_key_material = Zeroizing::new([0u8; 32]);
         prk.expand(&[info], hkdf::HKDF_SHA256)
             .map_err(|_| KeystoreError::InternalError("HKDF expansion failed".to_string()))?
-            .fill(&mut signing_key_material)
+            .fill(signing_key_material.as_mut())
             .map_err(|_| KeystoreError::InternalError("HKDF key derivation failed".to_string()))?;
 
-        Ok(hmac::Key::new(hmac::HMAC_SHA256, &signing_key_material))
+        // Create HMAC key and let Zeroizing automatically clear the raw key material
+        Ok(hmac::Key::new(
+            hmac::HMAC_SHA256,
+            signing_key_material.as_ref(),
+        ))
     }
 
     /// Helper: Sign an audit record for tamper evidence

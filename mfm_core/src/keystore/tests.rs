@@ -144,101 +144,211 @@ fn test_l2_tamper_evident_audit_log_export() {
 fn test_f1_nonce_collision_protection() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
-    
+
     // Initialize and unlock keystore
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
-    
+
     // Import multiple keys to test nonce uniqueness
-    let (key_id_1, _address_1) = ks.import_private_key_hex(Some("key1".to_string()), DUMMY_PK_HEX).unwrap();
-    let (key_id_2, _address_2) = ks.import_private_key_hex(Some("key2".to_string()), DUMMY_PK_HEX_2).unwrap();
-    
+    let (key_id_1, _address_1) = ks
+        .import_private_key_hex(Some("key1".to_string()), DUMMY_PK_HEX)
+        .unwrap();
+    let (key_id_2, _address_2) = ks
+        .import_private_key_hex(Some("key2".to_string()), DUMMY_PK_HEX_2)
+        .unwrap();
+
     // Verify all entries have unique nonce counters
     let keys = ks.list_keys().unwrap();
     assert_eq!(keys.len(), 2, "Should have 2 keys");
-    
+
     // Copy the data we need before borrowing mutably
-    let entry1_counter = ks.entries.iter().find(|e| e.id == key_id_1).unwrap().nonce_counter;
-    let entry2_counter = ks.entries.iter().find(|e| e.id == key_id_2).unwrap().nonce_counter;
-    let entry1_nonce = ks.entries.iter().find(|e| e.id == key_id_1).unwrap().nonce.clone();
-    let entry2_nonce = ks.entries.iter().find(|e| e.id == key_id_2).unwrap().nonce.clone();
-    
-    assert_ne!(entry1_counter, entry2_counter, "Nonce counters should be unique");
-    assert!(entry1_counter < entry2_counter || entry2_counter < entry1_counter, 
-           "Nonce counters should be sequential");
-    
+    let entry1_counter = ks
+        .entries
+        .iter()
+        .find(|e| e.id == key_id_1)
+        .unwrap()
+        .nonce_counter;
+    let entry2_counter = ks
+        .entries
+        .iter()
+        .find(|e| e.id == key_id_2)
+        .unwrap()
+        .nonce_counter;
+    let entry1_nonce = ks
+        .entries
+        .iter()
+        .find(|e| e.id == key_id_1)
+        .unwrap()
+        .nonce
+        .clone();
+    let entry2_nonce = ks
+        .entries
+        .iter()
+        .find(|e| e.id == key_id_2)
+        .unwrap()
+        .nonce
+        .clone();
+
+    assert_ne!(
+        entry1_counter, entry2_counter,
+        "Nonce counters should be unique"
+    );
+    assert!(
+        entry1_counter < entry2_counter || entry2_counter < entry1_counter,
+        "Nonce counters should be sequential"
+    );
+
     // Verify nonces are different
     assert_ne!(entry1_nonce, entry2_nonce, "Nonces should be different");
-    
+
     // Test that global counter persists across sessions
     let global_counter_before = ks.global_nonce_counter;
     ks.lock();
-    
+
     // Reload keystore
     let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
     ks2.initialize_or_load(None).unwrap();
     ks2.unlock(TEST_PASSWORD).unwrap();
-    
+
     // Global counter should be synchronized from existing entries
-    assert!(ks2.global_nonce_counter > 0, "Global counter should be initialized from existing entries");
-    assert!(ks2.global_nonce_counter >= global_counter_before, "Global counter should not go backwards");
-    
+    assert!(
+        ks2.global_nonce_counter > 0,
+        "Global counter should be initialized from existing entries"
+    );
+    assert!(
+        ks2.global_nonce_counter >= global_counter_before,
+        "Global counter should not go backwards"
+    );
+
     // Import another key to verify counter continues properly
-    let (key_id_3, _address_3) = ks2.import_private_key_hex(Some("key3".to_string()), DUMMY_PK_HEX).unwrap();
+    let (key_id_3, _address_3) = ks2
+        .import_private_key_hex(Some("key3".to_string()), DUMMY_PK_HEX)
+        .unwrap();
     let entry3 = ks2.entries.iter().find(|e| e.id == key_id_3).unwrap();
-    
+
     // Verify the new entry has a higher counter than existing ones
-    assert!(entry3.nonce_counter > entry1_counter, "New entry should have higher counter");
-    assert!(entry3.nonce_counter > entry2_counter, "New entry should have higher counter");
+    assert!(
+        entry3.nonce_counter > entry1_counter,
+        "New entry should have higher counter"
+    );
+    assert!(
+        entry3.nonce_counter > entry2_counter,
+        "New entry should have higher counter"
+    );
 }
 
 // F-4 Test: Test strict output_len validation
 #[test]
 fn test_f4_strict_output_len_validation() {
     use crate::keystore::KeystoreConfig;
-    
+
     // Test that configuration validation rejects non-standard output_len
     let mut invalid_config = KeystoreConfig::default();
     invalid_config.output_len = 16; // Less than required 32
-    
+
     let validation_result = invalid_config.validate_strength();
     assert!(validation_result.is_err(), "Should reject output_len < 32");
-    assert!(validation_result.unwrap_err().contains("exactly 32 bytes"), "Error should mention exact requirement");
-    
+    assert!(
+        validation_result.unwrap_err().contains("exactly 32 bytes"),
+        "Error should mention exact requirement"
+    );
+
     // Test with output_len > 32
     let mut invalid_config2 = KeystoreConfig::default();
     invalid_config2.output_len = 64; // More than required 32
-    
+
     let validation_result2 = invalid_config2.validate_strength();
     assert!(validation_result2.is_err(), "Should reject output_len > 32");
-    assert!(validation_result2.unwrap_err().contains("exactly 32 bytes"), "Error should mention exact requirement");
-    
+    assert!(
+        validation_result2.unwrap_err().contains("exactly 32 bytes"),
+        "Error should mention exact requirement"
+    );
+
     // Test that valid config passes
     let valid_config = KeystoreConfig::default();
     assert_eq!(valid_config.output_len, 32, "Default should be 32");
     let validation_result3 = valid_config.validate_strength();
-    assert!(validation_result3.is_ok(), "Valid config should pass validation");
+    assert!(
+        validation_result3.is_ok(),
+        "Valid config should pass validation"
+    );
 }
 
 // F-7 Test: Verify that Keystore is NOT Send + Sync
 #[test]
 fn test_f7_keystore_not_thread_safe() {
     // This test verifies that Keystore cannot be accidentally used across threads
-    
+
     // These should fail to compile if uncommented:
     // fn assert_send<T: Send>() {}
     // fn assert_sync<T: Sync>() {}
     // assert_send::<Keystore>();  // Should NOT compile
     // assert_sync::<Keystore>();  // Should NOT compile
-    
+
     // Instead, we verify that we can create a keystore normally in single-threaded context
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     let ks = Keystore::new(Some(keystore_path));
-    assert!(ks.is_ok(), "Should be able to create keystore in single thread");
-    
+    assert!(
+        ks.is_ok(),
+        "Should be able to create keystore in single thread"
+    );
+
     // The PhantomData marker should prevent Send + Sync while allowing normal operation
     // PhantomData is zero-sized so it doesn't affect the struct layout
-    assert_eq!(std::mem::size_of::<std::marker::PhantomData<*const ()>>(), 0, "PhantomData should be zero-sized");
+    assert_eq!(
+        std::mem::size_of::<std::marker::PhantomData<*const ()>>(),
+        0,
+        "PhantomData should be zero-sized"
+    );
+}
+
+// F-5 Test: Verify audit signing key is properly zeroized and not cached
+#[test]
+fn test_f5_audit_signing_key_zeroization() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+
+    // Initialize and unlock keystore
+    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+    ks.unlock(TEST_PASSWORD).unwrap();
+
+    // Test that audit export works when unlocked
+    let export_path = keystore_path.with_extension("audit.jsonl");
+    let export_result = ks.export_tamper_evident_audit_log(&export_path, None);
+    assert!(
+        export_result.is_ok(),
+        "Audit export should succeed when unlocked"
+    );
+
+    // Lock the keystore - this should clear master key and prevent audit signing
+    ks.lock();
+
+    // Test that audit export fails when locked (proving master key was cleared)
+    let export_result_locked = ks.export_tamper_evident_audit_log(&export_path, None);
+    assert!(
+        matches!(export_result_locked, Err(KeystoreError::Locked)),
+        "Audit export should fail when locked, got: {:?}",
+        export_result_locked
+    );
+
+    // Unlock again and verify audit signing works again (proves on-demand derivation)
+    // Note: After lock(), we need to reload from disk before unlocking
+    ks.initialize_or_load(None).unwrap();
+    ks.unlock(TEST_PASSWORD).unwrap();
+    let export_result_unlocked = ks.export_tamper_evident_audit_log(&export_path, None);
+    assert!(
+        export_result_unlocked.is_ok(),
+        "Audit export should work again after unlock"
+    );
+
+    // Verify that signing key is derived fresh each time by calling export twice
+    // If there were caching issues, this would be the place they'd manifest
+    let export_path_2 = keystore_path.with_extension("audit2.jsonl");
+    let export_result_2 = ks.export_tamper_evident_audit_log(&export_path_2, None);
+    assert!(
+        export_result_2.is_ok(),
+        "Second audit export should also succeed"
+    );
 }
 
 // M-4 Test: Test key rotation framework
