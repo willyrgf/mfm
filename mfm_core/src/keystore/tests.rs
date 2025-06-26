@@ -33,47 +33,110 @@ const NEW_PASSWORD: &str = "newpassword456";
 // const DUMMY_PK_HEX_3: &str = "0000000000000000000000000000000000000000000000000000000000000003"; // Unused
 
 // L-2 Test: Test comprehensive audit logging
-#[test] 
+#[test]
 fn test_l2_comprehensive_audit_logging() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
-    
+
     // Initialize keystore (should log creation)
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
-    
+
     // Unlock keystore (should log unlock)
     ks.unlock(TEST_PASSWORD).unwrap();
-    
+
     // Import a key (should log import)
-    let (key_id, _address) = ks.import_private_key_hex(Some("test_key".to_string()), DUMMY_PK_HEX).unwrap();
-    
+    let (key_id, _address) = ks
+        .import_private_key_hex(Some("test_key".to_string()), DUMMY_PK_HEX)
+        .unwrap();
+
     // Access key (should log access)
     let _signer = ks.get_signer(key_id).unwrap();
-    
+
     // Test failed unlock (should log failure)
     ks.lock();
     let result = ks.unlock(WRONG_PASSWORD);
     assert!(result.is_err(), "Wrong password should fail");
-    
+
     // Test rate limiting after multiple failures (should log rate limiting)
     for _ in 0..5 {
         ks.record_failed_attempt();
     }
-    
+
     // Reset rate limiting and verify session management events are logged
     ks.reset_rate_limiting_for_test();
     ks.unlock(TEST_PASSWORD).unwrap();
     ks.lock(); // Should log manual lock
-    
+
     // Test password change (should log password change)
     // Need to reload after lock to have proper state
     ks.initialize_or_load(None).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
     let change_result = ks.change_password(TEST_PASSWORD, NEW_PASSWORD);
     assert!(change_result.is_ok(), "Password change should succeed");
-    
+
     // Note: Actual audit log verification would depend on the logger implementation
     // In a real test, you might inject a mock logger to capture and verify events
+}
+
+// L-2 Enhancement Test: Test tamper-evident audit log export
+#[test]
+fn test_l2_tamper_evident_audit_log_export() {
+    let (_temp_dir, keystore_path) = create_temp_keystore_path();
+    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+
+    // Initialize and unlock keystore
+    ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
+    ks.unlock(TEST_PASSWORD).unwrap();
+
+    // Import a key to have some activity
+    let (_key_id, _address) = ks
+        .import_private_key_hex(Some("test_key".to_string()), DUMMY_PK_HEX)
+        .unwrap();
+
+    // Export tamper-evident audit log
+    let export_path = keystore_path.with_extension("audit.jsonl");
+    let export_result = ks.export_tamper_evident_audit_log(&export_path, None);
+    assert!(export_result.is_ok(), "Audit log export should succeed");
+
+    // Verify the export file was created
+    assert!(export_path.exists(), "Audit export file should exist");
+
+    // Read and verify the export file structure
+    let content = std::fs::read_to_string(&export_path).unwrap();
+    assert!(!content.is_empty(), "Export file should not be empty");
+
+    // Verify it contains at least the metadata record
+    let lines: Vec<&str> = content.trim().lines().collect();
+    assert!(
+        !lines.is_empty(),
+        "Export should contain at least one record"
+    );
+
+    // Parse the first line (should be metadata)
+    let first_record: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert!(
+        first_record.get("record").is_some(),
+        "Should contain audit record"
+    );
+    assert!(
+        first_record.get("signature").is_some(),
+        "Should contain signature for tamper evidence"
+    );
+
+    // Verify the record contains expected fields
+    let record = first_record.get("record").unwrap();
+    assert!(
+        record.get("timestamp").is_some(),
+        "Record should have timestamp"
+    );
+    assert!(
+        record.get("event_type").is_some(),
+        "Record should have event type"
+    );
+    assert!(
+        record.get("session_id").is_some(),
+        "Record should have session ID"
+    );
 }
 
 // M-4 Test: Test key rotation framework
@@ -81,35 +144,52 @@ fn test_l2_comprehensive_audit_logging() {
 fn test_m4_key_rotation_framework() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
-    
+
     // Initialize and unlock keystore
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
-    
+
     // Import a key
-    let (key_id, _address) = ks.import_private_key_hex(Some("test_key".to_string()), DUMMY_PK_HEX).unwrap();
-    
+    let (key_id, _address) = ks
+        .import_private_key_hex(Some("test_key".to_string()), DUMMY_PK_HEX)
+        .unwrap();
+
     // Verify the key was created with current version
     let keys = ks.list_keys().unwrap();
     let imported_key = keys.iter().find(|k| k.id == key_id).unwrap();
-    assert_eq!(imported_key.encryption_version, 1, "New keys should use current encryption version");
-    assert_eq!(imported_key.kdf_version, 1, "New keys should use current KDF version");
-    
+    assert_eq!(
+        imported_key.encryption_version, 1,
+        "New keys should use current encryption version"
+    );
+    assert_eq!(
+        imported_key.kdf_version, 1,
+        "New keys should use current KDF version"
+    );
+
     // Check that no keys need rotation initially
     let keys_needing_rotation = ks.check_keys_needing_rotation();
-    assert!(keys_needing_rotation.is_empty(), "Newly created keys should not need rotation");
-    
+    assert!(
+        keys_needing_rotation.is_empty(),
+        "Newly created keys should not need rotation"
+    );
+
     // Test key rotation function (should be no-op since key is already current)
     let rotation_result = ks.rotate_key(key_id);
-    assert!(rotation_result.is_ok(), "Rotating current key should succeed (no-op)");
-    
+    assert!(
+        rotation_result.is_ok(),
+        "Rotating current key should succeed (no-op)"
+    );
+
     // Test rotating all keys (should be no-op)
     let rotated_keys = ks.rotate_all_keys().unwrap();
     assert!(rotated_keys.is_empty(), "No keys should need rotation");
-    
+
     // Verify key still works after rotation attempt
     let signer_result = ks.get_signer(key_id);
-    assert!(signer_result.is_ok(), "Key should still work after rotation attempt");
+    assert!(
+        signer_result.is_ok(),
+        "Key should still work after rotation attempt"
+    );
 }
 
 // M-3 Test: Test enhanced session management with proper invalidation
@@ -117,29 +197,53 @@ fn test_m4_key_rotation_framework() {
 fn test_m3_session_management() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
-    
+
     // Initialize and unlock keystore
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
-    
+
     // Verify session token was created
-    assert!(ks.session_token.is_some(), "Session token should be generated on unlock");
-    assert!(ks.session_created_at.is_some(), "Session creation time should be recorded");
-    assert!(ks.validate_session(), "Session should be valid after unlock");
-    
+    assert!(
+        ks.session_token.is_some(),
+        "Session token should be generated on unlock"
+    );
+    assert!(
+        ks.session_created_at.is_some(),
+        "Session creation time should be recorded"
+    );
+    assert!(
+        ks.validate_session(),
+        "Session should be valid after unlock"
+    );
+
     // Test that operations work with valid session
     let import_result = ks.import_private_key_hex(Some("test_key".to_string()), DUMMY_PK_HEX);
-    assert!(import_result.is_ok(), "Import should work with valid session");
-    
+    assert!(
+        import_result.is_ok(),
+        "Import should work with valid session"
+    );
+
     // Test session invalidation on lock
     ks.lock();
-    assert!(ks.session_token.is_none(), "Session token should be cleared on lock");
-    assert!(ks.session_created_at.is_none(), "Session creation time should be cleared on lock");
-    assert!(!ks.validate_session(), "Session should be invalid after lock");
-    
+    assert!(
+        ks.session_token.is_none(),
+        "Session token should be cleared on lock"
+    );
+    assert!(
+        ks.session_created_at.is_none(),
+        "Session creation time should be cleared on lock"
+    );
+    assert!(
+        !ks.validate_session(),
+        "Session should be invalid after lock"
+    );
+
     // Test that operations fail after session invalidation
     let get_signer_result = ks.get_signer(uuid::Uuid::new_v4());
-    assert!(matches!(get_signer_result, Err(KeystoreError::Locked)), "Operations should fail with invalid session");
+    assert!(
+        matches!(get_signer_result, Err(KeystoreError::Locked)),
+        "Operations should fail with invalid session"
+    );
 }
 
 // M-2 Test: Test enhanced MAC coverage including KDF algorithm name
@@ -147,26 +251,33 @@ fn test_m3_session_management() {
 fn test_m2_enhanced_mac_coverage() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
-    
+
     // Initialize and save keystore
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
-    ks.import_private_key_hex(Some("test_key".to_string()), DUMMY_PK_HEX).unwrap();
+    ks.import_private_key_hex(Some("test_key".to_string()), DUMMY_PK_HEX)
+        .unwrap();
     ks.lock();
-    
+
     // Read the original file and verify that the MAC works correctly first
     let mut ks2 = Keystore::new(Some(keystore_path.clone())).unwrap();
     ks2.initialize_or_load(None).unwrap();
     let original_unlock = ks2.unlock(TEST_PASSWORD);
-    assert!(original_unlock.is_ok(), "Original keystore should unlock successfully");
-    
+    assert!(
+        original_unlock.is_ok(),
+        "Original keystore should unlock successfully"
+    );
+
     // Create a new keystore instance to test MAC enhancement after reload
     let mut ks3 = Keystore::new(Some(keystore_path)).unwrap();
     ks3.initialize_or_load(None).unwrap();
-    
+
     // Verify that the keystore still works after reload with enhanced MAC coverage
     let final_unlock = ks3.unlock(TEST_PASSWORD);
-    assert!(final_unlock.is_ok(), "Keystore should work after reload with enhanced MAC coverage");
+    assert!(
+        final_unlock.is_ok(),
+        "Keystore should work after reload with enhanced MAC coverage"
+    );
 }
 
 // H-2 Test: Test rate limiting functionality
@@ -174,28 +285,38 @@ fn test_m2_enhanced_mac_coverage() {
 fn test_h2_rate_limiting_functionality() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
-    
+
     // Initialize keystore with a password
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
-    
+
     // Reload keystore to test unlock with wrong password
     let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
     ks2.initialize_or_load(None).unwrap();
-    
+
     // Manually trigger 5 failed attempts to reach the limit
     for i in 1..=5 {
         ks2.record_failed_attempt();
-        println!("Failed attempt {}: {} attempts recorded", i, ks2.failed_unlock_attempts);
+        println!(
+            "Failed attempt {}: {} attempts recorded",
+            i, ks2.failed_unlock_attempts
+        );
     }
-    
+
     // Now the next attempt should be rate limited
     let result = ks2.unlock(WRONG_PASSWORD);
-    assert!(matches!(result, Err(KeystoreError::RateLimited { .. })), "Should be rate limited after 5 failed attempts, got: {:?}", result);
-    
+    assert!(
+        matches!(result, Err(KeystoreError::RateLimited { .. })),
+        "Should be rate limited after 5 failed attempts, got: {:?}",
+        result
+    );
+
     // Reset rate limiting and verify correct password works
     ks2.reset_rate_limiting_for_test();
     let result = ks2.unlock(TEST_PASSWORD);
-    assert!(result.is_ok(), "Correct password should work after rate limit reset");
+    assert!(
+        result.is_ok(),
+        "Correct password should work after rate limit reset"
+    );
 }
 
 #[test]

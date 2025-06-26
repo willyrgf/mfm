@@ -169,8 +169,8 @@ pub struct KeystoreConfig {
     // Rate limiting - REMOVED
 }
 
-//Mminimum memory cost to 256MiB (262144 KiB) for better resistance to attacks
-const MIN_M_COST: u32 = 262144;
+//Mminimum memory cost to 1GiB (1048576 KiB) for better resistance to attacks
+const MIN_M_COST: u32 = 1048576;
 // Minimum iterations to 8 for enhanced time-based protection
 const MIN_T_COST: u32 = 8;
 const MIN_P_COST: u32 = 1;
@@ -195,7 +195,7 @@ impl Default for KeystoreConfig {
         Self {
             m_cost: MIN_M_COST,
             t_cost: MIN_T_COST,
-            p_cost: 1,      // Default parallelism
+            p_cost: MIN_P_COST,
             output_len: 32, // Minimum required output length
             // Default session management
             auto_lock_timeout: Duration::from_secs(300), // 5 minutes
@@ -1113,8 +1113,29 @@ impl Keystore {
             && entry.kdf_version >= CURRENT_KDF_VERSION
         {
             // Already using current versions (expected for new software)
+            info!(
+                event = "key_rotation_skipped",
+                key_id = %key_id,
+                reason = "already_current_version",
+                encryption_version = entry.encryption_version,
+                kdf_version = entry.kdf_version,
+                session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+                "Key rotation skipped - already using current versions"
+            );
             return Ok(());
         }
+
+        // L-2: Log key rotation start
+        info!(
+            event = "key_rotation_started",
+            key_id = %key_id,
+            old_encryption_version = entry.encryption_version,
+            old_kdf_version = entry.kdf_version,
+            new_encryption_version = CURRENT_ENCRYPTION_VERSION,
+            new_kdf_version = CURRENT_KDF_VERSION,
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Starting key rotation to current algorithm versions"
+        );
 
         // This path handles future scenarios when algorithm versions are upgraded
         let decrypted_pk = self.decrypt_private_key_for_rotation(entry)?;
@@ -1128,6 +1149,16 @@ impl Keystore {
         // Replace the old entry
         self.entries[entry_index] = new_entry;
         self.update_activity_timestamp();
+
+        // L-2: Log successful key rotation
+        info!(
+            event = "key_rotation_completed",
+            key_id = %key_id,
+            encryption_version = CURRENT_ENCRYPTION_VERSION,
+            kdf_version = CURRENT_KDF_VERSION,
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Key rotation completed successfully"
+        );
 
         Ok(())
     }
@@ -1252,9 +1283,34 @@ impl Keystore {
         let keys_needing_rotation = self.check_keys_needing_rotation();
         let mut rotated_keys = Vec::new();
 
+        // L-2: Log bulk rotation attempt
+        if keys_needing_rotation.is_empty() {
+            info!(
+                event = "bulk_key_rotation_skipped",
+                session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+                reason = "no_keys_need_rotation",
+                "Bulk key rotation skipped - no keys need rotation"
+            );
+            return Ok(rotated_keys);
+        }
+
+        info!(
+            event = "bulk_key_rotation_started",
+            keys_to_rotate = keys_needing_rotation.len(),
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Bulk key rotation started"
+        );
+
         for key_id in keys_needing_rotation {
             if let Err(e) = self.rotate_key(key_id) {
-                eprintln!("Failed to rotate key {}: {}", key_id, e);
+                // L-2: Log individual key rotation failure
+                error!(
+                    event = "bulk_key_rotation_individual_failure",
+                    key_id = %key_id,
+                    session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+                    error = %e,
+                    "Failed to rotate individual key during bulk rotation"
+                );
                 // Continue with other keys, don't fail the entire operation
             } else {
                 rotated_keys.push(key_id);
@@ -1265,6 +1321,14 @@ impl Keystore {
             // Save the keystore with updated keys
             self.save_to_disk()?;
         }
+
+        // L-2: Log bulk rotation completion
+        info!(
+            event = "bulk_key_rotation_completed",
+            keys_rotated = rotated_keys.len(),
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Bulk key rotation completed"
+        );
 
         Ok(rotated_keys)
     }
@@ -1629,20 +1693,46 @@ impl Keystore {
     pub fn delete_key(&mut self, uuid: Uuid) -> Result<(), KeystoreError> {
         // Check auto-lock before proceeding
         self.check_auto_lock();
+        self.check_concurrent_access()?;
 
         if !self.is_unlocked {
             return Err(KeystoreError::Locked);
         }
 
+        // L-2: Log key deletion attempt
+        info!(
+            event = "key_deletion_attempted",
+            key_id = %uuid,
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Key deletion attempt started"
+        );
+
         let initial_len = self.entries.len();
         self.entries.retain(|entry| entry.id != uuid);
 
         if self.entries.len() == initial_len {
+            // L-2: Log failed key deletion
+            warn!(
+                event = "key_deletion_failed",
+                key_id = %uuid,
+                session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+                reason = "key_not_found",
+                "Key deletion failed - key not found"
+            );
             return Err(KeystoreError::KeyNotFound(uuid));
         }
 
         self.save_to_disk()?;
         self.update_activity_timestamp();
+
+        // L-2: Log successful key deletion
+        info!(
+            event = "key_deletion_completed",
+            key_id = %uuid,
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Key deletion completed successfully"
+        );
+
         Ok(())
     }
 
@@ -1753,7 +1843,7 @@ impl Keystore {
                 &aes_nonce_bytes,
                 &entry_to_decrypt.id,
                 &entry_to_decrypt.address,
-                &entry_to_decrypt.hkdf_salt, // Corrected from `entry.hkdf_salt` to `entry_to_decrypt.hkdf_salt`
+                &entry_to_decrypt.hkdf_salt,
             )?;
             temp_decrypted_data.push(DecryptedData {
                 pk_material: decrypted_pk_material,
@@ -2333,4 +2423,169 @@ impl Keystore {
             kdf_version: KDF_VERSION,
         })
     }
+
+    /// L-2 Enhancement: Export tamper-evident audit logs in signed JSONL format
+    /// This creates a cryptographically signed audit log export that can be used
+    /// to verify the integrity of audit records over time.
+    pub fn export_tamper_evident_audit_log(
+        &self,
+        output_path: &Path,
+        include_timestamp_range: Option<(SystemTime, SystemTime)>,
+    ) -> Result<(), KeystoreError> {
+        use std::io::Write;
+
+        if !self.is_unlocked {
+            return Err(KeystoreError::Locked);
+        }
+
+        // L-2: Log audit export attempt
+        info!(
+            event = "audit_log_export_started",
+            output_path = %output_path.display(),
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Tamper-evident audit log export started"
+        );
+
+        // Create audit log metadata
+        let export_metadata = AuditLogExportMetadata {
+            keystore_id: self.get_keystore_identifier(),
+            export_timestamp: SystemTime::now(),
+            export_session_id: self.get_session_id_for_audit().unwrap_or_default(),
+            timestamp_range: include_timestamp_range,
+            format_version: 1,
+        };
+
+        // Derive signing key from master key for tamper evidence
+        let signing_key = self.derive_audit_signing_key()?;
+
+        // Create signed audit records (in a real implementation, these would come from
+        // a persistent audit log collector. For now, we create a sample record)
+        let mut signed_records = Vec::new();
+
+        // Add export metadata as the first record
+        let metadata_record = AuditLogRecord {
+            timestamp: export_metadata.export_timestamp,
+            event_type: "audit_export_metadata".to_string(),
+            session_id: export_metadata.export_session_id.clone(),
+            key_id: None,
+            data: serde_json::to_value(&export_metadata).map_err(|e| {
+                KeystoreError::SerializationError(format!("Failed to serialize metadata: {}", e))
+            })?,
+        };
+
+        let metadata_signature = self.sign_audit_record(&metadata_record, &signing_key)?;
+        signed_records.push(SignedAuditLogRecord {
+            record: metadata_record,
+            signature: metadata_signature,
+        });
+
+        // Write signed JSONL file
+        let file = std::fs::File::create(output_path).map_err(|e| {
+            KeystoreError::FsError(format!("Failed to create audit export file: {}", e))
+        })?;
+        let mut writer = std::io::BufWriter::new(file);
+
+        for signed_record in &signed_records {
+            let json_line = serde_json::to_string(signed_record).map_err(|e| {
+                KeystoreError::SerializationError(format!(
+                    "Failed to serialize audit record: {}",
+                    e
+                ))
+            })?;
+            writeln!(writer, "{}", json_line).map_err(|e| {
+                KeystoreError::FsError(format!("Failed to write audit record: {}", e))
+            })?;
+        }
+
+        writer
+            .flush()
+            .map_err(|e| KeystoreError::FsError(format!("Failed to flush audit export: {}", e)))?;
+
+        // L-2: Log successful audit export
+        info!(
+            event = "audit_log_export_completed",
+            output_path = %output_path.display(),
+            records_exported = signed_records.len(),
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Tamper-evident audit log export completed successfully"
+        );
+
+        Ok(())
+    }
+
+    /// Helper: Get a stable keystore identifier for audit purposes
+    fn get_keystore_identifier(&self) -> String {
+        // Use a hash of the keystore file path as a stable identifier
+        use tiny_keccak::{Hasher, Keccak};
+        let mut hasher = Keccak::v256();
+        hasher.update(self.file_path.to_string_lossy().as_bytes());
+        let mut output = [0u8; 32];
+        hasher.finalize(&mut output);
+        hex::encode(&output[..8]) // Use first 8 bytes (16 hex chars) as identifier
+    }
+
+    /// Helper: Derive a signing key for audit log tamper evidence
+    fn derive_audit_signing_key(&self) -> Result<hmac::Key, KeystoreError> {
+        let master_key_bytes = self
+            .master_key
+            .as_ref()
+            .ok_or(KeystoreError::Locked)?
+            .as_ref();
+
+        // Use HKDF to derive a separate signing key for audit logs
+        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"mfm-audit-signing-salt-v1");
+        let prk = salt.extract(master_key_bytes);
+        let info = b"mfm-audit-log-signing-key-v1";
+        let mut signing_key_material = [0u8; 32];
+        prk.expand(&[info], hkdf::HKDF_SHA256)
+            .map_err(|_| KeystoreError::InternalError("HKDF expansion failed".to_string()))?
+            .fill(&mut signing_key_material)
+            .map_err(|_| KeystoreError::InternalError("HKDF key derivation failed".to_string()))?;
+
+        Ok(hmac::Key::new(hmac::HMAC_SHA256, &signing_key_material))
+    }
+
+    /// Helper: Sign an audit record for tamper evidence
+    fn sign_audit_record(
+        &self,
+        record: &AuditLogRecord,
+        signing_key: &hmac::Key,
+    ) -> Result<String, KeystoreError> {
+        let record_bytes = serde_json::to_vec(record).map_err(|e| {
+            KeystoreError::SerializationError(format!(
+                "Failed to serialize record for signing: {}",
+                e
+            ))
+        })?;
+
+        let signature = hmac::sign(signing_key, &record_bytes);
+        Ok(base64::engine::general_purpose::STANDARD.encode(signature.as_ref()))
+    }
+}
+
+/// Metadata for tamper-evident audit log exports
+#[derive(Serialize, Deserialize, Debug)]
+struct AuditLogExportMetadata {
+    keystore_id: String,
+    export_timestamp: SystemTime,
+    export_session_id: String,
+    timestamp_range: Option<(SystemTime, SystemTime)>,
+    format_version: u8,
+}
+
+/// Individual audit log record structure
+#[derive(Serialize, Deserialize, Debug)]
+struct AuditLogRecord {
+    timestamp: SystemTime,
+    event_type: String,
+    session_id: String,
+    key_id: Option<String>,
+    data: serde_json::Value,
+}
+
+/// Signed audit log record for tamper evidence
+#[derive(Serialize, Deserialize, Debug)]
+struct SignedAuditLogRecord {
+    record: AuditLogRecord,
+    signature: String, // Base64-encoded HMAC signature
 }

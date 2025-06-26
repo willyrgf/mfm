@@ -9,9 +9,9 @@ pub enum KeystoreError {
     #[error("Serialization error: {0}")]
     SerdeJson(#[from] serde_json::Error),
     #[error("Argon2 error: {0}")]
-    Argon2Error(String), // Changed to manual wrapping for argon2::Error
+    Argon2Error(String),
     #[error("AES-GCM error: {0}")]
-    AesGcm(String), // aes-gcm crate errors are not std::error::Error
+    AesGcm(String),
     #[error("BIP-39 error: {0}")]
     Bip39(#[from] bip39::Error),
     #[error("BIP-32 error: {0}")]
