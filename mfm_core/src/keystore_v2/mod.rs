@@ -152,9 +152,13 @@ impl SecureKey {
         let signing_key = SigningKey::from(&secret_key);
 
         use k256::ecdsa::signature::hazmat::PrehashSigner;
-        signing_key
+        let result = signing_key
             .sign_prehash(hash)
-            .map_err(|e| KeystoreError::CryptoError(format!("Signing failed: {}", e)))
+            .map_err(|e| KeystoreError::CryptoError(format!("Signing failed: {}", e)));
+        
+        // Note: SecretKey and SigningKey implement ZeroizeOnDrop automatically
+        // via the k256 crate, so they will be zeroized when dropped
+        result
     }
 
     /// Get Ethereum address for this key
@@ -170,12 +174,14 @@ impl SecureKey {
         let mut hash = [0u8; 32];
         keccak.finalize(&mut hash);
 
+        // Note: SecretKey implements ZeroizeOnDrop and will be zeroized when dropped
         Address::from_slice(&hash[12..])
     }
 
     /// Get public key
     pub fn public_key(&self) -> k256::PublicKey {
         let secret_key = SecretKey::from_slice(self.key_bytes.as_ref()).unwrap();
+        // Note: SecretKey implements ZeroizeOnDrop and will be zeroized when dropped
         secret_key.public_key()
     }
 }
@@ -256,15 +262,19 @@ impl Keystore {
             return Err(KeystoreError::InvalidPrivateKey);
         }
 
-        let private_key_bytes =
+        let mut private_key_bytes =
             hex::decode(private_key_hex).map_err(|_| KeystoreError::InvalidPrivateKey)?;
 
         if private_key_bytes.len() != 32 {
+            private_key_bytes.zeroize(); // Zeroize invalid data
             return Err(KeystoreError::InvalidPrivateKey);
         }
 
         let mut key_array = [0u8; 32];
         key_array.copy_from_slice(&private_key_bytes);
+        
+        // Zeroize the Vec<u8> immediately after copying
+        private_key_bytes.zeroize();
 
         // Validate that it's a valid secp256k1 private key (not zero, not >= curve order)
         if key_array == [0u8; 32] {
@@ -322,11 +332,16 @@ impl Keystore {
         // Validate derivation path
         let derivation_path_obj = DerivationPath::from_str(derivation_path)?;
 
-        // Derive private key from mnemonic
-        let seed = mnemonic.to_seed("");
-        let derived_xprv = XPrv::derive_from_path(&seed, &derivation_path_obj)?;
-
-        let private_key_bytes = derived_xprv.private_key().to_bytes();
+        // Derive private key from mnemonic - wrap seed in Zeroizing for automatic cleanup
+        let seed_bytes = mnemonic.to_seed("");
+        let mut seed = Zeroizing::new(seed_bytes);
+        
+        // Limit XPrv scope to ensure it's dropped quickly
+        let mut private_key_bytes = {
+            let derived_xprv = XPrv::derive_from_path(&*seed, &derivation_path_obj)?;
+            derived_xprv.private_key().to_bytes()
+        };
+        
         let mut key_array = [0u8; 32];
         key_array.copy_from_slice(&private_key_bytes);
 
@@ -335,7 +350,7 @@ impl Keystore {
         let address = secure_key.ethereum_address();
 
         // Store the mnemonic phrase (not the derived key)
-        let mnemonic_bytes = mnemonic.to_string().as_bytes().to_vec();
+        let mut mnemonic_bytes = mnemonic.to_string().as_bytes().to_vec();
 
         // Create encrypted entry
         let id = Uuid::new_v4();
@@ -360,6 +375,13 @@ impl Keystore {
 
         self.entries.push(entry);
         self.save_to_disk()?;
+
+        // Zeroize sensitive intermediate data
+        seed.zeroize();
+        // Note: XPrv doesn't implement Zeroize directly, but the private_key_bytes extracted from it are zeroized
+        private_key_bytes.zeroize();
+        key_array.zeroize();
+        mnemonic_bytes.zeroize();
 
         Ok(id)
     }
@@ -387,16 +409,29 @@ impl Keystore {
             }
             KeyType::Mnemonic { derivation_path } => {
                 // Decrypt mnemonic and derive key
-                let mnemonic_str = String::from_utf8(decrypted_data)
+                let mut mnemonic_str = String::from_utf8(decrypted_data.to_vec())
                     .map_err(|_| KeystoreError::InvalidMnemonic("Invalid UTF-8".to_string()))?;
                 let mnemonic = Mnemonic::from_str(&mnemonic_str)?;
                 let derivation_path_obj = DerivationPath::from_str(derivation_path)?;
 
-                let seed = mnemonic.to_seed("");
-                let derived_xprv = XPrv::derive_from_path(&seed, &derivation_path_obj)?;
-                let private_key_bytes = derived_xprv.private_key().to_bytes();
+                // Derive private key from mnemonic - wrap seed in Zeroizing for automatic cleanup
+                let seed_bytes = mnemonic.to_seed("");
+                let mut seed = Zeroizing::new(seed_bytes);
+                
+                // Limit XPrv scope to ensure it's dropped quickly
+                let mut private_key_bytes = {
+                    let derived_xprv = XPrv::derive_from_path(&*seed, &derivation_path_obj)?;
+                    derived_xprv.private_key().to_bytes()
+                };
+                
                 let mut key_array = [0u8; 32];
                 key_array.copy_from_slice(&private_key_bytes);
+
+                // Zeroize sensitive intermediate data
+                mnemonic_str.zeroize();
+                seed.zeroize();
+                // Note: XPrv doesn't implement Zeroize directly, but the private_key_bytes extracted from it are zeroized
+                private_key_bytes.zeroize();
 
                 Ok(SecureKey::new(key_array))
             }
@@ -530,13 +565,14 @@ impl Keystore {
         master_key: &[u8; 32],
         nonce: &[u8; 12],
         encrypted_data: &[u8],
-    ) -> Result<Vec<u8>, KeystoreError> {
+    ) -> Result<Zeroizing<Vec<u8>>, KeystoreError> {
         let key = Key::<Aes256Gcm>::from_slice(master_key);
         let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(nonce);
 
         cipher
             .decrypt(nonce, encrypted_data)
+            .map(Zeroizing::new)
             .map_err(KeystoreError::from)
     }
 
