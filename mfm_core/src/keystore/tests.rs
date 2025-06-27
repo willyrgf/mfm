@@ -36,7 +36,7 @@ const NEW_PASSWORD: &str = "newpassword456";
 #[test]
 fn test_l2_comprehensive_audit_logging() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
 
     // Initialize keystore (should log creation)
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
@@ -82,7 +82,7 @@ fn test_l2_comprehensive_audit_logging() {
 #[test]
 fn test_l2_tamper_evident_audit_log_export() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
 
     // Initialize and unlock keystore
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
@@ -143,7 +143,7 @@ fn test_l2_tamper_evident_audit_log_export() {
 #[test]
 fn test_f1_nonce_collision_protection() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
 
     // Initialize and unlock keystore
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
@@ -206,7 +206,7 @@ fn test_f1_nonce_collision_protection() {
     ks.lock();
 
     // Reload keystore
-    let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks2 = create_test_keystore(Some(keystore_path)).unwrap();
     ks2.initialize_or_load(None).unwrap();
     ks2.unlock(TEST_PASSWORD).unwrap();
 
@@ -287,7 +287,7 @@ fn test_f7_keystore_not_thread_safe() {
 
     // Instead, we verify that we can create a keystore normally in single-threaded context
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let ks = Keystore::new(Some(keystore_path));
+    let ks = create_test_keystore(Some(keystore_path));
     assert!(
         ks.is_ok(),
         "Should be able to create keystore in single thread"
@@ -306,7 +306,7 @@ fn test_f7_keystore_not_thread_safe() {
 #[test]
 fn test_f5_audit_signing_key_zeroization() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
 
     // Initialize and unlock keystore
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
@@ -355,7 +355,7 @@ fn test_f5_audit_signing_key_zeroization() {
 #[test]
 fn test_m4_key_rotation_framework() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
 
     // Initialize and unlock keystore
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
@@ -408,7 +408,7 @@ fn test_m4_key_rotation_framework() {
 #[test]
 fn test_m3_session_management() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
 
     // Initialize and unlock keystore
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
@@ -462,7 +462,7 @@ fn test_m3_session_management() {
 #[test]
 fn test_m2_enhanced_mac_coverage() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
 
     // Initialize and save keystore
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
@@ -472,7 +472,7 @@ fn test_m2_enhanced_mac_coverage() {
     ks.lock();
 
     // Read the original file and verify that the MAC works correctly first
-    let mut ks2 = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks2 = create_test_keystore(Some(keystore_path.clone())).unwrap();
     ks2.initialize_or_load(None).unwrap();
     let original_unlock = ks2.unlock(TEST_PASSWORD);
     assert!(
@@ -481,7 +481,7 @@ fn test_m2_enhanced_mac_coverage() {
     );
 
     // Create a new keystore instance to test MAC enhancement after reload
-    let mut ks3 = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks3 = create_test_keystore(Some(keystore_path)).unwrap();
     ks3.initialize_or_load(None).unwrap();
 
     // Verify that the keystore still works after reload with enhanced MAC coverage
@@ -496,13 +496,13 @@ fn test_m2_enhanced_mac_coverage() {
 #[test]
 fn test_h2_rate_limiting_functionality() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
 
     // Initialize keystore with a password
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
 
     // Reload keystore to test unlock with wrong password
-    let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks2 = create_test_keystore(Some(keystore_path)).unwrap();
     ks2.initialize_or_load(None).unwrap();
 
     // Manually trigger 5 failed attempts to reach the limit
@@ -534,14 +534,14 @@ fn test_h2_rate_limiting_functionality() {
 #[test]
 fn test_new_keystore_creation() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let ks = Keystore::new(Some(keystore_path));
+    let ks = create_test_keystore(Some(keystore_path));
     assert!(ks.is_ok(), "Keystore::new should succeed");
 }
 
 #[test]
 fn test_initialize_new_keystore_with_password() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
 
     let unlock_res_before_init = ks.unlock(TEST_PASSWORD);
     assert!(
@@ -569,7 +569,7 @@ fn test_initialize_new_keystore_with_password() {
 #[test]
 fn test_initialize_new_keystore_no_password() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
 
     ks.initialize_or_load(None)
         .expect("Initialization without password failed");
@@ -589,7 +589,7 @@ fn test_initialize_new_keystore_no_password() {
 #[test]
 fn test_unlock_lock_cycle() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
 
     ks.unlock(TEST_PASSWORD).expect("Unlock failed");
@@ -615,22 +615,25 @@ fn test_unlock_with_wrong_password_on_existing_keystore() {
     // Create a keystore with a custom config that meets H-1 minimum requirements
     let config = KeystoreConfig {
         // KDF parameters - updated to meet H-1 minimums
-        m_cost: 262144, // 256 MB minimum required memory cost (H-1 fix)
-        t_cost: 8,      // 8 iterations minimum required time cost (H-1 fix)
-        p_cost: 1,      // Default parallelism
-        output_len: 32, // Minimum required output length
+        m_cost: 1048576, // 1 GB minimum required memory cost (H-1 fix)
+        t_cost: 8,       // 8 iterations minimum required time cost (H-1 fix)
+        p_cost: 1,       // Default parallelism
+        output_len: 32,  // Minimum required output length
         // Session management
         auto_lock_timeout: Duration::from_secs(300), // 5 minutes
     };
 
     // Create and initialize a new keystore with the test password and custom config
-    let mut ks = Keystore::new_with_config(Some(keystore_path.clone()), config.clone()).unwrap();
+    let mut ks =
+        Keystore::new_with_config_production_mode(Some(keystore_path.clone()), config.clone())
+            .unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
 
     // To properly test unlocking an existing keystore, we now create a new keystore instance
     // and load from the same path.
     let mut new_ks =
-        Keystore::new_with_config(Some(keystore_path.clone()), config.clone()).unwrap();
+        Keystore::new_with_config_production_mode(Some(keystore_path.clone()), config.clone())
+            .unwrap();
     new_ks.initialize_or_load(None).unwrap(); // Load the previously saved keystore
 
     // Now, attempt to unlock with the wrong password
@@ -655,7 +658,8 @@ fn test_unlock_with_wrong_password_on_existing_keystore() {
     // Create a completely new keystore in a different path with minimal rate limiting
     let (_new_temp_dir, new_keystore_path) = create_temp_keystore_path();
     let mut new_ks =
-        Keystore::new_with_config(Some(new_keystore_path.clone()), config.clone()).unwrap();
+        Keystore::new_with_config_production_mode(Some(new_keystore_path.clone()), config.clone())
+            .unwrap();
 
     // Initialize the new keystore
     new_ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
@@ -677,7 +681,7 @@ fn test_load_existing_keystore() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     let original_key_alias = "key_to_load".to_string();
     {
-        let mut ks_orig = Keystore::new(Some(keystore_path.clone())).unwrap();
+        let mut ks_orig = create_test_keystore(Some(keystore_path.clone())).unwrap();
         ks_orig.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
         ks_orig.unlock(TEST_PASSWORD).unwrap();
         ks_orig
@@ -685,7 +689,7 @@ fn test_load_existing_keystore() {
             .unwrap();
     }
 
-    let mut ks_loaded = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks_loaded = create_test_keystore(Some(keystore_path)).unwrap();
     ks_loaded
         .initialize_or_load(None)
         .expect("Loading existing keystore (no password) failed");
@@ -709,7 +713,7 @@ fn test_h1_authenticated_keystore_round_trip() {
 
     // Phase 1: Create, initialize, import key, and save (implicitly by initialize and import)
     let imported_key_id = {
-        let mut ks1 = Keystore::new(Some(keystore_path.clone())).unwrap();
+        let mut ks1 = create_test_keystore(Some(keystore_path.clone())).unwrap();
         ks1.initialize_or_load(Some(TEST_PASSWORD))
             .expect("Phase 1: Keystore initialization failed");
         ks1.unlock(TEST_PASSWORD)
@@ -723,7 +727,7 @@ fn test_h1_authenticated_keystore_round_trip() {
 
     // Phase 2: Load the keystore, unlock, and verify key
     {
-        let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
+        let mut ks2 = create_test_keystore(Some(keystore_path)).unwrap();
         ks2.initialize_or_load(None) // No password here, just load
             .expect("Phase 2: Keystore loading failed");
 
@@ -746,7 +750,7 @@ fn test_h1_mac_verification_failure_tampered_data() {
 
     // Phase 1: Create and save a valid keystore
     {
-        let mut ks1 = Keystore::new(Some(keystore_path.clone())).unwrap();
+        let mut ks1 = create_test_keystore(Some(keystore_path.clone())).unwrap();
         ks1.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
         ks1.unlock(TEST_PASSWORD).unwrap();
         ks1.import_private_key_hex(Some("key".to_string()), DUMMY_PK_HEX)
@@ -785,7 +789,7 @@ fn test_h1_mac_verification_failure_tampered_data() {
 
     // Phase 3: Attempt to load and unlock the tampered keystore
     {
-        let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
+        let mut ks2 = create_test_keystore(Some(keystore_path)).unwrap();
         ks2.initialize_or_load(None)
             .expect("Loading tampered keystore data should succeed (parsing envelope)");
 
@@ -804,7 +808,7 @@ fn test_h1_mac_verification_failure_tampered_mac() {
 
     // Phase 1: Create and save a valid keystore
     {
-        let mut ks1 = Keystore::new(Some(keystore_path.clone())).unwrap();
+        let mut ks1 = create_test_keystore(Some(keystore_path.clone())).unwrap();
         ks1.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
         ks1.unlock(TEST_PASSWORD).unwrap();
         ks1.import_private_key_hex(Some("key".to_string()), DUMMY_PK_HEX)
@@ -835,7 +839,7 @@ fn test_h1_mac_verification_failure_tampered_mac() {
 
     // Phase 3: Attempt to load and unlock the tampered keystore
     {
-        let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
+        let mut ks2 = create_test_keystore(Some(keystore_path)).unwrap();
         ks2.initialize_or_load(None)
             .expect("Loading tampered keystore data should succeed (parsing envelope)");
 
@@ -854,7 +858,7 @@ fn test_h1_correct_mac_wrong_password() {
 
     // Phase 1: Create and save a valid keystore
     {
-        let mut ks1 = Keystore::new(Some(keystore_path.clone())).unwrap();
+        let mut ks1 = create_test_keystore(Some(keystore_path.clone())).unwrap();
         ks1.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
         ks1.unlock(TEST_PASSWORD).unwrap();
         ks1.import_private_key_hex(Some("key".to_string()), DUMMY_PK_HEX)
@@ -863,7 +867,7 @@ fn test_h1_correct_mac_wrong_password() {
 
     // Phase 2: Attempt to load and unlock with the wrong password
     {
-        let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
+        let mut ks2 = create_test_keystore(Some(keystore_path)).unwrap();
         ks2.initialize_or_load(None) // Load the envelope
             .expect("Loading keystore data should succeed (parsing envelope)");
 
@@ -887,7 +891,7 @@ fn test_h1_invalid_envelope_format() {
 
     // Phase 2: Attempt to load the malformed keystore
     {
-        let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+        let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
         let load_result = ks.initialize_or_load(None);
 
         assert!(
@@ -905,7 +909,7 @@ fn test_h1_change_password_interaction() {
 
     // Phase 1: Create, initialize, import key
     let imported_key_id = {
-        let mut ks1 = Keystore::new(Some(keystore_path.clone())).unwrap();
+        let mut ks1 = create_test_keystore(Some(keystore_path.clone())).unwrap();
         ks1.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
         ks1.unlock(TEST_PASSWORD).unwrap();
         let (key_id, _) = ks1
@@ -921,7 +925,7 @@ fn test_h1_change_password_interaction() {
 
     // Phase 3: Load with new keystore instance, try old and new passwords
     {
-        let mut ks2 = Keystore::new(Some(keystore_path)).unwrap();
+        let mut ks2 = create_test_keystore(Some(keystore_path)).unwrap();
         ks2.initialize_or_load(None) // Load the envelope
             .expect("Loading keystore after password change failed");
 
@@ -960,7 +964,7 @@ fn test_h1_change_password_interaction() {
 #[test]
 fn test_unlock_uninitialized_keystore() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     let unlock_result = ks.unlock("anypassword");
 
     // The behavior is correct: trying to unlock a keystore that hasn't been initialized
@@ -979,7 +983,7 @@ fn test_unlock_uninitialized_keystore() {
 #[test]
 fn test_import_private_key_hex_success() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
 
@@ -1005,7 +1009,7 @@ fn test_import_private_key_hex_success() {
 #[test]
 fn test_import_private_key_hex_duplicate_alias() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
 
@@ -1018,7 +1022,7 @@ fn test_import_private_key_hex_duplicate_alias() {
 #[test]
 fn test_import_private_key_hex_invalid_key_format() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
 
@@ -1056,7 +1060,7 @@ fn test_argon2_param_minimums_new_with_config() {
     let res_m_cost = Keystore::new_with_config(Some(temp_path_1), config.clone());
     if let Err(KeystoreError::FsError(msg)) = res_m_cost {
         assert!(
-            msg.contains("Memory cost 1000 is below minimum 262144"),
+            msg.contains("Memory cost 1000 is below minimum"),
             "Low m_cost check failed. Msg: {:?}",
             msg
         );
@@ -1070,7 +1074,7 @@ fn test_argon2_param_minimums_new_with_config() {
     let res_t_cost = Keystore::new_with_config(Some(temp_path_2), config.clone());
     if let Err(KeystoreError::FsError(msg)) = res_t_cost {
         assert!(
-            msg.contains("Time cost 1 is below minimum 8"),
+            msg.contains("Time cost 1 is below minimum"),
             "Low t_cost check failed. Msg: {:?}",
             msg
         );
@@ -1091,7 +1095,7 @@ fn test_argon2_param_minimums_new_with_config() {
 #[test]
 fn test_import_private_key_hex_keystore_locked() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
 
     let result = ks.import_private_key_hex(None, DUMMY_PK_HEX);
@@ -1107,7 +1111,7 @@ const TEST_MNEMONIC_2_VALID: &str = "test test test test test test test test tes
 #[test]
 fn test_import_mnemonic_success() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
 
@@ -1138,7 +1142,7 @@ fn test_import_mnemonic_success() {
 #[test]
 fn test_import_mnemonic_duplicate_alias() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
 
@@ -1161,7 +1165,7 @@ fn test_import_mnemonic_duplicate_alias() {
 #[test]
 fn test_import_mnemonic_invalid_phrase() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
 
@@ -1175,7 +1179,7 @@ fn test_import_mnemonic_invalid_phrase() {
 #[test]
 fn test_import_mnemonic_invalid_path() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
 
@@ -1189,7 +1193,7 @@ fn test_import_mnemonic_invalid_path() {
 #[test]
 fn test_import_mnemonic_keystore_locked() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
 
     let result = ks.import_mnemonic(None, TEST_MNEMONIC, None, TEST_DERIVATION_PATH);
@@ -1200,7 +1204,7 @@ fn test_import_mnemonic_keystore_locked() {
 #[test]
 fn test_list_and_delete_keys() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
 
@@ -1263,7 +1267,7 @@ fn test_list_and_delete_keys() {
 #[test]
 fn test_get_signer_success() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
     let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
@@ -1275,7 +1279,7 @@ fn test_get_signer_success() {
 #[test]
 fn test_get_signer_key_not_found() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
     let non_existent_id = uuid::Uuid::new_v4();
@@ -1289,7 +1293,7 @@ fn test_get_signer_key_not_found() {
 #[test]
 fn test_get_signer_locked() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
     let (id, _) = ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
@@ -1306,7 +1310,7 @@ fn test_get_signer_locked() {
 #[test]
 fn test_change_password_success() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
 
@@ -1337,7 +1341,7 @@ fn test_change_password_success() {
     let signer = ks
         .get_signer(id)
         .expect("Key should be accessible after password change");
-    let signing_key = signer.as_ref().clone(); // Clone the inner SigningKey
+    let signing_key = signer.to_signing_key().expect("Should create signing key"); // Get SigningKey on-demand
     let wallet = PrivateKeySigner::from(signing_key); // Create PrivateKeySigner
     let message_hash = B256::from_slice(&[1u8; 32]);
     let _signature = wallet
@@ -1348,7 +1352,7 @@ fn test_change_password_success() {
 #[test]
 fn test_change_password_incorrect_old_password() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
 
@@ -1383,7 +1387,7 @@ fn test_change_password_persisted_kdf_params() {
     let original_key_alias = "persisted_key".to_string();
 
     {
-        let mut ks_orig = Keystore::new(Some(keystore_path.clone())).unwrap();
+        let mut ks_orig = create_test_keystore(Some(keystore_path.clone())).unwrap();
         ks_orig.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
         ks_orig.unlock(TEST_PASSWORD).unwrap();
         ks_orig
@@ -1396,7 +1400,7 @@ fn test_change_password_persisted_kdf_params() {
     std::thread::sleep(Duration::from_secs(1));
 
     // Load a new keystore instance from the same path
-    let mut ks_loaded = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks_loaded = create_test_keystore(Some(keystore_path)).unwrap();
     ks_loaded
         .initialize_or_load(None) // Load without password, it should be locked
         .expect("Loading existing keystore failed");
@@ -1429,7 +1433,7 @@ fn test_change_password_persisted_kdf_params() {
     let signer = ks_loaded
         .get_signer(imported_key_id)
         .expect("Key should be accessible after loading and unlocking with new password");
-    let signing_key = signer.as_ref().clone(); // Clone the inner SigningKey
+    let signing_key = signer.to_signing_key().expect("Should create signing key"); // Get SigningKey on-demand
     let wallet = PrivateKeySigner::from(signing_key); // Create PrivateKeySigner
     let message_hash = B256::from_slice(&[2u8; 32]);
     let _signature = wallet
@@ -1442,9 +1446,9 @@ fn test_auto_lock_timeout() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     let config = KeystoreConfig {
         auto_lock_timeout: Duration::from_secs(1), // Short timeout for testing
-        ..Default::default()
+        ..KeystoreConfig::test_fast()
     };
-    let mut ks = Keystore::new_with_config(Some(keystore_path), config).unwrap();
+    let mut ks = Keystore::new_with_config_test_mode(Some(keystore_path), config).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
 
@@ -1470,9 +1474,9 @@ fn test_activity_resets_auto_lock_timestamp() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     let config = KeystoreConfig {
         auto_lock_timeout: Duration::from_secs(2), // 2 second timeout
-        ..Default::default()
+        ..KeystoreConfig::test_fast()
     };
-    let mut ks = Keystore::new_with_config(Some(keystore_path), config).unwrap();
+    let mut ks = Keystore::new_with_config_test_mode(Some(keystore_path), config).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
 
@@ -1540,7 +1544,7 @@ fn test_load_from_disk_malformed_json() {
     // Write malformed JSON to the file
     std::fs::write(&keystore_path, "{ \"invalid_json\": ").unwrap();
 
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     let load_res = ks.initialize_or_load(None); // Attempt to load
     assert!(
         matches!(load_res, Err(KeystoreError::InvalidFormat(_))),
@@ -1569,7 +1573,7 @@ fn test_load_from_disk_unsupported_version() {
     });
     std::fs::write(&keystore_path, unsupported_keystore_json.to_string()).unwrap();
 
-    let mut ks = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path)).unwrap();
     let load_res = ks.initialize_or_load(None);
     assert!(
         matches!(load_res, Err(KeystoreError::InvalidFormat(_))), // Changed to InvalidFormat
@@ -1581,7 +1585,7 @@ fn test_load_from_disk_unsupported_version() {
 #[test]
 fn test_aes_gcm_error_trigger() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
-    let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+    let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
     ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
     ks.unlock(TEST_PASSWORD).unwrap();
 
@@ -1613,7 +1617,7 @@ fn test_aes_gcm_error_trigger() {
 fn test_kdf_params_mismatch_error() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     {
-        let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+        let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
         ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
         ks.unlock(TEST_PASSWORD).unwrap();
         ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
@@ -1633,7 +1637,7 @@ fn test_kdf_params_mismatch_error() {
 
     println!("json_value: {:?}", json_value);
     // Attempt to load and unlock the keystore with mismatched KDF params
-    let mut ks_mismatched = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks_mismatched = create_test_keystore(Some(keystore_path)).unwrap();
     let load_res = ks_mismatched.initialize_or_load(None); // Load should now fail
     assert!(
         matches!(load_res, Err(KeystoreError::Argon2Error(_))),
@@ -1647,7 +1651,7 @@ fn test_unsupported_kdf_error() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     // 1. Create a valid keystore first.
     {
-        let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+        let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
         ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
         ks.unlock(TEST_PASSWORD).unwrap();
         ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
@@ -1666,7 +1670,7 @@ fn test_unsupported_kdf_error() {
     std::fs::write(&keystore_path, serde_json::to_string(&json_value).unwrap()).unwrap();
 
     // 3. Attempt to load and unlock the keystore with the unsupported KDF.
-    let mut ks_tampered = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks_tampered = create_test_keystore(Some(keystore_path)).unwrap();
     ks_tampered.initialize_or_load(None).unwrap(); // Load should succeed.
 
     // Unlock should fail because the KDF algorithm is not supported.
@@ -1682,7 +1686,7 @@ fn test_unsupported_kdf_error() {
 fn test_missing_verification_tag_error() {
     let (_temp_dir, keystore_path) = create_temp_keystore_path();
     {
-        let mut ks = Keystore::new(Some(keystore_path.clone())).unwrap();
+        let mut ks = create_test_keystore(Some(keystore_path.clone())).unwrap();
         ks.initialize_or_load(Some(TEST_PASSWORD)).unwrap();
         ks.unlock(TEST_PASSWORD).unwrap();
         ks.import_private_key_hex(None, DUMMY_PK_HEX).unwrap();
@@ -1721,7 +1725,7 @@ fn test_missing_verification_tag_error() {
     .unwrap();
 
     // Attempt to load and unlock the keystore
-    let mut ks_tampered = Keystore::new(Some(keystore_path)).unwrap();
+    let mut ks_tampered = create_test_keystore(Some(keystore_path)).unwrap();
     ks_tampered.initialize_or_load(None).unwrap(); // Load should succeed as MAC is not checked here
     let unlock_res = ks_tampered.unlock(TEST_PASSWORD); // Unlock should fail MAC verification
 

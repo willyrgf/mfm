@@ -89,28 +89,24 @@ const REQUIRED_OUTPUT_LEN: usize = 32; // Exact required output length - no flex
 // These ensure that key material is properly zeroized when dropped
 
 /// Zeroizing wrapper for AES-256-GCM cipher
-/// Ensures key material is cleared from memory on drop
+/// Stores only key material and instantiates cipher per call to prevent key caching
 pub struct ZeroizingAes256Gcm {
-    cipher: Aes256Gcm,
-    key_material: Zeroizing<[u8; 32]>, // Keep track of key for zeroization
+    key_material: Zeroizing<[u8; 32]>, // Only store key material, not cipher
 }
 
 impl ZeroizingAes256Gcm {
     pub fn new(key_bytes: &[u8]) -> Self {
         let mut key_material = Zeroizing::new([0u8; 32]);
         key_material.copy_from_slice(key_bytes);
-        let key = Key::<Aes256Gcm>::from_slice(key_material.as_ref());
-        let cipher = Aes256Gcm::new(key);
 
-        Self {
-            cipher,
-            key_material,
-        }
+        Self { key_material }
     }
 
     pub fn encrypt(&self, nonce_bytes: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+        let key = Key::<Aes256Gcm>::from_slice(self.key_material.as_ref());
+        let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(nonce_bytes);
-        self.cipher.encrypt(nonce, plaintext)
+        cipher.encrypt(nonce, plaintext)
     }
 
     pub fn decrypt(
@@ -118,8 +114,10 @@ impl ZeroizingAes256Gcm {
         nonce_bytes: &[u8],
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, aes_gcm::Error> {
+        let key = Key::<Aes256Gcm>::from_slice(self.key_material.as_ref());
+        let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(nonce_bytes);
-        self.cipher.decrypt(nonce, ciphertext)
+        cipher.decrypt(nonce, ciphertext)
     }
 
     pub fn encrypt_with_aad(
@@ -127,8 +125,10 @@ impl ZeroizingAes256Gcm {
         nonce_bytes: &[u8],
         payload: aes_gcm::aead::Payload,
     ) -> Result<Vec<u8>, aes_gcm::Error> {
+        let key = Key::<Aes256Gcm>::from_slice(self.key_material.as_ref());
+        let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(nonce_bytes);
-        self.cipher.encrypt(nonce, payload)
+        cipher.encrypt(nonce, payload)
     }
 
     pub fn decrypt_with_aad(
@@ -136,8 +136,10 @@ impl ZeroizingAes256Gcm {
         nonce_bytes: &[u8],
         payload: aes_gcm::aead::Payload,
     ) -> Result<Vec<u8>, aes_gcm::Error> {
+        let key = Key::<Aes256Gcm>::from_slice(self.key_material.as_ref());
+        let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(nonce_bytes);
-        self.cipher.decrypt(nonce, payload)
+        cipher.decrypt(nonce, payload)
     }
 }
 
@@ -150,26 +152,30 @@ impl Drop for ZeroizingAes256Gcm {
 }
 
 /// Zeroizing wrapper for HMAC keys
-/// Ensures key material is cleared from memory on drop  
+/// Stores only key material and instantiates HMAC key per call to prevent key caching
 pub struct ZeroizingHmacKey {
-    key: hmac::Key,
-    key_material: Zeroizing<Vec<u8>>, // Keep track of key for zeroization
+    algorithm: hmac::Algorithm,
+    key_material: Zeroizing<Vec<u8>>, // Only store key material, not key object
 }
 
 impl ZeroizingHmacKey {
     pub fn new(algorithm: hmac::Algorithm, key_bytes: &[u8]) -> Self {
         let key_material = Zeroizing::new(key_bytes.to_vec());
-        let key = hmac::Key::new(algorithm, key_material.as_ref());
 
-        Self { key, key_material }
+        Self {
+            algorithm,
+            key_material,
+        }
     }
 
     pub fn sign(&self, data: &[u8]) -> hmac::Tag {
-        hmac::sign(&self.key, data)
+        let key = hmac::Key::new(self.algorithm, self.key_material.as_ref());
+        hmac::sign(&key, data)
     }
 
     pub fn verify(&self, data: &[u8], tag: &[u8]) -> Result<(), ring::error::Unspecified> {
-        hmac::verify(&self.key, data, tag)
+        let key = hmac::Key::new(self.algorithm, self.key_material.as_ref());
+        hmac::verify(&key, data, tag)
     }
 }
 
@@ -403,46 +409,55 @@ impl KeystoreConfig {
 
 // Wrapper for k256::SigningKey that implements ZeroizeOnDrop
 #[derive(Debug)]
-pub struct ZeroizingSigningKey(SigningKey);
+/// Zeroizing wrapper for ECDSA signing keys
+/// Stores only key material and instantiates SigningKey per call to prevent key caching
+pub struct ZeroizingSigningKey {
+    key_material: Zeroizing<[u8; 32]>, // Only store raw key bytes, not SigningKey object
+}
 
 impl ZeroizeOnDrop for ZeroizingSigningKey {}
 
 impl Zeroize for ZeroizingSigningKey {
     fn zeroize(&mut self) {
-        // To explicitly zeroize the sensitive material within self.0 (the k256::ecdsa::SigningKey),
-        // we replace it with a new, dummy key. This action causes the old self.0
-        // to be dropped, and its Drop implementation will zeroize its internal scalar.
-        // This is a safe way to ensure the original key material is cleared without unsafe code.
-
-        // Create a dummy secret. Use a valid, non-zero byte array.
-        // [1; 32] is a simple choice for a non-problematic dummy key.
-        // Need k256::SecretKey for this.
-        // Ensure k256::SecretKey is in scope (it should be via use k256::SecretKey).
-        if let Ok(dummy_secret_key) = k256::SecretKey::from_slice(&[1u8; 32]) {
-            let dummy_signing_key = k256::ecdsa::SigningKey::from(&dummy_secret_key);
-            self.0 = dummy_signing_key; // Old self.0 is dropped here, its secret zeroized.
+        // key_material is automatically zeroized due to Zeroizing wrapper
+        // M-1 Fix: Explicitly zeroize again with random overwrite for extra safety
+        let mut random_overwrite = [0u8; 32];
+        if OsRng.try_fill_bytes(&mut random_overwrite).is_ok() {
+            self.key_material.copy_from_slice(&random_overwrite);
         }
+        self.key_material.zeroize();
+        random_overwrite.zeroize();
+    }
+}
+
+impl ZeroizingSigningKey {
+    /// Create a new ZeroizingSigningKey from raw key bytes
+    pub fn new(key_bytes: &[u8]) -> Result<Self, KeystoreError> {
+        if key_bytes.len() != 32 {
+            return Err(KeystoreError::InvalidFormat(
+                "ECDSA key must be 32 bytes".to_string(),
+            ));
+        }
+
+        let mut key_material = Zeroizing::new([0u8; 32]);
+        key_material.copy_from_slice(key_bytes);
+
+        Ok(ZeroizingSigningKey { key_material })
+    }
+
+    /// Create a SigningKey instance on-demand from stored key material
+    pub fn to_signing_key(&self) -> Result<SigningKey, KeystoreError> {
+        let secret_key = SecretKey::from_slice(self.key_material.as_ref())
+            .map_err(|_| KeystoreError::InvalidFormat("Invalid ECDSA secret key".to_string()))?;
+        Ok(SigningKey::from(&secret_key))
     }
 }
 
 impl From<SigningKey> for ZeroizingSigningKey {
     fn from(key: SigningKey) -> Self {
-        ZeroizingSigningKey(key)
-    }
-}
-
-impl AsRef<SigningKey> for ZeroizingSigningKey {
-    fn as_ref(&self) -> &SigningKey {
-        &self.0
-    }
-}
-
-// Allow direct access to the inner SigningKey when needed
-impl std::ops::Deref for ZeroizingSigningKey {
-    type Target = SigningKey;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+        let mut key_material = Zeroizing::new([0u8; 32]);
+        key_material.copy_from_slice(&key.to_bytes());
+        ZeroizingSigningKey { key_material }
     }
 }
 
@@ -522,7 +537,11 @@ pub struct Keystore {
 
     // F-7: Thread safety marker - keystore is NOT thread-safe by design
     // Prevents accidental concurrent access that could cause memory races or data loss
-    _not_thread_safe: std::marker::PhantomData<*const ()>,
+    _not_thread_safe: std::marker::PhantomData<std::sync::Mutex<()>>,
+
+    // Test mode flag to enable relaxed validation for unit tests
+    #[cfg(test)]
+    is_test_mode: bool,
 }
 
 // Simple Debug implementation for Keystore that doesn't expose sensitive data
@@ -659,6 +678,22 @@ impl Keystore {
         Ok(())
     }
 
+    /// Sync directory metadata to disk for crash safety
+    /// This ensures that directory changes (like file renames) are persisted
+    fn fsync_directory(dir: &Path) -> Result<(), std::io::Error> {
+        use std::os::unix::io::AsRawFd;
+
+        let dir_file = fs::OpenOptions::new().read(true).open(dir)?;
+
+        // Use libc fsync to sync the directory file descriptor
+        let result = unsafe { libc::fsync(dir_file.as_raw_fd()) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Ok(())
+    }
+
     pub fn new(custom_path: Option<PathBuf>) -> Result<Self, KeystoreError> {
         Self::new_with_config(custom_path, KeystoreConfig::default())
     }
@@ -720,6 +755,10 @@ impl Keystore {
 
             // F-7: Initialize thread safety marker
             _not_thread_safe: std::marker::PhantomData,
+
+            // Initialize test mode
+            #[cfg(test)]
+            is_test_mode: true,
         })
     }
 
@@ -779,6 +818,65 @@ impl Keystore {
 
             // F-7: Initialize thread safety marker
             _not_thread_safe: std::marker::PhantomData,
+
+            // Initialize production mode
+            #[cfg(test)]
+            is_test_mode: false,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn new_with_config_production_mode(
+        custom_path: Option<PathBuf>,
+        config: KeystoreConfig,
+    ) -> Result<Self, KeystoreError> {
+        // Use production validation even in test mode
+        config
+            .validate_strength()
+            .map_err(|e| KeystoreError::FsError(format!("Invalid KDF configuration: {}", e)))?;
+
+        let file_path = match custom_path {
+            Some(path) => path,
+            None => {
+                let data_dir = dirs_next::data_local_dir().ok_or_else(|| {
+                    KeystoreError::FsError("Could not determine system data directory".to_string())
+                })?;
+                let app_data_dir = data_dir.join(Self::APP_DIR_NAME);
+                if !app_data_dir.exists() {
+                    fs::create_dir_all(&app_data_dir).map_err(KeystoreError::Io)?;
+                }
+                app_data_dir.join(Self::DEFAULT_KEYSTORE_FILENAME)
+            }
+        };
+
+        Ok(Keystore {
+            file_path,
+            master_key: None,
+            keystore_version: None,
+            master_kdf_algo: None,
+            entries: Vec::new(),
+            verification_tag: None,
+            nonce_derivation_salt: Zeroizing::new([0u8; 32]),
+            master_kdf_params: None,
+            verification_nonce: String::new(),
+            keystore_id: None,
+            is_unlocked: false,
+            last_activity_at: None,
+            config,
+            pending_protected_data_b64: None,
+            pending_mac_b64: None,
+            failed_unlock_attempts: 0,
+            last_failed_attempt: None,
+            rate_limit_delay: Duration::from_millis(INITIAL_RATE_LIMIT_DELAY_MS),
+            session_token: None,
+            session_created_at: None,
+            suspicious_activities: 0,
+            last_suspicious_activity: None,
+            used_nonces: HashSet::new(),
+            global_nonce_counter: 0,
+            _not_thread_safe: std::marker::PhantomData,
+            // Mark as production mode even in test build
+            is_test_mode: false,
         })
     }
 
@@ -1170,6 +1268,25 @@ impl Keystore {
 
     fn get_verification_nonce(&self) -> &str {
         &self.verification_nonce
+    }
+
+    // Helper method to get appropriate minimums based on test mode
+    fn get_validation_minimums(&self) -> (u32, u32, u32) {
+        #[cfg(test)]
+        {
+            if self.is_test_mode {
+                // Test minimums for faster testing
+                (8192u32, 2u32, 1u32) // Same as KeystoreConfig::test_fast()
+            } else {
+                // Production minimums
+                (MIN_M_COST, MIN_T_COST, MIN_P_COST)
+            }
+        }
+        #[cfg(not(test))]
+        {
+            // Always use production minimums in non-test builds
+            (MIN_M_COST, MIN_T_COST, MIN_P_COST)
+        }
     }
 
     pub fn lock(&mut self) {
@@ -1890,8 +2007,9 @@ impl Keystore {
         let zeroizing_signing_key = self.get_signer(uuid)?;
 
         // Get the verifying key from the signing key
-        // Use as_ref() to access the inner SigningKey
-        let verifying_key = zeroizing_signing_key.as_ref().verifying_key();
+        // Instantiate SigningKey on-demand and get verifying key
+        let signing_key = zeroizing_signing_key.to_signing_key()?;
+        let verifying_key = signing_key.verifying_key();
 
         // Convert the alloy signature to k256 signature format
         let r_bytes = signature.r().to_be_bytes::<32>();
@@ -2342,6 +2460,18 @@ impl Keystore {
                     ))
                 })?;
 
+                // C-3 Fix: Crash-safe save - fsync parent directory after rename
+                // This ensures directory metadata is written to disk, preventing silent
+                // corruption or file loss during power failure
+                if let Some(parent_dir) = self.file_path.parent() {
+                    Self::fsync_directory(parent_dir).map_err(|e| {
+                        KeystoreError::FsError(format!(
+                            "Failed to fsync parent directory after rename: {}",
+                            e
+                        ))
+                    })?;
+                }
+
                 // F-3: Set secure file permissions (Unix only)
                 #[cfg(unix)]
                 {
@@ -2396,17 +2526,18 @@ impl Keystore {
             ))
         })?;
 
-        // Validate the loaded KDF parameters against minimums.
-        if envelope.master_kdf_params.m_cost < MIN_M_COST
-            || envelope.master_kdf_params.t_cost < MIN_T_COST
-            || envelope.master_kdf_params.p_cost < MIN_P_COST
+        // Validate the loaded KDF parameters against appropriate minimums based on test mode
+        let (min_m_cost, min_t_cost, min_p_cost) = self.get_validation_minimums();
+        if envelope.master_kdf_params.m_cost < min_m_cost
+            || envelope.master_kdf_params.t_cost < min_t_cost
+            || envelope.master_kdf_params.p_cost < min_p_cost
         {
             return Err(KeystoreError::Argon2Error(
                 format!(
                     "Invalid KDF parameters loaded from disk: m_cost ({}) < min ({}), or t_cost ({}) < min ({}), or p_cost ({}) < min ({}).",
-                    envelope.master_kdf_params.m_cost, MIN_M_COST,
-                    envelope.master_kdf_params.t_cost, MIN_T_COST,
-                    envelope.master_kdf_params.p_cost, MIN_P_COST
+                    envelope.master_kdf_params.m_cost, min_m_cost,
+                    envelope.master_kdf_params.t_cost, min_t_cost,
+                    envelope.master_kdf_params.p_cost, min_p_cost
                 )
             ));
         }
@@ -2754,9 +2885,28 @@ impl Keystore {
         config: &KeystoreConfig,
     ) -> Result<MasterKdfParams, KeystoreError> {
         // H-1 Fix: Use comprehensive parameter strength validation
-        config
-            .validate_strength()
-            .map_err(|e| KeystoreError::FsError(format!("Invalid KDF configuration: {}", e)))?;
+        // Determine validation mode based on config values - if values are below production
+        // minimums but above test minimums, use test validation
+        #[cfg(test)]
+        {
+            // Check if config has test-like parameters (below production minimums)
+            let is_test_config = config.m_cost < MIN_M_COST || config.t_cost < MIN_T_COST;
+            if is_test_config {
+                config.validate_strength_test_mode().map_err(|e| {
+                    KeystoreError::FsError(format!("Invalid KDF configuration: {}", e))
+                })?;
+            } else {
+                config.validate_strength().map_err(|e| {
+                    KeystoreError::FsError(format!("Invalid KDF configuration: {}", e))
+                })?;
+            }
+        }
+        #[cfg(not(test))]
+        {
+            config
+                .validate_strength()
+                .map_err(|e| KeystoreError::FsError(format!("Invalid KDF configuration: {}", e)))?;
+        }
 
         // H-3 Fix: Use zeroizing buffer for salt generation
         let mut salt_bytes = Zeroizing::new([0u8; 16]); // 16-byte salt

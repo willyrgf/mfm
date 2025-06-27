@@ -2674,6 +2674,7 @@ dependencies = [
  "hex",
  "k256",
  "lazy_static",
+ "libc",
  "mfm_machine",
  "mfm_machine_derive",
  "num_cpus",
