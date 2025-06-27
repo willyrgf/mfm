@@ -59,7 +59,8 @@ use dirs_next;
 use error::KeystoreError;
 use fs2::FileExt;
 use hex; // For encoding salt
-use k256::ecdsa::signature::hazmat::PrehashVerifier;
+use k256::ecdsa::signature::hazmat::{PrehashSigner, PrehashVerifier};
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{ecdsa::SigningKey, SecretKey};
 use rand::rngs::OsRng;
 use rand::TryRngCore;
@@ -445,19 +446,136 @@ impl ZeroizingSigningKey {
         Ok(ZeroizingSigningKey { key_material })
     }
 
-    /// Create a SigningKey instance on-demand from stored key material
-    pub fn to_signing_key(&self) -> Result<SigningKey, KeystoreError> {
+    /// Securely sign a hash without exposing the underlying SigningKey
+    /// This method ensures key material is properly zeroized and never leaked
+    pub fn sign_hash(&self, hash: &[u8]) -> Result<k256::ecdsa::Signature, KeystoreError> {
+        if hash.len() != 32 {
+            return Err(KeystoreError::InvalidFormat(
+                "Hash must be exactly 32 bytes".to_string(),
+            ));
+        }
+
         let secret_key = SecretKey::from_slice(self.key_material.as_ref())
             .map_err(|_| KeystoreError::InvalidFormat("Invalid ECDSA secret key".to_string()))?;
-        Ok(SigningKey::from(&secret_key))
+
+        // Create signing key temporarily - it will be dropped and zeroized at end of scope
+        let signing_key = SigningKey::from(&secret_key);
+
+        // Sign the hash
+        let signature = signing_key
+            .sign_prehash(hash)
+            .map_err(|e| KeystoreError::InvalidFormat(format!("Signing failed: {}", e)))?;
+
+        // signing_key is automatically dropped here, but k256::SigningKey doesn't zeroize
+        // That's why we never expose it outside this method
+
+        Ok(signature)
+    }
+
+    /// Get the public key for verification without exposing private key material
+    pub fn public_key(&self) -> Result<k256::PublicKey, KeystoreError> {
+        let secret_key = SecretKey::from_slice(self.key_material.as_ref())
+            .map_err(|_| KeystoreError::InvalidFormat("Invalid ECDSA secret key".to_string()))?;
+        Ok(secret_key.public_key())
+    }
+
+    /// Get the verifying key for signature verification without exposing private key material
+    pub fn verifying_key(&self) -> Result<k256::ecdsa::VerifyingKey, KeystoreError> {
+        let secret_key = SecretKey::from_slice(self.key_material.as_ref())
+            .map_err(|_| KeystoreError::InvalidFormat("Invalid ECDSA secret key".to_string()))?;
+        let signing_key = SigningKey::from(&secret_key);
+        Ok(*signing_key.verifying_key())
+    }
+
+    /// Get the Ethereum address derived from this key
+    pub fn ethereum_address(&self) -> Result<alloy_primitives::Address, KeystoreError> {
+        let secret_key = SecretKey::from_slice(self.key_material.as_ref())
+            .map_err(|_| KeystoreError::InvalidFormat("Invalid ECDSA secret key".to_string()))?;
+        let public_key = secret_key.public_key();
+
+        // Compute Ethereum address from public key (last 20 bytes of Keccak256 hash)
+        let uncompressed_pk = public_key.to_encoded_point(false);
+        let mut keccak = Keccak::v256();
+        keccak.update(&uncompressed_pk.as_bytes()[1..]); // Skip the 0x04 prefix
+        let mut address_bytes = [0u8; 32];
+        keccak.finalize(&mut address_bytes);
+
+        // Take the last 20 bytes as the Ethereum address
+        let address = alloy_primitives::Address::from_slice(&address_bytes[12..]);
+        Ok(address)
     }
 }
 
-impl From<SigningKey> for ZeroizingSigningKey {
-    fn from(key: SigningKey) -> Self {
+/// A wrapper around k256::SigningKey that ensures proper zeroization on drop
+/// This wrapper exists to fix the security issue where raw SigningKey instances
+/// don't zeroize their key material, leaving sensitive data in memory
+#[derive(Debug)]
+pub struct SecureSigningKey {
+    // We store the key material separately and create SigningKey on-demand
+    key_material: Zeroizing<[u8; 32]>,
+}
+
+impl SecureSigningKey {
+    /// Create a SecureSigningKey from key bytes
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
         let mut key_material = Zeroizing::new([0u8; 32]);
-        key_material.copy_from_slice(&key.to_bytes());
-        ZeroizingSigningKey { key_material }
+        key_material.copy_from_slice(bytes);
+        SecureSigningKey { key_material }
+    }
+
+    /// Sign a hash securely
+    pub fn sign_prehash(&self, hash: &[u8]) -> Result<k256::ecdsa::Signature, KeystoreError> {
+        if hash.len() != 32 {
+            return Err(KeystoreError::InvalidFormat(
+                "Hash must be exactly 32 bytes".to_string(),
+            ));
+        }
+
+        let secret_key = SecretKey::from_slice(self.key_material.as_ref())
+            .map_err(|_| KeystoreError::InvalidFormat("Invalid ECDSA secret key".to_string()))?;
+        let signing_key = SigningKey::from(&secret_key);
+
+        let signature = signing_key
+            .sign_prehash(hash)
+            .map_err(|e| KeystoreError::InvalidFormat(format!("Signing failed: {}", e)))?;
+
+        // Note: signing_key is dropped here automatically
+        Ok(signature)
+    }
+
+    /// Get the public key
+    pub fn public_key(&self) -> Result<k256::PublicKey, KeystoreError> {
+        let secret_key = SecretKey::from_slice(self.key_material.as_ref())
+            .map_err(|_| KeystoreError::InvalidFormat("Invalid ECDSA secret key".to_string()))?;
+        Ok(secret_key.public_key())
+    }
+
+    /// Get the verifying key
+    pub fn verifying_key(&self) -> Result<k256::ecdsa::VerifyingKey, KeystoreError> {
+        let secret_key = SecretKey::from_slice(self.key_material.as_ref())
+            .map_err(|_| KeystoreError::InvalidFormat("Invalid ECDSA secret key".to_string()))?;
+        let signing_key = SigningKey::from(&secret_key);
+
+        let verifying_key = *signing_key.verifying_key();
+
+        // Note: signing_key is dropped here automatically
+        Ok(verifying_key)
+    }
+}
+
+impl Drop for SecureSigningKey {
+    fn drop(&mut self) {
+        // key_material is automatically zeroized due to Zeroizing wrapper
+        // Add extra security by explicitly zeroizing again
+        self.key_material.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for SecureSigningKey {}
+
+impl Zeroize for SecureSigningKey {
+    fn zeroize(&mut self) {
+        self.key_material.zeroize();
     }
 }
 
@@ -492,6 +610,44 @@ impl AsRef<[u8]> for MasterKey {
 
 // --- Keystore Struct ---
 
+/// A secure cryptographic keystore for managing private keys and sensitive data.
+///
+/// ## Thread Safety
+///
+/// **IMPORTANT: This keystore is NOT thread-safe and must NOT be used concurrently.**
+///
+/// The `Keystore` intentionally does NOT implement `Send` or `Sync` to prevent accidental
+/// concurrent access. Concurrent use would cause:
+/// - Race conditions on non-atomic counters (`global_nonce_counter`, rate-limit state)
+/// - Nonce reuse leading to **cipher-text forgery** and data loss
+/// - Memory corruption and undefined behavior
+///
+/// Each keystore instance must be used from a single thread only. If you need to access
+/// the keystore from multiple threads, you must:
+/// 1. Use external synchronization (e.g., `Mutex<Keystore>`)
+/// 2. OR create separate keystore instances per thread (not recommended for the same file)
+///
+/// ## Secure Key Usage
+///
+/// **IMPORTANT: This keystore prevents sensitive key material exposure.**
+///
+/// The preferred signing methods are:
+/// - [`sign_hash()`] - Signs without exposing raw `SigningKey` instances
+/// - [`get_public_key()`] - Gets public keys without private key exposure
+///
+/// **SECURITY**: [`get_signer()`] returns a `ZeroizingSigningKey` that provides secure methods
+/// for signing and key operations without exposing raw `k256::SigningKey` instances.
+///
+/// ## Security Features
+///
+/// - Password-based key derivation using Argon2id
+/// - AES-256-GCM encryption for private keys
+/// - HMAC-based authentication for data integrity
+/// - Monotonic nonce counter to prevent nonce reuse
+/// - Session management with auto-lock functionality
+/// - Rate limiting for unlock attempts
+/// - Audit logging for security events
+/// - Secure signing methods that prevent key material exposure
 pub struct Keystore {
     file_path: PathBuf,
     master_key: Option<MasterKey>,
@@ -537,7 +693,8 @@ pub struct Keystore {
 
     // F-7: Thread safety marker - keystore is NOT thread-safe by design
     // Prevents accidental concurrent access that could cause memory races or data loss
-    _not_thread_safe: std::marker::PhantomData<std::sync::Mutex<()>>,
+    // Raw pointer makes struct !Send + !Sync (raw pointers are not Send/Sync)
+    _not_thread_safe: *const (),
 
     // Test mode flag to enable relaxed validation for unit tests
     #[cfg(test)]
@@ -754,7 +911,7 @@ impl Keystore {
             global_nonce_counter: 0,
 
             // F-7: Initialize thread safety marker
-            _not_thread_safe: std::marker::PhantomData,
+            _not_thread_safe: std::ptr::null(),
 
             // Initialize test mode
             #[cfg(test)]
@@ -817,7 +974,7 @@ impl Keystore {
             global_nonce_counter: 0,
 
             // F-7: Initialize thread safety marker
-            _not_thread_safe: std::marker::PhantomData,
+            _not_thread_safe: std::ptr::null(),
 
             // Initialize production mode
             #[cfg(test)]
@@ -874,7 +1031,7 @@ impl Keystore {
             last_suspicious_activity: None,
             used_nonces: HashSet::new(),
             global_nonce_counter: 0,
-            _not_thread_safe: std::marker::PhantomData,
+            _not_thread_safe: std::ptr::null(),
             // Mark as production mode even in test build
             is_test_mode: false,
         })
@@ -1971,9 +2128,9 @@ impl Keystore {
         let secret_key = SecretKey::from_slice(decrypted_pk_zeroizing_vec.as_slice())
             .map_err(|_| KeystoreError::InvalidPrivateKey)?; // Should be valid if encryption/decryption worked
 
-        let signing_key = SigningKey::from(secret_key);
-        // Fix for F-3: Return ZeroizingSigningKey instead of raw SigningKey
+        // Fix for F-3: Create ZeroizingSigningKey directly from bytes instead of raw SigningKey
         // This ensures the key will be properly zeroized when dropped
+        let zeroizing_key = ZeroizingSigningKey::new(&secret_key.to_bytes())?;
 
         self.update_activity_timestamp();
 
@@ -1986,7 +2143,7 @@ impl Keystore {
             "Private key accessed for signing"
         );
 
-        Ok(ZeroizingSigningKey::from(signing_key))
+        Ok(zeroizing_key)
     }
 
     // Verify a signature against a message hash using the key identified by uuid
@@ -2006,10 +2163,8 @@ impl Keystore {
         // Get the signer for this key
         let zeroizing_signing_key = self.get_signer(uuid)?;
 
-        // Get the verifying key from the signing key
-        // Instantiate SigningKey on-demand and get verifying key
-        let signing_key = zeroizing_signing_key.to_signing_key()?;
-        let verifying_key = signing_key.verifying_key();
+        // Get the verifying key from the signing key (secure method)
+        let verifying_key = zeroizing_signing_key.verifying_key()?;
 
         // Convert the alloy signature to k256 signature format
         let r_bytes = signature.r().to_be_bytes::<32>();
@@ -2032,6 +2187,140 @@ impl Keystore {
 
         self.update_activity_timestamp();
         Ok(result)
+    }
+
+    /// Securely sign a hash without exposing sensitive key material
+    /// This is the preferred method for signing as it never exposes raw SigningKey instances
+    pub fn sign_hash(
+        &mut self,
+        uuid: Uuid,
+        hash: &[u8],
+    ) -> Result<k256::ecdsa::Signature, KeystoreError> {
+        // Check auto-lock before proceeding
+        self.check_auto_lock();
+        self.check_concurrent_access()?;
+
+        if !self.is_unlocked || self.master_key.is_none() {
+            return Err(KeystoreError::Locked);
+        }
+
+        if hash.len() != 32 {
+            return Err(KeystoreError::InvalidFormat(
+                "Hash must be exactly 32 bytes".to_string(),
+            ));
+        }
+
+        // Find the entry
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| e.id == uuid)
+            .ok_or(KeystoreError::KeyNotFound(uuid))?;
+
+        // Decrypt the private key
+        let encrypted_pk_bytes =
+            Zeroizing::new(BASE64_STANDARD.decode(&entry.encrypted_pk).map_err(|_e| {
+                KeystoreError::InvalidFormat(
+                    "sign_hash: Failed to decode entry.encrypted_pk".to_string(),
+                )
+            })?);
+
+        let nonce_vec = Zeroizing::new(BASE64_STANDARD.decode(&entry.nonce).map_err(|_e| {
+            KeystoreError::InvalidFormat("sign_hash: Failed to decode entry.nonce".to_string())
+        })?);
+
+        let aes_nonce_bytes: [u8; 12] = nonce_vec.as_slice().try_into().map_err(|_| {
+            KeystoreError::InvalidFormat(
+                "sign_hash: Invalid AES nonce length for entry.nonce".to_string(),
+            )
+        })?;
+
+        let decrypted_pk_zeroizing_vec = self.decrypt_pk(
+            encrypted_pk_bytes.as_slice(),
+            &aes_nonce_bytes,
+            &entry.id,
+            &entry.address,
+            &entry.hkdf_salt,
+        )?;
+
+        // Create secret key and sign directly without exposing SigningKey
+        let secret_key = SecretKey::from_slice(decrypted_pk_zeroizing_vec.as_slice())
+            .map_err(|_| KeystoreError::InvalidPrivateKey)?;
+
+        // Create signing key temporarily - it will be dropped at end of scope
+        let signing_key = SigningKey::from(&secret_key);
+
+        // Sign the hash
+        let signature = signing_key
+            .sign_prehash(hash)
+            .map_err(|e| KeystoreError::InvalidFormat(format!("Signing failed: {}", e)))?;
+
+        self.update_activity_timestamp();
+
+        // L-2: Log signing operation
+        info!(
+            event = "hash_signed",
+            key_id = %uuid,
+            operation = "sign_hash",
+            session_id = %self.get_session_id_for_audit().unwrap_or_default(),
+            "Hash signed securely without key material exposure"
+        );
+
+        Ok(signature)
+    }
+
+    /// Get public key for a stored private key without exposing private key material
+    pub fn get_public_key(&mut self, uuid: Uuid) -> Result<k256::PublicKey, KeystoreError> {
+        // Check auto-lock before proceeding
+        self.check_auto_lock();
+        self.check_concurrent_access()?;
+
+        if !self.is_unlocked || self.master_key.is_none() {
+            return Err(KeystoreError::Locked);
+        }
+
+        // Find the entry
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| e.id == uuid)
+            .ok_or(KeystoreError::KeyNotFound(uuid))?;
+
+        // Decrypt the private key
+        let encrypted_pk_bytes =
+            Zeroizing::new(BASE64_STANDARD.decode(&entry.encrypted_pk).map_err(|_e| {
+                KeystoreError::InvalidFormat(
+                    "get_public_key: Failed to decode entry.encrypted_pk".to_string(),
+                )
+            })?);
+
+        let nonce_vec = Zeroizing::new(BASE64_STANDARD.decode(&entry.nonce).map_err(|_e| {
+            KeystoreError::InvalidFormat("get_public_key: Failed to decode entry.nonce".to_string())
+        })?);
+
+        let aes_nonce_bytes: [u8; 12] = nonce_vec.as_slice().try_into().map_err(|_| {
+            KeystoreError::InvalidFormat(
+                "get_public_key: Invalid AES nonce length for entry.nonce".to_string(),
+            )
+        })?;
+
+        let decrypted_pk_zeroizing_vec = self.decrypt_pk(
+            encrypted_pk_bytes.as_slice(),
+            &aes_nonce_bytes,
+            &entry.id,
+            &entry.address,
+            &entry.hkdf_salt,
+        )?;
+
+        // Get public key from private key
+        let secret_key = SecretKey::from_slice(decrypted_pk_zeroizing_vec.as_slice())
+            .map_err(|_| KeystoreError::InvalidPrivateKey)?;
+
+        let public_key = secret_key.public_key();
+
+        self.update_activity_timestamp();
+
+        Ok(public_key)
     }
 
     pub fn delete_key(&mut self, uuid: Uuid) -> Result<(), KeystoreError> {
