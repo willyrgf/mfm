@@ -1,21 +1,60 @@
-/// Minimal secure keystore for Ethereum keys and mnemonics
-///
-/// This is a simplified, focused implementation that provides only essential
-/// functionality for storing and retrieving Ethereum private keys and mnemonics.
-///
-/// # Security Assumptions
-///
-/// - Full disk encryption (including swap) is enabled
-/// - Single-threaded usage (not Send + Sync)
-/// - Local-only operation (no network features)
-/// - Trusted application environment
-///
-/// # Design Principles
-///
-/// - Simplicity over feature completeness
-/// - Security by default with minimal configuration
-/// - Clear separation of concerns
-/// - Minimal attack surface
+//! # Keystore Module
+//!
+//! Minimal secure keystore for Ethereum keys and mnemonics.
+//!
+//! This is a simplified, focused implementation that provides only essential
+//! functionality for storing and retrieving Ethereum private keys and mnemonics.
+//!
+//! ## Quick Start
+//!
+//! ```rust
+//! use mfm_core::keystore::{Keystore, KeystoreConfig};
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Use minimal config for doctest (don't use in production!)
+//!     let unsafe_fast_config = KeystoreConfig {
+//!         argon2_memory_kb: 64,    // 64KB - minimal for doctest
+//!         argon2_iterations: 1,    // 1 iteration - minimal
+//!         argon2_parallelism: 1,
+//!     };
+//!     let temp_dir = tempfile::tempdir()?;
+//!     let keystore_path = temp_dir.path().join("keystore.json");
+//!
+//!     let mut keystore = Keystore::new_with_config(&keystore_path, unsafe_fast_config)?;
+//!     keystore.unlock("secure_password")?;
+//!
+//!     // Import a private key
+//!     let key_id = keystore.import_private_key(
+//!         Some("my-wallet".to_string()),
+//!         "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+//!     )?;
+//!
+//!     // List all keys
+//!     let keys = keystore.list_keys()?;
+//!     println!("Stored {} keys", keys.len());
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Security Model
+//!
+//! - **Full disk encryption** (including swap) assumed to be enabled
+//! - **Single-threaded usage** - not designed for concurrent access
+//! - **Local-only operation** - no network features or remote storage
+//! - **Trusted application environment** - assumes application is not compromised
+//!
+//! ## Design Principles
+//!
+//! - **Simplicity over feature completeness**: Only essential functionality
+//! - **Security by default**: Secure configurations are the default
+//! - **Minimal attack surface**: Fewer features mean fewer vulnerabilities
+//! - **Clear separation of concerns**: Each component has a single responsibility
+//!
+//! ## Documentation
+//!
+//! For comprehensive documentation including security considerations, usage patterns,
+//! and troubleshooting, see [`KEYSTORE.md`](./KEYSTORE.md).
 pub mod error;
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -482,13 +521,11 @@ impl Keystore {
         self.save_to_disk()?;
 
         // Reload from disk to ensure file_integrity_mac is properly loaded
-        self.master_key = None; // Clear temporarily to reload
+        let saved_master_key = self.master_key.take(); // Save the derived key
         self.load_from_disk()?;
 
-        // Rederive master key to restore unlocked state
-        let kdf_params = self.kdf_params.as_ref().unwrap();
-        let master_key = self.derive_master_key(password, kdf_params)?;
-        self.master_key = Some(master_key);
+        // Restore the master key
+        self.master_key = saved_master_key;
 
         Ok(())
     }
