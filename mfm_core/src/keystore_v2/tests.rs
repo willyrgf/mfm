@@ -681,7 +681,7 @@ fn test_file_integrity_protection() {
 
     // Read the original file content
     let original_content = std::fs::read_to_string(&keystore_path).unwrap();
-    
+
     // Tamper with the file by changing an alias
     let tampered_content = original_content.replace("test_key", "hacked_key");
     std::fs::write(&keystore_path, tampered_content).unwrap();
@@ -689,11 +689,11 @@ fn test_file_integrity_protection() {
     // Try to load the tampered keystore
     let mut keystore2 =
         Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-    
+
     // Unlock should fail due to integrity check failure
     let result = keystore2.unlock("test_password");
     assert!(result.is_err());
-    
+
     // Verify it's specifically an integrity error
     match result.unwrap_err() {
         KeystoreError::InvalidInput(msg) => {
@@ -729,7 +729,7 @@ fn test_file_integrity_protection_entry_swap() {
 
     // Tamper with the file by manually swapping encrypted entry data
     let mut file_content = std::fs::read_to_string(&keystore_path).unwrap();
-    
+
     // This is a simplified tampering - in practice an attacker would swap the encrypted_data fields
     // For this test, we'll just modify some data to trigger integrity failure
     file_content = file_content.replacen("key1", "swapped1", 1);
@@ -738,15 +738,172 @@ fn test_file_integrity_protection_entry_swap() {
     // Try to load the tampered keystore
     let mut keystore2 =
         Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-    
+
     // Unlock should fail due to integrity check failure
     let result = keystore2.unlock("test_password");
     assert!(result.is_err());
-    
+
     match result.unwrap_err() {
         KeystoreError::InvalidInput(msg) => {
             assert!(msg.contains("integrity verification failed"));
         }
         other => panic!("Expected integrity verification failure, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_aad_prevents_entry_swapping() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("aad_test.keystore");
+
+    // Create keystore with two different keys
+    let (key1_id, key2_id) = {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("test_password").unwrap();
+
+        let key1_id = keystore
+            .import_private_key(
+                Some("key1".to_string()),
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .unwrap();
+
+        let key2_id = keystore
+            .import_private_key(
+                Some("key2".to_string()),
+                "0000000000000000000000000000000000000000000000000000000000000002",
+            )
+            .unwrap();
+
+        (key1_id, key2_id)
+    };
+
+    // Verify keys work correctly before any tampering
+    {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("test_password").unwrap();
+
+        let key1 = keystore.get_private_key(key1_id).unwrap();
+        let key2 = keystore.get_private_key(key2_id).unwrap();
+
+        // Verify they have different addresses (confirming they are different keys)
+        assert_ne!(key1.ethereum_address(), key2.ethereum_address());
+
+        // Test that both keys can sign different data successfully
+        let hash1 = [1u8; 32];
+        let hash2 = [2u8; 32];
+        let sig1 = key1.sign_hash(&hash1).unwrap();
+        let sig2 = key2.sign_hash(&hash2).unwrap();
+
+        // Signatures should be different (confirming AAD preserves key uniqueness)
+        assert_ne!(sig1.to_bytes(), sig2.to_bytes());
+    }
+
+    // Now attempt to manually swap encrypted_data between entries
+    {
+        let file_content = std::fs::read_to_string(&keystore_path).unwrap();
+        let mut keystore_data: serde_json::Value = serde_json::from_str(&file_content).unwrap();
+
+        // Swap the encrypted_data between the two entries
+        if let Some(entries) = keystore_data["entries"].as_array_mut() {
+            if entries.len() >= 2 {
+                let temp = entries[0]["encrypted_data"].clone();
+                entries[0]["encrypted_data"] = entries[1]["encrypted_data"].clone();
+                entries[1]["encrypted_data"] = temp;
+            }
+        }
+
+        // Write the tampered file back
+        let tampered_content = serde_json::to_string_pretty(&keystore_data).unwrap();
+        std::fs::write(&keystore_path, tampered_content).unwrap();
+    }
+
+    // Try to access the swapped entries - should fail due to AAD mismatch
+    {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        let result = keystore.unlock("test_password");
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            KeystoreError::InvalidInput(msg) => {
+                assert!(msg.contains("File integrity verification failed"));
+            }
+            other => panic!("Expected InvalidInput error, got: {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn test_early_file_validation_dos_protection() {
+    let temp_dir = tempdir().unwrap();
+
+    // Test oversized file detection
+    {
+        let keystore_path = temp_dir.path().join("large_test.keystore");
+        // Create keystore object first (when file doesn't exist)
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+
+        // Then create oversized file
+        let large_content = "x".repeat(15 * 1024 * 1024); // 15MB > 10MB limit
+        std::fs::write(&keystore_path, large_content).unwrap();
+
+        let result = keystore.unlock("any_password");
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            KeystoreError::InvalidInput(msg) => {
+                assert!(msg.contains("too large"));
+            }
+            other => panic!("Expected size validation error, got: {:?}", other),
+        }
+    }
+
+    // Test undersized file detection
+    {
+        let keystore_path = temp_dir.path().join("small_test.keystore");
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+
+        std::fs::write(&keystore_path, "tiny").unwrap();
+        let result = keystore.unlock("any_password");
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            KeystoreError::InvalidInput(msg) => {
+                assert!(msg.contains("too small"));
+            }
+            other => panic!("Expected size validation error, got: {:?}", other),
+        }
+    }
+
+    // Test malformed JSON detection
+    {
+        let keystore_path = temp_dir.path().join("json_test.keystore");
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+
+        // Create malformed JSON that's large enough to pass size check but invalid JSON
+        let malformed_json = format!(
+            "{{ \"version\": 1, \"invalid\": {}, \"truncated\": ",
+            "x".repeat(200)
+        );
+        std::fs::write(&keystore_path, malformed_json).unwrap();
+        let result = keystore.unlock("any_password");
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            KeystoreError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("invalid JSON") || msg.contains("Malformed"),
+                    "Got unexpected message: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected JSON validation error, got: {:?}", other),
+        }
     }
 }

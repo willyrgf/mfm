@@ -37,6 +37,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub use error::KeystoreError;
 
+const KEYSTORE_FILE_VERSION: u8 = 1;
+
 /// Simplified configuration with secure defaults
 #[derive(Debug, Clone)]
 pub struct KeystoreConfig {
@@ -156,7 +158,7 @@ impl SecureKey {
         let result = signing_key
             .sign_prehash(hash)
             .map_err(|e| KeystoreError::CryptoError(format!("Signing failed: {}", e)));
-        
+
         // Note: SecretKey and SigningKey implement ZeroizeOnDrop automatically
         // via the k256 crate, so they will be zeroized when dropped
         result
@@ -237,6 +239,9 @@ impl Keystore {
 
     /// Initialize new keystore or unlock existing one
     pub fn unlock(&mut self, password: &str) -> Result<(), KeystoreError> {
+        // Early file validation to detect malformed files before expensive operations
+        self.early_file_validation()?;
+
         if self.path.exists() {
             // Unlock existing keystore
             self.unlock_existing(password)
@@ -275,7 +280,7 @@ impl Keystore {
 
         let mut key_array = [0u8; 32];
         key_array.copy_from_slice(&private_key_bytes);
-        
+
         // Zeroize the Vec<u8> immediately after copying
         private_key_bytes.zeroize();
 
@@ -298,7 +303,7 @@ impl Keystore {
             KeystoreError::CryptoError("Failed to generate random nonce".to_string())
         })?;
 
-        let encrypted_data = self.encrypt_data(master_key, &nonce, &key_array)?;
+        let encrypted_data = self.encrypt_data(master_key, &nonce, &key_array, id.as_bytes())?;
 
         let entry = KeyEntry {
             id,
@@ -338,13 +343,13 @@ impl Keystore {
         // Derive private key from mnemonic - wrap seed in Zeroizing for automatic cleanup
         let seed_bytes = mnemonic.to_seed("");
         let mut seed = Zeroizing::new(seed_bytes);
-        
+
         // Limit XPrv scope to ensure it's dropped quickly
         let mut private_key_bytes = {
             let derived_xprv = XPrv::derive_from_path(&*seed, &derivation_path_obj)?;
             derived_xprv.private_key().to_bytes()
         };
-        
+
         let mut key_array = [0u8; 32];
         key_array.copy_from_slice(&private_key_bytes);
 
@@ -362,7 +367,8 @@ impl Keystore {
             KeystoreError::CryptoError("Failed to generate random nonce".to_string())
         })?;
 
-        let encrypted_data = self.encrypt_data(master_key, &nonce, &mnemonic_bytes)?;
+        let encrypted_data =
+            self.encrypt_data(master_key, &nonce, &mnemonic_bytes, id.as_bytes())?;
 
         let entry = KeyEntry {
             id,
@@ -399,7 +405,12 @@ impl Keystore {
             .find(|e| e.id == id)
             .ok_or(KeystoreError::KeyNotFound(id))?;
 
-        let decrypted_data = self.decrypt_data(master_key, &entry.nonce, &entry.encrypted_data)?;
+        let decrypted_data = self.decrypt_data(
+            master_key,
+            &entry.nonce,
+            &entry.encrypted_data,
+            entry.id.as_bytes(),
+        )?;
 
         match &entry.key_type {
             KeyType::PrivateKey => {
@@ -420,13 +431,13 @@ impl Keystore {
                 // Derive private key from mnemonic - wrap seed in Zeroizing for automatic cleanup
                 let seed_bytes = mnemonic.to_seed("");
                 let mut seed = Zeroizing::new(seed_bytes);
-                
+
                 // Limit XPrv scope to ensure it's dropped quickly
                 let mut private_key_bytes = {
                     let derived_xprv = XPrv::derive_from_path(&*seed, &derivation_path_obj)?;
                     derived_xprv.private_key().to_bytes()
                 };
-                
+
                 let mut key_array = [0u8; 32];
                 key_array.copy_from_slice(&private_key_bytes);
 
@@ -493,7 +504,7 @@ impl Keystore {
         // Reload from disk to ensure file_integrity_mac is properly loaded
         self.master_key = None; // Clear temporarily to reload
         self.load_from_disk()?;
-        
+
         // Rederive master key to restore unlocked state
         let kdf_params = self.kdf_params.as_ref().unwrap();
         let master_key = self.derive_master_key(password, kdf_params)?;
@@ -521,7 +532,7 @@ impl Keystore {
         if computed_verification == stored_verification {
             // Verify file integrity after password verification
             self.verify_file_integrity(&master_key)?;
-            
+
             self.master_key = Some(master_key);
             Ok(())
         } else {
@@ -562,7 +573,11 @@ impl Keystore {
         Ok(verification)
     }
 
-    fn compute_file_integrity_mac(&self, master_key: &[u8; 32], file_data: &[u8]) -> Result<[u8; 32], KeystoreError> {
+    fn compute_file_integrity_mac(
+        &self,
+        master_key: &[u8; 32],
+        file_data: &[u8],
+    ) -> Result<[u8; 32], KeystoreError> {
         use ring::hmac;
         let key = hmac::Key::new(hmac::HMAC_SHA256, master_key);
         let tag = hmac::sign(&key, file_data);
@@ -576,12 +591,19 @@ impl Keystore {
         master_key: &[u8; 32],
         nonce: &[u8; 12],
         data: &[u8],
+        additional_data: &[u8],
     ) -> Result<Vec<u8>, KeystoreError> {
         let key = Key::<Aes256Gcm>::from_slice(master_key);
         let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(nonce);
 
-        cipher.encrypt(nonce, data).map_err(KeystoreError::from)
+        use aes_gcm::aead::Payload;
+        let payload = Payload {
+            msg: data,
+            aad: additional_data,
+        };
+
+        cipher.encrypt(nonce, payload).map_err(KeystoreError::from)
     }
 
     fn decrypt_data(
@@ -589,13 +611,20 @@ impl Keystore {
         master_key: &[u8; 32],
         nonce: &[u8; 12],
         encrypted_data: &[u8],
+        additional_data: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, KeystoreError> {
         let key = Key::<Aes256Gcm>::from_slice(master_key);
         let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(nonce);
 
+        use aes_gcm::aead::Payload;
+        let payload = Payload {
+            msg: encrypted_data,
+            aad: additional_data,
+        };
+
         cipher
-            .decrypt(nonce, encrypted_data)
+            .decrypt(nonce, payload)
             .map(Zeroizing::new)
             .map_err(KeystoreError::from)
     }
@@ -616,7 +645,7 @@ impl Keystore {
 
         // Create keystore file structure without MAC first for canonical serialization
         let keystore_file_without_mac = KeystoreFile {
-            version: 1,
+            version: KEYSTORE_FILE_VERSION,
             kdf_params: kdf_params.clone(),
             master_key_verification,
             entries: self.entries.clone(),
@@ -625,13 +654,14 @@ impl Keystore {
 
         // Serialize to get canonical byte representation
         let json_data_without_mac = serde_json::to_string_pretty(&keystore_file_without_mac)?;
-        
+
         // Compute MAC over the canonical serialized data (excluding the placeholder MAC)
-        let file_integrity_mac = self.compute_file_integrity_mac(master_key, json_data_without_mac.as_bytes())?;
+        let file_integrity_mac =
+            self.compute_file_integrity_mac(master_key, json_data_without_mac.as_bytes())?;
 
         // Create final keystore file with the computed MAC
         let keystore_file = KeystoreFile {
-            version: 1,
+            version: KEYSTORE_FILE_VERSION,
             kdf_params: kdf_params.clone(),
             master_key_verification,
             entries: self.entries.clone(),
@@ -648,16 +678,79 @@ impl Keystore {
         let data = std::fs::read(&self.path)?;
         let keystore_file: KeystoreFile = serde_json::from_slice(&data)?;
 
-        if keystore_file.version != 1 {
-            return Err(KeystoreError::InvalidInput(
-                format!("Unsupported keystore version: {}", keystore_file.version),
-            ));
+        if keystore_file.version != KEYSTORE_FILE_VERSION {
+            return Err(KeystoreError::InvalidInput(format!(
+                "Unsupported keystore version: {}",
+                keystore_file.version
+            )));
         }
 
         self.kdf_params = Some(keystore_file.kdf_params);
         self.master_key_verification = Some(keystore_file.master_key_verification);
         self.file_integrity_mac = Some(keystore_file.file_integrity_mac);
         self.entries = keystore_file.entries;
+
+        Ok(())
+    }
+
+    fn early_file_validation(&self) -> Result<(), KeystoreError> {
+        // Early validation with dummy key to detect obviously malformed files
+        // before expensive password derivation
+        if !self.path.exists() {
+            return Ok(()); // New keystore, nothing to validate
+        }
+
+        let data = std::fs::read(&self.path)
+            .map_err(|_| KeystoreError::InvalidInput("Cannot read keystore file".to_string()))?;
+
+        // Basic size check - keystore files should be reasonable size
+        const MAX_KEYSTORE_SIZE: usize = 10 * 1024 * 1024; // 10MB
+        const MIN_KEYSTORE_SIZE: usize = 100; // Minimum JSON structure
+
+        if data.len() > MAX_KEYSTORE_SIZE {
+            return Err(KeystoreError::InvalidInput(
+                "Keystore file too large - possible DoS attempt".to_string(),
+            ));
+        }
+
+        if data.len() < MIN_KEYSTORE_SIZE {
+            return Err(KeystoreError::InvalidInput(
+                "Keystore file too small - likely corrupted".to_string(),
+            ));
+        }
+
+        // Parse JSON structure to ensure it's valid
+        let keystore_file: KeystoreFile = serde_json::from_slice(&data).map_err(|_| {
+            KeystoreError::InvalidInput("Malformed keystore file - invalid JSON".to_string())
+        })?;
+
+        // Basic structure validation
+        if keystore_file.version != KEYSTORE_FILE_VERSION {
+            return Err(KeystoreError::InvalidInput(format!(
+                "Unsupported keystore version: {}",
+                keystore_file.version
+            )));
+        }
+
+        // Check for reasonable entry count
+        const MAX_ENTRIES: usize = 10000; // Reasonable limit
+        if keystore_file.entries.len() > MAX_ENTRIES {
+            return Err(KeystoreError::InvalidInput(
+                "Too many entries - possible DoS attempt".to_string(),
+            ));
+        }
+
+        // Per-entry ciphertext size (optional limit ≈ 1 MiB)
+        const MAX_ENTRY_DATA: usize = 1 * 1024 * 1024;
+        if keystore_file
+            .entries
+            .iter()
+            .any(|e| e.encrypted_data.len() > MAX_ENTRY_DATA)
+        {
+            return Err(KeystoreError::InvalidInput(
+                "Entry too large – likely corrupted".into(),
+            ));
+        }
 
         Ok(())
     }
@@ -669,10 +762,10 @@ impl Keystore {
 
         // Read the file again for verification
         let data = std::fs::read(&self.path)?;
-        
+
         // Parse to extract the data without the MAC for verification
         let keystore_file: KeystoreFile = serde_json::from_slice(&data)?;
-        
+
         // Create the same structure used during save (with placeholder MAC)
         let keystore_file_without_mac = KeystoreFile {
             version: keystore_file.version,
@@ -683,12 +776,14 @@ impl Keystore {
         };
 
         let json_data_without_mac = serde_json::to_string_pretty(&keystore_file_without_mac)?;
-        let computed_mac = self.compute_file_integrity_mac(master_key, json_data_without_mac.as_bytes())?;
+        let computed_mac =
+            self.compute_file_integrity_mac(master_key, json_data_without_mac.as_bytes())?;
 
         // Constant-time comparison to prevent timing attacks
         if computed_mac != stored_mac {
             return Err(KeystoreError::InvalidInput(
-                "File integrity verification failed - keystore may have been tampered with".to_string(),
+                "File integrity verification failed - keystore may have been tampered with"
+                    .to_string(),
             ));
         }
 
