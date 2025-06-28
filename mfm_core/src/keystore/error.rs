@@ -1,66 +1,70 @@
-use thiserror::Error;
-use uuid::Uuid;
-
-// --- Error Enum ---
-#[derive(Error, Debug)]
+/// Simplified error types for minimal keystore
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum KeystoreError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("Serialization error: {0}")]
-    SerdeJson(#[from] serde_json::Error),
-    #[error("Argon2 error: {0}")]
-    Argon2Error(String),
-    #[error("AES-GCM error: {0}")]
-    AesGcm(String),
-    #[error("BIP-39 error: {0}")]
-    Bip39(#[from] bip39::Error),
-    #[error("BIP-32 error: {0}")]
-    Bip32(#[from] bip32::Error),
-    #[error("k256 error: {0}")]
-    K256(#[from] k256::elliptic_curve::Error),
-    #[error("Hex decoding error: {0}")]
-    Hex(#[from] hex::FromHexError),
-    #[error("Keystore is locked")]
-    Locked,
     #[error("Invalid password")]
     InvalidPassword,
+
+    #[error("Keystore is locked")]
+    Locked,
+
     #[error("Key not found: {0}")]
-    KeyNotFound(Uuid),
-    #[error("Invalid derivation path: {0}")]
-    InvalidPath(String),
-    #[error("Failed to derive key")]
-    DerivationFailed,
-    #[error("File system error: {0}")]
-    FsError(String),
-    #[error("Persistence FsError: {0}")]
-    FsErrorPersistence(String),
-    #[error("Invalid keystore file format: {0}")]
-    InvalidFormat(String),
-    #[error("Master KDF parameters mismatch")]
-    KdfParamsMismatch,
-    #[error("Unsupported KDF: {0}")]
-    UnsupportedKdf(String),
-    #[error("Signature verification failed")]
-    SignatureVerificationFailed,
-    #[error("Missing master key")]
-    MissingMasterKey,
-    #[error("Alias already exists: {0}")]
-    AliasExists(String),
-    #[error("Private key is invalid")]
+    KeyNotFound(uuid::Uuid),
+
+    #[error("Invalid private key format")]
     InvalidPrivateKey,
-    #[error("Keystore is missing a verification tag. File may be corrupted.")]
-    MissingVerificationTag,
-    #[error("MAC verification failed. Keystore data may have been tampered with.")]
-    MacVerificationFailure,
-    #[error("Internal error: {0}")]
-    InternalError(String),
-    #[error("Deserialization error: {0}")]
-    DeserializationError(String),
-    #[error("Serialization error: {0}")]
+
+    #[error("Invalid mnemonic: {0}")]
+    InvalidMnemonic(String),
+
+    #[error("Invalid derivation path: {0}")]
+    InvalidDerivationPath(String),
+
+    #[error("Cryptographic operation failed: {0}")]
+    CryptoError(String),
+
+    #[error("File operation failed: {0}")]
+    FileError(String),
+
+    #[error("Serialization failed: {0}")]
     SerializationError(String),
-    #[error("Too many unlock attempts. Please wait {retry_after_ms} ms before trying again. Attempts remaining: {attempts_remaining}")]
-    RateLimited {
-        retry_after_ms: u64,
-        attempts_remaining: u32,
-    },
+
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+}
+
+// Convert from common error types
+impl From<std::io::Error> for KeystoreError {
+    fn from(err: std::io::Error) -> Self {
+        KeystoreError::FileError(err.to_string())
+    }
+}
+
+impl From<serde_json::Error> for KeystoreError {
+    fn from(err: serde_json::Error) -> Self {
+        KeystoreError::SerializationError(err.to_string())
+    }
+}
+
+impl From<aes_gcm::Error> for KeystoreError {
+    fn from(err: aes_gcm::Error) -> Self {
+        KeystoreError::CryptoError(format!("AES-GCM error: {:?}", err))
+    }
+}
+
+impl From<argon2::Error> for KeystoreError {
+    fn from(err: argon2::Error) -> Self {
+        KeystoreError::CryptoError(format!("Argon2 error: {:?}", err))
+    }
+}
+
+impl From<bip32::Error> for KeystoreError {
+    fn from(err: bip32::Error) -> Self {
+        KeystoreError::InvalidDerivationPath(err.to_string())
+    }
+}
+
+impl From<bip39::Error> for KeystoreError {
+    fn from(err: bip39::Error) -> Self {
+        KeystoreError::InvalidMnemonic(err.to_string())
+    }
 }
