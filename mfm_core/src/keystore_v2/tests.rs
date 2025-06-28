@@ -646,7 +646,8 @@ fn test_keystore_version_handling() {
             "parallelism": 1
         },
         "master_key_verification": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        "entries": []
+        "entries": [],
+        "file_integrity_mac": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
     }"#;
 
     std::fs::write(&keystore_path, fake_keystore).unwrap();
@@ -658,4 +659,94 @@ fn test_keystore_version_handling() {
         result.unwrap_err(),
         KeystoreError::InvalidInput(_)
     ));
+}
+
+#[test]
+fn test_file_integrity_protection() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("integrity_test.keystore");
+
+    // Create and initialize keystore with a key
+    let _key_id = {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("test_password").unwrap();
+        keystore
+            .import_private_key(
+                Some("test_key".to_string()),
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .unwrap()
+    };
+
+    // Read the original file content
+    let original_content = std::fs::read_to_string(&keystore_path).unwrap();
+    
+    // Tamper with the file by changing an alias
+    let tampered_content = original_content.replace("test_key", "hacked_key");
+    std::fs::write(&keystore_path, tampered_content).unwrap();
+
+    // Try to load the tampered keystore
+    let mut keystore2 =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    
+    // Unlock should fail due to integrity check failure
+    let result = keystore2.unlock("test_password");
+    assert!(result.is_err());
+    
+    // Verify it's specifically an integrity error
+    match result.unwrap_err() {
+        KeystoreError::InvalidInput(msg) => {
+            assert!(msg.contains("integrity verification failed"));
+        }
+        other => panic!("Expected integrity verification failure, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_file_integrity_protection_entry_swap() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("entry_swap_test.keystore");
+
+    // Create keystore with two keys
+    {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("test_password").unwrap();
+        keystore
+            .import_private_key(
+                Some("key1".to_string()),
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .unwrap();
+        keystore
+            .import_private_key(
+                Some("key2".to_string()),
+                "0000000000000000000000000000000000000000000000000000000000000002",
+            )
+            .unwrap();
+    }
+
+    // Tamper with the file by manually swapping encrypted entry data
+    let mut file_content = std::fs::read_to_string(&keystore_path).unwrap();
+    
+    // This is a simplified tampering - in practice an attacker would swap the encrypted_data fields
+    // For this test, we'll just modify some data to trigger integrity failure
+    file_content = file_content.replacen("key1", "swapped1", 1);
+    std::fs::write(&keystore_path, file_content).unwrap();
+
+    // Try to load the tampered keystore
+    let mut keystore2 =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    
+    // Unlock should fail due to integrity check failure
+    let result = keystore2.unlock("test_password");
+    assert!(result.is_err());
+    
+    match result.unwrap_err() {
+        KeystoreError::InvalidInput(msg) => {
+            assert!(msg.contains("integrity verification failed"));
+        }
+        other => panic!("Expected integrity verification failure, got: {:?}", other),
+    }
 }

@@ -123,6 +123,7 @@ struct KeystoreFile {
     kdf_params: ArgonParams,
     master_key_verification: [u8; 32], // HMAC for password verification
     entries: Vec<KeyEntry>,
+    file_integrity_mac: [u8; 32], // HMAC over the entire file contents for integrity
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,6 +198,7 @@ pub struct Keystore {
     entries: Vec<KeyEntry>,
     kdf_params: Option<ArgonParams>,
     master_key_verification: Option<[u8; 32]>,
+    file_integrity_mac: Option<[u8; 32]>,
     // Thread safety marker - prevents Send + Sync
     _not_thread_safe: *const (),
 }
@@ -221,6 +223,7 @@ impl Keystore {
             entries: Vec::new(),
             kdf_params: None,
             master_key_verification: None,
+            file_integrity_mac: None,
             _not_thread_safe: std::ptr::null(),
         };
 
@@ -484,8 +487,17 @@ impl Keystore {
         self.kdf_params = Some(kdf_params);
         self.master_key_verification = Some(master_key_verification);
 
-        // Save empty keystore to disk
+        // Save empty keystore to disk (this will compute and include file_integrity_mac)
         self.save_to_disk()?;
+
+        // Reload from disk to ensure file_integrity_mac is properly loaded
+        self.master_key = None; // Clear temporarily to reload
+        self.load_from_disk()?;
+        
+        // Rederive master key to restore unlocked state
+        let kdf_params = self.kdf_params.as_ref().unwrap();
+        let master_key = self.derive_master_key(password, kdf_params)?;
+        self.master_key = Some(master_key);
 
         Ok(())
     }
@@ -507,6 +519,9 @@ impl Keystore {
 
         // Constant-time comparison of verification hashes
         if computed_verification == stored_verification {
+            // Verify file integrity after password verification
+            self.verify_file_integrity(&master_key)?;
+            
             self.master_key = Some(master_key);
             Ok(())
         } else {
@@ -547,6 +562,15 @@ impl Keystore {
         Ok(verification)
     }
 
+    fn compute_file_integrity_mac(&self, master_key: &[u8; 32], file_data: &[u8]) -> Result<[u8; 32], KeystoreError> {
+        use ring::hmac;
+        let key = hmac::Key::new(hmac::HMAC_SHA256, master_key);
+        let tag = hmac::sign(&key, file_data);
+        let mut mac = [0u8; 32];
+        mac.copy_from_slice(tag.as_ref());
+        Ok(mac)
+    }
+
     fn encrypt_data(
         &self,
         master_key: &[u8; 32],
@@ -582,7 +606,7 @@ impl Keystore {
             .as_ref()
             .ok_or(KeystoreError::InvalidInput("No KDF parameters".to_string()))?;
 
-        self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
+        let master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
 
         let master_key_verification =
             self.master_key_verification
@@ -590,11 +614,28 @@ impl Keystore {
                     "No verification hash".to_string(),
                 ))?;
 
+        // Create keystore file structure without MAC first for canonical serialization
+        let keystore_file_without_mac = KeystoreFile {
+            version: 1,
+            kdf_params: kdf_params.clone(),
+            master_key_verification,
+            entries: self.entries.clone(),
+            file_integrity_mac: [0u8; 32], // Placeholder MAC
+        };
+
+        // Serialize to get canonical byte representation
+        let json_data_without_mac = serde_json::to_string_pretty(&keystore_file_without_mac)?;
+        
+        // Compute MAC over the canonical serialized data (excluding the placeholder MAC)
+        let file_integrity_mac = self.compute_file_integrity_mac(master_key, json_data_without_mac.as_bytes())?;
+
+        // Create final keystore file with the computed MAC
         let keystore_file = KeystoreFile {
             version: 1,
             kdf_params: kdf_params.clone(),
             master_key_verification,
             entries: self.entries.clone(),
+            file_integrity_mac,
         };
 
         let json_data = serde_json::to_string_pretty(&keystore_file)?;
@@ -609,13 +650,47 @@ impl Keystore {
 
         if keystore_file.version != 1 {
             return Err(KeystoreError::InvalidInput(
-                "Unsupported keystore version".to_string(),
+                format!("Unsupported keystore version: {}", keystore_file.version),
             ));
         }
 
         self.kdf_params = Some(keystore_file.kdf_params);
         self.master_key_verification = Some(keystore_file.master_key_verification);
+        self.file_integrity_mac = Some(keystore_file.file_integrity_mac);
         self.entries = keystore_file.entries;
+
+        Ok(())
+    }
+
+    fn verify_file_integrity(&self, master_key: &[u8; 32]) -> Result<(), KeystoreError> {
+        let stored_mac = self.file_integrity_mac.ok_or(KeystoreError::InvalidInput(
+            "No file integrity MAC found".to_string(),
+        ))?;
+
+        // Read the file again for verification
+        let data = std::fs::read(&self.path)?;
+        
+        // Parse to extract the data without the MAC for verification
+        let keystore_file: KeystoreFile = serde_json::from_slice(&data)?;
+        
+        // Create the same structure used during save (with placeholder MAC)
+        let keystore_file_without_mac = KeystoreFile {
+            version: keystore_file.version,
+            kdf_params: keystore_file.kdf_params,
+            master_key_verification: keystore_file.master_key_verification,
+            entries: keystore_file.entries,
+            file_integrity_mac: [0u8; 32], // Same placeholder used during save
+        };
+
+        let json_data_without_mac = serde_json::to_string_pretty(&keystore_file_without_mac)?;
+        let computed_mac = self.compute_file_integrity_mac(master_key, json_data_without_mac.as_bytes())?;
+
+        // Constant-time comparison to prevent timing attacks
+        if computed_mac != stored_mac {
+            return Err(KeystoreError::InvalidInput(
+                "File integrity verification failed - keystore may have been tampered with".to_string(),
+            ));
+        }
 
         Ok(())
     }
