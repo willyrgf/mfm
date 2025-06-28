@@ -4,7 +4,14 @@
 /// for external consumers using only public interfaces.
 use super::*;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
+use static_assertions::assert_not_impl_any;
 use tempfile::tempdir;
+
+#[test]
+fn keystore_is_not_send_nor_sync() {
+    // Fails to compile if `Keystore` implements *any* of the listed traits
+    assert_not_impl_any!(Keystore: Send, Sync);
+}
 
 /// Helper function to create a test keystore with development config
 fn test_keystore() -> (tempfile::TempDir, Keystore) {

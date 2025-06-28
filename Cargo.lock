@@ -2688,6 +2688,7 @@ dependencies = [
  "sha2",
  "sha3",
  "signature",
+ "static_assertions",
  "subtle",
  "tempfile",
  "thiserror 2.0.12",
