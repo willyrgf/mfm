@@ -295,33 +295,27 @@ impl fmt::Display for StateError {
         match self {
             Self::Unknown(r, e) => write!(
                 f,
-                "unknown error; recoverability: {:?}; source error: {:?}",
-                r, e
+                "unknown error; recoverability: {r:?}; source error: {e:?}"
             ),
             Self::RpcConnection(r, e) => write!(
                 f,
-                "RPC connection error; recoverability: {:?}; source error: {:?}",
-                r, e
+                "RPC connection error; recoverability: {r:?}; source error: {e:?}"
             ),
             Self::StorageAccess(r, e) => write!(
                 f,
-                "storage access error; recoverability: {:?}; source error: {:?}",
-                r, e
+                "storage access error; recoverability: {r:?}; source error: {e:?}"
             ),
             Self::OnChainError(r, e) => write!(
                 f,
-                "on-chain error; recoverability: {:?}; source error: {:?}",
-                r, e
+                "on-chain error; recoverability: {r:?}; source error: {e:?}"
             ),
             Self::OffChainError(r, e) => write!(
                 f,
-                "off-chain error; recoverability: {:?}; source error: {:?}",
-                r, e
+                "off-chain error; recoverability: {r:?}; source error: {e:?}"
             ),
             Self::ParsingInput(r, e) => write!(
                 f,
-                "parsing input error; recoverability: {:?}; source error: {:?}",
-                r, e
+                "parsing input error; recoverability: {r:?}; source error: {e:?}"
             ),
         }
     }

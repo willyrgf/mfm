@@ -89,7 +89,7 @@ impl Encryption {
         let tag = self
             .sealing_key
             .seal_in_place_separate_tag(aead::Aad::empty(), &mut in_out)
-            .map_err(|e| format!("Encryption failed: {}", e))?;
+            .map_err(|e| format!("Encryption failed: {e}"))?;
 
         let mut result = Vec::with_capacity(NONCE_LEN + in_out.len() + tag.as_ref().len());
         result.extend_from_slice(&self.nonce);
@@ -105,7 +105,7 @@ impl Encryption {
     ) -> Result<Zeroizing<String>, Box<dyn std::error::Error>> {
         let data = STANDARD
             .decode(encrypted_data)
-            .map_err(|e| format!("Base64 decode failed: {}", e))?;
+            .map_err(|e| format!("Base64 decode failed: {e}"))?;
 
         if data.len() < NONCE_LEN {
             return Err("Invalid encrypted data length".into());
@@ -123,10 +123,10 @@ impl Encryption {
         let decrypted = self
             .opening_key
             .open_in_place(aead::Aad::empty(), &mut in_out)
-            .map_err(|e| format!("Decryption failed: {}", e))?;
+            .map_err(|e| format!("Decryption failed: {e}"))?;
 
         let result =
-            String::from_utf8(decrypted.to_vec()).map_err(|e| format!("Invalid UTF-8: {}", e))?;
+            String::from_utf8(decrypted.to_vec()).map_err(|e| format!("Invalid UTF-8: {e}"))?;
 
         Ok(Zeroizing::new(result))
     }

@@ -277,10 +277,7 @@ impl StateMachine {
                         .iter()
                         .any(|filter_tag| state_tags.contains(filter_tag))
                     {
-                        println!(
-                            "Skipping state at index {} because of filter",
-                            next_state_index
-                        );
+                        println!("Skipping state at index {next_state_index} because of filter");
                         // Skip this state and move to the next one
                         // First we need to determine what the next state is
                         let next_next_index = match self.scheduler.next_state(
@@ -466,13 +463,13 @@ mod test {
         println!("Executing state machine...");
         let result = state_machine.execute(safe_context);
 
-        println!("Result: {:?}", result);
+        println!("Result: {result:?}");
         assert!(result.is_ok());
 
         let safe_result = result.unwrap();
         println!("Reading report data...");
         let report_data: ReportCtx = safe_result.read_typed("report").unwrap();
-        println!("Report data: {:?}", report_data);
+        println!("Report data: {report_data:?}");
         assert_eq!(report_data.a, "setup_b_handled");
         assert_eq!(report_data.c, 2);
     }
@@ -498,7 +495,7 @@ mod test {
         // Use execute_with_filter
         let result = state_machine.execute_with_filter(safe_context, vec![standard_tags::REPORT]);
 
-        println!("Result: {:?}", result);
+        println!("Result: {result:?}");
         assert!(result.is_ok());
 
         // Report state should have been skipped, so no "report" data

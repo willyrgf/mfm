@@ -47,13 +47,13 @@ impl From<serde_json::Error> for KeystoreError {
 
 impl From<aes_gcm::Error> for KeystoreError {
     fn from(err: aes_gcm::Error) -> Self {
-        KeystoreError::CryptoError(format!("AES-GCM error: {:?}", err))
+        KeystoreError::CryptoError(format!("AES-GCM error: {err:?}"))
     }
 }
 
 impl From<argon2::Error> for KeystoreError {
     fn from(err: argon2::Error) -> Self {
-        KeystoreError::CryptoError(format!("Argon2 error: {:?}", err))
+        KeystoreError::CryptoError(format!("Argon2 error: {err:?}"))
     }
 }
 

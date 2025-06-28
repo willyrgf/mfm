@@ -154,8 +154,8 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned + 'static> TypedContext<T
 impl std::fmt::Debug for Box<dyn Context> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.dump() {
-            Ok(value) => write!(f, "{:?}", value),
-            Err(e) => write!(f, "Error dumping context: {:?}", e),
+            Ok(value) => write!(f, "{value:?}"),
+            Err(e) => write!(f, "Error dumping context: {e:?}"),
         }
     }
 }

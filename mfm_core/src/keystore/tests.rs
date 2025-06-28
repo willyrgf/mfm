@@ -324,7 +324,7 @@ fn test_import_private_key_edge_cases() {
     keystore.unlock("test_password").unwrap();
 
     // Test various valid private key formats
-    let valid_keys = vec![
+    let valid_keys = [
         "0000000000000000000000000000000000000000000000000000000000000001",
         "0x0000000000000000000000000000000000000000000000000000000000000002",
         "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140", // Large but valid secp256k1 key (curve order - 1)
@@ -332,15 +332,15 @@ fn test_import_private_key_edge_cases() {
     ];
 
     for (i, key) in valid_keys.iter().enumerate() {
-        let result = keystore.import_private_key(Some(format!("key_{}", i)), key);
+        let result = keystore.import_private_key(Some(format!("key_{i}")), key);
         match result {
-            Ok(_) => println!("Successfully imported key {}: {}", i, key),
-            Err(e) => panic!("Failed to import valid key {}: {} - Error: {:?}", i, key, e),
+            Ok(_) => println!("Successfully imported key {i}: {key}"),
+            Err(e) => panic!("Failed to import valid key {i}: {key} - Error: {e:?}"),
         }
     }
 
     // Test invalid private key formats
-    let invalid_keys = vec![
+    let invalid_keys = [
         "invalid_hex",
         "0x",
         "",
@@ -353,7 +353,7 @@ fn test_import_private_key_edge_cases() {
     for key in invalid_keys {
         let result = keystore.import_private_key(None, key);
         if result.is_ok() {
-            println!("Note: {} was accepted, which may be acceptable", key);
+            println!("Note: {key} was accepted, which may be acceptable");
         }
         // Note: We don't assert failure here since some edge cases might be acceptable
     }
@@ -367,7 +367,7 @@ fn test_import_mnemonic_edge_cases() {
     // Test valid mnemonic with different derivation paths
     let valid_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
-    let valid_paths = vec![
+    let valid_paths = [
         "m/44'/60'/0'/0/0", // Standard Ethereum path
         "m/44'/60'/0'/0/1", // Different account
         "m/44'/60'/1'/0/0", // Different account index
@@ -375,13 +375,12 @@ fn test_import_mnemonic_edge_cases() {
     ];
 
     for (i, path) in valid_paths.iter().enumerate() {
-        let result =
-            keystore.import_mnemonic(Some(format!("mnemonic_{}", i)), valid_mnemonic, path);
-        assert!(result.is_ok(), "Failed to import with valid path: {}", path);
+        let result = keystore.import_mnemonic(Some(format!("mnemonic_{i}")), valid_mnemonic, path);
+        assert!(result.is_ok(), "Failed to import with valid path: {path}");
     }
 
     // Test invalid derivation paths
-    let invalid_paths = vec![
+    let invalid_paths = [
         "invalid/path",
         "m/44'/60'/0'/0/-1", // Negative index
         "",
@@ -393,8 +392,7 @@ fn test_import_mnemonic_edge_cases() {
         let result = keystore.import_mnemonic(None, valid_mnemonic, path);
         if result.is_err() {
             println!(
-                "Note: path '{}' was rejected: {:?}",
-                path,
+                "Note: path '{path}' was rejected: {:?}",
                 result.unwrap_err()
             );
         }
@@ -402,7 +400,7 @@ fn test_import_mnemonic_edge_cases() {
     }
 
     // Test invalid mnemonics
-    let invalid_mnemonics = vec![
+    let invalid_mnemonics = [
         "invalid mnemonic phrase",
         "",
         "abandon", // Too short
@@ -411,11 +409,7 @@ fn test_import_mnemonic_edge_cases() {
 
     for mnemonic in invalid_mnemonics {
         let result = keystore.import_mnemonic(None, mnemonic, "m/44'/60'/0'/0/0");
-        assert!(
-            result.is_err(),
-            "Invalid mnemonic should fail: {}",
-            mnemonic
-        );
+        assert!(result.is_err(), "Invalid mnemonic should fail: {mnemonic}");
     }
 }
 
@@ -706,7 +700,7 @@ fn test_file_integrity_protection() {
         KeystoreError::InvalidInput(msg) => {
             assert!(msg.contains("integrity verification failed"));
         }
-        other => panic!("Expected integrity verification failure, got: {:?}", other),
+        other => panic!("Expected integrity verification failure, got: {other:?}"),
     }
 }
 
@@ -754,7 +748,7 @@ fn test_file_integrity_protection_entry_swap() {
         KeystoreError::InvalidInput(msg) => {
             assert!(msg.contains("integrity verification failed"));
         }
-        other => panic!("Expected integrity verification failure, got: {:?}", other),
+        other => panic!("Expected integrity verification failure, got: {other:?}"),
     }
 }
 
@@ -838,7 +832,7 @@ fn test_aad_prevents_entry_swapping() {
             KeystoreError::InvalidInput(msg) => {
                 assert!(msg.contains("File integrity verification failed"));
             }
-            other => panic!("Expected InvalidInput error, got: {:?}", other),
+            other => panic!("Expected InvalidInput error, got: {other:?}"),
         }
     }
 }
@@ -865,7 +859,7 @@ fn test_early_file_validation_dos_protection() {
             KeystoreError::InvalidInput(msg) => {
                 assert!(msg.contains("too large"));
             }
-            other => panic!("Expected size validation error, got: {:?}", other),
+            other => panic!("Expected size validation error, got: {other:?}"),
         }
     }
 
@@ -883,7 +877,7 @@ fn test_early_file_validation_dos_protection() {
             KeystoreError::InvalidInput(msg) => {
                 assert!(msg.contains("too small"));
             }
-            other => panic!("Expected size validation error, got: {:?}", other),
+            other => panic!("Expected size validation error, got: {other:?}"),
         }
     }
 
@@ -894,10 +888,9 @@ fn test_early_file_validation_dos_protection() {
             Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
 
         // Create malformed JSON that's large enough to pass size check but invalid JSON
-        let malformed_json = format!(
-            "{{ \"version\": 1, \"invalid\": {}, \"truncated\": ",
-            "x".repeat(200)
-        );
+        let repeated_x = "x".repeat(200);
+        let malformed_json =
+            format!("{{ \"version\": 1, \"invalid\": {repeated_x}, \"truncated\": ");
         std::fs::write(&keystore_path, malformed_json).unwrap();
         let result = keystore.unlock("any_password");
 
@@ -906,11 +899,10 @@ fn test_early_file_validation_dos_protection() {
             KeystoreError::InvalidInput(msg) => {
                 assert!(
                     msg.contains("invalid JSON") || msg.contains("Malformed"),
-                    "Got unexpected message: {}",
-                    msg
+                    "Got unexpected message: {msg}"
                 );
             }
-            other => panic!("Expected JSON validation error, got: {:?}", other),
+            other => panic!("Expected JSON validation error, got: {other:?}"),
         }
     }
 }

@@ -217,6 +217,7 @@ impl StateHandler for OnChainValuesState {
 }
 
 #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
+#[allow(dead_code)]
 pub struct ValidationState {
     label: Label,
     tags: Vec<Tag>,
@@ -267,6 +268,7 @@ impl StateHandler for ValidationState {
 }
 
 #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
+#[allow(dead_code)]
 pub struct NotificationState {
     label: Label,
     tags: Vec<Tag>,
@@ -313,6 +315,7 @@ impl StateHandler for NotificationState {
 }
 
 #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
+#[allow(dead_code)]
 pub struct AnalyticsState {
     label: Label,
     tags: Vec<Tag>,
@@ -358,6 +361,7 @@ impl StateHandler for AnalyticsState {
 }
 
 #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
+#[allow(dead_code)]
 pub struct FinalizeState {
     label: Label,
     tags: Vec<Tag>,

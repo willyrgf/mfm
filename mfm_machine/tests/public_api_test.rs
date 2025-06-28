@@ -37,7 +37,7 @@ fn test_state_machine_execute() {
 
     let context = create_default_safe_context();
     let result = state_machine.execute(context);
-    println!("Execute result: {:?}", result);
+    println!("Execute result: {result:?}");
 
     assert_eq!(state_machine.states.len(), iss.len());
     state_machine.states.iter().zip(iss.iter()).for_each(
