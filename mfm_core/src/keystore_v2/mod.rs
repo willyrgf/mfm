@@ -31,6 +31,7 @@ use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use subtle::ConstantTimeEq;
 use tiny_keccak::{Hasher, Keccak};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -423,31 +424,21 @@ impl Keystore {
             }
             KeyType::Mnemonic { derivation_path } => {
                 // Decrypt mnemonic and derive key
-                let mut mnemonic_str = String::from_utf8(decrypted_data.to_vec())
+                let mnemonic_str = core::str::from_utf8(decrypted_data.as_ref())
                     .map_err(|_| KeystoreError::InvalidMnemonic("Invalid UTF-8".to_string()))?;
                 let mnemonic = Mnemonic::from_str(&mnemonic_str)?;
                 let derivation_path_obj = DerivationPath::from_str(derivation_path)?;
 
                 // Derive private key from mnemonic - wrap seed in Zeroizing for automatic cleanup
-                let seed_bytes = mnemonic.to_seed("");
-                let mut seed = Zeroizing::new(seed_bytes);
+                let seed = Zeroizing::new(mnemonic.to_seed(""));
 
                 // Limit XPrv scope to ensure it's dropped quickly
-                let mut private_key_bytes = {
+                let secure_key = {
                     let derived_xprv = XPrv::derive_from_path(&*seed, &derivation_path_obj)?;
-                    derived_xprv.private_key().to_bytes()
+                    SecureKey::new(derived_xprv.private_key().to_bytes().into())
                 };
 
-                let mut key_array = [0u8; 32];
-                key_array.copy_from_slice(&private_key_bytes);
-
-                // Zeroize sensitive intermediate data
-                mnemonic_str.zeroize();
-                seed.zeroize();
-                // Note: XPrv doesn't implement Zeroize directly, but the private_key_bytes extracted from it are zeroized
-                private_key_bytes.zeroize();
-
-                Ok(SecureKey::new(key_array))
+                Ok(secure_key)
             }
         }
     }
@@ -528,8 +519,7 @@ impl Keystore {
             .master_key_verification
             .ok_or(KeystoreError::InvalidPassword)?;
 
-        // Constant-time comparison of verification hashes
-        if computed_verification == stored_verification {
+        if computed_verification.ct_eq(&stored_verification).into() {
             // Verify file integrity after password verification
             self.verify_file_integrity(&master_key)?;
 
@@ -780,7 +770,7 @@ impl Keystore {
             self.compute_file_integrity_mac(master_key, json_data_without_mac.as_bytes())?;
 
         // Constant-time comparison to prevent timing attacks
-        if computed_mac != stored_mac {
+        if computed_mac.ct_ne(&stored_mac).into() {
             return Err(KeystoreError::InvalidInput(
                 "File integrity verification failed - keystore may have been tampered with"
                     .to_string(),
