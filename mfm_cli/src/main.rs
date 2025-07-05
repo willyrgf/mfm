@@ -1,7 +1,8 @@
-use tracing::info;
+use clap::Parser;
 
-// Constants
-const APP_NAME: &str = "mfm";
+mod cli;
+
+use cli::Cli;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -10,7 +11,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    info!("{} starting...", APP_NAME);
+    let cli = Cli::parse();
 
-    Ok(())
+    match cli.execute().await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
 }

@@ -1,6 +1,8 @@
 pub const APP_NAME: &str = "mfm";
 pub const DEFAULT_LOG_LEVEL: &str = "info";
 
+pub mod cli;
+
 // Since the exit code names e.g. `SIGBUS` are most appropriate yet trigger a test error with the
 // clippy lint `upper_case_acronyms` we have disabled this lint for this enum.
 /// Vmm exit-code type.
