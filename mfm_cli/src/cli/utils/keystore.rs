@@ -1,4 +1,4 @@
-use mfm_core::keystore::Keystore;
+use mfm_core::keystore::{Keystore, KeystoreConfig};
 use std::path::PathBuf;
 
 /// Keystore operations wrapper with unlock handling
@@ -8,10 +8,16 @@ pub struct KeystoreManager {
 
 impl KeystoreManager {
     pub fn new(keystore_path: Option<PathBuf>) -> Self {
-        let keystore_path = keystore_path.unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".mfm").join("keystore")
-        });
+        let keystore_path = keystore_path
+            .or_else(|| {
+                // Check for environment variable
+                std::env::var("MFM_KEYSTORE_PATH").ok().map(PathBuf::from)
+            })
+            .unwrap_or_else(|| {
+                // Default to ~/.mfm/keystore
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                PathBuf::from(home).join(".mfm").join("keystore")
+            });
 
         Self { keystore_path }
     }
@@ -26,8 +32,12 @@ impl KeystoreManager {
         // Load keystore
         let mut keystore = Keystore::new(&self.keystore_path)?;
 
-        // Prompt for password
-        let password = super::input::read_password("Enter keystore password: ")?;
+        // Get password from environment variable or prompt
+        let password = if let Ok(env_password) = std::env::var("MFM_KEYSTORE_PASSWORD") {
+            env_password
+        } else {
+            super::input::read_password("Enter keystore password: ")?
+        };
 
         // Unlock
         keystore.unlock(&password)?;
@@ -47,16 +57,26 @@ impl KeystoreManager {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Get password
-        let password = super::input::read_password("Enter password for new keystore: ")?;
-        let confirm_password = super::input::read_password("Confirm password: ")?;
+        // Get password from environment variable or prompt
+        let password = if let Ok(env_password) = std::env::var("MFM_KEYSTORE_PASSWORD") {
+            env_password
+        } else {
+            let password = super::input::read_password("Enter password for new keystore: ")?;
+            let confirm_password = super::input::read_password("Confirm password: ")?;
 
-        if password != confirm_password {
-            return Err("Passwords do not match".into());
-        }
+            if password != confirm_password {
+                return Err("Passwords do not match".into());
+            }
+            password
+        };
 
-        // Create keystore
-        let mut keystore = Keystore::new(&self.keystore_path)?;
+        // Create keystore with fast config for integration tests
+        let config = if std::env::var("MFM_INTEGRATION_TEST").is_ok() {
+            KeystoreConfig::integration_test()
+        } else {
+            KeystoreConfig::default()
+        };
+        let mut keystore = Keystore::new_with_config(&self.keystore_path, config)?;
         keystore.unlock(&password)?;
         Ok(keystore)
     }

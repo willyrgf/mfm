@@ -115,6 +115,15 @@ impl KeystoreConfig {
             argon2_parallelism: 1,
         }
     }
+
+    /// Integration test configuration (very fast but insecure - DO NOT USE IN PRODUCTION)
+    pub fn integration_test() -> Self {
+        Self {
+            argon2_memory_kb: 64, // 64KB - minimal for fast tests
+            argon2_iterations: 1, // 1 iteration - minimal
+            argon2_parallelism: 1,
+        }
+    }
 }
 
 /// Key type for different storage formats
@@ -602,6 +611,7 @@ impl Keystore {
         Ok(mac)
     }
 
+    // TODO: check nonce-reuse-robust XChaCha20-Poly1305
     fn encrypt_data(
         &self,
         master_key: &[u8; 32],
@@ -691,6 +701,7 @@ impl Keystore {
     }
 
     fn load_from_disk(&mut self) -> Result<(), KeystoreError> {
+        // TODO: should we add an self.early_file_validation()?
         let data = std::fs::read(&self.path)?;
         let keystore_file: KeystoreFile = serde_json::from_slice(&data)?;
 
