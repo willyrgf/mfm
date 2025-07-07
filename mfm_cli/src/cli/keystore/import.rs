@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 pub struct ImportArgs {
-    /// Import type: private-key, mnemonic
+    /// Import type: privatekey, mnemonic
     #[arg(short = 't', long, value_enum)]
     pub import_type: ImportType,
 
@@ -31,7 +31,7 @@ pub struct ImportArgs {
 
 #[derive(clap::ValueEnum, Clone)]
 pub enum ImportType {
-    #[value(name = "private-key")]
+    #[value(name = "privatekey", alias = "private-key")]
     PrivateKey,
     #[value(name = "mnemonic")]
     Mnemonic,

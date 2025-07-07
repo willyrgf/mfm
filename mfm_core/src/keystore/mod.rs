@@ -117,7 +117,7 @@ impl KeystoreConfig {
     }
 
     /// Integration test configuration (very fast but insecure - DO NOT USE IN PRODUCTION)
-    pub fn integration_test() -> Self {
+    pub fn insecure_integration_test() -> Self {
         Self {
             argon2_memory_kb: 64, // 64KB - minimal for fast tests
             argon2_iterations: 1, // 1 iteration - minimal

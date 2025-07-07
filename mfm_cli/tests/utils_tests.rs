@@ -28,7 +28,7 @@ fn test_key_display_table_formatting() {
         KeyDisplay {
             id: "test-id-1".to_string(),
             label: "test-key-1".to_string(),
-            key_type: "private-key".to_string(),
+            key_type: "privatekey".to_string(),
             address: None,
             created: "2024-01-01 12:00:00".to_string(),
         },
@@ -46,7 +46,7 @@ fn test_key_display_table_formatting() {
     // Verify table contains expected data
     assert!(output.contains("test-id-1"));
     assert!(output.contains("test-key-1"));
-    assert!(output.contains("private-key"));
+    assert!(output.contains("privatekey"));
     assert!(output.contains("test-id-2"));
     assert!(output.contains("test-key-2"));
     assert!(output.contains("mnemonic"));
@@ -57,7 +57,7 @@ fn test_key_display_json_formatting() {
     let keys = vec![KeyDisplay {
         id: "test-id-1".to_string(),
         label: "test-key-1".to_string(),
-        key_type: "private-key".to_string(),
+        key_type: "privatekey".to_string(),
         address: Some("0x1234567890123456789012345678901234567890".to_string()),
         created: "2024-01-01 12:00:00".to_string(),
     }];
@@ -67,7 +67,7 @@ fn test_key_display_json_formatting() {
     // Verify JSON contains expected data
     assert!(output.contains("test-id-1"));
     assert!(output.contains("test-key-1"));
-    assert!(output.contains("private-key"));
+    assert!(output.contains("privatekey"));
     assert!(output.contains("0x1234567890123456789012345678901234567890"));
     assert!(output.contains("2024-01-01 12:00:00"));
 
@@ -81,7 +81,7 @@ fn test_key_display_json_without_addresses() {
     let keys = vec![KeyDisplay {
         id: "test-id-1".to_string(),
         label: "test-key-1".to_string(),
-        key_type: "private-key".to_string(),
+        key_type: "privatekey".to_string(),
         address: Some("0x1234567890123456789012345678901234567890".to_string()),
         created: "2024-01-01 12:00:00".to_string(),
     }];
@@ -105,7 +105,7 @@ fn test_key_display_table_with_addresses() {
     let keys = vec![KeyDisplay {
         id: "test-id-1".to_string(),
         label: "test-key-1".to_string(),
-        key_type: "private-key".to_string(),
+        key_type: "privatekey".to_string(),
         address: Some("0x1234567890123456789012345678901234567890".to_string()),
         created: "2024-01-01 12:00:00".to_string(),
     }];
@@ -121,7 +121,7 @@ fn test_key_display_table_without_addresses() {
     let keys = vec![KeyDisplay {
         id: "test-id-1".to_string(),
         label: "test-key-1".to_string(),
-        key_type: "private-key".to_string(),
+        key_type: "privatekey".to_string(),
         address: Some("0x1234567890123456789012345678901234567890".to_string()),
         created: "2024-01-01 12:00:00".to_string(),
     }];

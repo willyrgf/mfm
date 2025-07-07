@@ -72,7 +72,7 @@ impl KeystoreManager {
 
         // Create keystore with fast config for integration tests
         let config = if std::env::var("MFM_INTEGRATION_TEST").is_ok() {
-            KeystoreConfig::integration_test()
+            KeystoreConfig::insecure_integration_test()
         } else {
             KeystoreConfig::default()
         };

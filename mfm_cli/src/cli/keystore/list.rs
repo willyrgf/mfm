@@ -17,7 +17,7 @@ pub struct ListArgs {
     pub format: OutputFormat,
 
     /// Include Ethereum addresses in output
-    #[arg(long)]
+    #[arg(long, default_value = "true")]
     pub show_addresses: bool,
 
     /// Filter by label pattern (regex supported)

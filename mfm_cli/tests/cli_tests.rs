@@ -43,7 +43,7 @@ fn test_import_help() {
         .success()
         .stdout(predicate::str::contains("Import a private key or mnemonic"))
         .stdout(predicate::str::contains("--import-type"))
-        .stdout(predicate::str::contains("private-key"))
+        .stdout(predicate::str::contains("privatekey"))
         .stdout(predicate::str::contains("mnemonic"));
 }
 
@@ -97,7 +97,7 @@ fn test_import_invalid_private_key_format() {
         "keystore",
         "import",
         "--import-type",
-        "private-key",
+        "privatekey",
         "--keystore",
         keystore_path.to_str().unwrap(),
         "--stdin",
