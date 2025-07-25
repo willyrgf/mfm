@@ -9,7 +9,7 @@ The `mfm_cli` is the command-line interface for the MFM toolkit. It provides a u
 - **User-Centric**: Commands are designed to be intuitive and easy to remember.
 - **Scriptable**: Supports non-interactive modes, input from `stdin`, and configuration via environment variables, making it suitable for automation and scripting.
 - **Secure by Default**: Integrates directly with the `mfm_core::keystore` to ensure all key operations adhere to the same high security standards.
-- **Flexible Output**: Provides multiple output formats (e.g., human-readable tables, machine-readable JSON) to cater to different use cases.
+- **AI-Friendly Output**: Provides machine-readable JSON output via a global `--output-format` flag, making it ideal for AI agents and automation, while preserving human-readable text output by default.
 - **Minimalism**: Focuses on essential commands, avoiding feature bloat to maintain a clean and simple interface.
 
 ## Architecture
@@ -36,6 +36,60 @@ mfm_cli/
     ├── cli_e2e_tests.rs # End-to-end tests for command workflows
     └── ...              # Other unit and integration tests
 ```
+
+## Global Options
+
+The CLI supports global options that apply to all commands:
+
+- **`--output-format <FORMAT>`**: Specifies the output format for command results.
+  - `text` (default): Human-readable text output
+  - `json`: Machine-readable JSON output with standardized structure
+- **Environment Variable**: `MFM_OUTPUT_FORMAT` can be set to change the default output format. Command-line flags take precedence over environment variables.
+
+**Examples:**
+```sh
+# Use JSON output for a single command
+mfm_cli --output-format json keystore list
+
+# Set JSON as default for the session
+export MFM_OUTPUT_FORMAT=json
+mfm_cli keystore list
+
+# Override environment variable with command-line flag
+MFM_OUTPUT_FORMAT=json mfm_cli --output-format text keystore list
+```
+
+## JSON Output Format
+
+When `--output-format json` is used, all commands return structured JSON responses:
+
+**Success Response:**
+```json
+{
+  "status": "success",
+  "data": { /* command-specific data */ }
+}
+```
+
+**Error Response:**
+```json
+{
+  "status": "error",
+  "error": {
+    "code": "ErrorCode",
+    "message": "Human-readable error message"
+  }
+}
+```
+
+**Common Error Codes:**
+- `InvalidPrivateKey`: Private key format is invalid
+- `InvalidMnemonic`: Mnemonic phrase is invalid
+- `KeyNotFound`: Requested key does not exist
+- `InvalidUuid`: Provided UUID format is invalid
+- `AmbiguousLabel`: Multiple keys found with same label
+- `MissingArgument`: Required argument not provided
+- `OperationCancelled`: User cancelled the operation
 
 ## Command Reference
 
@@ -79,7 +133,6 @@ mfm_cli keystore list [OPTIONS]
 ```
 
 **Key Options:**
-- `--format <FORMAT>`: Output format. `table` (default) or `json`.
 - `--show-addresses`: Include the derived Ethereum address in the output.
 - `--filter-label <REGEX>`: Filter keys by a regular expression matching the label.
 - `--sort-by <FIELD>`: Sort keys by `label`, `created` (default), or `type`.
@@ -87,14 +140,14 @@ mfm_cli keystore list [OPTIONS]
 
 **Examples:**
 
-- **List all keys in a table:**
+- **List all keys with addresses:**
   ```sh
   mfm_cli keystore list --show-addresses
   ```
 
 - **List all keys with "wallet" in their label, sorted by label, in JSON format:**
   ```sh
-  mfm_cli keystore list --format json --filter-label "wallet" --sort-by label
+  mfm_cli --output-format json keystore list --filter-label "wallet" --sort-by label
   ```
 
 ### `keystore delete`
@@ -128,6 +181,12 @@ mfm_cli keystore delete [OPTIONS] (<ID> | --by-label <LABEL>)
 
 The CLI's behavior can be modified using environment variables, which is ideal for CI/CD pipelines and automated scripts.
 
+- **`MFM_OUTPUT_FORMAT`**: Sets the default output format for all commands. Valid values are `text` and `json`. Command-line `--output-format` flag takes precedence.
+  ```sh
+  export MFM_OUTPUT_FORMAT="json"
+  mfm_cli keystore list  # Will output JSON
+  ```
+
 - **`MFM_KEYSTORE_PATH`**: Overrides the default keystore path (`~/.mfm/keystore`). If a `--keystore` flag is provided, it takes precedence.
   ```sh
   export MFM_KEYSTORE_PATH="/etc/mfm/prod.keystore"
@@ -145,6 +204,28 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 ## Best Practices
 
 - **For interactive use**, rely on the built-in prompts for passwords and confirmations.
-- **For scripting**, use a combination of environment variables (`MFM_KEYSTORE_PASSWORD`, `MFM_KEYSTORE_PATH`), the `--stdin` flag for input, and the `--yes` flag to bypass confirmations.
+- **For scripting and automation**, use a combination of environment variables (`MFM_KEYSTORE_PASSWORD`, `MFM_KEYSTORE_PATH`), the `--stdin` flag for input, and the `--yes` flag to bypass confirmations.
+- **For AI agents and programmatic use**, use `--output-format json` to get structured, machine-readable responses with predictable error codes.
 - **Secure your environment**: When using environment variables, ensure the security of your shell history and environment.
 - **Backup your keystore file**: The CLI manages keys, but you are responsible for securely backing up the keystore file itself.
+
+## AI Integration
+
+The CLI is designed to be AI-friendly with consistent JSON output that makes it easy for AI agents to:
+
+- Parse command results reliably using the standardized `{"status": "success", "data": {...}}` format
+- Handle errors gracefully with structured error responses containing stable error codes
+- Integrate with automation pipelines using environment variables and non-interactive modes
+- Process keystore operations programmatically without human intervention
+
+**Example AI workflow:**
+```sh
+# Set JSON output for the session
+export MFM_OUTPUT_FORMAT=json
+
+# Import a key programmatically
+echo "1234567890abcdef..." | mfm_cli keystore import --import-type privatekey --stdin --label "ai-generated-key"
+
+# List keys and parse the JSON response
+mfm_cli keystore list | jq '.data[] | select(.label == "ai-generated-key")'
+```

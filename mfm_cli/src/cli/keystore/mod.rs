@@ -1,5 +1,7 @@
 use clap::Subcommand;
 
+use super::OutputFormat;
+
 pub mod delete;
 pub mod import;
 pub mod list;
@@ -24,16 +26,19 @@ pub enum KeystoreCommand {
 }
 
 impl KeystoreCommand {
-    pub async fn execute(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn execute(
+        &self,
+        output_format: &OutputFormat,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         match self {
             KeystoreCommand::Import { args } => {
-                import::execute(args).await?;
+                import::execute(args, output_format).await?;
             }
             KeystoreCommand::Delete { args } => {
-                delete::execute(args).await?;
+                delete::execute(args, output_format).await?;
             }
             KeystoreCommand::List { args } => {
-                list::execute(args).await?;
+                list::execute(args, output_format).await?;
             }
         }
         Ok(())

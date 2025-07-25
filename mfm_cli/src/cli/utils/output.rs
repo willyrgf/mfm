@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use tabled::{Table, Tabled};
 
+use super::super::OutputFormat;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
 pub struct KeyDisplay {
     pub id: String,
@@ -11,27 +13,89 @@ pub struct KeyDisplay {
     pub created: String,
 }
 
-#[derive(Debug, Clone)]
-pub enum OutputFormat {
-    Table,
-    Json,
+/// Standardized success response structure for JSON output
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuccessResponse<T> {
+    pub status: String,
+    pub data: T,
 }
 
-impl std::str::FromStr for OutputFormat {
-    type Err = String;
+impl<T> SuccessResponse<T> {
+    pub fn new(data: T) -> Self {
+        Self {
+            status: "success".to_string(),
+            data,
+        }
+    }
+}
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "table" => Ok(OutputFormat::Table),
-            "json" => Ok(OutputFormat::Json),
-            _ => Err(format!("Invalid output format: {s}")),
+/// Standardized error response structure for JSON output
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorResponse {
+    pub status: String,
+    pub error: ErrorDetails,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorDetails {
+    pub code: String,
+    pub message: String,
+}
+
+impl ErrorResponse {
+    pub fn new(code: &str, message: &str) -> Self {
+        Self {
+            status: "error".to_string(),
+            error: ErrorDetails {
+                code: code.to_string(),
+                message: message.to_string(),
+            },
+        }
+    }
+}
+
+/// Print a success response in the specified format
+pub fn print_success<T: Serialize>(data: T, format: &OutputFormat) {
+    match format {
+        OutputFormat::Text => {
+            // For text format, we assume the data implements Display or similar
+            // This is handled by the calling code
+        }
+        OutputFormat::Json => {
+            let response = SuccessResponse::new(data);
+            if let Ok(json) = serde_json::to_string_pretty(&response) {
+                println!("{json}");
+            } else {
+                eprintln!(
+                    r#"{{"status":"error","error":{{"code":"SerializationError","message":"Failed to serialize response"}}}}"#
+                );
+            }
+        }
+    }
+}
+
+/// Print an error response in the specified format  
+pub fn print_error(code: &str, message: &str, format: &OutputFormat) {
+    match format {
+        OutputFormat::Text => {
+            eprintln!("Error: {message}");
+        }
+        OutputFormat::Json => {
+            let response = ErrorResponse::new(code, message);
+            if let Ok(json) = serde_json::to_string_pretty(&response) {
+                eprintln!("{json}");
+            } else {
+                eprintln!(
+                    r#"{{"status":"error","error":{{"code":"SerializationError","message":"Failed to serialize error response"}}}}"#
+                );
+            }
         }
     }
 }
 
 pub fn format_keys(keys: Vec<KeyDisplay>, format: OutputFormat, show_addresses: bool) -> String {
     match format {
-        OutputFormat::Table => {
+        OutputFormat::Text => {
             if show_addresses {
                 let mut table_data = Vec::new();
                 for key in keys {
@@ -49,19 +113,18 @@ pub fn format_keys(keys: Vec<KeyDisplay>, format: OutputFormat, show_addresses: 
             }
         }
         OutputFormat::Json => {
-            if show_addresses {
-                serde_json::to_string_pretty(&keys).unwrap_or_else(|_| "[]".to_string())
+            let data = if show_addresses {
+                keys
             } else {
-                let keys_without_address: Vec<_> = keys
-                    .into_iter()
+                keys.into_iter()
                     .map(|mut k| {
                         k.address = None;
                         k
                     })
-                    .collect();
-                serde_json::to_string_pretty(&keys_without_address)
-                    .unwrap_or_else(|_| "[]".to_string())
-            }
+                    .collect()
+            };
+            let response = SuccessResponse::new(data);
+            serde_json::to_string_pretty(&response).unwrap_or_else(|_| r#"{"status":"error","error":{"code":"SerializationError","message":"Failed to serialize response"}}"#.to_string())
         }
     }
 }

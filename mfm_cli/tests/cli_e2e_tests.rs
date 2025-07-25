@@ -60,10 +60,10 @@ fn test_e2e_private_key_workflow() {
     // Step 3: List keys in JSON format
     let mut list_json_cmd = cli_with_password();
     list_json_cmd.args(&[
+        "--output-format",
+        "json",
         "keystore",
         "list",
-        "--format",
-        "json",
         "--keystore",
         keystore_str,
     ]);
@@ -155,10 +155,10 @@ fn test_e2e_mnemonic_workflow() {
     // Step 4: List should now show 2 keys
     let mut list_cmd2 = cli_with_password();
     list_cmd2.args(&[
+        "--output-format",
+        "json",
         "keystore",
         "list",
-        "--format",
-        "json",
         "--keystore",
         keystore_str,
     ]);
@@ -312,10 +312,10 @@ fn test_e2e_mixed_key_types_workflow() {
     // List all keys
     let mut list_cmd = cli_with_password();
     list_cmd.args(&[
+        "--output-format",
+        "json",
         "keystore",
         "list",
-        "--format",
-        "json",
         "--show-addresses",
         "--keystore",
         keystore_str,
@@ -437,10 +437,10 @@ fn test_e2e_sorting_and_formatting() {
     // Test JSON format with addresses
     let mut json_cmd = cli_with_password();
     json_cmd.args(&[
+        "--output-format",
+        "json",
         "keystore",
         "list",
-        "--format",
-        "json",
         "--show-addresses",
         "--sort-by",
         "created",

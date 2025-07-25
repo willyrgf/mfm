@@ -1,5 +1,7 @@
-use crate::cli::utils::{input, keystore::KeystoreManager};
+use crate::cli::utils::{input, keystore::KeystoreManager, output};
+use crate::cli::OutputFormat;
 use clap::Args;
+use serde::Serialize;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -21,7 +23,16 @@ pub struct DeleteArgs {
     pub by_label: Option<String>,
 }
 
-pub async fn execute(args: &DeleteArgs) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Serialize)]
+struct DeleteResponse {
+    id: String,
+    label: String,
+}
+
+pub async fn execute(
+    args: &DeleteArgs,
+    output_format: &OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
     let manager = KeystoreManager::new(args.keystore.clone());
     let mut keystore = manager.get_unlocked_keystore().await?;
 
@@ -35,36 +46,80 @@ pub async fn execute(args: &DeleteArgs) -> Result<(), Box<dyn std::error::Error>
             .collect();
 
         match matching_keys.len() {
-            0 => return Err(format!("No key found with label: {label}").into()),
-            1 => matching_keys[0].id,
-            _ => {
-                println!("Multiple keys found with label '{label}'. Please use ID instead:");
-                for key in matching_keys {
-                    println!(
-                        "  ID: {} ({})",
-                        key.id,
-                        key.alias.as_ref().unwrap_or(&"<no alias>".to_string())
-                    );
+            0 => match output_format {
+                OutputFormat::Text => {
+                    return Err(format!("No key found with label: {label}").into())
                 }
-                return Err("Multiple keys found with same label".into());
-            }
+                OutputFormat::Json => {
+                    output::print_error(
+                        "KeyNotFound",
+                        &format!("No key found with label: {label}"),
+                        output_format,
+                    );
+                    std::process::exit(1);
+                }
+            },
+            1 => matching_keys[0].id,
+            _ => match output_format {
+                OutputFormat::Text => {
+                    println!("Multiple keys found with label '{label}'. Please use ID instead:");
+                    for key in matching_keys {
+                        println!(
+                            "  ID: {} ({})",
+                            key.id,
+                            key.alias.as_ref().unwrap_or(&"<no alias>".to_string())
+                        );
+                    }
+                    return Err("Multiple keys found with same label".into());
+                }
+                OutputFormat::Json => {
+                    output::print_error(
+                        "AmbiguousLabel",
+                        &format!("Multiple keys found with label: {label}"),
+                        output_format,
+                    );
+                    std::process::exit(1);
+                }
+            },
         }
     } else if let Some(id_str) = &args.id {
         // Parse UUID
         match Uuid::parse_str(id_str) {
             Ok(id) => id,
-            Err(_) => return Err("Invalid UUID format".into()),
+            Err(_) => match output_format {
+                OutputFormat::Text => return Err("Invalid UUID format".into()),
+                OutputFormat::Json => {
+                    output::print_error("InvalidUuid", "Invalid UUID format", output_format);
+                    std::process::exit(1);
+                }
+            },
         }
     } else {
-        return Err("Must specify either key ID or --by-label".into());
+        match output_format {
+            OutputFormat::Text => return Err("Must specify either key ID or --by-label".into()),
+            OutputFormat::Json => {
+                output::print_error(
+                    "MissingArgument",
+                    "Must specify either key ID or --by-label",
+                    output_format,
+                );
+                std::process::exit(1);
+            }
+        }
     };
 
     // Find the key to confirm deletion
     let keys = keystore.list_keys()?;
-    let key_to_delete = keys
-        .iter()
-        .find(|k| k.id == key_id)
-        .ok_or("Key not found")?;
+    let key_to_delete = match keys.iter().find(|k| k.id == key_id) {
+        Some(key) => key,
+        None => match output_format {
+            OutputFormat::Text => return Err("Key not found".into()),
+            OutputFormat::Json => {
+                output::print_error("KeyNotFound", "Key not found", output_format);
+                std::process::exit(1);
+            }
+        },
+    };
 
     // Confirm deletion unless --yes flag is used
     if !args.yes {
@@ -78,20 +133,45 @@ pub async fn execute(args: &DeleteArgs) -> Result<(), Box<dyn std::error::Error>
         );
 
         if !input::confirm(&prompt)? {
-            println!("Deletion cancelled");
+            match output_format {
+                OutputFormat::Text => println!("Deletion cancelled"),
+                OutputFormat::Json => {
+                    output::print_error(
+                        "OperationCancelled",
+                        "Deletion cancelled by user",
+                        output_format,
+                    );
+                    std::process::exit(1);
+                }
+            }
             return Ok(());
         }
     }
 
     // Delete the key
     keystore.delete_key(key_id)?;
-    println!(
-        "Key '{}' deleted successfully",
-        key_to_delete
-            .alias
-            .as_ref()
-            .unwrap_or(&"<no alias>".to_string())
-    );
+
+    match output_format {
+        OutputFormat::Text => {
+            println!(
+                "Key '{}' deleted successfully",
+                key_to_delete
+                    .alias
+                    .as_ref()
+                    .unwrap_or(&"<no alias>".to_string())
+            );
+        }
+        OutputFormat::Json => {
+            let response = DeleteResponse {
+                id: key_to_delete.id.to_string(),
+                label: key_to_delete
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| "".to_string()),
+            };
+            output::print_success(response, output_format);
+        }
+    }
 
     Ok(())
 }

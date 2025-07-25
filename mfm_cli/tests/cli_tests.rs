@@ -55,7 +55,7 @@ fn test_list_help() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("List keys in the keystore"))
-        .stdout(predicate::str::contains("--format"))
+        .stdout(predicate::str::contains("--show-addresses"))
         .stdout(predicate::str::contains("--show-addresses"));
 }
 
@@ -167,10 +167,10 @@ fn test_list_json_format_option() {
 
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     cmd.args(&[
+        "--output-format",
+        "json",
         "keystore",
         "list",
-        "--format",
-        "json",
         "--keystore",
         keystore_path.to_str().unwrap(),
     ]);
@@ -186,10 +186,10 @@ fn test_list_invalid_format() {
 
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     cmd.args(&[
+        "--output-format",
+        "invalid",
         "keystore",
         "list",
-        "--format",
-        "invalid",
         "--keystore",
         keystore_path.to_str().unwrap(),
     ]);

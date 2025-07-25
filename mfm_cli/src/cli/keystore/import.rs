@@ -1,5 +1,7 @@
-use crate::cli::utils::{input, keystore::KeystoreManager};
+use crate::cli::utils::{input, keystore::KeystoreManager, output};
+use crate::cli::OutputFormat;
 use clap::Args;
+use serde::Serialize;
 use std::path::PathBuf;
 
 #[derive(Args)]
@@ -37,7 +39,19 @@ pub enum ImportType {
     Mnemonic,
 }
 
-pub async fn execute(args: &ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Serialize)]
+struct ImportResponse {
+    id: String,
+    label: String,
+    key_type: String,
+    address: String,
+    created_at: String,
+}
+
+pub async fn execute(
+    args: &ImportArgs,
+    output_format: &OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Read and validate input BEFORE creating/unlocking keystore
     match args.import_type {
         ImportType::PrivateKey => {
@@ -50,12 +64,36 @@ pub async fn execute(args: &ImportArgs) -> Result<(), Box<dyn std::error::Error>
             // Validate private key format EARLY
             let private_key = private_key.strip_prefix("0x").unwrap_or(&private_key);
             if private_key.len() != 64 {
-                return Err("Private key must be 64 hex characters".into());
+                match output_format {
+                    OutputFormat::Text => {
+                        return Err("Private key must be 64 hex characters".into())
+                    }
+                    OutputFormat::Json => {
+                        output::print_error(
+                            "InvalidPrivateKey",
+                            "Private key must be 64 hex characters",
+                            output_format,
+                        );
+                        std::process::exit(1);
+                    }
+                }
             }
 
             // Check if it's valid hex
             if hex::decode(private_key).is_err() {
-                return Err("Private key must be valid hexadecimal".into());
+                match output_format {
+                    OutputFormat::Text => {
+                        return Err("Private key must be valid hexadecimal".into())
+                    }
+                    OutputFormat::Json => {
+                        output::print_error(
+                            "InvalidPrivateKey",
+                            "Private key must be valid hexadecimal",
+                            output_format,
+                        );
+                        std::process::exit(1);
+                    }
+                }
             }
 
             // Only create keystore after validation passes
@@ -69,8 +107,33 @@ pub async fn execute(args: &ImportArgs) -> Result<(), Box<dyn std::error::Error>
                 )
             });
 
-            let key_id = keystore.import_private_key(Some(label), private_key)?;
-            println!("Private key imported successfully with ID: {key_id}");
+            let key_id = keystore.import_private_key(Some(label.clone()), private_key)?;
+
+            match output_format {
+                OutputFormat::Text => {
+                    println!("Private key imported successfully with ID: {key_id}");
+                }
+                OutputFormat::Json => {
+                    // Get the imported key info
+                    let keys = keystore.list_keys()?;
+                    if let Some(key_info) = keys.iter().find(|k| k.id == key_id) {
+                        let response = ImportResponse {
+                            id: key_info.id.to_string(),
+                            label: key_info.alias.clone().unwrap_or_else(|| "".to_string()),
+                            key_type: format!("{:?}", key_info.key_type).to_lowercase(),
+                            address: format!("{:?}", key_info.address),
+                            created_at: key_info.created_at.to_rfc3339(),
+                        };
+                        output::print_success(response, output_format);
+                    } else {
+                        output::print_error(
+                            "KeyNotFound",
+                            "Failed to retrieve imported key info",
+                            output_format,
+                        );
+                    }
+                }
+            }
         }
         ImportType::Mnemonic => {
             let mnemonic = if args.stdin {
@@ -81,7 +144,17 @@ pub async fn execute(args: &ImportArgs) -> Result<(), Box<dyn std::error::Error>
 
             // Basic mnemonic validation EARLY
             if mnemonic.split_whitespace().count() < 12 {
-                return Err("Mnemonic must have at least 12 words".into());
+                match output_format {
+                    OutputFormat::Text => return Err("Mnemonic must have at least 12 words".into()),
+                    OutputFormat::Json => {
+                        output::print_error(
+                            "InvalidMnemonic",
+                            "Mnemonic must have at least 12 words",
+                            output_format,
+                        );
+                        std::process::exit(1);
+                    }
+                }
             }
 
             // Only create keystore after validation passes
@@ -95,8 +168,34 @@ pub async fn execute(args: &ImportArgs) -> Result<(), Box<dyn std::error::Error>
                 )
             });
 
-            let key_id = keystore.import_mnemonic(Some(label), &mnemonic, &args.derivation_path)?;
-            println!("Mnemonic imported successfully with ID: {key_id}");
+            let key_id =
+                keystore.import_mnemonic(Some(label.clone()), &mnemonic, &args.derivation_path)?;
+
+            match output_format {
+                OutputFormat::Text => {
+                    println!("Mnemonic imported successfully with ID: {key_id}");
+                }
+                OutputFormat::Json => {
+                    // Get the imported key info
+                    let keys = keystore.list_keys()?;
+                    if let Some(key_info) = keys.iter().find(|k| k.id == key_id) {
+                        let response = ImportResponse {
+                            id: key_info.id.to_string(),
+                            label: key_info.alias.clone().unwrap_or_else(|| "".to_string()),
+                            key_type: format!("{:?}", key_info.key_type).to_lowercase(),
+                            address: format!("{:?}", key_info.address),
+                            created_at: key_info.created_at.to_rfc3339(),
+                        };
+                        output::print_success(response, output_format);
+                    } else {
+                        output::print_error(
+                            "KeyNotFound",
+                            "Failed to retrieve imported key info",
+                            output_format,
+                        );
+                    }
+                }
+            }
         }
     }
 

@@ -1,7 +1,8 @@
 use crate::cli::utils::{
     keystore::KeystoreManager,
-    output::{format_keys, KeyDisplay, OutputFormat},
+    output::{format_keys, KeyDisplay},
 };
+use crate::cli::OutputFormat;
 use clap::Args;
 use regex::Regex;
 use std::path::PathBuf;
@@ -11,10 +12,6 @@ pub struct ListArgs {
     /// Keystore file path
     #[arg(long)]
     pub keystore: Option<PathBuf>,
-
-    /// Output format: table, json
-    #[arg(long, default_value = "table")]
-    pub format: OutputFormat,
 
     /// Include Ethereum addresses in output
     #[arg(long, default_value = "true")]
@@ -39,14 +36,23 @@ pub enum SortBy {
     Type,
 }
 
-pub async fn execute(args: &ListArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(
+    args: &ListArgs,
+    output_format: &OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
     let manager = KeystoreManager::new(args.keystore.clone());
     let keystore = manager.get_unlocked_keystore().await?;
 
     let keys = keystore.list_keys()?;
 
     if keys.is_empty() {
-        println!("No keys found in keystore");
+        match output_format {
+            OutputFormat::Text => println!("No keys found in keystore"),
+            OutputFormat::Json => {
+                use crate::cli::utils::output;
+                output::print_success(Vec::<KeyDisplay>::new(), output_format);
+            }
+        }
         return Ok(());
     }
 
@@ -81,7 +87,7 @@ pub async fn execute(args: &ListArgs) -> Result<(), Box<dyn std::error::Error>> 
         SortBy::Type => key_displays.sort_by(|a, b| a.key_type.cmp(&b.key_type)),
     }
 
-    let output = format_keys(key_displays, args.format.clone(), args.show_addresses);
+    let output = format_keys(key_displays, output_format.clone(), args.show_addresses);
     println!("{output}");
 
     Ok(())
