@@ -2,7 +2,7 @@ use crate::cli::utils::{
     keystore::KeystoreManager,
     output::{format_keys, KeyDisplay},
 };
-use crate::cli::OutputFormat;
+use crate::cli::{CommandContext, OutputFormat};
 use clap::Args;
 use regex::Regex;
 use std::path::PathBuf;
@@ -38,7 +38,7 @@ pub enum SortBy {
 
 pub async fn execute(
     args: &ListArgs,
-    output_format: &OutputFormat,
+    ctx: &CommandContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let manager = KeystoreManager::new(args.keystore.clone());
     let keystore = manager.get_unlocked_keystore().await?;
@@ -46,11 +46,11 @@ pub async fn execute(
     let keys = keystore.list_keys()?;
 
     if keys.is_empty() {
-        match output_format {
+        match &ctx.output_format {
             OutputFormat::Text => println!("No keys found in keystore"),
             OutputFormat::Json => {
                 use crate::cli::utils::output;
-                output::print_success(Vec::<KeyDisplay>::new(), output_format);
+                output::print_success(Vec::<KeyDisplay>::new(), &ctx.output_format);
             }
         }
         return Ok(());
@@ -87,7 +87,7 @@ pub async fn execute(
         SortBy::Type => key_displays.sort_by(|a, b| a.key_type.cmp(&b.key_type)),
     }
 
-    let output = format_keys(key_displays, output_format.clone(), args.show_addresses);
+    let output = format_keys(key_displays, ctx.output_format.clone(), args.show_addresses);
     println!("{output}");
 
     Ok(())

@@ -1,5 +1,5 @@
 use crate::cli::utils::{input, keystore::KeystoreManager, output};
-use crate::cli::OutputFormat;
+use crate::cli::{CommandContext, OutputFormat};
 use clap::Args;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -50,7 +50,7 @@ struct ImportResponse {
 
 pub async fn execute(
     args: &ImportArgs,
-    output_format: &OutputFormat,
+    ctx: &CommandContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Read and validate input BEFORE creating/unlocking keystore
     match args.import_type {
@@ -64,7 +64,7 @@ pub async fn execute(
             // Validate private key format EARLY
             let private_key = private_key.strip_prefix("0x").unwrap_or(&private_key);
             if private_key.len() != 64 {
-                match output_format {
+                match &ctx.output_format {
                     OutputFormat::Text => {
                         return Err("Private key must be 64 hex characters".into())
                     }
@@ -72,7 +72,7 @@ pub async fn execute(
                         output::print_error(
                             "InvalidPrivateKey",
                             "Private key must be 64 hex characters",
-                            output_format,
+                            &ctx.output_format,
                         );
                         std::process::exit(1);
                     }
@@ -81,7 +81,7 @@ pub async fn execute(
 
             // Check if it's valid hex
             if hex::decode(private_key).is_err() {
-                match output_format {
+                match &ctx.output_format {
                     OutputFormat::Text => {
                         return Err("Private key must be valid hexadecimal".into())
                     }
@@ -89,7 +89,7 @@ pub async fn execute(
                         output::print_error(
                             "InvalidPrivateKey",
                             "Private key must be valid hexadecimal",
-                            output_format,
+                            &ctx.output_format,
                         );
                         std::process::exit(1);
                     }
@@ -109,7 +109,7 @@ pub async fn execute(
 
             let key_id = keystore.import_private_key(Some(label.clone()), private_key)?;
 
-            match output_format {
+            match &ctx.output_format {
                 OutputFormat::Text => {
                     println!("Private key imported successfully with ID: {key_id}");
                 }
@@ -124,12 +124,12 @@ pub async fn execute(
                             address: format!("{:?}", key_info.address),
                             created_at: key_info.created_at.to_rfc3339(),
                         };
-                        output::print_success(response, output_format);
+                        output::print_success(response, &ctx.output_format);
                     } else {
                         output::print_error(
                             "KeyNotFound",
                             "Failed to retrieve imported key info",
-                            output_format,
+                            &ctx.output_format,
                         );
                     }
                 }
@@ -144,13 +144,13 @@ pub async fn execute(
 
             // Basic mnemonic validation EARLY
             if mnemonic.split_whitespace().count() < 12 {
-                match output_format {
+                match &ctx.output_format {
                     OutputFormat::Text => return Err("Mnemonic must have at least 12 words".into()),
                     OutputFormat::Json => {
                         output::print_error(
                             "InvalidMnemonic",
                             "Mnemonic must have at least 12 words",
-                            output_format,
+                            &ctx.output_format,
                         );
                         std::process::exit(1);
                     }
@@ -171,7 +171,7 @@ pub async fn execute(
             let key_id =
                 keystore.import_mnemonic(Some(label.clone()), &mnemonic, &args.derivation_path)?;
 
-            match output_format {
+            match &ctx.output_format {
                 OutputFormat::Text => {
                     println!("Mnemonic imported successfully with ID: {key_id}");
                 }
@@ -186,12 +186,12 @@ pub async fn execute(
                             address: format!("{:?}", key_info.address),
                             created_at: key_info.created_at.to_rfc3339(),
                         };
-                        output::print_success(response, output_format);
+                        output::print_success(response, &ctx.output_format);
                     } else {
                         output::print_error(
                             "KeyNotFound",
                             "Failed to retrieve imported key info",
-                            output_format,
+                            &ctx.output_format,
                         );
                     }
                 }

@@ -12,6 +12,18 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Context passed to all CLI commands containing shared configuration and state
+#[derive(Debug, Clone)]
+pub struct CommandContext {
+    pub output_format: OutputFormat,
+}
+
+impl CommandContext {
+    pub fn new(output_format: OutputFormat) -> Self {
+        Self { output_format }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "mfm")]
 #[command(about = "MFM - On-chain operations tool")]
@@ -36,9 +48,11 @@ pub enum Commands {
 
 impl Cli {
     pub async fn execute(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let ctx = CommandContext::new(self.output_format.clone());
+        
         match &self.command {
             Commands::Keystore { command } => {
-                command.execute(&self.output_format).await?;
+                command.execute(&ctx).await?;
             }
         }
         Ok(())
