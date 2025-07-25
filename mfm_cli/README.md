@@ -209,7 +209,7 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 - **Secure your environment**: When using environment variables, ensure the security of your shell history and environment.
 - **Backup your keystore file**: The CLI manages keys, but you are responsible for securely backing up the keystore file itself.
 
-## AI Integration
+## AI/Machine Integration
 
 The CLI is designed to be AI-friendly with consistent JSON output that makes it easy for AI agents to:
 
