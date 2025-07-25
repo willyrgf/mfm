@@ -44,7 +44,7 @@ fn test_e2e_private_key_workflow() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Private key imported successfully",
+            "private key imported successfully",
         ));
 
     // Step 2: List keys to verify import
@@ -119,7 +119,7 @@ fn test_e2e_mnemonic_workflow() {
     import_cmd
         .assert()
         .success()
-        .stdout(predicate::str::contains("Mnemonic imported successfully"));
+        .stdout(predicate::str::contains("mnemonic imported successfully"));
 
     // Step 2: List keys to verify import
     let mut list_cmd = cli_with_password();
@@ -150,7 +150,7 @@ fn test_e2e_mnemonic_workflow() {
     import_cmd2
         .assert()
         .success()
-        .stdout(predicate::str::contains("Mnemonic imported successfully"));
+        .stdout(predicate::str::contains("mnemonic imported successfully"));
 
     // Step 4: List should now show 2 keys
     let mut list_cmd2 = cli_with_password();
@@ -194,7 +194,7 @@ fn test_e2e_delete_workflow() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Private key imported successfully",
+            "private key imported successfully",
         ));
 
     // Step 2: Import another key to keep
@@ -216,7 +216,7 @@ fn test_e2e_delete_workflow() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Private key imported successfully",
+            "private key imported successfully",
         ));
 
     // Step 3: List keys to verify both exist
@@ -286,7 +286,7 @@ fn test_e2e_mixed_key_types_workflow() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Private key imported successfully",
+            "private key imported successfully",
         ));
 
     // Import mnemonic
@@ -307,7 +307,7 @@ fn test_e2e_mixed_key_types_workflow() {
     import_mn_cmd
         .assert()
         .success()
-        .stdout(predicate::str::contains("Mnemonic imported successfully"));
+        .stdout(predicate::str::contains("mnemonic imported successfully"));
 
     // List all keys
     let mut list_cmd = cli_with_password();
@@ -369,7 +369,7 @@ fn test_e2e_auto_generated_labels() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Private key imported successfully",
+            "private key imported successfully",
         ));
 
     // List to verify auto-generated label
@@ -409,7 +409,7 @@ fn test_e2e_sorting_and_formatting() {
             .assert()
             .success()
             .stdout(predicate::str::contains(
-                "Private key imported successfully",
+                "private key imported successfully",
             ));
 
         // Small delay to ensure different timestamps
@@ -482,7 +482,7 @@ fn test_e2e_keystore_persistence() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Private key imported successfully",
+            "private key imported successfully",
         ));
 
     // Verify keystore file exists and has content

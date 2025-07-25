@@ -1,7 +1,9 @@
-use crate::cli::utils::{input, keystore::KeystoreManager, output};
-use crate::cli::{CommandContext, OutputFormat};
+use crate::cli::command_result::{CommandError, CommandOutput, CommandResult};
+use crate::cli::utils::{input, keystore::KeystoreManager, output::handle_command_result};
+use crate::cli::CommandContext;
 use clap::Args;
 use serde::Serialize;
+use std::fmt;
 use std::path::PathBuf;
 
 #[derive(Args)]
@@ -40,7 +42,7 @@ pub enum ImportType {
 }
 
 #[derive(Serialize)]
-struct ImportResponse {
+pub struct ImportResponse {
     id: String,
     label: String,
     key_type: String,
@@ -48,57 +50,59 @@ struct ImportResponse {
     created_at: String,
 }
 
-pub async fn execute(
+impl fmt::Display for ImportResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} imported successfully with ID: {}",
+            self.key_type, self.id
+        )
+    }
+}
+
+pub async fn execute(ctx: &CommandContext, args: &ImportArgs) -> ! {
+    let result = execute_internal(ctx, args).await;
+    handle_command_result(result, &ctx.output_format);
+}
+
+async fn execute_internal(
+    _ctx: &CommandContext,
     args: &ImportArgs,
-    ctx: &CommandContext,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> CommandResult<ImportResponse> {
     // Read and validate input BEFORE creating/unlocking keystore
     match args.import_type {
         ImportType::PrivateKey => {
             let private_key = if args.stdin {
-                input::read_input("", true)?
+                input::read_input("", true)
+                    .map_err(|e| CommandError::new("InputError", e.to_string()))?
             } else {
-                input::read_input("Enter private key (hex): ", false)?
+                input::read_input("Enter private key (hex): ", false)
+                    .map_err(|e| CommandError::new("InputError", e.to_string()))?
             };
 
             // Validate private key format EARLY
             let private_key = private_key.strip_prefix("0x").unwrap_or(&private_key);
             if private_key.len() != 64 {
-                match &ctx.output_format {
-                    OutputFormat::Text => {
-                        return Err("Private key must be 64 hex characters".into())
-                    }
-                    OutputFormat::Json => {
-                        output::print_error(
-                            "InvalidPrivateKey",
-                            "Private key must be 64 hex characters",
-                            &ctx.output_format,
-                        );
-                        std::process::exit(1);
-                    }
-                }
+                return Err(CommandError::new(
+                    "InvalidPrivateKey",
+                    "Private key must be 64 hex characters",
+                ));
             }
 
             // Check if it's valid hex
             if hex::decode(private_key).is_err() {
-                match &ctx.output_format {
-                    OutputFormat::Text => {
-                        return Err("Private key must be valid hexadecimal".into())
-                    }
-                    OutputFormat::Json => {
-                        output::print_error(
-                            "InvalidPrivateKey",
-                            "Private key must be valid hexadecimal",
-                            &ctx.output_format,
-                        );
-                        std::process::exit(1);
-                    }
-                }
+                return Err(CommandError::new(
+                    "InvalidPrivateKey",
+                    "Private key must be valid hexadecimal",
+                ));
             }
 
             // Only create keystore after validation passes
             let manager = KeystoreManager::new(args.keystore.clone());
-            let mut keystore = manager.create_keystore_if_needed().await?;
+            let mut keystore = manager
+                .create_keystore_if_needed()
+                .await
+                .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
 
             let label = args.label.clone().unwrap_or_else(|| {
                 format!(
@@ -107,59 +111,51 @@ pub async fn execute(
                 )
             });
 
-            let key_id = keystore.import_private_key(Some(label.clone()), private_key)?;
+            let key_id = keystore
+                .import_private_key(Some(label.clone()), private_key)
+                .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
 
-            match &ctx.output_format {
-                OutputFormat::Text => {
-                    println!("Private key imported successfully with ID: {key_id}");
-                }
-                OutputFormat::Json => {
-                    // Get the imported key info
-                    let keys = keystore.list_keys()?;
-                    if let Some(key_info) = keys.iter().find(|k| k.id == key_id) {
-                        let response = ImportResponse {
-                            id: key_info.id.to_string(),
-                            label: key_info.alias.clone().unwrap_or_else(|| "".to_string()),
-                            key_type: format!("{:?}", key_info.key_type).to_lowercase(),
-                            address: format!("{:?}", key_info.address),
-                            created_at: key_info.created_at.to_rfc3339(),
-                        };
-                        output::print_success(response, &ctx.output_format);
-                    } else {
-                        output::print_error(
-                            "KeyNotFound",
-                            "Failed to retrieve imported key info",
-                            &ctx.output_format,
-                        );
-                    }
-                }
-            }
+            // Get the imported key info
+            let keys = keystore
+                .list_keys()
+                .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
+            let key_info = keys.iter().find(|k| k.id == key_id).ok_or_else(|| {
+                CommandError::key_not_found("Failed to retrieve imported key info")
+            })?;
+
+            let response = ImportResponse {
+                id: key_info.id.to_string(),
+                label: key_info.alias.clone().unwrap_or_else(|| "".to_string()),
+                key_type: "private key".to_string(),
+                address: format!("{:?}", key_info.address),
+                created_at: key_info.created_at.to_rfc3339(),
+            };
+
+            Ok(CommandOutput::new(response))
         }
         ImportType::Mnemonic => {
             let mnemonic = if args.stdin {
-                input::read_input("", true)?
+                input::read_input("", true)
+                    .map_err(|e| CommandError::new("InputError", e.to_string()))?
             } else {
-                input::read_input("Enter mnemonic phrase: ", false)?
+                input::read_input("Enter mnemonic phrase: ", false)
+                    .map_err(|e| CommandError::new("InputError", e.to_string()))?
             };
 
             // Basic mnemonic validation EARLY
             if mnemonic.split_whitespace().count() < 12 {
-                match &ctx.output_format {
-                    OutputFormat::Text => return Err("Mnemonic must have at least 12 words".into()),
-                    OutputFormat::Json => {
-                        output::print_error(
-                            "InvalidMnemonic",
-                            "Mnemonic must have at least 12 words",
-                            &ctx.output_format,
-                        );
-                        std::process::exit(1);
-                    }
-                }
+                return Err(CommandError::new(
+                    "InvalidMnemonic",
+                    "Mnemonic must have at least 12 words",
+                ));
             }
 
             // Only create keystore after validation passes
             let manager = KeystoreManager::new(args.keystore.clone());
-            let mut keystore = manager.create_keystore_if_needed().await?;
+            let mut keystore = manager
+                .create_keystore_if_needed()
+                .await
+                .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
 
             let label = args.label.clone().unwrap_or_else(|| {
                 format!(
@@ -168,36 +164,27 @@ pub async fn execute(
                 )
             });
 
-            let key_id =
-                keystore.import_mnemonic(Some(label.clone()), &mnemonic, &args.derivation_path)?;
+            let key_id = keystore
+                .import_mnemonic(Some(label.clone()), &mnemonic, &args.derivation_path)
+                .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
 
-            match &ctx.output_format {
-                OutputFormat::Text => {
-                    println!("Mnemonic imported successfully with ID: {key_id}");
-                }
-                OutputFormat::Json => {
-                    // Get the imported key info
-                    let keys = keystore.list_keys()?;
-                    if let Some(key_info) = keys.iter().find(|k| k.id == key_id) {
-                        let response = ImportResponse {
-                            id: key_info.id.to_string(),
-                            label: key_info.alias.clone().unwrap_or_else(|| "".to_string()),
-                            key_type: format!("{:?}", key_info.key_type).to_lowercase(),
-                            address: format!("{:?}", key_info.address),
-                            created_at: key_info.created_at.to_rfc3339(),
-                        };
-                        output::print_success(response, &ctx.output_format);
-                    } else {
-                        output::print_error(
-                            "KeyNotFound",
-                            "Failed to retrieve imported key info",
-                            &ctx.output_format,
-                        );
-                    }
-                }
-            }
+            // Get the imported key info
+            let keys = keystore
+                .list_keys()
+                .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
+            let key_info = keys.iter().find(|k| k.id == key_id).ok_or_else(|| {
+                CommandError::key_not_found("Failed to retrieve imported key info")
+            })?;
+
+            let response = ImportResponse {
+                id: key_info.id.to_string(),
+                label: key_info.alias.clone().unwrap_or_else(|| "".to_string()),
+                key_type: "mnemonic".to_string(),
+                address: format!("{:?}", key_info.address),
+                created_at: key_info.created_at.to_rfc3339(),
+            };
+
+            Ok(CommandOutput::new(response))
         }
     }
-
-    Ok(())
 }

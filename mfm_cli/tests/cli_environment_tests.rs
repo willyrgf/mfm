@@ -27,7 +27,7 @@ fn test_environment_variable_configuration() {
     cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
 
     cmd.assert().success().stdout(predicate::str::contains(
-        "Private key imported successfully",
+        "private key imported successfully",
     ));
 
     // Verify we can list with same environment variable
@@ -73,7 +73,7 @@ fn test_wrong_password_environment_variable() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Private key imported successfully",
+            "private key imported successfully",
         ));
 
     // Try to access with wrong password
@@ -115,7 +115,7 @@ fn test_keystore_path_environment_variable() {
     cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
 
     cmd.assert().success().stdout(predicate::str::contains(
-        "Private key imported successfully",
+        "private key imported successfully",
     ));
 
     // Verify keystore was created at environment path
@@ -163,7 +163,7 @@ fn test_output_mode_environment_variable() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Private key imported successfully",
+            "private key imported successfully",
         ));
 
     // Test machine output mode via environment

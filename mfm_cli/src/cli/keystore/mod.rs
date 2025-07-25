@@ -26,21 +26,17 @@ pub enum KeystoreCommand {
 }
 
 impl KeystoreCommand {
-    pub async fn execute(
-        &self,
-        ctx: &CommandContext,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn execute(&self, ctx: &CommandContext) -> ! {
         match self {
             KeystoreCommand::Import { args } => {
-                import::execute(args, ctx).await?;
+                import::execute(ctx, args).await;
             }
             KeystoreCommand::Delete { args } => {
-                delete::execute(args, ctx).await?;
+                delete::execute(ctx, args).await;
             }
             KeystoreCommand::List { args } => {
-                list::execute(args, ctx).await?;
+                list::execute(ctx, args).await;
             }
         }
-        Ok(())
     }
 }

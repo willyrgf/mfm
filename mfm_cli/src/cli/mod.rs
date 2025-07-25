@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
+pub mod command_result;
 pub mod keystore;
 pub mod utils;
 
@@ -47,14 +48,13 @@ pub enum Commands {
 }
 
 impl Cli {
-    pub async fn execute(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn execute(&self) -> ! {
         let ctx = CommandContext::new(self.output_format.clone());
-        
+
         match &self.command {
             Commands::Keystore { command } => {
-                command.execute(&ctx).await?;
+                command.execute(&ctx).await;
             }
         }
-        Ok(())
     }
 }

@@ -1,7 +1,16 @@
 use assert_cmd::Command;
+use mfm::cli::utils::output::{ResponseStatus, SuccessResponse};
 use predicates::prelude::*;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tempfile::TempDir;
+
+// This struct is local to the test module to help with deserialization.
+#[derive(Deserialize)]
+struct TestResponse<T> {
+    status: ResponseStatus,
+    data: T,
+}
 
 /// Test helper to create a temporary keystore and return its path
 fn setup_temp_keystore() -> TempDir {
@@ -10,10 +19,9 @@ fn setup_temp_keystore() -> TempDir {
 
 /// Test helper to parse JSON output and verify it has the success structure
 fn verify_success_response(output: &str) -> Value {
-    let parsed: Value = serde_json::from_str(output).expect("Should be valid JSON");
-    assert_eq!(parsed["status"], "success");
-    assert!(parsed.get("data").is_some());
-    parsed
+    let parsed: TestResponse<Value> = serde_json::from_str(output).expect("Should be valid JSON");
+    assert!(matches!(parsed.status, ResponseStatus::Success));
+    parsed.data
 }
 
 #[test]
@@ -225,7 +233,7 @@ fn test_json_response_structure_consistency() {
     });
 
     // Verify our structures match the expected format
-    use mfm::cli::utils::output::{ErrorResponse, SuccessResponse};
+    use mfm::cli::utils::output::ErrorResponse;
 
     let success_response = SuccessResponse::new(json!({}));
     let success_json = serde_json::to_value(success_response).unwrap();

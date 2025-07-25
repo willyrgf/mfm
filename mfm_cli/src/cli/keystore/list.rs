@@ -1,10 +1,13 @@
+use crate::cli::command_result::{CommandError, CommandOutput, CommandResult};
 use crate::cli::utils::{
     keystore::KeystoreManager,
-    output::{format_keys, KeyDisplay},
+    output::{format_keys_table, handle_command_result, KeyDisplay},
 };
-use crate::cli::{CommandContext, OutputFormat};
+use crate::cli::CommandContext;
 use clap::Args;
 use regex::Regex;
+use serde::Serialize;
+use std::fmt;
 use std::path::PathBuf;
 
 #[derive(Args)]
@@ -36,24 +39,43 @@ pub enum SortBy {
     Type,
 }
 
-pub async fn execute(
-    args: &ListArgs,
-    ctx: &CommandContext,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let manager = KeystoreManager::new(args.keystore.clone());
-    let keystore = manager.get_unlocked_keystore().await?;
+#[derive(Serialize)]
+pub struct ListResponse {
+    keys: Vec<KeyDisplay>,
+    show_addresses: bool,
+}
 
-    let keys = keystore.list_keys()?;
+impl fmt::Display for ListResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.keys.is_empty() {
+            write!(f, "No keys found in keystore")
+        } else {
+            write!(f, "{}", format_keys_table(&self.keys, self.show_addresses))
+        }
+    }
+}
+
+pub async fn execute(ctx: &CommandContext, args: &ListArgs) -> ! {
+    let result = execute_internal(ctx, args).await;
+    handle_command_result(result, &ctx.output_format);
+}
+
+async fn execute_internal(_ctx: &CommandContext, args: &ListArgs) -> CommandResult<ListResponse> {
+    let manager = KeystoreManager::new(args.keystore.clone());
+    let keystore = manager
+        .get_unlocked_keystore()
+        .await
+        .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
+
+    let keys = keystore
+        .list_keys()
+        .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
 
     if keys.is_empty() {
-        match &ctx.output_format {
-            OutputFormat::Text => println!("No keys found in keystore"),
-            OutputFormat::Json => {
-                use crate::cli::utils::output;
-                output::print_success(Vec::<KeyDisplay>::new(), &ctx.output_format);
-            }
-        }
-        return Ok(());
+        return Ok(CommandOutput::new(ListResponse {
+            keys: Vec::new(),
+            show_addresses: args.show_addresses,
+        }));
     }
 
     let mut key_displays: Vec<KeyDisplay> = keys
@@ -76,7 +98,9 @@ pub async fn execute(
 
     // Apply label filter if specified
     if let Some(filter_pattern) = &args.filter_label {
-        let regex = Regex::new(filter_pattern)?;
+        let regex = Regex::new(filter_pattern).map_err(|e| {
+            CommandError::new("InvalidRegex", format!("Invalid regex pattern: {e}"))
+        })?;
         key_displays.retain(|key| regex.is_match(&key.label));
     }
 
@@ -87,8 +111,8 @@ pub async fn execute(
         SortBy::Type => key_displays.sort_by(|a, b| a.key_type.cmp(&b.key_type)),
     }
 
-    let output = format_keys(key_displays, ctx.output_format.clone(), args.show_addresses);
-    println!("{output}");
-
-    Ok(())
+    Ok(CommandOutput::new(ListResponse {
+        keys: key_displays,
+        show_addresses: args.show_addresses,
+    }))
 }

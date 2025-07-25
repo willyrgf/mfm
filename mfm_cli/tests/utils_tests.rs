@@ -1,12 +1,4 @@
-use mfm::cli::utils::output::{format_keys, KeyDisplay};
-use mfm::cli::OutputFormat;
-
-#[test]
-fn test_output_format_values() {
-    // Test the OutputFormat enum variants
-    assert!(matches!(OutputFormat::Text, OutputFormat::Text));
-    assert!(matches!(OutputFormat::Json, OutputFormat::Json));
-}
+use mfm::cli::utils::output::{format_keys_table, KeyDisplay, ResponseStatus, SuccessResponse};
 
 #[test]
 fn test_key_display_table_formatting() {
@@ -27,7 +19,7 @@ fn test_key_display_table_formatting() {
         },
     ];
 
-    let output = format_keys(keys, OutputFormat::Text, false);
+    let output = format_keys_table(&keys, false);
 
     // Verify table contains expected data
     assert!(output.contains("test-id-1"));
@@ -48,7 +40,8 @@ fn test_key_display_json_formatting() {
         created: "2024-01-01 12:00:00".to_string(),
     }];
 
-    let output = format_keys(keys, OutputFormat::Json, true);
+    let response = SuccessResponse::new(keys.clone());
+    let output = serde_json::to_string(&response).unwrap();
 
     // Verify JSON contains expected data
     assert!(output.contains("test-id-1"));
@@ -58,9 +51,10 @@ fn test_key_display_json_formatting() {
     assert!(output.contains("2024-01-01 12:00:00"));
 
     // Verify it's valid JSON with success response structure
-    let parsed: serde_json::Value = serde_json::from_str(&output).expect("Should be valid JSON");
-    assert_eq!(parsed["status"], "success");
-    assert!(parsed["data"].is_array());
+    let parsed: SuccessResponse<Vec<KeyDisplay>> =
+        serde_json::from_str(&output).expect("Should be valid JSON");
+    assert!(matches!(parsed.status, ResponseStatus::Success));
+    assert_eq!(parsed.data.len(), 1);
 }
 
 #[test]
@@ -73,19 +67,28 @@ fn test_key_display_json_without_addresses() {
         created: "2024-01-01 12:00:00".to_string(),
     }];
 
-    let output = format_keys(keys, OutputFormat::Json, false);
+    // In the new model, filtering addresses is done before serialization.
+    let keys_without_address: Vec<KeyDisplay> = keys
+        .into_iter()
+        .map(|mut k| {
+            k.address = None;
+            k
+        })
+        .collect();
+    let response = SuccessResponse::new(keys_without_address);
+    let output = serde_json::to_string(&response).unwrap();
 
     // Should not contain address when show_addresses is false
     assert!(!output.contains("0x1234567890123456789012345678901234567890"));
 
     // Verify it's valid JSON with success response structure
-    let parsed: serde_json::Value = serde_json::from_str(&output).expect("Should be valid JSON");
-    assert_eq!(parsed["status"], "success");
-    assert!(parsed["data"].is_array());
+    let parsed: SuccessResponse<Vec<KeyDisplay>> =
+        serde_json::from_str(&output).expect("Should be valid JSON");
+    assert!(matches!(parsed.status, ResponseStatus::Success));
 
     // Verify address field is null
-    let first_key = &parsed["data"][0];
-    assert!(first_key["address"].is_null());
+    let first_key = &parsed.data[0];
+    assert!(first_key.address.is_none());
 }
 
 #[test]
@@ -98,7 +101,7 @@ fn test_key_display_table_with_addresses() {
         created: "2024-01-01 12:00:00".to_string(),
     }];
 
-    let output = format_keys(keys, OutputFormat::Text, true);
+    let output = format_keys_table(&keys, true);
 
     // Should contain address when show_addresses is true
     assert!(output.contains("0x1234567890123456789012345678901234567890"));
@@ -114,7 +117,7 @@ fn test_key_display_table_without_addresses() {
         created: "2024-01-01 12:00:00".to_string(),
     }];
 
-    let output = format_keys(keys, OutputFormat::Text, false);
+    let output = format_keys_table(&keys, false);
 
     // Should not contain address when show_addresses is false
     assert!(!output.contains("0x1234567890123456789012345678901234567890"));
@@ -122,18 +125,20 @@ fn test_key_display_table_without_addresses() {
 
 #[test]
 fn test_empty_keys_formatting() {
-    let keys = vec![];
+    let keys: Vec<KeyDisplay> = vec![];
 
-    let table_output = format_keys(keys.clone(), OutputFormat::Text, false);
-    let json_output = format_keys(keys, OutputFormat::Json, false);
-
+    // Test table output
+    let table_output = format_keys_table(&keys, false);
     // Table should be empty or just headers
     assert!(!table_output.contains("test-id"));
 
+    // Test JSON output
+    let response = SuccessResponse::new(keys);
+    let json_output = serde_json::to_string(&response).unwrap();
+
     // JSON should be success response with empty array
-    let parsed: serde_json::Value =
+    let parsed: SuccessResponse<Vec<KeyDisplay>> =
         serde_json::from_str(&json_output).expect("Should be valid JSON");
-    assert_eq!(parsed["status"], "success");
-    assert!(parsed["data"].is_array());
-    assert_eq!(parsed["data"].as_array().unwrap().len(), 0);
+    assert!(matches!(parsed.status, ResponseStatus::Success));
+    assert!(parsed.data.is_empty());
 }
