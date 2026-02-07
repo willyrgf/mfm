@@ -1,7 +1,7 @@
 # MFM — Current State Report
 
 > Snapshot taken: 2026-02-07
-> Branch: `dev` at commit `3a5d987`
+> Branch: `redesigning` (post-cleanup; key commits: `302d204`, `6a29085`, `d76c7f8`)
 > Version: 0.1.29 (workspace), mfm_machine at 0.1.0
 
 ---
@@ -21,9 +21,9 @@ that currently exposes keystore management.
 ```
 mfm/
 ├── Cargo.toml          # workspace root, v0.1.29, resolver v2
-├── mfm_machine/        # generic async-ready state machine framework (lib, v0.1.0)
+├── mfm_machine/        # async recoverable state machine framework (lib, v0.1.0)
 ├── mfm_machine_derive/ # proc-macro for StateMetadata boilerplate (proc-macro lib, v0.1.0)
-├── mfm_core/           # keystore, config, encryption primitives (lib, v0.1.29)
+├── mfm_core/           # keystore + config models (lib, v0.1.29)
 ├── mfm_cli/            # command-line interface (bin, v0.1.29)
 ├── flake.nix           # nix build/dev environment
 └── flake.lock
@@ -49,8 +49,9 @@ The CLI does not use the state machine today — it only uses `mfm_core::keystor
 | CLI | `clap` (derive + env) |
 | Utilities | `anyhow`, `thiserror`, `url`, `hex`, `rand`, `uuid`, `chrono`, `base64` |
 
-The `alloy-*` crates are declared at workspace level but **not imported by any crate's
-Cargo.toml** today. They are reserved for future on-chain work.
+Only `alloy-primitives` is currently imported (used for `Address`/`U256` types in
+`mfm_core`). The remaining `alloy-*` crates are declared at workspace level for future
+on-chain work, but are not used yet.
 
 ---
 
@@ -81,11 +82,14 @@ mfm_machine/src/
 
 #### Tag and Label
 
-- Newtypes over `&'static str`, validated as non-empty lowercase ASCII with underscores.
-- `new()` validates at runtime; `new_const()` skips validation for `const` contexts.
-- Standard tags split into **kind tags** (`CONFIG`, `FETCH_DATA`, `COMPUTE`, `EXECUTE`,
-  `REPORT`, `REPORT_OPERATOR`, `REPORT_OPERATION`) and **behavior tags**
-  (`APPLY_SIDE_EFFECT`, `IMPURE`).
+- Newtypes over `String`, validated as non-empty lowercase ASCII letters with underscores.
+- `Tag::new(&str)` / `Label::new(&str)` validate at runtime.
+- `Tag::new_unchecked(&str)` / `Label::new_unchecked(&str)` skip validation (still allocate).
+- `as_str() -> &str` for access to the underlying string.
+- Standard tags are provided as functions in `state::standard_tags`, split into:
+  - **kind tags**: `config`, `fetch_data`, `compute`, `execute`, `report`,
+    `report_operator`, `report_operation`
+  - **behavior tags**: `apply_side_effect`, `impure`
 - `Tag::is_kind_tag()`, `is_behavior_tag()`, `is_standard_tag()` for introspection.
 
 #### StateMetadata (trait)
@@ -104,12 +108,16 @@ Derived methods:
 #### StateHandler (trait: StateMetadata + Send + Sync)
 
 ```rust
-fn handler(&self, context: SafeContext) -> StateResult;
+#[async_trait::async_trait]
+pub trait StateHandler: StateMetadata + Send + Sync {
+    async fn handler(&self, context: SafeContext) -> StateResult;
+}
 // StateResult = Result<(), StateError>
 ```
 
 This is the user-implemented logic. Receives a thread-safe context, reads/writes data,
-returns `Ok(())` or a categorized error.
+and returns `Ok(())` or a categorized error. The engine awaits handlers; state
+implementations should avoid blocking the async runtime.
 
 #### StateError
 
@@ -138,8 +146,9 @@ pub enum DependencyStrategy {
 }
 ```
 
-**Currently unused in practice** — `DefaultErrorHandler` always takes the last tracker
-match regardless of strategy. The enum exists for future scheduler implementations.
+Used by `DefaultErrorHandler` to select a recovery point among dependency matches
+(`Earliest` vs `Latest`). `LatestSuccessful` currently behaves like `Latest` (the
+tracker does not yet record per-execution success/failure).
 
 ### 3.4 Context system
 
@@ -150,7 +159,8 @@ Three layers:
 Abstract key-value store with immutable write semantics:
 - `read(key) -> Value` / `write(key, value) -> Box<dyn Context>` (returns new context)
 - `dump() -> Value` / `snapshot() -> Box<dyn Context>` / `history() -> Option<Vec<...>>`
-- Default implementation: `Local` — `HashMap<String, Value>` with `Vec<HashMap>` history.
+- Default implementation: `Local` — `HashMap<String, Value>` with bounded `VecDeque` history
+  (default max 100 snapshots; configurable via `Local::with_max_history`).
 
 **Layer 2 — `TypedContext<T>` trait** (`context.rs`)
 
@@ -180,46 +190,60 @@ StateMachineBuilder::new(states)
     .scheduler(Box::new(custom_scheduler))
     .error_handler(Box::new(custom_handler))
     .max_recoveries(20)
-    .build()  // -> StateMachine
+    .build()?;  // -> Result<StateMachine, StateMachineError>
 ```
 
 All components are optional — defaults to `HashMapTracker`, `DefaultScheduler`,
 `DefaultErrorHandler`, and `max_recoveries = states.len() * 3 + 1`.
 
+`build()` performs early validation of the state graph:
+- non-empty state list
+- no duplicate `Label`s
+- all `depends_on` tags are provided by at least one state
+- no circular dependencies (topological sort)
+
 #### Execution model
 
-`execute(context)` starts a recursive loop:
+`execute(context).await` runs an async loop:
 
 1. `transition(ctx, index, last_result)`:
-   - First call (no result): returns `(0, ctx)` passthrough
-   - After `Ok(())`: calls `scheduler.next_state()` to get next index
+   - First call (no result): returns `([start_index], ctx)` passthrough
+   - After `Ok(())`: calls `scheduler.next_states()` to get next indices (unless
+     filter tags are set, in which case it uses `next_state()` to preserve skip
+     semantics)
    - After recoverable `Err`: calls `error_handler.handle_error()`, looks up recovery
-     point in tracker, returns `(recovery_index, recovery_context)`
+     point in tracker, returns `([recovery_index], recovery_context)`
    - After unrecoverable `Err`: returns `StateMachineError`
    - Checks max recoveries at each transition
 
 2. `execute_rec(ctx, index, last_result)`:
    - Calls `transition()`
-   - If state exists at returned index: checks filter tags, runs `state.handler(ctx)`,
-     tracks execution, recurses
+   - If filtering is enabled (or only a single next state is returned): checks filter tags,
+     runs `state.handler(ctx).await`, tracks execution, continues
+   - If multiple runnable next states are returned: runs them concurrently via
+     `futures::future::join_all` (no `tokio::spawn`), tracks per-state snapshots, and
+     propagates the first error (by index) into the next transition
    - If no more states (`NoNextState`): returns final context
 
 Entry points:
-- `execute(ctx)` — from index 0
-- `execute_from(ctx, start_index)` — from arbitrary index
-- `execute_with_filter(ctx, filter_tags)` — skips states matching given tags
+- `execute(ctx).await` — from index 0
+- `execute_from(ctx, start_index).await` — from arbitrary index
+- `execute_with_filter(ctx, filter_tags).await` — skips states matching given tags
 
 #### Scheduler trait
 
 ```rust
 fn next_state(current_index, states, context) -> Result<usize, SchedulerError>
+fn next_states(current_index, states, context) -> Result<Vec<usize>, SchedulerError>
 fn set_filter_tags(tags) / fn get_filter_tags() -> Option<Vec<Tag>>
 ```
 
-Two implementations:
+Three implementations:
 - **DefaultScheduler** — `current_index + 1`, sequential.
 - **DependencyScheduler** — searches for next state whose `depends_on` tags overlap with
   current state's tags. Falls back to sequential if no match.
+- **ParallelScheduler** — can return a contiguous block of runnable states for concurrent
+  execution. Assumes `states` are ordered to satisfy dependencies.
 
 #### ErrorHandler trait
 
@@ -229,9 +253,11 @@ fn handle_error(error, current_index, current_state, states, tracker) -> Result<
 
 **DefaultErrorHandler**:
 1. Checks `error.is_recoverable()` — rejects unrecoverable errors
-2. Looks at `current_state.depends_on()`, takes first dependency tag
-3. Searches tracker for states with that tag, takes last match
-4. Returns that state's index as recovery point
+2. Looks at `current_state.depends_on()` and collects tracker matches across **all**
+   dependency tags
+3. Applies `DependencyStrategy` to pick a recovery point (`Earliest`/`Latest`;
+   `LatestSuccessful` currently behaves like `Latest`)
+4. Returns the selected state's index as recovery point
 5. Falls back to index 0 if no dependencies or no matches
 
 #### Tracker trait
@@ -250,49 +276,73 @@ Plus `TrackerMetadata`:
 **HashMapTracker**: stores `HashMap<Index, SafeContext>` + appends to `TrackerHistory`.
 `Index` contains `state_index: usize`, `state_label: Label`, `state_tags: Vec<Tag>`.
 
-### 3.6 Derive macro (`mfm_machine_derive`)
+### 3.6 Proc-macros (`mfm_machine_derive`)
 
-Single macro: `#[derive(StateMetadataReqs)]`.
+Two macros are available:
 
-Given a struct with fields `label: Label`, `tags: Vec<Tag>`, `depends_on: Vec<Tag>`,
-`depends_on_strategy: DependencyStrategy`, generates:
+1. `#[derive(StateMetadataReqs)]`
+   - For states that define metadata fields manually.
+   - Validates that the input is a struct with named fields:
+     `label`, `tags`, `depends_on`, `depends_on_strategy` (clear compile-time errors).
+   - Generates a `StateMetadata` impl that clones `Label`/`Tag` values (they are not `Copy`).
 
 ```rust
 impl StateMetadata for MyState {
-    fn label(&self) -> Label { self.label }
-    fn tags(&self) -> Vec<Tag> { self.tags.clone() }
-    fn depends_on(&self) -> Vec<Tag> { self.depends_on.clone() }
-    fn depends_on_strategy(&self) -> DependencyStrategy { self.depends_on_strategy }
+    fn label(&self) -> Label {
+        self.label.clone()
+    }
+    fn tags(&self) -> Vec<Tag> {
+        self.tags.clone()
+    }
+    fn depends_on(&self) -> Vec<Tag> {
+        self.depends_on.clone()
+    }
+    fn depends_on_strategy(&self) -> DependencyStrategy {
+        self.depends_on_strategy
+    }
 }
 ```
 
-No validation that the struct fields exist or have correct types — errors surface as
-compile errors in the generated code.
+2. `#[mfm_machine_derive::state_handler(...)]` (attribute macro)
+   - Ergonomic alternative for unit structs.
+   - Adds the metadata fields, plus `new()` and a `Default` impl.
+   - Does **not** implement `StateHandler`; consumers still implement `handler()` manually.
+
+Note: the proc-macro expansions refer to `::mfm_machine::...`. The `mfm_machine` crate
+includes `extern crate self as mfm_machine;` to make this work when macros are used
+within the crate itself.
 
 ### 3.7 Test coverage
 
 | Test file | What it covers |
 |-----------|---------------|
-| `tests/default_impls.rs` | 8 test state implementations: Setup, ComputePrice, Report, ConfigState, OnChainValuesState, ValidationState, NotificationState, AnalyticsState, FinalizeState |
-| `tests/public_api_test.rs` | Verifies metadata accessors, execute with 5 states |
+| `tests/default_impls.rs` | 9 reusable test state implementations (some using `#[state_handler(...)]`): Setup, ComputePrice, Report, ConfigState, OnChainValuesState, ValidationState, NotificationState, AnalyticsState, FinalizeState |
+| `tests/public_api_test.rs` | Verifies metadata accessors and async execution with a small workflow |
 | `tests/retry_workflow_state_machine.rs` | Linear workflow, data propagation between states |
-| `tests/n_states_with_n_ctxs.rs` | Linear transitions, complex 7-state workflow, "parallel" state ordering, dependency strategy ordering |
-| Inline unit tests | Tag/Label validation, standard tag classification, context read/write/history, SafeContext typed access, scheduler next_state, tracker track/search/recover |
+| `tests/n_states_with_n_ctxs.rs` | Linear transitions, complex workflow, parallel scheduler execution, dependency strategy ordering |
+| Inline unit tests | Tag/Label validation, standard tag classification, bounded context history, SafeContext typed access, scheduler behavior, tracker track/search/recover |
 
-### 3.8 Known limitations
+### 3.8 Limitations (Post-Cleanup)
 
-| # | Limitation | Impact |
-|---|-----------|--------|
-| 1 | **Handlers are synchronous** — `handler()` returns `StateResult`, not a future. | Cannot do async I/O (RPC calls, HTTP) without blocking the tokio runtime. |
-| 2 | **No parallel state execution** — states always run one at a time. | DependencyScheduler finds *one* next state. True concurrency not possible. |
-| 3 | **Tracker stores Arc clones, not snapshots** — `track()` stores `SafeContext.clone()` which shares the same `Arc<RwLock>`. | Recovery context may reflect current state, not state at time of tracking. Rewind may not work correctly. |
-| 4 | **Context history grows unboundedly** — every `Local::write()` copies the full HashMap into history. | O(n^2) memory for n writes in long workflows. |
-| 5 | **`DependencyStrategy` enum is declared but unused** — `DefaultErrorHandler` ignores it, always takes last match. | `Earliest` and `LatestSuccessful` strategies have no effect. |
-| 6 | **Error handler only checks first dependency** — `depends_on.first()` only. | Multi-dependency states get incomplete recovery logic. |
-| 7 | **Filter logic uses `println!`** — bare `println!` at `state_machine/mod.rs:280`. | Debug output leaks into production. |
-| 8 | **`&'static str` constraint on Tag/Label** — requires string literals or leaked memory. | Runtime-configured workflows (e.g., from config files) are difficult. |
-| 9 | **No build-time validation** — circular dependencies, missing tags, unreachable states are not detected. | Misconfigured workflows silently misbehave. |
-| 10 | **Ergonomics acknowledged as poor** — `lib.rs` has `//FIXME: reorganize library to be more ergonomic to use`. | Test code (`public_api_test.rs`) shows verbose boilerplate for state creation. |
+#### Prior limitations (L1-L10) — status
+
+| # | Item | Status |
+|---|------|--------|
+| 1 | Handlers were synchronous | Fixed: `StateHandler::handler` is `async fn`. |
+| 2 | No parallel execution | Fixed: scheduler can return multiple next states; engine can `join_all`. |
+| 3 | Tracker stored shared `Arc` clones | Fixed: tracker stores deep `SafeContext` snapshots at track time. |
+| 4 | Unbounded context history | Fixed: `Local` history is bounded (default 100; configurable). |
+| 5 | `DependencyStrategy` unused | Mostly fixed: `Earliest`/`Latest` applied; `LatestSuccessful` is still TODO. |
+| 6 | Error handler only checked first dependency | Fixed: checks all dependency tags. |
+| 7 | Filter logic used `println!` | Fixed: uses `log::debug!`. |
+| 8 | `&'static str` Tag/Label constraint | Fixed: `Tag`/`Label` own `String`. |
+| 9 | No build-time validation | Fixed: builder validates empty/duplicate/dangling/circular dependencies. |
+| 10 | Ergonomics poor | Improved: `#[state_handler(...)]` macro reduces boilerplate; broader ergonomics remain a redesign topic. |
+
+#### Remaining limitations / notes
+
+- `DependencyStrategy::LatestSuccessful` currently behaves like `Latest` (tracker does not record per-execution success/failure).
+- `ParallelScheduler` assumes `states` are already in dependency order and returns a contiguous runnable block (it is not a general-purpose dynamic scheduler).
 
 ---
 
@@ -301,7 +351,7 @@ compile errors in the generated code.
 ### 4.1 Purpose
 
 Provides the keystore for secure Ethereum key management, configuration models for
-networks/tokens/DEXes, and an older encryption module for file-based wallet keys.
+networks/tokens/DEXes, and auth helpers (including a plaintext wallet-file reader).
 
 ### 4.2 Module layout
 
@@ -316,7 +366,6 @@ mfm_core/src/
 │   └── authentication/
 │       ├── mod.rs                      # Method::{Wallet, MetaMask}, Methods
 │       ├── wallet.rs                   # Wallet (file-based key reader)
-│       └── encryption.rs              # ChaCha20-Poly1305 encryption (legacy)
 └── keystore/
     ├── mod.rs                          # Keystore, SecureKey, KeystoreConfig, KeyEntry, KeyInfo
     ├── error.rs                        # KeystoreError enum
@@ -342,7 +391,10 @@ pub struct Config {
 ```
 
 Pattern: define all options in top-level maps, select active one in flat fields.
-No validation that selection fields reference valid map keys.
+`Config::load()` calls `Config::validate()` after deserialization and fails fast with a
+multi-error message for invalid cross-references (e.g. `dex.provider` missing from
+`dexes`, token networks referencing unknown `network_id`, DEX entries referencing unknown
+`network_id`).
 
 #### Network model
 
@@ -356,10 +408,13 @@ pub struct Network {
     pub node_url_http: Option<String>,
     pub node_url_grpc: Option<String>,
     pub blockexplorer_url: Option<String>,
-    pub min_balance_coin: f64,
+    pub min_balance_coin: String,       // decimal string (coin units)
     pub wrapped_token: Option<String>,  // e.g. WETH address
 }
 ```
+
+`Network::min_balance_wei(decimals)` parses `min_balance_coin` into base units (`U256`)
+without floating point.
 
 #### Token model
 
@@ -368,8 +423,8 @@ pub struct TokenNetwork {
     pub name: String,
     pub kind: Kind,             // Kind::Erc20 (only variant)
     pub network_id: String,     // references Networks key
-    pub address: String,        // contract address (plain String, not Address type)
-    pub slippage: f64,
+    pub address: Address,       // contract address
+    pub slippage: String,       // percent string (e.g. "0.50" or "0.50%")
     pub path_token: String,     // swap routing path
     pub decimals: Option<u8>,
 }
@@ -379,6 +434,9 @@ pub struct Token {
 }
 ```
 
+`TokenNetwork::slippage_bps()` parses `slippage` into basis points (bps) without floating
+point.
+
 #### DEX model
 
 ```rust
@@ -387,10 +445,10 @@ pub enum Kind { UniswapV2, CowSwap, UniswapV3 }
 pub struct Dex {
     pub name: String,
     pub kind: Kind,
-    pub router_address: Option<String>,
-    pub factory_address: Option<String>,
+    pub router_address: Option<Address>,
+    pub factory_address: Option<Address>,
     pub network_id: String,
-    pub settlement_contract: Option<String>,  // CowSwap
+    pub settlement_contract: Option<Address>, // CowSwap
     pub api_url: Option<String>,              // CowSwap
 }
 ```
@@ -404,23 +462,14 @@ pub enum Method {
 }
 ```
 
-`Wallet` reads a private key file, optionally decrypting with the legacy `Encryption`
-module. `Config::load_wallet()` iterates auth methods, falls back to `WalletConfig` path.
+`Wallet` reads a **plaintext** private key file when `not_encrypted: true`. Encrypted
+wallet files are no longer supported. `Config::load_wallet()` iterates auth methods and
+falls back to `WalletConfig.private_key_path`.
 
-#### Legacy encryption module (`authentication/encryption.rs`)
+#### Legacy encryption (removed)
 
-| Property | Value |
-|----------|-------|
-| Algorithm | ChaCha20-Poly1305 (via `ring`) |
-| KDF | PBKDF2-HMAC-SHA256, 100,000 iterations |
-| Salt | **Hardcoded**: `b"mfm_encryption_salt"` |
-| Nonce | 12 bytes, random per `Encryption::new()` |
-| Format | base64(`nonce \|\| ciphertext \|\| tag`) |
-| Input validation | Exactly 64 hex characters (private key format) |
-| Output | `Zeroizing<String>` |
-
-This is separate from and older than the keystore's encryption. The keystore uses
-AES-256-GCM + Argon2id with per-file random salts.
+The legacy ChaCha20-Poly1305 + PBKDF2 wallet encryption module was removed (CLEANUP_PLAN
+Phase 0). Keystore encryption remains AES-256-GCM + Argon2id.
 
 ### 4.4 Keystore subsystem
 
@@ -463,17 +512,32 @@ keystore.import_private_key(alias, hex)
   └─ save_to_disk()
   └─ zeroize intermediates
 
-keystore.import_mnemonic(alias, mnemonic, derivation_path)
+keystore.import_mnemonic(alias, mnemonic, derivation_path, passphrase)
   └─ validate BIP39 mnemonic and BIP32 derivation path
-  └─ seed = mnemonic.to_seed("") (empty passphrase, wrapped in Zeroizing)
+  └─ seed = mnemonic.to_seed(passphrase.unwrap_or(""))
   └─ XPrv::derive_from_path(seed, path) → private key → Ethereum address
   └─ encrypt *mnemonic phrase* (not derived key)
-  └─ save with KeyType::Mnemonic { derivation_path }
+  └─ save with KeyType::Mnemonic { derivation_path, passphrase }
 
 keystore.get_private_key(uuid) → SecureKey
-  └─ decrypt entry, reconstruct key (or re-derive from mnemonic)
+  └─ decrypt entry, reconstruct key (or re-derive from mnemonic + stored passphrase)
+  └─ appends audit log entry + saves
 
 keystore.list_keys() → Vec<KeyInfo>  (works when locked)
+
+keystore.export_private_key(uuid) → Zeroizing<String>
+  └─ decrypt entry (or derive from mnemonic), return 0x-prefixed hex
+  └─ appends audit log entry + saves
+
+keystore.export_mnemonic(uuid) → Zeroizing<String>
+  └─ decrypt mnemonic (mnemonic keys only)
+  └─ appends audit log entry + saves
+
+keystore.change_password(old_password, new_password)
+  └─ verify old password → decrypt all entries → new salt → derive new master key
+  └─ re-encrypt all entries with fresh nonces → save_to_disk()
+
+keystore.audit_log() → &[AuditLogEntry]
 keystore.delete_key(uuid) → remove + save_to_disk()
 ```
 
@@ -520,11 +584,16 @@ JSON, human-readable:
     "parallelism": 1
   },
   "master_key_verification": [32 bytes],
+  "audit_log": [{
+    "timestamp": "ISO8601",
+    "event": "unlock | lock | import_private_key | import_mnemonic | get_private_key | export_private_key | export_mnemonic | delete_key | change_password",
+    "success": true
+  }],
   "entries": [{
     "id": "uuid",
     "alias": "name",
     "address": "0x...",
-    "key_type": "PrivateKey" | { "Mnemonic": { "derivation_path": "m/44'/60'/0'/0/0" } },
+    "key_type": "PrivateKey" | { "Mnemonic": { "derivation_path": "m/44'/60'/0'/0/0", "passphrase": "..." } },
     "encrypted_data": [bytes],
     "nonce": [12 bytes],
     "created_at": "ISO8601"
@@ -577,11 +646,16 @@ Auto-conversions from: `std::io::Error`, `serde_json::Error`, `aes_gcm::Error`,
 | `test_new_keystore_creation` | Empty initial state, no file before unlock |
 | `test_private_key_import_and_retrieval` | Import → get → sign → address → public key |
 | `test_mnemonic_import_and_retrieval` | Import BIP39 → derive → sign → consistent address |
+| `test_mnemonic_passphrase_support` | BIP39 passphrase support changes derived key |
 | `test_concurrent_operations` | Multiple keys produce different signatures/addresses |
 | `test_keystore_persistence` | Drop and reload keystore, key survives |
 | `test_wrong_password` | InvalidPassword error on wrong password |
 | `test_locked_operations` | Locked error on import/get/delete without unlock |
 | `test_key_deletion` | Delete + verify gone + KeyNotFound on re-delete |
+| `test_export_private_key_for_private_key_entries` | Export private key as 0x-hex |
+| `test_export_mnemonic_and_derived_private_key` | Export mnemonic phrase and derived private key |
+| `test_change_password_reencrypts_entries` | Password change re-encrypts all entries and persists |
+| `test_audit_log_entries_created_for_operations` | Audit log records success/failure for operations |
 | `test_keystore_new_variants` | Default vs development vs production configs |
 | `test_unlock_edge_cases` | File creation, re-unlock, empty password |
 | `test_lock_comprehensive` | Lock/unlock cycles, list_keys works when locked |
@@ -602,34 +676,30 @@ Auto-conversions from: `std::io::Error`, `serde_json::Error`, `aes_gcm::Error`,
 
 #### Keystore
 
-| # | Limitation | Detail |
-|---|-----------|--------|
-| 1 | **Single-file storage** | All keys in one JSON file. No streaming parse. 10K keys = load entire file. |
-| 2 | **Whole-file rewrite on every mutation** | `save_to_disk()` serializes everything and overwrites. No atomic write (temp-file-then-rename). Crash during write could corrupt. |
-| 3 | **No export** | No `export_private_key()` or `export_mnemonic()`. Keys go in but don't come out. |
-| 4 | **Mnemonic passphrase hardcoded to empty** | `mnemonic.to_seed("")` — BIP39 "25th word" passphrases not supported. |
-| 5 | **No password change / re-encryption** | Must create new keystore and re-import to change password. |
-| 6 | **`verify_file_integrity` re-reads file** | Reads from disk again after `load_from_disk()` already parsed it. Redundant I/O. |
-| 7 | **`save_to_disk` serializes twice** | Once without MAC to compute MAC, then with MAC. Two full serializations per save. |
-| 8 | **No audit log** | Commit history mentions audit logging, but it was removed in "minimal necessary" refactor. |
+| # | Limitation | Status / detail |
+|---|-----------|-----------------|
+| 1 | **Single-file storage** | By design (unchanged). |
+| 2 | **Whole-file rewrite on mutation** | By design (unchanged). |
+| 3 | **No export** | Fixed: `export_private_key()` and `export_mnemonic()`. |
+| 4 | **Mnemonic passphrase hardcoded to empty** | Fixed: per-entry `passphrase: Option<String>`. |
+| 5 | **No password change / re-encryption** | Fixed: `change_password(old, new)` re-encrypts all entries. |
+| 6 | **`verify_file_integrity` re-reads file** | By design (unchanged). |
+| 7 | **`save_to_disk` serializes twice** | By design (unchanged). |
+| 8 | **No audit log** | Fixed: audit log persisted in the keystore file and covered by the file MAC. |
 
 #### Config
 
-| # | Limitation | Detail |
-|---|-----------|--------|
-| 1 | **No cross-reference validation** | `network.name` not validated against `networks` keys. `dex.provider` not validated against `dexes` keys. |
-| 2 | **Addresses are plain Strings** | `WalletConfig.address`, `TokenNetwork.address`, `Dex.router_address` etc. No `Address` type validation. Has a TODO. |
-| 3 | **Floats for financial values** | `slippage: f64`, `min_balance_coin: f64` — imprecise for financial math. |
-| 4 | **Limited type variants** | Token kind only `Erc20`. Network kind only `Evm`. No native tokens, ERC721, ERC1155, non-EVM chains. |
-| 5 | **Several accessors are `#[allow(dead_code)]`** | The models are defined but nothing reads them yet. |
+| # | Limitation | Status / detail |
+|---|-----------|-----------------|
+| 1 | **No cross-reference validation** | Fixed: `Config::validate()` called from `Config::load()`. |
+| 2 | **Addresses are plain Strings** | Fixed: address fields are `alloy_primitives::Address`. |
+| 3 | **Floats for financial values** | Fixed: stored as strings with parse helpers (`min_balance_wei`, `slippage_bps`). |
+| 4 | **Limited type variants** | Still a limitation (deferred to redesign). |
+| 5 | **Several accessors are `#[allow(dead_code)]`** | Fixed: dead-code allowances removed. |
 
 #### Legacy encryption
 
-| # | Limitation | Detail |
-|---|-----------|--------|
-| 1 | **Hardcoded salt** | `b"mfm_encryption_salt"` — shared across all users, enables rainbow tables. |
-| 2 | **Password stored in struct** | `Encryption.password: String` — not zeroized. |
-| 3 | **Coexists with keystore crypto** | Two separate encryption systems (ChaCha20 + PBKDF2 vs AES-GCM + Argon2id) with no clear delineation. |
+Removed in CLEANUP_PLAN Phase 0 (no longer applicable).
 
 ---
 
@@ -642,7 +712,7 @@ Auto-conversions from: `std::io::Error`, `serde_json::Error`, `aes_gcm::Error`,
 ```
 mfm [--output-format text|json] <command>
 
-mfm keystore import  --import-type <privatekey|mnemonic> [--label] [--derivation-path] [--keystore] [--stdin]
+mfm keystore import  --import-type <privatekey|mnemonic> [--label] [--derivation-path] [--passphrase] [--keystore] [--stdin]
 mfm keystore list    [--filter-label <regex>] [--sort-by <label|created|type>] [--show-addresses]
 mfm keystore delete  [<uuid>] [--by-label] [--yes] [--keystore]
 ```
@@ -682,19 +752,18 @@ keystore integration, utilities.
 | State machine framework | Yes | Yes | **No** — no concrete states exist outside tests |
 | State machine derive macro | Yes | Yes (via test states) | **No** |
 | Keystore (core) | Yes | Comprehensive | Yes — via CLI |
-| Config loading (YAML) | Yes | No dedicated tests | **No** — nothing calls `Config::load()` |
+| Config loading (YAML) | Yes (with validation) | No dedicated tests | **No** — nothing calls `Config::load()` |
 | Network/Token/Dex models | Yes | No | **No** — defined but unused |
-| Legacy encryption | Yes | Yes | **No** — superseded by keystore, possibly still usable via `Config::load_wallet()` |
-| Auth methods (Wallet/MetaMask) | Partial | No | **No** — MetaMask is a placeholder |
+| Auth methods (Wallet/MetaMask) | Partial | No | **No** — Wallet supports plaintext key files; MetaMask is a placeholder |
 | CLI keystore commands | Yes | Yes | Yes |
 | On-chain interaction | **No** | N/A | N/A |
-| alloy-* blockchain crates | Declared | N/A | **Not imported** |
+| alloy-* blockchain crates | Declared | N/A | `alloy-primitives` imported by `mfm_core`; others not used yet |
 
 ---
 
 ## 7. Development History Summary
 
-30 commits on `dev` branch, two phases:
+High-level phases:
 
 **Phase 1 — Keystore security hardening** (bulk of commits):
 Nonce-reuse prevention, zeroization, constant-time comparison, !Send+!Sync markers,
@@ -704,6 +773,12 @@ protection, strict Argon2 output length, residual key material cleanup.
 **Phase 2 — CLI standardization** (recent commits):
 Structured command results, command context, standardized inputs/outputs for automation
 (JSON output, env vars, stdin mode), documentation migration to READMEs.
+
+**Phase 3 — Pre-redesign cleanup (CLEANUP_PLAN)** (2026-02-07):
+Removed legacy wallet-file encryption; updated `mfm_machine` for async handlers, parallel
+execution support, build-time validation, and improved proc-macro ergonomics; improved
+config typing/validation; added keystore export, mnemonic passphrase support, password
+change, and audit logging.
 
 ---
 
@@ -726,8 +801,8 @@ Structured command results, command context, standardized inputs/outputs for aut
                     │  │ Keystore     │  │ Config (YAML)    │  │
                     │  │ SecureKey    │  │ Network, Token   │  │
                     │  │ KeyEntry     │  │ Dex, Wallet      │  │
-                    │  │ KeyInfo      │  │ Encryption       │  │
-                    │  │              │  │ (legacy)         │  │
+                    │  │ KeyInfo      │  │ Validation       │  │
+                    │  │              │  │ + parsing helpers│  │
                     │  └──────────────┘  └─────────────────┘  │
                     │                                          │
                     │  re-exports: SafeContext                  │
@@ -804,7 +879,6 @@ mfm/
 │   │   │   └── authentication/
 │   │   │       ├── mod.rs
 │   │   │       ├── wallet.rs
-│   │   │       └── encryption.rs
 │   │   └── keystore/
 │   │       ├── mod.rs
 │   │       ├── error.rs

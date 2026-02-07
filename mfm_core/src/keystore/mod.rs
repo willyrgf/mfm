@@ -547,8 +547,29 @@ impl Keystore {
             }
         })();
 
-        self.log_audit(AuditEvent::GetPrivateKey { id }, result.is_ok());
-        result
+        match result {
+            Ok(secure_key) => {
+                self.log_audit(AuditEvent::GetPrivateKey { id }, true);
+
+                if let Err(err) = self.save_to_disk() {
+                    // If we can't persist the audit entry, treat the overall operation as failed
+                    // (the key must not be returned without a durable audit trail).
+                    if let Some(last) = self.audit_log.last_mut() {
+                        if matches!(last.event, AuditEvent::GetPrivateKey { id: eid } if eid == id)
+                        {
+                            last.success = false;
+                        }
+                    }
+                    return Err(err);
+                }
+
+                Ok(secure_key)
+            }
+            Err(err) => {
+                self.log_audit(AuditEvent::GetPrivateKey { id }, false);
+                Err(err)
+            }
+        }
     }
 
     /// Export the private key as a hex string (0x-prefixed).
@@ -604,8 +625,29 @@ impl Keystore {
             }
         })();
 
-        self.log_audit(AuditEvent::ExportPrivateKey { id }, result.is_ok());
-        result
+        match result {
+            Ok(private_key_hex) => {
+                self.log_audit(AuditEvent::ExportPrivateKey { id }, true);
+
+                if let Err(err) = self.save_to_disk() {
+                    if let Some(last) = self.audit_log.last_mut() {
+                        if matches!(
+                            last.event,
+                            AuditEvent::ExportPrivateKey { id: eid } if eid == id
+                        ) {
+                            last.success = false;
+                        }
+                    }
+                    return Err(err);
+                }
+
+                Ok(private_key_hex)
+            }
+            Err(err) => {
+                self.log_audit(AuditEvent::ExportPrivateKey { id }, false);
+                Err(err)
+            }
+        }
     }
 
     /// Export the mnemonic phrase.
@@ -638,8 +680,27 @@ impl Keystore {
             }
         })();
 
-        self.log_audit(AuditEvent::ExportMnemonic { id }, result.is_ok());
-        result
+        match result {
+            Ok(mnemonic) => {
+                self.log_audit(AuditEvent::ExportMnemonic { id }, true);
+
+                if let Err(err) = self.save_to_disk() {
+                    if let Some(last) = self.audit_log.last_mut() {
+                        if matches!(last.event, AuditEvent::ExportMnemonic { id: eid } if eid == id)
+                        {
+                            last.success = false;
+                        }
+                    }
+                    return Err(err);
+                }
+
+                Ok(mnemonic)
+            }
+            Err(err) => {
+                self.log_audit(AuditEvent::ExportMnemonic { id }, false);
+                Err(err)
+            }
+        }
     }
 
     /// List stored keys (metadata only)

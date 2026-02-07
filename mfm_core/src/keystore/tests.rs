@@ -287,6 +287,56 @@ fn test_audit_log_entries_created_for_operations() {
 }
 
 #[test]
+fn test_audit_log_persisted_for_read_only_access_operations() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("audit_persist.keystore");
+
+    let (pk_id, mnemonic_id) = {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("test_password").unwrap();
+
+        let pk_id = keystore
+            .import_private_key(
+                Some("pk".to_string()),
+                "0000000000000000000000000000000000000000000000000000000000000004",
+            )
+            .unwrap();
+
+        let mnemonic_id = keystore
+            .import_mnemonic(
+                Some("mn".to_string()),
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+                "m/44'/60'/0'/0/0",
+                None,
+            )
+            .unwrap();
+
+        // These operations should persist their audit entries to disk.
+        keystore.get_private_key(pk_id).unwrap();
+        keystore.export_private_key(pk_id).unwrap();
+        keystore.export_mnemonic(mnemonic_id).unwrap();
+
+        (pk_id, mnemonic_id)
+    };
+
+    // Re-open keystore and verify audit entries survived the process boundary.
+    let mut keystore2 =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore2.unlock("test_password").unwrap();
+
+    assert!(keystore2.audit_log().iter().any(|e| {
+        matches!(e.event, AuditEvent::GetPrivateKey { id } if id == pk_id) && e.success
+    }));
+    assert!(keystore2.audit_log().iter().any(|e| {
+        matches!(e.event, AuditEvent::ExportPrivateKey { id } if id == pk_id) && e.success
+    }));
+    assert!(keystore2.audit_log().iter().any(|e| {
+        matches!(e.event, AuditEvent::ExportMnemonic { id } if id == mnemonic_id) && e.success
+    }));
+}
+
+#[test]
 fn test_concurrent_operations() {
     let (_temp_dir, mut keystore) = test_keystore();
     keystore.unlock("test_password").unwrap();
