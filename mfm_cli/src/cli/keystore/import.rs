@@ -20,6 +20,10 @@ pub struct ImportArgs {
     #[arg(short = 'p', long, default_value = "m/44'/60'/0'/0/0")]
     pub derivation_path: String,
 
+    /// Optional mnemonic passphrase (BIP39). Note: providing it via CLI may expose it in shell history.
+    #[arg(long)]
+    pub passphrase: Option<String>,
+
     /// Keystore file path
     #[arg(long)]
     pub keystore: Option<PathBuf>,
@@ -165,7 +169,12 @@ async fn execute_internal(
             });
 
             let key_id = keystore
-                .import_mnemonic(Some(label.clone()), &mnemonic, &args.derivation_path)
+                .import_mnemonic(
+                    Some(label.clone()),
+                    &mnemonic,
+                    &args.derivation_path,
+                    args.passphrase.as_deref(),
+                )
                 .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
 
             // Get the imported key info

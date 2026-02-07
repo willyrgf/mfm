@@ -8,65 +8,83 @@ use self::safe_context::SafeContext;
 
 /// A structured tag system for classifying states based on their purpose and behavior.
 /// Tags are used to categorize states and to define dependencies between them.
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct Tag(pub &'static str);
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct Tag(pub String);
 
 /// Standard tags for classifying states by their kind
 pub mod standard_tags {
     use super::Tag;
 
     // State kinds
-    pub const CONFIG: Tag = Tag("config");
-    pub const FETCH_DATA: Tag = Tag("fetch_data");
-    pub const COMPUTE: Tag = Tag("compute");
-    pub const EXECUTE: Tag = Tag("execute");
-    pub const REPORT: Tag = Tag("report");
-    pub const REPORT_OPERATOR: Tag = Tag("report_operator");
-    pub const REPORT_OPERATION: Tag = Tag("report_operation");
+    pub fn config() -> Tag {
+        Tag::new_unchecked("config")
+    }
+    pub fn fetch_data() -> Tag {
+        Tag::new_unchecked("fetch_data")
+    }
+    pub fn compute() -> Tag {
+        Tag::new_unchecked("compute")
+    }
+    pub fn execute() -> Tag {
+        Tag::new_unchecked("execute")
+    }
+    pub fn report() -> Tag {
+        Tag::new_unchecked("report")
+    }
+    pub fn report_operator() -> Tag {
+        Tag::new_unchecked("report_operator")
+    }
+    pub fn report_operation() -> Tag {
+        Tag::new_unchecked("report_operation")
+    }
 
     // State behavior
-    pub const APPLY_SIDE_EFFECT: Tag = Tag("apply_side_effect");
-    pub const IMPURE: Tag = Tag("impure");
+    pub fn apply_side_effect() -> Tag {
+        Tag::new_unchecked("apply_side_effect")
+    }
+    pub fn impure() -> Tag {
+        Tag::new_unchecked("impure")
+    }
 
     // Create a vec of all standard tags (useful for validation and documentation)
     pub fn all() -> Vec<Tag> {
         vec![
-            CONFIG,
-            FETCH_DATA,
-            COMPUTE,
-            EXECUTE,
-            REPORT,
-            REPORT_OPERATOR,
-            REPORT_OPERATION,
-            APPLY_SIDE_EFFECT,
-            IMPURE,
+            config(),
+            fetch_data(),
+            compute(),
+            execute(),
+            report(),
+            report_operator(),
+            report_operation(),
+            apply_side_effect(),
+            impure(),
         ]
     }
 
     // Create a vec of all state kind tags
     pub fn kind_tags() -> Vec<Tag> {
         vec![
-            CONFIG,
-            FETCH_DATA,
-            COMPUTE,
-            EXECUTE,
-            REPORT,
-            REPORT_OPERATOR,
-            REPORT_OPERATION,
+            config(),
+            fetch_data(),
+            compute(),
+            execute(),
+            report(),
+            report_operator(),
+            report_operation(),
         ]
     }
 
     // Create a vec of all behavior tags
     pub fn behavior_tags() -> Vec<Tag> {
-        vec![APPLY_SIDE_EFFECT, IMPURE]
+        vec![apply_side_effect(), impure()]
     }
 }
 
 /// A unique identifier for a state
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct Label(pub &'static str);
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct Label(pub String);
 
-fn ensure_nonempty_ascii_lowercase_underscore(input: &'static str) -> Result<&'static str, Error> {
+fn ensure_nonempty_ascii_lowercase_underscore(input: &str) -> Result<String, Error> {
     if input.is_empty() {
         return Err(anyhow!("empty string; this string should be non empty, lowercase and use underscore as separator"));
     }
@@ -75,26 +93,24 @@ fn ensure_nonempty_ascii_lowercase_underscore(input: &'static str) -> Result<&'s
         return Err(anyhow!("invalid char in '{}'; this string should be non empty, lowercase and use underscore as separator", input));
     }
 
-    Ok(input)
+    Ok(input.to_string())
 }
 
 impl Tag {
-    pub fn new(s: &'static str) -> Result<Self, Error> {
-        match ensure_nonempty_ascii_lowercase_underscore(s) {
-            Ok(validated_input) => Ok(Self(validated_input)),
-            Err(e) => Err(e),
-        }
+    pub fn new(s: &str) -> Result<Self, Error> {
+        let validated = ensure_nonempty_ascii_lowercase_underscore(s)?;
+        Ok(Self(validated))
     }
 
-    /// Creates a Tag without validation - use only for constant definitions
-    /// where string validity is guaranteed at compile time
-    pub const fn new_const(s: &'static str) -> Self {
-        Self(s)
+    /// Creates a Tag without validation. Prefer `Tag::new` unless inputs are
+    /// guaranteed valid by construction.
+    pub fn new_unchecked(s: &str) -> Self {
+        Self(s.to_string())
     }
 
     /// Returns the string value of the tag
-    pub fn as_str(&self) -> &'static str {
-        self.0
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
     /// Checks if this tag is one of the standard state kind tags
@@ -114,28 +130,26 @@ impl Tag {
 }
 
 impl Label {
-    pub fn new(s: &'static str) -> Result<Self, Error> {
-        match ensure_nonempty_ascii_lowercase_underscore(s) {
-            Ok(validated_input) => Ok(Self(validated_input)),
-            Err(e) => Err(e),
-        }
+    pub fn new(s: &str) -> Result<Self, Error> {
+        let validated = ensure_nonempty_ascii_lowercase_underscore(s)?;
+        Ok(Self(validated))
     }
 
-    /// Creates a Label without validation - use only for constant definitions
-    /// where string validity is guaranteed at compile time
-    pub const fn new_const(s: &'static str) -> Self {
-        Self(s)
+    /// Creates a Label without validation. Prefer `Label::new` unless inputs are
+    /// guaranteed valid by construction.
+    pub fn new_unchecked(s: &str) -> Self {
+        Self(s.to_string())
     }
 
     /// Returns the string value of the label
-    pub fn as_str(&self) -> &'static str {
-        self.0
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 impl From<Label> for String {
     fn from(value: Label) -> Self {
-        value.0.to_owned()
+        value.0
     }
 }
 
@@ -175,12 +189,12 @@ pub trait StateMetadata {
 
     /// Returns true if this state has a tag indicating it applies side effects
     fn has_side_effects(&self) -> bool {
-        self.tags().contains(&standard_tags::APPLY_SIDE_EFFECT)
+        self.tags().contains(&standard_tags::apply_side_effect())
     }
 
     /// Returns true if this state has a tag indicating it is impure
     fn is_impure(&self) -> bool {
-        self.tags().contains(&standard_tags::IMPURE)
+        self.tags().contains(&standard_tags::impure())
     }
 
     /// Returns the kind tag of this state if present
@@ -194,9 +208,10 @@ pub type StateResult = Result<(), StateError>;
 /// A state handler that can be executed by the state machine.
 /// It maintains metadata about itself and provides a handler function
 /// to process the context data.
+#[async_trait::async_trait]
 pub trait StateHandler: StateMetadata + Send + Sync {
     /// Executes this state's logic, potentially modifying the context
-    fn handler(&self, context: SafeContext) -> StateResult;
+    async fn handler(&self, context: SafeContext) -> StateResult;
 }
 
 pub type States = Arc<[Box<dyn StateHandler>]>;
@@ -324,9 +339,10 @@ impl fmt::Display for StateError {
 impl std::error::Error for StateError {}
 
 // Implement StateHandler for Box<dyn StateHandler>
+#[async_trait::async_trait]
 impl StateHandler for Box<dyn StateHandler> {
-    fn handler(&self, context: SafeContext) -> StateResult {
-        (**self).handler(context)
+    async fn handler(&self, context: SafeContext) -> StateResult {
+        (**self).handler(context).await
     }
 }
 
@@ -369,7 +385,7 @@ mod test {
             .for_each(|input| {
                 let result = ensure_nonempty_ascii_lowercase_underscore(input);
                 assert!(result.is_ok());
-                assert_eq!(&result.unwrap(), input);
+                assert_eq!(&result.unwrap(), &input.to_string());
             })
     }
 
@@ -397,18 +413,18 @@ mod test {
     #[test]
     fn test_standard_tags() {
         // Test kind tag detection
-        assert!(standard_tags::CONFIG.is_kind_tag());
-        assert!(standard_tags::REPORT.is_kind_tag());
-        assert!(!standard_tags::APPLY_SIDE_EFFECT.is_kind_tag());
+        assert!(standard_tags::config().is_kind_tag());
+        assert!(standard_tags::report().is_kind_tag());
+        assert!(!standard_tags::apply_side_effect().is_kind_tag());
 
         // Test behavior tag detection
-        assert!(standard_tags::APPLY_SIDE_EFFECT.is_behavior_tag());
-        assert!(standard_tags::IMPURE.is_behavior_tag());
-        assert!(!standard_tags::CONFIG.is_behavior_tag());
+        assert!(standard_tags::apply_side_effect().is_behavior_tag());
+        assert!(standard_tags::impure().is_behavior_tag());
+        assert!(!standard_tags::config().is_behavior_tag());
 
         // Test standard tag detection
-        assert!(standard_tags::CONFIG.is_standard_tag());
-        assert!(standard_tags::APPLY_SIDE_EFFECT.is_standard_tag());
+        assert!(standard_tags::config().is_standard_tag());
+        assert!(standard_tags::apply_side_effect().is_standard_tag());
 
         // Test a non-standard tag
         let custom_tag = Tag::new("custom_tag").unwrap();

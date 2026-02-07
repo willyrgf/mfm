@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use std::collections::{HashSet, VecDeque};
 
 use crate::state::{safe_context::SafeContext, StateError, StateHandler, StateResult, States};
 
@@ -64,8 +65,10 @@ impl StateMachineBuilder {
     }
 
     /// Build the StateMachine with the configured options
-    pub fn build(self) -> StateMachine {
-        StateMachine {
+    pub fn build(self) -> Result<StateMachine, StateMachineError> {
+        validate_states(&self.states)?;
+
+        Ok(StateMachine {
             states: self.states,
             tracker: self
                 .tracker
@@ -77,8 +80,106 @@ impl StateMachineBuilder {
                 .error_handler
                 .unwrap_or_else(|| Box::new(DefaultErrorHandler::new())),
             max_recoveries: self.max_recoveries,
+        })
+    }
+}
+
+fn validate_states(states: &States) -> Result<(), StateMachineError> {
+    if states.is_empty() {
+        return Err(StateMachineError::EmptyState(anyhow!(
+            "There are no states to execute"
+        )));
+    }
+
+    // a) No duplicate labels.
+    let mut labels = HashSet::new();
+    for state in states.iter() {
+        let label = state.label();
+        if !labels.insert(label.clone()) {
+            return Err(StateMachineError::DuplicateLabel(label));
         }
     }
+
+    // b) All dependency tags are provided by at least one state.
+    let mut all_tags = HashSet::new();
+    for state in states.iter() {
+        for tag in state.tags() {
+            all_tags.insert(tag);
+        }
+    }
+    for state in states.iter() {
+        let label = state.label();
+        for dep in state.depends_on() {
+            if !all_tags.contains(&dep) {
+                return Err(StateMachineError::DanglingDependency {
+                    state_label: label,
+                    missing_tag: dep,
+                });
+            }
+        }
+    }
+
+    // c) No circular dependencies between states (topological sort).
+    let n = states.len();
+    let state_labels: Vec<crate::state::Label> = states.iter().map(|s| s.label()).collect();
+    let state_tags: Vec<Vec<crate::state::Tag>> = states.iter().map(|s| s.tags()).collect();
+    let state_depends_on: Vec<Vec<crate::state::Tag>> =
+        states.iter().map(|s| s.depends_on()).collect();
+
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut in_degree: Vec<usize> = vec![0; n];
+
+    for i in 0..n {
+        // Add edges from any state that provides a dependency tag to the dependent state.
+        let mut predecessors = HashSet::new();
+        for dep_tag in &state_depends_on[i] {
+            for (j, tags) in state_tags.iter().enumerate() {
+                if tags.contains(dep_tag) {
+                    predecessors.insert(j);
+                }
+            }
+        }
+
+        for pred in predecessors {
+            adjacency[pred].push(i);
+            in_degree[i] += 1;
+        }
+    }
+
+    let mut queue: VecDeque<usize> = in_degree
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &deg)| if deg == 0 { Some(i) } else { None })
+        .collect();
+
+    let mut visited = 0usize;
+    while let Some(node) = queue.pop_front() {
+        visited += 1;
+        for &succ in &adjacency[node] {
+            // Each edge is counted once in `in_degree`, so this cannot underflow.
+            in_degree[succ] -= 1;
+            if in_degree[succ] == 0 {
+                queue.push_back(succ);
+            }
+        }
+    }
+
+    if visited != n {
+        let cycle = in_degree
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &deg)| {
+                if deg > 0 {
+                    Some(state_labels[i].clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        return Err(StateMachineError::CircularDependency(cycle));
+    }
+
+    Ok(())
 }
 
 /// The state machine that executes a sequence of states
@@ -97,6 +198,15 @@ pub enum StateMachineError {
     ReachedMaxRecoveries(usize, anyhow::Error),
     /// No states were provided to execute
     EmptyState(anyhow::Error),
+    /// Duplicate state label found
+    DuplicateLabel(crate::state::Label),
+    /// A state depends on a tag that no state provides
+    DanglingDependency {
+        state_label: crate::state::Label,
+        missing_tag: crate::state::Tag,
+    },
+    /// Circular dependency between states
+    CircularDependency(Vec<crate::state::Label>),
     /// An internal error occurred in the state machine
     InternalError(StateResult, anyhow::Error),
     /// An error occurred in a state handler
@@ -121,14 +231,8 @@ impl From<SchedulerError> for StateMachineError {
 
 impl StateMachine {
     /// Create a new StateMachine with default tracker, scheduler, and error handler
-    pub fn new(states: States) -> Self {
-        Self {
-            states: states.clone(),
-            tracker: Box::new(HashMapTracker::new()),
-            scheduler: Box::new(DefaultScheduler::new()),
-            error_handler: Box::new(DefaultErrorHandler::new()),
-            max_recoveries: default_max_recoveries(states),
-        }
+    pub fn new(states: States) -> Result<Self, StateMachineError> {
+        StateMachineBuilder::new(states).build()
     }
 
     /// Get the history of executed states
@@ -153,7 +257,7 @@ impl StateMachine {
         context: SafeContext,
         state_index: usize,
         last_state_result: Option<StateResult>,
-    ) -> Result<(usize, SafeContext), StateMachineError> {
+    ) -> Result<(Vec<usize>, SafeContext), StateMachineError> {
         // Check if we have any states
         if !self.has_state(0) {
             return Err(StateMachineError::EmptyState(anyhow!(
@@ -172,7 +276,7 @@ impl StateMachine {
 
         // If this is the first state execution
         if last_state_result.is_none() {
-            return Ok((state_index, context));
+            return Ok((vec![state_index], context));
         }
 
         let state_result = last_state_result.unwrap();
@@ -185,10 +289,16 @@ impl StateMachine {
         match state_result {
             Ok(()) => {
                 // Successful execution - determine next state via scheduler
-                let next_index = self
-                    .scheduler
-                    .next_state(state_index, &self.states, &context)?;
-                Ok((next_index, context))
+                let next_indexes = if self.scheduler.get_filter_tags().is_some() {
+                    vec![self
+                        .scheduler
+                        .next_state(state_index, &self.states, &context)?]
+                } else {
+                    self.scheduler
+                        .next_states(state_index, &self.states, &context)?
+                };
+
+                Ok((next_indexes, context))
             }
             Err(e) => {
                 // Handle error based on recoverability
@@ -211,7 +321,7 @@ impl StateMachine {
                                 if let Some(recovery_context) =
                                     self.tracker.recover(recovery_state_index.clone())
                                 {
-                                    return Ok((recovery_index, recovery_context));
+                                    return Ok((vec![recovery_index], recovery_context));
                                 }
                             }
 
@@ -226,14 +336,17 @@ impl StateMachine {
                                     if let Some(recovery_context) =
                                         self.tracker.recover(last_index.clone())
                                     {
-                                        return Ok((last_index.state_index, recovery_context));
+                                        return Ok((
+                                            vec![last_index.state_index],
+                                            recovery_context,
+                                        ));
                                     }
                                 }
                             }
 
                             // TODO: human: think if we want this or just throw error (config?)
                             // If all else fails, restart from beginning with original context
-                            Ok((0, context))
+                            Ok((vec![0], context))
                         }
                         Err(_) => {
                             // Error handler rejected continuing
@@ -252,78 +365,154 @@ impl StateMachine {
     }
 
     /// Recursively execute states
-    fn execute_rec(
+    async fn execute_rec(
         &mut self,
-        context: SafeContext,
-        state_index: usize,
-        last_state_result: Option<StateResult>,
+        mut context: SafeContext,
+        mut state_index: usize,
+        mut last_state_result: Option<StateResult>,
     ) -> Result<SafeContext, StateMachineError> {
-        let transition_result = self.transition(context.clone(), state_index, last_state_result);
+        loop {
+            let transition_result =
+                self.transition(context.clone(), state_index, last_state_result);
 
-        match transition_result {
-            Ok((next_state_index, context)) => {
-                // If there are no more states to execute, return the final context
-                if !self.has_state(next_state_index) {
+            match transition_result {
+                Ok((next_state_indexes, next_context)) => {
+                    context = next_context;
+
+                    // If there are no more states to execute, return the final context.
+                    if next_state_indexes
+                        .iter()
+                        .all(|&next_state_index| !self.has_state(next_state_index))
+                    {
+                        return Ok(context);
+                    }
+
+                    // If filtering is enabled, keep execution sequential to preserve existing
+                    // skip semantics.
+                    let filter_tags = self.scheduler.get_filter_tags();
+                    if filter_tags.is_some() || next_state_indexes.len() <= 1 {
+                        let next_state_index = next_state_indexes
+                            .into_iter()
+                            .find(|&i| self.has_state(i))
+                            .expect("at least one next index is in range");
+
+                        let state = &self.states[next_state_index];
+
+                        // Check if we should skip this state based on filtering conditions.
+                        if let Some(filter_tags) = filter_tags {
+                            let state_tags = state.tags();
+                            if filter_tags
+                                .iter()
+                                .any(|filter_tag| state_tags.contains(filter_tag))
+                            {
+                                log::debug!(
+                                    "Skipping state at index {next_state_index} because of filter"
+                                );
+
+                                // Move to the next state.
+                                let next_next_index = match self.scheduler.next_state(
+                                    next_state_index,
+                                    &self.states,
+                                    &context,
+                                ) {
+                                    Ok(idx) => idx,
+                                    Err(SchedulerError::NoNextState) => {
+                                        return Ok(context);
+                                    }
+                                    Err(err) => return Err(StateMachineError::SchedulerError(err)),
+                                };
+
+                                state_index = next_next_index;
+                                last_state_result = Some(Ok(()));
+                                continue;
+                            }
+                        }
+
+                        // Execute the state handler.
+                        let result = state.handler(context.clone()).await;
+
+                        // Track the execution.
+                        let _ = self.tracker.as_mut().track(
+                            Index::new(next_state_index, state.label(), state.tags()),
+                            context.clone(),
+                        );
+
+                        // Continue to the next state.
+                        state_index = next_state_index;
+                        last_state_result = Some(result);
+                        continue;
+                    }
+
+                    // Parallel execution path.
+                    let states = self.states.clone();
+                    let task_ctx = context.clone();
+                    let mut results = futures::future::join_all(
+                        next_state_indexes
+                            .into_iter()
+                            .filter(|&i| self.has_state(i))
+                            .map(|next_state_index| {
+                                let states = states.clone();
+                                let ctx = task_ctx.clone();
+                                async move {
+                                    let state = &states[next_state_index];
+                                    let label = state.label();
+                                    let tags = state.tags();
+                                    let result = state.handler(ctx.clone()).await;
+                                    let snapshot = ctx.snapshot().unwrap_or(ctx);
+                                    (next_state_index, label, tags, snapshot, result)
+                                }
+                            }),
+                    )
+                    .await;
+
+                    results.sort_by_key(|(idx, _, _, _, _)| *idx);
+
+                    let mut first_error: Option<(usize, StateResult)> = None;
+                    let mut last_executed_index = state_index;
+                    for (idx, label, tags, snapshot, result) in results {
+                        last_executed_index = idx;
+
+                        // Track the execution (using a snapshot captured at completion time).
+                        let _ = self
+                            .tracker
+                            .as_mut()
+                            .track(Index::new(idx, label, tags), snapshot);
+
+                        if first_error.is_none() {
+                            if let Err(e) = result {
+                                first_error = Some((idx, Err(e)));
+                            }
+                        }
+                    }
+
+                    if let Some((failed_index, failed_result)) = first_error {
+                        state_index = failed_index;
+                        last_state_result = Some(failed_result);
+                        continue;
+                    }
+
+                    state_index = last_executed_index;
+                    last_state_result = Some(Ok(()));
+                    continue;
+                }
+                Err(StateMachineError::SchedulerError(SchedulerError::NoNextState)) => {
                     return Ok(context);
                 }
-
-                let state = &self.states[next_state_index];
-
-                // TODO: human: check this filtering
-                // Check if we should skip this state based on filtering conditions
-                if let Some(filter_tags) = self.scheduler.get_filter_tags() {
-                    let state_tags = state.tags();
-                    if filter_tags
-                        .iter()
-                        .any(|filter_tag| state_tags.contains(filter_tag))
-                    {
-                        println!("Skipping state at index {next_state_index} because of filter");
-                        // Skip this state and move to the next one
-                        // First we need to determine what the next state is
-                        let next_next_index = match self.scheduler.next_state(
-                            next_state_index,
-                            &self.states,
-                            &context,
-                        ) {
-                            Ok(idx) => idx,
-                            Err(SchedulerError::NoNextState) => {
-                                // No more states - we're done
-                                return Ok(context);
-                            }
-                            Err(err) => return Err(StateMachineError::SchedulerError(err)),
-                        };
-
-                        return self.execute_rec(context, next_next_index, Some(Ok(())));
-                    }
-                }
-
-                // Execute the state handler
-                let result = state.handler(context.clone());
-
-                // Track the execution
-                let _ = self.tracker.as_mut().track(
-                    Index::new(next_state_index, state.label(), state.tags()),
-                    context.clone(),
-                );
-
-                // Continue to the next state
-                self.execute_rec(context, next_state_index, Some(result))
+                Err(err) => return Err(err),
             }
-            Err(StateMachineError::SchedulerError(SchedulerError::NoNextState)) => {
-                // We've reached the end of states - this is a successful completion
-                Ok(context)
-            }
-            Err(err) => Err(err),
         }
     }
 
     /// Execute the state machine with the given SafeContext
-    pub fn execute(&mut self, context: SafeContext) -> Result<SafeContext, StateMachineError> {
-        self.execute_rec(context, 0, None)
+    pub async fn execute(
+        &mut self,
+        context: SafeContext,
+    ) -> Result<SafeContext, StateMachineError> {
+        self.execute_rec(context, 0, None).await
     }
 
     /// Execute the state machine starting from a specific state index
-    pub fn execute_from(
+    pub async fn execute_from(
         &mut self,
         context: SafeContext,
         start_index: usize,
@@ -335,17 +524,17 @@ impl StateMachine {
             )));
         }
 
-        self.execute_rec(context, start_index, None)
+        self.execute_rec(context, start_index, None).await
     }
 
     /// Execute the state machine, filtering out states with specific tags
-    pub fn execute_with_filter(
+    pub async fn execute_with_filter(
         &mut self,
         context: SafeContext,
         filter_tags: Vec<crate::state::Tag>,
     ) -> Result<SafeContext, StateMachineError> {
         self.scheduler.set_filter_tags(Some(filter_tags));
-        let result = self.execute(context);
+        let result = self.execute(context).await;
         self.scheduler.set_filter_tags(None);
         result
     }
@@ -357,30 +546,18 @@ mod test {
 
     use crate::state::safe_context::{create_default_safe_context, SafeContext};
     use crate::state::{
-        standard_tags, DependencyStrategy, Label, StateError, StateErrorRecoverability,
-        StateHandler, StateMetadata, StateResult, Tag,
+        standard_tags, StateError, StateErrorRecoverability, StateHandler, StateResult,
     };
-    use mfm_machine_derive::StateMetadataReqs;
     use serde_derive::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
-    pub struct Setup {
-        label: Label,
-        tags: Vec<Tag>,
-        depends_on: Vec<Tag>,
-        depends_on_strategy: DependencyStrategy,
-    }
-
-    impl Setup {
-        fn new() -> Self {
-            Self {
-                label: Label::new("setup_state").unwrap(),
-                tags: vec![Tag::new("setup").unwrap(), standard_tags::CONFIG],
-                depends_on: vec![Tag::new("setup").unwrap()],
-                depends_on_strategy: DependencyStrategy::Latest,
-            }
-        }
-    }
+    #[mfm_machine_derive::state_handler(
+        label = "setup_state",
+        tags = ["setup", "config"],
+        depends_on = [],
+        strategy = Latest
+    )]
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Setup;
 
     #[derive(Serialize, Deserialize)]
     struct SetupCtx {
@@ -388,8 +565,9 @@ mod test {
         b: u32,
     }
 
+    #[async_trait::async_trait]
     impl StateHandler for Setup {
-        fn handler(&self, context: SafeContext) -> StateResult {
+        async fn handler(&self, context: SafeContext) -> StateResult {
             let data = SetupCtx {
                 a: "setup_b".to_string(),
                 b: 1,
@@ -407,27 +585,18 @@ mod test {
         c: u32,
     }
 
-    #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
-    pub struct Report {
-        label: Label,
-        tags: Vec<Tag>,
-        depends_on: Vec<Tag>,
-        depends_on_strategy: DependencyStrategy,
-    }
+    #[mfm_machine_derive::state_handler(
+        label = "report_state",
+        tags = ["report"],
+        depends_on = ["setup"],
+        strategy = Latest
+    )]
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Report;
 
-    impl Report {
-        fn new() -> Self {
-            Self {
-                label: Label::new("report_state").unwrap(),
-                tags: vec![Tag::new("report").unwrap(), standard_tags::REPORT],
-                depends_on: vec![Tag::new("setup").unwrap()],
-                depends_on_strategy: DependencyStrategy::Latest,
-            }
-        }
-    }
-
+    #[async_trait::async_trait]
     impl StateHandler for Report {
-        fn handler(&self, context: SafeContext) -> StateResult {
+        async fn handler(&self, context: SafeContext) -> StateResult {
             let setup_data: SetupCtx = context
                 .read_typed("setup")
                 .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
@@ -443,8 +612,8 @@ mod test {
         }
     }
 
-    #[test]
-    fn test_state_machine_simple_flow() {
+    #[tokio::test]
+    async fn test_state_machine_simple_flow() {
         let setup = Setup::new();
         let report = Report::new();
 
@@ -455,13 +624,13 @@ mod test {
         let states = Arc::from(states);
 
         println!("Creating state machine...");
-        let mut state_machine = super::StateMachine::new(states);
+        let mut state_machine = super::StateMachine::new(states).unwrap();
 
         println!("Creating context...");
         let safe_context = create_default_safe_context();
 
         println!("Executing state machine...");
-        let result = state_machine.execute(safe_context);
+        let result = state_machine.execute(safe_context).await;
 
         println!("Result: {result:?}");
         assert!(result.is_ok());
@@ -474,8 +643,8 @@ mod test {
         assert_eq!(report_data.c, 2);
     }
 
-    #[test]
-    fn test_state_machine_with_filter() {
+    #[tokio::test]
+    async fn test_state_machine_with_filter() {
         let setup = Setup::new();
         let report = Report::new();
 
@@ -486,14 +655,16 @@ mod test {
         let states = Arc::from(states);
 
         println!("Creating state machine...");
-        let mut state_machine = super::StateMachine::new(states);
+        let mut state_machine = super::StateMachine::new(states).unwrap();
 
         println!("Creating context...");
         let safe_context = create_default_safe_context();
 
-        println!("Setting filter tags: {:?}", standard_tags::REPORT);
+        println!("Setting filter tags: {:?}", standard_tags::report());
         // Use execute_with_filter
-        let result = state_machine.execute_with_filter(safe_context, vec![standard_tags::REPORT]);
+        let result = state_machine
+            .execute_with_filter(safe_context, vec![standard_tags::report()])
+            .await;
 
         println!("Result: {result:?}");
         assert!(result.is_ok());

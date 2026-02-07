@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use crate::default_impls::{Config, ConfigState, OnChainValuesState, CONFIG};
 
-#[test]
-fn test_retry_workflow_state_machine() {
+#[tokio::test]
+async fn test_retry_workflow_state_machine() {
     let setup = Setup::new();
     let compute_price = ComputePrice::new();
     let report = Report::new();
@@ -24,10 +24,10 @@ fn test_retry_workflow_state_machine() {
     ];
     let states = Arc::from(states);
 
-    let mut state_machine = StateMachine::new(states);
+    let mut state_machine = StateMachine::new(states).unwrap();
     let context = create_default_safe_context();
 
-    let result = state_machine.execute(context);
+    let result = state_machine.execute(context).await;
     assert!(result.is_ok());
 
     // Verify we can read the configuration

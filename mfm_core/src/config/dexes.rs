@@ -1,3 +1,4 @@
+use alloy_primitives::Address;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -13,22 +14,20 @@ pub enum Kind {
 pub struct Dex {
     pub name: String,
     pub kind: Kind,
-    pub router_address: Option<String>,
-    pub factory_address: Option<String>,
+    pub router_address: Option<Address>,
+    pub factory_address: Option<Address>,
     pub network_id: String,
-    pub settlement_contract: Option<String>,
+    pub settlement_contract: Option<Address>,
     pub api_url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Dexes(HashMap<String, Dex>);
 impl Dexes {
-    #[allow(dead_code)]
     pub fn hashmap(&self) -> &HashMap<String, Dex> {
         &self.0
     }
 
-    #[allow(dead_code)]
     pub fn get(&self, key: &str) -> Option<&Dex> {
         self.0.get(key)
     }

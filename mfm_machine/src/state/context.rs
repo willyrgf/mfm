@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use anyhow::{anyhow, Error, Result};
 use serde_derive::{Deserialize, Serialize};
@@ -25,18 +25,32 @@ pub trait Context: Send + Sync {
 }
 
 /// A local in-memory context implementation with history tracking
-#[derive(Default, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Local {
     map: HashMap<String, Value>,
-    history: Vec<HashMap<String, Value>>,
+    history: VecDeque<HashMap<String, Value>>,
+    #[serde(skip)]
+    max_history: usize,
 }
 
 impl Local {
+    const DEFAULT_MAX_HISTORY: usize = 100;
+
     /// Creates a new local context with the given initial data
     pub fn new(map: HashMap<String, Value>) -> Self {
         Self {
             map,
-            history: Vec::new(),
+            history: VecDeque::new(),
+            max_history: Self::DEFAULT_MAX_HISTORY,
+        }
+    }
+
+    /// Creates a new empty local context with bounded history.
+    pub fn with_max_history(max: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            history: VecDeque::new(),
+            max_history: max,
         }
     }
 
@@ -44,13 +58,20 @@ impl Local {
     pub fn empty() -> Self {
         Self {
             map: HashMap::new(),
-            history: Vec::new(),
+            history: VecDeque::new(),
+            max_history: Self::DEFAULT_MAX_HISTORY,
         }
     }
 
     /// Get a reference to the internal map
     pub fn get_map(&self) -> &HashMap<String, Value> {
         &self.map
+    }
+}
+
+impl Default for Local {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 
@@ -70,11 +91,15 @@ impl Context for Local {
 
         // Create a new context with the updated map and extended history
         let mut new_history = self.history.clone();
-        new_history.push(self.map.clone());
+        new_history.push_back(self.map.clone());
+        while new_history.len() > self.max_history {
+            let _ = new_history.pop_front();
+        }
 
         Ok(Box::new(Self {
             map: new_map,
             history: new_history,
+            max_history: self.max_history,
         }))
     }
 
@@ -93,7 +118,8 @@ impl Context for Local {
             .map(|map| {
                 let ctx = Local {
                     map: map.clone(),
-                    history: Vec::new(),
+                    history: VecDeque::new(),
+                    max_history: self.max_history,
                 };
                 Box::new(ctx) as Box<dyn Context>
             })
@@ -232,5 +258,32 @@ mod test {
             json!("value1")
         );
         assert!(second_history_item.read("key2".to_string()).is_err());
+    }
+
+    #[test]
+    fn test_context_history_is_bounded() {
+        let context = Local::with_max_history(2);
+
+        let context1 = context.write("key1".to_string(), &json!("value1")).unwrap();
+        let context2 = context1
+            .write("key2".to_string(), &json!("value2"))
+            .unwrap();
+        let context3 = context2
+            .write("key3".to_string(), &json!("value3"))
+            .unwrap();
+
+        let history = context3.history().unwrap();
+        assert_eq!(history.len(), 2);
+
+        // The oldest entry was trimmed; we keep the last 2 snapshots:
+        // - map before writing key2 (has key1)
+        // - map before writing key3 (has key1 + key2)
+        let first = &history[0];
+        assert_eq!(first.read("key1".to_string()).unwrap(), json!("value1"));
+        assert!(first.read("key2".to_string()).is_err());
+
+        let second = &history[1];
+        assert_eq!(second.read("key2".to_string()).unwrap(), json!("value2"));
+        assert!(second.read("key3".to_string()).is_err());
     }
 }

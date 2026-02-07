@@ -1,4 +1,3 @@
-pub mod encryption;
 pub mod wallet;
 
 use self::wallet::Wallet;

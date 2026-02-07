@@ -42,7 +42,8 @@ impl TrackerHistory {
     }
 
     pub fn push(&mut self, index: Index, context: SafeContext) {
-        if let Ok(value) = context.dump() {
+        let snapshot = context.snapshot().unwrap_or(context.clone());
+        if let Ok(value) = snapshot.dump() {
             self.0.push((self.0.len(), index, value));
         }
     }
@@ -101,8 +102,10 @@ impl Default for HashMapTracker {
 
 impl Tracker for HashMapTracker {
     fn track(&mut self, index: Index, context: SafeContext) -> Result<bool, Error> {
-        self.history.push(index.clone(), context.clone());
-        self.tracker.insert(index, context);
+        // Store a deep snapshot so recoveries restore the context at the time of tracking.
+        let snapshot = context.snapshot().unwrap_or(context);
+        self.history.push(index.clone(), snapshot.clone());
+        self.tracker.insert(index, snapshot);
         Ok(true)
     }
 

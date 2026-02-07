@@ -11,8 +11,8 @@ use mfm_machine::state::{StateHandler, StateMetadata};
 use mfm_machine::state_machine::StateMachine;
 use std::sync::Arc;
 
-#[test]
-fn test_state_machine_execute() {
+#[tokio::test]
+async fn test_state_machine_execute() {
     let setup_state = Box::new(Setup::new());
     let compute_price = Box::new(ComputePrice::new());
     let report_state = Box::new(Report::new());
@@ -33,10 +33,10 @@ fn test_state_machine_execute() {
         })
         .collect();
 
-    let mut state_machine = StateMachine::new(initial_states);
+    let mut state_machine = StateMachine::new(initial_states).unwrap();
 
     let context = create_default_safe_context();
-    let result = state_machine.execute(context);
+    let result = state_machine.execute(context).await;
     println!("Execute result: {result:?}");
 
     assert_eq!(state_machine.states.len(), iss.len());
@@ -52,8 +52,8 @@ fn test_state_machine_execute() {
     assert!(result.is_ok());
 }
 
-#[test]
-fn test_public_api() {
+#[tokio::test]
+async fn test_public_api() {
     let setup = Setup::new();
     let compute_price = ComputePrice::new();
     let report = Report::new();
@@ -79,9 +79,9 @@ fn test_public_api() {
     ];
     let states = Arc::from(states);
 
-    let mut state_machine = StateMachine::new(states);
+    let mut state_machine = StateMachine::new(states).unwrap();
     let context = create_default_safe_context();
 
-    let result = state_machine.execute(context);
+    let result = state_machine.execute(context).await;
     assert!(result.is_ok());
 }

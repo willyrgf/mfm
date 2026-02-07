@@ -1,4 +1,3 @@
-use crate::config::authentication::encryption::Encryption;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -19,7 +18,7 @@ impl Eq for Wallet {}
 impl Wallet {
     pub fn read_private_key(
         &self,
-        password: Option<&str>,
+        _password: Option<&str>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let private_key = std::fs::read_to_string(&self.private_key_path)?;
 
@@ -27,10 +26,6 @@ impl Wallet {
             return Ok(private_key.trim().to_string());
         }
 
-        let password = password.ok_or("Password required for encrypted private key")?;
-        let mut encryption = Encryption::new(password);
-        let decrypted = encryption.decrypt(&private_key)?;
-
-        Ok(decrypted.as_str().to_string())
+        Err("Encrypted wallet files are no longer supported; set not_encrypted: true and store the key plaintext.".into())
     }
 }

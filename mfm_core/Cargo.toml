@@ -16,7 +16,6 @@ serde_derive = "1.0"
 serde_yaml = "0.9"
 subtle = "2.6.1"
 
-pbkdf2 = "0.12"
 tiny-keccak = { version = "2.0", features = ["keccak"] }
 argon2 = "0.5.3"
 aes-gcm = "0.10.1"
@@ -28,7 +27,7 @@ zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
 base64 = "0.22.1"
 chrono = { version = "0.4.38", features = ["serde"] }
 rand = "0.9.1"
-alloy-primitives = { version = "1.1", features = ["serde"] }
+alloy-primitives = { workspace = true, features = ["serde"] }
 hex = "0.4.3"
 thiserror = "2.0.12"
 ring = "0.17.14"

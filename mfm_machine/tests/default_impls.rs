@@ -1,45 +1,25 @@
 use anyhow::anyhow;
 use mfm_machine::state::safe_context::SafeContext;
 use mfm_machine::state::{
-    standard_tags, DependencyStrategy, Label, StateError, StateErrorRecoverability, StateHandler,
-    StateMetadata, StateResult, Tag,
+    DependencyStrategy, Label, StateError, StateErrorRecoverability, StateHandler, StateMetadata,
+    StateResult, Tag,
 };
 use mfm_machine_derive::StateMetadataReqs;
 use rand::Rng;
 use serde_derive::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
-pub struct Setup {
-    label: Label,
-    tags: Vec<Tag>,
-    depends_on: Vec<Tag>,
-    depends_on_strategy: DependencyStrategy,
-}
+#[mfm_machine_derive::state_handler(
+    label = "setup_state",
+    tags = ["setup", "config"],
+    depends_on = [],
+    strategy = Latest
+)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Setup;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SetupCtx {
-    a: String,
-    b: u32,
-}
-
-impl Default for Setup {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl Setup {
-    pub fn new() -> Self {
-        Self {
-            label: Label::new("setup_state").unwrap(),
-            tags: vec![Tag::new("setup").unwrap(), standard_tags::CONFIG],
-            depends_on: vec![Tag::new("setup").unwrap()],
-            depends_on_strategy: DependencyStrategy::Latest,
-        }
-    }
-}
-
+#[async_trait::async_trait]
 impl StateHandler for Setup {
-    fn handler(&self, context: SafeContext) -> StateResult {
+    async fn handler(&self, context: SafeContext) -> StateResult {
         let data = Config {
             a: "setup_b".to_string(),
             b: 1,
@@ -59,12 +39,6 @@ pub struct ComputePrice {
     depends_on_strategy: DependencyStrategy,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ComputePriceCtx {
-    msg: String,
-    b: u32,
-}
-
 impl Default for ComputePrice {
     fn default() -> Self {
         Self::new()
@@ -81,8 +55,9 @@ impl ComputePrice {
     }
 }
 
+#[async_trait::async_trait]
 impl StateHandler for ComputePrice {
-    fn handler(&self, context: SafeContext) -> StateResult {
+    async fn handler(&self, context: SafeContext) -> StateResult {
         let config_data: Config = context
             .read_typed(CONFIG)
             .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
@@ -98,38 +73,18 @@ impl StateHandler for ComputePrice {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, StateMetadataReqs)]
-pub struct Report {
-    label: Label,
-    tags: Vec<Tag>,
-    depends_on: Vec<Tag>,
-    depends_on_strategy: DependencyStrategy,
-}
+#[mfm_machine_derive::state_handler(
+    label = "report_state",
+    tags = ["report"],
+    depends_on = ["compute_price"],
+    strategy = Latest
+)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Report;
 
-#[derive(Serialize, Deserialize)]
-pub struct ReportCtx {
-    pub report_msg: String,
-    pub report_value: u32,
-}
-
-impl Default for Report {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl Report {
-    pub fn new() -> Self {
-        Self {
-            label: Label::new("report_state").unwrap(),
-            tags: vec![Tag::new("report").unwrap(), standard_tags::REPORT],
-            depends_on: vec![Tag::new("compute_price").unwrap()],
-            depends_on_strategy: DependencyStrategy::Latest,
-        }
-    }
-}
-
+#[async_trait::async_trait]
 impl StateHandler for Report {
-    fn handler(&self, context: SafeContext) -> StateResult {
+    async fn handler(&self, context: SafeContext) -> StateResult {
         let price_data: Config = context
             .read_typed("price")
             .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
@@ -178,8 +133,9 @@ impl ConfigState {
     }
 }
 
+#[async_trait::async_trait]
 impl StateHandler for ConfigState {
-    fn handler(&self, _context: SafeContext) -> StateResult {
+    async fn handler(&self, _context: SafeContext) -> StateResult {
         // Always succeed
         Ok(())
     }
@@ -210,8 +166,9 @@ impl OnChainValuesState {
     }
 }
 
+#[async_trait::async_trait]
 impl StateHandler for OnChainValuesState {
-    fn handler(&self, _context: SafeContext) -> StateResult {
+    async fn handler(&self, _context: SafeContext) -> StateResult {
         Ok(())
     }
 }
@@ -242,8 +199,9 @@ impl ValidationState {
     }
 }
 
+#[async_trait::async_trait]
 impl StateHandler for ValidationState {
-    fn handler(&self, context: SafeContext) -> StateResult {
+    async fn handler(&self, context: SafeContext) -> StateResult {
         let price_data: Config = context
             .read_typed("price")
             .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
@@ -293,8 +251,9 @@ impl NotificationState {
     }
 }
 
+#[async_trait::async_trait]
 impl StateHandler for NotificationState {
-    fn handler(&self, context: SafeContext) -> StateResult {
+    async fn handler(&self, context: SafeContext) -> StateResult {
         let report_data: Config = context
             .read_typed("report")
             .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;
@@ -343,8 +302,9 @@ impl AnalyticsState {
     }
 }
 
+#[async_trait::async_trait]
 impl StateHandler for AnalyticsState {
-    fn handler(&self, context: SafeContext) -> StateResult {
+    async fn handler(&self, context: SafeContext) -> StateResult {
         // Generate random analytics data
         let mut rng = rand::rng();
         let analytics_value = rng.random_range(100..1000);
@@ -390,8 +350,9 @@ impl FinalizeState {
     }
 }
 
+#[async_trait::async_trait]
 impl StateHandler for FinalizeState {
-    fn handler(&self, context: SafeContext) -> StateResult {
+    async fn handler(&self, context: SafeContext) -> StateResult {
         let report_data: Config = context
             .read_typed("report")
             .map_err(|e| StateError::StorageAccess(StateErrorRecoverability::Recoverable, e))?;

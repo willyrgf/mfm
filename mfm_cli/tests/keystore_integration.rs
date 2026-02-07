@@ -31,6 +31,7 @@ fn create_test_keystore_with_data() -> (TempDir, std::path::PathBuf) {
             Some("test-mnemonic".to_string()),
             test_mnemonic,
             "m/44'/60'/0'/0/0",
+            None,
         )
         .expect("Failed to import test mnemonic");
 
@@ -160,6 +161,7 @@ fn test_invalid_mnemonic() {
         Some("invalid-mnemonic".to_string()),
         "this is not a valid mnemonic phrase at all",
         "m/44'/60'/0'/0/0",
+        None,
     );
     assert!(result.is_err(), "Should fail with invalid mnemonic");
 }

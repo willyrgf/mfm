@@ -7,6 +7,7 @@ pub mod dexes;
 pub mod network;
 pub mod token;
 
+use alloy_primitives::Address;
 use dexes::Dexes;
 use network::Networks;
 use token::Tokens;
@@ -40,7 +41,7 @@ fn default_rpc_url() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WalletConfig {
-    pub address: String, // TODO: move it to an actual address type
+    pub address: Address,
     #[serde(skip_serializing)]
     pub private_key_path: PathBuf,
 }
@@ -80,7 +81,54 @@ fn expand_path(path: &Path) -> PathBuf {
 impl Config {
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let config: Config = serde_yaml::from_str(&std::fs::read_to_string(path)?)?;
+        if let Err(errors) = config.validate() {
+            let message = format!("config validation failed:\n{}", errors.join("\n"));
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message,
+            )));
+        }
         Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+
+        // C1: Cross-reference validation
+        if self.dexes.get(&self.dex.provider).is_none() {
+            errors.push(format!(
+                "dex.provider {:?} not found in dexes",
+                self.dex.provider
+            ));
+        }
+
+        // C1: Token networks must reference a known network id
+        for (token_id, token) in self.tokens.hashmap() {
+            for (token_network_id, token_network) in token.networks.hashmap() {
+                if self.networks.get(&token_network.network_id).is_none() {
+                    errors.push(format!(
+                        "tokens.{token_id}.networks.{token_network_id}.network_id {:?} not found in networks",
+                        token_network.network_id
+                    ));
+                }
+            }
+        }
+
+        // C1: Dex entries must reference a known network id
+        for (dex_id, dex) in self.dexes.hashmap() {
+            if self.networks.get(&dex.network_id).is_none() {
+                errors.push(format!(
+                    "dexes.{dex_id}.network_id {:?} not found in networks",
+                    dex.network_id
+                ));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     pub fn load_wallet(

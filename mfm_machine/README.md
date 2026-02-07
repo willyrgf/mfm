@@ -41,9 +41,10 @@ mfm_machine/
 The `StateHandler` is the fundamental building block of the state machine. It represents a single, executable step in a workflow. Every state must implement this trait.
 
 ```rust
+#[async_trait::async_trait]
 pub trait StateHandler: StateMetadata + Send + Sync {
     // Executes the state's logic, receiving and potentially updating the context.
-    fn handler(&self, context: SafeContext) -> StateResult;
+    async fn handler(&self, context: SafeContext) -> StateResult;
 }
 ```
 
@@ -75,13 +76,13 @@ let states: States = Arc::new([
 ]);
 
 // Create a new state machine with default components
-let mut state_machine = StateMachine::new(states);
+let mut state_machine = StateMachine::new(states)?;
 
 // Create an initial context
 let context = create_default_safe_context();
 
-// Execute the workflow
-let final_context = state_machine.execute(context)?;
+// Execute the workflow (async)
+let final_context = state_machine.execute(context).await?;
 ```
 
 ## Usage Example
@@ -112,8 +113,8 @@ pub struct Setup {
 impl Setup {
     fn new() -> Self {
         Self {
-            label: Label::new_const("setup_state"),
-            tags: vec![Tag::new_const("setup")],
+            label: Label::new_unchecked("setup_state"),
+            tags: vec![Tag::new_unchecked("setup")],
             depends_on: vec![], // No dependencies
             depends_on_strategy: DependencyStrategy::Latest,
         }
@@ -125,8 +126,9 @@ struct SetupCtx {
     value: u32,
 }
 
+#[async_trait::async_trait]
 impl StateHandler for Setup {
-    fn handler(&self, context: SafeContext) -> StateResult {
+    async fn handler(&self, context: SafeContext) -> StateResult {
         let data = SetupCtx { value: 42 };
         // Write the data to the context for other states to use
         context.write_typed("setup_data", &data).map_err(|e| e.into())
@@ -146,16 +148,17 @@ pub struct Report {
 impl Report {
     fn new() -> Self {
         Self {
-            label: Label::new_const("report_state"),
-            tags: vec![Tag::new_const("report")],
-            depends_on: vec![Tag::new_const("setup")], // Depends on the Setup state
+            label: Label::new_unchecked("report_state"),
+            tags: vec![Tag::new_unchecked("report")],
+            depends_on: vec![Tag::new_unchecked("setup")], // Depends on the Setup state
             depends_on_strategy: DependencyStrategy::Latest,
         }
     }
 }
 
+#[async_trait::async_trait]
 impl StateHandler for Report {
-    fn handler(&self, context: SafeContext) -> StateResult {
+    async fn handler(&self, context: SafeContext) -> StateResult {
         // Read data produced by the Setup state
         let setup_data: SetupCtx = context.read_typed("setup_data")?;
         println!("Report state received value: {}", setup_data.value);
@@ -174,6 +177,8 @@ use mfm_machine::state::States;
 use mfm_machine::state_machine::StateMachine;
 use std::sync::Arc;
 
+#[tokio::main]
+async fn main() {
 // Create a list of states to execute
 let states: States = Arc::new([
     Box::new(Setup::new()),
@@ -181,15 +186,16 @@ let states: States = Arc::new([
 ]);
 
 // Instantiate the state machine
-let mut state_machine = StateMachine::new(states);
+let mut state_machine = StateMachine::new(states).unwrap();
 
 // Create the initial context
 let context = create_default_safe_context();
 
 // Run the workflow
-let result = state_machine.execute(context);
+let result = state_machine.execute(context).await;
 
 assert!(result.is_ok());
+}
 ```
 
 ## Error Handling and Recovery

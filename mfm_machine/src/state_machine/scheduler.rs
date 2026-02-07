@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use std::collections::HashMap;
 
 use crate::state::{
     safe_context::SafeContext, StateError, StateHandler, StateMetadata, States, Tag,
@@ -28,6 +29,18 @@ pub trait Scheduler: Send + Sync {
         states: &States,
         context: &SafeContext,
     ) -> Result<usize, SchedulerError>;
+
+    /// Determine the next state(s) to execute using SafeContext.
+    ///
+    /// Default behavior is single-step scheduling (sequential).
+    fn next_states(
+        &self,
+        current_index: usize,
+        states: &States,
+        context: &SafeContext,
+    ) -> Result<Vec<usize>, SchedulerError> {
+        Ok(vec![self.next_state(current_index, states, context)?])
+    }
 
     /// Set tags to filter out states during execution
     fn set_filter_tags(&mut self, tags: Option<Vec<Tag>>);
@@ -133,19 +146,38 @@ impl ErrorHandler for DefaultErrorHandler {
             return Ok(0);
         }
 
-        // Find the last successful execution of a state with the first dependency tag
-        let first_dependency = depends_on.first().unwrap();
-        let dependency_indexes = tracker.search_by_tag(first_dependency);
+        // Collect all candidate recovery points for all dependency tags.
+        let mut dependency_indexes = Vec::new();
+        for dependency_tag in &depends_on {
+            dependency_indexes.extend(tracker.search_by_tag(dependency_tag));
+        }
 
         if dependency_indexes.is_empty() {
-            // If no dependency state has been executed yet, restart from the beginning
+            // If no dependency state has been executed yet, restart from the beginning.
             return Ok(0);
         }
 
-        // Use the last executed dependency state as the recovery point
-        let last_dependency = dependency_indexes.last().unwrap();
+        // Apply the dependency strategy to select a recovery point.
+        let strategy = current_state.depends_on_strategy();
+        let selected = match strategy {
+            crate::state::DependencyStrategy::Latest => dependency_indexes
+                .iter()
+                .max_by_key(|idx| idx.state_index)
+                .expect("dependency_indexes is non-empty"),
+            crate::state::DependencyStrategy::Earliest => dependency_indexes
+                .iter()
+                .min_by_key(|idx| idx.state_index)
+                .expect("dependency_indexes is non-empty"),
+            crate::state::DependencyStrategy::LatestSuccessful => {
+                // TODO: tracker does not record success/failure per execution yet.
+                dependency_indexes
+                    .iter()
+                    .max_by_key(|idx| idx.state_index)
+                    .expect("dependency_indexes is non-empty")
+            }
+        };
 
-        Ok(last_dependency.state_index)
+        Ok(selected.state_index)
     }
 }
 
@@ -235,6 +267,111 @@ impl Default for DependencyScheduler {
     }
 }
 
+/// A scheduler that can return multiple independent next states for concurrent execution.
+///
+/// This implementation assumes the `states` slice is in dependency order, and will return a
+/// contiguous block of runnable states starting at `current_index + 1` whose dependencies are all
+/// satisfied by tags provided by states at indexes `<= current_index`.
+pub struct ParallelScheduler {
+    filter_tags: Option<Vec<Tag>>,
+}
+
+impl ParallelScheduler {
+    pub fn new() -> Self {
+        Self { filter_tags: None }
+    }
+
+    fn earliest_tag_providers(states: &States) -> HashMap<Tag, usize> {
+        let mut providers = HashMap::new();
+        for (idx, state) in states.iter().enumerate() {
+            for tag in state.tags() {
+                providers
+                    .entry(tag)
+                    .and_modify(|existing| {
+                        if idx < *existing {
+                            *existing = idx;
+                        }
+                    })
+                    .or_insert(idx);
+            }
+        }
+        providers
+    }
+}
+
+impl Scheduler for ParallelScheduler {
+    fn next_state(
+        &self,
+        current_index: usize,
+        states: &States,
+        context: &SafeContext,
+    ) -> Result<usize, SchedulerError> {
+        // Sequential fallback.
+        DefaultScheduler::new().next_state(current_index, states, context)
+    }
+
+    fn next_states(
+        &self,
+        current_index: usize,
+        states: &States,
+        _context: &SafeContext,
+    ) -> Result<Vec<usize>, SchedulerError> {
+        if states.is_empty() {
+            return Err(SchedulerError::NoStates);
+        }
+
+        if current_index >= states.len() {
+            return Err(SchedulerError::InvalidStateIndex(current_index));
+        }
+
+        let start = current_index + 1;
+        if start >= states.len() {
+            return Err(SchedulerError::NoNextState);
+        }
+
+        let providers = Self::earliest_tag_providers(states);
+        let mut out = Vec::new();
+
+        for idx in start..states.len() {
+            let state = &states[idx];
+            let deps = state.depends_on();
+            let runnable = deps.iter().all(|dep| {
+                providers
+                    .get(dep)
+                    .is_some_and(|&provider_idx| provider_idx <= current_index)
+            });
+
+            if runnable {
+                out.push(idx);
+            } else {
+                break;
+            }
+        }
+
+        if out.is_empty() {
+            return Err(SchedulerError::Custom(anyhow!(
+                "No runnable next state at index {start}; state ordering likely violates dependencies"
+            )));
+        }
+
+        Ok(out)
+    }
+
+    fn set_filter_tags(&mut self, tags: Option<Vec<Tag>>) {
+        self.filter_tags = tags;
+    }
+
+    fn get_filter_tags(&self) -> Option<Vec<Tag>> {
+        self.filter_tags.clone()
+    }
+}
+
+impl Default for ParallelScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::state_machine::StateResult;
@@ -258,16 +395,17 @@ mod tests {
     impl TestState1 {
         fn new() -> Self {
             Self {
-                label: Label::new_const("test_state_1"),
-                tags: vec![Tag::new_const("test1")],
+                label: Label::new_unchecked("test_state_1"),
+                tags: vec![Tag::new_unchecked("test1")],
                 depends_on: vec![],
                 depends_on_strategy: DependencyStrategy::Latest,
             }
         }
     }
 
+    #[async_trait::async_trait]
     impl StateHandler for TestState1 {
-        fn handler(&self, _context: SafeContext) -> StateResult {
+        async fn handler(&self, _context: SafeContext) -> StateResult {
             // State 1 always passes
             Ok(())
         }
@@ -284,16 +422,17 @@ mod tests {
     impl TestState2 {
         fn new() -> Self {
             Self {
-                label: Label::new_const("test_state_2"),
-                tags: vec![Tag::new_const("test2")],
-                depends_on: vec![Tag::new_const("test1")],
+                label: Label::new_unchecked("test_state_2"),
+                tags: vec![Tag::new_unchecked("test2")],
+                depends_on: vec![Tag::new_unchecked("test1")],
                 depends_on_strategy: DependencyStrategy::Latest,
             }
         }
     }
 
+    #[async_trait::async_trait]
     impl StateHandler for TestState2 {
-        fn handler(&self, _context: SafeContext) -> StateResult {
+        async fn handler(&self, _context: SafeContext) -> StateResult {
             // State 2 always passes
             Ok(())
         }

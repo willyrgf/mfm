@@ -77,6 +77,7 @@ fn test_mnemonic_import_and_retrieval() {
             Some("mnemonic_key".to_string()),
             test_mnemonic,
             derivation_path,
+            None,
         )
         .unwrap();
 
@@ -90,6 +91,199 @@ fn test_mnemonic_import_and_retrieval() {
     let address1 = secure_key.ethereum_address();
     let address2 = secure_key.ethereum_address();
     assert_eq!(address1, address2);
+}
+
+#[test]
+fn test_mnemonic_passphrase_support() {
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+
+    let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let derivation_path = "m/44'/60'/0'/0/0";
+
+    let id_no_pass = keystore
+        .import_mnemonic(Some("no_pass".to_string()), mnemonic, derivation_path, None)
+        .unwrap();
+    let id_with_pass = keystore
+        .import_mnemonic(
+            Some("with_pass".to_string()),
+            mnemonic,
+            derivation_path,
+            Some("passphrase"),
+        )
+        .unwrap();
+
+    let key_no_pass = keystore.get_private_key(id_no_pass).unwrap();
+    let key_with_pass = keystore.get_private_key(id_with_pass).unwrap();
+
+    assert_ne!(
+        key_no_pass.ethereum_address(),
+        key_with_pass.ethereum_address()
+    );
+}
+
+#[test]
+fn test_export_private_key_for_private_key_entries() {
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+
+    let test_key = "0000000000000000000000000000000000000000000000000000000000000001";
+    let id = keystore
+        .import_private_key(Some("export_pk".to_string()), test_key)
+        .unwrap();
+
+    let exported = keystore.export_private_key(id).unwrap();
+    assert_eq!(exported.as_str(), format!("0x{test_key}"));
+}
+
+#[test]
+fn test_export_mnemonic_and_derived_private_key() {
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+
+    let test_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let derivation_path = "m/44'/60'/0'/0/0";
+
+    let mnemonic_id = keystore
+        .import_mnemonic(
+            Some("mnemonic_key".to_string()),
+            test_mnemonic,
+            derivation_path,
+            None,
+        )
+        .unwrap();
+
+    let exported_mnemonic = keystore.export_mnemonic(mnemonic_id).unwrap();
+    assert_eq!(exported_mnemonic.as_str(), test_mnemonic);
+
+    let exported_pk = keystore.export_private_key(mnemonic_id).unwrap();
+    let derived_id = keystore
+        .import_private_key(Some("derived".to_string()), exported_pk.as_str())
+        .unwrap();
+
+    let key_from_mnemonic = keystore.get_private_key(mnemonic_id).unwrap();
+    let key_from_exported = keystore.get_private_key(derived_id).unwrap();
+    assert_eq!(
+        key_from_mnemonic.ethereum_address(),
+        key_from_exported.ethereum_address()
+    );
+
+    // export_mnemonic should fail for private key entries.
+    assert!(matches!(
+        keystore.export_mnemonic(derived_id),
+        Err(KeystoreError::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn test_change_password_reencrypts_entries() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("change_password.keystore");
+
+    let (pk_id, mnemonic_id) = {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("old_password").unwrap();
+
+        let pk_id = keystore
+            .import_private_key(
+                Some("pk".to_string()),
+                "0000000000000000000000000000000000000000000000000000000000000002",
+            )
+            .unwrap();
+        let mnemonic_id = keystore
+            .import_mnemonic(
+                Some("mn".to_string()),
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+                "m/44'/60'/0'/0/0",
+                Some("pass"),
+            )
+            .unwrap();
+
+        keystore
+            .change_password("old_password", "new_password")
+            .unwrap();
+
+        (pk_id, mnemonic_id)
+    };
+
+    // Old password should fail.
+    let mut keystore2 =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    assert!(matches!(
+        keystore2.unlock("old_password"),
+        Err(KeystoreError::InvalidPassword)
+    ));
+
+    // New password should succeed and keys should still be accessible.
+    keystore2.unlock("new_password").unwrap();
+    assert!(keystore2.get_private_key(pk_id).is_ok());
+    assert!(keystore2.get_private_key(mnemonic_id).is_ok());
+}
+
+#[test]
+fn test_audit_log_entries_created_for_operations() {
+    let (_temp_dir, mut keystore) = test_keystore();
+
+    // Unlock logs.
+    keystore.unlock("test_password").unwrap();
+    assert!(matches!(
+        keystore.audit_log().last().unwrap().event,
+        AuditEvent::Unlock
+    ));
+
+    let pk_id = keystore
+        .import_private_key(
+            Some("pk".to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000003",
+        )
+        .unwrap();
+    assert!(keystore
+        .audit_log()
+        .iter()
+        .any(|e| matches!(e.event, AuditEvent::ImportPrivateKey { .. }) && e.success));
+
+    // get_private_key logs.
+    keystore.get_private_key(pk_id).unwrap();
+    assert!(keystore
+        .audit_log()
+        .iter()
+        .any(|e| matches!(e.event, AuditEvent::GetPrivateKey { id } if id == pk_id) && e.success));
+
+    // export_private_key logs.
+    keystore.export_private_key(pk_id).unwrap();
+    assert!(keystore.audit_log().iter().any(
+        |e| matches!(e.event, AuditEvent::ExportPrivateKey { id } if id == pk_id) && e.success
+    ));
+
+    // export_mnemonic failure logs.
+    assert!(keystore.export_mnemonic(pk_id).is_err());
+    assert!(keystore.audit_log().iter().any(|e| {
+        matches!(e.event, AuditEvent::ExportMnemonic { id } if id == pk_id) && !e.success
+    }));
+
+    // delete_key logs.
+    keystore.delete_key(pk_id).unwrap();
+    assert!(keystore
+        .audit_log()
+        .iter()
+        .any(|e| matches!(e.event, AuditEvent::DeleteKey { id } if id == pk_id) && e.success));
+
+    // lock logs.
+    keystore.lock();
+    assert!(matches!(
+        keystore.audit_log().last().unwrap().event,
+        AuditEvent::Lock
+    ));
+
+    // change_password failure logs (locked).
+    assert!(keystore
+        .change_password("old_password", "new_password")
+        .is_err());
+    assert!(keystore
+        .audit_log()
+        .iter()
+        .any(|e| matches!(e.event, AuditEvent::ChangePassword) && !e.success));
 }
 
 #[test]
@@ -375,7 +569,8 @@ fn test_import_mnemonic_edge_cases() {
     ];
 
     for (i, path) in valid_paths.iter().enumerate() {
-        let result = keystore.import_mnemonic(Some(format!("mnemonic_{i}")), valid_mnemonic, path);
+        let result =
+            keystore.import_mnemonic(Some(format!("mnemonic_{i}")), valid_mnemonic, path, None);
         assert!(result.is_ok(), "Failed to import with valid path: {path}");
     }
 
@@ -389,7 +584,7 @@ fn test_import_mnemonic_edge_cases() {
     ];
 
     for path in invalid_paths {
-        let result = keystore.import_mnemonic(None, valid_mnemonic, path);
+        let result = keystore.import_mnemonic(None, valid_mnemonic, path, None);
         if result.is_err() {
             println!(
                 "Note: path '{path}' was rejected: {:?}",
@@ -408,7 +603,7 @@ fn test_import_mnemonic_edge_cases() {
     ];
 
     for mnemonic in invalid_mnemonics {
-        let result = keystore.import_mnemonic(None, mnemonic, "m/44'/60'/0'/0/0");
+        let result = keystore.import_mnemonic(None, mnemonic, "m/44'/60'/0'/0/0", None);
         assert!(result.is_err(), "Invalid mnemonic should fail: {mnemonic}");
     }
 }
@@ -430,6 +625,7 @@ fn test_get_private_key_comprehensive() {
             Some("test_mnemonic".to_string()),
             test_mnemonic,
             "m/44'/60'/0'/0/0",
+            None,
         )
         .unwrap();
 
@@ -473,6 +669,7 @@ fn test_list_keys_comprehensive() {
             Some("mnemonic1".to_string()),
             test_mnemonic,
             "m/44'/60'/0'/0/0",
+            None,
         )
         .unwrap();
 
@@ -590,14 +787,14 @@ fn test_error_conditions() {
 
     // Invalid mnemonic
     assert!(matches!(
-        keystore.import_mnemonic(None, "invalid mnemonic", "m/44'/60'/0'/0/0"),
+        keystore.import_mnemonic(None, "invalid mnemonic", "m/44'/60'/0'/0/0", None),
         Err(KeystoreError::InvalidMnemonic(_))
     ));
 
     // Invalid derivation path
     let valid_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     assert!(matches!(
-        keystore.import_mnemonic(None, valid_mnemonic, "invalid/path"),
+        keystore.import_mnemonic(None, valid_mnemonic, "invalid/path", None),
         Err(KeystoreError::InvalidDerivationPath(_))
     ));
 }

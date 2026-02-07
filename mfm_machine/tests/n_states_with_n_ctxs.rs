@@ -13,8 +13,9 @@ use crate::default_impls::Config;
 
 mod default_impls;
 
-#[test]
-fn test_n_states_with_ctxs() {
+#[tokio::test]
+async fn test_n_states_with_ctxs() {
+    let setup_state = Box::new(Setup::new());
     let config_state = Box::new(ConfigState::new());
     let onchain_value_state = Box::new(OnChainValuesState::new());
 
@@ -30,13 +31,17 @@ fn test_n_states_with_ctxs() {
     let dump = safe_context.dump().unwrap();
     assert!(dump.is_object());
 
-    let initial_states: States = Arc::new([config_state.clone(), onchain_value_state.clone()]);
+    let initial_states: States = Arc::new([
+        setup_state.clone(),
+        config_state.clone(),
+        onchain_value_state.clone(),
+    ]);
 
-    let mut state_machine = StateMachine::new(initial_states);
+    let mut state_machine = StateMachine::new(initial_states).unwrap();
 
     // Execute state machine
     println!("Executing state machine...");
-    let result = state_machine.execute(safe_context);
+    let result = state_machine.execute(safe_context).await;
 
     println!(
         "state machine execution history: \n{:?}",
@@ -46,8 +51,8 @@ fn test_n_states_with_ctxs() {
     assert!(result.is_ok());
 }
 
-#[test]
-fn test_linear_state_transition() {
+#[tokio::test]
+async fn test_linear_state_transition() {
     // Create states with a linear dependency chain
     // Setup -> ComputePrice -> Report
     let setup_state = Box::new(Setup::new());
@@ -64,11 +69,11 @@ fn test_linear_state_transition() {
         report_state.clone(),
     ]);
 
-    let mut state_machine = StateMachine::new(initial_states);
+    let mut state_machine = StateMachine::new(initial_states).unwrap();
 
     // Execute state machine with the linear chain
     println!("Executing linear state transition...");
-    let result = state_machine.execute(safe_context);
+    let result = state_machine.execute(safe_context).await;
 
     println!(
         "Linear state machine execution history: \n{:?}",
@@ -90,8 +95,8 @@ fn test_linear_state_transition() {
     assert_eq!(history_vec[2].1.state_label.as_str(), "report_state");
 }
 
-#[test]
-fn test_complex_state_transition() {
+#[tokio::test]
+async fn test_complex_state_transition() {
     // Create a complex workflow with multiple dependencies
     // Setup -> ComputePrice -> [Report, Validation] -> Notification -> AnalyticsState -> FinalizeState
     let setup_state = Box::new(Setup::new());
@@ -116,11 +121,11 @@ fn test_complex_state_transition() {
         finalize_state.clone(),
     ]);
 
-    let mut state_machine = StateMachine::new(initial_states);
+    let mut state_machine = StateMachine::new(initial_states).unwrap();
 
     // Execute state machine with the complex workflow
     println!("Executing complex state transition...");
-    let result = state_machine.execute(safe_context);
+    let result = state_machine.execute(safe_context).await;
 
     println!(
         "Complex state machine execution history: \n{:?}",
@@ -139,8 +144,8 @@ fn test_complex_state_transition() {
     assert!(finalized_data.is_ok());
 }
 
-#[test]
-fn test_parallel_state_transitions() {
+#[tokio::test]
+async fn test_parallel_state_transitions() {
     // Create states for parallel execution (states with the same dependencies)
     let setup_state = Box::new(Setup::new());
 
@@ -166,11 +171,11 @@ fn test_parallel_state_transitions() {
         validation_state.clone(),
     ]);
 
-    let mut state_machine = StateMachine::new(initial_states);
+    let mut state_machine = StateMachine::new(initial_states).unwrap();
 
     // Execute state machine with parallel flows
     println!("Executing parallel state transitions...");
-    let result = state_machine.execute(safe_context);
+    let result = state_machine.execute(safe_context).await;
 
     println!(
         "Parallel state machine execution history: \n{:?}",
@@ -205,8 +210,8 @@ fn test_parallel_state_transitions() {
     assert!(found_validation);
 }
 
-#[test]
-fn test_dependency_strategy_all() {
+#[tokio::test]
+async fn test_dependency_strategy_all() {
     // Test a state that requires ALL dependencies to be satisfied
     let setup_state = Box::new(Setup::new());
     let compute_price_state = Box::new(ComputePrice::new());
@@ -228,11 +233,11 @@ fn test_dependency_strategy_all() {
         notification_state.clone(),
     ]);
 
-    let mut state_machine = StateMachine::new(initial_states);
+    let mut state_machine = StateMachine::new(initial_states).unwrap();
 
     // Execute state machine
     println!("Executing state machine with ALL dependency strategy...");
-    let result = state_machine.execute(safe_context);
+    let result = state_machine.execute(safe_context).await;
 
     println!(
         "ALL dependency state machine execution history: \n{:?}",
@@ -263,15 +268,16 @@ fn test_dependency_strategy_all() {
     assert!(notification_pos > validation_pos);
 }
 
-#[test]
-fn test_dependency_strategy_any() {
-    // Test a state that requires ANY dependency to be satisfied
+#[tokio::test]
+async fn test_dependency_strategy_any() {
+    // AnalyticsState depends on both report and notification tags, so we include
+    // the full chain to satisfy build-time validation.
     let setup_state = Box::new(Setup::new());
     let compute_price_state = Box::new(ComputePrice::new());
     let report_state = Box::new(Report::new());
+    let validation_state = Box::new(ValidationState::new());
+    let notification_state = Box::new(NotificationState::new());
 
-    // Analytics can run after EITHER report or notification
-    // We'll exclude notification in this test to confirm it runs after report
     let analytics_state = Box::new(AnalyticsState::new());
 
     // Create a default SafeContext
@@ -282,14 +288,16 @@ fn test_dependency_strategy_any() {
         setup_state.clone(),
         compute_price_state.clone(),
         report_state.clone(),
+        validation_state.clone(),
+        notification_state.clone(),
         analytics_state.clone(),
     ]);
 
-    let mut state_machine = StateMachine::new(initial_states);
+    let mut state_machine = StateMachine::new(initial_states).unwrap();
 
     // Execute state machine
     println!("Executing state machine with ANY dependency strategy...");
-    let result = state_machine.execute(safe_context);
+    let result = state_machine.execute(safe_context).await;
 
     println!(
         "ANY dependency state machine execution history: \n{:?}",
@@ -298,21 +306,24 @@ fn test_dependency_strategy_any() {
 
     assert!(result.is_ok());
 
-    // Verify analytics ran after report
+    // Verify analytics ran after report and notification
     let history_vec: Vec<_> = state_machine.track_history().into_iter().collect();
 
     // Find positions of each state in the history
     let mut report_pos = 0;
+    let mut notification_pos = 0;
     let mut analytics_pos = 0;
 
     for (i, (_step, index, _value)) in history_vec.iter().enumerate() {
         match index.state_label.as_str() {
             "report_state" => report_pos = i,
+            "notification_state" => notification_pos = i,
             "analytics_state" => analytics_pos = i,
             _ => {}
         }
     }
 
-    // Analytics must come after report
+    // Analytics must come after report and notification
     assert!(analytics_pos > report_pos);
+    assert!(analytics_pos > notification_pos);
 }
