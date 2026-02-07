@@ -6,7 +6,7 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 ## Read First (Non-Negotiables)
 
 - Keep changes small and local; prefer 1 logical change per PR/commit.
-- Match CI: use Rust stable + `cargo fmt`, `cargo clippy`, and `cargo test`.
+- Match CI: use `cargo +nightly fmt --all`, `cargo +nightly clippy --workspace --lib --examples --tests --benches --all-features`, and `cargo nextest run --workspace`.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
 - If you touch security-sensitive code (keystore/crypto), add or strengthen tests.
@@ -82,13 +82,13 @@ cargo +nightly fmt --all
 
 2. **Linting**: Run clippy with all features
 ```bash
-cargo +nightly clippy --workspace --lib --examples --tests --benches --all-features 
+cargo +nightly clippy --workspace --lib --examples --tests --benches --all-features
 ```
 
 3. **Testing**: Use nextest for faster test execution
 ```bash
 cargo nextest run --workspace
-``
+```
 
 ### Security Audit
 
@@ -265,7 +265,7 @@ If a bug can reappear, write a regression test.
 
 ## CI Requirements
 
-Before opening a PR (or finishing a change), ensure [Code Style and Standards](.#Code-Style-and-Standards) are met.
+Before opening a PR (or finishing a change), ensure [Code Style and Standards](#code-style-and-standards) are met.
 
 If you use Nix or need CI parity, also run: `nix flake check && nix build`.
 
@@ -314,7 +314,7 @@ DONT:
 cargo +nightly fmt --all
 
 # Run lints
-cargo +nightly clippy --workspace --all-features
+cargo +nightly clippy --workspace --lib --examples --tests --benches --all-features
 
 # Run tests
 cargo nextest run --workspace
