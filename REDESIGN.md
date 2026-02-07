@@ -167,8 +167,8 @@ mfm/
 ```
 
 ### 4.1 Naming: removing `mfm_` prefixes
-- Directory/module names can drop `mfm_`.
-- **Cargo package names should remain namespaced** to avoid collisions (`mfm-machine`, `mfm-core`, etc.).
+- Directory/module names can drop `mfm_` (e.g., `crates/machine/`, `crates/core/`, `bin/cli/`).
+- **Cargo package names should remain namespaced** to avoid collisions (`mfm-machine`, `mfm-core`, `mfm-sdk`, etc.).
   - Cargo translates `mfm-machine` → Rust crate import `mfm_machine`.
 
 ---
@@ -178,24 +178,47 @@ mfm/
 ### 5.1 High-level dependency graph
 ```
 
-{ cli, rest-api } -> ops -> { machine, core, collectors, storages }
+{ cli, rest-api } -> { ops, sdk }       # thin wrappers
+sdk -> machine                          # orchestration helpers; generic over store traits
+ops -> { machine, core, collectors, storages } (+ sdk for Operation/Pipeline traits)
 machine -> machine-derive
 storages -> { core, machine }   # for IDs/types and event model
 collectors -> { core } (+ machine if needed for shared IO abstractions)
-core -> (must not depend on collectors/storages/ops)
+core -> (must not depend on collectors/storages/ops/sdk)
 
 ````
 
 ### 5.2 Boundary rules (non-negotiable)
-- **Binaries** depend on ops and minimal shared crates only.
+- **Binaries** are thin wrappers; they should depend on ops and (recommended) sdk only.
 - **Ops** orchestrate only:
   - define expansion to state graphs
   - compose collectors + storages
   - no storage implementations in ops
+- **SDK** provides orchestration ergonomics (planning helpers, run launcher/resume); it must stay thin.
 - **Collectors** fetch/normalize data; must be usable under live or replay IO.
 - **Storages** persist and query; no business logic.
 - **Core** houses security-critical code; avoid heavy IO deps.
 - **Machine** is generic; no chain-specific code.
+
+### 5.3 Machine vs SDK ownership (planning vs orchestration)
+
+Recommended split (avoid “god crates” while keeping correctness centralized):
+
+Put these in `crates/machine/` (runtime-owned; correctness-critical):
+- `StateId`, `StateMeta`, dependency edge model
+- `StateGraph`, `ExecutionPlan`
+- kernel event types (`RunStarted`, `StateEntered`, ...)
+- executor + context snapshot mechanics
+
+Put these in `crates/sdk/` (planning convenience + integration; ergonomics):
+- `Operation` (or `Op`) trait + versioning conventions
+- op registry / discovery helpers
+- `Pipeline` builder (`then()`, `build()`)
+- run launcher / resume helpers (thin wrapper around machine + stores)
+
+Ops crates (`crates/ops/*`) typically:
+- implement the `Operation` trait (from sdk)
+- produce `StateGraph`s made of machine states
 
 ---
 
@@ -668,4 +691,3 @@ Ops choose an event profile that controls domain event verbosity:
 * `verbose`: detailed domain events for diagnostics
 
 Kernel events are always emitted regardless of profile.
-

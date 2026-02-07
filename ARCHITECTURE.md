@@ -97,9 +97,16 @@ The engine executes K states in a single run with a shared context (namespaced).
 A state may spawn child runs (sub-machines). The parent machine does not need to know
 the child’s internal states, but must record linkage events.
 
+At minimum:
+- `ChildRunSpawned { child_run_id, child_manifest_id }`
+
 ---
 
 ## Where code should live (map of responsibilities)
+
+Naming reminder:
+- Paths/modules drop `mfm_` (e.g., `crates/machine/`, `crates/core/`).
+- Cargo packages stay namespaced (`mfm-machine` → `mfm_machine`).
 
 ### `crates/machine/`
 Owns the execution model:
@@ -112,6 +119,16 @@ Owns the execution model:
 Must NOT:
 - contain chain-specific code
 - contain concrete storage backends
+- contain op registries / pipeline builders (belongs in `crates/sdk/`)
+
+### `crates/machine-derive/`
+Owns ergonomics at compile time:
+- proc-macros for state metadata boilerplate
+- compile-time validation with clear error messages
+
+Must NOT:
+- contain runtime behavior (no executor logic)
+- depend on ops/collectors/storages
 
 ### `crates/core/`
 Owns primitives and security-sensitive components:
@@ -142,8 +159,12 @@ Owns domain workflows:
 - composes collectors + storages + machine runtime
 - contains op-specific states and tests
 
+In practice:
+- ops typically implement an `Operation` trait (recommended to live in `crates/sdk/`)
+
 ### `crates/sdk/` (optional but recommended)
 Owns “glue” for binaries and integrations:
+- `Operation` trait (or `Op` trait) + versioning conventions
 - op registry
 - pipeline builder convenience API
 - run launcher / resume helpers (thin wrapper around machine + stores)
@@ -185,4 +206,3 @@ Keep libraries free of printing/logging secrets.
 
 - **REDESIGN.md** (full contract)
 - **AGENTS.md** (repo contribution rules / CI parity)
-
