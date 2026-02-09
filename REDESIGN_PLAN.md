@@ -1,447 +1,343 @@
-# MFM — REDESIGN.md Implementation Plan
+# MFM — REDESIGN.md Implementation Plan (v4.0)
 
 > This document turns `REDESIGN.md` into an executable, PR-sized checklist.
-> If this plan disagrees with `REDESIGN.md`, `REDESIGN.md` wins.
+> Contract rule: `REDESIGN.md` wins on semantics, but **any known plan ↔ contract deviation must be recorded**
+> in §Deviations (no silent drift).
 >
+> Version: v4.0 (aligned to `REDESIGN_V4.md`; removes v3 drift items by integrating them into the contract)
 > Last updated: 2026-02-09
+
+---
 
 ## Goals (Success Criteria)
 
-- Implement the `REDESIGN.md` core invariants:
-  - append-only per-run event streams
-  - transactional state transitions at the event-store layer
-  - content-addressed artifacts (manifest, context snapshots, fact payloads, outputs)
-  - canonical JSON hashing for structured hashed data
-  - explicit IO abstraction (live vs replay), missing facts are structured errors
-  - kernel events are sufficient for recovery/resume correctness
-  - no secrets in events/manifests/artifacts by default
-- Restructure workspace to `crates/` + `bin/` and align Cargo naming policy (§2.6).
-- Provide a thin CLI surface that can start/resume runs and inspect events/artifacts with stable
-  `--output-format` / `MFM_OUTPUT_FORMAT` behavior.
-- Add design-level tests from §15:
-  - live-then-replay determinism
-  - crash/resume determinism
-  - optimistic concurrency for event appends
+Implement the `REDESIGN.md` core invariants with explicit, testable semantics:
 
-## Non-Goals (For Now)
+- Append-only per-run event streams
+- Transactional appends at the event-store layer (each append is atomic; readers never observe partial appends)
+- Attempt envelopes across one-or-more appends (`StateEntered … domain … terminal`)
+- Content-addressed artifacts (manifest, context snapshots, fact payloads, outputs)
+- Canonical JSON hashing for structured hashed data (RFC 8785 semantics)
+- Explicit IO abstraction (live vs replay)
+  - Replay requires `fact_key` for deterministic IO
+  - Missing fact_key is a structured error (`missing_fact_key`)
+  - Missing facts are structured errors (`MissingFact`)
+- Kernel events sufficient for recovery/resume correctness
+- **Secrets excluded from everything persisted**
+- Thin CLI surfaces to start/resume runs and inspect events/artifacts with stable `--output-format`
 
-- ClickHouse projections/indexers (explicitly deferred by `REDESIGN.md` §12.3/§16).
-- Production hardening of REST API (auth, multi-tenant, quotas).
-- A full suite of domain ops/collectors (we start with 1 minimal op crate to prove the model).
+### Acceptance Tests (Named)
 
-## Current Repo Reality (Baseline)
+Each invariant must be verifiable by at least one named acceptance test. PRs MUST reference these IDs.
 
-- Workspace members today: `mfm_cli`, `mfm_machine`, `mfm_machine_derive`, `mfm_core`.
-- Current state machine is a recoverable, tag-based scheduler with `SafeContext` snapshots.
-- `mfm_core` currently depends on `mfm_machine` only to re-export `SafeContext` (must be removed per
-  redesign boundary rules: `core` must not depend on `machine`).
+- AT-01 AppendOnlyEventStream
+- AT-02 AtomicAppendVisibility
+- AT-03 ExpectedSeqConcurrency
+- AT-04 ArtifactContentAddressing
+- AT-05 CanonicalJsonHashing
+- AT-06 LiveThenReplayDeterminism
+- AT-07 CrashResumeDeterminism
+- AT-08 SideEffectIdempotency
+- AT-09 SecretsNeverPersisted
 
-## Decision Defaults (Locked In Unless We Update This File)
+### Delivery Map
 
-- Workspace restructure happens early (create `crates/` + `bin/` first).
-- Primary persistence backends:
-  - Event store: PostgreSQL
-  - Artifact store: MinIO/S3
-- Keep a fast unit-test lane implementation (in-memory / filesystem) even if the default dev story
-  is Postgres+MinIO, to keep `cargo nextest` fast and hermetic.
-- Canonical JSON: RFC 8785 (JCS) semantics (likely `serde_jcs`).
-- Hashing: SHA-256 (lowercase hex string in `ArtifactId`).
-- Plan IDs follow §10.7: `StateId = <machine_id>.<step_id>.<state_local_id>` (stable, no random
-  nonces).
-
-## CI Parity Commands (Required Before Each PR Is “Done”)
-
-```bash
-cargo +nightly fmt --all
-cargo +nightly clippy --workspace --lib --examples --tests --benches --all-features
-cargo nextest run --workspace
-cargo audit
-
-# optional parity lane
-nix flake check
-nix build
-```
+| Acceptance Test | Primary PR(s) |
+|---|---|
+| AT-01 | PR10 (+ PR07/PR08 stores) |
+| AT-02 | PR07, PR08 |
+| AT-03 | PR07, PR08 |
+| AT-04 | PR07, PR09 |
+| AT-05 | PR05, PR11 |
+| AT-06 | PR12, PR13, PR15 |
+| AT-07 | PR10, PR15 |
+| AT-08 | PR15 |
+| AT-09 | PR11, PR12, PR16 |
 
 ---
 
-# Phase 0 — Workspace and Naming
+## Non-Goals (Milestone 1: Semantics Proof)
 
-## PR 01 — Create `crates/` + `bin/` (Move Only)
-
-**Intent:** Restructure without changing behavior.
-
-### Steps
-
-1. Add directories: `crates/`, `bin/`.
-2. Move existing crates:
-   - `mfm_core` → `crates/core`
-   - `mfm_machine` → `crates/machine_legacy` (temporary)
-   - `mfm_machine_derive` → `crates/machine-derive_legacy` (temporary)
-   - `mfm_cli` → `bin/cli_legacy` (temporary)
-3. Update root `Cargo.toml` workspace `members` paths.
-4. Update all `path = "../..."` dependencies.
-5. Update `flake.nix` to build the legacy CLI at its new path.
-
-### Acceptance
-
-- All CI parity commands pass.
-- `nix run .#... -- --help` still works (using the legacy CLI app target).
-
-## PR 02 — Cargo Package Naming Policy (Hyphens)
-
-**Intent:** Align packages with `REDESIGN.md` §2.6 while legacy code still exists.
-
-### Steps
-
-- Rename packages:
-  - `crates/machine_legacy` → package name `mfm-machine-legacy`
-  - `crates/machine-derive_legacy` → package name `mfm-machine-derive-legacy`
-  - `crates/core` → package name `mfm-core` (Rust import stays `mfm_core`)
-  - `bin/cli_legacy` → package name `mfm-cli-legacy` (if desired) but keep binary name stable
-    until replacement.
-- Fix all workspace dependency references.
-
-### Acceptance
-
-- All CI parity commands pass.
-
-## PR 03 — Remove `core -> machine` Dependency
-
-**Intent:** Enforce boundary rule: `core` must not depend on `machine` (REDESIGN §5.2).
-
-### Steps
-
-1. Remove `mfm_machine` dependency from `crates/core/Cargo.toml`.
-2. Remove `SafeContext` re-export from `crates/core/src/lib.rs`.
-3. Update any call sites (likely few) to import context directly from legacy machine (temporary)
-   or migrate them to the new machine later.
-
-### Acceptance
-
-- All CI parity commands pass.
+- REST API surface (optional/deferred)
+- ClickHouse projections/indexers
+- Artifact GC / compaction
+- Manual operator interventions (DLQ, force-complete, compensations)
+- Full suite of domain ops/collectors (start with one proof op)
+- Postgres/MinIO are integration-lane only until fast-lane semantics are proven stable
+- Nested machines / child-run spawning + linkage (deferred)
+- Deterministic rewinds across completed transitions (deferred)
+- Encrypted secret-bearing artifacts (deferred; Milestone 1 is “no secrets persisted”)
 
 ---
 
-# Phase 1 — New `mfm-machine` Public Contract (Appendix C)
+## Core Semantic Clarifications (v4)
 
-## PR 04 — Add `crates/machine` (Types + Traits Only)
+### S1 — Attempt envelopes with per-append atomicity
 
-**Intent:** Introduce the redesign’s stable public surface without committing to implementation
-details yet.
+A state attempt is a kernel envelope:
 
-### Steps
+- `StateEntered { state_id, attempt, base_snapshot_id }`
+- zero or more domain events
+- exactly one terminal kernel event: `StateCompleted { … }` or `StateFailed { … }`
 
-1. Create `crates/machine` (package name `mfm-machine`).
-2. Implement modules from Appendix C (public contract):
-   - `ids`, `canonical` (marker), `config`, `meta`, `errors`, `context`, `events`, `io`,
-     `recorder`, `state`, `plan`, `stores`, `engine`
-3. Add minimal compile/serde tests.
+Rules:
+1. Engine MUST append `StateEntered` before calling the handler.
+2. Each `EventStore::append([...])` is atomic and never partially visible.
+3. A single attempt MAY span multiple appends (required for crash-safe fact recording).
+4. Only `StateCompleted { context_snapshot_id }` advances the checkpoint.
 
-### Acceptance
+Orphan handling:
+- If the stream ends with `StateEntered` and no terminal event, attempt is in-flight.
+  Resume retries from `base_snapshot_id`.
+- Facts recorded during in-flight attempts remain valid (run-scoped).
+- Non-fact domain events are audit-only and MUST NOT advance progression/checkpoints.
 
-- All CI parity commands pass.
-- No other crate is forced to use this new API yet.
+### S2 — Facts are single-assignment (FactKey first durable wins)
 
-## PR 05 — Canonical JSON + SHA-256 Hash Helpers (Internal)
+Within a run:
+- The first durable `FactRecorded { key, payload_id }` binds the key permanently.
 
-**Intent:** Provide a single correct hashing pipeline for manifests/snapshots/events.
+LiveIo behavior when `fact_key` is present:
+1. Check fact index for key
+2. If exists → return recorded payload (no transport)
+3. Else → perform IO, store payload artifact, append `FactRecorded` durably
 
-### Steps
+### S3 — Replay requires `fact_key` for deterministic IO
 
-1. Add internal helpers in `crates/machine` (not part of Appendix C contract):
-   - `canonical_json_bytes(value) -> Vec<u8>`
-   - `artifact_id_for_bytes(bytes) -> ArtifactId` (SHA-256, lowercase hex)
-2. Add tests:
-   - object key order does not change canonical bytes/hash
-   - stable hash for equivalent structures
+In Replay mode:
+- If `fact_key` is absent → return `IoError::MissingFactKey` with stable code `missing_fact_key` (non-retryable).
+- If `fact_key` present but missing → return `IoError::MissingFact { key, … }`
 
-### Acceptance
+Missing-fact retryability:
+- Controlled by `RunConfig.replay_missing_fact_retryable` (default false).
 
-- All CI parity commands pass.
+### S4 — Secrets excluded from all persisted surfaces
 
-## PR 06 — Add `crates/machine-derive` (New Macros)
+Hard rule:
+- secrets must never appear in manifests, events, artifacts (including fact payloads and snapshots), or error details.
 
-**Intent:** Replace legacy metadata boilerplate with macros aligned to new `StateMeta`.
+### S5 — Side effects require idempotency
 
-### Steps
+Any APPLY_SIDE_EFFECT state must:
+- declare an idempotency key
+- emit a durable domain event recording the key
+- use an external idempotency mechanism keyed by that value
+- ensure crash/resume does not re-apply
 
-1. Create `crates/machine-derive` (package name `mfm-machine-derive`).
-2. Implement macro(s) aligned to Appendix C `StateMeta` fields.
-3. Add `trybuild` compile-fail tests for invalid args.
+### S6 — Time/random must be recorded when used
 
-### Acceptance
-
-- All CI parity commands pass.
-
----
-
-# Phase 2 — Storage Backends (Postgres + MinIO/S3)
-
-## PR 07 — Storage Traits + “Fast Lane” Local Implementations
-
-**Intent:** Unblock runtime tests without requiring services.
-
-### Steps
-
-1. Add `crates/storages/event-store` (package `mfm-event-store`):
-   - `InMemoryEventStore` implementing `mfm_machine::stores::EventStore`
-2. Add `crates/storages/artifact-store` (package `mfm-artifact-store`):
-   - `FsArtifactStore` writing by content hash under a root dir
-3. Tests:
-   - optimistic concurrency behavior (expected seq)
-   - artifact de-dupe by content hash
-
-### Acceptance
-
-- All CI parity commands pass without external services.
-
-## PR 08 — Postgres `EventStore` Implementation
-
-**Intent:** Implement the primary transactional event store.
-
-### Postgres Schema (Locked In)
-
-- Table `run_events`:
-  - `run_id uuid not null`
-  - `seq bigint not null`
-  - `ts_millis bigint null`
-  - `event_json jsonb not null` (serialized `EventEnvelope`)
-  - primary key `(run_id, seq)`
-
-### Append Semantics (Locked In)
-
-- `append(run_id, expected_seq, events)` must be one SQL transaction:
-  - check current head seq equals `expected_seq`
-  - insert `N` events as seq `expected_seq+1..expected_seq+N`
-  - commit
-- Wrong `expected_seq` returns `StorageError::Concurrency`.
-
-### Steps
-
-1. Implement using `sqlx` + tokio.
-2. Add integration tests gated behind env (e.g. `MFM_TEST_PG_URL`).
-
-### Acceptance
-
-- Fast lane still passes without Postgres.
-- Integration lane passes when env is provided.
-
-## PR 09 — MinIO/S3 `ArtifactStore` Implementation
-
-**Intent:** Implement primary artifact storage.
-
-### Steps
-
-1. Implement using `aws-sdk-s3` (configure endpoint for MinIO).
-2. Store objects keyed by `ArtifactId` (content hash).
-3. Add integration tests gated behind env (e.g. `MFM_TEST_S3_ENDPOINT`, bucket, credentials).
-
-### Acceptance
-
-- Fast lane still passes without MinIO.
-- Integration lane passes when env is provided.
+`IoProvider::now_millis()` and `random_bytes()` are nondeterministic:
+- LiveIo MUST record them as facts with deterministic, attempt-scoped keys.
+- ReplayIo MUST replay them or return MissingFact.
+- Proof op tests MUST exercise at least one of these in the replayable path.
 
 ---
 
-# Phase 3 — Execution Engine + Kernel Events
+## Decision Defaults (Milestone 1)
 
-## PR 10 — Engine Skeleton + Kernel Events Emission
-
-**Intent:** Make `start` / `resume` real, with kernel events sufficient for recovery.
-
-### Locked-In Engine Semantics
-
-- Each state attempt is transactional with respect to:
-  - context updates (staged; commit on success only)
-  - event append (entered + domain + completed/failed in a single append)
-- Artifacts referenced by events must be written before emitting the referencing event(s).
-
-### Steps
-
-1. Add `DefaultEngine` implementing `ExecutionEngine`.
-2. Implement `start()`:
-   - store manifest artifact
-   - store initial snapshot artifact
-   - append `RunStarted`
-   - execute plan sequentially (dependency edges)
-3. Implement `resume()`:
-   - read kernel events, find last durable boundary, resume incomplete states deterministically
-4. Add `EventRecorder` implementation that buffers domain events per state attempt.
-
-### Acceptance
-
-- Unit tests covering kernel event ordering and transactional semantics.
-
-## PR 11 — Context Snapshotting (Full Snapshots)
-
-**Intent:** Ensure full-snapshot artifacts are created and referenced by kernel events.
-
-### Steps
-
-1. Provide a `DynContext` implementation suitable for staging:
-   - base context loaded from snapshot
-   - staged writes tracked in-memory
-   - on commit: materialize full `dump()` and store snapshot artifact
-2. Tests:
-   - staged writes discarded on `StateFailed`
-   - committed snapshots reproduce full context
-
-### Acceptance
-
-- All CI parity commands pass.
+- Sequential per run
+- `EventEnvelope.seq` is 1-indexed; empty run head is 0
+- Fast lane: SQLite event store (file-backed) + filesystem artifact store
+- Integration lane: Postgres + MinIO
+- Canonical JSON: RFC 8785 (JCS); reject floats, NaN/Inf
+- Hash: SHA-256; `ArtifactId` is 64-char lowercase hex
+- IDs:
+  - `OpPath = <machine_id>.<step_id>`
+  - `StateId = <machine_id>.<step_id>.<state_local_id>`
+  - segment regex `^[a-z][a-z0-9_]{0,62}$`
+  - single-op runs use `step_id = main`
+- Crash simulation: explicit failpoints (`fail` crate or equivalent), chosen before PR10.
 
 ---
 
-# Phase 4 — IO Provider + Replay Determinism
+## Deviations (Plan vs Contract)
 
-## PR 12 — `LiveIo` + Fact Recording Domain Events
-
-**Intent:** Make IO explicit; record facts as artifacts referenced by events.
-
-### Steps
-
-1. Implement `LiveIo`:
-   - `call(IoCall)` uses a transport registry (start with a test transport)
-   - when `fact_key` is present:
-     - store response as `ArtifactKind::FactPayload`
-     - emit domain event `FactRecorded { key, payload_id, meta }`
-2. Add tests with a fake transport:
-   - Live call records payload and emits event
-
-### Acceptance
-
-- All CI parity commands pass.
-
-## PR 13 — `ReplayIo` + Missing Fact Semantics
-
-**Intent:** Replay uses recorded facts/artifacts; missing facts return structured error.
-
-### Steps
-
-1. Implement `ReplayIo`:
-   - `call(IoCall)` requires `fact_key` for replay-sensitive calls; otherwise treat as error or
-     as “non-replayable” depending on policy (explicit in code).
-   - lookup recorded fact from run’s domain events.
-   - missing returns `IoError::MissingFact { key, info }`
-2. Add determinism test:
-   - live run records fact
-   - replay run produces identical derived outputs without transport access
-
-### Acceptance
-
-- All CI parity commands pass.
+None (this v4 plan is aligned to `REDESIGN_V4.md`).
 
 ---
 
-# Phase 5 — `mfm-sdk` Planning + First Op
+## PR Dependency Graph (Critical Path)
 
-## PR 14 — Add `crates/sdk` (Operation + Pipeline)
+```text
+PR00 -> PR01 -> PR02 -> PR03
 
-**Intent:** Move planning ergonomics out of `machine` per boundary rules.
+PR04a -> PR04b -> PR04c -> PR05
+PR04c -> PR07 -> PR10 -> PR10b -> PR11 -> PR12 -> PR13 -> PR14 -> PR15 -> PR16 -> PR17 -> PR20
 
-### Steps
+PR08, PR09 depend on PR04c + PR05 and SHOULD start only after PR10/PR11 prove fast-lane semantics.
+PR19 depends on PR08 + PR09 and can run in parallel with PR14–PR17.
 
-1. Add `crates/sdk` (package `mfm-sdk`) containing:
-   - `Operation::expand(...) -> StateGraph`
-   - `Pipeline::then(...)` and `build() -> ExecutionPlan`
-2. Implement ID assignment per §10.7:
-   - `OpPath = <machine_id>.<step_id>`
-   - `StateId = <machine_id>.<step_id>.<state_local_id>`
-3. Add plan validation tests (cycles, duplicates, missing nodes).
-
-### Acceptance
-
-- All CI parity commands pass.
-
-## PR 15 — Add `crates/ops/<minimal-op>` End-to-End
-
-**Intent:** Prove the model with one runnable op crate.
-
-### Steps
-
-1. Add `crates/ops/hello-run` (or similar) that expands into:
-   - `config` → `fetch_data` (records fact) → `report` (writes output artifact)
-2. Add §15 tests:
-   - live then replay produces identical output artifact IDs
-   - crash after N events, resume, completes consistently
-
-### Acceptance
-
-- All CI parity commands pass (replay/crash tests run in fast lane).
+PR18 (REST) is deferred until after PR20.
+````
 
 ---
 
-# Phase 6 — Replace CLI With Thin Orchestrator
+## Phase -1 — Contract Alignment (Blocking)
 
-## PR 16 — New `bin/cli` (Run Start/Resume/Inspect)
+### PR 00 — Apply `REDESIGN_V4.md` to `REDESIGN.md`
 
-**Intent:** Make binaries thin wrappers over sdk+machine+storages.
+Intent:
 
-### Commands (Minimum Set)
+* Replace/merge `REDESIGN.md` content so the repo’s contract matches v4 semantics:
 
-- `run start --op <id> --input <json> [--io-mode live|replay]`
-- `run resume --run-id <uuid>`
-- `run events --run-id <uuid> [--from <seq>]`
-- `artifact get --id <hash>`
+  * attempt envelopes + orphan handling
+  * FactKey single-assignment
+  * Replay requires fact_key
+  * ID regex + examples
+  * Milestone 1 scope deferrals
+  * Milestone 1 “no secrets persisted” policy
 
-### Output Contract
+Acceptance:
 
-- Preserve global `--output-format` and `MFM_OUTPUT_FORMAT` semantics (current CLI contract).
-- Stable JSON schema for success/errors; no secrets in outputs.
-
-### Acceptance
-
-- CLI e2e tests for the new commands.
-- Legacy keystore commands remain available (temporarily) or are migrated to separate subcommands
-  without touching event store.
-
-## PR 17 — Deprecate/Remove Legacy CLI
-
-- Remove `bin/cli_legacy` after new CLI is the default.
-- Update `flake.nix` to build and `nix run` the new CLI.
+* No drift items remain; plan Deviations stays “None”.
 
 ---
 
-# Phase 7 — REST API Scaffold
+## Phase 1 — New `mfm-machine` Public Contract (Appendix C)
 
-## PR 18 — `bin/rest-api` Minimal Surface
+### PR 04a — Foundational Types
 
-- Endpoints mirroring CLI surfaces:
-  - start run, resume run, list/read events, get artifact
-- No auth; explicitly non-production.
+Scope:
+
+* `ids`, `canonical`, `config`, `meta`, `errors`
+
+v4-specific requirements:
+
+* Add `RunConfig.replay_missing_fact_retryable: bool` (default false).
+* Add `IoError::MissingFactKey` variant and ensure stable code `missing_fact_key`.
+
+Tests:
+
+* `ArtifactId` format: 64-char lowercase hex
+* ID segment regex validation
+
+### PR 04b — Runtime Abstractions
+
+Scope:
+
+* `context`, `events`, `io`, `recorder`
+
+v4-specific requirements:
+
+* KernelEvent fields must match v4 (`context_snapshot_id` required in `StateCompleted`).
+* Recorder docs reflect multi-append attempts.
+
+### PR 04c — Planning + Stores + Engine Traits
+
+Scope:
+
+* `state`, `plan`, `stores`, `engine`
 
 ---
 
-# Phase 8 — CI Integration Lane (Postgres + MinIO)
+## Phase 2 — Hashing Helpers
 
-## PR 19 — GitHub Actions Services for Postgres + MinIO
+### PR 05 — Canonical JSON + SHA-256 helpers
 
-- Add a CI job that runs integration tests with:
-  - Postgres service container
-  - MinIO service container
-- Gate integration tests behind env vars so fast lane remains unchanged.
-
----
-
-# Phase 9 — Remove Legacy State Machine
-
-## PR 20 — Delete Legacy Machine + Derive
-
-Prerequisites:
-- No crate depends on `mfm-machine-legacy` or `mfm-machine-derive-legacy`.
-- All ops/CLI use new `mfm-machine` + stores + sdk.
-
-Steps:
-- Remove legacy crates from workspace.
-- Remove legacy docs/tests referencing them.
+* canonical bytes per RFC 8785 semantics
+* reject floats / NaN / Inf in hashed structures
+* include JCS/RFC test vectors where possible
 
 ---
 
-## Review Checklist (For Our Next Pass)
+## Phase 3 — Storage Backends
 
-- Confirm crate naming and binary naming we want long-term (`mfm` vs `mfm_cli`).
-- Confirm canonical JSON crate choice (JCS semantics + test coverage).
-- Confirm Postgres schema migrations approach (`sqlx::migrate!` vs hand-rolled).
-- Confirm how `ReplayIo` discovers facts (event scan vs index).
-- Confirm how “crash simulation” is implemented in tests (controlled failpoint vs harness).
+### PR 07 — Fast-lane stores (SQLite + FS)
+
+v4-specific notes:
+
+* `EventEnvelope.seq` is assigned by the engine; store MUST validate:
+
+  * first seq == expected_seq+1
+  * contiguous increments
+* Artifact store MUST hash-on-read and return `Corruption` on mismatch
+
+Tests:
+
+* AT-02, AT-03, AT-04 supported in fast lane
+
+### PR 08 — Postgres EventStore (integration lane)
+
+### PR 09 — MinIO/S3 ArtifactStore (integration lane)
+
+---
+
+## Phase 4 — Execution Engine + Kernel Events
+
+### PR 10 — Engine skeleton (attempt envelopes) + kernel emission
+
+* Implements S1, orphan handling, resume logic
+* Failpoints added for crash tests
+
+### PR 10b — Policy semantics
+
+* retry policy (no sleep in replay mode)
+* skip-tags semantics
+* event profile gating for domain events
+
+---
+
+## Phase 5 — Context Snapshotting
+
+### PR 11 — Full snapshots + staging + secret exclusion
+
+* staged writes commit only on StateCompleted
+* failure discards staged writes
+* snapshot determinism tests
+* AT-09 coverage begins here
+
+---
+
+## Phase 6 — IO Providers
+
+### PR 12 — LiveIo + fact recording + dedupe
+
+* FactKey single-assignment enforced by scanning/building fact index
+* Time/random recorded as facts in deterministic, attempt-scoped way (S6)
+
+### PR 13 — ReplayIo + MissingFactKey/MissingFact semantics
+
+* missing fact_key → `IoError::MissingFactKey` (`missing_fact_key`, non-retryable)
+* missing fact → `IoError::MissingFact` with retryable based on `RunConfig.replay_missing_fact_retryable`
+
+---
+
+## Phase 7 — SDK + Proof Op
+
+### PR 14 — SDK planning (Operation + Pipeline)
+
+* enforce ID shape and default `step_id = main` for single-op runs
+
+### PR 15 — Proof op end-to-end
+
+Must include:
+
+* fork/join DAG shape
+* read-only IO facts
+* idempotent side-effect state (tested)
+* report output artifact
+
+Tests:
+
+1. Live → Replay determinism (skip side effects)
+2. Crash/resume determinism
+3. Side-effect idempotency across crash/resume
+4. now/random fact recording exercised in replayable path (S6)
+
+---
+
+## Phase 8 — CLI replacement
+
+### PR 16 — Thin CLI for start/resume/inspect
+
+* stable `--output-format`
+* no secrets in outputs/errors
+
+---
+
+## Phase 9 — Cleanup
+
+### PR 20 — Delete legacy machine + derive
+
+* all AT-01..AT-09 passing in fast lane
 

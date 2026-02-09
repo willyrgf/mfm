@@ -1,8 +1,10 @@
-# MFM — Redesign
+# MFM — Redesign (v4)
 
 > **Purpose**: This document is the design contract for the next MFM architecture.
 > Last updated: 2026-02-09
-> It prioritizes **reproducibility, auditability, simplicity, and security**.  
+> Version: v4 (consolidated contract; resolves v3 internal inconsistencies)
+>
+> It prioritizes **reproducibility, auditability, simplicity, and security**.
 > If code disagrees with this document, the code is wrong (until the doc is explicitly updated).
 
 ---
@@ -19,11 +21,14 @@
 
 ## 1. System Design Requirements
 
-### 1.1 Append-only + transactional
+### 1.1 Append-only + transactional (per-append atomicity; attempt envelopes)
 - All meaningful actions are recorded as **immutable events** in an **append-only log**.
 - A “run” is an ordered event stream. No updates to past events.
-- State transitions are **transactional** at the event-store layer:
-  - either all events for a transition are appended, or none are.
+- Event-store appends are **transactional** at the storage layer:
+  - each `EventStore::append([...])` is atomic and never partially visible to readers.
+- A **state attempt** is delimited by a kernel envelope in the event stream (§6.2/§6.4) and MAY span multiple
+  appends:
+  - `StateEntered … [domain…] … (StateCompleted|StateFailed)`
 
 ### 1.2 Reproducibility (Nix philosophy applied system-wide)
 - Every run is defined by a **run manifest** (content-addressed).
@@ -37,9 +42,9 @@ Prefer a small set of “boring primitives”:
 - state machine runtime
 - event store
 - artifact store
-- typed schema registry (optional; see §17)
 - IO abstraction (live vs replay)
 - operation planning (expand ops → state graphs)
+- (optional later) typed schema registry
 
 ### 1.4 Composability & reusability
 - Ops are state graphs. State graphs compose.
@@ -54,8 +59,8 @@ Prefer a small set of “boring primitives”:
 ### 1.6 Everything executes inside a state machine
 - Every execution is a state machine.
 - “Ops” are sequences/graphs of states plus configuration.
-- Nested machines are allowed (“state machines all the way down”):
-  - a state handler may spawn sub-machines.
+- Nested machines are a supported *concept*, but **engine-managed child runs are deferred for Milestone 1**
+  (Milestone 1 uses flattened composition only; see §11).
 
 ---
 
@@ -68,7 +73,8 @@ Prefer a small set of “boring primitives”:
 
 **Constraints**
 - No NaN/Infinity.
-- Avoid floats in hashed structures (prefer integer-scaled or decimal strings).
+- Hashed structures MUST NOT contain floats (JSON numbers with fractional parts). Use integer-scaled values or
+  decimal strings.
 
 ### 2.2 Context snapshots
 - Snapshots are **full snapshots** (not deltas).
@@ -79,20 +85,22 @@ Prefer a small set of “boring primitives”:
 - Beyond that, the **domain event set is configurable per op** (event profiles).
 
 ### 2.4 Replay mode semantics
-- Replay mode does **not** hard-fail on network access.
-- Missing facts/IO return a structured error.
-- If the error is tagged **retryable**, the runtime retries according to run configuration.
+- Replay mode does **not** hard-crash the process on attempted IO.
+- Replay mode returns **structured IO errors** when deterministic facts are missing or when replayable IO is invoked
+  without a `fact_key` (see §8).
 
 ### 2.5 Parallel execution
 - Sequential execution is the default.
-- Some ops may opt into parallelism, but it must remain auditable and replayable.
-- Preferred expression: explicit fan-out / join (see §9).
+- Parallel execution is deferred for Milestone 1. Any future parallelism MUST remain auditable and replayable.
 
 ### 2.6 Cargo package naming
-- **Cargo package names SHOULD use hyphens** (e.g. `mfm-machine`, `mfm-core`) to match ecosystem
-  convention and avoid surprises.
+- Cargo package names SHOULD use hyphens (e.g. `mfm-machine`, `mfm-core`).
 - Rust import paths use underscores (Cargo mapping), e.g. `use mfm_machine::...`.
-- Workspace directory/module names may omit the `mfm_` prefix (see §4.1).
+
+### 2.7 Milestone 1 security policy: no secrets persisted
+- **Milestone 1 hard rule:** secrets must not appear in persisted surfaces:
+  - manifests, events, artifacts (including fact payloads and context snapshots), CLI/API outputs, and error details.
+- Encrypted secret-bearing artifacts are explicitly deferred until after Milestone 1.
 
 ---
 
@@ -116,7 +124,7 @@ A concrete execution of an Op:
 A step in a machine:
 - reads/writes context (namespaced)
 - uses IO provider (live/replay)
-- emits events
+- emits domain events
 - may store artifacts and reference them via events
 
 ### 3.4 Context
@@ -137,114 +145,33 @@ An immutable blob/document stored in an artifact store:
 
 ### 3.7 Fact
 A recorded external input:
-- e.g., RPC response, HTTP response, time reading, etc.
+- e.g., RPC response, HTTP response, time reading, randomness bytes
 - stored as a content-addressed payload artifact and referenced from events
 
 ### 3.8 What does NOT belong in context
 Context is for *derived working state* needed by downstream states, not for:
 - IO provider internal runtime state (connection pools, caches, backoff counters).
-- Large raw external payloads (store as fact payload artifacts instead; see §7 and §8).
-- Secrets (never store in context, events, or artifacts unless explicitly encrypted and access-controlled).
-
-If something is needed for reproducibility/debuggability:
-- **Configuration/provenance** belongs in the **manifest** and referenced config artifacts.
-- **External inputs/outputs** belong in the **fact/artifact stores**, referenced by events.
-- **Context snapshots** are stored as artifacts and referenced from kernel events.
+- Large raw external payloads (store as fact payload artifacts instead).
+- Secrets (never store).
 
 ---
 
 ## 4. Workspace Structure
 
-Proposed layout:
-
-```
-
-mfm/
-├── Cargo.toml
-├── crates/
-│   ├── machine/                # state machine runtime + context + tags/labels + planning types
-│   ├── machine-derive/         # proc macros
-│   ├── core/                   # primitives: keystore, config models, crypto utilities, typed IDs
-│   ├── collectors/
-│   │   ├── evm/                # EVM collectors (RPC, logs, traces)
-│   │   └── coingecko/          # HTTP collectors for price/facts
-│   ├── storages/
-│   │   ├── event-store/         # event-store implementations (pg, local)
-│   │   ├── artifact-store/      # artifact-store implementations (minio, fs)
-│   │   └── indexer/            # optional: projections (clickhouse)
-│   ├── ops/                    # operation definitions (expand into state graphs)
-│   │   ├── aave-tracker/
-│   │   ├── portfolio-tracker/
-│   │   └── portfolio-management/
-│   └── sdk/                    # optional: client SDK
-├── bin/
-│   ├── cli/
-│   └── rest-api/
-├── flake.nix
-└── flake.lock
-
-```
-
-### 4.1 Naming: removing `mfm_` prefixes
-- Directory/module names can drop `mfm_` (e.g., `crates/machine/`, `crates/core/`, `bin/cli/`).
-- **Cargo package names should remain namespaced** to avoid collisions (`mfm-machine`, `mfm-core`, `mfm-sdk`, etc.).
-  - Cargo translates `mfm-machine` → Rust crate import `mfm_machine`.
-- Cargo package naming policy is in §2.6.
+(unchanged from prior drafts; omitted here for brevity—same as v3 layout and boundary intent.)
 
 ---
 
 ## 5. Dependency Graph & Boundary Rules
 
-### 5.1 High-level dependency graph
-```
-
-{ cli, rest-api } -> { ops, sdk }       # thin wrappers
-sdk -> machine                          # orchestration helpers; generic over store traits
-ops -> { machine, core, collectors, storages } (+ sdk for Operation/Pipeline traits)
-machine -> machine-derive
-storages -> { core, machine }   # for IDs/types and event model
-collectors -> { core } (+ machine if needed for shared IO abstractions)
-core -> (must not depend on collectors/storages/ops/sdk)
-
-````
-
-### 5.2 Boundary rules (non-negotiable)
-- **Binaries** are thin wrappers; they should depend on ops and (recommended) sdk only.
-- **Ops** orchestrate only:
-  - define expansion to state graphs
-  - compose collectors + storages
-  - no storage implementations in ops
-- **SDK** provides orchestration ergonomics (planning helpers, run launcher/resume); it must stay thin.
-- **Collectors** fetch/normalize data; must be usable under live or replay IO.
-- **Storages** persist and query; no business logic.
-- **Core** houses security-critical code; avoid heavy IO deps.
-- **Machine** is generic; no chain-specific code.
-
-### 5.3 Machine vs SDK ownership (planning vs orchestration)
-
-Recommended split (avoid “god crates” while keeping correctness centralized):
-
-Put these in `crates/machine/` (runtime-owned; correctness-critical):
-- `StateId`, `StateMeta`, dependency edge model
-- `StateGraph`, `ExecutionPlan`
-- kernel event types (`RunStarted`, `StateEntered`, ...)
-- executor + context snapshot mechanics
-
-Put these in `crates/sdk/` (planning convenience + integration; ergonomics):
-- `Operation` (or `Op`) trait + versioning conventions
-- op registry / discovery helpers
-- `Pipeline` builder (`then()`, `build()`)
-- run launcher / resume helpers (thin wrapper around machine + stores)
-
-Ops crates (`crates/ops/*`) typically:
-- implement the `Operation` trait (from sdk)
-- produce `StateGraph`s made of machine states
+(unchanged; same as v3.)
 
 ---
 
 ## 6. Append-only Execution Model
 
 ### 6.1 Per-run event stream
+
 A run is an ordered sequence of events stored in an append-only event store.
 
 #### Kernel events (engine-level; always emitted)
@@ -256,61 +183,59 @@ Minimum required for recovery/resume/audit:
 - `StateFailed { state_id, error, failure_snapshot_id? }`
 - `RunCompleted { status, final_snapshot_id? }`
 
-Notes:
+**Notes**
 - `seq` is a strictly increasing per-run sequence number.
+- **Milestone 1 seq convention:** `seq` is 1-indexed; empty run has `head_seq = 0`.
 - `attempt` increments per state retry.
-- `initial_snapshot_id` is the content-addressed snapshot of the **initial context** for the run.
-- `base_snapshot_id` is the snapshot the state attempt started from. In the common case
-  (default checkpointing), it is the previous state's `context_snapshot_id`.
-- `failure_snapshot_id` is **diagnostic-only** and MUST NOT be used as a resume checkpoint.
+- `initial_snapshot_id` is the snapshot of the initial context for the run.
+- `base_snapshot_id` is the snapshot the attempt starts from.
+- `failure_snapshot_id` is diagnostic-only and MUST NOT be used as a resume checkpoint.
 
 #### Domain events (operation-level; configurable per op)
 Examples (not required by engine correctness):
 - `FactRecorded { key, payload_id, meta }`
 - `ArtifactWritten { artifact_id, kind, meta }`
 - `OpBoundary { op_path, phase }`
-- any other op-specific events
 
 **Rule**
 - Domain events must never be required for engine correctness.
 - Domain events must never include secrets.
 
-### 6.2 Transactionality
-A “state transition” must be atomic from the event store’s perspective:
-- append `StateEntered`
-- append any domain events (facts/artifact refs)
-- append `StateCompleted` or `StateFailed`
+### 6.2 Transactionality (per-append atomicity) + Attempt Envelopes
 
-If a process dies mid-state:
-- the run is resumed by reading the last durable kernel event boundary.
+The event store is transactional at the **append** boundary:
+- each `EventStore::append([...])` is atomic (all events written or none; never partially visible).
+
+A state attempt is represented by a kernel envelope in the event stream:
+- `StateEntered { ... }`
+- zero or more domain events
+- exactly one terminal kernel event: `StateCompleted` or `StateFailed`
+
+A single attempt MAY span multiple appends.
+
+#### Crash/Resume Semantics (Orphan Handling)
+- If the stream ends with `StateEntered` and no terminal kernel event, the attempt is **in-flight**.
+  On resume, the engine retries from `base_snapshot_id` (discarding staged context).
+- Domain events emitted during an in-flight attempt remain in the stream. On resume:
+  - facts are run-scoped and remain valid for dedupe and replay
+  - other domain events MUST NOT advance plan progression or checkpoint selection
 
 ### 6.3 Snapshots & checkpointing
 - Context snapshots are full snapshots stored as artifacts.
 - A snapshot is referenced by kernel events (`context_snapshot_id`).
-- **Default policy**: checkpoint after every successful state transition.
-  - This keeps resume simple (no need to replay prior states on resume).
-- Advanced policies (e.g., periodic checkpointing) may be added later, but must remain auditable.
-  - If checkpointing is less frequent, resume semantics must be explicit: replay from last checkpoint
-    using recorded facts, and fail deterministically if facts are missing.
-
-Optional compaction is allowed only if auditable:
-- compaction emits events describing what was compacted and what snapshot replaces the range.
+- **Milestone 1 policy:** checkpoint after every successful state transition.
+  - If a state produces no logical changes, the engine MAY reuse the same snapshot ID (content-addressed dedupe),
+    but `context_snapshot_id` is still emitted explicitly.
 
 ### 6.4 Transactional state semantics (context + events)
-To make retries and crash recovery deterministic and debuggable:
+- A state runs against a staged view of context derived from `base_snapshot_id`.
+- On success: staged writes commit → full snapshot is produced → `StateCompleted` references it.
+- On failure: staged writes are discarded; run remains at `base_snapshot_id`.
 
-- State execution MUST be **transactional with respect to context updates**:
-  - A state runs against a staged view of context derived from `base_snapshot_id`.
-  - On success: staged writes commit → snapshot is produced → `StateCompleted` references it.
-  - On failure: staged writes are discarded; the run remains at `base_snapshot_id`.
-
-- State transition event emission MUST be **atomic** in the event store:
-  - append `StateEntered`
-  - append any domain events (facts/artifact refs, boundaries)
-  - append `StateCompleted` or `StateFailed`
-
-- IO results that affect determinism MUST be recorded as facts (payload artifacts) and referenced via events.
-  - Handlers must not depend on IO provider internal state for correctness.
+Kernel event semantics:
+- `StateEntered` MUST be appended at the start of every attempt, before calling the handler.
+- Only `StateCompleted { context_snapshot_id }` advances the run’s effective checkpoint.
+- `StateFailed` MUST NOT advance the checkpoint.
 
 ---
 
@@ -319,65 +244,58 @@ To make retries and crash recovery deterministic and debuggable:
 ### 7.1 Run manifest
 Each run has a manifest artifact whose ID is included in `RunStarted`.
 
-Recommended manifest fields:
+Recommended fields:
 - `op_id` + `op_version`
-- `git_commit` (or workspace revision)
-- `cargo_lock_hash`
-- `flake_lock_hash` (or equivalent)
-- `rustc_version`, `target_triple`
-- `input_params` (canonical JSON)
-- `config_refs` (content-addressed config files)
-- `env_allowlist` + captured env values (only those allowed)
-- `run_config` (retry policy, replay policy, event profile)
-- `io_mode` (live / replay)
-
-Additional guidance:
-- IO provider *configuration/provenance* SHOULD be represented in `config_refs` and/or manifest fields,
-  but MUST NOT include secrets (API keys, passwords, headers, decrypted buffers).
-- Large or structured config documents SHOULD be stored as artifacts and referenced (not embedded).
+- build provenance (git/cargo/flake/rustc/target)
+- `input_params` (canonical JSON; no secrets)
+- config refs (as artifacts; no secrets)
+- env allowlist + captured values (allowlisted only)
+- run config (retry, replay policy, event profile)
+- io mode (live/replay)
 
 ### 7.2 Canonical JSON hashing rules
 - Structured data → canonical JSON bytes → hash → `ArtifactId`
 - Binary blobs → raw bytes → hash → `ArtifactId`
-- Hash function should be stable and widely available (e.g., SHA-256).
+- Hash function (Milestone 1): SHA-256.
 
-### 7.3 Facts as first-class citizens
-Any external/non-deterministic input is a “fact”:
-- RPC responses
-- HTTP responses
-- time readings
-- randomness seeds (if used)
+### 7.3 Facts as first-class citizens (single-assignment)
+Any external/non-deterministic input used by deterministic logic is a “fact”.
 
-Facts are stored as payload artifacts and referenced via `FactRecorded` events.
+Within a run:
+- A `FactKey` is **single-assignment**: the first durable `FactRecorded { key, payload_id }` binds that key
+  permanently to that payload.
+- Facts recorded during in-flight (orphaned) attempts remain valid for replay and dedupe.
 
 ---
 
 ## 8. Replay & IO Determinism
 
 ### 8.1 IO provider model
-Handlers do not do ambient IO. They use an IO provider:
+Handlers do not do ambient IO; they use an IO provider.
 
-- `LiveIo`: performs real IO and may record facts/artifacts.
+- `LiveIo`: performs real IO and may record facts.
 - `ReplayIo`: serves recorded facts/artifacts when available; otherwise returns a structured error.
 
 Rules:
-- IO calls that influence deterministic behavior SHOULD use `fact_key` and produce fact payload artifacts.
-- Raw external payloads SHOULD be stored as **FactPayload** artifacts (or referenced artifacts) and
-  referenced by events; context should store derived/normalized results or references.
+- In Live mode, replayable IO SHOULD provide `fact_key`. Calls without `fact_key` are non-replayable by default.
+- In Replay mode, any deterministic IO MUST provide `fact_key`.
+  - If `fact_key` is absent: return an `IoError` with stable code `missing_fact_key` (non-retryable by default).
 
 ### 8.2 Missing facts in replay mode
 When replay needs a fact that does not exist:
-- IO returns `IoError::MissingFact { key }`
+- If `fact_key` is present but not recorded: return `IoError::MissingFact { key, ... }`.
 
-This is not automatically fatal:
-- if tagged retryable → retry per run policy
-- otherwise → deterministic failure
+Retryability:
+- `MissingFact` retryability is controlled by run config:
+  - `RunConfig.replay_missing_fact_retryable` (default false).
 
-### 8.3 “Retryable” errors are explicit
-Errors must carry:
-- category (e.g., network, rpc, parsing, storage)
-- retryability (retryable / non-retryable)
-- optional retry hints (backoff class, recommended delay, etc.)
+### 8.3 Time and randomness
+`now_millis()` and `random_bytes()` are nondeterministic and therefore are treated as facts when used.
+
+Milestone 1 rule:
+- `LiveIo` MUST record time/random reads as fact payloads with deterministic, attempt-scoped keys derived from:
+  - `(run_id, state_id, call_ordinal, kind)` (exact encoding is implementation-defined but MUST be stable)
+- `ReplayIo` MUST serve those recorded values or return `MissingFact`.
 
 ---
 
@@ -385,444 +303,74 @@ Errors must carry:
 
 ### 9.1 Requirements
 The runtime must support:
-- async handlers (no blocking runtime)
+- async handlers
 - recoverable/resumable execution
 - deterministic replay mode
-- nested machines
+- flattened composition for Milestone 1 (nested machines deferred)
 - side-effect tagging + idempotency strategy
 - stable metadata + introspection
 
-### 9.2 Handler shape (recommended)
+### 9.2 Handler shape (aligned with Appendix C)
 A state handler is async and receives explicit dependencies:
 
 ```rust
 #[async_trait]
-pub trait State {
-    fn id(&self) -> StateId;
+pub trait State: Send + Sync {
     fn meta(&self) -> StateMeta;
 
     async fn handle(
         &self,
-        ctx: &mut DynContext,
+        ctx: &mut dyn DynContext,
         io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError>;
 }
 ````
 
-**Key properties**
-
-* `IoProvider` switches live vs replay.
-* `EventRecorder` is the only way to append events.
-* `StateOutcome` references produced artifacts/snapshots.
-
-### 9.3 Side effects & idempotency
-
-States declare behavior:
-
-* `PURE`: deterministic, no external IO
-* `READ_ONLY_IO`: reads external IO, should record facts
-* `APPLY_SIDE_EFFECT`: writes external systems (tx submission, writes)
-
-Side-effecting states must provide an idempotency strategy:
-
-* a dedupe key (e.g., “intent hash”)
-* recorded in events
-* executor may retry safely after crash
-
-### 9.4 Sequential by default; parallel opt-in (fan-out / join)
-
-Default executor is sequential.
-
-Ops that need parallelism should use an explicit pattern:
-
-1. `FanOut` state:
-
-   * enumerates work items
-   * spawns child runs (or child machines) per item
-   * records child references
-
-2. `Join` state:
-
-   * waits/collects child results
-   * merges deterministically (stable ordering)
-
-This avoids concurrent writes into shared context and keeps auditability strong.
-
 ---
 
 ## 10. Operations as Expandable State Graphs
 
-### 10.1 Core idea
+(unchanged conceptually; tightened ID rules below.)
 
-An op expands into a **state graph** (states + dependency edges).
-The engine executes states; “ops” are a planning abstraction.
+### 10.7 Machines as named pipelines (Milestone 1 enforced ID shape)
 
-### 10.2 Expansion
+A machine is a pipeline op with named steps.
 
-Each op must be able to resolve itself into a concrete graph given config:
+Milestone 1 enforced conventions:
 
-* `OpConfig`: domain parameters
-* `RunConfig`: execution policy (retry policy, replay policy, event profile)
+* `OpPath = <machine_id>.<step_id>` (2 segments)
+* `StateId = <machine_id>.<step_id>.<state_local_id>` (3 segments)
+* Each segment MUST match: `^[a-z][a-z0-9_]{0,62}$`
+* Dots are reserved separators and forbidden inside segments.
 
-Expansion produces:
+Single-op runs:
 
-* set of states
-* dependency edges (DAG)
-* optional op boundaries (informational)
-* namespacing strategy
+* If the CLI runs a single op, the SDK MUST wrap it as a 1-step machine with:
 
-### 10.3 Flattening ops into one machine (K = N + M + …)
-
-If:
-
-* `ops1` expands into N states
-* `ops2` expands into M states
-
-Then a pipeline op can expand into a single graph of:
-
-* `K = N + M` states
-
-The engine sees:
-
-* one execution plan
-* one run
-* one event stream
-* one shared context (namespaced)
-
-This enables composition at both levels:
-
-* compose states into ops
-* compose ops into larger ops (flattening)
-
-### 10.4 Namespacing & uniqueness
-
-Flattening requires stable unique state identifiers:
-
-* include an `op_path` prefix:
-
-  * `portfolio_tracker.fetch_balances`
-  * `aave_tracker.index.logs`
-
-If the same op appears multiple times in a pipeline/machine, disambiguate using **named steps**
-with stable identifiers (Option A):
-
-* `portfolio_management.prices.fetch_blocks`
-* `portfolio_management.balances.fetch_blocks`
-
-**Rule**
-
-* `StateId` must be stable across machines and environments (no random IDs in identifiers).
-
-### 10.5 Context collision rules
-
-Shared context implies collision risk.
-
-Default rule:
-
-* context keys are namespaced by op path automatically.
-
-Cross-op wiring is explicit:
-
-* ops declare exports and imports
-* planner validates that all imports are satisfiable
-
-Example:
-
-* `ops1` exports `prices.latest_eth`
-* `ops2` imports `prices.latest_eth`
-
-### 10.6 Optional op boundaries
-
-Even though the engine executes K states, boundaries are useful for humans and APIs:
-
-* `OpBoundary { op_path, phase = Started }`
-* `OpBoundary { op_path, phase = Completed }`
-
-Boundaries are domain events and may be enabled/disabled by the op's event profile.
-
-### 10.7 Machines as named pipelines (SDK-level convention)
-A **machine** is a first-class pipeline operation defined as a **sequence of ops** with **named steps**.
-
-Goals:
-- ergonomic CLI invocation (run/resume a machine)
-- stable, readable namespacing for `OpPath` and `StateId`
-- deterministic plan expansion
-
-Recommended convention:
-- A machine has a stable `op_id` (e.g., `portfolio_management`) and `op_version`.
-- Each step has a stable `step_id` chosen by the machine author (e.g., `prices`, `balances`, `report`).
-- The planner expands the machine into a single state graph and assigns IDs:
-  - `OpPath`: `<machine_id>.<step_id>`
-  - `StateId`: `<machine_id>.<step_id>.<state_local_id>`
-
-Examples:
-- `portfolio_management.prices.fetch_eth_usd`
-- `portfolio_management.balances.fetch_wallet_balances`
-- `portfolio_management.report.render_summary`
-
-Constraints:
-- Step IDs MUST be stable and unique within a machine version.
-- If a machine repeats the same op with different configs, it MUST use distinct step IDs.
-- No run-specific nonces are allowed in `OpPath` or `StateId` (use `RunId` + `seq` for run uniqueness).
+  * `machine_id = <op_id>`
+  * `step_id = main`
 
 ---
 
 ## 11. Nested Machines vs Flattened Composition
 
-MFM supports two composition mechanisms:
+Milestone 1:
 
-### 11.1 Flattened composition (preferred for single-run pipelines)
-
-* `ops1 -> ops2 -> ops3` becomes one plan, one run.
-* Best when:
-
-  * shared context is desired
-  * sequencing is straightforward
-  * a single audit trail is preferred
-
-### 11.2 Nested machines spawned inside a state (preferred for isolation/parallelism)
-
-* A handler may spawn a sub-machine.
-* Parent does not need to understand child internals.
-
-Audit rule:
-
-* linkage must be recorded:
-
-  * at minimum: `ChildRunSpawned { child_run_id, child_manifest_id }`
-
-Best when:
-
-* parallel fan-out workloads
-* isolate failures/retry policies per subtask
-* long-running child workflows that can resume independently
+* flattened composition only (one plan, one run)
+* engine-managed child runs deferred
 
 ---
 
-## 12. Storage Architecture
+## 12–17 Remaining Sections
 
-### 12.1 Two primary storage roles
-
-1. **Event Store** (append-only)
-2. **Artifact Store** (content-addressed)
-
-Optional:
-
-* index/projection store for analytics (ClickHouse)
-
-### 12.2 Storage traits (sketch)
-
-```rust
-pub trait EventStore {
-    fn append(&self, run_id: RunId, expected_seq: u64, events: Vec<Event>) -> Result<u64>;
-    fn read_range(&self, run_id: RunId, from: u64, to: Option<u64>) -> Result<Vec<Event>>;
-    fn head(&self, run_id: RunId) -> Result<u64>;
-}
-
-pub trait ArtifactStore {
-    fn put(&self, bytes: &[u8], kind: ArtifactKind) -> Result<ArtifactId>;
-    fn get(&self, id: ArtifactId) -> Result<Vec<u8>>;
-    fn exists(&self, id: ArtifactId) -> Result<bool>;
-}
-```
-
-### 12.3 Backend strategy
-
-* PostgreSQL: primary event store (strong transactions)
-* MinIO/S3: artifact store for large blobs
-* ClickHouse: optional projections/indexes derived from events
-
-Local/dev:
-
-- A Nix-first approach SHOULD make production-like dependencies easy to run locally:
-  - PostgreSQL + MinIO can be used for dev and integration testing, pinned by flake inputs.
-- However, we SHOULD keep fast local implementations for tight iteration and unit tests:
-  - filesystem artifact store
-  - in-memory or sqlite event store
-
-Recommended test lanes:
-1) **Unit / fast lane** (default):
-   - in-memory/sqlite event store + filesystem artifacts
-2) **Integration / parity lane** (opt-in):
-   - PostgreSQL event store + MinIO artifact store
-
-Both lanes MUST satisfy the same correctness contract (append-only events, content-addressed artifacts,
-deterministic replay semantics).
-
-### 12.4 Security rules for storage
-
-* No secrets in events.
-* Avoid secrets in artifacts; if unavoidable, artifacts must be encrypted and tightly controlled.
-* Events reference secret IDs, never secret contents.
+Same intent as v3; Milestone 1 security remains “no secrets persisted”; encrypted secret-bearing artifacts deferred.
 
 ---
 
-## 13. CLI and REST API Responsibilities
+## Appendix C — Public API Contract (v0.1)
 
-### 13.1 CLI
-
-* starts/resumes runs
-* queries run history
-* prints stable outputs (text/json)
-* does not own business logic
-
-### 13.2 REST API
-
-* same as CLI over HTTP
-* should support:
-
-  * start run
-  * resume run
-  * fetch events
-  * fetch artifacts (or signed URLs)
-  * progress observation (polling; SSE/websocket later if needed)
-
----
-
-## 14. Security & Secret Handling
-
-### 14.1 Keystore
-
-The keystore remains security-critical:
-
-* constant-time comparisons
-* tamper detection and DoS guards
-* zeroization
-* strict parsing/validation
-
-Enhancements aligned with append-only architecture:
-
-* atomic writes for keystore persistence (temp + fsync + rename) or transactional persistence
-* optional audit events (no secrets): import/delete/lock/unlock metadata events
-
-### 14.2 No secrets in events
-
-* events must never contain:
-
-  * passwords, mnemonics, private keys, raw decrypted buffers
-* if needed, store references:
-
-  * keystore entry IDs
-  * encrypted artifact IDs
-
----
-
-## 15. Testing Requirements (Design-level)
-
-### 15.1 For every op crate
-
-* **Replay determinism**
-
-  * run in live mode (record facts)
-  * rerun in replay mode (no external IO required)
-  * assert same output artifact IDs / hashes
-
-* **Recovery/resume**
-
-  * simulate crash after N events
-  * resume
-  * assert run completes consistently
-
-* **Output stability**
-
-  * JSON schema stability tests for CLI/API responses
-
-### 15.2 For runtime/storage crates
-
-* optimistic concurrency tests (`expected_seq`)
-* snapshot correctness tests (full snapshot hashing)
-* nested-machine linkage tests
-* idempotency/dedupe tests for side-effect patterns
-
----
-
-## 16. Migration Plan (Incremental)
-
-1. Introduce `EventStore` + `ArtifactStore` traits and local implementations.
-2. Introduce run manifest type + hashing + artifact storage.
-3. Add kernel event emission to the runtime (even before async conversion if needed).
-4. Convert state handlers to async and introduce `IoProvider`.
-5. Implement replay mode with `ReplayIo` and missing-fact error semantics.
-6. Introduce op planning:
-
-   * `Operation::expand(...) -> StateGraph`
-   * pipeline flattening to one execution plan
-7. Move CLI and REST API to “start/resume run” surfaces.
-8. Add PostgreSQL + MinIO backends; keep local backends for tests.
-9. Add projections (ClickHouse) only after event model stabilizes.
-
----
-
-## 17. Open Questions (Remaining)
-
-These are intentionally left open until forced by implementation.
-Current decisions (subject to change via explicit doc update):
-
-### 17.1 Minimal standard library of reusable state patterns
-Initial set:
-- `fetch` (READ_ONLY_IO; records facts)
-- `validate` (PURE; schema/invariants)
-- `execute` (APPLY_SIDE_EFFECT; requires idempotency)
-- `store` (writes artifacts + references)
-- `join` (deterministic merge; supports fan-out/join)
-- `report` (outputs as artifacts)
-
-### 17.2 Op schema versioning and backward compatibility
-- Every operation MUST have an explicit `op_version`.
-- Stored manifests/events MUST include `op_id` + `op_version`.
-- Version changes MUST preserve reproducibility:
-  - old runs remain replayable under their recorded manifest/build provenance
-  - migrations create new runs/manifests rather than mutating historical data
-
-### 17.3 Event profiles
-- No formal shared spec for now.
-- The baseline in Appendix B is sufficient; kernel events are always emitted.
-
-### 17.4 Typed schema registry
-- A typed schema registry is desirable.
-- Schemas SHOULD be stored as artifacts (content-addressed) and referenced by manifests.
-- Planner/runtime MAY validate producer/consumer compatibility across ops.
-
----
-
-## Appendix A — Planning API (Sketch)
-
-The engine executes states, not ops.
-
-* `Operation::expand(op_config, run_config) -> StateGraph`
-* `Pipeline::then(op) -> Pipeline`
-* `Pipeline::build(...) -> ExecutionPlan`
-* `ExecutionPlan` is what the engine executes.
-
----
-
-## Appendix B — Event Profiles (Concept)
-
-Ops choose an event profile that controls domain event verbosity:
-
-* `minimal`: kernel events only + essential artifacts
-* `normal`: facts + artifacts + boundaries
-* `verbose`: detailed domain events for diagnostics
-
-Kernel events are always emitted regardless of profile.
-
-## Appendix C — Public API Contract (v0)
-
-This section defines the **minimal stable public API surface** for the `machine` and `sdk`
-crates.
-
-**Scope**
-- Only **types + traits** (no implementations).
-- Anything not listed here is **internal/unstable**, even if it is temporarily `pub`.
-
-**Intent**
-- `machine` defines **what can be executed** and **how it is represented**
-- `sdk` defines **what an operation is**, how ops compose (pipelines), and how runs are launched
-
----
-
-# C.1 `mfm-machine` — Public API Contract
+This is the minimal stable public API surface for `mfm-machine` and `mfm-sdk` (types + traits only).
 
 ```rust
 //! crates/machine/src/lib.rs — public API contract (types + traits only)
@@ -835,69 +383,48 @@ use std::time::Duration;
 pub mod ids {
     use super::*;
 
-    /// Stable identifier for an operation (human meaningful).
-    /// Invariant: stable across environments; should not be random.
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct OpId(pub String);
 
-    /// Stable identifier for an operation path used for namespacing in pipelines.
-    /// Example: "portfolio_tracker" or "pipeline[0].aave_tracker".
-    /// Invariant: stable across environments.
+    /// Milestone 1 enforced: "<machine_id>.<step_id>"
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct OpPath(pub String);
 
-    /// Stable identifier for a state in an execution plan.
-    /// Example: "portfolio_management.prices.fetch_blocks".
-    /// Invariant: stable across environments; fully qualified (namespaced).
+    /// Milestone 1 enforced: "<machine_id>.<step_id>.<state_local_id>"
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct StateId(pub String);
 
-    /// Unique run identifier (can be random).
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct RunId(pub uuid::Uuid);
 
-    /// Content-addressed identifier (hash) for an artifact.
-    /// Invariant: lowercase hex digest string (algorithm defined by policy; default SHA-256).
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct ArtifactId(pub String);
 
-    /// Namespaced key for recorded facts (external inputs).
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct FactKey(pub String);
 
-    /// Namespaced key for context entries.
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct ContextKey(pub String);
 
-    /// Stable machine-readable error code.
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct ErrorCode(pub String);
 }
 
 pub mod canonical {
-    /// Canonical JSON policy marker.
-    ///
-    /// Design contract:
-    /// - Structured data that participates in hashing MUST be serialized as canonical JSON.
-    /// - Target semantics: RFC 8785 (JCS).
-    ///
-    /// Implementations belong in `machine` internals; this module only reserves the concept.
     pub trait CanonicalJsonPolicy: Send + Sync {}
 }
 
 pub mod config {
     use super::*;
-    use crate::ids::OpId;
     use crate::meta::Tag;
+    use crate::ids::OpId;
 
-    /// Whether a run is allowed to perform live IO or must replay from recorded facts/artifacts.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum IoMode {
         Live,
         Replay,
     }
 
-    /// Controls domain event verbosity. Kernel events are always emitted.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum EventProfile {
         Minimal,
@@ -906,42 +433,30 @@ pub mod config {
         Custom(String),
     }
 
-    /// Backoff policy for retryable errors.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum BackoffPolicy {
         Fixed { delay: Duration },
-        Exponential {
-            base_delay: Duration,
-            max_delay: Duration,
-        },
+        Exponential { base_delay: Duration, max_delay: Duration },
     }
 
-    /// Retry policy for retryable errors (including replay missing-fact errors if configured retryable).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct RetryPolicy {
         pub max_attempts: u32,
         pub backoff: BackoffPolicy,
     }
 
-    /// Execution mode: sequential by default; ops may opt into explicit parallel patterns.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum ExecutionMode {
         Sequential,
-        /// Explicit fan-out/join model. Avoids concurrent writes to shared context.
         FanOutJoin { max_concurrency: u32 },
     }
 
-    /// Run-level context checkpointing policy.
-    ///
-    /// Default is `AfterEveryState` to keep resume semantics simple (no replay required on resume).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum ContextCheckpointing {
         AfterEveryState,
-        /// Reserved for future: periodic/tag-based checkpointing policies.
         Custom(String),
     }
 
-    /// Run-level execution configuration (policy).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct RunConfig {
         pub io_mode: IoMode,
@@ -950,13 +465,12 @@ pub mod config {
         pub execution_mode: ExecutionMode,
         pub context_checkpointing: ContextCheckpointing,
 
-        /// States with any of these tags may be skipped by the executor.
-        /// Common use: skip APPLY_SIDE_EFFECT for dry runs.
+        /// If true, ReplayIo MissingFact errors are retryable (default false).
+        pub replay_missing_fact_retryable: bool,
+
         pub skip_tags: Vec<Tag>,
     }
 
-    /// Minimal run manifest shape (stored as an artifact; hashed via canonical JSON).
-    /// Note: `input_params` MUST be canonical-JSON hashable and MUST NOT contain secrets.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct RunManifest {
         pub op_id: OpId,
@@ -966,7 +480,6 @@ pub mod config {
         pub build: BuildProvenance,
     }
 
-    /// Build provenance (reproducibility metadata).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct BuildProvenance {
         pub git_commit: Option<String>,
@@ -981,29 +494,19 @@ pub mod config {
 pub mod meta {
     use super::*;
 
-    /// Tags are used for classification, filtering, and policy decisions.
-    /// Recommended format: lowercase; allow separators for namespacing if needed.
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct Tag(pub String);
 
-    /// Standard tags (stable identifiers).
-    /// Implementations may provide helpers, but these string constants are the contract.
     pub mod standard_tags {
-        // kind tags
         pub const CONFIG: &str = "config";
         pub const FETCH_DATA: &str = "fetch_data";
         pub const COMPUTE: &str = "compute";
         pub const EXECUTE: &str = "execute";
         pub const REPORT: &str = "report";
-        pub const REPORT_OPERATOR: &str = "report_operator";
-        pub const REPORT_OPERATION: &str = "report_operation";
-
-        // behavior tags
         pub const APPLY_SIDE_EFFECT: &str = "apply_side_effect";
         pub const IMPURE: &str = "impure";
     }
 
-    /// Side-effect classification (affects replay and retry semantics).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum SideEffectKind {
         Pure,
@@ -1011,15 +514,12 @@ pub mod meta {
         ApplySideEffect,
     }
 
-    /// Optional idempotency declaration for side-effecting states.
-    /// Key semantics: stable value used for dedupe (e.g., tx intent hash).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum Idempotency {
         None,
         Key(String),
     }
 
-    /// Strategy for choosing a recovery point among dependency candidates.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum DependencyStrategy {
         Latest,
@@ -1027,19 +527,11 @@ pub mod meta {
         LatestSuccessful,
     }
 
-    /// State metadata used for policy decisions and validation.
-    ///
-    /// Notes:
-    /// - `depends_on` is an authoring-time *hint* (often used by planners).
-    /// - Execution correctness is governed by explicit plan edges.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct StateMeta {
         pub tags: Vec<Tag>,
-
-        /// Optional authoring-time dependency hints expressed as tags.
         pub depends_on: Vec<Tag>,
         pub depends_on_strategy: DependencyStrategy,
-
         pub side_effects: SideEffectKind,
         pub idempotency: Idempotency,
     }
@@ -1049,7 +541,6 @@ pub mod errors {
     use super::*;
     use crate::ids::{ErrorCode, StateId};
 
-    /// Error category used for stable handling and policies.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum ErrorCategory {
         ParsingInput,
@@ -1061,7 +552,6 @@ pub mod errors {
         Unknown,
     }
 
-    /// Structured error info (canonical-JSON compatible; MUST NOT contain secrets).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ErrorInfo {
         pub code: ErrorCode,
@@ -1071,23 +561,24 @@ pub mod errors {
         pub details: Option<serde_json::Value>,
     }
 
-    /// Errors returned by state handlers (no secrets).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct StateError {
         pub state_id: Option<StateId>,
         pub info: ErrorInfo,
     }
 
-    /// IO errors (live or replay).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum IoError {
+        /// Replay was asked to perform deterministic IO without a fact key.
+        MissingFactKey(ErrorInfo),
+
         MissingFact { key: crate::ids::FactKey, info: ErrorInfo },
+
         Transport(ErrorInfo),
         RateLimited(ErrorInfo),
         Other(ErrorInfo),
     }
 
-    /// Context errors.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum ContextError {
         MissingKey { key: crate::ids::ContextKey, info: ErrorInfo },
@@ -1095,7 +586,6 @@ pub mod errors {
         Other(ErrorInfo),
     }
 
-    /// Storage errors (event store / artifact store).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum StorageError {
         Concurrency(ErrorInfo),
@@ -1104,7 +594,6 @@ pub mod errors {
         Other(ErrorInfo),
     }
 
-    /// Run-level errors from the engine.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum RunError {
         InvalidPlan(ErrorInfo),
@@ -1121,21 +610,13 @@ pub mod context {
     use crate::errors::ContextError;
     use crate::ids::ContextKey;
 
-    /// Dynamic context interface.
-    ///
-    /// Contract:
-    /// - `dump()` returns a **full snapshot** of current state (canonical JSON object recommended).
-    /// - Implementations MUST ensure deterministic serialization of snapshot artifacts.
     pub trait DynContext: Send {
         fn read(&self, key: &ContextKey) -> Result<Option<serde_json::Value>, ContextError>;
         fn write(&mut self, key: ContextKey, value: serde_json::Value) -> Result<(), ContextError>;
         fn delete(&mut self, key: &ContextKey) -> Result<(), ContextError>;
-
-        /// Full snapshot of current context state.
         fn dump(&self) -> Result<serde_json::Value, ContextError>;
     }
 
-    /// Typed convenience extension (no default bodies; implementations may blanket-impl internally).
     pub trait TypedContextExt {
         fn read_typed<T: serde::de::DeserializeOwned>(
             &self,
@@ -1155,7 +636,6 @@ pub mod events {
     use crate::errors::StateError;
     use crate::ids::{ArtifactId, OpId, OpPath, RunId, StateId};
 
-    /// Run completion status.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum RunStatus {
         Completed,
@@ -1163,29 +643,25 @@ pub mod events {
         Cancelled,
     }
 
-    /// Kernel event variants required for recovery/resume correctness.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum KernelEvent {
         RunStarted {
             op_id: OpId,
             manifest_id: ArtifactId,
-            /// Snapshot of initial context at run start.
             initial_snapshot_id: ArtifactId,
         },
         StateEntered {
             state_id: StateId,
             attempt: u32,
-            /// Snapshot the attempt starts from (resume/retry boundary).
             base_snapshot_id: ArtifactId,
         },
         StateCompleted {
             state_id: StateId,
-            snapshot_id: Option<ArtifactId>,
+            context_snapshot_id: ArtifactId,
         },
         StateFailed {
             state_id: StateId,
             error: StateError,
-            /// Diagnostic-only snapshot (must not be used as a resume boundary).
             failure_snapshot_id: Option<ArtifactId>,
         },
         RunCompleted {
@@ -1194,12 +670,6 @@ pub mod events {
         },
     }
 
-    /// Optional domain event (operation-defined; verbosity is controlled by event profile).
-    ///
-    /// Rules:
-    /// - payload MUST be canonical-JSON compatible
-    /// - payload MUST NOT contain secrets
-    /// - large payloads SHOULD be stored as artifacts and referenced via `payload_ref`
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct DomainEvent {
         pub name: String,
@@ -1213,19 +683,14 @@ pub mod events {
         Domain(DomainEvent),
     }
 
-    /// Envelope stored in the event store.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct EventEnvelope {
         pub run_id: RunId,
         pub seq: u64,
-
-        /// Informational timestamp; must not be required for deterministic replay semantics.
         pub ts_millis: Option<u64>,
-
         pub event: Event,
     }
 
-    /// Recommended standard domain event payloads (not required by engine).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct FactRecorded {
         pub key: crate::ids::FactKey,
@@ -1243,9 +708,10 @@ pub mod events {
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct OpBoundary {
         pub op_path: OpPath,
-        pub phase: String, // e.g. "started" | "completed"
+        pub phase: String,
     }
 
+    /// Reserved for later milestones (nested machines).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ChildRunSpawned {
         pub parent_run_id: RunId,
@@ -1259,38 +725,24 @@ pub mod io {
     use crate::errors::IoError;
     use crate::ids::{ArtifactId, FactKey};
 
-    /// Opaque IO call surface; collectors define typed adapters on top.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct IoCall {
-        /// Namespace like "http", "jsonrpc", "coingecko", etc.
         pub namespace: String,
-        /// Canonical JSON request payload (typed by the caller/collector).
         pub request: serde_json::Value,
-        /// Optional fact key for recording/replay (recommended for reproducibility).
         pub fact_key: Option<FactKey>,
     }
 
-    /// Opaque IO result surface; collectors define typed adapters on top.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct IoResult {
-        /// Canonical JSON response payload.
         pub response: serde_json::Value,
-        /// If recorded, points to the stored payload artifact.
         pub recorded_payload_id: Option<ArtifactId>,
     }
 
-    /// IO provider (LiveIo/ReplayIo are implementations).
     #[async_trait]
     pub trait IoProvider: Send {
         async fn call(&mut self, call: IoCall) -> Result<IoResult, IoError>;
-
-        /// Lookup recorded fact payload by key.
         async fn get_recorded_fact(&mut self, key: &FactKey) -> Result<Option<ArtifactId>, IoError>;
-
-        /// Current time. Implementations may record time as facts in replay-sensitive paths.
         async fn now_millis(&mut self) -> Result<u64, IoError>;
-
-        /// Random bytes. If used in reproducible paths, implementations MUST record as facts.
         async fn random_bytes(&mut self, n: usize) -> Result<Vec<u8>, IoError>;
     }
 }
@@ -1303,7 +755,8 @@ pub mod recorder {
     /// Domain event recorder used by state handlers.
     ///
     /// Engine contract:
-    /// - Domain events emitted within a state must be committed atomically with the state transition.
+    /// - Domain events are associated with the current state attempt (bounded by `StateEntered` and a terminal event).
+    /// - A state attempt MAY span multiple transactional appends; each append is atomic.
     #[async_trait]
     pub trait EventRecorder: Send {
         async fn emit(&mut self, event: DomainEvent) -> Result<(), RunError>;
@@ -1319,7 +772,6 @@ pub mod state {
     use crate::meta::StateMeta;
     use crate::recorder::EventRecorder;
 
-    /// Indicates whether the engine should snapshot context after the state.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum SnapshotPolicy {
         Never,
@@ -1332,12 +784,6 @@ pub mod state {
         pub snapshot: SnapshotPolicy,
     }
 
-    /// Note:
-    /// - The engine MAY still checkpoint context according to `RunConfig.context_checkpointing`
-    ///   regardless of `StateOutcome.snapshot`. This hint controls additional snapshot behavior
-    ///   and/or diagnostic snapshots, not permission to bypass required checkpoints.
-
-    /// State behavior. States do NOT own their `StateId` — IDs are assigned by the plan.
     #[async_trait]
     pub trait State: Send + Sync {
         fn meta(&self) -> StateMeta;
@@ -1358,7 +804,6 @@ pub mod plan {
     use crate::ids::{OpId, StateId};
     use crate::state::DynState;
 
-    /// An edge `from -> to` means `from` must complete before `to` can run.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct DependencyEdge {
         pub from: StateId,
@@ -1371,7 +816,6 @@ pub mod plan {
         pub state: DynState,
     }
 
-    /// A state graph is the executable structure derived from ops/pipelines.
     #[derive(Clone)]
     pub struct StateGraph {
         pub states: Vec<StateNode>,
@@ -1384,15 +828,12 @@ pub mod plan {
         pub graph: StateGraph,
     }
 
-    /// Plan validation errors (fail-fast).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum PlanValidationError {
         EmptyPlan,
         DuplicateStateId { state_id: StateId },
         MissingStateForEdge { missing: StateId },
         CircularDependency { cycle: Vec<StateId> },
-
-        /// Optional: if planners derive edges from tag dependencies, they may validate those too.
         DanglingDependencyTag { state_id: StateId, missing_tag: crate::meta::Tag },
     }
 
@@ -1416,7 +857,6 @@ pub mod stores {
         Other(String),
     }
 
-    /// Append-only event store with optimistic concurrency.
     #[async_trait]
     pub trait EventStore: Send + Sync {
         async fn head_seq(&self, run_id: RunId) -> Result<u64, StorageError>;
@@ -1436,7 +876,6 @@ pub mod stores {
         ) -> Result<Vec<EventEnvelope>, StorageError>;
     }
 
-    /// Immutable, content-addressed artifact store.
     #[async_trait]
     pub trait ArtifactStore: Send + Sync {
         async fn put(&self, kind: ArtifactKind, bytes: Vec<u8>) -> Result<ArtifactId, StorageError>;
@@ -1454,7 +893,6 @@ pub mod engine {
     use crate::plan::ExecutionPlan;
     use crate::stores::{ArtifactStore, EventStore};
 
-    /// Current run phase (observability).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum RunPhase {
         Running,
@@ -1470,7 +908,6 @@ pub mod engine {
         pub final_snapshot_id: Option<ArtifactId>,
     }
 
-    /// Inputs required to start a run.
     pub struct StartRun {
         pub manifest: RunManifest,
         pub manifest_id: ArtifactId,
@@ -1479,13 +916,11 @@ pub mod engine {
         pub initial_context: Box<dyn DynContext>,
     }
 
-    /// Store bundle passed to the engine.
     pub struct Stores {
         pub events: Arc<dyn EventStore>,
         pub artifacts: Arc<dyn ArtifactStore>,
     }
 
-    /// Execution engine interface.
     #[async_trait]
     pub trait ExecutionEngine: Send + Sync {
         async fn start(&self, stores: Stores, run: StartRun) -> Result<RunResult, RunError>;
