@@ -1,6 +1,7 @@
 # MFM — Redesign
 
-> **Purpose**: This document is the design contract for the next MFM architecture.  
+> **Purpose**: This document is the design contract for the next MFM architecture.
+> Last updated: 2026-02-09
 > It prioritizes **reproducibility, auditability, simplicity, and security**.  
 > If code disagrees with this document, the code is wrong (until the doc is explicitly updated).
 
@@ -36,6 +37,7 @@ Prefer a small set of “boring primitives”:
 - state machine runtime
 - event store
 - artifact store
+- typed schema registry (optional; see §17)
 - IO abstraction (live vs replay)
 - operation planning (expand ops → state graphs)
 
@@ -86,6 +88,12 @@ Prefer a small set of “boring primitives”:
 - Some ops may opt into parallelism, but it must remain auditable and replayable.
 - Preferred expression: explicit fan-out / join (see §9).
 
+### 2.6 Cargo package naming
+- **Cargo package names SHOULD use hyphens** (e.g. `mfm-machine`, `mfm-core`) to match ecosystem
+  convention and avoid surprises.
+- Rust import paths use underscores (Cargo mapping), e.g. `use mfm_machine::...`.
+- Workspace directory/module names may omit the `mfm_` prefix (see §4.1).
+
 ---
 
 ## 3. Core Concepts & Terminology
@@ -132,6 +140,17 @@ A recorded external input:
 - e.g., RPC response, HTTP response, time reading, etc.
 - stored as a content-addressed payload artifact and referenced from events
 
+### 3.8 What does NOT belong in context
+Context is for *derived working state* needed by downstream states, not for:
+- IO provider internal runtime state (connection pools, caches, backoff counters).
+- Large raw external payloads (store as fact payload artifacts instead; see §7 and §8).
+- Secrets (never store in context, events, or artifacts unless explicitly encrypted and access-controlled).
+
+If something is needed for reproducibility/debuggability:
+- **Configuration/provenance** belongs in the **manifest** and referenced config artifacts.
+- **External inputs/outputs** belong in the **fact/artifact stores**, referenced by events.
+- **Context snapshots** are stored as artifacts and referenced from kernel events.
+
 ---
 
 ## 4. Workspace Structure
@@ -170,6 +189,7 @@ mfm/
 - Directory/module names can drop `mfm_` (e.g., `crates/machine/`, `crates/core/`, `bin/cli/`).
 - **Cargo package names should remain namespaced** to avoid collisions (`mfm-machine`, `mfm-core`, `mfm-sdk`, etc.).
   - Cargo translates `mfm-machine` → Rust crate import `mfm_machine`.
+- Cargo package naming policy is in §2.6.
 
 ---
 
@@ -230,15 +250,19 @@ A run is an ordered sequence of events stored in an append-only event store.
 #### Kernel events (engine-level; always emitted)
 Minimum required for recovery/resume/audit:
 
-- `RunStarted { run_id, op_id, manifest_id }`
-- `StateEntered { run_id, state_id, attempt, seq }`
-- `StateCompleted { run_id, state_id, seq, context_snapshot_id? }`
-- `StateFailed { run_id, state_id, seq, error }`
-- `RunCompleted { run_id, status, final_snapshot_id? }`
+- `RunStarted { op_id, manifest_id, initial_snapshot_id }`
+- `StateEntered { state_id, attempt, base_snapshot_id }`
+- `StateCompleted { state_id, context_snapshot_id }`
+- `StateFailed { state_id, error, failure_snapshot_id? }`
+- `RunCompleted { status, final_snapshot_id? }`
 
 Notes:
 - `seq` is a strictly increasing per-run sequence number.
 - `attempt` increments per state retry.
+- `initial_snapshot_id` is the content-addressed snapshot of the **initial context** for the run.
+- `base_snapshot_id` is the snapshot the state attempt started from. In the common case
+  (default checkpointing), it is the previous state's `context_snapshot_id`.
+- `failure_snapshot_id` is **diagnostic-only** and MUST NOT be used as a resume checkpoint.
 
 #### Domain events (operation-level; configurable per op)
 Examples (not required by engine correctness):
@@ -260,11 +284,33 @@ A “state transition” must be atomic from the event store’s perspective:
 If a process dies mid-state:
 - the run is resumed by reading the last durable kernel event boundary.
 
-### 6.3 Snapshots & compaction
+### 6.3 Snapshots & checkpointing
 - Context snapshots are full snapshots stored as artifacts.
 - A snapshot is referenced by kernel events (`context_snapshot_id`).
-- Optional compaction is allowed only if auditable:
-  - compaction emits events describing what was compacted and what snapshot replaces the range.
+- **Default policy**: checkpoint after every successful state transition.
+  - This keeps resume simple (no need to replay prior states on resume).
+- Advanced policies (e.g., periodic checkpointing) may be added later, but must remain auditable.
+  - If checkpointing is less frequent, resume semantics must be explicit: replay from last checkpoint
+    using recorded facts, and fail deterministically if facts are missing.
+
+Optional compaction is allowed only if auditable:
+- compaction emits events describing what was compacted and what snapshot replaces the range.
+
+### 6.4 Transactional state semantics (context + events)
+To make retries and crash recovery deterministic and debuggable:
+
+- State execution MUST be **transactional with respect to context updates**:
+  - A state runs against a staged view of context derived from `base_snapshot_id`.
+  - On success: staged writes commit → snapshot is produced → `StateCompleted` references it.
+  - On failure: staged writes are discarded; the run remains at `base_snapshot_id`.
+
+- State transition event emission MUST be **atomic** in the event store:
+  - append `StateEntered`
+  - append any domain events (facts/artifact refs, boundaries)
+  - append `StateCompleted` or `StateFailed`
+
+- IO results that affect determinism MUST be recorded as facts (payload artifacts) and referenced via events.
+  - Handlers must not depend on IO provider internal state for correctness.
 
 ---
 
@@ -284,6 +330,11 @@ Recommended manifest fields:
 - `env_allowlist` + captured env values (only those allowed)
 - `run_config` (retry policy, replay policy, event profile)
 - `io_mode` (live / replay)
+
+Additional guidance:
+- IO provider *configuration/provenance* SHOULD be represented in `config_refs` and/or manifest fields,
+  but MUST NOT include secrets (API keys, passwords, headers, decrypted buffers).
+- Large or structured config documents SHOULD be stored as artifacts and referenced (not embedded).
 
 ### 7.2 Canonical JSON hashing rules
 - Structured data → canonical JSON bytes → hash → `ArtifactId`
@@ -308,6 +359,11 @@ Handlers do not do ambient IO. They use an IO provider:
 
 - `LiveIo`: performs real IO and may record facts/artifacts.
 - `ReplayIo`: serves recorded facts/artifacts when available; otherwise returns a structured error.
+
+Rules:
+- IO calls that influence deterministic behavior SHOULD use `fact_key` and produce fact payload artifacts.
+- Raw external payloads SHOULD be stored as **FactPayload** artifacts (or referenced artifacts) and
+  referenced by events; context should store derived/normalized results or references.
 
 ### 8.2 Missing facts in replay mode
 When replay needs a fact that does not exist:
@@ -448,10 +504,11 @@ Flattening requires stable unique state identifiers:
   * `portfolio_tracker.fetch_balances`
   * `aave_tracker.index.logs`
 
-If the same op appears multiple times in a pipeline, disambiguate:
+If the same op appears multiple times in a pipeline/machine, disambiguate using **named steps**
+with stable identifiers (Option A):
 
-* `pipeline[0].aave_tracker.fetch_blocks`
-* `pipeline[1].aave_tracker.fetch_blocks`
+* `portfolio_management.prices.fetch_blocks`
+* `portfolio_management.balances.fetch_blocks`
 
 **Rule**
 
@@ -482,7 +539,32 @@ Even though the engine executes K states, boundaries are useful for humans and A
 * `OpBoundary { op_path, phase = Started }`
 * `OpBoundary { op_path, phase = Completed }`
 
-Boundaries are domain events and may be enabled/disabled by the op’s event profile.
+Boundaries are domain events and may be enabled/disabled by the op's event profile.
+
+### 10.7 Machines as named pipelines (SDK-level convention)
+A **machine** is a first-class pipeline operation defined as a **sequence of ops** with **named steps**.
+
+Goals:
+- ergonomic CLI invocation (run/resume a machine)
+- stable, readable namespacing for `OpPath` and `StateId`
+- deterministic plan expansion
+
+Recommended convention:
+- A machine has a stable `op_id` (e.g., `portfolio_management`) and `op_version`.
+- Each step has a stable `step_id` chosen by the machine author (e.g., `prices`, `balances`, `report`).
+- The planner expands the machine into a single state graph and assigns IDs:
+  - `OpPath`: `<machine_id>.<step_id>`
+  - `StateId`: `<machine_id>.<step_id>.<state_local_id>`
+
+Examples:
+- `portfolio_management.prices.fetch_eth_usd`
+- `portfolio_management.balances.fetch_wallet_balances`
+- `portfolio_management.report.render_summary`
+
+Constraints:
+- Step IDs MUST be stable and unique within a machine version.
+- If a machine repeats the same op with different configs, it MUST use distinct step IDs.
+- No run-specific nonces are allowed in `OpPath` or `StateId` (use `RunId` + `seq` for run uniqueness).
 
 ---
 
@@ -553,8 +635,20 @@ pub trait ArtifactStore {
 
 Local/dev:
 
-* filesystem artifact store
-* local event store (sqlite/postgres) as appropriate
+- A Nix-first approach SHOULD make production-like dependencies easy to run locally:
+  - PostgreSQL + MinIO can be used for dev and integration testing, pinned by flake inputs.
+- However, we SHOULD keep fast local implementations for tight iteration and unit tests:
+  - filesystem artifact store
+  - in-memory or sqlite event store
+
+Recommended test lanes:
+1) **Unit / fast lane** (default):
+   - in-memory/sqlite event store + filesystem artifacts
+2) **Integration / parity lane** (opt-in):
+   - PostgreSQL event store + MinIO artifact store
+
+Both lanes MUST satisfy the same correctness contract (append-only events, content-addressed artifacts,
+deterministic replay semantics).
 
 ### 12.4 Security rules for storage
 
@@ -662,12 +756,33 @@ Enhancements aligned with append-only architecture:
 
 ## 17. Open Questions (Remaining)
 
-These are intentionally left open until forced by implementation:
+These are intentionally left open until forced by implementation.
+Current decisions (subject to change via explicit doc update):
 
-* What is the minimal “standard library” of reusable state patterns (fetch/validate/store/join)?
-* How do we version op schemas and ensure backward compatibility of stored manifests?
-* Do we want a formal “event profile” spec (levels like minimal/normal/verbose) shared across ops?
-* How do we represent and validate context schemas across ops (optional typed schema registry)?
+### 17.1 Minimal standard library of reusable state patterns
+Initial set:
+- `fetch` (READ_ONLY_IO; records facts)
+- `validate` (PURE; schema/invariants)
+- `execute` (APPLY_SIDE_EFFECT; requires idempotency)
+- `store` (writes artifacts + references)
+- `join` (deterministic merge; supports fan-out/join)
+- `report` (outputs as artifacts)
+
+### 17.2 Op schema versioning and backward compatibility
+- Every operation MUST have an explicit `op_version`.
+- Stored manifests/events MUST include `op_id` + `op_version`.
+- Version changes MUST preserve reproducibility:
+  - old runs remain replayable under their recorded manifest/build provenance
+  - migrations create new runs/manifests rather than mutating historical data
+
+### 17.3 Event profiles
+- No formal shared spec for now.
+- The baseline in Appendix B is sufficient; kernel events are always emitted.
+
+### 17.4 Typed schema registry
+- A typed schema registry is desirable.
+- Schemas SHOULD be stored as artifacts (content-addressed) and referenced by manifests.
+- Planner/runtime MAY validate producer/consumer compatibility across ops.
 
 ---
 
@@ -732,7 +847,7 @@ pub mod ids {
     pub struct OpPath(pub String);
 
     /// Stable identifier for a state in an execution plan.
-    /// Example: "pipeline[0].aave_tracker.fetch_blocks".
+    /// Example: "portfolio_management.prices.fetch_blocks".
     /// Invariant: stable across environments; fully qualified (namespaced).
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct StateId(pub String);
@@ -816,6 +931,16 @@ pub mod config {
         FanOutJoin { max_concurrency: u32 },
     }
 
+    /// Run-level context checkpointing policy.
+    ///
+    /// Default is `AfterEveryState` to keep resume semantics simple (no replay required on resume).
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum ContextCheckpointing {
+        AfterEveryState,
+        /// Reserved for future: periodic/tag-based checkpointing policies.
+        Custom(String),
+    }
+
     /// Run-level execution configuration (policy).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct RunConfig {
@@ -823,6 +948,7 @@ pub mod config {
         pub retry_policy: RetryPolicy,
         pub event_profile: EventProfile,
         pub execution_mode: ExecutionMode,
+        pub context_checkpointing: ContextCheckpointing,
 
         /// States with any of these tags may be skipped by the executor.
         /// Common use: skip APPLY_SIDE_EFFECT for dry runs.
@@ -1043,10 +1169,14 @@ pub mod events {
         RunStarted {
             op_id: OpId,
             manifest_id: ArtifactId,
+            /// Snapshot of initial context at run start.
+            initial_snapshot_id: ArtifactId,
         },
         StateEntered {
             state_id: StateId,
             attempt: u32,
+            /// Snapshot the attempt starts from (resume/retry boundary).
+            base_snapshot_id: ArtifactId,
         },
         StateCompleted {
             state_id: StateId,
@@ -1055,6 +1185,8 @@ pub mod events {
         StateFailed {
             state_id: StateId,
             error: StateError,
+            /// Diagnostic-only snapshot (must not be used as a resume boundary).
+            failure_snapshot_id: Option<ArtifactId>,
         },
         RunCompleted {
             status: RunStatus,
@@ -1199,6 +1331,11 @@ pub mod state {
     pub struct StateOutcome {
         pub snapshot: SnapshotPolicy,
     }
+
+    /// Note:
+    /// - The engine MAY still checkpoint context according to `RunConfig.context_checkpointing`
+    ///   regardless of `StateOutcome.snapshot`. This hint controls additional snapshot behavior
+    ///   and/or diagnostic snapshots, not permission to bypass required checkpoints.
 
     /// State behavior. States do NOT own their `StateId` — IDs are assigned by the plan.
     #[async_trait]
