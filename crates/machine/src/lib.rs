@@ -876,6 +876,11 @@ pub mod runtime;
 /// Not part of the stable API contract (Appendix C.1).
 pub mod live_io;
 
+/// Unstable Replay IO implementation (facts replay).
+///
+/// Not part of the stable API contract (Appendix C.1).
+pub mod replay_io;
+
 pub(crate) mod attempt_envelope;
 pub(crate) mod context_runtime;
 pub(crate) mod event_profile;

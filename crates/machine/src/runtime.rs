@@ -24,6 +24,7 @@ use crate::live_io::{
 };
 use crate::plan::{DependencyEdge, ExecutionPlan, PlanValidationError, StateNode};
 use crate::recorder::EventRecorder;
+use crate::replay_io::ReplayIo;
 use crate::stores::{ArtifactStore, EventStore};
 
 const CODE_UNSUPPORTED_EXECUTION_MODE: &str = "unsupported_execution_mode";
@@ -161,50 +162,16 @@ impl EventRecorder for AppendEventRecorder<'_> {
     }
 }
 
-struct UnimplementedIo;
-
-impl UnimplementedIo {
-    fn err() -> IoError {
-        IoError::Other(info(
-            "io_unimplemented",
-            ErrorCategory::Unknown,
-            "io is not implemented yet",
-        ))
-    }
-}
-
-#[async_trait]
-impl IoProvider for UnimplementedIo {
-    async fn call(&mut self, _call: IoCall) -> Result<IoResult, IoError> {
-        Err(Self::err())
-    }
-
-    async fn get_recorded_fact(
-        &mut self,
-        _key: &crate::ids::FactKey,
-    ) -> Result<Option<ArtifactId>, IoError> {
-        Err(Self::err())
-    }
-
-    async fn now_millis(&mut self) -> Result<u64, IoError> {
-        Err(Self::err())
-    }
-
-    async fn random_bytes(&mut self, _n: usize) -> Result<Vec<u8>, IoError> {
-        Err(Self::err())
-    }
-}
-
 enum AttemptIo {
     Live(LiveIo),
-    Unimplemented(UnimplementedIo),
+    Replay(ReplayIo),
 }
 
 impl AttemptIo {
     fn drain_pending_events(&mut self) -> Vec<DomainEvent> {
         match self {
             AttemptIo::Live(io) => io.drain_pending_events(),
-            AttemptIo::Unimplemented(_) => Vec::new(),
+            AttemptIo::Replay(_) => Vec::new(),
         }
     }
 }
@@ -214,7 +181,7 @@ impl IoProvider for AttemptIo {
     async fn call(&mut self, call: IoCall) -> Result<IoResult, IoError> {
         match self {
             AttemptIo::Live(io) => io.call(call).await,
-            AttemptIo::Unimplemented(io) => io.call(call).await,
+            AttemptIo::Replay(io) => io.call(call).await,
         }
     }
 
@@ -224,21 +191,21 @@ impl IoProvider for AttemptIo {
     ) -> Result<Option<ArtifactId>, IoError> {
         match self {
             AttemptIo::Live(io) => io.get_recorded_fact(key).await,
-            AttemptIo::Unimplemented(io) => io.get_recorded_fact(key).await,
+            AttemptIo::Replay(io) => io.get_recorded_fact(key).await,
         }
     }
 
     async fn now_millis(&mut self) -> Result<u64, IoError> {
         match self {
             AttemptIo::Live(io) => io.now_millis().await,
-            AttemptIo::Unimplemented(io) => io.now_millis().await,
+            AttemptIo::Replay(io) => io.now_millis().await,
         }
     }
 
     async fn random_bytes(&mut self, n: usize) -> Result<Vec<u8>, IoError> {
         match self {
             AttemptIo::Live(io) => io.random_bytes(n).await,
-            AttemptIo::Unimplemented(io) => io.random_bytes(n).await,
+            AttemptIo::Replay(io) => io.random_bytes(n).await,
         }
     }
 }
@@ -603,7 +570,14 @@ async fn run_states(
                     facts.clone(),
                     live_factory.make(),
                 )),
-                IoMode::Replay => AttemptIo::Unimplemented(UnimplementedIo),
+                IoMode::Replay => AttemptIo::Replay(ReplayIo::new(
+                    run_id,
+                    state_id.clone(),
+                    attempt,
+                    Arc::clone(&stores.artifacts),
+                    facts.clone(),
+                    run_config.replay_missing_fact_retryable,
+                )),
             };
             let mut append_rec = AppendEventRecorder {
                 writer: &mut writer,
