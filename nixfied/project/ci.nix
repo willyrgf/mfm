@@ -94,6 +94,8 @@
         requires = [ "postgres" ];
         run = ''
           eval "$($SLOT_INFO)"
+          # parity-postgres starts a real daemon; ensure we stop it so slot reuse is re-entrant.
+          with_cleanup "PGDATA=\"$POSTGRES_DIR\" run_hook POSTGRES_STOP"
           run_hook POSTGRES_FULL_START_TEST
 
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"

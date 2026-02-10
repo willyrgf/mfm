@@ -150,7 +150,21 @@
           in
           lib.appApi.validateApps apps0;
 
-        packages = project.packages or { };
+        packages =
+          let
+            projectPkgs = project.packages or { };
+            projectMeta = project.project or { };
+            projectId = projectMeta.id or "project";
+          in
+          projectPkgs
+          // {
+            # Provide a conventional default output so `nix build` works at repo root.
+            default =
+              projectPkgs.default or (pkgs.runCommand "${projectId}-default" { } ''
+                mkdir -p "$out"
+                echo "Default flake package. Use: nix run .#help" > "$out/README"
+              '');
+          };
       }
     );
 }

@@ -7,7 +7,10 @@ let
   fenix = pkgs.fenix or null;
 
   stableToolchain =
-    if fenix != null && fenix ? stable && fenix.stable ? toolchain then fenix.stable.toolchain else null;
+    if fenix != null && fenix ? stable && fenix.stable ? toolchain then
+      fenix.stable.toolchain
+    else
+      null;
 
   # Prefer the "complete" nightly channel so rustfmt/clippy exist without rustup.
   nightlyToolchain =
@@ -17,7 +20,14 @@ let
       fenix.complete.toolchain
     else if fenix ? latest && fenix.latest ? toolchain then
       fenix.latest.toolchain
-    else if fenix ? latest && fenix ? combine && fenix.latest ? cargo && fenix.latest ? rustc && fenix.latest ? rustfmt && fenix.latest ? clippy then
+    else if
+      fenix ? latest
+      && fenix ? combine
+      && fenix.latest ? cargo
+      && fenix.latest ? rustc
+      && fenix.latest ? rustfmt
+      && fenix.latest ? clippy
+    then
       fenix.combine [
         fenix.latest.cargo
         fenix.latest.rustc
@@ -97,18 +107,17 @@ rec {
   };
 
   tooling = rec {
-    runtimePackages =
-      [
-        pkgs.coreutils
-        pkgs.gnused
-        pkgs.git
-        pkgs.lsof
-        pkgs.cargo-nextest
-        pkgs.cargo-audit
-        pkgs.minio
-      ]
-      ++ rustToolchainPackages
-      ++ [ cargoNightly ];
+    runtimePackages = [
+      pkgs.coreutils
+      pkgs.gnused
+      pkgs.git
+      pkgs.lsof
+      pkgs.cargo-nextest
+      pkgs.cargo-audit
+      pkgs.minio
+    ]
+    ++ rustToolchainPackages
+    ++ [ cargoNightly ];
     devShellPackages = runtimePackages;
     devShellHook = ''
       echo "MFM dev shell ready. Use: nix run .#help"
@@ -186,7 +195,12 @@ rec {
   # Isolation test runner configuration (nix run .#test-isolation)
   isolation = {
     enable = true;
-    slots = [ 5 7 8 9 ];
+    slots = [
+      5
+      7
+      8
+      9
+    ];
     envs = [ ];
     validationInterval = 10;
     maxRuntime = 300;
