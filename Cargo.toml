@@ -7,8 +7,6 @@ members = [
 	"crates/core",
 	"crates/machine",
 	"crates/machine-derive",
-	"crates/machine-legacy",
-	"crates/machine-derive-legacy",
 	"crates/machine-test-support",
 	"crates/sdk",
 	"crates/storages/artifact-store-fs",
