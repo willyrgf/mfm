@@ -240,7 +240,7 @@ impl State for ApplySideEffectState {
             depends_on: Vec::new(),
             depends_on_strategy: DependencyStrategy::Latest,
             side_effects: SideEffectKind::ApplySideEffect,
-            idempotency: Idempotency::None,
+            idempotency: Idempotency::Key(format!("proof:side_effect|op:{}", self.op_path.0)),
         }
     }
 
@@ -877,7 +877,7 @@ mod tests {
                 depends_on: Vec::new(),
                 depends_on_strategy: DependencyStrategy::Latest,
                 side_effects: SideEffectKind::ApplySideEffect,
-                idempotency: Idempotency::None,
+                idempotency: Idempotency::Key(format!("child_parent:spawn|op:{}", self.op_path.0)),
             }
         }
 
@@ -935,7 +935,7 @@ mod tests {
                 depends_on: Vec::new(),
                 depends_on_strategy: DependencyStrategy::Latest,
                 side_effects: SideEffectKind::ApplySideEffect,
-                idempotency: Idempotency::None,
+                idempotency: Idempotency::Key(format!("child_parent:join|op:{}", self.op_path.0)),
             }
         }
 

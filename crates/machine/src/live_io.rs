@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::engine::Stores;
 use crate::errors::{ErrorCategory, ErrorInfo, IoError};
-use crate::events::{DomainEvent, Event, EventEnvelope, FactRecorded, DOMAIN_EVENT_FACT_RECORDED};
+use crate::events::{Event, EventEnvelope, FactRecorded, DOMAIN_EVENT_FACT_RECORDED};
 use crate::hashing::{canonical_json_bytes, CanonicalJsonError};
 use crate::ids::{ArtifactId, ErrorCode, FactKey, RunId, StateId};
 use crate::io::{IoCall, IoProvider, IoResult};
@@ -76,6 +76,17 @@ impl FactIndex {
             }
         }
     }
+
+    pub async fn unbind_if_matches(&self, key: &FactKey, payload_id: &ArtifactId) -> bool {
+        let mut inner = self.inner.lock().await;
+        match inner.get(key) {
+            Some(existing) if existing == payload_id => {
+                inner.remove(key);
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 #[async_trait]
@@ -124,8 +135,8 @@ pub struct LiveIo {
     call_ordinal: u64,
     artifacts: Arc<dyn ArtifactStore>,
     facts: FactIndex,
+    fact_recorder: Arc<dyn FactRecorder>,
     transport: Box<dyn LiveIoTransport>,
-    pending: Vec<DomainEvent>,
 }
 
 impl LiveIo {
@@ -135,6 +146,7 @@ impl LiveIo {
         attempt: u32,
         artifacts: Arc<dyn ArtifactStore>,
         facts: FactIndex,
+        fact_recorder: Arc<dyn FactRecorder>,
         transport: Box<dyn LiveIoTransport>,
     ) -> Self {
         Self {
@@ -144,13 +156,9 @@ impl LiveIo {
             call_ordinal: 0,
             artifacts,
             facts,
+            fact_recorder,
             transport,
-            pending: Vec::new(),
         }
-    }
-
-    pub fn drain_pending_events(&mut self) -> Vec<DomainEvent> {
-        std::mem::take(&mut self.pending)
     }
 
     fn derived_fact_key(&mut self, kind: &str) -> FactKey {
@@ -160,21 +168,6 @@ impl LiveIo {
             "mfm:{kind}|run:{}|state:{}|attempt:{}|ord:{ord}",
             self.run_id.0, self.state_id.0, self.attempt
         ))
-    }
-
-    fn fact_recorded_event(key: FactKey, payload_id: ArtifactId) -> DomainEvent {
-        let payload = serde_json::to_value(FactRecorded {
-            key,
-            payload_id,
-            meta: serde_json::json!({}),
-        })
-        .expect("FactRecorded must be serializable");
-
-        DomainEvent {
-            name: DOMAIN_EVENT_FACT_RECORDED.to_string(),
-            payload,
-            payload_ref: None,
-        }
     }
 
     async fn record_fact_json(
@@ -227,8 +220,15 @@ impl LiveIo {
 
         let (bound_id, inserted) = self.facts.bind_if_unset(key.clone(), payload_id).await;
         if inserted {
-            self.pending
-                .push(Self::fact_recorded_event(key, bound_id.clone()));
+            if let Err(e) = self
+                .fact_recorder
+                .record_fact_binding(key.clone(), bound_id.clone())
+                .await
+            {
+                // Roll back the in-memory binding so retries don't "think" the fact is durable.
+                let _ = self.facts.unbind_if_matches(&key, &bound_id).await;
+                return Err(e);
+            }
             Ok((value, bound_id))
         } else {
             // Single-assignment: ignore this value and reuse the existing one.
@@ -280,8 +280,15 @@ impl LiveIo {
 
         let (bound_id, inserted) = self.facts.bind_if_unset(key.clone(), payload_id).await;
         if inserted {
-            self.pending
-                .push(Self::fact_recorded_event(key, bound_id.clone()));
+            if let Err(e) = self
+                .fact_recorder
+                .record_fact_binding(key.clone(), bound_id.clone())
+                .await
+            {
+                // Roll back the in-memory binding so retries don't "think" the fact is durable.
+                let _ = self.facts.unbind_if_matches(&key, &bound_id).await;
+                return Err(e);
+            }
         }
 
         Ok((bytes, bound_id))
@@ -373,5 +380,32 @@ impl IoProvider for LiveIo {
         let key = self.derived_fact_key("random_bytes");
         let (got, _payload_id) = self.record_fact_bytes(key, bytes).await?;
         Ok(got)
+    }
+}
+
+/// Durable binding sink for `FactKey -> payload_id` facts.
+///
+/// Design contract: fact bindings MUST be durable regardless of `EventProfile`.
+#[async_trait]
+pub trait FactRecorder: Send + Sync {
+    async fn record_fact_binding(
+        &self,
+        key: FactKey,
+        payload_id: ArtifactId,
+    ) -> Result<(), IoError>;
+}
+
+/// A `FactRecorder` that does nothing. Intended for tests and non-engine usage.
+#[derive(Clone, Default)]
+pub struct NoopFactRecorder;
+
+#[async_trait]
+impl FactRecorder for NoopFactRecorder {
+    async fn record_fact_binding(
+        &self,
+        _key: FactKey,
+        _payload_id: ArtifactId,
+    ) -> Result<(), IoError> {
+        Ok(())
     }
 }
