@@ -816,3 +816,8 @@ pub mod engine {
         async fn resume(&self, stores: Stores, run_id: RunId) -> Result<RunResult, RunError>;
     }
 }
+
+/// Internal helpers for canonical JSON hashing and `ArtifactId` computation.
+///
+/// This module is not part of the stable API contract (Appendix C.1) and may change.
+pub mod hashing;

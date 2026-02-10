@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 async-trait = { workspace = true }
+hex = { workspace = true }
+ring = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { version = "1.8.0", features = ["serde", "v4"] }

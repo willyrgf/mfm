@@ -1336,6 +1336,8 @@ name = "mfm-machine"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "hex",
+ "ring",
  "serde",
  "serde_json",
  "uuid",
