@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::attempt_envelope::{analyze_kernel_events, OrphanAttempt};
-use crate::config::{BackoffPolicy, ExecutionMode, RunConfig, RunManifest};
+use crate::config::{BackoffPolicy, ExecutionMode, IoMode, RunConfig, RunManifest};
 use crate::context::DynContext;
 use crate::context_runtime::{read_json_context, write_full_snapshot_value, StagedContext};
 use crate::engine::{ExecutionEngine, RunPhase, RunResult, StartRun, Stores};
@@ -19,6 +19,9 @@ use crate::events::{DomainEvent, Event, EventEnvelope, KernelEvent, RunStatus};
 use crate::hashing::artifact_id_for_json;
 use crate::ids::{ArtifactId, ErrorCode, OpId, RunId, StateId};
 use crate::io::{IoCall, IoProvider, IoResult};
+use crate::live_io::{
+    FactIndex, LiveIo, LiveIoTransportFactory, UnimplementedLiveIoTransportFactory,
+};
 use crate::plan::{DependencyEdge, ExecutionPlan, PlanValidationError, StateNode};
 use crate::recorder::EventRecorder;
 use crate::stores::{ArtifactStore, EventStore};
@@ -44,6 +47,7 @@ impl EngineFailpoints {
 #[derive(Clone)]
 pub struct DefaultExecutionEngine {
     resolver: Arc<dyn PlanResolver>,
+    live_transport_factory: Arc<dyn LiveIoTransportFactory>,
     failpoints: Option<EngineFailpoints>,
 }
 
@@ -51,8 +55,14 @@ impl DefaultExecutionEngine {
     pub fn new(resolver: Arc<dyn PlanResolver>) -> Self {
         Self {
             resolver,
+            live_transport_factory: Arc::new(UnimplementedLiveIoTransportFactory),
             failpoints: None,
         }
+    }
+
+    pub fn with_live_transport_factory(mut self, factory: Arc<dyn LiveIoTransportFactory>) -> Self {
+        self.live_transport_factory = factory;
+        self
     }
 
     pub fn with_failpoints(mut self, failpoints: EngineFailpoints) -> Self {
@@ -182,6 +192,54 @@ impl IoProvider for UnimplementedIo {
 
     async fn random_bytes(&mut self, _n: usize) -> Result<Vec<u8>, IoError> {
         Err(Self::err())
+    }
+}
+
+enum AttemptIo {
+    Live(LiveIo),
+    Unimplemented(UnimplementedIo),
+}
+
+impl AttemptIo {
+    fn drain_pending_events(&mut self) -> Vec<DomainEvent> {
+        match self {
+            AttemptIo::Live(io) => io.drain_pending_events(),
+            AttemptIo::Unimplemented(_) => Vec::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl IoProvider for AttemptIo {
+    async fn call(&mut self, call: IoCall) -> Result<IoResult, IoError> {
+        match self {
+            AttemptIo::Live(io) => io.call(call).await,
+            AttemptIo::Unimplemented(io) => io.call(call).await,
+        }
+    }
+
+    async fn get_recorded_fact(
+        &mut self,
+        key: &crate::ids::FactKey,
+    ) -> Result<Option<ArtifactId>, IoError> {
+        match self {
+            AttemptIo::Live(io) => io.get_recorded_fact(key).await,
+            AttemptIo::Unimplemented(io) => io.get_recorded_fact(key).await,
+        }
+    }
+
+    async fn now_millis(&mut self) -> Result<u64, IoError> {
+        match self {
+            AttemptIo::Live(io) => io.now_millis().await,
+            AttemptIo::Unimplemented(io) => io.now_millis().await,
+        }
+    }
+
+    async fn random_bytes(&mut self, n: usize) -> Result<Vec<u8>, IoError> {
+        match self {
+            AttemptIo::Live(io) => io.random_bytes(n).await,
+            AttemptIo::Unimplemented(io) => io.random_bytes(n).await,
+        }
     }
 }
 
@@ -489,6 +547,8 @@ async fn run_states(
     mut current_snapshot_id: ArtifactId,
     completed_states: &HashSet<StateId>,
     start_at_state: Option<(StateId, u32, ArtifactId)>,
+    facts: FactIndex,
+    live_factory: Arc<dyn LiveIoTransportFactory>,
     failpoints: Option<EngineFailpoints>,
 ) -> Result<RunResult, RunError> {
     validate_execution_mode(run_config)?;
@@ -534,7 +594,17 @@ async fn run_states(
 
             let base_ctx = read_json_context(stores.artifacts.as_ref(), &base_snapshot_id).await?;
             let mut ctx = StagedContext::new(base_ctx);
-            let mut io = UnimplementedIo;
+            let mut io = match run_config.io_mode {
+                IoMode::Live => AttemptIo::Live(LiveIo::new(
+                    run_id,
+                    state_id.clone(),
+                    attempt,
+                    Arc::clone(&stores.artifacts),
+                    facts.clone(),
+                    live_factory.make(),
+                )),
+                IoMode::Replay => AttemptIo::Unimplemented(UnimplementedIo),
+            };
             let mut append_rec = AppendEventRecorder {
                 writer: &mut writer,
             };
@@ -544,6 +614,11 @@ async fn run_states(
             );
 
             let res = node.state.handle(&mut ctx, &mut io, &mut rec).await;
+
+            let pending = io.drain_pending_events();
+            if !pending.is_empty() {
+                rec.emit_many(pending).await?;
+            }
 
             if let Some(fp) = &failpoints {
                 if fp.should_stop_after_handler() {
@@ -673,6 +748,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
 
         let completed_states = HashSet::new();
         let current_snapshot_id = initial_snapshot_id.clone();
+        let facts = FactIndex::default();
 
         run_states(
             &stores,
@@ -683,6 +759,8 @@ impl ExecutionEngine for DefaultExecutionEngine {
             current_snapshot_id,
             &completed_states,
             None,
+            facts,
+            Arc::clone(&self.live_transport_factory),
             self.failpoints.clone(),
         )
         .await
@@ -707,6 +785,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
             .await
             .map_err(RunError::Storage)?;
 
+        let facts = FactIndex::from_event_stream(&stream);
         let history = read_run_history(run_id, &stream)?;
 
         if let Some((status, final_snapshot_id)) = &history.run_completed {
@@ -760,6 +839,8 @@ impl ExecutionEngine for DefaultExecutionEngine {
                 history.last_checkpoint.clone(),
                 &history.completed_states,
                 Some(start),
+                facts.clone(),
+                Arc::clone(&self.live_transport_factory),
                 self.failpoints.clone(),
             )
             .await;
@@ -818,6 +899,8 @@ impl ExecutionEngine for DefaultExecutionEngine {
                 history.last_checkpoint.clone(),
                 &history.completed_states,
                 Some(start),
+                facts.clone(),
+                Arc::clone(&self.live_transport_factory),
                 self.failpoints.clone(),
             )
             .await;
@@ -837,6 +920,8 @@ impl ExecutionEngine for DefaultExecutionEngine {
             history.last_checkpoint.clone(),
             &history.completed_states,
             Some(start),
+            facts,
+            Arc::clone(&self.live_transport_factory),
             self.failpoints.clone(),
         )
         .await
@@ -849,8 +934,11 @@ mod tests {
     use crate::context_runtime::JsonContext;
     use crate::errors::StateError;
     use crate::errors::StorageError;
+    use crate::events::{FactRecorded, DOMAIN_EVENT_FACT_RECORDED};
     use crate::hashing::artifact_id_for_bytes;
     use crate::ids::ContextKey;
+    use crate::ids::FactKey;
+    use crate::live_io::{LiveIoTransport, LiveIoTransportFactory};
     use crate::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta};
     use crate::plan::StateGraph;
     use crate::state::State;
@@ -1285,6 +1373,277 @@ mod tests {
         match err {
             RunError::InvalidPlan(info) => assert_eq!(info.code.0, CODE_UNSUPPORTED_EXECUTION_MODE),
             other => panic!("expected InvalidPlan, got: {other:?}"),
+        }
+    }
+
+    struct CountingTransport {
+        calls: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    #[async_trait]
+    impl LiveIoTransport for CountingTransport {
+        async fn call(&mut self, _call: IoCall) -> Result<serde_json::Value, IoError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(serde_json::json!({ "n": n }))
+        }
+    }
+
+    struct CountingTransportFactory {
+        calls: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl LiveIoTransportFactory for CountingTransportFactory {
+        fn make(&self) -> Box<dyn LiveIoTransport> {
+            Box::new(CountingTransport {
+                calls: Arc::clone(&self.calls),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordFactThenFailOnce {
+        handled: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    #[async_trait]
+    impl State for RecordFactThenFailOnce {
+        fn meta(&self) -> StateMeta {
+            StateMeta {
+                tags: Vec::new(),
+                depends_on: Vec::new(),
+                depends_on_strategy: DependencyStrategy::Latest,
+                side_effects: SideEffectKind::ReadOnlyIo,
+                idempotency: Idempotency::None,
+            }
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &mut dyn DynContext,
+            io: &mut dyn IoProvider,
+            _rec: &mut dyn EventRecorder,
+        ) -> Result<crate::state::StateOutcome, StateError> {
+            let got = io
+                .call(IoCall {
+                    namespace: "test".to_string(),
+                    request: serde_json::json!({"q": 1}),
+                    fact_key: Some(FactKey("k".to_string())),
+                })
+                .await
+                .expect("io");
+
+            assert_eq!(got.response, serde_json::json!({ "n": 0 }));
+
+            let n = self
+                .handled
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                return Err(StateError {
+                    state_id: None,
+                    info: ErrorInfo {
+                        code: ErrorCode("flaky".to_string()),
+                        category: ErrorCategory::Unknown,
+                        retryable: true,
+                        message: "flaky".to_string(),
+                        details: None,
+                    },
+                });
+            }
+
+            Ok(crate::state::StateOutcome {
+                snapshot: crate::state::SnapshotPolicy::OnSuccess,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn facts_are_single_assignment_and_reused_across_retries() {
+        let events = Arc::new(MemEventStore::default());
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let stores = || Stores {
+            events: events.clone(),
+            artifacts: artifacts.clone(),
+        };
+
+        let run_config = base_run_config();
+        let manifest = RunManifest {
+            op_id: OpId("op".to_string()),
+            op_version: "0".to_string(),
+            input_params: serde_json::json!({}),
+            run_config: run_config.clone(),
+            build: crate::config::BuildProvenance {
+                git_commit: None,
+                cargo_lock_hash: None,
+                flake_lock_hash: None,
+                rustc_version: None,
+                target_triple: None,
+                env_allowlist: Vec::new(),
+            },
+        };
+        let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let factory: Arc<dyn LiveIoTransportFactory> = Arc::new(CountingTransportFactory {
+            calls: Arc::clone(&calls),
+        });
+
+        let state_id = StateId("machine.main.s1".to_string());
+        let plan = ExecutionPlan {
+            op_id: manifest.op_id.clone(),
+            graph: StateGraph {
+                states: vec![StateNode {
+                    id: state_id.clone(),
+                    state: Arc::new(RecordFactThenFailOnce {
+                        handled: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                    }),
+                }],
+                edges: Vec::new(),
+            },
+        };
+
+        let resolver = Arc::new(FixedResolver { plan: plan.clone() });
+        let engine = DefaultExecutionEngine::new(resolver).with_live_transport_factory(factory);
+
+        let r = engine
+            .start(
+                stores(),
+                StartRun {
+                    manifest,
+                    manifest_id,
+                    plan,
+                    run_config,
+                    initial_context: Box::new(JsonContext::new()),
+                },
+            )
+            .await
+            .expect("start");
+        assert_eq!(r.phase, RunPhase::Completed);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "transport call should be deduped by fact key"
+        );
+
+        let stream = events.read_range(r.run_id, 1, None).await.expect("read");
+        let facts: Vec<FactRecorded> = stream
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::Domain(de) if de.name == DOMAIN_EVENT_FACT_RECORDED => {
+                    serde_json::from_value::<FactRecorded>(de.payload.clone()).ok()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].key.0, "k");
+    }
+
+    #[derive(Clone)]
+    struct TimeAndRandomState;
+
+    #[async_trait]
+    impl State for TimeAndRandomState {
+        fn meta(&self) -> StateMeta {
+            StateMeta {
+                tags: Vec::new(),
+                depends_on: Vec::new(),
+                depends_on_strategy: DependencyStrategy::Latest,
+                side_effects: SideEffectKind::ReadOnlyIo,
+                idempotency: Idempotency::None,
+            }
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &mut dyn DynContext,
+            io: &mut dyn IoProvider,
+            _rec: &mut dyn EventRecorder,
+        ) -> Result<crate::state::StateOutcome, StateError> {
+            let _t0 = io.now_millis().await.expect("time");
+            let _t1 = io.now_millis().await.expect("time");
+            let r = io.random_bytes(8).await.expect("random");
+            assert_eq!(r.len(), 8);
+
+            Ok(crate::state::StateOutcome {
+                snapshot: crate::state::SnapshotPolicy::OnSuccess,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn time_and_random_are_recorded_as_facts() {
+        let events = Arc::new(MemEventStore::default());
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let stores = || Stores {
+            events: events.clone(),
+            artifacts: artifacts.clone(),
+        };
+
+        let run_config = base_run_config();
+        let manifest = RunManifest {
+            op_id: OpId("op".to_string()),
+            op_version: "0".to_string(),
+            input_params: serde_json::json!({}),
+            run_config: run_config.clone(),
+            build: crate::config::BuildProvenance {
+                git_commit: None,
+                cargo_lock_hash: None,
+                flake_lock_hash: None,
+                rustc_version: None,
+                target_triple: None,
+                env_allowlist: Vec::new(),
+            },
+        };
+        let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+
+        let state_id = StateId("machine.main.s1".to_string());
+        let plan = ExecutionPlan {
+            op_id: manifest.op_id.clone(),
+            graph: StateGraph {
+                states: vec![StateNode {
+                    id: state_id.clone(),
+                    state: Arc::new(TimeAndRandomState),
+                }],
+                edges: Vec::new(),
+            },
+        };
+
+        let resolver = Arc::new(FixedResolver { plan: plan.clone() });
+        let engine = DefaultExecutionEngine::new(resolver);
+
+        let r = engine
+            .start(
+                stores(),
+                StartRun {
+                    manifest,
+                    manifest_id,
+                    plan,
+                    run_config,
+                    initial_context: Box::new(JsonContext::new()),
+                },
+            )
+            .await
+            .expect("start");
+        assert_eq!(r.phase, RunPhase::Completed);
+
+        let stream = events.read_range(r.run_id, 1, None).await.expect("read");
+        let facts: Vec<FactRecorded> = stream
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::Domain(de) if de.name == DOMAIN_EVENT_FACT_RECORDED => {
+                    serde_json::from_value::<FactRecorded>(de.payload.clone()).ok()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(facts.len(), 3);
+
+        assert!(facts[0].key.0.starts_with("mfm:now_millis|"));
+        assert!(facts[1].key.0.starts_with("mfm:now_millis|"));
+        assert!(facts[2].key.0.starts_with("mfm:random_bytes|"));
+
+        for fr in facts {
+            assert!(artifacts.exists(&fr.payload_id).await.expect("exists"));
         }
     }
 }

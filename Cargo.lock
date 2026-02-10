@@ -1797,6 +1797,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "hex",
+ "rand 0.9.1",
  "ring",
  "serde",
  "serde_json",

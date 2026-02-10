@@ -871,6 +871,11 @@ pub mod hashing;
 /// Not part of the stable API contract (Appendix C.1).
 pub mod runtime;
 
+/// Unstable Live IO implementation (facts recording).
+///
+/// Not part of the stable API contract (Appendix C.1).
+pub mod live_io;
+
 pub(crate) mod attempt_envelope;
 pub(crate) mod context_runtime;
 pub(crate) mod event_profile;
