@@ -22,6 +22,10 @@
           overlays = [ rust-overlay.overlays.default ];
         };
 
+        # Use rust-overlay toolchains so Nix builds don't get stuck on an older
+        # nixpkgs rustc that can't compile newer transitive deps.
+        stableToolchain = pkgs.rust-bin.stable.latest.default;
+
         nightlyToolchain = pkgs.rust-bin.nightly.latest.default.override {
           extensions = [
             "rustfmt"
@@ -30,8 +34,13 @@
           ];
         };
 
+        rustPlatform = pkgs.makeRustPlatform {
+          cargo = stableToolchain;
+          rustc = stableToolchain;
+        };
+
         # Define the Rust package
-        mfm_cli = pkgs.rustPlatform.buildRustPackage {
+        mfm_cli = rustPlatform.buildRustPackage {
           pname = "mfm_cli";
           version = "0.0.2";
           src = ./.;
@@ -41,12 +50,7 @@
             lockFile = ./Cargo.lock;
           };
 
-          nativeBuildInputs = with pkgs; [
-            cargo
-            rustc
-            rustfmt
-            pkg-config
-          ];
+          nativeBuildInputs = with pkgs; [ pkg-config ];
 
           buildInputs = with pkgs; [
             git

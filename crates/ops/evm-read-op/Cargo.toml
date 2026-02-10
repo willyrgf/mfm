@@ -1,5 +1,5 @@
 [package]
-name = "mfm-op-nix-app"
+name = "mfm-op-evm-read"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,3 +10,5 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
+mfm-collectors-evm = { path = "../../collectors/evm" }
+

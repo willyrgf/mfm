@@ -876,6 +876,16 @@ pub mod runtime;
 /// Not part of the stable API contract (Appendix C.1).
 pub mod live_io;
 
+/// Unstable live IO transport for external program execution (`exec` namespace).
+///
+/// Not part of the stable API contract (Appendix C.1).
+pub mod exec_transport;
+
+/// Unstable Live IO transport router (namespace dispatch).
+///
+/// Not part of the stable API contract (Appendix C.1).
+pub mod live_io_router;
+
 /// Unstable Replay IO implementation (facts replay).
 ///
 /// Not part of the stable API contract (Appendix C.1).

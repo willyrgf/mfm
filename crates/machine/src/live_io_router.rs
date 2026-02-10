@@ -1,0 +1,173 @@
+//! Live IO transport router (Milestone 2).
+//!
+//! This module is NOT part of the stable API contract (Appendix C.1) and may change.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+
+use crate::errors::{ErrorCategory, ErrorInfo, IoError};
+use crate::ids::ErrorCode;
+use crate::io::IoCall;
+use crate::live_io::{LiveIoTransport, LiveIoTransportFactory};
+
+const CODE_IO_UNKNOWN_NAMESPACE: &str = "io_unknown_namespace";
+
+fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
+    ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category,
+        retryable: false,
+        message: message.to_string(),
+        details: None,
+    }
+}
+
+fn namespace_group(namespace: &str) -> &str {
+    namespace.split('.').next().unwrap_or(namespace)
+}
+
+/// A `LiveIoTransportFactory` that routes calls by namespace group.
+///
+/// Routing rule:
+/// - group = first segment of `IoCall.namespace` split by `.`
+/// - e.g. `proof.read` routes to group `proof`
+#[derive(Clone, Default)]
+pub struct RouterLiveIoTransportFactory {
+    routes: HashMap<String, Arc<dyn LiveIoTransportFactory>>,
+}
+
+impl RouterLiveIoTransportFactory {
+    pub fn new(routes: HashMap<String, Arc<dyn LiveIoTransportFactory>>) -> Self {
+        Self { routes }
+    }
+
+    pub fn with_route(
+        mut self,
+        group: impl Into<String>,
+        factory: Arc<dyn LiveIoTransportFactory>,
+    ) -> Self {
+        self.routes.insert(group.into(), factory);
+        self
+    }
+}
+
+impl LiveIoTransportFactory for RouterLiveIoTransportFactory {
+    fn make(&self) -> Box<dyn LiveIoTransport> {
+        let mut routes = HashMap::new();
+        for (group, factory) in &self.routes {
+            routes.insert(group.clone(), factory.make());
+        }
+        Box::new(RouterLiveIoTransport { routes })
+    }
+}
+
+struct RouterLiveIoTransport {
+    routes: HashMap<String, Box<dyn LiveIoTransport>>,
+}
+
+#[async_trait]
+impl LiveIoTransport for RouterLiveIoTransport {
+    async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
+        let group = namespace_group(&call.namespace);
+        let Some(t) = self.routes.get_mut(group) else {
+            // Do not echo request payloads in errors (avoid accidental secret leakage).
+            return Err(IoError::Other(info(
+                CODE_IO_UNKNOWN_NAMESPACE,
+                ErrorCategory::Unknown,
+                "unknown io namespace",
+            )));
+        };
+        t.call(call).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FixedFactory {
+        response: serde_json::Value,
+    }
+
+    impl LiveIoTransportFactory for FixedFactory {
+        fn make(&self) -> Box<dyn LiveIoTransport> {
+            Box::new(FixedTransport {
+                response: self.response.clone(),
+            })
+        }
+    }
+
+    struct FixedTransport {
+        response: serde_json::Value,
+    }
+
+    #[async_trait]
+    impl LiveIoTransport for FixedTransport {
+        async fn call(&mut self, _call: IoCall) -> Result<serde_json::Value, IoError> {
+            Ok(self.response.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn routes_by_namespace_group_prefix() {
+        let mut routes: HashMap<String, Arc<dyn LiveIoTransportFactory>> = HashMap::new();
+        routes.insert(
+            "proof".to_string(),
+            Arc::new(FixedFactory {
+                response: serde_json::json!({"ok": "proof"}),
+            }),
+        );
+        routes.insert(
+            "evm".to_string(),
+            Arc::new(FixedFactory {
+                response: serde_json::json!({"ok": "evm"}),
+            }),
+        );
+
+        let factory = RouterLiveIoTransportFactory::new(routes);
+        let mut t = factory.make();
+
+        let got = t
+            .call(IoCall {
+                namespace: "proof.read".to_string(),
+                request: serde_json::json!({}),
+                fact_key: None,
+            })
+            .await
+            .expect("call");
+        assert_eq!(got, serde_json::json!({"ok": "proof"}));
+
+        let got = t
+            .call(IoCall {
+                namespace: "evm".to_string(),
+                request: serde_json::json!({}),
+                fact_key: None,
+            })
+            .await
+            .expect("call");
+        assert_eq!(got, serde_json::json!({"ok": "evm"}));
+    }
+
+    #[tokio::test]
+    async fn unknown_namespace_is_stable_error() {
+        let routes: HashMap<String, Arc<dyn LiveIoTransportFactory>> = HashMap::new();
+        let factory = RouterLiveIoTransportFactory::new(routes);
+        let mut t = factory.make();
+
+        let err = t
+            .call(IoCall {
+                namespace: "unknown.ns".to_string(),
+                request: serde_json::json!({"authorization": "Bearer x"}),
+                fact_key: None,
+            })
+            .await
+            .expect_err("expected error");
+
+        match err {
+            IoError::Other(info) => assert_eq!(info.code.0, CODE_IO_UNKNOWN_NAMESPACE),
+            other => panic!("expected IoError::Other, got: {other:?}"),
+        }
+    }
+}

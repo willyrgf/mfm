@@ -1809,7 +1809,9 @@ dependencies = [
  "mfm-artifact-store-fs",
  "mfm-event-store-postgres",
  "mfm-machine",
+ "mfm-op-evm-read",
  "mfm-op-keystore",
+ "mfm-op-nix-app",
  "mfm-op-proof",
  "mfm-sdk",
  "predicates",
@@ -1934,6 +1936,7 @@ dependencies = [
  "mfm-sdk",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

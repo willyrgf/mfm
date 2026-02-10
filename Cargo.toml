@@ -4,6 +4,7 @@ resolver = "2"
 
 members = [
 	"bin/cli",
+	"crates/collectors/evm",
 	"crates/core",
 	"crates/machine",
 	"crates/machine-derive",
@@ -14,6 +15,8 @@ members = [
 	"crates/storages/event-store-mem",
 	"crates/storages/event-store-postgres",
 	"crates/ops/keystore-op",
+	"crates/ops/evm-read-op",
+	"crates/ops/nix-app-op",
 	"crates/ops/proof-op",
 ]
 

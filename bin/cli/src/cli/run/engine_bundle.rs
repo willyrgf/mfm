@@ -5,10 +5,14 @@ use async_trait::async_trait;
 use crate::cli::command_result::CommandError;
 use mfm_machine::engine::ExecutionEngine;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, RunError, StorageError};
+use mfm_machine::exec_transport::ExecProgramTransportFactory;
 use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoTransport, LiveIoTransportFactory};
+use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::DefaultExecutionEngine;
+use mfm_op_evm_read::EvmReadOp;
+use mfm_op_nix_app::NixAppOp;
 use mfm_op_proof::ProofOp;
 use mfm_sdk::op::OperationRegistry;
 use mfm_sdk::pipeline::PipelinePlanner;
@@ -67,6 +71,8 @@ pub(super) struct EngineBundle {
 pub(super) fn make_engine_bundle() -> EngineBundle {
     let mut reg = HashMapOperationRegistry::default();
     reg.register(Arc::new(ProofOp::default()));
+    reg.register(Arc::new(EvmReadOp));
+    reg.register(Arc::new(NixAppOp));
     let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
 
     let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
@@ -75,7 +81,16 @@ pub(super) fn make_engine_bundle() -> EngineBundle {
         Arc::clone(&planner),
     ));
 
-    let factory: Arc<dyn LiveIoTransportFactory> = Arc::new(CliLiveIoTransportFactory);
+    let mut routes: std::collections::HashMap<String, Arc<dyn LiveIoTransportFactory>> =
+        std::collections::HashMap::new();
+    routes.insert("proof".to_string(), Arc::new(CliLiveIoTransportFactory));
+    routes.insert(
+        "exec".to_string(),
+        Arc::new(ExecProgramTransportFactory::default()),
+    );
+
+    let factory: Arc<dyn LiveIoTransportFactory> =
+        Arc::new(RouterLiveIoTransportFactory::new(routes));
     let engine: Arc<dyn ExecutionEngine> =
         Arc::new(DefaultExecutionEngine::new(resolver).with_live_transport_factory(factory));
 
