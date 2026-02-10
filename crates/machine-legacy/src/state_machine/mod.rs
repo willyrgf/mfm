@@ -550,7 +550,7 @@ mod test {
     };
     use serde_derive::{Deserialize, Serialize};
 
-    #[mfm_machine_derive::state_handler(
+    #[mfm_machine_derive_legacy::state_handler(
         label = "setup_state",
         tags = ["setup", "config"],
         depends_on = [],
@@ -585,7 +585,7 @@ mod test {
         c: u32,
     }
 
-    #[mfm_machine_derive::state_handler(
+    #[mfm_machine_derive_legacy::state_handler(
         label = "report_state",
         tags = ["report"],
         depends_on = ["setup"],

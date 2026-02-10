@@ -381,7 +381,7 @@ mod tests {
     use crate::state::{
         safe_context::create_default_safe_context, DependencyStrategy, Label, StateHandler,
     };
-    use mfm_machine_derive::StateMetadataReqs;
+    use mfm_machine_derive_legacy::StateMetadataReqs;
 
     // Define test states
     #[derive(Debug, Clone, PartialEq, StateMetadataReqs)]

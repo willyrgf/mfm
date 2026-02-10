@@ -1,14 +1,14 @@
 use anyhow::anyhow;
-use mfm_machine::state::safe_context::SafeContext;
-use mfm_machine::state::{
+use mfm_machine_derive_legacy::StateMetadataReqs;
+use mfm_machine_legacy::state::safe_context::SafeContext;
+use mfm_machine_legacy::state::{
     DependencyStrategy, Label, StateError, StateErrorRecoverability, StateHandler, StateMetadata,
     StateResult, Tag,
 };
-use mfm_machine_derive::StateMetadataReqs;
 use rand::Rng;
 use serde_derive::{Deserialize, Serialize};
 
-#[mfm_machine_derive::state_handler(
+#[mfm_machine_derive_legacy::state_handler(
     label = "setup_state",
     tags = ["setup", "config"],
     depends_on = [],
@@ -73,7 +73,7 @@ impl StateHandler for ComputePrice {
     }
 }
 
-#[mfm_machine_derive::state_handler(
+#[mfm_machine_derive_legacy::state_handler(
     label = "report_state",
     tags = ["report"],
     depends_on = ["compute_price"],

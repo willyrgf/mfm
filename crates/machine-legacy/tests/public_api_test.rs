@@ -2,13 +2,13 @@ mod default_impls;
 
 use crate::default_impls::{ComputePrice, ConfigState, OnChainValuesState};
 use default_impls::{Report, Setup};
-use mfm_machine::state::safe_context::create_default_safe_context;
-use mfm_machine::state::DependencyStrategy;
-use mfm_machine::state::Label;
-use mfm_machine::state::States;
-use mfm_machine::state::Tag;
-use mfm_machine::state::{StateHandler, StateMetadata};
-use mfm_machine::state_machine::StateMachine;
+use mfm_machine_legacy::state::safe_context::create_default_safe_context;
+use mfm_machine_legacy::state::DependencyStrategy;
+use mfm_machine_legacy::state::Label;
+use mfm_machine_legacy::state::States;
+use mfm_machine_legacy::state::Tag;
+use mfm_machine_legacy::state::{StateHandler, StateMetadata};
+use mfm_machine_legacy::state_machine::StateMachine;
 use std::sync::Arc;
 
 #[tokio::test]

@@ -1316,6 +1316,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-artifact-store-fs"
+version = "0.1.0"
+
+[[package]]
+name = "mfm-artifact-store-s3"
+version = "0.1.0"
+
+[[package]]
+name = "mfm-event-store-mem"
+version = "0.1.0"
+
+[[package]]
+name = "mfm-event-store-postgres"
+version = "0.1.0"
+
+[[package]]
+name = "mfm-machine"
+version = "0.1.0"
+
+[[package]]
+name = "mfm-machine-derive"
+version = "0.1.0"
+
+[[package]]
+name = "mfm-op-keystore"
+version = "0.1.0"
+
+[[package]]
+name = "mfm-op-proof"
+version = "0.1.0"
+
+[[package]]
+name = "mfm-sdk"
+version = "0.1.0"
+
+[[package]]
 name = "mfm_core"
 version = "0.1.29"
 dependencies = [
@@ -1344,27 +1380,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm_machine"
+name = "mfm_machine_derive_legacy"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
+name = "mfm_machine_legacy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "futures",
  "log",
- "mfm_machine_derive",
+ "mfm_machine_derive_legacy",
  "rand 0.9.1",
  "serde",
  "serde_derive",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "mfm_machine_derive"
-version = "0.1.0"
-dependencies = [
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]

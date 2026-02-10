@@ -1,8 +1,8 @@
 mod default_impls;
 
 use default_impls::{ComputePrice, Report, Setup};
-use mfm_machine::state::safe_context::create_default_safe_context;
-use mfm_machine::state_machine::StateMachine;
+use mfm_machine_legacy::state::safe_context::create_default_safe_context;
+use mfm_machine_legacy::state_machine::StateMachine;
 use std::sync::Arc;
 
 use crate::default_impls::{Config, ConfigState, OnChainValuesState, CONFIG};
@@ -16,11 +16,11 @@ async fn test_retry_workflow_state_machine() {
     let onchain_values = OnChainValuesState::new();
 
     let states = vec![
-        Box::new(setup) as Box<dyn mfm_machine::state::StateHandler>,
-        Box::new(compute_price) as Box<dyn mfm_machine::state::StateHandler>,
-        Box::new(report) as Box<dyn mfm_machine::state::StateHandler>,
-        Box::new(config_state) as Box<dyn mfm_machine::state::StateHandler>,
-        Box::new(onchain_values) as Box<dyn mfm_machine::state::StateHandler>,
+        Box::new(setup) as Box<dyn mfm_machine_legacy::state::StateHandler>,
+        Box::new(compute_price) as Box<dyn mfm_machine_legacy::state::StateHandler>,
+        Box::new(report) as Box<dyn mfm_machine_legacy::state::StateHandler>,
+        Box::new(config_state) as Box<dyn mfm_machine_legacy::state::StateHandler>,
+        Box::new(onchain_values) as Box<dyn mfm_machine_legacy::state::StateHandler>,
     ];
     let states = Arc::from(states);
 

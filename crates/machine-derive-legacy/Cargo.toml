@@ -1,5 +1,5 @@
 [package]
-name = "mfm_machine_derive"
+name = "mfm_machine_derive_legacy"
 version = "0.1.0"
 edition = "2021"
 

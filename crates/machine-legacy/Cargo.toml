@@ -1,5 +1,5 @@
 [package]
-name = "mfm_machine"
+name = "mfm_machine_legacy"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,7 +8,7 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
-mfm_machine_derive = { path = "../machine-derive-legacy" }
+mfm_machine_derive_legacy = { path = "../machine-derive-legacy" }
 rand = { workspace = true } 
 log = "0.4"
 async-trait = { workspace = true }

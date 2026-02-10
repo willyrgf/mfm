@@ -1,0 +1,7 @@
+[package]
+name = "mfm-artifact-store-s3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+

@@ -4,7 +4,7 @@ use default_impls::{
     AnalyticsState, ComputePrice, ConfigState, FinalizeState, NotificationState,
     OnChainValuesState, Report, Setup, ValidationState,
 };
-use mfm_machine::{
+use mfm_machine_legacy::{
     state::{safe_context::create_default_safe_context, States},
     state_machine::StateMachine,
 };

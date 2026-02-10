@@ -207,31 +207,31 @@ pub fn state_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let strategy = match args.strategy {
         DependencyStrategyArg::Latest => {
-            quote! { ::mfm_machine::state::DependencyStrategy::Latest }
+            quote! { ::mfm_machine_legacy::state::DependencyStrategy::Latest }
         }
         DependencyStrategyArg::Earliest => {
-            quote! { ::mfm_machine::state::DependencyStrategy::Earliest }
+            quote! { ::mfm_machine_legacy::state::DependencyStrategy::Earliest }
         }
         DependencyStrategyArg::LatestSuccessful => {
-            quote! { ::mfm_machine::state::DependencyStrategy::LatestSuccessful }
+            quote! { ::mfm_machine_legacy::state::DependencyStrategy::LatestSuccessful }
         }
     };
 
     let expanded = quote! {
         #(#attrs)*
         #vis struct #ident {
-            label: ::mfm_machine::state::Label,
-            tags: ::std::vec::Vec<::mfm_machine::state::Tag>,
-            depends_on: ::std::vec::Vec<::mfm_machine::state::Tag>,
-            depends_on_strategy: ::mfm_machine::state::DependencyStrategy,
+            label: ::mfm_machine_legacy::state::Label,
+            tags: ::std::vec::Vec<::mfm_machine_legacy::state::Tag>,
+            depends_on: ::std::vec::Vec<::mfm_machine_legacy::state::Tag>,
+            depends_on_strategy: ::mfm_machine_legacy::state::DependencyStrategy,
         }
 
         impl #ident {
             pub fn new() -> Self {
                 Self {
-                    label: ::mfm_machine::state::Label::new_unchecked(#label),
-                    tags: vec![#(::mfm_machine::state::Tag::new_unchecked(#tags)),*],
-                    depends_on: vec![#(::mfm_machine::state::Tag::new_unchecked(#depends_on)),*],
+                    label: ::mfm_machine_legacy::state::Label::new_unchecked(#label),
+                    tags: vec![#(::mfm_machine_legacy::state::Tag::new_unchecked(#tags)),*],
+                    depends_on: vec![#(::mfm_machine_legacy::state::Tag::new_unchecked(#depends_on)),*],
                     depends_on_strategy: #strategy,
                 }
             }
@@ -243,20 +243,20 @@ pub fn state_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        impl ::mfm_machine::state::StateMetadata for #ident {
-            fn label(&self) -> ::mfm_machine::state::Label {
+        impl ::mfm_machine_legacy::state::StateMetadata for #ident {
+            fn label(&self) -> ::mfm_machine_legacy::state::Label {
                 self.label.clone()
             }
 
-            fn tags(&self) -> ::std::vec::Vec<::mfm_machine::state::Tag> {
+            fn tags(&self) -> ::std::vec::Vec<::mfm_machine_legacy::state::Tag> {
                 self.tags.clone()
             }
 
-            fn depends_on(&self) -> ::std::vec::Vec<::mfm_machine::state::Tag> {
+            fn depends_on(&self) -> ::std::vec::Vec<::mfm_machine_legacy::state::Tag> {
                 self.depends_on.clone()
             }
 
-            fn depends_on_strategy(&self) -> ::mfm_machine::state::DependencyStrategy {
+            fn depends_on_strategy(&self) -> ::mfm_machine_legacy::state::DependencyStrategy {
                 self.depends_on_strategy
             }
         }

@@ -4,9 +4,18 @@ resolver = "2"
 
 members = [
 	"bin/cli",
+	"crates/core",
+	"crates/machine",
+	"crates/machine-derive",
 	"crates/machine-legacy",
 	"crates/machine-derive-legacy",
-	"crates/core",
+	"crates/sdk",
+	"crates/storages/artifact-store-fs",
+	"crates/storages/artifact-store-s3",
+	"crates/storages/event-store-mem",
+	"crates/storages/event-store-postgres",
+	"crates/ops/keystore-op",
+	"crates/ops/proof-op",
 ]
 
 # Core dependencies
