@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Json;
@@ -23,8 +23,9 @@ use mfm_machine::config::{
 use mfm_machine::context::DynContext;
 use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, RunError, StorageError};
+use mfm_machine::events::EventEnvelope;
 use mfm_machine::exec_transport::ExecProgramTransportFactory;
-use mfm_machine::ids::{ContextKey, ErrorCode, RunId};
+use mfm_machine::ids::{ArtifactId, ContextKey, ErrorCode, RunId};
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
@@ -119,19 +120,17 @@ fn info(code: &'static str, category: ErrorCategory, message: impl Into<String>)
 }
 
 fn api_error_from_storage_error(err: StorageError) -> ApiError {
-    let info = match err {
-        StorageError::Concurrency(info)
-        | StorageError::NotFound(info)
-        | StorageError::Corruption(info)
-        | StorageError::Other(info) => info,
-    };
-
-    let status = match info.code.0.as_str() {
-        "run_not_found" => StatusCode::NOT_FOUND,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-
-    ApiError::new(status, info.code.0, info.message)
+    match err {
+        StorageError::Concurrency(info) => {
+            ApiError::new(StatusCode::CONFLICT, info.code.0, info.message)
+        }
+        StorageError::NotFound(info) => {
+            ApiError::new(StatusCode::NOT_FOUND, info.code.0, info.message)
+        }
+        StorageError::Corruption(info) | StorageError::Other(info) => {
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, info.code.0, info.message)
+        }
+    }
 }
 
 fn api_error_from_run_error(err: RunError) -> ApiError {
@@ -361,6 +360,8 @@ pub fn make_app(state: AppState) -> Router {
         .route("/v1/runs/start", post(runs_start))
         .route("/v1/runs/:run_id/resume", post(runs_resume))
         .route("/v1/runs/:run_id/status", get(runs_status))
+        .route("/v1/runs/:run_id/events", get(runs_events))
+        .route("/v1/artifacts/:artifact_id", get(artifacts_get))
         .fallback(not_found)
         .with_state(state)
 }
@@ -577,4 +578,98 @@ async fn runs_status(
         final_snapshot_id,
     })
     .expect("run status response must serialize"))))
+}
+
+fn default_from_seq() -> u64 {
+    1
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RunsEventsQuery {
+    #[serde(default = "default_from_seq")]
+    pub from_seq: u64,
+
+    pub to_seq: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RunsEventsResponse {
+    pub run_id: String,
+    pub head_seq: u64,
+    pub events: Vec<EventEnvelope>,
+}
+
+async fn runs_events(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    Query(q): Query<RunsEventsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let uuid = uuid::Uuid::parse_str(&run_id).map_err(|_| ApiError::invalid_uuid())?;
+    let run_id = RunId(uuid);
+
+    let head = state
+        .events
+        .head_seq(run_id)
+        .await
+        .map_err(api_error_from_storage_error)?;
+    if head == 0 {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "run_not_found",
+            "run event stream was not found",
+        ));
+    }
+
+    let events = state
+        .events
+        .read_range(run_id, q.from_seq, q.to_seq)
+        .await
+        .map_err(api_error_from_storage_error)?;
+
+    Ok(Json(ok(serde_json::to_value(RunsEventsResponse {
+        run_id: run_id.0.to_string(),
+        head_seq: head,
+        events,
+    })
+    .expect("events response must serialize"))))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtifactGetResponse {
+    pub artifact_id: String,
+    #[serde(flatten)]
+    pub body: ArtifactBody,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "encoding", rename_all = "lowercase")]
+pub enum ArtifactBody {
+    Json { value: serde_json::Value },
+    Hex { hex: String },
+}
+
+async fn artifacts_get(
+    State(state): State<AppState>,
+    Path(artifact_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = ArtifactId(artifact_id);
+
+    let bytes = state
+        .artifacts
+        .get(&id)
+        .await
+        .map_err(api_error_from_storage_error)?;
+
+    let body = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(value) => ArtifactBody::Json { value },
+        Err(_) => ArtifactBody::Hex {
+            hex: hex::encode(bytes),
+        },
+    };
+
+    Ok(Json(ok(serde_json::to_value(ArtifactGetResponse {
+        artifact_id: id.0,
+        body,
+    })
+    .expect("artifact response must serialize"))))
 }
