@@ -1,0 +1,8 @@
+[package]
+name = "mfm-machine-test-support"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mfm-machine = { path = "../machine" }
+
