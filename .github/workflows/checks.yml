@@ -1,4 +1,4 @@
-name: Rust CI
+name: CI
 permissions:
   contents: read
   pull-requests: write
@@ -31,7 +31,7 @@ jobs:
         run: |
           nix run .#ci $NIX_CMD_OPTS -- --basic --summary
 
-      - name: Smoke: mfm_cli --help
+      - name: Smoke mfm_cli --help
         run: |
           nix run .#mfm_cli $NIX_CMD_OPTS -- --help
 
