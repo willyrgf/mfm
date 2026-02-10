@@ -2038,12 +2038,25 @@ dependencies = [
 name = "mfm-rest-api"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
+ "mfm-artifact-store-fs",
+ "mfm-collectors-evm-jsonrpc-http",
+ "mfm-event-store-mem",
+ "mfm-event-store-postgres",
+ "mfm-machine",
+ "mfm-op-evm-read",
+ "mfm-op-nix-app",
+ "mfm-op-proof",
+ "mfm-sdk",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
