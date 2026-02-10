@@ -14,20 +14,12 @@ use crate::attempt_envelope::{analyze_kernel_events, OrphanAttempt};
 use crate::config::{BackoffPolicy, ExecutionMode, RunConfig, RunManifest};
 use crate::context_runtime::write_full_snapshot_value;
 use crate::engine::{ExecutionEngine, RunPhase, RunResult, StartRun, Stores};
-use crate::errors::{ContextError, ErrorCategory, ErrorInfo, IoError, RunError, StorageError};
-use crate::events::{
-    DomainEvent, Event, EventEnvelope, FactRecorded, KernelEvent, RunStatus,
-    DOMAIN_EVENT_FACT_RECORDED,
-};
+use crate::errors::{ContextError, ErrorCategory, ErrorInfo, RunError, StorageError};
+use crate::events::{Event, EventEnvelope, KernelEvent, RunStatus};
 use crate::hashing::artifact_id_for_json;
 use crate::ids::{ArtifactId, ErrorCode, OpId, RunId, StateId};
-use crate::io::{IoCall, IoProvider, IoResult};
-use crate::live_io::{
-    FactIndex, FactRecorder, LiveIo, LiveIoTransportFactory, UnimplementedLiveIoTransportFactory,
-};
+use crate::live_io::{FactIndex, LiveIoTransportFactory, UnimplementedLiveIoTransportFactory};
 use crate::plan::{DependencyEdge, ExecutionPlan, PlanValidationError, StateNode};
-use crate::recorder::EventRecorder;
-use crate::replay_io::ReplayIo;
 use crate::stores::ArtifactStore;
 
 mod attempt;
@@ -103,161 +95,6 @@ fn storage_not_found(code: &'static str, message: &'static str) -> StorageError 
 
 fn context_err(code: &'static str, message: &'static str) -> ContextError {
     ContextError::Serialization(info(code, ErrorCategory::Context, message))
-}
-
-const CODE_FACT_BINDING_APPEND_FAILED: &str = "fact_binding_append_failed";
-const CODE_FACT_BINDING_PAYLOAD_INVALID: &str = "fact_binding_payload_invalid";
-
-#[derive(Clone)]
-struct RuntimeFactRecorder {
-    writer: SharedEventWriter,
-}
-
-#[async_trait]
-impl FactRecorder for RuntimeFactRecorder {
-    async fn record_fact_binding(
-        &self,
-        key: crate::ids::FactKey,
-        payload_id: ArtifactId,
-    ) -> Result<(), IoError> {
-        if crate::secrets::string_contains_secrets(&key.0) {
-            return Err(IoError::Other(info(
-                "secrets_detected",
-                ErrorCategory::Unknown,
-                "fact key contained secrets (Milestone 1 forbids persisting secrets)",
-            )));
-        }
-
-        let payload = serde_json::to_value(FactRecorded {
-            key,
-            payload_id,
-            meta: serde_json::json!({}),
-        })
-        .map_err(|_| {
-            IoError::Other(info(
-                CODE_FACT_BINDING_PAYLOAD_INVALID,
-                ErrorCategory::ParsingInput,
-                "failed to serialize FactRecorded payload",
-            ))
-        })?;
-
-        if crate::secrets::json_contains_secrets(&payload) {
-            return Err(IoError::Other(info(
-                "secrets_detected",
-                ErrorCategory::Unknown,
-                "fact binding payload contained secrets (Milestone 1 forbids persisting secrets)",
-            )));
-        }
-
-        let event = DomainEvent {
-            name: DOMAIN_EVENT_FACT_RECORDED.to_string(),
-            payload,
-            payload_ref: None,
-        };
-
-        self.writer
-            .lock()
-            .await
-            .append(vec![Event::Domain(event)])
-            .await
-            .map_err(|_| {
-                IoError::Other(info(
-                    CODE_FACT_BINDING_APPEND_FAILED,
-                    ErrorCategory::Storage,
-                    "failed to append fact binding event",
-                ))
-            })?;
-
-        Ok(())
-    }
-}
-
-struct AppendEventRecorder {
-    writer: SharedEventWriter,
-}
-
-#[async_trait]
-impl EventRecorder for AppendEventRecorder {
-    async fn emit(&mut self, event: DomainEvent) -> Result<(), RunError> {
-        if crate::secrets::string_contains_secrets(&event.name)
-            || crate::secrets::json_contains_secrets(&event.payload)
-        {
-            return Err(RunError::Other(info(
-                "secrets_detected",
-                ErrorCategory::Unknown,
-                "domain event contained secrets (Milestone 1 forbids persisting secrets)",
-            )));
-        }
-
-        self.writer
-            .lock()
-            .await
-            .append(vec![Event::Domain(event)])
-            .await
-            .map_err(RunError::Storage)?;
-        Ok(())
-    }
-
-    async fn emit_many(&mut self, events: Vec<DomainEvent>) -> Result<(), RunError> {
-        for e in &events {
-            if crate::secrets::string_contains_secrets(&e.name)
-                || crate::secrets::json_contains_secrets(&e.payload)
-            {
-                return Err(RunError::Other(info(
-                    "secrets_detected",
-                    ErrorCategory::Unknown,
-                    "domain event contained secrets (Milestone 1 forbids persisting secrets)",
-                )));
-            }
-        }
-
-        self.writer
-            .lock()
-            .await
-            .append(events.into_iter().map(Event::Domain).collect())
-            .await
-            .map_err(RunError::Storage)?;
-        Ok(())
-    }
-}
-
-enum AttemptIo {
-    Live(LiveIo),
-    Replay(ReplayIo),
-}
-
-#[async_trait]
-impl IoProvider for AttemptIo {
-    async fn call(&mut self, call: IoCall) -> Result<IoResult, IoError> {
-        match self {
-            AttemptIo::Live(io) => io.call(call).await,
-            AttemptIo::Replay(io) => io.call(call).await,
-        }
-    }
-
-    async fn get_recorded_fact(
-        &mut self,
-        key: &crate::ids::FactKey,
-    ) -> Result<Option<ArtifactId>, IoError> {
-        match self {
-            AttemptIo::Live(io) => io.get_recorded_fact(key).await,
-            AttemptIo::Replay(io) => io.get_recorded_fact(key).await,
-        }
-    }
-
-    async fn now_millis(&mut self) -> Result<u64, IoError> {
-        match self {
-            AttemptIo::Live(io) => io.now_millis().await,
-            AttemptIo::Replay(io) => io.now_millis().await,
-        }
-    }
-
-    async fn random_bytes(&mut self, n: usize) -> Result<Vec<u8>, IoError> {
-        match self {
-            AttemptIo::Live(io) => io.random_bytes(n).await,
-            AttemptIo::Replay(io) => io.random_bytes(n).await,
-        }
-    }
 }
 
 fn compute_backoff(policy: &BackoffPolicy, attempt: u32) -> Duration {
@@ -927,11 +764,13 @@ mod tests {
     use crate::ids::ErrorCode;
     use crate::ids::FactKey;
     use crate::io::IoCall;
+    use crate::io::IoProvider;
     use crate::live_io::{LiveIoTransport, LiveIoTransportFactory};
     use crate::meta::{
         standard_tags, DependencyStrategy, Idempotency, SideEffectKind, StateMeta, Tag,
     };
     use crate::plan::StateGraph;
+    use crate::recorder::EventRecorder;
     use crate::state::State;
     use crate::stores::{ArtifactKind, ArtifactStore, EventStore};
     use std::collections::HashMap;
