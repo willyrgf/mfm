@@ -779,6 +779,10 @@ pub mod stores {
         Manifest,
         ContextSnapshot,
         FactPayload,
+        /// Encrypted secret payload (ciphertext bytes only).
+        ///
+        /// Secret plaintext MUST NOT be stored directly in the artifact store.
+        SecretPayload,
         Output,
         Other(String),
     }

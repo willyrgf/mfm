@@ -1920,6 +1920,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-artifact-store-secret"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "mfm-artifact-store-fs",
+ "mfm-machine",
+ "ring",
+ "tempfile",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "mfm-collectors-evm"
 version = "0.1.0"
 dependencies = [

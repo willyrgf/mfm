@@ -118,6 +118,7 @@ impl S3ArtifactStore {
             ArtifactKind::Manifest => "manifest",
             ArtifactKind::ContextSnapshot => "context_snapshot",
             ArtifactKind::FactPayload => "fact_payload",
+            ArtifactKind::SecretPayload => "secret_payload",
             ArtifactKind::Output => "output",
             ArtifactKind::Other(_) => "other",
         };
