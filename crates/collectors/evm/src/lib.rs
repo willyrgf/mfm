@@ -5,9 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
 use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
-use mfm_machine::ids::{FactKey, StateId};
-use mfm_machine::io::IoCall;
+use mfm_machine::ids::{ErrorCode, FactKey, StateId};
+use mfm_machine::io::{IoCall, IoProvider, IoResult};
 
 pub const NAMESPACE_EVM: &str = "evm";
 
@@ -106,9 +107,84 @@ pub fn parse_u64_hex_value(v: &serde_json::Value) -> Result<u64, ParseHexError> 
     parse_u64_hex(s)
 }
 
+fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
+    ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category,
+        retryable: false,
+        message: message.to_string(),
+        details: None,
+    }
+}
+
+fn io_other(code: &'static str, category: ErrorCategory, message: &'static str) -> IoError {
+    IoError::Other(info(code, category, message))
+}
+
+/// First-class EVM client wrapper over `IoProvider`.
+///
+/// States should use this instead of hand-rolling JSON-RPC requests.
+pub struct EvmIoClient<'a> {
+    state_id: StateId,
+    io: &'a mut dyn IoProvider,
+}
+
+impl<'a> EvmIoClient<'a> {
+    pub fn new(state_id: StateId, io: &'a mut dyn IoProvider) -> Self {
+        Self { state_id, io }
+    }
+
+    pub async fn call(&mut self, call: JsonRpcCall) -> Result<IoResult, IoError> {
+        let key = fact_key_for_jsonrpc_call(&self.state_id, &call).map_err(|e| match e {
+            FactKeyDerivationError::NotCanonical(CanonicalJsonError::FloatNotAllowed) => io_other(
+                "evm_request_not_canonical",
+                ErrorCategory::ParsingInput,
+                "evm request was not canonical-json-hashable (floats are forbidden)",
+            ),
+            FactKeyDerivationError::NotCanonical(CanonicalJsonError::SecretsNotAllowed) => {
+                io_other(
+                    "secrets_detected",
+                    ErrorCategory::Unknown,
+                    "evm request contained secrets (Milestone 1 forbids persisting secrets)",
+                )
+            }
+        })?;
+
+        self.io.call(evm_io_call(call, key)).await
+    }
+
+    pub async fn chain_id_u64(&mut self) -> Result<u64, IoError> {
+        let res = self
+            .call(JsonRpcCall::new("eth_chainId", serde_json::json!([])))
+            .await?;
+        parse_u64_hex_value(&res.response).map_err(|_| {
+            io_other(
+                "evm_response_invalid",
+                ErrorCategory::ParsingInput,
+                "evm response was not a hex u64",
+            )
+        })
+    }
+
+    pub async fn block_number_u64(&mut self) -> Result<u64, IoError> {
+        let res = self
+            .call(JsonRpcCall::new("eth_blockNumber", serde_json::json!([])))
+            .await?;
+        parse_u64_hex_value(&res.response).map_err(|_| {
+            io_other(
+                "evm_response_invalid",
+                ErrorCategory::ParsingInput,
+                "evm response was not a hex u64",
+            )
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use mfm_machine::ids::ArtifactId;
 
     #[test]
     fn fact_key_is_stable_for_same_call() {
@@ -139,5 +215,44 @@ mod tests {
             parse_u64_hex("0x0123456789abcdef0").unwrap_err(),
             ParseHexError::Overflow
         );
+    }
+
+    struct FixedIo {
+        response: serde_json::Value,
+    }
+
+    #[async_trait]
+    impl IoProvider for FixedIo {
+        async fn call(&mut self, _call: IoCall) -> Result<IoResult, IoError> {
+            Ok(IoResult {
+                response: self.response.clone(),
+                recorded_payload_id: None,
+            })
+        }
+
+        async fn get_recorded_fact(
+            &mut self,
+            _key: &FactKey,
+        ) -> Result<Option<ArtifactId>, IoError> {
+            Ok(None)
+        }
+
+        async fn now_millis(&mut self) -> Result<u64, IoError> {
+            Ok(0)
+        }
+
+        async fn random_bytes(&mut self, _n: usize) -> Result<Vec<u8>, IoError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn evm_client_parses_chain_id() {
+        let mut io = FixedIo {
+            response: serde_json::json!("0x1"),
+        };
+        let mut client = EvmIoClient::new(StateId("m.main.chain_id".to_string()), &mut io);
+        let id = client.chain_id_u64().await.expect("chain id");
+        assert_eq!(id, 1);
     }
 }

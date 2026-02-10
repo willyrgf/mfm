@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::cli::command_result::CommandError;
+use mfm_collectors_evm_jsonrpc_http::{EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory};
 use mfm_machine::engine::ExecutionEngine;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, RunError, StorageError};
 use mfm_machine::exec_transport::ExecProgramTransportFactory;
@@ -17,6 +18,9 @@ use mfm_op_proof::ProofOp;
 use mfm_sdk::op::OperationRegistry;
 use mfm_sdk::pipeline::PipelinePlanner;
 use mfm_sdk::unstable::{DefaultPipelinePlanner, HashMapOperationRegistry, SdkPlanResolver};
+
+const ENV_EVM_RPC_URL: &str = "MFM_EVM_RPC_URL";
+const ENV_EVM_RPC_AUTHORIZATION: &str = "MFM_EVM_RPC_AUTHORIZATION";
 
 fn info(code: &'static str, category: ErrorCategory, message: impl Into<String>) -> ErrorInfo {
     ErrorInfo {
@@ -81,6 +85,15 @@ pub(super) fn make_engine_bundle() -> EngineBundle {
         Arc::clone(&planner),
     ));
 
+    let rpc_url = std::env::var(ENV_EVM_RPC_URL).ok();
+    let authorization = std::env::var(ENV_EVM_RPC_AUTHORIZATION).ok();
+    let evm_factory: Arc<dyn LiveIoTransportFactory> =
+        Arc::new(EvmJsonRpcHttpTransportFactory::new(EvmJsonRpcHttpConfig {
+            rpc_url,
+            authorization,
+            ..EvmJsonRpcHttpConfig::default()
+        }));
+
     let mut routes: std::collections::HashMap<String, Arc<dyn LiveIoTransportFactory>> =
         std::collections::HashMap::new();
     routes.insert("proof".to_string(), Arc::new(CliLiveIoTransportFactory));
@@ -88,6 +101,7 @@ pub(super) fn make_engine_bundle() -> EngineBundle {
         "exec".to_string(),
         Arc::new(ExecProgramTransportFactory::default()),
     );
+    routes.insert("evm".to_string(), evm_factory);
 
     let factory: Arc<dyn LiveIoTransportFactory> =
         Arc::new(RouterLiveIoTransportFactory::new(routes));

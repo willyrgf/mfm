@@ -1807,6 +1807,7 @@ dependencies = [
  "clap",
  "hex",
  "mfm-artifact-store-fs",
+ "mfm-collectors-evm-jsonrpc-http",
  "mfm-event-store-postgres",
  "mfm-machine",
  "mfm-op-evm-read",
@@ -1854,9 +1855,24 @@ dependencies = [
 name = "mfm-collectors-evm"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "mfm-machine",
  "serde",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "mfm-collectors-evm-jsonrpc-http"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-collectors-evm",
+ "mfm-machine",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

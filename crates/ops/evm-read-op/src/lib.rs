@@ -12,12 +12,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use mfm_collectors_evm::{
-    evm_io_call, fact_key_for_jsonrpc_call, parse_u64_hex_value, JsonRpcCall,
-};
+use mfm_collectors_evm::{parse_u64_hex_value, EvmIoClient, JsonRpcCall};
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
-use mfm_machine::errors::{ErrorCategory, ErrorInfo, StateError};
+use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, StateError};
 use mfm_machine::ids::{ContextKey, ErrorCode, OpId, OpPath, StateId};
 use mfm_machine::io::IoProvider;
 use mfm_machine::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta, Tag};
@@ -52,6 +50,21 @@ fn state_err(code: &'static str, message: &'static str) -> StateError {
     StateError {
         state_id: None,
         info: info(code, ErrorCategory::Unknown, false, message),
+    }
+}
+
+fn state_err_from_io(err: IoError) -> StateError {
+    let info = match err {
+        IoError::MissingFactKey(info)
+        | IoError::Transport(info)
+        | IoError::RateLimited(info)
+        | IoError::Other(info) => info,
+        IoError::MissingFact { info, .. } => info,
+    };
+
+    StateError {
+        state_id: None,
+        info,
     }
 }
 
@@ -184,14 +197,11 @@ impl State for ReadU64HexState {
         io: &mut dyn IoProvider,
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let call = JsonRpcCall::new(self.method, serde_json::json!([]));
-        let key = fact_key_for_jsonrpc_call(&self.state_id, &call)
-            .map_err(|_| state_err("fact_key_invalid", "fact key derivation failed"))?;
-
-        let res = io
-            .call(evm_io_call(call, key))
+        let mut client = EvmIoClient::new(self.state_id.clone(), io);
+        let res = client
+            .call(JsonRpcCall::new(self.method, serde_json::json!([])))
             .await
-            .map_err(|_| state_err("evm_io_failed", "evm io call failed"))?;
+            .map_err(state_err_from_io)?;
 
         let n = parse_u64_hex_value(&res.response)
             .map_err(|_| state_err("evm_response_invalid", "evm response was not a hex u64"))?;

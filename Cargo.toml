@@ -5,6 +5,7 @@ resolver = "2"
 members = [
 	"bin/cli",
 	"crates/collectors/evm",
+	"crates/collectors/evm-jsonrpc-http",
 	"crates/core",
 	"crates/machine",
 	"crates/machine-derive",
