@@ -668,6 +668,253 @@ pub fn single_op_pipeline(
     })
 }
 
+/// Helpers for spawning and awaiting engine-managed child runs (Milestone 5).
+///
+/// These helpers are intentionally `unstable`:
+/// - the IO surface is stringly-typed (`IoCall.namespace`)
+/// - request/response schemas may evolve
+pub mod child_runs {
+    use serde::{Deserialize, Serialize};
+
+    use mfm_machine::config::RunConfig;
+    use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, RunError};
+    use mfm_machine::events::{
+        ChildRunCompleted, ChildRunSpawned, DomainEvent, RunStatus,
+        DOMAIN_EVENT_CHILD_RUN_COMPLETED, DOMAIN_EVENT_CHILD_RUN_SPAWNED,
+    };
+    use mfm_machine::ids::{ArtifactId, ErrorCode, FactKey, OpId, RunId};
+    use mfm_machine::io::{IoCall, IoProvider};
+    use mfm_machine::recorder::EventRecorder;
+
+    const NAMESPACE_CHILD_RUN_SPAWN: &str = "machine.child_run.spawn";
+    const NAMESPACE_CHILD_RUN_AWAIT: &str = "machine.child_run.await";
+
+    fn io_other(code: &'static str, category: ErrorCategory, message: &'static str) -> IoError {
+        IoError::Other(ErrorInfo {
+            code: ErrorCode(code.to_string()),
+            category,
+            retryable: false,
+            message: message.to_string(),
+            details: None,
+        })
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct SpawnChildRunV1 {
+        pub op_id: OpId,
+        pub op_version: String,
+        pub op_config: serde_json::Value,
+        pub input: serde_json::Value,
+        pub run_config: RunConfig,
+        pub initial_context: Option<serde_json::Value>,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct SpawnChildRunResult {
+        pub parent_run_id: RunId,
+        pub child_run_id: RunId,
+        pub child_manifest_id: ArtifactId,
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    struct SpawnRequestV1 {
+        kind: &'static str,
+        op_id: String,
+        op_version: String,
+        op_config: serde_json::Value,
+        input: serde_json::Value,
+        run_config: RunConfig,
+        #[serde(default)]
+        initial_context: serde_json::Value,
+    }
+
+    #[derive(Clone, Debug, Deserialize)]
+    struct SpawnResponseV1 {
+        parent_run_id: RunId,
+        child_run_id: RunId,
+        child_manifest_id: ArtifactId,
+    }
+
+    pub async fn spawn_child_run_v1(
+        io: &mut dyn IoProvider,
+        rec: &mut dyn EventRecorder,
+        fact_key: FactKey,
+        req: SpawnChildRunV1,
+    ) -> Result<SpawnChildRunResult, RunError> {
+        // If the fact already exists (resume/replay), do not emit linkage again.
+        let existed = io
+            .get_recorded_fact(&fact_key)
+            .await
+            .map_err(RunError::Io)?
+            .is_some();
+
+        let request = serde_json::to_value(SpawnRequestV1 {
+            kind: "child_run_spawn_v1",
+            op_id: req.op_id.0,
+            op_version: req.op_version,
+            op_config: req.op_config,
+            input: req.input,
+            run_config: req.run_config,
+            initial_context: req.initial_context.unwrap_or(serde_json::Value::Null),
+        })
+        .map_err(|_| {
+            RunError::Io(io_other(
+                "child_run_spawn_request_serialize_failed",
+                ErrorCategory::ParsingInput,
+                "failed to serialize child run spawn request",
+            ))
+        })?;
+
+        let res = io
+            .call(IoCall {
+                namespace: NAMESPACE_CHILD_RUN_SPAWN.to_string(),
+                request,
+                fact_key: Some(fact_key.clone()),
+            })
+            .await
+            .map_err(RunError::Io)?;
+
+        let parsed = serde_json::from_value::<SpawnResponseV1>(res.response).map_err(|_| {
+            RunError::Io(io_other(
+                "child_run_spawn_response_invalid",
+                ErrorCategory::ParsingInput,
+                "invalid child run spawn response",
+            ))
+        })?;
+
+        if !existed {
+            let payload = serde_json::to_value(ChildRunSpawned {
+                parent_run_id: parsed.parent_run_id,
+                child_run_id: parsed.child_run_id,
+                child_manifest_id: parsed.child_manifest_id.clone(),
+            })
+            .map_err(|_| {
+                RunError::Io(io_other(
+                    "child_run_spawned_payload_serialize_failed",
+                    ErrorCategory::Unknown,
+                    "failed to serialize ChildRunSpawned payload",
+                ))
+            })?;
+
+            rec.emit(DomainEvent {
+                name: DOMAIN_EVENT_CHILD_RUN_SPAWNED.to_string(),
+                payload,
+                payload_ref: None,
+            })
+            .await?;
+        }
+
+        Ok(SpawnChildRunResult {
+            parent_run_id: parsed.parent_run_id,
+            child_run_id: parsed.child_run_id,
+            child_manifest_id: parsed.child_manifest_id,
+        })
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct AwaitChildRunV1 {
+        pub child_run_id: RunId,
+        pub child_manifest_id: ArtifactId,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct AwaitChildRunResult {
+        pub child_run_id: RunId,
+        pub status: RunStatus,
+        pub final_snapshot_id: Option<ArtifactId>,
+        pub final_snapshot: serde_json::Value,
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    struct AwaitRequestV1 {
+        kind: &'static str,
+        child_run_id: RunId,
+        child_manifest_id: ArtifactId,
+    }
+
+    #[derive(Clone, Debug, Deserialize)]
+    struct AwaitResponseV1 {
+        child_run_id: RunId,
+        status: RunStatus,
+        final_snapshot_id: Option<ArtifactId>,
+        #[serde(default)]
+        final_snapshot: serde_json::Value,
+    }
+
+    pub async fn await_child_run_v1(
+        io: &mut dyn IoProvider,
+        rec: &mut dyn EventRecorder,
+        fact_key: FactKey,
+        req: AwaitChildRunV1,
+    ) -> Result<AwaitChildRunResult, RunError> {
+        // If the fact already exists (resume/replay), do not emit linkage again.
+        let existed = io
+            .get_recorded_fact(&fact_key)
+            .await
+            .map_err(RunError::Io)?
+            .is_some();
+
+        let request = serde_json::to_value(AwaitRequestV1 {
+            kind: "child_run_await_v1",
+            child_run_id: req.child_run_id,
+            child_manifest_id: req.child_manifest_id.clone(),
+        })
+        .map_err(|_| {
+            RunError::Io(io_other(
+                "child_run_await_request_serialize_failed",
+                ErrorCategory::ParsingInput,
+                "failed to serialize child run await request",
+            ))
+        })?;
+
+        let res = io
+            .call(IoCall {
+                namespace: NAMESPACE_CHILD_RUN_AWAIT.to_string(),
+                request,
+                fact_key: Some(fact_key.clone()),
+            })
+            .await
+            .map_err(RunError::Io)?;
+
+        let parsed = serde_json::from_value::<AwaitResponseV1>(res.response).map_err(|_| {
+            RunError::Io(io_other(
+                "child_run_await_response_invalid",
+                ErrorCategory::ParsingInput,
+                "invalid child run await response",
+            ))
+        })?;
+
+        if !existed {
+            let payload = serde_json::to_value(ChildRunCompleted {
+                child_run_id: parsed.child_run_id,
+                status: parsed.status.clone(),
+                final_snapshot_id: parsed.final_snapshot_id.clone(),
+            })
+            .map_err(|_| {
+                RunError::Io(io_other(
+                    "child_run_completed_payload_serialize_failed",
+                    ErrorCategory::Unknown,
+                    "failed to serialize ChildRunCompleted payload",
+                ))
+            })?;
+
+            rec.emit(DomainEvent {
+                name: DOMAIN_EVENT_CHILD_RUN_COMPLETED.to_string(),
+                payload,
+                payload_ref: None,
+            })
+            .await?;
+        }
+
+        Ok(AwaitChildRunResult {
+            child_run_id: parsed.child_run_id,
+            status: parsed.status,
+            final_snapshot_id: parsed.final_snapshot_id,
+            final_snapshot: parsed.final_snapshot,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
