@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use mfm_artifact_store_fs::FsArtifactStore;
+use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_collectors_evm_jsonrpc_http::{EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory};
 use mfm_event_store_postgres::PostgresEventStore;
 use mfm_machine::config::{
@@ -45,8 +46,10 @@ use mfm_sdk::unstable::{
 const ENV_EVM_RPC_URL: &str = "MFM_EVM_RPC_URL";
 const ENV_EVM_RPC_AUTHORIZATION: &str = "MFM_EVM_RPC_AUTHORIZATION";
 
+const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
 const ENV_ARTIFACT_ROOT: &str = "MFM_ARTIFACT_ROOT";
 const ENV_DATABASE_URL: &str = "DATABASE_URL";
+const ENV_S3_ENSURE_BUCKET: &str = "MFM_S3_ENSURE_BUCKET";
 
 fn ok(data: serde_json::Value) -> serde_json::Value {
     json!({ "status": "success", "data": data })
@@ -181,8 +184,26 @@ fn default_artifact_root() -> PathBuf {
         })
 }
 
-pub fn make_default_artifact_store() -> Arc<dyn ArtifactStore> {
-    Arc::new(FsArtifactStore::new(default_artifact_root()))
+pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, ApiError> {
+    let backend = std::env::var(ENV_ARTIFACT_BACKEND).unwrap_or_else(|_| "fs".to_string());
+    match backend.as_str() {
+        "fs" => Ok(Arc::new(FsArtifactStore::new(default_artifact_root()))),
+        "s3" => {
+            let store = S3ArtifactStore::from_env().map_err(api_error_from_storage_error)?;
+            if std::env::var(ENV_S3_ENSURE_BUCKET).is_ok() {
+                store
+                    .ensure_bucket_exists()
+                    .await
+                    .map_err(api_error_from_storage_error)?;
+            }
+            Ok(Arc::new(store))
+        }
+        other => Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InvalidArtifactBackend",
+            format!("invalid {ENV_ARTIFACT_BACKEND}: {other}"),
+        )),
+    }
 }
 
 pub async fn make_default_event_store() -> Result<Arc<dyn EventStore>, ApiError> {

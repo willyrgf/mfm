@@ -22,7 +22,11 @@ mfm-op-evm-read = { path = "../../crates/ops/evm-read-op" }
 mfm-op-nix-app = { path = "../../crates/ops/nix-app-op" }
 mfm-collectors-evm-jsonrpc-http = { path = "../../crates/collectors/evm-jsonrpc-http" }
 mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
+mfm-artifact-store-s3 = { path = "../../crates/storages/artifact-store-s3" }
 mfm-event-store-postgres = { path = "../../crates/storages/event-store-postgres" }
+
+[features]
+parity-tests = []
 
 [dev-dependencies]
 tower = "0.5"

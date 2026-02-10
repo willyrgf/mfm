@@ -2042,6 +2042,7 @@ dependencies = [
  "axum",
  "hex",
  "mfm-artifact-store-fs",
+ "mfm-artifact-store-s3",
  "mfm-collectors-evm-jsonrpc-http",
  "mfm-event-store-mem",
  "mfm-event-store-postgres",

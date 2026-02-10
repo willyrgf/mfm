@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| format!("invalid {ENV_ADDR} socket addr"))?;
 
     let events = mfm_rest_api::make_default_event_store().await?;
-    let artifacts = mfm_rest_api::make_default_artifact_store();
+    let artifacts = mfm_rest_api::make_default_artifact_store().await?;
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
