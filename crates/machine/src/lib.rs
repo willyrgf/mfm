@@ -455,6 +455,45 @@ pub mod context {
             value: &T,
         ) -> Result<(), ContextError>;
     }
+
+    impl<C: DynContext + ?Sized> TypedContextExt for C {
+        fn read_typed<T: serde::de::DeserializeOwned>(
+            &self,
+            key: &ContextKey,
+        ) -> Result<Option<T>, ContextError> {
+            let Some(value) = self.read(key)? else {
+                return Ok(None);
+            };
+
+            serde_json::from_value(value).map(Some).map_err(|_| {
+                ContextError::Serialization(crate::errors::ErrorInfo {
+                    code: crate::ids::ErrorCode("context_deserialize_failed".to_string()),
+                    category: crate::errors::ErrorCategory::Context,
+                    retryable: false,
+                    message: "context value deserialization failed".to_string(),
+                    details: None,
+                })
+            })
+        }
+
+        fn write_typed<T: Serialize>(
+            &mut self,
+            key: ContextKey,
+            value: &T,
+        ) -> Result<(), ContextError> {
+            let v = serde_json::to_value(value).map_err(|_| {
+                ContextError::Serialization(crate::errors::ErrorInfo {
+                    code: crate::ids::ErrorCode("context_serialize_failed".to_string()),
+                    category: crate::errors::ErrorCategory::Context,
+                    retryable: false,
+                    message: "context value serialization failed".to_string(),
+                    details: None,
+                })
+            })?;
+
+            self.write(key, v)
+        }
+    }
 }
 
 pub mod events {
@@ -828,4 +867,5 @@ pub mod engine {
 pub mod hashing;
 
 pub(crate) mod attempt_envelope;
+pub(crate) mod context_runtime;
 pub(crate) mod event_profile;
