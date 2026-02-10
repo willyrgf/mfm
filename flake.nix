@@ -1,10 +1,10 @@
 {
-  description = "MFM distributed by Nix.";
+  description = "MFM";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs";
+    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    rust-overlay.url = "github:oxalica/rust-overlay";
+    fenix.url = "github:nix-community/fenix";
   };
 
   outputs =
@@ -12,74 +12,146 @@
       self,
       nixpkgs,
       flake-utils,
-      rust-overlay,
+      fenix,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ rust-overlay.overlays.default ];
+          overlays = [ fenix.overlays.default ];
         };
 
-        # Use rust-overlay toolchains so Nix builds don't get stuck on an older
-        # nixpkgs rustc that can't compile newer transitive deps.
-        stableToolchain = pkgs.rust-bin.stable.latest.default;
+        project = import ./nixfied/project { inherit pkgs; };
+        slots = import ./nixfied/slots.nix { inherit pkgs project; };
 
-        nightlyToolchain = pkgs.rust-bin.nightly.latest.default.override {
-          extensions = [
-            "rustfmt"
-            "clippy"
-            "rust-src"
-          ];
+        postgres =
+          if (project.modules.postgres.enable or false) then
+            import ./nixfied/postgres { inherit pkgs project slots; }
+          else
+            null;
+
+        nginx =
+          if (project.modules.nginx.enable or false) then
+            import ./nixfied/nginx { inherit pkgs project slots; }
+          else
+            null;
+
+        ephemeral =
+          if (project.ephemeral.enable or false) then
+            import ./nixfied/ephemeral.nix { inherit pkgs project; }
+          else
+            null;
+
+        hooks = import ./nixfied/hooks.nix {
+          inherit
+            pkgs
+            project
+            slots
+            postgres
+            nginx
+            supervisor
+            ephemeral
+            ;
         };
 
-        rustPlatform = pkgs.makeRustPlatform {
-          cargo = stableToolchain;
-          rustc = stableToolchain;
+        lib = import ./nixfied/lib { inherit pkgs project hooks; };
+        supervisor =
+          if (project.supervisor.enable or true) then
+            import ./nixfied/supervisor { inherit pkgs project slots; }
+          else
+            null;
+
+        coreApps = import ./nixfied/internal/core.nix {
+          inherit
+            pkgs
+            project
+            lib
+            moduleApps
+            ;
         };
+        isFramework = builtins.pathExists ./nixfied/.framework;
 
-        # Define the Rust package
-        mfm_cli = rustPlatform.buildRustPackage {
-          pname = "mfm_cli";
-          version = "0.0.2";
-          src = ./.;
+        installApps =
+          if isFramework then
+            import ./nixfied/internal/install.nix {
+              inherit
+                pkgs
+                lib
+                ;
+              frameworkRoot = ./.;
+            }
+          else
+            { };
 
-          # Specify the cargo workspace root if needed
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-          };
-
-          nativeBuildInputs = with pkgs; [ pkg-config ];
-
-          buildInputs = with pkgs; [
-            git
-            openssl
-          ];
-
-          # Skip tests if you don't want them
-          doCheck = false;
+        testApps =
+          if isFramework then
+            import ./nixfied/internal/test.nix {
+              inherit
+                pkgs
+                lib
+                ;
+            }
+          else
+            { };
+        isolationApps = import ./nixfied/internal/isolation.nix {
+          inherit
+            pkgs
+            project
+            lib
+            slots
+            ;
         };
+        moduleApps = import ./nixfied/internal/module-apps.nix {
+          inherit
+            pkgs
+            project
+            lib
+            postgres
+            nginx
+            supervisor
+            slots
+            ;
+        };
+        frameworkApps = pkgs.lib.mapAttrs' (name: value: {
+          name = "framework::${name}";
+          value = value;
+        }) (installApps // testApps);
+        ciEntry = import ./nixfied/ci.nix {
+          inherit
+            pkgs
+            project
+            lib
+            ephemeral
+            ;
+        };
+        ciApp =
+          if ciEntry == null then
+            null
+          else if ciEntry ? app then
+            ciEntry.app
+          else
+            ciEntry;
       in
       {
-        packages.mfm_cli = mfm_cli;
-
-        defaultPackage = self.packages.${system}.mfm_cli;
-
-        apps.default = {
-          type = "app";
-          program = "${self.packages.${system}.mfm_cli}/bin/mfm_cli";
+        devShells.default = import ./nixfied/devshell.nix {
+          inherit
+            pkgs
+            project
+            ;
         };
 
-        devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            nightlyToolchain
-            cargo-nextest
-            git
-            pkg-config
-            openssl
-          ];
-        };
+        apps =
+          coreApps
+          // moduleApps
+          // (if ciApp != null then { ci = ciApp; } else { })
+          // isolationApps
+          // frameworkApps
+          // {
+            default = if coreApps ? help then coreApps.help else coreApps.dev;
+          };
+
+        packages = project.packages or { };
       }
     );
 }

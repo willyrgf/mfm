@@ -11,6 +11,18 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 - Preserve crate boundaries: libraries stay usable without the CLI.
 - If you touch security-sensitive code (keystore/crypto), add or strengthen tests.
 
+## Nixfied Entry Points
+
+Nixfied is the canonical entrypoint for dev/test/build/check/ci:
+
+- `nix run .#help`
+- `nix run .#dev`
+- `nix run .#check`
+- `nix run .#test`
+- `nix run .#build`
+- `nix run .#ci -- --basic --summary`
+- `nix run .#ci -- --parity --summary`
+
 ## Project Overview
 
 MFM is a WIP toolkit for on-chain operations.
