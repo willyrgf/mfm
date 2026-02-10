@@ -30,7 +30,7 @@ use mfm_machine::ids::{ArtifactId, ContextKey, ErrorCode, RunId};
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
-use mfm_machine::runtime::DefaultExecutionEngine;
+use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
 use mfm_machine::stores::{ArtifactStore, EventStore};
 use mfm_op_evm_read::EvmReadOp;
 use mfm_op_nix_app::NixAppOp;
@@ -333,7 +333,7 @@ pub fn make_engine_bundle() -> EngineBundle {
     let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
 
     let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
-    let resolver = Arc::new(SdkPlanResolver::new(
+    let resolver: Arc<dyn PlanResolver> = Arc::new(SdkPlanResolver::new(
         Arc::clone(&registry),
         Arc::clone(&planner),
     ));
@@ -356,8 +356,12 @@ pub fn make_engine_bundle() -> EngineBundle {
     );
     routes.insert("evm".to_string(), evm_factory);
 
-    let factory: Arc<dyn LiveIoTransportFactory> =
+    let base_factory: Arc<dyn LiveIoTransportFactory> =
         Arc::new(RouterLiveIoTransportFactory::new(routes));
+    let factory: Arc<dyn LiveIoTransportFactory> = Arc::new(ChildRunLiveIoTransportFactory::new(
+        Arc::clone(&resolver),
+        Arc::clone(&base_factory),
+    ));
     let engine: Arc<dyn ExecutionEngine> =
         Arc::new(DefaultExecutionEngine::new(resolver).with_live_transport_factory(factory));
 
