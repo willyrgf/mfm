@@ -17,7 +17,7 @@ use mfm_machine::hashing::{
 };
 use mfm_machine::ids::{ContextKey, ErrorCode, OpId, OpPath, RunId, StateId};
 use mfm_machine::io::IoProvider;
-use mfm_machine::meta::StateMeta;
+use mfm_machine::meta::{Idempotency, SideEffectKind, StateMeta};
 use mfm_machine::plan::{DependencyEdge, ExecutionPlan, StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{DynState, State, StateOutcome};
@@ -203,6 +203,24 @@ fn validate_state_graph(
     let mut ids = HashSet::new();
     for n in &g.states {
         validate_state_id_shape(&n.id, machine_id, step_id)?;
+        let meta = n.state.meta();
+        if meta.side_effects == SideEffectKind::ApplySideEffect {
+            let ok = matches!(&meta.idempotency, Idempotency::Key(k) if !k.is_empty());
+            if !ok {
+                return Err(SdkError {
+                    info: ErrorInfo {
+                        code: ErrorCode("missing_idempotency_key".to_string()),
+                        category: ErrorCategory::ParsingInput,
+                        retryable: false,
+                        message: format!(
+                            "apply_side_effect state must declare Idempotency::Key: {}",
+                            n.id.0
+                        ),
+                        details: None,
+                    },
+                });
+            }
+        }
         if !ids.insert(n.id.clone()) {
             return Err(sdk_error(
                 "duplicate_state_id",
@@ -1298,6 +1316,70 @@ mod tests {
                 .any(|e| e.from.0 == "m.step1.s1" && e.to.0 == "m.step2.s1"),
             "expected barrier edge from step1 to step2"
         );
+    }
+
+    #[test]
+    fn planner_rejects_apply_side_effect_without_idempotency_key() {
+        #[derive(Clone)]
+        struct ApplyNoIdemState;
+
+        #[async_trait]
+        impl State for ApplyNoIdemState {
+            fn meta(&self) -> StateMeta {
+                StateMeta {
+                    tags: Vec::new(),
+                    depends_on: Vec::new(),
+                    depends_on_strategy: mfm_machine::meta::DependencyStrategy::Latest,
+                    side_effects: mfm_machine::meta::SideEffectKind::ApplySideEffect,
+                    idempotency: mfm_machine::meta::Idempotency::None,
+                }
+            }
+
+            async fn handle(
+                &self,
+                _ctx: &mut dyn DynContext,
+                _io: &mut dyn IoProvider,
+                _rec: &mut dyn EventRecorder,
+            ) -> Result<StateOutcome, StateError> {
+                Ok(StateOutcome {
+                    snapshot: mfm_machine::state::SnapshotPolicy::OnSuccess,
+                })
+            }
+        }
+
+        let mut reg = HashMapOperationRegistry::default();
+        reg.register(Arc::new(TestOp {
+            op_id: OpId("op".to_string()),
+            op_version: "v1".to_string(),
+            io: OpIo {
+                imports: Vec::new(),
+                exports: Vec::new(),
+            },
+            graph: StateGraph {
+                states: vec![StateNode {
+                    id: StateId("op.main.s1".to_string()),
+                    state: Arc::new(ApplyNoIdemState),
+                }],
+                edges: Vec::new(),
+            },
+        }));
+
+        let pipeline = single_op_pipeline(
+            OpId("op".to_string()),
+            "v1".to_string(),
+            serde_json::json!({}),
+        )
+        .expect("pipeline");
+
+        let err = match DefaultPipelinePlanner.build_execution_plan(
+            Arc::new(reg),
+            &pipeline,
+            &run_config_live(),
+        ) {
+            Ok(_) => panic!("expected planner error"),
+            Err(e) => e,
+        };
+        assert_eq!(err.info.code.0, "missing_idempotency_key");
     }
 
     #[test]

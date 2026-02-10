@@ -166,7 +166,7 @@ impl State for NixAppState {
             depends_on: Vec::new(),
             depends_on_strategy: DependencyStrategy::Latest,
             side_effects: SideEffectKind::ApplySideEffect,
-            idempotency: Idempotency::None,
+            idempotency: Idempotency::Key(format!("mfm:exec|state:{}", self.state_id.0)),
         }
     }
 

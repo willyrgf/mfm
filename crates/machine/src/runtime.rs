@@ -18,12 +18,15 @@ use crate::context::DynContext;
 use crate::context_runtime::{read_json_context, write_full_snapshot_value, StagedContext};
 use crate::engine::{ExecutionEngine, RunPhase, RunResult, StartRun, Stores};
 use crate::errors::{ContextError, ErrorCategory, ErrorInfo, IoError, RunError, StorageError};
-use crate::events::{DomainEvent, Event, EventEnvelope, KernelEvent, RunStatus};
+use crate::events::{
+    DomainEvent, Event, EventEnvelope, FactRecorded, KernelEvent, RunStatus,
+    DOMAIN_EVENT_FACT_RECORDED,
+};
 use crate::hashing::artifact_id_for_json;
 use crate::ids::{ArtifactId, ErrorCode, OpId, RunId, StateId};
 use crate::io::{IoCall, IoProvider, IoResult};
 use crate::live_io::{
-    FactIndex, LiveIo, LiveIoEnv, LiveIoTransport, LiveIoTransportFactory,
+    FactIndex, FactRecorder, LiveIo, LiveIoEnv, LiveIoTransport, LiveIoTransportFactory,
     UnimplementedLiveIoTransportFactory,
 };
 use crate::plan::{DependencyEdge, ExecutionPlan, PlanValidationError, StateNode};
@@ -157,11 +160,15 @@ impl ChildRunEngine {
         let initial_snapshot_id =
             write_full_snapshot_value(stores.artifacts.as_ref(), initial_snapshot).await?;
 
-        let mut writer = EventWriter::new(Arc::clone(&stores.events), run_id)
-            .await
-            .map_err(RunError::Storage)?;
+        let writer: SharedEventWriter = Arc::new(Mutex::new(
+            EventWriter::new(Arc::clone(&stores.events), run_id)
+                .await
+                .map_err(RunError::Storage)?,
+        ));
 
         writer
+            .lock()
+            .await
             .append_kernel(KernelEvent::RunStarted {
                 op_id: run.plan.op_id.clone(),
                 manifest_id: run.manifest_id.clone(),
@@ -239,9 +246,11 @@ impl ChildRunEngine {
             ));
         }
 
-        let mut writer = EventWriter::new(Arc::clone(&stores.events), run_id)
-            .await
-            .map_err(RunError::Storage)?;
+        let writer: SharedEventWriter = Arc::new(Mutex::new(
+            EventWriter::new(Arc::clone(&stores.events), run_id)
+                .await
+                .map_err(RunError::Storage)?,
+        ));
 
         if let Some(orphan) = &history.orphan_attempt {
             let start = (
@@ -274,6 +283,8 @@ impl ChildRunEngine {
 
         let Some(next_state_id) = next_state else {
             writer
+                .lock()
+                .await
                 .append_kernel(KernelEvent::RunCompleted {
                     status: RunStatus::Completed,
                     final_snapshot_id: Some(history.last_checkpoint.clone()),
@@ -293,6 +304,8 @@ impl ChildRunEngine {
             let next = attempt + 1;
             if !*retryable || next >= manifest.run_config.retry_policy.max_attempts {
                 writer
+                    .lock()
+                    .await
                     .append_kernel(KernelEvent::RunCompleted {
                         status: RunStatus::Failed,
                         final_snapshot_id: Some(history.last_checkpoint.clone()),
@@ -856,6 +869,11 @@ fn context_err(code: &'static str, message: &'static str) -> ContextError {
     ContextError::Serialization(info(code, ErrorCategory::Context, message))
 }
 
+type SharedEventWriter = Arc<Mutex<EventWriter>>;
+
+const CODE_FACT_BINDING_APPEND_FAILED: &str = "fact_binding_append_failed";
+const CODE_FACT_BINDING_PAYLOAD_INVALID: &str = "fact_binding_payload_invalid";
+
 struct EventWriter {
     run_id: RunId,
     store: Arc<dyn EventStore>,
@@ -901,12 +919,76 @@ impl EventWriter {
     }
 }
 
-struct AppendEventRecorder<'a> {
-    writer: &'a mut EventWriter,
+#[derive(Clone)]
+struct RuntimeFactRecorder {
+    writer: SharedEventWriter,
 }
 
 #[async_trait]
-impl EventRecorder for AppendEventRecorder<'_> {
+impl FactRecorder for RuntimeFactRecorder {
+    async fn record_fact_binding(
+        &self,
+        key: crate::ids::FactKey,
+        payload_id: ArtifactId,
+    ) -> Result<(), IoError> {
+        if crate::secrets::string_contains_secrets(&key.0) {
+            return Err(IoError::Other(info(
+                "secrets_detected",
+                ErrorCategory::Unknown,
+                "fact key contained secrets (Milestone 1 forbids persisting secrets)",
+            )));
+        }
+
+        let payload = serde_json::to_value(FactRecorded {
+            key,
+            payload_id,
+            meta: serde_json::json!({}),
+        })
+        .map_err(|_| {
+            IoError::Other(info(
+                CODE_FACT_BINDING_PAYLOAD_INVALID,
+                ErrorCategory::ParsingInput,
+                "failed to serialize FactRecorded payload",
+            ))
+        })?;
+
+        if crate::secrets::json_contains_secrets(&payload) {
+            return Err(IoError::Other(info(
+                "secrets_detected",
+                ErrorCategory::Unknown,
+                "fact binding payload contained secrets (Milestone 1 forbids persisting secrets)",
+            )));
+        }
+
+        let event = DomainEvent {
+            name: DOMAIN_EVENT_FACT_RECORDED.to_string(),
+            payload,
+            payload_ref: None,
+        };
+
+        self.writer
+            .lock()
+            .await
+            .append(vec![Event::Domain(event)])
+            .await
+            .map_err(|_| {
+                IoError::Other(info(
+                    CODE_FACT_BINDING_APPEND_FAILED,
+                    ErrorCategory::Storage,
+                    "failed to append fact binding event",
+                ))
+            })?;
+
+        Ok(())
+    }
+}
+
+struct AppendEventRecorder {
+    writer: SharedEventWriter,
+}
+
+#[async_trait]
+impl EventRecorder for AppendEventRecorder {
     async fn emit(&mut self, event: DomainEvent) -> Result<(), RunError> {
         if crate::secrets::string_contains_secrets(&event.name)
             || crate::secrets::json_contains_secrets(&event.payload)
@@ -919,6 +1001,8 @@ impl EventRecorder for AppendEventRecorder<'_> {
         }
 
         self.writer
+            .lock()
+            .await
             .append(vec![Event::Domain(event)])
             .await
             .map_err(RunError::Storage)?;
@@ -939,6 +1023,8 @@ impl EventRecorder for AppendEventRecorder<'_> {
         }
 
         self.writer
+            .lock()
+            .await
             .append(events.into_iter().map(Event::Domain).collect())
             .await
             .map_err(RunError::Storage)?;
@@ -949,15 +1035,6 @@ impl EventRecorder for AppendEventRecorder<'_> {
 enum AttemptIo {
     Live(LiveIo),
     Replay(ReplayIo),
-}
-
-impl AttemptIo {
-    fn drain_pending_events(&mut self) -> Vec<DomainEvent> {
-        match self {
-            AttemptIo::Live(io) => io.drain_pending_events(),
-            AttemptIo::Replay(_) => Vec::new(),
-        }
-    }
 }
 
 #[async_trait]
@@ -1298,7 +1375,7 @@ async fn run_states(
     plan: &ExecutionPlan,
     run_config: &RunConfig,
     run_id: RunId,
-    mut writer: EventWriter,
+    writer: SharedEventWriter,
     mut current_snapshot_id: ArtifactId,
     completed_states: &HashSet<StateId>,
     start_at_state: Option<(StateId, u32, ArtifactId)>,
@@ -1336,9 +1413,47 @@ async fn run_states(
                 (node.id.clone(), 0, current_snapshot_id.clone())
             };
 
+        // Optional: allow the executor to skip tagged states (e.g., dry-run skipping apply-side-effect).
+        if !run_config.skip_tags.is_empty()
+            && node
+                .state
+                .meta()
+                .tags
+                .iter()
+                .any(|t| run_config.skip_tags.contains(t))
+        {
+            writer
+                .lock()
+                .await
+                .append_kernel(KernelEvent::StateEntered {
+                    state_id: state_id.clone(),
+                    attempt,
+                    base_snapshot_id: base_snapshot_id.clone(),
+                })
+                .await
+                .map_err(RunError::Storage)?;
+
+            // Skipped states are treated as successful no-ops: they advance plan progression but
+            // do not change the checkpoint.
+            writer
+                .lock()
+                .await
+                .append_kernel(KernelEvent::StateCompleted {
+                    state_id: state_id.clone(),
+                    context_snapshot_id: base_snapshot_id.clone(),
+                })
+                .await
+                .map_err(RunError::Storage)?;
+
+            current_snapshot_id = base_snapshot_id.clone();
+            continue;
+        }
+
         loop {
             // Kernel: entered attempt.
             writer
+                .lock()
+                .await
                 .append_kernel(KernelEvent::StateEntered {
                     state_id: state_id.clone(),
                     attempt,
@@ -1349,6 +1464,9 @@ async fn run_states(
 
             let base_ctx = read_json_context(stores.artifacts.as_ref(), &base_snapshot_id).await?;
             let mut ctx = StagedContext::new(base_ctx);
+            let fact_recorder: Arc<dyn FactRecorder> = Arc::new(RuntimeFactRecorder {
+                writer: Arc::clone(&writer),
+            });
             let mut io = match run_config.io_mode {
                 IoMode::Live => AttemptIo::Live(LiveIo::new(
                     run_id,
@@ -1356,6 +1474,7 @@ async fn run_states(
                     attempt,
                     Arc::clone(&stores.artifacts),
                     facts.clone(),
+                    fact_recorder,
                     live_factory.make(crate::live_io::LiveIoEnv {
                         stores: stores.clone(),
                         run_id,
@@ -1373,7 +1492,7 @@ async fn run_states(
                 )),
             };
             let mut append_rec = AppendEventRecorder {
-                writer: &mut writer,
+                writer: Arc::clone(&writer),
             };
             let mut rec = crate::event_profile::FilteringEventRecorder::new(
                 run_config.event_profile.clone(),
@@ -1381,11 +1500,6 @@ async fn run_states(
             );
 
             let res = node.state.handle(&mut ctx, &mut io, &mut rec).await;
-
-            let pending = io.drain_pending_events();
-            if !pending.is_empty() {
-                rec.emit_many(pending).await?;
-            }
 
             if let Some(fp) = &failpoints {
                 if fp.should_stop_after_handler() {
@@ -1403,6 +1517,8 @@ async fn run_states(
                     let snapshot_id =
                         write_full_snapshot_value(stores.artifacts.as_ref(), snapshot).await?;
                     writer
+                        .lock()
+                        .await
                         .append_kernel(KernelEvent::StateCompleted {
                             state_id: state_id.clone(),
                             context_snapshot_id: snapshot_id.clone(),
@@ -1421,6 +1537,8 @@ async fn run_states(
                     crate::secrets::redact_error_info(&mut err.info);
 
                     writer
+                        .lock()
+                        .await
                         .append_kernel(KernelEvent::StateFailed {
                             state_id: state_id.clone(),
                             error: err.clone(),
@@ -1460,6 +1578,8 @@ async fn run_states(
     };
 
     writer
+        .lock()
+        .await
         .append_kernel(KernelEvent::RunCompleted {
             status: status.clone(),
             final_snapshot_id: final_snapshot_id.clone(),
@@ -1503,11 +1623,15 @@ impl ExecutionEngine for DefaultExecutionEngine {
         let initial_snapshot_id =
             write_full_snapshot_value(stores.artifacts.as_ref(), initial_snapshot).await?;
 
-        let mut writer = EventWriter::new(Arc::clone(&stores.events), run_id)
-            .await
-            .map_err(RunError::Storage)?;
+        let writer: SharedEventWriter = Arc::new(Mutex::new(
+            EventWriter::new(Arc::clone(&stores.events), run_id)
+                .await
+                .map_err(RunError::Storage)?,
+        ));
 
         writer
+            .lock()
+            .await
             .append_kernel(KernelEvent::RunStarted {
                 op_id: run.plan.op_id.clone(),
                 manifest_id: run.manifest_id.clone(),
@@ -1589,9 +1713,11 @@ impl ExecutionEngine for DefaultExecutionEngine {
             ));
         }
 
-        let mut writer = EventWriter::new(Arc::clone(&stores.events), run_id)
-            .await
-            .map_err(RunError::Storage)?;
+        let writer: SharedEventWriter = Arc::new(Mutex::new(
+            EventWriter::new(Arc::clone(&stores.events), run_id)
+                .await
+                .map_err(RunError::Storage)?,
+        ));
 
         // Orphan attempt handling: retry from base snapshot with attempt+1.
         if let Some(orphan) = &history.orphan_attempt {
@@ -1626,6 +1752,8 @@ impl ExecutionEngine for DefaultExecutionEngine {
 
         let Some(next_state_id) = next_state else {
             writer
+                .lock()
+                .await
                 .append_kernel(KernelEvent::RunCompleted {
                     status: RunStatus::Completed,
                     final_snapshot_id: Some(history.last_checkpoint.clone()),
@@ -1646,6 +1774,8 @@ impl ExecutionEngine for DefaultExecutionEngine {
             let next = attempt + 1;
             if !*retryable || next >= manifest.run_config.retry_policy.max_attempts {
                 writer
+                    .lock()
+                    .await
                     .append_kernel(KernelEvent::RunCompleted {
                         status: RunStatus::Failed,
                         final_snapshot_id: Some(history.last_checkpoint.clone()),
@@ -1712,7 +1842,9 @@ mod tests {
     use crate::ids::FactKey;
     use crate::io::IoCall;
     use crate::live_io::{LiveIoTransport, LiveIoTransportFactory};
-    use crate::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta};
+    use crate::meta::{
+        standard_tags, DependencyStrategy, Idempotency, SideEffectKind, StateMeta, Tag,
+    };
     use crate::plan::StateGraph;
     use crate::state::State;
     use crate::stores::{ArtifactKind, ArtifactStore, EventStore};
@@ -1855,6 +1987,79 @@ mod tests {
 
             ctx.write(ContextKey("x".to_string()), serde_json::json!(1))
                 .expect("write");
+            Ok(crate::state::StateOutcome {
+                snapshot: crate::state::SnapshotPolicy::OnSuccess,
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct TaggedWriteState {
+        called: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    #[async_trait]
+    impl State for TaggedWriteState {
+        fn meta(&self) -> StateMeta {
+            StateMeta {
+                tags: vec![Tag(standard_tags::APPLY_SIDE_EFFECT.to_string())],
+                depends_on: Vec::new(),
+                depends_on_strategy: DependencyStrategy::Latest,
+                side_effects: SideEffectKind::ApplySideEffect,
+                idempotency: Idempotency::Key("test:tagged_write".to_string()),
+            }
+        }
+
+        async fn handle(
+            &self,
+            ctx: &mut dyn DynContext,
+            _io: &mut dyn IoProvider,
+            _rec: &mut dyn EventRecorder,
+        ) -> Result<crate::state::StateOutcome, StateError> {
+            self.called
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ctx.write(ContextKey("y".to_string()), serde_json::json!(2))
+                .expect("write");
+            Ok(crate::state::StateOutcome {
+                snapshot: crate::state::SnapshotPolicy::OnSuccess,
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordFactAndWriteState;
+
+    #[async_trait]
+    impl State for RecordFactAndWriteState {
+        fn meta(&self) -> StateMeta {
+            StateMeta {
+                tags: Vec::new(),
+                depends_on: Vec::new(),
+                depends_on_strategy: DependencyStrategy::Latest,
+                side_effects: SideEffectKind::ReadOnlyIo,
+                idempotency: Idempotency::None,
+            }
+        }
+
+        async fn handle(
+            &self,
+            ctx: &mut dyn DynContext,
+            io: &mut dyn IoProvider,
+            _rec: &mut dyn EventRecorder,
+        ) -> Result<crate::state::StateOutcome, StateError> {
+            let got = io
+                .call(IoCall {
+                    namespace: "test".to_string(),
+                    request: serde_json::json!({"q": 1}),
+                    fact_key: Some(FactKey("k".to_string())),
+                })
+                .await
+                .expect("io");
+            assert_eq!(got.response, serde_json::json!({ "n": 0 }));
+
+            ctx.write(ContextKey("x".to_string()), serde_json::json!(1))
+                .expect("write");
+
             Ok(crate::state::StateOutcome {
                 snapshot: crate::state::SnapshotPolicy::OnSuccess,
             })
@@ -2595,6 +2800,237 @@ mod tests {
             RunError::InvalidPlan(info) => assert_eq!(info.code.0, CODE_UNSUPPORTED_EXECUTION_MODE),
             other => panic!("expected InvalidPlan, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn skip_tags_skips_tagged_states_without_running_handler() {
+        let events = Arc::new(MemEventStore::default());
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let stores = || Stores {
+            events: events.clone(),
+            artifacts: artifacts.clone(),
+        };
+
+        let mut run_config = base_run_config();
+        run_config.skip_tags = vec![Tag(standard_tags::APPLY_SIDE_EFFECT.to_string())];
+        let manifest = RunManifest {
+            op_id: OpId("op".to_string()),
+            op_version: "0".to_string(),
+            input_params: serde_json::json!({}),
+            run_config: run_config.clone(),
+            build: crate::config::BuildProvenance {
+                git_commit: None,
+                cargo_lock_hash: None,
+                flake_lock_hash: None,
+                rustc_version: None,
+                target_triple: None,
+                env_allowlist: Vec::new(),
+            },
+        };
+        let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+
+        let called = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let s1 = StateId("machine.main.s1".to_string());
+        let s2 = StateId("machine.main.s2".to_string());
+        let plan = ExecutionPlan {
+            op_id: manifest.op_id.clone(),
+            graph: StateGraph {
+                states: vec![
+                    StateNode {
+                        id: s1.clone(),
+                        state: Arc::new(SetKeyState),
+                    },
+                    StateNode {
+                        id: s2.clone(),
+                        state: Arc::new(TaggedWriteState {
+                            called: Arc::clone(&called),
+                        }),
+                    },
+                ],
+                edges: vec![DependencyEdge {
+                    from: s1.clone(),
+                    to: s2.clone(),
+                }],
+            },
+        };
+
+        let resolver = Arc::new(FixedResolver { plan: plan.clone() });
+        let engine = DefaultExecutionEngine::new(resolver);
+
+        let r = engine
+            .start(
+                stores(),
+                StartRun {
+                    manifest,
+                    manifest_id,
+                    plan,
+                    run_config,
+                    initial_context: Box::new(JsonContext::new()),
+                },
+            )
+            .await
+            .expect("start");
+
+        assert_eq!(r.phase, RunPhase::Completed);
+        assert_eq!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "tagged state should be skipped"
+        );
+
+        let final_snapshot_id = r.final_snapshot_id.expect("final snapshot");
+        let snapshot = crate::context_runtime::read_full_snapshot_value(
+            artifacts.as_ref(),
+            &final_snapshot_id,
+        )
+        .await
+        .expect("read snapshot");
+        assert_eq!(snapshot, serde_json::json!({"x": 1}));
+
+        let stream = events.read_range(r.run_id, 1, None).await.expect("read");
+        let mut s1_snapshot = None;
+        let mut s2_enter_base = None;
+        let mut s2_completed_snapshot = None;
+
+        for e in &stream {
+            match &e.event {
+                Event::Kernel(KernelEvent::StateCompleted {
+                    state_id,
+                    context_snapshot_id,
+                }) if state_id == &s1 => {
+                    s1_snapshot = Some(context_snapshot_id.clone());
+                }
+                Event::Kernel(KernelEvent::StateEntered {
+                    state_id,
+                    base_snapshot_id,
+                    ..
+                }) if state_id == &s2 => {
+                    s2_enter_base = Some(base_snapshot_id.clone());
+                }
+                Event::Kernel(KernelEvent::StateCompleted {
+                    state_id,
+                    context_snapshot_id,
+                }) if state_id == &s2 => {
+                    s2_completed_snapshot = Some(context_snapshot_id.clone());
+                }
+                _ => {}
+            }
+        }
+
+        let s1_snapshot = s1_snapshot.expect("s1 snapshot");
+        assert_eq!(s2_enter_base, Some(s1_snapshot.clone()));
+        assert_eq!(s2_completed_snapshot, Some(s1_snapshot.clone()));
+        assert_eq!(final_snapshot_id, s1_snapshot);
+    }
+
+    #[tokio::test]
+    async fn crash_resume_orphan_attempt_reuses_facts() {
+        let events = Arc::new(MemEventStore::default());
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let stores = || Stores {
+            events: events.clone(),
+            artifacts: artifacts.clone(),
+        };
+
+        let run_config = base_run_config();
+        let manifest = RunManifest {
+            op_id: OpId("op".to_string()),
+            op_version: "0".to_string(),
+            input_params: serde_json::json!({}),
+            run_config: run_config.clone(),
+            build: crate::config::BuildProvenance {
+                git_commit: None,
+                cargo_lock_hash: None,
+                flake_lock_hash: None,
+                rustc_version: None,
+                target_triple: None,
+                env_allowlist: Vec::new(),
+            },
+        };
+        let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let factory: Arc<dyn LiveIoTransportFactory> = Arc::new(CountingTransportFactory {
+            calls: Arc::clone(&calls),
+        });
+
+        let state_id = StateId("machine.main.s1".to_string());
+        let plan = ExecutionPlan {
+            op_id: manifest.op_id.clone(),
+            graph: StateGraph {
+                states: vec![StateNode {
+                    id: state_id.clone(),
+                    state: Arc::new(RecordFactAndWriteState),
+                }],
+                edges: Vec::new(),
+            },
+        };
+
+        let resolver = Arc::new(FixedResolver { plan: plan.clone() });
+        let failpoints = EngineFailpoints {
+            stop_after_handler_once: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        };
+        let engine = DefaultExecutionEngine::new(resolver)
+            .with_live_transport_factory(factory)
+            .with_failpoints(failpoints);
+
+        let initial_ctx = Box::new(JsonContext::new());
+        let r1 = engine
+            .start(
+                stores(),
+                StartRun {
+                    manifest: manifest.clone(),
+                    manifest_id: manifest_id.clone(),
+                    plan: plan.clone(),
+                    run_config: run_config.clone(),
+                    initial_context: initial_ctx,
+                },
+            )
+            .await
+            .expect("start");
+
+        assert_eq!(r1.phase, RunPhase::Running);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let r2 = engine.resume(stores(), r1.run_id).await.expect("resume");
+        assert_eq!(r2.phase, RunPhase::Completed);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let final_snapshot_id = r2.final_snapshot_id.expect("final snapshot");
+        let snapshot = crate::context_runtime::read_full_snapshot_value(
+            artifacts.as_ref(),
+            &final_snapshot_id,
+        )
+        .await
+        .expect("read snapshot");
+        assert_eq!(snapshot, serde_json::json!({"x": 1}));
+
+        let stream = events.read_range(r1.run_id, 1, None).await.expect("read");
+        let entered: Vec<u32> = stream
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::Kernel(KernelEvent::StateEntered {
+                    state_id: sid,
+                    attempt,
+                    ..
+                }) if sid == &state_id => Some(*attempt),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(entered, vec![0, 1]);
+
+        let facts: Vec<FactRecorded> = stream
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::Domain(de) if de.name == DOMAIN_EVENT_FACT_RECORDED => {
+                    serde_json::from_value::<FactRecorded>(de.payload.clone()).ok()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].key.0, "k");
     }
 
     struct CountingTransport {
