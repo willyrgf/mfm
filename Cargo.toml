@@ -3,10 +3,10 @@
 resolver = "2"
 
 members = [
-	"mfm_cli",
-	"mfm_machine",
-	"mfm_machine_derive",
-	"mfm_core",
+	"bin/cli",
+	"crates/machine-legacy",
+	"crates/machine-derive-legacy",
+	"crates/core",
 ]
 
 # Core dependencies
