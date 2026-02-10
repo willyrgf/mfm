@@ -18,10 +18,25 @@ const FORBIDDEN_SUBSTRINGS: &[&str] = &[
     "mnemonic",
     "private_key",
     "privatekey",
-    "seed",
+    // Avoid matching the generic word "seed" to reduce false positives.
+    "seed phrase",
+    "seed_phrase",
+    "seedphrase",
     "api_key",
     "apikey",
+    "x-api-key",
+    "x_api_key",
+    "access_key",
+    "accesskey",
+    "secret_key",
+    "secretkey",
+    "aws_access_key_id",
+    "aws_secret_access_key",
+    "access_token",
+    "refresh_token",
+    "id_token",
     "authorization",
+    "bearer ",
 ];
 
 pub(crate) fn string_contains_secrets(s: &str) -> bool {
@@ -89,7 +104,10 @@ mod tests {
         assert!(string_contains_secrets("password=123"));
         assert!(string_contains_secrets("MNEMONIC"));
         assert!(string_contains_secrets("private_key"));
+        assert!(string_contains_secrets("seed phrase: ..."));
+        assert!(string_contains_secrets("AWS_SECRET_ACCESS_KEY=..."));
         assert!(!string_contains_secrets("artifact_written"));
+        assert!(!string_contains_secrets("seeding_database"));
     }
 
     #[test]
