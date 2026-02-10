@@ -300,6 +300,16 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   mfm_cli run artifacts get "<ARTIFACT_ID>"
   ```
 
+- **`MFM_EVM_RPC_URL`**: HTTP(s) JSON-RPC endpoint used for `namespace="evm"` live IO (e.g. EVM read ops). This value is runtime-only and is never persisted by MFM.
+  ```sh
+  export MFM_EVM_RPC_URL="https://example.invalid"
+  ```
+
+- **`MFM_EVM_RPC_AUTHORIZATION`**: Optional HTTP `Authorization` header value for EVM JSON-RPC. Treat this as a secret; it is runtime-only and is never persisted by MFM.
+  ```sh
+  export MFM_EVM_RPC_AUTHORIZATION="Bearer <token>"
+  ```
+
 ## Best Practices
 
 - **For interactive use**, rely on the built-in prompts for passwords and confirmations.
