@@ -10,6 +10,7 @@ let
 
   restart = pkgs.writeShellScript "supervisor-restart" ''
     set -euo pipefail
+    eval "$(${slots.getSlotInfo})"
 
     SERVICE="''${1:-}"
     if [ -z "$SERVICE" ]; then
@@ -19,7 +20,8 @@ let
 
     CONFIG_FILE=$(${config.generateConfig})
     echo "🔄 Restarting $SERVICE..."
-    ${pc}/bin/process-compose -f "$CONFIG_FILE" restart "$SERVICE"
+    SOCKET="$RUN_DIR/process-compose.sock"
+    ${pc}/bin/process-compose -f "$CONFIG_FILE" -U -u "$SOCKET" restart "$SERVICE"
     echo "✅ $SERVICE restarted"
   '';
 

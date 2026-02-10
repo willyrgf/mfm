@@ -13,7 +13,6 @@ let
   # Base configuration shared across all environments
   baseConf = ''
     listen_addresses = 'localhost'
-    port = $PGPORT
     unix_socket_directories = '/tmp'
     log_destination = 'stderr'
     logging_collector = off

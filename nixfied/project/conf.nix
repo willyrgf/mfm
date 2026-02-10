@@ -78,7 +78,9 @@ rec {
   # Slot behavior for port calculations
   slots = {
     max = 9;
-    stride = 1;
+    # Keep per-slot ports disjoint even when multiple port roles are adjacent
+    # (e.g. MinIO data port + console port).
+    stride = 100;
   };
 
   # Port roles (keys become <KEY>_PORT in slot scripts)

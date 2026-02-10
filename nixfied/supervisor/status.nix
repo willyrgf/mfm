@@ -10,8 +10,10 @@ let
 
   status = pkgs.writeShellScript "supervisor-status" ''
     set -euo pipefail
+    eval "$(${slots.getSlotInfo})"
     CONFIG_FILE=$(${config.generateConfig})
-    exec ${pc}/bin/process-compose -f "$CONFIG_FILE" status
+    SOCKET="$RUN_DIR/process-compose.sock"
+    exec ${pc}/bin/process-compose -f "$CONFIG_FILE" -U -u "$SOCKET" status
   '';
 
   isRunning = pkgs.writeShellScript "supervisor-is-running" ''

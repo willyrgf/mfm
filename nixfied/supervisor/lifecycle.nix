@@ -13,35 +13,42 @@ let
 
   start = pkgs.writeShellScript "supervisor-start" ''
     set -euo pipefail
+    eval "$(${slots.getSlotInfo})"
     CONFIG_FILE=$(${config.generateConfig})
-    exec ${pc}/bin/process-compose -f "$CONFIG_FILE" up
+    SOCKET="$RUN_DIR/process-compose.sock"
+    exec ${pc}/bin/process-compose -f "$CONFIG_FILE" -U -u "$SOCKET" up
   '';
 
   stop = pkgs.writeShellScript "supervisor-stop" ''
     set -euo pipefail
     eval "$(${slots.getSlotInfo})"
     CONFIG_FILE=$(${config.generateConfig})
+    SOCKET="$RUN_DIR/process-compose.sock"
 
     # First, stop via process-compose
-    ${pc}/bin/process-compose -f "$CONFIG_FILE" down 2>/dev/null || true
+    ${pc}/bin/process-compose -f "$CONFIG_FILE" -U -u "$SOCKET" down 2>/dev/null || true
 
     # Clean up orphan processes on configured ports
-    ${pkgs.lib.concatMapStringsSep "\n" (
-      name:
-      let
-        portVar = slots.portVarName name;
-      in
-      ''
-        PORT="''${${portVar}:-}"
-        if [ -n "$PORT" ] && command -v lsof >/dev/null 2>&1; then
-          ORPHANS=$(lsof -ti:"$PORT" 2>/dev/null || true)
-          if [ -n "$ORPHANS" ]; then
-            echo "🧹 Cleaning orphan processes on port $PORT (${name}): $ORPHANS"
-            echo "$ORPHANS" | xargs kill -TERM 2>/dev/null || true
+    # Safety: do NOT kill by port by default. This can terminate unrelated processes.
+    # Opt-in with SUPERVISOR_CLEANUP_ORPHANS=1.
+    if [ "''${SUPERVISOR_CLEANUP_ORPHANS:-0}" = "1" ]; then
+      ${pkgs.lib.concatMapStringsSep "\n" (
+        name:
+        let
+          portVar = slots.portVarName name;
+        in
+        ''
+          PORT="''${${portVar}:-}"
+          if [ -n "$PORT" ] && command -v lsof >/dev/null 2>&1; then
+            ORPHANS=$(lsof -ti:"$PORT" 2>/dev/null || true)
+            if [ -n "$ORPHANS" ]; then
+              echo "🧹 Cleaning orphan processes on port $PORT (${name}): $ORPHANS"
+              echo "$ORPHANS" | xargs kill -TERM 2>/dev/null || true
+            fi
           fi
-        fi
-      ''
-    ) portNames}
+        ''
+      ) portNames}
+    fi
 
     # Remove PID file
     PID_FILE="$RUN_DIR/supervisor.pid"
@@ -54,6 +61,7 @@ let
     set -euo pipefail
     eval "$(${slots.getSlotInfo})"
     CONFIG_FILE=$(${config.generateConfig})
+    SOCKET="$RUN_DIR/process-compose.sock"
 
     PID_FILE="$RUN_DIR/supervisor.pid"
 
@@ -68,7 +76,7 @@ let
     fi
 
     echo "🚀 Starting supervisor in background..."
-    nohup ${pc}/bin/process-compose -f "$CONFIG_FILE" up \
+    nohup ${pc}/bin/process-compose -f "$CONFIG_FILE" -U -u "$SOCKET" -t=false up \
       > "$LOG_DIR/supervisor-daemon.log" 2>&1 &
 
     DAEMON_PID=$!

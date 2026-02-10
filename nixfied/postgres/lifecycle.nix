@@ -27,15 +27,16 @@ let
 
     mkdir -p "$PGDATA"
 
-    if [ -f "$PGDATA/PG_VERSION" ]; then
+    if [ ! -f "$PGDATA/PG_VERSION" ]; then
+      echo "🔧 Initializing PostgreSQL at $PGDATA..."
+      ${postgres}/bin/initdb -D "$PGDATA" -U postgres --no-locale --encoding=UTF8 -A trust
+    else
       echo "✅ PostgreSQL already initialized at $PGDATA"
-      exit 0
     fi
 
-    echo "🔧 Initializing PostgreSQL at $PGDATA..."
-    ${postgres}/bin/initdb -D "$PGDATA" -U postgres --no-locale --encoding=UTF8 -A trust
-
-    # Determine environment-specific config
+    # Determine environment-specific config.
+    # Note: always rewrite the config so framework upgrades take effect even for
+    # already-initialized clusters.
     CONF_ENV="''${ENV:-dev}"
     case "$CONF_ENV" in
       prod)
