@@ -4,4 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+async-trait = { workspace = true }
+mfm-machine = { path = "../../machine" }
+tokio = { workspace = true }
 
+[dev-dependencies]
+mfm-machine-test-support = { path = "../../machine-test-support" }

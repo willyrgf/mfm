@@ -4,14 +4,20 @@
 //! share correctness tests without creating dependency cycles.
 
 use mfm_machine::errors::StorageError;
+use mfm_machine::events::{Event, EventEnvelope, KernelEvent, RunStatus};
 use mfm_machine::hashing::artifact_id_for_bytes;
-use mfm_machine::ids::ArtifactId;
-use mfm_machine::stores::{ArtifactKind, ArtifactStore};
+use mfm_machine::ids::{ArtifactId, OpId, RunId, StateId};
+use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
 
 pub async fn artifact_store_contract_tests(store: &dyn ArtifactStore) {
     put_get_roundtrip(store).await;
     content_addressed(store).await;
     exists_and_not_found(store).await;
+}
+
+pub async fn event_store_contract_tests(store: &dyn EventStore) {
+    append_and_read(store).await;
+    expected_seq_concurrency(store).await;
 }
 
 async fn put_get_roundtrip(store: &dyn ArtifactStore) {
@@ -52,4 +58,96 @@ async fn exists_and_not_found(store: &dyn ArtifactStore) {
         Err(StorageError::NotFound(_)) => {}
         other => panic!("expected NotFound for missing artifact, got: {other:?}"),
     }
+}
+
+async fn append_and_read(store: &dyn EventStore) {
+    let run_id = RunId(uuid::Uuid::new_v4());
+
+    assert_eq!(store.head_seq(run_id).await.expect("head_seq"), 0);
+
+    let e1 = EventEnvelope {
+        run_id,
+        seq: 1,
+        ts_millis: Some(1),
+        event: Event::Kernel(KernelEvent::RunStarted {
+            op_id: OpId("op".to_string()),
+            manifest_id: ArtifactId("0".repeat(64)),
+            initial_snapshot_id: ArtifactId("1".repeat(64)),
+        }),
+    };
+
+    let head = store
+        .append(run_id, 0, vec![e1.clone()])
+        .await
+        .expect("append");
+    assert_eq!(head, 1);
+    assert_eq!(store.head_seq(run_id).await.expect("head_seq"), 1);
+
+    let got = store.read_range(run_id, 1, None).await.expect("read_range");
+    assert_eq!(got, vec![e1.clone()]);
+
+    let e2 = EventEnvelope {
+        run_id,
+        seq: 2,
+        ts_millis: Some(2),
+        event: Event::Kernel(KernelEvent::StateEntered {
+            state_id: StateId("machine.main.setup".to_string()),
+            attempt: 0,
+            base_snapshot_id: ArtifactId("2".repeat(64)),
+        }),
+    };
+    let e3 = EventEnvelope {
+        run_id,
+        seq: 3,
+        ts_millis: Some(3),
+        event: Event::Kernel(KernelEvent::RunCompleted {
+            status: RunStatus::Completed,
+            final_snapshot_id: None,
+        }),
+    };
+
+    let head = store
+        .append(run_id, 1, vec![e2.clone(), e3.clone()])
+        .await
+        .expect("append");
+    assert_eq!(head, 3);
+
+    let got = store
+        .read_range(run_id, 2, Some(2))
+        .await
+        .expect("read_range");
+    assert_eq!(got, vec![e2]);
+}
+
+async fn expected_seq_concurrency(store: &dyn EventStore) {
+    let run_id = RunId(uuid::Uuid::new_v4());
+
+    let e1 = EventEnvelope {
+        run_id,
+        seq: 1,
+        ts_millis: None,
+        event: Event::Kernel(KernelEvent::RunStarted {
+            op_id: OpId("op".to_string()),
+            manifest_id: ArtifactId("0".repeat(64)),
+            initial_snapshot_id: ArtifactId("1".repeat(64)),
+        }),
+    };
+
+    let head = store
+        .append(run_id, 0, vec![e1.clone()])
+        .await
+        .expect("append");
+    assert_eq!(head, 1);
+
+    // ExpectedSeq concurrency: appending with an old expected seq must fail and must not change head.
+    let err = store
+        .append(run_id, 0, vec![e1])
+        .await
+        .expect_err("append should fail");
+    match err {
+        StorageError::Concurrency(_) => {}
+        other => panic!("expected Concurrency error, got: {other:?}"),
+    }
+
+    assert_eq!(store.head_seq(run_id).await.expect("head_seq"), 1);
 }
