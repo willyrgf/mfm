@@ -462,6 +462,11 @@ pub mod events {
     use crate::errors::StateError;
     use crate::ids::{ArtifactId, OpId, OpPath, RunId, StateId};
 
+    /// Recommended stable `DomainEvent.name` values.
+    pub const DOMAIN_EVENT_FACT_RECORDED: &str = "fact_recorded";
+    pub const DOMAIN_EVENT_ARTIFACT_WRITTEN: &str = "artifact_written";
+    pub const DOMAIN_EVENT_OP_BOUNDARY: &str = "op_boundary";
+
     /// Run completion status.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum RunStatus {
@@ -821,3 +826,6 @@ pub mod engine {
 ///
 /// This module is not part of the stable API contract (Appendix C.1) and may change.
 pub mod hashing;
+
+pub(crate) mod attempt_envelope;
+pub(crate) mod event_profile;
