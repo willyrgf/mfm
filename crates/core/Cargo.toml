@@ -22,7 +22,6 @@ bip32 = "0.5.3"
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 uuid = { version = "1.8.0", features = ["serde", "v4"] }
 zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
-base64 = "0.22.1"
 chrono = { version = "0.4.38", features = ["serde"] }
 rand = "0.9.1"
 alloy-primitives = { workspace = true, features = ["serde"] }

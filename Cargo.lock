@@ -1849,6 +1849,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-collectors-evm"
+version = "0.1.0"
+dependencies = [
+ "mfm-machine",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mfm-event-store-mem"
 version = "0.1.0"
 dependencies = [
@@ -1897,10 +1906,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-op-evm-read"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-collectors-evm",
+ "mfm-machine",
+ "mfm-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mfm-op-keystore"
 version = "0.1.0"
 dependencies = [
  "mfm_core",
+]
+
+[[package]]
+name = "mfm-op-nix-app"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-machine",
+ "mfm-sdk",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1910,7 +1943,6 @@ dependencies = [
  "async-trait",
  "mfm-machine",
  "mfm-sdk",
- "serde",
  "serde_json",
  "tokio",
 ]
@@ -1933,7 +1965,6 @@ dependencies = [
  "aes-gcm",
  "alloy-primitives",
  "argon2",
- "base64",
  "bip32",
  "bip39",
  "chrono",
