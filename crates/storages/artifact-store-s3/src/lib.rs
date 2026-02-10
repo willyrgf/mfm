@@ -132,13 +132,23 @@ impl ArtifactStore for S3ArtifactStore {
         let path = self.object_path(&id);
         let (k, v) = Self::kind_to_meta(&kind);
 
-        self.bucket
+        let resp = self
+            .bucket
             .put_object_builder(&path, &bytes)
             .with_metadata(k, v)
             .map_err(|e| StorageError::Other(Self::info("s3_put_failed", e.to_string())))?
             .execute()
             .await
             .map_err(|e| Self::map_s3_err("s3_put_failed", e))?;
+
+        // rust-s3 does not fail on non-2xx by default; it returns a ResponseData with status_code.
+        let status = resp.status_code();
+        if !(200..300).contains(&status) {
+            return Err(StorageError::Other(Self::info(
+                "s3_put_failed",
+                format!("s3 put returned status {status}"),
+            )));
+        }
 
         Ok(id)
     }
@@ -150,6 +160,21 @@ impl ArtifactStore for S3ArtifactStore {
             .get_object(&path)
             .await
             .map_err(|e| Self::map_s3_err("s3_get_failed", e))?;
+
+        // rust-s3 does not fail on non-2xx by default; it returns a ResponseData with status_code.
+        let status = data.status_code();
+        if status == 404 {
+            return Err(StorageError::NotFound(Self::info(
+                "s3_get_failed",
+                "artifact not found",
+            )));
+        }
+        if !(200..300).contains(&status) {
+            return Err(StorageError::Other(Self::info(
+                "s3_get_failed",
+                format!("s3 get returned status {status}"),
+            )));
+        }
 
         let bytes: Vec<u8> = data.into();
 
@@ -166,10 +191,9 @@ impl ArtifactStore for S3ArtifactStore {
 
     async fn exists(&self, id: &ArtifactId) -> Result<bool, StorageError> {
         let path = self.object_path(id);
-        match self.bucket.head_object(&path).await {
-            Ok((_res, _status)) => Ok(true),
-            Err(S3Error::HttpFailWithBody(404, _)) => Ok(false),
-            Err(e) => Err(Self::map_s3_err("s3_head_failed", e)),
-        }
+        self.bucket
+            .object_exists(&path)
+            .await
+            .map_err(|e| Self::map_s3_err("s3_head_failed", e))
     }
 }
