@@ -6,10 +6,39 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 ## Read First (Non-Negotiables)
 
 - Keep changes small and local; prefer 1 logical change per PR/commit.
-- Match CI: use `cargo +nightly fmt --all`, `cargo +nightly clippy --workspace --lib --examples --tests --benches --all-features`, and `cargo nextest run --workspace`.
+- Match CI (Nixfied): use `nix run .#check`, `nix run .#test`, and `nix run .#ci -- --basic/--audit/--parity --summary`.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
 - If you touch security-sensitive code (keystore/crypto), add or strengthen tests.
+
+## Design Contract (Architecture Invariants)
+
+- `REDESIGN.md` is the design contract. If code disagrees with it, the code is wrong (until the doc is updated).
+- `ARCHITECTURE.md` is the contributor-facing one-pager.
+
+Key invariants to preserve (high risk if violated):
+
+- Append-only event streams (no mutation of past events).
+- Per-append atomicity in event stores: each append is all-or-nothing.
+- Content addressing for manifests, snapshots, facts, and outputs.
+- Canonical JSON for hashing structured data (target semantics: RFC 8785 / JCS-style).
+  - Hashed structures MUST NOT contain floats (use integer-scaled values or decimal strings).
+- No ambient IO in state logic: route network/FS through an IO abstraction that supports live and replay.
+- Secrets must not appear in persisted surfaces:
+  - manifests, events, artifacts (including fact payloads and context snapshots), CLI/API outputs, or error details.
+
+## Nixfied Entry Points
+
+Nixfied is the canonical entrypoint for dev/test/build/check/ci:
+
+- `nix run .#help`
+- `nix run .#dev`
+- `nix run .#check`
+- `nix run .#test`
+- `nix run .#build`
+- `nix run .#ci -- --basic --summary`
+- `nix run .#ci -- --audit --summary`
+- `nix run .#ci -- --parity --summary`
 
 ## Project Overview
 
@@ -28,37 +57,52 @@ Status: experimental, not production-ready, and not intended for mainnet use.
 
 Workspace root: `Cargo.toml`
 
-- `mfm_core/`: core library (keystore + config models). Security-critical.
-- `mfm_machine/`: async recoverable state machine framework.
-- `mfm_machine_derive/`: proc-macro derive for state metadata.
-- `mfm_cli/`: CLI binary (package name `mfm`, bin name `mfm_cli`).
+- `crates/core/`: core library (keystore + config models + primitives). Security-critical.
+- `crates/machine/`: state machine runtime + recovery/replay primitives.
+- `crates/machine-derive/`: proc-macro derive crate for compile-time ergonomics.
+- `crates/sdk/`: integration glue (op registry + run launch/resume helpers).
+- `crates/ops/`: domain operations (expand to state graphs).
+- `crates/collectors/`: data collection/normalization libraries (HTTP/RPC/etc).
+- `crates/storages/`: persistence backends (event stores, artifact stores, indexers).
+- `bin/cli/`: CLI package `mfm` (bin `mfm_cli`).
+- `bin/rest-api/`: REST API package `mfm-rest-api` (bin `mfm_rest_api`).
+- `nixfied/`: Nixfied framework integration (commands, CI DSL, module apps).
 
 Key docs:
 
 - `README.md`: project disclaimer.
-- `mfm_cli/README.md`: CLI behavior and JSON output contract.
-- `mfm_machine/README.md`: state machine concepts and usage.
-- `CURRENT_STATE.md`, `CLEANUP_PLAN.md`: deeper design notes (may lag code).
+- `ARCHITECTURE.md`: one-page architecture overview + invariants.
+- `REDESIGN.md`: full design contract (authoritative).
+- `bin/cli/README.md`: CLI behavior and JSON output contract.
+- `crates/machine/README.md`: state machine concepts and usage.
+- `crates/machine-derive/README.md`: proc-macro notes.
+- `NIX_STATE_PROPOSAL.md`: Nix/state design notes (may lag code).
 
 ## Architecture Overview
 
 ### Core Components
 
-1. `mfm_core/`: core library
+1. `crates/machine/`: execution model
+   - state traits + metadata
+   - context + snapshots
+   - execution planning + runtime (recovery/replay aware)
+2. `crates/storages/*`: persistence backends
+   - event stores (append-only, atomic append semantics)
+   - artifact stores (content-addressed blobs/documents)
+3. `crates/ops/*`: domain workflows
+   - ops expand into state graphs, emit domain events, store artifacts/facts
+4. `crates/core/`: primitives + security-sensitive components
    - `mfm_core::keystore`: encrypted key storage and signing utilities
-   - `mfm_core::config`: YAML config models (networks/tokens/DEX/auth)
-2. `mfm_machine/`: async state machine framework
-   - `state`: `Tag`, `Label`, metadata, typed context (`SafeContext`)
-   - `state_machine`: engine, scheduler, tracker, recovery
-3. `mfm_machine_derive/`: proc-macro derive
-   - `#[derive(StateMetadataReqs)]` reduces boilerplate for state metadata
-4. `mfm_cli/`: CLI binary (package `mfm`, bin `mfm_cli`)
-   - clap command tree, keystore subcommands, stable JSON/text outputs
+   - `mfm_core::config`: YAML config models
+5. `bin/cli/`, `bin/rest-api/`: thin wrappers
+   - parse requests, start/resume runs, render stable outputs
 
 Crate dependency graph:
 
 ```text
-mfm (CLI) -> mfm_core -> mfm_machine -> mfm_machine_derive
+bin/cli (mfm) -> crates/sdk -> crates/machine
+bin/cli (mfm) -> crates/ops/* -> crates/core + crates/collectors/* + crates/storages/*
+bin/rest-api (mfm-rest-api) -> crates/sdk -> crates/machine
 ```
 
 ## Key Design Principles
@@ -75,30 +119,22 @@ mfm (CLI) -> mfm_core -> mfm_machine -> mfm_machine_derive
 
 ### Code Style and Standards
 
-1. **Formatting**: Always use nightly rustfmt
+1. **Formatting + Clippy (nightly)**:
 ```bash
-cargo +nightly fmt --all
+nix run .#check
 ```
 
-2. **Linting**: Run clippy with all features
+2. **Testing**:
 ```bash
-cargo +nightly clippy --workspace --lib --examples --tests --benches --all-features
+nix run .#test
 ```
 
-3. **Testing**: Use nextest for faster test execution
+3. **Security Audit**:
 ```bash
-cargo nextest run --workspace
+nix run .#ci -- --audit --summary
 ```
 
-### Security Audit
-
-CI runs `cargo audit`.
-
-```bash
-cargo audit
-```
-
-### Nix (Optional, CI Parity)
+### Nix (CI Parity)
 
 The repo ships a Nix flake (`flake.nix`). CI runs:
 
@@ -107,6 +143,29 @@ nix flake check
 nix build
 nix run .#mfm_cli -- --help
 ```
+
+## Nixfied Customization Surface
+
+Nixfied is vendored under `nixfied/`. Vendoring boundaries (canonical doc: `nixfied/VENDORED.txt`):
+
+- Framework-owned (overwritten on `framework::upgrade`): `flake.nix`, `flake.lock`, `nixfied/internal/`, `nixfied/lib/`, and framework modules under `nixfied/*.nix`.
+- User-owned (preserved on `framework::upgrade`): `nixfied/project/` (primary customization surface) and `nixfied/local/` (extensions).
+
+Prefer editing `nixfied/project/` and `nixfied/local/` (not `flake.nix` or framework code under `nixfied/`) for workflow changes:
+
+- `nixfied/project/conf.nix`: project identity, env vars, envs/ports, module toggles, slot behavior.
+- `nixfied/project/dev.nix`: `nix run .#dev`, plus convenience runners like `nix run .#mfm_cli` / `nix run .#mfm_rest_api`.
+- `nixfied/project/test.nix`: `nix run .#test` (nextest).
+- `nixfied/project/quality.nix`: `nix run .#check` (nightly fmt + clippy).
+- `nixfied/project/prod.nix`: `nix run .#build` (release build).
+- `nixfied/project/ci.nix`: CI pipeline DSL (modes/steps, artifacts, parity services).
+- `nixfied/project/default.nix`: merges project files; update it if you add a new `nixfied/project/*.nix` part.
+- `nixfied/local/default.nix`: optional extension point for extra flake `apps`/`packages`/`devShells` that should survive framework upgrades.
+
+Environment variables you should expect:
+
+- `MFM_ENV`: environment name (`dev|test|prod`).
+- `NIX_ENV`: slot number (0-9) for disjoint ports when running multiple local instances.
 
 ## Common Contribution Types
 
@@ -129,7 +188,7 @@ These are typical, review-friendly change patterns (focus on a single outcome).
 
 4. Making components more generic / reusable
    - Prefer traits + bounds over hard-coded types when it improves reuse
-   - Keep crate boundaries intact (no `mfm_core` -> `mfm_cli` coupling)
+   - Keep crate boundaries intact (no `crates/*` -> `bin/*` coupling)
 
 5. Feature additions
    - New CLI subcommand with stable JSON output
@@ -151,7 +210,7 @@ These are typical, review-friendly change patterns (focus on a single outcome).
   - Prefer typed errors (e.g. `thiserror`) for stable, testable behavior.
   - Use `anyhow` primarily for glue code or when error typing adds little value.
 - CLI:
-  - Preserve stable, machine-readable error codes (see `mfm_cli/README.md`).
+  - Preserve stable, machine-readable error codes (see `bin/cli/README.md`).
   - Avoid breaking the JSON output schema.
 
 ### Logging
@@ -159,7 +218,7 @@ These are typical, review-friendly change patterns (focus on a single outcome).
 - Library crates:
   - Prefer `log` to avoid forcing a subscriber on downstream users.
 - Binaries:
-  - Prefer `tracing` (CLI initializes `tracing_subscriber` in `mfm_cli/src/main.rs`).
+  - Prefer `tracing` (CLI initializes `tracing_subscriber` in `bin/cli/src/main.rs`).
 - Never log secrets (passwords, mnemonics, private keys, raw ciphertext).
 
 ### Unsafe
@@ -171,7 +230,7 @@ Avoid `unsafe` where possible. If you must use it:
 
 ## Domain-Specific Guidance
 
-### Keystore (`mfm_core/src/keystore/`)
+### Keystore (`crates/core/src/keystore/`)
 
 This is security-sensitive code. Treat changes here as high risk.
 
@@ -189,7 +248,7 @@ When adding features (export, password change, etc.):
 - Add unit tests and corruption/tamper tests.
 - Prefer explicit, test-backed behavior over implicit "best effort".
 
-### CLI (`mfm_cli/`)
+### CLI (`bin/cli/`)
 
 The CLI is designed to be scriptable and AI-friendly.
 
@@ -203,11 +262,11 @@ The CLI is designed to be scriptable and AI-friendly.
 Run locally:
 
 ```bash
-cargo run -p mfm --bin mfm_cli -- --help
-cargo run -p mfm --bin mfm_cli -- keystore list
+nix run .#mfm_cli -- --help
+nix run .#mfm_cli -- keystore list
 ```
 
-### State Machine (`mfm_machine/`)
+### State Machine (`crates/machine/`)
 
 The state machine is async and uses a typed tag/label system.
 
@@ -215,10 +274,10 @@ The state machine is async and uses a typed tag/label system.
 - Do not block the async runtime:
   - use async I/O where possible
   - use `tokio::task::spawn_blocking` for CPU-bound or blocking work
-- Prefer `SafeContext::{read_typed, write_typed}` over ad-hoc JSON.
+- Prefer `TypedContextExt::{read_typed, write_typed}` over ad-hoc JSON.
 - If you change scheduling/recovery semantics, add tests that assert behavior.
 
-### Proc-Macros (`mfm_machine_derive/`)
+### Proc-Macros (`crates/machine-derive/`)
 
 - Optimize for clear compile-time errors.
 - Avoid expanding to surprising code (keep generated impls small and idiomatic).
@@ -253,7 +312,7 @@ If a bug can reappear, write a regression test.
 - Avoid accidental allocations in hot paths (crypto, parsing, tight loops).
 - Prefer borrowing (`&[u8]`, `&str`) to cloning, especially for large buffers.
 - In async code, do not block the runtime; use `tokio::task::spawn_blocking`.
-- Be mindful of lock scope for `SafeContext` (keep read/write lock holds short).
+- Be mindful of context scope (avoid holding mutable context across `.await`).
 
 ## Common Pitfalls
 
@@ -275,6 +334,7 @@ If you use Nix or need CI parity, also run: `nix flake check && nix build`.
 - CLI logging: use `tracing::{debug, info, warn, error}` with a clear target.
 - Library logging: use `log::{debug, info, warn, error}`.
 - Tests: prefer isolated temp dirs/files via `tempfile`.
+- CI summaries: `nix run .#ci -- --summary` writes `summary.json` to the artifacts dir (see `nixfied/project/ci.nix`).
 
 
 ## Commenting Guidelines (Keep Future Readers in Mind)
@@ -310,24 +370,22 @@ DONT:
 ### Essential Commands
 
 ```bash
-# Format code
-cargo +nightly fmt --all
+# Quality checks (fmt + clippy, nightly toolchain)
+nix run .#check
 
-# Run lints
-cargo +nightly clippy --workspace --lib --examples --tests --benches --all-features
+# Run tests (nextest)
+nix run .#test
 
-# Run tests
-cargo nextest run --workspace
+# Security audit
+nix run .#ci -- --audit --summary
 
-# Run specific benchmark
-cargo bench --bench bench_name
+# CI modes
+nix run .#ci -- --basic --summary
+nix run .#ci -- --parity --summary
 
-# Build optimized binary
-cargo build --release --features "jemalloc asm-keccak"
+# Release build (all features)
+nix run .#build
 
-# Check compilation for all features
-cargo check --workspace --all-features
-
-# Check documentation
-cargo docs --document-private-items 
+# For ad-hoc cargo commands (bench/check/doc), use the pinned dev shell:
+nix develop
 ```

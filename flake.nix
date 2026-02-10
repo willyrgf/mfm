@@ -1,10 +1,9 @@
 {
-  description = "MFM distributed by Nix.";
+  description = "Generic Nix project framework";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs";
+    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
   outputs =
@@ -12,74 +11,168 @@
       self,
       nixpkgs,
       flake-utils,
-      rust-overlay,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [ rust-overlay.overlays.default ];
+        pkgs = import nixpkgs { inherit system; };
+
+        project = import ./nixfied/project { inherit pkgs; };
+        slots = import ./nixfied/slots.nix { inherit pkgs project; };
+
+        postgres =
+          if (project.modules.postgres.enable or false) then
+            import ./nixfied/postgres { inherit pkgs project slots; }
+          else
+            null;
+
+        nginx =
+          if (project.modules.nginx.enable or false) then
+            import ./nixfied/nginx { inherit pkgs project slots; }
+          else
+            null;
+
+        ephemeral =
+          if (project.ephemeral.enable or false) then
+            import ./nixfied/ephemeral.nix { inherit pkgs project; }
+          else
+            null;
+
+        hooks = import ./nixfied/hooks.nix {
+          inherit
+            pkgs
+            project
+            slots
+            postgres
+            nginx
+            supervisor
+            ephemeral
+            ;
         };
 
-        # Use rust-overlay toolchains so Nix builds don't get stuck on an older
-        # nixpkgs rustc that can't compile newer transitive deps.
-        stableToolchain = pkgs.rust-bin.stable.latest.default;
+        lib = import ./nixfied/lib { inherit pkgs project hooks; };
+        supervisor =
+          if (project.supervisor.enable or true) then
+            import ./nixfied/supervisor { inherit pkgs project slots; }
+          else
+            null;
 
-        nightlyToolchain = pkgs.rust-bin.nightly.latest.default.override {
-          extensions = [
-            "rustfmt"
-            "clippy"
-            "rust-src"
-          ];
+        coreApps = import ./nixfied/internal/core.nix {
+          inherit
+            pkgs
+            project
+            lib
+            moduleApps
+            ;
         };
+        isFramework = builtins.pathExists ./nixfied/.framework;
 
-        rustPlatform = pkgs.makeRustPlatform {
-          cargo = stableToolchain;
-          rustc = stableToolchain;
+        installApps =
+          if isFramework then
+            import ./nixfied/internal/install.nix {
+              inherit
+                pkgs
+                lib
+                ;
+              frameworkRoot = ./.;
+            }
+          else
+            { };
+
+        testApps =
+          if isFramework then
+            import ./nixfied/internal/test.nix {
+              inherit
+                pkgs
+                lib
+                ;
+            }
+          else
+            { };
+        isolationApps = import ./nixfied/internal/isolation.nix {
+          inherit
+            pkgs
+            project
+            lib
+            slots
+            ;
         };
-
-        # Define the Rust package
-        mfm_cli = rustPlatform.buildRustPackage {
-          pname = "mfm_cli";
-          version = "0.0.2";
-          src = ./.;
-
-          # Specify the cargo workspace root if needed
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-          };
-
-          nativeBuildInputs = with pkgs; [ pkg-config ];
-
-          buildInputs = with pkgs; [
-            git
-            openssl
-          ];
-
-          # Skip tests if you don't want them
-          doCheck = false;
+        moduleApps = import ./nixfied/internal/module-apps.nix {
+          inherit
+            pkgs
+            project
+            lib
+            postgres
+            nginx
+            supervisor
+            slots
+            ;
         };
+        frameworkApps = pkgs.lib.mapAttrs' (name: value: {
+          name = "framework::${name}";
+          value = value;
+        }) (installApps // testApps);
+        ciEntry = import ./nixfied/ci.nix {
+          inherit
+            pkgs
+            project
+            lib
+            ephemeral
+            ;
+        };
+        ciApp =
+          if ciEntry == null then
+            null
+          else if ciEntry ? app then
+            ciEntry.app
+          else
+            ciEntry;
+
+        local =
+          if builtins.pathExists ./nixfied/local then
+            import ./nixfied/local {
+              inherit
+                pkgs
+                project
+                lib
+                slots
+                hooks
+                postgres
+                nginx
+                supervisor
+                ephemeral
+                ;
+            }
+          else
+            { };
       in
       {
-        packages.mfm_cli = mfm_cli;
+        devShells = {
+          default = import ./nixfied/devshell.nix {
+            inherit
+              pkgs
+              project
+              ;
+          };
+        }
+        // (local.devShells or { });
 
-        defaultPackage = self.packages.${system}.mfm_cli;
+        apps =
+          let
+            apps0 =
+              coreApps
+              // moduleApps
+              // (if ciApp != null then { ci = ciApp; } else { })
+              // isolationApps
+              // frameworkApps
+              // (local.apps or { })
+              // {
+                default = if coreApps ? help then coreApps.help else coreApps.dev;
+              };
+          in
+          lib.appApi.validateApps apps0;
 
-        apps.default = {
-          type = "app";
-          program = "${self.packages.${system}.mfm_cli}/bin/mfm_cli";
-        };
-
-        devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            nightlyToolchain
-            cargo-nextest
-            git
-            pkg-config
-            openssl
-          ];
-        };
+        packages = pkgs.lib.recursiveUpdate (project.packages or { }) (local.packages or { });
       }
     );
 }
