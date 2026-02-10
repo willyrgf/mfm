@@ -28,10 +28,13 @@ use crate::live_io::{
 use crate::plan::{DependencyEdge, ExecutionPlan, PlanValidationError, StateNode};
 use crate::recorder::EventRecorder;
 use crate::replay_io::ReplayIo;
-use crate::stores::{ArtifactStore, EventStore};
+use crate::stores::ArtifactStore;
 
 mod attempt;
 mod child_runs;
+mod writer;
+
+use writer::{append_kernel, EventWriter, SharedEventWriter};
 
 pub use child_runs::ChildRunLiveIoTransportFactory;
 
@@ -102,55 +105,8 @@ fn context_err(code: &'static str, message: &'static str) -> ContextError {
     ContextError::Serialization(info(code, ErrorCategory::Context, message))
 }
 
-type SharedEventWriter = Arc<Mutex<EventWriter>>;
-
 const CODE_FACT_BINDING_APPEND_FAILED: &str = "fact_binding_append_failed";
 const CODE_FACT_BINDING_PAYLOAD_INVALID: &str = "fact_binding_payload_invalid";
-
-struct EventWriter {
-    run_id: RunId,
-    store: Arc<dyn EventStore>,
-    next_seq: u64,
-}
-
-impl EventWriter {
-    async fn new(store: Arc<dyn EventStore>, run_id: RunId) -> Result<Self, StorageError> {
-        let head = store.head_seq(run_id).await?;
-        Ok(Self {
-            run_id,
-            store,
-            next_seq: head + 1,
-        })
-    }
-
-    async fn append(&mut self, events: Vec<Event>) -> Result<u64, StorageError> {
-        if events.is_empty() {
-            return Ok(self.next_seq.saturating_sub(1));
-        }
-
-        let expected_seq = self.next_seq.saturating_sub(1);
-        let mut envelopes = Vec::with_capacity(events.len());
-        for (idx, event) in events.into_iter().enumerate() {
-            envelopes.push(EventEnvelope {
-                run_id: self.run_id,
-                seq: expected_seq + (idx as u64) + 1,
-                ts_millis: None,
-                event,
-            });
-        }
-
-        let head = self
-            .store
-            .append(self.run_id, expected_seq, envelopes)
-            .await?;
-        self.next_seq = head + 1;
-        Ok(head)
-    }
-
-    async fn append_kernel(&mut self, event: KernelEvent) -> Result<u64, StorageError> {
-        self.append(vec![Event::Kernel(event)]).await
-    }
-}
 
 #[derive(Clone)]
 struct RuntimeFactRecorder {
@@ -600,16 +556,6 @@ fn next_attempt(last_attempt_by_state: &HashMap<StateId, u32>, state_id: &StateI
         .copied()
         .map(|a| a + 1)
         .unwrap_or(0)
-}
-
-async fn append_kernel(writer: &SharedEventWriter, event: KernelEvent) -> Result<(), RunError> {
-    writer
-        .lock()
-        .await
-        .append_kernel(event)
-        .await
-        .map_err(RunError::Storage)?;
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
