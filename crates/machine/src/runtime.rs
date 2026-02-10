@@ -1369,6 +1369,285 @@ fn next_attempt(last_attempt_by_state: &HashMap<StateId, u32>, state_id: &StateI
         .unwrap_or(0)
 }
 
+async fn append_kernel(writer: &SharedEventWriter, event: KernelEvent) -> Result<(), RunError> {
+    writer
+        .lock()
+        .await
+        .append_kernel(event)
+        .await
+        .map_err(RunError::Storage)?;
+    Ok(())
+}
+
+fn should_skip_state(run_config: &RunConfig, state_meta: &crate::meta::StateMeta) -> bool {
+    if run_config.skip_tags.is_empty() {
+        return false;
+    }
+
+    state_meta
+        .tags
+        .iter()
+        .any(|t| run_config.skip_tags.contains(t))
+}
+
+struct AttemptCtx<'a> {
+    stores: &'a Stores,
+    run_config: &'a RunConfig,
+    run_id: RunId,
+    state_id: StateId,
+    attempt: u32,
+    base_snapshot_id: ArtifactId,
+    facts: FactIndex,
+    writer: SharedEventWriter,
+    live_factory: Arc<dyn LiveIoTransportFactory>,
+    failpoints: Option<EngineFailpoints>,
+    state: crate::state::DynState,
+    state_meta: crate::meta::StateMeta,
+}
+
+enum HandlerResult {
+    Ok(StagedContext),
+    Err(crate::errors::StateError),
+}
+
+enum AfterHandlerResult {
+    StopAfterHandler,
+    Done(HandlerResult),
+}
+
+#[derive(Clone)]
+struct SanitizedStateError(crate::errors::StateError);
+
+impl SanitizedStateError {
+    fn new(mut err: crate::errors::StateError, state_id: &StateId) -> Self {
+        if err.state_id.is_none() {
+            err.state_id = Some(state_id.clone());
+        }
+
+        // Milestone 1: never persist secrets in error details.
+        crate::secrets::redact_error_info(&mut err.info);
+
+        Self(err)
+    }
+
+    fn retryable(&self) -> bool {
+        self.0.info.retryable
+    }
+}
+
+enum RedactedResult {
+    StopAfterHandler,
+    Ok(StagedContext),
+    Err(SanitizedStateError),
+}
+
+enum AttemptOutcome {
+    Skipped,
+    StopAfterHandler,
+    Ok(StagedContext),
+    Err(SanitizedStateError),
+}
+
+#[async_trait]
+trait AttemptStep {
+    type Output;
+
+    async fn run(&self, ctx: &mut AttemptCtx<'_>) -> Result<Self::Output, RunError>;
+}
+
+struct CallHandler;
+
+#[async_trait]
+impl AttemptStep for CallHandler {
+    type Output = HandlerResult;
+
+    async fn run(&self, ctx: &mut AttemptCtx<'_>) -> Result<Self::Output, RunError> {
+        let base_ctx =
+            read_json_context(ctx.stores.artifacts.as_ref(), &ctx.base_snapshot_id).await?;
+        let mut staged = StagedContext::new(base_ctx);
+
+        let mut io = match ctx.run_config.io_mode {
+            IoMode::Live => {
+                let fact_recorder: Arc<dyn FactRecorder> = Arc::new(RuntimeFactRecorder {
+                    writer: Arc::clone(&ctx.writer),
+                });
+                AttemptIo::Live(LiveIo::new(
+                    ctx.run_id,
+                    ctx.state_id.clone(),
+                    ctx.attempt,
+                    Arc::clone(&ctx.stores.artifacts),
+                    ctx.facts.clone(),
+                    fact_recorder,
+                    ctx.live_factory.make(crate::live_io::LiveIoEnv {
+                        stores: ctx.stores.clone(),
+                        run_id: ctx.run_id,
+                        state_id: ctx.state_id.clone(),
+                        attempt: ctx.attempt,
+                    }),
+                ))
+            }
+            IoMode::Replay => AttemptIo::Replay(ReplayIo::new(
+                ctx.run_id,
+                ctx.state_id.clone(),
+                ctx.attempt,
+                Arc::clone(&ctx.stores.artifacts),
+                ctx.facts.clone(),
+                ctx.run_config.replay_missing_fact_retryable,
+            )),
+        };
+
+        let mut append_rec = AppendEventRecorder {
+            writer: Arc::clone(&ctx.writer),
+        };
+        let mut rec = crate::event_profile::FilteringEventRecorder::new(
+            ctx.run_config.event_profile.clone(),
+            &mut append_rec,
+        );
+
+        match ctx.state.handle(&mut staged, &mut io, &mut rec).await {
+            Ok(_) => Ok(HandlerResult::Ok(staged)),
+            Err(err) => Ok(HandlerResult::Err(err)),
+        }
+    }
+}
+
+struct WithFailpoints<S> {
+    inner: S,
+}
+
+#[async_trait]
+impl<S> AttemptStep for WithFailpoints<S>
+where
+    S: AttemptStep<Output = HandlerResult> + Send + Sync,
+{
+    type Output = AfterHandlerResult;
+
+    async fn run(&self, ctx: &mut AttemptCtx<'_>) -> Result<Self::Output, RunError> {
+        let out = self.inner.run(ctx).await?;
+        if let Some(fp) = &ctx.failpoints {
+            if fp.should_stop_after_handler() {
+                return Ok(AfterHandlerResult::StopAfterHandler);
+            }
+        }
+        Ok(AfterHandlerResult::Done(out))
+    }
+}
+
+struct RedactErrors<S> {
+    inner: S,
+}
+
+#[async_trait]
+impl<S> AttemptStep for RedactErrors<S>
+where
+    S: AttemptStep<Output = AfterHandlerResult> + Send + Sync,
+{
+    type Output = RedactedResult;
+
+    async fn run(&self, ctx: &mut AttemptCtx<'_>) -> Result<Self::Output, RunError> {
+        match self.inner.run(ctx).await? {
+            AfterHandlerResult::StopAfterHandler => Ok(RedactedResult::StopAfterHandler),
+            AfterHandlerResult::Done(HandlerResult::Ok(staged)) => Ok(RedactedResult::Ok(staged)),
+            AfterHandlerResult::Done(HandlerResult::Err(err)) => Ok(RedactedResult::Err(
+                SanitizedStateError::new(err, &ctx.state_id),
+            )),
+        }
+    }
+}
+
+struct SkipTags<S> {
+    inner: S,
+}
+
+#[async_trait]
+impl<S> AttemptStep for SkipTags<S>
+where
+    S: AttemptStep<Output = RedactedResult> + Send + Sync,
+{
+    type Output = AttemptOutcome;
+
+    async fn run(&self, ctx: &mut AttemptCtx<'_>) -> Result<Self::Output, RunError> {
+        if should_skip_state(ctx.run_config, &ctx.state_meta) {
+            return Ok(AttemptOutcome::Skipped);
+        }
+
+        match self.inner.run(ctx).await? {
+            RedactedResult::StopAfterHandler => Ok(AttemptOutcome::StopAfterHandler),
+            RedactedResult::Ok(staged) => Ok(AttemptOutcome::Ok(staged)),
+            RedactedResult::Err(err) => Ok(AttemptOutcome::Err(err)),
+        }
+    }
+}
+
+enum AttemptExec {
+    Completed { snapshot_id: ArtifactId },
+    Failed { retryable: bool },
+    StopAfterHandler,
+}
+
+async fn execute_attempt(ctx: &mut AttemptCtx<'_>) -> Result<AttemptExec, RunError> {
+    append_kernel(
+        &ctx.writer,
+        KernelEvent::StateEntered {
+            state_id: ctx.state_id.clone(),
+            attempt: ctx.attempt,
+            base_snapshot_id: ctx.base_snapshot_id.clone(),
+        },
+    )
+    .await?;
+
+    let logic = SkipTags {
+        inner: RedactErrors {
+            inner: WithFailpoints { inner: CallHandler },
+        },
+    };
+
+    match logic.run(ctx).await? {
+        AttemptOutcome::StopAfterHandler => Ok(AttemptExec::StopAfterHandler),
+        AttemptOutcome::Skipped => {
+            append_kernel(
+                &ctx.writer,
+                KernelEvent::StateCompleted {
+                    state_id: ctx.state_id.clone(),
+                    context_snapshot_id: ctx.base_snapshot_id.clone(),
+                },
+            )
+            .await?;
+            Ok(AttemptExec::Completed {
+                snapshot_id: ctx.base_snapshot_id.clone(),
+            })
+        }
+        AttemptOutcome::Ok(staged) => {
+            let snapshot = staged.dump().map_err(RunError::Context)?;
+            let snapshot_id =
+                write_full_snapshot_value(ctx.stores.artifacts.as_ref(), snapshot).await?;
+            append_kernel(
+                &ctx.writer,
+                KernelEvent::StateCompleted {
+                    state_id: ctx.state_id.clone(),
+                    context_snapshot_id: snapshot_id.clone(),
+                },
+            )
+            .await?;
+            Ok(AttemptExec::Completed { snapshot_id })
+        }
+        AttemptOutcome::Err(err) => {
+            append_kernel(
+                &ctx.writer,
+                KernelEvent::StateFailed {
+                    state_id: ctx.state_id.clone(),
+                    error: err.0.clone(),
+                    failure_snapshot_id: None,
+                },
+            )
+            .await?;
+            Ok(AttemptExec::Failed {
+                retryable: err.retryable(),
+            })
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_states(
     stores: &Stores,
@@ -1413,141 +1692,38 @@ async fn run_states(
                 (node.id.clone(), 0, current_snapshot_id.clone())
             };
 
-        // Optional: allow the executor to skip tagged states (e.g., dry-run skipping apply-side-effect).
-        if !run_config.skip_tags.is_empty()
-            && node
-                .state
-                .meta()
-                .tags
-                .iter()
-                .any(|t| run_config.skip_tags.contains(t))
-        {
-            writer
-                .lock()
-                .await
-                .append_kernel(KernelEvent::StateEntered {
-                    state_id: state_id.clone(),
-                    attempt,
-                    base_snapshot_id: base_snapshot_id.clone(),
-                })
-                .await
-                .map_err(RunError::Storage)?;
-
-            // Skipped states are treated as successful no-ops: they advance plan progression but
-            // do not change the checkpoint.
-            writer
-                .lock()
-                .await
-                .append_kernel(KernelEvent::StateCompleted {
-                    state_id: state_id.clone(),
-                    context_snapshot_id: base_snapshot_id.clone(),
-                })
-                .await
-                .map_err(RunError::Storage)?;
-
-            current_snapshot_id = base_snapshot_id.clone();
-            continue;
-        }
+        let state = Arc::clone(&node.state);
+        let state_meta = state.meta();
 
         loop {
-            // Kernel: entered attempt.
-            writer
-                .lock()
-                .await
-                .append_kernel(KernelEvent::StateEntered {
-                    state_id: state_id.clone(),
-                    attempt,
-                    base_snapshot_id: base_snapshot_id.clone(),
-                })
-                .await
-                .map_err(RunError::Storage)?;
-
-            let base_ctx = read_json_context(stores.artifacts.as_ref(), &base_snapshot_id).await?;
-            let mut ctx = StagedContext::new(base_ctx);
-            let fact_recorder: Arc<dyn FactRecorder> = Arc::new(RuntimeFactRecorder {
+            let mut attempt_ctx = AttemptCtx {
+                stores,
+                run_config,
+                run_id,
+                state_id: state_id.clone(),
+                attempt,
+                base_snapshot_id: base_snapshot_id.clone(),
+                facts: facts.clone(),
                 writer: Arc::clone(&writer),
-            });
-            let mut io = match run_config.io_mode {
-                IoMode::Live => AttemptIo::Live(LiveIo::new(
-                    run_id,
-                    state_id.clone(),
-                    attempt,
-                    Arc::clone(&stores.artifacts),
-                    facts.clone(),
-                    fact_recorder,
-                    live_factory.make(crate::live_io::LiveIoEnv {
-                        stores: stores.clone(),
-                        run_id,
-                        state_id: state_id.clone(),
-                        attempt,
-                    }),
-                )),
-                IoMode::Replay => AttemptIo::Replay(ReplayIo::new(
-                    run_id,
-                    state_id.clone(),
-                    attempt,
-                    Arc::clone(&stores.artifacts),
-                    facts.clone(),
-                    run_config.replay_missing_fact_retryable,
-                )),
+                live_factory: Arc::clone(&live_factory),
+                failpoints: failpoints.clone(),
+                state: Arc::clone(&state),
+                state_meta: state_meta.clone(),
             };
-            let mut append_rec = AppendEventRecorder {
-                writer: Arc::clone(&writer),
-            };
-            let mut rec = crate::event_profile::FilteringEventRecorder::new(
-                run_config.event_profile.clone(),
-                &mut append_rec,
-            );
 
-            let res = node.state.handle(&mut ctx, &mut io, &mut rec).await;
-
-            if let Some(fp) = &failpoints {
-                if fp.should_stop_after_handler() {
+            match execute_attempt(&mut attempt_ctx).await? {
+                AttemptExec::Completed { snapshot_id } => {
+                    current_snapshot_id = snapshot_id;
+                    break;
+                }
+                AttemptExec::StopAfterHandler => {
                     return Ok(RunResult {
                         run_id,
                         phase: RunPhase::Running,
                         final_snapshot_id: Some(current_snapshot_id.clone()),
                     });
                 }
-            }
-
-            match res {
-                Ok(_) => {
-                    let snapshot = ctx.dump().map_err(RunError::Context)?;
-                    let snapshot_id =
-                        write_full_snapshot_value(stores.artifacts.as_ref(), snapshot).await?;
-                    writer
-                        .lock()
-                        .await
-                        .append_kernel(KernelEvent::StateCompleted {
-                            state_id: state_id.clone(),
-                            context_snapshot_id: snapshot_id.clone(),
-                        })
-                        .await
-                        .map_err(RunError::Storage)?;
-                    current_snapshot_id = snapshot_id;
-                    break;
-                }
-                Err(mut err) => {
-                    if err.state_id.is_none() {
-                        err.state_id = Some(state_id.clone());
-                    }
-
-                    // Milestone 1: never persist secrets in error details.
-                    crate::secrets::redact_error_info(&mut err.info);
-
-                    writer
-                        .lock()
-                        .await
-                        .append_kernel(KernelEvent::StateFailed {
-                            state_id: state_id.clone(),
-                            error: err.clone(),
-                            failure_snapshot_id: None,
-                        })
-                        .await
-                        .map_err(RunError::Storage)?;
-
-                    let retryable = err.info.retryable;
+                AttemptExec::Failed { retryable } => {
                     let next = attempt + 1;
                     if retryable && next < run_config.retry_policy.max_attempts {
                         let d = compute_backoff(&run_config.retry_policy.backoff, attempt);
@@ -1577,15 +1753,14 @@ async fn run_states(
         RunPhase::Cancelled => (RunStatus::Cancelled, Some(current_snapshot_id.clone())),
     };
 
-    writer
-        .lock()
-        .await
-        .append_kernel(KernelEvent::RunCompleted {
+    append_kernel(
+        &writer,
+        KernelEvent::RunCompleted {
             status: status.clone(),
             final_snapshot_id: final_snapshot_id.clone(),
-        })
-        .await
-        .map_err(RunError::Storage)?;
+        },
+    )
+    .await?;
 
     Ok(RunResult {
         run_id,
