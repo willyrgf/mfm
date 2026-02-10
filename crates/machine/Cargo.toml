@@ -9,7 +9,5 @@ hex = { workspace = true }
 ring = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-uuid = { version = "1.8.0", features = ["serde", "v4"] }
-
-[dev-dependencies]
 tokio = { workspace = true }
+uuid = { version = "1.8.0", features = ["serde", "v4"] }

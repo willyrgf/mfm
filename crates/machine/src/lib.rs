@@ -866,6 +866,11 @@ pub mod engine {
 /// This module is not part of the stable API contract (Appendix C.1) and may change.
 pub mod hashing;
 
+/// Unstable v4 runtime implementation (executor + resume logic).
+///
+/// Not part of the stable API contract (Appendix C.1).
+pub mod runtime;
+
 pub(crate) mod attempt_envelope;
 pub(crate) mod context_runtime;
 pub(crate) mod event_profile;
