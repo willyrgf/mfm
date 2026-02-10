@@ -43,7 +43,20 @@ These are implementation decisions that remove ambiguity for the rest of the wor
 
 1. **CLI scope**: keep existing `keystore` subcommands in the same CLI binary while adding run start/resume/inspect.
 2. **Repo layout**: adopt `crates/` + `bin/` early (start reorganizing up front).
-3. **Storage backends for Milestone 1**: go straight to **PostgreSQL EventStore** + **MinIO (S3) ArtifactStore**.
+3. **Storage backends for Milestone 1**: implement both a fast local lane and a parity lane:
+   - **fast lane (default tests)**: in-memory `EventStore` + filesystem `ArtifactStore`
+   - **parity lane (integration)**: PostgreSQL `EventStore` + MinIO/S3 `ArtifactStore`
+   - parity tests MUST be opt-in so `cargo nextest run --workspace` remains service-free by default.
+
+---
+
+## Workflow Rules (Git)
+
+- Work directly on the `dev` branch for this milestone (no long-lived feature branches).
+- Each PR-sized unit below MUST land as a **single commit**.
+- Commit message MUST be prefixed with: `redesign: `
+  - Example: `redesign: layout scaffold`
+- Keep the repo green after each commit (fmt/clippy/nextest).
 
 ---
 
@@ -60,6 +73,9 @@ These are implementation decisions that remove ambiguity for the rest of the wor
 
 ## Public Interfaces (Milestone 1)
 
+Milestone 1 public API contract for `mfm-machine` is Appendix C.1 in `REDESIGN_FINAL.md`.
+This plan follows that contract; any deviation MUST be recorded in [Deviations](#deviations).
+
 ### Kernel events (required for recovery)
 
 - `RunStarted { op_id, manifest_id, initial_snapshot_id }`
@@ -70,13 +86,32 @@ These are implementation decisions that remove ambiguity for the rest of the wor
 
 ### Domain events (audit-only; never required for correctness)
 
-Examples:
+Milestone 1 domain events use a generic envelope:
+
+- `DomainEvent { name, payload, payload_ref? }`
+
+Recommended standard payloads (helpers only; not required by the engine):
 
 - `FactRecorded { key, payload_id, meta }`
 - `ArtifactWritten { artifact_id, kind, meta }`
 - `OpBoundary { op_path, phase }`
 
-Rule: domain events must never contain secrets.
+Rules:
+
+- Domain events must never be required for engine correctness.
+- Domain events must never contain secrets.
+- Domain event emission is controlled by `RunConfig.event_profile` (Minimal/Normal/Verbose/Custom).
+
+### Store traits (signatures)
+
+- `EventStore`:
+  - `head_seq(run_id) -> u64`
+  - `append(run_id, expected_seq, events) -> u64` (atomic; optimistic concurrency)
+  - `read_range(run_id, from_seq, to_seq: Option<u64>) -> Vec<EventEnvelope>`
+- `ArtifactStore`:
+  - `put(kind, bytes) -> ArtifactId` (content-addressed)
+  - `get(id) -> bytes` (verify hash; corruption => error)
+  - `exists(id) -> bool`
 
 ### IDs and naming conventions
 
@@ -85,6 +120,7 @@ Rule: domain events must never contain secrets.
 - `StateId = <machine_id>.<step_id>.<state_local_id>` (3 segments)
 - each segment matches `^[a-z][a-z0-9_]{0,62}$`
 - `ArtifactId` is SHA-256 lowercase hex, 64 chars
+- `ContextKey` and `ErrorCode` are stable string newtypes (see Appendix C.1)
 
 ---
 
@@ -104,15 +140,18 @@ Each invariant must be verifiable by at least one named acceptance test:
 
 ---
 
-## CI Requirements (because Postgres + MinIO are mandatory)
+## CI Requirements (fast lane + parity lane)
 
-Rust CI currently runs `cargo nextest run --workspace` with no services. For Milestone 1 tests that require
-Postgres/MinIO, we will make CI decision-complete by doing BOTH:
+Rust CI currently runs `cargo nextest run --workspace` with no services. For Milestone 1 we keep that as the default
+**fast lane**, using local store implementations (in-memory `EventStore` + filesystem `ArtifactStore`).
 
-1. Add GitHub Actions `services:` for `postgres` and `minio` to `.github/workflows/checks.yml`.
-2. Make integration tests read connection details from env vars (with sane defaults matching CI services).
+Add an opt-in **parity lane** that runs against Postgres + MinIO:
 
-This keeps unit tests fast and makes integration-lane tests reliable in CI without manual setup.
+1. Add a separate GitHub Actions job (or workflow) with `services:` for `postgres` and `minio`.
+2. Gate parity integration tests behind a feature flag or env toggle so they do not run in the fast lane.
+3. Make parity tests read connection details from env vars (with sane defaults matching CI services).
+
+Both lanes MUST satisfy the same correctness contract/invariants.
 
 ---
 
@@ -143,64 +182,94 @@ Each PR is intended to be small, reviewable, and keep the repo green.
 
 - Add:
   - `crates/machine/` (package `mfm-machine`)
+  - `crates/machine-derive/` (package `mfm-machine-derive`)
   - `crates/sdk/` (package `mfm-sdk`)
+  - `crates/storages/event-store-mem/` (package `mfm-event-store-mem`) (fast lane)
+  - `crates/storages/artifact-store-fs/` (package `mfm-artifact-store-fs`) (fast lane)
   - `crates/storages/event-store-postgres/` (package `mfm-event-store-postgres`)
   - `crates/storages/artifact-store-s3/` (package `mfm-artifact-store-s3`)
   - `crates/ops/proof-op/` (package `mfm-op-proof`)
+  - `crates/ops/keystore-op/` (package `mfm-op-keystore`)
 - Add minimal `lib.rs` and `README.md` per crate describing boundaries
 - Keep legacy machine in place for now
 
-### PR 04 — Canonical JSON + SHA-256 helpers (AT-05)
+### PR 04 — `mfm-machine` public API contract (Appendix C.1)
+
+Define the stable Milestone 1 API surface exactly as described in `REDESIGN_FINAL.md` Appendix C.1 (types + traits only):
+
+- `ids`: `RunId`, `OpId`, `OpPath`, `StateId`, `ArtifactId`, `FactKey`, `ContextKey`, `ErrorCode`
+- `config`: `IoMode`, `EventProfile`, retry/backoff policy types, `RunConfig`, `RunManifest`, `BuildProvenance`
+- `meta`: tags + side-effect classification + idempotency declarations
+- `errors`: `ErrorInfo`-based structured errors (no secrets)
+- `context`: `DynContext` + typed extension trait
+- `events`: kernel events, generic `DomainEvent`, `EventEnvelope`, and recommended standard payload helpers
+- `io`: `IoCall`/`IoResult` + `IoProvider`
+- `recorder`: `EventRecorder`
+- `state`: `State` trait + `StateOutcome`
+- `plan`: `StateGraph` / `ExecutionPlan` + plan validation errors
+- `stores`: `EventStore` + `ArtifactStore` traits + `ArtifactKind`
+- `engine`: `ExecutionEngine::{start,resume}` contract types
+
+Add unit tests for:
+
+- ID validation (including `OpPath`/`StateId` segment regex invariants)
+- stable error code `missing_fact_key`
+
+### PR 05 — Canonical JSON + SHA-256 helpers (AT-05)
 
 - Implement canonical JSON bytes for hashing (RFC 8785 / JCS semantics)
 - Reject floats (fractional JSON numbers) and NaN/Inf in hashed structures
-- Define `ArtifactId` newtype (sha256 hex)
+- Implement `ArtifactId` computation (SHA-256 lowercase hex)
 - Add tests:
   - canonicalization vectors
   - float rejection
-  - ArtifactId format
+  - `ArtifactId` format
 
-### PR 05 — Core v4 types, IDs, and errors
+### PR 06 — ArtifactStore implementations (fast lane + parity lane) (AT-04)
 
-- Define and validate:
-  - `RunId`, `OpId`, `OpPath`, `StateId`, `FactKey`
-- Define `RunConfig` including `replay_missing_fact_retryable: bool` (default false)
-- Define structured errors:
-  - `IoError::MissingFactKey` with stable code `missing_fact_key`
-  - `IoError::MissingFact { key, ... }`
-  - `StorageError`, `StateError` with explicit retryability semantics
-- Add unit tests for validation + error code stability
+- Implement filesystem backend in `mfm-artifact-store-fs` (fast lane; no services)
+- Implement S3/MinIO backend in `mfm-artifact-store-s3` (parity lane)
+- Both backends MUST:
+  - be content-addressed (`put` computes `ArtifactId` from bytes)
+  - verify hashes on `get` (corruption => `StorageError::Corruption`)
+  - support `exists`
+- Tests:
+  - fast-lane unit/acceptance tests for AT-04 using filesystem backend
+  - parity integration tests for S3/MinIO backend (gated; see CI section)
 
-### PR 06 — ArtifactStore trait + MinIO/S3 implementation (AT-04 partial)
+### PR 07 — EventStore implementations (fast lane + parity lane) (AT-01..AT-03)
 
-- Add `ArtifactStore` trait to v4 machine:
-  - `put(kind, bytes) -> ArtifactId` (content-addressed)
-  - `get(id) -> bytes` (verify hash; corruption => error)
-- Implement S3/MinIO backend in `mfm-artifact-store-s3`
-- Add integration tests using MinIO service
-
-### PR 07 — EventStore trait + Postgres implementation (AT-01..AT-03 foundation)
-
-- Add `EventStore` trait to v4 machine:
-  - `head_seq(run_id)`
-  - `append(run_id, expected_seq, events)` (atomic; optimistic concurrency)
-  - `read_range(run_id, from_seq, to_seq)`
-- Implement Postgres backend in `mfm-event-store-postgres`:
+- Implement in-memory backend in `mfm-event-store-mem` (fast lane)
+- Implement Postgres backend in `mfm-event-store-postgres` (parity lane):
   - schema for runs + events
   - append in a single transaction:
-    - validate expected head
+    - validate `expected_seq` vs current head
     - insert contiguous seq events
-- Add integration tests:
-  - AT-02 atomic visibility
-  - AT-03 expected seq concurrency
+    - return new head seq
+  - `read_range(run_id, from_seq, to_seq: Option<u64>)`
+- Tests:
+  - fast-lane acceptance tests:
+    - AT-01 AppendOnlyEventStream
+    - AT-02 AtomicAppendVisibility
+    - AT-03 ExpectedSeqConcurrency
+  - parity integration tests for Postgres (gated; see CI section)
 
-### PR 08 — Kernel + domain events and attempt envelope validation
+### PR 08 — Event emission + attempt envelope validation + event profiles
 
-- Define kernel and domain event payloads
-- Define `EventEnvelope` shape and (de)serialization
-- Add attempt-envelope validation helpers:
-  - `StateEntered ... terminal` rules
-- Add tests for event stability (no secrets)
+- Implement attempt-envelope validation helpers (kernel envelope + orphan detection):
+  - `StateEntered ... (StateCompleted|StateFailed)` rules
+  - orphan attempt handling rules (domain events allowed; must not advance checkpoint)
+- Implement `EventRecorder` plumbing:
+  - domain events are emitted only via `EventRecorder`
+  - domain events may span multiple transactional appends (per-append atomicity preserved)
+- Implement event profile behavior (`RunConfig.event_profile`):
+  - `minimal`: kernel only
+  - `normal`: facts + artifacts + boundaries
+  - `verbose`: more domain details (no secrets)
+- Add tests for:
+  - envelope validation
+  - event profile filtering
+  - “domain events are never required for correctness” invariants
 
 ### PR 09 — Context + full snapshots as artifacts
 
@@ -213,11 +282,18 @@ Each PR is intended to be small, reviewable, and keep the repo green.
 
 ### PR 10 — Executor + resume + orphan attempt semantics (AT-07 core)
 
+- Implement run start manifest + provenance:
+  - build `RunManifest` (+ `BuildProvenance`) and store it as an artifact
+  - store the initial context snapshot as an artifact
+  - append `RunStarted { op_id, manifest_id, initial_snapshot_id }`
 - Implement sequential executor:
   - append `StateEntered` before handler
   - domain events may span multiple appends
   - on success: write snapshot artifact, append `StateCompleted`
   - on failure: append `StateFailed` (no checkpoint advance)
+- Implement retry/backoff policy:
+  - honor `RunConfig.retry_policy` and state `attempt` increments
+  - only retry errors explicitly marked retryable via structured `ErrorInfo`
 - Implement resume:
   - compute checkpoint as last `StateCompleted.context_snapshot_id`
   - handle orphan attempt (stream ends after `StateEntered`): retry from `base_snapshot_id`
@@ -230,7 +306,8 @@ Each PR is intended to be small, reviewable, and keep the repo green.
 - Implement `LiveIo`:
   - replayable IO uses `fact_key`
   - facts are single-assignment (first durable `FactRecorded` wins)
-  - time/random recorded as facts when used
+  - time/random recorded as facts when used, with stable attempt-scoped keys derived from:
+    - `(run_id, state_id, call_ordinal, kind)` (encoding must be stable)
 - Tests:
   - fact dedupe
   - time/random fact recording
@@ -245,11 +322,16 @@ Each PR is intended to be small, reviewable, and keep the repo green.
 
 ### PR 13 — SDK: operations and pipelines (flattened composition)
 
+- Add/confirm `mfm-sdk` public API contract (Appendix C.2) in `REDESIGN_FINAL.md` before implementing, since only
+  C.1 exists today.
 - Define `Operation` trait:
   - `op_id`, `op_version`, `expand(...) -> StateGraph`
 - Define pipeline builder:
   - enforce `OpPath` and `StateId` shapes
   - wrap single-op runs with `step_id = main`
+- Implement namespacing + wiring validation:
+  - default context key namespacing by `OpPath`
+  - explicit exports/imports and planner validation that imports are satisfiable
 - Add tests for ID enforcement and stable expansion
 
 ### PR 14 — Proof op end-to-end (AT-06..AT-08)
@@ -272,6 +354,9 @@ Each PR is intended to be small, reviewable, and keep the repo green.
   - `run artifacts get`
   - `run status`
 - Keep existing `keystore` subcommands and output contract
+- Enforce boundary rule from `REDESIGN_FINAL.md`:
+  - CLI depends on `sdk` + `ops` (not directly on `core`)
+  - implement keystore command behavior in `mfm-op-keystore` (which depends on `core`)
 - Ensure stable `--output-format` across both
 - Add CLI JSON schema stability tests for new surfaces
 
@@ -294,11 +379,11 @@ Each PR is intended to be small, reviewable, and keep the repo green.
 - [ ] PR 01 Layout scaffold (`crates/` + `bin/`)
 - [ ] PR 02 Core boundary fix (core independent of machine)
 - [ ] PR 03 v4 crate skeletons
-- [ ] PR 04 Canonical JSON + SHA-256 (AT-05)
-- [ ] PR 05 IDs + errors + RunConfig
-- [ ] PR 06 ArtifactStore + MinIO (AT-04)
-- [ ] PR 07 EventStore + Postgres (AT-01..AT-03)
-- [ ] PR 08 Kernel/domain events + envelopes
+- [ ] PR 04 `mfm-machine` API contract (Appendix C.1)
+- [ ] PR 05 Canonical JSON + SHA-256 (AT-05)
+- [ ] PR 06 ArtifactStore implementations (fast + parity) (AT-04)
+- [ ] PR 07 EventStore implementations (fast + parity) (AT-01..AT-03)
+- [ ] PR 08 Event emission + envelopes + profiles
 - [ ] PR 09 Context snapshots as artifacts
 - [ ] PR 10 Executor + resume + orphan handling (AT-07)
 - [ ] PR 11 LiveIo + facts
@@ -309,3 +394,8 @@ Each PR is intended to be small, reviewable, and keep the repo green.
 - [ ] PR 16 Secrets guardrails (AT-09)
 - [ ] PR 17 Remove legacy machine crates
 
+---
+
+## Deviations
+
+None.
