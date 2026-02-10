@@ -15,7 +15,7 @@ use mfm_collectors_evm::JsonRpcCall;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
 use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
-use mfm_machine::live_io::{LiveIoTransport, LiveIoTransportFactory};
+use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 
 const CODE_EVM_RPC_URL_MISSING: &str = "evm_rpc_url_missing";
 const CODE_EVM_REQUEST_INVALID: &str = "evm_request_invalid";
@@ -77,7 +77,7 @@ impl EvmJsonRpcHttpTransportFactory {
 }
 
 impl LiveIoTransportFactory for EvmJsonRpcHttpTransportFactory {
-    fn make(&self) -> Box<dyn LiveIoTransport> {
+    fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
         Box::new(EvmJsonRpcHttpTransport {
             cfg: self.cfg.clone(),
             client: self.client.clone(),
@@ -208,6 +208,78 @@ impl LiveIoTransport for EvmJsonRpcHttpTransport {
 mod tests {
     use super::*;
 
+    use async_trait::async_trait;
+    use mfm_machine::engine::Stores;
+    use mfm_machine::errors::StorageError;
+    use mfm_machine::events::EventEnvelope;
+    use mfm_machine::ids::{ArtifactId, RunId, StateId};
+    use mfm_machine::live_io::LiveIoEnv;
+    use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct NoopEventStore;
+
+    #[async_trait]
+    impl EventStore for NoopEventStore {
+        async fn head_seq(&self, _run_id: RunId) -> Result<u64, StorageError> {
+            Ok(0)
+        }
+
+        async fn append(
+            &self,
+            _run_id: RunId,
+            _expected_seq: u64,
+            _events: Vec<EventEnvelope>,
+        ) -> Result<u64, StorageError> {
+            Ok(0)
+        }
+
+        async fn read_range(
+            &self,
+            _run_id: RunId,
+            _from_seq: u64,
+            _to_seq: Option<u64>,
+        ) -> Result<Vec<EventEnvelope>, StorageError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Clone)]
+    struct NoopArtifactStore;
+
+    #[async_trait]
+    impl ArtifactStore for NoopArtifactStore {
+        async fn put(
+            &self,
+            _kind: ArtifactKind,
+            _bytes: Vec<u8>,
+        ) -> Result<ArtifactId, StorageError> {
+            Ok(ArtifactId("0".repeat(64)))
+        }
+
+        async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn exists(&self, _id: &ArtifactId) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+    }
+
+    fn env() -> LiveIoEnv {
+        LiveIoEnv {
+            stores: Stores {
+                events: Arc::new(NoopEventStore),
+                artifacts: Arc::new(NoopArtifactStore),
+            },
+            run_id: serde_json::from_str::<RunId>("\"00000000-0000-0000-0000-000000000000\"")
+                .expect("valid RunId"),
+            state_id: StateId("machine.main.s1".to_string()),
+            attempt: 0,
+        }
+    }
+
     #[tokio::test]
     async fn transport_missing_rpc_url_is_stable_error() {
         let factory = EvmJsonRpcHttpTransportFactory::new(EvmJsonRpcHttpConfig {
@@ -215,7 +287,7 @@ mod tests {
             authorization: None,
             timeout: Duration::from_secs(1),
         });
-        let mut t = factory.make();
+        let mut t = factory.make(env());
 
         let err = t
             .call(IoCall {
@@ -239,7 +311,7 @@ mod tests {
             authorization: None,
             timeout: Duration::from_secs(1),
         });
-        let mut t = factory.make();
+        let mut t = factory.make(env());
 
         let err = t
             .call(IoCall {

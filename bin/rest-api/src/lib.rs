@@ -28,7 +28,7 @@ use mfm_machine::events::EventEnvelope;
 use mfm_machine::exec_transport::ExecProgramTransportFactory;
 use mfm_machine::ids::{ArtifactId, ContextKey, ErrorCode, RunId};
 use mfm_machine::io::IoCall;
-use mfm_machine::live_io::{LiveIoTransport, LiveIoTransportFactory};
+use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::DefaultExecutionEngine;
 use mfm_machine::stores::{ArtifactStore, EventStore};
@@ -287,7 +287,7 @@ fn phase_str(p: &RunPhase) -> &'static str {
 struct RestApiLiveIoTransportFactory;
 
 impl LiveIoTransportFactory for RestApiLiveIoTransportFactory {
-    fn make(&self) -> Box<dyn LiveIoTransport> {
+    fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
         Box::new(RestApiLiveIoTransport)
     }
 }

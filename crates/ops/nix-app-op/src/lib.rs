@@ -415,7 +415,7 @@ mod tests {
     }
 
     impl LiveIoTransportFactory for CountingExecFactory {
-        fn make(&self) -> Box<dyn LiveIoTransport> {
+        fn make(&self, _env: mfm_machine::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(CountingExecTransport {
                 counts: Arc::clone(&self.counts),
             })

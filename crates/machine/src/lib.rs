@@ -889,6 +889,7 @@ pub mod engine {
     }
 
     /// Store bundle passed to the engine.
+    #[derive(Clone)]
     pub struct Stores {
         pub events: Arc<dyn EventStore>,
         pub artifacts: Arc<dyn ArtifactStore>,

@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use rand::TryRngCore;
 use tokio::sync::Mutex;
 
+use crate::engine::Stores;
 use crate::errors::{ErrorCategory, ErrorInfo, IoError};
 use crate::events::{DomainEvent, Event, EventEnvelope, FactRecorded, DOMAIN_EVENT_FACT_RECORDED};
 use crate::hashing::{canonical_json_bytes, CanonicalJsonError};
@@ -82,8 +83,16 @@ pub trait LiveIoTransport: Send {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError>;
 }
 
+#[derive(Clone)]
+pub struct LiveIoEnv {
+    pub stores: Stores,
+    pub run_id: RunId,
+    pub state_id: StateId,
+    pub attempt: u32,
+}
+
 pub trait LiveIoTransportFactory: Send + Sync {
-    fn make(&self) -> Box<dyn LiveIoTransport>;
+    fn make(&self, env: LiveIoEnv) -> Box<dyn LiveIoTransport>;
 }
 
 struct UnimplementedLiveIoTransport;
@@ -103,7 +112,7 @@ impl LiveIoTransport for UnimplementedLiveIoTransport {
 pub struct UnimplementedLiveIoTransportFactory;
 
 impl LiveIoTransportFactory for UnimplementedLiveIoTransportFactory {
-    fn make(&self) -> Box<dyn LiveIoTransport> {
+    fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
         Box::new(UnimplementedLiveIoTransport)
     }
 }

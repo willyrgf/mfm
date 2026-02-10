@@ -18,7 +18,7 @@ use tokio::process::Command;
 use crate::errors::{ErrorCategory, ErrorInfo, IoError};
 use crate::ids::ErrorCode;
 use crate::io::IoCall;
-use crate::live_io::{LiveIoTransport, LiveIoTransportFactory};
+use crate::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 
 pub const NAMESPACE_EXEC: &str = "exec";
 
@@ -66,7 +66,7 @@ impl ExecProgramTransportFactory {
 }
 
 impl LiveIoTransportFactory for ExecProgramTransportFactory {
-    fn make(&self) -> Box<dyn LiveIoTransport> {
+    fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
         Box::new(ExecProgramTransport {
             policy: self.policy.clone(),
         })
@@ -259,10 +259,81 @@ impl LiveIoTransport for ExecProgramTransport {
 mod tests {
     use super::*;
 
+    use crate::engine::Stores;
+    use crate::errors::StorageError;
+    use crate::events::EventEnvelope;
+    use crate::ids::{ArtifactId, RunId, StateId};
+    use crate::live_io::LiveIoEnv;
+    use crate::stores::{ArtifactKind, ArtifactStore, EventStore};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct NoopEventStore;
+
+    #[async_trait]
+    impl EventStore for NoopEventStore {
+        async fn head_seq(&self, _run_id: RunId) -> Result<u64, StorageError> {
+            Ok(0)
+        }
+
+        async fn append(
+            &self,
+            _run_id: RunId,
+            _expected_seq: u64,
+            _events: Vec<EventEnvelope>,
+        ) -> Result<u64, StorageError> {
+            Ok(0)
+        }
+
+        async fn read_range(
+            &self,
+            _run_id: RunId,
+            _from_seq: u64,
+            _to_seq: Option<u64>,
+        ) -> Result<Vec<EventEnvelope>, StorageError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Clone)]
+    struct NoopArtifactStore;
+
+    #[async_trait]
+    impl ArtifactStore for NoopArtifactStore {
+        async fn put(
+            &self,
+            _kind: ArtifactKind,
+            _bytes: Vec<u8>,
+        ) -> Result<ArtifactId, StorageError> {
+            Ok(ArtifactId("0".repeat(64)))
+        }
+
+        async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn exists(&self, _id: &ArtifactId) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+    }
+
+    fn env() -> LiveIoEnv {
+        LiveIoEnv {
+            stores: Stores {
+                events: Arc::new(NoopEventStore),
+                artifacts: Arc::new(NoopArtifactStore),
+            },
+            run_id: RunId(uuid::Uuid::new_v4()),
+            state_id: StateId("machine.main.s1".to_string()),
+            attempt: 0,
+        }
+    }
+
     #[tokio::test]
     async fn rejects_disallowed_program_path_by_default() {
         let factory = ExecProgramTransportFactory::default();
-        let mut t = factory.make();
+        let mut t = factory.make(env());
 
         let err = t
             .call(IoCall {
@@ -288,7 +359,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_request_shape() {
         let factory = ExecProgramTransportFactory::default();
-        let mut t = factory.make();
+        let mut t = factory.make(env());
 
         let err = t
             .call(IoCall {

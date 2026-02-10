@@ -594,7 +594,12 @@ async fn run_states(
                     attempt,
                     Arc::clone(&stores.artifacts),
                     facts.clone(),
-                    live_factory.make(),
+                    live_factory.make(crate::live_io::LiveIoEnv {
+                        stores: stores.clone(),
+                        run_id,
+                        state_id: state_id.clone(),
+                        attempt,
+                    }),
                 )),
                 IoMode::Replay => AttemptIo::Replay(ReplayIo::new(
                     run_id,
@@ -1265,7 +1270,7 @@ mod tests {
     }
 
     impl LiveIoTransportFactory for SecretTransportFactory {
-        fn make(&self) -> Box<dyn LiveIoTransport> {
+        fn make(&self, _env: crate::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(SecretTransport)
         }
     }
@@ -1847,7 +1852,7 @@ mod tests {
     }
 
     impl LiveIoTransportFactory for CountingTransportFactory {
-        fn make(&self) -> Box<dyn LiveIoTransport> {
+        fn make(&self, _env: crate::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(CountingTransport {
                 calls: Arc::clone(&self.calls),
             })

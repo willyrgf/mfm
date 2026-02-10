@@ -9,7 +9,7 @@ use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, RunError, StorageEr
 use mfm_machine::exec_transport::ExecProgramTransportFactory;
 use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
-use mfm_machine::live_io::{LiveIoTransport, LiveIoTransportFactory};
+use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::DefaultExecutionEngine;
 use mfm_op_evm_read::EvmReadOp;
@@ -35,7 +35,7 @@ fn info(code: &'static str, category: ErrorCategory, message: impl Into<String>)
 struct CliLiveIoTransportFactory;
 
 impl LiveIoTransportFactory for CliLiveIoTransportFactory {
-    fn make(&self) -> Box<dyn LiveIoTransport> {
+    fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
         Box::new(CliLiveIoTransport)
     }
 }
