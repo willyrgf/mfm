@@ -168,6 +168,9 @@ let
     Environment:
       ${project.project.envVar}  Environment name (${pkgs.lib.concatStringsSep "|" (builtins.attrNames project.envs)})
       ${project.project.slotVar}  Slot number (0-9)
+      ${pkgs.lib.optionalString (project.project.slotVar != "NIXFIED_ENV") ''
+        NIXFIED_ENV  Slot number (alias for ${project.project.slotVar})
+      ''}
 
     Edit nixfied/project/ to customize commands, ports, and modules.
     EOF

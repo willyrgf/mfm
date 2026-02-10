@@ -37,18 +37,18 @@ let
     HASH=$(${getMigrationHash} "$MIGRATIONS_PATH")
 
     if [ "$HASH" = "no-migrations" ]; then
-      echo "ℹ️  No migrations found, skipping safety check"
+      echo "SKIP: No migrations found (skipping safety check)"
       exit 0
     fi
 
     MARKER_FILE="$MARKER_DIR/$HASH.tested"
 
     if [ -f "$MARKER_FILE" ]; then
-      echo "✅ Migrations already tested (hash: ''${HASH:0:12}...)"
+      echo "OK: Migrations already tested (hash: ''${HASH:0:12}...)"
       exit 0
     fi
 
-    echo "❌ Migrations have NOT been tested against a database copy" >&2
+    echo "ERROR: Migrations have not been tested against a database copy" >&2
     echo "   Hash: $HASH" >&2
     echo "   Run 'run_hook POSTGRES_TEST_MIGRATIONS' first" >&2
     exit 1
@@ -68,7 +68,7 @@ let
     fi
 
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$MARKER_DIR/$HASH.tested"
-    echo "✅ Migration marked as tested (hash: ''${HASH:0:12}...)"
+    echo "OK: Migration marked as tested (hash: ''${HASH:0:12}...)"
   '';
 
   detectDrift = pkgs.writeShellScript "postgres-detect-drift" ''
@@ -80,14 +80,14 @@ let
     CURRENT_HASH=$(${getMigrationHash} "$MIGRATIONS_PATH")
 
     if [ "$CURRENT_HASH" = "no-migrations" ]; then
-      echo "ℹ️  No migrations found"
+      echo "SKIP: No migrations found"
       exit 0
     fi
 
     if [ -f "$MARKER_DIR/$CURRENT_HASH.tested" ]; then
-      echo "✅ Migrations match tested hash (''${CURRENT_HASH:0:12}...)"
+      echo "OK: Migrations match tested hash (''${CURRENT_HASH:0:12}...)"
     else
-      echo "⚠️  Migration drift detected - current hash (''${CURRENT_HASH:0:12}...) not tested"
+      echo "WARN: Migration drift detected - current hash (''${CURRENT_HASH:0:12}...) not tested" >&2
       exit 1
     fi
   '';

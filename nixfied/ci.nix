@@ -104,7 +104,7 @@ let
               local step_desc="${desc}"
 
       ${pkgs.lib.optionalString (missingReason != "") ''
-        echo "↷ Skipping ''${step_desc}: ${missingReason}"
+        echo "SKIP: ''${step_desc}: ${missingReason}"
         return 42
       ''}
 
@@ -117,14 +117,14 @@ let
           fi
         done
         if [ -n "$missing_reason" ]; then
-          echo "↷ Skipping ''${step_desc}: $missing_reason"
+          echo "SKIP: ''${step_desc}: $missing_reason"
           return 42
         fi
       ''}
 
       ${pkgs.lib.optionalString (when != "") ''
         if ! ( ${when} ); then
-          echo "↷ Skipping ''${step_desc}: condition not met"
+          echo "SKIP: ''${step_desc}: condition not met"
           return 42
         fi
       ''}
@@ -356,13 +356,13 @@ let
                   rm -f "$LOGFILE" 2>/dev/null || true
                   if [ "$EXIT_CODE" -ne 0 ]; then
                     if [ "$CI_KEEP_ARTIFACTS_ON_FAILURE" = "1" ]; then
-                      echo "🧾 CI artifacts kept at: $CI_ARTIFACTS_DIR"
+                      echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
                     else
                       rm -rf "$CI_ARTIFACTS_DIR" 2>/dev/null || true
                     fi
                   else
                     if [ "$CI_KEEP_ARTIFACTS_ON_SUCCESS" = "1" ]; then
-                      echo "🧾 CI artifacts kept at: $CI_ARTIFACTS_DIR"
+                      echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
                     else
                       rm -rf "$CI_ARTIFACTS_DIR" 2>/dev/null || true
                     fi
@@ -375,13 +375,13 @@ let
                   set -e
                   if [ "$EXIT_CODE" -ne 0 ]; then
                     if [ "$CI_KEEP_ARTIFACTS_ON_FAILURE" = "1" ]; then
-                      echo "🧾 CI artifacts kept at: $CI_ARTIFACTS_DIR"
+                      echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
                     else
                       rm -rf "$CI_ARTIFACTS_DIR" 2>/dev/null || true
                     fi
                   else
                     if [ "$CI_KEEP_ARTIFACTS_ON_SUCCESS" = "1" ]; then
-                      echo "🧾 CI artifacts kept at: $CI_ARTIFACTS_DIR"
+                      echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
                     else
                       rm -rf "$CI_ARTIFACTS_DIR" 2>/dev/null || true
                     fi

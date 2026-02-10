@@ -115,7 +115,7 @@ let
       if [ -n "$TIMEOUT" ]; then
         (
           sleep "$TIMEOUT"
-          echo "⏰ Timeout after ''${TIMEOUT}s, killing run $RUN_ID" >&2
+          echo "ERROR: Timeout after ''${TIMEOUT}s, killing run $RUN_ID" >&2
           kill -TERM $$ 2>/dev/null || true
           sleep 5
           kill -KILL $$ 2>/dev/null || true
@@ -153,10 +153,10 @@ let
       ) &
       disown
 
-      echo "🚀 Run $RUN_ID started in background"
-      echo "   Dir: $RUN_DIR"
-      echo "   Log: $RUN_DIR/output.log"
-      echo "   Meta: $RUN_DIR/meta.json"
+      echo "INFO: Run $RUN_ID started in background"
+      echo "INFO: Dir: $RUN_DIR"
+      echo "INFO: Log: $RUN_DIR/output.log"
+      echo "INFO: Meta: $RUN_DIR/meta.json"
       exit 0
     else
       # Foreground mode: stream output

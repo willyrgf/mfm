@@ -269,7 +269,7 @@ let
       script = ''
         eval "$($SLOT_INFO)"
         LSOF="${pkgs.lsof}/bin/lsof"
-        echo "Port status for slot ''${${project.project.slotVar}:-0}, env ''${${project.project.envVar}:-dev}:"
+        echo "Port status for slot ''${SLOT:-0}, env ''${ENV:-dev}:"
         echo ""
         ${pkgs.lib.concatMapStringsSep "\n" (
           portName:
@@ -298,7 +298,7 @@ let
       category = "utility";
       script = ''
         eval "$($SLOT_INFO)"
-        echo "Port assignments for slot ''${${project.project.slotVar}:-0}, env ''${${project.project.envVar}:-dev}:"
+        echo "Port assignments for slot ''${SLOT:-0}, env ''${ENV:-dev}:"
         echo ""
         ${pkgs.lib.concatMapStringsSep "\n" (
           portName:

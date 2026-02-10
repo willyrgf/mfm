@@ -146,7 +146,12 @@ nix run .#mfm_cli -- --help
 
 ## Nixfied Customization Surface
 
-Prefer editing `nixfied/project/` (not `flake.nix`) for workflow changes:
+Nixfied is vendored under `nixfied/`. Vendoring boundaries (canonical doc: `nixfied/VENDORED.txt`):
+
+- Framework-owned (overwritten on `framework::upgrade`): `flake.nix`, `flake.lock`, `nixfied/internal/`, `nixfied/lib/`, and framework modules under `nixfied/*.nix`.
+- User-owned (preserved on `framework::upgrade`): `nixfied/project/` (primary customization surface) and `nixfied/local/` (extensions).
+
+Prefer editing `nixfied/project/` and `nixfied/local/` (not `flake.nix` or framework code under `nixfied/`) for workflow changes:
 
 - `nixfied/project/conf.nix`: project identity, env vars, envs/ports, module toggles, slot behavior.
 - `nixfied/project/dev.nix`: `nix run .#dev`, plus convenience runners like `nix run .#mfm_cli` / `nix run .#mfm_rest_api`.
@@ -155,6 +160,7 @@ Prefer editing `nixfied/project/` (not `flake.nix`) for workflow changes:
 - `nixfied/project/prod.nix`: `nix run .#build` (release build).
 - `nixfied/project/ci.nix`: CI pipeline DSL (modes/steps, artifacts, parity services).
 - `nixfied/project/default.nix`: merges project files; update it if you add a new `nixfied/project/*.nix` part.
+- `nixfied/local/default.nix`: optional extension point for extra flake `apps`/`packages`/`devShells` that should survive framework upgrades.
 
 Environment variables you should expect:
 

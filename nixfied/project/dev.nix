@@ -7,7 +7,7 @@
       api = {
         version = 1;
         summary = "Start the dev workflow (Postgres + REST API)";
-        details = "Starts Postgres and the REST API, then waits (local development).";
+        details = "Starts Postgres, MinIO (S3), and the REST API, then waits (local development).";
         usage = [
           "nix run .#dev"
           "NIX_ENV=1 nix run .#dev"
@@ -29,6 +29,20 @@
 
         export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm"
         export MFM_REST_API_ADDR="127.0.0.1:$REST_API_PORT"
+
+        # Dev/test should not depend on the supervisor (production-only).
+        # Start MinIO directly for local development.
+        mkdir -p "$MINIO_STATE_DIR" "$LOG_DIR"
+        export MINIO_ROOT_USER="minio"
+        export MINIO_ROOT_PASSWORD="minio123456"
+        start_service minio \
+          --log "$LOG_DIR/minio.log" \
+          --wait-http "http://127.0.0.1:$MINIO_PORT/minio/health/ready" \
+          --timeout 60 \
+          -- \
+          minio server "$MINIO_STATE_DIR" \
+            --address "127.0.0.1:$MINIO_PORT" \
+            --console-address "127.0.0.1:$MINIO_CONSOLE_PORT"
 
         start_service rest-api \
           --wait-http "http://127.0.0.1:$REST_API_PORT/v1/health" \

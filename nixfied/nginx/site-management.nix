@@ -93,7 +93,7 @@ let
 
     rm -f "$NGINX_DIR/conf/sites-enabled/$DOMAIN.conf"
     rm -f "$NGINX_DIR/conf/sites-available/$DOMAIN.conf"
-    echo "✅ Site $DOMAIN removed"
+    echo "OK: Site $DOMAIN removed"
   '';
 
   enableSite = pkgs.writeShellScript "nginx-site-enable" ''
@@ -109,12 +109,12 @@ let
 
     AVAIL="$NGINX_DIR/conf/sites-available/$DOMAIN.conf"
     if [ ! -f "$AVAIL" ]; then
-      echo "❌ Site not found: $DOMAIN" >&2
+      echo "ERROR: Site not found: $DOMAIN" >&2
       exit 1
     fi
 
     ln -sf "$AVAIL" "$NGINX_DIR/conf/sites-enabled/$DOMAIN.conf"
-    echo "✅ Site $DOMAIN enabled"
+    echo "OK: Site $DOMAIN enabled"
   '';
 
   disableSite = pkgs.writeShellScript "nginx-site-disable" ''
@@ -129,7 +129,7 @@ let
     NGINX_DIR="${nginxDirExpr}"
 
     rm -f "$NGINX_DIR/conf/sites-enabled/$DOMAIN.conf"
-    echo "✅ Site $DOMAIN disabled"
+    echo "OK: Site $DOMAIN disabled"
   '';
 
   listSites = pkgs.writeShellScript "nginx-site-list" ''

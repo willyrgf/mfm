@@ -23,7 +23,7 @@ let
 
     BACKUP_DIR="$BACKUP_BASE_DIR/base"
     if [ ! -d "$BACKUP_DIR" ]; then
-      echo "❌ No backups found" >&2
+      echo "ERROR: No backups found" >&2
       exit 1
     fi
 
@@ -38,7 +38,7 @@ let
       fi
     done
 
-    echo "❌ No backup found for commit $COMMIT" >&2
+    echo "ERROR: No backup found for commit $COMMIT" >&2
     exit 1
   '';
 
@@ -54,16 +54,16 @@ let
       # Default to previous commit
       COMMIT=$(git rev-parse --short HEAD~1 2>/dev/null || true)
       if [ -z "$COMMIT" ]; then
-        echo "❌ No commit specified and cannot determine previous commit" >&2
+        echo "ERROR: No commit specified and cannot determine previous commit" >&2
         exit 1
       fi
     fi
 
-    echo "🧪 Testing rollback to commit $COMMIT..."
+    echo "INFO: Testing rollback to commit $COMMIT"
 
     BACKUP_PATH=$(${findBackupForCommit} "$COMMIT")
     if [ -z "$BACKUP_PATH" ]; then
-      echo "❌ No backup found for commit $COMMIT" >&2
+      echo "ERROR: No backup found for commit $COMMIT" >&2
       exit 1
     fi
 
@@ -79,7 +79,7 @@ let
       cp -a "$BACKUP_PATH/." "$TEST_DIR/"
     fi
 
-    echo "✅ Rollback test: backup is restorable for commit $COMMIT"
+    echo "OK: Rollback test: backup is restorable for commit $COMMIT"
   '';
 
 in

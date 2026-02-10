@@ -10,7 +10,6 @@ let
 
   restart = pkgs.writeShellScript "supervisor-restart" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
 
     SERVICE="''${1:-}"
     if [ -z "$SERVICE" ]; then
@@ -19,10 +18,9 @@ let
     fi
 
     CONFIG_FILE=$(${config.generateConfig})
-    echo "🔄 Restarting $SERVICE..."
-    SOCKET="$RUN_DIR/process-compose.sock"
-    ${pc}/bin/process-compose -f "$CONFIG_FILE" -U -u "$SOCKET" restart "$SERVICE"
-    echo "✅ $SERVICE restarted"
+    echo "INFO: Restarting $SERVICE"
+    ${pc}/bin/process-compose -f "$CONFIG_FILE" restart "$SERVICE"
+    echo "OK: $SERVICE restarted"
   '';
 
   rotateLogs = pkgs.writeShellScript "supervisor-rotate-logs" ''
@@ -37,7 +35,7 @@ let
 
       SIZE=$(stat -f%z "$logfile" 2>/dev/null || stat -c%s "$logfile" 2>/dev/null || echo 0)
       if [ "$SIZE" -gt "$MAX_SIZE" ]; then
-        echo "🔄 Rotating $(basename "$logfile") ($SIZE bytes)..."
+        echo "INFO: Rotating $(basename "$logfile") ($SIZE bytes)"
 
         # Shift existing rotated logs
         for i in $(seq "$KEEP_COUNT" -1 1); do
@@ -56,7 +54,7 @@ let
         # Compress current log and start fresh
         gzip -c "$logfile" > "$logfile.1.gz"
         : > "$logfile"
-        echo "   ✅ Rotated"
+        echo "OK: Rotated $(basename "$logfile")"
       fi
     done
   '';

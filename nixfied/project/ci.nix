@@ -4,6 +4,55 @@
   commands = {
     ci = {
       description = "Run the CI pipeline";
+      api = {
+        version = 1;
+        summary = "Run the CI pipeline";
+        details = ''
+          Runs the CI pipeline defined in `nixfied/project/ci.nix` (modes + steps).
+
+          Supported options (from the framework CI runner):
+          - `--basic|--audit|--parity`: select a mode
+          - `--mode <name>`: select a mode by name
+          - `--summary`: print a compact summary and write `summary.json` into the artifacts dir
+          - `--bg`: run in background via the run registry
+        '';
+        usage = [
+          "nix run .#ci -- --basic --summary"
+          "nix run .#ci -- --audit --summary"
+          "nix run .#ci -- --parity --summary"
+          "nix run .#ci -- --mode basic --summary"
+          "nix run .#ci -- --bg"
+        ];
+        examples = [
+          "nix run .#ci -- --basic --summary"
+          "CI_ARTIFACTS_DIR=/tmp/ci-artifacts nix run .#ci -- --parity --summary"
+        ];
+        args = [
+          {
+            name = "--basic|--audit|--parity";
+            description = "Select CI mode (configured in nixfied/project/ci.nix).";
+          }
+          {
+            name = "--mode <name>";
+            description = "Select CI mode by name.";
+          }
+          {
+            name = "--summary";
+            description = "Print a compact summary and write artifacts/summary.json.";
+          }
+          {
+            name = "--bg";
+            description = "Run CI in background via the run registry.";
+          }
+        ];
+        env = [
+          {
+            name = "CI_ARTIFACTS_DIR";
+            description = "Override artifacts directory (default: /tmp/ci-artifacts).";
+          }
+        ];
+        category = "core";
+      };
       env = {
         "${project.envVar}" = "test";
       };
@@ -110,8 +159,18 @@
         run = ''
           eval "$($SLOT_INFO)"
 
-          run_hook SUPERVISOR_START_DAEMON
-          with_cleanup "run_hook SUPERVISOR_STOP"
+          # Dev/test parity should not depend on the supervisor (production-only).
+          # Start MinIO directly (no process-compose/TUI).
+          mkdir -p "$MINIO_STATE_DIR"
+          export MINIO_ROOT_USER="minio"
+          export MINIO_ROOT_PASSWORD="minio123456"
+
+          MINIO_LOGFILE=$(artifact_path "minio.log")
+          MINIO_PID=$(start_service minio --log "$MINIO_LOGFILE" -- \
+            minio server "$MINIO_STATE_DIR" \
+              --address "127.0.0.1:$MINIO_PORT" \
+              --console-address "127.0.0.1:$MINIO_CONSOLE_PORT")
+          with_cleanup "stop_service $MINIO_PID minio"
 
           export AWS_ACCESS_KEY_ID="minio"
           export AWS_SECRET_ACCESS_KEY="minio123456"

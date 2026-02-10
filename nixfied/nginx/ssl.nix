@@ -32,7 +32,7 @@ let
       STAGING_FLAG="--staging"
     fi
 
-    echo "🔒 Obtaining Let's Encrypt certificate for $DOMAIN..."
+    echo "INFO: Obtaining Let's Encrypt certificate for $DOMAIN"
 
     ${pkgs.certbot}/bin/certbot certonly \
       --webroot \
@@ -45,7 +45,7 @@ let
       -d "$DOMAIN" \
       $STAGING_FLAG
 
-    echo "✅ Certificate obtained for $DOMAIN"
+    echo "OK: Certificate obtained for $DOMAIN"
   '';
 
   renewCerts = pkgs.writeShellScript "nginx-cert-renew" ''
@@ -53,13 +53,13 @@ let
     eval "$(${slots.getSlotInfo})"
     NGINX_DIR="${nginxDirExpr}"
 
-    echo "🔄 Renewing certificates..."
+    echo "INFO: Renewing certificates"
 
     ${pkgs.certbot}/bin/certbot renew \
       --deploy-hook "${lifecycle.reload}" \
       2>&1
 
-    echo "✅ Certificate renewal complete"
+    echo "OK: Certificate renewal complete"
   '';
 
   certStatus = pkgs.writeShellScript "nginx-cert-status" ''

@@ -7,7 +7,7 @@ let
     pkgs.writeShellScript "signal-handler" ''
       shutdown() {
         echo ""
-        echo "🛑 Shutting down..."
+        echo "INFO: Shutting down"
         ${cleanupHook}
         exit 0
       }
@@ -28,7 +28,7 @@ let
     pkgs.writeShellScript "process-manager" ''
       ${mkSignalHandler cleanupHook}
 
-      echo "🚀 Starting ${processName}..."
+      echo "INFO: Starting ${processName}"
       ${startupScript}
       wait
     '';

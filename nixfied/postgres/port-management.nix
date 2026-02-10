@@ -19,7 +19,7 @@ let
       fi
     fi
 
-    echo "✅ Port $PORT is available"
+    echo "OK: Port $PORT is available"
   '';
 
   getPortPids = pkgs.writeShellScript "postgres-get-port-pids" ''
@@ -57,7 +57,7 @@ let
       exit 0
     fi
 
-    echo "🛑 Killing processes on port $PORT: $PIDS"
+    echo "WARN: Killing processes on port $PORT: $PIDS"
     echo "$PIDS" | xargs kill -TERM 2>/dev/null || true
     sleep 2
 
@@ -67,7 +67,7 @@ let
       echo "$REMAINING" | xargs kill -KILL 2>/dev/null || true
     fi
 
-    echo "✅ Port $PORT cleared"
+    echo "OK: Port $PORT cleared"
   '';
 
   assertPortsFree = pkgs.writeShellScript "postgres-assert-ports-free" ''
@@ -76,7 +76,7 @@ let
     for PORT in "$@"; do
       if command -v lsof >/dev/null 2>&1; then
         if lsof -ti:"$PORT" >/dev/null 2>&1; then
-          echo "❌ Port $PORT is in use"
+          echo "ERROR: Port $PORT is in use" >&2
           FAILED=1
         fi
       fi
@@ -84,7 +84,7 @@ let
     if [ "$FAILED" -eq 1 ]; then
       exit 1
     fi
-    echo "✅ All ports are available"
+    echo "OK: All ports are available"
   '';
 
 in

@@ -13,7 +13,7 @@ let
         OUTPUT_FILE=$(mktemp)
         OUTPUT_FILES[$i]=$OUTPUT_FILE
 
-        echo "🚀 Starting command $((i+1)): ${cmd}"
+        echo "RUN: command $((i+1)): ${cmd}"
         (
           eval "${cmd}" 2>&1
           echo $? > "$OUTPUT_FILE.exit"
@@ -37,9 +37,7 @@ let
       i=0
       for cmd in ${pkgs.lib.concatMapStringsSep " " (c: "\"${c}\"") commands}; do
         echo ""
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "📋 Command $((i+1)) output:"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "OUTPUT: command $((i+1))"
         cat "''${OUTPUT_FILES[$i]}"
         i=$((i+1))
       done

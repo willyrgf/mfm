@@ -68,7 +68,7 @@ let
 
     CONF="$NGINX_DIR/conf/nginx.conf"
     if [ ! -f "$CONF" ]; then
-      echo "❌ Nginx not initialized. Run nginx-init first." >&2
+      echo "ERROR: Nginx not initialized. Run nginx-init first." >&2
       exit 1
     fi
 
@@ -98,17 +98,17 @@ let
     CONF="$NGINX_DIR/conf/nginx.conf"
 
     if [ ! -f "$CONF" ]; then
-      echo "❌ Nginx not initialized." >&2
+      echo "ERROR: Nginx not initialized." >&2
       exit 1
     fi
 
     # Test config before reload
-    echo "🔍 Testing nginx configuration..."
+    echo "INFO: Testing nginx configuration"
     ${nginx}/bin/nginx -c "$CONF" -t 2>&1
 
-    echo "🔄 Reloading nginx..."
+    echo "INFO: Reloading nginx"
     ${nginx}/bin/nginx -c "$CONF" -s reload
-    echo "✅ Nginx reloaded"
+    echo "OK: Nginx reloaded"
   '';
 
   listInstances = pkgs.writeShellScript "nginx-list-instances" ''

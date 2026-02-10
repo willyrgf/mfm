@@ -15,7 +15,7 @@ let
     set -euo pipefail
 
     if [ -z "''${PGDATA:-}" ] || [ -z "''${BACKUP_BASE_DIR:-}" ]; then
-      echo "❌ PGDATA and BACKUP_BASE_DIR must be set" >&2
+      echo "ERROR: PGDATA and BACKUP_BASE_DIR must be set" >&2
       exit 1
     fi
 
@@ -33,20 +33,20 @@ let
     set -euo pipefail
 
     if [ -z "''${PGDATA:-}" ] || [ -z "''${BACKUP_BASE_DIR:-}" ]; then
-      echo "❌ PGDATA and BACKUP_BASE_DIR must be set" >&2
+      echo "ERROR: PGDATA and BACKUP_BASE_DIR must be set" >&2
       exit 1
     fi
 
     WAL_ARCHIVE="$BACKUP_BASE_DIR/wal"
     mkdir -p "$WAL_ARCHIVE"
 
-    echo "🔧 Configuring WAL archiving..."
+    echo "INFO: Configuring WAL archiving"
     cat >> "$PGDATA/postgresql.conf" <<EOF
     archive_mode = on
     archive_command = 'cp %p $WAL_ARCHIVE/%f'
     EOF
 
-    echo "✅ WAL archiving configured to $WAL_ARCHIVE"
+    echo "OK: WAL archiving configured to $WAL_ARCHIVE"
   '';
 
   backup = pkgs.writeShellScript "postgres-backup" ''
@@ -57,7 +57,7 @@ let
     export PGPORT="''${!PORT_VAR}"
 
     if [ -z "''${BACKUP_BASE_DIR:-}" ]; then
-      echo "❌ BACKUP_BASE_DIR must be set (run eval \"\$(SLOT_INFO)\" first)" >&2
+      echo "ERROR: BACKUP_BASE_DIR must be set (run eval \"\$(SLOT_INFO)\" first)" >&2
       exit 1
     fi
 
@@ -70,7 +70,7 @@ let
     BACKUP_NAME="backup-$TIMESTAMP"
     BACKUP_PATH="$BACKUP_DIR/$BACKUP_NAME"
 
-    echo "📦 Creating base backup: $BACKUP_NAME..."
+    echo "INFO: Creating base backup: $BACKUP_NAME"
     ${postgres}/bin/pg_basebackup -h localhost -p "$PGPORT" -U postgres -D "$BACKUP_PATH" -Ft -z -P
 
     # Write backup manifest
@@ -87,7 +87,7 @@ let
     }
     EOF
 
-    echo "✅ Backup created: $BACKUP_PATH"
+    echo "OK: Backup created: $BACKUP_PATH"
     echo "   Manifest: $BACKUP_PATH.manifest.json"
   '';
 
@@ -101,16 +101,16 @@ let
     fi
 
     if [ -z "''${PGDATA:-}" ]; then
-      echo "❌ PGDATA must be set" >&2
+      echo "ERROR: PGDATA must be set" >&2
       exit 1
     fi
 
     if [ ! -d "$BACKUP_PATH" ] && [ ! -f "$BACKUP_PATH/base.tar.gz" ]; then
-      echo "❌ Backup not found: $BACKUP_PATH" >&2
+      echo "ERROR: Backup not found: $BACKUP_PATH" >&2
       exit 1
     fi
 
-    echo "📦 Restoring from backup: $BACKUP_PATH..."
+    echo "INFO: Restoring from backup: $BACKUP_PATH"
 
     # Stop postgres if running
     if [ -f "$PGDATA/postmaster.pid" ]; then
@@ -129,7 +129,7 @@ let
       cp -a "$BACKUP_PATH/." "$PGDATA/"
     fi
 
-    echo "✅ Backup restored to $PGDATA"
+    echo "OK: Backup restored to $PGDATA"
   '';
 
   listBackups = pkgs.writeShellScript "postgres-list-backups" ''
@@ -164,17 +164,17 @@ let
     fi
 
     if [ ! -d "$BACKUP_PATH" ]; then
-      echo "❌ Backup not found: $BACKUP_PATH" >&2
+      echo "ERROR: Backup not found: $BACKUP_PATH" >&2
       exit 1
     fi
 
-    echo "🔍 Verifying backup: $BACKUP_PATH..."
+    echo "INFO: Verifying backup: $BACKUP_PATH"
 
     if [ -f "$BACKUP_PATH/base.tar.gz" ]; then
       if tar tzf "$BACKUP_PATH/base.tar.gz" >/dev/null 2>&1; then
-        echo "✅ Backup archive is valid"
+        echo "OK: Backup archive is valid"
       else
-        echo "❌ Backup archive is corrupted" >&2
+        echo "ERROR: Backup archive is corrupted" >&2
         exit 1
       fi
     fi
@@ -182,10 +182,10 @@ let
     if [ -f "$BACKUP_PATH.manifest.json" ]; then
       echo "   Manifest found"
     else
-      echo "   ⚠️  No manifest found"
+      echo "WARN: No manifest found"
     fi
 
-    echo "✅ Backup verification passed"
+    echo "OK: Backup verification passed"
   '';
 
   cleanupBackups = pkgs.writeShellScript "postgres-cleanup-backups" ''
@@ -201,12 +201,12 @@ let
 
     BACKUP_COUNT=$(ls -d "$BACKUP_DIR"/backup-* 2>/dev/null | wc -l || echo 0)
     if [ "$BACKUP_COUNT" -le "$KEEP" ]; then
-      echo "✅ $BACKUP_COUNT backups (keeping $KEEP), nothing to clean"
+      echo "OK: $BACKUP_COUNT backups (keeping $KEEP), nothing to clean"
       exit 0
     fi
 
     TO_REMOVE=$((BACKUP_COUNT - KEEP))
-    echo "🧹 Removing $TO_REMOVE old backups (keeping newest $KEEP)..."
+    echo "INFO: Removing $TO_REMOVE old backups (keeping newest $KEEP)"
     ls -dt "$BACKUP_DIR"/backup-* | tail -n "$TO_REMOVE" | while read -r dir; do
       rm -rf "$dir" "$dir.manifest.json"
       echo "   Removed: $(basename "$dir")"

@@ -22,8 +22,7 @@ let
     ${
       if migrateCommand == "" then
         ''
-          echo "ℹ️  No migration command configured (modules.postgres.migrations.command)"
-          echo "   Skipping migration test"
+          echo "SKIP: No migration command configured (modules.postgres.migrations.command)"
           exit 0
         ''
       else
@@ -37,11 +36,11 @@ let
     SOURCE_DB="''${1:-${if sourceDatabase != null then sourceDatabase else database}}"
     TEST_DB="migration_test_$(date +%s)"
 
-    echo "🧪 Testing migrations against copy of '$SOURCE_DB'..."
+    echo "INFO: Testing migrations against copy of '$SOURCE_DB'"
 
     # Create test database as copy of source
     ${postgres}/bin/createdb -h localhost -p "$PGPORT" -U postgres -T "$SOURCE_DB" "$TEST_DB" 2>/dev/null || {
-      echo "❌ Failed to copy database '$SOURCE_DB'" >&2
+      echo "ERROR: Failed to copy database '$SOURCE_DB'" >&2
       exit 1
     }
 
@@ -57,11 +56,11 @@ let
     ${postgres}/bin/dropdb -h localhost -p "$PGPORT" -U postgres "$TEST_DB" 2>/dev/null || true
 
     if [ $MIGRATION_EXIT -ne 0 ]; then
-      echo "❌ Migration test failed (exit code: $MIGRATION_EXIT)" >&2
+      echo "ERROR: Migration test failed (exit code: $MIGRATION_EXIT)" >&2
       exit $MIGRATION_EXIT
     fi
 
-    echo "✅ Migration test passed"
+    echo "OK: Migration test passed"
   '';
 
 in

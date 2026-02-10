@@ -128,6 +128,7 @@ let
     assert_contains "$HELP_OUT" "Commands:"
     assert_contains "$HELP_OUT" "PROJECT_ENV"
     assert_contains "$HELP_OUT" "NIX_ENV"
+    assert_contains "$HELP_OUT" "NIXFIED_ENV"
 
     HELP_DEV_OUT="$WORKDIR/help-dev.txt"
     nix run "path:$ROOT"#help -- dev > "$HELP_DEV_OUT"
@@ -503,6 +504,7 @@ let
     fi
     assert_file_absent "$INSTALL_TARGET/nixfied/.framework"
     assert_file_absent "$INSTALL_TARGET/NIXFIED_PROMPT_PLAN.md"
+    assert_file_exists "$INSTALL_TARGET/nixfied/local/default.nix"
 
     log "installer worktree"
     INSTALL_WT_BASE="$WORKDIR/install-worktree"
@@ -528,6 +530,7 @@ let
       fail "expected nixfied/ directory in worktree target"
     fi
     assert_file_absent "$INSTALL_WT_TARGET/nixfied/.framework"
+    assert_file_exists "$INSTALL_WT_TARGET/nixfied/local/default.nix"
 
     log "example project apps (basic install)"
     BASIC_HELP="$WORKDIR/basic-help.txt"
@@ -550,6 +553,14 @@ let
     assert_app_missing "$INSTALL_TARGET" "framework::install"
     assert_app_missing "$INSTALL_TARGET" "framework::prompt-plan"
     assert_app_missing "$INSTALL_TARGET" "framework::test"
+
+    log "ports env var aliases"
+    PORTS_ALIAS_OUT="$WORKDIR/ports-alias.txt"
+    NIXFIED_ENV=1 run_app "$INSTALL_TARGET" ports > "$PORTS_ALIAS_OUT"
+    assert_contains "$PORTS_ALIAS_OUT" "Port assignments for slot 1, env dev"
+    PORTS_NIX_ENV_OUT="$WORKDIR/ports-nix-env.txt"
+    NIX_ENV=1 run_app "$INSTALL_TARGET" ports > "$PORTS_NIX_ENV_OUT"
+    assert_contains "$PORTS_NIX_ENV_OUT" "Port assignments for slot 1, env dev"
 
     log "app api contract enforcement"
     BAD_API_BASE="$WORKDIR/install-bad-api"
@@ -599,8 +610,10 @@ let
 
     log "installer upgrade preserves project"
     echo "# NIXFIED_UPGRADE_TEST_MARKER" >> "$INSTALL_TARGET/nixfied/project/conf.nix"
+    echo "# NIXFIED_LOCAL_UPGRADE_TEST_MARKER" >> "$INSTALL_TARGET/nixfied/local/default.nix"
     (cd "$INSTALL_TARGET" && nix run "path:$ROOT"#framework::upgrade -- --force >/dev/null)
     assert_contains "$INSTALL_TARGET/nixfied/project/conf.nix" "NIXFIED_UPGRADE_TEST_MARKER"
+    assert_contains "$INSTALL_TARGET/nixfied/local/default.nix" "NIXFIED_LOCAL_UPGRADE_TEST_MARKER"
     assert_file_absent "$INSTALL_TARGET/nixfied/.framework"
 
     log "framework marker toggle"

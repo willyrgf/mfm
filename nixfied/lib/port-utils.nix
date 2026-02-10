@@ -7,7 +7,7 @@ let
       local port=$1
       local name=$2
 
-      echo "🧹 Cleaning $name processes on port $port..."
+      echo "INFO: Cleaning $name processes on port $port"
 
       if command -v lsof >/dev/null 2>&1; then
         PIDS=$(lsof -ti:$port 2>/dev/null || true)
@@ -36,16 +36,16 @@ let
 
       if command -v lsof >/dev/null 2>&1; then
         if lsof -i:$port >/dev/null 2>&1; then
-          echo "❌ Port $port ($name) is already in use"
+          echo "ERROR: Port $port ($name) is already in use" >&2
           return 1
         fi
       else
         if ${pkgs.procps}/bin/netstat -tln 2>/dev/null | grep ":$port " >/dev/null; then
-          echo "❌ Port $port ($name) is already in use"
+          echo "ERROR: Port $port ($name) is already in use" >&2
           return 1
         fi
       fi
-      echo "✅ Port $port ($name) is available"
+      echo "OK: Port $port ($name) is available"
       return 0
     }
 

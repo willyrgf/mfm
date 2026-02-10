@@ -27,15 +27,13 @@ let
     _TIMING_DURATION=$((_TIMING_END - _TIMING_START))
 
     echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     if [ $_TIMING_DURATION -lt 60 ]; then
-      echo "⏱️  ${name} completed in ''${_TIMING_DURATION}s"
+      echo "TIMING: ${name} duration=''${_TIMING_DURATION}s"
     else
       _TIMING_MINS=$((_TIMING_DURATION / 60))
       _TIMING_SECS=$((_TIMING_DURATION % 60))
-      echo "⏱️  ${name} completed in ''${_TIMING_MINS}m ''${_TIMING_SECS}s"
+      echo "TIMING: ${name} duration=''${_TIMING_MINS}m''${_TIMING_SECS}s"
     fi
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     exit $_TIMING_EXIT
   '';

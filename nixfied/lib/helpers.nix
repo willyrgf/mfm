@@ -35,7 +35,7 @@ let
       local var="$1"
       local msg="''${2:-Missing required env var: $var}"
       if [ -z "''${!var:-}" ]; then
-        echo "❌ $msg" >&2
+        echo "ERROR: $msg" >&2
         return 1
       fi
       return 0
@@ -47,7 +47,7 @@ let
       local var="$1"
       local reason="''${2:-Missing required env var: $var}"
       if [ -z "''${!var:-}" ]; then
-        echo "ℹ️  Skipping: $reason"
+        echo "SKIP: $reason"
         return 1
       fi
       return 0
@@ -142,7 +142,7 @@ let
       fi
       local cmd="''${!var:-}"
       if [ -z "$cmd" ]; then
-        echo "❌ Hook not available: $var" >&2
+        echo "ERROR: Hook not available: $var" >&2
         return 1
       fi
       "$cmd" "$@"
@@ -150,57 +150,6 @@ let
 
     _cleanup_initialized=false
     _cleanup_actions=()
-    _cleanup_prev_trap_EXIT=""
-    _cleanup_prev_trap_INT=""
-    _cleanup_prev_trap_TERM=""
-
-    _cleanup_get_trap_cmd() {
-      local sig="$1"
-      local spec
-      spec="$(trap -p "$sig" 2>/dev/null || true)"
-      if [ -z "$spec" ]; then
-        echo ""
-        return 0
-      fi
-
-      # `trap -p` prints: trap -- 'cmd' SIGNAL (often SIGINT/SIGTERM).
-      # Extract the quoted command payload.
-      if [ "''${spec#*\\'}" = "$spec" ]; then
-        echo ""
-        return 0
-      fi
-      spec="''${spec#*\\'}"
-      spec="''${spec%\\'*}"
-
-      # "-" means default action.
-      if [ "$spec" = "-" ]; then
-        echo ""
-        return 0
-      fi
-
-      echo "$spec"
-      return 0
-    }
-
-    _cleanup_trap_handler() {
-      local sig="$1"
-      local exit_code="$2"
-
-      _run_cleanups
-
-      local prev=""
-      case "$sig" in
-        EXIT) prev="$_cleanup_prev_trap_EXIT" ;;
-        INT) prev="$_cleanup_prev_trap_INT" ;;
-        TERM) prev="$_cleanup_prev_trap_TERM" ;;
-      esac
-
-      if [ -n "$prev" ]; then
-        # Ensure the previous handler observes the original exit code in `$?`.
-        (exit "$exit_code")
-        eval "$prev"
-      fi
-    }
 
     # with_cleanup CMD
     # - register cleanup command to run on EXIT/INT/TERM (LIFO order).
@@ -213,15 +162,7 @@ let
       _cleanup_actions+=("$cmd")
       if [ "$_cleanup_initialized" = false ]; then
         _cleanup_initialized=true
-        # Preserve any pre-existing traps (e.g. ephemeral wrapper teardown).
-        _cleanup_prev_trap_EXIT=$(_cleanup_get_trap_cmd EXIT)
-        _cleanup_prev_trap_INT=$(_cleanup_get_trap_cmd INT)
-        _cleanup_prev_trap_TERM=$(_cleanup_get_trap_cmd TERM)
-
-        # Run registered cleanups first, then fall back to the prior trap.
-        trap '_cleanup_trap_handler EXIT $?' EXIT
-        trap '_cleanup_trap_handler INT $?' INT
-        trap '_cleanup_trap_handler TERM $?' TERM
+        trap _run_cleanups EXIT INT TERM
       fi
     }
 
@@ -276,7 +217,7 @@ let
       fi
 
       if kill -0 "$pid" 2>/dev/null; then
-        echo "🛑 Stopping $name (PID $pid)..."
+        echo "STOP: $name (PID $pid)"
         kill -TERM "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
       fi
@@ -384,14 +325,14 @@ let
 
       if [ -n "$wait_http_url" ]; then
         if ! wait_http "$wait_http_url" "$timeout" "$interval"; then
-          echo "❌ $name failed readiness check (http)" >&2
+          echo "ERROR: $name failed readiness check (http)" >&2
           return 1
         fi
       fi
 
       if [ -n "$wait_port_num" ]; then
         if ! wait_port "$wait_port_num" "$timeout" "$interval"; then
-          echo "❌ $name failed readiness check (port)" >&2
+          echo "ERROR: $name failed readiness check (port)" >&2
           return 1
         fi
       fi
