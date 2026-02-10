@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use crate::context::DynContext;
 use crate::errors::{ContextError, ErrorCategory, ErrorInfo, RunError};
-use crate::hashing::canonical_json_bytes;
+use crate::hashing::{canonical_json_bytes, CanonicalJsonError};
 use crate::ids::{ArtifactId, ContextKey, ErrorCode};
 use crate::stores::{ArtifactKind, ArtifactStore};
 
@@ -164,11 +164,17 @@ pub(crate) async fn write_full_snapshot_value(
     artifacts: &dyn ArtifactStore,
     snapshot: serde_json::Value,
 ) -> Result<ArtifactId, RunError> {
-    let bytes = canonical_json_bytes(&snapshot).map_err(|_| {
-        RunError::Context(ContextError::Serialization(info(
-            "context_snapshot_not_canonical",
-            "context snapshot is not canonical-json-hashable (floats are forbidden)",
-        )))
+    let bytes = canonical_json_bytes(&snapshot).map_err(|e| match e {
+        CanonicalJsonError::FloatNotAllowed => {
+            RunError::Context(ContextError::Serialization(info(
+                "context_snapshot_not_canonical",
+                "context snapshot is not canonical-json-hashable (floats are forbidden)",
+            )))
+        }
+        CanonicalJsonError::SecretsNotAllowed => RunError::Context(ContextError::Other(info(
+            "secrets_detected",
+            "context snapshot contained secrets (Milestone 1 forbids persisting secrets)",
+        ))),
     })?;
 
     artifacts

@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::errors::{ErrorCategory, ErrorInfo, IoError};
 use crate::events::{DomainEvent, Event, EventEnvelope, FactRecorded, DOMAIN_EVENT_FACT_RECORDED};
-use crate::hashing::canonical_json_bytes;
+use crate::hashing::{canonical_json_bytes, CanonicalJsonError};
 use crate::ids::{ArtifactId, ErrorCode, FactKey, RunId, StateId};
 use crate::io::{IoCall, IoProvider, IoResult};
 use crate::stores::{ArtifactKind, ArtifactStore};
@@ -191,12 +191,17 @@ impl LiveIo {
             return Ok((v, payload_id));
         }
 
-        let bytes = canonical_json_bytes(&value).map_err(|_| {
-            io_other(
+        let bytes = canonical_json_bytes(&value).map_err(|e| match e {
+            CanonicalJsonError::FloatNotAllowed => io_other(
                 "fact_payload_not_canonical",
                 ErrorCategory::ParsingInput,
                 "fact payload is not canonical-json-hashable (floats are forbidden)",
-            )
+            ),
+            CanonicalJsonError::SecretsNotAllowed => io_other(
+                "secrets_detected",
+                ErrorCategory::Unknown,
+                "fact payload contained secrets (Milestone 1 forbids persisting secrets)",
+            ),
         })?;
 
         let payload_id = self

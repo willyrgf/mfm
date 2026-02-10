@@ -12,7 +12,9 @@ use mfm_machine::config::RunManifest;
 use mfm_machine::context::DynContext;
 use mfm_machine::engine::{ExecutionEngine, RunResult, StartRun, Stores};
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, RunError};
-use mfm_machine::hashing::{artifact_id_for_bytes, artifact_id_for_json, canonical_json_bytes};
+use mfm_machine::hashing::{
+    artifact_id_for_bytes, artifact_id_for_json, canonical_json_bytes, CanonicalJsonError,
+};
 use mfm_machine::ids::{ContextKey, ErrorCode, OpId, OpPath, RunId, StateId};
 use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
@@ -109,12 +111,17 @@ fn validate_pipeline(p: &Pipeline) -> Result<(), SdkError> {
         }
 
         // Enforce Milestone 1: op_config must be canonical-JSON hashable (floats forbidden).
-        canonical_json_bytes(&s.op_config).map_err(|_| {
-            sdk_error(
+        canonical_json_bytes(&s.op_config).map_err(|e| match e {
+            CanonicalJsonError::FloatNotAllowed => sdk_error(
                 "op_config_not_canonical",
                 ErrorCategory::ParsingInput,
                 "op_config is not canonical-json-hashable (floats are forbidden)",
-            )
+            ),
+            CanonicalJsonError::SecretsNotAllowed => sdk_error(
+                "secrets_detected",
+                ErrorCategory::ParsingInput,
+                "op_config contained secrets (Milestone 1 forbids persisting secrets)",
+            ),
         })?;
     }
 
@@ -514,22 +521,34 @@ impl RunLauncher for DefaultRunLauncher {
         })?;
 
         // Store the manifest as canonical JSON bytes so `manifest_id` matches engine validation.
-        let bytes = canonical_json_bytes(&value).map_err(|_| {
-            RunError::InvalidPlan(info(
+        let bytes = canonical_json_bytes(&value).map_err(|e| match e {
+            CanonicalJsonError::FloatNotAllowed => RunError::InvalidPlan(info(
                 "manifest_not_canonical",
                 ErrorCategory::ParsingInput,
                 false,
                 "run manifest is not canonical-json-hashable (floats are forbidden)",
-            ))
+            )),
+            CanonicalJsonError::SecretsNotAllowed => RunError::InvalidPlan(info(
+                "secrets_detected",
+                ErrorCategory::ParsingInput,
+                false,
+                "run manifest contained secrets (Milestone 1 forbids persisting secrets)",
+            )),
         })?;
         let computed_id = artifact_id_for_bytes(&bytes);
-        let computed_from_value = artifact_id_for_json(&value).map_err(|_| {
-            RunError::InvalidPlan(info(
+        let computed_from_value = artifact_id_for_json(&value).map_err(|e| match e {
+            CanonicalJsonError::FloatNotAllowed => RunError::InvalidPlan(info(
                 "manifest_not_canonical",
                 ErrorCategory::ParsingInput,
                 false,
                 "run manifest is not canonical-json-hashable (floats are forbidden)",
-            ))
+            )),
+            CanonicalJsonError::SecretsNotAllowed => RunError::InvalidPlan(info(
+                "secrets_detected",
+                ErrorCategory::ParsingInput,
+                false,
+                "run manifest contained secrets (Milestone 1 forbids persisting secrets)",
+            )),
         })?;
         debug_assert_eq!(computed_id, computed_from_value);
 
@@ -1069,6 +1088,107 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(err.info.code.0, "unsatisfied_import");
+    }
+
+    #[test]
+    fn planner_rejects_secrets_in_op_config() {
+        let reg = HashMapOperationRegistry::default();
+        let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
+
+        let pipeline = Pipeline {
+            machine_id: MachineId("m".to_string()),
+            pipeline_version: "v".to_string(),
+            steps: vec![PipelineStep {
+                step_id: StepId("step1".to_string()),
+                op_id: OpId("op1".to_string()),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({ "password": "x" }),
+            }],
+        };
+
+        let err = match planner.build_execution_plan(Arc::new(reg), &pipeline, &run_config_live()) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        assert_eq!(err.info.code.0, "secrets_detected");
+    }
+
+    #[tokio::test]
+    async fn launcher_rejects_secrets_in_manifest_input() {
+        let mut reg = HashMapOperationRegistry::default();
+        reg.register(Arc::new(TestOp::new_write(
+            "op1",
+            "v1",
+            "m.step1.s1",
+            "k",
+            serde_json::json!("v1"),
+            OpIo {
+                imports: Vec::new(),
+                exports: Vec::new(),
+            },
+        )));
+
+        let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
+        let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
+
+        struct NeverResolver;
+        impl mfm_machine::runtime::PlanResolver for NeverResolver {
+            fn resolve(&self, _manifest: &RunManifest) -> Result<ExecutionPlan, RunError> {
+                Err(RunError::InvalidPlan(info(
+                    "resolver_unavailable",
+                    ErrorCategory::Unknown,
+                    false,
+                    "resolver unavailable",
+                )))
+            }
+        }
+
+        let engine: Arc<dyn ExecutionEngine> =
+            Arc::new(DefaultExecutionEngine::new(Arc::new(NeverResolver)));
+        let stores = Stores {
+            events: Arc::new(MemEventStore::default()),
+            artifacts: Arc::new(MemArtifactStore::default()),
+        };
+
+        let pipeline = Pipeline {
+            machine_id: MachineId("m".to_string()),
+            pipeline_version: "v".to_string(),
+            steps: vec![PipelineStep {
+                step_id: StepId("step1".to_string()),
+                op_id: OpId("op1".to_string()),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({}),
+            }],
+        };
+
+        let err = launcher
+            .start_pipeline(
+                engine,
+                stores,
+                Arc::new(reg),
+                planner,
+                LaunchPipeline {
+                    pipeline,
+                    input: serde_json::json!({ "authorization": "Bearer x" }),
+                    run_config: run_config_live(),
+                    build: mfm_machine::config::BuildProvenance {
+                        git_commit: None,
+                        cargo_lock_hash: None,
+                        flake_lock_hash: None,
+                        rustc_version: None,
+                        target_triple: None,
+                        env_allowlist: Vec::new(),
+                    },
+                    initial_context: Box::new(MapContext::default()),
+                },
+            )
+            .await
+            .unwrap_err();
+
+        match err {
+            RunError::InvalidPlan(info) => assert_eq!(info.code.0, "secrets_detected"),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]

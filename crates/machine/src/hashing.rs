@@ -9,6 +9,7 @@ use crate::ids::ArtifactId;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CanonicalJsonError {
     FloatNotAllowed,
+    SecretsNotAllowed,
 }
 
 impl std::fmt::Display for CanonicalJsonError {
@@ -18,6 +19,12 @@ impl std::fmt::Display for CanonicalJsonError {
                 write!(
                     f,
                     "floats are not allowed in canonical-json-hashed structures"
+                )
+            }
+            CanonicalJsonError::SecretsNotAllowed => {
+                write!(
+                    f,
+                    "secrets are not allowed in persisted canonical-json structures"
                 )
             }
         }
@@ -31,6 +38,9 @@ impl std::error::Error for CanonicalJsonError {}
 /// Target semantics: RFC 8785 (JCS-style) canonicalization.
 /// Milestone 1 additional constraint: floats are rejected.
 pub fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, CanonicalJsonError> {
+    if crate::secrets::json_contains_secrets(value) {
+        return Err(CanonicalJsonError::SecretsNotAllowed);
+    }
     let mut out = Vec::new();
     write_canonical_json(value, &mut out)?;
     Ok(out)
@@ -134,6 +144,15 @@ mod tests {
         assert_eq!(
             canonical_json_bytes(&v).unwrap_err(),
             CanonicalJsonError::FloatNotAllowed
+        );
+    }
+
+    #[test]
+    fn canonical_json_rejects_secrets() {
+        let v = serde_json::json!({"mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"});
+        assert_eq!(
+            canonical_json_bytes(&v).unwrap_err(),
+            CanonicalJsonError::SecretsNotAllowed
         );
     }
 

@@ -884,3 +884,4 @@ pub mod replay_io;
 pub(crate) mod attempt_envelope;
 pub(crate) mod context_runtime;
 pub(crate) mod event_profile;
+pub(crate) mod secrets;

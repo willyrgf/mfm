@@ -146,6 +146,16 @@ struct AppendEventRecorder<'a> {
 #[async_trait]
 impl EventRecorder for AppendEventRecorder<'_> {
     async fn emit(&mut self, event: DomainEvent) -> Result<(), RunError> {
+        if crate::secrets::string_contains_secrets(&event.name)
+            || crate::secrets::json_contains_secrets(&event.payload)
+        {
+            return Err(RunError::Other(info(
+                "secrets_detected",
+                ErrorCategory::Unknown,
+                "domain event contained secrets (Milestone 1 forbids persisting secrets)",
+            )));
+        }
+
         self.writer
             .append(vec![Event::Domain(event)])
             .await
@@ -154,6 +164,18 @@ impl EventRecorder for AppendEventRecorder<'_> {
     }
 
     async fn emit_many(&mut self, events: Vec<DomainEvent>) -> Result<(), RunError> {
+        for e in &events {
+            if crate::secrets::string_contains_secrets(&e.name)
+                || crate::secrets::json_contains_secrets(&e.payload)
+            {
+                return Err(RunError::Other(info(
+                    "secrets_detected",
+                    ErrorCategory::Unknown,
+                    "domain event contained secrets (Milestone 1 forbids persisting secrets)",
+                )));
+            }
+        }
+
         self.writer
             .append(events.into_iter().map(Event::Domain).collect())
             .await
@@ -247,11 +269,15 @@ fn validate_start_run_contract(run: &StartRun) -> Result<(), RunError> {
             "failed to serialize run manifest",
         )
     })?;
-    let computed = artifact_id_for_json(&value).map_err(|_| {
-        invalid_plan(
+    let computed = artifact_id_for_json(&value).map_err(|e| match e {
+        crate::hashing::CanonicalJsonError::FloatNotAllowed => invalid_plan(
             "manifest_not_canonical",
             "run manifest is not canonical-json-hashable (floats are forbidden)",
-        )
+        ),
+        crate::hashing::CanonicalJsonError::SecretsNotAllowed => invalid_plan(
+            "secrets_detected",
+            "run manifest contained secrets (Milestone 1 forbids persisting secrets)",
+        ),
     })?;
     if computed != run.manifest_id {
         return Err(invalid_plan(
@@ -624,6 +650,9 @@ async fn run_states(
                         err.state_id = Some(state_id.clone());
                     }
 
+                    // Milestone 1: never persist secrets in error details.
+                    crate::secrets::redact_error_info(&mut err.info);
+
                     writer
                         .append_kernel(KernelEvent::StateFailed {
                             state_id: state_id.clone(),
@@ -908,10 +937,13 @@ mod tests {
     use crate::context_runtime::JsonContext;
     use crate::errors::StateError;
     use crate::errors::StorageError;
-    use crate::events::{FactRecorded, DOMAIN_EVENT_FACT_RECORDED};
+    use crate::errors::{ErrorCategory, ErrorInfo, IoError};
+    use crate::events::{DomainEvent, FactRecorded, DOMAIN_EVENT_FACT_RECORDED};
     use crate::hashing::artifact_id_for_bytes;
     use crate::ids::ContextKey;
+    use crate::ids::ErrorCode;
     use crate::ids::FactKey;
+    use crate::io::IoCall;
     use crate::live_io::{LiveIoTransport, LiveIoTransportFactory};
     use crate::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta};
     use crate::plan::StateGraph;
@@ -1083,6 +1115,454 @@ mod tests {
         let value = serde_json::to_value(manifest).unwrap();
         let bytes = crate::hashing::canonical_json_bytes(&value).unwrap();
         artifacts.put(ArtifactKind::Manifest, bytes).await.unwrap()
+    }
+
+    const SECRET_MNEMONIC: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const SECRET_PASSWORD: &str = "hunter2";
+
+    #[derive(Clone)]
+    struct SecretErrorState;
+
+    #[async_trait]
+    impl State for SecretErrorState {
+        fn meta(&self) -> StateMeta {
+            StateMeta {
+                tags: Vec::new(),
+                depends_on: Vec::new(),
+                depends_on_strategy: DependencyStrategy::Latest,
+                side_effects: SideEffectKind::Pure,
+                idempotency: Idempotency::None,
+            }
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &mut dyn DynContext,
+            _io: &mut dyn IoProvider,
+            _rec: &mut dyn EventRecorder,
+        ) -> Result<crate::state::StateOutcome, StateError> {
+            Err(StateError {
+                state_id: None,
+                info: ErrorInfo {
+                    code: ErrorCode("secret_error".to_string()),
+                    category: ErrorCategory::Unknown,
+                    retryable: false,
+                    message: format!("password leaked: {SECRET_PASSWORD}"),
+                    details: Some(serde_json::json!({
+                        "private_key": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    })),
+                },
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct EmitSecretDomainEventState;
+
+    #[async_trait]
+    impl State for EmitSecretDomainEventState {
+        fn meta(&self) -> StateMeta {
+            StateMeta {
+                tags: Vec::new(),
+                depends_on: Vec::new(),
+                depends_on_strategy: DependencyStrategy::Latest,
+                side_effects: SideEffectKind::Pure,
+                idempotency: Idempotency::None,
+            }
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &mut dyn DynContext,
+            _io: &mut dyn IoProvider,
+            rec: &mut dyn EventRecorder,
+        ) -> Result<crate::state::StateOutcome, StateError> {
+            let res = rec
+                .emit(DomainEvent {
+                    name: "test".to_string(),
+                    payload: serde_json::json!({ "password": SECRET_PASSWORD }),
+                    payload_ref: None,
+                })
+                .await;
+
+            if res.is_err() {
+                return Err(StateError {
+                    state_id: None,
+                    info: ErrorInfo {
+                        code: ErrorCode("emit_failed".to_string()),
+                        category: ErrorCategory::Unknown,
+                        retryable: false,
+                        message: "emit failed".to_string(),
+                        details: None,
+                    },
+                });
+            }
+
+            Ok(crate::state::StateOutcome {
+                snapshot: crate::state::SnapshotPolicy::OnSuccess,
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct SecretFactIoState;
+
+    #[async_trait]
+    impl State for SecretFactIoState {
+        fn meta(&self) -> StateMeta {
+            StateMeta {
+                tags: Vec::new(),
+                depends_on: Vec::new(),
+                depends_on_strategy: DependencyStrategy::Latest,
+                side_effects: SideEffectKind::ReadOnlyIo,
+                idempotency: Idempotency::None,
+            }
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &mut dyn DynContext,
+            io: &mut dyn IoProvider,
+            _rec: &mut dyn EventRecorder,
+        ) -> Result<crate::state::StateOutcome, StateError> {
+            io.call(IoCall {
+                namespace: "test".to_string(),
+                request: serde_json::json!({}),
+                fact_key: Some(FactKey("test:fact".to_string())),
+            })
+            .await
+            .map_err(|_| StateError {
+                state_id: None,
+                info: ErrorInfo {
+                    code: ErrorCode("io_failed".to_string()),
+                    category: ErrorCategory::Unknown,
+                    retryable: false,
+                    message: "io failed".to_string(),
+                    details: None,
+                },
+            })?;
+
+            Ok(crate::state::StateOutcome {
+                snapshot: crate::state::SnapshotPolicy::OnSuccess,
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct SecretTransportFactory;
+
+    struct SecretTransport;
+
+    #[async_trait]
+    impl LiveIoTransport for SecretTransport {
+        async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
+            match call.namespace.as_str() {
+                "test" => Ok(serde_json::json!({ "password": SECRET_PASSWORD })),
+                _ => Ok(serde_json::json!({})),
+            }
+        }
+    }
+
+    impl LiveIoTransportFactory for SecretTransportFactory {
+        fn make(&self) -> Box<dyn LiveIoTransport> {
+            Box::new(SecretTransport)
+        }
+    }
+
+    async fn assert_no_secret_bytes_in_artifacts(artifacts: &MemArtifactStore, needles: &[&str]) {
+        let inner = artifacts.inner.lock().await;
+        for bytes in inner.values() {
+            let s = String::from_utf8_lossy(bytes);
+            for n in needles {
+                assert!(!s.contains(n));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn secrets_in_initial_context_are_rejected_and_not_persisted() {
+        let events = Arc::new(MemEventStore::default());
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let stores = Stores {
+            events: events.clone(),
+            artifacts: artifacts.clone(),
+        };
+
+        let run_config = base_run_config();
+        let manifest = RunManifest {
+            op_id: OpId("op".to_string()),
+            op_version: "0".to_string(),
+            input_params: serde_json::json!({}),
+            run_config: run_config.clone(),
+            build: crate::config::BuildProvenance {
+                git_commit: None,
+                cargo_lock_hash: None,
+                flake_lock_hash: None,
+                rustc_version: None,
+                target_triple: None,
+                env_allowlist: Vec::new(),
+            },
+        };
+        let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+
+        let state_id = StateId("machine.main.s1".to_string());
+        let plan = ExecutionPlan {
+            op_id: manifest.op_id.clone(),
+            graph: StateGraph {
+                states: vec![StateNode {
+                    id: state_id,
+                    state: Arc::new(SetKeyState),
+                }],
+                edges: Vec::new(),
+            },
+        };
+
+        let resolver = Arc::new(FixedResolver { plan: plan.clone() });
+        let engine = DefaultExecutionEngine::new(resolver);
+
+        let mut initial = JsonContext::new();
+        initial
+            .write(
+                ContextKey("mnemonic".to_string()),
+                serde_json::json!(SECRET_MNEMONIC),
+            )
+            .unwrap();
+
+        let err = engine
+            .start(
+                stores,
+                StartRun {
+                    manifest,
+                    manifest_id,
+                    plan,
+                    run_config,
+                    initial_context: Box::new(initial),
+                },
+            )
+            .await
+            .unwrap_err();
+
+        match err {
+            RunError::Context(crate::errors::ContextError::Other(info)) => {
+                assert_eq!(info.code.0, "secrets_detected");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        // No event stream was created, and no artifact contains the secret.
+        assert!(events.inner.lock().await.is_empty());
+        assert_no_secret_bytes_in_artifacts(&artifacts, &[SECRET_MNEMONIC, "mnemonic"]).await;
+    }
+
+    #[tokio::test]
+    async fn state_failed_error_messages_are_redacted_before_persisting() {
+        let events = Arc::new(MemEventStore::default());
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let stores = Stores {
+            events: events.clone(),
+            artifacts: artifacts.clone(),
+        };
+
+        let run_config = base_run_config();
+        let manifest = RunManifest {
+            op_id: OpId("op".to_string()),
+            op_version: "0".to_string(),
+            input_params: serde_json::json!({}),
+            run_config: run_config.clone(),
+            build: crate::config::BuildProvenance {
+                git_commit: None,
+                cargo_lock_hash: None,
+                flake_lock_hash: None,
+                rustc_version: None,
+                target_triple: None,
+                env_allowlist: Vec::new(),
+            },
+        };
+        let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+
+        let state_id = StateId("machine.main.s1".to_string());
+        let plan = ExecutionPlan {
+            op_id: manifest.op_id.clone(),
+            graph: StateGraph {
+                states: vec![StateNode {
+                    id: state_id.clone(),
+                    state: Arc::new(SecretErrorState),
+                }],
+                edges: Vec::new(),
+            },
+        };
+
+        let resolver = Arc::new(FixedResolver { plan: plan.clone() });
+        let engine = DefaultExecutionEngine::new(resolver);
+
+        let r = engine
+            .start(
+                stores,
+                StartRun {
+                    manifest,
+                    manifest_id,
+                    plan,
+                    run_config,
+                    initial_context: Box::new(JsonContext::new()),
+                },
+            )
+            .await
+            .expect("start");
+
+        assert_eq!(r.phase, RunPhase::Failed);
+
+        let stream = events.read_range(r.run_id, 1, None).await.expect("read");
+        let failed = stream.iter().find_map(|e| match &e.event {
+            Event::Kernel(KernelEvent::StateFailed { error, .. }) => Some(error.clone()),
+            _ => None,
+        });
+        let failed = failed.expect("StateFailed event");
+        assert_eq!(failed.state_id, Some(state_id));
+        assert_eq!(failed.info.message, "error details redacted");
+        assert!(failed.info.details.is_none());
+
+        // Persisted surfaces must not contain the leaked secret.
+        let serialized = serde_json::to_string(&stream).unwrap();
+        assert!(!serialized.contains(SECRET_PASSWORD));
+        assert!(!serialized.to_ascii_lowercase().contains("private_key"));
+    }
+
+    #[tokio::test]
+    async fn domain_events_with_secrets_are_rejected() {
+        let events = Arc::new(MemEventStore::default());
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let stores = Stores {
+            events: events.clone(),
+            artifacts: artifacts.clone(),
+        };
+
+        let mut run_config = base_run_config();
+        run_config.event_profile = crate::config::EventProfile::Normal;
+
+        let manifest = RunManifest {
+            op_id: OpId("op".to_string()),
+            op_version: "0".to_string(),
+            input_params: serde_json::json!({}),
+            run_config: run_config.clone(),
+            build: crate::config::BuildProvenance {
+                git_commit: None,
+                cargo_lock_hash: None,
+                flake_lock_hash: None,
+                rustc_version: None,
+                target_triple: None,
+                env_allowlist: Vec::new(),
+            },
+        };
+        let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+
+        let plan = ExecutionPlan {
+            op_id: manifest.op_id.clone(),
+            graph: StateGraph {
+                states: vec![StateNode {
+                    id: StateId("machine.main.s1".to_string()),
+                    state: Arc::new(EmitSecretDomainEventState),
+                }],
+                edges: Vec::new(),
+            },
+        };
+
+        let resolver = Arc::new(FixedResolver { plan: plan.clone() });
+        let engine = DefaultExecutionEngine::new(resolver);
+
+        let r = engine
+            .start(
+                stores,
+                StartRun {
+                    manifest,
+                    manifest_id,
+                    plan,
+                    run_config,
+                    initial_context: Box::new(JsonContext::new()),
+                },
+            )
+            .await
+            .expect("start");
+
+        assert_eq!(r.phase, RunPhase::Failed);
+
+        let stream = events.read_range(r.run_id, 1, None).await.expect("read");
+        assert!(!stream.iter().any(|e| matches!(e.event, Event::Domain(_))));
+
+        let serialized = serde_json::to_string(&stream).unwrap();
+        assert!(!serialized.contains(SECRET_PASSWORD));
+        assert!(!serialized.to_ascii_lowercase().contains("password"));
+    }
+
+    #[tokio::test]
+    async fn fact_payloads_with_secrets_are_rejected() {
+        let events = Arc::new(MemEventStore::default());
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let stores = Stores {
+            events: events.clone(),
+            artifacts: artifacts.clone(),
+        };
+
+        let mut run_config = base_run_config();
+        run_config.event_profile = crate::config::EventProfile::Normal;
+
+        let manifest = RunManifest {
+            op_id: OpId("op".to_string()),
+            op_version: "0".to_string(),
+            input_params: serde_json::json!({}),
+            run_config: run_config.clone(),
+            build: crate::config::BuildProvenance {
+                git_commit: None,
+                cargo_lock_hash: None,
+                flake_lock_hash: None,
+                rustc_version: None,
+                target_triple: None,
+                env_allowlist: Vec::new(),
+            },
+        };
+        let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+
+        let plan = ExecutionPlan {
+            op_id: manifest.op_id.clone(),
+            graph: StateGraph {
+                states: vec![StateNode {
+                    id: StateId("machine.main.s1".to_string()),
+                    state: Arc::new(SecretFactIoState),
+                }],
+                edges: Vec::new(),
+            },
+        };
+
+        let resolver = Arc::new(FixedResolver { plan: plan.clone() });
+        let engine = DefaultExecutionEngine::new(resolver)
+            .with_live_transport_factory(Arc::new(SecretTransportFactory));
+
+        let r = engine
+            .start(
+                stores,
+                StartRun {
+                    manifest,
+                    manifest_id,
+                    plan,
+                    run_config,
+                    initial_context: Box::new(JsonContext::new()),
+                },
+            )
+            .await
+            .expect("start");
+
+        assert_eq!(r.phase, RunPhase::Failed);
+
+        let stream = events.read_range(r.run_id, 1, None).await.expect("read");
+        assert!(!stream.iter().any(|e| match &e.event {
+            Event::Domain(de) => de.name == DOMAIN_EVENT_FACT_RECORDED,
+            _ => false,
+        }));
+
+        // No persisted bytes should include the secret-bearing "password" field.
+        let serialized = serde_json::to_string(&stream).unwrap();
+        assert!(!serialized.to_ascii_lowercase().contains("password"));
+        assert_no_secret_bytes_in_artifacts(&artifacts, &["password", SECRET_PASSWORD]).await;
     }
 
     #[tokio::test]
