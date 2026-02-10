@@ -77,6 +77,7 @@ These are implementation decisions that remove ambiguity for the rest of the wor
 ## Public Interfaces (Milestone 1)
 
 Milestone 1 public API contract for `mfm-machine` is Appendix C.1 in `REDESIGN_FINAL.md`.
+Milestone 1 public API contract for `mfm-sdk` is Appendix C.2 in `REDESIGN_FINAL.md`.
 This plan follows that contract; any deviation MUST be recorded in [Deviations](#deviations).
 
 ### Kernel events (required for recovery)
@@ -352,8 +353,10 @@ Implementation notes:
 
 ### PR 13 — SDK: operations and pipelines (flattened composition)
 
-- Add/confirm `mfm-sdk` public API contract (Appendix C.2) in `REDESIGN_FINAL.md` before implementing, since only
-  C.1 exists today.
+- Implement the `mfm-sdk` public API contract (Appendix C.2 in `REDESIGN_FINAL.md`):
+  - `Operation` + `OperationRegistry`
+  - `Pipeline` + `PipelinePlanner`
+  - `RunLauncher` (`start_pipeline`/`resume`)
 - Define `Operation` trait:
   - `op_id`, `op_version`, `expand(...) -> StateGraph`
 - Define pipeline builder:
@@ -445,7 +448,7 @@ Implementation notes:
 - R-02 Secrets leakage across persisted surfaces: mitigate with explicit redaction + AT-09 scanning tests.
 - R-03 Borrow/ownership complexity in IO + event recording: mitigate with the LiveIo buffering pattern (DL-04).
 - R-04 Parity lane drift from fast lane: mitigate with shared contract tests (DL-05).
-- R-05 SDK contract gap (Appendix C.2 not yet in `REDESIGN_FINAL.md`): mitigate by landing C.2 before PR 13 implementation.
+- R-05 SDK contract churn risk: mitigate by treating Appendix C.2 as authoritative and recording deviations explicitly.
 
 ---
 
