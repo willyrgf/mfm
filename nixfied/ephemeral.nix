@@ -29,17 +29,18 @@ let
   envVar = projectMeta.envVar or "PROJECT_ENV";
 
   ephemeralCfg = project.ephemeral or { };
-  excludePatterns = ephemeralCfg.excludePatterns or [
-    ".git"
-    "node_modules"
-    ".next"
-    "dist"
-    ".turbo"
-    ".cache"
-    "*.log"
-    "test-results"
-    "coverage"
-  ];
+  excludePatterns =
+    ephemeralCfg.excludePatterns or [
+      ".git"
+      "node_modules"
+      ".next"
+      "dist"
+      ".turbo"
+      ".cache"
+      "*.log"
+      "test-results"
+      "coverage"
+    ];
   extraDirs = ephemeralCfg.extraDirs or [ ];
 
   depsScript = project.install.deps or "";
@@ -162,16 +163,8 @@ let
       extraEnv ? "",
     }:
     let
-      runtimePath =
-        if runtimePackages == [ ] then
-          ""
-        else
-          pkgs.lib.makeBinPath runtimePackages;
-      pathBlock =
-        if runtimePath != "" then
-          ''export PATH="${runtimePath}:$PATH"''
-        else
-          "";
+      runtimePath = if runtimePackages == [ ] then "" else pkgs.lib.makeBinPath runtimePackages;
+      pathBlock = if runtimePath != "" then ''export PATH="${runtimePath}:$PATH"'' else "";
     in
     pkgs.writeShellScript "ephemeral-${name}" ''
       set -euo pipefail

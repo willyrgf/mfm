@@ -40,8 +40,10 @@
           "clippy"
           "build"
           "tests"
-          "audit"
         ];
+      };
+      audit = {
+        steps = [ "audit" ];
       };
       parity = {
         steps = [

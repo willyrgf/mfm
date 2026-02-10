@@ -6,7 +6,7 @@
 }:
 
 let
-  inherit (lib) mkApp;
+  inherit (lib.appApi) mkNixfiedApp;
 
   promptPlanScript = pkgs.writeShellScript "nixfied-prompt-plan" ''
             set -euo pipefail
@@ -164,76 +164,80 @@ let
   '';
 
   installScript = ''
-    set -euo pipefail
+        set -euo pipefail
 
-    ORIG_ARGS=("$@")
-    FORCE=false
-    FILTERS_RAW=""
-    TARGET_PATH=""
-    USE_WORKTREE=false
-    SYNC_TARGET=false
-    PROMPT_PLAN=false
-    PROMPT_PLAN_FORCE=false
-    RESET_PROJECT=false
-    MODE="''${NIXFIED_INSTALL_MODE:-install}"
+        ORIG_ARGS=("$@")
+        FORCE=false
+        FILTERS_RAW=""
+        TARGET_PATH=""
+        USE_WORKTREE=false
+        SYNC_TARGET=false
+        PROMPT_PLAN=true
+        PROMPT_PLAN_FORCE=false
+        RESET_PROJECT=false
+        MODE="''${NIXFIED_INSTALL_MODE:-install}"
 
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        --force)
-          FORCE=true
-          shift
-          ;;
-        --upgrade)
-          MODE="upgrade"
-          shift
-          ;;
-        --filter=*)
-          FILTERS_RAW="''${1#--filter=}"
-          shift
-          ;;
-        --filter)
-          if [ "$#" -lt 2 ]; then
-            echo "❌ --filter requires a value (example: --filter=conf,ci)" >&2
-            exit 1
-          fi
-          FILTERS_RAW="''${2-}"
-          shift 2
-          ;;
-        --target=*)
-          TARGET_PATH="''${1#--target=}"
-          shift
-          ;;
-        --target)
-          if [ "$#" -lt 2 ]; then
-            echo "❌ --target requires a path" >&2
-            exit 1
-          fi
-          TARGET_PATH="''${2-}"
-          shift 2
-          ;;
-        --worktree)
-          USE_WORKTREE=true
-          shift
-          ;;
-        --sync)
-          SYNC_TARGET=true
-          shift
-          ;;
-        --prompt-plan)
-          PROMPT_PLAN=true
-          shift
-          ;;
-        --prompt-plan-force)
-          PROMPT_PLAN=true
-          PROMPT_PLAN_FORCE=true
-          shift
-          ;;
-        --reset-project)
-          RESET_PROJECT=true
-          shift
-          ;;
-        --help|-h)
-          cat <<'EOF'
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --force)
+              FORCE=true
+              shift
+              ;;
+            --upgrade)
+              MODE="upgrade"
+              shift
+              ;;
+            --filter=*)
+              FILTERS_RAW="''${1#--filter=}"
+              shift
+              ;;
+            --filter)
+              if [ "$#" -lt 2 ]; then
+                echo "❌ --filter requires a value (example: --filter=conf,ci)" >&2
+                exit 1
+              fi
+              FILTERS_RAW="''${2-}"
+              shift 2
+              ;;
+            --target=*)
+              TARGET_PATH="''${1#--target=}"
+              shift
+              ;;
+            --target)
+              if [ "$#" -lt 2 ]; then
+                echo "❌ --target requires a path" >&2
+                exit 1
+              fi
+              TARGET_PATH="''${2-}"
+              shift 2
+              ;;
+            --worktree)
+              USE_WORKTREE=true
+              shift
+              ;;
+            --sync)
+              SYNC_TARGET=true
+              shift
+              ;;
+            --prompt-plan)
+              PROMPT_PLAN=true
+              shift
+              ;;
+            --prompt-plan-force)
+              PROMPT_PLAN=true
+              PROMPT_PLAN_FORCE=true
+              shift
+              ;;
+            --no-prompt-plan|--skip-prompt-plan)
+              PROMPT_PLAN=false
+              shift
+              ;;
+            --reset-project)
+              RESET_PROJECT=true
+              shift
+              ;;
+	        --help|-h)
+	          cat <<'EOF'
 Usage:
   nix run github:willyrgf/nixfied#framework::install [options]
   nix run github:willyrgf/nixfied#framework::upgrade [options]
@@ -242,284 +246,322 @@ Install options:
   --force                Overwrite existing nix files (flake.nix/flake.lock/nixfied)
   --filter=LIST          Fresh install only: install subset of project templates
                          (values: conf,dev,test,build,quality,ci; build is an alias of prod.nix)
-  --target=PATH          When installing from a non-_nixified repo, write to PATH (must end with _nixified)
-  --worktree             Use 'git worktree add --detach' instead of copying (requires clean working tree unless --force)
-  --sync                 If target exists and --force is set, sync repo contents into target before installing
+  --worktree             Install into a git worktree for the nixfied branch (keeps current checkout unchanged)
+  --target=PATH          With --worktree: worktree directory path (default: <repo>_nixfied)
+  --sync                 Deprecated (no-op); kept for backward compatibility
 
 Upgrade options:
   --upgrade              Treat as an upgrade (preserves nixfied/project unless --reset-project)
   --reset-project        Overwrite nixfied/project templates during upgrade
 
 Prompt plan:
-  --prompt-plan          Generate NIXFIED_PROMPT_PLAN.md after install/upgrade (best effort)
+  --no-prompt-plan       Skip generating NIXFIED_PROMPT_PLAN.md (default is to generate)
+  --prompt-plan          Generate NIXFIED_PROMPT_PLAN.md after install/upgrade (best effort; default)
   --prompt-plan-force    Overwrite existing NIXFIED_PROMPT_PLAN.md
 EOF
-          exit 0
-          ;;
-        --)
-          # Accept an explicit "--" (some wrappers include it) and keep parsing.
-          shift
-          ;;
-        *)
-          # Ignore unknown args for forward compatibility.
-          shift
-          ;;
-      esac
-    done
-
-    if [ "$FORCE" = "true" ]; then
-      export NIXFIED_INSTALL_FORCE=1
-    fi
-
-    ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
-    if [ -z "$ROOT" ]; then
-      echo "❌ Not inside a git repository." >&2
-      exit 1
-    fi
-
-    SUFFIX="_nixified"
-    BASE=$(basename "$ROOT")
-
-    if [ "$MODE" = "upgrade" ]; then
-      if [[ "$BASE" != *"$SUFFIX" ]]; then
-        echo "❌ Upgrade requires running inside a repository ending with $SUFFIX" >&2
-        exit 1
-      fi
-      if [ ! -d "$ROOT/nixfied" ]; then
-        echo "❌ No nixfied/ directory found in $ROOT" >&2
-        echo "   Run install first: nix run github:willyrgf/nixfied#framework::install" >&2
-        exit 1
-      fi
-    fi
-
-    if [ "$MODE" != "upgrade" ] && [ -z "''${NIXFIED_INSTALL_REENTRY:-}" ]; then
-      if [[ "$BASE" != *"$SUFFIX" ]]; then
-        TARGET="''${TARGET_PATH:-''${ROOT}''${SUFFIX}}"
-        if [[ "$(basename "$TARGET")" != *"$SUFFIX" ]]; then
-          echo "❌ Target must end with $SUFFIX (got: $TARGET)" >&2
-          exit 1
-        fi
-        case "$TARGET" in
-          "$ROOT"/*)
-            echo "❌ Target must not be inside the source repo (got: $TARGET)" >&2
-            exit 1
-            ;;
-        esac
-        if [ -e "$TARGET" ]; then
-          if [ "$FORCE" = "true" ]; then
-            if [ "$SYNC_TARGET" = "true" ] && [ "$USE_WORKTREE" != "true" ]; then
-              echo "🔄 Syncing repository to $TARGET..."
-              ${pkgs.rsync}/bin/rsync -a --delete "$ROOT/" "$TARGET/"
-            else
-              echo "⚠️  Target already exists: $TARGET"
-              echo "    Reusing existing target (no new copy/worktree created)."
-              if [ "$SYNC_TARGET" = "true" ] && [ "$USE_WORKTREE" = "true" ]; then
-                echo "ℹ️  --sync has no effect with --worktree."
-              fi
-            fi
-            (cd "$TARGET" && NIXFIED_INSTALL_REENTRY=1 NIXFIED_INSTALL_FORCE=1 "$0" "''${ORIG_ARGS[@]}")
-            exit 0
-          else
-            echo "❌ Target already exists: $TARGET" >&2
-            echo "   Remove it or rename it, then re-run (or pass --force to reuse)." >&2
-            exit 1
-          fi
-        fi
-        if [ "$USE_WORKTREE" = "true" ]; then
-          if [ ! -x "${pkgs.git}/bin/git" ]; then
-            echo "❌ git is required for --worktree" >&2
-            exit 1
-          fi
-          DIRTY=$(${pkgs.git}/bin/git -C "$ROOT" status --porcelain 2>/dev/null || true)
-          if [ -n "$DIRTY" ] && [ "$FORCE" != "true" ]; then
-            echo "❌ Working tree is dirty; refusing to create a detached worktree without --force" >&2
-            echo "   (uncommitted changes would not be present in the worktree)" >&2
-            exit 1
-          fi
-          echo "🌿 Creating git worktree at $TARGET..."
-          ${pkgs.git}/bin/git -C "$ROOT" worktree add --detach "$TARGET" >/dev/null
-        else
-          echo "📦 Copying repository to $TARGET..."
-          ${pkgs.rsync}/bin/rsync -a "$ROOT/" "$TARGET/"
-        fi
-        echo "✅ Target ready. Re-running installer in $TARGET"
-        (cd "$TARGET" && NIXFIED_INSTALL_REENTRY=1 "$0" "''${ORIG_ARGS[@]}")
-        exit 0
-      fi
-    fi
-
-    if [[ "$BASE" != *"$SUFFIX" ]]; then
-      echo "❌ For safety, run inside a repository ending with $SUFFIX" >&2
-      exit 1
-    fi
-
-    SRC="${frameworkRoot}"
-
-    if [ ! -f "$SRC/flake.nix" ] || [ ! -d "$SRC/nixfied" ]; then
-      echo "❌ Framework source is missing required files." >&2
-      exit 1
-    fi
-
-    NEEDS_OVERWRITE=false
-    if [ -e "$ROOT/flake.nix" ] || [ -e "$ROOT/flake.lock" ] || [ -d "$ROOT/nixfied" ]; then
-      NEEDS_OVERWRITE=true
-    fi
-
-    if [ "$NEEDS_OVERWRITE" = "true" ] && [ -z "''${NIXFIED_INSTALL_FORCE:-}" ]; then
-      if [ -t 0 ]; then
-        if [ -d "$ROOT/nixfied/project" ] && [ "$RESET_PROJECT" != "true" ]; then
-          echo "⚠️  Existing Nixfied install found in $ROOT"
-          echo "    This will upgrade framework files and preserve nixfied/project/"
-          echo "    It will overwrite: flake.nix, flake.lock, nixfied/ (except nixfied/project/)"
-        else
-          echo "⚠️  Existing Nix files found in $ROOT"
-          echo "    This will overwrite: flake.nix, flake.lock, nixfied/"
-        fi
-        echo -n "Continue? [y/N]: "
-        read -r REPLY
-        if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
-          echo "Aborted."
-          exit 1
-        fi
-      else
-        echo "❌ Existing Nix files found. Re-run with NIXFIED_INSTALL_FORCE=1 to overwrite." >&2
-        exit 1
-      fi
-    fi
-
-    echo "📦 Installing framework files..."
-
-    cp -f "$SRC/flake.nix" "$ROOT/flake.nix"
-    if [ -f "$SRC/flake.lock" ]; then
-      cp -f "$SRC/flake.lock" "$ROOT/flake.lock"
-    fi
-
-    PRESERVE_PROJECT=false
-    if [ -d "$ROOT/nixfied/project" ] && [ "$RESET_PROJECT" != "true" ]; then
-      PRESERVE_PROJECT=true
-    fi
-    if [ "$MODE" = "upgrade" ] && [ "$RESET_PROJECT" != "true" ]; then
-      PRESERVE_PROJECT=true
-    fi
-
-    if [ -n "$FILTERS_RAW" ] && [ "$PRESERVE_PROJECT" = "true" ]; then
-      echo "ℹ️  Skipping --filter on upgrade (nixfied/project is preserved)."
-      FILTERS_RAW=""
-    fi
-
-    if [ -d "$ROOT/nixfied" ]; then
-      chmod -R u+w "$ROOT/nixfied" 2>/dev/null || true
-    fi
-
-    if [ "$PRESERVE_PROJECT" = "true" ]; then
-      echo "🔧 Upgrading nixfied/ (preserving nixfied/project/)"
-      ${pkgs.rsync}/bin/rsync -a --delete --chmod=Du+w,Fu+w --exclude='/project/' "$SRC/nixfied/" "$ROOT/nixfied/"
-    else
-      ${pkgs.rsync}/bin/rsync -a --delete --chmod=Du+w,Fu+w "$SRC/nixfied/" "$ROOT/nixfied/"
-    fi
-
-    chmod -R u+w "$ROOT/nixfied" 2>/dev/null || true
-    if command -v chflags >/dev/null 2>&1; then
-      chflags -R nouchg "$ROOT/nixfied" 2>/dev/null || true
-    fi
-    if command -v chattr >/dev/null 2>&1; then
-      chattr -R -i "$ROOT/nixfied" 2>/dev/null || true
-    fi
-    chmod u+w "$ROOT/nixfied/.framework" 2>/dev/null || true
-    if command -v chflags >/dev/null 2>&1; then
-      chflags nouchg "$ROOT/nixfied/.framework" 2>/dev/null || true
-    fi
-    if command -v chattr >/dev/null 2>&1; then
-      chattr -i "$ROOT/nixfied/.framework" 2>/dev/null || true
-    fi
-    rm -f "$ROOT/nixfied/.framework"
-
-    if [ -n "$FILTERS_RAW" ]; then
-      IFS=',' read -r -a FILTERS <<< "$FILTERS_RAW"
-      declare -A KEEP
-      KEEP[conf]=1
-
-      for f in "''${FILTERS[@]}"; do
-        f="''${f,,}"
-        case "$f" in
-          build)
-            KEEP[prod]=1
-            ;;
-          conf|dev|test|prod|quality|ci)
-            KEEP["$f"]=1
-            ;;
-          "")
-            ;;
-          *)
-            echo "❌ Unknown filter: $f" >&2
-            exit 1
-            ;;
-        esac
-      done
-
-      for f in dev test prod quality ci; do
-        if [ -z "''${KEEP[$f]:-}" ]; then
-          rm -f "$ROOT/nixfied/project/$f.nix" 2>/dev/null || true
-        fi
-      done
-
-      {
-        echo "{ pkgs ? null }:"
-        echo ""
-        echo "let"
-        echo "  conf = import ./conf.nix { inherit pkgs; };"
-        echo "  project = conf.project or { };"
-        echo "  parts = ["
-        echo "    conf"
-        for f in dev test prod quality ci; do
-          if [ -n "''${KEEP[$f]:-}" ]; then
-            echo "    (import ./$f.nix { inherit pkgs project; })"
-          fi
+	          exit 0
+	          ;;
+            --)
+              # Accept an explicit "--" (some wrappers include it) and keep parsing.
+              shift
+              ;;
+            *)
+              # Ignore unknown args for forward compatibility.
+              shift
+              ;;
+          esac
         done
-        echo "  ];"
-        echo "in"
-        echo "pkgs.lib.foldl' pkgs.lib.recursiveUpdate { } parts"
-      } > "$ROOT/nixfied/project/default.nix"
-    fi
 
-    if [ "$PROMPT_PLAN" = "true" ]; then
-      PLAN_EXIT=0
-      set +e
-      if [ "$PROMPT_PLAN_FORCE" = "true" ]; then
-        ${promptPlanScript} --force
-      else
-        ${promptPlanScript}
-      fi
-      PLAN_EXIT=$?
-      set -e
-      if [ "$PLAN_EXIT" -ne 0 ]; then
-        echo "⚠️  Prompt plan generation failed or was skipped."
-      fi
-    fi
+	        if [ "$FORCE" = "true" ]; then
+	          export NIXFIED_INSTALL_FORCE=1
+	        fi
 
-    if [ "$PRESERVE_PROJECT" = "true" ] || [ "$MODE" = "upgrade" ]; then
-      echo "✅ Framework upgraded."
-      echo "    Preserved nixfied/project/ (pass --reset-project to overwrite)."
-    else
-      echo "✅ Framework installed."
-    fi
-    echo "Next:"
-    echo "  - Edit nixfied/project/conf.nix"
-    echo "  - Customize nixfied/project/{dev,test,prod,quality,ci}.nix (prod.nix defines the build command)"
+	        GIT="${pkgs.git}/bin/git"
+	        if [ ! -x "$GIT" ]; then
+	          echo "❌ git is required to install/upgrade." >&2
+	          exit 1
+	        fi
+
+	        ROOT=$("$GIT" rev-parse --show-toplevel 2>/dev/null || true)
+	        if [ -z "$ROOT" ]; then
+	          echo "❌ Not inside a git repository." >&2
+	          exit 1
+	        fi
+	        ROOT=$(cd "$ROOT" && pwd -P)
+
+	        INSTALL_BRANCH="''${NIXFIED_INSTALL_BRANCH:-nixfied}"
+
+	        if [ "$SYNC_TARGET" = "true" ]; then
+	          echo "ℹ️  --sync is deprecated in the branch-based installer (no-op)."
+	        fi
+
+	        if [ -z "''${NIXFIED_INSTALL_REENTRY:-}" ] && [ "$USE_WORKTREE" = "true" ]; then
+	          TARGET="''${TARGET_PATH:-''${ROOT}_''${INSTALL_BRANCH}}"
+	          case "$TARGET" in
+	            "$ROOT"/*)
+	              echo "❌ Target must not be inside the source repo (got: $TARGET)" >&2
+	              exit 1
+	              ;;
+	          esac
+
+	          if [ -e "$TARGET" ]; then
+	            if [ "$FORCE" = "true" ]; then
+	              echo "⚠️  Target already exists: $TARGET"
+	              echo "    Reusing existing target (no new worktree created)."
+	            else
+	              echo "❌ Target already exists: $TARGET" >&2
+	              echo "   Remove it or pass --force to reuse." >&2
+	              exit 1
+	            fi
+	          else
+	            DIRTY=$("$GIT" -C "$ROOT" status --porcelain 2>/dev/null || true)
+	            if [ -n "$DIRTY" ] && [ "$FORCE" != "true" ]; then
+	              echo "❌ Working tree is dirty; refusing to create a worktree without --force" >&2
+	              echo "   (uncommitted changes would not be present in the worktree)" >&2
+	              exit 1
+	            fi
+	            echo "🌿 Creating git worktree at $TARGET (branch: $INSTALL_BRANCH)..."
+	            if "$GIT" -C "$ROOT" show-ref --verify --quiet "refs/heads/$INSTALL_BRANCH"; then
+	              "$GIT" -C "$ROOT" worktree add "$TARGET" "$INSTALL_BRANCH" >/dev/null
+	            else
+	              "$GIT" -C "$ROOT" worktree add -b "$INSTALL_BRANCH" "$TARGET" >/dev/null
+	            fi
+	          fi
+
+	          if ! "$GIT" -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+	            echo "❌ Target exists but is not a git worktree: $TARGET" >&2
+	            exit 1
+	          fi
+
+	          echo "✅ Worktree ready. Re-running installer in $TARGET"
+	          (cd "$TARGET" && NIXFIED_INSTALL_REENTRY=1 "$0" "''${ORIG_ARGS[@]}")
+	          exit 0
+	        fi
+
+	        if [ -n "$TARGET_PATH" ] && [ "$USE_WORKTREE" != "true" ] && [ -z "''${NIXFIED_INSTALL_REENTRY:-}" ]; then
+	          echo "ℹ️  --target is only used with --worktree; ignoring."
+	        fi
+
+	        HEAD_REF=$("$GIT" -C "$ROOT" symbolic-ref -q HEAD 2>/dev/null || true)
+	        if [[ "$HEAD_REF" == refs/heads/* ]]; then
+	          CURRENT_BRANCH="''${HEAD_REF#refs/heads/}"
+	        else
+	          CURRENT_BRANCH=$("$GIT" -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+	        fi
+
+	        if [ "$MODE" = "upgrade" ]; then
+	          if [ ! -d "$ROOT/nixfied" ]; then
+	            echo "❌ No nixfied/ directory found in $ROOT" >&2
+	            echo "   Run install first: nix run github:willyrgf/nixfied#framework::install" >&2
+	            exit 1
+	          fi
+	          if [ "$HEAD_REF" != "refs/heads/$INSTALL_BRANCH" ] && ! "$GIT" -C "$ROOT" show-ref --verify --quiet "refs/heads/$INSTALL_BRANCH"; then
+	            echo "❌ Upgrade requires an existing branch: $INSTALL_BRANCH" >&2
+	            exit 1
+	          fi
+	        fi
+
+	        if [ "$CURRENT_BRANCH" != "$INSTALL_BRANCH" ]; then
+	          if "$GIT" -C "$ROOT" show-ref --verify --quiet "refs/heads/$INSTALL_BRANCH"; then
+	            DIRTY=$("$GIT" -C "$ROOT" status --porcelain 2>/dev/null || true)
+	            if [ -n "$DIRTY" ] && [ "$FORCE" != "true" ]; then
+	              echo "❌ Working tree is dirty; refusing to switch to '$INSTALL_BRANCH' without --force" >&2
+	              echo "   (commit/stash your changes, or pass --worktree)" >&2
+	              exit 1
+	            fi
+	            echo "🌿 Switching to $INSTALL_BRANCH branch..."
+	            "$GIT" -C "$ROOT" switch "$INSTALL_BRANCH" >/dev/null
+	          else
+	            if [ "$MODE" = "upgrade" ]; then
+	              echo "❌ Upgrade requires an existing branch: $INSTALL_BRANCH" >&2
+	              exit 1
+	            fi
+	            echo "🌿 Creating and switching to $INSTALL_BRANCH branch..."
+	            "$GIT" -C "$ROOT" switch -c "$INSTALL_BRANCH" >/dev/null
+	          fi
+	        fi
+
+	        SRC="${frameworkRoot}"
+
+        if [ ! -f "$SRC/flake.nix" ] || [ ! -d "$SRC/nixfied" ]; then
+          echo "❌ Framework source is missing required files." >&2
+          exit 1
+        fi
+
+        NEEDS_OVERWRITE=false
+        if [ -e "$ROOT/flake.nix" ] || [ -e "$ROOT/flake.lock" ] || [ -d "$ROOT/nixfied" ]; then
+          NEEDS_OVERWRITE=true
+        fi
+
+        if [ "$NEEDS_OVERWRITE" = "true" ] && [ -z "''${NIXFIED_INSTALL_FORCE:-}" ]; then
+          if [ -t 0 ]; then
+            if [ -d "$ROOT/nixfied/project" ] && [ "$RESET_PROJECT" != "true" ]; then
+              echo "⚠️  Existing Nixfied install found in $ROOT"
+              echo "    This will upgrade framework files and preserve nixfied/project/"
+              echo "    It will overwrite: flake.nix, flake.lock, nixfied/ (except nixfied/project/)"
+            else
+              echo "⚠️  Existing Nix files found in $ROOT"
+              echo "    This will overwrite: flake.nix, flake.lock, nixfied/"
+            fi
+            echo -n "Continue? [y/N]: "
+            read -r REPLY
+            if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+              echo "Aborted."
+              exit 1
+            fi
+          else
+            echo "❌ Existing Nix files found. Re-run with NIXFIED_INSTALL_FORCE=1 to overwrite." >&2
+            exit 1
+          fi
+        fi
+
+        echo "📦 Installing framework files..."
+
+        cp -f "$SRC/flake.nix" "$ROOT/flake.nix"
+        if [ -f "$SRC/flake.lock" ]; then
+          cp -f "$SRC/flake.lock" "$ROOT/flake.lock"
+        fi
+
+        PRESERVE_PROJECT=false
+        if [ -d "$ROOT/nixfied/project" ] && [ "$RESET_PROJECT" != "true" ]; then
+          PRESERVE_PROJECT=true
+        fi
+        if [ "$MODE" = "upgrade" ] && [ "$RESET_PROJECT" != "true" ]; then
+          PRESERVE_PROJECT=true
+        fi
+
+        if [ -n "$FILTERS_RAW" ] && [ "$PRESERVE_PROJECT" = "true" ]; then
+          echo "ℹ️  Skipping --filter on upgrade (nixfied/project is preserved)."
+          FILTERS_RAW=""
+        fi
+
+        if [ -d "$ROOT/nixfied" ]; then
+          chmod -R u+w "$ROOT/nixfied" 2>/dev/null || true
+        fi
+
+        if [ "$PRESERVE_PROJECT" = "true" ]; then
+          echo "🔧 Upgrading nixfied/ (preserving nixfied/project/)"
+          ${pkgs.rsync}/bin/rsync -a --delete --chmod=Du+w,Fu+w --exclude='/project/' "$SRC/nixfied/" "$ROOT/nixfied/"
+        else
+          ${pkgs.rsync}/bin/rsync -a --delete --chmod=Du+w,Fu+w "$SRC/nixfied/" "$ROOT/nixfied/"
+        fi
+
+        chmod -R u+w "$ROOT/nixfied" 2>/dev/null || true
+        if command -v chflags >/dev/null 2>&1; then
+          chflags -R nouchg "$ROOT/nixfied" 2>/dev/null || true
+        fi
+        if command -v chattr >/dev/null 2>&1; then
+          chattr -R -i "$ROOT/nixfied" 2>/dev/null || true
+        fi
+        chmod u+w "$ROOT/nixfied/.framework" 2>/dev/null || true
+        if command -v chflags >/dev/null 2>&1; then
+          chflags nouchg "$ROOT/nixfied/.framework" 2>/dev/null || true
+        fi
+        if command -v chattr >/dev/null 2>&1; then
+          chattr -i "$ROOT/nixfied/.framework" 2>/dev/null || true
+        fi
+        rm -f "$ROOT/nixfied/.framework"
+
+        if [ -n "$FILTERS_RAW" ]; then
+          IFS=',' read -r -a FILTERS <<< "$FILTERS_RAW"
+          declare -A KEEP
+          KEEP[conf]=1
+
+          for f in "''${FILTERS[@]}"; do
+            f="''${f,,}"
+            case "$f" in
+              build)
+                KEEP[prod]=1
+                ;;
+              conf|dev|test|prod|quality|ci)
+                KEEP["$f"]=1
+                ;;
+              "")
+                ;;
+              *)
+                echo "❌ Unknown filter: $f" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          for f in dev test prod quality ci; do
+            if [ -z "''${KEEP[$f]:-}" ]; then
+              rm -f "$ROOT/nixfied/project/$f.nix" 2>/dev/null || true
+            fi
+          done
+
+          {
+            echo "{ pkgs ? null }:"
+            echo ""
+            echo "let"
+            echo "  conf = import ./conf.nix { inherit pkgs; };"
+            echo "  project = conf.project or { };"
+            echo "  parts = ["
+            echo "    conf"
+            for f in dev test prod quality ci; do
+              if [ -n "''${KEEP[$f]:-}" ]; then
+                echo "    (import ./$f.nix { inherit pkgs project; })"
+              fi
+            done
+            echo "  ];"
+            echo "in"
+            echo "pkgs.lib.foldl' pkgs.lib.recursiveUpdate { } parts"
+          } > "$ROOT/nixfied/project/default.nix"
+        fi
+
+        if [ "$PROMPT_PLAN" = "true" ]; then
+          PLAN_EXIT=0
+          set +e
+          if [ "$PROMPT_PLAN_FORCE" = "true" ]; then
+            ${promptPlanScript} --force
+          else
+            ${promptPlanScript}
+          fi
+          PLAN_EXIT=$?
+          set -e
+          if [ "$PLAN_EXIT" -ne 0 ]; then
+            echo "⚠️  Prompt plan generation failed or was skipped."
+          fi
+        fi
+
+        if [ "$PRESERVE_PROJECT" = "true" ] || [ "$MODE" = "upgrade" ]; then
+          echo "✅ Framework upgraded."
+          echo "    Preserved nixfied/project/ (pass --reset-project to overwrite)."
+        else
+          echo "✅ Framework installed."
+        fi
+        echo "Next:"
+        echo "  - Edit nixfied/project/conf.nix"
+        echo "  - Customize nixfied/project/{dev,test,prod,quality,ci}.nix (prod.nix defines the build command)"
   '';
 in
 {
-  install = mkApp {
+  install = mkNixfiedApp {
     name = "install";
-    description = "Install Nixfied framework into a repository";
+    api = {
+      version = 1;
+      summary = "Install Nixfied framework into a repository";
+      details = "Installs the Nixfied framework into a target repository (writes flake.nix and nixfied/), optionally generating project scaffolding.";
+      usage = [
+        "nix run .#framework::install -- [--force] [--filter=...] [--reset-project] [--no-prompt-plan]"
+      ];
+      category = "framework";
+    };
     env = { };
     useDeps = false;
     script = installScript;
   };
 
-  upgrade = mkApp {
+  upgrade = mkNixfiedApp {
     name = "upgrade";
-    description = "Upgrade Nixfied framework in-place (preserving nixfied/project by default)";
+    api = {
+      version = 1;
+      summary = "Upgrade Nixfied framework in-place (preserving nixfied/project by default)";
+      details = "Upgrades the Nixfied framework in-place. By default it preserves nixfied/project so project-specific configuration remains intact.";
+      usage = [ "nix run .#framework::upgrade -- [--force] [--reset-project] [--no-prompt-plan]" ];
+      category = "framework";
+    };
     env = {
       NIXFIED_INSTALL_MODE = "upgrade";
     };
@@ -527,9 +569,15 @@ in
     script = installScript;
   };
 
-  "prompt-plan" = mkApp {
+  "prompt-plan" = mkNixfiedApp {
     name = "prompt-plan";
-    description = "Generate Nixfied prompt plan from project docs";
+    api = {
+      version = 1;
+      summary = "Generate Nixfied prompt plan from project docs";
+      details = "Generates a prompt plan document (for agents) from the repository's project docs. This is framework-only and can be disabled via NIXFIED_PROMPT_PLAN=0.";
+      usage = [ "nix run .#framework::prompt-plan -- [--force] [--output=PATH]" ];
+      category = "framework";
+    };
     env = { };
     useDeps = false;
     script = ''

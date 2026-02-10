@@ -29,10 +29,11 @@ let
 
     if [ -f "$PGDATA/PG_VERSION" ]; then
       echo "✅ PostgreSQL already initialized at $PGDATA"
-    else
-      echo "🔧 Initializing PostgreSQL at $PGDATA..."
-      ${postgres}/bin/initdb -D "$PGDATA" -U postgres --no-locale --encoding=UTF8 -A trust
+      exit 0
     fi
+
+    echo "🔧 Initializing PostgreSQL at $PGDATA..."
+    ${postgres}/bin/initdb -D "$PGDATA" -U postgres --no-locale --encoding=UTF8 -A trust
 
     # Determine environment-specific config
     CONF_ENV="''${ENV:-dev}"

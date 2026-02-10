@@ -16,6 +16,10 @@ let
     inherit pkgs project;
     inherit (helpers) loadEnv helpersScript hookExports;
   };
+  appApi = import ./app-api.nix {
+    inherit pkgs;
+    inherit (builders) mkApp;
+  };
   process = import ./process.nix { inherit pkgs; };
   portUtils = import ./port-utils.nix { inherit pkgs; };
   parallel = import ./parallel.nix { inherit pkgs; };
@@ -24,7 +28,13 @@ in
 {
   inherit (helpers) loadEnv helpersScript hookExports;
   inherit (summary) summaryParser;
-  inherit (builders) withTiming mkAppScript mkApp mkAppWithDeps;
+  inherit (builders)
+    withTiming
+    mkAppScript
+    mkApp
+    mkAppWithDeps
+    ;
+  inherit appApi;
   inherit (process) mkSignalHandler mkProcessManager;
   inherit (portUtils) mkPortCleanup mkPortConflictChecker;
   inherit (parallel) mkParallelRunner;

@@ -142,5 +142,10 @@ let
 
 in
 {
-  inherit nginx nginxConfTemplate siteProxyTemplate siteStaticTemplate;
+  inherit
+    nginx
+    nginxConfTemplate
+    siteProxyTemplate
+    siteStaticTemplate
+    ;
 }

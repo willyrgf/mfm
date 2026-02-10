@@ -6,7 +6,7 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 ## Read First (Non-Negotiables)
 
 - Keep changes small and local; prefer 1 logical change per PR/commit.
-- Match CI: use `cargo +nightly fmt --all`, `cargo +nightly clippy --workspace --lib --examples --tests --benches --all-features`, and `cargo nextest run --workspace`.
+- Match CI (Nixfied): use `nix run .#check`, `nix run .#test`, and `nix run .#ci -- --basic/--audit/--parity --summary`.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
 - If you touch security-sensitive code (keystore/crypto), add or strengthen tests.
@@ -21,6 +21,7 @@ Nixfied is the canonical entrypoint for dev/test/build/check/ci:
 - `nix run .#test`
 - `nix run .#build`
 - `nix run .#ci -- --basic --summary`
+- `nix run .#ci -- --audit --summary`
 - `nix run .#ci -- --parity --summary`
 
 ## Project Overview
@@ -87,30 +88,22 @@ mfm (CLI) -> mfm_core -> mfm_machine -> mfm_machine_derive
 
 ### Code Style and Standards
 
-1. **Formatting**: Always use nightly rustfmt
+1. **Formatting + Clippy (nightly)**:
 ```bash
-cargo +nightly fmt --all
+nix run .#check
 ```
 
-2. **Linting**: Run clippy with all features
+2. **Testing**:
 ```bash
-cargo +nightly clippy --workspace --lib --examples --tests --benches --all-features
+nix run .#test
 ```
 
-3. **Testing**: Use nextest for faster test execution
+3. **Security Audit**:
 ```bash
-cargo nextest run --workspace
+nix run .#ci -- --audit --summary
 ```
 
-### Security Audit
-
-CI runs `cargo audit`.
-
-```bash
-cargo audit
-```
-
-### Nix (Optional, CI Parity)
+### Nix (CI Parity)
 
 The repo ships a Nix flake (`flake.nix`). CI runs:
 
@@ -322,24 +315,22 @@ DONT:
 ### Essential Commands
 
 ```bash
-# Format code
-cargo +nightly fmt --all
+# Quality checks (fmt + clippy, nightly toolchain)
+nix run .#check
 
-# Run lints
-cargo +nightly clippy --workspace --lib --examples --tests --benches --all-features
+# Run tests (nextest)
+nix run .#test
 
-# Run tests
-cargo nextest run --workspace
+# Security audit
+nix run .#ci -- --audit --summary
 
-# Run specific benchmark
-cargo bench --bench bench_name
+# CI modes
+nix run .#ci -- --basic --summary
+nix run .#ci -- --parity --summary
 
-# Build optimized binary
-cargo build --release --features "jemalloc asm-keccak"
+# Release build (all features)
+nix run .#build
 
-# Check compilation for all features
-cargo check --workspace --all-features
-
-# Check documentation
-cargo docs --document-private-items 
+# For ad-hoc cargo commands (bench/check/doc), use the pinned dev shell:
+nix develop
 ```

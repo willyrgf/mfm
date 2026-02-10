@@ -19,11 +19,16 @@ let
   testMigrations = pkgs.writeShellScript "postgres-test-migrations" ''
     set -euo pipefail
 
-    ${if migrateCommand == "" then ''
-      echo "ℹ️  No migration command configured (modules.postgres.migrations.command)"
-      echo "   Skipping migration test"
-      exit 0
-    '' else ""}
+    ${
+      if migrateCommand == "" then
+        ''
+          echo "ℹ️  No migration command configured (modules.postgres.migrations.command)"
+          echo "   Skipping migration test"
+          exit 0
+        ''
+      else
+        ""
+    }
 
     eval "$(${slots.getSlotInfo})"
 

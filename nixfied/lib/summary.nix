@@ -7,7 +7,11 @@
 let
   ciCfg = project.ci or { };
   failureSignals = ciCfg.failureSignals or [ ];
-  defaultSignals = [ "HTTP_429" "ECONNRESET" "ENOTFOUND" ];
+  defaultSignals = [
+    "HTTP_429"
+    "ECONNRESET"
+    "ENOTFOUND"
+  ];
   allSignals = failureSignals ++ defaultSignals;
   signalPattern = pkgs.lib.concatStringsSep "|" allSignals;
 
@@ -57,7 +61,7 @@ let
       echo "❌ Exit code: $EXIT_CODE"
 
       # Check for known failure signals
-      ${pkgs.lib.optionalString (allSignals != []) ''
+      ${pkgs.lib.optionalString (allSignals != [ ]) ''
         if [ -n "$LOGFILE" ] && [ -f "$LOGFILE" ]; then
           SIGNALS=$(grep -oE '${signalPattern}' "$LOGFILE" 2>/dev/null | sort -u || true)
           if [ -n "$SIGNALS" ]; then

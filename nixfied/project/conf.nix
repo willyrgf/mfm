@@ -28,14 +28,30 @@ let
       null;
 
   cargoNightly =
-    if nightlyToolchain == null then
-      null
-    else
+    if nightlyToolchain != null then
       pkgs.writeShellScriptBin "cargo-nightly" ''
         set -euo pipefail
         export PATH="${nightlyToolchain}/bin:$PATH"
         exec "${nightlyToolchain}/bin/cargo" "$@"
+      ''
+    else
+      # Fallback when fenix isn't available: use the nixpkgs toolchain.
+      # This keeps the command surface stable (`cargo-nightly`) for CI scripts.
+      pkgs.writeShellScriptBin "cargo-nightly" ''
+        set -euo pipefail
+        exec cargo "$@"
       '';
+
+  rustToolchainPackages =
+    if stableToolchain != null then
+      [ stableToolchain ]
+    else
+      [
+        pkgs.cargo
+        pkgs.rustc
+        pkgs.rustfmt
+        pkgs.clippy
+      ];
 in
 rec {
   project = {
@@ -89,8 +105,8 @@ rec {
         pkgs.cargo-audit
         pkgs.minio
       ]
-      ++ pkgs.lib.optionals (stableToolchain != null) [ stableToolchain ]
-      ++ pkgs.lib.optionals (cargoNightly != null) [ cargoNightly ];
+      ++ rustToolchainPackages
+      ++ [ cargoNightly ];
     devShellPackages = runtimePackages;
     devShellHook = ''
       echo "MFM dev shell ready. Use: nix run .#help"

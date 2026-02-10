@@ -1,10 +1,9 @@
 {
-  description = "MFM";
+  description = "Generic Nix project framework";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    fenix.url = "github:nix-community/fenix";
   };
 
   outputs =
@@ -12,15 +11,11 @@
       self,
       nixpkgs,
       flake-utils,
-      fenix,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [ fenix.overlays.default ];
-        };
+        pkgs = import nixpkgs { inherit system; };
 
         project = import ./nixfied/project { inherit pkgs; };
         slots = import ./nixfied/slots.nix { inherit pkgs project; };
@@ -142,14 +137,18 @@
         };
 
         apps =
-          coreApps
-          // moduleApps
-          // (if ciApp != null then { ci = ciApp; } else { })
-          // isolationApps
-          // frameworkApps
-          // {
-            default = if coreApps ? help then coreApps.help else coreApps.dev;
-          };
+          let
+            apps0 =
+              coreApps
+              // moduleApps
+              // (if ciApp != null then { ci = ciApp; } else { })
+              // isolationApps
+              // frameworkApps
+              // {
+                default = if coreApps ? help then coreApps.help else coreApps.dev;
+              };
+          in
+          lib.appApi.validateApps apps0;
 
         packages = project.packages or { };
       }

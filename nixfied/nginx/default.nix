@@ -8,13 +8,29 @@
 let
   templates = import ./templates.nix { inherit pkgs; };
   lifecycle = import ./lifecycle.nix {
-    inherit pkgs project slots templates;
+    inherit
+      pkgs
+      project
+      slots
+      templates
+      ;
   };
   siteMgmt = import ./site-management.nix {
-    inherit pkgs project slots templates lifecycle;
+    inherit
+      pkgs
+      project
+      slots
+      templates
+      lifecycle
+      ;
   };
   ssl = import ./ssl.nix {
-    inherit pkgs project slots lifecycle;
+    inherit
+      pkgs
+      project
+      slots
+      lifecycle
+      ;
   };
 in
 {

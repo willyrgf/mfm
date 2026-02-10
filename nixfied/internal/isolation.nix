@@ -18,19 +18,13 @@ let
       configured = isolation.slots or [ ];
       maxSlot = slots.slotMax or 0;
     in
-    if configured != [ ] then
-      configured
-    else
-      builtins.genList (n: n) (maxSlot + 1);
+    if configured != [ ] then configured else builtins.genList (n: n) (maxSlot + 1);
   envList =
     let
       configured = isolation.envs or [ ];
       defaults = builtins.attrNames (project.envs or { });
     in
-    if configured != [ ] then
-      configured
-    else
-      defaults;
+    if configured != [ ] then configured else defaults;
 
   slotListStr = pkgs.lib.concatMapStringsSep " " (s: toString s) slotList;
   envListStr = pkgs.lib.concatMapStringsSep " " pkgs.lib.escapeShellArg envList;
@@ -48,10 +42,7 @@ let
   runArgsStr = pkgs.lib.escapeShellArgs runArgs;
   runCommand = isolation.runCommand or "";
   defaultRunCommand =
-    if runArgsStr == "" then
-      "nix run .#${runApp}"
-    else
-      "nix run .#${runApp} -- ${runArgsStr}";
+    if runArgsStr == "" then "nix run .#${runApp}" else "nix run .#${runApp} -- ${runArgsStr}";
   effectiveRunCommand = if runCommand != "" then runCommand else defaultRunCommand;
 
   runEnv = isolation.runEnv or { };
@@ -64,7 +55,8 @@ let
   cleanupSlotScript = if cleanupScript != "" then cleanupScript else ":";
 
   validateCommand = isolation.validateCommand or "";
-  effectiveValidateCommand = if validateCommand != "" then validateCommand else "nix run .#validate-env";
+  effectiveValidateCommand =
+    if validateCommand != "" then validateCommand else "nix run .#validate-env";
 
   portNames = builtins.attrNames (project.ports or { });
   portPairs = map (name: "${name}:${slots.portVarName name}") portNames;
@@ -73,29 +65,34 @@ let
   serviceNames = slots.serviceNames or [ ];
   serviceSockets = slots.serviceSockets or { };
   socketServiceNames = builtins.attrNames serviceSockets;
-  serviceDirVars =
-    builtins.concatLists (map (name: [
+  serviceDirVars = builtins.concatLists (
+    map (name: [
       "${slots.normalizeName name}_DIR"
       "${slots.normalizeName name}_LOG_DIR"
       "${slots.normalizeName name}_RUN_DIR"
       "${slots.normalizeName name}_CONFIG_DIR"
       "${slots.normalizeName name}_STATE_DIR"
       "${slots.normalizeName name}_SOCKET_DIR"
-    ]) serviceNames);
+    ]) serviceNames
+  );
   serviceDirVarsStr = pkgs.lib.concatMapStringsSep " " pkgs.lib.escapeShellArg serviceDirVars;
-  socketChecks =
-    map (name: let
+  socketChecks = map (
+    name:
+    let
       socketVar = "${slots.normalizeName name}_SOCKET";
       portVar = if builtins.hasAttr name (project.ports or { }) then slots.portVarName name else "";
-    in "${name}:${socketVar}:${portVar}") socketServiceNames;
+    in
+    "${name}:${socketVar}:${portVar}"
+  ) socketServiceNames;
   socketChecksStr = pkgs.lib.concatMapStringsSep " " pkgs.lib.escapeShellArg socketChecks;
 
-  dirVars = isolation.dirVars or [
-    "LOG_DIR"
-    "RUN_DIR"
-    "CONFIG_DIR"
-    "STATE_DIR"
-  ];
+  dirVars =
+    isolation.dirVars or [
+      "LOG_DIR"
+      "RUN_DIR"
+      "CONFIG_DIR"
+      "STATE_DIR"
+    ];
   dirVarsStr = pkgs.lib.concatMapStringsSep " " pkgs.lib.escapeShellArg dirVars;
 
   validateEnvScript = ''
@@ -514,19 +511,31 @@ let
   '';
 in
 {
-  validate-env = lib.mkApp {
+  validate-env = lib.appApi.mkNixfiedApp {
     name = "validate-env";
     script = validateEnvScript;
     env = { };
     useDeps = false;
-    description = "Validate slot/env listeners and directories";
+    api = {
+      version = 1;
+      summary = "Validate slot/env listeners and directories";
+      details = "Validates port listeners and required directories for the current slot/env.";
+      usage = [ "nix run .#validate-env" ];
+      category = "isolation";
+    };
   };
 
-  test-isolation = lib.mkApp {
+  test-isolation = lib.appApi.mkNixfiedApp {
     name = "test-isolation";
     script = testIsolationScript;
     env = { };
     useDeps = useDeps;
-    description = "Run concurrent isolation checks across slots/envs";
+    api = {
+      version = 1;
+      summary = "Run concurrent isolation checks across slots/envs";
+      details = "Runs concurrent validation and CI (or custom) commands across slot/env combinations and reports isolation issues.";
+      usage = [ "nix run .#test-isolation" ];
+      category = "isolation";
+    };
   };
 }

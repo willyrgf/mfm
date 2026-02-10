@@ -14,5 +14,6 @@ nix run .#dev
 nix run .#check
 nix run .#test
 nix run .#ci -- --basic --summary
+nix run .#ci -- --audit --summary
 nix run .#ci -- --parity --summary
 ```

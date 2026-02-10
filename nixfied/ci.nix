@@ -415,12 +415,31 @@ let
     else
       null;
 
+  ciApi = {
+    version = 1;
+    summary = "Run the CI pipeline";
+    details = "Runs the CI pipeline defined in nixfied/project/ci.nix (modes + steps).";
+    usage = [
+      "nix run .#ci"
+      "nix run .#ci -- --summary"
+    ];
+    examples = [ "nix run .#ci -- --summary" ];
+    category = "core";
+  };
+  _ = lib.appApi.validateApi {
+    name = "ci";
+    api = ciApi;
+  };
+
   app =
     if enabled then
       {
         type = "app";
-        meta = pkgs.lib.optionalAttrs true {
-          description = "Run the CI pipeline";
+        meta = {
+          description = ciApi.summary;
+          nixfied = {
+            api = ciApi;
+          };
         };
         program = toString scriptDrv;
       }

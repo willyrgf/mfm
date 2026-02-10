@@ -89,5 +89,11 @@ let
 
 in
 {
-  inherit checkPort getPortPids getPortInfo killPort assertPortsFree;
+  inherit
+    checkPort
+    getPortPids
+    getPortInfo
+    killPort
+    assertPortsFree
+    ;
 }

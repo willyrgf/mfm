@@ -8,7 +8,12 @@
 let
   config = import ./config.nix { inherit pkgs project; };
   lifecycle = import ./lifecycle.nix {
-    inherit pkgs project slots config;
+    inherit
+      pkgs
+      project
+      slots
+      config
+      ;
   };
   backupMod = import ./backup.nix { inherit pkgs project slots; };
   migration = import ./migration.nix { inherit pkgs project slots; };
@@ -55,7 +60,13 @@ in
   inherit (rollback) findBackupForCommit testRollback;
 
   # Port management
-  inherit (portMgmt) checkPort getPortPids getPortInfo killPort assertPortsFree;
+  inherit (portMgmt)
+    checkPort
+    getPortPids
+    getPortInfo
+    killPort
+    assertPortsFree
+    ;
 
   # Config (for reference)
   inherit config;

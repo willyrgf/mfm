@@ -14,64 +14,110 @@ let
   pgDatabase = project.modules.postgres.database or "app";
   pgPackage = project.modules.postgres.package or pkgs.postgresql_16;
 
+  mk =
+    {
+      name,
+      summary,
+      details,
+      usage ? [ "nix run .#${name}" ],
+      script,
+      category ? "module",
+    }:
+    lib.appApi.mkNixfiedApp {
+      inherit name script;
+      env = { };
+      useDeps = false;
+      api = {
+        version = 1;
+        summary = summary;
+        details = details;
+        usage = usage;
+        category = category;
+      };
+    };
+
   postgresApps =
     if postgres == null then
       { }
     else
       {
-        db-start = lib.mkApp {
+        db-start = mk {
           name = "db-start";
-          description = "Start PostgreSQL server";
+          summary = "Start PostgreSQL server";
+          details = "Starts the PostgreSQL server for the current slot/env (configured in nixfied/project/conf.nix).";
+          category = "postgres";
           script = ''run_hook POSTGRES_START'';
         };
-        db-stop = lib.mkApp {
+        db-stop = mk {
           name = "db-stop";
-          description = "Stop PostgreSQL server";
+          summary = "Stop PostgreSQL server";
+          details = "Stops the PostgreSQL server for the current slot/env.";
+          category = "postgres";
           script = ''run_hook POSTGRES_STOP'';
         };
-        db-setup = lib.mkApp {
+        db-setup = mk {
           name = "db-setup";
-          description = "Create and set up database";
+          summary = "Create and set up database";
+          details = "Creates the configured database/user for the current slot/env.";
+          category = "postgres";
           script = ''run_hook POSTGRES_SETUP_DB'';
         };
-        db-full-start = lib.mkApp {
+        db-full-start = mk {
           name = "db-full-start";
-          description = "Init, start, and set up PostgreSQL";
+          summary = "Init, start, and set up PostgreSQL";
+          details = "Initializes the data directory (if needed), starts PostgreSQL, and sets up the database for the current slot/env.";
+          category = "postgres";
           script = ''run_hook POSTGRES_FULL_START'';
         };
-        db-list = lib.mkApp {
+        db-list = mk {
           name = "db-list";
-          description = "List PostgreSQL instances";
+          summary = "List PostgreSQL instances";
+          details = "Lists PostgreSQL instances managed by Nixfied for this project.";
+          category = "postgres";
           script = ''run_hook POSTGRES_LIST_INSTANCES'';
         };
-        db-backup = lib.mkApp {
+        db-backup = mk {
           name = "db-backup";
-          description = "Create database backup";
+          summary = "Create database backup";
+          details = "Creates a backup of the current slot/env database. Arguments are forwarded to the backup hook.";
+          usage = [ "nix run .#db-backup -- <args>" ];
+          category = "postgres";
           script = ''run_hook POSTGRES_BACKUP "$@"'';
         };
-        db-restore = lib.mkApp {
+        db-restore = mk {
           name = "db-restore";
-          description = "Restore database from backup";
+          summary = "Restore database from backup";
+          details = "Restores the current slot/env database from a backup. Arguments are forwarded to the restore hook.";
+          usage = [ "nix run .#db-restore -- <args>" ];
+          category = "postgres";
           script = ''run_hook POSTGRES_RESTORE "$@"'';
         };
-        db-backup-list = lib.mkApp {
+        db-backup-list = mk {
           name = "db-backup-list";
-          description = "List database backups";
+          summary = "List database backups";
+          details = "Lists available backups for the current project.";
+          category = "postgres";
           script = ''run_hook POSTGRES_LIST_BACKUPS'';
         };
-        db-test-migration = lib.mkApp {
+        db-test-migration = mk {
           name = "db-test-migration";
-          description = "Test database migrations";
+          summary = "Test database migrations";
+          details = "Runs the configured migration test routine for the current slot/env.";
+          category = "postgres";
           script = ''run_hook POSTGRES_TEST_MIGRATIONS'';
         };
-        db-check-ports = lib.mkApp {
+        db-check-ports = mk {
           name = "db-check-ports";
-          description = "Check PostgreSQL port status";
+          summary = "Check PostgreSQL port status";
+          details = "Checks whether the PostgreSQL port for the current slot/env is available.";
+          category = "postgres";
           script = ''run_hook POSTGRES_CHECK_PORT'';
         };
-        db-shell = lib.mkApp {
+        db-shell = mk {
           name = "db-shell";
-          description = "Open PostgreSQL shell";
+          summary = "Open PostgreSQL shell";
+          details = "Opens a psql shell connected to the current slot/env database.";
+          category = "postgres";
           script = ''
             eval "$($SLOT_INFO)"
             exec ${pgPackage}/bin/psql "postgresql://localhost:$POSTGRES_PORT/${pgDatabase}" "$@"
@@ -84,59 +130,86 @@ let
       { }
     else
       {
-        nginx-start = lib.mkApp {
+        nginx-start = mk {
           name = "nginx-start";
-          description = "Start nginx server";
+          summary = "Start nginx server";
+          details = "Starts the nginx instance managed by Nixfied for the current slot/env.";
+          category = "nginx";
           script = ''run_hook NGINX_START'';
         };
-        nginx-stop = lib.mkApp {
+        nginx-stop = mk {
           name = "nginx-stop";
-          description = "Stop nginx server";
+          summary = "Stop nginx server";
+          details = "Stops the nginx instance managed by Nixfied for the current slot/env.";
+          category = "nginx";
           script = ''run_hook NGINX_STOP'';
         };
-        nginx-reload = lib.mkApp {
+        nginx-reload = mk {
           name = "nginx-reload";
-          description = "Reload nginx configuration";
+          summary = "Reload nginx configuration";
+          details = "Reloads nginx configuration for the current slot/env.";
+          category = "nginx";
           script = ''run_hook NGINX_RELOAD'';
         };
-        nginx-site-add = lib.mkApp {
+        nginx-site-add = mk {
           name = "nginx-site-add";
-          description = "Add an nginx site";
+          summary = "Add an nginx site";
+          details = "Adds a new nginx site configuration. Arguments are forwarded to the hook.";
+          usage = [ "nix run .#nginx-site-add -- <args>" ];
+          category = "nginx";
           script = ''run_hook NGINX_SITE_ADD "$@"'';
         };
-        nginx-site-remove = lib.mkApp {
+        nginx-site-remove = mk {
           name = "nginx-site-remove";
-          description = "Remove an nginx site";
+          summary = "Remove an nginx site";
+          details = "Removes an nginx site configuration. Arguments are forwarded to the hook.";
+          usage = [ "nix run .#nginx-site-remove -- <args>" ];
+          category = "nginx";
           script = ''run_hook NGINX_SITE_REMOVE "$@"'';
         };
-        nginx-site-list = lib.mkApp {
+        nginx-site-list = mk {
           name = "nginx-site-list";
-          description = "List nginx sites";
+          summary = "List nginx sites";
+          details = "Lists nginx sites configured for the project.";
+          category = "nginx";
           script = ''run_hook NGINX_SITE_LIST'';
         };
-        nginx-site-enable = lib.mkApp {
+        nginx-site-enable = mk {
           name = "nginx-site-enable";
-          description = "Enable an nginx site";
+          summary = "Enable an nginx site";
+          details = "Enables an nginx site. Arguments are forwarded to the hook.";
+          usage = [ "nix run .#nginx-site-enable -- <args>" ];
+          category = "nginx";
           script = ''run_hook NGINX_SITE_ENABLE "$@"'';
         };
-        nginx-site-disable = lib.mkApp {
+        nginx-site-disable = mk {
           name = "nginx-site-disable";
-          description = "Disable an nginx site";
+          summary = "Disable an nginx site";
+          details = "Disables an nginx site. Arguments are forwarded to the hook.";
+          usage = [ "nix run .#nginx-site-disable -- <args>" ];
+          category = "nginx";
           script = ''run_hook NGINX_SITE_DISABLE "$@"'';
         };
-        nginx-cert-obtain = lib.mkApp {
+        nginx-cert-obtain = mk {
           name = "nginx-cert-obtain";
-          description = "Obtain SSL certificate";
+          summary = "Obtain SSL certificate";
+          details = "Obtains an SSL certificate. Arguments are forwarded to the hook.";
+          usage = [ "nix run .#nginx-cert-obtain -- <args>" ];
+          category = "nginx";
           script = ''run_hook NGINX_CERT_OBTAIN "$@"'';
         };
-        nginx-cert-renew = lib.mkApp {
+        nginx-cert-renew = mk {
           name = "nginx-cert-renew";
-          description = "Renew SSL certificates";
+          summary = "Renew SSL certificates";
+          details = "Renews SSL certificates for configured sites.";
+          category = "nginx";
           script = ''run_hook NGINX_CERT_RENEW'';
         };
-        nginx-cert-status = lib.mkApp {
+        nginx-cert-status = mk {
           name = "nginx-cert-status";
-          description = "Show SSL certificate status";
+          summary = "Show SSL certificate status";
+          details = "Shows SSL certificate status for configured sites.";
+          category = "nginx";
           script = ''run_hook NGINX_CERT_STATUS'';
         };
       };
@@ -146,29 +219,41 @@ let
       { }
     else
       {
-        up = lib.mkApp {
+        up = mk {
           name = "up";
-          description = "Start all services";
+          summary = "Start all services";
+          details = "Starts all supervisor-managed services for the current slot/env.";
+          category = "supervisor";
           script = ''run_hook SUPERVISOR_START_DAEMON'';
         };
-        down = lib.mkApp {
+        down = mk {
           name = "down";
-          description = "Stop all services";
+          summary = "Stop all services";
+          details = "Stops all supervisor-managed services for the current slot/env.";
+          category = "supervisor";
           script = ''run_hook SUPERVISOR_STOP'';
         };
-        svc-status = lib.mkApp {
+        svc-status = mk {
           name = "svc-status";
-          description = "Show service status";
+          summary = "Show service status";
+          details = "Shows the status of supervisor-managed services.";
+          category = "supervisor";
           script = ''run_hook SUPERVISOR_STATUS'';
         };
-        svc-logs = lib.mkApp {
+        svc-logs = mk {
           name = "svc-logs";
-          description = "Show service logs";
+          summary = "Show service logs";
+          details = "Streams logs for supervisor-managed services. Arguments are forwarded to the hook.";
+          usage = [ "nix run .#svc-logs -- <args>" ];
+          category = "supervisor";
           script = ''run_hook SUPERVISOR_LOGS "$@"'';
         };
-        svc-restart = lib.mkApp {
+        svc-restart = mk {
           name = "svc-restart";
-          description = "Restart a service";
+          summary = "Restart a service";
+          details = "Restarts a supervisor-managed service. Arguments are forwarded to the hook.";
+          usage = [ "nix run .#svc-restart -- <args>" ];
+          category = "supervisor";
           script = ''run_hook SUPERVISOR_RESTART "$@"'';
         };
       };
@@ -176,9 +261,11 @@ let
   portNames = builtins.attrNames (project.ports or { });
 
   utilityApps = {
-    check-ports = lib.mkApp {
+    check-ports = mk {
       name = "check-ports";
-      description = "Scan configured ports for conflicts";
+      summary = "Scan configured ports for conflicts";
+      details = "Scans the configured ports for the current slot/env and reports whether they are free or listening.";
+      category = "utility";
       script = ''
         eval "$($SLOT_INFO)"
         LSOF="${pkgs.lsof}/bin/lsof"
@@ -204,9 +291,11 @@ let
         ) portNames}
       '';
     };
-    ports = lib.mkApp {
+    ports = mk {
       name = "ports";
-      description = "Show port assignments";
+      summary = "Show port assignments";
+      details = "Prints effective port assignments for the current slot/env.";
+      category = "utility";
       script = ''
         eval "$($SLOT_INFO)"
         echo "Port assignments for slot ''${${project.project.slotVar}:-0}, env ''${${project.project.envVar}:-dev}:"

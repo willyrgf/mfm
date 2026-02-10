@@ -110,7 +110,12 @@ let
     init_repo() {
       local dir="$1"
       mkdir -p "$dir"
-      (cd "$dir" && git init -q)
+      (
+        cd "$dir" \
+          && git init -q \
+          && git config user.email "nixfied-test@example.invalid" \
+          && git config user.name "nixfied test"
+      )
     }
 
     log "flake eval"
@@ -123,6 +128,11 @@ let
     assert_contains "$HELP_OUT" "Commands:"
     assert_contains "$HELP_OUT" "PROJECT_ENV"
     assert_contains "$HELP_OUT" "NIX_ENV"
+
+    HELP_DEV_OUT="$WORKDIR/help-dev.txt"
+    nix run "path:$ROOT"#help -- dev > "$HELP_DEV_OUT"
+    assert_contains "$HELP_DEV_OUT" "Usage:"
+    assert_contains "$HELP_DEV_OUT" "nix run .#dev"
 
     nix run "path:$ROOT"#dev >/dev/null
     nix run "path:$ROOT"#test >/dev/null
@@ -482,13 +492,42 @@ let
     INSTALL_BASE="$WORKDIR/install-repo"
     init_repo "$INSTALL_BASE"
     (cd "$INSTALL_BASE" && nix run "path:$ROOT"#framework::install >/dev/null)
-    INSTALL_TARGET="''${INSTALL_BASE}_nixified"
+    INSTALL_TARGET="$INSTALL_BASE"
+    INSTALL_BRANCH=$(git -C "$INSTALL_TARGET" symbolic-ref --short HEAD 2>/dev/null || git -C "$INSTALL_TARGET" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    if [ "$INSTALL_BRANCH" != "nixfied" ]; then
+      fail "expected installer to switch to nixfied branch (got: $INSTALL_BRANCH)"
+    fi
     assert_file_exists "$INSTALL_TARGET/flake.nix"
     if [ ! -d "$INSTALL_TARGET/nixfied" ]; then
       fail "expected nixfied/ directory in installer target"
     fi
     assert_file_absent "$INSTALL_TARGET/nixfied/.framework"
     assert_file_absent "$INSTALL_TARGET/NIXFIED_PROMPT_PLAN.md"
+
+    log "installer worktree"
+    INSTALL_WT_BASE="$WORKDIR/install-worktree"
+    init_repo "$INSTALL_WT_BASE"
+    echo "test" > "$INSTALL_WT_BASE/README.md"
+    (cd "$INSTALL_WT_BASE" && git add README.md && git commit -qm "init")
+    INSTALL_WT_TARGET="$WORKDIR/install-worktree-target"
+    ORIG_BRANCH=$(git -C "$INSTALL_WT_BASE" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    (cd "$INSTALL_WT_BASE" && nix run "path:$ROOT"#framework::install -- --worktree --target "$INSTALL_WT_TARGET" --force >/dev/null)
+    AFTER_ORIG_BRANCH=$(git -C "$INSTALL_WT_BASE" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    if [ "$AFTER_ORIG_BRANCH" != "$ORIG_BRANCH" ]; then
+      fail "expected worktree install to keep current checkout on '$ORIG_BRANCH' (got: $AFTER_ORIG_BRANCH)"
+    fi
+    if ! git -C "$INSTALL_WT_BASE" worktree list | grep -q "$INSTALL_WT_TARGET"; then
+      fail "expected git worktree to exist: $INSTALL_WT_TARGET"
+    fi
+    WT_BRANCH=$(git -C "$INSTALL_WT_TARGET" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    if [ "$WT_BRANCH" != "nixfied" ]; then
+      fail "expected worktree install to use nixfied branch (got: $WT_BRANCH)"
+    fi
+    assert_file_exists "$INSTALL_WT_TARGET/flake.nix"
+    if [ ! -d "$INSTALL_WT_TARGET/nixfied" ]; then
+      fail "expected nixfied/ directory in worktree target"
+    fi
+    assert_file_absent "$INSTALL_WT_TARGET/nixfied/.framework"
 
     log "example project apps (basic install)"
     BASIC_HELP="$WORKDIR/basic-help.txt"
@@ -499,6 +538,10 @@ let
     assert_contains "$BASIC_HELP" "build  Build artifacts"
     assert_contains "$BASIC_HELP" "check  Run quality checks"
     assert_contains "$BASIC_HELP" "ci  Run the CI pipeline"
+    BASIC_HELP_DEV="$WORKDIR/basic-help-dev.txt"
+    run_app "$INSTALL_TARGET" help dev > "$BASIC_HELP_DEV"
+    assert_contains "$BASIC_HELP_DEV" "Usage:"
+    assert_contains "$BASIC_HELP_DEV" "nix run .#dev"
     run_app_quiet "$INSTALL_TARGET" dev
     run_app_quiet "$INSTALL_TARGET" test
     run_app_quiet "$INSTALL_TARGET" build
@@ -507,6 +550,52 @@ let
     assert_app_missing "$INSTALL_TARGET" "framework::install"
     assert_app_missing "$INSTALL_TARGET" "framework::prompt-plan"
     assert_app_missing "$INSTALL_TARGET" "framework::test"
+
+    log "app api contract enforcement"
+    BAD_API_BASE="$WORKDIR/install-bad-api"
+    init_repo "$BAD_API_BASE"
+    (cd "$BAD_API_BASE" && nix run "path:$ROOT"#framework::install >/dev/null)
+    BAD_API_TARGET="$BAD_API_BASE"
+    assert_file_exists "$BAD_API_TARGET/flake.nix"
+    cat > "$BAD_API_TARGET/nixfied/project/dev.nix" <<'EOF'
+    { ... }:
+
+    {
+      commands = {
+        dev = {
+          description = "Start the dev workflow";
+          api = {
+            version = 1;
+            summary = "Start the dev workflow";
+            details = "ok";
+            usage = [ "nix run .#dev" ];
+          };
+          env = {
+            PROJECT_ENV = "dev";
+          };
+          useDeps = true;
+          script = "echo dev\nexit 0\n";
+        };
+
+        missing-api = {
+          description = "This command is missing api";
+          env = { };
+          useDeps = false;
+          script = "echo missing\nexit 0\n";
+        };
+      };
+    }
+    EOF
+    BAD_API_LOG="$WORKDIR/bad-api-contract.log"
+    set +e
+    nix flake show "path:$BAD_API_TARGET" > "$BAD_API_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected API contract violation to fail"
+    fi
+    assert_contains "$BAD_API_LOG" "Nixfied app API contract violated"
+    assert_contains "$BAD_API_LOG" "missing meta.nixfied.api"
 
     log "installer upgrade preserves project"
     echo "# NIXFIED_UPGRADE_TEST_MARKER" >> "$INSTALL_TARGET/nixfied/project/conf.nix"
@@ -544,18 +633,19 @@ let
     REENTRY_BASE="$WORKDIR/install-reentry"
     init_repo "$REENTRY_BASE"
     (cd "$REENTRY_BASE" && nix run "path:$ROOT"#framework::install >/dev/null)
-    REENTRY_TARGET="''${REENTRY_BASE}_nixified"
+    REENTRY_TARGET="$REENTRY_BASE"
     assert_file_exists "$REENTRY_TARGET/flake.nix"
     assert_file_absent "$REENTRY_TARGET/nixfied/.framework"
     (cd "$REENTRY_BASE" && nix run "path:$ROOT"#framework::install -- --force >/dev/null)
     assert_file_exists "$REENTRY_TARGET/flake.nix"
-    assert_file_absent "''${REENTRY_TARGET}_nixified"
+    assert_file_absent "''${REENTRY_BASE}_nixfied"
+    assert_file_absent "''${REENTRY_BASE}_nixified"
 
     log "installer filter"
     INSTALL_FILTER="$WORKDIR/install-filter"
     init_repo "$INSTALL_FILTER"
     (cd "$INSTALL_FILTER" && nix run "path:$ROOT"#framework::install -- --filter=conf,ci >/dev/null)
-    FILTER_TARGET="''${INSTALL_FILTER}_nixified"
+    FILTER_TARGET="$INSTALL_FILTER"
     assert_file_exists "$FILTER_TARGET/nixfied/project/ci.nix"
     assert_file_absent "$FILTER_TARGET/nixfied/project/dev.nix"
     assert_file_absent "$FILTER_TARGET/nixfied/project/test.nix"
@@ -864,9 +954,15 @@ let
 
 in
 {
-  test = lib.mkApp {
+  test = lib.appApi.mkNixfiedApp {
     name = "test";
-    description = "Run framework integration tests";
+    api = {
+      version = 1;
+      summary = "Run framework integration tests";
+      details = "Runs the Nixfied framework integration test suite (intended for framework development).";
+      usage = [ "nix run .#framework::test" ];
+      category = "framework";
+    };
     env = { };
     useDeps = false;
     script = ''

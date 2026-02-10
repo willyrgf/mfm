@@ -39,15 +39,19 @@ let
   rawServiceNames = servicesCfg.names or [ ];
   defaultServiceNames = if rawServiceNames != [ ] then rawServiceNames else portNames;
   defaultServiceSockets =
-    if builtins.hasAttr "postgres" ports then
-      { postgres = ".s.PGSQL.$PGPORT"; }
-    else
-      { };
+    if builtins.hasAttr "postgres" ports then { postgres = ".s.PGSQL.$PGPORT"; } else { };
   serviceSockets = defaultServiceSockets // (servicesCfg.sockets or { });
   serviceSocketNames = builtins.attrNames serviceSockets;
   uniqueNames =
     names:
-    builtins.attrNames (builtins.listToAttrs (map (name: { inherit name; value = true; }) names));
+    builtins.attrNames (
+      builtins.listToAttrs (
+        map (name: {
+          inherit name;
+          value = true;
+        }) names
+      )
+    );
   serviceNames = uniqueNames (defaultServiceNames ++ serviceSocketNames);
 
   normalizeName =
@@ -214,21 +218,33 @@ let
 
     ${portAssignments}
 
-    ${pkgs.lib.concatMapStringsSep "\n" (name: let upper = normalizeName name; in ''
-      ${upper}_DIR="$BASE_DIR/${name}-$SLOT-$ENV"
-      ${upper}_LOG_DIR="$BASE_DIR/${name}-$SLOT-$ENV/logs"
-      ${upper}_RUN_DIR="$BASE_DIR/${name}-$SLOT-$ENV/run"
-      ${upper}_CONFIG_DIR="$BASE_DIR/${name}-$SLOT-$ENV/config"
-      ${upper}_STATE_DIR="$BASE_DIR/${name}-$SLOT-$ENV/state"
-      ${upper}_SOCKET_DIR="$BASE_DIR/${name}-$SLOT-$ENV/run/sockets"
-    '') serviceNames}
+    ${pkgs.lib.concatMapStringsSep "\n" (
+      name:
+      let
+        upper = normalizeName name;
+      in
+      ''
+        ${upper}_DIR="$BASE_DIR/${name}-$SLOT-$ENV"
+        ${upper}_LOG_DIR="$BASE_DIR/${name}-$SLOT-$ENV/logs"
+        ${upper}_RUN_DIR="$BASE_DIR/${name}-$SLOT-$ENV/run"
+        ${upper}_CONFIG_DIR="$BASE_DIR/${name}-$SLOT-$ENV/config"
+        ${upper}_STATE_DIR="$BASE_DIR/${name}-$SLOT-$ENV/state"
+        ${upper}_SOCKET_DIR="$BASE_DIR/${name}-$SLOT-$ENV/run/sockets"
+      ''
+    ) serviceNames}
 
-    ${pkgs.lib.concatMapStringsSep "\n" (name: let upper = normalizeName name; in ''
-      ${upper}_SOCKET_NAME="${serviceSockets.${name}}"
-      if [ -n "${"$"}{${upper}_SOCKET_NAME:-}" ]; then
-        ${upper}_SOCKET="${"$"}{${upper}_SOCKET_DIR}/${"$"}{${upper}_SOCKET_NAME}"
-      fi
-    '') serviceSocketNames}
+    ${pkgs.lib.concatMapStringsSep "\n" (
+      name:
+      let
+        upper = normalizeName name;
+      in
+      ''
+        ${upper}_SOCKET_NAME="${serviceSockets.${name}}"
+        if [ -n "${"$"}{${upper}_SOCKET_NAME:-}" ]; then
+          ${upper}_SOCKET="${"$"}{${upper}_SOCKET_DIR}/${"$"}{${upper}_SOCKET_NAME}"
+        fi
+      ''
+    ) serviceSocketNames}
 
     echo "SLOT=$SLOT"
     echo "ENV=$ENV"
@@ -240,19 +256,31 @@ let
     echo "CONFIG_DIR=$CONFIG_DIR"
     echo "STATE_DIR=$STATE_DIR"
     echo "BACKUP_BASE_DIR=$BACKUP_BASE_DIR"
-    ${pkgs.lib.concatMapStringsSep "\n" (name: let upper = normalizeName name; in ''
-      echo "${upper}_DIR=${"$"}${upper}_DIR"
-      echo "${upper}_LOG_DIR=${"$"}${upper}_LOG_DIR"
-      echo "${upper}_RUN_DIR=${"$"}${upper}_RUN_DIR"
-      echo "${upper}_CONFIG_DIR=${"$"}${upper}_CONFIG_DIR"
-      echo "${upper}_STATE_DIR=${"$"}${upper}_STATE_DIR"
-      echo "${upper}_SOCKET_DIR=${"$"}${upper}_SOCKET_DIR"
-    '') serviceNames}
-    ${pkgs.lib.concatMapStringsSep "\n" (name: let upper = normalizeName name; in ''
-      if [ -n "${"$"}{${upper}_SOCKET:-}" ]; then
-        echo "${upper}_SOCKET=${"$"}${upper}_SOCKET"
-      fi
-    '') serviceSocketNames}
+    ${pkgs.lib.concatMapStringsSep "\n" (
+      name:
+      let
+        upper = normalizeName name;
+      in
+      ''
+        echo "${upper}_DIR=${"$"}${upper}_DIR"
+        echo "${upper}_LOG_DIR=${"$"}${upper}_LOG_DIR"
+        echo "${upper}_RUN_DIR=${"$"}${upper}_RUN_DIR"
+        echo "${upper}_CONFIG_DIR=${"$"}${upper}_CONFIG_DIR"
+        echo "${upper}_STATE_DIR=${"$"}${upper}_STATE_DIR"
+        echo "${upper}_SOCKET_DIR=${"$"}${upper}_SOCKET_DIR"
+      ''
+    ) serviceNames}
+    ${pkgs.lib.concatMapStringsSep "\n" (
+      name:
+      let
+        upper = normalizeName name;
+      in
+      ''
+        if [ -n "${"$"}{${upper}_SOCKET:-}" ]; then
+          echo "${upper}_SOCKET=${"$"}${upper}_SOCKET"
+        fi
+      ''
+    ) serviceSocketNames}
     ${portExports}
     ${pkgs.lib.optionalString (postgresEnabled && builtins.hasAttr postgresPortKey ports) ''
       DATABASE_URL="postgresql://localhost:${"$"}${portVarName postgresPortKey}/${postgresDatabase}"
@@ -273,18 +301,30 @@ let
     builtins.mapAttrs (name: base: base + (slot * slotStride) + offset) ports;
 
   # Nix-level accessor: get database URL for env and port
-  getDatabaseUrl = env: port:
-    "postgresql://localhost:${toString port}/${if env == "test" then postgresTestDatabase else postgresDatabase}";
+  getDatabaseUrl =
+    env: port:
+    "postgresql://localhost:${toString port}/${
+      if env == "test" then postgresTestDatabase else postgresDatabase
+    }";
 
   # Nix-level accessor: validate slot/env pair
   validateSlotEnv =
     { slot, env }:
     if slot < 0 || slot > slotMax then
-      { valid = false; error = "${slotVar} must be 0-${toString slotMax} (got ${toString slot})"; }
+      {
+        valid = false;
+        error = "${slotVar} must be 0-${toString slotMax} (got ${toString slot})";
+      }
     else if !(builtins.hasAttr env envOffsets) then
-      { valid = false; error = "${envVar} must be one of: ${envList} (got '${env}')"; }
+      {
+        valid = false;
+        error = "${envVar} must be one of: ${envList} (got '${env}')";
+      }
     else
-      { valid = true; error = ""; };
+      {
+        valid = true;
+        error = "";
+      };
 
   # Nix-level accessor: full config for a slot/env
   getFullConfig =

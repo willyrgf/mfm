@@ -76,6 +76,7 @@ let
       env ? { },
       useDeps ? false,
       description ? null,
+      meta ? { },
     }:
     let
       scriptDrv = mkAppScript {
@@ -89,9 +90,9 @@ let
     in
     {
       type = "app";
-      meta = pkgs.lib.optionalAttrs (description != null) {
+      meta = pkgs.lib.recursiveUpdate (pkgs.lib.optionalAttrs (description != null) {
         inherit description;
-      };
+      }) meta;
       program = toString scriptDrv;
     };
 
