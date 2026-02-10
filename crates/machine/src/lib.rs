@@ -505,6 +505,8 @@ pub mod events {
     pub const DOMAIN_EVENT_FACT_RECORDED: &str = "fact_recorded";
     pub const DOMAIN_EVENT_ARTIFACT_WRITTEN: &str = "artifact_written";
     pub const DOMAIN_EVENT_OP_BOUNDARY: &str = "op_boundary";
+    pub const DOMAIN_EVENT_CHILD_RUN_SPAWNED: &str = "child_run_spawned";
+    pub const DOMAIN_EVENT_CHILD_RUN_COMPLETED: &str = "child_run_completed";
 
     /// Run completion status.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -603,6 +605,41 @@ pub mod events {
         pub parent_run_id: RunId,
         pub child_run_id: RunId,
         pub child_manifest_id: ArtifactId,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct ChildRunCompleted {
+        pub child_run_id: RunId,
+        pub status: RunStatus,
+        pub final_snapshot_id: Option<ArtifactId>,
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        use crate::hashing::artifact_id_for_json;
+
+        #[test]
+        fn child_run_payloads_are_canonical_and_non_secret() {
+            let v = serde_json::to_value(ChildRunSpawned {
+                parent_run_id: RunId(uuid::Uuid::new_v4()),
+                child_run_id: RunId(uuid::Uuid::new_v4()),
+                child_manifest_id: ArtifactId("0".repeat(64)),
+            })
+            .expect("serialize");
+            artifact_id_for_json(&v).expect("canonical-json-hashable");
+            assert!(!crate::secrets::json_contains_secrets(&v));
+
+            let v = serde_json::to_value(ChildRunCompleted {
+                child_run_id: RunId(uuid::Uuid::new_v4()),
+                status: RunStatus::Completed,
+                final_snapshot_id: Some(ArtifactId("1".repeat(64))),
+            })
+            .expect("serialize");
+            artifact_id_for_json(&v).expect("canonical-json-hashable");
+            assert!(!crate::secrets::json_contains_secrets(&v));
+        }
     }
 }
 
