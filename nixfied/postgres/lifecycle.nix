@@ -27,7 +27,35 @@ let
 
     mkdir -p "$PGDATA"
 
+    write_postgres_conf() {
+      # Determine environment-specific config
+      CONF_ENV="''${ENV:-dev}"
+      case "$CONF_ENV" in
+        prod)
+          cat > "$PGDATA/postgresql.conf" <<'PGCONF'
+    ${config.prodConf}
+    PGCONF
+          ;;
+        test)
+          cat > "$PGDATA/postgresql.conf" <<'PGCONF'
+    ${config.testConf}
+    PGCONF
+          ;;
+        *)
+          cat > "$PGDATA/postgresql.conf" <<'PGCONF'
+    ${config.devConf}
+    PGCONF
+          ;;
+      esac
+    }
+
     if [ -f "$PGDATA/PG_VERSION" ]; then
+      # One-time repair for legacy configs that used invalid shell placeholders (e.g. `port = $PGPORT`).
+      if grep -q '\$PGPORT' "$PGDATA/postgresql.conf" 2>/dev/null; then
+        echo "WARN: Detected legacy postgresql.conf with \\$PGPORT placeholder; rewriting"
+        write_postgres_conf
+      fi
+
       echo "OK: PostgreSQL already initialized at $PGDATA"
       exit 0
     fi
@@ -35,25 +63,7 @@ let
     echo "INFO: Initializing PostgreSQL at $PGDATA"
     ${postgres}/bin/initdb -D "$PGDATA" -U postgres --no-locale --encoding=UTF8 -A trust
 
-    # Determine environment-specific config
-    CONF_ENV="''${ENV:-dev}"
-    case "$CONF_ENV" in
-      prod)
-        cat > "$PGDATA/postgresql.conf" <<'PGCONF'
-    ${config.prodConf}
-    PGCONF
-        ;;
-      test)
-        cat > "$PGDATA/postgresql.conf" <<'PGCONF'
-    ${config.testConf}
-    PGCONF
-        ;;
-      *)
-        cat > "$PGDATA/postgresql.conf" <<'PGCONF'
-    ${config.devConf}
-    PGCONF
-        ;;
-    esac
+    write_postgres_conf
 
     cat > "$PGDATA/pg_hba.conf" <<'EOF'
     # TYPE  DATABASE        USER  ADDRESS       METHOD
@@ -105,7 +115,14 @@ let
     chmod 700 "$PGSOCKET_DIR" 2>/dev/null || true
 
     echo "INFO: Starting PostgreSQL on port $PGPORT"
-    ${postgres}/bin/pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -o "-p $PGPORT -k $PGSOCKET_DIR" start
+    if ! ${postgres}/bin/pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -o "-p $PGPORT -k $PGSOCKET_DIR" start; then
+      echo "ERROR: pg_ctl failed to start PostgreSQL. Check $PGDATA/postgres.log" >&2
+      if [ -f "$PGDATA/postgres.log" ]; then
+        echo "--- postgres.log (tail) ---" >&2
+        tail -200 "$PGDATA/postgres.log" >&2 || true
+      fi
+      exit 1
+    fi
 
     for i in $(seq 1 60); do
       if ${postgres}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then

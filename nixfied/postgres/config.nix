@@ -13,8 +13,8 @@ let
   # Base configuration shared across all environments
   baseConf = ''
     listen_addresses = 'localhost'
-    port = $PGPORT
-    unix_socket_directories = '/tmp'
+    # NOTE: do not use shell-style env vars (like $PGPORT) in postgresql.conf.
+    # Nixfied sets port/socket directories via pg_ctl -o "-p <port> -k <socket_dir>".
     log_destination = 'stderr'
     logging_collector = off
   '';
