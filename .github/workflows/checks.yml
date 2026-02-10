@@ -47,6 +47,79 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace
 
+  parity-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: mfm_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mfm_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Postgres parity tests read DATABASE_URL.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/mfm_test
+
+      # S3/MinIO parity tests use Credentials::default() which reads AWS_* env vars.
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio123456
+      AWS_EC2_METADATA_DISABLED: true
+
+      # Keep these explicit (the store has defaults, but CI should be unambiguous).
+      MFM_S3_ENDPOINT: http://localhost:9000
+      MFM_S3_REGION: us-east-1
+      MFM_S3_BUCKET: mfm-test
+      MFM_S3_PREFIX: mfm-artifacts
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Start MinIO (S3)
+        run: |
+          docker run -d --name mfm-minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID" \
+            -e MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY" \
+            minio/minio:latest server /data
+
+      - name: Wait for MinIO
+        run: |
+          for i in {1..60}; do
+            if curl -sSf "$MFM_S3_ENDPOINT/minio/health/ready" > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "minio did not become ready" >&2
+          docker logs mfm-minio || true
+          exit 1
+
+      - name: Run event store parity tests (Postgres)
+        run: cargo nextest run -p mfm-event-store-postgres --features parity-tests
+
+      - name: Run artifact store parity tests (S3/MinIO)
+        run: cargo nextest run -p mfm-artifact-store-s3 --features parity-tests
+
+      - name: Stop MinIO
+        if: always()
+        run: docker rm -f mfm-minio || true
+
   audit:
     runs-on: ubuntu-latest
     steps:
