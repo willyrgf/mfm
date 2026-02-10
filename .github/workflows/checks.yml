@@ -12,7 +12,7 @@ env:
   NIX_CMD_OPTS: "-L -v --log-format bar-with-logs"
 
 jobs:
-  build-and-test:
+  ci:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -35,31 +35,9 @@ jobs:
         run: |
           nix run .#mfm_cli $NIX_CMD_OPTS -- --help
 
-  parity-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Nixfied CI (parity)
         run: |
           nix run .#ci $NIX_CMD_OPTS -- --parity --summary
-
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Nixfied CI (audit)
         run: |
