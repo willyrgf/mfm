@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `mfm_cli` is the command-line interface for the MFM toolkit. It provides a user-friendly and scriptable way to interact with MFM modules, starting with comprehensive keystore management. The CLI is built using the `clap` crate for robust argument parsing and command structure.
+The `mfm_cli` is the command-line interface for the MFM toolkit. It provides a user-friendly and scriptable way to interact with MFM modules, including keystore management and an experimental `run` subcommand for starting/resuming/inspecting runs. The CLI is built using the `clap` crate for robust argument parsing and command structure.
 
 ## Design Philosophy
 
@@ -177,6 +177,93 @@ mfm_cli keystore delete [OPTIONS] (<ID> | --by-label <LABEL>)
   mfm_cli keystore delete --by-label "my-main-wallet" --yes
   ```
 
+## Run Commands (Experimental)
+
+Run operations are available under the `run` subcommand.
+
+These commands are intended for parity/integration testing and early workflows. They currently use:
+
+- a PostgreSQL-backed event store (requires `DATABASE_URL` or `--database-url`)
+- a filesystem artifact store (defaults to `$MFM_ARTIFACT_ROOT` or `~/.mfm/run_artifacts`, or use `--artifact-root`)
+
+### `run start`
+
+Starts a new run.
+
+**Usage:**
+```sh
+mfm_cli run start [OPTIONS]
+```
+
+**Key Options:**
+- `--op-id <ID>`: Operation id (default: `proof`)
+- `--op-version <VERSION>`: Operation version (default: `v1`)
+- `--op-config-json <JSON>`: Operation config JSON (must be canonical-json-hashable; no floats)
+- `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
+- `--artifact-root <PATH>`: Artifact store root directory (default: `$MFM_ARTIFACT_ROOT` or `~/.mfm/run_artifacts`)
+
+**Examples:**
+```sh
+export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
+
+# Start the built-in proof op
+mfm_cli run start
+
+# Start with an explicit op config JSON
+mfm_cli run start --op-config-json '{"message":"hello"}'
+```
+
+### `run resume`
+
+Resumes an existing run by id (executes any remaining states).
+
+**Usage:**
+```sh
+mfm_cli run resume <RUN_ID> [OPTIONS]
+```
+
+**Examples:**
+```sh
+mfm_cli run resume "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+```
+
+### `run status`
+
+Shows run status without executing states.
+
+**Usage:**
+```sh
+mfm_cli run status <RUN_ID> [OPTIONS]
+```
+
+### `run events`
+
+Prints run events from the event store.
+
+**Usage:**
+```sh
+mfm_cli run events <RUN_ID> [OPTIONS]
+```
+
+**Key Options:**
+- `--from-seq <N>`: First sequence number to read (default: 1)
+- `--to-seq <N>`: Optional last sequence number to read (inclusive)
+
+### `run artifacts get`
+
+Fetches an artifact by id from the artifact store.
+
+Note: this command does not require Postgres; it only uses the filesystem artifact store.
+
+**Usage:**
+```sh
+mfm_cli run artifacts get <ARTIFACT_ID> [OPTIONS]
+```
+
+**Output Notes:**
+- If the artifact bytes decode as JSON, the response uses `encoding: "json"` and includes a `value` field.
+- Otherwise the response uses `encoding: "hex"` and includes a hex string field.
+
 ## Configuration
 
 The CLI's behavior can be modified using environment variables, which is ideal for CI/CD pipelines and automated scripts.
@@ -200,6 +287,18 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   ```
 
 - **`MFM_INTEGRATION_TEST`**: When set to `1`, the CLI uses a faster, less secure KDF configuration for the keystore. **This should only be used for testing purposes.**
+
+- **`DATABASE_URL`**: PostgreSQL connection string used by `run` commands (unless `--database-url` is provided).
+  ```sh
+  export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
+  mfm_cli run start
+  ```
+
+- **`MFM_ARTIFACT_ROOT`**: Filesystem artifact store root used by `run` commands (unless `--artifact-root` is provided).
+  ```sh
+  export MFM_ARTIFACT_ROOT="/tmp/mfm_artifacts"
+  mfm_cli run artifacts get "<ARTIFACT_ID>"
+  ```
 
 ## Best Practices
 
