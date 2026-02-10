@@ -1,4 +1,4 @@
-use mfm_core::keystore::{Keystore, KeystoreConfig};
+use mfm_op_keystore::{Keystore, KeystoreConfig};
 use std::path::PathBuf;
 
 /// Keystore operations wrapper with unlock handling

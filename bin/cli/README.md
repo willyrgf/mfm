@@ -8,7 +8,7 @@ The `mfm_cli` is the command-line interface for the MFM toolkit. It provides a u
 
 - **User-Centric**: Commands are designed to be intuitive and easy to remember.
 - **Scriptable**: Supports non-interactive modes, input from `stdin`, and configuration via environment variables, making it suitable for automation and scripting.
-- **Secure by Default**: Integrates directly with the `mfm_core::keystore` to ensure all key operations adhere to the same high security standards.
+- **Secure by Default**: Uses the security-hardened keystore implementation (via `mfm-op-keystore`, which wraps `crates/core`) so key operations share the same security invariants.
 - **AI-Friendly Output**: Provides machine-readable JSON output via a global `--output-format` flag, making it ideal for AI agents and automation, while preserving human-readable text output by default.
 - **Minimalism**: Focuses on essential commands, avoiding feature bloat to maintain a clean and simple interface.
 

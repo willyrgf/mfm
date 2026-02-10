@@ -1,4 +1,4 @@
-use mfm_core::keystore::{Keystore, KeystoreConfig};
+use mfm_op_keystore::{Keystore, KeystoreConfig};
 use tempfile::TempDir;
 
 fn create_test_keystore_with_data() -> (TempDir, std::path::PathBuf) {

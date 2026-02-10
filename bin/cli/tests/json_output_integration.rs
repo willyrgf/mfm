@@ -1,5 +1,7 @@
 use assert_cmd::Command;
-use mfm::cli::utils::output::{ResponseStatus, SuccessResponse};
+use mfm::cli::utils::output::{ErrorResponse, ResponseStatus, SuccessResponse};
+use mfm_artifact_store_fs::FsArtifactStore;
+use mfm_machine::stores::{ArtifactKind, ArtifactStore};
 use predicates::prelude::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -22,6 +24,13 @@ fn verify_success_response(output: &str) -> Value {
     let parsed: TestResponse<Value> = serde_json::from_str(output).expect("Should be valid JSON");
     assert!(matches!(parsed.status, ResponseStatus::Success));
     parsed.data
+}
+
+fn verify_error_response(output: &str) -> ErrorResponse {
+    let parsed: ErrorResponse =
+        serde_json::from_str(output).expect("Should be valid JSON error response");
+    assert!(matches!(parsed.status, ResponseStatus::Error));
+    parsed
 }
 
 #[test]
@@ -214,6 +223,113 @@ fn test_environment_variable_precedence() {
             assert!(!stdout.contains("\"status\":"));
         }
     }
+}
+
+#[test]
+fn test_run_start_json_error_missing_database_url() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args(["--output-format", "json", "run", "start"])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "MissingDatabaseUrl");
+}
+
+#[test]
+fn test_run_status_json_error_invalid_uuid() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args(["--output-format", "json", "run", "status", "not-a-uuid"])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "InvalidUuid");
+}
+
+#[test]
+fn test_run_artifacts_get_json_success_for_json_payload() {
+    let temp = TempDir::new().unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let store = FsArtifactStore::new(temp.path());
+    let id = rt.block_on(async {
+        store
+            .put(
+                ArtifactKind::Other("test".to_string()),
+                serde_json::to_vec(&json!({"a": 1})).unwrap(),
+            )
+            .await
+            .unwrap()
+    });
+
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args([
+            "--output-format",
+            "json",
+            "run",
+            "artifacts",
+            "get",
+            &id.0,
+            "--artifact-root",
+            temp.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let data = verify_success_response(&stdout);
+    assert_eq!(data["artifact_id"], id.0);
+    assert_eq!(data["encoding"], "json");
+    assert_eq!(data["value"]["a"], 1);
+}
+
+#[test]
+fn test_run_artifacts_get_json_success_for_binary_payload() {
+    let temp = TempDir::new().unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let store = FsArtifactStore::new(temp.path());
+    let id = rt.block_on(async {
+        store
+            .put(ArtifactKind::Other("test".to_string()), b"hello".to_vec())
+            .await
+            .unwrap()
+    });
+
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args([
+            "--output-format",
+            "json",
+            "run",
+            "artifacts",
+            "get",
+            &id.0,
+            "--artifact-root",
+            temp.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let data = verify_success_response(&stdout);
+    assert_eq!(data["artifact_id"], id.0);
+    assert_eq!(data["encoding"], "hex");
+    assert_eq!(data["hex"], "68656c6c6f");
 }
 
 #[test]

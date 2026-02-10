@@ -1729,10 +1729,16 @@ name = "mfm"
 version = "0.1.29"
 dependencies = [
  "assert_cmd",
+ "async-trait",
  "chrono",
  "clap",
  "hex",
- "mfm_core",
+ "mfm-artifact-store-fs",
+ "mfm-event-store-postgres",
+ "mfm-machine",
+ "mfm-op-keystore",
+ "mfm-op-proof",
+ "mfm-sdk",
  "predicates",
  "regex",
  "rpassword",
@@ -1820,6 +1826,9 @@ dependencies = [
 [[package]]
 name = "mfm-op-keystore"
 version = "0.1.0"
+dependencies = [
+ "mfm_core",
+]
 
 [[package]]
 name = "mfm-op-proof"

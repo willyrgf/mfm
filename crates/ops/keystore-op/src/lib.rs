@@ -1,3 +1,8 @@
 //! Keystore op wrapper (Milestone 1).
 //!
-//! Source of truth: `REDESIGN.md`.
+//! Source of truth: `REDESIGN.md` (v4).
+//!
+//! This crate exists to enforce the boundary rule:
+//! - CLI depends on `ops` crates, not directly on `core`.
+
+pub use mfm_core::keystore::{Keystore, KeystoreConfig};

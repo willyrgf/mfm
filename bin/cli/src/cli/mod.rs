@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 pub mod command_result;
 pub mod keystore;
+pub mod run;
 pub mod utils;
 
 #[derive(Debug, Clone, ValueEnum, Default)]
@@ -45,6 +46,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: keystore::KeystoreCommand,
     },
+    /// Run operations (start/resume/inspect)
+    Run {
+        #[command(subcommand)]
+        command: run::RunCommand,
+    },
 }
 
 impl Cli {
@@ -53,6 +59,9 @@ impl Cli {
 
         match &self.command {
             Commands::Keystore { command } => {
+                command.execute(&ctx).await;
+            }
+            Commands::Run { command } => {
                 command.execute(&ctx).await;
             }
         }

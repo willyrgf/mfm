@@ -1,0 +1,124 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
+
+use crate::cli::command_result::CommandError;
+use mfm_machine::engine::ExecutionEngine;
+use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, RunError, StorageError};
+use mfm_machine::ids::ErrorCode;
+use mfm_machine::io::IoCall;
+use mfm_machine::live_io::{LiveIoTransport, LiveIoTransportFactory};
+use mfm_machine::runtime::DefaultExecutionEngine;
+use mfm_op_proof::ProofOp;
+use mfm_sdk::op::OperationRegistry;
+use mfm_sdk::pipeline::PipelinePlanner;
+use mfm_sdk::unstable::{DefaultPipelinePlanner, HashMapOperationRegistry, SdkPlanResolver};
+
+fn info(code: &'static str, category: ErrorCategory, message: impl Into<String>) -> ErrorInfo {
+    ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category,
+        retryable: false,
+        message: message.into(),
+        details: None,
+    }
+}
+
+struct CliLiveIoTransportFactory;
+
+impl LiveIoTransportFactory for CliLiveIoTransportFactory {
+    fn make(&self) -> Box<dyn LiveIoTransport> {
+        Box::new(CliLiveIoTransport)
+    }
+}
+
+struct CliLiveIoTransport;
+
+#[async_trait]
+impl LiveIoTransport for CliLiveIoTransport {
+    async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
+        match call.namespace.as_str() {
+            "proof.read" => Ok(serde_json::json!({ "n": 1 })),
+            "proof.side_effect" => {
+                let k = call
+                    .request
+                    .get("idempotency_key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("missing");
+                let prefix: String = k.chars().take(8).collect();
+                Ok(serde_json::json!({ "tx_hash": format!("0x{prefix}") }))
+            }
+            "proof.output" => Ok(call.request),
+            other => Err(IoError::Other(info(
+                "unknown_namespace",
+                ErrorCategory::Unknown,
+                format!("unknown namespace: {other}"),
+            ))),
+        }
+    }
+}
+
+pub(super) struct EngineBundle {
+    pub engine: Arc<dyn ExecutionEngine>,
+    pub registry: Arc<dyn OperationRegistry>,
+    pub planner: Arc<dyn PipelinePlanner>,
+}
+
+pub(super) fn make_engine_bundle() -> EngineBundle {
+    let mut reg = HashMapOperationRegistry::default();
+    reg.register(Arc::new(ProofOp::default()));
+    let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
+
+    let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
+    let resolver = Arc::new(SdkPlanResolver::new(
+        Arc::clone(&registry),
+        Arc::clone(&planner),
+    ));
+
+    let factory: Arc<dyn LiveIoTransportFactory> = Arc::new(CliLiveIoTransportFactory);
+    let engine: Arc<dyn ExecutionEngine> =
+        Arc::new(DefaultExecutionEngine::new(resolver).with_live_transport_factory(factory));
+
+    EngineBundle {
+        engine,
+        registry,
+        planner,
+    }
+}
+
+pub(super) fn command_error_from_storage_error(err: StorageError) -> CommandError {
+    match err {
+        StorageError::Concurrency(info)
+        | StorageError::NotFound(info)
+        | StorageError::Corruption(info)
+        | StorageError::Other(info) => CommandError::new(info.code.0, info.message),
+    }
+}
+
+pub(super) fn command_error_from_run_error(err: RunError) -> CommandError {
+    match err {
+        RunError::InvalidPlan(info) => CommandError::new(info.code.0, info.message),
+        RunError::Storage(se) => match se {
+            StorageError::Concurrency(info)
+            | StorageError::NotFound(info)
+            | StorageError::Corruption(info)
+            | StorageError::Other(info) => CommandError::new(info.code.0, info.message),
+        },
+        RunError::Context(ce) => match ce {
+            mfm_machine::errors::ContextError::MissingKey { info, .. }
+            | mfm_machine::errors::ContextError::Serialization(info)
+            | mfm_machine::errors::ContextError::Other(info) => {
+                CommandError::new(info.code.0, info.message)
+            }
+        },
+        RunError::Io(ie) => match ie {
+            IoError::MissingFactKey(info)
+            | IoError::MissingFact { info, .. }
+            | IoError::Transport(info)
+            | IoError::RateLimited(info)
+            | IoError::Other(info) => CommandError::new(info.code.0, info.message),
+        },
+        RunError::State(se) => CommandError::new(se.info.code.0, se.info.message),
+        RunError::Other(info) => CommandError::new(info.code.0, info.message),
+    }
+}
