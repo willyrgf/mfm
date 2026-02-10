@@ -47,6 +47,9 @@ These are implementation decisions that remove ambiguity for the rest of the wor
    - **fast lane (default tests)**: in-memory `EventStore` + filesystem `ArtifactStore`
    - **parity lane (integration)**: PostgreSQL `EventStore` + MinIO/S3 `ArtifactStore`
    - parity tests MUST be opt-in so `cargo nextest run --workspace` remains service-free by default.
+4. **Manifest ownership**: the caller (SDK/CLI/tests) computes `manifest_id` (canonical JSON hash) and stores the
+   manifest as an artifact before calling `ExecutionEngine::start`. The engine validates the ID and references it
+   from `RunStarted`.
 
 ---
 
@@ -104,14 +107,14 @@ Rules:
 
 ### Store traits (signatures)
 
-- `EventStore`:
-  - `head_seq(run_id) -> u64`
-  - `append(run_id, expected_seq, events) -> u64` (atomic; optimistic concurrency)
-  - `read_range(run_id, from_seq, to_seq: Option<u64>) -> Vec<EventEnvelope>`
-- `ArtifactStore`:
-  - `put(kind, bytes) -> ArtifactId` (content-addressed)
-  - `get(id) -> bytes` (verify hash; corruption => error)
-  - `exists(id) -> bool`
+- `EventStore` (async):
+  - `head_seq(run_id) -> Result<u64, StorageError>`
+  - `append(run_id, expected_seq, events) -> Result<u64, StorageError>` (atomic; optimistic concurrency)
+  - `read_range(run_id, from_seq, to_seq: Option<u64>) -> Result<Vec<EventEnvelope>, StorageError>`
+- `ArtifactStore` (async):
+  - `put(kind, bytes) -> Result<ArtifactId, StorageError>` (content-addressed)
+  - `get(id) -> Result<Vec<u8>, StorageError>` (verify hash; corruption => `StorageError::Corruption`)
+  - `exists(id) -> Result<bool, StorageError>`
 
 ### IDs and naming conventions
 
@@ -137,6 +140,11 @@ Each invariant must be verifiable by at least one named acceptance test:
 - AT-07 CrashResumeDeterminism
 - AT-08 SideEffectIdempotency
 - AT-09 SecretsNeverPersisted
+- AT-10 FactKeySingleAssignment
+- AT-11 StateIdStabilityAndShape
+- AT-12 FullSnapshotAsArtifact
+- AT-13 ReplayMissingFactErrors
+- AT-14 TimeAndRandomAsFacts
 
 ---
 
@@ -215,6 +223,11 @@ Add unit tests for:
 - ID validation (including `OpPath`/`StateId` segment regex invariants)
 - stable error code `missing_fact_key`
 
+Implementation notes:
+
+- `BackoffPolicy` uses `Duration` in Appendix C.1; implement a stable serde representation (integer-based; no floats)
+  so `RunManifest` remains canonical-JSON hashable.
+
 ### PR 05 — Canonical JSON + SHA-256 helpers (AT-05)
 
 - Implement canonical JSON bytes for hashing (RFC 8785 / JCS semantics)
@@ -234,8 +247,11 @@ Add unit tests for:
   - verify hashes on `get` (corruption => `StorageError::Corruption`)
   - support `exists`
 - Tests:
-  - fast-lane unit/acceptance tests for AT-04 using filesystem backend
-  - parity integration tests for S3/MinIO backend (gated; see CI section)
+  - add a backend-agnostic ArtifactStore contract test harness (reused by all backends)
+  - place the harness in a dependency-cycle-safe location (e.g. `mfm-machine` internal test-support module or a tiny helper crate
+    that depends only on `mfm-machine`)
+  - fast-lane contract tests (AT-04) using filesystem backend
+  - parity integration contract tests for S3/MinIO backend (gated; see CI section)
 
 ### PR 07 — EventStore implementations (fast lane + parity lane) (AT-01..AT-03)
 
@@ -248,11 +264,14 @@ Add unit tests for:
     - return new head seq
   - `read_range(run_id, from_seq, to_seq: Option<u64>)`
 - Tests:
-  - fast-lane acceptance tests:
+  - add a backend-agnostic EventStore contract test harness (reused by all backends)
+  - place the harness in a dependency-cycle-safe location (e.g. `mfm-machine` internal test-support module or a tiny helper crate
+    that depends only on `mfm-machine`)
+  - fast-lane contract tests:
     - AT-01 AppendOnlyEventStream
     - AT-02 AtomicAppendVisibility
     - AT-03 ExpectedSeqConcurrency
-  - parity integration tests for Postgres (gated; see CI section)
+  - parity integration contract tests for Postgres (gated; see CI section)
 
 ### PR 08 — Event emission + attempt envelope validation + event profiles
 
@@ -278,12 +297,18 @@ Add unit tests for:
   - commit on success only
   - discard on failure
 - Snapshot = full snapshot stored as artifact (content-addressed)
-- Add determinism tests (same logical state => same snapshot id)
+- Add determinism tests (same logical state => same snapshot id) (AT-12)
 
 ### PR 10 — Executor + resume + orphan attempt semantics (AT-07 core)
 
-- Implement run start manifest + provenance:
-  - build `RunManifest` (+ `BuildProvenance`) and store it as an artifact
+- Implement run start plumbing (aligned with Appendix C.1 `StartRun`):
+  - `StartRun` carries both `manifest` and precomputed `manifest_id`
+  - caller (SDK/CLI/tests) stores the manifest as an artifact before starting the run
+  - engine validates:
+    - `artifacts.exists(&manifest_id)` is true (or returns a structured storage error)
+    - `manifest_id == hash(canonical_json(manifest))` (defense-in-depth)
+    - `manifest.op_id == plan.op_id` (fail fast on mismatch; engine uses this `op_id` in `RunStarted`)
+    - `run_config == manifest.run_config` (fail fast on mismatch)
   - store the initial context snapshot as an artifact
   - append `RunStarted { op_id, manifest_id, initial_snapshot_id }`
 - Implement sequential executor:
@@ -308,9 +333,14 @@ Add unit tests for:
   - facts are single-assignment (first durable `FactRecorded` wins)
   - time/random recorded as facts when used, with stable attempt-scoped keys derived from:
     - `(run_id, state_id, call_ordinal, kind)` (encoding must be stable)
+  - implementation note: avoid `&mut dyn IoProvider` + `&mut dyn EventRecorder` borrowing conflicts by buffering
+    `FactRecorded` domain events inside the concrete `LiveIo` value and letting the engine drain+append them via the
+    recorder after `State::handle` returns (attempt envelope semantics preserved; domain events still appended by the engine)
+  - ensure resume builds a run-scoped FactKey index by scanning existing `FactRecorded` domain events (including orphan attempts)
+    so retries/replays reuse previously recorded facts (per `REDESIGN_FINAL.md` §6.2 + §7.3)
 - Tests:
-  - fact dedupe
-  - time/random fact recording
+  - fact dedupe + single-assignment (AT-10)
+  - time/random fact recording (AT-14)
 
 ### PR 12 — Replay IO semantics (AT-06 foundation)
 
@@ -318,7 +348,7 @@ Add unit tests for:
   - deterministic IO missing `fact_key` => `MissingFactKey` (`missing_fact_key`)
   - missing fact => `MissingFact`
   - retryability controlled by `RunConfig.replay_missing_fact_retryable`
-- Tests for stable error semantics
+- Tests for stable error semantics (AT-13)
 
 ### PR 13 — SDK: operations and pipelines (flattened composition)
 
@@ -333,6 +363,9 @@ Add unit tests for:
   - default context key namespacing by `OpPath`
   - explicit exports/imports and planner validation that imports are satisfiable
 - Add tests for ID enforcement and stable expansion
+- Implement a thin run launcher helper in the SDK contract:
+  - compute/store manifest artifact
+  - call `ExecutionEngine::start` with `StartRun { manifest, manifest_id, plan, run_config, initial_context }`
 
 ### PR 14 — Proof op end-to-end (AT-06..AT-08)
 
@@ -393,6 +426,26 @@ Add unit tests for:
 - [ ] PR 15 CLI run commands + keep keystore
 - [ ] PR 16 Secrets guardrails (AT-09)
 - [ ] PR 17 Remove legacy machine crates
+
+---
+
+## Decision Log (Plan-Level)
+
+- DL-01 Two-lane testing: keep service-free fast lane by default; parity lane is opt-in (matches `REDESIGN_FINAL.md` §12.3).
+- DL-02 Legacy coexistence: keep v1 machine as `crates/machine-legacy/` until Milestone 1 is complete, then delete.
+- DL-03 Manifest ownership: caller stores manifest artifact + computes `manifest_id`; engine validates existence + hash.
+- DL-04 LiveIo fact recording: buffer fact-related domain events in LiveIo and drain/append them via the engine.
+- DL-05 Store correctness: use a shared backend-agnostic contract test harness for EventStore/ArtifactStore.
+- DL-06 Duration serialization: keep `Duration` types per Appendix C.1, but serialize deterministically using an integer
+  representation suitable for canonical JSON hashing (no floats).
+
+## Risk Register (Plan-Level)
+
+- R-01 Canonical JSON corner cases: mitigate with RFC 8785/JCS vectors + targeted fuzz/property tests.
+- R-02 Secrets leakage across persisted surfaces: mitigate with explicit redaction + AT-09 scanning tests.
+- R-03 Borrow/ownership complexity in IO + event recording: mitigate with the LiveIo buffering pattern (DL-04).
+- R-04 Parity lane drift from fast lane: mitigate with shared contract tests (DL-05).
+- R-05 SDK contract gap (Appendix C.2 not yet in `REDESIGN_FINAL.md`): mitigate by landing C.2 before PR 13 implementation.
 
 ---
 
