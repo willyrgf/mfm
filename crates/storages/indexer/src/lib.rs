@@ -1,8 +1,8 @@
-//! ClickHouse indexer/projection store (Milestone 6).
+//! Derived projection/indexer store scaffold (Milestone 6).
 //!
 //! This crate is intentionally a scaffold:
 //! - projections are derived-only and must never become correctness-critical for resume/replay
-//! - ClickHouse wiring and schema migrations will be implemented incrementally
+//! - wiring and schema migrations will be implemented incrementally
 
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
 use mfm_machine::events::EventEnvelope;
@@ -23,9 +23,9 @@ fn other(code: &'static str, message: &'static str) -> StorageError {
 }
 
 #[derive(Clone, Debug)]
-pub struct ClickhouseIndexer;
+pub struct ProjectionIndexer;
 
-impl ClickhouseIndexer {
+impl ProjectionIndexer {
     pub fn new() -> Self {
         Self
     }
@@ -33,8 +33,8 @@ impl ClickhouseIndexer {
     /// Apply schema migrations (scaffold).
     pub async fn migrate(&self) -> Result<(), StorageError> {
         Err(other(
-            "clickhouse_unimplemented",
-            "clickhouse indexer is not implemented yet",
+            "projection_indexer_unimplemented",
+            "projection indexer is not implemented yet",
         ))
     }
 
@@ -45,13 +45,13 @@ impl ClickhouseIndexer {
         _events: &[EventEnvelope],
     ) -> Result<(), StorageError> {
         Err(other(
-            "clickhouse_unimplemented",
-            "clickhouse indexer is not implemented yet",
+            "projection_indexer_unimplemented",
+            "projection indexer is not implemented yet",
         ))
     }
 }
 
-impl Default for ClickhouseIndexer {
+impl Default for ProjectionIndexer {
     fn default() -> Self {
         Self::new()
     }

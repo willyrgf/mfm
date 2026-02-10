@@ -15,7 +15,7 @@ members = [
 	"crates/storages/artifact-store-fs",
 	"crates/storages/artifact-store-secret",
 	"crates/storages/artifact-store-s3",
-	"crates/storages/indexer-clickhouse",
+	"crates/storages/indexer",
 	"crates/storages/event-store-mem",
 	"crates/storages/event-store-postgres",
 	"crates/ops/keystore-op",

@@ -66,7 +66,7 @@ These are implementation decisions that remove ambiguity for the rest of the wor
 ## Non-Goals (Milestone 1)
 
 - REST API surface (deferred)
-- ClickHouse projections/indexers (deferred)
+- Projections/indexers (deferred)
 - Parallel execution (deferred; executor is sequential)
 - Engine-managed child runs / nested machines (deferred; Milestone 1 uses flattened composition only)
 - Artifact GC/compaction (deferred)

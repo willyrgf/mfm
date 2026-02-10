@@ -147,7 +147,7 @@ Must NOT:
 Owns persistence implementations:
 - EventStore backends (e.g., postgres/local)
 - ArtifactStore backends (e.g., minio/fs)
-- Optional index/projection stores (clickhouse)
+- Optional index/projection stores (deferred)
 
 Must NOT:
 - contain business logic (no op workflows)

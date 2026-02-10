@@ -3,7 +3,7 @@
 > Source of truth: `REDESIGN.md` (v4, last updated 2026-02-09).
 > Generated: 2026-02-10
 >
-> Goal: add projections/indexing (ClickHouse) and optional typed schema registry after the event model stabilizes
+> Goal: add projections/indexing and optional typed schema registry after the event model stabilizes
 > under real ops and child runs.
 
 ---
@@ -29,7 +29,7 @@ Milestone 6 adds:
 ### M6-01 — Projection store scaffold
 
 Tasks:
-- Add `crates/storages/indexer-clickhouse/` with:
+- Add `crates/storages/indexer/` with:
   - schema migration tooling
   - ingestion pipeline interface
 
@@ -61,6 +61,5 @@ Acceptance:
 ## CI / Done Definition
 
 Milestone 6 is “done” when:
-- ClickHouse projections provide useful queries without becoming a correctness dependency
+- projections provide useful queries without becoming a correctness dependency
 - schema registry (if implemented) is artifact-based and reproducibility-friendly
-

@@ -1,8 +1,7 @@
 [package]
-name = "mfm-indexer-clickhouse"
+name = "mfm-indexer"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 mfm-machine = { path = "../../machine" }
-

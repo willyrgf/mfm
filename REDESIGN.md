@@ -179,7 +179,7 @@ mfm/
 │   ├── storages/
 │   │   ├── event-store/         # event-store implementations (pg, local)
 │   │   ├── artifact-store/      # artifact-store implementations (minio, fs)
-│   │   └── indexer/            # optional: projections (clickhouse)
+│   │   └── indexer/            # optional: projections (deferred)
 │   ├── ops/                    # operation definitions (expand into state graphs)
 │   │   ├── aave-tracker/
 │   │   ├── portfolio-tracker/
@@ -633,7 +633,7 @@ Best when:
 
 Optional:
 
-* index/projection store for analytics (ClickHouse)
+* index/projection store for analytics (deferred)
 
 ### 12.2 Storage traits (sketch)
 
@@ -669,7 +669,7 @@ pub trait ArtifactStore: Send + Sync {
 
 * PostgreSQL: primary event store (strong transactions)
 * MinIO/S3: artifact store for large blobs
-* ClickHouse: optional projections/indexes derived from events
+* optional index/projection store: derived projections/indexes from events
 
 Local/dev:
 
@@ -792,7 +792,7 @@ details).
    * pipeline flattening to one execution plan
 7. Move CLI and REST API to “start/resume run” surfaces.
 8. Add PostgreSQL + MinIO backends; keep local backends for tests.
-9. Add projections (ClickHouse) only after event model stabilizes.
+9. Add projections/indexing only after event model stabilizes.
 
 ---
 

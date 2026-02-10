@@ -1979,7 +1979,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-indexer-clickhouse"
+name = "mfm-indexer"
 version = "0.1.0"
 dependencies = [
  "mfm-machine",
