@@ -1328,7 +1328,6 @@ dependencies = [
  "chrono",
  "hex",
  "k256",
- "mfm_machine",
  "rand 0.9.1",
  "ring",
  "serde",
