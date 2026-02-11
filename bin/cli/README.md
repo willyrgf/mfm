@@ -244,6 +244,7 @@ Starts a standard 3-step pipeline:
 **Usage:**
 ```sh
 mfm_cli run pipeline deploy-configure-validate --spec-json '<SPEC_JSON>' [OPTIONS]
+mfm_cli run pipeline deploy-configure-validate --spec-file /path/to/spec.json [OPTIONS]
 ```
 
 ### `run resume`

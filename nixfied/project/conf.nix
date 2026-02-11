@@ -77,9 +77,16 @@ let
     else
       null;
 
+  solcPackage =
+    if pkgs != null && pkgs ? solc then
+      pkgs.solc
+    else
+      null;
+
   evmToolPackages =
     (if foundryPackage != null then [ foundryPackage ] else [ ])
-    ++ (if rethPackage != null then [ rethPackage ] else [ ]);
+    ++ (if rethPackage != null then [ rethPackage ] else [ ])
+    ++ (if solcPackage != null then [ solcPackage ] else [ ]);
 in
 rec {
   project = {

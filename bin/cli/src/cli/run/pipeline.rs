@@ -13,6 +13,7 @@ use mfm_sdk::unstable::DefaultRunLauncher;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::path::PathBuf;
 
 use crate::cli::command_result::{CommandError, CommandOutput, CommandResult};
 use crate::cli::utils::output::handle_command_result;
@@ -67,7 +68,11 @@ pub struct PipelineStartArgs {
 pub struct DeployConfigureValidateArgs {
     /// Spec JSON payload describing deploy/configure/validate op configs
     #[arg(long)]
-    pub spec_json: String,
+    pub spec_json: Option<String>,
+
+    /// Path to a spec JSON file describing deploy/configure/validate op configs
+    #[arg(long)]
+    pub spec_file: Option<PathBuf>,
 
     #[command(flatten)]
     pub stores: RunStoresArgs,
@@ -241,13 +246,31 @@ async fn execute_start_internal(args: &PipelineStartArgs) -> CommandResult<Start
 }
 
 async fn execute_dcv_internal(args: &DeployConfigureValidateArgs) -> CommandResult<StartResponse> {
-    let spec: DeployConfigureValidateSpec =
-        serde_json::from_str(&args.spec_json).map_err(|_| {
-            CommandError::new(
-                "InvalidJson",
-                "Failed to parse --spec-json as deploy/configure/validate spec JSON",
-            )
-        })?;
+    let spec_json = match (&args.spec_json, &args.spec_file) {
+        (Some(_), Some(_)) => {
+            return Err(CommandError::new(
+                "InvalidArguments",
+                "Pass only one of --spec-json or --spec-file",
+            ))
+        }
+        (None, None) => {
+            return Err(CommandError::new(
+                "MissingArgument",
+                "Pass one of --spec-json or --spec-file",
+            ))
+        }
+        (Some(s), None) => s.clone(),
+        (None, Some(path)) => std::fs::read_to_string(path).map_err(|_| {
+            CommandError::new("InvalidSpecFile", "Failed to read --spec-file contents")
+        })?,
+    };
+
+    let spec: DeployConfigureValidateSpec = serde_json::from_str(&spec_json).map_err(|_| {
+        CommandError::new(
+            "InvalidJson",
+            "Failed to parse deploy/configure/validate spec JSON",
+        )
+    })?;
 
     let pipeline = Pipeline {
         machine_id: MachineId(spec.machine_id),

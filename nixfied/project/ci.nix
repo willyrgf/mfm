@@ -203,6 +203,10 @@
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
           export MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_RPC_PORT"
 
+          if command -v solc >/dev/null 2>&1; then
+            export FOUNDRY_SOLC="$(command -v solc)"
+          fi
+
           if [ -f foundry.toml ]; then
             if ! command -v forge >/dev/null 2>&1; then
               fail "forge binary not available"
@@ -231,12 +235,94 @@
               --http.port "$RETH_RPC_PORT")
           with_cleanup "stop_service $RETH_PID reth"
 
+          rpc_call() {
+            local method="$1"
+            local params="$2"
+            curl -sS -H "content-type: application/json" \
+              --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}" \
+              "$MFM_EVM_RPC_URL"
+          }
+
+          CHAIN_ID_HEX=$(rpc_call "eth_chainId" "[]" | sed -n 's/.*"result"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+          if [ -z "$CHAIN_ID_HEX" ]; then
+            fail "failed to read eth_chainId from reth"
+          fi
+          CHAIN_ID_DEC=$((16#''${CHAIN_ID_HEX#0x}))
+
+          FROM_ADDR=$(rpc_call "eth_accounts" "[]" | sed -n 's/.*"result"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\([^"]*\)".*/\1/p')
+          if [ -z "$FROM_ADDR" ]; then
+            fail "failed to read first eth_accounts address from reth"
+          fi
+
+          if [ ! -f foundry.toml ]; then
+            fail "foundry.toml not found; cannot build deploy/configure/validate artifact"
+          fi
+
+          ABI_JSON=$(forge inspect --json "contracts/src/ConfigurableCounter.sol:ConfigurableCounter" abi)
+          BYTECODE_HEX=$(forge inspect --json "contracts/src/ConfigurableCounter.sol:ConfigurableCounter" bytecode)
+          if [ -z "$ABI_JSON" ] || [ -z "$BYTECODE_HEX" ]; then
+            fail "failed to inspect contract artifact from forge"
+          fi
+          case "$BYTECODE_HEX" in
+            0x*) ;;
+            *) BYTECODE_HEX="0x$BYTECODE_HEX" ;;
+          esac
+
+          SPEC_FILE=$(mktemp "/tmp/mfm-dcv-spec-$SLOT-$ENV-XXXXXX.json")
+          with_cleanup "rm -f \"$SPEC_FILE\""
+          {
+            printf '{\n'
+            printf '  "machine_id": "evm_deploy_configure_validate",\n'
+            printf '  "pipeline_version": "v1",\n'
+            printf '  "input": {},\n'
+            printf '  "deploy": {\n'
+            printf '    "artifact": {\n'
+            printf '      "abi": %s,\n' "$ABI_JSON"
+            printf '      "bytecode": "%s"\n' "$BYTECODE_HEX"
+            printf '    },\n'
+            printf '    "from": "%s",\n' "$FROM_ADDR"
+            printf '    "constructor_args": [1]\n'
+            printf '  },\n'
+            printf '  "configure": {\n'
+            printf '    "artifact": {\n'
+            printf '      "abi": %s,\n' "$ABI_JSON"
+            printf '      "bytecode": "%s"\n' "$BYTECODE_HEX"
+            printf '    },\n'
+            printf '    "from": "%s",\n' "$FROM_ADDR"
+            printf '    "calls": [\n'
+            printf '      {\n'
+            printf '        "function": "setValue",\n'
+            printf '        "args": [42]\n'
+            printf '      }\n'
+            printf '    ]\n'
+            printf '  },\n'
+            printf '  "validate": {\n'
+            printf '    "artifact": {\n'
+            printf '      "abi": %s,\n' "$ABI_JSON"
+            printf '      "bytecode": "%s"\n' "$BYTECODE_HEX"
+            printf '    },\n'
+            printf '    "expected_chain_id": %s,\n' "$CHAIN_ID_DEC"
+            printf '    "read_assertions": [\n'
+            printf '      {\n'
+            printf '        "function": "getValue",\n'
+            printf '        "args": [],\n'
+            printf '        "expected": 42\n'
+            printf '      }\n'
+            printf '    ],\n'
+            printf '    "event_assertions": [\n'
+            printf '      {\n'
+            printf '        "event": "ValueSet",\n'
+            printf '        "min_count": 2\n'
+            printf '      }\n'
+            printf '    ]\n'
+            printf '  }\n'
+            printf '}\n'
+          } > "$SPEC_FILE"
+
           LOGFILE=$(artifact_path "parity-reth.log")
           log_capture "$LOGFILE" -- \
-            cargo run -p mfm --bin mfm_cli -- --output-format json run start \
-              --op-id evm_read \
-              --op-version v1 \
-              --op-config-json '{"include_chain_id":true,"include_block_number":true}'
+            cargo run -p mfm --bin mfm_cli -- --output-format json run pipeline deploy-configure-validate \
+              --spec-file "$SPEC_FILE"
         '';
       };
     };
