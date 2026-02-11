@@ -1,5 +1,5 @@
 {
-  description = "Generic Nix project framework";
+  description = "Nixfied framework";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
@@ -18,46 +18,65 @@
         pkgs = import nixpkgs { inherit system; };
 
         project = import ./nixfied/project { inherit pkgs; };
-        slots = import ./nixfied/slots.nix { inherit pkgs project; };
+        slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
 
         postgres =
           if (project.modules.postgres.enable or false) then
-            import ./nixfied/postgres { inherit pkgs project slots; }
+            import ./nixfied/.framework/postgres { inherit pkgs project slots; }
           else
             null;
 
         nginx =
           if (project.modules.nginx.enable or false) then
-            import ./nixfied/nginx { inherit pkgs project slots; }
+            import ./nixfied/.framework/nginx { inherit pkgs project slots; }
           else
             null;
+
+        minio =
+          if (project.modules.minio.enable or false) then
+            import ./nixfied/.framework/minio { inherit pkgs project slots; }
+          else
+            null;
+
+        serviceApiLib = import ./nixfied/.framework/lib/service-api.nix { inherit pkgs; };
+        serviceApis =
+          (pkgs.lib.optionalAttrs (postgres != null) { postgres = postgres.publicApi or null; })
+          // (pkgs.lib.optionalAttrs (nginx != null) { nginx = nginx.publicApi or null; })
+          // (pkgs.lib.optionalAttrs (minio != null) { minio = minio.publicApi or null; });
+        enabledServices = builtins.attrNames serviceApis;
+        serviceApisValidated = serviceApiLib.validateEnabledServicesHaveContracts {
+          enabledServices = enabledServices;
+          serviceApis = serviceApis;
+        };
 
         ephemeral =
           if (project.ephemeral.enable or false) then
-            import ./nixfied/ephemeral.nix { inherit pkgs project; }
+            import ./nixfied/.framework/ephemeral.nix { inherit pkgs project; }
           else
             null;
 
-        hooks = import ./nixfied/hooks.nix {
+        hooks = import ./nixfied/.framework/hooks.nix {
           inherit
             pkgs
             project
             slots
             postgres
             nginx
+            minio
             supervisor
             ephemeral
             ;
+          serviceApis = serviceApisValidated;
         };
 
-        lib = import ./nixfied/lib { inherit pkgs project hooks; };
+        lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
         supervisor =
           if (project.supervisor.enable or true) then
-            import ./nixfied/supervisor { inherit pkgs project slots; }
+            import ./nixfied/.framework/supervisor { inherit pkgs project slots; }
           else
             null;
 
-        coreApps = import ./nixfied/internal/core.nix {
+        coreApps = import ./nixfied/.framework/internal/core.nix {
           inherit
             pkgs
             project
@@ -65,11 +84,11 @@
             moduleApps
             ;
         };
-        isFramework = builtins.pathExists ./nixfied/.framework;
+        isFramework = builtins.pathExists ./nixfied/.framework/.workspace;
 
         installApps =
           if isFramework then
-            import ./nixfied/internal/install.nix {
+            import ./nixfied/.framework/internal/install.nix {
               inherit
                 pkgs
                 lib
@@ -81,7 +100,7 @@
 
         testApps =
           if isFramework then
-            import ./nixfied/internal/test.nix {
+            import ./nixfied/.framework/internal/test.nix {
               inherit
                 pkgs
                 lib
@@ -89,7 +108,7 @@
             }
           else
             { };
-        isolationApps = import ./nixfied/internal/isolation.nix {
+        isolationApps = import ./nixfied/.framework/internal/isolation.nix {
           inherit
             pkgs
             project
@@ -97,22 +116,21 @@
             slots
             ;
         };
-        moduleApps = import ./nixfied/internal/module-apps.nix {
+        moduleApps = import ./nixfied/.framework/internal/module-apps.nix {
           inherit
             pkgs
             project
             lib
-            postgres
-            nginx
             supervisor
             slots
             ;
+          serviceApis = serviceApisValidated;
         };
         frameworkApps = pkgs.lib.mapAttrs' (name: value: {
           name = "framework::${name}";
           value = value;
         }) (installApps // testApps);
-        ciEntry = import ./nixfied/ci.nix {
+        ciEntry = import ./nixfied/.framework/ci.nix {
           inherit
             pkgs
             project
@@ -139,6 +157,7 @@
                 hooks
                 postgres
                 nginx
+                minio
                 supervisor
                 ephemeral
                 ;
@@ -148,7 +167,7 @@
       in
       {
         devShells = {
-          default = import ./nixfied/devshell.nix {
+          default = import ./nixfied/.framework/devshell.nix {
             inherit
               pkgs
               project

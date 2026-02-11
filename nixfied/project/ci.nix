@@ -57,7 +57,7 @@
         "${project.envVar}" = "test";
       };
       useDeps = true;
-      # Note: `nix run .#ci` is implemented by the framework CI runner (nixfied/ci.nix),
+      # Note: `nix run .#ci` is implemented by the framework CI runner (nixfied/.framework/ci.nix),
       # which reads `project.ci.*` below. This command exists primarily for `nix run .#help`.
       script = "";
     };
@@ -157,20 +157,19 @@
 
       parity-s3 = {
         description = "Parity: S3/MinIO artifact store";
+        requires = [ "minio" ];
         run = ''
           eval "$($SLOT_INFO)"
 
-          # Dev/test parity should not depend on the supervisor (production-only).
-          # Start MinIO directly (no process-compose/TUI).
-          mkdir -p "$MINIO_STATE_DIR"
-          export MINIO_ROOT_USER="minio"
-          export MINIO_ROOT_PASSWORD="minio123456"
-
+          # Use the MinIO service module contract in CI parity (without supervisor).
+          run_hook MINIO_INIT
           MINIO_LOGFILE=$(artifact_path "minio.log")
-          MINIO_PID=$(start_service minio --log "$MINIO_LOGFILE" -- \
-            minio server "$MINIO_STATE_DIR" \
-              --address "127.0.0.1:$MINIO_PORT" \
-              --console-address "127.0.0.1:$MINIO_CONSOLE_PORT")
+          MINIO_PID=$(start_service minio \
+            --log "$MINIO_LOGFILE" \
+            --wait-http "http://127.0.0.1:$MINIO_PORT/minio/health/ready" \
+            --timeout 60 \
+            -- \
+            "$MINIO_START")
           with_cleanup "stop_service $MINIO_PID minio"
 
           export AWS_ACCESS_KEY_ID="minio"
@@ -182,7 +181,7 @@
           export MFM_S3_BUCKET="mfm-test"
           export MFM_S3_PREFIX="mfm-artifacts"
 
-          wait_http "$MFM_S3_ENDPOINT/minio/health/ready" 60 1
+          run_hook MINIO_BUCKET_CREATE "$MFM_S3_BUCKET"
 
           LOGFILE=$(artifact_path "parity-s3.log")
           log_capture "$LOGFILE" -- cargo nextest run -p mfm-artifact-store-s3 --features parity-tests

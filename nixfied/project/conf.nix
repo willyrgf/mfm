@@ -217,6 +217,15 @@ rec {
       portKeyHttps = "https";
       dataDirName = "nginx";
     };
+    minio = {
+      enable = true;
+      portKeyApi = "minio";
+      portKeyConsole = "minio_console";
+      dataDirName = "minio";
+      rootUser = "minio";
+      rootPassword = "minio123456";
+      browser = true;
+    };
   };
 
   # Isolation test runner configuration (nix run .#test-isolation)

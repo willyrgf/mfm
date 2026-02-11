@@ -160,9 +160,9 @@ let
             pkgs.python3
           ];
       };
-      slots = import ./nixfied/slots.nix { inherit pkgs project; };
-      hooks = import ./nixfied/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
-      lib = import ./nixfied/lib { inherit pkgs project hooks; };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
     in
       lib.mkAppScript {
         name = "helpers-runtime";
@@ -204,9 +204,9 @@ let
             pkgs.python3
           ];
       };
-      slots = import ./nixfied/slots.nix { inherit pkgs project; };
-      hooks = import ./nixfied/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
-      lib = import ./nixfied/lib { inherit pkgs project hooks; };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
     in
       lib.mkAppScript {
         name = "slots-runtime";
@@ -240,10 +240,10 @@ let
       base = import ./nixfied/project { inherit pkgs; };
       fixture = import ./tests/framework/fixtures/ci/ci.nix { project = base.project; };
       project = pkgs.lib.recursiveUpdate base fixture;
-      slots = import ./nixfied/slots.nix { inherit pkgs project; };
-      hooks = import ./nixfied/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
-      lib = import ./nixfied/lib { inherit pkgs project hooks; };
-      ciEntry = import ./nixfied/ci.nix { inherit pkgs project lib; };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+      ciEntry = import ./nixfied/.framework/ci.nix { inherit pkgs project lib; };
     in
       ciEntry.scriptDrv
     NIX
@@ -314,10 +314,10 @@ let
       base = import ./nixfied/project { inherit pkgs; };
       fixture = import ./tests/framework/fixtures/ci/retention.nix { project = base.project; };
       project = pkgs.lib.recursiveUpdate base fixture;
-      slots = import ./nixfied/slots.nix { inherit pkgs project; };
-      hooks = import ./nixfied/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
-      lib = import ./nixfied/lib { inherit pkgs project hooks; };
-      ciEntry = import ./nixfied/ci.nix { inherit pkgs project lib; };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+      ciEntry = import ./nixfied/.framework/ci.nix { inherit pkgs project lib; };
     in
       ciEntry.scriptDrv
     NIX
@@ -348,10 +348,10 @@ let
       base = import ./nixfied/project { inherit pkgs; };
       fixture = import ./tests/framework/fixtures/ci/unknown-step.nix { project = base.project; };
       project = pkgs.lib.recursiveUpdate base fixture;
-      slots = import ./nixfied/slots.nix { inherit pkgs project; };
-      hooks = import ./nixfied/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
-      lib = import ./nixfied/lib { inherit pkgs project hooks; };
-      ciEntry = import ./nixfied/ci.nix { inherit pkgs project lib; };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+      ciEntry = import ./nixfied/.framework/ci.nix { inherit pkgs project lib; };
     in
       ciEntry.scriptDrv
     NIX
@@ -405,19 +405,24 @@ let
       conf = import ./tests/framework/fixtures/modules/conf.nix { inherit pkgs; };
       dev = import ./tests/framework/fixtures/modules/dev.nix { project = conf.project; };
       project = pkgs.lib.recursiveUpdate base (pkgs.lib.recursiveUpdate conf dev);
-      slots = import ./nixfied/slots.nix { inherit pkgs project; };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
       postgres =
         if (project.modules.postgres.enable or false) then
-          import ./nixfied/postgres { inherit pkgs project slots; }
+          import ./nixfied/.framework/postgres { inherit pkgs project slots; }
         else
           null;
       nginx =
         if (project.modules.nginx.enable or false) then
-          import ./nixfied/nginx { inherit pkgs project slots; }
+          import ./nixfied/.framework/nginx { inherit pkgs project slots; }
         else
           null;
-      hooks = import ./nixfied/hooks.nix { inherit pkgs project slots postgres nginx; };
-      lib = import ./nixfied/lib { inherit pkgs project hooks; };
+      minio =
+        if (project.modules.minio.enable or false) then
+          import ./nixfied/.framework/minio { inherit pkgs project slots; }
+        else
+          null;
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots postgres nginx minio; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
     in
       let
         devCfg = dev.commands.dev or { };
@@ -437,7 +442,8 @@ let
     (
       unset SLOT_INFO REQUIRE_SLOT_ENV \
         POSTGRES_INIT POSTGRES_START POSTGRES_STOP POSTGRES_SETUP_DB POSTGRES_FULL_START POSTGRES_FULL_START_TEST \
-        NGINX_INIT NGINX_START NGINX_STOP NGINX_SITE_PROXY NGINX_SITE_STATIC
+        NGINX_INIT NGINX_START NGINX_STOP NGINX_SITE_PROXY NGINX_SITE_STATIC \
+        MINIO_INIT MINIO_START MINIO_STOP MINIO_HEALTH MINIO_CHECK_CONFIG MINIO_BUCKET_LIST
       export NIXFIED_TEST_DEBUG=1
       cd "$MOD_DIR" && "$DEV_SCRIPT" >"$DEV_LOG" 2>&1
     )
@@ -475,15 +481,15 @@ let
           };
         };
       };
-      slots = import ./nixfied/slots.nix { inherit pkgs project; };
-      supervisor = import ./nixfied/supervisor { inherit pkgs project slots; };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      supervisor = import ./nixfied/.framework/supervisor { inherit pkgs project slots; };
     in
       supervisor.generateConfig
     NIX
     )
 
     SUP_SCRIPT=$(build_expr "$SUP_EXPR")
-    SUP_CONFIG=$("$SUP_SCRIPT")
+    SUP_CONFIG=$(PROJECT_ENV=dev NIX_ENV=0 "$SUP_SCRIPT")
     assert_file_exists "$SUP_CONFIG"
     assert_contains "$SUP_CONFIG" "processes:"
     assert_contains "$SUP_CONFIG" "app:"
@@ -502,7 +508,10 @@ let
     if [ ! -d "$INSTALL_TARGET/nixfied" ]; then
       fail "expected nixfied/ directory in installer target"
     fi
-    assert_file_absent "$INSTALL_TARGET/nixfied/.framework"
+    if [ ! -d "$INSTALL_TARGET/nixfied/.framework" ]; then
+      fail "expected nixfied/.framework directory in installer target"
+    fi
+    assert_file_absent "$INSTALL_TARGET/nixfied/.framework/.workspace"
     assert_file_absent "$INSTALL_TARGET/NIXFIED_PROMPT_PLAN.md"
     assert_file_exists "$INSTALL_TARGET/nixfied/local/default.nix"
 
@@ -529,7 +538,10 @@ let
     if [ ! -d "$INSTALL_WT_TARGET/nixfied" ]; then
       fail "expected nixfied/ directory in worktree target"
     fi
-    assert_file_absent "$INSTALL_WT_TARGET/nixfied/.framework"
+    if [ ! -d "$INSTALL_WT_TARGET/nixfied/.framework" ]; then
+      fail "expected nixfied/.framework directory in worktree target"
+    fi
+    assert_file_absent "$INSTALL_WT_TARGET/nixfied/.framework/.workspace"
     assert_file_exists "$INSTALL_WT_TARGET/nixfied/local/default.nix"
 
     log "example project apps (basic install)"
@@ -556,10 +568,10 @@ let
 
     log "ports env var aliases"
     PORTS_ALIAS_OUT="$WORKDIR/ports-alias.txt"
-    NIXFIED_ENV=1 run_app "$INSTALL_TARGET" ports > "$PORTS_ALIAS_OUT"
+    PROJECT_ENV=dev NIXFIED_ENV=1 run_app "$INSTALL_TARGET" ports > "$PORTS_ALIAS_OUT"
     assert_contains "$PORTS_ALIAS_OUT" "Port assignments for slot 1, env dev"
     PORTS_NIX_ENV_OUT="$WORKDIR/ports-nix-env.txt"
-    NIX_ENV=1 run_app "$INSTALL_TARGET" ports > "$PORTS_NIX_ENV_OUT"
+    PROJECT_ENV=dev NIX_ENV=1 run_app "$INSTALL_TARGET" ports > "$PORTS_NIX_ENV_OUT"
     assert_contains "$PORTS_NIX_ENV_OUT" "Port assignments for slot 1, env dev"
 
     log "app api contract enforcement"
@@ -608,16 +620,56 @@ let
     assert_contains "$BAD_API_LOG" "Nixfied app API contract violated"
     assert_contains "$BAD_API_LOG" "missing meta.nixfied.api"
 
+    log "service api contract enforcement"
+    BAD_SERVICE_API_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      serviceApi = import ./nixfied/.framework/lib/service-api.nix { inherit pkgs; };
+    in
+      pkgs.writeText "service-api-validated" (builtins.toJSON (serviceApi.validateServiceApis {
+        postgres = {
+          version = 1;
+          service = "postgres";
+          summary = "bad contract";
+          details = "missing required core ops and ci profile";
+          profiles = [ "dev" "prod" "test" ];
+          coreOps = {
+            init = {
+              script = "/bin/true";
+              summary = "init";
+              details = "init";
+            };
+          };
+          artifacts = { };
+        };
+      }))
+    NIX
+    )
+    BAD_SERVICE_API_LOG="$WORKDIR/bad-service-api-contract.log"
+    set +e
+    build_expr "$BAD_SERVICE_API_EXPR" > "$BAD_SERVICE_API_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected service API contract violation to fail"
+    fi
+    assert_contains "$BAD_SERVICE_API_LOG" "Nixfied service API contract violated"
+    assert_contains "$BAD_SERVICE_API_LOG" "publicApi.profiles missing required values: ci"
+    assert_contains "$BAD_SERVICE_API_LOG" "publicApi.coreOps missing required ops"
+
     log "installer upgrade preserves project"
     echo "# NIXFIED_UPGRADE_TEST_MARKER" >> "$INSTALL_TARGET/nixfied/project/conf.nix"
     echo "# NIXFIED_LOCAL_UPGRADE_TEST_MARKER" >> "$INSTALL_TARGET/nixfied/local/default.nix"
     (cd "$INSTALL_TARGET" && nix run "path:$ROOT"#framework::upgrade -- --force >/dev/null)
     assert_contains "$INSTALL_TARGET/nixfied/project/conf.nix" "NIXFIED_UPGRADE_TEST_MARKER"
     assert_contains "$INSTALL_TARGET/nixfied/local/default.nix" "NIXFIED_LOCAL_UPGRADE_TEST_MARKER"
-    assert_file_absent "$INSTALL_TARGET/nixfied/.framework"
+    assert_file_absent "$INSTALL_TARGET/nixfied/.framework/.workspace"
 
     log "framework marker toggle"
-    touch "$INSTALL_TARGET/nixfied/.framework"
+    mkdir -p "$INSTALL_TARGET/nixfied/.framework"
+    touch "$INSTALL_TARGET/nixfied/.framework/.workspace"
     FRAMEWORK_HELP="$WORKDIR/framework-help.txt"
     run_app "$INSTALL_TARGET" "framework::prompt-plan" --help > "$FRAMEWORK_HELP"
     assert_contains "$FRAMEWORK_HELP" "prompt-plan"
@@ -640,7 +692,7 @@ let
     assert_file_absent "$PROMPT_PLAN_FORCE_OUT"
     NIXFIED_PROMPT_PLAN=1 run_app "$INSTALL_TARGET" "framework::prompt-plan" -- --force --output="$PROMPT_PLAN_FORCE_OUT" >/dev/null
     assert_file_exists "$PROMPT_PLAN_FORCE_OUT"
-    rm -f "$INSTALL_TARGET/nixfied/.framework"
+    rm -f "$INSTALL_TARGET/nixfied/.framework/.workspace"
 
     log "installer re-entry"
     REENTRY_BASE="$WORKDIR/install-reentry"
@@ -648,7 +700,7 @@ let
     (cd "$REENTRY_BASE" && nix run "path:$ROOT"#framework::install >/dev/null)
     REENTRY_TARGET="$REENTRY_BASE"
     assert_file_exists "$REENTRY_TARGET/flake.nix"
-    assert_file_absent "$REENTRY_TARGET/nixfied/.framework"
+    assert_file_absent "$REENTRY_TARGET/nixfied/.framework/.workspace"
     (cd "$REENTRY_BASE" && nix run "path:$ROOT"#framework::install -- --force >/dev/null)
     assert_file_exists "$REENTRY_TARGET/flake.nix"
     assert_file_absent "''${REENTRY_BASE}_nixfied"
@@ -667,7 +719,7 @@ let
     if grep -q "dev.nix" "$FILTER_TARGET/nixfied/project/default.nix"; then
       fail "default.nix should not include dev.nix when filtered"
     fi
-    assert_file_absent "$FILTER_TARGET/nixfied/.framework"
+    assert_file_absent "$FILTER_TARGET/nixfied/.framework/.workspace"
     assert_file_absent "$FILTER_TARGET/NIXFIED_PROMPT_PLAN.md"
 
     log "example project apps (filtered install)"
@@ -705,7 +757,7 @@ let
     if [ ! -d "$INSTALL_FORCE/nixfied" ]; then
       fail "expected nixfied/ directory in force target"
     fi
-    assert_file_absent "$INSTALL_FORCE/nixfied/.framework"
+    assert_file_absent "$INSTALL_FORCE/nixfied/.framework/.workspace"
     assert_file_absent "$INSTALL_FORCE/NIXFIED_PROMPT_PLAN.md"
 
     log "example project apps (force install)"
@@ -738,10 +790,10 @@ let
       project = pkgs.lib.recursiveUpdate base {
         ephemeral.enable = true;
       };
-      ephemeral = import ./nixfied/ephemeral.nix { inherit pkgs project; };
-      slots = import ./nixfied/slots.nix { inherit pkgs project; };
-      hooks = import ./nixfied/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
-      lib = import ./nixfied/lib { inherit pkgs project hooks; };
+      ephemeral = import ./nixfied/.framework/ephemeral.nix { inherit pkgs project; };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
     in
       lib.mkAppScript {
         name = "ephemeral-lock-test";
@@ -780,9 +832,9 @@ let
       pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
       base = import ./nixfied/project { inherit pkgs; };
       project = base;
-      slots = import ./nixfied/slots.nix { inherit pkgs project; };
-      hooks = import ./nixfied/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
-      lib = import ./nixfied/lib { inherit pkgs project hooks; };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
     in
       lib.mkAppScript {
         name = "registry-fg-test";
@@ -819,10 +871,10 @@ let
       base = import ./nixfied/project { inherit pkgs; };
       fixture = import ./tests/framework/fixtures/ci/summary-json.nix { project = base.project; };
       project = pkgs.lib.recursiveUpdate base fixture;
-      slots = import ./nixfied/slots.nix { inherit pkgs project; };
-      hooks = import ./nixfied/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
-      lib = import ./nixfied/lib { inherit pkgs project hooks; };
-      ciEntry = import ./nixfied/ci.nix { inherit pkgs project lib; };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+      ciEntry = import ./nixfied/.framework/ci.nix { inherit pkgs project lib; };
     in
       ciEntry.scriptDrv
     NIX
@@ -857,17 +909,24 @@ let
       project = pkgs.lib.recursiveUpdate base {
         modules.postgres.enable = true;
         modules.nginx.enable = true;
+        modules.minio.enable = true;
       };
-      slots = import ./nixfied/slots.nix { inherit pkgs project; };
-      postgres = import ./nixfied/postgres { inherit pkgs project slots; };
-      nginx = import ./nixfied/nginx { inherit pkgs project slots; };
-      supervisor = import ./nixfied/supervisor { inherit pkgs project slots; };
-      hooks = import ./nixfied/hooks.nix {
-        inherit pkgs project slots postgres nginx supervisor;
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      postgres = import ./nixfied/.framework/postgres { inherit pkgs project slots; };
+      nginx = import ./nixfied/.framework/nginx { inherit pkgs project slots; };
+      minio = import ./nixfied/.framework/minio { inherit pkgs project slots; };
+      supervisor = import ./nixfied/.framework/supervisor { inherit pkgs project slots; };
+      serviceApis = {
+        postgres = postgres.publicApi;
+        nginx = nginx.publicApi;
+        minio = minio.publicApi;
       };
-      lib = import ./nixfied/lib { inherit pkgs project hooks; };
-      moduleApps = import ./nixfied/internal/module-apps.nix {
-        inherit pkgs project lib postgres nginx supervisor slots;
+      hooks = import ./nixfied/.framework/hooks.nix {
+        inherit pkgs project slots postgres nginx minio supervisor serviceApis;
+      };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+      moduleApps = import ./nixfied/.framework/internal/module-apps.nix {
+        inherit pkgs project lib supervisor slots serviceApis;
       };
     in
       pkgs.writeText "module-app-names" (builtins.concatStringsSep "\n" (builtins.attrNames moduleApps))
@@ -875,10 +934,84 @@ let
     )
 
     MODAPP_NAMES_FILE=$(build_expr "$MODAPP_EXPR")
-    assert_contains "$MODAPP_NAMES_FILE" "db-start"
-    assert_contains "$MODAPP_NAMES_FILE" "nginx-start"
+    assert_contains "$MODAPP_NAMES_FILE" "service::postgres::start"
+    assert_contains "$MODAPP_NAMES_FILE" "service::nginx::start"
+    assert_contains "$MODAPP_NAMES_FILE" "service::minio::start"
     assert_contains "$MODAPP_NAMES_FILE" "up"
     assert_contains "$MODAPP_NAMES_FILE" "check-ports"
+
+    log "strict slot/env enforcement"
+    STRICT_SLOT_ENV_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base {
+        modules.postgres.enable = true;
+        modules.nginx.enable = true;
+        modules.minio.enable = true;
+      };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      postgres = import ./nixfied/.framework/postgres { inherit pkgs project slots; };
+      nginx = import ./nixfied/.framework/nginx { inherit pkgs project slots; };
+      minio = import ./nixfied/.framework/minio { inherit pkgs project slots; };
+      supervisor = import ./nixfied/.framework/supervisor { inherit pkgs project slots; };
+      serviceApis = {
+        postgres = postgres.publicApi;
+        nginx = nginx.publicApi;
+        minio = minio.publicApi;
+      };
+      hooks = import ./nixfied/.framework/hooks.nix {
+        inherit pkgs project slots postgres nginx minio supervisor serviceApis;
+      };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+      moduleApps = import ./nixfied/.framework/internal/module-apps.nix {
+        inherit pkgs project lib supervisor slots serviceApis;
+      };
+    in
+      pkgs.writeText "strict-slot-env-apps" (
+        "UP=" + moduleApps.up.program + "\n"
+        + "POSTGRES_LIST_INSTANCES=" + moduleApps."service::postgres::list-instances".program + "\n"
+      )
+    NIX
+    )
+
+    STRICT_SLOT_ENV_FILE=$(build_expr "$STRICT_SLOT_ENV_EXPR")
+    STRICT_UP_SCRIPT=$(grep 'UP=' "$STRICT_SLOT_ENV_FILE" | head -1 | sed 's/^[[:space:]]*UP=//')
+    STRICT_PG_LIST_SCRIPT=$(grep 'POSTGRES_LIST_INSTANCES=' "$STRICT_SLOT_ENV_FILE" | head -1 | sed 's/^[[:space:]]*POSTGRES_LIST_INSTANCES=//')
+
+    STRICT_UP_MISSING_ENV_LOG="$WORKDIR/strict-up-missing-env.log"
+    set +e
+    NIX_ENV=0 "$STRICT_UP_SCRIPT" > "$STRICT_UP_MISSING_ENV_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected up app to fail when PROJECT_ENV is missing"
+    fi
+    assert_contains "$STRICT_UP_MISSING_ENV_LOG" "PROJECT_ENV must be set"
+
+    STRICT_UP_MISSING_SLOT_LOG="$WORKDIR/strict-up-missing-slot.log"
+    set +e
+    PROJECT_ENV=dev "$STRICT_UP_SCRIPT" > "$STRICT_UP_MISSING_SLOT_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected up app to fail when NIX_ENV is missing"
+    fi
+    assert_contains "$STRICT_UP_MISSING_SLOT_LOG" "NIX_ENV must be set"
+
+    STRICT_PG_MISSING_ENV_LOG="$WORKDIR/strict-pg-list-missing-env.log"
+    set +e
+    NIX_ENV=0 "$STRICT_PG_LIST_SCRIPT" > "$STRICT_PG_MISSING_ENV_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected service::postgres::list-instances to fail when PROJECT_ENV is missing"
+    fi
+    assert_contains "$STRICT_PG_MISSING_ENV_LOG" "PROJECT_ENV must be set"
+
+    PROJECT_ENV=dev NIX_ENV=0 "$STRICT_PG_LIST_SCRIPT" >/dev/null
 
     MODAPP_DISABLED_EXPR=$(cat <<'NIX'
     { root, system }:
@@ -887,19 +1020,18 @@ let
       pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
       base = import ./nixfied/project { inherit pkgs; };
       project = base;
-      slots = import ./nixfied/slots.nix { inherit pkgs project; };
-      supervisor = import ./nixfied/supervisor { inherit pkgs project slots; };
-      hooks = import ./nixfied/hooks.nix {
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      supervisor = import ./nixfied/.framework/supervisor { inherit pkgs project slots; };
+      hooks = import ./nixfied/.framework/hooks.nix {
         inherit pkgs project slots supervisor;
         postgres = null;
         nginx = null;
+        minio = null;
       };
-      lib = import ./nixfied/lib { inherit pkgs project hooks; };
-      moduleApps = import ./nixfied/internal/module-apps.nix {
-        inherit pkgs project lib slots;
-        postgres = null;
-        nginx = null;
-        supervisor = supervisor;
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+      moduleApps = import ./nixfied/.framework/internal/module-apps.nix {
+        inherit pkgs project lib slots supervisor;
+        serviceApis = { };
       };
     in
       pkgs.writeText "module-app-names-disabled" (builtins.concatStringsSep "\n" (builtins.attrNames moduleApps))
@@ -907,14 +1039,72 @@ let
     )
 
     MODAPP_DISABLED_FILE=$(build_expr "$MODAPP_DISABLED_EXPR")
-    if grep -q "db-start" "$MODAPP_DISABLED_FILE"; then
-      fail "db-start should not be present when postgres is disabled"
+    if grep -q "service::postgres::start" "$MODAPP_DISABLED_FILE"; then
+      fail "service::postgres::start should not be present when postgres is disabled"
     fi
-    if grep -q "nginx-start" "$MODAPP_DISABLED_FILE"; then
-      fail "nginx-start should not be present when nginx is disabled"
+    if grep -q "service::nginx::start" "$MODAPP_DISABLED_FILE"; then
+      fail "service::nginx::start should not be present when nginx is disabled"
+    fi
+    if grep -q "service::minio::start" "$MODAPP_DISABLED_FILE"; then
+      fail "service::minio::start should not be present when minio is disabled"
     fi
     assert_contains "$MODAPP_DISABLED_FILE" "check-ports"
     assert_contains "$MODAPP_DISABLED_FILE" "ports"
+
+    log "service hooks"
+    SERVICE_HOOKS_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base {
+        modules = {
+          postgres.enable = true;
+          nginx.enable = true;
+          minio.enable = true;
+        };
+      };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      postgres = import ./nixfied/.framework/postgres { inherit pkgs project slots; };
+      nginx = import ./nixfied/.framework/nginx { inherit pkgs project slots; };
+      minio = import ./nixfied/.framework/minio { inherit pkgs project slots; };
+      serviceApis = {
+        postgres = postgres.publicApi;
+        nginx = nginx.publicApi;
+        minio = minio.publicApi;
+      };
+      hooks = import ./nixfied/.framework/hooks.nix {
+        inherit pkgs project slots postgres nginx minio serviceApis;
+        supervisor = null;
+      };
+      names = builtins.attrNames hooks.env;
+      selected =
+        builtins.filter (
+          n:
+          builtins.substring 0 9 n == "POSTGRES_"
+          || builtins.substring 0 6 n == "NGINX_"
+          || builtins.substring 0 6 n == "MINIO_"
+        ) names;
+    in
+      pkgs.writeText "service-hooks" (builtins.concatStringsSep "\n" (
+        builtins.map (
+          name:
+          let
+            value = builtins.getAttr name hooks.env;
+          in
+          "''${name}= ''${value}"
+        ) selected
+      ))
+    NIX
+    )
+
+    SERVICE_HOOKS_FILE=$(build_expr "$SERVICE_HOOKS_EXPR")
+    assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "NGINX_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "MINIO_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "MINIO_BUCKET_LIST="
+    assert_contains "$SERVICE_HOOKS_FILE" "/nix/store/"
 
     log "supervisor hooks"
     SUP_HOOKS_EXPR=$(cat <<'NIX'
@@ -934,9 +1124,9 @@ let
           };
         };
       };
-      slots = import ./nixfied/slots.nix { inherit pkgs project; };
-      supervisor = import ./nixfied/supervisor { inherit pkgs project slots; };
-      hooks = import ./nixfied/hooks.nix {
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      supervisor = import ./nixfied/.framework/supervisor { inherit pkgs project slots; };
+      hooks = import ./nixfied/.framework/hooks.nix {
         inherit pkgs project slots supervisor;
         postgres = null;
         nginx = null;

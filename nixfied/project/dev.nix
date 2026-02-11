@@ -50,19 +50,13 @@
             --http.addr "127.0.0.1" \
             --http.port "$RETH_RPC_PORT"
 
-        # Dev/test should not depend on the supervisor (production-only).
-        # Start MinIO directly for local development.
-        mkdir -p "$MINIO_STATE_DIR" "$LOG_DIR"
-        export MINIO_ROOT_USER="minio"
-        export MINIO_ROOT_PASSWORD="minio123456"
+        # Use the MinIO service module contract in dev/test (without supervisor).
+        run_hook MINIO_INIT
         start_service minio \
-          --log "$LOG_DIR/minio.log" \
           --wait-http "http://127.0.0.1:$MINIO_PORT/minio/health/ready" \
           --timeout 60 \
           -- \
-          minio server "$MINIO_STATE_DIR" \
-            --address "127.0.0.1:$MINIO_PORT" \
-            --console-address "127.0.0.1:$MINIO_CONSOLE_PORT"
+          "$MINIO_START"
 
         start_service rest-api \
           --wait-http "http://127.0.0.1:$REST_API_PORT/v1/health" \

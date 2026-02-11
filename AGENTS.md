@@ -147,10 +147,10 @@ nix run .#mfm_cli -- --help
 
 Nixfied is vendored under `nixfied/`. Vendoring boundaries (canonical doc: `nixfied/VENDORED.txt`):
 
-- Framework-owned (overwritten on `framework::upgrade`): `flake.nix`, `flake.lock`, `nixfied/internal/`, `nixfied/lib/`, and framework modules under `nixfied/*.nix`.
+- Framework-owned (overwritten on `framework::upgrade`): `flake.nix`, `flake.lock`, `nixfied/.framework/`.
 - User-owned (preserved on `framework::upgrade`): `nixfied/project/` (primary customization surface) and `nixfied/local/` (extensions).
 
-Prefer editing `nixfied/project/` and `nixfied/local/` (not `flake.nix` or framework code under `nixfied/`) for workflow changes:
+Prefer editing `nixfied/project/` and `nixfied/local/` (not `flake.nix` or framework code under `nixfied/.framework/`) for workflow changes:
 
 - `nixfied/project/conf.nix`: project identity, env vars, envs/ports, module toggles, slot behavior.
 - `nixfied/project/dev.nix`: `nix run .#dev`, plus convenience runners like `nix run .#mfm_cli` / `nix run .#mfm_rest_api`.
