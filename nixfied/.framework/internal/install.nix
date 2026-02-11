@@ -444,6 +444,11 @@ let
                           chmod -R u+w "$ROOT/nixfied" 2>/dev/null || true
                         fi
 
+                        # Migrate legacy marker file to the new .framework directory layout.
+                        if [ -f "$ROOT/nixfied/.framework" ]; then
+                          rm -f "$ROOT/nixfied/.framework"
+                        fi
+
                 	        RSYNC_EXCLUDES=()
                 	        PRESERVE_MSG=""
                 	        if [ "$PRESERVE_PROJECT" = "true" ]; then
@@ -473,14 +478,15 @@ let
                         if command -v chattr >/dev/null 2>&1; then
                           chattr -R -i "$ROOT/nixfied" 2>/dev/null || true
                         fi
-                        chmod u+w "$ROOT/nixfied/.framework" 2>/dev/null || true
+                        mkdir -p "$ROOT/nixfied/.framework"
+                        chmod -R u+w "$ROOT/nixfied/.framework" 2>/dev/null || true
                         if command -v chflags >/dev/null 2>&1; then
-                          chflags nouchg "$ROOT/nixfied/.framework" 2>/dev/null || true
+                          chflags -R nouchg "$ROOT/nixfied/.framework" 2>/dev/null || true
                         fi
                         if command -v chattr >/dev/null 2>&1; then
-                          chattr -i "$ROOT/nixfied/.framework" 2>/dev/null || true
+                          chattr -R -i "$ROOT/nixfied/.framework" 2>/dev/null || true
                         fi
-                        rm -f "$ROOT/nixfied/.framework"
+                        rm -f "$ROOT/nixfied/.framework/.workspace"
 
                         if [ -n "$FILTERS_RAW" ]; then
                           IFS=',' read -r -a FILTERS <<< "$FILTERS_RAW"

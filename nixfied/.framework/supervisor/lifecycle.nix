@@ -13,13 +13,16 @@ let
 
   start = pkgs.writeShellScript "supervisor-start" ''
     set -euo pipefail
+    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
+    eval "$SLOT_INFO_OUT"
     CONFIG_FILE=$(${config.generateConfig})
     exec ${pc}/bin/process-compose -f "$CONFIG_FILE" up
   '';
 
   stop = pkgs.writeShellScript "supervisor-stop" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
+    eval "$SLOT_INFO_OUT"
     CONFIG_FILE=$(${config.generateConfig})
 
     # First, stop via process-compose
@@ -52,7 +55,8 @@ let
 
   startDaemon = pkgs.writeShellScript "supervisor-start-daemon" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
+    eval "$SLOT_INFO_OUT"
     CONFIG_FILE=$(${config.generateConfig})
 
     PID_FILE="$RUN_DIR/supervisor.pid"

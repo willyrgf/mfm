@@ -20,6 +20,9 @@ let
     inherit pkgs;
     inherit (builders) mkApp;
   };
+  serviceApi = import ./service-api.nix {
+    inherit pkgs appApi;
+  };
   process = import ./process.nix { inherit pkgs; };
   portUtils = import ./port-utils.nix { inherit pkgs; };
   parallel = import ./parallel.nix { inherit pkgs; };
@@ -35,6 +38,7 @@ in
     mkAppWithDeps
     ;
   inherit appApi;
+  inherit serviceApi;
   inherit (process) mkSignalHandler mkProcessManager;
   inherit (portUtils) mkPortCleanup mkPortConflictChecker;
   inherit (parallel) mkParallelRunner;

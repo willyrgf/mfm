@@ -77,56 +77,33 @@ let
 
   envList = pkgs.lib.concatStringsSep " " envNames;
 
-  hasProd = builtins.hasAttr "prod" envOffsets;
-  hasTest = builtins.hasAttr "test" envOffsets;
-  hasDev = builtins.hasAttr "dev" envOffsets;
-
-  # Resolve environment from PROJECT_ENV or command context
+  # Resolve and validate explicit environment selection
   resolveEnv = pkgs.writeShellScript "resolve-env" ''
+    set -eo pipefail
     ENV_VAR="${envVar}"
 
-    if [ -n "''${!ENV_VAR:-}" ]; then
-      ENV_VALUE="''${!ENV_VAR}"
-      case "$ENV_VALUE" in
-        ${pkgs.lib.concatStringsSep "|" envNames})
-          echo "$ENV_VALUE"
-          exit 0
-          ;;
-        *)
-          echo "Error: $ENV_VAR must be one of: ${envList} (got '$ENV_VALUE')" >&2
-          exit 1
-          ;;
-      esac
+    if [ -z "''${!ENV_VAR:-}" ]; then
+      echo "ERROR: $ENV_VAR must be set (example: ${slotVar}=0 $ENV_VAR=${defaultEnv})" >&2
+      exit 1
     fi
 
-    COMMAND="''${COMMAND_NAME:-''${0:-}}"
-    ${pkgs.lib.optionalString hasProd ''
-      if echo "$COMMAND" | grep -qi "prod"; then
-        echo "prod"
+    ENV_VALUE="''${!ENV_VAR}"
+    case "$ENV_VALUE" in
+      ${pkgs.lib.concatStringsSep "|" envNames})
+        echo "$ENV_VALUE"
         exit 0
-      fi
-    ''}
-    ${pkgs.lib.optionalString hasTest ''
-      if echo "$COMMAND" | grep -qiE "(test|ci)"; then
-        echo "test"
-        exit 0
-      fi
-    ''}
-    ${pkgs.lib.optionalString hasDev ''
-      if echo "$COMMAND" | grep -qi "dev"; then
-        echo "dev"
-        exit 0
-      fi
-    ''}
-
-    echo "${defaultEnv}"
-    exit 0
+        ;;
+      *)
+        echo "ERROR: $ENV_VAR must be one of: ${envList} (got '$ENV_VALUE')" >&2
+        exit 1
+        ;;
+    esac
   '';
 
-  # Validate and optionally prompt for slot/env
-  requireSlotEnv = pkgs.writeShellScript "require-slot-env" ''
+  # Read and validate explicit slot value
+  resolveSlot = pkgs.writeShellScript "resolve-slot" ''
+    set -eo pipefail
     SLOT_VAR="${slotVar}"
-    ENV_VAR="${envVar}"
 
     # Compatibility aliases:
     # - NIXFIED_ENV: alias for the configured slot variable (default: NIX_ENV).
@@ -134,17 +111,42 @@ let
       export "$SLOT_VAR"="''${NIXFIED_ENV}"
     fi
 
-    SLOT="''${!SLOT_VAR:-0}"
-    ENV="''${!ENV_VAR:-}"
-
-    if [ -z "$ENV" ]; then
-      ENV=$(${resolveEnv})
-    fi
-
-    if [ "$SLOT" -lt 0 ] || [ "$SLOT" -gt ${toString slotMax} ]; then
-      echo "ERROR: $SLOT_VAR must be 0-${toString slotMax} (got $SLOT)" >&2
+    if [ -z "''${!SLOT_VAR:-}" ]; then
+      echo "ERROR: $SLOT_VAR must be set (example: $SLOT_VAR=0 ${envVar}=${defaultEnv})" >&2
       exit 1
     fi
+
+    SLOT_VALUE="''${!SLOT_VAR}"
+    case "$SLOT_VALUE" in
+      *[!0-9]*)
+        echo "ERROR: $SLOT_VAR must be an integer 0-${toString slotMax} (got '$SLOT_VALUE')" >&2
+        exit 1
+        ;;
+      "")
+        echo "ERROR: $SLOT_VAR must be set (example: $SLOT_VAR=0 ${envVar}=${defaultEnv})" >&2
+        exit 1
+        ;;
+      *)
+        ;;
+    esac
+
+    if [ "$SLOT_VALUE" -lt 0 ] || [ "$SLOT_VALUE" -gt ${toString slotMax} ]; then
+      echo "ERROR: $SLOT_VAR must be 0-${toString slotMax} (got $SLOT_VALUE)" >&2
+      exit 1
+    fi
+
+    echo "$SLOT_VALUE"
+    exit 0
+  '';
+
+  # Validate explicit slot/env and emit eval-able variables
+  requireSlotEnv = pkgs.writeShellScript "require-slot-env" ''
+    set -eo pipefail
+    SLOT_VAR="${slotVar}"
+    ENV_VAR="${envVar}"
+
+    SLOT=$(${resolveSlot})
+    ENV=$(${resolveEnv})
 
     case "$ENV" in
       ${pkgs.lib.concatStringsSep "|" envNames})
@@ -161,55 +163,27 @@ let
 
     ${portAssignments}
 
-    NON_INTERACTIVE=false
-    if [ -n "''${CI:-}" ] || [ -n "''${NO_TTY:-}" ] || [ "''${TERM:-}" = "dumb" ]; then
-      NON_INTERACTIVE=true
-    fi
-
-    if [ "$NON_INTERACTIVE" = "false" ] && [ -t 0 ] && ([ -z "''${!SLOT_VAR:-}" ] || [ -z "''${!ENV_VAR:-}" ]); then
-      echo "WARN: $SLOT_VAR and/or $ENV_VAR not explicitly set" >&2
-      echo "" >&2
-      echo "Using defaults:" >&2
-      echo "  $SLOT_VAR=$SLOT" >&2
-      echo "  $ENV_VAR=$ENV" >&2
-      echo "" >&2
-      ${pkgs.lib.optionalString (portNames != [ ]) ''
-        echo "Computed ports:" >&2
-        ${pkgs.lib.concatMapStringsSep "\n" (name: ''
-          echo "  ${normalizeName name}: ${"$"}${portVarName name}" >&2
-        '') portNames}
-        echo "" >&2
-      ''}
-      echo -n "Continue with these defaults? [y/N]: " >&2
-      read -r REPLY
-      if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
-        echo "Aborted." >&2
-        exit 1
-      fi
-    fi
-
     echo "SLOT=$SLOT"
     echo "ENV=$ENV"
   '';
 
   # Get slot + environment configuration as eval-able shell variables
   getSlotInfo = pkgs.writeShellScript "get-slot-info" ''
+    set -eo pipefail
     SLOT_VAR="${slotVar}"
     ENV_VAR="${envVar}"
 
-    # Compatibility aliases:
-    # - NIXFIED_ENV: alias for the configured slot variable (default: NIX_ENV).
-    if [ -z "''${!SLOT_VAR:-}" ] && [ -n "''${NIXFIED_ENV:-}" ]; then
-      export "$SLOT_VAR"="''${NIXFIED_ENV}"
-    fi
-
-    SLOT="''${!SLOT_VAR:-0}"
-    if [ "$SLOT" -lt 0 ] || [ "$SLOT" -gt ${toString slotMax} ]; then
-      echo "Error: $SLOT_VAR must be 0-${toString slotMax} (got $SLOT)" >&2
-      exit 1
-    fi
-
+    SLOT=$(${resolveSlot})
     ENV=$(${resolveEnv})
+
+    case "$ENV" in
+      ${pkgs.lib.concatStringsSep "|" envNames})
+        ;;
+      *)
+        echo "ERROR: $ENV_VAR must be one of: ${envList} (got '$ENV')" >&2
+        exit 1
+        ;;
+    esac
 
     case "$ENV" in
     ${envCase}
@@ -374,6 +348,7 @@ in
     portVarName
     normalizeName
     resolveEnv
+    resolveSlot
     requireSlotEnv
     getSlotInfo
     getServiceDir

@@ -16,14 +16,27 @@ let
   database = cfg.database or "app";
   testDatabase = cfg.testDatabase or "${database}_test";
   extensions = config.extensions or [ ];
+  pgRuntimePrelude =
+    defaultDb: ''
+      SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
+      eval "$SLOT_INFO_OUT"
+
+      PORT_VAR="${portVar}"
+      export PGPORT="''${PGPORT:-''${!PORT_VAR:-}}"
+      export PGDATA="''${PGDATA:-${pgdataExpr}}"
+      export PGSOCKET_DIR="''${PGSOCKET_DIR:-''${POSTGRES_SOCKET_DIR:-$PGDATA/run/sockets}}"
+      export PGDATABASE="''${PGDATABASE:-${defaultDb}}"
+
+      if [ -z "''${PGPORT:-}" ] || [ -z "''${PGDATA:-}" ]; then
+        echo "ERROR: Failed to resolve PostgreSQL runtime variables (PGPORT/PGDATA)" >&2
+        exit 1
+      fi
+    '';
 
   init = pkgs.writeShellScript "postgres-init" ''
     set -euo pipefail
 
-    if [ -z "''${PGDATA:-}" ] || [ -z "''${PGPORT:-}" ]; then
-      echo "ERROR: PGDATA and PGPORT must be set" >&2
-      exit 1
-    fi
+    ${pgRuntimePrelude database}
 
     mkdir -p "$PGDATA"
 
@@ -66,10 +79,7 @@ let
   start = pkgs.writeShellScript "postgres-start" ''
     set -euo pipefail
 
-    if [ -z "''${PGDATA:-}" ] || [ -z "''${PGPORT:-}" ]; then
-      echo "ERROR: PGDATA and PGPORT must be set" >&2
-      exit 1
-    fi
+    ${pgRuntimePrelude database}
 
     if ${postgres}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
       # Verify the running instance is ours by checking PGDATA
@@ -121,6 +131,9 @@ let
   '';
 
   stop = pkgs.writeShellScript "postgres-stop" ''
+    set -euo pipefail
+    ${pgRuntimePrelude database}
+
     if [ -n "''${PGDATA:-}" ] && [ -f "$PGDATA/postmaster.pid" ]; then
       echo "STOP: PostgreSQL at $PGDATA"
       ${postgres}/bin/pg_ctl -D "$PGDATA" stop -m fast 2>/dev/null || true
@@ -130,10 +143,7 @@ let
   setupDb = pkgs.writeShellScript "postgres-setup-db" ''
     set -euo pipefail
 
-    if [ -z "''${PGPORT:-}" ] || [ -z "''${PGDATABASE:-}" ]; then
-      echo "ERROR: PGPORT and PGDATABASE must be set" >&2
-      exit 1
-    fi
+    ${pgRuntimePrelude database}
 
     echo "INFO: Setting up database '$PGDATABASE'"
 
@@ -154,13 +164,7 @@ let
 
   fullStart = pkgs.writeShellScript "postgres-full-start" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
-
-    PORT_VAR="${portVar}"
-    export PGPORT="''${!PORT_VAR}"
-    export PGDATA="${pgdataExpr}"
-    export PGSOCKET_DIR="''${POSTGRES_SOCKET_DIR:-$PGDATA/run/sockets}"
-    export PGDATABASE="''${PGDATABASE:-${database}}"
+    ${pgRuntimePrelude database}
 
     echo "INFO: Slot $SLOT, env $ENV (PGPORT=$PGPORT)"
 
@@ -175,12 +179,7 @@ let
 
   fullStartTest = pkgs.writeShellScript "postgres-full-start-test" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
-
-    PORT_VAR="${portVar}"
-    export PGPORT="''${!PORT_VAR}"
-    export PGDATA="${pgdataExpr}"
-    export PGSOCKET_DIR="''${POSTGRES_SOCKET_DIR:-$PGDATA/run/sockets}"
+    ${pgRuntimePrelude testDatabase}
     export PGDATABASE="''${PGDATABASE:-${testDatabase}}"
 
     ${init}
