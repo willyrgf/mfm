@@ -13,6 +13,7 @@ mfm-sdk = { path = "../../crates/sdk" }
 mfm-op-keystore = { path = "../../crates/ops/keystore-op" }
 mfm-collectors-evm-jsonrpc-http = { path = "../../crates/collectors/evm-jsonrpc-http" }
 mfm-op-evm-read = { path = "../../crates/ops/evm-read-op" }
+mfm-op-evm-write = { path = "../../crates/ops/evm-write-op" }
 mfm-op-nix-app = { path = "../../crates/ops/nix-app-op" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }
 mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }

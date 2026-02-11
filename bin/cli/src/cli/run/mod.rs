@@ -6,6 +6,7 @@ mod engine_bundle;
 
 pub mod artifacts;
 pub mod events;
+pub mod pipeline;
 pub mod resume;
 pub mod start;
 pub mod status;
@@ -16,6 +17,11 @@ pub enum RunCommand {
     Start {
         #[command(flatten)]
         args: start::StartArgs,
+    },
+    /// Start a multi-step pipeline run
+    Pipeline {
+        #[command(subcommand)]
+        command: pipeline::PipelineCommand,
     },
     /// Resume an existing run by id
     Resume {
@@ -43,6 +49,7 @@ impl RunCommand {
     pub async fn execute(&self, ctx: &CommandContext) -> ! {
         match self {
             RunCommand::Start { args } => start::execute(ctx, args).await,
+            RunCommand::Pipeline { command } => command.execute(ctx).await,
             RunCommand::Resume { args } => resume::execute(ctx, args).await,
             RunCommand::Status { args } => status::execute(ctx, args).await,
             RunCommand::Events { args } => events::execute(ctx, args).await,

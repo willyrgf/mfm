@@ -6,8 +6,8 @@
       description = "Start the dev workflow";
       api = {
         version = 1;
-        summary = "Start the dev workflow (Postgres + REST API)";
-        details = "Starts Postgres, MinIO (S3), and the REST API, then waits (local development).";
+        summary = "Start the dev workflow (Postgres + reth + REST API)";
+        details = "Starts Postgres, local reth JSON-RPC, MinIO (S3), and the REST API, then waits (local development).";
         usage = [
           "nix run .#dev"
           "NIX_ENV=1 nix run .#dev"
@@ -29,6 +29,26 @@
 
         export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm"
         export MFM_REST_API_ADDR="127.0.0.1:$REST_API_PORT"
+        export MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_RPC_PORT"
+
+        if ! command -v reth >/dev/null 2>&1; then
+          echo "ERROR: reth binary not found in PATH. Install reth in the dev environment first." >&2
+          exit 1
+        fi
+
+        RETH_STATE_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/mfm/reth-$SLOT-$ENV"
+        mkdir -p "$RETH_STATE_DIR" "$LOG_DIR"
+        start_service reth \
+          --log "$LOG_DIR/reth.log" \
+          --wait-port "$RETH_RPC_PORT" \
+          --timeout 60 \
+          -- \
+          reth node \
+            --dev \
+            --datadir "$RETH_STATE_DIR" \
+            --http \
+            --http.addr "127.0.0.1" \
+            --http.port "$RETH_RPC_PORT"
 
         # Dev/test should not depend on the supervisor (production-only).
         # Start MinIO directly for local development.
@@ -88,6 +108,29 @@
       useDeps = true;
       script = ''
         exec cargo run -p mfm-rest-api --bin mfm_rest_api -- "$@"
+      '';
+    };
+
+    contracts_build = {
+      description = "Build Solidity contracts via Foundry";
+      api = {
+        version = 1;
+        summary = "Build contracts (forge build)";
+        details = "Compiles contracts using Foundry (`forge build`) and writes artifacts to `contracts/out`.";
+        usage = [
+          "nix run .#contracts_build"
+          "nix run .#contracts_build -- --sizes"
+        ];
+        category = "core";
+      };
+      env = { };
+      useDeps = true;
+      script = ''
+        if ! command -v forge >/dev/null 2>&1; then
+          echo "ERROR: forge binary not found in PATH." >&2
+          exit 1
+        fi
+        exec forge build "$@"
       '';
     };
   };

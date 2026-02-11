@@ -213,6 +213,39 @@ mfm_cli run start
 mfm_cli run start --op-config-json '{"message":"hello"}'
 ```
 
+### `run pipeline start`
+
+Starts a run from a full pipeline JSON payload.
+
+**Usage:**
+```sh
+mfm_cli run pipeline start --pipeline-json '<PIPELINE_JSON>' [OPTIONS]
+```
+
+**Key Options:**
+- `--pipeline-json <JSON>`: Required. Full `mfm_sdk::pipeline::Pipeline` JSON.
+- `--input-json <JSON>`: Optional pipeline input payload (default: `{}`).
+- `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`).
+- `--artifact-root <PATH>`: Artifact store root directory (default: `$MFM_ARTIFACT_ROOT` or `~/.mfm/run_artifacts`).
+
+**Example:**
+```sh
+mfm_cli run pipeline start \
+  --pipeline-json '{"machine_id":"proof","pipeline_version":"v1","steps":[{"step_id":"main","op_id":"proof","op_version":"v1","op_config":{}}]}'
+```
+
+### `run pipeline deploy-configure-validate`
+
+Starts a standard 3-step pipeline:
+1. `evm_deploy`
+2. `evm_configure`
+3. `evm_validate`
+
+**Usage:**
+```sh
+mfm_cli run pipeline deploy-configure-validate --spec-json '<SPEC_JSON>' [OPTIONS]
+```
+
 ### `run resume`
 
 Resumes an existing run by id (executes any remaining states).

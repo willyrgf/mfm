@@ -1,0 +1,15 @@
+[package]
+name = "mfm-op-evm-write"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+hex = { workspace = true }
+alloy-primitives = { workspace = true }
+mfm-machine = { path = "../../machine" }
+mfm-sdk = { path = "../../sdk" }
+mfm-collectors-evm = { path = "../../collectors/evm" }

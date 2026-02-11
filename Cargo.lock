@@ -1879,6 +1879,7 @@ dependencies = [
  "mfm-event-store-postgres",
  "mfm-machine",
  "mfm-op-evm-read",
+ "mfm-op-evm-write",
  "mfm-op-keystore",
  "mfm-op-nix-app",
  "mfm-op-proof",
@@ -2026,6 +2027,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-op-evm-write"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "async-trait",
+ "hex",
+ "mfm-collectors-evm",
+ "mfm-machine",
+ "mfm-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mfm-op-keystore"
 version = "0.1.0"
 dependencies = [
@@ -2070,6 +2086,7 @@ dependencies = [
  "mfm-event-store-postgres",
  "mfm-machine",
  "mfm-op-evm-read",
+ "mfm-op-evm-write",
  "mfm-op-nix-app",
  "mfm-op-proof",
  "mfm-sdk",

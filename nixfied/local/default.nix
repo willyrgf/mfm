@@ -70,6 +70,29 @@
             category = "supervisor";
           };
         };
+
+      mkDevApp =
+        {
+          name,
+          summary,
+          details,
+          usage ? [ "nix run .#${name}" ],
+          script,
+        }:
+        lib.appApi.mkNixfiedApp {
+          inherit name script;
+          env = {
+            "${envVar}" = "dev";
+          };
+          useDeps = true;
+          api = {
+            version = 1;
+            summary = summary;
+            details = details;
+            usage = usage;
+            category = "core";
+          };
+        };
     in
     {
       jq_fmt_example = mkExampleApp {
@@ -115,7 +138,8 @@
               "rest_api:$REST_API_PORT" \
               "postgres:$POSTGRES_PORT" \
               "minio:$MINIO_PORT" \
-              "minio_console:$MINIO_CONSOLE_PORT"
+              "minio_console:$MINIO_CONSOLE_PORT" \
+              "reth_rpc:$RETH_RPC_PORT"
             do
               name="''${spec%%:*}"
               port="''${spec##*:}"
@@ -155,6 +179,74 @@
 
           run_hook SUPERVISOR_STOP
           run_hook SUPERVISOR_START_DAEMON
+        '';
+      };
+
+      reth-up = mkDevApp {
+        name = "reth-up";
+        summary = "Start local reth (dev)";
+        details = "Starts a local reth dev node for the current slot and leaves it running in the background.";
+        script = ''
+          set -euo pipefail
+          eval "$($SLOT_INFO)"
+
+          if ! command -v reth >/dev/null 2>&1; then
+            echo "ERROR: reth binary not found in PATH." >&2
+            exit 1
+          fi
+
+          RETH_STATE_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/mfm/reth-$SLOT-$ENV"
+          mkdir -p "$RETH_STATE_DIR" "$LOG_DIR"
+          pid=$(start_service reth \
+            --log "$LOG_DIR/reth.log" \
+            --wait-port "$RETH_RPC_PORT" \
+            --timeout 60 \
+            -- \
+            reth node \
+              --dev \
+              --datadir "$RETH_STATE_DIR" \
+              --http \
+              --http.addr "127.0.0.1" \
+              --http.port "$RETH_RPC_PORT")
+          echo "reth started: pid=$pid rpc=http://127.0.0.1:$RETH_RPC_PORT"
+        '';
+      };
+
+      reth-down = mkDevApp {
+        name = "reth-down";
+        summary = "Stop local reth (dev)";
+        details = "Stops local reth listeners bound to the current slot RPC port.";
+        script = ''
+          set -euo pipefail
+          eval "$($SLOT_INFO)"
+
+          pids=$(lsof -tiTCP:"$RETH_RPC_PORT" -sTCP:LISTEN -n -P 2>/dev/null || true)
+          if [ -z "$pids" ]; then
+            echo "reth is not running on port $RETH_RPC_PORT"
+            exit 0
+          fi
+
+          for pid in $pids; do
+            echo "stopping reth pid=$pid"
+            kill -TERM "$pid" 2>/dev/null || true
+          done
+        '';
+      };
+
+      reth-status = mkDevApp {
+        name = "reth-status";
+        summary = "Show local reth status (dev)";
+        details = "Reports whether reth is listening on the current slot RPC port.";
+        script = ''
+          set -euo pipefail
+          eval "$($SLOT_INFO)"
+
+          pids=$(lsof -tiTCP:"$RETH_RPC_PORT" -sTCP:LISTEN -n -P 2>/dev/null || true)
+          if [ -n "$pids" ]; then
+            echo "UP: reth_rpc port=$RETH_RPC_PORT pid=$pids"
+          else
+            echo "DOWN: reth_rpc port=$RETH_RPC_PORT"
+          fi
         '';
       };
     };

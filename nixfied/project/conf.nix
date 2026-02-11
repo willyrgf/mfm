@@ -62,6 +62,24 @@ let
         pkgs.rustfmt
         pkgs.clippy
       ];
+
+  foundryPackage =
+    if pkgs != null && pkgs ? foundry then
+      pkgs.foundry
+    else if pkgs != null && pkgs ? foundry-bin then
+      pkgs.foundry-bin
+    else
+      null;
+
+  rethPackage =
+    if pkgs != null && pkgs ? reth then
+      pkgs.reth
+    else
+      null;
+
+  evmToolPackages =
+    (if foundryPackage != null then [ foundryPackage ] else [ ])
+    ++ (if rethPackage != null then [ rethPackage ] else [ ]);
 in
 rec {
   project = {
@@ -99,6 +117,7 @@ rec {
     postgres = 5432;
     minio = 9000;
     minio_console = 9001;
+    reth_rpc = 8545;
   };
 
   # Base data directory for per-slot/per-env state
@@ -117,6 +136,7 @@ rec {
       pkgs.minio
     ]
     ++ rustToolchainPackages
+    ++ evmToolPackages
     ++ [ cargoNightly ];
     devShellPackages = runtimePackages;
     devShellHook = ''

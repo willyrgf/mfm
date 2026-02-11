@@ -98,6 +98,7 @@
         steps = [
           "parity-postgres"
           "parity-s3"
+          "parity-reth"
         ];
       };
     };
@@ -185,6 +186,57 @@
 
           LOGFILE=$(artifact_path "parity-s3.log")
           log_capture "$LOGFILE" -- cargo nextest run -p mfm-artifact-store-s3 --features parity-tests
+        '';
+      };
+
+      parity-reth = {
+        description = "Parity: local reth JSON-RPC lane";
+        requires = [ "postgres" ];
+        run = ''
+          eval "$($SLOT_INFO)"
+          run_hook POSTGRES_FULL_START_TEST
+
+          if ! command -v reth >/dev/null 2>&1; then
+            fail "reth binary not available"
+          fi
+
+          export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
+          export MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_RPC_PORT"
+
+          if [ -f foundry.toml ]; then
+            if ! command -v forge >/dev/null 2>&1; then
+              fail "forge binary not available"
+            fi
+
+            FORGE_LOGFILE=$(artifact_path "forge-build.log")
+            if ! log_capture "$FORGE_LOGFILE" -- forge build --offline; then
+              echo "WARN: forge build failed in parity lane; continuing without blocking reth RPC parity checks" >&2
+            fi
+          fi
+
+          RETH_DATA_DIR=$(mktemp -d "/tmp/mfm-reth-$SLOT-$ENV-XXXXXX")
+          with_cleanup "rm -rf \"$RETH_DATA_DIR\""
+
+          RETH_LOGFILE=$(artifact_path "reth.log")
+          RETH_PID=$(start_service reth \
+            --log "$RETH_LOGFILE" \
+            --wait-port "$RETH_RPC_PORT" \
+            --timeout 60 \
+            -- \
+            reth node \
+              --dev \
+              --datadir "$RETH_DATA_DIR" \
+              --http \
+              --http.addr "127.0.0.1" \
+              --http.port "$RETH_RPC_PORT")
+          with_cleanup "stop_service $RETH_PID reth"
+
+          LOGFILE=$(artifact_path "parity-reth.log")
+          log_capture "$LOGFILE" -- \
+            cargo run -p mfm --bin mfm_cli -- --output-format json run start \
+              --op-id evm_read \
+              --op-version v1 \
+              --op-config-json '{"include_chain_id":true,"include_block_number":true}'
         '';
       };
     };
