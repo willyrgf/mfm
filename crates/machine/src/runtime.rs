@@ -1005,6 +1005,7 @@ mod tests {
             context_checkpointing: crate::config::ContextCheckpointing::AfterEveryState,
             replay_missing_fact_retryable: false,
             skip_tags: Vec::new(),
+            nix_flake_allowlist: crate::config::default_nix_flake_allowlist(),
         }
     }
 

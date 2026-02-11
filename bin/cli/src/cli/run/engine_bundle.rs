@@ -11,6 +11,7 @@ use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
+use mfm_machine::nix_exec_transport::NixFlakeTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
 use mfm_op_evm_read::EvmReadOp;
 use mfm_op_nix_app::NixAppOp;
@@ -100,6 +101,10 @@ pub(super) fn make_engine_bundle() -> EngineBundle {
     routes.insert(
         "exec".to_string(),
         Arc::new(ExecProgramTransportFactory::default()),
+    );
+    routes.insert(
+        "nix".to_string(),
+        Arc::new(NixFlakeTransportFactory::default()),
     );
     routes.insert("evm".to_string(), evm_factory);
 

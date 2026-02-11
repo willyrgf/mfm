@@ -8,10 +8,12 @@
 //! - Errors MUST NOT echo stdout/stderr or request payloads (avoid accidental secret leakage).
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use nix::unistd::{access, AccessFlags};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
@@ -24,6 +26,8 @@ pub const NAMESPACE_EXEC: &str = "exec";
 
 const CODE_EXEC_REQUEST_INVALID: &str = "exec_request_invalid";
 const CODE_EXEC_PROGRAM_NOT_ALLOWED: &str = "exec_program_not_allowed";
+const CODE_EXEC_PROGRAM_MISSING: &str = "exec_program_missing";
+const CODE_EXEC_PROGRAM_NOT_EXECUTABLE: &str = "exec_program_not_executable";
 const CODE_EXEC_SPAWN_FAILED: &str = "exec_spawn_failed";
 const CODE_EXEC_STDIN_WRITE_FAILED: &str = "exec_stdin_write_failed";
 const CODE_EXEC_TIMEOUT: &str = "exec_timeout";
@@ -169,6 +173,28 @@ fn program_allowed(policy: &ExecPolicy, program_path: &str) -> bool {
         .any(|p| program_path.starts_with(p))
 }
 
+fn ensure_program_accessible(program_path: &str) -> Result<(), IoError> {
+    let path = Path::new(program_path);
+
+    access(path, AccessFlags::F_OK).map_err(|_| {
+        IoError::Other(info(
+            CODE_EXEC_PROGRAM_MISSING,
+            ErrorCategory::Unknown,
+            "program_path does not exist",
+        ))
+    })?;
+
+    access(path, AccessFlags::X_OK).map_err(|_| {
+        IoError::Other(info(
+            CODE_EXEC_PROGRAM_NOT_EXECUTABLE,
+            ErrorCategory::Unknown,
+            "program_path is not executable",
+        ))
+    })?;
+
+    Ok(())
+}
+
 #[async_trait]
 impl LiveIoTransport for ExecProgramTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
@@ -181,6 +207,8 @@ impl LiveIoTransport for ExecProgramTransport {
                 "program_path is not allowed by policy",
             )));
         }
+
+        ensure_program_accessible(&req.program_path)?;
 
         let stdin_bytes = serde_json::to_vec(&req.stdin_json).map_err(|_| {
             IoError::Other(info(
@@ -352,6 +380,34 @@ mod tests {
 
         match err {
             IoError::Other(info) => assert_eq!(info.code.0, CODE_EXEC_PROGRAM_NOT_ALLOWED),
+            other => panic!("expected Other, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_program_path_even_if_allowlisted() {
+        let factory = ExecProgramTransportFactory::new(ExecPolicy {
+            allow_prefixes: vec!["/nix/store/".to_string()],
+        });
+        let mut t = factory.make(env());
+
+        let err = t
+            .call(IoCall {
+                namespace: "exec".to_string(),
+                request: serde_json::json!({
+                    "kind": "run_program_v1",
+                    "program_path": "/nix/store/does-not-exist/bin/app",
+                    "argv": [],
+                    "stdin_json": {},
+                    "timeout_ms": 10
+                }),
+                fact_key: None,
+            })
+            .await
+            .expect_err("expected error");
+
+        match err {
+            IoError::Other(info) => assert_eq!(info.code.0, CODE_EXEC_PROGRAM_MISSING),
             other => panic!("expected Other, got: {other:?}"),
         }
     }

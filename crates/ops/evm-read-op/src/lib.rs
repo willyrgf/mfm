@@ -256,6 +256,7 @@ mod tests {
             context_checkpointing: ContextCheckpointing::AfterEveryState,
             replay_missing_fact_retryable: false,
             skip_tags: Vec::new(),
+            nix_flake_allowlist: mfm_machine::config::default_nix_flake_allowlist(),
         }
     }
 

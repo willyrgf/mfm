@@ -30,6 +30,7 @@ use mfm_machine::ids::{ArtifactId, ContextKey, ErrorCode, RunId};
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
+use mfm_machine::nix_exec_transport::NixFlakeTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
 use mfm_machine::stores::{ArtifactStore, EventStore};
 use mfm_op_evm_read::EvmReadOp;
@@ -272,6 +273,7 @@ fn default_run_config() -> RunConfig {
         context_checkpointing: ContextCheckpointing::AfterEveryState,
         replay_missing_fact_retryable: false,
         skip_tags: Vec::new(),
+        nix_flake_allowlist: mfm_machine::config::default_nix_flake_allowlist(),
     }
 }
 
@@ -353,6 +355,10 @@ pub fn make_engine_bundle() -> EngineBundle {
     routes.insert(
         "exec".to_string(),
         Arc::new(ExecProgramTransportFactory::default()),
+    );
+    routes.insert(
+        "nix".to_string(),
+        Arc::new(NixFlakeTransportFactory::default()),
     );
     routes.insert("evm".to_string(), evm_factory);
 

@@ -2,236 +2,257 @@
 
 ## Goal
 
-Enable an MFM state to execute an external implementation in a reproducible environment, producing a JSON result that can be written into the MFM context and passed to subsequent states, while preserving the `REDESIGN.md` Milestone 1 invariants:
+Enable an MFM state to execute an external implementation in a reproducible environment,
+producing a JSON result that can be written into MFM context and consumed by later states,
+while preserving `REDESIGN.md` Milestone 1 invariants:
 
-- No ambient IO (states must not do direct network/FS/process IO).
-- Live mode records deterministic facts as artifacts; Replay mode reuses recorded facts.
-- Canonical JSON (no floats) for hashed/persisted structured data.
-- No secrets persisted (manifests, events, artifacts, snapshots, error details).
-- Resume correctness via kernel attempt envelopes.
+- No ambient IO in state logic.
+- Live mode records deterministic facts; Replay mode reuses recorded facts.
+- Canonical JSON for persisted structured data (no floats).
+- No secrets in persisted surfaces.
+- Resume correctness through attempt envelopes and fact reuse.
 
-This supports use cases like generating configuration, producing a transaction signature, or performing a deterministic computation using tooling not implemented in Rust.
+This version adds a **real preflight path for flake apps** such as:
 
-## Non-Goal (v1)
+- `github:willyrgf/mfm#jq_fmt_example`
 
-- v1 does not implement a full `nix run` / `nix flake check` workflow from inside the runtime.
-- v1 does not depend on invoking the `nix` CLI.
-- v1 does not attempt to use the `nix-rust/nix` crate as a Nix package-manager interface (it is POSIX/syscall bindings).
+so users can understand that the app may be hosted outside the current working repository.
 
-## Key Design Choice
+## What Is Implemented
 
-Because we want reproducibility but must avoid invoking the `nix` CLI, v1 executes a pinned Nix store program path, typically:
+The codebase now supports a two-step model for `nix_app`:
 
-- `program_path = "/nix/store/<hash>-pkg/bin/<app>"`
+1. Resolve and validate a Nix app ref (optional) via `nix.exec`.
+2. Execute the resolved pinned program path via `exec`.
 
-This is reproducible because the Nix store path is content-addressed by Nix, and MFM will record the execution result as a fact payload artifact.
+Relevant implementation points:
 
-Future milestones can add a "realize if missing" backend via Nix daemon protocol/bindings (still without CLI).
+- `crates/ops/nix-app-op/src/lib.rs`
+- `crates/machine/src/nix_exec_transport.rs`
+- `crates/machine/src/exec_transport.rs`
 
-## Where It Fits (REDESIGN.md-aligned)
+Runtime wiring (CLI + REST API) routes both namespace groups:
 
-We do not change the runtime/planner core types. We add:
+- `nix` -> `NixFlakeTransportFactory`
+- `exec` -> `ExecProgramTransportFactory`
 
-1. A generic `State` implementation: `NixAppState` (external program state).
-2. A dedicated operation: `nix_app` which expands deterministically to a `StateGraph` containing `NixAppState`.
-3. A `LiveIoTransportFactory` backend that supports an IO namespace (e.g. `"exec"`), so:
-   - states use `io.call(...)`
-   - live execution is recorded as facts
-   - replay returns recorded facts
+## Design Overview
 
-This leverages existing `mfm-machine` concepts:
+### `nix_app` state input modes
 
-- `IoCall` / `IoProvider` for live/replay
-- `FactKey` for recording/replay
-- context snapshots via staged writes (`StagedContext`)
-- secrets scanning + redaction rules
+`nix_app` accepts exactly one source of executable:
 
-## External App Protocol (stdin JSON -> stdout JSON)
+1. `program_path` mode (direct store path)
+2. `app` mode (flake app reference)
 
-### Contract (external implementation)
+Validation rules:
 
-- Reads exactly one JSON object from `stdin`.
-- Writes exactly one JSON value to `stdout` (typically an object).
-- Writes logs to `stderr` (not persisted by MFM).
-- Exit code:
-  - `0`: success
-  - non-`0`: failure (mapped to `StateError`)
+- exactly one of `program_path` or `app`
+- `program_path` must start with `/nix/store/`
+- `app` must be non-empty and contain `#`
 
-### Request schema (example)
+### Two-phase execution
 
-```json
-{
-  "mfm": {
-    "run_id": "...",
-    "state_id": "machine.step.run",
-    "op_path": "machine.step",
-    "attempt": 0,
-    "io_mode": "live"
-  },
-  "input": { "...": "..." }
-}
-```
+If configured with `app`:
 
-### Response schema (example)
+1. Call `io.call(namespace="nix.exec")` with `resolve_flake_app_v1`.
+2. Receive `{ "program_path": "/nix/store/.../bin/..." }`.
+3. Call `io.call(namespace="exec")` with `run_program_v1`.
+
+If configured with `program_path`, step 1 is skipped.
+
+Both IO calls include explicit `fact_key`, so live/replay behavior is deterministic.
+
+## IO Contracts
+
+### Namespace: `nix.exec`
+
+Request (`kind = resolve_flake_app_v1`):
 
 ```json
 {
-  "ok": true,
-  "result": { "...": "..." },
-  "meta": { "warnings": [] }
+  "kind": "resolve_flake_app_v1",
+  "app": "github:willyrgf/mfm#jq_fmt_example",
+  "timeout_ms": 300000
 }
 ```
 
-### Persisted-surface constraints
+Response:
 
-- The response must be valid JSON.
-- If recorded as a fact payload artifact and/or written into context snapshots:
-  - must be canonical-JSON hashable (no floats)
-  - must not contain secrets (enforced by existing secret scanning)
+```json
+{
+  "program_path": "/nix/store/<hash>-jq-<ver>/bin/jq"
+}
+```
 
-## IO Integration (facts + replay)
+Live behavior:
 
-### Namespace
+- policy-check app ref prefix using `manifest.run_config.nix_flake_allowlist`
+  - default allowlist includes `github:willyrgf/mfm`
+- parse flake ref and app fragment
+- resolve app program via `nix eval --raw <flake>#apps.<system>.<name>.program`
+  - if fragment is already `apps.<system>.<name>`, use it directly
+  - if fragment ends with `.program`, use it directly
+- verify resolved path starts with `/nix/store/`
+- run `nix build --no-link <program_path>` to ensure it is realized/compiling
+- return `program_path`
 
-Use a single namespace, e.g. `namespace = "exec"`.
+Replay behavior:
 
-### Exec request payload (typed)
+- return previously recorded payload for the `fact_key`
+- fail with `MissingFact` if absent
 
-`IoCall.request` encodes:
+### Namespace: `exec`
+
+Request (`kind = run_program_v1`):
 
 ```json
 {
   "kind": "run_program_v1",
   "program_path": "/nix/store/.../bin/app",
-  "argv": ["--flag", "x"],
-  "stdin_json": { "...": "..." },
+  "argv": ["-S", "."],
+  "stdin_json": {"b": 1, "a": 2},
   "timeout_ms": 300000,
-  "env": { "SAFE_VAR": "value" }
+  "env": {}
 }
 ```
 
-### Fact key stability
+Response:
 
-`NixAppState` MUST provide an explicit `fact_key` so:
+- arbitrary JSON value parsed from stdout
 
-- Live mode records the response deterministically.
-- Replay mode can return the recorded result without re-running.
+Live behavior:
 
-Recommended derivation:
+- policy-check program path prefix (`/nix/store/` by default)
+- preflight executable checks using Rust `nix` crate (`access(F_OK|X_OK)`)
+- execute program and parse stdout JSON
 
-- Canonicalize the exec request (excluding attempt).
-- Hash it (e.g. SHA-256 hex).
-- Build key:
+Replay behavior:
 
-`mfm:exec|state:<state_id>|req:<sha256(canonical_json(request))>`
+- same as any deterministic IO call keyed by fact key
 
-### Live mode behavior
+## Fact Key Strategy
 
-The Live IO transport:
+`nix_app` uses stable keys per request hash:
 
-- executes the program at `program_path`
-- passes `stdin_json` on stdin
-- parses stdout JSON into `IoResult.response`
-- LiveIo records the response as a fact payload artifact keyed by `fact_key`
+- preflight key:
+  - `mfm:nix:preflight|state:<state_id>|req:<sha256(canonical_json(req))>`
+- exec key:
+  - `mfm:exec|state:<state_id>|req:<sha256(canonical_json(req))>`
 
-### Replay mode behavior
+This gives deterministic replay and dedupe semantics across retries/resume.
 
-Replay IO:
-
-- ignores exec details
-- returns the recorded payload for the `fact_key`
-- errors with `MissingFact` if absent (retryable per run config)
-
-## State Behavior (writing outputs into context)
-
-`NixAppState` does:
-
-1. Read selected input keys from context (config controlled).
-2. Build request JSON and call:
-   - `io.call(IoCall { namespace: "exec", request: ..., fact_key: Some(...) })`
-3. Write outputs to context under namespaced keys:
-   - default: `ContextKey("<op_path>.result") = response.result`
-   - optional: `ContextKey("<op_path>.exec_fact_payload_id") = recorded_payload_id`
-   - optional: `ContextKey("<op_path>.meta") = response.meta`
-
-Large payloads should remain as artifacts referenced by id, not duplicated into context.
-
-State meta defaults:
-
-- tag: `EXECUTE`
-- side effects: `ApplySideEffect` (configurable)
-- idempotency: `None` (configurable)
-
-## Operation: `nix_app` (configuration-driven)
-
-Implement an op with:
-
-- `op_id = "nix_app"`
-- `op_version = "v1"`
-
-`op_config` schema:
+## `nix_app` Operation Config
 
 ```json
 {
   "program_path": "/nix/store/.../bin/app",
+  "app": "github:willyrgf/mfm#jq_fmt_example",
   "argv": [],
-  "stdin_from_context": ["machine.step1.some_key"],
-  "write_result_to": "result",
+  "stdin_json": {},
   "timeout_ms": 300000,
-  "side_effects": "apply|readonly|pure",
-  "idempotency_key": "optional-stable-string"
+  "write_result_to": "result"
 }
 ```
 
-`expand()` is deterministic and produces a single state:
+Notes:
 
-- `state_local_id = "run"`
-- `state_id = "<op_path>.run"`
+- `program_path` and `app` are mutually exclusive.
+- `write_result_to` defaults to `result`.
+- state writes stdout JSON into context at `<op_path>.<write_result_to>`.
 
-## Prevalidations (no CLI)
+## Run Policy: `nix_flake_allowlist`
 
-Before execution, validate:
+Flake ref allowlisting is configured at run policy level and persisted in the manifest:
 
-- `program_path` exists
-- `program_path` is executable
-- `program_path` starts with `/nix/store/` (default allowlist; can be extended)
-- timeout is within policy bounds
+- `RunManifest.run_config.nix_flake_allowlist: Vec<String>`
 
-Optional later:
+Example:
 
-- allowlist of env vars using `RunManifest.build.env_allowlist`
+```json
+{
+  "run_config": {
+    "nix_flake_allowlist": [
+      "github:willyrgf/mfm",
+      "path:/absolute/path/to/another/flake"
+    ]
+  }
+}
+```
 
-## Tests
+`nix.exec` resolves allowlist from the current run manifest before validating `app`.
 
-### Fast lane (no Nix required)
+## Real Example: `github:willyrgf/mfm#jq_fmt_example`
 
-- Fake `LiveIoTransport` that returns deterministic JSON.
-- Assertions:
-  - context receives expected keys/values
-  - `fact_key` stability dedupes across retries (no double execution)
+### Flake app
 
-### Parity lane (opt-in, Nix environment)
+The repository exposes a real app:
 
-- Package a tiny external app (echoes input to output).
-- Validate end-to-end:
-  - live run records the output as a fact payload
-  - replay returns the same output without executing
+- `jq_fmt_example` in `nixfied/local/default.nix`
 
-## Assumptions / Defaults (v1)
+Behavior:
 
-- No `nix` CLI invocation.
-- External execution is via pinned `/nix/store/...` program paths.
-- External outputs must be non-secret and canonical-JSON compatible if persisted.
-- "Only apps in this repo flake" is interpreted as: repo tooling produces the store path; MFM runs that store path.
+- reads JSON from stdin
+- writes formatted JSON with sorted keys via `jq -S '.'`
+
+You can run it directly from any repository location:
+
+```bash
+printf '{"b":1,"a":2}' | nix run github:willyrgf/mfm#jq_fmt_example
+```
+
+### `nix_app` config using external flake ref
+
+```json
+{
+  "app": "github:willyrgf/mfm#jq_fmt_example",
+  "argv": [],
+  "stdin_json": {"b": 1, "a": 2},
+  "write_result_to": "result"
+}
+```
+
+Execution flow:
+
+1. `nix.exec` preflight resolves and realizes the app.
+2. `exec` runs the resolved `/nix/store/.../bin/jq`.
+3. Context receives `<op_path>.result` with sorted-key JSON output.
+
+## Preflight Analysis Contract
+
+For `app = github:willyrgf/mfm#jq_fmt_example`, preflight ensures:
+
+1. reference shape is valid (`<flake>#<fragment>`)
+2. app ref is allowlisted by policy
+3. app resolves to a concrete `program` path in `/nix/store/`
+4. the resulting path can be realized/compiled (`nix build --no-link`)
+5. final executable existence/execute-bit is checked before spawn
+
+This is intentionally a **real validity check**, not a string-only validation.
+
+## Security and Invariants
+
+- No stdout/stderr/request echo in transport error messages.
+- Responses recorded as facts must pass existing canonical JSON + secret checks.
+- Replay never re-runs external commands when a fact is present.
+- State logic remains IO-abstracted (`io.call`) with no ambient process calls.
+
+## Non-Goals (Current)
+
+- No support for arbitrary unallowlisted Git refs by default.
+- No broad "execute any flake app from the internet" policy by default.
+- No persisted secrets in manifests/events/artifacts/snapshots.
 
 ## Follow-ups
 
-1. Add a backend to realize a store path via Nix daemon protocol/bindings (no CLI).
-2. Add a v2 config mode that accepts flake app refs (likely requires CLI or deep bindings).
-3. Populate `RunManifest.build.{flake_lock_hash,cargo_lock_hash,rustc_version,target_triple}` automatically in the launcher for stronger provenance.
+1. Add richer preflight diagnostics artifact (sanitized) for operator debugging.
+2. Add optional pinning constraints (e.g., locked rev) for stricter provenance.
+3. Add dedicated parity-lane e2e that resolves `github:willyrgf/mfm#jq_fmt_example` over network.
 
 ## References
 
-- `REDESIGN.md` (v4): execution/runtime contracts and Milestone 1 rules.
-- https://github.com/nix-rust/nix (Unix syscall bindings crate, not a Nix package-manager API)
-
+- `REDESIGN.md` (v4): execution/runtime contracts and Milestone 1 invariants.
+- `crates/machine/src/nix_exec_transport.rs`
+- `crates/machine/src/exec_transport.rs`
+- `crates/ops/nix-app-op/src/lib.rs`
+- `nixfied/local/default.nix`

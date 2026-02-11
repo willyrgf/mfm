@@ -24,6 +24,27 @@
     let
       envVar = project.project.envVar or "PROJECT_ENV";
 
+      mkExampleApp =
+        {
+          name,
+          summary,
+          details,
+          usage ? [ "nix run .#${name}" ],
+          script,
+        }:
+        lib.appApi.mkNixfiedApp {
+          inherit name script;
+          env = { };
+          useDeps = false;
+          api = {
+            version = 1;
+            summary = summary;
+            details = details;
+            usage = usage;
+            category = "examples";
+          };
+        };
+
       mkProdSupervisorApp =
         {
           name,
@@ -51,6 +72,19 @@
         };
     in
     {
+      jq_fmt_example = mkExampleApp {
+        name = "jq_fmt_example";
+        summary = "Format JSON with jq";
+        details = "Reads JSON from stdin and prints formatted JSON (sorted keys) to stdout.";
+        usage = [
+          "printf '{\"b\":1,\"a\":2}' | nix run .#jq_fmt_example"
+          "printf '{\"b\":1,\"a\":2}' | nix run github:willyrgf/mfm#jq_fmt_example"
+        ];
+        script = ''
+          exec ${pkgs.jq}/bin/jq -S '.'
+        '';
+      };
+
       up = mkProdSupervisorApp {
         name = "up";
         summary = "Start all services (prod)";
