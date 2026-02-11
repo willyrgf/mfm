@@ -6,6 +6,8 @@
   postgres ? null,
   nginx ? null,
   minio ? null,
+  reth ? null,
+  helios ? null,
   supervisor ? null,
   ephemeral ? null,
   serviceApis ? { },
@@ -19,7 +21,9 @@ let
     else
       (pkgs.lib.optionalAttrs (postgres != null) { postgres = postgres.publicApi or null; })
       // (pkgs.lib.optionalAttrs (nginx != null) { nginx = nginx.publicApi or null; })
-      // (pkgs.lib.optionalAttrs (minio != null) { minio = minio.publicApi or null; });
+      // (pkgs.lib.optionalAttrs (minio != null) { minio = minio.publicApi or null; })
+      // (pkgs.lib.optionalAttrs (reth != null) { reth = reth.publicApi or null; })
+      // (pkgs.lib.optionalAttrs (helios != null) { helios = helios.publicApi or null; });
   _ = serviceApi.validateServiceApis effectiveServiceApis;
 
   serviceEnv = serviceApi.mkServiceHookEnvFromContract effectiveServiceApis;

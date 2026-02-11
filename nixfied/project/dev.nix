@@ -6,8 +6,8 @@
       description = "Start the dev workflow";
       api = {
         version = 1;
-        summary = "Start the dev workflow (Postgres + REST API)";
-        details = "Starts Postgres, MinIO (S3), and the REST API, then waits (local development).";
+        summary = "Start the dev workflow (Postgres + MinIO + Reth + REST API)";
+        details = "Starts Postgres, MinIO (S3), Reth, and the REST API, then waits (local development).";
         usage = [
           "nix run .#dev"
           "NIX_ENV=1 nix run .#dev"
@@ -37,6 +37,17 @@
           --timeout 60 \
           -- \
           run_hook MINIO_START
+
+        # Use the Reth service module contract and route default EVM RPC to reth.
+        run_hook RETH_INIT
+        run_hook RETH_CHECK_CONFIG
+        start_service reth \
+          --wait-port "$RETH_HTTP_PORT" \
+          --timeout 60 \
+          -- \
+          run_hook RETH_START
+
+        export MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_HTTP_PORT"
 
         start_service rest-api \
           --wait-http "http://127.0.0.1:$REST_API_PORT/v1/health" \

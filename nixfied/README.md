@@ -55,10 +55,12 @@ nix run .#test
 nix run .#build
 nix run .#ci
 nix run .#check
+nix run .#format
 ```
 
 Template defaults are safe no-ops: `dev`, `test`, `build`, and `check` print a
-placeholder and exit 0. The CI pipeline is enabled and runs placeholder steps.
+placeholder and exit 0. `format` runs `nixfmt` over `*.nix` files in the repo.
+The CI pipeline is enabled and runs placeholder steps.
 Replace each command in its file under `nixfied/project/`.
 
 ## App API contract
@@ -81,7 +83,7 @@ commands.dev.api = {
 
 ## Service API contract
 
-For supported services (`postgres`, `nginx`, `minio`), Nixfied enforces a
+For supported services (`postgres`, `nginx`, `minio`, `reth`, `helios`), Nixfied enforces a
 service contract at `module.publicApi` during flake evaluation.
 
 Required shape:
@@ -104,6 +106,8 @@ Examples:
 - `PROJECT_ENV=dev NIX_ENV=0 nix run .#service::postgres::start`
 - `PROJECT_ENV=dev NIX_ENV=0 nix run .#service::nginx::site-add -- example.localhost 127.0.0.1 3000`
 - `PROJECT_ENV=dev NIX_ENV=0 nix run .#service::minio::bucket-list`
+- `PROJECT_ENV=dev NIX_ENV=0 nix run .#service::reth::start`
+- `PROJECT_ENV=dev NIX_ENV=0 nix run .#service::helios::start`
 
 ## Install into an existing repo
 
@@ -237,6 +241,15 @@ nixfied/
       config.nix       # minio config defaults
       lifecycle.nix    # init/start/stop/restart/status/health/check-config
       bucket-management.nix # bucket/policy operations
+    reth/
+      default.nix      # aggregator
+      config.nix       # reth config defaults
+      lifecycle.nix    # init/start/stop/restart/status/health/check-config
+    helios/
+      default.nix      # aggregator
+      package.nix      # vendored helios package wrapper
+      config.nix       # helios config defaults
+      lifecycle.nix    # init/start/stop/restart/status/health/check-config
     supervisor/
       default.nix      # aggregator
       config.nix       # process-compose YAML generation
@@ -255,7 +268,7 @@ nixfied/
     dev.nix            # dev command
     test.nix           # test command
     prod.nix           # build/prod command(s)
-    quality.nix        # check command
+    quality.nix        # check/format commands
     ci.nix             # CI command + pipeline DSL
     default.nix        # merges the files above
 tests/
@@ -307,6 +320,10 @@ ports = {
   postgres = 5432;
   minioApi = 9000;
   minioConsole = 9001;
+  rethHttp = 8545;
+  rethWs = 8546;
+  rethAuth = 8551;
+  heliosRpc = 8547;
 };
 
 directories.base = "${XDG_DATA_HOME:-$HOME/.local/share}/${project.id}";
@@ -326,6 +343,8 @@ supervisor.services = { };
 modules.postgres.enable = false;
 modules.nginx.enable = false;
 modules.minio.enable = false;
+modules.reth.enable = false;
+modules.helios.enable = false;
 
 packages = { };
 ```
@@ -352,7 +371,7 @@ Files by convention:
 - `dev.nix` -> `dev`
 - `test.nix` -> `test`
 - `prod.nix` -> `build`
-- `quality.nix` -> `check`
+- `quality.nix` -> `check`, `format`
 - `ci.nix` -> `ci`
 
 ## Execution environment
@@ -569,6 +588,8 @@ Service apps (when modules are enabled):
 - `service::postgres::<operation>` (for example: `start`, `setup-db`, `backup`, `shell`)
 - `service::nginx::<operation>` (for example: `start`, `site-add`, `site-list`, `cert-renew`)
 - `service::minio::<operation>` (for example: `start`, `bucket-create`, `bucket-list`, `policy-apply`)
+- `service::reth::<operation>` (for example: `start`, `health`, `check-config`)
+- `service::helios::<operation>` (for example: `start`, `health`, `check-config`)
 
 Supervisor apps (when `supervisor.enable = true`):
 - `up`, `down`, `svc-status`, `svc-logs`, `svc-restart`
@@ -690,6 +711,75 @@ run_hook MINIO_INIT
 run_hook MINIO_START
 run_hook MINIO_BUCKET_LIST
 run_hook MINIO_STOP
+```
+
+### Reth
+
+Config:
+
+```nix
+modules.reth = {
+  enable = true;
+  package = pkgs.reth;
+  portKeyHttp = "rethHttp";
+  portKeyWs = "rethWs";
+  portKeyAuth = "rethAuth";
+  dataDirName = "reth";
+  network = "local";
+  devMode = true;
+  extraArgs = [ ];
+};
+```
+
+Hooks:
+- `RETH_INIT`, `RETH_START`, `RETH_STOP`, `RETH_RESTART`
+- `RETH_STATUS`, `RETH_HEALTH`, `RETH_CHECK_CONFIG`
+
+Example:
+
+```bash
+run_hook RETH_INIT
+run_hook RETH_CHECK_CONFIG
+run_hook RETH_START
+run_hook RETH_HEALTH
+run_hook RETH_STOP
+```
+
+### Helios
+
+Config:
+
+```nix
+modules.helios = {
+  enable = true;
+  package = pkgs.callPackage ../.framework/helios/package.nix { };
+  portKeyRpc = "heliosRpc";
+  dataDirName = "helios";
+  network = "local";
+  executionRpcPortKey = "rethHttp";
+  executionRpcUrl = "";
+  consensusRpcUrl = "";
+  checkpoint = "";
+  extraArgs = [ ];
+};
+```
+
+Hooks:
+- `HELIOS_INIT`, `HELIOS_START`, `HELIOS_STOP`, `HELIOS_RESTART`
+- `HELIOS_STATUS`, `HELIOS_HEALTH`, `HELIOS_CHECK_CONFIG`
+
+Note:
+- The vendored default package is a wrapper. Set `HELIOS_BIN` or override
+  `modules.helios.package` to point at a real Helios binary.
+
+Example:
+
+```bash
+run_hook HELIOS_INIT
+run_hook HELIOS_CHECK_CONFIG
+run_hook HELIOS_START
+run_hook HELIOS_HEALTH
+run_hook HELIOS_STOP
 ```
 
 ## Supervisor (process-compose)

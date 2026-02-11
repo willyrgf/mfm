@@ -38,11 +38,25 @@
           else
             null;
 
+        reth =
+          if (project.modules.reth.enable or false) then
+            import ./nixfied/.framework/reth { inherit pkgs project slots; }
+          else
+            null;
+
+        helios =
+          if (project.modules.helios.enable or false) then
+            import ./nixfied/.framework/helios { inherit pkgs project slots; }
+          else
+            null;
+
         serviceApiLib = import ./nixfied/.framework/lib/service-api.nix { inherit pkgs; };
         serviceApis =
           (pkgs.lib.optionalAttrs (postgres != null) { postgres = postgres.publicApi or null; })
           // (pkgs.lib.optionalAttrs (nginx != null) { nginx = nginx.publicApi or null; })
-          // (pkgs.lib.optionalAttrs (minio != null) { minio = minio.publicApi or null; });
+          // (pkgs.lib.optionalAttrs (minio != null) { minio = minio.publicApi or null; })
+          // (pkgs.lib.optionalAttrs (reth != null) { reth = reth.publicApi or null; })
+          // (pkgs.lib.optionalAttrs (helios != null) { helios = helios.publicApi or null; });
         enabledServices = builtins.attrNames serviceApis;
         serviceApisValidated = serviceApiLib.validateEnabledServicesHaveContracts {
           enabledServices = enabledServices;
@@ -63,6 +77,8 @@
             postgres
             nginx
             minio
+            reth
+            helios
             supervisor
             ephemeral
             ;
@@ -170,6 +186,8 @@
                 postgres
                 nginx
                 minio
+                reth
+                helios
                 supervisor
                 ephemeral
                 ;

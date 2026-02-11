@@ -503,7 +503,17 @@ let
           import ./nixfied/.framework/minio { inherit pkgs project slots; }
         else
           null;
-      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots postgres nginx minio; };
+      reth =
+        if (project.modules.reth.enable or false) then
+          import ./nixfied/.framework/reth { inherit pkgs project slots; }
+        else
+          null;
+      helios =
+        if (project.modules.helios.enable or false) then
+          import ./nixfied/.framework/helios { inherit pkgs project slots; }
+        else
+          null;
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots postgres nginx minio reth helios; };
       lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
     in
       let
@@ -525,7 +535,9 @@ let
       unset SLOT_INFO REQUIRE_SLOT_ENV \
         POSTGRES_INIT POSTGRES_START POSTGRES_STOP POSTGRES_SETUP_DB POSTGRES_FULL_START POSTGRES_FULL_START_TEST \
         NGINX_INIT NGINX_START NGINX_STOP NGINX_SITE_PROXY NGINX_SITE_STATIC \
-        MINIO_INIT MINIO_START MINIO_STOP MINIO_HEALTH MINIO_CHECK_CONFIG MINIO_BUCKET_LIST
+        MINIO_INIT MINIO_START MINIO_STOP MINIO_HEALTH MINIO_CHECK_CONFIG MINIO_BUCKET_LIST \
+        RETH_INIT RETH_START RETH_STOP RETH_HEALTH RETH_CHECK_CONFIG \
+        HELIOS_INIT HELIOS_START HELIOS_STOP HELIOS_HEALTH HELIOS_CHECK_CONFIG
       export NIXFIED_TEST_DEBUG=1
       cd "$MOD_DIR" && "$DEV_SCRIPT" >"$DEV_LOG" 2>&1
     )
@@ -648,6 +660,7 @@ let
     run_app_quiet "$INSTALL_TARGET" build
     run_app_quiet "$INSTALL_TARGET" check
     run_app_quiet "$INSTALL_TARGET" ci --summary
+    assert_app_missing "$INSTALL_TARGET" "format"
     assert_app_missing "$INSTALL_TARGET" "framework::install"
     assert_app_missing "$INSTALL_TARGET" "framework::prompt-plan"
     assert_app_missing "$INSTALL_TARGET" "framework::test"
@@ -824,6 +837,7 @@ let
     assert_app_missing "$FILTER_TARGET" "test"
     assert_app_missing "$FILTER_TARGET" "build"
     assert_app_missing "$FILTER_TARGET" "check"
+    assert_app_missing "$FILTER_TARGET" "format"
     run_app_quiet "$FILTER_TARGET" ci --summary
 
     log "installer filter build alias"
@@ -844,6 +858,7 @@ let
     assert_contains "$FILTER_BUILD_HELP" "build  Build artifacts"
     assert_app_missing "$FILTER_BUILD_TARGET" "ci"
     assert_app_missing "$FILTER_BUILD_TARGET" "check"
+    assert_app_missing "$FILTER_BUILD_TARGET" "format"
     run_app_quiet "$FILTER_BUILD_TARGET" build
 
     log "installer invalid filter"
@@ -900,6 +915,7 @@ let
     run_app_quiet "$INSTALL_FORCE" build
     run_app_quiet "$INSTALL_FORCE" check
     run_app_quiet "$INSTALL_FORCE" ci --summary
+    assert_app_missing "$INSTALL_FORCE" "format"
     assert_app_missing "$INSTALL_FORCE" "framework::install"
     assert_app_missing "$INSTALL_FORCE" "framework::prompt-plan"
     assert_app_missing "$INSTALL_FORCE" "framework::test"
@@ -1190,6 +1206,134 @@ let
       echo "Fixture output (last 80 lines):" >&2
       tail -80 "$MINIO_FIX_LOG" >&2 || true
       exit "$MINIO_FIX_RC"
+    fi
+
+    log "reth lifecycle"
+    RETH_FIX_DIR="$WORKDIR/reth-lifecycle"
+    mkdir -p "$RETH_FIX_DIR"
+    RETH_FIX_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      conf = import ./tests/framework/fixtures/modules/conf.nix { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate (pkgs.lib.recursiveUpdate base conf) {
+        modules = {
+          postgres.enable = false;
+          nginx.enable = false;
+          minio.enable = false;
+          helios.enable = false;
+          reth.enable = true;
+        };
+      };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      reth = import ./nixfied/.framework/reth { inherit pkgs project slots; };
+      hooks = import ./nixfied/.framework/hooks.nix {
+        inherit pkgs project slots reth;
+        postgres = null;
+        nginx = null;
+        minio = null;
+        helios = null;
+        supervisor = null;
+      };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+    in
+      lib.mkAppScript {
+        name = "reth-lifecycle-test";
+        env = {
+          "''${project.project.envVar}" = "dev";
+          "''${project.project.slotVar}" = "0";
+        };
+        useDeps = false;
+        script = import ./tests/framework/fixtures/reth/lifecycle.nix {
+          rethInit = toString reth.init;
+          rethStart = toString reth.start;
+          rethStop = toString reth.stop;
+          rethHealth = toString reth.health;
+          rethStatus = toString reth.status;
+          rethCheckConfig = toString reth.checkConfig;
+        };
+      }
+    NIX
+    )
+
+    RETH_FIX_SCRIPT=$(build_expr "$RETH_FIX_EXPR")
+    RETH_FIX_LOG="$WORKDIR/reth-lifecycle.log"
+    set +e
+    (cd "$RETH_FIX_DIR" && "$RETH_FIX_SCRIPT" >"$RETH_FIX_LOG" 2>&1)
+    RETH_FIX_RC=$?
+    set -e
+    if [ "$RETH_FIX_RC" -ne 0 ]; then
+      echo "Reth lifecycle fixture failed (rc=$RETH_FIX_RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 80 lines):" >&2
+      tail -80 "$RETH_FIX_LOG" >&2 || true
+      exit "$RETH_FIX_RC"
+    fi
+
+    log "helios lifecycle"
+    HELIOS_FIX_DIR="$WORKDIR/helios-lifecycle"
+    mkdir -p "$HELIOS_FIX_DIR"
+    HELIOS_FIX_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      conf = import ./tests/framework/fixtures/modules/conf.nix { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate (pkgs.lib.recursiveUpdate base conf) {
+        modules = {
+          postgres.enable = false;
+          nginx.enable = false;
+          minio.enable = false;
+          reth.enable = false;
+          helios.enable = true;
+        };
+      };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      helios = import ./nixfied/.framework/helios { inherit pkgs project slots; };
+      hooks = import ./nixfied/.framework/hooks.nix {
+        inherit pkgs project slots helios;
+        postgres = null;
+        nginx = null;
+        minio = null;
+        reth = null;
+        supervisor = null;
+      };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+    in
+      lib.mkAppScript {
+        name = "helios-lifecycle-test";
+        env = {
+          "''${project.project.envVar}" = "dev";
+          "''${project.project.slotVar}" = "0";
+        };
+        useDeps = false;
+        script = import ./tests/framework/fixtures/helios/lifecycle.nix {
+          heliosInit = toString helios.init;
+          heliosStart = toString helios.start;
+          heliosStop = toString helios.stop;
+          heliosHealth = toString helios.health;
+          heliosStatus = toString helios.status;
+          heliosCheckConfig = toString helios.checkConfig;
+        };
+      }
+    NIX
+    )
+
+    HELIOS_FIX_SCRIPT=$(build_expr "$HELIOS_FIX_EXPR")
+    HELIOS_FIX_LOG="$WORKDIR/helios-lifecycle.log"
+    set +e
+    (cd "$HELIOS_FIX_DIR" && "$HELIOS_FIX_SCRIPT" >"$HELIOS_FIX_LOG" 2>&1)
+    HELIOS_FIX_RC=$?
+    set -e
+    if [ "$HELIOS_FIX_RC" -ne 0 ]; then
+      echo "Helios lifecycle fixture failed (rc=$HELIOS_FIX_RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 80 lines):" >&2
+      tail -80 "$HELIOS_FIX_LOG" >&2 || true
+      exit "$HELIOS_FIX_RC"
     fi
 
     log "supervisor management"
@@ -1496,19 +1640,25 @@ let
         modules.postgres.enable = true;
         modules.nginx.enable = true;
         modules.minio.enable = true;
+        modules.reth.enable = true;
+        modules.helios.enable = true;
       };
       slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
       postgres = import ./nixfied/.framework/postgres { inherit pkgs project slots; };
       nginx = import ./nixfied/.framework/nginx { inherit pkgs project slots; };
       minio = import ./nixfied/.framework/minio { inherit pkgs project slots; };
+      reth = import ./nixfied/.framework/reth { inherit pkgs project slots; };
+      helios = import ./nixfied/.framework/helios { inherit pkgs project slots; };
       supervisor = import ./nixfied/.framework/supervisor { inherit pkgs project slots; };
       serviceApis = {
         postgres = postgres.publicApi;
         nginx = nginx.publicApi;
         minio = minio.publicApi;
+        reth = reth.publicApi;
+        helios = helios.publicApi;
       };
       hooks = import ./nixfied/.framework/hooks.nix {
-        inherit pkgs project slots postgres nginx minio supervisor serviceApis;
+        inherit pkgs project slots postgres nginx minio reth helios supervisor serviceApis;
       };
       lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
       moduleApps = import ./nixfied/.framework/internal/module-apps.nix {
@@ -1523,6 +1673,8 @@ let
     assert_contains "$MODAPP_NAMES_FILE" "service::postgres::start"
     assert_contains "$MODAPP_NAMES_FILE" "service::nginx::start"
     assert_contains "$MODAPP_NAMES_FILE" "service::minio::start"
+    assert_contains "$MODAPP_NAMES_FILE" "service::reth::start"
+    assert_contains "$MODAPP_NAMES_FILE" "service::helios::start"
     assert_contains "$MODAPP_NAMES_FILE" "up"
     assert_contains "$MODAPP_NAMES_FILE" "check-ports"
 
@@ -1537,19 +1689,25 @@ let
         modules.postgres.enable = true;
         modules.nginx.enable = true;
         modules.minio.enable = true;
+        modules.reth.enable = true;
+        modules.helios.enable = true;
       };
       slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
       postgres = import ./nixfied/.framework/postgres { inherit pkgs project slots; };
       nginx = import ./nixfied/.framework/nginx { inherit pkgs project slots; };
       minio = import ./nixfied/.framework/minio { inherit pkgs project slots; };
+      reth = import ./nixfied/.framework/reth { inherit pkgs project slots; };
+      helios = import ./nixfied/.framework/helios { inherit pkgs project slots; };
       supervisor = import ./nixfied/.framework/supervisor { inherit pkgs project slots; };
       serviceApis = {
         postgres = postgres.publicApi;
         nginx = nginx.publicApi;
         minio = minio.publicApi;
+        reth = reth.publicApi;
+        helios = helios.publicApi;
       };
       hooks = import ./nixfied/.framework/hooks.nix {
-        inherit pkgs project slots postgres nginx minio supervisor serviceApis;
+        inherit pkgs project slots postgres nginx minio reth helios supervisor serviceApis;
       };
       lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
       moduleApps = import ./nixfied/.framework/internal/module-apps.nix {
@@ -1684,6 +1842,12 @@ let
     if grep -q "service::minio::start" "$MODAPP_DISABLED_FILE"; then
       fail "service::minio::start should not be present when minio is disabled"
     fi
+    if grep -q "service::reth::start" "$MODAPP_DISABLED_FILE"; then
+      fail "service::reth::start should not be present when reth is disabled"
+    fi
+    if grep -q "service::helios::start" "$MODAPP_DISABLED_FILE"; then
+      fail "service::helios::start should not be present when helios is disabled"
+    fi
     assert_contains "$MODAPP_DISABLED_FILE" "check-ports"
     assert_contains "$MODAPP_DISABLED_FILE" "ports"
 
@@ -1699,19 +1863,25 @@ let
           postgres.enable = true;
           nginx.enable = true;
           minio.enable = true;
+          reth.enable = true;
+          helios.enable = true;
         };
       };
       slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
       postgres = import ./nixfied/.framework/postgres { inherit pkgs project slots; };
       nginx = import ./nixfied/.framework/nginx { inherit pkgs project slots; };
       minio = import ./nixfied/.framework/minio { inherit pkgs project slots; };
+      reth = import ./nixfied/.framework/reth { inherit pkgs project slots; };
+      helios = import ./nixfied/.framework/helios { inherit pkgs project slots; };
       serviceApis = {
         postgres = postgres.publicApi;
         nginx = nginx.publicApi;
         minio = minio.publicApi;
+        reth = reth.publicApi;
+        helios = helios.publicApi;
       };
       hooks = import ./nixfied/.framework/hooks.nix {
-        inherit pkgs project slots postgres nginx minio serviceApis;
+        inherit pkgs project slots postgres nginx minio reth helios serviceApis;
         supervisor = null;
       };
       names = builtins.attrNames hooks.env;
@@ -1721,6 +1891,8 @@ let
           builtins.substring 0 9 n == "POSTGRES_"
           || builtins.substring 0 6 n == "NGINX_"
           || builtins.substring 0 6 n == "MINIO_"
+          || builtins.substring 0 5 n == "RETH_"
+          || builtins.substring 0 7 n == "HELIOS_"
         ) names;
     in
       pkgs.writeText "service-hooks" (builtins.concatStringsSep "\n" (
@@ -1740,6 +1912,8 @@ let
     assert_contains "$SERVICE_HOOKS_FILE" "NGINX_START="
     assert_contains "$SERVICE_HOOKS_FILE" "MINIO_START="
     assert_contains "$SERVICE_HOOKS_FILE" "MINIO_BUCKET_LIST="
+    assert_contains "$SERVICE_HOOKS_FILE" "RETH_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "HELIOS_START="
     assert_contains "$SERVICE_HOOKS_FILE" "/nix/store/"
 
     log "supervisor hooks"

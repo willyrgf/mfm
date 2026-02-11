@@ -100,6 +100,7 @@
           "parity-postgres"
           "parity-s3"
           "parity-evm-reth"
+          "parity-evm-helios-smoke"
         ];
       };
     };
@@ -196,6 +197,7 @@
         requires = [
           "postgres"
           "minio"
+          "reth"
         ];
         run = ''
           eval "$($SLOT_INFO)"
@@ -225,37 +227,70 @@
           export MFM_S3_PREFIX="mfm-artifacts"
           run_hook MINIO_BUCKET_CREATE "$MFM_S3_BUCKET"
 
-          # Start a real local reth dev node for deploy/configure/validate flow.
+          # Start reth via the Nixfied service module contract.
+          run_hook RETH_INIT
+          run_hook RETH_CHECK_CONFIG
           RETH_LOGFILE=$(artifact_path "reth.log")
-          RETH_DATADIR=$(artifact_path "reth-datadir")
-          rm -rf "$RETH_DATADIR"
           RETH_PID=$(start_service reth \
             --log "$RETH_LOGFILE" \
-            --wait-port "$RETH_RPC_PORT" \
+            --wait-port "$RETH_HTTP_PORT" \
             --timeout 60 \
             -- \
-            reth node --dev --http --http.addr 127.0.0.1 --http.port "$RETH_RPC_PORT" --datadir "$RETH_DATADIR")
+            run_hook RETH_START)
           with_cleanup "stop_service $RETH_PID reth"
+          with_cleanup "run_hook RETH_STOP"
+          run_hook RETH_HEALTH
 
-          # Wait until JSON-RPC responds.
-          for i in $(seq 1 60); do
-            if curl -fsS \
-              -H 'content-type: application/json' \
-              --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
-              "http://127.0.0.1:$RETH_RPC_PORT" >/dev/null; then
-              break
-            fi
-            if [ "$i" -eq 60 ]; then
-              echo "reth JSON-RPC did not become ready in time" >&2
-              exit 1
-            fi
-            sleep 1
-          done
-
-          export MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_RPC_PORT"
+          export MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_HTTP_PORT"
 
           LOGFILE=$(artifact_path "parity-evm-reth.log")
           log_capture "$LOGFILE" -- cargo nextest run -p mfm-rest-api --features parity-tests --test parity_evm_reth_pipeline
+        '';
+      };
+
+      parity-evm-helios-smoke = {
+        description = "Parity: Helios lifecycle and RPC smoke over reth execution";
+        requires = [
+          "reth"
+          "helios"
+        ];
+        run = ''
+          eval "$($SLOT_INFO)"
+
+          run_hook RETH_INIT
+          run_hook RETH_CHECK_CONFIG
+          RETH_LOGFILE=$(artifact_path "reth-helios.log")
+          RETH_PID=$(start_service reth \
+            --log "$RETH_LOGFILE" \
+            --wait-port "$RETH_HTTP_PORT" \
+            --timeout 60 \
+            -- \
+            run_hook RETH_START)
+          with_cleanup "stop_service $RETH_PID reth"
+          with_cleanup "run_hook RETH_STOP"
+
+          run_hook HELIOS_INIT
+          run_hook HELIOS_CHECK_CONFIG
+          HELIOS_LOGFILE=$(artifact_path "helios.log")
+          HELIOS_PID=$(start_service helios \
+            --log "$HELIOS_LOGFILE" \
+            --wait-port "$HELIOS_RPC_PORT" \
+            --timeout 60 \
+            -- \
+            run_hook HELIOS_START)
+          with_cleanup "stop_service $HELIOS_PID helios"
+          with_cleanup "run_hook HELIOS_STOP"
+
+          run_hook RETH_HEALTH
+          run_hook HELIOS_HEALTH
+
+          LOGFILE=$(artifact_path "parity-evm-helios-smoke.log")
+          curl -fsS \
+            -H 'content-type: application/json' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+            "http://127.0.0.1:$HELIOS_RPC_PORT" \
+            | tee "$LOGFILE" \
+            | jq -e '.result | strings' >/dev/null
         '';
       };
     };

@@ -130,7 +130,10 @@ rec {
     postgres = 5432;
     minio = 9000;
     minio_console = 9001;
-    reth_rpc = 8545;
+    rethHttp = 8545;
+    rethWs = 8546;
+    rethAuth = 8551;
+    heliosRpc = 8547;
   };
 
   # Base data directory for per-slot/per-env state
@@ -235,6 +238,30 @@ rec {
       rootUser = "minio";
       rootPassword = "minio123456";
       browser = true;
+    };
+    reth = {
+      enable = true;
+      package = if pkgs != null then pkgs.reth else null;
+      portKeyHttp = "rethHttp";
+      portKeyWs = "rethWs";
+      portKeyAuth = "rethAuth";
+      dataDirName = "reth";
+      network = "local";
+      devMode = true;
+      extraArgs = [ ];
+    };
+    helios = {
+      enable = true;
+      # Keep the framework wrapper default package and source the real binary
+      # from HELIOS_BIN (or PATH) where Helios workflows are executed.
+      portKeyRpc = "heliosRpc";
+      dataDirName = "helios";
+      network = "local";
+      executionRpcPortKey = "rethHttp";
+      executionRpcUrl = "";
+      consensusRpcUrl = "";
+      checkpoint = "";
+      extraArgs = [ ];
     };
   };
 
