@@ -3,11 +3,14 @@ Vendored Framework
 
 This repository vendors the Nixfied framework under `nixfied/`.
 
-Framework-owned (overwritten on `framework::upgrade`):
+Framework source revision (install/upgrade):
+- 3d85a19cc0ea8eb2da5e410fbb082176edbc9124
+
+Framework-owned (overwritten on framework::upgrade):
 - flake.nix, flake.lock
 - nixfied/.framework/
 
-User-owned (preserved on `framework::upgrade` by default):
+User-owned (preserved on framework::upgrade by default):
 - nixfied/project/ (primary customization surface)
 - nixfied/local/ (extensions: extra apps/packages/devShells)
 

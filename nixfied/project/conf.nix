@@ -91,6 +91,8 @@ rec {
     # Keep per-slot ports disjoint even when multiple port roles are adjacent
     # (e.g. MinIO data port + console port).
     stride = 100;
+    # New Nixfied default-slot behavior: unset NIX_ENV resolves to this slot.
+    default = 0;
   };
 
   # Port roles (keys become <KEY>_PORT in slot scripts)

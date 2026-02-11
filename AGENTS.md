@@ -164,7 +164,7 @@ Prefer editing `nixfied/project/` and `nixfied/local/` (not `flake.nix` or frame
 Environment variables you should expect:
 
 - `MFM_ENV`: environment name (`dev|test|prod`).
-- `NIX_ENV`: slot number (0-9) for disjoint ports when running multiple local instances.
+- `NIX_ENV`: slot number (0-9) for disjoint ports when running multiple local instances (defaults to `0` when unset).
 
 ## Common Contribution Types
 

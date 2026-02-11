@@ -97,7 +97,7 @@ Generated service apps are exposed as:
 
 Generated service hooks (`<SERVICE>_<OPERATION>`) and service apps share the
 same launcher path:
-- both enforce explicit slot/env via `REQUIRE_SLOT_ENV`
+- both enforce explicit env and resolve slot via `REQUIRE_SLOT_ENV` (slot defaults to `0` when unset)
 - both forward CLI arguments to the underlying operation script
 
 Examples:
@@ -116,15 +116,17 @@ nix run github:willyrgf/nixfied#framework::install
 
 Safety behavior:
 - Installs into the `nixfied` branch (creates it from your current HEAD if missing).
-- If you are on another branch, it switches to `nixfied` before writing files
+- By default, if you are on another branch, it switches to `nixfied` before writing files
   (refuses to switch if the working tree is dirty unless `--force`).
+- With `--force` (and without `--worktree`), install/upgrade run on your current branch
+  instead of switching to `nixfied`.
 - It installs only `flake.nix`, `flake.lock`, and `nixfied/`.
 - Customize your project in `nixfied/project/` and `nixfied/local/` (avoid editing framework code).
 
 Vendoring boundaries (relevant for upgrades):
 - Framework-owned (overwritten on `framework::upgrade`): `flake.nix`, `flake.lock`, `nixfied/.framework/`.
 - User-owned (preserved on `framework::upgrade`): `nixfied/project/` and `nixfied/local/`.
-- Canonical doc: `nixfied/VENDORED.txt`.
+- Canonical doc: `nixfied/VENDORED.txt` (includes the framework source revision used by install/upgrade).
 
 Force overwrite:
 
@@ -152,6 +154,8 @@ Upgrade an existing install (upgrades framework files, preserves `nixfied/projec
 cd my-app
 nix run github:willyrgf/nixfied#framework::upgrade -- --force
 ```
+
+With `--force` (and without `--worktree`), upgrade runs in your current branch.
 
 To overwrite project templates during upgrade:
 
@@ -289,6 +293,12 @@ envs = {
   test = { offset = 20; };
 };
 
+slots = {
+  max = 9;
+  stride = 1;
+  default = 0; # used when NIX_ENV is unset
+};
+
 ports = {
   backend = 3000;
   frontend = 3100;
@@ -358,7 +368,7 @@ Every command is wrapped by framework lib helpers and gets:
 ## Slots, environments, and ports
 
 - `PROJECT_ENV` selects the environment (`dev`, `test`, `prod`).
-- `NIX_ENV` selects the slot (0-9).
+- `NIX_ENV` selects the slot (0-9, defaults to `0` if unset).
 
 Ports are computed as:
 
@@ -369,8 +379,8 @@ computed_port = base_port + slot + env_offset
 `nixfied/.framework/slots.nix` exposes helper scripts:
 - `SLOT_INFO` prints `SLOT`, `ENV`, `BASE_DIR`, `LOG_DIR`, `RUN_DIR`,
   `CONFIG_DIR`, `STATE_DIR`, and all computed ports.
-- `REQUIRE_SLOT_ENV` validates env/slot and hard-fails if `PROJECT_ENV` or
-  `NIX_ENV` are missing.
+- `REQUIRE_SLOT_ENV` validates env/slot and hard-fails if `PROJECT_ENV` is
+  missing or if slot/env values are invalid.
 
 Example usage:
 
@@ -566,9 +576,10 @@ Supervisor apps (when `supervisor.enable = true`):
 Utility apps (always available):
 - `check-ports`, `ports`
 
-All module apps and supervisor apps require explicit slot/env selection.
-Set both `PROJECT_ENV` and `NIX_ENV` before running `up`, `down`, `svc-*`,
-or any `service::<service>::<operation>` app.
+All module apps and supervisor apps require explicit env selection.
+Set `PROJECT_ENV` before running `up`, `down`, `svc-*`, or any
+`service::<service>::<operation>` app. `NIX_ENV` is optional and defaults to
+slot `0` when unset (an `INFO:` line is printed when the default is used).
 
 ## Run registry
 

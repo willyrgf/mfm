@@ -85,6 +85,17 @@
             ;
         };
         isFramework = builtins.pathExists ./nixfied/.framework/.workspace;
+        frameworkRevision =
+          let
+            dirtyRev = if self ? dirtyRev then self.dirtyRev else null;
+            rev = if self ? rev then self.rev else null;
+          in
+          if dirtyRev != null then
+            dirtyRev
+          else if rev != null then
+            rev
+          else
+            "unknown";
 
         installApps =
           if isFramework then
@@ -94,6 +105,7 @@
                 lib
                 ;
               frameworkRoot = ./.;
+              inherit frameworkRevision;
             }
           else
             { };

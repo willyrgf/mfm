@@ -11,6 +11,14 @@ let
   slotsCfg = cfg.slots or { };
   slotMax = slotsCfg.max or 9;
   slotStride = slotsCfg.stride or 1;
+  slotDefaultRaw = slotsCfg.default or 0;
+  slotDefault =
+    if !(builtins.isInt slotDefaultRaw) then
+      throw "slots.default must be an integer 0-${toString slotMax} (got type ${builtins.typeOf slotDefaultRaw})"
+    else if slotDefaultRaw < 0 || slotDefaultRaw > slotMax then
+      throw "slots.default must be 0-${toString slotMax} (got ${toString slotDefaultRaw})"
+    else
+      slotDefaultRaw;
 
   envOffsets = builtins.mapAttrs (name: envCfg: envCfg.offset or 0) (cfg.envs or { });
   envNames = builtins.attrNames envOffsets;
@@ -83,7 +91,7 @@ let
     ENV_VAR="${envVar}"
 
     if [ -z "''${!ENV_VAR:-}" ]; then
-      echo "ERROR: $ENV_VAR must be set (example: ${slotVar}=0 $ENV_VAR=${defaultEnv})" >&2
+      echo "ERROR: $ENV_VAR must be set (example: ${slotVar}=${toString slotDefault} $ENV_VAR=${defaultEnv})" >&2
       exit 1
     fi
 
@@ -100,7 +108,7 @@ let
     esac
   '';
 
-  # Read and validate explicit slot value
+  # Read and validate slot value (defaults when unset)
   resolveSlot = pkgs.writeShellScript "resolve-slot" ''
     set -eo pipefail
     SLOT_VAR="${slotVar}"
@@ -112,8 +120,8 @@ let
     fi
 
     if [ -z "''${!SLOT_VAR:-}" ]; then
-      echo "ERROR: $SLOT_VAR must be set (example: $SLOT_VAR=0 ${envVar}=${defaultEnv})" >&2
-      exit 1
+      export "$SLOT_VAR"="${toString slotDefault}"
+      echo "INFO: default slot selected slot_var=$SLOT_VAR slot=${toString slotDefault}" >&2
     fi
 
     SLOT_VALUE="''${!SLOT_VAR}"
@@ -123,7 +131,7 @@ let
         exit 1
         ;;
       "")
-        echo "ERROR: $SLOT_VAR must be set (example: $SLOT_VAR=0 ${envVar}=${defaultEnv})" >&2
+        echo "ERROR: $SLOT_VAR must be set (example: $SLOT_VAR=${toString slotDefault} ${envVar}=${defaultEnv})" >&2
         exit 1
         ;;
       *)
@@ -139,7 +147,7 @@ let
     exit 0
   '';
 
-  # Validate explicit slot/env and emit eval-able variables
+  # Validate slot/env and emit eval-able variables
   requireSlotEnv = pkgs.writeShellScript "require-slot-env" ''
     set -eo pipefail
     SLOT_VAR="${slotVar}"

@@ -597,6 +597,8 @@ let
     assert_file_absent "$INSTALL_TARGET/NIXFIED_PROMPT_PLAN.md"
     assert_file_exists "$INSTALL_TARGET/nixfied/local/default.nix"
     assert_file_exists "$INSTALL_TARGET/nixfied/README.md"
+    assert_file_exists "$INSTALL_TARGET/nixfied/VENDORED.txt"
+    assert_contains "$INSTALL_TARGET/nixfied/VENDORED.txt" "Framework source revision"
 
     log "installer worktree"
     INSTALL_WT_BASE="$WORKDIR/install-worktree"
@@ -751,6 +753,7 @@ let
     assert_contains "$INSTALL_TARGET/nixfied/local/default.nix" "NIXFIED_LOCAL_UPGRADE_TEST_MARKER"
     assert_file_absent "$INSTALL_TARGET/nixfied/.framework/.workspace"
     assert_file_exists "$INSTALL_TARGET/nixfied/README.md"
+    assert_contains "$INSTALL_TARGET/nixfied/VENDORED.txt" "Framework source revision"
 
     log "framework marker toggle"
     mkdir -p "$INSTALL_TARGET/nixfied/.framework"
@@ -761,6 +764,9 @@ let
     FRAMEWORK_INSTALL_HELP="$WORKDIR/framework-install-help.txt"
     run_app "$INSTALL_TARGET" "framework::install" --help > "$FRAMEWORK_INSTALL_HELP"
     assert_contains "$FRAMEWORK_INSTALL_HELP" "framework::install"
+    FRAMEWORK_UPGRADE_HELP="$WORKDIR/framework-upgrade-help.txt"
+    run_app "$INSTALL_TARGET" "framework::upgrade" --help > "$FRAMEWORK_UPGRADE_HELP"
+    assert_contains "$FRAMEWORK_UPGRADE_HELP" "framework::upgrade"
     PROMPT_PLAN_OUT="$WORKDIR/prompt-plan-disabled.md"
     assert_file_absent "$PROMPT_PLAN_OUT"
     PROMPT_PLAN_LOG="$WORKDIR/prompt-plan-disabled.log"
@@ -820,6 +826,26 @@ let
     assert_app_missing "$FILTER_TARGET" "check"
     run_app_quiet "$FILTER_TARGET" ci --summary
 
+    log "installer filter build alias"
+    INSTALL_FILTER_BUILD="$WORKDIR/install-filter-build"
+    init_repo "$INSTALL_FILTER_BUILD"
+    (cd "$INSTALL_FILTER_BUILD" && nix run "path:$ROOT"#framework::install -- --filter=conf,build >/dev/null)
+    FILTER_BUILD_TARGET="$INSTALL_FILTER_BUILD"
+    assert_file_exists "$FILTER_BUILD_TARGET/nixfied/project/prod.nix"
+    assert_file_absent "$FILTER_BUILD_TARGET/nixfied/project/dev.nix"
+    assert_file_absent "$FILTER_BUILD_TARGET/nixfied/project/test.nix"
+    assert_file_absent "$FILTER_BUILD_TARGET/nixfied/project/quality.nix"
+    assert_file_absent "$FILTER_BUILD_TARGET/nixfied/project/ci.nix"
+    if ! grep -q "prod.nix" "$FILTER_BUILD_TARGET/nixfied/project/default.nix"; then
+      fail "default.nix should include prod.nix when filtered with build alias"
+    fi
+    FILTER_BUILD_HELP="$WORKDIR/filter-build-help.txt"
+    run_app "$FILTER_BUILD_TARGET" help > "$FILTER_BUILD_HELP"
+    assert_contains "$FILTER_BUILD_HELP" "build  Build artifacts"
+    assert_app_missing "$FILTER_BUILD_TARGET" "ci"
+    assert_app_missing "$FILTER_BUILD_TARGET" "check"
+    run_app_quiet "$FILTER_BUILD_TARGET" build
+
     log "installer invalid filter"
     INSTALL_BAD_FILTER="$WORKDIR/install-bad-filter"
     init_repo "$INSTALL_BAD_FILTER"
@@ -837,13 +863,28 @@ let
     INSTALL_FORCE="$WORKDIR/force_nixified"
     init_repo "$INSTALL_FORCE"
     mkdir -p "$INSTALL_FORCE/nixfied"
+    FORCE_BRANCH_BEFORE=$(git -C "$INSTALL_FORCE" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
     (cd "$INSTALL_FORCE" && nix run "path:$ROOT"#framework::install -- --force >/dev/null)
+    FORCE_BRANCH_AFTER=$(git -C "$INSTALL_FORCE" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    if [ "$FORCE_BRANCH_AFTER" != "$FORCE_BRANCH_BEFORE" ]; then
+      fail "expected --force install to keep branch '$FORCE_BRANCH_BEFORE' (got: $FORCE_BRANCH_AFTER)"
+    fi
     assert_file_exists "$INSTALL_FORCE/flake.nix"
     if [ ! -d "$INSTALL_FORCE/nixfied" ]; then
       fail "expected nixfied/ directory in force target"
     fi
     assert_file_absent "$INSTALL_FORCE/nixfied/.framework/.workspace"
     assert_file_absent "$INSTALL_FORCE/NIXFIED_PROMPT_PLAN.md"
+
+    log "upgrade force keeps current branch"
+    echo "# NIXFIED_FORCE_UPGRADE_TEST_MARKER" >> "$INSTALL_FORCE/nixfied/project/conf.nix"
+    FORCE_UPGRADE_BRANCH_BEFORE=$(git -C "$INSTALL_FORCE" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    (cd "$INSTALL_FORCE" && nix run "path:$ROOT"#framework::upgrade -- --force >/dev/null)
+    FORCE_UPGRADE_BRANCH_AFTER=$(git -C "$INSTALL_FORCE" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    if [ "$FORCE_UPGRADE_BRANCH_AFTER" != "$FORCE_UPGRADE_BRANCH_BEFORE" ]; then
+      fail "expected --force upgrade to keep branch '$FORCE_UPGRADE_BRANCH_BEFORE' (got: $FORCE_UPGRADE_BRANCH_AFTER)"
+    fi
+    assert_contains "$INSTALL_FORCE/nixfied/project/conf.nix" "NIXFIED_FORCE_UPGRADE_TEST_MARKER"
 
     log "example project apps (force install)"
     FORCE_HELP="$WORKDIR/force-help.txt"
@@ -1544,15 +1585,16 @@ let
     fi
     assert_contains "$STRICT_UP_MISSING_ENV_LOG" "PROJECT_ENV must be set"
 
-    STRICT_UP_MISSING_SLOT_LOG="$WORKDIR/strict-up-missing-slot.log"
+    STRICT_REQUIRE_MISSING_SLOT_LOG="$WORKDIR/strict-require-missing-slot.log"
     set +e
-    PROJECT_ENV=dev "$STRICT_UP_SCRIPT" > "$STRICT_UP_MISSING_SLOT_LOG" 2>&1
+    PROJECT_ENV=dev "$STRICT_REQUIRE_SLOT_ENV_SCRIPT" > "$STRICT_REQUIRE_MISSING_SLOT_LOG" 2>&1
     RC=$?
     set -e
-    if [ "$RC" -eq 0 ]; then
-      fail "expected up app to fail when NIX_ENV is missing"
+    if [ "$RC" -ne 0 ]; then
+      fail "expected REQUIRE_SLOT_ENV to default NIX_ENV when missing"
     fi
-    assert_contains "$STRICT_UP_MISSING_SLOT_LOG" "NIX_ENV must be set"
+    assert_contains "$STRICT_REQUIRE_MISSING_SLOT_LOG" "INFO: default slot selected"
+    assert_contains "$STRICT_REQUIRE_MISSING_SLOT_LOG" "SLOT=0"
 
     STRICT_PG_MISSING_ENV_LOG="$WORKDIR/strict-pg-list-missing-env.log"
     set +e
