@@ -933,11 +933,6 @@ pub mod live_io;
 /// Not part of the stable API contract (Appendix C.1).
 pub mod exec_transport;
 
-/// Unstable live IO transport for Nix flake app resolution (`nix` namespace group).
-///
-/// Not part of the stable API contract (Appendix C.1).
-pub mod nix_exec_transport;
-
 /// Unstable Live IO transport router (namespace dispatch).
 ///
 /// Not part of the stable API contract (Appendix C.1).

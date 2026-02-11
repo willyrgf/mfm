@@ -18,13 +18,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::process::Command;
 
-use crate::config::RunManifest;
-use crate::errors::{ErrorCategory, ErrorInfo, IoError};
-use crate::events::{Event, KernelEvent};
-use crate::ids::ErrorCode;
-use crate::io::IoCall;
-use crate::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
-use crate::stores::{ArtifactStore, EventStore};
+use mfm_machine::config::RunManifest;
+use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
+use mfm_machine::events::{Event, KernelEvent};
+use mfm_machine::ids::ErrorCode;
+use mfm_machine::io::IoCall;
+use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
+use mfm_machine::stores::{ArtifactStore, EventStore};
 
 pub const NAMESPACE_NIX_EXEC: &str = "nix.exec";
 
@@ -90,7 +90,7 @@ struct NixFlakeTransport {
     fallback_policy: NixFlakePolicy,
     events: Arc<dyn EventStore>,
     artifacts: Arc<dyn ArtifactStore>,
-    run_id: crate::ids::RunId,
+    run_id: mfm_machine::ids::RunId,
     resolved_policy: Option<NixFlakePolicy>,
 }
 
@@ -203,8 +203,8 @@ fn parse_resolve_request(call: &IoCall) -> Result<ResolveFlakeAppV1, IoError> {
 }
 
 fn run_started_manifest_id(
-    stream: &[crate::events::EventEnvelope],
-) -> Option<crate::ids::ArtifactId> {
+    stream: &[mfm_machine::events::EventEnvelope],
+) -> Option<mfm_machine::ids::ArtifactId> {
     for e in stream {
         if let Event::Kernel(KernelEvent::RunStarted { manifest_id, .. }) = &e.event {
             return Some(manifest_id.clone());
@@ -372,16 +372,16 @@ impl LiveIoTransport for NixFlakeTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
+    use async_trait::async_trait;
+    use mfm_machine::config::{
         BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
         RetryPolicy, RunConfig, RunManifest,
     };
-    use crate::engine::Stores;
-    use crate::errors::StorageError;
-    use crate::events::{Event, EventEnvelope, KernelEvent};
-    use crate::ids::{ArtifactId, OpId, RunId, StateId};
-    use crate::stores::{ArtifactKind, ArtifactStore, EventStore};
-    use async_trait::async_trait;
+    use mfm_machine::engine::Stores;
+    use mfm_machine::errors::StorageError;
+    use mfm_machine::events::{Event, EventEnvelope, KernelEvent};
+    use mfm_machine::ids::{ArtifactId, OpId, RunId, StateId};
+    use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -510,7 +510,7 @@ mod tests {
             _kind: ArtifactKind,
             bytes: Vec<u8>,
         ) -> Result<ArtifactId, StorageError> {
-            let id = crate::hashing::artifact_id_for_bytes(&bytes);
+            let id = mfm_machine::hashing::artifact_id_for_bytes(&bytes);
             self.blobs.lock().await.insert(id.clone(), bytes);
             Ok(id)
         }

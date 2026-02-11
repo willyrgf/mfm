@@ -4,6 +4,8 @@
 //!
 //! This op expands into a single state that requests external execution via `namespace="exec"`.
 
+pub mod nix_exec_transport;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -313,7 +315,6 @@ mod tests {
     use mfm_machine::io::IoCall;
     use mfm_machine::live_io::{FactIndex, LiveIoTransport, LiveIoTransportFactory};
     use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
-    use mfm_machine::nix_exec_transport::{NixFlakePolicy, NixFlakeTransportFactory};
     use mfm_machine::replay_io::ReplayIo;
     use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
     use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
@@ -324,6 +325,8 @@ mod tests {
         SdkPlanResolver,
     };
     use tokio::sync::Mutex;
+
+    use crate::nix_exec_transport::{NixFlakePolicy, NixFlakeTransportFactory};
 
     fn run_config_live() -> RunConfig {
         RunConfig {
