@@ -76,7 +76,6 @@ Key docs:
 - `bin/cli/README.md`: CLI behavior and JSON output contract.
 - `crates/machine/README.md`: state machine concepts and usage.
 - `crates/machine-derive/README.md`: proc-macro notes.
-- `NIX_STATE_PROPOSAL.md`: Nix/state design notes (may lag code).
 
 ## Architecture Overview
 
