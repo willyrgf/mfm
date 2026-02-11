@@ -292,6 +292,12 @@ Prefer tests that lock in behavior at boundaries:
   - CLI command workflows (happy path + failure modes)
   - state machine execution and recovery
 
+Keep implementation files readable by separating large test suites:
+
+- Avoid growing a single source file with both large implementation and very large `#[cfg(test)]` blocks.
+- For non-trivial test coverage, move tests to separate files (for example, `mod tests;` with `tests.rs`/`tests/*.rs`, or crate-level `tests/`).
+- Keep only small, local smoke tests inline when they materially improve readability near the code under test.
+
 Optional but useful in the right places:
 
 - Property tests for invariants (parsing/validation code).

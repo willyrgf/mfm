@@ -315,11 +315,15 @@ mod tests {
     use mfm_machine::io::IoCall;
     use mfm_machine::live_io::{FactIndex, LiveIoTransport, LiveIoTransportFactory};
     use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
+    use mfm_machine::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta, Tag};
     use mfm_machine::replay_io::ReplayIo;
     use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
+    use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
     use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+    use mfm_sdk::ids::{MachineId, PortKey, StepId};
     use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
-    use mfm_sdk::pipeline::PipelinePlanner;
+    use mfm_sdk::op::{OpIo, Operation};
+    use mfm_sdk::pipeline::{Pipeline, PipelinePlanner, PipelineStep};
     use mfm_sdk::unstable::{
         single_op_pipeline, DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry,
         SdkPlanResolver,
@@ -617,6 +621,90 @@ mod tests {
             _events: Vec<mfm_machine::events::DomainEvent>,
         ) -> Result<(), mfm_machine::errors::RunError> {
             Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct MarkerOp;
+
+    #[derive(Clone, Debug, serde::Deserialize)]
+    struct MarkerConfig {
+        key: String,
+        value: serde_json::Value,
+    }
+
+    struct MarkerState {
+        key: String,
+        value: serde_json::Value,
+    }
+
+    impl Operation for MarkerOp {
+        fn op_id(&self) -> OpId {
+            OpId("marker".to_string())
+        }
+
+        fn op_version(&self) -> String {
+            "v1".to_string()
+        }
+
+        fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, mfm_sdk::errors::SdkError> {
+            let cfg: MarkerConfig = serde_json::from_value(op_config.clone())
+                .map_err(|_| sdk_err("invalid_op_config", "invalid marker op_config"))?;
+            Ok(OpIo {
+                imports: Vec::new(),
+                exports: vec![PortKey(cfg.key)],
+            })
+        }
+
+        fn expand(
+            &self,
+            op_path: OpPath,
+            op_config: &serde_json::Value,
+            _run_config: &RunConfig,
+        ) -> Result<mfm_machine::plan::StateGraph, mfm_sdk::errors::SdkError> {
+            let cfg: MarkerConfig = serde_json::from_value(op_config.clone())
+                .map_err(|_| sdk_err("invalid_op_config", "invalid marker op_config"))?;
+            if cfg.key.trim().is_empty() {
+                return Err(sdk_err("invalid_op_config", "marker key must be non-empty"));
+            }
+
+            let state_id = StateId(format!("{}.write", op_path.0));
+            Ok(mfm_machine::plan::StateGraph {
+                states: vec![mfm_machine::plan::StateNode {
+                    id: state_id,
+                    state: Arc::new(MarkerState {
+                        key: cfg.key,
+                        value: cfg.value,
+                    }),
+                }],
+                edges: Vec::new(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl State for MarkerState {
+        fn meta(&self) -> StateMeta {
+            StateMeta {
+                tags: vec![Tag("marker".to_string())],
+                depends_on: Vec::new(),
+                depends_on_strategy: DependencyStrategy::Latest,
+                side_effects: SideEffectKind::Pure,
+                idempotency: Idempotency::None,
+            }
+        }
+
+        async fn handle(
+            &self,
+            ctx: &mut dyn DynContext,
+            _io: &mut dyn mfm_machine::io::IoProvider,
+            _rec: &mut dyn EventRecorder,
+        ) -> Result<StateOutcome, StateError> {
+            ctx.write(ContextKey(self.key.clone()), self.value.clone())
+                .map_err(|_| state_err("ctx_write_failed", "context write failed"))?;
+            Ok(StateOutcome {
+                snapshot: SnapshotPolicy::OnSuccess,
+            })
         }
     }
 
@@ -920,6 +1008,172 @@ mod tests {
             .or_else(|| snapshot.get("machine.main.result").cloned())
             .or_else(|| snapshot.get("machine.main.machine.main.result").cloned());
         assert_eq!(result, Some(serde_json::json!({"a": 2, "b": 1})));
+
+        std::fs::remove_file(temp_root.join("flake.nix")).expect("remove flake.nix");
+        std::fs::remove_dir(temp_root).expect("remove temp root");
+    }
+
+    #[tokio::test]
+    async fn at_multi_step_pipeline_runs_nix_jq_fmt_example() {
+        if std::process::Command::new("nix")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let nix_bin = std::fs::canonicalize("/nix/var/nix/profiles/default/bin/nix")
+            .expect("resolve nix binary");
+        let system = match std::env::consts::OS {
+            "macos" => format!("{}-darwin", std::env::consts::ARCH),
+            other => format!("{}-{other}", std::env::consts::ARCH),
+        };
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("mfm-nix-multi-{nonce}"));
+        std::fs::create_dir_all(&temp_root).expect("create temp root");
+        let temp_root = temp_root.canonicalize().expect("canonical temp root");
+        let flake_nix = format!(
+            "{{\n  outputs = {{ self }}: {{\n    apps.{system}.jq_fmt_example = {{\n      type = \"app\";\n      program = \"{}\";\n    }};\n  }};\n}}\n",
+            nix_bin.display()
+        );
+        std::fs::write(temp_root.join("flake.nix"), flake_nix).expect("write flake.nix");
+
+        let repo_prefix = format!("path:{}", temp_root.display());
+        let app_ref = format!("{repo_prefix}#jq_fmt_example");
+
+        let mut reg = HashMapOperationRegistry::default();
+        reg.register(Arc::new(MarkerOp));
+        reg.register(Arc::new(NixAppOp));
+        let registry: Arc<dyn mfm_sdk::op::OperationRegistry> = Arc::new(reg);
+
+        let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
+        let pipeline = Pipeline {
+            machine_id: MachineId("nix_multi".to_string()),
+            pipeline_version: "v1".to_string(),
+            steps: vec![
+                PipelineStep {
+                    step_id: StepId("prep".to_string()),
+                    op_id: OpId("marker".to_string()),
+                    op_version: "v1".to_string(),
+                    op_config: serde_json::json!({
+                        "key": "prep",
+                        "value": {"stage": "prep"}
+                    }),
+                },
+                PipelineStep {
+                    step_id: StepId("fmt".to_string()),
+                    op_id: OpId("nix_app".to_string()),
+                    op_version: "v1".to_string(),
+                    op_config: serde_json::json!({
+                        "app": app_ref,
+                        "argv": ["eval", "--json", "--expr", "{ z = 1; a = { y = 2; x = 3; }; }"],
+                        "stdin_json": {"ignored": true},
+                        "timeout_ms": 60000,
+                        "write_result_to": "result"
+                    }),
+                },
+                PipelineStep {
+                    step_id: StepId("post".to_string()),
+                    op_id: OpId("marker".to_string()),
+                    op_version: "v1".to_string(),
+                    op_config: serde_json::json!({
+                        "key": "post",
+                        "value": {"stage": "post"}
+                    }),
+                },
+            ],
+        };
+
+        let resolver = Arc::new(SdkPlanResolver::new(
+            Arc::clone(&registry),
+            Arc::clone(&planner),
+        ));
+
+        let mut routes: HashMap<String, Arc<dyn LiveIoTransportFactory>> = HashMap::new();
+        routes.insert(
+            "exec".to_string(),
+            Arc::new(ExecProgramTransportFactory::new(ExecPolicy {
+                allow_prefixes: vec!["/nix/store/".to_string()],
+            })),
+        );
+        routes.insert(
+            "nix".to_string(),
+            Arc::new(NixFlakeTransportFactory::new(NixFlakePolicy {
+                allow_prefixes: vec![repo_prefix.clone()],
+            })),
+        );
+
+        let factory: Arc<dyn LiveIoTransportFactory> =
+            Arc::new(RouterLiveIoTransportFactory::new(routes));
+        let engine = DefaultExecutionEngine::new(resolver).with_live_transport_factory(factory);
+        let engine: Arc<dyn ExecutionEngine> = Arc::new(engine);
+
+        let stores = Stores {
+            events: Arc::new(MemEventStore::default()),
+            artifacts: Arc::new(MemArtifactStore::default()),
+        };
+
+        let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
+        let cfg = run_config_live_with_allowlist(vec![repo_prefix]);
+
+        let res = launcher
+            .start_pipeline(
+                Arc::clone(&engine),
+                Stores {
+                    events: Arc::clone(&stores.events),
+                    artifacts: Arc::clone(&stores.artifacts),
+                },
+                Arc::clone(&registry),
+                Arc::clone(&planner),
+                LaunchPipeline {
+                    pipeline,
+                    input: serde_json::json!({}),
+                    run_config: cfg,
+                    build: BuildProvenance {
+                        git_commit: None,
+                        cargo_lock_hash: None,
+                        flake_lock_hash: None,
+                        rustc_version: None,
+                        target_triple: None,
+                        env_allowlist: Vec::new(),
+                    },
+                    initial_context: Box::new(MapContext::default()),
+                },
+            )
+            .await
+            .expect("start");
+
+        assert_eq!(res.phase, RunPhase::Completed);
+
+        let final_snapshot_id = res.final_snapshot_id.expect("final snapshot");
+        let bytes = stores
+            .artifacts
+            .get(&final_snapshot_id)
+            .await
+            .expect("get final snapshot");
+        let snapshot = serde_json::from_slice::<serde_json::Value>(&bytes).expect("json snapshot");
+
+        assert_eq!(
+            snapshot.get("nix_multi.prep.prep"),
+            Some(&serde_json::json!({"stage": "prep"}))
+        );
+        let formatted = snapshot
+            .get("nix_multi.fmt.nix_multi.fmt.result")
+            .cloned()
+            .or_else(|| snapshot.get("nix_multi.fmt.result").cloned());
+        assert_eq!(
+            formatted,
+            Some(serde_json::json!({"a": {"x": 3, "y": 2}, "z": 1}))
+        );
+        assert_eq!(
+            snapshot.get("nix_multi.post.post"),
+            Some(&serde_json::json!({"stage": "post"}))
+        );
 
         std::fs::remove_file(temp_root.join("flake.nix")).expect("remove flake.nix");
         std::fs::remove_dir(temp_root).expect("remove temp root");
