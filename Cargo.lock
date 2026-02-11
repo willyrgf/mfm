@@ -1772,9 +1772,9 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "libc"
-version = "0.2.181"
+version = "0.2.180"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "459427e2af2b9c839b132acb702a1c654d95e10f8c326bfc2ad11310e458b1c5"
+checksum = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc"
 
 [[package]]
 name = "libm"
@@ -1879,6 +1879,7 @@ dependencies = [
  "mfm-event-store-postgres",
  "mfm-machine",
  "mfm-op-evm-read",
+ "mfm-op-evm-write",
  "mfm-op-keystore",
  "mfm-op-nix-app",
  "mfm-op-proof",
@@ -1991,6 +1992,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "hex",
+ "nix",
  "rand 0.9.1",
  "ring",
  "serde",
@@ -2025,6 +2027,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-op-evm-write"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "async-trait",
+ "hex",
+ "mfm-collectors-evm",
+ "mfm-machine",
+ "mfm-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mfm-op-keystore"
 version = "0.1.0"
 dependencies = [
@@ -2041,6 +2058,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2068,6 +2086,7 @@ dependencies = [
  "mfm-event-store-postgres",
  "mfm-machine",
  "mfm-op-evm-read",
+ "mfm-op-evm-write",
  "mfm-op-nix-app",
  "mfm-op-proof",
  "mfm-sdk",
@@ -2134,6 +2153,18 @@ dependencies = [
  "libc",
  "wasi 0.11.0+wasi-snapshot-preview1",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "225e7cfe711e0ba79a68baeddb2982723e4235247aefce1482f2f16c27865b66"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]

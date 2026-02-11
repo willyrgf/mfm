@@ -226,6 +226,16 @@ pub mod config {
         /// States with any of these tags may be skipped by the executor.
         /// Common use: skip APPLY_SIDE_EFFECT for dry runs.
         pub skip_tags: Vec<Tag>,
+
+        /// Allowlisted flake prefixes for `nix.exec` preflight resolution.
+        ///
+        /// Example prefix: `github:willyrgf/mfm`.
+        #[serde(default = "default_nix_flake_allowlist")]
+        pub nix_flake_allowlist: Vec<String>,
+    }
+
+    pub fn default_nix_flake_allowlist() -> Vec<String> {
+        vec!["github:willyrgf/mfm".to_string()]
     }
 
     /// Minimal run manifest shape (stored as an artifact; hashed via canonical JSON).

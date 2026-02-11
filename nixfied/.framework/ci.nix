@@ -8,7 +8,6 @@
 
 let
   ci = project.ci or null;
-  commands = project.commands or { };
   enabled = ci != null && (ci.enable or false);
   useEphemeral = ephemeral != null && (ci.useEphemeral or true);
 
@@ -416,7 +415,7 @@ let
     else
       null;
 
-  defaultCiApi = {
+  ciApi = {
     version = 1;
     summary = "Run the CI pipeline";
     details = "Runs the CI pipeline defined in nixfied/project/ci.nix (modes + steps).";
@@ -427,12 +426,6 @@ let
     examples = [ "nix run .#ci -- --summary" ];
     category = "core";
   };
-  projectCiApi =
-    let
-      ciCommand = commands.ci or null;
-    in
-    if ciCommand != null && (ciCommand ? api) then ciCommand.api else null;
-  ciApi = if projectCiApi != null then projectCiApi else defaultCiApi;
   _ = lib.appApi.validateApi {
     name = "ci";
     api = ciApi;

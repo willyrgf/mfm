@@ -1005,7 +1005,14 @@ mod tests {
             context_checkpointing: crate::config::ContextCheckpointing::AfterEveryState,
             replay_missing_fact_retryable: false,
             skip_tags: Vec::new(),
+            nix_flake_allowlist: crate::config::default_nix_flake_allowlist(),
         }
+    }
+
+    fn replay_run_config() -> RunConfig {
+        let mut cfg = base_run_config();
+        cfg.io_mode = crate::config::IoMode::Replay;
+        cfg
     }
 
     async fn store_manifest(artifacts: &dyn ArtifactStore, manifest: &RunManifest) -> ArtifactId {
@@ -1982,6 +1989,32 @@ mod tests {
         }
     }
 
+    struct TrackingTransportFactory {
+        makes: Arc<std::sync::atomic::AtomicU32>,
+        calls: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl LiveIoTransportFactory for TrackingTransportFactory {
+        fn make(&self, _env: crate::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
+            self.makes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::new(TrackingTransport {
+                calls: Arc::clone(&self.calls),
+            })
+        }
+    }
+
+    struct TrackingTransport {
+        calls: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    #[async_trait]
+    impl LiveIoTransport for TrackingTransport {
+        async fn call(&mut self, _call: IoCall) -> Result<serde_json::Value, IoError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(serde_json::json!({ "n": 999 }))
+        }
+    }
+
     #[derive(Clone)]
     struct RecordFactThenFailOnce {
         handled: Arc<std::sync::atomic::AtomicU32>,
@@ -2227,5 +2260,230 @@ mod tests {
         for fr in facts {
             assert!(artifacts.exists(&fr.payload_id).await.expect("exists"));
         }
+    }
+
+    #[tokio::test]
+    async fn replay_mode_serves_recorded_facts_without_live_io() {
+        let events = Arc::new(MemEventStore::default());
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let stores = || Stores {
+            events: events.clone(),
+            artifacts: artifacts.clone(),
+        };
+
+        let run_config = replay_run_config();
+        let manifest = RunManifest {
+            op_id: OpId("op".to_string()),
+            op_version: "0".to_string(),
+            input_params: serde_json::json!({}),
+            run_config: run_config.clone(),
+            build: crate::config::BuildProvenance {
+                git_commit: None,
+                cargo_lock_hash: None,
+                flake_lock_hash: None,
+                rustc_version: None,
+                target_triple: None,
+                env_allowlist: Vec::new(),
+            },
+        };
+        let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+
+        let initial_snapshot_id =
+            write_full_snapshot_value(artifacts.as_ref(), serde_json::json!({}))
+                .await
+                .expect("initial snapshot");
+
+        // Seed a recorded fact so the run can execute without hitting live IO.
+        let payload = serde_json::json!({ "n": 0 });
+        let bytes = crate::hashing::canonical_json_bytes(&payload).expect("canonical payload");
+        let payload_id = artifacts
+            .put(ArtifactKind::FactPayload, bytes)
+            .await
+            .expect("store payload");
+
+        let domain = DomainEvent {
+            name: DOMAIN_EVENT_FACT_RECORDED.to_string(),
+            payload: serde_json::to_value(FactRecorded {
+                key: FactKey("k".to_string()),
+                payload_id,
+                meta: serde_json::json!({}),
+            })
+            .expect("payload"),
+            payload_ref: None,
+        };
+
+        let run_id = RunId(uuid::Uuid::new_v4());
+        events
+            .append(
+                run_id,
+                0,
+                vec![
+                    EventEnvelope {
+                        run_id,
+                        seq: 1,
+                        ts_millis: None,
+                        event: Event::Kernel(KernelEvent::RunStarted {
+                            op_id: manifest.op_id.clone(),
+                            manifest_id: manifest_id.clone(),
+                            initial_snapshot_id: initial_snapshot_id.clone(),
+                        }),
+                    },
+                    EventEnvelope {
+                        run_id,
+                        seq: 2,
+                        ts_millis: None,
+                        event: Event::Domain(domain),
+                    },
+                ],
+            )
+            .await
+            .expect("seed run");
+
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let makes = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let factory: Arc<dyn LiveIoTransportFactory> = Arc::new(TrackingTransportFactory {
+            makes: Arc::clone(&makes),
+            calls: Arc::clone(&calls),
+        });
+
+        let state_id = StateId("machine.main.s1".to_string());
+        let plan = ExecutionPlan {
+            op_id: manifest.op_id.clone(),
+            graph: StateGraph {
+                states: vec![StateNode {
+                    id: state_id,
+                    state: Arc::new(RecordFactAndWriteState),
+                }],
+                edges: Vec::new(),
+            },
+        };
+
+        let resolver = Arc::new(FixedResolver { plan: plan.clone() });
+        let engine = DefaultExecutionEngine::new(resolver).with_live_transport_factory(factory);
+
+        let r = engine.resume(stores(), run_id).await.expect("resume");
+        assert_eq!(r.phase, RunPhase::Completed);
+        assert_eq!(makes.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[derive(Clone)]
+    struct ReplayMissingFactState;
+
+    #[async_trait]
+    impl State for ReplayMissingFactState {
+        fn meta(&self) -> StateMeta {
+            StateMeta {
+                tags: Vec::new(),
+                depends_on: Vec::new(),
+                depends_on_strategy: DependencyStrategy::Latest,
+                side_effects: SideEffectKind::ReadOnlyIo,
+                idempotency: Idempotency::None,
+            }
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &mut dyn DynContext,
+            io: &mut dyn IoProvider,
+            _rec: &mut dyn EventRecorder,
+        ) -> Result<crate::state::StateOutcome, StateError> {
+            let err = io
+                .call(IoCall {
+                    namespace: "test".to_string(),
+                    request: serde_json::json!({"q": 1}),
+                    fact_key: Some(FactKey("k".to_string())),
+                })
+                .await
+                .expect_err("missing fact");
+
+            let info = match err {
+                IoError::MissingFact { info, .. } => info,
+                other => panic!("expected MissingFact, got: {other:?}"),
+            };
+
+            Err(StateError {
+                state_id: None,
+                info,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_mode_missing_fact_fails_without_live_io() {
+        let events = Arc::new(MemEventStore::default());
+        let artifacts = Arc::new(MemArtifactStore::default());
+        let stores = || Stores {
+            events: events.clone(),
+            artifacts: artifacts.clone(),
+        };
+
+        let run_config = replay_run_config();
+        let manifest = RunManifest {
+            op_id: OpId("op".to_string()),
+            op_version: "0".to_string(),
+            input_params: serde_json::json!({}),
+            run_config: run_config.clone(),
+            build: crate::config::BuildProvenance {
+                git_commit: None,
+                cargo_lock_hash: None,
+                flake_lock_hash: None,
+                rustc_version: None,
+                target_triple: None,
+                env_allowlist: Vec::new(),
+            },
+        };
+        let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
+
+        let initial_snapshot_id =
+            write_full_snapshot_value(artifacts.as_ref(), serde_json::json!({}))
+                .await
+                .expect("initial snapshot");
+
+        let run_id = RunId(uuid::Uuid::new_v4());
+        events
+            .append(
+                run_id,
+                0,
+                vec![EventEnvelope {
+                    run_id,
+                    seq: 1,
+                    ts_millis: None,
+                    event: Event::Kernel(KernelEvent::RunStarted {
+                        op_id: manifest.op_id.clone(),
+                        manifest_id: manifest_id.clone(),
+                        initial_snapshot_id,
+                    }),
+                }],
+            )
+            .await
+            .expect("seed run");
+
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let makes = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let factory: Arc<dyn LiveIoTransportFactory> = Arc::new(TrackingTransportFactory {
+            makes: Arc::clone(&makes),
+            calls: Arc::clone(&calls),
+        });
+
+        let state_id = StateId("machine.main.s1".to_string());
+        let plan = ExecutionPlan {
+            op_id: manifest.op_id.clone(),
+            graph: StateGraph {
+                states: vec![StateNode {
+                    id: state_id,
+                    state: Arc::new(ReplayMissingFactState),
+                }],
+                edges: Vec::new(),
+            },
+        };
+
+        let resolver = Arc::new(FixedResolver { plan: plan.clone() });
+        let engine = DefaultExecutionEngine::new(resolver).with_live_transport_factory(factory);
+
+        let r = engine.resume(stores(), run_id).await.expect("resume");
+        assert_eq!(r.phase, RunPhase::Failed);
+        assert_eq!(makes.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

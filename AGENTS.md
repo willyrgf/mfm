@@ -76,7 +76,6 @@ Key docs:
 - `bin/cli/README.md`: CLI behavior and JSON output contract.
 - `crates/machine/README.md`: state machine concepts and usage.
 - `crates/machine-derive/README.md`: proc-macro notes.
-- `NIX_STATE_PROPOSAL.md`: Nix/state design notes (may lag code).
 
 ## Architecture Overview
 
@@ -292,6 +291,12 @@ Prefer tests that lock in behavior at boundaries:
   - keystore persistence and file integrity
   - CLI command workflows (happy path + failure modes)
   - state machine execution and recovery
+
+Keep implementation files readable by separating large test suites:
+
+- Avoid growing a single source file with both large implementation and very large `#[cfg(test)]` blocks.
+- For non-trivial test coverage, move tests to separate files (for example, `mod tests;` with `tests.rs`/`tests/*.rs`, or crate-level `tests/`).
+- Keep only small, local smoke tests inline when they materially improve readability near the code under test.
 
 Optional but useful in the right places:
 

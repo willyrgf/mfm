@@ -1,7 +1,7 @@
 # MFM — Redesign (v4)
 
 > **Purpose**: This document is the design contract for the next MFM architecture.
-> Last updated: 2026-02-09
+> Last updated: 2026-02-11
 > Version: v4 (consolidated contract; resolves v3 internal inconsistencies)
 >
 > It prioritizes **reproducibility, auditability, simplicity, and security**.
@@ -348,7 +348,7 @@ Recommended manifest fields:
 - `input_params` (canonical JSON; no secrets)
 - `config_refs` (content-addressed config files; no secrets)
 - `env_allowlist` + captured env values (only those allowed)
-- `run_config` (retry policy, replay policy, event profile)
+- `run_config` (retry policy, replay policy, event profile, nix flake allowlist)
 - `io_mode` (live / replay)
 
 Additional guidance:
@@ -410,6 +410,49 @@ Errors must carry:
 - category (e.g., network, rpc, parsing, storage)
 - retryability (retryable / non-retryable)
 - optional retry hints (backoff class, recommended delay, etc.)
+
+### 8.5 External program execution via Nix app preflight
+
+Milestone 1 supports external deterministic program execution through `io.call(...)` only
+(no ambient process calls from handlers):
+
+- `nix.exec` namespace group: resolve and preflight a flake app ref.
+- `exec` namespace group: run an already-resolved store program path.
+
+`nix_app` op configuration accepts exactly one source:
+
+- `program_path` mode: direct `/nix/store/...` executable.
+- `app` mode: flake app ref, e.g. `github:willyrgf/mfm#jq_fmt_example`.
+
+Live mode behavior for `app` mode:
+
+1. `nix.exec` call with `kind = resolve_flake_app_v1` and request `{ app, timeout_ms }`.
+2. Validate `app` against `RunConfig.nix_flake_allowlist` (default includes `github:willyrgf/mfm`).
+3. Resolve app program path via `nix eval --raw <flake>#apps.<system>.<name>.program`
+   (or equivalent fragment forms).
+4. Require resolved path under `/nix/store/`.
+5. Realize/compile with `nix build --no-link <store_root>`.
+6. Return `{ "program_path": "/nix/store/.../bin/..." }`.
+7. `exec` call with `kind = run_program_v1` and request
+   `{ program_path, argv, stdin_json, timeout_ms, env }`.
+
+Replay mode behavior:
+
+- both preflight and execution calls are fact-backed via explicit `fact_key`.
+- replay returns recorded payloads or `MissingFact` if absent.
+
+Fact key guidance for deterministic dedupe/replay:
+
+- preflight:
+  - `mfm:nix:preflight|state:<state_id>|req:<sha256(canonical_json(req))>`
+- exec:
+  - `mfm:exec|state:<state_id>|req:<sha256(canonical_json(req))>`
+
+Security constraints:
+
+- request payloads and stdout/stderr MUST NOT be echoed in persisted errors.
+- persisted fact payloads and snapshots remain subject to canonical JSON and secret checks.
+- executable preflight checks MUST verify existence/execute bit before spawn.
 
 ---
 
@@ -994,6 +1037,10 @@ pub mod config {
         /// States with any of these tags may be skipped by the executor.
         /// Common use: skip APPLY_SIDE_EFFECT for dry runs.
         pub skip_tags: Vec<Tag>,
+
+        /// Allowlisted flake prefixes for `nix.exec` preflight resolution.
+        /// Example: `github:willyrgf/mfm`.
+        pub nix_flake_allowlist: Vec<String>,
     }
 
     /// Minimal run manifest shape (stored as an artifact; hashed via canonical JSON).

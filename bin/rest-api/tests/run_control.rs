@@ -144,6 +144,49 @@ async fn start_status_resume_happy_path() {
 }
 
 #[tokio::test]
+async fn start_pipeline_payload_happy_path() {
+    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let artifacts: Arc<dyn ArtifactStore> =
+        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
+
+    let bundle = mfm_rest_api::make_engine_bundle();
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        bundle,
+        events,
+        artifacts,
+    });
+
+    let start = app
+        .clone()
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "pipeline": {
+                    "machine_id": "proof",
+                    "pipeline_version": "v1",
+                    "steps": [
+                        {
+                            "step_id": "main",
+                            "op_id": "proof",
+                            "op_version": "v1",
+                            "op_config": {}
+                        }
+                    ]
+                },
+                "input": {}
+            }),
+        ))
+        .await
+        .expect("start response");
+
+    assert_eq!(start.status(), StatusCode::OK);
+    let start_v = response_json(start).await;
+    assert_eq!(start_v["status"], "success");
+    assert_eq!(start_v["data"]["phase"], "completed");
+}
+
+#[tokio::test]
 async fn artifacts_not_found_is_404() {
     let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");

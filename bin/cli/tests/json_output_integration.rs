@@ -241,6 +241,29 @@ fn test_run_start_json_error_missing_database_url() {
 }
 
 #[test]
+fn test_run_pipeline_start_json_error_missing_database_url() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args([
+            "--output-format",
+            "json",
+            "run",
+            "pipeline",
+            "start",
+            "--pipeline-json",
+            r#"{"machine_id":"proof","pipeline_version":"v1","steps":[{"step_id":"main","op_id":"proof","op_version":"v1","op_config":{}}]}"#,
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "MissingDatabaseUrl");
+}
+
+#[test]
 fn test_run_status_json_error_invalid_uuid() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd

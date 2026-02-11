@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 async-trait = { workspace = true }
 hex = { workspace = true }
+nix = { version = "0.31.1", features = ["fs"] }
 rand = { workspace = true }
 ring = { workspace = true }
 serde = { workspace = true }

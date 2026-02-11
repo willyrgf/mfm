@@ -33,11 +33,13 @@ use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
 use mfm_machine::stores::{ArtifactStore, EventStore};
 use mfm_op_evm_read::EvmReadOp;
+use mfm_op_evm_write::{EvmConfigureOp, EvmDeployOp, EvmValidateOp};
+use mfm_op_nix_app::nix_exec_transport::NixFlakeTransportFactory;
 use mfm_op_nix_app::NixAppOp;
 use mfm_op_proof::ProofOp;
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::op::OperationRegistry;
-use mfm_sdk::pipeline::PipelinePlanner;
+use mfm_sdk::pipeline::{Pipeline, PipelinePlanner};
 use mfm_sdk::unstable::{
     single_op_pipeline, DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry,
     SdkPlanResolver,
@@ -272,6 +274,7 @@ fn default_run_config() -> RunConfig {
         context_checkpointing: ContextCheckpointing::AfterEveryState,
         replay_missing_fact_retryable: false,
         skip_tags: Vec::new(),
+        nix_flake_allowlist: mfm_machine::config::default_nix_flake_allowlist(),
     }
 }
 
@@ -329,6 +332,9 @@ pub fn make_engine_bundle() -> EngineBundle {
     let mut reg = HashMapOperationRegistry::default();
     reg.register(Arc::new(ProofOp::default()));
     reg.register(Arc::new(EvmReadOp));
+    reg.register(Arc::new(EvmDeployOp));
+    reg.register(Arc::new(EvmConfigureOp));
+    reg.register(Arc::new(EvmValidateOp));
     reg.register(Arc::new(NixAppOp));
     let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
 
@@ -353,6 +359,10 @@ pub fn make_engine_bundle() -> EngineBundle {
     routes.insert(
         "exec".to_string(),
         Arc::new(ExecProgramTransportFactory::default()),
+    );
+    routes.insert(
+        "nix".to_string(),
+        Arc::new(NixFlakeTransportFactory::default()),
     );
     routes.insert("evm".to_string(), evm_factory);
 
@@ -400,7 +410,14 @@ async fn not_found() -> (StatusCode, Json<serde_json::Value>) {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct RunsStartRequest {
+#[serde(untagged)]
+pub enum RunsStartRequest {
+    Single(SingleOpStartRequest),
+    Pipeline(PipelineStartRequest),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SingleOpStartRequest {
     #[serde(default = "default_op_id")]
     pub op_id: String,
 
@@ -409,6 +426,17 @@ pub struct RunsStartRequest {
 
     #[serde(default = "default_empty_object")]
     pub op_config: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PipelineStartRequest {
+    pub pipeline: Pipeline,
+
+    #[serde(default = "default_empty_object")]
+    pub input: serde_json::Value,
+
+    #[serde(default)]
+    pub run_config: Option<RunConfig>,
 }
 
 fn default_op_id() -> String {
@@ -436,12 +464,22 @@ async fn runs_start(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
 
-    let pipeline = single_op_pipeline(
-        mfm_machine::ids::OpId(req.op_id),
-        req.op_version,
-        req.op_config,
-    )
-    .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.info.code.0, e.info.message))?;
+    let (pipeline, input, run_config) = match req {
+        RunsStartRequest::Single(req) => {
+            let pipeline = single_op_pipeline(
+                mfm_machine::ids::OpId(req.op_id),
+                req.op_version,
+                req.op_config,
+            )
+            .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.info.code.0, e.info.message))?;
+            (pipeline, serde_json::json!({}), default_run_config())
+        }
+        RunsStartRequest::Pipeline(req) => (
+            req.pipeline,
+            req.input,
+            req.run_config.unwrap_or_else(default_run_config),
+        ),
+    };
 
     let launcher = DefaultRunLauncher;
     let run = launcher
@@ -455,8 +493,8 @@ async fn runs_start(
             Arc::clone(&state.bundle.planner),
             LaunchPipeline {
                 pipeline,
-                input: serde_json::json!({}),
-                run_config: default_run_config(),
+                input,
+                run_config,
                 build: BuildProvenance {
                     git_commit: None,
                     cargo_lock_hash: None,
