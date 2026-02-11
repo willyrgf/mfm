@@ -1,5 +1,7 @@
 .DS_Store
 /target
+/cache
+/contracts/out
 config.yaml
 result
 NIXFIED_PROMPT_PLAN.md

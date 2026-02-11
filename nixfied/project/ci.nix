@@ -55,6 +55,7 @@
       };
       env = {
         "${project.envVar}" = "test";
+        "${project.slotVar}" = "0";
       };
       useDeps = true;
       # Note: `nix run .#ci` is implemented by the framework CI runner (nixfied/.framework/ci.nix),
@@ -68,6 +69,7 @@
     defaultMode = "basic";
     env = {
       "${project.envVar}" = "test";
+      "${project.slotVar}" = "0";
       CARGO_TERM_COLOR = "always";
       RUST_BACKTRACE = "1";
     };

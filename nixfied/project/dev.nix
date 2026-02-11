@@ -20,6 +20,7 @@
       };
       env = {
         "${project.envVar}" = "dev";
+        "${project.slotVar}" = "0";
       };
       useDeps = true;
       script = ''

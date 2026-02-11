@@ -24,6 +24,7 @@
   apps =
     let
       envVar = project.project.envVar or "PROJECT_ENV";
+      slotVar = project.project.slotVar or "NIX_ENV";
 
       mkExampleApp =
         {
@@ -59,6 +60,7 @@
           env = {
             # Enforce: supervisor is production-only.
             "${envVar}" = "prod";
+            "${slotVar}" = "0";
             # process-compose defaults to TUI; disable so daemon mode works in non-TTY contexts.
             PC_DISABLE_TUI = "1";
           };
@@ -84,6 +86,7 @@
           inherit name script;
           env = {
             "${envVar}" = "dev";
+            "${slotVar}" = "0";
           };
           useDeps = true;
           api = {
