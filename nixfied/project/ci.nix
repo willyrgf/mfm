@@ -146,7 +146,8 @@
           eval "$($SLOT_INFO)"
           # parity-postgres starts a real daemon; ensure we stop it so slot reuse is re-entrant.
           with_cleanup "run_hook POSTGRES_STOP"
-          run_hook POSTGRES_FULL_START_TEST
+          # In local CI runs, recover from stale/foreign listeners on the slot test port.
+          AUTO_STOP_CONFLICTING=1 run_hook POSTGRES_FULL_START_TEST
 
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
 
