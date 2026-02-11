@@ -58,7 +58,8 @@
       };
       useDeps = true;
       # Note: `nix run .#ci` is implemented by the framework CI runner (nixfied/.framework/ci.nix),
-      # which reads `project.ci.*` below. This command exists primarily for `nix run .#help`.
+      # which reads `project.ci.*` below. This command exists for `nix run .#help`, and
+      # `commands.ci.api` is the canonical CI docs source mirrored into app metadata.
       script = "";
     };
   };
@@ -144,7 +145,7 @@
         run = ''
           eval "$($SLOT_INFO)"
           # parity-postgres starts a real daemon; ensure we stop it so slot reuse is re-entrant.
-          with_cleanup "PGDATA=\"$POSTGRES_DIR\" run_hook POSTGRES_STOP"
+          with_cleanup "run_hook POSTGRES_STOP"
           run_hook POSTGRES_FULL_START_TEST
 
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
@@ -163,12 +164,13 @@
           # Use the MinIO service module contract in CI parity (without supervisor).
           run_hook MINIO_INIT
           MINIO_LOGFILE=$(artifact_path "minio.log")
+          # Hook and service app launch the same contract-generated operation script.
           MINIO_PID=$(start_service minio \
             --log "$MINIO_LOGFILE" \
             --wait-http "http://127.0.0.1:$MINIO_PORT/minio/health/ready" \
             --timeout 60 \
             -- \
-            "$MINIO_START")
+            run_hook MINIO_START)
           with_cleanup "stop_service $MINIO_PID minio"
 
           export AWS_ACCESS_KEY_ID="minio"

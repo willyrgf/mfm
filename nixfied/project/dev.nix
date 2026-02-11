@@ -36,7 +36,7 @@
           --wait-http "http://127.0.0.1:$MINIO_PORT/minio/health/ready" \
           --timeout 60 \
           -- \
-          "$MINIO_START"
+          run_hook MINIO_START
 
         start_service rest-api \
           --wait-http "http://127.0.0.1:$REST_API_PORT/v1/health" \

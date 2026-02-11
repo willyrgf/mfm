@@ -236,31 +236,31 @@ let
                               RESET_PROJECT=true
                               shift
                               ;;
-                	        --help|-h)
-                	          cat <<'EOF'
-                Usage:
-                  nix run github:willyrgf/nixfied#framework::install [options]
-                  nix run github:willyrgf/nixfied#framework::upgrade [options]
+                            --help|-h)
+                              cat <<'EOF'
+Usage:
+  nix run github:willyrgf/nixfied#framework::install [options]
+  nix run github:willyrgf/nixfied#framework::upgrade [options]
 
-                Install options:
-                  --force                Overwrite existing nix files (flake.nix/flake.lock/nixfied)
-                  --filter=LIST          Fresh install only: install subset of project templates
-                                         (values: conf,dev,test,build,quality,ci; build is an alias of prod.nix)
-                  --worktree             Install into a git worktree for the nixfied branch (keeps current checkout unchanged)
-                  --target=PATH          With --worktree: worktree directory path (default: <repo>_nixfied)
-                  --sync                 Deprecated (no-op); kept for backward compatibility
+Install options:
+  --force                Overwrite existing nix files (flake.nix/flake.lock/nixfied)
+  --filter=LIST          Fresh install only: install subset of project templates
+                         (values: conf,dev,test,build,quality,ci; build is an alias of prod.nix)
+  --worktree             Install into a git worktree for the nixfied branch (keeps current checkout unchanged)
+  --target=PATH          With --worktree: worktree directory path (default: <repo>_nixfied)
+  --sync                 Deprecated (no-op); kept for backward compatibility
 
-                Upgrade options:
-                  --upgrade              Treat as an upgrade (preserves nixfied/project unless --reset-project)
-                  --reset-project        Overwrite nixfied/project templates during upgrade
+Upgrade options:
+  --upgrade              Treat as an upgrade (preserves nixfied/project unless --reset-project)
+  --reset-project        Overwrite nixfied/project templates during upgrade
 
-                Prompt plan:
-                  --no-prompt-plan       Skip generating NIXFIED_PROMPT_PLAN.md (default is to generate)
-                  --prompt-plan          Generate NIXFIED_PROMPT_PLAN.md after install/upgrade (best effort; default)
-              --prompt-plan-force    Overwrite existing NIXFIED_PROMPT_PLAN.md
-    EOF
-                	          exit 0
-                	          ;;
+Prompt plan:
+  --no-prompt-plan       Skip generating NIXFIED_PROMPT_PLAN.md (default is to generate)
+  --prompt-plan          Generate NIXFIED_PROMPT_PLAN.md after install/upgrade (best effort; default)
+  --prompt-plan-force    Overwrite existing NIXFIED_PROMPT_PLAN.md
+EOF
+                              exit 0
+                              ;;
                             --)
                               # Accept an explicit "--" (some wrappers include it) and keep parsing.
                               shift
@@ -464,12 +464,16 @@ let
                 	          fi
                 	        fi
                 	
-                		        if [ "''${#RSYNC_EXCLUDES[@]}" -gt 0 ]; then
-                		          echo "INFO: Upgrading nixfied/ (preserving $PRESERVE_MSG)"
-                		          ${pkgs.rsync}/bin/rsync -a --delete --chmod=Du+w,Fu+w "''${RSYNC_EXCLUDES[@]}" "$SRC/nixfied/" "$ROOT/nixfied/"
-                		        else
-                		          ${pkgs.rsync}/bin/rsync -a --delete --chmod=Du+w,Fu+w "$SRC/nixfied/" "$ROOT/nixfied/"
-                		        fi
+	                		        if [ "''${#RSYNC_EXCLUDES[@]}" -gt 0 ]; then
+	                		          echo "INFO: Upgrading nixfied/ (preserving $PRESERVE_MSG)"
+	                		          ${pkgs.rsync}/bin/rsync -a --delete --chmod=Du+w,Fu+w "''${RSYNC_EXCLUDES[@]}" "$SRC/nixfied/" "$ROOT/nixfied/"
+	                		        else
+	                		          ${pkgs.rsync}/bin/rsync -a --delete --chmod=Du+w,Fu+w "$SRC/nixfied/" "$ROOT/nixfied/"
+	                		        fi
+
+                        if [ -f "$SRC/README.md" ]; then
+                          cp -f "$SRC/README.md" "$ROOT/nixfied/README.md"
+                        fi
 
                         chmod -R u+w "$ROOT/nixfied" 2>/dev/null || true
                         if command -v chflags >/dev/null 2>&1; then

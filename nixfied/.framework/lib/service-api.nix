@@ -202,12 +202,41 @@ let
     in
     "${prefix}_${suffix}";
 
-  mkServiceHookEnvFromContract =
+  sanitizeScriptToken = x: pkgs.lib.replaceStrings [ "/" ":" "." " " ] [ "-" "-" "-" "-" ] x;
+
+  launcherNameFor = serviceName: opName: "service-op-${sanitizeScriptToken serviceName}-${sanitizeScriptToken opName}";
+
+  mkServiceOpLauncher =
+    {
+      serviceName,
+      opName,
+      opCfg,
+    }:
+    pkgs.writeShellScript (launcherNameFor serviceName opName) ''
+      set -euo pipefail
+
+      REQUIRE_SLOT_ENV_CMD="''${REQUIRE_SLOT_ENV:-}"
+      if [ -z "$REQUIRE_SLOT_ENV_CMD" ]; then
+        echo "ERROR: REQUIRE_SLOT_ENV is not set; run via nixfied app/hook context." >&2
+        exit 1
+      fi
+      if [ ! -x "$REQUIRE_SLOT_ENV_CMD" ]; then
+        echo "ERROR: REQUIRE_SLOT_ENV is not executable: $REQUIRE_SLOT_ENV_CMD" >&2
+        exit 1
+      fi
+
+      SLOT_ENV_OUT="$("$REQUIRE_SLOT_ENV_CMD")" || exit 1
+      eval "$SLOT_ENV_OUT"
+
+      exec ${toString opCfg.script} "$@"
+    '';
+
+  collectServiceOps =
     serviceApis:
     let
       names = lib.sort (a: b: a < b) (builtins.attrNames serviceApis);
       validated = validateServiceApis serviceApis;
-      toPairs =
+      toOps =
         serviceName:
         let
           ops = serviceOps validated.${serviceName};
@@ -217,13 +246,39 @@ let
           opName:
           let
             opCfg = ops.${opName};
+            appName = if opCfg ? appName then opCfg.appName else "service::${serviceName}::${opName}";
           in
           {
-            name = hookNameFor serviceName opName opCfg;
-            value = toString opCfg.script;
+            inherit
+              serviceName
+              opName
+              opCfg
+              appName
+              ;
+            hookName = hookNameFor serviceName opName opCfg;
+            includeApp = opCfg.app or true;
+            usage = if opCfg ? usage then opCfg.usage else [ "nix run .#${appName}" ];
+            category = if opCfg ? category then opCfg.category else serviceName;
+            launcher = mkServiceOpLauncher {
+              inherit
+                serviceName
+                opName
+                opCfg
+                ;
+            };
           }
         ) opNamesSorted;
-      pairs = builtins.concatLists (map toPairs names);
+    in
+    builtins.concatLists (map toOps names);
+
+  mkServiceHookEnvFromContract =
+    serviceApis:
+    let
+      ops = collectServiceOps serviceApis;
+      pairs = map (op: {
+        name = op.hookName;
+        value = toString op.launcher;
+      }) ops;
       dedup =
         acc: pair:
         if builtins.hasAttr pair.name acc then
@@ -247,59 +302,37 @@ let
           throw "mkServiceAppsFromContract requires appApi"
         else
           null;
-      names = lib.sort (a: b: a < b) (builtins.attrNames serviceApis);
-      validated = validateServiceApis serviceApis;
-      appPairsForService =
-        serviceName:
-        let
-          api = validated.${serviceName};
-          ops = serviceOps api;
-          opNamesSorted = lib.sort (a: b: a < b) (builtins.attrNames ops);
-          mkAppPair =
-            opName:
-            let
-              op = ops.${opName};
-              include = op.app or true;
-              appName = if op ? appName then op.appName else "service::${serviceName}::${opName}";
-              usage = if op ? usage then op.usage else [ "nix run .#${appName}" ];
-              category = if op ? category then op.category else serviceName;
-            in
-            if !include then
-              null
-            else
-              {
-                name = appName;
-                value = appApi.mkNixfiedApp {
-                  name = appName;
-                  script = ''
-                    SLOT_ENV_OUT="$($REQUIRE_SLOT_ENV)" || exit 1
-                    eval "$SLOT_ENV_OUT"
-                    ${toString op.script}
-                  '';
-                  env = { };
-                  useDeps = false;
-                  api = {
-                    version = 1;
-                    summary = op.summary;
-                    details = op.details;
-                    usage = usage;
-                  }
-                  // lib.optionalAttrs (op ? examples) { examples = op.examples; }
-                  // lib.optionalAttrs (op ? args) { args = op.args; }
-                  // lib.optionalAttrs (op ? env) { env = op.env; }
-                  // { inherit category; };
-                  meta = {
-                    nixfied = {
-                      service = serviceName;
-                      operation = opName;
-                    };
-                  };
-                };
+      ops = builtins.filter (op: op.includeApp) (collectServiceOps serviceApis);
+      pairs = map (
+        op:
+        {
+          name = op.appName;
+          value = appApi.mkNixfiedApp {
+            name = op.appName;
+            script = ''
+              exec ${toString op.launcher} "$@"
+            '';
+            env = { };
+            useDeps = false;
+            api = {
+              version = 1;
+              summary = op.opCfg.summary;
+              details = op.opCfg.details;
+              usage = op.usage;
+            }
+            // lib.optionalAttrs (op.opCfg ? examples) { examples = op.opCfg.examples; }
+            // lib.optionalAttrs (op.opCfg ? args) { args = op.opCfg.args; }
+            // lib.optionalAttrs (op.opCfg ? env) { env = op.opCfg.env; }
+            // { category = op.category; };
+            meta = {
+              nixfied = {
+                service = op.serviceName;
+                operation = op.opName;
               };
-          candidates = map mkAppPair opNamesSorted;
-        in
-        builtins.filter (x: x != null) candidates;
-      pairs = builtins.concatLists (map appPairsForService names);
+            };
+          };
+        }
+      ) ops;
     in
     builtins.listToAttrs pairs;
 in
