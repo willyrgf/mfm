@@ -970,7 +970,10 @@ async fn send_signed_create_transaction(
     send_raw_transaction(client, &raw_tx_hex).await
 }
 
-async fn transaction_count_hex(client: &mut EvmIoClient<'_>, from: &str) -> Result<String, StateError> {
+async fn transaction_count_hex(
+    client: &mut EvmIoClient<'_>,
+    from: &str,
+) -> Result<String, StateError> {
     let res = client
         .call(JsonRpcCall::new(
             "eth_getTransactionCount",
