@@ -7,6 +7,8 @@
   postgres ? null,
   nginx ? null,
   minio ? null,
+  reth ? null,
+  helios ? null,
   supervisor ? null,
   ephemeral ? null,
 }:

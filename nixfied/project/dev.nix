@@ -36,18 +36,18 @@
           --wait-http "http://127.0.0.1:$MINIO_PORT/minio/health/ready" \
           --timeout 60 \
           -- \
-          run_hook MINIO_START
+          "$MINIO_START"
 
         # Use the Reth service module contract and route default EVM RPC to reth.
         run_hook RETH_INIT
         run_hook RETH_CHECK_CONFIG
         start_service reth \
-          --wait-port "$RETH_HTTP_PORT" \
+          --wait-port "$RETHHTTP_PORT" \
           --timeout 60 \
           -- \
-          run_hook RETH_START
+          "$RETH_START"
 
-        export MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_HTTP_PORT"
+        export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
 
         start_service rest-api \
           --wait-http "http://127.0.0.1:$REST_API_PORT/v1/health" \
