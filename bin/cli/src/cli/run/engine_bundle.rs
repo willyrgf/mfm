@@ -13,7 +13,7 @@ use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
 use mfm_op_evm_read::EvmReadOp;
-use mfm_op_evm_write::{EvmConfigureOp, EvmDeployOp, EvmValidateOp};
+use mfm_op_evm_write::{EvmConfigureOp, EvmContractFromNixOp, EvmDeployOp, EvmValidateOp};
 use mfm_op_nix_app::nix_exec_transport::NixFlakeTransportFactory;
 use mfm_op_nix_app::NixAppOp;
 use mfm_op_proof::ProofOp;
@@ -78,6 +78,7 @@ pub(super) fn make_engine_bundle() -> EngineBundle {
     let mut reg = HashMapOperationRegistry::default();
     reg.register(Arc::new(ProofOp::default()));
     reg.register(Arc::new(EvmReadOp));
+    reg.register(Arc::new(EvmContractFromNixOp));
     reg.register(Arc::new(EvmDeployOp));
     reg.register(Arc::new(EvmConfigureOp));
     reg.register(Arc::new(EvmValidateOp));

@@ -62,6 +62,35 @@ let
         pkgs.rustfmt
         pkgs.clippy
       ];
+
+  contractArtifactTool = pkgs.writeShellScriptBin "mfm-contract-artifact-configurable-counter" ''
+    set -euo pipefail
+
+    tmp="$(${pkgs.coreutils}/bin/mktemp -d)"
+    cleanup() { ${pkgs.coreutils}/bin/rm -rf "$tmp"; }
+    trap cleanup EXIT
+
+    ${pkgs.coreutils}/bin/mkdir -p "$tmp/src"
+    ${pkgs.coreutils}/bin/cp "${../../contracts/src/ConfigurableCounter.sol}" "$tmp/src/ConfigurableCounter.sol"
+
+    cat > "$tmp/foundry.toml" <<'EOF'
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+optimizer = true
+optimizer_runs = 200
+solc = "${pkgs.solc}/bin/solc"
+EOF
+
+    (
+      cd "$tmp"
+      ${pkgs.foundry}/bin/forge build --quiet > /dev/null
+    )
+
+    artifact="$tmp/out/ConfigurableCounter.sol/ConfigurableCounter.json"
+    ${pkgs.jq}/bin/jq -c '{artifact:{abi:.abi,bytecode:{object:.bytecode.object}}}' "$artifact"
+  '';
 in
 rec {
   project = {
@@ -101,6 +130,7 @@ rec {
     postgres = 5432;
     minio = 9000;
     minio_console = 9001;
+    reth_rpc = 8545;
   };
 
   # Base data directory for per-slot/per-env state
@@ -114,9 +144,14 @@ rec {
       pkgs.gnused
       pkgs.git
       pkgs.lsof
+      pkgs.curl
+      pkgs.jq
       pkgs.cargo-nextest
       pkgs.cargo-audit
+      pkgs.foundry
+      pkgs.reth
       pkgs.minio
+      contractArtifactTool
     ]
     ++ rustToolchainPackages
     ++ [ cargoNightly ];

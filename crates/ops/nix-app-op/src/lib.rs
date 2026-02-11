@@ -54,10 +54,6 @@ fn state_err(code: &'static str, message: &'static str) -> StateError {
     }
 }
 
-fn ctx_key(op_path: &OpPath, suffix: &str) -> ContextKey {
-    ContextKey(format!("{}.{}", op_path.0, suffix))
-}
-
 #[derive(Clone, Debug, Deserialize)]
 struct NixAppConfig {
     #[serde(default)]
@@ -164,7 +160,6 @@ impl Operation for NixAppOp {
 
         let sid = StateId(format!("{}.run", op_path.0));
         let state = Arc::new(NixAppState {
-            op_path,
             state_id: sid.clone(),
             cfg,
         });
@@ -177,7 +172,6 @@ impl Operation for NixAppOp {
 }
 
 struct NixAppState {
-    op_path: OpPath,
     state_id: StateId,
     cfg: NixAppConfig,
 }
@@ -287,7 +281,7 @@ impl State for NixAppState {
             .await
             .map_err(|_| state_err("exec_io_failed", "exec io call failed"))?;
 
-        let out_key = ctx_key(&self.op_path, &self.cfg.write_result_to);
+        let out_key = ContextKey(self.cfg.write_result_to.clone());
         ctx.write(out_key, res.response)
             .map_err(|_| state_err("ctx_write_failed", "context write failed"))?;
 

@@ -2033,6 +2033,7 @@ dependencies = [
  "alloy-primitives",
  "async-trait",
  "hex",
+ "k256",
  "mfm-collectors-evm",
  "mfm-machine",
  "mfm-sdk",

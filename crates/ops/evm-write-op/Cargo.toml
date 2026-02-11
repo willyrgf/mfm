@@ -10,6 +10,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 hex = { workspace = true }
 alloy-primitives = { workspace = true }
+k256 = { version = "0.13", features = ["ecdsa"] }
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-collectors-evm = { path = "../../collectors/evm" }

@@ -99,6 +99,7 @@
         steps = [
           "parity-postgres"
           "parity-s3"
+          "parity-evm-reth"
         ];
       };
     };
@@ -187,6 +188,74 @@
 
           LOGFILE=$(artifact_path "parity-s3.log")
           log_capture "$LOGFILE" -- cargo nextest run -p mfm-artifact-store-s3 --features parity-tests
+        '';
+      };
+
+      parity-evm-reth = {
+        description = "Parity: EVM pipeline deploy/configure/validate on reth";
+        requires = [
+          "postgres"
+          "minio"
+        ];
+        run = ''
+          eval "$($SLOT_INFO)"
+
+          # PostgreSQL parity store setup.
+          with_cleanup "run_hook POSTGRES_STOP"
+          AUTO_STOP_CONFLICTING=1 run_hook POSTGRES_FULL_START_TEST
+          export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
+
+          # MinIO parity store setup.
+          run_hook MINIO_INIT
+          MINIO_LOGFILE=$(artifact_path "minio-evm.log")
+          MINIO_PID=$(start_service minio \
+            --log "$MINIO_LOGFILE" \
+            --wait-http "http://127.0.0.1:$MINIO_PORT/minio/health/ready" \
+            --timeout 60 \
+            -- \
+            run_hook MINIO_START)
+          with_cleanup "stop_service $MINIO_PID minio"
+
+          export AWS_ACCESS_KEY_ID="minio"
+          export AWS_SECRET_ACCESS_KEY="minio123456"
+          export AWS_EC2_METADATA_DISABLED="true"
+          export MFM_S3_ENDPOINT="http://127.0.0.1:$MINIO_PORT"
+          export MFM_S3_REGION="us-east-1"
+          export MFM_S3_BUCKET="mfm-test"
+          export MFM_S3_PREFIX="mfm-artifacts"
+          run_hook MINIO_BUCKET_CREATE "$MFM_S3_BUCKET"
+
+          # Start a real local reth dev node for deploy/configure/validate flow.
+          RETH_LOGFILE=$(artifact_path "reth.log")
+          RETH_DATADIR=$(artifact_path "reth-datadir")
+          rm -rf "$RETH_DATADIR"
+          RETH_PID=$(start_service reth \
+            --log "$RETH_LOGFILE" \
+            --wait-port "$RETH_RPC_PORT" \
+            --timeout 60 \
+            -- \
+            reth node --dev --http --http.addr 127.0.0.1 --http.port "$RETH_RPC_PORT" --datadir "$RETH_DATADIR")
+          with_cleanup "stop_service $RETH_PID reth"
+
+          # Wait until JSON-RPC responds.
+          for i in $(seq 1 60); do
+            if curl -fsS \
+              -H 'content-type: application/json' \
+              --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+              "http://127.0.0.1:$RETH_RPC_PORT" >/dev/null; then
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "reth JSON-RPC did not become ready in time" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          export MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_RPC_PORT"
+
+          LOGFILE=$(artifact_path "parity-evm-reth.log")
+          log_capture "$LOGFILE" -- cargo nextest run -p mfm-rest-api --features parity-tests --test parity_evm_reth_pipeline
         '';
       };
     };

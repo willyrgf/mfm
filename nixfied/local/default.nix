@@ -124,6 +124,22 @@
           run_hook SUPERVISOR_START_DAEMON
         '';
       };
+
+      evm-contract-artifact-configurable-counter = lib.appApi.mkNixfiedApp {
+        name = "evm-contract-artifact-configurable-counter";
+        env = { };
+        useDeps = true;
+        api = {
+          version = 1;
+          summary = "Build ConfigurableCounter artifact JSON";
+          details = "Compiles contracts/src/ConfigurableCounter.sol with Foundry and prints compact JSON {artifact:{abi,bytecode.object}} to stdout.";
+          usage = [ "nix run .#evm-contract-artifact-configurable-counter" ];
+          category = "evm";
+        };
+        script = ''
+          exec mfm-contract-artifact-configurable-counter "$@"
+        '';
+      };
     };
 
   # Extra flake packages (merged into `packages` output).

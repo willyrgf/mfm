@@ -322,6 +322,9 @@ impl LiveIoTransport for NixFlakeTransport {
         // 1) Resolve the app program path.
         let mut eval = Command::new("nix");
         eval.arg("eval")
+            .arg("--option")
+            .arg("eval-cache")
+            .arg("false")
             .arg("--raw")
             .arg("--no-write-lock-file")
             .arg(format!("{flake_url}#{attr}"));

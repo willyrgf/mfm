@@ -1,9 +1,10 @@
 //! EVM write/validation operations (Milestone 2).
 //!
-//! This crate provides three operations that can be composed as a pipeline:
+//! This crate provides four operations that can be composed as a pipeline:
 //! - `evm_deploy`   : deploy a contract from an artifact
 //! - `evm_configure`: execute post-deploy contract calls
 //! - `evm_validate` : enforce chain/client/read/event assertions
+//! - `evm_contract_from_nix`: adapt `nix_app` output into an EVM artifact export
 //!
 //! Notes:
 //! - All network interaction flows through `namespace = "evm"` IO.
@@ -13,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use k256::ecdsa::SigningKey;
 use serde::Deserialize;
 
 use alloy_primitives::keccak256;
@@ -20,8 +22,8 @@ use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, StateError};
-use mfm_machine::ids::{ContextKey, ErrorCode, OpId, OpPath, StateId};
-use mfm_machine::io::IoProvider;
+use mfm_machine::ids::{ContextKey, ErrorCode, FactKey, OpId, OpPath, StateId};
+use mfm_machine::io::{IoCall, IoProvider};
 use mfm_machine::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta, Tag};
 use mfm_machine::plan::{StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
@@ -31,11 +33,14 @@ use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
 
+const OP_ID_CONTRACT_FROM_NIX: &str = "evm_contract_from_nix";
 const OP_ID_DEPLOY: &str = "evm_deploy";
 const OP_ID_CONFIGURE: &str = "evm_configure";
 const OP_ID_VALIDATE: &str = "evm_validate";
 const OP_VERSION: &str = "v1";
 
+const KEY_NIX_RESULT: &str = "result";
+const KEY_CONTRACT_ARTIFACT: &str = "contract_artifact";
 const KEY_CONTRACT_ADDRESS: &str = "contract_address";
 const KEY_DEPLOY_TX_HASH: &str = "deploy_tx_hash";
 const KEY_DEPLOY_RECEIPT: &str = "deploy_receipt";
@@ -101,6 +106,14 @@ fn default_min_count() -> u64 {
     1
 }
 
+fn default_result_pointer() -> String {
+    "/artifact".to_string()
+}
+
+fn default_artifact_port() -> String {
+    KEY_CONTRACT_ARTIFACT.to_string()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct ContractArtifactConfig {
     abi: serde_json::Value,
@@ -108,8 +121,19 @@ struct ContractArtifactConfig {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+struct EvmContractFromNixConfig {
+    #[serde(default = "default_result_pointer")]
+    result_pointer: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 struct EvmDeployConfig {
-    artifact: ContractArtifactConfig,
+    #[serde(default)]
+    artifact: Option<ContractArtifactConfig>,
+
+    #[serde(default = "default_artifact_port")]
+    artifact_port: String,
+
     from: String,
 
     #[serde(default)]
@@ -117,6 +141,9 @@ struct EvmDeployConfig {
 
     #[serde(default)]
     value_wei: Option<String>,
+
+    #[serde(default)]
+    signing_key_env: Option<String>,
 
     #[serde(default = "default_poll_interval_ms")]
     poll_interval_ms: u64,
@@ -138,7 +165,12 @@ struct ConfigureCallConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 struct EvmConfigureConfig {
-    artifact: ContractArtifactConfig,
+    #[serde(default)]
+    artifact: Option<ContractArtifactConfig>,
+
+    #[serde(default = "default_artifact_port")]
+    artifact_port: String,
+
     from: String,
 
     #[serde(default)]
@@ -186,7 +218,11 @@ struct EventAssertionConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 struct EvmValidateConfig {
-    artifact: ContractArtifactConfig,
+    #[serde(default)]
+    artifact: Option<ContractArtifactConfig>,
+
+    #[serde(default = "default_artifact_port")]
+    artifact_port: String,
 
     #[serde(default)]
     contract_address: Option<String>,
@@ -226,25 +262,30 @@ struct ParsedAbi {
 
 #[derive(Clone, Debug)]
 struct DeployRuntimeConfig {
+    artifact: Option<ContractArtifactConfig>,
+    artifact_port: String,
     from: String,
-    data_hex: String,
+    constructor_args: Vec<serde_json::Value>,
     value_hex: Option<String>,
+    signing_key_env: Option<String>,
     poll_interval_ms: u64,
     max_receipt_polls: u64,
 }
 
 #[derive(Clone, Debug)]
-struct PreparedConfigureCall {
+struct ConfigureRuntimeCall {
     function: String,
-    data_hex: String,
+    args: Vec<serde_json::Value>,
     value_hex: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 struct ConfigureRuntimeConfig {
+    artifact: Option<ContractArtifactConfig>,
+    artifact_port: String,
     from: String,
     contract_address: Option<String>,
-    calls: Vec<PreparedConfigureCall>,
+    calls: Vec<ConfigureRuntimeCall>,
     poll_interval_ms: u64,
     max_receipt_polls: u64,
 }
@@ -267,11 +308,13 @@ struct PreparedEventAssertion {
 
 #[derive(Clone, Debug)]
 struct ValidateRuntimeConfig {
+    artifact: Option<ContractArtifactConfig>,
+    artifact_port: String,
     contract_address: Option<String>,
     expected_chain_id: u64,
     require_client_substring: String,
-    read_assertions: Vec<PreparedReadAssertion>,
-    event_assertions: Vec<PreparedEventAssertion>,
+    read_assertions: Vec<ReadAssertionConfig>,
+    event_assertions: Vec<EventAssertionConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -631,6 +674,52 @@ fn parse_artifact(cfg: &ContractArtifactConfig) -> Result<(ParsedAbi, Vec<u8>), 
     Ok((abi, bytecode))
 }
 
+fn prepare_validate_assertions(
+    abi: &ParsedAbi,
+    read_assertions: &[ReadAssertionConfig],
+    event_assertions: &[EventAssertionConfig],
+) -> Result<(Vec<PreparedReadAssertion>, Vec<PreparedEventAssertion>), String> {
+    let mut prepared_reads = Vec::with_capacity(read_assertions.len());
+    for ra in read_assertions {
+        let (data, outputs) = resolve_function_call(abi, &ra.function, &ra.args)
+            .map_err(|_| "read assertion did not match ABI".to_string())?;
+        prepared_reads.push(PreparedReadAssertion {
+            data_hex: bytes_to_hex_prefixed(&data),
+            expected: ra.expected.clone(),
+            outputs,
+        });
+    }
+
+    let mut prepared_events = Vec::with_capacity(event_assertions.len());
+    for ea in event_assertions {
+        let Some(event) = abi.events.iter().find(|e| e.name == ea.event) else {
+            return Err("event assertion referenced unknown event".to_string());
+        };
+
+        if event.anonymous {
+            return Err("anonymous events are not supported for validation".to_string());
+        }
+
+        let sig = format!("{}({})", event.name, event.inputs.join(","));
+        let topic0 = keccak256(sig.as_bytes());
+
+        let from_block = to_block_param(&ea.from_block, "earliest")
+            .map_err(|_| "invalid from_block".to_string())?;
+        let to_block =
+            to_block_param(&ea.to_block, "latest").map_err(|_| "invalid to_block".to_string())?;
+
+        prepared_events.push(PreparedEventAssertion {
+            event: ea.event.clone(),
+            topic0_hex: bytes_to_hex_prefixed(topic0.as_slice()),
+            min_count: ea.min_count,
+            from_block,
+            to_block,
+        });
+    }
+
+    Ok((prepared_reads, prepared_events))
+}
+
 fn parse_value_wei_to_hex(value_wei: &Option<String>) -> Result<Option<String>, String> {
     let Some(v) = value_wei else {
         return Ok(None);
@@ -647,6 +736,20 @@ fn parse_value_wei_to_hex(value_wei: &Option<String>) -> Result<Option<String>, 
 fn ensure_nonzero_polls(max_receipt_polls: u64) -> Result<(), String> {
     if max_receipt_polls == 0 {
         return Err("max_receipt_polls must be > 0".to_string());
+    }
+    Ok(())
+}
+
+fn ensure_nonempty_artifact_port(artifact_port: &str) -> Result<(), String> {
+    if artifact_port.trim().is_empty() {
+        return Err("artifact_port must be non-empty".to_string());
+    }
+    Ok(())
+}
+
+fn ensure_nonempty_env_name(env_name: &str) -> Result<(), String> {
+    if env_name.trim().is_empty() {
+        return Err("signing_key_env must be non-empty".to_string());
     }
     Ok(())
 }
@@ -726,6 +829,27 @@ fn context_read_string(ctx: &dyn DynContext, key: &str) -> Result<String, StateE
     Ok(s.to_string())
 }
 
+fn context_read_json(ctx: &dyn DynContext, key: &str) -> Result<serde_json::Value, StateError> {
+    let got = ctx
+        .read(&ContextKey(key.to_string()))
+        .map_err(|_| state_err("ctx_read_failed", "context read failed"))?;
+    got.ok_or_else(|| state_err("ctx_missing_key", "required context key was missing"))
+}
+
+fn resolve_artifact_config(
+    ctx: &dyn DynContext,
+    configured: &Option<ContractArtifactConfig>,
+    artifact_port: &str,
+) -> Result<ContractArtifactConfig, StateError> {
+    if let Some(artifact) = configured {
+        return Ok(artifact.clone());
+    }
+
+    let v = context_read_json(ctx, artifact_port)?;
+    serde_json::from_value::<ContractArtifactConfig>(v)
+        .map_err(|_| state_err("ctx_type_mismatch", "context artifact value was invalid"))
+}
+
 fn context_write_json(
     ctx: &mut dyn DynContext,
     key: &str,
@@ -737,8 +861,18 @@ fn context_write_json(
 
 async fn send_transaction(
     client: &mut EvmIoClient<'_>,
-    tx_obj: serde_json::Value,
+    mut tx_obj: serde_json::Value,
 ) -> Result<String, StateError> {
+    if tx_obj.get("gas").is_none() {
+        let gas = estimate_gas_hex(client, &tx_obj).await?;
+        tx_obj["gas"] = serde_json::json!(gas);
+    }
+
+    if tx_obj.get("gasPrice").is_none() && tx_obj.get("maxFeePerGas").is_none() {
+        let gas_price = gas_price_hex(client).await?;
+        tx_obj["gasPrice"] = serde_json::json!(gas_price);
+    }
+
     let res = client
         .call(JsonRpcCall::new(
             "eth_sendTransaction",
@@ -762,18 +896,343 @@ async fn send_transaction(
     })
 }
 
-async fn wait_for_receipt(
+async fn send_raw_transaction(
     client: &mut EvmIoClient<'_>,
+    raw_tx_hex: &str,
+) -> Result<String, StateError> {
+    let res = client
+        .call(JsonRpcCall::new(
+            "eth_sendRawTransaction",
+            serde_json::json!([raw_tx_hex]),
+        ))
+        .await
+        .map_err(state_err_from_io)?;
+
+    let Some(tx_hash) = res.response.as_str() else {
+        return Err(state_err(
+            "evm_response_invalid",
+            "eth_sendRawTransaction returned non-string tx hash",
+        ));
+    };
+
+    normalize_hex_str(tx_hash).map_err(|_| {
+        state_err(
+            "evm_response_invalid",
+            "eth_sendRawTransaction returned invalid hex tx hash",
+        )
+    })
+}
+
+async fn send_signed_create_transaction(
+    client: &mut EvmIoClient<'_>,
+    signing_key_env: &str,
+    from: &str,
+    constructor_payload: &[u8],
+    value_hex: Option<&str>,
+) -> Result<String, StateError> {
+    let signing_key = signing_key_from_env(signing_key_env)?;
+    let signer_addr = signer_address_hex(&signing_key);
+    let configured_from = normalize_address(from)
+        .map_err(|_| state_err("invalid_op_config", "invalid from address"))?;
+    if signer_addr != configured_from {
+        return Err(state_err(
+            "signing_key_address_mismatch",
+            "signing key did not match configured from address",
+        ));
+    }
+
+    let tx_obj = {
+        let mut tx = serde_json::json!({
+            "from": configured_from,
+            "data": bytes_to_hex_prefixed(constructor_payload),
+        });
+        if let Some(v) = value_hex {
+            tx["value"] = serde_json::json!(v);
+        }
+        tx
+    };
+
+    let nonce_hex = transaction_count_hex(client, &configured_from).await?;
+    let gas_hex = estimate_gas_hex(client, &tx_obj).await?;
+    let gas_price_hex = gas_price_hex(client).await?;
+    let chain_id = client.chain_id_u64().await.map_err(state_err_from_io)?;
+
+    let raw_tx_hex = sign_legacy_create_raw_tx(
+        &signing_key,
+        chain_id,
+        &nonce_hex,
+        &gas_price_hex,
+        &gas_hex,
+        value_hex.unwrap_or("0x0"),
+        constructor_payload,
+    )?;
+
+    send_raw_transaction(client, &raw_tx_hex).await
+}
+
+async fn transaction_count_hex(client: &mut EvmIoClient<'_>, from: &str) -> Result<String, StateError> {
+    let res = client
+        .call(JsonRpcCall::new(
+            "eth_getTransactionCount",
+            serde_json::json!([from, "pending"]),
+        ))
+        .await
+        .map_err(state_err_from_io)?;
+
+    let Some(nonce) = res.response.as_str() else {
+        return Err(state_err(
+            "evm_response_invalid",
+            "eth_getTransactionCount returned non-string nonce",
+        ));
+    };
+
+    normalize_hex_str(nonce).map_err(|_| {
+        state_err(
+            "evm_response_invalid",
+            "eth_getTransactionCount returned invalid hex nonce",
+        )
+    })
+}
+
+fn signing_key_from_env(signing_key_env: &str) -> Result<SigningKey, StateError> {
+    let raw = std::env::var(signing_key_env).map_err(|_| {
+        state_err(
+            "missing_signing_key_env",
+            "signing_key_env did not exist in process environment",
+        )
+    })?;
+
+    let normalized = normalize_hex_str(&raw)
+        .map_err(|_| state_err("invalid_signing_key_env", "signing key hex was invalid"))?;
+    let bytes = hex_to_bytes(&normalized)
+        .map_err(|_| state_err("invalid_signing_key_env", "signing key hex was invalid"))?;
+    let key: [u8; 32] = bytes.try_into().map_err(|_| {
+        state_err(
+            "invalid_signing_key_env",
+            "signing key must be exactly 32 bytes",
+        )
+    })?;
+
+    SigningKey::from_bytes((&key).into()).map_err(|_| {
+        state_err(
+            "invalid_signing_key_env",
+            "signing key did not form a valid secp256k1 key",
+        )
+    })
+}
+
+fn signer_address_hex(signing_key: &SigningKey) -> String {
+    let public_key = signing_key.verifying_key().to_encoded_point(false);
+    let hash = keccak256(&public_key.as_bytes()[1..]);
+    bytes_to_hex_prefixed(&hash.as_slice()[12..])
+}
+
+fn sign_legacy_create_raw_tx(
+    signing_key: &SigningKey,
+    chain_id: u64,
+    nonce_hex: &str,
+    gas_price_hex: &str,
+    gas_limit_hex: &str,
+    value_hex: &str,
+    data: &[u8],
+) -> Result<String, StateError> {
+    let nonce = hex_quantity_to_rlp_bytes(nonce_hex)?;
+    let gas_price = hex_quantity_to_rlp_bytes(gas_price_hex)?;
+    let gas_limit = hex_quantity_to_rlp_bytes(gas_limit_hex)?;
+    let value = hex_quantity_to_rlp_bytes(value_hex)?;
+    let chain_id_bytes = u128_to_min_be(u128::from(chain_id));
+
+    let unsigned = rlp_encode_list(&[
+        nonce.clone(),
+        gas_price.clone(),
+        gas_limit.clone(),
+        Vec::new(),
+        value.clone(),
+        data.to_vec(),
+        chain_id_bytes.clone(),
+        Vec::new(),
+        Vec::new(),
+    ]);
+
+    let sighash = keccak256(&unsigned);
+    let (sig, recid) = signing_key
+        .sign_prehash_recoverable(sighash.as_slice())
+        .map_err(|_| state_err("signing_failed", "failed to sign deployment transaction"))?;
+
+    let sig_bytes = sig.to_bytes();
+    let r = trim_leading_zero_bytes(&sig_bytes[..32]);
+    let s = trim_leading_zero_bytes(&sig_bytes[32..]);
+    let v = u128::from(chain_id) * 2 + 35 + u128::from(u8::from(recid));
+    let v_bytes = u128_to_min_be(v);
+
+    let signed = rlp_encode_list(&[
+        nonce,
+        gas_price,
+        gas_limit,
+        Vec::new(),
+        value,
+        data.to_vec(),
+        v_bytes,
+        r,
+        s,
+    ]);
+
+    Ok(bytes_to_hex_prefixed(&signed))
+}
+
+fn hex_quantity_to_rlp_bytes(value: &str) -> Result<Vec<u8>, StateError> {
+    let normalized = normalize_hex_str(value)
+        .map_err(|_| state_err("invalid_op_config", "invalid transaction quantity hex"))?;
+    let bytes = hex_to_bytes(&normalized)
+        .map_err(|_| state_err("invalid_op_config", "invalid transaction quantity hex"))?;
+    Ok(trim_leading_zero_bytes(&bytes))
+}
+
+fn trim_leading_zero_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut idx = 0usize;
+    while idx < bytes.len() && bytes[idx] == 0 {
+        idx += 1;
+    }
+    bytes[idx..].to_vec()
+}
+
+fn u128_to_min_be(mut value: u128) -> Vec<u8> {
+    if value == 0 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    while value > 0 {
+        out.push((value & 0xff) as u8);
+        value >>= 8;
+    }
+    out.reverse();
+    out
+}
+
+fn rlp_encode_bytes(bytes: &[u8]) -> Vec<u8> {
+    if bytes.len() == 1 && bytes[0] < 0x80 {
+        return vec![bytes[0]];
+    }
+
+    let mut out = Vec::new();
+    if bytes.len() <= 55 {
+        out.push(0x80 + bytes.len() as u8);
+        out.extend_from_slice(bytes);
+        return out;
+    }
+
+    let len_bytes = usize_to_min_be(bytes.len());
+    out.push(0xb7 + len_bytes.len() as u8);
+    out.extend_from_slice(&len_bytes);
+    out.extend_from_slice(bytes);
+    out
+}
+
+fn rlp_encode_list(items: &[Vec<u8>]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for item in items {
+        payload.extend_from_slice(&rlp_encode_bytes(item));
+    }
+
+    let mut out = Vec::new();
+    if payload.len() <= 55 {
+        out.push(0xc0 + payload.len() as u8);
+        out.extend_from_slice(&payload);
+        return out;
+    }
+
+    let len_bytes = usize_to_min_be(payload.len());
+    out.push(0xf7 + len_bytes.len() as u8);
+    out.extend_from_slice(&len_bytes);
+    out.extend_from_slice(&payload);
+    out
+}
+
+fn usize_to_min_be(mut value: usize) -> Vec<u8> {
+    if value == 0 {
+        return vec![0];
+    }
+
+    let mut out = Vec::new();
+    while value > 0 {
+        out.push((value & 0xff) as u8);
+        value >>= 8;
+    }
+    out.reverse();
+    out
+}
+
+async fn estimate_gas_hex(
+    client: &mut EvmIoClient<'_>,
+    tx_obj: &serde_json::Value,
+) -> Result<String, StateError> {
+    let res = client
+        .call(JsonRpcCall::new(
+            "eth_estimateGas",
+            serde_json::json!([tx_obj]),
+        ))
+        .await
+        .map_err(state_err_from_io)?;
+
+    let Some(gas) = res.response.as_str() else {
+        return Err(state_err(
+            "evm_response_invalid",
+            "eth_estimateGas returned non-string gas value",
+        ));
+    };
+
+    normalize_hex_str(gas).map_err(|_| {
+        state_err(
+            "evm_response_invalid",
+            "eth_estimateGas returned invalid hex gas value",
+        )
+    })
+}
+
+async fn gas_price_hex(client: &mut EvmIoClient<'_>) -> Result<String, StateError> {
+    let res = client
+        .call(JsonRpcCall::new("eth_gasPrice", serde_json::json!([])))
+        .await
+        .map_err(state_err_from_io)?;
+
+    let Some(gas_price) = res.response.as_str() else {
+        return Err(state_err(
+            "evm_response_invalid",
+            "eth_gasPrice returned non-string gas price",
+        ));
+    };
+
+    normalize_hex_str(gas_price).map_err(|_| {
+        state_err(
+            "evm_response_invalid",
+            "eth_gasPrice returned invalid hex gas price",
+        )
+    })
+}
+
+async fn wait_for_receipt(
+    state_id: &StateId,
+    io: &mut dyn IoProvider,
     tx_hash: &str,
     poll_interval_ms: u64,
     max_receipt_polls: u64,
 ) -> Result<serde_json::Value, StateError> {
-    for _ in 0..max_receipt_polls {
-        let res = client
-            .call(JsonRpcCall::new(
-                "eth_getTransactionReceipt",
-                serde_json::json!([tx_hash]),
-            ))
+    for poll_index in 0..max_receipt_polls {
+        let request = serde_json::to_value(JsonRpcCall::new(
+            "eth_getTransactionReceipt",
+            serde_json::json!([tx_hash]),
+        ))
+        .expect("JsonRpcCall must serialize");
+        let res = io
+            .call(IoCall {
+                namespace: "evm".to_string(),
+                request,
+                fact_key: Some(FactKey(format!(
+                    "mfm:evm|state:{}|receipt_poll:{}|tx:{}",
+                    state_id.0, poll_index, tx_hash
+                ))),
+            })
             .await
             .map_err(state_err_from_io)?;
 
@@ -850,6 +1309,134 @@ fn resolve_contract_address(
 }
 
 #[derive(Clone, Default)]
+pub struct EvmContractFromNixOp;
+
+impl Operation for EvmContractFromNixOp {
+    fn op_id(&self) -> OpId {
+        OpId(OP_ID_CONTRACT_FROM_NIX.to_string())
+    }
+
+    fn op_version(&self) -> String {
+        OP_VERSION.to_string()
+    }
+
+    fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
+        let cfg: EvmContractFromNixConfig =
+            serde_json::from_value(op_config.clone()).map_err(|_| {
+                sdk_err(
+                    "invalid_op_config",
+                    "invalid evm_contract_from_nix op_config",
+                )
+            })?;
+        if !cfg.result_pointer.is_empty() && !cfg.result_pointer.starts_with('/') {
+            return Err(sdk_err(
+                "invalid_op_config",
+                "result_pointer must be empty or start with '/'",
+            ));
+        }
+
+        Ok(OpIo {
+            imports: vec![PortKey(KEY_NIX_RESULT.to_string())],
+            exports: vec![PortKey(KEY_CONTRACT_ARTIFACT.to_string())],
+        })
+    }
+
+    fn expand(
+        &self,
+        op_path: OpPath,
+        op_config: &serde_json::Value,
+        _run_config: &RunConfig,
+    ) -> Result<StateGraph, SdkError> {
+        let cfg: EvmContractFromNixConfig =
+            serde_json::from_value(op_config.clone()).map_err(|_| {
+                sdk_err(
+                    "invalid_op_config",
+                    "invalid evm_contract_from_nix op_config",
+                )
+            })?;
+        if !cfg.result_pointer.is_empty() && !cfg.result_pointer.starts_with('/') {
+            return Err(sdk_err(
+                "invalid_op_config",
+                "result_pointer must be empty or start with '/'",
+            ));
+        }
+
+        let state_id = StateId(format!("{}.adapt", op_path.0));
+        let state = Arc::new(ContractFromNixState {
+            result_pointer: cfg.result_pointer,
+        });
+
+        Ok(StateGraph {
+            states: vec![StateNode {
+                id: state_id,
+                state,
+            }],
+            edges: Vec::new(),
+        })
+    }
+}
+
+struct ContractFromNixState {
+    result_pointer: String,
+}
+
+#[async_trait]
+impl State for ContractFromNixState {
+    fn meta(&self) -> StateMeta {
+        StateMeta {
+            tags: vec![Tag("config".to_string())],
+            depends_on: Vec::new(),
+            depends_on_strategy: DependencyStrategy::Latest,
+            side_effects: SideEffectKind::Pure,
+            idempotency: Idempotency::None,
+        }
+    }
+
+    async fn handle(
+        &self,
+        ctx: &mut dyn DynContext,
+        _io: &mut dyn IoProvider,
+        _rec: &mut dyn EventRecorder,
+    ) -> Result<StateOutcome, StateError> {
+        let result = context_read_json(ctx, KEY_NIX_RESULT)?;
+
+        let artifact_value = if self.result_pointer.is_empty() {
+            result
+        } else {
+            result
+                .pointer(&self.result_pointer)
+                .cloned()
+                .ok_or_else(|| {
+                    state_err(
+                        "nix_result_pointer_missing",
+                        "nix result did not contain the configured pointer",
+                    )
+                })?
+        };
+
+        let artifact = serde_json::from_value::<ContractArtifactConfig>(artifact_value.clone())
+            .map_err(|_| {
+                state_err(
+                    "invalid_contract_artifact",
+                    "nix result artifact was invalid",
+                )
+            })?;
+        parse_artifact(&artifact).map_err(|_| {
+            state_err(
+                "invalid_contract_artifact",
+                "nix result artifact was invalid",
+            )
+        })?;
+
+        context_write_json(ctx, KEY_CONTRACT_ARTIFACT, artifact_value)?;
+
+        Ok(StateOutcome {
+            snapshot: SnapshotPolicy::OnSuccess,
+        })
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct EvmDeployOp;
 
 impl Operation for EvmDeployOp {
@@ -861,9 +1448,24 @@ impl Operation for EvmDeployOp {
         OP_VERSION.to_string()
     }
 
-    fn io(&self, _op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
+    fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
+        let cfg: EvmDeployConfig = serde_json::from_value(op_config.clone())
+            .map_err(|_| sdk_err("invalid_op_config", "invalid evm_deploy op_config"))?;
+        ensure_nonempty_artifact_port(&cfg.artifact_port)
+            .map_err(|_| sdk_err("invalid_op_config", "artifact_port must be non-empty"))?;
+        if let Some(env_name) = cfg.signing_key_env.as_deref() {
+            ensure_nonempty_env_name(env_name)
+                .map_err(|_| sdk_err("invalid_op_config", "signing_key_env must be non-empty"))?;
+        }
+
+        let imports = if cfg.artifact.is_none() {
+            vec![PortKey(cfg.artifact_port)]
+        } else {
+            Vec::new()
+        };
+
         Ok(OpIo {
-            imports: Vec::new(),
+            imports,
             exports: vec![
                 PortKey(KEY_CONTRACT_ADDRESS.to_string()),
                 PortKey(KEY_DEPLOY_TX_HASH.to_string()),
@@ -881,17 +1483,22 @@ impl Operation for EvmDeployOp {
         let cfg: EvmDeployConfig = serde_json::from_value(op_config.clone())
             .map_err(|_| sdk_err("invalid_op_config", "invalid evm_deploy op_config"))?;
 
-        let (abi, bytecode) = parse_artifact(&cfg.artifact)
-            .map_err(|_| sdk_err("invalid_op_config", "invalid contract artifact"))?;
+        ensure_nonempty_artifact_port(&cfg.artifact_port)
+            .map_err(|_| sdk_err("invalid_op_config", "artifact_port must be non-empty"))?;
+        if let Some(env_name) = cfg.signing_key_env.as_deref() {
+            ensure_nonempty_env_name(env_name)
+                .map_err(|_| sdk_err("invalid_op_config", "signing_key_env must be non-empty"))?;
+        }
+        if let Some(artifact) = &cfg.artifact {
+            parse_artifact(artifact)
+                .map_err(|_| sdk_err("invalid_op_config", "invalid contract artifact"))?;
+        }
 
         let from = normalize_address(&cfg.from)
             .map_err(|_| sdk_err("invalid_op_config", "invalid from address"))?;
 
         ensure_nonzero_polls(cfg.max_receipt_polls)
             .map_err(|_| sdk_err("invalid_op_config", "max_receipt_polls must be > 0"))?;
-
-        let constructor_payload = constructor_data(&abi, &bytecode, &cfg.constructor_args)
-            .map_err(|_| sdk_err("invalid_op_config", "constructor args did not match ABI"))?;
 
         let value_hex = parse_value_wei_to_hex(&cfg.value_wei)
             .map_err(|_| sdk_err("invalid_op_config", "invalid value_wei"))?;
@@ -900,9 +1507,12 @@ impl Operation for EvmDeployOp {
         let state = Arc::new(DeployState {
             state_id: state_id.clone(),
             cfg: DeployRuntimeConfig {
+                artifact: cfg.artifact,
+                artifact_port: cfg.artifact_port,
                 from,
-                data_hex: bytes_to_hex_prefixed(&constructor_payload),
+                constructor_args: cfg.constructor_args,
                 value_hex,
+                signing_key_env: cfg.signing_key_env,
                 poll_interval_ms: cfg.poll_interval_ms,
                 max_receipt_polls: cfg.max_receipt_polls,
             },
@@ -941,19 +1551,39 @@ impl State for DeployState {
         io: &mut dyn IoProvider,
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
+        let artifact = resolve_artifact_config(ctx, &self.cfg.artifact, &self.cfg.artifact_port)?;
+        let (abi, bytecode) = parse_artifact(&artifact)
+            .map_err(|_| state_err("invalid_contract_artifact", "contract artifact was invalid"))?;
+        let constructor_payload = constructor_data(&abi, &bytecode, &self.cfg.constructor_args)
+            .map_err(|_| state_err("invalid_op_config", "constructor args did not match ABI"))?;
+
         let mut client = EvmIoClient::new(self.state_id.clone(), io);
 
         let mut tx = serde_json::json!({
             "from": self.cfg.from,
-            "data": self.cfg.data_hex,
+            "data": bytes_to_hex_prefixed(&constructor_payload),
         });
         if let Some(v) = &self.cfg.value_hex {
             tx["value"] = serde_json::json!(v);
         }
 
-        let tx_hash = send_transaction(&mut client, tx).await?;
+        let tx_hash = if let Some(env_name) = self.cfg.signing_key_env.as_deref() {
+            send_signed_create_transaction(
+                &mut client,
+                env_name,
+                &self.cfg.from,
+                &constructor_payload,
+                self.cfg.value_hex.as_deref(),
+            )
+            .await?
+        } else {
+            send_transaction(&mut client, tx).await?
+        };
+        drop(client);
+
         let receipt = wait_for_receipt(
-            &mut client,
+            &self.state_id,
+            io,
             &tx_hash,
             self.cfg.poll_interval_ms,
             self.cfg.max_receipt_polls,
@@ -992,12 +1622,16 @@ impl Operation for EvmConfigureOp {
     fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
         let cfg: EvmConfigureConfig = serde_json::from_value(op_config.clone())
             .map_err(|_| sdk_err("invalid_op_config", "invalid evm_configure op_config"))?;
+        ensure_nonempty_artifact_port(&cfg.artifact_port)
+            .map_err(|_| sdk_err("invalid_op_config", "artifact_port must be non-empty"))?;
 
-        let imports = if cfg.contract_address.is_none() {
-            vec![PortKey(KEY_CONTRACT_ADDRESS.to_string())]
-        } else {
-            Vec::new()
-        };
+        let mut imports = Vec::new();
+        if cfg.artifact.is_none() {
+            imports.push(PortKey(cfg.artifact_port.clone()));
+        }
+        if cfg.contract_address.is_none() {
+            imports.push(PortKey(KEY_CONTRACT_ADDRESS.to_string()));
+        }
 
         Ok(OpIo {
             imports,
@@ -1017,6 +1651,9 @@ impl Operation for EvmConfigureOp {
         let cfg: EvmConfigureConfig = serde_json::from_value(op_config.clone())
             .map_err(|_| sdk_err("invalid_op_config", "invalid evm_configure op_config"))?;
 
+        ensure_nonempty_artifact_port(&cfg.artifact_port)
+            .map_err(|_| sdk_err("invalid_op_config", "artifact_port must be non-empty"))?;
+
         if cfg.calls.is_empty() {
             return Err(sdk_err(
                 "invalid_op_config",
@@ -1024,8 +1661,13 @@ impl Operation for EvmConfigureOp {
             ));
         }
 
-        let (abi, _bytecode) = parse_artifact(&cfg.artifact)
-            .map_err(|_| sdk_err("invalid_op_config", "invalid contract artifact"))?;
+        let parsed_abi = if let Some(artifact) = &cfg.artifact {
+            let (abi, _bytecode) = parse_artifact(artifact)
+                .map_err(|_| sdk_err("invalid_op_config", "invalid contract artifact"))?;
+            Some(abi)
+        } else {
+            None
+        };
 
         let from = normalize_address(&cfg.from)
             .map_err(|_| sdk_err("invalid_op_config", "invalid from address"))?;
@@ -1042,15 +1684,17 @@ impl Operation for EvmConfigureOp {
 
         let mut calls = Vec::with_capacity(cfg.calls.len());
         for c in &cfg.calls {
-            let (calldata, _outputs) = resolve_function_call(&abi, &c.function, &c.args)
-                .map_err(|_| sdk_err("invalid_op_config", "configure call did not match ABI"))?;
-
+            if let Some(abi) = &parsed_abi {
+                let _ = resolve_function_call(abi, &c.function, &c.args).map_err(|_| {
+                    sdk_err("invalid_op_config", "configure call did not match ABI")
+                })?;
+            }
             let value_hex = parse_value_wei_to_hex(&c.value_wei)
                 .map_err(|_| sdk_err("invalid_op_config", "invalid value_wei in configure call"))?;
 
-            calls.push(PreparedConfigureCall {
+            calls.push(ConfigureRuntimeCall {
                 function: c.function.clone(),
-                data_hex: bytes_to_hex_prefixed(&calldata),
+                args: c.args.clone(),
                 value_hex,
             });
         }
@@ -1059,6 +1703,8 @@ impl Operation for EvmConfigureOp {
         let state = Arc::new(ConfigureState {
             state_id: state_id.clone(),
             cfg: ConfigureRuntimeConfig {
+                artifact: cfg.artifact,
+                artifact_port: cfg.artifact_port,
                 from,
                 contract_address,
                 calls,
@@ -1100,7 +1746,9 @@ impl State for ConfigureState {
         io: &mut dyn IoProvider,
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let mut client = EvmIoClient::new(self.state_id.clone(), io);
+        let artifact = resolve_artifact_config(ctx, &self.cfg.artifact, &self.cfg.artifact_port)?;
+        let (abi, _bytecode) = parse_artifact(&artifact)
+            .map_err(|_| state_err("invalid_contract_artifact", "contract artifact was invalid"))?;
 
         let to = resolve_contract_address(ctx, &self.cfg.contract_address)?;
 
@@ -1108,18 +1756,23 @@ impl State for ConfigureState {
         let mut receipts: Vec<serde_json::Value> = Vec::new();
 
         for call in &self.cfg.calls {
+            let (calldata, _outputs) = resolve_function_call(&abi, &call.function, &call.args)
+                .map_err(|_| state_err("invalid_op_config", "configure call did not match ABI"))?;
             let mut tx = serde_json::json!({
                 "from": self.cfg.from,
                 "to": to,
-                "data": call.data_hex,
+                "data": bytes_to_hex_prefixed(&calldata),
             });
             if let Some(v) = &call.value_hex {
                 tx["value"] = serde_json::json!(v);
             }
 
+            let mut client = EvmIoClient::new(self.state_id.clone(), io);
             let tx_hash = send_transaction(&mut client, tx).await?;
+            drop(client);
             let receipt = wait_for_receipt(
-                &mut client,
+                &self.state_id,
+                io,
                 &tx_hash,
                 self.cfg.poll_interval_ms,
                 self.cfg.max_receipt_polls,
@@ -1166,12 +1819,16 @@ impl Operation for EvmValidateOp {
     fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
         let cfg: EvmValidateConfig = serde_json::from_value(op_config.clone())
             .map_err(|_| sdk_err("invalid_op_config", "invalid evm_validate op_config"))?;
+        ensure_nonempty_artifact_port(&cfg.artifact_port)
+            .map_err(|_| sdk_err("invalid_op_config", "artifact_port must be non-empty"))?;
 
-        let imports = if cfg.contract_address.is_none() {
-            vec![PortKey(KEY_CONTRACT_ADDRESS.to_string())]
-        } else {
-            Vec::new()
-        };
+        let mut imports = Vec::new();
+        if cfg.artifact.is_none() {
+            imports.push(PortKey(cfg.artifact_port.clone()));
+        }
+        if cfg.contract_address.is_none() {
+            imports.push(PortKey(KEY_CONTRACT_ADDRESS.to_string()));
+        }
 
         Ok(OpIo {
             imports,
@@ -1192,8 +1849,16 @@ impl Operation for EvmValidateOp {
         let cfg: EvmValidateConfig = serde_json::from_value(op_config.clone())
             .map_err(|_| sdk_err("invalid_op_config", "invalid evm_validate op_config"))?;
 
-        let (abi, _bytecode) = parse_artifact(&cfg.artifact)
-            .map_err(|_| sdk_err("invalid_op_config", "invalid contract artifact"))?;
+        ensure_nonempty_artifact_port(&cfg.artifact_port)
+            .map_err(|_| sdk_err("invalid_op_config", "artifact_port must be non-empty"))?;
+
+        let parsed_abi = if let Some(artifact) = &cfg.artifact {
+            let (abi, _bytecode) = parse_artifact(artifact)
+                .map_err(|_| sdk_err("invalid_op_config", "invalid contract artifact"))?;
+            Some(abi)
+        } else {
+            None
+        };
 
         let contract_address = cfg
             .contract_address
@@ -1209,59 +1874,37 @@ impl Operation for EvmValidateOp {
             ));
         }
 
-        let mut read_assertions = Vec::with_capacity(cfg.read_assertions.len());
-        for ra in &cfg.read_assertions {
-            let (data, outputs) = resolve_function_call(&abi, &ra.function, &ra.args)
-                .map_err(|_| sdk_err("invalid_op_config", "read assertion did not match ABI"))?;
-            read_assertions.push(PreparedReadAssertion {
-                data_hex: bytes_to_hex_prefixed(&data),
-                expected: ra.expected.clone(),
-                outputs,
-            });
-        }
-
-        let mut event_assertions = Vec::with_capacity(cfg.event_assertions.len());
-        for ea in &cfg.event_assertions {
-            let Some(event) = abi.events.iter().find(|e| e.name == ea.event) else {
-                return Err(sdk_err(
+        if let Some(abi) = &parsed_abi {
+            let _ = prepare_validate_assertions(abi, &cfg.read_assertions, &cfg.event_assertions)
+                .map_err(|err| match err.as_str() {
+                "read assertion did not match ABI" => {
+                    sdk_err("invalid_op_config", "read assertion did not match ABI")
+                }
+                "event assertion referenced unknown event" => sdk_err(
                     "invalid_op_config",
                     "event assertion referenced unknown event",
-                ));
-            };
-
-            if event.anonymous {
-                return Err(sdk_err(
+                ),
+                "anonymous events are not supported for validation" => sdk_err(
                     "invalid_op_config",
                     "anonymous events are not supported for validation",
-                ));
-            }
-
-            let sig = format!("{}({})", event.name, event.inputs.join(","));
-            let topic0 = keccak256(sig.as_bytes());
-
-            let from_block = to_block_param(&ea.from_block, "earliest")
-                .map_err(|_| sdk_err("invalid_op_config", "invalid from_block"))?;
-            let to_block = to_block_param(&ea.to_block, "latest")
-                .map_err(|_| sdk_err("invalid_op_config", "invalid to_block"))?;
-
-            event_assertions.push(PreparedEventAssertion {
-                event: ea.event.clone(),
-                topic0_hex: bytes_to_hex_prefixed(topic0.as_slice()),
-                min_count: ea.min_count,
-                from_block,
-                to_block,
-            });
+                ),
+                "invalid from_block" => sdk_err("invalid_op_config", "invalid from_block"),
+                "invalid to_block" => sdk_err("invalid_op_config", "invalid to_block"),
+                _ => sdk_err("invalid_op_config", "invalid evm_validate op_config"),
+            })?;
         }
 
         let state_id = StateId(format!("{}.validate", op_path.0));
         let state = Arc::new(ValidateState {
             state_id: state_id.clone(),
             cfg: ValidateRuntimeConfig {
+                artifact: cfg.artifact,
+                artifact_port: cfg.artifact_port,
                 contract_address,
                 expected_chain_id: cfg.expected_chain_id,
                 require_client_substring: cfg.require_client_substring,
-                read_assertions,
-                event_assertions,
+                read_assertions: cfg.read_assertions,
+                event_assertions: cfg.event_assertions,
             },
         });
 
@@ -1298,6 +1941,31 @@ impl State for ValidateState {
         io: &mut dyn IoProvider,
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
+        let artifact = resolve_artifact_config(ctx, &self.cfg.artifact, &self.cfg.artifact_port)?;
+        let (abi, _bytecode) = parse_artifact(&artifact)
+            .map_err(|_| state_err("invalid_contract_artifact", "contract artifact was invalid"))?;
+        let (read_assertions, event_assertions) = prepare_validate_assertions(
+            &abi,
+            &self.cfg.read_assertions,
+            &self.cfg.event_assertions,
+        )
+        .map_err(|err| match err.as_str() {
+            "read assertion did not match ABI" => {
+                state_err("invalid_op_config", "read assertion did not match ABI")
+            }
+            "event assertion referenced unknown event" => state_err(
+                "invalid_op_config",
+                "event assertion referenced unknown event",
+            ),
+            "anonymous events are not supported for validation" => state_err(
+                "invalid_op_config",
+                "anonymous events are not supported for validation",
+            ),
+            "invalid from_block" => state_err("invalid_op_config", "invalid from_block"),
+            "invalid to_block" => state_err("invalid_op_config", "invalid to_block"),
+            _ => state_err("invalid_op_config", "invalid evm_validate op_config"),
+        })?;
+
         let mut client = EvmIoClient::new(self.state_id.clone(), io);
 
         let client_version_res = client
@@ -1334,7 +2002,7 @@ impl State for ValidateState {
 
         let to = resolve_contract_address(ctx, &self.cfg.contract_address)?;
 
-        for ra in &self.cfg.read_assertions {
+        for ra in &read_assertions {
             let res = client
                 .call(JsonRpcCall::new(
                     "eth_call",
@@ -1365,7 +2033,7 @@ impl State for ValidateState {
             }
         }
 
-        for ea in &self.cfg.event_assertions {
+        for ea in &event_assertions {
             let logs_res = client
                 .call(JsonRpcCall::new(
                     "eth_getLogs",
@@ -1490,11 +2158,31 @@ mod tests {
     #[test]
     fn deploy_io_exports_contract_address() {
         let op = EvmDeployOp;
-        let io = op.io(&serde_json::json!({})).expect("io");
+        let io = op
+            .io(&serde_json::json!({
+                "artifact": sample_artifact(),
+                "from": "0x1111111111111111111111111111111111111111"
+            }))
+            .expect("io");
         assert!(io
             .exports
             .iter()
             .any(|k| k.0.as_str() == KEY_CONTRACT_ADDRESS));
+    }
+
+    #[test]
+    fn deploy_io_imports_artifact_port_when_artifact_is_unset() {
+        let op = EvmDeployOp;
+        let io = op
+            .io(&serde_json::json!({
+                "artifact_port": "contract_artifact",
+                "from": "0x1111111111111111111111111111111111111111"
+            }))
+            .expect("io");
+        assert!(io
+            .imports
+            .iter()
+            .any(|k| k.0.as_str() == KEY_CONTRACT_ARTIFACT));
     }
 
     #[test]
@@ -1512,6 +2200,22 @@ mod tests {
             .imports
             .iter()
             .any(|k| k.0.as_str() == KEY_CONTRACT_ADDRESS));
+    }
+
+    #[test]
+    fn contract_from_nix_io_imports_result_and_exports_artifact() {
+        let op = EvmContractFromNixOp;
+        let io = op
+            .io(&serde_json::json!({
+                "result_pointer": "/artifact"
+            }))
+            .expect("io");
+
+        assert!(io.imports.iter().any(|k| k.0.as_str() == KEY_NIX_RESULT));
+        assert!(io
+            .exports
+            .iter()
+            .any(|k| k.0.as_str() == KEY_CONTRACT_ARTIFACT));
     }
 
     #[test]
