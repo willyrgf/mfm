@@ -12,7 +12,8 @@ env:
   NIX_CMD_OPTS: "-L -v --log-format bar-with-logs"
 
 jobs:
-  ci:
+  flake-check:
+    name: Flake Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -23,22 +24,48 @@ jobs:
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Restore Nix cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/nix
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ hashFiles('flake.lock', 'flake.nix', 'Cargo.lock', '.github/workflows/checks.yml', 'nixfied/**/*.nix') }}
+
       - name: Nix flake check
         run: |
           nix flake check
 
-      - name: Nixfied CI (basic)
+  ci-modes:
+    name: Nixfied CI (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode:
+          - basic
+          - parity
+          - audit
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore Nix cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/nix
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ hashFiles('flake.lock', 'flake.nix', 'Cargo.lock', '.github/workflows/checks.yml', 'nixfied/**/*.nix') }}
+
+      - name: Nixfied CI (${{ matrix.mode }})
         run: |
-          nix run .#ci $NIX_CMD_OPTS -- --basic --summary
+          nix run .#ci $NIX_CMD_OPTS -- --${{ matrix.mode }} --summary
 
       - name: Smoke mfm_cli --help
+        if: matrix.mode == 'basic'
         run: |
           nix run .#mfm_cli $NIX_CMD_OPTS -- --help
-
-      - name: Nixfied CI (parity)
-        run: |
-          nix run .#ci $NIX_CMD_OPTS -- --parity --summary
-
-      - name: Nixfied CI (audit)
-        run: |
-          nix run .#ci $NIX_CMD_OPTS -- --audit --summary
