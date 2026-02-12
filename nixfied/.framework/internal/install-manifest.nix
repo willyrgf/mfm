@@ -34,47 +34,48 @@ let
         ;
     };
 
-  projectTemplates =
-    lib.sort (a: b: a.order < b.order) [
-      (mkTemplate {
-        key = "conf";
-        file = "conf.nix";
-        order = 10;
-        required = true;
-      })
-      (mkTemplate {
-        key = "dev";
-        file = "dev.nix";
-        order = 20;
-      })
-      (mkTemplate {
-        key = "test";
-        file = "test.nix";
-        order = 30;
-      })
-      (mkTemplate {
-        key = "prod";
-        file = "prod.nix";
-        order = 40;
-        aliases = [ "build" ];
-        # Keep help output stable while still accepting the canonical token ("prod").
-        filterDisplay = [ "build" ];
-      })
-      (mkTemplate {
-        key = "quality";
-        file = "quality.nix";
-        order = 50;
-      })
-      (mkTemplate {
-        key = "ci";
-        file = "ci.nix";
-        order = 60;
-      })
-    ];
+  projectTemplates = lib.sort (a: b: a.order < b.order) [
+    (mkTemplate {
+      key = "conf";
+      file = "conf.nix";
+      order = 10;
+      required = true;
+    })
+    (mkTemplate {
+      key = "dev";
+      file = "dev.nix";
+      order = 20;
+    })
+    (mkTemplate {
+      key = "test";
+      file = "test.nix";
+      order = 30;
+    })
+    (mkTemplate {
+      key = "prod";
+      file = "prod.nix";
+      order = 40;
+      aliases = [ "build" ];
+      # Keep help output stable while still accepting the canonical token ("prod").
+      filterDisplay = [ "build" ];
+    })
+    (mkTemplate {
+      key = "quality";
+      file = "quality.nix";
+      order = 50;
+    })
+    (mkTemplate {
+      key = "ci";
+      file = "ci.nix";
+      order = 60;
+    })
+  ];
 
   templateKeys = map (t: t.key) projectTemplates;
   templateFiles = map (t: t.file) projectTemplates;
-  templateFilterTokens = builtins.concatLists (map (t: [ t.key ] ++ (t.aliases or [ ])) projectTemplates);
+  templateFilterTokens = builtins.concatLists (
+    map (t: [ t.key ] ++ (t.aliases or [ ])) projectTemplates
+  );
   templateFilterDisplayTokens = builtins.concatLists (
     map (t: if t.filterDisplay == null then [ t.key ] else t.filterDisplay) projectTemplates
   );
@@ -85,7 +86,9 @@ let
 
   _displayTokensValid =
     let
-      unknown = builtins.filter (token: !(builtins.elem token templateFilterTokens)) templateFilterDisplayTokens;
+      unknown = builtins.filter (
+        token: !(builtins.elem token templateFilterTokens)
+      ) templateFilterDisplayTokens;
     in
     if unknown == [ ] then
       null

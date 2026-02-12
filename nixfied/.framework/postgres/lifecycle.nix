@@ -16,29 +16,28 @@ let
   database = cfg.database or "app";
   testDatabase = cfg.testDatabase or "${database}_test";
   extensions = config.extensions or [ ];
-  pgRuntimePrelude =
-    defaultDb: ''
-      SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
-      eval "$SLOT_INFO_OUT"
+  pgRuntimePrelude = defaultDb: ''
+    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
+    eval "$SLOT_INFO_OUT"
 
-      PORT_VAR="${portVar}"
-      export PGPORT="''${PGPORT:-''${!PORT_VAR:-}}"
-      export PGDATA="''${PGDATA:-${pgdataExpr}}"
-      export PGSOCKET_DIR="''${PGSOCKET_DIR:-''${POSTGRES_SOCKET_DIR:-$PGDATA/run/sockets}}"
-      export PGDATABASE="''${PGDATABASE:-${defaultDb}}"
+    PORT_VAR="${portVar}"
+    export PGPORT="''${PGPORT:-''${!PORT_VAR:-}}"
+    export PGDATA="''${PGDATA:-${pgdataExpr}}"
+    export PGSOCKET_DIR="''${PGSOCKET_DIR:-''${POSTGRES_SOCKET_DIR:-$PGDATA/run/sockets}}"
+    export PGDATABASE="''${PGDATABASE:-${defaultDb}}"
 
-      if [ -z "''${PGPORT:-}" ] || [ -z "''${PGDATA:-}" ]; then
-        echo "ERROR: Failed to resolve PostgreSQL runtime variables (PGPORT/PGDATA)" >&2
+    if [ -z "''${PGPORT:-}" ] || [ -z "''${PGDATA:-}" ]; then
+      echo "ERROR: Failed to resolve PostgreSQL runtime variables (PGPORT/PGDATA)" >&2
+      exit 1
+    fi
+
+    case "$PGPORT" in
+      *[!0-9]*)
+        echo "ERROR: PGPORT must be numeric (got '$PGPORT')" >&2
         exit 1
-      fi
-
-      case "$PGPORT" in
-        *[!0-9]*)
-          echo "ERROR: PGPORT must be numeric (got '$PGPORT')" >&2
-          exit 1
-          ;;
-      esac
-    '';
+        ;;
+    esac
+  '';
 
   ensureConfigPort = ''
     ensure_config_port() {

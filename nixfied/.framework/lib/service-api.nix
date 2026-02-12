@@ -1,5 +1,8 @@
 # Nixfied service API contract helpers (validation + app/hook generation)
-{ pkgs, appApi ? null }:
+{
+  pkgs,
+  appApi ? null,
+}:
 
 let
   lib = pkgs.lib;
@@ -39,7 +42,11 @@ let
   isScriptLike = x: (builtins.isString x) || (builtins.isPath x) || (builtins.isAttrs x);
 
   validateOpErrors =
-    { service, opName, op }:
+    {
+      service,
+      opName,
+      op,
+    }:
     let
       prefix = "${service}.${opName}";
     in
@@ -67,9 +74,7 @@ let
       ++ expect (
         !(op ? category) || isNonEmptyString (op.category or "")
       ) "${prefix}: category must be a non-empty string"
-      ++ expect (
-        !(op ? app) || builtins.isBool (op.app or null)
-      ) "${prefix}: app must be a boolean"
+      ++ expect (!(op ? app) || builtins.isBool (op.app or null)) "${prefix}: app must be a boolean"
       ++ expect (
         !(op ? appName) || isNonEmptyString (op.appName or "")
       ) "${prefix}: appName must be a non-empty string"
@@ -80,8 +85,7 @@ let
   opNames = ops: builtins.attrNames ops;
 
   opsOverlap =
-    coreOps: extOps:
-    builtins.filter (name: builtins.elem name (opNames extOps)) (opNames coreOps);
+    coreOps: extOps: builtins.filter (name: builtins.elem name (opNames extOps)) (opNames coreOps);
 
   validateServiceApiErrors =
     { serviceName, api }:
@@ -95,11 +99,14 @@ let
       missingProfiles = builtins.filter (p: !(builtins.elem p profiles)) requiredProfiles;
       missingCoreOps = builtins.filter (op: !(builtins.hasAttr op coreOps)) requiredCoreOps;
       opErrs = builtins.concatLists (
-        map (name: validateOpErrors {
-          service = serviceName;
-          opName = name;
-          op = allOps.${name};
-        }) (opNames allOps)
+        map (
+          name:
+          validateOpErrors {
+            service = serviceName;
+            opName = name;
+            op = allOps.${name};
+          }
+        ) (opNames allOps)
       );
     in
     if api == null then
@@ -109,32 +116,46 @@ let
     else
       base
       ++ expect (api ? version) "${serviceName}: publicApi.version is required"
-      ++ expect (builtins.isInt (api.version or null)) "${serviceName}: publicApi.version must be an integer"
+      ++ expect (builtins.isInt (
+        api.version or null
+      )) "${serviceName}: publicApi.version must be an integer"
       ++ expect ((api.version or null) == 1) "${serviceName}: publicApi.version must be 1"
       ++ expect (api ? service) "${serviceName}: publicApi.service is required"
-      ++ expect (isNonEmptyString (api.service or "")) "${serviceName}: publicApi.service must be a non-empty string"
+      ++ expect (isNonEmptyString (
+        api.service or ""
+      )) "${serviceName}: publicApi.service must be a non-empty string"
       ++ expect (
         (api.service or "") == serviceName
       ) "${serviceName}: publicApi.service must match service key (${serviceName})"
       ++ expect (api ? summary) "${serviceName}: publicApi.summary is required"
-      ++ expect (isNonEmptyString (api.summary or "")) "${serviceName}: publicApi.summary must be a non-empty string"
+      ++ expect (isNonEmptyString (
+        api.summary or ""
+      )) "${serviceName}: publicApi.summary must be a non-empty string"
       ++ expect (api ? details) "${serviceName}: publicApi.details is required"
-      ++ expect (builtins.isString (api.details or null)) "${serviceName}: publicApi.details must be a string"
+      ++ expect (builtins.isString (
+        api.details or null
+      )) "${serviceName}: publicApi.details must be a string"
       ++ expect (api ? profiles) "${serviceName}: publicApi.profiles is required"
       ++ expect (isNonEmptyList (profiles)) "${serviceName}: publicApi.profiles must be a non-empty list"
-      ++ expect (
-        isListOfNonEmptyStrings profiles
-      ) "${serviceName}: publicApi.profiles must be a list of non-empty strings"
-      ++ expect (missingProfiles == [ ]) "${serviceName}: publicApi.profiles missing required values: ${builtins.concatStringsSep ", " missingProfiles}"
+      ++ expect (isListOfNonEmptyStrings profiles) "${serviceName}: publicApi.profiles must be a list of non-empty strings"
+      ++
+        expect (missingProfiles == [ ])
+          "${serviceName}: publicApi.profiles missing required values: ${builtins.concatStringsSep ", " missingProfiles}"
       ++ expect (api ? coreOps) "${serviceName}: publicApi.coreOps is required"
       ++ expect (isAttrs coreOps) "${serviceName}: publicApi.coreOps must be an attribute set"
-      ++ expect (missingCoreOps == [ ]) "${serviceName}: publicApi.coreOps missing required ops: ${builtins.concatStringsSep ", " missingCoreOps}"
+      ++
+        expect (missingCoreOps == [ ])
+          "${serviceName}: publicApi.coreOps missing required ops: ${builtins.concatStringsSep ", " missingCoreOps}"
       ++ expect (
         !(api ? extensions) || isAttrs extOps
       ) "${serviceName}: publicApi.extensions must be an attribute set"
-      ++ expect (overlap == [ ]) "${serviceName}: publicApi.coreOps/extensions overlap on ops: ${builtins.concatStringsSep ", " overlap}"
+      ++
+        expect (overlap == [ ])
+          "${serviceName}: publicApi.coreOps/extensions overlap on ops: ${builtins.concatStringsSep ", " overlap}"
       ++ expect (api ? artifacts) "${serviceName}: publicApi.artifacts is required"
-      ++ expect (isAttrs (api.artifacts or null)) "${serviceName}: publicApi.artifacts must be an attribute set"
+      ++ expect (isAttrs (
+        api.artifacts or null
+      )) "${serviceName}: publicApi.artifacts must be an attribute set"
       ++ opErrs;
 
   validateServiceApi =
@@ -161,10 +182,13 @@ let
     let
       names = lib.sort (a: b: a < b) (builtins.attrNames serviceApis);
       errs = builtins.concatLists (
-        map (serviceName: validateServiceApiErrors {
-          inherit serviceName;
-          api = serviceApis.${serviceName};
-        }) names
+        map (
+          serviceName:
+          validateServiceApiErrors {
+            inherit serviceName;
+            api = serviceApis.${serviceName};
+          }
+        ) names
       );
     in
     if errs == [ ] then
@@ -204,7 +228,8 @@ let
 
   sanitizeScriptToken = x: pkgs.lib.replaceStrings [ "/" ":" "." " " ] [ "-" "-" "-" "-" ] x;
 
-  launcherNameFor = serviceName: opName: "service-op-${sanitizeScriptToken serviceName}-${sanitizeScriptToken opName}";
+  launcherNameFor =
+    serviceName: opName: "service-op-${sanitizeScriptToken serviceName}-${sanitizeScriptToken opName}";
 
   mkServiceOpLauncher =
     {
@@ -297,42 +322,37 @@ let
   mkServiceAppsFromContract =
     serviceApis:
     let
-      _ =
-        if appApi == null then
-          throw "mkServiceAppsFromContract requires appApi"
-        else
-          null;
+      _ = if appApi == null then throw "mkServiceAppsFromContract requires appApi" else null;
       ops = builtins.filter (op: op.includeApp) (collectServiceOps serviceApis);
-      pairs = map (
-        op:
-        {
+      pairs = map (op: {
+        name = op.appName;
+        value = appApi.mkNixfiedApp {
           name = op.appName;
-          value = appApi.mkNixfiedApp {
-            name = op.appName;
-            script = ''
-              exec ${toString op.launcher} "$@"
-            '';
-            env = { };
-            useDeps = false;
-            api = {
-              version = 1;
-              summary = op.opCfg.summary;
-              details = op.opCfg.details;
-              usage = op.usage;
-            }
-            // lib.optionalAttrs (op.opCfg ? examples) { examples = op.opCfg.examples; }
-            // lib.optionalAttrs (op.opCfg ? args) { args = op.opCfg.args; }
-            // lib.optionalAttrs (op.opCfg ? env) { env = op.opCfg.env; }
-            // { category = op.category; };
-            meta = {
-              nixfied = {
-                service = op.serviceName;
-                operation = op.opName;
-              };
+          script = ''
+            exec ${toString op.launcher} "$@"
+          '';
+          env = { };
+          useDeps = false;
+          api = {
+            version = 1;
+            summary = op.opCfg.summary;
+            details = op.opCfg.details;
+            usage = op.usage;
+          }
+          // lib.optionalAttrs (op.opCfg ? examples) { examples = op.opCfg.examples; }
+          // lib.optionalAttrs (op.opCfg ? args) { args = op.opCfg.args; }
+          // lib.optionalAttrs (op.opCfg ? env) { env = op.opCfg.env; }
+          // {
+            category = op.category;
+          };
+          meta = {
+            nixfied = {
+              service = op.serviceName;
+              operation = op.opName;
             };
           };
-        }
-      ) ops;
+        };
+      }) ops;
     in
     builtins.listToAttrs pairs;
 in

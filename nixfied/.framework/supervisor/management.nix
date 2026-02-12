@@ -10,6 +10,7 @@ let
 
   restart = pkgs.writeShellScript "supervisor-restart" ''
     set -euo pipefail
+    eval "$(${slots.getSlotInfo})"
 
     SERVICE="''${1:-}"
     if [ -z "$SERVICE" ]; then
@@ -17,9 +18,11 @@ let
       exit 1
     fi
 
-    CONFIG_FILE=$(${config.generateConfig})
+    SOCKET_HASH=$(printf '%s' "$RUN_DIR" | cksum | cut -d ' ' -f1)
+    export PC_SOCKET_PATH="/tmp/nixfied-pc-$SOCKET_HASH.sock"
+
     echo "INFO: Restarting $SERVICE"
-    ${pc}/bin/process-compose -f "$CONFIG_FILE" restart "$SERVICE"
+    ${pc}/bin/process-compose process restart "$SERVICE"
     echo "OK: $SERVICE restarted"
   '';
 

@@ -47,8 +47,8 @@ let
     eval "$(${slots.getSlotInfo})"
 
     PORT_VAR="${portVar}"
-    PGPORT="''${!PORT_VAR}"
-    PGDATA="${pgdataExpr}"
+    PGPORT="''${PGPORT:-''${!PORT_VAR}}"
+    PGDATA="''${PGDATA:-${pgdataExpr}}"
 
     RUNNING=false
     if ${pgPackage}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
@@ -73,7 +73,7 @@ let
     eval "$(${slots.getSlotInfo})"
 
     PORT_VAR="${portVar}"
-    PGPORT="''${!PORT_VAR}"
+    PGPORT="''${PGPORT:-''${!PORT_VAR}}"
 
     if ${pgPackage}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
       echo "OK: PostgreSQL healthy port=$PGPORT"

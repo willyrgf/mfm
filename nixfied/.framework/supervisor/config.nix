@@ -8,6 +8,20 @@
 let
   services = project.supervisor.services or { };
   serviceNames = builtins.attrNames services;
+  missingReadiness = builtins.filter (
+    name: (services.${name}.readiness or null) == null
+  ) serviceNames;
+  readinessValidation =
+    if missingReadiness == [ ] then
+      null
+    else
+      throw ''
+        Supervisor configuration invalid:
+          - Missing readiness probe for services: ${builtins.concatStringsSep ", " missingReadiness}
+
+        Fix:
+          - Define supervisor.services.<name>.readiness for each configured service.
+      '';
 
   indent =
     level: text:
@@ -22,25 +36,27 @@ let
     if env == { } then
       ""
     else
-      ''
-        environment:
-      ''
-      + pkgs.lib.concatMapStringsSep "\n" (key: "      - ${key}=${toString env.${key}}") (
-        builtins.attrNames env
-      );
+      indent 4 (
+        "environment:\n"
+        + pkgs.lib.concatMapStringsSep "\n" (key: "  - ${key}=${toString env.${key}}") (
+          builtins.attrNames env
+        )
+      )
+      + "\n";
 
   dependsBlock =
     deps:
     if deps == [ ] then
       ""
     else
-      ''
-        depends_on:
-      ''
-      + pkgs.lib.concatMapStringsSep "\n" (dep: ''
-        ${dep}:
-          condition: process_healthy
-      '') deps;
+      indent 4 (
+        "depends_on:\n"
+        + pkgs.lib.concatMapStringsSep "\n" (dep: ''
+          ${dep}:
+            condition: process_healthy
+        '') deps
+      )
+      + "\n";
 
   readinessBlock =
     readiness:
@@ -54,7 +70,7 @@ let
         failure = toString (readiness.failureThreshold or 3);
       in
       if readiness.type or "http" == "exec" then
-        ''
+        indent 4 ''
           readiness_probe:
             exec:
               command: ${readiness.command or "true"}
@@ -63,8 +79,9 @@ let
             timeout_seconds: ${timeout}
             failure_threshold: ${failure}
         ''
+        + "\n"
       else
-        ''
+        indent 4 ''
           readiness_probe:
             http_get:
               host: ${readiness.host or "127.0.0.1"}
@@ -74,31 +91,36 @@ let
             period_seconds: ${period}
             timeout_seconds: ${timeout}
             failure_threshold: ${failure}
-        '';
+        ''
+        + "\n";
 
   availabilityBlock =
     availability:
     if availability == null then
       ""
     else
-      ''
+      indent 4 ''
         availability:
           restart: ${availability.restart or "on_failure"}
           max_restarts: ${toString (availability.maxRestarts or 3)}
           backoff_seconds: ${toString (availability.backoffSeconds or 5)}
-      '';
+      ''
+      + "\n";
 
   shutdownBlock =
     shutdown:
     if shutdown == null then
       ""
     else
-      ''
-        shutdown:
-          signal: ${toString (shutdown.signal or 15)}
-          timeout_seconds: ${toString (shutdown.timeoutSeconds or 15)}
-          ${pkgs.lib.optionalString (shutdown.command or "" != "") "command: ${shutdown.command}"}
-      '';
+      indent 4 (
+        ''
+          shutdown:
+            signal: ${toString (shutdown.signal or 15)}
+            timeout_seconds: ${toString (shutdown.timeoutSeconds or 15)}
+        ''
+        + pkgs.lib.optionalString (shutdown.command or "" != "") "  command: ${shutdown.command}\n"
+      )
+      + "\n";
 
   serviceYaml =
     name: cfg:
@@ -111,23 +133,23 @@ let
       availability = cfg.availability or null;
       shutdown = cfg.shutdown or null;
     in
-    ''
-            ${name}:
-              command: |
-      ${indent 10 cmd}
-              working_dir: ${workingDir}
-      ${envBlock env}
-      ${readinessBlock readiness}
-      ${dependsBlock deps}
-      ${availabilityBlock availability}
-      ${shutdownBlock shutdown}
-    '';
+    "  ${name}:\n"
+    + "    command: |\n"
+    + (indent 6 cmd)
+    + "\n"
+    + "    working_dir: ${workingDir}\n"
+    + (envBlock env)
+    + (readinessBlock readiness)
+    + (dependsBlock deps)
+    + (availabilityBlock availability)
+    + (shutdownBlock shutdown);
 
-  servicesYaml =
+  servicesYaml = builtins.seq readinessValidation (
     if serviceNames == [ ] then
       "  # No services configured"
     else
-      pkgs.lib.concatMapStringsSep "\n" (name: serviceYaml name services.${name}) serviceNames;
+      pkgs.lib.concatMapStringsSep "\n" (name: serviceYaml name services.${name}) serviceNames
+  );
 
   generateConfig = pkgs.writeShellScript "supervisor-generate-config" ''
     set -euo pipefail

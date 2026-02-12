@@ -80,15 +80,24 @@ let
     set -euo pipefail
     eval "$(${slots.getSlotInfo})"
 
+    NGINX_DIR="${nginxDirExpr}"
+    PID_FILE="$NGINX_DIR/run/nginx.pid"
     HTTP_PORT_VAR="${portVarHttp}"
     HTTP_PORT="''${!HTTP_PORT_VAR}"
 
-    if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$HTTP_PORT" >/dev/null 2>&1; then
-      echo "OK: nginx healthy http_port=$HTTP_PORT"
-      exit 0
+    PID=""
+    if [ -f "$PID_FILE" ]; then
+      PID=$(cat "$PID_FILE" 2>/dev/null || true)
     fi
 
-    echo "ERROR: nginx unhealthy http_port=$HTTP_PORT" >&2
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+      if ${pkgs.netcat}/bin/nc -z 127.0.0.1 "$HTTP_PORT" >/dev/null 2>&1; then
+        echo "OK: nginx healthy http_port=$HTTP_PORT pid=$PID"
+        exit 0
+      fi
+    fi
+
+    echo "ERROR: nginx unhealthy http_port=$HTTP_PORT pid=''${PID:-unknown}" >&2
     exit 1
   '';
 

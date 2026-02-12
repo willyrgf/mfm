@@ -7,23 +7,34 @@
 
 let
   pc = pkgs.process-compose;
+  jq = pkgs.jq;
 
   status = pkgs.writeShellScript "supervisor-status" ''
     set -euo pipefail
-    CONFIG_FILE=$(${config.generateConfig})
-    exec ${pc}/bin/process-compose -f "$CONFIG_FILE" status
+    eval "$(${slots.getSlotInfo})"
+    SOCKET_HASH=$(printf '%s' "$RUN_DIR" | cksum | cut -d ' ' -f1)
+    export PC_SOCKET_PATH="/tmp/nixfied-pc-$SOCKET_HASH.sock"
+
+    if ! ${isRunning} >/dev/null 2>&1; then
+      echo "service=supervisor slot=$SLOT env=$ENV running=false"
+      exit 1
+    fi
+
+    exec ${pc}/bin/process-compose process list -o wide
   '';
 
   isRunning = pkgs.writeShellScript "supervisor-is-running" ''
+    set -euo pipefail
     eval "$(${slots.getSlotInfo})"
-    PID_FILE="$RUN_DIR/supervisor.pid"
-    if [ -f "$PID_FILE" ]; then
-      PID=$(cat "$PID_FILE" 2>/dev/null || true)
-      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-        echo "running (PID $PID)"
-        exit 0
-      fi
+
+    SOCKET_HASH=$(printf '%s' "$RUN_DIR" | cksum | cut -d ' ' -f1)
+    export PC_SOCKET_PATH="/tmp/nixfied-pc-$SOCKET_HASH.sock"
+
+    if ${pc}/bin/process-compose process list -o json >/dev/null 2>&1; then
+      echo "running (socket $PC_SOCKET_PATH)"
+      exit 0
     fi
+
     echo "stopped"
     exit 1
   '';
@@ -56,7 +67,62 @@ let
     fi
   '';
 
+  health = pkgs.writeShellScript "supervisor-health" ''
+    set -euo pipefail
+    eval "$(${slots.getSlotInfo})"
+
+    SOCKET_HASH=$(printf '%s' "$RUN_DIR" | cksum | cut -d ' ' -f1)
+    export PC_SOCKET_PATH="/tmp/nixfied-pc-$SOCKET_HASH.sock"
+
+    if ! ${isRunning} >/dev/null 2>&1; then
+      echo "ERROR: supervisor unhealthy reason=daemon_not_running slot=$SLOT env=$ENV" >&2
+      exit 1
+    fi
+
+    set +e
+    PROC_JSON=$(${pc}/bin/process-compose process list -o json 2>/dev/null)
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ] || [ -z "$PROC_JSON" ]; then
+      echo "ERROR: supervisor unhealthy reason=process_query_failed socket=$PC_SOCKET_PATH" >&2
+      exit 1
+    fi
+
+    TOTAL=$(${jq}/bin/jq -r 'length' <<<"$PROC_JSON")
+    if [ "$TOTAL" -eq 0 ]; then
+      echo "OK: supervisor healthy services=0 slot=$SLOT env=$ENV"
+      exit 0
+    fi
+
+    UNHEALTHY=$(
+      ${jq}/bin/jq -r '
+        [
+          .[]
+          | select((.status != "Running") or (.is_running != true))
+          | (
+              .name
+              + ":status=" + (.status | tostring)
+              + ",running=" + (.is_running | tostring)
+              + ",ready=" + (.is_ready | tostring)
+            )
+        ] | join("; ")
+      ' <<<"$PROC_JSON"
+    )
+
+    if [ -n "$UNHEALTHY" ]; then
+      echo "ERROR: supervisor unhealthy slot=$SLOT env=$ENV services=$UNHEALTHY" >&2
+      exit 1
+    fi
+
+    echo "OK: supervisor healthy services=$TOTAL slot=$SLOT env=$ENV"
+  '';
+
 in
 {
-  inherit status isRunning logs;
+  inherit
+    status
+    isRunning
+    health
+    logs
+    ;
 }

@@ -72,6 +72,17 @@ let
             run_hook SUPERVISOR_STATUS
           '';
         };
+        svc-health = mk {
+          name = "svc-health";
+          summary = "Check service health";
+          details = "Checks readiness health for supervisor-managed services.";
+          category = "supervisor";
+          script = ''
+            SLOT_ENV_OUT="$($REQUIRE_SLOT_ENV)" || exit 1
+            eval "$SLOT_ENV_OUT"
+            run_hook SUPERVISOR_HEALTH
+          '';
+        };
         svc-logs = mk {
           name = "svc-logs";
           summary = "Show service logs";

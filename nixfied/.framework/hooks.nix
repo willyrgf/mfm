@@ -37,6 +37,7 @@ let
         SUPERVISOR_STOP = toString supervisor.stop;
         SUPERVISOR_START_DAEMON = toString supervisor.startDaemon;
         SUPERVISOR_STATUS = toString supervisor.status;
+        SUPERVISOR_HEALTH = toString supervisor.health;
         SUPERVISOR_IS_RUNNING = toString supervisor.isRunning;
         SUPERVISOR_LOGS = toString supervisor.logs;
         SUPERVISOR_RESTART = toString supervisor.restart;

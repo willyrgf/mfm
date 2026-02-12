@@ -27,6 +27,11 @@ in
     startDaemon
     ;
   inherit (config) generateConfig;
-  inherit (statusMod) status isRunning logs;
+  inherit (statusMod)
+    status
+    isRunning
+    health
+    logs
+    ;
   inherit (management) restart rotateLogs;
 }

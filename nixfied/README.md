@@ -835,10 +835,18 @@ Run the integration test suite for the framework itself:
 nix run .#framework::test
 ```
 
-To include the isolation runner in framework tests:
+This defaults to the deepest profile (`full`), including the isolation runner.
+
+For a faster CI-oriented profile:
 
 ```bash
-FRAMEWORK_ISOLATION=1 nix run .#framework::test
+nix run .#framework::test -- --profile ci
+```
+
+To force isolation while using `ci` profile:
+
+```bash
+FRAMEWORK_ISOLATION=1 nix run .#framework::test -- --profile ci
 ```
 
 The test runner is fully packaged with Nix tools; it does not depend on system

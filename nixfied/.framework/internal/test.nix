@@ -35,7 +35,7 @@ let
       exit 1
     fi
 
-    PROFILE="ci"
+    PROFILE="full"
     SUMMARY_JSON=""
 
     usage() {
@@ -43,7 +43,7 @@ let
     Usage: nix run .#framework::test [--profile ci|full] [--summary-json <path>]
 
     Options:
-      --profile <name>      Test profile to run (ci|full). Default: ci.
+      --profile <name>      Test profile to run (ci|full). Default: full.
       --summary-json <path> Write a compact JSON summary to <path>.
       --help                Show this help.
     EOF
@@ -568,8 +568,8 @@ let
     set +e
     (
       unset SLOT_INFO REQUIRE_SLOT_ENV \
-        POSTGRES_INIT POSTGRES_START POSTGRES_STOP POSTGRES_SETUP_DB POSTGRES_FULL_START POSTGRES_FULL_START_TEST \
-        NGINX_INIT NGINX_START NGINX_STOP NGINX_SITE_PROXY NGINX_SITE_STATIC \
+        POSTGRES_INIT POSTGRES_START POSTGRES_STOP POSTGRES_HEALTH POSTGRES_SETUP_DB POSTGRES_FULL_START POSTGRES_FULL_START_TEST \
+        NGINX_INIT NGINX_START NGINX_STOP NGINX_HEALTH NGINX_SITE_PROXY NGINX_SITE_STATIC \
         MINIO_INIT MINIO_START MINIO_STOP MINIO_HEALTH MINIO_CHECK_CONFIG MINIO_BUCKET_LIST \
         RETH_INIT RETH_START RETH_STOP RETH_HEALTH RETH_CHECK_CONFIG \
         HELIOS_INIT HELIOS_START HELIOS_STOP HELIOS_HEALTH HELIOS_CHECK_CONFIG
@@ -606,6 +606,14 @@ let
             app = {
               command = "echo $KEEP_ME";
               workingDir = ".";
+              readiness = {
+                type = "exec";
+                command = "test -n \"$KEEP_ME\"";
+                initialDelaySeconds = 1;
+                periodSeconds = 1;
+                timeoutSeconds = 1;
+                failureThreshold = 1;
+              };
             };
           };
         };
@@ -623,6 +631,41 @@ let
     assert_contains "$SUP_CONFIG" "processes:"
     assert_contains "$SUP_CONFIG" "app:"
     assert_contains "$SUP_CONFIG" 'echo $KEEP_ME'
+
+    log "supervisor config missing readiness"
+    SUP_BAD_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base {
+        supervisor = {
+          enable = true;
+          services = {
+            app = {
+              command = "echo missing readiness";
+              workingDir = ".";
+            };
+          };
+        };
+      };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      supervisor = import ./nixfied/.framework/supervisor { inherit pkgs project slots; };
+    in
+      supervisor.generateConfig
+    NIX
+    )
+
+    SUP_BAD_LOG="$WORKDIR/supervisor-config-missing-readiness.log"
+    set +e
+    build_expr "$SUP_BAD_EXPR" >"$SUP_BAD_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected supervisor config evaluation to fail when readiness is missing"
+    fi
+    assert_contains "$SUP_BAD_LOG" "Missing readiness probe for services"
 
     export NIXFIED_PROMPT_PLAN=0
     log "installer basic"
@@ -686,6 +729,7 @@ let
     assert_contains "$BASIC_HELP" "test  Run tests"
     assert_contains "$BASIC_HELP" "build  Build artifacts"
     assert_contains "$BASIC_HELP" "check  Run quality checks"
+    assert_contains "$BASIC_HELP" "format  Format Nix files"
     assert_contains "$BASIC_HELP" "ci  Run the CI pipeline"
     BASIC_HELP_DEV="$WORKDIR/basic-help-dev.txt"
     run_app "$INSTALL_TARGET" help dev > "$BASIC_HELP_DEV"
@@ -696,7 +740,6 @@ let
     run_app_quiet "$INSTALL_TARGET" build
     run_app_quiet "$INSTALL_TARGET" check
     run_app_quiet "$INSTALL_TARGET" ci --summary
-    assert_app_missing "$INSTALL_TARGET" "format"
     assert_app_missing "$INSTALL_TARGET" "framework::install"
     assert_app_missing "$INSTALL_TARGET" "framework::prompt-plan"
     assert_app_missing "$INSTALL_TARGET" "framework::test"
@@ -945,13 +988,13 @@ let
     assert_contains "$FORCE_HELP" "test  Run tests"
     assert_contains "$FORCE_HELP" "build  Build artifacts"
     assert_contains "$FORCE_HELP" "check  Run quality checks"
+    assert_contains "$FORCE_HELP" "format  Format Nix files"
     assert_contains "$FORCE_HELP" "ci  Run the CI pipeline"
     run_app_quiet "$INSTALL_FORCE" dev
     run_app_quiet "$INSTALL_FORCE" test
     run_app_quiet "$INSTALL_FORCE" build
     run_app_quiet "$INSTALL_FORCE" check
     run_app_quiet "$INSTALL_FORCE" ci --summary
-    assert_app_missing "$INSTALL_FORCE" "format"
     assert_app_missing "$INSTALL_FORCE" "framework::install"
     assert_app_missing "$INSTALL_FORCE" "framework::prompt-plan"
     assert_app_missing "$INSTALL_FORCE" "framework::test"
@@ -1150,6 +1193,8 @@ let
         useDeps = false;
         script = import ./tests/framework/fixtures/nginx/site-lifecycle.nix {
           nginxInit = toString nginx.init;
+          nginxStart = toString nginx.start;
+          nginxStop = toString nginx.stop;
           nginxReload = toString nginx.reload;
           nginxCheckConfig = toString nginx.checkConfig;
           nginxStatus = toString nginx.status;
@@ -1323,18 +1368,18 @@ let
           postgres.enable = false;
           nginx.enable = false;
           minio.enable = false;
-          reth.enable = false;
+          reth.enable = true;
           helios.enable = true;
         };
       };
       slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      reth = import ./nixfied/.framework/reth { inherit pkgs project slots; };
       helios = import ./nixfied/.framework/helios { inherit pkgs project slots; };
       hooks = import ./nixfied/.framework/hooks.nix {
-        inherit pkgs project slots helios;
+        inherit pkgs project slots reth helios;
         postgres = null;
         nginx = null;
         minio = null;
-        reth = null;
         supervisor = null;
       };
       lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
@@ -1347,6 +1392,12 @@ let
         };
         useDeps = false;
         script = import ./tests/framework/fixtures/helios/lifecycle.nix {
+          rethBin = "''${reth.reth}/bin/reth";
+          heliosBin = "''${helios.helios}/bin/helios";
+          rethInit = toString reth.init;
+          rethStart = toString reth.start;
+          rethStop = toString reth.stop;
+          rethHealth = toString reth.health;
           heliosInit = toString helios.init;
           heliosStart = toString helios.start;
           heliosStop = toString helios.stop;
@@ -1393,6 +1444,14 @@ let
             app = {
               command = "sleep 30";
               workingDir = ".";
+              readiness = {
+                type = "exec";
+                command = "true";
+                initialDelaySeconds = 1;
+                periodSeconds = 1;
+                timeoutSeconds = 1;
+                failureThreshold = 1;
+              };
             };
           };
         };
@@ -1415,6 +1474,9 @@ let
         };
         useDeps = false;
         script = import ./tests/framework/fixtures/supervisor/management.nix {
+          supervisorStartDaemon = toString supervisor.startDaemon;
+          supervisorStop = toString supervisor.stop;
+          supervisorHealth = toString supervisor.health;
           supervisorRestart = toString supervisor.restart;
           supervisorRotateLogs = toString supervisor.rotateLogs;
           supervisorIsRunning = toString supervisor.isRunning;
@@ -1711,7 +1773,13 @@ let
     assert_contains "$MODAPP_NAMES_FILE" "service::minio::start"
     assert_contains "$MODAPP_NAMES_FILE" "service::reth::start"
     assert_contains "$MODAPP_NAMES_FILE" "service::helios::start"
+    assert_contains "$MODAPP_NAMES_FILE" "service::postgres::health"
+    assert_contains "$MODAPP_NAMES_FILE" "service::nginx::health"
+    assert_contains "$MODAPP_NAMES_FILE" "service::minio::health"
+    assert_contains "$MODAPP_NAMES_FILE" "service::reth::health"
+    assert_contains "$MODAPP_NAMES_FILE" "service::helios::health"
     assert_contains "$MODAPP_NAMES_FILE" "up"
+    assert_contains "$MODAPP_NAMES_FILE" "svc-health"
     assert_contains "$MODAPP_NAMES_FILE" "check-ports"
 
     log "strict slot/env enforcement"
@@ -1945,11 +2013,16 @@ let
 
     SERVICE_HOOKS_FILE=$(build_expr "$SERVICE_HOOKS_EXPR")
     assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_HEALTH="
     assert_contains "$SERVICE_HOOKS_FILE" "NGINX_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "NGINX_HEALTH="
     assert_contains "$SERVICE_HOOKS_FILE" "MINIO_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "MINIO_HEALTH="
     assert_contains "$SERVICE_HOOKS_FILE" "MINIO_BUCKET_LIST="
     assert_contains "$SERVICE_HOOKS_FILE" "RETH_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "RETH_HEALTH="
     assert_contains "$SERVICE_HOOKS_FILE" "HELIOS_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "HELIOS_HEALTH="
     assert_contains "$SERVICE_HOOKS_FILE" "/nix/store/"
 
     log "supervisor hooks"
@@ -1966,6 +2039,14 @@ let
             app = {
               command = "echo hello";
               workingDir = ".";
+              readiness = {
+                type = "exec";
+                command = "echo ready";
+                initialDelaySeconds = 1;
+                periodSeconds = 1;
+                timeoutSeconds = 1;
+                failureThreshold = 1;
+              };
             };
           };
         };
@@ -1990,6 +2071,7 @@ let
     assert_contains "$SUP_HOOKS_FILE" "SUPERVISOR_START="
     assert_contains "$SUP_HOOKS_FILE" "SUPERVISOR_STOP="
     assert_contains "$SUP_HOOKS_FILE" "SUPERVISOR_STATUS="
+    assert_contains "$SUP_HOOKS_FILE" "SUPERVISOR_HEALTH="
     # Verify they point to nix store paths
     assert_contains "$SUP_HOOKS_FILE" "/nix/store/"
 
