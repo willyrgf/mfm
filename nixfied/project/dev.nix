@@ -164,7 +164,46 @@
         export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm"
         export MFM_EVM_RPC_URL="http://127.0.0.1:$HELIOSRPC_PORT"
 
-        cargo run -p mfm --bin mfm_cli -- \
+        # Helios can be "healthy" (responds to `eth_chainId`) while still syncing.
+        # Wait until `eth_blockNumber` succeeds before attempting the snapshot.
+        echo "INFO: waiting for Helios to sync (eth_blockNumber)..." >&2
+        READY=0
+        for i in $(seq 1 300); do
+          if curl -fsS --max-time 2 \
+            -H 'content-type: application/json' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+            "$MFM_EVM_RPC_URL" \
+            | jq -e '.result | strings' >/dev/null 2>&1
+          then
+            READY=1
+            break
+          fi
+
+          if [ $((i % 10)) -eq 0 ]; then
+            SYNC_STATUS=$(
+              curl -fsS --max-time 2 \
+                -H 'content-type: application/json' \
+                --data '{"jsonrpc":"2.0","id":1,"method":"eth_syncing","params":[]}' \
+                "$MFM_EVM_RPC_URL" 2>/dev/null \
+                | jq -r '.result | if type == "object" then "\(.currentBlock)/\(.highestBlock)" else "not_syncing" end' 2>/dev/null \
+                || true
+            )
+            if [ -n "''${SYNC_STATUS:-}" ]; then
+              echo "INFO: helios eth_syncing=''${SYNC_STATUS}" >&2
+            fi
+          fi
+
+          sleep 1
+        done
+
+        if [ "$READY" -ne 1 ]; then
+          echo "ERROR: Helios did not become ready (eth_blockNumber) within 300s." >&2
+          echo "       This usually means Helios is still syncing or needs a mainnet checkpoint / valid consensus RPC." >&2
+          exit 1
+        fi
+
+        cargo run -q -p mfm --bin mfm_cli -- \
+          --output-format json \
           portfolio snapshot "$ADDRESS" \
           --chain-id 1
       '';
