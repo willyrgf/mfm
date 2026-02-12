@@ -614,6 +614,355 @@ let
       exit "$DEV_RC"
     fi
 
+    log "fixtures services prelude"
+    FIX_SVC_DIR="$WORKDIR/fixtures-services"
+    mkdir -p "$FIX_SVC_DIR"
+    FIX_SVC_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      conf = import ./tests/framework/fixtures/modules/conf.nix { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base conf;
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      postgres =
+        if (project.modules.postgres.enable or false) then
+          import ./nixfied/.framework/postgres { inherit pkgs project slots; }
+        else
+          null;
+      hooks = import ./nixfied/.framework/hooks.nix {
+        inherit pkgs project slots postgres;
+        nginx = null;
+        minio = null;
+        reth = null;
+        helios = null;
+      };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+
+      fixtures = {
+        artifacts = {
+          prefix = "fx";
+          logs = true;
+        };
+        services = [
+          {
+            name = "postgres";
+            profile = "test";
+            timeout = 120;
+            interval = 1;
+            logs = true;
+          }
+        ];
+      };
+
+      fixturePrelude = lib.fixtures.renderPrelude {
+        inherit fixtures;
+        contextName = "fixtures-services";
+        defaultProfile = "default";
+        defaultLogs = true;
+      };
+    in
+    lib.mkAppScript {
+      name = "fixtures-services";
+      env = {
+        "''${project.project.envVar}" = "test";
+        "''${project.project.slotVar}" = "0";
+      };
+      useDeps = false;
+      script = '''
+        fail() {
+          echo "FAIL: $*" >&2
+          exit 1
+        }
+
+        pick_port() {
+          local port
+          local i
+          for i in $(seq 1 40); do
+            port=$(( (RANDOM % 20000) + 20000 ))
+            if ! nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+              echo "$port"
+              return 0
+            fi
+          done
+          return 1
+        }
+
+        export PGPORT="$(pick_port)" || fail "failed to pick port"
+        export CI_ARTIFACTS_DIR="$PWD/.artifacts"
+
+        ''${fixturePrelude}
+
+        LOG="$CI_ARTIFACTS_DIR/fx-0-postgres.log"
+        [ -f "$LOG" ] || fail "missing fixture service log: $LOG"
+        for i in $(seq 1 200); do
+          if grep -q "OK: Database 'app_test' ready" "$LOG"; then
+            exit 0
+          fi
+          sleep 0.1
+        done
+        fail "expected test db setup in log"
+      ''';
+    }
+    NIX
+    )
+
+    FIX_SVC_SCRIPT=$(build_expr "$FIX_SVC_EXPR")
+    FIX_SVC_LOG="$WORKDIR/fixtures-services.log"
+    set +e
+    (cd "$FIX_SVC_DIR" && "$FIX_SVC_SCRIPT" >"$FIX_SVC_LOG" 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      echo "Fixtures services fixture failed (rc=$RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 100 lines):" >&2
+      tail -100 "$FIX_SVC_LOG" >&2 || true
+      exit "$RC"
+    fi
+    assert_contains "$FIX_SVC_LOG" "INFO: fixture service start name=postgres profile=test"
+    assert_contains "$FIX_SVC_LOG" "OK: fixture service ready service=postgres profile=test"
+
+    log "fixture_start_service"
+    FIX_START_DIR="$WORKDIR/fixture-start-service"
+    mkdir -p "$FIX_START_DIR"
+    FIX_START_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      conf = import ./tests/framework/fixtures/modules/conf.nix { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base conf;
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      postgres =
+        if (project.modules.postgres.enable or false) then
+          import ./nixfied/.framework/postgres { inherit pkgs project slots; }
+        else
+          null;
+      hooks = import ./nixfied/.framework/hooks.nix {
+        inherit pkgs project slots postgres;
+        nginx = null;
+        minio = null;
+        reth = null;
+        helios = null;
+      };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+    in
+    lib.mkAppScript {
+      name = "fixture-start-service";
+      env = {
+        "''${project.project.envVar}" = "test";
+        "''${project.project.slotVar}" = "0";
+      };
+      useDeps = false;
+      script = '''
+        fail() {
+          echo "FAIL: $*" >&2
+          exit 1
+        }
+
+        pick_port() {
+          local port
+          local i
+          for i in $(seq 1 40); do
+            port=$(( (RANDOM % 20000) + 20000 ))
+            if ! nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+              echo "$port"
+              return 0
+            fi
+          done
+          return 1
+        }
+
+        export PGPORT="$(pick_port)" || fail "failed to pick port"
+        export CI_ARTIFACTS_DIR="$PWD/.artifacts"
+
+        LOGFILE="$(artifact_path "postgres-fixture.log")"
+        fixture_start_service postgres test 120 1 "$LOGFILE"
+        [ -f "$LOGFILE" ] || fail "missing fixture_start_service log: $LOGFILE"
+        for i in $(seq 1 200); do
+          if grep -q "OK: Database 'app_test' ready" "$LOGFILE"; then
+            break
+          fi
+          sleep 0.1
+        done
+        grep -q "OK: Database 'app_test' ready" "$LOGFILE" || fail "expected test db setup in log"
+
+        # Explicitly run cleanups so we can assert the port closes.
+        _run_cleanups
+
+        for i in $(seq 1 30); do
+          if nc -z 127.0.0.1 "$PGPORT" >/dev/null 2>&1; then
+            sleep 0.2
+            continue
+          fi
+          echo "OK: fixture cleanup stopped postgres port=$PGPORT"
+          exit 0
+        done
+        fail "postgres still listening after cleanup port=$PGPORT"
+      ''';
+    }
+    NIX
+    )
+
+    FIX_START_SCRIPT=$(build_expr "$FIX_START_EXPR")
+    FIX_START_LOG="$WORKDIR/fixture-start-service.log"
+    set +e
+    (cd "$FIX_START_DIR" && "$FIX_START_SCRIPT" >"$FIX_START_LOG" 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      echo "fixture_start_service fixture failed (rc=$RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 100 lines):" >&2
+      tail -100 "$FIX_START_LOG" >&2 || true
+      exit "$RC"
+    fi
+    assert_contains "$FIX_START_LOG" "OK: fixture service ready service=postgres profile=test"
+    assert_contains "$FIX_START_LOG" "OK: fixture cleanup stopped postgres"
+
+    log "fixtures env resolvers"
+    FIX_ENV_DIR="$WORKDIR/fixtures-env"
+    mkdir -p "$FIX_ENV_DIR"
+    FIX_ENV_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      conf = import ./tests/framework/fixtures/modules/conf.nix { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base conf;
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; minio = null; reth = null; helios = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+    in
+    lib.mkAppScript {
+      name = "fixtures-env";
+      env = {
+        POSTGRES_PORT = "15432";
+        RETHHTTP_PORT = "18545";
+        HELIOSRPC_PORT = "18547";
+        MINIOAPI_PORT = "19000";
+        MINIO_BUCKET = "bucket1";
+        MINIO_REGION = "us-west-2";
+        MINIO_PREFIX = "pfx";
+        SOURCE_VAR = "from-env";
+      };
+      fixtures = {
+        env = {
+          FIX_POSTGRES_URL = { from = "postgres.url"; database = "db1"; };
+          FIX_RETH_HTTP_URL = { from = "reth.httpUrl"; };
+          FIX_HELIOS_RPC_URL = { from = "helios.rpcUrl"; };
+          FIX_MINIO_ENDPOINT = { from = "minio.endpoint"; };
+          FIX_MINIO_BUCKET = { from = "minio.bucket"; };
+          FIX_MINIO_REGION = { from = "minio.region"; };
+          FIX_MINIO_PREFIX = { from = "minio.prefix"; };
+          FIX_FROM_ENV = { from = "env"; var = "SOURCE_VAR"; };
+        };
+      };
+      useDeps = false;
+      script = '''
+        fail() {
+          echo "FAIL: $*" >&2
+          exit 1
+        }
+
+        [ "$FIX_POSTGRES_URL" = "postgresql://postgres:postgres@127.0.0.1:15432/db1" ] || fail "FIX_POSTGRES_URL mismatch: $FIX_POSTGRES_URL"
+        [ "$FIX_RETH_HTTP_URL" = "http://127.0.0.1:18545" ] || fail "FIX_RETH_HTTP_URL mismatch: $FIX_RETH_HTTP_URL"
+        [ "$FIX_HELIOS_RPC_URL" = "http://127.0.0.1:18547" ] || fail "FIX_HELIOS_RPC_URL mismatch: $FIX_HELIOS_RPC_URL"
+        [ "$FIX_MINIO_ENDPOINT" = "http://127.0.0.1:19000" ] || fail "FIX_MINIO_ENDPOINT mismatch: $FIX_MINIO_ENDPOINT"
+        [ "$FIX_MINIO_BUCKET" = "bucket1" ] || fail "FIX_MINIO_BUCKET mismatch: $FIX_MINIO_BUCKET"
+        [ "$FIX_MINIO_REGION" = "us-west-2" ] || fail "FIX_MINIO_REGION mismatch: $FIX_MINIO_REGION"
+        [ "$FIX_MINIO_PREFIX" = "pfx" ] || fail "FIX_MINIO_PREFIX mismatch: $FIX_MINIO_PREFIX"
+        [ "$FIX_FROM_ENV" = "from-env" ] || fail "FIX_FROM_ENV mismatch: $FIX_FROM_ENV"
+      ''';
+    }
+    NIX
+    )
+
+    FIX_ENV_SCRIPT=$(build_expr "$FIX_ENV_EXPR")
+    FIX_ENV_LOG="$WORKDIR/fixtures-env.log"
+    set +e
+    (cd "$FIX_ENV_DIR" && "$FIX_ENV_SCRIPT" >"$FIX_ENV_LOG" 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      echo "Fixtures env resolvers fixture failed (rc=$RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 100 lines):" >&2
+      tail -100 "$FIX_ENV_LOG" >&2 || true
+      exit "$RC"
+    fi
+
+    log "fixtures service validation"
+    FIX_BAD_UNKNOWN_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      conf = import ./tests/framework/fixtures/modules/conf.nix { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base conf;
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; minio = null; reth = null; helios = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+    in
+      pkgs.writeText "fixture-prelude" (lib.fixtures.renderPrelude {
+        fixtures = { services = [ "does-not-exist" ]; };
+        contextName = "bad-fixtures";
+        defaultProfile = "default";
+        defaultLogs = true;
+      })
+    NIX
+    )
+
+    FIX_BAD_UNKNOWN_LOG="$WORKDIR/fixtures-bad-unknown.log"
+    set +e
+    build_expr "$FIX_BAD_UNKNOWN_EXPR" >"$FIX_BAD_UNKNOWN_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected unknown fixture service evaluation to fail"
+    fi
+    assert_contains "$FIX_BAD_UNKNOWN_LOG" "Unknown fixture service"
+
+    FIX_BAD_DISABLED_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      conf = import ./tests/framework/fixtures/modules/conf.nix { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base conf // {
+        modules = conf.modules // {
+          postgres = (conf.modules.postgres or { }) // { enable = false; };
+        };
+      };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; minio = null; reth = null; helios = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+    in
+      pkgs.writeText "fixture-prelude" (lib.fixtures.renderPrelude {
+        fixtures = { services = [ "postgres" ]; };
+        contextName = "bad-fixtures";
+        defaultProfile = "default";
+        defaultLogs = true;
+      })
+    NIX
+    )
+
+    FIX_BAD_DISABLED_LOG="$WORKDIR/fixtures-bad-disabled.log"
+    set +e
+    build_expr "$FIX_BAD_DISABLED_EXPR" >"$FIX_BAD_DISABLED_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected disabled fixture service evaluation to fail"
+    fi
+    assert_contains "$FIX_BAD_DISABLED_LOG" "requires project.modules.postgres.enable = true"
+
     log "supervisor config"
     SUP_EXPR=$(cat <<'NIX'
     { root, system }:

@@ -185,7 +185,7 @@ let
 
     _service_token() {
       local service="$1"
-      echo "$service" | tr '[:lower:]' '[:upper:]' | tr -- '-.:/' '_'
+      echo "$service" | tr '[:lower:]' '[:upper:]' | tr '.:/-' '_'
     }
 
     _service_hook_name() {
