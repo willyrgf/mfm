@@ -36,7 +36,8 @@ let
     PORT_VAR="${portVar}"
     export PGPORT="''${!PORT_VAR}"
     export PGDATA="${pgdataExpr}"
-    export PGSOCKET_DIR="''${POSTGRES_SOCKET_DIR:-$PGDATA/run/sockets}"
+    SOCKET_HASH=$(printf '%s' "''${RUN_DIR:-$PGDATA}" | ${pkgs.coreutils}/bin/cksum | ${pkgs.coreutils}/bin/cut -d ' ' -f1)
+    export PGSOCKET_DIR="''${PGSOCKET_DIR:-/tmp/nixfied-pg-$SOCKET_HASH}"
 
     ${lifecycle.stop}
     ${lifecycle.start}

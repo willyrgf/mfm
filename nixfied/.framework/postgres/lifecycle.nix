@@ -23,7 +23,11 @@ let
     PORT_VAR="${portVar}"
     export PGPORT="''${PGPORT:-''${!PORT_VAR:-}}"
     export PGDATA="''${PGDATA:-${pgdataExpr}}"
-    export PGSOCKET_DIR="''${PGSOCKET_DIR:-''${POSTGRES_SOCKET_DIR:-$PGDATA/run/sockets}}"
+    # Keep the unix socket path short. In CI (and on some systems with long TMPDIR paths),
+    # putting sockets under $PGDATA can exceed the 107-byte sockaddr_un.sun_path limit and
+    # prevent PostgreSQL from starting.
+    SOCKET_HASH=$(printf '%s' "''${RUN_DIR:-$PGDATA}" | ${pkgs.coreutils}/bin/cksum | ${pkgs.coreutils}/bin/cut -d ' ' -f1)
+    export PGSOCKET_DIR="''${PGSOCKET_DIR:-/tmp/nixfied-pg-$SOCKET_HASH}"
     export PGDATABASE="''${PGDATABASE:-${defaultDb}}"
 
     if [ -z "''${PGPORT:-}" ] || [ -z "''${PGDATA:-}" ]; then
