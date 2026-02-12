@@ -11,6 +11,10 @@ pub struct SnapshotArgs {
     /// Wallet public address (0x...)
     pub address: String,
 
+    /// EVM chain id to snapshot (default: 1)
+    #[arg(long, default_value_t = 1)]
+    pub chain_id: u64,
+
     /// Optional tokens JSON array to include/override allowlisted tokens (default: [])
     #[arg(long, default_value = "[]")]
     pub tokens_json: String,
@@ -55,6 +59,7 @@ async fn execute_internal(args: &SnapshotArgs) -> CommandResult<FeatureExecution
                 feature_id: "portfolio.snapshot".to_string(),
                 payload: serde_json::json!({
                     "address": args.address,
+                    "chain_id": args.chain_id,
                     "tokens": tokens,
                 }),
             },

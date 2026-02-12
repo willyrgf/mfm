@@ -971,7 +971,8 @@ mod tests {
         let registry: Arc<dyn mfm_sdk::op::OperationRegistry> = Arc::new(reg);
 
         let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
-        let pipeline = single_op_pipeline(op.op_id(), op.op_version(), op_config).expect("pipeline");
+        let pipeline =
+            single_op_pipeline(op.op_id(), op.op_version(), op_config).expect("pipeline");
 
         let resolver = Arc::new(SdkPlanResolver::new(
             Arc::clone(&registry),
@@ -1093,7 +1094,10 @@ mod tests {
 
         let mut found = false;
         for e in &stream {
-            let Event::Kernel(KernelEvent::StateFailed { state_id, error, .. }) = &e.event else {
+            let Event::Kernel(KernelEvent::StateFailed {
+                state_id, error, ..
+            }) = &e.event
+            else {
                 continue;
             };
             if state_id.0 != "portfolio_tracker.main.chain_id" {

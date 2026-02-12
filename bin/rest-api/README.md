@@ -59,6 +59,14 @@ curl -s "http://127.0.0.1:3001/v1/features/run.start/execute" \
   -d '{"payload":{"op_id":"proof","op_version":"v1","op_config":{}}}'
 ```
 
+Portfolio snapshot feature:
+
+```bash
+curl -s "http://127.0.0.1:3001/v1/features/portfolio.snapshot/execute" \
+  -H "content-type: application/json" \
+  -d '{"payload":{"address":"0x000000000000000000000000000000000000dead","chain_id":1,"tokens":[]}}'
+```
+
 Supported `op_id` values (current):
 
 - `proof` (default)

@@ -718,9 +718,11 @@ impl AppServices {
             }
         }
 
+        let chain_id = req.chain_id.unwrap_or(1);
+
         let op_config = serde_json::json!({
             "wallet_address": wallet_address,
-            "chain_id": 1,
+            "chain_id": chain_id,
             "tokens": tokens,
         });
 
@@ -1274,11 +1276,12 @@ impl FeatureCatalog {
                 id: "portfolio.snapshot".to_string(),
                 version: "v1".to_string(),
                 kind: FeatureKind::Operation,
-                description: "Start a portfolio snapshot run from a single wallet address (default: Ethereum mainnet)".to_string(),
+                description: "Start a portfolio snapshot run from a single wallet address (default chain_id: 1)".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "address": {"type": "string"},
+                        "chain_id": {"type": "integer"},
                         "tokens": {"type": "array"}
                     },
                     "required": ["address"]
@@ -1395,6 +1398,7 @@ struct RunEventsInput {
 #[derive(Clone, Debug, Deserialize)]
 pub struct PortfolioSnapshotRequest {
     pub address: String,
+    pub chain_id: Option<u64>,
     #[serde(default)]
     pub tokens: Vec<PortfolioTokenSpec>,
 }

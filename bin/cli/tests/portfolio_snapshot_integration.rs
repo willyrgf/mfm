@@ -39,7 +39,6 @@ fn portfolio_snapshot_invalid_tokens_json_is_stable_error() {
     let parsed = parse_error_response(&output.stderr);
     assert_eq!(parsed.error.code, "InvalidJson");
 }
-
 #[test]
 fn portfolio_snapshot_tokens_json_must_be_array_is_stable_error() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
@@ -62,4 +61,3 @@ fn portfolio_snapshot_tokens_json_must_be_array_is_stable_error() {
     let parsed = parse_error_response(&output.stderr);
     assert_eq!(parsed.error.code, "InvalidJson");
 }
-

@@ -147,10 +147,10 @@ Use this when you want an end-to-end signal that:
 
 ### Important: `portfolio.snapshot` Feature (REST + CLI) vs Local `reth`
 
-The `portfolio.snapshot` feature (used by both the REST API and `mfm_cli portfolio snapshot`) currently
-forces `chain_id=1` (Ethereum mainnet default).
-Local `reth` dev networks do not use chain id 1, so a parity test **should call the op directly**
-with `chain_id` read from `eth_chainId`.
+The `portfolio.snapshot` feature (used by both the REST API and `mfm_cli portfolio snapshot`) defaults
+to `chain_id=1` (Ethereum mainnet).
+Local `reth` dev networks do not use chain id 1, so parity tests should pass `chain_id` explicitly
+(for example, read from `eth_chainId`) to avoid `chain_id_mismatch`.
 
 ### Recommended Structure
 
@@ -170,8 +170,8 @@ Pipeline strategy:
 
 1. Fetch dev account (`eth_accounts[0]`)
 2. Deploy a minimal ERC-20 token contract (MockERC20) and mint to the dev account
-3. Start `portfolio_tracker` with:
-   - `wallet_address = <dev account>`
+3. Start `portfolio.snapshot` with:
+   - `address = <dev account>`
    - `chain_id = <eth_chainId>`
    - `tokens = [{ address: <mock token address>, symbol: "MOCK", decimals: null }]`
 4. Assert output artifact includes:
@@ -214,13 +214,13 @@ Example:
 
 ```bash
 export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/mfm"
-# Must point at a chain_id=1 node (mainnet mode). A local `reth` dev chain will fail `chain_id_mismatch`.
 export MFM_EVM_RPC_URL="http://127.0.0.1:8545"
 export MFM_PORTFOLIO_TOKENS_JSON='[
   {"address":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","symbol":"USDC","decimals":6}
 ]'
 
-nix run .#mfm_cli -- portfolio snapshot 0x000000000000000000000000000000000000dead --output-format json
+# Default is `--chain-id 1`. Local `reth` dev networks typically require passing a different chain id.
+nix run .#mfm_cli -- portfolio snapshot 0x000000000000000000000000000000000000dead --chain-id 1 --output-format json
 ```
 
 ### REST
@@ -228,5 +228,5 @@ nix run .#mfm_cli -- portfolio snapshot 0x000000000000000000000000000000000000de
 ```bash
 curl -s "http://127.0.0.1:3001/v1/features/portfolio.snapshot/execute" \
   -H "content-type: application/json" \
-  -d '{"payload":{"address":"0x000000000000000000000000000000000000dead"}}'
+  -d '{"payload":{"address":"0x000000000000000000000000000000000000dead","chain_id":1}}'
 ```

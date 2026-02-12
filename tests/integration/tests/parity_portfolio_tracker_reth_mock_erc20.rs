@@ -4,6 +4,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
+
 use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_collectors_evm_jsonrpc_http::{EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory};
 use mfm_event_store_postgres::PostgresEventStore;
@@ -21,7 +25,7 @@ use mfm_machine::stores::{ArtifactStore, EventStore};
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
-use mfm_sdk::unstable::{single_op_pipeline, DefaultRunLauncher};
+use mfm_sdk::unstable::DefaultRunLauncher;
 
 #[derive(Default)]
 struct MapContext {
@@ -52,6 +56,23 @@ impl DynContext for MapContext {
     }
 }
 
+fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
+    let s = serde_json::to_string(&body).expect("json request must serialize");
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(s))
+        .expect("request")
+}
+
+async fn response_json(resp: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    serde_json::from_slice(&bytes).expect("json response")
+}
+
 fn run_config_with_allowlist(allowlist: Vec<String>) -> RunConfig {
     RunConfig {
         io_mode: IoMode::Live,
@@ -79,7 +100,10 @@ fn parse_u64_hex(s: &str) -> u64 {
 
 fn normalize_address_lower(s: &str) -> String {
     let s = s.trim();
-    let rest = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).expect("0x");
+    let rest = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .expect("0x");
     assert_eq!(rest.len(), 40, "address must be 20 bytes hex");
     assert!(
         rest.chars().all(|c| c.is_ascii_hexdigit()),
@@ -307,71 +331,67 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
         .expect("contract address");
     let token_address_norm = normalize_address_lower(token_address);
 
-    // 2) Run `portfolio_tracker` directly (feature `portfolio.snapshot` forces chain_id=1).
-    let pipeline = single_op_pipeline(
-        OpId("portfolio_tracker".to_string()),
-        "v1".to_string(),
-        serde_json::json!({
-            "wallet_address": from_norm,
-            "chain_id": chain_id,
-            "tokens": [
-                {
-                    "address": token_address_norm,
-                    "symbol": "MOCK",
-                    "decimals": null
-                }
-            ],
-        }),
-    )
-    .expect("pipeline");
+    // 2) Run `portfolio.snapshot` feature end-to-end (REST feature execution path).
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        bundle,
+        events: Arc::clone(&events),
+        artifacts: Arc::clone(&artifacts),
+    });
 
-    let run = launcher
-        .start_pipeline(
-            Arc::clone(&bundle.engine),
-            Stores {
-                events: Arc::clone(&events),
-                artifacts: Arc::clone(&artifacts),
-            },
-            Arc::clone(&bundle.registry),
-            Arc::clone(&bundle.planner),
-            LaunchPipeline {
-                pipeline,
-                input: serde_json::json!({}),
-                run_config,
-                build: BuildProvenance {
-                    git_commit: None,
-                    cargo_lock_hash: None,
-                    flake_lock_hash: None,
-                    rustc_version: None,
-                    target_triple: None,
-                    env_allowlist: Vec::new(),
-                },
-                initial_context: Box::new(MapContext::default()),
-            },
+    let resp = app
+        .clone()
+        .oneshot(json_post(
+            "/v1/features/portfolio.snapshot/execute",
+            serde_json::json!({
+                "payload": {
+                    "address": from_norm,
+                    "chain_id": chain_id,
+                    "tokens": [
+                        {
+                            "address": token_address_norm,
+                            "symbol": "MOCK",
+                            "decimals": null
+                        }
+                    ],
+                }
+            }),
+        ))
+        .await
+        .expect("feature execute response");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "success");
+    assert_eq!(v["data"]["feature_id"], "portfolio.snapshot");
+    assert_eq!(v["data"]["result"]["phase"], "completed");
+
+    let snapshot_artifact_id = v["data"]["result"]["snapshot_artifact_id"]
+        .as_str()
+        .expect("snapshot_artifact_id")
+        .to_string();
+
+    let artifact_resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/artifacts/{snapshot_artifact_id}"))
+                .body(Body::empty())
+                .expect("artifact request"),
         )
         .await
-        .expect("start portfolio snapshot");
+        .expect("artifact get response");
 
-    assert_eq!(run.phase, RunPhase::Completed);
-    let final_snapshot_id = run.final_snapshot_id.expect("final snapshot id");
+    assert_eq!(artifact_resp.status(), StatusCode::OK);
+    let a = response_json(artifact_resp).await;
 
-    let snapshot_bytes = artifacts
-        .get(&final_snapshot_id)
-        .await
-        .expect("read final snapshot");
-    let snapshot: serde_json::Value =
-        serde_json::from_slice(&snapshot_bytes).expect("decode snapshot json");
+    assert_eq!(a["status"], "success");
+    assert_eq!(a["data"]["artifact_id"], snapshot_artifact_id);
+    assert_eq!(a["data"]["encoding"], "json");
 
-    let out_id = snapshot
-        .get("portfolio_tracker.main.snapshot_artifact_id")
-        .and_then(|v| v.as_str())
-        .expect("snapshot_artifact_id");
-
-    let out_bytes = artifacts
-        .get(&mfm_machine::ids::ArtifactId(out_id.to_string()))
-        .await
-        .expect("read output artifact");
-    let out: serde_json::Value = serde_json::from_slice(&out_bytes).expect("output json");
+    let out = a
+        .get("data")
+        .and_then(|v| v.get("value"))
+        .expect("output value");
 
     assert_eq!(
         out.get("wallet_address").and_then(|v| v.as_str()),
@@ -404,4 +424,3 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
         Some("1.000000")
     );
 }
-

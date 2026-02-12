@@ -303,7 +303,7 @@ mfm_cli run artifacts get <ARTIFACT_ID> [OPTIONS]
 
 ### `portfolio snapshot`
 
-Snapshots a wallet portfolio (ETH + allowlisted ERC-20 balances) on Ethereum by default.
+Snapshots a wallet portfolio (ETH + allowlisted ERC-20 balances) with `chain_id=1` by default.
 
 **Requirements:**
 - `DATABASE_URL` (event store)
@@ -315,6 +315,7 @@ mfm_cli portfolio snapshot <ADDRESS> [OPTIONS]
 ```
 
 **Key Options:**
+- `--chain-id <N>`: EVM chain id to snapshot (default: 1)
 - `--tokens-json <JSON>`: Optional JSON array to include/override allowlisted tokens (default: `[]`)
 
 ## Configuration

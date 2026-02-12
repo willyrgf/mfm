@@ -374,6 +374,9 @@ async fn feature_execute_run_start_happy_path() {
     assert!(v["data"]["result"]["run_id"].as_str().is_some());
 }
 
+// Holding `ENV_LOCK` across `.await` is intentional: we mutate process env vars
+// and need to prevent cross-test interference under concurrent test execution.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn feature_execute_portfolio_snapshot_missing_rpc_url_is_stable_error() {
     let _guard = ENV_LOCK.lock().expect("env lock");
