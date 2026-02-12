@@ -34,6 +34,8 @@ All responses are JSON envelopes:
 Endpoints:
 
 - `GET /v1/health`
+- `GET /v1/features`
+- `POST /v1/features/:feature_id/execute`
 - `POST /v1/runs/start`
 - `POST /v1/runs/:run_id/resume`
 - `GET /v1/runs/:run_id/status`
@@ -46,6 +48,14 @@ Start a run:
 curl -s "http://127.0.0.1:3001/v1/runs/start" \
   -H "content-type: application/json" \
   -d '{"op_id":"proof","op_version":"v1","op_config":{}}'
+```
+
+Generic feature execution:
+
+```bash
+curl -s "http://127.0.0.1:3001/v1/features/run.start/execute" \
+  -H "content-type: application/json" \
+  -d '{"payload":{"op_id":"proof","op_version":"v1","op_config":{}}}'
 ```
 
 Supported `op_id` values (current):

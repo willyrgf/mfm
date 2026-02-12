@@ -186,6 +186,8 @@ These commands are intended for parity/integration testing and early workflows. 
 - a PostgreSQL-backed event store (requires `DATABASE_URL` or `--database-url`)
 - a filesystem artifact store (defaults to `$MFM_ARTIFACT_ROOT` or `~/.mfm/run_artifacts`, or use `--artifact-root`)
 
+Run commands and REST API run endpoints are backed by the same shared feature catalog/runtime layer (`mfm-app`) to keep both entrypoints behaviorally aligned.
+
 ### `run start`
 
 Starts a new run.

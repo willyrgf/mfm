@@ -3,12 +3,9 @@ use crate::cli::utils::output::handle_command_result;
 use crate::cli::utils::run_stores::{make_stores, RunStoresArgs};
 use crate::cli::CommandContext;
 use clap::Args;
-use mfm_machine::events::EventEnvelope;
-use mfm_machine::ids::RunId;
-use serde::Serialize;
-use std::fmt;
+use mfm_app::{AppServices, RunsEventsQuery, RunsEventsResponse};
 
-use super::engine_bundle::command_error_from_storage_error;
+use super::engine_bundle::{command_error_from_app_error, make_engine_bundle};
 
 #[derive(Args)]
 pub struct EventsArgs {
@@ -27,29 +24,14 @@ pub struct EventsArgs {
     pub stores: RunStoresArgs,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct EventsResponse {
-    pub run_id: String,
-    pub head_seq: u64,
-    pub events: Vec<EventEnvelope>,
-}
-
-impl fmt::Display for EventsResponse {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = serde_json::to_string_pretty(&self.events).unwrap_or_else(|_| "[]".to_string());
-        write!(f, "{s}")
-    }
-}
-
 pub async fn execute(ctx: &CommandContext, args: &EventsArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);
 }
 
-async fn execute_internal(args: &EventsArgs) -> CommandResult<EventsResponse> {
-    let uuid = uuid::Uuid::parse_str(&args.run_id)
+async fn execute_internal(args: &EventsArgs) -> CommandResult<RunsEventsResponse> {
+    uuid::Uuid::parse_str(&args.run_id)
         .map_err(|_| CommandError::invalid_uuid("Invalid UUID format"))?;
-    let run_id = RunId(uuid);
 
     let stores = make_stores(
         args.stores.artifact_root.clone(),
@@ -57,27 +39,19 @@ async fn execute_internal(args: &EventsArgs) -> CommandResult<EventsResponse> {
     )
     .await?;
 
-    let head = stores
-        .events
-        .head_seq(run_id)
-        .await
-        .map_err(command_error_from_storage_error)?;
-    if head == 0 {
-        return Err(CommandError::new(
-            "run_not_found",
-            "run event stream was not found",
-        ));
-    }
+    let bundle = make_engine_bundle();
+    let services = AppServices::new(bundle, stores.events, stores.artifacts);
 
-    let events = stores
-        .events
-        .read_range(run_id, args.from_seq, args.to_seq)
+    let response = services
+        .run_events(
+            &args.run_id,
+            RunsEventsQuery {
+                from_seq: args.from_seq,
+                to_seq: args.to_seq,
+            },
+        )
         .await
-        .map_err(command_error_from_storage_error)?;
+        .map_err(command_error_from_app_error)?;
 
-    Ok(CommandOutput::new(EventsResponse {
-        run_id: run_id.0.to_string(),
-        head_seq: head,
-        events,
-    }))
+    Ok(CommandOutput::new(response))
 }
