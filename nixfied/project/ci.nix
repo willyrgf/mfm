@@ -105,6 +105,9 @@
           "parity-evm-helios-smoke"
         ];
       };
+      mainnet = {
+        steps = [ "mainnet-portfolio-snapshot-helios" ];
+      };
     };
     steps = {
       tests = {
@@ -347,6 +350,69 @@
             "http://127.0.0.1:$HELIOSRPC_PORT" \
             | tee "$LOGFILE" \
             | jq -e '.result | strings' >/dev/null
+        '';
+      };
+
+      mainnet-portfolio-snapshot-helios = {
+        description = "Mainnet: mfm::portfolio::snapshot (Helios) and assert Vitalik has ETH";
+        run = ''
+          eval "$($SLOT_INFO)"
+
+          export HELIOS_NETWORK="mainnet"
+          export HELIOS_EXECUTION_RPC_URL="https://eth.llamarpc.com"
+          export HELIOS_CONSENSUS_RPC_URL="https://www.lightclientdata.org"
+
+          # Mainnet Helios can take a while to sync; gate on eth_blockNumber.
+          export HELIOS_READY_TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-900}"
+
+          export MFM_ARTIFACT_ROOT="$CI_ARTIFACTS_DIR/mfm-mainnet-artifacts"
+          mkdir -p "$MFM_ARTIFACT_ROOT"
+
+          ADDRESS="0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+
+          LOGFILE=$(artifact_path "mainnet-portfolio-snapshot.log")
+          OUTFILE=$(artifact_path "mainnet-portfolio-snapshot.json")
+
+          set +e
+          nix run .#mfm::portfolio::snapshot -- "$ADDRESS" >"$OUTFILE" 2>"$LOGFILE"
+          rc=$?
+          set -e
+
+          if [ $rc -ne 0 ]; then
+            echo "ERROR: mfm::portfolio::snapshot failed rc=$rc" >&2
+            tail -200 "$LOGFILE" >&2 || true
+            if [ -s "$OUTFILE" ]; then
+              echo "STDOUT:" >&2
+              cat "$OUTFILE" >&2 || true
+            fi
+            exit $rc
+          fi
+
+          jq -e '.status == "success"' "$OUTFILE" >/dev/null
+          jq -e '.data.feature_id == "portfolio.snapshot"' "$OUTFILE" >/dev/null
+          jq -e '.data.result.phase == "completed"' "$OUTFILE" >/dev/null
+
+          ART_ID=$(jq -r '.data.result.snapshot_artifact_id // empty' "$OUTFILE")
+          if [ -z "$ART_ID" ] || [ "$ART_ID" = "null" ]; then
+            echo "ERROR: missing snapshot_artifact_id" >&2
+            cat "$OUTFILE" >&2
+            exit 1
+          fi
+
+          SNAPSHOT_FILE="$MFM_ARTIFACT_ROOT/''${ART_ID:0:2}/$ART_ID"
+          if [ ! -f "$SNAPSHOT_FILE" ]; then
+            echo "ERROR: snapshot artifact not found at $SNAPSHOT_FILE" >&2
+            exit 1
+          fi
+
+          BAL_WEI=$(jq -r '.native.raw_u256_dec // empty' "$SNAPSHOT_FILE")
+          if [ -z "$BAL_WEI" ] || [ "$BAL_WEI" = "null" ] || [ "$BAL_WEI" = "0" ]; then
+            echo "ERROR: expected non-zero ETH balance; got native.raw_u256_dec=$BAL_WEI" >&2
+            cat "$SNAPSHOT_FILE" >&2
+            exit 1
+          fi
+
+          echo "OK: mainnet snapshot non-zero ETH balance wei=$BAL_WEI artifact_id=$ART_ID"
         '';
       };
     };
