@@ -1,9 +1,7 @@
-use crate::cli::command_result::{CommandError, CommandOutput, CommandResult};
-use crate::cli::utils::{
-    keystore::KeystoreManager,
-    output::{format_keys_table, handle_command_result, KeyDisplay},
-};
-use crate::cli::CommandContext;
+use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::CommandContext;
+use crate::presentation::output::{format_keys_table, handle_command_result, KeyDisplay};
+use crate::support::keystore_manager::KeystoreManager;
 use clap::Args;
 use regex::Regex;
 use serde::Serialize;

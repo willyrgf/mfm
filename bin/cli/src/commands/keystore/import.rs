@@ -1,6 +1,7 @@
-use crate::cli::command_result::{CommandError, CommandOutput, CommandResult};
-use crate::cli::utils::{input, keystore::KeystoreManager, output::handle_command_result};
-use crate::cli::CommandContext;
+use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::CommandContext;
+use crate::presentation::output::handle_command_result;
+use crate::support::{input, keystore_manager::KeystoreManager};
 use clap::Args;
 use serde::Serialize;
 use std::fmt;

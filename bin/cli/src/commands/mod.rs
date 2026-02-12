@@ -1,9 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
-pub mod command_result;
 pub mod keystore;
+pub mod result;
 pub mod run;
-pub mod utils;
 
 #[derive(Debug, Clone, ValueEnum, Default)]
 pub enum OutputFormat {

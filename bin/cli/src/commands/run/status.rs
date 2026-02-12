@@ -1,7 +1,7 @@
-use crate::cli::command_result::{CommandError, CommandOutput, CommandResult};
-use crate::cli::utils::output::handle_command_result;
-use crate::cli::utils::run_stores::{make_stores, RunStoresArgs};
-use crate::cli::CommandContext;
+use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::CommandContext;
+use crate::presentation::output::handle_command_result;
+use crate::support::run_stores::{make_stores, RunStoresArgs};
 use clap::Args;
 use mfm_app::{AppServices, RunStatusResponse};
 

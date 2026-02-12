@@ -1,5 +1,5 @@
 use assert_cmd::Command;
-use mfm::cli::utils::output::{ErrorResponse, ResponseStatus, SuccessResponse};
+use mfm::presentation::output::{ErrorResponse, ResponseStatus, SuccessResponse};
 use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_machine::stores::{ArtifactKind, ArtifactStore};
 use predicates::prelude::*;
@@ -372,7 +372,7 @@ fn test_json_response_structure_consistency() {
     });
 
     // Verify our structures match the expected format
-    use mfm::cli::utils::output::ErrorResponse;
+    use mfm::presentation::output::ErrorResponse;
 
     let success_response = SuccessResponse::new(json!({}));
     let success_json = serde_json::to_value(success_response).unwrap();

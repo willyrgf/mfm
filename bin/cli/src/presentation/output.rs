@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use tabled::{Table, Tabled};
 
-use super::super::{command_result::CommandResult, OutputFormat};
+use crate::commands::{result::CommandResult, OutputFormat};
 
 /// Standardized error response structure for JSON output
 #[derive(Debug, Clone, Serialize, Deserialize)]

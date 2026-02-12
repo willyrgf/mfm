@@ -6,10 +6,10 @@ use mfm_app::{
 use mfm_sdk::pipeline::Pipeline;
 use std::path::PathBuf;
 
-use crate::cli::command_result::{CommandError, CommandOutput, CommandResult};
-use crate::cli::utils::output::handle_command_result;
-use crate::cli::utils::run_stores::{make_stores, RunStoresArgs};
-use crate::cli::CommandContext;
+use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::CommandContext;
+use crate::presentation::output::handle_command_result;
+use crate::support::run_stores::{make_stores, RunStoresArgs};
 
 use super::engine_bundle::{command_error_from_app_error, make_engine_bundle};
 

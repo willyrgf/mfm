@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::cli::command_result::CommandError;
+use crate::commands::result::CommandError;
 use clap::Args;
 use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_event_store_postgres::PostgresEventStore;

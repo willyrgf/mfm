@@ -1,4 +1,4 @@
-use crate::cli::command_result::CommandError;
+use crate::commands::result::CommandError;
 use mfm_app::{AppError, EngineBundle};
 
 pub(super) fn make_engine_bundle() -> EngineBundle {

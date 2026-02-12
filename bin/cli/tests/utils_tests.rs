@@ -1,4 +1,4 @@
-use mfm::cli::utils::output::{format_keys_table, KeyDisplay, ResponseStatus, SuccessResponse};
+use mfm::presentation::output::{format_keys_table, KeyDisplay, ResponseStatus, SuccessResponse};
 
 #[test]
 fn test_key_display_table_formatting() {

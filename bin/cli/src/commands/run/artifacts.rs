@@ -1,7 +1,7 @@
-use crate::cli::command_result::{CommandOutput, CommandResult};
-use crate::cli::utils::output::handle_command_result;
-use crate::cli::utils::run_stores::{make_artifact_store, RunStoresArgs};
-use crate::cli::CommandContext;
+use crate::commands::result::{CommandOutput, CommandResult};
+use crate::commands::CommandContext;
+use crate::presentation::output::handle_command_result;
+use crate::support::run_stores::{make_artifact_store, RunStoresArgs};
 use clap::{Args, Subcommand};
 use mfm_app::{get_artifact_from_store, ArtifactGetResponse};
 

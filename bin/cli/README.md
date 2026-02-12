@@ -19,19 +19,18 @@ The CLI's structure is organized to separate concerns, making it maintainable an
 ```
 mfm_cli/
 ├── src/
-│   ├── main.rs         # Application entry point, argument parsing
-│   └── cli/
-│       ├── mod.rs      # Defines top-level commands (e.g., `keystore`)
-│       ├── keystore/
-│       │   ├── mod.rs  # Defines `keystore` subcommands (import, list, delete)
-│       │   ├── import.rs # Logic for the `import` command
-│       │   ├── list.rs   # Logic for the `list` command
-│       │   └── delete.rs # Logic for the `delete` command
-│       └── utils/
-│           ├── mod.rs      # Utility module declarations
-│           ├── keystore.rs # KeystoreManager for handling path and unlocking
-│           ├── input.rs    # Handles user input (passwords, confirmations)
-│           └── output.rs   # Formats command output (tables, JSON)
+│   ├── main.rs            # Application entry point
+│   ├── commands/
+│   │   ├── mod.rs         # Top-level clap CLI + dispatch
+│   │   ├── result.rs      # Shared command result/error types
+│   │   ├── keystore/      # `keystore` subcommands (import, list, delete)
+│   │   └── run/           # `run` subcommands
+│   ├── support/
+│   │   ├── input.rs       # Input prompts/password helpers
+│   │   ├── keystore_manager.rs # Keystore path/unlock/create helpers
+│   │   └── run_stores.rs  # Event/artifact store construction helpers
+│   └── presentation/
+│       └── output.rs      # Text/JSON output models and rendering
 └── tests/
     ├── cli_e2e_tests.rs # End-to-end tests for command workflows
     └── ...              # Other unit and integration tests

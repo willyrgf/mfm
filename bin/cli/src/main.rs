@@ -1,8 +1,10 @@
 use clap::Parser;
 
-mod cli;
+mod commands;
+mod presentation;
+mod support;
 
-use cli::Cli;
+use commands::Cli;
 
 #[tokio::main]
 async fn main() -> ! {
