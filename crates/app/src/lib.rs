@@ -32,6 +32,7 @@ use mfm_op_evm_read::EvmReadOp;
 use mfm_op_evm_write::{EvmConfigureOp, EvmContractFromNixOp, EvmDeployOp, EvmValidateOp};
 use mfm_op_nix_app::nix_exec_transport::NixFlakeTransportFactory;
 use mfm_op_nix_app::NixAppOp;
+use mfm_op_portfolio_tracker::PortfolioTrackerOp;
 use mfm_op_proof::ProofOp;
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
@@ -44,6 +45,8 @@ use mfm_sdk::unstable::{
 
 const ENV_EVM_RPC_URL: &str = "MFM_EVM_RPC_URL";
 const ENV_EVM_RPC_AUTHORIZATION: &str = "MFM_EVM_RPC_AUTHORIZATION";
+
+const ENV_PORTFOLIO_TOKENS_JSON: &str = "MFM_PORTFOLIO_TOKENS_JSON";
 
 const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
 const ENV_ARTIFACT_ROOT: &str = "MFM_ARTIFACT_ROOT";
@@ -327,6 +330,31 @@ impl LiveIoTransport for AppLiveIoTransport {
     }
 }
 
+struct PortfolioLiveIoTransportFactory;
+
+impl LiveIoTransportFactory for PortfolioLiveIoTransportFactory {
+    fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
+        Box::new(PortfolioLiveIoTransport)
+    }
+}
+
+struct PortfolioLiveIoTransport;
+
+#[async_trait]
+impl LiveIoTransport for PortfolioLiveIoTransport {
+    async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
+        match call.namespace.as_str() {
+            // Used by ops to persist deterministic output payloads as fact artifacts.
+            "portfolio.output" => Ok(call.request),
+            other => Err(IoError::Other(info(
+                "unknown_namespace",
+                ErrorCategory::Unknown,
+                format!("unknown namespace: {other}"),
+            ))),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct EngineBundle {
     pub engine: Arc<dyn ExecutionEngine>,
@@ -342,6 +370,7 @@ pub fn make_engine_bundle() -> EngineBundle {
     reg.register(Arc::new(EvmDeployOp));
     reg.register(Arc::new(EvmConfigureOp));
     reg.register(Arc::new(EvmValidateOp));
+    reg.register(Arc::new(PortfolioTrackerOp));
     reg.register(Arc::new(NixAppOp));
     let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
 
@@ -362,6 +391,10 @@ pub fn make_engine_bundle() -> EngineBundle {
 
     let mut routes: HashMap<String, Arc<dyn LiveIoTransportFactory>> = HashMap::new();
     routes.insert("proof".to_string(), Arc::new(AppLiveIoTransportFactory));
+    routes.insert(
+        "portfolio".to_string(),
+        Arc::new(PortfolioLiveIoTransportFactory),
+    );
     routes.insert(
         "exec".to_string(),
         Arc::new(ExecProgramTransportFactory::default()),
@@ -602,6 +635,161 @@ impl AppServices {
         }))
         .await
     }
+
+    pub async fn start_portfolio_snapshot(
+        &self,
+        req: PortfolioSnapshotRequest,
+    ) -> Result<PortfolioSnapshotResponse, AppError> {
+        const OP_ID: &str = "portfolio_tracker";
+        const OP_VERSION: &str = "v1";
+        const OP_PATH: &str = "portfolio_tracker.main";
+
+        let wallet_address = normalize_eth_address(&req.address).ok_or_else(|| {
+            AppError::new(
+                ErrorClass::BadRequest,
+                "InvalidAddress",
+                "invalid ethereum address",
+            )
+        })?;
+
+        let mut merged: HashMap<String, PortfolioTokenSpec> = HashMap::new();
+
+        // Server-side allowlist (optional).
+        for t in load_portfolio_tokens_from_env()? {
+            let addr = normalize_eth_address(&t.address).ok_or_else(|| {
+                AppError::new(
+                    ErrorClass::Internal,
+                    "InvalidPortfolioTokensJson",
+                    "invalid token address in MFM_PORTFOLIO_TOKENS_JSON",
+                )
+            })?;
+            merged.insert(
+                addr.clone(),
+                PortfolioTokenSpec {
+                    address: addr,
+                    symbol: t.symbol,
+                    decimals: t.decimals,
+                },
+            );
+        }
+
+        // Request tokens (override allowlist entries by address).
+        for t in req.tokens {
+            let addr = normalize_eth_address(&t.address).ok_or_else(|| {
+                AppError::new(
+                    ErrorClass::BadRequest,
+                    "InvalidTokenAddress",
+                    "invalid token address",
+                )
+            })?;
+            merged.insert(
+                addr.clone(),
+                PortfolioTokenSpec {
+                    address: addr,
+                    symbol: t.symbol,
+                    decimals: t.decimals,
+                },
+            );
+        }
+
+        let mut addrs: Vec<String> = merged.keys().cloned().collect();
+        addrs.sort();
+
+        let mut tokens: Vec<PortfolioTokenSpec> = Vec::with_capacity(addrs.len());
+        for addr in addrs {
+            if let Some(t) = merged.remove(&addr) {
+                tokens.push(t);
+            }
+        }
+
+        let op_config = serde_json::json!({
+            "wallet_address": wallet_address,
+            "chain_id": 1,
+            "tokens": tokens,
+        });
+
+        let run = self
+            .start_run(RunsStartRequest::Single(SingleOpStartRequest {
+                op_id: OP_ID.to_string(),
+                op_version: OP_VERSION.to_string(),
+                op_config,
+            }))
+            .await?;
+
+        let mut snapshot_artifact_id = None;
+        let mut chain_id = None;
+        let mut block_number = None;
+
+        if let Some(final_snapshot_id) = &run.final_snapshot_id {
+            let bytes = self
+                .artifacts
+                .get(&ArtifactId(final_snapshot_id.clone()))
+                .await
+                .map_err(app_error_from_storage_error)?;
+
+            let v = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
+                AppError::new(
+                    ErrorClass::Internal,
+                    "ContextSnapshotDecodeFailed",
+                    "failed to decode context snapshot json",
+                )
+            })?;
+
+            let obj = v.as_object().ok_or_else(|| {
+                AppError::new(
+                    ErrorClass::Internal,
+                    "ContextSnapshotInvalid",
+                    "context snapshot must be a json object",
+                )
+            })?;
+
+            snapshot_artifact_id = obj
+                .get(&format!("{OP_PATH}.snapshot_artifact_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            chain_id = obj
+                .get(&format!("{OP_PATH}.chain_id"))
+                .and_then(|v| v.as_u64());
+            block_number = obj
+                .get(&format!("{OP_PATH}.block_number"))
+                .and_then(|v| v.as_u64());
+        }
+
+        Ok(PortfolioSnapshotResponse {
+            run_id: run.run_id,
+            phase: run.phase,
+            final_snapshot_id: run.final_snapshot_id,
+            snapshot_artifact_id,
+            chain_id,
+            block_number,
+        })
+    }
+}
+
+fn normalize_eth_address(s: &str) -> Option<String> {
+    let s = s.trim();
+    let rest = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
+    if rest.len() != 40 {
+        return None;
+    }
+    if !rest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("0x{}", rest.to_ascii_lowercase()))
+}
+
+fn load_portfolio_tokens_from_env() -> Result<Vec<PortfolioTokenSpec>, AppError> {
+    let Ok(raw) = std::env::var(ENV_PORTFOLIO_TOKENS_JSON) else {
+        return Ok(Vec::new());
+    };
+
+    serde_json::from_str::<Vec<PortfolioTokenSpec>>(&raw).map_err(|_| {
+        AppError::new(
+            ErrorClass::Internal,
+            "InvalidPortfolioTokensJson",
+            format!("invalid {ENV_PORTFOLIO_TOKENS_JSON}"),
+        )
+    })
 }
 
 pub async fn get_artifact_from_store(
@@ -870,6 +1058,16 @@ pub struct FeatureExecutionResult {
     pub result: serde_json::Value,
 }
 
+impl fmt::Display for FeatureExecutionResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "feature_id: {}", self.feature_id)?;
+        writeln!(f, "result:")?;
+        let s =
+            serde_json::to_string_pretty(&self.result).unwrap_or_else(|_| self.result.to_string());
+        write!(f, "{s}")
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct FeatureCatalog {
     handlers: HashMap<String, BuiltinFeature>,
@@ -884,6 +1082,7 @@ enum BuiltinFeature {
     RunEvents,
     ArtifactGet,
     PipelineDeployConfigureValidateStart,
+    PortfolioSnapshot,
 }
 
 impl FeatureCatalog {
@@ -897,6 +1096,10 @@ impl FeatureCatalog {
         handlers.insert(
             "pipeline.deploy_configure_validate.start".to_string(),
             BuiltinFeature::PipelineDeployConfigureValidateStart,
+        );
+        handlers.insert(
+            "portfolio.snapshot".to_string(),
+            BuiltinFeature::PortfolioSnapshot,
         );
 
         let descriptors = vec![
@@ -1051,6 +1254,32 @@ impl FeatureCatalog {
                     "required": ["run_id", "phase"]
                 }),
             },
+            FeatureDescriptor {
+                id: "portfolio.snapshot".to_string(),
+                version: "v1".to_string(),
+                kind: FeatureKind::Operation,
+                description: "Start a portfolio snapshot run from a single wallet address (default: Ethereum mainnet)".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "address": {"type": "string"},
+                        "tokens": {"type": "array"}
+                    },
+                    "required": ["address"]
+                }),
+                output_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "run_id": {"type": "string"},
+                        "phase": {"type": "string"},
+                        "final_snapshot_id": {"type": ["string", "null"]},
+                        "snapshot_artifact_id": {"type": ["string", "null"]},
+                        "chain_id": {"type": ["integer", "null"]},
+                        "block_number": {"type": ["integer", "null"]}
+                    },
+                    "required": ["run_id", "phase"]
+                }),
+            },
         ];
 
         Self {
@@ -1109,6 +1338,11 @@ impl FeatureCatalog {
                     serde_json::from_value(req.payload).map_err(|_| AppError::invalid_json())?;
                 serde_json::to_value(services.start_deploy_configure_validate(parsed).await?)
             }
+            BuiltinFeature::PortfolioSnapshot => {
+                let parsed: PortfolioSnapshotRequest =
+                    serde_json::from_value(req.payload).map_err(|_| AppError::invalid_json())?;
+                serde_json::to_value(services.start_portfolio_snapshot(parsed).await?)
+            }
         }
         .map_err(|_| {
             AppError::new(
@@ -1140,4 +1374,30 @@ struct RunEventsInput {
     run_id: String,
     from_seq: Option<u64>,
     to_seq: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PortfolioSnapshotRequest {
+    pub address: String,
+    #[serde(default)]
+    pub tokens: Vec<PortfolioTokenSpec>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PortfolioTokenSpec {
+    pub address: String,
+    #[serde(default)]
+    pub symbol: Option<String>,
+    #[serde(default)]
+    pub decimals: Option<u8>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PortfolioSnapshotResponse {
+    pub run_id: String,
+    pub phase: String,
+    pub final_snapshot_id: Option<String>,
+    pub snapshot_artifact_id: Option<String>,
+    pub chain_id: Option<u64>,
+    pub block_number: Option<u64>,
 }

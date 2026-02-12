@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
 pub mod keystore;
+pub mod portfolio;
 pub mod result;
 pub mod run;
 
@@ -45,6 +46,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: keystore::KeystoreCommand,
     },
+    /// Portfolio monitoring operations
+    Portfolio {
+        #[command(subcommand)]
+        command: portfolio::PortfolioCommand,
+    },
     /// Run operations (start/resume/inspect)
     Run {
         #[command(subcommand)]
@@ -58,6 +64,9 @@ impl Cli {
 
         match &self.command {
             Commands::Keystore { command } => {
+                command.execute(&ctx).await;
+            }
+            Commands::Portfolio { command } => {
                 command.execute(&ctx).await;
             }
             Commands::Run { command } => {

@@ -1912,6 +1912,7 @@ dependencies = [
  "mfm-op-evm-read",
  "mfm-op-evm-write",
  "mfm-op-nix-app",
+ "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-sdk",
  "serde",
@@ -2104,6 +2105,21 @@ dependencies = [
  "serde_json",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "mfm-op-portfolio-tracker"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "async-trait",
+ "hex",
+ "mfm-collectors-evm",
+ "mfm-machine",
+ "mfm-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -16,6 +16,7 @@ mfm-collectors-evm-jsonrpc-http = { path = "../collectors/evm-jsonrpc-http" }
 mfm-op-proof = { path = "../ops/proof-op" }
 mfm-op-evm-read = { path = "../ops/evm-read-op" }
 mfm-op-evm-write = { path = "../ops/evm-write-op" }
+mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
 mfm-op-nix-app = { path = "../ops/nix-app-op" }
 mfm-artifact-store-fs = { path = "../storages/artifact-store-fs" }
 mfm-artifact-store-s3 = { path = "../storages/artifact-store-s3" }

@@ -23,6 +23,7 @@ Environment variables:
 - `MFM_S3_ENSURE_BUCKET`: if set (any value), ensure the S3 bucket exists on startup
 - `MFM_EVM_RPC_URL`: EVM JSON-RPC URL (required for `op_id = "evm_read"`)
 - `MFM_EVM_RPC_AUTHORIZATION`: optional Authorization header value for the EVM RPC transport
+- `MFM_PORTFOLIO_TOKENS_JSON`: optional JSON array of ERC-20 token specs used by `feature_id = "portfolio.snapshot"`
 
 ## API
 
@@ -62,7 +63,12 @@ Supported `op_id` values (current):
 
 - `proof` (default)
 - `evm_read`
+- `portfolio_tracker`
 - `nix_app`
+
+Supported `feature_id` values (current):
+
+- `portfolio.snapshot`
 
 Docs:
 

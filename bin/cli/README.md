@@ -299,6 +299,24 @@ mfm_cli run artifacts get <ARTIFACT_ID> [OPTIONS]
 - If the artifact bytes decode as JSON, the response uses `encoding: "json"` and includes a `value` field.
 - Otherwise the response uses `encoding: "hex"` and includes a hex string field.
 
+## Portfolio Commands (Experimental)
+
+### `portfolio snapshot`
+
+Snapshots a wallet portfolio (ETH + allowlisted ERC-20 balances) on Ethereum by default.
+
+**Requirements:**
+- `DATABASE_URL` (event store)
+- `MFM_EVM_RPC_URL` (EVM JSON-RPC)
+
+**Usage:**
+```sh
+mfm_cli portfolio snapshot <ADDRESS> [OPTIONS]
+```
+
+**Key Options:**
+- `--tokens-json <JSON>`: Optional JSON array to include/override allowlisted tokens (default: `[]`)
+
 ## Configuration
 
 The CLI's behavior can be modified using environment variables, which is ideal for CI/CD pipelines and automated scripts.
@@ -343,6 +361,13 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 - **`MFM_EVM_RPC_AUTHORIZATION`**: Optional HTTP `Authorization` header value for EVM JSON-RPC. Treat this as a secret; it is runtime-only and is never persisted by MFM.
   ```sh
   export MFM_EVM_RPC_AUTHORIZATION="Bearer <token>"
+  ```
+
+- **`MFM_PORTFOLIO_TOKENS_JSON`**: Optional JSON array of ERC-20 token specs used by `mfm_cli portfolio snapshot` (and the REST API feature `portfolio.snapshot`).
+  ```sh
+  export MFM_PORTFOLIO_TOKENS_JSON='[
+    {"address":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","symbol":"USDC","decimals":6}
+  ]'
   ```
 
 ## Best Practices
