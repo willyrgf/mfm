@@ -1987,6 +1987,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "mfm-artifact-store-fs",
+ "mfm-artifact-store-s3",
+ "mfm-collectors-evm-jsonrpc-http",
+ "mfm-event-store-mem",
+ "mfm-event-store-postgres",
+ "mfm-machine",
+ "mfm-machine-test-support",
+ "mfm-rest-api",
+ "mfm-sdk",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "uuid",
+]
+
+[[package]]
 name = "mfm-machine"
 version = "0.1.0"
 dependencies = [

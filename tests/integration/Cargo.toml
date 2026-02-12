@@ -1,0 +1,26 @@
+[package]
+name = "mfm-integration-tests"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+parity-tests = []
+
+[dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+uuid = { version = "1.0", features = ["v4"] }
+axum = "0.7"
+tower = "0.5"
+tempfile = "3.0"
+
+mfm-rest-api = { path = "../../bin/rest-api" }
+mfm-machine = { path = "../../crates/machine" }
+mfm-sdk = { path = "../../crates/sdk" }
+mfm-machine-test-support = { path = "../../crates/machine-test-support" }
+
+mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
+mfm-artifact-store-s3 = { path = "../../crates/storages/artifact-store-s3" }
+mfm-event-store-mem = { path = "../../crates/storages/event-store-mem" }
+mfm-event-store-postgres = { path = "../../crates/storages/event-store-postgres" }
+mfm-collectors-evm-jsonrpc-http = { path = "../../crates/collectors/evm-jsonrpc-http" }

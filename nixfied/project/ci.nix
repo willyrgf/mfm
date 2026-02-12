@@ -99,6 +99,7 @@
         steps = [
           "parity-postgres"
           "parity-s3"
+          "parity-rest-api-smoke"
           "parity-evm-reth"
           "parity-evm-helios-smoke"
         ];
@@ -154,7 +155,7 @@
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
 
           LOGFILE=$(artifact_path "parity-postgres.log")
-          log_capture "$LOGFILE" -- cargo nextest run -p mfm-event-store-postgres --features parity-tests
+          log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_event_store_postgres_contract
         '';
       };
 
@@ -188,7 +189,46 @@
           run_hook MINIO_BUCKET_CREATE "$MFM_S3_BUCKET"
 
           LOGFILE=$(artifact_path "parity-s3.log")
-          log_capture "$LOGFILE" -- cargo nextest run -p mfm-artifact-store-s3 --features parity-tests
+          log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_artifact_store_s3_contract
+        '';
+      };
+
+      parity-rest-api-smoke = {
+        description = "Parity: REST API smoke on Postgres + S3/MinIO";
+        requires = [
+          "postgres"
+          "minio"
+        ];
+        run = ''
+          eval "$($SLOT_INFO)"
+
+          # PostgreSQL parity store setup.
+          with_cleanup "run_hook POSTGRES_STOP"
+          AUTO_STOP_CONFLICTING=1 run_hook POSTGRES_FULL_START_TEST
+          export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
+
+          # MinIO parity store setup.
+          run_hook MINIO_INIT
+          MINIO_LOGFILE=$(artifact_path "minio-rest-api-smoke.log")
+          MINIO_PID=$(start_service minio \
+            --log "$MINIO_LOGFILE" \
+            --wait-http "http://127.0.0.1:$MINIO_PORT/minio/health/ready" \
+            --timeout 60 \
+            -- \
+            "$MINIO_START")
+          with_cleanup "stop_service $MINIO_PID minio"
+
+          export AWS_ACCESS_KEY_ID="minio"
+          export AWS_SECRET_ACCESS_KEY="minio123456"
+          export AWS_EC2_METADATA_DISABLED="true"
+          export MFM_S3_ENDPOINT="http://127.0.0.1:$MINIO_PORT"
+          export MFM_S3_REGION="us-east-1"
+          export MFM_S3_BUCKET="mfm-test"
+          export MFM_S3_PREFIX="mfm-artifacts"
+          run_hook MINIO_BUCKET_CREATE "$MFM_S3_BUCKET"
+
+          LOGFILE=$(artifact_path "parity-rest-api-smoke.log")
+          log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_rest_api_postgres_s3_smoke
         '';
       };
 
@@ -244,7 +284,7 @@
           export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
 
           LOGFILE=$(artifact_path "parity-evm-reth.log")
-          log_capture "$LOGFILE" -- cargo nextest run -p mfm-rest-api --features parity-tests --test parity_evm_reth_pipeline
+          log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_rest_api_evm_reth_pipeline
         '';
       };
 
