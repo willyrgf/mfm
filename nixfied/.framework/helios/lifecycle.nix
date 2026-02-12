@@ -254,6 +254,22 @@ let
     ${helios}/bin/helios ethereum --help >/dev/null 2>&1
     echo "OK: helios configuration valid dir=$HELIOS_DIR network=$HELIOS_NETWORK"
   '';
+
+  fullStart = pkgs.writeShellScript "helios-full-start" ''
+    set -euo pipefail
+
+    ${init}
+    ${checkConfig}
+    exec ${start}
+  '';
+
+  fullStartTest = pkgs.writeShellScript "helios-full-start-test" ''
+    set -euo pipefail
+
+    ${init}
+    ${checkConfig}
+    exec ${start}
+  '';
 in
 {
   inherit
@@ -265,5 +281,7 @@ in
     status
     health
     checkConfig
+    fullStart
+    fullStartTest
     ;
 }

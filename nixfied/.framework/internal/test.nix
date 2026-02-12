@@ -372,26 +372,48 @@ let
     mkdir -p "$CI_BASIC_DIR"
     unset CI_MISSING
     set +e
-    (cd "$CI_BASIC_DIR" && "$CI_SCRIPT" --mode basic > "$CI_BASIC_LOG" 2>&1)
+    (cd "$CI_BASIC_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts" "$CI_SCRIPT" --mode basic > "$CI_BASIC_LOG" 2>&1)
     RC=$?
     set -e
     if [ "$RC" -ne 0 ]; then
       fail "expected CI basic mode to exit zero"
     fi
     assert_file_exists "$CI_BASIC_DIR/.ci-artifacts/runs.ok"
+    assert_file_exists "$CI_BASIC_DIR/.ci-artifacts/runs-second.ok"
     assert_file_absent "$CI_BASIC_DIR/.ci-artifacts/skip-missing.ok"
     assert_file_absent "$CI_BASIC_DIR/.ci-artifacts/when.ok"
-    assert_file_absent "$CI_BASIC_DIR/.ci-artifacts/requires.ok"
     assert_file_exists "$CI_BASIC_DIR/.ci-artifacts/teardown.ok"
     assert_contains "$CI_BASIC_LOG" "missing CI_MISSING"
     assert_contains "$CI_BASIC_LOG" "condition not met"
-    assert_contains "$CI_BASIC_LOG" "requires module(s): nginx"
+
+    CI_SCOPED_DIR="$WORKDIR/ci-runscoped"
+    CI_SCOPED_LOG="$WORKDIR/ci-runscoped.log"
+    mkdir -p "$CI_SCOPED_DIR"
+    set +e
+    (cd "$CI_SCOPED_DIR" && "$CI_SCRIPT" --mode basic > "$CI_SCOPED_LOG" 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      fail "expected run-scoped CI artifacts mode to exit zero"
+    fi
+    CI_LATEST_LINK="$CI_SCOPED_DIR/.ci-artifacts/latest"
+    if [ ! -L "$CI_LATEST_LINK" ]; then
+      fail "expected latest artifact symlink"
+    fi
+    CI_LATEST_TARGET=$(readlink "$CI_LATEST_LINK")
+    case "$CI_LATEST_TARGET" in
+      "$CI_SCOPED_DIR"/.ci-artifacts/*) ;;
+      *)
+        fail "latest symlink should point to a run-scoped artifacts directory"
+        ;;
+    esac
+    assert_file_exists "$CI_LATEST_TARGET/runs.ok"
 
     CI_FAIL_DIR="$WORKDIR/ci-failure"
     CI_FAIL_LOG="$WORKDIR/ci-failure.log"
     mkdir -p "$CI_FAIL_DIR"
     set +e
-    (cd "$CI_FAIL_DIR" && "$CI_SCRIPT" --mode failure > "$CI_FAIL_LOG" 2>&1)
+    (cd "$CI_FAIL_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts" "$CI_SCRIPT" --mode failure > "$CI_FAIL_LOG" 2>&1)
     RC=$?
     set -e
     if [ "$RC" -eq 0 ]; then
@@ -444,11 +466,11 @@ let
     CI_RET_OK_DIR="$WORKDIR/ci-ret-ok"
     CI_RET_FAIL_DIR="$WORKDIR/ci-ret-fail"
     mkdir -p "$CI_RET_OK_DIR" "$CI_RET_FAIL_DIR"
-    (cd "$CI_RET_OK_DIR" && "$CI_RET_SCRIPT" --mode success >/dev/null)
+    (cd "$CI_RET_OK_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts" "$CI_RET_SCRIPT" --mode success >/dev/null)
     assert_file_absent "$CI_RET_OK_DIR/.ci-artifacts"
 
     set +e
-    (cd "$CI_RET_FAIL_DIR" && "$CI_RET_SCRIPT" --mode failure >/dev/null 2>&1)
+    (cd "$CI_RET_FAIL_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts" "$CI_RET_SCRIPT" --mode failure >/dev/null 2>&1)
     RC=$?
     set -e
     if [ "$RC" -eq 0 ]; then
@@ -490,7 +512,7 @@ let
     CI_RET_SUM_OK_DIR="$WORKDIR/ci-ret-summary-ok"
     CI_RET_SUM_OK_LOG="$WORKDIR/ci-ret-summary-ok.log"
     mkdir -p "$CI_RET_SUM_OK_DIR"
-    (cd "$CI_RET_SUM_OK_DIR" && "$CI_RET_SCRIPT" --mode success --summary > "$CI_RET_SUM_OK_LOG" 2>&1)
+    (cd "$CI_RET_SUM_OK_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts" "$CI_RET_SCRIPT" --mode success --summary > "$CI_RET_SUM_OK_LOG" 2>&1)
     assert_contains "$CI_RET_SUM_OK_LOG" "Summary"
     assert_contains "$CI_RET_SUM_OK_LOG" "Exit code: 0"
     assert_file_absent "$CI_RET_SUM_OK_DIR/.ci-artifacts"
@@ -499,7 +521,7 @@ let
     CI_RET_SUM_FAIL_LOG="$WORKDIR/ci-ret-summary-fail.log"
     mkdir -p "$CI_RET_SUM_FAIL_DIR"
     set +e
-    (cd "$CI_RET_SUM_FAIL_DIR" && "$CI_RET_SCRIPT" --mode failure --summary > "$CI_RET_SUM_FAIL_LOG" 2>&1)
+    (cd "$CI_RET_SUM_FAIL_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts" "$CI_RET_SCRIPT" --mode failure --summary > "$CI_RET_SUM_FAIL_LOG" 2>&1)
     RC=$?
     set -e
     if [ "$RC" -eq 0 ]; then
@@ -1713,7 +1735,7 @@ let
     CI_SJ_LOG="$WORKDIR/ci-summary-json.log"
     mkdir -p "$CI_SJ_DIR"
     set +e
-    (cd "$CI_SJ_DIR" && "$CI_SJ_SCRIPT" --mode check > "$CI_SJ_LOG" 2>&1)
+    (cd "$CI_SJ_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts" "$CI_SJ_SCRIPT" --mode check > "$CI_SJ_LOG" 2>&1)
     CI_SJ_RC=$?
     set -e
     if [ "$CI_SJ_RC" -ne 0 ]; then
@@ -1778,6 +1800,14 @@ let
     assert_contains "$MODAPP_NAMES_FILE" "service::minio::health"
     assert_contains "$MODAPP_NAMES_FILE" "service::reth::health"
     assert_contains "$MODAPP_NAMES_FILE" "service::helios::health"
+    assert_contains "$MODAPP_NAMES_FILE" "service::minio::full-start"
+    assert_contains "$MODAPP_NAMES_FILE" "service::minio::full-start-test"
+    assert_contains "$MODAPP_NAMES_FILE" "service::minio::export-s3-env"
+    assert_contains "$MODAPP_NAMES_FILE" "service::minio::bucket-ensure"
+    assert_contains "$MODAPP_NAMES_FILE" "service::reth::full-start"
+    assert_contains "$MODAPP_NAMES_FILE" "service::reth::full-start-test"
+    assert_contains "$MODAPP_NAMES_FILE" "service::helios::full-start"
+    assert_contains "$MODAPP_NAMES_FILE" "service::helios::full-start-test"
     assert_contains "$MODAPP_NAMES_FILE" "up"
     assert_contains "$MODAPP_NAMES_FILE" "svc-health"
     assert_contains "$MODAPP_NAMES_FILE" "check-ports"

@@ -36,6 +36,30 @@ let
     echo "OK: minio bucket created bucket=$BUCKET"
   '';
 
+  bucketEnsure = pkgs.writeShellScript "minio-bucket-ensure" ''
+    set -euo pipefail
+
+    BUCKET="''${1:-}"
+    if [ -z "$BUCKET" ]; then
+      echo "usage: minio-bucket-ensure <bucket>" >&2
+      exit 1
+    fi
+
+    eval "$(${slots.getSlotInfo})"
+    API_PORT_VAR="${apiPortVar}"
+    MINIO_API_PORT="''${!API_PORT_VAR}"
+    MINIO_DIR="${minioDirExpr}"
+
+    ROOT_USER="''${MINIO_ROOT_USER:-${config.rootUser}}"
+    ROOT_PASSWORD="''${MINIO_ROOT_PASSWORD:-${config.rootPassword}}"
+
+    export MC_CONFIG_DIR="$MINIO_DIR/config/mc"
+    ${mc}/bin/mc alias set local "http://127.0.0.1:$MINIO_API_PORT" "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null
+    ${mc}/bin/mc mb --ignore-existing "local/$BUCKET" >/dev/null
+
+    echo "OK: minio bucket ensured bucket=$BUCKET"
+  '';
+
   bucketDelete = pkgs.writeShellScript "minio-bucket-delete" ''
     set -euo pipefail
 
@@ -111,6 +135,7 @@ in
 {
   inherit
     bucketCreate
+    bucketEnsure
     bucketDelete
     bucketList
     policyApply

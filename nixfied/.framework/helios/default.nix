@@ -75,6 +75,20 @@ let
         details = "Validates Helios binary availability and required runtime configuration.";
       };
     };
+    extensions = {
+      full-start = {
+        script = lifecycle.fullStart;
+        hook = "FULL_START";
+        summary = "Init/check/start Helios";
+        details = "Performs init + check-config + start for Helios.";
+      };
+      full-start-test = {
+        script = lifecycle.fullStartTest;
+        hook = "FULL_START_TEST";
+        summary = "Init/check/start Helios for test profile";
+        details = "Performs init + check-config + start for Helios (test profile).";
+      };
+    };
   };
 in
 {
@@ -89,6 +103,8 @@ in
     status
     health
     checkConfig
+    fullStart
+    fullStartTest
     ;
 
   inherit publicApi;

@@ -72,6 +72,20 @@ let
         details = "Validates Reth binary availability and runtime configuration basics.";
       };
     };
+    extensions = {
+      full-start = {
+        script = lifecycle.fullStart;
+        hook = "FULL_START";
+        summary = "Init/check/start Reth";
+        details = "Performs init + check-config + start for Reth.";
+      };
+      full-start-test = {
+        script = lifecycle.fullStartTest;
+        hook = "FULL_START_TEST";
+        summary = "Init/check/start Reth for test profile";
+        details = "Performs init + check-config + start for Reth (test profile).";
+      };
+    };
   };
 in
 {
@@ -86,6 +100,8 @@ in
     status
     health
     checkConfig
+    fullStart
+    fullStartTest
     ;
 
   inherit publicApi;

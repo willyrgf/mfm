@@ -12,8 +12,12 @@ let
     inherit pkgs hooks;
     inherit (summary) summaryParser;
   };
+  fixtures = import ./fixtures.nix {
+    inherit pkgs project;
+  };
   builders = import ./builders.nix {
     inherit pkgs project;
+    fixtureLib = fixtures;
     inherit (helpers) loadEnv helpersScript hookExports;
   };
   appApi = import ./app-api.nix {
@@ -37,6 +41,7 @@ in
     mkApp
     mkAppWithDeps
     ;
+  inherit fixtures;
   inherit appApi;
   inherit serviceApi;
   inherit (process) mkSignalHandler mkProcessManager;

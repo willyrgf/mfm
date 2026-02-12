@@ -148,6 +148,145 @@ let
       "$cmd" "$@"
     }
 
+    # has_hook ENV_VAR
+    # - check whether a hook variable is exported and non-empty.
+    has_hook() {
+      local var="$1"
+      if [ -z "$var" ]; then
+        return 1
+      fi
+      [ -n "''${!var:-}" ]
+    }
+
+    # wait_hook_ok ENV_VAR [timeout] [interval]
+    # - poll a hook command until it succeeds (stdout/stderr suppressed).
+    wait_hook_ok() {
+      local var="$1"
+      local timeout="''${2:-60}"
+      local interval="''${3:-1}"
+      local start
+      start=$(date +%s)
+
+      if ! has_hook "$var"; then
+        echo "ERROR: Hook not available: $var" >&2
+        return 1
+      fi
+
+      while true; do
+        if run_hook "$var" >/dev/null 2>&1; then
+          return 0
+        fi
+        if [ $(( $(date +%s) - start )) -ge "$timeout" ]; then
+          return 1
+        fi
+        sleep "$interval"
+      done
+    }
+
+    _service_token() {
+      local service="$1"
+      echo "$service" | tr '[:lower:]' '[:upper:]' | tr '-.:/' '_'
+    }
+
+    _service_hook_name() {
+      local service="$1"
+      local op="$2"
+      local token
+      token=$(_service_token "$service")
+      echo "''${token}_''${op}"
+    }
+
+    # fixture_start_service SERVICE [profile] [timeout] [interval] [logfile]
+    # - start service lifecycle from hook contract and register cleanup.
+    fixture_start_service() {
+      local service="$1"
+      local profile="''${2:-default}"
+      local timeout="''${3:-60}"
+      local interval="''${4:-1}"
+      local logfile="''${5:-}"
+
+      if [ -z "$service" ]; then
+        echo "usage: fixture_start_service <service> [profile] [timeout] [interval] [logfile]" >&2
+        return 1
+      fi
+
+      local start_hook=""
+      local init_hook=""
+      local check_hook=""
+      local stop_hook=""
+      local health_hook=""
+      local start_cmd=""
+      local op=""
+      local hook=""
+      local -a start_ops=()
+
+      case "$profile" in
+        test)
+          start_ops=(FULL_START_TEST FULL_START START)
+          ;;
+        *)
+          start_ops=(FULL_START START)
+          ;;
+      esac
+
+      for op in "''${start_ops[@]}"; do
+        hook=$(_service_hook_name "$service" "$op")
+        if has_hook "$hook"; then
+          start_hook="$hook"
+          break
+        fi
+      done
+
+      if [ -z "$start_hook" ]; then
+        echo "ERROR: fixture_start_service could not resolve start hook service=$service profile=$profile" >&2
+        return 1
+      fi
+
+      stop_hook=$(_service_hook_name "$service" "STOP")
+      health_hook=$(_service_hook_name "$service" "HEALTH")
+      init_hook=$(_service_hook_name "$service" "INIT")
+      check_hook=$(_service_hook_name "$service" "CHECK_CONFIG")
+      start_cmd="''${!start_hook}"
+
+      if has_hook "$init_hook"; then
+        run_hook "$init_hook"
+      fi
+      if has_hook "$check_hook"; then
+        run_hook "$check_hook"
+      fi
+
+      local pid=""
+      if [ -n "$logfile" ]; then
+        pid=$(start_service "$service" --log "$logfile" -- "$start_cmd")
+      else
+        pid=$(start_service "$service" -- "$start_cmd")
+      fi
+      if [ -z "$pid" ]; then
+        echo "ERROR: fixture service start returned empty pid service=$service hook=$start_hook" >&2
+        return 1
+      fi
+
+      # Always clean wrapper process and module-native process state.
+      with_cleanup "stop_service $pid \"$service\""
+      if has_hook "$stop_hook"; then
+        with_cleanup "run_hook $stop_hook"
+      fi
+
+      if has_hook "$health_hook"; then
+        if ! wait_hook_ok "$health_hook" "$timeout" "$interval"; then
+          echo "ERROR: fixture health check failed service=$service hook=$health_hook" >&2
+          if has_hook "$stop_hook"; then
+            run_hook "$stop_hook" >/dev/null 2>&1 || true
+          fi
+          stop_service "$pid" "$service" >/dev/null 2>&1 || true
+          return 1
+        fi
+      fi
+
+      echo "OK: fixture service ready service=$service profile=$profile"
+      return 0
+    }
+
     _cleanup_initialized=false
     _cleanup_actions=()
 
@@ -318,14 +457,11 @@ let
       fi
 
       local pid=$!
-      # Avoid registering cleanup in command substitution subshells (they exit immediately).
-      if [ -n "''${BASHPID:-}" ] && [ "''${BASHPID}" = "$$" ]; then
-        with_cleanup "stop_service $pid \"$name\""
-      fi
 
       if [ -n "$wait_http_url" ]; then
         if ! wait_http "$wait_http_url" "$timeout" "$interval"; then
           echo "ERROR: $name failed readiness check (http)" >&2
+          stop_service "$pid" "$name" >/dev/null 2>&1 || true
           return 1
         fi
       fi
@@ -333,11 +469,38 @@ let
       if [ -n "$wait_port_num" ]; then
         if ! wait_port "$wait_port_num" "$timeout" "$interval"; then
           echo "ERROR: $name failed readiness check (port)" >&2
+          stop_service "$pid" "$name" >/dev/null 2>&1 || true
           return 1
         fi
       fi
 
+      # Avoid registering cleanup in command substitution subshells (they exit immediately).
+      if [ -n "''${BASHPID:-}" ] && [ "''${BASHPID}" = "$$" ]; then
+        with_cleanup "stop_service $pid \"$name\""
+      fi
+
       echo "$pid"
+    }
+
+    # start_service_into PID_VAR NAME [opts] -- <command...>
+    # - start a service and assign PID to PID_VAR in the current shell.
+    start_service_into() {
+      local pid_var="$1"
+      shift || true
+
+      if [ -z "$pid_var" ]; then
+        echo "usage: start_service_into <pid_var> <name> [opts] -- <command...>" >&2
+        return 1
+      fi
+
+      local _pid=""
+      _pid=$(start_service "$@")
+      if [ -z "$_pid" ]; then
+        echo "start_service_into: failed to start service" >&2
+        return 1
+      fi
+      printf -v "$pid_var" '%s' "$_pid"
+      return 0
     }
 
     # with_service NAME [start opts] -- <start command...> --run <command...>
@@ -379,8 +542,7 @@ let
 
       local pid=""
       local rc=0
-      pid=$(start_service "$name" "''${args[@]}")
-      if [ -z "$pid" ]; then
+      if ! start_service_into pid "$name" "''${args[@]}"; then
         echo "with_service: failed to start $name" >&2
         return 1
       fi

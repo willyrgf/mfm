@@ -33,7 +33,7 @@ let
   );
 
   artifacts = ci.artifacts or { };
-  artifactsDir = artifacts.dir or "/tmp/ci-artifacts";
+  artifactsRoot = artifacts.dir or "/tmp/ci-artifacts";
   keepOnFailure = artifacts.keepOnFailure or true;
   keepOnSuccess = artifacts.keepOnSuccess or false;
 
@@ -77,36 +77,29 @@ let
       when = step.when or "";
       cleanup = step.cleanup or "";
       env = step.env or { };
+      fixtures = step.fixtures or null;
+      _ =
+        if step ? requires then
+          throw "ci.steps.${name}.requires has been removed. Use ci.steps.${name}.fixtures.services instead."
+        else
+          null;
       slug = normalizeName name;
       envExports = pkgs.lib.concatMapStringsSep "\n" (key: "export ${key}=${toString env.${key}}") (
         builtins.attrNames env
       );
       skipVars = step.skipIfMissing or [ ];
       skipList = pkgs.lib.concatMapStringsSep " " (v: "\"${v}\"") skipVars;
-      requires = step.requires or [ ];
-      missingModules = builtins.filter (
-        req:
-        let
-          modCfg = project.modules.${req} or null;
-          enabledMod = if modCfg == null then false else (modCfg.enable or false);
-        in
-        !enabledMod
-      ) requires;
-      missingReason =
-        if missingModules == [ ] then
-          ""
-        else
-          "requires module(s): ${pkgs.lib.concatStringsSep ", " missingModules}";
+      fixturePrelude = lib.fixtures.renderPrelude {
+        inherit fixtures;
+        contextName = "ci-step-${name}";
+        defaultProfile = "test";
+        defaultLogs = true;
+      };
     in
     ''
             run_step_${slug}() {
               local step_name="${name}"
               local step_desc="${desc}"
-
-      ${pkgs.lib.optionalString (missingReason != "") ''
-        echo "SKIP: ''${step_desc}: ${missingReason}"
-        return 42
-      ''}
 
       ${pkgs.lib.optionalString (skipVars != [ ]) ''
         local missing_reason=""
@@ -134,6 +127,7 @@ let
               (
                 set -euo pipefail
       ${pkgs.lib.optionalString (envExports != "") envExports}
+      ${pkgs.lib.optionalString (fixturePrelude != "") fixturePrelude}
       ${run}
               )
               rc=$?
@@ -217,11 +211,59 @@ let
                 export CI_STEP_ARGS
                 if [ -n "''${CI_ARTIFACTS_DIR:-}" ]; then
                   export CI_ARTIFACTS_DIR="''${CI_ARTIFACTS_DIR}"
+                  case "$CI_ARTIFACTS_DIR" in
+                    /*) ;;
+                    *) CI_ARTIFACTS_DIR="$(pwd)/$CI_ARTIFACTS_DIR" ;;
+                  esac
+                  export CI_ARTIFACTS_BASE="$(dirname "$CI_ARTIFACTS_DIR")"
+                  export CI_ARTIFACTS_LATEST_LINK=""
                 else
-                  export CI_ARTIFACTS_DIR="${artifactsDir}"
+                  export CI_ARTIFACTS_BASE="${artifactsRoot}"
+                  case "$CI_ARTIFACTS_BASE" in
+                    /*) ;;
+                    *) CI_ARTIFACTS_BASE="$(pwd)/$CI_ARTIFACTS_BASE" ;;
+                  esac
+                  CI_RUN_ID="$(date +%Y%m%d-%H%M%S)-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+                  export CI_ARTIFACTS_DIR="$CI_ARTIFACTS_BASE/$CI_RUN_ID"
+                  export CI_ARTIFACTS_LATEST_LINK="$CI_ARTIFACTS_BASE/latest"
                 fi
                 export CI_KEEP_ARTIFACTS_ON_FAILURE="${if keepOnFailure then "1" else "0"}"
                 export CI_KEEP_ARTIFACTS_ON_SUCCESS="${if keepOnSuccess then "1" else "0"}"
+        ${pkgs.lib.optionalString (ciEnvExports != "") ciEnvExports}
+
+                init_ci_artifacts() {
+                  mkdir -p "$CI_ARTIFACTS_DIR"
+                  if [ -n "$CI_ARTIFACTS_LATEST_LINK" ]; then
+                    mkdir -p "$CI_ARTIFACTS_BASE"
+                    ln -sfn "$CI_ARTIFACTS_DIR" "$CI_ARTIFACTS_LATEST_LINK" 2>/dev/null || true
+                  fi
+                }
+
+                cleanup_ci_artifacts() {
+                  local ec="$1"
+                  local keep=0
+
+                  if [ "$ec" -ne 0 ] && [ "$CI_KEEP_ARTIFACTS_ON_FAILURE" = "1" ]; then
+                    keep=1
+                  fi
+                  if [ "$ec" -eq 0 ] && [ "$CI_KEEP_ARTIFACTS_ON_SUCCESS" = "1" ]; then
+                    keep=1
+                  fi
+
+                  if [ "$keep" -eq 1 ]; then
+                    echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
+                    return 0
+                  fi
+
+                  rm -rf "$CI_ARTIFACTS_DIR" 2>/dev/null || true
+                  if [ -n "$CI_ARTIFACTS_LATEST_LINK" ] && [ -L "$CI_ARTIFACTS_LATEST_LINK" ]; then
+                    local link_target=""
+                    link_target=$(readlink "$CI_ARTIFACTS_LATEST_LINK" 2>/dev/null || true)
+                    if [ "$link_target" = "$CI_ARTIFACTS_DIR" ]; then
+                      rm -f "$CI_ARTIFACTS_LATEST_LINK" 2>/dev/null || true
+                    fi
+                  fi
+                }
 
                 # Background mode: delegate to run registry and exit
                 if [ "$CI_BACKGROUND" = "true" ]; then
@@ -279,23 +321,36 @@ let
                 }
 
                 run_pipeline() {
-                  set -euo pipefail
-        ${pkgs.lib.optionalString (ciEnvExports != "") ciEnvExports}
-        ${setupScript}
-
-                  mkdir -p "$CI_ARTIFACTS_DIR"
-
                   local exit_code=0
+                  local setup_rc=0
+                  local teardown_rc=0
                   local step_rc=0
                   STEPS=()
 
-                  case "$CI_MODE" in
+                  init_ci_artifacts
+
+                  set +e
+                  (
+                    set -euo pipefail
+        ${setupScript}
+                  )
+                  setup_rc=$?
+                  set -e
+
+                  if [ "$setup_rc" -ne 0 ]; then
+                    echo "ERROR: CI setup failed rc=$setup_rc" >&2
+                    exit_code=$setup_rc
+                  fi
+
+                  if [ "$exit_code" -eq 0 ]; then
+                    case "$CI_MODE" in
         ${modeCase}
-                    *)
-                      echo "Unknown CI mode: $CI_MODE" >&2
-                      exit_code=1
-                      ;;
-                  esac
+                      *)
+                        echo "Unknown CI mode: $CI_MODE" >&2
+                        exit_code=1
+                        ;;
+                    esac
+                  fi
 
                   if [ "$exit_code" -eq 0 ] && [ "''${#STEPS[@]}" -eq 0 ]; then
                     echo "No steps configured for mode: $CI_MODE"
@@ -315,13 +370,16 @@ let
                       STEP_DESC=$(step_desc "$step")
                       echo ""
                       echo "Step ''${STEP_INDEX}/''${TOTAL_STEPS}: ''${STEP_DESC}"
-                      local STEP_START_TIME=$(date +%s)
+                      local STEP_START_TIME=0
+                      STEP_START_TIME=$(date +%s)
                       set +e
                       ( "$STEP_FUNC" )
                       step_rc=$?
                       set -e
-                      local STEP_END_TIME=$(date +%s)
-                      local STEP_DUR=$((STEP_END_TIME - STEP_START_TIME))
+                      local STEP_END_TIME=0
+                      local STEP_DUR=0
+                      STEP_END_TIME=$(date +%s)
+                      STEP_DUR=$((STEP_END_TIME - STEP_START_TIME))
                       if [ "$step_rc" -eq 42 ]; then
                         _ci_record_step "$step" "skipped" "$STEP_DUR"
                       elif [ "$step_rc" -eq 0 ]; then
@@ -335,7 +393,19 @@ let
                     done
                   fi
 
+                  set +e
+                  (
+                    set -euo pipefail
         ${teardownScript}
+                  )
+                  teardown_rc=$?
+                  set -e
+                  if [ "$teardown_rc" -ne 0 ]; then
+                    echo "ERROR: CI teardown failed rc=$teardown_rc" >&2
+                    if [ "$exit_code" -eq 0 ]; then
+                      exit_code=$teardown_rc
+                    fi
+                  fi
 
                   # Write structured summary
                   _write_summary_json "$exit_code"
@@ -344,7 +414,8 @@ let
                 }
 
                 if [ "$CI_SUMMARY" = "true" ]; then
-                  LOGFILE=$(mktemp)
+                  init_ci_artifacts
+                  LOGFILE=$(artifact_path "ci-output.log")
                   START_TIME=$(date +%s)
                   set +e
                   ( run_pipeline ) 2>&1 | tee "$LOGFILE"
@@ -353,39 +424,14 @@ let
                   END_TIME=$(date +%s)
                   DURATION=$((END_TIME - START_TIME))
                   summary_parse "$LOGFILE" "$DURATION" "$EXIT_CODE"
-                  rm -f "$LOGFILE" 2>/dev/null || true
-                  if [ "$EXIT_CODE" -ne 0 ]; then
-                    if [ "$CI_KEEP_ARTIFACTS_ON_FAILURE" = "1" ]; then
-                      echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
-                    else
-                      rm -rf "$CI_ARTIFACTS_DIR" 2>/dev/null || true
-                    fi
-                  else
-                    if [ "$CI_KEEP_ARTIFACTS_ON_SUCCESS" = "1" ]; then
-                      echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
-                    else
-                      rm -rf "$CI_ARTIFACTS_DIR" 2>/dev/null || true
-                    fi
-                  fi
+                  cleanup_ci_artifacts "$EXIT_CODE"
                   exit $EXIT_CODE
                 else
                   set +e
                   run_pipeline
                   EXIT_CODE=$?
                   set -e
-                  if [ "$EXIT_CODE" -ne 0 ]; then
-                    if [ "$CI_KEEP_ARTIFACTS_ON_FAILURE" = "1" ]; then
-                      echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
-                    else
-                      rm -rf "$CI_ARTIFACTS_DIR" 2>/dev/null || true
-                    fi
-                  else
-                    if [ "$CI_KEEP_ARTIFACTS_ON_SUCCESS" = "1" ]; then
-                      echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
-                    else
-                      rm -rf "$CI_ARTIFACTS_DIR" 2>/dev/null || true
-                    fi
-                  fi
+                  cleanup_ci_artifacts "$EXIT_CODE"
                   exit $EXIT_CODE
                 fi
       '';

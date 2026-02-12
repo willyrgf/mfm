@@ -182,6 +182,49 @@ let
     ${minio}/bin/minio --help >/dev/null
     echo "OK: minio configuration valid dir=$MINIO_DIR"
   '';
+
+  fullStart = pkgs.writeShellScript "minio-full-start" ''
+    set -euo pipefail
+
+    ${init}
+    ${checkConfig}
+    exec ${start}
+  '';
+
+  fullStartTest = pkgs.writeShellScript "minio-full-start-test" ''
+    set -euo pipefail
+
+    ${init}
+    ${checkConfig}
+    exec ${start}
+  '';
+
+  exportS3Env = pkgs.writeShellScript "minio-export-s3-env" ''
+    set -euo pipefail
+    eval "$(${slots.getSlotInfo})"
+
+    API_PORT_VAR="${apiPortVar}"
+    MINIO_API_PORT="''${!API_PORT_VAR}"
+
+    BUCKET="''${1:-''${MINIO_BUCKET:-}}"
+    PREFIX="''${2:-''${MINIO_PREFIX:-}}"
+    REGION="''${3:-''${MINIO_REGION:-us-east-1}}"
+
+    ROOT_USER="''${MINIO_ROOT_USER:-${config.rootUser}}"
+    ROOT_PASSWORD="''${MINIO_ROOT_PASSWORD:-${config.rootPassword}}"
+
+    echo "export AWS_ACCESS_KEY_ID=\"$ROOT_USER\""
+    echo "export AWS_SECRET_ACCESS_KEY=\"$ROOT_PASSWORD\""
+    echo "export AWS_EC2_METADATA_DISABLED=\"true\""
+    echo "export MINIO_ENDPOINT=\"http://127.0.0.1:$MINIO_API_PORT\""
+    echo "export MINIO_REGION=\"$REGION\""
+    echo "export MINIO_BUCKET=\"$BUCKET\""
+    echo "export MINIO_PREFIX=\"$PREFIX\""
+    echo "export S3_ENDPOINT=\"http://127.0.0.1:$MINIO_API_PORT\""
+    echo "export S3_REGION=\"$REGION\""
+    echo "export S3_BUCKET=\"$BUCKET\""
+    echo "export S3_PREFIX=\"$PREFIX\""
+  '';
 in
 {
   inherit
@@ -193,5 +236,8 @@ in
     status
     health
     checkConfig
+    fullStart
+    fullStartTest
+    exportS3Env
     ;
 }

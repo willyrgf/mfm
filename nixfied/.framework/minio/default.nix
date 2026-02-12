@@ -78,6 +78,32 @@ let
       };
     };
     extensions = {
+      full-start = {
+        script = lifecycle.fullStart;
+        hook = "FULL_START";
+        summary = "Init/check/start MinIO";
+        details = "Performs init + check-config + start for MinIO.";
+      };
+      full-start-test = {
+        script = lifecycle.fullStartTest;
+        hook = "FULL_START_TEST";
+        summary = "Init/check/start MinIO for test profile";
+        details = "Performs init + check-config + start for MinIO (test profile).";
+      };
+      export-s3-env = {
+        script = lifecycle.exportS3Env;
+        hook = "EXPORT_S3_ENV";
+        summary = "Export S3-compatible environment from MinIO";
+        details = "Prints shell exports for AWS/S3 variables targeting the current MinIO endpoint.";
+        usage = [ "eval \"$(nix run .#service::minio::export-s3-env -- <bucket> <prefix> <region>)\"" ];
+      };
+      bucket-ensure = {
+        script = bucketMgmt.bucketEnsure;
+        hook = "BUCKET_ENSURE";
+        summary = "Ensure MinIO bucket exists";
+        details = "Creates bucket when missing and succeeds when already present.";
+        usage = [ "nix run .#service::minio::bucket-ensure -- <bucket>" ];
+      };
       bucket-create = {
         script = bucketMgmt.bucketCreate;
         hook = "BUCKET_CREATE";
@@ -121,11 +147,15 @@ in
     status
     health
     checkConfig
+    fullStart
+    fullStartTest
+    exportS3Env
     ;
 
   # Bucket management
   inherit (bucketMgmt)
     bucketCreate
+    bucketEnsure
     bucketDelete
     bucketList
     policyApply

@@ -130,8 +130,10 @@ let
     {
       name,
       script,
+      fixtures ? null,
       env ? { },
       useDeps ? false,
+      fixtureProfile ? "default",
       api,
       meta ? { },
     }:
@@ -143,8 +145,10 @@ let
       inherit
         name
         script
+        fixtures
         env
         useDeps
+        fixtureProfile
         ;
       description = api.summary;
       meta = mergedMeta;

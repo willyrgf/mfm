@@ -238,6 +238,22 @@ let
     ${reth}/bin/reth --version >/dev/null 2>&1
     echo "OK: reth configuration valid dir=$RETH_DIR network=$RETH_NETWORK"
   '';
+
+  fullStart = pkgs.writeShellScript "reth-full-start" ''
+    set -euo pipefail
+
+    ${init}
+    ${checkConfig}
+    exec ${start}
+  '';
+
+  fullStartTest = pkgs.writeShellScript "reth-full-start-test" ''
+    set -euo pipefail
+
+    ${init}
+    ${checkConfig}
+    exec ${start}
+  '';
 in
 {
   inherit
@@ -249,5 +265,7 @@ in
     status
     health
     checkConfig
+    fullStart
+    fullStartTest
     ;
 }

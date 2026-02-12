@@ -15,8 +15,10 @@ let
     lib.mkApp {
       name = name;
       script = cfg.script or "";
+      fixtures = cfg.fixtures or null;
       env = cfg.env or { };
       useDeps = cfg.useDeps or false;
+      fixtureProfile = cfg.fixtureProfile or "default";
       description = if (cfg ? api) then (cfg.api.summary or null) else (cfg.description or null);
       meta = pkgs.lib.optionalAttrs (cfg ? api) { nixfied.api = cfg.api; };
     };

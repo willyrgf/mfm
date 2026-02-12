@@ -2,6 +2,7 @@
 {
   pkgs,
   project,
+  fixtureLib,
   loadEnv,
   helpersScript,
   hookExports,
@@ -43,8 +44,10 @@ let
     {
       name,
       script,
+      fixtures ? null,
       env ? { },
       useDeps ? false,
+      fixtureProfile ? "default",
     }:
     let
       envExports = concatMapStringsSep "\n" (key: "export ${key}=${toString env.${key}}") (
@@ -53,6 +56,14 @@ let
       depsScript = project.install.deps or "";
       depsBlock = if useDeps && depsScript != "" then depsScript else "";
       pathBlock = if runtimePath != "" then "export PATH=\"${runtimePath}:$PATH\"" else "";
+      script0 =
+        fixtureLib.wrapScript {
+          contextName = name;
+          inherit fixtures;
+          defaultProfile = fixtureProfile;
+          defaultLogs = true;
+          script = script;
+        };
     in
     pkgs.writeShellScript name ''
       set -euo pipefail
@@ -64,15 +75,17 @@ let
       ${hookExports}
       ${envExports}
       ${depsBlock}
-      ${script}
+      ${script0}
     '';
 
   mkApp =
     {
       name,
       script,
+      fixtures ? null,
       env ? { },
       useDeps ? false,
+      fixtureProfile ? "default",
       description ? null,
       meta ? { },
     }:
@@ -81,8 +94,10 @@ let
         inherit
           name
           script
+          fixtures
           env
           useDeps
+          fixtureProfile
           ;
       };
     in
