@@ -255,6 +255,85 @@ let
     echo "OK: helios configuration valid dir=$HELIOS_DIR network=$HELIOS_NETWORK"
   '';
 
+  ready = pkgs.writeShellScript "helios-ready" ''
+    set -euo pipefail
+    ${runtimePrelude}
+
+    if [ ! -f "$HELIOS_PID_FILE" ]; then
+      echo "ERROR: helios not running (missing pid file) pid_file=$HELIOS_PID_FILE" >&2
+      exit 1
+    fi
+
+    PID=$(cat "$HELIOS_PID_FILE" 2>/dev/null || true)
+    if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+      echo "ERROR: helios not running (stale pid file) pid_file=$HELIOS_PID_FILE pid=''${PID:-unknown}" >&2
+      exit 1
+    fi
+
+    TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-300}"
+    INTERVAL_SECS="''${HELIOS_READY_INTERVAL_SECS:-1}"
+
+    case "$TIMEOUT_SECS" in
+      *[!0-9]*|"")
+        echo "ERROR: HELIOS_READY_TIMEOUT_SECS must be an integer seconds value (got '$TIMEOUT_SECS')" >&2
+        exit 1
+        ;;
+    esac
+
+    start_ts="$(${pkgs.coreutils}/bin/date +%s)"
+    attempt=0
+
+    while true; do
+      attempt=$((attempt + 1))
+
+      # Main readiness gate for MFM: must be able to answer `eth_blockNumber`.
+      #
+      # Helios can be "healthy" (responds to `eth_chainId`) while still syncing and returning
+      # JSON-RPC errors for other methods like `eth_blockNumber`.
+      RESP="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
+        -H 'content-type: application/json' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+        "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null || true)"
+
+      if [ -n "$RESP" ] && echo "$RESP" | ${pkgs.jq}/bin/jq -e '.result | strings' >/dev/null 2>&1; then
+        echo "OK: helios ready rpc_port=$HELIOS_RPC_PORT"
+        exit 0
+      fi
+
+      # Periodic progress info (stderr) to aid debugging in CI.
+      if [ $((attempt % 10)) -eq 0 ]; then
+        ERR_MSG=""
+        if [ -n "$RESP" ]; then
+          ERR_MSG="$(echo "$RESP" | ${pkgs.jq}/bin/jq -r '.error.message // empty' 2>/dev/null || true)"
+        fi
+
+        SYNC_STATUS="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
+          -H 'content-type: application/json' \
+          --data '{"jsonrpc":"2.0","id":1,"method":"eth_syncing","params":[]}' \
+          "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null \
+          | ${pkgs.jq}/bin/jq -r '.result | if type == "object" then "\(.currentBlock)/\(.highestBlock)" else "not_syncing" end' 2>/dev/null \
+          || true)"
+
+        if [ -n "''${ERR_MSG:-}" ] && [ -n "''${SYNC_STATUS:-}" ]; then
+          echo "INFO: helios not ready yet: $ERR_MSG (eth_syncing=$SYNC_STATUS)" >&2
+        elif [ -n "''${ERR_MSG:-}" ]; then
+          echo "INFO: helios not ready yet: $ERR_MSG" >&2
+        elif [ -n "''${SYNC_STATUS:-}" ]; then
+          echo "INFO: helios eth_syncing=$SYNC_STATUS" >&2
+        fi
+      fi
+
+      now_ts="$(${pkgs.coreutils}/bin/date +%s)"
+      if [ $((now_ts - start_ts)) -ge "$TIMEOUT_SECS" ]; then
+        echo "ERROR: helios not ready after $TIMEOUT_SECS s (eth_blockNumber still failing) rpc_port=$HELIOS_RPC_PORT" >&2
+        echo "HINT: mainnet Helios often needs a checkpoint (HELIOS_CHECKPOINT) and a working consensus RPC." >&2
+        exit 1
+      fi
+
+      ${pkgs.coreutils}/bin/sleep "$INTERVAL_SECS"
+    done
+  '';
+
   fullStart = pkgs.writeShellScript "helios-full-start" ''
     set -euo pipefail
 
@@ -281,6 +360,7 @@ in
     status
     health
     checkConfig
+    ready
     fullStart
     fullStartTest
     ;

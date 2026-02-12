@@ -122,6 +122,10 @@
       script = ''
         set -euo pipefail
 
+        # Reserve stdout for the final JSON output (for CI/scripting).
+        exec 3>&1
+        exec 1>&2
+
         if [ "$#" -ne 1 ] || [ "''${1:-}" = "--help" ] || [ "''${1:-}" = "-h" ]; then
           echo "usage: nix run .#mfm::portfolio::snapshot -- <ADDRESS>" >&2
           exit 2
@@ -164,48 +168,17 @@
         export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm"
         export MFM_EVM_RPC_URL="http://127.0.0.1:$HELIOSRPC_PORT"
 
-        # Helios can be "healthy" (responds to `eth_chainId`) while still syncing.
-        # Wait until `eth_blockNumber` succeeds before attempting the snapshot.
-        echo "INFO: waiting for Helios to sync (eth_blockNumber)..." >&2
-        READY=0
-        for i in $(seq 1 300); do
-          if curl -fsS --max-time 2 \
-            -H 'content-type: application/json' \
-            --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-            "$MFM_EVM_RPC_URL" \
-            | jq -e '.result | strings' >/dev/null 2>&1
-          then
-            READY=1
-            break
-          fi
+        echo "INFO: waiting for Helios readiness (eth_blockNumber)..." >&2
+        run_hook HELIOS_READY
 
-          if [ $((i % 10)) -eq 0 ]; then
-            SYNC_STATUS=$(
-              curl -fsS --max-time 2 \
-                -H 'content-type: application/json' \
-                --data '{"jsonrpc":"2.0","id":1,"method":"eth_syncing","params":[]}' \
-                "$MFM_EVM_RPC_URL" 2>/dev/null \
-                | jq -r '.result | if type == "object" then "\(.currentBlock)/\(.highestBlock)" else "not_syncing" end' 2>/dev/null \
-                || true
-            )
-            if [ -n "''${SYNC_STATUS:-}" ]; then
-              echo "INFO: helios eth_syncing=''${SYNC_STATUS}" >&2
-            fi
-          fi
-
-          sleep 1
-        done
-
-        if [ "$READY" -ne 1 ]; then
-          echo "ERROR: Helios did not become ready (eth_blockNumber) within 300s." >&2
-          echo "       This usually means Helios is still syncing or needs a mainnet checkpoint / valid consensus RPC." >&2
-          exit 1
-        fi
-
+        OUT_FILE="$(artifact_path "mfm-portfolio-snapshot.json")"
         cargo run -q -p mfm --bin mfm_cli -- \
           --output-format json \
           portfolio snapshot "$ADDRESS" \
-          --chain-id 1
+          --chain-id 1 \
+          >"$OUT_FILE"
+
+        cat "$OUT_FILE" >&3
       '';
     };
 
