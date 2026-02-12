@@ -2,11 +2,8 @@
 
 Experimental, WIP toolkit for on-chain operations built around an event-sourced state machine runtime.
 
-WARNING: Not production-ready. Do not use on mainnet.
+> WARNING: Not production-ready. Do not use on mainnet.
 
-<<<<<<< HEAD
-## Development (Nixfied)
-=======
 ## Documentation
 
 Start here:
@@ -38,7 +35,6 @@ Design notes / planning:
 - Nixfied vendoring boundaries: [`nixfied/VENDORED.txt`](nixfied/VENDORED.txt)
 
 ## Development
->>>>>>> origin/dev
 
 Canonical entrypoints:
 
@@ -47,23 +43,18 @@ nix run .#help
 nix run .#dev
 nix run .#check
 nix run .#test
-<<<<<<< HEAD
-=======
-nix run .#build
->>>>>>> origin/dev
 nix run .#ci -- --basic --summary
 nix run .#ci -- --audit --summary
 nix run .#ci -- --parity --summary
 ```
 
-<<<<<<< HEAD
-Contract notes:
+### Contract notes:
 
 - Service hooks (for example `run_hook MINIO_START`) and service apps (for example `nix run .#service::minio::start`) share the same launcher path and argument/slot-env enforcement.
 - Local supervisor wrappers in `nixfied/local/default.nix` (`up`, `down`, `svc-*`) are intentional prod-only overrides.
 - CI help/docs metadata comes from `nixfied/project/ci.nix` at `commands.ci.api`, and is mirrored into `apps.<system>.ci.meta.nixfied.api`.
-=======
-Run binaries:
+
+### Run binaries:
 
 ```bash
 nix run .#mfm_cli -- --help
@@ -71,6 +62,4 @@ nix run .#mfm_rest_api
 ```
 
 ## License
-
 MIT (see [`LICENSE`](LICENSE)).
->>>>>>> origin/dev
