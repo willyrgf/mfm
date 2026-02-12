@@ -149,7 +149,7 @@ let
     in
     ''
       {
-        local _fixture_log_file=""
+        _fixture_log_file=""
         ${lib.optionalString logsEnabled ''
           _fixture_log_file="$(artifact_path ${quote logName})"
         ''}

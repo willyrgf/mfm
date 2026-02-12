@@ -22,31 +22,28 @@
         "${project.envVar}" = "dev";
       };
       useDeps = true;
+      fixtures = {
+        services = [
+          {
+            name = "postgres";
+            profile = "dev";
+          }
+          {
+            name = "minio";
+            profile = "dev";
+            exports = [ "s3" ];
+          }
+          {
+            name = "reth";
+            profile = "dev";
+          }
+        ];
+      };
       script = ''
         eval "$($SLOT_INFO)"
 
-        run_hook POSTGRES_FULL_START
-
         export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm"
         export MFM_REST_API_ADDR="127.0.0.1:$REST_API_PORT"
-
-        # Use the MinIO service module contract in dev/test (without supervisor).
-        run_hook MINIO_INIT
-        start_service minio \
-          --wait-http "http://127.0.0.1:$MINIO_PORT/minio/health/ready" \
-          --timeout 60 \
-          -- \
-          "$MINIO_START"
-
-        # Use the Reth service module contract and route default EVM RPC to reth.
-        run_hook RETH_INIT
-        run_hook RETH_CHECK_CONFIG
-        start_service reth \
-          --wait-port "$RETHHTTP_PORT" \
-          --timeout 60 \
-          -- \
-          "$RETH_START"
-
         export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
 
         start_service rest-api \
