@@ -16,8 +16,21 @@ Current `.env` values:
 
 - `HELIOS_NETWORK=mainnet`
 - `HELIOS_EXECUTION_RPC_URL=https://eth.llamarpc.com`
-- `HELIOS_CONSENSUS_RPC_URL=https://www.lightclientdata.org`
+- `HELIOS_CONSENSUS_RPC_URL=https://www.lightclientdata.org` (optional; defaults to this for mainnet if omitted)
+- `HELIOS_CHECKPOINT=0x...` (optional; if omitted, Nixfied derives one from the consensus endpoint at start time)
 - `ETHEREUM_MAINNET_RPC_WSS=wss://ethereum-rpc.publicnode.com` (optional; not used unless you point Helios at it)
+
+### Deriving a Checkpoint Manually (Optional)
+
+If you want to pin the weak-subjectivity checkpoint explicitly:
+
+```bash
+CONS="https://www.lightclientdata.org"
+slot=$(curl -fsS "$CONS/eth/v1/beacon/headers/finalized" | jq -r '.data.header.message.slot|tonumber')
+epoch_start=$(( slot - (slot % 32) ))
+checkpoint=$(curl -fsS "$CONS/eth/v1/beacon/headers/$epoch_start" | jq -r '.data.root')
+echo "HELIOS_CHECKPOINT=$checkpoint"
+```
 
 ## Start Helios (Mainnet)
 
@@ -124,5 +137,7 @@ nix run .#mfm_cli -- portfolio snapshot 0x000000000000000000000000000000000000de
 ## Notes / Gotchas
 
 - Helios mainnet requires a **consensus** endpoint (Beacon API / light client updates provider). An Ethereum JSON-RPC endpoint (HTTP/WSS) is not a consensus endpoint.
+- If you don't set `HELIOS_CONSENSUS_RPC_URL` for mainnet, the Nixfied Helios wrapper defaults it to `https://www.lightclientdata.org`.
+- `HELIOS_CHECKPOINT` is part of the weak-subjectivity trust model. If you want explicit, deterministic control, pin `HELIOS_CHECKPOINT` in `.env` instead of relying on auto-derivation.
 - Helios requires the upstream execution RPC to support `eth_getProof`. If Helios fails to start due to provider limitations, try switching `HELIOS_EXECUTION_RPC_URL` to the websocket endpoint in `.env`:
   - `HELIOS_EXECUTION_RPC_URL=wss://ethereum-rpc.publicnode.com`

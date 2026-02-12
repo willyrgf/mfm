@@ -85,7 +85,7 @@
 
           Note: Helios mainnet configuration is expected to come from a root `.env` (Nixfied loads
           it automatically), e.g. `HELIOS_NETWORK=mainnet`, `HELIOS_EXECUTION_RPC_URL=...`,
-          `HELIOS_CONSENSUS_RPC_URL=...`.
+          and optionally `HELIOS_CONSENSUS_RPC_URL=...` / `HELIOS_CHECKPOINT=...`.
         '';
         usage = [
           "nix run .#mfm::portfolio::snapshot -- <ADDRESS>"
@@ -111,7 +111,11 @@
           }
           {
             name = "HELIOS_CONSENSUS_RPC_URL";
-            description = "Upstream consensus endpoint for Helios (required when HELIOS_NETWORK != local). Loaded from `.env` if present.";
+            description = "Upstream consensus endpoint for Helios (Beacon API). Optional for mainnet: defaults to https://www.lightclientdata.org. Loaded from `.env` if present.";
+          }
+          {
+            name = "HELIOS_CHECKPOINT";
+            description = "Optional weak-subjectivity checkpoint (0x...). If unset for non-local networks, the Nixfied Helios service will derive one from the consensus endpoint at start time.";
           }
         ];
       };
@@ -142,10 +146,6 @@
         fi
         if [ -z "''${HELIOS_EXECUTION_RPC_URL:-}" ]; then
           echo "ERROR: HELIOS_EXECUTION_RPC_URL is required (set it in .env)" >&2
-          exit 1
-        fi
-        if [ -z "''${HELIOS_CONSENSUS_RPC_URL:-}" ]; then
-          echo "ERROR: HELIOS_CONSENSUS_RPC_URL is required for mainnet (set it in .env)" >&2
           exit 1
         fi
 

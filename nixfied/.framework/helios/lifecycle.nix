@@ -36,11 +36,22 @@ let
       HELIOS_EXECUTION_RPC_URL="http://127.0.0.1:$HELIOS_EXECUTION_PORT"
     fi
 
+    HELIOS_DEFAULT_CONSENSUS_RPC_URL="${config.defaultConsensusRpcUrl or ""}"
+
+    # Default consensus endpoint for mainnet if not explicitly configured.
+    # This keeps testnets and other networks explicit to avoid accidentally mixing networks.
+    if [ "$HELIOS_NETWORK" = "mainnet" ] && [ -z "$HELIOS_CONSENSUS_RPC_URL" ] && [ -n "$HELIOS_DEFAULT_CONSENSUS_RPC_URL" ]; then
+      HELIOS_CONSENSUS_RPC_URL="$HELIOS_DEFAULT_CONSENSUS_RPC_URL"
+    fi
+
     # Helios local profile expects a consensus endpoint; default to execution RPC
     # so local dev/testing can run without a separate consensus client.
     if [ "$HELIOS_NETWORK" = "local" ] && [ -z "$HELIOS_CONSENSUS_RPC_URL" ] && [ -n "$HELIOS_EXECUTION_RPC_URL" ]; then
       HELIOS_CONSENSUS_RPC_URL="$HELIOS_EXECUTION_RPC_URL"
     fi
+
+    # Normalize for composing paths.
+    HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL%/}"
 
     if [ -z "$HELIOS_RPC_PORT" ]; then
       echo "ERROR: helios RPC port variable is not set" >&2
@@ -96,6 +107,61 @@ let
     if [ -z "$HELIOS_EXECUTION_RPC_URL" ]; then
       echo "ERROR: HELIOS_EXECUTION_RPC_URL is required (or set executionRpcPortKey to a valid port key)" >&2
       exit 1
+    fi
+
+    # Derive a recent weak-subjectivity checkpoint when not pinned explicitly.
+    #
+    # This avoids a common failure mode where Helios stays "healthy" but remains unable to answer
+    # `eth_blockNumber` because the consensus light client never bootstrapped.
+    if [ "$HELIOS_NETWORK" != "local" ] && [ -z "$HELIOS_CHECKPOINT" ]; then
+      CONS="$HELIOS_CONSENSUS_RPC_URL"
+      if [ -z "$CONS" ]; then
+        echo "ERROR: cannot derive HELIOS_CHECKPOINT: HELIOS_CONSENSUS_RPC_URL is empty" >&2
+        exit 1
+      fi
+
+      echo "INFO: deriving HELIOS_CHECKPOINT from consensus endpoint cons=$CONS" >&2
+
+      FINALIZED_JSON="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
+        -H 'accept: application/json' \
+        "$CONS/eth/v1/beacon/headers/finalized" 2>/dev/null)" || {
+        echo "ERROR: failed to fetch finalized header from consensus endpoint cons=$CONS" >&2
+        exit 1
+      }
+
+      slot="$(echo "$FINALIZED_JSON" | ${pkgs.jq}/bin/jq -r '.data.header.message.slot|tonumber' 2>/dev/null || true)"
+      case "$slot" in
+        *[!0-9]*|"")
+          echo "ERROR: failed to parse finalized slot from consensus response cons=$CONS" >&2
+          exit 1
+          ;;
+      esac
+
+      epoch_start=$((slot - (slot % 32)))
+
+      EPOCH_JSON="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
+        -H 'accept: application/json' \
+        "$CONS/eth/v1/beacon/headers/$epoch_start" 2>/dev/null)" || {
+        echo "ERROR: failed to fetch epoch boundary header from consensus endpoint cons=$CONS slot=$epoch_start" >&2
+        exit 1
+      }
+
+      checkpoint="$(echo "$EPOCH_JSON" | ${pkgs.jq}/bin/jq -r '.data.root // empty' 2>/dev/null || true)"
+      if ! echo "$checkpoint" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]{64}$'; then
+        echo "ERROR: invalid checkpoint root from consensus endpoint cons=$CONS root='$checkpoint'" >&2
+        exit 1
+      fi
+
+      # Sanity-check that the light-client bootstrap endpoint is served for this checkpoint.
+      ${pkgs.curl}/bin/curl -fsS --max-time 10 \
+        -H 'accept: application/json' \
+        "$CONS/eth/v1/beacon/light_client/bootstrap/$checkpoint" >/dev/null 2>&1 || {
+        echo "ERROR: consensus endpoint does not serve light_client/bootstrap for derived checkpoint cons=$CONS checkpoint=$checkpoint" >&2
+        exit 1
+      }
+
+      HELIOS_CHECKPOINT="$checkpoint"
+      echo "INFO: derived HELIOS_CHECKPOINT=$HELIOS_CHECKPOINT" >&2
     fi
 
     ARGS=(

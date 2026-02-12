@@ -360,7 +360,7 @@
 
           export HELIOS_NETWORK="mainnet"
           export HELIOS_EXECUTION_RPC_URL="https://eth.llamarpc.com"
-          export HELIOS_CONSENSUS_RPC_URL="https://www.lightclientdata.org"
+          # Intentionally rely on the Nixfied Helios service default consensus endpoint.
 
           # Mainnet Helios can take a while to sync; gate on eth_blockNumber.
           export HELIOS_READY_TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-900}"
