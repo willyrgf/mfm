@@ -142,6 +142,22 @@
           exec mfm-contract-artifact-configurable-counter "$@"
         '';
       };
+
+      evm-contract-artifact-mock-erc20 = lib.appApi.mkNixfiedApp {
+        name = "evm-contract-artifact-mock-erc20";
+        env = { };
+        useDeps = true;
+        api = {
+          version = 1;
+          summary = "Build MockERC20 artifact JSON";
+          details = "Compiles contracts/src/MockERC20.sol with Foundry and prints compact JSON {artifact:{abi,bytecode.object}} to stdout.";
+          usage = [ "nix run .#evm-contract-artifact-mock-erc20" ];
+          category = "evm";
+        };
+        script = ''
+          exec mfm-contract-artifact-mock-erc20 "$@"
+        '';
+      };
     };
 
   # Extra flake packages (merged into `packages` output).

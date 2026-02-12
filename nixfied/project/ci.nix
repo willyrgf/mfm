@@ -101,6 +101,7 @@
           "parity-s3"
           "parity-rest-api-smoke"
           "parity-evm-reth"
+          "parity-portfolio-tracker-reth"
           "parity-evm-helios-smoke"
         ];
       };
@@ -272,6 +273,51 @@
 
           LOGFILE=$(artifact_path "parity-evm-reth.log")
           log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_rest_api_evm_reth_pipeline
+        '';
+      };
+
+      parity-portfolio-tracker-reth = {
+        description = "Parity: portfolio_tracker snapshot against reth (MockERC20)";
+        env = {
+          AUTO_STOP_CONFLICTING = "1";
+        };
+        fixtures = {
+          services = [
+            {
+              name = "postgres";
+              profile = "test";
+            }
+            {
+              name = "minio";
+              profile = "test";
+              exports = [ "s3" ];
+              bucket = "mfm-test";
+              prefix = "mfm-artifacts";
+              region = "us-east-1";
+              bootstrap = [ "mfm-test" ];
+              logName = "minio-portfolio-tracker.log";
+            }
+            {
+              name = "reth";
+              profile = "test";
+              logName = "reth-portfolio-tracker.log";
+            }
+          ];
+        };
+        run = ''
+          eval "$($SLOT_INFO)"
+
+          export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
+
+          export MFM_S3_ENDPOINT="$MINIO_ENDPOINT"
+          export MFM_S3_REGION="$MINIO_REGION"
+          export MFM_S3_BUCKET="$MINIO_BUCKET"
+          export MFM_S3_PREFIX="$MINIO_PREFIX"
+
+          export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
+
+          LOGFILE=$(artifact_path "parity-portfolio-tracker-reth.log")
+          log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_portfolio_tracker_reth_mock_erc20
         '';
       };
 

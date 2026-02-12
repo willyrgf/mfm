@@ -640,6 +640,22 @@ impl AppServices {
         &self,
         req: PortfolioSnapshotRequest,
     ) -> Result<PortfolioSnapshotResponse, AppError> {
+        // Fail fast for the higher-level feature surface when RPC is not configured.
+        //
+        // Note: the underlying op can still be started via `run.start` and may end in `phase=failed`,
+        // but the feature is intended to behave like a request-level RPC dependency.
+        let rpc_url_missing = std::env::var(ENV_EVM_RPC_URL)
+            .ok()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+        if rpc_url_missing {
+            return Err(AppError::new(
+                ErrorClass::BadGateway,
+                "evm_rpc_url_missing",
+                "evm rpc url is not configured",
+            ));
+        }
+
         const OP_ID: &str = "portfolio_tracker";
         const OP_VERSION: &str = "v1";
         const OP_PATH: &str = "portfolio_tracker.main";

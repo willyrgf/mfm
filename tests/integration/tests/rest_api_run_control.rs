@@ -8,6 +8,30 @@ use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_event_store_mem::MemEventStore;
 use mfm_machine::stores::{ArtifactStore, EventStore};
 
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn remove(key: &'static str) -> Self {
+        let prev = std::env::var(key).ok();
+        std::env::remove_var(key);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => std::env::set_var(self.key, v.as_str()),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
     let s = serde_json::to_string(&body).expect("json request must serialize");
     Request::builder()
@@ -314,6 +338,7 @@ async fn features_list_exposes_builtin_catalog() {
     assert!(features.iter().any(|f| f["id"] == "run.status"));
     assert!(features.iter().any(|f| f["id"] == "run.events"));
     assert!(features.iter().any(|f| f["id"] == "artifact.get"));
+    assert!(features.iter().any(|f| f["id"] == "portfolio.snapshot"));
 }
 
 #[tokio::test]
@@ -347,4 +372,37 @@ async fn feature_execute_run_start_happy_path() {
     assert_eq!(v["data"]["feature_id"], "run.start");
     assert_eq!(v["data"]["result"]["phase"], "completed");
     assert!(v["data"]["result"]["run_id"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn feature_execute_portfolio_snapshot_missing_rpc_url_is_stable_error() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let _rpc = EnvVarGuard::remove("MFM_EVM_RPC_URL");
+
+    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let artifacts: Arc<dyn ArtifactStore> =
+        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
+
+    let bundle = mfm_rest_api::make_engine_bundle();
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        bundle,
+        events,
+        artifacts,
+    });
+
+    let resp = app
+        .oneshot(json_post(
+            "/v1/features/portfolio.snapshot/execute",
+            serde_json::json!({
+                "payload": { "address": "0x000000000000000000000000000000000000dead" }
+            }),
+        ))
+        .await
+        .expect("feature execute response");
+
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["error"]["code"], "evm_rpc_url_missing");
 }
