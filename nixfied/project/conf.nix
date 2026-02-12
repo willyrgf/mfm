@@ -179,6 +179,16 @@ rec {
             --address "127.0.0.1:$MINIO_PORT" \
             --console-address "127.0.0.1:$MINIO_CONSOLE_PORT"
         '';
+        readiness = {
+          type = "http";
+          host = "127.0.0.1";
+          port = "\${MINIO_PORT}";
+          path = "/minio/health/ready";
+          initialDelaySeconds = 2;
+          periodSeconds = 5;
+          timeoutSeconds = 5;
+          failureThreshold = 12;
+        };
         env = {
           MINIO_ROOT_USER = "minio";
           MINIO_ROOT_PASSWORD = "minio123456";
