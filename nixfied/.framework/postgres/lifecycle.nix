@@ -31,12 +31,37 @@ let
         echo "ERROR: Failed to resolve PostgreSQL runtime variables (PGPORT/PGDATA)" >&2
         exit 1
       fi
+
+      case "$PGPORT" in
+        *[!0-9]*)
+          echo "ERROR: PGPORT must be numeric (got '$PGPORT')" >&2
+          exit 1
+          ;;
+      esac
     '';
+
+  ensureConfigPort = ''
+    ensure_config_port() {
+      local conf="$1"
+
+      if [ ! -f "$conf" ]; then
+        echo "ERROR: missing postgresql.conf path=$conf" >&2
+        exit 1
+      fi
+
+      if ${pkgs.gnugrep}/bin/grep -Eq '^[[:space:]]*port[[:space:]]*=' "$conf"; then
+        ${pkgs.gnused}/bin/sed -i -E "s|^[[:space:]]*port[[:space:]]*=.*$|port = $PGPORT|g" "$conf"
+      else
+        printf '\nport = %s\n' "$PGPORT" >> "$conf"
+      fi
+    }
+  '';
 
   init = pkgs.writeShellScript "postgres-init" ''
     set -euo pipefail
 
     ${pgRuntimePrelude database}
+    ${ensureConfigPort}
 
     mkdir -p "$PGDATA"
 
@@ -68,6 +93,12 @@ let
         ;;
     esac
 
+    ensure_config_port "$PGDATA/postgresql.conf"
+    if ! ${postgres}/bin/postgres -D "$PGDATA" -C port >/dev/null 2>&1; then
+      echo "ERROR: PostgreSQL configuration invalid after init pgdata=$PGDATA" >&2
+      exit 1
+    fi
+
     cat > "$PGDATA/pg_hba.conf" <<'EOF'
     # TYPE  DATABASE        USER  ADDRESS       METHOD
     local   all             all                 trust
@@ -80,6 +111,14 @@ let
     set -euo pipefail
 
     ${pgRuntimePrelude database}
+    ${ensureConfigPort}
+
+    if [ ! -f "$PGDATA/postgresql.conf" ]; then
+      echo "ERROR: PostgreSQL not initialized at $PGDATA (missing postgresql.conf)" >&2
+      echo "   Run postgres init first: nix run .#service::postgres::init" >&2
+      exit 1
+    fi
+    ensure_config_port "$PGDATA/postgresql.conf"
 
     if ${postgres}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
       # Verify the running instance is ours by checking PGDATA

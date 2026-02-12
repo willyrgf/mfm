@@ -13,8 +13,8 @@ let
   # Base configuration shared across all environments
   baseConf = ''
     listen_addresses = 'localhost'
-    # The lifecycle start hook sets the slot-specific port via pg_ctl -o "-p ...".
-    # Keep postgresql.conf static/valid so fresh initdb directories start cleanly.
+    # Lifecycle hooks rewrite this to the slot-specific runtime port.
+    # Keep a static valid fallback so fresh initdb config always parses.
     port = 5432
     unix_socket_directories = '/tmp'
     log_destination = 'stderr'

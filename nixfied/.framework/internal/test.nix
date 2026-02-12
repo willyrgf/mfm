@@ -197,12 +197,47 @@ let
       )
     }
 
+    check_coverage_map() {
+      local map="$ROOT/tests/framework/COVERAGE_MAP.txt"
+      local framework_dir="$ROOT/nixfied/.framework"
+      local missing=0
+      local count=0
+      local file
+      local rel
+
+      if [ ! -f "$map" ]; then
+        echo "ERROR: coverage map missing path=$map" >&2
+        exit 1
+      fi
+
+      if [ ! -d "$framework_dir" ]; then
+        echo "ERROR: framework directory missing path=$framework_dir" >&2
+        exit 1
+      fi
+
+      while IFS= read -r file; do
+        rel="''${file#$ROOT/}"
+        count=$((count + 1))
+        if ! grep -Fq "\`$rel\`" "$map"; then
+          echo "ERROR: coverage map missing entry file=$rel" >&2
+          missing=$((missing + 1))
+        fi
+      done < <(find "$framework_dir" -type f -name '*.nix' | sort)
+
+      if [ "$missing" -ne 0 ]; then
+        echo "ERROR: coverage map incomplete missing=$missing total=$count" >&2
+        exit 1
+      fi
+
+      echo "OK: coverage map complete total=$count"
+    }
+
     log "flake eval"
     nix flake show "path:$ROOT" >/dev/null
     nix flake check --no-build "path:$ROOT" >/dev/null
 
     log "coverage map"
-    "$ROOT/tests/framework/scripts/check-coverage-map.sh" "$ROOT" >/dev/null
+    check_coverage_map >/dev/null
 
     log "core apps"
     HELP_OUT="$WORKDIR/help.txt"
@@ -569,7 +604,7 @@ let
           enable = true;
           services = {
             app = {
-              command = "echo hello";
+              command = "echo $KEEP_ME";
               workingDir = ".";
             };
           };
@@ -587,6 +622,7 @@ let
     assert_file_exists "$SUP_CONFIG"
     assert_contains "$SUP_CONFIG" "processes:"
     assert_contains "$SUP_CONFIG" "app:"
+    assert_contains "$SUP_CONFIG" 'echo $KEEP_ME'
 
     export NIXFIED_PROMPT_PLAN=0
     log "installer basic"

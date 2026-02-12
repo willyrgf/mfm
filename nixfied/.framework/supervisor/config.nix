@@ -138,14 +138,15 @@ let
 
     CONFIG_FILE="$CONFIG_DIR/process-compose.yaml"
 
-    cat > "$CONFIG_FILE" << EOF
-    version: "0.5"
-    log_level: info
-    log_location: $LOG_DIR/supervisor.log
-
-    processes:
+    {
+      printf 'version: "0.5"\n'
+      printf 'log_level: info\n'
+      printf 'log_location: %s/supervisor.log\n\n' "$LOG_DIR"
+      printf 'processes:\n'
+      cat <<'EOF'
     ${servicesYaml}
     EOF
+    } > "$CONFIG_FILE"
 
     echo "$CONFIG_FILE"
   '';
