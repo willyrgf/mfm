@@ -239,6 +239,25 @@
           eval "$($SLOT_INFO)"
           run_hook POSTGRES_READY
 
+          DB_READY=0
+          for _ in $(seq 1 30); do
+            if psql \
+              -h 127.0.0.1 \
+              -p "$POSTGRES_PORT" \
+              -U postgres \
+              -d postgres \
+              -Atqc "SELECT 1 FROM pg_database WHERE datname='mfm_test';" \
+              | grep -q '^1$'; then
+              DB_READY=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$DB_READY" -ne 1 ]; then
+            echo "ERROR: mfm_test database was not created within readiness window" >&2
+            exit 1
+          fi
+
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
 
           LOGFILE=$(artifact_path "parity-postgres.log")
@@ -436,11 +455,6 @@
               profile = "test";
               logName = "reth-helios.log";
             }
-            {
-              name = "helios";
-              profile = "test";
-              logName = "helios.log";
-            }
           ];
           artifacts = {
             logs = true;
@@ -450,7 +464,13 @@
         run = ''
           eval "$($SLOT_INFO)"
           run_hook RETH_READY
-          run_hook HELIOS_READY
+
+          export HELIOS_NETWORK="local"
+          export HELIOS_EXECUTION_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
+          export HELIOS_CONSENSUS_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
+          export HELIOS_READY_TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-120}"
+          HELIOS_SERVICE_LOG=$(artifact_path "parity-evm-helios-service.log")
+          fixture_start_service helios test "''${HELIOS_FIXTURE_TIMEOUT_SECS:-120}" 1 "$HELIOS_SERVICE_LOG"
 
           LOGFILE=$(artifact_path "parity-evm-helios-smoke.log")
           curl -fsS \
