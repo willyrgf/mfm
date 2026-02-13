@@ -14,6 +14,7 @@ members = [
 	"crates/machine-derive",
 	"crates/machine-test-support",
 	"crates/sdk",
+	"crates/ops/common",
 	"crates/storages/artifact-store-fs",
 	"crates/storages/artifact-store-secret",
 	"crates/storages/artifact-store-s3",

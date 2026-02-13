@@ -853,6 +853,13 @@ Initial set:
 - `join` (deterministic merge; supports fan-out/join)
 - `report` (outputs as artifacts)
 
+Current implementation status:
+- Reusable ops-layer state library scaffolded in `crates/ops/common`.
+- First shared primitives shipped:
+  - `states::evm::ReadU64HexState` (READ_ONLY_IO fetch pattern)
+  - `states::meta::*` metadata constructors
+  - `ctx`/`errors` helpers for stable context + error handling in ops
+
 ### 17.2 Op schema versioning and backward compatibility
 - Every operation MUST have an explicit `op_version`.
 - Stored manifests/events MUST include `op_id` + `op_version`.

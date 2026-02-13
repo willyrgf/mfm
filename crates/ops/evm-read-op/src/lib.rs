@@ -9,20 +9,15 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde::Deserialize;
 
-use mfm_collectors_evm::{parse_u64_hex_value, EvmIoClient, JsonRpcCall};
 use mfm_machine::config::RunConfig;
-use mfm_machine::context::DynContext;
-use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, StateError};
-use mfm_machine::ids::{ContextKey, ErrorCode, OpId, OpPath, StateId};
-use mfm_machine::io::IoProvider;
-use mfm_machine::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta, Tag};
+use mfm_machine::errors::ErrorCategory;
+use mfm_machine::ids::{ContextKey, OpId, OpPath, StateId};
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
-use mfm_machine::recorder::EventRecorder;
-use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 
+use mfm_op_common::errors;
+use mfm_op_common::states::evm::ReadU64HexState;
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
@@ -30,42 +25,8 @@ use mfm_sdk::op::{OpIo, Operation};
 const OP_ID: &str = "evm_read";
 const OP_VERSION: &str = "v1";
 
-fn info(code: &'static str, category: ErrorCategory, retryable: bool, message: &str) -> ErrorInfo {
-    ErrorInfo {
-        code: ErrorCode(code.to_string()),
-        category,
-        retryable,
-        message: message.to_string(),
-        details: None,
-    }
-}
-
 fn sdk_err(code: &'static str, message: &'static str) -> SdkError {
-    SdkError {
-        info: info(code, ErrorCategory::Unknown, false, message),
-    }
-}
-
-fn state_err(code: &'static str, message: &'static str) -> StateError {
-    StateError {
-        state_id: None,
-        info: info(code, ErrorCategory::Unknown, false, message),
-    }
-}
-
-fn state_err_from_io(err: IoError) -> StateError {
-    let info = match err {
-        IoError::MissingFactKey(info)
-        | IoError::Transport(info)
-        | IoError::RateLimited(info)
-        | IoError::Other(info) => info,
-        IoError::MissingFact { info, .. } => info,
-    };
-
-    StateError {
-        state_id: None,
-        info,
-    }
+    errors::sdk_error(code, ErrorCategory::Unknown, false, message)
 }
 
 fn ctx_key(op_path: &OpPath, suffix: &'static str) -> ContextKey {
@@ -138,11 +99,12 @@ impl Operation for EvmReadOp {
 
         if cfg.include_chain_id {
             let id = StateId(format!("{}.chain_id", op_path.0));
-            let st = Arc::new(ReadU64HexState {
-                state_id: id.clone(),
-                method: "eth_chainId",
-                output_key: ctx_key(&op_path, "chain_id"),
-            });
+            let st = Arc::new(ReadU64HexState::new(
+                id.clone(),
+                "eth_chainId",
+                serde_json::json!([]),
+                ctx_key(&op_path, "chain_id"),
+            ));
             states.push(StateNode {
                 id: id.clone(),
                 state: st,
@@ -152,11 +114,12 @@ impl Operation for EvmReadOp {
 
         if cfg.include_block_number {
             let id = StateId(format!("{}.block_number", op_path.0));
-            let st = Arc::new(ReadU64HexState {
-                state_id: id.clone(),
-                method: "eth_blockNumber",
-                output_key: ctx_key(&op_path, "block_number"),
-            });
+            let st = Arc::new(ReadU64HexState::new(
+                id.clone(),
+                "eth_blockNumber",
+                serde_json::json!([]),
+                ctx_key(&op_path, "block_number"),
+            ));
             if let Some(prev) = &last {
                 edges.push(DependencyEdge {
                     from: prev.clone(),
@@ -173,64 +136,26 @@ impl Operation for EvmReadOp {
     }
 }
 
-struct ReadU64HexState {
-    state_id: StateId,
-    method: &'static str,
-    output_key: ContextKey,
-}
-
-#[async_trait]
-impl State for ReadU64HexState {
-    fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: vec![Tag("fetch_data".to_string())],
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::ReadOnlyIo,
-            idempotency: Idempotency::None,
-        }
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        _rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let mut client = EvmIoClient::new(self.state_id.clone(), io);
-        let res = client
-            .call(JsonRpcCall::new(self.method, serde_json::json!([])))
-            .await
-            .map_err(state_err_from_io)?;
-
-        let n = parse_u64_hex_value(&res.response)
-            .map_err(|_| state_err("evm_response_invalid", "evm response was not a hex u64"))?;
-
-        ctx.write(self.output_key.clone(), serde_json::json!(n))
-            .map_err(|_| state_err("ctx_write_failed", "context write failed"))?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use std::collections::HashMap;
 
+    use async_trait::async_trait;
     use mfm_machine::config::{
         BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
         RetryPolicy,
     };
+    use mfm_machine::context::DynContext;
     use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
+    use mfm_machine::errors::{ErrorCategory, ErrorInfo};
     use mfm_machine::events::{Event, EventEnvelope, KernelEvent};
     use mfm_machine::hashing::artifact_id_for_json;
-    use mfm_machine::ids::{ArtifactId, RunId};
+    use mfm_machine::ids::{ArtifactId, ErrorCode, RunId};
     use mfm_machine::io::IoCall;
     use mfm_machine::live_io::{FactIndex, LiveIoTransport, LiveIoTransportFactory};
+    use mfm_machine::recorder::EventRecorder;
     use mfm_machine::replay_io::ReplayIo;
     use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
     use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};

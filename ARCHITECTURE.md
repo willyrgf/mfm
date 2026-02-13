@@ -157,10 +157,20 @@ Owns data collection/normalization (RPC/HTTP):
 - must operate through the IO abstraction
 - should be usable in live or replay
 
+### `crates/ops/common/`
+Owns reusable operation-level building blocks:
+- reusable `State` implementations (for example shared fetch/validate/execute patterns)
+- shared context/error/metadata helpers for ops
+
+Must NOT:
+- change `mfm-machine` runtime/planner semantics
+- depend on binaries
+
 ### `crates/ops/*`
 Owns domain workflows:
 - defines ops (expand to graphs)
 - composes collectors + storages + machine runtime
+- reuses shared primitives from `crates/ops/common/` when possible
 - contains op-specific states and tests
 
 In practice:

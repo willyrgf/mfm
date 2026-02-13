@@ -15,18 +15,21 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use alloy_primitives::{Address, U256};
-use mfm_collectors_evm::{parse_u64_hex_value, EvmIoClient, JsonRpcCall};
+use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, StateError};
 use mfm_machine::events::{ArtifactWritten, DomainEvent, DOMAIN_EVENT_ARTIFACT_WRITTEN};
 use mfm_machine::ids::{ContextKey, ErrorCode, FactKey, OpId, OpPath, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
-use mfm_machine::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta, Tag};
+use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_machine::stores::ArtifactKind;
+use mfm_op_common::ctx as op_ctx;
+use mfm_op_common::states::evm::{ReadU64HexState, U64Expectation};
+use mfm_op_common::states::meta;
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
@@ -261,10 +264,19 @@ impl Operation for PortfolioTrackerOp {
         let chain_id_sid = StateId(format!("{}.chain_id", op_path.0));
         states.push(StateNode {
             id: chain_id_sid.clone(),
-            state: Arc::new(ReadChainIdState {
-                state_id: chain_id_sid.clone(),
-                expected_chain_id: cfg.chain_id,
-            }),
+            state: Arc::new(
+                ReadU64HexState::new(
+                    chain_id_sid.clone(),
+                    "eth_chainId",
+                    serde_json::json!([]),
+                    ctx_key(KEY_CHAIN_ID),
+                )
+                .with_expectation(U64Expectation::parsing_input(
+                    cfg.chain_id,
+                    "chain_id_mismatch",
+                    "rpc chain_id did not match configured chain_id",
+                )),
+            ),
         });
         let mut last = chain_id_sid;
 
@@ -276,9 +288,12 @@ impl Operation for PortfolioTrackerOp {
         });
         states.push(StateNode {
             id: block_sid.clone(),
-            state: Arc::new(ReadBlockNumberState {
-                state_id: block_sid.clone(),
-            }),
+            state: Arc::new(ReadU64HexState::new(
+                block_sid.clone(),
+                "eth_blockNumber",
+                serde_json::json!([]),
+                ctx_key(KEY_BLOCK_NUMBER),
+            )),
         });
         last = block_sid;
 
@@ -331,98 +346,6 @@ impl Operation for PortfolioTrackerOp {
     }
 }
 
-struct ReadChainIdState {
-    state_id: StateId,
-    expected_chain_id: u64,
-}
-
-#[async_trait]
-impl State for ReadChainIdState {
-    fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: vec![Tag("fetch_data".to_string())],
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::ReadOnlyIo,
-            idempotency: Idempotency::None,
-        }
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        _rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let mut client = EvmIoClient::new(self.state_id.clone(), io);
-        let res = client
-            .call(JsonRpcCall::new("eth_chainId", serde_json::json!([])))
-            .await
-            .map_err(state_err_from_io)?;
-
-        let chain_id = parse_u64_hex_value(&res.response)
-            .map_err(|_| state_err("evm_response_invalid", "evm response was not a hex u64"))?;
-        if chain_id != self.expected_chain_id {
-            return Err(StateError {
-                state_id: Some(self.state_id.clone()),
-                info: info(
-                    "chain_id_mismatch",
-                    ErrorCategory::ParsingInput,
-                    false,
-                    "rpc chain_id did not match configured chain_id",
-                ),
-            });
-        }
-
-        ctx.write(ctx_key(KEY_CHAIN_ID), serde_json::json!(chain_id))
-            .map_err(|_| state_err("ctx_write_failed", "context write failed"))?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
-    }
-}
-
-struct ReadBlockNumberState {
-    state_id: StateId,
-}
-
-#[async_trait]
-impl State for ReadBlockNumberState {
-    fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: vec![Tag("fetch_data".to_string())],
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::ReadOnlyIo,
-            idempotency: Idempotency::None,
-        }
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        _rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let mut client = EvmIoClient::new(self.state_id.clone(), io);
-        let res = client
-            .call(JsonRpcCall::new("eth_blockNumber", serde_json::json!([])))
-            .await
-            .map_err(state_err_from_io)?;
-
-        let n = parse_u64_hex_value(&res.response)
-            .map_err(|_| state_err("evm_response_invalid", "evm response was not a hex u64"))?;
-
-        ctx.write(ctx_key(KEY_BLOCK_NUMBER), serde_json::json!(n))
-            .map_err(|_| state_err("ctx_write_failed", "context write failed"))?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
-    }
-}
-
 struct ReadEthBalanceState {
     state_id: StateId,
     wallet: Address,
@@ -431,13 +354,7 @@ struct ReadEthBalanceState {
 #[async_trait]
 impl State for ReadEthBalanceState {
     fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: vec![Tag("fetch_data".to_string())],
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::ReadOnlyIo,
-            idempotency: Idempotency::None,
-        }
+        meta::fetch_data()
     }
 
     async fn handle(
@@ -446,11 +363,12 @@ impl State for ReadEthBalanceState {
         io: &mut dyn IoProvider,
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let block = ctx
-            .read(&ctx_key(KEY_BLOCK_NUMBER))
-            .map_err(|_| state_err("ctx_read_failed", "context read failed"))?
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| state_err("missing_block_number", "missing block_number in context"))?;
+        let block = op_ctx::read_u64_required(
+            ctx,
+            &ctx_key(KEY_BLOCK_NUMBER),
+            "missing_block_number",
+            "missing block_number in context",
+        )?;
 
         let mut client = EvmIoClient::new(self.state_id.clone(), io);
         let res = client
@@ -469,8 +387,7 @@ impl State for ReadEthBalanceState {
             "amount_dec": format_u256_units(&wei, 18),
         });
 
-        ctx.write(ctx_key(KEY_NATIVE), native)
-            .map_err(|_| state_err("ctx_write_failed", "context write failed"))?;
+        op_ctx::write_json(ctx, ctx_key(KEY_NATIVE), native)?;
 
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,
@@ -487,13 +404,7 @@ struct ReadErc20BalanceState {
 #[async_trait]
 impl State for ReadErc20BalanceState {
     fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: vec![Tag("fetch_data".to_string())],
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::ReadOnlyIo,
-            idempotency: Idempotency::None,
-        }
+        meta::fetch_data()
     }
 
     async fn handle(
@@ -502,11 +413,12 @@ impl State for ReadErc20BalanceState {
         io: &mut dyn IoProvider,
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let block = ctx
-            .read(&ctx_key(KEY_BLOCK_NUMBER))
-            .map_err(|_| state_err("ctx_read_failed", "context read failed"))?
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| state_err("missing_block_number", "missing block_number in context"))?;
+        let block = op_ctx::read_u64_required(
+            ctx,
+            &ctx_key(KEY_BLOCK_NUMBER),
+            "missing_block_number",
+            "missing block_number in context",
+        )?;
 
         let addr_no0x = address_hex_lower_no0x(&self.token.address);
         let token_ctx_key = ctx_key_erc20_token(&addr_no0x);
@@ -553,8 +465,7 @@ impl State for ReadErc20BalanceState {
             "amount_dec": format_u256_units(&raw, decimals),
         });
 
-        ctx.write(token_ctx_key, token_obj)
-            .map_err(|_| state_err("ctx_write_failed", "context write failed"))?;
+        op_ctx::write_json(ctx, token_ctx_key, token_obj)?;
 
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,
@@ -570,13 +481,7 @@ struct WriteSnapshotState {
 #[async_trait]
 impl State for WriteSnapshotState {
     fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: Vec::new(),
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::Pure,
-            idempotency: Idempotency::None,
-        }
+        meta::pure()
     }
 
     async fn handle(
@@ -585,17 +490,18 @@ impl State for WriteSnapshotState {
         io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let chain_id = ctx
-            .read(&ctx_key(KEY_CHAIN_ID))
-            .map_err(|_| state_err("ctx_read_failed", "context read failed"))?
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| state_err("missing_chain_id", "missing chain_id in context"))?;
-
-        let block_number = ctx
-            .read(&ctx_key(KEY_BLOCK_NUMBER))
-            .map_err(|_| state_err("ctx_read_failed", "context read failed"))?
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| state_err("missing_block_number", "missing block_number in context"))?;
+        let chain_id = op_ctx::read_u64_required(
+            ctx,
+            &ctx_key(KEY_CHAIN_ID),
+            "missing_chain_id",
+            "missing chain_id in context",
+        )?;
+        let block_number = op_ctx::read_u64_required(
+            ctx,
+            &ctx_key(KEY_BLOCK_NUMBER),
+            "missing_block_number",
+            "missing block_number in context",
+        )?;
 
         let native = ctx
             .read(&ctx_key(KEY_NATIVE))
@@ -647,11 +553,11 @@ impl State for WriteSnapshotState {
             ));
         };
 
-        ctx.write(
+        op_ctx::write_json(
+            ctx,
             ctx_key(KEY_SNAPSHOT_ARTIFACT_ID),
             serde_json::json!(payload_id.0.clone()),
-        )
-        .map_err(|_| state_err("ctx_write_failed", "context write failed"))?;
+        )?;
 
         if !existed {
             let payload = serde_json::to_value(ArtifactWritten {
