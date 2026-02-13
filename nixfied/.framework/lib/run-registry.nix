@@ -7,6 +7,7 @@
 let
   projectId = (project.project or { }).id or "project";
   runsRoot = (project.ci or { }).runsRoot or "/tmp/${projectId}-runs";
+  id = import ./id.nix { inherit pkgs; };
 
   runRegistryStart = pkgs.writeShellScript "run-registry-start" ''
     set -euo pipefail
@@ -32,17 +33,17 @@ let
     fi
 
     RUNS_ROOT="${runsRoot}"
-    RUN_ID="$(date +%Y%m%d-%H%M%S)-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    RUN_ID="$(${id.resolveId})"
     RUN_DIR="$RUNS_ROOT/$RUN_ID"
 
     mkdir -p "$RUN_DIR"
 
     # Write runner script
-    cat > "$RUN_DIR/runner.sh" <<RUNNER_EOF
-    #!/usr/bin/env bash
-    set -euo pipefail
-    $SCRIPT
-    RUNNER_EOF
+    {
+      printf '%s\n' '#!/usr/bin/env bash'
+      printf '%s\n' 'set -euo pipefail'
+      printf '%s\n' "$SCRIPT"
+    } > "$RUN_DIR/runner.sh"
     chmod +x "$RUN_DIR/runner.sh"
 
     # Write initial meta.json
@@ -51,19 +52,25 @@ let
     ENV_INFO=""
     if [ -n "''${ENV:-}" ]; then ENV_INFO="$ENV"; fi
 
-    cat > "$RUN_DIR/meta.json" <<META_EOF
-    {
-      "run_id": "$RUN_ID",
-      "target": "$NAME",
-      "status": "starting",
-      "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-      "pid": null,
-      "slot": $(if [ -n "$SLOT_INFO" ]; then echo "$SLOT_INFO"; else echo "null"; fi),
-      "env": $(if [ -n "$ENV_INFO" ]; then echo "\"$ENV_INFO\""; else echo "null"; fi),
-      "exit_code": null,
-      "duration": null
-    }
-    META_EOF
+    ${pkgs.jq}/bin/jq -n \
+      --arg run_id "$RUN_ID" \
+      --arg target "$NAME" \
+      --arg started_at "$(${pkgs.coreutils}/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg slot "$SLOT_INFO" \
+      --arg env "$ENV_INFO" \
+      '
+      {
+        run_id: $run_id,
+        target: $target,
+        status: "starting",
+        started_at: $started_at,
+        pid: null,
+        slot: (if $slot == "" then null else (try ($slot | tonumber) catch $slot) end),
+        env: (if $env == "" then null else $env end),
+        exit_code: null,
+        duration: null
+      }
+      ' > "$RUN_DIR/meta.json"
 
     export RUN_DIR="$RUN_DIR"
     export RUN_ID="$RUN_ID"

@@ -5,12 +5,17 @@ let
   mkParallelRunner =
     commands:
     pkgs.writeShellScript "parallel-runner" ''
+      set -euo pipefail
       declare -a OUTPUT_FILES
       declare -a PIDS
 
       i=0
       ${pkgs.lib.concatMapStringsSep "\n" (cmd: ''
-        OUTPUT_FILE=$(mktemp)
+        OUTPUT_FILE=$(mktemp 2>/dev/null || true)
+        if [ -z "$OUTPUT_FILE" ]; then
+          echo "ERROR: failed to allocate temporary output file for command $((i+1))" >&2
+          exit 1
+        fi
         OUTPUT_FILES[$i]=$OUTPUT_FILE
 
         echo "RUN: command $((i+1)): ${cmd}"

@@ -7,6 +7,13 @@
 
 let
   processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
+  observability = import ../lib/service-observability.nix {
+    inherit
+      pkgs
+      slots
+      processRegistry
+      ;
+  };
   config = import ./config.nix { inherit project; };
   lifecycle = import ./lifecycle.nix {
     inherit
@@ -17,20 +24,10 @@ let
       ;
   };
 
-  logs = pkgs.writeShellScript "minio-logs" ''
-    set -euo pipefail
-    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
-    eval "$SLOT_INFO_OUT"
-    exec ${processRegistry.serviceLogs} --service minio --slot "$SLOT" --env "$ENV" "$@"
-  '';
+  logs = observability.mkLogScript "minio";
   log = logs;
 
-  events = pkgs.writeShellScript "minio-events" ''
-    set -euo pipefail
-    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
-    eval "$SLOT_INFO_OUT"
-    exec ${processRegistry.serviceEvents} --service minio --slot "$SLOT" --env "$ENV" "$@"
-  '';
+  events = observability.mkEventsScript "minio";
   bucketMgmt = import ./bucket-management.nix {
     inherit
       pkgs

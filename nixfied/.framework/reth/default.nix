@@ -7,6 +7,13 @@
 
 let
   processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
+  observability = import ../lib/service-observability.nix {
+    inherit
+      pkgs
+      slots
+      processRegistry
+      ;
+  };
   config = import ./config.nix { inherit project; };
   lifecycle = import ./lifecycle.nix {
     inherit
@@ -17,20 +24,10 @@ let
       ;
   };
 
-  logs = pkgs.writeShellScript "reth-logs" ''
-    set -euo pipefail
-    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
-    eval "$SLOT_INFO_OUT"
-    exec ${processRegistry.serviceLogs} --service reth --slot "$SLOT" --env "$ENV" "$@"
-  '';
+  logs = observability.mkLogScript "reth";
   log = logs;
 
-  events = pkgs.writeShellScript "reth-events" ''
-    set -euo pipefail
-    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
-    eval "$SLOT_INFO_OUT"
-    exec ${processRegistry.serviceEvents} --service reth --slot "$SLOT" --env "$ENV" "$@"
-  '';
+  events = observability.mkEventsScript "reth";
 
   publicApi = {
     version = 1;

@@ -6,6 +6,14 @@
 
 let
   lib = pkgs.lib;
+  validation = import ./validation.nix { inherit pkgs; };
+  inherit (validation)
+    isNonEmptyString
+    isNonEmptyList
+    expect
+    isListOfNonEmptyStrings
+    isKVSpec
+    ;
 
   requiredProfiles = [
     "dev"
@@ -23,16 +31,6 @@ let
     "health"
     "check-config"
   ];
-
-  isNonEmptyString = x: builtins.isString x && x != "";
-  isNonEmptyList = x: builtins.isList x && x != [ ];
-
-  expect = cond: msg: if cond then [ ] else [ msg ];
-
-  isListOfNonEmptyStrings = xs: builtins.isList xs && builtins.all isNonEmptyString xs;
-
-  isKVSpec =
-    x: builtins.isAttrs x && isNonEmptyString (x.name or "") && isNonEmptyString (x.description or "");
 
   isAttrs = x: builtins.isAttrs x;
 

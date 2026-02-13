@@ -8,6 +8,13 @@
 let
   cfg = project.modules.nginx or { };
   processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
+  observability = import ../lib/service-observability.nix {
+    inherit
+      pkgs
+      slots
+      processRegistry
+      ;
+  };
   portVarHttp = slots.portVarName (cfg.portKeyHttp or "http");
   portVarHttps = slots.portVarName (cfg.portKeyHttps or "https");
   dataDirName = cfg.dataDirName or "nginx";
@@ -69,38 +76,10 @@ let
       fi
     fi
 
-    LOCAL_RUNNING="$RUNNING"
-    REGISTRY_FOUND="0"
-    REGISTRY_RUNNING="false"
-    REGISTRY_STATE="unknown"
-    OWNER_RUN_ID=""
-    OWNER_SCOPE=""
-    EPHEMERAL_ROOT=""
-    WAIT_REASON=""
-    LOG_PATH=""
-    SLOT_OWNER=""
-    REGISTRY_SCOPE="global"
-
-    REG_OUT="$(${processRegistry.serviceStatus} --service nginx --slot "$SLOT" --env "$ENV" 2>/dev/null || true)"
-    if [ -n "$REG_OUT" ]; then
-      eval "$REG_OUT"
-    fi
-
-    if [ "$RUNNING" != "true" ] && [ "$REGISTRY_RUNNING" = "true" ]; then
-      RUNNING=true
-    fi
-
-    SCOPE="none"
-    if [ "$LOCAL_RUNNING" = "true" ]; then
-      SCOPE="local"
-    elif [ "$REGISTRY_RUNNING" = "true" ]; then
-      SCOPE="global"
-    fi
-
-    EFFECTIVE_LOG_PATH="$NGINX_DIR/logs/error.log"
-    if [ -n "$LOG_PATH" ]; then
-      EFFECTIVE_LOG_PATH="$LOG_PATH"
-    fi
+    ${observability.mkStatusMergeBlock {
+      service = "nginx";
+      defaultLogPathExpr = ''"$NGINX_DIR/logs/error.log"'';
+    }}
 
     echo "service=nginx slot=$SLOT env=$ENV running=$RUNNING pid=''${PID:-unknown} http_port=$HTTP_PORT https_port=$HTTPS_PORT scope=$SCOPE owner_run_id=''${OWNER_RUN_ID:-unknown} owner_scope=''${OWNER_SCOPE:-unknown} ephemeral_root=''${EPHEMERAL_ROOT:-none} registry_state=''${REGISTRY_STATE:-unknown} slot_owner=''${SLOT_OWNER:-unknown} wait_reason=''${WAIT_REASON:-none} log_path=$EFFECTIVE_LOG_PATH"
 
@@ -187,20 +166,10 @@ let
     echo "OK: nginx configuration valid conf=$CONF"
   '';
 
-  logs = pkgs.writeShellScript "nginx-logs-registry" ''
-    set -euo pipefail
-    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
-    eval "$SLOT_INFO_OUT"
-    exec ${processRegistry.serviceLogs} --service nginx --slot "$SLOT" --env "$ENV" "$@"
-  '';
+  logs = observability.mkLogScript "nginx";
   log = logs;
 
-  events = pkgs.writeShellScript "nginx-events-registry" ''
-    set -euo pipefail
-    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
-    eval "$SLOT_INFO_OUT"
-    exec ${processRegistry.serviceEvents} --service nginx --slot "$SLOT" --env "$ENV" "$@"
-  '';
+  events = observability.mkEventsScript "nginx";
 
   publicApi = {
     version = 1;

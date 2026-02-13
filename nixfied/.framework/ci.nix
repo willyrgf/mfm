@@ -223,17 +223,22 @@ let
                     /*) ;;
                     *) CI_ARTIFACTS_BASE="$(pwd)/$CI_ARTIFACTS_BASE" ;;
                   esac
-                  CI_RUN_ID="$(date +%Y%m%d-%H%M%S)-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+                  CI_RUN_ID="$(${toString lib.resolveId})"
                   export CI_ARTIFACTS_DIR="$CI_ARTIFACTS_BASE/$CI_RUN_ID"
                   export CI_ARTIFACTS_LATEST_LINK="$CI_ARTIFACTS_BASE/latest"
                 fi
+                case "$CI_ARTIFACTS_BASE" in
+                  /*) ;;
+                  *)
+                    echo "ERROR: CI_ARTIFACTS_BASE must resolve to an absolute path (got '$CI_ARTIFACTS_BASE')" >&2
+                    exit 1
+                    ;;
+                esac
                 export CI_KEEP_ARTIFACTS_ON_FAILURE="${if keepOnFailure then "1" else "0"}"
                 export CI_KEEP_ARTIFACTS_ON_SUCCESS="${if keepOnSuccess then "1" else "0"}"
         ${pkgs.lib.optionalString (ciEnvExports != "") ciEnvExports}
 
-                if [ -z "''${RUN_ID:-}" ]; then
-                  export RUN_ID="$(date +%Y%m%d-%H%M%S)-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-                fi
+                export RUN_ID="$(${toString lib.resolveId} "''${RUN_ID:-}")"
 
                 _emit_process_event() {
                   ${toString lib.emitEvent} "$@" >/dev/null 2>&1 || true

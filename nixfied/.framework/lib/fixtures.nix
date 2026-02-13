@@ -123,11 +123,7 @@ let
           globalArtifacts.logs
         else
           defaultLogs;
-      logPrefix =
-        if globalArtifacts ? prefix then
-          toString globalArtifacts.prefix
-        else
-          contextName;
+      logPrefix = if globalArtifacts ? prefix then toString globalArtifacts.prefix else contextName;
       logName =
         if serviceSpec ? logName then
           toString serviceSpec.logName

@@ -13,9 +13,72 @@ let
   portVarHttps = slots.portVarName (cfg.portKeyHttps or "https");
   dataDirName = cfg.dataDirName or "nginx";
   nginxDirExpr = slots.getServiceDir dataDirName;
+  siteHelpers = ''
+    validate_domain() {
+      local value="$1"
+      if ! echo "$value" | ${pkgs.gnugrep}/bin/grep -Eq '^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$'; then
+        echo "ERROR: invalid domain value=$value" >&2
+        return 1
+      fi
+      if echo "$value" | ${pkgs.gnugrep}/bin/grep -Eq '(^-|-$|[.]{2,})'; then
+        echo "ERROR: invalid domain value=$value" >&2
+        return 1
+      fi
+      return 0
+    }
+
+    validate_upstream_host() {
+      local value="$1"
+      if echo "$value" | ${pkgs.gnugrep}/bin/grep -Eq '^([A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|([0-9]{1,3}[.]){3}[0-9]{1,3}|localhost)$'; then
+        return 0
+      fi
+      echo "ERROR: invalid upstream host value=$value" >&2
+      return 1
+    }
+
+    validate_port() {
+      local value="$1"
+      case "$value" in
+        *[!0-9]*|"")
+          echo "ERROR: upstream port must be numeric value=$value" >&2
+          return 1
+          ;;
+      esac
+      if [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
+        echo "ERROR: upstream port out of range value=$value" >&2
+        return 1
+      fi
+      return 0
+    }
+
+    validate_site_root() {
+      local value="$1"
+      if [ -z "$value" ]; then
+        echo "ERROR: site root cannot be empty" >&2
+        return 1
+      fi
+      case "$value" in
+        /*) ;;
+        *)
+          echo "ERROR: site root must be absolute path value=$value" >&2
+          return 1
+          ;;
+      esac
+      if echo "$value" | ${pkgs.gnugrep}/bin/grep -Eq '(^|/)[.]{2}(/|$)'; then
+        echo "ERROR: site root cannot contain '..' segments value=$value" >&2
+        return 1
+      fi
+      return 0
+    }
+
+    escape_sed_replacement() {
+      printf '%s' "$1" | ${pkgs.gnused}/bin/sed -e 's/[|&\\]/\\&/g'
+    }
+  '';
 
   writeProxySite = pkgs.writeShellScript "nginx-site-proxy" ''
     set -euo pipefail
+    ${siteHelpers}
     if [ $# -lt 3 ]; then
       echo "Usage: nginx-site-proxy <domain> <upstream_host> <upstream_port>" >&2
       exit 1
@@ -24,6 +87,9 @@ let
     DOMAIN="$1"
     UPSTREAM_HOST="$2"
     UPSTREAM_PORT="$3"
+    validate_domain "$DOMAIN"
+    validate_upstream_host "$UPSTREAM_HOST"
+    validate_port "$UPSTREAM_PORT"
 
     eval "$(${slots.getSlotInfo})"
     HTTP_PORT_VAR="${portVarHttp}"
@@ -35,12 +101,12 @@ let
     CONF="$NGINX_DIR/conf/sites-available/$DOMAIN.conf"
 
     ${pkgs.gnused}/bin/sed \
-      -e "s|NGINX_DIR|$NGINX_DIR|g" \
-      -e "s|HTTP_PORT|$HTTP_PORT|g" \
-      -e "s|HTTPS_PORT|$HTTPS_PORT|g" \
-      -e "s|SITE_DOMAIN|$DOMAIN|g" \
-      -e "s|UPSTREAM_HOST|$UPSTREAM_HOST|g" \
-      -e "s|UPSTREAM_PORT|$UPSTREAM_PORT|g" \
+      -e "s|NGINX_DIR|$(escape_sed_replacement "$NGINX_DIR")|g" \
+      -e "s|HTTP_PORT|$(escape_sed_replacement "$HTTP_PORT")|g" \
+      -e "s|HTTPS_PORT|$(escape_sed_replacement "$HTTPS_PORT")|g" \
+      -e "s|SITE_DOMAIN|$(escape_sed_replacement "$DOMAIN")|g" \
+      -e "s|UPSTREAM_HOST|$(escape_sed_replacement "$UPSTREAM_HOST")|g" \
+      -e "s|UPSTREAM_PORT|$(escape_sed_replacement "$UPSTREAM_PORT")|g" \
       "${templates.siteProxyTemplate}" > "$CONF"
 
     ln -sf "$CONF" "$NGINX_DIR/conf/sites-enabled/$DOMAIN.conf"
@@ -49,6 +115,7 @@ let
 
   writeStaticSite = pkgs.writeShellScript "nginx-site-static" ''
     set -euo pipefail
+    ${siteHelpers}
     if [ $# -lt 2 ]; then
       echo "Usage: nginx-site-static <domain> <site_root>" >&2
       exit 1
@@ -56,6 +123,8 @@ let
 
     DOMAIN="$1"
     SITE_ROOT="$2"
+    validate_domain "$DOMAIN"
+    validate_site_root "$SITE_ROOT"
 
     eval "$(${slots.getSlotInfo})"
     HTTP_PORT_VAR="${portVarHttp}"
@@ -67,11 +136,11 @@ let
     CONF="$NGINX_DIR/conf/sites-available/$DOMAIN.conf"
 
     ${pkgs.gnused}/bin/sed \
-      -e "s|NGINX_DIR|$NGINX_DIR|g" \
-      -e "s|HTTP_PORT|$HTTP_PORT|g" \
-      -e "s|HTTPS_PORT|$HTTPS_PORT|g" \
-      -e "s|SITE_DOMAIN|$DOMAIN|g" \
-      -e "s|SITE_ROOT|$SITE_ROOT|g" \
+      -e "s|NGINX_DIR|$(escape_sed_replacement "$NGINX_DIR")|g" \
+      -e "s|HTTP_PORT|$(escape_sed_replacement "$HTTP_PORT")|g" \
+      -e "s|HTTPS_PORT|$(escape_sed_replacement "$HTTPS_PORT")|g" \
+      -e "s|SITE_DOMAIN|$(escape_sed_replacement "$DOMAIN")|g" \
+      -e "s|SITE_ROOT|$(escape_sed_replacement "$SITE_ROOT")|g" \
       "${templates.siteStaticTemplate}" > "$CONF"
 
     ln -sf "$CONF" "$NGINX_DIR/conf/sites-enabled/$DOMAIN.conf"

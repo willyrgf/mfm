@@ -7,6 +7,8 @@
 
 let
   cfg = project.modules.postgres or { };
+  dataDirName = cfg.dataDirName or "postgres";
+  pgdataExpr = slots.getServiceDir dataDirName;
   postgres = cfg.package or pkgs.postgresql_16;
   portKey = cfg.portKey or "postgres";
   portVar = slots.portVarName portKey;
@@ -69,23 +71,33 @@ let
     GIT_BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
     BACKUP_NAME="backup-$TIMESTAMP"
     BACKUP_PATH="$BACKUP_DIR/$BACKUP_NAME"
+    CREATED_AT="$(${pkgs.coreutils}/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     echo "INFO: Creating base backup: $BACKUP_NAME"
     ${postgres}/bin/pg_basebackup -h localhost -p "$PGPORT" -U postgres -D "$BACKUP_PATH" -Ft -z -P
 
     # Write backup manifest
-    cat > "$BACKUP_PATH.manifest.json" <<EOF
-    {
-      "name": "$BACKUP_NAME",
-      "timestamp": "$TIMESTAMP",
-      "git_commit": "$GIT_COMMIT",
-      "git_branch": "$GIT_BRANCH",
-      "pgport": "$PGPORT",
-      "slot": "$SLOT",
-      "env": "$ENV",
-      "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    }
-    EOF
+    ${pkgs.jq}/bin/jq -n \
+      --arg name "$BACKUP_NAME" \
+      --arg timestamp "$TIMESTAMP" \
+      --arg git_commit "$GIT_COMMIT" \
+      --arg git_branch "$GIT_BRANCH" \
+      --arg pgport "$PGPORT" \
+      --arg slot "''${SLOT:-}" \
+      --arg env "''${ENV:-}" \
+      --arg created_at "$CREATED_AT" \
+      '
+      {
+        name: $name,
+        timestamp: $timestamp,
+        git_commit: $git_commit,
+        git_branch: $git_branch,
+        pgport: $pgport,
+        slot: (if $slot == "" then null else $slot end),
+        env: (if $env == "" then null else $env end),
+        created_at: $created_at
+      }
+      ' > "$BACKUP_PATH.manifest.json"
 
     echo "OK: Backup created: $BACKUP_PATH"
     echo "   Manifest: $BACKUP_PATH.manifest.json"
@@ -93,6 +105,8 @@ let
 
   restore = pkgs.writeShellScript "postgres-restore" ''
     set -euo pipefail
+
+    eval "$(${slots.getSlotInfo})"
 
     BACKUP_PATH="''${1:-}"
     if [ -z "$BACKUP_PATH" ]; then
@@ -104,6 +118,27 @@ let
       echo "ERROR: PGDATA must be set" >&2
       exit 1
     fi
+
+    EXPECTED_PGDATA="${pgdataExpr}"
+    if [ "$PGDATA" != "$EXPECTED_PGDATA" ] && [ "''${POSTGRES_RESTORE_ALLOW_CUSTOM_PGDATA:-0}" != "1" ]; then
+      echo "ERROR: PGDATA must match the slot/env postgres data dir or set POSTGRES_RESTORE_ALLOW_CUSTOM_PGDATA=1" >&2
+      echo "DETAIL: expected=$EXPECTED_PGDATA actual=$PGDATA" >&2
+      exit 1
+    fi
+
+    case "$PGDATA" in
+      ""|"/"|"/tmp"|"/var"|"/usr"|"/etc"|"/bin"|"/sbin"|"/opt"|"/home"|"/Users")
+        echo "ERROR: refusing to restore using unsafe PGDATA path=$PGDATA" >&2
+        exit 1
+        ;;
+    esac
+    case "$PGDATA" in
+      /*) ;;
+      *)
+        echo "ERROR: PGDATA must be an absolute path (got '$PGDATA')" >&2
+        exit 1
+        ;;
+    esac
 
     if [ ! -d "$BACKUP_PATH" ] && [ ! -f "$BACKUP_PATH/base.tar.gz" ]; then
       echo "ERROR: Backup not found: $BACKUP_PATH" >&2

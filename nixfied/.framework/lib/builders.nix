@@ -56,14 +56,13 @@ let
       depsScript = project.install.deps or "";
       depsBlock = if useDeps && depsScript != "" then depsScript else "";
       pathBlock = if runtimePath != "" then "export PATH=\"${runtimePath}:$PATH\"" else "";
-      script0 =
-        fixtureLib.wrapScript {
-          contextName = name;
-          inherit fixtures;
-          defaultProfile = fixtureProfile;
-          defaultLogs = true;
-          script = script;
-        };
+      script0 = fixtureLib.wrapScript {
+        contextName = name;
+        inherit fixtures;
+        defaultProfile = fixtureProfile;
+        defaultLogs = true;
+        script = script;
+      };
     in
     pkgs.writeShellScript name ''
       set -euo pipefail

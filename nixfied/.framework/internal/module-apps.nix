@@ -240,7 +240,7 @@ let
       usage = [ "nix run .#runtime::status -- [args]" ];
       category = "utility";
       script = ''
-        echo "WARN: runtime::status is deprecated; use process::status"
+        echo "WARN: runtime::status is deprecated; use process::status" >&2
         exec ${toString lib.processStatus} "$@"
       '';
     };
@@ -251,7 +251,7 @@ let
       usage = [ "nix run .#runtime::ps -- [args]" ];
       category = "utility";
       script = ''
-        echo "WARN: runtime::ps is deprecated; use process::status"
+        echo "WARN: runtime::ps is deprecated; use process::status" >&2
         exec ${toString lib.processStatus} "$@"
       '';
     };
@@ -262,7 +262,7 @@ let
       usage = [ "nix run .#runtime::slots -- [args]" ];
       category = "utility";
       script = ''
-        echo "WARN: runtime::slots is deprecated; use process::slots"
+        echo "WARN: runtime::slots is deprecated; use process::slots" >&2
         exec ${toString lib.processSlots} "$@"
       '';
     };
@@ -273,7 +273,7 @@ let
       usage = [ "nix run .#runtime::runs -- [args]" ];
       category = "utility";
       script = ''
-        echo "WARN: runtime::runs is deprecated; use process::runs"
+        echo "WARN: runtime::runs is deprecated; use process::runs" >&2
         exec ${toString lib.processRuns} "$@"
       '';
     };
@@ -284,7 +284,7 @@ let
       usage = [ "nix run .#runtime::inspect -- <id>" ];
       category = "utility";
       script = ''
-        echo "WARN: runtime::inspect is deprecated; use process::inspect"
+        echo "WARN: runtime::inspect is deprecated; use process::inspect" >&2
         exec ${toString lib.processInspect} "$@"
       '';
     };
@@ -295,7 +295,7 @@ let
       usage = [ "nix run .#runtime::gc -- [args]" ];
       category = "utility";
       script = ''
-        echo "WARN: runtime::gc is deprecated; use process::gc"
+        echo "WARN: runtime::gc is deprecated; use process::gc" >&2
         exec ${toString lib.processGc} "$@"
       '';
     };

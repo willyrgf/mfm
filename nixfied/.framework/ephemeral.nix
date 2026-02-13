@@ -45,6 +45,7 @@ let
 
   depsScript = project.install.deps or "";
   runtimePackages = project.tooling.runtimePackages or [ ];
+  id = import ./lib/id.nix { inherit pkgs; };
   processRegistry = import ./lib/process-registry.nix { inherit pkgs project; };
 
   lockDir = "/tmp";
@@ -58,9 +59,7 @@ let
   refEphSlot = "\$${projectIdUpper}_EPHEMERAL_SLOT";
   refLockFd = "\$${projectIdUpper}_SLOT_LOCK_FD";
 
-  mkUniqueId = pkgs.writeShellScript "mk-unique-id" ''
-    echo "$(date +%Y%m%d-%H%M%S)-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-  '';
+  mkUniqueId = id.mkUniqueId;
 
   acquireSlotLock = pkgs.writeShellScript "acquire-slot-lock" ''
     set -euo pipefail
@@ -196,9 +195,7 @@ let
 
       export ${envVar}="''${${envVar}:-test}"
 
-      if [ -z "''${RUN_ID:-}" ]; then
-        export RUN_ID="$(date +%Y%m%d-%H%M%S)-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-      fi
+      export RUN_ID="$(${id.resolveId} "''${RUN_ID:-}")"
 
       export ${projectIdUpper}_EPHEMERAL_ROOT=$(${mkEphemeralRoot})
       export ${projectIdUpper}_EPHEMERAL=1

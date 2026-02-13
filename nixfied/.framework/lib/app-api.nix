@@ -3,16 +3,14 @@
 
 let
   lib = pkgs.lib;
-
-  isNonEmptyString = x: builtins.isString x && x != "";
-  isNonEmptyList = x: builtins.isList x && x != [ ];
-
-  expect = cond: msg: if cond then [ ] else [ msg ];
-
-  isListOfNonEmptyStrings = xs: builtins.isList xs && builtins.all isNonEmptyString xs;
-
-  isKVSpec =
-    x: builtins.isAttrs x && isNonEmptyString (x.name or "") && isNonEmptyString (x.description or "");
+  validation = import ./validation.nix { inherit pkgs; };
+  inherit (validation)
+    isNonEmptyString
+    isNonEmptyList
+    expect
+    isListOfNonEmptyStrings
+    isKVSpec
+    ;
 
   validateApiErrors =
     { name, api }:

@@ -7,6 +7,13 @@
 
 let
   processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
+  observability = import ../lib/service-observability.nix {
+    inherit
+      pkgs
+      slots
+      processRegistry
+      ;
+  };
   config = import ./config.nix {
     inherit
       pkgs
@@ -22,20 +29,10 @@ let
       ;
   };
 
-  logs = pkgs.writeShellScript "helios-logs" ''
-    set -euo pipefail
-    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
-    eval "$SLOT_INFO_OUT"
-    exec ${processRegistry.serviceLogs} --service helios --slot "$SLOT" --env "$ENV" "$@"
-  '';
+  logs = observability.mkLogScript "helios";
   log = logs;
 
-  events = pkgs.writeShellScript "helios-events" ''
-    set -euo pipefail
-    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
-    eval "$SLOT_INFO_OUT"
-    exec ${processRegistry.serviceEvents} --service helios --slot "$SLOT" --env "$ENV" "$@"
-  '';
+  events = observability.mkEventsScript "helios";
 
   publicApi = {
     version = 1;
