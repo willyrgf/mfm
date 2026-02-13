@@ -94,10 +94,59 @@
       "${project.envVar}" = "test";
       CARGO_TERM_COLOR = "always";
       RUST_BACKTRACE = "1";
+      SERVICE_OWNER_SCOPE = "persistent";
+      SERVICE_DISCOVERY_SCOPE = "global";
+      SERVICE_REUSE_POLICY = "same-slot";
     };
     useDeps = true;
     setup = "";
-    teardown = "";
+    teardown = ''
+      # Keep teardown diagnostics best-effort so step failures remain the primary CI exit code.
+      CI_DIAG_EVENTS_LIMIT="''${CI_DIAG_EVENTS_LIMIT:-200}"
+
+      capture_diag() {
+        local name="$1"
+        shift
+        local outfile=""
+        outfile=$(artifact_path "$name")
+        echo "INFO: collecting ci diagnostic name=$name outfile=$outfile" >&2
+        set +e
+        "$@" >"$outfile" 2>&1
+        local rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+          echo "WARN: diagnostic command failed name=$name rc=$rc" >&2
+        fi
+      }
+
+      capture_service_diag() {
+        local service="$1"
+        local token=""
+        local status_hook=""
+        local events_hook=""
+
+        token=$(echo "$service" | tr '[:lower:]' '[:upper:]' | tr '.:/-' '_')
+        status_hook="''${token}_STATUS"
+        events_hook="''${token}_EVENTS"
+
+        if has_hook "$status_hook"; then
+          capture_diag "ci-diagnostics-service-''${service}-status.log" run_hook "$status_hook"
+        fi
+
+        if has_hook "$events_hook"; then
+          capture_diag "ci-diagnostics-service-''${service}-events.log" run_hook "$events_hook" -- --limit "$CI_DIAG_EVENTS_LIMIT"
+        fi
+      }
+
+      capture_diag "ci-diagnostics-process-status.log" nix run .#process::status -- --all
+      capture_diag "ci-diagnostics-process-runs.log" nix run .#process::runs -- --all
+      capture_diag "ci-diagnostics-process-slots.log" nix run .#process::slots -- --all
+      capture_diag "ci-diagnostics-process-gc.log" nix run .#process::gc
+
+      for service in postgres minio reth helios nginx; do
+        capture_service_diag "$service"
+      done
+    '';
     failureSignals = [ ];
     runsRoot = "/tmp/${project.id}-runs";
     useEphemeral = true;
@@ -445,6 +494,29 @@
 
           if [ $rc -ne 0 ]; then
             echo "ERROR: mfm::portfolio::snapshot failed rc=$rc" >&2
+
+            HELIOS_EVENTS_FILE=$(artifact_path "mainnet-helios-events.log")
+            HELIOS_SERVICE_LOG_FILE=$(artifact_path "mainnet-helios-service-log.log")
+            PROCESS_INSPECT_FILE=$(artifact_path "mainnet-process-inspect.log")
+
+            if has_hook HELIOS_EVENTS; then
+              run_hook HELIOS_EVENTS -- --limit 200 >"$HELIOS_EVENTS_FILE" 2>&1 || true
+              echo "INFO: helios events (tail 200) path=$HELIOS_EVENTS_FILE" >&2
+              tail -200 "$HELIOS_EVENTS_FILE" >&2 || true
+            fi
+
+            if has_hook HELIOS_LOG; then
+              run_hook HELIOS_LOG -- --lines 200 >"$HELIOS_SERVICE_LOG_FILE" 2>&1 || true
+              echo "INFO: helios service log (tail 200) path=$HELIOS_SERVICE_LOG_FILE" >&2
+              tail -200 "$HELIOS_SERVICE_LOG_FILE" >&2 || true
+            fi
+
+            if [ -n "''${RUN_ID:-}" ]; then
+              nix run .#process::inspect -- "$RUN_ID" >"$PROCESS_INSPECT_FILE" 2>&1 || true
+              echo "INFO: process inspect path=$PROCESS_INSPECT_FILE run_id=$RUN_ID" >&2
+              tail -200 "$PROCESS_INSPECT_FILE" >&2 || true
+            fi
+
             tail -200 "$LOGFILE" >&2 || true
             if [ -s "$RAW_OUTFILE" ]; then
               echo "STDOUT:" >&2
