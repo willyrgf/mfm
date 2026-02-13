@@ -1839,21 +1839,11 @@ impl Operation for EvmValidateOp {
 
         if let Some(abi) = &parsed_abi {
             let _ = prepare_validate_assertions(abi, &cfg.read_assertions, &cfg.event_assertions)
-                .map_err(|err| match err.as_str() {
-                "read assertion did not match ABI" => {
-                    sdk_err("invalid_op_config", "read assertion did not match ABI")
-                }
-                "event assertion referenced unknown event" => sdk_err(
+                .map_err(|err| {
+                sdk_err(
                     "invalid_op_config",
-                    "event assertion referenced unknown event",
-                ),
-                "anonymous events are not supported for validation" => sdk_err(
-                    "invalid_op_config",
-                    "anonymous events are not supported for validation",
-                ),
-                "invalid from_block" => sdk_err("invalid_op_config", "invalid from_block"),
-                "invalid to_block" => sdk_err("invalid_op_config", "invalid to_block"),
-                _ => sdk_err("invalid_op_config", "invalid evm_validate op_config"),
+                    op_rpc::validation_assertion_error_message(&err),
+                )
             })?;
         }
 
@@ -1906,21 +1896,11 @@ impl State for ValidateState {
             &self.cfg.read_assertions,
             &self.cfg.event_assertions,
         )
-        .map_err(|err| match err.as_str() {
-            "read assertion did not match ABI" => {
-                state_err("invalid_op_config", "read assertion did not match ABI")
-            }
-            "event assertion referenced unknown event" => state_err(
+        .map_err(|err| {
+            state_err(
                 "invalid_op_config",
-                "event assertion referenced unknown event",
-            ),
-            "anonymous events are not supported for validation" => state_err(
-                "invalid_op_config",
-                "anonymous events are not supported for validation",
-            ),
-            "invalid from_block" => state_err("invalid_op_config", "invalid from_block"),
-            "invalid to_block" => state_err("invalid_op_config", "invalid to_block"),
-            _ => state_err("invalid_op_config", "invalid evm_validate op_config"),
+                op_rpc::validation_assertion_error_message(&err),
+            )
         })?;
 
         let mut client = EvmIoClient::new(self.state_id.clone(), io);
