@@ -228,14 +228,17 @@ rec {
   };
 
   ephemeral = {
-    enable = false;
+    enable = true;
     excludePatterns = [
       ".git"
+      ".direnv"
       "node_modules"
       ".next"
       "dist"
       ".turbo"
       ".cache"
+      "target"
+      "result"
       "*.log"
       "test-results"
       "coverage"

@@ -35,6 +35,7 @@ All responses are JSON envelopes:
 Endpoints:
 
 - `GET /v1/health`
+- `GET /v1/ready`
 - `GET /v1/features`
 - `POST /v1/features/:feature_id/execute`
 - `POST /v1/runs/start`
@@ -42,6 +43,11 @@ Endpoints:
 - `GET /v1/runs/:run_id/status`
 - `GET /v1/runs/:run_id/events?from_seq=1&to_seq=<optional>`
 - `GET /v1/artifacts/:artifact_id`
+
+Probe semantics:
+
+- `/v1/health`: liveness only (process is running)
+- `/v1/ready`: readiness (event store + artifact store probes must succeed)
 
 Start a run:
 

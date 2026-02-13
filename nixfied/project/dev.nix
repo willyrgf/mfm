@@ -7,7 +7,15 @@
       api = {
         version = 1;
         summary = "Start the dev workflow (Postgres + MinIO + Reth + REST API)";
-        details = "Starts Postgres, MinIO (S3), Reth, and the REST API, then waits (local development).";
+        details = ''
+          Starts Postgres, MinIO (S3), Reth, and the REST API for local development.
+
+          Startup is readiness-gated:
+          - `POSTGRES_READY`
+          - `MINIO_READY`
+          - `RETH_READY`
+          - REST API `/v1/ready`
+        '';
         usage = [
           "nix run .#dev"
           "NIX_ENV=1 nix run .#dev"
@@ -46,8 +54,12 @@
         export MFM_REST_API_ADDR="127.0.0.1:$REST_API_PORT"
         export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
 
+        run_hook POSTGRES_READY
+        run_hook MINIO_READY
+        run_hook RETH_READY
+
         start_service rest-api \
-          --wait-http "http://127.0.0.1:$REST_API_PORT/v1/health" \
+          --wait-http "http://127.0.0.1:$REST_API_PORT/v1/ready" \
           -- \
           cargo run -p mfm-rest-api --bin mfm_rest_api
 
@@ -196,10 +208,11 @@
           PG_LOGFILE="$(artifact_path "postgres-mfm-portfolio-snapshot.log")"
           fixture_start_service postgres dev 60 1 "$PG_LOGFILE" "$KEEP_SERVICES"
         fi
+        run_hook POSTGRES_READY
 
         # Start Helios (mainnet-backed). If already running, don't stop it.
         if run_hook HELIOS_STATUS >/dev/null 2>&1; then
-          run_hook HELIOS_HEALTH >/dev/null 2>&1
+          run_hook HELIOS_READY
         else
           STARTED_HELIOS=1
           HELIOS_LOGFILE="$(artifact_path "helios-mfm-portfolio-snapshot.log")"

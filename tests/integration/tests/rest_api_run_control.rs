@@ -1,12 +1,16 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_event_store_mem::MemEventStore;
-use mfm_machine::stores::{ArtifactStore, EventStore};
+use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
+use mfm_machine::events::EventEnvelope;
+use mfm_machine::ids::{ArtifactId, ErrorCode, RunId};
+use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -47,6 +51,204 @@ async fn response_json(resp: axum::response::Response) -> serde_json::Value {
         .await
         .expect("body bytes");
     serde_json::from_slice(&bytes).expect("json response")
+}
+
+fn storage_other(code: &str, message: &str) -> StorageError {
+    StorageError::Other(ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category: ErrorCategory::Storage,
+        retryable: false,
+        message: message.to_string(),
+        details: None,
+    })
+}
+
+struct FailingEventStore;
+
+#[async_trait]
+impl EventStore for FailingEventStore {
+    async fn head_seq(&self, _run_id: RunId) -> Result<u64, StorageError> {
+        Err(storage_other(
+            "event_store_unavailable",
+            "event store unavailable",
+        ))
+    }
+
+    async fn append(
+        &self,
+        _run_id: RunId,
+        _expected_seq: u64,
+        _events: Vec<EventEnvelope>,
+    ) -> Result<u64, StorageError> {
+        Err(storage_other(
+            "event_store_unavailable",
+            "event store unavailable",
+        ))
+    }
+
+    async fn read_range(
+        &self,
+        _run_id: RunId,
+        _from_seq: u64,
+        _to_seq: Option<u64>,
+    ) -> Result<Vec<EventEnvelope>, StorageError> {
+        Err(storage_other(
+            "event_store_unavailable",
+            "event store unavailable",
+        ))
+    }
+}
+
+struct FailingArtifactStore;
+
+#[async_trait]
+impl ArtifactStore for FailingArtifactStore {
+    async fn put(&self, _kind: ArtifactKind, _bytes: Vec<u8>) -> Result<ArtifactId, StorageError> {
+        Err(storage_other(
+            "artifact_store_unavailable",
+            "artifact store unavailable",
+        ))
+    }
+
+    async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+        Err(storage_other(
+            "artifact_store_unavailable",
+            "artifact store unavailable",
+        ))
+    }
+
+    async fn exists(&self, _id: &ArtifactId) -> Result<bool, StorageError> {
+        Err(storage_other(
+            "artifact_store_unavailable",
+            "artifact store unavailable",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn health_endpoint_reports_liveness() {
+    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let artifacts: Arc<dyn ArtifactStore> =
+        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
+
+    let bundle = mfm_rest_api::make_engine_bundle();
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        bundle,
+        events,
+        artifacts,
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/health")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "success");
+    assert_eq!(v["data"]["ok"], true);
+}
+
+#[tokio::test]
+async fn ready_endpoint_reports_readiness_when_stores_are_usable() {
+    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let artifacts: Arc<dyn ArtifactStore> =
+        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
+
+    let bundle = mfm_rest_api::make_engine_bundle();
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        bundle,
+        events,
+        artifacts,
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/ready")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "success");
+    assert_eq!(v["data"]["ok"], true);
+    assert_eq!(v["data"]["checks"]["event_store"], "ready");
+    assert_eq!(v["data"]["checks"]["artifact_store"], "ready");
+}
+
+#[tokio::test]
+async fn ready_endpoint_returns_503_when_event_store_is_unavailable() {
+    let events: Arc<dyn EventStore> = Arc::new(FailingEventStore);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let artifacts: Arc<dyn ArtifactStore> =
+        Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
+
+    let bundle = mfm_rest_api::make_engine_bundle();
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        bundle,
+        events,
+        artifacts,
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/ready")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["error"]["code"], "NotReady");
+    assert_eq!(v["error"]["message"], "event store is not ready");
+}
+
+#[tokio::test]
+async fn ready_endpoint_returns_503_when_artifact_store_is_unavailable() {
+    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let artifacts: Arc<dyn ArtifactStore> = Arc::new(FailingArtifactStore);
+
+    let bundle = mfm_rest_api::make_engine_bundle();
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        bundle,
+        events,
+        artifacts,
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/ready")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["error"]["code"], "NotReady");
+    assert_eq!(v["error"]["message"], "artifact store is not ready");
 }
 
 #[tokio::test]

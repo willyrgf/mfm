@@ -15,6 +15,10 @@
           - `--mode <name>`: select a mode by name
           - `--summary`: print a compact summary and write `summary.json` into the artifacts dir
           - `--bg`: run in background via the run registry
+
+          Readiness-first behavior:
+          - parity/mainnet workflows gate on service `*_READY` hooks
+          - fixture logs are persisted under CI artifacts for debugging
         '';
         usage = [
           "nix run .#ci -- --basic --summary"
@@ -158,9 +162,14 @@
               profile = "test";
             }
           ];
+          artifacts = {
+            logs = true;
+            prefix = "parity-postgres";
+          };
         };
         run = ''
           eval "$($SLOT_INFO)"
+          run_hook POSTGRES_READY
 
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
 
@@ -184,8 +193,14 @@
               logName = "minio.log";
             }
           ];
+          artifacts = {
+            logs = true;
+            prefix = "parity-s3";
+          };
         };
         run = ''
+          run_hook MINIO_READY
+
           export MFM_S3_ENDPOINT="$MINIO_ENDPOINT"
           export MFM_S3_REGION="$MINIO_REGION"
           export MFM_S3_BUCKET="$MINIO_BUCKET"
@@ -218,9 +233,15 @@
               logName = "minio-rest-api-smoke.log";
             }
           ];
+          artifacts = {
+            logs = true;
+            prefix = "parity-rest-api-smoke";
+          };
         };
         run = ''
           eval "$($SLOT_INFO)"
+          run_hook POSTGRES_READY
+          run_hook MINIO_READY
 
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
 
@@ -261,9 +282,16 @@
               logName = "reth.log";
             }
           ];
+          artifacts = {
+            logs = true;
+            prefix = "parity-evm-reth";
+          };
         };
         run = ''
           eval "$($SLOT_INFO)"
+          run_hook POSTGRES_READY
+          run_hook MINIO_READY
+          run_hook RETH_READY
 
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
 
@@ -306,9 +334,16 @@
               logName = "reth-portfolio-tracker.log";
             }
           ];
+          artifacts = {
+            logs = true;
+            prefix = "parity-portfolio-tracker-reth";
+          };
         };
         run = ''
           eval "$($SLOT_INFO)"
+          run_hook POSTGRES_READY
+          run_hook MINIO_READY
+          run_hook RETH_READY
 
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
 
@@ -339,9 +374,15 @@
               logName = "helios.log";
             }
           ];
+          artifacts = {
+            logs = true;
+            prefix = "parity-evm-helios-smoke";
+          };
         };
         run = ''
           eval "$($SLOT_INFO)"
+          run_hook RETH_READY
+          run_hook HELIOS_READY
 
           LOGFILE=$(artifact_path "parity-evm-helios-smoke.log")
           curl -fsS \

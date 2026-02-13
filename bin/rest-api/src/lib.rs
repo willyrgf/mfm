@@ -9,6 +9,7 @@ use mfm_app::{
     AppError, AppServices, EngineBundle, ErrorClass, FeatureCatalog, FeatureRequest,
     RunsEventsQuery, RunsStartRequest,
 };
+use mfm_machine::ids::{ArtifactId, RunId};
 use mfm_machine::stores::{ArtifactStore, EventStore};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -135,6 +136,7 @@ pub fn make_app(state: AppState) -> Router {
 
     Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/ready", get(ready))
         .route("/v1/features", get(features_list))
         .route("/v1/features/:feature_id/execute", post(features_execute))
         .route("/v1/runs/start", post(runs_start))
@@ -148,6 +150,46 @@ pub fn make_app(state: AppState) -> Router {
 
 async fn health() -> Json<serde_json::Value> {
     Json(ok(json!({ "ok": true })))
+}
+
+async fn ready(State(state): State<RouterState>) -> Result<Json<serde_json::Value>, ApiError> {
+    // Liveness probe for the event store.
+    state
+        .app
+        .events
+        .head_seq(RunId(uuid::Uuid::nil()))
+        .await
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "NotReady",
+                "event store is not ready",
+            )
+        })?;
+
+    // Usability probe for the artifact store.
+    let probe_artifact_id =
+        ArtifactId("0000000000000000000000000000000000000000000000000000000000000000".to_string());
+    state
+        .app
+        .artifacts
+        .exists(&probe_artifact_id)
+        .await
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "NotReady",
+                "artifact store is not ready",
+            )
+        })?;
+
+    Ok(Json(ok(json!({
+      "ok": true,
+      "checks": {
+        "event_store": "ready",
+        "artifact_store": "ready"
+      }
+    }))))
 }
 
 async fn not_found() -> (StatusCode, Json<serde_json::Value>) {
