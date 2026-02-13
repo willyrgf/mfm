@@ -139,6 +139,22 @@
         exec 3>&1
         exec 1>&2
 
+        sanitize_json_payload() {
+          local raw_file="$1"
+          local clean_file="$2"
+          local label="$3"
+
+          # Keep content from the first JSON object line onward. This isolates
+          # machine-readable payloads from incidental log prelude lines.
+          sed -n '/^[[:space:]]*{/,$p' "$raw_file" >"$clean_file"
+          if [ ! -s "$clean_file" ] || ! jq -e . "$clean_file" >/dev/null; then
+            echo "ERROR: $label is not valid JSON" >&2
+            echo "RAW OUTPUT ($label):" >&2
+            cat "$raw_file" >&2 || true
+            exit 1
+          fi
+        }
+
         if [ "$#" -ne 1 ] || [ "''${1:-}" = "--help" ] || [ "''${1:-}" = "-h" ]; then
           echo "usage: nix run .#mfm::portfolio::snapshot -- <ADDRESS>" >&2
           exit 2
@@ -196,12 +212,15 @@
         echo "INFO: waiting for Helios readiness (eth_blockNumber)..." >&2
         run_hook HELIOS_READY
 
+        OUT_RAW_FILE="$(artifact_path "mfm-portfolio-snapshot.raw.out")"
         OUT_FILE="$(artifact_path "mfm-portfolio-snapshot.json")"
         cargo run -q -p mfm --bin mfm_cli -- \
           --output-format json \
           portfolio snapshot "$ADDRESS" \
           --chain-id 1 \
-          >"$OUT_FILE"
+          >"$OUT_RAW_FILE"
+
+        sanitize_json_payload "$OUT_RAW_FILE" "$OUT_FILE" "snapshot output"
 
         if ! jq -e '.status == "success"' "$OUT_FILE" >/dev/null; then
           echo "ERROR: snapshot command did not produce a success payload" >&2
@@ -216,11 +235,14 @@
           exit 1
         fi
 
+        ART_RAW_FILE="$(artifact_path "mfm-portfolio-snapshot-artifact.raw.out")"
         ART_FILE="$(artifact_path "mfm-portfolio-snapshot-artifact.json")"
         cargo run -q -p mfm --bin mfm_cli -- \
           --output-format json \
           run artifacts get "$ART_ID" \
-          >"$ART_FILE"
+          >"$ART_RAW_FILE"
+
+        sanitize_json_payload "$ART_RAW_FILE" "$ART_FILE" "artifact output"
 
         if ! jq -e '.status == "success"' "$ART_FILE" >/dev/null; then
           echo "ERROR: failed to fetch snapshot artifact id=$ART_ID" >&2
@@ -234,8 +256,35 @@
           exit 1
         fi
 
-        OUT_WITH_SNAPSHOT_FILE="$(artifact_path "mfm-portfolio-snapshot-with-content.json")"
-        jq -s '.[0] as $base | .[1].data.value as $snapshot | $base | .data.result.snapshot = $snapshot' "$OUT_FILE" "$ART_FILE" >"$OUT_WITH_SNAPSHOT_FILE"
+        REPORT_FILE="$(artifact_path "mfm-portfolio-snapshot-report.json")"
+        REPORT_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        jq -s \
+          --arg address "$ADDRESS" \
+          --arg generated_at "$REPORT_TS" \
+          '
+          .[0] as $base
+          | .[1] as $artifact
+          | .[1].data.value as $snapshot
+          | $base
+          | .data.result.snapshot = $snapshot
+          | .data.report = {
+              phase: "completed",
+              generated_at: $generated_at,
+              address: $address,
+              snapshot_artifact_id: ($base.data.result.snapshot_artifact_id // null),
+              artifact_encoding: ($artifact.data.encoding // null),
+              sources: {
+                snapshot_response: $base,
+                artifact_response: $artifact
+              }
+            }
+          ' "$OUT_FILE" "$ART_FILE" >"$REPORT_FILE"
+
+        if ! jq -e '.data.report.phase == "completed" and (.data.result.snapshot | type == "object")' "$REPORT_FILE" >/dev/null; then
+          echo "ERROR: report phase did not produce expected output" >&2
+          cat "$REPORT_FILE" >&2 || true
+          exit 1
+        fi
 
         if [ "$KEEP_SERVICES" = "1" ] && { [ "$STARTED_POSTGRES" = "1" ] || [ "$STARTED_HELIOS" = "1" ]; }; then
           echo "INFO: MFM_KEEP_SERVICES=1; leaving started services running for reuse." >&2
@@ -247,7 +296,7 @@
           fi
         fi
 
-        cat "$OUT_WITH_SNAPSHOT_FILE" >&3
+        cat "$REPORT_FILE" >&3
       '';
     };
 
