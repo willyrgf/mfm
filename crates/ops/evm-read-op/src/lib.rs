@@ -143,9 +143,8 @@ mod tests {
     use std::collections::HashMap;
 
     use async_trait::async_trait;
-    use mfm_machine::config::BuildProvenance;
     use mfm_machine::context::DynContext;
-    use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
+    use mfm_machine::engine::{ExecutionEngine, RunPhase};
     use mfm_machine::errors::{ErrorCategory, ErrorInfo};
     use mfm_machine::hashing::artifact_id_for_json;
     use mfm_machine::ids::ErrorCode;
@@ -155,12 +154,7 @@ mod tests {
     use mfm_machine::replay_io::ReplayIo;
     use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
     use mfm_op_common::test_support as op_test_support;
-    use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
-    use mfm_sdk::pipeline::PipelinePlanner;
-    use mfm_sdk::unstable::{
-        single_op_pipeline, DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry,
-        SdkPlanResolver,
-    };
+    use mfm_sdk::unstable::SdkPlanResolver;
     use tokio::sync::Mutex;
 
     fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
@@ -265,13 +259,8 @@ mod tests {
             Arc::new(CountingTransportFactory::new(Arc::clone(&counts)));
 
         let op: mfm_sdk::op::DynOperation = Arc::new(EvmReadOp);
-        let mut reg = HashMapOperationRegistry::default();
-        reg.register(Arc::clone(&op));
-        let registry: Arc<dyn mfm_sdk::op::OperationRegistry> = Arc::new(reg);
-
-        let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
-        let pipeline = single_op_pipeline(op.op_id(), op.op_version(), serde_json::json!({}))
-            .expect("pipeline");
+        let (registry, planner, pipeline) =
+            op_test_support::single_op_plan(op, serde_json::json!({})).expect("pipeline");
 
         let resolver = Arc::new(SdkPlanResolver::new(
             Arc::clone(&registry),
@@ -282,35 +271,17 @@ mod tests {
         let engine: Arc<dyn ExecutionEngine> = Arc::new(engine);
         let stores = op_test_support::in_memory_stores();
 
-        let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
         let cfg = op_test_support::run_config_live();
-
-        let res = launcher
-            .start_pipeline(
-                Arc::clone(&engine),
-                Stores {
-                    events: Arc::clone(&stores.events),
-                    artifacts: Arc::clone(&stores.artifacts),
-                },
-                Arc::clone(&registry),
-                Arc::clone(&planner),
-                LaunchPipeline {
-                    pipeline: pipeline.clone(),
-                    input: serde_json::json!({}),
-                    run_config: cfg.clone(),
-                    build: BuildProvenance {
-                        git_commit: None,
-                        cargo_lock_hash: None,
-                        flake_lock_hash: None,
-                        rustc_version: None,
-                        target_triple: None,
-                        env_allowlist: Vec::new(),
-                    },
-                    initial_context: Box::new(op_test_support::MapContext::default()),
-                },
-            )
-            .await
-            .expect("start");
+        let res = op_test_support::start_pipeline_with_defaults(
+            Arc::clone(&engine),
+            &stores,
+            Arc::clone(&registry),
+            Arc::clone(&planner),
+            pipeline.clone(),
+            cfg.clone(),
+        )
+        .await
+        .expect("start");
 
         assert_eq!(res.phase, RunPhase::Completed);
         let final_snapshot_id = res.final_snapshot_id.clone().expect("final snapshot");
@@ -390,13 +361,8 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
         let op: mfm_sdk::op::DynOperation = Arc::new(EvmReadOp);
-        let mut reg = HashMapOperationRegistry::default();
-        reg.register(Arc::clone(&op));
-        let registry: Arc<dyn mfm_sdk::op::OperationRegistry> = Arc::new(reg);
-
-        let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
-        let pipeline = single_op_pipeline(op.op_id(), op.op_version(), serde_json::json!({}))
-            .expect("pipeline");
+        let (registry, planner, pipeline) =
+            op_test_support::single_op_plan(op, serde_json::json!({})).expect("pipeline");
 
         let resolver = Arc::new(SdkPlanResolver::new(
             Arc::clone(&registry),
@@ -409,51 +375,29 @@ mod tests {
 
         let stores = op_test_support::in_memory_stores();
 
-        let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
         let cfg = op_test_support::run_config_live();
-
-        let first = launcher
-            .start_pipeline(
-                Arc::clone(&engine),
-                Stores {
-                    events: Arc::clone(&stores.events),
-                    artifacts: Arc::clone(&stores.artifacts),
-                },
-                Arc::clone(&registry),
-                Arc::clone(&planner),
-                LaunchPipeline {
-                    pipeline: pipeline.clone(),
-                    input: serde_json::json!({}),
-                    run_config: cfg.clone(),
-                    build: BuildProvenance {
-                        git_commit: None,
-                        cargo_lock_hash: None,
-                        flake_lock_hash: None,
-                        rustc_version: None,
-                        target_triple: None,
-                        env_allowlist: Vec::new(),
-                    },
-                    initial_context: Box::new(op_test_support::MapContext::default()),
-                },
-            )
-            .await
-            .expect("start");
+        let first = op_test_support::start_pipeline_with_defaults(
+            Arc::clone(&engine),
+            &stores,
+            Arc::clone(&registry),
+            Arc::clone(&planner),
+            pipeline.clone(),
+            cfg.clone(),
+        )
+        .await
+        .expect("start");
 
         assert_eq!(first.phase, RunPhase::Running);
 
-        let resumed = launcher
-            .resume(
-                Arc::clone(&engine),
-                Stores {
-                    events: Arc::clone(&stores.events),
-                    artifacts: Arc::clone(&stores.artifacts),
-                },
-                Arc::clone(&registry),
-                Arc::clone(&planner),
-                first.run_id,
-            )
-            .await
-            .expect("resume");
+        let resumed = op_test_support::resume_pipeline_with_defaults(
+            Arc::clone(&engine),
+            &stores,
+            Arc::clone(&registry),
+            Arc::clone(&planner),
+            first.run_id,
+        )
+        .await
+        .expect("resume");
         assert_eq!(resumed.phase, RunPhase::Completed);
 
         // ChainId handler was executed twice, but transport should be called once due to fact reuse.

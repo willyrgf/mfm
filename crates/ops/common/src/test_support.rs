@@ -7,17 +7,25 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use mfm_machine::config::BuildProvenance;
 use mfm_machine::config::{
     BackoffPolicy, ContextCheckpointing, EventProfile, ExecutionMode, IoMode, RetryPolicy,
     RunConfig,
 };
 use mfm_machine::context::DynContext;
-use mfm_machine::engine::Stores;
+use mfm_machine::engine::{ExecutionEngine, RunResult, Stores};
 use mfm_machine::errors::{ContextError, ErrorCategory, ErrorInfo, StorageError};
 use mfm_machine::events::{Event, EventEnvelope, KernelEvent};
 use mfm_machine::hashing::artifact_id_for_bytes;
 use mfm_machine::ids::{ArtifactId, ContextKey, ErrorCode, RunId};
 use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+use mfm_sdk::errors::SdkError;
+use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
+use mfm_sdk::op::{DynOperation, OperationRegistry};
+use mfm_sdk::pipeline::{Pipeline, PipelinePlanner};
+use mfm_sdk::unstable::{
+    single_op_pipeline, DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry,
+};
 
 pub fn run_config_live() -> RunConfig {
     run_config_live_with_retry_attempts(1)
@@ -45,6 +53,87 @@ pub fn run_config_live_with_allowlist(prefixes: Vec<String>) -> RunConfig {
     let mut cfg = run_config_live();
     cfg.nix_flake_allowlist = prefixes;
     cfg
+}
+
+pub fn build_provenance_default() -> BuildProvenance {
+    BuildProvenance {
+        git_commit: None,
+        cargo_lock_hash: None,
+        flake_lock_hash: None,
+        rustc_version: None,
+        target_triple: None,
+        env_allowlist: Vec::new(),
+    }
+}
+
+pub type SingleOpPlan = (
+    Arc<dyn OperationRegistry>,
+    Arc<dyn PipelinePlanner>,
+    Pipeline,
+);
+
+pub fn single_op_plan(
+    op: DynOperation,
+    op_config: serde_json::Value,
+) -> Result<SingleOpPlan, SdkError> {
+    let mut reg = HashMapOperationRegistry::default();
+    reg.register(Arc::clone(&op));
+    let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
+
+    let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
+    let pipeline = single_op_pipeline(op.op_id(), op.op_version(), op_config)?;
+    Ok((registry, planner, pipeline))
+}
+
+pub async fn start_pipeline_with_defaults(
+    engine: Arc<dyn ExecutionEngine>,
+    stores: &Stores,
+    registry: Arc<dyn OperationRegistry>,
+    planner: Arc<dyn PipelinePlanner>,
+    pipeline: Pipeline,
+    run_config: RunConfig,
+) -> Result<RunResult, mfm_machine::errors::RunError> {
+    let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
+    launcher
+        .start_pipeline(
+            engine,
+            Stores {
+                events: Arc::clone(&stores.events),
+                artifacts: Arc::clone(&stores.artifacts),
+            },
+            registry,
+            planner,
+            LaunchPipeline {
+                pipeline,
+                input: serde_json::json!({}),
+                run_config,
+                build: build_provenance_default(),
+                initial_context: Box::new(MapContext::default()),
+            },
+        )
+        .await
+}
+
+pub async fn resume_pipeline_with_defaults(
+    engine: Arc<dyn ExecutionEngine>,
+    stores: &Stores,
+    registry: Arc<dyn OperationRegistry>,
+    planner: Arc<dyn PipelinePlanner>,
+    run_id: RunId,
+) -> Result<RunResult, mfm_machine::errors::RunError> {
+    let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
+    launcher
+        .resume(
+            engine,
+            Stores {
+                events: Arc::clone(&stores.events),
+                artifacts: Arc::clone(&stores.artifacts),
+            },
+            registry,
+            planner,
+            run_id,
+        )
+        .await
 }
 
 #[derive(Default)]
