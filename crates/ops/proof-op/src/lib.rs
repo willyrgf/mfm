@@ -347,12 +347,12 @@ mod tests {
 
     use mfm_machine::config::{BuildProvenance, RunConfig};
     use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
-    use mfm_machine::errors::{ContextError, IoError, RunError, StorageError};
+    use mfm_machine::errors::{IoError, RunError};
     use mfm_machine::events::{
         ChildRunCompleted, ChildRunSpawned, Event, EventEnvelope, KernelEvent,
         DOMAIN_EVENT_CHILD_RUN_COMPLETED, DOMAIN_EVENT_CHILD_RUN_SPAWNED,
     };
-    use mfm_machine::hashing::{artifact_id_for_bytes, artifact_id_for_json};
+    use mfm_machine::hashing::artifact_id_for_json;
     use mfm_machine::ids::{ArtifactId, RunId, StateId};
     use mfm_machine::live_io::{FactIndex, LiveIoTransport, LiveIoTransportFactory};
     use mfm_machine::plan::ExecutionPlan;
@@ -361,7 +361,6 @@ mod tests {
     use mfm_machine::runtime::{
         ChildRunLiveIoTransportFactory, DefaultExecutionEngine, EngineFailpoints, PlanResolver,
     };
-    use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
     use mfm_op_common::test_support as op_test_support;
 
     use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
@@ -370,138 +369,6 @@ mod tests {
         single_op_pipeline, DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry,
         SdkPlanResolver,
     };
-
-    #[derive(Default)]
-    struct MapContext {
-        inner: HashMap<String, serde_json::Value>,
-    }
-
-    impl MapContext {
-        fn from_snapshot(v: serde_json::Value) -> Self {
-            let mut ctx = MapContext::default();
-            if let serde_json::Value::Object(m) = v {
-                for (k, v) in m {
-                    ctx.inner.insert(k, v);
-                }
-            }
-            ctx
-        }
-    }
-
-    impl DynContext for MapContext {
-        fn read(&self, key: &ContextKey) -> Result<Option<serde_json::Value>, ContextError> {
-            Ok(self.inner.get(&key.0).cloned())
-        }
-
-        fn write(&mut self, key: ContextKey, value: serde_json::Value) -> Result<(), ContextError> {
-            self.inner.insert(key.0, value);
-            Ok(())
-        }
-
-        fn delete(&mut self, key: &ContextKey) -> Result<(), ContextError> {
-            self.inner.remove(&key.0);
-            Ok(())
-        }
-
-        fn dump(&self) -> Result<serde_json::Value, ContextError> {
-            let mut m = serde_json::Map::new();
-            for (k, v) in &self.inner {
-                m.insert(k.clone(), v.clone());
-            }
-            Ok(serde_json::Value::Object(m))
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct MemEventStore {
-        inner: Arc<tokio::sync::Mutex<HashMap<RunId, Vec<EventEnvelope>>>>,
-    }
-
-    #[async_trait]
-    impl EventStore for MemEventStore {
-        async fn head_seq(&self, run_id: RunId) -> Result<u64, StorageError> {
-            let inner = self.inner.lock().await;
-            Ok(inner
-                .get(&run_id)
-                .and_then(|v| v.last())
-                .map(|e| e.seq)
-                .unwrap_or(0))
-        }
-
-        async fn append(
-            &self,
-            run_id: RunId,
-            expected_seq: u64,
-            events: Vec<EventEnvelope>,
-        ) -> Result<u64, StorageError> {
-            let mut inner = self.inner.lock().await;
-            let stream = inner.entry(run_id).or_default();
-            let head = stream.last().map(|e| e.seq).unwrap_or(0);
-            if head != expected_seq {
-                return Err(StorageError::Concurrency(info(
-                    "event_store_concurrency",
-                    ErrorCategory::Storage,
-                    false,
-                    "head seq did not match expected seq",
-                )));
-            }
-            stream.extend(events);
-            Ok(stream.last().map(|e| e.seq).unwrap_or(head))
-        }
-
-        async fn read_range(
-            &self,
-            run_id: RunId,
-            from_seq: u64,
-            to_seq: Option<u64>,
-        ) -> Result<Vec<EventEnvelope>, StorageError> {
-            let inner = self.inner.lock().await;
-            let Some(stream) = inner.get(&run_id) else {
-                return Ok(Vec::new());
-            };
-            let from = from_seq.max(1);
-            let to = to_seq.unwrap_or(u64::MAX);
-            Ok(stream
-                .iter()
-                .filter(|e| e.seq >= from && e.seq <= to)
-                .cloned()
-                .collect())
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct MemArtifactStore {
-        inner: Arc<tokio::sync::Mutex<HashMap<ArtifactId, Vec<u8>>>>,
-    }
-
-    #[async_trait]
-    impl ArtifactStore for MemArtifactStore {
-        async fn put(
-            &self,
-            _kind: ArtifactKind,
-            bytes: Vec<u8>,
-        ) -> Result<ArtifactId, StorageError> {
-            let id = artifact_id_for_bytes(&bytes);
-            self.inner.lock().await.insert(id.clone(), bytes);
-            Ok(id)
-        }
-
-        async fn get(&self, id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
-            let inner = self.inner.lock().await;
-            inner.get(id).cloned().ok_or_else(|| {
-                StorageError::NotFound(info(
-                    "artifact_not_found",
-                    ErrorCategory::Storage,
-                    false,
-                    "artifact not found",
-                ))
-            })
-        }
-
-        async fn exists(&self, id: &ArtifactId) -> Result<bool, StorageError> {
-            Ok(self.inner.lock().await.contains_key(id))
-        }
-    }
 
     #[derive(Clone)]
     struct CountingTransportFactory {
@@ -608,20 +475,6 @@ mod tests {
         out
     }
 
-    fn run_started(stream: &[EventEnvelope]) -> (ArtifactId, ArtifactId) {
-        for e in stream {
-            if let Event::Kernel(KernelEvent::RunStarted {
-                manifest_id,
-                initial_snapshot_id,
-                ..
-            }) = &e.event
-            {
-                return (manifest_id.clone(), initial_snapshot_id.clone());
-            }
-        }
-        panic!("missing RunStarted");
-    }
-
     fn count_state_entered_attempts(stream: &[EventEnvelope], state_id: &str) -> Vec<u32> {
         let mut atts = Vec::new();
         for e in stream {
@@ -676,18 +529,6 @@ mod tests {
             out.push(payload);
         }
         out
-    }
-
-    fn run_completed_snapshot_id(stream: &[EventEnvelope]) -> Option<ArtifactId> {
-        for e in stream {
-            if let Event::Kernel(KernelEvent::RunCompleted {
-                final_snapshot_id, ..
-            }) = &e.event
-            {
-                return final_snapshot_id.clone();
-            }
-        }
-        None
     }
 
     // Parent op for Milestone 5 child-run tests.
@@ -944,10 +785,7 @@ mod tests {
         let engine =
             DefaultExecutionEngine::new(resolver).with_live_transport_factory(Arc::clone(&factory));
         let engine: Arc<dyn ExecutionEngine> = Arc::new(engine);
-        let stores = Stores {
-            events: Arc::new(MemEventStore::default()),
-            artifacts: Arc::new(MemArtifactStore::default()),
-        };
+        let stores = op_test_support::in_memory_stores();
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
         let cfg = op_test_support::run_config_live_with_retry_attempts(3);
@@ -973,7 +811,7 @@ mod tests {
                         target_triple: None,
                         env_allowlist: Vec::new(),
                     },
-                    initial_context: Box::new(MapContext::default()),
+                    initial_context: Box::new(op_test_support::MapContext::default()),
                 },
             )
             .await
@@ -989,7 +827,7 @@ mod tests {
             .await
             .expect("read_range");
         let facts = FactIndex::from_event_stream(&stream);
-        let (_manifest_id, initial_snapshot_id) = run_started(&stream);
+        let (_manifest_id, initial_snapshot_id) = op_test_support::run_started(&stream);
 
         let bytes = stores
             .artifacts
@@ -997,7 +835,7 @@ mod tests {
             .await
             .expect("get initial snapshot");
         let initial = serde_json::from_slice::<serde_json::Value>(&bytes).expect("json");
-        let mut ctx = MapContext::from_snapshot(initial);
+        let mut ctx = op_test_support::MapContext::from_snapshot(initial);
 
         let plan = planner
             .build_execution_plan(Arc::clone(&registry), &pipeline, &cfg)
@@ -1058,10 +896,7 @@ mod tests {
             .with_failpoints(failpoints.clone());
         let engine: Arc<dyn ExecutionEngine> = Arc::new(engine);
 
-        let stores = Stores {
-            events: Arc::new(MemEventStore::default()),
-            artifacts: Arc::new(MemArtifactStore::default()),
-        };
+        let stores = op_test_support::in_memory_stores();
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
         let cfg = op_test_support::run_config_live_with_retry_attempts(3);
@@ -1087,7 +922,7 @@ mod tests {
                         target_triple: None,
                         env_allowlist: Vec::new(),
                     },
-                    initial_context: Box::new(MapContext::default()),
+                    initial_context: Box::new(op_test_support::MapContext::default()),
                 },
             )
             .await
@@ -1146,10 +981,7 @@ mod tests {
         ));
         let engine2 = DefaultExecutionEngine::new(resolver2).with_live_transport_factory(factory2);
         let engine2: Arc<dyn ExecutionEngine> = Arc::new(engine2);
-        let stores2 = Stores {
-            events: Arc::new(MemEventStore::default()),
-            artifacts: Arc::new(MemArtifactStore::default()),
-        };
+        let stores2 = op_test_support::in_memory_stores();
         let launcher2: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
         let clean = launcher2
             .start_pipeline(
@@ -1172,7 +1004,7 @@ mod tests {
                         target_triple: None,
                         env_allowlist: Vec::new(),
                     },
-                    initial_context: Box::new(MapContext::default()),
+                    initial_context: Box::new(op_test_support::MapContext::default()),
                 },
             )
             .await
@@ -1213,10 +1045,7 @@ mod tests {
             DefaultExecutionEngine::new(Arc::clone(&resolver)).with_live_transport_factory(factory),
         );
 
-        let stores = Stores {
-            events: Arc::new(MemEventStore::default()),
-            artifacts: Arc::new(MemArtifactStore::default()),
-        };
+        let stores = op_test_support::in_memory_stores();
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
         let cfg = op_test_support::run_config_live_with_retry_attempts(3);
@@ -1241,7 +1070,7 @@ mod tests {
                         target_triple: None,
                         env_allowlist: Vec::new(),
                     },
-                    initial_context: Box::new(MapContext::default()),
+                    initial_context: Box::new(op_test_support::MapContext::default()),
                 },
             )
             .await
@@ -1268,7 +1097,7 @@ mod tests {
 
         // Parent replay determinism: manual replay using ReplayIo reproduces the final snapshot id.
         let parent_facts = FactIndex::from_event_stream(&parent_stream);
-        let (_manifest_id, initial_snapshot_id) = run_started(&parent_stream);
+        let (_manifest_id, initial_snapshot_id) = op_test_support::run_started(&parent_stream);
 
         let bytes = stores
             .artifacts
@@ -1276,7 +1105,7 @@ mod tests {
             .await
             .expect("get initial snapshot");
         let initial = serde_json::from_slice::<serde_json::Value>(&bytes).expect("json");
-        let mut ctx = MapContext::from_snapshot(initial);
+        let mut ctx = op_test_support::MapContext::from_snapshot(initial);
 
         let plan = planner
             .build_execution_plan(Arc::clone(&registry), &pipeline, &cfg)
@@ -1326,7 +1155,8 @@ mod tests {
                 .expect("read child stream");
             let child_facts = FactIndex::from_event_stream(&child_stream);
 
-            let (manifest_id, child_initial_snapshot_id) = run_started(&child_stream);
+            let (manifest_id, child_initial_snapshot_id) =
+                op_test_support::run_started(&child_stream);
             assert_eq!(manifest_id, s.child_manifest_id);
 
             let bytes = stores
@@ -1335,7 +1165,7 @@ mod tests {
                 .await
                 .expect("get child initial snapshot");
             let initial = serde_json::from_slice::<serde_json::Value>(&bytes).expect("json");
-            let mut ctx = MapContext::from_snapshot(initial);
+            let mut ctx = op_test_support::MapContext::from_snapshot(initial);
 
             let bytes = stores
                 .artifacts
@@ -1364,7 +1194,8 @@ mod tests {
 
             let v = ctx.dump().expect("child dump");
             let computed = artifact_id_for_json(&v).expect("child hash");
-            let expected = run_completed_snapshot_id(&child_stream).expect("child RunCompleted");
+            let expected = op_test_support::run_completed_snapshot_id(&child_stream)
+                .expect("child RunCompleted");
             assert_eq!(computed, expected);
             assert_eq!(Some(computed), c.final_snapshot_id);
         }
@@ -1464,10 +1295,7 @@ mod tests {
                 .with_failpoints(failpoints.clone()),
         );
 
-        let stores = Stores {
-            events: Arc::new(MemEventStore::default()),
-            artifacts: Arc::new(MemArtifactStore::default()),
-        };
+        let stores = op_test_support::in_memory_stores();
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
         let cfg = op_test_support::run_config_live_with_retry_attempts(3);
@@ -1492,7 +1320,7 @@ mod tests {
                         target_triple: None,
                         env_allowlist: Vec::new(),
                     },
-                    initial_context: Box::new(MapContext::default()),
+                    initial_context: Box::new(op_test_support::MapContext::default()),
                 },
             )
             .await
@@ -1514,7 +1342,7 @@ mod tests {
                 .read_range(s.child_run_id, 1, None)
                 .await
                 .expect("read child stream");
-            assert!(run_completed_snapshot_id(&child_stream).is_none());
+            assert!(op_test_support::run_completed_snapshot_id(&child_stream).is_none());
         }
 
         // Resume in background; it should block until children finish.
@@ -1595,10 +1423,7 @@ mod tests {
                 .with_failpoints(failpoints.clone()),
         );
 
-        let stores = Stores {
-            events: Arc::new(MemEventStore::default()),
-            artifacts: Arc::new(MemArtifactStore::default()),
-        };
+        let stores = op_test_support::in_memory_stores();
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
         let cfg = op_test_support::run_config_live_with_retry_attempts(3);
@@ -1623,7 +1448,7 @@ mod tests {
                         target_triple: None,
                         env_allowlist: Vec::new(),
                     },
-                    initial_context: Box::new(MapContext::default()),
+                    initial_context: Box::new(op_test_support::MapContext::default()),
                 },
             )
             .await
@@ -1668,7 +1493,7 @@ mod tests {
         // Manual replay of the parent run must still match the final snapshot id.
         let final_snapshot_id = resumed.final_snapshot_id.clone().expect("final snapshot");
         let parent_facts = FactIndex::from_event_stream(&parent_stream);
-        let (_manifest_id, initial_snapshot_id) = run_started(&parent_stream);
+        let (_manifest_id, initial_snapshot_id) = op_test_support::run_started(&parent_stream);
 
         let bytes = stores
             .artifacts
@@ -1676,7 +1501,7 @@ mod tests {
             .await
             .expect("get initial snapshot");
         let initial = serde_json::from_slice::<serde_json::Value>(&bytes).expect("json");
-        let mut ctx = MapContext::from_snapshot(initial);
+        let mut ctx = op_test_support::MapContext::from_snapshot(initial);
 
         let plan = planner
             .build_execution_plan(Arc::clone(&registry), &pipeline, &cfg)

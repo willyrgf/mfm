@@ -2,12 +2,22 @@
 //!
 //! Keep this module limited to non-domain, reusable test wiring helpers.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use mfm_machine::config::{
     BackoffPolicy, ContextCheckpointing, EventProfile, ExecutionMode, IoMode, RetryPolicy,
     RunConfig,
 };
+use mfm_machine::context::DynContext;
+use mfm_machine::engine::Stores;
+use mfm_machine::errors::{ContextError, ErrorCategory, ErrorInfo, StorageError};
+use mfm_machine::events::{Event, EventEnvelope, KernelEvent};
+use mfm_machine::hashing::artifact_id_for_bytes;
+use mfm_machine::ids::{ArtifactId, ContextKey, ErrorCode, RunId};
+use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
 
 pub fn run_config_live() -> RunConfig {
     run_config_live_with_retry_attempts(1)
@@ -35,4 +45,174 @@ pub fn run_config_live_with_allowlist(prefixes: Vec<String>) -> RunConfig {
     let mut cfg = run_config_live();
     cfg.nix_flake_allowlist = prefixes;
     cfg
+}
+
+#[derive(Default)]
+pub struct MapContext {
+    inner: HashMap<String, serde_json::Value>,
+}
+
+impl MapContext {
+    pub fn from_snapshot(v: serde_json::Value) -> Self {
+        let obj = v.as_object().cloned().unwrap_or_default();
+        let mut inner = HashMap::new();
+        for (k, v) in obj {
+            inner.insert(k, v);
+        }
+        Self { inner }
+    }
+}
+
+impl DynContext for MapContext {
+    fn read(&self, key: &ContextKey) -> Result<Option<serde_json::Value>, ContextError> {
+        Ok(self.inner.get(&key.0).cloned())
+    }
+
+    fn write(&mut self, key: ContextKey, value: serde_json::Value) -> Result<(), ContextError> {
+        self.inner.insert(key.0, value);
+        Ok(())
+    }
+
+    fn delete(&mut self, key: &ContextKey) -> Result<(), ContextError> {
+        self.inner.remove(&key.0);
+        Ok(())
+    }
+
+    fn dump(&self) -> Result<serde_json::Value, ContextError> {
+        let mut m = serde_json::Map::new();
+        for (k, v) in &self.inner {
+            m.insert(k.clone(), v.clone());
+        }
+        Ok(serde_json::Value::Object(m))
+    }
+}
+
+fn storage_info(code: &'static str, message: &'static str) -> ErrorInfo {
+    ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category: ErrorCategory::Storage,
+        retryable: false,
+        message: message.to_string(),
+        details: None,
+    }
+}
+
+fn lock_map<'a, T>(mutex: &'a Mutex<T>) -> Result<MutexGuard<'a, T>, StorageError> {
+    mutex.lock().map_err(|_| {
+        StorageError::Other(storage_info("storage_lock_failed", "storage lock failed"))
+    })
+}
+
+#[derive(Clone, Default)]
+pub struct MemEventStore {
+    inner: Arc<Mutex<HashMap<RunId, Vec<EventEnvelope>>>>,
+}
+
+#[async_trait]
+impl EventStore for MemEventStore {
+    async fn head_seq(&self, run_id: RunId) -> Result<u64, StorageError> {
+        let inner = lock_map(&self.inner)?;
+        Ok(inner
+            .get(&run_id)
+            .and_then(|v| v.last())
+            .map(|e| e.seq)
+            .unwrap_or(0))
+    }
+
+    async fn append(
+        &self,
+        run_id: RunId,
+        expected_seq: u64,
+        events: Vec<EventEnvelope>,
+    ) -> Result<u64, StorageError> {
+        let mut inner = lock_map(&self.inner)?;
+        let stream = inner.entry(run_id).or_default();
+        let head = stream.last().map(|e| e.seq).unwrap_or(0);
+        if head != expected_seq {
+            return Err(StorageError::Concurrency(storage_info(
+                "event_store_concurrency",
+                "head seq did not match expected seq",
+            )));
+        }
+
+        stream.extend(events);
+        Ok(stream.last().map(|e| e.seq).unwrap_or(head))
+    }
+
+    async fn read_range(
+        &self,
+        run_id: RunId,
+        from_seq: u64,
+        to_seq: Option<u64>,
+    ) -> Result<Vec<EventEnvelope>, StorageError> {
+        let inner = lock_map(&self.inner)?;
+        let Some(stream) = inner.get(&run_id) else {
+            return Ok(Vec::new());
+        };
+        let from = from_seq.max(1);
+        let to = to_seq.unwrap_or(u64::MAX);
+        Ok(stream
+            .iter()
+            .filter(|e| e.seq >= from && e.seq <= to)
+            .cloned()
+            .collect())
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct MemArtifactStore {
+    inner: Arc<Mutex<HashMap<ArtifactId, Vec<u8>>>>,
+}
+
+#[async_trait]
+impl ArtifactStore for MemArtifactStore {
+    async fn put(&self, _kind: ArtifactKind, bytes: Vec<u8>) -> Result<ArtifactId, StorageError> {
+        let id = artifact_id_for_bytes(&bytes);
+        lock_map(&self.inner)?.insert(id.clone(), bytes);
+        Ok(id)
+    }
+
+    async fn get(&self, id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+        lock_map(&self.inner)?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| StorageError::NotFound(storage_info("not_found", "artifact not found")))
+    }
+
+    async fn exists(&self, id: &ArtifactId) -> Result<bool, StorageError> {
+        Ok(lock_map(&self.inner)?.contains_key(id))
+    }
+}
+
+pub fn in_memory_stores() -> Stores {
+    Stores {
+        events: Arc::new(MemEventStore::default()),
+        artifacts: Arc::new(MemArtifactStore::default()),
+    }
+}
+
+pub fn run_started(stream: &[EventEnvelope]) -> (ArtifactId, ArtifactId) {
+    for e in stream {
+        if let Event::Kernel(KernelEvent::RunStarted {
+            manifest_id,
+            initial_snapshot_id,
+            ..
+        }) = &e.event
+        {
+            return (manifest_id.clone(), initial_snapshot_id.clone());
+        }
+    }
+    panic!("missing RunStarted");
+}
+
+pub fn run_completed_snapshot_id(stream: &[EventEnvelope]) -> Option<ArtifactId> {
+    for e in stream {
+        if let Event::Kernel(KernelEvent::RunCompleted {
+            final_snapshot_id, ..
+        }) = &e.event
+        {
+            return final_snapshot_id.clone();
+        }
+    }
+    None
 }
