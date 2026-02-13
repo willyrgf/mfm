@@ -139,6 +139,28 @@ let
           continue
         fi
 
+        # Prefer the latest finalized root first. This reduces light-client catch-up time versus
+        # pinning to the start of the finalized epoch.
+        checkpoint="$(echo "$FINALIZED_JSON" | ${pkgs.jq}/bin/jq -r '.data.root // empty' 2>/dev/null || true)"
+        if echo "$checkpoint" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]{64}$'; then
+          BOOTSTRAP_URL="$CONS/eth/v1/beacon/light_client/bootstrap/$checkpoint"
+          if ${pkgs.curl}/bin/curl -fsS --max-time 10 \
+            --retry 3 --retry-delay 1 --retry-max-time 30 \
+            -H 'accept: application/json' \
+            -o /dev/null \
+            "$BOOTSTRAP_URL" >/dev/null 2>&1; then
+            HELIOS_CONSENSUS_RPC_URL="$CONS"
+            HELIOS_CHECKPOINT="$checkpoint"
+            echo "INFO: derived HELIOS_CHECKPOINT=$HELIOS_CHECKPOINT (source=finalized cons=$HELIOS_CONSENSUS_RPC_URL)" >&2
+            DERIVED=1
+            break
+          fi
+          echo "WARN: finalized checkpoint root not bootstrap-ready yet; falling back to epoch-boundary root cons=$CONS root=$checkpoint" >&2
+        else
+          echo "WARN: invalid finalized checkpoint root from consensus endpoint cons=$CONS root='$checkpoint'" >&2
+        fi
+
+        # Fallback for endpoints that only serve bootstrap payloads for epoch-boundary roots.
         slot="$(echo "$FINALIZED_JSON" | ${pkgs.jq}/bin/jq -r '.data.header.message.slot|tonumber' 2>/dev/null || true)"
         case "$slot" in
           *[!0-9]*|"")
@@ -159,14 +181,14 @@ let
           continue
         fi
 
-        checkpoint="$(echo "$EPOCH_JSON" | ${pkgs.jq}/bin/jq -r '.data.root // empty' 2>/dev/null || true)"
-        if ! echo "$checkpoint" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]{64}$'; then
-          echo "WARN: invalid checkpoint root from consensus endpoint cons=$CONS root='$checkpoint'" >&2
+        epoch_checkpoint="$(echo "$EPOCH_JSON" | ${pkgs.jq}/bin/jq -r '.data.root // empty' 2>/dev/null || true)"
+        if ! echo "$epoch_checkpoint" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]{64}$'; then
+          echo "WARN: invalid epoch-boundary checkpoint root from consensus endpoint cons=$CONS root='$epoch_checkpoint'" >&2
           continue
         fi
 
         # Sanity-check that the light-client bootstrap endpoint is served for this checkpoint.
-        BOOTSTRAP_URL="$CONS/eth/v1/beacon/light_client/bootstrap/$checkpoint"
+        BOOTSTRAP_URL="$CONS/eth/v1/beacon/light_client/bootstrap/$epoch_checkpoint"
         if ! BOOTSTRAP_ERR="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
           --retry 3 --retry-delay 1 --retry-max-time 30 \
           -H 'accept: application/json' \
@@ -178,8 +200,8 @@ let
         fi
 
         HELIOS_CONSENSUS_RPC_URL="$CONS"
-        HELIOS_CHECKPOINT="$checkpoint"
-        echo "INFO: derived HELIOS_CHECKPOINT=$HELIOS_CHECKPOINT (cons=$HELIOS_CONSENSUS_RPC_URL)" >&2
+        HELIOS_CHECKPOINT="$epoch_checkpoint"
+        echo "INFO: derived HELIOS_CHECKPOINT=$HELIOS_CHECKPOINT (source=epoch_boundary cons=$HELIOS_CONSENSUS_RPC_URL)" >&2
         DERIVED=1
         break
       done
