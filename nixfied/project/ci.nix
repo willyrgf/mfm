@@ -408,6 +408,9 @@
           jq -e '.status == "success"' "$OUTFILE" >/dev/null
           jq -e '.data.feature_id == "portfolio.snapshot"' "$OUTFILE" >/dev/null
           jq -e '.data.result.phase == "completed"' "$OUTFILE" >/dev/null
+          jq -e '.data.result.snapshot | type == "object"' "$OUTFILE" >/dev/null
+          jq -e '.data.result.snapshot.chain_id == .data.result.chain_id' "$OUTFILE" >/dev/null
+          jq -e '.data.result.snapshot.block_number == .data.result.block_number' "$OUTFILE" >/dev/null
 
           ART_ID=$(jq -r '.data.result.snapshot_artifact_id // empty' "$OUTFILE")
           if [ -z "$ART_ID" ] || [ "$ART_ID" = "null" ]; then
@@ -422,12 +425,24 @@
             exit 1
           fi
 
+          INLINE_BAL_WEI=$(jq -r '.data.result.snapshot.native.raw_u256_dec // empty' "$OUTFILE")
           BAL_WEI=$(jq -r '.native.raw_u256_dec // empty' "$SNAPSHOT_FILE")
           MIN_BAL_WEI="32000000000000000000"
+
+          if [ -z "$INLINE_BAL_WEI" ] || [ "$INLINE_BAL_WEI" = "null" ] || ! echo "$INLINE_BAL_WEI" | grep -Eq '^[0-9]+$'; then
+            echo "ERROR: invalid embedded ETH balance; got data.result.snapshot.native.raw_u256_dec=$INLINE_BAL_WEI" >&2
+            cat "$OUTFILE" >&2
+            exit 1
+          fi
 
           if [ -z "$BAL_WEI" ] || [ "$BAL_WEI" = "null" ] || ! echo "$BAL_WEI" | grep -Eq '^[0-9]+$'; then
             echo "ERROR: invalid ETH balance; got native.raw_u256_dec=$BAL_WEI" >&2
             cat "$SNAPSHOT_FILE" >&2
+            exit 1
+          fi
+
+          if [ "$INLINE_BAL_WEI" != "$BAL_WEI" ]; then
+            echo "ERROR: embedded snapshot balance mismatch inline=$INLINE_BAL_WEI artifact=$BAL_WEI" >&2
             exit 1
           fi
 

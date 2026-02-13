@@ -112,6 +112,22 @@ This repo provides an app that starts Postgres + Helios and then snapshots a sin
 nix run .#mfm::portfolio::snapshot -- 0x000000000000000000000000000000000000dead
 ```
 
+The final JSON now includes both metadata and the decoded snapshot payload at
+`data.result.snapshot` (in addition to `snapshot_artifact_id`).
+
+To keep Helios/Postgres running after the command exits (so Helios sync progress keeps advancing):
+
+```bash
+MFM_KEEP_SERVICES=1 nix run .#mfm::portfolio::snapshot -- 0x000000000000000000000000000000000000dead
+```
+
+Stop them manually when done:
+
+```bash
+MFM_ENV=dev NIX_ENV=0 nix run .#service::helios::stop
+MFM_ENV=dev NIX_ENV=0 nix run .#service::postgres::stop
+```
+
 ### Manual (CLI)
 
 `mfm_cli portfolio snapshot` currently requires:
