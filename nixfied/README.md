@@ -22,8 +22,8 @@ nix run github:willyrgf/nixfied#framework::install
 nix run github:willyrgf/nixfied#framework::prompt-plan
 ```
 
-**This generates a prompt-plan markdown document. Paste it into your AI prompt
-and ask the model to follow it.**
+**This generates `NIXFIED_PROMPT_PLAN.md`. Paste it into your AI prompt and ask
+the model to follow it.**
 
 ## Contents
 

@@ -11,8 +11,11 @@ let
     isNonEmptyString
     isNonEmptyList
     expect
+    renderErrors
+    sortedAttrNames
+    optionalAttrSatisfies
     isListOfNonEmptyStrings
-    isKVSpec
+    isKVSpecList
     ;
 
   requiredProfiles = [
@@ -33,7 +36,6 @@ let
   ];
 
   isAttrs = x: builtins.isAttrs x;
-
   normalizeToken =
     x: pkgs.lib.strings.toUpper (pkgs.lib.replaceStrings [ "-" "." ":" ] [ "_" "_" "_" ] x);
 
@@ -57,28 +59,14 @@ let
       ++ expect (isNonEmptyString (op.summary or "")) "${prefix}: summary must be a non-empty string"
       ++ expect (op ? details) "${prefix}: details is required"
       ++ expect (builtins.isString (op.details or null)) "${prefix}: details must be a string"
-      ++ expect (
-        !(op ? usage) || isListOfNonEmptyStrings (op.usage or null)
-      ) "${prefix}: usage must be a list of non-empty strings"
-      ++ expect (
-        !(op ? examples) || isListOfNonEmptyStrings (op.examples or null)
-      ) "${prefix}: examples must be a list of non-empty strings"
-      ++ expect (
-        !(op ? args) || (builtins.isList (op.args or null) && builtins.all isKVSpec (op.args or [ ]))
-      ) "${prefix}: args must be a list of { name, description }"
-      ++ expect (
-        !(op ? env) || (builtins.isList (op.env or null) && builtins.all isKVSpec (op.env or [ ]))
-      ) "${prefix}: env must be a list of { name, description }"
-      ++ expect (
-        !(op ? category) || isNonEmptyString (op.category or "")
-      ) "${prefix}: category must be a non-empty string"
-      ++ expect (!(op ? app) || builtins.isBool (op.app or null)) "${prefix}: app must be a boolean"
-      ++ expect (
-        !(op ? appName) || isNonEmptyString (op.appName or "")
-      ) "${prefix}: appName must be a non-empty string"
-      ++ expect (
-        !(op ? hook) || isNonEmptyString (op.hook or "")
-      ) "${prefix}: hook must be a non-empty string";
+      ++ expect (optionalAttrSatisfies op "usage" isListOfNonEmptyStrings) "${prefix}: usage must be a list of non-empty strings"
+      ++ expect (optionalAttrSatisfies op "examples" isListOfNonEmptyStrings) "${prefix}: examples must be a list of non-empty strings"
+      ++ expect (optionalAttrSatisfies op "args" isKVSpecList) "${prefix}: args must be a list of { name, description }"
+      ++ expect (optionalAttrSatisfies op "env" isKVSpecList) "${prefix}: env must be a list of { name, description }"
+      ++ expect (optionalAttrSatisfies op "category" isNonEmptyString) "${prefix}: category must be a non-empty string"
+      ++ expect (optionalAttrSatisfies op "app" builtins.isBool) "${prefix}: app must be a boolean"
+      ++ expect (optionalAttrSatisfies op "appName" isNonEmptyString) "${prefix}: appName must be a non-empty string"
+      ++ expect (optionalAttrSatisfies op "hook" isNonEmptyString) "${prefix}: hook must be a non-empty string";
 
   opNames = ops: builtins.attrNames ops;
 
@@ -166,7 +154,7 @@ let
     else
       throw ''
         Nixfied service API contract violated for "${serviceName}":
-        ${builtins.concatStringsSep "\n" (map (e: "  - " + e) errs)}
+        ${renderErrors errs}
 
         Fix:
           - Define ${serviceName}.publicApi with:
@@ -178,7 +166,7 @@ let
   validateServiceApis =
     serviceApis:
     let
-      names = lib.sort (a: b: a < b) (builtins.attrNames serviceApis);
+      names = sortedAttrNames serviceApis;
       errs = builtins.concatLists (
         map (
           serviceName:
@@ -194,7 +182,7 @@ let
     else
       throw ''
         Nixfied service API contract violated:
-        ${builtins.concatStringsSep "\n" (map (e: "  - " + e) errs)}
+        ${renderErrors errs}
       '';
 
   validateEnabledServicesHaveContracts =
@@ -213,6 +201,53 @@ let
         Nixfied service API contract violated:
           - Missing publicApi for enabled services: ${builtins.concatStringsSep ", " missing}
       '';
+
+  mkServiceApi =
+    {
+      service,
+      summary,
+      details,
+      artifacts,
+      coreOps,
+      extensions ? { },
+      profiles ? requiredProfiles,
+    }:
+    {
+      version = 1;
+      inherit
+        service
+        summary
+        details
+        profiles
+        artifacts
+        coreOps
+        extensions
+        ;
+    };
+
+  mkServiceApisFromModules =
+    modules:
+    let
+      names = sortedAttrNames modules;
+      pairs = builtins.concatLists (
+        map (
+          name:
+          let
+            mod = modules.${name};
+          in
+          if mod == null then
+            [ ]
+          else
+            [
+              {
+                inherit name;
+                value = mod.publicApi or null;
+              }
+            ]
+        ) names
+      );
+    in
+    builtins.listToAttrs pairs;
 
   serviceOps = api: (api.coreOps or { }) // (api.extensions or { });
 
@@ -257,13 +292,13 @@ let
   collectServiceOps =
     serviceApis:
     let
-      names = lib.sort (a: b: a < b) (builtins.attrNames serviceApis);
+      names = sortedAttrNames serviceApis;
       validated = validateServiceApis serviceApis;
       toOps =
         serviceName:
         let
           ops = serviceOps validated.${serviceName};
-          opNamesSorted = lib.sort (a: b: a < b) (builtins.attrNames ops);
+          opNamesSorted = sortedAttrNames ops;
         in
         map (
           opName:
@@ -361,6 +396,8 @@ in
     validateServiceApi
     validateServiceApis
     validateEnabledServicesHaveContracts
+    mkServiceApi
+    mkServiceApisFromModules
     mkServiceHookEnvFromContract
     mkServiceAppsFromContract
     ;

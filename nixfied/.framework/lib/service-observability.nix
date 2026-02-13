@@ -78,6 +78,38 @@ let
         "$@" >/dev/null 2>&1 || true
     }
   '';
+
+  mkLogEventExtensions =
+    {
+      service,
+      summaryName,
+      logScript,
+      logsScript ? logScript,
+      eventsScript,
+    }:
+    {
+      log = {
+        script = logScript;
+        hook = "LOG";
+        summary = "Show ${summaryName} log";
+        details = "Shows ${summaryName} runtime log for the current slot/environment.";
+        usage = [ "nix run .#service::${service}::log -- [--lines N] [--follow]" ];
+      };
+      logs = {
+        script = logsScript;
+        hook = "LOGS";
+        summary = "Alias for service::${service}::log";
+        details = "Compatibility alias for service::${service}::log.";
+        usage = [ "nix run .#service::${service}::logs -- [--lines N] [--follow]" ];
+      };
+      events = {
+        script = eventsScript;
+        hook = "EVENTS";
+        summary = "Show ${summaryName} lifecycle events";
+        details = "Shows ${summaryName} lifecycle events from the global process registry for the current slot/environment.";
+        usage = [ "nix run .#service::${service}::events -- [--limit N]" ];
+      };
+    };
 in
 {
   inherit
@@ -85,5 +117,6 @@ in
     mkEventsScript
     mkStatusMergeBlock
     mkEmitServiceEventFunction
+    mkLogEventExtensions
     ;
 }

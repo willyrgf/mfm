@@ -37,18 +37,31 @@ let
   '') optionalTemplates;
   filteredDefaultImportsScript = pkgs.lib.concatMapStringsSep "\n" (t: ''
     if [ -n "''${KEEP[${t.key}]:-}" ]; then
-      echo "    (import ./${t.file} { inherit pkgs project; })"
+      echo "    (mkPart ./${t.file})"
     fi
   '') optionalTemplates;
   filteredTemplateHint = builtins.concatStringsSep "," (
     map (t: pkgs.lib.strings.removeSuffix ".nix" t.file) optionalTemplates
   );
+  requireNextArgFunction = ''
+    require_next_arg() {
+      local flag="$1"
+      local requirement="$2"
+      shift 2 || true
+      if [ "$#" -lt 2 ]; then
+        echo "ERROR: $flag requires $requirement" >&2
+        exit 1
+      fi
+      printf '%s\n' "$2"
+    }
+  '';
 
   promptPlanScript = pkgs.writeShellScript "nixfied-prompt-plan" ''
                             set -euo pipefail
 
                             FORCE=false
                             OUT_PATH=""
+                            ${requireNextArgFunction}
 
                             while [ "$#" -gt 0 ]; do
                               case "$1" in
@@ -61,11 +74,7 @@ let
                                   shift
                                   ;;
                 	                --output)
-                	                  if [ "$#" -lt 2 ]; then
-                	                    echo "ERROR: --output requires a path" >&2
-                	                    exit 1
-                	                  fi
-                                  OUT_PATH="''${2-}"
+                                  OUT_PATH="$(require_next_arg --output "a path" "$@")"
                                   shift 2
                                   ;;
                                 --help|-h)
@@ -112,26 +121,23 @@ let
                         TMPDIR=$(mktemp -d)
                         trap 'rm -rf "$TMPDIR" "$CONTEXT_FILE" "$PROMPT_FILE"' EXIT
 
+                        add_prompt_input() {
+                          local src="$1"
+                          local dest="$2"
+                          if [ -f "$src" ]; then
+                            cp "$src" "$TMPDIR/$dest"
+                            INPUTS+=("$dest")
+                          fi
+                        }
+
                         INPUTS=()
 
-                        if [ -f "$ROOT/README.md" ]; then
-                          cp "$ROOT/README.md" "$TMPDIR/PROJECT_README.md"
-                          INPUTS+=("PROJECT_README.md")
-                        fi
-                        if [ -f "$ROOT/CLAUDE.md" ]; then
-                          cp "$ROOT/CLAUDE.md" "$TMPDIR/PROJECT_CLAUDE.md"
-                          INPUTS+=("PROJECT_CLAUDE.md")
-                        fi
-                        if [ -f "$ROOT/AGENTS.md" ]; then
-                          cp "$ROOT/AGENTS.md" "$TMPDIR/PROJECT_AGENTS.md"
-                          INPUTS+=("PROJECT_AGENTS.md")
-                        fi
+                        add_prompt_input "$ROOT/README.md" "PROJECT_README.md"
+                        add_prompt_input "$ROOT/CLAUDE.md" "PROJECT_CLAUDE.md"
+                        add_prompt_input "$ROOT/AGENTS.md" "PROJECT_AGENTS.md"
 
                         FRAMEWORK_README="${frameworkRoot}/README.md"
-                        if [ -f "$FRAMEWORK_README" ]; then
-                          cp "$FRAMEWORK_README" "$TMPDIR/NIXFIED_FRAMEWORK_README.md"
-                          INPUTS+=("NIXFIED_FRAMEWORK_README.md")
-                        fi
+                        add_prompt_input "$FRAMEWORK_README" "NIXFIED_FRAMEWORK_README.md"
 
                 	        if [ "''${#INPUTS[@]}" -eq 0 ]; then
                 	          echo "SKIP: Skipping prompt plan (no README/CLAUDE/AGENTS files found)." >&2
@@ -212,6 +218,7 @@ let
                                     PROMPT_PLAN_FORCE=false
                                     RESET_PROJECT=false
                                     MODE="''${NIXFIED_INSTALL_MODE:-install}"
+                                    ${requireNextArgFunction}
 
                                     while [ "$#" -gt 0 ]; do
                                       case "$1" in
@@ -228,11 +235,7 @@ let
                                           shift
                                           ;;
                             	            --filter)
-                            	              if [ "$#" -lt 2 ]; then
-                            	                echo "ERROR: --filter requires a value (example: --filter=conf,ci)" >&2
-                            	                exit 1
-                            	              fi
-                                          FILTERS_RAW="''${2-}"
+                                          FILTERS_RAW="$(require_next_arg --filter "a value (example: --filter=conf,ci)" "$@")"
                                           shift 2
                                           ;;
                                         --target=*)
@@ -240,11 +243,7 @@ let
                                           shift
                                           ;;
                             	            --target)
-                            	              if [ "$#" -lt 2 ]; then
-                            	                echo "ERROR: --target requires a path" >&2
-                            	                exit 1
-                            	              fi
-                                          TARGET_PATH="''${2-}"
+                                          TARGET_PATH="$(require_next_arg --target "a path" "$@")"
                                           shift 2
                                           ;;
                                         --worktree)
@@ -612,6 +611,8 @@ let
                                         echo "let"
                                         echo "  conf = import ./conf.nix { inherit pkgs; };"
                                         echo "  project = conf.project or { };"
+                                        echo "  commandLib = import ./lib/command.nix { inherit project; };"
+                                        echo "  mkPart = path: import path { inherit pkgs project commandLib; };"
                                         echo "  parts = ["
                                         echo "    conf"
     ${filteredDefaultImportsScript}

@@ -1930,6 +1930,51 @@ let
       exit "$REG_RC"
     fi
 
+    log "process registry stale run liveness"
+    REG_STALE_DIR="$WORKDIR/registry-stale-run"
+    mkdir -p "$REG_STALE_DIR"
+    REG_STALE_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base {
+        project.id = "nixfied-process-registry-stale-run-fixture";
+        process.registryRoot = "$PWD/.process-registry";
+      };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+    in
+      lib.mkAppScript {
+        name = "registry-stale-run-liveness-test";
+        env = { };
+        useDeps = false;
+        script = import ./tests/framework/fixtures/registry/stale-run-liveness.nix {
+          emitEvent = toString lib.emitEvent;
+          processStatus = toString lib.processStatus;
+          processRuns = toString lib.processRuns;
+          registryRoot = "$PWD/.process-registry";
+        };
+      }
+    NIX
+    )
+
+    REG_STALE_SCRIPT=$(build_expr "$REG_STALE_EXPR")
+    REG_STALE_LOG="$WORKDIR/registry-stale-run.log"
+    set +e
+    (cd "$REG_STALE_DIR" && "$REG_STALE_SCRIPT" >"$REG_STALE_LOG" 2>&1)
+    REG_STALE_RC=$?
+    set -e
+    if [ "$REG_STALE_RC" -ne 0 ]; then
+      echo "Registry stale run liveness fixture failed (rc=$REG_STALE_RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 50 lines):" >&2
+      print_log_tail "$REG_STALE_LOG" 50
+      exit "$REG_STALE_RC"
+    fi
+
     log "postgres extensions"
     PG_EXT_DIR="$WORKDIR/postgres-extensions"
     mkdir -p "$PG_EXT_DIR"
@@ -2603,12 +2648,15 @@ let
       reth = import ./nixfied/.framework/reth { inherit pkgs project slots; };
       helios = import ./nixfied/.framework/helios { inherit pkgs project slots; };
       supervisor = import ./nixfied/.framework/supervisor { inherit pkgs project slots; };
-      serviceApis = {
-        postgres = postgres.publicApi;
-        nginx = nginx.publicApi;
-        minio = minio.publicApi;
-        reth = reth.publicApi;
-        helios = helios.publicApi;
+      serviceApi = import ./nixfied/.framework/lib/service-api.nix { inherit pkgs; };
+      serviceApis = serviceApi.mkServiceApisFromModules {
+        inherit
+          postgres
+          nginx
+          minio
+          reth
+          helios
+          ;
       };
       hooks = import ./nixfied/.framework/hooks.nix {
         inherit pkgs project slots postgres nginx minio reth helios supervisor serviceApis;
@@ -2666,12 +2714,15 @@ let
       reth = import ./nixfied/.framework/reth { inherit pkgs project slots; };
       helios = import ./nixfied/.framework/helios { inherit pkgs project slots; };
       supervisor = import ./nixfied/.framework/supervisor { inherit pkgs project slots; };
-      serviceApis = {
-        postgres = postgres.publicApi;
-        nginx = nginx.publicApi;
-        minio = minio.publicApi;
-        reth = reth.publicApi;
-        helios = helios.publicApi;
+      serviceApi = import ./nixfied/.framework/lib/service-api.nix { inherit pkgs; };
+      serviceApis = serviceApi.mkServiceApisFromModules {
+        inherit
+          postgres
+          nginx
+          minio
+          reth
+          helios
+          ;
       };
       hooks = import ./nixfied/.framework/hooks.nix {
         inherit pkgs project slots postgres nginx minio reth helios supervisor serviceApis;
@@ -2840,12 +2891,15 @@ let
       minio = import ./nixfied/.framework/minio { inherit pkgs project slots; };
       reth = import ./nixfied/.framework/reth { inherit pkgs project slots; };
       helios = import ./nixfied/.framework/helios { inherit pkgs project slots; };
-      serviceApis = {
-        postgres = postgres.publicApi;
-        nginx = nginx.publicApi;
-        minio = minio.publicApi;
-        reth = reth.publicApi;
-        helios = helios.publicApi;
+      serviceApi = import ./nixfied/.framework/lib/service-api.nix { inherit pkgs; };
+      serviceApis = serviceApi.mkServiceApisFromModules {
+        inherit
+          postgres
+          nginx
+          minio
+          reth
+          helios
+          ;
       };
       hooks = import ./nixfied/.framework/hooks.nix {
         inherit pkgs project slots postgres nginx minio reth helios serviceApis;

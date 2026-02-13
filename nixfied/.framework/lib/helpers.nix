@@ -118,24 +118,24 @@ let
       return 0
     }
 
-    # wait_http URL [timeout] [interval]
-    # - poll HTTP(S) endpoint until it responds 2xx/3xx or timeout.
-    wait_http() {
-      local url="$1"
-      local timeout="''${2:-30}"
-      local interval="''${3:-1}"
+    # wait_until TIMEOUT INTERVAL CHECK_FN
+    # - run CHECK_FN until success or timeout.
+    wait_until() {
+      local timeout="$1"
+      local interval="$2"
+      local check_fn="$3"
       local start
       start=$(date +%s)
 
-      if [ -z "$url" ]; then
-        echo "usage: wait_http <url> [timeout] [interval]" >&2
+      if [ -z "$check_fn" ]; then
+        echo "usage: wait_until <timeout> <interval> <check_fn>" >&2
         return 1
       fi
       require_positive_int "timeout" "$timeout" || return 1
       require_positive_number "interval" "$interval" || return 1
 
       while true; do
-        if ${pkgs.curl}/bin/curl -sSf "$url" >/dev/null 2>&1; then
+        if "$check_fn"; then
           return 0
         fi
         if [ $(( $(date +%s) - start )) -ge "$timeout" ]; then
@@ -143,6 +143,25 @@ let
         fi
         sleep "$interval"
       done
+    }
+
+    # wait_http URL [timeout] [interval]
+    # - poll HTTP(S) endpoint until it responds 2xx/3xx or timeout.
+    wait_http() {
+      local url="$1"
+      local timeout="''${2:-30}"
+      local interval="''${3:-1}"
+
+      if [ -z "$url" ]; then
+        echo "usage: wait_http <url> [timeout] [interval]" >&2
+        return 1
+      fi
+
+      _wait_http_probe() {
+        ${pkgs.curl}/bin/curl -sSf "$url" >/dev/null 2>&1
+      }
+
+      wait_until "$timeout" "$interval" _wait_http_probe
     }
 
     # log_capture LOGFILE -- <command...>
@@ -254,25 +273,17 @@ let
       local var="$1"
       local timeout="''${2:-60}"
       local interval="''${3:-1}"
-      local start
-      start=$(date +%s)
 
       if ! has_hook "$var"; then
         echo "ERROR: Hook not available: $var" >&2
         return 1
       fi
-      require_positive_int "timeout" "$timeout" || return 1
-      require_positive_number "interval" "$interval" || return 1
 
-      while true; do
-        if run_hook "$var" >/dev/null 2>&1; then
-          return 0
-        fi
-        if [ $(( $(date +%s) - start )) -ge "$timeout" ]; then
-          return 1
-        fi
-        sleep "$interval"
-      done
+      _wait_hook_probe() {
+        run_hook "$var" >/dev/null 2>&1
+      }
+
+      wait_until "$timeout" "$interval" _wait_hook_probe
     }
 
     _service_token() {
@@ -511,18 +522,14 @@ let
       local port="$1"
       local timeout="''${2:-30}"
       local interval="''${3:-1}"
-      local start
-      start=$(date +%s)
 
       if [ -z "$port" ]; then
         echo "usage: wait_port <port> [timeout] [interval]" >&2
         return 1
       fi
       require_port "port" "$port" || return 1
-      require_positive_int "timeout" "$timeout" || return 1
-      require_positive_number "interval" "$interval" || return 1
 
-      while true; do
+      _wait_port_probe() {
         if command -v lsof >/dev/null 2>&1; then
           if lsof -iTCP:"$port" -sTCP:LISTEN -n -P >/dev/null 2>&1; then
             return 0
@@ -532,11 +539,10 @@ let
             return 0
           fi
         fi
-        if [ $(( $(date +%s) - start )) -ge "$timeout" ]; then
-          return 1
-        fi
-        sleep "$interval"
-      done
+        return 1
+      }
+
+      wait_until "$timeout" "$interval" _wait_port_probe
     }
 
     # stop_service PID [name]

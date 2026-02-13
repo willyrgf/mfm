@@ -7,6 +7,7 @@
 
 let
   cfg = project.modules.nginx or { };
+  serviceApi = import ../lib/service-api.nix { inherit pkgs; };
   processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   observability = import ../lib/service-observability.nix {
     inherit
@@ -170,18 +171,18 @@ let
   log = logs;
 
   events = observability.mkEventsScript "nginx";
+  logEventExtensions = observability.mkLogEventExtensions {
+    service = "nginx";
+    summaryName = "nginx";
+    logScript = log;
+    logsScript = logs;
+    eventsScript = events;
+  };
 
-  publicApi = {
-    version = 1;
+  publicApi = serviceApi.mkServiceApi {
     service = "nginx";
     summary = "Nginx service management API";
     details = "Public service contract for managing nginx across dev/prod/test/ci.";
-    profiles = [
-      "dev"
-      "prod"
-      "test"
-      "ci"
-    ];
     artifacts = {
       httpPortVar = portVarHttp;
       httpsPortVar = portVarHttps;
@@ -311,28 +312,7 @@ let
         summary = "Show SSL certificate status";
         details = "Prints certificate status for configured domains.";
       };
-      log = {
-        script = log;
-        hook = "LOG";
-        summary = "Show nginx log";
-        details = "Shows nginx runtime log for the current slot/environment.";
-        usage = [ "nix run .#service::nginx::log -- [--lines N] [--follow]" ];
-      };
-      logs = {
-        script = logs;
-        hook = "LOGS";
-        summary = "Alias for service::nginx::log";
-        details = "Compatibility alias for service::nginx::log.";
-        usage = [ "nix run .#service::nginx::logs -- [--lines N] [--follow]" ];
-      };
-      events = {
-        script = events;
-        hook = "EVENTS";
-        summary = "Show nginx lifecycle events";
-        details = "Shows nginx lifecycle events from the global process registry for the current slot/environment.";
-        usage = [ "nix run .#service::nginx::events -- [--limit N]" ];
-      };
-    };
+    } // logEventExtensions;
   };
 in
 {

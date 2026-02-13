@@ -6,6 +6,7 @@
 }:
 
 let
+  serviceApi = import ../lib/service-api.nix { inherit pkgs; };
   processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   observability = import ../lib/service-observability.nix {
     inherit
@@ -28,18 +29,18 @@ let
   log = logs;
 
   events = observability.mkEventsScript "reth";
+  logEventExtensions = observability.mkLogEventExtensions {
+    service = "reth";
+    summaryName = "Reth";
+    logScript = log;
+    logsScript = logs;
+    eventsScript = events;
+  };
 
-  publicApi = {
-    version = 1;
+  publicApi = serviceApi.mkServiceApi {
     service = "reth";
     summary = "Reth service management API";
     details = "Public service contract for managing Reth across dev/prod/test/ci.";
-    profiles = [
-      "dev"
-      "prod"
-      "test"
-      "ci"
-    ];
     artifacts = {
       httpPortVar = slots.portVarName config.portKeyHttp;
       wsPortVar = slots.portVarName config.portKeyWs;
@@ -104,28 +105,7 @@ let
         summary = "Wait for Reth readiness";
         details = "Checks that Reth responds on the configured HTTP RPC port.";
       };
-      log = {
-        script = log;
-        hook = "LOG";
-        summary = "Show Reth log";
-        details = "Shows Reth runtime log for the current slot/environment.";
-        usage = [ "nix run .#service::reth::log -- [--lines N] [--follow]" ];
-      };
-      logs = {
-        script = logs;
-        hook = "LOGS";
-        summary = "Alias for service::reth::log";
-        details = "Compatibility alias for service::reth::log.";
-        usage = [ "nix run .#service::reth::logs -- [--lines N] [--follow]" ];
-      };
-      events = {
-        script = events;
-        hook = "EVENTS";
-        summary = "Show Reth lifecycle events";
-        details = "Shows Reth lifecycle events from the global process registry for the current slot/environment.";
-        usage = [ "nix run .#service::reth::events -- [--limit N]" ];
-      };
-    };
+    } // logEventExtensions;
   };
 in
 {

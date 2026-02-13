@@ -34,42 +34,65 @@ let
         ;
     };
 
-  projectTemplates = lib.sort (a: b: a.order < b.order) [
-    (mkTemplate {
+  mkFrameworkHelper =
+    {
+      name,
+      runner,
+      summary,
+      details,
+      usage,
+      env ? { },
+    }:
+    {
+      inherit name runner env;
+      api = {
+        version = 1;
+        inherit
+          summary
+          details
+          usage
+          ;
+        category = "framework";
+      };
+    };
+
+  templateSpecs = [
+    {
       key = "conf";
       file = "conf.nix";
       order = 10;
       required = true;
-    })
-    (mkTemplate {
+    }
+    {
       key = "dev";
       file = "dev.nix";
       order = 20;
-    })
-    (mkTemplate {
+    }
+    {
       key = "test";
       file = "test.nix";
       order = 30;
-    })
-    (mkTemplate {
+    }
+    {
       key = "prod";
       file = "prod.nix";
       order = 40;
       aliases = [ "build" ];
       # Keep help output stable while still accepting the canonical token ("prod").
       filterDisplay = [ "build" ];
-    })
-    (mkTemplate {
+    }
+    {
       key = "quality";
       file = "quality.nix";
       order = 50;
-    })
-    (mkTemplate {
+    }
+    {
       key = "ci";
       file = "ci.nix";
       order = 60;
-    })
+    }
   ];
+  projectTemplates = lib.sort (a: b: a.order < b.order) (map mkTemplate templateSpecs);
 
   templateKeys = map (t: t.key) projectTemplates;
   templateFiles = map (t: t.file) projectTemplates;
@@ -95,20 +118,15 @@ let
     else
       throw "Install manifest invalid: filterDisplay includes unknown tokens: ${builtins.concatStringsSep ", " unknown}";
 
-  frameworkHelpers = [
+  frameworkHelperSpecs = [
     {
       name = "install";
       runner = "install";
-      env = { };
-      api = {
-        version = 1;
-        summary = "Install Nixfied framework into a repository";
-        details = "Installs the Nixfied framework into a target repository (writes flake.nix and nixfied/), optionally generating project scaffolding.";
-        usage = [
-          "nix run .#framework::install -- [--force] [--filter=...] [--reset-project] [--no-prompt-plan]"
-        ];
-        category = "framework";
-      };
+      summary = "Install Nixfied framework into a repository";
+      details = "Installs the Nixfied framework into a target repository (writes flake.nix and nixfied/), optionally generating project scaffolding.";
+      usage = [
+        "nix run .#framework::install -- [--force] [--filter=...] [--reset-project] [--no-prompt-plan]"
+      ];
     }
     {
       name = "upgrade";
@@ -116,27 +134,19 @@ let
       env = {
         NIXFIED_INSTALL_MODE = "upgrade";
       };
-      api = {
-        version = 1;
-        summary = "Upgrade Nixfied framework in-place (preserving nixfied/project and nixfied/local by default)";
-        details = "Upgrades the Nixfied framework in-place. By default it preserves nixfied/project and nixfied/local so project-specific configuration and extensions remain intact.";
-        usage = [ "nix run .#framework::upgrade -- [--force] [--reset-project] [--no-prompt-plan]" ];
-        category = "framework";
-      };
+      summary = "Upgrade Nixfied framework in-place (preserving nixfied/project and nixfied/local by default)";
+      details = "Upgrades the Nixfied framework in-place. By default it preserves nixfied/project and nixfied/local so project-specific configuration and extensions remain intact.";
+      usage = [ "nix run .#framework::upgrade -- [--force] [--reset-project] [--no-prompt-plan]" ];
     }
     {
       name = "prompt-plan";
       runner = "prompt-plan";
-      env = { };
-      api = {
-        version = 1;
-        summary = "Generate Nixfied prompt plan from project docs";
-        details = "Generates a prompt plan document (for agents) from the repository's project docs. This is framework-only and can be disabled via NIXFIED_PROMPT_PLAN=0.";
-        usage = [ "nix run .#framework::prompt-plan -- [--force] [--output=PATH]" ];
-        category = "framework";
-      };
+      summary = "Generate Nixfied prompt plan from project docs";
+      details = "Generates a prompt plan document (for agents) from the repository's project docs. This is framework-only and can be disabled via NIXFIED_PROMPT_PLAN=0.";
+      usage = [ "nix run .#framework::prompt-plan -- [--force] [--output=PATH]" ];
     }
   ];
+  frameworkHelpers = map mkFrameworkHelper frameworkHelperSpecs;
 
   helperNames = map (h: h.name) frameworkHelpers;
   helperRunners = map (h: h.runner) frameworkHelpers;

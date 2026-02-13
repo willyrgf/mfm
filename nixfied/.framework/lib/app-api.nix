@@ -8,9 +8,27 @@ let
     isNonEmptyString
     isNonEmptyList
     expect
+    renderErrors
     isListOfNonEmptyStrings
-    isKVSpec
+    sortedAttrNames
+    optionalAttrSatisfies
+    isKVSpecList
     ;
+
+  mkFixHint =
+    commandName: ''
+      Fix:
+        - For project commands: define commands.${commandName}.api = { version = 1; summary = "..."; details = "..."; usage = [ "nix run .#${commandName}" ]; };
+        - For generated/internal apps: set app.meta.nixfied.api (or use lib.appApi.mkNixfiedApp).
+    '';
+  throwNamedViolation =
+    name: errs:
+    throw ''
+      Nixfied app API contract violated for "${name}":
+      ${renderErrors errs}
+
+      ${mkFixHint name}
+    '';
 
   validateApiErrors =
     { name, api }:
@@ -35,18 +53,10 @@ let
       ++ expect (isListOfNonEmptyStrings (
         api.usage or [ ]
       )) "${name}: api.usage must be a list of non-empty strings"
-      ++ expect (
-        !(api ? examples) || isListOfNonEmptyStrings (api.examples or null)
-      ) "${name}: api.examples must be a list of non-empty strings"
-      ++ expect (
-        !(api ? args) || (builtins.isList (api.args or null) && builtins.all isKVSpec (api.args or [ ]))
-      ) "${name}: api.args must be a list of { name, description }"
-      ++ expect (
-        !(api ? env) || (builtins.isList (api.env or null) && builtins.all isKVSpec (api.env or [ ]))
-      ) "${name}: api.env must be a list of { name, description }"
-      ++ expect (
-        !(api ? category) || isNonEmptyString (api.category or "")
-      ) "${name}: api.category must be a non-empty string";
+      ++ expect (optionalAttrSatisfies api "examples" isListOfNonEmptyStrings) "${name}: api.examples must be a list of non-empty strings"
+      ++ expect (optionalAttrSatisfies api "args" isKVSpecList) "${name}: api.args must be a list of { name, description }"
+      ++ expect (optionalAttrSatisfies api "env" isKVSpecList) "${name}: api.env must be a list of { name, description }"
+      ++ expect (optionalAttrSatisfies api "category" isNonEmptyString) "${name}: api.category must be a non-empty string";
 
   validateApi =
     { name, api }:
@@ -56,14 +66,7 @@ let
     if errs == [ ] then
       api
     else
-      throw ''
-        Nixfied app API contract violated for "${name}":
-        ${builtins.concatStringsSep "\n" (map (e: "  - " + e) errs)}
-
-        Fix:
-          - For project commands: define commands.${name}.api = { version = 1; summary = "..."; details = "..."; usage = [ "nix run .#${name}" ]; };
-          - For generated/internal apps: set app.meta.nixfied.api (or use lib.appApi.mkNixfiedApp).
-      '';
+      throwNamedViolation name errs;
 
   validateAppErrors =
     { name, app }:
@@ -89,19 +92,12 @@ let
     if errs == [ ] then
       app
     else
-      throw ''
-        Nixfied app API contract violated for "${name}":
-        ${builtins.concatStringsSep "\n" (map (e: "  - " + e) errs)}
-
-        Fix:
-          - For project commands: define commands.${name}.api = { version = 1; summary = "..."; details = "..."; usage = [ "nix run .#${name}" ]; };
-          - For generated/internal apps: set app.meta.nixfied.api (or use lib.appApi.mkNixfiedApp).
-      '';
+      throwNamedViolation name errs;
 
   validateApps =
     apps:
     let
-      names = lib.sort (a: b: a < b) (builtins.attrNames apps);
+      names = sortedAttrNames apps;
       errs = builtins.concatLists (
         map (
           name:
@@ -117,11 +113,9 @@ let
     else
       throw ''
         Nixfied app API contract violated:
-        ${builtins.concatStringsSep "\n" (map (e: "  - " + e) errs)}
+        ${renderErrors errs}
 
-        Fix:
-          - For project commands: define commands.<name>.api = { version = 1; summary = "..."; details = "..."; usage = [ "nix run .#<name>" ]; };
-          - For generated/internal apps: set app.meta.nixfied.api (or use lib.appApi.mkNixfiedApp).
+        ${mkFixHint "<name>"}
       '';
 
   mkNixfiedApp =

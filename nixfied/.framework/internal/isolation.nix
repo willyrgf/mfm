@@ -94,6 +94,17 @@ let
       "STATE_DIR"
     ];
   dirVarsStr = pkgs.lib.concatMapStringsSep " " pkgs.lib.escapeShellArg dirVars;
+  forEachDirVarFunction = ''
+    for_each_dir_var() {
+      local callback="$1"
+      local var
+      local path
+      for var in "''${DIR_VARS[@]}" "''${SERVICE_DIR_VARS[@]}"; do
+        path="''${!var:-}"
+        "$callback" "$var" "$path"
+      done
+    }
+  '';
 
   validateEnvScript = ''
     set -euo pipefail
@@ -112,6 +123,7 @@ let
     DIR_VARS=(${dirVarsStr})
     SERVICE_DIR_VARS=(${serviceDirVarsStr})
     SOCKET_CHECKS=(${socketChecksStr})
+    ${forEachDirVarFunction}
 
     LSOF="${pkgs.lsof}/bin/lsof"
 
@@ -150,18 +162,21 @@ let
       check_port "$name" "$var" "$port"
     done
 
-    for var in "''${DIR_VARS[@]}" "''${SERVICE_DIR_VARS[@]}"; do
-      path="''${!var:-}"
+    warn_missing_dir_var() {
+      local var="$1"
+      local path="$2"
       if [ -z "$path" ]; then
         echo "WARN: $var not set"
         WARNINGS=$((WARNINGS + 1))
-        continue
+        return 0
       fi
       if [ ! -d "$path" ]; then
         echo "WARN: $var missing: $path"
         WARNINGS=$((WARNINGS + 1))
       fi
-    done
+    }
+
+    for_each_dir_var warn_missing_dir_var
 
     check_socket() {
       local name="$1"
@@ -239,6 +254,7 @@ let
     KEEP_LOGS_ON_FAILURE=${if keepLogsOnFailure then "true" else "false"}
     DIR_VARS=(${dirVarsStr})
     SERVICE_DIR_VARS=(${serviceDirVarsStr})
+    ${forEachDirVarFunction}
 
     declare -A PIDS
     declare -A OUTPUTS
@@ -348,15 +364,17 @@ let
       echo ""
     fi
 
+    ensure_dir_var() {
+      local _var="$1"
+      local path="$2"
+      if [ -n "$path" ]; then
+        mkdir -p "$path"
+        chmod 700 "$path" 2>/dev/null || true
+      fi
+    }
+
     ensure_dirs() {
-      local var
-      for var in "''${DIR_VARS[@]}" "''${SERVICE_DIR_VARS[@]}"; do
-        local path="''${!var:-}"
-        if [ -n "$path" ]; then
-          mkdir -p "$path"
-          chmod 700 "$path" 2>/dev/null || true
-        fi
-      done
+      for_each_dir_var ensure_dir_var
     }
 
     run_cmd() {
@@ -509,33 +527,49 @@ let
     echo "TESTS FAILED"
     exit 1
   '';
+
+  mkIsolationApp =
+    {
+      name,
+      script,
+      useDeps ? false,
+      summary,
+      details,
+      usage,
+    }:
+    lib.appApi.mkNixfiedApp {
+      inherit
+        name
+        script
+        useDeps
+        ;
+      env = { };
+      api = {
+        version = 1;
+        inherit
+          summary
+          details
+          usage
+          ;
+        category = "isolation";
+      };
+    };
 in
 {
-  validate-env = lib.appApi.mkNixfiedApp {
+  validate-env = mkIsolationApp {
     name = "validate-env";
     script = validateEnvScript;
-    env = { };
-    useDeps = false;
-    api = {
-      version = 1;
-      summary = "Validate slot/env listeners and directories";
-      details = "Validates port listeners and required directories for the current slot/env.";
-      usage = [ "nix run .#validate-env" ];
-      category = "isolation";
-    };
+    summary = "Validate slot/env listeners and directories";
+    details = "Validates port listeners and required directories for the current slot/env.";
+    usage = [ "nix run .#validate-env" ];
   };
 
-  test-isolation = lib.appApi.mkNixfiedApp {
+  test-isolation = mkIsolationApp {
     name = "test-isolation";
     script = testIsolationScript;
-    env = { };
     useDeps = useDeps;
-    api = {
-      version = 1;
-      summary = "Run concurrent isolation checks across slots/envs";
-      details = "Runs concurrent validation and CI (or custom) commands across slot/env combinations and reports isolation issues.";
-      usage = [ "nix run .#test-isolation" ];
-      category = "isolation";
-    };
+    summary = "Run concurrent isolation checks across slots/envs";
+    details = "Runs concurrent validation and CI (or custom) commands across slot/env combinations and reports isolation issues.";
+    usage = [ "nix run .#test-isolation" ];
   };
 }

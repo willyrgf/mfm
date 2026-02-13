@@ -136,6 +136,57 @@ let
       return 0
     }
 
+    is_numeric_pid() {
+      case "''${1:-}" in
+        ""|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+      esac
+    }
+
+    is_active_run_state() {
+      case "''${1:-}" in
+        starting|running|ready|degraded|waiting|busy) return 0 ;;
+        *) return 1 ;;
+      esac
+    }
+
+    read_kv_field() {
+      local line="''${1:-}"
+      local key="''${2:-}"
+      local token=""
+
+      for token in $line; do
+        if [ "''${token%%=*}" = "$key" ]; then
+          printf '%s\n' "''${token#*=}"
+          return 0
+        fi
+      done
+
+      printf '\n'
+    }
+
+    rewrite_kv_field() {
+      local line="''${1:-}"
+      local key="''${2:-}"
+      local value="''${3:-}"
+      local token=""
+      local out=""
+
+      for token in $line; do
+        if [ "''${token%%=*}" = "$key" ]; then
+          token="$key=$value"
+        fi
+
+        if [ -z "$out" ]; then
+          out="$token"
+        else
+          out="$out $token"
+        fi
+      done
+
+      printf '%s\n' "$out"
+    }
+
     append_event_json() {
       local payload="$1"
       local lock_file="$LOCK_DIR/events.lock"
@@ -389,6 +440,35 @@ let
       | .[]
     ' "$EVENTS_FILE")
 
+    if [ -n "$OUT" ]; then
+      RECONCILED_OUT=""
+      while IFS= read -r LINE; do
+        if [ -z "$LINE" ]; then
+          continue
+        fi
+
+        ENTITY_TYPE="$(read_kv_field "$LINE" "type")"
+        if [ "$ENTITY_TYPE" = "run" ]; then
+          STATE="$(read_kv_field "$LINE" "state")"
+          PID="$(read_kv_field "$LINE" "pid")"
+          if is_active_run_state "$STATE" && is_numeric_pid "$PID" && ! kill -0 "$PID" 2>/dev/null; then
+            if [ "$SHOW_ALL" = "true" ]; then
+              LINE="$(rewrite_kv_field "$LINE" "state" "failed")"
+            else
+              continue
+            fi
+          fi
+        fi
+
+        if [ -z "$RECONCILED_OUT" ]; then
+          RECONCILED_OUT="$LINE"
+        else
+          RECONCILED_OUT="$RECONCILED_OUT"$'\n'"$LINE"
+        fi
+      done <<< "$OUT"
+      OUT="$RECONCILED_OUT"
+    fi
+
     if [ -z "$OUT" ]; then
       if [ "$SHOW_ALL" = "true" ]; then
         echo "OK: no process entities found project_id=$PROJECT_ID"
@@ -446,6 +526,32 @@ let
         | select(($all == "true") or is_active)
         | "run_id=\((.run_id // "unknown")) state=\((.state // "unknown")) command=\((.command_name // "unknown")) slot=\((.slot // "unknown")) env=\((.env // "unknown")) pid=\((.pid // "unknown")) started_at=\((.timestamp // "unknown"))")
     ' "$EVENTS_FILE")
+
+    if [ -n "$OUT" ]; then
+      RECONCILED_OUT=""
+      while IFS= read -r LINE; do
+        if [ -z "$LINE" ]; then
+          continue
+        fi
+
+        STATE="$(read_kv_field "$LINE" "state")"
+        PID="$(read_kv_field "$LINE" "pid")"
+        if is_active_run_state "$STATE" && is_numeric_pid "$PID" && ! kill -0 "$PID" 2>/dev/null; then
+          if [ "$SHOW_ALL" = "true" ]; then
+            LINE="$(rewrite_kv_field "$LINE" "state" "failed")"
+          else
+            continue
+          fi
+        fi
+
+        if [ -z "$RECONCILED_OUT" ]; then
+          RECONCILED_OUT="$LINE"
+        else
+          RECONCILED_OUT="$RECONCILED_OUT"$'\n'"$LINE"
+        fi
+      done <<< "$OUT"
+      OUT="$RECONCILED_OUT"
+    fi
 
     if [ -z "$OUT" ]; then
       if [ "$SHOW_ALL" = "true" ]; then

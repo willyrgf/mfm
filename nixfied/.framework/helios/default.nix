@@ -6,6 +6,7 @@
 }:
 
 let
+  serviceApi = import ../lib/service-api.nix { inherit pkgs; };
   processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   observability = import ../lib/service-observability.nix {
     inherit
@@ -33,18 +34,18 @@ let
   log = logs;
 
   events = observability.mkEventsScript "helios";
+  logEventExtensions = observability.mkLogEventExtensions {
+    service = "helios";
+    summaryName = "Helios";
+    logScript = log;
+    logsScript = logs;
+    eventsScript = events;
+  };
 
-  publicApi = {
-    version = 1;
+  publicApi = serviceApi.mkServiceApi {
     service = "helios";
     summary = "Helios service management API";
     details = "Public service contract for managing Helios across dev/prod/test/ci.";
-    profiles = [
-      "dev"
-      "prod"
-      "test"
-      "ci"
-    ];
     artifacts = {
       rpcPortVar = slots.portVarName config.portKeyRpc;
       executionPortVar = slots.portVarName config.executionRpcPortKey;
@@ -116,28 +117,7 @@ let
           - `HELIOS_READY_INTERVAL_SECS` (default: 1)
         '';
       };
-      log = {
-        script = log;
-        hook = "LOG";
-        summary = "Show Helios log";
-        details = "Shows Helios runtime log for the current slot/environment.";
-        usage = [ "nix run .#service::helios::log -- [--lines N] [--follow]" ];
-      };
-      logs = {
-        script = logs;
-        hook = "LOGS";
-        summary = "Alias for service::helios::log";
-        details = "Compatibility alias for service::helios::log.";
-        usage = [ "nix run .#service::helios::logs -- [--lines N] [--follow]" ];
-      };
-      events = {
-        script = events;
-        hook = "EVENTS";
-        summary = "Show Helios lifecycle events";
-        details = "Shows Helios lifecycle events from the global process registry for the current slot/environment.";
-        usage = [ "nix run .#service::helios::events -- [--limit N]" ];
-      };
-    };
+    } // logEventExtensions;
   };
 in
 {

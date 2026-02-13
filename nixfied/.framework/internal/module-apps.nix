@@ -32,84 +32,150 @@ let
       };
     };
 
+  mkSupervisorHookApp =
+    {
+      name,
+      summary,
+      details,
+      hook,
+      usage ? [ "nix run .#${name}" ],
+      passArgs ? false,
+    }:
+    mk {
+      inherit
+        name
+        summary
+        details
+        usage
+        ;
+      category = "supervisor";
+      script = ''
+        SLOT_ENV_OUT="$($REQUIRE_SLOT_ENV)" || exit 1
+        eval "$SLOT_ENV_OUT"
+        run_hook ${hook}${if passArgs then " \"$@\"" else ""}
+      '';
+    };
+
+  mkProcessApp =
+    {
+      name,
+      summary,
+      details,
+      usage,
+      tool,
+    }:
+    mk {
+      inherit
+        name
+        summary
+        details
+        usage
+        ;
+      category = "utility";
+      script = ''
+        exec ${toString tool} "$@"
+      '';
+    };
+
+  mkRuntimeAliasApp =
+    {
+      name,
+      target,
+      tool,
+      usage,
+    }:
+    mk {
+      inherit name usage;
+      summary = "Alias for ${target}";
+      details = "Compatibility alias for ${target}.";
+      category = "utility";
+      script = ''
+        echo "WARN: ${name} is deprecated; use ${target}" >&2
+        exec ${toString tool} "$@"
+      '';
+    };
+
+  mkAppsFromSpecs = mkFromSpec: specs:
+    builtins.listToAttrs (
+      map (spec: {
+        name = spec.name;
+        value = mkFromSpec spec;
+      }) specs
+    );
+
   serviceApps = lib.serviceApi.mkServiceAppsFromContract serviceApis;
+
+  supervisorSpecs = [
+    {
+      name = "up";
+      summary = "Start all services";
+      details = "Starts all supervisor-managed services for the current slot/env.";
+      hook = "SUPERVISOR_START_DAEMON";
+    }
+    {
+      name = "down";
+      summary = "Stop all services";
+      details = "Stops all supervisor-managed services for the current slot/env.";
+      hook = "SUPERVISOR_STOP";
+    }
+    {
+      name = "svc-status";
+      summary = "Show service status";
+      details = "Shows the status of supervisor-managed services.";
+      hook = "SUPERVISOR_STATUS";
+    }
+    {
+      name = "svc-health";
+      summary = "Check service health";
+      details = "Checks readiness health for supervisor-managed services.";
+      hook = "SUPERVISOR_HEALTH";
+    }
+    {
+      name = "svc-logs";
+      summary = "Show service logs";
+      details = "Streams logs for supervisor-managed services. Arguments are forwarded to the hook.";
+      usage = [ "nix run .#svc-logs -- <args>" ];
+      hook = "SUPERVISOR_LOGS";
+      passArgs = true;
+    }
+    {
+      name = "svc-restart";
+      summary = "Restart a service";
+      details = "Restarts a supervisor-managed service. Arguments are forwarded to the hook.";
+      usage = [ "nix run .#svc-restart -- <args>" ];
+      hook = "SUPERVISOR_RESTART";
+      passArgs = true;
+    }
+  ];
 
   supervisorApps =
     if supervisor == null then
       { }
     else
-      {
-        up = mk {
-          name = "up";
-          summary = "Start all services";
-          details = "Starts all supervisor-managed services for the current slot/env.";
-          category = "supervisor";
-          script = ''
-            SLOT_ENV_OUT="$($REQUIRE_SLOT_ENV)" || exit 1
-            eval "$SLOT_ENV_OUT"
-            run_hook SUPERVISOR_START_DAEMON
-          '';
-        };
-        down = mk {
-          name = "down";
-          summary = "Stop all services";
-          details = "Stops all supervisor-managed services for the current slot/env.";
-          category = "supervisor";
-          script = ''
-            SLOT_ENV_OUT="$($REQUIRE_SLOT_ENV)" || exit 1
-            eval "$SLOT_ENV_OUT"
-            run_hook SUPERVISOR_STOP
-          '';
-        };
-        svc-status = mk {
-          name = "svc-status";
-          summary = "Show service status";
-          details = "Shows the status of supervisor-managed services.";
-          category = "supervisor";
-          script = ''
-            SLOT_ENV_OUT="$($REQUIRE_SLOT_ENV)" || exit 1
-            eval "$SLOT_ENV_OUT"
-            run_hook SUPERVISOR_STATUS
-          '';
-        };
-        svc-health = mk {
-          name = "svc-health";
-          summary = "Check service health";
-          details = "Checks readiness health for supervisor-managed services.";
-          category = "supervisor";
-          script = ''
-            SLOT_ENV_OUT="$($REQUIRE_SLOT_ENV)" || exit 1
-            eval "$SLOT_ENV_OUT"
-            run_hook SUPERVISOR_HEALTH
-          '';
-        };
-        svc-logs = mk {
-          name = "svc-logs";
-          summary = "Show service logs";
-          details = "Streams logs for supervisor-managed services. Arguments are forwarded to the hook.";
-          usage = [ "nix run .#svc-logs -- <args>" ];
-          category = "supervisor";
-          script = ''
-            SLOT_ENV_OUT="$($REQUIRE_SLOT_ENV)" || exit 1
-            eval "$SLOT_ENV_OUT"
-            run_hook SUPERVISOR_LOGS "$@"
-          '';
-        };
-        svc-restart = mk {
-          name = "svc-restart";
-          summary = "Restart a service";
-          details = "Restarts a supervisor-managed service. Arguments are forwarded to the hook.";
-          usage = [ "nix run .#svc-restart -- <args>" ];
-          category = "supervisor";
-          script = ''
-            SLOT_ENV_OUT="$($REQUIRE_SLOT_ENV)" || exit 1
-            eval "$SLOT_ENV_OUT"
-            run_hook SUPERVISOR_RESTART "$@"
-          '';
-        };
-      };
+      mkAppsFromSpecs mkSupervisorHookApp supervisorSpecs;
 
   portNames = builtins.attrNames (project.ports or { });
+  slotInfoEvalBlock = ''
+    SLOT_INFO_OUT="$($SLOT_INFO)" || exit 1
+    eval "$SLOT_INFO_OUT"
+  '';
+  portVarNameFor =
+    portName:
+    pkgs.lib.strings.toUpper (pkgs.lib.replaceStrings [ "-" "." ] [ "_" "_" ] portName) + "_PORT";
+  mkPortScriptLines =
+    render:
+    pkgs.lib.concatMapStringsSep "\n" (
+      portName:
+      let
+        varName = portVarNameFor portName;
+      in
+      render {
+        inherit
+          portName
+          varName
+          ;
+      }
+    ) portNames;
 
   utilityApps = {
     check-ports = mk {
@@ -118,17 +184,15 @@ let
       details = "Scans the configured ports for the current slot/env and reports whether they are free or listening.";
       category = "utility";
       script = ''
-        SLOT_INFO_OUT="$($SLOT_INFO)" || exit 1
-        eval "$SLOT_INFO_OUT"
+        ${slotInfoEvalBlock}
         LSOF="${pkgs.lsof}/bin/lsof"
         echo "Port status for slot ''${SLOT:-0}, env ''${ENV:-dev}:"
         echo ""
-        ${pkgs.lib.concatMapStringsSep "\n" (
-          portName:
-          let
-            varName =
-              pkgs.lib.strings.toUpper (pkgs.lib.replaceStrings [ "-" "." ] [ "_" "_" ] portName) + "_PORT";
-          in
+        ${mkPortScriptLines (
+          {
+            portName,
+            varName,
+          }:
           ''
             PORT_VAL="''${${varName}:-}"
             if [ -n "$PORT_VAL" ]; then
@@ -140,7 +204,7 @@ let
               fi
             fi
           ''
-        ) portNames}
+        )}
       '';
     };
     ports = mk {
@@ -149,26 +213,24 @@ let
       details = "Prints effective port assignments for the current slot/env.";
       category = "utility";
       script = ''
-        SLOT_INFO_OUT="$($SLOT_INFO)" || exit 1
-        eval "$SLOT_INFO_OUT"
+        ${slotInfoEvalBlock}
         echo "Port assignments for slot ''${SLOT:-0}, env ''${ENV:-dev}:"
         echo ""
-        ${pkgs.lib.concatMapStringsSep "\n" (
-          portName:
-          let
-            varName =
-              pkgs.lib.strings.toUpper (pkgs.lib.replaceStrings [ "-" "." ] [ "_" "_" ] portName) + "_PORT";
-          in
+        ${mkPortScriptLines (
+          {
+            portName,
+            varName,
+          }:
           ''
             echo "  ${portName}: ''${${varName}:-n/a}"
           ''
-        ) portNames}
+        )}
       '';
     };
   };
 
-  processApps = {
-    "process::status" = mk {
+  processSpecs = [
+    {
       name = "process::status";
       summary = "Show process and service status";
       details = "Lists process/run/service entities tracked by the global process registry. Use --all to include completed and stopped entities.";
@@ -176,12 +238,9 @@ let
         "nix run .#process::status"
         "nix run .#process::status -- --all"
       ];
-      category = "utility";
-      script = ''
-        exec ${toString lib.processStatus} "$@"
-      '';
-    };
-    "process::slots" = mk {
+      tool = lib.processStatus;
+    }
+    {
       name = "process::slots";
       summary = "Show slot occupancy";
       details = "Shows slot ownership and contention metadata from the process registry.";
@@ -189,12 +248,9 @@ let
         "nix run .#process::slots"
         "nix run .#process::slots -- --all"
       ];
-      category = "utility";
-      script = ''
-        exec ${toString lib.processSlots} "$@"
-      '';
-    };
-    "process::runs" = mk {
+      tool = lib.processSlots;
+    }
+    {
       name = "process::runs";
       summary = "Show tracked runs";
       details = "Lists command runs tracked in the process registry. Use --all to include completed runs.";
@@ -202,22 +258,16 @@ let
         "nix run .#process::runs"
         "nix run .#process::runs -- --all"
       ];
-      category = "utility";
-      script = ''
-        exec ${toString lib.processRuns} "$@"
-      '';
-    };
-    "process::inspect" = mk {
+      tool = lib.processRuns;
+    }
+    {
       name = "process::inspect";
       summary = "Inspect a run/process/service";
       details = "Prints detailed registry events for a run id, service name, or event id.";
       usage = [ "nix run .#process::inspect -- <id>" ];
-      category = "utility";
-      script = ''
-        exec ${toString lib.processInspect} "$@"
-      '';
-    };
-    "process::gc" = mk {
+      tool = lib.processInspect;
+    }
+    {
       name = "process::gc";
       summary = "Reconcile orphaned process metadata";
       details = "Finds orphaned service metadata in the process registry and records orphaned state with --apply.";
@@ -225,80 +275,74 @@ let
         "nix run .#process::gc"
         "nix run .#process::gc -- --apply"
       ];
-      category = "utility";
-      script = ''
-        exec ${toString lib.processGc} "$@"
-      '';
-    };
-  };
+      tool = lib.processGc;
+    }
+  ];
+  processApps = mkAppsFromSpecs mkProcessApp processSpecs;
+  processToolByAppName = builtins.listToAttrs (
+    map (spec: {
+      name = spec.name;
+      value = spec.tool;
+    }) processSpecs
+  );
 
-  runtimeAliases = {
-    "runtime::status" = mk {
+  mkRuntimeAliasSpec =
+    {
+      name,
+      target,
+      usage,
+    }:
+    {
+      inherit
+        name
+        target
+        usage
+        ;
+      tool = processToolByAppName.${target};
+    };
+
+  runtimeAliasDefs = [
+    {
       name = "runtime::status";
-      summary = "Alias for process::status";
-      details = "Compatibility alias for process::status.";
-      usage = [ "nix run .#runtime::status -- [args]" ];
-      category = "utility";
-      script = ''
-        echo "WARN: runtime::status is deprecated; use process::status" >&2
-        exec ${toString lib.processStatus} "$@"
-      '';
-    };
-    "runtime::ps" = mk {
+      target = "process::status";
+      usageTail = "[args]";
+    }
+    {
       name = "runtime::ps";
-      summary = "Alias for process::status";
-      details = "Compatibility alias for process::status.";
-      usage = [ "nix run .#runtime::ps -- [args]" ];
-      category = "utility";
-      script = ''
-        echo "WARN: runtime::ps is deprecated; use process::status" >&2
-        exec ${toString lib.processStatus} "$@"
-      '';
-    };
-    "runtime::slots" = mk {
+      target = "process::status";
+      usageTail = "[args]";
+    }
+    {
       name = "runtime::slots";
-      summary = "Alias for process::slots";
-      details = "Compatibility alias for process::slots.";
-      usage = [ "nix run .#runtime::slots -- [args]" ];
-      category = "utility";
-      script = ''
-        echo "WARN: runtime::slots is deprecated; use process::slots" >&2
-        exec ${toString lib.processSlots} "$@"
-      '';
-    };
-    "runtime::runs" = mk {
+      target = "process::slots";
+      usageTail = "[args]";
+    }
+    {
       name = "runtime::runs";
-      summary = "Alias for process::runs";
-      details = "Compatibility alias for process::runs.";
-      usage = [ "nix run .#runtime::runs -- [args]" ];
-      category = "utility";
-      script = ''
-        echo "WARN: runtime::runs is deprecated; use process::runs" >&2
-        exec ${toString lib.processRuns} "$@"
-      '';
-    };
-    "runtime::inspect" = mk {
+      target = "process::runs";
+      usageTail = "[args]";
+    }
+    {
       name = "runtime::inspect";
-      summary = "Alias for process::inspect";
-      details = "Compatibility alias for process::inspect.";
-      usage = [ "nix run .#runtime::inspect -- <id>" ];
-      category = "utility";
-      script = ''
-        echo "WARN: runtime::inspect is deprecated; use process::inspect" >&2
-        exec ${toString lib.processInspect} "$@"
-      '';
-    };
-    "runtime::gc" = mk {
+      target = "process::inspect";
+      usageTail = "<id>";
+    }
+    {
       name = "runtime::gc";
-      summary = "Alias for process::gc";
-      details = "Compatibility alias for process::gc.";
-      usage = [ "nix run .#runtime::gc -- [args]" ];
-      category = "utility";
-      script = ''
-        echo "WARN: runtime::gc is deprecated; use process::gc" >&2
-        exec ${toString lib.processGc} "$@"
-      '';
-    };
-  };
+      target = "process::gc";
+      usageTail = "[args]";
+    }
+  ];
+  runtimeAliasSpecs = map (
+    def:
+    mkRuntimeAliasSpec {
+      inherit (def)
+        name
+        target
+        ;
+      usage = [ "nix run .#${def.name} -- ${def.usageTail}" ];
+    }
+  ) runtimeAliasDefs;
+  runtimeAliases = mkAppsFromSpecs mkRuntimeAliasApp runtimeAliasSpecs;
 in
 serviceApps // supervisorApps // utilityApps // processApps // runtimeAliases

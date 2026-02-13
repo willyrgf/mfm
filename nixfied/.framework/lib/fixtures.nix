@@ -181,23 +181,11 @@ let
           export ${key}="postgresql://postgres:postgres@127.0.0.1:''${_fixture_port_val}/${dbName}"
         ''
       else if from == "reth.httpUrl" then
-        ''
-          _fixture_port_var="${rethHttpPortVar}"
-          _fixture_port_val="''${!_fixture_port_var:-}"
-          export ${key}="http://127.0.0.1:''${_fixture_port_val}"
-        ''
+        mkHttpUrlExportFromPortVar key rethHttpPortVar
       else if from == "helios.rpcUrl" then
-        ''
-          _fixture_port_var="${heliosRpcPortVar}"
-          _fixture_port_val="''${!_fixture_port_var:-}"
-          export ${key}="http://127.0.0.1:''${_fixture_port_val}"
-        ''
+        mkHttpUrlExportFromPortVar key heliosRpcPortVar
       else if from == "minio.endpoint" then
-        ''
-          _fixture_port_var="${minioApiPortVar}"
-          _fixture_port_val="''${!_fixture_port_var:-}"
-          export ${key}="http://127.0.0.1:''${_fixture_port_val}"
-        ''
+        mkHttpUrlExportFromPortVar key minioApiPortVar
       else if from == "minio.bucket" then
         ''
           export ${key}="''${MINIO_BUCKET:-}"
@@ -221,6 +209,14 @@ let
         throw "Unsupported fixtures.env.${key}.from value: ${from}"
     else
       throw "fixtures.env.${key} must be a scalar or attrset";
+
+  mkHttpUrlExportFromPortVar =
+    key: portVar:
+    ''
+      _fixture_port_var="${portVar}"
+      _fixture_port_val="''${!_fixture_port_var:-}"
+      export ${key}="http://127.0.0.1:''${_fixture_port_val}"
+    '';
 
   renderPrelude =
     {

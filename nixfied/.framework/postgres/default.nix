@@ -7,6 +7,7 @@
 
 let
   cfg = project.modules.postgres or { };
+  serviceApi = import ../lib/service-api.nix { inherit pkgs; };
   processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   observability = import ../lib/service-observability.nix {
     inherit
@@ -182,18 +183,18 @@ let
   log = logs;
 
   events = observability.mkEventsScript "postgres";
+  logEventExtensions = observability.mkLogEventExtensions {
+    service = "postgres";
+    summaryName = "PostgreSQL";
+    logScript = log;
+    logsScript = logs;
+    eventsScript = events;
+  };
 
-  publicApi = {
-    version = 1;
+  publicApi = serviceApi.mkServiceApi {
     service = "postgres";
     summary = "PostgreSQL service management API";
     details = "Public service contract for managing PostgreSQL across dev/prod/test/ci.";
-    profiles = [
-      "dev"
-      "prod"
-      "test"
-      "ci"
-    ];
     artifacts = {
       portKey = portKey;
       portVar = portVar;
@@ -338,28 +339,7 @@ let
         details = "Opens psql connected to the configured slot/environment database.";
         usage = [ "nix run .#service::postgres::shell -- <psql-args>" ];
       };
-      log = {
-        script = log;
-        hook = "LOG";
-        summary = "Show PostgreSQL log";
-        details = "Shows PostgreSQL runtime log for the current slot/environment.";
-        usage = [ "nix run .#service::postgres::log -- [--lines N] [--follow]" ];
-      };
-      logs = {
-        script = logs;
-        hook = "LOGS";
-        summary = "Alias for service::postgres::log";
-        details = "Compatibility alias for service::postgres::log.";
-        usage = [ "nix run .#service::postgres::logs -- [--lines N] [--follow]" ];
-      };
-      events = {
-        script = events;
-        hook = "EVENTS";
-        summary = "Show PostgreSQL lifecycle events";
-        details = "Shows PostgreSQL lifecycle events from the global process registry for the current slot/environment.";
-        usage = [ "nix run .#service::postgres::events -- [--limit N]" ];
-      };
-    };
+    } // logEventExtensions;
   };
 in
 {

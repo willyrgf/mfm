@@ -43,17 +43,42 @@ let
   };
 
   moduleAppNames = builtins.attrNames moduleApps;
+  sortNames = names: pkgs.lib.sort (a: b: a < b) names;
+  getCommandCfg = name: if name == "help" && !(commands ? help) then { api = helpApi; } else commands.${name};
+  getCommandApi = name: (getCommandCfg name).api or null;
+  getModuleApi = name: (((moduleApps.${name}.meta or { }).nixfied or { }).api or null);
+  getCommandSummary =
+    name:
+    let
+      cfg = getCommandCfg name;
+      api = getCommandApi name;
+    in
+    if api != null then (api.summary or "") else (cfg.description or "");
+  getModuleSummary =
+    name:
+    let
+      app = moduleApps.${name};
+      api = getModuleApi name;
+    in
+    if api != null then (api.summary or "") else (app.meta.description or "");
+  renderDetailCasesFor =
+    names: apiFor:
+    pkgs.lib.concatMapStringsSep "\n" (
+      name:
+      let
+        api = apiFor name;
+      in
+      if api == null then "" else renderApiDoc name api
+    ) (sortNames names);
 
   commandNamesForHelp = commandNames ++ (if commands ? help then [ ] else [ "help" ]);
   commandHelpLines = pkgs.lib.concatMapStringsSep "\n" (
     name:
     let
-      cfg = if name == "help" && !(commands ? help) then { api = helpApi; } else commands.${name};
-      api = cfg.api or null;
-      summary = if api != null then (api.summary or "") else (cfg.description or "");
+      summary = getCommandSummary name;
     in
     "  ${name}  ${summary}"
-  ) (pkgs.lib.sort (a: b: a < b) commandNamesForHelp);
+  ) (sortNames commandNamesForHelp);
 
   moduleHelpLines =
     if moduleAppNames == [ ] then
@@ -63,12 +88,10 @@ let
       + pkgs.lib.concatMapStringsSep "\n" (
         name:
         let
-          app = moduleApps.${name};
-          api = (((app.meta or { }).nixfied or { }).api or null);
-          summary = if api != null then (api.summary or "") else (app.meta.description or "");
+          summary = getModuleSummary name;
         in
         "  ${name}  ${summary}"
-      ) (pkgs.lib.sort (a: b: a < b) moduleAppNames);
+      ) (sortNames moduleAppNames);
 
   renderApiDoc =
     name: api:
@@ -111,23 +134,8 @@ let
                   ;;
     '';
 
-  commandDetailCases = pkgs.lib.concatMapStringsSep "\n" (
-    name:
-    let
-      cfg = if name == "help" && !(commands ? help) then { api = helpApi; } else commands.${name};
-      api = cfg.api or null;
-    in
-    if api == null then "" else renderApiDoc name api
-  ) (pkgs.lib.sort (a: b: a < b) commandNamesForHelp);
-
-  moduleDetailCases = pkgs.lib.concatMapStringsSep "\n" (
-    name:
-    let
-      app = moduleApps.${name};
-      api = (((app.meta or { }).nixfied or { }).api or null);
-    in
-    if api == null then "" else renderApiDoc name api
-  ) (pkgs.lib.sort (a: b: a < b) moduleAppNames);
+  commandDetailCases = renderDetailCasesFor commandNamesForHelp getCommandApi;
+  moduleDetailCases = renderDetailCasesFor moduleAppNames getModuleApi;
 
   detailCases = commandDetailCases + "\n" + moduleDetailCases;
 
