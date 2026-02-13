@@ -54,6 +54,25 @@ nix run .#ci -- --parity --summary
 - Local supervisor wrappers in `nixfied/local/default.nix` (`up`, `down`, `svc-*`) are intentional prod-only overrides.
 - CI help/docs metadata comes from `nixfied/project/ci.nix` at `commands.ci.api`, and is mirrored into `apps.<system>.ci.meta.nixfied.api`.
 
+### Process-first ops:
+
+- Runtime visibility:
+  - `nix run .#process::status`
+  - `nix run .#process::status -- --all`
+  - `nix run .#process::runs -- --all`
+  - `nix run .#process::inspect -- <id>`
+- Service diagnostics:
+  - `nix run .#service::postgres::events -- --limit 100`
+  - `nix run .#service::postgres::log -- --lines 200`
+  - `nix run .#service::helios::events -- --limit 100`
+- Policy controls (optional overrides):
+  - `SERVICE_REUSE_POLICY=never|same-root|same-slot|cross-run`
+  - `SERVICE_OWNER_SCOPE=ephemeral|persistent`
+  - `SERVICE_DISCOVERY_SCOPE=local|global`
+- Migration note:
+  - `MFM_KEEP_SERVICES` has been removed from `mfm::portfolio::snapshot`.
+  - Start reusable services explicitly via `service::*::start`, then inspect ownership with `process::status`.
+
 ### Run binaries:
 
 ```bash

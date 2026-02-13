@@ -19,6 +19,12 @@
           Readiness-first behavior:
           - parity/mainnet workflows gate on service `*_READY` hooks
           - fixture logs are persisted under CI artifacts for debugging
+
+          Process-first diagnostics:
+          - `nix run .#process::status -- --all`
+          - `nix run .#process::runs -- --all`
+          - `nix run .#process::inspect -- <run-id>`
+          - `nix run .#service::postgres::events -- --limit 100`
         '';
         usage = [
           "nix run .#ci -- --basic --summary"
@@ -30,6 +36,7 @@
         examples = [
           "nix run .#ci -- --basic --summary"
           "CI_ARTIFACTS_DIR=/tmp/ci-artifacts nix run .#ci -- --parity --summary"
+          "nix run .#process::status -- --all"
         ];
         args = [
           {
@@ -53,6 +60,18 @@
           {
             name = "CI_ARTIFACTS_DIR";
             description = "Override artifacts directory (default: /tmp/ci-artifacts).";
+          }
+          {
+            name = "SERVICE_REUSE_POLICY";
+            description = "Optional process-first policy override (never|same-root|same-slot|cross-run).";
+          }
+          {
+            name = "SERVICE_OWNER_SCOPE";
+            description = "Optional process-first policy override (ephemeral|persistent).";
+          }
+          {
+            name = "SERVICE_DISCOVERY_SCOPE";
+            description = "Optional process-first policy override (local|global).";
           }
         ];
         category = "core";

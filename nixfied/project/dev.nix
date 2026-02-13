@@ -15,6 +15,12 @@
           - `MINIO_READY`
           - `RETH_READY`
           - REST API `/v1/ready`
+
+          Process-first observability:
+          - `nix run .#process::status`
+          - `nix run .#process::runs -- --all`
+          - `nix run .#service::postgres::events -- --limit 50`
+          - `nix run .#service::reth::log -- --lines 200`
         '';
         usage = [
           "nix run .#dev"
@@ -102,7 +108,13 @@
           If `HELIOS_EXECUTION_RPC_URL` is unset, this app falls back to the internal default:
           `https://eth.drpc.org`.
 
-          Set `MFM_KEEP_SERVICES=1` to keep Helios/Postgres running after the command exits.
+          `MFM_KEEP_SERVICES` is deprecated and no longer accepted.
+          To keep services running for reuse, start them explicitly:
+          - `nix run .#service::postgres::start`
+          - `nix run .#service::helios::start`
+          and inspect reuse/ownership with:
+          - `nix run .#process::status -- --all`
+          - `nix run .#service::helios::events -- --limit 100`
         '';
         usage = [
           "nix run .#mfm::portfolio::snapshot -- <ADDRESS>"
@@ -135,8 +147,16 @@
             description = "Optional weak-subjectivity checkpoint (0x...). If unset for non-local networks, the Nixfied Helios service will derive one from the consensus endpoint at start time.";
           }
           {
-            name = "MFM_KEEP_SERVICES";
-            description = "Set to 1/true/yes to keep Helios + Postgres running after this app exits (default: 0).";
+            name = "SERVICE_REUSE_POLICY";
+            description = "Optional process-first policy override (never|same-root|same-slot|cross-run).";
+          }
+          {
+            name = "SERVICE_OWNER_SCOPE";
+            description = "Optional process-first policy override (ephemeral|persistent).";
+          }
+          {
+            name = "SERVICE_DISCOVERY_SCOPE";
+            description = "Optional process-first policy override (local|global).";
           }
         ];
       };
@@ -183,30 +203,22 @@
         fi
         export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-https://eth.drpc.org}"
 
-        KEEP_SERVICES_RAW="''${MFM_KEEP_SERVICES:-0}"
-        case "$KEEP_SERVICES_RAW" in
-          1|true|TRUE|yes|YES)
-            KEEP_SERVICES=1
-            ;;
-          0|false|FALSE|no|NO|"")
-            KEEP_SERVICES=0
-            ;;
-          *)
-            echo "ERROR: MFM_KEEP_SERVICES must be 0/1/true/false (got '$KEEP_SERVICES_RAW')" >&2
-            exit 1
-            ;;
-        esac
-
-        STARTED_POSTGRES=0
-        STARTED_HELIOS=0
+        if [ "''${MFM_KEEP_SERVICES+x}" = "x" ]; then
+          echo "ERROR: MFM_KEEP_SERVICES has been removed from mfm::portfolio::snapshot" >&2
+          echo "Use process-first controls instead:" >&2
+          echo "  SERVICE_REUSE_POLICY=never|same-root|same-slot|cross-run" >&2
+          echo "  SERVICE_OWNER_SCOPE=ephemeral|persistent" >&2
+          echo "  SERVICE_DISCOVERY_SCOPE=local|global" >&2
+          echo "Or start services explicitly before running the snapshot command." >&2
+          exit 1
+        fi
 
         # Start Postgres (required by portfolio snapshot). If already running, don't stop it.
         if run_hook POSTGRES_STATUS >/dev/null 2>&1; then
           run_hook POSTGRES_SETUP_DB >/dev/null 2>&1 || true
         else
-          STARTED_POSTGRES=1
           PG_LOGFILE="$(artifact_path "postgres-mfm-portfolio-snapshot.log")"
-          fixture_start_service postgres dev 60 1 "$PG_LOGFILE" "$KEEP_SERVICES"
+          fixture_start_service postgres dev 60 1 "$PG_LOGFILE"
         fi
         run_hook POSTGRES_READY
 
@@ -214,9 +226,8 @@
         if run_hook HELIOS_STATUS >/dev/null 2>&1; then
           run_hook HELIOS_READY
         else
-          STARTED_HELIOS=1
           HELIOS_LOGFILE="$(artifact_path "helios-mfm-portfolio-snapshot.log")"
-          fixture_start_service helios dev 300 1 "$HELIOS_LOGFILE" "$KEEP_SERVICES"
+          fixture_start_service helios dev 300 1 "$HELIOS_LOGFILE"
         fi
 
         export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm"
@@ -297,16 +308,6 @@
           echo "ERROR: report phase did not produce expected output" >&2
           cat "$REPORT_FILE" >&2 || true
           exit 1
-        fi
-
-        if [ "$KEEP_SERVICES" = "1" ] && { [ "$STARTED_POSTGRES" = "1" ] || [ "$STARTED_HELIOS" = "1" ]; }; then
-          echo "INFO: MFM_KEEP_SERVICES=1; leaving started services running for reuse." >&2
-          if [ "$STARTED_HELIOS" = "1" ]; then
-            echo "INFO: stop Helios with: MFM_ENV=$ENV NIX_ENV=$SLOT nix run .#service::helios::stop" >&2
-          fi
-          if [ "$STARTED_POSTGRES" = "1" ]; then
-            echo "INFO: stop Postgres with: MFM_ENV=$ENV NIX_ENV=$SLOT nix run .#service::postgres::stop" >&2
-          fi
         fi
 
         cat "$REPORT_FILE" >&3

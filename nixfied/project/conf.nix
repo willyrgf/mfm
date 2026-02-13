@@ -170,6 +170,11 @@ rec {
     base = "\${XDG_DATA_HOME:-$HOME/.local/share}/${project.id}";
   };
 
+  # Process-first runtime registry root used by framework process::* commands.
+  process = {
+    registryRoot = "/tmp/nixfied-runtime/${project.id}";
+  };
+
   tooling = rec {
     runtimePackages = [
       pkgs.coreutils

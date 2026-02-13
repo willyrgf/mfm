@@ -115,10 +115,14 @@ nix run .#mfm::portfolio::snapshot -- 0x000000000000000000000000000000000000dead
 The final JSON now includes both metadata and the decoded snapshot payload at
 `data.result.snapshot` (in addition to `snapshot_artifact_id`).
 
-To keep Helios/Postgres running after the command exits (so Helios sync progress keeps advancing):
+`MFM_KEEP_SERVICES` is no longer supported by this app.
+To keep Helios/Postgres running after the command exits (so Helios sync progress keeps advancing),
+start them explicitly first:
 
 ```bash
-MFM_KEEP_SERVICES=1 nix run .#mfm::portfolio::snapshot -- 0x000000000000000000000000000000000000dead
+MFM_ENV=dev NIX_ENV=0 nix run .#service::postgres::start
+MFM_ENV=dev NIX_ENV=0 nix run .#service::helios::start
+nix run .#mfm::portfolio::snapshot -- 0x000000000000000000000000000000000000dead
 ```
 
 Stop them manually when done:
@@ -126,6 +130,13 @@ Stop them manually when done:
 ```bash
 MFM_ENV=dev NIX_ENV=0 nix run .#service::helios::stop
 MFM_ENV=dev NIX_ENV=0 nix run .#service::postgres::stop
+```
+
+Inspect service ownership/reuse state with:
+
+```bash
+nix run .#process::status -- --all
+nix run .#service::helios::events -- --limit 100
 ```
 
 ### Manual (CLI)
