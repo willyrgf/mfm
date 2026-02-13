@@ -90,6 +90,12 @@ let
         summary = "Init/check/start MinIO for test profile";
         details = "Performs init + check-config + start for MinIO (test profile).";
       };
+      ready = {
+        script = lifecycle.ready;
+        hook = "READY";
+        summary = "Wait for MinIO readiness";
+        details = "Checks MinIO readiness endpoint on the configured API port.";
+      };
       export-s3-env = {
         script = lifecycle.exportS3Env;
         hook = "EXPORT_S3_ENV";
@@ -147,6 +153,7 @@ in
     status
     health
     checkConfig
+    ready
     fullStart
     fullStartTest
     exportS3Env

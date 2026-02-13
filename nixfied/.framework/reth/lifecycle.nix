@@ -225,6 +225,19 @@ let
     exit 1
   '';
 
+  ready = pkgs.writeShellScript "reth-ready" ''
+    set -euo pipefail
+    ${runtimePrelude}
+
+    if ${health} >/dev/null 2>&1; then
+      echo "OK: reth ready http_port=$RETH_HTTP_PORT"
+      exit 0
+    fi
+
+    echo "ERROR: reth not ready http_port=$RETH_HTTP_PORT" >&2
+    exit 1
+  '';
+
   checkConfig = pkgs.writeShellScript "reth-check-config" ''
     set -euo pipefail
     ${runtimePrelude}
@@ -265,6 +278,7 @@ in
     status
     health
     checkConfig
+    ready
     fullStart
     fullStartTest
     ;

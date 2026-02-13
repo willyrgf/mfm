@@ -8,9 +8,9 @@
 let
   hookEnv = hooks.env or { };
   hookExports = pkgs.lib.concatMapStringsSep "\n" (key: ''
-    if [ -z "''${${key}:-}" ]; then
-      export ${key}="${toString hookEnv.${key}}"
-    fi
+    # Always pin framework hook paths for deterministic app behavior.
+    # User shell/.env hook overrides can route commands to stale scripts.
+    export ${key}="${toString hookEnv.${key}}"
   '') (builtins.attrNames hookEnv);
 
   # Script to load .env if it exists (does not override existing env vars)
@@ -230,6 +230,8 @@ let
       local check_hook=""
       local stop_hook=""
       local health_hook=""
+      local ready_hook=""
+      local wait_hook=""
       local status_hook=""
       local start_cmd=""
       local op=""
@@ -260,6 +262,7 @@ let
 
       stop_hook=$(_service_hook_name "$service" "STOP")
       health_hook=$(_service_hook_name "$service" "HEALTH")
+      ready_hook=$(_service_hook_name "$service" "READY")
       status_hook=$(_service_hook_name "$service" "STATUS")
       init_hook=$(_service_hook_name "$service" "INIT")
       check_hook=$(_service_hook_name "$service" "CHECK_CONFIG")
@@ -283,7 +286,7 @@ let
         return 1
       fi
 
-      # Clean wrapper process and module-native process state unless service persistence is requested.
+      # Clean wrapper process and module-native process state unless persistence is requested.
       if [ "$keep_running" = "1" ]; then
         echo "INFO: fixture service keep_running enabled service=$service pid=$pid" >&2
       else
@@ -293,16 +296,22 @@ let
         fi
       fi
 
-      if has_hook "$health_hook"; then
+      if has_hook "$ready_hook"; then
+        wait_hook="$ready_hook"
+      elif has_hook "$health_hook"; then
+        wait_hook="$health_hook"
+      fi
+
+      if [ -n "$wait_hook" ]; then
         local start_ts
         start_ts=$(date +%s)
 
         while true; do
-          if run_hook "$health_hook" >/dev/null 2>&1; then
+          if run_hook "$wait_hook" >/dev/null 2>&1; then
             break
           fi
 
-          # If the wrapper process died, fail fast unless STATUS indicates the service is up.
+          # If the wrapper process died, fail fast unless STATUS indicates service is up.
           if ! kill -0 "$pid" 2>/dev/null; then
             local status_ok=0
             if has_hook "$status_hook"; then
@@ -317,7 +326,6 @@ let
                 echo "INFO: last 200 lines of log: $logfile" >&2
                 tail -200 "$logfile" >&2 || true
               fi
-
               if has_hook "$stop_hook"; then
                 run_hook "$stop_hook" >/dev/null 2>&1 || true
               fi
@@ -327,7 +335,7 @@ let
           fi
 
           if [ $(( $(date +%s) - start_ts )) -ge "$timeout" ]; then
-            echo "ERROR: fixture health check failed service=$service hook=$health_hook timeout=''${timeout}s" >&2
+            echo "ERROR: fixture readiness check failed service=$service hook=$wait_hook timeout=''${timeout}s" >&2
             if [ -n "$logfile" ] && [ -f "$logfile" ]; then
               echo "INFO: last 200 lines of log: $logfile" >&2
               tail -200 "$logfile" >&2 || true

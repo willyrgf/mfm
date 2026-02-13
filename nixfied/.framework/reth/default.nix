@@ -85,6 +85,12 @@ let
         summary = "Init/check/start Reth for test profile";
         details = "Performs init + check-config + start for Reth (test profile).";
       };
+      ready = {
+        script = lifecycle.ready;
+        hook = "READY";
+        summary = "Wait for Reth readiness";
+        details = "Checks that Reth responds on the configured HTTP RPC port.";
+      };
     };
   };
 in
@@ -100,6 +106,7 @@ in
     status
     health
     checkConfig
+    ready
     fullStart
     fullStartTest
     ;

@@ -590,11 +590,11 @@ let
     set +e
     (
       unset SLOT_INFO REQUIRE_SLOT_ENV \
-        POSTGRES_INIT POSTGRES_START POSTGRES_STOP POSTGRES_HEALTH POSTGRES_SETUP_DB POSTGRES_FULL_START POSTGRES_FULL_START_TEST \
-        NGINX_INIT NGINX_START NGINX_STOP NGINX_HEALTH NGINX_SITE_PROXY NGINX_SITE_STATIC \
-        MINIO_INIT MINIO_START MINIO_STOP MINIO_HEALTH MINIO_CHECK_CONFIG MINIO_BUCKET_LIST \
-        RETH_INIT RETH_START RETH_STOP RETH_HEALTH RETH_CHECK_CONFIG \
-        HELIOS_INIT HELIOS_START HELIOS_STOP HELIOS_HEALTH HELIOS_CHECK_CONFIG
+        POSTGRES_INIT POSTGRES_START POSTGRES_STOP POSTGRES_HEALTH POSTGRES_READY POSTGRES_SETUP_DB POSTGRES_FULL_START POSTGRES_FULL_START_TEST \
+        NGINX_INIT NGINX_START NGINX_STOP NGINX_HEALTH NGINX_READY NGINX_SITE_PROXY NGINX_SITE_STATIC \
+        MINIO_INIT MINIO_START MINIO_STOP MINIO_HEALTH MINIO_READY MINIO_CHECK_CONFIG MINIO_BUCKET_LIST \
+        RETH_INIT RETH_START RETH_STOP RETH_HEALTH RETH_READY RETH_CHECK_CONFIG \
+        HELIOS_INIT HELIOS_START HELIOS_STOP HELIOS_HEALTH HELIOS_READY HELIOS_CHECK_CONFIG
       export NIXFIED_TEST_DEBUG=1
       cd "$MOD_DIR" && "$DEV_SCRIPT" >"$DEV_LOG" 2>&1
     )
@@ -822,6 +822,127 @@ let
     fi
     assert_contains "$FIX_START_LOG" "OK: fixture service ready service=postgres profile=test"
     assert_contains "$FIX_START_LOG" "OK: fixture cleanup stopped postgres"
+
+    log "fixture_start_service readiness"
+    FIX_START_READY_DIR="$WORKDIR/fixture-start-service-readiness"
+    mkdir -p "$FIX_START_READY_DIR"
+    FIX_START_READY_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      conf = import ./tests/framework/fixtures/modules/conf.nix { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base conf;
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      postgres =
+        if (project.modules.postgres.enable or false) then
+          import ./nixfied/.framework/postgres { inherit pkgs project slots; }
+        else
+          null;
+      hooks = import ./nixfied/.framework/hooks.nix {
+        inherit pkgs project slots postgres;
+        nginx = null;
+        minio = null;
+        reth = null;
+        helios = null;
+      };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+    in
+    lib.mkAppScript {
+      name = "fixture-start-service-readiness";
+      env = {
+        "''${project.project.envVar}" = "test";
+        "''${project.project.slotVar}" = "0";
+      };
+      useDeps = false;
+      script = '''
+        fail() {
+          echo "FAIL: $*" >&2
+          exit 1
+        }
+
+        pick_port() {
+          local port
+          local i
+          for i in $(seq 1 40); do
+            port=$(( (RANDOM % 20000) + 20000 ))
+            if ! nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+              echo "$port"
+              return 0
+            fi
+          done
+          return 1
+        }
+
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'while true; do' '  sleep 1' 'done' > "$PWD/mock-start.sh"
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 1' > "$PWD/mock-health.sh"
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 0' > "$PWD/mock-ready.sh"
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 0' > "$PWD/mock-status.sh"
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 0' > "$PWD/mock-stop.sh"
+        chmod +x "$PWD/mock-start.sh" "$PWD/mock-health.sh" "$PWD/mock-ready.sh" "$PWD/mock-status.sh" "$PWD/mock-stop.sh"
+
+        export MOCKSVC_START="$PWD/mock-start.sh"
+        export MOCKSVC_HEALTH="$PWD/mock-health.sh"
+        export MOCKSVC_READY="$PWD/mock-ready.sh"
+        export MOCKSVC_STATUS="$PWD/mock-status.sh"
+        export MOCKSVC_STOP="$PWD/mock-stop.sh"
+
+        fixture_start_service mocksvc default 5 1
+        _run_cleanups
+        _cleanup_actions=()
+        _cleanup_initialized=false
+        echo "OK: fixture_start_service preferred READY hook"
+
+        export PGPORT="$(pick_port)" || fail "failed to pick port"
+        export CI_ARTIFACTS_DIR="$PWD/.artifacts"
+        LOGFILE="$(artifact_path "postgres-keep-running.log")"
+
+        fixture_start_service postgres test 120 1 "$LOGFILE" 1
+        _run_cleanups
+
+        PORT_UP=0
+        for i in $(seq 1 30); do
+          if nc -z 127.0.0.1 "$PGPORT" >/dev/null 2>&1; then
+            PORT_UP=1
+            break
+          fi
+          sleep 0.2
+        done
+        [ "$PORT_UP" -eq 1 ] || fail "postgres should still be running with keep_running=1 port=$PGPORT"
+
+        run_hook POSTGRES_STOP
+        PORT_DOWN=0
+        for i in $(seq 1 30); do
+          if nc -z 127.0.0.1 "$PGPORT" >/dev/null 2>&1; then
+            sleep 0.2
+          else
+            PORT_DOWN=1
+            break
+          fi
+        done
+        [ "$PORT_DOWN" -eq 1 ] || fail "postgres should stop after explicit POSTGRES_STOP port=$PGPORT"
+        echo "OK: fixture_start_service keep_running preserved service"
+      ''';
+    }
+    NIX
+    )
+
+    FIX_START_READY_SCRIPT=$(build_expr "$FIX_START_READY_EXPR")
+    FIX_START_READY_LOG="$WORKDIR/fixture-start-service-readiness.log"
+    set +e
+    (cd "$FIX_START_READY_DIR" && "$FIX_START_READY_SCRIPT" >"$FIX_START_READY_LOG" 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      echo "fixture_start_service readiness fixture failed (rc=$RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 120 lines):" >&2
+      tail -120 "$FIX_START_READY_LOG" >&2 || true
+      exit "$RC"
+    fi
+    assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service preferred READY hook"
+    assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service keep_running preserved service"
 
     log "fixtures env resolvers"
     FIX_ENV_DIR="$WORKDIR/fixtures-env"
@@ -1570,6 +1691,7 @@ let
           nginxCheckConfig = toString nginx.checkConfig;
           nginxStatus = toString nginx.status;
           nginxHealth = toString nginx.health;
+          nginxReady = toString nginx.ready;
           nginxSiteAdd = toString nginx.addSite;
           nginxSiteStatic = toString nginx.writeStaticSite;
           nginxSiteList = toString nginx.listSites;
@@ -1635,6 +1757,7 @@ let
           minioStart = toString minio.start;
           minioStop = toString minio.stop;
           minioHealth = toString minio.health;
+          minioReady = toString minio.ready;
           minioStatus = toString minio.status;
           minioCheckConfig = toString minio.checkConfig;
           minioBucketCreate = toString minio.bucketCreate;
@@ -1695,7 +1818,7 @@ let
         name = "reth-lifecycle-test";
         env = {
           "''${project.project.envVar}" = "dev";
-          "''${project.project.slotVar}" = "0";
+          "''${project.project.slotVar}" = "8";
         };
         useDeps = false;
         script = import ./tests/framework/fixtures/reth/lifecycle.nix {
@@ -1703,6 +1826,7 @@ let
           rethStart = toString reth.start;
           rethStop = toString reth.stop;
           rethHealth = toString reth.health;
+          rethReady = toString reth.ready;
           rethStatus = toString reth.status;
           rethCheckConfig = toString reth.checkConfig;
         };
@@ -1759,7 +1883,7 @@ let
         name = "helios-lifecycle-test";
         env = {
           "''${project.project.envVar}" = "dev";
-          "''${project.project.slotVar}" = "0";
+          "''${project.project.slotVar}" = "9";
         };
         useDeps = false;
         script = import ./tests/framework/fixtures/helios/lifecycle.nix {
@@ -1773,6 +1897,7 @@ let
           heliosStart = toString helios.start;
           heliosStop = toString helios.stop;
           heliosHealth = toString helios.health;
+          heliosReady = toString helios.ready;
           heliosStatus = toString helios.status;
           heliosCheckConfig = toString helios.checkConfig;
         };
@@ -2393,15 +2518,20 @@ let
     SERVICE_HOOKS_FILE=$(build_expr "$SERVICE_HOOKS_EXPR")
     assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_START="
     assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_HEALTH="
+    assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_READY="
     assert_contains "$SERVICE_HOOKS_FILE" "NGINX_START="
     assert_contains "$SERVICE_HOOKS_FILE" "NGINX_HEALTH="
+    assert_contains "$SERVICE_HOOKS_FILE" "NGINX_READY="
     assert_contains "$SERVICE_HOOKS_FILE" "MINIO_START="
     assert_contains "$SERVICE_HOOKS_FILE" "MINIO_HEALTH="
+    assert_contains "$SERVICE_HOOKS_FILE" "MINIO_READY="
     assert_contains "$SERVICE_HOOKS_FILE" "MINIO_BUCKET_LIST="
     assert_contains "$SERVICE_HOOKS_FILE" "RETH_START="
     assert_contains "$SERVICE_HOOKS_FILE" "RETH_HEALTH="
+    assert_contains "$SERVICE_HOOKS_FILE" "RETH_READY="
     assert_contains "$SERVICE_HOOKS_FILE" "HELIOS_START="
     assert_contains "$SERVICE_HOOKS_FILE" "HELIOS_HEALTH="
+    assert_contains "$SERVICE_HOOKS_FILE" "HELIOS_READY="
     assert_contains "$SERVICE_HOOKS_FILE" "/nix/store/"
 
     log "supervisor hooks"

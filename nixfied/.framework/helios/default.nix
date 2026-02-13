@@ -95,9 +95,6 @@ let
         details = ''
           Waits until Helios can answer `eth_blockNumber` successfully.
 
-          Helios may be "healthy" (responds to `eth_chainId`) while still syncing and returning
-          JSON-RPC errors for methods like `eth_blockNumber`.
-
           Tunables:
           - `HELIOS_READY_TIMEOUT_SECS` (default: 300)
           - `HELIOS_READY_INTERVAL_SECS` (default: 1)

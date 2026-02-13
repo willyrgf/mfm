@@ -30,13 +30,12 @@ let
     HELIOS_NETWORK="''${HELIOS_NETWORK:-${config.network or "local"}}"
     HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${config.executionRpcUrl or ""}}"
     HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${config.consensusRpcUrl or ""}}"
+    HELIOS_DEFAULT_CONSENSUS_RPC_URL="''${HELIOS_DEFAULT_CONSENSUS_RPC_URL:-${config.defaultConsensusRpcUrl or ""}}"
     HELIOS_CHECKPOINT="''${HELIOS_CHECKPOINT:-${config.checkpoint or ""}}"
 
     if [ -z "$HELIOS_EXECUTION_RPC_URL" ] && [ -n "$HELIOS_EXECUTION_PORT" ]; then
       HELIOS_EXECUTION_RPC_URL="http://127.0.0.1:$HELIOS_EXECUTION_PORT"
     fi
-
-    HELIOS_DEFAULT_CONSENSUS_RPC_URL="${config.defaultConsensusRpcUrl or ""}"
 
     # Default consensus endpoint for mainnet if not explicitly configured.
     # This keeps testnets and other networks explicit to avoid accidentally mixing networks.
@@ -96,11 +95,6 @@ let
 
     if [ ! -x "${helios}/bin/helios" ]; then
       echo "ERROR: missing helios binary at ${helios}/bin/helios" >&2
-      exit 1
-    fi
-
-    if [ "$HELIOS_NETWORK" != "local" ] && [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
-      echo "ERROR: HELIOS_CONSENSUS_RPC_URL is required when network is not local" >&2
       exit 1
     fi
 
@@ -195,6 +189,11 @@ let
         echo "HINT: set HELIOS_CONSENSUS_RPC_URL and HELIOS_CHECKPOINT explicitly." >&2
         exit 1
       fi
+    fi
+
+    if [ "$HELIOS_NETWORK" != "local" ] && [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
+      echo "ERROR: HELIOS_CONSENSUS_RPC_URL is required when network is not local" >&2
+      exit 1
     fi
 
     ARGS=(
@@ -385,10 +384,6 @@ let
     while true; do
       attempt=$((attempt + 1))
 
-      # Main readiness gate for MFM: must be able to answer `eth_blockNumber`.
-      #
-      # Helios can be "healthy" (responds to `eth_chainId`) while still syncing and returning
-      # JSON-RPC errors for other methods like `eth_blockNumber`.
       RESP="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
         --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
@@ -399,7 +394,6 @@ let
         exit 0
       fi
 
-      # Periodic progress info (stderr) to aid debugging in CI.
       if [ $((attempt % 10)) -eq 0 ]; then
         ERR_MSG=""
         if [ -n "$RESP" ]; then
@@ -425,7 +419,7 @@ let
       now_ts="$(${pkgs.coreutils}/bin/date +%s)"
       if [ $((now_ts - start_ts)) -ge "$TIMEOUT_SECS" ]; then
         echo "ERROR: helios not ready after $TIMEOUT_SECS s (eth_blockNumber still failing) rpc_port=$HELIOS_RPC_PORT" >&2
-        echo "HINT: mainnet Helios often needs a checkpoint (HELIOS_CHECKPOINT) and a working consensus RPC." >&2
+        echo "HINT: set HELIOS_CHECKPOINT and HELIOS_CONSENSUS_RPC_URL explicitly for mainnet." >&2
         exit 1
       fi
 

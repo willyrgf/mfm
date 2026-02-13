@@ -85,6 +85,27 @@ let
     exit 1
   '';
 
+  ready = pkgs.writeShellScript "postgres-ready" ''
+    set -euo pipefail
+    eval "$(${slots.getSlotInfo})"
+
+    PORT_VAR="${portVar}"
+    PGPORT="''${PGPORT:-''${!PORT_VAR}}"
+
+    if ! ${pgPackage}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
+      echo "ERROR: PostgreSQL not ready port=$PGPORT (pg_isready failed)" >&2
+      exit 1
+    fi
+
+    if ${pgPackage}/bin/psql -h localhost -p "$PGPORT" -U postgres -d postgres -Atqc "select 1;" >/dev/null 2>&1; then
+      echo "OK: PostgreSQL ready port=$PGPORT"
+      exit 0
+    fi
+
+    echo "ERROR: PostgreSQL not ready port=$PGPORT (query failed)" >&2
+    exit 1
+  '';
+
   checkConfig = pkgs.writeShellScript "postgres-check-config" ''
     set -euo pipefail
     eval "$(${slots.getSlotInfo})"
@@ -189,6 +210,12 @@ let
         summary = "Init/start/setup for test database";
         details = "Performs init/start/setup-db using the configured test database.";
       };
+      ready = {
+        script = ready;
+        hook = "READY";
+        summary = "Wait for PostgreSQL readiness";
+        details = "Checks PostgreSQL accepts local SQL queries on the configured port.";
+      };
       list-instances = {
         script = lifecycle.listInstances;
         hook = "LIST_INSTANCES";
@@ -279,6 +306,7 @@ in
     restart
     status
     health
+    ready
     checkConfig
     shell
     ;

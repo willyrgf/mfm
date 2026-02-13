@@ -101,6 +101,34 @@ let
     exit 1
   '';
 
+  ready = pkgs.writeShellScript "nginx-ready" ''
+    set -euo pipefail
+    eval "$(${slots.getSlotInfo})"
+
+    NGINX_DIR="${nginxDirExpr}"
+    PID_FILE="$NGINX_DIR/run/nginx.pid"
+    HTTP_PORT_VAR="${portVarHttp}"
+    HTTP_PORT="''${!HTTP_PORT_VAR}"
+
+    PID=""
+    if [ -f "$PID_FILE" ]; then
+      PID=$(cat "$PID_FILE" 2>/dev/null || true)
+    fi
+
+    if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+      echo "ERROR: nginx not ready (process not running) http_port=$HTTP_PORT pid=''${PID:-unknown}" >&2
+      exit 1
+    fi
+
+    if ${pkgs.netcat}/bin/nc -z 127.0.0.1 "$HTTP_PORT" >/dev/null 2>&1; then
+      echo "OK: nginx ready http_port=$HTTP_PORT pid=$PID"
+      exit 0
+    fi
+
+    echo "ERROR: nginx not ready http_port=$HTTP_PORT pid=$PID" >&2
+    exit 1
+  '';
+
   checkConfig = pkgs.writeShellScript "nginx-check-config" ''
     set -euo pipefail
     eval "$(${slots.getSlotInfo})"
@@ -175,6 +203,12 @@ let
         script = lifecycle.reload;
         summary = "Reload nginx configuration";
         details = "Tests and reloads nginx configuration.";
+      };
+      ready = {
+        script = ready;
+        hook = "READY";
+        summary = "Wait for nginx readiness";
+        details = "Checks that nginx serves HTTP requests on the configured port.";
       };
       list-instances = {
         script = lifecycle.listInstances;
@@ -271,6 +305,7 @@ in
     restart
     status
     health
+    ready
     checkConfig
     ;
 

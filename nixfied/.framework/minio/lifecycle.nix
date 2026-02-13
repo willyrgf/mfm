@@ -168,6 +168,22 @@ let
     exit 1
   '';
 
+  ready = pkgs.writeShellScript "minio-ready" ''
+    set -euo pipefail
+    eval "$(${slots.getSlotInfo})"
+
+    API_PORT_VAR="${apiPortVar}"
+    MINIO_API_PORT="''${!API_PORT_VAR}"
+
+    if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready" >/dev/null 2>&1; then
+      echo "OK: minio ready api_port=$MINIO_API_PORT"
+      exit 0
+    fi
+
+    echo "ERROR: minio not ready api_port=$MINIO_API_PORT" >&2
+    exit 1
+  '';
+
   checkConfig = pkgs.writeShellScript "minio-check-config" ''
     set -euo pipefail
     eval "$(${slots.getSlotInfo})"
@@ -236,6 +252,7 @@ in
     status
     health
     checkConfig
+    ready
     fullStart
     fullStartTest
     exportS3Env
