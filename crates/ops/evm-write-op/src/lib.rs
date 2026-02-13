@@ -1505,9 +1505,10 @@ struct DeployState {
 #[async_trait]
 impl State for DeployState {
     fn meta(&self) -> StateMeta {
-        meta::apply_side_effect(op_idempotency::state_scope(
-            "mfm:evm_deploy",
+        meta::apply_side_effect(op_idempotency::state_purpose(
+            "evm_deploy",
             &self.state_id,
+            "apply_side_effect",
         ))
     }
 
@@ -1697,9 +1698,10 @@ struct ConfigureState {
 #[async_trait]
 impl State for ConfigureState {
     fn meta(&self) -> StateMeta {
-        meta::apply_side_effect(op_idempotency::state_scope(
-            "mfm:evm_configure",
+        meta::apply_side_effect(op_idempotency::state_purpose(
+            "evm_configure",
             &self.state_id,
+            "apply_side_effect",
         ))
     }
 

@@ -192,7 +192,11 @@ impl NixAppState {
 #[async_trait]
 impl State for NixAppState {
     fn meta(&self) -> StateMeta {
-        meta::execute(op_idempotency::state_scope("mfm:exec", &self.state_id))
+        meta::execute(op_idempotency::state_purpose(
+            "nix_app",
+            &self.state_id,
+            "exec",
+        ))
     }
 
     async fn handle(

@@ -149,6 +149,7 @@ impl Operation for ProofOp {
             op_path: op_path.clone(),
         });
         let side = Arc::new(ApplySideEffectState {
+            state_id: side_sid.clone(),
             op_path: op_path.clone(),
             orphan_after_side_effect: self.orphan_after_side_effect.clone(),
         });
@@ -220,6 +221,7 @@ impl State for ReadFactsState {
 }
 
 struct ApplySideEffectState {
+    state_id: mfm_machine::ids::StateId,
     op_path: OpPath,
     orphan_after_side_effect: Option<OrphanAfterSideEffect>,
 }
@@ -227,7 +229,11 @@ struct ApplySideEffectState {
 #[async_trait]
 impl State for ApplySideEffectState {
     fn meta(&self) -> StateMeta {
-        meta::apply_side_effect(op_idempotency::op_scope("proof:side_effect", &self.op_path))
+        meta::apply_side_effect(op_idempotency::state_purpose(
+            OP_ID,
+            &self.state_id,
+            "apply_side_effect",
+        ))
     }
 
     async fn handle(
@@ -589,10 +595,12 @@ mod tests {
             let join_sid = mfm_machine::ids::StateId(format!("{}.join_children", op_path.0));
 
             let spawn = Arc::new(SpawnChildrenState {
+                state_id: spawn_sid.clone(),
                 op_path: op_path.clone(),
                 child_run_config: run_config.clone(),
             });
             let join = Arc::new(JoinChildrenState {
+                state_id: join_sid.clone(),
                 op_path: op_path.clone(),
                 orphan_after_join: self.orphan_after_join.clone(),
             });
@@ -617,6 +625,7 @@ mod tests {
     }
 
     struct SpawnChildrenState {
+        state_id: mfm_machine::ids::StateId,
         op_path: OpPath,
         child_run_config: RunConfig,
     }
@@ -626,7 +635,7 @@ mod tests {
         fn meta(&self) -> StateMeta {
             meta::apply_side_effect_with_tag(
                 "child_run_spawn",
-                op_idempotency::op_scope("child_parent:spawn", &self.op_path),
+                op_idempotency::state_purpose(CHILD_PARENT_OP_ID, &self.state_id, "spawn_children"),
             )
         }
 
@@ -671,6 +680,7 @@ mod tests {
     }
 
     struct JoinChildrenState {
+        state_id: mfm_machine::ids::StateId,
         op_path: OpPath,
         orphan_after_join: Option<OrphanAfterJoin>,
     }
@@ -680,7 +690,7 @@ mod tests {
         fn meta(&self) -> StateMeta {
             meta::apply_side_effect_with_tag(
                 "child_run_join",
-                op_idempotency::op_scope("child_parent:join", &self.op_path),
+                op_idempotency::state_purpose(CHILD_PARENT_OP_ID, &self.state_id, "join_children"),
             )
         }
 

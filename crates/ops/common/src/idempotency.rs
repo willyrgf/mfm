@@ -17,6 +17,19 @@ pub fn canonical(op: impl AsRef<str>, state: impl AsRef<str>, purpose: impl AsRe
     )
 }
 
+pub fn state_purpose(op: impl AsRef<str>, state_id: &StateId, purpose: impl AsRef<str>) -> String {
+    canonical(op, &state_id.0, purpose)
+}
+
+pub fn op_purpose(op: impl AsRef<str>, op_path: &OpPath, purpose: impl AsRef<str>) -> String {
+    format!(
+        "mfm:{}|op:{}|purpose:{}",
+        op.as_ref(),
+        op_path.0,
+        purpose.as_ref()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,5 +53,17 @@ mod tests {
             out,
             "mfm:evm_validate|state:m.main.validate|purpose:assertions"
         );
+    }
+
+    #[test]
+    fn state_purpose_shape_is_stable() {
+        let out = state_purpose("nix_app", &StateId("nix_app.main.run".to_string()), "exec");
+        assert_eq!(out, "mfm:nix_app|state:nix_app.main.run|purpose:exec");
+    }
+
+    #[test]
+    fn op_purpose_shape_is_stable() {
+        let out = op_purpose("proof", &OpPath("proof.main".to_string()), "side_effect");
+        assert_eq!(out, "mfm:proof|op:proof.main|purpose:side_effect");
     }
 }
