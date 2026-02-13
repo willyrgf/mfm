@@ -153,6 +153,10 @@ let
         ${lib.optionalString logsEnabled ''
           _fixture_log_file="$(artifact_path ${quote logName})"
         ''}
+        # Lifecycle contract for fixture services:
+        # - start may be asynchronous.
+        # - fixture_start_service must poll READY/HEALTH with timeout.
+        # - diagnostics must stay robust when log files are missing.
         echo "INFO: fixture service start name=${serviceName} profile=${profile}"
         fixture_start_service ${quote serviceName} ${quote profile} ${quote timeout} ${quote interval} "$_fixture_log_file"
         ${exportScript}

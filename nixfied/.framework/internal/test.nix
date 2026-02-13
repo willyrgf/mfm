@@ -154,6 +154,24 @@ let
       grep -q "$pattern" "$file" || fail "expected '$pattern' in $file"
     }
 
+    assert_not_contains() {
+      local file="$1"
+      local pattern="$2"
+      if grep -q "$pattern" "$file"; then
+        fail "unexpected '$pattern' in $file"
+      fi
+    }
+
+    print_log_tail() {
+      local file="$1"
+      local lines="''${2:-80}"
+      if [ -f "$file" ]; then
+        tail -n "$lines" "$file" >&2 || true
+      else
+        echo "WARN: test log missing path=$file" >&2
+      fi
+    }
+
     run_app() {
       local flake_path="$1"
       local app="$2"
@@ -232,12 +250,65 @@ let
       echo "OK: coverage map complete total=$count"
     }
 
+    require_contains() {
+      local file="$1"
+      local needle="$2"
+      local check="$3"
+      if ! grep -Fq "$needle" "$file"; then
+        echo "ERROR: fixture contract missing check=$check file=$file needle=$needle" >&2
+        exit 1
+      fi
+    }
+
+    require_absent() {
+      local file="$1"
+      local needle="$2"
+      local check="$3"
+      if grep -Fq "$needle" "$file"; then
+        echo "ERROR: fixture contract violation check=$check file=$file needle=$needle" >&2
+        exit 1
+      fi
+    }
+
+    check_fixture_hardening_contracts() {
+      local reth_file="$ROOT/tests/framework/fixtures/reth/lifecycle.nix"
+      local minio_file="$ROOT/tests/framework/fixtures/minio/bucket-ops.nix"
+      local nginx_file="$ROOT/tests/framework/fixtures/nginx/site-lifecycle.nix"
+      local helios_file="$ROOT/tests/framework/fixtures/helios/lifecycle.nix"
+      local modules_file="$ROOT/tests/framework/fixtures/modules/dev.nix"
+
+      require_contains "$reth_file" 'for _ in $(seq 1 240); do' "reth readiness retry loop"
+      require_contains "$minio_file" 'for _ in $(seq 1 50); do' "minio readiness retry loop"
+      require_contains "$nginx_file" 'for _ in $(seq 1 80); do' "nginx readiness retry loop"
+      require_contains "$helios_file" 'HELIOS_READY_OK=0' "helios readiness retry loop"
+      require_contains "$modules_file" 'POSTGRES_READY_OK=0' "modules postgres readiness retry loop"
+      require_contains "$modules_file" 'RETH_READY_OK=0' "modules reth readiness retry loop"
+      require_contains "$modules_file" 'HELIOS_READY_OK=0' "modules helios readiness retry loop"
+
+      require_contains "$reth_file" 'print_log_tail "$RETH_DIR/logs/reth.log" 50' "reth guarded log diagnostics"
+      require_contains "$minio_file" 'print_log_tail "$MINIO_DIR/logs/minio.log" 50' "minio guarded log diagnostics"
+      require_contains "$nginx_file" 'print_log_tail "$NGINX_DIR/logs/error.log" 50' "nginx guarded log diagnostics"
+      require_contains "$helios_file" 'print_log_tail "$HELIOS_DIR/logs/helios.log" 50' "helios guarded log diagnostics"
+      require_contains "$modules_file" 'print_log_tail "$PGDATA/postgres.log" 50' "modules postgres guarded log diagnostics"
+      require_contains "$modules_file" 'print_log_tail "$RETH_DIR/logs/reth.log" 50' "modules reth guarded log diagnostics"
+      require_contains "$modules_file" 'print_log_tail "$HELIOS_DIR/logs/helios.log" 50' "modules helios guarded log diagnostics"
+
+      require_absent "$reth_file" 'tail -50 "$RETH_DIR/logs/reth.log" >&2 || true' "reth unguarded log tail"
+      require_absent "$helios_file" 'tail -50 "$HELIOS_DIR/logs/helios.log" >&2 || true' "helios unguarded log tail"
+      require_absent "$modules_file" 'tail -50 "$PGDATA/postgres.log" >&2 || true' "modules postgres unguarded log tail"
+      require_absent "$modules_file" 'tail -50 "$RETH_DIR/logs/reth.log" >&2 || true' "modules reth unguarded log tail"
+      require_absent "$modules_file" 'tail -50 "$HELIOS_DIR/logs/helios.log" >&2 || true' "modules helios unguarded log tail"
+    }
+
     log "flake eval"
     nix flake show "path:$ROOT" >/dev/null
     nix flake check --no-build "path:$ROOT" >/dev/null
 
     log "coverage map"
     check_coverage_map >/dev/null
+
+    log "fixture hardening contracts"
+    check_fixture_hardening_contracts
 
     log "core apps"
     HELP_OUT="$WORKDIR/help.txt"
@@ -300,7 +371,7 @@ let
       echo "Helpers runtime fixture failed (rc=$HELPERS_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 100 lines):" >&2
-      tail -100 "$HELPERS_LOG" >&2 || true
+      print_log_tail "$HELPERS_LOG" 100
       exit "$HELPERS_RC"
     fi
 
@@ -344,7 +415,7 @@ let
       echo "Slots env fixture failed (rc=$SLOTS_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 100 lines):" >&2
-      tail -100 "$SLOTS_LOG" >&2 || true
+      print_log_tail "$SLOTS_LOG" 100
       exit "$SLOTS_RC"
     fi
 
@@ -607,7 +678,7 @@ let
       nl -ba "$DEV_SCRIPT" | sed -n '60,100p' >&2
       echo "" >&2
       echo "Fixture output (last 50 lines):" >&2
-      tail -50 "$DEV_LOG" >&2 || true
+      print_log_tail "$DEV_LOG" 50
       echo "" >&2
       echo "Matches for 'name}' in script:" >&2
       grep -n "name}" "$DEV_SCRIPT" >&2 || true
@@ -718,7 +789,7 @@ let
       echo "Fixtures services fixture failed (rc=$RC)." >&2
       echo "" >&2
       echo "Fixture output (last 100 lines):" >&2
-      tail -100 "$FIX_SVC_LOG" >&2 || true
+      print_log_tail "$FIX_SVC_LOG" 100
       exit "$RC"
     fi
     assert_contains "$FIX_SVC_LOG" "INFO: fixture service start name=postgres profile=test"
@@ -817,7 +888,7 @@ let
       echo "fixture_start_service fixture failed (rc=$RC)." >&2
       echo "" >&2
       echo "Fixture output (last 100 lines):" >&2
-      tail -100 "$FIX_START_LOG" >&2 || true
+      print_log_tail "$FIX_START_LOG" 100
       exit "$RC"
     fi
     assert_contains "$FIX_START_LOG" "OK: fixture service ready service=postgres profile=test"
@@ -877,11 +948,12 @@ let
 
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'while true; do' '  sleep 1' 'done' > "$PWD/mock-start.sh"
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 1' > "$PWD/mock-health.sh"
-        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 0' > "$PWD/mock-ready.sh"
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'COUNT_FILE="$MOCK_READY_COUNT_FILE"' 'if [ -z "$COUNT_FILE" ]; then COUNT_FILE="$PWD/mock-ready.count"; fi' 'count=0' 'if [ -f "$COUNT_FILE" ]; then count=$(cat "$COUNT_FILE"); fi' 'count=$((count + 1))' 'echo "$count" > "$COUNT_FILE"' 'if [ "$count" -lt 3 ]; then exit 1; fi' 'exit 0' > "$PWD/mock-ready.sh"
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 0' > "$PWD/mock-status.sh"
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 0' > "$PWD/mock-stop.sh"
         chmod +x "$PWD/mock-start.sh" "$PWD/mock-health.sh" "$PWD/mock-ready.sh" "$PWD/mock-status.sh" "$PWD/mock-stop.sh"
 
+        export MOCK_READY_COUNT_FILE="$PWD/mock-ready.count"
         export MOCKSVC_START="$PWD/mock-start.sh"
         export MOCKSVC_HEALTH="$PWD/mock-health.sh"
         export MOCKSVC_READY="$PWD/mock-ready.sh"
@@ -889,10 +961,12 @@ let
         export MOCKSVC_STOP="$PWD/mock-stop.sh"
 
         fixture_start_service mocksvc default 5 1
+        READY_ATTEMPTS="$(cat "$MOCK_READY_COUNT_FILE" 2>/dev/null || echo 0)"
+        [ "$READY_ATTEMPTS" -ge 3 ] || fail "fixture_start_service should retry READY hook attempts=$READY_ATTEMPTS"
         _run_cleanups
         _cleanup_actions=()
         _cleanup_initialized=false
-        echo "OK: fixture_start_service preferred READY hook"
+        echo "OK: fixture_start_service retried READY hook"
 
         export PGPORT="$(pick_port)" || fail "failed to pick port"
         export CI_ARTIFACTS_DIR="$PWD/.artifacts"
@@ -923,6 +997,36 @@ let
         done
         [ "$PORT_DOWN" -eq 1 ] || fail "postgres should stop after explicit POSTGRES_STOP port=$PGPORT"
         echo "OK: fixture_start_service keep_running preserved service"
+
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'echo "$$" > "$PWD/mock-timeout.pid"' 'while true; do' '  if [ -n "$MOCK_TIMEOUT_LOGFILE" ]; then rm -f "$MOCK_TIMEOUT_LOGFILE"; fi' '  sleep 0.1' 'done' > "$PWD/mock-timeout-start.sh"
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 1' > "$PWD/mock-timeout-health.sh"
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 1' > "$PWD/mock-timeout-ready.sh"
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 1' > "$PWD/mock-timeout-status.sh"
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'if [ -f "$PWD/mock-timeout.pid" ]; then pid=$(cat "$PWD/mock-timeout.pid" 2>/dev/null || true); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; fi; fi; exit 0' > "$PWD/mock-timeout-stop.sh"
+        chmod +x "$PWD/mock-timeout-start.sh" "$PWD/mock-timeout-health.sh" "$PWD/mock-timeout-ready.sh" "$PWD/mock-timeout-status.sh" "$PWD/mock-timeout-stop.sh"
+
+        export TIMEOUTSVC_START="$PWD/mock-timeout-start.sh"
+        export TIMEOUTSVC_HEALTH="$PWD/mock-timeout-health.sh"
+        export TIMEOUTSVC_READY="$PWD/mock-timeout-ready.sh"
+        export TIMEOUTSVC_STATUS="$PWD/mock-timeout-status.sh"
+        export TIMEOUTSVC_STOP="$PWD/mock-timeout-stop.sh"
+
+        TIMEOUT_LOG="$PWD/missing-timeout.log"
+        export MOCK_TIMEOUT_LOGFILE="$TIMEOUT_LOG"
+        set +e
+        fixture_start_service timeoutsvc default 1 0.1 "$TIMEOUT_LOG"
+        TIMEOUT_RC=$?
+        set -e
+        [ "$TIMEOUT_RC" -ne 0 ] || fail "expected timeoutsvc readiness failure"
+        [ ! -f "$TIMEOUT_LOG" ] || fail "timeoutsvc log should be absent path=$TIMEOUT_LOG"
+        TIMEOUT_PID="$(cat "$PWD/mock-timeout.pid" 2>/dev/null || true)"
+        if [ -n "$TIMEOUT_PID" ] && kill -0 "$TIMEOUT_PID" 2>/dev/null; then
+          fail "timeoutsvc process still running pid=$TIMEOUT_PID"
+        fi
+        _run_cleanups
+        _cleanup_actions=()
+        _cleanup_initialized=false
+        echo "OK: fixture_start_service timeout cleanup removed process"
       ''';
     }
     NIX
@@ -938,11 +1042,14 @@ let
       echo "fixture_start_service readiness fixture failed (rc=$RC)." >&2
       echo "" >&2
       echo "Fixture output (last 120 lines):" >&2
-      tail -120 "$FIX_START_READY_LOG" >&2 || true
+      print_log_tail "$FIX_START_READY_LOG" 120
       exit "$RC"
     fi
-    assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service preferred READY hook"
+    assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service retried READY hook"
     assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service keep_running preserved service"
+    assert_contains "$FIX_START_READY_LOG" "WARN: fixture log file missing path="
+    assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service timeout cleanup removed process"
+    assert_not_contains "$FIX_START_READY_LOG" "tail: cannot open"
 
     log "fixtures env resolvers"
     FIX_ENV_DIR="$WORKDIR/fixtures-env"
@@ -1013,7 +1120,7 @@ let
       echo "Fixtures env resolvers fixture failed (rc=$RC)." >&2
       echo "" >&2
       echo "Fixture output (last 100 lines):" >&2
-      tail -100 "$FIX_ENV_LOG" >&2 || true
+      print_log_tail "$FIX_ENV_LOG" 100
       exit "$RC"
     fi
 
@@ -1531,7 +1638,7 @@ let
       echo "Ephemeral lock fixture failed (rc=$EPHEM_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 50 lines):" >&2
-      tail -50 "$EPHEM_LOG" >&2 || true
+      print_log_tail "$EPHEM_LOG" 50
       exit "$EPHEM_RC"
     fi
 
@@ -1571,7 +1678,7 @@ let
       echo "Registry foreground fixture failed (rc=$REG_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 50 lines):" >&2
-      tail -50 "$REG_LOG" >&2 || true
+      print_log_tail "$REG_LOG" 50
       exit "$REG_RC"
     fi
 
@@ -1644,7 +1751,7 @@ let
       echo "Postgres extensions fixture failed (rc=$PG_EXT_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 80 lines):" >&2
-      tail -80 "$PG_EXT_LOG" >&2 || true
+      print_log_tail "$PG_EXT_LOG" 80
       exit "$PG_EXT_RC"
     fi
 
@@ -1713,7 +1820,7 @@ let
       echo "Nginx site lifecycle fixture failed (rc=$NGX_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 80 lines):" >&2
-      tail -80 "$NGX_LOG" >&2 || true
+      print_log_tail "$NGX_LOG" 80
       exit "$NGX_RC"
     fi
 
@@ -1779,7 +1886,7 @@ let
       echo "MinIO bucket ops fixture failed (rc=$MINIO_FIX_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 80 lines):" >&2
-      tail -80 "$MINIO_FIX_LOG" >&2 || true
+      print_log_tail "$MINIO_FIX_LOG" 80
       exit "$MINIO_FIX_RC"
     fi
 
@@ -1844,7 +1951,7 @@ let
       echo "Reth lifecycle fixture failed (rc=$RETH_FIX_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 80 lines):" >&2
-      tail -80 "$RETH_FIX_LOG" >&2 || true
+      print_log_tail "$RETH_FIX_LOG" 80
       exit "$RETH_FIX_RC"
     fi
 
@@ -1915,7 +2022,7 @@ let
       echo "Helios lifecycle fixture failed (rc=$HELIOS_FIX_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 80 lines):" >&2
-      tail -80 "$HELIOS_FIX_LOG" >&2 || true
+      print_log_tail "$HELIOS_FIX_LOG" 80
       exit "$HELIOS_FIX_RC"
     fi
 
@@ -1992,7 +2099,7 @@ let
       echo "Supervisor management fixture failed (rc=$SUP_MGMT_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 80 lines):" >&2
-      tail -80 "$SUP_MGMT_LOG" >&2 || true
+      print_log_tail "$SUP_MGMT_LOG" 80
       exit "$SUP_MGMT_RC"
     fi
 
@@ -2040,7 +2147,7 @@ let
       echo "Registry background/timeout fixture failed (rc=$REG_BG_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 80 lines):" >&2
-      tail -80 "$REG_BG_LOG" >&2 || true
+      print_log_tail "$REG_BG_LOG" 80
       exit "$REG_BG_RC"
     fi
 
@@ -2089,7 +2196,7 @@ let
       echo "Lib parallel fixture failed (rc=$LIB_PAR_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 80 lines):" >&2
-      tail -80 "$LIB_PAR_LOG" >&2 || true
+      print_log_tail "$LIB_PAR_LOG" 80
       exit "$LIB_PAR_RC"
     fi
 
@@ -2137,7 +2244,7 @@ let
       echo "Lib port-utils fixture failed (rc=$LIB_PORT_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 80 lines):" >&2
-      tail -80 "$LIB_PORT_LOG" >&2 || true
+      print_log_tail "$LIB_PORT_LOG" 80
       exit "$LIB_PORT_RC"
     fi
 
@@ -2182,7 +2289,7 @@ let
       echo "Lib process fixture failed (rc=$LIB_PROC_RC)." >&2
       echo "" >&2
       echo "Fixture output (last 80 lines):" >&2
-      tail -80 "$LIB_PROC_LOG" >&2 || true
+      print_log_tail "$LIB_PROC_LOG" 80
       exit "$LIB_PROC_RC"
     fi
 

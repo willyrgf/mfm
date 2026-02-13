@@ -231,6 +231,14 @@ let
                 export CI_KEEP_ARTIFACTS_ON_SUCCESS="${if keepOnSuccess then "1" else "0"}"
         ${pkgs.lib.optionalString (ciEnvExports != "") ciEnvExports}
 
+                if [ -z "''${RUN_ID:-}" ]; then
+                  export RUN_ID="$(date +%Y%m%d-%H%M%S)-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+                fi
+
+                _emit_process_event() {
+                  ${toString lib.emitEvent} "$@" >/dev/null 2>&1 || true
+                }
+
                 init_ci_artifacts() {
                   mkdir -p "$CI_ARTIFACTS_DIR"
                   if [ -n "$CI_ARTIFACTS_LATEST_LINK" ]; then
@@ -370,6 +378,10 @@ let
                       STEP_DESC=$(step_desc "$step")
                       echo ""
                       echo "Step ''${STEP_INDEX}/''${TOTAL_STEPS}: ''${STEP_DESC}"
+                      _emit_process_event \
+                        --event-type readiness_progress \
+                        --state waiting \
+                        --wait-reason "step=$step index=$STEP_INDEX total=$TOTAL_STEPS"
                       local STEP_START_TIME=0
                       STEP_START_TIME=$(date +%s)
                       set +e
@@ -415,6 +427,7 @@ let
 
                 if [ "$CI_SUMMARY" = "true" ]; then
                   init_ci_artifacts
+                  _emit_process_event --event-type run_started --state running --wait-reason "ci_mode=$CI_MODE summary=true"
                   LOGFILE=$(artifact_path "ci-output.log")
                   START_TIME=$(date +%s)
                   set +e
@@ -423,14 +436,25 @@ let
                   set -e
                   END_TIME=$(date +%s)
                   DURATION=$((END_TIME - START_TIME))
+                  if [ "$EXIT_CODE" -eq 0 ]; then
+                    _emit_process_event --event-type run_finished --state passed --wait-reason "exit_code=0 duration=$DURATION"
+                  else
+                    _emit_process_event --event-type run_finished --state failed --wait-reason "exit_code=$EXIT_CODE duration=$DURATION"
+                  fi
                   summary_parse "$LOGFILE" "$DURATION" "$EXIT_CODE"
                   cleanup_ci_artifacts "$EXIT_CODE"
                   exit $EXIT_CODE
                 else
+                  _emit_process_event --event-type run_started --state running --wait-reason "ci_mode=$CI_MODE summary=false"
                   set +e
                   run_pipeline
                   EXIT_CODE=$?
                   set -e
+                  if [ "$EXIT_CODE" -eq 0 ]; then
+                    _emit_process_event --event-type run_finished --state passed --wait-reason "exit_code=0"
+                  else
+                    _emit_process_event --event-type run_finished --state failed --wait-reason "exit_code=$EXIT_CODE"
+                  fi
                   cleanup_ci_artifacts "$EXIT_CODE"
                   exit $EXIT_CODE
                 fi

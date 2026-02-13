@@ -6,6 +6,7 @@
 }:
 
 let
+  processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   config = import ./config.nix { inherit project; };
   lifecycle = import ./lifecycle.nix {
     inherit
@@ -15,6 +16,21 @@ let
       config
       ;
   };
+
+  logs = pkgs.writeShellScript "reth-logs" ''
+    set -euo pipefail
+    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
+    eval "$SLOT_INFO_OUT"
+    exec ${processRegistry.serviceLogs} --service reth --slot "$SLOT" --env "$ENV" "$@"
+  '';
+  log = logs;
+
+  events = pkgs.writeShellScript "reth-events" ''
+    set -euo pipefail
+    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
+    eval "$SLOT_INFO_OUT"
+    exec ${processRegistry.serviceEvents} --service reth --slot "$SLOT" --env "$ENV" "$@"
+  '';
 
   publicApi = {
     version = 1;
@@ -91,6 +107,27 @@ let
         summary = "Wait for Reth readiness";
         details = "Checks that Reth responds on the configured HTTP RPC port.";
       };
+      log = {
+        script = log;
+        hook = "LOG";
+        summary = "Show Reth log";
+        details = "Shows Reth runtime log for the current slot/environment.";
+        usage = [ "nix run .#service::reth::log -- [--lines N] [--follow]" ];
+      };
+      logs = {
+        script = logs;
+        hook = "LOGS";
+        summary = "Alias for service::reth::log";
+        details = "Compatibility alias for service::reth::log.";
+        usage = [ "nix run .#service::reth::logs -- [--lines N] [--follow]" ];
+      };
+      events = {
+        script = events;
+        hook = "EVENTS";
+        summary = "Show Reth lifecycle events";
+        details = "Shows Reth lifecycle events from the global process registry for the current slot/environment.";
+        usage = [ "nix run .#service::reth::events -- [--limit N]" ];
+      };
     };
   };
 in
@@ -109,6 +146,12 @@ in
     ready
     fullStart
     fullStartTest
+    ;
+
+  inherit
+    log
+    logs
+    events
     ;
 
   inherit publicApi;

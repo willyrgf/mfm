@@ -1,0 +1,1012 @@
+# Process registry - global process/run visibility + diagnostics
+{
+  pkgs,
+  project ? { },
+}:
+
+let
+  projectMeta = project.project or { };
+  projectId = projectMeta.id or "project";
+  projectIdUpper =
+    let
+      replaced = pkgs.lib.replaceStrings [ "-" "." ] [ "_" "_" ] projectId;
+    in
+    pkgs.lib.strings.toUpper replaced;
+  slotVar = projectMeta.slotVar or "NIX_ENV";
+  envVar = projectMeta.envVar or "PROJECT_ENV";
+  processCfg = project.process or { };
+  registryRoot = processCfg.registryRoot or "/tmp/nixfied-runtime/${projectId}";
+
+  sharedPrelude = ''
+    set -euo pipefail
+
+    REGISTRY_ROOT="${registryRoot}"
+    PROJECT_ID="${projectId}"
+    SLOT_VAR="${slotVar}"
+    ENV_VAR="${envVar}"
+    EPHEMERAL_FLAG_VAR="${projectIdUpper}_EPHEMERAL"
+    EPHEMERAL_ROOT_VAR="${projectIdUpper}_EPHEMERAL_ROOT"
+
+    LOCK_DIR="$REGISTRY_ROOT/locks"
+    EVENTS_FILE="$REGISTRY_ROOT/events.jsonl"
+    SNAPSHOT_FILE="$REGISTRY_ROOT/snapshot.json"
+
+    mkdir -p "$LOCK_DIR"
+    touch "$EVENTS_FILE"
+
+    normalize_bool() {
+      case "''${1:-}" in
+        1|true|TRUE|yes|YES|on|ON) echo "true" ;;
+        0|false|FALSE|no|NO|off|OFF) echo "false" ;;
+        *) echo "null" ;;
+      esac
+    }
+
+    infer_owner_scope() {
+      if [ -n "''${SERVICE_OWNER_SCOPE:-}" ]; then
+        echo "$SERVICE_OWNER_SCOPE"
+        return 0
+      fi
+
+      if [ "''${!EPHEMERAL_FLAG_VAR:-0}" = "1" ]; then
+        echo "ephemeral"
+      else
+        echo "persistent"
+      fi
+    }
+
+    infer_discovery_scope() {
+      if [ -n "''${SERVICE_DISCOVERY_SCOPE:-}" ]; then
+        echo "$SERVICE_DISCOVERY_SCOPE"
+        return 0
+      fi
+
+      if [ "''${!EPHEMERAL_FLAG_VAR:-0}" = "1" ]; then
+        echo "local"
+      else
+        echo "global"
+      fi
+    }
+
+    infer_reuse_policy() {
+      local owner_scope="$1"
+      if [ -n "''${SERVICE_REUSE_POLICY:-}" ]; then
+        echo "$SERVICE_REUSE_POLICY"
+        return 0
+      fi
+
+      if [ "$owner_scope" = "ephemeral" ]; then
+        echo "same-root"
+      else
+        echo "same-slot"
+      fi
+    }
+
+    validate_policy_matrix() {
+      local reuse="$1"
+      local owner="$2"
+      local discovery="$3"
+
+      case "$reuse" in
+        never|same-root|same-slot|cross-run)
+          ;;
+        *)
+          echo "ERROR: SERVICE_REUSE_POLICY must be one of never|same-root|same-slot|cross-run (got '$reuse')" >&2
+          return 1
+          ;;
+      esac
+
+      case "$owner" in
+        ephemeral|persistent)
+          ;;
+        *)
+          echo "ERROR: SERVICE_OWNER_SCOPE must be ephemeral|persistent (got '$owner')" >&2
+          return 1
+          ;;
+      esac
+
+      case "$discovery" in
+        local|global)
+          ;;
+        *)
+          echo "ERROR: SERVICE_DISCOVERY_SCOPE must be local|global (got '$discovery')" >&2
+          return 1
+          ;;
+      esac
+
+      if [ "$reuse" = "cross-run" ] && { [ "$owner" != "persistent" ] || [ "$discovery" != "global" ]; }; then
+        echo "ERROR: cross-run reuse requires SERVICE_OWNER_SCOPE=persistent and SERVICE_DISCOVERY_SCOPE=global" >&2
+        return 1
+      fi
+
+      if [ "$reuse" = "same-root" ] && { [ "$owner" != "ephemeral" ] || [ "$discovery" != "local" ]; }; then
+        echo "ERROR: same-root reuse requires SERVICE_OWNER_SCOPE=ephemeral and SERVICE_DISCOVERY_SCOPE=local" >&2
+        return 1
+      fi
+
+      return 0
+    }
+
+    append_event_json() {
+      local payload="$1"
+      local lock_file="$LOCK_DIR/events.lock"
+      local tmp_snapshot="$SNAPSHOT_FILE.tmp.$$"
+
+      (
+        exec 9>"$lock_file"
+        ${pkgs.flock}/bin/flock -x 9
+
+        echo "$payload" >> "$EVENTS_FILE"
+
+        ${pkgs.jq}/bin/jq -s --arg generated_at "$(${pkgs.coreutils}/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" '
+          {
+            schema_version: 1,
+            generated_at: $generated_at,
+            totals: { events: length },
+            events: .
+          }
+        ' "$EVENTS_FILE" > "$tmp_snapshot"
+        mv "$tmp_snapshot" "$SNAPSHOT_FILE"
+      )
+    }
+  '';
+
+  emitEvent = pkgs.writeShellScript "process-registry-emit-event" ''
+    ${sharedPrelude}
+
+    EVENT_TYPE=""
+    EVENT_STATE=""
+    EVENT_SERVICE=""
+    EVENT_RUN_ID=""
+    EVENT_COMMAND=""
+    EVENT_SLOT=""
+    EVENT_ENV=""
+    EVENT_PROFILE=""
+    EVENT_PID=""
+    EVENT_PGID=""
+    EVENT_OWNER_SCOPE=""
+    EVENT_REUSE_POLICY=""
+    EVENT_DISCOVERY_SCOPE=""
+    EVENT_EPHEMERAL_ROOT=""
+    EVENT_WAIT_REASON=""
+    EVENT_LOG_PATH=""
+    EVENT_LAST_ERROR=""
+    EVENT_READINESS_HEALTH=""
+    EVENT_READINESS_READY=""
+
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --event-type) EVENT_TYPE="$2"; shift 2 ;;
+        --state) EVENT_STATE="$2"; shift 2 ;;
+        --service) EVENT_SERVICE="$2"; shift 2 ;;
+        --run-id) EVENT_RUN_ID="$2"; shift 2 ;;
+        --command) EVENT_COMMAND="$2"; shift 2 ;;
+        --slot) EVENT_SLOT="$2"; shift 2 ;;
+        --env) EVENT_ENV="$2"; shift 2 ;;
+        --profile) EVENT_PROFILE="$2"; shift 2 ;;
+        --pid) EVENT_PID="$2"; shift 2 ;;
+        --pgid) EVENT_PGID="$2"; shift 2 ;;
+        --owner-scope) EVENT_OWNER_SCOPE="$2"; shift 2 ;;
+        --reuse-policy) EVENT_REUSE_POLICY="$2"; shift 2 ;;
+        --discovery-scope) EVENT_DISCOVERY_SCOPE="$2"; shift 2 ;;
+        --ephemeral-root) EVENT_EPHEMERAL_ROOT="$2"; shift 2 ;;
+        --wait-reason) EVENT_WAIT_REASON="$2"; shift 2 ;;
+        --log-path) EVENT_LOG_PATH="$2"; shift 2 ;;
+        --last-error) EVENT_LAST_ERROR="$2"; shift 2 ;;
+        --readiness-health) EVENT_READINESS_HEALTH="$2"; shift 2 ;;
+        --readiness-ready) EVENT_READINESS_READY="$2"; shift 2 ;;
+        *)
+          echo "ERROR: unknown argument: $1" >&2
+          exit 1
+          ;;
+      esac
+    done
+
+    if [ -z "$EVENT_TYPE" ]; then
+      echo "Usage: process-registry-emit-event --event-type <type> [--service <name>] [--state <state>] [--run-id <id>] [--slot <slot>] [--env <env>] [--wait-reason <reason>] [--log-path <path>]" >&2
+      exit 1
+    fi
+
+    if [ -z "$EVENT_RUN_ID" ]; then
+      EVENT_RUN_ID="''${RUN_ID:-}"
+    fi
+    if [ -z "$EVENT_RUN_ID" ]; then
+      EVENT_RUN_ID="$(${pkgs.coreutils}/bin/date +%Y%m%d-%H%M%S)-$$"
+    fi
+
+    if [ -z "$EVENT_COMMAND" ]; then
+      EVENT_COMMAND="''${COMMAND_NAME:-unknown}"
+    fi
+
+    if [ -z "$EVENT_SLOT" ]; then
+      EVENT_SLOT="''${SLOT:-''${!SLOT_VAR:-}}"
+    fi
+
+    if [ -z "$EVENT_ENV" ]; then
+      EVENT_ENV="''${ENV:-''${!ENV_VAR:-}}"
+    fi
+
+    if [ -z "$EVENT_PID" ]; then
+      EVENT_PID="$$"
+    fi
+
+    if [ -z "$EVENT_PGID" ]; then
+      EVENT_PGID="$(${pkgs.procps}/bin/ps -o pgid= -p "$EVENT_PID" 2>/dev/null | tr -d ' ' || true)"
+    fi
+
+    if [ -z "$EVENT_OWNER_SCOPE" ]; then
+      EVENT_OWNER_SCOPE="$(infer_owner_scope)"
+    fi
+    if [ -z "$EVENT_DISCOVERY_SCOPE" ]; then
+      EVENT_DISCOVERY_SCOPE="$(infer_discovery_scope)"
+    fi
+    if [ -z "$EVENT_REUSE_POLICY" ]; then
+      EVENT_REUSE_POLICY="$(infer_reuse_policy "$EVENT_OWNER_SCOPE")"
+    fi
+
+    validate_policy_matrix "$EVENT_REUSE_POLICY" "$EVENT_OWNER_SCOPE" "$EVENT_DISCOVERY_SCOPE"
+
+    if [ -z "$EVENT_EPHEMERAL_ROOT" ]; then
+      EVENT_EPHEMERAL_ROOT="''${!EPHEMERAL_ROOT_VAR:-}"
+    fi
+
+    if [ -z "$EVENT_STATE" ]; then
+      case "$EVENT_TYPE" in
+        run_started) EVENT_STATE="running" ;;
+        run_finished) EVENT_STATE="passed" ;;
+        slot_acquired) EVENT_STATE="busy" ;;
+        slot_released) EVENT_STATE="released" ;;
+        service_starting) EVENT_STATE="starting" ;;
+        service_ready) EVENT_STATE="ready" ;;
+        service_stopped) EVENT_STATE="stopped" ;;
+        service_orphaned) EVENT_STATE="orphaned" ;;
+        readiness_progress) EVENT_STATE="waiting" ;;
+        *) EVENT_STATE="unknown" ;;
+      esac
+    fi
+
+    EVENT_ID="$(${pkgs.coreutils}/bin/date +%Y%m%d-%H%M%S)-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    EVENT_TS="$(${pkgs.coreutils}/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+    EVENT_READINESS_HEALTH_NORM="$(normalize_bool "$EVENT_READINESS_HEALTH")"
+    EVENT_READINESS_READY_NORM="$(normalize_bool "$EVENT_READINESS_READY")"
+
+    PAYLOAD=$(${pkgs.jq}/bin/jq -cn \
+      --argjson schema_version 1 \
+      --arg event_id "$EVENT_ID" \
+      --arg event_type "$EVENT_TYPE" \
+      --arg timestamp "$EVENT_TS" \
+      --arg run_id "$EVENT_RUN_ID" \
+      --arg command_name "$EVENT_COMMAND" \
+      --arg project_id "$PROJECT_ID" \
+      --arg service "$EVENT_SERVICE" \
+      --arg slot "$EVENT_SLOT" \
+      --arg env "$EVENT_ENV" \
+      --arg profile "$EVENT_PROFILE" \
+      --arg pid "$EVENT_PID" \
+      --arg pgid "$EVENT_PGID" \
+      --arg state "$EVENT_STATE" \
+      --arg owner_scope "$EVENT_OWNER_SCOPE" \
+      --arg reuse_policy "$EVENT_REUSE_POLICY" \
+      --arg discovery_scope "$EVENT_DISCOVERY_SCOPE" \
+      --arg ephemeral_root "$EVENT_EPHEMERAL_ROOT" \
+      --arg wait_reason "$EVENT_WAIT_REASON" \
+      --arg log_path "$EVENT_LOG_PATH" \
+      --arg last_error "$EVENT_LAST_ERROR" \
+      --arg readiness_health "$EVENT_READINESS_HEALTH_NORM" \
+      --arg readiness_ready "$EVENT_READINESS_READY_NORM" \
+      '
+      {
+        schema_version: $schema_version,
+        event_id: $event_id,
+        event_type: $event_type,
+        timestamp: $timestamp,
+        run_id: (if $run_id == "" then null else $run_id end),
+        command_name: (if $command_name == "" then null else $command_name end),
+        project_id: $project_id,
+        service: (if $service == "" then null else $service end),
+        slot: (if $slot == "" then null else $slot end),
+        env: (if $env == "" then null else $env end),
+        profile: (if $profile == "" then null else $profile end),
+        pid: (if $pid == "" then null else (try ($pid | tonumber) catch $pid) end),
+        pgid: (if $pgid == "" then null else (try ($pgid | tonumber) catch $pgid) end),
+        state: (if $state == "" then "unknown" else $state end),
+        owner_scope: (if $owner_scope == "" then null else $owner_scope end),
+        reuse_policy: (if $reuse_policy == "" then null else $reuse_policy end),
+        discovery_scope: (if $discovery_scope == "" then null else $discovery_scope end),
+        ephemeral_root: (if $ephemeral_root == "" then null else $ephemeral_root end),
+        readiness: {
+          health_ok: (if $readiness_health == "null" then null else ($readiness_health == "true") end),
+          ready_ok: (if $readiness_ready == "null" then null else ($readiness_ready == "true") end),
+          last_error: (if $last_error == "" then null else $last_error end)
+        },
+        wait_reason: (if $wait_reason == "" then null else $wait_reason end),
+        log_path: (if $log_path == "" then null else $log_path end)
+      }
+      ')
+
+    append_event_json "$PAYLOAD"
+    echo "OK: process event recorded event_type=$EVENT_TYPE run_id=$EVENT_RUN_ID service=''${EVENT_SERVICE:-none} state=$EVENT_STATE"
+  '';
+
+  processStatus = pkgs.writeShellScript "process-status" ''
+    ${sharedPrelude}
+
+    SHOW_ALL=false
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --all)
+          SHOW_ALL=true
+          shift
+          ;;
+        *)
+          echo "ERROR: unknown argument: $1" >&2
+          exit 1
+          ;;
+      esac
+    done
+
+    if [ ! -s "$EVENTS_FILE" ]; then
+      echo "OK: no process events project_id=$PROJECT_ID registry_root=$REGISTRY_ROOT"
+      exit 0
+    fi
+
+    OUT=$(${pkgs.jq}/bin/jq -sr --arg all "$SHOW_ALL" '
+      def is_active:
+        .state == "starting"
+        or .state == "running"
+        or .state == "ready"
+        or .state == "degraded"
+        or .state == "waiting"
+        or .state == "busy";
+
+      def service_key:
+        (.service // "") + "|" + ((.slot // "") | tostring) + "|" + (.env // "");
+
+      def run_key:
+        (.run_id // "");
+
+      def latest_by(f):
+        sort_by(f, (.timestamp // ""))
+        | group_by(f)
+        | map(last);
+
+      . as $events
+      | ([$events[] | select(.service != null and .service != "")] | latest_by(service_key)) as $services
+      | ([$events[] | select(.run_id != null and .run_id != "" and (.event_type == "run_started" or .event_type == "run_finished"))] | latest_by(run_key)) as $runs
+      | [
+          ($services[]? | select(($all == "true") or is_active)
+            | "type=service service=\(.service) slot=\((.slot // "unknown")) env=\((.env // "unknown")) state=\((.state // "unknown")) run_id=\((.run_id // "unknown")) pid=\((.pid // "unknown")) owner_scope=\((.owner_scope // "unknown")) command=\((.command_name // "unknown"))"),
+          ($runs[]? | select(($all == "true") or is_active)
+            | "type=run run_id=\((.run_id // "unknown")) state=\((.state // "unknown")) command=\((.command_name // "unknown")) slot=\((.slot // "unknown")) env=\((.env // "unknown")) pid=\((.pid // "unknown"))")
+        ]
+      | .[]
+    ' "$EVENTS_FILE")
+
+    if [ -z "$OUT" ]; then
+      if [ "$SHOW_ALL" = "true" ]; then
+        echo "OK: no process entities found project_id=$PROJECT_ID"
+      else
+        echo "OK: no active process entities found project_id=$PROJECT_ID"
+      fi
+      exit 0
+    fi
+
+    echo "$OUT"
+  '';
+
+  processRuns = pkgs.writeShellScript "process-runs" ''
+    ${sharedPrelude}
+
+    SHOW_ALL=false
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --all)
+          SHOW_ALL=true
+          shift
+          ;;
+        *)
+          echo "ERROR: unknown argument: $1" >&2
+          exit 1
+          ;;
+      esac
+    done
+
+    if [ ! -s "$EVENTS_FILE" ]; then
+      echo "OK: no runs found project_id=$PROJECT_ID"
+      exit 0
+    fi
+
+    OUT=$(${pkgs.jq}/bin/jq -sr --arg all "$SHOW_ALL" '
+      def is_active:
+        .state == "starting"
+        or .state == "running"
+        or .state == "ready"
+        or .state == "degraded"
+        or .state == "waiting"
+        or .state == "busy";
+
+      def run_key:
+        (.run_id // "");
+
+      def latest_by(f):
+        sort_by(f, (.timestamp // ""))
+        | group_by(f)
+        | map(last);
+
+      ([ .[] | select(.run_id != null and .run_id != "" and (.event_type == "run_started" or .event_type == "run_finished")) ]
+        | latest_by(run_key)
+        | .[]
+        | select(($all == "true") or is_active)
+        | "run_id=\((.run_id // "unknown")) state=\((.state // "unknown")) command=\((.command_name // "unknown")) slot=\((.slot // "unknown")) env=\((.env // "unknown")) pid=\((.pid // "unknown")) started_at=\((.timestamp // "unknown"))")
+    ' "$EVENTS_FILE")
+
+    if [ -z "$OUT" ]; then
+      if [ "$SHOW_ALL" = "true" ]; then
+        echo "OK: no run entities found project_id=$PROJECT_ID"
+      else
+        echo "OK: no active runs found project_id=$PROJECT_ID"
+      fi
+      exit 0
+    fi
+
+    echo "$OUT"
+  '';
+
+  processSlots = pkgs.writeShellScript "process-slots" ''
+    ${sharedPrelude}
+
+    SHOW_ALL=false
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --all)
+          SHOW_ALL=true
+          shift
+          ;;
+        *)
+          echo "ERROR: unknown argument: $1" >&2
+          exit 1
+          ;;
+      esac
+    done
+
+    if [ ! -s "$EVENTS_FILE" ]; then
+      echo "OK: no slot events found project_id=$PROJECT_ID"
+      exit 0
+    fi
+
+    OUT=$(${pkgs.jq}/bin/jq -sr --arg all "$SHOW_ALL" '
+      def slot_key:
+        ((.slot // "") | tostring) + "|" + (.env // "");
+
+      def latest_by(f):
+        sort_by(f, (.timestamp // ""))
+        | group_by(f)
+        | map(last);
+
+      def is_released:
+        .event_type == "slot_released"
+        or .state == "released";
+
+      ([ .[] | select(.event_type == "slot_acquired" or .event_type == "slot_released") ] | latest_by(slot_key)) as $slot_events
+      | (if ($slot_events | length) > 0 then
+           $slot_events
+         else
+           ([ .[] | select(.service != null and .slot != null) ] | latest_by(slot_key))
+         end)
+      | .[]
+      | (if is_released then "false" else "true" end) as $busy
+      | select(($all == "true") or ($busy == "true"))
+      | "slot=\((.slot // "unknown")) env=\((.env // "unknown")) busy=\($busy) owner_run_id=\((.run_id // "unknown")) owner_scope=\((.owner_scope // "unknown")) state=\((.state // "unknown")) since=\((.timestamp // "unknown")) command=\((.command_name // "unknown"))"
+    ' "$EVENTS_FILE")
+
+    if [ -z "$OUT" ]; then
+      if [ "$SHOW_ALL" = "true" ]; then
+        echo "OK: no slot ownership entities found project_id=$PROJECT_ID"
+      else
+        echo "OK: no busy slots found project_id=$PROJECT_ID"
+      fi
+      exit 0
+    fi
+
+    echo "$OUT"
+  '';
+
+  processInspect = pkgs.writeShellScript "process-inspect" ''
+    ${sharedPrelude}
+
+    TARGET=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --id)
+          TARGET="$2"
+          shift 2
+          ;;
+        --)
+          shift
+          break
+          ;;
+        -*)
+          echo "ERROR: unknown argument: $1" >&2
+          exit 1
+          ;;
+        *)
+          if [ -z "$TARGET" ]; then
+            TARGET="$1"
+          else
+            echo "ERROR: unexpected extra argument: $1" >&2
+            exit 1
+          fi
+          shift
+          ;;
+      esac
+    done
+
+    if [ -z "$TARGET" ]; then
+      echo "Usage: process-inspect -- <id>" >&2
+      echo "   or: process-inspect --id <id>" >&2
+      exit 1
+    fi
+
+    if [ ! -s "$EVENTS_FILE" ]; then
+      echo "ERROR: no process events found project_id=$PROJECT_ID" >&2
+      exit 1
+    fi
+
+    MATCH_COUNT=$(${pkgs.jq}/bin/jq -sr --arg id "$TARGET" '
+      def matches:
+        ((.run_id // "") == $id)
+        or ((.event_id // "") == $id)
+        or ((.service // "") == $id);
+      [ .[] | select(matches) ] | length
+    ' "$EVENTS_FILE")
+
+    if [ "$MATCH_COUNT" = "0" ]; then
+      echo "ERROR: no events found for id=$TARGET" >&2
+      exit 1
+    fi
+
+    ${pkgs.jq}/bin/jq -s --arg id "$TARGET" '
+      def matches:
+        ((.run_id // "") == $id)
+        or ((.event_id // "") == $id)
+        or ((.service // "") == $id);
+      [ .[] | select(matches) ] as $matched
+      | {
+          inspect_id: $id,
+          matched_events: ($matched | length),
+          latest: ($matched | sort_by(.timestamp // "") | last),
+          events: ($matched | sort_by(.timestamp // ""))
+        }
+    ' "$EVENTS_FILE"
+  '';
+
+  processGc = pkgs.writeShellScript "process-gc" ''
+    ${sharedPrelude}
+
+    APPLY=false
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --apply)
+          APPLY=true
+          shift
+          ;;
+        *)
+          echo "ERROR: unknown argument: $1" >&2
+          exit 1
+          ;;
+      esac
+    done
+
+    if [ ! -s "$EVENTS_FILE" ]; then
+      echo "OK: no process events found project_id=$PROJECT_ID"
+      exit 0
+    fi
+
+    CANDIDATES=$(${pkgs.jq}/bin/jq -sr '
+      def is_active:
+        .state == "starting"
+        or .state == "running"
+        or .state == "ready"
+        or .state == "degraded"
+        or .state == "waiting"
+        or .state == "busy";
+
+      def service_key:
+        (.service // "") + "|" + ((.slot // "") | tostring) + "|" + (.env // "");
+
+      def latest_by(f):
+        sort_by(f, (.timestamp // ""))
+        | group_by(f)
+        | map(last);
+
+      ([ .[] | select(.service != null and .service != "") ] | latest_by(service_key))
+      | .[]
+      | select(is_active and (.pid != null))
+      | [.service, (.slot // ""), (.env // ""), (.run_id // ""), (.pid | tostring), (.log_path // "")]
+      | @tsv
+    ' "$EVENTS_FILE")
+
+    if [ -z "$CANDIDATES" ]; then
+      echo "OK: no GC candidates found project_id=$PROJECT_ID"
+      exit 0
+    fi
+
+    FOUND=0
+    APPLIED=0
+    RUN_FOUND=0
+    RUN_APPLIED=0
+
+    while IFS=$'\t' read -r SERVICE SLOT ENV RUN_ID PID LOG_PATH; do
+      if [ -z "$PID" ]; then
+        continue
+      fi
+
+      if kill -0 "$PID" 2>/dev/null; then
+        continue
+      fi
+
+      FOUND=$((FOUND + 1))
+      echo "WARN: orphan detected service=$SERVICE slot=''${SLOT:-unknown} env=''${ENV:-unknown} pid=$PID run_id=''${RUN_ID:-unknown}"
+
+      if [ "$APPLY" = "true" ]; then
+        ${emitEvent} \
+          --event-type service_orphaned \
+          --state orphaned \
+          --service "$SERVICE" \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --run-id "$RUN_ID" \
+          --pid "$PID" \
+          --log-path "$LOG_PATH" \
+          --wait-reason "gc_detected_dead_pid" >/dev/null 2>&1 || true
+        APPLIED=$((APPLIED + 1))
+        echo "OK: orphan marked service=$SERVICE slot=''${SLOT:-unknown} env=''${ENV:-unknown} pid=$PID"
+      fi
+    done <<< "$CANDIDATES"
+
+    RUN_CANDIDATES=$(${pkgs.jq}/bin/jq -sr '
+      def is_active:
+        .state == "starting"
+        or .state == "running"
+        or .state == "waiting"
+        or .state == "busy";
+
+      def run_key:
+        (.run_id // "");
+
+      def latest_by(f):
+        sort_by(f, (.timestamp // ""))
+        | group_by(f)
+        | map(last);
+
+      ([ .[] | select(.run_id != null and .run_id != "" and (.event_type == "run_started" or .event_type == "run_finished")) ] | latest_by(run_key))
+      | .[]
+      | select(is_active and (.pid != null))
+      | [.run_id, (.pid | tostring), (.command_name // "unknown"), ((.slot // "unknown") | tostring), (.env // "unknown")]
+      | @tsv
+    ' "$EVENTS_FILE")
+
+    while IFS=$'\t' read -r RUN_ID PID COMMAND SLOT ENV; do
+      if [ -z "$RUN_ID" ] || [ -z "$PID" ]; then
+        continue
+      fi
+
+      if kill -0 "$PID" 2>/dev/null; then
+        continue
+      fi
+
+      RUN_FOUND=$((RUN_FOUND + 1))
+      echo "WARN: stale run detected run_id=$RUN_ID pid=$PID command=''${COMMAND:-unknown} slot=''${SLOT:-unknown} env=''${ENV:-unknown}"
+
+      if [ "$APPLY" = "true" ]; then
+        ${emitEvent} \
+          --event-type run_finished \
+          --state failed \
+          --run-id "$RUN_ID" \
+          --command "$COMMAND" \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --pid "$PID" \
+          --wait-reason "gc_detected_dead_run_pid" \
+          --last-error "run process no longer exists" >/dev/null 2>&1 || true
+        RUN_APPLIED=$((RUN_APPLIED + 1))
+        echo "OK: stale run marked failed run_id=$RUN_ID"
+      fi
+    done <<< "$RUN_CANDIDATES"
+
+    if [ "$FOUND" -eq 0 ] && [ "$RUN_FOUND" -eq 0 ]; then
+      echo "OK: no orphaned active processes found project_id=$PROJECT_ID"
+      exit 0
+    fi
+
+    if [ "$APPLY" = "true" ]; then
+      echo "OK: process gc complete orphaned_marked=$APPLIED stale_runs_marked=$RUN_APPLIED"
+    else
+      echo "INFO: process gc dry-run complete orphans_found=$FOUND stale_runs_found=$RUN_FOUND (re-run with --apply to reconcile)"
+    fi
+  '';
+
+  serviceEvents = pkgs.writeShellScript "process-service-events" ''
+    ${sharedPrelude}
+
+    SERVICE=""
+    SLOT_FILTER=""
+    ENV_FILTER=""
+    LIMIT="200"
+
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --service) SERVICE="$2"; shift 2 ;;
+        --slot) SLOT_FILTER="$2"; shift 2 ;;
+        --env) ENV_FILTER="$2"; shift 2 ;;
+        --limit) LIMIT="$2"; shift 2 ;;
+        *)
+          echo "ERROR: unknown argument: $1" >&2
+          exit 1
+          ;;
+      esac
+    done
+
+    if [ -z "$SERVICE" ]; then
+      echo "Usage: process-service-events --service <name> [--slot <slot>] [--env <env>] [--limit <n>]" >&2
+      exit 1
+    fi
+
+    if [ ! -s "$EVENTS_FILE" ]; then
+      echo "OK: no events found service=$SERVICE project_id=$PROJECT_ID"
+      exit 0
+    fi
+
+    OUT=$(${pkgs.jq}/bin/jq -src \
+      --arg service "$SERVICE" \
+      --arg slot "$SLOT_FILTER" \
+      --arg env "$ENV_FILTER" \
+      --arg limit "$LIMIT" '
+      [ .[]
+        | select((.service // "") == $service)
+        | select(($slot == "") or (((.slot // "") | tostring) == $slot))
+        | select(($env == "") or ((.env // "") == $env))
+      ]
+      | sort_by(.timestamp // "")
+      | if (($limit | tonumber?) // 0) > 0 then
+          .[-(($limit | tonumber?) // 0):]
+        else
+          .
+        end
+      | .[]
+    ' "$EVENTS_FILE")
+
+    if [ -z "$OUT" ]; then
+      echo "OK: no events matched service=$SERVICE slot=''${SLOT_FILTER:-any} env=''${ENV_FILTER:-any}"
+      exit 0
+    fi
+
+    echo "$OUT"
+  '';
+
+  serviceLogs = pkgs.writeShellScript "process-service-logs" ''
+    ${sharedPrelude}
+
+    SERVICE=""
+    SLOT_FILTER=""
+    ENV_FILTER=""
+    FOLLOW=false
+    LINES="200"
+
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --service) SERVICE="$2"; shift 2 ;;
+        --slot) SLOT_FILTER="$2"; shift 2 ;;
+        --env) ENV_FILTER="$2"; shift 2 ;;
+        --lines) LINES="$2"; shift 2 ;;
+        --follow|-f) FOLLOW=true; shift ;;
+        *)
+          echo "ERROR: unknown argument: $1" >&2
+          exit 1
+          ;;
+      esac
+    done
+
+    if [ -z "$SERVICE" ]; then
+      echo "Usage: process-service-logs --service <name> [--slot <slot>] [--env <env>] [--lines <n>] [--follow]" >&2
+      exit 1
+    fi
+
+    case "$LINES" in
+      *[!0-9]*|"")
+        echo "ERROR: --lines must be a positive integer (got '$LINES')" >&2
+        exit 1
+        ;;
+      *)
+        ;;
+    esac
+
+    if [ -z "$SLOT_FILTER" ]; then
+      SLOT_FILTER="''${SLOT:-''${!SLOT_VAR:-}}"
+    fi
+    if [ -z "$ENV_FILTER" ]; then
+      ENV_FILTER="''${ENV:-''${!ENV_VAR:-}}"
+    fi
+
+    if [ ! -s "$EVENTS_FILE" ]; then
+      echo "ERROR: no process events found; cannot resolve log path service=$SERVICE" >&2
+      exit 1
+    fi
+
+    LOG_PATH=$(${pkgs.jq}/bin/jq -sr \
+      --arg service "$SERVICE" \
+      --arg slot "$SLOT_FILTER" \
+      --arg env "$ENV_FILTER" '
+      [ .[]
+        | select((.service // "") == $service)
+        | select(($slot == "") or (((.slot // "") | tostring) == $slot))
+        | select(($env == "") or ((.env // "") == $env))
+        | select((.log_path // "") != "")
+      ]
+      | sort_by(.timestamp // "")
+      | (last | .log_path) // ""
+    ' "$EVENTS_FILE")
+
+    if [ -z "$LOG_PATH" ]; then
+      echo "ERROR: no log path recorded for service=$SERVICE slot=''${SLOT_FILTER:-any} env=''${ENV_FILTER:-any}" >&2
+      echo "HINT: start the service once so it emits lifecycle events with log_path." >&2
+      exit 1
+    fi
+
+    if [ ! -f "$LOG_PATH" ]; then
+      echo "ERROR: log file not found path=$LOG_PATH service=$SERVICE" >&2
+      exit 1
+    fi
+
+    if [ "$FOLLOW" = "true" ]; then
+      exec ${pkgs.coreutils}/bin/tail -n "$LINES" -f "$LOG_PATH"
+    fi
+    exec ${pkgs.coreutils}/bin/tail -n "$LINES" "$LOG_PATH"
+  '';
+
+  serviceStatus = pkgs.writeShellScript "process-service-status" ''
+    ${sharedPrelude}
+
+    SERVICE=""
+    SLOT_FILTER=""
+    ENV_FILTER=""
+
+    emit_var() {
+      local key="$1"
+      local value="$2"
+      printf '%s=%q\n' "$key" "$value"
+    }
+
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --service) SERVICE="$2"; shift 2 ;;
+        --slot) SLOT_FILTER="$2"; shift 2 ;;
+        --env) ENV_FILTER="$2"; shift 2 ;;
+        *)
+          echo "ERROR: unknown argument: $1" >&2
+          exit 1
+          ;;
+      esac
+    done
+
+    if [ -z "$SERVICE" ]; then
+      echo "Usage: process-service-status --service <name> [--slot <slot>] [--env <env>]" >&2
+      exit 1
+    fi
+
+    if [ -z "$SLOT_FILTER" ]; then
+      SLOT_FILTER="''${SLOT:-''${!SLOT_VAR:-}}"
+    fi
+    if [ -z "$ENV_FILTER" ]; then
+      ENV_FILTER="''${ENV:-''${!ENV_VAR:-}}"
+    fi
+
+    DISCOVERY_SCOPE="$(infer_discovery_scope)"
+
+    if [ "$DISCOVERY_SCOPE" = "local" ]; then
+      emit_var "REGISTRY_FOUND" "0"
+      emit_var "REGISTRY_RUNNING" "false"
+      emit_var "REGISTRY_SCOPE" "local"
+      emit_var "REGISTRY_STATE" "local_only"
+      emit_var "OWNER_RUN_ID" ""
+      emit_var "OWNER_SCOPE" ""
+      emit_var "EPHEMERAL_ROOT" ""
+      emit_var "WAIT_REASON" ""
+      emit_var "LOG_PATH" ""
+      emit_var "SLOT_OWNER" ""
+      exit 0
+    fi
+
+    if [ ! -s "$EVENTS_FILE" ]; then
+      emit_var "REGISTRY_FOUND" "0"
+      emit_var "REGISTRY_RUNNING" "false"
+      emit_var "REGISTRY_SCOPE" "global"
+      emit_var "REGISTRY_STATE" "unknown"
+      emit_var "OWNER_RUN_ID" ""
+      emit_var "OWNER_SCOPE" ""
+      emit_var "EPHEMERAL_ROOT" ""
+      emit_var "WAIT_REASON" ""
+      emit_var "LOG_PATH" ""
+      emit_var "SLOT_OWNER" ""
+      exit 0
+    fi
+
+    MATCH=$(${pkgs.jq}/bin/jq -src \
+      --arg service "$SERVICE" \
+      --arg slot "$SLOT_FILTER" \
+      --arg env "$ENV_FILTER" '
+      [ .[]
+        | select((.service // "") == $service)
+        | select(($slot == "") or (((.slot // "") | tostring) == $slot))
+        | select(($env == "") or ((.env // "") == $env))
+      ]
+      | sort_by(.timestamp // "")
+      | (last // {})
+    ' "$EVENTS_FILE")
+
+    if [ "$MATCH" = "{}" ]; then
+      emit_var "REGISTRY_FOUND" "0"
+      emit_var "REGISTRY_RUNNING" "false"
+      emit_var "REGISTRY_SCOPE" "global"
+      emit_var "REGISTRY_STATE" "unknown"
+      emit_var "OWNER_RUN_ID" ""
+      emit_var "OWNER_SCOPE" ""
+      emit_var "EPHEMERAL_ROOT" ""
+      emit_var "WAIT_REASON" ""
+      emit_var "LOG_PATH" ""
+      emit_var "SLOT_OWNER" ""
+      exit 0
+    fi
+
+    STATE=$(echo "$MATCH" | ${pkgs.jq}/bin/jq -r '.state // "unknown"')
+    OWNER_RUN_ID=$(echo "$MATCH" | ${pkgs.jq}/bin/jq -r '.run_id // ""')
+    OWNER_SCOPE=$(echo "$MATCH" | ${pkgs.jq}/bin/jq -r '.owner_scope // ""')
+    EPHEMERAL_ROOT=$(echo "$MATCH" | ${pkgs.jq}/bin/jq -r '.ephemeral_root // ""')
+    WAIT_REASON=$(echo "$MATCH" | ${pkgs.jq}/bin/jq -r '.wait_reason // ""')
+    LOG_PATH=$(echo "$MATCH" | ${pkgs.jq}/bin/jq -r '.log_path // ""')
+
+    SLOT_OWNER=$(${pkgs.jq}/bin/jq -sr \
+      --arg slot "$SLOT_FILTER" \
+      --arg env "$ENV_FILTER" '
+      [ .[]
+        | select(.event_type == "slot_acquired" or .event_type == "slot_released")
+        | select(($slot == "") or (((.slot // "") | tostring) == $slot))
+        | select(($env == "") or ((.env // "") == $env))
+      ]
+      | sort_by(.timestamp // "")
+      | (last | .run_id) // ""
+    ' "$EVENTS_FILE")
+
+    REGISTRY_RUNNING="false"
+    case "$STATE" in
+      starting|running|ready|degraded|waiting|busy)
+        REGISTRY_RUNNING="true"
+        ;;
+    esac
+
+    emit_var "REGISTRY_FOUND" "1"
+    emit_var "REGISTRY_RUNNING" "$REGISTRY_RUNNING"
+    emit_var "REGISTRY_SCOPE" "global"
+    emit_var "REGISTRY_STATE" "$STATE"
+    emit_var "OWNER_RUN_ID" "$OWNER_RUN_ID"
+    emit_var "OWNER_SCOPE" "$OWNER_SCOPE"
+    emit_var "EPHEMERAL_ROOT" "$EPHEMERAL_ROOT"
+    emit_var "WAIT_REASON" "$WAIT_REASON"
+    emit_var "LOG_PATH" "$LOG_PATH"
+    emit_var "SLOT_OWNER" "$SLOT_OWNER"
+  '';
+in
+{
+  inherit
+    registryRoot
+    emitEvent
+    processStatus
+    processSlots
+    processRuns
+    processInspect
+    processGc
+    serviceEvents
+    serviceLogs
+    serviceStatus
+    ;
+}

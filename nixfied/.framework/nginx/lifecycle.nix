@@ -8,6 +8,7 @@
 
 let
   cfg = project.modules.nginx or { };
+  processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   nginx = templates.nginx;
   portVarHttp = slots.portVarName (cfg.portKeyHttp or "http");
   portVarHttps = slots.portVarName (cfg.portKeyHttps or "https");
@@ -72,6 +73,14 @@ let
       exit 1
     fi
 
+    ${processRegistry.emitEvent} \
+      --event-type service_starting \
+      --service nginx \
+      --state starting \
+      --slot "$SLOT" \
+      --env "$ENV" \
+      --log-path "$NGINX_DIR/logs/error.log" >/dev/null 2>&1 || true
+
     ${nginx}/bin/nginx -c "$CONF" -g 'daemon off;'
   '';
 
@@ -85,9 +94,32 @@ let
       PID=$(cat "$PID_FILE" 2>/dev/null || true)
       if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
         ${nginx}/bin/nginx -c "$NGINX_DIR/conf/nginx.conf" -s quit || true
+        ${processRegistry.emitEvent} \
+          --event-type service_stopped \
+          --service nginx \
+          --state stopped \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --pid "$PID" \
+          --log-path "$NGINX_DIR/logs/error.log" >/dev/null 2>&1 || true
       else
         rm -f "$PID_FILE"
+        ${processRegistry.emitEvent} \
+          --event-type service_stopped \
+          --service nginx \
+          --state stopped \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --log-path "$NGINX_DIR/logs/error.log" >/dev/null 2>&1 || true
       fi
+    else
+      ${processRegistry.emitEvent} \
+        --event-type service_stopped \
+        --service nginx \
+        --state stopped \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --log-path "$NGINX_DIR/logs/error.log" >/dev/null 2>&1 || true
     fi
   '';
 

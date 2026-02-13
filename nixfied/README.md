@@ -40,6 +40,7 @@ the model to follow it.**
 - [Ephemeral environments](#ephemeral-environments)
 - [Module apps](#module-apps)
 - [Run registry](#run-registry)
+- [Process-first visibility and reuse semantics](#process-first-visibility-and-reuse-semantics)
 - [Optional modules](#optional-modules)
 - [Supervisor (process-compose)](#supervisor-process-compose)
 - [Dev shell and packages](#dev-shell-and-packages)
@@ -224,6 +225,7 @@ nixfied/
       builders.nix     # mkApp / mkAppScript / withTiming
       summary.nix      # summary parser for CI output
       run-registry.nix # run tracking with meta.json + background mode
+      process-registry.nix # global process/service/run registry + diagnostics
       parallel.nix     # parallel runner generation
       process.nix      # signal handler + process manager
       port-utils.nix   # port cleanup + conflict checker
@@ -499,6 +501,9 @@ Exported functions:
 - **port-utils.nix** - `mkPortCleanup`, `mkPortConflictChecker`
 - **process.nix** - `mkSignalHandler`, `mkProcessManager`
 - **run-registry.nix** - `runRegistryStart` (run tracking with meta.json)
+- **process-registry.nix** - `emitEvent`, `processStatus`, `processSlots`,
+  `processRuns`, `processInspect`, `processGc`, `serviceStatus`,
+  `serviceEvents`, `serviceLogs` (global process-first visibility)
 
 ## CI pipeline DSL
 
@@ -636,6 +641,11 @@ Supervisor apps (when `supervisor.enable = true`):
 
 Utility apps (always available):
 - `check-ports`, `ports`
+- `process::status`, `process::slots`, `process::runs`, `process::inspect`, `process::gc`
+
+Compatibility aliases:
+- `runtime::status`, `runtime::ps`, `runtime::slots`, `runtime::runs`,
+  `runtime::inspect`, `runtime::gc` (deprecated; forward to `process::*`)
 
 All module apps and supervisor apps require explicit env selection.
 Set `PROJECT_ENV` before running `up`, `down`, `svc-*`, or any
@@ -650,6 +660,110 @@ Each run creates a directory with `meta.json` (status, timing, exit code) and
 
 Used by CI `--bg` mode to detach runs into the background. The runs root
 defaults to `/tmp/<project-id>-runs` (configurable via `ci.runsRoot`).
+
+## Process-first visibility and reuse semantics
+
+Nixfied now includes a process-first runtime registry to make cross-run
+observability explicit, especially when CI runs inside ephemeral roots.
+
+Problem this solves:
+- `MFM_KEEP_SERVICES=1` style behavior is local to one command invocation.
+- Ephemeral runs use isolated roots and often clean up on success, which can
+  hide runtime metadata from later status queries.
+- Service status checks based only on slot/env-local PID/state files can miss
+  processes started from another root.
+- Long CI readiness waits can look "stuck" without a global view of active runs
+  and wait reasons.
+
+### Command surface
+
+Process commands:
+- `nix run .#process::status`
+- `nix run .#process::status -- --all`
+- `nix run .#process::slots`
+- `nix run .#process::runs`
+- `nix run .#process::inspect -- <id>`
+- `nix run .#process::gc`
+- `nix run .#process::gc -- --apply`
+
+Service-level observability extensions:
+- `nix run .#service::<name>::log -- [--lines N] [--follow]`
+- `nix run .#service::<name>::logs -- [--lines N] [--follow]` (compat alias)
+- `nix run .#service::<name>::events -- [--limit N]`
+- `nix run .#service::<name>::status` (local + global registry merge)
+
+Extended `service::<name>::status` fields:
+- `scope`
+- `owner_run_id`
+- `owner_scope`
+- `ephemeral_root`
+- `registry_state`
+- `slot_owner`
+- `wait_reason`
+- `log_path`
+
+### Reuse and discovery policy controls
+
+Public env controls:
+- `SERVICE_REUSE_POLICY=never|same-root|same-slot|cross-run`
+- `SERVICE_OWNER_SCOPE=ephemeral|persistent`
+- `SERVICE_DISCOVERY_SCOPE=local|global`
+
+Defaults are inferred from execution context and can be overridden:
+- ephemeral execution defaults to `same-root`, `ephemeral`, `local`
+- persistent execution defaults to `same-slot`, `persistent`, `global`
+
+Validation rules:
+- `cross-run` requires `SERVICE_OWNER_SCOPE=persistent` and
+  `SERVICE_DISCOVERY_SCOPE=global`
+- `same-root` requires `SERVICE_OWNER_SCOPE=ephemeral` and
+  `SERVICE_DISCOVERY_SCOPE=local`
+- invalid combinations fail fast with an `ERROR:` and corrective hint
+
+### Registry model
+
+Default registry root:
+- `/tmp/nixfied-runtime/<project-id>` (configurable via
+  `project.process.registryRoot` in `nixfied/project/conf.nix`)
+
+Storage:
+- `events.jsonl` (append-only event log)
+- `snapshot.json` (materialized query snapshot)
+- `locks/*.lock` (coordination)
+
+Core event types:
+- `run_started`, `run_finished`
+- `slot_acquired`, `slot_released`
+- `service_starting`, `service_ready`, `service_degraded`, `service_stopped`,
+  `service_orphaned`
+- `readiness_progress`
+
+Representative event fields:
+- `event_id`, `event_type`, `timestamp`, `run_id`, `command_name`, `project_id`
+- `service`, `slot`, `env`, `profile`, `pid`, `pgid`, `state`
+- `owner_scope`, `reuse_policy`, `discovery_scope`, `ephemeral_root`
+- `readiness` metadata, `wait_reason`, `log_path`
+
+### Delivery and migration
+
+Phase plan:
+- Phase 1: registry writes + `process::*` command namespace
+- Phase 2: dual-source service status + service events/log operations
+- Phase 3: explicit policy semantics with strict validation
+- Phase 4: GC/orphan hardening + deprecation guidance for older implicit keep
+  semantics
+
+Compatibility:
+- existing defaults remain non-breaking
+- `runtime::*` aliases remain available during migration
+- status field additions are additive key/value fields
+
+Acceptance goals:
+- active services/runs are always listable regardless of ephemeral roots
+- slot ownership and contention reason are visible from one command
+- reuse behavior is explicit, documented, and test-covered
+- cross-root status is no longer silently misleading
+- CI + registry data provides postmortem traceability
 
 ## Optional modules
 

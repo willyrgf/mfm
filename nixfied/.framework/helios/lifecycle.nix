@@ -8,6 +8,7 @@
 
 let
   lib = pkgs.lib;
+  processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   helios = config.package;
   rpcPortVar = slots.portVarName config.portKeyRpc;
   executionRpcPortVar = slots.portVarName config.executionRpcPortKey;
@@ -30,7 +31,9 @@ let
     HELIOS_NETWORK="''${HELIOS_NETWORK:-${config.network or "local"}}"
     HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${config.executionRpcUrl or ""}}"
     HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${config.consensusRpcUrl or ""}}"
-    HELIOS_DEFAULT_CONSENSUS_RPC_URL="''${HELIOS_DEFAULT_CONSENSUS_RPC_URL:-${config.defaultConsensusRpcUrl or ""}}"
+    HELIOS_DEFAULT_CONSENSUS_RPC_URL="''${HELIOS_DEFAULT_CONSENSUS_RPC_URL:-${
+      config.defaultConsensusRpcUrl or ""
+    }}"
     HELIOS_CHECKPOINT="''${HELIOS_CHECKPOINT:-${config.checkpoint or ""}}"
 
     if [ -z "$HELIOS_EXECUTION_RPC_URL" ] && [ -n "$HELIOS_EXECUTION_PORT" ]; then
@@ -87,6 +90,14 @@ let
     if [ -f "$HELIOS_PID_FILE" ]; then
       PID=$(cat "$HELIOS_PID_FILE" 2>/dev/null || true)
       if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        ${processRegistry.emitEvent} \
+          --event-type service_ready \
+          --service helios \
+          --state ready \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --pid "$PID" \
+          --log-path "$HELIOS_LOG_FILE" >/dev/null 2>&1 || true
         echo "OK: helios already running pid=$PID rpc_port=$HELIOS_RPC_PORT"
         exit 0
       fi
@@ -139,28 +150,6 @@ let
           continue
         fi
 
-        # Prefer the latest finalized root first. This reduces light-client catch-up time versus
-        # pinning to the start of the finalized epoch.
-        checkpoint="$(echo "$FINALIZED_JSON" | ${pkgs.jq}/bin/jq -r '.data.root // empty' 2>/dev/null || true)"
-        if echo "$checkpoint" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]{64}$'; then
-          BOOTSTRAP_URL="$CONS/eth/v1/beacon/light_client/bootstrap/$checkpoint"
-          if ${pkgs.curl}/bin/curl -fsS --max-time 10 \
-            --retry 3 --retry-delay 1 --retry-max-time 30 \
-            -H 'accept: application/json' \
-            -o /dev/null \
-            "$BOOTSTRAP_URL" >/dev/null 2>&1; then
-            HELIOS_CONSENSUS_RPC_URL="$CONS"
-            HELIOS_CHECKPOINT="$checkpoint"
-            echo "INFO: derived HELIOS_CHECKPOINT=$HELIOS_CHECKPOINT (source=finalized cons=$HELIOS_CONSENSUS_RPC_URL)" >&2
-            DERIVED=1
-            break
-          fi
-          echo "WARN: finalized checkpoint root not bootstrap-ready yet; falling back to epoch-boundary root cons=$CONS root=$checkpoint" >&2
-        else
-          echo "WARN: invalid finalized checkpoint root from consensus endpoint cons=$CONS root='$checkpoint'" >&2
-        fi
-
-        # Fallback for endpoints that only serve bootstrap payloads for epoch-boundary roots.
         slot="$(echo "$FINALIZED_JSON" | ${pkgs.jq}/bin/jq -r '.data.header.message.slot|tonumber' 2>/dev/null || true)"
         case "$slot" in
           *[!0-9]*|"")
@@ -181,14 +170,14 @@ let
           continue
         fi
 
-        epoch_checkpoint="$(echo "$EPOCH_JSON" | ${pkgs.jq}/bin/jq -r '.data.root // empty' 2>/dev/null || true)"
-        if ! echo "$epoch_checkpoint" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]{64}$'; then
-          echo "WARN: invalid epoch-boundary checkpoint root from consensus endpoint cons=$CONS root='$epoch_checkpoint'" >&2
+        checkpoint="$(echo "$EPOCH_JSON" | ${pkgs.jq}/bin/jq -r '.data.root // empty' 2>/dev/null || true)"
+        if ! echo "$checkpoint" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]{64}$'; then
+          echo "WARN: invalid checkpoint root from consensus endpoint cons=$CONS root='$checkpoint'" >&2
           continue
         fi
 
         # Sanity-check that the light-client bootstrap endpoint is served for this checkpoint.
-        BOOTSTRAP_URL="$CONS/eth/v1/beacon/light_client/bootstrap/$epoch_checkpoint"
+        BOOTSTRAP_URL="$CONS/eth/v1/beacon/light_client/bootstrap/$checkpoint"
         if ! BOOTSTRAP_ERR="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
           --retry 3 --retry-delay 1 --retry-max-time 30 \
           -H 'accept: application/json' \
@@ -200,8 +189,8 @@ let
         fi
 
         HELIOS_CONSENSUS_RPC_URL="$CONS"
-        HELIOS_CHECKPOINT="$epoch_checkpoint"
-        echo "INFO: derived HELIOS_CHECKPOINT=$HELIOS_CHECKPOINT (source=epoch_boundary cons=$HELIOS_CONSENSUS_RPC_URL)" >&2
+        HELIOS_CHECKPOINT="$checkpoint"
+        echo "INFO: derived HELIOS_CHECKPOINT=$HELIOS_CHECKPOINT (cons=$HELIOS_CONSENSUS_RPC_URL)" >&2
         DERIVED=1
         break
       done
@@ -244,6 +233,15 @@ let
     CHILD_PID=$!
     echo "$CHILD_PID" > "$HELIOS_PID_FILE"
 
+    ${processRegistry.emitEvent} \
+      --event-type service_starting \
+      --service helios \
+      --state starting \
+      --slot "$SLOT" \
+      --env "$ENV" \
+      --pid "$CHILD_PID" \
+      --log-path "$HELIOS_LOG_FILE" >/dev/null 2>&1 || true
+
     cleanup() {
       if [ -n "''${CHILD_PID:-}" ] && kill -0 "$CHILD_PID" 2>/dev/null; then
         kill "$CHILD_PID" 2>/dev/null || true
@@ -268,13 +266,63 @@ let
     done
 
     if [ "$READY" -ne 1 ]; then
+      ${processRegistry.emitEvent} \
+        --event-type service_degraded \
+        --service helios \
+        --state degraded \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --pid "$CHILD_PID" \
+        --log-path "$HELIOS_LOG_FILE" \
+        --wait-reason "failed_startup_health" \
+        --last-error "helios failed initial health checks" >/dev/null 2>&1 || true
       echo "ERROR: helios failed to become healthy. log=$HELIOS_LOG_FILE" >&2
-      tail -50 "$HELIOS_LOG_FILE" >&2 || true
+      if [ -f "$HELIOS_LOG_FILE" ]; then
+        echo "INFO: helios log tail path=$HELIOS_LOG_FILE lines=50" >&2
+        tail -50 "$HELIOS_LOG_FILE" >&2 || true
+      else
+        echo "WARN: helios log file missing path=$HELIOS_LOG_FILE" >&2
+      fi
       exit 1
     fi
 
+    ${processRegistry.emitEvent} \
+      --event-type service_ready \
+      --service helios \
+      --state ready \
+      --slot "$SLOT" \
+      --env "$ENV" \
+      --pid "$CHILD_PID" \
+      --log-path "$HELIOS_LOG_FILE" >/dev/null 2>&1 || true
+
     echo "INFO: helios started pid=$CHILD_PID rpc_port=$HELIOS_RPC_PORT"
+    set +e
     wait "$CHILD_PID"
+    RC=$?
+    set -e
+
+    if [ "$RC" -eq 0 ]; then
+      ${processRegistry.emitEvent} \
+        --event-type service_stopped \
+        --service helios \
+        --state stopped \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --pid "$CHILD_PID" \
+        --log-path "$HELIOS_LOG_FILE" >/dev/null 2>&1 || true
+    else
+      ${processRegistry.emitEvent} \
+        --event-type service_degraded \
+        --service helios \
+        --state degraded \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --pid "$CHILD_PID" \
+        --log-path "$HELIOS_LOG_FILE" \
+        --wait-reason "helios_process_exit code=$RC" \
+        --last-error "helios process exited non-zero" >/dev/null 2>&1 || true
+    fi
+    exit "$RC"
   '';
 
   stop = pkgs.writeShellScript "helios-stop" ''
@@ -282,6 +330,13 @@ let
     ${runtimePrelude}
 
     if [ ! -f "$HELIOS_PID_FILE" ]; then
+      ${processRegistry.emitEvent} \
+        --event-type service_stopped \
+        --service helios \
+        --state stopped \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --log-path "$HELIOS_LOG_FILE" >/dev/null 2>&1 || true
       echo "OK: helios not running"
       exit 0
     fi
@@ -289,6 +344,14 @@ let
     PID=$(cat "$HELIOS_PID_FILE" 2>/dev/null || true)
     if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
       rm -f "$HELIOS_PID_FILE"
+      ${processRegistry.emitEvent} \
+        --event-type service_stopped \
+        --service helios \
+        --state stopped \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --pid "$PID" \
+        --log-path "$HELIOS_LOG_FILE" >/dev/null 2>&1 || true
       echo "OK: helios pid file cleaned"
       exit 0
     fi
@@ -297,6 +360,14 @@ let
     for _ in $(seq 1 40); do
       if ! kill -0 "$PID" 2>/dev/null; then
         rm -f "$HELIOS_PID_FILE"
+        ${processRegistry.emitEvent} \
+          --event-type service_stopped \
+          --service helios \
+          --state stopped \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --pid "$PID" \
+          --log-path "$HELIOS_LOG_FILE" >/dev/null 2>&1 || true
         echo "OK: helios stopped pid=$PID"
         exit 0
       fi
@@ -305,6 +376,14 @@ let
 
     kill -KILL "$PID" 2>/dev/null || true
     rm -f "$HELIOS_PID_FILE"
+    ${processRegistry.emitEvent} \
+      --event-type service_stopped \
+      --service helios \
+      --state stopped \
+      --slot "$SLOT" \
+      --env "$ENV" \
+      --pid "$PID" \
+      --log-path "$HELIOS_LOG_FILE" >/dev/null 2>&1 || true
     echo "WARN: helios force-killed pid=$PID"
   '';
 
@@ -329,7 +408,40 @@ let
       fi
     fi
 
-    echo "service=helios slot=$SLOT env=$ENV running=$RUNNING pid=''${PID:-unknown} rpc_port=$HELIOS_RPC_PORT network=$HELIOS_NETWORK"
+    LOCAL_RUNNING="$RUNNING"
+    REGISTRY_FOUND="0"
+    REGISTRY_RUNNING="false"
+    REGISTRY_STATE="unknown"
+    OWNER_RUN_ID=""
+    OWNER_SCOPE=""
+    EPHEMERAL_ROOT=""
+    WAIT_REASON=""
+    LOG_PATH=""
+    SLOT_OWNER=""
+    REGISTRY_SCOPE="global"
+
+    REG_OUT="$(${processRegistry.serviceStatus} --service helios --slot "$SLOT" --env "$ENV" 2>/dev/null || true)"
+    if [ -n "$REG_OUT" ]; then
+      eval "$REG_OUT"
+    fi
+
+    if [ "$RUNNING" != "true" ] && [ "$REGISTRY_RUNNING" = "true" ]; then
+      RUNNING=true
+    fi
+
+    SCOPE="none"
+    if [ "$LOCAL_RUNNING" = "true" ]; then
+      SCOPE="local"
+    elif [ "$REGISTRY_RUNNING" = "true" ]; then
+      SCOPE="global"
+    fi
+
+    EFFECTIVE_LOG_PATH="$HELIOS_LOG_FILE"
+    if [ -n "$LOG_PATH" ]; then
+      EFFECTIVE_LOG_PATH="$LOG_PATH"
+    fi
+
+    echo "service=helios slot=$SLOT env=$ENV running=$RUNNING pid=''${PID:-unknown} rpc_port=$HELIOS_RPC_PORT network=$HELIOS_NETWORK scope=$SCOPE owner_run_id=''${OWNER_RUN_ID:-unknown} owner_scope=''${OWNER_SCOPE:-unknown} ephemeral_root=''${EPHEMERAL_ROOT:-none} registry_state=''${REGISTRY_STATE:-unknown} slot_owner=''${SLOT_OWNER:-unknown} wait_reason=''${WAIT_REASON:-none} log_path=$EFFECTIVE_LOG_PATH"
 
     if [ "$RUNNING" = "true" ]; then
       exit 0
@@ -379,17 +491,6 @@ let
     set -euo pipefail
     ${runtimePrelude}
 
-    if [ ! -f "$HELIOS_PID_FILE" ]; then
-      echo "ERROR: helios not running (missing pid file) pid_file=$HELIOS_PID_FILE" >&2
-      exit 1
-    fi
-
-    PID=$(cat "$HELIOS_PID_FILE" 2>/dev/null || true)
-    if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
-      echo "ERROR: helios not running (stale pid file) pid_file=$HELIOS_PID_FILE pid=''${PID:-unknown}" >&2
-      exit 1
-    fi
-
     TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-300}"
     INTERVAL_SECS="''${HELIOS_READY_INTERVAL_SECS:-1}"
 
@@ -401,6 +502,33 @@ let
     esac
 
     start_ts="$(${pkgs.coreutils}/bin/date +%s)"
+
+    # HELIOS_START runs asynchronously in tests/helpers; wait for pid file creation
+    # so readiness checks do not fail before startup has finished writing runtime state.
+    while true; do
+      PID=""
+      PID_STATE="missing"
+      if [ -f "$HELIOS_PID_FILE" ]; then
+        PID=$(cat "$HELIOS_PID_FILE" 2>/dev/null || true)
+        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+          break
+        fi
+        PID_STATE="stale"
+      fi
+
+      now_ts="$(${pkgs.coreutils}/bin/date +%s)"
+      if [ $((now_ts - start_ts)) -ge "$TIMEOUT_SECS" ]; then
+        if [ "$PID_STATE" = "stale" ]; then
+          echo "ERROR: helios not running (stale pid file) pid_file=$HELIOS_PID_FILE pid=''${PID:-unknown}" >&2
+        else
+          echo "ERROR: helios not running (missing pid file) pid_file=$HELIOS_PID_FILE" >&2
+        fi
+        exit 1
+      fi
+
+      ${pkgs.coreutils}/bin/sleep "$INTERVAL_SECS"
+    done
+
     attempt=0
 
     while true; do
@@ -416,7 +544,25 @@ let
         exit 0
       fi
 
+      if [ "$HELIOS_NETWORK" = "local" ]; then
+        if ${healthCheck}
+        then
+          echo "OK: helios ready rpc_port=$HELIOS_RPC_PORT mode=local_chainid_fallback"
+          exit 0
+        fi
+      fi
+
       if [ $((attempt % 10)) -eq 0 ]; then
+        ${processRegistry.emitEvent} \
+          --event-type readiness_progress \
+          --service helios \
+          --state waiting \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --pid "$PID" \
+          --log-path "$HELIOS_LOG_FILE" \
+          --wait-reason "helios_ready_attempt=$attempt" >/dev/null 2>&1 || true
+
         ERR_MSG=""
         if [ -n "$RESP" ]; then
           ERR_MSG="$(echo "$RESP" | ${pkgs.jq}/bin/jq -r '.error.message // empty' 2>/dev/null || true)"

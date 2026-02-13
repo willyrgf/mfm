@@ -7,6 +7,7 @@
 
 let
   cfg = project.modules.postgres or { };
+  processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   pgPackage = cfg.package or pkgs.postgresql_16;
   pgDatabase = cfg.database or "app";
   portKey = cfg.portKey or "postgres";
@@ -61,7 +62,40 @@ let
       PID=$(head -1 "$PGDATA/postmaster.pid" 2>/dev/null || true)
     fi
 
-    echo "service=postgres slot=$SLOT env=$ENV port=$PGPORT pgdata=$PGDATA running=$RUNNING pid=''${PID:-unknown}"
+    LOCAL_RUNNING="$RUNNING"
+    REGISTRY_FOUND="0"
+    REGISTRY_RUNNING="false"
+    REGISTRY_STATE="unknown"
+    OWNER_RUN_ID=""
+    OWNER_SCOPE=""
+    EPHEMERAL_ROOT=""
+    WAIT_REASON=""
+    LOG_PATH=""
+    SLOT_OWNER=""
+    REGISTRY_SCOPE="global"
+
+    REG_OUT="$(${processRegistry.serviceStatus} --service postgres --slot "$SLOT" --env "$ENV" 2>/dev/null || true)"
+    if [ -n "$REG_OUT" ]; then
+      eval "$REG_OUT"
+    fi
+
+    if [ "$RUNNING" != "true" ] && [ "$REGISTRY_RUNNING" = "true" ]; then
+      RUNNING=true
+    fi
+
+    SCOPE="none"
+    if [ "$LOCAL_RUNNING" = "true" ]; then
+      SCOPE="local"
+    elif [ "$REGISTRY_RUNNING" = "true" ]; then
+      SCOPE="global"
+    fi
+
+    EFFECTIVE_LOG_PATH="$PGDATA/postgres.log"
+    if [ -n "$LOG_PATH" ]; then
+      EFFECTIVE_LOG_PATH="$LOG_PATH"
+    fi
+
+    echo "service=postgres slot=$SLOT env=$ENV port=$PGPORT pgdata=$PGDATA running=$RUNNING pid=''${PID:-unknown} scope=$SCOPE owner_run_id=''${OWNER_RUN_ID:-unknown} owner_scope=''${OWNER_SCOPE:-unknown} ephemeral_root=''${EPHEMERAL_ROOT:-none} registry_state=''${REGISTRY_STATE:-unknown} slot_owner=''${SLOT_OWNER:-unknown} wait_reason=''${WAIT_REASON:-none} log_path=$EFFECTIVE_LOG_PATH"
 
     if [ "$RUNNING" = "true" ]; then
       exit 0
@@ -135,6 +169,21 @@ let
     PGDATABASE="''${PGDATABASE:-${pgDatabase}}"
 
     exec ${pgPackage}/bin/psql "postgresql://localhost:$PGPORT/$PGDATABASE" "$@"
+  '';
+
+  logs = pkgs.writeShellScript "postgres-logs" ''
+    set -euo pipefail
+    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
+    eval "$SLOT_INFO_OUT"
+    exec ${processRegistry.serviceLogs} --service postgres --slot "$SLOT" --env "$ENV" "$@"
+  '';
+  log = logs;
+
+  events = pkgs.writeShellScript "postgres-events" ''
+    set -euo pipefail
+    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
+    eval "$SLOT_INFO_OUT"
+    exec ${processRegistry.serviceEvents} --service postgres --slot "$SLOT" --env "$ENV" "$@"
   '';
 
   publicApi = {
@@ -285,6 +334,27 @@ let
         details = "Opens psql connected to the configured slot/environment database.";
         usage = [ "nix run .#service::postgres::shell -- <psql-args>" ];
       };
+      log = {
+        script = log;
+        hook = "LOG";
+        summary = "Show PostgreSQL log";
+        details = "Shows PostgreSQL runtime log for the current slot/environment.";
+        usage = [ "nix run .#service::postgres::log -- [--lines N] [--follow]" ];
+      };
+      logs = {
+        script = logs;
+        hook = "LOGS";
+        summary = "Alias for service::postgres::log";
+        details = "Compatibility alias for service::postgres::log.";
+        usage = [ "nix run .#service::postgres::logs -- [--lines N] [--follow]" ];
+      };
+      events = {
+        script = events;
+        hook = "EVENTS";
+        summary = "Show PostgreSQL lifecycle events";
+        details = "Shows PostgreSQL lifecycle events from the global process registry for the current slot/environment.";
+        usage = [ "nix run .#service::postgres::events -- [--limit N]" ];
+      };
     };
   };
 in
@@ -309,6 +379,9 @@ in
     ready
     checkConfig
     shell
+    log
+    logs
+    events
     ;
 
   # Backup

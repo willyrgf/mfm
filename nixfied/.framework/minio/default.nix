@@ -6,6 +6,7 @@
 }:
 
 let
+  processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   config = import ./config.nix { inherit project; };
   lifecycle = import ./lifecycle.nix {
     inherit
@@ -15,6 +16,21 @@ let
       config
       ;
   };
+
+  logs = pkgs.writeShellScript "minio-logs" ''
+    set -euo pipefail
+    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
+    eval "$SLOT_INFO_OUT"
+    exec ${processRegistry.serviceLogs} --service minio --slot "$SLOT" --env "$ENV" "$@"
+  '';
+  log = logs;
+
+  events = pkgs.writeShellScript "minio-events" ''
+    set -euo pipefail
+    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
+    eval "$SLOT_INFO_OUT"
+    exec ${processRegistry.serviceEvents} --service minio --slot "$SLOT" --env "$ENV" "$@"
+  '';
   bucketMgmt = import ./bucket-management.nix {
     inherit
       pkgs
@@ -137,6 +153,27 @@ let
         details = "Applies a JSON policy file to a MinIO bucket.";
         usage = [ "nix run .#service::minio::policy-apply -- <bucket> <policy-file>" ];
       };
+      log = {
+        script = log;
+        hook = "LOG";
+        summary = "Show MinIO log";
+        details = "Shows MinIO runtime log for the current slot/environment.";
+        usage = [ "nix run .#service::minio::log -- [--lines N] [--follow]" ];
+      };
+      logs = {
+        script = logs;
+        hook = "LOGS";
+        summary = "Alias for service::minio::log";
+        details = "Compatibility alias for service::minio::log.";
+        usage = [ "nix run .#service::minio::logs -- [--lines N] [--follow]" ];
+      };
+      events = {
+        script = events;
+        hook = "EVENTS";
+        summary = "Show MinIO lifecycle events";
+        details = "Shows MinIO lifecycle events from the global process registry for the current slot/environment.";
+        usage = [ "nix run .#service::minio::events -- [--limit N]" ];
+      };
     };
   };
 in
@@ -166,6 +203,12 @@ in
     bucketDelete
     bucketList
     policyApply
+    ;
+
+  inherit
+    log
+    logs
+    events
     ;
 
   # Service API contract

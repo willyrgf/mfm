@@ -28,6 +28,7 @@ let
     inherit pkgs appApi;
   };
   process = import ./process.nix { inherit pkgs; };
+  processRegistry = import ./process-registry.nix { inherit pkgs project; };
   portUtils = import ./port-utils.nix { inherit pkgs; };
   parallel = import ./parallel.nix { inherit pkgs; };
   runRegistry = import ./run-registry.nix { inherit pkgs project; };
@@ -45,6 +46,18 @@ in
   inherit appApi;
   inherit serviceApi;
   inherit (process) mkSignalHandler mkProcessManager;
+  inherit (processRegistry)
+    processStatus
+    processSlots
+    processRuns
+    processInspect
+    processGc
+    emitEvent
+    serviceEvents
+    serviceLogs
+    serviceStatus
+    registryRoot
+    ;
   inherit (portUtils) mkPortCleanup mkPortConflictChecker;
   inherit (parallel) mkParallelRunner;
   inherit (runRegistry) runRegistryStart;

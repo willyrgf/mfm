@@ -45,6 +45,7 @@ let
 
   depsScript = project.install.deps or "";
   runtimePackages = project.tooling.runtimePackages or [ ];
+  processRegistry = import ./lib/process-registry.nix { inherit pkgs project; };
 
   lockDir = "/tmp";
   lockPrefix = "${projectId}-slot";
@@ -147,6 +148,13 @@ let
         echo "OK: Ephemeral state cleaned"
       fi
 
+      ${processRegistry.emitEvent} \
+        --event-type slot_released \
+        --state released \
+        --slot "''${${slotVar}:-}" \
+        --env "''${${envVar}:-}" \
+        --wait-reason "ephemeral_cleanup exit_code=$exit_code" >/dev/null 2>&1 || true
+
       if [ -n "''${${projectIdUpper}_SLOT_LOCK_FD:-}" ]; then
         eval "exec ${refLockFd}>&-" 2>/dev/null || true
       fi
@@ -188,6 +196,10 @@ let
 
       export ${envVar}="''${${envVar}:-test}"
 
+      if [ -z "''${RUN_ID:-}" ]; then
+        export RUN_ID="$(date +%Y%m%d-%H%M%S)-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+      fi
+
       export ${projectIdUpper}_EPHEMERAL_ROOT=$(${mkEphemeralRoot})
       export ${projectIdUpper}_EPHEMERAL=1
 
@@ -196,6 +208,13 @@ let
       echo "INFO: Root: ${refEphRoot}"
       echo "INFO: Slot: ${refEphSlot} (${slotVar}=''${${slotVar}}, ${envVar}=''${${envVar}})"
       echo ""
+
+      ${processRegistry.emitEvent} \
+        --event-type slot_acquired \
+        --state busy \
+        --slot "''${${slotVar}}" \
+        --env "''${${envVar}}" \
+        --wait-reason "ephemeral_start" >/dev/null 2>&1 || true
 
       source ${mkConditionalCleanup}
       trap _ephemeral_cleanup EXIT INT TERM

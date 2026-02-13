@@ -8,6 +8,7 @@
 
 let
   cfg = project.modules.postgres or { };
+  processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   postgres = cfg.package or pkgs.postgresql_16;
   portKey = cfg.portKey or "postgres";
   portVar = slots.portVarName portKey;
@@ -126,6 +127,15 @@ let
     if ${postgres}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
       # Verify the running instance is ours by checking PGDATA
       if [ -f "$PGDATA/postmaster.pid" ]; then
+        RUN_PID=$(head -1 "$PGDATA/postmaster.pid" 2>/dev/null || true)
+        ${processRegistry.emitEvent} \
+          --event-type service_ready \
+          --service postgres \
+          --state ready \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --pid "$RUN_PID" \
+          --log-path "$PGDATA/postgres.log" >/dev/null 2>&1 || true
         echo "OK: PostgreSQL already running on port $PGPORT"
         exit 0
       else
@@ -157,18 +167,48 @@ let
     chmod 700 "$PGSOCKET_DIR" 2>/dev/null || true
 
     echo "INFO: Starting PostgreSQL on port $PGPORT"
+    ${processRegistry.emitEvent} \
+      --event-type service_starting \
+      --service postgres \
+      --state starting \
+      --slot "$SLOT" \
+      --env "$ENV" \
+      --log-path "$PGDATA/postgres.log" >/dev/null 2>&1 || true
     ${postgres}/bin/pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -o "-p $PGPORT -k $PGSOCKET_DIR" start
 
     for i in $(seq 1 60); do
       if ${postgres}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
+        RUN_PID=$(head -1 "$PGDATA/postmaster.pid" 2>/dev/null || true)
+        ${processRegistry.emitEvent} \
+          --event-type service_ready \
+          --service postgres \
+          --state ready \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --pid "$RUN_PID" \
+          --log-path "$PGDATA/postgres.log" >/dev/null 2>&1 || true
         echo "OK: PostgreSQL ready on port $PGPORT"
         exit 0
       fi
       sleep 0.5
     done
 
+    ${processRegistry.emitEvent} \
+      --event-type service_degraded \
+      --service postgres \
+      --state degraded \
+      --slot "$SLOT" \
+      --env "$ENV" \
+      --log-path "$PGDATA/postgres.log" \
+      --wait-reason "failed_readiness" \
+      --last-error "postgres did not become ready in startup window" >/dev/null 2>&1 || true
     echo "ERROR: PostgreSQL failed to start. Check $PGDATA/postgres.log" >&2
-    tail -20 "$PGDATA/postgres.log" || true
+    if [ -f "$PGDATA/postgres.log" ]; then
+      echo "INFO: postgres log tail path=$PGDATA/postgres.log lines=20" >&2
+      tail -20 "$PGDATA/postgres.log" >&2 || true
+    else
+      echo "WARN: postgres log file missing path=$PGDATA/postgres.log" >&2
+    fi
     exit 1
   '';
 
@@ -177,8 +217,24 @@ let
     ${pgRuntimePrelude database}
 
     if [ -n "''${PGDATA:-}" ] && [ -f "$PGDATA/postmaster.pid" ]; then
+      RUN_PID=$(head -1 "$PGDATA/postmaster.pid" 2>/dev/null || true)
       echo "STOP: PostgreSQL at $PGDATA"
       ${postgres}/bin/pg_ctl -D "$PGDATA" stop -m fast 2>/dev/null || true
+      ${processRegistry.emitEvent} \
+        --event-type service_stopped \
+        --service postgres \
+        --state stopped \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --pid "$RUN_PID" \
+        --log-path "$PGDATA/postgres.log" >/dev/null 2>&1 || true
+    else
+      ${processRegistry.emitEvent} \
+        --event-type service_stopped \
+        --service postgres \
+        --state stopped \
+        --slot "$SLOT" \
+        --env "$ENV" >/dev/null 2>&1 || true
     fi
   '';
 

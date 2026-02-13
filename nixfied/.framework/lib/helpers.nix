@@ -131,6 +131,23 @@ let
       echo "$dir/$name"
     }
 
+    # print_log_tail PATH [lines]
+    # - print trailing log lines when available; emit WARN when log file is missing.
+    print_log_tail() {
+      local path="$1"
+      local lines="''${2:-50}"
+      if [ -z "$path" ]; then
+        echo "usage: print_log_tail <path> [lines]" >&2
+        return 1
+      fi
+      if [ -f "$path" ]; then
+        echo "INFO: log tail path=$path lines=$lines" >&2
+        tail -n "$lines" "$path" >&2 || true
+      else
+        echo "WARN: fixture log file missing path=$path" >&2
+      fi
+    }
+
     # run_hook ENV_VAR [args...]
     # - execute the command stored in ENV_VAR.
     run_hook() {
@@ -198,6 +215,12 @@ let
 
     # fixture_start_service SERVICE [profile] [timeout] [interval] [logfile] [keep_running]
     # - start service lifecycle from hook contract and register cleanup unless keep_running=1.
+    #
+    # Lifecycle policy invariants:
+    # - start hooks may return before the service is externally ready.
+    # - READY/HEALTH hooks must be safe to poll and deterministic when not ready.
+    # - fixtures must poll READY/HEALTH with timeout loops after start (never one-shot checks).
+    # - failure diagnostics must not introduce secondary errors (for example tailing missing logs).
     fixture_start_service() {
       local service="$1"
       local profile="''${2:-default}"
@@ -322,9 +345,8 @@ let
 
             if [ "$status_ok" -ne 1 ]; then
               echo "ERROR: fixture service start exited early service=$service pid=$pid hook=$start_hook" >&2
-              if [ -n "$logfile" ] && [ -f "$logfile" ]; then
-                echo "INFO: last 200 lines of log: $logfile" >&2
-                tail -200 "$logfile" >&2 || true
+              if [ -n "$logfile" ]; then
+                print_log_tail "$logfile" 200
               fi
               if has_hook "$stop_hook"; then
                 run_hook "$stop_hook" >/dev/null 2>&1 || true
@@ -336,9 +358,8 @@ let
 
           if [ $(( $(date +%s) - start_ts )) -ge "$timeout" ]; then
             echo "ERROR: fixture readiness check failed service=$service hook=$wait_hook timeout=''${timeout}s" >&2
-            if [ -n "$logfile" ] && [ -f "$logfile" ]; then
-              echo "INFO: last 200 lines of log: $logfile" >&2
-              tail -200 "$logfile" >&2 || true
+            if [ -n "$logfile" ]; then
+              print_log_tail "$logfile" 200
             fi
             if has_hook "$stop_hook"; then
               run_hook "$stop_hook" >/dev/null 2>&1 || true

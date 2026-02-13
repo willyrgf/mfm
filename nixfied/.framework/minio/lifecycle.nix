@@ -8,6 +8,7 @@
 
 let
   cfg = project.modules.minio or { };
+  processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   minio = cfg.package or pkgs.minio;
   apiPortVar = slots.portVarName config.portKeyApi;
   consolePortVar = slots.portVarName config.portKeyConsole;
@@ -45,6 +46,14 @@ let
     if [ -f "$MINIO_PID_FILE" ]; then
       PID=$(cat "$MINIO_PID_FILE" 2>/dev/null || true)
       if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        ${processRegistry.emitEvent} \
+          --event-type service_ready \
+          --service minio \
+          --state ready \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --pid "$PID" \
+          --log-path "$LOG_FILE" >/dev/null 2>&1 || true
         echo "OK: minio already running pid=$PID api_port=$MINIO_API_PORT"
         exit 0
       fi
@@ -66,6 +75,15 @@ let
     CHILD_PID=$!
     echo "$CHILD_PID" > "$MINIO_PID_FILE"
 
+    ${processRegistry.emitEvent} \
+      --event-type service_starting \
+      --service minio \
+      --state starting \
+      --slot "$SLOT" \
+      --env "$ENV" \
+      --pid "$CHILD_PID" \
+      --log-path "$LOG_FILE" >/dev/null 2>&1 || true
+
     cleanup() {
       if [ -n "''${CHILD_PID:-}" ] && kill -0 "$CHILD_PID" 2>/dev/null; then
         kill "$CHILD_PID" 2>/dev/null || true
@@ -76,8 +94,43 @@ let
 
     trap cleanup EXIT INT TERM
 
+    ${processRegistry.emitEvent} \
+      --event-type service_ready \
+      --service minio \
+      --state ready \
+      --slot "$SLOT" \
+      --env "$ENV" \
+      --pid "$CHILD_PID" \
+      --log-path "$LOG_FILE" >/dev/null 2>&1 || true
+
     echo "INFO: minio started pid=$CHILD_PID api_port=$MINIO_API_PORT console_port=$MINIO_CONSOLE_PORT"
+    set +e
     wait "$CHILD_PID"
+    RC=$?
+    set -e
+
+    if [ "$RC" -eq 0 ]; then
+      ${processRegistry.emitEvent} \
+        --event-type service_stopped \
+        --service minio \
+        --state stopped \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --pid "$CHILD_PID" \
+        --log-path "$LOG_FILE" >/dev/null 2>&1 || true
+    else
+      ${processRegistry.emitEvent} \
+        --event-type service_degraded \
+        --service minio \
+        --state degraded \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --pid "$CHILD_PID" \
+        --log-path "$LOG_FILE" \
+        --wait-reason "minio_process_exit code=$RC" \
+        --last-error "minio process exited non-zero" >/dev/null 2>&1 || true
+    fi
+    exit "$RC"
   '';
 
   stop = pkgs.writeShellScript "minio-stop" ''
@@ -88,6 +141,12 @@ let
     MINIO_PID_FILE="$MINIO_DIR/run/minio.pid"
 
     if [ ! -f "$MINIO_PID_FILE" ]; then
+      ${processRegistry.emitEvent} \
+        --event-type service_stopped \
+        --service minio \
+        --state stopped \
+        --slot "$SLOT" \
+        --env "$ENV" >/dev/null 2>&1 || true
       echo "OK: minio not running"
       exit 0
     fi
@@ -95,6 +154,13 @@ let
     PID=$(cat "$MINIO_PID_FILE" 2>/dev/null || true)
     if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
       rm -f "$MINIO_PID_FILE"
+      ${processRegistry.emitEvent} \
+        --event-type service_stopped \
+        --service minio \
+        --state stopped \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --pid "$PID" >/dev/null 2>&1 || true
       echo "OK: minio pid file cleaned"
       exit 0
     fi
@@ -104,6 +170,13 @@ let
     for _ in $(seq 1 20); do
       if ! kill -0 "$PID" 2>/dev/null; then
         rm -f "$MINIO_PID_FILE"
+        ${processRegistry.emitEvent} \
+          --event-type service_stopped \
+          --service minio \
+          --state stopped \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --pid "$PID" >/dev/null 2>&1 || true
         echo "OK: minio stopped pid=$PID"
         exit 0
       fi
@@ -112,6 +185,13 @@ let
 
     kill -KILL "$PID" 2>/dev/null || true
     rm -f "$MINIO_PID_FILE"
+    ${processRegistry.emitEvent} \
+      --event-type service_stopped \
+      --service minio \
+      --state stopped \
+      --slot "$SLOT" \
+      --env "$ENV" \
+      --pid "$PID" >/dev/null 2>&1 || true
     echo "WARN: minio force-killed pid=$PID"
   '';
 
@@ -144,7 +224,40 @@ let
       fi
     fi
 
-    echo "service=minio slot=$SLOT env=$ENV running=$RUNNING pid=''${PID:-unknown} api_port=$MINIO_API_PORT console_port=$MINIO_CONSOLE_PORT"
+    LOCAL_RUNNING="$RUNNING"
+    REGISTRY_FOUND="0"
+    REGISTRY_RUNNING="false"
+    REGISTRY_STATE="unknown"
+    OWNER_RUN_ID=""
+    OWNER_SCOPE=""
+    EPHEMERAL_ROOT=""
+    WAIT_REASON=""
+    LOG_PATH=""
+    SLOT_OWNER=""
+    REGISTRY_SCOPE="global"
+
+    REG_OUT="$(${processRegistry.serviceStatus} --service minio --slot "$SLOT" --env "$ENV" 2>/dev/null || true)"
+    if [ -n "$REG_OUT" ]; then
+      eval "$REG_OUT"
+    fi
+
+    if [ "$RUNNING" != "true" ] && [ "$REGISTRY_RUNNING" = "true" ]; then
+      RUNNING=true
+    fi
+
+    SCOPE="none"
+    if [ "$LOCAL_RUNNING" = "true" ]; then
+      SCOPE="local"
+    elif [ "$REGISTRY_RUNNING" = "true" ]; then
+      SCOPE="global"
+    fi
+
+    EFFECTIVE_LOG_PATH="$MINIO_DIR/logs/minio.log"
+    if [ -n "$LOG_PATH" ]; then
+      EFFECTIVE_LOG_PATH="$LOG_PATH"
+    fi
+
+    echo "service=minio slot=$SLOT env=$ENV running=$RUNNING pid=''${PID:-unknown} api_port=$MINIO_API_PORT console_port=$MINIO_CONSOLE_PORT scope=$SCOPE owner_run_id=''${OWNER_RUN_ID:-unknown} owner_scope=''${OWNER_SCOPE:-unknown} ephemeral_root=''${EPHEMERAL_ROOT:-none} registry_state=''${REGISTRY_STATE:-unknown} slot_owner=''${SLOT_OWNER:-unknown} wait_reason=''${WAIT_REASON:-none} log_path=$EFFECTIVE_LOG_PATH"
 
     if [ "$RUNNING" = "true" ]; then
       exit 0

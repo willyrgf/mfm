@@ -7,6 +7,7 @@
 
 let
   cfg = project.modules.nginx or { };
+  processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   portVarHttp = slots.portVarName (cfg.portKeyHttp or "http");
   portVarHttps = slots.portVarName (cfg.portKeyHttps or "https");
   dataDirName = cfg.dataDirName or "nginx";
@@ -68,7 +69,40 @@ let
       fi
     fi
 
-    echo "service=nginx slot=$SLOT env=$ENV running=$RUNNING pid=''${PID:-unknown} http_port=$HTTP_PORT https_port=$HTTPS_PORT"
+    LOCAL_RUNNING="$RUNNING"
+    REGISTRY_FOUND="0"
+    REGISTRY_RUNNING="false"
+    REGISTRY_STATE="unknown"
+    OWNER_RUN_ID=""
+    OWNER_SCOPE=""
+    EPHEMERAL_ROOT=""
+    WAIT_REASON=""
+    LOG_PATH=""
+    SLOT_OWNER=""
+    REGISTRY_SCOPE="global"
+
+    REG_OUT="$(${processRegistry.serviceStatus} --service nginx --slot "$SLOT" --env "$ENV" 2>/dev/null || true)"
+    if [ -n "$REG_OUT" ]; then
+      eval "$REG_OUT"
+    fi
+
+    if [ "$RUNNING" != "true" ] && [ "$REGISTRY_RUNNING" = "true" ]; then
+      RUNNING=true
+    fi
+
+    SCOPE="none"
+    if [ "$LOCAL_RUNNING" = "true" ]; then
+      SCOPE="local"
+    elif [ "$REGISTRY_RUNNING" = "true" ]; then
+      SCOPE="global"
+    fi
+
+    EFFECTIVE_LOG_PATH="$NGINX_DIR/logs/error.log"
+    if [ -n "$LOG_PATH" ]; then
+      EFFECTIVE_LOG_PATH="$LOG_PATH"
+    fi
+
+    echo "service=nginx slot=$SLOT env=$ENV running=$RUNNING pid=''${PID:-unknown} http_port=$HTTP_PORT https_port=$HTTPS_PORT scope=$SCOPE owner_run_id=''${OWNER_RUN_ID:-unknown} owner_scope=''${OWNER_SCOPE:-unknown} ephemeral_root=''${EPHEMERAL_ROOT:-none} registry_state=''${REGISTRY_STATE:-unknown} slot_owner=''${SLOT_OWNER:-unknown} wait_reason=''${WAIT_REASON:-none} log_path=$EFFECTIVE_LOG_PATH"
 
     if [ "$RUNNING" = "true" ]; then
       exit 0
@@ -121,6 +155,14 @@ let
     fi
 
     if ${pkgs.netcat}/bin/nc -z 127.0.0.1 "$HTTP_PORT" >/dev/null 2>&1; then
+      ${processRegistry.emitEvent} \
+        --event-type service_ready \
+        --service nginx \
+        --state ready \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --pid "$PID" \
+        --log-path "$NGINX_DIR/logs/error.log" >/dev/null 2>&1 || true
       echo "OK: nginx ready http_port=$HTTP_PORT pid=$PID"
       exit 0
     fi
@@ -143,6 +185,21 @@ let
 
     ${lifecycle.nginx}/bin/nginx -c "$CONF" -t 2>&1
     echo "OK: nginx configuration valid conf=$CONF"
+  '';
+
+  logs = pkgs.writeShellScript "nginx-logs-registry" ''
+    set -euo pipefail
+    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
+    eval "$SLOT_INFO_OUT"
+    exec ${processRegistry.serviceLogs} --service nginx --slot "$SLOT" --env "$ENV" "$@"
+  '';
+  log = logs;
+
+  events = pkgs.writeShellScript "nginx-events-registry" ''
+    set -euo pipefail
+    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
+    eval "$SLOT_INFO_OUT"
+    exec ${processRegistry.serviceEvents} --service nginx --slot "$SLOT" --env "$ENV" "$@"
   '';
 
   publicApi = {
@@ -285,6 +342,27 @@ let
         summary = "Show SSL certificate status";
         details = "Prints certificate status for configured domains.";
       };
+      log = {
+        script = log;
+        hook = "LOG";
+        summary = "Show nginx log";
+        details = "Shows nginx runtime log for the current slot/environment.";
+        usage = [ "nix run .#service::nginx::log -- [--lines N] [--follow]" ];
+      };
+      logs = {
+        script = logs;
+        hook = "LOGS";
+        summary = "Alias for service::nginx::log";
+        details = "Compatibility alias for service::nginx::log.";
+        usage = [ "nix run .#service::nginx::logs -- [--lines N] [--follow]" ];
+      };
+      events = {
+        script = events;
+        hook = "EVENTS";
+        summary = "Show nginx lifecycle events";
+        details = "Shows nginx lifecycle events from the global process registry for the current slot/environment.";
+        usage = [ "nix run .#service::nginx::events -- [--limit N]" ];
+      };
     };
   };
 in
@@ -307,6 +385,9 @@ in
     health
     ready
     checkConfig
+    log
+    logs
+    events
     ;
 
   # Site management (backward compat + new)

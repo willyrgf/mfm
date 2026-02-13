@@ -166,5 +166,139 @@ let
       '';
     };
   };
+
+  processApps = {
+    "process::status" = mk {
+      name = "process::status";
+      summary = "Show process and service status";
+      details = "Lists process/run/service entities tracked by the global process registry. Use --all to include completed and stopped entities.";
+      usage = [
+        "nix run .#process::status"
+        "nix run .#process::status -- --all"
+      ];
+      category = "utility";
+      script = ''
+        exec ${toString lib.processStatus} "$@"
+      '';
+    };
+    "process::slots" = mk {
+      name = "process::slots";
+      summary = "Show slot occupancy";
+      details = "Shows slot ownership and contention metadata from the process registry.";
+      usage = [
+        "nix run .#process::slots"
+        "nix run .#process::slots -- --all"
+      ];
+      category = "utility";
+      script = ''
+        exec ${toString lib.processSlots} "$@"
+      '';
+    };
+    "process::runs" = mk {
+      name = "process::runs";
+      summary = "Show tracked runs";
+      details = "Lists command runs tracked in the process registry. Use --all to include completed runs.";
+      usage = [
+        "nix run .#process::runs"
+        "nix run .#process::runs -- --all"
+      ];
+      category = "utility";
+      script = ''
+        exec ${toString lib.processRuns} "$@"
+      '';
+    };
+    "process::inspect" = mk {
+      name = "process::inspect";
+      summary = "Inspect a run/process/service";
+      details = "Prints detailed registry events for a run id, service name, or event id.";
+      usage = [ "nix run .#process::inspect -- <id>" ];
+      category = "utility";
+      script = ''
+        exec ${toString lib.processInspect} "$@"
+      '';
+    };
+    "process::gc" = mk {
+      name = "process::gc";
+      summary = "Reconcile orphaned process metadata";
+      details = "Finds orphaned service metadata in the process registry and records orphaned state with --apply.";
+      usage = [
+        "nix run .#process::gc"
+        "nix run .#process::gc -- --apply"
+      ];
+      category = "utility";
+      script = ''
+        exec ${toString lib.processGc} "$@"
+      '';
+    };
+  };
+
+  runtimeAliases = {
+    "runtime::status" = mk {
+      name = "runtime::status";
+      summary = "Alias for process::status";
+      details = "Compatibility alias for process::status.";
+      usage = [ "nix run .#runtime::status -- [args]" ];
+      category = "utility";
+      script = ''
+        echo "WARN: runtime::status is deprecated; use process::status"
+        exec ${toString lib.processStatus} "$@"
+      '';
+    };
+    "runtime::ps" = mk {
+      name = "runtime::ps";
+      summary = "Alias for process::status";
+      details = "Compatibility alias for process::status.";
+      usage = [ "nix run .#runtime::ps -- [args]" ];
+      category = "utility";
+      script = ''
+        echo "WARN: runtime::ps is deprecated; use process::status"
+        exec ${toString lib.processStatus} "$@"
+      '';
+    };
+    "runtime::slots" = mk {
+      name = "runtime::slots";
+      summary = "Alias for process::slots";
+      details = "Compatibility alias for process::slots.";
+      usage = [ "nix run .#runtime::slots -- [args]" ];
+      category = "utility";
+      script = ''
+        echo "WARN: runtime::slots is deprecated; use process::slots"
+        exec ${toString lib.processSlots} "$@"
+      '';
+    };
+    "runtime::runs" = mk {
+      name = "runtime::runs";
+      summary = "Alias for process::runs";
+      details = "Compatibility alias for process::runs.";
+      usage = [ "nix run .#runtime::runs -- [args]" ];
+      category = "utility";
+      script = ''
+        echo "WARN: runtime::runs is deprecated; use process::runs"
+        exec ${toString lib.processRuns} "$@"
+      '';
+    };
+    "runtime::inspect" = mk {
+      name = "runtime::inspect";
+      summary = "Alias for process::inspect";
+      details = "Compatibility alias for process::inspect.";
+      usage = [ "nix run .#runtime::inspect -- <id>" ];
+      category = "utility";
+      script = ''
+        echo "WARN: runtime::inspect is deprecated; use process::inspect"
+        exec ${toString lib.processInspect} "$@"
+      '';
+    };
+    "runtime::gc" = mk {
+      name = "runtime::gc";
+      summary = "Alias for process::gc";
+      details = "Compatibility alias for process::gc.";
+      usage = [ "nix run .#runtime::gc -- [args]" ];
+      category = "utility";
+      script = ''
+        echo "WARN: runtime::gc is deprecated; use process::gc"
+        exec ${toString lib.processGc} "$@"
+      '';
+    };
+  };
 in
-serviceApps // supervisorApps // utilityApps
+serviceApps // supervisorApps // utilityApps // processApps // runtimeAliases

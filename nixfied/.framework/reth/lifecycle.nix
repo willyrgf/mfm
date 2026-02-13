@@ -8,6 +8,7 @@
 
 let
   lib = pkgs.lib;
+  processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   reth = config.package or (project.modules.reth.package or pkgs.reth);
   httpPortVar = slots.portVarName config.portKeyHttp;
   wsPortVar = slots.portVarName config.portKeyWs;
@@ -78,6 +79,14 @@ let
     if [ -f "$RETH_PID_FILE" ]; then
       PID=$(cat "$RETH_PID_FILE" 2>/dev/null || true)
       if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        ${processRegistry.emitEvent} \
+          --event-type service_ready \
+          --service reth \
+          --state ready \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --pid "$PID" \
+          --log-path "$RETH_LOG_FILE" >/dev/null 2>&1 || true
         echo "OK: reth already running pid=$PID http_port=$RETH_HTTP_PORT"
         exit 0
       fi
@@ -118,6 +127,15 @@ let
     CHILD_PID=$!
     echo "$CHILD_PID" > "$RETH_PID_FILE"
 
+    ${processRegistry.emitEvent} \
+      --event-type service_starting \
+      --service reth \
+      --state starting \
+      --slot "$SLOT" \
+      --env "$ENV" \
+      --pid "$CHILD_PID" \
+      --log-path "$RETH_LOG_FILE" >/dev/null 2>&1 || true
+
     cleanup() {
       if [ -n "''${CHILD_PID:-}" ] && kill -0 "$CHILD_PID" 2>/dev/null; then
         kill "$CHILD_PID" 2>/dev/null || true
@@ -142,13 +160,63 @@ let
     done
 
     if [ "$READY" -ne 1 ]; then
+      ${processRegistry.emitEvent} \
+        --event-type service_degraded \
+        --service reth \
+        --state degraded \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --pid "$CHILD_PID" \
+        --log-path "$RETH_LOG_FILE" \
+        --wait-reason "failed_readiness" \
+        --last-error "reth failed health check during startup" >/dev/null 2>&1 || true
       echo "ERROR: reth failed to become healthy. log=$RETH_LOG_FILE" >&2
-      tail -50 "$RETH_LOG_FILE" >&2 || true
+      if [ -f "$RETH_LOG_FILE" ]; then
+        echo "INFO: reth log tail path=$RETH_LOG_FILE lines=50" >&2
+        tail -50 "$RETH_LOG_FILE" >&2 || true
+      else
+        echo "WARN: reth log file missing path=$RETH_LOG_FILE" >&2
+      fi
       exit 1
     fi
 
+    ${processRegistry.emitEvent} \
+      --event-type service_ready \
+      --service reth \
+      --state ready \
+      --slot "$SLOT" \
+      --env "$ENV" \
+      --pid "$CHILD_PID" \
+      --log-path "$RETH_LOG_FILE" >/dev/null 2>&1 || true
+
     echo "INFO: reth started pid=$CHILD_PID http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT"
+    set +e
     wait "$CHILD_PID"
+    RC=$?
+    set -e
+
+    if [ "$RC" -eq 0 ]; then
+      ${processRegistry.emitEvent} \
+        --event-type service_stopped \
+        --service reth \
+        --state stopped \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --pid "$CHILD_PID" \
+        --log-path "$RETH_LOG_FILE" >/dev/null 2>&1 || true
+    else
+      ${processRegistry.emitEvent} \
+        --event-type service_degraded \
+        --service reth \
+        --state degraded \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --pid "$CHILD_PID" \
+        --log-path "$RETH_LOG_FILE" \
+        --wait-reason "reth_process_exit code=$RC" \
+        --last-error "reth process exited non-zero" >/dev/null 2>&1 || true
+    fi
+    exit "$RC"
   '';
 
   stop = pkgs.writeShellScript "reth-stop" ''
@@ -156,6 +224,13 @@ let
     ${runtimePrelude}
 
     if [ ! -f "$RETH_PID_FILE" ]; then
+      ${processRegistry.emitEvent} \
+        --event-type service_stopped \
+        --service reth \
+        --state stopped \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --log-path "$RETH_LOG_FILE" >/dev/null 2>&1 || true
       echo "OK: reth not running"
       exit 0
     fi
@@ -163,6 +238,14 @@ let
     PID=$(cat "$RETH_PID_FILE" 2>/dev/null || true)
     if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
       rm -f "$RETH_PID_FILE"
+      ${processRegistry.emitEvent} \
+        --event-type service_stopped \
+        --service reth \
+        --state stopped \
+        --slot "$SLOT" \
+        --env "$ENV" \
+        --pid "$PID" \
+        --log-path "$RETH_LOG_FILE" >/dev/null 2>&1 || true
       echo "OK: reth pid file cleaned"
       exit 0
     fi
@@ -171,6 +254,14 @@ let
     for _ in $(seq 1 40); do
       if ! kill -0 "$PID" 2>/dev/null; then
         rm -f "$RETH_PID_FILE"
+        ${processRegistry.emitEvent} \
+          --event-type service_stopped \
+          --service reth \
+          --state stopped \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --pid "$PID" \
+          --log-path "$RETH_LOG_FILE" >/dev/null 2>&1 || true
         echo "OK: reth stopped pid=$PID"
         exit 0
       fi
@@ -179,6 +270,14 @@ let
 
     kill -KILL "$PID" 2>/dev/null || true
     rm -f "$RETH_PID_FILE"
+    ${processRegistry.emitEvent} \
+      --event-type service_stopped \
+      --service reth \
+      --state stopped \
+      --slot "$SLOT" \
+      --env "$ENV" \
+      --pid "$PID" \
+      --log-path "$RETH_LOG_FILE" >/dev/null 2>&1 || true
     echo "WARN: reth force-killed pid=$PID"
   '';
 
@@ -203,7 +302,40 @@ let
       fi
     fi
 
-    echo "service=reth slot=$SLOT env=$ENV running=$RUNNING pid=''${PID:-unknown} http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT network=$RETH_NETWORK"
+    LOCAL_RUNNING="$RUNNING"
+    REGISTRY_FOUND="0"
+    REGISTRY_RUNNING="false"
+    REGISTRY_STATE="unknown"
+    OWNER_RUN_ID=""
+    OWNER_SCOPE=""
+    EPHEMERAL_ROOT=""
+    WAIT_REASON=""
+    LOG_PATH=""
+    SLOT_OWNER=""
+    REGISTRY_SCOPE="global"
+
+    REG_OUT="$(${processRegistry.serviceStatus} --service reth --slot "$SLOT" --env "$ENV" 2>/dev/null || true)"
+    if [ -n "$REG_OUT" ]; then
+      eval "$REG_OUT"
+    fi
+
+    if [ "$RUNNING" != "true" ] && [ "$REGISTRY_RUNNING" = "true" ]; then
+      RUNNING=true
+    fi
+
+    SCOPE="none"
+    if [ "$LOCAL_RUNNING" = "true" ]; then
+      SCOPE="local"
+    elif [ "$REGISTRY_RUNNING" = "true" ]; then
+      SCOPE="global"
+    fi
+
+    EFFECTIVE_LOG_PATH="$RETH_LOG_FILE"
+    if [ -n "$LOG_PATH" ]; then
+      EFFECTIVE_LOG_PATH="$LOG_PATH"
+    fi
+
+    echo "service=reth slot=$SLOT env=$ENV running=$RUNNING pid=''${PID:-unknown} http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT network=$RETH_NETWORK scope=$SCOPE owner_run_id=''${OWNER_RUN_ID:-unknown} owner_scope=''${OWNER_SCOPE:-unknown} ephemeral_root=''${EPHEMERAL_ROOT:-none} registry_state=''${REGISTRY_STATE:-unknown} slot_owner=''${SLOT_OWNER:-unknown} wait_reason=''${WAIT_REASON:-none} log_path=$EFFECTIVE_LOG_PATH"
 
     if [ "$RUNNING" = "true" ]; then
       exit 0
