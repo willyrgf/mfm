@@ -292,8 +292,8 @@ mod tests {
     use mfm_op_common::test_support as op_test_support;
     use mfm_sdk::ids::{MachineId, PortKey, StepId};
     use mfm_sdk::op::{OpIo, Operation};
-    use mfm_sdk::pipeline::{Pipeline, PipelinePlanner, PipelineStep};
-    use mfm_sdk::unstable::{DefaultPipelinePlanner, HashMapOperationRegistry, SdkPlanResolver};
+    use mfm_sdk::pipeline::{Pipeline, PipelineStep};
+    use mfm_sdk::unstable::SdkPlanResolver;
     use tokio::sync::Mutex;
 
     use crate::nix_exec_transport::{NixFlakePolicy, NixFlakeTransportFactory};
@@ -748,12 +748,12 @@ mod tests {
         let repo_prefix = format!("path:{}", temp_root.display());
         let app_ref = format!("{repo_prefix}#jq_fmt_example");
 
-        let mut reg = HashMapOperationRegistry::default();
-        reg.register(Arc::new(MarkerOp));
-        reg.register(Arc::new(NixAppOp));
-        let registry: Arc<dyn mfm_sdk::op::OperationRegistry> = Arc::new(reg);
+        let registry = op_test_support::registry_with_ops([
+            Arc::new(MarkerOp) as mfm_sdk::op::DynOperation,
+            Arc::new(NixAppOp) as mfm_sdk::op::DynOperation,
+        ]);
 
-        let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
+        let planner = op_test_support::default_pipeline_planner();
         let pipeline = Pipeline {
             machine_id: MachineId("nix_multi".to_string()),
             pipeline_version: "v1".to_string(),

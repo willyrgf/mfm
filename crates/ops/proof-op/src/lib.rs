@@ -363,10 +363,7 @@ mod tests {
     };
     use mfm_op_common::test_support as op_test_support;
 
-    use mfm_sdk::pipeline::PipelinePlanner;
-    use mfm_sdk::unstable::{
-        single_op_pipeline, DefaultPipelinePlanner, HashMapOperationRegistry, SdkPlanResolver,
-    };
+    use mfm_sdk::unstable::SdkPlanResolver;
 
     #[derive(Clone)]
     struct CountingTransportFactory {
@@ -953,15 +950,11 @@ mod tests {
 
         let parent: mfm_sdk::op::DynOperation = Arc::new(ChildParentOp::default());
         let child: mfm_sdk::op::DynOperation = Arc::new(ProofOp::default());
-        let mut reg = HashMapOperationRegistry::default();
-        reg.register(Arc::clone(&parent));
-        reg.register(Arc::clone(&child));
-        let registry: Arc<dyn mfm_sdk::op::OperationRegistry> = Arc::new(reg);
-
-        let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
-        let pipeline =
-            single_op_pipeline(parent.op_id(), parent.op_version(), serde_json::json!({}))
-                .expect("pipeline");
+        let registry =
+            op_test_support::registry_with_ops([Arc::clone(&parent), Arc::clone(&child)]);
+        let planner = op_test_support::default_pipeline_planner();
+        let pipeline = op_test_support::single_op_pipeline_for(&parent, serde_json::json!({}))
+            .expect("pipeline");
 
         let resolver: Arc<dyn PlanResolver> = Arc::new(SdkPlanResolver::new(
             Arc::clone(&registry),
@@ -1178,15 +1171,11 @@ mod tests {
 
         let parent: mfm_sdk::op::DynOperation = Arc::new(ChildParentOp::default());
         let child: mfm_sdk::op::DynOperation = Arc::new(ProofOp::default());
-        let mut reg = HashMapOperationRegistry::default();
-        reg.register(Arc::clone(&parent));
-        reg.register(Arc::clone(&child));
-        let registry: Arc<dyn mfm_sdk::op::OperationRegistry> = Arc::new(reg);
-
-        let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
-        let pipeline =
-            single_op_pipeline(parent.op_id(), parent.op_version(), serde_json::json!({}))
-                .expect("pipeline");
+        let registry =
+            op_test_support::registry_with_ops([Arc::clone(&parent), Arc::clone(&child)]);
+        let planner = op_test_support::default_pipeline_planner();
+        let pipeline = op_test_support::single_op_pipeline_for(&parent, serde_json::json!({}))
+            .expect("pipeline");
 
         // Stop after the first handler once (spawn state), leaving an orphan attempt.
         let failpoints = EngineFailpoints::default();
@@ -1300,15 +1289,11 @@ mod tests {
                 .with_orphan_after_join(Arc::clone(&failpoints.stop_after_handler_once)),
         );
         let child: mfm_sdk::op::DynOperation = Arc::new(ProofOp::default());
-        let mut reg = HashMapOperationRegistry::default();
-        reg.register(Arc::clone(&parent));
-        reg.register(Arc::clone(&child));
-        let registry: Arc<dyn mfm_sdk::op::OperationRegistry> = Arc::new(reg);
-
-        let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
-        let pipeline =
-            single_op_pipeline(parent.op_id(), parent.op_version(), serde_json::json!({}))
-                .expect("pipeline");
+        let registry =
+            op_test_support::registry_with_ops([Arc::clone(&parent), Arc::clone(&child)]);
+        let planner = op_test_support::default_pipeline_planner();
+        let pipeline = op_test_support::single_op_pipeline_for(&parent, serde_json::json!({}))
+            .expect("pipeline");
 
         let resolver: Arc<dyn PlanResolver> = Arc::new(SdkPlanResolver::new(
             Arc::clone(&registry),

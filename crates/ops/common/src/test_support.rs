@@ -72,16 +72,34 @@ pub type SingleOpPlan = (
     Pipeline,
 );
 
+pub fn registry_with_ops(
+    ops: impl IntoIterator<Item = DynOperation>,
+) -> Arc<dyn OperationRegistry> {
+    let mut reg = HashMapOperationRegistry::default();
+    for op in ops {
+        reg.register(op);
+    }
+    Arc::new(reg)
+}
+
+pub fn default_pipeline_planner() -> Arc<dyn PipelinePlanner> {
+    Arc::new(DefaultPipelinePlanner)
+}
+
+pub fn single_op_pipeline_for(
+    op: &DynOperation,
+    op_config: serde_json::Value,
+) -> Result<Pipeline, SdkError> {
+    single_op_pipeline(op.op_id(), op.op_version(), op_config)
+}
+
 pub fn single_op_plan(
     op: DynOperation,
     op_config: serde_json::Value,
 ) -> Result<SingleOpPlan, SdkError> {
-    let mut reg = HashMapOperationRegistry::default();
-    reg.register(Arc::clone(&op));
-    let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
-
-    let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
-    let pipeline = single_op_pipeline(op.op_id(), op.op_version(), op_config)?;
+    let registry = registry_with_ops([Arc::clone(&op)]);
+    let planner = default_pipeline_planner();
+    let pipeline = single_op_pipeline_for(&op, op_config)?;
     Ok((registry, planner, pipeline))
 }
 
