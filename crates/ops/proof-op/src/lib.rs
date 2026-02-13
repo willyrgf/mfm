@@ -345,10 +345,7 @@ mod tests {
 
     use std::collections::{HashMap, VecDeque};
 
-    use mfm_machine::config::{
-        BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
-        RetryPolicy, RunConfig,
-    };
+    use mfm_machine::config::{BuildProvenance, RunConfig};
     use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
     use mfm_machine::errors::{ContextError, IoError, RunError, StorageError};
     use mfm_machine::events::{
@@ -365,6 +362,7 @@ mod tests {
         ChildRunLiveIoTransportFactory, DefaultExecutionEngine, EngineFailpoints, PlanResolver,
     };
     use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+    use mfm_op_common::test_support as op_test_support;
 
     use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
     use mfm_sdk::pipeline::PipelinePlanner;
@@ -372,24 +370,6 @@ mod tests {
         single_op_pipeline, DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry,
         SdkPlanResolver,
     };
-
-    fn run_config_live() -> RunConfig {
-        RunConfig {
-            io_mode: IoMode::Live,
-            retry_policy: RetryPolicy {
-                max_attempts: 3,
-                backoff: BackoffPolicy::Fixed {
-                    delay: std::time::Duration::from_millis(0),
-                },
-            },
-            event_profile: EventProfile::Normal,
-            execution_mode: ExecutionMode::Sequential,
-            context_checkpointing: ContextCheckpointing::AfterEveryState,
-            replay_missing_fact_retryable: false,
-            skip_tags: Vec::new(),
-            nix_flake_allowlist: mfm_machine::config::default_nix_flake_allowlist(),
-        }
-    }
 
     #[derive(Default)]
     struct MapContext {
@@ -970,7 +950,7 @@ mod tests {
         };
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
-        let cfg = run_config_live();
+        let cfg = op_test_support::run_config_live_with_retry_attempts(3);
 
         let res = launcher
             .start_pipeline(
@@ -1084,7 +1064,7 @@ mod tests {
         };
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
-        let cfg = run_config_live();
+        let cfg = op_test_support::run_config_live_with_retry_attempts(3);
 
         let first = launcher
             .start_pipeline(
@@ -1239,7 +1219,7 @@ mod tests {
         };
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
-        let cfg = run_config_live();
+        let cfg = op_test_support::run_config_live_with_retry_attempts(3);
         let res = launcher
             .start_pipeline(
                 Arc::clone(&engine),
@@ -1490,7 +1470,7 @@ mod tests {
         };
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
-        let cfg = run_config_live();
+        let cfg = op_test_support::run_config_live_with_retry_attempts(3);
         let first = launcher
             .start_pipeline(
                 Arc::clone(&engine),
@@ -1621,7 +1601,7 @@ mod tests {
         };
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
-        let cfg = run_config_live();
+        let cfg = op_test_support::run_config_live_with_retry_attempts(3);
         let first = launcher
             .start_pipeline(
                 Arc::clone(&engine),

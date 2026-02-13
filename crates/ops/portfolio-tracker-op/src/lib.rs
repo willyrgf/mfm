@@ -531,10 +531,7 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use mfm_machine::config::{
-        BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
-        RetryPolicy,
-    };
+    use mfm_machine::config::BuildProvenance;
     use mfm_machine::context::DynContext;
     use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
     use mfm_machine::errors::ContextError;
@@ -547,6 +544,7 @@ mod tests {
     use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
     use mfm_machine::runtime::DefaultExecutionEngine;
     use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+    use mfm_op_common::test_support as op_test_support;
     use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
     use mfm_sdk::pipeline::PipelinePlanner;
     use mfm_sdk::unstable::{
@@ -554,24 +552,6 @@ mod tests {
         SdkPlanResolver,
     };
     use tokio::sync::Mutex;
-
-    fn run_config_live() -> RunConfig {
-        RunConfig {
-            io_mode: IoMode::Live,
-            retry_policy: RetryPolicy {
-                max_attempts: 1,
-                backoff: BackoffPolicy::Fixed {
-                    delay: std::time::Duration::from_millis(0),
-                },
-            },
-            event_profile: EventProfile::Normal,
-            execution_mode: ExecutionMode::Sequential,
-            context_checkpointing: ContextCheckpointing::AfterEveryState,
-            replay_missing_fact_retryable: false,
-            skip_tags: Vec::new(),
-            nix_flake_allowlist: mfm_machine::config::default_nix_flake_allowlist(),
-        }
-    }
 
     fn info(
         code: &'static str,
@@ -861,7 +841,7 @@ mod tests {
                 LaunchPipeline {
                     pipeline,
                     input: serde_json::json!({}),
-                    run_config: run_config_live(),
+                    run_config: op_test_support::run_config_live(),
                     build: BuildProvenance {
                         git_commit: None,
                         cargo_lock_hash: None,
@@ -901,7 +881,7 @@ mod tests {
                         }
                     ]
                 }),
-                &run_config_live(),
+                &op_test_support::run_config_live(),
             )
             .expect("expand");
 

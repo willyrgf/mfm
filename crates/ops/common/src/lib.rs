@@ -9,3 +9,4 @@ pub mod idempotency;
 pub mod output;
 pub mod rpc;
 pub mod states;
+pub mod test_support;

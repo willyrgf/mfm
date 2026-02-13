@@ -279,10 +279,7 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use mfm_machine::config::{
-        BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
-        RetryPolicy,
-    };
+    use mfm_machine::config::BuildProvenance;
     use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
     use mfm_machine::errors::ErrorInfo;
     use mfm_machine::events::{Event, EventEnvelope, KernelEvent};
@@ -297,6 +294,7 @@ mod tests {
     use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
     use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
     use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+    use mfm_op_common::test_support as op_test_support;
     use mfm_sdk::ids::{MachineId, PortKey, StepId};
     use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
     use mfm_sdk::op::{OpIo, Operation};
@@ -309,34 +307,10 @@ mod tests {
 
     use crate::nix_exec_transport::{NixFlakePolicy, NixFlakeTransportFactory};
 
-    fn run_config_live() -> RunConfig {
-        RunConfig {
-            io_mode: IoMode::Live,
-            retry_policy: RetryPolicy {
-                max_attempts: 1,
-                backoff: BackoffPolicy::Fixed {
-                    delay: std::time::Duration::from_millis(0),
-                },
-            },
-            event_profile: EventProfile::Normal,
-            execution_mode: ExecutionMode::Sequential,
-            context_checkpointing: ContextCheckpointing::AfterEveryState,
-            replay_missing_fact_retryable: false,
-            skip_tags: Vec::new(),
-            nix_flake_allowlist: mfm_machine::config::default_nix_flake_allowlist(),
-        }
-    }
-
-    fn run_config_live_with_allowlist(prefixes: Vec<String>) -> RunConfig {
-        let mut cfg = run_config_live();
-        cfg.nix_flake_allowlist = prefixes;
-        cfg
-    }
-
     #[test]
     fn expand_accepts_flake_app_ref_config() {
         let op = NixAppOp;
-        let cfg = run_config_live();
+        let cfg = op_test_support::run_config_live();
         let graph = mfm_sdk::op::Operation::expand(
             &op,
             OpPath("machine.main".to_string()),
@@ -350,7 +324,7 @@ mod tests {
     #[test]
     fn expand_rejects_both_program_path_and_app() {
         let op = NixAppOp;
-        let cfg = run_config_live();
+        let cfg = op_test_support::run_config_live();
         let got = mfm_sdk::op::Operation::expand(
             &op,
             OpPath("machine.main".to_string()),
@@ -370,7 +344,7 @@ mod tests {
     #[test]
     fn expand_rejects_missing_program_path_and_app() {
         let op = NixAppOp;
-        let cfg = run_config_live();
+        let cfg = op_test_support::run_config_live();
         let got = mfm_sdk::op::Operation::expand(
             &op,
             OpPath("machine.main".to_string()),
@@ -718,7 +692,7 @@ mod tests {
         };
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
-        let cfg = run_config_live();
+        let cfg = op_test_support::run_config_live();
 
         let res = launcher
             .start_pipeline(
@@ -824,7 +798,7 @@ mod tests {
         };
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
-        let cfg = run_config_live();
+        let cfg = op_test_support::run_config_live();
 
         let res = launcher
             .start_pipeline(
@@ -939,7 +913,7 @@ mod tests {
         };
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
-        let cfg = run_config_live_with_allowlist(vec![repo_prefix]);
+        let cfg = op_test_support::run_config_live_with_allowlist(vec![repo_prefix]);
 
         let res = launcher
             .start_pipeline(
@@ -1096,7 +1070,7 @@ mod tests {
         };
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
-        let cfg = run_config_live_with_allowlist(vec![repo_prefix]);
+        let cfg = op_test_support::run_config_live_with_allowlist(vec![repo_prefix]);
 
         let res = launcher
             .start_pipeline(
@@ -1195,7 +1169,7 @@ mod tests {
         };
 
         let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
-        let cfg = run_config_live();
+        let cfg = op_test_support::run_config_live();
 
         let first = launcher
             .start_pipeline(

@@ -14,3 +14,4 @@ Core modules:
 - `output`: shared output artifact persistence + event emission helper
 - `idempotency`: helper builders for idempotency key shapes
 - `rpc`: JSON-RPC response assertion helpers
+- `test_support`: shared test harness helpers for ops crates
