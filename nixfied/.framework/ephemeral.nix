@@ -116,19 +116,61 @@ let
   mkSourceCopy = pkgs.writeShellScript "mk-source-copy" ''
     set -euo pipefail
 
+    _nixfied_truthy() {
+      case "''${1:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+      esac
+    }
+
+    _nixfied_debug_enabled() {
+      if _nixfied_truthy "''${NIXFIED_VERBOSE:-0}" || _nixfied_truthy "''${NIXFIED_DEBUG:-0}" || _nixfied_truthy "''${CI_VERBOSE:-0}"; then
+        return 0
+      fi
+
+      case "''${NIXFIED_LOG_LEVEL:-}" in
+        debug|DEBUG|trace|TRACE) return 0 ;;
+      esac
+
+      return 1
+    }
+
     SOURCE_DIR="$1"
     DEST_DIR="$2"
 
-    echo "INFO: Copying project source to ephemeral location"
+    if _nixfied_debug_enabled; then
+      echo "DEBUG: Copying project source to ephemeral location"
+    fi
 
     ${pkgs.rsync}/bin/rsync -a \
       ${rsyncExcludes} \
       "$SOURCE_DIR/" "$DEST_DIR/"
 
-    echo "OK: Source copied to $DEST_DIR"
+    if _nixfied_debug_enabled; then
+      echo "DEBUG: Source copied to $DEST_DIR"
+    fi
   '';
 
   mkConditionalCleanup = pkgs.writeShellScript "mk-conditional-cleanup" ''
+    _nixfied_truthy() {
+      case "''${1:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+      esac
+    }
+
+    _nixfied_debug_enabled() {
+      if _nixfied_truthy "''${NIXFIED_VERBOSE:-0}" || _nixfied_truthy "''${NIXFIED_DEBUG:-0}" || _nixfied_truthy "''${CI_VERBOSE:-0}"; then
+        return 0
+      fi
+
+      case "''${NIXFIED_LOG_LEVEL:-}" in
+        debug|DEBUG|trace|TRACE) return 0 ;;
+      esac
+
+      return 1
+    }
+
     _ephemeral_cleanup() {
       local exit_code=$?
 
@@ -141,10 +183,14 @@ let
       if [ $exit_code -ne 0 ]; then
         :
       else
-        echo ""
-        echo "INFO: Cleaning up ephemeral state (slot ''${${projectIdUpper}_EPHEMERAL_SLOT:-unknown})"
+        if _nixfied_debug_enabled; then
+          echo ""
+          echo "DEBUG: Cleaning up ephemeral state (slot ''${${projectIdUpper}_EPHEMERAL_SLOT:-unknown})"
+        fi
         rm -rf "${refEphRoot}"
-        echo "OK: Ephemeral state cleaned"
+        if _nixfied_debug_enabled; then
+          echo "DEBUG: Ephemeral state cleaned"
+        fi
       fi
 
       ${processRegistry.emitEvent} \
@@ -176,6 +222,45 @@ let
     pkgs.writeShellScript "ephemeral-${name}" ''
       set -euo pipefail
 
+      _nixfied_truthy() {
+        case "''${1:-}" in
+          1|true|TRUE|yes|YES|on|ON) return 0 ;;
+          *) return 1 ;;
+        esac
+      }
+
+      _nixfied_debug_enabled() {
+        if _nixfied_truthy "''${NIXFIED_VERBOSE:-0}" || _nixfied_truthy "''${NIXFIED_DEBUG:-0}" || _nixfied_truthy "''${CI_VERBOSE:-0}"; then
+          return 0
+        fi
+
+        case "''${NIXFIED_LOG_LEVEL:-}" in
+          debug|DEBUG|trace|TRACE) return 0 ;;
+        esac
+
+        for arg in "$@"; do
+          case "$arg" in
+            --verbose|--debug)
+              return 0
+              ;;
+          esac
+        done
+
+        return 1
+      }
+
+      EPHEMERAL_DEBUG="0"
+      if _nixfied_debug_enabled "$@"; then
+        EPHEMERAL_DEBUG="1"
+        export NIXFIED_VERBOSE="1"
+      fi
+
+      _ephemeral_debug() {
+        if [ "$EPHEMERAL_DEBUG" = "1" ]; then
+          echo "DEBUG: $*"
+        fi
+      }
+
       export ORIGINAL_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
       # Compatibility aliases:
@@ -188,7 +273,7 @@ let
       if [ -n "''${${slotVar}:-}" ]; then
         export ${projectIdUpper}_EPHEMERAL_SLOT="''${${slotVar}}"
         export ${projectIdUpper}_SLOT_LOCK_FD=""
-        echo "INFO: Using pre-set slot: ''${${slotVar}} (no lock - caller managed)"
+        _ephemeral_debug "Using pre-set slot: ''${${slotVar}} (no lock - caller managed)"
       else
         eval "$(${acquireSlotLock})"
       fi
@@ -200,11 +285,13 @@ let
       export ${projectIdUpper}_EPHEMERAL_ROOT=$(${mkEphemeralRoot})
       export ${projectIdUpper}_EPHEMERAL=1
 
-      echo ""
-      echo "INFO: Ephemeral execution mode"
-      echo "INFO: Root: ${refEphRoot}"
-      echo "INFO: Slot: ${refEphSlot} (${slotVar}=''${${slotVar}}, ${envVar}=''${${envVar}})"
-      echo ""
+      if [ "$EPHEMERAL_DEBUG" = "1" ]; then
+        echo ""
+        _ephemeral_debug "Ephemeral execution mode"
+        _ephemeral_debug "Root: ${refEphRoot}"
+        _ephemeral_debug "Slot: ${refEphSlot} (${slotVar}=''${${slotVar}}, ${envVar}=''${${envVar}})"
+        echo ""
+      fi
 
       ${processRegistry.emitEvent} \
         --event-type slot_acquired \
@@ -227,9 +314,9 @@ let
       ${
         if installDeps && depsScript != "" then
           ''
-            echo "INFO: Installing dependencies"
+            _ephemeral_debug "Installing dependencies"
             ${depsScript}
-            echo "OK: Dependencies installed"
+            _ephemeral_debug "Dependencies installed"
           ''
         else
           ""
@@ -250,9 +337,11 @@ let
         done < "$ORIGINAL_ROOT/.env"
       fi
 
-      echo ""
-      echo "INFO: Starting ${name}"
-      echo ""
+      if [ "$EPHEMERAL_DEBUG" = "1" ]; then
+        echo ""
+        _ephemeral_debug "Starting ${name}"
+        echo ""
+      fi
 
       ${script}
     '';

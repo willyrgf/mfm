@@ -167,7 +167,27 @@ let
                 CI_MODE="${resolvedDefaultMode}"
                 CI_SUMMARY=false
                 CI_BACKGROUND=false
+                CI_VERBOSE="''${CI_VERBOSE:-0}"
                 CI_STEP_ARGS=()
+
+                _ci_truthy() {
+                  case "''${1:-}" in
+                    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+                    *) return 1 ;;
+                  esac
+                }
+
+                if _ci_truthy "$CI_VERBOSE"; then
+                  CI_VERBOSE=1
+                else
+                  CI_VERBOSE=0
+                fi
+
+                ci_debug() {
+                  if [ "$CI_VERBOSE" = "1" ]; then
+                    echo "DEBUG: $*" >&2
+                  fi
+                }
 
                 while [ "''$#" -gt 0 ]; do
                   case "''$1" in
@@ -177,6 +197,10 @@ let
                       ;;
                     --bg)
                       CI_BACKGROUND=true
+                      shift
+                      ;;
+                    --verbose|--debug)
+                      CI_VERBOSE=1
                       shift
                       ;;
                     --mode)
@@ -209,6 +233,10 @@ let
                 export CI_MODE
                 export CI_SUMMARY
                 export CI_STEP_ARGS
+                export CI_VERBOSE
+                if [ "$CI_VERBOSE" = "1" ]; then
+                  export NIXFIED_VERBOSE=1
+                fi
                 if [ -n "''${CI_ARTIFACTS_DIR:-}" ]; then
                   export CI_ARTIFACTS_DIR="''${CI_ARTIFACTS_DIR}"
                   case "$CI_ARTIFACTS_DIR" in
@@ -264,7 +292,7 @@ let
                   fi
 
                   if [ "$keep" -eq 1 ]; then
-                    echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
+                    ci_debug "CI artifacts kept at: $CI_ARTIFACTS_DIR"
                     return 0
                   fi
 
@@ -281,6 +309,9 @@ let
                 # Background mode: delegate to run registry and exit
                 if [ "$CI_BACKGROUND" = "true" ]; then
                   REEXEC_ARGS="--mode $CI_MODE --summary"
+                  if [ "$CI_VERBOSE" = "1" ]; then
+                    REEXEC_ARGS="$REEXEC_ARGS --verbose"
+                  fi
                   ${runRegistryScript} \
                     --name "ci-$CI_MODE" \
                     --bg \
