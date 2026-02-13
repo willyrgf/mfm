@@ -13,14 +13,18 @@ use serde::{Deserialize, Serialize};
 
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
-use mfm_machine::errors::{ErrorCategory, ErrorInfo, StateError};
+use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::hashing::artifact_id_for_json;
-use mfm_machine::ids::{ContextKey, ErrorCode, FactKey, OpId, OpPath, StateId};
+use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
-use mfm_machine::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta, Tag};
+use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::StateGraph;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
+use mfm_op_common::ctx as op_ctx;
+use mfm_op_common::errors as op_errors;
+use mfm_op_common::idempotency as op_idempotency;
+use mfm_op_common::states::meta;
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -31,27 +35,12 @@ const OP_VERSION: &str = "v1";
 const NAMESPACE_NIX_EXEC: &str = "nix.exec";
 const NAMESPACE_EXEC: &str = "exec";
 
-fn info(code: &'static str, category: ErrorCategory, retryable: bool, message: &str) -> ErrorInfo {
-    ErrorInfo {
-        code: ErrorCode(code.to_string()),
-        category,
-        retryable,
-        message: message.to_string(),
-        details: None,
-    }
-}
-
 fn sdk_err(code: &'static str, message: &'static str) -> SdkError {
-    SdkError {
-        info: info(code, ErrorCategory::Unknown, false, message),
-    }
+    op_errors::sdk_error(code, ErrorCategory::Unknown, false, message)
 }
 
 fn state_err(code: &'static str, message: &'static str) -> StateError {
-    StateError {
-        state_id: None,
-        info: info(code, ErrorCategory::Unknown, false, message),
-    }
+    op_errors::state_unknown(code, message)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -203,13 +192,7 @@ impl NixAppState {
 #[async_trait]
 impl State for NixAppState {
     fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: vec![Tag("execute".to_string())],
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::ApplySideEffect,
-            idempotency: Idempotency::Key(format!("mfm:exec|state:{}", self.state_id.0)),
-        }
+        meta::execute(op_idempotency::state_scope("mfm:exec", &self.state_id))
     }
 
     async fn handle(
@@ -282,8 +265,7 @@ impl State for NixAppState {
             .map_err(|_| state_err("exec_io_failed", "exec io call failed"))?;
 
         let out_key = ContextKey(self.cfg.write_result_to.clone());
-        ctx.write(out_key, res.response)
-            .map_err(|_| state_err("ctx_write_failed", "context write failed"))?;
+        op_ctx::write_json(ctx, out_key, res.response)?;
 
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,
@@ -302,10 +284,11 @@ mod tests {
         RetryPolicy,
     };
     use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
+    use mfm_machine::errors::ErrorInfo;
     use mfm_machine::events::{Event, EventEnvelope, KernelEvent};
     use mfm_machine::exec_transport::{ExecPolicy, ExecProgramTransportFactory};
     use mfm_machine::hashing::artifact_id_for_json;
-    use mfm_machine::ids::{ArtifactId, RunId};
+    use mfm_machine::ids::{ArtifactId, ErrorCode, RunId};
     use mfm_machine::io::IoCall;
     use mfm_machine::live_io::{FactIndex, LiveIoTransport, LiveIoTransportFactory};
     use mfm_machine::live_io_router::RouterLiveIoTransportFactory;

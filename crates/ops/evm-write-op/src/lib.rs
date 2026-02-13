@@ -21,13 +21,17 @@ use alloy_primitives::keccak256;
 use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
-use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, StateError};
-use mfm_machine::ids::{ContextKey, ErrorCode, FactKey, OpId, OpPath, StateId};
+use mfm_machine::errors::{ErrorCategory, IoError, StateError};
+use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
 use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::{StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
+use mfm_op_common::ctx as op_ctx;
+use mfm_op_common::errors as op_errors;
+use mfm_op_common::idempotency as op_idempotency;
+use mfm_op_common::rpc as op_rpc;
 use mfm_op_common::states::meta;
 
 use mfm_sdk::errors::SdkError;
@@ -53,42 +57,16 @@ const KEY_VALIDATED: &str = "validated";
 const KEY_CHAIN_ID: &str = "chain_id";
 const KEY_CLIENT_VERSION: &str = "client_version";
 
-fn info(code: &'static str, category: ErrorCategory, retryable: bool, message: &str) -> ErrorInfo {
-    ErrorInfo {
-        code: ErrorCode(code.to_string()),
-        category,
-        retryable,
-        message: message.to_string(),
-        details: None,
-    }
-}
-
 fn sdk_err(code: &'static str, message: &'static str) -> SdkError {
-    SdkError {
-        info: info(code, ErrorCategory::ParsingInput, false, message),
-    }
+    op_errors::sdk_error(code, ErrorCategory::ParsingInput, false, message)
 }
 
 fn state_err(code: &'static str, message: &'static str) -> StateError {
-    StateError {
-        state_id: None,
-        info: info(code, ErrorCategory::Unknown, false, message),
-    }
+    op_errors::state_unknown(code, message)
 }
 
 fn state_err_from_io(err: IoError) -> StateError {
-    let info = match err {
-        IoError::MissingFactKey(info)
-        | IoError::Transport(info)
-        | IoError::RateLimited(info)
-        | IoError::Other(info)
-        | IoError::MissingFact { info, .. } => info,
-    };
-
-    StateError {
-        state_id: None,
-        info,
-    }
+    op_errors::state_from_io(err)
 }
 
 fn default_poll_interval_ms() -> u64 {
@@ -812,29 +790,23 @@ fn expected_matches(actual: &serde_json::Value, expected: &serde_json::Value) ->
 }
 
 fn context_read_string(ctx: &dyn DynContext, key: &str) -> Result<String, StateError> {
-    let got = ctx
-        .read(&ContextKey(key.to_string()))
-        .map_err(|_| state_err("ctx_read_failed", "context read failed"))?;
-    let Some(v) = got else {
-        return Err(state_err(
-            "ctx_missing_key",
-            "required context key was missing",
-        ));
-    };
-    let Some(s) = v.as_str() else {
-        return Err(state_err(
-            "ctx_type_mismatch",
-            "context value was not a string",
-        ));
-    };
-    Ok(s.to_string())
+    op_ctx::read_string_required(
+        ctx,
+        &ContextKey(key.to_string()),
+        "ctx_missing_key",
+        "required context key was missing",
+        "ctx_type_mismatch",
+        "context value was not a string",
+    )
 }
 
 fn context_read_json(ctx: &dyn DynContext, key: &str) -> Result<serde_json::Value, StateError> {
-    let got = ctx
-        .read(&ContextKey(key.to_string()))
-        .map_err(|_| state_err("ctx_read_failed", "context read failed"))?;
-    got.ok_or_else(|| state_err("ctx_missing_key", "required context key was missing"))
+    op_ctx::read_json_required(
+        ctx,
+        &ContextKey(key.to_string()),
+        "ctx_missing_key",
+        "required context key was missing",
+    )
 }
 
 fn resolve_artifact_config(
@@ -856,8 +828,7 @@ fn context_write_json(
     key: &str,
     value: serde_json::Value,
 ) -> Result<(), StateError> {
-    ctx.write(ContextKey(key.to_string()), value)
-        .map_err(|_| state_err("ctx_write_failed", "context write failed"))
+    op_ctx::write_json(ctx, ContextKey(key.to_string()), value)
 }
 
 async fn send_transaction(
@@ -1387,7 +1358,7 @@ struct ContractFromNixState {
 #[async_trait]
 impl State for ContractFromNixState {
     fn meta(&self) -> StateMeta {
-        meta::pure_with_tag("config")
+        meta::config()
     }
 
     async fn handle(
@@ -1534,7 +1505,10 @@ struct DeployState {
 #[async_trait]
 impl State for DeployState {
     fn meta(&self) -> StateMeta {
-        meta::apply_side_effect(format!("mfm:evm_deploy|state:{}", self.state_id.0))
+        meta::apply_side_effect(op_idempotency::state_scope(
+            "mfm:evm_deploy",
+            &self.state_id,
+        ))
     }
 
     async fn handle(
@@ -1723,7 +1697,10 @@ struct ConfigureState {
 #[async_trait]
 impl State for ConfigureState {
     fn meta(&self) -> StateMeta {
-        meta::apply_side_effect(format!("mfm:evm_configure|state:{}", self.state_id.0))
+        meta::apply_side_effect(op_idempotency::state_scope(
+            "mfm:evm_configure",
+            &self.state_id,
+        ))
     }
 
     async fn handle(
@@ -1912,7 +1889,7 @@ struct ValidateState {
 #[async_trait]
 impl State for ValidateState {
     fn meta(&self) -> StateMeta {
-        meta::read_only_io_with_tag("validate")
+        meta::validate()
     }
 
     async fn handle(
@@ -1955,30 +1932,25 @@ impl State for ValidateState {
             ))
             .await
             .map_err(state_err_from_io)?;
-        let Some(client_version) = client_version_res.response.as_str() else {
-            return Err(state_err(
-                "evm_response_invalid",
-                "web3_clientVersion was not a string",
-            ));
-        };
-
-        if !client_version
-            .to_ascii_lowercase()
-            .contains(&self.cfg.require_client_substring.to_ascii_lowercase())
-        {
-            return Err(state_err(
-                "reth_client_mismatch",
-                "rpc clientVersion did not match required reth substring",
-            ));
-        }
+        let client_version = op_rpc::expect_string(
+            &client_version_res.response,
+            "evm_response_invalid",
+            "web3_clientVersion was not a string",
+        )?;
+        op_rpc::assert_condition(
+            client_version
+                .to_ascii_lowercase()
+                .contains(&self.cfg.require_client_substring.to_ascii_lowercase()),
+            "reth_client_mismatch",
+            "rpc clientVersion did not match required reth substring",
+        )?;
 
         let chain_id = client.chain_id_u64().await.map_err(state_err_from_io)?;
-        if chain_id != self.cfg.expected_chain_id {
-            return Err(state_err(
-                "chain_id_mismatch",
-                "rpc chain id did not match expected_chain_id",
-            ));
-        }
+        op_rpc::assert_condition(
+            chain_id == self.cfg.expected_chain_id,
+            "chain_id_mismatch",
+            "rpc chain id did not match expected_chain_id",
+        )?;
 
         let to = resolve_contract_address(ctx, &self.cfg.contract_address)?;
 
@@ -1994,23 +1966,21 @@ impl State for ValidateState {
                 .await
                 .map_err(state_err_from_io)?;
 
-            let Some(raw) = res.response.as_str() else {
-                return Err(state_err(
-                    "evm_response_invalid",
-                    "eth_call returned non-string",
-                ));
-            };
+            let raw = op_rpc::expect_string(
+                &res.response,
+                "evm_response_invalid",
+                "eth_call returned non-string",
+            )?;
 
-            let actual = decode_single_output_to_json(&ra.outputs, raw).map_err(|_| {
+            let actual = decode_single_output_to_json(&ra.outputs, &raw).map_err(|_| {
                 state_err("evm_response_invalid", "failed to decode eth_call output")
             })?;
 
-            if !expected_matches(&actual, &ra.expected) {
-                return Err(state_err(
-                    "validation_failed",
-                    "read assertion failed during evm_validate",
-                ));
-            }
+            op_rpc::assert_condition(
+                expected_matches(&actual, &ra.expected),
+                "validation_failed",
+                "read assertion failed during evm_validate",
+            )?;
         }
 
         for ea in &event_assertions {
@@ -2029,19 +1999,16 @@ impl State for ValidateState {
                 .await
                 .map_err(state_err_from_io)?;
 
-            let Some(logs) = logs_res.response.as_array() else {
-                return Err(state_err(
-                    "evm_response_invalid",
-                    "eth_getLogs returned non-array",
-                ));
-            };
-
-            if u64::try_from(logs.len()).unwrap_or(0) < ea.min_count {
-                return Err(state_err(
-                    "validation_failed",
-                    "event assertion failed during evm_validate",
-                ));
-            }
+            let logs = op_rpc::expect_array(
+                &logs_res.response,
+                "evm_response_invalid",
+                "eth_getLogs returned non-array",
+            )?;
+            op_rpc::assert_condition(
+                u64::try_from(logs.len()).unwrap_or(0) >= ea.min_count,
+                "validation_failed",
+                "event assertion failed during evm_validate",
+            )?;
 
             let _ = &ea.event;
         }

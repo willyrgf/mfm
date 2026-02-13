@@ -9,21 +9,27 @@ use async_trait::async_trait;
 
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
-use mfm_machine::errors::{ErrorCategory, ErrorInfo, StateError};
-use mfm_machine::events::{ArtifactWritten, DomainEvent, DOMAIN_EVENT_ARTIFACT_WRITTEN};
+use mfm_machine::errors::{ErrorCategory, StateError};
+use mfm_machine::events::DomainEvent;
 use mfm_machine::hashing::artifact_id_for_json;
-use mfm_machine::ids::{ContextKey, ErrorCode, FactKey, OpId, OpPath};
+use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
 use mfm_machine::io::{IoCall, IoProvider};
 use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-use mfm_machine::stores::ArtifactKind;
+use mfm_op_common::ctx as op_ctx;
+use mfm_op_common::errors as op_errors;
+use mfm_op_common::idempotency as op_idempotency;
+use mfm_op_common::output as op_output;
 use mfm_op_common::states::meta;
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
+
+#[cfg(test)]
+use mfm_machine::errors::ErrorInfo;
 
 const OP_ID: &str = "proof";
 const OP_VERSION: &str = "v1";
@@ -31,21 +37,13 @@ const OP_VERSION: &str = "v1";
 // Custom domain event (audit only).
 const DOMAIN_EVENT_IDEMPOTENCY_KEY: &str = "proof_idempotency_key";
 
+#[cfg(test)]
 fn info(code: &'static str, category: ErrorCategory, retryable: bool, message: &str) -> ErrorInfo {
-    ErrorInfo {
-        code: ErrorCode(code.to_string()),
-        category,
-        retryable,
-        message: message.to_string(),
-        details: None,
-    }
+    op_errors::info(code, category, retryable, message)
 }
 
 fn state_error(code: &'static str, message: &str) -> StateError {
-    StateError {
-        state_id: None,
-        info: info(code, ErrorCategory::Unknown, false, message),
-    }
+    op_errors::state_error(code, ErrorCategory::Unknown, false, message)
 }
 
 fn ctx_key(s: &'static str) -> ContextKey {
@@ -194,7 +192,7 @@ struct ReadFactsState {
 #[async_trait]
 impl State for ReadFactsState {
     fn meta(&self) -> StateMeta {
-        meta::read_only_io_with_tag("read_only_io")
+        meta::read_only_io_with_tag(meta::tags::READ_ONLY_IO)
     }
 
     async fn handle(
@@ -213,8 +211,7 @@ impl State for ReadFactsState {
             .await
             .map_err(|_| state_error("read_fact_io_failed", "failed to read input fact"))?;
 
-        ctx.write(ctx_key("read_fact"), res.response)
-            .map_err(|_| state_error("ctx_write_failed", "context write failed"))?;
+        op_ctx::write_json(ctx, ctx_key("read_fact"), res.response)?;
 
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,
@@ -230,7 +227,7 @@ struct ApplySideEffectState {
 #[async_trait]
 impl State for ApplySideEffectState {
     fn meta(&self) -> StateMeta {
-        meta::apply_side_effect(format!("proof:side_effect|op:{}", self.op_path.0))
+        meta::apply_side_effect(op_idempotency::op_scope("proof:side_effect", &self.op_path))
     }
 
     async fn handle(
@@ -239,22 +236,19 @@ impl State for ApplySideEffectState {
         io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let Some(read_fact) = ctx
-            .read(&ctx_key("read_fact"))
-            .map_err(|_| state_error("ctx_read_failed", "context read failed"))?
-        else {
-            return Err(state_error(
-                "missing_read_fact",
-                "missing read_fact in context",
-            ));
-        };
+        let read_fact = op_ctx::read_json_required(
+            ctx,
+            &ctx_key("read_fact"),
+            "missing_read_fact",
+            "missing read_fact in context",
+        )?;
 
         let id_key = idempotency_key_for_value(&read_fact)?;
-        ctx.write(
+        op_ctx::write_json(
+            ctx,
             ctx_key("idempotency_key"),
             serde_json::json!(id_key.clone()),
-        )
-        .map_err(|_| state_error("ctx_write_failed", "context write failed"))?;
+        )?;
 
         let fact_key = side_effect_fact_key(&self.op_path, &id_key);
         let existing = io
@@ -281,8 +275,7 @@ impl State for ApplySideEffectState {
             .await
             .map_err(|_| state_error("side_effect_io_failed", "side-effect call failed"))?;
 
-        ctx.write(ctx_key("side_effect_result"), res.response)
-            .map_err(|_| state_error("ctx_write_failed", "context write failed"))?;
+        op_ctx::write_json(ctx, ctx_key("side_effect_result"), res.response)?;
 
         if let Some(orphan) = &self.orphan_after_side_effect {
             orphan.trigger_if_armed();
@@ -310,76 +303,35 @@ impl State for WriteOutputState {
         io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let read_fact = ctx
-            .read(&ctx_key("read_fact"))
-            .map_err(|_| state_error("ctx_read_failed", "context read failed"))?
-            .ok_or_else(|| state_error("missing_read_fact", "missing read_fact in context"))?;
+        let read_fact = op_ctx::read_json_required(
+            ctx,
+            &ctx_key("read_fact"),
+            "missing_read_fact",
+            "missing read_fact in context",
+        )?;
 
-        let side_effect = ctx
-            .read(&ctx_key("side_effect_result"))
-            .map_err(|_| state_error("ctx_read_failed", "context read failed"))?
-            .ok_or_else(|| {
-                state_error(
-                    "missing_side_effect",
-                    "missing side_effect_result in context",
-                )
-            })?;
+        let side_effect = op_ctx::read_json_required(
+            ctx,
+            &ctx_key("side_effect_result"),
+            "missing_side_effect",
+            "missing side_effect_result in context",
+        )?;
 
         let output = serde_json::json!({
             "read_fact": read_fact,
             "side_effect_result": side_effect,
         });
 
-        let key = output_fact_key(&self.op_path);
-        let existed = io
-            .get_recorded_fact(&key)
-            .await
-            .map_err(|_| state_error("io_fact_lookup_failed", "failed to lookup recorded fact"))?
-            .is_some();
-
-        let res = io
-            .call(IoCall {
-                namespace: "proof.output".to_string(),
-                request: output,
-                fact_key: Some(key),
-            })
-            .await
-            .map_err(|_| state_error("output_io_failed", "output call failed"))?;
-
-        let Some(payload_id) = res.recorded_payload_id else {
-            return Err(state_error(
-                "missing_output_payload_id",
-                "expected recorded payload id for output",
-            ));
-        };
-
-        ctx.write(
+        op_output::write_output_artifact(
+            ctx,
+            io,
+            rec,
+            "proof.output",
+            output_fact_key(&self.op_path),
+            output,
             ctx_key("output_artifact_id"),
-            serde_json::json!(payload_id.0.clone()),
         )
-        .map_err(|_| state_error("ctx_write_failed", "context write failed"))?;
-
-        if !existed {
-            let payload = serde_json::to_value(ArtifactWritten {
-                artifact_id: payload_id,
-                kind: ArtifactKind::Output,
-                meta: serde_json::json!({}),
-            })
-            .map_err(|_| {
-                state_error(
-                    "artifact_written_serialize_failed",
-                    "failed to serialize ArtifactWritten",
-                )
-            })?;
-
-            rec.emit(DomainEvent {
-                name: DOMAIN_EVENT_ARTIFACT_WRITTEN.to_string(),
-                payload,
-                payload_ref: None,
-            })
-            .await
-            .map_err(|_| state_error("emit_failed", "failed to emit artifact_written"))?;
-        }
+        .await?;
 
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,
@@ -412,7 +364,7 @@ mod tests {
     use mfm_machine::runtime::{
         ChildRunLiveIoTransportFactory, DefaultExecutionEngine, EngineFailpoints, PlanResolver,
     };
-    use mfm_machine::stores::{ArtifactStore, EventStore};
+    use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
 
     use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
     use mfm_sdk::pipeline::PipelinePlanner;
@@ -858,7 +810,7 @@ mod tests {
         fn meta(&self) -> StateMeta {
             meta::apply_side_effect_with_tag(
                 "child_run_spawn",
-                format!("child_parent:spawn|op:{}", self.op_path.0),
+                op_idempotency::op_scope("child_parent:spawn", &self.op_path),
             )
         }
 
@@ -894,8 +846,7 @@ mod tests {
                 }));
             }
 
-            ctx.write(ctx_key("child_refs"), serde_json::Value::Array(refs))
-                .map_err(|_| state_error("ctx_write_failed", "context write failed"))?;
+            op_ctx::write_json(ctx, ctx_key("child_refs"), serde_json::Value::Array(refs))?;
 
             Ok(StateOutcome {
                 snapshot: SnapshotPolicy::OnSuccess,
@@ -913,7 +864,7 @@ mod tests {
         fn meta(&self) -> StateMeta {
             meta::apply_side_effect_with_tag(
                 "child_run_join",
-                format!("child_parent:join|op:{}", self.op_path.0),
+                op_idempotency::op_scope("child_parent:join", &self.op_path),
             )
         }
 
@@ -923,16 +874,14 @@ mod tests {
             io: &mut dyn IoProvider,
             rec: &mut dyn EventRecorder,
         ) -> Result<StateOutcome, StateError> {
-            let refs = ctx
-                .read(&ctx_key("child_refs"))
-                .map_err(|_| state_error("ctx_read_failed", "context read failed"))?
-                .ok_or_else(|| {
-                    state_error("missing_child_refs", "missing child_refs in context")
-                })?;
-
-            let refs = refs
-                .as_array()
-                .ok_or_else(|| state_error("invalid_child_refs", "child_refs must be an array"))?;
+            let refs = op_ctx::read_array_required(
+                ctx,
+                &ctx_key("child_refs"),
+                "missing_child_refs",
+                "missing child_refs in context",
+                "invalid_child_refs",
+                "child_refs must be an array",
+            )?;
 
             let mut joined: Vec<(RunId, serde_json::Value)> = Vec::new();
             for r in refs {
@@ -977,11 +926,11 @@ mod tests {
             // Locked decision (Milestone 5): deterministic join order by child_run_id bytes.
             joined.sort_by(|(a, _), (b, _)| a.0.as_bytes().cmp(b.0.as_bytes()));
 
-            ctx.write(
+            op_ctx::write_json(
+                ctx,
                 ctx_key("joined"),
                 serde_json::Value::Array(joined.into_iter().map(|(_, v)| v).collect()),
-            )
-            .map_err(|_| state_error("ctx_write_failed", "context write failed"))?;
+            )?;
 
             if let Some(orphan) = &self.orphan_after_join {
                 orphan.trigger_if_armed();

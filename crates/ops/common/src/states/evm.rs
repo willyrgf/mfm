@@ -13,6 +13,40 @@ use crate::ctx::write_json;
 use crate::errors::{state_error_with_state, state_from_io, state_unknown};
 use crate::states::meta;
 
+fn parse_hex_string_response(value: &serde_json::Value) -> Result<String, StateError> {
+    let Some(s) = value.as_str() else {
+        return Err(state_unknown(
+            "evm_response_invalid",
+            "evm response was not a hex string",
+        ));
+    };
+    let Some(rest) = s.strip_prefix("0x") else {
+        return Err(state_unknown(
+            "evm_response_invalid",
+            "evm response was not a hex string",
+        ));
+    };
+    if !rest.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(state_unknown(
+            "evm_response_invalid",
+            "evm response was not a hex string",
+        ));
+    }
+    Ok(s.to_string())
+}
+
+fn parse_u256_hex_response(value: &serde_json::Value) -> Result<String, StateError> {
+    let s = parse_hex_string_response(value)?;
+    let rest = s.strip_prefix("0x").unwrap_or_default();
+    if rest.is_empty() || rest.len() > 64 {
+        return Err(state_unknown(
+            "evm_response_invalid",
+            "evm response was not a hex u256",
+        ));
+    }
+    Ok(s)
+}
+
 #[derive(Clone, Debug)]
 pub struct U64Expectation {
     pub expected: u64,
@@ -35,6 +69,194 @@ impl U64Expectation {
             mismatch_retryable: false,
             mismatch_message,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ReadHexStringState {
+    pub state_id: StateId,
+    pub method: String,
+    pub params: serde_json::Value,
+    pub output_key: ContextKey,
+}
+
+impl ReadHexStringState {
+    pub fn new(
+        state_id: StateId,
+        method: impl Into<String>,
+        params: serde_json::Value,
+        output_key: ContextKey,
+    ) -> Self {
+        Self {
+            state_id,
+            method: method.into(),
+            params,
+            output_key,
+        }
+    }
+}
+
+#[async_trait]
+impl State for ReadHexStringState {
+    fn meta(&self) -> StateMeta {
+        meta::fetch_data()
+    }
+
+    async fn handle(
+        &self,
+        ctx: &mut dyn DynContext,
+        io: &mut dyn IoProvider,
+        _rec: &mut dyn EventRecorder,
+    ) -> Result<StateOutcome, StateError> {
+        let mut client = EvmIoClient::new(self.state_id.clone(), io);
+        let res = client
+            .call(JsonRpcCall::new(self.method.clone(), self.params.clone()))
+            .await
+            .map_err(state_from_io)?;
+        let value = parse_hex_string_response(&res.response)?;
+        write_json(ctx, self.output_key.clone(), serde_json::json!(value))?;
+
+        Ok(StateOutcome {
+            snapshot: SnapshotPolicy::OnSuccess,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ReadU256HexState {
+    pub state_id: StateId,
+    pub method: String,
+    pub params: serde_json::Value,
+    pub output_key: ContextKey,
+}
+
+impl ReadU256HexState {
+    pub fn new(
+        state_id: StateId,
+        method: impl Into<String>,
+        params: serde_json::Value,
+        output_key: ContextKey,
+    ) -> Self {
+        Self {
+            state_id,
+            method: method.into(),
+            params,
+            output_key,
+        }
+    }
+}
+
+#[async_trait]
+impl State for ReadU256HexState {
+    fn meta(&self) -> StateMeta {
+        meta::fetch_data()
+    }
+
+    async fn handle(
+        &self,
+        ctx: &mut dyn DynContext,
+        io: &mut dyn IoProvider,
+        _rec: &mut dyn EventRecorder,
+    ) -> Result<StateOutcome, StateError> {
+        let mut client = EvmIoClient::new(self.state_id.clone(), io);
+        let res = client
+            .call(JsonRpcCall::new(self.method.clone(), self.params.clone()))
+            .await
+            .map_err(state_from_io)?;
+        let value = parse_u256_hex_response(&res.response)?;
+        write_json(ctx, self.output_key.clone(), serde_json::json!(value))?;
+
+        Ok(StateOutcome {
+            snapshot: SnapshotPolicy::OnSuccess,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum EthCallDecode {
+    #[default]
+    HexString,
+    U64,
+    U256Hex,
+}
+
+#[derive(Clone, Debug)]
+pub struct EthCallState {
+    pub state_id: StateId,
+    pub to: String,
+    pub data: String,
+    pub block: serde_json::Value,
+    pub output_key: ContextKey,
+    pub decode: EthCallDecode,
+}
+
+impl EthCallState {
+    pub fn new(
+        state_id: StateId,
+        to: impl Into<String>,
+        data: impl Into<String>,
+        output_key: ContextKey,
+    ) -> Self {
+        Self {
+            state_id,
+            to: to.into(),
+            data: data.into(),
+            block: serde_json::json!("latest"),
+            output_key,
+            decode: EthCallDecode::HexString,
+        }
+    }
+
+    pub fn with_block(mut self, block: serde_json::Value) -> Self {
+        self.block = block;
+        self
+    }
+
+    pub fn with_decode(mut self, decode: EthCallDecode) -> Self {
+        self.decode = decode;
+        self
+    }
+}
+
+#[async_trait]
+impl State for EthCallState {
+    fn meta(&self) -> StateMeta {
+        meta::fetch_data()
+    }
+
+    async fn handle(
+        &self,
+        ctx: &mut dyn DynContext,
+        io: &mut dyn IoProvider,
+        _rec: &mut dyn EventRecorder,
+    ) -> Result<StateOutcome, StateError> {
+        let mut client = EvmIoClient::new(self.state_id.clone(), io);
+        let res = client
+            .call(JsonRpcCall::new(
+                "eth_call",
+                serde_json::json!([
+                    {"to": self.to.clone(), "data": self.data.clone()},
+                    self.block.clone()
+                ]),
+            ))
+            .await
+            .map_err(state_from_io)?;
+
+        let parsed = match self.decode {
+            EthCallDecode::HexString => {
+                serde_json::json!(parse_hex_string_response(&res.response)?)
+            }
+            EthCallDecode::U64 => serde_json::json!(parse_u64_hex_value(&res.response).map_err(
+                |_| state_unknown("evm_response_invalid", "evm response was not a hex u64")
+            )?),
+            EthCallDecode::U256Hex => serde_json::json!(parse_u256_hex_response(&res.response)?),
+        };
+
+        write_json(ctx, self.output_key.clone(), parsed)?;
+
+        Ok(StateOutcome {
+            snapshot: SnapshotPolicy::OnSuccess,
+        })
     }
 }
 
@@ -298,5 +520,83 @@ mod tests {
         let state_err = state_from_io(io_err);
         assert_eq!(state_err.info.code.0, "io_code");
         assert_eq!(state_err.info.message, "io message");
+    }
+
+    #[tokio::test]
+    async fn read_hex_string_writes_string_value() {
+        let state = ReadHexStringState::new(
+            StateId("m.main.client_version".to_string()),
+            "web3_clientVersion",
+            serde_json::json!([]),
+            ContextKey("client_version".to_string()),
+        );
+
+        let mut ctx = MapContext::default();
+        let mut io = FixedIo::default();
+        io.responses.insert(
+            "web3_clientVersion".to_string(),
+            serde_json::json!("0xdeadbeef"),
+        );
+        let mut rec = NoopRecorder;
+
+        state
+            .handle(&mut ctx, &mut io, &mut rec)
+            .await
+            .expect("state");
+        assert_eq!(
+            ctx.read(&ContextKey("client_version".to_string()))
+                .expect("read"),
+            Some(serde_json::json!("0xdeadbeef"))
+        );
+    }
+
+    #[tokio::test]
+    async fn read_u256_hex_rejects_overflow() {
+        let state = ReadU256HexState::new(
+            StateId("m.main.balance".to_string()),
+            "eth_getBalance",
+            serde_json::json!(["0xabc", "latest"]),
+            ContextKey("balance".to_string()),
+        );
+
+        let mut ctx = MapContext::default();
+        let mut io = FixedIo::default();
+        io.responses.insert(
+            "eth_getBalance".to_string(),
+            serde_json::json!(format!("0x{}", "f".repeat(65))),
+        );
+        let mut rec = NoopRecorder;
+
+        let err = state
+            .handle(&mut ctx, &mut io, &mut rec)
+            .await
+            .expect_err("overflow");
+        assert_eq!(err.info.code.0, "evm_response_invalid");
+    }
+
+    #[tokio::test]
+    async fn eth_call_u64_decode_writes_numeric_value() {
+        let state = EthCallState::new(
+            StateId("m.main.eth_call".to_string()),
+            "0x0000000000000000000000000000000000000000",
+            "0x313ce567",
+            ContextKey("decimals".to_string()),
+        )
+        .with_decode(EthCallDecode::U64);
+
+        let mut ctx = MapContext::default();
+        let mut io = FixedIo::default();
+        io.responses
+            .insert("eth_call".to_string(), serde_json::json!("0x12"));
+        let mut rec = NoopRecorder;
+
+        state
+            .handle(&mut ctx, &mut io, &mut rec)
+            .await
+            .expect("state");
+        assert_eq!(
+            ctx.read(&ContextKey("decimals".to_string())).expect("read"),
+            Some(serde_json::json!(18))
+        );
     }
 }

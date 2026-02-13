@@ -18,16 +18,16 @@ use alloy_primitives::{Address, U256};
 use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
-use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, StateError};
-use mfm_machine::events::{ArtifactWritten, DomainEvent, DOMAIN_EVENT_ARTIFACT_WRITTEN};
-use mfm_machine::ids::{ContextKey, ErrorCode, FactKey, OpId, OpPath, StateId};
-use mfm_machine::io::{IoCall, IoProvider};
+use mfm_machine::errors::{ErrorCategory, IoError, StateError};
+use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
+use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-use mfm_machine::stores::ArtifactKind;
 use mfm_op_common::ctx as op_ctx;
+use mfm_op_common::errors as op_errors;
+use mfm_op_common::output as op_output;
 use mfm_op_common::states::evm::{ReadU64HexState, U64Expectation};
 use mfm_op_common::states::meta;
 use mfm_sdk::errors::SdkError;
@@ -42,42 +42,16 @@ const KEY_BLOCK_NUMBER: &str = "block_number";
 const KEY_NATIVE: &str = "native";
 const KEY_SNAPSHOT_ARTIFACT_ID: &str = "snapshot_artifact_id";
 
-fn info(code: &'static str, category: ErrorCategory, retryable: bool, message: &str) -> ErrorInfo {
-    ErrorInfo {
-        code: ErrorCode(code.to_string()),
-        category,
-        retryable,
-        message: message.to_string(),
-        details: None,
-    }
-}
-
 fn sdk_err(code: &'static str, message: &'static str) -> SdkError {
-    SdkError {
-        info: info(code, ErrorCategory::ParsingInput, false, message),
-    }
+    op_errors::sdk_error(code, ErrorCategory::ParsingInput, false, message)
 }
 
 fn state_err(code: &'static str, message: &'static str) -> StateError {
-    StateError {
-        state_id: None,
-        info: info(code, ErrorCategory::Unknown, false, message),
-    }
+    op_errors::state_unknown(code, message)
 }
 
 fn state_err_from_io(err: IoError) -> StateError {
-    let info = match err {
-        IoError::MissingFactKey(info)
-        | IoError::Transport(info)
-        | IoError::RateLimited(info)
-        | IoError::Other(info)
-        | IoError::MissingFact { info, .. } => info,
-    };
-
-    StateError {
-        state_id: None,
-        info,
-    }
+    op_errors::state_from_io(err)
 }
 
 fn ctx_key(suffix: &'static str) -> ContextKey {
@@ -503,19 +477,23 @@ impl State for WriteSnapshotState {
             "missing block_number in context",
         )?;
 
-        let native = ctx
-            .read(&ctx_key(KEY_NATIVE))
-            .map_err(|_| state_err("ctx_read_failed", "context read failed"))?
-            .ok_or_else(|| state_err("missing_native", "missing native balance in context"))?;
+        let native = op_ctx::read_json_required(
+            ctx,
+            &ctx_key(KEY_NATIVE),
+            "missing_native",
+            "missing native balance in context",
+        )?;
 
         let mut tokens = Vec::with_capacity(self.cfg.tokens.len());
         for t in &self.cfg.tokens {
             let addr_no0x = address_hex_lower_no0x(&t.address);
             let k = ctx_key_erc20_token(&addr_no0x);
-            let tok = ctx
-                .read(&k)
-                .map_err(|_| state_err("ctx_read_failed", "context read failed"))?
-                .ok_or_else(|| state_err("missing_token", "missing token balance in context"))?;
+            let tok = op_ctx::read_json_required(
+                ctx,
+                &k,
+                "missing_token",
+                "missing token balance in context",
+            )?;
             tokens.push(tok);
         }
 
@@ -530,56 +508,16 @@ impl State for WriteSnapshotState {
             "errors": [],
         });
 
-        let key = output_fact_key(&self.op_path);
-        let existed = io
-            .get_recorded_fact(&key)
-            .await
-            .map_err(|_| state_err("io_fact_lookup_failed", "failed to lookup recorded fact"))?
-            .is_some();
-
-        let res = io
-            .call(IoCall {
-                namespace: "portfolio.output".to_string(),
-                request: snapshot,
-                fact_key: Some(key),
-            })
-            .await
-            .map_err(|_| state_err("output_io_failed", "output call failed"))?;
-
-        let Some(payload_id) = res.recorded_payload_id else {
-            return Err(state_err(
-                "missing_output_payload_id",
-                "expected recorded payload id for output",
-            ));
-        };
-
-        op_ctx::write_json(
+        op_output::write_output_artifact(
             ctx,
+            io,
+            rec,
+            "portfolio.output",
+            output_fact_key(&self.op_path),
+            snapshot,
             ctx_key(KEY_SNAPSHOT_ARTIFACT_ID),
-            serde_json::json!(payload_id.0.clone()),
-        )?;
-
-        if !existed {
-            let payload = serde_json::to_value(ArtifactWritten {
-                artifact_id: payload_id,
-                kind: ArtifactKind::Output,
-                meta: serde_json::json!({}),
-            })
-            .map_err(|_| {
-                state_err(
-                    "artifact_written_serialize_failed",
-                    "failed to serialize ArtifactWritten",
-                )
-            })?;
-
-            rec.emit(DomainEvent {
-                name: DOMAIN_EVENT_ARTIFACT_WRITTEN.to_string(),
-                payload,
-                payload_ref: None,
-            })
-            .await
-            .map_err(|_| state_err("emit_failed", "failed to emit artifact_written"))?;
-        }
+        )
+        .await?;
 
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,
@@ -600,10 +538,11 @@ mod tests {
     use mfm_machine::context::DynContext;
     use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
     use mfm_machine::errors::ContextError;
-    use mfm_machine::errors::{ErrorCategory, StorageError};
+    use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
     use mfm_machine::events::{Event, EventEnvelope, KernelEvent};
     use mfm_machine::hashing::artifact_id_for_bytes;
-    use mfm_machine::ids::{ArtifactId, RunId};
+    use mfm_machine::ids::{ArtifactId, ErrorCode, RunId};
+    use mfm_machine::io::IoCall;
     use mfm_machine::live_io::{LiveIoTransport, LiveIoTransportFactory};
     use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
     use mfm_machine::runtime::DefaultExecutionEngine;
@@ -632,6 +571,15 @@ mod tests {
             skip_tags: Vec::new(),
             nix_flake_allowlist: mfm_machine::config::default_nix_flake_allowlist(),
         }
+    }
+
+    fn info(
+        code: &'static str,
+        category: ErrorCategory,
+        retryable: bool,
+        message: &str,
+    ) -> ErrorInfo {
+        op_errors::info(code, category, retryable, message)
     }
 
     fn storage_info(code: &'static str, message: &'static str) -> ErrorInfo {

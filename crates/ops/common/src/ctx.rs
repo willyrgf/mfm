@@ -23,6 +23,45 @@ pub fn read_u64_required(
         .ok_or_else(|| state_unknown(missing_code, missing_message))
 }
 
+pub fn read_json_required(
+    ctx: &dyn DynContext,
+    key: &ContextKey,
+    missing_code: &'static str,
+    missing_message: &'static str,
+) -> Result<serde_json::Value, StateError> {
+    read_json(ctx, key)?.ok_or_else(|| state_unknown(missing_code, missing_message))
+}
+
+pub fn read_string_required(
+    ctx: &dyn DynContext,
+    key: &ContextKey,
+    missing_code: &'static str,
+    missing_message: &'static str,
+    type_code: &'static str,
+    type_message: &'static str,
+) -> Result<String, StateError> {
+    let value = read_json_required(ctx, key, missing_code, missing_message)?;
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| state_unknown(type_code, type_message))
+}
+
+pub fn read_array_required(
+    ctx: &dyn DynContext,
+    key: &ContextKey,
+    missing_code: &'static str,
+    missing_message: &'static str,
+    type_code: &'static str,
+    type_message: &'static str,
+) -> Result<Vec<serde_json::Value>, StateError> {
+    let value = read_json_required(ctx, key, missing_code, missing_message)?;
+    value
+        .as_array()
+        .cloned()
+        .ok_or_else(|| state_unknown(type_code, type_message))
+}
+
 pub fn write_json(
     ctx: &mut dyn DynContext,
     key: ContextKey,
@@ -106,6 +145,60 @@ mod tests {
             .expect_err("expected missing");
         assert_eq!(err.info.code.0, "missing_key");
         assert_eq!(err.info.message, "key was missing");
+    }
+
+    #[test]
+    fn read_json_required_missing_uses_requested_error() {
+        let key = ContextKey("missing".to_string());
+        let ctx = MapContext::default();
+        let err = read_json_required(&ctx, &key, "missing_json", "json was missing")
+            .expect_err("expected missing");
+        assert_eq!(err.info.code.0, "missing_json");
+        assert_eq!(err.info.message, "json was missing");
+    }
+
+    #[test]
+    fn read_string_required_reports_type_mismatch() {
+        let key = ContextKey("s".to_string());
+        let mut ctx = MapContext::default();
+        write_json(&mut ctx, key.clone(), serde_json::json!({"not": "string"})).expect("write");
+
+        let err = read_string_required(
+            &ctx,
+            &key,
+            "missing",
+            "missing",
+            "type_mismatch",
+            "not string",
+        )
+        .expect_err("expected type mismatch");
+        assert_eq!(err.info.code.0, "type_mismatch");
+        assert_eq!(err.info.message, "not string");
+    }
+
+    #[test]
+    fn read_array_required_reads_array() {
+        let key = ContextKey("arr".to_string());
+        let mut ctx = MapContext::default();
+        write_json(&mut ctx, key.clone(), serde_json::json!([1, 2, 3])).expect("write");
+
+        let values = read_array_required(
+            &ctx,
+            &key,
+            "missing",
+            "missing",
+            "type_mismatch",
+            "not array",
+        )
+        .expect("array");
+        assert_eq!(
+            values,
+            vec![
+                serde_json::json!(1),
+                serde_json::json!(2),
+                serde_json::json!(3)
+            ]
+        );
     }
 
     #[test]
