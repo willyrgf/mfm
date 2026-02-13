@@ -294,6 +294,7 @@ let
     # Lifecycle policy invariants:
     # - start hooks may return before the service is externally ready.
     # - READY/HEALTH hooks must be safe to poll and deterministic when not ready.
+    # - profile-specific readiness hooks (for example *_READY_TEST) take precedence when present.
     # - fixtures must poll READY/HEALTH with timeout loops after start (never one-shot checks).
     # - failure diagnostics must not introduce secondary errors (for example tailing missing logs).
     fixture_start_service() {
@@ -331,11 +332,13 @@ let
       local stop_hook=""
       local health_hook=""
       local ready_hook=""
+      local profile_ready_hook=""
       local wait_hook=""
       local status_hook=""
       local start_cmd=""
       local op=""
       local hook=""
+      local profile_token=""
       local -a start_ops=()
 
       case "$profile" in
@@ -368,6 +371,11 @@ let
       check_hook=$(_service_hook_name "$service" "CHECK_CONFIG")
       start_cmd="''${!start_hook}"
 
+      if [ -n "$profile" ] && [ "$profile" != "default" ]; then
+        profile_token=$(echo "$profile" | tr '[:lower:]' '[:upper:]' | tr '.:/-' '_')
+        profile_ready_hook=$(_service_hook_name "$service" "READY_''${profile_token}")
+      fi
+
       if has_hook "$init_hook"; then
         run_hook "$init_hook"
       fi
@@ -396,7 +404,9 @@ let
         fi
       fi
 
-      if has_hook "$ready_hook"; then
+      if [ -n "$profile_ready_hook" ] && has_hook "$profile_ready_hook"; then
+        wait_hook="$profile_ready_hook"
+      elif has_hook "$ready_hook"; then
         wait_hook="$ready_hook"
       elif has_hook "$health_hook"; then
         wait_hook="$health_hook"

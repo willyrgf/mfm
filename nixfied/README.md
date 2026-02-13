@@ -1004,18 +1004,24 @@ Run the integration test suite for the framework itself:
 nix run .#framework::test
 ```
 
-This defaults to the deepest profile (`full`), including the isolation runner.
+Default behavior:
+- Uses the `ci` profile.
+- Runs shard groups in parallel (`--jobs 2`).
 
-For a faster CI-oriented profile:
+Examples:
 
 ```bash
 nix run .#framework::test -- --profile ci
+nix run .#framework::test -- --jobs 3
+nix run .#framework::test -- --serial
+nix run .#framework::test -- --list-shards
+nix run .#framework::test -- --shard installer
 ```
 
-To force isolation while using `ci` profile:
+To include isolation in framework tests:
 
 ```bash
-FRAMEWORK_ISOLATION=1 nix run .#framework::test -- --profile ci
+FRAMEWORK_ISOLATION=1 nix run .#framework::test
 ```
 
 The test runner is fully packaged with Nix tools; it does not depend on system

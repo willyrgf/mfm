@@ -438,6 +438,23 @@ let
 
                                     echo "INFO: Framework source revision rev=$FRAMEWORK_REVISION"
 
+                                    PREV_FRAMEWORK_REVISION="unknown"
+                                    if [ "$MODE" = "upgrade" ] && [ -f "$ROOT/nixfied/VENDORED.txt" ]; then
+                                      PREV_FRAMEWORK_REVISION=$(${pkgs.gawk}/bin/awk '
+                                        $0 ~ /^Framework source revision \(install\/upgrade\):$/ { in_section=1; next }
+                                        in_section && $0 ~ /^[[:space:]]*-[[:space:]]+/ {
+                                          line=$0
+                                          sub(/^[[:space:]]*-[[:space:]]+/, "", line)
+                                          print line
+                                          exit
+                                        }
+                                      ' "$ROOT/nixfied/VENDORED.txt" 2>/dev/null || true)
+                                      if [ -z "$PREV_FRAMEWORK_REVISION" ]; then
+                                        PREV_FRAMEWORK_REVISION="unknown"
+                                      fi
+                                      echo "INFO: Existing vendored revision rev=$PREV_FRAMEWORK_REVISION"
+                                    fi
+
         	                    	        if [ ! -f "$SRC/flake.nix" ] || [ ! -d "$SRC/nixfied" ]; then
         	                    	          echo "ERROR: Framework source is missing required files." >&2
         	                    	          exit 1
@@ -550,6 +567,7 @@ let
                                       echo "If you need to customize behavior, prefer editing files under nixfied/project/"
                                       echo "and nixfied/local/ rather than editing framework code."
                                     } > "$ROOT/nixfied/VENDORED.txt"
+                                    rm -f "$ROOT/nixfied/UPGRADE_CHECK.txt" 2>/dev/null || true
 
                                     chmod -R u+w "$ROOT/nixfied" 2>/dev/null || true
                                     if command -v chflags >/dev/null 2>&1; then

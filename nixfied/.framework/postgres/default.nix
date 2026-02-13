@@ -17,6 +17,7 @@ let
   };
   pgPackage = cfg.package or pkgs.postgresql_16;
   pgDatabase = cfg.database or "app";
+  testDatabase = cfg.testDatabase or "${pgDatabase}_test";
   portKey = cfg.portKey or "postgres";
   portVar = slots.portVarName portKey;
   dataDirName = cfg.dataDirName or "postgres";
@@ -119,6 +120,33 @@ let
     exit 1
   '';
 
+  readyTest = pkgs.writeShellScript "postgres-ready-test" ''
+    set -euo pipefail
+    eval "$(${slots.getSlotInfo})"
+
+    PORT_VAR="${portVar}"
+    PGPORT="''${PGPORT:-''${!PORT_VAR}}"
+    PGDATABASE="''${PGDATABASE:-${testDatabase}}"
+
+    if ! ${pgPackage}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
+      echo "ERROR: PostgreSQL not ready for test db port=$PGPORT database=$PGDATABASE (pg_isready failed)" >&2
+      exit 1
+    fi
+
+    if ! ${pgPackage}/bin/psql -h localhost -p "$PGPORT" -U postgres -d postgres -Atqc "select 1;" >/dev/null 2>&1; then
+      echo "ERROR: PostgreSQL not ready for test db port=$PGPORT database=$PGDATABASE (maintenance query failed)" >&2
+      exit 1
+    fi
+
+    if ${pgPackage}/bin/psql -h localhost -p "$PGPORT" -U postgres -d "$PGDATABASE" -Atqc "select 1;" >/dev/null 2>&1; then
+      echo "OK: PostgreSQL ready for test db port=$PGPORT database=$PGDATABASE"
+      exit 0
+    fi
+
+    echo "ERROR: PostgreSQL not ready for test db port=$PGPORT database=$PGDATABASE (database query failed)" >&2
+    exit 1
+  '';
+
   checkConfig = pkgs.writeShellScript "postgres-check-config" ''
     set -euo pipefail
     eval "$(${slots.getSlotInfo})"
@@ -171,6 +199,7 @@ let
       portVar = portVar;
       dataDir = pgdataExpr;
       defaultDatabase = pgDatabase;
+      testDatabase = testDatabase;
     };
     coreOps = {
       init = {
@@ -233,6 +262,12 @@ let
         hook = "READY";
         summary = "Wait for PostgreSQL readiness";
         details = "Checks PostgreSQL accepts local SQL queries on the configured port.";
+      };
+      ready-test = {
+        script = readyTest;
+        hook = "READY_TEST";
+        summary = "Wait for PostgreSQL test-database readiness";
+        details = "Checks PostgreSQL and the configured test database accept local SQL queries.";
       };
       list-instances = {
         script = lifecycle.listInstances;

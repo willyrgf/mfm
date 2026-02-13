@@ -35,18 +35,60 @@ let
       exit 1
     fi
 
-    PROFILE="full"
+    PROFILE="ci"
     SUMMARY_JSON=""
+    JOBS=2
+    SERIAL_MODE=0
+    SHARD=""
+    LIST_SHARDS=0
+    SKIP_SETUP=0
+    SKIP_TEARDOWN=0
+    SHARDS=(
+      "helpers"
+      "installer"
+      "runtime-modules"
+      "lib-contracts"
+    )
 
     usage() {
       cat <<'EOF'
-    Usage: nix run .#framework::test [--profile ci|full] [--summary-json <path>]
+    Usage: nix run .#framework::test [--profile ci|full] [--jobs <n>] [--serial] [--shard <name>] [--list-shards] [--summary-json <path>]
 
     Options:
-      --profile <name>      Test profile to run (ci|full). Default: full.
+      --profile <name>      Test profile to run. Use ci (default). full is a deprecated alias for ci.
+      --jobs <n>            Number of shard workers (default: 2).
+      --serial              Run all shards serially (same as --jobs 1).
+      --shard <name>        Run one shard only.
+      --list-shards         Print shard names and exit.
       --summary-json <path> Write a compact JSON summary to <path>.
       --help                Show this help.
     EOF
+    }
+
+    print_shards() {
+      local shard_name
+      for shard_name in "''${SHARDS[@]}"; do
+        printf '%s\n' "$shard_name"
+      done
+    }
+
+    shard_valid() {
+      local requested="$1"
+      local shard_name
+      for shard_name in "''${SHARDS[@]}"; do
+        if [ "$shard_name" = "$requested" ]; then
+          return 0
+        fi
+      done
+      return 1
+    }
+
+    should_run_shard() {
+      local shard_name="$1"
+      if [ -z "$SHARD" ] || [ "$SHARD" = "$shard_name" ]; then
+        return 0
+      fi
+      return 1
     }
 
     while [ "$#" -gt 0 ]; do
@@ -58,7 +100,11 @@ let
             exit 1
           fi
           case "$PROFILE" in
-            ci|full) ;;
+            ci) ;;
+            full)
+              echo "WARN: profile 'full' is deprecated; using 'ci'. Set FRAMEWORK_ISOLATION=1 to include isolation."
+              PROFILE="ci"
+              ;;
             *)
               echo "Unknown profile: $PROFILE (expected: ci|full)" >&2
               exit 1
@@ -74,6 +120,46 @@ let
           fi
           shift 2
           ;;
+        --jobs)
+          JOBS="''${2:-}"
+          if [ -z "$JOBS" ]; then
+            echo "Missing value for --jobs" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$JOBS" | grep -Eq '^[0-9]+$'; then
+            echo "--jobs must be a positive integer" >&2
+            exit 1
+          fi
+          if [ "$JOBS" -lt 1 ]; then
+            echo "--jobs must be >= 1" >&2
+            exit 1
+          fi
+          shift 2
+          ;;
+        --serial)
+          SERIAL_MODE=1
+          shift
+          ;;
+        --shard)
+          SHARD="''${2:-}"
+          if [ -z "$SHARD" ]; then
+            echo "Missing value for --shard" >&2
+            exit 1
+          fi
+          shift 2
+          ;;
+        --list-shards)
+          LIST_SHARDS=1
+          shift
+          ;;
+        --skip-setup)
+          SKIP_SETUP=1
+          shift
+          ;;
+        --skip-teardown)
+          SKIP_TEARDOWN=1
+          shift
+          ;;
         --help|-h)
           usage
           exit 0
@@ -85,6 +171,22 @@ let
           ;;
       esac
     done
+
+    if [ "$SERIAL_MODE" -eq 1 ]; then
+      JOBS=1
+    fi
+
+    if [ "$LIST_SHARDS" -eq 1 ]; then
+      print_shards
+      exit 0
+    fi
+
+    if [ -n "$SHARD" ] && ! shard_valid "$SHARD"; then
+      echo "Unknown shard: $SHARD" >&2
+      echo "Valid shards:" >&2
+      print_shards >&2
+      exit 1
+    fi
 
     TEST_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     TEST_START_EPOCH=$(date +%s)
@@ -170,6 +272,113 @@ let
       else
         echo "WARN: test log missing path=$file" >&2
       fi
+    }
+
+    run_parallel_shards() {
+      local shards_dir="$WORKDIR/shards"
+      local failed=0
+      local first_fail_rc=1
+      local have_fail_rc=0
+      local shard_name
+
+      mkdir -p "$shards_dir"
+
+      local -a active_pids=()
+      declare -A shard_by_pid=()
+      declare -A log_by_pid=()
+      declare -A start_by_pid=()
+
+      remove_active_pid() {
+        local remove_pid="$1"
+        local pid
+        local -a keep=()
+        for pid in "''${active_pids[@]}"; do
+          if [ "$pid" != "$remove_pid" ]; then
+            keep+=("$pid")
+          fi
+        done
+        active_pids=("''${keep[@]}")
+      }
+
+      start_one_shard() {
+        local shard="$1"
+        local log_file="$shards_dir/$shard.log"
+        local pid
+        local started
+
+        started=$(date +%s)
+        "$0" \
+          --profile "$PROFILE" \
+          --jobs 1 \
+          --shard "$shard" \
+          --skip-setup \
+          --skip-teardown >"$log_file" 2>&1 &
+        pid=$!
+
+        active_pids+=("$pid")
+        shard_by_pid["$pid"]="$shard"
+        log_by_pid["$pid"]="$log_file"
+        start_by_pid["$pid"]="$started"
+
+        echo "INFO: shard started name=$shard pid=$pid log=$log_file"
+      }
+
+      wait_one_shard() {
+        local done_pid=""
+        local rc=0
+        local shard=""
+        local log_file=""
+        local started=0
+        local duration=0
+
+        set +e
+        wait -n -p done_pid
+        rc=$?
+        set -e
+
+        if [ -z "$done_pid" ]; then
+          return 0
+        fi
+
+        shard="''${shard_by_pid[$done_pid]:-unknown}"
+        log_file="''${log_by_pid[$done_pid]:-}"
+        started="''${start_by_pid[$done_pid]:-0}"
+        duration=$(( $(date +%s) - started ))
+
+        remove_active_pid "$done_pid"
+        unset "shard_by_pid[$done_pid]" "log_by_pid[$done_pid]" "start_by_pid[$done_pid]"
+
+        if [ "$rc" -eq 0 ]; then
+          echo "OK: shard=$shard duration=$duration"
+          return 0
+        fi
+
+        echo "ERROR: shard=$shard exit=$rc log=$log_file" >&2
+        echo "ERROR: shard failure tail shard=$shard" >&2
+        print_log_tail "$log_file" 80
+        failed=1
+        if [ "$have_fail_rc" -eq 0 ]; then
+          first_fail_rc="$rc"
+          have_fail_rc=1
+        fi
+        return 0
+      }
+
+      for shard_name in "''${SHARDS[@]}"; do
+        while [ "''${#active_pids[@]}" -ge "$JOBS" ]; do
+          wait_one_shard
+        done
+        start_one_shard "$shard_name"
+      done
+
+      while [ "''${#active_pids[@]}" -gt 0 ]; do
+        wait_one_shard
+      done
+
+      if [ "$failed" -ne 0 ]; then
+        return "$first_fail_rc"
+      fi
+      return 0
     }
 
     run_app() {
@@ -300,35 +509,51 @@ let
       require_absent "$modules_file" 'tail -50 "$HELIOS_DIR/logs/helios.log" >&2 || true' "modules helios unguarded log tail"
     }
 
-    log "flake eval"
-    nix flake show "path:$ROOT" >/dev/null
-    nix flake check --no-build "path:$ROOT" >/dev/null
+    if [ "$SKIP_SETUP" -ne 1 ]; then
+      log "flake eval"
+      nix flake show "path:$ROOT" >/dev/null
+      nix flake check --no-build "path:$ROOT" >/dev/null
 
-    log "coverage map"
-    check_coverage_map >/dev/null
+      log "coverage map"
+      check_coverage_map >/dev/null
 
-    log "fixture hardening contracts"
-    check_fixture_hardening_contracts
+      log "fixture hardening contracts"
+      check_fixture_hardening_contracts
 
-    log "core apps"
-    HELP_OUT="$WORKDIR/help.txt"
-    nix run "path:$ROOT"#help > "$HELP_OUT"
-    assert_contains "$HELP_OUT" "Commands:"
-    assert_contains "$HELP_OUT" "PROJECT_ENV"
-    assert_contains "$HELP_OUT" "NIX_ENV"
-    assert_contains "$HELP_OUT" "NIXFIED_ENV"
+      log "core apps"
+      HELP_OUT="$WORKDIR/help.txt"
+      nix run "path:$ROOT"#help > "$HELP_OUT"
+      assert_contains "$HELP_OUT" "Commands:"
+      assert_contains "$HELP_OUT" "PROJECT_ENV"
+      assert_contains "$HELP_OUT" "NIX_ENV"
+      assert_contains "$HELP_OUT" "NIXFIED_ENV"
 
-    HELP_DEV_OUT="$WORKDIR/help-dev.txt"
-    nix run "path:$ROOT"#help -- dev > "$HELP_DEV_OUT"
-    assert_contains "$HELP_DEV_OUT" "Usage:"
-    assert_contains "$HELP_DEV_OUT" "nix run .#dev"
+      HELP_DEV_OUT="$WORKDIR/help-dev.txt"
+      nix run "path:$ROOT"#help -- dev > "$HELP_DEV_OUT"
+      assert_contains "$HELP_DEV_OUT" "Usage:"
+      assert_contains "$HELP_DEV_OUT" "nix run .#dev"
 
-    nix run "path:$ROOT"#dev >/dev/null
-    nix run "path:$ROOT"#test >/dev/null
-    nix run "path:$ROOT"#build >/dev/null
-    nix run "path:$ROOT"#check >/dev/null
-    nix run "path:$ROOT"#ci -- --summary >/dev/null
+      nix run "path:$ROOT"#dev >/dev/null
+      nix run "path:$ROOT"#test >/dev/null
+      nix run "path:$ROOT"#build >/dev/null
+      nix run "path:$ROOT"#check >/dev/null
+      nix run "path:$ROOT"#ci -- --summary >/dev/null
+    fi
 
+    if [ -z "$SHARD" ] && [ "$SKIP_SETUP" -ne 1 ] && [ "$SKIP_TEARDOWN" -ne 1 ] && [ "$JOBS" -gt 1 ]; then
+      log "parallel shard execution"
+      if ! run_parallel_shards; then
+        exit 1
+      fi
+      if [ "''${FRAMEWORK_ISOLATION:-}" = "1" ]; then
+        log "isolation runner"
+        run_app "$ROOT" test-isolation
+      fi
+      log "all tests passed"
+      exit 0
+    fi
+
+    if should_run_shard "helpers"; then
     log "helpers runtime"
     HELPERS_DIR="$WORKDIR/helpers"
     mkdir -p "$HELPERS_DIR"
@@ -661,7 +886,7 @@ let
     set +e
     (
       unset SLOT_INFO REQUIRE_SLOT_ENV \
-        POSTGRES_INIT POSTGRES_START POSTGRES_STOP POSTGRES_HEALTH POSTGRES_READY POSTGRES_SETUP_DB POSTGRES_FULL_START POSTGRES_FULL_START_TEST \
+        POSTGRES_INIT POSTGRES_START POSTGRES_STOP POSTGRES_HEALTH POSTGRES_READY POSTGRES_READY_TEST POSTGRES_SETUP_DB POSTGRES_FULL_START POSTGRES_FULL_START_TEST \
         NGINX_INIT NGINX_START NGINX_STOP NGINX_HEALTH NGINX_READY NGINX_SITE_PROXY NGINX_SITE_STATIC \
         MINIO_INIT MINIO_START MINIO_STOP MINIO_HEALTH MINIO_READY MINIO_CHECK_CONFIG MINIO_BUCKET_LIST \
         RETH_INIT RETH_START RETH_STOP RETH_HEALTH RETH_READY RETH_CHECK_CONFIG \
@@ -968,6 +1193,22 @@ let
         _cleanup_initialized=false
         echo "OK: fixture_start_service retried READY hook"
 
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 1' > "$PWD/mock-ready-default-fail.sh"
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'COUNT_FILE="$MOCK_READY_TEST_COUNT_FILE"' 'if [ -z "$COUNT_FILE" ]; then COUNT_FILE="$PWD/mock-ready-test.count"; fi' 'count=0' 'if [ -f "$COUNT_FILE" ]; then count=$(cat "$COUNT_FILE"); fi' 'count=$((count + 1))' 'echo "$count" > "$COUNT_FILE"' 'if [ "$count" -lt 2 ]; then exit 1; fi' 'exit 0' > "$PWD/mock-ready-test.sh"
+        chmod +x "$PWD/mock-ready-default-fail.sh" "$PWD/mock-ready-test.sh"
+        export MOCK_READY_TEST_COUNT_FILE="$PWD/mock-ready-test.count"
+        rm -f "$MOCK_READY_TEST_COUNT_FILE"
+        export MOCKSVC_READY="$PWD/mock-ready-default-fail.sh"
+        export MOCKSVC_READY_TEST="$PWD/mock-ready-test.sh"
+
+        fixture_start_service mocksvc test 5 1
+        READY_TEST_ATTEMPTS="$(cat "$MOCK_READY_TEST_COUNT_FILE" 2>/dev/null || echo 0)"
+        [ "$READY_TEST_ATTEMPTS" -ge 2 ] || fail "fixture_start_service should retry READY_TEST hook attempts=$READY_TEST_ATTEMPTS"
+        _run_cleanups
+        _cleanup_actions=()
+        _cleanup_initialized=false
+        echo "OK: fixture_start_service preferred READY_TEST hook"
+
         export PGPORT="$(pick_port)" || fail "failed to pick port"
         export CI_ARTIFACTS_DIR="$PWD/.artifacts"
         LOGFILE="$(artifact_path "postgres-keep-running.log")"
@@ -1046,6 +1287,7 @@ let
       exit "$RC"
     fi
     assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service retried READY hook"
+    assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service preferred READY_TEST hook"
     assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service keep_running preserved service"
     assert_contains "$FIX_START_READY_LOG" "WARN: fixture log file missing path="
     assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service timeout cleanup removed process"
@@ -1265,7 +1507,9 @@ let
       fail "expected supervisor config evaluation to fail when readiness is missing"
     fi
     assert_contains "$SUP_BAD_LOG" "Missing readiness probe for services"
+    fi
 
+    if should_run_shard "installer"; then
     export NIXFIED_PROMPT_PLAN=0
     log "installer basic"
     INSTALL_BASE="$WORKDIR/install-repo"
@@ -1439,12 +1683,14 @@ let
     log "installer upgrade preserves project"
     echo "# NIXFIED_UPGRADE_TEST_MARKER" >> "$INSTALL_TARGET/nixfied/project/conf.nix"
     echo "# NIXFIED_LOCAL_UPGRADE_TEST_MARKER" >> "$INSTALL_TARGET/nixfied/local/default.nix"
+    echo "stale upgrade check" > "$INSTALL_TARGET/nixfied/UPGRADE_CHECK.txt"
     (cd "$INSTALL_TARGET" && nix run "path:$ROOT"#framework::upgrade -- --force >/dev/null)
     assert_contains "$INSTALL_TARGET/nixfied/project/conf.nix" "NIXFIED_UPGRADE_TEST_MARKER"
     assert_contains "$INSTALL_TARGET/nixfied/local/default.nix" "NIXFIED_LOCAL_UPGRADE_TEST_MARKER"
     assert_file_absent "$INSTALL_TARGET/nixfied/.framework/.workspace"
     assert_file_exists "$INSTALL_TARGET/nixfied/README.md"
     assert_contains "$INSTALL_TARGET/nixfied/VENDORED.txt" "Framework source revision"
+    assert_file_absent "$INSTALL_TARGET/nixfied/UPGRADE_CHECK.txt"
 
     log "framework marker toggle"
     mkdir -p "$INSTALL_TARGET/nixfied/.framework"
@@ -1597,7 +1843,9 @@ let
     assert_app_missing "$INSTALL_FORCE" "framework::install"
     assert_app_missing "$INSTALL_FORCE" "framework::prompt-plan"
     assert_app_missing "$INSTALL_FORCE" "framework::test"
+    fi
 
+    if should_run_shard "runtime-modules"; then
     log "ephemeral slot locking"
     EPHEM_DIR="$WORKDIR/ephemeral"
     mkdir -p "$EPHEM_DIR"
@@ -1943,17 +2191,6 @@ let
 
     RETH_FIX_SCRIPT=$(build_expr "$RETH_FIX_EXPR")
     RETH_FIX_LOG="$WORKDIR/reth-lifecycle.log"
-    set +e
-    (cd "$RETH_FIX_DIR" && "$RETH_FIX_SCRIPT" >"$RETH_FIX_LOG" 2>&1)
-    RETH_FIX_RC=$?
-    set -e
-    if [ "$RETH_FIX_RC" -ne 0 ]; then
-      echo "Reth lifecycle fixture failed (rc=$RETH_FIX_RC)." >&2
-      echo "" >&2
-      echo "Fixture output (last 80 lines):" >&2
-      print_log_tail "$RETH_FIX_LOG" 80
-      exit "$RETH_FIX_RC"
-    fi
 
     log "helios lifecycle"
     HELIOS_FIX_DIR="$WORKDIR/helios-lifecycle"
@@ -2014,6 +2251,19 @@ let
 
     HELIOS_FIX_SCRIPT=$(build_expr "$HELIOS_FIX_EXPR")
     HELIOS_FIX_LOG="$WORKDIR/helios-lifecycle.log"
+
+    set +e
+    (cd "$RETH_FIX_DIR" && "$RETH_FIX_SCRIPT" >"$RETH_FIX_LOG" 2>&1)
+    RETH_FIX_RC=$?
+    set -e
+    if [ "$RETH_FIX_RC" -ne 0 ]; then
+      echo "Reth lifecycle fixture failed (rc=$RETH_FIX_RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 80 lines):" >&2
+      print_log_tail "$RETH_FIX_LOG" 80
+      exit "$RETH_FIX_RC"
+    fi
+
     set +e
     (cd "$HELIOS_FIX_DIR" && "$HELIOS_FIX_SCRIPT" >"$HELIOS_FIX_LOG" 2>&1)
     HELIOS_FIX_RC=$?
@@ -2150,7 +2400,9 @@ let
       print_log_tail "$REG_BG_LOG" 80
       exit "$REG_BG_RC"
     fi
+    fi
 
+    if should_run_shard "lib-contracts"; then
     log "lib parallel"
     LIB_PAR_DIR="$WORKDIR/lib-parallel"
     mkdir -p "$LIB_PAR_DIR"
@@ -2626,6 +2878,7 @@ let
     assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_START="
     assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_HEALTH="
     assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_READY="
+    assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_READY_TEST="
     assert_contains "$SERVICE_HOOKS_FILE" "NGINX_START="
     assert_contains "$SERVICE_HOOKS_FILE" "NGINX_HEALTH="
     assert_contains "$SERVICE_HOOKS_FILE" "NGINX_READY="
@@ -2690,13 +2943,18 @@ let
     assert_contains "$SUP_HOOKS_FILE" "SUPERVISOR_HEALTH="
     # Verify they point to nix store paths
     assert_contains "$SUP_HOOKS_FILE" "/nix/store/"
+    fi
 
-    if [ "$PROFILE" = "full" ] || [ "''${FRAMEWORK_ISOLATION:-}" = "1" ]; then
+    if [ "$SKIP_TEARDOWN" -ne 1 ] && [ "''${FRAMEWORK_ISOLATION:-}" = "1" ]; then
       log "isolation runner"
       run_app "$ROOT" test-isolation
     fi
 
-    log "all tests passed"
+    if [ "$SKIP_TEARDOWN" -ne 1 ]; then
+      log "all tests passed"
+    else
+      log "shard passed name=$SHARD"
+    fi
   '';
 
 in
@@ -2706,10 +2964,15 @@ in
     api = {
       version = 1;
       summary = "Run framework integration tests";
-      details = "Runs the Nixfied framework integration test suite (intended for framework development). Supports --profile and --summary-json options.";
+      details = "Runs the Nixfied framework integration test suite (intended for framework development). Supports shard orchestration via --jobs/--serial/--shard plus --profile and --summary-json options.";
       usage = [
         "nix run .#framework::test"
-        "nix run .#framework::test -- --profile full"
+        "nix run .#framework::test -- --profile ci"
+        "nix run .#framework::test -- --jobs 3"
+        "nix run .#framework::test -- --serial"
+        "nix run .#framework::test -- --list-shards"
+        "nix run .#framework::test -- --shard installer"
+        "FRAMEWORK_ISOLATION=1 nix run .#framework::test"
         "nix run .#framework::test -- --summary-json /tmp/framework-test-summary.json"
       ];
       category = "framework";

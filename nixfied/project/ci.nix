@@ -18,6 +18,7 @@
 
           Readiness-first behavior:
           - parity/mainnet workflows gate on service `*_READY` hooks
+          - parity fixtures with `profile = "test"` use profile-specific readiness when available (Postgres uses `POSTGRES_READY_TEST`)
           - fixture logs are persisted under CI artifacts for debugging
 
           Process-first diagnostics:
@@ -237,26 +238,7 @@
         };
         run = ''
           eval "$($SLOT_INFO)"
-          run_hook POSTGRES_READY
-
-          DB_READY=0
-          for _ in $(seq 1 30); do
-            if psql \
-              -h 127.0.0.1 \
-              -p "$POSTGRES_PORT" \
-              -U postgres \
-              -d postgres \
-              -Atqc "SELECT 1 FROM pg_database WHERE datname='mfm_test';" \
-              | grep -q '^1$'; then
-              DB_READY=1
-              break
-            fi
-            sleep 1
-          done
-          if [ "$DB_READY" -ne 1 ]; then
-            echo "ERROR: mfm_test database was not created within readiness window" >&2
-            exit 1
-          fi
+          # Fixture `postgres` with profile `test` already waits on POSTGRES_READY_TEST.
 
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
 
@@ -286,8 +268,6 @@
           };
         };
         run = ''
-          run_hook MINIO_READY
-
           export MFM_S3_ENDPOINT="$MINIO_ENDPOINT"
           export MFM_S3_REGION="$MINIO_REGION"
           export MFM_S3_BUCKET="$MINIO_BUCKET"
@@ -327,8 +307,6 @@
         };
         run = ''
           eval "$($SLOT_INFO)"
-          run_hook POSTGRES_READY
-          run_hook MINIO_READY
 
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
 
@@ -376,9 +354,6 @@
         };
         run = ''
           eval "$($SLOT_INFO)"
-          run_hook POSTGRES_READY
-          run_hook MINIO_READY
-          run_hook RETH_READY
 
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
 
@@ -428,9 +403,6 @@
         };
         run = ''
           eval "$($SLOT_INFO)"
-          run_hook POSTGRES_READY
-          run_hook MINIO_READY
-          run_hook RETH_READY
 
           export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
 
@@ -463,7 +435,6 @@
         };
         run = ''
           eval "$($SLOT_INFO)"
-          run_hook RETH_READY
 
           export HELIOS_NETWORK="local"
           export HELIOS_EXECUTION_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"

@@ -10,7 +10,7 @@
         details = ''
           Starts Postgres, MinIO (S3), Reth, and the REST API for local development.
 
-          Startup is readiness-gated:
+          Startup is readiness-gated by fixture orchestration plus REST API probe:
           - `POSTGRES_READY`
           - `MINIO_READY`
           - `RETH_READY`
@@ -59,10 +59,6 @@
         export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm"
         export MFM_REST_API_ADDR="127.0.0.1:$REST_API_PORT"
         export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
-
-        run_hook POSTGRES_READY
-        run_hook MINIO_READY
-        run_hook RETH_READY
 
         start_service rest-api \
           --wait-http "http://127.0.0.1:$REST_API_PORT/v1/ready" \
@@ -224,7 +220,7 @@
 
         # Start Helios (mainnet-backed). If already running, don't stop it.
         if run_hook HELIOS_STATUS >/dev/null 2>&1; then
-          run_hook HELIOS_READY
+          true
         else
           HELIOS_LOGFILE="$(artifact_path "helios-mfm-portfolio-snapshot.log")"
           fixture_start_service helios dev 300 1 "$HELIOS_LOGFILE"

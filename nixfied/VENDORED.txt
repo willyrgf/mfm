@@ -4,7 +4,7 @@ Vendored Framework
 This repository vendors the Nixfied framework under `nixfied/`.
 
 Framework source revision (install/upgrade):
-- 66f0f18a3db553db114e859d504f10d2ac02bdad
+- 4f78f424ffef7feb91efc5a01198667bba6e3e0d
 
 Framework-owned (overwritten on framework::upgrade):
 - flake.nix, flake.lock

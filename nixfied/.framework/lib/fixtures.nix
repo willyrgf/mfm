@@ -151,6 +151,7 @@ let
         ''}
         # Lifecycle contract for fixture services:
         # - start may be asynchronous.
+        # - fixture_start_service should prefer profile-specific READY hooks when available.
         # - fixture_start_service must poll READY/HEALTH with timeout.
         # - diagnostics must stay robust when log files are missing.
         echo "INFO: fixture service start name=${serviceName} profile=${profile}"
