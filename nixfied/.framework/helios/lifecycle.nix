@@ -114,54 +114,87 @@ let
     # This avoids a common failure mode where Helios stays "healthy" but remains unable to answer
     # `eth_blockNumber` because the consensus light client never bootstrapped.
     if [ "$HELIOS_NETWORK" != "local" ] && [ -z "$HELIOS_CHECKPOINT" ]; then
-      CONS="$HELIOS_CONSENSUS_RPC_URL"
-      if [ -z "$CONS" ]; then
+      if [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
         echo "ERROR: cannot derive HELIOS_CHECKPOINT: HELIOS_CONSENSUS_RPC_URL is empty" >&2
         exit 1
       fi
 
-      echo "INFO: deriving HELIOS_CHECKPOINT from consensus endpoint cons=$CONS" >&2
-
-      FINALIZED_JSON="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
-        -H 'accept: application/json' \
-        "$CONS/eth/v1/beacon/headers/finalized" 2>/dev/null)" || {
-        echo "ERROR: failed to fetch finalized header from consensus endpoint cons=$CONS" >&2
-        exit 1
-      }
-
-      slot="$(echo "$FINALIZED_JSON" | ${pkgs.jq}/bin/jq -r '.data.header.message.slot|tonumber' 2>/dev/null || true)"
-      case "$slot" in
-        *[!0-9]*|"")
-          echo "ERROR: failed to parse finalized slot from consensus response cons=$CONS" >&2
-          exit 1
-          ;;
-      esac
-
-      epoch_start=$((slot - (slot % 32)))
-
-      EPOCH_JSON="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
-        -H 'accept: application/json' \
-        "$CONS/eth/v1/beacon/headers/$epoch_start" 2>/dev/null)" || {
-        echo "ERROR: failed to fetch epoch boundary header from consensus endpoint cons=$CONS slot=$epoch_start" >&2
-        exit 1
-      }
-
-      checkpoint="$(echo "$EPOCH_JSON" | ${pkgs.jq}/bin/jq -r '.data.root // empty' 2>/dev/null || true)"
-      if ! echo "$checkpoint" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]{64}$'; then
-        echo "ERROR: invalid checkpoint root from consensus endpoint cons=$CONS root='$checkpoint'" >&2
-        exit 1
+      # Mainnet fallback: lightclientdata can be temporarily unavailable (e.g. 503).
+      # Prefer it first (Helios upstream default), then try a known public Lodestar endpoint.
+      CONS_CANDIDATES=("$HELIOS_CONSENSUS_RPC_URL")
+      if [ "$HELIOS_NETWORK" = "mainnet" ] && [ "$HELIOS_CONSENSUS_RPC_URL" = "https://www.lightclientdata.org" ]; then
+        CONS_CANDIDATES+=("https://lodestar-mainnet.chainsafe.io")
       fi
 
-      # Sanity-check that the light-client bootstrap endpoint is served for this checkpoint.
-      ${pkgs.curl}/bin/curl -fsS --max-time 10 \
-        -H 'accept: application/json' \
-        "$CONS/eth/v1/beacon/light_client/bootstrap/$checkpoint" >/dev/null 2>&1 || {
-        echo "ERROR: consensus endpoint does not serve light_client/bootstrap for derived checkpoint cons=$CONS checkpoint=$checkpoint" >&2
-        exit 1
-      }
+      DERIVED=0
+      for CONS in "''${CONS_CANDIDATES[@]}"; do
+        if [ -z "''${CONS:-}" ]; then
+          continue
+        fi
+        CONS="''${CONS%/}"
 
-      HELIOS_CHECKPOINT="$checkpoint"
-      echo "INFO: derived HELIOS_CHECKPOINT=$HELIOS_CHECKPOINT" >&2
+        echo "INFO: deriving HELIOS_CHECKPOINT from consensus endpoint cons=$CONS" >&2
+
+        FINALIZED_URL="$CONS/eth/v1/beacon/headers/finalized"
+        if ! FINALIZED_JSON="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
+          --retry 3 --retry-delay 1 --retry-max-time 30 \
+          -H 'accept: application/json' \
+          "$FINALIZED_URL" 2>&1)"; then
+          echo "WARN: failed to fetch finalized header cons=$CONS url=$FINALIZED_URL" >&2
+          echo "DETAIL: $FINALIZED_JSON" >&2
+          continue
+        fi
+
+        slot="$(echo "$FINALIZED_JSON" | ${pkgs.jq}/bin/jq -r '.data.header.message.slot|tonumber' 2>/dev/null || true)"
+        case "$slot" in
+          *[!0-9]*|"")
+            echo "WARN: failed to parse finalized slot from consensus response cons=$CONS" >&2
+            continue
+            ;;
+        esac
+
+        epoch_start=$((slot - (slot % 32)))
+
+        EPOCH_URL="$CONS/eth/v1/beacon/headers/$epoch_start"
+        if ! EPOCH_JSON="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
+          --retry 3 --retry-delay 1 --retry-max-time 30 \
+          -H 'accept: application/json' \
+          "$EPOCH_URL" 2>&1)"; then
+          echo "WARN: failed to fetch epoch boundary header cons=$CONS url=$EPOCH_URL" >&2
+          echo "DETAIL: $EPOCH_JSON" >&2
+          continue
+        fi
+
+        checkpoint="$(echo "$EPOCH_JSON" | ${pkgs.jq}/bin/jq -r '.data.root // empty' 2>/dev/null || true)"
+        if ! echo "$checkpoint" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]{64}$'; then
+          echo "WARN: invalid checkpoint root from consensus endpoint cons=$CONS root='$checkpoint'" >&2
+          continue
+        fi
+
+        # Sanity-check that the light-client bootstrap endpoint is served for this checkpoint.
+        BOOTSTRAP_URL="$CONS/eth/v1/beacon/light_client/bootstrap/$checkpoint"
+        if ! BOOTSTRAP_ERR="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
+          --retry 3 --retry-delay 1 --retry-max-time 30 \
+          -H 'accept: application/json' \
+          -o /dev/null \
+          "$BOOTSTRAP_URL" 2>&1)"; then
+          echo "WARN: consensus endpoint does not serve light_client/bootstrap cons=$CONS url=$BOOTSTRAP_URL" >&2
+          echo "DETAIL: $BOOTSTRAP_ERR" >&2
+          continue
+        fi
+
+        HELIOS_CONSENSUS_RPC_URL="$CONS"
+        HELIOS_CHECKPOINT="$checkpoint"
+        echo "INFO: derived HELIOS_CHECKPOINT=$HELIOS_CHECKPOINT (cons=$HELIOS_CONSENSUS_RPC_URL)" >&2
+        DERIVED=1
+        break
+      done
+
+      if [ "$DERIVED" -ne 1 ]; then
+        echo "ERROR: failed to derive HELIOS_CHECKPOINT from consensus endpoint(s)." >&2
+        echo "HINT: set HELIOS_CONSENSUS_RPC_URL and HELIOS_CHECKPOINT explicitly." >&2
+        exit 1
+      fi
     fi
 
     ARGS=(

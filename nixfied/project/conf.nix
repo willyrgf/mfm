@@ -298,7 +298,8 @@ rec {
       dataDirName = "helios";
       network = "local";
       executionRpcPortKey = "rethHttp";
-      executionRpcUrl = "";
+      # Mainnet default for workflows that do not set HELIOS_EXECUTION_RPC_URL explicitly.
+      executionRpcUrl = "https://eth.drpc.org";
       consensusRpcUrl = "";
       checkpoint = "";
       extraArgs = [ ];

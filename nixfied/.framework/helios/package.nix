@@ -20,6 +20,11 @@ rustPlatform.buildRustPackage rec {
 
   cargoHash = "sha256-RSTwadwdmZ35RwIjsomIjFdsvdayAxP13Y6GzXTJBQI=";
 
+  patches = [
+    ./patches/0001-disable-reqwest-hickory-dns.patch
+    ./patches/0002-limit-light-client-updates-request.patch
+  ];
+
   cargoBuildFlags = [
     "--package"
     "helios-cli"

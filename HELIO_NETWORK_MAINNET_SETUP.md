@@ -12,10 +12,10 @@ Nixfied auto-loads a root `.env` file (if present) for `nix run ...` commands.
 
 This repo's `.env` is intentionally gitignored (`/.env` in `.gitignore`).
 
-Current `.env` values:
+Recommended `.env` values (see also `.env.example`):
 
 - `HELIOS_NETWORK=mainnet`
-- `HELIOS_EXECUTION_RPC_URL=https://eth.llamarpc.com`
+- `HELIOS_EXECUTION_RPC_URL=https://eth.drpc.org`
 - `HELIOS_CONSENSUS_RPC_URL=https://www.lightclientdata.org` (optional; defaults to this for mainnet if omitted)
 - `HELIOS_CHECKPOINT=0x...` (optional; if omitted, Nixfied derives one from the consensus endpoint at start time)
 - `ETHEREUM_MAINNET_RPC_WSS=wss://ethereum-rpc.publicnode.com` (optional; not used unless you point Helios at it)
@@ -139,5 +139,6 @@ nix run .#mfm_cli -- portfolio snapshot 0x000000000000000000000000000000000000de
 - Helios mainnet requires a **consensus** endpoint (Beacon API / light client updates provider). An Ethereum JSON-RPC endpoint (HTTP/WSS) is not a consensus endpoint.
 - If you don't set `HELIOS_CONSENSUS_RPC_URL` for mainnet, the Nixfied Helios wrapper defaults it to `https://www.lightclientdata.org`.
 - `HELIOS_CHECKPOINT` is part of the weak-subjectivity trust model. If you want explicit, deterministic control, pin `HELIOS_CHECKPOINT` in `.env` instead of relying on auto-derivation.
-- Helios requires the upstream execution RPC to support `eth_getProof`. If Helios fails to start due to provider limitations, try switching `HELIOS_EXECUTION_RPC_URL` to the websocket endpoint in `.env`:
-  - `HELIOS_EXECUTION_RPC_URL=wss://ethereum-rpc.publicnode.com`
+- Helios requires the upstream execution RPC to support `eth_getProof` for **explicit block numbers** (not only `latest`).
+  - Some free RPCs return `distance to target block exceeds maximum proof window` for `eth_getProof` at numeric blocks (e.g. `eth.llamarpc.com`).
+  - If `mfm::portfolio::snapshot` fails before writing `snapshot_artifact_id`, switch to an execution RPC that supports proofs for recent numeric blocks (example: `https://eth.drpc.org`).

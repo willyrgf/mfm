@@ -359,8 +359,12 @@
           eval "$($SLOT_INFO)"
 
           export HELIOS_NETWORK="mainnet"
-          export HELIOS_EXECUTION_RPC_URL="https://eth.llamarpc.com"
-          # Intentionally rely on the Nixfied Helios service default consensus endpoint.
+          # Execution RPC must support `eth_getProof` for explicit block numbers (not just `latest`).
+          export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-https://eth.drpc.org}"
+
+          # Prefer a stable, up-to-date consensus endpoint for CI (faster and less flaky than relying
+          # on the default if it is temporarily unavailable).
+          export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-https://lodestar-mainnet.chainsafe.io}"
 
           # Mainnet Helios can take a while to sync; gate on eth_blockNumber.
           export HELIOS_READY_TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-900}"
@@ -371,21 +375,34 @@
           ADDRESS="0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
 
           LOGFILE=$(artifact_path "mainnet-portfolio-snapshot.log")
+          RAW_OUTFILE=$(artifact_path "mainnet-portfolio-snapshot.raw.out")
           OUTFILE=$(artifact_path "mainnet-portfolio-snapshot.json")
 
           set +e
-          nix run .#mfm::portfolio::snapshot -- "$ADDRESS" >"$OUTFILE" 2>"$LOGFILE"
+          nix run .#mfm::portfolio::snapshot -- "$ADDRESS" >"$RAW_OUTFILE" 2>"$LOGFILE"
           rc=$?
           set -e
 
           if [ $rc -ne 0 ]; then
             echo "ERROR: mfm::portfolio::snapshot failed rc=$rc" >&2
             tail -200 "$LOGFILE" >&2 || true
-            if [ -s "$OUTFILE" ]; then
+            if [ -s "$RAW_OUTFILE" ]; then
               echo "STDOUT:" >&2
-              cat "$OUTFILE" >&2 || true
+              cat "$RAW_OUTFILE" >&2 || true
             fi
             exit $rc
+          fi
+
+          # The app contract is final JSON on stdout, but Rust/tracing notices may still appear
+          # ahead of the payload in some environments. Keep only the JSON document.
+          sed -n '/^{/,$p' "$RAW_OUTFILE" >"$OUTFILE"
+          if ! jq -e . "$OUTFILE" >/dev/null; then
+            echo "ERROR: snapshot output is not valid JSON" >&2
+            echo "RAW STDOUT:" >&2
+            cat "$RAW_OUTFILE" >&2 || true
+            echo "STDERR LOG:" >&2
+            tail -200 "$LOGFILE" >&2 || true
+            exit 1
           fi
 
           jq -e '.status == "success"' "$OUTFILE" >/dev/null
@@ -406,13 +423,22 @@
           fi
 
           BAL_WEI=$(jq -r '.native.raw_u256_dec // empty' "$SNAPSHOT_FILE")
-          if [ -z "$BAL_WEI" ] || [ "$BAL_WEI" = "null" ] || [ "$BAL_WEI" = "0" ]; then
-            echo "ERROR: expected non-zero ETH balance; got native.raw_u256_dec=$BAL_WEI" >&2
+          MIN_BAL_WEI="32000000000000000000"
+
+          if [ -z "$BAL_WEI" ] || [ "$BAL_WEI" = "null" ] || ! echo "$BAL_WEI" | grep -Eq '^[0-9]+$'; then
+            echo "ERROR: invalid ETH balance; got native.raw_u256_dec=$BAL_WEI" >&2
             cat "$SNAPSHOT_FILE" >&2
             exit 1
           fi
 
-          echo "OK: mainnet snapshot non-zero ETH balance wei=$BAL_WEI artifact_id=$ART_ID"
+          # Compare large decimal integers without relying on 64-bit shell arithmetic.
+          if [ "''${#BAL_WEI}" -lt "''${#MIN_BAL_WEI}" ] || { [ "''${#BAL_WEI}" -eq "''${#MIN_BAL_WEI}" ] && [ "$BAL_WEI" \< "$MIN_BAL_WEI" ]; }; then
+            echo "ERROR: expected at least 32 ETH (wei >= $MIN_BAL_WEI); got native.raw_u256_dec=$BAL_WEI" >&2
+            cat "$SNAPSHOT_FILE" >&2
+            exit 1
+          fi
+
+          echo "OK: mainnet snapshot ETH balance >= 32 ETH wei=$BAL_WEI artifact_id=$ART_ID"
         '';
       };
     };

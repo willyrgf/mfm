@@ -86,6 +86,9 @@
           Note: Helios mainnet configuration is expected to come from a root `.env` (Nixfied loads
           it automatically), e.g. `HELIOS_NETWORK=mainnet`, `HELIOS_EXECUTION_RPC_URL=...`,
           and optionally `HELIOS_CONSENSUS_RPC_URL=...` / `HELIOS_CHECKPOINT=...`.
+
+          If `HELIOS_EXECUTION_RPC_URL` is unset, this app falls back to the internal default:
+          `https://eth.drpc.org`.
         '';
         usage = [
           "nix run .#mfm::portfolio::snapshot -- <ADDRESS>"
@@ -107,7 +110,7 @@
           }
           {
             name = "HELIOS_EXECUTION_RPC_URL";
-            description = "Upstream execution JSON-RPC URL for Helios (HTTP/WSS). Loaded from `.env` if present.";
+            description = "Upstream execution JSON-RPC URL for Helios (HTTP/WSS). Loaded from `.env` if present; defaults to https://eth.drpc.org when unset.";
           }
           {
             name = "HELIOS_CONSENSUS_RPC_URL";
@@ -144,10 +147,7 @@
           echo "ERROR: HELIOS_NETWORK must be 'mainnet' for mfm::portfolio::snapshot (set it in .env)" >&2
           exit 1
         fi
-        if [ -z "''${HELIOS_EXECUTION_RPC_URL:-}" ]; then
-          echo "ERROR: HELIOS_EXECUTION_RPC_URL is required (set it in .env)" >&2
-          exit 1
-        fi
+        export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-https://eth.drpc.org}"
 
         # Start Postgres (required by portfolio snapshot). If already running, don't stop it.
         if run_hook POSTGRES_STATUS >/dev/null 2>&1; then

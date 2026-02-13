@@ -1,0 +1,28 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 85f4cf0..d2021b4 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -51,7 +51,7 @@ tokio = { version = "1", features = ["rt", "sync", "macros"] }
+ 
+ # io
+-reqwest = { version = "0.12.4", features = ["json", "gzip", "deflate", "zstd", "brotli", "hickory-dns"] }
++reqwest = { version = "0.12.4", features = ["json", "gzip", "deflate", "zstd", "brotli"] }
+ reqwest-middleware = { version = "0.4.2", features = ["json"] }
+ reqwest-retry = "0.7.0"
+ url = { version = "2.5.2", features = ["serde"] }
+ serde = { version = "1.0.143", features = ["derive"] }
+diff --git a/verifiable-api/client/src/http.rs b/verifiable-api/client/src/http.rs
+index b9d8a78..4cff67c 100644
+--- a/verifiable-api/client/src/http.rs
++++ b/verifiable-api/client/src/http.rs
+@@ -50,8 +50,8 @@ impl<N: NetworkSpec> VerifiableApi<N> for HttpVerifiableApi<N> {
+             // Prevent connection closure
+             .tcp_nodelay(true)
+             // Fast decompression
+             .brotli(true)
+-            // Faster DNS resolution
+-            .hickory_dns(true)
++            // Avoid /etc/resolv.conf DNS on macOS (stale/unrouted); use OS resolver.
++            .no_hickory_dns()
+             // Use http2
+             .http2_prior_knowledge();
