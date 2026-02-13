@@ -134,7 +134,7 @@
         fi
 
         if has_hook "$events_hook"; then
-          capture_diag "ci-diagnostics-service-''${service}-events.log" run_hook "$events_hook" -- --limit "$CI_DIAG_EVENTS_LIMIT"
+          capture_diag "ci-diagnostics-service-''${service}-events.log" run_hook "$events_hook" --limit "$CI_DIAG_EVENTS_LIMIT"
         fi
       }
 
