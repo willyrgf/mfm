@@ -16,6 +16,7 @@
 //!         argon2_memory_kb: 64,    // 64KB - minimal for doctest
 //!         argon2_iterations: 1,    // 1 iteration - minimal
 //!         argon2_parallelism: 1,
+//!         allow_secret_exports: false,
 //!     };
 //!     let temp_dir = tempfile::tempdir()?;
 //!     let keystore_path = temp_dir.path().join("keystore.json");
@@ -68,6 +69,8 @@ use k256::{ecdsa::SigningKey, SecretKey};
 use rand::rngs::OsRng;
 use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use subtle::ConstantTimeEq;
@@ -77,7 +80,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub use error::KeystoreError;
 
-const KEYSTORE_FILE_VERSION: u8 = 1;
+const KEYSTORE_FILE_VERSION: u8 = 2;
+const FILE_INTEGRITY_CONTEXT: &[u8] = b"mfm_keystore_file_integrity_v1";
+const MNEMONIC_PAYLOAD_VERSION: u8 = 1;
 
 /// Simplified configuration with secure defaults
 #[derive(Debug, Clone)]
@@ -88,6 +93,10 @@ pub struct KeystoreConfig {
     pub argon2_iterations: u32,
     /// Argon2 parallelism (default: 1)
     pub argon2_parallelism: u32,
+    /// Whether secret export APIs are enabled.
+    ///
+    /// Exporting private keys/mnemonics increases exfiltration risk and is disabled by default.
+    pub allow_secret_exports: bool,
 }
 
 impl Default for KeystoreConfig {
@@ -96,6 +105,7 @@ impl Default for KeystoreConfig {
             argon2_memory_kb: 1_048_576, // 1GB - production secure
             argon2_iterations: 8,        // 8 iterations - secure default
             argon2_parallelism: 1,       // Single threaded
+            allow_secret_exports: false,
         }
     }
 }
@@ -113,6 +123,7 @@ impl KeystoreConfig {
             argon2_memory_kb: 8192, // 8MB for faster tests
             argon2_iterations: 2,   // 2 iterations
             argon2_parallelism: 1,
+            allow_secret_exports: false,
         }
     }
 
@@ -122,6 +133,7 @@ impl KeystoreConfig {
             argon2_memory_kb: 64, // 64KB - minimal for fast tests
             argon2_iterations: 1, // 1 iteration - minimal
             argon2_parallelism: 1,
+            allow_secret_exports: false,
         }
     }
 }
@@ -130,11 +142,13 @@ impl KeystoreConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum KeyType {
     PrivateKey,
-    Mnemonic {
-        derivation_path: String,
-        #[serde(default)]
-        passphrase: Option<String>,
-    },
+    Mnemonic { derivation_path: String },
+}
+
+impl KeyType {
+    fn sanitized_for_output(&self) -> Self {
+        self.clone()
+    }
 }
 
 /// Key entry stored in keystore
@@ -165,7 +179,7 @@ impl From<&KeyEntry> for KeyInfo {
             id: entry.id,
             alias: entry.alias.clone(),
             address: entry.address,
-            key_type: entry.key_type.clone(),
+            key_type: entry.key_type.sanitized_for_output(),
             created_at: entry.created_at,
         }
     }
@@ -212,6 +226,40 @@ struct ArgonParams {
     parallelism: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MnemonicPayload {
+    version: u8,
+    mnemonic: String,
+    #[serde(default)]
+    passphrase: Option<String>,
+}
+
+impl MnemonicPayload {
+    fn new(mnemonic: String, passphrase: Option<String>) -> Self {
+        Self {
+            version: MNEMONIC_PAYLOAD_VERSION,
+            mnemonic,
+            passphrase,
+        }
+    }
+}
+
+impl Zeroize for MnemonicPayload {
+    fn zeroize(&mut self) {
+        self.version = 0;
+        self.mnemonic.zeroize();
+        if let Some(passphrase) = &mut self.passphrase {
+            passphrase.zeroize();
+        }
+        self.passphrase = None;
+    }
+}
+
+struct MnemonicMaterial {
+    mnemonic: Zeroizing<String>,
+    passphrase: Option<Zeroizing<String>>,
+}
+
 /// Secure key wrapper that zeroizes on drop
 pub struct SecureKey {
     key_bytes: Zeroizing<[u8; 32]>,
@@ -241,8 +289,9 @@ impl SecureKey {
     }
 
     /// Get Ethereum address for this key
-    pub fn ethereum_address(&self) -> Address {
-        let secret_key = SecretKey::from_slice(self.key_bytes.as_ref()).unwrap();
+    pub fn ethereum_address(&self) -> Result<Address, KeystoreError> {
+        let secret_key = SecretKey::from_slice(self.key_bytes.as_ref())
+            .map_err(|_| KeystoreError::InvalidPrivateKey)?;
         let public_key = secret_key.public_key();
 
         // Compute Ethereum address from public key
@@ -254,14 +303,15 @@ impl SecureKey {
         keccak.finalize(&mut hash);
 
         // Note: SecretKey implements ZeroizeOnDrop and will be zeroized when dropped
-        Address::from_slice(&hash[12..])
+        Ok(Address::from_slice(&hash[12..]))
     }
 
     /// Get public key
-    pub fn public_key(&self) -> k256::PublicKey {
-        let secret_key = SecretKey::from_slice(self.key_bytes.as_ref()).unwrap();
+    pub fn public_key(&self) -> Result<k256::PublicKey, KeystoreError> {
+        let secret_key = SecretKey::from_slice(self.key_bytes.as_ref())
+            .map_err(|_| KeystoreError::InvalidPrivateKey)?;
         // Note: SecretKey implements ZeroizeOnDrop and will be zeroized when dropped
-        secret_key.public_key()
+        Ok(secret_key.public_key())
     }
 }
 
@@ -393,7 +443,7 @@ impl Keystore {
 
             // Calculate Ethereum address
             let secure_key = SecureKey::new(key_array);
-            let address = secure_key.ethereum_address();
+            let address = secure_key.ethereum_address()?;
 
             // Create encrypted entry
             let mut nonce = [0u8; 12];
@@ -455,10 +505,13 @@ impl Keystore {
                 SecureKey::new(derived_xprv.private_key().to_bytes().into())
             };
 
-            let address = secure_key.ethereum_address();
+            let address = secure_key.ethereum_address()?;
 
-            // Store the mnemonic phrase (not the derived key)
-            let mut mnemonic_bytes = mnemonic.to_string().as_bytes().to_vec();
+            let payload = Zeroizing::new(MnemonicPayload::new(
+                mnemonic.to_string(),
+                passphrase.map(ToOwned::to_owned),
+            ));
+            let mnemonic_bytes = Zeroizing::new(serde_json::to_vec(&*payload)?);
 
             // Create encrypted entry
             let mut nonce = [0u8; 12];
@@ -475,7 +528,6 @@ impl Keystore {
                 address,
                 key_type: KeyType::Mnemonic {
                     derivation_path: derivation_path.to_string(),
-                    passphrase: passphrase.map(|s| s.to_string()),
                 },
                 encrypted_data,
                 nonce,
@@ -484,9 +536,6 @@ impl Keystore {
 
             self.entries.push(entry);
             self.save_to_disk()?;
-
-            // Zeroize sensitive intermediate data
-            mnemonic_bytes.zeroize();
 
             Ok(id)
         })();
@@ -506,15 +555,14 @@ impl Keystore {
                 .find(|e| e.id == id)
                 .ok_or(KeystoreError::KeyNotFound(id))?;
 
-            let decrypted_data = self.decrypt_data(
-                master_key,
-                &entry.nonce,
-                &entry.encrypted_data,
-                entry.id.as_bytes(),
-            )?;
-
             match &entry.key_type {
                 KeyType::PrivateKey => {
+                    let decrypted_data = self.decrypt_data(
+                        master_key,
+                        &entry.nonce,
+                        &entry.encrypted_data,
+                        entry.id.as_bytes(),
+                    )?;
                     if decrypted_data.len() != 32 {
                         return Err(KeystoreError::InvalidPrivateKey);
                     }
@@ -523,18 +571,18 @@ impl Keystore {
                     Ok(SecureKey::new(key_bytes))
                 }
                 KeyType::Mnemonic {
-                    derivation_path,
-                    passphrase,
+                    derivation_path, ..
                 } => {
-                    // Decrypt mnemonic and derive key
-                    let mnemonic_str = core::str::from_utf8(decrypted_data.as_ref())
-                        .map_err(|_| KeystoreError::InvalidMnemonic("Invalid UTF-8".to_string()))?;
-                    let mnemonic = Mnemonic::from_str(mnemonic_str)?;
+                    let material = self.decrypt_mnemonic_material(master_key, entry)?;
+                    let mnemonic = Mnemonic::from_str(material.mnemonic.as_str())?;
                     let derivation_path_obj = DerivationPath::from_str(derivation_path)?;
 
                     // Derive private key from mnemonic - wrap seed in Zeroizing for automatic cleanup
-                    let seed =
-                        Zeroizing::new(mnemonic.to_seed(passphrase.as_deref().unwrap_or("")));
+                    let passphrase = material
+                        .passphrase
+                        .as_ref()
+                        .map_or("", |passphrase| passphrase.as_str());
+                    let seed = Zeroizing::new(mnemonic.to_seed(passphrase));
 
                     // Limit XPrv scope to ensure it's dropped quickly
                     let secure_key = {
@@ -578,6 +626,7 @@ impl Keystore {
     /// - For `KeyType::Mnemonic`, this derives the private key and exports it.
     pub fn export_private_key(&mut self, id: Uuid) -> Result<Zeroizing<String>, KeystoreError> {
         let result: Result<Zeroizing<String>, KeystoreError> = (|| {
+            self.ensure_secret_exports_enabled()?;
             let master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
 
             let entry = self
@@ -586,15 +635,14 @@ impl Keystore {
                 .find(|e| e.id == id)
                 .ok_or(KeystoreError::KeyNotFound(id))?;
 
-            let decrypted_data = self.decrypt_data(
-                master_key,
-                &entry.nonce,
-                &entry.encrypted_data,
-                entry.id.as_bytes(),
-            )?;
-
             match &entry.key_type {
                 KeyType::PrivateKey => {
+                    let decrypted_data = self.decrypt_data(
+                        master_key,
+                        &entry.nonce,
+                        &entry.encrypted_data,
+                        entry.id.as_bytes(),
+                    )?;
                     if decrypted_data.len() != 32 {
                         return Err(KeystoreError::InvalidPrivateKey);
                     }
@@ -604,16 +652,17 @@ impl Keystore {
                     )))
                 }
                 KeyType::Mnemonic {
-                    derivation_path,
-                    passphrase,
+                    derivation_path, ..
                 } => {
-                    let mnemonic_str = core::str::from_utf8(decrypted_data.as_ref())
-                        .map_err(|_| KeystoreError::InvalidMnemonic("Invalid UTF-8".to_string()))?;
-                    let mnemonic = Mnemonic::from_str(mnemonic_str)?;
+                    let material = self.decrypt_mnemonic_material(master_key, entry)?;
+                    let mnemonic = Mnemonic::from_str(material.mnemonic.as_str())?;
                     let derivation_path_obj = DerivationPath::from_str(derivation_path)?;
 
-                    let seed =
-                        Zeroizing::new(mnemonic.to_seed(passphrase.as_deref().unwrap_or("")));
+                    let passphrase = material
+                        .passphrase
+                        .as_ref()
+                        .map_or("", |passphrase| passphrase.as_str());
+                    let seed = Zeroizing::new(mnemonic.to_seed(passphrase));
                     let derived_xprv = XPrv::derive_from_path(*seed, &derivation_path_obj)?;
 
                     let key_bytes = derived_xprv.private_key().to_bytes();
@@ -653,6 +702,7 @@ impl Keystore {
     /// Export the mnemonic phrase.
     pub fn export_mnemonic(&mut self, id: Uuid) -> Result<Zeroizing<String>, KeystoreError> {
         let result: Result<Zeroizing<String>, KeystoreError> = (|| {
+            self.ensure_secret_exports_enabled()?;
             let master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
 
             let entry = self
@@ -666,16 +716,8 @@ impl Keystore {
                     "export_mnemonic only works for mnemonic keys".to_string(),
                 )),
                 KeyType::Mnemonic { .. } => {
-                    let decrypted_data = self.decrypt_data(
-                        master_key,
-                        &entry.nonce,
-                        &entry.encrypted_data,
-                        entry.id.as_bytes(),
-                    )?;
-
-                    let mnemonic_str = core::str::from_utf8(decrypted_data.as_ref())
-                        .map_err(|_| KeystoreError::InvalidMnemonic("Invalid UTF-8".to_string()))?;
-                    Ok(Zeroizing::new(mnemonic_str.to_string()))
+                    let material = self.decrypt_mnemonic_material(master_key, entry)?;
+                    Ok(material.mnemonic)
                 }
             }
         })();
@@ -817,6 +859,47 @@ impl Keystore {
 
     // Private helper methods
 
+    fn ensure_secret_exports_enabled(&self) -> Result<(), KeystoreError> {
+        if self.config.allow_secret_exports {
+            return Ok(());
+        }
+
+        Err(KeystoreError::OperationNotPermitted(
+            "Secret export operations are disabled by policy".to_string(),
+        ))
+    }
+
+    fn decrypt_mnemonic_material(
+        &self,
+        master_key: &[u8; 32],
+        entry: &KeyEntry,
+    ) -> Result<MnemonicMaterial, KeystoreError> {
+        let decrypted_data = self.decrypt_data(
+            master_key,
+            &entry.nonce,
+            &entry.encrypted_data,
+            entry.id.as_bytes(),
+        )?;
+
+        if let Ok(payload) = serde_json::from_slice::<MnemonicPayload>(decrypted_data.as_ref()) {
+            if payload.version != MNEMONIC_PAYLOAD_VERSION {
+                return Err(KeystoreError::InvalidInput(format!(
+                    "Unsupported mnemonic payload version: {}",
+                    payload.version
+                )));
+            }
+
+            return Ok(MnemonicMaterial {
+                mnemonic: Zeroizing::new(payload.mnemonic),
+                passphrase: payload.passphrase.map(Zeroizing::new),
+            });
+        }
+
+        Err(KeystoreError::InvalidMnemonic(
+            "Unsupported mnemonic payload format".to_string(),
+        ))
+    }
+
     fn initialize_new(&mut self, password: &str) -> Result<(), KeystoreError> {
         // Generate salt for KDF
         let mut salt = [0u8; 32];
@@ -841,15 +924,8 @@ impl Keystore {
         self.kdf_params = Some(kdf_params);
         self.master_key_verification = Some(master_key_verification);
 
-        // Save empty keystore to disk (this will compute and include file_integrity_mac)
+        // Save empty keystore to disk (this computes and stores file_integrity_mac).
         self.save_to_disk()?;
-
-        // Reload from disk to ensure file_integrity_mac is properly loaded
-        let saved_master_key = self.master_key.take(); // Save the derived key
-        self.load_from_disk()?;
-
-        // Restore the master key
-        self.master_key = saved_master_key;
 
         Ok(())
     }
@@ -920,7 +996,10 @@ impl Keystore {
     ) -> Result<[u8; 32], KeystoreError> {
         use ring::hmac;
         let key = hmac::Key::new(hmac::HMAC_SHA256, master_key);
-        let tag = hmac::sign(&key, file_data);
+        let mut ctx = hmac::Context::with_key(&key);
+        ctx.update(FILE_INTEGRITY_CONTEXT);
+        ctx.update(file_data);
+        let tag = ctx.sign();
         let mut mac = [0u8; 32];
         mac.copy_from_slice(tag.as_ref());
         Ok(mac)
@@ -970,7 +1049,7 @@ impl Keystore {
             .map_err(KeystoreError::from)
     }
 
-    fn save_to_disk(&self) -> Result<(), KeystoreError> {
+    fn save_to_disk(&mut self) -> Result<(), KeystoreError> {
         let kdf_params = self
             .kdf_params
             .as_ref()
@@ -1011,15 +1090,18 @@ impl Keystore {
             file_integrity_mac,
         };
 
-        let json_data = serde_json::to_string_pretty(&keystore_file)?;
-        std::fs::write(&self.path, json_data)?;
+        let json_data = serde_json::to_vec_pretty(&keystore_file)?;
+        self.atomic_write_keystore_file(&json_data)?;
+        self.file_integrity_mac = Some(file_integrity_mac);
 
         Ok(())
     }
 
     fn load_from_disk(&mut self) -> Result<(), KeystoreError> {
-        // TODO: should we add an self.early_file_validation()?
-        let data = std::fs::read(&self.path)?;
+        self.ensure_path_is_not_symlink()?;
+        self.early_file_validation()?;
+
+        let data = fs::read(&self.path)?;
         let keystore_file: KeystoreFile = serde_json::from_slice(&data)?;
 
         if keystore_file.version != KEYSTORE_FILE_VERSION {
@@ -1045,7 +1127,9 @@ impl Keystore {
             return Ok(()); // New keystore, nothing to validate
         }
 
-        let data = std::fs::read(&self.path)
+        self.ensure_path_is_not_symlink()?;
+
+        let data = fs::read(&self.path)
             .map_err(|_| KeystoreError::InvalidInput("Cannot read keystore file".to_string()))?;
 
         // Basic size check - keystore files should be reasonable size
@@ -1105,8 +1189,10 @@ impl Keystore {
             "No file integrity MAC found".to_string(),
         ))?;
 
+        self.ensure_path_is_not_symlink()?;
+
         // Read the file again for verification
-        let data = std::fs::read(&self.path)?;
+        let data = fs::read(&self.path)?;
 
         // Parse to extract the data without the MAC for verification
         let keystore_file: KeystoreFile = serde_json::from_slice(&data)?;
@@ -1133,6 +1219,93 @@ impl Keystore {
             ));
         }
 
+        Ok(())
+    }
+
+    fn ensure_path_is_not_symlink(&self) -> Result<(), KeystoreError> {
+        if !self.path.exists() {
+            return Ok(());
+        }
+
+        let metadata = fs::symlink_metadata(&self.path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(KeystoreError::InvalidInput(
+                "Refusing to use symlinked keystore path".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn atomic_write_keystore_file(&self, data: &[u8]) -> Result<(), KeystoreError> {
+        if self.path.exists() {
+            self.ensure_path_is_not_symlink()?;
+        }
+
+        let parent = self
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        fs::create_dir_all(&parent)?;
+
+        let file_name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("keystore");
+        let tmp_path = parent.join(format!(".{file_name}.tmp-{}", Uuid::new_v4()));
+
+        let write_result = (|| -> Result<(), KeystoreError> {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&tmp_path)?;
+            Self::set_restrictive_permissions_for_file(&file)?;
+
+            file.write_all(data)?;
+            file.sync_all()?;
+            drop(file);
+
+            fs::rename(&tmp_path, &self.path)?;
+            Self::set_restrictive_permissions_for_path(&self.path)?;
+
+            #[cfg(unix)]
+            {
+                let parent_dir = OpenOptions::new().read(true).open(&parent)?;
+                parent_dir.sync_all()?;
+            }
+            Ok(())
+        })();
+
+        if write_result.is_err() {
+            let _ = fs::remove_file(&tmp_path);
+        }
+
+        write_result
+    }
+
+    #[cfg(unix)]
+    fn set_restrictive_permissions_for_file(file: &std::fs::File) -> Result<(), KeystoreError> {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn set_restrictive_permissions_for_file(_file: &std::fs::File) -> Result<(), KeystoreError> {
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn set_restrictive_permissions_for_path(path: &Path) -> Result<(), KeystoreError> {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn set_restrictive_permissions_for_path(_path: &Path) -> Result<(), KeystoreError> {
         Ok(())
     }
 }

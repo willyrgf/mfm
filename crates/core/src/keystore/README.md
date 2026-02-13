@@ -114,7 +114,7 @@ let custom_config = KeystoreConfig {
     argon2_memory_kb: 2097152,  // 2GB
     argon2_iterations: 10,
     argon2_parallelism: 1,
-    verification_iterations: 3,
+    allow_secret_exports: false,
 };
 ```
 
@@ -315,7 +315,7 @@ let low_memory_config = KeystoreConfig {
     argon2_memory_kb: 65536,  // 64MB instead of 1GB
     argon2_iterations: 8,
     argon2_parallelism: 1,
-    verification_iterations: 1,
+    allow_secret_exports: false,
 };
 ```
 

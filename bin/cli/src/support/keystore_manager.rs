@@ -1,5 +1,6 @@
 use mfm_op_keystore::{Keystore, KeystoreConfig};
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 /// Keystore operations wrapper with unlock handling
 pub struct KeystoreManager {
@@ -34,13 +35,13 @@ impl KeystoreManager {
 
         // Get password from environment variable or prompt
         let password = if let Ok(env_password) = std::env::var("MFM_KEYSTORE_PASSWORD") {
-            env_password
+            Zeroizing::new(env_password)
         } else {
             super::input::read_password("Enter keystore password: ")?
         };
 
         // Unlock
-        keystore.unlock(&password)?;
+        keystore.unlock(password.as_str())?;
         Ok(keystore)
     }
 
@@ -59,12 +60,12 @@ impl KeystoreManager {
 
         // Get password from environment variable or prompt
         let password = if let Ok(env_password) = std::env::var("MFM_KEYSTORE_PASSWORD") {
-            env_password
+            Zeroizing::new(env_password)
         } else {
             let password = super::input::read_password("Enter password for new keystore: ")?;
             let confirm_password = super::input::read_password("Confirm password: ")?;
 
-            if password != confirm_password {
+            if password.as_str() != confirm_password.as_str() {
                 return Err("Passwords do not match".into());
             }
             password
@@ -77,7 +78,7 @@ impl KeystoreManager {
             KeystoreConfig::default()
         };
         let mut keystore = Keystore::new_with_config(&self.keystore_path, config)?;
-        keystore.unlock(&password)?;
+        keystore.unlock(password.as_str())?;
         Ok(keystore)
     }
 }

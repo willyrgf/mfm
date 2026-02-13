@@ -1,11 +1,12 @@
 use std::io::{self, Write};
+use zeroize::Zeroizing;
 
 /// Securely read a password from the user
-pub fn read_password(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
+pub fn read_password(prompt: &str) -> Result<Zeroizing<String>, Box<dyn std::error::Error>> {
     print!("{prompt}");
     io::stdout().flush()?;
     let password = rpassword::read_password()?;
-    Ok(password)
+    Ok(Zeroizing::new(password))
 }
 
 /// Read input from stdin or prompt user

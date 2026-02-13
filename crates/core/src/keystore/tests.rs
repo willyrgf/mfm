@@ -22,6 +22,15 @@ fn test_keystore() -> (tempfile::TempDir, Keystore) {
     (temp_dir, keystore)
 }
 
+fn test_keystore_with_exports() -> (tempfile::TempDir, Keystore) {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("test.keystore");
+    let mut config = KeystoreConfig::development();
+    config.allow_secret_exports = true;
+    let keystore = Keystore::new_with_config(&keystore_path, config).unwrap();
+    (temp_dir, keystore)
+}
+
 #[test]
 fn test_new_keystore_creation() {
     let temp_dir = tempdir().unwrap();
@@ -56,11 +65,11 @@ fn test_private_key_import_and_retrieval() {
     assert_eq!(signature.to_bytes().len(), 64);
 
     // Test Ethereum address derivation
-    let address = secure_key.ethereum_address();
+    let address = secure_key.ethereum_address().unwrap();
     assert_ne!(address, Address::ZERO);
 
     // Test public key derivation
-    let public_key = secure_key.public_key();
+    let public_key = secure_key.public_key().unwrap();
     assert_eq!(public_key.to_encoded_point(false).len(), 65); // Uncompressed: 1 + 32 + 32
 }
 
@@ -88,8 +97,8 @@ fn test_mnemonic_import_and_retrieval() {
     assert_eq!(signature.to_bytes().len(), 64);
 
     // Verify consistent address derivation
-    let address1 = secure_key.ethereum_address();
-    let address2 = secure_key.ethereum_address();
+    let address1 = secure_key.ethereum_address().unwrap();
+    let address2 = secure_key.ethereum_address().unwrap();
     assert_eq!(address1, address2);
 }
 
@@ -117,14 +126,14 @@ fn test_mnemonic_passphrase_support() {
     let key_with_pass = keystore.get_private_key(id_with_pass).unwrap();
 
     assert_ne!(
-        key_no_pass.ethereum_address(),
-        key_with_pass.ethereum_address()
+        key_no_pass.ethereum_address().unwrap(),
+        key_with_pass.ethereum_address().unwrap()
     );
 }
 
 #[test]
 fn test_export_private_key_for_private_key_entries() {
-    let (_temp_dir, mut keystore) = test_keystore();
+    let (_temp_dir, mut keystore) = test_keystore_with_exports();
     keystore.unlock("test_password").unwrap();
 
     let test_key = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -138,7 +147,7 @@ fn test_export_private_key_for_private_key_entries() {
 
 #[test]
 fn test_export_mnemonic_and_derived_private_key() {
-    let (_temp_dir, mut keystore) = test_keystore();
+    let (_temp_dir, mut keystore) = test_keystore_with_exports();
     keystore.unlock("test_password").unwrap();
 
     let test_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -164,8 +173,8 @@ fn test_export_mnemonic_and_derived_private_key() {
     let key_from_mnemonic = keystore.get_private_key(mnemonic_id).unwrap();
     let key_from_exported = keystore.get_private_key(derived_id).unwrap();
     assert_eq!(
-        key_from_mnemonic.ethereum_address(),
-        key_from_exported.ethereum_address()
+        key_from_mnemonic.ethereum_address().unwrap(),
+        key_from_exported.ethereum_address().unwrap()
     );
 
     // export_mnemonic should fail for private key entries.
@@ -173,6 +182,46 @@ fn test_export_mnemonic_and_derived_private_key() {
         keystore.export_mnemonic(derived_id),
         Err(KeystoreError::InvalidInput(_))
     ));
+}
+
+#[test]
+fn test_secret_exports_disabled_by_default() {
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+
+    let id = keystore
+        .import_private_key(
+            Some("no_export".to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000005",
+        )
+        .unwrap();
+
+    assert!(matches!(
+        keystore.export_private_key(id),
+        Err(KeystoreError::OperationNotPermitted(_))
+    ));
+}
+
+#[test]
+fn test_mnemonic_passphrase_not_persisted_in_plaintext() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("mnemonic_passphrase_secure.keystore");
+
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("test_password").unwrap();
+    keystore
+        .import_mnemonic(
+            Some("mnemonic-secure".to_string()),
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            "m/44'/60'/0'/0/0",
+            Some("super-secret-passphrase"),
+        )
+        .unwrap();
+
+    let file_content = std::fs::read_to_string(&keystore_path).unwrap();
+    assert!(!file_content.contains("super-secret-passphrase"));
+    assert!(!file_content.contains("\"passphrase\""));
 }
 
 #[test]
@@ -223,7 +272,7 @@ fn test_change_password_reencrypts_entries() {
 
 #[test]
 fn test_audit_log_entries_created_for_operations() {
-    let (_temp_dir, mut keystore) = test_keystore();
+    let (_temp_dir, mut keystore) = test_keystore_with_exports();
 
     // Unlock logs.
     keystore.unlock("test_password").unwrap();
@@ -292,8 +341,9 @@ fn test_audit_log_persisted_for_read_only_access_operations() {
     let keystore_path = temp_dir.path().join("audit_persist.keystore");
 
     let (pk_id, mnemonic_id) = {
-        let mut keystore =
-            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        let mut config = KeystoreConfig::development();
+        config.allow_secret_exports = true;
+        let mut keystore = Keystore::new_with_config(&keystore_path, config).unwrap();
         keystore.unlock("test_password").unwrap();
 
         let pk_id = keystore
@@ -368,8 +418,8 @@ fn test_concurrent_operations() {
 
     // Verify different addresses
     assert_ne!(
-        secure_key1.ethereum_address(),
-        secure_key2.ethereum_address()
+        secure_key1.ethereum_address().unwrap(),
+        secure_key2.ethereum_address().unwrap()
     );
 }
 
@@ -490,18 +540,21 @@ fn test_keystore_new_variants() {
     let keystore_path1 = temp_dir.path().join("test1.keystore");
     let keystore1 = Keystore::new(&keystore_path1).unwrap();
     assert_eq!(keystore1.config.argon2_memory_kb, 1_048_576); // 1GB default
+    assert!(!keystore1.config.allow_secret_exports);
 
     // Test new_with_config() with development config
     let keystore_path2 = temp_dir.path().join("test2.keystore");
     let keystore2 =
         Keystore::new_with_config(&keystore_path2, KeystoreConfig::development()).unwrap();
     assert_eq!(keystore2.config.argon2_memory_kb, 8192); // 8MB development
+    assert!(!keystore2.config.allow_secret_exports);
 
     // Test with production config
     let keystore_path3 = temp_dir.path().join("test3.keystore");
     let keystore3 =
         Keystore::new_with_config(&keystore_path3, KeystoreConfig::production()).unwrap();
     assert_eq!(keystore3.config.argon2_memory_kb, 1_048_576); // 1GB production
+    assert!(!keystore3.config.allow_secret_exports);
 }
 
 #[test]
@@ -685,8 +738,8 @@ fn test_get_private_key_comprehensive() {
 
     // Verify they produce different addresses
     assert_ne!(
-        private_key.ethereum_address(),
-        mnemonic_key.ethereum_address()
+        private_key.ethereum_address().unwrap(),
+        mnemonic_key.ethereum_address().unwrap()
     );
 
     // Test non-existent key
@@ -769,14 +822,14 @@ fn test_secure_key_methods() {
     assert_eq!(sig1.to_bytes(), sig1_again.to_bytes());
 
     // Test ethereum_address
-    let address1 = secure_key.ethereum_address();
-    let address2 = secure_key.ethereum_address();
+    let address1 = secure_key.ethereum_address().unwrap();
+    let address2 = secure_key.ethereum_address().unwrap();
     assert_eq!(address1, address2); // Should be consistent
     assert_ne!(address1, Address::ZERO); // Should not be zero
 
     // Test public_key
-    let pubkey1 = secure_key.public_key();
-    let pubkey2 = secure_key.public_key();
+    let pubkey1 = secure_key.public_key().unwrap();
+    let pubkey2 = secure_key.public_key().unwrap();
     assert_eq!(
         pubkey1.to_encoded_point(false),
         pubkey2.to_encoded_point(false)
@@ -875,7 +928,7 @@ fn test_keystore_file_corruption_handling() {
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
-        KeystoreError::SerializationError(_)
+        KeystoreError::InvalidInput(_)
     ));
 }
 
@@ -1037,7 +1090,10 @@ fn test_aad_prevents_entry_swapping() {
         let key2 = keystore.get_private_key(key2_id).unwrap();
 
         // Verify they have different addresses (confirming they are different keys)
-        assert_ne!(key1.ethereum_address(), key2.ethereum_address());
+        assert_ne!(
+            key1.ethereum_address().unwrap(),
+            key2.ethereum_address().unwrap()
+        );
 
         // Test that both keys can sign different data successfully
         let hash1 = [1u8; 32];
