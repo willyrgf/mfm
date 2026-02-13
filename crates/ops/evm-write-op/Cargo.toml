@@ -14,3 +14,4 @@ k256 = { version = "0.13", features = ["ecdsa"] }
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-collectors-evm = { path = "../../collectors/evm" }
+mfm-op-common = { path = "../common" }

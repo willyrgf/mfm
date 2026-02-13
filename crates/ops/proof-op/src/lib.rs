@@ -14,11 +14,12 @@ use mfm_machine::events::{ArtifactWritten, DomainEvent, DOMAIN_EVENT_ARTIFACT_WR
 use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{ContextKey, ErrorCode, FactKey, OpId, OpPath};
 use mfm_machine::io::{IoCall, IoProvider};
-use mfm_machine::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta, Tag};
+use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_machine::stores::ArtifactKind;
+use mfm_op_common::states::meta;
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -193,13 +194,7 @@ struct ReadFactsState {
 #[async_trait]
 impl State for ReadFactsState {
     fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: vec![Tag("read_only_io".to_string())],
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::ReadOnlyIo,
-            idempotency: Idempotency::None,
-        }
+        meta::read_only_io_with_tag("read_only_io")
     }
 
     async fn handle(
@@ -235,13 +230,7 @@ struct ApplySideEffectState {
 #[async_trait]
 impl State for ApplySideEffectState {
     fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: vec![Tag("apply_side_effect".to_string())],
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::ApplySideEffect,
-            idempotency: Idempotency::Key(format!("proof:side_effect|op:{}", self.op_path.0)),
-        }
+        meta::apply_side_effect(format!("proof:side_effect|op:{}", self.op_path.0))
     }
 
     async fn handle(
@@ -312,13 +301,7 @@ struct WriteOutputState {
 #[async_trait]
 impl State for WriteOutputState {
     fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: Vec::new(),
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::Pure,
-            idempotency: Idempotency::None,
-        }
+        meta::pure()
     }
 
     async fn handle(
@@ -873,13 +856,10 @@ mod tests {
     #[async_trait]
     impl State for SpawnChildrenState {
         fn meta(&self) -> StateMeta {
-            StateMeta {
-                tags: vec![Tag("child_run_spawn".to_string())],
-                depends_on: Vec::new(),
-                depends_on_strategy: DependencyStrategy::Latest,
-                side_effects: SideEffectKind::ApplySideEffect,
-                idempotency: Idempotency::Key(format!("child_parent:spawn|op:{}", self.op_path.0)),
-            }
+            meta::apply_side_effect_with_tag(
+                "child_run_spawn",
+                format!("child_parent:spawn|op:{}", self.op_path.0),
+            )
         }
 
         async fn handle(
@@ -931,13 +911,10 @@ mod tests {
     #[async_trait]
     impl State for JoinChildrenState {
         fn meta(&self) -> StateMeta {
-            StateMeta {
-                tags: vec![Tag("child_run_join".to_string())],
-                depends_on: Vec::new(),
-                depends_on_strategy: DependencyStrategy::Latest,
-                side_effects: SideEffectKind::ApplySideEffect,
-                idempotency: Idempotency::Key(format!("child_parent:join|op:{}", self.op_path.0)),
-            }
+            meta::apply_side_effect_with_tag(
+                "child_run_join",
+                format!("child_parent:join|op:{}", self.op_path.0),
+            )
         }
 
         async fn handle(

@@ -24,10 +24,11 @@ use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, StateError};
 use mfm_machine::ids::{ContextKey, ErrorCode, FactKey, OpId, OpPath, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
-use mfm_machine::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta, Tag};
+use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::{StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
+use mfm_op_common::states::meta;
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -1386,13 +1387,7 @@ struct ContractFromNixState {
 #[async_trait]
 impl State for ContractFromNixState {
     fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: vec![Tag("config".to_string())],
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::Pure,
-            idempotency: Idempotency::None,
-        }
+        meta::pure_with_tag("config")
     }
 
     async fn handle(
@@ -1539,13 +1534,7 @@ struct DeployState {
 #[async_trait]
 impl State for DeployState {
     fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: vec![Tag("apply_side_effect".to_string())],
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::ApplySideEffect,
-            idempotency: Idempotency::Key(format!("mfm:evm_deploy|state:{}", self.state_id.0)),
-        }
+        meta::apply_side_effect(format!("mfm:evm_deploy|state:{}", self.state_id.0))
     }
 
     async fn handle(
@@ -1734,13 +1723,7 @@ struct ConfigureState {
 #[async_trait]
 impl State for ConfigureState {
     fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: vec![Tag("apply_side_effect".to_string())],
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::ApplySideEffect,
-            idempotency: Idempotency::Key(format!("mfm:evm_configure|state:{}", self.state_id.0)),
-        }
+        meta::apply_side_effect(format!("mfm:evm_configure|state:{}", self.state_id.0))
     }
 
     async fn handle(
@@ -1929,13 +1912,7 @@ struct ValidateState {
 #[async_trait]
 impl State for ValidateState {
     fn meta(&self) -> StateMeta {
-        StateMeta {
-            tags: vec![Tag("validate".to_string())],
-            depends_on: Vec::new(),
-            depends_on_strategy: DependencyStrategy::Latest,
-            side_effects: SideEffectKind::ReadOnlyIo,
-            idempotency: Idempotency::None,
-        }
+        meta::read_only_io_with_tag("validate")
     }
 
     async fn handle(

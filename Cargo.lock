@@ -2096,6 +2096,7 @@ dependencies = [
  "k256",
  "mfm-collectors-evm",
  "mfm-machine",
+ "mfm-op-common",
  "mfm-sdk",
  "serde",
  "serde_json",
@@ -2144,6 +2145,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mfm-machine",
+ "mfm-op-common",
  "mfm-sdk",
  "serde_json",
  "tokio",
