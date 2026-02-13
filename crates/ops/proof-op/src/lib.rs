@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
-use mfm_machine::errors::{ErrorCategory, StateError};
+use mfm_machine::errors::StateError;
 use mfm_machine::events::DomainEvent;
 use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
@@ -29,6 +29,8 @@ use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
 
 #[cfg(test)]
+use mfm_machine::errors::ErrorCategory;
+#[cfg(test)]
 use mfm_machine::errors::ErrorInfo;
 
 const OP_ID: &str = "proof";
@@ -40,10 +42,6 @@ const DOMAIN_EVENT_IDEMPOTENCY_KEY: &str = "proof_idempotency_key";
 #[cfg(test)]
 fn info(code: &'static str, category: ErrorCategory, retryable: bool, message: &str) -> ErrorInfo {
     op_errors::info(code, category, retryable, message)
-}
-
-fn state_error(code: &'static str, message: &str) -> StateError {
-    op_errors::state_error(code, ErrorCategory::Unknown, false, message)
 }
 
 fn ctx_key(s: &'static str) -> ContextKey {
@@ -60,7 +58,7 @@ fn output_fact_key(op_path: &OpPath) -> FactKey {
 
 fn idempotency_key_for_value(v: &serde_json::Value) -> Result<String, StateError> {
     let id = artifact_id_for_json(v).map_err(|_| {
-        state_error(
+        op_errors::state_unknown_msg(
             "idempotency_key_not_canonical",
             "value was not canonical-json-hashable",
         )
@@ -210,7 +208,9 @@ impl State for ReadFactsState {
                 fact_key: Some(key),
             })
             .await
-            .map_err(|_| state_error("read_fact_io_failed", "failed to read input fact"))?;
+            .map_err(|_| {
+                op_errors::state_unknown_msg("read_fact_io_failed", "failed to read input fact")
+            })?;
 
         op_ctx::write_json(ctx, ctx_key("read_fact"), res.response)?;
 
@@ -257,10 +257,9 @@ impl State for ApplySideEffectState {
         )?;
 
         let fact_key = side_effect_fact_key(&self.op_path, &id_key);
-        let existing = io
-            .get_recorded_fact(&fact_key)
-            .await
-            .map_err(|_| state_error("io_fact_lookup_failed", "failed to lookup recorded fact"))?;
+        let existing = io.get_recorded_fact(&fact_key).await.map_err(|_| {
+            op_errors::state_unknown_msg("io_fact_lookup_failed", "failed to lookup recorded fact")
+        })?;
 
         if existing.is_none() {
             rec.emit(DomainEvent {
@@ -269,7 +268,9 @@ impl State for ApplySideEffectState {
                 payload_ref: None,
             })
             .await
-            .map_err(|_| state_error("emit_failed", "failed to emit idempotency event"))?;
+            .map_err(|_| {
+                op_errors::state_unknown_msg("emit_failed", "failed to emit idempotency event")
+            })?;
         }
 
         let res = io
@@ -279,7 +280,9 @@ impl State for ApplySideEffectState {
                 fact_key: Some(fact_key),
             })
             .await
-            .map_err(|_| state_error("side_effect_io_failed", "side-effect call failed"))?;
+            .map_err(|_| {
+                op_errors::state_unknown_msg("side_effect_io_failed", "side-effect call failed")
+            })?;
 
         op_ctx::write_json(ctx, ctx_key("side_effect_result"), res.response)?;
 
@@ -662,7 +665,9 @@ mod tests {
                     },
                 )
                 .await
-                .map_err(|_| state_error("child_spawn_failed", "failed to spawn child run"))?;
+                .map_err(|_| {
+                    op_errors::state_unknown_msg("child_spawn_failed", "failed to spawn child run")
+                })?;
 
                 refs.push(serde_json::json!({
                     "i": i,
@@ -712,26 +717,30 @@ mod tests {
             let mut joined: Vec<(RunId, serde_json::Value)> = Vec::new();
             for r in refs {
                 let idx = r.get("i").and_then(|v| v.as_u64()).ok_or_else(|| {
-                    state_error("invalid_child_refs", "child_refs entry missing i")
+                    op_errors::state_unknown_msg("invalid_child_refs", "child_refs entry missing i")
                 })? as u32;
                 let child_run_id = serde_json::from_value::<RunId>(
                     r.get("child_run_id").cloned().ok_or_else(|| {
-                        state_error(
+                        op_errors::state_unknown_msg(
                             "invalid_child_refs",
                             "child_refs entry missing child_run_id",
                         )
                     })?,
                 )
-                .map_err(|_| state_error("invalid_child_refs", "invalid child_run_id"))?;
+                .map_err(|_| {
+                    op_errors::state_unknown_msg("invalid_child_refs", "invalid child_run_id")
+                })?;
                 let child_manifest_id = serde_json::from_value::<ArtifactId>(
                     r.get("child_manifest_id").cloned().ok_or_else(|| {
-                        state_error(
+                        op_errors::state_unknown_msg(
                             "invalid_child_refs",
                             "child_refs entry missing child_manifest_id",
                         )
                     })?,
                 )
-                .map_err(|_| state_error("invalid_child_refs", "invalid child_manifest_id"))?;
+                .map_err(|_| {
+                    op_errors::state_unknown_msg("invalid_child_refs", "invalid child_manifest_id")
+                })?;
 
                 let fact_key = FactKey(format!("child_parent:await|op:{}|i:{idx}", self.op_path.0));
                 let rr = mfm_sdk::unstable::child_runs::await_child_run_v1(
@@ -744,7 +753,9 @@ mod tests {
                     },
                 )
                 .await
-                .map_err(|_| state_error("child_await_failed", "failed to await child run"))?;
+                .map_err(|_| {
+                    op_errors::state_unknown_msg("child_await_failed", "failed to await child run")
+                })?;
 
                 joined.push((rr.child_run_id, rr.final_snapshot));
             }

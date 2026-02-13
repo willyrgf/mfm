@@ -32,6 +32,10 @@ pub fn sdk_parse_error(code: &'static str, message: &'static str) -> SdkError {
     sdk_error(code, ErrorCategory::ParsingInput, false, message)
 }
 
+pub fn sdk_unknown_error(code: &'static str, message: &'static str) -> SdkError {
+    sdk_error(code, ErrorCategory::Unknown, false, message)
+}
+
 pub fn state_error(
     code: &'static str,
     category: ErrorCategory,
@@ -58,6 +62,10 @@ pub fn state_error_with_state(
 }
 
 pub fn state_unknown(code: &'static str, message: &'static str) -> StateError {
+    state_error(code, ErrorCategory::Unknown, false, message)
+}
+
+pub fn state_unknown_msg(code: &'static str, message: impl Into<String>) -> StateError {
     state_error(code, ErrorCategory::Unknown, false, message)
 }
 

@@ -18,7 +18,7 @@ use alloy_primitives::{Address, U256};
 use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
-use mfm_machine::errors::{ErrorCategory, IoError, StateError};
+use mfm_machine::errors::StateError;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
 use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
@@ -41,18 +41,6 @@ const KEY_CHAIN_ID: &str = "chain_id";
 const KEY_BLOCK_NUMBER: &str = "block_number";
 const KEY_NATIVE: &str = "native";
 const KEY_SNAPSHOT_ARTIFACT_ID: &str = "snapshot_artifact_id";
-
-fn sdk_err(code: &'static str, message: &'static str) -> SdkError {
-    op_errors::sdk_error(code, ErrorCategory::ParsingInput, false, message)
-}
-
-fn state_err(code: &'static str, message: &'static str) -> StateError {
-    op_errors::state_unknown(code, message)
-}
-
-fn state_err_from_io(err: IoError) -> StateError {
-    op_errors::state_from_io(err)
-}
 
 fn ctx_key(suffix: &'static str) -> ContextKey {
     ContextKey(suffix.to_string())
@@ -145,18 +133,19 @@ fn parse_u256_hex(s: &str) -> Result<U256, String> {
 
 fn parse_u256_hex_value(v: &serde_json::Value) -> Result<U256, StateError> {
     let Some(s) = v.as_str() else {
-        return Err(state_err(
+        return Err(op_errors::state_unknown(
             "evm_response_invalid",
             "evm response was not a hex string",
         ));
     };
-    parse_u256_hex(s)
-        .map_err(|_| state_err("evm_response_invalid", "evm response was not a hex u256"))
+    parse_u256_hex(s).map_err(|_| {
+        op_errors::state_unknown("evm_response_invalid", "evm response was not a hex u256")
+    })
 }
 
 fn parse_u8_u256(v: U256) -> Result<u8, StateError> {
     if v > U256::from(u8::MAX) {
-        return Err(state_err(
+        return Err(op_errors::state_unknown(
             "evm_response_invalid",
             "evm response was out of range for u8",
         ));
@@ -225,8 +214,13 @@ impl Operation for PortfolioTrackerOp {
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
     ) -> Result<StateGraph, SdkError> {
-        let mut cfg: PortfolioTrackerConfig = serde_json::from_value(op_config.clone())
-            .map_err(|_| sdk_err("invalid_op_config", "invalid portfolio_tracker op_config"))?;
+        let mut cfg: PortfolioTrackerConfig =
+            serde_json::from_value(op_config.clone()).map_err(|_| {
+                op_errors::sdk_parse_error(
+                    "invalid_op_config",
+                    "invalid portfolio_tracker op_config",
+                )
+            })?;
 
         cfg.tokens
             .sort_by_key(|t| address_hex_lower_no0x(&t.address));
@@ -351,7 +345,7 @@ impl State for ReadEthBalanceState {
                 serde_json::json!([address_hex_lower(&self.wallet), u64_hex_quantity(block)]),
             ))
             .await
-            .map_err(state_err_from_io)?;
+            .map_err(op_errors::state_from_io)?;
 
         let wei = parse_u256_hex_value(&res.response)?;
         let native = serde_json::json!({
@@ -413,7 +407,7 @@ impl State for ReadErc20BalanceState {
                         ]),
                     ))
                     .await
-                    .map_err(state_err_from_io)?;
+                    .map_err(op_errors::state_from_io)?;
                 let v = parse_u256_hex_value(&res.response)?;
                 parse_u8_u256(v)?
             }
@@ -428,7 +422,7 @@ impl State for ReadErc20BalanceState {
                 ]),
             ))
             .await
-            .map_err(state_err_from_io)?;
+            .map_err(op_errors::state_from_io)?;
 
         let raw = parse_u256_hex_value(&res.response)?;
         let token_obj = serde_json::json!({
@@ -497,7 +491,7 @@ impl State for WriteSnapshotState {
             tokens.push(tok);
         }
 
-        let generated_at_ms = io.now_millis().await.map_err(state_err_from_io)?;
+        let generated_at_ms = io.now_millis().await.map_err(op_errors::state_from_io)?;
         let snapshot = serde_json::json!({
             "wallet_address": address_hex_lower(&self.cfg.wallet_address),
             "chain_id": chain_id,
@@ -532,7 +526,7 @@ mod tests {
     use std::collections::HashMap;
 
     use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
-    use mfm_machine::errors::{ErrorCategory, ErrorInfo};
+    use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
     use mfm_machine::events::{Event, KernelEvent};
     use mfm_machine::ids::ArtifactId;
     use mfm_machine::io::IoCall;

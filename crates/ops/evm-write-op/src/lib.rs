@@ -21,7 +21,7 @@ use alloy_primitives::keccak256;
 use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
-use mfm_machine::errors::{ErrorCategory, IoError, StateError};
+use mfm_machine::errors::StateError;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
 use mfm_machine::meta::StateMeta;
@@ -56,18 +56,6 @@ const KEY_CONFIGURE_RECEIPTS: &str = "configure_receipts";
 const KEY_VALIDATED: &str = "validated";
 const KEY_CHAIN_ID: &str = "chain_id";
 const KEY_CLIENT_VERSION: &str = "client_version";
-
-fn sdk_err(code: &'static str, message: &'static str) -> SdkError {
-    op_errors::sdk_error(code, ErrorCategory::ParsingInput, false, message)
-}
-
-fn state_err(code: &'static str, message: &'static str) -> StateError {
-    op_errors::state_unknown(code, message)
-}
-
-fn state_err_from_io(err: IoError) -> StateError {
-    op_errors::state_from_io(err)
-}
 
 fn default_poll_interval_ms() -> u64 {
     500
@@ -819,8 +807,9 @@ fn resolve_artifact_config(
     }
 
     let v = context_read_json(ctx, artifact_port)?;
-    serde_json::from_value::<ContractArtifactConfig>(v)
-        .map_err(|_| state_err("ctx_type_mismatch", "context artifact value was invalid"))
+    serde_json::from_value::<ContractArtifactConfig>(v).map_err(|_| {
+        op_errors::state_unknown("ctx_type_mismatch", "context artifact value was invalid")
+    })
 }
 
 fn context_write_json(
@@ -851,17 +840,17 @@ async fn send_transaction(
             serde_json::json!([tx_obj]),
         ))
         .await
-        .map_err(state_err_from_io)?;
+        .map_err(op_errors::state_from_io)?;
 
     let Some(tx_hash) = res.response.as_str() else {
-        return Err(state_err(
+        return Err(op_errors::state_unknown(
             "evm_response_invalid",
             "eth_sendTransaction returned non-string tx hash",
         ));
     };
 
     normalize_hex_str(tx_hash).map_err(|_| {
-        state_err(
+        op_errors::state_unknown(
             "evm_response_invalid",
             "eth_sendTransaction returned invalid hex tx hash",
         )
@@ -878,17 +867,17 @@ async fn send_raw_transaction(
             serde_json::json!([raw_tx_hex]),
         ))
         .await
-        .map_err(state_err_from_io)?;
+        .map_err(op_errors::state_from_io)?;
 
     let Some(tx_hash) = res.response.as_str() else {
-        return Err(state_err(
+        return Err(op_errors::state_unknown(
             "evm_response_invalid",
             "eth_sendRawTransaction returned non-string tx hash",
         ));
     };
 
     normalize_hex_str(tx_hash).map_err(|_| {
-        state_err(
+        op_errors::state_unknown(
             "evm_response_invalid",
             "eth_sendRawTransaction returned invalid hex tx hash",
         )
@@ -905,9 +894,9 @@ async fn send_signed_create_transaction(
     let signing_key = signing_key_from_env(signing_key_env)?;
     let signer_addr = signer_address_hex(&signing_key);
     let configured_from = normalize_address(from)
-        .map_err(|_| state_err("invalid_op_config", "invalid from address"))?;
+        .map_err(|_| op_errors::state_unknown("invalid_op_config", "invalid from address"))?;
     if signer_addr != configured_from {
-        return Err(state_err(
+        return Err(op_errors::state_unknown(
             "signing_key_address_mismatch",
             "signing key did not match configured from address",
         ));
@@ -927,7 +916,10 @@ async fn send_signed_create_transaction(
     let nonce_hex = transaction_count_hex(client, &configured_from).await?;
     let gas_hex = estimate_gas_hex(client, &tx_obj).await?;
     let gas_price_hex = gas_price_hex(client).await?;
-    let chain_id = client.chain_id_u64().await.map_err(state_err_from_io)?;
+    let chain_id = client
+        .chain_id_u64()
+        .await
+        .map_err(op_errors::state_from_io)?;
 
     let raw_tx_hex = sign_legacy_create_raw_tx(
         &signing_key,
@@ -952,17 +944,17 @@ async fn transaction_count_hex(
             serde_json::json!([from, "pending"]),
         ))
         .await
-        .map_err(state_err_from_io)?;
+        .map_err(op_errors::state_from_io)?;
 
     let Some(nonce) = res.response.as_str() else {
-        return Err(state_err(
+        return Err(op_errors::state_unknown(
             "evm_response_invalid",
             "eth_getTransactionCount returned non-string nonce",
         ));
     };
 
     normalize_hex_str(nonce).map_err(|_| {
-        state_err(
+        op_errors::state_unknown(
             "evm_response_invalid",
             "eth_getTransactionCount returned invalid hex nonce",
         )
@@ -971,25 +963,27 @@ async fn transaction_count_hex(
 
 fn signing_key_from_env(signing_key_env: &str) -> Result<SigningKey, StateError> {
     let raw = std::env::var(signing_key_env).map_err(|_| {
-        state_err(
+        op_errors::state_unknown(
             "missing_signing_key_env",
             "signing_key_env did not exist in process environment",
         )
     })?;
 
-    let normalized = normalize_hex_str(&raw)
-        .map_err(|_| state_err("invalid_signing_key_env", "signing key hex was invalid"))?;
-    let bytes = hex_to_bytes(&normalized)
-        .map_err(|_| state_err("invalid_signing_key_env", "signing key hex was invalid"))?;
+    let normalized = normalize_hex_str(&raw).map_err(|_| {
+        op_errors::state_unknown("invalid_signing_key_env", "signing key hex was invalid")
+    })?;
+    let bytes = hex_to_bytes(&normalized).map_err(|_| {
+        op_errors::state_unknown("invalid_signing_key_env", "signing key hex was invalid")
+    })?;
     let key: [u8; 32] = bytes.try_into().map_err(|_| {
-        state_err(
+        op_errors::state_unknown(
             "invalid_signing_key_env",
             "signing key must be exactly 32 bytes",
         )
     })?;
 
     SigningKey::from_bytes((&key).into()).map_err(|_| {
-        state_err(
+        op_errors::state_unknown(
             "invalid_signing_key_env",
             "signing key did not form a valid secp256k1 key",
         )
@@ -1032,7 +1026,9 @@ fn sign_legacy_create_raw_tx(
     let sighash = keccak256(&unsigned);
     let (sig, recid) = signing_key
         .sign_prehash_recoverable(sighash.as_slice())
-        .map_err(|_| state_err("signing_failed", "failed to sign deployment transaction"))?;
+        .map_err(|_| {
+            op_errors::state_unknown("signing_failed", "failed to sign deployment transaction")
+        })?;
 
     let sig_bytes = sig.to_bytes();
     let r = trim_leading_zero_bytes(&sig_bytes[..32]);
@@ -1056,10 +1052,12 @@ fn sign_legacy_create_raw_tx(
 }
 
 fn hex_quantity_to_rlp_bytes(value: &str) -> Result<Vec<u8>, StateError> {
-    let normalized = normalize_hex_str(value)
-        .map_err(|_| state_err("invalid_op_config", "invalid transaction quantity hex"))?;
-    let bytes = hex_to_bytes(&normalized)
-        .map_err(|_| state_err("invalid_op_config", "invalid transaction quantity hex"))?;
+    let normalized = normalize_hex_str(value).map_err(|_| {
+        op_errors::state_unknown("invalid_op_config", "invalid transaction quantity hex")
+    })?;
+    let bytes = hex_to_bytes(&normalized).map_err(|_| {
+        op_errors::state_unknown("invalid_op_config", "invalid transaction quantity hex")
+    })?;
     Ok(trim_leading_zero_bytes(&bytes))
 }
 
@@ -1148,17 +1146,17 @@ async fn estimate_gas_hex(
             serde_json::json!([tx_obj]),
         ))
         .await
-        .map_err(state_err_from_io)?;
+        .map_err(op_errors::state_from_io)?;
 
     let Some(gas) = res.response.as_str() else {
-        return Err(state_err(
+        return Err(op_errors::state_unknown(
             "evm_response_invalid",
             "eth_estimateGas returned non-string gas value",
         ));
     };
 
     normalize_hex_str(gas).map_err(|_| {
-        state_err(
+        op_errors::state_unknown(
             "evm_response_invalid",
             "eth_estimateGas returned invalid hex gas value",
         )
@@ -1169,17 +1167,17 @@ async fn gas_price_hex(client: &mut EvmIoClient<'_>) -> Result<String, StateErro
     let res = client
         .call(JsonRpcCall::new("eth_gasPrice", serde_json::json!([])))
         .await
-        .map_err(state_err_from_io)?;
+        .map_err(op_errors::state_from_io)?;
 
     let Some(gas_price) = res.response.as_str() else {
-        return Err(state_err(
+        return Err(op_errors::state_unknown(
             "evm_response_invalid",
             "eth_gasPrice returned non-string gas price",
         ));
     };
 
     normalize_hex_str(gas_price).map_err(|_| {
-        state_err(
+        op_errors::state_unknown(
             "evm_response_invalid",
             "eth_gasPrice returned invalid hex gas price",
         )
@@ -1209,7 +1207,7 @@ async fn wait_for_receipt(
                 ))),
             })
             .await
-            .map_err(state_err_from_io)?;
+            .map_err(op_errors::state_from_io)?;
 
         if !res.response.is_null() {
             return Ok(res.response);
@@ -1218,7 +1216,7 @@ async fn wait_for_receipt(
         tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
     }
 
-    Err(state_err(
+    Err(op_errors::state_unknown(
         "evm_receipt_timeout",
         "timed out waiting for transaction receipt",
     ))
@@ -1226,17 +1224,18 @@ async fn wait_for_receipt(
 
 fn ensure_receipt_success(receipt: &serde_json::Value) -> Result<(), StateError> {
     let Some(obj) = receipt.as_object() else {
-        return Err(state_err(
+        return Err(op_errors::state_unknown(
             "evm_response_invalid",
             "transaction receipt was not a JSON object",
         ));
     };
 
     if let Some(status) = obj.get("status").and_then(|v| v.as_str()) {
-        let s = normalize_hex_str(status)
-            .map_err(|_| state_err("evm_response_invalid", "receipt status was not valid hex"))?;
+        let s = normalize_hex_str(status).map_err(|_| {
+            op_errors::state_unknown("evm_response_invalid", "receipt status was not valid hex")
+        })?;
         if s != "0x01" && s != "0x1" {
-            return Err(state_err(
+            return Err(op_errors::state_unknown(
                 "evm_receipt_failed_status",
                 "transaction receipt reported failed status",
             ));
@@ -1248,20 +1247,20 @@ fn ensure_receipt_success(receipt: &serde_json::Value) -> Result<(), StateError>
 
 fn receipt_contract_address(receipt: &serde_json::Value) -> Result<String, StateError> {
     let Some(obj) = receipt.as_object() else {
-        return Err(state_err(
+        return Err(op_errors::state_unknown(
             "evm_response_invalid",
             "transaction receipt was not a JSON object",
         ));
     };
     let Some(addr) = obj.get("contractAddress").and_then(|v| v.as_str()) else {
-        return Err(state_err(
+        return Err(op_errors::state_unknown(
             "evm_receipt_missing_contract_address",
             "receipt did not include contractAddress",
         ));
     };
 
     normalize_address(addr).map_err(|_| {
-        state_err(
+        op_errors::state_unknown(
             "evm_response_invalid",
             "receipt contractAddress was invalid",
         )
@@ -1273,12 +1272,14 @@ fn resolve_contract_address(
     configured: &Option<String>,
 ) -> Result<String, StateError> {
     match configured {
-        Some(a) => normalize_address(a)
-            .map_err(|_| state_err("invalid_op_config", "contract_address was invalid")),
+        Some(a) => normalize_address(a).map_err(|_| {
+            op_errors::state_unknown("invalid_op_config", "contract_address was invalid")
+        }),
         None => {
             let a = context_read_string(ctx, KEY_CONTRACT_ADDRESS)?;
-            normalize_address(&a)
-                .map_err(|_| state_err("ctx_type_mismatch", "context contract address invalid"))
+            normalize_address(&a).map_err(|_| {
+                op_errors::state_unknown("ctx_type_mismatch", "context contract address invalid")
+            })
         }
     }
 }
@@ -1298,13 +1299,13 @@ impl Operation for EvmContractFromNixOp {
     fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
         let cfg: EvmContractFromNixConfig =
             serde_json::from_value(op_config.clone()).map_err(|_| {
-                sdk_err(
+                op_errors::sdk_parse_error(
                     "invalid_op_config",
                     "invalid evm_contract_from_nix op_config",
                 )
             })?;
         if !cfg.result_pointer.is_empty() && !cfg.result_pointer.starts_with('/') {
-            return Err(sdk_err(
+            return Err(op_errors::sdk_parse_error(
                 "invalid_op_config",
                 "result_pointer must be empty or start with '/'",
             ));
@@ -1324,13 +1325,13 @@ impl Operation for EvmContractFromNixOp {
     ) -> Result<StateGraph, SdkError> {
         let cfg: EvmContractFromNixConfig =
             serde_json::from_value(op_config.clone()).map_err(|_| {
-                sdk_err(
+                op_errors::sdk_parse_error(
                     "invalid_op_config",
                     "invalid evm_contract_from_nix op_config",
                 )
             })?;
         if !cfg.result_pointer.is_empty() && !cfg.result_pointer.starts_with('/') {
-            return Err(sdk_err(
+            return Err(op_errors::sdk_parse_error(
                 "invalid_op_config",
                 "result_pointer must be empty or start with '/'",
             ));
@@ -1376,7 +1377,7 @@ impl State for ContractFromNixState {
                 .pointer(&self.result_pointer)
                 .cloned()
                 .ok_or_else(|| {
-                    state_err(
+                    op_errors::state_unknown(
                         "nix_result_pointer_missing",
                         "nix result did not contain the configured pointer",
                     )
@@ -1385,13 +1386,13 @@ impl State for ContractFromNixState {
 
         let artifact = serde_json::from_value::<ContractArtifactConfig>(artifact_value.clone())
             .map_err(|_| {
-                state_err(
+                op_errors::state_unknown(
                     "invalid_contract_artifact",
                     "nix result artifact was invalid",
                 )
             })?;
         parse_artifact(&artifact).map_err(|_| {
-            state_err(
+            op_errors::state_unknown(
                 "invalid_contract_artifact",
                 "nix result artifact was invalid",
             )
@@ -1418,13 +1419,16 @@ impl Operation for EvmDeployOp {
     }
 
     fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        let cfg: EvmDeployConfig = serde_json::from_value(op_config.clone())
-            .map_err(|_| sdk_err("invalid_op_config", "invalid evm_deploy op_config"))?;
-        ensure_nonempty_artifact_port(&cfg.artifact_port)
-            .map_err(|_| sdk_err("invalid_op_config", "artifact_port must be non-empty"))?;
+        let cfg: EvmDeployConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "invalid evm_deploy op_config")
+        })?;
+        ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
+        })?;
         if let Some(env_name) = cfg.signing_key_env.as_deref() {
-            ensure_nonempty_env_name(env_name)
-                .map_err(|_| sdk_err("invalid_op_config", "signing_key_env must be non-empty"))?;
+            ensure_nonempty_env_name(env_name).map_err(|_| {
+                op_errors::sdk_parse_error("invalid_op_config", "signing_key_env must be non-empty")
+            })?;
         }
 
         let imports = if cfg.artifact.is_none() {
@@ -1449,28 +1453,33 @@ impl Operation for EvmDeployOp {
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
     ) -> Result<StateGraph, SdkError> {
-        let cfg: EvmDeployConfig = serde_json::from_value(op_config.clone())
-            .map_err(|_| sdk_err("invalid_op_config", "invalid evm_deploy op_config"))?;
+        let cfg: EvmDeployConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "invalid evm_deploy op_config")
+        })?;
 
-        ensure_nonempty_artifact_port(&cfg.artifact_port)
-            .map_err(|_| sdk_err("invalid_op_config", "artifact_port must be non-empty"))?;
+        ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
+        })?;
         if let Some(env_name) = cfg.signing_key_env.as_deref() {
-            ensure_nonempty_env_name(env_name)
-                .map_err(|_| sdk_err("invalid_op_config", "signing_key_env must be non-empty"))?;
+            ensure_nonempty_env_name(env_name).map_err(|_| {
+                op_errors::sdk_parse_error("invalid_op_config", "signing_key_env must be non-empty")
+            })?;
         }
         if let Some(artifact) = &cfg.artifact {
-            parse_artifact(artifact)
-                .map_err(|_| sdk_err("invalid_op_config", "invalid contract artifact"))?;
+            parse_artifact(artifact).map_err(|_| {
+                op_errors::sdk_parse_error("invalid_op_config", "invalid contract artifact")
+            })?;
         }
 
         let from = normalize_address(&cfg.from)
-            .map_err(|_| sdk_err("invalid_op_config", "invalid from address"))?;
+            .map_err(|_| op_errors::sdk_parse_error("invalid_op_config", "invalid from address"))?;
 
-        ensure_nonzero_polls(cfg.max_receipt_polls)
-            .map_err(|_| sdk_err("invalid_op_config", "max_receipt_polls must be > 0"))?;
+        ensure_nonzero_polls(cfg.max_receipt_polls).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "max_receipt_polls must be > 0")
+        })?;
 
         let value_hex = parse_value_wei_to_hex(&cfg.value_wei)
-            .map_err(|_| sdk_err("invalid_op_config", "invalid value_wei"))?;
+            .map_err(|_| op_errors::sdk_parse_error("invalid_op_config", "invalid value_wei"))?;
 
         let state_id = StateId(format!("{}.deploy", op_path.0));
         let state = Arc::new(DeployState {
@@ -1519,10 +1528,13 @@ impl State for DeployState {
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
         let artifact = resolve_artifact_config(ctx, &self.cfg.artifact, &self.cfg.artifact_port)?;
-        let (abi, bytecode) = parse_artifact(&artifact)
-            .map_err(|_| state_err("invalid_contract_artifact", "contract artifact was invalid"))?;
+        let (abi, bytecode) = parse_artifact(&artifact).map_err(|_| {
+            op_errors::state_unknown("invalid_contract_artifact", "contract artifact was invalid")
+        })?;
         let constructor_payload = constructor_data(&abi, &bytecode, &self.cfg.constructor_args)
-            .map_err(|_| state_err("invalid_op_config", "constructor args did not match ABI"))?;
+            .map_err(|_| {
+                op_errors::state_unknown("invalid_op_config", "constructor args did not match ABI")
+            })?;
 
         let mut client = EvmIoClient::new(self.state_id.clone(), io);
 
@@ -1587,10 +1599,12 @@ impl Operation for EvmConfigureOp {
     }
 
     fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        let cfg: EvmConfigureConfig = serde_json::from_value(op_config.clone())
-            .map_err(|_| sdk_err("invalid_op_config", "invalid evm_configure op_config"))?;
-        ensure_nonempty_artifact_port(&cfg.artifact_port)
-            .map_err(|_| sdk_err("invalid_op_config", "artifact_port must be non-empty"))?;
+        let cfg: EvmConfigureConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "invalid evm_configure op_config")
+        })?;
+        ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
+        })?;
 
         let mut imports = Vec::new();
         if cfg.artifact.is_none() {
@@ -1615,49 +1629,62 @@ impl Operation for EvmConfigureOp {
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
     ) -> Result<StateGraph, SdkError> {
-        let cfg: EvmConfigureConfig = serde_json::from_value(op_config.clone())
-            .map_err(|_| sdk_err("invalid_op_config", "invalid evm_configure op_config"))?;
+        let cfg: EvmConfigureConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "invalid evm_configure op_config")
+        })?;
 
-        ensure_nonempty_artifact_port(&cfg.artifact_port)
-            .map_err(|_| sdk_err("invalid_op_config", "artifact_port must be non-empty"))?;
+        ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
+        })?;
 
         if cfg.calls.is_empty() {
-            return Err(sdk_err(
+            return Err(op_errors::sdk_parse_error(
                 "invalid_op_config",
                 "evm_configure requires at least one call",
             ));
         }
 
         let parsed_abi = if let Some(artifact) = &cfg.artifact {
-            let (abi, _bytecode) = parse_artifact(artifact)
-                .map_err(|_| sdk_err("invalid_op_config", "invalid contract artifact"))?;
+            let (abi, _bytecode) = parse_artifact(artifact).map_err(|_| {
+                op_errors::sdk_parse_error("invalid_op_config", "invalid contract artifact")
+            })?;
             Some(abi)
         } else {
             None
         };
 
         let from = normalize_address(&cfg.from)
-            .map_err(|_| sdk_err("invalid_op_config", "invalid from address"))?;
+            .map_err(|_| op_errors::sdk_parse_error("invalid_op_config", "invalid from address"))?;
 
         let contract_address = cfg
             .contract_address
             .as_ref()
             .map(|a| normalize_address(a))
             .transpose()
-            .map_err(|_| sdk_err("invalid_op_config", "invalid contract_address"))?;
+            .map_err(|_| {
+                op_errors::sdk_parse_error("invalid_op_config", "invalid contract_address")
+            })?;
 
-        ensure_nonzero_polls(cfg.max_receipt_polls)
-            .map_err(|_| sdk_err("invalid_op_config", "max_receipt_polls must be > 0"))?;
+        ensure_nonzero_polls(cfg.max_receipt_polls).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "max_receipt_polls must be > 0")
+        })?;
 
         let mut calls = Vec::with_capacity(cfg.calls.len());
         for c in &cfg.calls {
             if let Some(abi) = &parsed_abi {
                 let _ = resolve_function_call(abi, &c.function, &c.args).map_err(|_| {
-                    sdk_err("invalid_op_config", "configure call did not match ABI")
+                    op_errors::sdk_parse_error(
+                        "invalid_op_config",
+                        "configure call did not match ABI",
+                    )
                 })?;
             }
-            let value_hex = parse_value_wei_to_hex(&c.value_wei)
-                .map_err(|_| sdk_err("invalid_op_config", "invalid value_wei in configure call"))?;
+            let value_hex = parse_value_wei_to_hex(&c.value_wei).map_err(|_| {
+                op_errors::sdk_parse_error(
+                    "invalid_op_config",
+                    "invalid value_wei in configure call",
+                )
+            })?;
 
             calls.push(ConfigureRuntimeCall {
                 function: c.function.clone(),
@@ -1712,8 +1739,9 @@ impl State for ConfigureState {
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
         let artifact = resolve_artifact_config(ctx, &self.cfg.artifact, &self.cfg.artifact_port)?;
-        let (abi, _bytecode) = parse_artifact(&artifact)
-            .map_err(|_| state_err("invalid_contract_artifact", "contract artifact was invalid"))?;
+        let (abi, _bytecode) = parse_artifact(&artifact).map_err(|_| {
+            op_errors::state_unknown("invalid_contract_artifact", "contract artifact was invalid")
+        })?;
 
         let to = resolve_contract_address(ctx, &self.cfg.contract_address)?;
 
@@ -1722,7 +1750,12 @@ impl State for ConfigureState {
 
         for call in &self.cfg.calls {
             let (calldata, _outputs) = resolve_function_call(&abi, &call.function, &call.args)
-                .map_err(|_| state_err("invalid_op_config", "configure call did not match ABI"))?;
+                .map_err(|_| {
+                    op_errors::state_unknown(
+                        "invalid_op_config",
+                        "configure call did not match ABI",
+                    )
+                })?;
             let mut tx = serde_json::json!({
                 "from": self.cfg.from,
                 "to": to,
@@ -1782,10 +1815,12 @@ impl Operation for EvmValidateOp {
     }
 
     fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        let cfg: EvmValidateConfig = serde_json::from_value(op_config.clone())
-            .map_err(|_| sdk_err("invalid_op_config", "invalid evm_validate op_config"))?;
-        ensure_nonempty_artifact_port(&cfg.artifact_port)
-            .map_err(|_| sdk_err("invalid_op_config", "artifact_port must be non-empty"))?;
+        let cfg: EvmValidateConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "invalid evm_validate op_config")
+        })?;
+        ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
+        })?;
 
         let mut imports = Vec::new();
         if cfg.artifact.is_none() {
@@ -1811,15 +1846,18 @@ impl Operation for EvmValidateOp {
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
     ) -> Result<StateGraph, SdkError> {
-        let cfg: EvmValidateConfig = serde_json::from_value(op_config.clone())
-            .map_err(|_| sdk_err("invalid_op_config", "invalid evm_validate op_config"))?;
+        let cfg: EvmValidateConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "invalid evm_validate op_config")
+        })?;
 
-        ensure_nonempty_artifact_port(&cfg.artifact_port)
-            .map_err(|_| sdk_err("invalid_op_config", "artifact_port must be non-empty"))?;
+        ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
+        })?;
 
         let parsed_abi = if let Some(artifact) = &cfg.artifact {
-            let (abi, _bytecode) = parse_artifact(artifact)
-                .map_err(|_| sdk_err("invalid_op_config", "invalid contract artifact"))?;
+            let (abi, _bytecode) = parse_artifact(artifact).map_err(|_| {
+                op_errors::sdk_parse_error("invalid_op_config", "invalid contract artifact")
+            })?;
             Some(abi)
         } else {
             None
@@ -1830,10 +1868,12 @@ impl Operation for EvmValidateOp {
             .as_ref()
             .map(|a| normalize_address(a))
             .transpose()
-            .map_err(|_| sdk_err("invalid_op_config", "invalid contract_address"))?;
+            .map_err(|_| {
+                op_errors::sdk_parse_error("invalid_op_config", "invalid contract_address")
+            })?;
 
         if cfg.require_client_substring.trim().is_empty() {
-            return Err(sdk_err(
+            return Err(op_errors::sdk_parse_error(
                 "invalid_op_config",
                 "require_client_substring must be non-empty",
             ));
@@ -1842,7 +1882,7 @@ impl Operation for EvmValidateOp {
         if let Some(abi) = &parsed_abi {
             let _ = prepare_validate_assertions(abi, &cfg.read_assertions, &cfg.event_assertions)
                 .map_err(|err| {
-                sdk_err(
+                op_errors::sdk_parse_error(
                     "invalid_op_config",
                     op_rpc::validation_assertion_error_message(&err),
                 )
@@ -1891,15 +1931,16 @@ impl State for ValidateState {
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
         let artifact = resolve_artifact_config(ctx, &self.cfg.artifact, &self.cfg.artifact_port)?;
-        let (abi, _bytecode) = parse_artifact(&artifact)
-            .map_err(|_| state_err("invalid_contract_artifact", "contract artifact was invalid"))?;
+        let (abi, _bytecode) = parse_artifact(&artifact).map_err(|_| {
+            op_errors::state_unknown("invalid_contract_artifact", "contract artifact was invalid")
+        })?;
         let (read_assertions, event_assertions) = prepare_validate_assertions(
             &abi,
             &self.cfg.read_assertions,
             &self.cfg.event_assertions,
         )
         .map_err(|err| {
-            state_err(
+            op_errors::state_unknown(
                 "invalid_op_config",
                 op_rpc::validation_assertion_error_message(&err),
             )
@@ -1913,7 +1954,7 @@ impl State for ValidateState {
                 serde_json::json!([]),
             ))
             .await
-            .map_err(state_err_from_io)?;
+            .map_err(op_errors::state_from_io)?;
         let client_version = op_rpc::expect_string(
             &client_version_res.response,
             "evm_response_invalid",
@@ -1927,7 +1968,10 @@ impl State for ValidateState {
             "rpc clientVersion did not match required reth substring",
         )?;
 
-        let chain_id = client.chain_id_u64().await.map_err(state_err_from_io)?;
+        let chain_id = client
+            .chain_id_u64()
+            .await
+            .map_err(op_errors::state_from_io)?;
         op_rpc::assert_condition(
             chain_id == self.cfg.expected_chain_id,
             "chain_id_mismatch",
@@ -1946,7 +1990,7 @@ impl State for ValidateState {
                     ]),
                 ))
                 .await
-                .map_err(state_err_from_io)?;
+                .map_err(op_errors::state_from_io)?;
 
             let raw = op_rpc::expect_string(
                 &res.response,
@@ -1955,7 +1999,7 @@ impl State for ValidateState {
             )?;
 
             let actual = decode_single_output_to_json(&ra.outputs, &raw).map_err(|_| {
-                state_err("evm_response_invalid", "failed to decode eth_call output")
+                op_errors::state_unknown("evm_response_invalid", "failed to decode eth_call output")
             })?;
 
             op_rpc::assert_condition(
@@ -1979,7 +2023,7 @@ impl State for ValidateState {
                     ]),
                 ))
                 .await
-                .map_err(state_err_from_io)?;
+                .map_err(op_errors::state_from_io)?;
 
             let logs = op_rpc::expect_array(
                 &logs_res.response,
