@@ -220,7 +220,17 @@ let
     ${postgres}/bin/psql -h localhost -p "$PGPORT" -U postgres -d postgres -c \
       "DO \$\$ BEGIN CREATE ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'postgres'; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;" 2>/dev/null || true
 
-    ${postgres}/bin/createdb -h localhost -p "$PGPORT" -U postgres "$PGDATABASE" 2>/dev/null || true
+    # Always connect via maintenance DB. If PGDATABASE is the target database and it does not
+    # exist yet, createdb without -d can fail by trying to connect to the missing DB first.
+    ${postgres}/bin/createdb -h localhost -p "$PGPORT" -U postgres --maintenance-db=postgres "$PGDATABASE" 2>/dev/null || true
+
+    PGDATABASE_SQL="''${PGDATABASE//\'/\'\'}"
+    DB_EXISTS="$(${postgres}/bin/psql -h localhost -p "$PGPORT" -U postgres -d postgres -Atqc \
+      "SELECT 1 FROM pg_database WHERE datname = '$PGDATABASE_SQL';" 2>/dev/null || true)"
+    if [ "$DB_EXISTS" != "1" ]; then
+      echo "ERROR: failed to ensure database '$PGDATABASE' exists" >&2
+      exit 1
+    fi
 
     if [ -n "${pkgs.lib.concatStringsSep " " extensions}" ]; then
       for ext in ${pkgs.lib.concatStringsSep " " extensions}; do
