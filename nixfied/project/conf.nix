@@ -182,8 +182,8 @@ rec {
     requiredDocs = [
       "README.md"
       "AGENTS.md"
-      "ARCHITECTURE.md"
-      "REDESIGN.md"
+      "docs/architecture.md"
+      "docs/redesign.md"
     ];
     riskAreas = [
       {

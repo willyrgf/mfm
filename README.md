@@ -8,8 +8,8 @@ Experimental, WIP toolkit for on-chain operations built around an event-sourced 
 
 Start here:
 
-- Design contract (source of truth): [`REDESIGN.md`](REDESIGN.md)
-- One-page overview + invariants: [`ARCHITECTURE.md`](ARCHITECTURE.md)
+- Design contract (source of truth): [`docs/redesign.md`](docs/redesign.md)
+- One-page overview + invariants: [`docs/architecture.md`](docs/architecture.md)
 - Contribution rules / CI parity: [`AGENTS.md`](AGENTS.md)
 
 User-facing docs:

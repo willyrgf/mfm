@@ -1,6 +1,6 @@
 //! EVM read-only op (Milestone 2).
 //!
-//! Source of truth: `REDESIGN.md` (v4).
+//! Source of truth: `docs/redesign.md` (v4).
 //!
 //! This op is intentionally small: it exists as the first “real” vertical slice that demonstrates:
 //! - deterministic facts recording in live mode

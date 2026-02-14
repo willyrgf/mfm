@@ -2,4 +2,4 @@
 
 Derived projection/indexer store scaffold (not correctness-critical for resume/replay).
 
-Docs: [`../../../REDESIGN.md`](../../../REDESIGN.md)
+Docs: [`../../../docs/redesign.md`](../../../docs/redesign.md)

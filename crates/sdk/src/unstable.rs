@@ -1,6 +1,6 @@
 //! Unstable helper implementations for planning and launching (Milestone 1).
 //!
-//! Source of truth: `REDESIGN.md` (v4).
+//! Source of truth: `docs/redesign.md` (v4).
 //! Not part of the stable API contract (Appendix C.2).
 
 use std::collections::{HashMap, HashSet};

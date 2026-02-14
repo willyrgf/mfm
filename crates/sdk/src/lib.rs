@@ -1,6 +1,6 @@
 //! v4 SDK (Milestone 1).
 //!
-//! Source of truth: `REDESIGN.md` (v4) Appendix C.2.
+//! Source of truth: `docs/redesign.md` (v4) Appendix C.2.
 //!
 //! Notes:
 //! - `mfm-sdk` depends on `mfm-machine` and provides orchestration ergonomics only.

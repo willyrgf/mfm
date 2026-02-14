@@ -41,14 +41,11 @@ Remaining focus:
 
 The audit scored implementation against these explicit statements:
 
-- `REDESIGN.md:52` binaries are thin wrappers that start/resume runs.
-- `REDESIGN.md:59` everything executes inside a state machine.
-- `REDESIGN.md:220` binaries are thin wrappers.
-- `REDESIGN.md:527` ops expand into state graphs.
-- `REDESIGN.md:830` and `REDESIGN.md:836` route state side effects through IO provider and keep CLI/REST as start/resume surfaces.
-- `ARCHITECTURE.md:195` `bin/cli` and `bin/rest-api` are thin wrappers.
-- `ENFORCE_BINS_THIN_LAYER.md:7` binaries are thin wrappers.
-- `ENFORCE_BINS_THIN_LAYER.md:8` business execution must happen inside state-machine runs.
+- `docs/redesign.md` section `4.9 Thin transport boundaries` (CLI/REST are start/resume/query adapters).
+- `docs/redesign.md` section `4.7 No ambient IO in state logic` (execution side effects route through IO provider).
+- `docs/redesign.md` section `11. Operations, Pipelines, and IDs` (ops expand to deterministic state graphs).
+- `docs/architecture.md` section `7. Thin-Binary Request Flow` (transport-only binary behavior).
+- `AGENTS.md` section `Binary Boundary Enforcement` (no domain workflow logic in binaries).
 
 ## 2. Audit Rubric
 

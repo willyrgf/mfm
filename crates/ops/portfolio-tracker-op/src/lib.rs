@@ -1,6 +1,6 @@
 //! Portfolio tracker operation (Milestone 2+).
 //!
-//! Source of truth: `REDESIGN.md` (v4).
+//! Source of truth: `docs/redesign.md` (v4).
 //!
 //! Current scope (v1):
 //! - validate `eth_chainId` matches configured `chain_id` (default: 1)

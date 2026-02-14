@@ -1,6 +1,6 @@
 //! Secrets scanning and redaction helpers (Milestone 1).
 //!
-//! Source of truth: `REDESIGN.md` (v4).
+//! Source of truth: `docs/redesign.md` (v4).
 //!
 //! Milestone 1 hard rule: secrets must not appear in persisted surfaces:
 //! - manifests, events, artifacts (including fact payloads and context snapshots), CLI/API outputs, and error details.

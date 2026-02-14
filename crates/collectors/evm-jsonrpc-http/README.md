@@ -2,4 +2,4 @@
 
 HTTP live transport for the `namespace = "evm"` IO surface (EVM JSON-RPC).
 
-Docs: [`../../../REDESIGN.md`](../../../REDESIGN.md)
+Docs: [`../../../docs/redesign.md`](../../../docs/redesign.md)

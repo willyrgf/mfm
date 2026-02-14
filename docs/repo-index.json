@@ -27,15 +27,15 @@
       "exists": true
     },
     {
-      "path": "ARCHITECTURE.md",
-      "purpose": "Architecture and system design details.",
-      "priority": 4,
+      "path": "docs/architecture.md",
+      "purpose": "Project documentation.",
+      "priority": 20,
       "exists": true
     },
     {
-      "path": "REDESIGN.md",
-      "purpose": "Redesign notes and migration context.",
-      "priority": 5,
+      "path": "docs/redesign.md",
+      "purpose": "Project documentation.",
+      "priority": 20,
       "exists": true
     }
   ],

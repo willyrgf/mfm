@@ -1,6 +1,6 @@
 //! Proof op (Milestone 1 acceptance tests).
 //!
-//! Source of truth: `REDESIGN.md`.
+//! Source of truth: `docs/redesign.md`.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;

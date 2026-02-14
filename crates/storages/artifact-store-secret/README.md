@@ -2,4 +2,4 @@
 
 Encrypted wrapper for storing secret-bearing artifacts.
 
-Docs: [`../../../REDESIGN.md`](../../../REDESIGN.md)
+Docs: [`../../../docs/redesign.md`](../../../docs/redesign.md)

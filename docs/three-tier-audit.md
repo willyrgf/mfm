@@ -154,7 +154,7 @@ Bugfix included in verifier:
 1. Tighten utility duplication policy from ceiling mode to strict single-source mode (hex/ABI wrappers).
 2. Consolidate duplicated test doubles into shared test support.
 3. Run and archive parity CI summary (`nix run .#ci -- --parity --summary`).
-4. Update architecture-facing docs (`ARCHITECTURE.md`, `ENFORCE_BINS_THIN_LAYER.md`) if needed to reflect new shared state modules.
+4. Update architecture-facing docs (`docs/architecture.md`, `docs/redesign.md`, `AGENTS.md`) if needed to reflect new shared state modules.
 
 ## 7. Acceptance Criteria Status
 

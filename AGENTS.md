@@ -16,8 +16,8 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 
 ## Design Contract (Architecture Invariants)
 
-- `REDESIGN.md` is the design contract. If code disagrees with it, the code is wrong (until the doc is updated).
-- `ARCHITECTURE.md` is the contributor-facing one-pager.
+- `docs/redesign.md` is the design contract. If code disagrees with it, the code is wrong (until the doc is updated).
+- `docs/architecture.md` is the contributor-facing one-pager.
 
 Key invariants to preserve (high risk if violated):
 
@@ -74,8 +74,8 @@ Workspace root: `Cargo.toml`
 Key docs:
 
 - `README.md`: project disclaimer.
-- `ARCHITECTURE.md`: one-page architecture overview + invariants.
-- `REDESIGN.md`: full design contract (authoritative).
+- `docs/architecture.md`: one-page architecture overview + invariants.
+- `docs/redesign.md`: full design contract (authoritative).
 - `bin/cli/README.md`: CLI behavior and JSON output contract.
 - `crates/machine/README.md`: state machine concepts and usage.
 - `crates/machine-derive/README.md`: proc-macro notes.
@@ -358,8 +358,8 @@ When changing CLI/REST behavior, update the relevant docs in the same change:
 
 - `bin/cli/README.md` for CLI contract/usage changes.
 - `bin/rest-api/README.md` for REST surface/contract changes.
-- `ARCHITECTURE.md` if architectural boundaries or responsibilities change.
-- `ENFORCE_BINS_THIN_LAYER.md` if thin-binary enforcement policy changes.
+- `docs/architecture.md` if architectural boundaries or responsibilities change.
+- `docs/redesign.md` if runtime/storage/replay contract semantics change.
 
 ## CI Requirements
 

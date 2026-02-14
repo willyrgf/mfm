@@ -1,6 +1,6 @@
 //! Nix-app execution op (Milestone 2).
 //!
-//! Source of truth: `REDESIGN.md` (v4), especially the Replay/IO contract.
+//! Source of truth: `docs/redesign.md` (v4), especially the Replay/IO contract.
 //!
 //! This op expands into a single state that requests external execution via `namespace="exec"`.
 

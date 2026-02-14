@@ -7,8 +7,8 @@ Generated from `docs/repo-index.json`.
 - `docs/repo-map.md` - LLM-facing repository map generated from docs/repo-index.json.
 - `README.md` - Primary repository overview and command entrypoints.
 - `AGENTS.md` - Agent instructions and collaboration constraints.
-- `ARCHITECTURE.md` - Architecture and system design details.
-- `REDESIGN.md` - Redesign notes and migration context.
+- `docs/architecture.md` - Project documentation.
+- `docs/redesign.md` - Project documentation.
 
 ## Components
 - `Cargo.toml` (rust-cargo)
