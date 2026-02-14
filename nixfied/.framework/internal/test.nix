@@ -1583,7 +1583,19 @@ let
     run_app_quiet "$INSTALL_TARGET" dev
     run_app_quiet "$INSTALL_TARGET" test
     run_app_quiet "$INSTALL_TARGET" build
-    run_app_quiet "$INSTALL_TARGET" check
+    BASIC_CHECK_DRIFT="$WORKDIR/basic-check-drift.log"
+    set +e
+    (cd "$INSTALL_TARGET" && nix run path:.#check > "$BASIC_CHECK_DRIFT" 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected check to fail when discovery artifacts are missing"
+    fi
+    assert_contains "$BASIC_CHECK_DRIFT" "discovery artifacts are out of date"
+    (cd "$INSTALL_TARGET" && nix run path:.#check -- --refresh-discovery >/dev/null)
+    (cd "$INSTALL_TARGET" && nix run path:.#check >/dev/null)
+    assert_file_exists "$INSTALL_TARGET/docs/repo-index.json"
+    assert_file_exists "$INSTALL_TARGET/docs/repo-map.md"
     run_app_quiet "$INSTALL_TARGET" ci --summary
     assert_app_missing "$INSTALL_TARGET" "framework::install"
     assert_app_missing "$INSTALL_TARGET" "framework::prompt-plan"
