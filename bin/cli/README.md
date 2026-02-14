@@ -23,7 +23,7 @@ mfm_cli/
 │   ├── commands/
 │   │   ├── mod.rs         # Top-level clap CLI + dispatch
 │   │   ├── result.rs      # Shared command result/error types
-│   │   ├── keystore/      # `keystore` subcommands (import, list, delete)
+│   │   ├── keystore/      # `keystore` subcommands (import, list, delete, tx-sign, tx-send-raw)
 │   │   └── run/           # `run` subcommands
 │   ├── support/
 │   │   ├── input.rs       # Input prompts/password helpers
@@ -175,6 +175,68 @@ mfm_cli keystore delete [OPTIONS] (<ID> | --by-label <LABEL>)
   ```sh
   mfm_cli keystore delete --by-label "my-main-wallet" --yes
   ```
+
+### `keystore tx-sign`
+
+Signs an EIP-1559 transaction payload using a key already stored in the keystore and writes the signed raw transaction to a file.
+
+The command output includes metadata only (`from`, `to`, `nonce`, `chain_id`, `tx_type`, `payload_hash`, `out_path`) and intentionally excludes raw tx hex and signature bytes.
+
+**Usage:**
+```sh
+mfm_cli keystore tx-sign [OPTIONS]
+```
+
+**Required options:**
+- Key selector: `--id <UUID>` or `--by-label <LABEL>`
+- `--to <ADDRESS>`
+- `--value-wei <DEC_OR_0X_HEX>`
+- `--chain-id <U64>`
+- `--nonce <U64>`
+- `--max-fee-per-gas <DEC_OR_0X_HEX>`
+- `--max-priority-fee-per-gas <DEC_OR_0X_HEX>`
+- `--gas-limit <U64>`
+- `--out <PATH>`
+
+**Optional options:**
+- `--data <0xHEX>` (default: `0x`)
+- `--keystore <PATH>`
+
+**Example:**
+```sh
+mfm_cli --output-format json keystore tx-sign \
+  --by-label "my-main-wallet" \
+  --to 0x1111111111111111111111111111111111111111 \
+  --value-wei 1000000000000000 \
+  --chain-id 31337 \
+  --nonce 0 \
+  --max-fee-per-gas 2000000000 \
+  --max-priority-fee-per-gas 1000000000 \
+  --gas-limit 21000 \
+  --out /tmp/signed.tx
+```
+
+### `keystore tx-send-raw`
+
+Submits a signed raw transaction from file using `eth_sendRawTransaction`.
+
+The command output includes `tx_hash`, `rpc_url_host`, and `submitted_at`; it does not print raw tx payload contents.
+
+**Usage:**
+```sh
+mfm_cli keystore tx-send-raw --in <PATH> [--rpc-url <URL>]
+```
+
+**Key options:**
+- `--in <PATH>`: file containing 0x-prefixed raw signed tx hex
+- `--rpc-url <URL>`: JSON-RPC URL (falls back to `MFM_EVM_RPC_URL`)
+
+**Example:**
+```sh
+mfm_cli --output-format json keystore tx-send-raw \
+  --rpc-url http://127.0.0.1:8545 \
+  --in /tmp/signed.tx
+```
 
 ## Run Commands (Experimental)
 

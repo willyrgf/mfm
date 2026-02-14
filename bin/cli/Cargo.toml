@@ -3,6 +3,9 @@ name = "mfm"
 version = "0.1.29"
 edition = "2021"
 
+[features]
+parity-tests = []
+
 [dependencies]
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -28,11 +31,15 @@ uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 zeroize = "1.7.0"
+alloy-primitives = { workspace = true, features = ["k256"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+k256 = { version = "0.13.0", features = ["ecdsa"] }
 
 [dev-dependencies]
 tempfile = "3.0"
 assert_cmd = "2.0"
 predicates = "3.0"
+rand = { workspace = true }
 
 [[bin]]
 name = "mfm_cli"

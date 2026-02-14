@@ -218,6 +218,7 @@
           "parity-rest-api-smoke"
           "parity-evm-reth"
           "parity-portfolio-tracker-reth"
+          "parity-keystore-reth-tx-sign-send"
           "parity-evm-helios-smoke"
         ];
       };
@@ -458,6 +459,34 @@
 
           LOGFILE=$(artifact_path "parity-portfolio-tracker-reth.log")
           log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_portfolio_tracker_reth_mock_erc20
+        '';
+      };
+
+      parity-keystore-reth-tx-sign-send = {
+        description = "Parity: keystore CLI import/sign/send raw tx on reth";
+        env = {
+          AUTO_STOP_CONFLICTING = "1";
+        };
+        fixtures = {
+          services = [
+            {
+              name = "reth";
+              profile = "test";
+              logName = "reth-keystore-cli.log";
+            }
+          ];
+          artifacts = {
+            logs = true;
+            prefix = "parity-keystore-reth-tx-sign-send";
+          };
+        };
+        run = ''
+          eval "$($SLOT_INFO)"
+
+          export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
+
+          LOGFILE=$(artifact_path "parity-keystore-reth-tx-sign-send.log")
+          log_capture "$LOGFILE" -- cargo nextest run -p mfm --features parity-tests --test parity_keystore_reth_tx_send
         '';
       };
 

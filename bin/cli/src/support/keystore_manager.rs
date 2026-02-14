@@ -1,5 +1,7 @@
+use crate::commands::result::CommandError;
 use mfm_op_keystore::{Keystore, KeystoreConfig};
 use std::path::PathBuf;
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 const ENV_PASSWORD_FILE: &str = "MFM_KEYSTORE_PASSWORD_FILE";
@@ -103,7 +105,9 @@ impl KeystoreManager {
         }
 
         if let Ok(password) = std::env::var(ENV_PASSWORD) {
-            eprintln!("Warning: {ENV_PASSWORD} may expose secrets; prefer {ENV_PASSWORD_FILE}.");
+            tracing::warn!(
+                "{ENV_PASSWORD} may expose secrets; prefer {ENV_PASSWORD_FILE} for non-interactive use"
+            );
             return Ok(Some(Zeroizing::new(password)));
         }
 
@@ -117,5 +121,42 @@ impl KeystoreManager {
             return Err(format!("Password file at '{path}' was empty").into());
         }
         Ok(Zeroizing::new(trimmed.to_string()))
+    }
+
+    pub fn resolve_key_id(
+        keystore: &Keystore,
+        id: Option<&str>,
+        by_label: Option<&str>,
+    ) -> Result<Uuid, CommandError> {
+        match (id, by_label) {
+            (Some(_), Some(_)) => Err(CommandError::missing_argument(
+                "Specify exactly one key selector: --id or --by-label",
+            )),
+            (None, None) => Err(CommandError::missing_argument(
+                "Must specify one key selector: --id or --by-label",
+            )),
+            (Some(raw), None) => {
+                Uuid::parse_str(raw).map_err(|_| CommandError::invalid_uuid("Invalid UUID format"))
+            }
+            (None, Some(label)) => {
+                let keys = keystore
+                    .list_keys()
+                    .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
+                let matching_keys: Vec<_> = keys
+                    .iter()
+                    .filter(|k| k.alias.as_deref() == Some(label))
+                    .collect();
+
+                match matching_keys.len() {
+                    0 => Err(CommandError::key_not_found(format!(
+                        "No key found with label: {label}"
+                    ))),
+                    1 => Ok(matching_keys[0].id),
+                    _ => Err(CommandError::ambiguous_label(format!(
+                        "Multiple keys found with label: {label}"
+                    ))),
+                }
+            }
+        }
     }
 }
