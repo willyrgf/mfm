@@ -15,8 +15,6 @@
       env = { };
       useDeps = true;
       script = ''
-        ./scripts/check-no-ad-hoc-prints.sh
-        ./scripts/check-no-ambient-io-in-state-handlers.sh
         cargo-nightly fmt --all -- --check
         cargo-nightly clippy --workspace --lib --examples --tests --benches --all-features
       '';

@@ -1,7 +1,7 @@
 # Three-Tier Thin-Layer Alignment Audit
 
-Date: 2026-02-14
-Status: Deep review enforcing three-tier model (bins thin -> ops thin -> states reusable)
+Date: 2026-02-14 (updated)
+Status: Progress checkpoint; Phase 2 complete, expand() boundary verified clean, utility duplication unchanged
 
 ## 0. Architectural Vision (Three-Tier Model)
 
@@ -39,7 +39,7 @@ The three-tier model is not an aspirational refactoring goal; it is a **repo-wid
 4. **Binaries are the shell.** `bin/cli` and `bin/rest-api` parse user intent, invoke the op/pipeline catalog, and render output. They never reach past the op boundary.
 
 This model guarantees:
-- **New ops compose existing behavior.** A DeFi op needing balance reads wires the same `EthBalanceState` and `Erc20BalanceState` that `portfolio_tracker` uses.
+- **New ops compose existing behavior.** A DeFi op needing balance reads wires the same `NativeBalanceState` and `TokenBalanceState` that `portfolio_tracker` uses.
 - **Behavioral changes propagate.** Fixing a receipt-polling edge case in the shared `EvmReceiptPollState` fixes every op that polls receipts.
 - **Testing is layered.** Utility functions get pure unit tests, states get IO-mocked execute tests, ops get graph-wiring tests, and integration tests validate end-to-end pipelines.
 
@@ -108,9 +108,10 @@ Audited surfaces:
 - REST routes: 9
 - Feature IDs: 7
 - Registered runtime ops: 14
-- Shared reusable state implementations in `ops/common/src/states/`: 7
-- Op-local state implementations across op crates: 13
+- Shared reusable state implementations in `ops/common/src/states/`: 9
+- Op-local state implementations across op crates: 11
 - Total state implementations: 20
+- Shared state modules: 4 (`evm.rs`, `evm_dcv.rs`, `keystore_admin.rs`, `meta.rs`)
 
 Primary entry/registry evidence:
 
@@ -166,19 +167,21 @@ REST summary: 9/9 Aligned. Fully thin.
 | `keystore_import` | Thin | 1 | 1 (`KeystoreImportState`) | 0 | Aligned | `keystore-admin-op/src/lib.rs:101` |
 | `keystore_list` | Thin | 1 | 1 (`KeystoreListState`) | 0 | Aligned | `keystore-admin-op/src/lib.rs:160` |
 | `keystore_delete` | Thin | 1 | 1 (`KeystoreDeleteState`) | 0 | Aligned | `keystore-admin-op/src/lib.rs:229` |
-| `keystore_tx_sign` | Mixed | 1 | 0 | 1 (`TxSignState`) | Partially aligned | `keystore-tx-op/src/lib.rs:113` |
-| `keystore_tx_send_raw` | Mixed | 1 | 0 | 1 (`TxSendRawState`) | Partially aligned | `keystore-tx-op/src/lib.rs:191` |
+| `keystore_tx_sign` | Mixed | 1 | 0 | 1 (`TxSignState`) | Partially aligned | `keystore-tx-op/src/lib.rs:129` |
+| `keystore_tx_send_raw` | Mixed | 1 | 0 | 1 (`TxSendRawState`) | Partially aligned | `keystore-tx-op/src/lib.rs:207` |
 | `evm_read` | Thin | 2 | 2 (`ReadU64HexState` x2) | 0 | Aligned | `evm-read-op/src/lib.rs:61` |
-| `evm_contract_from_nix` | Mixed | 1 | 0 | 1 (`ContractFromNixState`) | Partially aligned | `evm-write-op/src/lib.rs:1223` |
-| `evm_deploy` | Mixed | 1 | 0 | 1 (`DeployState`) | Partially aligned | `evm-write-op/src/lib.rs:1345` |
-| `evm_configure` | Mixed | 1 | 0 | 1 (`ConfigureState`) | Partially aligned | `evm-write-op/src/lib.rs:1525` |
-| `evm_validate` | Mixed | 1 | 0 | 1 (`ValidateState`) | Partially aligned | `evm-write-op/src/lib.rs:1741` |
+| `evm_contract_from_nix` | Mixed | 1 | 0 | 1 (`ContractFromNixState`) | Partially aligned | `evm-write-op/src/lib.rs:1254` |
+| `evm_deploy` | Mixed | 1 | 0 | 1 (`DeployState`) | Partially aligned | `evm-write-op/src/lib.rs:1384` |
+| `evm_configure` | Mixed | 1 | 0 | 1 (`ConfigureState`) | Partially aligned | `evm-write-op/src/lib.rs:1560` |
+| `evm_validate` | Mixed | 1 | 0 | 1 (`ValidateState`) | Partially aligned | `evm-write-op/src/lib.rs:1777` |
 | `evm_deploy_configure_validate` | Thin | 3 (composed) | 0 (delegates to child ops) | 0 | Aligned | `evm-deploy-configure-validate-op/src/lib.rs:26` |
-| `portfolio_tracker` | Mixed | 5 | 2 (`ReadU64HexState` x2) | 3 | Partially aligned | `portfolio-tracker-op/src/lib.rs:349` |
-| `proof` | Mixed | 3 | 0 | 3 | Partially aligned | `proof-op/src/lib.rs:116` |
-| `nix_app` | Mixed | 1 | 0 | 1 (`NixAppState`) | Partially aligned | `nix-app-op/src/lib.rs:84` |
+| `portfolio_tracker` | Mixed | 4+ | 4 (`ReadU64HexState` x2, `NativeBalanceState`, `TokenBalanceState` xN) | 1 (`WriteSnapshotState`) | Partially aligned | `portfolio-tracker-op/src/lib.rs:265` |
+| `proof` | Mixed | 3 | 0 | 3 | Partially aligned | `proof-op/src/lib.rs:132` |
+| `nix_app` | Mixed | 1 | 0 | 1 (`NixAppState`) | Partially aligned | `nix-app-op/src/lib.rs:100` |
 
-Tier 2 summary: 5/14 ops are Thin (using only shared states or pure composition). 9/14 are Mixed (delegate to op-local states that should be extracted).
+Tier 2 summary: 5/14 ops are Thin (using only shared states or pure composition). 9/14 are Mixed (delegate to at least one op-local state). All 14/14 expand() methods are structurally thin (config validation + graph wiring only; zero business logic in expand).
+
+Note: all expand() methods pass the op-expand boundary check (no `.await`, no file/network IO, no ambient side effects in expand). The "Mixed" rating reflects op-local state usage, not expand() thickness.
 
 ### 4.3 Tier 3: State Layer (Target: Thick, Reusable, Single-Responsibility)
 
@@ -186,81 +189,89 @@ Tier 2 summary: 5/14 ops are Thin (using only shared states or pure composition)
 
 | State | Module | Responsibility | Used By | Reuse Count |
 |---|---|---|---|---:|
-| `ReadHexStringState` | `evm.rs` | Execute JSON-RPC call, parse hex string response | evm-read-op, portfolio-tracker-op | 2 |
-| `ReadU256HexState` | `evm.rs` | Execute JSON-RPC call, parse U256 hex response | evm-read-op, portfolio-tracker-op | 2 |
-| `EthCallState` | `evm.rs` | Execute `eth_call` with configurable response decoding | evm-read-op, portfolio-tracker-op | 2 |
-| `ReadU64HexState` | `evm.rs` | Execute JSON-RPC call, parse u64 hex with optional validation | evm-read-op, portfolio-tracker-op | 2+ |
-| `KeystoreImportState` | `keystore_admin.rs` | Import key into keystore via local IO | keystore-admin-op | 1 |
-| `KeystoreListState` | `keystore_admin.rs` | List keystore keys via local IO | keystore-admin-op | 1 |
-| `KeystoreDeleteState` | `keystore_admin.rs` | Delete keystore key via local IO | keystore-admin-op | 1 |
+| `ReadHexStringState` | `evm.rs:77` | Execute JSON-RPC call, parse hex string response | evm-read-op, portfolio-tracker-op | 2 |
+| `ReadU256HexState` | `evm.rs:127` | Execute JSON-RPC call, parse U256 hex response | evm-read-op, portfolio-tracker-op | 2 |
+| `EthCallState` | `evm.rs:185` | Execute `eth_call` with configurable response decoding | evm-read-op, portfolio-tracker-op | 2 |
+| `ReadU64HexState` | `evm.rs:265` | Execute JSON-RPC call, parse u64 hex with optional validation | evm-read-op, portfolio-tracker-op | 2+ |
+| `NativeBalanceState` | `evm.rs:445` | Fetch native ETH balance at pinned block | portfolio-tracker-op | 1 |
+| `TokenBalanceState` | `evm.rs:517` | Fetch ERC-20 balance with decimals resolution | portfolio-tracker-op | 1 |
+| `KeystoreImportState` | `keystore_admin.rs:138` | Import key into keystore via local IO | keystore-admin-op | 1 |
+| `KeystoreListState` | `keystore_admin.rs:215` | List keystore keys via local IO | keystore-admin-op | 1 |
+| `KeystoreDeleteState` | `keystore_admin.rs:291` | Delete keystore key via local IO | keystore-admin-op | 1 |
 
-Shared states summary: 7 implementations. EVM read states have cross-op reuse (2+ ops each). Keystore admin states are shared-located but single-op consumers.
+Shared states summary: 9 implementations (was 7). EVM read states have cross-op reuse (2+ ops each). `NativeBalanceState` and `TokenBalanceState` were extracted from portfolio-tracker-op (Phase 2 complete). Keystore admin states are shared-located but single-op consumers.
+
+Shared support modules (no State impls, but shared across states):
+- `meta.rs`: `StateMeta` factory functions (`fetch_data()`, `validate()`, `pure()`, `config()`, `apply_side_effect()`, `execute()`). Used by all shared states for consistent metadata construction.
+- `evm_dcv.rs`: Shared pure functions for the deploy-configure-validate pipeline (`parse_abi`, `normalize_hex_str`, `hex_to_bytes`, `bytes_to_hex_prefixed`, `parse_value_wei_to_hex`, etc.). Contains config types (`ContractArtifactConfig`, `ConfigureCallConfig`, `ReadAssertionConfig`, `EventAssertionConfig`) and validation helpers. No State implementations.
 
 #### Op-Local States (candidates for extraction)
 
 | State | Op Crate | Responsibility | Extractable | Target Shared Module |
 |---|---|---|---|---|
-| `TxSignState` | keystore-tx-op | Sign tx via local IO, emit event | Yes | `states/keystore_tx.rs` |
-| `TxSendRawState` | keystore-tx-op | Read file + submit raw tx via RPC | Yes | `states/keystore_tx.rs` |
-| `ContractFromNixState` | evm-write-op | Adapt nix output to EVM contract artifact | Yes | `states/evm.rs` (artifact parsing) |
-| `DeployState` | evm-write-op | Build deploy payload, sign, submit, poll receipt | Yes (decompose) | `states/evm_write.rs` |
-| `ConfigureState` | evm-write-op | Encode function calls, submit txs, collect receipts | Yes (decompose) | `states/evm_write.rs` |
-| `ValidateState` | evm-write-op | Verify chain ID, read/event assertions | Yes (decompose) | `states/evm_write.rs` |
-| `ReadEthBalanceState` | portfolio-tracker-op | Fetch native ETH balance at pinned block | Yes | `states/evm.rs` |
-| `ReadErc20BalanceState` | portfolio-tracker-op | Fetch ERC-20 balance with decimals resolution | Yes | `states/evm.rs` |
-| `WriteSnapshotState` | portfolio-tracker-op | Aggregate balances into output artifact | Partially | Keep op-local (domain-specific) |
-| `ReadFactsState` | proof-op | Read input facts from namespace | Yes | `states/io.rs` |
-| `ApplySideEffectState` | proof-op | Idempotent side effect with event emission | Yes | `states/side_effect.rs` |
-| `WriteOutputState` | proof-op | Assemble output artifact | Partially | Keep op-local (domain-specific) |
-| `NixAppState` | nix-app-op | Execute nix program with optional preflight | Partially | `states/nix.rs` |
+| `TxSignState` | keystore-tx-op:260 | Sign tx via local IO, emit event | Yes | `states/keystore_tx.rs` |
+| `TxSendRawState` | keystore-tx-op:335 | Read file + submit raw tx via RPC | Yes | `states/keystore_tx.rs` |
+| `ContractFromNixState` | evm-write-op:1294 | Adapt nix output to EVM contract artifact | Yes | `states/evm.rs` (artifact parsing) |
+| `DeployState` | evm-write-op:1449 | Build deploy payload, sign, submit, poll receipt | Yes (decompose) | `states/evm_write.rs` |
+| `ConfigureState` | evm-write-op:1660 | Encode function calls, submit txs, collect receipts | Yes (decompose) | `states/evm_write.rs` |
+| `ValidateState` | evm-write-op:1856 | Verify chain ID, read/event assertions | Yes (decompose) | `states/evm_write.rs` |
+| `WriteSnapshotState` | portfolio-tracker-op:377 | Aggregate balances into output artifact | Partially | Keep op-local (domain-specific) |
+| `ReadFactsState` | proof-op:192 | Read input facts from namespace | Yes | `states/io.rs` |
+| `ApplySideEffectState` | proof-op:230 | Idempotent side effect with event emission | Yes | `states/side_effect.rs` |
+| `WriteOutputState` | proof-op:304 | Assemble output artifact | Partially | Keep op-local (domain-specific) |
+| `NixAppState` | nix-app-op:190 | Execute nix program with optional preflight | Partially | `states/nix.rs` |
 
-Op-local states summary: 13 implementations. Of these, 8 are clearly extractable to shared modules, 3 are partially extractable (domain-specific but with reusable patterns), and 2 should remain op-local (genuinely domain-specific aggregation/output).
+Op-local states summary: 11 implementations (was 13; 2 extracted in Phase 2). Of these, 6 are clearly extractable to shared modules, 3 are partially extractable (domain-specific but with reusable patterns), and 2 should remain op-local (genuinely domain-specific aggregation/output).
 
 ## 5. State Reuse Ratio
 
-| Metric | Count |
-|---|---:|
-| Total state implementations | 20 |
-| Shared (in `ops/common/src/states/`) | 7 |
-| Op-local (in individual op crates) | 13 |
-| Shared ratio | 35% |
-| Target shared ratio | 80%+ |
-| States with cross-op reuse today | 4 (EVM read states) |
+| Metric | Previous | Current |
+|---|---:|---:|
+| Total state implementations | 20 | 20 |
+| Shared (in `ops/common/src/states/`) | 7 | 9 |
+| Op-local (in individual op crates) | 13 | 11 |
+| Shared ratio | 35% | 45% |
+| Target shared ratio | 80%+ | 80%+ |
+| States with cross-op reuse today | 4 (EVM read states) | 6 (EVM read + balance states) |
 
-Current composition: op-local states dominate at 65%. The three-tier model requires inverting this ratio so shared states become the dominant composition unit.
+Current composition: op-local states still dominate at 55%. The shared ratio improved from 35% to 45% through Phase 2 extraction (portfolio balance states). The three-tier model requires further extraction to reach the 80%+ target.
 
 ## 6. Findings (Ordered by Severity)
 
 ### High
 
-1. `B7` Op-local states dominate composition; ops are not thin enough.
-- Impact: 9 of 14 ops use op-local states instead of shared states. Business logic is locked inside individual op crates and cannot be reused across operations.
-- Evidence: `crates/ops/evm-write-op/src/lib.rs` contains 4 op-local states (~1400 lines of execute logic). `crates/ops/portfolio-tracker-op/src/lib.rs` contains 3 op-local states. `crates/ops/proof-op/src/lib.rs` contains 3 op-local states.
+1. `B7` Op-local states still dominate composition.
+- Impact: 9 of 14 ops use at least one op-local state. Business logic in evm-write-op, proof-op, keystore-tx-op, and nix-app-op cannot be reused across operations.
+- Evidence: `crates/ops/evm-write-op/src/lib.rs` contains 4 op-local states (~1400 lines of execute logic). `crates/ops/proof-op/src/lib.rs` contains 3 op-local states. `crates/ops/keystore-tx-op/src/lib.rs` contains 2 op-local states.
+- Progress: portfolio-tracker-op reduced from 3 to 1 op-local state (Phase 2 complete).
 - Risk: new ops cannot compose existing behavior; duplicated patterns across ops; slower evolution toward composition-first architecture.
-- Remediation: extract op-local states to `crates/ops/common/src/states/` per the extraction plan in section 8.
+- Remediation: extract op-local states to `crates/ops/common/src/states/` per the extraction plan in section 8 (Phases 1, 3, 4 remaining).
 
 1b. `B8` Utility functions duplicated across crates instead of shared.
 - Impact: 11 pure functions are duplicated 2-3 times across `evm-write-op`, `common/states/evm_dcv.rs`, `common/local_io.rs`, and `common/keystore_tx.rs`. Maintenance changes must be applied in multiple places; bugs fixed in one copy persist in others; test coverage is fragmented (some copies tested, others not).
 - Evidence: see section 7 (Utility Duplication Audit) for full inventory.
+- Progress: no change since last audit; duplication baselines are enforced by guardrail but not yet reduced.
 - Risk: correctness drift between copies; duplicated test burden; slower onboarding.
-- Remediation: consolidate into shared utility modules per the plan in section 7.1.
+- Remediation: consolidate into shared utility modules per the plan in section 7.4.
 
 ### Medium
 
 2. `B6/B7` EVM write states are monolithic and not decomposed.
 - Impact: `DeployState`, `ConfigureState`, and `ValidateState` in `evm-write-op` each contain large execute methods with multiple responsibilities (payload construction, signing, receipt polling, validation). These should be decomposed into smaller reusable states.
-- Evidence: `crates/ops/evm-write-op/src/lib.rs:1448` (DeployState), `crates/ops/evm-write-op/src/lib.rs:1659` (ConfigureState), `crates/ops/evm-write-op/src/lib.rs:1855` (ValidateState).
+- Evidence: `crates/ops/evm-write-op/src/lib.rs:1449` (DeployState), `crates/ops/evm-write-op/src/lib.rs:1660` (ConfigureState), `crates/ops/evm-write-op/src/lib.rs:1856` (ValidateState).
 - Risk: receipt polling pattern is duplicated between deploy and configure; signing delegation is duplicated; validation patterns cannot be reused by other ops.
 
-3. `B6` Portfolio balance states are extractable EVM primitives.
-- Impact: `ReadEthBalanceState` and `ReadErc20BalanceState` implement generic EVM balance-reading patterns that any DeFi-related op would need.
-- Evidence: `crates/ops/portfolio-tracker-op/src/lib.rs:476` (ReadEthBalanceState), `crates/ops/portfolio-tracker-op/src/lib.rs` (ReadErc20BalanceState).
-- Risk: any future op needing balance queries would duplicate this logic.
+3. ~~`B6` Portfolio balance states are extractable EVM primitives.~~ **RESOLVED.**
+- `NativeBalanceState` (was `ReadEthBalanceState`) extracted to `crates/ops/common/src/states/evm.rs:445`.
+- `TokenBalanceState` (was `ReadErc20BalanceState`) extracted to `crates/ops/common/src/states/evm.rs:517`.
+- `portfolio_tracker` op now wires shared balance states; only `WriteSnapshotState` remains op-local (domain-specific aggregation, correctly kept local).
 
-4. Guardrails for ambient IO regressions are not yet automated.
-- Impact: no architecture test/check currently fails PRs when new state handlers reintroduce direct ambient IO outside intended transport.
-- Evidence: missing dedicated check surface; explicit local transport boundary is in `crates/ops/common/src/local_io.rs:47`.
-- Risk: regressions can land silently.
+4. ~~Guardrails for ambient IO regressions are not yet automated.~~ **PARTIALLY RESOLVED.**
+- Three guardrail scripts were implemented:
+  - `check-op-expand-boundary.sh`: enforces that `expand()` methods contain no `.await`, file/network IO, or ambient side effects. Currently passes for all 14 ops.
+  - `check-utility-single-source.sh`: enforces per-function duplication baselines (max 3 for hex, max 2 for RLP/ABI). Prevents duplication from increasing.
+  - `check-shared-state-ratio.sh`: enforces minimum shared-state ratio (baseline 45%). **Note: has a counting bug** where AWK skips non-test State impls in files where `#[cfg(test)]` attributes appear early for conditional imports (e.g. proof-op, evm-write-op). Reports 9/13 (69%) instead of the actual 9/20 (45%).
+- Remaining gap: these scripts are not yet integrated into CI. They should be converted to Rust-based checks or integrated into the Nix CI pipeline, and the counting bug must be fixed.
 
 5. Parity validation is still pending for this checkpoint.
 - Impact: architecture-level changes are landed but not yet validated through full parity gates.
@@ -270,8 +281,7 @@ Current composition: op-local states dominate at 65%. The three-tier model requi
 ### Low
 
 6. `B1` Minor validation logic in CLI layer.
-- Impact: `portfolio snapshot` validates JSON array in CLI; `run pipeline deploy-configure-validate` reads spec files in CLI.
-- Evidence: `bin/cli/src/commands/portfolio/snapshot.rs`, `bin/cli/src/commands/run/pipeline.rs`.
+- Impact: `portfolio snapshot` validates JSON array in CLI (`bin/cli/src/commands/portfolio/snapshot.rs:33`); `run pipeline deploy-configure-validate` reads spec files and parses JSON in CLI (`bin/cli/src/commands/run/pipeline.rs:115`).
 - Risk: low; these are input validation not business logic, but should ideally be pushed to ops.
 
 7. `B3` Keystore ops packaging naming ambiguity.
@@ -281,8 +291,13 @@ Current composition: op-local states dominate at 65%. The three-tier model requi
 
 8. `B7` Proof op states are generic patterns locked in a domain-specific crate.
 - Impact: `ApplySideEffectState` implements a generic idempotent-side-effect-with-event pattern. `ReadFactsState` implements generic namespace-read. Both are locked in proof-op.
-- Evidence: `crates/ops/proof-op/src/lib.rs:132`.
+- Evidence: `crates/ops/proof-op/src/lib.rs:192` (ReadFactsState), `crates/ops/proof-op/src/lib.rs:230` (ApplySideEffectState).
 - Risk: other ops needing idempotent side effects would duplicate the pattern.
+
+9. Test doubles (`NoopRecorder`, `CountingTransport`) are duplicated across op test modules instead of shared.
+- Impact: `NoopRecorder` is defined independently in 4 test modules (proof-op, nix-app-op, evm-read-op, evm.rs). `CountingTransport` is defined in 2 test modules (proof-op, evm-read-op).
+- Evidence: `proof-op/src/lib.rs:429`, `nix-app-op/src/lib.rs:393`, `evm-read-op/src/lib.rs:335`, `common/src/states/evm.rs:705`.
+- Risk: maintenance burden; inconsistent mock behavior.
 
 ## 7. Utility Duplication Audit (`B8`)
 
@@ -294,9 +309,9 @@ The three-tier model requires that pure utility functions live in shared modules
 
 | Function | Location 1 | Location 2 | Location 3 |
 |---|---|---|---|
-| `normalize_hex_str()` | `evm-write-op/src/lib.rs:354` | `common/states/evm_dcv.rs:158` (pub) | `common/local_io.rs:894` (different error type) |
-| `hex_to_bytes()` | `evm-write-op/src/lib.rs:372` | `common/states/evm_dcv.rs:176` (pub) | `common/local_io.rs:909` (different error type) |
-| `bytes_to_hex_prefixed()` | `evm-write-op/src/lib.rs:381` | `common/states/evm_dcv.rs:185` (pub) | `common/local_io.rs:905` |
+| `normalize_hex_str()` | `evm-write-op/src/lib.rs:354` | `common/states/evm_dcv.rs:156` (pub) | `common/local_io.rs:993` (different error type) |
+| `hex_to_bytes()` | `evm-write-op/src/lib.rs:372` | `common/states/evm_dcv.rs:174` (pub) | `common/local_io.rs:1008` (different error type) |
+| `bytes_to_hex_prefixed()` | `evm-write-op/src/lib.rs:381` | `common/states/evm_dcv.rs:183` (pub) | `common/local_io.rs:1004` |
 
 These are the most pervasive duplications. The three copies differ only in error return types (`String` vs `()`).
 
@@ -304,11 +319,11 @@ These are the most pervasive duplications. The three copies differ only in error
 
 | Function | Location 1 (`keystore_tx.rs`) | Location 2 (`local_io.rs`) | Variation |
 |---|---|---|---|
-| `trim_leading_zero_bytes()` | `keystore_tx.rs:486` | `local_io.rs:919` | Identical |
-| `u128_to_min_be()` | `keystore_tx.rs:508` | `local_io.rs:927` | Identical |
-| `usize_to_min_be()` | `keystore_tx.rs:561` | `local_io.rs:980` | Different: 0 returns `vec![]` vs `vec![0]` |
-| `rlp_encode_bytes()` | `keystore_tx.rs:522` | `local_io.rs:941` | Identical |
-| `rlp_encode_list()` | `keystore_tx.rs:541` | `local_io.rs:960` | `local_io` calls `rlp_encode_bytes()` on each item |
+| `trim_leading_zero_bytes()` | `keystore_tx.rs:486` | `local_io.rs:1018` | Identical |
+| `u128_to_min_be()` | `keystore_tx.rs:508` | `local_io.rs:1026` | Identical |
+| `usize_to_min_be()` | `keystore_tx.rs:561` | `local_io.rs:1079` | Different: 0 returns `vec![]` vs `vec![0]` |
+| `rlp_encode_bytes()` | `keystore_tx.rs:522` | `local_io.rs:1040` | Identical |
+| `rlp_encode_list()` | `keystore_tx.rs:541` | `local_io.rs:1059` | `local_io` calls `rlp_encode_bytes()` on each item |
 
 These are critical for EIP-1559 transaction encoding and are entirely untested in one copy.
 
@@ -317,14 +332,14 @@ These are critical for EIP-1559 transaction encoding and are entirely untested i
 | Function | Location 1 (`evm-write-op`) | Location 2 (`evm_dcv.rs`) | Notes |
 |---|---|---|---|
 | `parse_abi()` | `evm-write-op/src/lib.rs:316` | `common/states/evm_dcv.rs:118` (pub) | Identical logic, extracts constructor/functions/events |
-| `encode_params()` | `evm-write-op/src/lib.rs:563` | `common/states/evm_dcv.rs:249` | evm-write-op version is more complete (handles dynamic types) |
-| `parse_value_wei_to_hex()` | `evm-write-op/src/lib.rs:695` | `common/states/evm_dcv.rs:388` (pub) | Identical |
+| `encode_params()` | `evm-write-op/src/lib.rs:563` | `common/states/evm_dcv.rs:251` | evm-write-op version is more complete (handles dynamic types) |
+| `parse_value_wei_to_hex()` | `evm-write-op/src/lib.rs:695` | `common/states/evm_dcv.rs:397` (pub) | Identical |
 
 #### Signer Helpers
 
 | Function | Location 1 | Location 2 | Notes |
 |---|---|---|---|
-| `signer_address_hex()` | `common/local_io.rs:799` | `evm-write-op/src/lib.rs:1067` (`#[cfg(test)]`) | Test-only in evm-write-op |
+| `signer_address_hex()` | `common/local_io.rs:898` | `evm-write-op/src/lib.rs:1067` (`#[cfg(test)]`) | Test-only in evm-write-op |
 
 ### 7.2 Semantic Duplication (Same Pattern, Different Implementations)
 
@@ -335,7 +350,7 @@ Beyond copy-pasted functions, several patterns are reimplemented with slight var
 | 32-byte word encoding (address padding) | `encode_address_word()` in evm_dcv.rs:198; `parse_address_hex()` + manual padding in evm-write-op:401 | Same intent, different APIs |
 | Function selector computation | `function_selector()` in evm_dcv.rs:277 (keccak256 first 4 bytes); `selector()` in evm-write-op:597 | Same algorithm, different names |
 | `u64_to_min_be()` | `keystore_tx.rs:494` | Only one copy, but should be co-located with `u128_to_min_be()` |
-| ERC-20 selectors (hardcoded bytes) | `erc20_selector_balance_of()` in evm.rs:421; manual `[0x70,0xa0,0x82,0x31]` in portfolio-tracker-op | Constant duplication risk |
+| ERC-20 selectors (hardcoded bytes) | `erc20_selector_balance_of()` in evm.rs:420; manual `[0x70,0xa0,0x82,0x31]` in portfolio-tracker-op | Constant duplication risk (reduced: portfolio-tracker-op now imports from shared evm.rs) |
 
 ### 7.3 Test Coverage of Duplicated Functions
 
@@ -369,7 +384,7 @@ Error handling unification: all shared utility functions should return `Result<T
 
 ## 8. State Extraction Plan (Priority Order)
 
-### Phase 1: EVM Write States (Highest impact)
+### Phase 1: EVM Write States (Highest impact) -- PENDING
 
 Extract from `crates/ops/evm-write-op/src/lib.rs` into `crates/ops/common/src/states/evm_write.rs`:
 
@@ -382,19 +397,19 @@ Extract from `crates/ops/evm-write-op/src/lib.rs` into `crates/ops/common/src/st
 
 Exit criteria: `evm_deploy`, `evm_configure`, `evm_validate` ops become thin wrappers that only validate config and wire shared states in `expand()`.
 
-### Phase 2: Portfolio Balance States
+### Phase 2: Portfolio Balance States -- COMPLETE
 
-Extract from `crates/ops/portfolio-tracker-op/src/lib.rs` into `crates/ops/common/src/states/evm.rs`:
+Extracted from `crates/ops/portfolio-tracker-op/src/lib.rs` into `crates/ops/common/src/states/evm.rs`:
 
-| Current Op-Local State | Target Shared State | Notes |
+| Previous Op-Local State | New Shared State | Status |
 |---|---|---|
-| `ReadEthBalanceState` | `EthBalanceState` | Generic "read native balance at block" |
-| `ReadErc20BalanceState` | `Erc20BalanceState` | Generic "read ERC-20 balance with decimals" |
-| `WriteSnapshotState` | Keep op-local | Domain-specific aggregation; but extract artifact-write pattern to shared helper |
+| `ReadEthBalanceState` | `NativeBalanceState` (`evm.rs:445`) | Done |
+| `ReadErc20BalanceState` | `TokenBalanceState` (`evm.rs:517`) | Done |
+| `WriteSnapshotState` | Kept op-local (`portfolio-tracker-op/src/lib.rs:377`) | Done (correctly domain-specific) |
 
-Exit criteria: `portfolio_tracker` op wires shared EVM balance states and only keeps domain-specific aggregation logic.
+Result: `portfolio_tracker` op now wires 4 shared states (`ReadU64HexState` x2, `NativeBalanceState`, `TokenBalanceState` xN) plus 1 domain-specific op-local state. This validates the composition model: new ops needing balance reads can wire the same shared states.
 
-### Phase 3: Keystore TX States
+### Phase 3: Keystore TX States -- PENDING
 
 Extract from `crates/ops/keystore-tx-op/src/lib.rs` into `crates/ops/common/src/states/keystore_tx.rs`:
 
@@ -405,7 +420,7 @@ Extract from `crates/ops/keystore-tx-op/src/lib.rs` into `crates/ops/common/src/
 
 Exit criteria: `keystore_tx_sign` and `keystore_tx_send_raw` ops become as thin as the keystore-admin ops.
 
-### Phase 4: Generic Patterns
+### Phase 4: Generic Patterns -- PENDING
 
 Extract from `crates/ops/proof-op/src/lib.rs` into `crates/ops/common/src/states/`:
 
@@ -425,11 +440,11 @@ Exit criteria: proof-op and nix-app-op become thin wrappers wiring shared states
 
 ## 9. Target State After Extraction
 
-| Metric | Current | After Phase 1-4 + Utility Consolidation |
+| Metric | Current | After Phase 1,3,4 + Utility Consolidation |
 |---|---:|---:|
-| Shared state implementations | 7 | 18+ |
-| Op-local state implementations | 13 | 3-4 |
-| Shared ratio | 35% | 82%+ |
+| Shared state implementations | 9 | 18+ |
+| Op-local state implementations | 11 | 3-4 |
+| Shared ratio | 45% | 82%+ |
 | Ops rated "Thin" | 5/14 | 12/14 |
 | Ops rated "Mixed" | 9/14 | 2/14 |
 | Duplicated utility functions | 11 (across 24 copies) | 0 (single canonical copy each) |
@@ -443,7 +458,7 @@ Exit criteria: proof-op and nix-app-op become thin wrappers wiring shared states
 - `expand()` validates config (which queries to enable) and wires 1-2 shared `ReadU64HexState` instances.
 - Zero op-local states. Zero business logic in the op crate.
 - All execution logic is in `crates/ops/common/src/states/evm.rs`.
-- Evidence: `crates/ops/evm-read-op/src/lib.rs:80`
+- Evidence: `crates/ops/evm-read-op/src/lib.rs:61`
 
 ### Exemplar: Thin Composed Op (evm_deploy_configure_validate)
 
@@ -459,6 +474,14 @@ Keystore admin ops are the reference for local-IO-backed flows:
 - States delegate to `local_call()` helper in shared module.
 - Evidence: `crates/ops/keystore-admin-op/src/lib.rs:101`
 
+### Exemplar: Mixed Op with Maximal Shared Reuse (portfolio_tracker)
+
+`portfolio_tracker` demonstrates the target pattern for ops with domain-specific output:
+- `expand()` wires 4 shared states (`ReadU64HexState` x2 for chain_id/block_number, `NativeBalanceState` for ETH balance, `TokenBalanceState` xN for ERC-20 balances) into a sequential chain.
+- Only `WriteSnapshotState` remains op-local because it performs domain-specific aggregation (assembling all balances into a snapshot artifact).
+- Evidence: `crates/ops/portfolio-tracker-op/src/lib.rs:265`
+- This is the target pattern: maximize shared state reuse, keep only genuinely non-reusable aggregation logic op-local.
+
 ## 11. Test Opportunities Enabled by Reusability
 
 The three-tier extraction and utility consolidation unlock test categories that are currently impossible, fragmented, or impractical. This section catalogs what becomes testable and estimates the scope.
@@ -467,18 +490,21 @@ The three-tier extraction and utility consolidation unlock test categories that 
 
 | Test Category | Files | Approx. Tests | Coverage |
 |---|---:|---:|---|
-| Integration tests (full pipelines) | 7 | ~40 scenarios | Thorough for happy paths |
-| CLI e2e / output tests | 8 | ~100 invocations | Good |
-| Shared state unit tests (`evm.rs`) | 1 | ~30 | Strong for EVM read states |
-| Op-level unit tests (scattered `#[cfg(test)]`) | 5 | ~30 | Sparse, per-op only |
-| Utility function unit tests | 2 | ~10 | Fragmented; many functions untested |
-| State execute tests (non-EVM) | 0 | 0 | **Gap**: evm_dcv, keystore_admin, all op-local states |
-| Cross-op composition tests | 0 | 0 | **Gap**: impossible while states are op-local |
+| CLI e2e / output tests | 8 | ~67 | Good (`cli_tests`, `json_output_integration`, `keystore_integration`, etc.) |
+| Shared state unit tests (`evm.rs`) | 1 | 7 | Covers EVM read states; `NativeBalanceState`/`TokenBalanceState` not yet unit-tested |
+| Shared meta tests (`meta.rs`) | 1 | 9 | Strong (all factory functions covered) |
+| Common module tests (ctx, idempotency, keystore_tx, local_io, rpc) | 5 | ~21 | Moderate |
+| Op-level unit tests (scattered `#[cfg(test)]`) | 7 | ~44 | evm-write-op has 14, proof-op has 5, nix-app-op has 14, portfolio-tracker-op has 5 |
+| State execute tests (non-EVM) | 0 | 0 | **Gap**: keystore_admin, all op-local states have no isolated execute tests |
+| Cross-op composition tests | 0 | 0 | **Gap**: impossible while most states are op-local |
+
+Total test functions: ~148 (81 in ops crates, 67 in CLI tests).
 
 Key test infrastructure already in place:
 - `test_support.rs` provides `MemEventStore`, `MemArtifactStore`, `MapContext`, pipeline launch/resume helpers.
-- `FixedIo` (in `evm.rs` tests) provides a HashMap-based IO double for mocking JSON-RPC responses.
-- `CountingTransport` / `MockEvmTransport` / `EchoTransport` exist per-op but are not shared.
+- `FixedIo` (in `evm.rs:660` tests) provides a HashMap-based IO double for mocking JSON-RPC responses.
+- `NoopRecorder` duplicated in 4 test modules (proof-op, nix-app-op, evm-read-op, evm.rs).
+- `CountingTransport` duplicated in 2 test modules (proof-op, evm-read-op).
 
 ### 11.2 New Tests Enabled: Utility Unit Tests (est. 60-80 new tests)
 
@@ -524,8 +550,6 @@ Extracting op-local states to shared modules makes them independently testable w
 | `EvmReceiptPollState` | Success receipt, reverted receipt, timeout, null receipt retry | Execute unit |
 | `EvmMulticallState` | Multi-call encoding, per-call receipt handling, partial failure | Execute unit |
 | `EvmAssertionState` | Read assertion pass/fail, event assertion pass/fail, chain ID mismatch | Execute unit |
-| `EthBalanceState` | Valid balance, zero balance, block pinning, RPC error | Execute unit |
-| `Erc20BalanceState` | Balance with decimals, decimals call failure fallback, zero balance | Execute unit |
 | `KeystoreTxSignState` | Sign with mock local IO, missing key error, invalid data error | Execute unit |
 | `KeystoreTxSendRawState` | Submit via mock RPC, RPC rejection, already-known tx | Execute unit |
 | `IdempotentSideEffectState` | First execution, idempotent retry, side effect failure | Execute unit |
@@ -538,20 +562,22 @@ Each state above enables 3-6 test cases covering: happy path, input validation f
 
 | State | New Tests Enabled | Why |
 |---|---|---|
+| `NativeBalanceState` | 3-4 execute tests | Newly extracted; currently 0 state-level tests |
+| `TokenBalanceState` | 4-6 execute tests | Newly extracted; currently 0 state-level tests; decimals fallback path |
 | `KeystoreImportState` | 4-6 execute tests | Currently 0 state-level tests despite being in shared module |
 | `KeystoreListState` | 3-4 execute tests | Currently 0 state-level tests |
 | `KeystoreDeleteState` | 3-4 execute tests | Currently 0 state-level tests |
-| `evm_dcv.rs` states | 8-12 execute tests | Currently 0 tests; complex validation logic |
+| `evm_dcv.rs` helpers | 8-12 unit tests | Currently 0 tests; complex validation logic |
 
 ### 11.4 New Tests Enabled: Cross-Op Composition Tests (est. 15-25 new tests)
 
-These tests are **impossible today** because states are locked in their op crates. Once extracted:
+These tests are **impossible today** because most states are locked in their op crates. Once extracted:
 
 #### Scenario: Reuse across ops
 
 ```
-Test: "EthBalanceState used by portfolio_tracker AND a hypothetical airdrop_checker op"
-- Construct two different op configs that wire the same EthBalanceState
+Test: "NativeBalanceState used by portfolio_tracker AND a hypothetical airdrop_checker op"
+- Construct two different op configs that wire the same NativeBalanceState
 - Verify identical IO calls, identical context writes
 - Confirms the state is truly op-agnostic
 ```
@@ -569,7 +595,7 @@ Test: "EvmDeployState -> EvmReceiptPollState -> EvmAssertionState pipeline"
 #### Scenario: Mix-and-match from different domains
 
 ```
-Test: "EthBalanceState (from evm) + IdempotentSideEffectState (from generic)"
+Test: "NativeBalanceState (from evm) + IdempotentSideEffectState (from generic)"
 - Wire a balance check followed by an idempotent side effect
 - Verify the states compose without conflict
 - Confirms cross-domain composability
@@ -591,43 +617,44 @@ The extraction motivates standardizing the test doubles currently scattered acro
 | Current (Scattered) | Target (Shared in test_support.rs) | Benefit |
 |---|---|---|
 | `FixedIo` in `evm.rs` tests only | `FixedIo` in `test_support.rs` | Any state test can use IO mocking |
-| `NoopRecorder` in `evm.rs` tests | `NoopRecorder` in `test_support.rs` | Standard event recording in all state tests |
-| `CountingTransport` in evm-read-op | `CountingTransport` in `test_support.rs` | Call-count assertions available everywhere |
-| `MapContext` duplicated in evm.rs | Single `MapContext` in `test_support.rs` | Already exists but duplicate should be removed |
+| `NoopRecorder` in 4 test modules | `NoopRecorder` in `test_support.rs` | Standard event recording in all state tests |
+| `CountingTransport` in 2 test modules | `CountingTransport` in `test_support.rs` | Call-count assertions available everywhere |
+| `MapContext` in `test_support.rs` + 2 duplicates | Single `MapContext` in `test_support.rs` | Already exists; remove duplicates from `app/src/lib.rs:191` and `sdk/src/unstable.rs:780` |
 | No shared mock factory | `IoMockBuilder::new().method("eth_call", json!("0x...")).build()` | Declarative IO mock construction |
 
 ### 11.6 Test Scope Summary
 
 | Test Category | Current | After Extraction | Delta |
 |---|---:|---:|---:|
-| Utility unit tests | ~10 | 70-90 | +60-80 |
-| State execute unit tests | ~30 (evm.rs only) | 80-100 | +50-70 |
+| Utility unit tests | ~21 | 80-100 | +60-80 |
+| State execute unit tests | ~7 (evm.rs only) | 60-80 | +50-70 |
 | Cross-op composition tests | 0 | 15-25 | +15-25 |
-| Integration tests | ~40 | ~40 (unchanged) | 0 |
-| **Total** | **~80** | **~205-255** | **+125-175** |
+| Op-level tests | ~44 | ~44 (unchanged) | 0 |
+| CLI tests | ~67 | ~67 (unchanged) | 0 |
+| **Total** | **~148** | **~270-320** | **+125-175** |
 
-The integration test count stays flat because those tests already cover end-to-end behavior. The gain is entirely in the lower layers: utility tests catch encoding bugs before they reach states, state tests catch logic bugs before they reach integration, and composition tests validate the wiring contract that ops declare.
+The op-level and CLI test counts stay flat because those tests already cover their respective layers. The gain is entirely in the lower layers: utility tests catch encoding bugs before they reach states, state tests catch logic bugs before they reach integration, and composition tests validate the wiring contract that ops declare.
 
 ### 11.7 Architecture Guard Tests (New Category)
 
 In addition to functional tests, the extraction enables structural tests that enforce the three-tier model in CI:
 
-1. **No ambient IO in states**: grep-based or AST-based check that state `execute()` methods never call `std::fs`, `std::net`, `tokio::fs`, etc. directly.
-2. **No business logic in op expand()**: verify that `expand()` methods contain only config validation + `StateGraph` assembly (no `.await`, no IO calls).
-3. **Utility single-source**: verify that functions in `hex.rs`, `rlp.rs`, `abi.rs` are not duplicated elsewhere (import-only).
-4. **Shared ratio threshold**: count state implementations in `ops/common/src/states/` vs op-local; fail if ratio drops below 80%.
+1. **No ambient IO in states**: grep-based or AST-based check that state `execute()` methods never call `std::fs`, `std::net`, `tokio::fs`, etc. directly. (Prototype exists in `check-op-expand-boundary.sh`; should be extended to cover state handlers.)
+2. **No business logic in op expand()**: verify that `expand()` methods contain only config validation + `StateGraph` assembly (no `.await`, no IO calls). (Implemented in `check-op-expand-boundary.sh`; currently passes all 14 ops.)
+3. **Utility single-source**: verify that functions in `hex.rs`, `rlp.rs`, `abi.rs` are not duplicated elsewhere (import-only). (Baseline enforcement in `check-utility-single-source.sh`; strict mode available via `MFM_UTILITY_STRICT=1`.)
+4. **Shared ratio threshold**: count state implementations in `ops/common/src/states/` vs op-local; fail if ratio drops below threshold. (Implemented in `check-shared-state-ratio.sh` with threshold 45%; needs counting bug fix for accurate measurement.)
 
 ## 12. Acceptance Criteria for Three-Tier Completion
 
 1. No business workflow logic in `bin/cli` or `bin/rest-api`.
-2. No business execution logic in op `expand()` methods; ops are config validation + state graph wiring only.
-3. Shared states in `crates/ops/common/src/states/` are the default composition unit (80%+ of all states).
+2. No business execution logic in op `expand()` methods; ops are config validation + state graph wiring only. **MET** (all 14 ops pass boundary check).
+3. Shared states in `crates/ops/common/src/states/` are the default composition unit (80%+ of all states). Current: 45%.
 4. Op-local states exist only for genuinely domain-specific, non-reusable aggregation/output logic.
-5. Every reusable pattern (receipt polling, balance reading, side effect idempotency, artifact writing) exists as a shared state.
+5. Every reusable pattern (receipt polling, balance reading, side effect idempotency, artifact writing) exists as a shared state. Balance reading: **MET**. Others: pending.
 6. State execution side effects routed through IO abstraction boundaries (no ambient IO).
-7. Architecture guard prevents ambient IO regressions in CI.
+7. Architecture guard prevents ambient IO regressions in CI. **PARTIALLY MET** (scripts exist but not in CI; counting bug in ratio script).
 8. CI parity gates (`check/test/basic/parity`) pass with no behavior regressions.
-9. Zero duplicated utility functions; all pure helpers consolidated into shared modules (`hex.rs`, `rlp.rs`, `abi.rs`, `evm_encoding.rs`).
+9. Zero duplicated utility functions; all pure helpers consolidated into shared modules (`hex.rs`, `rlp.rs`, `abi.rs`, `evm_encoding.rs`). Current: 11 functions with 24 copies.
 10. Shared test harness (`FixedIo`, `NoopRecorder`, `IoMockBuilder`) available in `test_support.rs` for all state-level tests.
 11. Utility unit test suite covers all consolidated functions (est. 70-90 tests).
-12. Every shared state has at least one `execute()` unit test using IO mocks.
+12. Every shared state has at least one `execute()` unit test using IO mocks. Current: only EVM read states have execute tests; newly extracted `NativeBalanceState` and `TokenBalanceState` need tests.
