@@ -27,6 +27,7 @@ let
   serviceApi = import ./service-api.nix {
     inherit pkgs appApi;
   };
+  discovery = import ./discovery.nix { inherit pkgs project; };
   process = import ./process.nix { inherit pkgs; };
   id = import ./id.nix { inherit pkgs; };
   processRegistry = import ./process-registry.nix { inherit pkgs project; };
@@ -46,6 +47,7 @@ in
   inherit fixtures;
   inherit appApi;
   inherit serviceApi;
+  inherit discovery;
   inherit (process) mkSignalHandler mkProcessManager;
   inherit (id) mkUniqueId resolveId;
   inherit (processRegistry)

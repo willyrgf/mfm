@@ -25,8 +25,38 @@ let
     echo "Summary"
     echo "------------------------------------------------------------"
 
+    _is_nonneg_int() {
+      case "''${1:-}" in
+        ""|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+      esac
+    }
+
+    _format_duration() {
+      local seconds="$1"
+      if ! _is_nonneg_int "$seconds"; then
+        echo "?"
+        return 0
+      fi
+      if [ "$seconds" -lt 60 ]; then
+        echo "''${seconds}s"
+      else
+        local mins=0
+        local secs=0
+        mins=$((seconds / 60))
+        secs=$((seconds % 60))
+        echo "''${mins}m ''${secs}s"
+      fi
+    }
+
     # Prefer summary.json if available
     SUMMARY_JSON=""
+    TIMING_TOTAL=""
+    TIMING_SETUP=""
+    TIMING_STEPS=""
+    TIMING_TEARDOWN=""
+    TIMING_ACCOUNTED=""
+    TIMING_UNTRACKED=""
     if [ -n "''${CI_ARTIFACTS_DIR:-}" ] && [ -f "$CI_ARTIFACTS_DIR/summary.json" ]; then
       SUMMARY_JSON="$CI_ARTIFACTS_DIR/summary.json"
     elif [ -n "$LOGFILE" ]; then
@@ -45,16 +75,39 @@ let
           empty
         end
       ' "$SUMMARY_JSON" 2>/dev/null || true
+
+      TIMING_FIELDS=$(${pkgs.jq}/bin/jq -r '
+        if (.timing and (.timing | type == "object")) then
+          [
+            (.timing.total_duration // ""),
+            (.timing.setup_duration // ""),
+            (.timing.steps_duration // ""),
+            (.timing.teardown_duration // ""),
+            (.timing.accounted_duration // ""),
+            (.timing.untracked_duration // "")
+          ] | @tsv
+        else
+          ""
+        end
+      ' "$SUMMARY_JSON" 2>/dev/null || true)
+      if [ -n "$TIMING_FIELDS" ]; then
+        IFS=$'\t' read -r TIMING_TOTAL TIMING_SETUP TIMING_STEPS TIMING_TEARDOWN TIMING_ACCOUNTED TIMING_UNTRACKED <<< "$TIMING_FIELDS"
+        if _is_nonneg_int "$TIMING_TOTAL"; then
+          DURATION="$TIMING_TOTAL"
+        fi
+      fi
     fi
 
-    if [ -n "$DURATION" ]; then
-      if [ "$DURATION" -lt 60 ] 2>/dev/null; then
-        echo "Total time: ''${DURATION}s"
-      else
-        MINS=$((DURATION / 60))
-        SECS=$((DURATION % 60))
-        echo "Total time: ''${MINS}m ''${SECS}s"
-      fi
+    if _is_nonneg_int "$DURATION"; then
+      echo "Total time: $(_format_duration "$DURATION")"
+    fi
+
+    if _is_nonneg_int "$TIMING_SETUP" \
+      && _is_nonneg_int "$TIMING_STEPS" \
+      && _is_nonneg_int "$TIMING_TEARDOWN" \
+      && _is_nonneg_int "$TIMING_ACCOUNTED" \
+      && _is_nonneg_int "$TIMING_UNTRACKED"; then
+      echo "INFO: Time breakdown setup=''${TIMING_SETUP}s steps=''${TIMING_STEPS}s teardown=''${TIMING_TEARDOWN}s accounted=''${TIMING_ACCOUNTED}s untracked=''${TIMING_UNTRACKED}s"
     fi
 
     if [ "$EXIT_CODE" -ne 0 ] 2>/dev/null; then

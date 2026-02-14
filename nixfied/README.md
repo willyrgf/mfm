@@ -59,9 +59,17 @@ nix run .#check
 nix run .#format
 ```
 
-Template defaults are safe no-ops: `dev`, `test`, `build`, and `check` print a
-placeholder and exit 0. `format` runs `nixfmt` over `*.nix` files in the repo.
-The CI pipeline is enabled and runs placeholder steps.
+Template defaults are safe no-ops for `dev`, `test`, and `build`.
+`check` first validates discovery artifacts (`docs/repo-index.json`,
+`docs/repo-map.md`) and then runs the project quality script.
+If artifacts are missing or stale, run:
+
+```bash
+nix run .#check -- --refresh-discovery
+```
+
+`format` runs `nixfmt` over `*.nix` files in the repo. The CI pipeline is
+enabled and runs placeholder steps.
 Replace each command in its file under `nixfied/project/`.
 
 ## App API contract
@@ -583,7 +591,9 @@ nix run .#ci -- --bg         # run in background via run registry
 ```
 
 The CI runner writes `summary.json` to the artifacts directory after each run,
-containing mode, exit code, and per-step results (name, status, duration).
+containing mode, exit code, per-step results (name, status, duration), and a
+`timing` block (`total_duration`, `setup_duration`, `steps_duration`,
+`teardown_duration`, `accounted_duration`, `untracked_duration`).
 
 CI environment variables available inside steps:
 - `CI_MODE`

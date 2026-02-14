@@ -167,27 +167,7 @@ let
                 CI_MODE="${resolvedDefaultMode}"
                 CI_SUMMARY=false
                 CI_BACKGROUND=false
-                CI_VERBOSE="''${CI_VERBOSE:-0}"
                 CI_STEP_ARGS=()
-
-                _ci_truthy() {
-                  case "''${1:-}" in
-                    1|true|TRUE|yes|YES|on|ON) return 0 ;;
-                    *) return 1 ;;
-                  esac
-                }
-
-                if _ci_truthy "$CI_VERBOSE"; then
-                  CI_VERBOSE=1
-                else
-                  CI_VERBOSE=0
-                fi
-
-                ci_debug() {
-                  if [ "$CI_VERBOSE" = "1" ]; then
-                    echo "DEBUG: $*" >&2
-                  fi
-                }
 
                 while [ "''$#" -gt 0 ]; do
                   case "''$1" in
@@ -197,10 +177,6 @@ let
                       ;;
                     --bg)
                       CI_BACKGROUND=true
-                      shift
-                      ;;
-                    --verbose|--debug)
-                      CI_VERBOSE=1
                       shift
                       ;;
                     --mode)
@@ -233,10 +209,6 @@ let
                 export CI_MODE
                 export CI_SUMMARY
                 export CI_STEP_ARGS
-                export CI_VERBOSE
-                if [ "$CI_VERBOSE" = "1" ]; then
-                  export NIXFIED_VERBOSE=1
-                fi
                 if [ -n "''${CI_ARTIFACTS_DIR:-}" ]; then
                   export CI_ARTIFACTS_DIR="''${CI_ARTIFACTS_DIR}"
                   case "$CI_ARTIFACTS_DIR" in
@@ -292,7 +264,7 @@ let
                   fi
 
                   if [ "$keep" -eq 1 ]; then
-                    ci_debug "CI artifacts kept at: $CI_ARTIFACTS_DIR"
+                    echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
                     return 0
                   fi
 
@@ -309,9 +281,6 @@ let
                 # Background mode: delegate to run registry and exit
                 if [ "$CI_BACKGROUND" = "true" ]; then
                   REEXEC_ARGS="--mode $CI_MODE --summary"
-                  if [ "$CI_VERBOSE" = "1" ]; then
-                    REEXEC_ARGS="$REEXEC_ARGS --verbose"
-                  fi
                   ${runRegistryScript} \
                     --name "ci-$CI_MODE" \
                     --bg \
@@ -345,7 +314,20 @@ let
 
                 _write_summary_json() {
                   local ec="$1"
+                  local total_duration="$2"
+                  local setup_duration="$3"
+                  local steps_duration="$4"
+                  local teardown_duration="$5"
+                  local accounted_duration=0
+                  local untracked_duration=0
                   local json_file="$CI_ARTIFACTS_DIR/summary.json"
+
+                  accounted_duration=$((setup_duration + steps_duration + teardown_duration))
+                  untracked_duration=$((total_duration - accounted_duration))
+                  if [ "$untracked_duration" -lt 0 ]; then
+                    untracked_duration=0
+                  fi
+
                   mkdir -p "$CI_ARTIFACTS_DIR"
                   {
                     echo "{"
@@ -359,7 +341,15 @@ let
                       printf "    {\"name\": \"%s\", \"status\": \"%s\", \"duration\": %s}" "$s_name" "$s_status" "$s_dur"
                     done
                     echo ""
-                    echo "  ]"
+                    echo "  ],"
+                    echo "  \"timing\": {"
+                    echo "    \"total_duration\": $total_duration,"
+                    echo "    \"setup_duration\": $setup_duration,"
+                    echo "    \"steps_duration\": $steps_duration,"
+                    echo "    \"teardown_duration\": $teardown_duration,"
+                    echo "    \"accounted_duration\": $accounted_duration,"
+                    echo "    \"untracked_duration\": $untracked_duration"
+                    echo "  }"
                     echo "}"
                   } > "$json_file"
                 }
@@ -369,10 +359,22 @@ let
                   local setup_rc=0
                   local teardown_rc=0
                   local step_rc=0
+                  local setup_start_time=0
+                  local setup_end_time=0
+                  local setup_duration=0
+                  local teardown_start_time=0
+                  local teardown_end_time=0
+                  local teardown_duration=0
+                  local steps_duration=0
+                  local pipeline_start_time=0
+                  local pipeline_end_time=0
+                  local pipeline_duration=0
                   STEPS=()
 
+                  pipeline_start_time=$(date +%s)
                   init_ci_artifacts
 
+                  setup_start_time=$(date +%s)
                   set +e
                   (
                     set -euo pipefail
@@ -380,6 +382,8 @@ let
                   )
                   setup_rc=$?
                   set -e
+                  setup_end_time=$(date +%s)
+                  setup_duration=$((setup_end_time - setup_start_time))
 
                   if [ "$setup_rc" -ne 0 ]; then
                     echo "ERROR: CI setup failed rc=$setup_rc" >&2
@@ -428,6 +432,7 @@ let
                       local STEP_DUR=0
                       STEP_END_TIME=$(date +%s)
                       STEP_DUR=$((STEP_END_TIME - STEP_START_TIME))
+                      steps_duration=$((steps_duration + STEP_DUR))
                       if [ "$step_rc" -eq 42 ]; then
                         _ci_record_step "$step" "skipped" "$STEP_DUR"
                       elif [ "$step_rc" -eq 0 ]; then
@@ -441,6 +446,7 @@ let
                     done
                   fi
 
+                  teardown_start_time=$(date +%s)
                   set +e
                   (
                     set -euo pipefail
@@ -448,6 +454,8 @@ let
                   )
                   teardown_rc=$?
                   set -e
+                  teardown_end_time=$(date +%s)
+                  teardown_duration=$((teardown_end_time - teardown_start_time))
                   if [ "$teardown_rc" -ne 0 ]; then
                     echo "ERROR: CI teardown failed rc=$teardown_rc" >&2
                     if [ "$exit_code" -eq 0 ]; then
@@ -455,8 +463,11 @@ let
                     fi
                   fi
 
+                  pipeline_end_time=$(date +%s)
+                  pipeline_duration=$((pipeline_end_time - pipeline_start_time))
+
                   # Write structured summary
-                  _write_summary_json "$exit_code"
+                  _write_summary_json "$exit_code" "$pipeline_duration" "$setup_duration" "$steps_duration" "$teardown_duration"
 
                   return "$exit_code"
                 }

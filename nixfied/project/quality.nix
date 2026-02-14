@@ -20,5 +20,22 @@
         cargo-nightly clippy --workspace --lib --examples --tests --benches --all-features
       '';
     };
+
+    discovery-refresh = {
+      description = "Regenerate discovery artifacts";
+      api = {
+        version = 1;
+        summary = "Refresh docs/repo-index.json and docs/repo-map.md";
+        details = "Runs the quality check command with --refresh-discovery so discovery artifacts are regenerated.";
+        usage = [ "nix run .#discovery-refresh" ];
+        examples = [ "nix run .#discovery-refresh" ];
+        category = "quality";
+      };
+      env = { };
+      useDeps = true;
+      script = ''
+        nix run .#check -- --refresh-discovery
+      '';
+    };
   };
 }

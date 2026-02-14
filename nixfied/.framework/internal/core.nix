@@ -9,6 +9,86 @@
 let
   commands = project.commands or { };
   commandNames = builtins.attrNames commands;
+  discovery = lib.discovery;
+  discoveryEnabled = discovery.enabled or true;
+  discoveryStrict = discovery.strict or true;
+  checkRefreshArg = discovery.refreshArg or "--refresh-discovery";
+  checkRefreshArgSpec = {
+    name = checkRefreshArg;
+    description = "Regenerate docs/repo-index.json and docs/repo-map.md before running checks.";
+  };
+
+  appendApiArg =
+    args: arg:
+    if builtins.any (item: (item.name or "") == (arg.name or "")) args then args else args ++ [ arg ];
+
+  augmentCheckApi =
+    api:
+    if api == null then
+      null
+    else
+      let
+        args0 = api.args or [ ];
+      in
+      api // { args = appendApiArg args0 checkRefreshArgSpec; };
+
+  wrapCheckScript =
+    baseScript: ''
+      DISCOVERY_REFRESH=0
+      PASS_ARGS=()
+
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = "${checkRefreshArg}" ]; then
+          DISCOVERY_REFRESH=1
+          shift
+          continue
+        fi
+
+        PASS_ARGS+=("$1")
+        shift
+      done
+
+      if [ "$DISCOVERY_REFRESH" -eq 1 ]; then
+        ${discovery.tool}/bin/nixfied-discovery-index --refresh
+      else
+        if [ "${if discoveryStrict then "1" else "0"}" = "1" ]; then
+          ${discovery.tool}/bin/nixfied-discovery-index --verify
+        else
+          if ! ${discovery.tool}/bin/nixfied-discovery-index --verify; then
+            echo "WARN: discovery drift detected but strict mode is disabled by project config." >&2
+          fi
+        fi
+      fi
+
+      if [ "''${#PASS_ARGS[@]}" -gt 0 ]; then
+        set -- "''${PASS_ARGS[@]}"
+      else
+        set --
+      fi
+
+      ${baseScript}
+    '';
+
+  normalizeCommandCfg =
+    name: cfg:
+    let
+      api0 = cfg.api or null;
+      api1 = if discoveryEnabled && name == "check" then augmentCheckApi api0 else api0;
+      script0 = cfg.script or "";
+      script1 = if discoveryEnabled && name == "check" then wrapCheckScript script0 else script0;
+    in
+    cfg
+    // {
+      script = script1;
+    }
+    // (pkgs.lib.optionalAttrs (api1 != null) { api = api1; });
+
+  normalizedCommands = builtins.listToAttrs (
+    map (name: {
+      inherit name;
+      value = normalizeCommandCfg name commands.${name};
+    }) commandNames
+  );
 
   mkCommandApp =
     name: cfg:
@@ -26,7 +106,7 @@ let
   commandApps = builtins.listToAttrs (
     map (name: {
       name = name;
-      value = mkCommandApp name commands.${name};
+      value = mkCommandApp name normalizedCommands.${name};
     }) commandNames
   );
 
@@ -44,7 +124,7 @@ let
 
   moduleAppNames = builtins.attrNames moduleApps;
   sortNames = names: pkgs.lib.sort (a: b: a < b) names;
-  getCommandCfg = name: if name == "help" && !(commands ? help) then { api = helpApi; } else commands.${name};
+  getCommandCfg = name: if name == "help" && !(commands ? help) then { api = helpApi; } else normalizedCommands.${name};
   getCommandApi = name: (getCommandCfg name).api or null;
   getModuleApi = name: (((moduleApps.${name}.meta or { }).nixfied or { }).api or null);
   getCommandSummary =
