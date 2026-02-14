@@ -105,7 +105,12 @@
           `https://eth.drpc.org`.
 
           `MFM_KEEP_SERVICES` is deprecated and no longer accepted.
-          To keep services running for reuse, start them explicitly:
+          For process-first reuse/ownership, set:
+          - `SERVICE_REUSE_POLICY=same-slot|cross-run`
+          - or `SERVICE_OWNER_SCOPE=persistent`
+          - or `SERVICE_DISCOVERY_SCOPE=global`
+
+          You can also start services explicitly:
           - `nix run .#service::postgres::start`
           - `nix run .#service::helios::start`
           and inspect reuse/ownership with:
@@ -209,13 +214,54 @@
           exit 1
         fi
 
+        snapshot_keep_running_from_policy() {
+          local owner_scope="''${SERVICE_OWNER_SCOPE:-}"
+          local reuse_policy="''${SERVICE_REUSE_POLICY:-}"
+          local discovery_scope="''${SERVICE_DISCOVERY_SCOPE:-}"
+
+          case "$owner_scope" in
+            persistent) echo "1"; return 0 ;;
+            ephemeral) echo "0"; return 0 ;;
+            "") ;;
+            *)
+              echo "ERROR: SERVICE_OWNER_SCOPE must be ephemeral|persistent (got '$owner_scope')" >&2
+              return 1
+              ;;
+          esac
+
+          case "$reuse_policy" in
+            same-slot|cross-run) echo "1"; return 0 ;;
+            never|same-root) echo "0"; return 0 ;;
+            "") ;;
+            *)
+              echo "ERROR: SERVICE_REUSE_POLICY must be one of never|same-root|same-slot|cross-run (got '$reuse_policy')" >&2
+              return 1
+              ;;
+          esac
+
+          case "$discovery_scope" in
+            global) echo "1"; return 0 ;;
+            local) echo "0"; return 0 ;;
+            "") ;;
+            *)
+              echo "ERROR: SERVICE_DISCOVERY_SCOPE must be local|global (got '$discovery_scope')" >&2
+              return 1
+              ;;
+          esac
+
+          echo "0"
+          return 0
+        }
+
+        SNAPSHOT_KEEP_RUNNING="$(snapshot_keep_running_from_policy)"
+
         # Start Postgres (required by portfolio snapshot). Prefer reusing a healthy
         # instance; if status metadata is stale and health fails, start it.
         if run_hook POSTGRES_HEALTH >/dev/null 2>&1; then
           run_hook POSTGRES_SETUP_DB >/dev/null 2>&1 || true
         else
           PG_LOGFILE="$(artifact_path "postgres-mfm-portfolio-snapshot.log")"
-          fixture_start_service postgres dev 60 1 "$PG_LOGFILE"
+          fixture_start_service postgres dev 60 1 "$PG_LOGFILE" "$SNAPSHOT_KEEP_RUNNING"
         fi
         run_hook POSTGRES_READY
 
@@ -225,7 +271,7 @@
           true
         else
           HELIOS_LOGFILE="$(artifact_path "helios-mfm-portfolio-snapshot.log")"
-          fixture_start_service helios dev 300 1 "$HELIOS_LOGFILE"
+          fixture_start_service helios dev 300 1 "$HELIOS_LOGFILE" "$SNAPSHOT_KEEP_RUNNING"
         fi
 
         export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm"
