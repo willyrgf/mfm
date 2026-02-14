@@ -583,7 +583,9 @@ nix run .#ci -- --bg         # run in background via run registry
 ```
 
 The CI runner writes `summary.json` to the artifacts directory after each run,
-containing mode, exit code, and per-step results (name, status, duration).
+containing mode, exit code, per-step results (name, status, duration), and a
+`timing` block (`total_duration`, `setup_duration`, `steps_duration`,
+`teardown_duration`, `accounted_duration`, `untracked_duration`).
 
 CI environment variables available inside steps:
 - `CI_MODE`

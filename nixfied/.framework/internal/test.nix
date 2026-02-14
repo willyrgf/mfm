@@ -810,6 +810,7 @@ let
     mkdir -p "$CI_RET_SUM_OK_DIR"
     (cd "$CI_RET_SUM_OK_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts" "$CI_RET_SCRIPT" --mode success --summary > "$CI_RET_SUM_OK_LOG" 2>&1)
     assert_contains "$CI_RET_SUM_OK_LOG" "Summary"
+    assert_contains "$CI_RET_SUM_OK_LOG" "Time breakdown"
     assert_contains "$CI_RET_SUM_OK_LOG" "Exit code: 0"
     assert_file_absent "$CI_RET_SUM_OK_DIR/.ci-artifacts"
 
@@ -824,6 +825,7 @@ let
       fail "expected retention failure summary mode to exit non-zero"
     fi
     assert_contains "$CI_RET_SUM_FAIL_LOG" "Summary"
+    assert_contains "$CI_RET_SUM_FAIL_LOG" "Time breakdown"
     assert_contains "$CI_RET_SUM_FAIL_LOG" "Exit code: 1"
     assert_contains "$CI_RET_SUM_FAIL_LOG" "Last 50 lines"
     assert_file_exists "$CI_RET_SUM_FAIL_DIR/.ci-artifacts/fail.cleanup"
@@ -2626,6 +2628,13 @@ let
     assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"passing"'
     assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"passed"'
     assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"skipped"'
+    assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"timing"'
+    assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"total_duration"'
+    assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"setup_duration"'
+    assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"steps_duration"'
+    assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"teardown_duration"'
+    assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"accounted_duration"'
+    assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"untracked_duration"'
 
     log "module apps exposure"
     MODAPP_EXPR=$(cat <<'NIX'
