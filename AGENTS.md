@@ -12,6 +12,10 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 - Keep binaries (`bin/cli`, `bin/rest-api`) thin:
   - business/domain execution logic belongs in `crates/ops/*` (and reusable pieces in `crates/ops/common`)
   - binaries should parse input, start/resume runs, and render outputs only
+- Apply the three-tier thin-layer principle from `docs/three-tier-audit.md`:
+  - executable logic lives in reusable states (`crates/ops/common/src/states/*`)
+  - ops stay thin and assemble state graphs
+  - binaries stay transport-only
 - If you touch security-sensitive code (keystore/crypto), add or strengthen tests.
 
 ## Design Contract (Architecture Invariants)
@@ -221,6 +225,7 @@ These are typical, review-friendly change patterns (focus on a single outcome).
 - If a CLI/API feature performs business execution, implement it as an op/state-machine flow in `crates/ops/*` and invoke it via run start/resume.
 - `bin/cli/src/support/*` and REST handler helpers should contain transport/adaptation code only, not workflow/domain execution.
 - Shared business behavior needed by multiple ops should live in `crates/ops/common`.
+- Prefer reusable `State` implementations in `crates/ops/common/src/states/*`; keep op-local states for domain-specific output/aggregation when reuse is not justified.
 
 ### Logging
 

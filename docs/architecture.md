@@ -74,6 +74,29 @@ Replay/resume behavior:
 
 ## 5. Composition Model
 
+### Three-tier thin-layer principle
+The canonical architecture follows the three-tier model from `docs/three-tier-audit.md`:
+
+```text
+bin/{cli,rest-api}   (THIN) transport parsing/routing/output only
+       |
+       v
+  crates/ops/*       (THIN) config validation + state graph wiring
+       |
+       v
+crates/ops/common/   (THICK) reusable single-responsibility states
+  src/states/*               + shared pure utility modules
+```
+
+Core rule:
+- executable logic lives in reusable states
+- ops assemble state graphs
+- binaries stay transport-only
+
+Allowed exception:
+- op-local state implementations are acceptable only for domain-specific output/aggregation states
+  that are not reusable shared primitives.
+
 ### Ops are planning abstractions
 - An op resolves to a concrete `StateGraph` given `OpConfig` and `RunConfig`.
 - `expand()` must be deterministic and must not perform IO.
@@ -110,12 +133,14 @@ Must stay thin and avoid domain-specific execution behavior.
 
 ### `crates/ops/common/`
 Owns reusable state primitives and shared op-level helpers.
+This is the default home for executable workflow logic.
 
 ### `crates/ops/*`
 Owns domain workflows:
 - operation config validation
 - graph composition using reusable states
 - op-level tests and domain contracts
+Prefer thin ops: avoid embedding thick executable logic when a reusable state belongs in `crates/ops/common/`.
 
 ### `crates/collectors/*`
 Owns external data collection and normalization adapters.

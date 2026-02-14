@@ -28,6 +28,10 @@ Contributor read order:
 3. Small, reviewable changes over broad rewrites.
 4. Stable crate boundaries so libraries remain reusable outside binaries.
 5. Thin binaries: transport adapters only.
+6. Three-tier thin-layer design:
+   - executable logic lives in reusable states
+   - ops assemble state graphs
+   - binaries stay transport-only
 
 ## 3. Core Concepts
 
@@ -150,6 +154,12 @@ Canonical responsibilities:
 - `crates/ops/*`: domain ops that compose state graphs
 - `crates/sdk/`: operation/pipeline orchestration glue
 - `bin/cli`, `bin/rest-api`: thin transport adapters
+
+Three-tier rule (normative):
+- Tier 1 (`bin/*`) MUST remain transport-only.
+- Tier 2 (`crates/ops/*`) SHOULD remain thin and primarily perform config validation + graph wiring.
+- Tier 3 (`crates/ops/common/src/states/*`) SHOULD contain reusable executable workflow logic.
+- Non-reusable domain-specific output/aggregation states MAY remain op-local.
 
 ### 6.2 Dependency contract
 - Binaries depend on sdk/ops and render outputs.
