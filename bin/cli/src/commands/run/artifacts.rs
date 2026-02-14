@@ -1,11 +1,10 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
+use crate::support::app_services::command_error_from_app_error;
 use crate::support::run_stores::{make_artifact_store, RunStoresArgs};
 use clap::{Args, Subcommand};
 use mfm_app::{get_artifact_from_store, ArtifactGetResponse};
-
-use super::engine_bundle::command_error_from_app_error;
 
 #[derive(Subcommand)]
 pub enum ArtifactsCommand {

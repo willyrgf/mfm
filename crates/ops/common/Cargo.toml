@@ -7,9 +7,16 @@ edition = "2021"
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+hex = { workspace = true }
+alloy-primitives = { workspace = true, features = ["k256"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+url = { workspace = true }
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-collectors-evm = { path = "../../collectors/evm" }
+mfm-op-keystore = { path = "../keystore-op" }
 
 [dev-dependencies]
 tokio = { workspace = true }

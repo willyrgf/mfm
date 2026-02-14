@@ -8,10 +8,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use mfm_machine::config::RunManifest;
+use mfm_machine::config::{
+    BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
+    RetryPolicy, RunConfig, RunManifest,
+};
 use mfm_machine::context::DynContext;
-use mfm_machine::engine::{ExecutionEngine, RunResult, StartRun, Stores};
-use mfm_machine::errors::{ErrorCategory, ErrorInfo, RunError};
+use mfm_machine::engine::{ExecutionEngine, RunPhase, RunResult, StartRun, Stores};
+use mfm_machine::errors::{
+    ContextError, ErrorCategory, ErrorInfo, IoError, RunError, StorageError,
+};
+use mfm_machine::events::{Event, KernelEvent};
 use mfm_machine::hashing::{
     artifact_id_for_bytes, artifact_id_for_json, canonical_json_bytes, CanonicalJsonError,
 };
@@ -683,6 +689,266 @@ pub fn single_op_pipeline(
             op_version,
             op_config,
         }],
+    })
+}
+
+/// Inputs for single-op run execution with typed report extraction from final snapshot context.
+#[derive(Clone, Debug)]
+pub struct SingleOpReportRequest {
+    pub op_id: String,
+    pub op_version: String,
+    pub op_config: serde_json::Value,
+    pub report_context_key: String,
+}
+
+/// Typed error for single-op report execution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SingleOpReportError {
+    pub code: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for SingleOpReportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for SingleOpReportError {}
+
+impl SingleOpReportError {
+    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+fn single_op_report_error_from_storage(err: StorageError) -> SingleOpReportError {
+    let info = match err {
+        StorageError::Concurrency(info)
+        | StorageError::NotFound(info)
+        | StorageError::Corruption(info)
+        | StorageError::Other(info) => info,
+    };
+    SingleOpReportError::new(info.code.0, info.message)
+}
+
+fn single_op_report_error_from_run(err: RunError) -> SingleOpReportError {
+    let info = match err {
+        RunError::InvalidPlan(info) => info,
+        RunError::Storage(err) => match err {
+            StorageError::Concurrency(info)
+            | StorageError::NotFound(info)
+            | StorageError::Corruption(info)
+            | StorageError::Other(info) => info,
+        },
+        RunError::Context(err) => match err {
+            ContextError::MissingKey { info, .. }
+            | ContextError::Serialization(info)
+            | ContextError::Other(info) => info,
+        },
+        RunError::Io(err) => match err {
+            IoError::MissingFactKey(info)
+            | IoError::MissingFact { info, .. }
+            | IoError::Transport(info)
+            | IoError::RateLimited(info)
+            | IoError::Other(info) => info,
+        },
+        RunError::State(err) => err.info,
+        RunError::Other(info) => info,
+    };
+
+    SingleOpReportError::new(info.code.0, info.message)
+}
+
+fn single_op_report_error_from_sdk(err: SdkError) -> SingleOpReportError {
+    SingleOpReportError::new(err.info.code.0, err.info.message)
+}
+
+fn run_phase_label(phase: &RunPhase) -> &'static str {
+    match phase {
+        RunPhase::Running => "running",
+        RunPhase::Completed => "completed",
+        RunPhase::Failed => "failed",
+        RunPhase::Cancelled => "cancelled",
+    }
+}
+
+#[derive(Default)]
+struct MapContext {
+    inner: HashMap<String, serde_json::Value>,
+}
+
+impl DynContext for MapContext {
+    fn read(
+        &self,
+        key: &ContextKey,
+    ) -> Result<Option<serde_json::Value>, mfm_machine::errors::ContextError> {
+        Ok(self.inner.get(&key.0).cloned())
+    }
+
+    fn write(
+        &mut self,
+        key: ContextKey,
+        value: serde_json::Value,
+    ) -> Result<(), mfm_machine::errors::ContextError> {
+        self.inner.insert(key.0, value);
+        Ok(())
+    }
+
+    fn delete(&mut self, key: &ContextKey) -> Result<(), mfm_machine::errors::ContextError> {
+        self.inner.remove(&key.0);
+        Ok(())
+    }
+
+    fn dump(&self) -> Result<serde_json::Value, mfm_machine::errors::ContextError> {
+        let mut m = serde_json::Map::new();
+        for (k, v) in &self.inner {
+            m.insert(k.clone(), v.clone());
+        }
+        Ok(serde_json::Value::Object(m))
+    }
+}
+
+fn default_initial_context() -> Box<dyn DynContext> {
+    Box::new(MapContext::default())
+}
+
+fn default_build_provenance() -> BuildProvenance {
+    BuildProvenance {
+        git_commit: None,
+        cargo_lock_hash: None,
+        flake_lock_hash: None,
+        rustc_version: None,
+        target_triple: None,
+        env_allowlist: Vec::new(),
+    }
+}
+
+fn default_run_config() -> RunConfig {
+    RunConfig {
+        io_mode: IoMode::Live,
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            backoff: BackoffPolicy::Fixed {
+                delay: std::time::Duration::from_millis(0),
+            },
+        },
+        event_profile: EventProfile::Normal,
+        execution_mode: ExecutionMode::Sequential,
+        context_checkpointing: ContextCheckpointing::AfterEveryState,
+        replay_missing_fact_retryable: false,
+        skip_tags: Vec::new(),
+        nix_flake_allowlist: mfm_machine::config::default_nix_flake_allowlist(),
+    }
+}
+
+async fn single_op_report_error_from_failed_run(
+    stores: &Stores,
+    run: &RunResult,
+) -> SingleOpReportError {
+    let events = stores.events.read_range(run.run_id, 1, None).await;
+    let Ok(events) = events else {
+        return SingleOpReportError::new(
+            "RunFailed",
+            format!(
+                "run {} finished in phase {}",
+                run.run_id.0,
+                run_phase_label(&run.phase)
+            ),
+        );
+    };
+
+    for envelope in events.iter().rev() {
+        let Event::Kernel(kernel) = &envelope.event else {
+            continue;
+        };
+
+        if let KernelEvent::StateFailed { error, .. } = kernel {
+            return SingleOpReportError::new(error.info.code.0.clone(), error.info.message.clone());
+        }
+    }
+
+    SingleOpReportError::new(
+        "RunFailed",
+        format!(
+            "run {} finished in phase {}",
+            run.run_id.0,
+            run_phase_label(&run.phase)
+        ),
+    )
+}
+
+/// Executes a single-op run and decodes a typed report from final snapshot context.
+pub async fn execute_single_op_report<T: serde::de::DeserializeOwned>(
+    engine: Arc<dyn ExecutionEngine>,
+    stores: Stores,
+    registry: Arc<dyn OperationRegistry>,
+    planner: Arc<dyn PipelinePlanner>,
+    req: SingleOpReportRequest,
+) -> Result<T, SingleOpReportError> {
+    let pipeline = single_op_pipeline(OpId(req.op_id), req.op_version, req.op_config)
+        .map_err(single_op_report_error_from_sdk)?;
+
+    let launcher = DefaultRunLauncher;
+    let run = launcher
+        .start_pipeline(
+            engine,
+            Stores {
+                events: Arc::clone(&stores.events),
+                artifacts: Arc::clone(&stores.artifacts),
+            },
+            registry,
+            planner,
+            LaunchPipeline {
+                pipeline,
+                input: serde_json::json!({}),
+                run_config: default_run_config(),
+                build: default_build_provenance(),
+                initial_context: default_initial_context(),
+            },
+        )
+        .await
+        .map_err(single_op_report_error_from_run)?;
+
+    if run.phase != RunPhase::Completed {
+        return Err(single_op_report_error_from_failed_run(&stores, &run).await);
+    }
+
+    let final_snapshot_id = run.final_snapshot_id.ok_or_else(|| {
+        SingleOpReportError::new(
+            "MissingFinalSnapshot",
+            "run completed without a final snapshot",
+        )
+    })?;
+
+    let snapshot_bytes = stores
+        .artifacts
+        .get(&final_snapshot_id)
+        .await
+        .map_err(single_op_report_error_from_storage)?;
+
+    let snapshot: serde_json::Value = serde_json::from_slice(&snapshot_bytes).map_err(|_| {
+        SingleOpReportError::new("InvalidSnapshot", "final snapshot artifact was not JSON")
+    })?;
+
+    let report_value = snapshot
+        .get(&req.report_context_key)
+        .cloned()
+        .ok_or_else(|| {
+            SingleOpReportError::new(
+                "MissingReport",
+                "run completed without a report payload in snapshot context",
+            )
+        })?;
+
+    serde_json::from_value(report_value).map_err(|_| {
+        SingleOpReportError::new(
+            "InvalidReport",
+            "failed to decode report payload from final snapshot",
+        )
     })
 }
 
@@ -1700,5 +1966,205 @@ mod tests {
         assert_eq!(plan.op_id.0, "m");
         assert_eq!(plan.graph.states.len(), 1);
         assert_eq!(plan.graph.states[0].id.0, "m.step1.s1");
+    }
+
+    #[tokio::test]
+    async fn single_op_report_returns_typed_report() {
+        let mut reg = HashMapOperationRegistry::default();
+        reg.register(Arc::new(TestOp::new_write(
+            "report_op",
+            "v1",
+            "report_op.main.s1",
+            "report",
+            serde_json::json!({"value": 42}),
+            OpIo {
+                imports: Vec::new(),
+                exports: Vec::new(),
+            },
+        )));
+
+        let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
+        let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
+        let resolver: Arc<dyn PlanResolver> = Arc::new(SdkPlanResolver::new(
+            Arc::clone(&registry),
+            Arc::clone(&planner),
+        ));
+        let engine: Arc<dyn ExecutionEngine> = Arc::new(DefaultExecutionEngine::new(resolver));
+        let stores = Stores {
+            events: Arc::new(MemEventStore::default()),
+            artifacts: Arc::new(MemArtifactStore::default()),
+        };
+
+        let report: serde_json::Value = execute_single_op_report(
+            engine,
+            stores,
+            registry,
+            planner,
+            SingleOpReportRequest {
+                op_id: "report_op".to_string(),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({}),
+                report_context_key: "report_op.main.report".to_string(),
+            },
+        )
+        .await
+        .expect("single-op report should decode");
+
+        assert_eq!(report, serde_json::json!({"value": 42}));
+    }
+
+    #[tokio::test]
+    async fn single_op_report_errors_when_report_key_missing() {
+        let mut reg = HashMapOperationRegistry::default();
+        reg.register(Arc::new(TestOp::new_write(
+            "report_missing_op",
+            "v1",
+            "report_missing_op.main.s1",
+            "unused",
+            serde_json::json!({"value": 1}),
+            OpIo {
+                imports: Vec::new(),
+                exports: Vec::new(),
+            },
+        )));
+
+        let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
+        let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
+        let resolver: Arc<dyn PlanResolver> = Arc::new(SdkPlanResolver::new(
+            Arc::clone(&registry),
+            Arc::clone(&planner),
+        ));
+        let engine: Arc<dyn ExecutionEngine> = Arc::new(DefaultExecutionEngine::new(resolver));
+        let stores = Stores {
+            events: Arc::new(MemEventStore::default()),
+            artifacts: Arc::new(MemArtifactStore::default()),
+        };
+
+        let err = execute_single_op_report::<serde_json::Value>(
+            engine,
+            stores,
+            registry,
+            planner,
+            SingleOpReportRequest {
+                op_id: "report_missing_op".to_string(),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({}),
+                report_context_key: "report_missing_op.main.report".to_string(),
+            },
+        )
+        .await
+        .expect_err("missing report key should fail");
+
+        assert_eq!(err.code, "MissingReport");
+    }
+
+    #[derive(Clone)]
+    struct FailingState {
+        code: &'static str,
+        message: &'static str,
+    }
+
+    #[async_trait]
+    impl State for FailingState {
+        fn meta(&self) -> StateMeta {
+            StateMeta {
+                tags: Vec::new(),
+                depends_on: Vec::new(),
+                depends_on_strategy: mfm_machine::meta::DependencyStrategy::Latest,
+                side_effects: mfm_machine::meta::SideEffectKind::Pure,
+                idempotency: mfm_machine::meta::Idempotency::None,
+            }
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &mut dyn DynContext,
+            _io: &mut dyn IoProvider,
+            _rec: &mut dyn EventRecorder,
+        ) -> Result<StateOutcome, StateError> {
+            Err(StateError {
+                state_id: Some(StateId("fail_op.main.s1".to_string())),
+                info: ErrorInfo {
+                    code: ErrorCode(self.code.to_string()),
+                    category: ErrorCategory::Unknown,
+                    retryable: false,
+                    message: self.message.to_string(),
+                    details: None,
+                },
+            })
+        }
+    }
+
+    struct FailOp;
+
+    impl crate::op::Operation for FailOp {
+        fn op_id(&self) -> OpId {
+            OpId("fail_op".to_string())
+        }
+
+        fn op_version(&self) -> String {
+            "v1".to_string()
+        }
+
+        fn io(&self, _op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
+            Ok(OpIo {
+                imports: Vec::new(),
+                exports: Vec::new(),
+            })
+        }
+
+        fn expand(
+            &self,
+            _op_path: OpPath,
+            _op_config: &serde_json::Value,
+            _run_config: &RunConfig,
+        ) -> Result<StateGraph, SdkError> {
+            Ok(StateGraph {
+                states: vec![StateNode {
+                    id: StateId("fail_op.main.s1".to_string()),
+                    state: Arc::new(FailingState {
+                        code: "IntentionalFailure",
+                        message: "intentional test failure",
+                    }),
+                }],
+                edges: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn single_op_report_maps_failed_run_state_error() {
+        let mut reg = HashMapOperationRegistry::default();
+        reg.register(Arc::new(FailOp));
+
+        let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
+        let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
+        let resolver: Arc<dyn PlanResolver> = Arc::new(SdkPlanResolver::new(
+            Arc::clone(&registry),
+            Arc::clone(&planner),
+        ));
+        let engine: Arc<dyn ExecutionEngine> = Arc::new(DefaultExecutionEngine::new(resolver));
+        let stores = Stores {
+            events: Arc::new(MemEventStore::default()),
+            artifacts: Arc::new(MemArtifactStore::default()),
+        };
+
+        let err = execute_single_op_report::<serde_json::Value>(
+            engine,
+            stores,
+            registry,
+            planner,
+            SingleOpReportRequest {
+                op_id: "fail_op".to_string(),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({}),
+                report_context_key: "fail_op.main.report".to_string(),
+            },
+        )
+        .await
+        .expect_err("failed run should surface state failure");
+
+        assert_eq!(err.code, "IntentionalFailure");
+        assert_eq!(err.message, "intentional test failure");
     }
 }

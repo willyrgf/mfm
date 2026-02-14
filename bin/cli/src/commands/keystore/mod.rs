@@ -5,6 +5,8 @@ use super::CommandContext;
 pub mod delete;
 pub mod import;
 pub mod list;
+pub mod tx_send_raw;
+pub mod tx_sign;
 
 #[derive(Subcommand)]
 pub enum KeystoreCommand {
@@ -23,6 +25,16 @@ pub enum KeystoreCommand {
         #[command(flatten)]
         args: list::ListArgs,
     },
+    /// Sign an EIP-1559 transaction payload using a keystore-managed key
+    TxSign {
+        #[command(flatten)]
+        args: tx_sign::TxSignArgs,
+    },
+    /// Submit a signed raw transaction via JSON-RPC
+    TxSendRaw {
+        #[command(flatten)]
+        args: tx_send_raw::TxSendRawArgs,
+    },
 }
 
 impl KeystoreCommand {
@@ -36,6 +48,12 @@ impl KeystoreCommand {
             }
             KeystoreCommand::List { args } => {
                 list::execute(ctx, args).await;
+            }
+            KeystoreCommand::TxSign { args } => {
+                tx_sign::execute(ctx, args).await;
+            }
+            KeystoreCommand::TxSendRaw { args } => {
+                tx_send_raw::execute(ctx, args).await;
             }
         }
     }

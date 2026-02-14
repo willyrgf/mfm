@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::commands::result::CommandError;
 use clap::Args;
 use mfm_artifact_store_fs::FsArtifactStore;
+use mfm_event_store_mem::MemEventStore;
 use mfm_event_store_postgres::PostgresEventStore;
 use mfm_machine::engine::Stores;
 use mfm_machine::stores::{ArtifactStore, EventStore};
@@ -69,4 +70,11 @@ pub async fn make_stores(
     let events = make_event_store(database_url).await?;
 
     Ok(Stores { events, artifacts })
+}
+
+pub fn make_ephemeral_stores(artifact_root: Option<PathBuf>) -> Stores {
+    let artifacts = make_artifact_store(artifact_root);
+    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+
+    Stores { events, artifacts }
 }

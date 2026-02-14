@@ -1,5 +1,5 @@
 [package]
-name = "mfm-op-evm-write"
+name = "mfm-op-keystore-tx"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,12 +7,16 @@ edition = "2021"
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tracing = { workspace = true }
 hex = { workspace = true }
-alloy-primitives = { workspace = true }
-k256 = { version = "0.13", features = ["ecdsa"] }
+zeroize = "1.7.0"
+rpassword = "7.0"
+
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
-mfm-collectors-evm = { path = "../../collectors/evm" }
 mfm-op-common = { path = "../common" }
-zeroize = "1.7.0"
+mfm-op-keystore = { path = "../keystore-op" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3.0"

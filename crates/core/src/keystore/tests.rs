@@ -37,6 +37,16 @@ fn test_keystore() -> (tempfile::TempDir, Keystore) {
     (temp_dir, keystore)
 }
 
+#[cfg(feature = "dangerous-secret-export")]
+fn test_keystore_with_exports() -> (tempfile::TempDir, Keystore) {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("test.keystore");
+    let mut config = KeystoreConfig::development();
+    config.allow_secret_exports = true;
+    let keystore = Keystore::new_with_config(&keystore_path, config).unwrap();
+    (temp_dir, keystore)
+}
+
 #[test]
 fn test_new_keystore_creation() {
     let temp_dir = tempdir().unwrap();
@@ -47,7 +57,7 @@ fn test_new_keystore_creation() {
 
     // Verify initial state
     assert!(!keystore_path.exists()); // File not created until first unlock
-    assert_eq!(keystore.list_keys().unwrap().len(), 0); // Should be empty initially (list_keys works when locked)
+    assert!(matches!(keystore.list_keys(), Err(KeystoreError::Locked)));
 }
 
 #[test]
@@ -71,11 +81,11 @@ fn test_private_key_import_and_retrieval() {
     assert_eq!(signature.to_bytes().len(), 64);
 
     // Test Ethereum address derivation
-    let address = secure_key.ethereum_address();
+    let address = secure_key.ethereum_address().unwrap();
     assert_ne!(address, Address::ZERO);
 
     // Test public key derivation
-    let public_key = secure_key.public_key();
+    let public_key = secure_key.public_key().unwrap();
     assert_eq!(public_key.to_encoded_point(false).len(), 65); // Uncompressed: 1 + 32 + 32
 }
 
@@ -103,8 +113,8 @@ fn test_mnemonic_import_and_retrieval() {
     assert_eq!(signature.to_bytes().len(), 64);
 
     // Verify consistent address derivation
-    let address1 = secure_key.ethereum_address();
-    let address2 = secure_key.ethereum_address();
+    let address1 = secure_key.ethereum_address().unwrap();
+    let address2 = secure_key.ethereum_address().unwrap();
     assert_eq!(address1, address2);
 }
 
@@ -132,14 +142,15 @@ fn test_mnemonic_passphrase_support() {
     let key_with_pass = keystore.get_private_key(id_with_pass).unwrap();
 
     assert_ne!(
-        key_no_pass.ethereum_address(),
-        key_with_pass.ethereum_address()
+        key_no_pass.ethereum_address().unwrap(),
+        key_with_pass.ethereum_address().unwrap()
     );
 }
 
+#[cfg(feature = "dangerous-secret-export")]
 #[test]
 fn test_export_private_key_for_private_key_entries() {
-    let (_temp_dir, mut keystore) = test_keystore();
+    let (_temp_dir, mut keystore) = test_keystore_with_exports();
     keystore.unlock("test_password").unwrap();
 
     let test_key = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -151,9 +162,10 @@ fn test_export_private_key_for_private_key_entries() {
     assert_eq!(exported.as_str(), format!("0x{test_key}"));
 }
 
+#[cfg(feature = "dangerous-secret-export")]
 #[test]
 fn test_export_mnemonic_and_derived_private_key() {
-    let (_temp_dir, mut keystore) = test_keystore();
+    let (_temp_dir, mut keystore) = test_keystore_with_exports();
     keystore.unlock("test_password").unwrap();
 
     let test_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -179,8 +191,8 @@ fn test_export_mnemonic_and_derived_private_key() {
     let key_from_mnemonic = keystore.get_private_key(mnemonic_id).unwrap();
     let key_from_exported = keystore.get_private_key(derived_id).unwrap();
     assert_eq!(
-        key_from_mnemonic.ethereum_address(),
-        key_from_exported.ethereum_address()
+        key_from_mnemonic.ethereum_address().unwrap(),
+        key_from_exported.ethereum_address().unwrap()
     );
 
     // export_mnemonic should fail for private key entries.
@@ -188,6 +200,53 @@ fn test_export_mnemonic_and_derived_private_key() {
         keystore.export_mnemonic(derived_id),
         Err(KeystoreError::InvalidInput(_))
     ));
+}
+
+#[cfg(feature = "dangerous-secret-export")]
+#[test]
+fn test_secret_exports_disabled_by_default() {
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+
+    let id = keystore
+        .import_private_key(
+            Some("no_export".to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000005",
+        )
+        .unwrap();
+
+    assert!(matches!(
+        keystore.export_private_key(id),
+        Err(KeystoreError::OperationNotPermitted(_))
+    ));
+}
+
+#[cfg(not(feature = "dangerous-secret-export"))]
+#[test]
+fn test_secret_export_feature_is_disabled_by_default() {
+    assert!(!cfg!(feature = "dangerous-secret-export"));
+}
+
+#[test]
+fn test_mnemonic_passphrase_not_persisted_in_plaintext() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("mnemonic_passphrase_secure.keystore");
+
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("test_password").unwrap();
+    keystore
+        .import_mnemonic(
+            Some("mnemonic-secure".to_string()),
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            "m/44'/60'/0'/0/0",
+            Some("super-secret-passphrase"),
+        )
+        .unwrap();
+
+    let file_content = std::fs::read_to_string(&keystore_path).unwrap();
+    assert!(!file_content.contains("super-secret-passphrase"));
+    assert!(!file_content.contains("\"passphrase\""));
 }
 
 #[test]
@@ -236,9 +295,10 @@ fn test_change_password_reencrypts_entries() {
     assert!(keystore2.get_private_key(mnemonic_id).is_ok());
 }
 
+#[cfg(feature = "dangerous-secret-export")]
 #[test]
 fn test_audit_log_entries_created_for_operations() {
-    let (_temp_dir, mut keystore) = test_keystore();
+    let (_temp_dir, mut keystore) = test_keystore_with_exports();
 
     // Unlock logs.
     keystore.unlock("test_password").unwrap();
@@ -301,14 +361,16 @@ fn test_audit_log_entries_created_for_operations() {
         .any(|e| matches!(e.event, AuditEvent::ChangePassword) && !e.success));
 }
 
+#[cfg(feature = "dangerous-secret-export")]
 #[test]
 fn test_audit_log_persisted_for_read_only_access_operations() {
     let temp_dir = tempdir().unwrap();
     let keystore_path = temp_dir.path().join("audit_persist.keystore");
 
     let (pk_id, mnemonic_id) = {
-        let mut keystore =
-            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        let mut config = KeystoreConfig::development();
+        config.allow_secret_exports = true;
+        let mut keystore = Keystore::new_with_config(&keystore_path, config).unwrap();
         keystore.unlock("test_password").unwrap();
 
         let pk_id = keystore
@@ -383,8 +445,8 @@ fn test_concurrent_operations() {
 
     // Verify different addresses
     assert_ne!(
-        secure_key1.ethereum_address(),
-        secure_key2.ethereum_address()
+        secure_key1.ethereum_address().unwrap(),
+        secure_key2.ethereum_address().unwrap()
     );
 }
 
@@ -467,6 +529,8 @@ fn test_locked_operations() {
         keystore.delete_key(Uuid::new_v4()),
         Err(KeystoreError::Locked)
     ));
+
+    assert!(matches!(keystore.list_keys(), Err(KeystoreError::Locked)));
 }
 
 #[test]
@@ -505,18 +569,21 @@ fn test_keystore_new_variants() {
     let keystore_path1 = temp_dir.path().join("test1.keystore");
     let keystore1 = Keystore::new(&keystore_path1).unwrap();
     assert_eq!(keystore1.config.argon2_memory_kb, 1_048_576); // 1GB default
+    assert!(!keystore1.config.allow_secret_exports);
 
     // Test new_with_config() with development config
     let keystore_path2 = temp_dir.path().join("test2.keystore");
     let keystore2 =
         Keystore::new_with_config(&keystore_path2, KeystoreConfig::development()).unwrap();
     assert_eq!(keystore2.config.argon2_memory_kb, 8192); // 8MB development
+    assert!(!keystore2.config.allow_secret_exports);
 
     // Test with production config
     let keystore_path3 = temp_dir.path().join("test3.keystore");
     let keystore3 =
         Keystore::new_with_config(&keystore_path3, KeystoreConfig::production()).unwrap();
     assert_eq!(keystore3.config.argon2_memory_kb, 1_048_576); // 1GB production
+    assert!(!keystore3.config.allow_secret_exports);
 }
 
 #[test]
@@ -560,8 +627,8 @@ fn test_lock_comprehensive() {
     // Lock the keystore
     keystore.lock();
 
-    // Verify list_keys still works (doesn't require master key)
-    assert!(keystore.list_keys().is_ok());
+    // Metadata access is locked behind an unlocked session.
+    assert!(matches!(keystore.list_keys(), Err(KeystoreError::Locked)));
 
     // Verify operations requiring master key fail
     assert!(matches!(
@@ -699,8 +766,8 @@ fn test_get_private_key_comprehensive() {
 
     // Verify they produce different addresses
     assert_ne!(
-        private_key.ethereum_address(),
-        mnemonic_key.ethereum_address()
+        private_key.ethereum_address().unwrap(),
+        mnemonic_key.ethereum_address().unwrap()
     );
 
     // Test non-existent key
@@ -750,10 +817,9 @@ fn test_list_keys_comprehensive() {
     assert_eq!(key2_info.alias, Some("mnemonic1".to_string()));
     assert!(matches!(key2_info.key_type, KeyType::Mnemonic { .. }));
 
-    // Test list_keys works when locked (doesn't require master key)
+    // list_keys requires an unlocked session.
     keystore.lock();
-    let locked_keys = keystore.list_keys().unwrap();
-    assert_eq!(locked_keys.len(), 2);
+    assert!(matches!(keystore.list_keys(), Err(KeystoreError::Locked)));
 }
 
 #[test]
@@ -783,14 +849,14 @@ fn test_secure_key_methods() {
     assert_eq!(sig1.to_bytes(), sig1_again.to_bytes());
 
     // Test ethereum_address
-    let address1 = secure_key.ethereum_address();
-    let address2 = secure_key.ethereum_address();
+    let address1 = secure_key.ethereum_address().unwrap();
+    let address2 = secure_key.ethereum_address().unwrap();
     assert_eq!(address1, address2); // Should be consistent
     assert_ne!(address1, Address::ZERO); // Should not be zero
 
     // Test public_key
-    let pubkey1 = secure_key.public_key();
-    let pubkey2 = secure_key.public_key();
+    let pubkey1 = secure_key.public_key().unwrap();
+    let pubkey2 = secure_key.public_key().unwrap();
     assert_eq!(
         pubkey1.to_encoded_point(false),
         pubkey2.to_encoded_point(false)
@@ -889,7 +955,7 @@ fn test_keystore_file_corruption_handling() {
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
-        KeystoreError::SerializationError(_)
+        KeystoreError::InvalidInput(_)
     ));
 }
 
@@ -1051,7 +1117,10 @@ fn test_aad_prevents_entry_swapping() {
         let key2 = keystore.get_private_key(key2_id).unwrap();
 
         // Verify they have different addresses (confirming they are different keys)
-        assert_ne!(key1.ethereum_address(), key2.ethereum_address());
+        assert_ne!(
+            key1.ethereum_address().unwrap(),
+            key2.ethereum_address().unwrap()
+        );
 
         // Test that both keys can sign different data successfully
         let hash1 = [1u8; 32];
@@ -1166,4 +1235,352 @@ fn test_early_file_validation_dos_protection() {
             other => panic!("Expected JSON validation error, got: {other:?}"),
         }
     }
+}
+
+#[test]
+fn test_weak_password_rejected_on_create_and_change() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("weak_password.keystore");
+
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    let create_err = keystore.unlock("short").unwrap_err();
+    assert!(matches!(create_err, KeystoreError::InvalidInput(_)));
+
+    keystore.unlock("strong_password_123").unwrap();
+    let change_err = keystore
+        .change_password("strong_password_123", "aaaaaaaaaaaa")
+        .unwrap_err();
+    assert!(matches!(change_err, KeystoreError::InvalidInput(_)));
+}
+
+#[test]
+fn test_tampered_file_metadata_not_exposed_before_unlock() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("metadata_gate.keystore");
+
+    {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("strong_password_123").unwrap();
+        keystore
+            .import_private_key(
+                Some("original-alias".to_string()),
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .unwrap();
+    }
+
+    let original_content = std::fs::read_to_string(&keystore_path).unwrap();
+    let tampered_content = original_content.replace("original-alias", "tampered-alias");
+    std::fs::write(&keystore_path, tampered_content).unwrap();
+
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    assert!(matches!(keystore.list_keys(), Err(KeystoreError::Locked)));
+
+    let unlock_err = keystore.unlock("strong_password_123").unwrap_err();
+    assert!(matches!(unlock_err, KeystoreError::InvalidInput(_)));
+}
+
+#[test]
+fn test_duplicate_entry_ids_rejected() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("duplicate_ids.keystore");
+
+    {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("strong_password_123").unwrap();
+        keystore
+            .import_private_key(
+                Some("dup".to_string()),
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .unwrap();
+    }
+
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
+    let first_entry = json["entries"][0].clone();
+    json["entries"].as_array_mut().unwrap().push(first_entry);
+    std::fs::write(&keystore_path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+
+    let result = Keystore::new_with_config(&keystore_path, KeystoreConfig::development());
+    assert!(matches!(result, Err(KeystoreError::InvalidInput(_))));
+}
+
+#[test]
+fn test_oversized_audit_log_rejected() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("large_audit.keystore");
+
+    {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("strong_password_123").unwrap();
+    }
+
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let audit_entries = (0..4_097)
+        .map(|_| {
+            serde_json::json!({
+                "timestamp": timestamp,
+                "event": "unlock",
+                "success": true
+            })
+        })
+        .collect::<Vec<_>>();
+    json["audit_log"] = serde_json::Value::Array(audit_entries);
+    std::fs::write(&keystore_path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+
+    let result = Keystore::new_with_config(&keystore_path, KeystoreConfig::development());
+    assert!(matches!(result, Err(KeystoreError::InvalidInput(_))));
+}
+
+#[test]
+fn test_non_regular_keystore_path_rejected() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("not_a_file");
+    std::fs::create_dir_all(&keystore_path).unwrap();
+
+    let result = Keystore::new_with_config(&keystore_path, KeystoreConfig::development());
+    assert!(matches!(result, Err(KeystoreError::InvalidInput(_))));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_unsafe_parent_directory_rejected() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = tempdir().unwrap();
+    let unsafe_parent = temp_dir.path().join("unsafe_parent");
+    std::fs::create_dir_all(&unsafe_parent).unwrap();
+    std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    let keystore_path = unsafe_parent.join("unsafe.keystore");
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    let result = keystore.unlock("strong_password_123");
+    assert!(matches!(result, Err(KeystoreError::InvalidInput(_))));
+
+    std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn test_concurrent_write_conflict_detected() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("conflict.keystore");
+
+    let mut keystore1 =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore1.unlock("strong_password_123").unwrap();
+
+    let mut keystore2 =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore2.unlock("strong_password_123").unwrap();
+
+    keystore1
+        .import_private_key(
+            Some("writer1".to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+
+    let result = keystore2.import_private_key(
+        Some("writer2".to_string()),
+        "0000000000000000000000000000000000000000000000000000000000000002",
+    );
+    assert!(matches!(result, Err(KeystoreError::InvalidInput(_))));
+}
+
+#[test]
+fn test_auto_lock_timeout_expires_session() {
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+    let key_id = keystore
+        .import_private_key(
+            Some("autolock".to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+
+    keystore.set_auto_lock_timeout(Some(std::time::Duration::from_millis(1)));
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    assert!(matches!(keystore.list_keys(), Err(KeystoreError::Locked)));
+    assert!(matches!(
+        keystore.get_private_key(key_id),
+        Err(KeystoreError::Locked)
+    ));
+}
+
+#[test]
+fn test_password_policy_accepts_12_char_strong_password() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("pw_boundary.keystore");
+
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("A1b2C3d4E5f6").unwrap();
+    assert_eq!(keystore.list_keys().unwrap().len(), 0);
+}
+
+#[test]
+fn test_password_policy_rejects_common_values_case_insensitive() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("pw_common.keystore");
+
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    let err = keystore.unlock("QWERTY123456").unwrap_err();
+    match err {
+        KeystoreError::InvalidInput(msg) => assert!(msg.contains("too weak")),
+        other => panic!("expected InvalidInput for weak password, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_password_policy_rejects_whitespace_only_password() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("pw_spaces.keystore");
+
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    let err = keystore.unlock("            ").unwrap_err();
+    match err {
+        KeystoreError::InvalidInput(msg) => assert!(msg.contains("too weak")),
+        other => panic!("expected InvalidInput for weak password, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_auto_lock_timeout_can_be_disabled() {
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+    keystore.set_auto_lock_timeout(None);
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    assert!(keystore.list_keys().is_ok());
+}
+
+#[test]
+fn test_auto_lock_timeout_refreshes_on_sensitive_operations() {
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+    let key_id = keystore
+        .import_private_key(
+            Some("refresh".to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+
+    keystore.set_auto_lock_timeout(Some(std::time::Duration::from_millis(400)));
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(keystore.get_private_key(key_id).is_ok());
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(keystore.get_private_key(key_id).is_ok());
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(matches!(
+        keystore.get_private_key(key_id),
+        Err(KeystoreError::Locked)
+    ));
+}
+
+#[test]
+fn test_audit_log_limit_boundary_is_accepted() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("audit_boundary.keystore");
+
+    {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("strong_password_123").unwrap();
+    }
+
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&keystore_path).unwrap()).unwrap();
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let audit_entries = (0..4_096)
+        .map(|_| {
+            serde_json::json!({
+                "timestamp": timestamp,
+                "event": "unlock",
+                "success": true
+            })
+        })
+        .collect::<Vec<_>>();
+    json["audit_log"] = serde_json::Value::Array(audit_entries);
+    std::fs::write(&keystore_path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+
+    let result = Keystore::new_with_config(&keystore_path, KeystoreConfig::development());
+    assert!(result.is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_symlink_parent_directory_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let temp_dir = tempdir().unwrap();
+    let real_parent = temp_dir.path().join("real_parent");
+    let linked_parent = temp_dir.path().join("linked_parent");
+    std::fs::create_dir_all(&real_parent).unwrap();
+    symlink(&real_parent, &linked_parent).unwrap();
+
+    let keystore_path = linked_parent.join("symlink_parent.keystore");
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    let err = keystore.unlock("strong_password_123").unwrap_err();
+    match err {
+        KeystoreError::InvalidInput(msg) => assert!(msg.contains("symlinked parent directory")),
+        other => panic!("expected InvalidInput for symlink parent, got: {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_symlink_keystore_path_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let temp_dir = tempdir().unwrap();
+    let real_path = temp_dir.path().join("real.keystore");
+    {
+        let mut keystore =
+            Keystore::new_with_config(&real_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("strong_password_123").unwrap();
+    }
+
+    let symlink_path = temp_dir.path().join("symlink.keystore");
+    symlink(&real_path, &symlink_path).unwrap();
+    let result = Keystore::new_with_config(&symlink_path, KeystoreConfig::development());
+    assert!(matches!(result, Err(KeystoreError::InvalidInput(_))));
+}
+
+#[test]
+fn test_write_fails_if_backing_file_deleted_during_session() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("deleted_file_conflict.keystore");
+
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("strong_password_123").unwrap();
+    keystore
+        .import_private_key(
+            Some("first".to_string()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+
+    std::fs::remove_file(&keystore_path).unwrap();
+    let result = keystore.import_private_key(
+        Some("second".to_string()),
+        "0000000000000000000000000000000000000000000000000000000000000002",
+    );
+    assert!(matches!(result, Err(KeystoreError::InvalidInput(_))));
 }

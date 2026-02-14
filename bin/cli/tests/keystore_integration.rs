@@ -10,6 +10,7 @@ fn create_test_keystore_with_data() -> (TempDir, std::path::PathBuf) {
         argon2_memory_kb: 64, // 64KB - minimal for testing
         argon2_iterations: 1, // 1 iteration - minimal
         argon2_parallelism: 1,
+        allow_secret_exports: false,
     };
 
     let mut keystore =
@@ -67,6 +68,7 @@ fn test_keystore_file_creation() {
         argon2_memory_kb: 64,
         argon2_iterations: 1,
         argon2_parallelism: 1,
+        allow_secret_exports: false,
     };
     let _keystore =
         Keystore::new_with_config(&keystore_path, fast_config).expect("Failed to create keystore");
@@ -121,6 +123,7 @@ fn test_invalid_private_key() {
         argon2_memory_kb: 64,
         argon2_iterations: 1,
         argon2_parallelism: 1,
+        allow_secret_exports: false,
     };
     let mut keystore =
         Keystore::new_with_config(&keystore_path, fast_config).expect("Failed to create keystore");
@@ -149,6 +152,7 @@ fn test_invalid_mnemonic() {
         argon2_memory_kb: 64,
         argon2_iterations: 1,
         argon2_parallelism: 1,
+        allow_secret_exports: false,
     };
     let mut keystore =
         Keystore::new_with_config(&keystore_path, fast_config).expect("Failed to create keystore");
@@ -198,6 +202,7 @@ fn test_keystore_persistence() {
             argon2_memory_kb: 64,
             argon2_iterations: 1,
             argon2_parallelism: 1,
+            allow_secret_exports: false,
         };
         let mut keystore = Keystore::new_with_config(&keystore_path, fast_config)
             .expect("Failed to create keystore");

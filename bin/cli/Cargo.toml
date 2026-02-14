@@ -3,6 +3,9 @@ name = "mfm"
 version = "0.1.29"
 edition = "2021"
 
+[features]
+parity-tests = []
+
 [dependencies]
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -11,6 +14,7 @@ mfm-machine = { path = "../../crates/machine" }
 mfm-sdk = { path = "../../crates/sdk" }
 mfm-app = { path = "../../crates/app" }
 mfm-op-keystore = { path = "../../crates/ops/keystore-op" }
+mfm-op-keystore-tx = { path = "../../crates/ops/keystore-tx-op" }
 mfm-collectors-evm-jsonrpc-http = { path = "../../crates/collectors/evm-jsonrpc-http" }
 mfm-op-evm-read = { path = "../../crates/ops/evm-read-op" }
 mfm-op-evm-write = { path = "../../crates/ops/evm-write-op" }
@@ -18,6 +22,7 @@ mfm-op-nix-app = { path = "../../crates/ops/nix-app-op" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }
 mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
 mfm-event-store-postgres = { path = "../../crates/storages/event-store-postgres" }
+mfm-event-store-mem = { path = "../../crates/storages/event-store-mem" }
 clap = { version = "4.4", features = ["derive", "env"] }
 rpassword = "7.0"
 tabled = "0.15"
@@ -27,11 +32,16 @@ serde_json = "1.0"
 uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
+zeroize = "1.7.0"
+alloy-primitives = { workspace = true, features = ["k256"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+k256 = { version = "0.13.0", features = ["ecdsa"] }
 
 [dev-dependencies]
 tempfile = "3.0"
 assert_cmd = "2.0"
 predicates = "3.0"
+rand = { workspace = true }
 
 [[bin]]
 name = "mfm_cli"

@@ -1,9 +1,10 @@
 use clap::Args;
-use mfm_app::{AppError, AppServices, FeatureCatalog, FeatureExecutionResult, FeatureRequest};
+use mfm_app::{FeatureCatalog, FeatureExecutionResult, FeatureRequest};
 
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
+use crate::support::app_services::{command_error_from_app_error, make_app_services};
 use crate::support::run_stores::{make_stores, RunStoresArgs};
 
 #[derive(Args)]
@@ -28,10 +29,6 @@ pub async fn execute(ctx: &CommandContext, args: &SnapshotArgs) -> ! {
     handle_command_result(result, &ctx.output_format);
 }
 
-fn command_error_from_app_error(err: AppError) -> CommandError {
-    CommandError::new(err.code, err.message)
-}
-
 async fn execute_internal(args: &SnapshotArgs) -> CommandResult<FeatureExecutionResult> {
     let tokens: serde_json::Value = serde_json::from_str(&args.tokens_json)
         .map_err(|_| CommandError::new("InvalidJson", "Failed to parse --tokens-json as JSON"))?;
@@ -48,8 +45,7 @@ async fn execute_internal(args: &SnapshotArgs) -> CommandResult<FeatureExecution
     )
     .await?;
 
-    let bundle = mfm_app::make_engine_bundle();
-    let services = AppServices::new(bundle, stores.events, stores.artifacts);
+    let services = make_app_services(stores);
 
     let catalog = FeatureCatalog::with_builtins();
     let result = catalog

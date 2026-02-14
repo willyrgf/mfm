@@ -6,6 +6,7 @@ use clap::Args;
 use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 #[derive(Args)]
 pub struct ImportArgs {
@@ -78,16 +79,23 @@ async fn execute_internal(
     match args.import_type {
         ImportType::PrivateKey => {
             let private_key = if args.stdin {
-                input::read_input("", true)
-                    .map_err(|e| CommandError::new("InputError", e.to_string()))?
+                Zeroizing::new(
+                    input::read_input("", true)
+                        .map_err(|e| CommandError::new("InputError", e.to_string()))?,
+                )
             } else {
-                input::read_input("Enter private key (hex): ", false)
-                    .map_err(|e| CommandError::new("InputError", e.to_string()))?
+                Zeroizing::new(
+                    input::read_input("Enter private key (hex): ", false)
+                        .map_err(|e| CommandError::new("InputError", e.to_string()))?,
+                )
             };
 
             // Validate private key format EARLY
-            let private_key = private_key.strip_prefix("0x").unwrap_or(&private_key);
-            if private_key.len() != 64 {
+            let private_key_for_import = private_key
+                .as_str()
+                .strip_prefix("0x")
+                .unwrap_or(private_key.as_str());
+            if private_key_for_import.len() != 64 {
                 return Err(CommandError::new(
                     "InvalidPrivateKey",
                     "Private key must be 64 hex characters",
@@ -95,7 +103,7 @@ async fn execute_internal(
             }
 
             // Check if it's valid hex
-            if hex::decode(private_key).is_err() {
+            if hex::decode(private_key_for_import).is_err() {
                 return Err(CommandError::new(
                     "InvalidPrivateKey",
                     "Private key must be valid hexadecimal",
@@ -117,7 +125,7 @@ async fn execute_internal(
             });
 
             let key_id = keystore
-                .import_private_key(Some(label.clone()), private_key)
+                .import_private_key(Some(label.clone()), private_key_for_import)
                 .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
 
             // Get the imported key info
@@ -140,11 +148,15 @@ async fn execute_internal(
         }
         ImportType::Mnemonic => {
             let mnemonic = if args.stdin {
-                input::read_input("", true)
-                    .map_err(|e| CommandError::new("InputError", e.to_string()))?
+                Zeroizing::new(
+                    input::read_input("", true)
+                        .map_err(|e| CommandError::new("InputError", e.to_string()))?,
+                )
             } else {
-                input::read_input("Enter mnemonic phrase: ", false)
-                    .map_err(|e| CommandError::new("InputError", e.to_string()))?
+                Zeroizing::new(
+                    input::read_input("Enter mnemonic phrase: ", false)
+                        .map_err(|e| CommandError::new("InputError", e.to_string()))?,
+                )
             };
 
             // Basic mnemonic validation EARLY
@@ -172,7 +184,7 @@ async fn execute_internal(
             let key_id = keystore
                 .import_mnemonic(
                     Some(label.clone()),
-                    &mnemonic,
+                    mnemonic.as_str(),
                     &args.derivation_path,
                     args.passphrase.as_deref(),
                 )

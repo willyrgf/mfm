@@ -1,11 +1,10 @@
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
+use crate::support::app_services::{command_error_from_app_error, make_app_services};
 use crate::support::run_stores::{make_stores, RunStoresArgs};
 use clap::Args;
-use mfm_app::{AppServices, RunStatusResponse};
-
-use super::engine_bundle::{command_error_from_app_error, make_engine_bundle};
+use mfm_app::RunStatusResponse;
 
 #[derive(Args)]
 pub struct StatusArgs {
@@ -31,8 +30,7 @@ async fn execute_internal(args: &StatusArgs) -> CommandResult<RunStatusResponse>
     )
     .await?;
 
-    let bundle = make_engine_bundle();
-    let services = AppServices::new(bundle, stores.events, stores.artifacts);
+    let services = make_app_services(stores);
 
     let response = services
         .run_status(&args.run_id)

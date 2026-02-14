@@ -30,6 +30,9 @@ pub enum KeystoreError {
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    #[error("Operation not permitted: {0}")]
+    OperationNotPermitted(String),
 }
 
 // Convert from common error types

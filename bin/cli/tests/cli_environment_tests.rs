@@ -185,3 +185,173 @@ fn test_output_mode_environment_variable() {
         .success()
         .stdout(predicate::str::contains("output-test"));
 }
+
+#[test]
+fn test_password_file_environment_variable_precedence() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let keystore_path = temp_dir.path().join("test_keystore");
+    let password_file = temp_dir.path().join("pw.txt");
+    std::fs::write(&password_file, "correct_password_from_file\n").unwrap();
+
+    let mut create_cmd = Command::cargo_bin("mfm_cli").unwrap();
+    create_cmd.env("MFM_KEYSTORE_PASSWORD", "correct_password_from_file");
+    create_cmd.env("MFM_INTEGRATION_TEST", "1");
+    create_cmd.args(&[
+        "keystore",
+        "import",
+        "--import-type",
+        "privatekey",
+        "--label",
+        "file-priority",
+        "--keystore",
+        keystore_path.to_str().unwrap(),
+        "--stdin",
+    ]);
+    create_cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+    create_cmd.assert().success();
+
+    let mut list_cmd = Command::cargo_bin("mfm_cli").unwrap();
+    list_cmd.env(
+        "MFM_KEYSTORE_PASSWORD_FILE",
+        password_file.to_str().unwrap(),
+    );
+    list_cmd.env("MFM_KEYSTORE_PASSWORD", "wrong_password");
+    list_cmd.env("MFM_INTEGRATION_TEST", "1");
+    list_cmd.args(&[
+        "keystore",
+        "list",
+        "--keystore",
+        keystore_path.to_str().unwrap(),
+    ]);
+
+    list_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("file-priority"));
+}
+
+#[test]
+fn test_plain_password_env_emits_warning() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let keystore_path = temp_dir.path().join("test_keystore");
+
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    cmd.env("MFM_KEYSTORE_PASSWORD", "warning_password_123");
+    cmd.env("MFM_INTEGRATION_TEST", "1");
+    cmd.args(&[
+        "keystore",
+        "import",
+        "--import-type",
+        "privatekey",
+        "--label",
+        "warn-test",
+        "--keystore",
+        keystore_path.to_str().unwrap(),
+        "--stdin",
+    ]);
+    cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+
+    cmd.assert().success().stderr(predicate::str::contains(
+        "Warning: MFM_KEYSTORE_PASSWORD may expose secrets; prefer MFM_KEYSTORE_PASSWORD_FILE.",
+    ));
+}
+
+#[test]
+fn test_password_file_empty_fails_with_explicit_error() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let keystore_path = temp_dir.path().join("test_keystore");
+    let password_file = temp_dir.path().join("empty_pw.txt");
+    std::fs::write(&password_file, "").unwrap();
+
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    cmd.env(
+        "MFM_KEYSTORE_PASSWORD_FILE",
+        password_file.to_str().unwrap(),
+    );
+    cmd.env("MFM_INTEGRATION_TEST", "1");
+    cmd.args(&[
+        "keystore",
+        "import",
+        "--import-type",
+        "privatekey",
+        "--label",
+        "empty-file",
+        "--keystore",
+        keystore_path.to_str().unwrap(),
+        "--stdin",
+    ]);
+    cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("was empty"));
+}
+
+#[test]
+fn test_password_file_missing_fails() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let keystore_path = temp_dir.path().join("test_keystore");
+    let missing_path = temp_dir.path().join("does_not_exist_pw.txt");
+
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    cmd.env("MFM_KEYSTORE_PASSWORD_FILE", missing_path.to_str().unwrap());
+    cmd.env("MFM_INTEGRATION_TEST", "1");
+    cmd.args(&[
+        "keystore",
+        "import",
+        "--import-type",
+        "privatekey",
+        "--label",
+        "missing-file",
+        "--keystore",
+        keystore_path.to_str().unwrap(),
+        "--stdin",
+    ]);
+    cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+
+    cmd.assert().failure();
+}
+
+#[test]
+fn test_password_file_precedence_suppresses_plain_env_warning() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let keystore_path = temp_dir.path().join("test_keystore");
+    let password_file = temp_dir.path().join("pw.txt");
+    std::fs::write(&password_file, "file_pw_123456\n").unwrap();
+
+    let mut create_cmd = Command::cargo_bin("mfm_cli").unwrap();
+    create_cmd.env("MFM_KEYSTORE_PASSWORD", "file_pw_123456");
+    create_cmd.env("MFM_INTEGRATION_TEST", "1");
+    create_cmd.args(&[
+        "keystore",
+        "import",
+        "--import-type",
+        "privatekey",
+        "--label",
+        "warn-suppress",
+        "--keystore",
+        keystore_path.to_str().unwrap(),
+        "--stdin",
+    ]);
+    create_cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+    create_cmd.assert().success();
+
+    let mut list_cmd = Command::cargo_bin("mfm_cli").unwrap();
+    list_cmd.env(
+        "MFM_KEYSTORE_PASSWORD_FILE",
+        password_file.to_str().unwrap(),
+    );
+    list_cmd.env("MFM_KEYSTORE_PASSWORD", "wrong_but_should_not_warn");
+    list_cmd.env("MFM_INTEGRATION_TEST", "1");
+    list_cmd.args(&[
+        "keystore",
+        "list",
+        "--keystore",
+        keystore_path.to_str().unwrap(),
+    ]);
+
+    list_cmd
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Warning: MFM_KEYSTORE_PASSWORD").not());
+}

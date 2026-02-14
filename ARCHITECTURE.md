@@ -179,6 +179,7 @@ Owns domain workflows:
 - composes collectors + storages + machine runtime
 - reuses shared primitives from `crates/ops/common/` when possible
 - contains op-specific states and tests
+- includes keystore tx signing/send workflows in `crates/ops/keystore-tx-op`
 
 In practice:
 - ops typically implement an `Operation` trait (recommended to live in `crates/sdk/`)
@@ -189,12 +190,14 @@ Owns “glue” for binaries and integrations:
 - op registry
 - pipeline builder convenience API
 - run launcher / resume helpers (thin wrapper around machine + stores)
+- single-op execution/report extraction helpers for thin CLI/API adapters
 
 ### `bin/cli/` and `bin/rest-api/`
 Thin wrappers:
 - parse requests
 - start/resume runs via sdk
 - render stable outputs
+- no tx signing/send domain logic in binaries (`keystore tx-sign`/`tx-send-raw` run `keystore_tx_sign`/`keystore_tx_send_raw` ops)
 
 ---
 

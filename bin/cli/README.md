@@ -23,9 +23,10 @@ mfm_cli/
 │   ├── commands/
 │   │   ├── mod.rs         # Top-level clap CLI + dispatch
 │   │   ├── result.rs      # Shared command result/error types
-│   │   ├── keystore/      # `keystore` subcommands (import, list, delete)
+│   │   ├── keystore/      # `keystore` subcommands (import, list, delete, tx-sign, tx-send-raw)
 │   │   └── run/           # `run` subcommands
 │   ├── support/
+│   │   ├── app_services.rs # Shared AppServices + error-adapter helpers
 │   │   ├── input.rs       # Input prompts/password helpers
 │   │   ├── keystore_manager.rs # Keystore path/unlock/create helpers
 │   │   └── run_stores.rs  # Event/artifact store construction helpers
@@ -176,6 +177,72 @@ mfm_cli keystore delete [OPTIONS] (<ID> | --by-label <LABEL>)
   mfm_cli keystore delete --by-label "my-main-wallet" --yes
   ```
 
+### `keystore tx-sign`
+
+Signs an EIP-1559 transaction payload using a key already stored in the keystore and writes the signed raw transaction to a file.
+
+Implementation note: this command is a thin wrapper over a run-backed op (`op_id = "keystore_tx_sign"`, `op_version = "v1"`). The CLI maps args to op input and calls `mfm_sdk::unstable::execute_single_op_report` to launch and decode the final report payload.
+
+The command output includes metadata only (`from`, `to`, `nonce`, `chain_id`, `tx_type`, `payload_hash`, `out_path`) and intentionally excludes raw tx hex and signature bytes.
+
+**Usage:**
+```sh
+mfm_cli keystore tx-sign [OPTIONS]
+```
+
+**Required options:**
+- Key selector: `--id <UUID>` or `--by-label <LABEL>`
+- `--to <ADDRESS>`
+- `--value-wei <DEC_OR_0X_HEX>`
+- `--chain-id <U64>`
+- `--nonce <U64>`
+- `--max-fee-per-gas <DEC_OR_0X_HEX>`
+- `--max-priority-fee-per-gas <DEC_OR_0X_HEX>`
+- `--gas-limit <U64>`
+- `--out <PATH>`
+
+**Optional options:**
+- `--data <0xHEX>` (default: `0x`)
+- `--keystore <PATH>`
+
+**Example:**
+```sh
+mfm_cli --output-format json keystore tx-sign \
+  --by-label "my-main-wallet" \
+  --to 0x1111111111111111111111111111111111111111 \
+  --value-wei 1000000000000000 \
+  --chain-id 31337 \
+  --nonce 0 \
+  --max-fee-per-gas 2000000000 \
+  --max-priority-fee-per-gas 1000000000 \
+  --gas-limit 21000 \
+  --out /tmp/signed.tx
+```
+
+### `keystore tx-send-raw`
+
+Submits a signed raw transaction from file using `eth_sendRawTransaction`.
+
+Implementation note: this command is a thin wrapper over a run-backed op (`op_id = "keystore_tx_send_raw"`, `op_version = "v1"`). The CLI maps args to op input and calls `mfm_sdk::unstable::execute_single_op_report` to launch and decode the final report payload.
+
+The command output includes `tx_hash`, `rpc_url_host`, and `submitted_at`; it does not print raw tx payload contents.
+
+**Usage:**
+```sh
+mfm_cli keystore tx-send-raw --in <PATH> [--rpc-url <URL>]
+```
+
+**Key options:**
+- `--in <PATH>`: file containing 0x-prefixed raw signed tx hex
+- `--rpc-url <URL>`: JSON-RPC URL (falls back to `MFM_EVM_RPC_URL`)
+
+**Example:**
+```sh
+mfm_cli --output-format json keystore tx-send-raw \
+  --rpc-url http://127.0.0.1:8545 \
+  --in /tmp/signed.tx
+```
+
 ## Run Commands (Experimental)
 
 Run operations are available under the `run` subcommand.
@@ -186,6 +253,8 @@ These commands are intended for parity/integration testing and early workflows. 
 - a filesystem artifact store (defaults to `$MFM_ARTIFACT_ROOT` or `~/.mfm/run_artifacts`, or use `--artifact-root`)
 
 Run commands and REST API run endpoints are backed by the same shared feature catalog/runtime layer (`mfm-app`) to keep both entrypoints behaviorally aligned.
+
+Keystore tx commands are also run-backed and use the same shared op registry; they intentionally keep domain execution out of `bin/cli`. They use ephemeral in-memory event storage (no `DATABASE_URL` requirement) plus filesystem artifacts.
 
 ### `run start`
 
