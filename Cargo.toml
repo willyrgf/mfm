@@ -22,6 +22,7 @@ members = [
 	"crates/storages/event-store-mem",
 	"crates/storages/event-store-postgres",
 	"crates/ops/keystore-op",
+	"crates/ops/keystore-tx-op",
 	"crates/ops/evm-read-op",
 	"crates/ops/evm-write-op",
 	"crates/ops/portfolio-tracker-op",

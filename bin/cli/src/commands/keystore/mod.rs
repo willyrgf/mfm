@@ -5,6 +5,7 @@ use super::CommandContext;
 pub mod delete;
 pub mod import;
 pub mod list;
+mod run_op;
 pub mod tx_send_raw;
 pub mod tx_sign;
 

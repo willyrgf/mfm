@@ -21,7 +21,7 @@ Environment variables:
 - `MFM_ARTIFACT_BACKEND`: `fs` (default) or `s3`
 - `MFM_ARTIFACT_ROOT`: artifact root dir when using `fs` (default: `~/.mfm/run_artifacts`)
 - `MFM_S3_ENSURE_BUCKET`: if set (any value), ensure the S3 bucket exists on startup
-- `MFM_EVM_RPC_URL`: EVM JSON-RPC URL (required for `op_id = "evm_read"`)
+- `MFM_EVM_RPC_URL`: EVM JSON-RPC URL (used by EVM/tx ops when request payload does not override `rpc_url`)
 - `MFM_EVM_RPC_AUTHORIZATION`: optional Authorization header value for the EVM RPC transport
 - `MFM_PORTFOLIO_TOKENS_JSON`: optional JSON array of ERC-20 token specs used by `feature_id = "portfolio.snapshot"`
 
@@ -77,8 +77,12 @@ Supported `op_id` values (current):
 
 - `proof` (default)
 - `evm_read`
+- `keystore_tx_sign`
+- `keystore_tx_send_raw`
 - `portfolio_tracker`
 - `nix_app`
+
+There are no dedicated keystore tx endpoints. Use generic run APIs (`/v1/runs/start`, `/v1/runs/:run_id/resume`) with those `op_id` values.
 
 Supported `feature_id` values (current):
 

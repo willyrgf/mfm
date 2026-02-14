@@ -180,6 +180,8 @@ mfm_cli keystore delete [OPTIONS] (<ID> | --by-label <LABEL>)
 
 Signs an EIP-1559 transaction payload using a key already stored in the keystore and writes the signed raw transaction to a file.
 
+Implementation note: this command is a thin wrapper over a run-backed op (`op_id = "keystore_tx_sign"`, `op_version = "v1"`). The CLI maps args to op input, starts the run, and renders the final report payload.
+
 The command output includes metadata only (`from`, `to`, `nonce`, `chain_id`, `tx_type`, `payload_hash`, `out_path`) and intentionally excludes raw tx hex and signature bytes.
 
 **Usage:**
@@ -220,6 +222,8 @@ mfm_cli --output-format json keystore tx-sign \
 
 Submits a signed raw transaction from file using `eth_sendRawTransaction`.
 
+Implementation note: this command is a thin wrapper over a run-backed op (`op_id = "keystore_tx_send_raw"`, `op_version = "v1"`). The CLI maps args to op input, starts the run, and renders the final report payload.
+
 The command output includes `tx_hash`, `rpc_url_host`, and `submitted_at`; it does not print raw tx payload contents.
 
 **Usage:**
@@ -248,6 +252,8 @@ These commands are intended for parity/integration testing and early workflows. 
 - a filesystem artifact store (defaults to `$MFM_ARTIFACT_ROOT` or `~/.mfm/run_artifacts`, or use `--artifact-root`)
 
 Run commands and REST API run endpoints are backed by the same shared feature catalog/runtime layer (`mfm-app`) to keep both entrypoints behaviorally aligned.
+
+Keystore tx commands are also run-backed and use the same shared op registry; they intentionally keep domain execution out of `bin/cli`.
 
 ### `run start`
 

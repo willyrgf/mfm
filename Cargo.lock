@@ -1898,11 +1898,13 @@ dependencies = [
  "mfm-app",
  "mfm-artifact-store-fs",
  "mfm-collectors-evm-jsonrpc-http",
+ "mfm-event-store-mem",
  "mfm-event-store-postgres",
  "mfm-machine",
  "mfm-op-evm-read",
  "mfm-op-evm-write",
  "mfm-op-keystore",
+ "mfm-op-keystore-tx",
  "mfm-op-nix-app",
  "mfm-op-proof",
  "mfm-sdk",
@@ -1934,6 +1936,7 @@ dependencies = [
  "mfm-machine",
  "mfm-op-evm-read",
  "mfm-op-evm-write",
+ "mfm-op-keystore-tx",
  "mfm-op-nix-app",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
@@ -2093,13 +2096,20 @@ dependencies = [
 name = "mfm-op-common"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "async-trait",
+ "chrono",
+ "hex",
+ "k256",
  "mfm-collectors-evm",
  "mfm-machine",
+ "mfm-op-keystore",
  "mfm-sdk",
  "serde",
  "serde_json",
  "tokio",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2139,6 +2149,25 @@ name = "mfm-op-keystore"
 version = "0.1.0"
 dependencies = [
  "mfm_core",
+]
+
+[[package]]
+name = "mfm-op-keystore-tx"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "mfm-machine",
+ "mfm-op-common",
+ "mfm-op-keystore",
+ "mfm-sdk",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]

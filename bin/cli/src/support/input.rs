@@ -39,3 +39,7 @@ pub fn confirm(prompt: &str) -> Result<bool, Box<dyn std::error::Error>> {
         }
     }
 }
+
+pub fn print_warning(message: &str) {
+    eprintln!("Warning: {message}");
+}

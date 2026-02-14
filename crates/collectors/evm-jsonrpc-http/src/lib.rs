@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 
 use mfm_collectors_evm::JsonRpcCall;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
@@ -92,19 +93,18 @@ struct EvmJsonRpcHttpTransport {
     next_id: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct EvmTransportRequest {
+    method: String,
+    params: serde_json::Value,
+    #[serde(default)]
+    rpc_url: Option<String>,
+}
+
 #[async_trait]
 impl LiveIoTransport for EvmJsonRpcHttpTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
-        let Some(url) = &self.cfg.rpc_url else {
-            return Err(IoError::Transport(info(
-                CODE_EVM_RPC_URL_MISSING,
-                ErrorCategory::Rpc,
-                false,
-                "evm rpc url is not configured",
-            )));
-        };
-
-        let req: JsonRpcCall = serde_json::from_value(call.request).map_err(|_| {
+        let req: EvmTransportRequest = serde_json::from_value(call.request).map_err(|_| {
             IoError::Other(info(
                 CODE_EVM_REQUEST_INVALID,
                 ErrorCategory::ParsingInput,
@@ -112,6 +112,17 @@ impl LiveIoTransport for EvmJsonRpcHttpTransport {
                 "invalid evm jsonrpc request",
             ))
         })?;
+
+        let rpc_url = req.rpc_url.or_else(|| self.cfg.rpc_url.clone());
+        let Some(url) = rpc_url else {
+            return Err(IoError::Transport(info(
+                CODE_EVM_RPC_URL_MISSING,
+                ErrorCategory::Rpc,
+                false,
+                "evm rpc url is not configured",
+            )));
+        };
+        let req = JsonRpcCall::new(req.method, req.params);
 
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -325,6 +336,34 @@ mod tests {
         match err {
             IoError::Other(info) => assert_eq!(info.code.0, CODE_EVM_REQUEST_INVALID),
             other => panic!("expected Other, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_uses_per_request_rpc_url_override() {
+        let factory = EvmJsonRpcHttpTransportFactory::new(EvmJsonRpcHttpConfig {
+            rpc_url: None,
+            authorization: None,
+            timeout: Duration::from_millis(50),
+        });
+        let mut t = factory.make(env());
+
+        let err = t
+            .call(IoCall {
+                namespace: "evm".to_string(),
+                request: serde_json::json!({
+                    "method": "eth_chainId",
+                    "params": [],
+                    "rpc_url": "http://127.0.0.1:9",
+                }),
+                fact_key: None,
+            })
+            .await
+            .expect_err("expected connection failure");
+
+        match err {
+            IoError::Transport(info) => assert_eq!(info.code.0, CODE_EVM_HTTP_REQUEST_FAILED),
+            other => panic!("expected Transport, got: {other:?}"),
         }
     }
 }

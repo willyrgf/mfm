@@ -33,6 +33,7 @@ use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngin
 use mfm_machine::stores::{ArtifactStore, EventStore};
 use mfm_op_evm_read::EvmReadOp;
 use mfm_op_evm_write::{EvmConfigureOp, EvmContractFromNixOp, EvmDeployOp, EvmValidateOp};
+use mfm_op_keystore_tx::{KeystoreTxSendRawOp, KeystoreTxSignOp};
 use mfm_op_nix_app::nix_exec_transport::NixFlakeTransportFactory;
 use mfm_op_nix_app::NixAppOp;
 use mfm_op_portfolio_tracker::PortfolioTrackerOp;
@@ -377,6 +378,8 @@ pub struct EngineBundle {
 pub fn make_engine_bundle() -> EngineBundle {
     let mut reg = HashMapOperationRegistry::default();
     reg.register(Arc::new(ProofOp::default()));
+    reg.register(Arc::new(KeystoreTxSignOp));
+    reg.register(Arc::new(KeystoreTxSendRawOp));
     reg.register(Arc::new(EvmReadOp));
     reg.register(Arc::new(EvmContractFromNixOp));
     reg.register(Arc::new(EvmDeployOp));
