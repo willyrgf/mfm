@@ -171,6 +171,11 @@ let
 
     ${portAssignments}
 
+    # Export canonical slot/env hints so child hook launchers do not need to
+    # re-default slot selection when callers already resolved slot/env once.
+    echo "export ${slotVar}=$SLOT"
+    echo "export ${envVar}=$ENV"
+    echo "export NIXFIED_ENV=$SLOT"
     echo "SLOT=$SLOT"
     echo "ENV=$ENV"
   '';
@@ -240,6 +245,11 @@ let
       ''
     ) serviceSocketNames}
 
+    # Export canonical slot/env hints so child hook launchers do not need to
+    # re-default slot selection when callers already resolved slot/env once.
+    echo "export ${slotVar}=$SLOT"
+    echo "export ${envVar}=$ENV"
+    echo "export NIXFIED_ENV=$SLOT"
     echo "SLOT=$SLOT"
     echo "ENV=$ENV"
     echo "ENV_OFFSET=$ENV_OFFSET"

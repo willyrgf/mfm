@@ -1022,6 +1022,114 @@ let
     assert_contains "$FIX_SVC_LOG" "INFO: fixture service start name=postgres profile=test"
     assert_contains "$FIX_SVC_LOG" "OK: fixture service ready service=postgres profile=test"
 
+    log "fixtures keep_running policy inference"
+    FIX_KEEP_POLICY_DIR="$WORKDIR/fixtures-keep-policy"
+    mkdir -p "$FIX_KEEP_POLICY_DIR"
+    FIX_KEEP_POLICY_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      conf = import ./tests/framework/fixtures/modules/conf.nix { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base conf;
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; minio = null; reth = null; helios = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+      fixtures = {
+        services = [
+          {
+            name = "postgres";
+            profile = "test";
+            timeout = 10;
+            interval = 1;
+            logs = false;
+          }
+        ];
+      };
+      fixturePrelude = lib.fixtures.renderPrelude {
+        inherit fixtures;
+        contextName = "fixtures-keep-policy";
+        defaultProfile = "default";
+        defaultLogs = false;
+      };
+    in
+    lib.mkAppScript {
+      name = "fixtures-keep-policy";
+      env = {
+        "''${project.project.envVar}" = "test";
+        "''${project.project.slotVar}" = "0";
+      };
+      useDeps = false;
+      script = '''
+        fail() {
+          echo "FAIL: $*" >&2
+          exit 1
+        }
+
+        fixture_start_service() {
+          local service="$1"
+          local keep_running="''${6:-missing}"
+          echo "service=$service keep_running=$keep_running" >> "$PWD/keep-values.log"
+          return 0
+        }
+
+        run_case() {
+          local label="$1"
+          local expected="$2"
+          shift 2 || true
+
+          unset SERVICE_OWNER_SCOPE SERVICE_REUSE_POLICY SERVICE_DISCOVERY_SCOPE
+          while [ "$#" -gt 0 ]; do
+            export "$1"
+            shift
+          done
+
+          ''${fixturePrelude}
+
+          local actual
+          actual="$(tail -n 1 "$PWD/keep-values.log" | sed -n 's/^.*keep_running=//p')"
+          [ "$actual" = "$expected" ] || fail "case=$label expected keep_running=$expected got=$actual"
+          echo "OK: fixture keep policy $label keep_running=$actual"
+        }
+
+        : > "$PWD/keep-values.log"
+
+        run_case default 0
+        run_case reuse-same-slot 1 SERVICE_REUSE_POLICY=same-slot
+        run_case reuse-cross-run 1 SERVICE_REUSE_POLICY=cross-run
+        run_case reuse-same-root 0 SERVICE_REUSE_POLICY=same-root
+        run_case owner-persistent 1 SERVICE_OWNER_SCOPE=persistent
+        run_case owner-ephemeral 0 SERVICE_OWNER_SCOPE=ephemeral SERVICE_REUSE_POLICY=cross-run
+        run_case discovery-global 1 SERVICE_DISCOVERY_SCOPE=global
+        run_case discovery-local 0 SERVICE_DISCOVERY_SCOPE=local
+      ''';
+    }
+    NIX
+    )
+
+    FIX_KEEP_POLICY_SCRIPT=$(build_expr "$FIX_KEEP_POLICY_EXPR")
+    FIX_KEEP_POLICY_LOG="$WORKDIR/fixtures-keep-policy.log"
+    set +e
+    (cd "$FIX_KEEP_POLICY_DIR" && "$FIX_KEEP_POLICY_SCRIPT" >"$FIX_KEEP_POLICY_LOG" 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      echo "Fixtures keep_running policy fixture failed (rc=$RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 100 lines):" >&2
+      print_log_tail "$FIX_KEEP_POLICY_LOG" 100
+      exit "$RC"
+    fi
+    assert_contains "$FIX_KEEP_POLICY_LOG" "OK: fixture keep policy default keep_running=0"
+    assert_contains "$FIX_KEEP_POLICY_LOG" "OK: fixture keep policy reuse-same-slot keep_running=1"
+    assert_contains "$FIX_KEEP_POLICY_LOG" "OK: fixture keep policy reuse-cross-run keep_running=1"
+    assert_contains "$FIX_KEEP_POLICY_LOG" "OK: fixture keep policy reuse-same-root keep_running=0"
+    assert_contains "$FIX_KEEP_POLICY_LOG" "OK: fixture keep policy owner-persistent keep_running=1"
+    assert_contains "$FIX_KEEP_POLICY_LOG" "OK: fixture keep policy owner-ephemeral keep_running=0"
+    assert_contains "$FIX_KEEP_POLICY_LOG" "OK: fixture keep policy discovery-global keep_running=1"
+    assert_contains "$FIX_KEEP_POLICY_LOG" "OK: fixture keep policy discovery-local keep_running=0"
+
     log "fixture_start_service"
     FIX_START_DIR="$WORKDIR/fixture-start-service"
     mkdir -p "$FIX_START_DIR"
