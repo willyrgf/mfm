@@ -1,59 +1,64 @@
 # Thin-Layer Alignment Audit
 
 Date: 2026-02-14
-Status: Audit + Option A implementation (active, major milestones completed)
+Status: Option A checkpoint implemented; hardening in progress (`B6` convergence + parity validation)
 
-## 0. Implementation Update (Option A)
+## 0. Implementation Update (Option A Checkpoint)
 
-This document started as a pure audit. Since then, Option A implementation has landed in multiple phases and several findings below are now fully addressed:
+This document now reflects landed Option A work, not just planned work.
 
-- `B1` keystore admin commands (`import/list/delete`) were moved to run-backed ops:
+Closed findings in this checkpoint:
+
+- `B1` keystore admin commands (`import/list/delete`) are now run-backed ops from CLI wrappers:
   - `bin/cli/src/commands/keystore/import.rs:103`
   - `bin/cli/src/commands/keystore/list.rs:83`
   - `bin/cli/src/commands/keystore/delete.rs:64`
-  - `crates/ops/keystore-admin-op/src/lib.rs:113`
-- `B6` reusable state-library adoption was advanced with shared keystore admin states in `ops/common`:
-  - `crates/ops/common/src/states/mod.rs:2`
+  - `crates/ops/keystore-admin-op/src/lib.rs:101`
+- `B2` deploy/configure/validate template semantics moved behind a composed op:
+  - `crates/ops/evm-deploy-configure-validate-op/src/lib.rs:26`
+  - `crates/app/src/lib.rs:975`
+- `B2` portfolio snapshot normalization/orchestration moved into the op expand/state graph:
+  - `crates/ops/portfolio-tracker-op/src/lib.rs:302`
+  - `crates/ops/portfolio-tracker-op/src/lib.rs:370`
+  - `crates/app/src/lib.rs:706`
+- `B4/B5` state execution paths for keystore tx and signed deploy now route side effects through local IO namespaces:
+  - `crates/ops/keystore-tx-op/src/lib.rs:275`
+  - `crates/ops/keystore-tx-op/src/lib.rs:350`
+  - `crates/ops/evm-write-op/src/lib.rs:962`
+  - `crates/ops/common/src/local_io.rs:47`
+  - `crates/app/src/lib.rs:431`
+- `B6` reusable shared states were expanded for keystore admin flows:
   - `crates/ops/common/src/states/keystore_admin.rs`
-- `B4/B5` ambient IO was moved out of keystore admin/tx and signed deploy execution states into a dedicated local IO transport:
-  - `crates/ops/common/src/local_io.rs`
-  - `crates/app/src/lib.rs`
-  - `crates/ops/keystore-tx-op/src/lib.rs`
-  - `crates/ops/common/src/states/keystore_admin.rs`
-  - `crates/ops/evm-write-op/src/lib.rs`
-- `B2` portfolio snapshot orchestration moved into op layer; app now starts op and reads typed report:
-  - `crates/ops/portfolio-tracker-op/src/lib.rs`
-  - `crates/app/src/lib.rs`
-- `B2` deploy/configure/validate template assembly moved behind a composed op (`evm_deploy_configure_validate`) registered in app:
-  - `crates/ops/evm-deploy-configure-validate-op/src/lib.rs`
-  - `crates/app/src/lib.rs`
+  - `crates/ops/keystore-admin-op/src/lib.rs:12`
 
-Current residual work is mainly broader `B6` convergence: increasing reusable shared states beyond keystore flows so more operations compose common state primitives by default.
+Remaining focus:
 
-Note: sections 4-7 below capture the original audit snapshot. Use this section (`0`) as the source of truth for what has already been refactored.
+- Broader `B6` convergence for EVM deploy/configure/validate and portfolio state reuse.
+- Full parity validation gates across `check/test/ci basic/ci parity`.
+- Add an architecture guard to prevent new ambient IO in state handlers outside local IO transport.
 
 ## 1. Contract Baseline
 
-The audit scored current implementation against these explicit contract statements:
+The audit scored implementation against these explicit statements:
 
-- `REDESIGN.md:52` says binaries are thin wrappers that start/resume runs.
-- `REDESIGN.md:59` says everything executes inside a state machine.
-- `REDESIGN.md:220` says binaries are thin wrappers.
-- `REDESIGN.md:527` says ops expand into state graphs.
-- `REDESIGN.md:830` and `REDESIGN.md:836` move state handlers to `IoProvider` and move CLI/REST to start/resume surfaces.
-- `ARCHITECTURE.md:195` says `bin/cli` and `bin/rest-api` are thin wrappers.
-- `ENFORCE_BINS_THIN_LAYER.md:7` says binaries are thin wrappers.
-- `ENFORCE_BINS_THIN_LAYER.md:8` says business execution must happen inside state-machine runs.
+- `REDESIGN.md:52` binaries are thin wrappers that start/resume runs.
+- `REDESIGN.md:59` everything executes inside a state machine.
+- `REDESIGN.md:220` binaries are thin wrappers.
+- `REDESIGN.md:527` ops expand into state graphs.
+- `REDESIGN.md:830` and `REDESIGN.md:836` route state side effects through IO provider and keep CLI/REST as start/resume surfaces.
+- `ARCHITECTURE.md:195` `bin/cli` and `bin/rest-api` are thin wrappers.
+- `ENFORCE_BINS_THIN_LAYER.md:7` binaries are thin wrappers.
+- `ENFORCE_BINS_THIN_LAYER.md:8` business execution must happen inside state-machine runs.
 
 ## 2. Audit Rubric
 
-Boundary tags used in findings:
+Boundary tags:
 
 - `B1`: Business logic in binary layer (`bin/cli` or `bin/rest-api`).
 - `B2`: Business workflow logic in app adapter layer (`crates/app`).
 - `B3`: Operation packaging/ownership ambiguity (ops boundary unclear).
 - `B4`: Ambient IO in state/business path (`std::fs`, direct env/stdin/password prompt) where IO abstraction should own execution effects.
-- `B5`: Secret handling risk at boundaries (env/password prompt/file path handling outside intended abstraction).
+- `B5`: Secret handling risk at boundaries.
 - `B6`: Reusable state-library gap (shared state primitives exist but are not yet the dominant composition unit for ops).
 
 Status labels:
@@ -61,7 +66,8 @@ Status labels:
 - `Aligned`
 - `Partially aligned`
 - `Not aligned`
-- `Contract gap` (flow is run-backed but still violates execution-contract details)
+- `Contract gap`
+- `Packaging gap`
 
 ## 3. Coverage
 
@@ -70,16 +76,16 @@ Audited surfaces:
 - CLI command surfaces: 13
 - REST routes: 9
 - Feature IDs: 7
-- Registered runtime ops: 10
-- Shared reusable state implementations in `ops/common`: 4
+- Registered runtime ops: 14
+- Shared reusable state implementations in `ops/common`: 7
 - Op-local state implementations across op crates: 16
 
 Primary entry/registry evidence:
 
-- CLI command roots: `bin/cli/src/commands/mod.rs:42`, `bin/cli/src/commands/keystore/mod.rs:12`, `bin/cli/src/commands/run/mod.rs:13`, `bin/cli/src/commands/portfolio/mod.rs:8`
-- REST route map: `bin/rest-api/src/lib.rs:145`
-- Feature registry: `crates/app/src/lib.rs:1163`
-- Runtime op registry: `crates/app/src/lib.rs:378`
+- CLI command roots: `bin/cli/src/commands/mod.rs:42`, `bin/cli/src/commands/keystore/mod.rs:12`, `bin/cli/src/commands/run/mod.rs:12`, `bin/cli/src/commands/portfolio/mod.rs:7`
+- REST route map: `bin/rest-api/src/lib.rs:146`
+- Feature registry: `crates/app/src/lib.rs:1072`
+- Runtime op registry: `crates/app/src/lib.rs:384`
 
 ## 4. Conformance Matrix
 
@@ -87,157 +93,137 @@ Primary entry/registry evidence:
 
 | CLI Surface | Execution Path Today | Run-backed | State-composed | Status | Evidence |
 |---|---|---:|---:|---|---|
-| `mfm keystore import` | CLI command reads secrets/input, unlocks keystore, imports key directly | No | No | Not aligned (`B1`) | `bin/cli/src/commands/keystore/import.rs:78`, `bin/cli/src/commands/keystore/import.rs:114`, `bin/cli/src/commands/keystore/import.rs:127`, `bin/cli/src/support/keystore_manager.rs:31`, `bin/cli/src/support/keystore_manager.rs:71` |
-| `mfm keystore list` | CLI directly unlocks keystore and calls `list_keys` | No | No | Not aligned (`B1`) | `bin/cli/src/commands/keystore/list.rs:62`, `bin/cli/src/commands/keystore/list.rs:68`, `bin/cli/src/support/keystore_manager.rs:31` |
-| `mfm keystore delete` | CLI directly resolves key and calls `delete_key` | No | No | Not aligned (`B1`) | `bin/cli/src/commands/keystore/delete.rs:50`, `bin/cli/src/commands/keystore/delete.rs:59`, `bin/cli/src/commands/keystore/delete.rs:117` |
-| `mfm keystore tx-sign` | CLI wrapper -> SDK single-op helper -> `keystore_tx_sign` op | Yes | Yes | Contract gap (`B4`,`B5`) | `bin/cli/src/commands/keystore/tx_sign.rs:117`, `crates/sdk/src/unstable.rs:885`, `crates/ops/keystore-tx-op/src/lib.rs:113`, `crates/ops/keystore-tx-op/src/lib.rs:260`, `crates/ops/keystore-tx-op/src/lib.rs:516` |
-| `mfm keystore tx-send-raw` | CLI wrapper -> SDK single-op helper -> `keystore_tx_send_raw` op | Yes | Yes | Contract gap (`B4`) | `bin/cli/src/commands/keystore/tx_send_raw.rs:56`, `crates/sdk/src/unstable.rs:885`, `crates/ops/keystore-tx-op/src/lib.rs:191`, `crates/ops/keystore-tx-op/src/lib.rs:341`, `crates/ops/keystore-tx-op/src/lib.rs:356` |
-| `mfm portfolio snapshot` | CLI wrapper -> feature catalog -> app service feature helper -> run start | Yes | Partial | Partially aligned (`B2`) | `bin/cli/src/commands/portfolio/snapshot.rs:50`, `crates/app/src/lib.rs:1371`, `crates/app/src/lib.rs:695`, `crates/app/src/lib.rs:785` |
-| `mfm run start` | CLI wrapper -> `AppServices::start_run` | Yes | Depends on target op | Aligned | `bin/cli/src/commands/run/start.rs:46`, `crates/app/src/lib.rs:471` |
-| `mfm run pipeline start` | CLI wrapper -> pipeline request -> `AppServices::start_run` | Yes | Yes (by selected ops) | Aligned | `bin/cli/src/commands/run/pipeline.rs:94`, `bin/cli/src/commands/run/pipeline.rs:100`, `crates/app/src/lib.rs:471` |
-| `mfm run pipeline deploy-configure-validate` | CLI wrapper -> app template helper -> pipeline generated in app | Yes | Partial | Partially aligned (`B2`) | `bin/cli/src/commands/run/pipeline.rs:141`, `crates/app/src/lib.rs:682`, `crates/app/src/lib.rs:1057` |
-| `mfm run resume` | CLI wrapper -> `AppServices::resume_run` | Yes | N/A | Aligned | `bin/cli/src/commands/run/resume.rs:35`, `crates/app/src/lib.rs:528` |
-| `mfm run status` | CLI wrapper -> `AppServices::run_status` | N/A | N/A | Aligned | `bin/cli/src/commands/run/status.rs:35`, `crates/app/src/lib.rs:557` |
-| `mfm run events` | CLI wrapper -> `AppServices::run_events` | N/A | N/A | Aligned | `bin/cli/src/commands/run/events.rs:43`, `crates/app/src/lib.rs:638` |
-| `mfm run artifacts get` | CLI wrapper -> artifact store read helper | N/A | N/A | Aligned | `bin/cli/src/commands/run/artifacts.rs:40`, `crates/app/src/lib.rs:869` |
+| `mfm keystore import` | CLI wrapper -> single-op helper -> `keystore_import` op -> shared keystore admin state -> local IO | Yes | Yes | Aligned | `bin/cli/src/commands/keystore/import.rs:103`, `crates/ops/keystore-admin-op/src/lib.rs:101`, `crates/ops/common/src/states/keystore_admin.rs:138`, `crates/ops/common/src/local_io.rs:48` |
+| `mfm keystore list` | CLI wrapper -> single-op helper -> `keystore_list` op -> shared keystore admin state -> local IO | Yes | Yes | Aligned | `bin/cli/src/commands/keystore/list.rs:83`, `crates/ops/keystore-admin-op/src/lib.rs:160`, `crates/ops/common/src/states/keystore_admin.rs:215`, `crates/ops/common/src/local_io.rs:49` |
+| `mfm keystore delete` | CLI wrapper -> single-op helper -> `keystore_delete` op -> shared keystore admin state -> local IO | Yes | Yes | Aligned | `bin/cli/src/commands/keystore/delete.rs:64`, `crates/ops/keystore-admin-op/src/lib.rs:229`, `crates/ops/common/src/states/keystore_admin.rs:291`, `crates/ops/common/src/local_io.rs:50` |
+| `mfm keystore tx-sign` | CLI wrapper -> single-op helper -> `keystore_tx_sign` op -> local IO signer/write path | Yes | Yes | Aligned | `bin/cli/src/commands/keystore/tx_sign.rs:117`, `crates/ops/keystore-tx-op/src/lib.rs:260`, `crates/ops/keystore-tx-op/src/lib.rs:275`, `crates/ops/common/src/local_io.rs:51` |
+| `mfm keystore tx-send-raw` | CLI wrapper -> single-op helper -> `keystore_tx_send_raw` op -> local file read + RPC path via IO | Yes | Yes | Aligned | `bin/cli/src/commands/keystore/tx_send_raw.rs:56`, `crates/ops/keystore-tx-op/src/lib.rs:335`, `crates/ops/keystore-tx-op/src/lib.rs:350`, `crates/ops/common/src/local_io.rs:52` |
+| `mfm portfolio snapshot` | CLI wrapper -> feature catalog -> app helper starts `portfolio_tracker` op -> typed report extraction | Yes | Yes | Aligned | `bin/cli/src/commands/portfolio/snapshot.rs:50`, `crates/app/src/lib.rs:706`, `crates/ops/portfolio-tracker-op/src/lib.rs:370`, `crates/ops/portfolio-tracker-op/src/lib.rs:603` |
+| `mfm run start` | CLI wrapper -> `AppServices::start_run` | Yes | Depends on target op | Aligned | `bin/cli/src/commands/run/start.rs:47`, `crates/app/src/lib.rs:482` |
+| `mfm run pipeline start` | CLI wrapper -> pipeline request -> `AppServices::start_run` | Yes | Yes (by selected ops) | Aligned | `bin/cli/src/commands/run/pipeline.rs:101`, `crates/app/src/lib.rs:482` |
+| `mfm run pipeline deploy-configure-validate` | CLI wrapper -> app helper -> composed `evm_deploy_configure_validate` op | Yes | Yes | Aligned | `bin/cli/src/commands/run/pipeline.rs:143`, `crates/app/src/lib.rs:693`, `crates/app/src/lib.rs:975`, `crates/ops/evm-deploy-configure-validate-op/src/lib.rs:26` |
+| `mfm run resume` | CLI wrapper -> `AppServices::resume_run` | Yes | N/A | Aligned | `bin/cli/src/commands/run/resume.rs:36`, `crates/app/src/lib.rs:541` |
+| `mfm run status` | CLI wrapper -> `AppServices::run_status` | N/A | N/A | Aligned | `bin/cli/src/commands/run/status.rs:36`, `crates/app/src/lib.rs:570` |
+| `mfm run events` | CLI wrapper -> `AppServices::run_events` | N/A | N/A | Aligned | `bin/cli/src/commands/run/events.rs:44`, `crates/app/src/lib.rs:649` |
+| `mfm run artifacts get` | CLI wrapper -> app artifact helper | N/A | N/A | Aligned | `bin/cli/src/commands/run/artifacts.rs:42`, `crates/app/src/lib.rs:787` |
 
 ### 4.2 REST Routes
 
 | Route | Execution Path Today | Status | Evidence |
 |---|---|---|---|
-| `GET /v1/health` | Infra probe only | Aligned | `bin/rest-api/src/lib.rs:196` |
-| `GET /v1/ready` | Store readiness checks only | Aligned | `bin/rest-api/src/lib.rs:200` |
-| `GET /v1/features` | Returns feature descriptors | Aligned | `bin/rest-api/src/lib.rs:339` |
-| `POST /v1/features/:feature_id/execute` | Generic wrapper -> `FeatureCatalog::execute` | Mixed (depends on feature) | `bin/rest-api/src/lib.rs:347`, `crates/app/src/lib.rs:1371` |
-| `POST /v1/runs/start` | Wrapper -> `AppServices::start_run` | Aligned | `bin/rest-api/src/lib.rs:245`, `bin/rest-api/src/lib.rs:251`, `crates/app/src/lib.rs:471` |
-| `POST /v1/runs/:run_id/resume` | Wrapper -> `AppServices::resume_run` | Aligned | `bin/rest-api/src/lib.rs:258`, `bin/rest-api/src/lib.rs:263`, `crates/app/src/lib.rs:528` |
-| `GET /v1/runs/:run_id/status` | Wrapper -> `AppServices::run_status` | Aligned | `bin/rest-api/src/lib.rs:270`, `bin/rest-api/src/lib.rs:275`, `crates/app/src/lib.rs:557` |
-| `GET /v1/runs/:run_id/events` | Wrapper -> `AppServices::run_events` | Aligned | `bin/rest-api/src/lib.rs:282`, `bin/rest-api/src/lib.rs:292`, `crates/app/src/lib.rs:638` |
-| `GET /v1/artifacts/:artifact_id` | Wrapper -> `AppServices::artifact_get` | Aligned | `bin/rest-api/src/lib.rs:299`, `bin/rest-api/src/lib.rs:304`, `crates/app/src/lib.rs:677` |
+| `GET /v1/health` | Infra probe only | Aligned | `bin/rest-api/src/lib.rs:146`, `bin/rest-api/src/lib.rs:196` |
+| `GET /v1/ready` | Store readiness checks only | Aligned | `bin/rest-api/src/lib.rs:147`, `bin/rest-api/src/lib.rs:201` |
+| `GET /v1/features` | Returns feature descriptors | Aligned | `bin/rest-api/src/lib.rs:148`, `bin/rest-api/src/lib.rs:340` |
+| `POST /v1/features/:feature_id/execute` | Generic wrapper -> `FeatureCatalog::execute` | Mixed (depends on feature) | `bin/rest-api/src/lib.rs:149`, `bin/rest-api/src/lib.rs:348`, `crates/app/src/lib.rs:1279` |
+| `POST /v1/runs/start` | Wrapper -> `AppServices::start_run` | Aligned | `bin/rest-api/src/lib.rs:150`, `bin/rest-api/src/lib.rs:246`, `crates/app/src/lib.rs:482` |
+| `POST /v1/runs/:run_id/resume` | Wrapper -> `AppServices::resume_run` | Aligned | `bin/rest-api/src/lib.rs:151`, `bin/rest-api/src/lib.rs:259`, `crates/app/src/lib.rs:541` |
+| `GET /v1/runs/:run_id/status` | Wrapper -> `AppServices::run_status` | Aligned | `bin/rest-api/src/lib.rs:152`, `bin/rest-api/src/lib.rs:271`, `crates/app/src/lib.rs:570` |
+| `GET /v1/runs/:run_id/events` | Wrapper -> `AppServices::run_events` | Aligned | `bin/rest-api/src/lib.rs:153`, `bin/rest-api/src/lib.rs:287`, `crates/app/src/lib.rs:649` |
+| `GET /v1/artifacts/:artifact_id` | Wrapper -> `AppServices::artifact_get` | Aligned | `bin/rest-api/src/lib.rs:154`, `bin/rest-api/src/lib.rs:300`, `crates/app/src/lib.rs:689` |
 
 ### 4.3 Feature IDs
 
 | Feature ID | Implementation Owner Today | Run-backed | Status | Evidence |
 |---|---|---:|---|---|
-| `run.start` | Generic app run service | Yes | Aligned | `crates/app/src/lib.rs:1166`, `crates/app/src/lib.rs:1383`, `crates/app/src/lib.rs:471` |
-| `run.resume` | Generic app run service | Yes | Aligned | `crates/app/src/lib.rs:1167`, `crates/app/src/lib.rs:1388`, `crates/app/src/lib.rs:528` |
-| `run.status` | Generic app query service | N/A | Aligned | `crates/app/src/lib.rs:1168`, `crates/app/src/lib.rs:1393`, `crates/app/src/lib.rs:557` |
-| `run.events` | Generic app query service | N/A | Aligned | `crates/app/src/lib.rs:1169`, `crates/app/src/lib.rs:1398`, `crates/app/src/lib.rs:638` |
-| `artifact.get` | Generic app artifact service | N/A | Aligned | `crates/app/src/lib.rs:1170`, `crates/app/src/lib.rs:1407`, `crates/app/src/lib.rs:677` |
-| `pipeline.deploy_configure_validate.start` | App helper builds pipeline template in adapter layer | Yes | Partially aligned (`B2`) | `crates/app/src/lib.rs:1171`, `crates/app/src/lib.rs:1412`, `crates/app/src/lib.rs:682`, `crates/app/src/lib.rs:1057` |
-| `portfolio.snapshot` | App helper performs domain validation/normalization/aggregation before and after run | Yes | Partially aligned (`B2`) | `crates/app/src/lib.rs:1176`, `crates/app/src/lib.rs:1417`, `crates/app/src/lib.rs:695`, `crates/app/src/lib.rs:843` |
+| `run.start` | Generic app run service | Yes | Aligned | `crates/app/src/lib.rs:1074`, `crates/app/src/lib.rs:1090`, `crates/app/src/lib.rs:1291` |
+| `run.resume` | Generic app run service | Yes | Aligned | `crates/app/src/lib.rs:1075`, `crates/app/src/lib.rs:1127`, `crates/app/src/lib.rs:1297` |
+| `run.status` | Generic app query service | N/A | Aligned | `crates/app/src/lib.rs:1076`, `crates/app/src/lib.rs:1147`, `crates/app/src/lib.rs:1301` |
+| `run.events` | Generic app query service | N/A | Aligned | `crates/app/src/lib.rs:1077`, `crates/app/src/lib.rs:1170`, `crates/app/src/lib.rs:1306` |
+| `artifact.get` | Generic app artifact service | N/A | Aligned | `crates/app/src/lib.rs:1078`, `crates/app/src/lib.rs:1194`, `crates/app/src/lib.rs:1315` |
+| `pipeline.deploy_configure_validate.start` | App helper builds pipeline envelope that targets composed op | Yes | Aligned | `crates/app/src/lib.rs:693`, `crates/app/src/lib.rs:975`, `crates/app/src/lib.rs:1213`, `crates/app/src/lib.rs:1323` |
+| `portfolio.snapshot` | App helper starts `portfolio_tracker` op and returns typed report fields | Yes | Aligned | `crates/app/src/lib.rs:706`, `crates/app/src/lib.rs:1241`, `crates/app/src/lib.rs:1328`, `crates/ops/portfolio-tracker-op/src/lib.rs:302` |
 
 ## 5. Registered Ops Matrix
 
 | Registered Op | State-Graph Expansion | Boundary Status | Evidence |
 |---|---|---|---|
-| `proof` | Yes | Aligned | `crates/app/src/lib.rs:380`, `crates/ops/proof-op/src/lib.rs:116`, `crates/ops/proof-op/src/lib.rs:132` |
-| `keystore_tx_sign` | Yes | Contract gap (`B4`,`B5`) | `crates/app/src/lib.rs:381`, `crates/ops/keystore-tx-op/src/lib.rs:113`, `crates/ops/keystore-tx-op/src/lib.rs:276`, `crates/ops/keystore-tx-op/src/lib.rs:516`, `crates/ops/keystore-tx-op/src/lib.rs:548` |
-| `keystore_tx_send_raw` | Yes | Contract gap (`B4`) | `crates/app/src/lib.rs:382`, `crates/ops/keystore-tx-op/src/lib.rs:191`, `crates/ops/keystore-tx-op/src/lib.rs:356` |
-| `evm_read` | Yes | Aligned | `crates/app/src/lib.rs:383`, `crates/ops/evm-read-op/src/lib.rs:61`, `crates/ops/evm-read-op/src/lib.rs:80` |
-| `evm_contract_from_nix` | Yes | Aligned | `crates/app/src/lib.rs:384`, `crates/ops/evm-write-op/src/lib.rs:1294`, `crates/ops/evm-write-op/src/lib.rs:1324` |
-| `evm_deploy` | Yes | Contract gap (`B4`,`B5`) | `crates/app/src/lib.rs:385`, `crates/ops/evm-write-op/src/lib.rs:1416`, `crates/ops/evm-write-op/src/lib.rs:1454`, `crates/ops/evm-write-op/src/lib.rs:1553`, `crates/ops/evm-write-op/src/lib.rs:965` |
-| `evm_configure` | Yes | Aligned | `crates/app/src/lib.rs:386`, `crates/ops/evm-write-op/src/lib.rs:1596`, `crates/ops/evm-write-op/src/lib.rs:1630` |
-| `evm_validate` | Yes | Aligned | `crates/app/src/lib.rs:387`, `crates/ops/evm-write-op/src/lib.rs:1812`, `crates/ops/evm-write-op/src/lib.rs:1847` |
-| `portfolio_tracker` | Yes | Aligned (op itself) | `crates/app/src/lib.rs:388`, `crates/ops/portfolio-tracker-op/src/lib.rs:191`, `crates/ops/portfolio-tracker-op/src/lib.rs:211` |
-| `nix_app` | Yes | Aligned | `crates/app/src/lib.rs:389`, `crates/ops/nix-app-op/src/lib.rs:84`, `crates/ops/nix-app-op/src/lib.rs:100` |
+| `proof` | Yes | Aligned | `crates/app/src/lib.rs:386`, `crates/ops/proof-op/src/lib.rs:116`, `crates/ops/proof-op/src/lib.rs:132` |
+| `keystore_import` | Yes | Aligned | `crates/app/src/lib.rs:387`, `crates/ops/keystore-admin-op/src/lib.rs:101`, `crates/ops/common/src/states/keystore_admin.rs:138` |
+| `keystore_list` | Yes | Aligned | `crates/app/src/lib.rs:388`, `crates/ops/keystore-admin-op/src/lib.rs:160`, `crates/ops/common/src/states/keystore_admin.rs:215` |
+| `keystore_delete` | Yes | Aligned | `crates/app/src/lib.rs:389`, `crates/ops/keystore-admin-op/src/lib.rs:229`, `crates/ops/common/src/states/keystore_admin.rs:291` |
+| `keystore_tx_sign` | Yes | Aligned | `crates/app/src/lib.rs:390`, `crates/ops/keystore-tx-op/src/lib.rs:113`, `crates/ops/keystore-tx-op/src/lib.rs:275`, `crates/ops/common/src/local_io.rs:51` |
+| `keystore_tx_send_raw` | Yes | Aligned | `crates/app/src/lib.rs:391`, `crates/ops/keystore-tx-op/src/lib.rs:191`, `crates/ops/keystore-tx-op/src/lib.rs:350`, `crates/ops/common/src/local_io.rs:52` |
+| `evm_read` | Yes | Aligned | `crates/app/src/lib.rs:392`, `crates/ops/evm-read-op/src/lib.rs:61`, `crates/ops/evm-read-op/src/lib.rs:80` |
+| `evm_contract_from_nix` | Yes | Aligned | `crates/app/src/lib.rs:393`, `crates/ops/evm-write-op/src/lib.rs:1223`, `crates/ops/evm-write-op/src/lib.rs:1293` |
+| `evm_deploy` | Yes | Aligned | `crates/app/src/lib.rs:394`, `crates/ops/evm-write-op/src/lib.rs:1345`, `crates/ops/evm-write-op/src/lib.rs:1448`, `crates/ops/evm-write-op/src/lib.rs:962`, `crates/ops/common/src/local_io.rs:53` |
+| `evm_configure` | Yes | Aligned | `crates/app/src/lib.rs:395`, `crates/ops/evm-write-op/src/lib.rs:1525`, `crates/ops/evm-write-op/src/lib.rs:1659` |
+| `evm_validate` | Yes | Aligned | `crates/app/src/lib.rs:396`, `crates/ops/evm-write-op/src/lib.rs:1741`, `crates/ops/evm-write-op/src/lib.rs:1855` |
+| `evm_deploy_configure_validate` | Yes | Aligned | `crates/app/src/lib.rs:397`, `crates/ops/evm-deploy-configure-validate-op/src/lib.rs:26`, `crates/ops/evm-deploy-configure-validate-op/src/lib.rs:68` |
+| `portfolio_tracker` | Yes | Aligned | `crates/app/src/lib.rs:398`, `crates/ops/portfolio-tracker-op/src/lib.rs:349`, `crates/ops/portfolio-tracker-op/src/lib.rs:476` |
+| `nix_app` | Yes | Aligned | `crates/app/src/lib.rs:399`, `crates/ops/nix-app-op/src/lib.rs:84`, `crates/ops/nix-app-op/src/lib.rs:190` |
 
 Additional packaging observation:
 
-- `mfm-op-keystore` is a re-export wrapper, not an operation implementation: `crates/ops/keystore-op/src/lib.rs:8`, `crates/ops/keystore-op/README.md:3`.
+- `mfm-op-keystore` remains a re-export wrapper, not an operation implementation: `crates/ops/keystore-op/src/lib.rs:8`, `crates/ops/keystore-op/README.md:3`.
 
 Reusable state-library observation:
 
-- A shared state library location exists (`crates/ops/common/src/states`) and is documented as reusable (`crates/ops/common/src/lib.rs:1`, `crates/ops/common/README.md:3`, `REDESIGN.md:857`).
-- Current reuse is still narrow (4 shared state impls) relative to op-local state implementations (16), so ops are not yet predominantly composed by reusable state primitives.
+- Shared state library adoption improved (`7` shared state impls), but op-local states still dominate (`16` impls):
+  - shared: `crates/ops/common/src/states/keystore_admin.rs`, `crates/ops/common/src/states/evm.rs`
+  - op-local examples: `crates/ops/evm-write-op/src/lib.rs:1448`, `crates/ops/portfolio-tracker-op/src/lib.rs:476`, `crates/ops/keystore-tx-op/src/lib.rs:260`
 
 ## 6. Findings (Ordered by Severity)
 
 ### High
 
-1. `B1` Keystore admin business logic is still in CLI binaries.
-- Impact: `keystore import`, `keystore list`, `keystore delete` bypass run/event/state-machine execution, violating thin-wrapper + run-backed model.
-- Evidence: `bin/cli/src/commands/keystore/import.rs:114`, `bin/cli/src/commands/keystore/list.rs:62`, `bin/cli/src/commands/keystore/delete.rs:50`, `bin/cli/src/support/keystore_manager.rs:31`.
-- Risk: inconsistent observability/replay story and duplicated policy enforcement at transport layer.
-
-2. `B2` Portfolio feature orchestration is implemented in app adapter layer.
-- Impact: domain behavior (RPC precondition, address normalization, token merge/sort, response extraction from snapshots) exists outside ops/state graph.
-- Evidence: `crates/app/src/lib.rs:695`, `crates/app/src/lib.rs:703`, `crates/app/src/lib.rs:719`, `crates/app/src/lib.rs:767`, `crates/app/src/lib.rs:797`.
-- Risk: split ownership and higher chance of logic drift between feature and operation contracts.
+None open in this checkpoint.
 
 ### Medium
 
-3. `B2` Deploy/configure/validate template construction lives in app layer.
-- Impact: template semantics are not represented as a first-class op contract.
-- Evidence: `crates/app/src/lib.rs:682`, `crates/app/src/lib.rs:686`, `crates/app/src/lib.rs:1057`, `bin/cli/src/commands/run/pipeline.rs:143`.
-- Risk: composition rules duplicated at adapter surface instead of ops layer.
+1. `B6` reusable state-library convergence remains incomplete.
+- Impact: shared states exist but most business flows still use op-local state implementations.
+- Evidence: `crates/ops/common/src/states/keystore_admin.rs`, `crates/ops/common/src/states/evm.rs`, `crates/ops/evm-write-op/src/lib.rs:1448`, `crates/ops/portfolio-tracker-op/src/lib.rs:476`.
+- Risk: duplicated semantics and slower evolution toward composition-first ops.
 
-4. `B4`,`B5` Keystore tx ops are run-backed but still use ambient FS/env/stdin in execution path.
-- Impact: state handlers/helpers perform direct file reads/writes and prompt/password env access instead of IO abstraction.
-- Evidence: `crates/ops/keystore-tx-op/src/lib.rs:356`, `crates/ops/keystore-tx-op/src/lib.rs:427`, `crates/ops/keystore-tx-op/src/lib.rs:537`, `crates/ops/keystore-tx-op/src/lib.rs:548`, `crates/ops/common/src/keystore_tx.rs:263`.
-- Risk: replay/portability/testing complexity and secret-boundary coupling to process environment.
+2. Guardrails for ambient IO regressions are not yet automated.
+- Impact: no architecture test/check currently fails PRs when new state handlers reintroduce direct ambient IO outside intended transport.
+- Evidence: missing dedicated check surface; explicit local transport boundary is in `crates/ops/common/src/local_io.rs:47`.
+- Risk: regressions can land silently as code evolves.
 
-5. `B4`,`B5` `evm_deploy` signed path reads signing key directly from environment.
-- Impact: side-effect path depends on ambient env secret retrieval.
-- Evidence: `crates/ops/evm-write-op/src/lib.rs:1553`, `crates/ops/evm-write-op/src/lib.rs:965`.
-- Risk: operational inconsistency across execution environments and weaker abstraction boundary.
-
-6. `B6` Reusable state-library pattern is under-enforced and under-adopted.
-- Impact: many workflows are still implemented with op-local bespoke states instead of primarily composing shared state primitives.
-- Evidence: shared reusable state implementations are concentrated in `crates/ops/common/src/states/evm.rs` (4 `impl State for` blocks), while op crates define 16 op-local `impl State for` blocks (`crates/ops/evm-write-op/src/lib.rs:1364`, `crates/ops/keystore-tx-op/src/lib.rs:260`, `crates/ops/portfolio-tracker-op/src/lib.rs:323`, `crates/ops/proof-op/src/lib.rs:192`, etc.).
-- Risk: duplicated state patterns, inconsistent semantics, and slower evolution toward “operations only reuse states.”
+3. Parity validation is still pending for this checkpoint.
+- Impact: architecture-level changes are landed but not yet validated through full parity gates in one run.
+- Evidence: expected gates are `nix run .#check`, `nix run .#test`, `nix run .#ci -- --basic --summary`, `nix run .#ci -- --parity --summary`.
+- Risk: unnoticed behavior drift.
 
 ### Low
 
-7. `B3` Keystore ops packaging is semantically ambiguous.
-- Impact: `mfm-op-keystore` name implies operation behavior but currently only re-exports core keystore types.
+4. `B3` keystore ops packaging naming remains semantically ambiguous.
+- Impact: `mfm-op-keystore` implies executable op behavior but only re-exports core keystore types.
 - Evidence: `crates/ops/keystore-op/src/lib.rs:8`, `crates/ops/keystore-op/README.md:3`.
-- Risk: encourages future direct usage from wrappers instead of run-backed ops.
+- Risk: boundary confusion in future additions.
 
-## 7. Proposal Options (No Code Changes in This Audit)
+## 7. What's Next (High-Value Finish Plan)
 
-### Option A: Strict Ops-Only Target
+1. Establish parity baseline for this checkpoint.
+- Run and archive: `nix run .#check`, `nix run .#test`, `nix run .#ci -- --basic --summary`, and `nix run .#ci -- --parity --summary` with live RPC configured.
+- Treat this as the before/after safety net for all remaining Option A work.
+- Exit criteria: all green, or a tracked failure list with owner, root-cause, and fix plan.
 
-- Description: all business workflows move to op/state layers; binaries and `crates/app` remain transport/run-control only.
-- Scope includes: keystore admin flows, portfolio snapshot orchestration, pipeline template orchestration, ambient IO cleanup in state execution paths, and formalization/adoption of a reusable state library so operations primarily compose shared states.
-- Benefits: strongest alignment with redesign contract; single ownership of business behavior.
-- Tradeoffs: highest migration size and coordination cost.
-- Estimated effort/risk: `XL` effort, `Medium-High` migration risk, best long-term maintainability.
+2. Complete `B6` convergence for deploy/configure/validate.
+- Extract reusable EVM execution states (especially deploy/configure/validate pieces) from `crates/ops/evm-write-op/src/lib.rs` into `crates/ops/common/src/states`.
+- Keep operation crates focused on config validation + graph composition only (`Operation::expand` assembly).
+- Exit criteria: deploy/configure/validate flows are composed from shared state primitives, not bespoke op-local state handlers.
 
-### Option B: Wrapper-Only Strictness
+3. Complete `B6` convergence for portfolio snapshot.
+- Move reusable portfolio pieces (balance/read/write states) from `crates/ops/portfolio-tracker-op/src/lib.rs` into shared state modules.
+- Keep `portfolio_tracker` op as orchestration wiring + domain config normalization.
+- Exit criteria: portfolio op mostly wires shared states and exports report/output contracts.
 
-- Description: enforce thinness only in `bin/cli` and `bin/rest-api`; keep app feature orchestration helpers.
-- Scope includes: move only CLI direct keystore admin logic to run-backed path.
-- Benefits: smaller blast radius, faster delivery.
-- Tradeoffs: leaves `B2` architecture debt in `crates/app`.
-- Estimated effort/risk: `M-L` effort, `Low-Medium` risk, moderate long-term debt.
+4. Add an architecture guard against ambient IO regressions.
+- Add a test/check that fails when new state handlers use direct ambient IO (`std::fs`, direct env/password prompts) outside approved transport boundaries.
+- Use `crates/ops/common/src/local_io.rs` as the explicit allowlisted local-side-effect boundary.
+- Exit criteria: guard runs in normal quality gates and fails deterministically on boundary violations.
 
-### Option C: Hybrid Phased
+5. Re-run parity gates and close the audit.
+- Re-run the same gate set from step 1 after steps 2-4 land.
+- Update this audit and the CSV matrix with final counts/statuses.
+- Exit criteria: Option A marked complete with no open High/Medium findings except explicitly deferred items.
 
-- Description: close highest-severity wrapper leaks first, then move app feature orchestration and ambient IO boundary gaps.
-- Suggested phases:
-  1. Keystore admin wrappers -> run-backed path.
-  2. Portfolio and deploy/configure/validate feature orchestration -> ops.
-  3. Ambient IO normalization inside affected ops.
-- Benefits: incremental risk reduction with clear milestones.
-- Tradeoffs: temporary mixed architecture during transition.
-- Estimated effort/risk: `L-XL` cumulative effort, `Medium` risk, best balance for staged delivery.
+## 8. Acceptance Criteria for Option A Completion
 
-## 8. Decision Checklist for Implementation Phase
-
-Required decisions before coding:
-
-1. Choose target option (`A`, `B`, or `C`).
-2. Decide if app feature IDs remain stable while internal ownership moves to ops.
-3. Decide whether keystore admin commands keep current CLI flags/output schema exactly or permit additive fields.
-4. Decide IO abstraction policy for secrets/files in state execution paths.
-5. Choose migration order for test suites (op tests first vs CLI parity first).
-6. Define acceptance gate for “thin-layer complete” (which `B*` tags must be zero).
-
-## 9. Suggested Acceptance Criteria (for Later Refactor PRs)
-
-1. No business workflow logic under `bin/cli` or `bin/rest-api`.
-2. Feature-specific business orchestration removed from `crates/app` or explicitly justified as transport-only.
-3. All business execution paths run-backed and state-graph represented.
-4. State execution paths avoid ambient IO except where explicitly modeled/approved.
-5. Existing CLI/REST output contracts remain backward compatible unless explicitly versioned.
+1. No business workflow logic in `bin/cli` or `bin/rest-api`.
+2. Feature-specific execution behavior represented by ops/state graphs; app helpers remain transport/adaptation only.
+3. Business execution paths run-backed and state-graph represented.
+4. State execution side effects routed through IO abstraction boundaries.
+5. Shared state-library reuse is the default for common workflow primitives.
+6. CI parity gates (`check/test/basic/parity`) pass with no behavior regressions.

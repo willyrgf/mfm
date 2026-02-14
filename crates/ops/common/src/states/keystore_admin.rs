@@ -157,9 +157,9 @@ impl State for KeystoreImportState {
             "keystore_import",
             serde_json::json!({
                 "kind": self.cfg.import_type.clone(),
-                "label": self.cfg.label.clone(),
+                "label_hex": self.cfg.label.as_ref().map(|v| hex_utf8(v)),
                 "derive_path": self.cfg.derivation_path.clone(),
-                "store_path": path_to_string(&self.cfg.keystore_path),
+                "store_path_hex": hex_utf8(&path_to_string(&self.cfg.keystore_path)),
                 "stdin_mode": self.cfg.stdin,
             }),
         )
@@ -233,9 +233,9 @@ impl State for KeystoreListState {
             "local.keystore.list",
             "keystore_list",
             serde_json::json!({
-                "store_path": path_to_string(&self.cfg.keystore_path),
+                "store_path_hex": hex_utf8(&path_to_string(&self.cfg.keystore_path)),
                 "show_addrs": self.cfg.show_addresses,
-                "filter_label": self.cfg.filter_label.clone(),
+                "filter_label_hex": self.cfg.filter_label.as_ref().map(|v| hex_utf8(v)),
                 "sort_by": self.cfg.sort_by.clone(),
             }),
         )
@@ -310,9 +310,9 @@ impl State for KeystoreDeleteState {
             "keystore_delete",
             serde_json::json!({
                 "id": self.cfg.id.clone(),
-                "label": self.cfg.by_label.clone(),
+                "label_hex": self.cfg.by_label.as_ref().map(|v| hex_utf8(v)),
                 "confirm_yes": self.cfg.yes,
-                "store_path": path_to_string(&self.cfg.keystore_path),
+                "store_path_hex": hex_utf8(&path_to_string(&self.cfg.keystore_path)),
             }),
         )
         .await?;
@@ -413,6 +413,10 @@ fn helper_category(code: &str) -> ErrorCategory {
 
 fn path_to_string(path: &PathBuf) -> String {
     path.to_string_lossy().to_string()
+}
+
+fn hex_utf8(value: &str) -> String {
+    hex::encode(value.as_bytes())
 }
 
 async fn local_call<T: DeserializeOwned>(

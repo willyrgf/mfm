@@ -33,6 +33,8 @@ pub struct KeystoreImportOpConfig {
     pub import_type: KeystoreImportType,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default)]
+    pub label_hex: Option<String>,
     #[serde(default = "default_derivation_path")]
     pub derivation_path: String,
     pub keystore_path: Option<String>,
@@ -55,6 +57,8 @@ pub struct KeystoreListOpConfig {
     pub show_addresses: bool,
     #[serde(default)]
     pub filter_label: Option<String>,
+    #[serde(default)]
+    pub filter_label_hex: Option<String>,
     #[serde(default = "default_list_sort_by")]
     pub sort_by: KeystoreListSortBy,
 }
@@ -72,6 +76,8 @@ pub struct KeystoreDeleteOpConfig {
     pub id: Option<String>,
     #[serde(default)]
     pub by_label: Option<String>,
+    #[serde(default)]
+    pub by_label_hex: Option<String>,
     #[serde(default)]
     pub yes: bool,
     pub keystore_path: Option<String>,
@@ -128,6 +134,8 @@ impl Operation for KeystoreImportOp {
         let keystore_path =
             decode_optional_hex_string(cfg.keystore_path, cfg.keystore_path_hex, "keystore_path")
                 .map_err(sdk_error_from_helper)?;
+        let label = decode_optional_hex_string(cfg.label, cfg.label_hex, "label")
+            .map_err(sdk_error_from_helper)?;
 
         let state_id = StateId(format!("{}.import", op_path.0));
         let state = KeystoreImportState::new(
@@ -137,7 +145,7 @@ impl Operation for KeystoreImportOp {
             "keystore_import.completed",
             KeystoreImportStateConfig {
                 import_type: cfg.import_type,
-                label: cfg.label,
+                label,
                 derivation_path: cfg.derivation_path,
                 keystore_path: resolve_keystore_path(keystore_path),
                 stdin: cfg.stdin,
@@ -184,7 +192,11 @@ impl Operation for KeystoreListOp {
                 op_errors::sdk_parse_error("invalid_op_config", "invalid keystore_list op_config")
             })?;
 
-        if let Some(pattern) = cfg.filter_label.as_ref() {
+        let filter_label =
+            decode_optional_hex_string(cfg.filter_label, cfg.filter_label_hex, "filter_label")
+                .map_err(sdk_error_from_helper)?;
+
+        if let Some(pattern) = filter_label.as_ref() {
             Regex::new(pattern).map_err(|e| {
                 op_errors::sdk_error(
                     "InvalidRegex",
@@ -198,7 +210,6 @@ impl Operation for KeystoreListOp {
         let keystore_path =
             decode_optional_hex_string(cfg.keystore_path, cfg.keystore_path_hex, "keystore_path")
                 .map_err(sdk_error_from_helper)?;
-
         let state_id = StateId(format!("{}.list", op_path.0));
         let state = KeystoreListState::new(
             state_id.clone(),
@@ -208,7 +219,7 @@ impl Operation for KeystoreListOp {
             KeystoreListStateConfig {
                 keystore_path: resolve_keystore_path(keystore_path),
                 show_addresses: cfg.show_addresses,
-                filter_label: cfg.filter_label,
+                filter_label,
                 sort_by: cfg.sort_by,
             },
         );
@@ -252,6 +263,8 @@ impl Operation for KeystoreDeleteOp {
             serde_json::from_value(op_config.clone()).map_err(|_| {
                 op_errors::sdk_parse_error("invalid_op_config", "invalid keystore_delete op_config")
             })?;
+        let by_label = decode_optional_hex_string(cfg.by_label, cfg.by_label_hex, "by_label")
+            .map_err(sdk_error_from_helper)?;
         let keystore_path =
             decode_optional_hex_string(cfg.keystore_path, cfg.keystore_path_hex, "keystore_path")
                 .map_err(sdk_error_from_helper)?;
@@ -264,7 +277,7 @@ impl Operation for KeystoreDeleteOp {
             "keystore_delete.completed",
             KeystoreDeleteStateConfig {
                 id: cfg.id,
-                by_label: cfg.by_label,
+                by_label,
                 yes: cfg.yes,
                 keystore_path: resolve_keystore_path(keystore_path),
             },

@@ -70,7 +70,11 @@ async fn execute_internal(args: &ListArgs) -> CommandResult<ListResponse> {
             .as_ref()
             .map(|path| hex::encode(path.to_string_lossy().as_bytes())),
         show_addresses: args.show_addresses,
-        filter_label: args.filter_label.clone(),
+        filter_label: None,
+        filter_label_hex: args
+            .filter_label
+            .as_ref()
+            .map(|label| hex::encode(label.as_bytes())),
         sort_by: match args.sort_by {
             SortBy::Label => KeystoreListSortBy::Label,
             SortBy::Created => KeystoreListSortBy::Created,

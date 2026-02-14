@@ -50,7 +50,11 @@ pub async fn execute(ctx: &CommandContext, args: &DeleteArgs) -> ! {
 async fn execute_internal(args: &DeleteArgs) -> CommandResult<DeleteResponse> {
     let op_config = KeystoreDeleteOpConfig {
         id: args.id.clone(),
-        by_label: args.by_label.clone(),
+        by_label: None,
+        by_label_hex: args
+            .by_label
+            .as_ref()
+            .map(|label| hex::encode(label.as_bytes())),
         yes: args.yes,
         keystore_path: None,
         keystore_path_hex: args

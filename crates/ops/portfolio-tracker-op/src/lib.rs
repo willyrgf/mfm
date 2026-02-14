@@ -15,8 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use alloy_primitives::{Address, U256};
-use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
+use alloy_primitives::Address;
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::ErrorCategory;
@@ -32,7 +31,10 @@ use mfm_op_common::ctx as op_ctx;
 use mfm_op_common::errors as op_errors;
 use mfm_op_common::keystore_tx::output_context_key;
 use mfm_op_common::output as op_output;
-use mfm_op_common::states::evm::{ReadU64HexState, U64Expectation};
+use mfm_op_common::states::evm::{
+    address_hex_lower, address_hex_lower_no0x, encode_erc20_decimals, NativeBalanceState,
+    ReadU64HexState, TokenBalanceState, U64Expectation,
+};
 use mfm_op_common::states::meta;
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -110,89 +112,6 @@ struct PortfolioSnapshotInputConfig {
 enum PortfolioTrackerInputConfig {
     Tracker(PortfolioTrackerConfig),
     Snapshot(PortfolioSnapshotInputConfig),
-}
-
-fn address_hex_lower(addr: &Address) -> String {
-    // `Debug` formatting is lowercase (non-checksummed), which is stable and safe for IDs.
-    format!("{addr:?}")
-}
-
-fn address_hex_lower_no0x(addr: &Address) -> String {
-    address_hex_lower(addr)
-        .strip_prefix("0x")
-        .unwrap_or("")
-        .to_string()
-}
-
-fn u64_hex_quantity(n: u64) -> String {
-    // JSON-RPC quantities are 0x-prefixed, no leading zeros.
-    if n == 0 {
-        return "0x0".to_string();
-    }
-    format!("0x{:x}", n)
-}
-
-fn format_u256_units(raw: &U256, decimals: u8) -> String {
-    let s = raw.to_string();
-    let d = decimals as usize;
-    if d == 0 {
-        return s;
-    }
-    if s.len() <= d {
-        let mut out = String::with_capacity(2 + d + 1);
-        out.push_str("0.");
-        out.push_str(&"0".repeat(d - s.len()));
-        out.push_str(&s);
-        out
-    } else {
-        let split = s.len() - d;
-        let mut out = String::with_capacity(s.len() + 1);
-        out.push_str(&s[..split]);
-        out.push('.');
-        out.push_str(&s[split..]);
-        out
-    }
-}
-
-fn parse_u256_hex(s: &str) -> Result<U256, String> {
-    let Some(rest) = s.strip_prefix("0x") else {
-        return Err("missing 0x prefix".to_string());
-    };
-    if rest.is_empty() {
-        return Err("empty hex string".to_string());
-    }
-    if rest.len() > 64 {
-        return Err("hex value overflowed u256".to_string());
-    }
-
-    let mut hex_str = rest.to_string();
-    if hex_str.len() % 2 == 1 {
-        hex_str = format!("0{hex_str}");
-    }
-    let bytes = hex::decode(hex_str).map_err(|_| "invalid hex".to_string())?;
-    Ok(U256::from_be_slice(&bytes))
-}
-
-fn parse_u256_hex_value(v: &serde_json::Value) -> Result<U256, StateError> {
-    let Some(s) = v.as_str() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "evm response was not a hex string",
-        ));
-    };
-    parse_u256_hex(s).map_err(|_| {
-        op_errors::state_unknown("evm_response_invalid", "evm response was not a hex u256")
-    })
-}
-
-fn parse_u8_u256(v: U256) -> Result<u8, StateError> {
-    if v > U256::from(u8::MAX) {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "evm response was out of range for u8",
-        ));
-    }
-    Ok(v.to::<u8>())
 }
 
 fn sdk_input_error(code: &'static str, message: impl Into<String>) -> SdkError {
@@ -319,30 +238,6 @@ fn ctx_key_erc20_token(token_addr_no0x: &str) -> ContextKey {
     ContextKey(format!("erc20.{}", token_addr_no0x))
 }
 
-fn erc20_selector_balance_of() -> [u8; 4] {
-    // keccak256("balanceOf(address)")[..4]
-    [0x70, 0xa0, 0x82, 0x31]
-}
-
-fn erc20_selector_decimals() -> [u8; 4] {
-    // keccak256("decimals()")[..4]
-    [0x31, 0x3c, 0xe5, 0x67]
-}
-
-fn encode_erc20_balance_of(owner: &Address) -> String {
-    let mut data = Vec::with_capacity(4 + 32);
-    data.extend_from_slice(&erc20_selector_balance_of());
-    data.extend_from_slice(&[0u8; 12]);
-    data.extend_from_slice(owner.as_slice());
-    format!("0x{}", hex::encode(data))
-}
-
-fn encode_erc20_decimals() -> String {
-    let mut data = Vec::with_capacity(4);
-    data.extend_from_slice(&erc20_selector_decimals());
-    format!("0x{}", hex::encode(data))
-}
-
 #[derive(Clone, Default)]
 pub struct PortfolioTrackerOp;
 
@@ -426,10 +321,12 @@ impl Operation for PortfolioTrackerOp {
         });
         states.push(StateNode {
             id: eth_sid.clone(),
-            state: Arc::new(ReadEthBalanceState {
-                state_id: eth_sid.clone(),
-                wallet: cfg.wallet_address,
-            }),
+            state: Arc::new(NativeBalanceState::new(
+                eth_sid.clone(),
+                cfg.wallet_address,
+                ctx_key(KEY_BLOCK_NUMBER),
+                ctx_key(KEY_NATIVE),
+            )),
         });
         last = eth_sid;
 
@@ -443,11 +340,15 @@ impl Operation for PortfolioTrackerOp {
             });
             states.push(StateNode {
                 id: sid.clone(),
-                state: Arc::new(ReadErc20BalanceState {
-                    state_id: sid.clone(),
-                    token: t,
-                    wallet: cfg.wallet_address,
-                }),
+                state: Arc::new(TokenBalanceState::new(
+                    sid.clone(),
+                    t.address,
+                    cfg.wallet_address,
+                    t.symbol,
+                    t.decimals,
+                    ctx_key(KEY_BLOCK_NUMBER),
+                    ctx_key_erc20_token(&addr_no0x),
+                )),
             });
             last = sid;
         }
@@ -464,133 +365,6 @@ impl Operation for PortfolioTrackerOp {
         });
 
         Ok(StateGraph { states, edges })
-    }
-}
-
-struct ReadEthBalanceState {
-    state_id: StateId,
-    wallet: Address,
-}
-
-#[async_trait]
-impl State for ReadEthBalanceState {
-    fn meta(&self) -> StateMeta {
-        meta::fetch_data()
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        _rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let block = op_ctx::read_u64_required(
-            ctx,
-            &ctx_key(KEY_BLOCK_NUMBER),
-            "missing_block_number",
-            "missing block_number in context",
-        )?;
-
-        let mut client = EvmIoClient::new(self.state_id.clone(), io);
-        let res = client
-            .call(JsonRpcCall::new(
-                "eth_getBalance",
-                serde_json::json!([address_hex_lower(&self.wallet), u64_hex_quantity(block)]),
-            ))
-            .await
-            .map_err(op_errors::state_from_io)?;
-
-        let wei = parse_u256_hex_value(&res.response)?;
-        let native = serde_json::json!({
-            "symbol": "ETH",
-            "raw_u256_dec": wei.to_string(),
-            "decimals": 18,
-            "amount_dec": format_u256_units(&wei, 18),
-        });
-
-        op_ctx::write_json(ctx, ctx_key(KEY_NATIVE), native)?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
-    }
-}
-
-struct ReadErc20BalanceState {
-    state_id: StateId,
-    token: TokenConfig,
-    wallet: Address,
-}
-
-#[async_trait]
-impl State for ReadErc20BalanceState {
-    fn meta(&self) -> StateMeta {
-        meta::fetch_data()
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        _rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let block = op_ctx::read_u64_required(
-            ctx,
-            &ctx_key(KEY_BLOCK_NUMBER),
-            "missing_block_number",
-            "missing block_number in context",
-        )?;
-
-        let addr_no0x = address_hex_lower_no0x(&self.token.address);
-        let token_ctx_key = ctx_key_erc20_token(&addr_no0x);
-
-        let token_to = address_hex_lower(&self.token.address);
-        let at_block = u64_hex_quantity(block);
-        let mut client = EvmIoClient::new(self.state_id.clone(), io);
-
-        let decimals: u8 = match self.token.decimals {
-            Some(d) => d,
-            None => {
-                let res = client
-                    .call(JsonRpcCall::new(
-                        "eth_call",
-                        serde_json::json!([
-                            {"to": token_to, "data": encode_erc20_decimals()},
-                            at_block.clone()
-                        ]),
-                    ))
-                    .await
-                    .map_err(op_errors::state_from_io)?;
-                let v = parse_u256_hex_value(&res.response)?;
-                parse_u8_u256(v)?
-            }
-        };
-
-        let res = client
-            .call(JsonRpcCall::new(
-                "eth_call",
-                serde_json::json!([
-                    {"to": address_hex_lower(&self.token.address), "data": encode_erc20_balance_of(&self.wallet)},
-                    at_block
-                ]),
-            ))
-            .await
-            .map_err(op_errors::state_from_io)?;
-
-        let raw = parse_u256_hex_value(&res.response)?;
-        let token_obj = serde_json::json!({
-            "address": address_hex_lower(&self.token.address),
-            "symbol": self.token.symbol.clone(),
-            "decimals": decimals,
-            "raw_u256_dec": raw.to_string(),
-            "amount_dec": format_u256_units(&raw, decimals),
-        });
-
-        op_ctx::write_json(ctx, token_ctx_key, token_obj)?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
     }
 }
 

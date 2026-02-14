@@ -63,34 +63,63 @@ impl LiveIoTransport for LocalOpIoTransport {
 #[derive(Debug, Deserialize)]
 struct KeystoreImportRequest {
     kind: KeystoreImportType,
+    #[serde(default)]
     label: Option<String>,
+    #[serde(default)]
+    label_hex: Option<String>,
     derive_path: String,
-    store_path: String,
+    #[serde(default)]
+    store_path: Option<String>,
+    #[serde(default)]
+    store_path_hex: Option<String>,
     stdin_mode: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct KeystoreListRequest {
-    store_path: String,
+    #[serde(default)]
+    store_path: Option<String>,
+    #[serde(default)]
+    store_path_hex: Option<String>,
     show_addrs: bool,
+    #[serde(default)]
     filter_label: Option<String>,
+    #[serde(default)]
+    filter_label_hex: Option<String>,
     sort_by: KeystoreListSortBy,
 }
 
 #[derive(Debug, Deserialize)]
 struct KeystoreDeleteRequest {
+    #[serde(default)]
     id: Option<String>,
+    #[serde(default)]
     label: Option<String>,
+    #[serde(default)]
+    label_hex: Option<String>,
     confirm_yes: bool,
-    store_path: String,
+    #[serde(default)]
+    store_path: Option<String>,
+    #[serde(default)]
+    store_path_hex: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct KeystoreTxSignRequest {
+    #[serde(default)]
     id: Option<String>,
+    #[serde(default)]
     label: Option<String>,
-    store_path: String,
-    out_path: String,
+    #[serde(default)]
+    label_hex: Option<String>,
+    #[serde(default)]
+    store_path: Option<String>,
+    #[serde(default)]
+    store_path_hex: Option<String>,
+    #[serde(default)]
+    out_path: Option<String>,
+    #[serde(default)]
+    out_path_hex: Option<String>,
     to: String,
     value_wei: String,
     chain_id: u64,
@@ -103,7 +132,10 @@ struct KeystoreTxSignRequest {
 
 #[derive(Debug, Deserialize)]
 struct ReadTextRequest {
-    path: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    path_hex: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,11 +227,13 @@ fn handle_keystore_tx_sign(request: serde_json::Value) -> Result<serde_json::Val
 
 fn handle_read_text(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
     let req: ReadTextRequest = parse_request(request)?;
-    let text = std::fs::read_to_string(&req.path).map_err(|e| {
+    let path = decode_required_utf8(req.path, req.path_hex, "invalid_local_request", "path")
+        .map_err(LocalError::into_io)?;
+    let text = std::fs::read_to_string(&path).map_err(|e| {
         io_other(
             "InputReadError",
             ErrorCategory::Unknown,
-            format!("Failed to read input file '{}': {e}", req.path),
+            format!("Failed to read input file '{path}': {e}"),
         )
     })?;
     encode_response(serde_json::json!({ "text": text }))
@@ -212,7 +246,13 @@ fn handle_evm_sign_legacy_create(request: serde_json::Value) -> Result<serde_jso
 }
 
 fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, LocalError> {
-    let path = PathBuf::from(req.store_path);
+    let path = PathBuf::from(decode_required_utf8(
+        req.store_path,
+        req.store_path_hex,
+        "InvalidPathConfig",
+        "store_path",
+    )?);
+    let label = decode_optional_utf8(req.label, req.label_hex, "InvalidPathConfig", "label")?;
     let material = match req.kind {
         KeystoreImportType::PrivateKey => read_input(
             if req.stdin_mode {
@@ -236,8 +276,7 @@ fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, L
         KeystoreImportType::PrivateKey => {
             let normalized = normalize_private_key(&material)?;
             let mut ks = create_keystore_if_needed(&path)?;
-            let label = req
-                .label
+            let label = label
                 .unwrap_or_else(|| format!("imported-key-{}", Utc::now().format("%Y%m%d-%H%M%S")));
             let key_id = ks
                 .import_private_key(Some(label), normalized.as_str())
@@ -254,8 +293,7 @@ fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, L
         KeystoreImportType::Mnemonic => {
             validate_mnemonic_basic(&material)?;
             let mut ks = create_keystore_if_needed(&path)?;
-            let label = req
-                .label
+            let label = label
                 .unwrap_or_else(|| format!("imported-hd-{}", Utc::now().format("%Y%m%d-%H%M%S")));
             let extra = std::env::var(ENV_IMPORT_MNEMONIC_EXTRA)
                 .ok()
@@ -281,7 +319,18 @@ fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, L
 }
 
 fn keystore_list(req: KeystoreListRequest) -> Result<KeystoreListReport, LocalError> {
-    let path = PathBuf::from(req.store_path);
+    let path = PathBuf::from(decode_required_utf8(
+        req.store_path,
+        req.store_path_hex,
+        "InvalidPathConfig",
+        "store_path",
+    )?);
+    let filter_label = decode_optional_utf8(
+        req.filter_label,
+        req.filter_label_hex,
+        "InvalidPathConfig",
+        "filter_label",
+    )?;
     let keystore = load_unlocked_keystore(&path)?;
     let mut keys: Vec<KeystoreListKey> = keystore
         .list_keys()
@@ -300,7 +349,7 @@ fn keystore_list(req: KeystoreListRequest) -> Result<KeystoreListReport, LocalEr
         })
         .collect();
 
-    if let Some(pattern) = req.filter_label.as_ref() {
+    if let Some(pattern) = filter_label.as_ref() {
         let regex = regex::Regex::new(pattern).map_err(|e| {
             LocalError::new(
                 "InvalidRegex",
@@ -324,10 +373,16 @@ fn keystore_list(req: KeystoreListRequest) -> Result<KeystoreListReport, LocalEr
 }
 
 fn keystore_delete(req: KeystoreDeleteRequest) -> Result<KeystoreDeleteReport, LocalError> {
-    let path = PathBuf::from(req.store_path);
+    let path = PathBuf::from(decode_required_utf8(
+        req.store_path,
+        req.store_path_hex,
+        "InvalidPathConfig",
+        "store_path",
+    )?);
+    let label = decode_optional_utf8(req.label, req.label_hex, "InvalidPathConfig", "label")?;
     let mut keystore = load_unlocked_keystore(&path)?;
 
-    let key_id = if let Some(label) = &req.label {
+    let key_id = if let Some(label) = &label {
         let keys = keystore.list_keys().map_err(admin_error_from_keystore)?;
         let matching_keys: Vec<_> = keys
             .iter()
@@ -398,10 +453,22 @@ fn keystore_delete(req: KeystoreDeleteRequest) -> Result<KeystoreDeleteReport, L
 }
 
 fn keystore_tx_sign(req: KeystoreTxSignRequest) -> Result<serde_json::Value, LocalError> {
-    let path = PathBuf::from(req.store_path);
+    let path = PathBuf::from(decode_required_utf8(
+        req.store_path,
+        req.store_path_hex,
+        "InvalidPathConfig",
+        "store_path",
+    )?);
+    let label = decode_optional_utf8(req.label, req.label_hex, "InvalidSelectorLabel", "label")?;
+    let out_path = PathBuf::from(decode_required_utf8(
+        req.out_path,
+        req.out_path_hex,
+        "InvalidPathConfig",
+        "out_path",
+    )?);
     let mut keystore = load_unlocked_keystore(&path)?;
 
-    let key_id = resolve_key_id(&keystore, req.id.as_deref(), req.label.as_deref())
+    let key_id = resolve_key_id(&keystore, req.id.as_deref(), label.as_deref())
         .map_err(local_error_from_keystore_tx)?;
 
     let tx = Eip1559TxToSign {
@@ -423,7 +490,6 @@ fn keystore_tx_sign(req: KeystoreTxSignRequest) -> Result<serde_json::Value, Loc
 
     let signed = sign_eip1559_transaction(&mut keystore, key_id, &tx)
         .map_err(local_error_from_keystore_tx)?;
-    let out_path = PathBuf::from(req.out_path);
     write_raw_transaction_file(&out_path, &signed.raw_tx_hex)
         .map_err(local_error_from_keystore_tx)?;
 
@@ -758,6 +824,39 @@ fn decode_hex_utf8(
             code,
             ErrorCategory::ParsingInput,
             format!("{field} did not decode to utf-8"),
+        )
+    })
+}
+
+fn decode_optional_utf8(
+    raw: Option<String>,
+    raw_hex: Option<String>,
+    code: &'static str,
+    field: &'static str,
+) -> Result<Option<String>, LocalError> {
+    match (raw, raw_hex) {
+        (Some(_), Some(_)) => Err(LocalError::new(
+            code,
+            ErrorCategory::ParsingInput,
+            format!("{field} must use exactly one encoding"),
+        )),
+        (Some(value), None) => Ok(Some(value)),
+        (None, Some(value_hex)) => decode_hex_utf8(&value_hex, code, field).map(Some),
+        (None, None) => Ok(None),
+    }
+}
+
+fn decode_required_utf8(
+    raw: Option<String>,
+    raw_hex: Option<String>,
+    code: &'static str,
+    field: &'static str,
+) -> Result<String, LocalError> {
+    decode_optional_utf8(raw, raw_hex, code, field)?.ok_or_else(|| {
+        LocalError::new(
+            code,
+            ErrorCategory::ParsingInput,
+            format!("{field} is required"),
         )
     })
 }

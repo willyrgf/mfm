@@ -36,6 +36,7 @@ use mfm_op_common::ctx as op_ctx;
 use mfm_op_common::errors as op_errors;
 use mfm_op_common::idempotency as op_idempotency;
 use mfm_op_common::rpc as op_rpc;
+use mfm_op_common::states::evm_dcv as shared_dcv;
 use mfm_op_common::states::meta;
 
 use mfm_sdk::errors::SdkError;
@@ -895,7 +896,7 @@ async fn send_signed_create_transaction(
     constructor_payload: &[u8],
     value_hex: Option<&str>,
 ) -> Result<String, StateError> {
-    let configured_from = normalize_address(from)
+    let configured_from = shared_dcv::normalize_address(from)
         .map_err(|_| op_errors::state_unknown("invalid_op_config", "invalid from address"))?;
 
     let tx_obj = {
@@ -1192,7 +1193,7 @@ fn receipt_contract_address(receipt: &serde_json::Value) -> Result<String, State
         ));
     };
 
-    normalize_address(addr).map_err(|_| {
+    shared_dcv::normalize_address(addr).map_err(|_| {
         op_errors::state_unknown(
             "evm_response_invalid",
             "receipt contractAddress was invalid",
@@ -1205,12 +1206,12 @@ fn resolve_contract_address(
     configured: &Option<String>,
 ) -> Result<String, StateError> {
     match configured {
-        Some(a) => normalize_address(a).map_err(|_| {
+        Some(a) => shared_dcv::normalize_address(a).map_err(|_| {
             op_errors::state_unknown("invalid_op_config", "contract_address was invalid")
         }),
         None => {
             let a = context_read_string(ctx, KEY_CONTRACT_ADDRESS)?;
-            normalize_address(&a).map_err(|_| {
+            shared_dcv::normalize_address(&a).map_err(|_| {
                 op_errors::state_unknown("ctx_type_mismatch", "context contract address invalid")
             })
         }
@@ -1355,7 +1356,7 @@ impl Operation for EvmDeployOp {
         let cfg: EvmDeployConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "invalid evm_deploy op_config")
         })?;
-        ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
+        shared_dcv::ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
         })?;
         if let Some(env_name) = cfg.signing_key_env.as_deref() {
@@ -1390,7 +1391,7 @@ impl Operation for EvmDeployOp {
             op_errors::sdk_parse_error("invalid_op_config", "invalid evm_deploy op_config")
         })?;
 
-        ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
+        shared_dcv::ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
         })?;
         if let Some(env_name) = cfg.signing_key_env.as_deref() {
@@ -1404,14 +1405,14 @@ impl Operation for EvmDeployOp {
             })?;
         }
 
-        let from = normalize_address(&cfg.from)
+        let from = shared_dcv::normalize_address(&cfg.from)
             .map_err(|_| op_errors::sdk_parse_error("invalid_op_config", "invalid from address"))?;
 
-        ensure_nonzero_polls(cfg.max_receipt_polls).map_err(|_| {
+        shared_dcv::ensure_nonzero_polls(cfg.max_receipt_polls).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "max_receipt_polls must be > 0")
         })?;
 
-        let value_hex = parse_value_wei_to_hex(&cfg.value_wei)
+        let value_hex = shared_dcv::parse_value_wei_to_hex(&cfg.value_wei)
             .map_err(|_| op_errors::sdk_parse_error("invalid_op_config", "invalid value_wei"))?;
 
         let state_id = StateId(format!("{}.deploy", op_path.0));
@@ -1535,7 +1536,7 @@ impl Operation for EvmConfigureOp {
         let cfg: EvmConfigureConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "invalid evm_configure op_config")
         })?;
-        ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
+        shared_dcv::ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
         })?;
 
@@ -1566,7 +1567,7 @@ impl Operation for EvmConfigureOp {
             op_errors::sdk_parse_error("invalid_op_config", "invalid evm_configure op_config")
         })?;
 
-        ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
+        shared_dcv::ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
         })?;
 
@@ -1586,19 +1587,19 @@ impl Operation for EvmConfigureOp {
             None
         };
 
-        let from = normalize_address(&cfg.from)
+        let from = shared_dcv::normalize_address(&cfg.from)
             .map_err(|_| op_errors::sdk_parse_error("invalid_op_config", "invalid from address"))?;
 
         let contract_address = cfg
             .contract_address
             .as_ref()
-            .map(|a| normalize_address(a))
+            .map(|a| shared_dcv::normalize_address(a))
             .transpose()
             .map_err(|_| {
                 op_errors::sdk_parse_error("invalid_op_config", "invalid contract_address")
             })?;
 
-        ensure_nonzero_polls(cfg.max_receipt_polls).map_err(|_| {
+        shared_dcv::ensure_nonzero_polls(cfg.max_receipt_polls).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "max_receipt_polls must be > 0")
         })?;
 
@@ -1612,7 +1613,7 @@ impl Operation for EvmConfigureOp {
                     )
                 })?;
             }
-            let value_hex = parse_value_wei_to_hex(&c.value_wei).map_err(|_| {
+            let value_hex = shared_dcv::parse_value_wei_to_hex(&c.value_wei).map_err(|_| {
                 op_errors::sdk_parse_error(
                     "invalid_op_config",
                     "invalid value_wei in configure call",
@@ -1751,7 +1752,7 @@ impl Operation for EvmValidateOp {
         let cfg: EvmValidateConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "invalid evm_validate op_config")
         })?;
-        ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
+        shared_dcv::ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
         })?;
 
@@ -1783,7 +1784,7 @@ impl Operation for EvmValidateOp {
             op_errors::sdk_parse_error("invalid_op_config", "invalid evm_validate op_config")
         })?;
 
-        ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
+        shared_dcv::ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
         })?;
 
@@ -1799,7 +1800,7 @@ impl Operation for EvmValidateOp {
         let contract_address = cfg
             .contract_address
             .as_ref()
-            .map(|a| normalize_address(a))
+            .map(|a| shared_dcv::normalize_address(a))
             .transpose()
             .map_err(|_| {
                 op_errors::sdk_parse_error("invalid_op_config", "invalid contract_address")

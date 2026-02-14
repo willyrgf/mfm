@@ -88,7 +88,11 @@ async fn execute_internal(args: &ImportArgs) -> CommandResult<ImportResponse> {
             ImportType::PrivateKey => KeystoreImportType::PrivateKey,
             ImportType::Mnemonic => KeystoreImportType::Mnemonic,
         },
-        label: args.label.clone(),
+        label: None,
+        label_hex: args
+            .label
+            .as_ref()
+            .map(|label| hex::encode(label.as_bytes())),
         derivation_path: args.derivation_path.clone(),
         keystore_path: None,
         keystore_path_hex: args

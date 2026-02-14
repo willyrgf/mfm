@@ -96,6 +96,11 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "evm-deploy-configure-validate-op",
+      "path": "crates/ops/evm-deploy-configure-validate-op/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "evm-read-op",
       "path": "crates/ops/evm-read-op/Cargo.toml",
       "kind": "rust-cargo"
@@ -103,6 +108,11 @@
     {
       "name": "evm-write-op",
       "path": "crates/ops/evm-write-op/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "keystore-admin-op",
+      "path": "crates/ops/keystore-admin-op/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use alloy_primitives::{Address, U256};
 use mfm_collectors_evm::{parse_u64_hex_value, EvmIoClient, JsonRpcCall};
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, StateError};
@@ -9,7 +10,7 @@ use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 
-use crate::ctx::write_json;
+use crate::ctx::{read_u64_required, write_json};
 use crate::errors::{state_error_with_state, state_from_io, state_unknown};
 use crate::states::meta;
 
@@ -325,6 +326,288 @@ impl State for ReadU64HexState {
         }
 
         write_json(ctx, self.output_key.clone(), serde_json::json!(value))?;
+
+        Ok(StateOutcome {
+            snapshot: SnapshotPolicy::OnSuccess,
+        })
+    }
+}
+
+pub fn address_hex_lower(addr: &Address) -> String {
+    // Debug formatting is lowercase and stable.
+    format!("{addr:?}")
+}
+
+pub fn address_hex_lower_no0x(addr: &Address) -> String {
+    address_hex_lower(addr)
+        .strip_prefix("0x")
+        .unwrap_or("")
+        .to_string()
+}
+
+fn u64_hex_quantity(n: u64) -> String {
+    if n == 0 {
+        return "0x0".to_string();
+    }
+    format!("0x{:x}", n)
+}
+
+fn format_u256_units(raw: &U256, decimals: u8) -> String {
+    let s = raw.to_string();
+    let d = decimals as usize;
+    if d == 0 {
+        return s;
+    }
+    if s.len() <= d {
+        let mut out = String::with_capacity(2 + d + 1);
+        out.push_str("0.");
+        out.push_str(&"0".repeat(d - s.len()));
+        out.push_str(&s);
+        out
+    } else {
+        let split = s.len() - d;
+        let mut out = String::with_capacity(s.len() + 1);
+        out.push_str(&s[..split]);
+        out.push('.');
+        out.push_str(&s[split..]);
+        out
+    }
+}
+
+fn parse_u256_hex(s: &str) -> Result<U256, StateError> {
+    let Some(rest) = s.strip_prefix("0x") else {
+        return Err(state_unknown(
+            "evm_response_invalid",
+            "evm response was not a hex u256",
+        ));
+    };
+    if rest.is_empty() || rest.len() > 64 {
+        return Err(state_unknown(
+            "evm_response_invalid",
+            "evm response was not a hex u256",
+        ));
+    }
+
+    let mut hex_str = rest.to_string();
+    if hex_str.len() % 2 == 1 {
+        hex_str = format!("0{hex_str}");
+    }
+    let bytes = hex::decode(hex_str)
+        .map_err(|_| state_unknown("evm_response_invalid", "evm response was not a hex u256"))?;
+    Ok(U256::from_be_slice(&bytes))
+}
+
+fn parse_u256_hex_value(v: &serde_json::Value) -> Result<U256, StateError> {
+    let Some(s) = v.as_str() else {
+        return Err(state_unknown(
+            "evm_response_invalid",
+            "evm response was not a hex u256",
+        ));
+    };
+    parse_u256_hex(s)
+}
+
+fn parse_u8_u256(v: U256) -> Result<u8, StateError> {
+    if v > U256::from(u8::MAX) {
+        return Err(state_unknown(
+            "evm_response_invalid",
+            "evm response was out of range for u8",
+        ));
+    }
+    Ok(v.to::<u8>())
+}
+
+fn erc20_selector_balance_of() -> [u8; 4] {
+    // keccak256("balanceOf(address)")[..4]
+    [0x70, 0xa0, 0x82, 0x31]
+}
+
+fn erc20_selector_decimals() -> [u8; 4] {
+    // keccak256("decimals()")[..4]
+    [0x31, 0x3c, 0xe5, 0x67]
+}
+
+pub fn encode_erc20_balance_of(owner: &Address) -> String {
+    let mut data = Vec::with_capacity(4 + 32);
+    data.extend_from_slice(&erc20_selector_balance_of());
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(owner.as_slice());
+    format!("0x{}", hex::encode(data))
+}
+
+pub fn encode_erc20_decimals() -> String {
+    let mut data = Vec::with_capacity(4);
+    data.extend_from_slice(&erc20_selector_decimals());
+    format!("0x{}", hex::encode(data))
+}
+
+#[derive(Clone, Debug)]
+pub struct NativeBalanceState {
+    pub state_id: StateId,
+    pub wallet: Address,
+    pub block_key: ContextKey,
+    pub output_key: ContextKey,
+    pub symbol: String,
+    pub decimals: u8,
+}
+
+impl NativeBalanceState {
+    pub fn new(
+        state_id: StateId,
+        wallet: Address,
+        block_key: ContextKey,
+        output_key: ContextKey,
+    ) -> Self {
+        Self {
+            state_id,
+            wallet,
+            block_key,
+            output_key,
+            symbol: "ETH".to_string(),
+            decimals: 18,
+        }
+    }
+}
+
+#[async_trait]
+impl State for NativeBalanceState {
+    fn meta(&self) -> StateMeta {
+        meta::fetch_data()
+    }
+
+    async fn handle(
+        &self,
+        ctx: &mut dyn DynContext,
+        io: &mut dyn IoProvider,
+        _rec: &mut dyn EventRecorder,
+    ) -> Result<StateOutcome, StateError> {
+        let block = read_u64_required(
+            ctx,
+            &self.block_key,
+            "missing_block_number",
+            "missing block_number in context",
+        )?;
+
+        let mut client = EvmIoClient::new(self.state_id.clone(), io);
+        let res = client
+            .call(JsonRpcCall::new(
+                "eth_getBalance",
+                serde_json::json!([address_hex_lower(&self.wallet), u64_hex_quantity(block)]),
+            ))
+            .await
+            .map_err(state_from_io)?;
+
+        let wei = parse_u256_hex_value(&res.response)?;
+        let native = serde_json::json!({
+            "symbol": self.symbol,
+            "raw_u256_dec": wei.to_string(),
+            "decimals": self.decimals,
+            "amount_dec": format_u256_units(&wei, self.decimals),
+        });
+
+        write_json(ctx, self.output_key.clone(), native)?;
+
+        Ok(StateOutcome {
+            snapshot: SnapshotPolicy::OnSuccess,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TokenBalanceState {
+    pub state_id: StateId,
+    pub token: Address,
+    pub wallet: Address,
+    pub symbol: Option<String>,
+    pub decimals: Option<u8>,
+    pub block_key: ContextKey,
+    pub output_key: ContextKey,
+}
+
+impl TokenBalanceState {
+    pub fn new(
+        state_id: StateId,
+        token: Address,
+        wallet: Address,
+        symbol: Option<String>,
+        decimals: Option<u8>,
+        block_key: ContextKey,
+        output_key: ContextKey,
+    ) -> Self {
+        Self {
+            state_id,
+            token,
+            wallet,
+            symbol,
+            decimals,
+            block_key,
+            output_key,
+        }
+    }
+}
+
+#[async_trait]
+impl State for TokenBalanceState {
+    fn meta(&self) -> StateMeta {
+        meta::fetch_data()
+    }
+
+    async fn handle(
+        &self,
+        ctx: &mut dyn DynContext,
+        io: &mut dyn IoProvider,
+        _rec: &mut dyn EventRecorder,
+    ) -> Result<StateOutcome, StateError> {
+        let block = read_u64_required(
+            ctx,
+            &self.block_key,
+            "missing_block_number",
+            "missing block_number in context",
+        )?;
+
+        let token_to = address_hex_lower(&self.token);
+        let at_block = u64_hex_quantity(block);
+        let mut client = EvmIoClient::new(self.state_id.clone(), io);
+
+        let decimals: u8 = match self.decimals {
+            Some(d) => d,
+            None => {
+                let res = client
+                    .call(JsonRpcCall::new(
+                        "eth_call",
+                        serde_json::json!([
+                            {"to": token_to, "data": encode_erc20_decimals()},
+                            at_block.clone()
+                        ]),
+                    ))
+                    .await
+                    .map_err(state_from_io)?;
+                let v = parse_u256_hex_value(&res.response)?;
+                parse_u8_u256(v)?
+            }
+        };
+
+        let res = client
+            .call(JsonRpcCall::new(
+                "eth_call",
+                serde_json::json!([
+                    {"to": address_hex_lower(&self.token), "data": encode_erc20_balance_of(&self.wallet)},
+                    at_block
+                ]),
+            ))
+            .await
+            .map_err(state_from_io)?;
+
+        let raw = parse_u256_hex_value(&res.response)?;
+        let token_obj = serde_json::json!({
+            "address": address_hex_lower(&self.token),
+            "symbol": self.symbol.clone(),
+            "decimals": decimals,
+            "raw_u256_dec": raw.to_string(),
+            "amount_dec": format_u256_units(&raw, decimals),
+        });
+
+        write_json(ctx, self.output_key.clone(), token_obj)?;
 
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,

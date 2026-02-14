@@ -279,9 +279,9 @@ impl State for TxSignState {
             "tx_sign",
             serde_json::json!({
                 "id": self.cfg.id.clone(),
-                "label": self.cfg.by_label.clone(),
-                "store_path": self.cfg.keystore_path.display().to_string(),
-                "out_path": self.cfg.out_path.display().to_string(),
+                "label_hex": self.cfg.by_label.as_ref().map(|v| hex::encode(v.as_bytes())),
+                "store_path_hex": hex::encode(self.cfg.keystore_path.display().to_string().as_bytes()),
+                "out_path_hex": hex::encode(self.cfg.out_path.display().to_string().as_bytes()),
                 "to": format!("{:?}", self.cfg.tx.to),
                 "value_wei": self.cfg.tx.value_wei.to_string(),
                 "chain_id": self.cfg.tx.chain_id,
@@ -353,7 +353,7 @@ impl State for TxSendRawState {
             "local.fs.read_text",
             "tx_send_raw_read",
             serde_json::json!({
-                "path": self.cfg.input_path.display().to_string(),
+                "path_hex": hex::encode(self.cfg.input_path.display().to_string().as_bytes()),
             }),
         )
         .await?;

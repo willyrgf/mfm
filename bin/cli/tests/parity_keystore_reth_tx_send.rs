@@ -209,7 +209,7 @@ async fn parity_keystore_cli_tx_sign_and_send_on_reth() {
 #[test]
 fn parity_keystore_tx_sign_fails_with_wrong_password() {
     let temp = TempDir::new().expect("temp dir");
-    let keystore_path = temp.path().join("wrong-password.keystore");
+    let keystore_path = temp.path().join("wrong-credential.keystore");
     let good_password_file = write_password_file(temp.path(), TEST_PASSWORD);
     let wrong_password_file = write_password_file(temp.path(), "definitely-wrong-password");
     let out_path = temp.path().join("signed.tx");
@@ -218,7 +218,7 @@ fn parity_keystore_tx_sign_fails_with_wrong_password() {
     let import_output = run_import_private_key(
         &keystore_path,
         &good_password_file,
-        "wrong-password-label",
+        "wrong-credential-label",
         &private_key,
     );
     assert!(
@@ -230,7 +230,7 @@ fn parity_keystore_tx_sign_fails_with_wrong_password() {
     let output = run_tx_sign_with_selector(
         &keystore_path,
         &wrong_password_file,
-        Some("wrong-password-label"),
+        Some("wrong-credential-label"),
         None,
         "0x1111111111111111111111111111111111111111",
         "1",
