@@ -12,6 +12,7 @@ use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 
 use crate::ctx::{read_u64_required, write_json};
 use crate::errors::{state_error_with_state, state_from_io, state_unknown};
+use crate::evm_encoding::{ERC20_SELECTOR_BALANCE_OF, ERC20_SELECTOR_DECIMALS};
 use crate::states::meta;
 
 fn parse_hex_string_response(value: &serde_json::Value) -> Result<String, StateError> {
@@ -417,19 +418,9 @@ fn parse_u8_u256(v: U256) -> Result<u8, StateError> {
     Ok(v.to::<u8>())
 }
 
-fn erc20_selector_balance_of() -> [u8; 4] {
-    // keccak256("balanceOf(address)")[..4]
-    [0x70, 0xa0, 0x82, 0x31]
-}
-
-fn erc20_selector_decimals() -> [u8; 4] {
-    // keccak256("decimals()")[..4]
-    [0x31, 0x3c, 0xe5, 0x67]
-}
-
 pub fn encode_erc20_balance_of(owner: &Address) -> String {
     let mut data = Vec::with_capacity(4 + 32);
-    data.extend_from_slice(&erc20_selector_balance_of());
+    data.extend_from_slice(&ERC20_SELECTOR_BALANCE_OF);
     data.extend_from_slice(&[0u8; 12]);
     data.extend_from_slice(owner.as_slice());
     format!("0x{}", hex::encode(data))
@@ -437,7 +428,7 @@ pub fn encode_erc20_balance_of(owner: &Address) -> String {
 
 pub fn encode_erc20_decimals() -> String {
     let mut data = Vec::with_capacity(4);
-    data.extend_from_slice(&erc20_selector_decimals());
+    data.extend_from_slice(&ERC20_SELECTOR_DECIMALS);
     format!("0x{}", hex::encode(data))
 }
 

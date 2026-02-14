@@ -1,5 +1,5 @@
 use clap::Args;
-use mfm_app::{FeatureCatalog, FeatureExecutionResult, FeatureRequest};
+use mfm_app::{FeatureExecutionResult, PortfolioSnapshotRequest, PortfolioSnapshotResponse};
 
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
@@ -30,14 +30,8 @@ pub async fn execute(ctx: &CommandContext, args: &SnapshotArgs) -> ! {
 }
 
 async fn execute_internal(args: &SnapshotArgs) -> CommandResult<FeatureExecutionResult> {
-    let tokens: serde_json::Value = serde_json::from_str(&args.tokens_json)
-        .map_err(|_| CommandError::new("InvalidJson", "Failed to parse --tokens-json as JSON"))?;
-    if !tokens.is_array() {
-        return Err(CommandError::new(
-            "InvalidJson",
-            "--tokens-json must be a JSON array",
-        ));
-    }
+    let tokens = mfm_app::parse_portfolio_tokens_json(&args.tokens_json)
+        .map_err(command_error_from_app_error)?;
 
     let stores = make_stores(
         args.stores.artifact_root.clone(),
@@ -46,22 +40,20 @@ async fn execute_internal(args: &SnapshotArgs) -> CommandResult<FeatureExecution
     .await?;
 
     let services = make_app_services(stores);
-
-    let catalog = FeatureCatalog::with_builtins();
-    let result = catalog
-        .execute(
-            &services,
-            FeatureRequest {
-                feature_id: "portfolio.snapshot".to_string(),
-                payload: serde_json::json!({
-                    "address": args.address,
-                    "chain_id": args.chain_id,
-                    "tokens": tokens,
-                }),
-            },
-        )
+    let response: PortfolioSnapshotResponse = services
+        .start_portfolio_snapshot(PortfolioSnapshotRequest {
+            address: args.address.clone(),
+            chain_id: Some(args.chain_id),
+            tokens,
+        })
         .await
         .map_err(command_error_from_app_error)?;
+
+    let result = FeatureExecutionResult {
+        feature_id: "portfolio.snapshot".to_string(),
+        result: serde_json::to_value(response)
+            .map_err(|_| CommandError::new("SerializationError", "Failed to serialize result"))?,
+    };
 
     Ok(CommandOutput::new(result))
 }

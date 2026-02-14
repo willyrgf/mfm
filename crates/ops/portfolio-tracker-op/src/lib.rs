@@ -31,9 +31,11 @@ use mfm_op_common::ctx as op_ctx;
 use mfm_op_common::errors as op_errors;
 use mfm_op_common::keystore_tx::output_context_key;
 use mfm_op_common::output as op_output;
+#[cfg(test)]
+use mfm_op_common::states::evm::encode_erc20_decimals;
 use mfm_op_common::states::evm::{
-    address_hex_lower, address_hex_lower_no0x, encode_erc20_decimals, NativeBalanceState,
-    ReadU64HexState, TokenBalanceState, U64Expectation,
+    address_hex_lower, address_hex_lower_no0x, NativeBalanceState, ReadU64HexState,
+    TokenBalanceState, U64Expectation,
 };
 use mfm_op_common::states::meta;
 use mfm_sdk::errors::SdkError;

@@ -204,6 +204,7 @@
         steps = [
           "fmt"
           "clippy"
+          "architecture-verify"
           "build"
           "tests"
         ];
@@ -246,6 +247,13 @@
         run = ''
           LOGFILE=$(artifact_path "clippy.log")
           log_capture "$LOGFILE" -- cargo-nightly clippy --workspace --lib --examples --tests --benches --all-features
+        '';
+      };
+      architecture-verify = {
+        description = "Architecture verifier";
+        run = ''
+          LOGFILE=$(artifact_path "architecture-verify.log")
+          log_capture "$LOGFILE" -- cargo run -p mfm-architecture-verify --
         '';
       };
       build = {

@@ -16,10 +16,14 @@ use serde::Deserialize;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::hex::{
+    bytes_to_hex_prefixed, hex_to_bytes, normalize_hex_str, normalize_nonempty_hex_str,
+};
 use crate::keystore_tx::{
     parse_address, parse_data_hex, parse_u128_quantity, resolve_key_id, sign_eip1559_transaction,
     write_raw_transaction_file, Eip1559TxToSign, KeystoreTxError,
 };
+use crate::rlp::{rlp_encode_list, trim_leading_zero_bytes, u128_to_min_be};
 use crate::states::keystore_admin::{
     KeystoreDeleteReport, KeystoreImportReport, KeystoreImportType, KeystoreListKey,
     KeystoreListReport, KeystoreListSortBy,
@@ -959,20 +963,14 @@ fn sign_legacy_create_raw_tx(
 }
 
 fn hex_quantity_to_rlp_bytes(value: &str) -> Result<Vec<u8>, LocalError> {
-    let normalized = normalize_hex_str(value).map_err(|_| {
+    let normalized = normalize_nonempty_hex_str(value).map_err(|_| {
         LocalError::new(
             "invalid_op_config",
             ErrorCategory::ParsingInput,
             "invalid transaction quantity hex",
         )
     })?;
-    let rest = normalized.strip_prefix("0x").expect("prefix guaranteed");
-    let padded = if rest.len().is_multiple_of(2) {
-        rest.to_string()
-    } else {
-        format!("0{rest}")
-    };
-    let bytes = hex::decode(padded).map_err(|_| {
+    let bytes = hex_to_bytes(&normalized).map_err(|_| {
         LocalError::new(
             "invalid_op_config",
             ErrorCategory::ParsingInput,
@@ -983,111 +981,11 @@ fn hex_quantity_to_rlp_bytes(value: &str) -> Result<Vec<u8>, LocalError> {
 }
 
 fn normalize_address(raw: &str) -> Result<String, ()> {
-    let normalized = normalize_hex_str(raw)?;
+    let normalized = normalize_hex_str(raw).map_err(|_| ())?;
     if normalized.len() != 42 {
         return Err(());
     }
     Ok(normalized.to_ascii_lowercase())
-}
-
-fn normalize_hex_str(raw: &str) -> Result<String, ()> {
-    let s = raw.trim();
-    let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) else {
-        return Err(());
-    };
-    if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(());
-    }
-    Ok(format!("0x{}", rest.to_ascii_lowercase()))
-}
-
-fn bytes_to_hex_prefixed(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
-}
-
-fn hex_to_bytes(hex_str: &str) -> Result<Vec<u8>, ()> {
-    let Some(rest) = hex_str
-        .strip_prefix("0x")
-        .or_else(|| hex_str.strip_prefix("0X"))
-    else {
-        return Err(());
-    };
-    hex::decode(rest).map_err(|_| ())
-}
-
-fn trim_leading_zero_bytes(bytes: &[u8]) -> Vec<u8> {
-    let mut idx = 0usize;
-    while idx < bytes.len() && bytes[idx] == 0 {
-        idx += 1;
-    }
-    bytes[idx..].to_vec()
-}
-
-fn u128_to_min_be(mut value: u128) -> Vec<u8> {
-    if value == 0 {
-        return Vec::new();
-    }
-
-    let mut out = Vec::new();
-    while value > 0 {
-        out.push((value & 0xff) as u8);
-        value >>= 8;
-    }
-    out.reverse();
-    out
-}
-
-fn rlp_encode_bytes(bytes: &[u8]) -> Vec<u8> {
-    if bytes.len() == 1 && bytes[0] < 0x80 {
-        return vec![bytes[0]];
-    }
-
-    let mut out = Vec::new();
-    if bytes.len() <= 55 {
-        out.push(0x80 + bytes.len() as u8);
-        out.extend_from_slice(bytes);
-        return out;
-    }
-
-    let len_bytes = usize_to_min_be(bytes.len());
-    out.push(0xb7 + len_bytes.len() as u8);
-    out.extend_from_slice(&len_bytes);
-    out.extend_from_slice(bytes);
-    out
-}
-
-fn rlp_encode_list(items: &[Vec<u8>]) -> Vec<u8> {
-    let mut payload = Vec::new();
-    for item in items {
-        payload.extend_from_slice(&rlp_encode_bytes(item));
-    }
-
-    let mut out = Vec::new();
-    if payload.len() <= 55 {
-        out.push(0xc0 + payload.len() as u8);
-        out.extend_from_slice(&payload);
-        return out;
-    }
-
-    let len_bytes = usize_to_min_be(payload.len());
-    out.push(0xf7 + len_bytes.len() as u8);
-    out.extend_from_slice(&len_bytes);
-    out.extend_from_slice(&payload);
-    out
-}
-
-fn usize_to_min_be(mut value: usize) -> Vec<u8> {
-    if value == 0 {
-        return vec![0];
-    }
-
-    let mut out = Vec::new();
-    while value > 0 {
-        out.push((value & 0xff) as u8);
-        value >>= 8;
-    }
-    out.reverse();
-    out
 }
 
 fn local_error_from_keystore_tx(err: KeystoreTxError) -> LocalError {

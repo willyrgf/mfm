@@ -38,6 +38,7 @@ Generated from `docs/repo-index.json`.
 - `crates/storages/event-store-mem/Cargo.toml` (rust-cargo)
 - `crates/storages/event-store-postgres/Cargo.toml` (rust-cargo)
 - `crates/storages/indexer/Cargo.toml` (rust-cargo)
+- `crates/tools/architecture-verify/Cargo.toml` (rust-cargo)
 - `flake.nix` (nix-flake)
 - `tests/integration/Cargo.toml` (rust-cargo)
 

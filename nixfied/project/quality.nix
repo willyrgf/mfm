@@ -17,6 +17,7 @@
       script = ''
         cargo-nightly fmt --all -- --check
         cargo-nightly clippy --workspace --lib --examples --tests --benches --all-features
+        cargo run -p mfm-architecture-verify --
       '';
     };
 

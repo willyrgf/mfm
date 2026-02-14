@@ -30,6 +30,7 @@ members = [
 	"crates/ops/portfolio-tracker-op",
 	"crates/ops/nix-app-op",
 	"crates/ops/proof-op",
+	"crates/tools/architecture-verify",
 ]
 
 # Core dependencies

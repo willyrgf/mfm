@@ -1,26 +1,19 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use mfm_machine::config::RunConfig;
-use mfm_machine::context::DynContext;
-use mfm_machine::errors::{ErrorCategory, StateError};
-use mfm_machine::events::DomainEvent;
-use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
-use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
-use mfm_machine::io::{IoCall, IoProvider};
-use mfm_machine::meta::StateMeta;
+use mfm_machine::errors::ErrorCategory;
+use mfm_machine::ids::{ContextKey, OpId, OpPath, StateId};
 use mfm_machine::plan::{StateGraph, StateNode};
-use mfm_machine::recorder::EventRecorder;
-use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-use mfm_op_common::ctx as op_ctx;
 use mfm_op_common::errors as op_errors;
-use mfm_op_common::idempotency as op_idempotency;
 use mfm_op_common::keystore_tx::{
     output_context_key, parse_address, parse_data_hex, parse_rpc_url, parse_u128_quantity,
-    send_raw_transaction_via_io, Eip1559TxToSign, KeystoreTxError,
+    Eip1559TxToSign, KeystoreTxError,
 };
-use mfm_op_common::states::meta;
+use mfm_op_common::states::keystore_tx::{
+    KeystoreTxSendRawState, KeystoreTxSendRawStateConfig, KeystoreTxSignState,
+    KeystoreTxSignStateConfig,
+};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
@@ -50,11 +43,6 @@ pub struct TxSendRawReport {
     pub tx_hash: String,
     pub rpc_url_host: String,
     pub submitted_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ReadTextResponse {
-    text: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -163,10 +151,10 @@ impl Operation for KeystoreTxSignOp {
         let keystore_path =
             decode_optional_hex_string(cfg.keystore_path, cfg.keystore_path_hex, "keystore_path")
                 .map_err(sdk_error_from_helper)?;
-        let state = TxSignState {
+        let state = KeystoreTxSignState {
             state_id: state_id.clone(),
-            op_path,
-            cfg: ExpandedTxSignConfig {
+            output_key: tx_sign_report_key_for_op_path(&op_path),
+            cfg: KeystoreTxSignStateConfig {
                 id: cfg.id,
                 by_label,
                 tx,
@@ -221,10 +209,10 @@ impl Operation for KeystoreTxSendRawOp {
         parse_rpc_url(&rpc_url).map_err(sdk_error_from_helper)?;
 
         let state_id = StateId(format!("{}.send_raw", op_path.0));
-        let state = TxSendRawState {
+        let state = KeystoreTxSendRawState {
             state_id: state_id.clone(),
-            op_path,
-            cfg: ExpandedTxSendRawConfig {
+            output_key: tx_send_raw_report_key_for_op_path(&op_path),
+            cfg: KeystoreTxSendRawStateConfig {
                 rpc_url,
                 input_path: PathBuf::from(cfg.input_path),
             },
@@ -238,182 +226,6 @@ impl Operation for KeystoreTxSendRawOp {
             edges: Vec::new(),
         })
     }
-}
-
-#[derive(Clone)]
-struct ExpandedTxSignConfig {
-    id: Option<String>,
-    by_label: Option<String>,
-    tx: Eip1559TxToSign,
-    out_path: PathBuf,
-    keystore_path: PathBuf,
-}
-
-#[derive(Clone)]
-struct TxSignState {
-    state_id: StateId,
-    op_path: OpPath,
-    cfg: ExpandedTxSignConfig,
-}
-
-#[async_trait]
-impl State for TxSignState {
-    fn meta(&self) -> StateMeta {
-        meta::apply_side_effect(op_idempotency::state_purpose(
-            TX_SIGN_OP_ID,
-            &self.state_id,
-            "sign_tx",
-        ))
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let report: TxSignReport = local_call(
-            &self.state_id,
-            io,
-            "local.keystore.tx_sign",
-            "tx_sign",
-            serde_json::json!({
-                "id": self.cfg.id.clone(),
-                "label_hex": self.cfg.by_label.as_ref().map(|v| hex::encode(v.as_bytes())),
-                "store_path_hex": hex::encode(self.cfg.keystore_path.display().to_string().as_bytes()),
-                "out_path_hex": hex::encode(self.cfg.out_path.display().to_string().as_bytes()),
-                "to": format!("{:?}", self.cfg.tx.to),
-                "value_wei": self.cfg.tx.value_wei.to_string(),
-                "chain_id": self.cfg.tx.chain_id,
-                "nonce": self.cfg.tx.nonce,
-                "max_fee_per_gas": self.cfg.tx.max_fee_per_gas.to_string(),
-                "max_priority_fee_per_gas": self.cfg.tx.max_priority_fee_per_gas.to_string(),
-                "gas_limit": self.cfg.tx.gas_limit,
-                "data_hex": format!("0x{}", hex::encode(&self.cfg.tx.data)),
-            }),
-        )
-        .await?;
-
-        let report_json = serde_json::to_value(&report).map_err(|_| {
-            op_errors::state_error_with_state(
-                self.state_id.clone(),
-                "SerializeReportFailed",
-                ErrorCategory::Unknown,
-                false,
-                "failed to serialize tx sign report",
-            )
-        })?;
-
-        op_ctx::write_json(
-            ctx,
-            tx_sign_report_key_for_op_path(&self.op_path),
-            report_json.clone(),
-        )?;
-
-        emit_report_event(rec, "keystore_tx_sign.completed", report_json).await?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
-    }
-}
-
-#[derive(Clone)]
-struct ExpandedTxSendRawConfig {
-    rpc_url: String,
-    input_path: PathBuf,
-}
-
-#[derive(Clone)]
-struct TxSendRawState {
-    state_id: StateId,
-    op_path: OpPath,
-    cfg: ExpandedTxSendRawConfig,
-}
-
-#[async_trait]
-impl State for TxSendRawState {
-    fn meta(&self) -> StateMeta {
-        meta::apply_side_effect(op_idempotency::state_purpose(
-            TX_SEND_RAW_OP_ID,
-            &self.state_id,
-            "send_raw_tx",
-        ))
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let raw_tx_file: ReadTextResponse = local_call(
-            &self.state_id,
-            io,
-            "local.fs.read_text",
-            "tx_send_raw_read",
-            serde_json::json!({
-                "path_hex": hex::encode(self.cfg.input_path.display().to_string().as_bytes()),
-            }),
-        )
-        .await?;
-
-        let raw_tx_hex = raw_tx_file.text.trim();
-        if raw_tx_hex.is_empty() {
-            return Err(op_errors::state_error_with_state(
-                self.state_id.clone(),
-                "InvalidRawTransaction",
-                ErrorCategory::ParsingInput,
-                false,
-                "input file did not contain a raw transaction payload",
-            ));
-        }
-
-        let submission =
-            send_raw_transaction_via_io(&self.state_id, io, &self.cfg.rpc_url, raw_tx_hex).await?;
-
-        let report = TxSendRawReport {
-            tx_hash: submission.tx_hash,
-            rpc_url_host: submission.rpc_url_host,
-            submitted_at: submission.submitted_at,
-        };
-
-        let report_json = serde_json::to_value(&report).map_err(|_| {
-            op_errors::state_error_with_state(
-                self.state_id.clone(),
-                "SerializeReportFailed",
-                ErrorCategory::Unknown,
-                false,
-                "failed to serialize tx send raw report",
-            )
-        })?;
-
-        op_ctx::write_json(
-            ctx,
-            tx_send_raw_report_key_for_op_path(&self.op_path),
-            report_json.clone(),
-        )?;
-
-        emit_report_event(rec, "keystore_tx_send_raw.submitted", report_json).await?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
-    }
-}
-
-async fn emit_report_event(
-    rec: &mut dyn EventRecorder,
-    name: &str,
-    payload: serde_json::Value,
-) -> Result<(), StateError> {
-    rec.emit(DomainEvent {
-        name: name.to_string(),
-        payload,
-        payload_ref: None,
-    })
-    .await
-    .map_err(|_| op_errors::state_unknown("emit_failed", "failed to emit domain event"))
 }
 
 fn resolve_keystore_path(configured: Option<String>) -> PathBuf {
@@ -527,70 +339,6 @@ fn helper_category(code: &str) -> ErrorCategory {
         "RpcInvalidResponse" => ErrorCategory::Rpc,
         _ => ErrorCategory::Unknown,
     }
-}
-
-async fn local_call<T: for<'de> Deserialize<'de>>(
-    state_id: &StateId,
-    io: &mut dyn IoProvider,
-    namespace: &str,
-    purpose: &str,
-    request: serde_json::Value,
-) -> Result<T, StateError> {
-    let fact_key = local_fact_key(state_id, purpose, &request)?;
-    let response = io
-        .call(IoCall {
-            namespace: namespace.to_string(),
-            request,
-            fact_key: Some(fact_key),
-        })
-        .await
-        .map_err(op_errors::state_from_io)
-        .map_err(|err| attach_state_id(state_id, err))?;
-
-    serde_json::from_value(response.response).map_err(|_| {
-        op_errors::state_error_with_state(
-            state_id.clone(),
-            "LocalResponseDecodeFailed",
-            ErrorCategory::Unknown,
-            false,
-            "failed to decode local io response payload",
-        )
-    })
-}
-
-fn local_fact_key(
-    state_id: &StateId,
-    purpose: &str,
-    request: &serde_json::Value,
-) -> Result<FactKey, StateError> {
-    let req_id = artifact_id_for_json(request).map_err(|err| match err {
-        CanonicalJsonError::FloatNotAllowed => op_errors::state_error_with_state(
-            state_id.clone(),
-            "local_request_not_canonical",
-            ErrorCategory::ParsingInput,
-            false,
-            "local io request was not canonical-json-hashable (floats are forbidden)",
-        ),
-        CanonicalJsonError::SecretsNotAllowed => op_errors::state_error_with_state(
-            state_id.clone(),
-            "secrets_detected",
-            ErrorCategory::Unknown,
-            false,
-            "local io request contained secrets",
-        ),
-    })?;
-
-    Ok(FactKey(format!(
-        "mfm:local|state:{}|purpose:{purpose}|req:{}",
-        state_id.0, req_id.0
-    )))
-}
-
-fn attach_state_id(state_id: &StateId, mut err: StateError) -> StateError {
-    if err.state_id.is_none() {
-        err.state_id = Some(state_id.clone());
-    }
-    err
 }
 
 #[cfg(test)]

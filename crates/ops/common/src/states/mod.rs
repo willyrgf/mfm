@@ -1,4 +1,9 @@
 pub mod evm;
 pub mod evm_dcv;
+pub mod evm_write;
+pub mod io;
 pub mod keystore_admin;
+pub mod keystore_tx;
 pub mod meta;
+pub mod nix;
+pub mod side_effect;

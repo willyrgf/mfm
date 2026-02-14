@@ -1,7 +1,5 @@
 use clap::{Args, Subcommand};
-use mfm_app::{
-    DeployConfigureValidateSpec, PipelineStartRequest, RunStartResponse, RunsStartRequest,
-};
+use mfm_app::{PipelineStartRequest, RunStartResponse, RunsStartRequest};
 use mfm_sdk::pipeline::Pipeline;
 use std::path::PathBuf;
 
@@ -112,35 +110,12 @@ async fn execute_start_internal(args: &PipelineStartArgs) -> CommandResult<RunSt
 async fn execute_dcv_internal(
     args: &DeployConfigureValidateArgs,
 ) -> CommandResult<RunStartResponse> {
-    let spec_json = match (&args.spec_json, &args.spec_file) {
-        (Some(_), Some(_)) => {
-            return Err(CommandError::new(
-                "InvalidArguments",
-                "Pass only one of --spec-json or --spec-file",
-            ))
-        }
-        (None, None) => {
-            return Err(CommandError::new(
-                "MissingArgument",
-                "Pass one of --spec-json or --spec-file",
-            ))
-        }
-        (Some(s), None) => s.clone(),
-        (None, Some(path)) => std::fs::read_to_string(path).map_err(|_| {
-            CommandError::new("InvalidSpecFile", "Failed to read --spec-file contents")
-        })?,
-    };
-
-    let spec: DeployConfigureValidateSpec = serde_json::from_str(&spec_json).map_err(|_| {
-        CommandError::new(
-            "InvalidJson",
-            "Failed to parse deploy/configure/validate spec JSON",
-        )
-    })?;
-
     let services = app_services(&args.stores).await?;
     let response = services
-        .start_deploy_configure_validate(spec)
+        .start_deploy_configure_validate_from_spec_input(
+            args.spec_json.clone(),
+            args.spec_file.clone(),
+        )
         .await
         .map_err(command_error_from_app_error)?;
 

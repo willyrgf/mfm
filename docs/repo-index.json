@@ -176,6 +176,11 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "architecture-verify",
+      "path": "crates/tools/architecture-verify/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "root",
       "path": "flake.nix",
       "kind": "nix-flake"

@@ -1903,8 +1903,8 @@ dependencies = [
  "mfm-machine",
  "mfm-op-evm-read",
  "mfm-op-evm-write",
- "mfm-op-keystore",
  "mfm-op-keystore-admin",
+ "mfm-op-keystore-shim",
  "mfm-op-keystore-tx",
  "mfm-op-nix-app",
  "mfm-op-proof",
@@ -1950,6 +1950,10 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
 ]
+
+[[package]]
+name = "mfm-architecture-verify"
+version = "0.1.0"
 
 [[package]]
 name = "mfm-artifact-store-fs"
@@ -2105,7 +2109,7 @@ dependencies = [
  "k256",
  "mfm-collectors-evm",
  "mfm-machine",
- "mfm-op-keystore",
+ "mfm-op-keystore-shim",
  "mfm-sdk",
  "mfm_core",
  "regex",
@@ -2164,13 +2168,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-op-keystore"
-version = "0.1.0"
-dependencies = [
- "mfm_core",
-]
-
-[[package]]
 name = "mfm-op-keystore-admin"
 version = "0.1.0"
 dependencies = [
@@ -2183,6 +2180,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-op-keystore-shim"
+version = "0.1.0"
+dependencies = [
+ "mfm_core",
+]
+
+[[package]]
 name = "mfm-op-keystore-tx"
 version = "0.1.0"
 dependencies = [
@@ -2190,7 +2194,7 @@ dependencies = [
  "hex",
  "mfm-machine",
  "mfm-op-common",
- "mfm-op-keystore",
+ "mfm-op-keystore-shim",
  "mfm-sdk",
  "rpassword",
  "serde",

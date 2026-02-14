@@ -1,7 +1,10 @@
 [package]
-name = "mfm-op-keystore"
+name = "mfm-op-keystore-shim"
 version = "0.1.0"
 edition = "2021"
+
+[lib]
+name = "mfm_op_keystore"
 
 [dependencies]
 mfm_core = { path = "../../core" }

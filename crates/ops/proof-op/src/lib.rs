@@ -2,7 +2,7 @@
 //!
 //! Source of truth: `REDESIGN.md`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -10,19 +10,17 @@ use async_trait::async_trait;
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::StateError;
-use mfm_machine::events::DomainEvent;
-use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
-use mfm_machine::io::{IoCall, IoProvider};
+use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_op_common::ctx as op_ctx;
-use mfm_op_common::errors as op_errors;
-use mfm_op_common::idempotency as op_idempotency;
 use mfm_op_common::output as op_output;
+use mfm_op_common::states::io::NamespaceReadState;
 use mfm_op_common::states::meta;
+use mfm_op_common::states::side_effect::{IdempotentSideEffectState, TriggerOnce};
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -32,6 +30,12 @@ use mfm_sdk::op::{OpIo, Operation};
 use mfm_machine::errors::ErrorCategory;
 #[cfg(test)]
 use mfm_machine::errors::ErrorInfo;
+#[cfg(test)]
+use mfm_machine::events::DomainEvent;
+#[cfg(test)]
+use mfm_op_common::errors as op_errors;
+#[cfg(test)]
+use mfm_op_common::idempotency as op_idempotency;
 
 const OP_ID: &str = "proof";
 const OP_VERSION: &str = "v1";
@@ -56,48 +60,10 @@ fn output_fact_key(op_path: &OpPath) -> FactKey {
     FactKey(format!("proof:output|op:{}", op_path.0))
 }
 
-fn idempotency_key_for_value(v: &serde_json::Value) -> Result<String, StateError> {
-    let id = artifact_id_for_json(v).map_err(|_| {
-        op_errors::state_unknown_msg(
-            "idempotency_key_not_canonical",
-            "value was not canonical-json-hashable",
-        )
-    })?;
-    Ok(id.0)
-}
-
-fn side_effect_fact_key(op_path: &OpPath, idempotency_key: &str) -> FactKey {
-    FactKey(format!(
-        "proof:side_effect|op:{}|id:{idempotency_key}",
-        op_path.0
-    ))
-}
-
-#[derive(Clone)]
-struct OrphanAfterSideEffect {
-    stop_after_handler_once: Arc<AtomicBool>,
-    armed_once: Arc<AtomicBool>,
-}
-
-impl OrphanAfterSideEffect {
-    fn arm(stop_after_handler_once: Arc<AtomicBool>) -> Self {
-        Self {
-            stop_after_handler_once,
-            armed_once: Arc::new(AtomicBool::new(true)),
-        }
-    }
-
-    fn trigger_if_armed(&self) {
-        if self.armed_once.swap(false, Ordering::SeqCst) {
-            self.stop_after_handler_once.store(true, Ordering::SeqCst);
-        }
-    }
-}
-
 /// Proof op implementation used by acceptance tests.
 #[derive(Clone, Default)]
 pub struct ProofOp {
-    orphan_after_side_effect: Option<OrphanAfterSideEffect>,
+    orphan_after_side_effect: Option<TriggerOnce>,
 }
 
 impl ProofOp {
@@ -108,7 +74,7 @@ impl ProofOp {
         mut self,
         stop_after_handler_once: Arc<AtomicBool>,
     ) -> Self {
-        self.orphan_after_side_effect = Some(OrphanAfterSideEffect::arm(stop_after_handler_once));
+        self.orphan_after_side_effect = Some(TriggerOnce::arm(stop_after_handler_once));
         self
     }
 }
@@ -143,12 +109,24 @@ impl Operation for ProofOp {
         let side_sid = mfm_machine::ids::StateId(side_id);
         let out_sid = mfm_machine::ids::StateId(out_id);
 
-        let read = Arc::new(ReadFactsState {
-            op_path: op_path.clone(),
+        let read = Arc::new(NamespaceReadState {
+            namespace: "proof.read".to_string(),
+            request: serde_json::json!({}),
+            fact_key: read_fact_key(&op_path),
+            output_key: ctx_key("read_fact"),
+            io_error_code: "read_fact_io_failed",
+            io_error_message: "failed to read input fact",
         });
-        let side = Arc::new(ApplySideEffectState {
+        let side = Arc::new(IdempotentSideEffectState {
             state_id: side_sid.clone(),
+            op_id: OP_ID,
             op_path: op_path.clone(),
+            input_key: ctx_key("read_fact"),
+            idempotency_key_output: ctx_key("idempotency_key"),
+            output_key: ctx_key("side_effect_result"),
+            namespace: "proof.side_effect".to_string(),
+            fact_key_prefix: "proof:side_effect",
+            event_name: DOMAIN_EVENT_IDEMPOTENCY_KEY.to_string(),
             orphan_after_side_effect: self.orphan_after_side_effect.clone(),
         });
         let out = Arc::new(WriteOutputState {
@@ -180,118 +158,6 @@ impl Operation for ProofOp {
                     to: out_sid,
                 },
             ],
-        })
-    }
-}
-
-struct ReadFactsState {
-    op_path: OpPath,
-}
-
-#[async_trait]
-impl State for ReadFactsState {
-    fn meta(&self) -> StateMeta {
-        meta::read_only_io_with_tag(meta::tags::READ_ONLY_IO)
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        _rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let key = read_fact_key(&self.op_path);
-        let res = io
-            .call(IoCall {
-                namespace: "proof.read".to_string(),
-                request: serde_json::json!({}),
-                fact_key: Some(key),
-            })
-            .await
-            .map_err(|_| {
-                op_errors::state_unknown_msg("read_fact_io_failed", "failed to read input fact")
-            })?;
-
-        op_ctx::write_json(ctx, ctx_key("read_fact"), res.response)?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
-    }
-}
-
-struct ApplySideEffectState {
-    state_id: mfm_machine::ids::StateId,
-    op_path: OpPath,
-    orphan_after_side_effect: Option<OrphanAfterSideEffect>,
-}
-
-#[async_trait]
-impl State for ApplySideEffectState {
-    fn meta(&self) -> StateMeta {
-        meta::apply_side_effect(op_idempotency::state_purpose(
-            OP_ID,
-            &self.state_id,
-            "apply_side_effect",
-        ))
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let read_fact = op_ctx::read_json_required(
-            ctx,
-            &ctx_key("read_fact"),
-            "missing_read_fact",
-            "missing read_fact in context",
-        )?;
-
-        let id_key = idempotency_key_for_value(&read_fact)?;
-        op_ctx::write_json(
-            ctx,
-            ctx_key("idempotency_key"),
-            serde_json::json!(id_key.clone()),
-        )?;
-
-        let fact_key = side_effect_fact_key(&self.op_path, &id_key);
-        let existing = io.get_recorded_fact(&fact_key).await.map_err(|_| {
-            op_errors::state_unknown_msg("io_fact_lookup_failed", "failed to lookup recorded fact")
-        })?;
-
-        if existing.is_none() {
-            rec.emit(DomainEvent {
-                name: DOMAIN_EVENT_IDEMPOTENCY_KEY.to_string(),
-                payload: serde_json::json!({"key": id_key}),
-                payload_ref: None,
-            })
-            .await
-            .map_err(|_| {
-                op_errors::state_unknown_msg("emit_failed", "failed to emit idempotency event")
-            })?;
-        }
-
-        let res = io
-            .call(IoCall {
-                namespace: "proof.side_effect".to_string(),
-                request: serde_json::json!({"idempotency_key": id_key}),
-                fact_key: Some(fact_key),
-            })
-            .await
-            .map_err(|_| {
-                op_errors::state_unknown_msg("side_effect_io_failed", "side-effect call failed")
-            })?;
-
-        op_ctx::write_json(ctx, ctx_key("side_effect_result"), res.response)?;
-
-        if let Some(orphan) = &self.orphan_after_side_effect {
-            orphan.trigger_if_armed();
-        }
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
         })
     }
 }
@@ -353,6 +219,7 @@ mod tests {
     use super::*;
 
     use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::Ordering;
 
     use mfm_machine::config::RunConfig;
     use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
@@ -363,6 +230,7 @@ mod tests {
     };
     use mfm_machine::hashing::artifact_id_for_json;
     use mfm_machine::ids::{ArtifactId, RunId, StateId};
+    use mfm_machine::io::IoCall;
     use mfm_machine::live_io::{FactIndex, LiveIoTransport, LiveIoTransportFactory};
     use mfm_machine::plan::ExecutionPlan;
     use mfm_machine::recorder::EventRecorder;

@@ -36,7 +36,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 
 [dev-dependencies]
-mfm-op-keystore = { path = "../../crates/ops/keystore-op" }
+mfm-op-keystore = { package = "mfm-op-keystore-shim", path = "../../crates/ops/keystore-op" }
 tempfile = "3.0"
 assert_cmd = "2.0"
 predicates = "3.0"

@@ -8,23 +8,15 @@ pub mod nix_exec_transport;
 
 use std::sync::Arc;
 
+#[cfg(test)]
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 
 use mfm_machine::config::RunConfig;
-use mfm_machine::context::DynContext;
-use mfm_machine::errors::StateError;
-use mfm_machine::hashing::artifact_id_for_json;
-use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
-use mfm_machine::io::{IoCall, IoProvider};
-use mfm_machine::meta::StateMeta;
+use mfm_machine::errors::ErrorCategory;
+use mfm_machine::ids::{OpId, OpPath, StateId};
 use mfm_machine::plan::StateGraph;
-use mfm_machine::recorder::EventRecorder;
-use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-use mfm_op_common::ctx as op_ctx;
 use mfm_op_common::errors as op_errors;
-use mfm_op_common::idempotency as op_idempotency;
-use mfm_op_common::states::meta;
+use mfm_op_common::states::nix::{validate_nix_exec_config, NixExecState, NixExecStateConfig};
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -32,51 +24,6 @@ use mfm_sdk::op::{OpIo, Operation};
 
 const OP_ID: &str = "nix_app";
 const OP_VERSION: &str = "v1";
-const NAMESPACE_NIX_EXEC: &str = "nix.exec";
-const NAMESPACE_EXEC: &str = "exec";
-
-#[derive(Clone, Debug, Deserialize)]
-struct NixAppConfig {
-    #[serde(default)]
-    program_path: Option<String>,
-
-    #[serde(default)]
-    app: Option<String>,
-
-    #[serde(default)]
-    argv: Vec<String>,
-
-    #[serde(default)]
-    stdin_json: serde_json::Value,
-
-    #[serde(default = "default_timeout_ms")]
-    timeout_ms: u64,
-
-    #[serde(default = "default_write_result_to")]
-    write_result_to: String,
-}
-
-fn default_timeout_ms() -> u64 {
-    300_000
-}
-
-fn default_write_result_to() -> String {
-    "result".to_string()
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-enum ExecRequest {
-    #[serde(rename = "run_program_v1")]
-    RunProgramV1 {
-        program_path: String,
-        argv: Vec<String>,
-        stdin_json: serde_json::Value,
-        timeout_ms: u64,
-        #[serde(default)]
-        env: serde_json::Value,
-    },
-}
 
 #[derive(Clone, Default)]
 pub struct NixAppOp;
@@ -103,48 +50,15 @@ impl Operation for NixAppOp {
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
     ) -> Result<StateGraph, SdkError> {
-        let cfg: NixAppConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
+        let cfg: NixExecStateConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
             op_errors::sdk_unknown_error("invalid_op_config", "invalid nix_app op_config")
         })?;
-        match (&cfg.program_path, &cfg.app) {
-            (Some(program_path), None) => {
-                if !program_path.starts_with("/nix/store/") {
-                    return Err(op_errors::sdk_unknown_error(
-                        "program_path_not_allowed",
-                        "program_path must start with /nix/store/",
-                    ));
-                }
-            }
-            (None, Some(app)) => {
-                if app.trim().is_empty() {
-                    return Err(op_errors::sdk_unknown_error(
-                        "invalid_app_ref",
-                        "app must be a non-empty flake app ref",
-                    ));
-                }
-                if !app.contains('#') {
-                    return Err(op_errors::sdk_unknown_error(
-                        "invalid_app_ref",
-                        "app must contain a '#' fragment (for example github:willyrgf/mfm#jq_fmt_example)",
-                    ));
-                }
-            }
-            (Some(_), Some(_)) => {
-                return Err(op_errors::sdk_unknown_error(
-                    "invalid_op_config",
-                    "provide exactly one of program_path or app",
-                ));
-            }
-            (None, None) => {
-                return Err(op_errors::sdk_unknown_error(
-                    "invalid_op_config",
-                    "missing program_path or app",
-                ));
-            }
-        }
+        validate_nix_exec_config(&cfg).map_err(|msg| {
+            op_errors::sdk_error("invalid_op_config", ErrorCategory::Unknown, false, msg)
+        })?;
 
         let sid = StateId(format!("{}.run", op_path.0));
-        let state = Arc::new(NixAppState {
+        let state = Arc::new(NixExecState {
             state_id: sid.clone(),
             cfg,
         });
@@ -156,139 +70,23 @@ impl Operation for NixAppOp {
     }
 }
 
-struct NixAppState {
-    state_id: StateId,
-    cfg: NixAppConfig,
-}
-
-impl NixAppState {
-    fn preflight_fact_key(&self, req: &serde_json::Value) -> Result<FactKey, StateError> {
-        let id = artifact_id_for_json(req).map_err(|_| {
-            op_errors::state_unknown(
-                "nix_preflight_request_not_canonical",
-                "nix preflight request not canonical",
-            )
-        })?;
-        Ok(FactKey(format!(
-            "mfm:nix:preflight|state:{}|req:{}",
-            self.state_id.0, id.0
-        )))
-    }
-
-    fn fact_key(&self, req: &serde_json::Value) -> Result<FactKey, StateError> {
-        let id = artifact_id_for_json(req).map_err(|_| {
-            op_errors::state_unknown("exec_request_not_canonical", "exec request not canonical")
-        })?;
-        Ok(FactKey(format!(
-            "mfm:exec|state:{}|req:{}",
-            self.state_id.0, id.0
-        )))
-    }
-}
-
-#[async_trait]
-impl State for NixAppState {
-    fn meta(&self) -> StateMeta {
-        meta::execute(op_idempotency::state_purpose(
-            "nix_app",
-            &self.state_id,
-            "exec",
-        ))
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        _rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let program_path = if let Some(program_path) = &self.cfg.program_path {
-            program_path.clone()
-        } else {
-            let app = self.cfg.app.clone().ok_or_else(|| {
-                op_errors::state_unknown(
-                    "invalid_op_config",
-                    "missing app for nix preflight resolution",
-                )
-            })?;
-
-            let preflight_req = serde_json::json!({
-                "kind": "resolve_flake_app_v1",
-                "app": app,
-                "timeout_ms": self.cfg.timeout_ms,
-            });
-            let preflight_key = self.preflight_fact_key(&preflight_req)?;
-            let preflight = io
-                .call(IoCall {
-                    namespace: NAMESPACE_NIX_EXEC.to_string(),
-                    request: preflight_req,
-                    fact_key: Some(preflight_key),
-                })
-                .await
-                .map_err(|_| {
-                    op_errors::state_unknown("nix_preflight_failed", "nix preflight failed")
-                })?;
-
-            preflight
-                .response
-                .get("program_path")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| {
-                    op_errors::state_unknown(
-                        "nix_preflight_invalid_response",
-                        "nix preflight response missing program_path",
-                    )
-                })?
-        };
-
-        let req = serde_json::to_value(ExecRequest::RunProgramV1 {
-            program_path,
-            argv: self.cfg.argv.clone(),
-            stdin_json: self.cfg.stdin_json.clone(),
-            timeout_ms: self.cfg.timeout_ms,
-            env: serde_json::json!({}),
-        })
-        .map_err(|_| {
-            op_errors::state_unknown(
-                "exec_request_encode_failed",
-                "failed to encode exec request",
-            )
-        })?;
-
-        let key = self.fact_key(&req)?;
-
-        let res = io
-            .call(IoCall {
-                namespace: NAMESPACE_EXEC.to_string(),
-                request: req,
-                fact_key: Some(key),
-            })
-            .await
-            .map_err(|_| op_errors::state_unknown("exec_io_failed", "exec io call failed"))?;
-
-        let out_key = ContextKey(self.cfg.write_result_to.clone());
-        op_ctx::write_json(ctx, out_key, res.response)?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use std::collections::HashMap;
 
+    use mfm_machine::context::DynContext;
     use mfm_machine::engine::{ExecutionEngine, RunPhase};
+    use mfm_machine::errors::StateError;
     use mfm_machine::exec_transport::{ExecPolicy, ExecProgramTransportFactory};
     use mfm_machine::hashing::artifact_id_for_json;
+    use mfm_machine::ids::ContextKey;
     use mfm_machine::io::IoCall;
     use mfm_machine::live_io::{FactIndex, LiveIoTransport, LiveIoTransportFactory};
     use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
     use mfm_machine::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta, Tag};
+    use mfm_machine::recorder::EventRecorder;
     use mfm_machine::replay_io::ReplayIo;
     use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
     use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
@@ -299,7 +97,7 @@ mod tests {
     use mfm_sdk::unstable::SdkPlanResolver;
     use tokio::sync::Mutex;
 
-    use crate::nix_exec_transport::{NixFlakePolicy, NixFlakeTransportFactory};
+    use crate::nix_exec_transport::{NixFlakePolicy, NixFlakeTransportFactory, NAMESPACE_NIX_EXEC};
 
     #[test]
     fn expand_accepts_flake_app_ref_config() {

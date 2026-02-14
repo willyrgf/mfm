@@ -11,6 +11,10 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::errors::{state_error_with_state, state_from_io};
+use crate::rlp::{
+    rlp_encode_bytes, rlp_encode_list_preencoded, trim_leading_zero_bytes, u128_to_min_be,
+    u64_to_min_be,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -449,7 +453,7 @@ fn derive_signature_with_matching_recovery_id(
 }
 
 fn encode_eip1559_unsigned_payload(tx: &Eip1559TxToSign) -> Vec<u8> {
-    rlp_encode_list(&[
+    rlp_encode_list_preencoded(&[
         rlp_encode_bytes(&u64_to_min_be(tx.chain_id)),
         rlp_encode_bytes(&u64_to_min_be(tx.nonce)),
         rlp_encode_bytes(&u128_to_min_be(tx.max_priority_fee_per_gas)),
@@ -458,7 +462,7 @@ fn encode_eip1559_unsigned_payload(tx: &Eip1559TxToSign) -> Vec<u8> {
         rlp_encode_bytes(tx.to.as_slice()),
         rlp_encode_bytes(&u128_to_min_be(tx.value_wei)),
         rlp_encode_bytes(&tx.data),
-        rlp_encode_list(&[]),
+        rlp_encode_list_preencoded(&[]),
     ])
 }
 
@@ -467,7 +471,7 @@ fn encode_eip1559_signed_payload(tx: &Eip1559TxToSign, sig: PrimitiveSignature) 
     let r = trim_leading_zero_bytes(&sig.r().to_be_bytes::<32>());
     let s = trim_leading_zero_bytes(&sig.s().to_be_bytes::<32>());
 
-    rlp_encode_list(&[
+    rlp_encode_list_preencoded(&[
         rlp_encode_bytes(&u64_to_min_be(tx.chain_id)),
         rlp_encode_bytes(&u64_to_min_be(tx.nonce)),
         rlp_encode_bytes(&u128_to_min_be(tx.max_priority_fee_per_gas)),
@@ -476,100 +480,11 @@ fn encode_eip1559_signed_payload(tx: &Eip1559TxToSign, sig: PrimitiveSignature) 
         rlp_encode_bytes(tx.to.as_slice()),
         rlp_encode_bytes(&u128_to_min_be(tx.value_wei)),
         rlp_encode_bytes(&tx.data),
-        rlp_encode_list(&[]),
+        rlp_encode_list_preencoded(&[]),
         rlp_encode_bytes(&u64_to_min_be(u64::from(y_parity))),
         rlp_encode_bytes(&r),
         rlp_encode_bytes(&s),
     ])
-}
-
-fn trim_leading_zero_bytes(bytes: &[u8]) -> Vec<u8> {
-    let mut idx = 0usize;
-    while idx < bytes.len() && bytes[idx] == 0 {
-        idx += 1;
-    }
-    bytes[idx..].to_vec()
-}
-
-fn u64_to_min_be(mut value: u64) -> Vec<u8> {
-    if value == 0 {
-        return Vec::new();
-    }
-
-    let mut out = Vec::new();
-    while value > 0 {
-        out.push((value & 0xff) as u8);
-        value >>= 8;
-    }
-    out.reverse();
-    out
-}
-
-fn u128_to_min_be(mut value: u128) -> Vec<u8> {
-    if value == 0 {
-        return Vec::new();
-    }
-
-    let mut out = Vec::new();
-    while value > 0 {
-        out.push((value & 0xff) as u8);
-        value >>= 8;
-    }
-    out.reverse();
-    out
-}
-
-fn rlp_encode_bytes(bytes: &[u8]) -> Vec<u8> {
-    if bytes.len() == 1 && bytes[0] < 0x80 {
-        return vec![bytes[0]];
-    }
-
-    let mut out = Vec::new();
-    if bytes.len() <= 55 {
-        out.push(0x80 + bytes.len() as u8);
-        out.extend_from_slice(bytes);
-        return out;
-    }
-
-    let len_bytes = usize_to_min_be(bytes.len());
-    out.push(0xb7 + len_bytes.len() as u8);
-    out.extend_from_slice(&len_bytes);
-    out.extend_from_slice(bytes);
-    out
-}
-
-fn rlp_encode_list(items: &[Vec<u8>]) -> Vec<u8> {
-    let mut payload = Vec::new();
-    for item in items {
-        payload.extend_from_slice(item);
-    }
-
-    let mut out = Vec::new();
-    if payload.len() <= 55 {
-        out.push(0xc0 + payload.len() as u8);
-        out.extend_from_slice(&payload);
-        return out;
-    }
-
-    let len_bytes = usize_to_min_be(payload.len());
-    out.push(0xf7 + len_bytes.len() as u8);
-    out.extend_from_slice(&len_bytes);
-    out.extend_from_slice(&payload);
-    out
-}
-
-fn usize_to_min_be(mut value: usize) -> Vec<u8> {
-    if value == 0 {
-        return vec![0];
-    }
-
-    let mut out = Vec::new();
-    while value > 0 {
-        out.push((value & 0xff) as u8);
-        value >>= 8;
-    }
-    out.reverse();
-    out
 }
 
 #[cfg(test)]
@@ -590,7 +505,7 @@ mod tests {
 
     #[test]
     fn rlp_encode_empty_list_is_c0() {
-        assert_eq!(rlp_encode_list(&[]), vec![0xc0]);
+        assert_eq!(rlp_encode_list_preencoded(&[]), vec![0xc0]);
     }
 
     #[test]

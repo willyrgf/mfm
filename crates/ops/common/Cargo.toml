@@ -20,8 +20,8 @@ rpassword = "7.0"
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-collectors-evm = { path = "../../collectors/evm" }
-mfm-op-keystore = { path = "../keystore-op" }
+mfm-op-keystore = { package = "mfm-op-keystore-shim", path = "../keystore-op" }
 mfm_core = { path = "../../core" }
+tokio = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }

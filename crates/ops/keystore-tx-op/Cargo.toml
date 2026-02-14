@@ -15,7 +15,7 @@ rpassword = "7.0"
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-op-common = { path = "../common" }
-mfm-op-keystore = { path = "../keystore-op" }
+mfm-op-keystore = { package = "mfm-op-keystore-shim", path = "../keystore-op" }
 
 [dev-dependencies]
 tokio = { workspace = true }

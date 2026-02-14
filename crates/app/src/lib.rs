@@ -703,6 +703,46 @@ impl AppServices {
         .await
     }
 
+    pub async fn start_deploy_configure_validate_from_spec_input(
+        &self,
+        spec_json: Option<String>,
+        spec_file: Option<PathBuf>,
+    ) -> Result<RunStartResponse, AppError> {
+        let raw_spec = match (spec_json, spec_file) {
+            (Some(_), Some(_)) => {
+                return Err(AppError::new(
+                    ErrorClass::BadRequest,
+                    "InvalidArguments",
+                    "Pass only one of --spec-json or --spec-file",
+                ));
+            }
+            (None, None) => {
+                return Err(AppError::new(
+                    ErrorClass::BadRequest,
+                    "MissingArgument",
+                    "Pass one of --spec-json or --spec-file",
+                ));
+            }
+            (Some(s), None) => s,
+            (None, Some(path)) => std::fs::read_to_string(path).map_err(|_| {
+                AppError::new(
+                    ErrorClass::BadRequest,
+                    "InvalidSpecFile",
+                    "Failed to read --spec-file contents",
+                )
+            })?,
+        };
+
+        let spec: DeployConfigureValidateSpec = serde_json::from_str(&raw_spec).map_err(|_| {
+            AppError::new(
+                ErrorClass::BadRequest,
+                "InvalidJson",
+                "Failed to parse deploy/configure/validate spec JSON",
+            )
+        })?;
+        self.start_deploy_configure_validate(spec).await
+    }
+
     pub async fn start_portfolio_snapshot(
         &self,
         req: PortfolioSnapshotRequest,
@@ -781,6 +821,22 @@ impl AppServices {
             chain_id,
             block_number,
         })
+    }
+
+    pub async fn start_portfolio_snapshot_from_tokens_json(
+        &self,
+        address: String,
+        chain_id: u64,
+        tokens_json: String,
+    ) -> Result<PortfolioSnapshotResponse, AppError> {
+        let tokens = parse_portfolio_tokens_json(&tokens_json)?;
+
+        self.start_portfolio_snapshot(PortfolioSnapshotRequest {
+            address,
+            chain_id: Some(chain_id),
+            tokens,
+        })
+        .await
     }
 }
 
@@ -1366,6 +1422,31 @@ pub struct PortfolioSnapshotRequest {
     pub chain_id: Option<u64>,
     #[serde(default)]
     pub tokens: Vec<PortfolioTokenSpec>,
+}
+
+pub fn parse_portfolio_tokens_json(tokens_json: &str) -> Result<Vec<PortfolioTokenSpec>, AppError> {
+    let tokens_value: serde_json::Value = serde_json::from_str(tokens_json).map_err(|_| {
+        AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidJson",
+            "Failed to parse --tokens-json as JSON",
+        )
+    })?;
+    if !tokens_value.is_array() {
+        return Err(AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidJson",
+            "--tokens-json must be a JSON array",
+        ));
+    }
+
+    serde_json::from_value(tokens_value).map_err(|_| {
+        AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidJson",
+            "--tokens-json entries must be valid token objects",
+        )
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
