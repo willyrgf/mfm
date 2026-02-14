@@ -15,3 +15,4 @@ mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-collectors-evm = { path = "../../collectors/evm" }
 mfm-op-common = { path = "../common" }
+zeroize = "1.7.0"

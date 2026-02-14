@@ -7,6 +7,10 @@ edition = "2021"
 name = "mfm_core"
 path = "src/lib.rs"
 
+[features]
+default = []
+dangerous-secret-export = []
+
 [dependencies]
 serde = "1.0"
 serde_json = "1.0"
@@ -28,6 +32,7 @@ alloy-primitives = { workspace = true, features = ["serde"] }
 hex = "0.4.3"
 thiserror = "2.0.12"
 ring = "0.17.14"
+fs2 = "0.4.3"
 
 [dev-dependencies]
 tempfile = "3.8"
