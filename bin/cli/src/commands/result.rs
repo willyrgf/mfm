@@ -50,25 +50,8 @@ impl CommandError {
         self
     }
 
-    // Common error types
-    pub fn key_not_found(message: impl Into<String>) -> Self {
-        Self::new("KeyNotFound", message)
-    }
-
     pub fn invalid_uuid(message: impl Into<String>) -> Self {
         Self::new("InvalidUuid", message)
-    }
-
-    pub fn missing_argument(message: impl Into<String>) -> Self {
-        Self::new("MissingArgument", message)
-    }
-
-    pub fn ambiguous_label(message: impl Into<String>) -> Self {
-        Self::new("AmbiguousLabel", message)
-    }
-
-    pub fn operation_cancelled(message: impl Into<String>) -> Self {
-        Self::new("OperationCancelled", message).with_exit_code(0)
     }
 }
 

@@ -9,16 +9,19 @@
 //! - fetch allowlisted ERC-20 balances via `eth_call(balanceOf)` at that pinned block
 //! - write a content-addressed snapshot output artifact via `portfolio.output`
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use alloy_primitives::{Address, U256};
 use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
+use mfm_machine::errors::ErrorCategory;
 use mfm_machine::errors::StateError;
+use mfm_machine::events::DomainEvent;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
 use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
@@ -27,6 +30,7 @@ use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_op_common::ctx as op_ctx;
 use mfm_op_common::errors as op_errors;
+use mfm_op_common::keystore_tx::output_context_key;
 use mfm_op_common::output as op_output;
 use mfm_op_common::states::evm::{ReadU64HexState, U64Expectation};
 use mfm_op_common::states::meta;
@@ -41,6 +45,9 @@ const KEY_CHAIN_ID: &str = "chain_id";
 const KEY_BLOCK_NUMBER: &str = "block_number";
 const KEY_NATIVE: &str = "native";
 const KEY_SNAPSHOT_ARTIFACT_ID: &str = "snapshot_artifact_id";
+const KEY_REPORT: &str = "report";
+
+const ENV_PORTFOLIO_TOKENS_JSON: &str = "MFM_PORTFOLIO_TOKENS_JSON";
 
 fn ctx_key(suffix: &'static str) -> ContextKey {
     ContextKey(suffix.to_string())
@@ -48,6 +55,17 @@ fn ctx_key(suffix: &'static str) -> ContextKey {
 
 fn default_chain_id() -> u64 {
     1
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortfolioTrackerReport {
+    pub snapshot_artifact_id: String,
+    pub chain_id: u64,
+    pub block_number: u64,
+}
+
+pub fn portfolio_tracker_report_context_key() -> ContextKey {
+    output_context_key("portfolio_tracker.main")
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -68,6 +86,30 @@ struct PortfolioTrackerConfig {
 
     #[serde(default)]
     tokens: Vec<TokenConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PortfolioSnapshotTokenConfig {
+    address: String,
+    #[serde(default)]
+    symbol: Option<String>,
+    #[serde(default)]
+    decimals: Option<u8>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PortfolioSnapshotInputConfig {
+    address: String,
+    chain_id: Option<u64>,
+    #[serde(default)]
+    tokens: Vec<PortfolioSnapshotTokenConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+enum PortfolioTrackerInputConfig {
+    Tracker(PortfolioTrackerConfig),
+    Snapshot(PortfolioSnapshotInputConfig),
 }
 
 fn address_hex_lower(addr: &Address) -> String {
@@ -153,6 +195,122 @@ fn parse_u8_u256(v: U256) -> Result<u8, StateError> {
     Ok(v.to::<u8>())
 }
 
+fn sdk_input_error(code: &'static str, message: impl Into<String>) -> SdkError {
+    op_errors::sdk_error(code, ErrorCategory::ParsingInput, false, message)
+}
+
+fn normalize_eth_address(s: &str) -> Option<String> {
+    let s = s.trim();
+    let rest = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
+    if rest.len() != 40 {
+        return None;
+    }
+    if !rest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("0x{}", rest.to_ascii_lowercase()))
+}
+
+fn load_portfolio_tokens_from_env() -> Result<Vec<PortfolioSnapshotTokenConfig>, SdkError> {
+    let Ok(raw) = std::env::var(ENV_PORTFOLIO_TOKENS_JSON) else {
+        return Ok(Vec::new());
+    };
+
+    serde_json::from_str::<Vec<PortfolioSnapshotTokenConfig>>(&raw).map_err(|_| {
+        sdk_input_error(
+            "InvalidPortfolioTokensJson",
+            format!("invalid {ENV_PORTFOLIO_TOKENS_JSON}"),
+        )
+    })
+}
+
+fn parse_token_address(
+    raw: &str,
+    code: &'static str,
+    message: &'static str,
+) -> Result<Address, SdkError> {
+    let normalized = normalize_eth_address(raw).ok_or_else(|| sdk_input_error(code, message))?;
+    normalized
+        .parse::<Address>()
+        .map_err(|_| sdk_input_error(code, message))
+}
+
+fn normalize_snapshot_input(
+    cfg: PortfolioSnapshotInputConfig,
+) -> Result<PortfolioTrackerConfig, SdkError> {
+    let wallet_address =
+        parse_token_address(&cfg.address, "InvalidAddress", "invalid ethereum address")?;
+
+    let mut merged: HashMap<String, PortfolioSnapshotTokenConfig> = HashMap::new();
+
+    for token in load_portfolio_tokens_from_env()? {
+        let normalized = normalize_eth_address(&token.address).ok_or_else(|| {
+            sdk_input_error(
+                "InvalidPortfolioTokensJson",
+                "invalid token address in MFM_PORTFOLIO_TOKENS_JSON",
+            )
+        })?;
+        merged.insert(
+            normalized.clone(),
+            PortfolioSnapshotTokenConfig {
+                address: normalized,
+                symbol: token.symbol,
+                decimals: token.decimals,
+            },
+        );
+    }
+
+    for token in cfg.tokens {
+        let normalized = normalize_eth_address(&token.address)
+            .ok_or_else(|| sdk_input_error("InvalidTokenAddress", "invalid token address"))?;
+        merged.insert(
+            normalized.clone(),
+            PortfolioSnapshotTokenConfig {
+                address: normalized,
+                symbol: token.symbol,
+                decimals: token.decimals,
+            },
+        );
+    }
+
+    let mut addresses: Vec<String> = merged.keys().cloned().collect();
+    addresses.sort();
+
+    let mut tokens = Vec::with_capacity(addresses.len());
+    for address in addresses {
+        let Some(token) = merged.remove(&address) else {
+            continue;
+        };
+        tokens.push(TokenConfig {
+            address: parse_token_address(
+                &token.address,
+                "InvalidTokenAddress",
+                "invalid token address",
+            )?,
+            symbol: token.symbol,
+            decimals: token.decimals,
+        });
+    }
+
+    Ok(PortfolioTrackerConfig {
+        wallet_address,
+        chain_id: cfg.chain_id.unwrap_or_else(default_chain_id),
+        tokens,
+    })
+}
+
+fn parse_config(op_config: &serde_json::Value) -> Result<PortfolioTrackerConfig, SdkError> {
+    let cfg: PortfolioTrackerInputConfig =
+        serde_json::from_value(op_config.clone()).map_err(|_| {
+            op_errors::sdk_parse_error("invalid_op_config", "invalid portfolio_tracker op_config")
+        })?;
+
+    match cfg {
+        PortfolioTrackerInputConfig::Tracker(cfg) => Ok(cfg),
+        PortfolioTrackerInputConfig::Snapshot(cfg) => normalize_snapshot_input(cfg),
+    }
+}
+
 fn output_fact_key(op_path: &OpPath) -> FactKey {
     FactKey(format!("portfolio:output|op:{}", op_path.0))
 }
@@ -204,6 +362,7 @@ impl Operation for PortfolioTrackerOp {
                 PortKey(KEY_CHAIN_ID.to_string()),
                 PortKey(KEY_BLOCK_NUMBER.to_string()),
                 PortKey(KEY_SNAPSHOT_ARTIFACT_ID.to_string()),
+                PortKey(KEY_REPORT.to_string()),
             ],
         })
     }
@@ -214,13 +373,7 @@ impl Operation for PortfolioTrackerOp {
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
     ) -> Result<StateGraph, SdkError> {
-        let mut cfg: PortfolioTrackerConfig =
-            serde_json::from_value(op_config.clone()).map_err(|_| {
-                op_errors::sdk_parse_error(
-                    "invalid_op_config",
-                    "invalid portfolio_tracker op_config",
-                )
-            })?;
+        let mut cfg = parse_config(op_config)?;
 
         cfg.tokens
             .sort_by_key(|t| address_hex_lower_no0x(&t.address));
@@ -512,6 +665,35 @@ impl State for WriteSnapshotState {
             ctx_key(KEY_SNAPSHOT_ARTIFACT_ID),
         )
         .await?;
+
+        let snapshot_artifact_id = op_ctx::read_string_required(
+            ctx,
+            &ctx_key(KEY_SNAPSHOT_ARTIFACT_ID),
+            "missing_snapshot_artifact_id",
+            "missing snapshot artifact id in context",
+            "snapshot_artifact_id_not_string",
+            "snapshot artifact id in context must be a string",
+        )?;
+
+        let report = PortfolioTrackerReport {
+            snapshot_artifact_id,
+            chain_id,
+            block_number,
+        };
+        let report_json = serde_json::to_value(&report).map_err(|_| {
+            op_errors::state_unknown(
+                "serialize_report_failed",
+                "failed to serialize snapshot report",
+            )
+        })?;
+        op_ctx::write_json(ctx, ctx_key(KEY_REPORT), report_json.clone())?;
+        rec.emit(DomainEvent {
+            name: "portfolio_tracker.completed".to_string(),
+            payload: report_json,
+            payload_ref: None,
+        })
+        .await
+        .map_err(|_| op_errors::state_unknown("emit_failed", "failed to emit domain event"))?;
 
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,

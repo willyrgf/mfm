@@ -134,6 +134,14 @@ impl<'a> EvmIoClient<'a> {
         Self { state_id, io }
     }
 
+    pub fn state_id(&self) -> &StateId {
+        &self.state_id
+    }
+
+    pub fn io_mut(&mut self) -> &mut dyn IoProvider {
+        self.io
+    }
+
     pub async fn call(&mut self, call: JsonRpcCall) -> Result<IoResult, IoError> {
         let key = fact_key_for_jsonrpc_call(&self.state_id, &call).map_err(|e| match e {
             FactKeyDerivationError::NotCanonical(CanonicalJsonError::FloatNotAllowed) => io_other(

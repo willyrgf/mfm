@@ -1,0 +1,1072 @@
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+use alloy_primitives::keccak256;
+use async_trait::async_trait;
+use chrono::Utc;
+use k256::ecdsa::SigningKey;
+use mfm_core::keystore::{KeyType, KeystoreError};
+use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
+use mfm_machine::ids::ErrorCode;
+use mfm_machine::io::IoCall;
+use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
+use mfm_op_keystore::{Keystore, KeystoreConfig};
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use uuid::Uuid;
+use zeroize::Zeroizing;
+
+use crate::keystore_tx::{
+    parse_address, parse_data_hex, parse_u128_quantity, resolve_key_id, sign_eip1559_transaction,
+    write_raw_transaction_file, Eip1559TxToSign, KeystoreTxError,
+};
+use crate::states::keystore_admin::{
+    KeystoreDeleteReport, KeystoreImportReport, KeystoreImportType, KeystoreListKey,
+    KeystoreListReport, KeystoreListSortBy,
+};
+
+const ENV_KEYSTORE_PASSWORD_FILE: &str = "MFM_KEYSTORE_PASSWORD_FILE";
+const ENV_KEYSTORE_PASSWORD: &str = "MFM_KEYSTORE_PASSWORD";
+const ENV_INTEGRATION_TEST: &str = "MFM_INTEGRATION_TEST";
+const ENV_IMPORT_MNEMONIC_EXTRA: &str = "MFM_KEYSTORE_IMPORT_BIP39_EXTRA";
+
+#[derive(Clone, Default)]
+pub struct LocalOpIoTransportFactory;
+
+impl LiveIoTransportFactory for LocalOpIoTransportFactory {
+    fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
+        Box::new(LocalOpIoTransport)
+    }
+}
+
+struct LocalOpIoTransport;
+
+#[async_trait]
+impl LiveIoTransport for LocalOpIoTransport {
+    async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
+        match call.namespace.as_str() {
+            "local.keystore.import" => handle_keystore_import(call.request),
+            "local.keystore.list" => handle_keystore_list(call.request),
+            "local.keystore.delete" => handle_keystore_delete(call.request),
+            "local.keystore.tx_sign" => handle_keystore_tx_sign(call.request),
+            "local.fs.read_text" => handle_read_text(call.request),
+            "local.evm.sign_legacy_create" => handle_evm_sign_legacy_create(call.request),
+            _ => Err(io_other(
+                "unknown_namespace",
+                ErrorCategory::Unknown,
+                "unknown local io namespace",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct KeystoreImportRequest {
+    kind: KeystoreImportType,
+    label: Option<String>,
+    derive_path: String,
+    store_path: String,
+    stdin_mode: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct KeystoreListRequest {
+    store_path: String,
+    show_addrs: bool,
+    filter_label: Option<String>,
+    sort_by: KeystoreListSortBy,
+}
+
+#[derive(Debug, Deserialize)]
+struct KeystoreDeleteRequest {
+    id: Option<String>,
+    label: Option<String>,
+    confirm_yes: bool,
+    store_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct KeystoreTxSignRequest {
+    id: Option<String>,
+    label: Option<String>,
+    store_path: String,
+    out_path: String,
+    to: String,
+    value_wei: String,
+    chain_id: u64,
+    nonce: u64,
+    max_fee_per_gas: String,
+    max_priority_fee_per_gas: String,
+    gas_limit: u64,
+    data_hex: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadTextRequest {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvmSignLegacyCreateRequest {
+    env_name_hex: String,
+    from: String,
+    chain_id: u64,
+    nonce_hex: String,
+    gas_price_hex: String,
+    gas_limit_hex: String,
+    value_hex: String,
+    data_hex: String,
+}
+
+#[derive(Debug, Clone)]
+struct LocalError {
+    code: &'static str,
+    category: ErrorCategory,
+    message: String,
+}
+
+impl LocalError {
+    fn new(code: &'static str, category: ErrorCategory, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            category,
+            message: message.into(),
+        }
+    }
+
+    fn into_io(self) -> IoError {
+        io_other(self.code, self.category, self.message)
+    }
+}
+
+fn io_other(code: &'static str, category: ErrorCategory, message: impl Into<String>) -> IoError {
+    IoError::Other(ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category,
+        retryable: false,
+        message: message.into(),
+        details: None,
+    })
+}
+
+fn parse_request<T: DeserializeOwned>(request: serde_json::Value) -> Result<T, IoError> {
+    serde_json::from_value(request).map_err(|_| {
+        io_other(
+            "invalid_local_request",
+            ErrorCategory::ParsingInput,
+            "invalid local io request payload",
+        )
+    })
+}
+
+fn encode_response(value: serde_json::Value) -> Result<serde_json::Value, IoError> {
+    serde_json::to_value(value).map_err(|_| {
+        io_other(
+            "local_response_serialize_failed",
+            ErrorCategory::Unknown,
+            "failed to serialize local io response payload",
+        )
+    })
+}
+
+fn handle_keystore_import(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
+    let req: KeystoreImportRequest = parse_request(request)?;
+    let report = keystore_import(req).map_err(LocalError::into_io)?;
+    encode_response(serde_json::json!(report))
+}
+
+fn handle_keystore_list(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
+    let req: KeystoreListRequest = parse_request(request)?;
+    let report = keystore_list(req).map_err(LocalError::into_io)?;
+    encode_response(serde_json::json!(report))
+}
+
+fn handle_keystore_delete(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
+    let req: KeystoreDeleteRequest = parse_request(request)?;
+    let report = keystore_delete(req).map_err(LocalError::into_io)?;
+    encode_response(serde_json::json!(report))
+}
+
+fn handle_keystore_tx_sign(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
+    let req: KeystoreTxSignRequest = parse_request(request)?;
+    let report = keystore_tx_sign(req).map_err(LocalError::into_io)?;
+    encode_response(report)
+}
+
+fn handle_read_text(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
+    let req: ReadTextRequest = parse_request(request)?;
+    let text = std::fs::read_to_string(&req.path).map_err(|e| {
+        io_other(
+            "InputReadError",
+            ErrorCategory::Unknown,
+            format!("Failed to read input file '{}': {e}", req.path),
+        )
+    })?;
+    encode_response(serde_json::json!({ "text": text }))
+}
+
+fn handle_evm_sign_legacy_create(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
+    let req: EvmSignLegacyCreateRequest = parse_request(request)?;
+    let response = evm_sign_legacy_create(req).map_err(LocalError::into_io)?;
+    encode_response(response)
+}
+
+fn keystore_import(req: KeystoreImportRequest) -> Result<KeystoreImportReport, LocalError> {
+    let path = PathBuf::from(req.store_path);
+    let material = match req.kind {
+        KeystoreImportType::PrivateKey => read_input(
+            if req.stdin_mode {
+                ""
+            } else {
+                "Enter private key (hex): "
+            },
+            req.stdin_mode,
+        )?,
+        KeystoreImportType::Mnemonic => read_input(
+            if req.stdin_mode {
+                ""
+            } else {
+                "Enter mnemonic phrase: "
+            },
+            req.stdin_mode,
+        )?,
+    };
+
+    match req.kind {
+        KeystoreImportType::PrivateKey => {
+            let normalized = normalize_private_key(&material)?;
+            let mut ks = create_keystore_if_needed(&path)?;
+            let label = req
+                .label
+                .unwrap_or_else(|| format!("imported-key-{}", Utc::now().format("%Y%m%d-%H%M%S")));
+            let key_id = ks
+                .import_private_key(Some(label), normalized.as_str())
+                .map_err(admin_error_from_keystore)?;
+            let key_info = load_key_info(&ks, key_id)?;
+            Ok(KeystoreImportReport {
+                id: key_info.id.to_string(),
+                label: key_info.alias.unwrap_or_default(),
+                key_type: "raw".to_string(),
+                address: format!("{:?}", key_info.address),
+                created_at: key_info.created_at.to_rfc3339(),
+            })
+        }
+        KeystoreImportType::Mnemonic => {
+            validate_mnemonic_basic(&material)?;
+            let mut ks = create_keystore_if_needed(&path)?;
+            let label = req
+                .label
+                .unwrap_or_else(|| format!("imported-hd-{}", Utc::now().format("%Y%m%d-%H%M%S")));
+            let extra = std::env::var(ENV_IMPORT_MNEMONIC_EXTRA)
+                .ok()
+                .map(Zeroizing::new);
+            let key_id = ks
+                .import_mnemonic(
+                    Some(label),
+                    material.as_str(),
+                    &req.derive_path,
+                    extra.as_ref().map(|v| v.as_str()),
+                )
+                .map_err(admin_error_from_keystore)?;
+            let key_info = load_key_info(&ks, key_id)?;
+            Ok(KeystoreImportReport {
+                id: key_info.id.to_string(),
+                label: key_info.alias.unwrap_or_default(),
+                key_type: "hd".to_string(),
+                address: format!("{:?}", key_info.address),
+                created_at: key_info.created_at.to_rfc3339(),
+            })
+        }
+    }
+}
+
+fn keystore_list(req: KeystoreListRequest) -> Result<KeystoreListReport, LocalError> {
+    let path = PathBuf::from(req.store_path);
+    let keystore = load_unlocked_keystore(&path)?;
+    let mut keys: Vec<KeystoreListKey> = keystore
+        .list_keys()
+        .map_err(admin_error_from_keystore)?
+        .into_iter()
+        .map(|key| KeystoreListKey {
+            id: key.id.to_string(),
+            label: key.alias.unwrap_or_else(|| "<no alias>".to_string()),
+            key_type: key_type_code(&key.key_type).to_string(),
+            address: if req.show_addrs {
+                Some(format!("{:?}", key.address))
+            } else {
+                None
+            },
+            created: key.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+        })
+        .collect();
+
+    if let Some(pattern) = req.filter_label.as_ref() {
+        let regex = regex::Regex::new(pattern).map_err(|e| {
+            LocalError::new(
+                "InvalidRegex",
+                ErrorCategory::ParsingInput,
+                format!("Invalid regex pattern: {e}"),
+            )
+        })?;
+        keys.retain(|k| regex.is_match(&k.label));
+    }
+
+    match req.sort_by {
+        KeystoreListSortBy::Label => keys.sort_by(|a, b| a.label.cmp(&b.label)),
+        KeystoreListSortBy::Created => keys.sort_by(|a, b| a.created.cmp(&b.created)),
+        KeystoreListSortBy::Type => keys.sort_by(|a, b| a.key_type.cmp(&b.key_type)),
+    }
+
+    Ok(KeystoreListReport {
+        keys,
+        show_addresses: req.show_addrs,
+    })
+}
+
+fn keystore_delete(req: KeystoreDeleteRequest) -> Result<KeystoreDeleteReport, LocalError> {
+    let path = PathBuf::from(req.store_path);
+    let mut keystore = load_unlocked_keystore(&path)?;
+
+    let key_id = if let Some(label) = &req.label {
+        let keys = keystore.list_keys().map_err(admin_error_from_keystore)?;
+        let matching_keys: Vec<_> = keys
+            .iter()
+            .filter(|k| k.alias.as_ref() == Some(label))
+            .collect();
+        match matching_keys.len() {
+            0 => {
+                return Err(LocalError::new(
+                    "KeyNotFound",
+                    ErrorCategory::ParsingInput,
+                    format!("No key found with label: {label}"),
+                ))
+            }
+            1 => matching_keys[0].id,
+            _ => {
+                return Err(LocalError::new(
+                    "AmbiguousLabel",
+                    ErrorCategory::ParsingInput,
+                    format!("Multiple keys found with label: {label}"),
+                ))
+            }
+        }
+    } else if let Some(id_str) = &req.id {
+        Uuid::parse_str(id_str).map_err(|_| {
+            LocalError::new(
+                "InvalidUuid",
+                ErrorCategory::ParsingInput,
+                "Invalid UUID format",
+            )
+        })?
+    } else {
+        return Err(LocalError::new(
+            "MissingArgument",
+            ErrorCategory::ParsingInput,
+            "Must specify either key ID or --by-label",
+        ));
+    };
+
+    let keys = keystore.list_keys().map_err(admin_error_from_keystore)?;
+    let key_to_delete = keys.into_iter().find(|k| k.id == key_id).ok_or_else(|| {
+        LocalError::new("KeyNotFound", ErrorCategory::ParsingInput, "Key not found")
+    })?;
+
+    if !req.confirm_yes {
+        let label = key_to_delete.alias.as_deref().unwrap_or("<no alias>");
+        let prompt = format!(
+            "Are you sure you want to delete key '{}' (ID: {})?",
+            label, key_to_delete.id
+        );
+        let confirmed = confirm(&prompt)?;
+        if !confirmed {
+            return Err(LocalError::new(
+                "OperationCancelled",
+                ErrorCategory::ParsingInput,
+                "Deletion cancelled by user",
+            ));
+        }
+    }
+
+    keystore
+        .delete_key(key_id)
+        .map_err(admin_error_from_keystore)?;
+
+    Ok(KeystoreDeleteReport {
+        id: key_to_delete.id.to_string(),
+        label: key_to_delete.alias.unwrap_or_default(),
+    })
+}
+
+fn keystore_tx_sign(req: KeystoreTxSignRequest) -> Result<serde_json::Value, LocalError> {
+    let path = PathBuf::from(req.store_path);
+    let mut keystore = load_unlocked_keystore(&path)?;
+
+    let key_id = resolve_key_id(&keystore, req.id.as_deref(), req.label.as_deref())
+        .map_err(local_error_from_keystore_tx)?;
+
+    let tx = Eip1559TxToSign {
+        to: parse_address(&req.to, "to").map_err(local_error_from_keystore_tx)?,
+        value_wei: parse_u128_quantity(&req.value_wei, "value-wei")
+            .map_err(local_error_from_keystore_tx)?,
+        chain_id: req.chain_id,
+        nonce: req.nonce,
+        max_fee_per_gas: parse_u128_quantity(&req.max_fee_per_gas, "max-fee-per-gas")
+            .map_err(local_error_from_keystore_tx)?,
+        max_priority_fee_per_gas: parse_u128_quantity(
+            &req.max_priority_fee_per_gas,
+            "max-priority-fee-per-gas",
+        )
+        .map_err(local_error_from_keystore_tx)?,
+        gas_limit: req.gas_limit,
+        data: parse_data_hex(&req.data_hex).map_err(local_error_from_keystore_tx)?,
+    };
+
+    let signed = sign_eip1559_transaction(&mut keystore, key_id, &tx)
+        .map_err(local_error_from_keystore_tx)?;
+    let out_path = PathBuf::from(req.out_path);
+    write_raw_transaction_file(&out_path, &signed.raw_tx_hex)
+        .map_err(local_error_from_keystore_tx)?;
+
+    Ok(serde_json::json!({
+        "from": signed.from,
+        "to": format!("{:?}", tx.to),
+        "nonce": tx.nonce,
+        "chain_id": tx.chain_id,
+        "tx_type": "0x2",
+        "payload_hash": signed.payload_hash,
+        "out_path": out_path.display().to_string(),
+    }))
+}
+
+fn evm_sign_legacy_create(
+    req: EvmSignLegacyCreateRequest,
+) -> Result<serde_json::Value, LocalError> {
+    let env_name = decode_hex_utf8(&req.env_name_hex, "invalid_op_config", "env_name_hex")?;
+    let raw = Zeroizing::new(std::env::var(&env_name).map_err(|_| {
+        LocalError::new(
+            "missing_signing_key_env",
+            ErrorCategory::Unknown,
+            "signing key env was not configured",
+        )
+    })?);
+    let signing_key = signing_key_from_hex(raw.as_str())?;
+    let signer_addr = signer_address_hex(&signing_key);
+    let configured_from = normalize_address(&req.from).map_err(|_| {
+        LocalError::new(
+            "invalid_op_config",
+            ErrorCategory::ParsingInput,
+            "invalid from address",
+        )
+    })?;
+
+    if signer_addr != configured_from {
+        return Err(LocalError::new(
+            "signing_key_address_mismatch",
+            ErrorCategory::ParsingInput,
+            "signing key did not match configured from address",
+        ));
+    }
+
+    let data_hex = normalize_hex_str(&req.data_hex).map_err(|_| {
+        LocalError::new(
+            "invalid_op_config",
+            ErrorCategory::ParsingInput,
+            "invalid deployment data hex",
+        )
+    })?;
+    let data_bytes = hex_to_bytes(&data_hex).map_err(|_| {
+        LocalError::new(
+            "invalid_op_config",
+            ErrorCategory::ParsingInput,
+            "invalid deployment data hex",
+        )
+    })?;
+
+    let raw_tx_hex = sign_legacy_create_raw_tx(
+        &signing_key,
+        req.chain_id,
+        &req.nonce_hex,
+        &req.gas_price_hex,
+        &req.gas_limit_hex,
+        &req.value_hex,
+        &data_bytes,
+    )?;
+
+    Ok(serde_json::json!({ "raw_tx_hex": raw_tx_hex }))
+}
+
+fn create_keystore_if_needed(path: &Path) -> Result<Keystore, LocalError> {
+    if path.exists() {
+        return load_unlocked_keystore(path);
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            LocalError::new(
+                "KeystoreError",
+                ErrorCategory::Unknown,
+                format!(
+                    "Failed to create keystore directory '{}': {e}",
+                    parent.display()
+                ),
+            )
+        })?;
+    }
+
+    let password = get_create_password()?;
+    let cfg = if std::env::var(ENV_INTEGRATION_TEST).is_ok() {
+        KeystoreConfig::insecure_integration_test()
+    } else {
+        KeystoreConfig::default()
+    };
+
+    let mut keystore = Keystore::new_with_config(path, cfg).map_err(|e| {
+        LocalError::new(
+            "KeystoreError",
+            ErrorCategory::Unknown,
+            format!("Failed to create keystore: {e}"),
+        )
+    })?;
+    keystore.unlock(password.as_str()).map_err(|_| {
+        LocalError::new(
+            "KeystoreError",
+            ErrorCategory::Unknown,
+            "failed to unlock keystore",
+        )
+    })?;
+    Ok(keystore)
+}
+
+fn load_unlocked_keystore(path: &Path) -> Result<Keystore, LocalError> {
+    if !path.exists() {
+        return Err(LocalError::new(
+            "KeystoreError",
+            ErrorCategory::Unknown,
+            format!("Keystore not found at: {}", path.display()),
+        ));
+    }
+
+    let mut keystore = Keystore::new(path)
+        .map_err(|e| LocalError::new("KeystoreError", ErrorCategory::Unknown, e.to_string()))?;
+    let password = get_unlock_password()?;
+    keystore.unlock(password.as_str()).map_err(|_| {
+        LocalError::new(
+            "KeystoreError",
+            ErrorCategory::Unknown,
+            "invalid credential for keystore unlock",
+        )
+    })?;
+    Ok(keystore)
+}
+
+fn load_key_info(
+    keystore: &Keystore,
+    key_id: Uuid,
+) -> Result<mfm_core::keystore::KeyInfo, LocalError> {
+    let keys = keystore.list_keys().map_err(admin_error_from_keystore)?;
+    keys.into_iter().find(|k| k.id == key_id).ok_or_else(|| {
+        LocalError::new(
+            "KeyNotFound",
+            ErrorCategory::ParsingInput,
+            "Failed to retrieve imported key info",
+        )
+    })
+}
+
+fn get_unlock_password() -> Result<Zeroizing<String>, LocalError> {
+    if let Some(password) = password_from_env_sources()? {
+        return Ok(password);
+    }
+    read_password("Enter keystore password: ")
+}
+
+fn get_create_password() -> Result<Zeroizing<String>, LocalError> {
+    if let Some(password) = password_from_env_sources()? {
+        return Ok(password);
+    }
+    let password = read_password("Enter password for new keystore: ")?;
+    let confirm_password = read_password("Confirm password: ")?;
+    if password.as_str() != confirm_password.as_str() {
+        return Err(LocalError::new(
+            "KeystoreError",
+            ErrorCategory::Unknown,
+            "credential entries did not match",
+        ));
+    }
+    Ok(password)
+}
+
+fn password_from_env_sources() -> Result<Option<Zeroizing<String>>, LocalError> {
+    if let Ok(password_file) = std::env::var(ENV_KEYSTORE_PASSWORD_FILE) {
+        return Ok(Some(read_password_file(&password_file)?));
+    }
+
+    if let Ok(password) = std::env::var(ENV_KEYSTORE_PASSWORD) {
+        eprintln!(
+            "Warning: {ENV_KEYSTORE_PASSWORD} may expose secrets; prefer {ENV_KEYSTORE_PASSWORD_FILE}."
+        );
+        return Ok(Some(Zeroizing::new(password)));
+    }
+
+    Ok(None)
+}
+
+fn read_password(prompt: &str) -> Result<Zeroizing<String>, LocalError> {
+    print!("{prompt}");
+    io::stdout()
+        .flush()
+        .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
+    let password = rpassword::read_password()
+        .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
+    Ok(Zeroizing::new(password))
+}
+
+fn read_password_file(path: &str) -> Result<Zeroizing<String>, LocalError> {
+    let raw =
+        Zeroizing::new(std::fs::read_to_string(path).map_err(|e| {
+            LocalError::new("KeystoreError", ErrorCategory::Unknown, e.to_string())
+        })?);
+    let trimmed = raw.trim_end_matches(['\r', '\n']);
+    if trimmed.is_empty() {
+        return Err(LocalError::new(
+            "KeystoreError",
+            ErrorCategory::Unknown,
+            format!("credential file at '{path}' was empty"),
+        ));
+    }
+    Ok(Zeroizing::new(trimmed.to_string()))
+}
+
+fn read_input(prompt: &str, from_stdin: bool) -> Result<Zeroizing<String>, LocalError> {
+    if from_stdin {
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
+        return Ok(Zeroizing::new(input.trim().to_string()));
+    }
+
+    print!("{prompt}");
+    io::stdout()
+        .flush()
+        .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
+    Ok(Zeroizing::new(input.trim().to_string()))
+}
+
+fn confirm(prompt: &str) -> Result<bool, LocalError> {
+    loop {
+        print!("{prompt} (y/N): ");
+        io::stdout()
+            .flush()
+            .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| LocalError::new("InputError", ErrorCategory::Unknown, e.to_string()))?;
+        match input.trim().to_lowercase().as_str() {
+            "y" | "yes" => return Ok(true),
+            "n" | "no" | "" => return Ok(false),
+            _ => {
+                println!("Please enter 'y' or 'n'");
+            }
+        }
+    }
+}
+
+fn normalize_private_key(input: &str) -> Result<Zeroizing<String>, LocalError> {
+    let normalized = input.strip_prefix("0x").unwrap_or(input).trim().to_string();
+    if normalized.len() != 64 {
+        return Err(LocalError::new(
+            "InvalidPrivateKey",
+            ErrorCategory::ParsingInput,
+            "Private key must be 64 hex characters",
+        ));
+    }
+    if hex::decode(&normalized).is_err() {
+        return Err(LocalError::new(
+            "InvalidPrivateKey",
+            ErrorCategory::ParsingInput,
+            "Private key must be valid hexadecimal",
+        ));
+    }
+    Ok(Zeroizing::new(normalized))
+}
+
+fn validate_mnemonic_basic(input: &str) -> Result<(), LocalError> {
+    if input.split_whitespace().count() < 12 {
+        return Err(LocalError::new(
+            "InvalidMnemonic",
+            ErrorCategory::ParsingInput,
+            "Mnemonic must have at least 12 words",
+        ));
+    }
+    Ok(())
+}
+
+fn admin_error_from_keystore(err: KeystoreError) -> LocalError {
+    match err {
+        KeystoreError::InvalidPrivateKey => LocalError::new(
+            "InvalidPrivateKey",
+            ErrorCategory::ParsingInput,
+            "Private key format is invalid",
+        ),
+        KeystoreError::InvalidMnemonic(_) => LocalError::new(
+            "InvalidMnemonic",
+            ErrorCategory::ParsingInput,
+            "Mnemonic phrase is invalid",
+        ),
+        KeystoreError::InvalidDerivationPath(_) => LocalError::new(
+            "InvalidDerivationPath",
+            ErrorCategory::ParsingInput,
+            "Derivation path is invalid",
+        ),
+        KeystoreError::KeyNotFound(_) => LocalError::new(
+            "KeyNotFound",
+            ErrorCategory::ParsingInput,
+            "Requested key does not exist",
+        ),
+        _ => LocalError::new("KeystoreError", ErrorCategory::Unknown, err.to_string()),
+    }
+}
+
+fn key_type_code(key_type: &KeyType) -> &'static str {
+    match key_type {
+        KeyType::PrivateKey => "raw",
+        KeyType::Mnemonic { .. } => "hd",
+    }
+}
+
+fn decode_hex_utf8(
+    raw: &str,
+    code: &'static str,
+    field: &'static str,
+) -> Result<String, LocalError> {
+    let bytes = hex::decode(raw).map_err(|_| {
+        LocalError::new(
+            code,
+            ErrorCategory::ParsingInput,
+            format!("{field} must be valid hex"),
+        )
+    })?;
+    String::from_utf8(bytes).map_err(|_| {
+        LocalError::new(
+            code,
+            ErrorCategory::ParsingInput,
+            format!("{field} did not decode to utf-8"),
+        )
+    })
+}
+
+fn signing_key_from_hex(raw: &str) -> Result<SigningKey, LocalError> {
+    let normalized = Zeroizing::new(normalize_hex_str(raw).map_err(|_| {
+        LocalError::new(
+            "invalid_signing_key_env",
+            ErrorCategory::ParsingInput,
+            "signing key hex was invalid",
+        )
+    })?);
+    let bytes = Zeroizing::new(hex_to_bytes(normalized.as_str()).map_err(|_| {
+        LocalError::new(
+            "invalid_signing_key_env",
+            ErrorCategory::ParsingInput,
+            "signing key hex was invalid",
+        )
+    })?);
+    if bytes.len() != 32 {
+        return Err(LocalError::new(
+            "invalid_signing_key_env",
+            ErrorCategory::ParsingInput,
+            "signing key must be exactly 32 bytes",
+        ));
+    }
+
+    let mut key = Zeroizing::new([0u8; 32]);
+    key.copy_from_slice(bytes.as_slice());
+    SigningKey::from_bytes((&*key).into()).map_err(|_| {
+        LocalError::new(
+            "invalid_signing_key_env",
+            ErrorCategory::ParsingInput,
+            "signing key did not form a valid secp256k1 key",
+        )
+    })
+}
+
+fn signer_address_hex(signing_key: &SigningKey) -> String {
+    let public_key = signing_key.verifying_key().to_encoded_point(false);
+    let hash = keccak256(&public_key.as_bytes()[1..]);
+    bytes_to_hex_prefixed(&hash.as_slice()[12..])
+}
+
+fn sign_legacy_create_raw_tx(
+    signing_key: &SigningKey,
+    chain_id: u64,
+    nonce_hex: &str,
+    gas_price_hex: &str,
+    gas_limit_hex: &str,
+    value_hex: &str,
+    data: &[u8],
+) -> Result<String, LocalError> {
+    let nonce = hex_quantity_to_rlp_bytes(nonce_hex)?;
+    let gas_price = hex_quantity_to_rlp_bytes(gas_price_hex)?;
+    let gas_limit = hex_quantity_to_rlp_bytes(gas_limit_hex)?;
+    let value = hex_quantity_to_rlp_bytes(value_hex)?;
+    let chain_id_bytes = u128_to_min_be(u128::from(chain_id));
+
+    let unsigned = rlp_encode_list(&[
+        nonce.clone(),
+        gas_price.clone(),
+        gas_limit.clone(),
+        Vec::new(),
+        value.clone(),
+        data.to_vec(),
+        chain_id_bytes.clone(),
+        Vec::new(),
+        Vec::new(),
+    ]);
+
+    let sighash = keccak256(&unsigned);
+    let (sig, recid) = signing_key
+        .sign_prehash_recoverable(sighash.as_slice())
+        .map_err(|_| {
+            LocalError::new(
+                "signing_failed",
+                ErrorCategory::Unknown,
+                "failed to sign deployment transaction",
+            )
+        })?;
+    let sig_bytes = sig.to_bytes();
+    let r = trim_leading_zero_bytes(&sig_bytes[..32]);
+    let s = trim_leading_zero_bytes(&sig_bytes[32..]);
+    let v = u128::from(chain_id) * 2 + 35 + u128::from(u8::from(recid));
+    let v_bytes = u128_to_min_be(v);
+
+    let signed = rlp_encode_list(&[
+        nonce,
+        gas_price,
+        gas_limit,
+        Vec::new(),
+        value,
+        data.to_vec(),
+        v_bytes,
+        r,
+        s,
+    ]);
+    Ok(bytes_to_hex_prefixed(&signed))
+}
+
+fn hex_quantity_to_rlp_bytes(value: &str) -> Result<Vec<u8>, LocalError> {
+    let normalized = normalize_hex_str(value).map_err(|_| {
+        LocalError::new(
+            "invalid_op_config",
+            ErrorCategory::ParsingInput,
+            "invalid transaction quantity hex",
+        )
+    })?;
+    let rest = normalized.strip_prefix("0x").expect("prefix guaranteed");
+    let padded = if rest.len().is_multiple_of(2) {
+        rest.to_string()
+    } else {
+        format!("0{rest}")
+    };
+    let bytes = hex::decode(padded).map_err(|_| {
+        LocalError::new(
+            "invalid_op_config",
+            ErrorCategory::ParsingInput,
+            "invalid transaction quantity hex",
+        )
+    })?;
+    Ok(trim_leading_zero_bytes(&bytes))
+}
+
+fn normalize_address(raw: &str) -> Result<String, ()> {
+    let normalized = normalize_hex_str(raw)?;
+    if normalized.len() != 42 {
+        return Err(());
+    }
+    Ok(normalized.to_ascii_lowercase())
+}
+
+fn normalize_hex_str(raw: &str) -> Result<String, ()> {
+    let s = raw.trim();
+    let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) else {
+        return Err(());
+    };
+    if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(());
+    }
+    Ok(format!("0x{}", rest.to_ascii_lowercase()))
+}
+
+fn bytes_to_hex_prefixed(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+fn hex_to_bytes(hex_str: &str) -> Result<Vec<u8>, ()> {
+    let Some(rest) = hex_str
+        .strip_prefix("0x")
+        .or_else(|| hex_str.strip_prefix("0X"))
+    else {
+        return Err(());
+    };
+    hex::decode(rest).map_err(|_| ())
+}
+
+fn trim_leading_zero_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut idx = 0usize;
+    while idx < bytes.len() && bytes[idx] == 0 {
+        idx += 1;
+    }
+    bytes[idx..].to_vec()
+}
+
+fn u128_to_min_be(mut value: u128) -> Vec<u8> {
+    if value == 0 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    while value > 0 {
+        out.push((value & 0xff) as u8);
+        value >>= 8;
+    }
+    out.reverse();
+    out
+}
+
+fn rlp_encode_bytes(bytes: &[u8]) -> Vec<u8> {
+    if bytes.len() == 1 && bytes[0] < 0x80 {
+        return vec![bytes[0]];
+    }
+
+    let mut out = Vec::new();
+    if bytes.len() <= 55 {
+        out.push(0x80 + bytes.len() as u8);
+        out.extend_from_slice(bytes);
+        return out;
+    }
+
+    let len_bytes = usize_to_min_be(bytes.len());
+    out.push(0xb7 + len_bytes.len() as u8);
+    out.extend_from_slice(&len_bytes);
+    out.extend_from_slice(bytes);
+    out
+}
+
+fn rlp_encode_list(items: &[Vec<u8>]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for item in items {
+        payload.extend_from_slice(&rlp_encode_bytes(item));
+    }
+
+    let mut out = Vec::new();
+    if payload.len() <= 55 {
+        out.push(0xc0 + payload.len() as u8);
+        out.extend_from_slice(&payload);
+        return out;
+    }
+
+    let len_bytes = usize_to_min_be(payload.len());
+    out.push(0xf7 + len_bytes.len() as u8);
+    out.extend_from_slice(&len_bytes);
+    out.extend_from_slice(&payload);
+    out
+}
+
+fn usize_to_min_be(mut value: usize) -> Vec<u8> {
+    if value == 0 {
+        return vec![0];
+    }
+
+    let mut out = Vec::new();
+    while value > 0 {
+        out.push((value & 0xff) as u8);
+        value >>= 8;
+    }
+    out.reverse();
+    out
+}
+
+fn local_error_from_keystore_tx(err: KeystoreTxError) -> LocalError {
+    let category = match err.code {
+        "InvalidAddress"
+        | "InvalidQuantity"
+        | "InvalidData"
+        | "InvalidFeeConfig"
+        | "InvalidRawTransaction"
+        | "InvalidRpcUrl"
+        | "InvalidPathConfig"
+        | "InvalidSelectorLabel"
+        | "InvalidUuid"
+        | "MissingArgument"
+        | "AmbiguousLabel"
+        | "KeyNotFound" => ErrorCategory::ParsingInput,
+        "RpcInvalidResponse" => ErrorCategory::Rpc,
+        _ => ErrorCategory::Unknown,
+    };
+    LocalError::new(err.code, category, err.message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evm_sign_legacy_create_emits_raw_tx_hex() {
+        let env_name = "MFM_TEST_LOCAL_SIGNING_KEY_VALID";
+        std::env::set_var(
+            env_name,
+            "0x0000000000000000000000000000000000000000000000000000000000000001",
+        );
+
+        let request = EvmSignLegacyCreateRequest {
+            env_name_hex: hex::encode(env_name.as_bytes()),
+            from: "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf".to_string(),
+            chain_id: 1,
+            nonce_hex: "0x0".to_string(),
+            gas_price_hex: "0x1".to_string(),
+            gas_limit_hex: "0x5208".to_string(),
+            value_hex: "0x0".to_string(),
+            data_hex: "0x6000".to_string(),
+        };
+
+        let out = evm_sign_legacy_create(request).expect("sign");
+        let raw = out
+            .get("raw_tx_hex")
+            .and_then(|v| v.as_str())
+            .expect("raw_tx_hex string");
+        assert!(raw.starts_with("0x"));
+        assert!(raw.len() > 2);
+
+        std::env::remove_var(env_name);
+    }
+
+    #[test]
+    fn evm_sign_legacy_create_rejects_address_mismatch() {
+        let env_name = "MFM_TEST_LOCAL_SIGNING_KEY_MISMATCH";
+        std::env::set_var(
+            env_name,
+            "0x0000000000000000000000000000000000000000000000000000000000000001",
+        );
+
+        let request = EvmSignLegacyCreateRequest {
+            env_name_hex: hex::encode(env_name.as_bytes()),
+            from: "0x1111111111111111111111111111111111111111".to_string(),
+            chain_id: 1,
+            nonce_hex: "0x0".to_string(),
+            gas_price_hex: "0x1".to_string(),
+            gas_limit_hex: "0x5208".to_string(),
+            value_hex: "0x0".to_string(),
+            data_hex: "0x6000".to_string(),
+        };
+
+        let err = evm_sign_legacy_create(request).expect_err("mismatch should fail");
+        assert_eq!(err.code, "signing_key_address_mismatch");
+
+        std::env::remove_var(env_name);
+    }
+}

@@ -1,12 +1,18 @@
-use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::{input, keystore_manager::KeystoreManager};
+use crate::support::{app_services, run_stores};
 use clap::Args;
+use mfm_op_keystore_admin::{
+    keystore_import_report_context_key, KeystoreImportOpConfig, KeystoreImportReport,
+    KeystoreImportType, KEYSTORE_ADMIN_OP_VERSION, KEYSTORE_IMPORT_OP_ID,
+};
+use mfm_sdk::unstable::{execute_single_op_report, SingleOpReportRequest};
 use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
-use zeroize::Zeroizing;
+
+const ENV_IMPORT_PASSPHRASE: &str = "MFM_KEYSTORE_IMPORT_BIP39_EXTRA";
 
 #[derive(Args)]
 pub struct ImportArgs {
@@ -67,146 +73,86 @@ impl fmt::Display for ImportResponse {
 }
 
 pub async fn execute(ctx: &CommandContext, args: &ImportArgs) -> ! {
-    let result = execute_internal(ctx, args).await;
+    let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);
 }
 
-async fn execute_internal(
-    _ctx: &CommandContext,
-    args: &ImportArgs,
-) -> CommandResult<ImportResponse> {
-    // Read and validate input BEFORE creating/unlocking keystore
-    match args.import_type {
-        ImportType::PrivateKey => {
-            let private_key = if args.stdin {
-                Zeroizing::new(
-                    input::read_input("", true)
-                        .map_err(|e| CommandError::new("InputError", e.to_string()))?,
-                )
-            } else {
-                Zeroizing::new(
-                    input::read_input("Enter private key (hex): ", false)
-                        .map_err(|e| CommandError::new("InputError", e.to_string()))?,
-                )
-            };
+async fn execute_internal(args: &ImportArgs) -> CommandResult<ImportResponse> {
+    let _passphrase_guard = args
+        .passphrase
+        .as_ref()
+        .map(|passphrase| ScopedEnvVar::set(ENV_IMPORT_PASSPHRASE, passphrase));
 
-            // Validate private key format EARLY
-            let private_key_for_import = private_key
-                .as_str()
-                .strip_prefix("0x")
-                .unwrap_or(private_key.as_str());
-            if private_key_for_import.len() != 64 {
-                return Err(CommandError::new(
-                    "InvalidPrivateKey",
-                    "Private key must be 64 hex characters",
-                ));
-            }
+    let op_config = KeystoreImportOpConfig {
+        import_type: match args.import_type {
+            ImportType::PrivateKey => KeystoreImportType::PrivateKey,
+            ImportType::Mnemonic => KeystoreImportType::Mnemonic,
+        },
+        label: args.label.clone(),
+        derivation_path: args.derivation_path.clone(),
+        keystore_path: None,
+        keystore_path_hex: args
+            .keystore
+            .as_ref()
+            .map(|path| hex::encode(path.to_string_lossy().as_bytes())),
+        stdin: args.stdin,
+    };
 
-            // Check if it's valid hex
-            if hex::decode(private_key_for_import).is_err() {
-                return Err(CommandError::new(
-                    "InvalidPrivateKey",
-                    "Private key must be valid hexadecimal",
-                ));
-            }
+    let report_key = keystore_import_report_context_key();
+    let bundle = app_services::make_engine_bundle();
+    let report: KeystoreImportReport = execute_single_op_report(
+        bundle.engine,
+        run_stores::make_ephemeral_stores(None),
+        bundle.registry,
+        bundle.planner,
+        SingleOpReportRequest {
+            op_id: KEYSTORE_IMPORT_OP_ID.to_string(),
+            op_version: KEYSTORE_ADMIN_OP_VERSION.to_string(),
+            op_config: serde_json::to_value(op_config)
+                .expect("keystore import op config should serialize to json value"),
+            report_context_key: report_key.0,
+        },
+    )
+    .await
+    .map_err(app_services::command_error_from_single_op_report_error)?;
 
-            // Only create keystore after validation passes
-            let manager = KeystoreManager::new(args.keystore.clone());
-            let mut keystore = manager
-                .create_keystore_if_needed()
-                .await
-                .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
+    let key_type = match report.key_type.as_str() {
+        "raw" => "private key",
+        "hd" => "mnemonic",
+        other => other,
+    };
 
-            let label = args.label.clone().unwrap_or_else(|| {
-                format!(
-                    "imported-key-{}",
-                    chrono::Utc::now().format("%Y%m%d-%H%M%S")
-                )
-            });
+    Ok(CommandOutput::new(ImportResponse {
+        id: report.id,
+        label: report.label,
+        key_type: key_type.to_string(),
+        address: report.address,
+        created_at: report.created_at,
+    }))
+}
 
-            let key_id = keystore
-                .import_private_key(Some(label.clone()), private_key_for_import)
-                .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
+struct ScopedEnvVar {
+    key: String,
+    previous: Option<String>,
+}
 
-            // Get the imported key info
-            let keys = keystore
-                .list_keys()
-                .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
-            let key_info = keys.iter().find(|k| k.id == key_id).ok_or_else(|| {
-                CommandError::key_not_found("Failed to retrieve imported key info")
-            })?;
-
-            let response = ImportResponse {
-                id: key_info.id.to_string(),
-                label: key_info.alias.clone().unwrap_or_else(|| "".to_string()),
-                key_type: "private key".to_string(),
-                address: format!("{:?}", key_info.address),
-                created_at: key_info.created_at.to_rfc3339(),
-            };
-
-            Ok(CommandOutput::new(response))
+impl ScopedEnvVar {
+    fn set(key: &str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self {
+            key: key.to_string(),
+            previous,
         }
-        ImportType::Mnemonic => {
-            let mnemonic = if args.stdin {
-                Zeroizing::new(
-                    input::read_input("", true)
-                        .map_err(|e| CommandError::new("InputError", e.to_string()))?,
-                )
-            } else {
-                Zeroizing::new(
-                    input::read_input("Enter mnemonic phrase: ", false)
-                        .map_err(|e| CommandError::new("InputError", e.to_string()))?,
-                )
-            };
+    }
+}
 
-            // Basic mnemonic validation EARLY
-            if mnemonic.split_whitespace().count() < 12 {
-                return Err(CommandError::new(
-                    "InvalidMnemonic",
-                    "Mnemonic must have at least 12 words",
-                ));
-            }
-
-            // Only create keystore after validation passes
-            let manager = KeystoreManager::new(args.keystore.clone());
-            let mut keystore = manager
-                .create_keystore_if_needed()
-                .await
-                .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
-
-            let label = args.label.clone().unwrap_or_else(|| {
-                format!(
-                    "imported-mnemonic-{}",
-                    chrono::Utc::now().format("%Y%m%d-%H%M%S")
-                )
-            });
-
-            let key_id = keystore
-                .import_mnemonic(
-                    Some(label.clone()),
-                    mnemonic.as_str(),
-                    &args.derivation_path,
-                    args.passphrase.as_deref(),
-                )
-                .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
-
-            // Get the imported key info
-            let keys = keystore
-                .list_keys()
-                .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
-            let key_info = keys.iter().find(|k| k.id == key_id).ok_or_else(|| {
-                CommandError::key_not_found("Failed to retrieve imported key info")
-            })?;
-
-            let response = ImportResponse {
-                id: key_info.id.to_string(),
-                label: key_info.alias.clone().unwrap_or_else(|| "".to_string()),
-                key_type: "mnemonic".to_string(),
-                address: format!("{:?}", key_info.address),
-                created_at: key_info.created_at.to_rfc3339(),
-            };
-
-            Ok(CommandOutput::new(response))
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.as_ref() {
+            std::env::set_var(&self.key, previous);
+        } else {
+            std::env::remove_var(&self.key);
         }
     }
 }

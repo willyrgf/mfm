@@ -13,10 +13,15 @@ k256 = { version = "0.13", features = ["ecdsa"] }
 uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 url = { workspace = true }
+tracing = { workspace = true }
+regex = "1.0"
+zeroize = "1.7.0"
+rpassword = "7.0"
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-collectors-evm = { path = "../../collectors/evm" }
 mfm-op-keystore = { path = "../keystore-op" }
+mfm_core = { path = "../../core" }
 
 [dev-dependencies]
 tokio = { workspace = true }

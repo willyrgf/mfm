@@ -6,8 +6,9 @@ use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::events::DomainEvent;
-use mfm_machine::ids::{ContextKey, OpId, OpPath, StateId};
-use mfm_machine::io::IoProvider;
+use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
+use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
+use mfm_machine::io::{IoCall, IoProvider};
 use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::{StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
@@ -17,17 +18,13 @@ use mfm_op_common::errors as op_errors;
 use mfm_op_common::idempotency as op_idempotency;
 use mfm_op_common::keystore_tx::{
     output_context_key, parse_address, parse_data_hex, parse_rpc_url, parse_u128_quantity,
-    resolve_key_id, send_raw_transaction_via_io, sign_eip1559_transaction,
-    write_raw_transaction_file, Eip1559TxToSign, KeystoreTxError,
+    send_raw_transaction_via_io, Eip1559TxToSign, KeystoreTxError,
 };
 use mfm_op_common::states::meta;
-use mfm_op_keystore::Keystore;
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
-use zeroize::Zeroizing;
 
 pub const TX_OP_VERSION: &str = "v1";
 
@@ -35,8 +32,6 @@ pub const TX_SIGN_OP_ID: &str = "keystore_tx_sign";
 pub const TX_SEND_RAW_OP_ID: &str = "keystore_tx_send_raw";
 
 const ENV_KEYSTORE_PATH: &str = "MFM_KEYSTORE_PATH";
-const ENV_PASSWORD_FILE: &str = "MFM_KEYSTORE_PASSWORD_FILE";
-const ENV_PASSWORD: &str = "MFM_KEYSTORE_PASSWORD";
 const ENV_EVM_RPC_URL: &str = "MFM_EVM_RPC_URL";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,6 +50,11 @@ pub struct TxSendRawReport {
     pub tx_hash: String,
     pub rpc_url_host: String,
     pub submitted_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReadTextResponse {
+    text: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -269,36 +269,30 @@ impl State for TxSignState {
     async fn handle(
         &self,
         ctx: &mut dyn DynContext,
-        _io: &mut dyn IoProvider,
+        io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let report = {
-            let mut keystore = load_unlocked_keystore(&self.cfg.keystore_path)
-                .map_err(|e| state_error_from_helper(&self.state_id, e))?;
-
-            let key_id = resolve_key_id(
-                &keystore,
-                self.cfg.id.as_deref(),
-                self.cfg.by_label.as_deref(),
-            )
-            .map_err(|e| state_error_from_helper(&self.state_id, e))?;
-
-            let signed = sign_eip1559_transaction(&mut keystore, key_id, &self.cfg.tx)
-                .map_err(|e| state_error_from_helper(&self.state_id, e))?;
-
-            write_raw_transaction_file(&self.cfg.out_path, &signed.raw_tx_hex)
-                .map_err(|e| state_error_from_helper(&self.state_id, e))?;
-
-            TxSignReport {
-                from: signed.from,
-                to: format!("{:?}", self.cfg.tx.to),
-                nonce: self.cfg.tx.nonce,
-                chain_id: self.cfg.tx.chain_id,
-                tx_type: "0x2".to_string(),
-                payload_hash: signed.payload_hash,
-                out_path: self.cfg.out_path.display().to_string(),
-            }
-        };
+        let report: TxSignReport = local_call(
+            &self.state_id,
+            io,
+            "local.keystore.tx_sign",
+            "tx_sign",
+            serde_json::json!({
+                "id": self.cfg.id.clone(),
+                "label": self.cfg.by_label.clone(),
+                "store_path": self.cfg.keystore_path.display().to_string(),
+                "out_path": self.cfg.out_path.display().to_string(),
+                "to": format!("{:?}", self.cfg.tx.to),
+                "value_wei": self.cfg.tx.value_wei.to_string(),
+                "chain_id": self.cfg.tx.chain_id,
+                "nonce": self.cfg.tx.nonce,
+                "max_fee_per_gas": self.cfg.tx.max_fee_per_gas.to_string(),
+                "max_priority_fee_per_gas": self.cfg.tx.max_priority_fee_per_gas.to_string(),
+                "gas_limit": self.cfg.tx.gas_limit,
+                "data_hex": format!("0x{}", hex::encode(&self.cfg.tx.data)),
+            }),
+        )
+        .await?;
 
         let report_json = serde_json::to_value(&report).map_err(|_| {
             op_errors::state_error_with_state(
@@ -353,20 +347,18 @@ impl State for TxSendRawState {
         io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let raw_tx_file = std::fs::read_to_string(&self.cfg.input_path).map_err(|e| {
-            op_errors::state_error_with_state(
-                self.state_id.clone(),
-                "InputReadError",
-                ErrorCategory::Unknown,
-                false,
-                format!(
-                    "Failed to read input file '{}': {e}",
-                    self.cfg.input_path.display()
-                ),
-            )
-        })?;
+        let raw_tx_file: ReadTextResponse = local_call(
+            &self.state_id,
+            io,
+            "local.fs.read_text",
+            "tx_send_raw_read",
+            serde_json::json!({
+                "path": self.cfg.input_path.display().to_string(),
+            }),
+        )
+        .await?;
 
-        let raw_tx_hex = raw_tx_file.trim();
+        let raw_tx_hex = raw_tx_file.text.trim();
         if raw_tx_hex.is_empty() {
             return Err(op_errors::state_error_with_state(
                 self.state_id.clone(),
@@ -513,66 +505,9 @@ fn decode_optional_hex_string(
     }
 }
 
-fn load_unlocked_keystore(path: &PathBuf) -> Result<Keystore, KeystoreTxError> {
-    if !path.exists() {
-        return Err(KeystoreTxError::new(
-            "KeystoreError",
-            format!("Keystore not found at: {}", path.display()),
-        ));
-    }
-
-    let mut keystore =
-        Keystore::new(path).map_err(|e| KeystoreTxError::new("KeystoreError", e.to_string()))?;
-
-    let password = load_keystore_password()?;
-
-    keystore
-        .unlock(password.as_str())
-        .map_err(|_| KeystoreTxError::new("KeystoreError", "failed to unlock keystore"))?;
-
-    Ok(keystore)
-}
-
-fn load_keystore_password() -> Result<Zeroizing<String>, KeystoreTxError> {
-    if let Ok(password_file) = std::env::var(ENV_PASSWORD_FILE) {
-        return read_password_file(&password_file);
-    }
-
-    if let Ok(password) = std::env::var(ENV_PASSWORD) {
-        warn!(
-            "{ENV_PASSWORD} may expose secrets; prefer {ENV_PASSWORD_FILE} for non-interactive use"
-        );
-        return Ok(Zeroizing::new(password));
-    }
-
-    let password = rpassword::prompt_password("Enter keystore password: ")
-        .map_err(|e| KeystoreTxError::new("KeystoreError", e.to_string()))?;
-    Ok(Zeroizing::new(password))
-}
-
-fn read_password_file(path: &str) -> Result<Zeroizing<String>, KeystoreTxError> {
-    let raw = Zeroizing::new(
-        std::fs::read_to_string(path)
-            .map_err(|e| KeystoreTxError::new("KeystoreError", e.to_string()))?,
-    );
-    let trimmed = raw.trim_end_matches(['\r', '\n']);
-    if trimmed.is_empty() {
-        return Err(KeystoreTxError::new(
-            "KeystoreError",
-            format!("credential file at '{path}' was empty"),
-        ));
-    }
-    Ok(Zeroizing::new(trimmed.to_string()))
-}
-
 fn sdk_error_from_helper(err: KeystoreTxError) -> SdkError {
     let category = helper_category(err.code);
     op_errors::sdk_error(err.code, category, false, err.message)
-}
-
-fn state_error_from_helper(state_id: &StateId, err: KeystoreTxError) -> StateError {
-    let category = helper_category(err.code);
-    err.to_state_error(state_id, category)
 }
 
 fn helper_category(code: &str) -> ErrorCategory {
@@ -594,6 +529,70 @@ fn helper_category(code: &str) -> ErrorCategory {
     }
 }
 
+async fn local_call<T: for<'de> Deserialize<'de>>(
+    state_id: &StateId,
+    io: &mut dyn IoProvider,
+    namespace: &str,
+    purpose: &str,
+    request: serde_json::Value,
+) -> Result<T, StateError> {
+    let fact_key = local_fact_key(state_id, purpose, &request)?;
+    let response = io
+        .call(IoCall {
+            namespace: namespace.to_string(),
+            request,
+            fact_key: Some(fact_key),
+        })
+        .await
+        .map_err(op_errors::state_from_io)
+        .map_err(|err| attach_state_id(state_id, err))?;
+
+    serde_json::from_value(response.response).map_err(|_| {
+        op_errors::state_error_with_state(
+            state_id.clone(),
+            "LocalResponseDecodeFailed",
+            ErrorCategory::Unknown,
+            false,
+            "failed to decode local io response payload",
+        )
+    })
+}
+
+fn local_fact_key(
+    state_id: &StateId,
+    purpose: &str,
+    request: &serde_json::Value,
+) -> Result<FactKey, StateError> {
+    let req_id = artifact_id_for_json(request).map_err(|err| match err {
+        CanonicalJsonError::FloatNotAllowed => op_errors::state_error_with_state(
+            state_id.clone(),
+            "local_request_not_canonical",
+            ErrorCategory::ParsingInput,
+            false,
+            "local io request was not canonical-json-hashable (floats are forbidden)",
+        ),
+        CanonicalJsonError::SecretsNotAllowed => op_errors::state_error_with_state(
+            state_id.clone(),
+            "secrets_detected",
+            ErrorCategory::Unknown,
+            false,
+            "local io request contained secrets",
+        ),
+    })?;
+
+    Ok(FactKey(format!(
+        "mfm:local|state:{}|purpose:{purpose}|req:{}",
+        state_id.0, req_id.0
+    )))
+}
+
+fn attach_state_id(state_id: &StateId, mut err: StateError) -> StateError {
+    if err.state_id.is_none() {
+        err.state_id = Some(state_id.clone());
+    }
+    err
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,9 +603,12 @@ mod tests {
     use mfm_machine::ids::{ArtifactId, ErrorCode};
     use mfm_machine::io::IoCall;
     use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
+    use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
     use mfm_machine::runtime::{DefaultExecutionEngine, PlanResolver};
+    use mfm_op_common::local_io::LocalOpIoTransportFactory;
     use mfm_op_common::test_support as op_test_support;
     use mfm_sdk::unstable::SdkPlanResolver;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -651,6 +653,13 @@ mod tests {
         }
     }
 
+    fn test_transport_factory() -> Arc<dyn LiveIoTransportFactory> {
+        let mut routes: HashMap<String, Arc<dyn LiveIoTransportFactory>> = HashMap::new();
+        routes.insert("local".to_string(), Arc::new(LocalOpIoTransportFactory));
+        routes.insert("evm".to_string(), Arc::new(TestEvmFactory));
+        Arc::new(RouterLiveIoTransportFactory::new(routes))
+    }
+
     #[tokio::test]
     async fn tx_send_raw_op_run_reports_submission() {
         let temp = TempDir::new().expect("temp dir");
@@ -672,7 +681,7 @@ mod tests {
             Arc::clone(&planner),
         ));
         let engine = DefaultExecutionEngine::new(resolver)
-            .with_live_transport_factory(Arc::new(TestEvmFactory));
+            .with_live_transport_factory(test_transport_factory());
         let engine: Arc<dyn ExecutionEngine> = Arc::new(engine);
 
         let stores = op_test_support::in_memory_stores();

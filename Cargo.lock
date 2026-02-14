@@ -1904,6 +1904,7 @@ dependencies = [
  "mfm-op-evm-read",
  "mfm-op-evm-write",
  "mfm-op-keystore",
+ "mfm-op-keystore-admin",
  "mfm-op-keystore-tx",
  "mfm-op-nix-app",
  "mfm-op-proof",
@@ -1912,7 +1913,6 @@ dependencies = [
  "rand 0.9.1",
  "regex",
  "reqwest",
- "rpassword",
  "serde",
  "serde_json",
  "tabled",
@@ -1920,7 +1920,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "zeroize",
 ]
 
 [[package]]
@@ -1934,8 +1933,11 @@ dependencies = [
  "mfm-collectors-evm-jsonrpc-http",
  "mfm-event-store-postgres",
  "mfm-machine",
+ "mfm-op-common",
+ "mfm-op-evm-deploy-configure-validate",
  "mfm-op-evm-read",
  "mfm-op-evm-write",
+ "mfm-op-keystore-admin",
  "mfm-op-keystore-tx",
  "mfm-op-nix-app",
  "mfm-op-portfolio-tracker",
@@ -2105,11 +2107,28 @@ dependencies = [
  "mfm-machine",
  "mfm-op-keystore",
  "mfm-sdk",
+ "mfm_core",
+ "regex",
+ "rpassword",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "url",
  "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "mfm-op-evm-deploy-configure-validate"
+version = "0.1.0"
+dependencies = [
+ "mfm-machine",
+ "mfm-op-common",
+ "mfm-op-evm-write",
+ "mfm-sdk",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2149,6 +2168,18 @@ name = "mfm-op-keystore"
 version = "0.1.0"
 dependencies = [
  "mfm_core",
+]
+
+[[package]]
+name = "mfm-op-keystore-admin"
+version = "0.1.0"
+dependencies = [
+ "mfm-machine",
+ "mfm-op-common",
+ "mfm-sdk",
+ "regex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

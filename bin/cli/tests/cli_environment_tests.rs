@@ -87,10 +87,10 @@ fn test_wrong_password_environment_variable() {
         keystore_path.to_str().unwrap(),
     ]);
 
-    wrong_cmd.assert().failure().stderr(
-        predicate::str::contains("Invalid password")
-            .or(predicate::str::contains("InvalidPassword")),
-    );
+    wrong_cmd
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid credential"));
 }
 
 #[test]

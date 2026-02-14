@@ -1,9 +1,13 @@
-use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::{format_keys_table, handle_command_result, KeyDisplay};
-use crate::support::keystore_manager::KeystoreManager;
+use crate::support::{app_services, run_stores};
 use clap::Args;
-use regex::Regex;
+use mfm_op_keystore_admin::{
+    keystore_list_report_context_key, KeystoreListOpConfig, KeystoreListReport, KeystoreListSortBy,
+    KEYSTORE_ADMIN_OP_VERSION, KEYSTORE_LIST_OP_ID,
+};
+use mfm_sdk::unstable::{execute_single_op_report, SingleOpReportRequest};
 use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
@@ -54,63 +58,62 @@ impl fmt::Display for ListResponse {
 }
 
 pub async fn execute(ctx: &CommandContext, args: &ListArgs) -> ! {
-    let result = execute_internal(ctx, args).await;
+    let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);
 }
 
-async fn execute_internal(_ctx: &CommandContext, args: &ListArgs) -> CommandResult<ListResponse> {
-    let manager = KeystoreManager::new(args.keystore.clone());
-    let keystore = manager
-        .get_unlocked_keystore()
-        .await
-        .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
+async fn execute_internal(args: &ListArgs) -> CommandResult<ListResponse> {
+    let op_config = KeystoreListOpConfig {
+        keystore_path: None,
+        keystore_path_hex: args
+            .keystore
+            .as_ref()
+            .map(|path| hex::encode(path.to_string_lossy().as_bytes())),
+        show_addresses: args.show_addresses,
+        filter_label: args.filter_label.clone(),
+        sort_by: match args.sort_by {
+            SortBy::Label => KeystoreListSortBy::Label,
+            SortBy::Created => KeystoreListSortBy::Created,
+            SortBy::Type => KeystoreListSortBy::Type,
+        },
+    };
 
-    let keys = keystore
-        .list_keys()
-        .map_err(|e| CommandError::new("KeystoreError", e.to_string()))?;
+    let report_key = keystore_list_report_context_key();
+    let bundle = app_services::make_engine_bundle();
+    let report: KeystoreListReport = execute_single_op_report(
+        bundle.engine,
+        run_stores::make_ephemeral_stores(None),
+        bundle.registry,
+        bundle.planner,
+        SingleOpReportRequest {
+            op_id: KEYSTORE_LIST_OP_ID.to_string(),
+            op_version: KEYSTORE_ADMIN_OP_VERSION.to_string(),
+            op_config: serde_json::to_value(op_config)
+                .expect("keystore list op config should serialize to json value"),
+            report_context_key: report_key.0,
+        },
+    )
+    .await
+    .map_err(app_services::command_error_from_single_op_report_error)?;
 
-    if keys.is_empty() {
-        return Ok(CommandOutput::new(ListResponse {
-            keys: Vec::new(),
-            show_addresses: args.show_addresses,
-        }));
-    }
-
-    let mut key_displays: Vec<KeyDisplay> = keys
+    let keys = report
+        .keys
         .into_iter()
         .map(|key| KeyDisplay {
-            id: key.id.to_string(),
-            label: key
-                .alias
-                .clone()
-                .unwrap_or_else(|| "<no alias>".to_string()),
-            key_type: format!("{:?}", key.key_type).to_lowercase(),
-            address: if args.show_addresses {
-                Some(format!("{:?}", key.address))
-            } else {
-                None
+            id: key.id,
+            label: key.label,
+            key_type: match key.key_type.as_str() {
+                "raw" => "privatekey".to_string(),
+                "hd" => "mnemonic".to_string(),
+                other => other.to_string(),
             },
-            created: key.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            address: key.address,
+            created: key.created,
         })
         .collect();
 
-    // Apply label filter if specified
-    if let Some(filter_pattern) = &args.filter_label {
-        let regex = Regex::new(filter_pattern).map_err(|e| {
-            CommandError::new("InvalidRegex", format!("Invalid regex pattern: {e}"))
-        })?;
-        key_displays.retain(|key| regex.is_match(&key.label));
-    }
-
-    // Sort keys
-    match args.sort_by {
-        SortBy::Label => key_displays.sort_by(|a, b| a.label.cmp(&b.label)),
-        SortBy::Created => key_displays.sort_by(|a, b| a.created.cmp(&b.created)),
-        SortBy::Type => key_displays.sort_by(|a, b| a.key_type.cmp(&b.key_type)),
-    }
-
     Ok(CommandOutput::new(ListResponse {
-        keys: key_displays,
-        show_addresses: args.show_addresses,
+        keys,
+        show_addresses: report.show_addresses,
     }))
 }

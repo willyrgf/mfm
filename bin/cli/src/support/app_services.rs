@@ -16,5 +16,9 @@ pub fn command_error_from_app_error(err: AppError) -> CommandError {
 }
 
 pub fn command_error_from_single_op_report_error(err: SingleOpReportError) -> CommandError {
-    CommandError::new(err.code, err.message)
+    let mut out = CommandError::new(err.code, err.message);
+    if out.code == "OperationCancelled" {
+        out = out.with_exit_code(0);
+    }
+    out
 }

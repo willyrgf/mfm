@@ -31,12 +31,20 @@ use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
 use mfm_machine::stores::{ArtifactStore, EventStore};
+use mfm_op_common::local_io::LocalOpIoTransportFactory;
+use mfm_op_evm_deploy_configure_validate::{
+    EvmDeployConfigureValidateOp, EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID,
+    EVM_DEPLOY_CONFIGURE_VALIDATE_OP_VERSION,
+};
 use mfm_op_evm_read::EvmReadOp;
 use mfm_op_evm_write::{EvmConfigureOp, EvmContractFromNixOp, EvmDeployOp, EvmValidateOp};
+use mfm_op_keystore_admin::{KeystoreDeleteOp, KeystoreImportOp, KeystoreListOp};
 use mfm_op_keystore_tx::{KeystoreTxSendRawOp, KeystoreTxSignOp};
 use mfm_op_nix_app::nix_exec_transport::NixFlakeTransportFactory;
 use mfm_op_nix_app::NixAppOp;
-use mfm_op_portfolio_tracker::PortfolioTrackerOp;
+use mfm_op_portfolio_tracker::{
+    portfolio_tracker_report_context_key, PortfolioTrackerOp, PortfolioTrackerReport,
+};
 use mfm_op_proof::ProofOp;
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
@@ -49,8 +57,6 @@ use mfm_sdk::unstable::{
 
 const ENV_EVM_RPC_URL: &str = "MFM_EVM_RPC_URL";
 const ENV_EVM_RPC_AUTHORIZATION: &str = "MFM_EVM_RPC_AUTHORIZATION";
-
-const ENV_PORTFOLIO_TOKENS_JSON: &str = "MFM_PORTFOLIO_TOKENS_JSON";
 
 const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
 const ENV_ARTIFACT_ROOT: &str = "MFM_ARTIFACT_ROOT";
@@ -378,6 +384,9 @@ pub struct EngineBundle {
 pub fn make_engine_bundle() -> EngineBundle {
     let mut reg = HashMapOperationRegistry::default();
     reg.register(Arc::new(ProofOp::default()));
+    reg.register(Arc::new(KeystoreImportOp));
+    reg.register(Arc::new(KeystoreListOp));
+    reg.register(Arc::new(KeystoreDeleteOp));
     reg.register(Arc::new(KeystoreTxSignOp));
     reg.register(Arc::new(KeystoreTxSendRawOp));
     reg.register(Arc::new(EvmReadOp));
@@ -385,6 +394,7 @@ pub fn make_engine_bundle() -> EngineBundle {
     reg.register(Arc::new(EvmDeployOp));
     reg.register(Arc::new(EvmConfigureOp));
     reg.register(Arc::new(EvmValidateOp));
+    reg.register(Arc::new(EvmDeployConfigureValidateOp));
     reg.register(Arc::new(PortfolioTrackerOp));
     reg.register(Arc::new(NixAppOp));
     let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
@@ -418,6 +428,7 @@ pub fn make_engine_bundle() -> EngineBundle {
         "nix".to_string(),
         Arc::new(NixFlakeTransportFactory::default()),
     );
+    routes.insert("local".to_string(), Arc::new(LocalOpIoTransportFactory));
     routes.insert("evm".to_string(), evm_factory);
 
     let base_factory: Arc<dyn LiveIoTransportFactory> =
@@ -714,73 +725,10 @@ impl AppServices {
 
         const OP_ID: &str = "portfolio_tracker";
         const OP_VERSION: &str = "v1";
-        const OP_PATH: &str = "portfolio_tracker.main";
 
-        let wallet_address = normalize_eth_address(&req.address).ok_or_else(|| {
-            AppError::new(
-                ErrorClass::BadRequest,
-                "InvalidAddress",
-                "invalid ethereum address",
-            )
+        let op_config = serde_json::to_value(&req).map_err(|_| {
+            AppError::invalid_request("failed to encode portfolio snapshot request")
         })?;
-
-        let mut merged: HashMap<String, PortfolioTokenSpec> = HashMap::new();
-
-        // Server-side allowlist (optional).
-        for t in load_portfolio_tokens_from_env()? {
-            let addr = normalize_eth_address(&t.address).ok_or_else(|| {
-                AppError::new(
-                    ErrorClass::Internal,
-                    "InvalidPortfolioTokensJson",
-                    "invalid token address in MFM_PORTFOLIO_TOKENS_JSON",
-                )
-            })?;
-            merged.insert(
-                addr.clone(),
-                PortfolioTokenSpec {
-                    address: addr,
-                    symbol: t.symbol,
-                    decimals: t.decimals,
-                },
-            );
-        }
-
-        // Request tokens (override allowlist entries by address).
-        for t in req.tokens {
-            let addr = normalize_eth_address(&t.address).ok_or_else(|| {
-                AppError::new(
-                    ErrorClass::BadRequest,
-                    "InvalidTokenAddress",
-                    "invalid token address",
-                )
-            })?;
-            merged.insert(
-                addr.clone(),
-                PortfolioTokenSpec {
-                    address: addr,
-                    symbol: t.symbol,
-                    decimals: t.decimals,
-                },
-            );
-        }
-
-        let mut addrs: Vec<String> = merged.keys().cloned().collect();
-        addrs.sort();
-
-        let mut tokens: Vec<PortfolioTokenSpec> = Vec::with_capacity(addrs.len());
-        for addr in addrs {
-            if let Some(t) = merged.remove(&addr) {
-                tokens.push(t);
-            }
-        }
-
-        let chain_id = req.chain_id.unwrap_or(1);
-
-        let op_config = serde_json::json!({
-            "wallet_address": wallet_address,
-            "chain_id": chain_id,
-            "tokens": tokens,
-        });
 
         let run = self
             .start_run(RunsStartRequest::Single(SingleOpStartRequest {
@@ -795,6 +743,7 @@ impl AppServices {
         let mut block_number = None;
 
         if let Some(final_snapshot_id) = &run.final_snapshot_id {
+            let report_key = portfolio_tracker_report_context_key();
             let bytes = self
                 .artifacts
                 .get(&ArtifactId(final_snapshot_id.clone()))
@@ -809,24 +758,19 @@ impl AppServices {
                 )
             })?;
 
-            let obj = v.as_object().ok_or_else(|| {
-                AppError::new(
-                    ErrorClass::Internal,
-                    "ContextSnapshotInvalid",
-                    "context snapshot must be a json object",
-                )
-            })?;
-
-            snapshot_artifact_id = obj
-                .get(&format!("{OP_PATH}.snapshot_artifact_id"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            chain_id = obj
-                .get(&format!("{OP_PATH}.chain_id"))
-                .and_then(|v| v.as_u64());
-            block_number = obj
-                .get(&format!("{OP_PATH}.block_number"))
-                .and_then(|v| v.as_u64());
+            if let Some(report_value) = v.get(&report_key.0).cloned() {
+                let report: PortfolioTrackerReport =
+                    serde_json::from_value(report_value).map_err(|_| {
+                        AppError::new(
+                            ErrorClass::Internal,
+                            "PortfolioSnapshotReportDecodeFailed",
+                            "failed to decode portfolio snapshot report",
+                        )
+                    })?;
+                snapshot_artifact_id = Some(report.snapshot_artifact_id);
+                chain_id = Some(report.chain_id);
+                block_number = Some(report.block_number);
+            }
         }
 
         Ok(PortfolioSnapshotResponse {
@@ -838,32 +782,6 @@ impl AppServices {
             block_number,
         })
     }
-}
-
-fn normalize_eth_address(s: &str) -> Option<String> {
-    let s = s.trim();
-    let rest = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
-    if rest.len() != 40 {
-        return None;
-    }
-    if !rest.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(format!("0x{}", rest.to_ascii_lowercase()))
-}
-
-fn load_portfolio_tokens_from_env() -> Result<Vec<PortfolioTokenSpec>, AppError> {
-    let Ok(raw) = std::env::var(ENV_PORTFOLIO_TOKENS_JSON) else {
-        return Ok(Vec::new());
-    };
-
-    serde_json::from_str::<Vec<PortfolioTokenSpec>>(&raw).map_err(|_| {
-        AppError::new(
-            ErrorClass::Internal,
-            "InvalidPortfolioTokensJson",
-            format!("invalid {ENV_PORTFOLIO_TOKENS_JSON}"),
-        )
-    })
 }
 
 pub async fn get_artifact_from_store(
@@ -1058,26 +976,16 @@ pub fn pipeline_from_deploy_configure_validate_spec(spec: DeployConfigureValidat
     Pipeline {
         machine_id: MachineId(spec.machine_id),
         pipeline_version: spec.pipeline_version,
-        steps: vec![
-            PipelineStep {
-                step_id: StepId("deploy".to_string()),
-                op_id: OpId("evm_deploy".to_string()),
-                op_version: "v1".to_string(),
-                op_config: spec.deploy,
-            },
-            PipelineStep {
-                step_id: StepId("configure".to_string()),
-                op_id: OpId("evm_configure".to_string()),
-                op_version: "v1".to_string(),
-                op_config: spec.configure,
-            },
-            PipelineStep {
-                step_id: StepId("validate".to_string()),
-                op_id: OpId("evm_validate".to_string()),
-                op_version: "v1".to_string(),
-                op_config: spec.validate,
-            },
-        ],
+        steps: vec![PipelineStep {
+            step_id: StepId("main".to_string()),
+            op_id: OpId(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string()),
+            op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_OP_VERSION.to_string(),
+            op_config: serde_json::json!({
+                "deploy": spec.deploy,
+                "configure": spec.configure,
+                "validate": spec.validate,
+            }),
+        }],
     }
 }
 
@@ -1452,7 +1360,7 @@ struct RunEventsInput {
     to_seq: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PortfolioSnapshotRequest {
     pub address: String,
     pub chain_id: Option<u64>,

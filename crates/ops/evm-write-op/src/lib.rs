@@ -14,8 +14,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+#[cfg(test)]
 use k256::ecdsa::SigningKey;
 use serde::Deserialize;
+#[cfg(test)]
 use zeroize::Zeroizing;
 
 use alloy_primitives::keccak256;
@@ -23,6 +25,7 @@ use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::StateError;
+use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
 use mfm_machine::meta::StateMeta;
@@ -892,16 +895,8 @@ async fn send_signed_create_transaction(
     constructor_payload: &[u8],
     value_hex: Option<&str>,
 ) -> Result<String, StateError> {
-    let signing_key = signing_key_from_env(signing_key_env)?;
-    let signer_addr = signer_address_hex(&signing_key);
     let configured_from = normalize_address(from)
         .map_err(|_| op_errors::state_unknown("invalid_op_config", "invalid from address"))?;
-    if signer_addr != configured_from {
-        return Err(op_errors::state_unknown(
-            "signing_key_address_mismatch",
-            "signing key did not match configured from address",
-        ));
-    }
 
     let tx_obj = {
         let mut tx = serde_json::json!({
@@ -922,17 +917,89 @@ async fn send_signed_create_transaction(
         .await
         .map_err(op_errors::state_from_io)?;
 
-    let raw_tx_hex = sign_legacy_create_raw_tx(
-        &signing_key,
+    let raw_tx_hex = local_sign_legacy_create_raw_tx(
+        client,
+        signing_key_env,
+        &configured_from,
         chain_id,
         &nonce_hex,
         &gas_price_hex,
         &gas_hex,
         value_hex.unwrap_or("0x0"),
         constructor_payload,
-    )?;
+    )
+    .await?;
 
     send_raw_transaction(client, &raw_tx_hex).await
+}
+
+async fn local_sign_legacy_create_raw_tx(
+    client: &mut EvmIoClient<'_>,
+    signing_key_env: &str,
+    from: &str,
+    chain_id: u64,
+    nonce_hex: &str,
+    gas_price_hex: &str,
+    gas_limit_hex: &str,
+    value_hex: &str,
+    constructor_payload: &[u8],
+) -> Result<String, StateError> {
+    let state_id = client.state_id().clone();
+    let request = serde_json::json!({
+        "env_name_hex": hex::encode(signing_key_env.as_bytes()),
+        "from": from,
+        "chain_id": chain_id,
+        "nonce_hex": nonce_hex,
+        "gas_price_hex": gas_price_hex,
+        "gas_limit_hex": gas_limit_hex,
+        "value_hex": value_hex,
+        "data_hex": bytes_to_hex_prefixed(constructor_payload),
+    });
+    let fact_key = local_fact_key(&state_id, "deploy_sign_legacy_create", &request)?;
+    let res = client
+        .io_mut()
+        .call(IoCall {
+            namespace: "local.evm.sign_legacy_create".to_string(),
+            request,
+            fact_key: Some(fact_key),
+        })
+        .await
+        .map_err(op_errors::state_from_io)?;
+
+    let Some(raw_tx_hex) = res.response.get("raw_tx_hex").and_then(|v| v.as_str()) else {
+        return Err(op_errors::state_unknown(
+            "evm_response_invalid",
+            "local signer returned non-string raw transaction",
+        ));
+    };
+
+    normalize_hex_str(raw_tx_hex).map_err(|_| {
+        op_errors::state_unknown(
+            "evm_response_invalid",
+            "local signer returned invalid raw transaction hex",
+        )
+    })
+}
+
+fn local_fact_key(
+    state_id: &StateId,
+    purpose: &str,
+    request: &serde_json::Value,
+) -> Result<FactKey, StateError> {
+    let req_id = artifact_id_for_json(request).map_err(|err| match err {
+        CanonicalJsonError::FloatNotAllowed => op_errors::state_unknown(
+            "local_request_not_canonical",
+            "local io request was not canonical-json-hashable (floats are forbidden)",
+        ),
+        CanonicalJsonError::SecretsNotAllowed => {
+            op_errors::state_unknown("secrets_detected", "local io request contained secrets")
+        }
+    })?;
+
+    Ok(FactKey(format!(
+        "mfm:local|state:{}|purpose:{purpose}|req:{}",
+        state_id.0, req_id.0
+    )))
 }
 
 async fn transaction_count_hex(
@@ -962,6 +1029,7 @@ async fn transaction_count_hex(
     })
 }
 
+#[cfg(test)]
 fn signing_key_from_env(signing_key_env: &str) -> Result<SigningKey, StateError> {
     let raw = Zeroizing::new(std::env::var(signing_key_env).map_err(|_| {
         op_errors::state_unknown(
@@ -994,150 +1062,11 @@ fn signing_key_from_env(signing_key_env: &str) -> Result<SigningKey, StateError>
     })
 }
 
+#[cfg(test)]
 fn signer_address_hex(signing_key: &SigningKey) -> String {
     let public_key = signing_key.verifying_key().to_encoded_point(false);
     let hash = keccak256(&public_key.as_bytes()[1..]);
     bytes_to_hex_prefixed(&hash.as_slice()[12..])
-}
-
-fn sign_legacy_create_raw_tx(
-    signing_key: &SigningKey,
-    chain_id: u64,
-    nonce_hex: &str,
-    gas_price_hex: &str,
-    gas_limit_hex: &str,
-    value_hex: &str,
-    data: &[u8],
-) -> Result<String, StateError> {
-    let nonce = hex_quantity_to_rlp_bytes(nonce_hex)?;
-    let gas_price = hex_quantity_to_rlp_bytes(gas_price_hex)?;
-    let gas_limit = hex_quantity_to_rlp_bytes(gas_limit_hex)?;
-    let value = hex_quantity_to_rlp_bytes(value_hex)?;
-    let chain_id_bytes = u128_to_min_be(u128::from(chain_id));
-
-    let unsigned = rlp_encode_list(&[
-        nonce.clone(),
-        gas_price.clone(),
-        gas_limit.clone(),
-        Vec::new(),
-        value.clone(),
-        data.to_vec(),
-        chain_id_bytes.clone(),
-        Vec::new(),
-        Vec::new(),
-    ]);
-
-    let sighash = keccak256(&unsigned);
-    let (sig, recid) = signing_key
-        .sign_prehash_recoverable(sighash.as_slice())
-        .map_err(|_| {
-            op_errors::state_unknown("signing_failed", "failed to sign deployment transaction")
-        })?;
-
-    let sig_bytes = sig.to_bytes();
-    let r = trim_leading_zero_bytes(&sig_bytes[..32]);
-    let s = trim_leading_zero_bytes(&sig_bytes[32..]);
-    let v = u128::from(chain_id) * 2 + 35 + u128::from(u8::from(recid));
-    let v_bytes = u128_to_min_be(v);
-
-    let signed = rlp_encode_list(&[
-        nonce,
-        gas_price,
-        gas_limit,
-        Vec::new(),
-        value,
-        data.to_vec(),
-        v_bytes,
-        r,
-        s,
-    ]);
-
-    Ok(bytes_to_hex_prefixed(&signed))
-}
-
-fn hex_quantity_to_rlp_bytes(value: &str) -> Result<Vec<u8>, StateError> {
-    let normalized = normalize_hex_str(value).map_err(|_| {
-        op_errors::state_unknown("invalid_op_config", "invalid transaction quantity hex")
-    })?;
-    let bytes = hex_to_bytes(&normalized).map_err(|_| {
-        op_errors::state_unknown("invalid_op_config", "invalid transaction quantity hex")
-    })?;
-    Ok(trim_leading_zero_bytes(&bytes))
-}
-
-fn trim_leading_zero_bytes(bytes: &[u8]) -> Vec<u8> {
-    let mut idx = 0usize;
-    while idx < bytes.len() && bytes[idx] == 0 {
-        idx += 1;
-    }
-    bytes[idx..].to_vec()
-}
-
-fn u128_to_min_be(mut value: u128) -> Vec<u8> {
-    if value == 0 {
-        return Vec::new();
-    }
-
-    let mut out = Vec::new();
-    while value > 0 {
-        out.push((value & 0xff) as u8);
-        value >>= 8;
-    }
-    out.reverse();
-    out
-}
-
-fn rlp_encode_bytes(bytes: &[u8]) -> Vec<u8> {
-    if bytes.len() == 1 && bytes[0] < 0x80 {
-        return vec![bytes[0]];
-    }
-
-    let mut out = Vec::new();
-    if bytes.len() <= 55 {
-        out.push(0x80 + bytes.len() as u8);
-        out.extend_from_slice(bytes);
-        return out;
-    }
-
-    let len_bytes = usize_to_min_be(bytes.len());
-    out.push(0xb7 + len_bytes.len() as u8);
-    out.extend_from_slice(&len_bytes);
-    out.extend_from_slice(bytes);
-    out
-}
-
-fn rlp_encode_list(items: &[Vec<u8>]) -> Vec<u8> {
-    let mut payload = Vec::new();
-    for item in items {
-        payload.extend_from_slice(&rlp_encode_bytes(item));
-    }
-
-    let mut out = Vec::new();
-    if payload.len() <= 55 {
-        out.push(0xc0 + payload.len() as u8);
-        out.extend_from_slice(&payload);
-        return out;
-    }
-
-    let len_bytes = usize_to_min_be(payload.len());
-    out.push(0xf7 + len_bytes.len() as u8);
-    out.extend_from_slice(&len_bytes);
-    out.extend_from_slice(&payload);
-    out
-}
-
-fn usize_to_min_be(mut value: usize) -> Vec<u8> {
-    if value == 0 {
-        return vec![0];
-    }
-
-    let mut out = Vec::new();
-    while value > 0 {
-        out.push((value & 0xff) as u8);
-        value >>= 8;
-    }
-    out.reverse();
-    out
 }
 
 async fn estimate_gas_hex(
