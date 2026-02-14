@@ -190,6 +190,7 @@ Owns “glue” for binaries and integrations:
 - op registry
 - pipeline builder convenience API
 - run launcher / resume helpers (thin wrapper around machine + stores)
+- single-op execution/report extraction helpers for thin CLI/API adapters
 
 ### `bin/cli/` and `bin/rest-api/`
 Thin wrappers:

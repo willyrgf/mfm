@@ -2,8 +2,6 @@ use clap::Subcommand;
 
 use super::CommandContext;
 
-mod engine_bundle;
-
 pub mod artifacts;
 pub mod events;
 pub mod pipeline;

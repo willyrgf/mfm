@@ -1,12 +1,13 @@
-use crate::commands::keystore::run_op;
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
+use crate::support::{app_services, run_stores};
 use clap::Args;
 use mfm_op_keystore_tx::{
     tx_send_raw_report_context_key, TxSendRawOpConfig, TxSendRawReport, TX_OP_VERSION,
     TX_SEND_RAW_OP_ID,
 };
+use mfm_sdk::unstable::{execute_single_op_report, SingleOpReportRequest};
 use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
@@ -51,16 +52,23 @@ async fn execute_internal(args: &TxSendRawArgs) -> CommandResult<TxSendRawRespon
     };
 
     let report_key = tx_send_raw_report_context_key();
-    let run_output: CommandOutput<TxSendRawReport> = run_op::execute_single_op_report(
-        TX_SEND_RAW_OP_ID,
-        TX_OP_VERSION,
-        serde_json::to_value(op_config)
-            .expect("tx send raw op config should serialize to json value"),
-        &report_key.0,
+    let bundle = app_services::make_engine_bundle();
+    let report: TxSendRawReport = execute_single_op_report(
+        bundle.engine,
+        run_stores::make_ephemeral_stores(None),
+        bundle.registry,
+        bundle.planner,
+        SingleOpReportRequest {
+            op_id: TX_SEND_RAW_OP_ID.to_string(),
+            op_version: TX_OP_VERSION.to_string(),
+            op_config: serde_json::to_value(op_config)
+                .expect("tx send raw op config should serialize to json value"),
+            report_context_key: report_key.0,
+        },
     )
-    .await?;
+    .await
+    .map_err(app_services::command_error_from_single_op_report_error)?;
 
-    let report = run_output.data;
     Ok(CommandOutput::new(TxSendRawResponse {
         tx_hash: report.tx_hash,
         rpc_url_host: report.rpc_url_host,

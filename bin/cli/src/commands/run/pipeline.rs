@@ -1,7 +1,6 @@
 use clap::{Args, Subcommand};
 use mfm_app::{
-    AppServices, DeployConfigureValidateSpec, PipelineStartRequest, RunStartResponse,
-    RunsStartRequest,
+    DeployConfigureValidateSpec, PipelineStartRequest, RunStartResponse, RunsStartRequest,
 };
 use mfm_sdk::pipeline::Pipeline;
 use std::path::PathBuf;
@@ -9,9 +8,8 @@ use std::path::PathBuf;
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
+use crate::support::app_services::{command_error_from_app_error, make_app_services};
 use crate::support::run_stores::{make_stores, RunStoresArgs};
-
-use super::engine_bundle::{command_error_from_app_error, make_engine_bundle};
 
 #[derive(Subcommand)]
 pub enum PipelineCommand {
@@ -83,15 +81,14 @@ fn parse_input_json(s: &str) -> Result<serde_json::Value, CommandError> {
         .map_err(|_| CommandError::new("InvalidJson", "Failed to parse --input-json as JSON"))
 }
 
-async fn app_services(stores_args: &RunStoresArgs) -> Result<AppServices, CommandError> {
+async fn app_services(stores_args: &RunStoresArgs) -> Result<mfm_app::AppServices, CommandError> {
     let stores = make_stores(
         stores_args.artifact_root.clone(),
         stores_args.database_url.clone(),
     )
     .await?;
 
-    let bundle = make_engine_bundle();
-    Ok(AppServices::new(bundle, stores.events, stores.artifacts))
+    Ok(make_app_services(stores))
 }
 
 async fn execute_start_internal(args: &PipelineStartArgs) -> CommandResult<RunStartResponse> {
