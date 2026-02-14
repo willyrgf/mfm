@@ -18,10 +18,12 @@ use mfm_machine::ids::{ContextKey, OpId, RunId, StateId};
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransportFactory};
 use mfm_machine::stores::{ArtifactStore, EventStore};
+use mfm_machine_test_support::init_test_observability;
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::DefaultRunLauncher;
+use tracing::info;
 
 #[derive(Default)]
 struct MapContext {
@@ -152,6 +154,8 @@ const RETH_DEV_ACCOUNT0_PRIVATE_KEY: &str =
 
 #[tokio::test]
 async fn parity_reth_pipeline_contract_from_nix() {
+    init_test_observability();
+
     let pg = connect_postgres_with_retry(20, 250).await;
     let events: Arc<dyn EventStore> = Arc::new(pg);
 
@@ -356,5 +360,5 @@ async fn parity_reth_pipeline_contract_from_nix() {
         "client_version": client_version,
         "head_seq": head,
     });
-    println!("{}", serde_json::to_string(&report).expect("report json"));
+    info!(report = %serde_json::to_string(&report).expect("report json"), "parity report");
 }

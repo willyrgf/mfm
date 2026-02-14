@@ -1,5 +1,6 @@
 use mfm_op_keystore::{Keystore, KeystoreConfig};
 use std::path::PathBuf;
+use tracing::info;
 
 /// Keystore operations wrapper with unlock handling
 pub struct KeystoreManager {
@@ -50,7 +51,10 @@ impl KeystoreManager {
             return self.get_unlocked_keystore().await;
         }
 
-        println!("Creating new keystore at: {}", self.keystore_path.display());
+        info!(
+            keystore_path = %self.keystore_path.display(),
+            "creating new keystore file"
+        );
 
         // Create parent directory if needed
         if let Some(parent) = self.keystore_path.parent() {

@@ -8,11 +8,12 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing = { workspace = true }
 hex = { workspace = true }
 
 axum = "0.7"
+tower-http = { version = "0.6", features = ["request-id", "trace"] }
+http = "1"
 uuid = { version = "1.0", features = ["v4"] }
 
 mfm-machine = { path = "../../crates/machine" }

@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tracing::{debug, info, warn};
 
 use crate::config::{IoMode, RunConfig};
 use crate::context::DynContext;
@@ -292,6 +293,13 @@ impl AttemptStep for CallHandler {
     type Output = HandlerResult;
 
     async fn run(&self, ctx: &mut AttemptCtx<'_>) -> Result<Self::Output, RunError> {
+        debug!(
+            run_id = %ctx.run_id.0,
+            state_id = %ctx.state_id.0,
+            attempt = ctx.attempt,
+            io_mode = ?ctx.run_config.io_mode,
+            "executing state handler"
+        );
         let base_ctx =
             read_json_context(ctx.stores.artifacts.as_ref(), &ctx.base_snapshot_id).await?;
         let mut staged = StagedContext::new(base_ctx);
@@ -416,6 +424,13 @@ pub(super) enum AttemptExec {
 }
 
 pub(super) async fn execute_attempt(ctx: &mut AttemptCtx<'_>) -> Result<AttemptExec, RunError> {
+    info!(
+        run_id = %ctx.run_id.0,
+        state_id = %ctx.state_id.0,
+        attempt = ctx.attempt,
+        base_snapshot_id = %ctx.base_snapshot_id.0,
+        "state attempt started"
+    );
     super::append_kernel(
         &ctx.writer,
         KernelEvent::StateEntered {
@@ -433,8 +448,22 @@ pub(super) async fn execute_attempt(ctx: &mut AttemptCtx<'_>) -> Result<AttemptE
     };
 
     match logic.run(ctx).await? {
-        AttemptOutcome::StopAfterHandler => Ok(AttemptExec::StopAfterHandler),
+        AttemptOutcome::StopAfterHandler => {
+            warn!(
+                run_id = %ctx.run_id.0,
+                state_id = %ctx.state_id.0,
+                attempt = ctx.attempt,
+                "state attempt interrupted by failpoint"
+            );
+            Ok(AttemptExec::StopAfterHandler)
+        }
         AttemptOutcome::Skipped => {
+            info!(
+                run_id = %ctx.run_id.0,
+                state_id = %ctx.state_id.0,
+                attempt = ctx.attempt,
+                "state skipped due to run config tags"
+            );
             super::append_kernel(
                 &ctx.writer,
                 KernelEvent::StateCompleted {
@@ -451,6 +480,13 @@ pub(super) async fn execute_attempt(ctx: &mut AttemptCtx<'_>) -> Result<AttemptE
             let snapshot = staged.dump().map_err(RunError::Context)?;
             let snapshot_id =
                 write_full_snapshot_value(ctx.stores.artifacts.as_ref(), snapshot).await?;
+            info!(
+                run_id = %ctx.run_id.0,
+                state_id = %ctx.state_id.0,
+                attempt = ctx.attempt,
+                snapshot_id = %snapshot_id.0,
+                "state attempt completed"
+            );
             super::append_kernel(
                 &ctx.writer,
                 KernelEvent::StateCompleted {
@@ -462,6 +498,14 @@ pub(super) async fn execute_attempt(ctx: &mut AttemptCtx<'_>) -> Result<AttemptE
             Ok(AttemptExec::Completed { snapshot_id })
         }
         AttemptOutcome::Err(err) => {
+            warn!(
+                run_id = %ctx.run_id.0,
+                state_id = %ctx.state_id.0,
+                attempt = ctx.attempt,
+                error_code = %err.0.info.code.0,
+                retryable = err.retryable(),
+                "state attempt failed"
+            );
             super::append_kernel(
                 &ctx.writer,
                 KernelEvent::StateFailed {

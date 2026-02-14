@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
+use tracing::{debug, info, instrument, warn};
 
 use crate::attempt_envelope::{analyze_kernel_events, OrphanAttempt};
 use crate::config::{BackoffPolicy, ExecutionMode, RunConfig, RunManifest};
@@ -396,6 +397,21 @@ fn next_attempt(last_attempt_by_state: &HashMap<StateId, u32>, state_id: &StateI
 }
 
 #[allow(clippy::too_many_arguments)]
+#[instrument(
+    level = "info",
+    skip(
+        stores,
+        plan,
+        run_config,
+        writer,
+        completed_states,
+        start_at_state,
+        facts,
+        live_factory,
+        failpoints
+    ),
+    fields(run_id = %run_id.0, op_id = %plan.op_id.0)
+)]
 async fn run_states(
     stores: &Stores,
     plan: &ExecutionPlan,
@@ -410,15 +426,21 @@ async fn run_states(
     failpoints: Option<EngineFailpoints>,
 ) -> Result<RunResult, RunError> {
     validate_execution_mode(run_config)?;
+    debug!(execution_mode = ?run_config.execution_mode, "running execution plan");
 
     let ordered = topological_order(plan)
         .map_err(|_| invalid_plan("invalid_plan", "execution plan failed validation"))?;
+    debug!(
+        state_count = ordered.len(),
+        "execution plan resolved to topological order"
+    );
 
     let mut found_start = start_at_state.is_none();
     let mut phase = RunPhase::Running;
 
     for node in ordered {
         if completed_states.contains(&node.id) {
+            debug!(state_id = %node.id.0, "state already completed, skipping");
             continue;
         }
 
@@ -441,6 +463,7 @@ async fn run_states(
 
         let state = Arc::clone(&node.state);
         let state_meta = state.meta();
+        info!(state_id = %state_id.0, attempt, "starting state execution");
 
         loop {
             let mut attempt_ctx = attempt::AttemptCtx::new(
@@ -461,9 +484,20 @@ async fn run_states(
             match attempt::execute_attempt(&mut attempt_ctx).await? {
                 attempt::AttemptExec::Completed { snapshot_id } => {
                     current_snapshot_id = snapshot_id;
+                    info!(
+                        state_id = %state_id.0,
+                        attempt,
+                        snapshot_id = %current_snapshot_id.0,
+                        "state execution completed"
+                    );
                     break;
                 }
                 attempt::AttemptExec::StopAfterHandler => {
+                    warn!(
+                        state_id = %state_id.0,
+                        attempt,
+                        "execution stopped after handler due to failpoint"
+                    );
                     return Ok(RunResult {
                         run_id,
                         phase: RunPhase::Running,
@@ -474,6 +508,13 @@ async fn run_states(
                     let next = attempt + 1;
                     if retryable && next < run_config.retry_policy.max_attempts {
                         let d = compute_backoff(&run_config.retry_policy.backoff, attempt);
+                        warn!(
+                            state_id = %state_id.0,
+                            attempt,
+                            next_attempt = next,
+                            backoff_ms = d.as_millis() as u64,
+                            "state failed and will be retried"
+                        );
                         if !d.is_zero() {
                             tokio::time::sleep(d).await;
                         }
@@ -482,6 +523,13 @@ async fn run_states(
                     }
 
                     phase = RunPhase::Failed;
+                    warn!(
+                        state_id = %state_id.0,
+                        attempt,
+                        retryable,
+                        max_attempts = run_config.retry_policy.max_attempts,
+                        "state failed and no retries remain"
+                    );
                     break;
                 }
             }
@@ -508,6 +556,11 @@ async fn run_states(
         },
     )
     .await?;
+    info!(
+        phase = ?phase,
+        final_snapshot_id = final_snapshot_id.as_ref().map(|id| id.0.as_str()),
+        "run completed and finalized"
+    );
 
     Ok(RunResult {
         run_id,
@@ -522,6 +575,7 @@ async fn run_states(
 
 #[async_trait]
 impl ExecutionEngine for DefaultExecutionEngine {
+    #[instrument(level = "info", skip(self, stores, run), fields(op_id = %run.plan.op_id.0))]
     async fn start(&self, stores: Stores, run: StartRun) -> Result<RunResult, RunError> {
         validate_execution_mode(&run.run_config)?;
         validate_start_run_contract(&run)?;
@@ -537,6 +591,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
                 "manifest artifact was not found",
             )));
         }
+        info!(manifest_id = %run.manifest_id.0, "starting run");
 
         let run_id = RunId(uuid::Uuid::new_v4());
 
@@ -561,6 +616,11 @@ impl ExecutionEngine for DefaultExecutionEngine {
             })
             .await
             .map_err(RunError::Storage)?;
+        info!(
+            run_id = %run_id.0,
+            initial_snapshot_id = %initial_snapshot_id.0,
+            "run started event appended"
+        );
 
         let completed_states = HashSet::new();
         let current_snapshot_id = initial_snapshot_id.clone();
@@ -582,6 +642,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
         .await
     }
 
+    #[instrument(level = "info", skip(self, stores), fields(run_id = %run_id.0))]
     async fn resume(&self, stores: Stores, run_id: RunId) -> Result<RunResult, RunError> {
         let head = stores
             .events
@@ -594,6 +655,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
                 "run event stream was not found",
             )));
         }
+        debug!(head_seq = head, "resuming run from event stream");
 
         let stream = stores
             .events
@@ -603,8 +665,17 @@ impl ExecutionEngine for DefaultExecutionEngine {
 
         let facts = FactIndex::from_event_stream(&stream);
         let history = read_run_history(run_id, &stream)?;
+        debug!(
+            completed_state_count = history.completed_states.len(),
+            "loaded run history for resume"
+        );
 
         if let Some((status, final_snapshot_id)) = &history.run_completed {
+            info!(
+                status = ?status,
+                final_snapshot_id = final_snapshot_id.as_ref().map(|id| id.0.as_str()),
+                "run already completed; resume returns existing terminal state"
+            );
             return Ok(RunResult {
                 run_id,
                 phase: match status {
@@ -626,6 +697,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
                 "RunStarted.op_id did not match manifest.op_id",
             ));
         }
+        debug!(op_id = %manifest.op_id.0, "manifest loaded for resume");
 
         let plan = self.resolver.resolve(&manifest)?;
         if plan.op_id != manifest.op_id {
@@ -643,6 +715,11 @@ impl ExecutionEngine for DefaultExecutionEngine {
 
         // Orphan attempt handling: retry from base snapshot with attempt+1.
         if let Some(orphan) = &history.orphan_attempt {
+            warn!(
+                state_id = %orphan.state_id.0,
+                previous_attempt = orphan.attempt,
+                "retrying orphan attempt from base snapshot"
+            );
             let start = (
                 orphan.state_id.clone(),
                 orphan.attempt + 1,
@@ -673,6 +750,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
             .map(|n| n.id.clone());
 
         let Some(next_state_id) = next_state else {
+            info!("all states already completed; finalizing run");
             writer
                 .lock()
                 .await
@@ -695,6 +773,13 @@ impl ExecutionEngine for DefaultExecutionEngine {
         {
             let next = attempt + 1;
             if !*retryable || next >= manifest.run_config.retry_policy.max_attempts {
+                warn!(
+                    state_id = %next_state_id.0,
+                    attempt = *attempt,
+                    retryable = *retryable,
+                    max_attempts = manifest.run_config.retry_policy.max_attempts,
+                    "resume cannot retry failed state; finalizing run as failed"
+                );
                 writer
                     .lock()
                     .await
@@ -711,6 +796,12 @@ impl ExecutionEngine for DefaultExecutionEngine {
                 });
             }
 
+            info!(
+                state_id = %next_state_id.0,
+                next_attempt = next,
+                base_snapshot_id = %base_snapshot.0,
+                "resuming from failed state with retry"
+            );
             let start = (next_state_id.clone(), next, base_snapshot.clone());
             return run_states(
                 &stores,
@@ -732,6 +823,12 @@ impl ExecutionEngine for DefaultExecutionEngine {
             next_state_id.clone(),
             next_attempt(&history.last_attempt_by_state, &next_state_id),
             history.last_checkpoint.clone(),
+        );
+        info!(
+            state_id = %next_state_id.0,
+            attempt = start.1,
+            base_snapshot_id = %history.last_checkpoint.0,
+            "resuming run at next state"
         );
         run_states(
             &stores,

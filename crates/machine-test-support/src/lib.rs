@@ -3,11 +3,40 @@
 //! This crate is intentionally tiny and depends only on `mfm-machine` so storage backends can
 //! share correctness tests without creating dependency cycles.
 
+use std::sync::Once;
+
 use mfm_machine::errors::StorageError;
 use mfm_machine::events::{Event, EventEnvelope, KernelEvent, RunStatus};
 use mfm_machine::hashing::artifact_id_for_bytes;
 use mfm_machine::ids::{ArtifactId, OpId, RunId, StateId};
 use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+
+pub fn init_test_observability() {
+    static INIT: Once = Once::new();
+
+    INIT.call_once(|| {
+        let filter = std::env::var("MFM_TEST_LOG_FILTER")
+            .ok()
+            .or_else(|| std::env::var("MFM_LOG").ok())
+            .or_else(|| std::env::var("RUST_LOG").ok())
+            .unwrap_or_else(|| {
+                if std::env::var("MFM_TEST_LOG").is_ok() {
+                    "debug,mfm=trace".to_string()
+                } else {
+                    "warn,mfm=debug".to_string()
+                }
+            });
+
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_new(filter)
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,mfm=debug")),
+            )
+            .with_test_writer()
+            .with_target(true)
+            .try_init();
+    });
+}
 
 pub async fn artifact_store_contract_tests(store: &dyn ArtifactStore) {
     put_get_roundtrip(store).await;

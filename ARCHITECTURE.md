@@ -41,6 +41,13 @@ MFM is an **event-sourced execution engine** for on-chain/off-chain workflows wh
 - Manifests, events, artifacts (including fact payloads and context snapshots), CLI/API outputs, and error details
   must never contain private keys, mnemonics, passwords, or decrypted buffers.
 
+7) **Structured observability**
+- Instrumentation uses `tracing` across libraries and binaries.
+- Log output is stderr-only; API/CLI contract payloads remain stdout-only.
+- Correlation fields are required on critical paths when available:
+  - `request_id`, `run_id`, `op_id`, `state_id`, `attempt`, `artifact_id`, `event_seq`.
+- Logging must respect the no-secrets rule above.
+
 ---
 
 ## The runtime model (mental picture)

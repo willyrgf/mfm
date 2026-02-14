@@ -1,10 +1,12 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
+use http::header::HeaderName;
 use mfm_app::{
     AppError, AppServices, EngineBundle, ErrorClass, FeatureCatalog, FeatureRequest,
     RunsEventsQuery, RunsStartRequest,
@@ -13,6 +15,9 @@ use mfm_machine::ids::{ArtifactId, RunId};
 use mfm_machine::stores::{ArtifactStore, EventStore};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::trace::TraceLayer;
+use tracing::instrument;
 
 fn ok(data: serde_json::Value) -> serde_json::Value {
     json!({ "status": "success", "data": data })
@@ -129,6 +134,9 @@ impl RouterState {
 }
 
 pub fn make_app(state: AppState) -> Router {
+    let request_id_header = HeaderName::from_static("x-request-id");
+    let make_span_header = request_id_header.clone();
+
     let state = RouterState {
         app: state,
         catalog: Arc::new(FeatureCatalog::with_builtins()),
@@ -145,6 +153,43 @@ pub fn make_app(state: AppState) -> Router {
         .route("/v1/runs/:run_id/events", get(runs_events))
         .route("/v1/artifacts/:artifact_id", get(artifacts_get))
         .fallback(not_found)
+        .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
+        .layer(SetRequestIdLayer::new(
+            request_id_header.clone(),
+            MakeRequestUuid,
+        ))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(move |request: &axum::http::Request<axum::body::Body>| {
+                    let request_id = request
+                        .headers()
+                        .get(&make_span_header)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("missing");
+                    tracing::info_span!(
+                        "http.request",
+                        request_id = %request_id,
+                        method = %request.method(),
+                        route = %request.uri().path()
+                    )
+                })
+                .on_request(
+                    |_request: &axum::http::Request<axum::body::Body>, _span: &tracing::Span| {
+                        tracing::info!("request started");
+                    },
+                )
+                .on_response(
+                    |response: &axum::http::Response<axum::body::Body>,
+                     latency: Duration,
+                     _span: &tracing::Span| {
+                        tracing::info!(
+                            status_code = response.status().as_u16(),
+                            latency_ms = latency.as_millis() as u64,
+                            "request completed"
+                        );
+                    },
+                ),
+        )
         .with_state(state)
 }
 
@@ -152,6 +197,7 @@ async fn health() -> Json<serde_json::Value> {
     Json(ok(json!({ "ok": true })))
 }
 
+#[instrument(level = "debug", skip(state))]
 async fn ready(State(state): State<RouterState>) -> Result<Json<serde_json::Value>, ApiError> {
     // Liveness probe for the event store.
     state
@@ -196,6 +242,7 @@ async fn not_found() -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::NOT_FOUND, Json(err("not_found", "not found")))
 }
 
+#[instrument(level = "info", skip(state, body))]
 async fn runs_start(
     State(state): State<RouterState>,
     body: Result<Json<RunsStartRequest>, axum::extract::rejection::JsonRejection>,
@@ -208,6 +255,7 @@ async fn runs_start(
     )))
 }
 
+#[instrument(level = "info", skip(state), fields(run_id = run_id.as_str()))]
 async fn runs_resume(
     State(state): State<RouterState>,
     Path(run_id): Path<String>,
@@ -219,6 +267,7 @@ async fn runs_resume(
     )))
 }
 
+#[instrument(level = "debug", skip(state), fields(run_id = run_id.as_str()))]
 async fn runs_status(
     State(state): State<RouterState>,
     Path(run_id): Path<String>,
@@ -230,6 +279,11 @@ async fn runs_status(
     )))
 }
 
+#[instrument(
+    level = "debug",
+    skip(state, query),
+    fields(run_id = run_id.as_str(), from_seq = query.from_seq, to_seq = ?query.to_seq)
+)]
 async fn runs_events(
     State(state): State<RouterState>,
     Path(run_id): Path<String>,
@@ -242,6 +296,7 @@ async fn runs_events(
     )))
 }
 
+#[instrument(level = "debug", skip(state), fields(artifact_id = artifact_id.as_str()))]
 async fn artifacts_get(
     State(state): State<RouterState>,
     Path(artifact_id): Path<String>,
@@ -281,6 +336,7 @@ struct FeaturesListResponse {
     features: Vec<mfm_app::FeatureDescriptor>,
 }
 
+#[instrument(level = "debug", skip(state))]
 async fn features_list(State(state): State<RouterState>) -> Json<serde_json::Value> {
     Json(ok(serde_json::to_value(FeaturesListResponse {
         features: state.catalog.descriptors().to_vec(),
@@ -288,6 +344,7 @@ async fn features_list(State(state): State<RouterState>) -> Json<serde_json::Val
     .expect("feature list response must serialize")))
 }
 
+#[instrument(level = "info", skip(state, body), fields(feature_id = feature_id.as_str()))]
 async fn features_execute(
     State(state): State<RouterState>,
     Path(feature_id): Path<String>,
