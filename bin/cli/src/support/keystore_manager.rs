@@ -4,6 +4,7 @@ use zeroize::Zeroizing;
 
 const ENV_PASSWORD_FILE: &str = "MFM_KEYSTORE_PASSWORD_FILE";
 const ENV_PASSWORD: &str = "MFM_KEYSTORE_PASSWORD";
+use tracing::info;
 
 /// Keystore operations wrapper with unlock handling
 pub struct KeystoreManager {
@@ -49,7 +50,10 @@ impl KeystoreManager {
             return self.get_unlocked_keystore().await;
         }
 
-        println!("Creating new keystore at: {}", self.keystore_path.display());
+        info!(
+            keystore_path = %self.keystore_path.display(),
+            "creating new keystore file"
+        );
 
         // Create parent directory if needed
         if let Some(parent) = self.keystore_path.parent() {

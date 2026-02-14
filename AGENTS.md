@@ -215,9 +215,18 @@ These are typical, review-friendly change patterns (focus on a single outcome).
 ### Logging
 
 - Library crates:
-  - Prefer `log` to avoid forcing a subscriber on downstream users.
+  - Use `tracing` for structured events/spans (`info!`, `warn!`, `debug!`, `#[instrument]`).
 - Binaries:
-  - Prefer `tracing` (CLI initializes `tracing_subscriber` in `bin/cli/src/main.rs`).
+  - Initialize observability via `mfm_app::observability` so format/filter behavior is uniform.
+- Environment contract:
+  - `MFM_LOG` controls filter directives (fallback: `RUST_LOG`).
+  - `MFM_LOG_FORMAT` controls format (`text` default, `json` optional).
+  - `MFM_LOG_SPAN_EVENTS` controls span lifecycle logging (`none|new|close|active`).
+- Output contract:
+  - Logs go to stderr.
+  - CLI/API payload contracts remain on stdout only.
+- Correlation fields (include when available):
+  - `run_id`, `op_id`, `state_id`, `attempt`, `phase`, `artifact_id`, `event_seq`, `request_id`.
 - Never log secrets (passwords, mnemonics, private keys, raw ciphertext).
 
 ### Unsafe
@@ -337,8 +346,11 @@ If you use Nix or need CI parity, also run: `nix flake check && nix build`.
 
 - Backtraces: set `RUST_BACKTRACE=1` (CI already does).
 - CLI logging: use `tracing::{debug, info, warn, error}` with a clear target.
-- Library logging: use `log::{debug, info, warn, error}`.
+- Library logging: use `tracing::{debug, info, warn, error}` and `#[instrument]` on critical boundaries.
 - Tests: prefer isolated temp dirs/files via `tempfile`.
+- Test logging:
+  - initialize test subscriber via `mfm_machine_test_support::init_test_observability()`.
+  - default output is quiet and captured; enable extra verbosity with `MFM_TEST_LOG=1` or `MFM_TEST_LOG_FILTER`.
 - CI summaries: `nix run .#ci -- --summary` writes `summary.json` to the artifacts dir (see `nixfied/project/ci.nix`).
 
 

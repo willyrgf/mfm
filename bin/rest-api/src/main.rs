@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use mfm_app::observability::{init_observability, observability_from_env};
 use tokio::net::TcpListener;
 
 const ENV_ADDR: &str = "MFM_REST_API_ADDR";
@@ -11,7 +12,8 @@ async fn shutdown_signal() {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    init_observability(observability_from_env("mfm_rest_api"))
+        .map_err(|e| std::io::Error::other(format!("observability init failed: {}", e.message)))?;
 
     let addr: SocketAddr = std::env::var(ENV_ADDR)
         .unwrap_or_else(|_| "127.0.0.1:3001".to_string())

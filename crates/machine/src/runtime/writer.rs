@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
+use tracing::debug;
 
 use crate::errors::{RunError, StorageError};
 use crate::events::{Event, EventEnvelope, KernelEvent};
@@ -23,6 +24,7 @@ impl EventWriter {
         run_id: RunId,
     ) -> Result<Self, StorageError> {
         let head = store.head_seq(run_id).await?;
+        debug!(run_id = %run_id.0, head_seq = head, "initialized event writer");
         Ok(Self {
             run_id,
             store,
@@ -36,6 +38,12 @@ impl EventWriter {
         }
 
         let expected_seq = self.next_seq.saturating_sub(1);
+        debug!(
+            run_id = %self.run_id.0,
+            expected_seq,
+            event_count = events.len(),
+            "appending events"
+        );
         let mut envelopes = Vec::with_capacity(events.len());
         for (idx, event) in events.into_iter().enumerate() {
             envelopes.push(EventEnvelope {
@@ -50,6 +58,7 @@ impl EventWriter {
             .store
             .append(self.run_id, expected_seq, envelopes)
             .await?;
+        debug!(run_id = %self.run_id.0, new_head = head, "append completed");
         self.next_seq = head + 1;
         Ok(head)
     }

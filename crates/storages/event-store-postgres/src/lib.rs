@@ -12,6 +12,7 @@ use mfm_machine::ids::{ErrorCode, RunId};
 use mfm_machine::stores::EventStore;
 use tokio::sync::Mutex;
 use tokio_postgres::{Client, NoTls, Transaction};
+use tracing::{debug, info, warn};
 
 #[derive(Clone)]
 pub struct PostgresEventStore {
@@ -20,6 +21,7 @@ pub struct PostgresEventStore {
 
 impl PostgresEventStore {
     pub async fn connect(database_url: &str) -> Result<Self, StorageError> {
+        info!("connecting postgres event store");
         let (client, connection) = tokio_postgres::connect(database_url, NoTls)
             .await
             .map_err(|_| StorageError::Other(Self::info("pg_connect_failed", "connect failed")))?;
@@ -33,6 +35,7 @@ impl PostgresEventStore {
             client: Arc::new(Mutex::new(client)),
         };
         store.init().await?;
+        info!("postgres event store connected");
         Ok(store)
     }
 
@@ -67,6 +70,7 @@ CREATE TABLE IF NOT EXISTS mfm_events (
             .batch_execute(ddl)
             .await
             .map_err(|_| StorageError::Other(Self::info("pg_init_failed", "init failed")))?;
+        debug!("postgres event store schema ensured");
         Ok(())
     }
 
@@ -143,10 +147,12 @@ impl EventStore for PostgresEventStore {
             .map_err(|_| Self::other("pg_query_failed", "failed to query head_seq"))?;
 
         let Some(row) = row else {
+            debug!(run_id = %run_id.0, head_seq = 0, "head_seq resolved");
             return Ok(0);
         };
 
         let head: i64 = row.get(0);
+        debug!(run_id = %run_id.0, head_seq = head.max(0) as u64, "head_seq resolved");
         Ok(head.max(0) as u64)
     }
 
@@ -157,6 +163,12 @@ impl EventStore for PostgresEventStore {
         events: Vec<EventEnvelope>,
     ) -> Result<u64, StorageError> {
         Self::validate_append(run_id, expected_seq, &events)?;
+        debug!(
+            run_id = %run_id.0,
+            expected_seq,
+            event_count = events.len(),
+            "append called"
+        );
 
         let mut client = self.client.lock().await;
 
@@ -174,6 +186,12 @@ impl EventStore for PostgresEventStore {
 
         let head = Self::read_head_for_update(&tx, run_id).await?;
         if head != expected_seq {
+            warn!(
+                run_id = %run_id.0,
+                expected_seq,
+                actual_head = head,
+                "append concurrency conflict"
+            );
             return Err(Self::concurrency("head seq did not match expected seq"));
         }
 
@@ -205,6 +223,7 @@ impl EventStore for PostgresEventStore {
         tx.commit()
             .await
             .map_err(|_| Self::other("pg_tx_failed", "failed to commit transaction"))?;
+        debug!(run_id = %run_id.0, new_head, "append committed");
 
         Ok(new_head)
     }
@@ -250,6 +269,13 @@ impl EventStore for PostgresEventStore {
                 event,
             });
         }
+        debug!(
+            run_id = %run_id.0,
+            from_seq,
+            to_seq = ?to_seq,
+            event_count = out.len(),
+            "read_range completed"
+        );
 
         Ok(out)
     }

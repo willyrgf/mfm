@@ -1,3 +1,5 @@
+pub mod observability;
+
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
@@ -6,6 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info, instrument, warn};
 
 use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_artifact_store_s3::S3ArtifactStore;
@@ -258,13 +261,20 @@ pub fn default_artifact_root() -> PathBuf {
         })
 }
 
+#[instrument(level = "info", skip_all)]
 pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, AppError> {
     let backend = std::env::var(ENV_ARTIFACT_BACKEND).unwrap_or_else(|_| "fs".to_string());
+    info!(backend = %backend, "initializing artifact store");
     match backend.as_str() {
-        "fs" => Ok(Arc::new(FsArtifactStore::new(default_artifact_root()))),
+        "fs" => {
+            let root = default_artifact_root();
+            info!(artifact_root = %root.display(), "using filesystem artifact store");
+            Ok(Arc::new(FsArtifactStore::new(root)))
+        }
         "s3" => {
             let store = S3ArtifactStore::from_env().map_err(app_error_from_storage_error)?;
             if std::env::var(ENV_S3_ENSURE_BUCKET).is_ok() {
+                info!("ensuring s3 bucket exists");
                 store
                     .ensure_bucket_exists()
                     .await
@@ -280,6 +290,7 @@ pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, App
     }
 }
 
+#[instrument(level = "info", skip_all)]
 pub async fn make_default_event_store() -> Result<Arc<dyn EventStore>, AppError> {
     let database_url = std::env::var(ENV_DATABASE_URL).map_err(|_| {
         AppError::new(
@@ -289,6 +300,7 @@ pub async fn make_default_event_store() -> Result<Arc<dyn EventStore>, AppError>
         )
     })?;
 
+    info!(database_url_set = true, "initializing postgres event store");
     let store = PostgresEventStore::connect(&database_url)
         .await
         .map_err(app_error_from_storage_error)?;
@@ -448,22 +460,37 @@ impl AppServices {
         }
     }
 
+    #[instrument(
+        level = "info",
+        skip(self, req),
+        fields(op_id, machine_id, request_kind)
+    )]
     pub async fn start_run(&self, req: RunsStartRequest) -> Result<RunStartResponse, AppError> {
         let (pipeline, input, run_config) = match req {
             RunsStartRequest::Single(req) => {
+                tracing::Span::current().record("request_kind", "single");
+                tracing::Span::current().record("op_id", req.op_id.as_str());
                 let pipeline = single_op_pipeline(OpId(req.op_id), req.op_version, req.op_config)
                     .map_err(|e| {
                     AppError::new(ErrorClass::BadRequest, e.info.code.0, e.info.message)
                 })?;
                 (pipeline, serde_json::json!({}), default_run_config())
             }
-            RunsStartRequest::Pipeline(req) => (
-                req.pipeline,
-                req.input,
-                req.run_config.unwrap_or_else(default_run_config),
-            ),
+            RunsStartRequest::Pipeline(req) => {
+                tracing::Span::current().record("request_kind", "pipeline");
+                tracing::Span::current().record("machine_id", req.pipeline.machine_id.0.as_str());
+                (
+                    req.pipeline,
+                    req.input,
+                    req.run_config.unwrap_or_else(default_run_config),
+                )
+            }
         };
 
+        debug!(
+            step_count = pipeline.steps.len(),
+            "launching run for pipeline"
+        );
         let launcher = DefaultRunLauncher;
         let run = launcher
             .start_pipeline(
@@ -481,6 +508,11 @@ impl AppServices {
             )
             .await
             .map_err(app_error_from_run_error)?;
+        info!(
+            run_id = %run.run_id.0,
+            phase = %phase_str(&run.phase),
+            "run start finished"
+        );
 
         Ok(RunStartResponse {
             run_id: run.run_id.0.to_string(),
@@ -489,6 +521,7 @@ impl AppServices {
         })
     }
 
+    #[instrument(level = "info", skip(self), fields(run_id = run_id))]
     pub async fn resume_run(&self, run_id: &str) -> Result<RunResumeResponse, AppError> {
         let uuid = uuid::Uuid::parse_str(run_id).map_err(|_| AppError::invalid_uuid())?;
         let run_id = RunId(uuid);
@@ -504,6 +537,11 @@ impl AppServices {
             )
             .await
             .map_err(app_error_from_run_error)?;
+        info!(
+            run_id = %run.run_id.0,
+            phase = %phase_str(&run.phase),
+            "run resume finished"
+        );
 
         Ok(RunResumeResponse {
             run_id: run.run_id.0.to_string(),
@@ -512,6 +550,7 @@ impl AppServices {
         })
     }
 
+    #[instrument(level = "debug", skip(self), fields(run_id = run_id))]
     pub async fn run_status(&self, run_id: &str) -> Result<RunStatusResponse, AppError> {
         let uuid = uuid::Uuid::parse_str(run_id).map_err(|_| AppError::invalid_uuid())?;
         let run_id = RunId(uuid);
@@ -522,6 +561,7 @@ impl AppServices {
             .await
             .map_err(app_error_from_storage_error)?;
         if head == 0 {
+            warn!("run not found while reading status");
             return Err(AppError::not_found(
                 "run_not_found",
                 "run event stream was not found",
@@ -533,6 +573,7 @@ impl AppServices {
             .read_range(run_id, 1, None)
             .await
             .map_err(app_error_from_storage_error)?;
+        debug!(event_count = stream.len(), "loaded run event stream");
 
         let mut op_id = None;
         let mut manifest_id = None;
@@ -586,6 +627,11 @@ impl AppServices {
         })
     }
 
+    #[instrument(
+        level = "debug",
+        skip(self, query),
+        fields(run_id = run_id, from_seq = query.from_seq, to_seq = ?query.to_seq)
+    )]
     pub async fn run_events(
         &self,
         run_id: &str,
@@ -600,6 +646,7 @@ impl AppServices {
             .await
             .map_err(app_error_from_storage_error)?;
         if head == 0 {
+            warn!("run not found while reading events");
             return Err(AppError::not_found(
                 "run_not_found",
                 "run event stream was not found",
@@ -611,6 +658,11 @@ impl AppServices {
             .read_range(run_id, query.from_seq, query.to_seq)
             .await
             .map_err(app_error_from_storage_error)?;
+        debug!(
+            event_count = events.len(),
+            head_seq = head,
+            "run events loaded"
+        );
 
         Ok(RunsEventsResponse {
             run_id: run_id.0.to_string(),
@@ -619,6 +671,7 @@ impl AppServices {
         })
     }
 
+    #[instrument(level = "debug", skip(self), fields(artifact_id = artifact_id))]
     pub async fn artifact_get(&self, artifact_id: &str) -> Result<ArtifactGetResponse, AppError> {
         get_artifact_from_store(Arc::clone(&self.artifacts), artifact_id).await
     }
@@ -815,6 +868,7 @@ pub async fn get_artifact_from_store(
     artifact_id: &str,
 ) -> Result<ArtifactGetResponse, AppError> {
     let id = ArtifactId(artifact_id.to_string());
+    debug!(artifact_id = %id.0, "loading artifact from store");
 
     let bytes = artifacts
         .get(&id)

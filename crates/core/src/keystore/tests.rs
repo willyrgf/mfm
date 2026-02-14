@@ -5,7 +5,22 @@
 use super::*;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use static_assertions::assert_not_impl_any;
+use std::sync::Once;
 use tempfile::tempdir;
+use tracing::{info, warn};
+
+fn init_test_observability() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,mfm=debug")),
+            )
+            .with_test_writer()
+            .try_init();
+    });
+}
 
 #[test]
 fn keystore_is_not_send_nor_sync() {
@@ -631,6 +646,7 @@ fn test_lock_comprehensive() {
 
 #[test]
 fn test_import_private_key_edge_cases() {
+    init_test_observability();
     let (_temp_dir, mut keystore) = test_keystore();
     keystore.unlock("test_password").unwrap();
 
@@ -645,7 +661,7 @@ fn test_import_private_key_edge_cases() {
     for (i, key) in valid_keys.iter().enumerate() {
         let result = keystore.import_private_key(Some(format!("key_{i}")), key);
         match result {
-            Ok(_) => println!("Successfully imported key {i}: {key}"),
+            Ok(_) => info!(test_case = i, "valid private key import accepted"),
             Err(e) => panic!("Failed to import valid key {i}: {key} - Error: {e:?}"),
         }
     }
@@ -664,7 +680,7 @@ fn test_import_private_key_edge_cases() {
     for key in invalid_keys {
         let result = keystore.import_private_key(None, key);
         if result.is_ok() {
-            println!("Note: {key} was accepted, which may be acceptable");
+            warn!("invalid format key accepted by parser; this may be acceptable");
         }
         // Note: We don't assert failure here since some edge cases might be acceptable
     }
@@ -672,6 +688,7 @@ fn test_import_private_key_edge_cases() {
 
 #[test]
 fn test_import_mnemonic_edge_cases() {
+    init_test_observability();
     let (_temp_dir, mut keystore) = test_keystore();
     keystore.unlock("test_password").unwrap();
 
@@ -703,10 +720,7 @@ fn test_import_mnemonic_edge_cases() {
     for path in invalid_paths {
         let result = keystore.import_mnemonic(None, valid_mnemonic, path, None);
         if result.is_err() {
-            println!(
-                "Note: path '{path}' was rejected: {:?}",
-                result.unwrap_err()
-            );
+            info!("invalid derivation path rejected by parser");
         }
         // Note: Some paths might be accepted by the underlying library
     }
