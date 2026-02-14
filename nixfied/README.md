@@ -719,9 +719,20 @@ Public env controls:
 - `SERVICE_OWNER_SCOPE=ephemeral|persistent`
 - `SERVICE_DISCOVERY_SCOPE=local|global`
 
-Defaults are inferred from execution context and can be overridden:
-- ephemeral execution defaults to `same-root`, `ephemeral`, `local`
-- persistent execution defaults to `same-slot`, `persistent`, `global`
+Defaults are inferred with this precedence and can be overridden:
+- explicit `SERVICE_OWNER_SCOPE` / `SERVICE_DISCOVERY_SCOPE` env vars
+- explicit `SERVICE_REUSE_POLICY` fills missing scopes:
+  - `same-slot` or `cross-run` => `persistent`, `global`
+  - `same-root` => `ephemeral`, `local`
+- execution context fallback:
+  - ephemeral execution defaults to `same-root`, `ephemeral`, `local`
+  - persistent execution defaults to `same-slot`, `persistent`, `global`
+
+Examples:
+- concise slot reuse in persistent context:
+  `PROJECT_ENV=dev NIX_ENV=0 SERVICE_REUSE_POLICY=same-slot nix run .#<command>`
+- fully explicit equivalent:
+  `PROJECT_ENV=dev NIX_ENV=0 SERVICE_OWNER_SCOPE=persistent SERVICE_DISCOVERY_SCOPE=global SERVICE_REUSE_POLICY=same-slot nix run .#<command>`
 
 Validation rules:
 - `cross-run` requires `SERVICE_OWNER_SCOPE=persistent` and

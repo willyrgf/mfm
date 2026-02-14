@@ -1989,6 +1989,52 @@ let
       exit "$REG_STALE_RC"
     fi
 
+    log "process registry policy inference"
+    REG_POLICY_DIR="$WORKDIR/registry-policy-inference"
+    mkdir -p "$REG_POLICY_DIR"
+    REG_POLICY_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base {
+        project.id = "nixfied-process-policy-inference-fixture";
+        process.registryRoot = "$PWD/.process-registry";
+      };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+    in
+      lib.mkAppScript {
+        name = "registry-policy-inference-test";
+        env = { };
+        useDeps = false;
+        script = import ./tests/framework/fixtures/registry/policy-inference.nix {
+          emitEvent = toString lib.emitEvent;
+          serviceStatus = toString lib.serviceStatus;
+          processInspect = toString lib.processInspect;
+          registryRoot = "$PWD/.process-registry";
+          ephemeralFlagVar = "NIXFIED_PROCESS_POLICY_INFERENCE_FIXTURE_EPHEMERAL";
+        };
+      }
+    NIX
+    )
+
+    REG_POLICY_SCRIPT=$(build_expr "$REG_POLICY_EXPR")
+    REG_POLICY_LOG="$WORKDIR/registry-policy-inference.log"
+    set +e
+    (cd "$REG_POLICY_DIR" && "$REG_POLICY_SCRIPT" >"$REG_POLICY_LOG" 2>&1)
+    REG_POLICY_RC=$?
+    set -e
+    if [ "$REG_POLICY_RC" -ne 0 ]; then
+      echo "Registry policy inference fixture failed (rc=$REG_POLICY_RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 50 lines):" >&2
+      print_log_tail "$REG_POLICY_LOG" 50
+      exit "$REG_POLICY_RC"
+    fi
+
     log "postgres extensions"
     PG_EXT_DIR="$WORKDIR/postgres-extensions"
     mkdir -p "$PG_EXT_DIR"

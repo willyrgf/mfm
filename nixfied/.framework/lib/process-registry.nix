@@ -51,9 +51,46 @@ let
       esac
     }
 
+    infer_owner_scope_from_reuse_policy() {
+      case "''${SERVICE_REUSE_POLICY:-}" in
+        same-slot|cross-run)
+          echo "persistent"
+          ;;
+        same-root)
+          echo "ephemeral"
+          ;;
+        *)
+          echo ""
+          ;;
+      esac
+    }
+
+    infer_discovery_scope_from_reuse_policy() {
+      case "''${SERVICE_REUSE_POLICY:-}" in
+        same-slot|cross-run)
+          echo "global"
+          ;;
+        same-root)
+          echo "local"
+          ;;
+        *)
+          echo ""
+          ;;
+      esac
+    }
+
     infer_owner_scope() {
+      local from_reuse=""
+
       if [ -n "''${SERVICE_OWNER_SCOPE:-}" ]; then
         echo "$SERVICE_OWNER_SCOPE"
+        return 0
+      fi
+
+      # Precedence: explicit scope env > scope inferred from explicit reuse policy > execution context.
+      from_reuse="$(infer_owner_scope_from_reuse_policy)"
+      if [ -n "$from_reuse" ]; then
+        echo "$from_reuse"
         return 0
       fi
 
@@ -65,8 +102,17 @@ let
     }
 
     infer_discovery_scope() {
+      local from_reuse=""
+
       if [ -n "''${SERVICE_DISCOVERY_SCOPE:-}" ]; then
         echo "$SERVICE_DISCOVERY_SCOPE"
+        return 0
+      fi
+
+      # Keep discovery aligned with explicit reuse policy unless callers set SERVICE_DISCOVERY_SCOPE.
+      from_reuse="$(infer_discovery_scope_from_reuse_policy)"
+      if [ -n "$from_reuse" ]; then
+        echo "$from_reuse"
         return 0
       fi
 

@@ -124,6 +124,10 @@ EOF
 
     REQUIRED_DOCS_JSON='${requiredDocsJson}'
     RISK_AREAS_JSON='${riskAreasJson}'
+    HAS_GIT_TRACKING="0"
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      HAS_GIT_TRACKING="1"
+    fi
 
     doc_purpose() {
       case "$1" in
@@ -160,17 +164,29 @@ EOF
       "0" \
       "true" >> "$DOCS_TSV"
 
+    doc_present() {
+      local doc_path="$1"
+
+      # Ignore untracked local files so discovery stays stable in clean CI checkouts.
+      if [ "$HAS_GIT_TRACKING" = "1" ] && ! git ls-files --error-unmatch -- "$doc_path" >/dev/null 2>&1; then
+        echo "false"
+        return 0
+      fi
+
+      if [ -f "$ROOT/$doc_path" ]; then
+        echo "true"
+      else
+        echo "false"
+      fi
+    }
+
     while IFS= read -r doc_path; do
       [ -z "$doc_path" ] && continue
-      doc_exists="false"
-      if [ -f "$ROOT/$doc_path" ]; then
-        doc_exists="true"
-      fi
       printf '%s\t%s\t%s\t%s\n' \
         "$doc_path" \
         "$(doc_purpose "$doc_path")" \
         "$(doc_priority "$doc_path")" \
-        "$doc_exists" >> "$DOCS_TSV"
+        "$(doc_present "$doc_path")" >> "$DOCS_TSV"
     done < <(printf '%s\n' "$REQUIRED_DOCS_JSON" | ${pkgs.jq}/bin/jq -r '.[]')
 
     DOCS_JSON=$(${pkgs.jq}/bin/jq -R -s '
