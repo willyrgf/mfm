@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SHARED_RATIO_MIN: f64 = 0.60;
+const SHARED_RATIO_MIN: f64 = 0.80;
 
 fn main() {
     let repo_root = repo_root();
@@ -102,7 +102,7 @@ fn check_utility_duplication(repo_root: &Path, failures: &mut Vec<String>) {
         ("bytes_to_hex_prefixed", 3),
         ("parse_abi", 3),
         ("encode_params", 2),
-        ("parse_value_wei_to_hex", 3),
+        ("parse_value_wei_to_hex", 2),
         ("trim_leading_zero_bytes", 1),
         ("u128_to_min_be", 1),
         ("rlp_encode_bytes", 1),
@@ -194,11 +194,8 @@ fn count_state_impls_in_file(file: &Path) -> usize {
         Err(_) => return 0,
     };
 
-    let code_before_tests = content
-        .split("#[cfg(test)]")
-        .next()
-        .unwrap_or(content.as_str());
-    code_before_tests.matches("impl State for ").count()
+    let non_test_content = strip_cfg_test_items(&content);
+    non_test_content.matches("impl State for ").count()
 }
 
 fn collect_rs_files(root: &Path, files: &mut Vec<String>) {
@@ -236,4 +233,72 @@ fn find_matching_brace(content: &str, open_brace: usize) -> Option<usize> {
         }
     }
     None
+}
+
+fn strip_cfg_test_items(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut cursor = 0usize;
+
+    while let Some(rel) = content[cursor..].find("#[cfg(test)]") {
+        let attr_start = cursor + rel;
+        out.push_str(&content[cursor..attr_start]);
+
+        let mut item_start = attr_start + "#[cfg(test)]".len();
+        item_start = skip_ws(content, item_start);
+        item_start = skip_extra_attrs(content, item_start);
+
+        let next_word = next_word(content, item_start);
+        let semicolon_pos = content[item_start..].find(';').map(|p| item_start + p);
+        let brace_pos = content[item_start..].find('{').map(|p| item_start + p);
+
+        // `#[cfg(test)] use ...;` is common and may contain braces in import paths.
+        let prefers_semicolon = matches!(next_word, "use" | "extern" | "const" | "static" | "type");
+
+        cursor = match (semicolon_pos, brace_pos, prefers_semicolon) {
+            (Some(semicolon), _, true) => semicolon + 1,
+            (Some(semicolon), Some(brace), false) if semicolon < brace => semicolon + 1,
+            (_, Some(brace), false) => find_matching_brace(content, brace)
+                .map(|end| end + 1)
+                .unwrap_or(content.len()),
+            (Some(semicolon), None, false) => semicolon + 1,
+            (None, Some(brace), _) => find_matching_brace(content, brace)
+                .map(|end| end + 1)
+                .unwrap_or(content.len()),
+            (None, None, _) => content.len(),
+        };
+    }
+
+    out.push_str(&content[cursor..]);
+    out
+}
+
+fn skip_ws(content: &str, mut idx: usize) -> usize {
+    while idx < content.len() && content.as_bytes()[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    idx
+}
+
+fn skip_extra_attrs(content: &str, mut idx: usize) -> usize {
+    loop {
+        let Some(rest) = content.get(idx..) else {
+            return idx;
+        };
+        if !rest.starts_with("#[") {
+            return idx;
+        }
+
+        let Some(end_rel) = rest.find(']') else {
+            return content.len();
+        };
+        idx += end_rel + 1;
+        idx = skip_ws(content, idx);
+    }
+}
+
+fn next_word(content: &str, idx: usize) -> &str {
+    let Some(rest) = content.get(idx..) else {
+        return "";
+    };
+    rest.split_whitespace().next().unwrap_or("")
 }
