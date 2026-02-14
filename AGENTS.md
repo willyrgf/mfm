@@ -9,6 +9,9 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 - Match CI (Nixfied): use `nix run .#check`, `nix run .#test`, and `nix run .#ci -- --basic/--audit/--parity --summary`.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
+- Keep binaries (`bin/cli`, `bin/rest-api`) thin:
+  - business/domain execution logic belongs in `crates/ops/*` (and reusable pieces in `crates/ops/common`)
+  - binaries should parse input, start/resume runs, and render outputs only
 - If you touch security-sensitive code (keystore/crypto), add or strengthen tests.
 
 ## Design Contract (Architecture Invariants)
@@ -212,6 +215,13 @@ These are typical, review-friendly change patterns (focus on a single outcome).
   - Preserve stable, machine-readable error codes (see `bin/cli/README.md`).
   - Avoid breaking the JSON output schema.
 
+### Binary Boundary Enforcement
+
+- Do not add domain workflow logic directly to `bin/cli` or `bin/rest-api`.
+- If a CLI/API feature performs business execution, implement it as an op/state-machine flow in `crates/ops/*` and invoke it via run start/resume.
+- `bin/cli/src/support/*` and REST handler helpers should contain transport/adaptation code only, not workflow/domain execution.
+- Shared business behavior needed by multiple ops should live in `crates/ops/common`.
+
 ### Logging
 
 - Library crates:
@@ -266,6 +276,11 @@ The CLI is designed to be scriptable and AI-friendly.
   - machine-readable `json` output with stable structure
 - Provide non-interactive modes (`--stdin`, `--yes`, env vars) where appropriate.
 - Keep outputs stable; treat output format as part of the public API.
+- Commands should be wrappers over run execution:
+  - map args -> op/pipeline input
+  - start/resume run
+  - render final report
+  - avoid embedding domain execution logic in CLI command/support modules
 
 Run locally:
 
@@ -335,6 +350,16 @@ If a bug can reappear, write a regression test.
 - Holding locks across `.await` (can deadlock or stall progress).
 - Introducing `unwrap()`/`expect()` in library code where errors should be surfaced.
 - Changing CLI output schema or error codes without updating docs and tests.
+- Implementing business logic in binary crates instead of ops/state-machine crates.
+
+## Documentation Updates Required
+
+When changing CLI/REST behavior, update the relevant docs in the same change:
+
+- `bin/cli/README.md` for CLI contract/usage changes.
+- `bin/rest-api/README.md` for REST surface/contract changes.
+- `ARCHITECTURE.md` if architectural boundaries or responsibilities change.
+- `ENFORCE_BINS_THIN_LAYER.md` if thin-binary enforcement policy changes.
 
 ## CI Requirements
 
