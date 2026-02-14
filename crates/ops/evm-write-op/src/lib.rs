@@ -11,33 +11,31 @@
 //! - No secrets are persisted in op_config or outputs.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use async_trait::async_trait;
 #[cfg(test)]
 use k256::ecdsa::SigningKey;
 use serde::Deserialize;
 #[cfg(test)]
+use std::time::Duration;
+#[cfg(test)]
 use zeroize::Zeroizing;
 
 use alloy_primitives::keccak256;
-use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::config::RunConfig;
-use mfm_machine::context::DynContext;
+#[cfg(test)]
 use mfm_machine::errors::StateError;
-use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
-use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
-use mfm_machine::io::{IoCall, IoProvider};
-use mfm_machine::meta::StateMeta;
+use mfm_machine::ids::{OpId, OpPath, StateId};
 use mfm_machine::plan::{StateGraph, StateNode};
-use mfm_machine::recorder::EventRecorder;
-use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-use mfm_op_common::ctx as op_ctx;
 use mfm_op_common::errors as op_errors;
-use mfm_op_common::idempotency as op_idempotency;
 use mfm_op_common::rpc as op_rpc;
 use mfm_op_common::states::evm_dcv as shared_dcv;
-use mfm_op_common::states::meta;
+use mfm_op_common::states::evm_write::{
+    EvmConfigureRuntimeCall as SharedConfigureRuntimeCall,
+    EvmConfigureState as SharedConfigureState,
+    EvmConfigureStateConfig as SharedConfigureStateConfig, EvmDeployState as SharedDeployState,
+    EvmDeployStateConfig as SharedDeployStateConfig, EvmValidateState as SharedValidateState,
+    EvmValidateStateConfig as SharedValidateStateConfig, NixArtifactToEvmContractState,
+};
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -233,60 +231,10 @@ struct ParsedAbi {
 }
 
 #[derive(Clone, Debug)]
-struct DeployRuntimeConfig {
-    artifact: Option<ContractArtifactConfig>,
-    artifact_port: String,
-    from: String,
-    constructor_args: Vec<serde_json::Value>,
-    value_hex: Option<String>,
-    signing_key_env: Option<String>,
-    poll_interval_ms: u64,
-    max_receipt_polls: u64,
-}
-
-#[derive(Clone, Debug)]
 struct ConfigureRuntimeCall {
     function: String,
     args: Vec<serde_json::Value>,
     value_hex: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-struct ConfigureRuntimeConfig {
-    artifact: Option<ContractArtifactConfig>,
-    artifact_port: String,
-    from: String,
-    contract_address: Option<String>,
-    calls: Vec<ConfigureRuntimeCall>,
-    poll_interval_ms: u64,
-    max_receipt_polls: u64,
-}
-
-#[derive(Clone, Debug)]
-struct PreparedReadAssertion {
-    data_hex: String,
-    expected: serde_json::Value,
-    outputs: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-struct PreparedEventAssertion {
-    event: String,
-    topic0_hex: String,
-    min_count: u64,
-    from_block: serde_json::Value,
-    to_block: serde_json::Value,
-}
-
-#[derive(Clone, Debug)]
-struct ValidateRuntimeConfig {
-    artifact: Option<ContractArtifactConfig>,
-    artifact_port: String,
-    contract_address: Option<String>,
-    expected_chain_id: u64,
-    require_client_substring: String,
-    read_assertions: Vec<ReadAssertionConfig>,
-    event_assertions: Vec<EventAssertionConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -378,6 +326,7 @@ fn hex_to_bytes(s: &str) -> Result<Vec<u8>, String> {
     hex::decode(rest).map_err(|_| "invalid hex".to_string())
 }
 
+#[cfg(test)]
 fn bytes_to_hex_prefixed(bytes: &[u8]) -> String {
     format!("0x{}", hex::encode(bytes))
 }
@@ -406,11 +355,6 @@ fn parse_address_hex(s: &str) -> Result<[u8; 20], String> {
     let mut out = [0u8; 20];
     out.copy_from_slice(&b);
     Ok(out)
-}
-
-fn normalize_address(s: &str) -> Result<String, String> {
-    let b = parse_address_hex(s)?;
-    Ok(bytes_to_hex_prefixed(&b))
 }
 
 fn encode_u64_word(n: u64) -> [u8; 32] {
@@ -628,41 +572,22 @@ fn resolve_function_call(
     }
 }
 
-fn constructor_data(
-    abi: &ParsedAbi,
-    bytecode: &[u8],
-    args: &[serde_json::Value],
-) -> Result<Vec<u8>, String> {
-    let enc = encode_params(&abi.constructor_inputs, args)?;
-    let mut out = Vec::with_capacity(bytecode.len() + enc.len());
-    out.extend_from_slice(bytecode);
-    out.extend_from_slice(&enc);
-    Ok(out)
-}
-
 fn parse_artifact(cfg: &ContractArtifactConfig) -> Result<(ParsedAbi, Vec<u8>), String> {
     let abi = parse_abi(&cfg.abi)?;
     let bytecode = parse_bytecode(&cfg.bytecode)?;
     Ok((abi, bytecode))
 }
 
-fn prepare_validate_assertions(
+fn validate_assertions_match_abi(
     abi: &ParsedAbi,
     read_assertions: &[ReadAssertionConfig],
     event_assertions: &[EventAssertionConfig],
-) -> Result<(Vec<PreparedReadAssertion>, Vec<PreparedEventAssertion>), String> {
-    let mut prepared_reads = Vec::with_capacity(read_assertions.len());
+) -> Result<(), String> {
     for ra in read_assertions {
-        let (data, outputs) = resolve_function_call(abi, &ra.function, &ra.args)
+        let _ = resolve_function_call(abi, &ra.function, &ra.args)
             .map_err(|_| "read assertion did not match ABI".to_string())?;
-        prepared_reads.push(PreparedReadAssertion {
-            data_hex: bytes_to_hex_prefixed(&data),
-            expected: ra.expected.clone(),
-            outputs,
-        });
     }
 
-    let mut prepared_events = Vec::with_capacity(event_assertions.len());
     for ea in event_assertions {
         let Some(event) = abi.events.iter().find(|e| e.name == ea.event) else {
             return Err("event assertion referenced unknown event".to_string());
@@ -672,50 +597,9 @@ fn prepare_validate_assertions(
             return Err("anonymous events are not supported for validation".to_string());
         }
 
-        let sig = format!("{}({})", event.name, event.inputs.join(","));
-        let topic0 = keccak256(sig.as_bytes());
-
-        let from_block = to_block_param(&ea.from_block, "earliest")
-            .map_err(|_| "invalid from_block".to_string())?;
-        let to_block =
-            to_block_param(&ea.to_block, "latest").map_err(|_| "invalid to_block".to_string())?;
-
-        prepared_events.push(PreparedEventAssertion {
-            event: ea.event.clone(),
-            topic0_hex: bytes_to_hex_prefixed(topic0.as_slice()),
-            min_count: ea.min_count,
-            from_block,
-            to_block,
-        });
+        let _topic0 = keccak256(format!("{}({})", event.name, event.inputs.join(",")).as_bytes());
     }
 
-    Ok((prepared_reads, prepared_events))
-}
-
-fn parse_value_wei_to_hex(value_wei: &Option<String>) -> Result<Option<String>, String> {
-    let Some(v) = value_wei else {
-        return Ok(None);
-    };
-    if v.starts_with("0x") {
-        return Ok(Some(normalize_hex_str(v)?));
-    }
-    let parsed = v
-        .parse::<u128>()
-        .map_err(|_| "value_wei must be decimal or 0x-prefixed hex".to_string())?;
-    Ok(Some(format!("0x{:x}", parsed)))
-}
-
-fn ensure_nonzero_polls(max_receipt_polls: u64) -> Result<(), String> {
-    if max_receipt_polls == 0 {
-        return Err("max_receipt_polls must be > 0".to_string());
-    }
-    Ok(())
-}
-
-fn ensure_nonempty_artifact_port(artifact_port: &str) -> Result<(), String> {
-    if artifact_port.trim().is_empty() {
-        return Err("artifact_port must be non-empty".to_string());
-    }
     Ok(())
 }
 
@@ -724,310 +608,6 @@ fn ensure_nonempty_env_name(env_name: &str) -> Result<(), String> {
         return Err("signing_key_env must be non-empty".to_string());
     }
     Ok(())
-}
-
-fn to_block_param(tag: &Option<BlockTag>, default_tag: &str) -> Result<serde_json::Value, String> {
-    match tag {
-        None => Ok(serde_json::json!(default_tag)),
-        Some(BlockTag::Tag(t)) => Ok(serde_json::json!(t)),
-        Some(BlockTag::Number(n)) => Ok(serde_json::json!(format!("0x{n:x}"))),
-    }
-}
-
-fn decode_single_output_to_json(
-    outputs: &[String],
-    raw_hex: &str,
-) -> Result<serde_json::Value, String> {
-    let normalized = normalize_hex_str(raw_hex)?;
-
-    if outputs.is_empty() {
-        return Ok(serde_json::json!(normalized));
-    }
-
-    if outputs.len() != 1 {
-        return Ok(serde_json::json!(normalized));
-    }
-
-    let out_t = outputs[0].as_str();
-    let b = hex_to_bytes(&normalized)?;
-    if b.len() < 32 {
-        return Err("eth_call return data too short".to_string());
-    }
-
-    match out_t {
-        "bool" => Ok(serde_json::json!(b[31] == 1u8)),
-        "address" => {
-            let addr = &b[12..32];
-            Ok(serde_json::json!(bytes_to_hex_prefixed(addr)))
-        }
-        t if t.starts_with("uint") || t.starts_with("int") => {
-            let mut v: u64 = 0;
-            for byte in &b[24..32] {
-                v = (v << 8) | u64::from(*byte);
-            }
-            Ok(serde_json::json!(v))
-        }
-        _ => Ok(serde_json::json!(normalized)),
-    }
-}
-
-fn expected_matches(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
-    if let (Some(a), Some(e)) = (actual.as_str(), expected.as_str()) {
-        let an = normalize_hex_str(a).ok();
-        let en = normalize_hex_str(e).ok();
-        if let (Some(an), Some(en)) = (an, en) {
-            return an == en;
-        }
-    }
-    actual == expected
-}
-
-fn context_read_string(ctx: &dyn DynContext, key: &str) -> Result<String, StateError> {
-    op_ctx::read_string_required(
-        ctx,
-        &ContextKey(key.to_string()),
-        "ctx_missing_key",
-        "required context key was missing",
-        "ctx_type_mismatch",
-        "context value was not a string",
-    )
-}
-
-fn context_read_json(ctx: &dyn DynContext, key: &str) -> Result<serde_json::Value, StateError> {
-    op_ctx::read_json_required(
-        ctx,
-        &ContextKey(key.to_string()),
-        "ctx_missing_key",
-        "required context key was missing",
-    )
-}
-
-fn resolve_artifact_config(
-    ctx: &dyn DynContext,
-    configured: &Option<ContractArtifactConfig>,
-    artifact_port: &str,
-) -> Result<ContractArtifactConfig, StateError> {
-    if let Some(artifact) = configured {
-        return Ok(artifact.clone());
-    }
-
-    let v = context_read_json(ctx, artifact_port)?;
-    serde_json::from_value::<ContractArtifactConfig>(v).map_err(|_| {
-        op_errors::state_unknown("ctx_type_mismatch", "context artifact value was invalid")
-    })
-}
-
-fn context_write_json(
-    ctx: &mut dyn DynContext,
-    key: &str,
-    value: serde_json::Value,
-) -> Result<(), StateError> {
-    op_ctx::write_json(ctx, ContextKey(key.to_string()), value)
-}
-
-async fn send_transaction(
-    client: &mut EvmIoClient<'_>,
-    mut tx_obj: serde_json::Value,
-) -> Result<String, StateError> {
-    if tx_obj.get("gas").is_none() {
-        let gas = estimate_gas_hex(client, &tx_obj).await?;
-        tx_obj["gas"] = serde_json::json!(gas);
-    }
-
-    if tx_obj.get("gasPrice").is_none() && tx_obj.get("maxFeePerGas").is_none() {
-        let gas_price = gas_price_hex(client).await?;
-        tx_obj["gasPrice"] = serde_json::json!(gas_price);
-    }
-
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_sendTransaction",
-            serde_json::json!([tx_obj]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let Some(tx_hash) = res.response.as_str() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendTransaction returned non-string tx hash",
-        ));
-    };
-
-    normalize_hex_str(tx_hash).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendTransaction returned invalid hex tx hash",
-        )
-    })
-}
-
-async fn send_raw_transaction(
-    client: &mut EvmIoClient<'_>,
-    raw_tx_hex: &str,
-) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_sendRawTransaction",
-            serde_json::json!([raw_tx_hex]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let Some(tx_hash) = res.response.as_str() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendRawTransaction returned non-string tx hash",
-        ));
-    };
-
-    normalize_hex_str(tx_hash).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendRawTransaction returned invalid hex tx hash",
-        )
-    })
-}
-
-async fn send_signed_create_transaction(
-    client: &mut EvmIoClient<'_>,
-    signing_key_env: &str,
-    from: &str,
-    constructor_payload: &[u8],
-    value_hex: Option<&str>,
-) -> Result<String, StateError> {
-    let configured_from = shared_dcv::normalize_address(from)
-        .map_err(|_| op_errors::state_unknown("invalid_op_config", "invalid from address"))?;
-
-    let tx_obj = {
-        let mut tx = serde_json::json!({
-            "from": configured_from,
-            "data": bytes_to_hex_prefixed(constructor_payload),
-        });
-        if let Some(v) = value_hex {
-            tx["value"] = serde_json::json!(v);
-        }
-        tx
-    };
-
-    let nonce_hex = transaction_count_hex(client, &configured_from).await?;
-    let gas_hex = estimate_gas_hex(client, &tx_obj).await?;
-    let gas_price_hex = gas_price_hex(client).await?;
-    let chain_id = client
-        .chain_id_u64()
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let raw_tx_hex = local_sign_legacy_create_raw_tx(
-        client,
-        signing_key_env,
-        &configured_from,
-        chain_id,
-        &nonce_hex,
-        &gas_price_hex,
-        &gas_hex,
-        value_hex.unwrap_or("0x0"),
-        constructor_payload,
-    )
-    .await?;
-
-    send_raw_transaction(client, &raw_tx_hex).await
-}
-
-async fn local_sign_legacy_create_raw_tx(
-    client: &mut EvmIoClient<'_>,
-    signing_key_env: &str,
-    from: &str,
-    chain_id: u64,
-    nonce_hex: &str,
-    gas_price_hex: &str,
-    gas_limit_hex: &str,
-    value_hex: &str,
-    constructor_payload: &[u8],
-) -> Result<String, StateError> {
-    let state_id = client.state_id().clone();
-    let request = serde_json::json!({
-        "env_name_hex": hex::encode(signing_key_env.as_bytes()),
-        "from": from,
-        "chain_id": chain_id,
-        "nonce_hex": nonce_hex,
-        "gas_price_hex": gas_price_hex,
-        "gas_limit_hex": gas_limit_hex,
-        "value_hex": value_hex,
-        "data_hex": bytes_to_hex_prefixed(constructor_payload),
-    });
-    let fact_key = local_fact_key(&state_id, "deploy_sign_legacy_create", &request)?;
-    let res = client
-        .io_mut()
-        .call(IoCall {
-            namespace: "local.evm.sign_legacy_create".to_string(),
-            request,
-            fact_key: Some(fact_key),
-        })
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let Some(raw_tx_hex) = res.response.get("raw_tx_hex").and_then(|v| v.as_str()) else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "local signer returned non-string raw transaction",
-        ));
-    };
-
-    normalize_hex_str(raw_tx_hex).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "local signer returned invalid raw transaction hex",
-        )
-    })
-}
-
-fn local_fact_key(
-    state_id: &StateId,
-    purpose: &str,
-    request: &serde_json::Value,
-) -> Result<FactKey, StateError> {
-    let req_id = artifact_id_for_json(request).map_err(|err| match err {
-        CanonicalJsonError::FloatNotAllowed => op_errors::state_unknown(
-            "local_request_not_canonical",
-            "local io request was not canonical-json-hashable (floats are forbidden)",
-        ),
-        CanonicalJsonError::SecretsNotAllowed => {
-            op_errors::state_unknown("secrets_detected", "local io request contained secrets")
-        }
-    })?;
-
-    Ok(FactKey(format!(
-        "mfm:local|state:{}|purpose:{purpose}|req:{}",
-        state_id.0, req_id.0
-    )))
-}
-
-async fn transaction_count_hex(
-    client: &mut EvmIoClient<'_>,
-    from: &str,
-) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_getTransactionCount",
-            serde_json::json!([from, "pending"]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let Some(nonce) = res.response.as_str() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_getTransactionCount returned non-string nonce",
-        ));
-    };
-
-    normalize_hex_str(nonce).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_getTransactionCount returned invalid hex nonce",
-        )
-    })
 }
 
 #[cfg(test)]
@@ -1068,154 +648,6 @@ fn signer_address_hex(signing_key: &SigningKey) -> String {
     let public_key = signing_key.verifying_key().to_encoded_point(false);
     let hash = keccak256(&public_key.as_bytes()[1..]);
     bytes_to_hex_prefixed(&hash.as_slice()[12..])
-}
-
-async fn estimate_gas_hex(
-    client: &mut EvmIoClient<'_>,
-    tx_obj: &serde_json::Value,
-) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_estimateGas",
-            serde_json::json!([tx_obj]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let Some(gas) = res.response.as_str() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_estimateGas returned non-string gas value",
-        ));
-    };
-
-    normalize_hex_str(gas).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_estimateGas returned invalid hex gas value",
-        )
-    })
-}
-
-async fn gas_price_hex(client: &mut EvmIoClient<'_>) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new("eth_gasPrice", serde_json::json!([])))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let Some(gas_price) = res.response.as_str() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_gasPrice returned non-string gas price",
-        ));
-    };
-
-    normalize_hex_str(gas_price).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_gasPrice returned invalid hex gas price",
-        )
-    })
-}
-
-async fn wait_for_receipt(
-    state_id: &StateId,
-    io: &mut dyn IoProvider,
-    tx_hash: &str,
-    poll_interval_ms: u64,
-    max_receipt_polls: u64,
-) -> Result<serde_json::Value, StateError> {
-    for poll_index in 0..max_receipt_polls {
-        let request = serde_json::to_value(JsonRpcCall::new(
-            "eth_getTransactionReceipt",
-            serde_json::json!([tx_hash]),
-        ))
-        .expect("JsonRpcCall must serialize");
-        let res = io
-            .call(IoCall {
-                namespace: "evm".to_string(),
-                request,
-                fact_key: Some(FactKey(format!(
-                    "mfm:evm|state:{}|receipt_poll:{}|tx:{}",
-                    state_id.0, poll_index, tx_hash
-                ))),
-            })
-            .await
-            .map_err(op_errors::state_from_io)?;
-
-        if !res.response.is_null() {
-            return Ok(res.response);
-        }
-
-        tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
-    }
-
-    Err(op_errors::state_unknown(
-        "evm_receipt_timeout",
-        "timed out waiting for transaction receipt",
-    ))
-}
-
-fn ensure_receipt_success(receipt: &serde_json::Value) -> Result<(), StateError> {
-    let Some(obj) = receipt.as_object() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "transaction receipt was not a JSON object",
-        ));
-    };
-
-    if let Some(status) = obj.get("status").and_then(|v| v.as_str()) {
-        let s = normalize_hex_str(status).map_err(|_| {
-            op_errors::state_unknown("evm_response_invalid", "receipt status was not valid hex")
-        })?;
-        if s != "0x01" && s != "0x1" {
-            return Err(op_errors::state_unknown(
-                "evm_receipt_failed_status",
-                "transaction receipt reported failed status",
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn receipt_contract_address(receipt: &serde_json::Value) -> Result<String, StateError> {
-    let Some(obj) = receipt.as_object() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "transaction receipt was not a JSON object",
-        ));
-    };
-    let Some(addr) = obj.get("contractAddress").and_then(|v| v.as_str()) else {
-        return Err(op_errors::state_unknown(
-            "evm_receipt_missing_contract_address",
-            "receipt did not include contractAddress",
-        ));
-    };
-
-    shared_dcv::normalize_address(addr).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "receipt contractAddress was invalid",
-        )
-    })
-}
-
-fn resolve_contract_address(
-    ctx: &dyn DynContext,
-    configured: &Option<String>,
-) -> Result<String, StateError> {
-    match configured {
-        Some(a) => shared_dcv::normalize_address(a).map_err(|_| {
-            op_errors::state_unknown("invalid_op_config", "contract_address was invalid")
-        }),
-        None => {
-            let a = context_read_string(ctx, KEY_CONTRACT_ADDRESS)?;
-            shared_dcv::normalize_address(&a).map_err(|_| {
-                op_errors::state_unknown("ctx_type_mismatch", "context contract address invalid")
-            })
-        }
-    }
 }
 
 #[derive(Clone, Default)]
@@ -1272,7 +704,7 @@ impl Operation for EvmContractFromNixOp {
         }
 
         let state_id = StateId(format!("{}.adapt", op_path.0));
-        let state = Arc::new(ContractFromNixState {
+        let state = Arc::new(NixArtifactToEvmContractState {
             result_pointer: cfg.result_pointer,
         });
 
@@ -1282,60 +714,6 @@ impl Operation for EvmContractFromNixOp {
                 state,
             }],
             edges: Vec::new(),
-        })
-    }
-}
-
-struct ContractFromNixState {
-    result_pointer: String,
-}
-
-#[async_trait]
-impl State for ContractFromNixState {
-    fn meta(&self) -> StateMeta {
-        meta::config()
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        _io: &mut dyn IoProvider,
-        _rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let result = context_read_json(ctx, KEY_NIX_RESULT)?;
-
-        let artifact_value = if self.result_pointer.is_empty() {
-            result
-        } else {
-            result
-                .pointer(&self.result_pointer)
-                .cloned()
-                .ok_or_else(|| {
-                    op_errors::state_unknown(
-                        "nix_result_pointer_missing",
-                        "nix result did not contain the configured pointer",
-                    )
-                })?
-        };
-
-        let artifact = serde_json::from_value::<ContractArtifactConfig>(artifact_value.clone())
-            .map_err(|_| {
-                op_errors::state_unknown(
-                    "invalid_contract_artifact",
-                    "nix result artifact was invalid",
-                )
-            })?;
-        parse_artifact(&artifact).map_err(|_| {
-            op_errors::state_unknown(
-                "invalid_contract_artifact",
-                "nix result artifact was invalid",
-            )
-        })?;
-
-        context_write_json(ctx, KEY_CONTRACT_ARTIFACT, artifact_value)?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
         })
     }
 }
@@ -1416,10 +794,13 @@ impl Operation for EvmDeployOp {
             .map_err(|_| op_errors::sdk_parse_error("invalid_op_config", "invalid value_wei"))?;
 
         let state_id = StateId(format!("{}.deploy", op_path.0));
-        let state = Arc::new(DeployState {
+        let state = Arc::new(SharedDeployState {
             state_id: state_id.clone(),
-            cfg: DeployRuntimeConfig {
-                artifact: cfg.artifact,
+            cfg: SharedDeployStateConfig {
+                artifact: cfg.artifact.map(|a| shared_dcv::ContractArtifactConfig {
+                    abi: a.abi,
+                    bytecode: a.bytecode,
+                }),
                 artifact_port: cfg.artifact_port,
                 from,
                 constructor_args: cfg.constructor_args,
@@ -1436,86 +817,6 @@ impl Operation for EvmDeployOp {
                 state,
             }],
             edges: Vec::new(),
-        })
-    }
-}
-
-struct DeployState {
-    state_id: StateId,
-    cfg: DeployRuntimeConfig,
-}
-
-#[async_trait]
-impl State for DeployState {
-    fn meta(&self) -> StateMeta {
-        meta::apply_side_effect(op_idempotency::state_purpose(
-            "evm_deploy",
-            &self.state_id,
-            "apply_side_effect",
-        ))
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        _rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let artifact = resolve_artifact_config(ctx, &self.cfg.artifact, &self.cfg.artifact_port)?;
-        let (abi, bytecode) = parse_artifact(&artifact).map_err(|_| {
-            op_errors::state_unknown("invalid_contract_artifact", "contract artifact was invalid")
-        })?;
-        let constructor_payload = constructor_data(&abi, &bytecode, &self.cfg.constructor_args)
-            .map_err(|_| {
-                op_errors::state_unknown("invalid_op_config", "constructor args did not match ABI")
-            })?;
-
-        let mut client = EvmIoClient::new(self.state_id.clone(), io);
-
-        let mut tx = serde_json::json!({
-            "from": self.cfg.from,
-            "data": bytes_to_hex_prefixed(&constructor_payload),
-        });
-        if let Some(v) = &self.cfg.value_hex {
-            tx["value"] = serde_json::json!(v);
-        }
-
-        let tx_hash = if let Some(env_name) = self.cfg.signing_key_env.as_deref() {
-            send_signed_create_transaction(
-                &mut client,
-                env_name,
-                &self.cfg.from,
-                &constructor_payload,
-                self.cfg.value_hex.as_deref(),
-            )
-            .await?
-        } else {
-            send_transaction(&mut client, tx).await?
-        };
-        drop(client);
-
-        let receipt = wait_for_receipt(
-            &self.state_id,
-            io,
-            &tx_hash,
-            self.cfg.poll_interval_ms,
-            self.cfg.max_receipt_polls,
-        )
-        .await?;
-        ensure_receipt_success(&receipt)?;
-
-        let contract_address = receipt_contract_address(&receipt)?;
-
-        context_write_json(
-            ctx,
-            KEY_CONTRACT_ADDRESS,
-            serde_json::json!(contract_address),
-        )?;
-        context_write_json(ctx, KEY_DEPLOY_TX_HASH, serde_json::json!(tx_hash))?;
-        context_write_json(ctx, KEY_DEPLOY_RECEIPT, receipt)?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
         })
     }
 }
@@ -1628,14 +929,24 @@ impl Operation for EvmConfigureOp {
         }
 
         let state_id = StateId(format!("{}.configure", op_path.0));
-        let state = Arc::new(ConfigureState {
+        let state = Arc::new(SharedConfigureState {
             state_id: state_id.clone(),
-            cfg: ConfigureRuntimeConfig {
-                artifact: cfg.artifact,
+            cfg: SharedConfigureStateConfig {
+                artifact: cfg.artifact.map(|a| shared_dcv::ContractArtifactConfig {
+                    abi: a.abi,
+                    bytecode: a.bytecode,
+                }),
                 artifact_port: cfg.artifact_port,
                 from,
                 contract_address,
-                calls,
+                calls: calls
+                    .into_iter()
+                    .map(|c| SharedConfigureRuntimeCall {
+                        function: c.function,
+                        args: c.args,
+                        value_hex: c.value_hex,
+                    })
+                    .collect(),
                 poll_interval_ms: cfg.poll_interval_ms,
                 max_receipt_polls: cfg.max_receipt_polls,
             },
@@ -1647,91 +958,6 @@ impl Operation for EvmConfigureOp {
                 state,
             }],
             edges: Vec::new(),
-        })
-    }
-}
-
-struct ConfigureState {
-    state_id: StateId,
-    cfg: ConfigureRuntimeConfig,
-}
-
-#[async_trait]
-impl State for ConfigureState {
-    fn meta(&self) -> StateMeta {
-        meta::apply_side_effect(op_idempotency::state_purpose(
-            "evm_configure",
-            &self.state_id,
-            "apply_side_effect",
-        ))
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        _rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let artifact = resolve_artifact_config(ctx, &self.cfg.artifact, &self.cfg.artifact_port)?;
-        let (abi, _bytecode) = parse_artifact(&artifact).map_err(|_| {
-            op_errors::state_unknown("invalid_contract_artifact", "contract artifact was invalid")
-        })?;
-
-        let to = resolve_contract_address(ctx, &self.cfg.contract_address)?;
-
-        let mut tx_hashes: Vec<serde_json::Value> = Vec::new();
-        let mut receipts: Vec<serde_json::Value> = Vec::new();
-
-        for call in &self.cfg.calls {
-            let (calldata, _outputs) = resolve_function_call(&abi, &call.function, &call.args)
-                .map_err(|_| {
-                    op_errors::state_unknown(
-                        "invalid_op_config",
-                        "configure call did not match ABI",
-                    )
-                })?;
-            let mut tx = serde_json::json!({
-                "from": self.cfg.from,
-                "to": to,
-                "data": bytes_to_hex_prefixed(&calldata),
-            });
-            if let Some(v) = &call.value_hex {
-                tx["value"] = serde_json::json!(v);
-            }
-
-            let mut client = EvmIoClient::new(self.state_id.clone(), io);
-            let tx_hash = send_transaction(&mut client, tx).await?;
-            drop(client);
-            let receipt = wait_for_receipt(
-                &self.state_id,
-                io,
-                &tx_hash,
-                self.cfg.poll_interval_ms,
-                self.cfg.max_receipt_polls,
-            )
-            .await?;
-            ensure_receipt_success(&receipt)?;
-
-            tx_hashes.push(serde_json::json!({
-                "function": call.function,
-                "tx_hash": tx_hash,
-            }));
-            receipts.push(receipt);
-        }
-
-        context_write_json(
-            ctx,
-            KEY_CONFIGURE_TX_HASHES,
-            serde_json::Value::Array(tx_hashes),
-        )?;
-        context_write_json(
-            ctx,
-            KEY_CONFIGURE_RECEIPTS,
-            serde_json::Value::Array(receipts),
-        )?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
         })
     }
 }
@@ -1814,26 +1040,52 @@ impl Operation for EvmValidateOp {
         }
 
         if let Some(abi) = &parsed_abi {
-            let _ = prepare_validate_assertions(abi, &cfg.read_assertions, &cfg.event_assertions)
+            validate_assertions_match_abi(abi, &cfg.read_assertions, &cfg.event_assertions)
                 .map_err(|err| {
-                op_errors::sdk_parse_error(
-                    "invalid_op_config",
-                    op_rpc::validation_assertion_error_message(&err),
-                )
-            })?;
+                    op_errors::sdk_parse_error(
+                        "invalid_op_config",
+                        op_rpc::validation_assertion_error_message(&err),
+                    )
+                })?;
         }
 
         let state_id = StateId(format!("{}.validate", op_path.0));
-        let state = Arc::new(ValidateState {
+        let state = Arc::new(SharedValidateState {
             state_id: state_id.clone(),
-            cfg: ValidateRuntimeConfig {
-                artifact: cfg.artifact,
+            cfg: SharedValidateStateConfig {
+                artifact: cfg.artifact.map(|a| shared_dcv::ContractArtifactConfig {
+                    abi: a.abi,
+                    bytecode: a.bytecode,
+                }),
                 artifact_port: cfg.artifact_port,
                 contract_address,
                 expected_chain_id: cfg.expected_chain_id,
                 require_client_substring: cfg.require_client_substring,
-                read_assertions: cfg.read_assertions,
-                event_assertions: cfg.event_assertions,
+                read_assertions: cfg
+                    .read_assertions
+                    .into_iter()
+                    .map(|a| shared_dcv::ReadAssertionConfig {
+                        function: a.function,
+                        args: a.args,
+                        expected: a.expected,
+                    })
+                    .collect(),
+                event_assertions: cfg
+                    .event_assertions
+                    .into_iter()
+                    .map(|a| shared_dcv::EventAssertionConfig {
+                        event: a.event,
+                        min_count: a.min_count,
+                        from_block: a.from_block.map(|b| match b {
+                            BlockTag::Number(n) => shared_dcv::BlockTag::Number(n),
+                            BlockTag::Tag(s) => shared_dcv::BlockTag::Tag(s),
+                        }),
+                        to_block: a.to_block.map(|b| match b {
+                            BlockTag::Number(n) => shared_dcv::BlockTag::Number(n),
+                            BlockTag::Tag(s) => shared_dcv::BlockTag::Tag(s),
+                        }),
+                    })
+                    .collect(),
             },
         });
 
@@ -1843,142 +1095,6 @@ impl Operation for EvmValidateOp {
                 state,
             }],
             edges: Vec::new(),
-        })
-    }
-}
-
-struct ValidateState {
-    state_id: StateId,
-    cfg: ValidateRuntimeConfig,
-}
-
-#[async_trait]
-impl State for ValidateState {
-    fn meta(&self) -> StateMeta {
-        meta::validate()
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        _rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let artifact = resolve_artifact_config(ctx, &self.cfg.artifact, &self.cfg.artifact_port)?;
-        let (abi, _bytecode) = parse_artifact(&artifact).map_err(|_| {
-            op_errors::state_unknown("invalid_contract_artifact", "contract artifact was invalid")
-        })?;
-        let (read_assertions, event_assertions) = prepare_validate_assertions(
-            &abi,
-            &self.cfg.read_assertions,
-            &self.cfg.event_assertions,
-        )
-        .map_err(|err| {
-            op_errors::state_unknown(
-                "invalid_op_config",
-                op_rpc::validation_assertion_error_message(&err),
-            )
-        })?;
-
-        let mut client = EvmIoClient::new(self.state_id.clone(), io);
-
-        let client_version_res = client
-            .call(JsonRpcCall::new(
-                "web3_clientVersion",
-                serde_json::json!([]),
-            ))
-            .await
-            .map_err(op_errors::state_from_io)?;
-        let client_version = op_rpc::expect_string(
-            &client_version_res.response,
-            "evm_response_invalid",
-            "web3_clientVersion was not a string",
-        )?;
-        op_rpc::assert_condition(
-            client_version
-                .to_ascii_lowercase()
-                .contains(&self.cfg.require_client_substring.to_ascii_lowercase()),
-            "reth_client_mismatch",
-            "rpc clientVersion did not match required reth substring",
-        )?;
-
-        let chain_id = client
-            .chain_id_u64()
-            .await
-            .map_err(op_errors::state_from_io)?;
-        op_rpc::assert_condition(
-            chain_id == self.cfg.expected_chain_id,
-            "chain_id_mismatch",
-            "rpc chain id did not match expected_chain_id",
-        )?;
-
-        let to = resolve_contract_address(ctx, &self.cfg.contract_address)?;
-
-        for ra in &read_assertions {
-            let res = client
-                .call(JsonRpcCall::new(
-                    "eth_call",
-                    serde_json::json!([
-                        {"to": to, "data": ra.data_hex},
-                        "latest"
-                    ]),
-                ))
-                .await
-                .map_err(op_errors::state_from_io)?;
-
-            let raw = op_rpc::expect_string(
-                &res.response,
-                "evm_response_invalid",
-                "eth_call returned non-string",
-            )?;
-
-            let actual = decode_single_output_to_json(&ra.outputs, &raw).map_err(|_| {
-                op_errors::state_unknown("evm_response_invalid", "failed to decode eth_call output")
-            })?;
-
-            op_rpc::assert_condition(
-                expected_matches(&actual, &ra.expected),
-                "validation_failed",
-                "read assertion failed during evm_validate",
-            )?;
-        }
-
-        for ea in &event_assertions {
-            let logs_res = client
-                .call(JsonRpcCall::new(
-                    "eth_getLogs",
-                    serde_json::json!([
-                        {
-                            "address": to,
-                            "fromBlock": ea.from_block,
-                            "toBlock": ea.to_block,
-                            "topics": [ea.topic0_hex],
-                        }
-                    ]),
-                ))
-                .await
-                .map_err(op_errors::state_from_io)?;
-
-            let logs = op_rpc::expect_array(
-                &logs_res.response,
-                "evm_response_invalid",
-                "eth_getLogs returned non-array",
-            )?;
-            op_rpc::assert_condition(
-                u64::try_from(logs.len()).unwrap_or(0) >= ea.min_count,
-                "validation_failed",
-                "event assertion failed during evm_validate",
-            )?;
-
-            let _ = &ea.event;
-        }
-
-        context_write_json(ctx, KEY_CHAIN_ID, serde_json::json!(chain_id))?;
-        context_write_json(ctx, KEY_CLIENT_VERSION, serde_json::json!(client_version))?;
-        context_write_json(ctx, KEY_VALIDATED, serde_json::json!(true))?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
         })
     }
 }
