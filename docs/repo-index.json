@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "generated_by": "nixfied-discovery-index",
+  "docs": [
+    {
+      "path": "docs/repo-index.json",
+      "purpose": "Canonical deterministic repository index.",
+      "priority": 0,
+      "exists": true
+    },
+    {
+      "path": "docs/repo-map.md",
+      "purpose": "LLM-facing repository map generated from docs/repo-index.json.",
+      "priority": 0,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "purpose": "Primary repository overview and command entrypoints.",
+      "priority": 1,
+      "exists": true
+    },
+    {
+      "path": "AGENTS.md",
+      "purpose": "Agent instructions and collaboration constraints.",
+      "priority": 2,
+      "exists": true
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "purpose": "Architecture and system design details.",
+      "priority": 4,
+      "exists": true
+    },
+    {
+      "path": "REDESIGN.md",
+      "purpose": "Redesign notes and migration context.",
+      "priority": 5,
+      "exists": true
+    }
+  ],
+  "components": [
+    {
+      "name": "root",
+      "path": "Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "cli",
+      "path": "bin/cli/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "rest-api",
+      "path": "bin/rest-api/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "app",
+      "path": "crates/app/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "evm-jsonrpc-http",
+      "path": "crates/collectors/evm-jsonrpc-http/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "evm",
+      "path": "crates/collectors/evm/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "core",
+      "path": "crates/core/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "machine-derive",
+      "path": "crates/machine-derive/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "machine-test-support",
+      "path": "crates/machine-test-support/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "machine",
+      "path": "crates/machine/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "common",
+      "path": "crates/ops/common/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "evm-read-op",
+      "path": "crates/ops/evm-read-op/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "evm-write-op",
+      "path": "crates/ops/evm-write-op/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "keystore-op",
+      "path": "crates/ops/keystore-op/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "nix-app-op",
+      "path": "crates/ops/nix-app-op/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "portfolio-tracker-op",
+      "path": "crates/ops/portfolio-tracker-op/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "proof-op",
+      "path": "crates/ops/proof-op/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "sdk",
+      "path": "crates/sdk/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "artifact-store-fs",
+      "path": "crates/storages/artifact-store-fs/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "artifact-store-s3",
+      "path": "crates/storages/artifact-store-s3/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "artifact-store-secret",
+      "path": "crates/storages/artifact-store-secret/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "event-store-mem",
+      "path": "crates/storages/event-store-mem/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "event-store-postgres",
+      "path": "crates/storages/event-store-postgres/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "indexer",
+      "path": "crates/storages/indexer/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "root",
+      "path": "flake.nix",
+      "kind": "nix-flake"
+    },
+    {
+      "name": "integration",
+      "path": "tests/integration/Cargo.toml",
+      "kind": "rust-cargo"
+    }
+  ],
+  "risk_areas": [
+    {
+      "path": "crates/core/src/keystore",
+      "risk": "Security-sensitive key handling, tamper detection, and persisted keystore compatibility.",
+      "required_checks": [
+        "nix run .#check",
+        "nix run .#test",
+        "nix run .#ci -- --audit --summary"
+      ]
+    },
+    {
+      "path": "crates/machine",
+      "risk": "Recovery, replay, and deterministic state-machine runtime semantics.",
+      "required_checks": [
+        "nix run .#check",
+        "nix run .#test",
+        "nix run .#ci -- --parity --summary"
+      ]
+    },
+    {
+      "path": "nixfied/.framework",
+      "risk": "Framework internals; avoid direct edits in installed repos.",
+      "required_checks": [
+        "nix run .#help"
+      ]
+    },
+    {
+      "path": "nixfied/project/ci.nix",
+      "risk": "CI pipeline behavior and release gates.",
+      "required_checks": [
+        "nix run .#ci -- --summary"
+      ]
+    },
+    {
+      "path": "nixfied/project/conf.nix",
+      "risk": "Project identity, environment names, and port contract.",
+      "required_checks": [
+        "nix run .#check",
+        "nix run .#ci -- --summary"
+      ]
+    },
+    {
+      "path": "nixfied/project/quality.nix",
+      "risk": "Quality checks and discovery drift enforcement.",
+      "required_checks": [
+        "nix run .#check"
+      ]
+    }
+  ],
+  "command_surfaces": [
+    {
+      "name": "ci",
+      "owner_file": "nixfied/project/ci.nix"
+    }
+  ]
+}

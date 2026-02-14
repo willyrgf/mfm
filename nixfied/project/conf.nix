@@ -175,6 +175,67 @@ rec {
     registryRoot = "/tmp/nixfied-runtime/${project.id}";
   };
 
+  # Discovery index policy used by `nix run .#check`.
+  discovery = {
+    strict = true;
+    refreshArg = "--refresh-discovery";
+    requiredDocs = [
+      "README.md"
+      "AGENTS.md"
+      "ARCHITECTURE.md"
+      "REDESIGN.md"
+    ];
+    riskAreas = [
+      {
+        path = "nixfied/project/conf.nix";
+        risk = "Project identity, environment names, and port contract.";
+        required_checks = [
+          "nix run .#check"
+          "nix run .#ci -- --summary"
+        ];
+      }
+      {
+        path = "nixfied/project/ci.nix";
+        risk = "CI pipeline behavior and release gates.";
+        required_checks = [
+          "nix run .#ci -- --summary"
+        ];
+      }
+      {
+        path = "nixfied/project/quality.nix";
+        risk = "Quality checks and discovery drift enforcement.";
+        required_checks = [
+          "nix run .#check"
+        ];
+      }
+      {
+        path = "nixfied/.framework";
+        risk = "Framework internals; avoid direct edits in installed repos.";
+        required_checks = [
+          "nix run .#help"
+        ];
+      }
+      {
+        path = "crates/core/src/keystore";
+        risk = "Security-sensitive key handling, tamper detection, and persisted keystore compatibility.";
+        required_checks = [
+          "nix run .#check"
+          "nix run .#test"
+          "nix run .#ci -- --audit --summary"
+        ];
+      }
+      {
+        path = "crates/machine";
+        risk = "Recovery, replay, and deterministic state-machine runtime semantics.";
+        required_checks = [
+          "nix run .#check"
+          "nix run .#test"
+          "nix run .#ci -- --parity --summary"
+        ];
+      }
+    ];
+  };
+
   tooling = rec {
     runtimePackages = [
       pkgs.coreutils
