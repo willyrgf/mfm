@@ -209,8 +209,9 @@
           exit 1
         fi
 
-        # Start Postgres (required by portfolio snapshot). If already running, don't stop it.
-        if run_hook POSTGRES_STATUS >/dev/null 2>&1; then
+        # Start Postgres (required by portfolio snapshot). Prefer reusing a healthy
+        # instance; if status metadata is stale and health fails, start it.
+        if run_hook POSTGRES_HEALTH >/dev/null 2>&1; then
           run_hook POSTGRES_SETUP_DB >/dev/null 2>&1 || true
         else
           PG_LOGFILE="$(artifact_path "postgres-mfm-portfolio-snapshot.log")"
@@ -218,8 +219,9 @@
         fi
         run_hook POSTGRES_READY
 
-        # Start Helios (mainnet-backed). If already running, don't stop it.
-        if run_hook HELIOS_STATUS >/dev/null 2>&1; then
+        # Start Helios (mainnet-backed). Prefer reusing a healthy instance; if
+        # status metadata is stale and health fails, start it.
+        if run_hook HELIOS_HEALTH >/dev/null 2>&1; then
           true
         else
           HELIOS_LOGFILE="$(artifact_path "helios-mfm-portfolio-snapshot.log")"
