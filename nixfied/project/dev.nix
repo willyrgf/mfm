@@ -360,6 +360,65 @@ in
 
         SNAPSHOT_KEEP_RUNNING="$(snapshot_keep_running_from_policy)"
 
+        wait_helios_rpc_ready() {
+          local timeout_secs="''${HELIOS_READY_TIMEOUT_SECS:-300}"
+          local interval_secs="''${HELIOS_READY_INTERVAL_SECS:-1}"
+          local start_ts
+          local now_ts
+          local attempt
+          local resp
+          local err_msg
+
+          case "$timeout_secs" in
+            *[!0-9]*|"")
+              echo "ERROR: HELIOS_READY_TIMEOUT_SECS must be an integer seconds value (got '$timeout_secs')" >&2
+              return 1
+              ;;
+          esac
+
+          case "$interval_secs" in
+            *[!0-9.]*|""|*.*.*|.*|*.)
+              echo "ERROR: HELIOS_READY_INTERVAL_SECS must be a positive number (got '$interval_secs')" >&2
+              return 1
+              ;;
+          esac
+
+          start_ts=$(date +%s)
+          attempt=0
+
+          while true; do
+            attempt=$((attempt + 1))
+            resp="$(curl -fsS --max-time 2 \
+              -H 'content-type: application/json' \
+              --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+              "http://127.0.0.1:$HELIOSRPC_PORT" 2>/dev/null || true)"
+
+            if [ -n "$resp" ] && echo "$resp" | jq -e '.result | strings' >/dev/null 2>&1; then
+              echo "OK: helios ready rpc_port=$HELIOSRPC_PORT mode=rpc_probe"
+              return 0
+            fi
+
+            if [ $((attempt % 10)) -eq 0 ]; then
+              err_msg=""
+              if [ -n "$resp" ]; then
+                err_msg="$(echo "$resp" | jq -r '.error.message // empty' 2>/dev/null || true)"
+              fi
+              if [ -n "$err_msg" ]; then
+                echo "INFO: helios not ready yet: $err_msg" >&2
+              fi
+            fi
+
+            now_ts=$(date +%s)
+            if [ $((now_ts - start_ts)) -ge "$timeout_secs" ]; then
+              echo "ERROR: helios not ready after $timeout_secs s (eth_blockNumber still failing) rpc_port=$HELIOSRPC_PORT" >&2
+              echo "HINT: set HELIOS_CHECKPOINT and HELIOS_CONSENSUS_RPC_URL explicitly for mainnet." >&2
+              return 1
+            fi
+
+            sleep "$interval_secs"
+          done
+        }
+
         # Start Postgres (required by portfolio snapshot). Prefer reusing a healthy
         # instance; if status metadata is stale and health fails, start it.
         if run_hook POSTGRES_HEALTH >/dev/null 2>&1; then
@@ -383,7 +442,16 @@ in
         export MFM_EVM_RPC_URL="http://127.0.0.1:$HELIOSRPC_PORT"
 
         echo "INFO: waiting for Helios readiness (eth_blockNumber)..." >&2
-        run_hook HELIOS_READY
+        HELIOS_STATUS_LINE="$(run_hook HELIOS_STATUS 2>/dev/null || true)"
+        HELIOS_SCOPE="$(printf '%s\n' "$HELIOS_STATUS_LINE" | tr ' ' '\n' | awk -F= '$1=="scope" { print $2; exit }')"
+        HELIOS_RUNNING="$(printf '%s\n' "$HELIOS_STATUS_LINE" | tr ' ' '\n' | awk -F= '$1=="running" { print $2; exit }')"
+
+        if [ "$HELIOS_RUNNING" = "true" ] && [ "$HELIOS_SCOPE" = "global" ]; then
+          echo "INFO: helios reuse detected scope=global; using rpc-only readiness probe" >&2
+          wait_helios_rpc_ready
+        else
+          run_hook HELIOS_READY
+        fi
 
         OUT_RAW_FILE="$(artifact_path "mfm-portfolio-snapshot.raw.out")"
         OUT_FILE="$(artifact_path "mfm-portfolio-snapshot.json")"
