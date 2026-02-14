@@ -463,7 +463,7 @@ fn encode_eip1559_unsigned_payload(tx: &Eip1559TxToSign) -> Vec<u8> {
 }
 
 fn encode_eip1559_signed_payload(tx: &Eip1559TxToSign, sig: PrimitiveSignature) -> Vec<u8> {
-    let parity = if sig.v() { 1u8 } else { 0u8 };
+    let y_parity = sig.v();
     let r = trim_leading_zero_bytes(&sig.r().to_be_bytes::<32>());
     let s = trim_leading_zero_bytes(&sig.s().to_be_bytes::<32>());
 
@@ -477,7 +477,7 @@ fn encode_eip1559_signed_payload(tx: &Eip1559TxToSign, sig: PrimitiveSignature) 
         rlp_encode_bytes(&u128_to_min_be(tx.value_wei)),
         rlp_encode_bytes(&tx.data),
         rlp_encode_list(&[]),
-        rlp_encode_bytes(&[parity]),
+        rlp_encode_bytes(&u64_to_min_be(u64::from(y_parity))),
         rlp_encode_bytes(&r),
         rlp_encode_bytes(&s),
     ])
@@ -603,5 +603,31 @@ mod tests {
     fn parse_rpc_url_requires_host() {
         let err = parse_rpc_url("http:///").expect_err("hostless url should fail");
         assert_eq!(err.code, "InvalidRpcUrl");
+    }
+
+    #[test]
+    fn encode_eip1559_signed_payload_uses_canonical_zero_y_parity() {
+        let tx = Eip1559TxToSign {
+            to: Address::from([0u8; 20]),
+            value_wei: 1,
+            chain_id: 1,
+            nonce: 0,
+            max_fee_per_gas: 2,
+            max_priority_fee_per_gas: 1,
+            gas_limit: 21_000,
+            data: Vec::new(),
+        };
+        let sig = PrimitiveSignature::from_scalars_and_parity(
+            B256::from([1u8; 32]),
+            B256::from([2u8; 32]),
+            false,
+        );
+
+        let encoded = encode_eip1559_signed_payload(&tx, sig);
+        let y_parity_idx = encoded.len() - 67;
+
+        // Canonical integer RLP uses empty bytes for zero (0x80), not 0x00.
+        assert_eq!(encoded[y_parity_idx], 0x80);
+        assert_eq!(encoded[y_parity_idx + 1], 0xa0);
     }
 }
