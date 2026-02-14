@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use mfm_machine::context::DynContext;
@@ -411,7 +411,7 @@ fn helper_category(code: &str) -> ErrorCategory {
     }
 }
 
-fn path_to_string(path: &PathBuf) -> String {
+fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 

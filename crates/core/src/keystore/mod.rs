@@ -1382,6 +1382,7 @@ impl Keystore {
         let lock_path = self.mutation_lock_path(parent);
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(lock_path)?;
