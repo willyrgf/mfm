@@ -507,12 +507,51 @@ let
                 fi
       '';
 
+  ciApi = lib.appApi.mkApi {
+    name = "ci";
+    summary = "Run the CI pipeline";
+    details = "Runs the CI pipeline defined in nixfied/project/ci.nix (modes + steps).";
+    usage = [
+      "nix run .#ci"
+      "nix run .#ci -- --summary"
+    ];
+    examples = [ "nix run .#ci -- --summary" ];
+    category = "core";
+    allowUnknownArgs = true;
+    idempotent = false;
+    args = [
+      {
+        name = "--summary";
+        description = "Print compact CI summary output.";
+      }
+      {
+        name = "--bg";
+        description = "Run CI in background mode via the run registry.";
+      }
+      {
+        name = "--mode";
+        description = "Select configured CI mode.";
+      }
+    ];
+    env = [
+      {
+        name = "CI_ARTIFACTS_DIR";
+        description = "Override the output artifact directory.";
+      }
+      {
+        name = "CI_ARTIFACTS_BASE";
+        description = "Override artifacts root; must be absolute path.";
+      }
+    ];
+  };
+
   scriptDrv =
     if enabled then
       if useEphemeral then
         ephemeral.mkEphemeralWrapper {
           name = "ci";
           installDeps = ci.useDeps or true;
+          appContract = ciApi.appContract;
           extraEnv = ''
             export COMMAND_NAME="ci"
             source ${toString lib.loadEnv}
@@ -527,26 +566,11 @@ let
           name = "ci";
           env = ci.env or { };
           useDeps = ci.useDeps or true;
+          appContract = ciApi.appContract;
           script = script;
         }
     else
       null;
-
-  ciApi = {
-    version = 1;
-    summary = "Run the CI pipeline";
-    details = "Runs the CI pipeline defined in nixfied/project/ci.nix (modes + steps).";
-    usage = [
-      "nix run .#ci"
-      "nix run .#ci -- --summary"
-    ];
-    examples = [ "nix run .#ci -- --summary" ];
-    category = "core";
-  };
-  _ = lib.appApi.validateApi {
-    name = "ci";
-    api = ciApi;
-  };
 
   app =
     if enabled then

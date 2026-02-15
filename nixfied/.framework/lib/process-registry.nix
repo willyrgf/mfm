@@ -742,6 +742,312 @@ let
     ' "$EVENTS_FILE"
   '';
 
+  processStop = pkgs.writeShellScript "process-stop" ''
+    ${sharedPrelude}
+
+    RUN_ID=""
+    SCOPE="run"
+    DRY_RUN=false
+    FORCE=false
+    TIMEOUT_SECONDS="5"
+
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --run-id)
+          RUN_ID="$2"
+          shift 2
+          ;;
+        --scope)
+          SCOPE="$2"
+          shift 2
+          ;;
+        --dry-run)
+          DRY_RUN=true
+          shift
+          ;;
+        --force)
+          FORCE=true
+          shift
+          ;;
+        --timeout)
+          TIMEOUT_SECONDS="$2"
+          shift 2
+          ;;
+        *)
+          echo "ERROR: unknown argument: $1" >&2
+          exit 1
+          ;;
+      esac
+    done
+
+    if [ -z "$RUN_ID" ]; then
+      echo "Usage: process-stop --run-id <id> [--scope run|slot-env] [--dry-run] [--force] [--timeout <seconds>]" >&2
+      exit 1
+    fi
+
+    case "$SCOPE" in
+      run|slot-env) ;;
+      *)
+        echo "ERROR: --scope must be one of run|slot-env (got '$SCOPE')" >&2
+        exit 1
+        ;;
+    esac
+
+    case "$TIMEOUT_SECONDS" in
+      *[!0-9]*|"")
+        echo "ERROR: --timeout must be a positive integer (got '$TIMEOUT_SECONDS')" >&2
+        exit 1
+        ;;
+    esac
+
+    if [ ! -s "$EVENTS_FILE" ]; then
+      echo "ERROR: no process events found project_id=$PROJECT_ID" >&2
+      exit 1
+    fi
+
+    PLAN_JSON=$(${pkgs.jq}/bin/jq -sr --arg run_id "$RUN_ID" --arg scope "$SCOPE" '
+      def is_active:
+        .state == "starting"
+        or .state == "running"
+        or .state == "ready"
+        or .state == "degraded"
+        or .state == "waiting"
+        or .state == "busy";
+
+      def service_key:
+        (.service // "") + "|" + ((.slot // "") | tostring) + "|" + (.env // "");
+
+      def run_key:
+        (.run_id // "");
+
+      def latest_by(f):
+        sort_by(f, (.timestamp // ""))
+        | group_by(f)
+        | map(last);
+
+      def target_run:
+        [ .[] | select((.run_id // "") == $run_id) ]
+        | sort_by(.timestamp // "")
+        | last;
+
+      (target_run) as $target
+      | if ($target == null) then
+          { error: "missing_run" }
+        else
+          ($target.slot // "") as $slot
+          | ($target.env // "") as $env
+          | if ($scope == "slot-env" and ($slot == "" or $env == "")) then
+              { error: "missing_slot_env" }
+            else
+              {
+                error: null,
+                target_slot: $slot,
+                target_env: $env,
+                service_rows:
+                  (
+                    [ .[] | select(.service != null and .service != "") ]
+                    | latest_by(service_key)
+                    | map(select(is_active and (.pid != null)))
+                    | map(
+                        select(
+                          if $scope == "run" then
+                            ((.run_id // "") == $run_id)
+                          else
+                            (((.slot // "") | tostring) == $slot and (.env // "") == $env)
+                          end
+                        )
+                      )
+                    | map([
+                        "service",
+                        (.service // ""),
+                        (.run_id // ""),
+                        ((.slot // "") | tostring),
+                        (.env // ""),
+                        (.pid | tostring),
+                        ((.pgid // "") | tostring),
+                        (.command_name // ""),
+                        (.log_path // "")
+                      ] | @tsv)
+                  ),
+                run_rows:
+                  (
+                    [
+                      .[]
+                      | select(.run_id != null and .run_id != "")
+                      | select(.event_type == "run_started" or .event_type == "run_finished")
+                    ]
+                    | latest_by(run_key)
+                    | map(select(is_active and (.pid != null)))
+                    | map(
+                        select(
+                          if $scope == "run" then
+                            ((.run_id // "") == $run_id)
+                          else
+                            (((.slot // "") | tostring) == $slot and (.env // "") == $env)
+                          end
+                        )
+                      )
+                    | map([
+                        "run",
+                        (.run_id // ""),
+                        (.run_id // ""),
+                        ((.slot // "") | tostring),
+                        (.env // ""),
+                        (.pid | tostring),
+                        ((.pgid // "") | tostring),
+                        (.command_name // ""),
+                        ""
+                      ] | @tsv)
+                  )
+              }
+            end
+        end
+    ' "$EVENTS_FILE")
+
+    PLAN_ERROR=$(echo "$PLAN_JSON" | ${pkgs.jq}/bin/jq -r '.error // ""')
+    case "$PLAN_ERROR" in
+      "") ;;
+      missing_run)
+        echo "ERROR: run id not found run_id=$RUN_ID" >&2
+        exit 1
+        ;;
+      missing_slot_env)
+        echo "ERROR: run id missing slot/env metadata run_id=$RUN_ID; cannot use --scope slot-env" >&2
+        exit 1
+        ;;
+      *)
+        echo "ERROR: failed to build stop plan run_id=$RUN_ID error=$PLAN_ERROR" >&2
+        exit 1
+        ;;
+    esac
+
+    TARGET_SLOT=$(echo "$PLAN_JSON" | ${pkgs.jq}/bin/jq -r '.target_slot // ""')
+    TARGET_ENV=$(echo "$PLAN_JSON" | ${pkgs.jq}/bin/jq -r '.target_env // ""')
+    TARGET_ROWS=$(echo "$PLAN_JSON" | ${pkgs.jq}/bin/jq -r '(.service_rows + .run_rows)[]?')
+
+    if [ -z "$TARGET_ROWS" ]; then
+      echo "OK: no active entities matched run_id=$RUN_ID scope=$SCOPE slot=''${TARGET_SLOT:-unknown} env=''${TARGET_ENV:-unknown}"
+      exit 0
+    fi
+
+    SELF_PID="$$"
+    SELF_PGID="$(${pkgs.procps}/bin/ps -o pgid= -p "$SELF_PID" 2>/dev/null | tr -d ' ' || true)"
+
+    STOPPED=0
+    FAILED=0
+    SKIPPED=0
+    SEEN=""
+
+    while IFS=$'\t' read -r KIND IDENTIFIER RUN_REF SLOT ENV PID PGID COMMAND LOG_PATH; do
+      [ -n "$KIND" ] || continue
+
+      KEY="$KIND|$IDENTIFIER|$RUN_REF|$SLOT|$ENV"
+      case "$SEEN" in
+        *"|$KEY|"*)
+          continue
+          ;;
+      esac
+      SEEN="$SEEN|$KEY|"
+
+      if ! is_numeric_pid "$PID"; then
+        SKIPPED=$((SKIPPED + 1))
+        echo "WARN: skipping entity with invalid pid kind=$KIND id=$IDENTIFIER pid=''${PID:-unknown}"
+        continue
+      fi
+
+      if [ "$PID" = "$SELF_PID" ]; then
+        SKIPPED=$((SKIPPED + 1))
+        echo "WARN: refusing to stop current process kind=$KIND id=$IDENTIFIER pid=$PID"
+        continue
+      fi
+
+      TARGET="$PID"
+      TARGET_DESC="pid=$PID"
+      if is_numeric_pid "$PGID" && [ "$PGID" -gt 1 ] && [ "$PGID" != "$SELF_PGID" ]; then
+        TARGET="-$PGID"
+        TARGET_DESC="pgid=$PGID"
+      fi
+
+      if ! kill -0 "$PID" 2>/dev/null; then
+        SKIPPED=$((SKIPPED + 1))
+        echo "INFO: entity already stopped kind=$KIND id=$IDENTIFIER pid=$PID"
+        continue
+      fi
+
+      if [ "$DRY_RUN" = "true" ]; then
+        echo "INFO: dry-run would stop kind=$KIND id=$IDENTIFIER run_id=''${RUN_REF:-unknown} slot=''${SLOT:-unknown} env=''${ENV:-unknown} target=$TARGET_DESC"
+        continue
+      fi
+
+      echo "INFO: stopping kind=$KIND id=$IDENTIFIER run_id=''${RUN_REF:-unknown} slot=''${SLOT:-unknown} env=''${ENV:-unknown} target=$TARGET_DESC"
+      kill -TERM -- "$TARGET" 2>/dev/null || true
+
+      ELAPSED=0
+      while kill -0 "$PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT_SECONDS" ]; do
+        ${pkgs.coreutils}/bin/sleep 1
+        ELAPSED=$((ELAPSED + 1))
+      done
+
+      if kill -0 "$PID" 2>/dev/null; then
+        if [ "$FORCE" = "true" ]; then
+          echo "WARN: escalating to SIGKILL kind=$KIND id=$IDENTIFIER target=$TARGET_DESC"
+          kill -KILL -- "$TARGET" 2>/dev/null || true
+          ELAPSED=0
+          while kill -0 "$PID" 2>/dev/null && [ "$ELAPSED" -lt "2" ]; do
+            ${pkgs.coreutils}/bin/sleep 1
+            ELAPSED=$((ELAPSED + 1))
+          done
+        fi
+      fi
+
+      if kill -0 "$PID" 2>/dev/null; then
+        FAILED=$((FAILED + 1))
+        echo "ERROR: failed to stop entity kind=$KIND id=$IDENTIFIER pid=$PID timeout=$TIMEOUT_SECONDS force=$FORCE" >&2
+        continue
+      fi
+
+      STOPPED=$((STOPPED + 1))
+      echo "OK: stopped kind=$KIND id=$IDENTIFIER pid=$PID"
+
+      if [ "$KIND" = "service" ]; then
+        ${emitEvent} \
+          --event-type service_stopped \
+          --state stopped \
+          --service "$IDENTIFIER" \
+          --run-id "$RUN_REF" \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --pid "$PID" \
+          --command "$COMMAND" \
+          --log-path "$LOG_PATH" \
+          --wait-reason "process_stop" >/dev/null 2>&1 || true
+      else
+        ${emitEvent} \
+          --event-type run_finished \
+          --state stopped \
+          --run-id "$RUN_REF" \
+          --command "$COMMAND" \
+          --slot "$SLOT" \
+          --env "$ENV" \
+          --pid "$PID" \
+          --wait-reason "process_stop" \
+          --last-error "stopped by process::stop" >/dev/null 2>&1 || true
+      fi
+    done <<< "$TARGET_ROWS"
+
+    if [ "$DRY_RUN" = "true" ]; then
+      echo "INFO: process stop dry-run complete run_id=$RUN_ID scope=$SCOPE slot=''${TARGET_SLOT:-unknown} env=''${TARGET_ENV:-unknown}"
+      exit 0
+    fi
+
+    if [ "$FAILED" -gt 0 ]; then
+      echo "ERROR: process stop completed with failures run_id=$RUN_ID scope=$SCOPE stopped=$STOPPED skipped=$SKIPPED failed=$FAILED" >&2
+      exit 1
+    fi
+
+    echo "OK: process stop complete run_id=$RUN_ID scope=$SCOPE stopped=$STOPPED skipped=$SKIPPED"
+  '';
+
   processGc = pkgs.writeShellScript "process-gc" ''
     ${sharedPrelude}
 
@@ -1234,6 +1540,7 @@ in
     processSlots
     processRuns
     processInspect
+    processStop
     processGc
     serviceEvents
     serviceLogs

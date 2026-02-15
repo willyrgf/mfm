@@ -1069,7 +1069,10 @@ let
 
         fixture_start_service() {
           local service="$1"
-          local keep_running="''${6:-missing}"
+          local keep_running="missing"
+          if [ "$#" -ge 6 ] && [ -n "$6" ]; then
+            keep_running="$6"
+          fi
           echo "service=$service keep_running=$keep_running" >> "$PWD/keep-values.log"
           return 0
         }
@@ -1731,10 +1734,35 @@ let
         dev = {
           description = "Start the dev workflow";
           api = {
-            version = 1;
+            version = 2;
             summary = "Start the dev workflow";
             details = "ok";
             usage = [ "nix run .#dev" ];
+            category = "core";
+            appContract = {
+              version = 2;
+              name = "dev";
+              allowUnknownArgs = false;
+              args = [ ];
+              env = [
+                {
+                  name = "PROJECT_ENV";
+                  type = "string";
+                  required = false;
+                }
+              ];
+              outputs = {
+                mode = "text";
+              };
+              failureCodes = {
+                generic = 1;
+                usage = 2;
+                precondition = 3;
+                unavailable = 4;
+                timeout = 5;
+              };
+              idempotent = true;
+            };
           };
           env = {
             PROJECT_ENV = "dev";
@@ -1760,8 +1788,7 @@ let
     if [ "$RC" -eq 0 ]; then
       fail "expected API contract violation to fail"
     fi
-    assert_contains "$BAD_API_LOG" "Nixfied app API contract violated"
-    assert_contains "$BAD_API_LOG" "missing meta.nixfied.api"
+    assert_contains "$BAD_API_LOG" "commands.missing-api.api is required"
 
     log "service api contract enforcement"
     BAD_SERVICE_API_EXPR=$(cat <<'NIX'
@@ -2095,6 +2122,51 @@ let
       echo "Fixture output (last 50 lines):" >&2
       print_log_tail "$REG_STALE_LOG" 50
       exit "$REG_STALE_RC"
+    fi
+
+    log "process registry stop"
+    REG_STOP_DIR="$WORKDIR/registry-process-stop"
+    mkdir -p "$REG_STOP_DIR"
+    REG_STOP_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base {
+        project.id = "nixfied-process-stop-fixture";
+        process.registryRoot = "$PWD/.process-registry";
+      };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+    in
+      lib.mkAppScript {
+        name = "registry-process-stop-test";
+        env = { };
+        useDeps = false;
+        script = import ./tests/framework/fixtures/registry/process-stop.nix {
+          emitEvent = toString lib.emitEvent;
+          processInspect = toString lib.processInspect;
+          processStop = toString lib.processStop;
+          registryRoot = "$PWD/.process-registry";
+        };
+      }
+    NIX
+    )
+
+    REG_STOP_SCRIPT=$(build_expr "$REG_STOP_EXPR")
+    REG_STOP_LOG="$WORKDIR/registry-process-stop.log"
+    set +e
+    (cd "$REG_STOP_DIR" && "$REG_STOP_SCRIPT" >"$REG_STOP_LOG" 2>&1)
+    REG_STOP_RC=$?
+    set -e
+    if [ "$REG_STOP_RC" -ne 0 ]; then
+      echo "Registry process stop fixture failed (rc=$REG_STOP_RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 50 lines):" >&2
+      print_log_tail "$REG_STOP_LOG" 50
+      exit "$REG_STOP_RC"
     fi
 
     log "process registry policy inference"
@@ -3190,8 +3262,8 @@ in
 {
   test = lib.appApi.mkNixfiedApp {
     name = "test";
-    api = {
-      version = 1;
+    api = lib.appApi.mkApi {
+      name = "test";
       summary = "Run framework integration tests";
       details = "Runs the Nixfied framework integration test suite (intended for framework development). Supports shard orchestration via --jobs/--serial/--shard plus --profile and --summary-json options.";
       usage = [
@@ -3205,6 +3277,7 @@ in
         "nix run .#framework::test -- --summary-json /tmp/framework-test-summary.json"
       ];
       category = "framework";
+      allowUnknownArgs = true;
     };
     env = { };
     useDeps = false;

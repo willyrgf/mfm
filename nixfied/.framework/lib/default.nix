@@ -7,6 +7,7 @@
 }:
 
 let
+  shellContract = import ./shell-contract.nix { inherit pkgs; };
   summary = import ./summary.nix { inherit pkgs project; };
   helpers = import ./helpers.nix {
     inherit pkgs hooks;
@@ -17,11 +18,13 @@ let
   };
   builders = import ./builders.nix {
     inherit pkgs project;
+    inherit shellContract;
     fixtureLib = fixtures;
     inherit (helpers) loadEnv helpersScript hookExports;
   };
   appApi = import ./app-api.nix {
     inherit pkgs;
+    inherit shellContract;
     inherit (builders) mkApp;
   };
   serviceApi = import ./service-api.nix {
@@ -45,6 +48,7 @@ in
     mkAppWithDeps
     ;
   inherit fixtures;
+  inherit shellContract;
   inherit appApi;
   inherit serviceApi;
   inherit discovery;
@@ -55,6 +59,7 @@ in
     processSlots
     processRuns
     processInspect
+    processStop
     processGc
     emitEvent
     serviceEvents

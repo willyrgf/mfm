@@ -1,5 +1,9 @@
-# Nixfied app API contract helpers (validation + mkNixfiedApp)
-{ pkgs, mkApp }:
+# Nixfied app API + shell contract helpers (validation + mkNixfiedApp)
+{
+  pkgs,
+  mkApp,
+  shellContract,
+}:
 
 let
   lib = pkgs.lib;
@@ -18,7 +22,7 @@ let
   mkFixHint =
     commandName: ''
       Fix:
-        - For project commands: define commands.${commandName}.api = { version = 1; summary = "..."; details = "..."; usage = [ "nix run .#${commandName}" ]; };
+        - For project commands: define commands.${commandName}.api = { version = 2; summary = "..."; details = "..."; usage = [ "nix run .#${commandName}" ]; appContract = { ... }; };
         - For generated/internal apps: set app.meta.nixfied.api (or use lib.appApi.mkNixfiedApp).
     '';
   throwNamedViolation =
@@ -43,7 +47,7 @@ let
       base
       ++ expect (api ? version) "${name}: api.version is required"
       ++ expect (builtins.isInt (api.version or null)) "${name}: api.version must be an integer"
-      ++ expect ((api.version or null) == 1) "${name}: api.version must be 1"
+      ++ expect ((api.version or null) == 2) "${name}: api.version must be 2"
       ++ expect (api ? summary) "${name}: api.summary is required"
       ++ expect (isNonEmptyString (api.summary or "")) "${name}: api.summary must be a non-empty string"
       ++ expect (api ? details) "${name}: api.details is required"
@@ -56,7 +60,11 @@ let
       ++ expect (optionalAttrSatisfies api "examples" isListOfNonEmptyStrings) "${name}: api.examples must be a list of non-empty strings"
       ++ expect (optionalAttrSatisfies api "args" isKVSpecList) "${name}: api.args must be a list of { name, description }"
       ++ expect (optionalAttrSatisfies api "env" isKVSpecList) "${name}: api.env must be a list of { name, description }"
-      ++ expect (optionalAttrSatisfies api "category" isNonEmptyString) "${name}: api.category must be a non-empty string";
+      ++ expect (optionalAttrSatisfies api "category" isNonEmptyString) "${name}: api.category must be a non-empty string"
+      ++ shellContract.validateAppContractErrors {
+        inherit name;
+        contract = api.appContract or null;
+      };
 
   validateApi =
     { name, api }:
@@ -67,6 +75,60 @@ let
       api
     else
       throwNamedViolation name errs;
+
+  mkApi =
+    {
+      name,
+      summary,
+      details,
+      usage,
+      examples ? [ ],
+      args ? [ ],
+      env ? [ ],
+      category ? "core",
+      appContract ? null,
+      allowUnknownArgs ? false,
+      idempotent ? true,
+      outputsMode ? "text",
+      failureCodes ? shellContract.defaultFailureCodes,
+    }:
+    let
+      contract =
+        if appContract == null then
+          shellContract.mkDefaultAppContract {
+            inherit
+              name
+              args
+              env
+              allowUnknownArgs
+              idempotent
+              outputsMode
+              failureCodes
+              ;
+          }
+        else
+          appContract;
+      api =
+        {
+          version = 2;
+          inherit
+            summary
+            details
+            usage
+            category
+            appContract
+            ;
+        }
+        // lib.optionalAttrs (examples != [ ]) { inherit examples; }
+        // lib.optionalAttrs (args != [ ]) { inherit args; }
+        // lib.optionalAttrs (env != [ ]) { inherit env; };
+      apiFinal = api // { appContract = contract; };
+      _ = validateApi {
+        inherit name;
+        api = apiFinal;
+      };
+    in
+    apiFinal;
 
   validateAppErrors =
     { name, app }:
@@ -130,8 +192,8 @@ let
       meta ? { },
     }:
     let
-      _ = validateApi { inherit name api; };
-      mergedMeta = lib.recursiveUpdate { nixfied.api = api; } meta;
+      apiFinal = validateApi { inherit name api; };
+      mergedMeta = lib.recursiveUpdate { nixfied.api = apiFinal; } meta;
     in
     mkApp {
       inherit
@@ -142,12 +204,14 @@ let
         useDeps
         fixtureProfile
         ;
-      description = api.summary;
+      description = apiFinal.summary;
+      api = apiFinal;
       meta = mergedMeta;
     };
 in
 {
   inherit
+    mkApi
     validateApi
     validateApp
     validateApps

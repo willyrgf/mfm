@@ -43,16 +43,41 @@ let
       usage,
       env ? { },
     }:
+    let
+      envDocs = builtins.attrNames env;
+    in
     {
       inherit name runner env;
       api = {
-        version = 1;
+        version = 2;
         inherit
           summary
           details
           usage
           ;
         category = "framework";
+        appContract = {
+          version = 2;
+          inherit name;
+          allowUnknownArgs = true;
+          args = [ ];
+          env = map (var: {
+            name = var;
+            type = "string";
+            required = false;
+          }) envDocs;
+          outputs = {
+            mode = "text";
+          };
+          failureCodes = {
+            generic = 1;
+            usage = 2;
+            precondition = 3;
+            unavailable = 4;
+            timeout = 5;
+          };
+          idempotent = false;
+        };
       };
     };
 

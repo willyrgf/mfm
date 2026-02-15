@@ -103,6 +103,7 @@ let
     ARGS=(
       node
       --datadir "$RETH_DIR/data"
+      --ipcpath "$RETH_DIR/run/reth.ipc"
       --http
       --http.addr 127.0.0.1
       --http.port "$RETH_HTTP_PORT"

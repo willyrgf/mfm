@@ -83,10 +83,26 @@ Minimal example:
 
 ```nix
 commands.dev.api = {
-  version = 1;
+  version = 2;
   summary = "Start the dev workflow";
   details = "Longer docs (can be multi-line).";
   usage = [ "nix run .#dev" ];
+  appContract = {
+    version = 2;
+    name = "dev";
+    allowUnknownArgs = false;
+    args = [ ];
+    env = [ ];
+    outputs = { mode = "text"; };
+    failureCodes = {
+      generic = 1;
+      usage = 2;
+      precondition = 3;
+      unavailable = 4;
+      timeout = 5;
+    };
+    idempotent = true;
+  };
 };
 ```
 
@@ -654,11 +670,7 @@ Supervisor apps (when `supervisor.enable = true`):
 
 Utility apps (always available):
 - `check-ports`, `ports`
-- `process::status`, `process::slots`, `process::runs`, `process::inspect`, `process::gc`
-
-Compatibility aliases:
-- `runtime::status`, `runtime::ps`, `runtime::slots`, `runtime::runs`,
-  `runtime::inspect`, `runtime::gc` (deprecated; forward to `process::*`)
+- `process::status`, `process::slots`, `process::runs`, `process::inspect`, `process::stop`, `process::gc`
 
 All module apps and supervisor apps require explicit env selection.
 Set `PROJECT_ENV` before running `up`, `down`, `svc-*`, or any
@@ -696,6 +708,9 @@ Process commands:
 - `nix run .#process::slots`
 - `nix run .#process::runs`
 - `nix run .#process::inspect -- <id>`
+- `nix run .#process::stop -- --run-id <id>`
+- `nix run .#process::stop -- --run-id <id> --scope slot-env`
+- `nix run .#process::stop -- --run-id <id> --dry-run`
 - `nix run .#process::gc`
 - `nix run .#process::gc -- --apply`
 

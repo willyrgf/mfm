@@ -366,17 +366,17 @@ let
           '';
           env = { };
           useDeps = false;
-          api = {
-            version = 1;
+          api = appApi.mkApi {
+            name = op.appName;
             summary = op.opCfg.summary;
             details = op.opCfg.details;
             usage = op.usage;
-          }
-          // lib.optionalAttrs (op.opCfg ? examples) { examples = op.opCfg.examples; }
-          // lib.optionalAttrs (op.opCfg ? args) { args = op.opCfg.args; }
-          // lib.optionalAttrs (op.opCfg ? env) { env = op.opCfg.env; }
-          // {
+            examples = op.opCfg.examples or [ ];
+            args = op.opCfg.args or [ ];
+            env = op.opCfg.env or [ ];
             category = op.category;
+            allowUnknownArgs = true;
+            idempotent = false;
           };
           meta = {
             nixfied = {

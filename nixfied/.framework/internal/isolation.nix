@@ -544,14 +544,15 @@ let
         useDeps
         ;
       env = { };
-      api = {
-        version = 1;
+      api = lib.appApi.mkApi {
         inherit
+          name
           summary
           details
           usage
           ;
         category = "isolation";
+        allowUnknownArgs = false;
       };
     };
 in

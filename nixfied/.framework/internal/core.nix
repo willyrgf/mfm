@@ -17,6 +17,13 @@ let
     name = checkRefreshArg;
     description = "Regenerate docs/repo-index.json and docs/repo-map.md before running checks.";
   };
+  checkRefreshArgContractSpec = {
+    name = "refresh_discovery";
+    kind = "flag";
+    long = checkRefreshArg;
+    type = "bool";
+    required = false;
+  };
 
   appendApiArg =
     args: arg:
@@ -29,8 +36,22 @@ let
     else
       let
         args0 = api.args or [ ];
+        contract0 = api.appContract or null;
+        contractArgs0 = if contract0 == null then [ ] else (contract0.args or [ ]);
+        hasContractArg =
+          builtins.any (item: (item.long or "") == checkRefreshArg || (item.name or "") == "refresh_discovery") contractArgs0;
+        contractArgs1 = if hasContractArg then contractArgs0 else contractArgs0 ++ [ checkRefreshArgContractSpec ];
+        contract1 =
+          if contract0 == null then
+            null
+          else
+            contract0 // { args = contractArgs1; };
       in
-      api // { args = appendApiArg args0 checkRefreshArgSpec; };
+      api
+      // {
+        args = appendApiArg args0 checkRefreshArgSpec;
+      }
+      // (pkgs.lib.optionalAttrs (contract1 != null) { appContract = contract1; });
 
   wrapCheckScript =
     baseScript: ''
@@ -52,7 +73,9 @@ let
         ${discovery.tool}/bin/nixfied-discovery-index --refresh
       else
         if [ "${if discoveryStrict then "1" else "0"}" = "1" ]; then
-          ${discovery.tool}/bin/nixfied-discovery-index --verify
+          if ! ${discovery.tool}/bin/nixfied-discovery-index --verify; then
+            exit 1
+          fi
         else
           if ! ${discovery.tool}/bin/nixfied-discovery-index --verify; then
             echo "WARN: discovery drift detected but strict mode is disabled by project config." >&2
@@ -92,15 +115,18 @@ let
 
   mkCommandApp =
     name: cfg:
-    lib.mkApp {
+    lib.appApi.mkNixfiedApp {
       name = name;
       script = cfg.script or "";
       fixtures = cfg.fixtures or null;
       env = cfg.env or { };
       useDeps = cfg.useDeps or false;
       fixtureProfile = cfg.fixtureProfile or "default";
-      description = if (cfg ? api) then (cfg.api.summary or null) else (cfg.description or null);
-      meta = pkgs.lib.optionalAttrs (cfg ? api) { nixfied.api = cfg.api; };
+      api =
+        if cfg ? api then
+          cfg.api
+        else
+          throw "commands.${name}.api is required and must include appContract version=2";
     };
 
   commandApps = builtins.listToAttrs (
@@ -110,8 +136,8 @@ let
     }) commandNames
   );
 
-  helpApi = {
-    version = 1;
+  helpApi = lib.appApi.mkApi {
+    name = "help";
     summary = "Show available commands";
     details = "Lists available commands, or shows detailed documentation for a single command.";
     usage = [
@@ -120,6 +146,17 @@ let
     ];
     examples = [ "nix run .#help -- dev" ];
     category = "core";
+    allowUnknownArgs = true;
+    args = [
+      {
+        name = "--help";
+        description = "Show command list.";
+      }
+      {
+        name = "command";
+        description = "Optional command name to render full docs.";
+      }
+    ];
   };
 
   moduleAppNames = builtins.attrNames moduleApps;

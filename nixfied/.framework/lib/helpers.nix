@@ -396,9 +396,15 @@ let
 
       local pid=""
       if [ -n "$logfile" ]; then
-        pid=$(start_service "$service" --log "$logfile" -- "$start_cmd")
+        if ! start_service_into pid "$service" --log "$logfile" -- "$start_cmd"; then
+          echo "ERROR: fixture service start failed service=$service hook=$start_hook" >&2
+          return 1
+        fi
       else
-        pid=$(start_service "$service" -- "$start_cmd")
+        if ! start_service_into pid "$service" -- "$start_cmd"; then
+          echo "ERROR: fixture service start failed service=$service hook=$start_hook" >&2
+          return 1
+        fi
       fi
       if [ -z "$pid" ]; then
         echo "ERROR: fixture service start returned empty pid service=$service hook=$start_hook" >&2
@@ -681,7 +687,9 @@ let
       fi
 
       # Avoid registering cleanup in command substitution subshells (they exit immediately).
-      if [ -n "''${BASHPID:-}" ] && [ "''${BASHPID}" = "$$" ]; then
+      # App wrappers that execute command bodies in a dedicated subshell set
+      # NIXFIED_CLEANUP_OWNER_BASHPID to the app-body shell BASHPID.
+      if { [ -n "''${NIXFIED_CLEANUP_OWNER_BASHPID:-}" ] && [ -n "''${BASHPID:-}" ] && [ "''${NIXFIED_CLEANUP_OWNER_BASHPID}" = "''${BASHPID}" ]; } || { [ -n "''${BASHPID:-}" ] && [ "''${BASHPID}" = "$$" ]; }; then
         with_cleanup stop_service "$pid" "$name"
       fi
 
@@ -699,8 +707,28 @@ let
         return 1
       fi
 
+      # Avoid command substitution so start_service runs in this shell context.
+      local pid_file=""
+      pid_file="$(mktemp "''${TMPDIR:-/tmp}/nixfied-start-service.XXXXXX")" || {
+        echo "start_service_into: failed to allocate pid capture file" >&2
+        return 1
+      }
+
       local _pid=""
-      _pid=$(start_service "$@")
+      if ! start_service "$@" >"$pid_file"; then
+        rm -f "$pid_file" >/dev/null 2>&1 || true
+        echo "start_service_into: failed to start service" >&2
+        return 1
+      fi
+
+      local line=""
+      while IFS= read -r line; do
+        if [ -n "$line" ]; then
+          _pid="$line"
+        fi
+      done <"$pid_file"
+      rm -f "$pid_file" >/dev/null 2>&1 || true
+
       if [ -z "$_pid" ]; then
         echo "start_service_into: failed to start service" >&2
         return 1

@@ -2,6 +2,7 @@
 {
   pkgs,
   project,
+  shellContract,
   fixtureLib,
   loadEnv,
   helpersScript,
@@ -48,6 +49,7 @@ let
       env ? { },
       useDeps ? false,
       fixtureProfile ? "default",
+      appContract ? null,
     }:
     let
       envExports = concatMapStringsSep "\n" (key: "export ${key}=${toString env.${key}}") (
@@ -63,6 +65,29 @@ let
         defaultLogs = true;
         script = script;
       };
+      contractFile =
+        if appContract == null then null else pkgs.writeText "${name}-app-contract.json" (builtins.toJSON appContract);
+      contractPrelude =
+        if appContract == null then
+          ""
+        else
+          ''
+            NIXFIED_APP_CONTRACT_FILE="${toString contractFile}"
+            source ${toString shellContract.runtime}
+            nixfied_contract_validate_env "$NIXFIED_APP_CONTRACT_FILE"
+            nixfied_contract_validate_args "$NIXFIED_APP_CONTRACT_FILE" "$@"
+          '';
+      contractExitCheck =
+        if appContract == null then
+          ""
+        else
+          ''
+            _NIXFIED_CONTRACT_RC=0
+            nixfied_contract_validate_exit "$NIXFIED_APP_CONTRACT_FILE" "$_NIXFIED_APP_RC" || _NIXFIED_CONTRACT_RC=$?
+            if [ "$_NIXFIED_CONTRACT_RC" -ne 0 ]; then
+              exit "$_NIXFIED_CONTRACT_RC"
+            fi
+          '';
     in
     pkgs.writeShellScript name ''
       set -euo pipefail
@@ -74,7 +99,15 @@ let
       ${hookExports}
       ${envExports}
       ${depsBlock}
-      ${script0}
+      ${contractPrelude}
+      _NIXFIED_APP_RC=0
+      (
+        set -euo pipefail
+        export NIXFIED_CLEANUP_OWNER_BASHPID="''${BASHPID:-}"
+        ${script0}
+      ) || _NIXFIED_APP_RC=$?
+      ${contractExitCheck}
+      exit "$_NIXFIED_APP_RC"
     '';
 
   mkApp =
@@ -87,6 +120,7 @@ let
       fixtureProfile ? "default",
       description ? null,
       meta ? { },
+      api ? null,
     }:
     let
       scriptDrv = mkAppScript {
@@ -98,6 +132,7 @@ let
           useDeps
           fixtureProfile
           ;
+        appContract = if api == null then null else (api.appContract or null);
       };
     in
     {
