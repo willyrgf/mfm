@@ -1,5 +1,159 @@
 { project, lib, ... }:
 
+let
+  # v2 shell-app contract inventory (project-level):
+  # - ci: typed, outputs=text, wraps CI shell runner + cargo tools, failure map owner=project/ci.nix
+  failureCodesScript = {
+    generic = 1;
+    usage = 2;
+    precondition = 3;
+    unavailable = 4;
+    timeout = 5;
+  };
+  failureCodesCargo = failureCodesScript // {
+    cargoFailure = 101;
+  };
+  ciModeValues = [
+    "basic"
+    "audit"
+    "parity"
+    "mainnet"
+  ];
+  ciAppContract = {
+    version = 2;
+    name = "ci";
+    allowUnknownArgs = false;
+    idempotent = false;
+    failureCodes = failureCodesCargo;
+    outputs = {
+      mode = "text";
+    };
+    args = [
+      {
+        name = "basic";
+        kind = "flag";
+        long = "--basic";
+        type = "bool";
+        required = false;
+      }
+      {
+        name = "audit";
+        kind = "flag";
+        long = "--audit";
+        type = "bool";
+        required = false;
+      }
+      {
+        name = "parity";
+        kind = "flag";
+        long = "--parity";
+        type = "bool";
+        required = false;
+      }
+      {
+        name = "mainnet";
+        kind = "flag";
+        long = "--mainnet";
+        type = "bool";
+        required = false;
+      }
+      {
+        name = "mode";
+        kind = "option";
+        long = "--mode";
+        type = "enum";
+        values = ciModeValues;
+        required = false;
+      }
+      {
+        name = "summary";
+        kind = "flag";
+        long = "--summary";
+        type = "bool";
+        required = false;
+      }
+      {
+        name = "background";
+        kind = "flag";
+        long = "--background";
+        type = "bool";
+        required = false;
+      }
+      {
+        name = "bg";
+        kind = "flag";
+        long = "--bg";
+        type = "bool";
+        required = false;
+      }
+      {
+        name = "verbose";
+        kind = "flag";
+        long = "--verbose";
+        type = "bool";
+        required = false;
+      }
+      {
+        name = "debug";
+        kind = "flag";
+        long = "--debug";
+        type = "bool";
+        required = false;
+      }
+    ];
+    env = [
+      {
+        name = "CI_ARTIFACTS_DIR";
+        type = "string";
+        required = false;
+      }
+      {
+        name = "CI_ARTIFACTS_BASE";
+        type = "string";
+        required = false;
+      }
+      {
+        name = "SERVICE_REUSE_POLICY";
+        type = "enum";
+        values = [
+          "never"
+          "same-root"
+          "same-slot"
+          "cross-run"
+        ];
+        required = false;
+      }
+      {
+        name = "SERVICE_OWNER_SCOPE";
+        type = "enum";
+        values = [
+          "ephemeral"
+          "persistent"
+        ];
+        required = false;
+      }
+      {
+        name = "SERVICE_DISCOVERY_SCOPE";
+        type = "enum";
+        values = [
+          "local"
+          "global"
+        ];
+        required = false;
+      }
+      {
+        name = "CI_VERBOSE";
+        type = "bool";
+        required = false;
+      }
+      {
+        name = "NIXFIED_LOG_LEVEL";
+        type = "string";
+        required = false;
+      }
+    ];
+  };
+in
 {
   commands = {
     ci = {
@@ -11,10 +165,10 @@
           Runs the CI pipeline defined in `nixfied/project/ci.nix` (modes + steps).
 
           Supported options (from the framework CI runner):
-          - `--basic|--audit|--parity`: select a mode
-          - `--mode <name>`: select a mode by name
+          - `--basic|--audit|--parity|--mainnet`: select a mode
+          - `--mode <name>` or `--mode=<name>`: select a mode by name
           - `--summary`: print a compact summary and write `summary.json` into the artifacts dir
-          - `--bg`: run in background via the run registry
+          - `--bg|--background`: run in background via the run registry
           - `--verbose|--debug`: enable debug logs (including teardown diagnostic collection details)
 
           Readiness-first behavior:
@@ -33,7 +187,9 @@
           "nix run .#ci -- --audit --summary"
           "nix run .#ci -- --parity --summary"
           "nix run .#ci -- --mode basic --summary"
+          "nix run .#ci -- --mode=basic --summary"
           "nix run .#ci -- --bg"
+          "nix run .#ci -- --background"
         ];
         examples = [
           "nix run .#ci -- --basic --summary"
@@ -54,6 +210,10 @@
             description = "Select parity mode.";
           }
           {
+            name = "--mainnet";
+            description = "Select mainnet mode.";
+          }
+          {
             name = "--mode";
             description = "Select CI mode by name (value: <name>).";
           }
@@ -64,6 +224,10 @@
           {
             name = "--bg";
             description = "Run CI in background via the run registry.";
+          }
+          {
+            name = "--background";
+            description = "Alias for --bg.";
           }
           {
             name = "--verbose";
@@ -78,6 +242,10 @@
           {
             name = "CI_ARTIFACTS_DIR";
             description = "Override artifacts directory (default: /tmp/ci-artifacts).";
+          }
+          {
+            name = "CI_ARTIFACTS_BASE";
+            description = "Override artifacts root directory (must be absolute path).";
           }
           {
             name = "SERVICE_REUSE_POLICY";
@@ -101,8 +269,10 @@
           }
         ];
         category = "core";
-        allowUnknownArgs = true;
+        allowUnknownArgs = false;
+        failureCodes = failureCodesCargo;
         idempotent = false;
+        appContract = ciAppContract;
       };
       env = {
         "${project.envVar}" = "test";
@@ -318,6 +488,7 @@ $pid"
           "fmt"
           "clippy"
           "architecture-verify"
+          "shell-app-contracts"
           "build"
           "tests"
         ];
@@ -367,6 +538,77 @@ $pid"
         run = ''
           LOGFILE=$(artifact_path "architecture-verify.log")
           log_capture "$LOGFILE" -- cargo run -p mfm-architecture-verify --
+        '';
+      };
+      shell-app-contracts = {
+        description = "Shell app contract checks (strict typed + passthrough)";
+        run = ''
+          LOGFILE=$(artifact_path "shell-app-contracts.log")
+          set +e
+          (
+            set -euo pipefail
+
+            SYSTEM=$(nix eval --raw --impure --expr builtins.currentSystem)
+
+            ci_contract=$(nix eval --json ".#apps.$SYSTEM.ci.meta.nixfied.api.appContract")
+            check_contract=$(nix eval --json ".#apps.$SYSTEM.check.meta.nixfied.api.appContract")
+            cli_contract=$(nix eval --json ".#apps.$SYSTEM.mfm_cli.meta.nixfied.api.appContract")
+            rest_contract=$(nix eval --json ".#apps.$SYSTEM.mfm_rest_api.meta.nixfied.api.appContract")
+            snapshot_contract=$(nix eval --json ".#apps.$SYSTEM.\"mfm::portfolio::snapshot\".meta.nixfied.api.appContract")
+            svc_logs_contract=$(nix eval --json ".#apps.$SYSTEM.\"svc-logs\".meta.nixfied.api.appContract")
+
+            echo "$ci_contract" | jq -e '.allowUnknownArgs == false' >/dev/null
+            echo "$ci_contract" | jq -e '.args[] | select(.name == "mode") | .kind == "option" and .type == "enum" and (.values | index("basic") != null)' >/dev/null
+            echo "$ci_contract" | jq -e '.args[] | select(.name == "mode") | (.values | sort) == ["audit","basic","mainnet","parity"]' >/dev/null
+            echo "$ci_contract" | jq -e '.args[] | select(.name == "basic") | .kind == "flag" and .type == "bool"' >/dev/null
+            echo "$check_contract" | jq -e '.allowUnknownArgs == false' >/dev/null
+            echo "$snapshot_contract" | jq -e '.allowUnknownArgs == false and .outputs.mode == "json"' >/dev/null
+            echo "$cli_contract" | jq -e '.allowUnknownArgs == true' >/dev/null
+            echo "$rest_contract" | jq -e '.allowUnknownArgs == true' >/dev/null
+            echo "$svc_logs_contract" | jq -e '.allowUnknownArgs == true' >/dev/null
+
+            CHECK_UNKNOWN_LOG=$(mktemp)
+            set +e
+            nix run .#check -- --contract-probe-unknown >"$CHECK_UNKNOWN_LOG" 2>&1
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              echo "ERROR: expected typed command to reject unknown args" >&2
+              cat "$CHECK_UNKNOWN_LOG" >&2 || true
+              exit 1
+            fi
+            if ! grep -Eq "unknown option token=--contract-probe-unknown|Unknown option: --contract-probe-unknown" "$CHECK_UNKNOWN_LOG"; then
+              echo "ERROR: expected unknown option diagnostics for typed command" >&2
+              cat "$CHECK_UNKNOWN_LOG" >&2 || true
+              exit 1
+            fi
+
+            CLI_UNKNOWN_LOG=$(mktemp)
+            set +e
+            nix run .#mfm_cli -- --contract-probe-unknown >"$CLI_UNKNOWN_LOG" 2>&1
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              echo "ERROR: expected mfm_cli to fail downstream for unknown command args" >&2
+              cat "$CLI_UNKNOWN_LOG" >&2 || true
+              exit 1
+            fi
+            if grep -q "unknown option token=--contract-probe-unknown" "$CLI_UNKNOWN_LOG"; then
+              echo "ERROR: mfm_cli unknown args were rejected by shell-app contract (expected passthrough)" >&2
+              cat "$CLI_UNKNOWN_LOG" >&2 || true
+              exit 1
+            fi
+
+            ARTIFACT_JSON=$(mktemp)
+            nix run .#evm-contract-artifact-configurable-counter >"$ARTIFACT_JSON"
+            jq -e '.artifact.abi and .artifact.bytecode.object' "$ARTIFACT_JSON" >/dev/null
+          ) >"$LOGFILE" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            cat "$LOGFILE" >&2 || true
+            exit "$rc"
+          fi
         '';
       };
       build = {

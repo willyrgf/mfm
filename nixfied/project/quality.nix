@@ -1,5 +1,20 @@
 { project, lib, ... }:
 
+let
+  # v2 shell-app contract inventory (project-level):
+  # - check: typed, outputs=text, wraps cargo-nightly/cargo, failure map owner=project/quality.nix
+  # - discovery-refresh: typed, outputs=text, wraps nix run check, failure map owner=project/quality.nix
+  failureCodesScript = {
+    generic = 1;
+    usage = 2;
+    precondition = 3;
+    unavailable = 4;
+    timeout = 5;
+  };
+  failureCodesCargo = failureCodesScript // {
+    cargoFailure = 101;
+  };
+in
 {
   commands = {
     check = {
@@ -11,6 +26,8 @@
         usage = [ "nix run .#check" ];
         examples = [ "nix run .#check" ];
         category = "quality";
+        allowUnknownArgs = false;
+        failureCodes = failureCodesCargo;
       };
       env = { };
       useDeps = true;
@@ -30,6 +47,8 @@
         usage = [ "nix run .#discovery-refresh" ];
         examples = [ "nix run .#discovery-refresh" ];
         category = "quality";
+        allowUnknownArgs = false;
+        failureCodes = failureCodesScript;
       };
       env = { };
       useDeps = true;

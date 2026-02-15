@@ -36,6 +36,17 @@ let
   artifactsRoot = artifacts.dir or "/tmp/ci-artifacts";
   keepOnFailure = artifacts.keepOnFailure or true;
   keepOnSuccess = artifacts.keepOnSuccess or false;
+  failureCodesScript = {
+    generic = 1;
+    usage = 2;
+    precondition = 3;
+    unavailable = 4;
+    timeout = 5;
+  };
+  failureCodesCargo = failureCodesScript // {
+    cargoFailure = 101;
+  };
+  ciModeValues = if modeNames != [ ] then modeNames else [ "basic" ];
 
   stepDescCase = pkgs.lib.concatMapStringsSep "\n" (
     name:
@@ -175,13 +186,31 @@ let
                       CI_SUMMARY=true
                       shift
                       ;;
-                    --bg)
+                    --bg|--background)
                       CI_BACKGROUND=true
                       shift
                       ;;
+                    --verbose|--debug)
+                      export CI_VERBOSE=1
+                      : "''${NIXFIED_LOG_LEVEL:=debug}"
+                      export NIXFIED_LOG_LEVEL
+                      shift
+                      ;;
                     --mode)
-                      CI_MODE="''${2:-}"
+                      if [ "''$#" -lt 2 ] || [ -z "''${2:-}" ]; then
+                        echo "Missing value for --mode" >&2
+                        exit 2
+                      fi
+                      CI_MODE="$2"
                       shift 2
+                      ;;
+                    --mode=*)
+                      CI_MODE="''${1#--mode=}"
+                      if [ -z "$CI_MODE" ]; then
+                        echo "Missing value for --mode" >&2
+                        exit 2
+                      fi
+                      shift
                       ;;
                     --)
                       shift
@@ -507,18 +536,20 @@ let
                 fi
       '';
 
-  ciApi = lib.appApi.mkApi {
+  defaultCiApi = lib.appApi.mkApi {
     name = "ci";
     summary = "Run the CI pipeline";
     details = "Runs the CI pipeline defined in nixfied/project/ci.nix (modes + steps).";
     usage = [
       "nix run .#ci"
       "nix run .#ci -- --summary"
+      "nix run .#ci -- --mode basic --summary"
     ];
     examples = [ "nix run .#ci -- --summary" ];
     category = "core";
-    allowUnknownArgs = true;
+    allowUnknownArgs = false;
     idempotent = false;
+    failureCodes = failureCodesCargo;
     args = [
       {
         name = "--summary";
@@ -527,6 +558,18 @@ let
       {
         name = "--bg";
         description = "Run CI in background mode via the run registry.";
+      }
+      {
+        name = "--background";
+        description = "Alias for --bg.";
+      }
+      {
+        name = "--verbose";
+        description = "Enable verbose diagnostics.";
+      }
+      {
+        name = "--debug";
+        description = "Alias for --verbose.";
       }
       {
         name = "--mode";
@@ -542,8 +585,110 @@ let
         name = "CI_ARTIFACTS_BASE";
         description = "Override artifacts root; must be absolute path.";
       }
+      {
+        name = "CI_VERBOSE";
+        description = "Enable verbose diagnostics.";
+      }
+      {
+        name = "NIXFIED_LOG_LEVEL";
+        description = "Set framework log level (for example debug).";
+      }
     ];
+    appContract = {
+      version = 2;
+      name = "ci";
+      allowUnknownArgs = false;
+      idempotent = false;
+      failureCodes = failureCodesCargo;
+      outputs = {
+        mode = "text";
+      };
+      args =
+        (map (mode: {
+          name = mode;
+          kind = "flag";
+          long = "--${mode}";
+          type = "bool";
+          required = false;
+        }) ciModeValues)
+        ++ [
+          {
+            name = "mode";
+            kind = "option";
+            long = "--mode";
+            type = "enum";
+            values = ciModeValues;
+            required = false;
+          }
+          {
+            name = "summary";
+            kind = "flag";
+            long = "--summary";
+            type = "bool";
+            required = false;
+          }
+          {
+            name = "background";
+            kind = "flag";
+            long = "--background";
+            type = "bool";
+            required = false;
+          }
+          {
+            name = "bg";
+            kind = "flag";
+            long = "--bg";
+            type = "bool";
+            required = false;
+          }
+          {
+            name = "verbose";
+            kind = "flag";
+            long = "--verbose";
+            type = "bool";
+            required = false;
+          }
+          {
+            name = "debug";
+            kind = "flag";
+            long = "--debug";
+            type = "bool";
+            required = false;
+          }
+        ];
+      env = [
+        {
+          name = "CI_ARTIFACTS_DIR";
+          type = "string";
+          required = false;
+        }
+        {
+          name = "CI_ARTIFACTS_BASE";
+          type = "string";
+          required = false;
+        }
+        {
+          name = "CI_VERBOSE";
+          type = "bool";
+          required = false;
+        }
+        {
+          name = "NIXFIED_LOG_LEVEL";
+          type = "string";
+          required = false;
+        }
+      ];
+    };
   };
+  projectCiApi = (((project.commands or { }).ci or { }).api or null);
+  ciApi =
+    if projectCiApi == null then
+      defaultCiApi
+    else
+      lib.appApi.validateApi {
+        name = "ci";
+        api = projectCiApi;
+      };
 
   scriptDrv =
     if enabled then

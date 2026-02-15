@@ -25,6 +25,19 @@
   # - Use `lib.appApi.mkNixfiedApp { ... }` to build compliant apps.
   apps =
     let
+      # v2 shell-app contract inventory (project-local):
+      # - up/down/svc-status: typed, outputs=text, wraps supervisor hooks, failure map owner=local/default.nix
+      # - svc-logs/svc-restart: passthrough, outputs=text, wraps supervisor hooks, failure map owner=local/default.nix
+      # - evm-contract-artifact-*: typed, outputs=json, wraps Foundry helper tools, failure map owner=local/default.nix
+      failureCodesScript = {
+        generic = 1;
+        usage = 2;
+        precondition = 3;
+        unavailable = 4;
+        timeout = 5;
+      };
+      failureCodesSupervisor = failureCodesScript;
+      failureCodesFoundry = failureCodesScript;
       envVar = project.project.envVar or "PROJECT_ENV";
 
       mkProdSupervisorApp =
@@ -34,6 +47,7 @@
           details,
           usage ? [ "nix run .#${name}" ],
           allowUnknownArgs ? false,
+          failureCodes ? failureCodesSupervisor,
           script,
         }:
         lib.appApi.mkNixfiedApp {
@@ -52,6 +66,7 @@
               details
               usage
               allowUnknownArgs
+              failureCodes
               ;
             category = "supervisor";
             idempotent = false;
@@ -109,7 +124,7 @@
       svc-logs = mkProdSupervisorApp {
         name = "svc-logs";
         summary = "Show service logs (prod)";
-        details = "Streams logs for supervisor-managed services, forcing the production environment (MFM_ENV=prod). Arguments are forwarded to the hook.";
+        details = "Streams logs for supervisor-managed services, forcing the production environment (MFM_ENV=prod). Passthrough wrapper: arguments are forwarded unchanged to the supervisor hook.";
         usage = [ "nix run .#svc-logs -- <args>" ];
         allowUnknownArgs = true;
         script = ''run_hook SUPERVISOR_LOGS "$@"'';
@@ -118,19 +133,12 @@
       svc-restart = mkProdSupervisorApp {
         name = "svc-restart";
         summary = "Restart a service (prod)";
-        details = "Restarts a supervisor-managed service, forcing the production environment (MFM_ENV=prod). Arguments are forwarded to the hook.";
+        details = "Restarts supervisor-managed services, forcing the production environment (MFM_ENV=prod). Passthrough wrapper: arguments are forwarded unchanged to the supervisor hook.";
         usage = [ "nix run .#svc-restart -- <args>" ];
         allowUnknownArgs = true;
         script = ''
           set -euo pipefail
-          if [ -n "''${1:-}" ]; then
-            echo "INFO: Restarting supervisor-managed services (service arg ignored: ''${1})"
-          else
-            echo "INFO: Restarting supervisor-managed services"
-          fi
-
-          run_hook SUPERVISOR_STOP
-          run_hook SUPERVISOR_START_DAEMON
+          run_hook SUPERVISOR_RESTART "$@"
         '';
       };
 
@@ -144,8 +152,9 @@
           details = "Compiles contracts/src/ConfigurableCounter.sol with Foundry and prints compact JSON {artifact:{abi,bytecode.object}} to stdout.";
           usage = [ "nix run .#evm-contract-artifact-configurable-counter" ];
           category = "evm";
-          allowUnknownArgs = true;
+          allowUnknownArgs = false;
           outputsMode = "json";
+          failureCodes = failureCodesFoundry;
         };
         script = ''
           exec mfm-contract-artifact-configurable-counter "$@"
@@ -162,8 +171,9 @@
           details = "Compiles contracts/src/MockERC20.sol with Foundry and prints compact JSON {artifact:{abi,bytecode.object}} to stdout.";
           usage = [ "nix run .#evm-contract-artifact-mock-erc20" ];
           category = "evm";
-          allowUnknownArgs = true;
+          allowUnknownArgs = false;
           outputsMode = "json";
+          failureCodes = failureCodesFoundry;
         };
         script = ''
           exec mfm-contract-artifact-mock-erc20 "$@"

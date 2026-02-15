@@ -1,5 +1,19 @@
 { project, lib, ... }:
 
+let
+  # v2 shell-app contract inventory (project-level):
+  # - build: typed, outputs=text, wraps cargo build, failure map owner=project/prod.nix
+  failureCodesScript = {
+    generic = 1;
+    usage = 2;
+    precondition = 3;
+    unavailable = 4;
+    timeout = 5;
+  };
+  failureCodesCargo = failureCodesScript // {
+    cargoFailure = 101;
+  };
+in
 {
   commands = {
     build = {
@@ -11,6 +25,8 @@
         usage = [ "nix run .#build" ];
         examples = [ "nix run .#build" ];
         category = "build";
+        allowUnknownArgs = false;
+        failureCodes = failureCodesCargo;
       };
       env = {
         "${project.envVar}" = "prod";

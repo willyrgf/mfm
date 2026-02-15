@@ -1,5 +1,100 @@
 { project, lib, ... }:
 
+let
+  # v2 shell-app contract inventory (project-level):
+  # - dev: typed, outputs=text, wraps fixture orchestration + cargo run, failure map owner=project/dev.nix
+  # - mfm_cli: passthrough, outputs=text, wraps cargo run, failure map owner=project/dev.nix
+  # - mfm::portfolio::snapshot: typed, outputs=json, wraps fixtures + cargo run, failure map owner=project/dev.nix
+  # - mfm_rest_api: passthrough, outputs=text, wraps cargo run, failure map owner=project/dev.nix
+  failureCodesScript = {
+    generic = 1;
+    usage = 2;
+    precondition = 3;
+    unavailable = 4;
+    timeout = 5;
+  };
+  failureCodesCargo = failureCodesScript // {
+    cargoFailure = 101;
+  };
+  snapshotAppContract = {
+    version = 2;
+    name = "mfm::portfolio::snapshot";
+    allowUnknownArgs = false;
+    idempotent = false;
+    failureCodes = failureCodesCargo;
+    outputs = {
+      mode = "json";
+    };
+    args = [
+      {
+        name = "help";
+        kind = "flag";
+        long = "--help";
+        short = "-h";
+        type = "bool";
+        required = false;
+      }
+      {
+        name = "address";
+        kind = "positional";
+        type = "string";
+        required = false;
+      }
+    ];
+    env = [
+      {
+        name = "HELIOS_NETWORK";
+        type = "enum";
+        values = [ "mainnet" ];
+        required = false;
+      }
+      {
+        name = "HELIOS_EXECUTION_RPC_URL";
+        type = "string";
+        required = false;
+      }
+      {
+        name = "HELIOS_CONSENSUS_RPC_URL";
+        type = "string";
+        required = false;
+      }
+      {
+        name = "HELIOS_CHECKPOINT";
+        type = "string";
+        required = false;
+      }
+      {
+        name = "SERVICE_REUSE_POLICY";
+        type = "enum";
+        values = [
+          "never"
+          "same-root"
+          "same-slot"
+          "cross-run"
+        ];
+        required = false;
+      }
+      {
+        name = "SERVICE_OWNER_SCOPE";
+        type = "enum";
+        values = [
+          "ephemeral"
+          "persistent"
+        ];
+        required = false;
+      }
+      {
+        name = "SERVICE_DISCOVERY_SCOPE";
+        type = "enum";
+        values = [
+          "local"
+          "global"
+        ];
+        required = false;
+      }
+    ];
+  };
+in
 {
   commands = {
     dev = {
@@ -31,6 +126,8 @@
           "MFM_ENV=dev NIX_ENV=2 nix run .#dev"
         ];
         category = "core";
+        allowUnknownArgs = false;
+        failureCodes = failureCodesCargo;
         idempotent = false;
       };
       env = {
@@ -75,13 +172,14 @@
       api = lib.appApi.mkApi {
         name = "mfm_cli";
         summary = "Run mfm_cli";
-        details = "Runs the CLI binary via `cargo run` inside the pinned Nix environment.";
+        details = "Runs the CLI binary via `cargo run` inside the pinned Nix environment. Passthrough wrapper: arguments after `--` are forwarded unchanged.";
         usage = [
           "nix run .#mfm_cli -- --help"
           "nix run .#mfm_cli -- <args>"
         ];
         category = "core";
         allowUnknownArgs = true;
+        failureCodes = failureCodesCargo;
       };
       env = { };
       useDeps = true;
@@ -162,8 +260,11 @@
             description = "Optional process-first policy override (local|global).";
           }
         ];
-        allowUnknownArgs = true;
+        allowUnknownArgs = false;
         outputsMode = "json";
+        failureCodes = failureCodesCargo;
+        idempotent = false;
+        appContract = snapshotAppContract;
       };
       env = {
         "${project.envVar}" = "dev";
@@ -367,13 +468,14 @@
       api = lib.appApi.mkApi {
         name = "mfm_rest_api";
         summary = "Run mfm_rest_api";
-        details = "Runs the REST API server via `cargo run` inside the pinned Nix environment.";
+        details = "Runs the REST API server via `cargo run` inside the pinned Nix environment. Passthrough wrapper: arguments after `--` are forwarded unchanged.";
         usage = [
           "nix run .#mfm_rest_api"
           "nix run .#mfm_rest_api -- <args>"
         ];
         category = "core";
         allowUnknownArgs = true;
+        failureCodes = failureCodesCargo;
       };
       env = { };
       useDeps = true;
