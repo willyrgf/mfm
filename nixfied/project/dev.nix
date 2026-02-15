@@ -1,11 +1,11 @@
-{ project, ... }:
+{ project, lib, ... }:
 
 {
   commands = {
     dev = {
       description = "Start the dev workflow";
-      api = {
-        version = 1;
+      api = lib.appApi.mkApi {
+        name = "dev";
         summary = "Start the dev workflow (Postgres + MinIO + Reth + REST API)";
         details = ''
           Starts Postgres, MinIO (S3), Reth, and the REST API for local development.
@@ -31,6 +31,7 @@
           "MFM_ENV=dev NIX_ENV=2 nix run .#dev"
         ];
         category = "core";
+        idempotent = false;
       };
       env = {
         "${project.envVar}" = "dev";
@@ -71,8 +72,8 @@
 
     mfm_cli = {
       description = "Run mfm_cli (Cargo run)";
-      api = {
-        version = 1;
+      api = lib.appApi.mkApi {
+        name = "mfm_cli";
         summary = "Run mfm_cli";
         details = "Runs the CLI binary via `cargo run` inside the pinned Nix environment.";
         usage = [
@@ -80,6 +81,7 @@
           "nix run .#mfm_cli -- <args>"
         ];
         category = "core";
+        allowUnknownArgs = true;
       };
       env = { };
       useDeps = true;
@@ -90,8 +92,8 @@
 
     "mfm::portfolio::snapshot" = {
       description = "Snapshot a wallet via Helios-backed mainnet RPC (starts Postgres + Helios)";
-      api = {
-        version = 1;
+      api = lib.appApi.mkApi {
+        name = "mfm::portfolio::snapshot";
         summary = "Snapshot an Ethereum wallet portfolio (Helios-backed)";
         details = ''
           Starts Postgres + Helios (local JSON-RPC), then runs:
@@ -126,7 +128,7 @@
         category = "mfm";
         args = [
           {
-            name = "<ADDRESS>";
+            name = "address";
             description = "Ethereum address (0x...) to snapshot.";
           }
         ];
@@ -160,6 +162,8 @@
             description = "Optional process-first policy override (local|global).";
           }
         ];
+        allowUnknownArgs = true;
+        outputsMode = "json";
       };
       env = {
         "${project.envVar}" = "dev";
@@ -360,8 +364,8 @@
 
     mfm_rest_api = {
       description = "Run mfm_rest_api (Cargo run)";
-      api = {
-        version = 1;
+      api = lib.appApi.mkApi {
+        name = "mfm_rest_api";
         summary = "Run mfm_rest_api";
         details = "Runs the REST API server via `cargo run` inside the pinned Nix environment.";
         usage = [
@@ -369,6 +373,7 @@
           "nix run .#mfm_rest_api -- <args>"
         ];
         category = "core";
+        allowUnknownArgs = true;
       };
       env = { };
       useDeps = true;

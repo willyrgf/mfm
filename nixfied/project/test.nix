@@ -1,11 +1,11 @@
-{ project, ... }:
+{ project, lib, ... }:
 
 {
   commands = {
     test = {
       description = "Run tests";
-      api = {
-        version = 1;
+      api = lib.appApi.mkApi {
+        name = "test";
         summary = "Run tests (nextest)";
         details = "Runs the full workspace test suite using cargo-nextest.";
         usage = [ "nix run .#test" ];

@@ -33,6 +33,7 @@
           summary,
           details,
           usage ? [ "nix run .#${name}" ],
+          allowUnknownArgs ? false,
           script,
         }:
         lib.appApi.mkNixfiedApp {
@@ -44,12 +45,16 @@
             PC_DISABLE_TUI = "1";
           };
           useDeps = false;
-          api = {
-            version = 1;
-            summary = summary;
-            details = details;
-            usage = usage;
+          api = lib.appApi.mkApi {
+            inherit
+              name
+              summary
+              details
+              usage
+              allowUnknownArgs
+              ;
             category = "supervisor";
+            idempotent = false;
           };
         };
     in
@@ -106,6 +111,7 @@
         summary = "Show service logs (prod)";
         details = "Streams logs for supervisor-managed services, forcing the production environment (MFM_ENV=prod). Arguments are forwarded to the hook.";
         usage = [ "nix run .#svc-logs -- <args>" ];
+        allowUnknownArgs = true;
         script = ''run_hook SUPERVISOR_LOGS "$@"'';
       };
 
@@ -114,6 +120,7 @@
         summary = "Restart a service (prod)";
         details = "Restarts a supervisor-managed service, forcing the production environment (MFM_ENV=prod). Arguments are forwarded to the hook.";
         usage = [ "nix run .#svc-restart -- <args>" ];
+        allowUnknownArgs = true;
         script = ''
           set -euo pipefail
           if [ -n "''${1:-}" ]; then
@@ -131,12 +138,14 @@
         name = "evm-contract-artifact-configurable-counter";
         env = { };
         useDeps = true;
-        api = {
-          version = 1;
+        api = lib.appApi.mkApi {
+          name = "evm-contract-artifact-configurable-counter";
           summary = "Build ConfigurableCounter artifact JSON";
           details = "Compiles contracts/src/ConfigurableCounter.sol with Foundry and prints compact JSON {artifact:{abi,bytecode.object}} to stdout.";
           usage = [ "nix run .#evm-contract-artifact-configurable-counter" ];
           category = "evm";
+          allowUnknownArgs = true;
+          outputsMode = "json";
         };
         script = ''
           exec mfm-contract-artifact-configurable-counter "$@"
@@ -147,12 +156,14 @@
         name = "evm-contract-artifact-mock-erc20";
         env = { };
         useDeps = true;
-        api = {
-          version = 1;
+        api = lib.appApi.mkApi {
+          name = "evm-contract-artifact-mock-erc20";
           summary = "Build MockERC20 artifact JSON";
           details = "Compiles contracts/src/MockERC20.sol with Foundry and prints compact JSON {artifact:{abi,bytecode.object}} to stdout.";
           usage = [ "nix run .#evm-contract-artifact-mock-erc20" ];
           category = "evm";
+          allowUnknownArgs = true;
+          outputsMode = "json";
         };
         script = ''
           exec mfm-contract-artifact-mock-erc20 "$@"

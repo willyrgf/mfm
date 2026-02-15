@@ -61,6 +61,9 @@ nix run .#ci -- --parity --summary
   - `nix run .#process::status -- --all`
   - `nix run .#process::runs -- --all`
   - `nix run .#process::inspect -- <id>`
+  - `nix run .#process::stop -- --run-id <id>`
+  - `nix run .#process::stop -- --run-id <id> --scope slot-env`
+  - `nix run .#process::stop -- --run-id <id> --dry-run`
 - Service diagnostics:
   - `nix run .#service::postgres::events -- --limit 100`
   - `nix run .#service::postgres::log -- --lines 200`

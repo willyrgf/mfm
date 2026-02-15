@@ -1,11 +1,11 @@
-{ project, ... }:
+{ project, lib, ... }:
 
 {
   commands = {
     check = {
       description = "Run quality checks";
-      api = {
-        version = 1;
+      api = lib.appApi.mkApi {
+        name = "check";
         summary = "Run fmt + clippy (nightly)";
         details = "Runs rustfmt and clippy using the pinned nightly toolchain (via cargo-nightly).";
         usage = [ "nix run .#check" ];
@@ -23,8 +23,8 @@
 
     discovery-refresh = {
       description = "Regenerate discovery artifacts";
-      api = {
-        version = 1;
+      api = lib.appApi.mkApi {
+        name = "discovery-refresh";
         summary = "Refresh docs/repo-index.json and docs/repo-map.md";
         details = "Runs the quality check command with --refresh-discovery so discovery artifacts are regenerated.";
         usage = [ "nix run .#discovery-refresh" ];

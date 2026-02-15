@@ -1,11 +1,11 @@
-{ project, ... }:
+{ project, lib, ... }:
 
 {
   commands = {
     ci = {
       description = "Run the CI pipeline";
-      api = {
-        version = 1;
+      api = lib.appApi.mkApi {
+        name = "ci";
         summary = "Run the CI pipeline";
         details = ''
           Runs the CI pipeline defined in `nixfied/project/ci.nix` (modes + steps).
@@ -42,12 +42,20 @@
         ];
         args = [
           {
-            name = "--basic|--audit|--parity";
-            description = "Select CI mode (configured in nixfied/project/ci.nix).";
+            name = "--basic";
+            description = "Select basic mode.";
           }
           {
-            name = "--mode <name>";
-            description = "Select CI mode by name.";
+            name = "--audit";
+            description = "Select audit mode.";
+          }
+          {
+            name = "--parity";
+            description = "Select parity mode.";
+          }
+          {
+            name = "--mode";
+            description = "Select CI mode by name (value: <name>).";
           }
           {
             name = "--summary";
@@ -58,8 +66,12 @@
             description = "Run CI in background via the run registry.";
           }
           {
-            name = "--verbose|--debug";
+            name = "--verbose";
             description = "Enable debug logging for framework and CI teardown diagnostics.";
+          }
+          {
+            name = "--debug";
+            description = "Alias for --verbose debug logging.";
           }
         ];
         env = [
@@ -89,6 +101,8 @@
           }
         ];
         category = "core";
+        allowUnknownArgs = true;
+        idempotent = false;
       };
       env = {
         "${project.envVar}" = "test";
