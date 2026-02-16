@@ -562,7 +562,7 @@ $pid"
             echo "$ci_contract" | jq -e '.commandClass == "batch-runner" and .allowUnknownArgs == false' >/dev/null
             echo "$ci_contract" | jq -e '.args[] | select(.name == "mode") | .kind == "option" and .type == "enum" and (.values | index("basic") != null)' >/dev/null
             echo "$ci_contract" | jq -e '.args[] | select(.name == "mode") | (.values | sort) == ["audit","basic","mainnet","parity"]' >/dev/null
-            echo "$ci_contract" | jq -e '.args[] | select(.name == "basic") | .kind == "flag" and .type == "bool"' >/dev/null
+            echo "$ci_contract" | jq -e '[.args[] | select((.name == "basic" or .name == "mode_basic") and .kind == "flag" and .type == "bool")] | length > 0' >/dev/null
             echo "$check_contract" | jq -e '.commandClass == "typed" and .allowUnknownArgs == false and .outputs.mode == "text"' >/dev/null
             echo "$snapshot_contract" | jq -e '.commandClass == "json" and .allowUnknownArgs == false and .outputs.mode == "json"' >/dev/null
             echo "$run_start_contract" | jq -e '.commandClass == "json" and .allowUnknownArgs == false and .outputs.mode == "json"' >/dev/null

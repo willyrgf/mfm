@@ -57,6 +57,8 @@ nix run .#ci -- --mode basic --summary
 - Workflow-oriented strict json apps are available under `mfm::keystore::*` and `mfm::run::*`.
 - `nix run .#help` currently lists project commands + module apps; invoke `mfm::keystore::*` and `mfm::run::*` apps directly by name.
 - CI help/docs metadata comes from `nixfied/project/ci.nix` at `commands.ci.api`, and is mirrored into `apps.<system>.ci.meta.nixfied.api`.
+- Project scripts should prefer framework policy helpers (for example `start_service_should_register_cleanup`) over duplicating `SERVICE_*` policy matrix logic.
+- `nix run .#dev` intentionally uses `start_service ... --cleanup` for deterministic teardown.
 
 ### Reliability improvements:
 
