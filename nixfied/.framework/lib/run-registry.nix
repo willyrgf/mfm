@@ -7,7 +7,9 @@
 let
   projectId = (project.project or { }).id or "project";
   runsRoot = (project.ci or { }).runsRoot or "/tmp/${projectId}-runs";
-  id = import ./id.nix { inherit pkgs; };
+  id = import ./id.nix {
+    inherit pkgs project;
+  };
 
   runRegistryStart = pkgs.writeShellScript "run-registry-start" ''
     set -euo pipefail
@@ -33,7 +35,8 @@ let
     fi
 
     RUNS_ROOT="${runsRoot}"
-    RUN_ID="$(${id.resolveId})"
+    PLAN_ID="''${NIXFIED_PLAN_ID:-}"
+    RUN_ID="$(${id.resolveId} "''${RUN_ID:-}" "$PLAN_ID")"
     RUN_DIR="$RUNS_ROOT/$RUN_ID"
 
     mkdir -p "$RUN_DIR"
@@ -56,11 +59,13 @@ let
       --arg run_id "$RUN_ID" \
       --arg target "$NAME" \
       --arg started_at "$(${pkgs.coreutils}/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg plan_id "$PLAN_ID" \
       --arg slot "$SLOT_INFO" \
       --arg env "$ENV_INFO" \
       '
       {
         run_id: $run_id,
+        plan_id: (if $plan_id == "" then null else $plan_id end),
         target: $target,
         status: "starting",
         started_at: $started_at,

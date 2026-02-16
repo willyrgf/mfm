@@ -84,7 +84,6 @@ let
       service,
       summaryName,
       logScript,
-      logsScript ? logScript,
       eventsScript,
     }:
     {
@@ -94,13 +93,6 @@ let
         summary = "Show ${summaryName} log";
         details = "Shows ${summaryName} runtime log for the current slot/environment.";
         usage = [ "nix run .#service::${service}::log -- [--lines N] [--follow]" ];
-      };
-      logs = {
-        script = logsScript;
-        hook = "LOGS";
-        summary = "Alias for service::${service}::log";
-        details = "Compatibility alias for service::${service}::log.";
-        usage = [ "nix run .#service::${service}::logs -- [--lines N] [--follow]" ];
       };
       events = {
         script = eventsScript;

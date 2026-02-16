@@ -33,7 +33,6 @@ let
     service = "minio";
     summaryName = "MinIO";
     logScript = log;
-    logsScript = logs;
     eventsScript = events;
   };
   bucketMgmt = import ./bucket-management.nix {
@@ -45,16 +44,22 @@ let
       ;
   };
 
-  publicApi = serviceApi.mkServiceApi {
+  publicApi = serviceApi.mkServiceApiV2 {
     service = "minio";
     summary = "MinIO service management API";
     details = "Public service contract for managing MinIO across dev/prod/test/ci.";
+    profiles = [
+      "dev"
+      "prod"
+      "test"
+      "ci"
+    ];
     artifacts = {
       apiPortVar = slots.portVarName config.portKeyApi;
       consolePortVar = slots.portVarName config.portKeyConsole;
       dataDir = slots.getServiceDir config.dataDirName;
     };
-    coreOps = {
+    operations = {
       init = {
         script = lifecycle.init;
         summary = "Initialize MinIO data directories";
@@ -90,8 +95,6 @@ let
         summary = "Validate MinIO configuration";
         details = "Validates MinIO binary and runtime configuration directories.";
       };
-    };
-    extensions = {
       full-start = {
         script = lifecycle.fullStart;
         hook = "FULL_START";
@@ -151,7 +154,8 @@ let
         details = "Applies a JSON policy file to a MinIO bucket.";
         usage = [ "nix run .#service::minio::policy-apply -- <bucket> <policy-file>" ];
       };
-    } // logEventExtensions;
+    }
+    // logEventExtensions;
   };
 in
 {

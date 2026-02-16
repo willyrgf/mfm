@@ -187,11 +187,10 @@ let
     service = "postgres";
     summaryName = "PostgreSQL";
     logScript = log;
-    logsScript = logs;
     eventsScript = events;
   };
 
-  publicApi = serviceApi.mkServiceApi {
+  publicApi = serviceApi.mkServiceApiV2 {
     service = "postgres";
     summary = "PostgreSQL service management API";
     details = "Public service contract for managing PostgreSQL across dev/prod/test/ci.";
@@ -202,7 +201,7 @@ let
       defaultDatabase = pgDatabase;
       testDatabase = testDatabase;
     };
-    coreOps = {
+    operations = {
       init = {
         script = lifecycle.init;
         summary = "Initialize PostgreSQL data directory";
@@ -238,8 +237,8 @@ let
         summary = "Validate PostgreSQL configuration";
         details = "Validates postgresql.conf for the current slot and environment.";
       };
-    };
-    extensions = {
+    }
+    // {
       setup-db = {
         script = lifecycle.setupDb;
         hook = "SETUP_DB";
@@ -339,7 +338,8 @@ let
         details = "Opens psql connected to the configured slot/environment database.";
         usage = [ "nix run .#service::postgres::shell -- <psql-args>" ];
       };
-    } // logEventExtensions;
+    }
+    // logEventExtensions;
   };
 in
 {

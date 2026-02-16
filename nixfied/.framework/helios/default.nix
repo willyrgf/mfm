@@ -38,11 +38,10 @@ let
     service = "helios";
     summaryName = "Helios";
     logScript = log;
-    logsScript = logs;
     eventsScript = events;
   };
 
-  publicApi = serviceApi.mkServiceApi {
+  publicApi = serviceApi.mkServiceApiV2 {
     service = "helios";
     summary = "Helios service management API";
     details = "Public service contract for managing Helios across dev/prod/test/ci.";
@@ -52,7 +51,7 @@ let
       dataDir = slots.getServiceDir config.dataDirName;
       network = config.network;
     };
-    coreOps = {
+    operations = {
       init = {
         script = lifecycle.init;
         summary = "Initialize Helios runtime directories";
@@ -88,8 +87,8 @@ let
         summary = "Validate Helios configuration";
         details = "Validates Helios binary availability and required runtime configuration.";
       };
-    };
-    extensions = {
+    }
+    // {
       full-start = {
         script = lifecycle.fullStart;
         hook = "FULL_START";
@@ -117,7 +116,8 @@ let
           - `HELIOS_READY_INTERVAL_SECS` (default: 1)
         '';
       };
-    } // logEventExtensions;
+    }
+    // logEventExtensions;
   };
 in
 {

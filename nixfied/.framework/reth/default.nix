@@ -33,11 +33,10 @@ let
     service = "reth";
     summaryName = "Reth";
     logScript = log;
-    logsScript = logs;
     eventsScript = events;
   };
 
-  publicApi = serviceApi.mkServiceApi {
+  publicApi = serviceApi.mkServiceApiV2 {
     service = "reth";
     summary = "Reth service management API";
     details = "Public service contract for managing Reth across dev/prod/test/ci.";
@@ -49,7 +48,7 @@ let
       network = config.network;
       devMode = config.devMode;
     };
-    coreOps = {
+    operations = {
       init = {
         script = lifecycle.init;
         summary = "Initialize Reth runtime directories";
@@ -85,8 +84,8 @@ let
         summary = "Validate Reth configuration";
         details = "Validates Reth binary availability and runtime configuration basics.";
       };
-    };
-    extensions = {
+    }
+    // {
       full-start = {
         script = lifecycle.fullStart;
         hook = "FULL_START";
@@ -105,7 +104,8 @@ let
         summary = "Wait for Reth readiness";
         details = "Checks that Reth responds on the configured HTTP RPC port.";
       };
-    } // logEventExtensions;
+    }
+    // logEventExtensions;
   };
 in
 {

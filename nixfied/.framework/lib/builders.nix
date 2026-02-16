@@ -5,6 +5,7 @@
   shellContract,
   fixtureLib,
   loadEnv,
+  loadEnvFile ? null,
   helpersScript,
   hookExports,
 }:
@@ -66,7 +67,10 @@ let
         script = script;
       };
       contractFile =
-        if appContract == null then null else pkgs.writeText "${name}-app-contract.json" (builtins.toJSON appContract);
+        if appContract == null then
+          null
+        else
+          pkgs.writeText "${name}-app-contract.json" (builtins.toJSON appContract);
       contractPrelude =
         if appContract == null then
           ""

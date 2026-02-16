@@ -52,10 +52,10 @@ let
 
     usage() {
       cat <<'EOF'
-    Usage: nix run .#framework::test [--profile ci|full] [--jobs <n>] [--serial] [--shard <name>] [--list-shards] [--summary-json <path>]
+    Usage: nix run .#framework::test [--profile ci] [--jobs <n>] [--serial] [--shard <name>] [--list-shards] [--summary-json <path>]
 
     Options:
-      --profile <name>      Test profile to run. Use ci (default). full is a deprecated alias for ci.
+      --profile <name>      Test profile to run. Use ci (default).
       --jobs <n>            Number of shard workers (default: 2).
       --serial              Run all shards serially (same as --jobs 1).
       --shard <name>        Run one shard only.
@@ -102,11 +102,11 @@ let
           case "$PROFILE" in
             ci) ;;
             full)
-              echo "WARN: profile 'full' is deprecated; using 'ci'. Set FRAMEWORK_ISOLATION=1 to include isolation."
-              PROFILE="ci"
+              echo "ERROR: profile 'full' is no longer supported; use --profile ci." >&2
+              exit 1
               ;;
             *)
-              echo "Unknown profile: $PROFILE (expected: ci|full)" >&2
+              echo "Unknown profile: $PROFILE (expected: ci)" >&2
               exit 1
               ;;
           esac
@@ -554,6 +554,17 @@ let
     fi
 
     if should_run_shard "helpers"; then
+    log "framework::test profile validation"
+    PROFILE_FULL_LOG="$WORKDIR/framework-test-profile-full.log"
+    set +e
+    nix run "path:$ROOT"#framework::test -- --profile full --list-shards >"$PROFILE_FULL_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected framework::test --profile full to fail"
+    fi
+    assert_contains "$PROFILE_FULL_LOG" "profile 'full' is no longer supported"
+
     log "helpers runtime"
     HELPERS_DIR="$WORKDIR/helpers"
     mkdir -p "$HELPERS_DIR"
@@ -1684,6 +1695,17 @@ let
     assert_file_exists "$INSTALL_TARGET/nixfied/VENDORED.txt"
     assert_contains "$INSTALL_TARGET/nixfied/VENDORED.txt" "Framework source revision"
 
+    log "installer rejects removed --sync option"
+    INSTALL_SYNC_LOG="$WORKDIR/install-sync-removed.log"
+    set +e
+    (cd "$INSTALL_TARGET" && nix run "path:$ROOT"#framework::install -- --sync >"$INSTALL_SYNC_LOG" 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected framework::install --sync to fail"
+    fi
+    assert_contains "$INSTALL_SYNC_LOG" "unsupported option: --sync"
+
     log "installer worktree"
     INSTALL_WT_BASE="$WORKDIR/install-worktree"
     init_repo "$INSTALL_WT_BASE"
@@ -1838,16 +1860,16 @@ let
     in
       pkgs.writeText "service-api-validated" (builtins.toJSON (serviceApi.validateServiceApis {
         postgres = {
-          version = 1;
+          version = 2;
           service = "postgres";
           summary = "bad contract";
-          details = "missing required core ops and ci profile";
-          profiles = [ "dev" "prod" "test" ];
-          coreOps = {
-            init = {
+          details = "missing required lifecycle op and malformed op entry";
+          operations = {
+            start = "not-an-op";
+            status = {
               script = "/bin/true";
-              summary = "init";
-              details = "init";
+              summary = "status";
+              details = "status";
             };
           };
           artifacts = { };
@@ -1864,8 +1886,47 @@ let
       fail "expected service API contract violation to fail"
     fi
     assert_contains "$BAD_SERVICE_API_LOG" "Nixfied service API contract violated"
-    assert_contains "$BAD_SERVICE_API_LOG" "publicApi.profiles missing required values: ci"
-    assert_contains "$BAD_SERVICE_API_LOG" "publicApi.coreOps missing required ops"
+    assert_contains "$BAD_SERVICE_API_LOG" "publicApi.operations missing required lifecycle ops: stop"
+    assert_contains "$BAD_SERVICE_API_LOG" "postgres.start: op must be an attribute set"
+
+    BAD_SERVICE_API_V1_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      serviceApi = import ./nixfied/.framework/lib/service-api.nix { inherit pkgs; };
+      mkOp = name: {
+        script = "/bin/true";
+        summary = name;
+        details = name;
+      };
+    in
+      pkgs.writeText "service-api-v1-validated" (builtins.toJSON (serviceApi.validateServiceApis {
+        postgres = {
+          version = 1;
+          service = "postgres";
+          summary = "legacy contract";
+          details = "version 1 contracts are no longer supported";
+          operations = {
+            start = mkOp "start";
+            stop = mkOp "stop";
+            status = mkOp "status";
+          };
+          artifacts = { };
+        };
+      }))
+    NIX
+    )
+    BAD_SERVICE_API_V1_LOG="$WORKDIR/bad-service-api-v1-contract.log"
+    set +e
+    build_expr "$BAD_SERVICE_API_V1_EXPR" > "$BAD_SERVICE_API_V1_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected version=1 service API contract violation to fail"
+    fi
+    assert_contains "$BAD_SERVICE_API_V1_LOG" "Nixfied service API contract violated"
+    assert_contains "$BAD_SERVICE_API_V1_LOG" "publicApi.version must be 2"
 
     log "installer upgrade preserves project"
     echo "# NIXFIED_UPGRADE_TEST_MARKER" >> "$INSTALL_TARGET/nixfied/project/conf.nix"
@@ -3069,6 +3130,11 @@ let
     assert_contains "$MODAPP_NAMES_FILE" "service::reth::full-start-test"
     assert_contains "$MODAPP_NAMES_FILE" "service::helios::full-start"
     assert_contains "$MODAPP_NAMES_FILE" "service::helios::full-start-test"
+    assert_not_contains "$MODAPP_NAMES_FILE" "service::postgres::logs"
+    assert_not_contains "$MODAPP_NAMES_FILE" "service::nginx::logs"
+    assert_not_contains "$MODAPP_NAMES_FILE" "service::minio::logs"
+    assert_not_contains "$MODAPP_NAMES_FILE" "service::reth::logs"
+    assert_not_contains "$MODAPP_NAMES_FILE" "service::helios::logs"
     assert_contains "$MODAPP_NAMES_FILE" "up"
     assert_contains "$MODAPP_NAMES_FILE" "svc-health"
     assert_contains "$MODAPP_NAMES_FILE" "check-ports"

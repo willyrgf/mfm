@@ -175,11 +175,10 @@ let
     service = "nginx";
     summaryName = "nginx";
     logScript = log;
-    logsScript = logs;
     eventsScript = events;
   };
 
-  publicApi = serviceApi.mkServiceApi {
+  publicApi = serviceApi.mkServiceApiV2 {
     service = "nginx";
     summary = "Nginx service management API";
     details = "Public service contract for managing nginx across dev/prod/test/ci.";
@@ -188,7 +187,7 @@ let
       httpsPortVar = portVarHttps;
       dataDir = nginxDirExpr;
     };
-    coreOps = {
+    operations = {
       init = {
         script = lifecycle.init;
         summary = "Initialize nginx directories and config";
@@ -224,8 +223,8 @@ let
         summary = "Validate nginx configuration";
         details = "Runs nginx config validation for the current slot and environment.";
       };
-    };
-    extensions = {
+    }
+    // {
       reload = {
         script = lifecycle.reload;
         summary = "Reload nginx configuration";
@@ -312,7 +311,8 @@ let
         summary = "Show SSL certificate status";
         details = "Prints certificate status for configured domains.";
       };
-    } // logEventExtensions;
+    }
+    // logEventExtensions;
   };
 in
 {

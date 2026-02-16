@@ -20,7 +20,12 @@ let
     inherit pkgs project;
     inherit shellContract;
     fixtureLib = fixtures;
-    inherit (helpers) loadEnv helpersScript hookExports;
+    inherit (helpers)
+      loadEnv
+      loadEnvFile
+      helpersScript
+      hookExports
+      ;
   };
   appApi = import ./app-api.nix {
     inherit pkgs;
@@ -32,14 +37,24 @@ let
   };
   discovery = import ./discovery.nix { inherit pkgs project; };
   process = import ./process.nix { inherit pkgs; };
-  id = import ./id.nix { inherit pkgs; };
+  id = import ./id.nix {
+    inherit pkgs project;
+  };
   processRegistry = import ./process-registry.nix { inherit pkgs project; };
   portUtils = import ./port-utils.nix { inherit pkgs; };
   parallel = import ./parallel.nix { inherit pkgs; };
   runRegistry = import ./run-registry.nix { inherit pkgs project; };
+  executionCore = import ./execution-core.nix {
+    inherit pkgs project;
+  };
 in
 {
-  inherit (helpers) loadEnv helpersScript hookExports;
+  inherit (helpers)
+    loadEnv
+    loadEnvFile
+    helpersScript
+    hookExports
+    ;
   inherit (summary) summaryParser;
   inherit (builders)
     withTiming
@@ -53,7 +68,12 @@ in
   inherit serviceApi;
   inherit discovery;
   inherit (process) mkSignalHandler mkProcessManager;
-  inherit (id) mkUniqueId resolveId;
+  inherit (id)
+    mkPlanId
+    mkUniqueId
+    mkRunId
+    resolveId
+    ;
   inherit (processRegistry)
     processStatus
     processSlots
@@ -70,4 +90,5 @@ in
   inherit (portUtils) mkPortCleanup mkPortConflictChecker;
   inherit (parallel) mkParallelRunner;
   inherit (runRegistry) runRegistryStart;
+  inherit (executionCore) runPlan;
 }

@@ -6,27 +6,16 @@
 }:
 
 let
+  envLoader = import ./env-loader.nix { inherit pkgs; };
   hookEnv = hooks.env or { };
   hookExports = pkgs.lib.concatMapStringsSep "\n" (key: ''
     # Always pin framework hook paths for deterministic app behavior.
     # User shell/.env hook overrides can route commands to stale scripts.
     export ${key}="${toString hookEnv.${key}}"
-  '') (builtins.attrNames hookEnv);
+  '') (pkgs.lib.sort (a: b: a < b) (builtins.attrNames hookEnv));
 
-  # Script to load .env if it exists (does not override existing env vars)
-  loadEnv = pkgs.writeShellScript "load-env" ''
-    if [ -f ".env" ]; then
-      while IFS='=' read -r key value || [ -n "$key" ]; do
-        case "$key" in
-          \#*|"") continue ;;
-        esac
-        value=$(echo "$value" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
-        if [ -z "''${!key:-}" ]; then
-          export "$key=$value"
-        fi
-      done < .env
-    fi
-  '';
+  loadEnv = envLoader.loadEnv;
+  loadEnvFile = envLoader.loadEnvFile;
 
   helpersScript = pkgs.writeShellScript "framework-helpers" ''
     # require_env VAR [message]
@@ -396,12 +385,12 @@ let
 
       local pid=""
       if [ -n "$logfile" ]; then
-        if ! NIXFIED_FIXTURE_MANAGED_CLEANUP=1 start_service_into pid "$service" --log "$logfile" -- "$start_cmd"; then
+        if ! NIXFIED_START_SERVICE_MANAGED_CLEANUP=1 start_service_into pid "$service" --log "$logfile" -- "$start_cmd"; then
           echo "ERROR: fixture service start failed service=$service hook=$start_hook" >&2
           return 1
         fi
       else
-        if ! NIXFIED_FIXTURE_MANAGED_CLEANUP=1 start_service_into pid "$service" -- "$start_cmd"; then
+        if ! NIXFIED_START_SERVICE_MANAGED_CLEANUP=1 start_service_into pid "$service" -- "$start_cmd"; then
           echo "ERROR: fixture service start failed service=$service hook=$start_hook" >&2
           return 1
         fi
@@ -569,6 +558,244 @@ let
       fi
     }
 
+    _start_service_policy_any_set() {
+      [ -n "''${SERVICE_OWNER_SCOPE:-}" ] || [ -n "''${SERVICE_REUSE_POLICY:-}" ] || [ -n "''${SERVICE_DISCOVERY_SCOPE:-}" ]
+    }
+
+    _start_service_is_truthy() {
+      case "''${1:-}" in
+        1|true|TRUE|yes|YES|on|ON)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+    }
+
+    _start_service_infer_owner_scope_from_reuse_policy() {
+      case "''${SERVICE_REUSE_POLICY:-}" in
+        same-slot|cross-run)
+          echo "persistent"
+          ;;
+        same-root)
+          echo "ephemeral"
+          ;;
+        *)
+          echo ""
+          ;;
+      esac
+    }
+
+    _start_service_infer_discovery_scope_from_reuse_policy() {
+      case "''${SERVICE_REUSE_POLICY:-}" in
+        same-slot|cross-run)
+          echo "global"
+          ;;
+        same-root)
+          echo "local"
+          ;;
+        *)
+          echo ""
+          ;;
+      esac
+    }
+
+    _start_service_infer_owner_scope() {
+      local from_reuse=""
+      if [ -n "''${SERVICE_OWNER_SCOPE:-}" ]; then
+        echo "$SERVICE_OWNER_SCOPE"
+        return 0
+      fi
+
+      from_reuse="$(_start_service_infer_owner_scope_from_reuse_policy)"
+      if [ -n "$from_reuse" ]; then
+        echo "$from_reuse"
+        return 0
+      fi
+
+      case "''${SERVICE_DISCOVERY_SCOPE:-}" in
+        global)
+          echo "persistent"
+          ;;
+        local)
+          echo "ephemeral"
+          ;;
+        *)
+          echo ""
+          ;;
+      esac
+    }
+
+    _start_service_infer_discovery_scope() {
+      local owner_scope="''${1:-}"
+      local from_reuse=""
+      if [ -n "''${SERVICE_DISCOVERY_SCOPE:-}" ]; then
+        echo "$SERVICE_DISCOVERY_SCOPE"
+        return 0
+      fi
+
+      from_reuse="$(_start_service_infer_discovery_scope_from_reuse_policy)"
+      if [ -n "$from_reuse" ]; then
+        echo "$from_reuse"
+        return 0
+      fi
+
+      case "$owner_scope" in
+        persistent)
+          echo "global"
+          ;;
+        ephemeral)
+          echo "local"
+          ;;
+        *)
+          echo ""
+          ;;
+      esac
+    }
+
+    _start_service_infer_reuse_policy() {
+      local owner_scope="''${1:-}"
+      local discovery_scope="''${2:-}"
+
+      if [ -n "''${SERVICE_REUSE_POLICY:-}" ]; then
+        echo "$SERVICE_REUSE_POLICY"
+        return 0
+      fi
+
+      if [ "$owner_scope" = "persistent" ] || [ "$discovery_scope" = "global" ]; then
+        echo "same-slot"
+        return 0
+      fi
+
+      if [ "$owner_scope" = "ephemeral" ] || [ "$discovery_scope" = "local" ]; then
+        echo "same-root"
+        return 0
+      fi
+
+      echo ""
+      return 0
+    }
+
+    _start_service_validate_policy_matrix() {
+      local reuse="$1"
+      local owner="$2"
+      local discovery="$3"
+
+      case "$reuse" in
+        ""|never|same-root|same-slot|cross-run)
+          ;;
+        *)
+          echo "ERROR: SERVICE_REUSE_POLICY must be one of never|same-root|same-slot|cross-run (got '$reuse')" >&2
+          return 1
+          ;;
+      esac
+
+      case "$owner" in
+        ""|ephemeral|persistent)
+          ;;
+        *)
+          echo "ERROR: SERVICE_OWNER_SCOPE must be ephemeral|persistent (got '$owner')" >&2
+          return 1
+          ;;
+      esac
+
+      case "$discovery" in
+        ""|local|global)
+          ;;
+        *)
+          echo "ERROR: SERVICE_DISCOVERY_SCOPE must be local|global (got '$discovery')" >&2
+          return 1
+          ;;
+      esac
+
+      if [ "$reuse" = "cross-run" ] && { [ "$owner" != "persistent" ] || [ "$discovery" != "global" ]; }; then
+        echo "ERROR: cross-run reuse requires SERVICE_OWNER_SCOPE=persistent and SERVICE_DISCOVERY_SCOPE=global" >&2
+        return 1
+      fi
+
+      if [ "$reuse" = "same-root" ] && { [ "$owner" != "ephemeral" ] || [ "$discovery" != "local" ]; }; then
+        echo "ERROR: same-root reuse requires SERVICE_OWNER_SCOPE=ephemeral and SERVICE_DISCOVERY_SCOPE=local" >&2
+        return 1
+      fi
+
+      if [ -n "$owner" ] && [ -n "$discovery" ]; then
+        if [ "$owner" = "persistent" ] && [ "$discovery" != "global" ]; then
+          echo "ERROR: persistent owner scope requires SERVICE_DISCOVERY_SCOPE=global" >&2
+          return 1
+        fi
+        if [ "$owner" = "ephemeral" ] && [ "$discovery" != "local" ]; then
+          echo "ERROR: ephemeral owner scope requires SERVICE_DISCOVERY_SCOPE=local" >&2
+          return 1
+        fi
+      fi
+
+      return 0
+    }
+
+    # start_service_should_register_cleanup [explicit_mode]
+    # - return 1 to register stop cleanup and 0 to preserve process after command exit.
+    start_service_should_register_cleanup() {
+      local explicit_mode="''${1:-auto}"
+      local owner_scope=""
+      local discovery_scope=""
+      local reuse_policy=""
+
+      case "$explicit_mode" in
+        cleanup)
+          echo "1"
+          return 0
+          ;;
+        keep-running)
+          echo "0"
+          return 0
+          ;;
+        auto)
+          ;;
+        *)
+          echo "ERROR: invalid start_service cleanup mode '$explicit_mode' (expected auto|cleanup|keep-running)" >&2
+          return 1
+          ;;
+      esac
+
+      if _start_service_is_truthy "''${NIXFIED_START_SERVICE_MANAGED_CLEANUP:-0}"; then
+        echo "0"
+        return 0
+      fi
+
+      if ! _start_service_policy_any_set; then
+        echo "1"
+        return 0
+      fi
+
+      owner_scope="$(_start_service_infer_owner_scope)"
+      discovery_scope="$(_start_service_infer_discovery_scope "$owner_scope")"
+      reuse_policy="$(_start_service_infer_reuse_policy "$owner_scope" "$discovery_scope")"
+
+      _start_service_validate_policy_matrix "$reuse_policy" "$owner_scope" "$discovery_scope" || return 1
+
+      case "$reuse_policy" in
+        same-slot|cross-run)
+          echo "0"
+          ;;
+        never|same-root)
+          echo "1"
+          ;;
+        "")
+          if [ "$owner_scope" = "persistent" ] || [ "$discovery_scope" = "global" ]; then
+            echo "0"
+          else
+            echo "1"
+          fi
+          ;;
+        *)
+          echo "ERROR: unresolved start_service reuse policy '$reuse_policy'" >&2
+          return 1
+          ;;
+      esac
+      return 0
+    }
+
     # start_service NAME [opts] -- <command...>
     # - run a background service with optional logging and readiness checks.
     start_service() {
@@ -576,7 +803,7 @@ let
       shift || true
 
       if [ -z "$name" ]; then
-        echo "usage: start_service <name> [--log <file>] [--cwd <dir>] [--wait-http <url>] [--wait-port <port>] [--timeout <s>] [--interval <s>] -- <command...>" >&2
+        echo "usage: start_service <name> [--log <file>] [--cwd <dir>] [--wait-http <url>] [--wait-port <port>] [--timeout <s>] [--interval <s>] [--keep-running|--cleanup] -- <command...>" >&2
         return 1
       fi
 
@@ -586,6 +813,8 @@ let
       local wait_port_num=""
       local timeout="30"
       local interval="1"
+      local cleanup_mode="auto"
+      local register_cleanup="1"
 
       while [ "''$#" -gt 0 ]; do
         case "''$1" in
@@ -613,6 +842,22 @@ let
             interval="$2"
             shift 2
             ;;
+          --keep-running)
+            if [ "$cleanup_mode" = "cleanup" ]; then
+              echo "ERROR: start_service flags --keep-running and --cleanup are mutually exclusive" >&2
+              return 1
+            fi
+            cleanup_mode="keep-running"
+            shift
+            ;;
+          --cleanup)
+            if [ "$cleanup_mode" = "keep-running" ]; then
+              echo "ERROR: start_service flags --keep-running and --cleanup are mutually exclusive" >&2
+              return 1
+            fi
+            cleanup_mode="cleanup"
+            shift
+            ;;
           --)
             shift
             break
@@ -631,6 +876,11 @@ let
       require_positive_number "--interval" "$interval" || return 1
       if [ -n "$wait_port_num" ]; then
         require_port "--wait-port" "$wait_port_num" || return 1
+      fi
+      register_cleanup="$(start_service_should_register_cleanup "$cleanup_mode")" || return 1
+      if [ "$register_cleanup" != "0" ] && [ "$register_cleanup" != "1" ]; then
+        echo "ERROR: start_service cleanup decision must be 0 or 1 (got '$register_cleanup')" >&2
+        return 1
       fi
 
       local in_subshell="false"
@@ -689,9 +939,7 @@ let
       # Avoid registering cleanup in command substitution subshells (they exit immediately).
       # App wrappers that execute command bodies in a dedicated subshell set
       # NIXFIED_CLEANUP_OWNER_BASHPID to the app-body shell BASHPID.
-      # fixture_start_service controls cleanup via keep_running policy and must
-      # suppress start_service auto-cleanup to avoid contradictory registration.
-      if [ "''${NIXFIED_FIXTURE_MANAGED_CLEANUP:-0}" != "1" ] && ( { [ -n "''${NIXFIED_CLEANUP_OWNER_BASHPID:-}" ] && [ -n "''${BASHPID:-}" ] && [ "''${NIXFIED_CLEANUP_OWNER_BASHPID}" = "''${BASHPID}" ]; } || { [ -n "''${BASHPID:-}" ] && [ "''${BASHPID}" = "$$" ]; } ); then
+      if [ "$register_cleanup" = "1" ] && { { [ -n "''${NIXFIED_CLEANUP_OWNER_BASHPID:-}" ] && [ -n "''${BASHPID:-}" ] && [ "''${NIXFIED_CLEANUP_OWNER_BASHPID}" = "''${BASHPID}" ]; } || { [ -n "''${BASHPID:-}" ] && [ "''${BASHPID}" = "$$" ]; }; }; then
         with_cleanup stop_service "$pid" "$name"
       fi
 
@@ -792,5 +1040,10 @@ let
   '';
 in
 {
-  inherit loadEnv helpersScript hookExports;
+  inherit
+    loadEnv
+    loadEnvFile
+    helpersScript
+    hookExports
+    ;
 }

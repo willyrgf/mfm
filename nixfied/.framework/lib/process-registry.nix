@@ -7,7 +7,9 @@
 let
   projectMeta = project.project or { };
   projectId = projectMeta.id or "project";
-  id = import ./id.nix { inherit pkgs; };
+  id = import ./id.nix {
+    inherit pkgs project;
+  };
   projectIdUpper =
     let
       replaced = pkgs.lib.replaceStrings [ "-" "." ] [ "_" "_" ] projectId;
@@ -242,11 +244,23 @@ let
         exec 9>"$lock_file"
         ${pkgs.flock}/bin/flock -x 9
 
-        echo "$payload" >> "$EVENTS_FILE"
+        local next_seq=1
+        local payload_with_seq="$payload"
+        if [ -s "$EVENTS_FILE" ]; then
+          next_seq="$(${pkgs.jq}/bin/jq -sr '
+            if length == 0 then
+              1
+            else
+              ((.[-1].seq // length) + 1)
+            end
+          ' "$EVENTS_FILE")"
+        fi
+        payload_with_seq="$(printf '%s\n' "$payload" | ${pkgs.jq}/bin/jq --arg seq "$next_seq" '.seq = ($seq | tonumber)')"
+        echo "$payload_with_seq" >> "$EVENTS_FILE"
 
         ${pkgs.jq}/bin/jq -s --arg generated_at "$(${pkgs.coreutils}/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" '
           {
-            schema_version: 1,
+            schema_version: 2,
             generated_at: $generated_at,
             totals: { events: length },
             events: .
@@ -270,6 +284,9 @@ let
     EVENT_PROFILE=""
     EVENT_PID=""
     EVENT_PGID=""
+    EVENT_PLAN_ID=""
+    EVENT_UNIT_ID=""
+    EVENT_ATTEMPT=""
     EVENT_OWNER_SCOPE=""
     EVENT_REUSE_POLICY=""
     EVENT_DISCOVERY_SCOPE=""
@@ -292,6 +309,9 @@ let
         --profile) EVENT_PROFILE="$2"; shift 2 ;;
         --pid) EVENT_PID="$2"; shift 2 ;;
         --pgid) EVENT_PGID="$2"; shift 2 ;;
+        --plan-id) EVENT_PLAN_ID="$2"; shift 2 ;;
+        --unit-id) EVENT_UNIT_ID="$2"; shift 2 ;;
+        --attempt) EVENT_ATTEMPT="$2"; shift 2 ;;
         --owner-scope) EVENT_OWNER_SCOPE="$2"; shift 2 ;;
         --reuse-policy) EVENT_REUSE_POLICY="$2"; shift 2 ;;
         --discovery-scope) EVENT_DISCOVERY_SCOPE="$2"; shift 2 ;;
@@ -313,8 +333,35 @@ let
       exit 1
     fi
 
+    if [ -z "$EVENT_PLAN_ID" ]; then
+      EVENT_PLAN_ID="''${NIXFIED_PLAN_ID:-}"
+    fi
+
+    if [ -z "$EVENT_UNIT_ID" ]; then
+      EVENT_UNIT_ID="''${NIXFIED_UNIT_ID:-}"
+    fi
+
+    if [ -z "$EVENT_ATTEMPT" ]; then
+      EVENT_ATTEMPT="''${NIXFIED_UNIT_ATTEMPT:-}"
+    fi
+    if [ -z "$EVENT_ATTEMPT" ]; then
+      EVENT_ATTEMPT="1"
+    fi
+    case "$EVENT_ATTEMPT" in
+      *[!0-9]*|"")
+        echo "ERROR: --attempt must be a positive integer (got '$EVENT_ATTEMPT')" >&2
+        exit 1
+        ;;
+      0)
+        echo "ERROR: --attempt must be >= 1 (got '$EVENT_ATTEMPT')" >&2
+        exit 1
+        ;;
+      *)
+        ;;
+    esac
+
     if [ -z "$EVENT_RUN_ID" ]; then
-      EVENT_RUN_ID="$(${id.resolveId} "''${RUN_ID:-}")"
+      EVENT_RUN_ID="$(${id.resolveId} "''${RUN_ID:-}" "$EVENT_PLAN_ID")"
       export RUN_ID="$EVENT_RUN_ID"
     fi
 
@@ -375,11 +422,14 @@ let
     EVENT_READINESS_READY_NORM="$(normalize_bool "$EVENT_READINESS_READY")"
 
     PAYLOAD=$(${pkgs.jq}/bin/jq -cn \
-      --argjson schema_version 1 \
+      --argjson schema_version 2 \
       --arg event_id "$EVENT_ID" \
       --arg event_type "$EVENT_TYPE" \
       --arg timestamp "$EVENT_TS" \
       --arg run_id "$EVENT_RUN_ID" \
+      --arg plan_id "$EVENT_PLAN_ID" \
+      --arg unit_id "$EVENT_UNIT_ID" \
+      --arg attempt "$EVENT_ATTEMPT" \
       --arg command_name "$EVENT_COMMAND" \
       --arg project_id "$PROJECT_ID" \
       --arg service "$EVENT_SERVICE" \
@@ -405,6 +455,9 @@ let
         event_type: $event_type,
         timestamp: $timestamp,
         run_id: (if $run_id == "" then null else $run_id end),
+        plan_id: (if $plan_id == "" then null else $plan_id end),
+        unit_id: (if $unit_id == "" then null else $unit_id end),
+        attempt: (if $attempt == "" then null else (try ($attempt | tonumber) catch null) end),
         command_name: (if $command_name == "" then null else $command_name end),
         project_id: $project_id,
         service: (if $service == "" then null else $service end),
@@ -470,7 +523,7 @@ let
         (.run_id // "");
 
       def latest_by(f):
-        sort_by(f, (.timestamp // ""))
+        sort_by(f, (.seq // 0), (.timestamp // ""))
         | group_by(f)
         | map(last);
 
@@ -562,7 +615,7 @@ let
         (.run_id // "");
 
       def latest_by(f):
-        sort_by(f, (.timestamp // ""))
+        sort_by(f, (.seq // 0), (.timestamp // ""))
         | group_by(f)
         | map(last);
 
@@ -638,7 +691,7 @@ let
         ((.slot // "") | tostring) + "|" + (.env // "");
 
       def latest_by(f):
-        sort_by(f, (.timestamp // ""))
+        sort_by(f, (.seq // 0), (.timestamp // ""))
         | group_by(f)
         | map(last);
 
@@ -736,8 +789,8 @@ let
       | {
           inspect_id: $id,
           matched_events: ($matched | length),
-          latest: ($matched | sort_by(.timestamp // "") | last),
-          events: ($matched | sort_by(.timestamp // ""))
+          latest: ($matched | sort_by((.seq // 0), (.timestamp // "")) | last),
+          events: ($matched | sort_by((.seq // 0), (.timestamp // "")))
         }
     ' "$EVENTS_FILE"
   '';
@@ -821,13 +874,13 @@ let
         (.run_id // "");
 
       def latest_by(f):
-        sort_by(f, (.timestamp // ""))
+        sort_by(f, (.seq // 0), (.timestamp // ""))
         | group_by(f)
         | map(last);
 
       def target_run:
         [ .[] | select((.run_id // "") == $run_id) ]
-        | sort_by(.timestamp // "")
+        | sort_by((.seq // 0), (.timestamp // ""))
         | last;
 
       (target_run) as $target
@@ -1083,7 +1136,7 @@ let
         (.service // "") + "|" + ((.slot // "") | tostring) + "|" + (.env // "");
 
       def latest_by(f):
-        sort_by(f, (.timestamp // ""))
+        sort_by(f, (.seq // 0), (.timestamp // ""))
         | group_by(f)
         | map(last);
 
@@ -1140,7 +1193,7 @@ let
         (.run_id // "");
 
       def latest_by(f):
-        sort_by(f, (.timestamp // ""))
+        sort_by(f, (.seq // 0), (.timestamp // ""))
         | group_by(f)
         | map(last);
 
@@ -1232,7 +1285,7 @@ let
         | select(($slot == "") or (((.slot // "") | tostring) == $slot))
         | select(($env == "") or ((.env // "") == $env))
       ]
-      | sort_by(.timestamp // "")
+      | sort_by((.seq // 0), (.timestamp // ""))
       | if (($limit | tonumber?) // 0) > 0 then
           .[-(($limit | tonumber?) // 0):]
         else
@@ -1308,7 +1361,7 @@ let
         | select(($env == "") or ((.env // "") == $env))
         | select((.log_path // "") != "")
       ]
-      | sort_by(.timestamp // "")
+      | sort_by((.seq // 0), (.timestamp // ""))
       | (last | .log_path) // ""
     ' "$EVENTS_FILE")
 
@@ -1476,7 +1529,7 @@ let
         | select(($slot == "") or (((.slot // "") | tostring) == $slot))
         | select(($env == "") or ((.env // "") == $env))
       ]
-      | sort_by(.timestamp // "")
+      | sort_by((.seq // 0), (.timestamp // ""))
       | (last // {})
     ' "$EVENTS_FILE")
 
@@ -1509,7 +1562,7 @@ let
         | select(($slot == "") or (((.slot // "") | tostring) == $slot))
         | select(($env == "") or ((.env // "") == $env))
       ]
-      | sort_by(.timestamp // "")
+      | sort_by((.seq // 0), (.timestamp // ""))
       | (last | .run_id) // ""
     ' "$EVENTS_FILE")
 

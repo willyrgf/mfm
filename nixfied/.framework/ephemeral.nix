@@ -45,7 +45,10 @@ let
 
   depsScript = project.install.deps or "";
   runtimePackages = project.tooling.runtimePackages or [ ];
-  id = import ./lib/id.nix { inherit pkgs; };
+  id = import ./lib/id.nix {
+    inherit pkgs project;
+  };
+  envLoader = import ./lib/env-loader.nix { inherit pkgs; };
   processRegistry = import ./lib/process-registry.nix { inherit pkgs project; };
   shellContract = import ./lib/shell-contract.nix { inherit pkgs; };
 
@@ -175,7 +178,10 @@ let
       runtimePath = if runtimePackages == [ ] then "" else pkgs.lib.makeBinPath runtimePackages;
       pathBlock = if runtimePath != "" then ''export PATH="${runtimePath}:$PATH"'' else "";
       contractFile =
-        if appContract == null then null else pkgs.writeText "ephemeral-${name}-app-contract.json" (builtins.toJSON appContract);
+        if appContract == null then
+          null
+        else
+          pkgs.writeText "ephemeral-${name}-app-contract.json" (builtins.toJSON appContract);
       contractPrelude =
         if appContract == null then
           ""
@@ -263,17 +269,7 @@ let
       ${pathBlock}
 
       # Load .env from original location (secrets shouldn't be copied)
-      if [ -f "$ORIGINAL_ROOT/.env" ]; then
-        while IFS='=' read -r key value || [ -n "$key" ]; do
-          case "$key" in
-            \#*|"") continue ;;
-          esac
-          value=$(echo "$value" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
-          if [ -z "''${!key:-}" ]; then
-            export "$key=$value"
-          fi
-        done < "$ORIGINAL_ROOT/.env"
-      fi
+      ${envLoader.loadEnvFile} "$ORIGINAL_ROOT/.env"
 
       ${contractPrelude}
 

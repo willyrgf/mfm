@@ -213,7 +213,6 @@ let
                                     FILTERS_RAW=""
                                     TARGET_PATH=""
                                     USE_WORKTREE=false
-                                    SYNC_TARGET=false
                                     PROMPT_PLAN=true
                                     PROMPT_PLAN_FORCE=false
                                     RESET_PROJECT=false
@@ -251,8 +250,8 @@ let
                                           shift
                                           ;;
                                         --sync)
-                                          SYNC_TARGET=true
-                                          shift
+                                          echo "ERROR: unsupported option: --sync (removed; run without --sync)." >&2
+                                          exit 1
                                           ;;
                                         --prompt-plan)
                                           PROMPT_PLAN=true
@@ -286,7 +285,6 @@ let
                                             })"
                                             echo "  --worktree             Install into a git worktree for the nixfied branch (keeps current checkout unchanged)"
                                             echo "  --target=PATH          With --worktree: worktree directory path (default: <repo>_nixfied)"
-                                            echo "  --sync                 Deprecated (no-op); kept for backward compatibility"
                                             echo ""
                                             echo "Upgrade options:"
                                             echo "  --upgrade              Treat as an upgrade (preserves nixfied/project unless --reset-project)"
@@ -328,10 +326,6 @@ let
                             	        ROOT=$(cd "$ROOT" && pwd -P)
 
                                     INSTALL_BRANCH="''${NIXFIED_INSTALL_BRANCH:-nixfied}"
-
-                            		        if [ "$SYNC_TARGET" = "true" ]; then
-                            		          echo "INFO: --sync is deprecated in the branch-based installer (no-op)."
-                            		        fi
 
                             	        if [ -z "''${NIXFIED_INSTALL_REENTRY:-}" ] && [ "$USE_WORKTREE" = "true" ]; then
                             		          TARGET="''${TARGET_PATH:-''${ROOT}_''${INSTALL_BRANCH}}"

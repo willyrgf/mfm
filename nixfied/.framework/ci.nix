@@ -13,18 +13,19 @@ let
 
   steps = if enabled then (ci.steps or { }) else { };
   modes = if enabled then (ci.modes or { }) else { };
-  modeNames = builtins.attrNames modes;
-  modeTokenName =
-    mode:
-    pkgs.lib.replaceStrings [ "-" "." ":" " " "/" ] [ "_" "_" "_" "_" "_" ] mode;
+  modeNames = pkgs.lib.sort (a: b: a < b) (builtins.attrNames modes);
+  modeTokenName = mode: pkgs.lib.replaceStrings [ "-" "." ":" " " "/" ] [ "_" "_" "_" "_" "_" ] mode;
   modeArgDocs = map (mode: {
     name = "--${mode}";
     description = "Select CI mode ${mode}.";
   }) modeNames;
-  modeFlagSpecs = map (mode: lib.appApi.arg.flag {
-    name = "mode_${modeTokenName mode}";
-    long = "--${mode}";
-  }) modeNames;
+  modeFlagSpecs = map (
+    mode:
+    lib.appApi.arg.flag {
+      name = "mode_${modeTokenName mode}";
+      long = "--${mode}";
+    }
+  ) modeNames;
   modeOptionSpec =
     if modeNames == [ ] then
       lib.appApi.arg.option {
@@ -62,14 +63,6 @@ let
   keepOnFailure = artifacts.keepOnFailure or true;
   keepOnSuccess = artifacts.keepOnSuccess or false;
 
-  stepDescCase = pkgs.lib.concatMapStringsSep "\n" (
-    name:
-    let
-      desc = steps.${name}.description or name;
-    in
-    "  ${name}) echo \"${desc}\" ;;"
-  ) (builtins.attrNames steps);
-
   normalizeName =
     name:
     let
@@ -77,97 +70,89 @@ let
     in
     pkgs.lib.strings.toLower replaced;
 
-  stepFuncCase = pkgs.lib.concatMapStringsSep "\n" (
+  stepNames = pkgs.lib.sort (a: b: a < b) (builtins.attrNames steps);
+
+  mkStepTemplate =
     name:
     let
-      slug = normalizeName name;
-    in
-    "  ${name}) echo \"run_step_${slug}\" ;;"
-  ) (builtins.attrNames steps);
-
-  modeCase = pkgs.lib.concatMapStringsSep "\n" (
-    mode:
-    let
-      modeSteps = modes.${mode}.steps or [ ];
-      stepsList = pkgs.lib.concatMapStringsSep " " (s: "\"${s}\"") modeSteps;
-    in
-    "  ${mode}) STEPS=(${stepsList}) ;;"
-  ) modeNames;
-
-  mkStepFunction =
-    name: step:
-    let
-      desc = step.description or name;
-      run = step.run or "";
-      when = step.when or "";
-      cleanup = step.cleanup or "";
-      env = step.env or { };
-      fixtures = step.fixtures or null;
+      step = steps.${name};
       _ =
         if step ? requires then
           throw "ci.steps.${name}.requires has been removed. Use ci.steps.${name}.fixtures.services instead."
         else
           null;
-      slug = normalizeName name;
-      envExports = pkgs.lib.concatMapStringsSep "\n" (key: "export ${key}=${toString env.${key}}") (
-        builtins.attrNames env
-      );
-      skipVars = step.skipIfMissing or [ ];
-      skipList = pkgs.lib.concatMapStringsSep " " (v: "\"${v}\"") skipVars;
+      fixtures = step.fixtures or null;
       fixturePrelude = lib.fixtures.renderPrelude {
         inherit fixtures;
         contextName = "ci-step-${name}";
         defaultProfile = "test";
         defaultLogs = true;
       };
+      run = step.run or "";
     in
-    ''
-            run_step_${slug}() {
-              local step_name="${name}"
-              local step_desc="${desc}"
+    {
+      inherit name;
+      description = step.description or name;
+      env = step.env or { };
+      when = step.when or "";
+      cleanup = step.cleanup or "";
+      skip_if_missing = step.skipIfMissing or [ ];
+      depends_on = step.dependsOn or [ ];
+      missing = false;
+      run = pkgs.lib.optionalString (fixturePrelude != "") (fixturePrelude + "\n") + run;
+    };
 
-      ${pkgs.lib.optionalString (skipVars != [ ]) ''
-        local missing_reason=""
-        for var in ${skipList}; do
-          if [ -z "''${!var:-}" ]; then
-            missing_reason="missing $var"
-            break
-          fi
-        done
-        if [ -n "$missing_reason" ]; then
-          echo "SKIP: ''${step_desc}: $missing_reason"
-          return 42
-        fi
-      ''}
-
-      ${pkgs.lib.optionalString (when != "") ''
-        if ! ( ${when} ); then
-          echo "SKIP: ''${step_desc}: condition not met"
-          return 42
-        fi
-      ''}
-
-              local rc=0
-              set +e
-              (
-                set -euo pipefail
-      ${pkgs.lib.optionalString (envExports != "") envExports}
-      ${pkgs.lib.optionalString (fixturePrelude != "") fixturePrelude}
-      ${run}
-              )
-              rc=$?
-              set -e
-      ${pkgs.lib.optionalString (cleanup != "") cleanup}
-              if [ $rc -ne 0 ]; then
-                return $rc
-              fi
-              return 0
-            }
-    '';
-
-  stepFunctions = pkgs.lib.concatMapStringsSep "\n" (name: mkStepFunction name steps.${name}) (
-    builtins.attrNames steps
+  stepCatalog = builtins.listToAttrs (
+    map (name: {
+      inherit name;
+      value = mkStepTemplate name;
+    }) stepNames
   );
+
+  mkModePlan =
+    mode:
+    let
+      modeSteps = modes.${mode}.steps or [ ];
+      mkUnit =
+        index: stepName:
+        let
+          baseUnit =
+            if builtins.hasAttr stepName stepCatalog then
+              stepCatalog.${stepName}
+            else
+              {
+                name = stepName;
+                description = stepName;
+                env = { };
+                when = "";
+                cleanup = "";
+                skip_if_missing = [ ];
+                depends_on = [ ];
+                missing = true;
+                run = "";
+              };
+          sequentialDep = if index == 0 then [ ] else [ (builtins.elemAt modeSteps (index - 1)) ];
+        in
+        baseUnit
+        // {
+          id = "unit.${normalizeName mode}.${toString (index + 1)}.${normalizeName stepName}";
+          depends_on = pkgs.lib.unique (sequentialDep ++ (baseUnit.depends_on or [ ]));
+        };
+      units = pkgs.lib.imap0 mkUnit modeSteps;
+    in
+    {
+      schema_version = 2;
+      mode = mode;
+      units = units;
+    };
+
+  modePlans = builtins.listToAttrs (
+    map (mode: {
+      name = mode;
+      value = mkModePlan mode;
+    }) modeNames
+  );
+  modePlansJson = builtins.toJSON modePlans;
 
   setupScript = ci.setup or "";
   teardownScript = ci.teardown or "";
@@ -188,363 +173,366 @@ let
       ''
     else
       ''
-                # Parse args
-                CI_MODE="${resolvedDefaultMode}"
-                CI_SUMMARY=false
-                CI_BACKGROUND=false
-                CI_STEP_ARGS=()
+                        # Parse args
+                        CI_MODE="${resolvedDefaultMode}"
+                        CI_SUMMARY=false
+                        CI_BACKGROUND=false
+                        CI_STEP_ARGS=()
 
-                while [ "''$#" -gt 0 ]; do
-                  case "''$1" in
-                    --summary)
-                      CI_SUMMARY=true
-                      shift
-                      ;;
-                    --bg)
-                      CI_BACKGROUND=true
-                      shift
-                      ;;
-                    --mode)
-                      if [ -z "''${2:-}" ]; then
-                        echo "Missing value for --mode" >&2
-                        exit 1
-                      fi
-                      CI_MODE="''${2:-}"
-                      shift 2
-                      ;;
-                    --mode=*)
-                      CI_MODE="''${1#--mode=}"
-                      if [ -z "$CI_MODE" ]; then
-                        echo "Missing value for --mode" >&2
-                        exit 1
-                      fi
-                      shift
-                      ;;
-                    --)
-                      shift
-                      CI_STEP_ARGS=("$@")
-                      break
-                      ;;
-                    --*)
-                      MODE_FLAG="''${1#--}"
-                      case "$MODE_FLAG" in
-        ${pkgs.lib.concatMapStringsSep "\n" (m: "                ${m}) CI_MODE=\"${m}\" ;;") modeNames}
-                        *)
-                          echo "Unknown option: ''$1" >&2
-                          exit 1
-                          ;;
-                      esac
-                      shift
-                      ;;
-                    *)
-                      echo "Unknown option: ''$1" >&2
-                      exit 1
-                      ;;
-                  esac
-                done
+                        while [ "''$#" -gt 0 ]; do
+                          case "''$1" in
+                            --summary)
+                              CI_SUMMARY=true
+                              shift
+                              ;;
+                            --bg)
+                              CI_BACKGROUND=true
+                              shift
+                              ;;
+                            --mode)
+                              if [ -z "''${2:-}" ]; then
+                                echo "Missing value for --mode" >&2
+                                exit 1
+                              fi
+                              CI_MODE="''${2:-}"
+                              shift 2
+                              ;;
+                            --mode=*)
+                              CI_MODE="''${1#--mode=}"
+                              if [ -z "$CI_MODE" ]; then
+                                echo "Missing value for --mode" >&2
+                                exit 1
+                              fi
+                              shift
+                              ;;
+                            --)
+                              shift
+                              CI_STEP_ARGS=("$@")
+                              break
+                              ;;
+                            --*)
+                              MODE_FLAG="''${1#--}"
+                              case "$MODE_FLAG" in
+                ${pkgs.lib.concatMapStringsSep "\n" (
+                  m: "                ${m}) CI_MODE=\"${m}\" ;;"
+                ) modeNames}
+                                *)
+                                  echo "Unknown option: ''$1" >&2
+                                  exit 1
+                                  ;;
+                              esac
+                              shift
+                              ;;
+                            *)
+                              echo "Unknown option: ''$1" >&2
+                              exit 1
+                              ;;
+                          esac
+                        done
 
-                export CI_MODE
-                export CI_SUMMARY
-                export CI_STEP_ARGS
-                if [ -n "''${CI_ARTIFACTS_DIR:-}" ]; then
-                  export CI_ARTIFACTS_DIR="''${CI_ARTIFACTS_DIR}"
-                  case "$CI_ARTIFACTS_DIR" in
-                    /*) ;;
-                    *) CI_ARTIFACTS_DIR="$(pwd)/$CI_ARTIFACTS_DIR" ;;
-                  esac
-                  export CI_ARTIFACTS_BASE="$(dirname "$CI_ARTIFACTS_DIR")"
-                  export CI_ARTIFACTS_LATEST_LINK=""
-                else
-                  export CI_ARTIFACTS_BASE="${artifactsRoot}"
-                  case "$CI_ARTIFACTS_BASE" in
-                    /*) ;;
-                    *) CI_ARTIFACTS_BASE="$(pwd)/$CI_ARTIFACTS_BASE" ;;
-                  esac
-                  CI_RUN_ID="$(${toString lib.resolveId})"
-                  export CI_ARTIFACTS_DIR="$CI_ARTIFACTS_BASE/$CI_RUN_ID"
-                  export CI_ARTIFACTS_LATEST_LINK="$CI_ARTIFACTS_BASE/latest"
-                fi
-                case "$CI_ARTIFACTS_BASE" in
-                  /*) ;;
-                  *)
-                    echo "ERROR: CI_ARTIFACTS_BASE must resolve to an absolute path (got '$CI_ARTIFACTS_BASE')" >&2
-                    exit 1
-                    ;;
-                esac
-                export CI_KEEP_ARTIFACTS_ON_FAILURE="${if keepOnFailure then "1" else "0"}"
-                export CI_KEEP_ARTIFACTS_ON_SUCCESS="${if keepOnSuccess then "1" else "0"}"
-        ${pkgs.lib.optionalString (ciEnvExports != "") ciEnvExports}
+                        export CI_MODE
+                        export CI_SUMMARY
+                        export CI_STEP_ARGS
+                        if [ -n "''${CI_ARTIFACTS_DIR:-}" ]; then
+                          export CI_ARTIFACTS_DIR="''${CI_ARTIFACTS_DIR}"
+                          case "$CI_ARTIFACTS_DIR" in
+                            /*) ;;
+                            *) CI_ARTIFACTS_DIR="$(pwd)/$CI_ARTIFACTS_DIR" ;;
+                          esac
+                          export CI_ARTIFACTS_BASE="$(dirname "$CI_ARTIFACTS_DIR")"
+                          export CI_ARTIFACTS_LATEST_LINK=""
+                        else
+                          export CI_ARTIFACTS_BASE="${artifactsRoot}"
+                          case "$CI_ARTIFACTS_BASE" in
+                            /*) ;;
+                            *) CI_ARTIFACTS_BASE="$(pwd)/$CI_ARTIFACTS_BASE" ;;
+                          esac
+                          CI_RUN_ID="$(${toString lib.resolveId})"
+                          export CI_ARTIFACTS_DIR="$CI_ARTIFACTS_BASE/$CI_RUN_ID"
+                          export CI_ARTIFACTS_LATEST_LINK="$CI_ARTIFACTS_BASE/latest"
+                        fi
+                        case "$CI_ARTIFACTS_BASE" in
+                          /*) ;;
+                          *)
+                            echo "ERROR: CI_ARTIFACTS_BASE must resolve to an absolute path (got '$CI_ARTIFACTS_BASE')" >&2
+                            exit 1
+                            ;;
+                        esac
+                        export CI_KEEP_ARTIFACTS_ON_FAILURE="${if keepOnFailure then "1" else "0"}"
+                        export CI_KEEP_ARTIFACTS_ON_SUCCESS="${if keepOnSuccess then "1" else "0"}"
+                ${pkgs.lib.optionalString (ciEnvExports != "") ciEnvExports}
 
-                export RUN_ID="$(${toString lib.resolveId} "''${RUN_ID:-}")"
+                        export RUN_ID="$(${toString lib.resolveId} "''${RUN_ID:-}")"
 
-                _emit_process_event() {
-                  ${toString lib.emitEvent} "$@" >/dev/null 2>&1 || true
-                }
+                        _emit_process_event() {
+                          ${toString lib.emitEvent} "$@" >/dev/null 2>&1 || true
+                        }
 
-                init_ci_artifacts() {
-                  mkdir -p "$CI_ARTIFACTS_DIR"
-                  if [ -n "$CI_ARTIFACTS_LATEST_LINK" ]; then
-                    mkdir -p "$CI_ARTIFACTS_BASE"
-                    ln -sfn "$CI_ARTIFACTS_DIR" "$CI_ARTIFACTS_LATEST_LINK" 2>/dev/null || true
-                  fi
-                }
+                        init_ci_artifacts() {
+                          mkdir -p "$CI_ARTIFACTS_DIR"
+                          if [ -n "$CI_ARTIFACTS_LATEST_LINK" ]; then
+                            mkdir -p "$CI_ARTIFACTS_BASE"
+                            ln -sfn "$CI_ARTIFACTS_DIR" "$CI_ARTIFACTS_LATEST_LINK" 2>/dev/null || true
+                          fi
+                        }
 
-                cleanup_ci_artifacts() {
-                  local ec="$1"
-                  local keep=0
+                        cleanup_ci_artifacts() {
+                          local ec="$1"
+                          local keep=0
 
-                  if [ "$ec" -ne 0 ] && [ "$CI_KEEP_ARTIFACTS_ON_FAILURE" = "1" ]; then
-                    keep=1
-                  fi
-                  if [ "$ec" -eq 0 ] && [ "$CI_KEEP_ARTIFACTS_ON_SUCCESS" = "1" ]; then
-                    keep=1
-                  fi
+                          if [ "$ec" -ne 0 ] && [ "$CI_KEEP_ARTIFACTS_ON_FAILURE" = "1" ]; then
+                            keep=1
+                          fi
+                          if [ "$ec" -eq 0 ] && [ "$CI_KEEP_ARTIFACTS_ON_SUCCESS" = "1" ]; then
+                            keep=1
+                          fi
 
-                  if [ "$keep" -eq 1 ]; then
-                    echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
-                    return 0
-                  fi
+                          if [ "$keep" -eq 1 ]; then
+                            echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
+                            return 0
+                          fi
 
-                  rm -rf "$CI_ARTIFACTS_DIR" 2>/dev/null || true
-                  if [ -n "$CI_ARTIFACTS_LATEST_LINK" ] && [ -L "$CI_ARTIFACTS_LATEST_LINK" ]; then
-                    local link_target=""
-                    link_target=$(readlink "$CI_ARTIFACTS_LATEST_LINK" 2>/dev/null || true)
-                    if [ "$link_target" = "$CI_ARTIFACTS_DIR" ]; then
-                      rm -f "$CI_ARTIFACTS_LATEST_LINK" 2>/dev/null || true
-                    fi
-                  fi
-                }
+                          rm -rf "$CI_ARTIFACTS_DIR" 2>/dev/null || true
+                          if [ -n "$CI_ARTIFACTS_LATEST_LINK" ] && [ -L "$CI_ARTIFACTS_LATEST_LINK" ]; then
+                            local link_target=""
+                            link_target=$(readlink "$CI_ARTIFACTS_LATEST_LINK" 2>/dev/null || true)
+                            if [ "$link_target" = "$CI_ARTIFACTS_DIR" ]; then
+                              rm -f "$CI_ARTIFACTS_LATEST_LINK" 2>/dev/null || true
+                            fi
+                          fi
+                        }
 
-                # Background mode: delegate to run registry and exit
-                if [ "$CI_BACKGROUND" = "true" ]; then
-                  REEXEC_ARGS="--mode $CI_MODE --summary"
-                  ${runRegistryScript} \
-                    --name "ci-$CI_MODE" \
-                    --bg \
-                    --script "$0 $REEXEC_ARGS"
-                  exit $?
-                fi
+                        # Background mode: delegate to run registry and exit
+                        if [ "$CI_BACKGROUND" = "true" ]; then
+                          REEXEC_ARGS="--mode $CI_MODE --summary"
+                          ${runRegistryScript} \
+                            --name "ci-$CI_MODE" \
+                            --bg \
+                            --script "$0 $REEXEC_ARGS"
+                          exit $?
+                        fi
 
-        ${stepFunctions}
+                        MODE_PLANS_JSON=$(cat <<'NIXFIED_MODE_PLANS_JSON'
+                ${modePlansJson}
+        NIXFIED_MODE_PLANS_JSON
+                        )
 
-                step_desc() {
-                  case "''$1" in
-        ${stepDescCase}
-                    *) echo "''$1" ;;
-                  esac
-                }
+                        _write_summary_json() {
+                          local ec="$1"
+                          local total_duration="$2"
+                          local setup_duration="$3"
+                          local steps_duration="$4"
+                          local teardown_duration="$5"
+                          local plan_result_file="$6"
+                          local accounted_duration=0
+                          local untracked_duration=0
+                          local json_file="$CI_ARTIFACTS_DIR/summary.json"
+                          local steps_json="[]"
+                          local plan_id=""
+                          local run_id=""
 
-                step_func() {
-                  case "''$1" in
-        ${stepFuncCase}
-                    *) echo "" ;;
-                  esac
-                }
+                          accounted_duration=$((setup_duration + steps_duration + teardown_duration))
+                          untracked_duration=$((total_duration - accounted_duration))
+                          if [ "$untracked_duration" -lt 0 ]; then
+                            untracked_duration=0
+                          fi
 
-                # Step result tracking for summary.json
-                declare -a _CI_STEP_RESULTS=()
+                          if [ -f "$plan_result_file" ]; then
+                            steps_json="$(${pkgs.jq}/bin/jq -c '.steps // []' "$plan_result_file" 2>/dev/null || echo "[]")"
+                            plan_id="$(${pkgs.jq}/bin/jq -r '.plan_id // ""' "$plan_result_file" 2>/dev/null || true)"
+                            run_id="$(${pkgs.jq}/bin/jq -r '.run_id // ""' "$plan_result_file" 2>/dev/null || true)"
+                          fi
 
-                _ci_record_step() {
-                  local name="$1" status="$2" duration="$3"
-                  _CI_STEP_RESULTS+=("$name|$status|$duration")
-                }
+                          mkdir -p "$CI_ARTIFACTS_DIR"
+                          ${pkgs.jq}/bin/jq -n \
+                            --arg mode "$CI_MODE" \
+                            --arg exit_code "$ec" \
+                            --argjson steps "$steps_json" \
+                            --arg plan_id "$plan_id" \
+                            --arg run_id "$run_id" \
+                            --arg total_duration "$total_duration" \
+                            --arg setup_duration "$setup_duration" \
+                            --arg steps_duration "$steps_duration" \
+                            --arg teardown_duration "$teardown_duration" \
+                            --arg accounted_duration "$accounted_duration" \
+                            --arg untracked_duration "$untracked_duration" \
+                            '
+                            {
+                              mode: $mode,
+                              exit_code: ($exit_code | tonumber),
+                              plan_id: (if $plan_id == "" then null else $plan_id end),
+                              run_id: (if $run_id == "" then null else $run_id end),
+                              steps: $steps,
+                              timing: {
+                                total_duration: ($total_duration | tonumber),
+                                setup_duration: ($setup_duration | tonumber),
+                                steps_duration: ($steps_duration | tonumber),
+                                teardown_duration: ($teardown_duration | tonumber),
+                                accounted_duration: ($accounted_duration | tonumber),
+                                untracked_duration: ($untracked_duration | tonumber)
+                              }
+                            }
+                            ' > "$json_file"
+                        }
 
-                _write_summary_json() {
-                  local ec="$1"
-                  local total_duration="$2"
-                  local setup_duration="$3"
-                  local steps_duration="$4"
-                  local teardown_duration="$5"
-                  local accounted_duration=0
-                  local untracked_duration=0
-                  local json_file="$CI_ARTIFACTS_DIR/summary.json"
+                        write_ci_plan() {
+                          local plan_file="$1"
+                          local mode_plan_json=""
+                          local unit_count=0
+                          local plan_canonical=""
+                          local plan_id=""
+                          local tmp_file=""
 
-                  accounted_duration=$((setup_duration + steps_duration + teardown_duration))
-                  untracked_duration=$((total_duration - accounted_duration))
-                  if [ "$untracked_duration" -lt 0 ]; then
-                    untracked_duration=0
-                  fi
+                          mode_plan_json="$(printf '%s\n' "$MODE_PLANS_JSON" | ${pkgs.jq}/bin/jq -c --arg mode "$CI_MODE" '.[$mode] // null')"
+                          if [ "$mode_plan_json" = "null" ] || [ -z "$mode_plan_json" ]; then
+                            echo "Unknown CI mode: $CI_MODE" >&2
+                            return 1
+                          fi
 
-                  mkdir -p "$CI_ARTIFACTS_DIR"
-                  {
-                    echo "{"
-                    echo "  \"mode\": \"$CI_MODE\","
-                    echo "  \"exit_code\": $ec,"
-                    echo "  \"steps\": ["
-                    local first=true
-                    for entry in "''${_CI_STEP_RESULTS[@]}"; do
-                      IFS='|' read -r s_name s_status s_dur <<< "$entry"
-                      if [ "$first" = true ]; then first=false; else echo ","; fi
-                      printf "    {\"name\": \"%s\", \"status\": \"%s\", \"duration\": %s}" "$s_name" "$s_status" "$s_dur"
-                    done
-                    echo ""
-                    echo "  ],"
-                    echo "  \"timing\": {"
-                    echo "    \"total_duration\": $total_duration,"
-                    echo "    \"setup_duration\": $setup_duration,"
-                    echo "    \"steps_duration\": $steps_duration,"
-                    echo "    \"teardown_duration\": $teardown_duration,"
-                    echo "    \"accounted_duration\": $accounted_duration,"
-                    echo "    \"untracked_duration\": $untracked_duration"
-                    echo "  }"
-                    echo "}"
-                  } > "$json_file"
-                }
+                          printf '%s\n' "$mode_plan_json" > "$plan_file"
+                          unit_count="$(${pkgs.jq}/bin/jq -r '(.units // []) | length' "$plan_file")"
+                          if [ "$unit_count" -eq 0 ]; then
+                            echo "No steps configured for mode: $CI_MODE"
+                            return 1
+                          fi
 
-                run_pipeline() {
-                  local exit_code=0
-                  local setup_rc=0
-                  local teardown_rc=0
-                  local step_rc=0
-                  local setup_start_time=0
-                  local setup_end_time=0
-                  local setup_duration=0
-                  local teardown_start_time=0
-                  local teardown_end_time=0
-                  local teardown_duration=0
-                  local steps_duration=0
-                  local pipeline_start_time=0
-                  local pipeline_end_time=0
-                  local pipeline_duration=0
-                  STEPS=()
+                          plan_canonical="$(${pkgs.jq}/bin/jq -cS 'del(.plan_id)' "$plan_file")"
+                          plan_id="$(printf '%s' "$plan_canonical" | ${toString lib.mkPlanId} --from-stdin)"
+                          tmp_file="$plan_file.tmp.$$"
+                          ${pkgs.jq}/bin/jq --arg plan_id "$plan_id" '.plan_id = $plan_id' "$plan_file" > "$tmp_file"
+                          mv "$tmp_file" "$plan_file"
+                          export NIXFIED_PLAN_ID="$plan_id"
+                          return 0
+                        }
 
-                  pipeline_start_time=$(date +%s)
-                  init_ci_artifacts
+                        run_pipeline() {
+                          local exit_code=0
+                          local setup_rc=0
+                          local teardown_rc=0
+                          local step_rc=0
+                          local plan_write_rc=0
+                          local setup_start_time=0
+                          local setup_end_time=0
+                          local setup_duration=0
+                          local teardown_start_time=0
+                          local teardown_end_time=0
+                          local teardown_duration=0
+                          local steps_duration=0
+                          local pipeline_start_time=0
+                          local pipeline_end_time=0
+                          local pipeline_duration=0
+                          local plan_file="$CI_ARTIFACTS_DIR/execution-plan.json"
+                          local plan_result_file="$CI_ARTIFACTS_DIR/execution-result.json"
 
-                  setup_start_time=$(date +%s)
-                  set +e
-                  (
-                    set -euo pipefail
-        ${setupScript}
-                  )
-                  setup_rc=$?
-                  set -e
-                  setup_end_time=$(date +%s)
-                  setup_duration=$((setup_end_time - setup_start_time))
+                          pipeline_start_time=$(date +%s)
+                          init_ci_artifacts
 
-                  if [ "$setup_rc" -ne 0 ]; then
-                    echo "ERROR: CI setup failed rc=$setup_rc" >&2
-                    exit_code=$setup_rc
-                  fi
+                          setup_start_time=$(date +%s)
+                          set +e
+                          (
+                            set -euo pipefail
+                ${setupScript}
+                          )
+                          setup_rc=$?
+                          set -e
+                          setup_end_time=$(date +%s)
+                          setup_duration=$((setup_end_time - setup_start_time))
 
-                  if [ "$exit_code" -eq 0 ]; then
-                    case "$CI_MODE" in
-        ${modeCase}
-                      *)
-                        echo "Unknown CI mode: $CI_MODE" >&2
-                        exit_code=1
-                        ;;
-                    esac
-                  fi
+                          if [ "$setup_rc" -ne 0 ]; then
+                            echo "ERROR: CI setup failed rc=$setup_rc" >&2
+                            exit_code=$setup_rc
+                          fi
 
-                  if [ "$exit_code" -eq 0 ] && [ "''${#STEPS[@]}" -eq 0 ]; then
-                    echo "No steps configured for mode: $CI_MODE"
-                    exit_code=1
-                  fi
+                          if [ "$exit_code" -eq 0 ]; then
+                            set +e
+                            write_ci_plan "$plan_file"
+                            plan_write_rc=$?
+                            set -e
+                            if [ "$plan_write_rc" -ne 0 ]; then
+                              exit_code="$plan_write_rc"
+                            fi
+                          fi
 
-                  if [ "$exit_code" -eq 0 ]; then
-                    TOTAL_STEPS="''${#STEPS[@]}"
-                    STEP_INDEX=1
-                    for step in "''${STEPS[@]}"; do
-                      STEP_FUNC=$(step_func "$step")
-                      if [ -z "$STEP_FUNC" ]; then
-                        echo "Unknown step: $step" >&2
-                        exit_code=1
-                        break
-                      fi
-                      STEP_DESC=$(step_desc "$step")
-                      echo ""
-                      echo "Step ''${STEP_INDEX}/''${TOTAL_STEPS}: ''${STEP_DESC}"
-                      _emit_process_event \
-                        --event-type readiness_progress \
-                        --state waiting \
-                        --wait-reason "step=$step index=$STEP_INDEX total=$TOTAL_STEPS"
-                      local STEP_START_TIME=0
-                      STEP_START_TIME=$(date +%s)
-                      set +e
-                      ( "$STEP_FUNC" )
-                      step_rc=$?
-                      set -e
-                      local STEP_END_TIME=0
-                      local STEP_DUR=0
-                      STEP_END_TIME=$(date +%s)
-                      STEP_DUR=$((STEP_END_TIME - STEP_START_TIME))
-                      steps_duration=$((steps_duration + STEP_DUR))
-                      if [ "$step_rc" -eq 42 ]; then
-                        _ci_record_step "$step" "skipped" "$STEP_DUR"
-                      elif [ "$step_rc" -eq 0 ]; then
-                        _ci_record_step "$step" "passed" "$STEP_DUR"
-                      else
-                        _ci_record_step "$step" "failed" "$STEP_DUR"
-                        exit_code="$step_rc"
-                        break
-                      fi
-                      STEP_INDEX=$((STEP_INDEX + 1))
-                    done
-                  fi
+                          if [ "$exit_code" -eq 0 ]; then
+                            set +e
+                            ${toString lib.runPlan} \
+                              --plan-file "$plan_file" \
+                              --result-file "$plan_result_file" \
+                              --emit-event "${toString lib.emitEvent}" \
+                              --context-script "${toString lib.helpersScript}"
+                            step_rc=$?
+                            set -e
 
-                  teardown_start_time=$(date +%s)
-                  set +e
-                  (
-                    set -euo pipefail
-        ${teardownScript}
-                  )
-                  teardown_rc=$?
-                  set -e
-                  teardown_end_time=$(date +%s)
-                  teardown_duration=$((teardown_end_time - teardown_start_time))
-                  if [ "$teardown_rc" -ne 0 ]; then
-                    echo "ERROR: CI teardown failed rc=$teardown_rc" >&2
-                    if [ "$exit_code" -eq 0 ]; then
-                      exit_code=$teardown_rc
-                    fi
-                  fi
+                            if [ -f "$plan_result_file" ]; then
+                              steps_duration="$(${pkgs.jq}/bin/jq -r '.steps_duration // 0' "$plan_result_file" 2>/dev/null || echo 0)"
+                            fi
+                            if [ "$step_rc" -ne 0 ]; then
+                              exit_code="$step_rc"
+                            fi
+                          fi
 
-                  pipeline_end_time=$(date +%s)
-                  pipeline_duration=$((pipeline_end_time - pipeline_start_time))
+                          teardown_start_time=$(date +%s)
+                          set +e
+                          (
+                            set -euo pipefail
+                ${teardownScript}
+                          )
+                          teardown_rc=$?
+                          set -e
+                          teardown_end_time=$(date +%s)
+                          teardown_duration=$((teardown_end_time - teardown_start_time))
+                          if [ "$teardown_rc" -ne 0 ]; then
+                            echo "ERROR: CI teardown failed rc=$teardown_rc" >&2
+                            if [ "$exit_code" -eq 0 ]; then
+                              exit_code=$teardown_rc
+                            fi
+                          fi
 
-                  # Write structured summary
-                  _write_summary_json "$exit_code" "$pipeline_duration" "$setup_duration" "$steps_duration" "$teardown_duration"
+                          pipeline_end_time=$(date +%s)
+                          pipeline_duration=$((pipeline_end_time - pipeline_start_time))
 
-                  if [ "$exit_code" -eq 0 ]; then
-                    return 0
-                  fi
-                  return 1
-                }
+                          # Write structured summary
+                          _write_summary_json "$exit_code" "$pipeline_duration" "$setup_duration" "$steps_duration" "$teardown_duration" "$plan_result_file"
 
-                if [ "$CI_SUMMARY" = "true" ]; then
-                  init_ci_artifacts
-                  _emit_process_event --event-type run_started --state running --wait-reason "ci_mode=$CI_MODE summary=true"
-                  LOGFILE=$(artifact_path "ci-output.log")
-                  START_TIME=$(date +%s)
-                  set +e
-                  ( run_pipeline ) 2>&1 | tee "$LOGFILE"
-                  EXIT_CODE=$?
-                  set -e
-                  END_TIME=$(date +%s)
-                  DURATION=$((END_TIME - START_TIME))
-                  if [ "$EXIT_CODE" -eq 0 ]; then
-                    _emit_process_event --event-type run_finished --state passed --wait-reason "exit_code=0 duration=$DURATION"
-                  else
-                    _emit_process_event --event-type run_finished --state failed --wait-reason "exit_code=$EXIT_CODE duration=$DURATION"
-                  fi
-                  summary_parse "$LOGFILE" "$DURATION" "$EXIT_CODE"
-                  cleanup_ci_artifacts "$EXIT_CODE"
-                  exit $EXIT_CODE
-                else
-                  _emit_process_event --event-type run_started --state running --wait-reason "ci_mode=$CI_MODE summary=false"
-                  set +e
-                  run_pipeline
-                  EXIT_CODE=$?
-                  set -e
-                  if [ "$EXIT_CODE" -eq 0 ]; then
-                    _emit_process_event --event-type run_finished --state passed --wait-reason "exit_code=0"
-                  else
-                    _emit_process_event --event-type run_finished --state failed --wait-reason "exit_code=$EXIT_CODE"
-                  fi
-                  cleanup_ci_artifacts "$EXIT_CODE"
-                  exit $EXIT_CODE
-                fi
+                          if [ "$exit_code" -eq 0 ]; then
+                            return 0
+                          fi
+                          return "$exit_code"
+                        }
+
+                        if [ "$CI_SUMMARY" = "true" ]; then
+                          init_ci_artifacts
+                          _emit_process_event --event-type run_started --state running --wait-reason "ci_mode=$CI_MODE summary=true"
+                          LOGFILE=$(artifact_path "ci-output.log")
+                          START_TIME=$(date +%s)
+                          set +e
+                          ( run_pipeline ) 2>&1 | tee "$LOGFILE"
+                          EXIT_CODE=$?
+                          set -e
+                          END_TIME=$(date +%s)
+                          DURATION=$((END_TIME - START_TIME))
+                          if [ "$EXIT_CODE" -eq 0 ]; then
+                            _emit_process_event --event-type run_finished --state passed --wait-reason "exit_code=0 duration=$DURATION"
+                          else
+                            _emit_process_event --event-type run_finished --state failed --wait-reason "exit_code=$EXIT_CODE duration=$DURATION"
+                          fi
+                          summary_parse "$LOGFILE" "$DURATION" "$EXIT_CODE"
+                          cleanup_ci_artifacts "$EXIT_CODE"
+                          exit $EXIT_CODE
+                        else
+                          _emit_process_event --event-type run_started --state running --wait-reason "ci_mode=$CI_MODE summary=false"
+                          set +e
+                          run_pipeline
+                          EXIT_CODE=$?
+                          set -e
+                          if [ "$EXIT_CODE" -eq 0 ]; then
+                            _emit_process_event --event-type run_finished --state passed --wait-reason "exit_code=0"
+                          else
+                            _emit_process_event --event-type run_finished --state failed --wait-reason "exit_code=$EXIT_CODE"
+                          fi
+                          cleanup_ci_artifacts "$EXIT_CODE"
+                          exit $EXIT_CODE
+                        fi
       '';
 
   ciApi = lib.appApi.mkBatchRunnerCommandApi {
@@ -571,20 +559,20 @@ let
         name = "--mode";
         description = "Select configured CI mode.";
       }
-    ] ++ modeArgDocs;
-    contractArgs =
-      [
-        (lib.appApi.arg.flag {
-          name = "summary";
-          long = "--summary";
-        })
-        (lib.appApi.arg.flag {
-          name = "bg";
-          long = "--bg";
-        })
-        modeOptionSpec
-      ]
-      ++ modeFlagSpecs;
+    ]
+    ++ modeArgDocs;
+    contractArgs = [
+      (lib.appApi.arg.flag {
+        name = "summary";
+        long = "--summary";
+      })
+      (lib.appApi.arg.flag {
+        name = "bg";
+        long = "--bg";
+      })
+      modeOptionSpec
+    ]
+    ++ modeFlagSpecs;
     env = [
       {
         name = "CI_ARTIFACTS_DIR";
