@@ -79,9 +79,7 @@ let
       [ "${prefix}: step config must be an attribute set" ]
     else
       expect (!(step ? run)) "${prefix}.run has been removed. Use ${prefix}.actions."
-      ++ expect (
-        !(step ? cleanup)
-      ) "${prefix}.cleanup has been removed. Use ${prefix}.cleanupActions."
+      ++ expect (!(step ? cleanup)) "${prefix}.cleanup has been removed. Use ${prefix}.cleanupActions."
       ++ expect (
         !(step ? when) || builtins.isAttrs step.when
       ) "${prefix}.when must be an attribute set (string conditions are not supported)"
@@ -89,7 +87,8 @@ let
         !(step ? description) || builtins.isString step.description
       ) "${prefix}.description must be a string when set"
       ++ expect (
-        !(step ? skipIfMissing) || (builtins.isList (step.skipIfMissing) && isListOfNonEmptyStrings (step.skipIfMissing))
+        !(step ? skipIfMissing)
+        || (builtins.isList (step.skipIfMissing) && isListOfNonEmptyStrings (step.skipIfMissing))
       ) "${prefix}.skipIfMissing must be a list of non-empty strings"
       ++ expect (
         builtins.isList depends && isListOfNonEmptyStrings depends
@@ -127,9 +126,7 @@ let
       [ "${prefix}: mode config must be an attribute set" ]
     else
       expect (isNonEmptyList modeSteps) "${prefix}.steps must be a non-empty list"
-      ++ expect (
-        isListOfNonEmptyStrings modeSteps
-      ) "${prefix}.steps must be a list of non-empty strings"
+      ++ expect (isListOfNonEmptyStrings modeSteps) "${prefix}.steps must be a list of non-empty strings"
       ++ expect (
         unknown == [ ]
       ) "${prefix}.steps references unknown steps: ${builtins.concatStringsSep ", " unknown}";
@@ -158,27 +155,13 @@ let
       modeNames = sortedAttrNames modes;
 
       baseErrs =
-        expect (
-          !(ci ? setup)
-        ) "ci.setup has been removed. Use ci.setupActions."
-        ++ expect (
-          !(ci ? teardown)
-        ) "ci.teardown has been removed. Use ci.teardownActions."
-        ++ expect (
-          !(ci ? stepCommand)
-        ) "ci.stepCommand has been removed. Define per-step actions."
-        ++ expect (
-          !(ci ? modeCommand)
-        ) "ci.modeCommand has been removed. Define ci.modes and ci.steps."
-        ++ expect (
-          builtins.isAttrs stepsRaw
-        ) "ci.steps must be an attribute set"
-        ++ expect (
-          builtins.isAttrs modes
-        ) "ci.modes must be an attribute set"
-        ++ expect (
-          modeNames != [ ]
-        ) "ci.modes must define at least one mode";
+        expect (!(ci ? setup)) "ci.setup has been removed. Use ci.setupActions."
+        ++ expect (!(ci ? teardown)) "ci.teardown has been removed. Use ci.teardownActions."
+        ++ expect (!(ci ? stepCommand)) "ci.stepCommand has been removed. Define per-step actions."
+        ++ expect (!(ci ? modeCommand)) "ci.modeCommand has been removed. Define ci.modes and ci.steps."
+        ++ expect (builtins.isAttrs stepsRaw) "ci.steps must be an attribute set"
+        ++ expect (builtins.isAttrs modes) "ci.modes must be an attribute set"
+        ++ expect (modeNames != [ ]) "ci.modes must define at least one mode";
 
       stepErrs = builtins.concatLists (
         map (
@@ -202,17 +185,13 @@ let
         ) modeNames
       );
 
-      cyclicSteps =
-        lib.unique (
-          builtins.filter (
-            name: hasCycleFrom stepsRaw stepNames [ ] name
-          ) stepNames
-        );
+      cyclicSteps = lib.unique (
+        builtins.filter (name: hasCycleFrom stepsRaw stepNames [ ] name) stepNames
+      );
 
-      cycleErrs =
-        expect (
-          cyclicSteps == [ ]
-        ) "ci.steps dependency graph has cycle(s): ${builtins.concatStringsSep ", " cyclicSteps}";
+      cycleErrs = expect (
+        cyclicSteps == [ ]
+      ) "ci.steps dependency graph has cycle(s): ${builtins.concatStringsSep ", " cyclicSteps}";
 
       setupActions = ci.setupActions or [ ];
       teardownActions = ci.teardownActions or [ ];
@@ -238,15 +217,13 @@ let
           in
           {
             inherit name;
-            value =
-              raw
-              // {
-                run = actionSchema.renderActionList (raw.actions or [ ]);
-                cleanup = actionSchema.renderActionList (raw.cleanupActions or [ ]);
-                when = renderWhen (raw.when or { });
-                skip_if_missing = raw.skipIfMissing or [ ];
-                depends_on = raw.dependsOn or [ ];
-              };
+            value = raw // {
+              run = actionSchema.renderActionList (raw.actions or [ ]);
+              cleanup = actionSchema.renderActionList (raw.cleanupActions or [ ]);
+              when = renderWhen (raw.when or { });
+              skip_if_missing = raw.skipIfMissing or [ ];
+              depends_on = raw.dependsOn or [ ];
+            };
           }
         ) stepNames
       );

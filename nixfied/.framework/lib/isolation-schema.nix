@@ -57,18 +57,26 @@ let
       envErrs = builtins.concatLists (
         map (
           env:
-          expect (
-            builtins.elem env envNames
-          ) "isolation.envs contains unknown environment '${env}' (expected one of: ${builtins.concatStringsSep ", " envNames})"
+          expect (builtins.elem env envNames) "isolation.envs contains unknown environment '${env}' (expected one of: ${builtins.concatStringsSep ", " envNames})"
         ) configuredEnvs
       );
 
       errs =
-        expect (!(isolation ? runCommand)) "isolation.runCommand has been removed. Use isolation.run action."
-        ++ expect (!(isolation ? validateCommand)) "isolation.validateCommand has been removed. Use isolation.validate action."
-        ++ expect (!(isolation ? preInstall)) "isolation.preInstall has been removed. Use isolation.setupActions."
-        ++ expect (!(isolation ? cleanup)) "isolation.cleanup has been removed. Use isolation.cleanupActions."
-        ++ expect (!(isolation ? runApp)) "isolation.runApp has been removed. Use isolation.run = { kind = \"runApp\"; ... }."
+        expect (
+          !(isolation ? runCommand)
+        ) "isolation.runCommand has been removed. Use isolation.run action."
+        ++ expect (
+          !(isolation ? validateCommand)
+        ) "isolation.validateCommand has been removed. Use isolation.validate action."
+        ++ expect (
+          !(isolation ? preInstall)
+        ) "isolation.preInstall has been removed. Use isolation.setupActions."
+        ++ expect (
+          !(isolation ? cleanup)
+        ) "isolation.cleanup has been removed. Use isolation.cleanupActions."
+        ++ expect (
+          !(isolation ? runApp)
+        ) "isolation.runApp has been removed. Use isolation.run = { kind = \"runApp\"; ... }."
         ++ expect (!(isolation ? runArgs)) "isolation.runArgs has been removed. Use isolation.run.args."
         ++ expect (
           !(isolation ? slots) || (builtins.isList configuredSlots)
@@ -76,9 +84,7 @@ let
         ++ expect (
           !(isolation ? envs) || (builtins.isList configuredEnvs && isListOfNonEmptyStrings configuredEnvs)
         ) "isolation.envs must be a list of non-empty strings when set"
-        ++ expect (
-          isScalarAttrset runEnv
-        ) "isolation.runEnv must be an attrset with shell-safe keys and scalar values"
+        ++ expect (isScalarAttrset runEnv) "isolation.runEnv must be an attrset with shell-safe keys and scalar values"
         ++ slotErrs
         ++ envErrs
         ++ actionSchema.validateActionListErrors {

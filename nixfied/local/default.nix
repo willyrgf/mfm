@@ -378,7 +378,9 @@
         name = "mfm::keystore::tx-sign";
         summary = "Sign an EIP-1559 transaction";
         details = "Typed wrapper over `mfm_cli keystore tx-sign` with fixed JSON output.";
-        usage = [ "nix run .#mfm::keystore::tx-sign -- --to <ADDR> --value-wei <VALUE> --chain-id <ID> --nonce <N> --max-fee-per-gas <FEE> --max-priority-fee-per-gas <FEE> --gas-limit <N> --out <PATH>" ];
+        usage = [
+          "nix run .#mfm::keystore::tx-sign -- --to <ADDR> --value-wei <VALUE> --chain-id <ID> --nonce <N> --max-fee-per-gas <FEE> --max-priority-fee-per-gas <FEE> --gas-limit <N> --out <PATH>"
+        ];
         category = "keystore";
         args = [
           {
@@ -576,7 +578,8 @@
             name = "--op-config-json";
             description = "Operation config JSON payload.";
           }
-        ] ++ runStoreDocArgs;
+        ]
+        ++ runStoreDocArgs;
         env = runStoreDocEnv;
         contractArgs = [
           (lib.appApi.arg.option {
@@ -597,7 +600,8 @@
             type = "json";
             required = false;
           })
-        ] ++ runStoreContractArgs;
+        ]
+        ++ runStoreContractArgs;
         contractEnv = runStoreContractEnv;
         idempotent = false;
         command = "run start";
@@ -614,7 +618,8 @@
             name = "run-id";
             description = "Run id (UUID).";
           }
-        ] ++ runStoreDocArgs;
+        ]
+        ++ runStoreDocArgs;
         env = runStoreDocEnv;
         contractArgs = [
           (lib.appApi.arg.positional {
@@ -622,7 +627,8 @@
             type = "string";
             required = true;
           })
-        ] ++ runStoreContractArgs;
+        ]
+        ++ runStoreContractArgs;
         contractEnv = runStoreContractEnv;
         idempotent = false;
         command = "run resume";
@@ -639,7 +645,8 @@
             name = "run-id";
             description = "Run id (UUID).";
           }
-        ] ++ runStoreDocArgs;
+        ]
+        ++ runStoreDocArgs;
         env = runStoreDocEnv;
         contractArgs = [
           (lib.appApi.arg.positional {
@@ -647,7 +654,8 @@
             type = "string";
             required = true;
           })
-        ] ++ runStoreContractArgs;
+        ]
+        ++ runStoreContractArgs;
         contractEnv = runStoreContractEnv;
         idempotent = true;
         command = "run status";
@@ -672,7 +680,8 @@
             name = "--to-seq";
             description = "Optional last sequence number to read (inclusive).";
           }
-        ] ++ runStoreDocArgs;
+        ]
+        ++ runStoreDocArgs;
         env = runStoreDocEnv;
         contractArgs = [
           (lib.appApi.arg.positional {
@@ -694,7 +703,8 @@
             required = false;
             min = 1;
           })
-        ] ++ runStoreContractArgs;
+        ]
+        ++ runStoreContractArgs;
         contractEnv = runStoreContractEnv;
         idempotent = true;
         command = "run events";
@@ -711,7 +721,8 @@
             name = "artifact-id";
             description = "Artifact id (content hash).";
           }
-        ] ++ runStoreDocArgs;
+        ]
+        ++ runStoreDocArgs;
         env = runStoreDocEnv;
         contractArgs = [
           (lib.appApi.arg.positional {
@@ -719,7 +730,8 @@
             type = "string";
             required = true;
           })
-        ] ++ runStoreContractArgs;
+        ]
+        ++ runStoreContractArgs;
         contractEnv = runStoreContractEnv;
         idempotent = true;
         command = "run artifacts get";
@@ -740,7 +752,8 @@
             name = "--input-json";
             description = "Optional pipeline input JSON payload (default: {}).";
           }
-        ] ++ runStoreDocArgs;
+        ]
+        ++ runStoreDocArgs;
         env = runStoreDocEnv;
         contractArgs = [
           (lib.appApi.arg.option {
@@ -755,7 +768,8 @@
             type = "json";
             required = false;
           })
-        ] ++ runStoreContractArgs;
+        ]
+        ++ runStoreContractArgs;
         contractEnv = runStoreContractEnv;
         idempotent = false;
         command = "run pipeline start";
@@ -776,7 +790,8 @@
             name = "--spec-file";
             description = "Optional path to JSON pipeline spec file.";
           }
-        ] ++ runStoreDocArgs;
+        ]
+        ++ runStoreDocArgs;
         env = runStoreDocEnv;
         contractArgs = [
           (lib.appApi.arg.option {
@@ -791,7 +806,8 @@
             type = "string";
             required = false;
           })
-        ] ++ runStoreContractArgs;
+        ]
+        ++ runStoreContractArgs;
         contractEnv = runStoreContractEnv;
         idempotent = false;
         command = "run pipeline deploy-configure-validate";

@@ -26,14 +26,17 @@ let
     "fail"
   ];
 
-  isArtifactName = value: builtins.isString value && (builtins.match "^[A-Za-z0-9._-]+$" value) != null;
+  isArtifactName =
+    value: builtins.isString value && (builtins.match "^[A-Za-z0-9._-]+$" value) != null;
 
   renderEnvExports =
     env:
     let
       keys = lib.sort (a: b: a < b) (builtins.attrNames env);
     in
-    lib.concatMapStringsSep "\n" (key: "export ${key}=${lib.escapeShellArg (toString env.${key})}") keys;
+    lib.concatMapStringsSep "\n" (
+      key: "export ${key}=${lib.escapeShellArg (toString env.${key})}"
+    ) keys;
 
   renderArgv =
     argv:
@@ -48,19 +51,13 @@ let
     action:
     let
       kind = action.kind;
-      envBlock =
-        if action ? env && action.env != { } then
-          renderEnvExports action.env
-        else
-          "";
-      withEnv =
-        body:
-        ''
-          (
-            ${envBlock}
-            ${body}
-          )
-        '';
+      envBlock = if action ? env && action.env != { } then renderEnvExports action.env else "";
+      withEnv = body: ''
+        (
+          ${envBlock}
+          ${body}
+        )
+      '';
     in
     if kind == "runApp" then
       let
@@ -75,7 +72,9 @@ let
       withEnv ''
         _NIXFIED_RUN_APP_ARGS=()
         ${argsInit}
-        if [ "${if action.passArgs or false then "1" else "0"}" = "1" ] && [ "''${CI_STEP_ARGS+x}" = "x" ] && [ "''${#CI_STEP_ARGS[@]}" -gt 0 ]; then
+        if [ "${
+          if action.passArgs or false then "1" else "0"
+        }" = "1" ] && [ "''${CI_STEP_ARGS+x}" = "x" ] && [ "''${#CI_STEP_ARGS[@]}" -gt 0 ]; then
           _NIXFIED_RUN_APP_ARGS+=("''${CI_STEP_ARGS[@]}")
         fi
         if [ "''${#_NIXFIED_RUN_APP_ARGS[@]}" -gt 0 ]; then
@@ -153,23 +152,21 @@ let
             builtins.isList argv && isListOfNonEmptyStrings argv && argv != [ ]
           ) "${prefix}: exec.argv must be a non-empty list of non-empty strings"
         else if kind == "logCapture" then
-          expect (
-            isArtifactName (action.artifact or "")
-          ) "${prefix}: logCapture.artifact must match ^[A-Za-z0-9._-]+$"
+          expect (isArtifactName (
+            action.artifact or ""
+          )) "${prefix}: logCapture.artifact must match ^[A-Za-z0-9._-]+$"
           ++ expect (
             builtins.isList argv && isListOfNonEmptyStrings argv && argv != [ ]
           ) "${prefix}: logCapture.argv must be a non-empty list of non-empty strings"
         else if kind == "artifactTouch" then
-          expect (
-            isArtifactName (action.artifact or "")
-          ) "${prefix}: artifactTouch.artifact must match ^[A-Za-z0-9._-]+$"
+          expect (isArtifactName (
+            action.artifact or ""
+          )) "${prefix}: artifactTouch.artifact must match ^[A-Za-z0-9._-]+$"
         else if kind == "assertEnvEquals" then
-          expect (
-            isEnvVarName (action.name or "")
-          ) "${prefix}: assertEnvEquals.name must be a shell-safe env var token"
-          ++ expect (
-            isScalar (action.value or null)
-          ) "${prefix}: assertEnvEquals.value must be a scalar"
+          expect (isEnvVarName (
+            action.name or ""
+          )) "${prefix}: assertEnvEquals.name must be a shell-safe env var token"
+          ++ expect (isScalar (action.value or null)) "${prefix}: assertEnvEquals.value must be a scalar"
         else if kind == "fail" then
           let
             code = action.code or 1;
@@ -192,10 +189,13 @@ let
     else
       (expect (!required || actions != [ ]) "${context}: must include at least one action")
       ++ builtins.concatLists (
-        lib.imap0 (index: action: validateActionErrors {
-          inherit index action;
-          context = context;
-        }) actions
+        lib.imap0 (
+          index: action:
+          validateActionErrors {
+            inherit index action;
+            context = context;
+          }
+        ) actions
       );
 
   throwActionListViolation =

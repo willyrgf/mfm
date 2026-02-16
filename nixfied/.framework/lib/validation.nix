@@ -7,8 +7,11 @@ rec {
   expect = cond: msg: if cond then [ ] else [ msg ];
   renderErrors = errs: builtins.concatStringsSep "\n" (map (e: "  - " + e) errs);
   sortedAttrNames = attrs: pkgs.lib.sort (a: b: a < b) (builtins.attrNames attrs);
-  optionalAttrSatisfies = attrs: field: pred: !(builtins.hasAttr field attrs) || pred (attrs.${field});
-  isEnvVarName = value: builtins.isString value && (builtins.match "^[A-Z_][A-Z0-9_]*$" value) != null;
+  optionalAttrSatisfies =
+    attrs: field: pred:
+    !(builtins.hasAttr field attrs) || pred (attrs.${field});
+  isEnvVarName =
+    value: builtins.isString value && (builtins.match "^[A-Z_][A-Z0-9_]*$" value) != null;
   isScalar =
     value:
     builtins.isString value

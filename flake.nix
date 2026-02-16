@@ -136,17 +136,16 @@
             }
           else
             { };
-        knownAppNames =
-          pkgs.lib.unique (
-            (builtins.attrNames (project.commands or { }))
-            ++ (builtins.attrNames moduleApps)
-            ++ [
-              "help"
-              "ci"
-              "validate-env"
-              "test-isolation"
-            ]
-          );
+        knownAppNames = pkgs.lib.unique (
+          (builtins.attrNames (project.commands or { }))
+          ++ (builtins.attrNames moduleApps)
+          ++ [
+            "help"
+            "ci"
+            "validate-env"
+            "test-isolation"
+          ]
+        );
         isolationApps = import ./nixfied/.framework/internal/isolation.nix {
           inherit
             pkgs

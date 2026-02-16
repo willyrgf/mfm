@@ -74,8 +74,12 @@ let
       ++ expect (
         !(op ? class) || builtins.elem op.class validCommandClasses
       ) "${prefix}: class must be one of ${builtins.concatStringsSep ", " validCommandClasses}"
-      ++ expect (optionalAttrSatisfies op "idempotent" builtins.isBool) "${prefix}: idempotent must be a boolean"
-      ++ expect (optionalAttrSatisfies op "exposeApp" builtins.isBool) "${prefix}: exposeApp must be a boolean"
+      ++ expect (optionalAttrSatisfies op "idempotent"
+        builtins.isBool
+      ) "${prefix}: idempotent must be a boolean"
+      ++ expect (optionalAttrSatisfies op "exposeApp"
+        builtins.isBool
+      ) "${prefix}: exposeApp must be a boolean"
       ++ expect (optionalAttrSatisfies op "appName"
         isNonEmptyString
       ) "${prefix}: appName must be a non-empty string"

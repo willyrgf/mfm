@@ -212,13 +212,11 @@ let
     else
       throw "fixtures.env.${key} must be a scalar or attrset";
 
-  mkHttpUrlExportFromPortVar =
-    key: portVar:
-    ''
-      _fixture_port_var="${portVar}"
-      _fixture_port_val="''${!_fixture_port_var:-}"
-      export ${key}="http://127.0.0.1:''${_fixture_port_val}"
-    '';
+  mkHttpUrlExportFromPortVar = key: portVar: ''
+    _fixture_port_var="${portVar}"
+    _fixture_port_val="''${!_fixture_port_var:-}"
+    export ${key}="http://127.0.0.1:''${_fixture_port_val}"
+  '';
 
   keepRunningFromPolicy = ''
     ${servicePolicy.policyRuntimeFunctions}

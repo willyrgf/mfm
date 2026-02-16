@@ -19,12 +19,11 @@ let
     isKVSpecList
     ;
 
-  mkFixHint =
-    commandName: ''
-      Fix:
-        - For project commands: define commands.${commandName}.api = { version = 2; summary = "..."; details = "..."; usage = [ "nix run .#${commandName}" ]; appContract = { commandClass = "typed"; ... }; };
-        - For generated/internal apps: set app.meta.nixfied.api (or use lib.appApi.mkNixfiedApp).
-    '';
+  mkFixHint = commandName: ''
+    Fix:
+      - For project commands: define commands.${commandName}.api = { version = 2; summary = "..."; details = "..."; usage = [ "nix run .#${commandName}" ]; appContract = { commandClass = "typed"; ... }; };
+      - For generated/internal apps: set app.meta.nixfied.api (or use lib.appApi.mkNixfiedApp).
+  '';
   throwNamedViolation =
     name: errs:
     throw ''
@@ -57,10 +56,18 @@ let
       ++ expect (isListOfNonEmptyStrings (
         api.usage or [ ]
       )) "${name}: api.usage must be a list of non-empty strings"
-      ++ expect (optionalAttrSatisfies api "examples" isListOfNonEmptyStrings) "${name}: api.examples must be a list of non-empty strings"
-      ++ expect (optionalAttrSatisfies api "args" isKVSpecList) "${name}: api.args must be a list of { name, description }"
-      ++ expect (optionalAttrSatisfies api "env" isKVSpecList) "${name}: api.env must be a list of { name, description }"
-      ++ expect (optionalAttrSatisfies api "category" isNonEmptyString) "${name}: api.category must be a non-empty string"
+      ++ expect (optionalAttrSatisfies api "examples"
+        isListOfNonEmptyStrings
+      ) "${name}: api.examples must be a list of non-empty strings"
+      ++ expect (optionalAttrSatisfies api "args"
+        isKVSpecList
+      ) "${name}: api.args must be a list of { name, description }"
+      ++ expect (optionalAttrSatisfies api "env"
+        isKVSpecList
+      ) "${name}: api.env must be a list of { name, description }"
+      ++ expect (optionalAttrSatisfies api "category"
+        isNonEmptyString
+      ) "${name}: api.category must be a non-empty string"
       ++ shellContract.validateAppContractErrors {
         inherit name;
         contract = api.appContract or null;
@@ -71,14 +78,13 @@ let
     let
       errs = validateApiErrors { inherit name api; };
     in
-    if errs == [ ] then
-      api
-    else
-      throwNamedViolation name errs;
+    if errs == [ ] then api else throwNamedViolation name errs;
 
   failureProfiles = {
     script = shellContract.defaultFailureCodes;
-    cargo = shellContract.defaultFailureCodes // { cargoFailure = 101; };
+    cargo = shellContract.defaultFailureCodes // {
+      cargoFailure = 101;
+    };
     supervisor = shellContract.defaultFailureCodes // {
       interrupted = 130;
       terminated = 143;
@@ -235,21 +241,22 @@ let
           }
         else
           appContract;
-      api =
-        {
-          version = 2;
-          inherit
-            summary
-            details
-            usage
-            category
-            appContract
-            ;
-        }
-        // lib.optionalAttrs (examples != [ ]) { inherit examples; }
-        // lib.optionalAttrs (args != [ ]) { inherit args; }
-        // lib.optionalAttrs (env != [ ]) { inherit env; };
-      apiFinal = api // { appContract = contract; };
+      api = {
+        version = 2;
+        inherit
+          summary
+          details
+          usage
+          category
+          appContract
+          ;
+      }
+      // lib.optionalAttrs (examples != [ ]) { inherit examples; }
+      // lib.optionalAttrs (args != [ ]) { inherit args; }
+      // lib.optionalAttrs (env != [ ]) { inherit env; };
+      apiFinal = api // {
+        appContract = contract;
+      };
       _ = validateApi {
         inherit name;
         api = apiFinal;
@@ -278,26 +285,27 @@ let
       failureCodes ? failureProfiles.script,
     }:
     let
-      defaultContract =
-        shellContract.mkDefaultAppContract {
-          inherit
-            name
-            args
-            env
-            allowUnknownArgs
-            commandClass
-            idempotent
-            outputsMode
-            failureCodes
-            ;
-        };
+      defaultContract = shellContract.mkDefaultAppContract {
+        inherit
+          name
+          args
+          env
+          allowUnknownArgs
+          commandClass
+          idempotent
+          outputsMode
+          failureCodes
+          ;
+      };
 
       contractWithSpecOverrides =
         defaultContract
         // lib.optionalAttrs (contractArgs != null) { args = contractArgs; }
         // lib.optionalAttrs (contractEnv != null) { env = contractEnv; }
         // lib.optionalAttrs (outputsKeys != [ ]) {
-          outputs = defaultContract.outputs // { keys = outputsKeys; };
+          outputs = defaultContract.outputs // {
+            keys = outputsKeys;
+          };
         };
 
       contract0 =
@@ -337,26 +345,24 @@ let
         else
           null;
     in
-    builtins.seq _classPolicy (
-      mkApi {
-        inherit
-          name
-          summary
-          details
-          usage
-          examples
-          args
-          env
-          category
-          idempotent
-          ;
-        appContract = contract0;
-        commandClass = commandClass;
-        allowUnknownArgs = allowUnknownActual;
-        outputsMode = outputModeActual;
-        failureCodes = contract0.failureCodes or failureCodes;
-      }
-    );
+    builtins.seq _classPolicy (mkApi {
+      inherit
+        name
+        summary
+        details
+        usage
+        examples
+        args
+        env
+        category
+        idempotent
+        ;
+      appContract = contract0;
+      commandClass = commandClass;
+      allowUnknownArgs = allowUnknownActual;
+      outputsMode = outputModeActual;
+      failureCodes = contract0.failureCodes or failureCodes;
+    });
 
   mkCommandApi =
     args:
@@ -422,10 +428,7 @@ let
     let
       errs = validateAppErrors { inherit name app; };
     in
-    if errs == [ ] then
-      app
-    else
-      throwNamedViolation name errs;
+    if errs == [ ] then app else throwNamedViolation name errs;
 
   validateApps =
     apps:

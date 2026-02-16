@@ -8,10 +8,8 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-hex = { workspace = true }
 alloy-primitives = { workspace = true, features = ["serde"] }
 
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
-mfm-collectors-evm = { path = "../../collectors/evm" }
 mfm-op-common = { path = "../common" }

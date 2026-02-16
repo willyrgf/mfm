@@ -30,36 +30,35 @@ let
     "durationSec"
     "json"
   ];
-  specErrors =
-    builtins.concatLists (
-      lib.imap0 (
-        index: spec:
-        let
-          prefix = "tooling.envFile.allow[${toString index}]";
-          type = spec.type or "string";
-        in
-        if !builtins.isAttrs spec then
-          [ "${prefix}: entry must be an attribute set" ]
-        else
-          expect (isEnvVarName (spec.name or "")) "${prefix}.name must be a shell-safe env var token"
-          ++ expect (
-            !(spec ? type) || builtins.elem type supportedTypes
-          ) "${prefix}.type must be one of ${builtins.concatStringsSep ", " supportedTypes}"
-          ++ expect (
-            !(spec ? required) || builtins.isBool spec.required
-          ) "${prefix}.required must be a boolean when set"
-          ++ expect (
-            !(spec ? default) || isScalar spec.default
-          ) "${prefix}.default must be a scalar when set"
-      ) allowSpecsRaw
-    );
+  specErrors = builtins.concatLists (
+    lib.imap0 (
+      index: spec:
+      let
+        prefix = "tooling.envFile.allow[${toString index}]";
+        type = spec.type or "string";
+      in
+      if !builtins.isAttrs spec then
+        [ "${prefix}: entry must be an attribute set" ]
+      else
+        expect (isEnvVarName (spec.name or "")) "${prefix}.name must be a shell-safe env var token"
+        ++ expect (
+          !(spec ? type) || builtins.elem type supportedTypes
+        ) "${prefix}.type must be one of ${builtins.concatStringsSep ", " supportedTypes}"
+        ++ expect (
+          !(spec ? required) || builtins.isBool spec.required
+        ) "${prefix}.required must be a boolean when set"
+        ++ expect (!(spec ? default) || isScalar spec.default) "${prefix}.default must be a scalar when set"
+    ) allowSpecsRaw
+  );
   specNames = map (spec: if builtins.isAttrs spec then (spec.name or "") else "") allowSpecsRaw;
   duplicateSpecNames = builtins.filter (
     name: (builtins.length (builtins.filter (candidate: candidate == name) specNames)) > 1
   ) (lib.unique specNames);
   topLevelErrs =
     expect (builtins.isList allowSpecsRawValue) "tooling.envFile.allow must be a list"
-    ++ expect (duplicateSpecNames == [ ]) "tooling.envFile.allow contains duplicate names: ${builtins.concatStringsSep ", " duplicateSpecNames}";
+    ++
+      expect (duplicateSpecNames == [ ])
+        "tooling.envFile.allow contains duplicate names: ${builtins.concatStringsSep ", " duplicateSpecNames}";
 
   allErrs = topLevelErrs ++ specErrors;
 
@@ -92,7 +91,9 @@ let
         ${renderErrors allErrs}
       '';
 
-  allowSpecsFile = pkgs.writeText "nixfied-env-file-specs.json" (builtins.toJSON normalizedAllowSpecs);
+  allowSpecsFile = pkgs.writeText "nixfied-env-file-specs.json" (
+    builtins.toJSON normalizedAllowSpecs
+  );
 
   loadEnvFile = pkgs.writeShellScript "nixfied-load-env-file" ''
     set -euo pipefail

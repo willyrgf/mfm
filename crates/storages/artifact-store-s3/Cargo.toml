@@ -9,9 +9,6 @@ mfm-machine = { path = "../../machine" }
 s3 = { package = "rust-s3", version = "0.37.1", default-features = false, features = ["tokio-rustls-tls"] }
 
 [dev-dependencies]
-mfm-machine-test-support = { path = "../../machine-test-support" }
-tempfile = "3.8"
-tokio = { workspace = true }
 
 [features]
 parity-tests = []

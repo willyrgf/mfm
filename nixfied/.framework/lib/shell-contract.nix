@@ -58,11 +58,9 @@ let
     && (builtins.stringLength value) >= (builtins.stringLength prefix)
     && (builtins.substring 0 (builtins.stringLength prefix) value) == prefix;
 
-  isShortOpt =
-    value: builtins.isString value && (builtins.match "^-.[^[:space:]]*$" value) != null;
+  isShortOpt = value: builtins.isString value && (builtins.match "^-.[^[:space:]]*$" value) != null;
 
-  isLongOpt =
-    value: builtins.isString value && (builtins.match "^--[^[:space:]]+$" value) != null;
+  isLongOpt = value: builtins.isString value && (builtins.match "^--[^[:space:]]+$" value) != null;
 
   isSupportedType = value: builtins.elem value supportedTypes;
   isSupportedKind = value: builtins.elem value supportedArgKinds;
@@ -113,27 +111,22 @@ let
       ++ expect (
         kind != "positional" || (!(argSpec ? long) && !(argSpec ? short))
       ) "${prefix}: positional args cannot set long/short"
+      ++ expect (kind != "flag" || type == "bool") "${prefix}: flag args must use type=bool"
       ++ expect (
-        kind != "flag" || type == "bool"
-      ) "${prefix}: flag args must use type=bool"
-      ++ expect (
-        !hasDefault || (builtins.isString argSpec.default || builtins.isInt argSpec.default || builtins.isBool argSpec.default)
+        !hasDefault
+        || (
+          builtins.isString argSpec.default
+          || builtins.isInt argSpec.default
+          || builtins.isBool argSpec.default
+        )
       ) "${prefix}: default must be string/int/bool when set"
       ++ expect (
         type != "enum" || (isNonEmptyList values && isListOfNonEmptyStrings values)
       ) "${prefix}: enum args must define values=[\"...\"]"
-      ++ expect (
-        type != "enum" || !(argSpec ? pattern)
-      ) "${prefix}: enum args cannot also define pattern"
-      ++ expect (
-        min == null || builtins.isInt min
-      ) "${prefix}: min must be an integer when set"
-      ++ expect (
-        max == null || builtins.isInt max
-      ) "${prefix}: max must be an integer when set"
-      ++ expect (
-        (min == null || max == null) || min <= max
-      ) "${prefix}: min must be <= max";
+      ++ expect (type != "enum" || !(argSpec ? pattern)) "${prefix}: enum args cannot also define pattern"
+      ++ expect (min == null || builtins.isInt min) "${prefix}: min must be an integer when set"
+      ++ expect (max == null || builtins.isInt max) "${prefix}: max must be an integer when set"
+      ++ expect ((min == null || max == null) || min <= max) "${prefix}: min must be <= max";
 
   validateEnvSpecErrors =
     {
@@ -162,7 +155,12 @@ let
         !(envSpec ? required) || builtins.isBool (envSpec.required or null)
       ) "${prefix}: required must be a boolean when set"
       ++ expect (
-        !hasDefault || (builtins.isString envSpec.default || builtins.isInt envSpec.default || builtins.isBool envSpec.default)
+        !hasDefault
+        || (
+          builtins.isString envSpec.default
+          || builtins.isInt envSpec.default
+          || builtins.isBool envSpec.default
+        )
       ) "${prefix}: default must be string/int/bool when set"
       ++ expect (
         !(envSpec ? sensitive) || builtins.isBool (envSpec.sensitive or null)
@@ -170,15 +168,9 @@ let
       ++ expect (
         builtins.isList aliases && builtins.all isEnvVarName aliases
       ) "${prefix}: aliases must be env var tokens"
-      ++ expect (
-        min == null || builtins.isInt min
-      ) "${prefix}: min must be an integer when set"
-      ++ expect (
-        max == null || builtins.isInt max
-      ) "${prefix}: max must be an integer when set"
-      ++ expect (
-        (min == null || max == null) || min <= max
-      ) "${prefix}: min must be <= max";
+      ++ expect (min == null || builtins.isInt min) "${prefix}: min must be an integer when set"
+      ++ expect (max == null || builtins.isInt max) "${prefix}: max must be an integer when set"
+      ++ expect ((min == null || max == null) || min <= max) "${prefix}: min must be <= max";
 
   validateFailureCodesErrors =
     {
@@ -187,19 +179,15 @@ let
     }:
     let
       prefix = "${appName}.appContract.failureCodes";
-      names =
-        if builtins.isAttrs failureCodes then builtins.attrNames failureCodes else [ ];
+      names = if builtins.isAttrs failureCodes then builtins.attrNames failureCodes else [ ];
       badKeys = builtins.filter (key: !isNonEmptyString key) names;
-      badValues =
-        builtins.filter
-          (key: !(isPositiveExitCode failureCodes.${key}))
-          names;
+      badValues = builtins.filter (key: !(isPositiveExitCode failureCodes.${key})) names;
     in
     expect (builtins.isAttrs failureCodes) "${prefix}: failureCodes must be an attribute set"
     ++ expect (badKeys == [ ]) "${prefix}: failure code names must be non-empty strings"
-    ++ expect (
-      badValues == [ ]
-    ) "${prefix}: failure code values must be integers in 1..255 (invalid: ${builtins.concatStringsSep ", " badValues})";
+    ++
+      expect (badValues == [ ])
+        "${prefix}: failure code values must be integers in 1..255 (invalid: ${builtins.concatStringsSep ", " badValues})";
 
   validateAppContractErrors =
     {
@@ -214,16 +202,22 @@ let
       outputs = contract.outputs or { mode = "text"; };
       mode = outputs.mode or "text";
       argErrs = builtins.concatLists (
-        lib.imap0 (index: argSpec: validateArgSpecErrors {
-          appName = name;
-          inherit argSpec index;
-        }) args
+        lib.imap0 (
+          index: argSpec:
+          validateArgSpecErrors {
+            appName = name;
+            inherit argSpec index;
+          }
+        ) args
       );
       envErrs = builtins.concatLists (
-        lib.imap0 (index: envSpec: validateEnvSpecErrors {
-          appName = name;
-          inherit envSpec index;
-        }) env
+        lib.imap0 (
+          index: envSpec:
+          validateEnvSpecErrors {
+            appName = name;
+            inherit envSpec index;
+          }
+        ) env
       );
       argNames = map (argSpec: argSpec.name or "") args;
       longNames = builtins.filter (token: token != "") (map (argSpec: argSpec.long or "") args);
@@ -242,37 +236,23 @@ let
       [ "${name}: appContract must be an attribute set" ]
     else
       expect (contract ? version) "${name}: appContract.version is required"
-      ++ expect (
-        builtins.isInt (contract.version or null)
-      ) "${name}: appContract.version must be an integer"
+      ++ expect (builtins.isInt (
+        contract.version or null
+      )) "${name}: appContract.version must be an integer"
       ++ expect ((contract.version or null) == 2) "${name}: appContract.version must be 2"
-      ++ expect (
-        isNonEmptyString (contract.name or "")
-      ) "${name}: appContract.name must be a non-empty string"
+      ++ expect (isNonEmptyString (
+        contract.name or ""
+      )) "${name}: appContract.name must be a non-empty string"
       ++ expect (
         !(contract ? allowUnknownArgs) || builtins.isBool (contract.allowUnknownArgs or null)
       ) "${name}: appContract.allowUnknownArgs must be a boolean when set"
-      ++ expect (
-        contract ? commandClass
-      ) "${name}: appContract.commandClass is required"
-      ++ expect (
-        isNonEmptyString commandClass
-      ) "${name}: appContract.commandClass must be a non-empty string"
-      ++ expect (
-        isSupportedCommandClass commandClass
-      ) "${name}: appContract.commandClass must be one of ${builtins.concatStringsSep "|" supportedCommandClasses}"
-      ++ expect (
-        builtins.isList args
-      ) "${name}: appContract.args must be a list"
-      ++ expect (
-        builtins.isList env
-      ) "${name}: appContract.env must be a list"
-      ++ expect (
-        builtins.isAttrs outputs
-      ) "${name}: appContract.outputs must be an attribute set"
-      ++ expect (
-        isSupportedOutputMode mode
-      ) "${name}: appContract.outputs.mode must be one of ${builtins.concatStringsSep "|" supportedOutputModes}"
+      ++ expect (contract ? commandClass) "${name}: appContract.commandClass is required"
+      ++ expect (isNonEmptyString commandClass) "${name}: appContract.commandClass must be a non-empty string"
+      ++ expect (isSupportedCommandClass commandClass) "${name}: appContract.commandClass must be one of ${builtins.concatStringsSep "|" supportedCommandClasses}"
+      ++ expect (builtins.isList args) "${name}: appContract.args must be a list"
+      ++ expect (builtins.isList env) "${name}: appContract.env must be a list"
+      ++ expect (builtins.isAttrs outputs) "${name}: appContract.outputs must be an attribute set"
+      ++ expect (isSupportedOutputMode mode) "${name}: appContract.outputs.mode must be one of ${builtins.concatStringsSep "|" supportedOutputModes}"
       ++ expect (
         !(outputs ? keys) || isListOfNonEmptyStrings (outputs.keys or [ ])
       ) "${name}: appContract.outputs.keys must be a list of non-empty strings when set"
@@ -301,21 +281,21 @@ let
         appName = name;
         failureCodes = contract.failureCodes or defaultFailureCodes;
       }
-      ++ expect (
-        duplicateArgNames == [ ]
-      ) "${name}: appContract.args has duplicate names: ${builtins.concatStringsSep ", " duplicateArgNames}"
-      ++ expect (
-        duplicateLongNames == [ ]
-      ) "${name}: appContract.args has duplicate long options: ${builtins.concatStringsSep ", " duplicateLongNames}"
-      ++ expect (
-        duplicateShortNames == [ ]
-      ) "${name}: appContract.args has duplicate short options: ${builtins.concatStringsSep ", " duplicateShortNames}"
-      ++ expect (
-        duplicateEnvNames == [ ]
-      ) "${name}: appContract.env has duplicate names: ${builtins.concatStringsSep ", " duplicateEnvNames}"
-      ++ expect (
-        duplicateEnvAliases == [ ]
-      ) "${name}: appContract.env has duplicate aliases: ${builtins.concatStringsSep ", " duplicateEnvAliases}"
+      ++
+        expect (duplicateArgNames == [ ])
+          "${name}: appContract.args has duplicate names: ${builtins.concatStringsSep ", " duplicateArgNames}"
+      ++
+        expect (duplicateLongNames == [ ])
+          "${name}: appContract.args has duplicate long options: ${builtins.concatStringsSep ", " duplicateLongNames}"
+      ++
+        expect (duplicateShortNames == [ ])
+          "${name}: appContract.args has duplicate short options: ${builtins.concatStringsSep ", " duplicateShortNames}"
+      ++
+        expect (duplicateEnvNames == [ ])
+          "${name}: appContract.env has duplicate names: ${builtins.concatStringsSep ", " duplicateEnvNames}"
+      ++
+        expect (duplicateEnvAliases == [ ])
+          "${name}: appContract.env has duplicate aliases: ${builtins.concatStringsSep ", " duplicateEnvAliases}"
       ++ argErrs
       ++ envErrs;
 
@@ -338,8 +318,16 @@ let
   tokenToArgName =
     token:
     let
-      base0 = if hasPrefix "--" token then builtins.substring 2 ((builtins.stringLength token) - 2) token else token;
-      base1 = if hasPrefix "-" base0 then builtins.substring 1 ((builtins.stringLength base0) - 1) base0 else base0;
+      base0 =
+        if hasPrefix "--" token then
+          builtins.substring 2 ((builtins.stringLength token) - 2) token
+        else
+          token;
+      base1 =
+        if hasPrefix "-" base0 then
+          builtins.substring 1 ((builtins.stringLength base0) - 1) base0
+        else
+          base0;
       base2 =
         let
           equalMatch = builtins.match "^([^=]+)=.*$" base1;
@@ -366,8 +354,7 @@ let
           if (builtins.match "^--[^=]+=.+$" token) != null then "option" else "flag"
         else
           "positional";
-      type =
-        if kind == "flag" then "bool" else "string";
+      type = if kind == "flag" then "bool" else "string";
     in
     {
       inherit

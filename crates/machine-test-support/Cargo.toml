@@ -6,5 +6,4 @@ edition = "2021"
 [dependencies]
 mfm-machine = { path = "../machine" }
 uuid = { version = "1", features = ["v4"] }
-tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }

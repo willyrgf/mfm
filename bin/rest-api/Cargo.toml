@@ -5,11 +5,9 @@ edition = "2021"
 
 [dependencies]
 tokio = { workspace = true }
-async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-hex = { workspace = true }
 
 axum = "0.7"
 tower-http = { version = "0.6", features = ["request-id", "trace"] }
@@ -17,24 +15,12 @@ http = "1"
 uuid = { version = "1.0", features = ["v4"] }
 
 mfm-machine = { path = "../../crates/machine" }
-mfm-sdk = { path = "../../crates/sdk" }
 mfm-app = { path = "../../crates/app" }
-mfm-op-proof = { path = "../../crates/ops/proof-op" }
-mfm-op-evm-read = { path = "../../crates/ops/evm-read-op" }
-mfm-op-evm-write = { path = "../../crates/ops/evm-write-op" }
-mfm-op-nix-app = { path = "../../crates/ops/nix-app-op" }
-mfm-collectors-evm-jsonrpc-http = { path = "../../crates/collectors/evm-jsonrpc-http" }
-mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
-mfm-artifact-store-s3 = { path = "../../crates/storages/artifact-store-s3" }
-mfm-event-store-postgres = { path = "../../crates/storages/event-store-postgres" }
 
 [features]
 parity-tests = []
 
 [dev-dependencies]
-tower = "0.5"
-tempfile = "3.0"
-mfm-event-store-mem = { path = "../../crates/storages/event-store-mem" }
 
 [[bin]]
 name = "mfm_rest_api"

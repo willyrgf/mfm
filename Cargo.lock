@@ -1888,37 +1888,26 @@ checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 name = "mfm"
 version = "0.1.29"
 dependencies = [
- "alloy-primitives",
  "assert_cmd",
- "async-trait",
- "chrono",
  "clap",
  "hex",
- "k256",
  "mfm-app",
  "mfm-artifact-store-fs",
- "mfm-collectors-evm-jsonrpc-http",
  "mfm-event-store-mem",
  "mfm-event-store-postgres",
  "mfm-machine",
- "mfm-op-evm-read",
- "mfm-op-evm-write",
  "mfm-op-keystore-admin",
  "mfm-op-keystore-shim",
  "mfm-op-keystore-tx",
- "mfm-op-nix-app",
- "mfm-op-proof",
  "mfm-sdk",
  "predicates",
  "rand 0.9.1",
- "regex",
  "reqwest",
  "serde",
  "serde_json",
  "tabled",
  "tempfile",
  "tokio",
- "tracing",
  "uuid",
 ]
 
@@ -1945,7 +1934,6 @@ dependencies = [
  "mfm-sdk",
  "serde",
  "serde_json",
- "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -1972,10 +1960,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mfm-machine",
- "mfm-machine-test-support",
  "rust-s3",
- "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -2031,7 +2016,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mfm-machine",
- "mfm-machine-test-support",
  "serde_json",
  "tokio",
  "tokio-postgres",
@@ -2093,7 +2077,6 @@ name = "mfm-machine-test-support"
 version = "0.1.0"
 dependencies = [
  "mfm-machine",
- "tracing",
  "tracing-subscriber",
  "uuid",
 ]
@@ -2117,7 +2100,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tracing",
  "url",
  "uuid",
  "zeroize",
@@ -2140,7 +2122,6 @@ name = "mfm-op-evm-read"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "mfm-collectors-evm",
  "mfm-machine",
  "mfm-op-common",
  "mfm-sdk",
@@ -2154,7 +2135,6 @@ name = "mfm-op-evm-write"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "async-trait",
  "hex",
  "k256",
  "mfm-collectors-evm",
@@ -2163,7 +2143,6 @@ dependencies = [
  "mfm-sdk",
  "serde",
  "serde_json",
- "tokio",
  "zeroize",
 ]
 
@@ -2194,15 +2173,11 @@ dependencies = [
  "hex",
  "mfm-machine",
  "mfm-op-common",
- "mfm-op-keystore-shim",
  "mfm-sdk",
- "rpassword",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "tracing",
- "zeroize",
 ]
 
 [[package]]
@@ -2225,8 +2200,6 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "async-trait",
- "hex",
- "mfm-collectors-evm",
  "mfm-machine",
  "mfm-op-common",
  "mfm-sdk",
@@ -2251,27 +2224,13 @@ dependencies = [
 name = "mfm-rest-api"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "axum",
- "hex",
  "http",
  "mfm-app",
- "mfm-artifact-store-fs",
- "mfm-artifact-store-s3",
- "mfm-collectors-evm-jsonrpc-http",
- "mfm-event-store-mem",
- "mfm-event-store-postgres",
  "mfm-machine",
- "mfm-op-evm-read",
- "mfm-op-evm-write",
- "mfm-op-nix-app",
- "mfm-op-proof",
- "mfm-sdk",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
- "tower",
  "tower-http",
  "tracing",
  "uuid",

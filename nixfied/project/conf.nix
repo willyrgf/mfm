@@ -64,61 +64,61 @@ let
       ];
 
   contractArtifactTool = pkgs.writeShellScriptBin "mfm-contract-artifact-configurable-counter" ''
-    set -euo pipefail
+        set -euo pipefail
 
-    tmp="$(${pkgs.coreutils}/bin/mktemp -d)"
-    cleanup() { ${pkgs.coreutils}/bin/rm -rf "$tmp"; }
-    trap cleanup EXIT
+        tmp="$(${pkgs.coreutils}/bin/mktemp -d)"
+        cleanup() { ${pkgs.coreutils}/bin/rm -rf "$tmp"; }
+        trap cleanup EXIT
 
-    ${pkgs.coreutils}/bin/mkdir -p "$tmp/src"
-    ${pkgs.coreutils}/bin/cp "${../../contracts/src/ConfigurableCounter.sol}" "$tmp/src/ConfigurableCounter.sol"
+        ${pkgs.coreutils}/bin/mkdir -p "$tmp/src"
+        ${pkgs.coreutils}/bin/cp "${../../contracts/src/ConfigurableCounter.sol}" "$tmp/src/ConfigurableCounter.sol"
 
-    cat > "$tmp/foundry.toml" <<'EOF'
-[profile.default]
-src = "src"
-out = "out"
-libs = ["lib"]
-optimizer = true
-optimizer_runs = 200
-solc = "${pkgs.solc}/bin/solc"
-EOF
+        cat > "$tmp/foundry.toml" <<'EOF'
+    [profile.default]
+    src = "src"
+    out = "out"
+    libs = ["lib"]
+    optimizer = true
+    optimizer_runs = 200
+    solc = "${pkgs.solc}/bin/solc"
+    EOF
 
-    (
-      cd "$tmp"
-      ${pkgs.foundry}/bin/forge build --quiet > /dev/null
-    )
+        (
+          cd "$tmp"
+          ${pkgs.foundry}/bin/forge build --quiet > /dev/null
+        )
 
-    artifact="$tmp/out/ConfigurableCounter.sol/ConfigurableCounter.json"
-    ${pkgs.jq}/bin/jq -c '{artifact:{abi:.abi,bytecode:{object:.bytecode.object}}}' "$artifact"
+        artifact="$tmp/out/ConfigurableCounter.sol/ConfigurableCounter.json"
+        ${pkgs.jq}/bin/jq -c '{artifact:{abi:.abi,bytecode:{object:.bytecode.object}}}' "$artifact"
   '';
 
   contractArtifactMockErc20Tool = pkgs.writeShellScriptBin "mfm-contract-artifact-mock-erc20" ''
-    set -euo pipefail
+        set -euo pipefail
 
-    tmp="$(${pkgs.coreutils}/bin/mktemp -d)"
-    cleanup() { ${pkgs.coreutils}/bin/rm -rf "$tmp"; }
-    trap cleanup EXIT
+        tmp="$(${pkgs.coreutils}/bin/mktemp -d)"
+        cleanup() { ${pkgs.coreutils}/bin/rm -rf "$tmp"; }
+        trap cleanup EXIT
 
-    ${pkgs.coreutils}/bin/mkdir -p "$tmp/src"
-    ${pkgs.coreutils}/bin/cp "${../../contracts/src/MockERC20.sol}" "$tmp/src/MockERC20.sol"
+        ${pkgs.coreutils}/bin/mkdir -p "$tmp/src"
+        ${pkgs.coreutils}/bin/cp "${../../contracts/src/MockERC20.sol}" "$tmp/src/MockERC20.sol"
 
-    cat > "$tmp/foundry.toml" <<'EOF'
-[profile.default]
-src = "src"
-out = "out"
-libs = ["lib"]
-optimizer = true
-optimizer_runs = 200
-solc = "${pkgs.solc}/bin/solc"
-EOF
+        cat > "$tmp/foundry.toml" <<'EOF'
+    [profile.default]
+    src = "src"
+    out = "out"
+    libs = ["lib"]
+    optimizer = true
+    optimizer_runs = 200
+    solc = "${pkgs.solc}/bin/solc"
+    EOF
 
-    (
-      cd "$tmp"
-      ${pkgs.foundry}/bin/forge build --quiet > /dev/null
-    )
+        (
+          cd "$tmp"
+          ${pkgs.foundry}/bin/forge build --quiet > /dev/null
+        )
 
-    artifact="$tmp/out/MockERC20.sol/MockERC20.json"
-    ${pkgs.jq}/bin/jq -c '{artifact:{abi:.abi,bytecode:{object:.bytecode.object}}}' "$artifact"
+        artifact="$tmp/out/MockERC20.sol/MockERC20.json"
+        ${pkgs.jq}/bin/jq -c '{artifact:{abi:.abi,bytecode:{object:.bytecode.object}}}' "$artifact"
   '';
 in
 rec {

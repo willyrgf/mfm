@@ -38,14 +38,12 @@ let
         args0 = api.args or [ ];
         contract0 = api.appContract or null;
         contractArgs0 = if contract0 == null then [ ] else (contract0.args or [ ]);
-        hasContractArg =
-          builtins.any (item: (item.long or "") == checkRefreshArg || (item.name or "") == "refresh_discovery") contractArgs0;
-        contractArgs1 = if hasContractArg then contractArgs0 else contractArgs0 ++ [ checkRefreshArgContractSpec ];
-        contract1 =
-          if contract0 == null then
-            null
-          else
-            contract0 // { args = contractArgs1; };
+        hasContractArg = builtins.any (
+          item: (item.long or "") == checkRefreshArg || (item.name or "") == "refresh_discovery"
+        ) contractArgs0;
+        contractArgs1 =
+          if hasContractArg then contractArgs0 else contractArgs0 ++ [ checkRefreshArgContractSpec ];
+        contract1 = if contract0 == null then null else contract0 // { args = contractArgs1; };
       in
       api
       // {
@@ -53,44 +51,43 @@ let
       }
       // (pkgs.lib.optionalAttrs (contract1 != null) { appContract = contract1; });
 
-  wrapCheckScript =
-    baseScript: ''
-      DISCOVERY_REFRESH=0
-      PASS_ARGS=()
+  wrapCheckScript = baseScript: ''
+    DISCOVERY_REFRESH=0
+    PASS_ARGS=()
 
-      while [ "$#" -gt 0 ]; do
-        if [ "$1" = "${checkRefreshArg}" ]; then
-          DISCOVERY_REFRESH=1
-          shift
-          continue
-        fi
-
-        PASS_ARGS+=("$1")
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "${checkRefreshArg}" ]; then
+        DISCOVERY_REFRESH=1
         shift
-      done
+        continue
+      fi
 
-      if [ "$DISCOVERY_REFRESH" -eq 1 ]; then
-        ${discovery.tool}/bin/nixfied-discovery-index --refresh
+      PASS_ARGS+=("$1")
+      shift
+    done
+
+    if [ "$DISCOVERY_REFRESH" -eq 1 ]; then
+      ${discovery.tool}/bin/nixfied-discovery-index --refresh
+    else
+      if [ "${if discoveryStrict then "1" else "0"}" = "1" ]; then
+        if ! ${discovery.tool}/bin/nixfied-discovery-index --verify; then
+          exit 1
+        fi
       else
-        if [ "${if discoveryStrict then "1" else "0"}" = "1" ]; then
-          if ! ${discovery.tool}/bin/nixfied-discovery-index --verify; then
-            exit 1
-          fi
-        else
-          if ! ${discovery.tool}/bin/nixfied-discovery-index --verify; then
-            echo "WARN: discovery drift detected but strict mode is disabled by project config." >&2
-          fi
+        if ! ${discovery.tool}/bin/nixfied-discovery-index --verify; then
+          echo "WARN: discovery drift detected but strict mode is disabled by project config." >&2
         fi
       fi
+    fi
 
-      if [ "''${#PASS_ARGS[@]}" -gt 0 ]; then
-        set -- "''${PASS_ARGS[@]}"
-      else
-        set --
-      fi
+    if [ "''${#PASS_ARGS[@]}" -gt 0 ]; then
+      set -- "''${PASS_ARGS[@]}"
+    else
+      set --
+    fi
 
-      ${baseScript}
-    '';
+    ${baseScript}
+  '';
 
   normalizeCommandCfg =
     name: cfg:
@@ -161,7 +158,9 @@ let
 
   moduleAppNames = builtins.attrNames moduleApps;
   sortNames = names: pkgs.lib.sort (a: b: a < b) names;
-  getCommandCfg = name: if name == "help" && !(commands ? help) then { api = helpApi; } else normalizedCommands.${name};
+  getCommandCfg =
+    name:
+    if name == "help" && !(commands ? help) then { api = helpApi; } else normalizedCommands.${name};
   getCommandApi = name: (getCommandCfg name).api or null;
   getModuleApi = name: (((moduleApps.${name}.meta or { }).nixfied or { }).api or null);
   getCommandSummary =
