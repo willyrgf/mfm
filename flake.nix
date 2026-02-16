@@ -12,7 +12,12 @@
       nixpkgs,
       flake-utils,
     }:
-    flake-utils.lib.eachSystem flake-utils.lib.allSystems (
+    let
+      supportedSystems = builtins.filter (
+        system: builtins.elem system nixpkgs.lib.systems.flakeExposed
+      ) flake-utils.lib.allSystems;
+    in
+    flake-utils.lib.eachSystem supportedSystems (
       system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -206,7 +211,6 @@
             }
           else
             { };
-
         apps0 =
           coreApps
           // moduleApps
@@ -225,10 +229,10 @@
           else
             packages0
             // {
-              # Keep `nix build` functional even when the project only defines apps.
-              default = pkgs.runCommand "${project.project.id or "app"}-default" { } ''
+              # Keep `nix build` functional when the project only defines apps.
+              default = pkgs.runCommand "default-app" { } ''
                 mkdir -p "$out/bin"
-                ln -s ${appsValidated.default.program} "$out/bin/${project.project.id or "app"}"
+                ln -s ${appsValidated.default.program} "$out/bin/default"
               '';
             };
       in
