@@ -1,9 +1,11 @@
+{ pkgs }:
+pkgs.writeText "mfm-ci-setup.sh" ''
 eval "$($SLOT_INFO)"
 
 kill_conflicting_listener() {
   local port="$1"
   local label="$2"
-  local expected_token="${3:-}"
+  local expected_token="''${3:-}"
   local pids=""
   local filtered_pids=""
   local remaining=""
@@ -84,9 +86,10 @@ $pid"
 
 # Parity flows rely on MinIO fixture bootstrap. Clean stale listeners from
 # previous slot-shared runs before steps execute.
-kill_conflicting_listener "${MINIO_PORT:-}" "minio-api" "minio"
-kill_conflicting_listener "${MINIO_CONSOLE_PORT:-}" "minio-console" "minio"
-kill_conflicting_listener "${RETHHTTP_PORT:-}" "reth-http" "reth"
-kill_conflicting_listener "${RETHWS_PORT:-}" "reth-ws" "reth"
-kill_conflicting_listener "${RETHAUTH_PORT:-}" "reth-auth" "reth"
+kill_conflicting_listener "''${MINIO_PORT:-}" "minio-api" "minio"
+kill_conflicting_listener "''${MINIO_CONSOLE_PORT:-}" "minio-console" "minio"
+kill_conflicting_listener "''${RETHHTTP_PORT:-}" "reth-http" "reth"
+kill_conflicting_listener "''${RETHWS_PORT:-}" "reth-ws" "reth"
+kill_conflicting_listener "''${RETHAUTH_PORT:-}" "reth-auth" "reth"
 kill_conflicting_listener "30303" "reth-p2p" "reth"
+''

@@ -1,3 +1,5 @@
+{ pkgs }:
+pkgs.writeText "mfm-ci-steps-shell-app-contracts.sh" ''
 LOGFILE=$(artifact_path "shell-app-contracts.log")
 set +e
 (
@@ -82,3 +84,4 @@ if [ "$rc" -ne 0 ]; then
   cat "$LOGFILE" >&2 || true
   exit "$rc"
 fi
+''

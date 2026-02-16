@@ -1,4 +1,4 @@
-{ project, lib, ... }:
+{ pkgs, project, lib, ... }:
 
 let
   # v2 shell-app contract inventory (project-level):
@@ -154,9 +154,11 @@ let
       }
     ];
   };
-  ciSetupScript = toString ./ci/setup.sh;
-  ciTeardownScript = toString ./ci/teardown.sh;
-  ciStepScript = name: toString (./ci/steps + "/${name}.sh");
+  # Policy: CI shell logic must be Nix-packaged/Nix-evaluated (no committed raw .sh scripts).
+  ciScripts = import ./ci/scripts { inherit pkgs; };
+  ciSetupScript = toString ciScripts.setup;
+  ciTeardownScript = toString ciScripts.teardown;
+  ciStepScript = name: toString ciScripts.steps.${name};
 in
 {
   commands = {

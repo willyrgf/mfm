@@ -1,19 +1,21 @@
+{ pkgs }:
+pkgs.writeText "mfm-ci-teardown.sh" ''
 # Keep teardown diagnostics best-effort so step failures remain the primary CI exit code.
-CI_DIAG_EVENTS_LIMIT="${CI_DIAG_EVENTS_LIMIT:-200}"
+CI_DIAG_EVENTS_LIMIT="''${CI_DIAG_EVENTS_LIMIT:-200}"
 
 _ci_truthy() {
-  case "${1:-}" in
+  case "''${1:-}" in
     1|true|TRUE|yes|YES|on|ON) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 ci_debug() {
-  if _ci_truthy "${CI_VERBOSE:-0}" || _ci_truthy "${NIXFIED_VERBOSE:-0}" || _ci_truthy "${NIXFIED_DEBUG:-0}"; then
+  if _ci_truthy "''${CI_VERBOSE:-0}" || _ci_truthy "''${NIXFIED_VERBOSE:-0}" || _ci_truthy "''${NIXFIED_DEBUG:-0}"; then
     echo "DEBUG: $*" >&2
     return 0
   fi
-  case "${NIXFIED_LOG_LEVEL:-}" in
+  case "''${NIXFIED_LOG_LEVEL:-}" in
     debug|DEBUG|trace|TRACE)
       echo "DEBUG: $*" >&2
       ;;
@@ -53,15 +55,15 @@ capture_service_diag() {
   local events_hook=""
 
   token=$(echo "$service" | tr '[:lower:]' '[:upper:]' | tr '.:/-' '_')
-  status_hook="SVC_${token}_STATUS"
-  events_hook="SVC_${token}_EVENTS"
+  status_hook="SVC_''${token}_STATUS"
+  events_hook="SVC_''${token}_EVENTS"
 
   if has_hook "$status_hook"; then
-    capture_diag "ci-diagnostics-service-${service}-status.log" "service-status" run_hook "$status_hook"
+    capture_diag "ci-diagnostics-service-''${service}-status.log" "service-status" run_hook "$status_hook"
   fi
 
   if has_hook "$events_hook"; then
-    capture_diag "ci-diagnostics-service-${service}-events.log" "service-events" run_hook "$events_hook" --limit "$CI_DIAG_EVENTS_LIMIT"
+    capture_diag "ci-diagnostics-service-''${service}-events.log" "service-events" run_hook "$events_hook" --limit "$CI_DIAG_EVENTS_LIMIT"
   fi
 }
 
@@ -73,3 +75,4 @@ capture_diag "ci-diagnostics-process-gc.log" "process" nix run .#process::gc
 for service in postgres minio reth helios nginx; do
   capture_service_diag "$service"
 done
+''

@@ -1,15 +1,17 @@
+{ pkgs }:
+pkgs.writeText "mfm-ci-steps-mainnet-portfolio-snapshot-helios.sh" ''
 eval "$($SLOT_INFO)"
 
 export HELIOS_NETWORK="mainnet"
 # Execution RPC must support `eth_getProof` for explicit block numbers (not just `latest`).
-export HELIOS_EXECUTION_RPC_URL="${HELIOS_EXECUTION_RPC_URL:-https://eth.drpc.org}"
+export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-https://eth.drpc.org}"
 
 # Prefer a stable, up-to-date consensus endpoint for CI (faster and less flaky than relying
 # on the default if it is temporarily unavailable).
-export HELIOS_CONSENSUS_RPC_URL="${HELIOS_CONSENSUS_RPC_URL:-https://lodestar-mainnet.chainsafe.io}"
+export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-https://lodestar-mainnet.chainsafe.io}"
 
 # Mainnet Helios can take a while to sync; gate on eth_blockNumber.
-export HELIOS_READY_TIMEOUT_SECS="${HELIOS_READY_TIMEOUT_SECS:-900}"
+export HELIOS_READY_TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-900}"
 
 export MFM_ARTIFACT_ROOT="$CI_ARTIFACTS_DIR/mfm-mainnet-artifacts"
 mkdir -p "$MFM_ARTIFACT_ROOT"
@@ -44,7 +46,7 @@ if [ $rc -ne 0 ]; then
     tail -200 "$HELIOS_SERVICE_LOG_FILE" >&2 || true
   fi
 
-  if [ -n "${RUN_ID:-}" ]; then
+  if [ -n "''${RUN_ID:-}" ]; then
     nix run .#process::inspect -- "$RUN_ID" >"$PROCESS_INSPECT_FILE" 2>&1 || true
     echo "INFO: process inspect path=$PROCESS_INSPECT_FILE run_id=$RUN_ID" >&2
     tail -200 "$PROCESS_INSPECT_FILE" >&2 || true
@@ -84,7 +86,7 @@ if [ -z "$ART_ID" ] || [ "$ART_ID" = "null" ]; then
   exit 1
 fi
 
-SNAPSHOT_FILE="$MFM_ARTIFACT_ROOT/${ART_ID:0:2}/$ART_ID"
+SNAPSHOT_FILE="$MFM_ARTIFACT_ROOT/''${ART_ID:0:2}/$ART_ID"
 if [ ! -f "$SNAPSHOT_FILE" ]; then
   echo "ERROR: snapshot artifact not found at $SNAPSHOT_FILE" >&2
   exit 1
@@ -112,10 +114,11 @@ if [ "$INLINE_BAL_WEI" != "$BAL_WEI" ]; then
 fi
 
 # Compare large decimal integers without relying on 64-bit shell arithmetic.
-if [ "${#BAL_WEI}" -lt "${#MIN_BAL_WEI}" ] || { [ "${#BAL_WEI}" -eq "${#MIN_BAL_WEI}" ] && [ "$BAL_WEI" \< "$MIN_BAL_WEI" ]; }; then
+if [ "''${#BAL_WEI}" -lt "''${#MIN_BAL_WEI}" ] || { [ "''${#BAL_WEI}" -eq "''${#MIN_BAL_WEI}" ] && [ "$BAL_WEI" \< "$MIN_BAL_WEI" ]; }; then
   echo "ERROR: expected at least 32 ETH (wei >= $MIN_BAL_WEI); got native.raw_u256_dec=$BAL_WEI" >&2
   cat "$SNAPSHOT_FILE" >&2
   exit 1
 fi
 
 echo "OK: mainnet snapshot ETH balance >= 32 ETH wei=$BAL_WEI artifact_id=$ART_ID"
+''

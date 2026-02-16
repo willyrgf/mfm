@@ -1,3 +1,5 @@
+{ pkgs }:
+pkgs.writeText "mfm-ci-steps-parity-portfolio-tracker-reth.sh" ''
 eval "$($SLOT_INFO)"
 
 export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
@@ -11,3 +13,4 @@ export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
 
 LOGFILE=$(artifact_path "parity-portfolio-tracker-reth.log")
 log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_portfolio_tracker_reth_mock_erc20
+''
