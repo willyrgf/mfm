@@ -100,23 +100,24 @@ in
   commands = {
     dev = {
       description = "Start the dev workflow";
-      api = lib.appApi.mkTypedCommandApi {
+      api = lib.appApi.mkCommandApi {
+        class = "typed";
         name = "dev";
         summary = "Start the dev workflow (Postgres + MinIO + Reth + REST API)";
         details = ''
           Starts Postgres, MinIO (S3), Reth, and the REST API for local development.
 
           Startup is readiness-gated by fixture orchestration plus REST API probe:
-          - `POSTGRES_READY`
-          - `MINIO_READY`
-          - `RETH_READY`
+          - `SVC_POSTGRES_READY`
+          - `SVC_MINIO_READY`
+          - `SVC_RETH_READY`
           - REST API `/v1/ready`
 
           Process-first observability:
           - `nix run .#process::status`
           - `nix run .#process::runs -- --all`
-          - `nix run .#service::postgres::events -- --limit 50`
-          - `nix run .#service::reth::log -- --lines 200`
+          - `nix run .#svc::postgres::events -- --limit 50`
+          - `nix run .#svc::reth::log -- --lines 200`
         '';
         usage = [
           "nix run .#dev"
@@ -170,7 +171,8 @@ in
 
     mfm_cli = {
       description = "Run mfm_cli (Cargo run)";
-      api = lib.appApi.mkPassthroughCommandApi {
+      api = lib.appApi.mkCommandApi {
+        class = "passthrough";
         name = "mfm_cli";
         summary = "Run mfm_cli";
         details = "Runs the CLI binary via `cargo run` inside the pinned Nix environment. Passthrough wrapper: arguments after `--` are forwarded unchanged.";
@@ -190,7 +192,8 @@ in
 
     "mfm::portfolio::snapshot" = {
       description = "Snapshot a wallet via Helios-backed mainnet RPC (starts Postgres + Helios)";
-      api = lib.appApi.mkJsonCommandApi {
+      api = lib.appApi.mkCommandApi {
+        class = "json";
         name = "mfm::portfolio::snapshot";
         summary = "Snapshot an Ethereum wallet portfolio (Helios-backed)";
         details = ''
@@ -211,11 +214,11 @@ in
           - or `SERVICE_DISCOVERY_SCOPE=global`
 
           You can also start services explicitly:
-          - `nix run .#service::postgres::start`
-          - `nix run .#service::helios::start`
+          - `nix run .#svc::postgres::start`
+          - `nix run .#svc::helios::start`
           and inspect reuse/ownership with:
           - `nix run .#process::status -- --all`
-          - `nix run .#service::helios::events -- --limit 100`
+          - `nix run .#svc::helios::events -- --limit 100`
         '';
         usage = [
           "nix run .#mfm::portfolio::snapshot -- <ADDRESS>"
@@ -392,17 +395,17 @@ in
 
         # Start Postgres (required by portfolio snapshot). Prefer reusing a healthy
         # instance; if status metadata is stale and health fails, start it.
-        if run_hook POSTGRES_HEALTH >/dev/null 2>&1; then
-          run_hook POSTGRES_SETUP_DB >/dev/null 2>&1 || true
+        if run_hook SVC_POSTGRES_HEALTH >/dev/null 2>&1; then
+          run_hook SVC_POSTGRES_SETUP_DB >/dev/null 2>&1 || true
         else
           PG_LOGFILE="$(artifact_path "postgres-mfm-portfolio-snapshot.log")"
           fixture_start_service postgres dev 60 1 "$PG_LOGFILE" "$SNAPSHOT_KEEP_RUNNING"
         fi
-        run_hook POSTGRES_READY
+        run_hook SVC_POSTGRES_READY
 
         # Start Helios (mainnet-backed). Prefer reusing a healthy instance; if
         # status metadata is stale and health fails, start it.
-        if run_hook HELIOS_HEALTH >/dev/null 2>&1; then
+        if run_hook SVC_HELIOS_HEALTH >/dev/null 2>&1; then
           true
         else
           HELIOS_LOGFILE="$(artifact_path "helios-mfm-portfolio-snapshot.log")"
@@ -413,7 +416,7 @@ in
         export MFM_EVM_RPC_URL="http://127.0.0.1:$HELIOSRPC_PORT"
 
         echo "INFO: waiting for Helios readiness (eth_blockNumber)..." >&2
-        HELIOS_STATUS_LINE="$(run_hook HELIOS_STATUS 2>/dev/null || true)"
+        HELIOS_STATUS_LINE="$(run_hook SVC_HELIOS_STATUS 2>/dev/null || true)"
         HELIOS_SCOPE="$(printf '%s\n' "$HELIOS_STATUS_LINE" | tr ' ' '\n' | awk -F= '$1=="scope" { print $2; exit }')"
         HELIOS_RUNNING="$(printf '%s\n' "$HELIOS_STATUS_LINE" | tr ' ' '\n' | awk -F= '$1=="running" { print $2; exit }')"
 
@@ -421,7 +424,7 @@ in
           echo "INFO: helios reuse detected scope=global; using rpc-only readiness probe" >&2
           wait_helios_rpc_ready
         else
-          run_hook HELIOS_READY
+          run_hook SVC_HELIOS_READY
         fi
 
         OUT_RAW_FILE="$(artifact_path "mfm-portfolio-snapshot.raw.out")"
@@ -504,7 +507,8 @@ in
 
     mfm_rest_api = {
       description = "Run mfm_rest_api (Cargo run)";
-      api = lib.appApi.mkTypedCommandApi {
+      api = lib.appApi.mkCommandApi {
+        class = "typed";
         name = "mfm_rest_api";
         summary = "Run mfm_rest_api";
         details = "Runs the REST API server via `cargo run` inside the pinned Nix environment.";

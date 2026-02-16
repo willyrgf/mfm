@@ -26,7 +26,6 @@
   apps =
     let
       # v2 shell-app contract inventory (project-local):
-      # - up/down/svc-status/svc-logs/svc-restart: typed, outputs=text, wraps supervisor hooks, failure map owner=local/default.nix
       # - evm-contract-artifact-*: json, outputs=json, wraps Foundry helper tools, failure map owner=local/default.nix
       # - mfm::keystore::* and mfm::run::*: json, outputs=json, strict typed args/env, failure map owner=local/default.nix
       failureCodesScript = {
@@ -39,49 +38,7 @@
       failureCodesCargo = failureCodesScript // {
         cargoFailure = 101;
       };
-      failureCodesSupervisor = failureCodesScript;
       failureCodesFoundry = failureCodesScript;
-      envVar = project.project.envVar or "PROJECT_ENV";
-
-      mkProdSupervisorTypedApp =
-        {
-          name,
-          summary,
-          details,
-          usage ? [ "nix run .#${name}" ],
-          args ? [ ],
-          env ? [ ],
-          contractArgs ? null,
-          contractEnv ? null,
-          category ? "supervisor",
-          failureCodes ? failureCodesSupervisor,
-          idempotent ? false,
-          script,
-        }:
-        lib.appApi.mkNixfiedApp {
-          inherit name script;
-          env = {
-            # Enforce: supervisor is production-only.
-            "${envVar}" = "prod";
-            # process-compose defaults to TUI; disable so daemon mode works in non-TTY contexts.
-            PC_DISABLE_TUI = "1";
-          };
-          useDeps = false;
-          api = lib.appApi.mkTypedCommandApi {
-            inherit
-              name
-              summary
-              details
-              usage
-              args
-              env
-              category
-              idempotent
-              failureCodes
-              ;
-            inherit contractArgs contractEnv;
-          };
-        };
 
       mkFoundryArtifactApp =
         {
@@ -94,7 +51,8 @@
           inherit name;
           env = { };
           useDeps = true;
-          api = lib.appApi.mkJsonCommandApi {
+          api = lib.appApi.mkCommandApi {
+            class = "json";
             inherit
               name
               summary
@@ -130,7 +88,8 @@
           inherit name;
           env = { };
           useDeps = true;
-          api = lib.appApi.mkJsonCommandApi {
+          api = lib.appApi.mkCommandApi {
+            class = "json";
             inherit
               name
               summary
@@ -199,116 +158,6 @@
       ];
     in
     {
-      up = mkProdSupervisorTypedApp {
-        name = "up";
-        summary = "Start all services (prod)";
-        details = "Starts all supervisor-managed services for the current slot, forcing the production environment (MFM_ENV=prod).";
-        script = ''run_hook SUPERVISOR_START_DAEMON'';
-      };
-
-      down = mkProdSupervisorTypedApp {
-        name = "down";
-        summary = "Stop all services (prod)";
-        details = "Stops all supervisor-managed services for the current slot, forcing the production environment (MFM_ENV=prod).";
-        script = ''run_hook SUPERVISOR_STOP'';
-      };
-
-      svc-status = mkProdSupervisorTypedApp {
-        name = "svc-status";
-        summary = "Show service status (prod)";
-        details = "Shows the status of supervisor-managed services, forcing the production environment (MFM_ENV=prod).";
-        script = ''
-          set -euo pipefail
-          eval "$($SLOT_INFO)"
-
-          echo "ENV=$ENV SLOT=$SLOT"
-          run_hook SUPERVISOR_IS_RUNNING || true
-
-          if command -v lsof >/dev/null 2>&1; then
-            for spec in \
-              "rest_api:$REST_API_PORT" \
-              "postgres:$POSTGRES_PORT" \
-              "minio:$MINIO_PORT" \
-              "minio_console:$MINIO_CONSOLE_PORT"
-            do
-              name="''${spec%%:*}"
-              port="''${spec##*:}"
-              pids=$(lsof -tiTCP:"$port" -sTCP:LISTEN -n -P 2>/dev/null || true)
-              if [ -n "$pids" ]; then
-                echo "LISTEN: $name port=$port pid=$pids"
-              else
-                echo "DOWN: $name port=$port"
-              fi
-            done
-          else
-            echo "WARN: lsof not available; skipping port checks" >&2
-          fi
-        '';
-      };
-
-      svc-logs = mkProdSupervisorTypedApp {
-        name = "svc-logs";
-        summary = "Show service logs (prod)";
-        details = "Streams logs for supervisor-managed services, forcing the production environment (MFM_ENV=prod).";
-        usage = [
-          "nix run .#svc-logs"
-          "nix run .#svc-logs -- <service> [lines]"
-        ];
-        args = [
-          {
-            name = "service";
-            description = "Optional service name; when omitted, supervisor logs are streamed.";
-          }
-          {
-            name = "lines";
-            description = "Optional line count to tail (default: 50).";
-          }
-        ];
-        contractArgs = [
-          (lib.appApi.arg.positional {
-            name = "service";
-            type = "string";
-            required = false;
-          })
-          (lib.appApi.arg.positional {
-            name = "lines";
-            type = "int";
-            required = false;
-            min = 1;
-          })
-        ];
-        script = ''
-          set -euo pipefail
-          SERVICE="''${NIXFIED_ARG_SERVICE:-}"
-          LINES="''${NIXFIED_ARG_LINES:-50}"
-          run_hook SUPERVISOR_LOGS "$SERVICE" "$LINES"
-        '';
-      };
-
-      svc-restart = mkProdSupervisorTypedApp {
-        name = "svc-restart";
-        summary = "Restart a service (prod)";
-        details = "Restarts a supervisor-managed service, forcing the production environment (MFM_ENV=prod).";
-        usage = [ "nix run .#svc-restart -- <service>" ];
-        args = [
-          {
-            name = "service";
-            description = "Service name to restart.";
-          }
-        ];
-        contractArgs = [
-          (lib.appApi.arg.positional {
-            name = "service";
-            type = "string";
-            required = true;
-          })
-        ];
-        script = ''
-          set -euo pipefail
-          run_hook SUPERVISOR_RESTART "$NIXFIED_ARG_SERVICE"
-        '';
-      };
-
       evm-contract-artifact-configurable-counter = mkFoundryArtifactApp {
         name = "evm-contract-artifact-configurable-counter";
         summary = "Build ConfigurableCounter artifact JSON";

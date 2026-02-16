@@ -18,7 +18,8 @@ in
   commands = {
     build = {
       description = "Build artifacts";
-      api = lib.appApi.mkTypedCommandApi {
+      api = lib.appApi.mkCommandApi {
+        class = "typed";
         name = "build";
         summary = "Build release artifacts";
         details = "Builds the workspace in release mode with all features enabled.";

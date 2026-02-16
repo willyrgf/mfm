@@ -19,7 +19,8 @@ in
   commands = {
     check = {
       description = "Run quality checks";
-      api = lib.appApi.mkTypedCommandApi {
+      api = lib.appApi.mkCommandApi {
+        class = "typed";
         name = "check";
         summary = "Run fmt + clippy (nightly)";
         details = "Runs rustfmt and clippy using the pinned nightly toolchain (via cargo-nightly).";
@@ -39,7 +40,8 @@ in
 
     discovery-refresh = {
       description = "Regenerate discovery artifacts";
-      api = lib.appApi.mkTypedCommandApi {
+      api = lib.appApi.mkCommandApi {
+        class = "typed";
         name = "discovery-refresh";
         summary = "Refresh docs/repo-index.json and docs/repo-map.md";
         details = "Runs the quality check command with --refresh-discovery so discovery artifacts are regenerated.";

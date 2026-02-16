@@ -18,7 +18,8 @@ in
   commands = {
     test = {
       description = "Run tests";
-      api = lib.appApi.mkTypedCommandApi {
+      api = lib.appApi.mkCommandApi {
+        class = "typed";
         name = "test";
         summary = "Run tests (nextest)";
         details = "Runs the full workspace test suite using cargo-nextest.";
