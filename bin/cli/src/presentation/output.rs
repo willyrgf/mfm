@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use tabled::{Table, Tabled};
 
 use crate::commands::{result::CommandResult, OutputFormat};
 
@@ -36,12 +35,11 @@ impl ErrorResponse {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyDisplay {
     pub id: String,
     pub label: String,
     pub key_type: String,
-    #[tabled(skip)]
     pub address: Option<String>,
     pub created: String,
 }
@@ -113,29 +111,94 @@ pub fn print_error(code: &str, message: &str, format: &OutputFormat) {
 
 pub fn format_keys_table(keys: &[KeyDisplay], show_addresses: bool) -> String {
     if show_addresses {
-        let table_data: Vec<KeyDisplayWithAddress> = keys
+        let headers = ["id", "label", "key_type", "address", "created"];
+        let rows: Vec<Vec<String>> = keys
             .iter()
-            .map(|key| KeyDisplayWithAddress {
-                id: key.id.clone(),
-                label: key.label.clone(),
-                key_type: key.key_type.clone(),
-                address: key.address.clone().unwrap_or_else(|| "N/A".to_string()),
-                created: key.created.clone(),
+            .map(|key| {
+                vec![
+                    key.id.clone(),
+                    key.label.clone(),
+                    key.key_type.clone(),
+                    key.address.clone().unwrap_or_else(|| "N/A".to_string()),
+                    key.created.clone(),
+                ]
             })
             .collect();
-        Table::new(table_data).to_string()
+        format_ascii_table(&headers, &rows)
     } else {
-        Table::new(keys).to_string()
+        let headers = ["id", "label", "key_type", "created"];
+        let rows: Vec<Vec<String>> = keys
+            .iter()
+            .map(|key| {
+                vec![
+                    key.id.clone(),
+                    key.label.clone(),
+                    key.key_type.clone(),
+                    key.created.clone(),
+                ]
+            })
+            .collect();
+        format_ascii_table(&headers, &rows)
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
-pub struct KeyDisplayWithAddress {
-    pub id: String,
-    pub label: String,
-    pub key_type: String,
-    pub address: String,
-    pub created: String,
+fn format_ascii_table(headers: &[&str], rows: &[Vec<String>]) -> String {
+    let widths = compute_column_widths(headers, rows);
+    let border = build_border(&widths);
+    let mut output = String::new();
+
+    output.push_str(&border);
+    output.push('\n');
+    output.push_str(&build_row(headers, &widths));
+    output.push('\n');
+
+    if rows.is_empty() {
+        output.push_str(&border);
+        return output;
+    }
+
+    output.push_str(&border);
+    for row in rows {
+        output.push('\n');
+        let cells: Vec<&str> = row.iter().map(String::as_str).collect();
+        output.push_str(&build_row(&cells, &widths));
+    }
+    output.push('\n');
+    output.push_str(&border);
+    output
+}
+
+fn compute_column_widths(headers: &[&str], rows: &[Vec<String>]) -> Vec<usize> {
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
+    for row in rows {
+        for (idx, value) in row.iter().enumerate() {
+            widths[idx] = widths[idx].max(value.chars().count());
+        }
+    }
+    widths
+}
+
+fn build_border(widths: &[usize]) -> String {
+    let mut border = String::new();
+    border.push('+');
+    for width in widths {
+        border.push_str(&"-".repeat(*width + 2));
+        border.push('+');
+    }
+    border
+}
+
+fn build_row(cells: &[&str], widths: &[usize]) -> String {
+    let mut row = String::new();
+    row.push('|');
+    for (cell, width) in cells.iter().zip(widths) {
+        row.push(' ');
+        row.push_str(cell);
+        row.push_str(&" ".repeat(width.saturating_sub(cell.chars().count())));
+        row.push(' ');
+        row.push('|');
+    }
+    row
 }
 
 /// Handles the output formatting for command results

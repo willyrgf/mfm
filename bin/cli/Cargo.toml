@@ -17,12 +17,10 @@ mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
 mfm-event-store-postgres = { path = "../../crates/storages/event-store-postgres" }
 mfm-event-store-mem = { path = "../../crates/storages/event-store-mem" }
 clap = { version = "4.4", features = ["derive", "env"] }
-tabled = "0.15"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.0", features = ["v4"] }
 hex = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 mfm-op-keystore = { package = "mfm-op-keystore-shim", path = "../../crates/ops/keystore-op" }
@@ -30,6 +28,7 @@ tempfile = "3.0"
 assert_cmd = "2.0"
 predicates = "3.0"
 rand = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [[bin]]
 name = "mfm_cli"

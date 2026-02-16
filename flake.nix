@@ -12,7 +12,7 @@
       nixpkgs,
       flake-utils,
     }:
-    flake-utils.lib.eachDefaultSystem (
+    flake-utils.lib.eachSystem flake-utils.lib.allSystems (
       system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -206,6 +206,31 @@
             }
           else
             { };
+
+        apps0 =
+          coreApps
+          // moduleApps
+          // (if ciApp != null then { ci = ciApp; } else { })
+          // isolationApps
+          // frameworkApps
+          // (local.apps or { })
+          // {
+            default = if coreApps ? help then coreApps.help else coreApps.dev;
+          };
+        appsValidated = lib.appApi.validateApps apps0;
+        packages0 = pkgs.lib.recursiveUpdate (project.packages or { }) (local.packages or { });
+        packagesWithDefault =
+          if packages0 ? default then
+            packages0
+          else
+            packages0
+            // {
+              # Keep `nix build` functional even when the project only defines apps.
+              default = pkgs.runCommand "${project.project.id or "app"}-default" { } ''
+                mkdir -p "$out/bin"
+                ln -s ${appsValidated.default.program} "$out/bin/${project.project.id or "app"}"
+              '';
+            };
       in
       {
         devShells = {
@@ -218,22 +243,9 @@
         }
         // (local.devShells or { });
 
-        apps =
-          let
-            apps0 =
-              coreApps
-              // moduleApps
-              // (if ciApp != null then { ci = ciApp; } else { })
-              // isolationApps
-              // frameworkApps
-              // (local.apps or { })
-              // {
-                default = if coreApps ? help then coreApps.help else coreApps.dev;
-              };
-          in
-          lib.appApi.validateApps apps0;
+        apps = appsValidated;
 
-        packages = pkgs.lib.recursiveUpdate (project.packages or { }) (local.packages or { });
+        packages = packagesWithDefault;
       }
     );
 }

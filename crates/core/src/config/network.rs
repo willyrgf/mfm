@@ -1,5 +1,5 @@
 use alloy_primitives::U256;
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 

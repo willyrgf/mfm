@@ -142,3 +142,51 @@ fn test_empty_keys_formatting() {
     assert!(matches!(parsed.status, ResponseStatus::Success));
     assert!(parsed.data.is_empty());
 }
+
+#[test]
+fn test_ascii_table_shape_is_stable() {
+    let keys = vec![
+        KeyDisplay {
+            id: "id-1".to_string(),
+            label: "short".to_string(),
+            key_type: "privatekey".to_string(),
+            address: None,
+            created: "2024-01-01 12:00:00".to_string(),
+        },
+        KeyDisplay {
+            id: "id-2".to_string(),
+            label: "much-longer-label".to_string(),
+            key_type: "mnemonic".to_string(),
+            address: None,
+            created: "2024-01-01 13:00:00".to_string(),
+        },
+    ];
+
+    let output = format_keys_table(&keys, false);
+    let lines: Vec<&str> = output.lines().collect();
+
+    assert!(lines.len() >= 5);
+    assert!(lines[0].starts_with('+') && lines[0].ends_with('+'));
+    assert_eq!(lines[0], lines[2]);
+    assert!(lines[1].contains("| id"));
+    assert!(lines[1].contains("| label"));
+    assert!(lines[1].contains("| key_type"));
+    assert!(lines[1].contains("| created"));
+
+    for line in &lines {
+        if line.starts_with('|') {
+            assert_eq!(line.len(), lines[0].len());
+        }
+    }
+}
+
+#[test]
+fn test_ascii_table_for_empty_keys_has_header_only() {
+    let output = format_keys_table(&[], false);
+    let lines: Vec<&str> = output.lines().collect();
+
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].starts_with('+') && lines[0].ends_with('+'));
+    assert!(lines[1].contains("| id"));
+    assert_eq!(lines[0], lines[2]);
+}
