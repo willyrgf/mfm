@@ -1,12 +1,16 @@
 # Shell runtime helpers - sourced by all app scripts
 {
   pkgs,
+  project ? { },
   hooks ? { },
   summaryParser,
 }:
 
 let
-  envLoader = import ./env-loader.nix { inherit pkgs; };
+  envLoader = import ./env-loader.nix {
+    inherit pkgs project;
+  };
+  servicePolicy = import ./service-policy.nix { inherit pkgs; };
   hookEnv = hooks.env or { };
   hookExports = pkgs.lib.concatMapStringsSep "\n" (key: ''
     # Always pin framework hook paths for deterministic app behavior.
@@ -285,7 +289,7 @@ let
       local op="$2"
       local token
       token=$(_service_token "$service")
-      echo "''${token}_''${op}"
+      echo "SVC_''${token}_''${op}"
     }
 
     # fixture_start_service SERVICE [profile] [timeout] [interval] [logfile] [keep_running]
@@ -573,32 +577,14 @@ let
       esac
     }
 
+    ${servicePolicy.policyRuntimeFunctions}
+
     _start_service_infer_owner_scope_from_reuse_policy() {
-      case "''${SERVICE_REUSE_POLICY:-}" in
-        same-slot|cross-run)
-          echo "persistent"
-          ;;
-        same-root)
-          echo "ephemeral"
-          ;;
-        *)
-          echo ""
-          ;;
-      esac
+      nixfied_policy_owner_scope_from_reuse "''${SERVICE_REUSE_POLICY:-}"
     }
 
     _start_service_infer_discovery_scope_from_reuse_policy() {
-      case "''${SERVICE_REUSE_POLICY:-}" in
-        same-slot|cross-run)
-          echo "global"
-          ;;
-        same-root)
-          echo "local"
-          ;;
-        *)
-          echo ""
-          ;;
-      esac
+      nixfied_policy_discovery_scope_from_reuse "''${SERVICE_REUSE_POLICY:-}"
     }
 
     _start_service_infer_owner_scope() {
@@ -657,80 +643,14 @@ let
     _start_service_infer_reuse_policy() {
       local owner_scope="''${1:-}"
       local discovery_scope="''${2:-}"
-
-      if [ -n "''${SERVICE_REUSE_POLICY:-}" ]; then
-        echo "$SERVICE_REUSE_POLICY"
-        return 0
-      fi
-
-      if [ "$owner_scope" = "persistent" ] || [ "$discovery_scope" = "global" ]; then
-        echo "same-slot"
-        return 0
-      fi
-
-      if [ "$owner_scope" = "ephemeral" ] || [ "$discovery_scope" = "local" ]; then
-        echo "same-root"
-        return 0
-      fi
-
-      echo ""
-      return 0
+      nixfied_policy_infer_reuse_policy "''${SERVICE_REUSE_POLICY:-}" "$owner_scope" "$discovery_scope" ""
     }
 
     _start_service_validate_policy_matrix() {
       local reuse="$1"
       local owner="$2"
       local discovery="$3"
-
-      case "$reuse" in
-        ""|never|same-root|same-slot|cross-run)
-          ;;
-        *)
-          echo "ERROR: SERVICE_REUSE_POLICY must be one of never|same-root|same-slot|cross-run (got '$reuse')" >&2
-          return 1
-          ;;
-      esac
-
-      case "$owner" in
-        ""|ephemeral|persistent)
-          ;;
-        *)
-          echo "ERROR: SERVICE_OWNER_SCOPE must be ephemeral|persistent (got '$owner')" >&2
-          return 1
-          ;;
-      esac
-
-      case "$discovery" in
-        ""|local|global)
-          ;;
-        *)
-          echo "ERROR: SERVICE_DISCOVERY_SCOPE must be local|global (got '$discovery')" >&2
-          return 1
-          ;;
-      esac
-
-      if [ "$reuse" = "cross-run" ] && { [ "$owner" != "persistent" ] || [ "$discovery" != "global" ]; }; then
-        echo "ERROR: cross-run reuse requires SERVICE_OWNER_SCOPE=persistent and SERVICE_DISCOVERY_SCOPE=global" >&2
-        return 1
-      fi
-
-      if [ "$reuse" = "same-root" ] && { [ "$owner" != "ephemeral" ] || [ "$discovery" != "local" ]; }; then
-        echo "ERROR: same-root reuse requires SERVICE_OWNER_SCOPE=ephemeral and SERVICE_DISCOVERY_SCOPE=local" >&2
-        return 1
-      fi
-
-      if [ -n "$owner" ] && [ -n "$discovery" ]; then
-        if [ "$owner" = "persistent" ] && [ "$discovery" != "global" ]; then
-          echo "ERROR: persistent owner scope requires SERVICE_DISCOVERY_SCOPE=global" >&2
-          return 1
-        fi
-        if [ "$owner" = "ephemeral" ] && [ "$discovery" != "local" ]; then
-          echo "ERROR: ephemeral owner scope requires SERVICE_DISCOVERY_SCOPE=local" >&2
-          return 1
-        fi
-      fi
-
-      return 0
+      nixfied_policy_validate_matrix "$reuse" "$owner" "$discovery" 1 1
     }
 
     # start_service_should_register_cleanup [explicit_mode]

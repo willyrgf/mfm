@@ -6,6 +6,7 @@
 
 let
   lib = pkgs.lib;
+  servicePolicy = import ./service-policy.nix { inherit pkgs; };
 
   modules = project.modules or { };
   postgresCfg = modules.postgres or { };
@@ -61,7 +62,7 @@ let
       region = serviceSpec.region or "us-east-1";
     in
     ''
-      eval "$(run_hook MINIO_EXPORT_S3_ENV ${quote bucket} ${quote prefix} ${quote region})"
+      eval "$(run_hook SVC_MINIO_EXPORT_S3_ENV ${quote bucket} ${quote prefix} ${quote region})"
     '';
 
   mkBootstrapScript =
@@ -93,7 +94,7 @@ let
               bucketName = action.name or (throw "Fixture bootstrap kind=bucket requires `name`");
             in
             ''
-              run_hook MINIO_BUCKET_ENSURE ${quote bucketName}
+              run_hook SVC_MINIO_BUCKET_ENSURE ${quote bucketName}
             ''
         else
           throw "Unsupported fixture bootstrap kind for `${serviceName}`: ${kind}";
@@ -220,39 +221,33 @@ let
     '';
 
   keepRunningFromPolicy = ''
+    ${servicePolicy.policyRuntimeFunctions}
+
     _fixture_keep_running_from_policy() {
       local owner_scope="''${SERVICE_OWNER_SCOPE:-}"
       local reuse_policy="''${SERVICE_REUSE_POLICY:-}"
       local discovery_scope="''${SERVICE_DISCOVERY_SCOPE:-}"
 
+      nixfied_policy_validate_owner_scope "$owner_scope" 1 || return 1
+      nixfied_policy_validate_reuse_policy "$reuse_policy" 1 || return 1
+      nixfied_policy_validate_discovery_scope "$discovery_scope" 1 || return 1
+
       case "$owner_scope" in
         persistent) echo "1"; return 0 ;;
         ephemeral) echo "0"; return 0 ;;
         "") ;;
-        *)
-          echo "ERROR: SERVICE_OWNER_SCOPE must be ephemeral|persistent (got '$owner_scope')" >&2
-          return 1
-          ;;
       esac
 
       case "$reuse_policy" in
         same-slot|cross-run) echo "1"; return 0 ;;
         never|same-root) echo "0"; return 0 ;;
         "") ;;
-        *)
-          echo "ERROR: SERVICE_REUSE_POLICY must be one of never|same-root|same-slot|cross-run (got '$reuse_policy')" >&2
-          return 1
-          ;;
       esac
 
       case "$discovery_scope" in
         global) echo "1"; return 0 ;;
         local) echo "0"; return 0 ;;
         "") ;;
-        *)
-          echo "ERROR: SERVICE_DISCOVERY_SCOPE must be local|global (got '$discovery_scope')" >&2
-          return 1
-          ;;
       esac
 
       # Keep default fixture semantics unchanged unless policy envs request persistence.

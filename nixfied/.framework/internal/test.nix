@@ -803,18 +803,69 @@ let
     NIX
     )
 
-    CI_UNKNOWN_SCRIPT=$(build_expr "$CI_UNKNOWN_EXPR")
-    CI_UNKNOWN_DIR="$WORKDIR/ci-unknown-step"
     CI_UNKNOWN_LOG="$WORKDIR/ci-unknown-step.log"
-    mkdir -p "$CI_UNKNOWN_DIR"
     set +e
-    (cd "$CI_UNKNOWN_DIR" && "$CI_UNKNOWN_SCRIPT" > "$CI_UNKNOWN_LOG" 2>&1)
+    build_expr "$CI_UNKNOWN_EXPR" > /dev/null 2> "$CI_UNKNOWN_LOG"
     RC=$?
     set -e
     if [ "$RC" -eq 0 ]; then
-      fail "expected unknown step to exit non-zero"
+      fail "expected unknown step fixture evaluation to fail"
     fi
-    assert_contains "$CI_UNKNOWN_LOG" "Unknown step"
+    assert_contains "$CI_UNKNOWN_LOG" "ci.modes.broken.steps references unknown steps"
+
+    log "ci legacy fields"
+    CI_LEGACY_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      fixture = import ./tests/framework/fixtures/ci/legacy-fields.nix { project = base.project; };
+      project = pkgs.lib.recursiveUpdate base fixture;
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+      ciEntry = import ./nixfied/.framework/ci.nix { inherit pkgs project lib; };
+    in
+      ciEntry.scriptDrv
+    NIX
+    )
+    CI_LEGACY_LOG="$WORKDIR/ci-legacy-fields.log"
+    set +e
+    build_expr "$CI_LEGACY_EXPR" > /dev/null 2> "$CI_LEGACY_LOG"
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected legacy CI fields fixture evaluation to fail"
+    fi
+    assert_contains "$CI_LEGACY_LOG" "ci.steps.legacy-step.run has been removed"
+
+    log "isolation legacy fields"
+    ISO_LEGACY_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      fixture = import ./tests/framework/fixtures/isolation/legacy-fields.nix { };
+      project = pkgs.lib.recursiveUpdate base fixture;
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+      isolationApps = import ./nixfied/.framework/internal/isolation.nix { inherit pkgs project lib slots; };
+    in
+      isolationApps.test-isolation.program
+    NIX
+    )
+    ISO_LEGACY_LOG="$WORKDIR/isolation-legacy-fields.log"
+    set +e
+    build_expr "$ISO_LEGACY_EXPR" > /dev/null 2> "$ISO_LEGACY_LOG"
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected legacy isolation fields fixture evaluation to fail"
+    fi
+    assert_contains "$ISO_LEGACY_LOG" "isolation.runCommand has been removed"
 
     CI_RET_SUM_OK_DIR="$WORKDIR/ci-ret-summary-ok"
     CI_RET_SUM_OK_LOG="$WORKDIR/ci-ret-summary-ok.log"
@@ -899,11 +950,11 @@ let
     set +e
     (
       unset SLOT_INFO REQUIRE_SLOT_ENV \
-        POSTGRES_INIT POSTGRES_START POSTGRES_STOP POSTGRES_HEALTH POSTGRES_READY POSTGRES_READY_TEST POSTGRES_SETUP_DB POSTGRES_FULL_START POSTGRES_FULL_START_TEST \
-        NGINX_INIT NGINX_START NGINX_STOP NGINX_HEALTH NGINX_READY NGINX_SITE_PROXY NGINX_SITE_STATIC \
-        MINIO_INIT MINIO_START MINIO_STOP MINIO_HEALTH MINIO_READY MINIO_CHECK_CONFIG MINIO_BUCKET_LIST \
-        RETH_INIT RETH_START RETH_STOP RETH_HEALTH RETH_READY RETH_CHECK_CONFIG \
-        HELIOS_INIT HELIOS_START HELIOS_STOP HELIOS_HEALTH HELIOS_READY HELIOS_CHECK_CONFIG
+        SVC_POSTGRES_INIT SVC_POSTGRES_START SVC_POSTGRES_STOP SVC_POSTGRES_HEALTH SVC_POSTGRES_READY SVC_POSTGRES_READY_TEST SVC_POSTGRES_SETUP_DB SVC_POSTGRES_FULL_START SVC_POSTGRES_FULL_START_TEST \
+        SVC_NGINX_INIT SVC_NGINX_START SVC_NGINX_STOP SVC_NGINX_HEALTH SVC_NGINX_READY SVC_NGINX_SITE_PROXY SVC_NGINX_SITE_STATIC \
+        SVC_MINIO_INIT SVC_MINIO_START SVC_MINIO_STOP SVC_MINIO_HEALTH SVC_MINIO_READY SVC_MINIO_CHECK_CONFIG SVC_MINIO_BUCKET_LIST \
+        SVC_RETH_INIT SVC_RETH_START SVC_RETH_STOP SVC_RETH_HEALTH SVC_RETH_READY SVC_RETH_CHECK_CONFIG \
+        SVC_HELIOS_INIT SVC_HELIOS_START SVC_HELIOS_STOP SVC_HELIOS_HEALTH SVC_HELIOS_READY SVC_HELIOS_CHECK_CONFIG
       export NIXFIED_TEST_DEBUG=1
       cd "$MOD_DIR" && "$DEV_SCRIPT" >"$DEV_LOG" 2>&1
     )
@@ -1303,11 +1354,11 @@ let
         chmod +x "$PWD/mock-start.sh" "$PWD/mock-health.sh" "$PWD/mock-ready.sh" "$PWD/mock-status.sh" "$PWD/mock-stop.sh"
 
         export MOCK_READY_COUNT_FILE="$PWD/mock-ready.count"
-        export MOCKSVC_START="$PWD/mock-start.sh"
-        export MOCKSVC_HEALTH="$PWD/mock-health.sh"
-        export MOCKSVC_READY="$PWD/mock-ready.sh"
-        export MOCKSVC_STATUS="$PWD/mock-status.sh"
-        export MOCKSVC_STOP="$PWD/mock-stop.sh"
+        export SVC_MOCKSVC_START="$PWD/mock-start.sh"
+        export SVC_MOCKSVC_HEALTH="$PWD/mock-health.sh"
+        export SVC_MOCKSVC_READY="$PWD/mock-ready.sh"
+        export SVC_MOCKSVC_STATUS="$PWD/mock-status.sh"
+        export SVC_MOCKSVC_STOP="$PWD/mock-stop.sh"
 
         fixture_start_service mocksvc default 20 1
         READY_ATTEMPTS="$(cat "$MOCK_READY_COUNT_FILE" 2>/dev/null || echo 0)"
@@ -1322,8 +1373,8 @@ let
         chmod +x "$PWD/mock-ready-default-fail.sh" "$PWD/mock-ready-test.sh"
         export MOCK_READY_TEST_COUNT_FILE="$PWD/mock-ready-test.count"
         rm -f "$MOCK_READY_TEST_COUNT_FILE"
-        export MOCKSVC_READY="$PWD/mock-ready-default-fail.sh"
-        export MOCKSVC_READY_TEST="$PWD/mock-ready-test.sh"
+        export SVC_MOCKSVC_READY="$PWD/mock-ready-default-fail.sh"
+        export SVC_MOCKSVC_READY_TEST="$PWD/mock-ready-test.sh"
 
         fixture_start_service mocksvc test 20 1
         READY_TEST_ATTEMPTS="$(cat "$MOCK_READY_TEST_COUNT_FILE" 2>/dev/null || echo 0)"
@@ -1350,7 +1401,7 @@ let
         done
         [ "$PORT_UP" -eq 1 ] || fail "postgres should still be running with keep_running=1 port=$PGPORT"
 
-        run_hook POSTGRES_STOP
+        run_hook SVC_POSTGRES_STOP
         PORT_DOWN=0
         for i in $(seq 1 30); do
           if nc -z 127.0.0.1 "$PGPORT" >/dev/null 2>&1; then
@@ -1360,7 +1411,7 @@ let
             break
           fi
         done
-        [ "$PORT_DOWN" -eq 1 ] || fail "postgres should stop after explicit POSTGRES_STOP port=$PGPORT"
+        [ "$PORT_DOWN" -eq 1 ] || fail "postgres should stop after explicit SVC_POSTGRES_STOP port=$PGPORT"
         echo "OK: fixture_start_service keep_running preserved service"
 
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'echo "$$" > "$PWD/mock-wrapper.pid"' 'while true; do' '  sleep 1' 'done' > "$PWD/mock-wrapper-start.sh"
@@ -1369,10 +1420,10 @@ let
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'pid=$(cat "$PWD/mock-wrapper.pid" 2>/dev/null || true)' 'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; fi' 'exit 0' > "$PWD/mock-wrapper-stop.sh"
         chmod +x "$PWD/mock-wrapper-start.sh" "$PWD/mock-wrapper-ready.sh" "$PWD/mock-wrapper-status.sh" "$PWD/mock-wrapper-stop.sh"
 
-        export WRAPPERSVC_START="$PWD/mock-wrapper-start.sh"
-        export WRAPPERSVC_READY="$PWD/mock-wrapper-ready.sh"
-        export WRAPPERSVC_STATUS="$PWD/mock-wrapper-status.sh"
-        export WRAPPERSVC_STOP="$PWD/mock-wrapper-stop.sh"
+        export SVC_WRAPPERSVC_START="$PWD/mock-wrapper-start.sh"
+        export SVC_WRAPPERSVC_READY="$PWD/mock-wrapper-ready.sh"
+        export SVC_WRAPPERSVC_STATUS="$PWD/mock-wrapper-status.sh"
+        export SVC_WRAPPERSVC_STOP="$PWD/mock-wrapper-stop.sh"
 
         rm -f "$PWD/mock-wrapper.pid"
         fixture_start_service wrappersvc default 20 0.2 "" 1
@@ -1386,7 +1437,7 @@ let
           fail "wrappersvc should still be running with keep_running=1 pid=$WRAPPER_PID"
         fi
 
-        run_hook WRAPPERSVC_STOP
+        run_hook SVC_WRAPPERSVC_STOP
         WRAPPER_DOWN=0
         for i in $(seq 1 30); do
           if kill -0 "$WRAPPER_PID" 2>/dev/null; then
@@ -1396,7 +1447,7 @@ let
             break
           fi
         done
-        [ "$WRAPPER_DOWN" -eq 1 ] || fail "wrappersvc should stop after explicit WRAPPERSVC_STOP pid=$WRAPPER_PID"
+        [ "$WRAPPER_DOWN" -eq 1 ] || fail "wrappersvc should stop after explicit SVC_WRAPPERSVC_STOP pid=$WRAPPER_PID"
         echo "OK: fixture_start_service keep_running preserved wrapper process"
 
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'echo "$$" > "$PWD/mock-timeout.pid"' 'while true; do' '  if [ -n "$MOCK_TIMEOUT_LOGFILE" ]; then rm -f "$MOCK_TIMEOUT_LOGFILE"; fi' '  sleep 0.1' 'done' > "$PWD/mock-timeout-start.sh"
@@ -1406,11 +1457,11 @@ let
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'if [ -f "$PWD/mock-timeout.pid" ]; then pid=$(cat "$PWD/mock-timeout.pid" 2>/dev/null || true); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; fi; fi; exit 0' > "$PWD/mock-timeout-stop.sh"
         chmod +x "$PWD/mock-timeout-start.sh" "$PWD/mock-timeout-health.sh" "$PWD/mock-timeout-ready.sh" "$PWD/mock-timeout-status.sh" "$PWD/mock-timeout-stop.sh"
 
-        export TIMEOUTSVC_START="$PWD/mock-timeout-start.sh"
-        export TIMEOUTSVC_HEALTH="$PWD/mock-timeout-health.sh"
-        export TIMEOUTSVC_READY="$PWD/mock-timeout-ready.sh"
-        export TIMEOUTSVC_STATUS="$PWD/mock-timeout-status.sh"
-        export TIMEOUTSVC_STOP="$PWD/mock-timeout-stop.sh"
+        export SVC_TIMEOUTSVC_START="$PWD/mock-timeout-start.sh"
+        export SVC_TIMEOUTSVC_HEALTH="$PWD/mock-timeout-health.sh"
+        export SVC_TIMEOUTSVC_READY="$PWD/mock-timeout-ready.sh"
+        export SVC_TIMEOUTSVC_STATUS="$PWD/mock-timeout-status.sh"
+        export SVC_TIMEOUTSVC_STOP="$PWD/mock-timeout-stop.sh"
 
         TIMEOUT_LOG="$PWD/missing-timeout.log"
         export MOCK_TIMEOUT_LOGFILE="$TIMEOUT_LOG"
@@ -1860,7 +1911,7 @@ let
     in
       pkgs.writeText "service-api-validated" (builtins.toJSON (serviceApi.validateServiceApis {
         postgres = {
-          version = 2;
+          version = 3;
           service = "postgres";
           summary = "bad contract";
           details = "missing required lifecycle op and malformed op entry";
@@ -1926,7 +1977,7 @@ let
       fail "expected version=1 service API contract violation to fail"
     fi
     assert_contains "$BAD_SERVICE_API_V1_LOG" "Nixfied service API contract violated"
-    assert_contains "$BAD_SERVICE_API_V1_LOG" "publicApi.version must be 2"
+    assert_contains "$BAD_SERVICE_API_V1_LOG" "publicApi.version must be 3"
 
     log "installer upgrade preserves project"
     echo "# NIXFIED_UPGRADE_TEST_MARKER" >> "$INSTALL_TARGET/nixfied/project/conf.nix"
@@ -3007,7 +3058,8 @@ let
       hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs; project = base; inherit slots; postgres = null; nginx = null; };
       lib = import ./nixfied/.framework/lib { inherit pkgs; project = base; inherit hooks; };
     in
-      pkgs.writeText "bad-command-class-policy" (builtins.toJSON (lib.appApi.mkTypedCommandApi {
+      pkgs.writeText "bad-command-class-policy" (builtins.toJSON (lib.appApi.mkCommandApi {
+        class = "typed";
         name = "bad-policy";
         summary = "bad";
         details = "bad";
@@ -3112,29 +3164,29 @@ let
     )
 
     MODAPP_NAMES_FILE=$(build_expr "$MODAPP_EXPR")
-    assert_contains "$MODAPP_NAMES_FILE" "service::postgres::start"
-    assert_contains "$MODAPP_NAMES_FILE" "service::nginx::start"
-    assert_contains "$MODAPP_NAMES_FILE" "service::minio::start"
-    assert_contains "$MODAPP_NAMES_FILE" "service::reth::start"
-    assert_contains "$MODAPP_NAMES_FILE" "service::helios::start"
-    assert_contains "$MODAPP_NAMES_FILE" "service::postgres::health"
-    assert_contains "$MODAPP_NAMES_FILE" "service::nginx::health"
-    assert_contains "$MODAPP_NAMES_FILE" "service::minio::health"
-    assert_contains "$MODAPP_NAMES_FILE" "service::reth::health"
-    assert_contains "$MODAPP_NAMES_FILE" "service::helios::health"
-    assert_contains "$MODAPP_NAMES_FILE" "service::minio::full-start"
-    assert_contains "$MODAPP_NAMES_FILE" "service::minio::full-start-test"
-    assert_contains "$MODAPP_NAMES_FILE" "service::minio::export-s3-env"
-    assert_contains "$MODAPP_NAMES_FILE" "service::minio::bucket-ensure"
-    assert_contains "$MODAPP_NAMES_FILE" "service::reth::full-start"
-    assert_contains "$MODAPP_NAMES_FILE" "service::reth::full-start-test"
-    assert_contains "$MODAPP_NAMES_FILE" "service::helios::full-start"
-    assert_contains "$MODAPP_NAMES_FILE" "service::helios::full-start-test"
-    assert_not_contains "$MODAPP_NAMES_FILE" "service::postgres::logs"
-    assert_not_contains "$MODAPP_NAMES_FILE" "service::nginx::logs"
-    assert_not_contains "$MODAPP_NAMES_FILE" "service::minio::logs"
-    assert_not_contains "$MODAPP_NAMES_FILE" "service::reth::logs"
-    assert_not_contains "$MODAPP_NAMES_FILE" "service::helios::logs"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::postgres::start"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::nginx::start"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::minio::start"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::reth::start"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::helios::start"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::postgres::health"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::nginx::health"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::minio::health"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::reth::health"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::helios::health"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::minio::full-start"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::minio::full-start-test"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::minio::export-s3-env"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::minio::bucket-ensure"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::reth::full-start"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::reth::full-start-test"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::helios::full-start"
+    assert_contains "$MODAPP_NAMES_FILE" "svc::helios::full-start-test"
+    assert_not_contains "$MODAPP_NAMES_FILE" "svc::postgres::logs"
+    assert_not_contains "$MODAPP_NAMES_FILE" "svc::nginx::logs"
+    assert_not_contains "$MODAPP_NAMES_FILE" "svc::minio::logs"
+    assert_not_contains "$MODAPP_NAMES_FILE" "svc::reth::logs"
+    assert_not_contains "$MODAPP_NAMES_FILE" "svc::helios::logs"
     assert_contains "$MODAPP_NAMES_FILE" "up"
     assert_contains "$MODAPP_NAMES_FILE" "svc-health"
     assert_contains "$MODAPP_NAMES_FILE" "check-ports"
@@ -3180,10 +3232,10 @@ let
     in
       pkgs.writeText "strict-slot-env-apps" (
         "UP=" + moduleApps.up.program + "\n"
-        + "POSTGRES_LIST_INSTANCES=" + moduleApps."service::postgres::list-instances".program + "\n"
-        + "POSTGRES_CHECK_PORT=" + moduleApps."service::postgres::check-port".program + "\n"
-        + "HOOK_POSTGRES_LIST_INSTANCES=" + hooks.env.POSTGRES_LIST_INSTANCES + "\n"
-        + "HOOK_POSTGRES_CHECK_PORT=" + hooks.env.POSTGRES_CHECK_PORT + "\n"
+        + "SVC_POSTGRES_LIST_INSTANCES=" + moduleApps."svc::postgres::list-instances".program + "\n"
+        + "SVC_POSTGRES_CHECK_PORT=" + moduleApps."svc::postgres::check-port".program + "\n"
+        + "HOOK_POSTGRES_LIST_INSTANCES=" + hooks.env.SVC_POSTGRES_LIST_INSTANCES + "\n"
+        + "HOOK_POSTGRES_CHECK_PORT=" + hooks.env.SVC_POSTGRES_CHECK_PORT + "\n"
         + "REQUIRE_SLOT_ENV=" + hooks.env.REQUIRE_SLOT_ENV + "\n"
       )
     NIX
@@ -3191,8 +3243,8 @@ let
 
     STRICT_SLOT_ENV_FILE=$(build_expr "$STRICT_SLOT_ENV_EXPR")
     STRICT_UP_SCRIPT=$(grep 'UP=' "$STRICT_SLOT_ENV_FILE" | head -1 | sed 's/^[[:space:]]*UP=//')
-    STRICT_PG_LIST_SCRIPT=$(grep 'POSTGRES_LIST_INSTANCES=' "$STRICT_SLOT_ENV_FILE" | head -1 | sed 's/^[[:space:]]*POSTGRES_LIST_INSTANCES=//')
-    STRICT_PG_CHECK_PORT_SCRIPT=$(grep 'POSTGRES_CHECK_PORT=' "$STRICT_SLOT_ENV_FILE" | head -1 | sed 's/^[[:space:]]*POSTGRES_CHECK_PORT=//')
+    STRICT_PG_LIST_SCRIPT=$(grep 'SVC_POSTGRES_LIST_INSTANCES=' "$STRICT_SLOT_ENV_FILE" | head -1 | sed 's/^[[:space:]]*SVC_POSTGRES_LIST_INSTANCES=//')
+    STRICT_PG_CHECK_PORT_SCRIPT=$(grep 'SVC_POSTGRES_CHECK_PORT=' "$STRICT_SLOT_ENV_FILE" | head -1 | sed 's/^[[:space:]]*SVC_POSTGRES_CHECK_PORT=//')
     STRICT_HOOK_PG_LIST_SCRIPT=$(grep 'HOOK_POSTGRES_LIST_INSTANCES=' "$STRICT_SLOT_ENV_FILE" | head -1 | sed 's/^[[:space:]]*HOOK_POSTGRES_LIST_INSTANCES=//')
     STRICT_HOOK_PG_CHECK_PORT_SCRIPT=$(grep 'HOOK_POSTGRES_CHECK_PORT=' "$STRICT_SLOT_ENV_FILE" | head -1 | sed 's/^[[:space:]]*HOOK_POSTGRES_CHECK_PORT=//')
     STRICT_REQUIRE_SLOT_ENV_SCRIPT=$(grep 'REQUIRE_SLOT_ENV=' "$STRICT_SLOT_ENV_FILE" | head -1 | sed 's/^[[:space:]]*REQUIRE_SLOT_ENV=//')
@@ -3224,7 +3276,7 @@ let
     RC=$?
     set -e
     if [ "$RC" -eq 0 ]; then
-      fail "expected service::postgres::list-instances to fail when PROJECT_ENV is missing"
+      fail "expected svc::postgres::list-instances to fail when PROJECT_ENV is missing"
     fi
     assert_contains "$STRICT_PG_MISSING_ENV_LOG" "PROJECT_ENV must be set"
 
@@ -3236,7 +3288,7 @@ let
     RC=$?
     set -e
     if [ "$RC" -eq 0 ]; then
-      fail "expected POSTGRES_LIST_INSTANCES hook to fail when PROJECT_ENV is missing"
+      fail "expected SVC_POSTGRES_LIST_INSTANCES hook to fail when PROJECT_ENV is missing"
     fi
     assert_contains "$STRICT_PG_HOOK_MISSING_ENV_LOG" "PROJECT_ENV must be set"
 
@@ -3251,11 +3303,11 @@ let
     RC=$?
     set -e
     if grep -q "usage: postgres-check-port <port>" "$STRICT_PG_CHECK_PORT_LOG"; then
-      fail "expected service::postgres::check-port to receive forwarded args"
+      fail "expected svc::postgres::check-port to receive forwarded args"
     fi
     assert_contains "$STRICT_PG_CHECK_PORT_LOG" "$STRICT_PORT_ARG"
     if [ "$RC" -ne 0 ] && ! grep -q "Port $STRICT_PORT_ARG is in use by PID(s):" "$STRICT_PG_CHECK_PORT_LOG"; then
-      fail "unexpected failure from service::postgres::check-port with forwarded args"
+      fail "unexpected failure from svc::postgres::check-port with forwarded args"
     fi
 
     STRICT_PG_HOOK_CHECK_PORT_LOG="$WORKDIR/strict-pg-check-port-hook.log"
@@ -3264,11 +3316,11 @@ let
     RC=$?
     set -e
     if grep -q "usage: postgres-check-port <port>" "$STRICT_PG_HOOK_CHECK_PORT_LOG"; then
-      fail "expected POSTGRES_CHECK_PORT hook to receive forwarded args"
+      fail "expected SVC_POSTGRES_CHECK_PORT hook to receive forwarded args"
     fi
     assert_contains "$STRICT_PG_HOOK_CHECK_PORT_LOG" "$STRICT_PORT_ARG"
     if [ "$RC" -ne 0 ] && ! grep -q "Port $STRICT_PORT_ARG is in use by PID(s):" "$STRICT_PG_HOOK_CHECK_PORT_LOG"; then
-      fail "unexpected failure from POSTGRES_CHECK_PORT hook with forwarded args"
+      fail "unexpected failure from SVC_POSTGRES_CHECK_PORT hook with forwarded args"
     fi
 
     MODAPP_DISABLED_EXPR=$(cat <<'NIX'
@@ -3297,20 +3349,20 @@ let
     )
 
     MODAPP_DISABLED_FILE=$(build_expr "$MODAPP_DISABLED_EXPR")
-    if grep -q "service::postgres::start" "$MODAPP_DISABLED_FILE"; then
-      fail "service::postgres::start should not be present when postgres is disabled"
+    if grep -q "svc::postgres::start" "$MODAPP_DISABLED_FILE"; then
+      fail "svc::postgres::start should not be present when postgres is disabled"
     fi
-    if grep -q "service::nginx::start" "$MODAPP_DISABLED_FILE"; then
-      fail "service::nginx::start should not be present when nginx is disabled"
+    if grep -q "svc::nginx::start" "$MODAPP_DISABLED_FILE"; then
+      fail "svc::nginx::start should not be present when nginx is disabled"
     fi
-    if grep -q "service::minio::start" "$MODAPP_DISABLED_FILE"; then
-      fail "service::minio::start should not be present when minio is disabled"
+    if grep -q "svc::minio::start" "$MODAPP_DISABLED_FILE"; then
+      fail "svc::minio::start should not be present when minio is disabled"
     fi
-    if grep -q "service::reth::start" "$MODAPP_DISABLED_FILE"; then
-      fail "service::reth::start should not be present when reth is disabled"
+    if grep -q "svc::reth::start" "$MODAPP_DISABLED_FILE"; then
+      fail "svc::reth::start should not be present when reth is disabled"
     fi
-    if grep -q "service::helios::start" "$MODAPP_DISABLED_FILE"; then
-      fail "service::helios::start should not be present when helios is disabled"
+    if grep -q "svc::helios::start" "$MODAPP_DISABLED_FILE"; then
+      fail "svc::helios::start should not be present when helios is disabled"
     fi
     assert_contains "$MODAPP_DISABLED_FILE" "check-ports"
     assert_contains "$MODAPP_DISABLED_FILE" "ports"
@@ -3355,11 +3407,11 @@ let
       selected =
         builtins.filter (
           n:
-          builtins.substring 0 9 n == "POSTGRES_"
-          || builtins.substring 0 6 n == "NGINX_"
-          || builtins.substring 0 6 n == "MINIO_"
-          || builtins.substring 0 5 n == "RETH_"
-          || builtins.substring 0 7 n == "HELIOS_"
+          builtins.substring 0 13 n == "SVC_POSTGRES_"
+          || builtins.substring 0 10 n == "SVC_NGINX_"
+          || builtins.substring 0 10 n == "SVC_MINIO_"
+          || builtins.substring 0 9 n == "SVC_RETH_"
+          || builtins.substring 0 11 n == "SVC_HELIOS_"
         ) names;
     in
       pkgs.writeText "service-hooks" (builtins.concatStringsSep "\n" (
@@ -3375,23 +3427,23 @@ let
     )
 
     SERVICE_HOOKS_FILE=$(build_expr "$SERVICE_HOOKS_EXPR")
-    assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_START="
-    assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_HEALTH="
-    assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_READY="
-    assert_contains "$SERVICE_HOOKS_FILE" "POSTGRES_READY_TEST="
-    assert_contains "$SERVICE_HOOKS_FILE" "NGINX_START="
-    assert_contains "$SERVICE_HOOKS_FILE" "NGINX_HEALTH="
-    assert_contains "$SERVICE_HOOKS_FILE" "NGINX_READY="
-    assert_contains "$SERVICE_HOOKS_FILE" "MINIO_START="
-    assert_contains "$SERVICE_HOOKS_FILE" "MINIO_HEALTH="
-    assert_contains "$SERVICE_HOOKS_FILE" "MINIO_READY="
-    assert_contains "$SERVICE_HOOKS_FILE" "MINIO_BUCKET_LIST="
-    assert_contains "$SERVICE_HOOKS_FILE" "RETH_START="
-    assert_contains "$SERVICE_HOOKS_FILE" "RETH_HEALTH="
-    assert_contains "$SERVICE_HOOKS_FILE" "RETH_READY="
-    assert_contains "$SERVICE_HOOKS_FILE" "HELIOS_START="
-    assert_contains "$SERVICE_HOOKS_FILE" "HELIOS_HEALTH="
-    assert_contains "$SERVICE_HOOKS_FILE" "HELIOS_READY="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_POSTGRES_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_POSTGRES_HEALTH="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_POSTGRES_READY="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_POSTGRES_READY_TEST="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_NGINX_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_NGINX_HEALTH="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_NGINX_READY="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_MINIO_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_MINIO_HEALTH="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_MINIO_READY="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_MINIO_BUCKET_LIST="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_RETH_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_RETH_HEALTH="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_RETH_READY="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_HELIOS_START="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_HELIOS_HEALTH="
+    assert_contains "$SERVICE_HOOKS_FILE" "SVC_HELIOS_READY="
     assert_contains "$SERVICE_HOOKS_FILE" "/nix/store/"
 
     log "supervisor hooks"
@@ -3461,7 +3513,8 @@ in
 {
   test = lib.appApi.mkNixfiedApp {
     name = "test";
-    api = lib.appApi.mkPassthroughCommandApi {
+    api = lib.appApi.mkCommandApi {
+      class = "passthrough";
       name = "test";
       summary = "Run framework integration tests";
       details = "Runs the Nixfied framework integration test suite (intended for framework development). Supports shard orchestration via --jobs/--serial/--shard plus --profile and --summary-json options.";

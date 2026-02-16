@@ -52,7 +52,9 @@ in
 {
   env = {
     SLOT_INFO = toString slots.getSlotInfo;
+    SLOT_INFO_JSON = toString slots.getSlotInfoJson;
     REQUIRE_SLOT_ENV = toString slots.requireSlotEnv;
+    REQUIRE_SLOT_ENV_JSON = toString slots.requireSlotEnvJson;
   }
   // serviceEnv
   // supervisorEnv

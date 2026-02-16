@@ -294,6 +294,70 @@ let
     ''}
   '';
 
+  kvLinesToJson = pkgs.writeShellScript "slot-kv-lines-to-json" ''
+    set -euo pipefail
+    ${pkgs.jq}/bin/jq -Rn '
+      [ inputs
+        | select(length > 0)
+        | select(startswith("export ") | not)
+        | capture("^(?<key>[^=]+)=(?<value>.*)$")
+      ]
+      | reduce .[] as $entry ({}; . + {($entry.key): $entry.value})
+    '
+  '';
+
+  getSlotInfoJson = pkgs.writeShellScript "get-slot-info-json" ''
+    set -euo pipefail
+
+    RAW="$(${getSlotInfo})"
+    VARS_JSON="$(printf '%s\n' "$RAW" | ${kvLinesToJson})"
+
+    ${pkgs.jq}/bin/jq -n --argjson vars "$VARS_JSON" '
+      {
+        slot: (($vars.SLOT // "0") | tonumber),
+        env: ($vars.ENV // ""),
+        env_offset: (($vars.ENV_OFFSET // "0") | tonumber),
+        slot_stride: (($vars.SLOT_STRIDE // "0") | tonumber),
+        directories: {
+          base: ($vars.BASE_DIR // ""),
+          log: ($vars.LOG_DIR // ""),
+          run: ($vars.RUN_DIR // ""),
+          config: ($vars.CONFIG_DIR // ""),
+          state: ($vars.STATE_DIR // ""),
+          backup: ($vars.BACKUP_BASE_DIR // "")
+        },
+        ports: (
+          $vars
+          | to_entries
+          | map(select(.key | endswith("_PORT")))
+          | reduce .[] as $entry ({}; . + {($entry.key): (($entry.value | tonumber?) // $entry.value)})
+        ),
+        vars: $vars
+      }
+    '
+  '';
+
+  requireSlotEnvJson = pkgs.writeShellScript "require-slot-env-json" ''
+    set -euo pipefail
+
+    RAW="$(${requireSlotEnv})"
+    VARS_JSON="$(printf '%s\n' "$RAW" | ${kvLinesToJson})"
+
+    ${pkgs.jq}/bin/jq -n --argjson vars "$VARS_JSON" '
+      {
+        slot: (($vars.SLOT // "0") | tonumber),
+        env: ($vars.ENV // ""),
+        ports: (
+          $vars
+          | to_entries
+          | map(select(.key | endswith("_PORT")))
+          | reduce .[] as $entry ({}; . + {($entry.key): (($entry.value | tonumber?) // $entry.value)})
+        ),
+        vars: $vars
+      }
+    '
+  '';
+
   getServiceDir = service: "\${BASE_DIR:-${baseDirExpr}}/${service}-$SLOT-$ENV";
 
   # Nix-level accessor: calculate ports for a given slot/env
@@ -368,7 +432,9 @@ in
     resolveEnv
     resolveSlot
     requireSlotEnv
+    requireSlotEnvJson
     getSlotInfo
+    getSlotInfoJson
     getServiceDir
     serviceNames
     serviceSockets

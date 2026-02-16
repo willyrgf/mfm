@@ -8,6 +8,7 @@
 
 let
   cfg = project.modules.minio or { };
+  slotEnvRuntime = import ../lib/slot-env-runtime.nix { inherit pkgs; };
   processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   observability = import ../lib/service-observability.nix {
     inherit
@@ -22,12 +23,42 @@ let
   minioDirExpr = slots.getServiceDir config.dataDirName;
   browserValue = if config.browser then "on" else "off";
   emitHelper = observability.mkEmitServiceEventFunction "minio";
+  runtimePrelude = ''
+    ${slotEnvRuntime.loadJsonFromCommand {
+      outVar = "SLOT_INFO_JSON_OUT";
+      command = toString slots.getSlotInfoJson;
+      exportVars = false;
+    }}
+
+    API_PORT_VAR="${apiPortVar}"
+    CONSOLE_PORT_VAR="${consolePortVar}"
+
+    ${slotEnvRuntime.readPortFromJson {
+      targetVar = "MINIO_API_PORT";
+      jsonVar = "SLOT_INFO_JSON_OUT";
+      keyExpr = "$API_PORT_VAR";
+    }}
+    ${slotEnvRuntime.readPortFromJson {
+      targetVar = "MINIO_CONSOLE_PORT";
+      jsonVar = "SLOT_INFO_JSON_OUT";
+      keyExpr = "$CONSOLE_PORT_VAR";
+    }}
+    MINIO_DIR="${minioDirExpr}"
+    MINIO_PID_FILE="$MINIO_DIR/run/minio.pid"
+    MINIO_LOG_FILE="$MINIO_DIR/logs/minio.log"
+
+    if [ -z "$MINIO_API_PORT" ] || [ -z "$MINIO_CONSOLE_PORT" ]; then
+      echo "ERROR: minio port variables are not set (api/console)" >&2
+      exit 1
+    fi
+
+    ${emitHelper}
+  '';
 
   init = pkgs.writeShellScript "minio-init" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    ${runtimePrelude}
 
-    MINIO_DIR="${minioDirExpr}"
     mkdir -p "$MINIO_DIR/data"
     mkdir -p "$MINIO_DIR/config"
     mkdir -p "$MINIO_DIR/run"
@@ -38,17 +69,9 @@ let
 
   start = pkgs.writeShellScript "minio-start" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
-    ${emitHelper}
+    ${runtimePrelude}
 
-    API_PORT_VAR="${apiPortVar}"
-    CONSOLE_PORT_VAR="${consolePortVar}"
-
-    MINIO_API_PORT="''${!API_PORT_VAR}"
-    MINIO_CONSOLE_PORT="''${!CONSOLE_PORT_VAR}"
-    MINIO_DIR="${minioDirExpr}"
-    MINIO_PID_FILE="$MINIO_DIR/run/minio.pid"
-    LOG_FILE="$MINIO_DIR/logs/minio.log"
+    LOG_FILE="$MINIO_LOG_FILE"
 
     ${init}
 
@@ -111,11 +134,7 @@ let
 
   stop = pkgs.writeShellScript "minio-stop" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
-    ${emitHelper}
-
-    MINIO_DIR="${minioDirExpr}"
-    MINIO_PID_FILE="$MINIO_DIR/run/minio.pid"
+    ${runtimePrelude}
 
     if [ ! -f "$MINIO_PID_FILE" ]; then
       emit_service_event service_stopped stopped
@@ -158,15 +177,7 @@ let
 
   status = pkgs.writeShellScript "minio-status" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
-
-    API_PORT_VAR="${apiPortVar}"
-    CONSOLE_PORT_VAR="${consolePortVar}"
-
-    MINIO_API_PORT="''${!API_PORT_VAR}"
-    MINIO_CONSOLE_PORT="''${!CONSOLE_PORT_VAR}"
-    MINIO_DIR="${minioDirExpr}"
-    MINIO_PID_FILE="$MINIO_DIR/run/minio.pid"
+    ${runtimePrelude}
 
     RUNNING=false
     PID=""
@@ -180,7 +191,7 @@ let
 
     ${observability.mkStatusMergeBlock {
       service = "minio";
-      defaultLogPathExpr = ''"$MINIO_DIR/logs/minio.log"'';
+      defaultLogPathExpr = ''"$MINIO_LOG_FILE"'';
     }}
 
     echo "service=minio slot=$SLOT env=$ENV running=$RUNNING pid=''${PID:-unknown} api_port=$MINIO_API_PORT console_port=$MINIO_CONSOLE_PORT scope=$SCOPE owner_run_id=''${OWNER_RUN_ID:-unknown} owner_scope=''${OWNER_SCOPE:-unknown} ephemeral_root=''${EPHEMERAL_ROOT:-none} registry_state=''${REGISTRY_STATE:-unknown} slot_owner=''${SLOT_OWNER:-unknown} wait_reason=''${WAIT_REASON:-none} log_path=$EFFECTIVE_LOG_PATH"
@@ -193,10 +204,7 @@ let
 
   health = pkgs.writeShellScript "minio-health" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
-
-    API_PORT_VAR="${apiPortVar}"
-    MINIO_API_PORT="''${!API_PORT_VAR}"
+    ${runtimePrelude}
 
     if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/live" >/dev/null 2>&1; then
       echo "OK: minio healthy api_port=$MINIO_API_PORT"
@@ -209,10 +217,7 @@ let
 
   ready = pkgs.writeShellScript "minio-ready" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
-
-    API_PORT_VAR="${apiPortVar}"
-    MINIO_API_PORT="''${!API_PORT_VAR}"
+    ${runtimePrelude}
 
     if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready" >/dev/null 2>&1; then
       echo "OK: minio ready api_port=$MINIO_API_PORT"
@@ -225,9 +230,7 @@ let
 
   checkConfig = pkgs.writeShellScript "minio-check-config" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
-
-    MINIO_DIR="${minioDirExpr}"
+    ${runtimePrelude}
 
     if [ ! -d "$MINIO_DIR/config" ]; then
       echo "ERROR: missing minio config directory at $MINIO_DIR/config" >&2
@@ -256,10 +259,7 @@ let
 
   exportS3Env = pkgs.writeShellScript "minio-export-s3-env" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
-
-    API_PORT_VAR="${apiPortVar}"
-    MINIO_API_PORT="''${!API_PORT_VAR}"
+    ${runtimePrelude}
 
     BUCKET="''${1:-''${MINIO_BUCKET:-}}"
     PREFIX="''${2:-''${MINIO_PREFIX:-}}"

@@ -8,6 +8,7 @@
 
 let
   cfg = project.modules.nginx or { };
+  slotEnvRuntime = import ../lib/slot-env-runtime.nix { inherit pkgs; };
   processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   observability = import ../lib/service-observability.nix {
     inherit
@@ -22,6 +23,33 @@ let
   dataDirName = cfg.dataDirName or "nginx";
   nginxDirExpr = slots.getServiceDir dataDirName;
   emitHelper = observability.mkEmitServiceEventFunction "nginx";
+  runtimePrelude = ''
+    ${slotEnvRuntime.loadJsonFromCommand {
+      outVar = "SLOT_INFO_JSON_OUT";
+      command = toString slots.getSlotInfoJson;
+      exportVars = false;
+    }}
+
+    HTTP_PORT_VAR="${portVarHttp}"
+    HTTPS_PORT_VAR="${portVarHttps}"
+
+    ${slotEnvRuntime.readPortFromJson {
+      targetVar = "HTTP_PORT";
+      jsonVar = "SLOT_INFO_JSON_OUT";
+      keyExpr = "$HTTP_PORT_VAR";
+    }}
+    ${slotEnvRuntime.readPortFromJson {
+      targetVar = "HTTPS_PORT";
+      jsonVar = "SLOT_INFO_JSON_OUT";
+      keyExpr = "$HTTPS_PORT_VAR";
+    }}
+    NGINX_DIR="${nginxDirExpr}"
+
+    if [ -z "$HTTP_PORT" ] || [ -z "$HTTPS_PORT" ]; then
+      echo "ERROR: nginx port variables are not set (http/https)" >&2
+      exit 1
+    fi
+  '';
 
   generateSelfSignedCert = pkgs.writeShellScript "nginx-generate-self-signed" ''
     set -euo pipefail
@@ -45,14 +73,7 @@ let
 
   init = pkgs.writeShellScript "nginx-init" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
-
-    HTTP_PORT_VAR="${portVarHttp}"
-    HTTPS_PORT_VAR="${portVarHttps}"
-    HTTP_PORT="''${!HTTP_PORT_VAR}"
-    HTTPS_PORT="''${!HTTPS_PORT_VAR}"
-
-    NGINX_DIR="${nginxDirExpr}"
+    ${runtimePrelude}
 
     mkdir -p "$NGINX_DIR/conf/sites-available"
     mkdir -p "$NGINX_DIR/conf/sites-enabled"
@@ -72,9 +93,8 @@ let
 
   start = pkgs.writeShellScript "nginx-start" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    ${runtimePrelude}
     ${emitHelper}
-    NGINX_DIR="${nginxDirExpr}"
 
     CONF="$NGINX_DIR/conf/nginx.conf"
     if [ ! -f "$CONF" ]; then
@@ -89,9 +109,8 @@ let
 
   stop = pkgs.writeShellScript "nginx-stop" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    ${runtimePrelude}
     ${emitHelper}
-    NGINX_DIR="${nginxDirExpr}"
     PID_FILE="$NGINX_DIR/run/nginx.pid"
 
     if [ -f "$PID_FILE" ]; then
@@ -110,8 +129,7 @@ let
 
   reload = pkgs.writeShellScript "nginx-reload" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
-    NGINX_DIR="${nginxDirExpr}"
+    ${runtimePrelude}
     CONF="$NGINX_DIR/conf/nginx.conf"
 
     if [ ! -f "$CONF" ]; then

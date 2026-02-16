@@ -10,6 +10,9 @@
 }:
 
 let
+  slotEnvRuntime = lib.slotEnvRuntime;
+  slotVar = project.project.slotVar or "NIX_ENV";
+  envVar = project.project.envVar or "PROJECT_ENV";
   mk =
     {
       name,
@@ -23,37 +26,21 @@ let
       allowUnknownArgs ? false,
       idempotent ? true,
     }:
-    lib.appApi.mkNixfiedApp {
-      inherit name script;
-      env = { };
+    lib.appApi.mkTypedAppFromSpec {
+      inherit
+        name
+        script
+        summary
+        details
+        usage
+        args
+        category
+        idempotent
+        ;
+      class = if allowUnknownArgs then "passthrough" else "typed";
+      envDocs = env;
+      runtimeEnv = { };
       useDeps = false;
-      api =
-        if allowUnknownArgs then
-          lib.appApi.mkPassthroughCommandApi {
-            inherit
-              name
-              summary
-              details
-              usage
-              args
-              env
-              category
-              idempotent
-              ;
-          }
-        else
-          lib.appApi.mkTypedCommandApi {
-            inherit
-              name
-              summary
-              details
-              usage
-              args
-              env
-              category
-              idempotent
-              ;
-          };
     };
 
   mkSupervisorHookApp =
@@ -76,8 +63,13 @@ let
       allowUnknownArgs = passArgs;
       idempotent = false;
       script = ''
-        SLOT_ENV_OUT="$($REQUIRE_SLOT_ENV)" || exit 1
-        eval "$SLOT_ENV_OUT"
+        ${slotEnvRuntime.requireSlotEnvJson {
+          outVar = "SLOT_ENV_JSON_OUT";
+          exportVars = false;
+        }}
+        export ${slotVar}="$SLOT"
+        export ${envVar}="$ENV"
+        export NIXFIED_ENV="$SLOT"
         run_hook ${hook}${if passArgs then " \"$@\"" else ""}
       '';
     };
@@ -163,10 +155,11 @@ let
     if supervisor == null then { } else mkAppsFromSpecs mkSupervisorHookApp supervisorSpecs;
 
   portNames = builtins.attrNames (project.ports or { });
-  slotInfoEvalBlock = ''
-    SLOT_INFO_OUT="$($SLOT_INFO)" || exit 1
-    eval "$SLOT_INFO_OUT"
-  '';
+  slotInfoJsonBlock = slotEnvRuntime.loadJsonFromCommand {
+    outVar = "SLOT_INFO_JSON_OUT";
+    command = "\"$SLOT_INFO_JSON\"";
+    exportVars = false;
+  };
   portVarNameFor =
     portName:
     pkgs.lib.strings.toUpper (pkgs.lib.replaceStrings [ "-" "." ] [ "_" "_" ] portName) + "_PORT";
@@ -192,7 +185,7 @@ let
       details = "Scans the configured ports for the current slot/env and reports whether they are free or listening.";
       category = "utility";
       script = ''
-        ${slotInfoEvalBlock}
+        ${slotInfoJsonBlock}
         LSOF="${pkgs.lsof}/bin/lsof"
         echo "Port status for slot ''${SLOT:-0}, env ''${ENV:-dev}:"
         echo ""
@@ -202,7 +195,11 @@ let
             varName,
           }:
           ''
-            PORT_VAL="''${${varName}:-}"
+            ${slotEnvRuntime.readPortFromJson {
+              targetVar = "PORT_VAL";
+              jsonVar = "SLOT_INFO_JSON_OUT";
+              keyExpr = varName;
+            }}
             if [ -n "$PORT_VAL" ]; then
               if "$LSOF" -iTCP:"$PORT_VAL" -sTCP:LISTEN -n -P >/dev/null 2>&1; then
                 PIDS=$("$LSOF" -iTCP:"$PORT_VAL" -sTCP:LISTEN -n -P -t 2>/dev/null | tr '\n' ',' | sed 's/,$//')
@@ -221,7 +218,7 @@ let
       details = "Prints effective port assignments for the current slot/env.";
       category = "utility";
       script = ''
-        ${slotInfoEvalBlock}
+        ${slotInfoJsonBlock}
         echo "Port assignments for slot ''${SLOT:-0}, env ''${ENV:-dev}:"
         echo ""
         ${mkPortScriptLines (
@@ -230,7 +227,12 @@ let
             varName,
           }:
           ''
-            echo "  ${portName}: ''${${varName}:-n/a}"
+            ${slotEnvRuntime.readPortFromJson {
+              targetVar = "PORT_VAL";
+              jsonVar = "SLOT_INFO_JSON_OUT";
+              keyExpr = varName;
+            }}
+            echo "  ${portName}: ''${PORT_VAL:-n/a}"
           ''
         )}
       '';

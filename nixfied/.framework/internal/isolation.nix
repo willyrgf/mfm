@@ -4,10 +4,23 @@
   project,
   lib,
   slots,
+  knownApps ? [ ],
 }:
 
 let
-  isolation = project.isolation or { };
+  slotEnvRuntime = lib.slotEnvRuntime;
+  isolationRaw = project.isolation or { };
+  isolationSchema = import ../lib/isolation-schema.nix {
+    inherit
+      pkgs
+      knownApps
+      ;
+  };
+  isolation = isolationSchema.validateIsolation {
+    isolation = isolationRaw;
+    envNames = builtins.attrNames (project.envs or { });
+    slotMax = slots.slotMax or 0;
+  };
   enabled = isolation.enable or false;
 
   envVar = project.project.envVar or "PROJECT_ENV";
@@ -36,27 +49,24 @@ let
   keepLogsOnSuccess = isolation.keepLogsOnSuccess or false;
   keepLogsOnFailure = isolation.keepLogsOnFailure or true;
   useDeps = isolation.useDeps or false;
-
-  runApp = isolation.runApp or "ci";
-  runArgs = isolation.runArgs or [ "--summary" ];
-  runArgsStr = pkgs.lib.escapeShellArgs runArgs;
-  runCommand = isolation.runCommand or "";
-  defaultRunCommand =
-    if runArgsStr == "" then "nix run .#${runApp}" else "nix run .#${runApp} -- ${runArgsStr}";
-  effectiveRunCommand = if runCommand != "" then runCommand else defaultRunCommand;
+  runScript = isolation.runScript or "nix run .#ci -- --summary";
+  validateScript = isolation.validateScript or "nix run .#validate-env";
 
   runEnv = isolation.runEnv or { };
   runEnvExports = pkgs.lib.concatMapStringsSep "\n" (key: "export ${key}=${toString runEnv.${key}}") (
     builtins.attrNames runEnv
   );
 
-  preInstall = isolation.preInstall or "";
-  cleanupScript = isolation.cleanup or "";
-  cleanupSlotScript = if cleanupScript != "" then cleanupScript else ":";
-
-  validateCommand = isolation.validateCommand or "";
-  effectiveValidateCommand =
-    if validateCommand != "" then validateCommand else "nix run .#validate-env";
+  setupScript =
+    let
+      script = isolation.setupScript or "";
+    in
+    script;
+  cleanupSlotScript =
+    let
+      script = isolation.cleanupScript or "";
+    in
+    if script != "" then script else ":";
 
   portNames = builtins.attrNames (project.ports or { });
   portPairs = map (name: "${name}:${slots.portVarName name}") portNames;
@@ -105,6 +115,12 @@ let
       done
     }
   '';
+  loadSlotInfoJsonFunction = ''
+    load_slot_info_json() {
+      local json_value="$1"
+      ${slotEnvRuntime.loadSlotEnvAndVarsFromJson { jsonVar = "json_value"; }}
+    }
+  '';
 
   validateEnvScript = ''
     set -euo pipefail
@@ -112,12 +128,10 @@ let
     ERRORS=0
     WARNINGS=0
 
-    if [ -z "''${SLOT_INFO:-}" ] || [ ! -x "$SLOT_INFO" ]; then
-      echo "ERROR: SLOT_INFO not available"
-      exit 1
-    fi
-
-    eval "$("$SLOT_INFO")"
+    ${slotEnvRuntime.requireSlotInfoJson {
+      outVar = "SLOT_INFO_JSON_OUT";
+      missingMsg = "ERROR: SLOT_INFO_JSON not available";
+    }}
 
     PORT_PAIRS=(${portPairsStr})
     DIR_VARS=(${dirVarsStr})
@@ -227,7 +241,7 @@ let
     set -euo pipefail
 
     ISOLATION_ENABLED=${if enabled then "true" else "false"}
-    PREINSTALL_ENABLED=${if preInstall != "" then "true" else "false"}
+    SETUP_ENABLED=${if setupScript != "" then "true" else "false"}
 
     if [ "$ISOLATION_ENABLED" != "true" ]; then
       echo "Isolation runner disabled. Set project.isolation.enable = true to run it."
@@ -239,8 +253,8 @@ let
       exit 1
     fi
 
-    if [ -z "''${SLOT_INFO:-}" ] || [ ! -x "$SLOT_INFO" ]; then
-      echo "SLOT_INFO is required for isolation testing." >&2
+    if [ -z "''${SLOT_INFO_JSON:-}" ] || [ ! -x "$SLOT_INFO_JSON" ]; then
+      echo "SLOT_INFO_JSON is required for isolation testing." >&2
       exit 1
     fi
 
@@ -255,6 +269,7 @@ let
     DIR_VARS=(${dirVarsStr})
     SERVICE_DIR_VARS=(${serviceDirVarsStr})
     ${forEachDirVarFunction}
+    ${loadSlotInfoJsonFunction}
 
     declare -A PIDS
     declare -A OUTPUTS
@@ -345,12 +360,16 @@ let
     PORT_PAIRS=(${portPairsStr})
     for slot in "''${SLOTS[@]}"; do
       for env in "''${ENVS[@]}"; do
-        INFO=$(${slotVar}=$slot ${envVar}=$env "$SLOT_INFO")
+        INFO_JSON=$(${slotVar}=$slot ${envVar}=$env "$SLOT_INFO_JSON")
         PORTS=""
         for pair in "''${PORT_PAIRS[@]}"; do
           name="''${pair%%:*}"
           var="''${pair#*:}"
-          value=$(echo "$INFO" | grep "^$var=" | cut -d= -f2 || true)
+          ${slotEnvRuntime.readPortFromJson {
+            targetVar = "value";
+            jsonVar = "INFO_JSON";
+            keyExpr = "$var";
+          }}
           PORTS="$PORTS $name:$value"
         done
         printf "  slot=%s env=%s%s\n" "$slot" "$env" "$PORTS"
@@ -358,9 +377,9 @@ let
     done
     echo ""
 
-    if [ "$PREINSTALL_ENABLED" = "true" ]; then
-      echo "==> Pre-install"
-    ${preInstall}
+    if [ "$SETUP_ENABLED" = "true" ]; then
+      echo "==> Setup"
+    ${setupScript}
       echo ""
     fi
 
@@ -378,11 +397,11 @@ let
     }
 
     run_cmd() {
-    ${effectiveRunCommand}
+    ${runScript}
     }
 
     validate_cmd() {
-    ${effectiveValidateCommand}
+    ${validateScript}
     }
 
     echo "==> Starting runs"
@@ -395,7 +414,8 @@ let
         (
           export ${slotVar}="$slot"
           export ${envVar}="$env"
-          eval "$("$SLOT_INFO")"
+          SLOT_INFO_JSON_OUT="$("$SLOT_INFO_JSON")"
+          load_slot_info_json "$SLOT_INFO_JSON_OUT"
           if [ -z "''${CI_ARTIFACTS_DIR:-}" ]; then
             CI_ARTIFACTS_DIR="$STATE_DIR/ci-artifacts"
             export CI_ARTIFACTS_DIR
@@ -537,23 +557,18 @@ let
       details,
       usage,
     }:
-    lib.appApi.mkNixfiedApp {
+    lib.appApi.mkTypedAppFromSpec {
       inherit
         name
         script
         useDeps
+        summary
+        details
+        usage
         ;
-      env = { };
-      api = lib.appApi.mkApi {
-        inherit
-          name
-          summary
-          details
-          usage
-          ;
-        category = "isolation";
-        allowUnknownArgs = false;
-      };
+      class = "typed";
+      category = "isolation";
+      runtimeEnv = { };
     };
 in
 {

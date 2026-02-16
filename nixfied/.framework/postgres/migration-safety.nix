@@ -50,7 +50,7 @@ let
 
     echo "ERROR: Migrations have not been tested against a database copy" >&2
     echo "   Hash: $HASH" >&2
-    echo "   Run 'run_hook POSTGRES_TEST_MIGRATIONS' first" >&2
+    echo "   Run 'run_hook SVC_POSTGRES_TEST_MIGRATIONS' first" >&2
     exit 1
   '';
 

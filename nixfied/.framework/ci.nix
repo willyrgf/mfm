@@ -4,15 +4,23 @@
   project,
   lib,
   ephemeral ? null,
+  knownApps ? [ ],
 }:
 
 let
   ci = project.ci or null;
   enabled = ci != null && (ci.enable or false);
+  ciSchema = import ./lib/ci-schema.nix {
+    inherit
+      pkgs
+      knownApps
+      ;
+  };
+  ciValidated = if enabled then ciSchema.validateCi ci else null;
   useEphemeral = ephemeral != null && (ci.useEphemeral or true);
 
-  steps = if enabled then (ci.steps or { }) else { };
-  modes = if enabled then (ci.modes or { }) else { };
+  steps = if enabled then (ciValidated.steps or { }) else { };
+  modes = if enabled then (ciValidated.modes or { }) else { };
   modeNames = pkgs.lib.sort (a: b: a < b) (builtins.attrNames modes);
   modeTokenName = mode: pkgs.lib.replaceStrings [ "-" "." ":" " " "/" ] [ "_" "_" "_" "_" "_" ] mode;
   modeArgDocs = map (mode: {
@@ -96,8 +104,8 @@ let
       env = step.env or { };
       when = step.when or "";
       cleanup = step.cleanup or "";
-      skip_if_missing = step.skipIfMissing or [ ];
-      depends_on = step.dependsOn or [ ];
+      skip_if_missing = step.skip_if_missing or [ ];
+      depends_on = step.depends_on or [ ];
       missing = false;
       run = pkgs.lib.optionalString (fixturePrelude != "") (fixturePrelude + "\n") + run;
     };
@@ -154,8 +162,8 @@ let
   );
   modePlansJson = builtins.toJSON modePlans;
 
-  setupScript = ci.setup or "";
-  teardownScript = ci.teardown or "";
+  setupScript = if enabled then (ciValidated.setupScript or "") else "";
+  teardownScript = if enabled then (ciValidated.teardownScript or "") else "";
 
   # Run registry script path
   runRegistryScript = toString lib.runRegistryStart;
@@ -535,7 +543,8 @@ let
                         fi
       '';
 
-  ciApi = lib.appApi.mkBatchRunnerCommandApi {
+  ciApi = lib.appApi.mkCommandApi {
+    class = "batch-runner";
     name = "ci";
     summary = "Run the CI pipeline";
     details = "Runs the CI pipeline defined in nixfied/project/ci.nix (modes + steps).";

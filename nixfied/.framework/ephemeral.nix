@@ -48,7 +48,9 @@ let
   id = import ./lib/id.nix {
     inherit pkgs project;
   };
-  envLoader = import ./lib/env-loader.nix { inherit pkgs; };
+  envLoader = import ./lib/env-loader.nix {
+    inherit pkgs project;
+  };
   processRegistry = import ./lib/process-registry.nix { inherit pkgs project; };
   shellContract = import ./lib/shell-contract.nix { inherit pkgs; };
 

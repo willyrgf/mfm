@@ -10,6 +10,7 @@ let
   id = import ./id.nix {
     inherit pkgs project;
   };
+  servicePolicy = import ./service-policy.nix { inherit pkgs; };
   projectIdUpper =
     let
       replaced = pkgs.lib.replaceStrings [ "-" "." ] [ "_" "_" ] projectId;
@@ -53,32 +54,14 @@ let
       esac
     }
 
+    ${servicePolicy.policyRuntimeFunctions}
+
     infer_owner_scope_from_reuse_policy() {
-      case "''${SERVICE_REUSE_POLICY:-}" in
-        same-slot|cross-run)
-          echo "persistent"
-          ;;
-        same-root)
-          echo "ephemeral"
-          ;;
-        *)
-          echo ""
-          ;;
-      esac
+      nixfied_policy_owner_scope_from_reuse "''${SERVICE_REUSE_POLICY:-}"
     }
 
     infer_discovery_scope_from_reuse_policy() {
-      case "''${SERVICE_REUSE_POLICY:-}" in
-        same-slot|cross-run)
-          echo "global"
-          ;;
-        same-root)
-          echo "local"
-          ;;
-        *)
-          echo ""
-          ;;
-      esac
+      nixfied_policy_discovery_scope_from_reuse "''${SERVICE_REUSE_POLICY:-}"
     }
 
     infer_owner_scope() {
@@ -127,61 +110,15 @@ let
 
     infer_reuse_policy() {
       local owner_scope="$1"
-      if [ -n "''${SERVICE_REUSE_POLICY:-}" ]; then
-        echo "$SERVICE_REUSE_POLICY"
-        return 0
-      fi
-
-      if [ "$owner_scope" = "ephemeral" ]; then
-        echo "same-root"
-      else
-        echo "same-slot"
-      fi
+      local discovery_scope="''${2:-}"
+      nixfied_policy_infer_reuse_policy "''${SERVICE_REUSE_POLICY:-}" "$owner_scope" "$discovery_scope" "same-slot"
     }
 
     validate_policy_matrix() {
       local reuse="$1"
       local owner="$2"
       local discovery="$3"
-
-      case "$reuse" in
-        never|same-root|same-slot|cross-run)
-          ;;
-        *)
-          echo "ERROR: SERVICE_REUSE_POLICY must be one of never|same-root|same-slot|cross-run (got '$reuse')" >&2
-          return 1
-          ;;
-      esac
-
-      case "$owner" in
-        ephemeral|persistent)
-          ;;
-        *)
-          echo "ERROR: SERVICE_OWNER_SCOPE must be ephemeral|persistent (got '$owner')" >&2
-          return 1
-          ;;
-      esac
-
-      case "$discovery" in
-        local|global)
-          ;;
-        *)
-          echo "ERROR: SERVICE_DISCOVERY_SCOPE must be local|global (got '$discovery')" >&2
-          return 1
-          ;;
-      esac
-
-      if [ "$reuse" = "cross-run" ] && { [ "$owner" != "persistent" ] || [ "$discovery" != "global" ]; }; then
-        echo "ERROR: cross-run reuse requires SERVICE_OWNER_SCOPE=persistent and SERVICE_DISCOVERY_SCOPE=global" >&2
-        return 1
-      fi
-
-      if [ "$reuse" = "same-root" ] && { [ "$owner" != "ephemeral" ] || [ "$discovery" != "local" ]; }; then
-        echo "ERROR: same-root reuse requires SERVICE_OWNER_SCOPE=ephemeral and SERVICE_DISCOVERY_SCOPE=local" >&2
-        return 1
-      fi
-
-      return 0
+      nixfied_policy_validate_matrix "$reuse" "$owner" "$discovery" 0 0
     }
 
     is_numeric_pid() {

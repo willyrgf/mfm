@@ -53,13 +53,13 @@ let
 
   backup = pkgs.writeShellScript "postgres-backup" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
 
     PORT_VAR="${portVar}"
     export PGPORT="''${!PORT_VAR}"
 
     if [ -z "''${BACKUP_BASE_DIR:-}" ]; then
-      echo "ERROR: BACKUP_BASE_DIR must be set (run eval \"\$(SLOT_INFO)\" first)" >&2
+      echo "ERROR: BACKUP_BASE_DIR must be set (run source <(\$SLOT_INFO) first)" >&2
       exit 1
     fi
 
@@ -106,7 +106,7 @@ let
   restore = pkgs.writeShellScript "postgres-restore" ''
     set -euo pipefail
 
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
 
     BACKUP_PATH="''${1:-}"
     if [ -z "$BACKUP_PATH" ]; then
@@ -169,7 +169,7 @@ let
 
   listBackups = pkgs.writeShellScript "postgres-list-backups" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
 
     BACKUP_DIR="$BACKUP_BASE_DIR/base"
 
@@ -225,7 +225,7 @@ let
 
   cleanupBackups = pkgs.writeShellScript "postgres-cleanup-backups" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
 
     BACKUP_DIR="$BACKUP_BASE_DIR/base"
     KEEP="''${1:-5}"

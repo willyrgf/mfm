@@ -136,7 +136,8 @@ let
     }) commandNames
   );
 
-  helpApi = lib.appApi.mkPassthroughCommandApi {
+  helpApi = lib.appApi.mkCommandApi {
+    class = "passthrough";
     name = "help";
     summary = "Show available commands";
     details = "Lists available commands, or shows detailed documentation for a single command.";

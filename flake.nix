@@ -136,6 +136,17 @@
             }
           else
             { };
+        knownAppNames =
+          pkgs.lib.unique (
+            (builtins.attrNames (project.commands or { }))
+            ++ (builtins.attrNames moduleApps)
+            ++ [
+              "help"
+              "ci"
+              "validate-env"
+              "test-isolation"
+            ]
+          );
         isolationApps = import ./nixfied/.framework/internal/isolation.nix {
           inherit
             pkgs
@@ -143,6 +154,7 @@
             lib
             slots
             ;
+          knownApps = knownAppNames;
         };
         moduleApps = import ./nixfied/.framework/internal/module-apps.nix {
           inherit
@@ -165,6 +177,7 @@
             lib
             ephemeral
             ;
+          knownApps = knownAppNames;
         };
         ciApp =
           if ciEntry == null then

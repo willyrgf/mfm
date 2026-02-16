@@ -8,6 +8,7 @@
 
 let
   cfg = project.modules.postgres or { };
+  slotEnvRuntime = import ../lib/slot-env-runtime.nix { inherit pkgs; };
   processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   observability = import ../lib/service-observability.nix {
     inherit
@@ -25,11 +26,24 @@ let
   testDatabase = cfg.testDatabase or "${database}_test";
   extensions = config.extensions or [ ];
   pgRuntimePrelude = defaultDb: ''
-    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
-    eval "$SLOT_INFO_OUT"
+    ${slotEnvRuntime.loadJsonFromCommand {
+      outVar = "SLOT_INFO_JSON_OUT";
+      command = toString slots.getSlotInfoJson;
+      exportVars = false;
+    }}
+    ${slotEnvRuntime.readJsonField {
+      targetVar = "RUN_DIR";
+      jsonVar = "SLOT_INFO_JSON_OUT";
+      jqExpr = ".directories.run";
+    }}
 
     PORT_VAR="${portVar}"
-    export PGPORT="''${PGPORT:-''${!PORT_VAR:-}}"
+    ${slotEnvRuntime.readPortFromJson {
+      targetVar = "_PGPORT_RESOLVED";
+      jsonVar = "SLOT_INFO_JSON_OUT";
+      keyExpr = "$PORT_VAR";
+    }}
+    export PGPORT="''${PGPORT:-$_PGPORT_RESOLVED}"
     export PGDATA="''${PGDATA:-${pgdataExpr}}"
     # Keep the unix socket path short. In CI (and on some systems with long TMPDIR paths),
     # putting sockets under $PGDATA can exceed the 107-byte sockaddr_un.sun_path limit and
@@ -128,7 +142,7 @@ let
 
     if [ ! -f "$PGDATA/postgresql.conf" ]; then
       echo "ERROR: PostgreSQL not initialized at $PGDATA (missing postgresql.conf)" >&2
-      echo "   Run postgres init first: nix run .#service::postgres::init" >&2
+      echo "   Run postgres init first: nix run .#svc::postgres::init" >&2
       exit 1
     fi
     ensure_config_port "$PGDATA/postgresql.conf"
@@ -147,7 +161,7 @@ let
           lsof -ti:$PGPORT 2>/dev/null | xargs kill -TERM 2>/dev/null || true
           sleep 2
         else
-          echo "   Use 'run_hook POSTGRES_CHECK_PORT' to investigate" >&2
+          echo "   Use 'run_hook SVC_POSTGRES_CHECK_PORT' to investigate" >&2
           exit 1
         fi
       fi

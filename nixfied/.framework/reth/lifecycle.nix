@@ -8,6 +8,7 @@
 
 let
   lib = pkgs.lib;
+  slotEnvRuntime = import ../lib/slot-env-runtime.nix { inherit pkgs; };
   processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   observability = import ../lib/service-observability.nix {
     inherit
@@ -25,16 +26,31 @@ let
   extraArgs = lib.escapeShellArgs (config.extraArgs or [ ]);
 
   runtimePrelude = ''
-    SLOT_INFO_OUT="$(${slots.getSlotInfo})" || exit 1
-    eval "$SLOT_INFO_OUT"
+    ${slotEnvRuntime.loadJsonFromCommand {
+      outVar = "SLOT_INFO_JSON_OUT";
+      command = toString slots.getSlotInfoJson;
+      exportVars = false;
+    }}
 
     HTTP_PORT_VAR="${httpPortVar}"
     WS_PORT_VAR="${wsPortVar}"
     AUTH_PORT_VAR="${authPortVar}"
 
-    RETH_HTTP_PORT="''${!HTTP_PORT_VAR:-}"
-    RETH_WS_PORT="''${!WS_PORT_VAR:-}"
-    RETH_AUTH_PORT="''${!AUTH_PORT_VAR:-}"
+    ${slotEnvRuntime.readPortFromJson {
+      targetVar = "RETH_HTTP_PORT";
+      jsonVar = "SLOT_INFO_JSON_OUT";
+      keyExpr = "$HTTP_PORT_VAR";
+    }}
+    ${slotEnvRuntime.readPortFromJson {
+      targetVar = "RETH_WS_PORT";
+      jsonVar = "SLOT_INFO_JSON_OUT";
+      keyExpr = "$WS_PORT_VAR";
+    }}
+    ${slotEnvRuntime.readPortFromJson {
+      targetVar = "RETH_AUTH_PORT";
+      jsonVar = "SLOT_INFO_JSON_OUT";
+      keyExpr = "$AUTH_PORT_VAR";
+    }}
     RETH_DIR="${rethDirExpr}"
     RETH_PID_FILE="$RETH_DIR/run/reth.pid"
     RETH_LOG_FILE="$RETH_DIR/logs/reth.log"

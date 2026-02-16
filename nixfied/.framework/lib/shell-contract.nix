@@ -10,6 +10,7 @@ let
     isNonEmptyString
     isNonEmptyList
     isListOfNonEmptyStrings
+    isEnvVarName
     ;
 
   supportedTypes = [
@@ -68,7 +69,6 @@ let
   isSupportedOutputMode = value: builtins.elem value supportedOutputModes;
   isSupportedCommandClass = value: builtins.elem value supportedCommandClasses;
   isPositiveExitCode = value: builtins.isInt value && value > 0 && value < 256;
-  isEnvVarName = value: builtins.isString value && (builtins.match "^[A-Z_][A-Z0-9_]*$" value) != null;
 
   duplicatesOf =
     values:
