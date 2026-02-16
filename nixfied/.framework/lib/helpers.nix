@@ -396,12 +396,12 @@ let
 
       local pid=""
       if [ -n "$logfile" ]; then
-        if ! start_service_into pid "$service" --log "$logfile" -- "$start_cmd"; then
+        if ! NIXFIED_FIXTURE_MANAGED_CLEANUP=1 start_service_into pid "$service" --log "$logfile" -- "$start_cmd"; then
           echo "ERROR: fixture service start failed service=$service hook=$start_hook" >&2
           return 1
         fi
       else
-        if ! start_service_into pid "$service" -- "$start_cmd"; then
+        if ! NIXFIED_FIXTURE_MANAGED_CLEANUP=1 start_service_into pid "$service" -- "$start_cmd"; then
           echo "ERROR: fixture service start failed service=$service hook=$start_hook" >&2
           return 1
         fi
@@ -689,7 +689,9 @@ let
       # Avoid registering cleanup in command substitution subshells (they exit immediately).
       # App wrappers that execute command bodies in a dedicated subshell set
       # NIXFIED_CLEANUP_OWNER_BASHPID to the app-body shell BASHPID.
-      if { [ -n "''${NIXFIED_CLEANUP_OWNER_BASHPID:-}" ] && [ -n "''${BASHPID:-}" ] && [ "''${NIXFIED_CLEANUP_OWNER_BASHPID}" = "''${BASHPID}" ]; } || { [ -n "''${BASHPID:-}" ] && [ "''${BASHPID}" = "$$" ]; }; then
+      # fixture_start_service controls cleanup via keep_running policy and must
+      # suppress start_service auto-cleanup to avoid contradictory registration.
+      if [ "''${NIXFIED_FIXTURE_MANAGED_CLEANUP:-0}" != "1" ] && ( { [ -n "''${NIXFIED_CLEANUP_OWNER_BASHPID:-}" ] && [ -n "''${BASHPID:-}" ] && [ "''${NIXFIED_CLEANUP_OWNER_BASHPID}" = "''${BASHPID}" ]; } || { [ -n "''${BASHPID:-}" ] && [ "''${BASHPID}" = "$$" ]; } ); then
         with_cleanup stop_service "$pid" "$name"
       fi
 

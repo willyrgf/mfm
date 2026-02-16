@@ -1352,6 +1352,42 @@ let
         [ "$PORT_DOWN" -eq 1 ] || fail "postgres should stop after explicit POSTGRES_STOP port=$PGPORT"
         echo "OK: fixture_start_service keep_running preserved service"
 
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'echo "$$" > "$PWD/mock-wrapper.pid"' 'while true; do' '  sleep 1' 'done' > "$PWD/mock-wrapper-start.sh"
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'pid=$(cat "$PWD/mock-wrapper.pid" 2>/dev/null || true)' '[ -n "$pid" ]' 'kill -0 "$pid" 2>/dev/null' > "$PWD/mock-wrapper-ready.sh"
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'pid=$(cat "$PWD/mock-wrapper.pid" 2>/dev/null || true)' '[ -n "$pid" ]' 'kill -0 "$pid" 2>/dev/null' > "$PWD/mock-wrapper-status.sh"
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'pid=$(cat "$PWD/mock-wrapper.pid" 2>/dev/null || true)' 'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; fi' 'exit 0' > "$PWD/mock-wrapper-stop.sh"
+        chmod +x "$PWD/mock-wrapper-start.sh" "$PWD/mock-wrapper-ready.sh" "$PWD/mock-wrapper-status.sh" "$PWD/mock-wrapper-stop.sh"
+
+        export WRAPPERSVC_START="$PWD/mock-wrapper-start.sh"
+        export WRAPPERSVC_READY="$PWD/mock-wrapper-ready.sh"
+        export WRAPPERSVC_STATUS="$PWD/mock-wrapper-status.sh"
+        export WRAPPERSVC_STOP="$PWD/mock-wrapper-stop.sh"
+
+        rm -f "$PWD/mock-wrapper.pid"
+        fixture_start_service wrappersvc default 20 0.2 "" 1
+        WRAPPER_PID="$(cat "$PWD/mock-wrapper.pid" 2>/dev/null || true)"
+        [ -n "$WRAPPER_PID" ] || fail "wrappersvc should record pid"
+        kill -0 "$WRAPPER_PID" 2>/dev/null || fail "wrappersvc should be running pid=$WRAPPER_PID"
+
+        _run_cleanups
+
+        if ! kill -0 "$WRAPPER_PID" 2>/dev/null; then
+          fail "wrappersvc should still be running with keep_running=1 pid=$WRAPPER_PID"
+        fi
+
+        run_hook WRAPPERSVC_STOP
+        WRAPPER_DOWN=0
+        for i in $(seq 1 30); do
+          if kill -0 "$WRAPPER_PID" 2>/dev/null; then
+            sleep 0.2
+          else
+            WRAPPER_DOWN=1
+            break
+          fi
+        done
+        [ "$WRAPPER_DOWN" -eq 1 ] || fail "wrappersvc should stop after explicit WRAPPERSVC_STOP pid=$WRAPPER_PID"
+        echo "OK: fixture_start_service keep_running preserved wrapper process"
+
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'echo "$$" > "$PWD/mock-timeout.pid"' 'while true; do' '  if [ -n "$MOCK_TIMEOUT_LOGFILE" ]; then rm -f "$MOCK_TIMEOUT_LOGFILE"; fi' '  sleep 0.1' 'done' > "$PWD/mock-timeout-start.sh"
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 1' > "$PWD/mock-timeout-health.sh"
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 1' > "$PWD/mock-timeout-ready.sh"
@@ -1402,6 +1438,7 @@ let
     assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service retried READY hook"
     assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service preferred READY_TEST hook"
     assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service keep_running preserved service"
+    assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service keep_running preserved wrapper process"
     assert_contains "$FIX_START_READY_LOG" "WARN: fixture log file missing path="
     assert_contains "$FIX_START_READY_LOG" "OK: fixture_start_service timeout cleanup removed process"
     assert_not_contains "$FIX_START_READY_LOG" "tail: cannot open"
