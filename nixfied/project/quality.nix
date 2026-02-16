@@ -19,14 +19,13 @@ in
   commands = {
     check = {
       description = "Run quality checks";
-      api = lib.appApi.mkApi {
+      api = lib.appApi.mkTypedCommandApi {
         name = "check";
         summary = "Run fmt + clippy (nightly)";
         details = "Runs rustfmt and clippy using the pinned nightly toolchain (via cargo-nightly).";
         usage = [ "nix run .#check" ];
         examples = [ "nix run .#check" ];
         category = "quality";
-        allowUnknownArgs = false;
         failureCodes = failureCodesCargo;
       };
       env = { };
@@ -40,14 +39,13 @@ in
 
     discovery-refresh = {
       description = "Regenerate discovery artifacts";
-      api = lib.appApi.mkApi {
+      api = lib.appApi.mkTypedCommandApi {
         name = "discovery-refresh";
         summary = "Refresh docs/repo-index.json and docs/repo-map.md";
         details = "Runs the quality check command with --refresh-discovery so discovery artifacts are regenerated.";
         usage = [ "nix run .#discovery-refresh" ];
         examples = [ "nix run .#discovery-refresh" ];
         category = "quality";
-        allowUnknownArgs = false;
         failureCodes = failureCodesScript;
       };
       env = { };

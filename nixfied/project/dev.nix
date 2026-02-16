@@ -4,8 +4,8 @@ let
   # v2 shell-app contract inventory (project-level):
   # - dev: typed, outputs=text, wraps fixture orchestration + cargo run, failure map owner=project/dev.nix
   # - mfm_cli: passthrough, outputs=text, wraps cargo run, failure map owner=project/dev.nix
-  # - mfm::portfolio::snapshot: typed, outputs=json, wraps fixtures + cargo run, failure map owner=project/dev.nix
-  # - mfm_rest_api: passthrough, outputs=text, wraps cargo run, failure map owner=project/dev.nix
+  # - mfm::portfolio::snapshot: json, outputs=json, wraps fixtures + cargo run, failure map owner=project/dev.nix
+  # - mfm_rest_api: typed, outputs=text, wraps cargo run, failure map owner=project/dev.nix
   failureCodesScript = {
     generic = 1;
     usage = 2;
@@ -19,6 +19,7 @@ let
   snapshotAppContract = {
     version = 2;
     name = "mfm::portfolio::snapshot";
+    commandClass = "json";
     allowUnknownArgs = false;
     idempotent = false;
     failureCodes = failureCodesCargo;
@@ -99,7 +100,7 @@ in
   commands = {
     dev = {
       description = "Start the dev workflow";
-      api = lib.appApi.mkApi {
+      api = lib.appApi.mkTypedCommandApi {
         name = "dev";
         summary = "Start the dev workflow (Postgres + MinIO + Reth + REST API)";
         details = ''
@@ -126,7 +127,6 @@ in
           "MFM_ENV=dev NIX_ENV=2 nix run .#dev"
         ];
         category = "core";
-        allowUnknownArgs = false;
         failureCodes = failureCodesCargo;
         idempotent = false;
       };
@@ -169,7 +169,7 @@ in
 
     mfm_cli = {
       description = "Run mfm_cli (Cargo run)";
-      api = lib.appApi.mkApi {
+      api = lib.appApi.mkPassthroughCommandApi {
         name = "mfm_cli";
         summary = "Run mfm_cli";
         details = "Runs the CLI binary via `cargo run` inside the pinned Nix environment. Passthrough wrapper: arguments after `--` are forwarded unchanged.";
@@ -178,7 +178,6 @@ in
           "nix run .#mfm_cli -- <args>"
         ];
         category = "core";
-        allowUnknownArgs = true;
         failureCodes = failureCodesCargo;
       };
       env = { };
@@ -190,7 +189,7 @@ in
 
     "mfm::portfolio::snapshot" = {
       description = "Snapshot a wallet via Helios-backed mainnet RPC (starts Postgres + Helios)";
-      api = lib.appApi.mkApi {
+      api = lib.appApi.mkJsonCommandApi {
         name = "mfm::portfolio::snapshot";
         summary = "Snapshot an Ethereum wallet portfolio (Helios-backed)";
         details = ''
@@ -260,8 +259,6 @@ in
             description = "Optional process-first policy override (local|global).";
           }
         ];
-        allowUnknownArgs = false;
-        outputsMode = "json";
         failureCodes = failureCodesCargo;
         idempotent = false;
         appContract = snapshotAppContract;
@@ -533,16 +530,12 @@ in
 
     mfm_rest_api = {
       description = "Run mfm_rest_api (Cargo run)";
-      api = lib.appApi.mkApi {
+      api = lib.appApi.mkTypedCommandApi {
         name = "mfm_rest_api";
         summary = "Run mfm_rest_api";
-        details = "Runs the REST API server via `cargo run` inside the pinned Nix environment. Passthrough wrapper: arguments after `--` are forwarded unchanged.";
-        usage = [
-          "nix run .#mfm_rest_api"
-          "nix run .#mfm_rest_api -- <args>"
-        ];
+        details = "Runs the REST API server via `cargo run` inside the pinned Nix environment.";
+        usage = [ "nix run .#mfm_rest_api" ];
         category = "core";
-        allowUnknownArgs = true;
         failureCodes = failureCodesCargo;
       };
       env = { };

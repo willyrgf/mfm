@@ -4,6 +4,13 @@
 
 The `mfm_cli` is the command-line interface for the MFM toolkit. It provides a user-friendly and scriptable way to interact with MFM modules, including keystore management and an experimental `run` subcommand for starting/resuming/inspecting runs. The CLI is built using the `clap` crate for robust argument parsing and command structure.
 
+For Nixfied automation, prefer strict app wrappers when possible:
+- `nix run .#mfm::keystore::list`
+- `nix run .#mfm::keystore::tx-sign -- --to ...`
+- `nix run .#mfm::run::status -- <RUN_ID>`
+
+The `nix run .#mfm_cli -- ...` entrypoint remains available as a compatibility passthrough wrapper.
+
 ## Design Philosophy
 
 - **User-Centric**: Commands are designed to be intuitive and easy to remember.

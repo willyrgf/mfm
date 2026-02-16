@@ -18,14 +18,13 @@ in
   commands = {
     test = {
       description = "Run tests";
-      api = lib.appApi.mkApi {
+      api = lib.appApi.mkTypedCommandApi {
         name = "test";
         summary = "Run tests (nextest)";
         details = "Runs the full workspace test suite using cargo-nextest.";
         usage = [ "nix run .#test" ];
         examples = [ "nix run .#test" ];
         category = "test";
-        allowUnknownArgs = false;
         failureCodes = failureCodesCargo;
       };
       env = {

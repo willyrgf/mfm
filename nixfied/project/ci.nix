@@ -2,7 +2,7 @@
 
 let
   # v2 shell-app contract inventory (project-level):
-  # - ci: typed, outputs=text, wraps CI shell runner + cargo tools, failure map owner=project/ci.nix
+  # - ci: batch-runner, outputs=text, wraps CI shell runner + cargo tools, failure map owner=project/ci.nix
   failureCodesScript = {
     generic = 1;
     usage = 2;
@@ -22,6 +22,7 @@ let
   ciAppContract = {
     version = 2;
     name = "ci";
+    commandClass = "batch-runner";
     allowUnknownArgs = false;
     idempotent = false;
     failureCodes = failureCodesCargo;
@@ -541,7 +542,7 @@ $pid"
         '';
       };
       shell-app-contracts = {
-        description = "Shell app contract checks (strict typed + passthrough)";
+        description = "Shell app contract checks (typed/json/batch-runner/passthrough)";
         run = ''
           LOGFILE=$(artifact_path "shell-app-contracts.log")
           set +e
@@ -556,16 +557,18 @@ $pid"
             rest_contract=$(nix eval --json ".#apps.$SYSTEM.mfm_rest_api.meta.nixfied.api.appContract")
             snapshot_contract=$(nix eval --json ".#apps.$SYSTEM.\"mfm::portfolio::snapshot\".meta.nixfied.api.appContract")
             svc_logs_contract=$(nix eval --json ".#apps.$SYSTEM.\"svc-logs\".meta.nixfied.api.appContract")
+            run_start_contract=$(nix eval --json ".#apps.$SYSTEM.\"mfm::run::start\".meta.nixfied.api.appContract")
 
-            echo "$ci_contract" | jq -e '.allowUnknownArgs == false' >/dev/null
+            echo "$ci_contract" | jq -e '.commandClass == "batch-runner" and .allowUnknownArgs == false' >/dev/null
             echo "$ci_contract" | jq -e '.args[] | select(.name == "mode") | .kind == "option" and .type == "enum" and (.values | index("basic") != null)' >/dev/null
             echo "$ci_contract" | jq -e '.args[] | select(.name == "mode") | (.values | sort) == ["audit","basic","mainnet","parity"]' >/dev/null
             echo "$ci_contract" | jq -e '.args[] | select(.name == "basic") | .kind == "flag" and .type == "bool"' >/dev/null
-            echo "$check_contract" | jq -e '.allowUnknownArgs == false' >/dev/null
-            echo "$snapshot_contract" | jq -e '.allowUnknownArgs == false and .outputs.mode == "json"' >/dev/null
-            echo "$cli_contract" | jq -e '.allowUnknownArgs == true' >/dev/null
-            echo "$rest_contract" | jq -e '.allowUnknownArgs == true' >/dev/null
-            echo "$svc_logs_contract" | jq -e '.allowUnknownArgs == true' >/dev/null
+            echo "$check_contract" | jq -e '.commandClass == "typed" and .allowUnknownArgs == false and .outputs.mode == "text"' >/dev/null
+            echo "$snapshot_contract" | jq -e '.commandClass == "json" and .allowUnknownArgs == false and .outputs.mode == "json"' >/dev/null
+            echo "$run_start_contract" | jq -e '.commandClass == "json" and .allowUnknownArgs == false and .outputs.mode == "json"' >/dev/null
+            echo "$cli_contract" | jq -e '.commandClass == "passthrough" and .allowUnknownArgs == true' >/dev/null
+            echo "$rest_contract" | jq -e '.commandClass == "typed" and .allowUnknownArgs == false and .outputs.mode == "text"' >/dev/null
+            echo "$svc_logs_contract" | jq -e '.commandClass == "typed" and .allowUnknownArgs == false and .outputs.mode == "text"' >/dev/null
 
             CHECK_UNKNOWN_LOG=$(mktemp)
             set +e
@@ -580,6 +583,22 @@ $pid"
             if ! grep -Eq "unknown option token=--contract-probe-unknown|Unknown option: --contract-probe-unknown" "$CHECK_UNKNOWN_LOG"; then
               echo "ERROR: expected unknown option diagnostics for typed command" >&2
               cat "$CHECK_UNKNOWN_LOG" >&2 || true
+              exit 1
+            fi
+
+            JSON_UNKNOWN_LOG=$(mktemp)
+            set +e
+            nix run .#mfm::run::start -- --contract-probe-unknown >"$JSON_UNKNOWN_LOG" 2>&1
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              echo "ERROR: expected json-class command to reject unknown args" >&2
+              cat "$JSON_UNKNOWN_LOG" >&2 || true
+              exit 1
+            fi
+            if ! grep -Eq "unknown option token=--contract-probe-unknown|Unknown option: --contract-probe-unknown" "$JSON_UNKNOWN_LOG"; then
+              echo "ERROR: expected unknown option diagnostics for json-class command" >&2
+              cat "$JSON_UNKNOWN_LOG" >&2 || true
               exit 1
             fi
 

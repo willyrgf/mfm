@@ -18,14 +18,13 @@ in
   commands = {
     build = {
       description = "Build artifacts";
-      api = lib.appApi.mkApi {
+      api = lib.appApi.mkTypedCommandApi {
         name = "build";
         summary = "Build release artifacts";
         details = "Builds the workspace in release mode with all features enabled.";
         usage = [ "nix run .#build" ];
         examples = [ "nix run .#build" ];
         category = "build";
-        allowUnknownArgs = false;
         failureCodes = failureCodesCargo;
       };
       env = {
