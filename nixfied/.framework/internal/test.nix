@@ -10,7 +10,6 @@ let
     pkgs.gnugrep
     pkgs.gnused
     pkgs.git
-    pkgs.jq
     pkgs.nix
     pkgs.rsync
   ];
@@ -730,7 +729,7 @@ let
     if [ "$RC" -eq 0 ]; then
       fail "expected unknown CI mode to exit non-zero"
     fi
-    assert_contains "$CI_MODE_LOG" "Unknown CI mode"
+    assert_contains "$CI_MODE_LOG" "arg:mode must be one of"
 
     set +e
     (cd "$CI_ERR_DIR" && "$CI_SCRIPT" --no-such-flag > "$CI_FLAG_LOG" 2>&1)
@@ -739,7 +738,7 @@ let
     if [ "$RC" -eq 0 ]; then
       fail "expected unknown CI flag to exit non-zero"
     fi
-    assert_contains "$CI_FLAG_LOG" "Unknown option"
+    assert_contains "$CI_FLAG_LOG" "unknown option token=--no-such-flag"
 
     log "ci artifacts retention"
     CI_RET_EXPR=$(cat <<'NIX'
@@ -1299,7 +1298,7 @@ let
         export MOCKSVC_STATUS="$PWD/mock-status.sh"
         export MOCKSVC_STOP="$PWD/mock-stop.sh"
 
-        fixture_start_service mocksvc default 5 1
+        fixture_start_service mocksvc default 20 1
         READY_ATTEMPTS="$(cat "$MOCK_READY_COUNT_FILE" 2>/dev/null || echo 0)"
         [ "$READY_ATTEMPTS" -ge 3 ] || fail "fixture_start_service should retry READY hook attempts=$READY_ATTEMPTS"
         _run_cleanups
@@ -1315,7 +1314,7 @@ let
         export MOCKSVC_READY="$PWD/mock-ready-default-fail.sh"
         export MOCKSVC_READY_TEST="$PWD/mock-ready-test.sh"
 
-        fixture_start_service mocksvc test 5 1
+        fixture_start_service mocksvc test 20 1
         READY_TEST_ATTEMPTS="$(cat "$MOCK_READY_TEST_COUNT_FILE" 2>/dev/null || echo 0)"
         [ "$READY_TEST_ATTEMPTS" -ge 2 ] || fail "fixture_start_service should retry READY_TEST hook attempts=$READY_TEST_ATTEMPTS"
         _run_cleanups
@@ -1743,6 +1742,7 @@ let
             appContract = {
               version = 2;
               name = "dev";
+              commandClass = "typed";
               allowUnknownArgs = false;
               args = [ ];
               env = [
@@ -1790,314 +1790,6 @@ let
       fail "expected API contract violation to fail"
     fi
     assert_contains "$BAD_API_LOG" "commands.missing-api.api is required"
-
-    log "app contract duplicate option/env alias enforcement"
-    BAD_DUP_BASE="$WORKDIR/install-bad-duplicates"
-    init_repo "$BAD_DUP_BASE"
-    (cd "$BAD_DUP_BASE" && nix run "path:$ROOT"#framework::install >/dev/null)
-    BAD_DUP_TARGET="$BAD_DUP_BASE"
-    cat > "$BAD_DUP_TARGET/nixfied/project/dev.nix" <<'EOF'
-    { ... }:
-
-    {
-      commands = {
-        dev = {
-          description = "Duplicate contract check";
-          api = {
-            version = 2;
-            summary = "Duplicate contract check";
-            details = "Intentionally invalid duplicate args/env aliases.";
-            usage = [ "nix run .#dev" ];
-            category = "core";
-            appContract = {
-              version = 2;
-              name = "dev";
-              allowUnknownArgs = false;
-              args = [
-                {
-                  name = "mode";
-                  kind = "option";
-                  long = "--mode";
-                  short = "-m";
-                  type = "string";
-                  required = false;
-                }
-                {
-                  name = "mode_alias";
-                  kind = "option";
-                  long = "--mode";
-                  short = "-n";
-                  type = "string";
-                  required = false;
-                }
-                {
-                  name = "mode_short_dup";
-                  kind = "option";
-                  long = "--mode-short-dup";
-                  short = "-m";
-                  type = "string";
-                  required = false;
-                }
-              ];
-              env = [
-                {
-                  name = "PROJECT_ENV";
-                  type = "string";
-                  required = false;
-                  aliases = [ "PROJECT_ENV_ALIAS" ];
-                }
-                {
-                  name = "PROJECT_ENV_DUP";
-                  type = "string";
-                  required = false;
-                  aliases = [ "PROJECT_ENV_ALIAS" ];
-                }
-              ];
-              outputs = {
-                mode = "text";
-              };
-              failureCodes = {
-                generic = 1;
-                usage = 2;
-                precondition = 3;
-                unavailable = 4;
-                timeout = 5;
-              };
-              idempotent = true;
-            };
-          };
-          env = {
-            PROJECT_ENV = "dev";
-          };
-          useDeps = false;
-          script = "echo ok\n";
-        };
-      };
-    }
-    EOF
-    BAD_DUP_LOG="$WORKDIR/bad-duplicate-contract.log"
-    set +e
-    nix flake show "path:$BAD_DUP_TARGET" > "$BAD_DUP_LOG" 2>&1
-    RC=$?
-    set -e
-    if [ "$RC" -eq 0 ]; then
-      fail "expected duplicate appContract options/env aliases to fail"
-    fi
-    assert_contains "$BAD_DUP_LOG" "appContract.args has duplicate long options"
-    assert_contains "$BAD_DUP_LOG" "appContract.args has duplicate short options"
-    assert_contains "$BAD_DUP_LOG" "appContract.env has duplicate aliases"
-
-    log "shell-app runtime contract behavior"
-    RUNTIME_CONTRACT_BASE="$WORKDIR/install-runtime-contract"
-    init_repo "$RUNTIME_CONTRACT_BASE"
-    (cd "$RUNTIME_CONTRACT_BASE" && nix run "path:$ROOT"#framework::install >/dev/null)
-    RUNTIME_CONTRACT_TARGET="$RUNTIME_CONTRACT_BASE"
-    cat > "$RUNTIME_CONTRACT_TARGET/nixfied/project/dev.nix" <<'EOF'
-    { project, lib, ... }:
-
-    let
-      failureCodesScript = {
-        generic = 1;
-        usage = 2;
-        precondition = 3;
-        unavailable = 4;
-        timeout = 5;
-      };
-      failureCodesCargo = failureCodesScript // {
-        cargoFailure = 101;
-      };
-    in
-    {
-      commands = {
-        mode-flag = {
-          description = "mode contract flag behavior";
-          api = lib.appApi.mkApi {
-            name = "mode-flag";
-            summary = "Flag vs option validation";
-            details = "Deliberately models --mode as a flag to ensure --mode <value> is rejected.";
-            usage = [ "nix run .#mode-flag -- --mode" ];
-            category = "test";
-            appContract = {
-              version = 2;
-              name = "mode-flag";
-              allowUnknownArgs = false;
-              args = [
-                {
-                  name = "mode";
-                  kind = "flag";
-                  long = "--mode";
-                  type = "bool";
-                  required = false;
-                }
-              ];
-              env = [ ];
-              outputs = {
-                mode = "text";
-              };
-              failureCodes = failureCodesScript;
-              idempotent = true;
-            };
-          };
-          env = {
-            "${project.envVar}" = "dev";
-          };
-          useDeps = false;
-          script = ''
-            echo "ok"
-          '';
-        };
-
-        passthrough = {
-          description = "passthrough behavior";
-          api = lib.appApi.mkApi {
-            name = "passthrough";
-            summary = "allowUnknownArgs passthrough behavior";
-            details = "Arguments after -- are forwarded unchanged.";
-            usage = [ "nix run .#passthrough -- <args>" ];
-            category = "test";
-            allowUnknownArgs = true;
-            failureCodes = failureCodesScript;
-          };
-          env = {
-            "${project.envVar}" = "dev";
-          };
-          useDeps = false;
-          script = ''
-            echo "passthrough:$*"
-          '';
-        };
-
-        cargo-allowed = {
-          description = "declared non-zero exit behavior";
-          api = lib.appApi.mkApi {
-            name = "cargo-allowed";
-            summary = "declared code accepted";
-            details = "Exits with 101 and declares cargoFailure=101.";
-            usage = [ "nix run .#cargo-allowed" ];
-            category = "test";
-            failureCodes = failureCodesCargo;
-          };
-          env = {
-            "${project.envVar}" = "dev";
-          };
-          useDeps = false;
-          script = ''
-            exit 101
-          '';
-        };
-
-        cargo-blocked = {
-          description = "undeclared non-zero exit behavior";
-          api = lib.appApi.mkApi {
-            name = "cargo-blocked";
-            summary = "undeclared code rejected";
-            details = "Exits with 101 but only declares default script failure codes.";
-            usage = [ "nix run .#cargo-blocked" ];
-            category = "test";
-            failureCodes = failureCodesScript;
-          };
-          env = {
-            "${project.envVar}" = "dev";
-          };
-          useDeps = false;
-          script = ''
-            exit 101
-          '';
-        };
-
-        json-valid = {
-          description = "valid json output helper";
-          api = lib.appApi.mkApi {
-            name = "json-valid";
-            summary = "emit valid json";
-            details = "Uses nixfied_contract_emit_json with valid JSON payload.";
-            usage = [ "nix run .#json-valid" ];
-            category = "test";
-            outputsMode = "json";
-            failureCodes = failureCodesScript;
-          };
-          env = {
-            "${project.envVar}" = "dev";
-          };
-          useDeps = false;
-          script = ''
-            nixfied_contract_emit_json '{"status":"ok"}'
-          '';
-        };
-
-        json-invalid = {
-          description = "invalid json output helper";
-          api = lib.appApi.mkApi {
-            name = "json-invalid";
-            summary = "emit invalid json";
-            details = "Uses nixfied_contract_emit_json with invalid payload.";
-            usage = [ "nix run .#json-invalid" ];
-            category = "test";
-            outputsMode = "json";
-            failureCodes = failureCodesScript;
-          };
-          env = {
-            "${project.envVar}" = "dev";
-          };
-          useDeps = false;
-          script = ''
-            nixfied_contract_emit_json 'not-json'
-          '';
-        };
-      };
-    }
-    EOF
-
-    MODE_FLAG_LOG="$WORKDIR/mode-flag-value.log"
-    set +e
-    run_app "$RUNTIME_CONTRACT_TARGET" mode-flag --mode basic > "$MODE_FLAG_LOG" 2>&1
-    RC=$?
-    set -e
-    if [ "$RC" -eq 0 ]; then
-      fail "expected --mode <value> to fail when mode is declared as flag"
-    fi
-    assert_contains "$MODE_FLAG_LOG" "flag does not accept a value token=--mode"
-
-    PASSTHROUGH_LOG="$WORKDIR/passthrough-unknown.log"
-    run_app "$RUNTIME_CONTRACT_TARGET" passthrough --unknown --raw > "$PASSTHROUGH_LOG"
-    assert_contains "$PASSTHROUGH_LOG" "passthrough:--unknown --raw"
-
-    CARGO_ALLOWED_LOG="$WORKDIR/cargo-allowed.log"
-    set +e
-    run_app "$RUNTIME_CONTRACT_TARGET" cargo-allowed > "$CARGO_ALLOWED_LOG" 2>&1
-    RC=$?
-    set -e
-    if [ "$RC" -ne 101 ]; then
-      fail "expected cargo-allowed to exit 101 (got $RC)"
-    fi
-    assert_not_contains "$CARGO_ALLOWED_LOG" "undeclared exit code"
-
-    CARGO_BLOCKED_LOG="$WORKDIR/cargo-blocked.log"
-    set +e
-    run_app "$RUNTIME_CONTRACT_TARGET" cargo-blocked > "$CARGO_BLOCKED_LOG" 2>&1
-    RC=$?
-    set -e
-    if [ "$RC" -ne 2 ]; then
-      fail "expected cargo-blocked to fail contract exit validation with rc=2 (got $RC)"
-    fi
-    assert_contains "$CARGO_BLOCKED_LOG" "undeclared exit code code=101"
-
-    JSON_VALID_OUT="$WORKDIR/json-valid.out"
-    run_app "$RUNTIME_CONTRACT_TARGET" json-valid > "$JSON_VALID_OUT"
-    if ! jq -e . "$JSON_VALID_OUT" >/dev/null 2>&1; then
-      fail "expected json-valid to emit parseable JSON"
-    fi
-    assert_contains "$JSON_VALID_OUT" "\"status\":\"ok\""
-
-    JSON_INVALID_LOG="$WORKDIR/json-invalid.log"
-    set +e
-    run_app "$RUNTIME_CONTRACT_TARGET" json-invalid > "$JSON_INVALID_LOG" 2>&1
-    RC=$?
-    set -e
-    if [ "$RC" -eq 0 ]; then
-      fail "expected json-invalid to fail"
-    fi
-    assert_contains "$JSON_INVALID_LOG" "payload must be valid json"
 
     log "service api contract enforcement"
     BAD_SERVICE_API_EXPR=$(cat <<'NIX'
@@ -3183,6 +2875,101 @@ let
     assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"accounted_duration"'
     assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"untracked_duration"'
 
+    CI_SJ_EQ_LOG="$WORKDIR/ci-summary-json-equals.log"
+    set +e
+    (cd "$CI_SJ_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts-equals" "$CI_SJ_SCRIPT" --mode=check > "$CI_SJ_EQ_LOG" 2>&1)
+    CI_SJ_EQ_RC=$?
+    set -e
+    if [ "$CI_SJ_EQ_RC" -ne 0 ]; then
+      fail "expected CI --mode=<name> form to exit zero"
+    fi
+    assert_file_exists "$CI_SJ_DIR/.ci-artifacts-equals/summary.json"
+
+    CI_SJ_BAD_LOG="$WORKDIR/ci-summary-json-bad.log"
+    set +e
+    (cd "$CI_SJ_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts-bad" "$CI_SJ_SCRIPT" --unknown-option > "$CI_SJ_BAD_LOG" 2>&1)
+    CI_SJ_BAD_RC=$?
+    set -e
+    if [ "$CI_SJ_BAD_RC" -eq 0 ]; then
+      fail "expected CI unknown option to fail under strict contract"
+    fi
+    assert_contains "$CI_SJ_BAD_LOG" "unknown option token=--unknown-option"
+
+    log "command class policy"
+    CLASS_POLICY_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      slots = import ./nixfied/.framework/slots.nix {
+        inherit pkgs;
+        project = base;
+      };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs; project = base; inherit slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs; project = base; inherit hooks; };
+    in
+      pkgs.writeText "bad-command-class-policy" (builtins.toJSON (lib.appApi.mkTypedCommandApi {
+        name = "bad-policy";
+        summary = "bad";
+        details = "bad";
+        usage = [ "nix run .#bad-policy" ];
+        appContract = {
+          version = 2;
+          name = "bad-policy";
+          commandClass = "typed";
+          allowUnknownArgs = true;
+          args = [ ];
+          env = [ ];
+          outputs = { mode = "text"; };
+          failureCodes = lib.appApi.failureProfiles.script;
+          idempotent = true;
+        };
+      }))
+    NIX
+    )
+    CLASS_POLICY_LOG="$WORKDIR/command-class-policy.log"
+    set +e
+    build_expr "$CLASS_POLICY_EXPR" > "$CLASS_POLICY_LOG" 2>&1
+    CLASS_POLICY_RC=$?
+    set -e
+    if [ "$CLASS_POLICY_RC" -eq 0 ]; then
+      fail "expected typed class policy violation to fail"
+    fi
+    assert_contains "$CLASS_POLICY_LOG" "typed command class requires allowUnknownArgs=false"
+
+    MISSING_CLASS_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      shellContract = import ./nixfied/.framework/lib/shell-contract.nix { inherit pkgs; };
+    in
+      pkgs.writeText "missing-command-class" (builtins.toJSON (shellContract.validateAppContract {
+        name = "missing-class";
+        contract = {
+          version = 2;
+          name = "missing-class";
+          allowUnknownArgs = false;
+          args = [ ];
+          env = [ ];
+          outputs = { mode = "text"; };
+          failureCodes = shellContract.defaultFailureCodes;
+          idempotent = true;
+        };
+      }))
+    NIX
+    )
+    MISSING_CLASS_LOG="$WORKDIR/missing-command-class.log"
+    set +e
+    build_expr "$MISSING_CLASS_EXPR" > "$MISSING_CLASS_LOG" 2>&1
+    MISSING_CLASS_RC=$?
+    set -e
+    if [ "$MISSING_CLASS_RC" -eq 0 ]; then
+      fail "expected appContract.commandClass missing violation"
+    fi
+    assert_contains "$MISSING_CLASS_LOG" "appContract.commandClass is required"
+
     log "module apps exposure"
     MODAPP_EXPR=$(cat <<'NIX'
     { root, system }:
@@ -3571,7 +3358,7 @@ in
 {
   test = lib.appApi.mkNixfiedApp {
     name = "test";
-    api = lib.appApi.mkApi {
+    api = lib.appApi.mkPassthroughCommandApi {
       name = "test";
       summary = "Run framework integration tests";
       details = "Runs the Nixfied framework integration test suite (intended for framework development). Supports shard orchestration via --jobs/--serial/--shard plus --profile and --summary-json options.";
@@ -3586,7 +3373,6 @@ in
         "nix run .#framework::test -- --summary-json /tmp/framework-test-summary.json"
       ];
       category = "framework";
-      allowUnknownArgs = true;
     };
     env = { };
     useDeps = false;

@@ -22,7 +22,7 @@ let
   mkFixHint =
     commandName: ''
       Fix:
-        - For project commands: define commands.${commandName}.api = { version = 2; summary = "..."; details = "..."; usage = [ "nix run .#${commandName}" ]; appContract = { ... }; };
+        - For project commands: define commands.${commandName}.api = { version = 2; summary = "..."; details = "..."; usage = [ "nix run .#${commandName}" ]; appContract = { commandClass = "typed"; ... }; };
         - For generated/internal apps: set app.meta.nixfied.api (or use lib.appApi.mkNixfiedApp).
     '';
   throwNamedViolation =
@@ -76,6 +76,131 @@ let
     else
       throwNamedViolation name errs;
 
+  failureProfiles = {
+    script = shellContract.defaultFailureCodes;
+    cargo = shellContract.defaultFailureCodes // { cargoFailure = 101; };
+    supervisor = shellContract.defaultFailureCodes // {
+      interrupted = 130;
+      terminated = 143;
+    };
+    foundry = shellContract.defaultFailureCodes // {
+      assertion = 134;
+    };
+  };
+
+  arg = {
+    flag =
+      {
+        name,
+        long,
+        short ? null,
+        required ? false,
+      }:
+      {
+        inherit
+          name
+          long
+          required
+          ;
+        kind = "flag";
+        type = "bool";
+      }
+      // lib.optionalAttrs (short != null) { inherit short; };
+
+    option =
+      {
+        name,
+        long,
+        short ? null,
+        type ? "string",
+        required ? false,
+        values ? [ ],
+        min ? null,
+        max ? null,
+      }:
+      {
+        inherit
+          name
+          long
+          type
+          required
+          ;
+        kind = "option";
+      }
+      // lib.optionalAttrs (short != null) { inherit short; }
+      // lib.optionalAttrs (values != [ ]) { inherit values; }
+      // lib.optionalAttrs (min != null) { inherit min; }
+      // lib.optionalAttrs (max != null) { inherit max; };
+
+    positional =
+      {
+        name,
+        type ? "string",
+        required ? false,
+        values ? [ ],
+        min ? null,
+        max ? null,
+      }:
+      {
+        inherit
+          name
+          type
+          required
+          ;
+        kind = "positional";
+      }
+      // lib.optionalAttrs (values != [ ]) { inherit values; }
+      // lib.optionalAttrs (min != null) { inherit min; }
+      // lib.optionalAttrs (max != null) { inherit max; };
+  };
+
+  env = rec {
+    typed =
+      {
+        name,
+        type ? "string",
+        required ? false,
+        aliases ? [ ],
+        sensitive ? false,
+        values ? [ ],
+        min ? null,
+        max ? null,
+        default ? null,
+      }:
+      {
+        inherit
+          name
+          type
+          required
+          aliases
+          sensitive
+          ;
+      }
+      // lib.optionalAttrs (values != [ ]) { inherit values; }
+      // lib.optionalAttrs (min != null) { inherit min; }
+      // lib.optionalAttrs (max != null) { inherit max; }
+      // lib.optionalAttrs (default != null) { inherit default; };
+
+    string =
+      {
+        name,
+        required ? false,
+        aliases ? [ ],
+        sensitive ? false,
+        default ? null,
+      }:
+      env.typed {
+        inherit
+          name
+          required
+          aliases
+          sensitive
+          default
+          ;
+        type = "string";
+      };
+  };
+
   mkApi =
     {
       name,
@@ -88,9 +213,10 @@ let
       category ? "core",
       appContract ? null,
       allowUnknownArgs ? false,
+      commandClass ? "typed",
       idempotent ? true,
       outputsMode ? "text",
-      failureCodes ? shellContract.defaultFailureCodes,
+      failureCodes ? failureProfiles.script,
     }:
     let
       contract =
@@ -101,6 +227,7 @@ let
               args
               env
               allowUnknownArgs
+              commandClass
               idempotent
               outputsMode
               failureCodes
@@ -129,6 +256,149 @@ let
       };
     in
     apiFinal;
+
+  mkCommandClassApi =
+    {
+      name,
+      summary,
+      details,
+      usage,
+      examples ? [ ],
+      args ? [ ],
+      env ? [ ],
+      category ? "core",
+      appContract ? null,
+      contractArgs ? null,
+      contractEnv ? null,
+      outputsKeys ? [ ],
+      allowUnknownArgs,
+      commandClass,
+      idempotent ? true,
+      outputsMode ? "text",
+      failureCodes ? failureProfiles.script,
+    }:
+    let
+      defaultContract =
+        shellContract.mkDefaultAppContract {
+          inherit
+            name
+            args
+            env
+            allowUnknownArgs
+            commandClass
+            idempotent
+            outputsMode
+            failureCodes
+            ;
+        };
+
+      contractWithSpecOverrides =
+        defaultContract
+        // lib.optionalAttrs (contractArgs != null) { args = contractArgs; }
+        // lib.optionalAttrs (contractEnv != null) { env = contractEnv; }
+        // lib.optionalAttrs (outputsKeys != [ ]) {
+          outputs = defaultContract.outputs // { keys = outputsKeys; };
+        };
+
+      contract0 =
+        if appContract == null then
+          contractWithSpecOverrides
+        else
+          appContract // { commandClass = appContract.commandClass or commandClass; };
+
+      allowUnknownActual = contract0.allowUnknownArgs or false;
+      outputModeActual = ((contract0.outputs or { mode = "text"; }).mode or "text");
+
+      _classPolicy =
+        if commandClass == "typed" then
+          if allowUnknownActual then
+            throw "${name}: typed command class requires allowUnknownArgs=false"
+          else if outputModeActual == "json" then
+            throw "${name}: typed command class cannot use outputs.mode=json"
+          else
+            null
+        else if commandClass == "passthrough" then
+          if allowUnknownActual then
+            null
+          else
+            throw "${name}: passthrough command class requires allowUnknownArgs=true"
+        else if commandClass == "json" then
+          if outputModeActual != "json" then
+            throw "${name}: json command class requires outputs.mode=json"
+          else if allowUnknownActual then
+            throw "${name}: json command class requires allowUnknownArgs=false"
+          else
+            null
+        else if commandClass == "batch-runner" then
+          if allowUnknownActual then
+            throw "${name}: batch-runner command class requires allowUnknownArgs=false"
+          else
+            null
+        else
+          null;
+    in
+    builtins.seq _classPolicy (
+      mkApi {
+        inherit
+          name
+          summary
+          details
+          usage
+          examples
+          args
+          env
+          category
+          idempotent
+          ;
+        appContract = contract0;
+        commandClass = commandClass;
+        allowUnknownArgs = allowUnknownActual;
+        outputsMode = outputModeActual;
+        failureCodes = contract0.failureCodes or failureCodes;
+      }
+    );
+
+  mkTypedCommandApi =
+    args:
+    mkCommandClassApi (
+      args
+      // {
+        allowUnknownArgs = false;
+        commandClass = "typed";
+      }
+    );
+
+  mkPassthroughCommandApi =
+    args:
+    mkCommandClassApi (
+      args
+      // {
+        allowUnknownArgs = true;
+        commandClass = "passthrough";
+      }
+    );
+
+  mkJsonCommandApi =
+    args:
+    mkCommandClassApi (
+      args
+      // {
+        allowUnknownArgs = false;
+        commandClass = "json";
+        outputsMode = "json";
+      }
+    );
+
+  mkBatchRunnerCommandApi =
+    args:
+    mkCommandClassApi (
+      args
+      // {
+        allowUnknownArgs = false;
+        commandClass = "batch-runner";
+        idempotent = args.idempotent or false;
+      }
+    );
 
   validateAppErrors =
     { name, app }:
@@ -212,9 +482,16 @@ in
 {
   inherit
     mkApi
+    mkTypedCommandApi
+    mkPassthroughCommandApi
+    mkJsonCommandApi
+    mkBatchRunnerCommandApi
     validateApi
     validateApp
     validateApps
     mkNixfiedApp
+    failureProfiles
+    arg
+    env
     ;
 }

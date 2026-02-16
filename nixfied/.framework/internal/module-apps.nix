@@ -27,19 +27,33 @@ let
       inherit name script;
       env = { };
       useDeps = false;
-      api = lib.appApi.mkApi {
-        inherit
-          name
-          summary
-          details
-          usage
-          args
-          env
-          category
-          allowUnknownArgs
-          idempotent
-          ;
-      };
+      api =
+        if allowUnknownArgs then
+          lib.appApi.mkPassthroughCommandApi {
+            inherit
+              name
+              summary
+              details
+              usage
+              args
+              env
+              category
+              idempotent
+              ;
+          }
+        else
+          lib.appApi.mkTypedCommandApi {
+            inherit
+              name
+              summary
+              details
+              usage
+              args
+              env
+              category
+              idempotent
+              ;
+          };
     };
 
   mkSupervisorHookApp =

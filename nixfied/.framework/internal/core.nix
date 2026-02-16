@@ -136,7 +136,7 @@ let
     }) commandNames
   );
 
-  helpApi = lib.appApi.mkApi {
+  helpApi = lib.appApi.mkPassthroughCommandApi {
     name = "help";
     summary = "Show available commands";
     details = "Lists available commands, or shows detailed documentation for a single command.";
@@ -146,7 +146,6 @@ let
     ];
     examples = [ "nix run .#help -- dev" ];
     category = "core";
-    allowUnknownArgs = true;
     args = [
       {
         name = "--help";

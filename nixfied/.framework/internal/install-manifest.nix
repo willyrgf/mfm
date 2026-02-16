@@ -59,6 +59,7 @@ let
         appContract = {
           version = 2;
           inherit name;
+          commandClass = "passthrough";
           allowUnknownArgs = true;
           args = [ ];
           env = map (var: {

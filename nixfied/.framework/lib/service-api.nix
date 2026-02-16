@@ -366,7 +366,7 @@ let
           '';
           env = { };
           useDeps = false;
-          api = appApi.mkApi {
+          api = appApi.mkPassthroughCommandApi {
             name = op.appName;
             summary = op.opCfg.summary;
             details = op.opCfg.details;
@@ -375,7 +375,6 @@ let
             args = op.opCfg.args or [ ];
             env = op.opCfg.env or [ ];
             category = op.category;
-            allowUnknownArgs = true;
             idempotent = false;
           };
           meta = {

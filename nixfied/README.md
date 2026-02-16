@@ -90,6 +90,7 @@ commands.dev.api = {
   appContract = {
     version = 2;
     name = "dev";
+    commandClass = "typed";
     allowUnknownArgs = false;
     args = [ ];
     env = [ ];

@@ -36,6 +36,13 @@ let
     "json"
   ];
 
+  supportedCommandClasses = [
+    "typed"
+    "passthrough"
+    "json"
+    "batch-runner"
+  ];
+
   defaultFailureCodes = {
     generic = 1;
     usage = 2;
@@ -59,6 +66,7 @@ let
   isSupportedType = value: builtins.elem value supportedTypes;
   isSupportedKind = value: builtins.elem value supportedArgKinds;
   isSupportedOutputMode = value: builtins.elem value supportedOutputModes;
+  isSupportedCommandClass = value: builtins.elem value supportedCommandClasses;
   isPositiveExitCode = value: builtins.isInt value && value > 0 && value < 256;
   isEnvVarName = value: builtins.isString value && (builtins.match "^[A-Z_][A-Z0-9_]*$" value) != null;
 
@@ -201,6 +209,8 @@ let
     let
       args = contract.args or [ ];
       env = contract.env or [ ];
+      commandClass = contract.commandClass or null;
+      allowUnknownArgs = contract.allowUnknownArgs or false;
       outputs = contract.outputs or { mode = "text"; };
       mode = outputs.mode or "text";
       argErrs = builtins.concatLists (
@@ -243,6 +253,15 @@ let
         !(contract ? allowUnknownArgs) || builtins.isBool (contract.allowUnknownArgs or null)
       ) "${name}: appContract.allowUnknownArgs must be a boolean when set"
       ++ expect (
+        contract ? commandClass
+      ) "${name}: appContract.commandClass is required"
+      ++ expect (
+        isNonEmptyString commandClass
+      ) "${name}: appContract.commandClass must be a non-empty string"
+      ++ expect (
+        isSupportedCommandClass commandClass
+      ) "${name}: appContract.commandClass must be one of ${builtins.concatStringsSep "|" supportedCommandClasses}"
+      ++ expect (
         builtins.isList args
       ) "${name}: appContract.args must be a list"
       ++ expect (
@@ -260,6 +279,24 @@ let
       ++ expect (
         !(contract ? idempotent) || builtins.isBool (contract.idempotent or null)
       ) "${name}: appContract.idempotent must be a boolean when set"
+      ++ expect (
+        commandClass != "typed" || allowUnknownArgs == false
+      ) "${name}: appContract.commandClass=typed requires allowUnknownArgs=false"
+      ++ expect (
+        commandClass != "typed" || mode != "json"
+      ) "${name}: appContract.commandClass=typed cannot use outputs.mode=json"
+      ++ expect (
+        commandClass != "passthrough" || allowUnknownArgs == true
+      ) "${name}: appContract.commandClass=passthrough requires allowUnknownArgs=true"
+      ++ expect (
+        commandClass != "json" || mode == "json"
+      ) "${name}: appContract.commandClass=json requires outputs.mode=json"
+      ++ expect (
+        commandClass != "json" || allowUnknownArgs == false
+      ) "${name}: appContract.commandClass=json requires allowUnknownArgs=false"
+      ++ expect (
+        commandClass != "batch-runner" || allowUnknownArgs == false
+      ) "${name}: appContract.commandClass=batch-runner requires allowUnknownArgs=false"
       ++ validateFailureCodesErrors {
         appName = name;
         failureCodes = contract.failureCodes or defaultFailureCodes;
@@ -365,13 +402,20 @@ let
       args ? [ ],
       env ? [ ],
       allowUnknownArgs ? false,
+      commandClass ? "typed",
       outputsMode ? "text",
       failureCodes ? defaultFailureCodes,
       idempotent ? true,
     }:
     {
       version = 2;
-      inherit name allowUnknownArgs idempotent failureCodes;
+      inherit
+        name
+        allowUnknownArgs
+        commandClass
+        idempotent
+        failureCodes
+        ;
       args = map mkDefaultArgFromDoc args;
       env = map mkDefaultEnvFromDoc env;
       outputs = {
@@ -864,6 +908,7 @@ in
     supportedTypes
     supportedArgKinds
     supportedOutputModes
+    supportedCommandClasses
     defaultFailureCodes
     validateAppContractErrors
     validateAppContract
