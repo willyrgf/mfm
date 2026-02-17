@@ -33,6 +33,7 @@ use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngin
 use mfm_machine::stores::{ArtifactStore, EventStore};
 use mfm_op_aave_v3_configure_runtime::AaveV3ConfigureRuntimeOp;
 use mfm_op_aave_v3_deploy_runtime::AaveV3DeployRuntimeOp;
+use mfm_op_aave_v3_origin_adapt::AaveV3OriginAdaptDeployOp;
 use mfm_op_aave_v3_scenario::AaveV3ScenarioOp;
 use mfm_op_common::local_io::LocalOpIoTransportFactory;
 use mfm_op_evm_deploy_configure_validate::{
@@ -426,6 +427,7 @@ pub fn make_engine_bundle() -> EngineBundle {
     reg.register(Arc::new(NixAppOp));
     reg.register(Arc::new(AaveV3DeployRuntimeOp));
     reg.register(Arc::new(AaveV3ConfigureRuntimeOp));
+    reg.register(Arc::new(AaveV3OriginAdaptDeployOp));
     reg.register(Arc::new(AaveV3ScenarioOp));
     let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
 

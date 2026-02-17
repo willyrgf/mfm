@@ -22,14 +22,18 @@ use crate::rpc as op_rpc;
 use crate::states::evm_dcv as shared_dcv;
 use crate::states::meta;
 
-pub const COMPILE_MANIFEST_KIND: &str = "aave_v3_compile_manifest_v1";
+pub const COMPILE_MANIFEST_KIND: &str = "aave_v3_origin_compile_manifest_v1";
 pub const DEPLOY_MANIFEST_KIND: &str = "aave_v3_deploy_manifest_v1";
+pub const ORIGIN_DEPLOY_OUTPUT_KIND: &str = "aave_v3_origin_deploy_output_v1";
 pub const CONFIG_REPORT_KIND: &str = "aave_v3_config_report_v1";
 pub const SCENARIO_REPORT_KIND: &str = "aave_v3_reth_scenario_report_v1";
 
 pub const CONTRACT_USDC: &str = "usdc";
 pub const CONTRACT_WBTC: &str = "wbtc";
 pub const CONTRACT_POOL: &str = "pool";
+pub const CONTRACT_USDC_A_TOKEN: &str = "usdc_a_token";
+pub const CONTRACT_WBTC_A_TOKEN: &str = "wbtc_a_token";
+pub const CONTRACT_USDC_VARIABLE_DEBT_TOKEN: &str = "usdc_variable_debt_token";
 
 const KEY_COMPILE_MANIFEST: &str = "compile_manifest";
 const KEY_PENDING_DEPLOY_TXS: &str = "pending_deploy_txs";
@@ -67,10 +71,6 @@ fn default_deploy_manifest_port() -> String {
     "deploy_manifest".to_string()
 }
 
-fn default_config_report_port() -> String {
-    "config_report".to_string()
-}
-
 fn default_deploy_manifest_export_key() -> String {
     "deploy_manifest".to_string()
 }
@@ -93,38 +93,6 @@ fn default_deployer_account_index() -> usize {
 
 fn default_configure_from_account_index() -> usize {
     0
-}
-
-fn default_funder_account_index() -> usize {
-    0
-}
-
-fn default_merican_account_index() -> usize {
-    1
-}
-
-fn default_saylor_account_index() -> usize {
-    2
-}
-
-fn default_usdc_supply_amount() -> u64 {
-    1_000_000_000_000
-}
-
-fn default_wbtc_collateral_amount() -> u64 {
-    1_000_000_000
-}
-
-fn default_usdc_borrow_amount() -> u64 {
-    400_000_000_000
-}
-
-fn default_borrow_rate_mode() -> u64 {
-    2
-}
-
-fn default_fund_wei() -> String {
-    "1000000000000000000".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -179,6 +147,23 @@ pub struct AaveDeployManifest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AaveOriginDeployOutputContract {
+    pub id: String,
+    pub address: String,
+    pub artifact: ContractArtifactJson,
+    #[serde(default)]
+    pub deploy_tx_hash: Option<String>,
+    #[serde(default)]
+    pub deploy_receipt: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AaveOriginDeployOutput {
+    pub kind: String,
+    pub contracts: Vec<AaveOriginDeployOutputContract>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AaveConfigCallRecord {
     pub function: String,
     pub tx_hash: String,
@@ -197,8 +182,8 @@ pub struct AaveConfigReport {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AaveScenarioAccounts {
     pub funder: String,
-    pub merican: String,
-    pub saylor: String,
+    pub supplier: String,
+    pub borrower: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -211,11 +196,10 @@ pub struct AaveScenarioAmounts {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AaveScenarioPositionSnapshot {
-    pub merican_supplied_usdc: u64,
-    pub saylor_supplied_usdc: u64,
-    pub saylor_collateral_wbtc: u64,
-    pub saylor_borrowed_usdc: u64,
-    pub saylor_usdc_balance: u64,
+    pub supplier_supplied_usdc: u64,
+    pub borrower_collateral_wbtc: u64,
+    pub borrower_borrowed_usdc: u64,
+    pub borrower_usdc_balance: u64,
     pub pool_usdc_balance: u64,
 }
 
@@ -234,7 +218,6 @@ pub struct AaveScenarioReport {
     pub positions: AaveScenarioPositionSnapshot,
     pub assertions: AaveScenarioAssertions,
     pub deploy_manifest_kind: String,
-    pub config_report_kind: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -281,31 +264,20 @@ pub struct AaveScenarioConfig {
     #[serde(default = "default_deploy_manifest_port")]
     pub deploy_manifest_port: String,
 
-    #[serde(default = "default_config_report_port")]
-    pub config_report_port: String,
-
-    #[serde(default = "default_funder_account_index")]
     pub funder_account_index: usize,
 
-    #[serde(default = "default_merican_account_index")]
-    pub merican_account_index: usize,
+    pub supplier_account_index: usize,
 
-    #[serde(default = "default_saylor_account_index")]
-    pub saylor_account_index: usize,
+    pub borrower_account_index: usize,
 
-    #[serde(default = "default_fund_wei")]
     pub fund_wei: String,
 
-    #[serde(default = "default_usdc_supply_amount")]
     pub usdc_supply_amount: u64,
 
-    #[serde(default = "default_wbtc_collateral_amount")]
     pub wbtc_collateral_amount: u64,
 
-    #[serde(default = "default_usdc_borrow_amount")]
     pub usdc_borrow_amount: u64,
 
-    #[serde(default = "default_borrow_rate_mode")]
     pub borrow_rate_mode: u64,
 
     #[serde(default = "default_poll_interval_ms")]
@@ -370,6 +342,13 @@ pub struct CollectDeployOutputsState {
 #[derive(Clone, Debug)]
 pub struct WriteDeployManifestState {
     pub state_id: StateId,
+    pub deploy_manifest_export_key: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct AdaptOriginDeployOutputState {
+    pub state_id: StateId,
+    pub origin_deploy_port: String,
     pub deploy_manifest_export_key: String,
 }
 
@@ -486,17 +465,35 @@ pub fn validate_scenario_config(cfg: &AaveScenarioConfig) -> Result<(), String> 
     if cfg.deploy_manifest_port.trim().is_empty() {
         return Err("deploy_manifest_port must be non-empty".to_string());
     }
-    if cfg.config_report_port.trim().is_empty() {
-        return Err("config_report_port must be non-empty".to_string());
-    }
     if cfg.scenario_report_export_key.trim().is_empty() {
         return Err("scenario_report_export_key must be non-empty".to_string());
     }
     if cfg.scenario_report_artifact_key.trim().is_empty() {
         return Err("scenario_report_artifact_key must be non-empty".to_string());
     }
-    if cfg.merican_account_index == cfg.saylor_account_index {
-        return Err("merican_account_index and saylor_account_index must differ".to_string());
+    if cfg.fund_wei.trim().is_empty() {
+        return Err("fund_wei must be non-empty".to_string());
+    }
+    if cfg.funder_account_index == cfg.supplier_account_index
+        || cfg.funder_account_index == cfg.borrower_account_index
+        || cfg.supplier_account_index == cfg.borrower_account_index
+    {
+        return Err(
+            "funder_account_index, supplier_account_index, and borrower_account_index must differ"
+                .to_string(),
+        );
+    }
+    if cfg.usdc_supply_amount == 0 {
+        return Err("usdc_supply_amount must be > 0".to_string());
+    }
+    if cfg.wbtc_collateral_amount == 0 {
+        return Err("wbtc_collateral_amount must be > 0".to_string());
+    }
+    if cfg.usdc_borrow_amount == 0 {
+        return Err("usdc_borrow_amount must be > 0".to_string());
+    }
+    if cfg.borrow_rate_mode == 0 {
+        return Err("borrow_rate_mode must be > 0".to_string());
     }
     if cfg.max_receipt_polls == 0 {
         return Err("max_receipt_polls must be > 0".to_string());
@@ -769,6 +766,60 @@ impl State for WriteDeployManifestState {
             ContextKey(self.deploy_manifest_export_key.clone()),
             manifest,
         )?;
+        Ok(StateOutcome {
+            snapshot: SnapshotPolicy::OnSuccess,
+        })
+    }
+}
+
+#[async_trait]
+impl State for AdaptOriginDeployOutputState {
+    fn meta(&self) -> StateMeta {
+        meta::config()
+    }
+
+    async fn handle(
+        &self,
+        ctx: &mut dyn DynContext,
+        _io: &mut dyn IoProvider,
+        _rec: &mut dyn EventRecorder,
+    ) -> Result<StateOutcome, StateError> {
+        let value = op_ctx::read_json_required(
+            ctx,
+            &ContextKey(self.origin_deploy_port.clone()),
+            "missing_origin_deploy_output",
+            "missing origin deploy output in context",
+        )?;
+        let output = decode_origin_deploy_output(&value)?;
+
+        let contracts = output
+            .contracts
+            .into_iter()
+            .map(|c| AaveDeployManifestContract {
+                id: c.id,
+                address: c.address,
+                deploy_tx_hash: c.deploy_tx_hash.unwrap_or_else(|| "0x0".to_string()),
+                deploy_receipt: c.deploy_receipt.unwrap_or_else(|| serde_json::json!({})),
+                artifact: c.artifact,
+            })
+            .collect::<Vec<_>>();
+        let manifest = AaveDeployManifest {
+            kind: DEPLOY_MANIFEST_KIND.to_string(),
+            contracts,
+        };
+        validate_deploy_manifest(&manifest)?;
+
+        op_ctx::write_json(
+            ctx,
+            ContextKey(self.deploy_manifest_export_key.clone()),
+            serde_json::to_value(manifest).map_err(|_| {
+                op_errors::state_unknown(
+                    "serialize_deploy_manifest_failed",
+                    "failed to serialize deploy manifest",
+                )
+            })?,
+        )?;
+
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,
         })
@@ -1049,21 +1100,21 @@ impl State for ResolveAccountsState {
             self.cfg.funder_account_index,
             "invalid_funder_account_index",
         )?;
-        let merican = account_at(
+        let supplier = account_at(
             &accounts,
-            self.cfg.merican_account_index,
-            "invalid_merican_account_index",
+            self.cfg.supplier_account_index,
+            "invalid_supplier_account_index",
         )?;
-        let saylor = account_at(
+        let borrower = account_at(
             &accounts,
-            self.cfg.saylor_account_index,
-            "invalid_saylor_account_index",
+            self.cfg.borrower_account_index,
+            "invalid_borrower_account_index",
         )?;
 
         let resolved = AaveScenarioAccounts {
             funder,
-            merican,
-            saylor,
+            supplier,
+            borrower,
         };
         op_ctx::write_json(
             ctx,
@@ -1105,10 +1156,16 @@ impl State for FundWalletState {
             "scenario_accounts_invalid",
             "scenario accounts were invalid",
         )?;
-        let value_hex = wei_to_hex(&self.cfg.fund_wei)?;
+        let fund_wei = parse_wei_u128(&self.cfg.fund_wei)?;
+        let value_hex = format!("0x{fund_wei:x}");
 
         let mut tx_hashes = Vec::new();
-        for to in [&accounts.merican, &accounts.saylor] {
+        for to in [&accounts.supplier, &accounts.borrower] {
+            let current_balance = account_balance(io, &self.state_id, to).await?;
+            if current_balance >= fund_wei {
+                continue;
+            }
+
             let tx_hash = send_transaction(
                 io,
                 &self.state_id,
@@ -1174,50 +1231,55 @@ impl State for ApproveErc20State {
         let wbtc = contract_from_manifest(&manifest, CONTRACT_WBTC)?;
 
         let mut txs = Vec::new();
-        txs.push(
-            send_contract_transaction(
-                io,
-                &self.state_id,
-                &accounts.merican,
-                usdc,
-                "approve",
-                vec![
-                    serde_json::json!(pool.address),
-                    serde_json::json!(self.cfg.usdc_supply_amount),
-                ],
-                None,
-                "approve_usdc_failed",
-            )
-            .await?,
-        );
-        txs.push(
-            send_contract_transaction(
-                io,
-                &self.state_id,
-                &accounts.saylor,
-                wbtc,
-                "approve",
-                vec![
-                    serde_json::json!(pool.address),
-                    serde_json::json!(self.cfg.wbtc_collateral_amount),
-                ],
-                None,
-                "approve_wbtc_failed",
-            )
-            .await?,
-        );
+        let supplier_approve_tx = send_contract_transaction(
+            io,
+            &self.state_id,
+            &accounts.supplier,
+            usdc,
+            "approve",
+            vec![
+                serde_json::json!(pool.address),
+                serde_json::json!(self.cfg.usdc_supply_amount),
+            ],
+            None,
+            "approve_usdc_failed",
+        )
+        .await?;
+        let supplier_approve_receipt = wait_for_receipt(
+            io,
+            &self.state_id,
+            &supplier_approve_tx,
+            self.cfg.poll_interval_ms,
+            self.cfg.max_receipt_polls,
+        )
+        .await?;
+        ensure_receipt_success(&supplier_approve_receipt, "approve_receipt_failed")?;
+        txs.push(supplier_approve_tx);
 
-        for tx_hash in &txs {
-            let receipt = wait_for_receipt(
-                io,
-                &self.state_id,
-                tx_hash,
-                self.cfg.poll_interval_ms,
-                self.cfg.max_receipt_polls,
-            )
-            .await?;
-            ensure_receipt_success(&receipt, "approve_receipt_failed")?;
-        }
+        let borrower_approve_tx = send_contract_transaction(
+            io,
+            &self.state_id,
+            &accounts.borrower,
+            wbtc,
+            "approve",
+            vec![
+                serde_json::json!(pool.address),
+                serde_json::json!(self.cfg.wbtc_collateral_amount),
+            ],
+            None,
+            "approve_wbtc_failed",
+        )
+        .await?;
+        let borrower_approve_receipt = wait_for_receipt(
+            io,
+            &self.state_id,
+            &borrower_approve_tx,
+            self.cfg.poll_interval_ms,
+            self.cfg.max_receipt_polls,
+        )
+        .await?;
+        ensure_receipt_success(&borrower_approve_receipt, "approve_receipt_failed")?;
+        txs.push(borrower_approve_tx);
 
         op_ctx::write_json(
             ctx,
@@ -1261,54 +1323,59 @@ impl State for SupplyAssetState {
         let wbtc = contract_from_manifest(&manifest, CONTRACT_WBTC)?;
 
         let mut txs = Vec::new();
-        txs.push(
-            send_contract_transaction(
-                io,
-                &self.state_id,
-                &accounts.merican,
-                pool,
-                "supply",
-                vec![
-                    serde_json::json!(usdc.address),
-                    serde_json::json!(self.cfg.usdc_supply_amount),
-                    serde_json::json!(accounts.merican),
-                    serde_json::json!(0),
-                ],
-                None,
-                "supply_usdc_failed",
-            )
-            .await?,
-        );
-        txs.push(
-            send_contract_transaction(
-                io,
-                &self.state_id,
-                &accounts.saylor,
-                pool,
-                "supply",
-                vec![
-                    serde_json::json!(wbtc.address),
-                    serde_json::json!(self.cfg.wbtc_collateral_amount),
-                    serde_json::json!(accounts.saylor),
-                    serde_json::json!(0),
-                ],
-                None,
-                "supply_wbtc_failed",
-            )
-            .await?,
-        );
+        let supply_usdc_tx = send_contract_transaction(
+            io,
+            &self.state_id,
+            &accounts.supplier,
+            pool,
+            "supply",
+            vec![
+                serde_json::json!(usdc.address),
+                serde_json::json!(self.cfg.usdc_supply_amount),
+                serde_json::json!(accounts.supplier),
+                serde_json::json!(0),
+            ],
+            None,
+            "supply_usdc_failed",
+        )
+        .await?;
+        let supply_usdc_receipt = wait_for_receipt(
+            io,
+            &self.state_id,
+            &supply_usdc_tx,
+            self.cfg.poll_interval_ms,
+            self.cfg.max_receipt_polls,
+        )
+        .await?;
+        ensure_receipt_success(&supply_usdc_receipt, "supply_receipt_failed")?;
+        txs.push(supply_usdc_tx);
 
-        for tx_hash in &txs {
-            let receipt = wait_for_receipt(
-                io,
-                &self.state_id,
-                tx_hash,
-                self.cfg.poll_interval_ms,
-                self.cfg.max_receipt_polls,
-            )
-            .await?;
-            ensure_receipt_success(&receipt, "supply_receipt_failed")?;
-        }
+        let supply_wbtc_tx = send_contract_transaction(
+            io,
+            &self.state_id,
+            &accounts.borrower,
+            pool,
+            "supply",
+            vec![
+                serde_json::json!(wbtc.address),
+                serde_json::json!(self.cfg.wbtc_collateral_amount),
+                serde_json::json!(accounts.borrower),
+                serde_json::json!(0),
+            ],
+            None,
+            "supply_wbtc_failed",
+        )
+        .await?;
+        let supply_wbtc_receipt = wait_for_receipt(
+            io,
+            &self.state_id,
+            &supply_wbtc_tx,
+            self.cfg.poll_interval_ms,
+            self.cfg.max_receipt_polls,
+        )
+        .await?;
+        ensure_receipt_success(&supply_wbtc_receipt, "supply_receipt_failed")?;
+        txs.push(supply_wbtc_tx);
 
         op_ctx::write_json(
             ctx,
@@ -1352,7 +1419,7 @@ impl State for BorrowAssetState {
         let tx_hash = send_contract_transaction(
             io,
             &self.state_id,
-            &accounts.saylor,
+            &accounts.borrower,
             pool,
             "borrow",
             vec![
@@ -1360,7 +1427,7 @@ impl State for BorrowAssetState {
                 serde_json::json!(self.cfg.usdc_borrow_amount),
                 serde_json::json!(self.cfg.borrow_rate_mode),
                 serde_json::json!(0),
-                serde_json::json!(accounts.saylor),
+                serde_json::json!(accounts.borrower),
             ],
             None,
             "borrow_transaction_failed",
@@ -1411,45 +1478,41 @@ impl State for ReadPositionsState {
         )?;
         let pool = contract_from_manifest(&manifest, CONTRACT_POOL)?;
         let usdc = contract_from_manifest(&manifest, CONTRACT_USDC)?;
+        let usdc_a_token = contract_from_manifest(&manifest, CONTRACT_USDC_A_TOKEN)?;
+        let wbtc_a_token = contract_from_manifest(&manifest, CONTRACT_WBTC_A_TOKEN)?;
+        let usdc_variable_debt =
+            contract_from_manifest(&manifest, CONTRACT_USDC_VARIABLE_DEBT_TOKEN)?;
 
-        let merican_supplied = call_contract_u64(
+        let supplier_supplied = call_contract_u64(
             io,
             &self.state_id,
-            pool,
-            "suppliedUsdcOf",
-            vec![serde_json::json!(accounts.merican)],
+            usdc_a_token,
+            "balanceOf",
+            vec![serde_json::json!(accounts.supplier)],
         )
         .await?;
-        let saylor_supplied = call_contract_u64(
+        let borrower_collateral = call_contract_u64(
             io,
             &self.state_id,
-            pool,
-            "suppliedUsdcOf",
-            vec![serde_json::json!(accounts.saylor)],
+            wbtc_a_token,
+            "balanceOf",
+            vec![serde_json::json!(accounts.borrower)],
         )
         .await?;
-        let saylor_collateral = call_contract_u64(
+        let borrower_borrowed = call_contract_u64(
             io,
             &self.state_id,
-            pool,
-            "collateralWbtcOf",
-            vec![serde_json::json!(accounts.saylor)],
+            usdc_variable_debt,
+            "balanceOf",
+            vec![serde_json::json!(accounts.borrower)],
         )
         .await?;
-        let saylor_borrowed = call_contract_u64(
-            io,
-            &self.state_id,
-            pool,
-            "borrowedUsdcOf",
-            vec![serde_json::json!(accounts.saylor)],
-        )
-        .await?;
-        let saylor_usdc_balance = call_contract_u64(
+        let borrower_usdc_balance = call_contract_u64(
             io,
             &self.state_id,
             usdc,
             "balanceOf",
-            vec![serde_json::json!(accounts.saylor)],
+            vec![serde_json::json!(accounts.borrower)],
         )
         .await?;
         let pool_usdc_balance = call_contract_u64(
@@ -1462,11 +1525,10 @@ impl State for ReadPositionsState {
         .await?;
 
         let snapshot = AaveScenarioPositionSnapshot {
-            merican_supplied_usdc: merican_supplied,
-            saylor_supplied_usdc: saylor_supplied,
-            saylor_collateral_wbtc: saylor_collateral,
-            saylor_borrowed_usdc: saylor_borrowed,
-            saylor_usdc_balance,
+            supplier_supplied_usdc: supplier_supplied,
+            borrower_collateral_wbtc: borrower_collateral,
+            borrower_borrowed_usdc: borrower_borrowed,
+            borrower_usdc_balance,
             pool_usdc_balance,
         };
         op_ctx::write_json(
@@ -1506,47 +1568,30 @@ impl State for AssertInvariantsState {
             "scenario position snapshot was invalid",
         )?;
 
-        assert_equal_u64(
-            positions.merican_supplied_usdc,
+        assert_at_least_u64(
+            positions.supplier_supplied_usdc,
             self.cfg.usdc_supply_amount,
             "scenario_assertion_failed",
-            "merican supplied usdc did not match expected amount",
+            "supplier supplied usdc was lower than expected amount",
         )?;
-        assert_equal_u64(
-            positions.saylor_collateral_wbtc,
+        assert_at_least_u64(
+            positions.borrower_collateral_wbtc,
             self.cfg.wbtc_collateral_amount,
             "scenario_assertion_failed",
-            "saylor collateral wbtc did not match expected amount",
+            "borrower collateral wbtc was lower than expected amount",
         )?;
-        assert_equal_u64(
-            positions.saylor_borrowed_usdc,
+        assert_at_least_u64(
+            positions.borrower_borrowed_usdc,
             self.cfg.usdc_borrow_amount,
             "scenario_assertion_failed",
-            "saylor borrowed usdc did not match expected amount",
+            "borrower borrowed usdc was lower than expected amount",
         )?;
-        assert_equal_u64(
-            positions.saylor_usdc_balance,
+        assert_at_least_u64(
+            positions.borrower_usdc_balance,
             self.cfg.usdc_borrow_amount,
             "scenario_assertion_failed",
-            "saylor usdc balance did not match expected borrowed amount",
+            "borrower usdc balance was lower than expected borrowed amount",
         )?;
-        let expected_pool_usdc = self
-            .cfg
-            .usdc_supply_amount
-            .checked_sub(self.cfg.usdc_borrow_amount)
-            .ok_or_else(|| {
-                op_errors::state_unknown(
-                    "scenario_assertion_failed",
-                    "expected pool usdc underflow",
-                )
-            })?;
-        assert_equal_u64(
-            positions.pool_usdc_balance,
-            expected_pool_usdc,
-            "scenario_assertion_failed",
-            "pool usdc balance did not match expected remaining liquidity",
-        )?;
-
         let assertions = AaveScenarioAssertions {
             strict: true,
             passed: true,
@@ -1610,7 +1655,6 @@ impl State for WriteSummaryState {
             "scenario assertions were invalid",
         )?;
         let deploy_manifest = read_deploy_manifest_loaded(ctx)?;
-        let config_report = read_config_report(ctx, &self.cfg.config_report_port)?;
 
         let report = AaveScenarioReport {
             kind: SCENARIO_REPORT_KIND.to_string(),
@@ -1625,7 +1669,6 @@ impl State for WriteSummaryState {
             positions,
             assertions,
             deploy_manifest_kind: deploy_manifest.kind,
-            config_report_kind: config_report.kind,
         };
 
         let report_json = serde_json::to_value(&report).map_err(|_| {
@@ -1688,6 +1731,21 @@ fn decode_deploy_manifest(value: &serde_json::Value) -> Result<AaveDeployManifes
     Ok(manifest)
 }
 
+fn decode_origin_deploy_output(
+    value: &serde_json::Value,
+) -> Result<AaveOriginDeployOutput, StateError> {
+    let output: AaveOriginDeployOutput = serde_json::from_value(value.clone()).map_err(|_| {
+        op_errors::state_error(
+            "origin_deploy_output_invalid",
+            ErrorCategory::ParsingInput,
+            false,
+            "origin deploy output was invalid",
+        )
+    })?;
+    validate_origin_deploy_output(&output)?;
+    Ok(output)
+}
+
 fn validate_compile_manifest(manifest: &AaveCompileManifest) -> Result<(), StateError> {
     if manifest.kind != COMPILE_MANIFEST_KIND {
         return Err(op_errors::state_error(
@@ -1725,6 +1783,62 @@ fn validate_compile_manifest(manifest: &AaveCompileManifest) -> Result<(), State
         }
         let _ = c.artifact.parse()?;
     }
+    Ok(())
+}
+
+fn validate_origin_deploy_output(output: &AaveOriginDeployOutput) -> Result<(), StateError> {
+    if output.kind != ORIGIN_DEPLOY_OUTPUT_KIND {
+        return Err(op_errors::state_error(
+            "origin_deploy_output_kind_mismatch",
+            ErrorCategory::ParsingInput,
+            false,
+            "origin deploy output kind mismatch",
+        ));
+    }
+    if output.contracts.is_empty() {
+        return Err(op_errors::state_error(
+            "origin_deploy_output_empty",
+            ErrorCategory::ParsingInput,
+            false,
+            "origin deploy output must contain at least one contract",
+        ));
+    }
+
+    let mut seen: HashSet<String> = HashSet::new();
+    for c in &output.contracts {
+        if c.id.trim().is_empty() {
+            return Err(op_errors::state_error(
+                "origin_deploy_output_contract_id_invalid",
+                ErrorCategory::ParsingInput,
+                false,
+                "origin deploy output contract id must be non-empty",
+            ));
+        }
+        if !seen.insert(c.id.clone()) {
+            return Err(op_errors::state_error(
+                "origin_deploy_output_duplicate_contract_id",
+                ErrorCategory::ParsingInput,
+                false,
+                "origin deploy output contract ids must be unique",
+            ));
+        }
+        let _ = shared_dcv::normalize_address(&c.address).map_err(|_| {
+            op_errors::state_error(
+                "origin_deploy_output_contract_address_invalid",
+                ErrorCategory::ParsingInput,
+                false,
+                "origin deploy output contract address was invalid",
+            )
+        })?;
+        let _ = c.artifact.parse()?;
+    }
+
+    origin_contract_from_output(output, CONTRACT_USDC)?;
+    origin_contract_from_output(output, CONTRACT_WBTC)?;
+    origin_contract_from_output(output, CONTRACT_POOL)?;
+    origin_contract_from_output(output, CONTRACT_USDC_A_TOKEN)?;
+    origin_contract_from_output(output, CONTRACT_WBTC_A_TOKEN)?;
+    origin_contract_from_output(output, CONTRACT_USDC_VARIABLE_DEBT_TOKEN)?;
     Ok(())
 }
 
@@ -1799,35 +1913,6 @@ fn read_deploy_manifest_loaded(ctx: &dyn DynContext) -> Result<AaveDeployManifes
     decode_deploy_manifest(&value)
 }
 
-fn read_config_report(
-    ctx: &dyn DynContext,
-    config_report_port: &str,
-) -> Result<AaveConfigReport, StateError> {
-    let value = op_ctx::read_json_required(
-        ctx,
-        &ContextKey(config_report_port.to_string()),
-        "missing_config_report",
-        "missing config report in context",
-    )?;
-    let report: AaveConfigReport = serde_json::from_value(value).map_err(|_| {
-        op_errors::state_error(
-            "config_report_invalid",
-            ErrorCategory::ParsingInput,
-            false,
-            "config report was invalid",
-        )
-    })?;
-    if report.kind != CONFIG_REPORT_KIND {
-        return Err(op_errors::state_error(
-            "config_report_kind_mismatch",
-            ErrorCategory::ParsingInput,
-            false,
-            "config report kind mismatch",
-        ));
-    }
-    Ok(report)
-}
-
 fn read_typed<T: serde::de::DeserializeOwned>(
     ctx: &dyn DynContext,
     key: &str,
@@ -1859,6 +1944,24 @@ fn contract_from_manifest<'a>(
                 ErrorCategory::ParsingInput,
                 false,
                 format!("deploy manifest missing contract: {id}"),
+            )
+        })
+}
+
+fn origin_contract_from_output<'a>(
+    output: &'a AaveOriginDeployOutput,
+    id: &str,
+) -> Result<&'a AaveOriginDeployOutputContract, StateError> {
+    output
+        .contracts
+        .iter()
+        .find(|c| c.id == id)
+        .ok_or_else(|| {
+            op_errors::state_error(
+                "origin_deploy_output_missing_contract",
+                ErrorCategory::ParsingInput,
+                false,
+                format!("origin deploy output missing contract: {id}"),
             )
         })
 }
@@ -1916,9 +2019,21 @@ async fn resolve_account_by_index(
     account_at(&accounts, idx, "invalid_account_index")
 }
 
-fn wei_to_hex(raw: &str) -> Result<String, StateError> {
+fn parse_wei_u128(raw: &str) -> Result<u128, StateError> {
     if raw.starts_with("0x") || raw.starts_with("0X") {
-        return shared_dcv::normalize_hex_str(raw).map_err(|_| {
+        let normalized = shared_dcv::normalize_hex_str(raw).map_err(|_| {
+            op_errors::state_error(
+                "fund_wei_invalid",
+                ErrorCategory::ParsingInput,
+                false,
+                "fund_wei must be a valid decimal or 0x hex string",
+            )
+        })?;
+        return quantity_hex_to_u128(
+            &normalized,
+            "fund_wei must be a valid decimal or 0x hex string",
+        )
+        .map_err(|_| {
             op_errors::state_error(
                 "fund_wei_invalid",
                 ErrorCategory::ParsingInput,
@@ -1927,15 +2042,31 @@ fn wei_to_hex(raw: &str) -> Result<String, StateError> {
             )
         });
     }
-    let v = raw.parse::<u128>().map_err(|_| {
+    raw.parse::<u128>().map_err(|_| {
         op_errors::state_error(
             "fund_wei_invalid",
             ErrorCategory::ParsingInput,
             false,
             "fund_wei must be a valid decimal or 0x hex string",
         )
-    })?;
-    Ok(format!("0x{v:x}"))
+    })
+}
+
+fn quantity_hex_to_u128(raw: &str, message: &'static str) -> Result<u128, StateError> {
+    let trimmed = raw.trim();
+    let Some(rest) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    else {
+        return Err(op_errors::state_unknown("evm_response_invalid", message));
+    };
+
+    if rest.is_empty() {
+        return Ok(0);
+    }
+
+    u128::from_str_radix(rest, 16)
+        .map_err(|_| op_errors::state_unknown("evm_response_invalid", message))
 }
 
 async fn send_transaction(
@@ -1995,6 +2126,32 @@ async fn send_raw_transaction(
             "eth_sendRawTransaction returned invalid tx hash",
         )
     })
+}
+
+async fn account_balance(
+    io: &mut dyn IoProvider,
+    state_id: &StateId,
+    account: &str,
+) -> Result<u128, StateError> {
+    let mut client = EvmIoClient::new(state_id.clone(), io);
+    let res = client
+        .call(JsonRpcCall::new(
+            "eth_getBalance",
+            serde_json::json!([account, "latest"]),
+        ))
+        .await
+        .map_err(op_errors::state_from_io)?;
+
+    let balance_hex = op_rpc::expect_string(
+        &res.response,
+        "evm_response_invalid",
+        "eth_getBalance returned non-string balance",
+    )?;
+    let normalized = normalize_quantity_hex(
+        &balance_hex,
+        "eth_getBalance returned invalid hex balance",
+    )?;
+    quantity_hex_to_u128(&normalized, "eth_getBalance returned invalid hex balance")
 }
 
 struct LegacyCreateTxSigningRequest<'a> {
@@ -2231,13 +2388,21 @@ async fn wait_for_receipt(
     let normalized_tx = shared_dcv::normalize_hex_str(tx_hash)
         .map_err(|_| op_errors::state_unknown("invalid_tx_hash", "tx hash was invalid hex"))?;
 
-    let mut client = EvmIoClient::new(state_id.clone(), io);
-    for _ in 0..max_receipt_polls {
-        let res = client
-            .call(JsonRpcCall::new(
-                "eth_getTransactionReceipt",
-                serde_json::json!([normalized_tx]),
-            ))
+    for poll_index in 0..max_receipt_polls {
+        let request = serde_json::to_value(JsonRpcCall::new(
+            "eth_getTransactionReceipt",
+            serde_json::json!([normalized_tx]),
+        ))
+        .expect("JsonRpcCall must serialize");
+        let res = io
+            .call(IoCall {
+                namespace: "evm".to_string(),
+                request,
+                fact_key: Some(FactKey(format!(
+                    "mfm:evm|state:{}|receipt_poll:{}|tx:{}",
+                    state_id.0, poll_index, normalized_tx
+                ))),
+            })
             .await
             .map_err(op_errors::state_from_io)?;
         if !res.response.is_null() {
@@ -2397,13 +2562,13 @@ async fn call_contract_u64(
     })
 }
 
-fn assert_equal_u64(
+fn assert_at_least_u64(
     actual: u64,
-    expected: u64,
+    minimum: u64,
     code: &'static str,
     message: &'static str,
 ) -> Result<(), StateError> {
-    if actual == expected {
+    if actual >= minimum {
         return Ok(());
     }
     Err(op_errors::state_error(
@@ -2412,4 +2577,105 @@ fn assert_equal_u64(
         false,
         message,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_artifact() -> ContractArtifactJson {
+        ContractArtifactJson {
+            abi: serde_json::json!([
+                {
+                    "type": "function",
+                    "name": "balanceOf",
+                    "inputs": [{ "type": "address" }],
+                    "outputs": [{ "type": "uint256" }]
+                }
+            ]),
+            bytecode: serde_json::json!({ "object": "0x00" }),
+        }
+    }
+
+    fn make_origin_output_contract(id: &str, address: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "address": address,
+            "artifact": test_artifact(),
+            "deploy_tx_hash": "0x0",
+            "deploy_receipt": {},
+        })
+    }
+
+    #[test]
+    fn scenario_config_requires_explicit_fields_on_deserialize() {
+        let cfg = serde_json::from_value::<AaveScenarioConfig>(serde_json::json!({
+            "deploy_manifest_port": "deploy_manifest",
+            "poll_interval_ms": 200,
+            "max_receipt_polls": 120,
+            "scenario_report_export_key": "scenario_report",
+            "scenario_report_artifact_key": "scenario_report_artifact_id"
+        }));
+        assert!(cfg.is_err());
+    }
+
+    #[test]
+    fn validate_scenario_config_rejects_duplicate_account_indexes() {
+        let cfg = AaveScenarioConfig {
+            deploy_manifest_port: "deploy_manifest".to_string(),
+            funder_account_index: 0,
+            supplier_account_index: 0,
+            borrower_account_index: 2,
+            fund_wei: "1000000000000000000".to_string(),
+            usdc_supply_amount: 1_000_000_000_000,
+            wbtc_collateral_amount: 1_000_000_000,
+            usdc_borrow_amount: 400_000_000_000,
+            borrow_rate_mode: 2,
+            poll_interval_ms: 200,
+            max_receipt_polls: 120,
+            scenario_report_export_key: "scenario_report".to_string(),
+            scenario_report_artifact_key: "scenario_report_artifact_id".to_string(),
+        };
+
+        let err = validate_scenario_config(&cfg).expect_err("expected invalid config");
+        assert_eq!(
+            err,
+            "funder_account_index, supplier_account_index, and borrower_account_index must differ"
+        );
+    }
+
+    #[test]
+    fn decode_origin_deploy_output_accepts_required_contracts() {
+        let value = serde_json::json!({
+            "kind": ORIGIN_DEPLOY_OUTPUT_KIND,
+            "contracts": [
+                make_origin_output_contract(CONTRACT_POOL, "0x0000000000000000000000000000000000000001"),
+                make_origin_output_contract(CONTRACT_USDC, "0x0000000000000000000000000000000000000002"),
+                make_origin_output_contract(CONTRACT_WBTC, "0x0000000000000000000000000000000000000003"),
+                make_origin_output_contract(CONTRACT_USDC_A_TOKEN, "0x0000000000000000000000000000000000000004"),
+                make_origin_output_contract(CONTRACT_WBTC_A_TOKEN, "0x0000000000000000000000000000000000000005"),
+                make_origin_output_contract(CONTRACT_USDC_VARIABLE_DEBT_TOKEN, "0x0000000000000000000000000000000000000006")
+            ]
+        });
+
+        let output = decode_origin_deploy_output(&value).expect("expected valid origin output");
+        assert_eq!(output.contracts.len(), 6);
+    }
+
+    #[test]
+    fn decode_origin_deploy_output_rejects_missing_required_contract() {
+        let value = serde_json::json!({
+            "kind": ORIGIN_DEPLOY_OUTPUT_KIND,
+            "contracts": [
+                make_origin_output_contract(CONTRACT_POOL, "0x0000000000000000000000000000000000000001"),
+                make_origin_output_contract(CONTRACT_USDC, "0x0000000000000000000000000000000000000002"),
+                make_origin_output_contract(CONTRACT_WBTC, "0x0000000000000000000000000000000000000003"),
+                make_origin_output_contract(CONTRACT_USDC_A_TOKEN, "0x0000000000000000000000000000000000000004"),
+                make_origin_output_contract(CONTRACT_WBTC_A_TOKEN, "0x0000000000000000000000000000000000000005")
+            ]
+        });
+
+        let err = decode_origin_deploy_output(&value).expect_err("expected validation failure");
+        assert_eq!(err.info.code.0, "origin_deploy_output_missing_contract");
+    }
 }

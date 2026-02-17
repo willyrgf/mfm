@@ -38,10 +38,7 @@ impl Operation for AaveV3ScenarioOp {
         })?;
 
         Ok(OpIo {
-            imports: vec![
-                PortKey(cfg.deploy_manifest_port),
-                PortKey(cfg.config_report_port),
-            ],
+            imports: vec![PortKey(cfg.deploy_manifest_port)],
             exports: vec![
                 PortKey(cfg.scenario_report_export_key),
                 PortKey(cfg.scenario_report_artifact_key),

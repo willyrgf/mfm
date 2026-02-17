@@ -79,6 +79,20 @@ fn parse_u64_hex(s: &str) -> u64 {
     u64::from_str_radix(trimmed, 16).expect("hex string must parse as u64")
 }
 
+fn snapshot_kind(snapshot: &serde_json::Value, key: &str) -> Option<String> {
+    snapshot
+        .get(format!("{key}.kind"))
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+        .or_else(|| {
+            snapshot
+                .get(key)
+                .and_then(|v| v.get("kind"))
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string)
+        })
+}
+
 fn workspace_flake_ref() -> String {
     let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for dir in start.ancestors() {
@@ -178,62 +192,86 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .as_str()
         .map(parse_u64_hex)
         .expect("eth_chainId hex");
+    let accounts_json = rpc_call(
+        &rpc_url,
+        Arc::clone(&events),
+        Arc::clone(&artifacts),
+        "eth_accounts",
+        serde_json::json!([]),
+    )
+    .await;
+    let accounts = accounts_json
+        .as_array()
+        .expect("eth_accounts returned array");
+    let _funder = accounts
+        .first()
+        .and_then(|v| v.as_str())
+        .expect("funder account");
+    let supplier = accounts
+        .get(1)
+        .and_then(|v| v.as_str())
+        .expect("supplier account");
+    let borrower = accounts
+        .get(2)
+        .and_then(|v| v.as_str())
+        .expect("borrower account");
+
     let signing_key_env = "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY";
     std::env::set_var(signing_key_env, RETH_DEV_ACCOUNT0_PRIVATE_KEY);
+    std::env::set_var("MFM_AAVE_V3_ORIGIN_SUPPLIER", supplier);
+    std::env::set_var("MFM_AAVE_V3_ORIGIN_BORROWER", borrower);
+    std::env::set_var("MFM_AAVE_V3_ORIGIN_USDC_SUPPLY_AMOUNT", "1000000000000");
+    std::env::set_var("MFM_AAVE_V3_ORIGIN_WBTC_COLLATERAL_AMOUNT", "1000000000");
 
     let workspace_flake = workspace_flake_ref();
-    let fetch_contracts_app = format!("{workspace_flake}#aave-v3-contracts-fetch");
-    let compile_contracts_app = format!("{workspace_flake}#aave-v3-contracts-compile");
+    let fetch_origin_app = format!("{workspace_flake}#aave-v3-origin-fetch");
+    let compile_origin_app = format!("{workspace_flake}#aave-v3-origin-compile");
+    let deploy_origin_app = format!("{workspace_flake}#aave-v3-origin-deploy");
 
     let pipeline = Pipeline {
         machine_id: MachineId("aave_v3_reth_pipeline".to_string()),
         pipeline_version: "v1".to_string(),
         steps: vec![
             PipelineStep {
-                step_id: StepId("fetch_contracts".to_string()),
+                step_id: StepId("fetch_origin".to_string()),
                 op_id: OpId("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
-                    "app": fetch_contracts_app,
+                    "app": fetch_origin_app,
                     "stdin_json": {},
                     "timeout_ms": 300000,
                     "write_result_to": "result",
                 }),
             },
             PipelineStep {
-                step_id: StepId("compile_contracts".to_string()),
+                step_id: StepId("compile_origin".to_string()),
                 op_id: OpId("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
-                    "app": compile_contracts_app,
+                    "app": compile_origin_app,
                     "stdin_json": {},
                     "timeout_ms": 300000,
                     "write_result_to": "result",
                 }),
             },
             PipelineStep {
-                step_id: StepId("deploy_runtime".to_string()),
-                op_id: OpId("aave_v3_deploy_runtime".to_string()),
+                step_id: StepId("deploy_origin_stack".to_string()),
+                op_id: OpId("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
-                    "compile_manifest_port": "result",
-                    "deployer_account_index": 0,
-                    "signing_key_env": signing_key_env,
-                    "poll_interval_ms": 200,
-                    "max_receipt_polls": 120,
+                    "app": deploy_origin_app,
+                    "stdin_json": {},
+                    "timeout_ms": 600000,
+                    "write_result_to": "result",
+                }),
+            },
+            PipelineStep {
+                step_id: StepId("adapt_origin_deploy".to_string()),
+                op_id: OpId("aave_v3_origin_adapt_deploy".to_string()),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({
+                    "origin_deploy_port": "result",
                     "deploy_manifest_export_key": "deploy_manifest",
-                }),
-            },
-            PipelineStep {
-                step_id: StepId("configure_runtime".to_string()),
-                op_id: OpId("aave_v3_configure_runtime".to_string()),
-                op_version: "v1".to_string(),
-                op_config: serde_json::json!({
-                    "deploy_manifest_port": "deploy_manifest",
-                    "from_account_index": 0,
-                    "poll_interval_ms": 200,
-                    "max_receipt_polls": 120,
-                    "config_report_export_key": "config_report",
                 }),
             },
             PipelineStep {
@@ -242,14 +280,13 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "deploy_manifest_port": "deploy_manifest",
-                    "config_report_port": "config_report",
                     "funder_account_index": 0,
-                    "merican_account_index": 1,
-                    "saylor_account_index": 2,
+                    "supplier_account_index": 1,
+                    "borrower_account_index": 2,
                     "fund_wei": "1000000000000000000",
                     "usdc_supply_amount": 1000000000000u64,
                     "wbtc_collateral_amount": 1000000000u64,
-                    "usdc_borrow_amount": 400000000000u64,
+                    "usdc_borrow_amount": 1000000u64,
                     "borrow_rate_mode": 2,
                     "poll_interval_ms": 200,
                     "max_receipt_polls": 120,
@@ -304,16 +341,24 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         serde_json::from_slice(&snapshot_bytes).expect("decode snapshot json");
 
     assert_eq!(
-        snapshot
-            .get("aave_v3_reth_pipeline.deploy_runtime.deploy_manifest.kind")
-            .and_then(|v| v.as_str()),
+        snapshot_kind(
+            &snapshot,
+            "aave_v3_reth_pipeline.adapt_origin_deploy.deploy_manifest",
+        )
+        .as_deref(),
         Some("aave_v3_deploy_manifest_v1")
     );
     assert_eq!(
-        snapshot
-            .get("aave_v3_reth_pipeline.configure_runtime.config_report.kind")
-            .and_then(|v| v.as_str()),
-        Some("aave_v3_config_report_v1")
+        snapshot_kind(&snapshot, "aave_v3_reth_pipeline.fetch_origin.result").as_deref(),
+        Some("aave_v3_origin_source_v1")
+    );
+    assert_eq!(
+        snapshot_kind(&snapshot, "aave_v3_reth_pipeline.compile_origin.result").as_deref(),
+        Some("aave_v3_origin_compile_manifest_v1")
+    );
+    assert_eq!(
+        snapshot_kind(&snapshot, "aave_v3_reth_pipeline.deploy_origin_stack.result").as_deref(),
+        Some("aave_v3_origin_deploy_output_v1")
     );
 
     let report = snapshot
@@ -346,7 +391,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
             .get("amounts")
             .and_then(|v| v.get("usdc_borrow"))
             .and_then(|v| v.as_u64()),
-        Some(400_000_000_000)
+        Some(1_000_000)
     );
     assert_eq!(
         report

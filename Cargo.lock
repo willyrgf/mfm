@@ -1911,6 +1911,7 @@ dependencies = [
  "mfm-machine",
  "mfm-op-aave-v3-configure-runtime",
  "mfm-op-aave-v3-deploy-runtime",
+ "mfm-op-aave-v3-origin-adapt",
  "mfm-op-aave-v3-scenario",
  "mfm-op-common",
  "mfm-op-evm-deploy-configure-validate",
@@ -2084,6 +2085,17 @@ dependencies = [
 
 [[package]]
 name = "mfm-op-aave-v3-deploy-runtime"
+version = "0.1.0"
+dependencies = [
+ "mfm-machine",
+ "mfm-op-common",
+ "mfm-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mfm-op-aave-v3-origin-adapt"
 version = "0.1.0"
 dependencies = [
  "mfm-machine",

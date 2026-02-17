@@ -301,6 +301,7 @@ in
       SERVICE_OWNER_SCOPE = "persistent";
       SERVICE_DISCOVERY_SCOPE = "global";
       SERVICE_REUSE_POLICY = "same-slot";
+      MINIO_ROOTDISK_THRESHOLD_SIZE = "512MiB";
     };
     useDeps = true;
     setupActions = [
