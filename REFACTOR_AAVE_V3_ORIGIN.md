@@ -112,8 +112,9 @@ Implemented outcomes:
 2. Origin outputs are normalized through a dedicated adapter op into `aave_v3_deploy_manifest_v1`.
 3. Shared Aave runtime state uses neutral actor naming (`supplier`, `borrower`) with explicit required scenario config values.
 4. Parity integration test uses explicit scenario values and validates origin contract kinds.
-5. Nix app registrations/configuration for origin fetch/compile/deploy are active in project configuration.
+5. Nix app registrations/configuration for origin fetch/compile/deploy are active and use a nix-packaged pinned source derivation (not workspace cache paths).
 6. Scenario config validation now hard-requires `fund_wei` to be parseable and `> 0`, with focused unit coverage for all numeric guard rails.
+7. Legacy mock-runtime Aave crates and `contracts/src/MockAaveV3Pool.sol` were removed from the branch.
 
 Validation executed:
 1. `nix run .#check` (pass)

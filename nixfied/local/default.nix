@@ -175,7 +175,7 @@
       aave-v3-origin-fetch = mkFoundryArtifactApp {
         name = "aave-v3-origin-fetch";
         summary = "Fetch pinned Aave v3 origin source metadata";
-        details = "Validates local cached source pin and emits `aave_v3_origin_source_v1` metadata for parity pipelines.";
+        details = "Reads nix-packaged pinned source metadata and emits `aave_v3_origin_source_v1` for parity pipelines.";
         tool = "mfm-aave-v3-origin-fetch";
       };
 

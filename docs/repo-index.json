@@ -56,76 +56,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "forge-std",
-      "path": "cache/aave-v3-origin/lib/forge-std/package.json",
-      "kind": "node-package"
-    },
-    {
-      "name": "forge-std",
-      "path": "cache/aave-v3-origin/lib/solidity-utils/lib/forge-std/package.json",
-      "kind": "node-package"
-    },
-    {
-      "name": "contracts",
-      "path": "cache/aave-v3-origin/lib/solidity-utils/lib/openzeppelin-contracts-upgradeable/contracts/package.json",
-      "kind": "node-package"
-    },
-    {
-      "name": "ds-test",
-      "path": "cache/aave-v3-origin/lib/solidity-utils/lib/openzeppelin-contracts-upgradeable/lib/forge-std/lib/ds-test/package.json",
-      "kind": "node-package"
-    },
-    {
-      "name": "forge-std",
-      "path": "cache/aave-v3-origin/lib/solidity-utils/lib/openzeppelin-contracts-upgradeable/lib/forge-std/package.json",
-      "kind": "node-package"
-    },
-    {
-      "name": "contracts",
-      "path": "cache/aave-v3-origin/lib/solidity-utils/lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/package.json",
-      "kind": "node-package"
-    },
-    {
-      "name": "ds-test",
-      "path": "cache/aave-v3-origin/lib/solidity-utils/lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/lib/forge-std/lib/ds-test/package.json",
-      "kind": "node-package"
-    },
-    {
-      "name": "forge-std",
-      "path": "cache/aave-v3-origin/lib/solidity-utils/lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/lib/forge-std/package.json",
-      "kind": "node-package"
-    },
-    {
-      "name": "openzeppelin-contracts",
-      "path": "cache/aave-v3-origin/lib/solidity-utils/lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/package.json",
-      "kind": "node-package"
-    },
-    {
-      "name": "solhint-custom",
-      "path": "cache/aave-v3-origin/lib/solidity-utils/lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/scripts/solhint-custom/package.json",
-      "kind": "node-package"
-    },
-    {
-      "name": "openzeppelin-contracts-upgradeable",
-      "path": "cache/aave-v3-origin/lib/solidity-utils/lib/openzeppelin-contracts-upgradeable/package.json",
-      "kind": "node-package"
-    },
-    {
-      "name": "solhint-custom",
-      "path": "cache/aave-v3-origin/lib/solidity-utils/lib/openzeppelin-contracts-upgradeable/scripts/solhint-custom/package.json",
-      "kind": "node-package"
-    },
-    {
-      "name": "solidity-utils",
-      "path": "cache/aave-v3-origin/lib/solidity-utils/package.json",
-      "kind": "node-package"
-    },
-    {
-      "name": "aave-v3-origin",
-      "path": "cache/aave-v3-origin/package.json",
-      "kind": "node-package"
-    },
-    {
       "name": "app",
       "path": "crates/app/Cargo.toml",
       "kind": "rust-cargo"
@@ -158,16 +88,6 @@
     {
       "name": "machine",
       "path": "crates/machine/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "aave-v3-configure-runtime-op",
-      "path": "crates/ops/aave-v3-configure-runtime-op/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "aave-v3-deploy-runtime-op",
-      "path": "crates/ops/aave-v3-deploy-runtime-op/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

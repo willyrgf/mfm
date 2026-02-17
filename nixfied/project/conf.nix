@@ -65,6 +65,14 @@ let
 
   aaveV3OriginRepoUrl = "https://github.com/aave-dao/aave-v3-origin";
   aaveV3OriginCommit = "1e3d70c4151a94166ebc59e2eaa4aff6e6ba6978";
+  aaveV3OriginHash = "sha256-PNDpFxNozzot0t7XESS7YaNVaaNfpL/PKjCF2J+zJIw=";
+  aaveV3OriginSource = pkgs.fetchFromGitHub {
+    owner = "aave-dao";
+    repo = "aave-v3-origin";
+    rev = aaveV3OriginCommit;
+    hash = aaveV3OriginHash;
+    fetchSubmodules = true;
+  };
 
   contractArtifactTool = pkgs.writeShellScriptBin "mfm-contract-artifact-configurable-counter" ''
         set -euo pipefail
@@ -127,27 +135,7 @@ let
   aaveV3OriginFetchTool = pkgs.writeShellScriptBin "mfm-aave-v3-origin-fetch" ''
         set -euo pipefail
 
-        workspace_root="$PWD"
-        while [ "$workspace_root" != "/" ] && [ ! -f "$workspace_root/flake.nix" ]; do
-          workspace_root="$(${pkgs.coreutils}/bin/dirname "$workspace_root")"
-        done
-        if [ ! -f "$workspace_root/flake.nix" ]; then
-          echo "could not locate workspace root from $PWD" >&2
-          exit 1
-        fi
-        origin_source="$workspace_root/cache/aave-v3-origin"
-        if [ ! -d "$origin_source" ]; then
-          echo "missing origin source at $origin_source" >&2
-          exit 1
-        fi
-
-        if [ -d "$origin_source/.git" ]; then
-          actual_commit="$(${pkgs.git}/bin/git -C "$origin_source" rev-parse HEAD)"
-          if [ "$actual_commit" != "${aaveV3OriginCommit}" ]; then
-            echo "origin source commit mismatch: expected ${aaveV3OriginCommit}, got $actual_commit" >&2
-            exit 1
-          fi
-        fi
+        origin_source="${aaveV3OriginSource}"
 
         ${pkgs.jq}/bin/jq -n -c \
           --arg repo_url "${aaveV3OriginRepoUrl}" \
@@ -166,27 +154,7 @@ let
   aaveV3OriginCompileTool = pkgs.writeShellScriptBin "mfm-aave-v3-origin-compile" ''
         set -euo pipefail
 
-        workspace_root="$PWD"
-        while [ "$workspace_root" != "/" ] && [ ! -f "$workspace_root/flake.nix" ]; do
-          workspace_root="$(${pkgs.coreutils}/bin/dirname "$workspace_root")"
-        done
-        if [ ! -f "$workspace_root/flake.nix" ]; then
-          echo "could not locate workspace root from $PWD" >&2
-          exit 1
-        fi
-        origin_source="$workspace_root/cache/aave-v3-origin"
-        if [ ! -d "$origin_source" ]; then
-          echo "missing origin source at $origin_source" >&2
-          exit 1
-        fi
-
-        if [ -d "$origin_source/.git" ]; then
-          actual_commit="$(${pkgs.git}/bin/git -C "$origin_source" rev-parse HEAD)"
-          if [ "$actual_commit" != "${aaveV3OriginCommit}" ]; then
-            echo "origin source commit mismatch: expected ${aaveV3OriginCommit}, got $actual_commit" >&2
-            exit 1
-          fi
-        fi
+        origin_source="${aaveV3OriginSource}"
 
         tmp="$(${pkgs.coreutils}/bin/mktemp -d)"
         cleanup() { ${pkgs.coreutils}/bin/rm -rf "$tmp"; }
@@ -194,23 +162,7 @@ let
 
         ${pkgs.coreutils}/bin/mkdir -p "$tmp/origin"
         ${pkgs.coreutils}/bin/cp -R "$origin_source/." "$tmp/origin/"
-
-        ensure_submodules() {
-          repo="$1"
-          if [ -f "$repo/lib/forge-std/src/Script.sol" ] && [ -f "$repo/lib/solidity-utils/src/contracts/utils/Rescuable.sol" ]; then
-            return
-          fi
-          if [ ! -d "$repo/.git" ]; then
-            echo "origin source dependencies are missing and source is not a git checkout" >&2
-            exit 1
-          fi
-          ${pkgs.git}/bin/git -C "$repo" submodule update --init --recursive > /dev/null
-          if [ ! -f "$repo/lib/forge-std/src/Script.sol" ] || [ ! -f "$repo/lib/solidity-utils/src/contracts/utils/Rescuable.sol" ]; then
-            echo "origin source dependencies are missing after submodule update" >&2
-            exit 1
-          fi
-        }
-        ensure_submodules "$tmp/origin"
+        ${pkgs.coreutils}/bin/chmod -R u+w "$tmp/origin"
 
         cat > "$tmp/origin/foundry.toml" <<EOF
     [profile.default]
@@ -302,27 +254,7 @@ let
   aaveV3OriginDeployTool = pkgs.writeShellScriptBin "mfm-aave-v3-origin-deploy" ''
         set -euo pipefail
 
-        workspace_root="$PWD"
-        while [ "$workspace_root" != "/" ] && [ ! -f "$workspace_root/flake.nix" ]; do
-          workspace_root="$(${pkgs.coreutils}/bin/dirname "$workspace_root")"
-        done
-        if [ ! -f "$workspace_root/flake.nix" ]; then
-          echo "could not locate workspace root from $PWD" >&2
-          exit 1
-        fi
-        origin_source="$workspace_root/cache/aave-v3-origin"
-        if [ ! -d "$origin_source" ]; then
-          echo "missing origin source at $origin_source" >&2
-          exit 1
-        fi
-
-        if [ -d "$origin_source/.git" ]; then
-          actual_commit="$(${pkgs.git}/bin/git -C "$origin_source" rev-parse HEAD)"
-          if [ "$actual_commit" != "${aaveV3OriginCommit}" ]; then
-            echo "origin source commit mismatch: expected ${aaveV3OriginCommit}, got $actual_commit" >&2
-            exit 1
-          fi
-        fi
+        origin_source="${aaveV3OriginSource}"
 
         if [ -z "''${MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY-}" ]; then
           echo "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY is required" >&2
@@ -353,23 +285,7 @@ let
 
         ${pkgs.coreutils}/bin/mkdir -p "$tmp/origin"
         ${pkgs.coreutils}/bin/cp -R "$origin_source/." "$tmp/origin/"
-
-        ensure_submodules() {
-          repo="$1"
-          if [ -f "$repo/lib/forge-std/src/Script.sol" ] && [ -f "$repo/lib/solidity-utils/src/contracts/utils/Rescuable.sol" ]; then
-            return
-          fi
-          if [ ! -d "$repo/.git" ]; then
-            echo "origin source dependencies are missing and source is not a git checkout" >&2
-            exit 1
-          fi
-          ${pkgs.git}/bin/git -C "$repo" submodule update --init --recursive > /dev/null
-          if [ ! -f "$repo/lib/forge-std/src/Script.sol" ] || [ ! -f "$repo/lib/solidity-utils/src/contracts/utils/Rescuable.sol" ]; then
-            echo "origin source dependencies are missing after submodule update" >&2
-            exit 1
-          fi
-        }
-        ensure_submodules "$tmp/origin"
+        ${pkgs.coreutils}/bin/chmod -R u+w "$tmp/origin"
 
         cat > "$tmp/origin/foundry.toml" <<EOF
     [profile.default]

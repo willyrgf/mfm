@@ -31,8 +31,6 @@ use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
 use mfm_machine::stores::{ArtifactStore, EventStore};
-use mfm_op_aave_v3_configure_runtime::AaveV3ConfigureRuntimeOp;
-use mfm_op_aave_v3_deploy_runtime::AaveV3DeployRuntimeOp;
 use mfm_op_aave_v3_origin_adapt::AaveV3OriginAdaptDeployOp;
 use mfm_op_aave_v3_scenario::AaveV3ScenarioOp;
 use mfm_op_common::local_io::LocalOpIoTransportFactory;
@@ -425,8 +423,6 @@ pub fn make_engine_bundle() -> EngineBundle {
     reg.register(Arc::new(EvmDeployConfigureValidateOp));
     reg.register(Arc::new(PortfolioTrackerOp));
     reg.register(Arc::new(NixAppOp));
-    reg.register(Arc::new(AaveV3DeployRuntimeOp));
-    reg.register(Arc::new(AaveV3ConfigureRuntimeOp));
     reg.register(Arc::new(AaveV3OriginAdaptDeployOp));
     reg.register(Arc::new(AaveV3ScenarioOp));
     let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
