@@ -5,8 +5,9 @@ use async_trait::async_trait;
 use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, StateError};
+use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{ContextKey, FactKey, StateId};
-use mfm_machine::io::IoProvider;
+use mfm_machine::io::{IoCall, IoProvider};
 use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
@@ -243,6 +244,9 @@ pub struct AaveDeployRuntimeConfig {
 
     #[serde(default = "default_deployer_account_index")]
     pub deployer_account_index: usize,
+
+    #[serde(default)]
+    pub signing_key_env: Option<String>,
 
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
@@ -555,6 +559,12 @@ impl State for DeployContractState {
         let manifest = read_compile_manifest(ctx)?;
         let deployer =
             resolve_account_by_index(io, &self.state_id, self.cfg.deployer_account_index).await?;
+        let signing_key_env = self.cfg.signing_key_env.as_deref();
+        let mut next_nonce = if signing_key_env.is_some() {
+            Some(pending_nonce_u128(io, &self.state_id, &deployer).await?)
+        } else {
+            None
+        };
 
         let mut pending: Vec<PendingDeployment> = Vec::with_capacity(manifest.contracts.len());
         for contract in manifest.contracts {
@@ -568,15 +578,36 @@ impl State for DeployContractState {
                         )
                     },
                 )?;
-            let tx_hash = send_transaction(
-                io,
-                &self.state_id,
-                serde_json::json!({
-                    "from": deployer,
-                    "data": shared_dcv::bytes_to_hex_prefixed(&constructor_payload),
-                }),
-            )
-            .await?;
+            let tx_hash = if let Some(env_name) = signing_key_env {
+                let nonce = next_nonce.as_mut().expect("nonce initialized");
+                let nonce_hex = format!("0x{:x}", *nonce);
+                let tx_hash = send_signed_create_transaction(
+                    io,
+                    &self.state_id,
+                    env_name,
+                    &deployer,
+                    &nonce_hex,
+                    &constructor_payload,
+                )
+                .await?;
+                *nonce = nonce.checked_add(1).ok_or_else(|| {
+                    op_errors::state_unknown(
+                        "evm_response_invalid",
+                        "nonce overflow while preparing signed deployment transactions",
+                    )
+                })?;
+                tx_hash
+            } else {
+                send_transaction(
+                    io,
+                    &self.state_id,
+                    serde_json::json!({
+                        "from": deployer,
+                        "data": shared_dcv::bytes_to_hex_prefixed(&constructor_payload),
+                    }),
+                )
+                .await?
+            };
 
             pending.push(PendingDeployment {
                 id: contract.id,
@@ -1910,9 +1941,17 @@ fn wei_to_hex(raw: &str) -> Result<String, StateError> {
 async fn send_transaction(
     io: &mut dyn IoProvider,
     state_id: &StateId,
-    tx_obj: serde_json::Value,
+    mut tx_obj: serde_json::Value,
 ) -> Result<String, StateError> {
     let mut client = EvmIoClient::new(state_id.clone(), io);
+    if tx_obj.get("gas").is_none() {
+        let gas = estimate_gas_hex(&mut client, &tx_obj).await?;
+        tx_obj["gas"] = serde_json::json!(gas);
+    }
+    if tx_obj.get("gasPrice").is_none() && tx_obj.get("maxFeePerGas").is_none() {
+        let gas_price = gas_price_hex(&mut client).await?;
+        tx_obj["gasPrice"] = serde_json::json!(gas_price);
+    }
     let res = client
         .call(JsonRpcCall::new(
             "eth_sendTransaction",
@@ -1931,6 +1970,248 @@ async fn send_transaction(
             "eth_sendTransaction returned invalid tx hash",
         )
     })
+}
+
+async fn send_raw_transaction(
+    client: &mut EvmIoClient<'_>,
+    raw_tx_hex: &str,
+) -> Result<String, StateError> {
+    let res = client
+        .call(JsonRpcCall::new(
+            "eth_sendRawTransaction",
+            serde_json::json!([raw_tx_hex]),
+        ))
+        .await
+        .map_err(op_errors::state_from_io)?;
+
+    let tx_hash = op_rpc::expect_string(
+        &res.response,
+        "evm_response_invalid",
+        "eth_sendRawTransaction returned non-string tx hash",
+    )?;
+    shared_dcv::normalize_hex_str(&tx_hash).map_err(|_| {
+        op_errors::state_unknown(
+            "evm_response_invalid",
+            "eth_sendRawTransaction returned invalid tx hash",
+        )
+    })
+}
+
+struct LegacyCreateTxSigningRequest<'a> {
+    signing_key_env: &'a str,
+    from: &'a str,
+    chain_id: u64,
+    nonce_hex: &'a str,
+    gas_price_hex: &'a str,
+    gas_limit_hex: &'a str,
+    value_hex: &'a str,
+    constructor_payload: &'a [u8],
+}
+
+async fn local_sign_legacy_create_raw_tx(
+    client: &mut EvmIoClient<'_>,
+    req: LegacyCreateTxSigningRequest<'_>,
+) -> Result<String, StateError> {
+    let state_id = client.state_id().clone();
+    let request = serde_json::json!({
+        "env_name_hex": hex::encode(req.signing_key_env.as_bytes()),
+        "from": req.from,
+        "chain_id": req.chain_id,
+        "nonce_hex": req.nonce_hex,
+        "gas_price_hex": req.gas_price_hex,
+        "gas_limit_hex": req.gas_limit_hex,
+        "value_hex": req.value_hex,
+        "data_hex": shared_dcv::bytes_to_hex_prefixed(req.constructor_payload),
+    });
+    let fact_key = local_fact_key(&state_id, "deploy_sign_legacy_create", &request)?;
+    let res = client
+        .io_mut()
+        .call(IoCall {
+            namespace: "local.evm.sign_legacy_create".to_string(),
+            request,
+            fact_key: Some(fact_key),
+        })
+        .await
+        .map_err(op_errors::state_from_io)?;
+
+    let raw_tx_hex = op_rpc::expect_string(
+        &res.response["raw_tx_hex"],
+        "evm_response_invalid",
+        "local signer returned non-string raw transaction",
+    )?;
+    shared_dcv::normalize_hex_str(&raw_tx_hex).map_err(|_| {
+        op_errors::state_unknown(
+            "evm_response_invalid",
+            "local signer returned invalid raw transaction hex",
+        )
+    })
+}
+
+fn local_fact_key(
+    state_id: &StateId,
+    purpose: &str,
+    request: &serde_json::Value,
+) -> Result<FactKey, StateError> {
+    let req_id = artifact_id_for_json(request).map_err(|err| match err {
+        CanonicalJsonError::FloatNotAllowed => op_errors::state_unknown(
+            "local_request_not_canonical",
+            "local io request was not canonical-json-hashable (floats are forbidden)",
+        ),
+        CanonicalJsonError::SecretsNotAllowed => {
+            op_errors::state_unknown("secrets_detected", "local io request contained secrets")
+        }
+    })?;
+
+    Ok(FactKey(format!(
+        "mfm:local|state:{}|purpose:{purpose}|req:{}",
+        state_id.0, req_id.0
+    )))
+}
+
+async fn transaction_count_hex(
+    client: &mut EvmIoClient<'_>,
+    from: &str,
+) -> Result<String, StateError> {
+    let res = client
+        .call(JsonRpcCall::new(
+            "eth_getTransactionCount",
+            serde_json::json!([from, "pending"]),
+        ))
+        .await
+        .map_err(op_errors::state_from_io)?;
+
+    let nonce = op_rpc::expect_string(
+        &res.response,
+        "evm_response_invalid",
+        "eth_getTransactionCount returned non-string nonce",
+    )?;
+    normalize_quantity_hex(&nonce, "eth_getTransactionCount returned invalid hex nonce")
+}
+
+fn parse_quantity_hex_u128(raw: &str, message: &'static str) -> Result<u128, StateError> {
+    let normalized = normalize_quantity_hex(raw, message)?;
+    let digits = normalized
+        .strip_prefix("0x")
+        .ok_or_else(|| op_errors::state_unknown("evm_response_invalid", message))?;
+    u128::from_str_radix(digits, 16)
+        .map_err(|_| op_errors::state_unknown("evm_response_invalid", message))
+}
+
+async fn pending_nonce_u128(
+    io: &mut dyn IoProvider,
+    state_id: &StateId,
+    from: &str,
+) -> Result<u128, StateError> {
+    let mut client = EvmIoClient::new(state_id.clone(), io);
+    let nonce_hex = transaction_count_hex(&mut client, from).await?;
+    parse_quantity_hex_u128(
+        &nonce_hex,
+        "eth_getTransactionCount returned invalid hex nonce",
+    )
+}
+
+async fn send_signed_create_transaction(
+    io: &mut dyn IoProvider,
+    state_id: &StateId,
+    signing_key_env: &str,
+    from: &str,
+    nonce_hex: &str,
+    constructor_payload: &[u8],
+) -> Result<String, StateError> {
+    let configured_from = shared_dcv::normalize_address(from)
+        .map_err(|_| op_errors::state_unknown("invalid_op_config", "invalid from address"))?;
+    let nonce_hex = normalize_quantity_hex(
+        nonce_hex,
+        "signed deploy nonce must be a valid hex quantity",
+    )?;
+    let mut client = EvmIoClient::new(state_id.clone(), io);
+
+    let tx_obj = serde_json::json!({
+        "from": configured_from,
+        "data": shared_dcv::bytes_to_hex_prefixed(constructor_payload),
+    });
+
+    let gas_hex = estimate_gas_hex(&mut client, &tx_obj).await?;
+    let gas_price = gas_price_hex(&mut client).await?;
+    let chain_id = client
+        .chain_id_u64()
+        .await
+        .map_err(op_errors::state_from_io)?;
+
+    let raw_tx_hex = local_sign_legacy_create_raw_tx(
+        &mut client,
+        LegacyCreateTxSigningRequest {
+            signing_key_env,
+            from: &configured_from,
+            chain_id,
+            nonce_hex: &nonce_hex,
+            gas_price_hex: &gas_price,
+            gas_limit_hex: &gas_hex,
+            value_hex: "0x0",
+            constructor_payload,
+        },
+    )
+    .await?;
+
+    send_raw_transaction(&mut client, &raw_tx_hex).await
+}
+
+async fn estimate_gas_hex(
+    client: &mut EvmIoClient<'_>,
+    tx_obj: &serde_json::Value,
+) -> Result<String, StateError> {
+    let res = client
+        .call(JsonRpcCall::new(
+            "eth_estimateGas",
+            serde_json::json!([tx_obj]),
+        ))
+        .await
+        .map_err(op_errors::state_from_io)?;
+
+    let gas = op_rpc::expect_string(
+        &res.response,
+        "evm_response_invalid",
+        "eth_estimateGas returned non-string gas value",
+    )?;
+    normalize_quantity_hex(&gas, "eth_estimateGas returned invalid hex gas value")
+}
+
+async fn gas_price_hex(client: &mut EvmIoClient<'_>) -> Result<String, StateError> {
+    let res = client
+        .call(JsonRpcCall::new("eth_gasPrice", serde_json::json!([])))
+        .await
+        .map_err(op_errors::state_from_io)?;
+
+    let gas_price = op_rpc::expect_string(
+        &res.response,
+        "evm_response_invalid",
+        "eth_gasPrice returned non-string gas price",
+    )?;
+    normalize_quantity_hex(&gas_price, "eth_gasPrice returned invalid hex gas price")
+}
+
+fn normalize_quantity_hex(raw: &str, message: &'static str) -> Result<String, StateError> {
+    let trimmed = raw.trim();
+    let Some(rest) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    else {
+        return Err(op_errors::state_unknown("evm_response_invalid", message));
+    };
+
+    if rest.is_empty() {
+        return Ok("0x0".to_string());
+    }
+    if !rest.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(op_errors::state_unknown("evm_response_invalid", message));
+    }
+
+    let normalized = rest.trim_start_matches('0');
+    if normalized.is_empty() {
+        Ok("0x0".to_string())
+    } else {
+        Ok(format!("0x{}", normalized.to_ascii_lowercase()))
+    }
 }
 
 async fn wait_for_receipt(

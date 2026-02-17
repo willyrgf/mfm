@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
+use serde_json::json;
 
 use mfm_collectors_evm::JsonRpcCall;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
@@ -42,6 +43,46 @@ fn info(
         message: message.to_string(),
         details: None,
     }
+}
+
+fn info_with_details(
+    code: &'static str,
+    category: ErrorCategory,
+    retryable: bool,
+    message: &'static str,
+    details: Option<serde_json::Value>,
+) -> ErrorInfo {
+    ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category,
+        retryable,
+        message: message.to_string(),
+        details,
+    }
+}
+
+fn jsonrpc_error_details(error_value: &serde_json::Value) -> Option<serde_json::Value> {
+    let error = error_value.as_object()?;
+
+    let code = error.get("code").and_then(|v| v.as_i64());
+    let message = error.get("message").and_then(|v| v.as_str()).map(|s| {
+        // Keep diagnostics concise and avoid persisting arbitrarily large payload fragments.
+        const MAX_LEN: usize = 240;
+        if s.len() <= MAX_LEN {
+            s.to_string()
+        } else {
+            s.chars().take(MAX_LEN).collect::<String>()
+        }
+    });
+
+    if code.is_none() && message.is_none() {
+        return None;
+    }
+
+    Some(json!({
+        "jsonrpc_error_code": code,
+        "jsonrpc_error_message": message,
+    }))
 }
 
 #[derive(Clone)]
@@ -193,12 +234,13 @@ impl LiveIoTransport for EvmJsonRpcHttpTransport {
             ))
         })?;
 
-        if obj.contains_key("error") {
-            return Err(IoError::Transport(info(
+        if let Some(error_value) = obj.get("error") {
+            return Err(IoError::Transport(info_with_details(
                 CODE_EVM_JSONRPC_ERROR,
                 ErrorCategory::Rpc,
                 true,
                 "evm jsonrpc returned an error",
+                jsonrpc_error_details(error_value),
             )));
         }
 

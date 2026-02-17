@@ -1,6 +1,7 @@
 #![cfg(feature = "parity-tests")]
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -78,6 +79,21 @@ fn parse_u64_hex(s: &str) -> u64 {
     u64::from_str_radix(trimmed, 16).expect("hex string must parse as u64")
 }
 
+fn workspace_flake_ref() -> String {
+    let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for dir in start.ancestors() {
+        if dir.join("flake.nix").is_file() {
+            let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+            return format!("path:{}", canonical.display());
+        }
+    }
+
+    panic!(
+        "could not locate workspace root from CARGO_MANIFEST_DIR={}",
+        start.display()
+    );
+}
+
 async fn rpc_call(
     rpc_url: &str,
     events: Arc<dyn EventStore>,
@@ -135,6 +151,9 @@ async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> Postgr
     );
 }
 
+const RETH_DEV_ACCOUNT0_PRIVATE_KEY: &str =
+    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+
 #[tokio::test]
 async fn parity_aave_v3_reth_scenario_pipeline() {
     init_test_observability();
@@ -159,6 +178,12 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .as_str()
         .map(parse_u64_hex)
         .expect("eth_chainId hex");
+    let signing_key_env = "MFM_AAVE_V3_PARITY_DEPLOY_SIGNING_KEY";
+    std::env::set_var(signing_key_env, RETH_DEV_ACCOUNT0_PRIVATE_KEY);
+
+    let workspace_flake = workspace_flake_ref();
+    let fetch_contracts_app = format!("{workspace_flake}#aave-v3-contracts-fetch");
+    let compile_contracts_app = format!("{workspace_flake}#aave-v3-contracts-compile");
 
     let pipeline = Pipeline {
         machine_id: MachineId("aave_v3_reth_pipeline".to_string()),
@@ -169,7 +194,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
                 op_id: OpId("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
-                    "app": "path:.#aave-v3-contracts-fetch",
+                    "app": fetch_contracts_app,
                     "stdin_json": {},
                     "timeout_ms": 300000,
                     "write_result_to": "result",
@@ -180,7 +205,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
                 op_id: OpId("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
-                    "app": "path:.#aave-v3-contracts-compile",
+                    "app": compile_contracts_app,
                     "stdin_json": {},
                     "timeout_ms": 300000,
                     "write_result_to": "result",
@@ -193,6 +218,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
                 op_config: serde_json::json!({
                     "compile_manifest_port": "result",
                     "deployer_account_index": 0,
+                    "signing_key_env": signing_key_env,
                     "poll_interval_ms": 200,
                     "max_receipt_polls": 120,
                     "deploy_manifest_export_key": "deploy_manifest",
@@ -235,7 +261,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     };
 
     let mut allowlist = mfm_machine::config::default_nix_flake_allowlist();
-    allowlist.push("path:.".to_string());
+    allowlist.push(workspace_flake);
     let run_config = run_config_with_allowlist(allowlist);
 
     let bundle = mfm_rest_api::make_engine_bundle();

@@ -14,6 +14,7 @@
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
+use std::path::Path;
 
 use async_trait::async_trait;
 use tokio::process::Command;
@@ -140,21 +141,6 @@ fn attr_path_for_program(system: &str, fragment: &str) -> String {
     } else {
         format!("apps.{system}.{frag}.program")
     }
-}
-
-fn nix_store_root(program_path: &str) -> Option<String> {
-    let prefix = "/nix/store/";
-    if !program_path.starts_with(prefix) {
-        return None;
-    }
-
-    let rest = &program_path[prefix.len()..];
-    let entry = rest.split('/').next()?;
-    if entry.is_empty() {
-        return None;
-    }
-
-    Some(format!("{prefix}{entry}"))
 }
 
 fn parse_resolve_request(call: &IoCall) -> Result<ResolveFlakeAppV1, IoError> {
@@ -347,25 +333,23 @@ impl LiveIoTransport for NixFlakeTransport {
             )));
         }
 
-        let store_root = nix_store_root(&program_path).ok_or_else(|| {
-            IoError::Other(info(
-                CODE_NIX_REQUEST_INVALID,
-                ErrorCategory::ParsingInput,
-                "resolved program path was not under a valid /nix/store root",
-            ))
-        })?;
+        // 2) Realize the app when the resolved program path is not already present.
+        if !Path::new(&program_path).exists() {
+            let mut build = Command::new("nix");
+            build
+                .arg("build")
+                .arg("--no-link")
+                .arg("--no-write-lock-file")
+                .arg(format!("{flake_url}#{attr}"));
 
-        // 2) Realize the containing store root (compile/substitute) without local symlinks.
-        let mut build = Command::new("nix");
-        build.arg("build").arg("--no-link").arg(store_root);
-
-        let out = run_with_timeout(build, req.timeout_ms).await?;
-        if !out.status.success() {
-            return Err(IoError::Transport(info(
-                CODE_NIX_BUILD_FAILED,
-                ErrorCategory::Unknown,
-                "nix build failed",
-            )));
+            let out = run_with_timeout(build, req.timeout_ms).await?;
+            if !out.status.success() {
+                return Err(IoError::Transport(info(
+                    CODE_NIX_BUILD_FAILED,
+                    ErrorCategory::Unknown,
+                    "nix build failed",
+                )));
+            }
         }
 
         Ok(serde_json::json!({"program_path": program_path}))
@@ -601,13 +585,6 @@ mod tests {
         let system = "aarch64-darwin";
         let got = attr_path_for_program(system, "jq_fmt_example");
         assert_eq!(got, "apps.aarch64-darwin.jq_fmt_example.program");
-    }
-
-    #[test]
-    fn nix_store_root_extracts_derivation_root() {
-        let got = nix_store_root("/nix/store/abc123-my-app/bin/run");
-        assert_eq!(got.as_deref(), Some("/nix/store/abc123-my-app"));
-        assert_eq!(nix_store_root("/bin/echo"), None);
     }
 
     #[tokio::test]
