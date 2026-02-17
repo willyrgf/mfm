@@ -474,6 +474,11 @@ pub fn validate_scenario_config(cfg: &AaveScenarioConfig) -> Result<(), String> 
     if cfg.fund_wei.trim().is_empty() {
         return Err("fund_wei must be non-empty".to_string());
     }
+    let fund_wei = parse_wei_u128(&cfg.fund_wei)
+        .map_err(|_| "fund_wei must be a valid decimal or 0x hex string".to_string())?;
+    if fund_wei == 0 {
+        return Err("fund_wei must be > 0".to_string());
+    }
     if cfg.funder_account_index == cfg.supplier_account_index
         || cfg.funder_account_index == cfg.borrower_account_index
         || cfg.supplier_account_index == cfg.borrower_account_index
@@ -2607,6 +2612,24 @@ mod tests {
         })
     }
 
+    fn valid_scenario_config() -> AaveScenarioConfig {
+        AaveScenarioConfig {
+            deploy_manifest_port: "deploy_manifest".to_string(),
+            funder_account_index: 0,
+            supplier_account_index: 1,
+            borrower_account_index: 2,
+            fund_wei: "1000000000000000000".to_string(),
+            usdc_supply_amount: 1_000_000_000_000,
+            wbtc_collateral_amount: 1_000_000_000,
+            usdc_borrow_amount: 1_000_000,
+            borrow_rate_mode: 2,
+            poll_interval_ms: 200,
+            max_receipt_polls: 120,
+            scenario_report_export_key: "scenario_report".to_string(),
+            scenario_report_artifact_key: "scenario_report_artifact_id".to_string(),
+        }
+    }
+
     #[test]
     fn scenario_config_requires_explicit_fields_on_deserialize() {
         let cfg = serde_json::from_value::<AaveScenarioConfig>(serde_json::json!({
@@ -2621,27 +2644,74 @@ mod tests {
 
     #[test]
     fn validate_scenario_config_rejects_duplicate_account_indexes() {
-        let cfg = AaveScenarioConfig {
-            deploy_manifest_port: "deploy_manifest".to_string(),
-            funder_account_index: 0,
-            supplier_account_index: 0,
-            borrower_account_index: 2,
-            fund_wei: "1000000000000000000".to_string(),
-            usdc_supply_amount: 1_000_000_000_000,
-            wbtc_collateral_amount: 1_000_000_000,
-            usdc_borrow_amount: 400_000_000_000,
-            borrow_rate_mode: 2,
-            poll_interval_ms: 200,
-            max_receipt_polls: 120,
-            scenario_report_export_key: "scenario_report".to_string(),
-            scenario_report_artifact_key: "scenario_report_artifact_id".to_string(),
-        };
+        let mut cfg = valid_scenario_config();
+        cfg.supplier_account_index = cfg.funder_account_index;
 
         let err = validate_scenario_config(&cfg).expect_err("expected invalid config");
         assert_eq!(
             err,
             "funder_account_index, supplier_account_index, and borrower_account_index must differ"
         );
+    }
+
+    #[test]
+    fn validate_scenario_config_rejects_zero_fund_wei() {
+        let mut cfg = valid_scenario_config();
+        cfg.fund_wei = "0".to_string();
+
+        let err = validate_scenario_config(&cfg).expect_err("expected invalid config");
+        assert_eq!(err, "fund_wei must be > 0");
+    }
+
+    #[test]
+    fn validate_scenario_config_rejects_invalid_fund_wei() {
+        let mut cfg = valid_scenario_config();
+        cfg.fund_wei = "not-a-number".to_string();
+
+        let err = validate_scenario_config(&cfg).expect_err("expected invalid config");
+        assert_eq!(err, "fund_wei must be a valid decimal or 0x hex string");
+    }
+
+    #[test]
+    fn validate_scenario_config_rejects_zero_usdc_supply_amount() {
+        let mut cfg = valid_scenario_config();
+        cfg.usdc_supply_amount = 0;
+
+        let err = validate_scenario_config(&cfg).expect_err("expected invalid config");
+        assert_eq!(err, "usdc_supply_amount must be > 0");
+    }
+
+    #[test]
+    fn validate_scenario_config_rejects_zero_wbtc_collateral_amount() {
+        let mut cfg = valid_scenario_config();
+        cfg.wbtc_collateral_amount = 0;
+
+        let err = validate_scenario_config(&cfg).expect_err("expected invalid config");
+        assert_eq!(err, "wbtc_collateral_amount must be > 0");
+    }
+
+    #[test]
+    fn validate_scenario_config_rejects_zero_usdc_borrow_amount() {
+        let mut cfg = valid_scenario_config();
+        cfg.usdc_borrow_amount = 0;
+
+        let err = validate_scenario_config(&cfg).expect_err("expected invalid config");
+        assert_eq!(err, "usdc_borrow_amount must be > 0");
+    }
+
+    #[test]
+    fn validate_scenario_config_rejects_zero_borrow_rate_mode() {
+        let mut cfg = valid_scenario_config();
+        cfg.borrow_rate_mode = 0;
+
+        let err = validate_scenario_config(&cfg).expect_err("expected invalid config");
+        assert_eq!(err, "borrow_rate_mode must be > 0");
+    }
+
+    #[test]
+    fn validate_scenario_config_accepts_explicit_non_zero_config() {
+        let cfg = valid_scenario_config();
+        validate_scenario_config(&cfg).expect("expected valid config");
     }
 
     #[test]

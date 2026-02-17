@@ -113,10 +113,11 @@ Implemented outcomes:
 3. Shared Aave runtime state uses neutral actor naming (`supplier`, `borrower`) with explicit required scenario config values.
 4. Parity integration test uses explicit scenario values and validates origin contract kinds.
 5. Nix app registrations/configuration for origin fetch/compile/deploy are active in project configuration.
+6. Scenario config validation now hard-requires `fund_wei` to be parseable and `> 0`, with focused unit coverage for all numeric guard rails.
 
 Validation executed:
 1. `nix run .#check` (pass)
-2. `nix run .#test` (pass, 277/277)
+2. `nix run .#test` (pass, 284/284)
 3. `nix run .#ci -- --parity --summary` (pass)
    - Includes `parity-aave-v3-reth` passing.
 
