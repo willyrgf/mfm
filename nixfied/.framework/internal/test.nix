@@ -611,6 +611,129 @@ let
       exit "$HELPERS_RC"
     fi
 
+    log "env loader export propagation"
+    ENV_LOADER_STD_DIR="$WORKDIR/env-loader-standard"
+    ENV_LOADER_EPH_DIR="$WORKDIR/env-loader-ephemeral"
+    mkdir -p "$ENV_LOADER_STD_DIR" "$ENV_LOADER_EPH_DIR"
+
+    cat > "$ENV_LOADER_STD_DIR/.env" <<'EOF'
+    HELIOS_NETWORK=mainnet
+    EOF
+
+    cat > "$ENV_LOADER_EPH_DIR/.env" <<'EOF'
+    HELIOS_NETWORK=mainnet
+    EOF
+
+    ENV_LOADER_STD_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      project = import ./nixfied/project { inherit pkgs; };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+    in
+      lib.mkAppScript {
+        name = "env-loader-export-standard";
+        env = { };
+        useDeps = false;
+        script = import ./tests/framework/fixtures/helpers/env-loader-export.nix { };
+      }
+    NIX
+    )
+
+    ENV_LOADER_EPH_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      base = import ./nixfied/project { inherit pkgs; };
+      project = pkgs.lib.recursiveUpdate base {
+        project.id = "nixfied-env-loader-export-ephemeral-fixture";
+        ephemeral.enable = true;
+      };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      ephemeral = import ./nixfied/.framework/ephemeral.nix { inherit pkgs project; };
+    in
+      ephemeral.mkEphemeralWrapper {
+        name = "env-loader-export-ephemeral";
+        installDeps = false;
+        script = import ./tests/framework/fixtures/ephemeral/env-loader-export.nix { };
+      }
+    NIX
+    )
+
+    ENV_LOADER_STD_SCRIPT=$(build_expr "$ENV_LOADER_STD_EXPR")
+    ENV_LOADER_EPH_SCRIPT=$(build_expr "$ENV_LOADER_EPH_EXPR")
+
+    ENV_LOADER_STD_LOG="$WORKDIR/env-loader-standard.log"
+    set +e
+    (
+      cd "$ENV_LOADER_STD_DIR"
+      unset HELIOS_NETWORK
+      EXPECTED_HELIOS_NETWORK=mainnet "$ENV_LOADER_STD_SCRIPT"
+    ) >"$ENV_LOADER_STD_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      echo "Standard env loader fixture failed (rc=$RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 100 lines):" >&2
+      print_log_tail "$ENV_LOADER_STD_LOG" 100
+      exit "$RC"
+    fi
+
+    ENV_LOADER_STD_OVERRIDE_LOG="$WORKDIR/env-loader-standard-override.log"
+    set +e
+    (
+      cd "$ENV_LOADER_STD_DIR"
+      HELIOS_NETWORK=local EXPECTED_HELIOS_NETWORK=local "$ENV_LOADER_STD_SCRIPT"
+    ) >"$ENV_LOADER_STD_OVERRIDE_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      echo "Standard env override fixture failed (rc=$RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 100 lines):" >&2
+      print_log_tail "$ENV_LOADER_STD_OVERRIDE_LOG" 100
+      exit "$RC"
+    fi
+
+    ENV_LOADER_EPH_LOG="$WORKDIR/env-loader-ephemeral.log"
+    set +e
+    (
+      cd "$ENV_LOADER_EPH_DIR"
+      unset HELIOS_NETWORK
+      EXPECTED_HELIOS_NETWORK=mainnet "$ENV_LOADER_EPH_SCRIPT"
+    ) >"$ENV_LOADER_EPH_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      echo "Ephemeral env loader fixture failed (rc=$RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 100 lines):" >&2
+      print_log_tail "$ENV_LOADER_EPH_LOG" 100
+      exit "$RC"
+    fi
+
+    ENV_LOADER_EPH_OVERRIDE_LOG="$WORKDIR/env-loader-ephemeral-override.log"
+    set +e
+    (
+      cd "$ENV_LOADER_EPH_DIR"
+      HELIOS_NETWORK=local EXPECTED_HELIOS_NETWORK=local "$ENV_LOADER_EPH_SCRIPT"
+    ) >"$ENV_LOADER_EPH_OVERRIDE_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      echo "Ephemeral env override fixture failed (rc=$RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 100 lines):" >&2
+      print_log_tail "$ENV_LOADER_EPH_OVERRIDE_LOG" 100
+      exit "$RC"
+    fi
+
     log "slots env"
     SLOTS_DIR="$WORKDIR/slots"
     mkdir -p "$SLOTS_DIR"

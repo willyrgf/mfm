@@ -738,6 +738,7 @@ Process commands:
 - `nix run .#process::inspect -- <id>`
 - `nix run .#process::stop -- --run-id <id>`
 - `nix run .#process::stop -- --run-id <id> --scope slot-env`
+- `nix run .#process::stop -- --all`
 - `nix run .#process::stop -- --run-id <id> --dry-run`
 - `nix run .#process::gc`
 - `nix run .#process::gc -- --apply`

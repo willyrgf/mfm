@@ -270,8 +270,9 @@ let
 
       ${pathBlock}
 
-      # Load .env from original location (secrets shouldn't be copied)
-      ${envLoader.loadEnvFile} "$ORIGINAL_ROOT/.env"
+      # Load .env from original location (secrets shouldn't be copied) and
+      # source into this shell so exported keys are visible to app scripts.
+      source ${envLoader.loadEnvFile} "$ORIGINAL_ROOT/.env"
 
       ${contractPrelude}
 

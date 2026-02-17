@@ -102,9 +102,10 @@ let
     ENV_FILE_ENABLED="${if envFileEnabled then "1" else "0"}"
     ENV_FILE_STRICT="${if envFileStrict then "1" else "0"}"
     ENV_SPECS_FILE="${allowSpecsFile}"
-
-    if [ "$ENV_FILE_ENABLED" != "1" ]; then
-      exit 0
+    if [ "''${BASH_SOURCE[0]:-}" != "$0" ]; then
+      NIXFIED_ENV_LOADER_SOURCED=1
+    else
+      NIXFIED_ENV_LOADER_SOURCED=0
     fi
 
     validate_env_value() {
@@ -185,99 +186,115 @@ let
       return 0
     }
 
-    if [ ! -f "$ENV_FILE" ]; then
-      if [ "$ENV_FILE_STRICT" = "1" ]; then
-        while IFS= read -r SPEC_B64; do
-          [ -z "$SPEC_B64" ] && continue
-          SPEC_JSON="$(printf '%s' "$SPEC_B64" | ${pkgs.coreutils}/bin/base64 -d)"
-          SPEC_NAME="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.name')"
-          SPEC_REQUIRED="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.required')"
-          if [ "$SPEC_REQUIRED" = "true" ] && [ -z "''${!SPEC_NAME:-}" ]; then
-            echo "ERROR: required env key missing key=$SPEC_NAME source=.env" >&2
-            exit 1
+    nixfied_load_env_file_main() {
+      if [ "$ENV_FILE_ENABLED" != "1" ]; then
+        return 0
+      fi
+
+      if [ ! -f "$ENV_FILE" ]; then
+        if [ "$ENV_FILE_STRICT" = "1" ]; then
+          while IFS= read -r SPEC_B64; do
+            [ -z "$SPEC_B64" ] && continue
+            SPEC_JSON="$(printf '%s' "$SPEC_B64" | ${pkgs.coreutils}/bin/base64 -d)"
+            SPEC_NAME="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.name')"
+            SPEC_REQUIRED="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.required')"
+            if [ "$SPEC_REQUIRED" = "true" ] && [ -z "''${!SPEC_NAME:-}" ]; then
+              echo "ERROR: required env key missing key=$SPEC_NAME source=.env" >&2
+              return 1
+            fi
+          done < <(${pkgs.jq}/bin/jq -r '.[] | @base64' "$ENV_SPECS_FILE")
+        fi
+        return 0
+      fi
+
+      SPECS_MAP_JSON="$(${pkgs.jq}/bin/jq -c 'reduce .[] as $spec ({}; . + {($spec.name): $spec})' "$ENV_SPECS_FILE")"
+
+      while IFS= read -r RAW_LINE || [ -n "$RAW_LINE" ]; do
+        LINE="$(printf '%s' "$RAW_LINE" | ${pkgs.gnused}/bin/sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+        case "$LINE" in
+          \#*|"")
+            continue
+            ;;
+        esac
+
+        case "$LINE" in
+          *=*)
+            ;;
+          *)
+            echo "ERROR: invalid .env line (missing '=') line='$LINE'" >&2
+            return 1
+            ;;
+        esac
+
+        key="$(printf '%s' "$LINE" | ${pkgs.gnused}/bin/sed -E 's/=.*$//; s/[[:space:]]+$//')"
+        value="$(printf '%s' "$LINE" | ${pkgs.gnused}/bin/sed -E 's/^[^=]*=//')"
+
+        if ! printf '%s' "$key" | ${pkgs.gnugrep}/bin/grep -Eq '^[A-Z_][A-Z0-9_]*$'; then
+          echo "ERROR: invalid .env key token key='$key'" >&2
+          return 1
+        fi
+
+        value="$(printf '%s' "$value" | ${pkgs.gnused}/bin/sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
+
+        SPEC_JSON="$(printf '%s\n' "$SPECS_MAP_JSON" | ${pkgs.jq}/bin/jq -c --arg key "$key" '.[$key] // null')"
+        KNOWN_KEY="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r 'if . == null then "0" else "1" end')"
+
+        if [ "$KNOWN_KEY" != "1" ] && [ "$ENV_FILE_STRICT" = "1" ]; then
+          echo "ERROR: unknown .env key key=$key (strict mode enabled)" >&2
+          return 1
+        fi
+
+        if [ "$KNOWN_KEY" = "1" ]; then
+          SPEC_TYPE="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.type // "string"')"
+          if [ -z "''${!key:-}" ]; then
+            validate_env_value "$key" "$SPEC_TYPE" "$value" || return 1
+          else
+            validate_env_value "$key" "$SPEC_TYPE" "''${!key}" || return 1
           fi
-        done < <(${pkgs.jq}/bin/jq -r '.[] | @base64' "$ENV_SPECS_FILE")
-      fi
-      exit 0
-    fi
+        fi
 
-    SPECS_MAP_JSON="$(${pkgs.jq}/bin/jq -c 'reduce .[] as $spec ({}; . + {($spec.name): $spec})' "$ENV_SPECS_FILE")"
-
-    while IFS= read -r RAW_LINE || [ -n "$RAW_LINE" ]; do
-      LINE="$(printf '%s' "$RAW_LINE" | ${pkgs.gnused}/bin/sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-      case "$LINE" in
-        \#*|"")
-          continue
-          ;;
-      esac
-
-      case "$LINE" in
-        *=*)
-          ;;
-        *)
-          echo "ERROR: invalid .env line (missing '=') line='$LINE'" >&2
-          exit 1
-          ;;
-      esac
-
-      key="$(printf '%s' "$LINE" | ${pkgs.gnused}/bin/sed -E 's/=.*$//; s/[[:space:]]+$//')"
-      value="$(printf '%s' "$LINE" | ${pkgs.gnused}/bin/sed -E 's/^[^=]*=//')"
-
-      if ! printf '%s' "$key" | ${pkgs.gnugrep}/bin/grep -Eq '^[A-Z_][A-Z0-9_]*$'; then
-        echo "ERROR: invalid .env key token key='$key'" >&2
-        exit 1
-      fi
-
-      value="$(printf '%s' "$value" | ${pkgs.gnused}/bin/sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
-
-      SPEC_JSON="$(printf '%s\n' "$SPECS_MAP_JSON" | ${pkgs.jq}/bin/jq -c --arg key "$key" '.[$key] // null')"
-      KNOWN_KEY="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r 'if . == null then "0" else "1" end')"
-
-      if [ "$KNOWN_KEY" != "1" ] && [ "$ENV_FILE_STRICT" = "1" ]; then
-        echo "ERROR: unknown .env key key=$key (strict mode enabled)" >&2
-        exit 1
-      fi
-
-      if [ "$KNOWN_KEY" = "1" ]; then
-        SPEC_TYPE="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.type // "string"')"
         if [ -z "''${!key:-}" ]; then
-          validate_env_value "$key" "$SPEC_TYPE" "$value" || exit 1
+          export "$key=$value"
+        fi
+      done < "$ENV_FILE"
+
+      while IFS= read -r SPEC_B64; do
+        [ -z "$SPEC_B64" ] && continue
+        SPEC_JSON="$(printf '%s' "$SPEC_B64" | ${pkgs.coreutils}/bin/base64 -d)"
+        SPEC_NAME="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.name')"
+        SPEC_TYPE="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.type // "string"')"
+        SPEC_REQUIRED="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.required')"
+        SPEC_HAS_DEFAULT="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.hasDefault')"
+
+        if [ -z "''${!SPEC_NAME:-}" ]; then
+          if [ "$SPEC_HAS_DEFAULT" = "true" ]; then
+            SPEC_DEFAULT="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.default | tostring')"
+            validate_env_value "$SPEC_NAME" "$SPEC_TYPE" "$SPEC_DEFAULT" || return 1
+            export "$SPEC_NAME=$SPEC_DEFAULT"
+          elif [ "$SPEC_REQUIRED" = "true" ]; then
+            echo "ERROR: required env key missing key=$SPEC_NAME source=.env" >&2
+            return 1
+          fi
         else
-          validate_env_value "$key" "$SPEC_TYPE" "''${!key}" || exit 1
+          validate_env_value "$SPEC_NAME" "$SPEC_TYPE" "''${!SPEC_NAME}" || return 1
         fi
-      fi
+      done < <(${pkgs.jq}/bin/jq -r '.[] | @base64' "$ENV_SPECS_FILE")
 
-      if [ -z "''${!key:-}" ]; then
-        export "$key=$value"
-      fi
-    done < "$ENV_FILE"
+      return 0
+    }
 
-    while IFS= read -r SPEC_B64; do
-      [ -z "$SPEC_B64" ] && continue
-      SPEC_JSON="$(printf '%s' "$SPEC_B64" | ${pkgs.coreutils}/bin/base64 -d)"
-      SPEC_NAME="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.name')"
-      SPEC_TYPE="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.type // "string"')"
-      SPEC_REQUIRED="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.required')"
-      SPEC_HAS_DEFAULT="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.hasDefault')"
-
-      if [ -z "''${!SPEC_NAME:-}" ]; then
-        if [ "$SPEC_HAS_DEFAULT" = "true" ]; then
-          SPEC_DEFAULT="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.default | tostring')"
-          validate_env_value "$SPEC_NAME" "$SPEC_TYPE" "$SPEC_DEFAULT" || exit 1
-          export "$SPEC_NAME=$SPEC_DEFAULT"
-        elif [ "$SPEC_REQUIRED" = "true" ]; then
-          echo "ERROR: required env key missing key=$SPEC_NAME source=.env" >&2
-          exit 1
-        fi
-      else
-        validate_env_value "$SPEC_NAME" "$SPEC_TYPE" "''${!SPEC_NAME}" || exit 1
-      fi
-    done < <(${pkgs.jq}/bin/jq -r '.[] | @base64' "$ENV_SPECS_FILE")
+    NIXFIED_ENV_LOADER_RC=0
+    nixfied_load_env_file_main || NIXFIED_ENV_LOADER_RC=$?
+    if [ "$NIXFIED_ENV_LOADER_SOURCED" = "1" ]; then
+      return "$NIXFIED_ENV_LOADER_RC"
+    fi
+    exit "$NIXFIED_ENV_LOADER_RC"
   '';
 
   loadEnv = pkgs.writeShellScript "nixfied-load-env" ''
     set -euo pipefail
-    ${loadEnvFile} ".env"
+    # Source into the current shell so exported keys persist for app scripts.
+    source ${loadEnvFile} ".env"
   '';
 in
 {

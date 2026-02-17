@@ -737,6 +737,8 @@ let
 
     RUN_ID=""
     SCOPE="run"
+    SCOPE_SET=false
+    STOP_ALL=false
     DRY_RUN=false
     FORCE=false
     TIMEOUT_SECONDS="5"
@@ -749,7 +751,12 @@ let
           ;;
         --scope)
           SCOPE="$2"
+          SCOPE_SET=true
           shift 2
+          ;;
+        --all)
+          STOP_ALL=true
+          shift
           ;;
         --dry-run)
           DRY_RUN=true
@@ -770,18 +777,30 @@ let
       esac
     done
 
-    if [ -z "$RUN_ID" ]; then
-      echo "Usage: process-stop --run-id <id> [--scope run|slot-env] [--dry-run] [--force] [--timeout <seconds>]" >&2
+    if [ "$STOP_ALL" = "true" ] && [ -n "$RUN_ID" ]; then
+      echo "ERROR: --all cannot be combined with --run-id" >&2
       exit 1
     fi
 
-    case "$SCOPE" in
-      run|slot-env) ;;
-      *)
-        echo "ERROR: --scope must be one of run|slot-env (got '$SCOPE')" >&2
-        exit 1
-        ;;
-    esac
+    if [ "$STOP_ALL" = "true" ] && [ "$SCOPE_SET" = "true" ]; then
+      echo "ERROR: --all cannot be combined with --scope" >&2
+      exit 1
+    fi
+
+    if [ "$STOP_ALL" != "true" ] && [ -z "$RUN_ID" ]; then
+      echo "Usage: process-stop (--run-id <id> [--scope run|slot-env] | --all) [--dry-run] [--force] [--timeout <seconds>]" >&2
+      exit 1
+    fi
+
+    if [ "$STOP_ALL" != "true" ]; then
+      case "$SCOPE" in
+        run|slot-env) ;;
+        *)
+          echo "ERROR: --scope must be one of run|slot-env (got '$SCOPE')" >&2
+          exit 1
+          ;;
+      esac
+    fi
 
     case "$TIMEOUT_SECONDS" in
       *[!0-9]*|"")
@@ -795,7 +814,7 @@ let
       exit 1
     fi
 
-    PLAN_JSON=$(${pkgs.jq}/bin/jq -sr --arg run_id "$RUN_ID" --arg scope "$SCOPE" '
+    PLAN_JSON=$(${pkgs.jq}/bin/jq -sr --arg run_id "$RUN_ID" --arg scope "$SCOPE" --arg stop_all "$STOP_ALL" '
       def is_active:
         .state == "starting"
         or .state == "running"
@@ -820,78 +839,126 @@ let
         | sort_by((.seq // 0), (.timestamp // ""))
         | last;
 
-      (target_run) as $target
-      | if ($target == null) then
-          { error: "missing_run" }
-        else
-          ($target.slot // "") as $slot
-          | ($target.env // "") as $env
-          | if ($scope == "slot-env" and ($slot == "" or $env == "")) then
-              { error: "missing_slot_env" }
-            else
-              {
-                error: null,
-                target_slot: $slot,
-                target_env: $env,
-                service_rows:
-                  (
-                    [ .[] | select(.service != null and .service != "") ]
-                    | latest_by(service_key)
-                    | map(select(is_active and (.pid != null)))
-                    | map(
-                        select(
-                          if $scope == "run" then
-                            ((.run_id // "") == $run_id)
-                          else
-                            (((.slot // "") | tostring) == $slot and (.env // "") == $env)
-                          end
+      if ($stop_all == "true") then
+        {
+          error: null,
+          mode: "all",
+          target_slot: "",
+          target_env: "",
+          service_rows:
+            (
+              [ .[] | select(.service != null and .service != "") ]
+              | latest_by(service_key)
+              | map(select(is_active and (.pid != null)))
+              | map([
+                  "service",
+                  (.service // ""),
+                  (.run_id // ""),
+                  ((.slot // "") | tostring),
+                  (.env // ""),
+                  (.pid | tostring),
+                  ((.pgid // "") | tostring),
+                  (.command_name // ""),
+                  (.log_path // "")
+                ] | @tsv)
+            ),
+          run_rows:
+            (
+              [
+                .[]
+                | select(.run_id != null and .run_id != "")
+                | select(.event_type == "run_started" or .event_type == "run_finished")
+              ]
+              | latest_by(run_key)
+              | map(select(is_active and (.pid != null)))
+              | map([
+                  "run",
+                  (.run_id // ""),
+                  (.run_id // ""),
+                  ((.slot // "") | tostring),
+                  (.env // ""),
+                  (.pid | tostring),
+                  ((.pgid // "") | tostring),
+                  (.command_name // ""),
+                  ""
+                ] | @tsv)
+            )
+        }
+      else
+        (target_run) as $target
+        | if ($target == null) then
+            { error: "missing_run" }
+          else
+            ($target.slot // "") as $slot
+            | ($target.env // "") as $env
+            | if ($scope == "slot-env" and ($slot == "" or $env == "")) then
+                { error: "missing_slot_env" }
+              else
+                {
+                  error: null,
+                  mode: "run-id",
+                  target_slot: $slot,
+                  target_env: $env,
+                  service_rows:
+                    (
+                      [ .[] | select(.service != null and .service != "") ]
+                      | latest_by(service_key)
+                      | map(select(is_active and (.pid != null)))
+                      | map(
+                          select(
+                            if $scope == "run" then
+                              ((.run_id // "") == $run_id)
+                            else
+                              (((.slot // "") | tostring) == $slot and (.env // "") == $env)
+                            end
+                          )
                         )
-                      )
-                    | map([
-                        "service",
-                        (.service // ""),
-                        (.run_id // ""),
-                        ((.slot // "") | tostring),
-                        (.env // ""),
-                        (.pid | tostring),
-                        ((.pgid // "") | tostring),
-                        (.command_name // ""),
-                        (.log_path // "")
-                      ] | @tsv)
-                  ),
-                run_rows:
-                  (
-                    [
-                      .[]
-                      | select(.run_id != null and .run_id != "")
-                      | select(.event_type == "run_started" or .event_type == "run_finished")
-                    ]
-                    | latest_by(run_key)
-                    | map(select(is_active and (.pid != null)))
-                    | map(
-                        select(
-                          if $scope == "run" then
-                            ((.run_id // "") == $run_id)
-                          else
-                            (((.slot // "") | tostring) == $slot and (.env // "") == $env)
-                          end
+                      | map([
+                          "service",
+                          (.service // ""),
+                          (.run_id // ""),
+                          ((.slot // "") | tostring),
+                          (.env // ""),
+                          (.pid | tostring),
+                          ((.pgid // "") | tostring),
+                          (.command_name // ""),
+                          (.log_path // "")
+                        ] | @tsv)
+                    ),
+                  run_rows:
+                    (
+                      [
+                        .[]
+                        | select(.run_id != null and .run_id != "")
+                        | select(.event_type == "run_started" or .event_type == "run_finished")
+                      ]
+                      | latest_by(run_key)
+                      | map(select(is_active and (.pid != null)))
+                      | map(
+                          select(
+                            if $scope == "run" then
+                              ((.run_id // "") == $run_id)
+                            else
+                              (((.slot // "") | tostring) == $slot and (.env // "") == $env)
+                            end
+                          )
                         )
-                      )
-                    | map([
-                        "run",
-                        (.run_id // ""),
-                        (.run_id // ""),
-                        ((.slot // "") | tostring),
-                        (.env // ""),
-                        (.pid | tostring),
-                        ((.pgid // "") | tostring),
-                        (.command_name // ""),
-                        ""
-                      ] | @tsv)
-                  )
-              }
-            end
-        end
+                      | map([
+                          "run",
+                          (.run_id // ""),
+                          (.run_id // ""),
+                          ((.slot // "") | tostring),
+                          (.env // ""),
+                          (.pid | tostring),
+                          ((.pgid // "") | tostring),
+                          (.command_name // ""),
+                          ""
+                        ] | @tsv)
+                    )
+                }
+              end
+          end
+      end
     ' "$EVENTS_FILE")
 
     PLAN_ERROR=$(echo "$PLAN_JSON" | ${pkgs.jq}/bin/jq -r '.error // ""')
@@ -906,17 +973,28 @@ let
         exit 1
         ;;
       *)
-        echo "ERROR: failed to build stop plan run_id=$RUN_ID error=$PLAN_ERROR" >&2
+        if [ "$STOP_ALL" = "true" ]; then
+          echo "ERROR: failed to build stop plan mode=all error=$PLAN_ERROR" >&2
+        else
+          echo "ERROR: failed to build stop plan run_id=$RUN_ID error=$PLAN_ERROR" >&2
+        fi
         exit 1
         ;;
     esac
 
+    TARGET_MODE=$(echo "$PLAN_JSON" | ${pkgs.jq}/bin/jq -r '.mode // ""')
     TARGET_SLOT=$(echo "$PLAN_JSON" | ${pkgs.jq}/bin/jq -r '.target_slot // ""')
     TARGET_ENV=$(echo "$PLAN_JSON" | ${pkgs.jq}/bin/jq -r '.target_env // ""')
     TARGET_ROWS=$(echo "$PLAN_JSON" | ${pkgs.jq}/bin/jq -r '(.service_rows + .run_rows)[]?')
 
+    if [ "$TARGET_MODE" = "all" ]; then
+      STOP_CONTEXT="mode=all"
+    else
+      STOP_CONTEXT="mode=run-id run_id=$RUN_ID scope=$SCOPE slot=''${TARGET_SLOT:-unknown} env=''${TARGET_ENV:-unknown}"
+    fi
+
     if [ -z "$TARGET_ROWS" ]; then
-      echo "OK: no active entities matched run_id=$RUN_ID scope=$SCOPE slot=''${TARGET_SLOT:-unknown} env=''${TARGET_ENV:-unknown}"
+      echo "OK: no active entities matched $STOP_CONTEXT"
       exit 0
     fi
 
@@ -1026,16 +1104,16 @@ let
     done <<< "$TARGET_ROWS"
 
     if [ "$DRY_RUN" = "true" ]; then
-      echo "INFO: process stop dry-run complete run_id=$RUN_ID scope=$SCOPE slot=''${TARGET_SLOT:-unknown} env=''${TARGET_ENV:-unknown}"
+      echo "INFO: process stop dry-run complete $STOP_CONTEXT"
       exit 0
     fi
 
     if [ "$FAILED" -gt 0 ]; then
-      echo "ERROR: process stop completed with failures run_id=$RUN_ID scope=$SCOPE stopped=$STOPPED skipped=$SKIPPED failed=$FAILED" >&2
+      echo "ERROR: process stop completed with failures $STOP_CONTEXT stopped=$STOPPED skipped=$SKIPPED failed=$FAILED" >&2
       exit 1
     fi
 
-    echo "OK: process stop complete run_id=$RUN_ID scope=$SCOPE stopped=$STOPPED skipped=$SKIPPED"
+    echo "OK: process stop complete $STOP_CONTEXT stopped=$STOPPED skipped=$SKIPPED"
   '';
 
   processGc = pkgs.writeShellScript "process-gc" ''

@@ -279,11 +279,12 @@ let
     }
     {
       name = "process::stop";
-      summary = "Stop active entities by run id";
-      details = "Stops active run and service processes tied to a run id. Use --scope slot-env to stop all active entities in the same slot/env.";
+      summary = "Stop active entities by run id or globally";
+      details = "Stops active run and service processes tied to a run id. Use --scope slot-env to stop all active entities in the same slot/env, or use --all to stop every active entity across all slots/envs.";
       usage = [
         "nix run .#process::stop -- --run-id <id>"
         "nix run .#process::stop -- --run-id <id> --scope slot-env"
+        "nix run .#process::stop -- --all"
         "nix run .#process::stop -- --run-id <id> --dry-run"
       ];
       tool = lib.processStop;
