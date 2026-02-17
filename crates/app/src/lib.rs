@@ -31,6 +31,9 @@ use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
 use mfm_machine::stores::{ArtifactStore, EventStore};
+use mfm_op_aave_v3_configure_runtime::AaveV3ConfigureRuntimeOp;
+use mfm_op_aave_v3_deploy_runtime::AaveV3DeployRuntimeOp;
+use mfm_op_aave_v3_scenario::AaveV3ScenarioOp;
 use mfm_op_common::local_io::LocalOpIoTransportFactory;
 use mfm_op_evm_deploy_configure_validate::{
     EvmDeployConfigureValidateOp, EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID,
@@ -374,6 +377,30 @@ impl LiveIoTransport for PortfolioLiveIoTransport {
     }
 }
 
+struct AaveOutputLiveIoTransportFactory;
+
+impl LiveIoTransportFactory for AaveOutputLiveIoTransportFactory {
+    fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
+        Box::new(AaveOutputLiveIoTransport)
+    }
+}
+
+struct AaveOutputLiveIoTransport;
+
+#[async_trait]
+impl LiveIoTransport for AaveOutputLiveIoTransport {
+    async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
+        match call.namespace.as_str() {
+            "aave.output" => Ok(call.request),
+            other => Err(IoError::Other(info(
+                "unknown_namespace",
+                ErrorCategory::Unknown,
+                format!("unknown namespace: {other}"),
+            ))),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct EngineBundle {
     pub engine: Arc<dyn ExecutionEngine>,
@@ -397,6 +424,9 @@ pub fn make_engine_bundle() -> EngineBundle {
     reg.register(Arc::new(EvmDeployConfigureValidateOp));
     reg.register(Arc::new(PortfolioTrackerOp));
     reg.register(Arc::new(NixAppOp));
+    reg.register(Arc::new(AaveV3DeployRuntimeOp));
+    reg.register(Arc::new(AaveV3ConfigureRuntimeOp));
+    reg.register(Arc::new(AaveV3ScenarioOp));
     let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
 
     let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
@@ -419,6 +449,10 @@ pub fn make_engine_bundle() -> EngineBundle {
     routes.insert(
         "portfolio".to_string(),
         Arc::new(PortfolioLiveIoTransportFactory),
+    );
+    routes.insert(
+        "aave".to_string(),
+        Arc::new(AaveOutputLiveIoTransportFactory),
     );
     routes.insert(
         "exec".to_string(),

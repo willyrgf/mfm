@@ -120,6 +120,112 @@ let
         artifact="$tmp/out/MockERC20.sol/MockERC20.json"
         ${pkgs.jq}/bin/jq -c '{artifact:{abi:.abi,bytecode:{object:.bytecode.object}}}' "$artifact"
   '';
+
+  contractArtifactMockAavePoolTool = pkgs.writeShellScriptBin "mfm-contract-artifact-mock-aave-v3-pool" ''
+        set -euo pipefail
+
+        tmp="$(${pkgs.coreutils}/bin/mktemp -d)"
+        cleanup() { ${pkgs.coreutils}/bin/rm -rf "$tmp"; }
+        trap cleanup EXIT
+
+        ${pkgs.coreutils}/bin/mkdir -p "$tmp/src"
+        ${pkgs.coreutils}/bin/cp "${../../contracts/src/MockAaveV3Pool.sol}" "$tmp/src/MockAaveV3Pool.sol"
+
+        cat > "$tmp/foundry.toml" <<'EOF'
+    [profile.default]
+    src = "src"
+    out = "out"
+    libs = ["lib"]
+    optimizer = true
+    optimizer_runs = 200
+    solc = "${pkgs.solc}/bin/solc"
+    EOF
+
+        (
+          cd "$tmp"
+          ${pkgs.foundry}/bin/forge build --quiet > /dev/null
+        )
+
+        artifact="$tmp/out/MockAaveV3Pool.sol/MockAaveV3Pool.json"
+        ${pkgs.jq}/bin/jq -c '{artifact:{abi:.abi,bytecode:{object:.bytecode.object}}}' "$artifact"
+  '';
+
+  aaveV3ContractsFetchTool = pkgs.writeShellScriptBin "mfm-aave-v3-contracts-fetch" ''
+        set -euo pipefail
+        ${pkgs.jq}/bin/jq -n -c '{
+          kind: "aave_v3_contract_source_v1",
+          source: {
+            kind: "local_mock_contracts",
+            contracts: ["MockERC20", "MockAaveV3Pool"],
+            pinned: true
+          }
+        }'
+  '';
+
+  aaveV3CompileManifestTool = pkgs.writeShellScriptBin "mfm-aave-v3-compile-manifest" ''
+        set -euo pipefail
+
+        tmp="$(${pkgs.coreutils}/bin/mktemp -d)"
+        cleanup() { ${pkgs.coreutils}/bin/rm -rf "$tmp"; }
+        trap cleanup EXIT
+
+        ${pkgs.coreutils}/bin/mkdir -p "$tmp/src"
+        ${pkgs.coreutils}/bin/cp "${../../contracts/src/MockERC20.sol}" "$tmp/src/MockERC20.sol"
+        ${pkgs.coreutils}/bin/cp "${../../contracts/src/MockAaveV3Pool.sol}" "$tmp/src/MockAaveV3Pool.sol"
+
+        cat > "$tmp/foundry.toml" <<'EOF'
+    [profile.default]
+    src = "src"
+    out = "out"
+    libs = ["lib"]
+    optimizer = true
+    optimizer_runs = 200
+    solc = "${pkgs.solc}/bin/solc"
+    EOF
+
+        (
+          cd "$tmp"
+          ${pkgs.foundry}/bin/forge build --quiet > /dev/null
+        )
+
+        token_artifact="$tmp/out/MockERC20.sol/MockERC20.json"
+        pool_artifact="$tmp/out/MockAaveV3Pool.sol/MockAaveV3Pool.json"
+
+        usdc_abi=$(${pkgs.jq}/bin/jq -c '.abi' "$token_artifact")
+        usdc_bytecode=$(${pkgs.jq}/bin/jq -r '.bytecode.object' "$token_artifact")
+        wbtc_abi=$usdc_abi
+        wbtc_bytecode=$usdc_bytecode
+        pool_abi=$(${pkgs.jq}/bin/jq -c '.abi' "$pool_artifact")
+        pool_bytecode=$(${pkgs.jq}/bin/jq -r '.bytecode.object' "$pool_artifact")
+
+        ${pkgs.jq}/bin/jq -n -c \
+          --argjson usdc_abi "$usdc_abi" \
+          --arg usdc_bytecode "$usdc_bytecode" \
+          --argjson wbtc_abi "$wbtc_abi" \
+          --arg wbtc_bytecode "$wbtc_bytecode" \
+          --argjson pool_abi "$pool_abi" \
+          --arg pool_bytecode "$pool_bytecode" \
+          '{
+            kind: "aave_v3_compile_manifest_v1",
+            contracts: [
+              {
+                id: "usdc",
+                artifact: { abi: $usdc_abi, bytecode: { object: $usdc_bytecode } },
+                constructor_args: ["Mock USDC", "USDC", 6]
+              },
+              {
+                id: "wbtc",
+                artifact: { abi: $wbtc_abi, bytecode: { object: $wbtc_bytecode } },
+                constructor_args: ["Mock WBTC", "WBTC", 8]
+              },
+              {
+                id: "pool",
+                artifact: { abi: $pool_abi, bytecode: { object: $pool_bytecode } },
+                constructor_args: []
+              }
+            ]
+          }'
+  '';
 in
 rec {
   project = {
@@ -251,6 +357,9 @@ rec {
       pkgs.minio
       contractArtifactTool
       contractArtifactMockErc20Tool
+      contractArtifactMockAavePoolTool
+      aaveV3ContractsFetchTool
+      aaveV3CompileManifestTool
     ]
     ++ rustToolchainPackages
     ++ [ cargoNightly ];

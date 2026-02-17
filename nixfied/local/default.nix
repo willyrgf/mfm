@@ -172,6 +172,27 @@
         tool = "mfm-contract-artifact-mock-erc20";
       };
 
+      evm-contract-artifact-mock-aave-v3-pool = mkFoundryArtifactApp {
+        name = "evm-contract-artifact-mock-aave-v3-pool";
+        summary = "Build MockAaveV3Pool artifact JSON";
+        details = "Compiles contracts/src/MockAaveV3Pool.sol with Foundry and prints compact JSON {artifact:{abi,bytecode.object}} to stdout.";
+        tool = "mfm-contract-artifact-mock-aave-v3-pool";
+      };
+
+      aave-v3-contracts-fetch = mkFoundryArtifactApp {
+        name = "aave-v3-contracts-fetch";
+        summary = "Fetch Aave v3 source metadata";
+        details = "Pinned Nix app that emits source identity metadata for the Aave v3 parity pipeline.";
+        tool = "mfm-aave-v3-contracts-fetch";
+      };
+
+      aave-v3-contracts-compile = mkFoundryArtifactApp {
+        name = "aave-v3-contracts-compile";
+        summary = "Compile Aave v3 parity manifest";
+        details = "Pinned Nix app that compiles local Aave v3 mock contracts and emits a typed deploy manifest.";
+        tool = "mfm-aave-v3-compile-manifest";
+      };
+
       "mfm::keystore::import" = mkMfmCliJsonApp {
         name = "mfm::keystore::import";
         summary = "Import a private key or mnemonic into keystore";

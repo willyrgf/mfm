@@ -349,6 +349,7 @@ in
           "parity-s3"
           "parity-rest-api-smoke"
           "parity-evm-reth"
+          "parity-aave-v3-reth"
           "parity-portfolio-tracker-reth"
           "parity-keystore-reth-tx-sign-send"
           "parity-evm-helios-smoke"
@@ -579,6 +580,49 @@ in
             argv = [
               "."
               (ciStepScript "parity-evm-reth")
+            ];
+          }
+        ];
+      };
+
+      parity-aave-v3-reth = {
+        description = "Parity: Aave v3 deploy/configure/lend/borrow scenario on reth";
+        env = {
+          AUTO_STOP_CONFLICTING = "1";
+        };
+        fixtures = {
+          services = [
+            {
+              name = "postgres";
+              profile = "test";
+            }
+            {
+              name = "minio";
+              profile = "test";
+              exports = [ "s3" ];
+              bucket = "mfm-test";
+              prefix = "mfm-artifacts";
+              region = "us-east-1";
+              bootstrap = [ "mfm-test" ];
+              logName = "minio-aave-v3.log";
+            }
+            {
+              name = "reth";
+              profile = "test";
+              logName = "reth-aave-v3.log";
+            }
+          ];
+          artifacts = {
+            logs = true;
+            prefix = "parity-aave-v3-reth";
+          };
+        };
+        actions = [
+          {
+            kind = "exec";
+            argv = [
+              "."
+              (ciStepScript "parity-aave-v3-reth")
             ];
           }
         ];

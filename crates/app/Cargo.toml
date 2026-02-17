@@ -24,6 +24,9 @@ mfm-op-evm-write = { path = "../ops/evm-write-op" }
 mfm-op-evm-deploy-configure-validate = { path = "../ops/evm-deploy-configure-validate-op" }
 mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
 mfm-op-nix-app = { path = "../ops/nix-app-op" }
+mfm-op-aave-v3-deploy-runtime = { path = "../ops/aave-v3-deploy-runtime-op" }
+mfm-op-aave-v3-configure-runtime = { path = "../ops/aave-v3-configure-runtime-op" }
+mfm-op-aave-v3-scenario = { path = "../ops/aave-v3-scenario-op" }
 mfm-artifact-store-fs = { path = "../storages/artifact-store-fs" }
 mfm-artifact-store-s3 = { path = "../storages/artifact-store-s3" }
 mfm-event-store-postgres = { path = "../storages/event-store-postgres" }

@@ -9,6 +9,7 @@
     "clippy" = import ./steps/clippy.nix { inherit pkgs; };
     "fmt" = import ./steps/fmt.nix { inherit pkgs; };
     "mainnet-portfolio-snapshot-helios" = import ./steps/mainnet-portfolio-snapshot-helios.nix { inherit pkgs; };
+    "parity-aave-v3-reth" = import ./steps/parity-aave-v3-reth.nix { inherit pkgs; };
     "parity-evm-helios-smoke" = import ./steps/parity-evm-helios-smoke.nix { inherit pkgs; };
     "parity-evm-reth" = import ./steps/parity-evm-reth.nix { inherit pkgs; };
     "parity-keystore-reth-tx-sign-send" = import ./steps/parity-keystore-reth-tx-sign-send.nix { inherit pkgs; };

@@ -29,6 +29,9 @@ members = [
 	"crates/ops/evm-deploy-configure-validate-op",
 	"crates/ops/portfolio-tracker-op",
 	"crates/ops/nix-app-op",
+	"crates/ops/aave-v3-deploy-runtime-op",
+	"crates/ops/aave-v3-configure-runtime-op",
+	"crates/ops/aave-v3-scenario-op",
 	"crates/ops/proof-op",
 	"crates/tools/architecture-verify",
 ]

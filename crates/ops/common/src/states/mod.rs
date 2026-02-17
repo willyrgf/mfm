@@ -1,3 +1,4 @@
+pub mod aave_v3;
 pub mod evm;
 pub mod evm_dcv;
 pub mod evm_write;
