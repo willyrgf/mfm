@@ -2,6 +2,7 @@
 pkgs.writeText "mfm-ci-teardown.sh" ''
 # Keep teardown diagnostics best-effort so step failures remain the primary CI exit code.
 CI_DIAG_EVENTS_LIMIT="''${CI_DIAG_EVENTS_LIMIT:-200}"
+CI_PROCESS_STOP_TIMEOUT_SECS="''${CI_PROCESS_STOP_TIMEOUT_SECS:-20}"
 
 _ci_truthy() {
   case "''${1:-}" in
@@ -70,7 +71,15 @@ capture_service_diag() {
 capture_diag "ci-diagnostics-process-status.log" "process" nix run .#process::status -- --all
 capture_diag "ci-diagnostics-process-runs.log" "process" nix run .#process::runs -- --all
 capture_diag "ci-diagnostics-process-slots.log" "process" nix run .#process::slots -- --all
-capture_diag "ci-diagnostics-process-gc.log" "process" nix run .#process::gc
+# CI parity modes can intentionally keep fixture services running across steps
+# (same-slot reuse). Stop the run-scoped processes before ephemeral root cleanup.
+if [ -n "''${RUN_ID:-}" ]; then
+  capture_diag "ci-diagnostics-process-stop.log" "process" \
+    nix run .#process::stop -- --run-id "$RUN_ID" --scope slot-env --timeout "$CI_PROCESS_STOP_TIMEOUT_SECS" --force
+else
+  echo "WARN: RUN_ID is unset; skipping process::stop run-scoped cleanup" >&2
+fi
+capture_diag "ci-diagnostics-process-gc.log" "process" nix run .#process::gc -- --apply
 
 for service in postgres minio reth helios nginx; do
   capture_service_diag "$service"
