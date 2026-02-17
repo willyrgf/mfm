@@ -361,7 +361,7 @@ fn parity_keystore_tx_send_raw_fails_without_rpc_url() {
     std::fs::write(&raw_file, "0x0201").expect("write payload");
 
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
-    let output = cmd
+    let output = sanitize_machine_readable_cli_env(&mut cmd)
         .env_remove("MFM_EVM_RPC_URL")
         .args([
             "--output-format",
@@ -386,7 +386,8 @@ fn run_import_private_key(
     private_key_hex: &str,
 ) -> Output {
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
-    cmd.env("MFM_INTEGRATION_TEST", "1")
+    sanitize_machine_readable_cli_env(&mut cmd)
+        .env("MFM_INTEGRATION_TEST", "1")
         .env("MFM_KEYSTORE_PASSWORD_FILE", password_file)
         .args([
             "--output-format",
@@ -452,7 +453,8 @@ fn run_tx_sign_with_selector(
     out: &Path,
 ) -> Output {
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
-    cmd.env("MFM_INTEGRATION_TEST", "1")
+    sanitize_machine_readable_cli_env(&mut cmd)
+        .env("MFM_INTEGRATION_TEST", "1")
         .env("MFM_KEYSTORE_PASSWORD_FILE", password_file)
         .args([
             "--output-format",
@@ -489,7 +491,7 @@ fn run_tx_sign_with_selector(
 
 fn run_tx_send_raw(input_path: &Path, rpc_url: &str) -> Output {
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
-    cmd.args([
+    sanitize_machine_readable_cli_env(&mut cmd).args([
         "--output-format",
         "json",
         "keystore",
@@ -624,6 +626,15 @@ fn parse_hex_u64(raw: &str) -> u64 {
         return 0;
     }
     u64::from_str_radix(hex, 16).expect("u64 hex parse")
+}
+
+fn sanitize_machine_readable_cli_env(cmd: &mut Command) -> &mut Command {
+    // Keep JSON response channels deterministic for parity tests even when the parent
+    // environment enables tracing (e.g. RUST_LOG/MFM_LOG in CI debug runs).
+    cmd.env_remove("MFM_LOG")
+        .env_remove("RUST_LOG")
+        .env_remove("MFM_LOG_FORMAT")
+        .env_remove("MFM_LOG_SPAN_EVENTS")
 }
 
 fn parse_hex_u128(raw: &str) -> u128 {
