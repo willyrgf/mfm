@@ -357,6 +357,7 @@ in
           "parity-evm-reth"
           "parity-aave-v3-reth"
           "parity-portfolio-tracker-reth"
+          "parity-postgres-state-events-audit"
           "parity-keystore-reth-tx-sign-send"
           "parity-evm-helios-smoke"
         ];
@@ -672,6 +673,49 @@ in
             argv = [
               "."
               (ciStepScript "parity-portfolio-tracker-reth")
+            ];
+          }
+        ];
+      };
+
+      parity-postgres-state-events-audit = {
+        description = "Parity: audit Postgres kernel state events after multi-state reth pipelines";
+        env = {
+          AUTO_STOP_CONFLICTING = "1";
+        };
+        fixtures = {
+          services = [
+            {
+              name = "postgres";
+              profile = "test";
+            }
+            {
+              name = "minio";
+              profile = "test";
+              exports = [ "s3" ];
+              bucket = "mfm-test";
+              prefix = "mfm-artifacts";
+              region = "us-east-1";
+              bootstrap = [ "mfm-test" ];
+              logName = "minio-postgres-state-events-audit.log";
+            }
+            {
+              name = "reth";
+              profile = "test";
+              logName = "reth-postgres-state-events-audit.log";
+            }
+          ];
+          artifacts = {
+            logs = true;
+            prefix = "parity-postgres-state-events-audit";
+          };
+        };
+        actions = [
+          {
+            kind = "exec";
+            argv = [
+              "."
+              (ciStepScript "parity-postgres-state-events-audit")
             ];
           }
         ];

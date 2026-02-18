@@ -20,6 +20,9 @@
     "parity-portfolio-tracker-reth" = import ./steps/parity-portfolio-tracker-reth.nix {
       inherit pkgs;
     };
+    "parity-postgres-state-events-audit" = import ./steps/parity-postgres-state-events-audit.nix {
+      inherit pkgs;
+    };
     "parity-postgres" = import ./steps/parity-postgres.nix { inherit pkgs; };
     "parity-rest-api-smoke" = import ./steps/parity-rest-api-smoke.nix { inherit pkgs; };
     "parity-s3" = import ./steps/parity-s3.nix { inherit pkgs; };

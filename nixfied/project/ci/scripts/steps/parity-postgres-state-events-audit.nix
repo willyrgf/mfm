@@ -1,0 +1,16 @@
+{ pkgs }:
+pkgs.writeText "mfm-ci-steps-parity-postgres-state-events-audit.sh" ''
+  eval "$($SLOT_INFO)"
+
+  export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
+
+  export MFM_S3_ENDPOINT="$MINIO_ENDPOINT"
+  export MFM_S3_REGION="$MINIO_REGION"
+  export MFM_S3_BUCKET="$MINIO_BUCKET"
+  export MFM_S3_PREFIX="$MINIO_PREFIX"
+
+  export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
+
+  LOGFILE=$(artifact_path "parity-postgres-state-events-audit.log")
+  log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_postgres_state_events_audit
+''
