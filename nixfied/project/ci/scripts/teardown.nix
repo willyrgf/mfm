@@ -2,6 +2,7 @@
 pkgs.writeText "mfm-ci-teardown.sh" ''
 # Keep teardown diagnostics best-effort so step failures remain the primary CI exit code.
 CI_DIAG_EVENTS_LIMIT="''${CI_DIAG_EVENTS_LIMIT:-200}"
+CI_DIAG_LOG_LINES="''${CI_DIAG_LOG_LINES:-200}"
 CI_PROCESS_STOP_TIMEOUT_SECS="''${CI_PROCESS_STOP_TIMEOUT_SECS:-20}"
 
 _ci_truthy() {
@@ -11,16 +12,42 @@ _ci_truthy() {
   esac
 }
 
-ci_debug() {
+_resolve_ci_log_level() {
+  if [ -n "''${CI_LOG_LEVEL:-}" ]; then
+    printf '%s' "$CI_LOG_LEVEL"
+    return 0
+  fi
+
   if _ci_truthy "''${CI_VERBOSE:-0}" || _ci_truthy "''${NIXFIED_VERBOSE:-0}" || _ci_truthy "''${NIXFIED_DEBUG:-0}"; then
+    printf '%s' "debug"
+    return 0
+  fi
+
+  if [ -n "''${NIXFIED_LOG_LEVEL:-}" ]; then
+    printf '%s' "$NIXFIED_LOG_LEVEL"
+    return 0
+  fi
+
+  if [ -n "''${LOG_LEVEL:-}" ]; then
+    printf '%s' "$LOG_LEVEL"
+    return 0
+  fi
+}
+
+_ci_debug_enabled() {
+  local level_lower=""
+  level_lower="$(_resolve_ci_log_level | tr '[:upper:]' '[:lower:]')"
+  case "$level_lower" in
+    *debug*|*trace*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ci_debug() {
+  if _ci_debug_enabled; then
     echo "DEBUG: $*" >&2
     return 0
   fi
-  case "''${NIXFIED_LOG_LEVEL:-}" in
-    debug|DEBUG|trace|TRACE)
-      echo "DEBUG: $*" >&2
-      ;;
-  esac
 }
 
 capture_diag() {
@@ -54,10 +81,12 @@ capture_service_diag() {
   local token=""
   local status_hook=""
   local events_hook=""
+  local logs_hook=""
 
   token=$(echo "$service" | tr '[:lower:]' '[:upper:]' | tr '.:/-' '_')
   status_hook="SVC_''${token}_STATUS"
   events_hook="SVC_''${token}_EVENTS"
+  logs_hook="SVC_''${token}_LOG"
 
   if has_hook "$status_hook"; then
     capture_diag "ci-diagnostics-service-''${service}-status.log" "service-status" run_hook "$status_hook"
@@ -65,6 +94,10 @@ capture_service_diag() {
 
   if has_hook "$events_hook"; then
     capture_diag "ci-diagnostics-service-''${service}-events.log" "service-events" run_hook "$events_hook" --limit "$CI_DIAG_EVENTS_LIMIT"
+  fi
+
+  if _ci_debug_enabled && has_hook "$logs_hook"; then
+    capture_diag "ci-diagnostics-service-''${service}-log.log" "service-log" run_hook "$logs_hook" -- --lines "$CI_DIAG_LOG_LINES"
   fi
 }
 

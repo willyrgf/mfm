@@ -10,6 +10,9 @@ use crate::{AppError, ErrorClass};
 pub const ENV_MFM_LOG: &str = "MFM_LOG";
 pub const ENV_MFM_LOG_FORMAT: &str = "MFM_LOG_FORMAT";
 pub const ENV_MFM_LOG_SPAN_EVENTS: &str = "MFM_LOG_SPAN_EVENTS";
+pub const ENV_LOG_LEVEL: &str = "LOG_LEVEL";
+pub const ENV_LOG_FORMAT: &str = "LOG_FORMAT";
+pub const ENV_LOG_SPAN_EVENTS: &str = "LOG_SPAN_EVENTS";
 pub const ENV_RUST_LOG: &str = "RUST_LOG";
 
 const DEFAULT_FILTER: &str = "warn,mfm=info,tower_http=info";
@@ -47,19 +50,54 @@ fn parse_span_events(raw: &str) -> FmtSpan {
     }
 }
 
+fn resolve_log_filter<F>(default_filter: &str, mut lookup: F) -> String
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    for key in [ENV_MFM_LOG, ENV_LOG_LEVEL, ENV_RUST_LOG] {
+        if let Some(value) = lookup(key) {
+            return value;
+        }
+    }
+    default_filter.to_string()
+}
+
+fn resolve_log_format<F>(mut lookup: F) -> LogFormat
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    for key in [ENV_MFM_LOG_FORMAT, ENV_LOG_FORMAT] {
+        if let Some(raw) = lookup(key) {
+            return parse_format(&raw);
+        }
+    }
+    LogFormat::Text
+}
+
+fn resolve_log_span_events<F>(mut lookup: F) -> FmtSpan
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    for key in [ENV_MFM_LOG_SPAN_EVENTS, ENV_LOG_SPAN_EVENTS] {
+        if let Some(raw) = lookup(key) {
+            return parse_span_events(&raw);
+        }
+    }
+    FmtSpan::NONE
+}
+
 pub fn observability_from_env(app_name: &'static str) -> ObservabilityConfig {
-    let default_filter = DEFAULT_FILTER.to_string();
-    let filter = std::env::var(ENV_MFM_LOG)
-        .or_else(|_| std::env::var(ENV_RUST_LOG))
-        .unwrap_or_else(|_| default_filter.clone());
+    observability_from_env_with_default(app_name, DEFAULT_FILTER)
+}
 
-    let format = std::env::var(ENV_MFM_LOG_FORMAT)
-        .map(|raw| parse_format(&raw))
-        .unwrap_or(LogFormat::Text);
-
-    let span_events = std::env::var(ENV_MFM_LOG_SPAN_EVENTS)
-        .map(|raw| parse_span_events(&raw))
-        .unwrap_or(FmtSpan::NONE);
+pub fn observability_from_env_with_default(
+    app_name: &'static str,
+    default_filter: &str,
+) -> ObservabilityConfig {
+    let default_filter = default_filter.to_string();
+    let filter = resolve_log_filter(&default_filter, |name| std::env::var(name).ok());
+    let format = resolve_log_format(|name| std::env::var(name).ok());
+    let span_events = resolve_log_span_events(|name| std::env::var(name).ok());
 
     let ansi = matches!(format, LogFormat::Text) && std::io::stderr().is_terminal();
 
@@ -79,7 +117,10 @@ pub fn init_observability(config: ObservabilityConfig) -> Result<(), AppError> {
         AppError::new(
             ErrorClass::BadRequest,
             "InvalidLogFilter",
-            format!("invalid {} value", ENV_MFM_LOG),
+            format!(
+                "invalid log filter value (supported env vars: {}, {}, {})",
+                ENV_MFM_LOG, ENV_LOG_LEVEL, ENV_RUST_LOG
+            ),
         )
     })?;
 
@@ -113,4 +154,79 @@ pub fn init_observability(config: ObservabilityConfig) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn lookup_from(entries: &[(&str, &str)]) -> impl FnMut(&str) -> Option<String> {
+        let vars: HashMap<String, String> = entries
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect();
+        move |name| vars.get(name).cloned()
+    }
+
+    #[test]
+    fn filter_resolution_prefers_component_overrides_before_global_level() {
+        let filter = resolve_log_filter(
+            "warn,mfm=info",
+            lookup_from(&[
+                (ENV_LOG_LEVEL, "warn"),
+                (ENV_RUST_LOG, "debug"),
+                (ENV_MFM_LOG, "trace,mfm=trace"),
+            ]),
+        );
+
+        assert_eq!(filter, "trace,mfm=trace");
+    }
+
+    #[test]
+    fn filter_resolution_uses_log_level_before_rust_log() {
+        let filter = resolve_log_filter(
+            "warn,mfm=info",
+            lookup_from(&[(ENV_LOG_LEVEL, "info"), (ENV_RUST_LOG, "debug")]),
+        );
+
+        assert_eq!(filter, "info");
+    }
+
+    #[test]
+    fn filter_resolution_falls_back_to_default() {
+        let filter = resolve_log_filter("warn,mfm=info", lookup_from(&[]));
+        assert_eq!(filter, "warn,mfm=info");
+    }
+
+    #[test]
+    fn format_resolution_supports_global_alias() {
+        let format = resolve_log_format(lookup_from(&[(ENV_LOG_FORMAT, "json")]));
+        assert_eq!(format, LogFormat::Json);
+    }
+
+    #[test]
+    fn format_resolution_prefers_legacy_override() {
+        let format = resolve_log_format(lookup_from(&[
+            (ENV_LOG_FORMAT, "text"),
+            (ENV_MFM_LOG_FORMAT, "json"),
+        ]));
+        assert_eq!(format, LogFormat::Json);
+    }
+
+    #[test]
+    fn span_event_resolution_supports_global_alias() {
+        let span_events = resolve_log_span_events(lookup_from(&[(ENV_LOG_SPAN_EVENTS, "active")]));
+        assert_eq!(span_events, FmtSpan::ACTIVE);
+    }
+
+    #[test]
+    fn span_event_resolution_prefers_legacy_override() {
+        let span_events = resolve_log_span_events(lookup_from(&[
+            (ENV_LOG_SPAN_EVENTS, "new"),
+            (ENV_MFM_LOG_SPAN_EVENTS, "close"),
+        ]));
+        assert_eq!(span_events, FmtSpan::CLOSE);
+    }
 }

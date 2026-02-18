@@ -591,6 +591,22 @@ let
         name = "CI_ARTIFACTS_BASE";
         description = "Override artifacts root; must be absolute path.";
       }
+      {
+        name = "LOG_LEVEL";
+        description = "Canonical process-wide baseline log filter.";
+      }
+      {
+        name = "CI_LOG_LEVEL";
+        description = "Canonical CI diagnostics verbosity level.";
+      }
+      {
+        name = "CI_VERBOSE";
+        description = "Compatibility toggle that maps to CI_LOG_LEVEL=debug.";
+      }
+      {
+        name = "NIXFIED_LOG_LEVEL";
+        description = "Compatibility alias for CI_LOG_LEVEL.";
+      }
     ];
     contractEnv = [
       (lib.appApi.env.string { name = "CI_ARTIFACTS_DIR"; })
@@ -598,6 +614,13 @@ let
         name = "CI_ARTIFACTS_BASE";
         type = "pathAbs";
       })
+      (lib.appApi.env.string { name = "LOG_LEVEL"; })
+      (lib.appApi.env.string { name = "CI_LOG_LEVEL"; })
+      (lib.appApi.env.typed {
+        name = "CI_VERBOSE";
+        type = "bool";
+      })
+      (lib.appApi.env.string { name = "NIXFIED_LOG_LEVEL"; })
     ];
     failureCodes = lib.appApi.failureProfiles.script;
   };

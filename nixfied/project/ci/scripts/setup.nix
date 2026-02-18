@@ -1,6 +1,69 @@
 { pkgs }:
 pkgs.writeText "mfm-ci-setup.sh" ''
+_ci_truthy() {
+  case "''${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_ci_logging_env() {
+  local resolved_ci_log_level=""
+  local resolved_log_level=""
+
+  if [ -n "''${CI_LOG_LEVEL:-}" ]; then
+    resolved_ci_log_level="$CI_LOG_LEVEL"
+  elif _ci_truthy "''${CI_VERBOSE:-0}" || _ci_truthy "''${NIXFIED_VERBOSE:-0}" || _ci_truthy "''${NIXFIED_DEBUG:-0}"; then
+    resolved_ci_log_level="debug"
+  elif [ -n "''${NIXFIED_LOG_LEVEL:-}" ]; then
+    resolved_ci_log_level="$NIXFIED_LOG_LEVEL"
+  elif [ -n "''${LOG_LEVEL:-}" ]; then
+    resolved_ci_log_level="$LOG_LEVEL"
+  fi
+
+  if [ -n "$resolved_ci_log_level" ]; then
+    export CI_LOG_LEVEL="$resolved_ci_log_level"
+  fi
+
+  if [ -n "''${LOG_LEVEL:-}" ]; then
+    resolved_log_level="$LOG_LEVEL"
+  elif [ -n "''${MFM_LOG:-}" ]; then
+    resolved_log_level="$MFM_LOG"
+  elif [ -n "''${RUST_LOG:-}" ]; then
+    resolved_log_level="$RUST_LOG"
+  elif [ -n "''${CI_LOG_LEVEL:-}" ]; then
+    resolved_log_level="$CI_LOG_LEVEL"
+  elif [ -n "''${NIXFIED_LOG_LEVEL:-}" ]; then
+    resolved_log_level="$NIXFIED_LOG_LEVEL"
+  fi
+
+  if [ -n "$resolved_log_level" ]; then
+    export LOG_LEVEL="$resolved_log_level"
+    export MFM_LOG="''${MFM_LOG:-$resolved_log_level}"
+    export RUST_LOG="''${RUST_LOG:-$resolved_log_level}"
+  fi
+
+  if [ -n "''${CI_LOG_LEVEL:-}" ] && [ -z "''${NIXFIED_LOG_LEVEL:-}" ]; then
+    export NIXFIED_LOG_LEVEL="$CI_LOG_LEVEL"
+  fi
+
+  if [ -n "''${MFM_LOG_FORMAT:-}" ] && [ -z "''${LOG_FORMAT:-}" ]; then
+    export LOG_FORMAT="$MFM_LOG_FORMAT"
+  fi
+  if [ -n "''${LOG_FORMAT:-}" ] && [ -z "''${MFM_LOG_FORMAT:-}" ]; then
+    export MFM_LOG_FORMAT="$LOG_FORMAT"
+  fi
+
+  if [ -n "''${MFM_LOG_SPAN_EVENTS:-}" ] && [ -z "''${LOG_SPAN_EVENTS:-}" ]; then
+    export LOG_SPAN_EVENTS="$MFM_LOG_SPAN_EVENTS"
+  fi
+  if [ -n "''${LOG_SPAN_EVENTS:-}" ] && [ -z "''${MFM_LOG_SPAN_EVENTS:-}" ]; then
+    export MFM_LOG_SPAN_EVENTS="$LOG_SPAN_EVENTS"
+  fi
+}
+
 eval "$($SLOT_INFO)"
+normalize_ci_logging_env
 
 kill_conflicting_listener() {
   local port="$1"

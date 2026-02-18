@@ -19,12 +19,22 @@ set +e
   echo "$ci_contract" | jq -e '.args[] | select(.name == "mode") | .kind == "option" and .type == "enum" and (.values | index("basic") != null)' >/dev/null
   echo "$ci_contract" | jq -e '.args[] | select(.name == "mode") | ((["audit","basic","full","mainnet","parity"] - (.values // [])) | length) == 0' >/dev/null
   echo "$ci_contract" | jq -e '[.args[] | select((.name == "basic" or .name == "mode_basic") and .kind == "flag" and .type == "bool")] | length > 0' >/dev/null
+  echo "$ci_contract" | jq -e '[.env[].name] | index("LOG_LEVEL") != null and index("CI_LOG_LEVEL") != null and index("CI_VERBOSE") != null and index("NIXFIED_LOG_LEVEL") != null' >/dev/null
+  echo "$ci_contract" | jq -e '[.args[].long] | index("--verbose") == null and index("--debug") == null' >/dev/null
   echo "$check_contract" | jq -e '.commandClass == "typed" and .allowUnknownArgs == false and .outputs.mode == "text"' >/dev/null
   echo "$snapshot_contract" | jq -e '.commandClass == "json" and .allowUnknownArgs == false and .outputs.mode == "json"' >/dev/null
   echo "$run_start_contract" | jq -e '.commandClass == "json" and .allowUnknownArgs == false and .outputs.mode == "json"' >/dev/null
   echo "$cli_contract" | jq -e '.commandClass == "passthrough" and .allowUnknownArgs == true' >/dev/null
   echo "$rest_contract" | jq -e '.commandClass == "typed" and .allowUnknownArgs == false and .outputs.mode == "text"' >/dev/null
   echo "$process_status_contract" | jq -e '.commandClass == "passthrough" and .allowUnknownArgs == true and .outputs.mode == "text"' >/dev/null
+
+  # Logging normalization contracts for CI setup/teardown scripts.
+  grep -Fq 'normalize_ci_logging_env()' nixfied/project/ci/scripts/setup.nix
+  grep -Fq 'export CI_LOG_LEVEL=' nixfied/project/ci/scripts/setup.nix
+  grep -Fq 'export LOG_LEVEL=' nixfied/project/ci/scripts/setup.nix
+  grep -Fq '_ci_debug_enabled()' nixfied/project/ci/scripts/teardown.nix
+  grep -Fq 'ci-diagnostics-service-' nixfied/project/ci/scripts/teardown.nix
+  grep -Fq -- '-log.log' nixfied/project/ci/scripts/teardown.nix
 
   CHECK_UNKNOWN_LOG=$(mktemp)
   set +e
