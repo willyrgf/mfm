@@ -706,13 +706,15 @@ impl State for ConfigureRuntimeCallState {
             &self.state_id,
             &from,
             pool,
-            "configureRuntime",
-            vec![
-                serde_json::json!(usdc.address),
-                serde_json::json!(wbtc.address),
-            ],
-            None,
-            "configure_runtime_call_failed",
+            ContractCallSpec {
+                function: "configureRuntime",
+                args: vec![
+                    serde_json::json!(usdc.address),
+                    serde_json::json!(wbtc.address),
+                ],
+                value: None,
+                err_code: "configure_runtime_call_failed",
+            },
         )
         .await?;
 
@@ -1158,15 +1160,19 @@ fn encode_call_data(
     Ok(shared_dcv::bytes_to_hex_prefixed(&calldata))
 }
 
+struct ContractCallSpec<'a> {
+    function: &'a str,
+    args: Vec<serde_json::Value>,
+    value: Option<String>,
+    err_code: &'static str,
+}
+
 async fn send_contract_transaction(
     io: &mut dyn IoProvider,
     state_id: &StateId,
     from: &str,
     contract: &AaveDeployManifestContract,
-    function: &str,
-    args: Vec<serde_json::Value>,
-    value: Option<String>,
-    err_code: &'static str,
+    spec: ContractCallSpec<'_>,
 ) -> Result<String, StateError> {
     let from_addr = shared_dcv::normalize_address(from).map_err(|_| {
         op_errors::state_error(
@@ -1176,13 +1182,13 @@ async fn send_contract_transaction(
             "from address was invalid",
         )
     })?;
-    let data = encode_call_data(contract, function, args)?;
+    let data = encode_call_data(contract, spec.function, spec.args)?;
     let mut tx = serde_json::json!({
         "from": from_addr,
         "to": contract.address,
         "data": data,
     });
-    if let Some(v) = value {
+    if let Some(v) = spec.value {
         tx["value"] = serde_json::json!(v);
     }
 
@@ -1191,7 +1197,7 @@ async fn send_contract_transaction(
         .await
         .map_err(|_| {
             op_errors::state_error(
-                err_code,
+                spec.err_code,
                 ErrorCategory::OnChain,
                 false,
                 "contract transaction failed to submit",

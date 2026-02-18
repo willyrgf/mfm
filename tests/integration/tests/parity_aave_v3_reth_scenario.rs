@@ -305,7 +305,7 @@ async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> Postgr
 }
 
 async fn run_failure_diagnostics(events: Arc<dyn EventStore>, run_id: RunId) -> String {
-    let stream = match events.read_range(run_id.clone(), 1, None).await {
+    let stream = match events.read_range(run_id, 1, None).await {
         Ok(stream) => stream,
         Err(err) => {
             return format!("run_id={} read_range_failed={err:?}", run_id.0);
@@ -657,8 +657,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .expect("start phase A pipeline");
 
     if phase_a_run.phase != RunPhase::Completed {
-        let diagnostics =
-            run_failure_diagnostics(Arc::clone(&events), phase_a_run.run_id.clone()).await;
+        let diagnostics = run_failure_diagnostics(Arc::clone(&events), phase_a_run.run_id).await;
         panic!(
             "phase A expected Completed, got {:?}; {}",
             phase_a_run.phase, diagnostics
@@ -747,8 +746,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .expect("start phase B pipeline");
 
     if phase_b_run.phase != RunPhase::Completed {
-        let diagnostics =
-            run_failure_diagnostics(Arc::clone(&events), phase_b_run.run_id.clone()).await;
+        let diagnostics = run_failure_diagnostics(Arc::clone(&events), phase_b_run.run_id).await;
         panic!(
             "phase B expected Completed, got {:?}; {}",
             phase_b_run.phase, diagnostics
