@@ -306,17 +306,21 @@ impl LiveIoTransport for ExecProgramTransport {
                     .map(serde_json::Value::from)
                     .unwrap_or(serde_json::Value::Null),
             );
-            #[cfg(unix)]
-            {
-                details.insert(
-                    "signal".to_string(),
+            let signal_value = {
+                #[cfg(unix)]
+                {
                     output
                         .status
                         .signal()
                         .map(serde_json::Value::from)
-                        .unwrap_or(serde_json::Value::Null),
-                );
-            }
+                        .unwrap_or(serde_json::Value::Null)
+                }
+                #[cfg(not(unix))]
+                {
+                    serde_json::Value::Null
+                }
+            };
+            details.insert("signal".to_string(), signal_value);
 
             return Err(IoError::Transport(info_with_details(
                 CODE_EXEC_FAILED,
@@ -539,7 +543,6 @@ mod tests {
                     Some(program.to_string_lossy().as_ref())
                 );
                 assert_eq!(details.get("exit_code").and_then(|v| v.as_i64()), Some(42));
-                #[cfg(unix)]
                 assert!(details.get("signal").is_some());
             }
             other => panic!("expected Transport, got: {other:?}"),
