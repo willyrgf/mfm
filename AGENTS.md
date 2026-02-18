@@ -240,7 +240,8 @@ These are typical, review-friendly change patterns (focus on a single outcome).
   - `MFM_LOG` and `RUST_LOG` remain supported as component-specific overrides/fallbacks.
   - `LOG_FORMAT` is the canonical format selector (`text` default, `json` optional); `MFM_LOG_FORMAT` remains supported.
   - `LOG_SPAN_EVENTS` is the canonical span lifecycle selector (`none|new|close|active`); `MFM_LOG_SPAN_EVENTS` remains supported.
-  - CI diagnostics use `CI_LOG_LEVEL` as canonical level; `CI_VERBOSE`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`, and `NIXFIED_LOG_LEVEL` are compatibility aliases.
+  - CI diagnostics use `LOG_LEVEL` as canonical level and `OUTPUT_MODE` as canonical output routing (`stdout|logs|both`).
+  - Project CI scripts hard-reject deprecated CI env aliases: `CI_LOG_LEVEL`, `CI_VERBOSE`, `NIXFIED_LOG_LEVEL`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`, `NIXFIED_OUTPUT_MODE`.
 - Output contract:
   - Logs go to stderr.
   - CLI/API payload contracts remain on stdout only.

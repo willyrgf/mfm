@@ -5,6 +5,20 @@ CI_DIAG_EVENTS_LIMIT="''${CI_DIAG_EVENTS_LIMIT:-200}"
 CI_DIAG_LOG_LINES="''${CI_DIAG_LOG_LINES:-200}"
 CI_PROCESS_STOP_TIMEOUT_SECS="''${CI_PROCESS_STOP_TIMEOUT_SECS:-20}"
 
+_ci_output_mode() {
+  local mode_lower=""
+  mode_lower="$(printf '%s' "''${OUTPUT_MODE:-stdout}" | tr '[:upper:]' '[:lower:]')"
+  case "$mode_lower" in
+    stdout|logs|both)
+      printf '%s\n' "$mode_lower"
+      ;;
+    *)
+      # Setup validates OUTPUT_MODE, but teardown remains tolerant.
+      printf '%s\n' "stdout"
+      ;;
+  esac
+}
+
 _ci_debug_enabled() {
   local level_lower=""
   level_lower="$(printf '%s' "''${LOG_LEVEL:-}" | tr '[:upper:]' '[:lower:]')"
@@ -67,7 +81,10 @@ capture_service_diag() {
     capture_diag "ci-diagnostics-service-''${service}-events.log" "service-events" run_hook "$events_hook" --limit "$CI_DIAG_EVENTS_LIMIT"
   fi
 
+  # OUTPUT_MODE routes process logs (stdout/log-file/both). Service log hooks
+  # are file-backed diagnostics and stay enabled for debug/trace regardless.
   if _ci_debug_enabled && has_hook "$logs_hook"; then
+    ci_debug "capturing service log tail service=$service output_mode=$(_ci_output_mode)"
     capture_diag "ci-diagnostics-service-''${service}-log.log" "service-log" run_hook "$logs_hook" -- --lines "$CI_DIAG_LOG_LINES"
   fi
 }
