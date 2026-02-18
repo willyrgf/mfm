@@ -491,18 +491,19 @@ fn run_tx_sign_with_selector(
 
 fn run_tx_send_raw(input_path: &Path, rpc_url: &str) -> Output {
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
-    sanitize_machine_readable_cli_env(&mut cmd).args([
-        "--output-format",
-        "json",
-        "keystore",
-        "tx-send-raw",
-        "--rpc-url",
-        rpc_url,
-        "--in",
-        input_path.to_str().expect("path"),
-    ])
-    .output()
-    .expect("execute tx-send-raw")
+    sanitize_machine_readable_cli_env(&mut cmd)
+        .args([
+            "--output-format",
+            "json",
+            "keystore",
+            "tx-send-raw",
+            "--rpc-url",
+            rpc_url,
+            "--in",
+            input_path.to_str().expect("path"),
+        ])
+        .output()
+        .expect("execute tx-send-raw")
 }
 
 async fn wait_for_receipt(rpc_url: &str, tx_hash: &str, max_polls: usize) -> Value {

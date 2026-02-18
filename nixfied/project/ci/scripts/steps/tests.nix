@@ -1,5 +1,5 @@
 { pkgs }:
 pkgs.writeText "mfm-ci-steps-tests.sh" ''
-LOGFILE=$(artifact_path "tests.log")
-log_capture "$LOGFILE" -- cargo nextest run --workspace
+  LOGFILE=$(artifact_path "tests.log")
+  log_capture "$LOGFILE" -- cargo nextest run --workspace
 ''

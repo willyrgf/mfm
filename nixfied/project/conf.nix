@@ -133,22 +133,22 @@ let
   '';
 
   aaveV3OriginFetchTool = pkgs.writeShellScriptBin "mfm-aave-v3-origin-fetch" ''
-        set -euo pipefail
+    set -euo pipefail
 
-        origin_source="${aaveV3OriginSource}"
+    origin_source="${aaveV3OriginSource}"
 
-        ${pkgs.jq}/bin/jq -n -c \
-          --arg repo_url "${aaveV3OriginRepoUrl}" \
-          --arg commit_sha "${aaveV3OriginCommit}" \
-          --arg local_path "$origin_source" \
-          '{
-            kind: "aave_v3_origin_source_v1",
-            source: {
-              repo_url: $repo_url,
-              commit_sha: $commit_sha,
-              local_path: $local_path
-            }
-          }'
+    ${pkgs.jq}/bin/jq -n -c \
+      --arg repo_url "${aaveV3OriginRepoUrl}" \
+      --arg commit_sha "${aaveV3OriginCommit}" \
+      --arg local_path "$origin_source" \
+      '{
+        kind: "aave_v3_origin_source_v1",
+        source: {
+          repo_url: $repo_url,
+          commit_sha: $commit_sha,
+          local_path: $local_path
+        }
+      }'
   '';
 
   aaveV3OriginCompileTool = pkgs.writeShellScriptBin "mfm-aave-v3-origin-compile" ''

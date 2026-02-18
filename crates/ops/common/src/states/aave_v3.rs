@@ -1957,18 +1957,14 @@ fn origin_contract_from_output<'a>(
     output: &'a AaveOriginDeployOutput,
     id: &str,
 ) -> Result<&'a AaveOriginDeployOutputContract, StateError> {
-    output
-        .contracts
-        .iter()
-        .find(|c| c.id == id)
-        .ok_or_else(|| {
-            op_errors::state_error(
-                "origin_deploy_output_missing_contract",
-                ErrorCategory::ParsingInput,
-                false,
-                format!("origin deploy output missing contract: {id}"),
-            )
-        })
+    output.contracts.iter().find(|c| c.id == id).ok_or_else(|| {
+        op_errors::state_error(
+            "origin_deploy_output_missing_contract",
+            ErrorCategory::ParsingInput,
+            false,
+            format!("origin deploy output missing contract: {id}"),
+        )
+    })
 }
 
 async fn rpc_accounts(
@@ -2152,10 +2148,8 @@ async fn account_balance(
         "evm_response_invalid",
         "eth_getBalance returned non-string balance",
     )?;
-    let normalized = normalize_quantity_hex(
-        &balance_hex,
-        "eth_getBalance returned invalid hex balance",
-    )?;
+    let normalized =
+        normalize_quantity_hex(&balance_hex, "eth_getBalance returned invalid hex balance")?;
     quantity_hex_to_u128(&normalized, "eth_getBalance returned invalid hex balance")
 }
 

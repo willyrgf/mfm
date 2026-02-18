@@ -11,10 +11,10 @@
 //! - `nix` may access the network in Live mode; the resulting *outputs* must still be recorded
 //!   as facts via the engine (handled by `LiveIo`).
 
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use std::path::Path;
 
 use async_trait::async_trait;
 use tokio::process::Command;

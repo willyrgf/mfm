@@ -357,7 +357,11 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         Some("aave_v3_origin_compile_manifest_v1")
     );
     assert_eq!(
-        snapshot_kind(&snapshot, "aave_v3_reth_pipeline.deploy_origin_stack.result").as_deref(),
+        snapshot_kind(
+            &snapshot,
+            "aave_v3_reth_pipeline.deploy_origin_stack.result"
+        )
+        .as_deref(),
         Some("aave_v3_origin_deploy_output_v1")
     );
 

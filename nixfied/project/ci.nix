@@ -1,4 +1,9 @@
-{ pkgs, project, lib, ... }:
+{
+  pkgs,
+  project,
+  lib,
+  ...
+}:
 
 let
   # v2 shell-app contract inventory (project-level):
