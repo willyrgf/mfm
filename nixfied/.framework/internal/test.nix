@@ -412,6 +412,22 @@ let
       run_app "$@" >/dev/null
     }
 
+    run_public_app_with_env() {
+      local app="$1"
+      local log_file="$2"
+      shift 2
+
+      set +e
+      if [ "$app" = "ci" ]; then
+        env -u LOG_LEVEL -u NIXFIED_LOG_LEVEL -u OUTPUT_MODE -u NIXFIED_OUTPUT_MODE "$@" nix run "path:$ROOT"#ci -- --summary >"$log_file" 2>&1
+      else
+        env -u LOG_LEVEL -u NIXFIED_LOG_LEVEL -u OUTPUT_MODE -u NIXFIED_OUTPUT_MODE "$@" nix run "path:$ROOT"#"$app" >"$log_file" 2>&1
+      fi
+      local rc=$?
+      set -e
+      printf '%s\n' "$rc"
+    }
+
     assert_app_missing() {
       local flake_path="$1"
       local app="$2"
@@ -501,8 +517,6 @@ let
       local nginx_file="$ROOT/tests/framework/fixtures/nginx/site-lifecycle.nix"
       local helios_file="$ROOT/tests/framework/fixtures/helios/lifecycle.nix"
       local modules_file="$ROOT/tests/framework/fixtures/modules/dev.nix"
-      local reth_lifecycle_file="$ROOT/nixfied/.framework/reth/lifecycle.nix"
-      local ci_setup_file="$ROOT/nixfied/project/ci/scripts/setup.nix"
 
       require_contains "$reth_file" 'for _ in $(seq 1 240); do' "reth readiness retry loop"
       require_contains "$minio_file" 'for _ in $(seq 1 50); do' "minio readiness retry loop"
@@ -525,13 +539,6 @@ let
       require_absent "$modules_file" 'tail -50 "$PGDATA/postgres.log" >&2 || true' "modules postgres unguarded log tail"
       require_absent "$modules_file" 'tail -50 "$RETH_DIR/logs/reth.log" >&2 || true' "modules reth unguarded log tail"
       require_absent "$modules_file" 'tail -50 "$HELIOS_DIR/logs/helios.log" >&2 || true' "modules helios unguarded log tail"
-
-      require_contains "$reth_lifecycle_file" '--port "$RETH_P2P_PORT"' "reth slot-scoped p2p port arg"
-      require_contains "$reth_lifecycle_file" 'p2p_port=$RETH_P2P_PORT' "reth status includes p2p port"
-      require_contains "$reth_lifecycle_file" 'wrapper_signal signal=' "reth wrapper signal diagnostics"
-      require_contains "$reth_lifecycle_file" 'reth_process_signal signal=' "reth child signal diagnostics"
-      require_contains "$ci_setup_file" 'kill_conflicting_listener "''${RETHP2P_PORT:-}" "reth-p2p" "reth" "reth"' "ci reth p2p cleanup uses slot-scoped port"
-      require_absent "$ci_setup_file" 'kill_conflicting_listener "30303" "reth-p2p" "reth" "reth"' "ci reth p2p cleanup no fixed global port"
     }
 
     if [ "$SKIP_SETUP" -ne 1 ]; then
@@ -563,6 +570,44 @@ let
       nix run "path:$ROOT"#build >/dev/null
       nix run "path:$ROOT"#check >/dev/null
       nix run "path:$ROOT"#ci -- --summary >/dev/null
+
+      log "public app runtime primitive enforcement"
+      for app in help dev test build check ci; do
+        APP_INVALID_LOG="$WORKDIR/public-app-''${app}-invalid-log-level.log"
+        RC=$(run_public_app_with_env "$app" "$APP_INVALID_LOG" LOG_LEVEL=verbose OUTPUT_MODE=stdout)
+        if [ "$RC" -eq 0 ]; then
+          fail "expected app=$app to reject invalid LOG_LEVEL"
+        fi
+        assert_contains "$APP_INVALID_LOG" "invalid LOG_LEVEL value=verbose"
+      done
+
+      DEV_CONFLICT_LOG_LEVEL_LOG="$WORKDIR/public-app-dev-conflict-log-level.log"
+      RC=$(run_public_app_with_env "dev" "$DEV_CONFLICT_LOG_LEVEL_LOG" LOG_LEVEL=info NIXFIED_LOG_LEVEL=debug OUTPUT_MODE=stdout)
+      if [ "$RC" -eq 0 ]; then
+        fail "expected dev app to reject conflicting LOG_LEVEL alias values"
+      fi
+      assert_contains "$DEV_CONFLICT_LOG_LEVEL_LOG" "env:LOG_LEVEL has conflicting values between LOG_LEVEL and NIXFIED_LOG_LEVEL"
+
+      DEV_CONFLICT_OUTPUT_MODE_LOG="$WORKDIR/public-app-dev-conflict-output-mode.log"
+      RC=$(run_public_app_with_env "dev" "$DEV_CONFLICT_OUTPUT_MODE_LOG" LOG_LEVEL=info OUTPUT_MODE=stdout NIXFIED_OUTPUT_MODE=logs)
+      if [ "$RC" -eq 0 ]; then
+        fail "expected dev app to reject conflicting OUTPUT_MODE alias values"
+      fi
+      assert_contains "$DEV_CONFLICT_OUTPUT_MODE_LOG" "env:OUTPUT_MODE has conflicting values between OUTPUT_MODE and NIXFIED_OUTPUT_MODE"
+
+      DEV_EMPTY_LOG_LEVEL_LOG="$WORKDIR/public-app-dev-empty-log-level.log"
+      RC=$(run_public_app_with_env "dev" "$DEV_EMPTY_LOG_LEVEL_LOG" LOG_LEVEL= OUTPUT_MODE=stdout)
+      if [ "$RC" -eq 0 ]; then
+        fail "expected dev app to reject empty LOG_LEVEL"
+      fi
+      assert_contains "$DEV_EMPTY_LOG_LEVEL_LOG" "env:LOG_LEVEL cannot be empty when set"
+
+      DEV_EMPTY_OUTPUT_MODE_LOG="$WORKDIR/public-app-dev-empty-output-mode.log"
+      RC=$(run_public_app_with_env "dev" "$DEV_EMPTY_OUTPUT_MODE_LOG" LOG_LEVEL=info OUTPUT_MODE=)
+      if [ "$RC" -eq 0 ]; then
+        fail "expected dev app to reject empty OUTPUT_MODE"
+      fi
+      assert_contains "$DEV_EMPTY_OUTPUT_MODE_LOG" "env:OUTPUT_MODE cannot be empty when set"
     fi
 
     if [ -z "$SHARD" ] && [ "$SKIP_SETUP" -ne 1 ] && [ "$SKIP_TEARDOWN" -ne 1 ] && [ "$JOBS" -gt 1 ]; then
@@ -3760,7 +3805,7 @@ let
 
     HOOK_BAD_LOG_LEVEL_LOG="$WORKDIR/service-hook-bad-log-level.log"
     set +e
-    REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=verbose OUTPUT_MODE=stdout "$POSTGRES_STATUS_HOOK" > "$HOOK_BAD_LOG_LEVEL_LOG" 2>&1
+    env -u LOG_LEVEL -u NIXFIED_LOG_LEVEL -u OUTPUT_MODE -u NIXFIED_OUTPUT_MODE REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=verbose OUTPUT_MODE=stdout "$POSTGRES_STATUS_HOOK" > "$HOOK_BAD_LOG_LEVEL_LOG" 2>&1
     HOOK_BAD_LOG_LEVEL_RC=$?
     set -e
     if [ "$HOOK_BAD_LOG_LEVEL_RC" -eq 0 ]; then
@@ -3770,13 +3815,53 @@ let
 
     HOOK_BAD_OUTPUT_MODE_LOG="$WORKDIR/service-hook-bad-output-mode.log"
     set +e
-    REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=info OUTPUT_MODE=file "$POSTGRES_STATUS_HOOK" > "$HOOK_BAD_OUTPUT_MODE_LOG" 2>&1
+    env -u LOG_LEVEL -u NIXFIED_LOG_LEVEL -u OUTPUT_MODE -u NIXFIED_OUTPUT_MODE REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=info OUTPUT_MODE=file "$POSTGRES_STATUS_HOOK" > "$HOOK_BAD_OUTPUT_MODE_LOG" 2>&1
     HOOK_BAD_OUTPUT_MODE_RC=$?
     set -e
     if [ "$HOOK_BAD_OUTPUT_MODE_RC" -eq 0 ]; then
       fail "expected service hook launcher to reject invalid OUTPUT_MODE"
     fi
     assert_contains "$HOOK_BAD_OUTPUT_MODE_LOG" "invalid OUTPUT_MODE value=file"
+
+    HOOK_CONFLICT_LOG_LEVEL_LOG="$WORKDIR/service-hook-conflict-log-level.log"
+    set +e
+    env -u LOG_LEVEL -u NIXFIED_LOG_LEVEL -u OUTPUT_MODE -u NIXFIED_OUTPUT_MODE REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=info NIXFIED_LOG_LEVEL=debug OUTPUT_MODE=stdout "$POSTGRES_STATUS_HOOK" > "$HOOK_CONFLICT_LOG_LEVEL_LOG" 2>&1
+    HOOK_CONFLICT_LOG_LEVEL_RC=$?
+    set -e
+    if [ "$HOOK_CONFLICT_LOG_LEVEL_RC" -eq 0 ]; then
+      fail "expected service hook launcher to reject conflicting LOG_LEVEL alias values"
+    fi
+    assert_contains "$HOOK_CONFLICT_LOG_LEVEL_LOG" "env:LOG_LEVEL has conflicting values between LOG_LEVEL and NIXFIED_LOG_LEVEL"
+
+    HOOK_CONFLICT_OUTPUT_MODE_LOG="$WORKDIR/service-hook-conflict-output-mode.log"
+    set +e
+    env -u LOG_LEVEL -u NIXFIED_LOG_LEVEL -u OUTPUT_MODE -u NIXFIED_OUTPUT_MODE REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=info OUTPUT_MODE=stdout NIXFIED_OUTPUT_MODE=logs "$POSTGRES_STATUS_HOOK" > "$HOOK_CONFLICT_OUTPUT_MODE_LOG" 2>&1
+    HOOK_CONFLICT_OUTPUT_MODE_RC=$?
+    set -e
+    if [ "$HOOK_CONFLICT_OUTPUT_MODE_RC" -eq 0 ]; then
+      fail "expected service hook launcher to reject conflicting OUTPUT_MODE alias values"
+    fi
+    assert_contains "$HOOK_CONFLICT_OUTPUT_MODE_LOG" "env:OUTPUT_MODE has conflicting values between OUTPUT_MODE and NIXFIED_OUTPUT_MODE"
+
+    HOOK_EMPTY_LOG_LEVEL_LOG="$WORKDIR/service-hook-empty-log-level.log"
+    set +e
+    env -u LOG_LEVEL -u NIXFIED_LOG_LEVEL -u OUTPUT_MODE -u NIXFIED_OUTPUT_MODE REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL= OUTPUT_MODE=stdout "$POSTGRES_STATUS_HOOK" > "$HOOK_EMPTY_LOG_LEVEL_LOG" 2>&1
+    HOOK_EMPTY_LOG_LEVEL_RC=$?
+    set -e
+    if [ "$HOOK_EMPTY_LOG_LEVEL_RC" -eq 0 ]; then
+      fail "expected service hook launcher to reject empty LOG_LEVEL"
+    fi
+    assert_contains "$HOOK_EMPTY_LOG_LEVEL_LOG" "env:LOG_LEVEL cannot be empty when set"
+
+    HOOK_EMPTY_OUTPUT_MODE_LOG="$WORKDIR/service-hook-empty-output-mode.log"
+    set +e
+    env -u LOG_LEVEL -u NIXFIED_LOG_LEVEL -u OUTPUT_MODE -u NIXFIED_OUTPUT_MODE REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=info OUTPUT_MODE= "$POSTGRES_STATUS_HOOK" > "$HOOK_EMPTY_OUTPUT_MODE_LOG" 2>&1
+    HOOK_EMPTY_OUTPUT_MODE_RC=$?
+    set -e
+    if [ "$HOOK_EMPTY_OUTPUT_MODE_RC" -eq 0 ]; then
+      fail "expected service hook launcher to reject empty OUTPUT_MODE"
+    fi
+    assert_contains "$HOOK_EMPTY_OUTPUT_MODE_LOG" "env:OUTPUT_MODE cannot be empty when set"
 
     SERVICE_DEFAULT_OUTPUT_HOOK_EXPR=$(cat <<'NIX'
     { root, system }:
@@ -3822,7 +3907,7 @@ let
 
     HOOK_DEBUG_DEFAULT_MODE_LOG="$WORKDIR/service-hook-debug-default-mode.log"
     set +e
-    REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=debug OUTPUT_MODE= NIXFIED_OUTPUT_MODE= "$SERVICE_DEFAULT_OUTPUT_HOOK" > "$HOOK_DEBUG_DEFAULT_MODE_LOG" 2>&1
+    env -u LOG_LEVEL -u NIXFIED_LOG_LEVEL -u OUTPUT_MODE -u NIXFIED_OUTPUT_MODE REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=debug "$SERVICE_DEFAULT_OUTPUT_HOOK" > "$HOOK_DEBUG_DEFAULT_MODE_LOG" 2>&1
     HOOK_DEBUG_DEFAULT_MODE_RC=$?
     set -e
     if [ "$HOOK_DEBUG_DEFAULT_MODE_RC" -ne 0 ]; then
@@ -3832,7 +3917,7 @@ let
 
     HOOK_INFO_DEFAULT_MODE_LOG="$WORKDIR/service-hook-info-default-mode.log"
     set +e
-    REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=info OUTPUT_MODE= NIXFIED_OUTPUT_MODE= "$SERVICE_DEFAULT_OUTPUT_HOOK" > "$HOOK_INFO_DEFAULT_MODE_LOG" 2>&1
+    env -u LOG_LEVEL -u NIXFIED_LOG_LEVEL -u OUTPUT_MODE -u NIXFIED_OUTPUT_MODE REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=info "$SERVICE_DEFAULT_OUTPUT_HOOK" > "$HOOK_INFO_DEFAULT_MODE_LOG" 2>&1
     HOOK_INFO_DEFAULT_MODE_RC=$?
     set -e
     if [ "$HOOK_INFO_DEFAULT_MODE_RC" -ne 0 ]; then

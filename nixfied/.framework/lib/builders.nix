@@ -80,7 +80,6 @@ let
         else
           ''
             NIXFIED_APP_CONTRACT_FILE="${toString contractFile}"
-            source ${toString shellContract.runtime}
             nixfied_contract_validate_env "$NIXFIED_APP_CONTRACT_FILE"
             nixfied_contract_validate_args "$NIXFIED_APP_CONTRACT_FILE" "$@"
           '';
@@ -103,21 +102,10 @@ let
       cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
       source ${loadEnv}
       source ${helpersScript}
+      source ${toString shellContract.runtime}
       ${hookExports}
       ${envExports}
-      LOG_LEVEL="''${LOG_LEVEL:-''${NIXFIED_LOG_LEVEL:-${defaultLogLevel}}}"
-      OUTPUT_MODE="''${OUTPUT_MODE:-''${NIXFIED_OUTPUT_MODE:-}}"
-      if [ -z "$OUTPUT_MODE" ]; then
-        if [ "$LOG_LEVEL" = "debug" ] && [ "${defaultOutputMode}" = "stdout" ]; then
-          OUTPUT_MODE="both"
-        else
-          OUTPUT_MODE="${defaultOutputMode}"
-        fi
-      fi
-      export LOG_LEVEL
-      export OUTPUT_MODE
-      export NIXFIED_LOG_LEVEL="$LOG_LEVEL"
-      export NIXFIED_OUTPUT_MODE="$OUTPUT_MODE"
+      nixfied_contract_resolve_runtime_primitives "${defaultLogLevel}" "${defaultOutputMode}"
       export NIXFIED_LOG_TRACE="''${NIXFIED_LOG_TRACE:-0}"
       export COMMAND_NAME="''${COMMAND_NAME:-${name}}"
       if [ "''${OUTPUT_MODE}" != "stdout" ]; then

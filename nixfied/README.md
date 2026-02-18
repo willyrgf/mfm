@@ -158,6 +158,8 @@ Core env interface:
 - `LOG_LEVEL`: runtime logging level (`error|warn|info|debug|trace`).
 - `OUTPUT_MODE`: runtime log routing (`stdout|logs|both`).
 - default coupling: when `OUTPUT_MODE` is unset and `LOG_LEVEL=debug`, output defaults to `both`.
+- strict alias consistency: conflicting canonical/alias values fail fast (`LOG_LEVEL` vs `NIXFIED_LOG_LEVEL`, `OUTPUT_MODE` vs `NIXFIED_OUTPUT_MODE`).
+- strict empty handling: explicitly setting `LOG_LEVEL=""` or `OUTPUT_MODE=""` fails; unset the variable to use defaults.
 
 Important distinction:
 - `OUTPUT_MODE` controls where log lines are emitted.
@@ -259,6 +261,29 @@ commands.dev = {
     echo "custom dev flow"
   '';
 };
+```
+
+Runtime primitive reuse example in a custom app script:
+
+```bash
+# LOG_LEVEL / OUTPUT_MODE are already validated and normalized by Nixfied.
+case "${LOG_LEVEL}" in
+  debug|trace)
+    export MY_APP_VERBOSE=1
+    ;;
+  *)
+    export MY_APP_VERBOSE=0
+    ;;
+esac
+
+case "${OUTPUT_MODE}" in
+  logs|both)
+    export MY_APP_AUDIT_LOGS=1
+    ;;
+  *)
+    export MY_APP_AUDIT_LOGS=0
+    ;;
+esac
 ```
 
 ## CI and ephemeral execution

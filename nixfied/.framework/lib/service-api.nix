@@ -402,45 +402,13 @@ let
     let
       logLevelDefault = runtimePrimitives.logLevel.default or runtimeLogLevelDefault;
       outputModeDefault = runtimePrimitives.outputMode.default or runtimeOutputModeDefault;
-      logLevelAllowed = builtins.concatStringsSep "|" runtimeLogLevels;
-      outputModeAllowed = builtins.concatStringsSep "|" runtimeOutputModes;
     in
     pkgs.writeShellScript (launcherNameFor serviceName opName) ''
       set -euo pipefail
 
       ${slotEnvRuntime.requireSlotEnvJson { }}
-
-      LOG_LEVEL="''${LOG_LEVEL:-''${NIXFIED_LOG_LEVEL:-${logLevelDefault}}}"
-      OUTPUT_MODE="''${OUTPUT_MODE:-''${NIXFIED_OUTPUT_MODE:-}}"
-      if [ -z "$OUTPUT_MODE" ]; then
-        if [ "$LOG_LEVEL" = "debug" ] && [ "${outputModeDefault}" = "stdout" ]; then
-          OUTPUT_MODE="both"
-        else
-          OUTPUT_MODE="${outputModeDefault}"
-        fi
-      fi
-      export LOG_LEVEL
-      export OUTPUT_MODE
-      export NIXFIED_LOG_LEVEL="$LOG_LEVEL"
-      export NIXFIED_OUTPUT_MODE="$OUTPUT_MODE"
-
-      case "$LOG_LEVEL" in
-        ${logLevelAllowed})
-          ;;
-        *)
-          echo "ERROR: invalid LOG_LEVEL value=$LOG_LEVEL allowed=${builtins.concatStringsSep "," runtimeLogLevels}" >&2
-          exit 2
-          ;;
-      esac
-
-      case "$OUTPUT_MODE" in
-        ${outputModeAllowed})
-          ;;
-        *)
-          echo "ERROR: invalid OUTPUT_MODE value=$OUTPUT_MODE allowed=${builtins.concatStringsSep "," runtimeOutputModes}" >&2
-          exit 2
-          ;;
-      esac
+      source ${toString shellContract.runtime}
+      nixfied_contract_resolve_runtime_primitives "${logLevelDefault}" "${outputModeDefault}"
 
       exec ${toString opCfg.script} "$@"
     '';

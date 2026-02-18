@@ -564,6 +564,7 @@ let
   runtime = pkgs.writeShellScript "nixfied-shell-contract-runtime" ''
     NIXFIED_CONTRACT_JQ="${pkgs.jq}/bin/jq"
     NIXFIED_CONTRACT_NONE="__NIXFIED_NONE__"
+    NIXFIED_CONTRACT_RESOLVED_VALUE=""
 
     _nixfied_contract_err() {
       if command -v log_error >/dev/null 2>&1; then
@@ -584,6 +585,144 @@ let
     _nixfied_contract_sanitize_name() {
       local value="$1"
       printf '%s' "$value" | tr '[:lower:]' '[:upper:]' | tr '.:/-' '_'
+    }
+
+    _nixfied_contract_var_is_set() {
+      local name="$1"
+      [ "''${!name+x}" = "x" ]
+    }
+
+    _nixfied_contract_resolve_env_with_aliases() {
+      local name="$1"
+      local aliases_json="$2"
+      local default="$3"
+      local label="$4"
+      local strict="$5"
+      local canonical_set=0 canonical_value=""
+      local alias_set=0 alias_name="" alias_value=""
+      local current_alias="" current_value=""
+
+      NIXFIED_CONTRACT_RESOLVED_VALUE=""
+
+      if _nixfied_contract_var_is_set "$name"; then
+        canonical_set=1
+        canonical_value="''${!name-}"
+      fi
+
+      if [ -n "$aliases_json" ] && [ "$aliases_json" != "[]" ]; then
+        while IFS= read -r current_alias; do
+          [ -z "$current_alias" ] && continue
+          if ! _nixfied_contract_var_is_set "$current_alias"; then
+            continue
+          fi
+          current_value="''${!current_alias-}"
+          if [ "$alias_set" -eq 0 ]; then
+            alias_set=1
+            alias_name="$current_alias"
+            alias_value="$current_value"
+            continue
+          fi
+          if [ "$strict" = "1" ] && [ "$current_value" != "$alias_value" ]; then
+            _nixfied_contract_err "$label has conflicting alias values alias=$alias_name and alias=$current_alias; set one alias or use matching values"
+            return 1
+          fi
+        done < <(printf '%s' "$aliases_json" | "$NIXFIED_CONTRACT_JQ" -r '.[]')
+      fi
+
+      if [ "$strict" = "1" ]; then
+        if [ "$canonical_set" -eq 1 ] && [ -z "$canonical_value" ]; then
+          _nixfied_contract_err "$label cannot be empty when set; unset $name to use defaults"
+          return 1
+        fi
+        if [ "$alias_set" -eq 1 ] && [ -z "$alias_value" ]; then
+          _nixfied_contract_err "$label alias=$alias_name cannot be empty when set; unset $alias_name to use defaults"
+          return 1
+        fi
+        if [ "$canonical_set" -eq 1 ] && [ "$alias_set" -eq 1 ] && [ "$canonical_value" != "$alias_value" ]; then
+          _nixfied_contract_err "$label has conflicting values between $name and $alias_name; set one variable or use matching values"
+          return 1
+        fi
+      fi
+
+      if [ "$canonical_set" -eq 1 ] && [ -n "$canonical_value" ]; then
+        NIXFIED_CONTRACT_RESOLVED_VALUE="$canonical_value"
+      elif [ "$alias_set" -eq 1 ] && [ -n "$alias_value" ]; then
+        NIXFIED_CONTRACT_RESOLVED_VALUE="$alias_value"
+      elif [ "$default" != "$NIXFIED_CONTRACT_NONE" ]; then
+        NIXFIED_CONTRACT_RESOLVED_VALUE="$default"
+      else
+        NIXFIED_CONTRACT_RESOLVED_VALUE=""
+      fi
+
+      return 0
+    }
+
+    nixfied_contract_resolve_runtime_primitives() {
+      local log_level_default="''${1:-info}"
+      local output_mode_default="''${2:-stdout}"
+      local log_level="" output_mode=""
+
+      case "$log_level_default" in
+        error|warn|info|debug|trace)
+          ;;
+        *)
+          _nixfied_contract_err "invalid runtime default LOG_LEVEL value=$log_level_default allowed=error,warn,info,debug,trace"
+          return 2
+          ;;
+      esac
+
+      case "$output_mode_default" in
+        stdout|logs|both)
+          ;;
+        *)
+          _nixfied_contract_err "invalid runtime default OUTPUT_MODE value=$output_mode_default allowed=stdout,logs,both"
+          return 2
+          ;;
+      esac
+
+      if ! _nixfied_contract_resolve_env_with_aliases "LOG_LEVEL" '["NIXFIED_LOG_LEVEL"]' "$log_level_default" "env:LOG_LEVEL" "1"; then
+        return 2
+      fi
+      log_level="$NIXFIED_CONTRACT_RESOLVED_VALUE"
+      if [ -z "$log_level" ]; then
+        log_level="$log_level_default"
+      fi
+
+      case "$log_level" in
+        error|warn|info|debug|trace)
+          ;;
+        *)
+          _nixfied_contract_err "invalid LOG_LEVEL value=$log_level allowed=error,warn,info,debug,trace"
+          return 2
+          ;;
+      esac
+
+      if ! _nixfied_contract_resolve_env_with_aliases "OUTPUT_MODE" '["NIXFIED_OUTPUT_MODE"]' "$NIXFIED_CONTRACT_NONE" "env:OUTPUT_MODE" "1"; then
+        return 2
+      fi
+      output_mode="$NIXFIED_CONTRACT_RESOLVED_VALUE"
+      if [ -z "$output_mode" ]; then
+        if [ "$log_level" = "debug" ] && [ "$output_mode_default" = "stdout" ]; then
+          output_mode="both"
+        else
+          output_mode="$output_mode_default"
+        fi
+      fi
+
+      case "$output_mode" in
+        stdout|logs|both)
+          ;;
+        *)
+          _nixfied_contract_err "invalid OUTPUT_MODE value=$output_mode allowed=stdout,logs,both"
+          return 2
+          ;;
+      esac
+
+      export LOG_LEVEL="$log_level"
+      export OUTPUT_MODE="$output_mode"
+      export NIXFIED_LOG_LEVEL="$log_level"
+      export NIXFIED_OUTPUT_MODE="$output_mode"
+      return 0
     }
 
     _nixfied_contract_validate_scalar() {
@@ -694,7 +833,8 @@ let
       local contract_file="$1"
       local failures=0
       local name="" type="" required="" default="" min="" max="" values_json="" aliases_json="" env_spec_json=""
-      local value="" alias=""
+      local strict_runtime_env=0
+      local value=""
 
       while IFS= read -r env_spec_json; do
         [ -z "$env_spec_json" ] && continue
@@ -707,19 +847,15 @@ let
         values_json="$(printf '%s' "$env_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '(.values // []) | @json')"
         aliases_json="$(printf '%s' "$env_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '(.aliases // []) | @json')"
         [ -z "$name" ] && continue
-        value="''${!name:-}"
-        if [ -z "$value" ] && [ -n "$aliases_json" ] && [ "$aliases_json" != "[]" ]; then
-          while IFS= read -r alias; do
-            if [ -n "$alias" ] && [ -n "''${!alias:-}" ]; then
-              value="''${!alias}"
-              break
-            fi
-          done < <(printf '%s' "$aliases_json" | "$NIXFIED_CONTRACT_JQ" -r '.[]')
+        strict_runtime_env=0
+        if [ "$name" = "LOG_LEVEL" ] || [ "$name" = "OUTPUT_MODE" ]; then
+          strict_runtime_env=1
         fi
-
-        if [ -z "$value" ] && [ "$default" != "$NIXFIED_CONTRACT_NONE" ]; then
-          value="$default"
+        if ! _nixfied_contract_resolve_env_with_aliases "$name" "$aliases_json" "$default" "env:$name" "$strict_runtime_env"; then
+          failures=1
+          continue
         fi
+        value="$NIXFIED_CONTRACT_RESOLVED_VALUE"
 
         if [ -z "$value" ] && [ "$required" = "true" ]; then
           _nixfied_contract_err "required env var missing name=$name"

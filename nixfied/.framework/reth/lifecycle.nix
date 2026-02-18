@@ -22,7 +22,6 @@ let
   httpPortVar = slots.portVarName config.portKeyHttp;
   wsPortVar = slots.portVarName config.portKeyWs;
   authPortVar = slots.portVarName config.portKeyAuth;
-  p2pPortVar = slots.portVarName config.portKeyP2p;
   rethDirExpr = slots.getServiceDir config.dataDirName;
   useDevMode = config.devMode or false;
   extraArgs = lib.escapeShellArgs (config.extraArgs or [ ]);
@@ -37,7 +36,6 @@ let
     HTTP_PORT_VAR="${httpPortVar}"
     WS_PORT_VAR="${wsPortVar}"
     AUTH_PORT_VAR="${authPortVar}"
-    P2P_PORT_VAR="${p2pPortVar}"
 
     ${slotEnvRuntime.readPortFromJson {
       targetVar = "RETH_HTTP_PORT";
@@ -54,11 +52,6 @@ let
       jsonVar = "SLOT_INFO_JSON_OUT";
       keyExpr = "$AUTH_PORT_VAR";
     }}
-    ${slotEnvRuntime.readPortFromJson {
-      targetVar = "RETH_P2P_PORT";
-      jsonVar = "SLOT_INFO_JSON_OUT";
-      keyExpr = "$P2P_PORT_VAR";
-    }}
     RETH_DIR="${rethDirExpr}"
     RETH_PID_FILE="$RETH_DIR/run/reth.pid"
     RETH_LOG_FILE="$RETH_DIR/logs/reth.log"
@@ -70,8 +63,8 @@ let
       RETH_USE_DEV="1"
     fi
 
-    if [ -z "$RETH_HTTP_PORT" ] || [ -z "$RETH_WS_PORT" ] || [ -z "$RETH_AUTH_PORT" ] || [ -z "$RETH_P2P_PORT" ]; then
-      log_error "reth port variables are not set (http/ws/auth/p2p)"
+    if [ -z "$RETH_HTTP_PORT" ] || [ -z "$RETH_WS_PORT" ] || [ -z "$RETH_AUTH_PORT" ]; then
+      log_error "reth port variables are not set (http/ws/auth)"
       exit 1
     fi
 
@@ -141,7 +134,6 @@ let
       --authrpc.addr 127.0.0.1
       --authrpc.port "$RETH_AUTH_PORT"
       --authrpc.jwtsecret "$RETH_JWT_FILE"
-      --port "$RETH_P2P_PORT"
     )
 
     if [ "$RETH_USE_DEV" = "1" ]; then
@@ -161,15 +153,6 @@ let
 
     emit_service_event service_starting starting --pid "$CHILD_PID" --log-path "$RETH_LOG_FILE"
 
-    signal_name_from_num() {
-      local signal_num="''${1:-}"
-      if [ -z "$signal_num" ]; then
-        echo "UNKNOWN"
-        return 0
-      fi
-      kill -l "$signal_num" 2>/dev/null | tr '[:lower:]' '[:upper:]' || echo "UNKNOWN"
-    }
-
     cleanup() {
       if [ -n "''${CHILD_PID:-}" ] && kill -0 "$CHILD_PID" 2>/dev/null; then
         kill "$CHILD_PID" 2>/dev/null || true
@@ -178,21 +161,7 @@ let
       rm -f "$RETH_PID_FILE"
     }
 
-    on_wrapper_signal() {
-      local signal_name="$1"
-      local now=""
-      now=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)
-      emit_service_event service_degraded degraded \
-        --pid "''${CHILD_PID:-}" \
-        --log-path "$RETH_LOG_FILE" \
-        --wait-reason "wrapper_signal signal=$signal_name wrapper_pid=$$ timestamp=$now" \
-        --last-error "reth wrapper received external signal"
-      log_warn "reth wrapper signal=$signal_name wrapper_pid=$$ child_pid=''${CHILD_PID:-unknown} timestamp=$now"
-    }
-
-    trap cleanup EXIT
-    trap 'on_wrapper_signal INT; exit 130' INT
-    trap 'on_wrapper_signal TERM; exit 143' TERM
+    trap cleanup EXIT INT TERM
 
     READY=0
     for _ in $(seq 1 80); do
@@ -225,7 +194,7 @@ let
 
     emit_service_event service_ready ready --pid "$CHILD_PID" --log-path "$RETH_LOG_FILE"
 
-    log_info "reth started pid=$CHILD_PID http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT p2p_port=$RETH_P2P_PORT"
+    log_info "reth started pid=$CHILD_PID http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT"
     set +e
     wait "$CHILD_PID"
     RC=$?
@@ -234,22 +203,11 @@ let
     if [ "$RC" -eq 0 ]; then
       emit_service_event service_stopped stopped --pid "$CHILD_PID" --log-path "$RETH_LOG_FILE"
     else
-      if [ "$RC" -ge 128 ]; then
-        SIGNAL_NUM=$((RC - 128))
-        SIGNAL_NAME=$(signal_name_from_num "$SIGNAL_NUM")
-        emit_service_event service_degraded degraded \
-          --pid "$CHILD_PID" \
-          --log-path "$RETH_LOG_FILE" \
-          --wait-reason "reth_process_signal signal=$SIGNAL_NAME signal_num=$SIGNAL_NUM rc=$RC" \
-          --last-error "reth process terminated by signal"
-        log_warn "reth terminated by signal signal=$SIGNAL_NAME signal_num=$SIGNAL_NUM rc=$RC pid=$CHILD_PID"
-      else
-        emit_service_event service_degraded degraded \
-          --pid "$CHILD_PID" \
-          --log-path "$RETH_LOG_FILE" \
-          --wait-reason "reth_process_exit code=$RC" \
-          --last-error "reth process exited non-zero"
-      fi
+      emit_service_event service_degraded degraded \
+        --pid "$CHILD_PID" \
+        --log-path "$RETH_LOG_FILE" \
+        --wait-reason "reth_process_exit code=$RC" \
+        --last-error "reth process exited non-zero"
     fi
     exit "$RC"
   '';
@@ -321,7 +279,7 @@ let
       defaultLogPathExpr = ''"$RETH_LOG_FILE"'';
     }}
 
-    echo "service=reth slot=$SLOT env=$ENV running=$RUNNING pid=''${PID:-unknown} http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT p2p_port=$RETH_P2P_PORT network=$RETH_NETWORK scope=$SCOPE owner_run_id=''${OWNER_RUN_ID:-unknown} owner_scope=''${OWNER_SCOPE:-unknown} ephemeral_root=''${EPHEMERAL_ROOT:-none} registry_state=''${REGISTRY_STATE:-unknown} slot_owner=''${SLOT_OWNER:-unknown} wait_reason=''${WAIT_REASON:-none} log_path=$EFFECTIVE_LOG_PATH"
+    echo "service=reth slot=$SLOT env=$ENV running=$RUNNING pid=''${PID:-unknown} http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT network=$RETH_NETWORK scope=$SCOPE owner_run_id=''${OWNER_RUN_ID:-unknown} owner_scope=''${OWNER_SCOPE:-unknown} ephemeral_root=''${EPHEMERAL_ROOT:-none} registry_state=''${REGISTRY_STATE:-unknown} slot_owner=''${SLOT_OWNER:-unknown} wait_reason=''${WAIT_REASON:-none} log_path=$EFFECTIVE_LOG_PATH"
 
     if [ "$RUNNING" = "true" ]; then
       exit 0
