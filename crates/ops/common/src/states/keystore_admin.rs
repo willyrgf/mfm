@@ -1,22 +1,20 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, StateError};
-use mfm_machine::events::DomainEvent;
-use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
-use mfm_machine::ids::{ContextKey, FactKey, StateId};
-use mfm_machine::io::{IoCall, IoProvider};
+use mfm_machine::ids::{ContextKey, StateId};
+use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_sdk::errors::SdkError;
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::ctx as op_ctx;
 use crate::errors as op_errors;
 use crate::idempotency as op_idempotency;
+use crate::local_io_helpers::{emit_report_event, local_call};
 use crate::states::meta;
 
 const ENV_KEYSTORE_PATH: &str = "MFM_KEYSTORE_PATH";
@@ -157,9 +155,9 @@ impl State for KeystoreImportState {
             "keystore_import",
             serde_json::json!({
                 "kind": self.cfg.import_type.clone(),
-                "label_hex": self.cfg.label.as_ref().map(|v| hex_utf8(v)),
+                "label_hex": self.cfg.label.as_ref().map(|v| crate::hex::hex_encode_utf8(v)),
                 "derive_path": self.cfg.derivation_path.clone(),
-                "store_path_hex": hex_utf8(&path_to_string(&self.cfg.keystore_path)),
+                "store_path_hex": crate::hex::hex_encode_utf8(self.cfg.keystore_path.to_string_lossy().as_ref()),
                 "stdin_mode": self.cfg.stdin,
             }),
         )
@@ -233,9 +231,9 @@ impl State for KeystoreListState {
             "local.keystore.list",
             "keystore_list",
             serde_json::json!({
-                "store_path_hex": hex_utf8(&path_to_string(&self.cfg.keystore_path)),
+                "store_path_hex": crate::hex::hex_encode_utf8(self.cfg.keystore_path.to_string_lossy().as_ref()),
                 "show_addrs": self.cfg.show_addresses,
-                "filter_label_hex": self.cfg.filter_label.as_ref().map(|v| hex_utf8(v)),
+                "filter_label_hex": self.cfg.filter_label.as_ref().map(|v| crate::hex::hex_encode_utf8(v)),
                 "sort_by": self.cfg.sort_by.clone(),
             }),
         )
@@ -310,9 +308,9 @@ impl State for KeystoreDeleteState {
             "keystore_delete",
             serde_json::json!({
                 "id": self.cfg.id.clone(),
-                "label_hex": self.cfg.by_label.as_ref().map(|v| hex_utf8(v)),
+                "label_hex": self.cfg.by_label.as_ref().map(|v| crate::hex::hex_encode_utf8(v)),
                 "confirm_yes": self.cfg.yes,
-                "store_path_hex": hex_utf8(&path_to_string(&self.cfg.keystore_path)),
+                "store_path_hex": crate::hex::hex_encode_utf8(self.cfg.keystore_path.to_string_lossy().as_ref()),
             }),
         )
         .await?;
@@ -334,20 +332,6 @@ impl State for KeystoreDeleteState {
             snapshot: SnapshotPolicy::OnSuccess,
         })
     }
-}
-
-async fn emit_report_event(
-    rec: &mut dyn EventRecorder,
-    name: &str,
-    payload: serde_json::Value,
-) -> Result<(), StateError> {
-    rec.emit(DomainEvent {
-        name: name.to_string(),
-        payload,
-        payload_ref: None,
-    })
-    .await
-    .map_err(|_| op_errors::state_unknown("emit_failed", "failed to emit domain event"))
 }
 
 pub fn decode_optional_hex_string(
@@ -391,94 +375,6 @@ pub fn resolve_keystore_path(configured: Option<String>) -> PathBuf {
 }
 
 pub fn sdk_error_from_helper(err: KeystoreAdminError) -> SdkError {
-    let category = helper_category(err.code);
+    let category = op_errors::keystore_error_category(err.code);
     op_errors::sdk_error(err.code, category, false, err.message)
-}
-
-fn helper_category(code: &str) -> ErrorCategory {
-    match code {
-        "InvalidPrivateKey"
-        | "InvalidMnemonic"
-        | "InvalidDerivationPath"
-        | "InvalidUuid"
-        | "MissingArgument"
-        | "AmbiguousLabel"
-        | "KeyNotFound"
-        | "InvalidRegex"
-        | "InvalidPathConfig"
-        | "OperationCancelled" => ErrorCategory::ParsingInput,
-        _ => ErrorCategory::Unknown,
-    }
-}
-
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().to_string()
-}
-
-fn hex_utf8(value: &str) -> String {
-    hex::encode(value.as_bytes())
-}
-
-async fn local_call<T: DeserializeOwned>(
-    state_id: &StateId,
-    io: &mut dyn IoProvider,
-    namespace: &str,
-    purpose: &str,
-    request: serde_json::Value,
-) -> Result<T, StateError> {
-    let fact_key = local_fact_key(state_id, purpose, &request)?;
-    let response = io
-        .call(IoCall {
-            namespace: namespace.to_string(),
-            request,
-            fact_key: Some(fact_key),
-        })
-        .await
-        .map_err(op_errors::state_from_io)
-        .map_err(|err| attach_state(state_id, err))?;
-
-    serde_json::from_value(response.response).map_err(|_| {
-        op_errors::state_error_with_state(
-            state_id.clone(),
-            "LocalResponseDecodeFailed",
-            ErrorCategory::Unknown,
-            false,
-            "failed to decode local io response payload",
-        )
-    })
-}
-
-fn local_fact_key(
-    state_id: &StateId,
-    purpose: &str,
-    request: &serde_json::Value,
-) -> Result<FactKey, StateError> {
-    let req_id = artifact_id_for_json(request).map_err(|err| match err {
-        CanonicalJsonError::FloatNotAllowed => op_errors::state_error_with_state(
-            state_id.clone(),
-            "local_request_not_canonical",
-            ErrorCategory::ParsingInput,
-            false,
-            "local io request was not canonical-json-hashable (floats are forbidden)",
-        ),
-        CanonicalJsonError::SecretsNotAllowed => op_errors::state_error_with_state(
-            state_id.clone(),
-            "secrets_detected",
-            ErrorCategory::Unknown,
-            false,
-            "local io request contained secrets",
-        ),
-    })?;
-
-    Ok(FactKey(format!(
-        "mfm:local|state:{}|purpose:{purpose}|req:{}",
-        state_id.0, req_id.0
-    )))
-}
-
-fn attach_state(state_id: &StateId, mut err: StateError) -> StateError {
-    if err.state_id.is_none() {
-        err.state_id = Some(state_id.clone());
-    }
-    err
 }

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::Address;
 use mfm_collectors_evm::{parse_u64_hex_value, EvmIoClient, JsonRpcCall};
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, StateError};
@@ -12,42 +12,15 @@ use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 
 use crate::ctx::{read_u64_required, write_json};
 use crate::errors::{state_error_with_state, state_from_io, state_unknown};
-use crate::evm_encoding::{ERC20_SELECTOR_BALANCE_OF, ERC20_SELECTOR_DECIMALS};
+use crate::evm_encoding::{
+    format_u256_units, parse_hex_string_response, parse_u256_hex_response, parse_u256_hex_value,
+    parse_u8_u256, u64_hex_quantity,
+};
 use crate::states::meta;
 
-fn parse_hex_string_response(value: &serde_json::Value) -> Result<String, StateError> {
-    let Some(s) = value.as_str() else {
-        return Err(state_unknown(
-            "evm_response_invalid",
-            "evm response was not a hex string",
-        ));
-    };
-    let Some(rest) = s.strip_prefix("0x") else {
-        return Err(state_unknown(
-            "evm_response_invalid",
-            "evm response was not a hex string",
-        ));
-    };
-    if !rest.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(state_unknown(
-            "evm_response_invalid",
-            "evm response was not a hex string",
-        ));
-    }
-    Ok(s.to_string())
-}
-
-fn parse_u256_hex_response(value: &serde_json::Value) -> Result<String, StateError> {
-    let s = parse_hex_string_response(value)?;
-    let rest = s.strip_prefix("0x").unwrap_or_default();
-    if rest.is_empty() || rest.len() > 64 {
-        return Err(state_unknown(
-            "evm_response_invalid",
-            "evm response was not a hex u256",
-        ));
-    }
-    Ok(s)
-}
+pub use crate::evm_encoding::{
+    address_hex_lower, address_hex_lower_no0x, encode_erc20_balance_of, encode_erc20_decimals,
+};
 
 #[derive(Clone, Debug)]
 pub struct U64Expectation {
@@ -332,104 +305,6 @@ impl State for ReadU64HexState {
             snapshot: SnapshotPolicy::OnSuccess,
         })
     }
-}
-
-pub fn address_hex_lower(addr: &Address) -> String {
-    // Debug formatting is lowercase and stable.
-    format!("{addr:?}")
-}
-
-pub fn address_hex_lower_no0x(addr: &Address) -> String {
-    address_hex_lower(addr)
-        .strip_prefix("0x")
-        .unwrap_or("")
-        .to_string()
-}
-
-fn u64_hex_quantity(n: u64) -> String {
-    if n == 0 {
-        return "0x0".to_string();
-    }
-    format!("0x{:x}", n)
-}
-
-fn format_u256_units(raw: &U256, decimals: u8) -> String {
-    let s = raw.to_string();
-    let d = decimals as usize;
-    if d == 0 {
-        return s;
-    }
-    if s.len() <= d {
-        let mut out = String::with_capacity(2 + d + 1);
-        out.push_str("0.");
-        out.push_str(&"0".repeat(d - s.len()));
-        out.push_str(&s);
-        out
-    } else {
-        let split = s.len() - d;
-        let mut out = String::with_capacity(s.len() + 1);
-        out.push_str(&s[..split]);
-        out.push('.');
-        out.push_str(&s[split..]);
-        out
-    }
-}
-
-fn parse_u256_hex(s: &str) -> Result<U256, StateError> {
-    let Some(rest) = s.strip_prefix("0x") else {
-        return Err(state_unknown(
-            "evm_response_invalid",
-            "evm response was not a hex u256",
-        ));
-    };
-    if rest.is_empty() || rest.len() > 64 {
-        return Err(state_unknown(
-            "evm_response_invalid",
-            "evm response was not a hex u256",
-        ));
-    }
-
-    let mut hex_str = rest.to_string();
-    if hex_str.len() % 2 == 1 {
-        hex_str = format!("0{hex_str}");
-    }
-    let bytes = hex::decode(hex_str)
-        .map_err(|_| state_unknown("evm_response_invalid", "evm response was not a hex u256"))?;
-    Ok(U256::from_be_slice(&bytes))
-}
-
-fn parse_u256_hex_value(v: &serde_json::Value) -> Result<U256, StateError> {
-    let Some(s) = v.as_str() else {
-        return Err(state_unknown(
-            "evm_response_invalid",
-            "evm response was not a hex u256",
-        ));
-    };
-    parse_u256_hex(s)
-}
-
-fn parse_u8_u256(v: U256) -> Result<u8, StateError> {
-    if v > U256::from(u8::MAX) {
-        return Err(state_unknown(
-            "evm_response_invalid",
-            "evm response was out of range for u8",
-        ));
-    }
-    Ok(v.to::<u8>())
-}
-
-pub fn encode_erc20_balance_of(owner: &Address) -> String {
-    let mut data = Vec::with_capacity(4 + 32);
-    data.extend_from_slice(&ERC20_SELECTOR_BALANCE_OF);
-    data.extend_from_slice(&[0u8; 12]);
-    data.extend_from_slice(owner.as_slice());
-    format!("0x{}", hex::encode(data))
-}
-
-pub fn encode_erc20_decimals() -> String {
-    let mut data = Vec::with_capacity(4);
-    data.extend_from_slice(&ERC20_SELECTOR_DECIMALS);
-    format!("0x{}", hex::encode(data))
 }
 
 #[derive(Clone, Debug)]

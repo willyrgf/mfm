@@ -10,10 +10,10 @@ use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 
 use crate::ctx as op_ctx;
 use crate::errors as op_errors;
+use crate::evm_dcv as shared_dcv;
 use crate::evm_rpc;
 use crate::idempotency as op_idempotency;
 use crate::rpc as op_rpc;
-use crate::states::evm_dcv as shared_dcv;
 use crate::states::meta;
 
 const KEY_NIX_RESULT: &str = "result";
@@ -450,7 +450,7 @@ fn context_read_json(ctx: &dyn DynContext, key: &str) -> Result<serde_json::Valu
     )
 }
 
-fn resolve_artifact_config(
+pub(crate) fn resolve_artifact_config(
     ctx: &dyn DynContext,
     configured: &Option<shared_dcv::ContractArtifactConfig>,
     artifact_port: &str,
@@ -473,7 +473,7 @@ fn context_write_json(
     op_ctx::write_json(ctx, ContextKey(key.to_string()), value)
 }
 
-fn resolve_contract_address(
+pub(crate) fn resolve_contract_address(
     ctx: &dyn DynContext,
     configured: &Option<String>,
 ) -> Result<String, StateError> {

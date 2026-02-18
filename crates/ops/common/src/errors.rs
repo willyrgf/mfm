@@ -83,3 +83,19 @@ pub fn state_from_io(err: IoError) -> StateError {
         info,
     }
 }
+
+pub fn keystore_error_category(code: &str) -> ErrorCategory {
+    match code {
+        "InvalidPrivateKey"
+        | "InvalidMnemonic"
+        | "InvalidDerivationPath"
+        | "InvalidUuid"
+        | "MissingArgument"
+        | "AmbiguousLabel"
+        | "KeyNotFound"
+        | "InvalidRegex"
+        | "InvalidPathConfig"
+        | "OperationCancelled" => ErrorCategory::ParsingInput,
+        _ => ErrorCategory::Unknown,
+    }
+}

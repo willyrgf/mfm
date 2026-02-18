@@ -1,4 +1,8 @@
+use mfm_machine::errors::StateError;
+use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{OpPath, StateId};
+
+use crate::errors::state_unknown_msg;
 
 pub fn state_scope(scope: impl AsRef<str>, state_id: &StateId) -> String {
     format!("{}|state:{}", scope.as_ref(), state_id.0)
@@ -28,6 +32,16 @@ pub fn op_purpose(op: impl AsRef<str>, op_path: &OpPath, purpose: impl AsRef<str
         op_path.0,
         purpose.as_ref()
     )
+}
+
+pub fn idempotency_key_for_value(v: &serde_json::Value) -> Result<String, StateError> {
+    let id = artifact_id_for_json(v).map_err(|_| {
+        state_unknown_msg(
+            "idempotency_key_not_canonical",
+            "value was not canonical-json-hashable",
+        )
+    })?;
+    Ok(id.0)
 }
 
 #[cfg(test)]

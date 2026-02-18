@@ -62,6 +62,18 @@ pub fn read_array_required(
         .ok_or_else(|| state_unknown(type_code, type_message))
 }
 
+pub fn read_typed<T: serde::de::DeserializeOwned>(
+    ctx: &dyn DynContext,
+    key: &ContextKey,
+    missing_code: &'static str,
+    missing_message: &'static str,
+    type_code: &'static str,
+    type_message: &'static str,
+) -> Result<T, StateError> {
+    let value = read_json_required(ctx, key, missing_code, missing_message)?;
+    serde_json::from_value(value).map_err(|_| state_unknown(type_code, type_message))
+}
+
 pub fn write_json(
     ctx: &mut dyn DynContext,
     key: ContextKey,

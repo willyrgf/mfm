@@ -2,13 +2,13 @@ use std::time::Duration;
 
 use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::errors::{ErrorCategory, StateError};
-use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{FactKey, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
 
 use crate::errors as op_errors;
+use crate::evm_dcv as shared_dcv;
+use crate::local_io_helpers::local_fact_key;
 use crate::rpc as op_rpc;
-use crate::states::evm_dcv as shared_dcv;
 
 pub(crate) fn normalize_quantity_hex(
     raw: &str,
@@ -161,6 +161,19 @@ pub(crate) async fn transaction_count_hex(
     normalize_quantity_hex(&nonce, "eth_getTransactionCount returned invalid hex nonce")
 }
 
+pub(crate) async fn pending_nonce_u128(
+    io: &mut dyn IoProvider,
+    state_id: &StateId,
+    from: &str,
+) -> Result<u128, StateError> {
+    let mut client = EvmIoClient::new(state_id.clone(), io);
+    let nonce_hex = transaction_count_hex(&mut client, from).await?;
+    parse_quantity_hex_u128(
+        &nonce_hex,
+        "eth_getTransactionCount returned invalid hex nonce",
+    )
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct LegacyCreateTxSigningRequest<'a> {
     pub signing_key_env: &'a str,
@@ -210,27 +223,6 @@ pub(crate) async fn local_sign_legacy_create_raw_tx(
             "local signer returned invalid raw transaction hex",
         )
     })
-}
-
-pub(crate) fn local_fact_key(
-    state_id: &StateId,
-    purpose: &str,
-    request: &serde_json::Value,
-) -> Result<FactKey, StateError> {
-    let req_id = artifact_id_for_json(request).map_err(|err| match err {
-        CanonicalJsonError::FloatNotAllowed => op_errors::state_unknown(
-            "local_request_not_canonical",
-            "local io request was not canonical-json-hashable (floats are forbidden)",
-        ),
-        CanonicalJsonError::SecretsNotAllowed => {
-            op_errors::state_unknown("secrets_detected", "local io request contained secrets")
-        }
-    })?;
-
-    Ok(FactKey(format!(
-        "mfm:local|state:{}|purpose:{purpose}|req:{}",
-        state_id.0, req_id.0
-    )))
 }
 
 pub(crate) async fn send_signed_create_transaction(

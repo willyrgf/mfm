@@ -49,6 +49,10 @@ pub fn bytes_to_hex_prefixed(bytes: &[u8]) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
+pub fn hex_encode_utf8(value: &str) -> String {
+    hex::encode(value.as_bytes())
+}
+
 pub fn hex_nibble(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),

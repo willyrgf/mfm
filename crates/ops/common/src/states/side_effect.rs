@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::StateError;
 use mfm_machine::events::DomainEvent;
-use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{ContextKey, FactKey, OpPath, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
 use mfm_machine::meta::StateMeta;
@@ -76,7 +75,7 @@ impl State for IdempotentSideEffectState {
             "missing read_fact in context",
         )?;
 
-        let id_key = idempotency_key_for_value(&read_fact)?;
+        let id_key = op_idempotency::idempotency_key_for_value(&read_fact)?;
         op_ctx::write_json(
             ctx,
             self.idempotency_key_output.clone(),
@@ -123,14 +122,4 @@ impl State for IdempotentSideEffectState {
             snapshot: SnapshotPolicy::OnSuccess,
         })
     }
-}
-
-fn idempotency_key_for_value(v: &serde_json::Value) -> Result<String, StateError> {
-    let id = artifact_id_for_json(v).map_err(|_| {
-        op_errors::state_unknown_msg(
-            "idempotency_key_not_canonical",
-            "value was not canonical-json-hashable",
-        )
-    })?;
-    Ok(id.0)
 }
