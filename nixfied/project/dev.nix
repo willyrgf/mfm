@@ -44,6 +44,30 @@ let
     ];
     env = [
       {
+        name = "LOG_LEVEL";
+        type = "enum";
+        values = [
+          "error"
+          "warn"
+          "info"
+          "debug"
+          "trace"
+        ];
+        aliases = [ "NIXFIED_LOG_LEVEL" ];
+        required = false;
+      }
+      {
+        name = "OUTPUT_MODE";
+        type = "enum";
+        values = [
+          "stdout"
+          "logs"
+          "both"
+        ];
+        aliases = [ "NIXFIED_OUTPUT_MODE" ];
+        required = false;
+      }
+      {
         name = "HELIOS_NETWORK";
         type = "enum";
         values = [ "mainnet" ];

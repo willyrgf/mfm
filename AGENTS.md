@@ -241,7 +241,9 @@ These are typical, review-friendly change patterns (focus on a single outcome).
   - `LOG_FORMAT` is the canonical format selector (`text` default, `json` optional); `MFM_LOG_FORMAT` remains supported.
   - `LOG_SPAN_EVENTS` is the canonical span lifecycle selector (`none|new|close|active`); `MFM_LOG_SPAN_EVENTS` remains supported.
   - CI diagnostics use `LOG_LEVEL` as canonical level and `OUTPUT_MODE` as canonical output routing (`stdout|logs|both`).
-  - Project CI scripts hard-reject deprecated CI env aliases: `CI_LOG_LEVEL`, `CI_VERBOSE`, `NIXFIED_LOG_LEVEL`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`, `NIXFIED_OUTPUT_MODE`.
+  - Project CI scripts support compatibility aliases `NIXFIED_LOG_LEVEL` and `NIXFIED_OUTPUT_MODE`.
+  - Project CI scripts reject legacy CI env vars: `CI_LOG_LEVEL`, `CI_VERBOSE`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`.
+  - If `OUTPUT_MODE` is unset and `LOG_LEVEL=debug`, CI defaults to `OUTPUT_MODE=both`.
 - Output contract:
   - Logs go to stderr.
   - CLI/API payload contracts remain on stdout only.

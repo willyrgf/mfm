@@ -1,6 +1,6 @@
 { pkgs }:
 pkgs.writeText "mfm-ci-setup.sh" ''
-reject_legacy_ci_logging_env() {
+reject_legacy_ci_env() {
   local deprecated=""
 
   if [ "''${CI_LOG_LEVEL+x}" = "x" ]; then
@@ -8,9 +8,6 @@ reject_legacy_ci_logging_env() {
   fi
   if [ "''${CI_VERBOSE+x}" = "x" ]; then
     deprecated="$deprecated CI_VERBOSE"
-  fi
-  if [ "''${NIXFIED_LOG_LEVEL+x}" = "x" ]; then
-    deprecated="$deprecated NIXFIED_LOG_LEVEL"
   fi
   if [ "''${NIXFIED_VERBOSE+x}" = "x" ]; then
     deprecated="$deprecated NIXFIED_VERBOSE"
@@ -21,23 +18,8 @@ reject_legacy_ci_logging_env() {
 
   deprecated="''${deprecated# }"
   if [ -n "$deprecated" ]; then
-    echo "ERROR: deprecated CI logging env var(s): $deprecated" >&2
+    echo "ERROR: deprecated CI env var(s): $deprecated" >&2
     echo "HINT: use LOG_LEVEL for CI diagnostics verbosity." >&2
-    exit 3
-  fi
-}
-
-reject_legacy_ci_output_env() {
-  local deprecated=""
-
-  if [ "''${NIXFIED_OUTPUT_MODE+x}" = "x" ]; then
-    deprecated="$deprecated NIXFIED_OUTPUT_MODE"
-  fi
-
-  deprecated="''${deprecated# }"
-  if [ -n "$deprecated" ]; then
-    echo "ERROR: deprecated CI output env var(s): $deprecated" >&2
-    echo "HINT: use OUTPUT_MODE with one of: stdout|logs|both." >&2
     exit 3
   fi
 }
@@ -47,6 +29,8 @@ normalize_ci_logging_env() {
 
   if [ -n "''${LOG_LEVEL:-}" ]; then
     resolved_log_level="$LOG_LEVEL"
+  elif [ -n "''${NIXFIED_LOG_LEVEL:-}" ]; then
+    resolved_log_level="$NIXFIED_LOG_LEVEL"
   elif [ -n "''${MFM_LOG:-}" ]; then
     resolved_log_level="$MFM_LOG"
   elif [ -n "''${RUST_LOG:-}" ]; then
@@ -55,6 +39,7 @@ normalize_ci_logging_env() {
 
   if [ -n "$resolved_log_level" ]; then
     export LOG_LEVEL="$resolved_log_level"
+    export NIXFIED_LOG_LEVEL="$resolved_log_level"
     export MFM_LOG="''${MFM_LOG:-$resolved_log_level}"
     export RUST_LOG="''${RUST_LOG:-$resolved_log_level}"
   fi
@@ -75,13 +60,27 @@ normalize_ci_logging_env() {
 }
 
 validate_ci_output_mode() {
-  local mode="''${OUTPUT_MODE:-stdout}"
+  local mode=""
 
+  if [ -n "''${OUTPUT_MODE:-}" ]; then
+    mode="$OUTPUT_MODE"
+  elif [ -n "''${NIXFIED_OUTPUT_MODE:-}" ]; then
+    mode="$NIXFIED_OUTPUT_MODE"
+  fi
+
+  if [ -z "$mode" ]; then
+    if [ "''${LOG_LEVEL:-}" = "debug" ]; then
+      mode="both"
+    else
+      mode="stdout"
+    fi
+  fi
   mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
 
   case "$mode" in
     stdout|logs|both)
       export OUTPUT_MODE="$mode"
+      export NIXFIED_OUTPUT_MODE="$mode"
       ;;
     *)
       echo "ERROR: OUTPUT_MODE must be one of stdout|logs|both (got '$mode')" >&2
@@ -144,8 +143,7 @@ init_ci_rust_build_cache() {
 }
 
 source <($SLOT_INFO)
-reject_legacy_ci_logging_env
-reject_legacy_ci_output_env
+reject_legacy_ci_env
 normalize_ci_logging_env
 validate_ci_output_mode
 init_ci_cargo_paths

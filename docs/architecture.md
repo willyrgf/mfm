@@ -192,7 +192,9 @@ Anti-patterns:
 - CI/service diagnostics env contract:
   - canonical diagnostics level: `LOG_LEVEL`
   - canonical diagnostics output routing: `OUTPUT_MODE` (`stdout|logs|both`)
-  - project CI setup rejects deprecated CI env aliases: `CI_LOG_LEVEL`, `CI_VERBOSE`, `NIXFIED_LOG_LEVEL`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`, `NIXFIED_OUTPUT_MODE`.
+  - compatibility aliases are supported: `NIXFIED_LOG_LEVEL` and `NIXFIED_OUTPUT_MODE`
+  - project CI setup rejects legacy CI env vars: `CI_LOG_LEVEL`, `CI_VERBOSE`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`
+  - if `OUTPUT_MODE` is unset and `LOG_LEVEL=debug`, CI defaults to `OUTPUT_MODE=both`
   - parity/CI teardown captures per-service status/events and debug-level service logs (`LOG_LEVEL=debug|trace`) for orchestrated fixtures, independent of `OUTPUT_MODE`.
 - Include correlation fields when available:
   - `request_id`, `run_id`, `op_id`, `state_id`, `attempt`, `artifact_id`, `event_seq`.

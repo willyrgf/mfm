@@ -177,8 +177,9 @@ in
 
           Service diagnostics coverage:
           - CI setup normalizes logging env for Rust apps/tests and service wrappers.
-          - Deprecated CI logging env vars are rejected (`CI_LOG_LEVEL`, `CI_VERBOSE`, `NIXFIED_LOG_LEVEL`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`).
-          - Deprecated CI output env vars are rejected (`NIXFIED_OUTPUT_MODE`).
+          - Canonical CI env vars are `LOG_LEVEL` and `OUTPUT_MODE`; compatibility aliases `NIXFIED_LOG_LEVEL` and `NIXFIED_OUTPUT_MODE` are supported.
+          - Legacy CI env vars are rejected (`CI_LOG_LEVEL`, `CI_VERBOSE`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`).
+          - If output mode is unset and `LOG_LEVEL=debug`, CI defaults `OUTPUT_MODE=both`.
           - CI teardown collects diagnostics for `postgres`, `minio`, `reth`, `helios`, and `nginx`.
           - service status/events are always captured; service log tails are captured when `LOG_LEVEL` resolves to `debug` or `trace` (independent of `OUTPUT_MODE`).
 
