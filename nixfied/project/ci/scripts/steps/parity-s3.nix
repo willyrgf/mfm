@@ -5,6 +5,8 @@ pkgs.writeText "mfm-ci-steps-parity-s3.sh" ''
   export MFM_S3_BUCKET="$MINIO_BUCKET"
   export MFM_S3_PREFIX="$MINIO_PREFIX"
 
+  run_hook SVC_MINIO_BUCKET_PROBE_WRITE "$MINIO_BUCKET" "$MINIO_PREFIX"
+
   LOGFILE=$(artifact_path "parity-s3.log")
   log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_artifact_store_s3_contract
 ''

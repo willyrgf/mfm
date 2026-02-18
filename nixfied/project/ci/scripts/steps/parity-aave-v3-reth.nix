@@ -11,6 +11,8 @@ pkgs.writeText "mfm-ci-steps-parity-aave-v3-reth.sh" ''
 
   export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
 
+  run_hook SVC_MINIO_BUCKET_PROBE_WRITE "$MINIO_BUCKET" "$MINIO_PREFIX"
+
   LOGFILE=$(artifact_path "parity-aave-v3-reth.log")
   log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_aave_v3_reth_scenario
 ''

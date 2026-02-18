@@ -15,6 +15,7 @@ use mfm_machine::config::{
 use mfm_machine::context::DynContext;
 use mfm_machine::engine::{RunPhase, Stores};
 use mfm_machine::errors::{ContextError, IoError};
+use mfm_machine::events::{Event, KernelEvent};
 use mfm_machine::ids::{ContextKey, OpId, RunId, StateId};
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransportFactory};
@@ -300,6 +301,66 @@ async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> Postgr
         "postgres config after retries (DATABASE_URL={}): {:?}",
         db_url, last_err
     );
+}
+
+async fn run_failure_diagnostics(events: Arc<dyn EventStore>, run_id: RunId) -> String {
+    let stream = match events.read_range(run_id.clone(), 1, None).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            return format!("run_id={} read_range_failed={err:?}", run_id.0);
+        }
+    };
+
+    let mut last_state_entered: Option<(u64, String, u32)> = None;
+    let mut last_state_failed: Option<(u64, String, String, bool, String)> = None;
+    let mut last_fact_key: Option<(u64, String)> = None;
+
+    for envelope in stream {
+        match envelope.event {
+            Event::Kernel(KernelEvent::StateEntered {
+                state_id, attempt, ..
+            }) => {
+                last_state_entered = Some((envelope.seq, state_id.0, attempt));
+            }
+            Event::Kernel(KernelEvent::StateFailed {
+                state_id, error, ..
+            }) => {
+                last_state_failed = Some((
+                    envelope.seq,
+                    state_id.0,
+                    error.info.code.0,
+                    error.info.retryable,
+                    error.info.message,
+                ));
+            }
+            Event::Domain(domain) if domain.name == "fact_recorded" => {
+                if let Some(key) = domain.payload.get("key").and_then(|v| v.as_str()) {
+                    last_fact_key = Some((envelope.seq, key.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut parts = vec![format!("run_id={}", run_id.0)];
+    if let Some((seq, state_id, attempt)) = last_state_entered {
+        parts.push(format!(
+            "last_state_entered={state_id} attempt={attempt} seq={seq}"
+        ));
+    }
+    if let Some((seq, state_id, code, retryable, message)) = last_state_failed {
+        parts.push(format!(
+            "state_failed={state_id} seq={seq} code={code} retryable={retryable} message={message}"
+        ));
+    }
+    if let Some((seq, fact_key)) = last_fact_key {
+        parts.push(format!("last_fact_key={fact_key} seq={seq}"));
+    }
+    if parts.len() == 1 {
+        parts.push("no_state_failed_event_found".to_string());
+    }
+
+    parts.join("; ")
 }
 
 fn phase_a_pipeline(workspace_flake: &str) -> Pipeline {
@@ -594,7 +655,14 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .await
         .expect("start phase A pipeline");
 
-    assert_eq!(phase_a_run.phase, RunPhase::Completed);
+    if phase_a_run.phase != RunPhase::Completed {
+        let diagnostics =
+            run_failure_diagnostics(Arc::clone(&events), phase_a_run.run_id.clone()).await;
+        panic!(
+            "phase A expected Completed, got {:?}; {}",
+            phase_a_run.phase, diagnostics
+        );
+    }
     let phase_a_snapshot_id = phase_a_run
         .final_snapshot_id
         .expect("phase A final snapshot");
@@ -677,7 +745,14 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .await
         .expect("start phase B pipeline");
 
-    assert_eq!(phase_b_run.phase, RunPhase::Completed);
+    if phase_b_run.phase != RunPhase::Completed {
+        let diagnostics =
+            run_failure_diagnostics(Arc::clone(&events), phase_b_run.run_id.clone()).await;
+        panic!(
+            "phase B expected Completed, got {:?}; {}",
+            phase_b_run.phase, diagnostics
+        );
+    }
 
     let pool = contract_from_manifest(&deploy_manifest, CONTRACT_POOL);
     let usdc = contract_from_manifest(&deploy_manifest, CONTRACT_USDC);

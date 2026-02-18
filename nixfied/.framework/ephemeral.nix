@@ -68,33 +68,39 @@ let
   mkUniqueId = id.mkUniqueId;
 
   acquireSlotLock = pkgs.writeShellScript "acquire-slot-lock" ''
-    set -euo pipefail
+    # Emit shell code to be eval'ed by the caller. This ensures the selected lock
+    # FD stays open in the caller process for the full run lifetime.
+    cat <<'EOF'
+LOCK_DIR="${lockDir}"
+LOCK_PREFIX="${lockPrefix}"
 
-    LOCK_DIR="${lockDir}"
-    LOCK_PREFIX="${lockPrefix}"
+_nixfied_slot_locked=0
+for slot in $(${pkgs.coreutils}/bin/seq 0 ${toString slotMax}); do
+  LOCK_FILE="$LOCK_DIR/$LOCK_PREFIX-$slot.lock"
+  FD=$((200 + slot))
+  eval "exec $FD>\"$LOCK_FILE\""
 
-    for slot in $(seq 0 ${toString slotMax}); do
-      LOCK_FILE="$LOCK_DIR/$LOCK_PREFIX-$slot.lock"
-      FD=$((200 + slot))
-      eval "exec $FD>\"$LOCK_FILE\""
+  if ${pkgs.flock}/bin/flock -n "$FD" 2>/dev/null; then
+    export ${projectIdUpper}_EPHEMERAL_SLOT="$slot"
+    export ${projectIdUpper}_SLOT_LOCK_FD="$FD"
+    export ${slotVar}="$slot"
+    _nixfied_slot_locked=1
+    break
+  fi
 
-      if ${pkgs.flock}/bin/flock -n "$FD" 2>/dev/null; then
-        echo "export ${projectIdUpper}_EPHEMERAL_SLOT=$slot"
-        echo "export ${projectIdUpper}_SLOT_LOCK_FD=$FD"
-        echo "export ${slotVar}=$slot"
-        exit 0
-      else
-        eval "exec $FD>&-"
-      fi
-    done
+  eval "exec $FD>&-"
+done
 
-    echo "ERROR: All $((${toString slotMax} + 1)) ephemeral slots (0-${toString slotMax}) are in use" >&2
-    echo "" >&2
-    echo "   This means $((${toString slotMax} + 1)) concurrent runs are already running." >&2
-    echo "   Wait for one to complete or check for stale locks:" >&2
-    echo "   ls -la $LOCK_DIR/$LOCK_PREFIX-*.lock" >&2
-    echo "" >&2
-    exit 1
+if [ "$_nixfied_slot_locked" -ne 1 ]; then
+  echo "ERROR: All $((${toString slotMax} + 1)) ephemeral slots (0-${toString slotMax}) are in use" >&2
+  echo "" >&2
+  echo "   This means $((${toString slotMax} + 1)) concurrent runs are already running." >&2
+  echo "   Wait for one to complete or check for stale locks:" >&2
+  echo "   ls -la $LOCK_DIR/$LOCK_PREFIX-*.lock" >&2
+  echo "" >&2
+  exit 1
+fi
+EOF
   '';
 
   releaseSlotLock = pkgs.writeShellScript "release-slot-lock" ''

@@ -156,9 +156,7 @@ impl State for NixExecState {
                     fact_key: Some(preflight_key),
                 })
                 .await
-                .map_err(|_| {
-                    op_errors::state_unknown("nix_preflight_failed", "nix preflight failed")
-                })?;
+                .map_err(op_errors::state_from_io)?;
 
             preflight
                 .response
@@ -195,7 +193,7 @@ impl State for NixExecState {
                 fact_key: Some(key),
             })
             .await
-            .map_err(|_| op_errors::state_unknown("exec_io_failed", "exec io call failed"))?;
+            .map_err(op_errors::state_from_io)?;
 
         op_ctx::write_json(
             ctx,

@@ -321,7 +321,10 @@ in
       SERVICE_OWNER_SCOPE = "persistent";
       SERVICE_DISCOVERY_SCOPE = "global";
       SERVICE_REUSE_POLICY = "same-slot";
-      MINIO_ROOTDISK_THRESHOLD_SIZE = "512MiB";
+      # MinIO accepts both ROOTDISK/ROOTDRIVE variable names across releases.
+      # These vars control root-drive classification, not the object-write fill fraction.
+      MINIO_ROOTDISK_THRESHOLD_SIZE = "128MiB";
+      MINIO_ROOTDRIVE_THRESHOLD_SIZE = "128MiB";
     };
     useDeps = true;
     setupActions = [
