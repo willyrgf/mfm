@@ -178,8 +178,10 @@ in
           Service diagnostics coverage:
           - CI setup normalizes logging env for Rust apps/tests and service wrappers.
           - Canonical CI env vars are `LOG_LEVEL` and `OUTPUT_MODE`; compatibility aliases `NIXFIED_LOG_LEVEL` and `NIXFIED_OUTPUT_MODE` are supported.
+          - `LOG_LEVEL` must be one of `error|warn|info|debug|trace`; use `RUST_LOG`/`MFM_LOG` for target-specific composite filters.
           - Legacy CI env vars are rejected (`CI_LOG_LEVEL`, `CI_VERBOSE`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`).
           - If output mode is unset and `LOG_LEVEL=debug`, CI defaults `OUTPUT_MODE=both`.
+          - CI step command output follows `OUTPUT_MODE`: `logs` captures to artifacts only, `stdout|both` stream while capturing.
           - CI teardown collects diagnostics for `postgres`, `minio`, `reth`, `helios`, and `nginx`.
           - service status/events are always captured; service log tails are captured when `LOG_LEVEL` resolves to `debug` or `trace` (independent of `OUTPUT_MODE`).
 
@@ -197,16 +199,16 @@ in
           "nix run .#ci -- --mode basic --summary"
           "nix run .#ci -- --mode full --summary"
           "nix run .#ci -- --mode=basic --summary"
-          "LOG_LEVEL='debug,mfm=trace' nix run .#ci -- --parity --summary"
-          "OUTPUT_MODE='both' LOG_LEVEL='debug,mfm=trace' nix run .#ci -- --parity --summary"
+          "LOG_LEVEL='debug' RUST_LOG='debug,mfm=trace' nix run .#ci -- --parity --summary"
+          "OUTPUT_MODE='both' LOG_LEVEL='debug' RUST_LOG='debug,mfm=trace' nix run .#ci -- --parity --summary"
           "nix run .#ci -- --bg"
           "nix run .#ci -- --background"
         ];
         examples = [
           "nix run .#ci -- --basic --summary"
           "CI_ARTIFACTS_DIR=/tmp/ci-artifacts nix run .#ci -- --parity --summary"
-          "LOG_LEVEL='debug,mfm=trace' nix run .#ci -- --parity --summary"
-          "OUTPUT_MODE='logs' LOG_LEVEL='debug,mfm=trace' nix run .#ci -- --parity --summary"
+          "LOG_LEVEL='debug' RUST_LOG='debug,mfm=trace' nix run .#ci -- --parity --summary"
+          "OUTPUT_MODE='logs' LOG_LEVEL='debug' RUST_LOG='debug,mfm=trace' nix run .#ci -- --parity --summary"
           "nix run .#ci -- --full --summary"
           "nix run .#process::status -- --all"
         ];

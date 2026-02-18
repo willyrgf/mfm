@@ -41,6 +41,9 @@ set +e
   grep -Fq 'validate_ci_output_mode()' nixfied/project/ci/scripts/setup.nix
   grep -Fq 'export LOG_LEVEL=' nixfied/project/ci/scripts/setup.nix
   grep -Fq 'export OUTPUT_MODE=' nixfied/project/ci/scripts/setup.nix
+  grep -Fq 'export LOG_TEE=' nixfied/project/ci/scripts/setup.nix
+  grep -Fq 'logs) export LOG_TEE="0"' nixfied/project/ci/scripts/setup.nix
+  grep -Fq 'stdout|both) export LOG_TEE="1"' nixfied/project/ci/scripts/setup.nix
   grep -Fq 'OUTPUT_MODE must be one of stdout|logs|both' nixfied/project/ci/scripts/setup.nix
   grep -Fq '_ci_debug_enabled()' nixfied/project/ci/scripts/teardown.nix
   grep -Fq '_ci_output_mode()' nixfied/project/ci/scripts/teardown.nix
@@ -49,6 +52,11 @@ set +e
   grep -Fq '`OUTPUT_MODE`' docs/architecture.md
   grep -Fq '`OUTPUT_MODE`' AGENTS.md
   grep -Fq 'compatibility aliases `NIXFIED_LOG_LEVEL` and `NIXFIED_OUTPUT_MODE` are supported.' nixfied/project/ci.nix
+  grep -Fq "RUST_LOG='debug,mfm=trace'" nixfied/project/ci.nix
+  if grep -Fq "LOG_LEVEL='debug,mfm=trace'" nixfied/project/ci.nix; then
+    echo "ERROR: CI docs still include invalid composite LOG_LEVEL examples" >&2
+    exit 1
+  fi
 
   CHECK_UNKNOWN_LOG=$(mktemp)
   set +e

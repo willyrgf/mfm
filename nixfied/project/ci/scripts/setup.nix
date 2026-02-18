@@ -81,6 +81,12 @@ validate_ci_output_mode() {
     stdout|logs|both)
       export OUTPUT_MODE="$mode"
       export NIXFIED_OUTPUT_MODE="$mode"
+      # CI step scripts use log_capture. Map OUTPUT_MODE to LOG_TEE so
+      # step command output follows the same routing semantics.
+      case "$mode" in
+        logs) export LOG_TEE="0" ;;
+        stdout|both) export LOG_TEE="1" ;;
+      esac
       ;;
     *)
       echo "ERROR: OUTPUT_MODE must be one of stdout|logs|both (got '$mode')" >&2
