@@ -36,6 +36,8 @@ const CODE_NIX_MANIFEST_INVALID: &str = "nix_manifest_invalid";
 const CODE_NIX_EVAL_FAILED: &str = "nix_eval_failed";
 const CODE_NIX_BUILD_FAILED: &str = "nix_build_failed";
 const CODE_NIX_TIMEOUT: &str = "nix_timeout";
+const MAX_STDERR_DETAIL_BYTES: usize = 4096;
+const MAX_STDOUT_DETAIL_BYTES: usize = 1024;
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
@@ -44,6 +46,21 @@ fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> E
         retryable: false,
         message: message.to_string(),
         details: None,
+    }
+}
+
+fn info_with_details(
+    code: &'static str,
+    category: ErrorCategory,
+    message: &'static str,
+    details: serde_json::Value,
+) -> ErrorInfo {
+    ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category,
+        retryable: false,
+        message: message.to_string(),
+        details: Some(details),
     }
 }
 
@@ -143,6 +160,10 @@ fn attr_path_for_program(system: &str, fragment: &str) -> String {
     }
 }
 
+fn flake_installable_target(flake_url: &str, attr: &str) -> String {
+    format!("{flake_url}#{attr}")
+}
+
 fn store_root_from_program_path(program_path: &str) -> Option<String> {
     let rest = program_path.strip_prefix("/nix/store/")?;
     let (entry, _) = rest.split_once('/').unwrap_or((rest, ""));
@@ -150,6 +171,64 @@ fn store_root_from_program_path(program_path: &str) -> Option<String> {
         return None;
     }
     Some(format!("/nix/store/{entry}"))
+}
+
+fn trim_command_output(bytes: &[u8], max_bytes: usize) -> Option<String> {
+    if bytes.is_empty() {
+        return None;
+    }
+
+    let (slice, truncated) = if bytes.len() > max_bytes {
+        (&bytes[bytes.len() - max_bytes..], true)
+    } else {
+        (bytes, false)
+    };
+    let text = String::from_utf8_lossy(slice).trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    if truncated {
+        Some(format!("...[truncated]\n{text}"))
+    } else {
+        Some(text)
+    }
+}
+
+fn command_failure_details(
+    command: &str,
+    target: &str,
+    status_code: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> serde_json::Value {
+    let mut details = serde_json::Map::new();
+    details.insert(
+        "command".to_string(),
+        serde_json::Value::String(command.to_string()),
+    );
+    details.insert(
+        "target".to_string(),
+        serde_json::Value::String(target.to_string()),
+    );
+    details.insert(
+        "exit_code".to_string(),
+        status_code
+            .map(|code| serde_json::Value::Number(code.into()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    if let Some(stderr_excerpt) = trim_command_output(stderr, MAX_STDERR_DETAIL_BYTES) {
+        details.insert(
+            "stderr".to_string(),
+            serde_json::Value::String(stderr_excerpt),
+        );
+    }
+    if let Some(stdout_excerpt) = trim_command_output(stdout, MAX_STDOUT_DETAIL_BYTES) {
+        details.insert(
+            "stdout".to_string(),
+            serde_json::Value::String(stdout_excerpt),
+        );
+    }
+    serde_json::Value::Object(details)
 }
 
 fn parse_resolve_request(call: &IoCall) -> Result<ResolveFlakeAppV1, IoError> {
@@ -313,6 +392,7 @@ impl LiveIoTransport for NixFlakeTransport {
         let (flake_url, fragment) = split_flake_app_ref(&req.app)?;
         let system = nix_system();
         let attr = attr_path_for_program(&system, fragment);
+        let target = flake_installable_target(flake_url, &attr);
 
         // 1) Resolve the app program path.
         let mut eval = Command::new("nix");
@@ -322,14 +402,21 @@ impl LiveIoTransport for NixFlakeTransport {
             .arg("false")
             .arg("--raw")
             .arg("--no-write-lock-file")
-            .arg(format!("{flake_url}#{attr}"));
+            .arg(&target);
 
         let out = run_with_timeout(eval, req.timeout_ms).await?;
         if !out.status.success() {
-            return Err(IoError::Transport(info(
+            return Err(IoError::Transport(info_with_details(
                 CODE_NIX_EVAL_FAILED,
                 ErrorCategory::Unknown,
                 "nix eval failed",
+                command_failure_details(
+                    "nix eval",
+                    &target,
+                    out.status.code(),
+                    &out.stdout,
+                    &out.stderr,
+                ),
             )));
         }
 
@@ -341,13 +428,13 @@ impl LiveIoTransport for NixFlakeTransport {
                 "resolved program path did not start with /nix/store/",
             )));
         }
-        let program_store_root = store_root_from_program_path(&program_path).ok_or_else(|| {
-            IoError::Other(info(
+        if store_root_from_program_path(&program_path).is_none() {
+            return Err(IoError::Other(info(
                 CODE_NIX_REQUEST_INVALID,
                 ErrorCategory::ParsingInput,
                 "resolved program path was not a valid nix store path",
-            ))
-        })?;
+            )));
+        }
 
         // 2) Realize the app when the resolved program path is not already present.
         if !Path::new(&program_path).exists() {
@@ -356,21 +443,33 @@ impl LiveIoTransport for NixFlakeTransport {
                 .arg("build")
                 .arg("--no-link")
                 .arg("--no-write-lock-file")
-                .arg(program_store_root);
+                .arg(&target);
 
             let out = run_with_timeout(build, req.timeout_ms).await?;
             if !out.status.success() {
-                return Err(IoError::Transport(info(
+                return Err(IoError::Transport(info_with_details(
                     CODE_NIX_BUILD_FAILED,
                     ErrorCategory::Unknown,
                     "nix build failed",
+                    command_failure_details(
+                        "nix build",
+                        &target,
+                        out.status.code(),
+                        &out.stdout,
+                        &out.stderr,
+                    ),
                 )));
             }
             if !Path::new(&program_path).exists() {
-                return Err(IoError::Transport(info(
+                return Err(IoError::Transport(info_with_details(
                     CODE_NIX_BUILD_FAILED,
                     ErrorCategory::Unknown,
                     "nix build did not realize resolved program path",
+                    serde_json::json!({
+                        "command": "nix build",
+                        "target": target,
+                        "expected_program_path": program_path,
+                    }),
                 )));
             }
         }
@@ -611,6 +710,12 @@ mod tests {
     }
 
     #[test]
+    fn flake_installable_target_uses_attr_path() {
+        let got = flake_installable_target("path:/repo", "apps.x86_64-linux.app.program");
+        assert_eq!(got, "path:/repo#apps.x86_64-linux.app.program");
+    }
+
+    #[test]
     fn store_root_from_program_path_extracts_store_root() {
         let got = store_root_from_program_path("/nix/store/hash-app/bin/app");
         assert_eq!(got.as_deref(), Some("/nix/store/hash-app"));
@@ -620,6 +725,48 @@ mod tests {
     fn store_root_from_program_path_rejects_non_store_paths() {
         assert!(store_root_from_program_path("/tmp/app").is_none());
         assert!(store_root_from_program_path("/nix/store/").is_none());
+    }
+
+    #[test]
+    fn command_failure_details_include_exit_code_and_stderr() {
+        let details = command_failure_details(
+            "nix build",
+            "path:/repo#apps.x86_64-linux.app.program",
+            Some(100),
+            b"",
+            b"error: failed to fetch\n",
+        );
+        assert_eq!(
+            details.get("command").and_then(|v| v.as_str()),
+            Some("nix build")
+        );
+        assert_eq!(
+            details.get("target").and_then(|v| v.as_str()),
+            Some("path:/repo#apps.x86_64-linux.app.program")
+        );
+        assert_eq!(details.get("exit_code").and_then(|v| v.as_i64()), Some(100));
+        assert!(details
+            .get("stderr")
+            .and_then(|v| v.as_str())
+            .expect("stderr")
+            .contains("failed to fetch"));
+    }
+
+    #[test]
+    fn command_failure_details_truncate_large_stderr() {
+        let huge = "x".repeat(MAX_STDERR_DETAIL_BYTES + 32);
+        let details = command_failure_details(
+            "nix eval",
+            "path:/repo#apps.x86_64-linux.app.program",
+            Some(1),
+            b"",
+            huge.as_bytes(),
+        );
+        let stderr = details
+            .get("stderr")
+            .and_then(|v| v.as_str())
+            .expect("stderr");
+        assert!(stderr.starts_with("...[truncated]"));
     }
 
     #[tokio::test]
