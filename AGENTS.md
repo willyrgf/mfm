@@ -6,7 +6,7 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 ## Read First (Non-Negotiables)
 
 - Keep changes small and local; prefer 1 logical change per PR/commit.
-- Match CI (Nixfied): use `nix run .#check`, `nix run .#test`, and `nix run .#ci -- --basic/--audit/--parity --summary`.
+- Match CI (Nixfied): use `nix run .#check`, `nix run .#test`, and `nix run .#ci -- --basic/--audit/--parity/--full --summary`.
 - Do not commit raw `.sh` scripts; shell logic must be Nix-packaged and executed from Nix-evaluated paths.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
@@ -47,6 +47,7 @@ Nixfied is the canonical entrypoint for dev/test/build/check/ci:
 - `nix run .#ci -- --basic --summary`
 - `nix run .#ci -- --audit --summary`
 - `nix run .#ci -- --parity --summary`
+- `nix run .#ci -- --full --summary`
 
 ## Project Overview
 
@@ -430,6 +431,7 @@ nix run .#ci -- --audit --summary
 # CI modes
 nix run .#ci -- --basic --summary
 nix run .#ci -- --parity --summary
+nix run .#ci -- --full --summary
 
 # Release build (all features)
 nix run .#build

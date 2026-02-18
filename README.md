@@ -85,6 +85,7 @@ nix run .#test
 nix run .#ci -- --basic --summary
 nix run .#ci -- --audit --summary
 nix run .#ci -- --parity --summary
+nix run .#ci -- --full --summary
 nix run .#ci -- --mode basic --summary
 ```
 
