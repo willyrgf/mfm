@@ -1,20 +1,16 @@
 use std::path::Path;
 
 use alloy_primitives::{keccak256, Address, PrimitiveSignature, B256};
-use chrono::{DateTime, Utc};
-use mfm_machine::errors::{ErrorCategory, StateError};
-use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
-use mfm_machine::ids::{ContextKey, FactKey, StateId};
-use mfm_machine::io::{IoCall, IoProvider};
-use mfm_op_keystore::Keystore;
-use url::Url;
-use uuid::Uuid;
-
-use crate::errors::{state_error_with_state, state_from_io};
-use crate::rlp::{
+use mfm_evm_core::rlp::{
     rlp_encode_bytes, rlp_encode_list_preencoded, trim_leading_zero_bytes, u128_to_min_be,
     u64_to_min_be,
 };
+use mfm_machine::errors::{ErrorCategory, StateError};
+use mfm_machine::ids::{ContextKey, StateId};
+use mfm_op_common::errors::state_error_with_state;
+use mfm_op_keystore::Keystore;
+use url::Url;
+use uuid::Uuid;
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -69,13 +65,6 @@ pub struct SignedEip1559Tx {
     pub from: String,
     pub payload_hash: String,
     pub raw_tx_hex: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RpcRawTxSubmission {
-    pub tx_hash: String,
-    pub rpc_url_host: String,
-    pub submitted_at: String,
 }
 
 pub fn parse_address(raw: &str, field_name: &str) -> Result<Address, KeystoreTxError> {
@@ -309,127 +298,6 @@ pub fn write_raw_transaction_file(path: &Path, raw_tx_hex: &str) -> Result<(), K
 
 pub fn output_context_key(op_path: &str) -> ContextKey {
     ContextKey(format!("{op_path}.report"))
-}
-
-pub async fn send_raw_transaction_via_io(
-    state_id: &StateId,
-    io: &mut dyn IoProvider,
-    rpc_url: &str,
-    raw_tx_hex: &str,
-) -> Result<RpcRawTxSubmission, StateError> {
-    let parsed_url = parse_rpc_url(rpc_url)
-        .map_err(|e| e.to_state_error(state_id, ErrorCategory::ParsingInput))?;
-    validate_raw_transaction_hex(raw_tx_hex)
-        .map_err(|e| e.to_state_error(state_id, ErrorCategory::ParsingInput))?;
-
-    let request = serde_json::json!({
-        "method": "eth_sendRawTransaction",
-        "params": [raw_tx_hex],
-        "rpc_url": rpc_url,
-    });
-
-    let fact_key = send_raw_fact_key(state_id, raw_tx_hex)?;
-
-    let response = io
-        .call(IoCall {
-            namespace: "evm".to_string(),
-            request,
-            fact_key: Some(fact_key),
-        })
-        .await
-        .map_err(state_from_io)?;
-
-    let tx_hash = response
-        .response
-        .as_str()
-        .ok_or_else(|| {
-            state_error_with_state(
-                state_id.clone(),
-                "RpcInvalidResponse",
-                ErrorCategory::ParsingInput,
-                false,
-                "eth_sendRawTransaction returned a non-string result",
-            )
-        })?
-        .to_string();
-
-    validate_tx_hash(&tx_hash)
-        .map_err(|e| e.to_state_error(state_id, ErrorCategory::ParsingInput))?;
-
-    let submitted_at = now_rfc3339(io, state_id).await?;
-
-    Ok(RpcRawTxSubmission {
-        tx_hash,
-        rpc_url_host: url_host_with_port(&parsed_url),
-        submitted_at,
-    })
-}
-
-async fn now_rfc3339(io: &mut dyn IoProvider, state_id: &StateId) -> Result<String, StateError> {
-    let now_ms = io.now_millis().await.map_err(state_from_io)?;
-    let timestamp = DateTime::<Utc>::from_timestamp_millis(now_ms as i64).ok_or_else(|| {
-        state_error_with_state(
-            state_id.clone(),
-            "InvalidTimestamp",
-            ErrorCategory::Unknown,
-            false,
-            "failed to convert timestamp to RFC3339",
-        )
-    })?;
-    Ok(timestamp.to_rfc3339())
-}
-
-fn send_raw_fact_key(state_id: &StateId, raw_tx_hex: &str) -> Result<FactKey, StateError> {
-    let key_request = serde_json::json!({
-        "method": "eth_sendRawTransaction",
-        "params": [raw_tx_hex],
-    });
-
-    let req_id = artifact_id_for_json(&key_request).map_err(|err| match err {
-        CanonicalJsonError::FloatNotAllowed => state_error_with_state(
-            state_id.clone(),
-            "evm_request_not_canonical",
-            ErrorCategory::ParsingInput,
-            false,
-            "raw tx request was not canonical-json-hashable (floats are forbidden)",
-        ),
-        CanonicalJsonError::SecretsNotAllowed => state_error_with_state(
-            state_id.clone(),
-            "secrets_detected",
-            ErrorCategory::Unknown,
-            false,
-            "raw tx request contained secrets (Milestone 1 forbids persisting secrets)",
-        ),
-    })?;
-
-    Ok(FactKey(format!(
-        "mfm:evm_send_raw|state:{}|req:{}",
-        state_id.0, req_id.0
-    )))
-}
-
-fn validate_tx_hash(tx_hash: &str) -> Result<(), KeystoreTxError> {
-    if tx_hash.len() != 66 || !tx_hash.starts_with("0x") {
-        return Err(KeystoreTxError::new(
-            "RpcInvalidResponse",
-            "eth_sendRawTransaction returned an invalid tx hash shape",
-        ));
-    }
-    if !tx_hash[2..].chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(KeystoreTxError::new(
-            "RpcInvalidResponse",
-            "eth_sendRawTransaction returned a non-hex tx hash",
-        ));
-    }
-    Ok(())
-}
-
-fn url_host_with_port(url: &Url) -> String {
-    let host = url.host_str().unwrap_or_default();
-    match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    }
 }
 
 fn derive_signature_with_matching_recovery_id(

@@ -1,5 +1,8 @@
 use async_trait::async_trait;
 use mfm_collectors_evm::EvmIoClient;
+use mfm_evm_core::abi as common_abi;
+use mfm_evm_runtime::dcv as shared_dcv;
+use mfm_evm_runtime::rpc as evm_rpc;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::ids::{ContextKey, StateId};
@@ -7,17 +10,13 @@ use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
+use mfm_op_common::ctx as op_ctx;
+use mfm_op_common::errors as op_errors;
+use mfm_op_common::idempotency as op_idempotency;
+use mfm_op_common::states::meta;
 use serde::{Deserialize, Serialize};
 
-use crate::abi as common_abi;
-use crate::ctx as op_ctx;
-use crate::errors as op_errors;
-use crate::evm_dcv as shared_dcv;
-use crate::evm_rpc;
-use crate::idempotency as op_idempotency;
-use crate::states::meta;
-
-pub use crate::aave_v3_manifest::{
+pub use crate::manifest::{
     contract_from_manifest, decode_compile_manifest, decode_deploy_manifest,
     decode_origin_deploy_output, origin_contract_from_output, validate_compile_manifest,
     validate_configure_runtime_config, validate_deploy_manifest, validate_deploy_runtime_config,
@@ -849,7 +848,7 @@ mod tests {
                 });
             }
 
-            Err(IoError::Other(crate::errors::info(
+            Err(IoError::Other(mfm_op_common::errors::info(
                 "unexpected_io_call",
                 ErrorCategory::Unknown,
                 false,

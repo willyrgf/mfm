@@ -8,17 +8,17 @@ use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, OpId, OpPath, StateId};
 use mfm_machine::plan::{StateGraph, StateNode};
 use mfm_op_common::errors as op_errors;
-use mfm_op_common::keystore_tx::output_context_key;
-use mfm_op_common::states::keystore_admin::{
+use mfm_op_keystore_common::states::admin::{
     decode_optional_hex_string, resolve_keystore_path, sdk_error_from_helper, KeystoreDeleteState,
     KeystoreDeleteStateConfig, KeystoreImportState, KeystoreImportStateConfig, KeystoreListState,
     KeystoreListStateConfig,
 };
+use mfm_op_keystore_common::tx::output_context_key;
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
 
-pub use mfm_op_common::states::keystore_admin::{
+pub use mfm_op_keystore_common::states::admin::{
     KeystoreDeleteReport, KeystoreImportReport, KeystoreImportType, KeystoreListKey,
     KeystoreListReport, KeystoreListSortBy,
 };

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use mfm_evm_core::hex::hex_encode_utf8;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::ids::{ContextKey, StateId};
@@ -8,14 +9,13 @@ use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
+use mfm_op_common::ctx as op_ctx;
+use mfm_op_common::errors as op_errors;
+use mfm_op_common::idempotency as op_idempotency;
+use mfm_op_common::local_io_helpers::{emit_report_event, local_call};
+use mfm_op_common::states::meta;
 use mfm_sdk::errors::SdkError;
 use serde::{Deserialize, Serialize};
-
-use crate::ctx as op_ctx;
-use crate::errors as op_errors;
-use crate::idempotency as op_idempotency;
-use crate::local_io_helpers::{emit_report_event, local_call};
-use crate::states::meta;
 
 const ENV_KEYSTORE_PATH: &str = "MFM_KEYSTORE_PATH";
 
@@ -155,9 +155,9 @@ impl State for KeystoreImportState {
             "keystore_import",
             serde_json::json!({
                 "kind": self.cfg.import_type.clone(),
-                "label_hex": self.cfg.label.as_ref().map(|v| crate::hex::hex_encode_utf8(v)),
+                "label_hex": self.cfg.label.as_ref().map(|v| hex_encode_utf8(v)),
                 "derive_path": self.cfg.derivation_path.clone(),
-                "store_path_hex": crate::hex::hex_encode_utf8(self.cfg.keystore_path.to_string_lossy().as_ref()),
+                "store_path_hex": hex_encode_utf8(self.cfg.keystore_path.to_string_lossy().as_ref()),
                 "stdin_mode": self.cfg.stdin,
             }),
         )
@@ -231,9 +231,9 @@ impl State for KeystoreListState {
             "local.keystore.list",
             "keystore_list",
             serde_json::json!({
-                "store_path_hex": crate::hex::hex_encode_utf8(self.cfg.keystore_path.to_string_lossy().as_ref()),
+                "store_path_hex": hex_encode_utf8(self.cfg.keystore_path.to_string_lossy().as_ref()),
                 "show_addrs": self.cfg.show_addresses,
-                "filter_label_hex": self.cfg.filter_label.as_ref().map(|v| crate::hex::hex_encode_utf8(v)),
+                "filter_label_hex": self.cfg.filter_label.as_ref().map(|v| hex_encode_utf8(v)),
                 "sort_by": self.cfg.sort_by.clone(),
             }),
         )
@@ -308,9 +308,9 @@ impl State for KeystoreDeleteState {
             "keystore_delete",
             serde_json::json!({
                 "id": self.cfg.id.clone(),
-                "label_hex": self.cfg.by_label.as_ref().map(|v| crate::hex::hex_encode_utf8(v)),
+                "label_hex": self.cfg.by_label.as_ref().map(|v| hex_encode_utf8(v)),
                 "confirm_yes": self.cfg.yes,
-                "store_path_hex": crate::hex::hex_encode_utf8(self.cfg.keystore_path.to_string_lossy().as_ref()),
+                "store_path_hex": hex_encode_utf8(self.cfg.keystore_path.to_string_lossy().as_ref()),
             }),
         )
         .await?;

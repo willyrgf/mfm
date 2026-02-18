@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 
 use crate::errors as op_errors;
 
-pub(crate) async fn emit_report_event(
+pub async fn emit_report_event(
     rec: &mut dyn EventRecorder,
     name: &str,
     payload: serde_json::Value,
@@ -22,7 +22,7 @@ pub(crate) async fn emit_report_event(
     .map_err(|_| op_errors::state_unknown("emit_failed", "failed to emit domain event"))
 }
 
-pub(crate) async fn local_call<T: DeserializeOwned>(
+pub async fn local_call<T: DeserializeOwned>(
     state_id: &StateId,
     io: &mut dyn IoProvider,
     namespace: &str,
@@ -51,7 +51,7 @@ pub(crate) async fn local_call<T: DeserializeOwned>(
     })
 }
 
-pub(crate) fn local_fact_key(
+pub fn local_fact_key(
     state_id: &StateId,
     purpose: &str,
     request: &serde_json::Value,
@@ -79,7 +79,7 @@ pub(crate) fn local_fact_key(
     )))
 }
 
-pub(crate) fn attach_state_id(state_id: &StateId, mut err: StateError) -> StateError {
+pub fn attach_state_id(state_id: &StateId, mut err: StateError) -> StateError {
     if err.state_id.is_none() {
         err.state_id = Some(state_id.clone());
     }

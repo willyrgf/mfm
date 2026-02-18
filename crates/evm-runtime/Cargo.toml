@@ -1,0 +1,21 @@
+[package]
+name = "mfm-evm-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+tokio = { workspace = true }
+alloy-primitives = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+url = { workspace = true }
+k256 = { version = "0.13", features = ["ecdsa"] }
+zeroize = "1.7.0"
+
+mfm-machine = { path = "../machine" }
+mfm-collectors-evm = { path = "../collectors/evm" }
+mfm-op-common = { path = "../ops/common" }
+mfm-evm-core = { path = "../evm-core" }

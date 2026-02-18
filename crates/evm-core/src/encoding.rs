@@ -1,7 +1,5 @@
 use alloy_primitives::{Address, U256};
-use mfm_machine::errors::StateError;
 
-use crate::errors::state_unknown;
 use crate::hex::{bytes_to_hex_prefixed, hex_to_bytes, normalize_hex_str};
 use crate::util_error::UtilError;
 
@@ -34,14 +32,14 @@ pub fn encode_erc20_decimals() -> String {
     format!("0x{}", hex::encode(data))
 }
 
-pub(crate) fn u64_hex_quantity(n: u64) -> String {
+pub fn u64_hex_quantity(n: u64) -> String {
     if n == 0 {
         return "0x0".to_string();
     }
     format!("0x{:x}", n)
 }
 
-pub(crate) fn format_u256_units(raw: &U256, decimals: u8) -> String {
+pub fn format_u256_units(raw: &U256, decimals: u8) -> String {
     let s = raw.to_string();
     let d = decimals as usize;
     if d == 0 {
@@ -63,15 +61,15 @@ pub(crate) fn format_u256_units(raw: &U256, decimals: u8) -> String {
     }
 }
 
-pub(crate) fn parse_u256_hex(s: &str) -> Result<U256, StateError> {
+pub fn parse_u256_hex(s: &str) -> Result<U256, UtilError> {
     let Some(rest) = s.strip_prefix("0x") else {
-        return Err(state_unknown(
+        return Err(UtilError::new(
             "evm_response_invalid",
             "evm response was not a hex u256",
         ));
     };
     if rest.is_empty() || rest.len() > 64 {
-        return Err(state_unknown(
+        return Err(UtilError::new(
             "evm_response_invalid",
             "evm response was not a hex u256",
         ));
@@ -82,13 +80,13 @@ pub(crate) fn parse_u256_hex(s: &str) -> Result<U256, StateError> {
         hex_str = format!("0{hex_str}");
     }
     let bytes = hex::decode(hex_str)
-        .map_err(|_| state_unknown("evm_response_invalid", "evm response was not a hex u256"))?;
+        .map_err(|_| UtilError::new("evm_response_invalid", "evm response was not a hex u256"))?;
     Ok(U256::from_be_slice(&bytes))
 }
 
-pub(crate) fn parse_u256_hex_value(v: &serde_json::Value) -> Result<U256, StateError> {
+pub fn parse_u256_hex_value(v: &serde_json::Value) -> Result<U256, UtilError> {
     let Some(s) = v.as_str() else {
-        return Err(state_unknown(
+        return Err(UtilError::new(
             "evm_response_invalid",
             "evm response was not a hex u256",
         ));
@@ -96,9 +94,9 @@ pub(crate) fn parse_u256_hex_value(v: &serde_json::Value) -> Result<U256, StateE
     parse_u256_hex(s)
 }
 
-pub(crate) fn parse_u8_u256(v: U256) -> Result<u8, StateError> {
+pub fn parse_u8_u256(v: U256) -> Result<u8, UtilError> {
     if v > U256::from(u8::MAX) {
-        return Err(state_unknown(
+        return Err(UtilError::new(
             "evm_response_invalid",
             "evm response was out of range for u8",
         ));
@@ -106,21 +104,21 @@ pub(crate) fn parse_u8_u256(v: U256) -> Result<u8, StateError> {
     Ok(v.to::<u8>())
 }
 
-pub(crate) fn parse_hex_string_response(value: &serde_json::Value) -> Result<String, StateError> {
+pub fn parse_hex_string_response(value: &serde_json::Value) -> Result<String, UtilError> {
     let Some(s) = value.as_str() else {
-        return Err(state_unknown(
+        return Err(UtilError::new(
             "evm_response_invalid",
             "evm response was not a hex string",
         ));
     };
     let Some(rest) = s.strip_prefix("0x") else {
-        return Err(state_unknown(
+        return Err(UtilError::new(
             "evm_response_invalid",
             "evm response was not a hex string",
         ));
     };
     if !rest.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(state_unknown(
+        return Err(UtilError::new(
             "evm_response_invalid",
             "evm response was not a hex string",
         ));
@@ -128,11 +126,11 @@ pub(crate) fn parse_hex_string_response(value: &serde_json::Value) -> Result<Str
     Ok(s.to_string())
 }
 
-pub(crate) fn parse_u256_hex_response(value: &serde_json::Value) -> Result<String, StateError> {
+pub fn parse_u256_hex_response(value: &serde_json::Value) -> Result<String, UtilError> {
     let s = parse_hex_string_response(value)?;
     let rest = s.strip_prefix("0x").unwrap_or_default();
     if rest.is_empty() || rest.len() > 64 {
-        return Err(state_unknown(
+        return Err(UtilError::new(
             "evm_response_invalid",
             "evm response was not a hex u256",
         ));

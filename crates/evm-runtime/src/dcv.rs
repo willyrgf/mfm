@@ -1,9 +1,9 @@
 use alloy_primitives::keccak256;
 use serde::Deserialize;
 
-use crate::abi as common_abi;
-use crate::evm_encoding;
-use crate::hex as common_hex;
+use mfm_evm_core::abi as common_abi;
+use mfm_evm_core::encoding;
+use mfm_evm_core::hex as common_hex;
 
 pub use common_abi::{AbiEvent, AbiFunction, ParsedAbi};
 
@@ -184,7 +184,7 @@ pub fn ensure_nonempty_artifact_port(artifact_port: &str) -> Result<(), String> 
 }
 
 pub fn normalize_address(s: &str) -> Result<String, String> {
-    evm_encoding::normalize_address(s).map_err(|e| e.message)
+    encoding::normalize_address(s).map_err(|e| e.message)
 }
 
 pub fn decode_single_output_to_json(

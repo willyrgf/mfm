@@ -16,17 +16,18 @@ use serde::Deserialize;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::hex::{
+use mfm_evm_core::hex::{
     bytes_to_hex_prefixed, hex_to_bytes, normalize_hex_str, normalize_nonempty_hex_str,
 };
-use crate::keystore_tx::{
-    parse_address, parse_data_hex, parse_u128_quantity, resolve_key_id, sign_eip1559_transaction,
-    write_raw_transaction_file, Eip1559TxToSign, KeystoreTxError,
-};
-use crate::rlp::{rlp_encode_list, trim_leading_zero_bytes, u128_to_min_be};
-use crate::states::keystore_admin::{
+use mfm_evm_core::rlp::{rlp_encode_list, trim_leading_zero_bytes, u128_to_min_be};
+
+use crate::states::admin::{
     KeystoreDeleteReport, KeystoreImportReport, KeystoreImportType, KeystoreListKey,
     KeystoreListReport, KeystoreListSortBy,
+};
+use crate::tx::{
+    parse_address, parse_data_hex, parse_u128_quantity, resolve_key_id, sign_eip1559_transaction,
+    write_raw_transaction_file, Eip1559TxToSign, KeystoreTxError,
 };
 
 const ENV_KEYSTORE_PASSWORD_FILE: &str = "MFM_KEYSTORE_PASSWORD_FILE";
@@ -35,31 +36,28 @@ const ENV_INTEGRATION_TEST: &str = "MFM_INTEGRATION_TEST";
 const ENV_IMPORT_MNEMONIC_EXTRA: &str = "MFM_KEYSTORE_IMPORT_BIP39_EXTRA";
 
 #[derive(Clone, Default)]
-pub struct LocalOpIoTransportFactory;
+pub struct LocalKeystoreIoTransportFactory;
 
-impl LiveIoTransportFactory for LocalOpIoTransportFactory {
+impl LiveIoTransportFactory for LocalKeystoreIoTransportFactory {
     fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
-        Box::new(LocalOpIoTransport)
+        Box::new(LocalKeystoreIoTransport)
     }
 }
 
-struct LocalOpIoTransport;
+struct LocalKeystoreIoTransport;
 
 #[async_trait]
-impl LiveIoTransport for LocalOpIoTransport {
+impl LiveIoTransport for LocalKeystoreIoTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
         match call.namespace.as_str() {
             "local.keystore.import" => handle_keystore_import(call.request),
             "local.keystore.list" => handle_keystore_list(call.request),
             "local.keystore.delete" => handle_keystore_delete(call.request),
             "local.keystore.tx_sign" => handle_keystore_tx_sign(call.request),
-            "local.fs.read_text" => handle_read_text(call.request),
-            "local.evm.signer_address" => handle_evm_signer_address(call.request),
-            "local.evm.sign_legacy_create" => handle_evm_sign_legacy_create(call.request),
             _ => Err(io_other(
                 "unknown_namespace",
                 ErrorCategory::Unknown,
-                "unknown local io namespace",
+                "unknown local keystore io namespace",
             )),
         }
     }

@@ -16,6 +16,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use alloy_primitives::Address;
+#[cfg(test)]
+use mfm_evm_runtime::states::read::encode_erc20_decimals;
+use mfm_evm_runtime::states::read::{
+    address_hex_lower, address_hex_lower_no0x, NativeBalanceState, ReadU64HexState,
+    TokenBalanceState, U64Expectation,
+};
 use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::ErrorCategory;
@@ -29,15 +35,9 @@ use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_op_common::ctx as op_ctx;
 use mfm_op_common::errors as op_errors;
-use mfm_op_common::keystore_tx::output_context_key;
 use mfm_op_common::output as op_output;
-#[cfg(test)]
-use mfm_op_common::states::evm::encode_erc20_decimals;
-use mfm_op_common::states::evm::{
-    address_hex_lower, address_hex_lower_no0x, NativeBalanceState, ReadU64HexState,
-    TokenBalanceState, U64Expectation,
-};
 use mfm_op_common::states::meta;
+use mfm_op_keystore_common::tx::output_context_key;
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};

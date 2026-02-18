@@ -14,6 +14,7 @@ use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_collectors_evm_jsonrpc_http::{EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory};
 use mfm_event_store_postgres::PostgresEventStore;
+use mfm_evm_runtime::local_evm_io::LocalEvmIoTransportFactory;
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
     RetryPolicy, RunConfig,
@@ -32,7 +33,7 @@ use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
 use mfm_machine::stores::{ArtifactStore, EventStore};
 use mfm_op_aave_v3_origin_adapt::AaveV3OriginAdaptDeployOp;
-use mfm_op_common::local_io::LocalOpIoTransportFactory;
+use mfm_op_common::local_fs_io::LocalFsIoTransportFactory;
 use mfm_op_evm_deploy_configure_validate::{
     EvmDeployConfigureValidateOp, EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID,
     EVM_DEPLOY_CONFIGURE_VALIDATE_OP_VERSION,
@@ -40,6 +41,7 @@ use mfm_op_evm_deploy_configure_validate::{
 use mfm_op_evm_read::EvmReadOp;
 use mfm_op_evm_write::{EvmConfigureOp, EvmContractFromNixOp, EvmDeployOp, EvmValidateOp};
 use mfm_op_keystore_admin::{KeystoreDeleteOp, KeystoreImportOp, KeystoreListOp};
+use mfm_op_keystore_common::local_keystore_io::LocalKeystoreIoTransportFactory;
 use mfm_op_keystore_tx::{KeystoreTxSendRawOp, KeystoreTxSignOp};
 use mfm_op_nix_app::nix_exec_transport::NixFlakeTransportFactory;
 use mfm_op_nix_app::NixAppOp;
@@ -399,6 +401,40 @@ impl LiveIoTransport for AaveOutputLiveIoTransport {
     }
 }
 
+struct AppLocalIoTransportFactory;
+
+impl LiveIoTransportFactory for AppLocalIoTransportFactory {
+    fn make(&self, env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
+        Box::new(AppLocalIoTransport {
+            fs: LocalFsIoTransportFactory.make(env.clone()),
+            keystore: LocalKeystoreIoTransportFactory.make(env.clone()),
+            evm: LocalEvmIoTransportFactory.make(env),
+        })
+    }
+}
+
+struct AppLocalIoTransport {
+    fs: Box<dyn LiveIoTransport>,
+    keystore: Box<dyn LiveIoTransport>,
+    evm: Box<dyn LiveIoTransport>,
+}
+
+#[async_trait]
+impl LiveIoTransport for AppLocalIoTransport {
+    async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
+        match call.namespace.as_str() {
+            ns if ns.starts_with("local.keystore.") => self.keystore.call(call).await,
+            ns if ns.starts_with("local.evm.") => self.evm.call(call).await,
+            ns if ns.starts_with("local.fs.") => self.fs.call(call).await,
+            other => Err(IoError::Other(info(
+                "unknown_namespace",
+                ErrorCategory::Unknown,
+                format!("unknown namespace: {other}"),
+            ))),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct EngineBundle {
     pub engine: Arc<dyn ExecutionEngine>,
@@ -458,7 +494,7 @@ pub fn make_engine_bundle() -> EngineBundle {
         "nix".to_string(),
         Arc::new(NixFlakeTransportFactory::default()),
     );
-    routes.insert("local".to_string(), Arc::new(LocalOpIoTransportFactory));
+    routes.insert("local".to_string(), Arc::new(AppLocalIoTransportFactory));
     routes.insert("evm".to_string(), evm_factory);
 
     let base_factory: Arc<dyn LiveIoTransportFactory> =

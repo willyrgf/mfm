@@ -2,6 +2,11 @@ use async_trait::async_trait;
 
 use alloy_primitives::Address;
 use mfm_collectors_evm::{parse_u64_hex_value, EvmIoClient, JsonRpcCall};
+use mfm_evm_core::encoding::{
+    format_u256_units, parse_hex_string_response, parse_u256_hex_response, parse_u256_hex_value,
+    parse_u8_u256, u64_hex_quantity,
+};
+use mfm_evm_core::util_error::UtilError;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::ids::{ContextKey, StateId};
@@ -9,18 +14,19 @@ use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-
-use crate::ctx::{read_u64_required, write_json};
-use crate::errors::{state_error_with_state, state_from_io, state_unknown};
-use crate::evm_encoding::{
-    format_u256_units, parse_hex_string_response, parse_u256_hex_response, parse_u256_hex_value,
-    parse_u8_u256, u64_hex_quantity,
+use mfm_op_common::ctx::{read_u64_required, write_json};
+use mfm_op_common::errors::{
+    state_error_with_state, state_from_io, state_unknown, state_unknown_msg,
 };
-use crate::states::meta;
+use mfm_op_common::states::meta;
 
-pub use crate::evm_encoding::{
+pub use mfm_evm_core::encoding::{
     address_hex_lower, address_hex_lower_no0x, encode_erc20_balance_of, encode_erc20_decimals,
 };
+
+fn parse_error(err: UtilError) -> StateError {
+    state_unknown_msg(err.code, err.message)
+}
 
 #[derive(Clone, Debug)]
 pub struct U64Expectation {
@@ -88,7 +94,7 @@ impl State for ReadHexStringState {
             .call(JsonRpcCall::new(self.method.clone(), self.params.clone()))
             .await
             .map_err(state_from_io)?;
-        let value = parse_hex_string_response(&res.response)?;
+        let value = parse_hex_string_response(&res.response).map_err(parse_error)?;
         write_json(ctx, self.output_key.clone(), serde_json::json!(value))?;
 
         Ok(StateOutcome {
@@ -138,7 +144,7 @@ impl State for ReadU256HexState {
             .call(JsonRpcCall::new(self.method.clone(), self.params.clone()))
             .await
             .map_err(state_from_io)?;
-        let value = parse_u256_hex_response(&res.response)?;
+        let value = parse_u256_hex_response(&res.response).map_err(parse_error)?;
         write_json(ctx, self.output_key.clone(), serde_json::json!(value))?;
 
         Ok(StateOutcome {
@@ -219,12 +225,14 @@ impl State for EthCallState {
 
         let parsed = match self.decode {
             EthCallDecode::HexString => {
-                serde_json::json!(parse_hex_string_response(&res.response)?)
+                serde_json::json!(parse_hex_string_response(&res.response).map_err(parse_error)?)
             }
             EthCallDecode::U64 => serde_json::json!(parse_u64_hex_value(&res.response).map_err(
                 |_| state_unknown("evm_response_invalid", "evm response was not a hex u64")
             )?),
-            EthCallDecode::U256Hex => serde_json::json!(parse_u256_hex_response(&res.response)?),
+            EthCallDecode::U256Hex => {
+                serde_json::json!(parse_u256_hex_response(&res.response).map_err(parse_error)?)
+            }
         };
 
         write_json(ctx, self.output_key.clone(), parsed)?;
@@ -363,7 +371,7 @@ impl State for NativeBalanceState {
             .await
             .map_err(state_from_io)?;
 
-        let wei = parse_u256_hex_value(&res.response)?;
+        let wei = parse_u256_hex_value(&res.response).map_err(parse_error)?;
         let native = serde_json::json!({
             "symbol": self.symbol,
             "raw_u256_dec": wei.to_string(),
@@ -448,8 +456,8 @@ impl State for TokenBalanceState {
                     ))
                     .await
                     .map_err(state_from_io)?;
-                let v = parse_u256_hex_value(&res.response)?;
-                parse_u8_u256(v)?
+                let v = parse_u256_hex_value(&res.response).map_err(parse_error)?;
+                parse_u8_u256(v).map_err(parse_error)?
             }
         };
 
@@ -464,7 +472,7 @@ impl State for TokenBalanceState {
             .await
             .map_err(state_from_io)?;
 
-        let raw = parse_u256_hex_value(&res.response)?;
+        let raw = parse_u256_hex_value(&res.response).map_err(parse_error)?;
         let token_obj = serde_json::json!({
             "address": address_hex_lower(&self.token),
             "symbol": self.symbol.clone(),
@@ -538,7 +546,7 @@ mod tests {
                 .to_string();
 
             let Some(response) = self.responses.get(&method) else {
-                return Err(IoError::Other(crate::errors::info(
+                return Err(IoError::Other(mfm_op_common::errors::info(
                     "unknown_method",
                     ErrorCategory::Rpc,
                     false,

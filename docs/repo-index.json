@@ -76,6 +76,16 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "evm-core",
+      "path": "crates/evm-core/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "evm-runtime",
+      "path": "crates/evm-runtime/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "machine-derive",
       "path": "crates/machine-derive/Cargo.toml",
       "kind": "rust-cargo"
@@ -88,6 +98,11 @@
     {
       "name": "machine",
       "path": "crates/machine/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "aave-v3-common",
+      "path": "crates/ops/aave-v3-common/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -118,6 +133,11 @@
     {
       "name": "keystore-admin-op",
       "path": "crates/ops/keystore-admin-op/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "keystore-common",
+      "path": "crates/ops/keystore-common/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

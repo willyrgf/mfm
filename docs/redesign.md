@@ -150,7 +150,10 @@ Canonical responsibilities:
 - `crates/core/`: primitives + security-sensitive keystore/crypto
 - `crates/collectors/*`: external data adapters
 - `crates/storages/*`: persistence implementations
-- `crates/ops/common/`: reusable state primitives
+- `crates/ops/common/`: cross-domain reusable state primitives
+- `crates/ops/keystore-common/`: keystore-domain reusable states/helpers
+- `crates/ops/aave-v3-common/`: Aave-domain reusable states/helpers
+- `crates/evm-runtime/`: runtime-facing reusable EVM states/helpers
 - `crates/ops/*`: domain ops that compose state graphs
 - `crates/sdk/`: operation/pipeline orchestration glue
 - `bin/cli`, `bin/rest-api`: thin transport adapters
@@ -158,8 +161,18 @@ Canonical responsibilities:
 Three-tier rule (normative):
 - Tier 1 (`bin/*`) MUST remain transport-only.
 - Tier 2 (`crates/ops/*`) SHOULD remain thin and primarily perform config validation + graph wiring.
-- Tier 3 (`crates/ops/common/src/states/*`) SHOULD contain reusable executable workflow logic.
+- Tier 3 (shared-state crates) SHOULD contain reusable executable workflow logic.
+- Approved Tier 3 roots include:
+  - `crates/ops/common/src/states/*`
+  - `crates/ops/keystore-common/src/states/*`
+  - `crates/ops/aave-v3-common/src/*`
+  - `crates/evm-runtime/src/states/*`
 - Non-reusable domain-specific output/aggregation states MAY remain op-local.
+
+Migration policy for internal crate/module paths:
+- Breaking cutovers are allowed.
+- Compatibility re-exports and deprecated internal aliases are not required.
+- All internal consumers MUST be updated in the same change.
 
 ### 6.2 Dependency contract
 - Binaries depend on sdk/ops and render outputs.

@@ -11,6 +11,7 @@ alloy-primitives = { workspace = true }
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-op-common = { path = "../common" }
+mfm-evm-runtime = { path = "../../evm-runtime" }
 
 [dev-dependencies]
 k256 = { version = "0.13", features = ["ecdsa"] }

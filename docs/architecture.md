@@ -78,14 +78,17 @@ Replay/resume behavior:
 The canonical architecture follows the three-tier model from `docs/three-tier-audit.md`:
 
 ```text
-bin/{cli,rest-api}   (THIN) transport parsing/routing/output only
-       |
-       v
-  crates/ops/*       (THIN) config validation + state graph wiring
-       |
-       v
-crates/ops/common/   (THICK) reusable single-responsibility states
-  src/states/*               + shared pure utility modules
+bin/{cli,rest-api}                 (THIN) transport parsing/routing/output only
+          |
+          v
+     crates/ops/*                  (THIN) config validation + state graph wiring
+          |
+          v
+shared state crates                (THICK) reusable single-responsibility states
+  crates/ops/common/src/states/*
+  crates/ops/keystore-common/src/states/*
+  crates/ops/aave-v3-common/src/*
+  crates/evm-runtime/src/states/*
 ```
 
 Core rule:
@@ -132,15 +135,22 @@ Owns orchestration ergonomics:
 Must stay thin and avoid domain-specific execution behavior.
 
 ### `crates/ops/common/`
-Owns reusable state primitives and shared op-level helpers.
-This is the default home for executable workflow logic.
+Owns cross-domain reusable state primitives and shared op-level helpers.
+Domain-specific reusable states may live in dedicated shared-state crates
+(`crates/ops/keystore-common`, `crates/ops/aave-v3-common`, `crates/evm-runtime`).
 
 ### `crates/ops/*`
 Owns domain workflows:
 - operation config validation
 - graph composition using reusable states
 - op-level tests and domain contracts
-Prefer thin ops: avoid embedding thick executable logic when a reusable state belongs in `crates/ops/common/`.
+Prefer thin ops: avoid embedding thick executable logic when a reusable state belongs in a shared-state crate.
+
+### Breaking Internal Refactors
+Internal crate/module path migrations may be performed as hard cutovers:
+- no compatibility re-exports
+- no deprecated aliases
+- all in-repo consumers updated in the same change
 
 ### `crates/collectors/*`
 Owns external data collection and normalization adapters.

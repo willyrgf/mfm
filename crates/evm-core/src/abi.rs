@@ -1,7 +1,7 @@
 use alloy_primitives::keccak256;
 use serde::Deserialize;
 
-use crate::evm_encoding::{encode_len_word, parse_address_hex};
+use crate::encoding::{encode_len_word, parse_address_hex};
 use crate::hex::{bytes_to_hex_prefixed, hex_nibble, hex_to_bytes, normalize_hex_str};
 use crate::util_error::UtilError;
 

@@ -1,19 +1,26 @@
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::errors::{ErrorCategory, StateError};
+use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{FactKey, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
+use mfm_op_common::errors as op_errors;
+use mfm_op_common::local_io_helpers::local_fact_key;
+use mfm_op_common::rpc as op_rpc;
+use url::Url;
 
-use crate::errors as op_errors;
-use crate::evm_dcv as shared_dcv;
-use crate::local_io_helpers::local_fact_key;
-use crate::rpc as op_rpc;
+use crate::dcv as shared_dcv;
 
-pub(crate) fn normalize_quantity_hex(
-    raw: &str,
-    message: &'static str,
-) -> Result<String, StateError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpcRawTxSubmission {
+    pub tx_hash: String,
+    pub rpc_url_host: String,
+    pub submitted_at: String,
+}
+
+pub fn normalize_quantity_hex(raw: &str, message: &'static str) -> Result<String, StateError> {
     let trimmed = raw.trim();
     let Some(rest) = trimmed
         .strip_prefix("0x")
@@ -37,10 +44,7 @@ pub(crate) fn normalize_quantity_hex(
     }
 }
 
-pub(crate) fn parse_quantity_hex_u128(
-    raw: &str,
-    message: &'static str,
-) -> Result<u128, StateError> {
+pub fn parse_quantity_hex_u128(raw: &str, message: &'static str) -> Result<u128, StateError> {
     let normalized = normalize_quantity_hex(raw, message)?;
     let digits = normalized
         .strip_prefix("0x")
@@ -49,7 +53,7 @@ pub(crate) fn parse_quantity_hex_u128(
         .map_err(|_| op_errors::state_unknown("evm_response_invalid", message))
 }
 
-pub(crate) async fn send_transaction(
+pub async fn send_transaction(
     client: &mut EvmIoClient<'_>,
     mut tx_obj: serde_json::Value,
 ) -> Result<String, StateError> {
@@ -82,7 +86,7 @@ pub(crate) async fn send_transaction(
     })
 }
 
-pub(crate) async fn send_raw_transaction(
+pub async fn send_raw_transaction(
     client: &mut EvmIoClient<'_>,
     raw_tx_hex: &str,
 ) -> Result<String, StateError> {
@@ -107,7 +111,7 @@ pub(crate) async fn send_raw_transaction(
     })
 }
 
-pub(crate) async fn estimate_gas_hex(
+pub async fn estimate_gas_hex(
     client: &mut EvmIoClient<'_>,
     tx_obj: &serde_json::Value,
 ) -> Result<String, StateError> {
@@ -127,7 +131,7 @@ pub(crate) async fn estimate_gas_hex(
     normalize_quantity_hex(&gas, "eth_estimateGas returned invalid hex gas value")
 }
 
-pub(crate) async fn gas_price_hex(client: &mut EvmIoClient<'_>) -> Result<String, StateError> {
+pub async fn gas_price_hex(client: &mut EvmIoClient<'_>) -> Result<String, StateError> {
     let res = client
         .call(JsonRpcCall::new("eth_gasPrice", serde_json::json!([])))
         .await
@@ -141,7 +145,7 @@ pub(crate) async fn gas_price_hex(client: &mut EvmIoClient<'_>) -> Result<String
     normalize_quantity_hex(&gas_price, "eth_gasPrice returned invalid hex gas price")
 }
 
-pub(crate) async fn transaction_count_hex(
+pub async fn transaction_count_hex(
     client: &mut EvmIoClient<'_>,
     from: &str,
 ) -> Result<String, StateError> {
@@ -161,7 +165,7 @@ pub(crate) async fn transaction_count_hex(
     normalize_quantity_hex(&nonce, "eth_getTransactionCount returned invalid hex nonce")
 }
 
-pub(crate) async fn pending_nonce_u128(
+pub async fn pending_nonce_u128(
     io: &mut dyn IoProvider,
     state_id: &StateId,
     from: &str,
@@ -175,7 +179,7 @@ pub(crate) async fn pending_nonce_u128(
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct LegacyCreateTxSigningRequest<'a> {
+pub struct LegacyCreateTxSigningRequest<'a> {
     pub signing_key_env: &'a str,
     pub from: &'a str,
     pub chain_id: u64,
@@ -186,7 +190,7 @@ pub(crate) struct LegacyCreateTxSigningRequest<'a> {
     pub constructor_payload: &'a [u8],
 }
 
-pub(crate) async fn local_sign_legacy_create_raw_tx(
+pub async fn local_sign_legacy_create_raw_tx(
     client: &mut EvmIoClient<'_>,
     req: LegacyCreateTxSigningRequest<'_>,
 ) -> Result<String, StateError> {
@@ -225,7 +229,7 @@ pub(crate) async fn local_sign_legacy_create_raw_tx(
     })
 }
 
-pub(crate) async fn send_signed_create_transaction(
+pub async fn send_signed_create_transaction(
     client: &mut EvmIoClient<'_>,
     signing_key_env: &str,
     from: &str,
@@ -244,7 +248,7 @@ pub(crate) async fn send_signed_create_transaction(
     .await
 }
 
-pub(crate) async fn send_signed_create_transaction_with_nonce(
+pub async fn send_signed_create_transaction_with_nonce(
     client: &mut EvmIoClient<'_>,
     signing_key_env: &str,
     from: &str,
@@ -296,7 +300,7 @@ pub(crate) async fn send_signed_create_transaction_with_nonce(
     send_raw_transaction(client, &raw_tx_hex).await
 }
 
-pub(crate) async fn wait_for_receipt(
+pub async fn wait_for_receipt(
     state_id: &StateId,
     io: &mut dyn IoProvider,
     tx_hash: &str,
@@ -342,7 +346,7 @@ pub(crate) async fn wait_for_receipt(
     ))
 }
 
-pub(crate) fn ensure_receipt_success(receipt: &serde_json::Value) -> Result<(), StateError> {
+pub fn ensure_receipt_success(receipt: &serde_json::Value) -> Result<(), StateError> {
     let Some(obj) = receipt.as_object() else {
         return Err(op_errors::state_unknown(
             "evm_response_invalid",
@@ -370,7 +374,7 @@ pub(crate) fn ensure_receipt_success(receipt: &serde_json::Value) -> Result<(), 
     Ok(())
 }
 
-pub(crate) fn receipt_contract_address(receipt: &serde_json::Value) -> Result<String, StateError> {
+pub fn receipt_contract_address(receipt: &serde_json::Value) -> Result<String, StateError> {
     let Some(obj) = receipt.as_object() else {
         return Err(op_errors::state_unknown(
             "evm_response_invalid",
@@ -392,7 +396,7 @@ pub(crate) fn receipt_contract_address(receipt: &serde_json::Value) -> Result<St
     })
 }
 
-pub(crate) async fn rpc_accounts(
+pub async fn rpc_accounts(
     io: &mut dyn IoProvider,
     state_id: &StateId,
 ) -> Result<Vec<String>, StateError> {
@@ -425,7 +429,7 @@ pub(crate) async fn rpc_accounts(
     Ok(out)
 }
 
-pub(crate) fn account_at(accounts: &[String], idx: usize) -> Result<String, StateError> {
+pub fn account_at(accounts: &[String], idx: usize) -> Result<String, StateError> {
     accounts.get(idx).cloned().ok_or_else(|| {
         op_errors::state_error(
             "invalid_account_index",
@@ -436,7 +440,7 @@ pub(crate) fn account_at(accounts: &[String], idx: usize) -> Result<String, Stat
     })
 }
 
-pub(crate) async fn resolve_account_by_index(
+pub async fn resolve_account_by_index(
     io: &mut dyn IoProvider,
     state_id: &StateId,
     idx: usize,
@@ -445,7 +449,7 @@ pub(crate) async fn resolve_account_by_index(
     account_at(&accounts, idx)
 }
 
-pub(crate) async fn resolve_signing_key_address(
+pub async fn resolve_signing_key_address(
     io: &mut dyn IoProvider,
     state_id: &StateId,
     signing_key_env: &str,
@@ -475,7 +479,7 @@ pub(crate) async fn resolve_signing_key_address(
     })
 }
 
-pub(crate) async fn resolve_deployer_address(
+pub async fn resolve_deployer_address(
     io: &mut dyn IoProvider,
     state_id: &StateId,
     deployer_account_index: usize,
@@ -485,4 +489,158 @@ pub(crate) async fn resolve_deployer_address(
         return resolve_signing_key_address(io, state_id, env_name).await;
     }
     resolve_account_by_index(io, state_id, deployer_account_index).await
+}
+
+pub async fn send_raw_transaction_via_io(
+    state_id: &StateId,
+    io: &mut dyn IoProvider,
+    rpc_url: &str,
+    raw_tx_hex: &str,
+) -> Result<RpcRawTxSubmission, StateError> {
+    let parsed_url = parse_rpc_url(rpc_url).map_err(|_| {
+        op_errors::state_error_with_state(
+            state_id.clone(),
+            "InvalidRpcUrl",
+            ErrorCategory::ParsingInput,
+            false,
+            "rpc url must be a valid absolute URL",
+        )
+    })?;
+    validate_raw_transaction_hex(raw_tx_hex).map_err(|_| {
+        op_errors::state_error_with_state(
+            state_id.clone(),
+            "InvalidRawTransaction",
+            ErrorCategory::ParsingInput,
+            false,
+            "raw transaction must be 0x-prefixed valid hex",
+        )
+    })?;
+
+    let request = serde_json::json!({
+        "method": "eth_sendRawTransaction",
+        "params": [raw_tx_hex],
+        "rpc_url": rpc_url,
+    });
+    let fact_key = send_raw_fact_key(state_id, raw_tx_hex)?;
+    let response = io
+        .call(IoCall {
+            namespace: "evm".to_string(),
+            request,
+            fact_key: Some(fact_key),
+        })
+        .await
+        .map_err(op_errors::state_from_io)?;
+
+    let tx_hash = response
+        .response
+        .as_str()
+        .ok_or_else(|| {
+            op_errors::state_error_with_state(
+                state_id.clone(),
+                "RpcInvalidResponse",
+                ErrorCategory::ParsingInput,
+                false,
+                "eth_sendRawTransaction returned a non-string result",
+            )
+        })?
+        .to_string();
+    validate_tx_hash(&tx_hash).map_err(|_| {
+        op_errors::state_error_with_state(
+            state_id.clone(),
+            "RpcInvalidResponse",
+            ErrorCategory::ParsingInput,
+            false,
+            "eth_sendRawTransaction returned an invalid tx hash",
+        )
+    })?;
+
+    let submitted_at = now_rfc3339(io, state_id).await?;
+
+    Ok(RpcRawTxSubmission {
+        tx_hash,
+        rpc_url_host: url_host_with_port(&parsed_url),
+        submitted_at,
+    })
+}
+
+fn parse_rpc_url(raw: &str) -> Result<Url, ()> {
+    let parsed = Url::parse(raw).map_err(|_| ())?;
+    if parsed.host_str().is_none() {
+        return Err(());
+    }
+    Ok(parsed)
+}
+
+fn validate_raw_transaction_hex(raw_tx_hex: &str) -> Result<(), ()> {
+    let value = raw_tx_hex.trim();
+    if !value.starts_with("0x") {
+        return Err(());
+    }
+    if value.len() <= 2 || !value.len().is_multiple_of(2) {
+        return Err(());
+    }
+    if !value[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn validate_tx_hash(tx_hash: &str) -> Result<(), ()> {
+    if tx_hash.len() != 66 || !tx_hash.starts_with("0x") {
+        return Err(());
+    }
+    if !tx_hash[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn url_host_with_port(url: &Url) -> String {
+    let host = url.host_str().unwrap_or_default();
+    match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    }
+}
+
+async fn now_rfc3339(io: &mut dyn IoProvider, state_id: &StateId) -> Result<String, StateError> {
+    let now_ms = io.now_millis().await.map_err(op_errors::state_from_io)?;
+    let timestamp = DateTime::<Utc>::from_timestamp_millis(now_ms as i64).ok_or_else(|| {
+        op_errors::state_error_with_state(
+            state_id.clone(),
+            "InvalidTimestamp",
+            ErrorCategory::Unknown,
+            false,
+            "failed to convert timestamp to RFC3339",
+        )
+    })?;
+    Ok(timestamp.to_rfc3339())
+}
+
+fn send_raw_fact_key(state_id: &StateId, raw_tx_hex: &str) -> Result<FactKey, StateError> {
+    let key_request = serde_json::json!({
+        "method": "eth_sendRawTransaction",
+        "params": [raw_tx_hex],
+    });
+    let req_id = artifact_id_for_json(&key_request).map_err(|err| match err {
+        CanonicalJsonError::FloatNotAllowed => op_errors::state_error_with_state(
+            state_id.clone(),
+            "evm_request_not_canonical",
+            ErrorCategory::ParsingInput,
+            false,
+            "raw tx request was not canonical-json-hashable (floats are forbidden)",
+        ),
+        CanonicalJsonError::SecretsNotAllowed => op_errors::state_error_with_state(
+            state_id.clone(),
+            "secrets_detected",
+            ErrorCategory::Unknown,
+            false,
+            "raw tx request contained secrets (Milestone 1 forbids persisting secrets)",
+        ),
+    })?;
+
+    Ok(FactKey(format!(
+        "mfm:evm_send_raw|state:{}|req:{}",
+        state_id.0, req_id.0
+    )))
 }

@@ -1,8 +1,14 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const SHARED_RATIO_MIN: f64 = 0.80;
+const DEFAULT_SHARED_STATE_ROOTS: &[&str] = &[
+    "crates/ops/common/src/states",
+    "crates/ops/keystore-common/src/states",
+    "crates/ops/aave-v3-common/src",
+    "crates/evm-runtime/src/states",
+];
 
 fn main() {
     let repo_root = repo_root();
@@ -141,10 +147,14 @@ fn check_utility_duplication(repo_root: &Path, failures: &mut Vec<String>) {
 }
 
 fn check_shared_state_ratio(repo_root: &Path, failures: &mut Vec<String>) {
-    let shared_root = repo_root.join("crates/ops/common/src/states");
+    let shared_roots = shared_state_roots(repo_root);
     let ops_root = repo_root.join("crates/ops");
 
-    let shared_count = count_state_impls_under(&shared_root);
+    let shared_count: usize = shared_roots
+        .iter()
+        .map(|root| count_state_impls_under(root))
+        .sum();
+    let shared_ops_dirs = shared_ops_dirs(repo_root, &shared_roots);
 
     let mut local_count = 0usize;
     if let Ok(entries) = fs::read_dir(&ops_root) {
@@ -153,7 +163,7 @@ fn check_shared_state_ratio(repo_root: &Path, failures: &mut Vec<String>) {
             if !path.is_dir() {
                 continue;
             }
-            if path.file_name().and_then(|s| s.to_str()) == Some("common") {
+            if shared_ops_dirs.contains(&path) {
                 continue;
             }
             let lib = path.join("src/lib.rs");
@@ -179,6 +189,10 @@ fn check_shared_state_ratio(repo_root: &Path, failures: &mut Vec<String>) {
 }
 
 fn count_state_impls_under(root: &Path) -> usize {
+    if root.is_file() {
+        return count_state_impls_in_file(root);
+    }
+
     let mut files = Vec::new();
     collect_rs_files(root, &mut files);
     files
@@ -186,6 +200,42 @@ fn count_state_impls_under(root: &Path) -> usize {
         .map(PathBuf::from)
         .map(|p| count_state_impls_in_file(&p))
         .sum()
+}
+
+fn shared_state_roots(repo_root: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    if let Ok(raw) = std::env::var("MFM_ARCH_VERIFY_SHARED_STATE_ROOTS") {
+        for value in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            roots.push(repo_root.join(value));
+        }
+    } else {
+        roots.extend(
+            DEFAULT_SHARED_STATE_ROOTS
+                .iter()
+                .map(|path| repo_root.join(path)),
+        );
+    }
+
+    roots.retain(|path| path.exists());
+    roots
+}
+
+fn shared_ops_dirs(repo_root: &Path, shared_roots: &[PathBuf]) -> BTreeSet<PathBuf> {
+    shared_roots
+        .iter()
+        .filter_map(|root| root.strip_prefix(repo_root).ok())
+        .filter_map(|rel| {
+            let mut components = rel.components();
+            let first = components.next()?.as_os_str();
+            let second = components.next()?.as_os_str();
+            if first != "crates" || second != "ops" {
+                return None;
+            }
+            components.next().map(|name| name.as_os_str().to_owned())
+        })
+        .map(|name| repo_root.join("crates/ops").join(name))
+        .collect()
 }
 
 fn count_state_impls_in_file(file: &Path) -> usize {

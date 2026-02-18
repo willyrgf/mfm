@@ -17,6 +17,8 @@ mfm-sdk = { path = "../sdk" }
 mfm-collectors-evm-jsonrpc-http = { path = "../collectors/evm-jsonrpc-http" }
 mfm-op-proof = { path = "../ops/proof-op" }
 mfm-op-common = { path = "../ops/common" }
+mfm-evm-runtime = { path = "../evm-runtime" }
+mfm-op-keystore-common = { path = "../ops/keystore-common" }
 mfm-op-keystore-tx = { path = "../ops/keystore-tx-op" }
 mfm-op-keystore-admin = { path = "../ops/keystore-admin-op" }
 mfm-op-evm-read = { path = "../ops/evm-read-op" }
