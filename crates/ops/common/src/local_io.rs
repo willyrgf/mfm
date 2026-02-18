@@ -54,6 +54,7 @@ impl LiveIoTransport for LocalOpIoTransport {
             "local.keystore.delete" => handle_keystore_delete(call.request),
             "local.keystore.tx_sign" => handle_keystore_tx_sign(call.request),
             "local.fs.read_text" => handle_read_text(call.request),
+            "local.evm.signer_address" => handle_evm_signer_address(call.request),
             "local.evm.sign_legacy_create" => handle_evm_sign_legacy_create(call.request),
             _ => Err(io_other(
                 "unknown_namespace",
@@ -154,6 +155,11 @@ struct EvmSignLegacyCreateRequest {
     data_hex: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct EvmSignerAddressRequest {
+    env_name_hex: String,
+}
+
 #[derive(Debug, Clone)]
 struct LocalError {
     code: &'static str,
@@ -246,6 +252,12 @@ fn handle_read_text(request: serde_json::Value) -> Result<serde_json::Value, IoE
 fn handle_evm_sign_legacy_create(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
     let req: EvmSignLegacyCreateRequest = parse_request(request)?;
     let response = evm_sign_legacy_create(req).map_err(LocalError::into_io)?;
+    encode_response(response)
+}
+
+fn handle_evm_signer_address(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
+    let req: EvmSignerAddressRequest = parse_request(request)?;
+    let response = evm_signer_address(req).map_err(LocalError::into_io)?;
     encode_response(response)
 }
 
@@ -511,15 +523,7 @@ fn keystore_tx_sign(req: KeystoreTxSignRequest) -> Result<serde_json::Value, Loc
 fn evm_sign_legacy_create(
     req: EvmSignLegacyCreateRequest,
 ) -> Result<serde_json::Value, LocalError> {
-    let env_name = decode_hex_utf8(&req.env_name_hex, "invalid_op_config", "env_name_hex")?;
-    let raw = Zeroizing::new(std::env::var(&env_name).map_err(|_| {
-        LocalError::new(
-            "missing_signing_key_env",
-            ErrorCategory::Unknown,
-            "signing key env was not configured",
-        )
-    })?);
-    let signing_key = signing_key_from_hex(raw.as_str())?;
+    let signing_key = signing_key_from_env_name_hex(&req.env_name_hex)?;
     let signer_addr = signer_address_hex(&signing_key);
     let configured_from = normalize_address(&req.from).map_err(|_| {
         LocalError::new(
@@ -563,6 +567,25 @@ fn evm_sign_legacy_create(
     )?;
 
     Ok(serde_json::json!({ "raw_tx_hex": raw_tx_hex }))
+}
+
+fn evm_signer_address(req: EvmSignerAddressRequest) -> Result<serde_json::Value, LocalError> {
+    let signing_key = signing_key_from_env_name_hex(&req.env_name_hex)?;
+    Ok(serde_json::json!({
+        "address": signer_address_hex(&signing_key),
+    }))
+}
+
+fn signing_key_from_env_name_hex(env_name_hex: &str) -> Result<SigningKey, LocalError> {
+    let env_name = decode_hex_utf8(env_name_hex, "invalid_op_config", "env_name_hex")?;
+    let raw = Zeroizing::new(std::env::var(&env_name).map_err(|_| {
+        LocalError::new(
+            "missing_signing_key_env",
+            ErrorCategory::Unknown,
+            "signing key env was not configured",
+        )
+    })?);
+    signing_key_from_hex(raw.as_str())
 }
 
 fn create_keystore_if_needed(path: &Path) -> Result<Keystore, LocalError> {
@@ -1063,6 +1086,27 @@ mod tests {
 
         let err = evm_sign_legacy_create(request).expect_err("mismatch should fail");
         assert_eq!(err.code, "signing_key_address_mismatch");
+
+        std::env::remove_var(env_name);
+    }
+
+    #[test]
+    fn evm_signer_address_returns_derived_address() {
+        let env_name = "MFM_TEST_LOCAL_SIGNING_KEY_DERIVE_ADDRESS";
+        std::env::set_var(
+            env_name,
+            "0x0000000000000000000000000000000000000000000000000000000000000001",
+        );
+
+        let request = EvmSignerAddressRequest {
+            env_name_hex: hex::encode(env_name.as_bytes()),
+        };
+
+        let out = evm_signer_address(request).expect("derive signer address");
+        assert_eq!(
+            out.get("address").and_then(|v| v.as_str()),
+            Some("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf")
+        );
 
         std::env::remove_var(env_name);
     }

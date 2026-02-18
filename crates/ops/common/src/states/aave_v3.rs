@@ -559,9 +559,14 @@ impl State for DeployContractState {
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
         let manifest = read_compile_manifest(ctx)?;
-        let deployer =
-            resolve_account_by_index(io, &self.state_id, self.cfg.deployer_account_index).await?;
         let signing_key_env = self.cfg.signing_key_env.as_deref();
+        let deployer = resolve_deployer_address(
+            io,
+            &self.state_id,
+            self.cfg.deployer_account_index,
+            signing_key_env,
+        )
+        .await?;
         let mut next_nonce = if signing_key_env.is_some() {
             Some(pending_nonce_u128(io, &self.state_id, &deployer).await?)
         } else {
@@ -2020,6 +2025,48 @@ async fn resolve_account_by_index(
     account_at(&accounts, idx, "invalid_account_index")
 }
 
+async fn resolve_deployer_address(
+    io: &mut dyn IoProvider,
+    state_id: &StateId,
+    deployer_account_index: usize,
+    signing_key_env: Option<&str>,
+) -> Result<String, StateError> {
+    if let Some(env_name) = signing_key_env {
+        return resolve_signing_key_address(io, state_id, env_name).await;
+    }
+    resolve_account_by_index(io, state_id, deployer_account_index).await
+}
+
+async fn resolve_signing_key_address(
+    io: &mut dyn IoProvider,
+    state_id: &StateId,
+    signing_key_env: &str,
+) -> Result<String, StateError> {
+    let request = serde_json::json!({
+        "env_name_hex": hex::encode(signing_key_env.as_bytes()),
+    });
+    let fact_key = local_fact_key(state_id, "resolve_signing_key_address", &request)?;
+    let res = io
+        .call(IoCall {
+            namespace: "local.evm.signer_address".to_string(),
+            request,
+            fact_key: Some(fact_key),
+        })
+        .await
+        .map_err(op_errors::state_from_io)?;
+    let address = op_rpc::expect_string(
+        &res.response["address"],
+        "evm_response_invalid",
+        "local signer returned non-string address",
+    )?;
+    shared_dcv::normalize_address(&address).map_err(|_| {
+        op_errors::state_unknown(
+            "evm_response_invalid",
+            "local signer returned invalid address",
+        )
+    })
+}
+
 fn parse_wei_u128(raw: &str) -> Result<u128, StateError> {
     if raw.starts_with("0x") || raw.starts_with("0X") {
         let normalized = shared_dcv::normalize_hex_str(raw).map_err(|_| {
@@ -2582,6 +2629,11 @@ fn assert_at_least_u64(
 mod tests {
     use super::*;
 
+    use async_trait::async_trait;
+    use mfm_machine::errors::{ErrorCategory, IoError};
+    use mfm_machine::ids::{ArtifactId, FactKey};
+    use mfm_machine::io::{IoCall, IoResult};
+
     fn test_artifact() -> ContractArtifactJson {
         ContractArtifactJson {
             abi: serde_json::json!([
@@ -2622,6 +2674,100 @@ mod tests {
             scenario_report_export_key: "scenario_report".to_string(),
             scenario_report_artifact_key: "scenario_report_artifact_id".to_string(),
         }
+    }
+
+    #[derive(Default)]
+    struct ResolveDeployerTestIo {
+        calls: Vec<IoCall>,
+    }
+
+    impl ResolveDeployerTestIo {
+        fn saw_eth_accounts(&self) -> bool {
+            self.calls.iter().any(|call| {
+                call.namespace == "evm"
+                    && call.request.get("method").and_then(|v| v.as_str()) == Some("eth_accounts")
+            })
+        }
+
+        fn saw_local_signer_address(&self) -> bool {
+            self.calls
+                .iter()
+                .any(|call| call.namespace == "local.evm.signer_address")
+        }
+    }
+
+    #[async_trait]
+    impl IoProvider for ResolveDeployerTestIo {
+        async fn call(&mut self, call: IoCall) -> Result<IoResult, IoError> {
+            self.calls.push(call.clone());
+
+            if call.namespace == "local.evm.signer_address" {
+                return Ok(IoResult {
+                    response: serde_json::json!({
+                        "address": "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+                    }),
+                    recorded_payload_id: None,
+                });
+            }
+
+            if call.namespace == "evm"
+                && call.request.get("method").and_then(|v| v.as_str()) == Some("eth_accounts")
+            {
+                return Ok(IoResult {
+                    response: serde_json::json!(["0x1111111111111111111111111111111111111111"]),
+                    recorded_payload_id: None,
+                });
+            }
+
+            Err(IoError::Other(crate::errors::info(
+                "unexpected_io_call",
+                ErrorCategory::Unknown,
+                false,
+                "unexpected io call",
+            )))
+        }
+
+        async fn get_recorded_fact(
+            &mut self,
+            _key: &FactKey,
+        ) -> Result<Option<ArtifactId>, IoError> {
+            Ok(None)
+        }
+
+        async fn now_millis(&mut self) -> Result<u64, IoError> {
+            Ok(0)
+        }
+
+        async fn random_bytes(&mut self, n: usize) -> Result<Vec<u8>, IoError> {
+            Ok(vec![0u8; n])
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_deployer_address_signed_mode_uses_local_signer_address() {
+        let state_id = StateId("m.test.aave_v3.resolve_deployer".to_string());
+        let mut io = ResolveDeployerTestIo::default();
+
+        let deployer =
+            resolve_deployer_address(&mut io, &state_id, 9, Some("MFM_TEST_SIGNING_KEY"))
+                .await
+                .expect("resolve deployer");
+        assert_eq!(deployer, "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf");
+        assert!(io.saw_local_signer_address());
+        assert!(!io.saw_eth_accounts());
+    }
+
+    #[tokio::test]
+    async fn resolve_deployer_address_unsigned_mode_uses_eth_accounts() {
+        let state_id = StateId("m.test.aave_v3.resolve_deployer".to_string());
+        let mut io = ResolveDeployerTestIo::default();
+
+        let deployer = resolve_deployer_address(&mut io, &state_id, 0, None)
+            .await
+            .expect("resolve deployer");
+        assert_eq!(deployer, "0x1111111111111111111111111111111111111111");
+        assert!(!io.saw_local_signer_address());
+        assert!(io.saw_eth_accounts());
     }
 
     #[test]
