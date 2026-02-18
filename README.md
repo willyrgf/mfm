@@ -4,6 +4,45 @@ Experimental, WIP toolkit for on-chain operations built around an event-sourced 
 
 > WARNING: Not production-ready. Do not use on mainnet.
 
+## Architecture at a glance
+
+```mermaid
+flowchart TD
+    B["bin/cli<br/>bin/rest-api<br/>(transport only)"] --> S["crates/sdk<br/>(run start/resume glue)"]
+    S --> O["crates/ops/*<br/>(op config + graph composition)"]
+    O --> C["crates/ops/common/src/states/*<br/>(main implementation layer:<br/>composable executable state logic)"]
+    C --> M["crates/machine<br/>(runtime/replay)"]
+    C --> K["crates/core<br/>(keystore + config)"]
+    M --> ST["crates/storages/*<br/>(event/artifact persistence)"]
+    COL["crates/collectors/*<br/>(RPC/HTTP + external data normalization)"] --> C
+
+    classDef transport fill:#e8f0ff,stroke:#2f5aa8,color:#0f2d63,stroke-width:1px;
+    classDef orchestration fill:#eefbe7,stroke:#3a7a2a,color:#1d4d12,stroke-width:1px;
+    classDef statecore fill:#ffe8cf,stroke:#a84b00,color:#5a2b00,stroke-width:3px;
+    classDef engine fill:#fff3df,stroke:#a66a00,color:#5a3a00,stroke-width:1px;
+    classDef storage fill:#f3ebff,stroke:#6d3da8,color:#39136b,stroke-width:1px;
+    classDef adapter fill:#e9f8f7,stroke:#0d7a77,color:#084645,stroke-width:1px;
+
+    class B transport;
+    class S,O orchestration;
+    class C statecore;
+    class M,K engine;
+    class ST storage;
+    class COL adapter;
+```
+
+States are the core execution unit: ops compose these reusable states, and the runtime executes them with replay/resume guarantees.
+
+## Core capabilities
+
+- Event-sourced runs with append-only execution history.
+- Crash-resume and replay-aware execution semantics.
+- Content-addressed manifests, snapshots, facts, and outputs.
+- Deterministic state-machine orchestration for ops/pipelines.
+- Thin CLI and REST transport layers for stable automation surfaces.
+- Security-hardened Ethereum keystore (tamper checks + signing utilities).
+- Swappable storage backends (in-memory, Postgres, fs, S3/MinIO).
+
 ## Documentation
 
 Start here:
