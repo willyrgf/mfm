@@ -15,6 +15,9 @@ let
 
   runtimePackages = project.tooling.runtimePackages or [ ];
   runtimePath = if runtimePackages == [ ] then "" else makeBinPath runtimePackages;
+  logging = project.logging or { };
+  defaultLogLevel = toString (logging.level or "info");
+  defaultOutputMode = toString (logging.output or "stdout");
 
   # Timing wrapper - records and displays execution time
   withTiming = name: script: ''
@@ -31,11 +34,11 @@ let
 
     echo ""
     if [ $_TIMING_DURATION -lt 60 ]; then
-      echo "TIMING: ${name} duration=''${_TIMING_DURATION}s"
+      log_timing "${name} duration=''${_TIMING_DURATION}s"
     else
       _TIMING_MINS=$((_TIMING_DURATION / 60))
       _TIMING_SECS=$((_TIMING_DURATION % 60))
-      echo "TIMING: ${name} duration=''${_TIMING_MINS}m''${_TIMING_SECS}s"
+      log_timing "${name} duration=''${_TIMING_MINS}m''${_TIMING_SECS}s"
     fi
 
     exit $_TIMING_EXIT
@@ -102,12 +105,40 @@ let
       source ${helpersScript}
       ${hookExports}
       ${envExports}
+      export LOG_LEVEL="''${LOG_LEVEL:-''${NIXFIED_LOG_LEVEL:-${defaultLogLevel}}}"
+      export OUTPUT_MODE="''${OUTPUT_MODE:-''${NIXFIED_OUTPUT_MODE:-${defaultOutputMode}}}"
+      export NIXFIED_LOG_LEVEL="$LOG_LEVEL"
+      export NIXFIED_OUTPUT_MODE="$OUTPUT_MODE"
+      export NIXFIED_LOG_TRACE="''${NIXFIED_LOG_TRACE:-0}"
+      export COMMAND_NAME="''${COMMAND_NAME:-${name}}"
+      if [ "''${OUTPUT_MODE}" != "stdout" ]; then
+        if [ -z "''${NIXFIED_LOG_FILE:-}" ]; then
+          _nixfied_slot="''${NIX_ENV:-0}"
+          _nixfied_env="''${PROJECT_ENV:-default}"
+          _nixfied_cmd="''${COMMAND_NAME:-app}"
+          _nixfied_ts="$(date +%Y%m%dT%H%M%S)"
+          NIXFIED_LOG_FILE="''${LOG_DIR:-/tmp}/nixfied-''${_nixfied_cmd}-''${_nixfied_env}-slot''${_nixfied_slot}-''${_nixfied_ts}-$$.log"
+        fi
+        export NIXFIED_LOG_FILE
+        mkdir -p "$(dirname "$NIXFIED_LOG_FILE")" 2>/dev/null || true
+      fi
       ${depsBlock}
       ${contractPrelude}
       _NIXFIED_APP_RC=0
       (
         set -euo pipefail
+        export COMMAND_NAME="''${COMMAND_NAME:-${name}}"
         export NIXFIED_CLEANUP_OWNER_BASHPID="''${BASHPID:-}"
+        if [ "''${LOG_LEVEL:-}" = "trace" ] && [ "''${NIXFIED_LOG_TRACE:-0}" = "1" ]; then
+          if [ -z "''${NIXFIED_XTRACE_FILE:-}" ]; then
+            NIXFIED_XTRACE_FILE="''${NIXFIED_LOG_FILE:-''${LOG_DIR:-/tmp}/nixfied-trace-''${COMMAND_NAME:-app}-''${PROJECT_ENV:-default}-slot''${NIX_ENV:-0}-$$.log}"
+            export NIXFIED_XTRACE_FILE
+          fi
+          mkdir -p "$(dirname "$NIXFIED_XTRACE_FILE")" 2>/dev/null || true
+          exec 19>>"$NIXFIED_XTRACE_FILE"
+          export BASH_XTRACEFD=19
+          set -x
+        fi
         ${script0}
       ) || _NIXFIED_APP_RC=$?
       ${contractExitCheck}

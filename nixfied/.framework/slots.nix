@@ -1,5 +1,9 @@
 # Slot + environment utilities for the framework
-{ pkgs, project }:
+{
+  pkgs,
+  project,
+  loggingPrelude ? null,
+}:
 
 let
   cfg = project;
@@ -84,14 +88,27 @@ let
   ) envNames;
 
   envList = pkgs.lib.concatStringsSep " " envNames;
+  resolvedLoggingPrelude =
+    if loggingPrelude != null && loggingPrelude != "" then
+      loggingPrelude
+    else
+      (
+        import ./lib/helpers.nix {
+          inherit pkgs project;
+          hooks = { };
+          summaryParser = "";
+        }
+      ).loggingPrelude;
 
   # Resolve and validate explicit environment selection
   resolveEnv = pkgs.writeShellScript "resolve-env" ''
+    ${resolvedLoggingPrelude}
+
     set -eo pipefail
     ENV_VAR="${envVar}"
 
     if [ -z "''${!ENV_VAR:-}" ]; then
-      echo "ERROR: $ENV_VAR must be set (example: ${slotVar}=${toString slotDefault} $ENV_VAR=${defaultEnv})" >&2
+      log_error "$ENV_VAR must be set (example: ${slotVar}=${toString slotDefault} $ENV_VAR=${defaultEnv})"
       exit 1
     fi
 
@@ -102,7 +119,7 @@ let
         exit 0
         ;;
       *)
-        echo "ERROR: $ENV_VAR must be one of: ${envList} (got '$ENV_VALUE')" >&2
+        log_error "$ENV_VAR must be one of: ${envList} (got '$ENV_VALUE')"
         exit 1
         ;;
     esac
@@ -110,6 +127,8 @@ let
 
   # Read and validate slot value (defaults when unset)
   resolveSlot = pkgs.writeShellScript "resolve-slot" ''
+    ${resolvedLoggingPrelude}
+
     set -eo pipefail
     SLOT_VAR="${slotVar}"
 
@@ -121,17 +140,17 @@ let
 
     if [ -z "''${!SLOT_VAR:-}" ]; then
       export "$SLOT_VAR"="${toString slotDefault}"
-      echo "INFO: default slot selected slot_var=$SLOT_VAR slot=${toString slotDefault}" >&2
+      log_info "default slot selected slot_var=$SLOT_VAR slot=${toString slotDefault}" >&2
     fi
 
     SLOT_VALUE="''${!SLOT_VAR}"
     case "$SLOT_VALUE" in
       *[!0-9]*)
-        echo "ERROR: $SLOT_VAR must be an integer 0-${toString slotMax} (got '$SLOT_VALUE')" >&2
+        log_error "$SLOT_VAR must be an integer 0-${toString slotMax} (got '$SLOT_VALUE')"
         exit 1
         ;;
       "")
-        echo "ERROR: $SLOT_VAR must be set (example: $SLOT_VAR=${toString slotDefault} ${envVar}=${defaultEnv})" >&2
+        log_error "$SLOT_VAR must be set (example: $SLOT_VAR=${toString slotDefault} ${envVar}=${defaultEnv})"
         exit 1
         ;;
       *)
@@ -139,7 +158,7 @@ let
     esac
 
     if [ "$SLOT_VALUE" -lt 0 ] || [ "$SLOT_VALUE" -gt ${toString slotMax} ]; then
-      echo "ERROR: $SLOT_VAR must be 0-${toString slotMax} (got $SLOT_VALUE)" >&2
+      log_error "$SLOT_VAR must be 0-${toString slotMax} (got $SLOT_VALUE)"
       exit 1
     fi
 
@@ -149,6 +168,8 @@ let
 
   # Validate slot/env and emit eval-able variables
   requireSlotEnv = pkgs.writeShellScript "require-slot-env" ''
+    ${resolvedLoggingPrelude}
+
     set -eo pipefail
     SLOT_VAR="${slotVar}"
     ENV_VAR="${envVar}"
@@ -160,7 +181,7 @@ let
       ${pkgs.lib.concatStringsSep "|" envNames})
         ;;
       *)
-        echo "ERROR: $ENV_VAR must be one of: ${envList} (got '$ENV')" >&2
+        log_error "$ENV_VAR must be one of: ${envList} (got '$ENV')"
         exit 1
         ;;
     esac
@@ -182,6 +203,8 @@ let
 
   # Get slot + environment configuration as eval-able shell variables
   getSlotInfo = pkgs.writeShellScript "get-slot-info" ''
+    ${resolvedLoggingPrelude}
+
     set -eo pipefail
     SLOT_VAR="${slotVar}"
     ENV_VAR="${envVar}"
@@ -193,7 +216,7 @@ let
       ${pkgs.lib.concatStringsSep "|" envNames})
         ;;
       *)
-        echo "ERROR: $ENV_VAR must be one of: ${envList} (got '$ENV')" >&2
+        log_error "$ENV_VAR must be one of: ${envList} (got '$ENV')"
         exit 1
         ;;
     esac

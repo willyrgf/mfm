@@ -2,6 +2,7 @@
 {
   pkgs,
   project,
+  loggingPrelude ? "",
 }:
 
 let
@@ -56,6 +57,8 @@ let
   riskAreasJson = builtins.toJSON riskAreas;
 
   tool = pkgs.writeShellScriptBin "nixfied-discovery-index" ''
+        ${loggingPrelude}
+
         set -euo pipefail
 
         MODE="verify"
@@ -88,7 +91,7 @@ let
             --root)
               ROOT="''${2:-}"
               if [ -z "$ROOT" ]; then
-                echo "ERROR: --root requires a path" >&2
+                log_error "--root requires a path"
                 exit 1
               fi
               shift 2
@@ -98,7 +101,7 @@ let
               exit 0
               ;;
             *)
-              echo "ERROR: unknown option: $1" >&2
+              log_error "unknown option: $1"
               usage >&2
               exit 1
               ;;
@@ -368,17 +371,17 @@ let
           local committed_path="$2"
 
           if [ ! -f "$committed_path" ]; then
-            echo "ERROR: missing discovery artifact path=''${committed_path#"$ROOT"/}" >&2
+            log_error "missing discovery artifact path=''${committed_path#"$ROOT"/}"
             return 1
           fi
 
           if ! ${pkgs.diffutils}/bin/cmp -s "$generated_path" "$committed_path"; then
-            echo "ERROR: discovery artifact drift path=''${committed_path#"$ROOT"/}" >&2
+            log_error "discovery artifact drift path=''${committed_path#"$ROOT"/}"
             ${pkgs.diffutils}/bin/diff -u "$committed_path" "$generated_path" >&2 || true
             return 1
           fi
 
-          echo "OK: discovery artifact current path=''${committed_path#"$ROOT"/}"
+          log_ok "discovery artifact current path=''${committed_path#"$ROOT"/}"
           return 0
         }
 
@@ -387,20 +390,20 @@ let
           local committed_path="$2"
 
           if [ -f "$committed_path" ] && ${pkgs.diffutils}/bin/cmp -s "$generated_path" "$committed_path"; then
-            echo "OK: discovery artifact unchanged path=''${committed_path#"$ROOT"/}"
+            log_ok "discovery artifact unchanged path=''${committed_path#"$ROOT"/}"
             return 0
           fi
 
           ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname "$committed_path")"
           ${pkgs.coreutils}/bin/cp "$generated_path" "$committed_path"
-          echo "INFO: wrote discovery artifact path=''${committed_path#"$ROOT"/}"
+          log_info "wrote discovery artifact path=''${committed_path#"$ROOT"/}"
           return 0
         }
 
         if [ "$MODE" = "refresh" ]; then
           write_if_changed "$TMP_INDEX" "$INDEX_PATH"
           write_if_changed "$TMP_MAP" "$MAP_PATH"
-          echo "OK: discovery refresh complete root=$ROOT"
+          log_ok "discovery refresh complete root=$ROOT"
           exit 0
         fi
 
@@ -409,12 +412,12 @@ let
         verify_file "$TMP_MAP" "$MAP_PATH" || rc=1
 
         if [ "$rc" -ne 0 ]; then
-          echo "ERROR: discovery artifacts are out of date." >&2
-          echo "INFO: refresh with: nix run .#check -- ${refreshArg}" >&2
+          log_error "discovery artifacts are out of date."
+          log_info "refresh with: nix run .#check -- ${refreshArg}"
           exit "$rc"
         fi
 
-        echo "OK: discovery artifacts are current"
+        log_ok "discovery artifacts are current"
   '';
 in
 {

@@ -156,7 +156,7 @@ let
         # - fixture_start_service must poll READY/HEALTH with timeout.
         # - diagnostics must stay robust when log files are missing.
         _fixture_keep_running="$(_fixture_keep_running_from_policy)"
-        echo "INFO: fixture service start name=${serviceName} profile=${profile}"
+        log_info "fixture service start name=${serviceName} profile=${profile}"
         fixture_start_service ${quote serviceName} ${quote profile} ${quote timeout} ${quote interval} "$_fixture_log_file" "$_fixture_keep_running"
         ${exportScript}
         ${bootstrapScript}

@@ -1,13 +1,18 @@
 # Process management utilities - signal handlers, process managers
-{ pkgs }:
+{
+  pkgs,
+  loggingPrelude,
+}:
 
 let
   mkSignalHandler =
     cleanupHook:
     pkgs.writeShellScript "signal-handler" ''
+      ${loggingPrelude}
+
       shutdown() {
         echo ""
-        echo "INFO: Shutting down"
+        log_info "Shutting down"
         ${cleanupHook}
         exit 0
       }
@@ -26,9 +31,11 @@ let
       cleanupHook ? "",
     }:
     pkgs.writeShellScript "process-manager" ''
+      ${loggingPrelude}
+
       ${mkSignalHandler cleanupHook}
 
-      echo "INFO: Starting ${processName}"
+      log_info "Starting ${processName}"
       ${startupScript}
       wait
     '';

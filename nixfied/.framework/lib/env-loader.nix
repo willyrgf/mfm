@@ -2,6 +2,7 @@
 {
   pkgs,
   project ? { },
+  loggingPrelude ? "",
 }:
 
 let
@@ -96,6 +97,8 @@ let
   );
 
   loadEnvFile = pkgs.writeShellScript "nixfied-load-env-file" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     ENV_FILE="''${1:-.env}"
@@ -119,7 +122,7 @@ let
           ;;
         int)
           if ! printf '%s' "$value" | ${pkgs.gnugrep}/bin/grep -Eq '^-?[0-9]+$'; then
-            echo "ERROR: .env key $key expects int (got '$value')" >&2
+            log_error ".env key $key expects int (got '$value')"
             return 1
           fi
           ;;
@@ -128,7 +131,7 @@ let
             1|0|true|false|TRUE|FALSE|yes|no|on|off)
               ;;
             *)
-              echo "ERROR: .env key $key expects bool (got '$value')" >&2
+              log_error ".env key $key expects bool (got '$value')"
               return 1
               ;;
           esac
@@ -137,7 +140,7 @@ let
           case "$value" in
             /*) ;;
             *)
-              echo "ERROR: .env key $key expects absolute path (got '$value')" >&2
+              log_error ".env key $key expects absolute path (got '$value')"
               return 1
               ;;
           esac
@@ -145,7 +148,7 @@ let
         pathRel)
           case "$value" in
             ""|/*)
-              echo "ERROR: .env key $key expects relative path (got '$value')" >&2
+              log_error ".env key $key expects relative path (got '$value')"
               return 1
               ;;
             *)
@@ -154,32 +157,32 @@ let
           ;;
         port)
           if ! printf '%s' "$value" | ${pkgs.gnugrep}/bin/grep -Eq '^[0-9]+$'; then
-            echo "ERROR: .env key $key expects TCP port (got '$value')" >&2
+            log_error ".env key $key expects TCP port (got '$value')"
             return 1
           fi
           if [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
-            echo "ERROR: .env key $key expects TCP port 1-65535 (got '$value')" >&2
+            log_error ".env key $key expects TCP port 1-65535 (got '$value')"
             return 1
           fi
           ;;
         durationSec)
           if ! printf '%s' "$value" | ${pkgs.gnugrep}/bin/grep -Eq '^[0-9]+$'; then
-            echo "ERROR: .env key $key expects durationSec integer (got '$value')" >&2
+            log_error ".env key $key expects durationSec integer (got '$value')"
             return 1
           fi
           if [ "$value" -le 0 ]; then
-            echo "ERROR: .env key $key expects durationSec > 0 (got '$value')" >&2
+            log_error ".env key $key expects durationSec > 0 (got '$value')"
             return 1
           fi
           ;;
         json)
           if ! printf '%s' "$value" | ${pkgs.jq}/bin/jq -e . >/dev/null 2>&1; then
-            echo "ERROR: .env key $key expects valid JSON" >&2
+            log_error ".env key $key expects valid JSON"
             return 1
           fi
           ;;
         *)
-          echo "ERROR: unsupported env spec type key=$key type=$type" >&2
+          log_error "unsupported env spec type key=$key type=$type"
           return 1
           ;;
       esac
@@ -199,7 +202,7 @@ let
             SPEC_NAME="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.name')"
             SPEC_REQUIRED="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.required')"
             if [ "$SPEC_REQUIRED" = "true" ] && [ -z "''${!SPEC_NAME:-}" ]; then
-              echo "ERROR: required env key missing key=$SPEC_NAME source=.env" >&2
+              log_error "required env key missing key=$SPEC_NAME source=.env"
               return 1
             fi
           done < <(${pkgs.jq}/bin/jq -r '.[] | @base64' "$ENV_SPECS_FILE")
@@ -221,7 +224,7 @@ let
           *=*)
             ;;
           *)
-            echo "ERROR: invalid .env line (missing '=') line='$LINE'" >&2
+            log_error "invalid .env line (missing '=') line='$LINE'"
             return 1
             ;;
         esac
@@ -230,7 +233,7 @@ let
         value="$(printf '%s' "$LINE" | ${pkgs.gnused}/bin/sed -E 's/^[^=]*=//')"
 
         if ! printf '%s' "$key" | ${pkgs.gnugrep}/bin/grep -Eq '^[A-Z_][A-Z0-9_]*$'; then
-          echo "ERROR: invalid .env key token key='$key'" >&2
+          log_error "invalid .env key token key='$key'"
           return 1
         fi
 
@@ -240,7 +243,7 @@ let
         KNOWN_KEY="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r 'if . == null then "0" else "1" end')"
 
         if [ "$KNOWN_KEY" != "1" ] && [ "$ENV_FILE_STRICT" = "1" ]; then
-          echo "ERROR: unknown .env key key=$key (strict mode enabled)" >&2
+          log_error "unknown .env key key=$key (strict mode enabled)"
           return 1
         fi
 
@@ -272,7 +275,7 @@ let
             validate_env_value "$SPEC_NAME" "$SPEC_TYPE" "$SPEC_DEFAULT" || return 1
             export "$SPEC_NAME=$SPEC_DEFAULT"
           elif [ "$SPEC_REQUIRED" = "true" ]; then
-            echo "ERROR: required env key missing key=$SPEC_NAME source=.env" >&2
+            log_error "required env key missing key=$SPEC_NAME source=.env"
             return 1
           fi
         else

@@ -49,7 +49,7 @@ let
       local requirement="$2"
       shift 2 || true
       if [ "$#" -lt 2 ]; then
-        echo "ERROR: $flag requires $requirement" >&2
+        log_error "$flag requires $requirement"
         exit 1
       fi
       printf '%s\n' "$2"
@@ -57,6 +57,8 @@ let
   '';
 
   promptPlanScript = pkgs.writeShellScript "nixfied-prompt-plan" ''
+                            ${lib.loggingPrelude}
+
                             set -euo pipefail
 
                             FORCE=false
@@ -93,26 +95,26 @@ let
                             done
 
                 	            if [ "''${NIXFIED_PROMPT_PLAN:-1}" = "0" ] || [ "''${NIXFIED_PROMPT_PLAN:-}" = "false" ] || [ "''${NIXFIED_INTEGRATION_PLAN:-}" = "0" ] || [ "''${NIXFIED_INTEGRATION_PLAN:-}" = "false" ]; then
-                	              echo "INFO: Prompt plan disabled (NIXFIED_PROMPT_PLAN=0)."
+                	              log_info "Prompt plan disabled (NIXFIED_PROMPT_PLAN=0)."
                 	              exit 0
                 	            fi
 
                 	            ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
                 	            if [ -z "$ROOT" ]; then
-                	              echo "ERROR: Not inside a git repository." >&2
+                	              log_error "Not inside a git repository."
                 	              exit 1
                 	            fi
 
                             OUT_PATH="''${OUT_PATH:-$ROOT/NIXFIED_PROMPT_PLAN.md}"
 
                 	            if [ -f "$OUT_PATH" ] && [ "$FORCE" = "false" ] && [ "''${NIXFIED_PROMPT_PLAN_OVERWRITE:-0}" != "1" ] && [ "''${NIXFIED_INTEGRATION_PLAN_OVERWRITE:-0}" != "1" ]; then
-                	              echo "INFO: Prompt plan already exists: $OUT_PATH"
+                	              log_info "Prompt plan already exists: $OUT_PATH"
                 	              echo "    Re-run with --force or NIXFIED_PROMPT_PLAN_OVERWRITE=1 to overwrite."
                 	              exit 0
                 	            fi
 
                 	            if ! command -v nix >/dev/null 2>&1; then
-                	              echo "ERROR: nix is required to run dump2llm." >&2
+                	              log_error "nix is required to run dump2llm."
                 	              exit 1
                 	            fi
 
@@ -140,7 +142,7 @@ let
                         add_prompt_input "$FRAMEWORK_README" "NIXFIED_FRAMEWORK_README.md"
 
                 	        if [ "''${#INPUTS[@]}" -eq 0 ]; then
-                	          echo "SKIP: Skipping prompt plan (no README/CLAUDE/AGENTS files found)." >&2
+                	          log_skip "Skipping prompt plan (no README/CLAUDE/AGENTS files found)."
                 	          exit 0
                 	        fi
 
@@ -196,16 +198,18 @@ let
                             cat "$CONTEXT_FILE"
                 	          else
                 	            echo ""
-                	            echo "WARN: Context generation failed. Re-run the prompt plan:"
+                	            log_warn "Context generation failed. Re-run the prompt plan:"
                 	            echo ""
                 	            echo "  nix run github:willyrgf/nixfied#framework::prompt-plan -- --force"
                 	          fi
                 	        } > "$OUT_PATH"
 
-                	            echo "OK: Prompt plan written to $OUT_PATH"
+                	            log_ok "Prompt plan written to $OUT_PATH"
                 	  '';
 
   installScript = ''
+                                    ${lib.loggingPrelude}
+
                                     set -euo pipefail
 
                                     ORIG_ARGS=("$@")
@@ -250,7 +254,7 @@ let
                                           shift
                                           ;;
                                         --sync)
-                                          echo "ERROR: unsupported option: --sync (removed; run without --sync)." >&2
+                                          log_error "unsupported option: --sync (removed; run without --sync)."
                                           exit 1
                                           ;;
                                         --prompt-plan)
@@ -314,13 +318,13 @@ let
 
                             		        GIT="${pkgs.git}/bin/git"
                             		        if [ ! -x "$GIT" ]; then
-                            		          echo "ERROR: git is required to install/upgrade." >&2
+                            		          log_error "git is required to install/upgrade."
                             		          exit 1
                             		        fi
 
                             		        ROOT=$("$GIT" rev-parse --show-toplevel 2>/dev/null || true)
                             		        if [ -z "$ROOT" ]; then
-                            		          echo "ERROR: Not inside a git repository." >&2
+                            		          log_error "Not inside a git repository."
                             		          exit 1
                             		        fi
                             	        ROOT=$(cd "$ROOT" && pwd -P)
@@ -331,28 +335,28 @@ let
                             		          TARGET="''${TARGET_PATH:-''${ROOT}_''${INSTALL_BRANCH}}"
                             		          case "$TARGET" in
                             		            "$ROOT"/*)
-                            		              echo "ERROR: Target must not be inside the source repo (got: $TARGET)" >&2
+                            		              log_error "Target must not be inside the source repo (got: $TARGET)"
                             		              exit 1
                             		              ;;
                             		          esac
 
                             		          if [ -e "$TARGET" ]; then
                             		            if [ "$FORCE" = "true" ]; then
-                            		              echo "WARN: Target already exists: $TARGET"
+                            		              log_warn "Target already exists: $TARGET"
                             		              echo "    Reusing existing target (no new worktree created)."
                             		            else
-                            		              echo "ERROR: Target already exists: $TARGET" >&2
+                            		              log_error "Target already exists: $TARGET"
                             		              echo "   Remove it or pass --force to reuse." >&2
                             		              exit 1
                             		            fi
                             		          else
                             		            DIRTY=$("$GIT" -C "$ROOT" status --porcelain 2>/dev/null || true)
                             		            if [ -n "$DIRTY" ] && [ "$FORCE" != "true" ]; then
-                            		              echo "ERROR: Working tree is dirty; refusing to create a worktree without --force" >&2
+                            		              log_error "Working tree is dirty; refusing to create a worktree without --force"
                             		              echo "   (uncommitted changes would not be present in the worktree)" >&2
                             		              exit 1
                             		            fi
-                            		            echo "INFO: Creating git worktree at $TARGET (branch: $INSTALL_BRANCH)..."
+                            		            log_info "Creating git worktree at $TARGET (branch: $INSTALL_BRANCH)..."
                             		            if "$GIT" -C "$ROOT" show-ref --verify --quiet "refs/heads/$INSTALL_BRANCH"; then
                             		              "$GIT" -C "$ROOT" worktree add "$TARGET" "$INSTALL_BRANCH" >/dev/null
                             		            else
@@ -361,17 +365,17 @@ let
                             		          fi
 
                             		          if ! "$GIT" -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-                            		            echo "ERROR: Target exists but is not a git worktree: $TARGET" >&2
+                            		            log_error "Target exists but is not a git worktree: $TARGET"
                             		            exit 1
                             		          fi
 
-                            		          echo "OK: Worktree ready. Re-running installer in $TARGET"
+                            		          log_ok "Worktree ready. Re-running installer in $TARGET"
                             		          (cd "$TARGET" && NIXFIED_INSTALL_REENTRY=1 "$0" "''${ORIG_ARGS[@]}")
                             		          exit 0
                             		        fi
 
                             		        if [ -n "$TARGET_PATH" ] && [ "$USE_WORKTREE" != "true" ] && [ -z "''${NIXFIED_INSTALL_REENTRY:-}" ]; then
-                            		          echo "INFO: --target is only used with --worktree; ignoring."
+                            		          log_info "--target is only used with --worktree; ignoring."
                             		        fi
 
                             	        HEAD_REF=$("$GIT" -C "$ROOT" symbolic-ref -q HEAD 2>/dev/null || true)
@@ -384,17 +388,17 @@ let
                                     TARGET_BRANCH="$INSTALL_BRANCH"
                                     if [ "$FORCE" = "true" ] && [ "$USE_WORKTREE" != "true" ]; then
                                       TARGET_BRANCH="$CURRENT_BRANCH"
-                                      echo "INFO: --force enabled; applying $MODE on current branch: $TARGET_BRANCH"
+                                      log_info "--force enabled; applying $MODE on current branch: $TARGET_BRANCH"
                                     fi
 
                                     if [ "$MODE" = "upgrade" ]; then
                                       if [ ! -d "$ROOT/nixfied" ]; then
-                                        echo "ERROR: No nixfied/ directory found in $ROOT" >&2
+                                        log_error "No nixfied/ directory found in $ROOT"
                                         echo "   Run install first: nix run github:willyrgf/nixfied#framework::install" >&2
                                         exit 1
                                       fi
                                       if [ "$TARGET_BRANCH" = "$INSTALL_BRANCH" ] && [ "$HEAD_REF" != "refs/heads/$INSTALL_BRANCH" ] && ! "$GIT" -C "$ROOT" show-ref --verify --quiet "refs/heads/$INSTALL_BRANCH"; then
-                                        echo "ERROR: Upgrade requires an existing branch: $INSTALL_BRANCH" >&2
+                                        log_error "Upgrade requires an existing branch: $INSTALL_BRANCH"
                                         exit 1
                                       fi
                                     fi
@@ -403,18 +407,18 @@ let
                                       if "$GIT" -C "$ROOT" show-ref --verify --quiet "refs/heads/$TARGET_BRANCH"; then
                                         DIRTY=$("$GIT" -C "$ROOT" status --porcelain 2>/dev/null || true)
                                         if [ -n "$DIRTY" ] && [ "$FORCE" != "true" ]; then
-                                          echo "ERROR: Working tree is dirty; refusing to switch to '$TARGET_BRANCH' without --force" >&2
+                                          log_error "Working tree is dirty; refusing to switch to '$TARGET_BRANCH' without --force"
                                           echo "   (commit/stash your changes, or pass --worktree)" >&2
                                           exit 1
                                         fi
-                                        echo "INFO: Switching to $TARGET_BRANCH branch..."
+                                        log_info "Switching to $TARGET_BRANCH branch..."
                                         "$GIT" -C "$ROOT" switch "$TARGET_BRANCH" >/dev/null
                                       else
                                         if [ "$MODE" = "upgrade" ]; then
-                                          echo "ERROR: Upgrade requires an existing branch: $TARGET_BRANCH" >&2
+                                          log_error "Upgrade requires an existing branch: $TARGET_BRANCH"
                                           exit 1
                                         fi
-                                        echo "INFO: Creating and switching to $TARGET_BRANCH branch..."
+                                        log_info "Creating and switching to $TARGET_BRANCH branch..."
                                         "$GIT" -C "$ROOT" switch -c "$TARGET_BRANCH" >/dev/null
                                       fi
                                     fi
@@ -429,7 +433,7 @@ let
                                       FRAMEWORK_REVISION="unknown"
                                     fi
 
-                                    echo "INFO: Framework source revision rev=$FRAMEWORK_REVISION"
+                                    log_info "Framework source revision rev=$FRAMEWORK_REVISION"
 
                                     PREV_FRAMEWORK_REVISION="unknown"
                                     if [ "$MODE" = "upgrade" ] && [ -f "$ROOT/nixfied/VENDORED.txt" ]; then
@@ -445,11 +449,11 @@ let
                                       if [ -z "$PREV_FRAMEWORK_REVISION" ]; then
                                         PREV_FRAMEWORK_REVISION="unknown"
                                       fi
-                                      echo "INFO: Existing vendored revision rev=$PREV_FRAMEWORK_REVISION"
+                                      log_info "Existing vendored revision rev=$PREV_FRAMEWORK_REVISION"
                                     fi
 
         	                    	        if [ ! -f "$SRC/flake.nix" ] || [ ! -d "$SRC/nixfied" ]; then
-        	                    	          echo "ERROR: Framework source is missing required files." >&2
+        	                    	          log_error "Framework source is missing required files."
         	                    	          exit 1
                             	        fi
 
@@ -461,11 +465,11 @@ let
                             	          if [ "$NEEDS_OVERWRITE" = "true" ] && [ -z "''${NIXFIED_INSTALL_FORCE:-}" ]; then
                             	          if [ -t 0 ]; then
                             	            if [ -d "$ROOT/nixfied/project" ] && [ "$RESET_PROJECT" != "true" ]; then
-                            	              echo "WARN: Existing Nixfied install found in $ROOT"
+                            	              log_warn "Existing Nixfied install found in $ROOT"
                             	              echo "    This will upgrade framework files and preserve nixfied/project/"
                             	              echo "    It will overwrite: flake.nix, flake.lock, nixfied/ (except nixfied/project/)"
                             	            else
-                            	              echo "WARN: Existing Nix files found in $ROOT"
+                            	              log_warn "Existing Nix files found in $ROOT"
                             	              echo "    This will overwrite: flake.nix, flake.lock, nixfied/"
                             	            fi
                                         echo -n "Continue? [y/N]: "
@@ -475,12 +479,12 @@ let
                                           exit 1
                                         fi
                             	          else
-                            	            echo "ERROR: Existing Nix files found. Re-run with NIXFIED_INSTALL_FORCE=1 to overwrite." >&2
+                            	            log_error "Existing Nix files found. Re-run with NIXFIED_INSTALL_FORCE=1 to overwrite."
                             	            exit 1
                             	          fi
                             	        fi
 
-                            	        echo "INFO: Installing framework files"
+                            	        log_info "Installing framework files"
 
                                     cp -f "$SRC/flake.nix" "$ROOT/flake.nix"
                                     if [ -f "$SRC/flake.lock" ]; then
@@ -501,7 +505,7 @@ let
                             	        fi
 
                             		        if [ -n "$FILTERS_RAW" ] && [ "$PRESERVE_PROJECT" = "true" ]; then
-                            		          echo "INFO: Skipping --filter on upgrade (nixfied/project is preserved)."
+                            		          log_info "Skipping --filter on upgrade (nixfied/project is preserved)."
                             		          FILTERS_RAW=""
                             		        fi
 
@@ -530,7 +534,7 @@ let
                             	        fi
                             	
             	                		        if [ "''${#RSYNC_EXCLUDES[@]}" -gt 0 ]; then
-            	                		          echo "INFO: Upgrading nixfied/ (preserving $PRESERVE_MSG)"
+            	                		          log_info "Upgrading nixfied/ (preserving $PRESERVE_MSG)"
             	                		          ${pkgs.rsync}/bin/rsync -a --delete --chmod=Du+w,Fu+w "''${RSYNC_EXCLUDES[@]}" "$SRC/nixfied/" "$ROOT/nixfied/"
             	                		        else
             	                		          ${pkgs.rsync}/bin/rsync -a --delete --chmod=Du+w,Fu+w "$SRC/nixfied/" "$ROOT/nixfied/"
@@ -591,7 +595,7 @@ let
                                           "")
                                             ;;
                             	              *)
-                            	                echo "ERROR: Unknown filter: $f" >&2
+                            	                log_error "Unknown filter: $f"
                             	                exit 1
                             	                ;;
                             	            esac
@@ -628,15 +632,15 @@ let
                                       PLAN_EXIT=$?
                                       set -e
                             	          if [ "$PLAN_EXIT" -ne 0 ]; then
-                            	            echo "WARN: Prompt plan generation failed or was skipped."
+                            	            log_warn "Prompt plan generation failed or was skipped."
                             	          fi
                             	        fi
 
                             		        if [ "$PRESERVE_PROJECT" = "true" ] || [ "$PRESERVE_LOCAL" = "true" ] || [ "$MODE" = "upgrade" ]; then
-                            		          echo "OK: Framework upgraded."
+                            		          log_ok "Framework upgraded."
                             		          echo "    Preserved nixfied/project/ and nixfied/local/ (pass --reset-project to overwrite project templates)."
                             		        else
-                            		          echo "OK: Framework installed."
+                            		          log_ok "Framework installed."
                                     fi
                                     echo "Next:"
                                     echo "  - Edit nixfied/project/conf.nix"

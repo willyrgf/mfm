@@ -3,6 +3,7 @@
   pkgs,
   project,
   slots,
+  loggingPrelude,
 }:
 
 let
@@ -17,30 +18,32 @@ let
   database = cfg.database or "app";
 
   testMigrations = pkgs.writeShellScript "postgres-test-migrations" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     ${
       if migrateCommand == "" then
         ''
-          echo "SKIP: No migration command configured (modules.postgres.migrations.command)"
+          log_skip "No migration command configured (modules.postgres.migrations.command)"
           exit 0
         ''
       else
         ""
     }
 
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
 
     PORT_VAR="${portVar}"
     export PGPORT="''${!PORT_VAR}"
     SOURCE_DB="''${1:-${if sourceDatabase != null then sourceDatabase else database}}"
     TEST_DB="migration_test_$(date +%s)"
 
-    echo "INFO: Testing migrations against copy of '$SOURCE_DB'"
+    log_info "Testing migrations against copy of '$SOURCE_DB'"
 
     # Create test database as copy of source
     ${postgres}/bin/createdb -h localhost -p "$PGPORT" -U postgres -T "$SOURCE_DB" "$TEST_DB" 2>/dev/null || {
-      echo "ERROR: Failed to copy database '$SOURCE_DB'" >&2
+      log_error "Failed to copy database '$SOURCE_DB'"
       exit 1
     }
 
@@ -56,11 +59,11 @@ let
     ${postgres}/bin/dropdb -h localhost -p "$PGPORT" -U postgres "$TEST_DB" 2>/dev/null || true
 
     if [ $MIGRATION_EXIT -ne 0 ]; then
-      echo "ERROR: Migration test failed (exit code: $MIGRATION_EXIT)" >&2
+      log_error "Migration test failed (exit code: $MIGRATION_EXIT)"
       exit $MIGRATION_EXIT
     fi
 
-    echo "OK: Migration test passed"
+    log_ok "Migration test passed"
   '';
 
 in

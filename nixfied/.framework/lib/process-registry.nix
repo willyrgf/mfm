@@ -2,6 +2,7 @@
 {
   pkgs,
   project ? { },
+  loggingPrelude ? null,
 }:
 
 let
@@ -25,8 +26,21 @@ let
   artifactsCfg = ciCfg.artifacts or { };
   artifactsRootExpr = artifactsCfg.dir or "/tmp/ci-artifacts";
   ephemeralPrefix = "/tmp/${projectId}-ephemeral-";
+  resolvedLoggingPrelude =
+    if loggingPrelude != null && loggingPrelude != "" then
+      loggingPrelude
+    else
+      (
+        import ./helpers.nix {
+          inherit pkgs project;
+          hooks = { };
+          summaryParser = "";
+        }
+      ).loggingPrelude;
 
   sharedPrelude = ''
+    ${resolvedLoggingPrelude}
+
     set -euo pipefail
 
     REGISTRY_ROOT="${registryRoot}"
@@ -259,7 +273,7 @@ let
         --readiness-health) EVENT_READINESS_HEALTH="$2"; shift 2 ;;
         --readiness-ready) EVENT_READINESS_READY="$2"; shift 2 ;;
         *)
-          echo "ERROR: unknown argument: $1" >&2
+          log_error "unknown argument: $1"
           exit 1
           ;;
       esac
@@ -286,11 +300,11 @@ let
     fi
     case "$EVENT_ATTEMPT" in
       *[!0-9]*|"")
-        echo "ERROR: --attempt must be a positive integer (got '$EVENT_ATTEMPT')" >&2
+        log_error "--attempt must be a positive integer (got '$EVENT_ATTEMPT')"
         exit 1
         ;;
       0)
-        echo "ERROR: --attempt must be >= 1 (got '$EVENT_ATTEMPT')" >&2
+        log_error "--attempt must be >= 1 (got '$EVENT_ATTEMPT')"
         exit 1
         ;;
       *)
@@ -419,7 +433,7 @@ let
       ')
 
     append_event_json "$PAYLOAD"
-    echo "OK: process event recorded event_type=$EVENT_TYPE run_id=$EVENT_RUN_ID service=''${EVENT_SERVICE:-none} state=$EVENT_STATE"
+    log_ok "process event recorded event_type=$EVENT_TYPE run_id=$EVENT_RUN_ID service=''${EVENT_SERVICE:-none} state=$EVENT_STATE"
   '';
 
   processStatus = pkgs.writeShellScript "process-status" ''
@@ -433,14 +447,14 @@ let
           shift
           ;;
         *)
-          echo "ERROR: unknown argument: $1" >&2
+          log_error "unknown argument: $1"
           exit 1
           ;;
       esac
     done
 
     if [ ! -s "$EVENTS_FILE" ]; then
-      echo "OK: no process events project_id=$PROJECT_ID registry_root=$REGISTRY_ROOT"
+      log_ok "no process events project_id=$PROJECT_ID registry_root=$REGISTRY_ROOT"
       exit 0
     fi
 
@@ -507,9 +521,9 @@ let
 
     if [ -z "$OUT" ]; then
       if [ "$SHOW_ALL" = "true" ]; then
-        echo "OK: no process entities found project_id=$PROJECT_ID"
+        log_ok "no process entities found project_id=$PROJECT_ID"
       else
-        echo "OK: no active process entities found project_id=$PROJECT_ID"
+        log_ok "no active process entities found project_id=$PROJECT_ID"
       fi
       exit 0
     fi
@@ -528,14 +542,14 @@ let
           shift
           ;;
         *)
-          echo "ERROR: unknown argument: $1" >&2
+          log_error "unknown argument: $1"
           exit 1
           ;;
       esac
     done
 
     if [ ! -s "$EVENTS_FILE" ]; then
-      echo "OK: no runs found project_id=$PROJECT_ID"
+      log_ok "no runs found project_id=$PROJECT_ID"
       exit 0
     fi
 
@@ -591,9 +605,9 @@ let
 
     if [ -z "$OUT" ]; then
       if [ "$SHOW_ALL" = "true" ]; then
-        echo "OK: no run entities found project_id=$PROJECT_ID"
+        log_ok "no run entities found project_id=$PROJECT_ID"
       else
-        echo "OK: no active runs found project_id=$PROJECT_ID"
+        log_ok "no active runs found project_id=$PROJECT_ID"
       fi
       exit 0
     fi
@@ -612,14 +626,14 @@ let
           shift
           ;;
         *)
-          echo "ERROR: unknown argument: $1" >&2
+          log_error "unknown argument: $1"
           exit 1
           ;;
       esac
     done
 
     if [ ! -s "$EVENTS_FILE" ]; then
-      echo "OK: no slot events found project_id=$PROJECT_ID"
+      log_ok "no slot events found project_id=$PROJECT_ID"
       exit 0
     fi
 
@@ -653,9 +667,9 @@ let
 
     if [ -z "$OUT" ]; then
       if [ "$SHOW_ALL" = "true" ]; then
-        echo "OK: no slot ownership entities found project_id=$PROJECT_ID"
+        log_ok "no slot ownership entities found project_id=$PROJECT_ID"
       else
-        echo "OK: no busy slots found project_id=$PROJECT_ID"
+        log_ok "no busy slots found project_id=$PROJECT_ID"
       fi
       exit 0
     fi
@@ -678,14 +692,14 @@ let
           break
           ;;
         -*)
-          echo "ERROR: unknown argument: $1" >&2
+          log_error "unknown argument: $1"
           exit 1
           ;;
         *)
           if [ -z "$TARGET" ]; then
             TARGET="$1"
           else
-            echo "ERROR: unexpected extra argument: $1" >&2
+            log_error "unexpected extra argument: $1"
             exit 1
           fi
           shift
@@ -700,7 +714,7 @@ let
     fi
 
     if [ ! -s "$EVENTS_FILE" ]; then
-      echo "ERROR: no process events found project_id=$PROJECT_ID" >&2
+      log_error "no process events found project_id=$PROJECT_ID"
       exit 1
     fi
 
@@ -713,7 +727,7 @@ let
     ' "$EVENTS_FILE")
 
     if [ "$MATCH_COUNT" = "0" ]; then
-      echo "ERROR: no events found for id=$TARGET" >&2
+      log_error "no events found for id=$TARGET"
       exit 1
     fi
 
@@ -771,19 +785,19 @@ let
           shift 2
           ;;
         *)
-          echo "ERROR: unknown argument: $1" >&2
+          log_error "unknown argument: $1"
           exit 1
           ;;
       esac
     done
 
     if [ "$STOP_ALL" = "true" ] && [ -n "$RUN_ID" ]; then
-      echo "ERROR: --all cannot be combined with --run-id" >&2
+      log_error "--all cannot be combined with --run-id"
       exit 1
     fi
 
     if [ "$STOP_ALL" = "true" ] && [ "$SCOPE_SET" = "true" ]; then
-      echo "ERROR: --all cannot be combined with --scope" >&2
+      log_error "--all cannot be combined with --scope"
       exit 1
     fi
 
@@ -796,7 +810,7 @@ let
       case "$SCOPE" in
         run|slot-env) ;;
         *)
-          echo "ERROR: --scope must be one of run|slot-env (got '$SCOPE')" >&2
+          log_error "--scope must be one of run|slot-env (got '$SCOPE')"
           exit 1
           ;;
       esac
@@ -804,13 +818,13 @@ let
 
     case "$TIMEOUT_SECONDS" in
       *[!0-9]*|"")
-        echo "ERROR: --timeout must be a positive integer (got '$TIMEOUT_SECONDS')" >&2
+        log_error "--timeout must be a positive integer (got '$TIMEOUT_SECONDS')"
         exit 1
         ;;
     esac
 
     if [ ! -s "$EVENTS_FILE" ]; then
-      echo "ERROR: no process events found project_id=$PROJECT_ID" >&2
+      log_error "no process events found project_id=$PROJECT_ID"
       exit 1
     fi
 
@@ -965,18 +979,18 @@ let
     case "$PLAN_ERROR" in
       "") ;;
       missing_run)
-        echo "ERROR: run id not found run_id=$RUN_ID" >&2
+        log_error "run id not found run_id=$RUN_ID"
         exit 1
         ;;
       missing_slot_env)
-        echo "ERROR: run id missing slot/env metadata run_id=$RUN_ID; cannot use --scope slot-env" >&2
+        log_error "run id missing slot/env metadata run_id=$RUN_ID; cannot use --scope slot-env"
         exit 1
         ;;
       *)
         if [ "$STOP_ALL" = "true" ]; then
-          echo "ERROR: failed to build stop plan mode=all error=$PLAN_ERROR" >&2
+          log_error "failed to build stop plan mode=all error=$PLAN_ERROR"
         else
-          echo "ERROR: failed to build stop plan run_id=$RUN_ID error=$PLAN_ERROR" >&2
+          log_error "failed to build stop plan run_id=$RUN_ID error=$PLAN_ERROR"
         fi
         exit 1
         ;;
@@ -994,7 +1008,7 @@ let
     fi
 
     if [ -z "$TARGET_ROWS" ]; then
-      echo "OK: no active entities matched $STOP_CONTEXT"
+      log_ok "no active entities matched $STOP_CONTEXT"
       exit 0
     fi
 
@@ -1019,13 +1033,13 @@ let
 
       if ! is_numeric_pid "$PID"; then
         SKIPPED=$((SKIPPED + 1))
-        echo "WARN: skipping entity with invalid pid kind=$KIND id=$IDENTIFIER pid=''${PID:-unknown}"
+        log_warn "skipping entity with invalid pid kind=$KIND id=$IDENTIFIER pid=''${PID:-unknown}"
         continue
       fi
 
       if [ "$PID" = "$SELF_PID" ]; then
         SKIPPED=$((SKIPPED + 1))
-        echo "WARN: refusing to stop current process kind=$KIND id=$IDENTIFIER pid=$PID"
+        log_warn "refusing to stop current process kind=$KIND id=$IDENTIFIER pid=$PID"
         continue
       fi
 
@@ -1038,16 +1052,16 @@ let
 
       if ! kill -0 "$PID" 2>/dev/null; then
         SKIPPED=$((SKIPPED + 1))
-        echo "INFO: entity already stopped kind=$KIND id=$IDENTIFIER pid=$PID"
+        log_info "entity already stopped kind=$KIND id=$IDENTIFIER pid=$PID"
         continue
       fi
 
       if [ "$DRY_RUN" = "true" ]; then
-        echo "INFO: dry-run would stop kind=$KIND id=$IDENTIFIER run_id=''${RUN_REF:-unknown} slot=''${SLOT:-unknown} env=''${ENV:-unknown} target=$TARGET_DESC"
+        log_info "dry-run would stop kind=$KIND id=$IDENTIFIER run_id=''${RUN_REF:-unknown} slot=''${SLOT:-unknown} env=''${ENV:-unknown} target=$TARGET_DESC"
         continue
       fi
 
-      echo "INFO: stopping kind=$KIND id=$IDENTIFIER run_id=''${RUN_REF:-unknown} slot=''${SLOT:-unknown} env=''${ENV:-unknown} target=$TARGET_DESC"
+      log_info "stopping kind=$KIND id=$IDENTIFIER run_id=''${RUN_REF:-unknown} slot=''${SLOT:-unknown} env=''${ENV:-unknown} target=$TARGET_DESC"
       kill -TERM -- "$TARGET" 2>/dev/null || true
 
       ELAPSED=0
@@ -1058,7 +1072,7 @@ let
 
       if kill -0 "$PID" 2>/dev/null; then
         if [ "$FORCE" = "true" ]; then
-          echo "WARN: escalating to SIGKILL kind=$KIND id=$IDENTIFIER target=$TARGET_DESC"
+          log_warn "escalating to SIGKILL kind=$KIND id=$IDENTIFIER target=$TARGET_DESC"
           kill -KILL -- "$TARGET" 2>/dev/null || true
           ELAPSED=0
           while kill -0 "$PID" 2>/dev/null && [ "$ELAPSED" -lt "2" ]; do
@@ -1070,12 +1084,12 @@ let
 
       if kill -0 "$PID" 2>/dev/null; then
         FAILED=$((FAILED + 1))
-        echo "ERROR: failed to stop entity kind=$KIND id=$IDENTIFIER pid=$PID timeout=$TIMEOUT_SECONDS force=$FORCE" >&2
+        log_error "failed to stop entity kind=$KIND id=$IDENTIFIER pid=$PID timeout=$TIMEOUT_SECONDS force=$FORCE"
         continue
       fi
 
       STOPPED=$((STOPPED + 1))
-      echo "OK: stopped kind=$KIND id=$IDENTIFIER pid=$PID"
+      log_ok "stopped kind=$KIND id=$IDENTIFIER pid=$PID"
 
       if [ "$KIND" = "service" ]; then
         ${emitEvent} \
@@ -1104,16 +1118,16 @@ let
     done <<< "$TARGET_ROWS"
 
     if [ "$DRY_RUN" = "true" ]; then
-      echo "INFO: process stop dry-run complete $STOP_CONTEXT"
+      log_info "process stop dry-run complete $STOP_CONTEXT"
       exit 0
     fi
 
     if [ "$FAILED" -gt 0 ]; then
-      echo "ERROR: process stop completed with failures $STOP_CONTEXT stopped=$STOPPED skipped=$SKIPPED failed=$FAILED" >&2
+      log_error "process stop completed with failures $STOP_CONTEXT stopped=$STOPPED skipped=$SKIPPED failed=$FAILED"
       exit 1
     fi
 
-    echo "OK: process stop complete $STOP_CONTEXT stopped=$STOPPED skipped=$SKIPPED"
+    log_ok "process stop complete $STOP_CONTEXT stopped=$STOPPED skipped=$SKIPPED"
   '';
 
   processGc = pkgs.writeShellScript "process-gc" ''
@@ -1127,14 +1141,14 @@ let
           shift
           ;;
         *)
-          echo "ERROR: unknown argument: $1" >&2
+          log_error "unknown argument: $1"
           exit 1
           ;;
       esac
     done
 
     if [ ! -s "$EVENTS_FILE" ]; then
-      echo "OK: no process events found project_id=$PROJECT_ID"
+      log_ok "no process events found project_id=$PROJECT_ID"
       exit 0
     fi
 
@@ -1178,7 +1192,7 @@ let
         fi
 
         FOUND=$((FOUND + 1))
-        echo "WARN: orphan detected service=$SERVICE slot=''${SLOT:-unknown} env=''${ENV:-unknown} pid=$PID run_id=''${RUN_ID:-unknown}"
+        log_warn "orphan detected service=$SERVICE slot=''${SLOT:-unknown} env=''${ENV:-unknown} pid=$PID run_id=''${RUN_ID:-unknown}"
 
         if [ "$APPLY" = "true" ]; then
           ${emitEvent} \
@@ -1192,7 +1206,7 @@ let
             --log-path "$LOG_PATH" \
             --wait-reason "gc_detected_dead_pid" >/dev/null 2>&1 || true
           APPLIED=$((APPLIED + 1))
-          echo "OK: orphan marked service=$SERVICE slot=''${SLOT:-unknown} env=''${ENV:-unknown} pid=$PID"
+          log_ok "orphan marked service=$SERVICE slot=''${SLOT:-unknown} env=''${ENV:-unknown} pid=$PID"
         fi
       done <<< "$CANDIDATES"
     fi
@@ -1229,7 +1243,7 @@ let
       fi
 
       RUN_FOUND=$((RUN_FOUND + 1))
-      echo "WARN: stale run detected run_id=$RUN_ID pid=$PID command=''${COMMAND:-unknown} slot=''${SLOT:-unknown} env=''${ENV:-unknown}"
+      log_warn "stale run detected run_id=$RUN_ID pid=$PID command=''${COMMAND:-unknown} slot=''${SLOT:-unknown} env=''${ENV:-unknown}"
 
       if [ "$APPLY" = "true" ]; then
         ${emitEvent} \
@@ -1243,19 +1257,19 @@ let
           --wait-reason "gc_detected_dead_run_pid" \
           --last-error "run process no longer exists" >/dev/null 2>&1 || true
         RUN_APPLIED=$((RUN_APPLIED + 1))
-        echo "OK: stale run marked failed run_id=$RUN_ID"
+        log_ok "stale run marked failed run_id=$RUN_ID"
       fi
     done <<< "$RUN_CANDIDATES"
 
     if [ "$FOUND" -eq 0 ] && [ "$RUN_FOUND" -eq 0 ]; then
-      echo "OK: no orphaned active processes found project_id=$PROJECT_ID"
+      log_ok "no orphaned active processes found project_id=$PROJECT_ID"
       exit 0
     fi
 
     if [ "$APPLY" = "true" ]; then
-      echo "OK: process gc complete orphaned_marked=$APPLIED stale_runs_marked=$RUN_APPLIED"
+      log_ok "process gc complete orphaned_marked=$APPLIED stale_runs_marked=$RUN_APPLIED"
     else
-      echo "INFO: process gc dry-run complete orphans_found=$FOUND stale_runs_found=$RUN_FOUND (re-run with --apply to reconcile)"
+      log_info "process gc dry-run complete orphans_found=$FOUND stale_runs_found=$RUN_FOUND (re-run with --apply to reconcile)"
     fi
   '';
 
@@ -1274,7 +1288,7 @@ let
         --env) ENV_FILTER="$2"; shift 2 ;;
         --limit) LIMIT="$2"; shift 2 ;;
         *)
-          echo "ERROR: unknown argument: $1" >&2
+          log_error "unknown argument: $1"
           exit 1
           ;;
       esac
@@ -1286,7 +1300,7 @@ let
     fi
 
     if [ ! -s "$EVENTS_FILE" ]; then
-      echo "OK: no events found service=$SERVICE project_id=$PROJECT_ID"
+      log_ok "no events found service=$SERVICE project_id=$PROJECT_ID"
       exit 0
     fi
 
@@ -1310,7 +1324,7 @@ let
     ' "$EVENTS_FILE")
 
     if [ -z "$OUT" ]; then
-      echo "OK: no events matched service=$SERVICE slot=''${SLOT_FILTER:-any} env=''${ENV_FILTER:-any}"
+      log_ok "no events matched service=$SERVICE slot=''${SLOT_FILTER:-any} env=''${ENV_FILTER:-any}"
       exit 0
     fi
 
@@ -1334,7 +1348,7 @@ let
         --lines) LINES="$2"; shift 2 ;;
         --follow|-f) FOLLOW=true; shift ;;
         *)
-          echo "ERROR: unknown argument: $1" >&2
+          log_error "unknown argument: $1"
           exit 1
           ;;
       esac
@@ -1347,7 +1361,7 @@ let
 
     case "$LINES" in
       *[!0-9]*|"")
-        echo "ERROR: --lines must be a positive integer (got '$LINES')" >&2
+        log_error "--lines must be a positive integer (got '$LINES')"
         exit 1
         ;;
       *)
@@ -1362,7 +1376,7 @@ let
     fi
 
     if [ ! -s "$EVENTS_FILE" ]; then
-      echo "ERROR: no process events found; cannot resolve log path service=$SERVICE" >&2
+      log_error "no process events found; cannot resolve log path service=$SERVICE"
       exit 1
     fi
 
@@ -1381,26 +1395,26 @@ let
     ' "$EVENTS_FILE")
 
     if [ -z "$LOG_PATH" ]; then
-      echo "ERROR: no log path recorded for service=$SERVICE slot=''${SLOT_FILTER:-any} env=''${ENV_FILTER:-any}" >&2
-      echo "HINT: start the service once so it emits lifecycle events with log_path." >&2
+      log_error "no log path recorded for service=$SERVICE slot=''${SLOT_FILTER:-any} env=''${ENV_FILTER:-any}"
+      log_hint "start the service once so it emits lifecycle events with log_path."
       exit 1
     fi
 
     case "$LOG_PATH" in
       /*) ;;
       *)
-        echo "ERROR: log path must be absolute path=$LOG_PATH service=$SERVICE" >&2
+        log_error "log path must be absolute path=$LOG_PATH service=$SERVICE"
         exit 1
         ;;
     esac
     if echo "$LOG_PATH" | ${pkgs.gnugrep}/bin/grep -Eq '(^|/)[.]{1,2}(/|$)'; then
-      echo "ERROR: log path contains unsafe traversal segments path=$LOG_PATH service=$SERVICE" >&2
+      log_error "log path contains unsafe traversal segments path=$LOG_PATH service=$SERVICE"
       exit 1
     fi
 
     LOG_PATH_CANON="$(${pkgs.coreutils}/bin/realpath "$LOG_PATH" 2>/dev/null || true)"
     if [ -z "$LOG_PATH_CANON" ]; then
-      echo "ERROR: failed to resolve canonical log path path=$LOG_PATH service=$SERVICE" >&2
+      log_error "failed to resolve canonical log path path=$LOG_PATH service=$SERVICE"
       exit 1
     fi
 
@@ -1452,13 +1466,13 @@ let
       fi
     done
     if [ "$ALLOWED" -ne 1 ]; then
-      echo "ERROR: log path is outside allowed roots path=$LOG_PATH_CANON service=$SERVICE" >&2
-      echo "HINT: allowed roots are BASE_DIR/CI_ARTIFACTS and project ephemeral prefixes only." >&2
+      log_error "log path is outside allowed roots path=$LOG_PATH_CANON service=$SERVICE"
+      log_hint "allowed roots are BASE_DIR/CI_ARTIFACTS and project ephemeral prefixes only."
       exit 1
     fi
 
     if [ ! -f "$LOG_PATH" ]; then
-      echo "ERROR: log file not found path=$LOG_PATH_CANON service=$SERVICE" >&2
+      log_error "log file not found path=$LOG_PATH_CANON service=$SERVICE"
       exit 1
     fi
 
@@ -1487,7 +1501,7 @@ let
         --slot) SLOT_FILTER="$2"; shift 2 ;;
         --env) ENV_FILTER="$2"; shift 2 ;;
         *)
-          echo "ERROR: unknown argument: $1" >&2
+          log_error "unknown argument: $1"
           exit 1
           ;;
       esac

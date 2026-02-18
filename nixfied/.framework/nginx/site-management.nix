@@ -5,6 +5,7 @@
   slots,
   templates,
   lifecycle,
+  loggingPrelude,
 }:
 
 let
@@ -17,11 +18,11 @@ let
     validate_domain() {
       local value="$1"
       if ! echo "$value" | ${pkgs.gnugrep}/bin/grep -Eq '^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$'; then
-        echo "ERROR: invalid domain value=$value" >&2
+        log_error "invalid domain value=$value"
         return 1
       fi
       if echo "$value" | ${pkgs.gnugrep}/bin/grep -Eq '(^-|-$|[.]{2,})'; then
-        echo "ERROR: invalid domain value=$value" >&2
+        log_error "invalid domain value=$value"
         return 1
       fi
       return 0
@@ -32,7 +33,7 @@ let
       if echo "$value" | ${pkgs.gnugrep}/bin/grep -Eq '^([A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|([0-9]{1,3}[.]){3}[0-9]{1,3}|localhost)$'; then
         return 0
       fi
-      echo "ERROR: invalid upstream host value=$value" >&2
+      log_error "invalid upstream host value=$value"
       return 1
     }
 
@@ -40,12 +41,12 @@ let
       local value="$1"
       case "$value" in
         *[!0-9]*|"")
-          echo "ERROR: upstream port must be numeric value=$value" >&2
+          log_error "upstream port must be numeric value=$value"
           return 1
           ;;
       esac
       if [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
-        echo "ERROR: upstream port out of range value=$value" >&2
+        log_error "upstream port out of range value=$value"
         return 1
       fi
       return 0
@@ -54,18 +55,18 @@ let
     validate_site_root() {
       local value="$1"
       if [ -z "$value" ]; then
-        echo "ERROR: site root cannot be empty" >&2
+        log_error "site root cannot be empty"
         return 1
       fi
       case "$value" in
         /*) ;;
         *)
-          echo "ERROR: site root must be absolute path value=$value" >&2
+          log_error "site root must be absolute path value=$value"
           return 1
           ;;
       esac
       if echo "$value" | ${pkgs.gnugrep}/bin/grep -Eq '(^|/)[.]{2}(/|$)'; then
-        echo "ERROR: site root cannot contain '..' segments value=$value" >&2
+        log_error "site root cannot contain '..' segments value=$value"
         return 1
       fi
       return 0
@@ -77,6 +78,8 @@ let
   '';
 
   writeProxySite = pkgs.writeShellScript "nginx-site-proxy" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${siteHelpers}
     if [ $# -lt 3 ]; then
@@ -91,7 +94,7 @@ let
     validate_upstream_host "$UPSTREAM_HOST"
     validate_port "$UPSTREAM_PORT"
 
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
     HTTP_PORT_VAR="${portVarHttp}"
     HTTPS_PORT_VAR="${portVarHttps}"
     HTTP_PORT="''${!HTTP_PORT_VAR}"
@@ -114,6 +117,8 @@ let
   '';
 
   writeStaticSite = pkgs.writeShellScript "nginx-site-static" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${siteHelpers}
     if [ $# -lt 2 ]; then
@@ -126,7 +131,7 @@ let
     validate_domain "$DOMAIN"
     validate_site_root "$SITE_ROOT"
 
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
     HTTP_PORT_VAR="${portVarHttp}"
     HTTPS_PORT_VAR="${portVarHttps}"
     HTTP_PORT="''${!HTTP_PORT_VAR}"
@@ -150,6 +155,8 @@ let
   addSite = writeProxySite;
 
   removeSite = pkgs.writeShellScript "nginx-site-remove" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     DOMAIN="''${1:-}"
     if [ -z "$DOMAIN" ]; then
@@ -157,15 +164,17 @@ let
       exit 1
     fi
 
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
     NGINX_DIR="${nginxDirExpr}"
 
     rm -f "$NGINX_DIR/conf/sites-enabled/$DOMAIN.conf"
     rm -f "$NGINX_DIR/conf/sites-available/$DOMAIN.conf"
-    echo "OK: Site $DOMAIN removed"
+    log_ok "Site $DOMAIN removed"
   '';
 
   enableSite = pkgs.writeShellScript "nginx-site-enable" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     DOMAIN="''${1:-}"
     if [ -z "$DOMAIN" ]; then
@@ -173,20 +182,22 @@ let
       exit 1
     fi
 
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
     NGINX_DIR="${nginxDirExpr}"
 
     AVAIL="$NGINX_DIR/conf/sites-available/$DOMAIN.conf"
     if [ ! -f "$AVAIL" ]; then
-      echo "ERROR: Site not found: $DOMAIN" >&2
+      log_error "Site not found: $DOMAIN"
       exit 1
     fi
 
     ln -sf "$AVAIL" "$NGINX_DIR/conf/sites-enabled/$DOMAIN.conf"
-    echo "OK: Site $DOMAIN enabled"
+    log_ok "Site $DOMAIN enabled"
   '';
 
   disableSite = pkgs.writeShellScript "nginx-site-disable" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     DOMAIN="''${1:-}"
     if [ -z "$DOMAIN" ]; then
@@ -194,16 +205,18 @@ let
       exit 1
     fi
 
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
     NGINX_DIR="${nginxDirExpr}"
 
     rm -f "$NGINX_DIR/conf/sites-enabled/$DOMAIN.conf"
-    echo "OK: Site $DOMAIN disabled"
+    log_ok "Site $DOMAIN disabled"
   '';
 
   listSites = pkgs.writeShellScript "nginx-site-list" ''
+    ${loggingPrelude}
+
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
     NGINX_DIR="${nginxDirExpr}"
 
     AVAIL_DIR="$NGINX_DIR/conf/sites-available"

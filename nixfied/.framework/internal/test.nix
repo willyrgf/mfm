@@ -50,6 +50,22 @@ let
       "lib-contracts"
     )
 
+    log_info() {
+      printf 'INFO: %s\n' "$*"
+    }
+
+    log_warn() {
+      printf 'WARN: %s\n' "$*" >&2
+    }
+
+    log_error() {
+      printf 'ERROR: %s\n' "$*" >&2
+    }
+
+    log_ok() {
+      printf 'OK: %s\n' "$*"
+    }
+
     usage() {
       cat <<'EOF'
     Usage: nix run .#framework::test [--profile ci] [--jobs <n>] [--serial] [--shard <name>] [--list-shards] [--summary-json <path>]
@@ -102,7 +118,7 @@ let
           case "$PROFILE" in
             ci) ;;
             full)
-              echo "ERROR: profile 'full' is no longer supported; use --profile ci." >&2
+              log_error "profile 'full' is no longer supported; use --profile ci."
               exit 1
               ;;
             *)
@@ -211,7 +227,7 @@ let
       "finished_at": "$finished_at"
     }
     JSON
-      echo "INFO: wrote summary json path=$SUMMARY_JSON"
+      log_info "wrote summary json path=$SUMMARY_JSON"
     }
 
     cleanup() {
@@ -270,7 +286,7 @@ let
       if [ -f "$file" ]; then
         tail -n "$lines" "$file" >&2 || true
       else
-        echo "WARN: test log missing path=$file" >&2
+        log_warn "test log missing path=$file"
       fi
     }
 
@@ -320,7 +336,7 @@ let
         log_by_pid["$pid"]="$log_file"
         start_by_pid["$pid"]="$started"
 
-        echo "INFO: shard started name=$shard pid=$pid log=$log_file"
+        log_info "shard started name=$shard pid=$pid log=$log_file"
       }
 
       wait_one_shard() {
@@ -349,12 +365,12 @@ let
         unset "shard_by_pid[$done_pid]" "log_by_pid[$done_pid]" "start_by_pid[$done_pid]"
 
         if [ "$rc" -eq 0 ]; then
-          echo "OK: shard=$shard duration=$duration"
+          log_ok "shard=$shard duration=$duration"
           return 0
         fi
 
-        echo "ERROR: shard=$shard exit=$rc log=$log_file" >&2
-        echo "ERROR: shard failure tail shard=$shard" >&2
+        log_error "shard=$shard exit=$rc log=$log_file"
+        log_error "shard failure tail shard=$shard"
         print_log_tail "$log_file" 80
         failed=1
         if [ "$have_fail_rc" -eq 0 ]; then
@@ -433,12 +449,12 @@ let
       local rel
 
       if [ ! -f "$map" ]; then
-        echo "ERROR: coverage map missing path=$map" >&2
+        log_error "coverage map missing path=$map"
         exit 1
       fi
 
       if [ ! -d "$framework_dir" ]; then
-        echo "ERROR: framework directory missing path=$framework_dir" >&2
+        log_error "framework directory missing path=$framework_dir"
         exit 1
       fi
 
@@ -446,17 +462,17 @@ let
         rel="''${file#$ROOT/}"
         count=$((count + 1))
         if ! grep -Fq "\`$rel\`" "$map"; then
-          echo "ERROR: coverage map missing entry file=$rel" >&2
+          log_error "coverage map missing entry file=$rel"
           missing=$((missing + 1))
         fi
       done < <(find "$framework_dir" -type f -name '*.nix' | sort)
 
       if [ "$missing" -ne 0 ]; then
-        echo "ERROR: coverage map incomplete missing=$missing total=$count" >&2
+        log_error "coverage map incomplete missing=$missing total=$count"
         exit 1
       fi
 
-      echo "OK: coverage map complete total=$count"
+      log_ok "coverage map complete total=$count"
     }
 
     require_contains() {
@@ -464,7 +480,7 @@ let
       local needle="$2"
       local check="$3"
       if ! grep -Fq "$needle" "$file"; then
-        echo "ERROR: fixture contract missing check=$check file=$file needle=$needle" >&2
+        log_error "fixture contract missing check=$check file=$file needle=$needle"
         exit 1
       fi
     }
@@ -474,7 +490,7 @@ let
       local needle="$2"
       local check="$3"
       if grep -Fq "$needle" "$file"; then
-        echo "ERROR: fixture contract violation check=$check file=$file needle=$needle" >&2
+        log_error "fixture contract violation check=$check file=$file needle=$needle"
         exit 1
       fi
     }
@@ -611,6 +627,42 @@ let
       exit "$HELPERS_RC"
     fi
 
+    log "helpers logging"
+    HELPERS_LOGGING_DIR="$WORKDIR/helpers-logging"
+    mkdir -p "$HELPERS_LOGGING_DIR"
+    HELPERS_LOGGING_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      project = import ./nixfied/project { inherit pkgs; };
+      slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+      hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+    in
+      lib.mkAppScript {
+        name = "helpers-logging";
+        env = { };
+        useDeps = false;
+        script = import ./tests/framework/fixtures/helpers/logging.nix { };
+      }
+    NIX
+    )
+
+    HELPERS_LOGGING_SCRIPT=$(build_expr "$HELPERS_LOGGING_EXPR")
+    HELPERS_LOGGING_LOG="$WORKDIR/helpers-logging.log"
+    set +e
+    (cd "$HELPERS_LOGGING_DIR" && "$HELPERS_LOGGING_SCRIPT" >"$HELPERS_LOGGING_LOG" 2>&1)
+    HELPERS_LOGGING_RC=$?
+    set -e
+    if [ "$HELPERS_LOGGING_RC" -ne 0 ]; then
+      echo "Helpers logging fixture failed (rc=$HELPERS_LOGGING_RC)." >&2
+      echo "" >&2
+      echo "Fixture output (last 120 lines):" >&2
+      print_log_tail "$HELPERS_LOGGING_LOG" 120
+      exit "$HELPERS_LOGGING_RC"
+    fi
+
     log "env loader export propagation"
     ENV_LOADER_STD_DIR="$WORKDIR/env-loader-standard"
     ENV_LOADER_EPH_DIR="$WORKDIR/env-loader-ephemeral"
@@ -655,7 +707,11 @@ let
       };
       slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
       hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
-      ephemeral = import ./nixfied/.framework/ephemeral.nix { inherit pkgs project; };
+      lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+      ephemeral = import ./nixfied/.framework/ephemeral.nix {
+        inherit pkgs project;
+        loggingPrelude = lib.loggingPrelude;
+      };
     in
       ephemeral.mkEphemeralWrapper {
         name = "env-loader-export-ephemeral";
@@ -1012,6 +1068,7 @@ let
     assert_contains "$CI_RET_SUM_FAIL_LOG" "Summary"
     assert_contains "$CI_RET_SUM_FAIL_LOG" "Time breakdown"
     assert_contains "$CI_RET_SUM_FAIL_LOG" "Exit code: 1"
+    assert_contains "$CI_RET_SUM_FAIL_LOG" "Last 50 lines"
     assert_file_exists "$CI_RET_SUM_FAIL_DIR/.ci-artifacts/fail.cleanup"
 
     log "module hooks fixture"
@@ -1277,7 +1334,7 @@ let
           local actual
           actual="$(tail -n 1 "$PWD/keep-values.log" | sed -n 's/^.*keep_running=//p')"
           [ "$actual" = "$expected" ] || fail "case=$label expected keep_running=$expected got=$actual"
-          echo "OK: fixture keep policy $label keep_running=$actual"
+          log_ok "fixture keep policy $label keep_running=$actual"
         }
 
         : > "$PWD/keep-values.log"
@@ -1391,7 +1448,7 @@ let
             sleep 0.2
             continue
           fi
-          echo "OK: fixture cleanup stopped postgres port=$PGPORT"
+          log_ok "fixture cleanup stopped postgres port=$PGPORT"
           exit 0
         done
         fail "postgres still listening after cleanup port=$PGPORT"
@@ -1488,7 +1545,7 @@ let
         _run_cleanups
         _cleanup_actions=()
         _cleanup_initialized=false
-        echo "OK: fixture_start_service retried READY hook"
+        log_ok "fixture_start_service retried READY hook"
 
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 1' > "$PWD/mock-ready-default-fail.sh"
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'COUNT_FILE="$MOCK_READY_TEST_COUNT_FILE"' 'if [ -z "$COUNT_FILE" ]; then COUNT_FILE="$PWD/mock-ready-test.count"; fi' 'count=0' 'if [ -f "$COUNT_FILE" ]; then count=$(cat "$COUNT_FILE"); fi' 'count=$((count + 1))' 'echo "$count" > "$COUNT_FILE"' 'if [ "$count" -lt 2 ]; then exit 1; fi' 'exit 0' > "$PWD/mock-ready-test.sh"
@@ -1504,7 +1561,7 @@ let
         _run_cleanups
         _cleanup_actions=()
         _cleanup_initialized=false
-        echo "OK: fixture_start_service preferred READY_TEST hook"
+        log_ok "fixture_start_service preferred READY_TEST hook"
 
         export PGPORT="$(pick_port)" || fail "failed to pick port"
         export CI_ARTIFACTS_DIR="$PWD/.artifacts"
@@ -1534,7 +1591,7 @@ let
           fi
         done
         [ "$PORT_DOWN" -eq 1 ] || fail "postgres should stop after explicit SVC_POSTGRES_STOP port=$PGPORT"
-        echo "OK: fixture_start_service keep_running preserved service"
+        log_ok "fixture_start_service keep_running preserved service"
 
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'echo "$$" > "$PWD/mock-wrapper.pid"' 'while true; do' '  sleep 1' 'done' > "$PWD/mock-wrapper-start.sh"
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'pid=$(cat "$PWD/mock-wrapper.pid" 2>/dev/null || true)' '[ -n "$pid" ]' 'kill -0 "$pid" 2>/dev/null' > "$PWD/mock-wrapper-ready.sh"
@@ -1570,7 +1627,7 @@ let
           fi
         done
         [ "$WRAPPER_DOWN" -eq 1 ] || fail "wrappersvc should stop after explicit SVC_WRAPPERSVC_STOP pid=$WRAPPER_PID"
-        echo "OK: fixture_start_service keep_running preserved wrapper process"
+        log_ok "fixture_start_service keep_running preserved wrapper process"
 
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'echo "$$" > "$PWD/mock-timeout.pid"' 'while true; do' '  if [ -n "$MOCK_TIMEOUT_LOGFILE" ]; then rm -f "$MOCK_TIMEOUT_LOGFILE"; fi' '  sleep 0.1' 'done' > "$PWD/mock-timeout-start.sh"
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 1' > "$PWD/mock-timeout-health.sh"
@@ -1600,7 +1657,7 @@ let
         _run_cleanups
         _cleanup_actions=()
         _cleanup_initialized=false
-        echo "OK: fixture_start_service timeout cleanup removed process"
+        log_ok "fixture_start_service timeout cleanup removed process"
       ''';
     }
     NIX
@@ -2279,10 +2336,13 @@ let
       project = pkgs.lib.recursiveUpdate base {
         ephemeral.enable = true;
       };
-      ephemeral = import ./nixfied/.framework/ephemeral.nix { inherit pkgs project; };
       slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
       hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
       lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
+      ephemeral = import ./nixfied/.framework/ephemeral.nix {
+        inherit pkgs project;
+        loggingPrelude = lib.loggingPrelude;
+      };
     in
       lib.mkAppScript {
         name = "ephemeral-lock-test";
@@ -2973,7 +3033,10 @@ let
       slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
       hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
       lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
-      parallel = import ./nixfied/.framework/lib/parallel.nix { inherit pkgs; };
+      parallel = import ./nixfied/.framework/lib/parallel.nix {
+        inherit pkgs;
+        loggingPrelude = lib.loggingPrelude;
+      };
       runnerOk = parallel.mkParallelRunner [
         "echo first"
         "echo second"
@@ -3029,7 +3092,10 @@ let
       slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
       hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
       lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
-      portUtils = import ./nixfied/.framework/lib/port-utils.nix { inherit pkgs; };
+      portUtils = import ./nixfied/.framework/lib/port-utils.nix {
+        inherit pkgs;
+        loggingPrelude = lib.loggingPrelude;
+      };
     in
       lib.mkAppScript {
         name = "lib-port-utils-test";
@@ -3070,7 +3136,10 @@ let
       slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
       hooks = import ./nixfied/.framework/hooks.nix { inherit pkgs project slots; postgres = null; nginx = null; };
       lib = import ./nixfied/.framework/lib { inherit pkgs project hooks; };
-      process = import ./nixfied/.framework/lib/process.nix { inherit pkgs; };
+      process = import ./nixfied/.framework/lib/process.nix {
+        inherit pkgs;
+        loggingPrelude = lib.loggingPrelude;
+      };
       processManager = process.mkProcessManager {
         processName = "fixture-process";
         startupScript = "sleep 30 &\nCHILD_PID=$!\nwait \"$CHILD_PID\"";

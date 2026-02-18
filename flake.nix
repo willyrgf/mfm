@@ -23,7 +23,15 @@
         pkgs = import nixpkgs { inherit system; };
 
         project = import ./nixfied/project { inherit pkgs; };
-        slots = import ./nixfied/.framework/slots.nix { inherit pkgs project; };
+        helpersForPrelude = import ./nixfied/.framework/lib/helpers.nix {
+          inherit pkgs project;
+          hooks = { };
+          summaryParser = "";
+        };
+        loggingPrelude = helpersForPrelude.loggingPrelude;
+        slots = import ./nixfied/.framework/slots.nix {
+          inherit pkgs project loggingPrelude;
+        };
 
         postgres =
           if (project.modules.postgres.enable or false) then
@@ -70,7 +78,9 @@
 
         ephemeral =
           if (project.ephemeral.enable or false) then
-            import ./nixfied/.framework/ephemeral.nix { inherit pkgs project; }
+            import ./nixfied/.framework/ephemeral.nix {
+              inherit pkgs project loggingPrelude;
+            }
           else
             null;
 

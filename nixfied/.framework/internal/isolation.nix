@@ -147,13 +147,13 @@ let
       local port="$3"
 
       if [ -z "$port" ]; then
-        echo "ERROR: missing $var for $name"
+        log_error "missing $var for $name"
         ERRORS=$((ERRORS + 1))
         return 0
       fi
 
       if ! echo "$port" | grep -qE '^[0-9]+$'; then
-        echo "ERROR: invalid $var=$port"
+        log_error "invalid $var=$port"
         ERRORS=$((ERRORS + 1))
         return 0
       fi
@@ -161,10 +161,10 @@ let
       local listen_count
       listen_count=$("$LSOF" -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {c++} END {print c+0}')
       if [ "$listen_count" -eq 0 ]; then
-        echo "WARN: $name not listening on $port"
+        log_warn "$name not listening on $port"
         WARNINGS=$((WARNINGS + 1))
       elif [ "$listen_count" -gt 1 ]; then
-        echo "WARN: $name has $listen_count listeners on $port"
+        log_warn "$name has $listen_count listeners on $port"
         WARNINGS=$((WARNINGS + 1))
       fi
     }
@@ -180,12 +180,12 @@ let
       local var="$1"
       local path="$2"
       if [ -z "$path" ]; then
-        echo "WARN: $var not set"
+        log_warn "$var not set"
         WARNINGS=$((WARNINGS + 1))
         return 0
       fi
       if [ ! -d "$path" ]; then
-        echo "WARN: $var missing: $path"
+        log_warn "$var missing: $path"
         WARNINGS=$((WARNINGS + 1))
       fi
     }
@@ -215,9 +215,9 @@ let
 
       if [ ! -S "$socket" ]; then
         if [ "$require_socket" = "true" ]; then
-          echo "WARN: $name socket missing at $socket while port is listening"
+          log_warn "$name socket missing at $socket while port is listening"
         else
-          echo "WARN: $name socket missing at $socket"
+          log_warn "$name socket missing at $socket"
         fi
         WARNINGS=$((WARNINGS + 1))
       fi
@@ -470,17 +470,17 @@ let
             WARN_COUNT=$(echo "$VALIDATE_OUTPUT" | grep -c "^WARN:" || true)
 
             if [ "$ERROR_COUNT" -gt 0 ]; then
-              echo "ERROR: validation failed for $KEY"
+              log_error "validation failed for $KEY"
               echo "$VALIDATE_OUTPUT" | sed 's/^/  /'
               ERRORS=$((ERRORS + ERROR_COUNT))
             elif [ "$VALIDATE_RC" -ne 0 ]; then
-              echo "ERROR: validation exited $VALIDATE_RC for $KEY"
+              log_error "validation exited $VALIDATE_RC for $KEY"
               echo "$VALIDATE_OUTPUT" | sed 's/^/  /'
               ERRORS=$((ERRORS + 1))
             fi
 
             if [ "$WARN_COUNT" -gt 0 ]; then
-              echo "WARN: $KEY reported $WARN_COUNT warning(s)"
+              log_warn "$KEY reported $WARN_COUNT warning(s)"
               WARNINGS=$((WARNINGS + WARN_COUNT))
             fi
           fi
@@ -518,12 +518,12 @@ let
       output=''${OUTPUTS[$key]}
       exit_code=''${EXIT_CODES[$key]:-999}
       if [ "$exit_code" -eq 999 ]; then
-        echo "ERROR: $key unknown (killed or timed out)"
+        log_error "$key unknown (killed or timed out)"
         CI_UNKNOWN=$((CI_UNKNOWN + 1))
       elif [ "$exit_code" -eq 0 ]; then
-        echo "OK: $key passed"
+        log_ok "$key passed"
       else
-        echo "ERROR: $key failed (exit code: $exit_code)"
+        log_error "$key failed (exit code: $exit_code)"
         CI_FAILURES=$((CI_FAILURES + 1))
         if [ -f "$output" ]; then
           echo "  last 10 lines:"

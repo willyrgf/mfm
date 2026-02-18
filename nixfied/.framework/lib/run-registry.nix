@@ -2,6 +2,7 @@
 {
   pkgs,
   project ? { },
+  loggingPrelude ? "",
 }:
 
 let
@@ -12,6 +13,8 @@ let
   };
 
   runRegistryStart = pkgs.writeShellScript "run-registry-start" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     NAME=""
@@ -127,7 +130,7 @@ let
       if [ -n "$TIMEOUT" ]; then
         (
           sleep "$TIMEOUT"
-          echo "ERROR: Timeout after ''${TIMEOUT}s, killing run $RUN_ID" >&2
+          log_error "Timeout after ''${TIMEOUT}s, killing run $RUN_ID"
           kill -TERM $$ 2>/dev/null || true
           sleep 5
           kill -KILL $$ 2>/dev/null || true
@@ -165,10 +168,10 @@ let
       ) &
       disown
 
-      echo "INFO: Run $RUN_ID started in background"
-      echo "INFO: Dir: $RUN_DIR"
-      echo "INFO: Log: $RUN_DIR/output.log"
-      echo "INFO: Meta: $RUN_DIR/meta.json"
+      log_info "Run $RUN_ID started in background"
+      log_info "Dir: $RUN_DIR"
+      log_info "Log: $RUN_DIR/output.log"
+      log_info "Meta: $RUN_DIR/meta.json"
       exit 0
     else
       # Foreground mode: stream output

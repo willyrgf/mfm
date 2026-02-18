@@ -2,6 +2,7 @@
 {
   pkgs,
   project ? { },
+  loggingPrelude ? "",
 }:
 
 let
@@ -16,6 +17,8 @@ let
   signalPattern = pkgs.lib.concatStringsSep "|" allSignals;
 
   summaryParser = pkgs.writeShellScript "summary-parser" ''
+    ${loggingPrelude}
+
     LOGFILE="$1"
     DURATION="$2"
     EXIT_CODE="$3"
@@ -107,11 +110,11 @@ let
       && _is_nonneg_int "$TIMING_TEARDOWN" \
       && _is_nonneg_int "$TIMING_ACCOUNTED" \
       && _is_nonneg_int "$TIMING_UNTRACKED"; then
-      echo "INFO: Time breakdown setup=''${TIMING_SETUP}s steps=''${TIMING_STEPS}s teardown=''${TIMING_TEARDOWN}s accounted=''${TIMING_ACCOUNTED}s untracked=''${TIMING_UNTRACKED}s"
+      log_info "Time breakdown setup=''${TIMING_SETUP}s steps=''${TIMING_STEPS}s teardown=''${TIMING_TEARDOWN}s accounted=''${TIMING_ACCOUNTED}s untracked=''${TIMING_UNTRACKED}s"
     fi
 
     if [ "$EXIT_CODE" -ne 0 ] 2>/dev/null; then
-      echo "ERROR: Exit code: $EXIT_CODE"
+      log_error "Exit code: $EXIT_CODE" 2>&1
 
       # Check for known failure signals
       ${pkgs.lib.optionalString (allSignals != [ ]) ''
@@ -119,14 +122,19 @@ let
           SIGNALS=$(grep -oE '${signalPattern}' "$LOGFILE" 2>/dev/null | sort -u || true)
           if [ -n "$SIGNALS" ]; then
             echo ""
-            echo "WARN: Detected failure signals:"
+            log_warn "Detected failure signals:" 2>&1
             echo "$SIGNALS" | while read -r sig; do echo "   - $sig"; done
           fi
         fi
       ''}
 
+      if [ -n "$LOGFILE" ] && [ -f "$LOGFILE" ]; then
+        echo ""
+        echo "Last 50 lines:"
+        tail -50 "$LOGFILE" || true
+      fi
     else
-      echo "OK: Exit code: 0"
+      log_ok "Exit code: 0"
     fi
 
     # Show artifact pointers

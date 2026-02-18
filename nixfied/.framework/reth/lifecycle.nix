@@ -4,6 +4,7 @@
   project,
   slots,
   config,
+  loggingPrelude,
 }:
 
 let
@@ -63,7 +64,7 @@ let
     fi
 
     if [ -z "$RETH_HTTP_PORT" ] || [ -z "$RETH_WS_PORT" ] || [ -z "$RETH_AUTH_PORT" ]; then
-      echo "ERROR: reth port variables are not set (http/ws/auth)" >&2
+      log_error "reth port variables are not set (http/ws/auth)"
       exit 1
     fi
 
@@ -79,6 +80,8 @@ let
   '';
 
   init = pkgs.writeShellScript "reth-init" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
@@ -92,10 +95,12 @@ let
     fi
     chmod 600 "$RETH_JWT_FILE" 2>/dev/null || true
 
-    echo "OK: reth initialized dir=$RETH_DIR slot=$SLOT env=$ENV"
+    log_ok "reth initialized dir=$RETH_DIR slot=$SLOT env=$ENV"
   '';
 
   start = pkgs.writeShellScript "reth-start" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
@@ -105,14 +110,14 @@ let
       PID=$(cat "$RETH_PID_FILE" 2>/dev/null || true)
       if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
         emit_service_event service_ready ready --pid "$PID" --log-path "$RETH_LOG_FILE"
-        echo "OK: reth already running pid=$PID http_port=$RETH_HTTP_PORT"
+        log_ok "reth already running pid=$PID http_port=$RETH_HTTP_PORT"
         exit 0
       fi
       rm -f "$RETH_PID_FILE"
     fi
 
     if [ ! -x "${reth}/bin/reth" ]; then
-      echo "ERROR: reth binary not executable at ${reth}/bin/reth" >&2
+      log_error "reth binary not executable at ${reth}/bin/reth"
       exit 1
     fi
 
@@ -177,19 +182,19 @@ let
         --log-path "$RETH_LOG_FILE" \
         --wait-reason "failed_readiness" \
         --last-error "reth failed health check during startup"
-      echo "ERROR: reth failed to become healthy. log=$RETH_LOG_FILE" >&2
+      log_error "reth failed to become healthy. log=$RETH_LOG_FILE"
       if [ -f "$RETH_LOG_FILE" ]; then
-        echo "INFO: reth log tail path=$RETH_LOG_FILE lines=50" >&2
+        log_info "reth log tail path=$RETH_LOG_FILE lines=50"
         tail -50 "$RETH_LOG_FILE" >&2 || true
       else
-        echo "WARN: reth log file missing path=$RETH_LOG_FILE" >&2
+        log_warn "reth log file missing path=$RETH_LOG_FILE"
       fi
       exit 1
     fi
 
     emit_service_event service_ready ready --pid "$CHILD_PID" --log-path "$RETH_LOG_FILE"
 
-    echo "INFO: reth started pid=$CHILD_PID http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT"
+    log_info "reth started pid=$CHILD_PID http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT"
     set +e
     wait "$CHILD_PID"
     RC=$?
@@ -208,12 +213,14 @@ let
   '';
 
   stop = pkgs.writeShellScript "reth-stop" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
     if [ ! -f "$RETH_PID_FILE" ]; then
       emit_service_event service_stopped stopped --log-path "$RETH_LOG_FILE"
-      echo "OK: reth not running"
+      log_ok "reth not running"
       exit 0
     fi
 
@@ -221,7 +228,7 @@ let
     if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
       rm -f "$RETH_PID_FILE"
       emit_service_event service_stopped stopped --pid "$PID" --log-path "$RETH_LOG_FILE"
-      echo "OK: reth pid file cleaned"
+      log_ok "reth pid file cleaned"
       exit 0
     fi
 
@@ -230,7 +237,7 @@ let
       if ! kill -0 "$PID" 2>/dev/null; then
         rm -f "$RETH_PID_FILE"
         emit_service_event service_stopped stopped --pid "$PID" --log-path "$RETH_LOG_FILE"
-        echo "OK: reth stopped pid=$PID"
+        log_ok "reth stopped pid=$PID"
         exit 0
       fi
       sleep 0.25
@@ -239,10 +246,12 @@ let
     kill -KILL "$PID" 2>/dev/null || true
     rm -f "$RETH_PID_FILE"
     emit_service_event service_stopped stopped --pid "$PID" --log-path "$RETH_LOG_FILE"
-    echo "WARN: reth force-killed pid=$PID"
+    log_warn "reth force-killed pid=$PID"
   '';
 
   restart = pkgs.writeShellScript "reth-restart" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     ${stop}
@@ -250,6 +259,8 @@ let
   '';
 
   status = pkgs.writeShellScript "reth-status" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
@@ -277,47 +288,55 @@ let
   '';
 
   health = pkgs.writeShellScript "reth-health" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
     if ${healthCheck}
     then
-      echo "OK: reth healthy http_port=$RETH_HTTP_PORT"
+      log_ok "reth healthy http_port=$RETH_HTTP_PORT"
       exit 0
     fi
 
-    echo "ERROR: reth unhealthy http_port=$RETH_HTTP_PORT" >&2
+    log_error "reth unhealthy http_port=$RETH_HTTP_PORT"
     exit 1
   '';
 
   ready = pkgs.writeShellScript "reth-ready" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
     if ${health} >/dev/null 2>&1; then
-      echo "OK: reth ready http_port=$RETH_HTTP_PORT"
+      log_ok "reth ready http_port=$RETH_HTTP_PORT"
       exit 0
     fi
 
-    echo "ERROR: reth not ready http_port=$RETH_HTTP_PORT" >&2
+    log_error "reth not ready http_port=$RETH_HTTP_PORT"
     exit 1
   '';
 
   checkConfig = pkgs.writeShellScript "reth-check-config" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
     if [ ! -x "${reth}/bin/reth" ]; then
-      echo "ERROR: missing reth binary at ${reth}/bin/reth" >&2
+      log_error "missing reth binary at ${reth}/bin/reth"
       exit 1
     fi
 
     mkdir -p "$RETH_DIR/config"
     ${reth}/bin/reth --version >/dev/null 2>&1
-    echo "OK: reth configuration valid dir=$RETH_DIR network=$RETH_NETWORK"
+    log_ok "reth configuration valid dir=$RETH_DIR network=$RETH_NETWORK"
   '';
 
   fullStart = pkgs.writeShellScript "reth-full-start" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     ${init}
@@ -326,6 +345,8 @@ let
   '';
 
   fullStartTest = pkgs.writeShellScript "reth-full-start-test" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     ${init}

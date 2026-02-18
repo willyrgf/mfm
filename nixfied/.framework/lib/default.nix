@@ -8,7 +8,18 @@
 
 let
   shellContract = import ./shell-contract.nix { inherit pkgs; };
-  summary = import ./summary.nix { inherit pkgs project; };
+  baseLoggingPrelude =
+    (
+      import ./helpers.nix {
+        inherit pkgs project;
+        hooks = { };
+        summaryParser = "";
+      }
+    ).loggingPrelude;
+  summary = import ./summary.nix {
+    inherit pkgs project;
+    loggingPrelude = baseLoggingPrelude;
+  };
   helpers = import ./helpers.nix {
     inherit pkgs project hooks;
     inherit (summary) summaryParser;
@@ -35,25 +46,46 @@ let
   serviceApi = import ./service-api.nix {
     inherit pkgs appApi;
   };
-  discovery = import ./discovery.nix { inherit pkgs project; };
-  process = import ./process.nix { inherit pkgs; };
+  discovery = import ./discovery.nix {
+    inherit pkgs project;
+    inherit (helpers) loggingPrelude;
+  };
+  process = import ./process.nix {
+    inherit pkgs;
+    inherit (helpers) loggingPrelude;
+  };
   id = import ./id.nix {
     inherit pkgs project;
+    inherit (helpers) loggingPrelude;
   };
-  processRegistry = import ./process-registry.nix { inherit pkgs project; };
+  processRegistry = import ./process-registry.nix {
+    inherit pkgs project;
+    inherit (helpers) loggingPrelude;
+  };
   slotEnvRuntime = import ./slot-env-runtime.nix { inherit pkgs; };
   servicePolicy = import ./service-policy.nix { inherit pkgs; };
-  portUtils = import ./port-utils.nix { inherit pkgs; };
-  parallel = import ./parallel.nix { inherit pkgs; };
-  runRegistry = import ./run-registry.nix { inherit pkgs project; };
+  portUtils = import ./port-utils.nix {
+    inherit pkgs;
+    inherit (helpers) loggingPrelude;
+  };
+  parallel = import ./parallel.nix {
+    inherit pkgs;
+    inherit (helpers) loggingPrelude;
+  };
+  runRegistry = import ./run-registry.nix {
+    inherit pkgs project;
+    inherit (helpers) loggingPrelude;
+  };
   executionCore = import ./execution-core.nix {
     inherit pkgs project;
+    inherit (helpers) loggingPrelude;
   };
 in
 {
   inherit (helpers)
     loadEnv
     loadEnvFile
+    loggingPrelude
     helpersScript
     hookExports
     ;

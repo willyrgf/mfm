@@ -262,7 +262,7 @@ let
                         case "$CI_ARTIFACTS_BASE" in
                           /*) ;;
                           *)
-                            echo "ERROR: CI_ARTIFACTS_BASE must resolve to an absolute path (got '$CI_ARTIFACTS_BASE')" >&2
+                            log_error "CI_ARTIFACTS_BASE must resolve to an absolute path (got '$CI_ARTIFACTS_BASE')"
                             exit 1
                             ;;
                         esac
@@ -296,7 +296,7 @@ let
                           fi
 
                           if [ "$keep" -eq 1 ]; then
-                            echo "INFO: CI artifacts kept at: $CI_ARTIFACTS_DIR"
+                            log_info "CI artifacts kept at: $CI_ARTIFACTS_DIR"
                             return 0
                           fi
 
@@ -447,7 +447,7 @@ let
                           setup_duration=$((setup_end_time - setup_start_time))
 
                           if [ "$setup_rc" -ne 0 ]; then
-                            echo "ERROR: CI setup failed rc=$setup_rc" >&2
+                            log_error "CI setup failed rc=$setup_rc"
                             exit_code=$setup_rc
                           fi
 
@@ -490,7 +490,7 @@ let
                           teardown_end_time=$(date +%s)
                           teardown_duration=$((teardown_end_time - teardown_start_time))
                           if [ "$teardown_rc" -ne 0 ]; then
-                            echo "ERROR: CI teardown failed rc=$teardown_rc" >&2
+                            log_error "CI teardown failed rc=$teardown_rc"
                             if [ "$exit_code" -eq 0 ]; then
                               exit_code=$teardown_rc
                             fi
@@ -591,22 +591,6 @@ let
         name = "CI_ARTIFACTS_BASE";
         description = "Override artifacts root; must be absolute path.";
       }
-      {
-        name = "LOG_LEVEL";
-        description = "Canonical process-wide baseline log filter.";
-      }
-      {
-        name = "CI_LOG_LEVEL";
-        description = "Canonical CI diagnostics verbosity level.";
-      }
-      {
-        name = "CI_VERBOSE";
-        description = "Compatibility toggle that maps to CI_LOG_LEVEL=debug.";
-      }
-      {
-        name = "NIXFIED_LOG_LEVEL";
-        description = "Compatibility alias for CI_LOG_LEVEL.";
-      }
     ];
     contractEnv = [
       (lib.appApi.env.string { name = "CI_ARTIFACTS_DIR"; })
@@ -614,13 +598,6 @@ let
         name = "CI_ARTIFACTS_BASE";
         type = "pathAbs";
       })
-      (lib.appApi.env.string { name = "LOG_LEVEL"; })
-      (lib.appApi.env.string { name = "CI_LOG_LEVEL"; })
-      (lib.appApi.env.typed {
-        name = "CI_VERBOSE";
-        type = "bool";
-      })
-      (lib.appApi.env.string { name = "NIXFIED_LOG_LEVEL"; })
     ];
     failureCodes = lib.appApi.failureProfiles.script;
   };

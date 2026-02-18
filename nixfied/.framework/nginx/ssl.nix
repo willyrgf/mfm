@@ -4,6 +4,7 @@
   project,
   slots,
   lifecycle,
+  loggingPrelude,
 }:
 
 let
@@ -12,6 +13,8 @@ let
   nginxDirExpr = slots.getServiceDir dataDirName;
 
   obtainCert = pkgs.writeShellScript "nginx-cert-obtain" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     DOMAIN="''${1:-}"
@@ -23,7 +26,7 @@ let
       exit 1
     fi
 
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
     NGINX_DIR="${nginxDirExpr}"
     WEBROOT="$NGINX_DIR/html"
 
@@ -32,7 +35,7 @@ let
       STAGING_FLAG="--staging"
     fi
 
-    echo "INFO: Obtaining Let's Encrypt certificate for $DOMAIN"
+    log_info "Obtaining Let's Encrypt certificate for $DOMAIN"
 
     ${pkgs.certbot}/bin/certbot certonly \
       --webroot \
@@ -45,26 +48,28 @@ let
       -d "$DOMAIN" \
       $STAGING_FLAG
 
-    echo "OK: Certificate obtained for $DOMAIN"
+    log_ok "Certificate obtained for $DOMAIN"
   '';
 
   renewCerts = pkgs.writeShellScript "nginx-cert-renew" ''
+    ${loggingPrelude}
+
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
     NGINX_DIR="${nginxDirExpr}"
 
-    echo "INFO: Renewing certificates"
+    log_info "Renewing certificates"
 
     ${pkgs.certbot}/bin/certbot renew \
       --deploy-hook "${lifecycle.reload}" \
       2>&1
 
-    echo "OK: Certificate renewal complete"
+    log_ok "Certificate renewal complete"
   '';
 
   certStatus = pkgs.writeShellScript "nginx-cert-status" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
     NGINX_DIR="${nginxDirExpr}"
 
     SSL_DIR="$NGINX_DIR/ssl/live"

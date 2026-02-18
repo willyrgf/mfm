@@ -415,7 +415,11 @@ let
     NIXFIED_CONTRACT_NONE="__NIXFIED_NONE__"
 
     _nixfied_contract_err() {
-      echo "ERROR: $*" >&2
+      if command -v log_error >/dev/null 2>&1; then
+        log_error "$*"
+      else
+        printf '%s\n' "ERROR: $*" >&2
+      fi
     }
 
     _nixfied_contract_is_int() {

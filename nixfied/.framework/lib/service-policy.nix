@@ -71,7 +71,7 @@
           ;;
       esac
 
-      echo "ERROR: SERVICE_REUSE_POLICY must be one of never|same-root|same-slot|cross-run (got '$reuse')" >&2
+      log_error "SERVICE_REUSE_POLICY must be one of never|same-root|same-slot|cross-run (got '$reuse')"
       return 1
     }
 
@@ -90,7 +90,7 @@
           ;;
       esac
 
-      echo "ERROR: SERVICE_OWNER_SCOPE must be ephemeral|persistent (got '$owner')" >&2
+      log_error "SERVICE_OWNER_SCOPE must be ephemeral|persistent (got '$owner')"
       return 1
     }
 
@@ -109,7 +109,7 @@
           ;;
       esac
 
-      echo "ERROR: SERVICE_DISCOVERY_SCOPE must be local|global (got '$discovery')" >&2
+      log_error "SERVICE_DISCOVERY_SCOPE must be local|global (got '$discovery')"
       return 1
     }
 
@@ -125,22 +125,22 @@
       nixfied_policy_validate_discovery_scope "$discovery" "$allow_empty" || return 1
 
       if [ "$reuse" = "cross-run" ] && { [ "$owner" != "persistent" ] || [ "$discovery" != "global" ]; }; then
-        echo "ERROR: cross-run reuse requires SERVICE_OWNER_SCOPE=persistent and SERVICE_DISCOVERY_SCOPE=global" >&2
+        log_error "cross-run reuse requires SERVICE_OWNER_SCOPE=persistent and SERVICE_DISCOVERY_SCOPE=global"
         return 1
       fi
 
       if [ "$reuse" = "same-root" ] && { [ "$owner" != "ephemeral" ] || [ "$discovery" != "local" ]; }; then
-        echo "ERROR: same-root reuse requires SERVICE_OWNER_SCOPE=ephemeral and SERVICE_DISCOVERY_SCOPE=local" >&2
+        log_error "same-root reuse requires SERVICE_OWNER_SCOPE=ephemeral and SERVICE_DISCOVERY_SCOPE=local"
         return 1
       fi
 
       if [ "$enforce_owner_discovery_alignment" = "1" ] && [ -n "$owner" ] && [ -n "$discovery" ]; then
         if [ "$owner" = "persistent" ] && [ "$discovery" != "global" ]; then
-          echo "ERROR: persistent owner scope requires SERVICE_DISCOVERY_SCOPE=global" >&2
+          log_error "persistent owner scope requires SERVICE_DISCOVERY_SCOPE=global"
           return 1
         fi
         if [ "$owner" = "ephemeral" ] && [ "$discovery" != "local" ]; then
-          echo "ERROR: ephemeral owner scope requires SERVICE_DISCOVERY_SCOPE=local" >&2
+          log_error "ephemeral owner scope requires SERVICE_DISCOVERY_SCOPE=local"
           return 1
         fi
       fi

@@ -9,6 +9,7 @@
 let
   envLoader = import ./env-loader.nix {
     inherit pkgs project;
+    loggingPrelude = loggingPrelude;
   };
   servicePolicy = import ./service-policy.nix { inherit pkgs; };
   hookEnv = hooks.env or { };
@@ -20,15 +21,153 @@ let
 
   loadEnv = envLoader.loadEnv;
   loadEnvFile = envLoader.loadEnvFile;
+  loggingPrelude = ''
+    _nixfied_level_num() {
+      case "''${1:-info}" in
+        error) printf '%s\n' "0" ;;
+        warn) printf '%s\n' "1" ;;
+        info) printf '%s\n' "2" ;;
+        debug) printf '%s\n' "3" ;;
+        trace) printf '%s\n' "4" ;;
+        *) printf '%s\n' "2" ;;
+      esac
+    }
+
+    _nixfied_refresh_log_level() {
+      local current_level="info"
+      if [ -n "''${LOG_LEVEL:-}" ]; then
+        current_level="$LOG_LEVEL"
+      elif [ -n "''${NIXFIED_LOG_LEVEL:-}" ]; then
+        current_level="$NIXFIED_LOG_LEVEL"
+      fi
+      if [ "''${_NIXFIED_LOG_LEVEL_RAW:-}" != "$current_level" ]; then
+        _NIXFIED_LOG_LEVEL_RAW="$current_level"
+        _NIXFIED_LOG_LEVEL_NUM="$(_nixfied_level_num "$current_level")"
+      fi
+    }
+
+    _nixfied_emit_to_terminal() {
+      local to_stderr="$1"
+      local message="$2"
+      if [ "$to_stderr" = "1" ]; then
+        printf '%s\n' "$message" >&2
+      else
+        printf '%s\n' "$message"
+      fi
+    }
+
+    _nixfied_emit() {
+      local level_num="$1"
+      local message="$2"
+      local to_stderr="$3"
+      local output_mode="stdout"
+      local log_file="''${NIXFIED_LOG_FILE:-}"
+
+      if [ -n "''${OUTPUT_MODE:-}" ]; then
+        output_mode="$OUTPUT_MODE"
+      elif [ -n "''${NIXFIED_OUTPUT_MODE:-}" ]; then
+        output_mode="$NIXFIED_OUTPUT_MODE"
+      fi
+
+      _nixfied_refresh_log_level
+      if [ "$level_num" -gt "''${_NIXFIED_LOG_LEVEL_NUM:-2}" ]; then
+        return 0
+      fi
+
+      case "$output_mode" in
+        stdout|"")
+          _nixfied_emit_to_terminal "$to_stderr" "$message"
+          ;;
+        logs)
+          if [ -n "$log_file" ]; then
+            printf '%s\n' "$message" >>"$log_file"
+          fi
+          if [ "$to_stderr" = "1" ] || [ -z "$log_file" ]; then
+            _nixfied_emit_to_terminal "$to_stderr" "$message"
+          fi
+          ;;
+        both)
+          _nixfied_emit_to_terminal "$to_stderr" "$message"
+          if [ -n "$log_file" ]; then
+            printf '%s\n' "$message" >>"$log_file"
+          fi
+          ;;
+        *)
+          _nixfied_emit_to_terminal "$to_stderr" "$message"
+          ;;
+      esac
+    }
+
+    log_error() {
+      _nixfied_emit 0 "ERROR: $*" "1"
+    }
+
+    log_detail() {
+      _nixfied_emit 0 "DETAIL: $*" "1"
+    }
+
+    log_hint() {
+      _nixfied_emit 0 "HINT: $*" "1"
+    }
+
+    log_warn() {
+      _nixfied_emit 1 "WARN: $*" "1"
+    }
+
+    log_info() {
+      _nixfied_emit 2 "INFO: $*" "0"
+    }
+
+    log_ok() {
+      _nixfied_emit 2 "OK: $*" "0"
+    }
+
+    log_skip() {
+      _nixfied_emit 2 "SKIP: $*" "0"
+    }
+
+    log_stop() {
+      _nixfied_emit 2 "STOP: $*" "0"
+    }
+
+    log_timing() {
+      _nixfied_emit 2 "TIMING: $*" "0"
+    }
+
+    log_run() {
+      _nixfied_emit 2 "RUN: $*" "0"
+    }
+
+    log_output() {
+      _nixfied_emit 2 "OUTPUT: $*" "0"
+    }
+
+    log_step() {
+      local step="$1"
+      local total="$2"
+      shift 2 || true
+      _nixfied_emit 2 "Step $step/$total: $*" "0"
+    }
+
+    log_debug() {
+      _nixfied_emit 3 "DEBUG: $*" "1"
+    }
+
+    _NIXFIED_LOG_LEVEL_RAW=""
+    _NIXFIED_LOG_LEVEL_NUM="2"
+    _nixfied_refresh_log_level
+  '';
 
   helpersScript = pkgs.writeShellScript "framework-helpers" ''
+    ${loggingPrelude}
+
     # require_env VAR [message]
     # - fail if VAR is unset/empty; prints message to stderr.
     require_env() {
       local var="$1"
       local msg="''${2:-Missing required env var: $var}"
       if [ -z "''${!var:-}" ]; then
-        echo "ERROR: $msg" >&2
+        log_error "$msg"
         return 1
       fi
       return 0
@@ -40,7 +179,7 @@ let
       local var="$1"
       local reason="''${2:-Missing required env var: $var}"
       if [ -z "''${!var:-}" ]; then
-        echo "SKIP: $reason"
+        log_skip "$reason"
         return 1
       fi
       return 0
@@ -61,7 +200,7 @@ let
       local name="$1"
       local value="$2"
       if ! is_uint "$value" || [ "$value" -le 0 ]; then
-        echo "ERROR: $name must be a positive integer (got '$value')" >&2
+        log_error "$name must be a positive integer (got '$value')"
         return 1
       fi
       return 0
@@ -75,14 +214,14 @@ let
 
       case "$value" in
         *[!0-9.]*|""|*.*.*|.*|*.)
-          echo "ERROR: $name must be a positive number (got '$value')" >&2
+          log_error "$name must be a positive number (got '$value')"
           return 1
           ;;
       esac
 
       if [ "''${value#*.}" = "$value" ]; then
         if ! is_uint "$value" || [ "$value" -le 0 ]; then
-          echo "ERROR: $name must be a positive number (got '$value')" >&2
+          log_error "$name must be a positive number (got '$value')"
           return 1
         fi
         return 0
@@ -91,11 +230,11 @@ let
       whole="''${value%%.*}"
       frac="''${value#*.}"
       if ! is_uint "$whole" || ! is_uint "$frac"; then
-        echo "ERROR: $name must be a positive number (got '$value')" >&2
+        log_error "$name must be a positive number (got '$value')"
         return 1
       fi
       if [ "$whole" -eq 0 ] && [ -z "''${frac//0/}" ]; then
-        echo "ERROR: $name must be a positive number (got '$value')" >&2
+        log_error "$name must be a positive number (got '$value')"
         return 1
       fi
       return 0
@@ -105,7 +244,7 @@ let
       local name="$1"
       local value="$2"
       if ! is_uint "$value" || [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
-        echo "ERROR: $name must be a valid TCP port (1-65535, got '$value')" >&2
+        log_error "$name must be a valid TCP port (1-65535, got '$value')"
         return 1
       fi
       return 0
@@ -206,7 +345,7 @@ let
       fi
       case "$name" in
         */*|*\\*|.|..)
-          echo "ERROR: artifact name must be a single file name (got '$name')" >&2
+          log_error "artifact name must be a single file name (got '$name')"
           return 1
           ;;
       esac
@@ -226,10 +365,10 @@ let
         return 1
       fi
       if [ -f "$path" ]; then
-        echo "INFO: log tail path=$path lines=$lines" >&2
+        log_info "log tail path=$path lines=$lines"
         tail -n "$lines" "$path" >&2 || true
       else
-        echo "WARN: fixture log file missing path=$path" >&2
+        log_warn "fixture log file missing path=$path"
       fi
     }
 
@@ -244,7 +383,7 @@ let
       fi
       local cmd="''${!var:-}"
       if [ -z "$cmd" ]; then
-        echo "ERROR: Hook not available: $var" >&2
+        log_error "Hook not available: $var"
         return 1
       fi
       "$cmd" "$@"
@@ -268,7 +407,7 @@ let
       local interval="''${3:-1}"
 
       if ! has_hook "$var"; then
-        echo "ERROR: Hook not available: $var" >&2
+        log_error "Hook not available: $var"
         return 1
       fi
 
@@ -323,7 +462,7 @@ let
           keep_running="0"
           ;;
         *)
-          echo "ERROR: fixture_start_service keep_running must be 0/1/true/false (got '$keep_running_raw')" >&2
+          log_error "fixture_start_service keep_running must be 0/1/true/false (got '$keep_running_raw')"
           return 1
           ;;
       esac
@@ -363,7 +502,7 @@ let
       done
 
       if [ -z "$start_hook" ]; then
-        echo "ERROR: fixture_start_service could not resolve start hook service=$service profile=$profile" >&2
+        log_error "fixture_start_service could not resolve start hook service=$service profile=$profile"
         return 1
       fi
 
@@ -390,23 +529,23 @@ let
       local pid=""
       if [ -n "$logfile" ]; then
         if ! NIXFIED_START_SERVICE_MANAGED_CLEANUP=1 start_service_into pid "$service" --log "$logfile" -- "$start_cmd"; then
-          echo "ERROR: fixture service start failed service=$service hook=$start_hook" >&2
+          log_error "fixture service start failed service=$service hook=$start_hook"
           return 1
         fi
       else
         if ! NIXFIED_START_SERVICE_MANAGED_CLEANUP=1 start_service_into pid "$service" -- "$start_cmd"; then
-          echo "ERROR: fixture service start failed service=$service hook=$start_hook" >&2
+          log_error "fixture service start failed service=$service hook=$start_hook"
           return 1
         fi
       fi
       if [ -z "$pid" ]; then
-        echo "ERROR: fixture service start returned empty pid service=$service hook=$start_hook" >&2
+        log_error "fixture service start returned empty pid service=$service hook=$start_hook"
         return 1
       fi
 
       # Clean wrapper process and module-native process state unless persistence is requested.
       if [ "$keep_running" = "1" ]; then
-        echo "INFO: fixture service keep_running enabled service=$service pid=$pid" >&2
+        log_info "fixture service keep_running enabled service=$service pid=$pid"
       else
         with_cleanup stop_service "$pid" "$service"
         if has_hook "$stop_hook"; then
@@ -441,7 +580,7 @@ let
             fi
 
             if [ "$status_ok" -ne 1 ]; then
-              echo "ERROR: fixture service start exited early service=$service pid=$pid hook=$start_hook" >&2
+              log_error "fixture service start exited early service=$service pid=$pid hook=$start_hook"
               if [ -n "$logfile" ]; then
                 print_log_tail "$logfile" 200
               fi
@@ -454,7 +593,7 @@ let
           fi
 
           if [ $(( $(date +%s) - start_ts )) -ge "$timeout" ]; then
-            echo "ERROR: fixture readiness check failed service=$service hook=$wait_hook timeout=''${timeout}s" >&2
+            log_error "fixture readiness check failed service=$service hook=$wait_hook timeout=''${timeout}s"
             if [ -n "$logfile" ]; then
               print_log_tail "$logfile" 200
             fi
@@ -469,7 +608,7 @@ let
         done
       fi
 
-      echo "OK: fixture service ready service=$service profile=$profile"
+      log_ok "fixture service ready service=$service profile=$profile"
       return 0
     }
 
@@ -486,7 +625,7 @@ let
       fi
       local script
       script="$(mktemp "''${TMPDIR:-/tmp}/nixfied-cleanup.XXXXXX")" || {
-        echo "ERROR: failed to create cleanup script file" >&2
+        log_error "failed to create cleanup script file"
         return 1
       }
       chmod 700 "$script" 2>/dev/null || true
@@ -556,7 +695,7 @@ let
       fi
 
       if kill -0 "$pid" 2>/dev/null; then
-        echo "STOP: $name (PID $pid)"
+        log_stop "$name (PID $pid)"
         kill -TERM "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
       fi
@@ -673,7 +812,7 @@ let
         auto)
           ;;
         *)
-          echo "ERROR: invalid start_service cleanup mode '$explicit_mode' (expected auto|cleanup|keep-running)" >&2
+          log_error "invalid start_service cleanup mode '$explicit_mode' (expected auto|cleanup|keep-running)"
           return 1
           ;;
       esac
@@ -709,7 +848,7 @@ let
           fi
           ;;
         *)
-          echo "ERROR: unresolved start_service reuse policy '$reuse_policy'" >&2
+          log_error "unresolved start_service reuse policy '$reuse_policy'"
           return 1
           ;;
       esac
@@ -764,7 +903,7 @@ let
             ;;
           --keep-running)
             if [ "$cleanup_mode" = "cleanup" ]; then
-              echo "ERROR: start_service flags --keep-running and --cleanup are mutually exclusive" >&2
+              log_error "start_service flags --keep-running and --cleanup are mutually exclusive"
               return 1
             fi
             cleanup_mode="keep-running"
@@ -772,7 +911,7 @@ let
             ;;
           --cleanup)
             if [ "$cleanup_mode" = "keep-running" ]; then
-              echo "ERROR: start_service flags --keep-running and --cleanup are mutually exclusive" >&2
+              log_error "start_service flags --keep-running and --cleanup are mutually exclusive"
               return 1
             fi
             cleanup_mode="cleanup"
@@ -799,7 +938,7 @@ let
       fi
       register_cleanup="$(start_service_should_register_cleanup "$cleanup_mode")" || return 1
       if [ "$register_cleanup" != "0" ] && [ "$register_cleanup" != "1" ]; then
-        echo "ERROR: start_service cleanup decision must be 0 or 1 (got '$register_cleanup')" >&2
+        log_error "start_service cleanup decision must be 0 or 1 (got '$register_cleanup')"
         return 1
       fi
 
@@ -842,7 +981,7 @@ let
 
       if [ -n "$wait_http_url" ]; then
         if ! wait_http "$wait_http_url" "$timeout" "$interval"; then
-          echo "ERROR: $name failed readiness check (http)" >&2
+          log_error "$name failed readiness check (http)"
           stop_service "$pid" "$name" >/dev/null 2>&1 || true
           return 1
         fi
@@ -850,7 +989,7 @@ let
 
       if [ -n "$wait_port_num" ]; then
         if ! wait_port "$wait_port_num" "$timeout" "$interval"; then
-          echo "ERROR: $name failed readiness check (port)" >&2
+          log_error "$name failed readiness check (port)"
           stop_service "$pid" "$name" >/dev/null 2>&1 || true
           return 1
         fi
@@ -963,6 +1102,7 @@ in
   inherit
     loadEnv
     loadEnvFile
+    loggingPrelude
     helpersScript
     hookExports
     ;

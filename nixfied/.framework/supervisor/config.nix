@@ -7,6 +7,18 @@
 
 let
   services = project.supervisor.services or { };
+  projectLogLevel = toString ((project.logging or { }).level or "info");
+  supervisorLogLevel =
+    if projectLogLevel == "trace" then
+      "debug"
+    else if projectLogLevel == "debug" then
+      "debug"
+    else if projectLogLevel == "warn" then
+      "warn"
+    else if projectLogLevel == "error" then
+      "error"
+    else
+      "info";
   serviceNames = builtins.attrNames services;
   missingReadiness = builtins.filter (
     name: (services.${name}.readiness or null) == null
@@ -153,7 +165,7 @@ let
 
   generateConfig = pkgs.writeShellScript "supervisor-generate-config" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
 
     mkdir -p "$LOG_DIR" "$RUN_DIR" "$CONFIG_DIR"
     chmod 700 "$LOG_DIR" "$RUN_DIR" "$CONFIG_DIR"
@@ -162,7 +174,7 @@ let
 
     {
       printf 'version: "0.5"\n'
-      printf 'log_level: info\n'
+      printf 'log_level: ${supervisorLogLevel}\n'
       printf 'log_location: %s/supervisor.log\n\n' "$LOG_DIR"
       printf 'processes:\n'
       cat <<'EOF'

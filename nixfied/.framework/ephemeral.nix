@@ -14,7 +14,11 @@
 # Usage:
 #   mkEphemeralWrapper { name = "ci"; script = "..."; }
 #
-{ pkgs, project }:
+{
+  pkgs,
+  project,
+  loggingPrelude ? null,
+}:
 
 let
   projectMeta = project.project or { };
@@ -47,17 +51,33 @@ let
   runtimePackages = project.tooling.runtimePackages or [ ];
   id = import ./lib/id.nix {
     inherit pkgs project;
+    loggingPrelude = resolvedLoggingPrelude;
   };
   envLoader = import ./lib/env-loader.nix {
     inherit pkgs project;
+    loggingPrelude = resolvedLoggingPrelude;
   };
-  processRegistry = import ./lib/process-registry.nix { inherit pkgs project; };
+  processRegistry = import ./lib/process-registry.nix {
+    inherit pkgs project;
+    loggingPrelude = resolvedLoggingPrelude;
+  };
   shellContract = import ./lib/shell-contract.nix { inherit pkgs; };
 
   lockDir = "/tmp";
   lockPrefix = "${projectId}-slot";
 
   slotMax = (project.slots or { }).max or 9;
+  resolvedLoggingPrelude =
+    if loggingPrelude != null && loggingPrelude != "" then
+      loggingPrelude
+    else
+      (
+        import ./lib/helpers.nix {
+          inherit pkgs project;
+          hooks = { };
+          summaryParser = "";
+        }
+      ).loggingPrelude;
 
   # Pre-computed bash variable references
   # Nix $${var} doesn't interpolate; use "\$${var}" in "..." strings instead
@@ -68,39 +88,35 @@ let
   mkUniqueId = id.mkUniqueId;
 
   acquireSlotLock = pkgs.writeShellScript "acquire-slot-lock" ''
-    # Emit shell code to be eval'ed by the caller. This ensures the selected lock
-    # FD stays open in the caller process for the full run lifetime.
-    cat <<'EOF'
-LOCK_DIR="${lockDir}"
-LOCK_PREFIX="${lockPrefix}"
+    ${resolvedLoggingPrelude}
 
-_nixfied_slot_locked=0
-for slot in $(${pkgs.coreutils}/bin/seq 0 ${toString slotMax}); do
-  LOCK_FILE="$LOCK_DIR/$LOCK_PREFIX-$slot.lock"
-  FD=$((200 + slot))
-  eval "exec $FD>\"$LOCK_FILE\""
+    set -euo pipefail
 
-  if ${pkgs.flock}/bin/flock -n "$FD" 2>/dev/null; then
-    export ${projectIdUpper}_EPHEMERAL_SLOT="$slot"
-    export ${projectIdUpper}_SLOT_LOCK_FD="$FD"
-    export ${slotVar}="$slot"
-    _nixfied_slot_locked=1
-    break
-  fi
+    LOCK_DIR="${lockDir}"
+    LOCK_PREFIX="${lockPrefix}"
 
-  eval "exec $FD>&-"
-done
+    for slot in $(seq 0 ${toString slotMax}); do
+      LOCK_FILE="$LOCK_DIR/$LOCK_PREFIX-$slot.lock"
+      FD=$((200 + slot))
+      eval "exec $FD>\"$LOCK_FILE\""
 
-if [ "$_nixfied_slot_locked" -ne 1 ]; then
-  echo "ERROR: All $((${toString slotMax} + 1)) ephemeral slots (0-${toString slotMax}) are in use" >&2
-  echo "" >&2
-  echo "   This means $((${toString slotMax} + 1)) concurrent runs are already running." >&2
-  echo "   Wait for one to complete or check for stale locks:" >&2
-  echo "   ls -la $LOCK_DIR/$LOCK_PREFIX-*.lock" >&2
-  echo "" >&2
-  exit 1
-fi
-EOF
+      if ${pkgs.flock}/bin/flock -n "$FD" 2>/dev/null; then
+        echo "export ${projectIdUpper}_EPHEMERAL_SLOT=$slot"
+        echo "export ${projectIdUpper}_SLOT_LOCK_FD=$FD"
+        echo "export ${slotVar}=$slot"
+        exit 0
+      else
+        eval "exec $FD>&-"
+      fi
+    done
+
+    log_error "All $((${toString slotMax} + 1)) ephemeral slots (0-${toString slotMax}) are in use"
+    echo "" >&2
+    echo "   This means $((${toString slotMax} + 1)) concurrent runs are already running." >&2
+    echo "   Wait for one to complete or check for stale locks:" >&2
+    echo "   ls -la $LOCK_DIR/$LOCK_PREFIX-*.lock" >&2
+    echo "" >&2
+    exit 1
   '';
 
   releaseSlotLock = pkgs.writeShellScript "release-slot-lock" ''
@@ -126,21 +142,25 @@ EOF
   rsyncExcludes = pkgs.lib.concatMapStringsSep " " (pat: "--exclude='${pat}'") excludePatterns;
 
   mkSourceCopy = pkgs.writeShellScript "mk-source-copy" ''
+    ${resolvedLoggingPrelude}
+
     set -euo pipefail
 
     SOURCE_DIR="$1"
     DEST_DIR="$2"
 
-    echo "INFO: Copying project source to ephemeral location"
+    log_info "Copying project source to ephemeral location"
 
     ${pkgs.rsync}/bin/rsync -a \
       ${rsyncExcludes} \
       "$SOURCE_DIR/" "$DEST_DIR/"
 
-    echo "OK: Source copied to $DEST_DIR"
+    log_ok "Source copied to $DEST_DIR"
   '';
 
   mkConditionalCleanup = pkgs.writeShellScript "mk-conditional-cleanup" ''
+    ${resolvedLoggingPrelude}
+
     _ephemeral_cleanup() {
       local exit_code=$?
 
@@ -154,9 +174,9 @@ EOF
         :
       else
         echo ""
-        echo "INFO: Cleaning up ephemeral state (slot ''${${projectIdUpper}_EPHEMERAL_SLOT:-unknown})"
+        log_info "Cleaning up ephemeral state (slot ''${${projectIdUpper}_EPHEMERAL_SLOT:-unknown})"
         rm -rf "${refEphRoot}"
-        echo "OK: Ephemeral state cleaned"
+        log_ok "Ephemeral state cleaned"
       fi
 
       ${processRegistry.emitEvent} \
@@ -213,6 +233,8 @@ EOF
           '';
     in
     pkgs.writeShellScript "ephemeral-${name}" ''
+      ${resolvedLoggingPrelude}
+
       set -euo pipefail
 
       export ORIGINAL_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -227,7 +249,7 @@ EOF
       if [ -n "''${${slotVar}:-}" ]; then
         export ${projectIdUpper}_EPHEMERAL_SLOT="''${${slotVar}}"
         export ${projectIdUpper}_SLOT_LOCK_FD=""
-        echo "INFO: Using pre-set slot: ''${${slotVar}} (no lock - caller managed)"
+        log_info "Using pre-set slot: ''${${slotVar}} (no lock - caller managed)"
       else
         eval "$(${acquireSlotLock})"
       fi
@@ -240,9 +262,9 @@ EOF
       export ${projectIdUpper}_EPHEMERAL=1
 
       echo ""
-      echo "INFO: Ephemeral execution mode"
-      echo "INFO: Root: ${refEphRoot}"
-      echo "INFO: Slot: ${refEphSlot} (${slotVar}=''${${slotVar}}, ${envVar}=''${${envVar}})"
+      log_info "Ephemeral execution mode"
+      log_info "Root: ${refEphRoot}"
+      log_info "Slot: ${refEphSlot} (${slotVar}=''${${slotVar}}, ${envVar}=''${${envVar}})"
       echo ""
 
       ${processRegistry.emitEvent} \
@@ -266,9 +288,9 @@ EOF
       ${
         if installDeps && depsScript != "" then
           ''
-            echo "INFO: Installing dependencies"
+            log_info "Installing dependencies"
             ${depsScript}
-            echo "OK: Dependencies installed"
+            log_ok "Dependencies installed"
           ''
         else
           ""
@@ -283,7 +305,7 @@ EOF
       ${contractPrelude}
 
       echo ""
-      echo "INFO: Starting ${name}"
+      log_info "Starting ${name}"
       echo ""
 
       _NIXFIED_APP_RC=0

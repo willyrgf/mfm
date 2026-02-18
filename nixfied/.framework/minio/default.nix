@@ -6,6 +6,12 @@
 }:
 
 let
+  summary = import ../lib/summary.nix { inherit pkgs project; };
+  helpers = import ../lib/helpers.nix {
+    inherit pkgs project;
+    inherit (summary) summaryParser;
+  };
+  loggingPrelude = helpers.loggingPrelude;
   serviceModule = import ../lib/service-module.nix { inherit pkgs project slots; };
   config = import ./config.nix { inherit project; };
   lifecycle = import ./lifecycle.nix {
@@ -14,6 +20,7 @@ let
       project
       slots
       config
+      loggingPrelude
       ;
   };
   bucketMgmt = import ./bucket-management.nix {
@@ -22,6 +29,7 @@ let
       project
       slots
       config
+      loggingPrelude
       ;
   };
 
@@ -93,13 +101,6 @@ let
       details = "Creates bucket when missing and succeeds when already present.";
       usage = [ "nix run .#svc::minio::bucket-ensure -- <bucket>" ];
     };
-    bucket-probe-write = {
-      script = bucketMgmt.bucketProbeWrite;
-      hook = "BUCKET_PROBE_WRITE";
-      summary = "Probe MinIO bucket writeability";
-      details = "Performs a tiny put/stat/delete round-trip to fail fast on storage/writeability issues.";
-      usage = [ "nix run .#svc::minio::bucket-probe-write -- <bucket> [prefix]" ];
-    };
     bucket-create = {
       script = bucketMgmt.bucketCreate;
       hook = "BUCKET_CREATE";
@@ -168,7 +169,6 @@ serviceModule.mkServiceModule {
     inherit (bucketMgmt)
       bucketCreate
       bucketEnsure
-      bucketProbeWrite
       bucketDelete
       bucketList
       policyApply

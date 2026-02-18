@@ -1,10 +1,15 @@
 # Parallel execution utility
-{ pkgs }:
+{
+  pkgs,
+  loggingPrelude,
+}:
 
 let
   mkParallelRunner =
     commands:
     pkgs.writeShellScript "parallel-runner" ''
+      ${loggingPrelude}
+
       set -euo pipefail
       declare -a OUTPUT_FILES
       declare -a PIDS
@@ -13,12 +18,12 @@ let
       ${pkgs.lib.concatMapStringsSep "\n" (cmd: ''
         OUTPUT_FILE=$(mktemp 2>/dev/null || true)
         if [ -z "$OUTPUT_FILE" ]; then
-          echo "ERROR: failed to allocate temporary output file for command $((i+1))" >&2
+          log_error "failed to allocate temporary output file for command $((i+1))"
           exit 1
         fi
         OUTPUT_FILES[$i]=$OUTPUT_FILE
 
-        echo "RUN: command $((i+1)): ${cmd}"
+        log_run "command $((i+1)): ${cmd}"
         (
           eval "${cmd}" 2>&1
           echo $? > "$OUTPUT_FILE.exit"
@@ -42,7 +47,7 @@ let
       i=0
       for cmd in ${pkgs.lib.concatMapStringsSep " " (c: "\"${c}\"") commands}; do
         echo ""
-        echo "OUTPUT: command $((i+1))"
+        log_output "command $((i+1))"
         cat "''${OUTPUT_FILES[$i]}"
         i=$((i+1))
       done

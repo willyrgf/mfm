@@ -98,7 +98,7 @@ let
       in
       ''
         if [ "${varRef}" != ${lib.escapeShellArg (toString action.value)} ]; then
-          echo "ERROR: expected env ${action.name}=${toString action.value} got='${varRef}'" >&2
+          log_error "expected env ${action.name}=${toString action.value} got='${varRef}'"
           exit 1
         fi
       ''

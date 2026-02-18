@@ -1,8 +1,13 @@
 # PostgreSQL port management utilities
-{ pkgs }:
+{
+  pkgs,
+  loggingPrelude,
+}:
 
 let
   checkPort = pkgs.writeShellScript "postgres-check-port" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     PORT="''${1:-}"
     if [ -z "$PORT" ]; then
@@ -19,7 +24,7 @@ let
       fi
     fi
 
-    echo "OK: Port $PORT is available"
+    log_ok "Port $PORT is available"
   '';
 
   getPortPids = pkgs.writeShellScript "postgres-get-port-pids" ''
@@ -44,6 +49,8 @@ let
   '';
 
   killPort = pkgs.writeShellScript "postgres-kill-port" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     PORT="''${1:-}"
     if [ -z "$PORT" ]; then
@@ -57,7 +64,7 @@ let
       exit 0
     fi
 
-    echo "WARN: Killing processes on port $PORT: $PIDS"
+    log_warn "Killing processes on port $PORT: $PIDS"
     echo "$PIDS" | xargs kill -TERM 2>/dev/null || true
     sleep 2
 
@@ -67,16 +74,18 @@ let
       echo "$REMAINING" | xargs kill -KILL 2>/dev/null || true
     fi
 
-    echo "OK: Port $PORT cleared"
+    log_ok "Port $PORT cleared"
   '';
 
   assertPortsFree = pkgs.writeShellScript "postgres-assert-ports-free" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     FAILED=0
     for PORT in "$@"; do
       if command -v lsof >/dev/null 2>&1; then
         if lsof -ti:"$PORT" >/dev/null 2>&1; then
-          echo "ERROR: Port $PORT is in use" >&2
+          log_error "Port $PORT is in use"
           FAILED=1
         fi
       fi
@@ -84,7 +93,7 @@ let
     if [ "$FAILED" -eq 1 ]; then
       exit 1
     fi
-    echo "OK: All ports are available"
+    log_ok "All ports are available"
   '';
 
 in

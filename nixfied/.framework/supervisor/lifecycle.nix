@@ -4,6 +4,7 @@
   project,
   slots,
   config,
+  loggingPrelude,
 }:
 
 let
@@ -13,6 +14,8 @@ let
   portNames = builtins.attrNames ports;
 
   start = pkgs.writeShellScript "supervisor-start" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${slotEnvRuntime.loadJsonFromCommand {
       outVar = "SLOT_INFO_JSON_OUT";
@@ -33,6 +36,8 @@ let
   '';
 
   stop = pkgs.writeShellScript "supervisor-stop" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${slotEnvRuntime.loadJsonFromCommand {
       outVar = "SLOT_INFO_JSON_OUT";
@@ -74,7 +79,7 @@ let
         if [ -n "$PORT" ] && command -v lsof >/dev/null 2>&1; then
           ORPHANS=$(lsof -ti:"$PORT" 2>/dev/null || true)
           if [ -n "$ORPHANS" ]; then
-            echo "INFO: Cleaning orphan processes on port $PORT (${name}): $ORPHANS"
+            log_info "Cleaning orphan processes on port $PORT (${name}): $ORPHANS"
             echo "$ORPHANS" | xargs kill -TERM 2>/dev/null || true
           fi
         fi
@@ -86,10 +91,12 @@ let
     PID_FILE="$RUN_DIR/supervisor.pid"
     rm -f "$PID_FILE" 2>/dev/null || true
 
-    echo "OK: Supervisor stopped"
+    log_ok "Supervisor stopped"
   '';
 
   startDaemon = pkgs.writeShellScript "supervisor-start-daemon" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${slotEnvRuntime.loadJsonFromCommand {
       outVar = "SLOT_INFO_JSON_OUT";
@@ -116,14 +123,14 @@ let
 
     # Check if already running via socket.
     if ${pc}/bin/process-compose process list -o json >/dev/null 2>&1; then
-      echo "OK: Supervisor already running socket=$PC_SOCKET_PATH"
+      log_ok "Supervisor already running socket=$PC_SOCKET_PATH"
       exit 0
     fi
 
     # Clear stale state from failed previous runs.
     rm -f "$PC_SOCKET_PATH" "$PID_FILE" 2>/dev/null || true
 
-    echo "INFO: Starting supervisor in background"
+    log_info "Starting supervisor in background"
     nohup ${pc}/bin/process-compose -f "$CONFIG_FILE" -t=false --keep-project up \
       > "$LOG_DIR/supervisor-daemon.log" 2>&1 &
     DAEMON_PID=$!
@@ -132,7 +139,7 @@ let
     # Fail fast if the daemon exits immediately (common config/startup error case).
     sleep 1
     if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
-      echo "ERROR: Supervisor failed to start (PID $DAEMON_PID exited). See: $LOG_DIR/supervisor-daemon.log" >&2
+      log_error "Supervisor failed to start (PID $DAEMON_PID exited). See: $LOG_DIR/supervisor-daemon.log"
       rm -f "$PID_FILE" 2>/dev/null || true
       exit 1
     fi
@@ -147,13 +154,13 @@ let
     done
 
     if [ "$READY" -ne 1 ]; then
-      echo "ERROR: Supervisor did not expose process API socket=$PC_SOCKET_PATH" >&2
+      log_error "Supervisor did not expose process API socket=$PC_SOCKET_PATH"
       kill -TERM "$DAEMON_PID" 2>/dev/null || true
       rm -f "$PID_FILE" 2>/dev/null || true
       exit 1
     fi
 
-    echo "OK: Supervisor started pid=$DAEMON_PID socket=$PC_SOCKET_PATH"
+    log_ok "Supervisor started pid=$DAEMON_PID socket=$PC_SOCKET_PATH"
   '';
 
 in

@@ -2,6 +2,7 @@
 {
   pkgs,
   project ? { },
+  loggingPrelude,
 }:
 
 let
@@ -10,6 +11,8 @@ let
   };
 
   runPlan = pkgs.writeShellScript "execution-core-run-plan" ''
+        ${loggingPrelude}
+
         set -euo pipefail
 
         PLAN_FILE=""
@@ -46,7 +49,7 @@ let
               exit 0
               ;;
             *)
-              echo "ERROR: unknown argument: $1" >&2
+              log_error "unknown argument: $1"
               usage >&2
               exit 1
               ;;
@@ -54,30 +57,30 @@ let
         done
 
         if [ -z "$PLAN_FILE" ] || [ -z "$RESULT_FILE" ]; then
-          echo "ERROR: --plan-file and --result-file are required" >&2
+          log_error "--plan-file and --result-file are required"
           usage >&2
           exit 1
         fi
 
         if [ ! -f "$PLAN_FILE" ]; then
-          echo "ERROR: plan file not found path=$PLAN_FILE" >&2
+          log_error "plan file not found path=$PLAN_FILE"
           exit 1
         fi
 
         if [ -n "$CONTEXT_SCRIPT" ] && [ ! -f "$CONTEXT_SCRIPT" ]; then
-          echo "ERROR: context script not found path=$CONTEXT_SCRIPT" >&2
+          log_error "context script not found path=$CONTEXT_SCRIPT"
           exit 1
         fi
 
         UNIT_COUNT="$(${pkgs.jq}/bin/jq -r '(.units // []) | length' "$PLAN_FILE")"
         case "$UNIT_COUNT" in
           *[!0-9]*|"")
-            echo "ERROR: invalid plan file; .units must be an array" >&2
+            log_error "invalid plan file; .units must be an array"
             exit 1
             ;;
         esac
         if [ "$UNIT_COUNT" -eq 0 ]; then
-          echo "ERROR: execution plan must include at least one unit" >&2
+          log_error "execution plan must include at least one unit"
           exit 1
         fi
 
@@ -88,7 +91,7 @@ let
           | .[]?
         ' "$PLAN_FILE")"
         if [ -n "$DUP_NAMES" ]; then
-          echo "ERROR: execution plan has duplicate unit names:" >&2
+          log_error "execution plan has duplicate unit names:"
           echo "$DUP_NAMES" >&2
           exit 1
         fi
@@ -98,7 +101,7 @@ let
           | [(.units // [])[].depends_on[]? | select(($names | index(.)) == null)] | unique | .[]?
         ' "$PLAN_FILE")"
         if [ -n "$MISSING_DEPS" ]; then
-          echo "ERROR: execution plan has unresolved dependencies:" >&2
+          log_error "execution plan has unresolved dependencies:"
           echo "$MISSING_DEPS" >&2
           exit 1
         fi
@@ -139,19 +142,19 @@ let
               end;
           loop([]) | .[]
         ' "$PLAN_FILE" > "$ORDER_FILE"; then
-          echo "ERROR: execution plan dependency graph is not resolvable" >&2
+          log_error "execution plan dependency graph is not resolvable"
           exit 1
         fi
 
         TOTAL_UNITS="$(wc -l < "$ORDER_FILE" | tr -d '[:space:]')"
         case "$TOTAL_UNITS" in
           *[!0-9]*|"")
-            echo "ERROR: failed to compute execution order" >&2
+            log_error "failed to compute execution order"
             exit 1
             ;;
         esac
         if [ "$TOTAL_UNITS" -eq 0 ]; then
-          echo "ERROR: computed execution order is empty" >&2
+          log_error "computed execution order is empty"
           exit 1
         fi
 
@@ -207,7 +210,7 @@ let
 
           UNIT_JSON="$(${pkgs.jq}/bin/jq -c --arg name "$UNIT_NAME" '.units[] | select(.name == $name)' "$PLAN_FILE")"
           if [ -z "$UNIT_JSON" ]; then
-            echo "ERROR: execution unit missing name=$UNIT_NAME" >&2
+            log_error "execution unit missing name=$UNIT_NAME"
             EXIT_CODE=1
             break
           fi
@@ -218,7 +221,7 @@ let
           export NIXFIED_UNIT_ATTEMPT="1"
 
           echo ""
-          echo "Step $STEP_INDEX/$TOTAL_UNITS: $UNIT_DESC"
+          log_step "$STEP_INDEX" "$TOTAL_UNITS" "$UNIT_DESC"
           emit_progress "$UNIT_NAME" "$UNIT_ID" "$STEP_INDEX"
 
           UNIT_START="$(${pkgs.coreutils}/bin/date +%s)"
@@ -257,7 +260,7 @@ let
           fi
 
           if [ -n "$SKIP_REASON" ]; then
-            echo "SKIP: $UNIT_DESC: $SKIP_REASON"
+            log_skip "$UNIT_DESC: $SKIP_REASON"
           fi
 
           if [ -z "$UNIT_STATUS" ]; then

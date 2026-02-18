@@ -3,14 +3,17 @@
   pkgs,
   slots,
   config,
+  loggingPrelude,
 }:
 
 let
   pc = pkgs.process-compose;
 
   restart = pkgs.writeShellScript "supervisor-restart" ''
+    ${loggingPrelude}
+
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
 
     SERVICE="''${1:-}"
     if [ -z "$SERVICE" ]; then
@@ -21,14 +24,16 @@ let
     SOCKET_HASH=$(printf '%s' "$RUN_DIR" | cksum | cut -d ' ' -f1)
     export PC_SOCKET_PATH="/tmp/nixfied-pc-$SOCKET_HASH.sock"
 
-    echo "INFO: Restarting $SERVICE"
+    log_info "Restarting $SERVICE"
     ${pc}/bin/process-compose process restart "$SERVICE"
-    echo "OK: $SERVICE restarted"
+    log_ok "$SERVICE restarted"
   '';
 
   rotateLogs = pkgs.writeShellScript "supervisor-rotate-logs" ''
+    ${loggingPrelude}
+
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
 
     MAX_SIZE="''${1:-10485760}"  # 10MB default
     KEEP_COUNT="''${2:-5}"
@@ -38,7 +43,7 @@ let
 
       SIZE=$(stat -f%z "$logfile" 2>/dev/null || stat -c%s "$logfile" 2>/dev/null || echo 0)
       if [ "$SIZE" -gt "$MAX_SIZE" ]; then
-        echo "INFO: Rotating $(basename "$logfile") ($SIZE bytes)"
+        log_info "Rotating $(basename "$logfile") ($SIZE bytes)"
 
         # Shift existing rotated logs
         for i in $(seq "$KEEP_COUNT" -1 1); do
@@ -57,7 +62,7 @@ let
         # Compress current log and start fresh
         gzip -c "$logfile" > "$logfile.1.gz"
         : > "$logfile"
-        echo "OK: Rotated $(basename "$logfile")"
+        log_ok "Rotated $(basename "$logfile")"
       fi
     done
   '';

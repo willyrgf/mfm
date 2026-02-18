@@ -3,6 +3,7 @@
   pkgs,
   project,
   slots,
+  loggingPrelude,
 }:
 
 let
@@ -14,10 +15,12 @@ let
   portVar = slots.portVarName portKey;
 
   archiveWal = pkgs.writeShellScript "postgres-archive-wal" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     if [ -z "''${PGDATA:-}" ] || [ -z "''${BACKUP_BASE_DIR:-}" ]; then
-      echo "ERROR: PGDATA and BACKUP_BASE_DIR must be set" >&2
+      log_error "PGDATA and BACKUP_BASE_DIR must be set"
       exit 1
     fi
 
@@ -32,26 +35,30 @@ let
   '';
 
   setupArchiving = pkgs.writeShellScript "postgres-setup-archiving" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     if [ -z "''${PGDATA:-}" ] || [ -z "''${BACKUP_BASE_DIR:-}" ]; then
-      echo "ERROR: PGDATA and BACKUP_BASE_DIR must be set" >&2
+      log_error "PGDATA and BACKUP_BASE_DIR must be set"
       exit 1
     fi
 
     WAL_ARCHIVE="$BACKUP_BASE_DIR/wal"
     mkdir -p "$WAL_ARCHIVE"
 
-    echo "INFO: Configuring WAL archiving"
+    log_info "Configuring WAL archiving"
     cat >> "$PGDATA/postgresql.conf" <<EOF
     archive_mode = on
     archive_command = 'cp %p $WAL_ARCHIVE/%f'
     EOF
 
-    echo "OK: WAL archiving configured to $WAL_ARCHIVE"
+    log_ok "WAL archiving configured to $WAL_ARCHIVE"
   '';
 
   backup = pkgs.writeShellScript "postgres-backup" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     source <(${slots.getSlotInfo})
 
@@ -59,7 +66,7 @@ let
     export PGPORT="''${!PORT_VAR}"
 
     if [ -z "''${BACKUP_BASE_DIR:-}" ]; then
-      echo "ERROR: BACKUP_BASE_DIR must be set (run source <(\$SLOT_INFO) first)" >&2
+      log_error "BACKUP_BASE_DIR must be set (run source <(\$SLOT_INFO) first)"
       exit 1
     fi
 
@@ -73,7 +80,7 @@ let
     BACKUP_PATH="$BACKUP_DIR/$BACKUP_NAME"
     CREATED_AT="$(${pkgs.coreutils}/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-    echo "INFO: Creating base backup: $BACKUP_NAME"
+    log_info "Creating base backup: $BACKUP_NAME"
     ${postgres}/bin/pg_basebackup -h localhost -p "$PGPORT" -U postgres -D "$BACKUP_PATH" -Ft -z -P
 
     # Write backup manifest
@@ -99,11 +106,13 @@ let
       }
       ' > "$BACKUP_PATH.manifest.json"
 
-    echo "OK: Backup created: $BACKUP_PATH"
+    log_ok "Backup created: $BACKUP_PATH"
     echo "   Manifest: $BACKUP_PATH.manifest.json"
   '';
 
   restore = pkgs.writeShellScript "postgres-restore" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     source <(${slots.getSlotInfo})
@@ -115,37 +124,37 @@ let
     fi
 
     if [ -z "''${PGDATA:-}" ]; then
-      echo "ERROR: PGDATA must be set" >&2
+      log_error "PGDATA must be set"
       exit 1
     fi
 
     EXPECTED_PGDATA="${pgdataExpr}"
     if [ "$PGDATA" != "$EXPECTED_PGDATA" ] && [ "''${POSTGRES_RESTORE_ALLOW_CUSTOM_PGDATA:-0}" != "1" ]; then
-      echo "ERROR: PGDATA must match the slot/env postgres data dir or set POSTGRES_RESTORE_ALLOW_CUSTOM_PGDATA=1" >&2
+      log_error "PGDATA must match the slot/env postgres data dir or set POSTGRES_RESTORE_ALLOW_CUSTOM_PGDATA=1"
       echo "DETAIL: expected=$EXPECTED_PGDATA actual=$PGDATA" >&2
       exit 1
     fi
 
     case "$PGDATA" in
       ""|"/"|"/tmp"|"/var"|"/usr"|"/etc"|"/bin"|"/sbin"|"/opt"|"/home"|"/Users")
-        echo "ERROR: refusing to restore using unsafe PGDATA path=$PGDATA" >&2
+        log_error "refusing to restore using unsafe PGDATA path=$PGDATA"
         exit 1
         ;;
     esac
     case "$PGDATA" in
       /*) ;;
       *)
-        echo "ERROR: PGDATA must be an absolute path (got '$PGDATA')" >&2
+        log_error "PGDATA must be an absolute path (got '$PGDATA')"
         exit 1
         ;;
     esac
 
     if [ ! -d "$BACKUP_PATH" ] && [ ! -f "$BACKUP_PATH/base.tar.gz" ]; then
-      echo "ERROR: Backup not found: $BACKUP_PATH" >&2
+      log_error "Backup not found: $BACKUP_PATH"
       exit 1
     fi
 
-    echo "INFO: Restoring from backup: $BACKUP_PATH"
+    log_info "Restoring from backup: $BACKUP_PATH"
 
     # Stop postgres if running
     if [ -f "$PGDATA/postmaster.pid" ]; then
@@ -164,7 +173,7 @@ let
       cp -a "$BACKUP_PATH/." "$PGDATA/"
     fi
 
-    echo "OK: Backup restored to $PGDATA"
+    log_ok "Backup restored to $PGDATA"
   '';
 
   listBackups = pkgs.writeShellScript "postgres-list-backups" ''
@@ -190,6 +199,8 @@ let
   '';
 
   verifyBackup = pkgs.writeShellScript "postgres-verify-backup" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     BACKUP_PATH="''${1:-}"
@@ -199,17 +210,17 @@ let
     fi
 
     if [ ! -d "$BACKUP_PATH" ]; then
-      echo "ERROR: Backup not found: $BACKUP_PATH" >&2
+      log_error "Backup not found: $BACKUP_PATH"
       exit 1
     fi
 
-    echo "INFO: Verifying backup: $BACKUP_PATH"
+    log_info "Verifying backup: $BACKUP_PATH"
 
     if [ -f "$BACKUP_PATH/base.tar.gz" ]; then
       if tar tzf "$BACKUP_PATH/base.tar.gz" >/dev/null 2>&1; then
-        echo "OK: Backup archive is valid"
+        log_ok "Backup archive is valid"
       else
-        echo "ERROR: Backup archive is corrupted" >&2
+        log_error "Backup archive is corrupted"
         exit 1
       fi
     fi
@@ -217,13 +228,15 @@ let
     if [ -f "$BACKUP_PATH.manifest.json" ]; then
       echo "   Manifest found"
     else
-      echo "WARN: No manifest found"
+      log_warn "No manifest found"
     fi
 
-    echo "OK: Backup verification passed"
+    log_ok "Backup verification passed"
   '';
 
   cleanupBackups = pkgs.writeShellScript "postgres-cleanup-backups" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     source <(${slots.getSlotInfo})
 
@@ -236,12 +249,12 @@ let
 
     BACKUP_COUNT=$(ls -d "$BACKUP_DIR"/backup-* 2>/dev/null | wc -l || echo 0)
     if [ "$BACKUP_COUNT" -le "$KEEP" ]; then
-      echo "OK: $BACKUP_COUNT backups (keeping $KEEP), nothing to clean"
+      log_ok "$BACKUP_COUNT backups (keeping $KEEP), nothing to clean"
       exit 0
     fi
 
     TO_REMOVE=$((BACKUP_COUNT - KEEP))
-    echo "INFO: Removing $TO_REMOVE old backups (keeping newest $KEEP)"
+    log_info "Removing $TO_REMOVE old backups (keeping newest $KEEP)"
     ls -dt "$BACKUP_DIR"/backup-* | tail -n "$TO_REMOVE" | while read -r dir; do
       rm -rf "$dir" "$dir.manifest.json"
       echo "   Removed: $(basename "$dir")"

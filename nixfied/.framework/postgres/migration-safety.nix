@@ -3,6 +3,7 @@
   pkgs,
   project,
   slots,
+  loggingPrelude,
 }:
 
 let
@@ -28,6 +29,8 @@ let
   '';
 
   ensureMigrationTested = pkgs.writeShellScript "postgres-ensure-migration-tested" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     MIGRATIONS_PATH="''${1:-${migrationsDir}}"
@@ -37,24 +40,26 @@ let
     HASH=$(${getMigrationHash} "$MIGRATIONS_PATH")
 
     if [ "$HASH" = "no-migrations" ]; then
-      echo "SKIP: No migrations found (skipping safety check)"
+      log_skip "No migrations found (skipping safety check)"
       exit 0
     fi
 
     MARKER_FILE="$MARKER_DIR/$HASH.tested"
 
     if [ -f "$MARKER_FILE" ]; then
-      echo "OK: Migrations already tested (hash: ''${HASH:0:12}...)"
+      log_ok "Migrations already tested (hash: ''${HASH:0:12}...)"
       exit 0
     fi
 
-    echo "ERROR: Migrations have not been tested against a database copy" >&2
+    log_error "Migrations have not been tested against a database copy"
     echo "   Hash: $HASH" >&2
     echo "   Run 'run_hook SVC_POSTGRES_TEST_MIGRATIONS' first" >&2
     exit 1
   '';
 
   markMigrationTested = pkgs.writeShellScript "postgres-mark-migration-tested" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     MIGRATIONS_PATH="''${1:-${migrationsDir}}"
@@ -68,10 +73,12 @@ let
     fi
 
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$MARKER_DIR/$HASH.tested"
-    echo "OK: Migration marked as tested (hash: ''${HASH:0:12}...)"
+    log_ok "Migration marked as tested (hash: ''${HASH:0:12}...)"
   '';
 
   detectDrift = pkgs.writeShellScript "postgres-detect-drift" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     MIGRATIONS_PATH="''${1:-${migrationsDir}}"
@@ -80,14 +87,14 @@ let
     CURRENT_HASH=$(${getMigrationHash} "$MIGRATIONS_PATH")
 
     if [ "$CURRENT_HASH" = "no-migrations" ]; then
-      echo "SKIP: No migrations found"
+      log_skip "No migrations found"
       exit 0
     fi
 
     if [ -f "$MARKER_DIR/$CURRENT_HASH.tested" ]; then
-      echo "OK: Migrations match tested hash (''${CURRENT_HASH:0:12}...)"
+      log_ok "Migrations match tested hash (''${CURRENT_HASH:0:12}...)"
     else
-      echo "WARN: Migration drift detected - current hash (''${CURRENT_HASH:0:12}...) not tested" >&2
+      log_warn "Migration drift detected - current hash (''${CURRENT_HASH:0:12}...) not tested"
       exit 1
     fi
   '';

@@ -75,7 +75,7 @@ let
         fi
       else
         if ! ${discovery.tool}/bin/nixfied-discovery-index --verify; then
-          echo "WARN: discovery drift detected but strict mode is disabled by project config." >&2
+          log_warn "discovery drift detected but strict mode is disabled by project config."
         fi
       fi
     fi

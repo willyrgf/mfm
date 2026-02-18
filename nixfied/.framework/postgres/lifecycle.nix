@@ -4,6 +4,7 @@
   project,
   slots,
   config,
+  loggingPrelude,
 }:
 
 let
@@ -53,13 +54,13 @@ let
     export PGDATABASE="''${PGDATABASE:-${defaultDb}}"
 
     if [ -z "''${PGPORT:-}" ] || [ -z "''${PGDATA:-}" ]; then
-      echo "ERROR: Failed to resolve PostgreSQL runtime variables (PGPORT/PGDATA)" >&2
+      log_error "Failed to resolve PostgreSQL runtime variables (PGPORT/PGDATA)"
       exit 1
     fi
 
     case "$PGPORT" in
       *[!0-9]*)
-        echo "ERROR: PGPORT must be numeric (got '$PGPORT')" >&2
+        log_error "PGPORT must be numeric (got '$PGPORT')"
         exit 1
         ;;
     esac
@@ -72,7 +73,7 @@ let
       local conf="$1"
 
       if [ ! -f "$conf" ]; then
-        echo "ERROR: missing postgresql.conf path=$conf" >&2
+        log_error "missing postgresql.conf path=$conf"
         exit 1
       fi
 
@@ -85,6 +86,8 @@ let
   '';
 
   init = pkgs.writeShellScript "postgres-init" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     ${pgRuntimePrelude database}
@@ -93,11 +96,11 @@ let
     mkdir -p "$PGDATA"
 
     if [ -f "$PGDATA/PG_VERSION" ]; then
-      echo "OK: PostgreSQL already initialized at $PGDATA"
+      log_ok "PostgreSQL already initialized at $PGDATA"
       exit 0
     fi
 
-    echo "INFO: Initializing PostgreSQL at $PGDATA"
+    log_info "Initializing PostgreSQL at $PGDATA"
     ${postgres}/bin/initdb -D "$PGDATA" -U postgres --no-locale --encoding=UTF8 -A trust
 
     # Determine environment-specific config
@@ -122,7 +125,7 @@ let
 
     ensure_config_port "$PGDATA/postgresql.conf"
     if ! ${postgres}/bin/postgres -D "$PGDATA" -C port >/dev/null 2>&1; then
-      echo "ERROR: PostgreSQL configuration invalid after init pgdata=$PGDATA" >&2
+      log_error "PostgreSQL configuration invalid after init pgdata=$PGDATA"
       exit 1
     fi
 
@@ -135,13 +138,15 @@ let
   '';
 
   start = pkgs.writeShellScript "postgres-start" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     ${pgRuntimePrelude database}
     ${ensureConfigPort}
 
     if [ ! -f "$PGDATA/postgresql.conf" ]; then
-      echo "ERROR: PostgreSQL not initialized at $PGDATA (missing postgresql.conf)" >&2
+      log_error "PostgreSQL not initialized at $PGDATA (missing postgresql.conf)"
       echo "   Run postgres init first: nix run .#svc::postgres::init" >&2
       exit 1
     fi
@@ -152,10 +157,10 @@ let
       if [ -f "$PGDATA/postmaster.pid" ]; then
         RUN_PID=$(head -1 "$PGDATA/postmaster.pid" 2>/dev/null || true)
         emit_service_event service_ready ready --pid "$RUN_PID" --log-path "$PGDATA/postgres.log"
-        echo "OK: PostgreSQL already running on port $PGPORT"
+        log_ok "PostgreSQL already running on port $PGPORT"
         exit 0
       else
-        echo "WARN: Port $PGPORT in use by a different PostgreSQL instance" >&2
+        log_warn "Port $PGPORT in use by a different PostgreSQL instance"
         if [ "''${CI:-}" = "true" ] || [ "''${AUTO_STOP_CONFLICTING:-}" = "1" ]; then
           echo "   Auto-stopping conflicting instance (CI mode)..." >&2
           lsof -ti:$PGPORT 2>/dev/null | xargs kill -TERM 2>/dev/null || true
@@ -171,7 +176,7 @@ let
     if [ -f "$PGDATA/postmaster.pid" ]; then
       STALE_PID=$(head -1 "$PGDATA/postmaster.pid" 2>/dev/null || true)
       if [ -n "$STALE_PID" ] && ! kill -0 "$STALE_PID" 2>/dev/null; then
-        echo "INFO: Removing stale PID file (PID $STALE_PID not running)"
+        log_info "Removing stale PID file (PID $STALE_PID not running)"
         rm -f "$PGDATA/postmaster.pid"
       fi
     fi
@@ -182,7 +187,7 @@ let
     mkdir -p "$PGSOCKET_DIR"
     chmod 700 "$PGSOCKET_DIR" 2>/dev/null || true
 
-    echo "INFO: Starting PostgreSQL on port $PGPORT"
+    log_info "Starting PostgreSQL on port $PGPORT"
     emit_service_event service_starting starting --log-path "$PGDATA/postgres.log"
     ${postgres}/bin/pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -o "-p $PGPORT -k $PGSOCKET_DIR" start
 
@@ -190,7 +195,7 @@ let
       if ${postgres}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
         RUN_PID=$(head -1 "$PGDATA/postmaster.pid" 2>/dev/null || true)
         emit_service_event service_ready ready --pid "$RUN_PID" --log-path "$PGDATA/postgres.log"
-        echo "OK: PostgreSQL ready on port $PGPORT"
+        log_ok "PostgreSQL ready on port $PGPORT"
         exit 0
       fi
       sleep 0.5
@@ -200,23 +205,25 @@ let
       --log-path "$PGDATA/postgres.log" \
       --wait-reason "failed_readiness" \
       --last-error "postgres did not become ready in startup window"
-    echo "ERROR: PostgreSQL failed to start. Check $PGDATA/postgres.log" >&2
+    log_error "PostgreSQL failed to start. Check $PGDATA/postgres.log"
     if [ -f "$PGDATA/postgres.log" ]; then
-      echo "INFO: postgres log tail path=$PGDATA/postgres.log lines=20" >&2
+      log_info "postgres log tail path=$PGDATA/postgres.log lines=20"
       tail -20 "$PGDATA/postgres.log" >&2 || true
     else
-      echo "WARN: postgres log file missing path=$PGDATA/postgres.log" >&2
+      log_warn "postgres log file missing path=$PGDATA/postgres.log"
     fi
     exit 1
   '';
 
   stop = pkgs.writeShellScript "postgres-stop" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${pgRuntimePrelude database}
 
     if [ -n "''${PGDATA:-}" ] && [ -f "$PGDATA/postmaster.pid" ]; then
       RUN_PID=$(head -1 "$PGDATA/postmaster.pid" 2>/dev/null || true)
-      echo "STOP: PostgreSQL at $PGDATA"
+      log_stop "PostgreSQL at $PGDATA"
       ${postgres}/bin/pg_ctl -D "$PGDATA" stop -m fast 2>/dev/null || true
       emit_service_event service_stopped stopped --pid "$RUN_PID" --log-path "$PGDATA/postgres.log"
     else
@@ -225,11 +232,13 @@ let
   '';
 
   setupDb = pkgs.writeShellScript "postgres-setup-db" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     ${pgRuntimePrelude database}
 
-    echo "INFO: Setting up database '$PGDATABASE'"
+    log_info "Setting up database '$PGDATABASE'"
 
     ${postgres}/bin/psql -h localhost -p "$PGPORT" -U postgres -d postgres -c \
       "DO \$\$ BEGIN CREATE ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'postgres'; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;" 2>/dev/null || true
@@ -243,14 +252,16 @@ let
       done
     fi
 
-    echo "OK: Database '$PGDATABASE' ready"
+    log_ok "Database '$PGDATABASE' ready"
   '';
 
   fullStart = pkgs.writeShellScript "postgres-full-start" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${pgRuntimePrelude database}
 
-    echo "INFO: Slot $SLOT, env $ENV (PGPORT=$PGPORT)"
+    log_info "Slot $SLOT, env $ENV (PGPORT=$PGPORT)"
 
     ${init}
     ${start}
@@ -262,6 +273,8 @@ let
   '';
 
   fullStartTest = pkgs.writeShellScript "postgres-full-start-test" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${pgRuntimePrelude testDatabase}
     export PGDATABASE="''${PGDATABASE:-${testDatabase}}"
@@ -272,6 +285,8 @@ let
   '';
 
   listInstances = pkgs.writeShellScript "postgres-list-instances" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     echo "PostgreSQL instances:"
     echo ""

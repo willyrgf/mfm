@@ -7,6 +7,12 @@
 
 let
   cfg = project.modules.postgres or { };
+  summary = import ../lib/summary.nix { inherit pkgs project; };
+  helpers = import ../lib/helpers.nix {
+    inherit pkgs project;
+    inherit (summary) summaryParser;
+  };
+  loggingPrelude = helpers.loggingPrelude;
   serviceApi = import ../lib/service-api.nix { inherit pkgs; };
   processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
   observability = import ../lib/service-observability.nix {
@@ -31,13 +37,24 @@ let
       project
       slots
       config
+      loggingPrelude
       ;
   };
-  backupMod = import ./backup.nix { inherit pkgs project slots; };
-  migration = import ./migration.nix { inherit pkgs project slots; };
-  migrationSafety = import ./migration-safety.nix { inherit pkgs project slots; };
-  rollback = import ./rollback.nix { inherit pkgs project slots; };
-  portMgmt = import ./port-management.nix { inherit pkgs; };
+  backupMod = import ./backup.nix {
+    inherit pkgs project slots loggingPrelude;
+  };
+  migration = import ./migration.nix {
+    inherit pkgs project slots loggingPrelude;
+  };
+  migrationSafety = import ./migration-safety.nix {
+    inherit pkgs project slots loggingPrelude;
+  };
+  rollback = import ./rollback.nix {
+    inherit pkgs project slots loggingPrelude;
+  };
+  portMgmt = import ./port-management.nix {
+    inherit pkgs loggingPrelude;
+  };
 
   restart = pkgs.writeShellScript "postgres-restart" ''
     set -euo pipefail
@@ -85,6 +102,8 @@ let
   '';
 
   health = pkgs.writeShellScript "postgres-health" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     source <(${slots.getSlotInfo})
 
@@ -92,15 +111,17 @@ let
     PGPORT="''${PGPORT:-''${!PORT_VAR}}"
 
     if ${pgPackage}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
-      echo "OK: PostgreSQL healthy port=$PGPORT"
+      log_ok "PostgreSQL healthy port=$PGPORT"
       exit 0
     fi
 
-    echo "ERROR: PostgreSQL unhealthy port=$PGPORT" >&2
+    log_error "PostgreSQL unhealthy port=$PGPORT"
     exit 1
   '';
 
   ready = pkgs.writeShellScript "postgres-ready" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     source <(${slots.getSlotInfo})
 
@@ -108,20 +129,22 @@ let
     PGPORT="''${PGPORT:-''${!PORT_VAR}}"
 
     if ! ${pgPackage}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
-      echo "ERROR: PostgreSQL not ready port=$PGPORT (pg_isready failed)" >&2
+      log_error "PostgreSQL not ready port=$PGPORT (pg_isready failed)"
       exit 1
     fi
 
     if ${pgPackage}/bin/psql -h localhost -p "$PGPORT" -U postgres -d postgres -Atqc "select 1;" >/dev/null 2>&1; then
-      echo "OK: PostgreSQL ready port=$PGPORT"
+      log_ok "PostgreSQL ready port=$PGPORT"
       exit 0
     fi
 
-    echo "ERROR: PostgreSQL not ready port=$PGPORT (query failed)" >&2
+    log_error "PostgreSQL not ready port=$PGPORT (query failed)"
     exit 1
   '';
 
   readyTest = pkgs.writeShellScript "postgres-ready-test" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     source <(${slots.getSlotInfo})
 
@@ -130,41 +153,43 @@ let
     PGDATABASE="''${PGDATABASE:-${testDatabase}}"
 
     if ! ${pgPackage}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
-      echo "ERROR: PostgreSQL not ready for test db port=$PGPORT database=$PGDATABASE (pg_isready failed)" >&2
+      log_error "PostgreSQL not ready for test db port=$PGPORT database=$PGDATABASE (pg_isready failed)"
       exit 1
     fi
 
     if ! ${pgPackage}/bin/psql -h localhost -p "$PGPORT" -U postgres -d postgres -Atqc "select 1;" >/dev/null 2>&1; then
-      echo "ERROR: PostgreSQL not ready for test db port=$PGPORT database=$PGDATABASE (maintenance query failed)" >&2
+      log_error "PostgreSQL not ready for test db port=$PGPORT database=$PGDATABASE (maintenance query failed)"
       exit 1
     fi
 
     if ${pgPackage}/bin/psql -h localhost -p "$PGPORT" -U postgres -d "$PGDATABASE" -Atqc "select 1;" >/dev/null 2>&1; then
-      echo "OK: PostgreSQL ready for test db port=$PGPORT database=$PGDATABASE"
+      log_ok "PostgreSQL ready for test db port=$PGPORT database=$PGDATABASE"
       exit 0
     fi
 
-    echo "ERROR: PostgreSQL not ready for test db port=$PGPORT database=$PGDATABASE (database query failed)" >&2
+    log_error "PostgreSQL not ready for test db port=$PGPORT database=$PGDATABASE (database query failed)"
     exit 1
   '';
 
   checkConfig = pkgs.writeShellScript "postgres-check-config" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     source <(${slots.getSlotInfo})
 
     PGDATA="${pgdataExpr}"
 
     if [ ! -f "$PGDATA/postgresql.conf" ]; then
-      echo "ERROR: missing postgresql.conf at $PGDATA" >&2
+      log_error "missing postgresql.conf at $PGDATA"
       exit 1
     fi
 
     if ${pgPackage}/bin/postgres -D "$PGDATA" -C port >/dev/null 2>&1; then
-      echo "OK: PostgreSQL configuration valid pgdata=$PGDATA"
+      log_ok "PostgreSQL configuration valid pgdata=$PGDATA"
       exit 0
     fi
 
-    echo "ERROR: PostgreSQL configuration invalid pgdata=$PGDATA" >&2
+    log_error "PostgreSQL configuration invalid pgdata=$PGDATA"
     exit 1
   '';
 

@@ -3,6 +3,7 @@
   pkgs,
   project,
   slots,
+  loggingPrelude,
 }:
 
 let
@@ -12,8 +13,10 @@ let
   portVar = slots.portVarName portKey;
 
   findBackupForCommit = pkgs.writeShellScript "postgres-find-backup-for-commit" ''
+    ${loggingPrelude}
+
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
 
     COMMIT="''${1:-}"
     if [ -z "$COMMIT" ]; then
@@ -23,7 +26,7 @@ let
 
     BACKUP_DIR="$BACKUP_BASE_DIR/base"
     if [ ! -d "$BACKUP_DIR" ]; then
-      echo "ERROR: No backups found" >&2
+      log_error "No backups found"
       exit 1
     fi
 
@@ -38,13 +41,15 @@ let
       fi
     done
 
-    echo "ERROR: No backup found for commit $COMMIT" >&2
+    log_error "No backup found for commit $COMMIT"
     exit 1
   '';
 
   testRollback = pkgs.writeShellScript "postgres-test-rollback" ''
+    ${loggingPrelude}
+
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
 
     PORT_VAR="${portVar}"
     export PGPORT="''${!PORT_VAR}"
@@ -54,16 +59,16 @@ let
       # Default to previous commit
       COMMIT=$(git rev-parse --short HEAD~1 2>/dev/null || true)
       if [ -z "$COMMIT" ]; then
-        echo "ERROR: No commit specified and cannot determine previous commit" >&2
+        log_error "No commit specified and cannot determine previous commit"
         exit 1
       fi
     fi
 
-    echo "INFO: Testing rollback to commit $COMMIT"
+    log_info "Testing rollback to commit $COMMIT"
 
     BACKUP_PATH=$(${findBackupForCommit} "$COMMIT")
     if [ -z "$BACKUP_PATH" ]; then
-      echo "ERROR: No backup found for commit $COMMIT" >&2
+      log_error "No backup found for commit $COMMIT"
       exit 1
     fi
 
@@ -79,7 +84,7 @@ let
       cp -a "$BACKUP_PATH/." "$TEST_DIR/"
     fi
 
-    echo "OK: Rollback test: backup is restorable for commit $COMMIT"
+    log_ok "Rollback test: backup is restorable for commit $COMMIT"
   '';
 
 in

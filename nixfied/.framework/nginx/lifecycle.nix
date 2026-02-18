@@ -4,6 +4,7 @@
   project,
   slots,
   templates,
+  loggingPrelude,
 }:
 
 let
@@ -46,12 +47,14 @@ let
     NGINX_DIR="${nginxDirExpr}"
 
     if [ -z "$HTTP_PORT" ] || [ -z "$HTTPS_PORT" ]; then
-      echo "ERROR: nginx port variables are not set (http/https)" >&2
+      log_error "nginx port variables are not set (http/https)"
       exit 1
     fi
   '';
 
   generateSelfSignedCert = pkgs.writeShellScript "nginx-generate-self-signed" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     DOMAIN="$1"
     SSL_DIR="$2"
@@ -72,6 +75,8 @@ let
   '';
 
   init = pkgs.writeShellScript "nginx-init" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
@@ -92,13 +97,15 @@ let
   '';
 
   start = pkgs.writeShellScript "nginx-start" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
     ${emitHelper}
 
     CONF="$NGINX_DIR/conf/nginx.conf"
     if [ ! -f "$CONF" ]; then
-      echo "ERROR: Nginx not initialized. Run nginx-init first." >&2
+      log_error "Nginx not initialized. Run nginx-init first."
       exit 1
     fi
 
@@ -108,6 +115,8 @@ let
   '';
 
   stop = pkgs.writeShellScript "nginx-stop" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
     ${emitHelper}
@@ -128,25 +137,29 @@ let
   '';
 
   reload = pkgs.writeShellScript "nginx-reload" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
     CONF="$NGINX_DIR/conf/nginx.conf"
 
     if [ ! -f "$CONF" ]; then
-      echo "ERROR: Nginx not initialized." >&2
+      log_error "Nginx not initialized."
       exit 1
     fi
 
     # Test config before reload
-    echo "INFO: Testing nginx configuration"
+    log_info "Testing nginx configuration"
     ${nginx}/bin/nginx -c "$CONF" -t 2>&1
 
-    echo "INFO: Reloading nginx"
+    log_info "Reloading nginx"
     ${nginx}/bin/nginx -c "$CONF" -s reload
-    echo "OK: Nginx reloaded"
+    log_ok "Nginx reloaded"
   '';
 
   listInstances = pkgs.writeShellScript "nginx-list-instances" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     echo "Nginx instances:"
     echo ""

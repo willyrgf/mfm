@@ -3,6 +3,7 @@
   pkgs,
   slots,
   config,
+  loggingPrelude,
 }:
 
 let
@@ -10,8 +11,10 @@ let
   jq = pkgs.jq;
 
   status = pkgs.writeShellScript "supervisor-status" ''
+    ${loggingPrelude}
+
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
     SOCKET_HASH=$(printf '%s' "$RUN_DIR" | cksum | cut -d ' ' -f1)
     export PC_SOCKET_PATH="/tmp/nixfied-pc-$SOCKET_HASH.sock"
 
@@ -25,7 +28,7 @@ let
 
   isRunning = pkgs.writeShellScript "supervisor-is-running" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
 
     SOCKET_HASH=$(printf '%s' "$RUN_DIR" | cksum | cut -d ' ' -f1)
     export PC_SOCKET_PATH="/tmp/nixfied-pc-$SOCKET_HASH.sock"
@@ -41,7 +44,7 @@ let
 
   logs = pkgs.writeShellScript "supervisor-logs" ''
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
 
     SERVICE="''${1:-}"
     LINES="''${2:-50}"
@@ -68,14 +71,16 @@ let
   '';
 
   health = pkgs.writeShellScript "supervisor-health" ''
+    ${loggingPrelude}
+
     set -euo pipefail
-    eval "$(${slots.getSlotInfo})"
+    source <(${slots.getSlotInfo})
 
     SOCKET_HASH=$(printf '%s' "$RUN_DIR" | cksum | cut -d ' ' -f1)
     export PC_SOCKET_PATH="/tmp/nixfied-pc-$SOCKET_HASH.sock"
 
     if ! ${isRunning} >/dev/null 2>&1; then
-      echo "ERROR: supervisor unhealthy reason=daemon_not_running slot=$SLOT env=$ENV" >&2
+      log_error "supervisor unhealthy reason=daemon_not_running slot=$SLOT env=$ENV"
       exit 1
     fi
 
@@ -84,13 +89,13 @@ let
     RC=$?
     set -e
     if [ "$RC" -ne 0 ] || [ -z "$PROC_JSON" ]; then
-      echo "ERROR: supervisor unhealthy reason=process_query_failed socket=$PC_SOCKET_PATH" >&2
+      log_error "supervisor unhealthy reason=process_query_failed socket=$PC_SOCKET_PATH"
       exit 1
     fi
 
     TOTAL=$(${jq}/bin/jq -r 'length' <<<"$PROC_JSON")
     if [ "$TOTAL" -eq 0 ]; then
-      echo "OK: supervisor healthy services=0 slot=$SLOT env=$ENV"
+      log_ok "supervisor healthy services=0 slot=$SLOT env=$ENV"
       exit 0
     fi
 
@@ -110,11 +115,11 @@ let
     )
 
     if [ -n "$UNHEALTHY" ]; then
-      echo "ERROR: supervisor unhealthy slot=$SLOT env=$ENV services=$UNHEALTHY" >&2
+      log_error "supervisor unhealthy slot=$SLOT env=$ENV services=$UNHEALTHY"
       exit 1
     fi
 
-    echo "OK: supervisor healthy services=$TOTAL slot=$SLOT env=$ENV"
+    log_ok "supervisor healthy services=$TOTAL slot=$SLOT env=$ENV"
   '';
 
 in

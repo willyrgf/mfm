@@ -4,6 +4,7 @@
   project,
   slots,
   config,
+  loggingPrelude,
 }:
 
 let
@@ -48,7 +49,7 @@ let
     MINIO_LOG_FILE="$MINIO_DIR/logs/minio.log"
 
     if [ -z "$MINIO_API_PORT" ] || [ -z "$MINIO_CONSOLE_PORT" ]; then
-      echo "ERROR: minio port variables are not set (api/console)" >&2
+      log_error "minio port variables are not set (api/console)"
       exit 1
     fi
 
@@ -56,6 +57,8 @@ let
   '';
 
   init = pkgs.writeShellScript "minio-init" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
@@ -64,10 +67,12 @@ let
     mkdir -p "$MINIO_DIR/run"
     mkdir -p "$MINIO_DIR/logs"
 
-    echo "OK: minio initialized dir=$MINIO_DIR slot=$SLOT env=$ENV"
+    log_ok "minio initialized dir=$MINIO_DIR slot=$SLOT env=$ENV"
   '';
 
   start = pkgs.writeShellScript "minio-start" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
@@ -79,7 +84,7 @@ let
       PID=$(cat "$MINIO_PID_FILE" 2>/dev/null || true)
       if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
         emit_service_event service_ready ready --pid "$PID" --log-path "$LOG_FILE"
-        echo "OK: minio already running pid=$PID api_port=$MINIO_API_PORT"
+        log_ok "minio already running pid=$PID api_port=$MINIO_API_PORT"
         exit 0
       fi
       rm -f "$MINIO_PID_FILE"
@@ -114,7 +119,7 @@ let
 
     emit_service_event service_ready ready --pid "$CHILD_PID" --log-path "$LOG_FILE"
 
-    echo "INFO: minio started pid=$CHILD_PID api_port=$MINIO_API_PORT console_port=$MINIO_CONSOLE_PORT"
+    log_info "minio started pid=$CHILD_PID api_port=$MINIO_API_PORT console_port=$MINIO_CONSOLE_PORT"
     set +e
     wait "$CHILD_PID"
     RC=$?
@@ -133,12 +138,14 @@ let
   '';
 
   stop = pkgs.writeShellScript "minio-stop" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
     if [ ! -f "$MINIO_PID_FILE" ]; then
       emit_service_event service_stopped stopped
-      echo "OK: minio not running"
+      log_ok "minio not running"
       exit 0
     fi
 
@@ -146,7 +153,7 @@ let
     if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
       rm -f "$MINIO_PID_FILE"
       emit_service_event service_stopped stopped --pid "$PID"
-      echo "OK: minio pid file cleaned"
+      log_ok "minio pid file cleaned"
       exit 0
     fi
 
@@ -156,7 +163,7 @@ let
       if ! kill -0 "$PID" 2>/dev/null; then
         rm -f "$MINIO_PID_FILE"
         emit_service_event service_stopped stopped --pid "$PID"
-        echo "OK: minio stopped pid=$PID"
+        log_ok "minio stopped pid=$PID"
         exit 0
       fi
       sleep 0.2
@@ -165,10 +172,12 @@ let
     kill -KILL "$PID" 2>/dev/null || true
     rm -f "$MINIO_PID_FILE"
     emit_service_event service_stopped stopped --pid "$PID"
-    echo "WARN: minio force-killed pid=$PID"
+    log_warn "minio force-killed pid=$PID"
   '';
 
   restart = pkgs.writeShellScript "minio-restart" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     ${stop}
@@ -176,6 +185,8 @@ let
   '';
 
   status = pkgs.writeShellScript "minio-status" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
@@ -203,45 +214,53 @@ let
   '';
 
   health = pkgs.writeShellScript "minio-health" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
     if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/live" >/dev/null 2>&1; then
-      echo "OK: minio healthy api_port=$MINIO_API_PORT"
+      log_ok "minio healthy api_port=$MINIO_API_PORT"
       exit 0
     fi
 
-    echo "ERROR: minio unhealthy api_port=$MINIO_API_PORT" >&2
+    log_error "minio unhealthy api_port=$MINIO_API_PORT"
     exit 1
   '';
 
   ready = pkgs.writeShellScript "minio-ready" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
     if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready" >/dev/null 2>&1; then
-      echo "OK: minio ready api_port=$MINIO_API_PORT"
+      log_ok "minio ready api_port=$MINIO_API_PORT"
       exit 0
     fi
 
-    echo "ERROR: minio not ready api_port=$MINIO_API_PORT" >&2
+    log_error "minio not ready api_port=$MINIO_API_PORT"
     exit 1
   '';
 
   checkConfig = pkgs.writeShellScript "minio-check-config" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 
     if [ ! -d "$MINIO_DIR/config" ]; then
-      echo "ERROR: missing minio config directory at $MINIO_DIR/config" >&2
+      log_error "missing minio config directory at $MINIO_DIR/config"
       exit 1
     fi
 
     ${minio}/bin/minio --help >/dev/null
-    echo "OK: minio configuration valid dir=$MINIO_DIR"
+    log_ok "minio configuration valid dir=$MINIO_DIR"
   '';
 
   fullStart = pkgs.writeShellScript "minio-full-start" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     ${init}
@@ -250,6 +269,8 @@ let
   '';
 
   fullStartTest = pkgs.writeShellScript "minio-full-start-test" ''
+    ${loggingPrelude}
+
     set -euo pipefail
 
     ${init}
@@ -258,6 +279,8 @@ let
   '';
 
   exportS3Env = pkgs.writeShellScript "minio-export-s3-env" ''
+    ${loggingPrelude}
+
     set -euo pipefail
     ${runtimePrelude}
 

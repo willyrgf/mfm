@@ -2,13 +2,27 @@
 {
   pkgs,
   project ? { },
+  loggingPrelude ? null,
 }:
 
 let
   projectId = (project.project or { }).id or "project";
   counterRoot = "/tmp/nixfied-runtime/${projectId}/id-counters";
+  resolvedLoggingPrelude =
+    if loggingPrelude != null && loggingPrelude != "" then
+      loggingPrelude
+    else
+      (
+        import ./helpers.nix {
+          inherit pkgs project;
+          hooks = { };
+          summaryParser = "";
+        }
+      ).loggingPrelude;
 
   mkPlanId = pkgs.writeShellScript "mk-plan-id" ''
+    ${resolvedLoggingPrelude}
+
     set -euo pipefail
 
     VALUE=""
@@ -22,7 +36,7 @@ let
     esac
 
     if [ -z "$VALUE" ]; then
-      echo "ERROR: mk-plan-id requires non-empty input" >&2
+      log_error "mk-plan-id requires non-empty input"
       exit 1
     fi
 
@@ -60,18 +74,20 @@ let
   '';
 
   mkRunId = pkgs.writeShellScript "mk-run-id" ''
+    ${resolvedLoggingPrelude}
+
     set -euo pipefail
 
     PLAN_ID="''${1:-}"
     if [ -z "$PLAN_ID" ]; then
-      echo "ERROR: mk-run-id requires plan id input" >&2
+      log_error "mk-run-id requires plan id input"
       exit 1
     fi
 
     case "$PLAN_ID" in
       *[!A-Za-z0-9._:-]*)
-        echo "ERROR: plan id contains invalid characters value=$PLAN_ID" >&2
-        echo "HINT: use only [A-Za-z0-9._:-]" >&2
+        log_error "plan id contains invalid characters value=$PLAN_ID"
+        log_hint "use only [A-Za-z0-9._:-]"
         exit 1
         ;;
       *)
@@ -105,6 +121,8 @@ let
   '';
 
   resolveId = pkgs.writeShellScript "resolve-id" ''
+    ${resolvedLoggingPrelude}
+
     set -euo pipefail
     VALUE="''${1:-}"
     PLAN_ID="''${2:-''${NIXFIED_PLAN_ID:-}}"
@@ -112,8 +130,8 @@ let
     if [ -n "$VALUE" ]; then
       case "$VALUE" in
         *[!A-Za-z0-9._:-]*)
-          echo "ERROR: id contains invalid characters value=$VALUE" >&2
-          echo "HINT: use only [A-Za-z0-9._:-]" >&2
+          log_error "id contains invalid characters value=$VALUE"
+          log_hint "use only [A-Za-z0-9._:-]"
           exit 1
           ;;
         *)
