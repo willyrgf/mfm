@@ -7,6 +7,7 @@ pub mod abi;
 pub mod ctx;
 pub mod errors;
 pub mod evm_encoding;
+pub mod evm_rpc;
 pub mod hex;
 pub mod idempotency;
 pub mod keystore_tx;

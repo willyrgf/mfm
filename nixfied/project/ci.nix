@@ -1,4 +1,9 @@
-{ pkgs, project, lib, ... }:
+{
+  pkgs,
+  project,
+  lib,
+  ...
+}:
 
 let
   # v2 shell-app contract inventory (project-level):
@@ -11,6 +16,7 @@ let
     timeout = 5;
   };
   failureCodesCargo = failureCodesScript // {
+    cargoTestFailure = 100;
     cargoFailure = 101;
   };
   ciModeValues = [
@@ -317,10 +323,18 @@ in
     env = {
       "${project.envVar}" = "test";
       CARGO_TERM_COLOR = "always";
+      # Keep rust artifacts in the run-scoped ephemeral root so sequential CI
+      # steps can reuse them safely without cross-run leakage.
+      CARGO_TARGET_DIR = "$MFM_EPHEMERAL_ROOT/build/cargo-target";
+      CARGO_HOME = "$MFM_EPHEMERAL_ROOT/build/cargo-home";
       RUST_BACKTRACE = "1";
       SERVICE_OWNER_SCOPE = "persistent";
       SERVICE_DISCOVERY_SCOPE = "global";
       SERVICE_REUSE_POLICY = "same-slot";
+      # MinIO accepts both ROOTDISK/ROOTDRIVE variable names across releases.
+      # These vars control root-drive classification, not the object-write fill fraction.
+      MINIO_ROOTDISK_THRESHOLD_SIZE = "128MiB";
+      MINIO_ROOTDRIVE_THRESHOLD_SIZE = "128MiB";
     };
     useDeps = true;
     setupActions = [
@@ -369,7 +383,9 @@ in
           "parity-s3"
           "parity-rest-api-smoke"
           "parity-evm-reth"
+          "parity-aave-v3-reth"
           "parity-portfolio-tracker-reth"
+          "parity-postgres-state-events-audit"
           "parity-keystore-reth-tx-sign-send"
           "parity-evm-helios-smoke"
         ];
@@ -621,6 +637,49 @@ in
         ];
       };
 
+      parity-aave-v3-reth = {
+        description = "Parity: Aave v3 deploy/configure/lend/borrow scenario on reth";
+        env = {
+          AUTO_STOP_CONFLICTING = "1";
+        };
+        fixtures = {
+          services = [
+            {
+              name = "postgres";
+              profile = "test";
+            }
+            {
+              name = "minio";
+              profile = "test";
+              exports = [ "s3" ];
+              bucket = "mfm-test";
+              prefix = "mfm-artifacts";
+              region = "us-east-1";
+              bootstrap = [ "mfm-test" ];
+              logName = "minio-aave-v3.log";
+            }
+            {
+              name = "reth";
+              profile = "test";
+              logName = "reth-aave-v3.log";
+            }
+          ];
+          artifacts = {
+            logs = true;
+            prefix = "parity-aave-v3-reth";
+          };
+        };
+        actions = [
+          {
+            kind = "exec";
+            argv = [
+              "."
+              (ciStepScript "parity-aave-v3-reth")
+            ];
+          }
+        ];
+      };
+
       parity-portfolio-tracker-reth = {
         description = "Parity: portfolio_tracker snapshot against reth (MockERC20)";
         env = {
@@ -659,6 +718,34 @@ in
             argv = [
               "."
               (ciStepScript "parity-portfolio-tracker-reth")
+            ];
+          }
+        ];
+      };
+
+      parity-postgres-state-events-audit = {
+        description = "Parity: query-only audit of Postgres kernel state events from prior parity runs";
+        env = {
+          AUTO_STOP_CONFLICTING = "1";
+        };
+        fixtures = {
+          services = [
+            {
+              name = "postgres";
+              profile = "test";
+            }
+          ];
+          artifacts = {
+            logs = true;
+            prefix = "parity-postgres-state-events-audit";
+          };
+        };
+        actions = [
+          {
+            kind = "exec";
+            argv = [
+              "."
+              (ciStepScript "parity-postgres-state-events-audit")
             ];
           }
         ];

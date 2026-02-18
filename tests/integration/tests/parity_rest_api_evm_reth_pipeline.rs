@@ -7,6 +7,7 @@ use std::time::Duration;
 use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_collectors_evm_jsonrpc_http::{EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory};
 use mfm_event_store_postgres::PostgresEventStore;
+use mfm_integration_tests::parity_run_ids::write_parity_evm_run_id;
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
     RetryPolicy, RunConfig,
@@ -23,7 +24,6 @@ use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::DefaultRunLauncher;
-use tracing::info;
 
 #[derive(Default)]
 struct MapContext {
@@ -350,15 +350,5 @@ async fn parity_reth_pipeline_contract_from_nix() {
         .expect("event stream");
     assert!(!stream.is_empty());
 
-    let report = serde_json::json!({
-        "kind": "parity_evm_reth_pipeline_report_v1",
-        "run_id": run.run_id.0.to_string(),
-        "contract_address": contract_address,
-        "deploy_tx_hash": deploy_tx_hash,
-        "configure_tx_hashes": configure_tx_hashes,
-        "chain_id": chain_id,
-        "client_version": client_version,
-        "head_seq": head,
-    });
-    info!(report = %serde_json::to_string(&report).expect("report json"), "parity report");
+    write_parity_evm_run_id(&run.run_id);
 }

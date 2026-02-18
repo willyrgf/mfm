@@ -1,0 +1,3 @@
+[profile.default]
+# Origin parity flows include source fetch + compile + deploy and can exceed 60s.
+slow-timeout = { period = "120s", terminate-after = 4 }

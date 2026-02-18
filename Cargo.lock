@@ -1909,6 +1909,7 @@ dependencies = [
  "mfm-collectors-evm-jsonrpc-http",
  "mfm-event-store-postgres",
  "mfm-machine",
+ "mfm-op-aave-v3-origin-adapt",
  "mfm-op-common",
  "mfm-op-evm-deploy-configure-validate",
  "mfm-op-evm-read",
@@ -2031,6 +2032,7 @@ dependencies = [
  "mfm-machine-test-support",
  "mfm-rest-api",
  "mfm-sdk",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2066,6 +2068,17 @@ dependencies = [
  "mfm-machine",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "mfm-op-aave-v3-origin-adapt"
+version = "0.1.0"
+dependencies = [
+ "mfm-machine",
+ "mfm-op-common",
+ "mfm-sdk",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

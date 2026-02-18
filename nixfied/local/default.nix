@@ -172,6 +172,27 @@
         tool = "mfm-contract-artifact-mock-erc20";
       };
 
+      aave-v3-origin-fetch = mkFoundryArtifactApp {
+        name = "aave-v3-origin-fetch";
+        summary = "Fetch pinned Aave v3 origin source metadata";
+        details = "Reads nix-packaged pinned source metadata and emits `aave_v3_origin_source_v1` for parity pipelines.";
+        tool = "mfm-aave-v3-origin-fetch";
+      };
+
+      aave-v3-origin-compile = mkFoundryArtifactApp {
+        name = "aave-v3-origin-compile";
+        summary = "Compile pinned Aave v3 origin artifacts";
+        details = "Runs Foundry compile against pinned `aave-v3-origin` source and emits `aave_v3_origin_compile_manifest_v1`.";
+        tool = "mfm-aave-v3-origin-compile";
+      };
+
+      aave-v3-origin-deploy = mkFoundryArtifactApp {
+        name = "aave-v3-origin-deploy";
+        summary = "Deploy local Aave v3 origin stack";
+        details = "Deploys the full local origin stack plus test listing and emits `aave_v3_origin_deploy_output_v1`.";
+        tool = "mfm-aave-v3-origin-deploy";
+      };
+
       "mfm::keystore::import" = mkMfmCliJsonApp {
         name = "mfm::keystore::import";
         summary = "Import a private key or mnemonic into keystore";

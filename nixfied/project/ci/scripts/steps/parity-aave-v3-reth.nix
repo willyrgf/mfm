@@ -1,5 +1,5 @@
 { pkgs }:
-pkgs.writeText "mfm-ci-steps-parity-evm-reth.sh" ''
+pkgs.writeText "mfm-ci-steps-parity-aave-v3-reth.sh" ''
   eval "$($SLOT_INFO)"
 
   export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
@@ -10,10 +10,10 @@ pkgs.writeText "mfm-ci-steps-parity-evm-reth.sh" ''
   export MFM_S3_PREFIX="$MINIO_PREFIX"
 
   export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
-  export MFM_PARITY_EVM_RETH_RUN_IDS_PATH="$CI_ARTIFACTS_DIR/parity-evm-reth-run-ids.json"
+  export MFM_PARITY_AAVE_V3_RUN_IDS_PATH="$CI_ARTIFACTS_DIR/parity-aave-v3-run-ids.json"
 
   run_hook SVC_MINIO_BUCKET_PROBE_WRITE "$MINIO_BUCKET" "$MINIO_PREFIX"
 
-  LOGFILE=$(artifact_path "parity-evm-reth.log")
-  log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_rest_api_evm_reth_pipeline
+  LOGFILE=$(artifact_path "parity-aave-v3-reth.log")
+  log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_aave_v3_reth_scenario
 ''

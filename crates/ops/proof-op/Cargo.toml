@@ -6,7 +6,9 @@ edition = "2021"
 [dependencies]
 async-trait = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-op-common = { path = "../common" }
+
+[dev-dependencies]
+tokio = { workspace = true }

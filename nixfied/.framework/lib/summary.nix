@@ -125,11 +125,6 @@ let
         fi
       ''}
 
-      if [ -n "$LOGFILE" ] && [ -f "$LOGFILE" ]; then
-        echo ""
-        echo "Last 50 lines:"
-        tail -50 "$LOGFILE" || true
-      fi
     else
       echo "OK: Exit code: 0"
     fi
