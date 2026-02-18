@@ -174,6 +174,15 @@ Anti-patterns:
 
 - Use `tracing` for library and binary instrumentation.
 - Logs go to stderr; contract payloads stay on stdout.
+- Runtime log env contract:
+  - canonical baseline: `LOG_LEVEL`
+  - component overrides: `MFM_LOG` (and `RUST_LOG` compatibility fallback)
+  - format aliases: `LOG_FORMAT` / `MFM_LOG_FORMAT`
+  - span-event aliases: `LOG_SPAN_EVENTS` / `MFM_LOG_SPAN_EVENTS`
+- CI/service diagnostics env contract:
+  - canonical CI diagnostics level: `CI_LOG_LEVEL`
+  - compatibility aliases: `CI_VERBOSE`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`, `NIXFIED_LOG_LEVEL`
+  - parity/CI teardown captures per-service status/events and debug-level service logs for orchestrated fixtures.
 - Include correlation fields when available:
   - `request_id`, `run_id`, `op_id`, `state_id`, `attempt`, `artifact_id`, `event_seq`.
 - Logging and error rendering must follow no-secrets policy.

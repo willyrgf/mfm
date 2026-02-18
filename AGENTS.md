@@ -236,9 +236,11 @@ These are typical, review-friendly change patterns (focus on a single outcome).
 - Binaries:
   - Initialize observability via `mfm_app::observability` so format/filter behavior is uniform.
 - Environment contract:
-  - `MFM_LOG` controls filter directives (fallback: `RUST_LOG`).
-  - `MFM_LOG_FORMAT` controls format (`text` default, `json` optional).
-  - `MFM_LOG_SPAN_EVENTS` controls span lifecycle logging (`none|new|close|active`).
+  - `LOG_LEVEL` is the canonical baseline filter directive.
+  - `MFM_LOG` and `RUST_LOG` remain supported as component-specific overrides/fallbacks.
+  - `LOG_FORMAT` is the canonical format selector (`text` default, `json` optional); `MFM_LOG_FORMAT` remains supported.
+  - `LOG_SPAN_EVENTS` is the canonical span lifecycle selector (`none|new|close|active`); `MFM_LOG_SPAN_EVENTS` remains supported.
+  - CI diagnostics use `CI_LOG_LEVEL` as canonical level; `CI_VERBOSE`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`, and `NIXFIED_LOG_LEVEL` are compatibility aliases.
 - Output contract:
   - Logs go to stderr.
   - CLI/API payload contracts remain on stdout only.
@@ -382,7 +384,7 @@ If you use Nix or need CI parity, also run: `nix flake check && nix build`.
 - Tests: prefer isolated temp dirs/files via `tempfile`.
 - Test logging:
   - initialize test subscriber via `mfm_machine_test_support::init_test_observability()`.
-  - default output is quiet and captured; enable extra verbosity with `MFM_TEST_LOG=1` or `MFM_TEST_LOG_FILTER`.
+  - default output is quiet and captured; enable extra verbosity with `MFM_TEST_LOG=1`, or explicitly set `MFM_TEST_LOG_FILTER` / `MFM_LOG` / `LOG_LEVEL`.
 - CI summaries: `nix run .#ci -- --summary` writes `summary.json` to the artifacts dir (see `nixfied/project/ci.nix`).
 
 

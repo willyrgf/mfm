@@ -11,26 +11,43 @@ use mfm_machine::hashing::artifact_id_for_bytes;
 use mfm_machine::ids::{ArtifactId, OpId, RunId, StateId};
 use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
 
+const TEST_FILTER_DEFAULT: &str = "warn,mfm=debug";
+const TEST_FILTER_VERBOSE: &str = "debug,mfm=trace";
+
+fn resolve_test_filter<F>(mut lookup: F) -> String
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if let Some(filter) = lookup("MFM_TEST_LOG_FILTER") {
+        return filter;
+    }
+    if let Some(filter) = lookup("MFM_LOG") {
+        return filter;
+    }
+    if let Some(filter) = lookup("LOG_LEVEL") {
+        return filter;
+    }
+    if let Some(filter) = lookup("RUST_LOG") {
+        return filter;
+    }
+
+    if lookup("MFM_TEST_LOG").is_some() {
+        TEST_FILTER_VERBOSE.to_string()
+    } else {
+        TEST_FILTER_DEFAULT.to_string()
+    }
+}
+
 pub fn init_test_observability() {
     static INIT: Once = Once::new();
 
     INIT.call_once(|| {
-        let filter = std::env::var("MFM_TEST_LOG_FILTER")
-            .ok()
-            .or_else(|| std::env::var("MFM_LOG").ok())
-            .or_else(|| std::env::var("RUST_LOG").ok())
-            .unwrap_or_else(|| {
-                if std::env::var("MFM_TEST_LOG").is_ok() {
-                    "debug,mfm=trace".to_string()
-                } else {
-                    "warn,mfm=debug".to_string()
-                }
-            });
+        let filter = resolve_test_filter(|name| std::env::var(name).ok());
 
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_new(filter)
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,mfm=debug")),
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(TEST_FILTER_DEFAULT)),
             )
             .with_test_writer()
             .with_target(true)
@@ -179,4 +196,58 @@ async fn expected_seq_concurrency(store: &dyn EventStore) {
     }
 
     assert_eq!(store.head_seq(run_id).await.expect("head_seq"), 1);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{resolve_test_filter, TEST_FILTER_DEFAULT, TEST_FILTER_VERBOSE};
+
+    fn lookup_from(entries: &[(&str, &str)]) -> impl FnMut(&str) -> Option<String> {
+        let vars: HashMap<String, String> = entries
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect();
+        move |name| vars.get(name).cloned()
+    }
+
+    #[test]
+    fn test_filter_prefers_test_specific_override() {
+        let filter = resolve_test_filter(lookup_from(&[
+            ("MFM_TEST_LOG_FILTER", "trace"),
+            ("MFM_LOG", "warn"),
+            ("LOG_LEVEL", "info"),
+        ]));
+        assert_eq!(filter, "trace");
+    }
+
+    #[test]
+    fn test_filter_prefers_component_override_before_global_level() {
+        let filter = resolve_test_filter(lookup_from(&[
+            ("MFM_LOG", "debug,mfm=trace"),
+            ("LOG_LEVEL", "info"),
+            ("RUST_LOG", "warn"),
+        ]));
+        assert_eq!(filter, "debug,mfm=trace");
+    }
+
+    #[test]
+    fn test_filter_uses_global_level_before_rust_log() {
+        let filter =
+            resolve_test_filter(lookup_from(&[("LOG_LEVEL", "debug"), ("RUST_LOG", "warn")]));
+        assert_eq!(filter, "debug");
+    }
+
+    #[test]
+    fn test_filter_uses_verbose_default_when_enabled() {
+        let filter = resolve_test_filter(lookup_from(&[("MFM_TEST_LOG", "1")]));
+        assert_eq!(filter, TEST_FILTER_VERBOSE);
+    }
+
+    #[test]
+    fn test_filter_uses_quiet_default_when_not_enabled() {
+        let filter = resolve_test_filter(lookup_from(&[]));
+        assert_eq!(filter, TEST_FILTER_DEFAULT);
+    }
 }

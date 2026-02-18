@@ -100,20 +100,6 @@ let
         type = "bool";
         required = false;
       }
-      {
-        name = "verbose";
-        kind = "flag";
-        long = "--verbose";
-        type = "bool";
-        required = false;
-      }
-      {
-        name = "debug";
-        kind = "flag";
-        long = "--debug";
-        type = "bool";
-        required = false;
-      }
     ];
     env = [
       {
@@ -156,6 +142,16 @@ let
         required = false;
       }
       {
+        name = "LOG_LEVEL";
+        type = "string";
+        required = false;
+      }
+      {
+        name = "CI_LOG_LEVEL";
+        type = "string";
+        required = false;
+      }
+      {
         name = "CI_VERBOSE";
         type = "bool";
         required = false;
@@ -188,12 +184,19 @@ in
           - `--mode <name>` or `--mode=<name>`: select a mode by name
           - `--summary`: print a compact summary and write `summary.json` into the artifacts dir
           - `--bg|--background`: run in background via the run registry
-          - `--verbose|--debug`: enable debug logs (including teardown diagnostic collection details)
+          - `CI_LOG_LEVEL`: canonical CI diagnostics verbosity (`debug` and `trace` enable debug teardown output)
+          - `CI_VERBOSE=1`: compatibility toggle that maps to `CI_LOG_LEVEL=debug`
+          - `LOG_LEVEL`: canonical process-wide baseline log level/filter for Rust apps/tests/services launched by CI
 
           Readiness-first behavior:
           - parity/mainnet workflows gate on service `*_READY` hooks
           - parity fixtures with `profile = "test"` use profile-specific readiness when available (Postgres uses `SVC_POSTGRES_READY_TEST`)
           - fixture logs are persisted under CI artifacts for debugging
+
+          Service diagnostics coverage:
+          - CI setup normalizes logging env for Rust apps/tests and service wrappers.
+          - CI teardown collects diagnostics for `postgres`, `minio`, `reth`, `helios`, and `nginx`.
+          - service status/events are always captured; service log tails are captured when CI log level resolves to `debug` or `trace`.
 
           Process-first diagnostics:
           - `nix run .#process::status -- --all`
@@ -209,12 +212,14 @@ in
           "nix run .#ci -- --mode basic --summary"
           "nix run .#ci -- --mode full --summary"
           "nix run .#ci -- --mode=basic --summary"
+          "CI_LOG_LEVEL=debug LOG_LEVEL='debug,mfm=trace' nix run .#ci -- --parity --summary"
           "nix run .#ci -- --bg"
           "nix run .#ci -- --background"
         ];
         examples = [
           "nix run .#ci -- --basic --summary"
           "CI_ARTIFACTS_DIR=/tmp/ci-artifacts nix run .#ci -- --parity --summary"
+          "CI_LOG_LEVEL=debug LOG_LEVEL='debug,mfm=trace' nix run .#ci -- --parity --summary"
           "nix run .#ci -- --full --summary"
           "nix run .#process::status -- --all"
         ];
@@ -255,14 +260,6 @@ in
             name = "--background";
             description = "Alias for --bg.";
           }
-          {
-            name = "--verbose";
-            description = "Enable debug logging for framework and CI teardown diagnostics.";
-          }
-          {
-            name = "--debug";
-            description = "Alias for --verbose debug logging.";
-          }
         ];
         env = [
           {
@@ -286,12 +283,20 @@ in
             description = "Optional process-first policy override (local|global).";
           }
           {
+            name = "LOG_LEVEL";
+            description = "Canonical baseline log filter for Rust apps/tests/services started by CI.";
+          }
+          {
+            name = "CI_LOG_LEVEL";
+            description = "Canonical CI diagnostics log level (debug/trace enable verbose teardown diagnostics).";
+          }
+          {
             name = "CI_VERBOSE";
-            description = "Set to 1/true to enable debug logs (equivalent to --verbose).";
+            description = "Legacy compatibility toggle that maps to CI_LOG_LEVEL=debug.";
           }
           {
             name = "NIXFIED_LOG_LEVEL";
-            description = "Set to debug to enable framework debug logs.";
+            description = "Legacy compatibility alias for CI_LOG_LEVEL.";
           }
         ];
         category = "core";

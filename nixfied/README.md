@@ -648,6 +648,13 @@ CI environment variables available inside steps:
 - `CI_ARTIFACTS_DIR`
 - `CI_KEEP_ARTIFACTS_ON_FAILURE`
 - `CI_KEEP_ARTIFACTS_ON_SUCCESS`
+- `LOG_LEVEL` (canonical process-wide baseline log filter)
+- `CI_LOG_LEVEL` (canonical CI diagnostics verbosity level)
+
+Logging compatibility aliases:
+- `MFM_LOG` and `RUST_LOG` remain supported for Rust runtime filters.
+- `MFM_LOG_FORMAT` / `LOG_FORMAT` and `MFM_LOG_SPAN_EVENTS` / `LOG_SPAN_EVENTS` are interchangeable aliases.
+- `CI_VERBOSE`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`, and `NIXFIED_LOG_LEVEL` are compatibility inputs that map into `CI_LOG_LEVEL`.
 
 Artifacts:
 - Stored per run under `ci.artifacts.dir/<run-id>` by default.
@@ -747,6 +754,11 @@ Service-level observability extensions:
 - `nix run .#svc::<name>::log -- [--lines N] [--follow]`
 - `nix run .#svc::<name>::events -- [--limit N]`
 - `nix run .#svc::<name>::status` (local + global registry merge)
+
+CI teardown diagnostics:
+- Always collects process diagnostics plus per-service status/events.
+- When `CI_LOG_LEVEL` resolves to `debug`/`trace`, also captures per-service log tails
+  (`ci-diagnostics-service-<service>-log.log`) for fixture-backed services.
 
 Extended `svc::<name>::status` fields:
 - `scope`
