@@ -16,6 +16,7 @@ let
     timeout = 5;
   };
   failureCodesCargo = failureCodesScript // {
+    cargoTestFailure = 100;
     cargoFailure = 101;
   };
   ciModeValues = [
@@ -322,6 +323,10 @@ in
     env = {
       "${project.envVar}" = "test";
       CARGO_TERM_COLOR = "always";
+      # Keep rust artifacts in the run-scoped ephemeral root so sequential CI
+      # steps can reuse them safely without cross-run leakage.
+      CARGO_TARGET_DIR = "$MFM_EPHEMERAL_ROOT/build/cargo-target";
+      CARGO_HOME = "$MFM_EPHEMERAL_ROOT/build/cargo-home";
       RUST_BACKTRACE = "1";
       SERVICE_OWNER_SCOPE = "persistent";
       SERVICE_DISCOVERY_SCOPE = "global";

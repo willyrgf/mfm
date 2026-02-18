@@ -62,8 +62,35 @@ normalize_ci_logging_env() {
   fi
 }
 
+init_ci_cargo_paths() {
+  local default_target_dir=""
+  local default_cargo_home=""
+
+  if [ -z "''${CARGO_TARGET_DIR:-}" ]; then
+    if [ -n "''${MFM_EPHEMERAL_ROOT:-}" ]; then
+      default_target_dir="$MFM_EPHEMERAL_ROOT/build/cargo-target"
+    else
+      default_target_dir="$(pwd)/target"
+    fi
+    export CARGO_TARGET_DIR="$default_target_dir"
+  fi
+
+  if [ -z "''${CARGO_HOME:-}" ]; then
+    if [ -n "''${MFM_EPHEMERAL_ROOT:-}" ]; then
+      default_cargo_home="$MFM_EPHEMERAL_ROOT/build/cargo-home"
+    else
+      default_cargo_home="$HOME/.cargo"
+    fi
+    export CARGO_HOME="$default_cargo_home"
+  fi
+
+  mkdir -p "$CARGO_TARGET_DIR" "$CARGO_HOME"
+  echo "INFO: ci cargo paths target_dir=$CARGO_TARGET_DIR cargo_home=$CARGO_HOME" >&2
+}
+
 eval "$($SLOT_INFO)"
 normalize_ci_logging_env
+init_ci_cargo_paths
 
 kill_conflicting_listener() {
   local port="$1"
