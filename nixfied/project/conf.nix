@@ -620,6 +620,12 @@ rec {
     registryRoot = "/tmp/nixfied-runtime/${project.id}";
   };
 
+  # Canonical Nixfied shell logging defaults.
+  logging = {
+    level = "info";
+    output = "stdout";
+  };
+
   # Discovery index policy used by `nix run .#check`.
   discovery = {
     strict = true;

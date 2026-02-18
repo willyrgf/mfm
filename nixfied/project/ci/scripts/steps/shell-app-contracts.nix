@@ -19,9 +19,9 @@ set +e
   echo "$ci_contract" | jq -e '.args[] | select(.name == "mode") | .kind == "option" and .type == "enum" and (.values | index("basic") != null)' >/dev/null
   echo "$ci_contract" | jq -e '.args[] | select(.name == "mode") | ((["audit","basic","full","mainnet","parity"] - (.values // [])) | length) == 0' >/dev/null
   echo "$ci_contract" | jq -e '[.args[] | select((.name == "basic" or .name == "mode_basic") and .kind == "flag" and .type == "bool")] | length > 0' >/dev/null
-  # CI logging env normalization is enforced in setup/teardown scripts.
-  # The shell-app contract should expose artifacts + CI logging controls.
-  echo "$ci_contract" | jq -e '[(.env // [])[].name] | index("CI_ARTIFACTS_DIR") != null and index("CI_ARTIFACTS_BASE") != null and index("LOG_LEVEL") != null and index("CI_LOG_LEVEL") != null and index("CI_VERBOSE") != null and index("NIXFIED_LOG_LEVEL") != null' >/dev/null
+  # CI logging hard-break is enforced in setup/teardown scripts.
+  # The framework CI app-contract env surface is artifacts-only.
+  echo "$ci_contract" | jq -e '[(.env // [])[].name] | index("CI_ARTIFACTS_DIR") != null and index("CI_ARTIFACTS_BASE") != null and index("LOG_LEVEL") == null and index("CI_LOG_LEVEL") == null and index("CI_VERBOSE") == null and index("NIXFIED_LOG_LEVEL") == null' >/dev/null
   echo "$ci_contract" | jq -e '[.args[].long] | index("--verbose") == null and index("--debug") == null' >/dev/null
   echo "$check_contract" | jq -e '.commandClass == "typed" and .allowUnknownArgs == false and .outputs.mode == "text"' >/dev/null
   echo "$snapshot_contract" | jq -e '.commandClass == "json" and .allowUnknownArgs == false and .outputs.mode == "json"' >/dev/null
@@ -32,7 +32,8 @@ set +e
 
   # Logging normalization contracts for CI setup/teardown scripts.
   grep -Fq 'normalize_ci_logging_env()' nixfied/project/ci/scripts/setup.nix
-  grep -Fq 'export CI_LOG_LEVEL=' nixfied/project/ci/scripts/setup.nix
+  grep -Fq 'reject_legacy_ci_logging_env()' nixfied/project/ci/scripts/setup.nix
+  grep -Fq 'deprecated CI logging env var(s)' nixfied/project/ci/scripts/setup.nix
   grep -Fq 'export LOG_LEVEL=' nixfied/project/ci/scripts/setup.nix
   grep -Fq '_ci_debug_enabled()' nixfied/project/ci/scripts/teardown.nix
   grep -Fq 'ci-diagnostics-service-' nixfied/project/ci/scripts/teardown.nix

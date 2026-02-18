@@ -153,7 +153,7 @@ in
         ];
       };
       script = ''
-        eval "$($SLOT_INFO)"
+        source <($SLOT_INFO)
 
         export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm"
         export MFM_REST_API_ADDR="127.0.0.1:$REST_API_PORT"
@@ -301,7 +301,7 @@ in
 
         ADDRESS="$1"
 
-        eval "$($SLOT_INFO)"
+        source <($SLOT_INFO)
 
         # Keep this app mainnet-only (chain-id 1) to avoid accidental local/reth wiring.
         if [ "''${HELIOS_NETWORK:-}" != "mainnet" ]; then

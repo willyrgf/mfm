@@ -1,6 +1,6 @@
 { pkgs }:
 pkgs.writeText "mfm-ci-steps-mainnet-portfolio-snapshot-helios.sh" ''
-  eval "$($SLOT_INFO)"
+  source <($SLOT_INFO)
 
   export HELIOS_NETWORK="mainnet"
   # Execution RPC must support `eth_getProof` for explicit block numbers (not just `latest`).

@@ -1,6 +1,6 @@
 { pkgs }:
 pkgs.writeText "mfm-ci-steps-parity-postgres.sh" ''
-  eval "$($SLOT_INFO)"
+  source <($SLOT_INFO)
   # Fixture `postgres` with profile `test` already waits on SVC_POSTGRES_READY_TEST.
 
   export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"

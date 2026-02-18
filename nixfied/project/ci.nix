@@ -142,26 +142,6 @@ let
         ];
         required = false;
       }
-      {
-        name = "LOG_LEVEL";
-        type = "string";
-        required = false;
-      }
-      {
-        name = "CI_LOG_LEVEL";
-        type = "string";
-        required = false;
-      }
-      {
-        name = "CI_VERBOSE";
-        type = "bool";
-        required = false;
-      }
-      {
-        name = "NIXFIED_LOG_LEVEL";
-        type = "string";
-        required = false;
-      }
     ];
   };
   # Policy: CI shell logic must be Nix-packaged/Nix-evaluated (no committed raw .sh scripts).
@@ -185,9 +165,8 @@ in
           - `--mode <name>` or `--mode=<name>`: select a mode by name
           - `--summary`: print a compact summary and write `summary.json` into the artifacts dir
           - `--bg|--background`: run in background via the run registry
-          - `CI_LOG_LEVEL`: canonical CI diagnostics verbosity (`debug` and `trace` enable debug teardown output)
-          - `CI_VERBOSE=1`: compatibility toggle that maps to `CI_LOG_LEVEL=debug`
           - `LOG_LEVEL`: canonical process-wide baseline log level/filter for Rust apps/tests/services launched by CI
+            (runtime env, not a CI app-contract field)
 
           Readiness-first behavior:
           - parity/mainnet workflows gate on service `*_READY` hooks
@@ -196,8 +175,9 @@ in
 
           Service diagnostics coverage:
           - CI setup normalizes logging env for Rust apps/tests and service wrappers.
+          - Deprecated CI logging env vars are rejected (`CI_LOG_LEVEL`, `CI_VERBOSE`, `NIXFIED_LOG_LEVEL`, `NIXFIED_VERBOSE`, `NIXFIED_DEBUG`).
           - CI teardown collects diagnostics for `postgres`, `minio`, `reth`, `helios`, and `nginx`.
-          - service status/events are always captured; service log tails are captured when CI log level resolves to `debug` or `trace`.
+          - service status/events are always captured; service log tails are captured when `LOG_LEVEL` resolves to `debug` or `trace`.
 
           Process-first diagnostics:
           - `nix run .#process::status -- --all`
@@ -213,14 +193,14 @@ in
           "nix run .#ci -- --mode basic --summary"
           "nix run .#ci -- --mode full --summary"
           "nix run .#ci -- --mode=basic --summary"
-          "CI_LOG_LEVEL=debug LOG_LEVEL='debug,mfm=trace' nix run .#ci -- --parity --summary"
+          "LOG_LEVEL='debug,mfm=trace' nix run .#ci -- --parity --summary"
           "nix run .#ci -- --bg"
           "nix run .#ci -- --background"
         ];
         examples = [
           "nix run .#ci -- --basic --summary"
           "CI_ARTIFACTS_DIR=/tmp/ci-artifacts nix run .#ci -- --parity --summary"
-          "CI_LOG_LEVEL=debug LOG_LEVEL='debug,mfm=trace' nix run .#ci -- --parity --summary"
+          "LOG_LEVEL='debug,mfm=trace' nix run .#ci -- --parity --summary"
           "nix run .#ci -- --full --summary"
           "nix run .#process::status -- --all"
         ];
@@ -282,22 +262,6 @@ in
           {
             name = "SERVICE_DISCOVERY_SCOPE";
             description = "Optional process-first policy override (local|global).";
-          }
-          {
-            name = "LOG_LEVEL";
-            description = "Canonical baseline log filter for Rust apps/tests/services started by CI.";
-          }
-          {
-            name = "CI_LOG_LEVEL";
-            description = "Canonical CI diagnostics log level (debug/trace enable verbose teardown diagnostics).";
-          }
-          {
-            name = "CI_VERBOSE";
-            description = "Legacy compatibility toggle that maps to CI_LOG_LEVEL=debug.";
-          }
-          {
-            name = "NIXFIED_LOG_LEVEL";
-            description = "Legacy compatibility alias for CI_LOG_LEVEL.";
           }
         ];
         category = "core";

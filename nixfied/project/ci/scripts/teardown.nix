@@ -5,38 +5,9 @@ CI_DIAG_EVENTS_LIMIT="''${CI_DIAG_EVENTS_LIMIT:-200}"
 CI_DIAG_LOG_LINES="''${CI_DIAG_LOG_LINES:-200}"
 CI_PROCESS_STOP_TIMEOUT_SECS="''${CI_PROCESS_STOP_TIMEOUT_SECS:-20}"
 
-_ci_truthy() {
-  case "''${1:-}" in
-    1|true|TRUE|yes|YES|on|ON) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-_resolve_ci_log_level() {
-  if [ -n "''${CI_LOG_LEVEL:-}" ]; then
-    printf '%s' "$CI_LOG_LEVEL"
-    return 0
-  fi
-
-  if _ci_truthy "''${CI_VERBOSE:-0}" || _ci_truthy "''${NIXFIED_VERBOSE:-0}" || _ci_truthy "''${NIXFIED_DEBUG:-0}"; then
-    printf '%s' "debug"
-    return 0
-  fi
-
-  if [ -n "''${NIXFIED_LOG_LEVEL:-}" ]; then
-    printf '%s' "$NIXFIED_LOG_LEVEL"
-    return 0
-  fi
-
-  if [ -n "''${LOG_LEVEL:-}" ]; then
-    printf '%s' "$LOG_LEVEL"
-    return 0
-  fi
-}
-
 _ci_debug_enabled() {
   local level_lower=""
-  level_lower="$(_resolve_ci_log_level | tr '[:upper:]' '[:lower:]')"
+  level_lower="$(printf '%s' "''${LOG_LEVEL:-}" | tr '[:upper:]' '[:lower:]')"
   case "$level_lower" in
     *debug*|*trace*) return 0 ;;
     *) return 1 ;;

@@ -1,6 +1,6 @@
 { pkgs }:
 pkgs.writeText "mfm-ci-steps-parity-evm-helios-smoke.sh" ''
-  eval "$($SLOT_INFO)"
+  source <($SLOT_INFO)
 
   export HELIOS_NETWORK="local"
   export HELIOS_EXECUTION_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"

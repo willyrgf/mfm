@@ -1,29 +1,34 @@
 { pkgs }:
 pkgs.writeText "mfm-ci-setup.sh" ''
-_ci_truthy() {
-  case "''${1:-}" in
-    1|true|TRUE|yes|YES|on|ON) return 0 ;;
-    *) return 1 ;;
-  esac
+reject_legacy_ci_logging_env() {
+  local deprecated=""
+
+  if [ "''${CI_LOG_LEVEL+x}" = "x" ]; then
+    deprecated="$deprecated CI_LOG_LEVEL"
+  fi
+  if [ "''${CI_VERBOSE+x}" = "x" ]; then
+    deprecated="$deprecated CI_VERBOSE"
+  fi
+  if [ "''${NIXFIED_LOG_LEVEL+x}" = "x" ]; then
+    deprecated="$deprecated NIXFIED_LOG_LEVEL"
+  fi
+  if [ "''${NIXFIED_VERBOSE+x}" = "x" ]; then
+    deprecated="$deprecated NIXFIED_VERBOSE"
+  fi
+  if [ "''${NIXFIED_DEBUG+x}" = "x" ]; then
+    deprecated="$deprecated NIXFIED_DEBUG"
+  fi
+
+  deprecated="''${deprecated# }"
+  if [ -n "$deprecated" ]; then
+    echo "ERROR: deprecated CI logging env var(s): $deprecated" >&2
+    echo "HINT: use LOG_LEVEL for CI diagnostics verbosity." >&2
+    exit 3
+  fi
 }
 
 normalize_ci_logging_env() {
-  local resolved_ci_log_level=""
   local resolved_log_level=""
-
-  if [ -n "''${CI_LOG_LEVEL:-}" ]; then
-    resolved_ci_log_level="$CI_LOG_LEVEL"
-  elif _ci_truthy "''${CI_VERBOSE:-0}" || _ci_truthy "''${NIXFIED_VERBOSE:-0}" || _ci_truthy "''${NIXFIED_DEBUG:-0}"; then
-    resolved_ci_log_level="debug"
-  elif [ -n "''${NIXFIED_LOG_LEVEL:-}" ]; then
-    resolved_ci_log_level="$NIXFIED_LOG_LEVEL"
-  elif [ -n "''${LOG_LEVEL:-}" ]; then
-    resolved_ci_log_level="$LOG_LEVEL"
-  fi
-
-  if [ -n "$resolved_ci_log_level" ]; then
-    export CI_LOG_LEVEL="$resolved_ci_log_level"
-  fi
 
   if [ -n "''${LOG_LEVEL:-}" ]; then
     resolved_log_level="$LOG_LEVEL"
@@ -31,20 +36,12 @@ normalize_ci_logging_env() {
     resolved_log_level="$MFM_LOG"
   elif [ -n "''${RUST_LOG:-}" ]; then
     resolved_log_level="$RUST_LOG"
-  elif [ -n "''${CI_LOG_LEVEL:-}" ]; then
-    resolved_log_level="$CI_LOG_LEVEL"
-  elif [ -n "''${NIXFIED_LOG_LEVEL:-}" ]; then
-    resolved_log_level="$NIXFIED_LOG_LEVEL"
   fi
 
   if [ -n "$resolved_log_level" ]; then
     export LOG_LEVEL="$resolved_log_level"
     export MFM_LOG="''${MFM_LOG:-$resolved_log_level}"
     export RUST_LOG="''${RUST_LOG:-$resolved_log_level}"
-  fi
-
-  if [ -n "''${CI_LOG_LEVEL:-}" ] && [ -z "''${NIXFIED_LOG_LEVEL:-}" ]; then
-    export NIXFIED_LOG_LEVEL="$CI_LOG_LEVEL"
   fi
 
   if [ -n "''${MFM_LOG_FORMAT:-}" ] && [ -z "''${LOG_FORMAT:-}" ]; then
@@ -88,7 +85,8 @@ init_ci_cargo_paths() {
   echo "INFO: ci cargo paths target_dir=$CARGO_TARGET_DIR cargo_home=$CARGO_HOME" >&2
 }
 
-eval "$($SLOT_INFO)"
+source <($SLOT_INFO)
+reject_legacy_ci_logging_env
 normalize_ci_logging_env
 init_ci_cargo_paths
 
