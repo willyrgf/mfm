@@ -161,6 +161,15 @@ let
 
     emit_service_event service_starting starting --pid "$CHILD_PID" --log-path "$RETH_LOG_FILE"
 
+    signal_name_from_num() {
+      local signal_num="''${1:-}"
+      if [ -z "$signal_num" ]; then
+        echo "UNKNOWN"
+        return 0
+      fi
+      kill -l "$signal_num" 2>/dev/null | tr '[:lower:]' '[:upper:]' || echo "UNKNOWN"
+    }
+
     cleanup() {
       if [ -n "''${CHILD_PID:-}" ] && kill -0 "$CHILD_PID" 2>/dev/null; then
         kill "$CHILD_PID" 2>/dev/null || true
@@ -169,7 +178,21 @@ let
       rm -f "$RETH_PID_FILE"
     }
 
-    trap cleanup EXIT INT TERM
+    on_wrapper_signal() {
+      local signal_name="$1"
+      local now=""
+      now=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)
+      emit_service_event service_degraded degraded \
+        --pid "''${CHILD_PID:-}" \
+        --log-path "$RETH_LOG_FILE" \
+        --wait-reason "wrapper_signal signal=$signal_name wrapper_pid=$$ timestamp=$now" \
+        --last-error "reth wrapper received external signal"
+      log_warn "reth wrapper signal=$signal_name wrapper_pid=$$ child_pid=''${CHILD_PID:-unknown} timestamp=$now"
+    }
+
+    trap cleanup EXIT
+    trap 'on_wrapper_signal INT; exit 130' INT
+    trap 'on_wrapper_signal TERM; exit 143' TERM
 
     READY=0
     for _ in $(seq 1 80); do
@@ -211,11 +234,22 @@ let
     if [ "$RC" -eq 0 ]; then
       emit_service_event service_stopped stopped --pid "$CHILD_PID" --log-path "$RETH_LOG_FILE"
     else
-      emit_service_event service_degraded degraded \
-        --pid "$CHILD_PID" \
-        --log-path "$RETH_LOG_FILE" \
-        --wait-reason "reth_process_exit code=$RC" \
-        --last-error "reth process exited non-zero"
+      if [ "$RC" -ge 128 ]; then
+        SIGNAL_NUM=$((RC - 128))
+        SIGNAL_NAME=$(signal_name_from_num "$SIGNAL_NUM")
+        emit_service_event service_degraded degraded \
+          --pid "$CHILD_PID" \
+          --log-path "$RETH_LOG_FILE" \
+          --wait-reason "reth_process_signal signal=$SIGNAL_NAME signal_num=$SIGNAL_NUM rc=$RC" \
+          --last-error "reth process terminated by signal"
+        log_warn "reth terminated by signal signal=$SIGNAL_NAME signal_num=$SIGNAL_NUM rc=$RC pid=$CHILD_PID"
+      else
+        emit_service_event service_degraded degraded \
+          --pid "$CHILD_PID" \
+          --log-path "$RETH_LOG_FILE" \
+          --wait-reason "reth_process_exit code=$RC" \
+          --last-error "reth process exited non-zero"
+      fi
     fi
     exit "$RC"
   '';

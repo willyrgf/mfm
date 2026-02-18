@@ -528,6 +528,8 @@ let
 
       require_contains "$reth_lifecycle_file" '--port "$RETH_P2P_PORT"' "reth slot-scoped p2p port arg"
       require_contains "$reth_lifecycle_file" 'p2p_port=$RETH_P2P_PORT' "reth status includes p2p port"
+      require_contains "$reth_lifecycle_file" 'wrapper_signal signal=' "reth wrapper signal diagnostics"
+      require_contains "$reth_lifecycle_file" 'reth_process_signal signal=' "reth child signal diagnostics"
       require_contains "$ci_setup_file" 'kill_conflicting_listener "''${RETHP2P_PORT:-}" "reth-p2p" "reth" "reth"' "ci reth p2p cleanup uses slot-scoped port"
       require_absent "$ci_setup_file" 'kill_conflicting_listener "30303" "reth-p2p" "reth" "reth"' "ci reth p2p cleanup no fixed global port"
     }

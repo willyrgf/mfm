@@ -304,6 +304,66 @@ async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> Postgr
     );
 }
 
+fn summarize_exec_error_details(details: Option<&serde_json::Value>) -> Option<String> {
+    let obj = details?.as_object()?;
+    let mut parts = Vec::new();
+
+    if let Some(program_path) = obj.get("program_path").and_then(|v| v.as_str()) {
+        parts.push(format!("program_path={program_path}"));
+    }
+    if let Some(timeout_ms) = obj.get("timeout_ms").and_then(|v| v.as_u64()) {
+        parts.push(format!("timeout_ms={timeout_ms}"));
+    }
+    if let Some(exit_code) = obj.get("exit_code").and_then(|v| v.as_i64()) {
+        parts.push(format!("exit_code={exit_code}"));
+    }
+    if let Some(signal) = obj.get("signal").and_then(|v| v.as_i64()) {
+        parts.push(format!("signal={signal}"));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+fn read_reth_probe_diagnostics() -> Option<String> {
+    let path = std::env::var("MFM_PARITY_AAVE_V3_RETH_PROBE_PATH").ok()?;
+    let contents = std::fs::read_to_string(path).ok()?;
+    let last_line = contents
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())?;
+    let probe: serde_json::Value = serde_json::from_str(last_line).ok()?;
+    let mut parts = Vec::new();
+
+    if let Some(ts) = probe.get("timestamp").and_then(|v| v.as_str()) {
+        parts.push(format!("timestamp={ts}"));
+    }
+    if let Some(phase) = probe.get("phase").and_then(|v| v.as_str()) {
+        parts.push(format!("phase={phase}"));
+    }
+    if let Some(running) = probe.get("running").and_then(|v| v.as_str()) {
+        parts.push(format!("running={running}"));
+    }
+    if let Some(health_ok) = probe.get("health_ok").and_then(|v| v.as_bool()) {
+        parts.push(format!("health_ok={health_ok}"));
+    }
+    if let Some(pid) = probe.get("pid").and_then(|v| v.as_str()) {
+        parts.push(format!("pid={pid}"));
+    }
+    if let Some(wait_reason) = probe.get("wait_reason").and_then(|v| v.as_str()) {
+        parts.push(format!("wait_reason={wait_reason}"));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
 async fn run_failure_diagnostics(events: Arc<dyn EventStore>, run_id: RunId) -> String {
     let stream = match events.read_range(run_id, 1, None).await {
         Ok(stream) => stream,
@@ -313,7 +373,7 @@ async fn run_failure_diagnostics(events: Arc<dyn EventStore>, run_id: RunId) -> 
     };
 
     let mut last_state_entered: Option<(u64, String, u32)> = None;
-    let mut last_state_failed: Option<(u64, String, String, bool, String)> = None;
+    let mut last_state_failed: Option<(u64, String, String, bool, String, Option<String>)> = None;
     let mut last_fact_key: Option<(u64, String)> = None;
 
     for envelope in stream {
@@ -326,12 +386,14 @@ async fn run_failure_diagnostics(events: Arc<dyn EventStore>, run_id: RunId) -> 
             Event::Kernel(KernelEvent::StateFailed {
                 state_id, error, ..
             }) => {
+                let detail_summary = summarize_exec_error_details(error.info.details.as_ref());
                 last_state_failed = Some((
                     envelope.seq,
                     state_id.0,
                     error.info.code.0,
                     error.info.retryable,
                     error.info.message,
+                    detail_summary,
                 ));
             }
             Event::Domain(domain) if domain.name == "fact_recorded" => {
@@ -349,13 +411,19 @@ async fn run_failure_diagnostics(events: Arc<dyn EventStore>, run_id: RunId) -> 
             "last_state_entered={state_id} attempt={attempt} seq={seq}"
         ));
     }
-    if let Some((seq, state_id, code, retryable, message)) = last_state_failed {
+    if let Some((seq, state_id, code, retryable, message, detail_summary)) = last_state_failed {
         parts.push(format!(
             "state_failed={state_id} seq={seq} code={code} retryable={retryable} message={message}"
         ));
+        if let Some(details) = detail_summary {
+            parts.push(format!("state_failed_details={details}"));
+        }
     }
     if let Some((seq, fact_key)) = last_fact_key {
         parts.push(format!("last_fact_key={fact_key} seq={seq}"));
+    }
+    if let Some(reth_probe) = read_reth_probe_diagnostics() {
+        parts.push(format!("reth_probe={reth_probe}"));
     }
     if parts.len() == 1 {
         parts.push("no_state_failed_event_found".to_string());

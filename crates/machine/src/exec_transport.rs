@@ -8,6 +8,8 @@
 //! - Errors MUST NOT echo stdout/stderr or request payloads (avoid accidental secret leakage).
 
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -41,6 +43,21 @@ fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> E
         retryable: false,
         message: message.to_string(),
         details: None,
+    }
+}
+
+fn info_with_details(
+    code: &'static str,
+    category: ErrorCategory,
+    message: &'static str,
+    details: serde_json::Value,
+) -> ErrorInfo {
+    ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category,
+        retryable: false,
+        message: message.to_string(),
+        details: Some(details),
     }
 }
 
@@ -230,10 +247,13 @@ impl LiveIoTransport for ExecProgramTransport {
         }
 
         let mut child = cmd.spawn().map_err(|_| {
-            IoError::Transport(info(
+            IoError::Transport(info_with_details(
                 CODE_EXEC_SPAWN_FAILED,
                 ErrorCategory::Unknown,
                 "failed to spawn program",
+                serde_json::json!({
+                    "program_path": req.program_path.clone(),
+                }),
             ))
         })?;
 
@@ -251,25 +271,58 @@ impl LiveIoTransport for ExecProgramTransport {
         let output = tokio::time::timeout(duration, child.wait_with_output())
             .await
             .map_err(|_| {
-                IoError::Transport(info(
+                IoError::Transport(info_with_details(
                     CODE_EXEC_TIMEOUT,
                     ErrorCategory::Unknown,
                     "program execution timed out",
+                    serde_json::json!({
+                        "program_path": req.program_path.clone(),
+                        "timeout_ms": req.timeout_ms,
+                    }),
                 ))
             })?
             .map_err(|_| {
-                IoError::Transport(info(
+                IoError::Transport(info_with_details(
                     CODE_EXEC_FAILED,
                     ErrorCategory::Unknown,
                     "program execution failed",
+                    serde_json::json!({
+                        "program_path": req.program_path.clone(),
+                    }),
                 ))
             })?;
 
         if !output.status.success() {
-            return Err(IoError::Transport(info(
+            let mut details = serde_json::Map::new();
+            details.insert(
+                "program_path".to_string(),
+                serde_json::Value::String(req.program_path.clone()),
+            );
+            details.insert(
+                "exit_code".to_string(),
+                output
+                    .status
+                    .code()
+                    .map(serde_json::Value::from)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            #[cfg(unix)]
+            {
+                details.insert(
+                    "signal".to_string(),
+                    output
+                        .status
+                        .signal()
+                        .map(serde_json::Value::from)
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+
+            return Err(IoError::Transport(info_with_details(
                 CODE_EXEC_FAILED,
                 ErrorCategory::Unknown,
                 "program exited with non-zero status",
+                serde_json::Value::Object(details),
             )));
         }
 
@@ -294,6 +347,9 @@ mod tests {
     use crate::live_io::LiveIoEnv;
     use crate::stores::{ArtifactKind, ArtifactStore, EventStore};
     use async_trait::async_trait;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     #[derive(Clone)]
@@ -356,6 +412,25 @@ mod tests {
             state_id: StateId("machine.main.s1".to_string()),
             attempt: 0,
         }
+    }
+
+    fn write_test_program(script_body: &str) -> (PathBuf, String) {
+        let root =
+            std::env::temp_dir().join(format!("mfm-exec-transport-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create temp test dir");
+        let program = root.join("app.sh");
+        std::fs::write(&program, format!("#!/bin/sh\n{script_body}\n"))
+            .expect("write test program");
+        #[cfg(unix)]
+        {
+            let mut perms = std::fs::metadata(&program)
+                .expect("program metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&program, perms).expect("chmod test program");
+        }
+        let allow_prefix = format!("{}/", root.display());
+        (program, allow_prefix)
     }
 
     #[tokio::test]
@@ -430,5 +505,89 @@ mod tests {
             IoError::Other(info) => assert_eq!(info.code.0, CODE_EXEC_REQUEST_INVALID),
             other => panic!("expected Other, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn non_zero_exit_includes_safe_failure_metadata() {
+        let (program, allow_prefix) = write_test_program("exit 42");
+        let factory = ExecProgramTransportFactory::new(ExecPolicy {
+            allow_prefixes: vec![allow_prefix],
+        });
+        let mut t = factory.make(env());
+
+        let err = t
+            .call(IoCall {
+                namespace: "exec".to_string(),
+                request: serde_json::json!({
+                    "kind": "run_program_v1",
+                    "program_path": program.to_string_lossy(),
+                    "argv": [],
+                    "stdin_json": {},
+                    "timeout_ms": 5_000
+                }),
+                fact_key: None,
+            })
+            .await
+            .expect_err("expected non-zero exit");
+
+        match err {
+            IoError::Transport(info) => {
+                assert_eq!(info.code.0, CODE_EXEC_FAILED);
+                let details = info.details.expect("details");
+                assert_eq!(
+                    details.get("program_path").and_then(|v| v.as_str()),
+                    Some(program.to_string_lossy().as_ref())
+                );
+                assert_eq!(details.get("exit_code").and_then(|v| v.as_i64()), Some(42));
+                #[cfg(unix)]
+                assert!(details.get("signal").is_some());
+            }
+            other => panic!("expected Transport, got: {other:?}"),
+        }
+
+        std::fs::remove_file(&program).expect("cleanup test program");
+        std::fs::remove_dir_all(program.parent().expect("program parent"))
+            .expect("cleanup test dir");
+    }
+
+    #[tokio::test]
+    async fn timeout_includes_program_and_timeout_metadata() {
+        let (program, allow_prefix) = write_test_program("sleep 2\nprintf '{}'");
+        let factory = ExecProgramTransportFactory::new(ExecPolicy {
+            allow_prefixes: vec![allow_prefix],
+        });
+        let mut t = factory.make(env());
+
+        let err = t
+            .call(IoCall {
+                namespace: "exec".to_string(),
+                request: serde_json::json!({
+                    "kind": "run_program_v1",
+                    "program_path": program.to_string_lossy(),
+                    "argv": [],
+                    "stdin_json": {},
+                    "timeout_ms": 1
+                }),
+                fact_key: None,
+            })
+            .await
+            .expect_err("expected timeout");
+
+        match err {
+            IoError::Transport(info) => {
+                assert_eq!(info.code.0, CODE_EXEC_TIMEOUT);
+                let details = info.details.expect("details");
+                assert_eq!(
+                    details.get("program_path").and_then(|v| v.as_str()),
+                    Some(program.to_string_lossy().as_ref())
+                );
+                assert_eq!(details.get("timeout_ms").and_then(|v| v.as_u64()), Some(1));
+            }
+            other => panic!("expected Transport, got: {other:?}"),
+        }
+
+        std::fs::remove_file(&program).expect("cleanup test program");
+        std::fs::remove_dir_all(program.parent().expect("program parent"))
+            .expect("cleanup test dir");
     }
 }
