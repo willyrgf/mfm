@@ -301,9 +301,13 @@ let
     }
 
     # log_capture LOGFILE -- <command...>
-    # - capture stdout/stderr to logfile (set LOG_TEE=1 to also stream to stdout).
+    # - capture stdout/stderr to logfile.
+    # - LOG_TEE overrides streaming (1=stream+file, 0=file-only).
+    # - when LOG_TEE is unset, derive streaming from OUTPUT_MODE:
+    #   logs=file-only; stdout|both=stream+file.
     log_capture() {
       local logfile="$1"
+      local tee_mode=""
       shift || true
       if [ "''${1:-}" = "--" ]; then
         shift
@@ -312,7 +316,22 @@ let
         echo "usage: log_capture <logfile> -- <command...>" >&2
         return 1
       fi
-      if [ "''${LOG_TEE:-0}" = "1" ]; then
+
+      if [ -n "''${LOG_TEE:-}" ]; then
+        tee_mode="$LOG_TEE"
+      else
+        case "''${OUTPUT_MODE:-stdout}" in
+          logs) tee_mode="0" ;;
+          stdout|both|"") tee_mode="1" ;;
+          *) tee_mode="0" ;;
+        esac
+      fi
+
+      if command -v log_debug >/dev/null 2>&1; then
+        log_debug "log_capture tee=$tee_mode output_mode=''${OUTPUT_MODE:-unset} logfile=$logfile cmd=$*"
+      fi
+
+      if [ "$tee_mode" = "1" ]; then
         "$@" 2>&1 | tee "$logfile"
       else
         "$@" > "$logfile" 2>&1

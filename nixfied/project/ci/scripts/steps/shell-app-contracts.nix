@@ -47,6 +47,8 @@ set +e
   grep -Fq 'OUTPUT_MODE must be one of stdout|logs|both' nixfied/project/ci/scripts/setup.nix
   grep -Fq '_ci_debug_enabled()' nixfied/project/ci/scripts/teardown.nix
   grep -Fq '_ci_output_mode()' nixfied/project/ci/scripts/teardown.nix
+  grep -Fq "case \"''\${OUTPUT_MODE:-stdout}\" in" nixfied/.framework/lib/helpers.nix
+  grep -Fq 'log_capture tee=' nixfied/.framework/lib/helpers.nix
   grep -Fq 'ci-diagnostics-service-' nixfied/project/ci/scripts/teardown.nix
   grep -Fq -- '-log.log' nixfied/project/ci/scripts/teardown.nix
   grep -Fq '`OUTPUT_MODE`' docs/architecture.md
