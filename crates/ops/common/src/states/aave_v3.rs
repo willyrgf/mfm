@@ -1,13 +1,11 @@
 use std::collections::HashSet;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, StateError};
-use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{ContextKey, FactKey, StateId};
-use mfm_machine::io::{IoCall, IoProvider};
+use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
@@ -16,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::abi as common_abi;
 use crate::ctx as op_ctx;
 use crate::errors as op_errors;
+use crate::evm_rpc;
 use crate::idempotency as op_idempotency;
 use crate::output as op_output;
 use crate::rpc as op_rpc;
@@ -560,7 +559,7 @@ impl State for DeployContractState {
     ) -> Result<StateOutcome, StateError> {
         let manifest = read_compile_manifest(ctx)?;
         let signing_key_env = self.cfg.signing_key_env.as_deref();
-        let deployer = resolve_deployer_address(
+        let deployer = evm_rpc::resolve_deployer_address(
             io,
             &self.state_id,
             self.cfg.deployer_account_index,
@@ -588,13 +587,14 @@ impl State for DeployContractState {
             let tx_hash = if let Some(env_name) = signing_key_env {
                 let nonce = next_nonce.as_mut().expect("nonce initialized");
                 let nonce_hex = format!("0x{:x}", *nonce);
-                let tx_hash = send_signed_create_transaction(
-                    io,
-                    &self.state_id,
+                let mut client = EvmIoClient::new(self.state_id.clone(), io);
+                let tx_hash = evm_rpc::send_signed_create_transaction_with_nonce(
+                    &mut client,
                     env_name,
                     &deployer,
                     &nonce_hex,
                     &constructor_payload,
+                    None,
                 )
                 .await?;
                 *nonce = nonce.checked_add(1).ok_or_else(|| {
@@ -605,9 +605,9 @@ impl State for DeployContractState {
                 })?;
                 tx_hash
             } else {
-                send_transaction(
-                    io,
-                    &self.state_id,
+                let mut client = EvmIoClient::new(self.state_id.clone(), io);
+                evm_rpc::send_transaction(
+                    &mut client,
                     serde_json::json!({
                         "from": deployer,
                         "data": shared_dcv::bytes_to_hex_prefixed(&constructor_payload),
@@ -663,16 +663,16 @@ impl State for WaitForReceiptState {
 
         let mut completed: Vec<DeploymentReceipt> = Vec::with_capacity(pending.len());
         for p in pending {
-            let receipt = wait_for_receipt(
-                io,
+            let receipt = evm_rpc::wait_for_receipt(
                 &self.state_id,
+                io,
                 &p.tx_hash,
                 self.poll_interval_ms,
                 self.max_receipt_polls,
             )
             .await?;
-            ensure_receipt_success(&receipt, "deploy_receipt_failed")?;
-            let contract_address = receipt_contract_address(&receipt)?;
+            evm_rpc::ensure_receipt_success(&receipt)?;
+            let contract_address = evm_rpc::receipt_contract_address(&receipt)?;
             completed.push(DeploymentReceipt {
                 id: p.id,
                 tx_hash: p.tx_hash,
@@ -889,7 +889,8 @@ impl State for ConfigureRuntimeCallState {
     ) -> Result<StateOutcome, StateError> {
         let manifest = read_deploy_manifest_loaded(ctx)?;
         let from =
-            resolve_account_by_index(io, &self.state_id, self.cfg.from_account_index).await?;
+            evm_rpc::resolve_account_by_index(io, &self.state_id, self.cfg.from_account_index)
+                .await?;
         let pool = contract_from_manifest(&manifest, CONTRACT_POOL)?;
         let usdc = contract_from_manifest(&manifest, CONTRACT_USDC)?;
         let wbtc = contract_from_manifest(&manifest, CONTRACT_WBTC)?;
@@ -953,15 +954,15 @@ impl State for WaitForConfigReceiptState {
 
         let mut calls = Vec::with_capacity(pending.len());
         for p in pending {
-            let receipt = wait_for_receipt(
-                io,
+            let receipt = evm_rpc::wait_for_receipt(
                 &self.state_id,
+                io,
                 &p.tx_hash,
                 self.poll_interval_ms,
                 self.max_receipt_polls,
             )
             .await?;
-            ensure_receipt_success(&receipt, "configure_receipt_failed")?;
+            evm_rpc::ensure_receipt_success(&receipt)?;
             calls.push(AaveConfigCallRecord {
                 function: p.function,
                 tx_hash: p.tx_hash,
@@ -1104,22 +1105,40 @@ impl State for ResolveAccountsState {
         io: &mut dyn IoProvider,
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let accounts = rpc_accounts(io, &self.state_id).await?;
-        let funder = account_at(
-            &accounts,
-            self.cfg.funder_account_index,
-            "invalid_funder_account_index",
-        )?;
-        let supplier = account_at(
-            &accounts,
-            self.cfg.supplier_account_index,
-            "invalid_supplier_account_index",
-        )?;
-        let borrower = account_at(
-            &accounts,
-            self.cfg.borrower_account_index,
-            "invalid_borrower_account_index",
-        )?;
+        let accounts = evm_rpc::rpc_accounts(io, &self.state_id).await?;
+        let funder = accounts
+            .get(self.cfg.funder_account_index)
+            .cloned()
+            .ok_or_else(|| {
+                op_errors::state_error(
+                    "invalid_funder_account_index",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    "account index was out of range",
+                )
+            })?;
+        let supplier = accounts
+            .get(self.cfg.supplier_account_index)
+            .cloned()
+            .ok_or_else(|| {
+                op_errors::state_error(
+                    "invalid_supplier_account_index",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    "account index was out of range",
+                )
+            })?;
+        let borrower = accounts
+            .get(self.cfg.borrower_account_index)
+            .cloned()
+            .ok_or_else(|| {
+                op_errors::state_error(
+                    "invalid_borrower_account_index",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    "account index was out of range",
+                )
+            })?;
 
         let resolved = AaveScenarioAccounts {
             funder,
@@ -1170,16 +1189,16 @@ impl State for FundWalletState {
 
         let mut tx_hashes = Vec::new();
         for to in [&accounts.supplier, &accounts.borrower] {
-            let current_balance = account_balance(io, &self.state_id, to).await?;
+            let current_balance = evm_rpc::account_balance(io, &self.state_id, to).await?;
             if current_balance >= fund_wei {
                 continue;
             }
             let top_up_wei = fund_wei - current_balance;
             let value_hex = format!("0x{top_up_wei:x}");
 
-            let tx_hash = send_transaction(
-                io,
-                &self.state_id,
+            let mut client = EvmIoClient::new(self.state_id.clone(), io);
+            let tx_hash = evm_rpc::send_transaction(
+                &mut client,
                 serde_json::json!({
                     "from": accounts.funder,
                     "to": to,
@@ -1188,15 +1207,15 @@ impl State for FundWalletState {
             )
             .await?;
 
-            let receipt = wait_for_receipt(
-                io,
+            let receipt = evm_rpc::wait_for_receipt(
                 &self.state_id,
+                io,
                 &tx_hash,
                 self.cfg.poll_interval_ms,
                 self.cfg.max_receipt_polls,
             )
             .await?;
-            ensure_receipt_success(&receipt, "fund_wallet_receipt_failed")?;
+            evm_rpc::ensure_receipt_success(&receipt)?;
             tx_hashes.push(tx_hash);
         }
 
@@ -1256,15 +1275,15 @@ impl State for ApproveErc20State {
             "approve_usdc_failed",
         )
         .await?;
-        let supplier_approve_receipt = wait_for_receipt(
-            io,
+        let supplier_approve_receipt = evm_rpc::wait_for_receipt(
             &self.state_id,
+            io,
             &supplier_approve_tx,
             self.cfg.poll_interval_ms,
             self.cfg.max_receipt_polls,
         )
         .await?;
-        ensure_receipt_success(&supplier_approve_receipt, "approve_receipt_failed")?;
+        evm_rpc::ensure_receipt_success(&supplier_approve_receipt)?;
         txs.push(supplier_approve_tx);
 
         let borrower_approve_tx = send_contract_transaction(
@@ -1281,15 +1300,15 @@ impl State for ApproveErc20State {
             "approve_wbtc_failed",
         )
         .await?;
-        let borrower_approve_receipt = wait_for_receipt(
-            io,
+        let borrower_approve_receipt = evm_rpc::wait_for_receipt(
             &self.state_id,
+            io,
             &borrower_approve_tx,
             self.cfg.poll_interval_ms,
             self.cfg.max_receipt_polls,
         )
         .await?;
-        ensure_receipt_success(&borrower_approve_receipt, "approve_receipt_failed")?;
+        evm_rpc::ensure_receipt_success(&borrower_approve_receipt)?;
         txs.push(borrower_approve_tx);
 
         op_ctx::write_json(
@@ -1350,15 +1369,15 @@ impl State for SupplyAssetState {
             "supply_usdc_failed",
         )
         .await?;
-        let supply_usdc_receipt = wait_for_receipt(
-            io,
+        let supply_usdc_receipt = evm_rpc::wait_for_receipt(
             &self.state_id,
+            io,
             &supply_usdc_tx,
             self.cfg.poll_interval_ms,
             self.cfg.max_receipt_polls,
         )
         .await?;
-        ensure_receipt_success(&supply_usdc_receipt, "supply_receipt_failed")?;
+        evm_rpc::ensure_receipt_success(&supply_usdc_receipt)?;
         txs.push(supply_usdc_tx);
 
         let supply_wbtc_tx = send_contract_transaction(
@@ -1377,15 +1396,15 @@ impl State for SupplyAssetState {
             "supply_wbtc_failed",
         )
         .await?;
-        let supply_wbtc_receipt = wait_for_receipt(
-            io,
+        let supply_wbtc_receipt = evm_rpc::wait_for_receipt(
             &self.state_id,
+            io,
             &supply_wbtc_tx,
             self.cfg.poll_interval_ms,
             self.cfg.max_receipt_polls,
         )
         .await?;
-        ensure_receipt_success(&supply_wbtc_receipt, "supply_receipt_failed")?;
+        evm_rpc::ensure_receipt_success(&supply_wbtc_receipt)?;
         txs.push(supply_wbtc_tx);
 
         op_ctx::write_json(
@@ -1445,15 +1464,15 @@ impl State for BorrowAssetState {
         )
         .await?;
 
-        let receipt = wait_for_receipt(
-            io,
+        let receipt = evm_rpc::wait_for_receipt(
             &self.state_id,
+            io,
             &tx_hash,
             self.cfg.poll_interval_ms,
             self.cfg.max_receipt_polls,
         )
         .await?;
-        ensure_receipt_success(&receipt, "borrow_failed")?;
+        evm_rpc::ensure_receipt_success(&receipt)?;
 
         op_ctx::write_json(
             ctx,
@@ -1973,101 +1992,6 @@ fn origin_contract_from_output<'a>(
     })
 }
 
-async fn rpc_accounts(
-    io: &mut dyn IoProvider,
-    state_id: &StateId,
-) -> Result<Vec<String>, StateError> {
-    let mut client = EvmIoClient::new(state_id.clone(), io);
-    let res = client
-        .call(JsonRpcCall::new("eth_accounts", serde_json::json!([])))
-        .await
-        .map_err(op_errors::state_from_io)?;
-    let arr = op_rpc::expect_array(
-        &res.response,
-        "evm_response_invalid",
-        "eth_accounts returned non-array",
-    )?;
-
-    let mut out = Vec::with_capacity(arr.len());
-    for v in arr {
-        let raw = op_rpc::expect_string(
-            v,
-            "evm_response_invalid",
-            "eth_accounts entry was not a string",
-        )?;
-        let normalized = shared_dcv::normalize_address(&raw).map_err(|_| {
-            op_errors::state_unknown(
-                "evm_response_invalid",
-                "eth_accounts entry was not a valid address",
-            )
-        })?;
-        out.push(normalized);
-    }
-    Ok(out)
-}
-
-fn account_at(accounts: &[String], idx: usize, code: &'static str) -> Result<String, StateError> {
-    accounts.get(idx).cloned().ok_or_else(|| {
-        op_errors::state_error(
-            code,
-            ErrorCategory::ParsingInput,
-            false,
-            "account index was out of range",
-        )
-    })
-}
-
-async fn resolve_account_by_index(
-    io: &mut dyn IoProvider,
-    state_id: &StateId,
-    idx: usize,
-) -> Result<String, StateError> {
-    let accounts = rpc_accounts(io, state_id).await?;
-    account_at(&accounts, idx, "invalid_account_index")
-}
-
-async fn resolve_deployer_address(
-    io: &mut dyn IoProvider,
-    state_id: &StateId,
-    deployer_account_index: usize,
-    signing_key_env: Option<&str>,
-) -> Result<String, StateError> {
-    if let Some(env_name) = signing_key_env {
-        return resolve_signing_key_address(io, state_id, env_name).await;
-    }
-    resolve_account_by_index(io, state_id, deployer_account_index).await
-}
-
-async fn resolve_signing_key_address(
-    io: &mut dyn IoProvider,
-    state_id: &StateId,
-    signing_key_env: &str,
-) -> Result<String, StateError> {
-    let request = serde_json::json!({
-        "env_name_hex": hex::encode(signing_key_env.as_bytes()),
-    });
-    let fact_key = local_fact_key(state_id, "resolve_signing_key_address", &request)?;
-    let res = io
-        .call(IoCall {
-            namespace: "local.evm.signer_address".to_string(),
-            request,
-            fact_key: Some(fact_key),
-        })
-        .await
-        .map_err(op_errors::state_from_io)?;
-    let address = op_rpc::expect_string(
-        &res.response["address"],
-        "evm_response_invalid",
-        "local signer returned non-string address",
-    )?;
-    shared_dcv::normalize_address(&address).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "local signer returned invalid address",
-        )
-    })
-}
-
 fn parse_wei_u128(raw: &str) -> Result<u128, StateError> {
     if raw.starts_with("0x") || raw.starts_with("0X") {
         let normalized = shared_dcv::normalize_hex_str(raw).map_err(|_| {
@@ -2078,7 +2002,7 @@ fn parse_wei_u128(raw: &str) -> Result<u128, StateError> {
                 "fund_wei must be a valid decimal or 0x hex string",
             )
         })?;
-        return quantity_hex_to_u128(
+        return evm_rpc::quantity_hex_to_u128(
             &normalized,
             "fund_wei must be a valid decimal or 0x hex string",
         )
@@ -2101,409 +2025,17 @@ fn parse_wei_u128(raw: &str) -> Result<u128, StateError> {
     })
 }
 
-fn quantity_hex_to_u128(raw: &str, message: &'static str) -> Result<u128, StateError> {
-    let trimmed = raw.trim();
-    let Some(rest) = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-    else {
-        return Err(op_errors::state_unknown("evm_response_invalid", message));
-    };
-
-    if rest.is_empty() {
-        return Ok(0);
-    }
-
-    u128::from_str_radix(rest, 16)
-        .map_err(|_| op_errors::state_unknown("evm_response_invalid", message))
-}
-
-async fn send_transaction(
-    io: &mut dyn IoProvider,
-    state_id: &StateId,
-    mut tx_obj: serde_json::Value,
-) -> Result<String, StateError> {
-    let mut client = EvmIoClient::new(state_id.clone(), io);
-    if tx_obj.get("gas").is_none() {
-        let gas = estimate_gas_hex(&mut client, &tx_obj).await?;
-        tx_obj["gas"] = serde_json::json!(gas);
-    }
-    if tx_obj.get("gasPrice").is_none() && tx_obj.get("maxFeePerGas").is_none() {
-        let gas_price = gas_price_hex(&mut client).await?;
-        tx_obj["gasPrice"] = serde_json::json!(gas_price);
-    }
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_sendTransaction",
-            serde_json::json!([tx_obj]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-    let tx_hash = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_sendTransaction returned non-string tx hash",
-    )?;
-    shared_dcv::normalize_hex_str(&tx_hash).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendTransaction returned invalid tx hash",
-        )
-    })
-}
-
-async fn send_raw_transaction(
-    client: &mut EvmIoClient<'_>,
-    raw_tx_hex: &str,
-) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_sendRawTransaction",
-            serde_json::json!([raw_tx_hex]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let tx_hash = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_sendRawTransaction returned non-string tx hash",
-    )?;
-    shared_dcv::normalize_hex_str(&tx_hash).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendRawTransaction returned invalid tx hash",
-        )
-    })
-}
-
-async fn account_balance(
-    io: &mut dyn IoProvider,
-    state_id: &StateId,
-    account: &str,
-) -> Result<u128, StateError> {
-    let mut client = EvmIoClient::new(state_id.clone(), io);
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_getBalance",
-            serde_json::json!([account, "latest"]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let balance_hex = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_getBalance returned non-string balance",
-    )?;
-    let normalized =
-        normalize_quantity_hex(&balance_hex, "eth_getBalance returned invalid hex balance")?;
-    quantity_hex_to_u128(&normalized, "eth_getBalance returned invalid hex balance")
-}
-
-struct LegacyCreateTxSigningRequest<'a> {
-    signing_key_env: &'a str,
-    from: &'a str,
-    chain_id: u64,
-    nonce_hex: &'a str,
-    gas_price_hex: &'a str,
-    gas_limit_hex: &'a str,
-    value_hex: &'a str,
-    constructor_payload: &'a [u8],
-}
-
-async fn local_sign_legacy_create_raw_tx(
-    client: &mut EvmIoClient<'_>,
-    req: LegacyCreateTxSigningRequest<'_>,
-) -> Result<String, StateError> {
-    let state_id = client.state_id().clone();
-    let request = serde_json::json!({
-        "env_name_hex": hex::encode(req.signing_key_env.as_bytes()),
-        "from": req.from,
-        "chain_id": req.chain_id,
-        "nonce_hex": req.nonce_hex,
-        "gas_price_hex": req.gas_price_hex,
-        "gas_limit_hex": req.gas_limit_hex,
-        "value_hex": req.value_hex,
-        "data_hex": shared_dcv::bytes_to_hex_prefixed(req.constructor_payload),
-    });
-    let fact_key = local_fact_key(&state_id, "deploy_sign_legacy_create", &request)?;
-    let res = client
-        .io_mut()
-        .call(IoCall {
-            namespace: "local.evm.sign_legacy_create".to_string(),
-            request,
-            fact_key: Some(fact_key),
-        })
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let raw_tx_hex = op_rpc::expect_string(
-        &res.response["raw_tx_hex"],
-        "evm_response_invalid",
-        "local signer returned non-string raw transaction",
-    )?;
-    shared_dcv::normalize_hex_str(&raw_tx_hex).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "local signer returned invalid raw transaction hex",
-        )
-    })
-}
-
-fn local_fact_key(
-    state_id: &StateId,
-    purpose: &str,
-    request: &serde_json::Value,
-) -> Result<FactKey, StateError> {
-    let req_id = artifact_id_for_json(request).map_err(|err| match err {
-        CanonicalJsonError::FloatNotAllowed => op_errors::state_unknown(
-            "local_request_not_canonical",
-            "local io request was not canonical-json-hashable (floats are forbidden)",
-        ),
-        CanonicalJsonError::SecretsNotAllowed => {
-            op_errors::state_unknown("secrets_detected", "local io request contained secrets")
-        }
-    })?;
-
-    Ok(FactKey(format!(
-        "mfm:local|state:{}|purpose:{purpose}|req:{}",
-        state_id.0, req_id.0
-    )))
-}
-
-async fn transaction_count_hex(
-    client: &mut EvmIoClient<'_>,
-    from: &str,
-) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_getTransactionCount",
-            serde_json::json!([from, "pending"]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let nonce = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_getTransactionCount returned non-string nonce",
-    )?;
-    normalize_quantity_hex(&nonce, "eth_getTransactionCount returned invalid hex nonce")
-}
-
-fn parse_quantity_hex_u128(raw: &str, message: &'static str) -> Result<u128, StateError> {
-    let normalized = normalize_quantity_hex(raw, message)?;
-    let digits = normalized
-        .strip_prefix("0x")
-        .ok_or_else(|| op_errors::state_unknown("evm_response_invalid", message))?;
-    u128::from_str_radix(digits, 16)
-        .map_err(|_| op_errors::state_unknown("evm_response_invalid", message))
-}
-
 async fn pending_nonce_u128(
     io: &mut dyn IoProvider,
     state_id: &StateId,
     from: &str,
 ) -> Result<u128, StateError> {
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let nonce_hex = transaction_count_hex(&mut client, from).await?;
-    parse_quantity_hex_u128(
+    let nonce_hex = evm_rpc::transaction_count_hex(&mut client, from).await?;
+    evm_rpc::parse_quantity_hex_u128(
         &nonce_hex,
         "eth_getTransactionCount returned invalid hex nonce",
     )
-}
-
-async fn send_signed_create_transaction(
-    io: &mut dyn IoProvider,
-    state_id: &StateId,
-    signing_key_env: &str,
-    from: &str,
-    nonce_hex: &str,
-    constructor_payload: &[u8],
-) -> Result<String, StateError> {
-    let configured_from = shared_dcv::normalize_address(from)
-        .map_err(|_| op_errors::state_unknown("invalid_op_config", "invalid from address"))?;
-    let nonce_hex = normalize_quantity_hex(
-        nonce_hex,
-        "signed deploy nonce must be a valid hex quantity",
-    )?;
-    let mut client = EvmIoClient::new(state_id.clone(), io);
-
-    let tx_obj = serde_json::json!({
-        "from": configured_from,
-        "data": shared_dcv::bytes_to_hex_prefixed(constructor_payload),
-    });
-
-    let gas_hex = estimate_gas_hex(&mut client, &tx_obj).await?;
-    let gas_price = gas_price_hex(&mut client).await?;
-    let chain_id = client
-        .chain_id_u64()
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let raw_tx_hex = local_sign_legacy_create_raw_tx(
-        &mut client,
-        LegacyCreateTxSigningRequest {
-            signing_key_env,
-            from: &configured_from,
-            chain_id,
-            nonce_hex: &nonce_hex,
-            gas_price_hex: &gas_price,
-            gas_limit_hex: &gas_hex,
-            value_hex: "0x0",
-            constructor_payload,
-        },
-    )
-    .await?;
-
-    send_raw_transaction(&mut client, &raw_tx_hex).await
-}
-
-async fn estimate_gas_hex(
-    client: &mut EvmIoClient<'_>,
-    tx_obj: &serde_json::Value,
-) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_estimateGas",
-            serde_json::json!([tx_obj]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let gas = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_estimateGas returned non-string gas value",
-    )?;
-    normalize_quantity_hex(&gas, "eth_estimateGas returned invalid hex gas value")
-}
-
-async fn gas_price_hex(client: &mut EvmIoClient<'_>) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new("eth_gasPrice", serde_json::json!([])))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let gas_price = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_gasPrice returned non-string gas price",
-    )?;
-    normalize_quantity_hex(&gas_price, "eth_gasPrice returned invalid hex gas price")
-}
-
-fn normalize_quantity_hex(raw: &str, message: &'static str) -> Result<String, StateError> {
-    let trimmed = raw.trim();
-    let Some(rest) = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-    else {
-        return Err(op_errors::state_unknown("evm_response_invalid", message));
-    };
-
-    if rest.is_empty() {
-        return Ok("0x0".to_string());
-    }
-    if !rest.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(op_errors::state_unknown("evm_response_invalid", message));
-    }
-
-    let normalized = rest.trim_start_matches('0');
-    if normalized.is_empty() {
-        Ok("0x0".to_string())
-    } else {
-        Ok(format!("0x{}", normalized.to_ascii_lowercase()))
-    }
-}
-
-async fn wait_for_receipt(
-    io: &mut dyn IoProvider,
-    state_id: &StateId,
-    tx_hash: &str,
-    poll_interval_ms: u64,
-    max_receipt_polls: u64,
-) -> Result<serde_json::Value, StateError> {
-    if max_receipt_polls == 0 {
-        return Err(op_errors::state_unknown(
-            "invalid_op_config",
-            "max_receipt_polls must be > 0",
-        ));
-    }
-
-    let normalized_tx = shared_dcv::normalize_hex_str(tx_hash)
-        .map_err(|_| op_errors::state_unknown("invalid_tx_hash", "tx hash was invalid hex"))?;
-
-    for poll_index in 0..max_receipt_polls {
-        let request = serde_json::to_value(JsonRpcCall::new(
-            "eth_getTransactionReceipt",
-            serde_json::json!([normalized_tx]),
-        ))
-        .expect("JsonRpcCall must serialize");
-        let res = io
-            .call(IoCall {
-                namespace: "evm".to_string(),
-                request,
-                fact_key: Some(FactKey(format!(
-                    "mfm:evm|state:{}|receipt_poll:{}|tx:{}",
-                    state_id.0, poll_index, normalized_tx
-                ))),
-            })
-            .await
-            .map_err(op_errors::state_from_io)?;
-        if !res.response.is_null() {
-            return Ok(res.response);
-        }
-        tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
-    }
-
-    Err(op_errors::state_unknown(
-        "receipt_timeout",
-        "timed out while waiting for receipt",
-    ))
-}
-
-fn ensure_receipt_success(
-    receipt: &serde_json::Value,
-    code: &'static str,
-) -> Result<(), StateError> {
-    let Some(status) = receipt.get("status").and_then(|v| v.as_str()) else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "receipt status was missing",
-        ));
-    };
-    let normalized = shared_dcv::normalize_hex_str(status).map_err(|_| {
-        op_errors::state_unknown("evm_response_invalid", "receipt status was invalid hex")
-    })?;
-    if normalized != "0x01" && normalized != "0x1" {
-        return Err(op_errors::state_error(
-            code,
-            ErrorCategory::OnChain,
-            false,
-            "transaction receipt status was unsuccessful",
-        ));
-    }
-    Ok(())
-}
-
-fn receipt_contract_address(receipt: &serde_json::Value) -> Result<String, StateError> {
-    let address = receipt
-        .get("contractAddress")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            op_errors::state_unknown(
-                "deploy_receipt_missing_contract_address",
-                "deployment receipt missing contractAddress",
-            )
-        })?;
-    shared_dcv::normalize_address(address).map_err(|_| {
-        op_errors::state_unknown(
-            "deploy_receipt_invalid_contract_address",
-            "deployment receipt contractAddress was invalid",
-        )
-    })
 }
 
 fn encode_call_data(
@@ -2552,14 +2084,17 @@ async fn send_contract_transaction(
         tx["value"] = serde_json::json!(v);
     }
 
-    send_transaction(io, state_id, tx).await.map_err(|_| {
-        op_errors::state_error(
-            err_code,
-            ErrorCategory::OnChain,
-            false,
-            "contract transaction failed to submit",
-        )
-    })
+    let mut client = EvmIoClient::new(state_id.clone(), io);
+    evm_rpc::send_transaction(&mut client, tx)
+        .await
+        .map_err(|_| {
+            op_errors::state_error(
+                err_code,
+                ErrorCategory::OnChain,
+                false,
+                "contract transaction failed to submit",
+            )
+        })
 }
 
 async fn call_contract_u64(
@@ -2914,7 +2449,7 @@ mod tests {
         let mut io = ResolveDeployerTestIo::default();
 
         let deployer =
-            resolve_deployer_address(&mut io, &state_id, 9, Some("MFM_TEST_SIGNING_KEY"))
+            evm_rpc::resolve_deployer_address(&mut io, &state_id, 9, Some("MFM_TEST_SIGNING_KEY"))
                 .await
                 .expect("resolve deployer");
         assert_eq!(deployer, "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf");
@@ -2927,7 +2462,7 @@ mod tests {
         let state_id = StateId("m.test.aave_v3.resolve_deployer".to_string());
         let mut io = ResolveDeployerTestIo::default();
 
-        let deployer = resolve_deployer_address(&mut io, &state_id, 0, None)
+        let deployer = evm_rpc::resolve_deployer_address(&mut io, &state_id, 0, None)
             .await
             .expect("resolve deployer");
         assert_eq!(deployer, "0x1111111111111111111111111111111111111111");

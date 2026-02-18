@@ -1,18 +1,16 @@
-use std::time::Duration;
-
 use async_trait::async_trait;
 use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::StateError;
-use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
-use mfm_machine::ids::{ContextKey, FactKey, StateId};
-use mfm_machine::io::{IoCall, IoProvider};
+use mfm_machine::ids::{ContextKey, StateId};
+use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 
 use crate::ctx as op_ctx;
 use crate::errors as op_errors;
+use crate::evm_rpc;
 use crate::idempotency as op_idempotency;
 use crate::rpc as op_rpc;
 use crate::states::evm_dcv as shared_dcv;
@@ -183,7 +181,7 @@ impl State for EvmDeployState {
         }
 
         let tx_hash = if let Some(env_name) = self.cfg.signing_key_env.as_deref() {
-            send_signed_create_transaction(
+            evm_rpc::send_signed_create_transaction(
                 &mut client,
                 env_name,
                 &self.cfg.from,
@@ -192,11 +190,11 @@ impl State for EvmDeployState {
             )
             .await?
         } else {
-            send_transaction(&mut client, tx).await?
+            evm_rpc::send_transaction(&mut client, tx).await?
         };
         drop(client);
 
-        let receipt = wait_for_receipt(
+        let receipt = evm_rpc::wait_for_receipt(
             &self.state_id,
             io,
             &tx_hash,
@@ -204,9 +202,9 @@ impl State for EvmDeployState {
             self.cfg.max_receipt_polls,
         )
         .await?;
-        ensure_receipt_success(&receipt)?;
+        evm_rpc::ensure_receipt_success(&receipt)?;
 
-        let contract_address = receipt_contract_address(&receipt)?;
+        let contract_address = evm_rpc::receipt_contract_address(&receipt)?;
         context_write_json(
             ctx,
             KEY_CONTRACT_ADDRESS,
@@ -266,9 +264,9 @@ impl State for EvmConfigureState {
             }
 
             let mut client = EvmIoClient::new(self.state_id.clone(), io);
-            let tx_hash = send_transaction(&mut client, tx).await?;
+            let tx_hash = evm_rpc::send_transaction(&mut client, tx).await?;
             drop(client);
-            let receipt = wait_for_receipt(
+            let receipt = evm_rpc::wait_for_receipt(
                 &self.state_id,
                 io,
                 &tx_hash,
@@ -276,7 +274,7 @@ impl State for EvmConfigureState {
                 self.cfg.max_receipt_polls,
             )
             .await?;
-            ensure_receipt_success(&receipt)?;
+            evm_rpc::ensure_receipt_success(&receipt)?;
 
             tx_hashes.push(serde_json::json!({
                 "function": call.function,
@@ -473,346 +471,6 @@ fn context_write_json(
     value: serde_json::Value,
 ) -> Result<(), StateError> {
     op_ctx::write_json(ctx, ContextKey(key.to_string()), value)
-}
-
-async fn send_transaction(
-    client: &mut EvmIoClient<'_>,
-    mut tx_obj: serde_json::Value,
-) -> Result<String, StateError> {
-    if tx_obj.get("gas").is_none() {
-        let gas = estimate_gas_hex(client, &tx_obj).await?;
-        tx_obj["gas"] = serde_json::json!(gas);
-    }
-    if tx_obj.get("gasPrice").is_none() && tx_obj.get("maxFeePerGas").is_none() {
-        let gas_price = gas_price_hex(client).await?;
-        tx_obj["gasPrice"] = serde_json::json!(gas_price);
-    }
-
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_sendTransaction",
-            serde_json::json!([tx_obj]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let Some(tx_hash) = res.response.as_str() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendTransaction returned non-string tx hash",
-        ));
-    };
-
-    shared_dcv::normalize_hex_str(tx_hash).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendTransaction returned invalid hex tx hash",
-        )
-    })
-}
-
-async fn send_raw_transaction(
-    client: &mut EvmIoClient<'_>,
-    raw_tx_hex: &str,
-) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_sendRawTransaction",
-            serde_json::json!([raw_tx_hex]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let Some(tx_hash) = res.response.as_str() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendRawTransaction returned non-string tx hash",
-        ));
-    };
-
-    shared_dcv::normalize_hex_str(tx_hash).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendRawTransaction returned invalid hex tx hash",
-        )
-    })
-}
-
-async fn send_signed_create_transaction(
-    client: &mut EvmIoClient<'_>,
-    signing_key_env: &str,
-    from: &str,
-    constructor_payload: &[u8],
-    value_hex: Option<&str>,
-) -> Result<String, StateError> {
-    let configured_from = shared_dcv::normalize_address(from)
-        .map_err(|_| op_errors::state_unknown("invalid_op_config", "invalid from address"))?;
-
-    let tx_obj = {
-        let mut tx = serde_json::json!({
-            "from": configured_from,
-            "data": shared_dcv::bytes_to_hex_prefixed(constructor_payload),
-        });
-        if let Some(v) = value_hex {
-            tx["value"] = serde_json::json!(v);
-        }
-        tx
-    };
-
-    let nonce_hex = transaction_count_hex(client, &configured_from).await?;
-    let gas_hex = estimate_gas_hex(client, &tx_obj).await?;
-    let gas_price_hex = gas_price_hex(client).await?;
-    let chain_id = client
-        .chain_id_u64()
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let raw_tx_hex = local_sign_legacy_create_raw_tx(
-        client,
-        LegacyCreateTxSigningRequest {
-            signing_key_env,
-            from: &configured_from,
-            chain_id,
-            nonce_hex: &nonce_hex,
-            gas_price_hex: &gas_price_hex,
-            gas_limit_hex: &gas_hex,
-            value_hex: value_hex.unwrap_or("0x0"),
-            constructor_payload,
-        },
-    )
-    .await?;
-
-    send_raw_transaction(client, &raw_tx_hex).await
-}
-
-struct LegacyCreateTxSigningRequest<'a> {
-    signing_key_env: &'a str,
-    from: &'a str,
-    chain_id: u64,
-    nonce_hex: &'a str,
-    gas_price_hex: &'a str,
-    gas_limit_hex: &'a str,
-    value_hex: &'a str,
-    constructor_payload: &'a [u8],
-}
-
-async fn local_sign_legacy_create_raw_tx(
-    client: &mut EvmIoClient<'_>,
-    req: LegacyCreateTxSigningRequest<'_>,
-) -> Result<String, StateError> {
-    let state_id = client.state_id().clone();
-    let request = serde_json::json!({
-        "env_name_hex": hex::encode(req.signing_key_env.as_bytes()),
-        "from": req.from,
-        "chain_id": req.chain_id,
-        "nonce_hex": req.nonce_hex,
-        "gas_price_hex": req.gas_price_hex,
-        "gas_limit_hex": req.gas_limit_hex,
-        "value_hex": req.value_hex,
-        "data_hex": shared_dcv::bytes_to_hex_prefixed(req.constructor_payload),
-    });
-    let fact_key = local_fact_key(&state_id, "deploy_sign_legacy_create", &request)?;
-    let res = client
-        .io_mut()
-        .call(IoCall {
-            namespace: "local.evm.sign_legacy_create".to_string(),
-            request,
-            fact_key: Some(fact_key),
-        })
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let Some(raw_tx_hex) = res.response.get("raw_tx_hex").and_then(|v| v.as_str()) else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "local signer returned non-string raw transaction",
-        ));
-    };
-
-    shared_dcv::normalize_hex_str(raw_tx_hex).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "local signer returned invalid raw transaction hex",
-        )
-    })
-}
-
-fn local_fact_key(
-    state_id: &StateId,
-    purpose: &str,
-    request: &serde_json::Value,
-) -> Result<FactKey, StateError> {
-    let req_id = artifact_id_for_json(request).map_err(|err| match err {
-        CanonicalJsonError::FloatNotAllowed => op_errors::state_unknown(
-            "local_request_not_canonical",
-            "local io request was not canonical-json-hashable (floats are forbidden)",
-        ),
-        CanonicalJsonError::SecretsNotAllowed => {
-            op_errors::state_unknown("secrets_detected", "local io request contained secrets")
-        }
-    })?;
-
-    Ok(FactKey(format!(
-        "mfm:local|state:{}|purpose:{purpose}|req:{}",
-        state_id.0, req_id.0
-    )))
-}
-
-async fn transaction_count_hex(
-    client: &mut EvmIoClient<'_>,
-    from: &str,
-) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_getTransactionCount",
-            serde_json::json!([from, "pending"]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let Some(nonce) = res.response.as_str() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_getTransactionCount returned non-string nonce",
-        ));
-    };
-
-    shared_dcv::normalize_hex_str(nonce).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_getTransactionCount returned invalid hex nonce",
-        )
-    })
-}
-
-async fn estimate_gas_hex(
-    client: &mut EvmIoClient<'_>,
-    tx_obj: &serde_json::Value,
-) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_estimateGas",
-            serde_json::json!([tx_obj]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let Some(gas) = res.response.as_str() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_estimateGas returned non-string gas value",
-        ));
-    };
-
-    shared_dcv::normalize_hex_str(gas).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_estimateGas returned invalid hex gas value",
-        )
-    })
-}
-
-async fn gas_price_hex(client: &mut EvmIoClient<'_>) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new("eth_gasPrice", serde_json::json!([])))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let Some(gas_price) = res.response.as_str() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_gasPrice returned non-string gas price",
-        ));
-    };
-
-    shared_dcv::normalize_hex_str(gas_price).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_gasPrice returned invalid hex gas price",
-        )
-    })
-}
-
-async fn wait_for_receipt(
-    state_id: &StateId,
-    io: &mut dyn IoProvider,
-    tx_hash: &str,
-    poll_interval_ms: u64,
-    max_receipt_polls: u64,
-) -> Result<serde_json::Value, StateError> {
-    for poll_index in 0..max_receipt_polls {
-        let request = serde_json::to_value(JsonRpcCall::new(
-            "eth_getTransactionReceipt",
-            serde_json::json!([tx_hash]),
-        ))
-        .expect("JsonRpcCall must serialize");
-        let res = io
-            .call(IoCall {
-                namespace: "evm".to_string(),
-                request,
-                fact_key: Some(FactKey(format!(
-                    "mfm:evm|state:{}|receipt_poll:{}|tx:{}",
-                    state_id.0, poll_index, tx_hash
-                ))),
-            })
-            .await
-            .map_err(op_errors::state_from_io)?;
-
-        if !res.response.is_null() {
-            return Ok(res.response);
-        }
-        tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
-    }
-
-    Err(op_errors::state_unknown(
-        "evm_receipt_timeout",
-        "timed out waiting for transaction receipt",
-    ))
-}
-
-fn ensure_receipt_success(receipt: &serde_json::Value) -> Result<(), StateError> {
-    let Some(obj) = receipt.as_object() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "transaction receipt was not a JSON object",
-        ));
-    };
-
-    if let Some(status) = obj.get("status").and_then(|v| v.as_str()) {
-        let s = shared_dcv::normalize_hex_str(status).map_err(|_| {
-            op_errors::state_unknown("evm_response_invalid", "receipt status was not valid hex")
-        })?;
-        if s != "0x01" && s != "0x1" {
-            return Err(op_errors::state_unknown(
-                "evm_receipt_failed_status",
-                "transaction receipt reported failed status",
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn receipt_contract_address(receipt: &serde_json::Value) -> Result<String, StateError> {
-    let Some(obj) = receipt.as_object() else {
-        return Err(op_errors::state_unknown(
-            "evm_response_invalid",
-            "transaction receipt was not a JSON object",
-        ));
-    };
-    let Some(addr) = obj.get("contractAddress").and_then(|v| v.as_str()) else {
-        return Err(op_errors::state_unknown(
-            "evm_receipt_missing_contract_address",
-            "receipt did not include contractAddress",
-        ));
-    };
-
-    shared_dcv::normalize_address(addr).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "receipt contractAddress was invalid",
-        )
-    })
 }
 
 fn resolve_contract_address(
