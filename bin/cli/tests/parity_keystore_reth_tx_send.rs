@@ -385,10 +385,12 @@ fn run_import_private_key(
     label: &str,
     private_key_hex: &str,
 ) -> Output {
+    let artifact_root = test_artifact_root(keystore_path);
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
     sanitize_machine_readable_cli_env(&mut cmd)
         .env("MFM_INTEGRATION_TEST", "1")
         .env("MFM_KEYSTORE_PASSWORD_FILE", password_file)
+        .env("MFM_ARTIFACT_ROOT", artifact_root)
         .args([
             "--output-format",
             "json",
@@ -452,10 +454,12 @@ fn run_tx_sign_with_selector(
     gas_limit: &str,
     out: &Path,
 ) -> Output {
+    let artifact_root = test_artifact_root(keystore_path);
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
     sanitize_machine_readable_cli_env(&mut cmd)
         .env("MFM_INTEGRATION_TEST", "1")
         .env("MFM_KEYSTORE_PASSWORD_FILE", password_file)
+        .env("MFM_ARTIFACT_ROOT", artifact_root)
         .args([
             "--output-format",
             "json",
@@ -490,8 +494,10 @@ fn run_tx_sign_with_selector(
 }
 
 fn run_tx_send_raw(input_path: &Path, rpc_url: &str) -> Output {
+    let artifact_root = test_artifact_root(input_path);
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
     sanitize_machine_readable_cli_env(&mut cmd)
+        .env("MFM_ARTIFACT_ROOT", artifact_root)
         .args([
             "--output-format",
             "json",
@@ -627,6 +633,12 @@ fn parse_hex_u64(raw: &str) -> u64 {
         return 0;
     }
     u64::from_str_radix(hex, 16).expect("u64 hex parse")
+}
+
+fn test_artifact_root(path: &Path) -> PathBuf {
+    path.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("run-artifacts")
 }
 
 fn sanitize_machine_readable_cli_env(cmd: &mut Command) -> &mut Command {
