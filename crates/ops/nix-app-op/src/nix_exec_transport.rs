@@ -143,6 +143,15 @@ fn attr_path_for_program(system: &str, fragment: &str) -> String {
     }
 }
 
+fn store_root_from_program_path(program_path: &str) -> Option<String> {
+    let rest = program_path.strip_prefix("/nix/store/")?;
+    let (entry, _) = rest.split_once('/').unwrap_or((rest, ""));
+    if entry.is_empty() {
+        return None;
+    }
+    Some(format!("/nix/store/{entry}"))
+}
+
 fn parse_resolve_request(call: &IoCall) -> Result<ResolveFlakeAppV1, IoError> {
     let obj = call.request.as_object().ok_or_else(|| {
         IoError::Other(info(
@@ -332,6 +341,13 @@ impl LiveIoTransport for NixFlakeTransport {
                 "resolved program path did not start with /nix/store/",
             )));
         }
+        let program_store_root = store_root_from_program_path(&program_path).ok_or_else(|| {
+            IoError::Other(info(
+                CODE_NIX_REQUEST_INVALID,
+                ErrorCategory::ParsingInput,
+                "resolved program path was not a valid nix store path",
+            ))
+        })?;
 
         // 2) Realize the app when the resolved program path is not already present.
         if !Path::new(&program_path).exists() {
@@ -340,7 +356,7 @@ impl LiveIoTransport for NixFlakeTransport {
                 .arg("build")
                 .arg("--no-link")
                 .arg("--no-write-lock-file")
-                .arg(format!("{flake_url}#{attr}"));
+                .arg(program_store_root);
 
             let out = run_with_timeout(build, req.timeout_ms).await?;
             if !out.status.success() {
@@ -348,6 +364,13 @@ impl LiveIoTransport for NixFlakeTransport {
                     CODE_NIX_BUILD_FAILED,
                     ErrorCategory::Unknown,
                     "nix build failed",
+                )));
+            }
+            if !Path::new(&program_path).exists() {
+                return Err(IoError::Transport(info(
+                    CODE_NIX_BUILD_FAILED,
+                    ErrorCategory::Unknown,
+                    "nix build did not realize resolved program path",
                 )));
             }
         }
@@ -585,6 +608,18 @@ mod tests {
         let system = "aarch64-darwin";
         let got = attr_path_for_program(system, "jq_fmt_example");
         assert_eq!(got, "apps.aarch64-darwin.jq_fmt_example.program");
+    }
+
+    #[test]
+    fn store_root_from_program_path_extracts_store_root() {
+        let got = store_root_from_program_path("/nix/store/hash-app/bin/app");
+        assert_eq!(got.as_deref(), Some("/nix/store/hash-app"));
+    }
+
+    #[test]
+    fn store_root_from_program_path_rejects_non_store_paths() {
+        assert!(store_root_from_program_path("/tmp/app").is_none());
+        assert!(store_root_from_program_path("/nix/store/").is_none());
     }
 
     #[tokio::test]

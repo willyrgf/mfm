@@ -1167,7 +1167,6 @@ impl State for FundWalletState {
             "scenario accounts were invalid",
         )?;
         let fund_wei = parse_wei_u128(&self.cfg.fund_wei)?;
-        let value_hex = format!("0x{fund_wei:x}");
 
         let mut tx_hashes = Vec::new();
         for to in [&accounts.supplier, &accounts.borrower] {
@@ -1175,6 +1174,8 @@ impl State for FundWalletState {
             if current_balance >= fund_wei {
                 continue;
             }
+            let top_up_wei = fund_wei - current_balance;
+            let value_hex = format!("0x{top_up_wei:x}");
 
             let tx_hash = send_transaction(
                 io,
@@ -2629,8 +2630,11 @@ fn assert_at_least_u64(
 mod tests {
     use super::*;
 
+    use std::collections::HashMap;
+
     use async_trait::async_trait;
-    use mfm_machine::errors::{ErrorCategory, IoError};
+    use mfm_machine::errors::{ContextError, ErrorCategory, IoError, RunError};
+    use mfm_machine::events::DomainEvent;
     use mfm_machine::ids::{ArtifactId, FactKey};
     use mfm_machine::io::{IoCall, IoResult};
 
@@ -2673,6 +2677,167 @@ mod tests {
             max_receipt_polls: 120,
             scenario_report_export_key: "scenario_report".to_string(),
             scenario_report_artifact_key: "scenario_report_artifact_id".to_string(),
+        }
+    }
+
+    #[derive(Default)]
+    struct MapContext {
+        values: HashMap<String, serde_json::Value>,
+    }
+
+    impl DynContext for MapContext {
+        fn read(&self, key: &ContextKey) -> Result<Option<serde_json::Value>, ContextError> {
+            Ok(self.values.get(&key.0).cloned())
+        }
+
+        fn write(&mut self, key: ContextKey, value: serde_json::Value) -> Result<(), ContextError> {
+            self.values.insert(key.0, value);
+            Ok(())
+        }
+
+        fn delete(&mut self, key: &ContextKey) -> Result<(), ContextError> {
+            self.values.remove(&key.0);
+            Ok(())
+        }
+
+        fn dump(&self) -> Result<serde_json::Value, ContextError> {
+            let mut out = serde_json::Map::new();
+            for (k, v) in &self.values {
+                out.insert(k.clone(), v.clone());
+            }
+            Ok(serde_json::Value::Object(out))
+        }
+    }
+
+    struct NoopRecorder;
+
+    #[async_trait]
+    impl EventRecorder for NoopRecorder {
+        async fn emit(&mut self, _event: DomainEvent) -> Result<(), RunError> {
+            Ok(())
+        }
+
+        async fn emit_many(&mut self, _events: Vec<DomainEvent>) -> Result<(), RunError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FundWalletTestIo {
+        balances: HashMap<String, u128>,
+        sent_values: Vec<String>,
+        tx_counter: u64,
+    }
+
+    impl FundWalletTestIo {
+        fn with_balances(entries: &[(&str, u128)]) -> Self {
+            let balances = entries
+                .iter()
+                .map(|(account, balance)| ((*account).to_string(), *balance))
+                .collect::<HashMap<_, _>>();
+            Self {
+                balances,
+                ..Default::default()
+            }
+        }
+    }
+
+    #[async_trait]
+    impl IoProvider for FundWalletTestIo {
+        async fn call(&mut self, call: IoCall) -> Result<IoResult, IoError> {
+            let method = call
+                .request
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if call.namespace != "evm" {
+                return Err(IoError::Other(crate::errors::info(
+                    "unexpected_io_namespace",
+                    ErrorCategory::Unknown,
+                    false,
+                    "unexpected io namespace",
+                )));
+            }
+
+            match method {
+                "eth_getBalance" => {
+                    let account = call
+                        .request
+                        .get("params")
+                        .and_then(|v| v.as_array())
+                        .and_then(|params| params.first())
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            IoError::Other(crate::errors::info(
+                                "unexpected_io_call",
+                                ErrorCategory::Unknown,
+                                false,
+                                "missing account parameter",
+                            ))
+                        })?;
+                    let balance = self.balances.get(account).copied().unwrap_or(0);
+                    Ok(IoResult {
+                        response: serde_json::json!(format!("0x{balance:x}")),
+                        recorded_payload_id: None,
+                    })
+                }
+                "eth_estimateGas" => Ok(IoResult {
+                    response: serde_json::json!("0x5208"),
+                    recorded_payload_id: None,
+                }),
+                "eth_gasPrice" => Ok(IoResult {
+                    response: serde_json::json!("0x1"),
+                    recorded_payload_id: None,
+                }),
+                "eth_sendTransaction" => {
+                    let value = call
+                        .request
+                        .get("params")
+                        .and_then(|v| v.as_array())
+                        .and_then(|params| params.first())
+                        .and_then(|tx| tx.get("value"))
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            IoError::Other(crate::errors::info(
+                                "unexpected_io_call",
+                                ErrorCategory::Unknown,
+                                false,
+                                "missing transaction value",
+                            ))
+                        })?;
+                    self.sent_values.push(value.to_string());
+                    self.tx_counter += 1;
+                    Ok(IoResult {
+                        response: serde_json::json!(format!("0x{:064x}", self.tx_counter)),
+                        recorded_payload_id: None,
+                    })
+                }
+                "eth_getTransactionReceipt" => Ok(IoResult {
+                    response: serde_json::json!({ "status": "0x1" }),
+                    recorded_payload_id: None,
+                }),
+                _ => Err(IoError::Other(crate::errors::info(
+                    "unexpected_io_call",
+                    ErrorCategory::Unknown,
+                    false,
+                    "unexpected io call",
+                ))),
+            }
+        }
+
+        async fn get_recorded_fact(
+            &mut self,
+            _key: &FactKey,
+        ) -> Result<Option<ArtifactId>, IoError> {
+            Ok(None)
+        }
+
+        async fn now_millis(&mut self) -> Result<u64, IoError> {
+            Ok(0)
+        }
+
+        async fn random_bytes(&mut self, n: usize) -> Result<Vec<u8>, IoError> {
+            Ok(vec![0u8; n])
         }
     }
 
@@ -2768,6 +2933,55 @@ mod tests {
         assert_eq!(deployer, "0x1111111111111111111111111111111111111111");
         assert!(!io.saw_local_signer_address());
         assert!(io.saw_eth_accounts());
+    }
+
+    #[tokio::test]
+    async fn fund_wallet_transfers_only_deficit_for_underfunded_accounts() {
+        let state = FundWalletState {
+            state_id: StateId("m.test.aave_v3.fund_wallet".to_string()),
+            cfg: valid_scenario_config(),
+        };
+        let fund_wei = parse_wei_u128(&state.cfg.fund_wei).expect("fund_wei");
+        let supplier = "0x00000000000000000000000000000000000000bb";
+        let borrower = "0x00000000000000000000000000000000000000cc";
+        let supplier_deficit = 100_000_000_000_000_000u128;
+        let borrower_deficit = 750_000_000_000_000_000u128;
+
+        let mut io = FundWalletTestIo::with_balances(&[
+            (supplier, fund_wei - supplier_deficit),
+            (borrower, fund_wei - borrower_deficit),
+        ]);
+        let mut ctx = MapContext::default();
+        op_ctx::write_json(
+            &mut ctx,
+            ContextKey(KEY_SCENARIO_ACCOUNTS.to_string()),
+            serde_json::to_value(AaveScenarioAccounts {
+                funder: "0x00000000000000000000000000000000000000aa".to_string(),
+                supplier: supplier.to_string(),
+                borrower: borrower.to_string(),
+            })
+            .expect("serialize scenario accounts"),
+        )
+        .expect("write scenario accounts");
+        let mut rec = NoopRecorder;
+
+        state
+            .handle(&mut ctx, &mut io, &mut rec)
+            .await
+            .expect("fund wallet");
+
+        assert_eq!(
+            io.sent_values,
+            vec![
+                format!("0x{supplier_deficit:x}"),
+                format!("0x{borrower_deficit:x}")
+            ]
+        );
+        let tx_hashes = ctx
+            .read(&ContextKey(KEY_FUNDING_TX_HASHES.to_string()))
+            .expect("read funding tx hashes")
+            .expect("funding tx hashes should be written");
+        assert_eq!(tx_hashes.as_array().map(|values| values.len()), Some(2));
     }
 
     #[test]
