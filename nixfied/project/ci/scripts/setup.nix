@@ -27,6 +27,21 @@ reject_legacy_ci_logging_env() {
   fi
 }
 
+reject_legacy_ci_output_env() {
+  local deprecated=""
+
+  if [ "''${NIXFIED_OUTPUT_MODE+x}" = "x" ]; then
+    deprecated="$deprecated NIXFIED_OUTPUT_MODE"
+  fi
+
+  deprecated="''${deprecated# }"
+  if [ -n "$deprecated" ]; then
+    echo "ERROR: deprecated CI output env var(s): $deprecated" >&2
+    echo "HINT: use OUTPUT_MODE with one of: stdout|logs|both." >&2
+    exit 3
+  fi
+}
+
 normalize_ci_logging_env() {
   local resolved_log_level=""
 
@@ -59,6 +74,22 @@ normalize_ci_logging_env() {
   fi
 }
 
+validate_ci_output_mode() {
+  local mode="''${OUTPUT_MODE:-stdout}"
+
+  mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
+
+  case "$mode" in
+    stdout|logs|both)
+      export OUTPUT_MODE="$mode"
+      ;;
+    *)
+      echo "ERROR: OUTPUT_MODE must be one of stdout|logs|both (got '$mode')" >&2
+      exit 3
+      ;;
+  esac
+}
+
 init_ci_cargo_paths() {
   local default_target_dir=""
   local default_cargo_home=""
@@ -87,7 +118,9 @@ init_ci_cargo_paths() {
 
 source <($SLOT_INFO)
 reject_legacy_ci_logging_env
+reject_legacy_ci_output_env
 normalize_ci_logging_env
+validate_ci_output_mode
 init_ci_cargo_paths
 
 kill_conflicting_listener() {
