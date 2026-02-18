@@ -24,6 +24,10 @@ let
       operations,
       summaryName ? service,
       profiles ? [ ],
+      runtimePrimitives ? serviceApi.mkRuntimePrimitivesV1 {
+        logLevelDefault = toString ((project.logging or { }).level or "info");
+        outputModeDefault = toString ((project.logging or { }).output or "stdout");
+      },
       config ? null,
       exported ? { },
     }:
@@ -46,6 +50,7 @@ let
           details
           profiles
           artifacts
+          runtimePrimitives
           ;
         operations = operations // logEventExtensions;
       };

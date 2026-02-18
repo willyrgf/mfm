@@ -60,16 +60,20 @@ let
       local level_num="$1"
       local message="$2"
       local to_stderr="$3"
-      local output_mode="stdout"
+      local output_mode=""
       local log_file="''${NIXFIED_LOG_FILE:-}"
 
+      _nixfied_refresh_log_level
       if [ -n "''${OUTPUT_MODE:-}" ]; then
         output_mode="$OUTPUT_MODE"
       elif [ -n "''${NIXFIED_OUTPUT_MODE:-}" ]; then
         output_mode="$NIXFIED_OUTPUT_MODE"
+      elif [ "''${_NIXFIED_LOG_LEVEL_RAW:-info}" = "debug" ]; then
+        output_mode="both"
+      else
+        output_mode="stdout"
       fi
 
-      _nixfied_refresh_log_level
       if [ "$level_num" -gt "''${_NIXFIED_LOG_LEVEL_NUM:-2}" ]; then
         return 0
       fi

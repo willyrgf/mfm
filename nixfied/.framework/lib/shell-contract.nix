@@ -52,6 +52,28 @@ let
     timeout = 5;
   };
 
+  runtimeLogLevels = [
+    "error"
+    "warn"
+    "info"
+    "debug"
+    "trace"
+  ];
+
+  runtimeOutputModes = [
+    "stdout"
+    "logs"
+    "both"
+  ];
+
+  runtimeLogLevelEnvName = "LOG_LEVEL";
+  runtimeLogLevelAliases = [ "NIXFIED_LOG_LEVEL" ];
+  runtimeLogLevelDefault = "info";
+
+  runtimeOutputModeEnvName = "OUTPUT_MODE";
+  runtimeOutputModeAliases = [ "NIXFIED_OUTPUT_MODE" ];
+  runtimeOutputModeDefault = "stdout";
+
   hasPrefix =
     prefix: value:
     builtins.isString value
@@ -76,6 +98,109 @@ let
     builtins.filter (
       value: (builtins.length (builtins.filter (candidate: candidate == value) values)) > 1
     ) uniq;
+
+  normalizeStringSet = values: lib.sort (a: b: a < b) (lib.unique values);
+
+  sameStringSet = expected: actual: normalizeStringSet expected == normalizeStringSet actual;
+
+  mkRuntimePrimitiveEnvSpecs =
+    {
+      logLevelDefault ? runtimeLogLevelDefault,
+      outputModeDefault ? runtimeOutputModeDefault,
+    }:
+    [
+      {
+        name = runtimeLogLevelEnvName;
+        type = "enum";
+        required = false;
+        aliases = runtimeLogLevelAliases;
+        values = runtimeLogLevels;
+        default = logLevelDefault;
+      }
+      {
+        name = runtimeOutputModeEnvName;
+        type = "enum";
+        required = false;
+        aliases = runtimeOutputModeAliases;
+        values = runtimeOutputModes;
+        default = outputModeDefault;
+      }
+    ];
+
+  mkServiceRuntimePrimitivesV1 =
+    {
+      logLevelDefault ? runtimeLogLevelDefault,
+      outputModeDefault ? runtimeOutputModeDefault,
+    }:
+    let
+      _logDefaultCheck =
+        if builtins.elem logLevelDefault runtimeLogLevels then
+          null
+        else
+          throw "runtime primitive default invalid: logLevel.default must be one of ${builtins.concatStringsSep "|" runtimeLogLevels}";
+      _outputDefaultCheck =
+        if builtins.elem outputModeDefault runtimeOutputModes then
+          null
+        else
+          throw "runtime primitive default invalid: outputMode.default must be one of ${builtins.concatStringsSep "|" runtimeOutputModes}";
+    in
+    builtins.seq _logDefaultCheck (
+      builtins.seq _outputDefaultCheck {
+        version = 1;
+        logLevel = {
+          env = runtimeLogLevelEnvName;
+          aliases = runtimeLogLevelAliases;
+          values = runtimeLogLevels;
+          default = logLevelDefault;
+        };
+        outputMode = {
+          env = runtimeOutputModeEnvName;
+          aliases = runtimeOutputModeAliases;
+          values = runtimeOutputModes;
+          default = outputModeDefault;
+        };
+      }
+    );
+
+  findEnvSpecByName =
+    {
+      env,
+      name,
+    }:
+    lib.findFirst (envSpec: (envSpec.name or "") == name) null env;
+
+  validateRuntimePrimitiveEnvErrors =
+    {
+      name,
+      env,
+      envName,
+      aliases,
+      values,
+    }:
+    let
+      envSpec = findEnvSpecByName {
+        inherit env;
+        name = envName;
+      };
+      prefix = "${name}: appContract.env[${envName}]";
+      actualAliases = if envSpec == null then [ ] else (envSpec.aliases or [ ]);
+      actualValues = if envSpec == null then [ ] else (envSpec.values or [ ]);
+      actualDefault = if envSpec == null || !(envSpec ? default) then null else envSpec.default;
+      actualType = if envSpec == null then null else (envSpec.type or "string");
+      actualRequired = if envSpec == null then false else (envSpec.required or false);
+    in
+    expect (envSpec != null) "${name}: appContract.env must include ${envName} runtime primitive"
+    ++ expect (envSpec == null || actualType == "enum") "${prefix}: type must be enum"
+    ++ expect (
+      envSpec == null || sameStringSet aliases actualAliases
+    ) "${prefix}: aliases must be exactly [${builtins.concatStringsSep ", " aliases}]"
+    ++ expect (
+      envSpec == null || sameStringSet values actualValues
+    ) "${prefix}: values must be exactly [${builtins.concatStringsSep ", " values}]"
+    ++ expect (envSpec == null || actualRequired == false) "${prefix}: required must be false"
+    ++ expect (
+      envSpec == null || actualDefault == null || builtins.elem actualDefault values
+    ) "${prefix}: default must be one of [${builtins.concatStringsSep ", " values}] when set";
 
   validateArgSpecErrors =
     {
@@ -229,6 +354,25 @@ let
       duplicateShortNames = duplicatesOf shortNames;
       duplicateEnvNames = duplicatesOf envNames;
       duplicateEnvAliases = duplicatesOf envAliases;
+      runtimePrimitiveErrs =
+        validateRuntimePrimitiveEnvErrors {
+          inherit
+            name
+            env
+            ;
+          envName = runtimeLogLevelEnvName;
+          aliases = runtimeLogLevelAliases;
+          values = runtimeLogLevels;
+        }
+        ++ validateRuntimePrimitiveEnvErrors {
+          inherit
+            name
+            env
+            ;
+          envName = runtimeOutputModeEnvName;
+          aliases = runtimeOutputModeAliases;
+          values = runtimeOutputModes;
+        };
     in
     if contract == null then
       [ "${name}: missing appContract" ]
@@ -297,7 +441,8 @@ let
         expect (duplicateEnvAliases == [ ])
           "${name}: appContract.env has duplicate aliases: ${builtins.concatStringsSep ", " duplicateEnvAliases}"
       ++ argErrs
-      ++ envErrs;
+      ++ envErrs
+      ++ runtimePrimitiveErrs;
 
   validateAppContract =
     {
@@ -394,6 +539,12 @@ let
       failureCodes ? defaultFailureCodes,
       idempotent ? true,
     }:
+    let
+      envSpecs0 = map mkDefaultEnvFromDoc env;
+      upsertEnvSpec =
+        acc: spec: (builtins.filter (envSpec: (envSpec.name or "") != (spec.name or "")) acc) ++ [ spec ];
+      envSpecs = builtins.foldl' upsertEnvSpec envSpecs0 (mkRuntimePrimitiveEnvSpecs { });
+    in
     {
       version = 2;
       inherit
@@ -404,7 +555,7 @@ let
         failureCodes
         ;
       args = map mkDefaultArgFromDoc args;
-      env = map mkDefaultEnvFromDoc env;
+      env = envSpecs;
       outputs = {
         mode = outputsMode;
       };
@@ -900,6 +1051,16 @@ in
     supportedArgKinds
     supportedOutputModes
     supportedCommandClasses
+    runtimeLogLevels
+    runtimeOutputModes
+    runtimeLogLevelEnvName
+    runtimeLogLevelAliases
+    runtimeLogLevelDefault
+    runtimeOutputModeEnvName
+    runtimeOutputModeAliases
+    runtimeOutputModeDefault
+    mkRuntimePrimitiveEnvSpecs
+    mkServiceRuntimePrimitivesV1
     defaultFailureCodes
     validateAppContractErrors
     validateAppContract

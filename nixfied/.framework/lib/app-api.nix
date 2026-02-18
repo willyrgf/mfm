@@ -24,6 +24,44 @@ let
       - For project commands: define commands.${commandName}.api = { version = 2; summary = "..."; details = "..."; usage = [ "nix run .#${commandName}" ]; appContract = { commandClass = "typed"; ... }; };
       - For generated/internal apps: set app.meta.nixfied.api (or use lib.appApi.mkNixfiedApp).
   '';
+
+  runtimePrimitiveEnvDocs = [
+    {
+      name = shellContract.runtimeLogLevelEnvName;
+      description =
+        "Logging verbosity ("
+        + builtins.concatStringsSep "|" shellContract.runtimeLogLevels
+        + "). Alias: "
+        + builtins.concatStringsSep ", " shellContract.runtimeLogLevelAliases;
+    }
+    {
+      name = shellContract.runtimeOutputModeEnvName;
+      description =
+        "Log routing mode ("
+        + builtins.concatStringsSep "|" shellContract.runtimeOutputModes
+        + "). Alias: "
+        + builtins.concatStringsSep ", " shellContract.runtimeOutputModeAliases;
+    }
+  ];
+
+  mergeEnvDocs =
+    docs:
+    let
+      ensureDoc =
+        acc: doc:
+        if builtins.any (entry: (entry.name or "") == (doc.name or "")) acc then acc else acc ++ [ doc ];
+    in
+    builtins.foldl' ensureDoc docs runtimePrimitiveEnvDocs;
+
+  mergeEnvSpecsByName =
+    baseSpecs: extraSpecs:
+    let
+      ensureSpec =
+        acc: spec:
+        if builtins.any (entry: (entry.name or "") == (spec.name or "")) acc then acc else acc ++ [ spec ];
+    in
+    builtins.foldl' ensureSpec baseSpecs extraSpecs;
+
   throwNamedViolation =
     name: errs:
     throw ''
@@ -225,19 +263,20 @@ let
       failureCodes ? failureProfiles.script,
     }:
     let
+      envFinal = mergeEnvDocs env;
       contract =
         if appContract == null then
           shellContract.mkDefaultAppContract {
             inherit
               name
               args
-              env
               allowUnknownArgs
               commandClass
               idempotent
               outputsMode
               failureCodes
               ;
+            env = envFinal;
           }
         else
           appContract;
@@ -253,7 +292,7 @@ let
       }
       // lib.optionalAttrs (examples != [ ]) { inherit examples; }
       // lib.optionalAttrs (args != [ ]) { inherit args; }
-      // lib.optionalAttrs (env != [ ]) { inherit env; };
+      // lib.optionalAttrs (envFinal != [ ]) { env = envFinal; };
       apiFinal = api // {
         appContract = contract;
       };
@@ -301,7 +340,9 @@ let
       contractWithSpecOverrides =
         defaultContract
         // lib.optionalAttrs (contractArgs != null) { args = contractArgs; }
-        // lib.optionalAttrs (contractEnv != null) { env = contractEnv; }
+        // lib.optionalAttrs (contractEnv != null) {
+          env = mergeEnvSpecsByName (defaultContract.env or [ ]) contractEnv;
+        }
         // lib.optionalAttrs (outputsKeys != [ ]) {
           outputs = defaultContract.outputs // {
             keys = outputsKeys;

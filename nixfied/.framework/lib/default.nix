@@ -9,13 +9,11 @@
 let
   shellContract = import ./shell-contract.nix { inherit pkgs; };
   baseLoggingPrelude =
-    (
-      import ./helpers.nix {
-        inherit pkgs project;
-        hooks = { };
-        summaryParser = "";
-      }
-    ).loggingPrelude;
+    (import ./helpers.nix {
+      inherit pkgs project;
+      hooks = { };
+      summaryParser = "";
+    }).loggingPrelude;
   summary = import ./summary.nix {
     inherit pkgs project;
     loggingPrelude = baseLoggingPrelude;
@@ -44,7 +42,11 @@ let
     inherit (builders) mkApp;
   };
   serviceApi = import ./service-api.nix {
-    inherit pkgs appApi;
+    inherit
+      pkgs
+      appApi
+      shellContract
+      ;
   };
   discovery = import ./discovery.nix {
     inherit pkgs project;

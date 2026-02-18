@@ -2,6 +2,7 @@
 {
   pkgs,
   appApi ? null,
+  shellContract ? import ./shell-contract.nix { inherit pkgs; },
 }:
 
 let
@@ -28,10 +29,25 @@ let
     "json"
     "batch-runner"
   ];
+  runtimeLogLevels = shellContract.runtimeLogLevels;
+  runtimeOutputModes = shellContract.runtimeOutputModes;
+  runtimeLogLevelEnvName = shellContract.runtimeLogLevelEnvName;
+  runtimeLogLevelAliases = shellContract.runtimeLogLevelAliases;
+  runtimeLogLevelDefault = shellContract.runtimeLogLevelDefault;
+  runtimeOutputModeEnvName = shellContract.runtimeOutputModeEnvName;
+  runtimeOutputModeAliases = shellContract.runtimeOutputModeAliases;
+  runtimeOutputModeDefault = shellContract.runtimeOutputModeDefault;
+  supportedRuntimePrimitiveKeys = [
+    "version"
+    "logLevel"
+    "outputMode"
+  ];
 
   isAttrs = x: builtins.isAttrs x;
   normalizeToken =
     x: pkgs.lib.strings.toUpper (pkgs.lib.replaceStrings [ "-" "." ":" ] [ "_" "_" "_" ] x);
+  normalizeStringSet = values: pkgs.lib.sort (a: b: a < b) (pkgs.lib.unique values);
+  sameStringSet = expected: actual: normalizeStringSet expected == normalizeStringSet actual;
 
   isScriptLike = x: (builtins.isString x) || (builtins.isPath x) || (builtins.isAttrs x);
 
@@ -87,6 +103,101 @@ let
         isNonEmptyString
       ) "${prefix}: hook must be a non-empty string";
 
+  validateRuntimePrimitiveSpecErrors =
+    {
+      serviceName,
+      primitiveName,
+      primitiveSpec,
+      expectedEnv,
+      expectedAliases,
+      expectedValues,
+    }:
+    let
+      prefix = "${serviceName}: publicApi.runtimePrimitives.${primitiveName}";
+      envName = primitiveSpec.env or "";
+      aliases = primitiveSpec.aliases or [ ];
+      values = primitiveSpec.values or [ ];
+      defaultValue = primitiveSpec.default or null;
+    in
+    if primitiveSpec == null then
+      [ "${prefix} is required" ]
+    else if !isAttrs primitiveSpec then
+      [ "${prefix} must be an attribute set" ]
+    else
+      expect (primitiveSpec ? env) "${prefix}.env is required"
+      ++ expect (isNonEmptyString envName) "${prefix}.env must be a non-empty string"
+      ++ expect (envName == expectedEnv) "${prefix}.env must be ${expectedEnv}"
+      ++ expect (primitiveSpec ? aliases) "${prefix}.aliases is required"
+      ++ expect (
+        builtins.isList aliases && isListOfNonEmptyStrings aliases
+      ) "${prefix}.aliases must be a list of non-empty strings"
+      ++ expect (sameStringSet expectedAliases aliases) "${prefix}.aliases must be [${builtins.concatStringsSep ", " expectedAliases}]"
+      ++ expect (primitiveSpec ? values) "${prefix}.values is required"
+      ++ expect (
+        builtins.isList values && isListOfNonEmptyStrings values
+      ) "${prefix}.values must be a list of non-empty strings"
+      ++ expect (sameStringSet expectedValues values) "${prefix}.values must be [${builtins.concatStringsSep ", " expectedValues}]"
+      ++ expect (primitiveSpec ? default) "${prefix}.default is required"
+      ++ expect (isNonEmptyString (toString defaultValue)) "${prefix}.default must be a non-empty string"
+      ++ expect (builtins.elem defaultValue expectedValues) "${prefix}.default must be one of [${builtins.concatStringsSep ", " expectedValues}]";
+
+  validateRuntimePrimitivesErrors =
+    {
+      serviceName,
+      runtimePrimitives,
+    }:
+    let
+      keys =
+        if runtimePrimitives == null || !isAttrs runtimePrimitives then
+          [ ]
+        else
+          builtins.attrNames runtimePrimitives;
+      unknownKeys = builtins.filter (k: !(builtins.elem k supportedRuntimePrimitiveKeys)) keys;
+      logLevelSpec =
+        if runtimePrimitives != null && isAttrs runtimePrimitives then
+          runtimePrimitives.logLevel or null
+        else
+          null;
+      outputModeSpec =
+        if runtimePrimitives != null && isAttrs runtimePrimitives then
+          runtimePrimitives.outputMode or null
+        else
+          null;
+    in
+    if runtimePrimitives == null then
+      [ "${serviceName}: publicApi.runtimePrimitives is required" ]
+    else if !isAttrs runtimePrimitives then
+      [ "${serviceName}: publicApi.runtimePrimitives must be an attribute set" ]
+    else
+      expect (
+        runtimePrimitives ? version
+      ) "${serviceName}: publicApi.runtimePrimitives.version is required"
+      ++ expect (builtins.isInt (
+        runtimePrimitives.version or null
+      )) "${serviceName}: publicApi.runtimePrimitives.version must be an integer"
+      ++ expect (
+        (runtimePrimitives.version or null) == 1
+      ) "${serviceName}: publicApi.runtimePrimitives.version must be 1"
+      ++
+        expect (unknownKeys == [ ])
+          "${serviceName}: publicApi.runtimePrimitives contains unsupported keys: ${builtins.concatStringsSep ", " unknownKeys}"
+      ++ validateRuntimePrimitiveSpecErrors {
+        inherit serviceName;
+        primitiveName = "logLevel";
+        primitiveSpec = logLevelSpec;
+        expectedEnv = runtimeLogLevelEnvName;
+        expectedAliases = runtimeLogLevelAliases;
+        expectedValues = runtimeLogLevels;
+      }
+      ++ validateRuntimePrimitiveSpecErrors {
+        inherit serviceName;
+        primitiveName = "outputMode";
+        primitiveSpec = outputModeSpec;
+        expectedEnv = runtimeOutputModeEnvName;
+        expectedAliases = runtimeOutputModeAliases;
+        expectedValues = runtimeOutputModes;
+      };
+
   opNames = ops: builtins.attrNames ops;
 
   validateServiceApiErrors =
@@ -96,6 +207,7 @@ let
       version = api.version or null;
       profiles = api.profiles or [ ];
       ops = api.operations or { };
+      runtimePrimitives = api.runtimePrimitives or null;
       missingLifecycleOps = builtins.filter (op: !(builtins.hasAttr op ops)) requiredLifecycleOps;
       opErrs = builtins.concatLists (
         map (
@@ -107,6 +219,7 @@ let
           }
         ) (opNames ops)
       );
+      runtimeErrs = validateRuntimePrimitivesErrors { inherit serviceName runtimePrimitives; };
     in
     if api == null then
       [ "${serviceName}: missing publicApi" ]
@@ -146,7 +259,8 @@ let
       ++ expect (isAttrs (
         api.artifacts or null
       )) "${serviceName}: publicApi.artifacts must be an attribute set"
-      ++ opErrs;
+      ++ opErrs
+      ++ runtimeErrs;
 
   validateServiceApi =
     { serviceName, api }:
@@ -204,6 +318,18 @@ let
           - Missing publicApi for enabled services: ${builtins.concatStringsSep ", " missing}
       '';
 
+  mkRuntimePrimitivesV1 =
+    {
+      logLevelDefault ? runtimeLogLevelDefault,
+      outputModeDefault ? runtimeOutputModeDefault,
+    }:
+    shellContract.mkServiceRuntimePrimitivesV1 {
+      inherit
+        logLevelDefault
+        outputModeDefault
+        ;
+    };
+
   mkServiceApiV3 =
     {
       service,
@@ -212,6 +338,7 @@ let
       artifacts,
       operations,
       profiles ? [ ],
+      runtimePrimitives ? mkRuntimePrimitivesV1 { },
     }:
     {
       version = 3;
@@ -222,6 +349,7 @@ let
         profiles
         artifacts
         operations
+        runtimePrimitives
         ;
     };
 
@@ -269,11 +397,50 @@ let
       serviceName,
       opName,
       opCfg,
+      runtimePrimitives,
     }:
+    let
+      logLevelDefault = runtimePrimitives.logLevel.default or runtimeLogLevelDefault;
+      outputModeDefault = runtimePrimitives.outputMode.default or runtimeOutputModeDefault;
+      logLevelAllowed = builtins.concatStringsSep "|" runtimeLogLevels;
+      outputModeAllowed = builtins.concatStringsSep "|" runtimeOutputModes;
+    in
     pkgs.writeShellScript (launcherNameFor serviceName opName) ''
       set -euo pipefail
 
       ${slotEnvRuntime.requireSlotEnvJson { }}
+
+      LOG_LEVEL="''${LOG_LEVEL:-''${NIXFIED_LOG_LEVEL:-${logLevelDefault}}}"
+      OUTPUT_MODE="''${OUTPUT_MODE:-''${NIXFIED_OUTPUT_MODE:-}}"
+      if [ -z "$OUTPUT_MODE" ]; then
+        if [ "$LOG_LEVEL" = "debug" ] && [ "${outputModeDefault}" = "stdout" ]; then
+          OUTPUT_MODE="both"
+        else
+          OUTPUT_MODE="${outputModeDefault}"
+        fi
+      fi
+      export LOG_LEVEL
+      export OUTPUT_MODE
+      export NIXFIED_LOG_LEVEL="$LOG_LEVEL"
+      export NIXFIED_OUTPUT_MODE="$OUTPUT_MODE"
+
+      case "$LOG_LEVEL" in
+        ${logLevelAllowed})
+          ;;
+        *)
+          echo "ERROR: invalid LOG_LEVEL value=$LOG_LEVEL allowed=${builtins.concatStringsSep "," runtimeLogLevels}" >&2
+          exit 2
+          ;;
+      esac
+
+      case "$OUTPUT_MODE" in
+        ${outputModeAllowed})
+          ;;
+        *)
+          echo "ERROR: invalid OUTPUT_MODE value=$OUTPUT_MODE allowed=${builtins.concatStringsSep "," runtimeOutputModes}" >&2
+          exit 2
+          ;;
+      esac
 
       exec ${toString opCfg.script} "$@"
     '';
@@ -294,6 +461,7 @@ let
           let
             opCfg = ops.${opName};
             appName = if opCfg ? appName then opCfg.appName else "svc::${serviceName}::${opName}";
+            opRuntimePrimitives = validated.${serviceName}.runtimePrimitives;
           in
           {
             inherit
@@ -308,12 +476,14 @@ let
             category = if opCfg ? category then opCfg.category else serviceName;
             class = opCfg.class or "passthrough";
             idempotent = opCfg.idempotent or false;
+            runtimePrimitives = opRuntimePrimitives;
             launcher = mkServiceOpLauncher {
               inherit
                 serviceName
                 opName
                 opCfg
                 ;
+              runtimePrimitives = opRuntimePrimitives;
             };
           }
         ) opNamesSorted;
@@ -385,6 +555,7 @@ in
     validateServiceApi
     validateServiceApis
     validateEnabledServicesHaveContracts
+    mkRuntimePrimitivesV1
     mkServiceApiV3
     mkServiceApisFromModules
     mkServiceHookEnvFromContract

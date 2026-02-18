@@ -92,13 +92,11 @@ let
     if loggingPrelude != null && loggingPrelude != "" then
       loggingPrelude
     else
-      (
-        import ./lib/helpers.nix {
-          inherit pkgs project;
-          hooks = { };
-          summaryParser = "";
-        }
-      ).loggingPrelude;
+      (import ./lib/helpers.nix {
+        inherit pkgs project;
+        hooks = { };
+        summaryParser = "";
+      }).loggingPrelude;
 
   # Resolve and validate explicit environment selection
   resolveEnv = pkgs.writeShellScript "resolve-env" ''

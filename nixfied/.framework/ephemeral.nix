@@ -71,13 +71,11 @@ let
     if loggingPrelude != null && loggingPrelude != "" then
       loggingPrelude
     else
-      (
-        import ./lib/helpers.nix {
-          inherit pkgs project;
-          hooks = { };
-          summaryParser = "";
-        }
-      ).loggingPrelude;
+      (import ./lib/helpers.nix {
+        inherit pkgs project;
+        hooks = { };
+        summaryParser = "";
+      }).loggingPrelude;
 
   # Pre-computed bash variable references
   # Nix $${var} doesn't interpolate; use "\$${var}" in "..." strings instead

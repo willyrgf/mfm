@@ -27,6 +27,10 @@ let
   portVarHttps = slots.portVarName (cfg.portKeyHttps or "https");
   dataDirName = cfg.dataDirName or "nginx";
   nginxDirExpr = slots.getServiceDir dataDirName;
+  runtimePrimitives = serviceApi.mkRuntimePrimitivesV1 {
+    logLevelDefault = toString ((project.logging or { }).level or "info");
+    outputModeDefault = toString ((project.logging or { }).output or "stdout");
+  };
   runtimePrelude = ''
     ${slotEnvRuntime.loadJsonFromCommand {
       outVar = "SLOT_INFO_JSON_OUT";
@@ -210,6 +214,7 @@ let
     service = "nginx";
     summary = "Nginx service management API";
     details = "Public service contract for managing nginx across dev/prod/test/ci.";
+    inherit runtimePrimitives;
     artifacts = {
       httpPortVar = portVarHttp;
       httpsPortVar = portVarHttps;

@@ -12,13 +12,11 @@ let
     if loggingPrelude != null && loggingPrelude != "" then
       loggingPrelude
     else
-      (
-        import ./helpers.nix {
-          inherit pkgs project;
-          hooks = { };
-          summaryParser = "";
-        }
-      ).loggingPrelude;
+      (import ./helpers.nix {
+        inherit pkgs project;
+        hooks = { };
+        summaryParser = "";
+      }).loggingPrelude;
 
   mkPlanId = pkgs.writeShellScript "mk-plan-id" ''
     ${resolvedLoggingPrelude}

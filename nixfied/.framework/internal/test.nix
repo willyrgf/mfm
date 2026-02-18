@@ -2040,6 +2040,32 @@ let
                   type = "string";
                   required = false;
                 }
+                {
+                  name = "LOG_LEVEL";
+                  type = "enum";
+                  required = false;
+                  aliases = [ "NIXFIED_LOG_LEVEL" ];
+                  values = [
+                    "error"
+                    "warn"
+                    "info"
+                    "debug"
+                    "trace"
+                  ];
+                  default = "info";
+                }
+                {
+                  name = "OUTPUT_MODE";
+                  type = "enum";
+                  required = false;
+                  aliases = [ "NIXFIED_OUTPUT_MODE" ];
+                  values = [
+                    "stdout"
+                    "logs"
+                    "both"
+                  ];
+                  default = "stdout";
+                }
               ];
               outputs = {
                 mode = "text";
@@ -2157,6 +2183,44 @@ let
     fi
     assert_contains "$BAD_SERVICE_API_V1_LOG" "Nixfied service API contract violated"
     assert_contains "$BAD_SERVICE_API_V1_LOG" "publicApi.version must be 3"
+
+    BAD_SERVICE_RUNTIME_PRIMITIVES_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      serviceApi = import ./nixfied/.framework/lib/service-api.nix { inherit pkgs; };
+      mkOp = name: {
+        script = "/bin/true";
+        summary = name;
+        details = name;
+      };
+    in
+      pkgs.writeText "service-api-missing-runtime-primitives" (builtins.toJSON (serviceApi.validateServiceApis {
+        postgres = {
+          version = 3;
+          service = "postgres";
+          summary = "missing runtime primitives";
+          details = "runtimePrimitives should be required";
+          operations = {
+            start = mkOp "start";
+            stop = mkOp "stop";
+            status = mkOp "status";
+          };
+          artifacts = { };
+        };
+      }))
+    NIX
+    )
+    BAD_SERVICE_RUNTIME_PRIMITIVES_LOG="$WORKDIR/bad-service-runtime-primitives.log"
+    set +e
+    build_expr "$BAD_SERVICE_RUNTIME_PRIMITIVES_EXPR" > "$BAD_SERVICE_RUNTIME_PRIMITIVES_LOG" 2>&1
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected runtimePrimitives service API contract violation to fail"
+    fi
+    assert_contains "$BAD_SERVICE_RUNTIME_PRIMITIVES_LOG" "publicApi.runtimePrimitives is required"
 
     log "installer upgrade preserves project"
     echo "# NIXFIED_UPGRADE_TEST_MARKER" >> "$INSTALL_TARGET/nixfied/project/conf.nix"
@@ -3311,6 +3375,40 @@ let
     fi
     assert_contains "$MISSING_CLASS_LOG" "appContract.commandClass is required"
 
+    MISSING_PRIMITIVES_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      shellContract = import ./nixfied/.framework/lib/shell-contract.nix { inherit pkgs; };
+    in
+      pkgs.writeText "missing-runtime-primitives" (builtins.toJSON (shellContract.validateAppContract {
+        name = "missing-runtime-primitives";
+        contract = {
+          version = 2;
+          name = "missing-runtime-primitives";
+          commandClass = "typed";
+          allowUnknownArgs = false;
+          args = [ ];
+          env = [ ];
+          outputs = { mode = "text"; };
+          failureCodes = shellContract.defaultFailureCodes;
+          idempotent = true;
+        };
+      }))
+    NIX
+    )
+    MISSING_PRIMITIVES_LOG="$WORKDIR/missing-runtime-primitives.log"
+    set +e
+    build_expr "$MISSING_PRIMITIVES_EXPR" > "$MISSING_PRIMITIVES_LOG" 2>&1
+    MISSING_PRIMITIVES_RC=$?
+    set -e
+    if [ "$MISSING_PRIMITIVES_RC" -eq 0 ]; then
+      fail "expected runtime primitive env enforcement violation"
+    fi
+    assert_contains "$MISSING_PRIMITIVES_LOG" "appContract.env must include LOG_LEVEL runtime primitive"
+    assert_contains "$MISSING_PRIMITIVES_LOG" "appContract.env must include OUTPUT_MODE runtime primitive"
+
     log "module apps exposure"
     MODAPP_EXPR=$(cat <<'NIX'
     { root, system }:
@@ -3636,6 +3734,102 @@ let
     assert_contains "$SERVICE_HOOKS_FILE" "SVC_HELIOS_HEALTH="
     assert_contains "$SERVICE_HOOKS_FILE" "SVC_HELIOS_READY="
     assert_contains "$SERVICE_HOOKS_FILE" "/nix/store/"
+
+    HOOK_SLOT_JSON="$WORKDIR/require-slot-env-json.sh"
+    cat > "$HOOK_SLOT_JSON" <<'EOF'
+    #!/usr/bin/env bash
+    cat <<'JSON'
+    {"slot":"0","env":"dev","vars":{"SLOT":"0","ENV":"dev","LOG_DIR":"/tmp","RUN_DIR":"/tmp","CONFIG_DIR":"/tmp","STATE_DIR":"/tmp","BASE_DIR":"/tmp"}}
+    JSON
+    EOF
+    chmod +x "$HOOK_SLOT_JSON"
+
+    POSTGRES_STATUS_HOOK=$(awk -F'= ' '/^SVC_POSTGRES_STATUS= / { print $2; exit }' "$SERVICE_HOOKS_FILE")
+    if [ -z "$POSTGRES_STATUS_HOOK" ] || [ ! -x "$POSTGRES_STATUS_HOOK" ]; then
+      fail "expected executable SVC_POSTGRES_STATUS hook path"
+    fi
+
+    HOOK_BAD_LOG_LEVEL_LOG="$WORKDIR/service-hook-bad-log-level.log"
+    set +e
+    REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=verbose OUTPUT_MODE=stdout "$POSTGRES_STATUS_HOOK" > "$HOOK_BAD_LOG_LEVEL_LOG" 2>&1
+    HOOK_BAD_LOG_LEVEL_RC=$?
+    set -e
+    if [ "$HOOK_BAD_LOG_LEVEL_RC" -eq 0 ]; then
+      fail "expected service hook launcher to reject invalid LOG_LEVEL"
+    fi
+    assert_contains "$HOOK_BAD_LOG_LEVEL_LOG" "invalid LOG_LEVEL value=verbose"
+
+    HOOK_BAD_OUTPUT_MODE_LOG="$WORKDIR/service-hook-bad-output-mode.log"
+    set +e
+    REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=info OUTPUT_MODE=file "$POSTGRES_STATUS_HOOK" > "$HOOK_BAD_OUTPUT_MODE_LOG" 2>&1
+    HOOK_BAD_OUTPUT_MODE_RC=$?
+    set -e
+    if [ "$HOOK_BAD_OUTPUT_MODE_RC" -eq 0 ]; then
+      fail "expected service hook launcher to reject invalid OUTPUT_MODE"
+    fi
+    assert_contains "$HOOK_BAD_OUTPUT_MODE_LOG" "invalid OUTPUT_MODE value=file"
+
+    SERVICE_DEFAULT_OUTPUT_HOOK_EXPR=$(cat <<'NIX'
+    { root, system }:
+    let
+      flake = builtins.getFlake root;
+      pkgs = flake.inputs.nixpkgs.legacyPackages.''${system};
+      serviceApi = import ./nixfied/.framework/lib/service-api.nix { inherit pkgs; };
+      printOutputMode = pkgs.writeShellScript "svc-print-output-mode" "set -euo pipefail\necho \"OUTPUT_MODE=$OUTPUT_MODE\"\n";
+      publicApi = serviceApi.mkServiceApiV3 {
+        service = "probe";
+        summary = "probe service";
+        details = "tests default runtime primitives in launcher";
+        artifacts = { };
+        operations = {
+          start = {
+            script = printOutputMode;
+            summary = "start";
+            details = "start";
+          };
+          stop = {
+            script = printOutputMode;
+            summary = "stop";
+            details = "stop";
+          };
+          status = {
+            script = printOutputMode;
+            summary = "status";
+            details = "status";
+          };
+        };
+      };
+      hookPath = (serviceApi.mkServiceHookEnvFromContract {
+        probe = publicApi;
+      }).SVC_PROBE_STATUS;
+    in
+      pkgs.writeText "service-default-output-hook-path" hookPath
+    NIX
+    )
+    SERVICE_DEFAULT_OUTPUT_HOOK=$(cat "$(build_expr "$SERVICE_DEFAULT_OUTPUT_HOOK_EXPR")")
+    if [ -z "$SERVICE_DEFAULT_OUTPUT_HOOK" ] || [ ! -x "$SERVICE_DEFAULT_OUTPUT_HOOK" ]; then
+      fail "expected executable service default output hook path"
+    fi
+
+    HOOK_DEBUG_DEFAULT_MODE_LOG="$WORKDIR/service-hook-debug-default-mode.log"
+    set +e
+    REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=debug OUTPUT_MODE= NIXFIED_OUTPUT_MODE= "$SERVICE_DEFAULT_OUTPUT_HOOK" > "$HOOK_DEBUG_DEFAULT_MODE_LOG" 2>&1
+    HOOK_DEBUG_DEFAULT_MODE_RC=$?
+    set -e
+    if [ "$HOOK_DEBUG_DEFAULT_MODE_RC" -ne 0 ]; then
+      fail "expected debug hook run to succeed when defaulting output mode"
+    fi
+    assert_contains "$HOOK_DEBUG_DEFAULT_MODE_LOG" "OUTPUT_MODE=both"
+
+    HOOK_INFO_DEFAULT_MODE_LOG="$WORKDIR/service-hook-info-default-mode.log"
+    set +e
+    REQUIRE_SLOT_ENV_JSON="$HOOK_SLOT_JSON" LOG_LEVEL=info OUTPUT_MODE= NIXFIED_OUTPUT_MODE= "$SERVICE_DEFAULT_OUTPUT_HOOK" > "$HOOK_INFO_DEFAULT_MODE_LOG" 2>&1
+    HOOK_INFO_DEFAULT_MODE_RC=$?
+    set -e
+    if [ "$HOOK_INFO_DEFAULT_MODE_RC" -ne 0 ]; then
+      fail "expected info hook run to succeed when defaulting output mode"
+    fi
+    assert_contains "$HOOK_INFO_DEFAULT_MODE_LOG" "OUTPUT_MODE=stdout"
 
     log "supervisor hooks"
     SUP_HOOKS_EXPR=$(cat <<'NIX'

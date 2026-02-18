@@ -23,10 +23,20 @@ let
       ;
   };
   statusMod = import ./status.nix {
-    inherit pkgs slots config loggingPrelude;
+    inherit
+      pkgs
+      slots
+      config
+      loggingPrelude
+      ;
   };
   management = import ./management.nix {
-    inherit pkgs slots config loggingPrelude;
+    inherit
+      pkgs
+      slots
+      config
+      loggingPrelude
+      ;
   };
 in
 {

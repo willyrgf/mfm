@@ -30,13 +30,11 @@ let
     if loggingPrelude != null && loggingPrelude != "" then
       loggingPrelude
     else
-      (
-        import ./helpers.nix {
-          inherit pkgs project;
-          hooks = { };
-          summaryParser = "";
-        }
-      ).loggingPrelude;
+      (import ./helpers.nix {
+        inherit pkgs project;
+        hooks = { };
+        summaryParser = "";
+      }).loggingPrelude;
 
   sharedPrelude = ''
     ${resolvedLoggingPrelude}

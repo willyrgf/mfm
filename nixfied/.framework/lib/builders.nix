@@ -105,8 +105,17 @@ let
       source ${helpersScript}
       ${hookExports}
       ${envExports}
-      export LOG_LEVEL="''${LOG_LEVEL:-''${NIXFIED_LOG_LEVEL:-${defaultLogLevel}}}"
-      export OUTPUT_MODE="''${OUTPUT_MODE:-''${NIXFIED_OUTPUT_MODE:-${defaultOutputMode}}}"
+      LOG_LEVEL="''${LOG_LEVEL:-''${NIXFIED_LOG_LEVEL:-${defaultLogLevel}}}"
+      OUTPUT_MODE="''${OUTPUT_MODE:-''${NIXFIED_OUTPUT_MODE:-}}"
+      if [ -z "$OUTPUT_MODE" ]; then
+        if [ "$LOG_LEVEL" = "debug" ] && [ "${defaultOutputMode}" = "stdout" ]; then
+          OUTPUT_MODE="both"
+        else
+          OUTPUT_MODE="${defaultOutputMode}"
+        fi
+      fi
+      export LOG_LEVEL
+      export OUTPUT_MODE
       export NIXFIED_LOG_LEVEL="$LOG_LEVEL"
       export NIXFIED_OUTPUT_MODE="$OUTPUT_MODE"
       export NIXFIED_LOG_TRACE="''${NIXFIED_LOG_TRACE:-0}"

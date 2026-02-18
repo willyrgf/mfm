@@ -62,11 +62,40 @@ let
           commandClass = "passthrough";
           allowUnknownArgs = true;
           args = [ ];
-          env = map (var: {
-            name = var;
-            type = "string";
-            required = false;
-          }) envDocs;
+          env =
+            (map (var: {
+              name = var;
+              type = "string";
+              required = false;
+            }) envDocs)
+            ++ [
+              {
+                name = "LOG_LEVEL";
+                type = "enum";
+                required = false;
+                aliases = [ "NIXFIED_LOG_LEVEL" ];
+                values = [
+                  "error"
+                  "warn"
+                  "info"
+                  "debug"
+                  "trace"
+                ];
+                default = "info";
+              }
+              {
+                name = "OUTPUT_MODE";
+                type = "enum";
+                required = false;
+                aliases = [ "NIXFIED_OUTPUT_MODE" ];
+                values = [
+                  "stdout"
+                  "logs"
+                  "both"
+                ];
+                default = "stdout";
+              }
+            ];
           outputs = {
             mode = "text";
           };

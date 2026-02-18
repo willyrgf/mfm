@@ -29,6 +29,10 @@ let
   portVar = slots.portVarName portKey;
   dataDirName = cfg.dataDirName or "postgres";
   pgdataExpr = slots.getServiceDir dataDirName;
+  runtimePrimitives = serviceApi.mkRuntimePrimitivesV1 {
+    logLevelDefault = toString ((project.logging or { }).level or "info");
+    outputModeDefault = toString ((project.logging or { }).output or "stdout");
+  };
 
   config = import ./config.nix { inherit pkgs project; };
   lifecycle = import ./lifecycle.nix {
@@ -41,16 +45,36 @@ let
       ;
   };
   backupMod = import ./backup.nix {
-    inherit pkgs project slots loggingPrelude;
+    inherit
+      pkgs
+      project
+      slots
+      loggingPrelude
+      ;
   };
   migration = import ./migration.nix {
-    inherit pkgs project slots loggingPrelude;
+    inherit
+      pkgs
+      project
+      slots
+      loggingPrelude
+      ;
   };
   migrationSafety = import ./migration-safety.nix {
-    inherit pkgs project slots loggingPrelude;
+    inherit
+      pkgs
+      project
+      slots
+      loggingPrelude
+      ;
   };
   rollback = import ./rollback.nix {
-    inherit pkgs project slots loggingPrelude;
+    inherit
+      pkgs
+      project
+      slots
+      loggingPrelude
+      ;
   };
   portMgmt = import ./port-management.nix {
     inherit pkgs loggingPrelude;
@@ -219,6 +243,7 @@ let
     service = "postgres";
     summary = "PostgreSQL service management API";
     details = "Public service contract for managing PostgreSQL across dev/prod/test/ci.";
+    inherit runtimePrimitives;
     artifacts = {
       portKey = portKey;
       portVar = portVar;
