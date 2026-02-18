@@ -34,8 +34,9 @@ in
       };
       useDeps = true;
       script = ''
+        set -euo pipefail
         cargo-nightly fmt --all -- --check
-        cargo-nightly clippy --workspace --lib --examples --tests --benches --all-features
+        cargo-nightly clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings
         cargo-nightly run -p mfm-architecture-verify --
       '';
     };

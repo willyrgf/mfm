@@ -5,11 +5,12 @@ use mfm_evm_core::hex::{
     bytes_to_hex_prefixed, hex_to_bytes, normalize_hex_str, normalize_nonempty_hex_str,
 };
 use mfm_evm_core::rlp::{rlp_encode_list, trim_leading_zero_bytes, u128_to_min_be};
-use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
-use mfm_machine::ids::ErrorCode;
+use mfm_machine::errors::{ErrorCategory, IoError};
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
-use serde::de::DeserializeOwned;
+use mfm_op_common::local_transport::{
+    decode_hex_utf8, encode_response, io_other, parse_request, LocalTransportError,
+};
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
@@ -56,56 +57,7 @@ struct EvmSignerAddressRequest {
     env_name_hex: String,
 }
 
-#[derive(Debug, Clone)]
-struct LocalError {
-    code: &'static str,
-    category: ErrorCategory,
-    message: String,
-}
-
-impl LocalError {
-    fn new(code: &'static str, category: ErrorCategory, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            category,
-            message: message.into(),
-        }
-    }
-
-    fn into_io(self) -> IoError {
-        io_other(self.code, self.category, self.message)
-    }
-}
-
-fn io_other(code: &'static str, category: ErrorCategory, message: impl Into<String>) -> IoError {
-    IoError::Other(ErrorInfo {
-        code: ErrorCode(code.to_string()),
-        category,
-        retryable: false,
-        message: message.into(),
-        details: None,
-    })
-}
-
-fn parse_request<T: DeserializeOwned>(request: serde_json::Value) -> Result<T, IoError> {
-    serde_json::from_value(request).map_err(|_| {
-        io_other(
-            "invalid_local_request",
-            ErrorCategory::ParsingInput,
-            "invalid local io request payload",
-        )
-    })
-}
-
-fn encode_response(value: serde_json::Value) -> Result<serde_json::Value, IoError> {
-    serde_json::to_value(value).map_err(|_| {
-        io_other(
-            "local_response_serialize_failed",
-            ErrorCategory::Unknown,
-            "failed to serialize local io response payload",
-        )
-    })
-}
+type LocalError = LocalTransportError;
 
 fn handle_evm_sign_legacy_create(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
     let req: EvmSignLegacyCreateRequest = parse_request(request)?;
@@ -185,27 +137,6 @@ fn signing_key_from_env_name_hex(env_name_hex: &str) -> Result<SigningKey, Local
         )
     })?);
     signing_key_from_hex(raw.as_str())
-}
-
-fn decode_hex_utf8(
-    raw: &str,
-    code: &'static str,
-    field: &'static str,
-) -> Result<String, LocalError> {
-    let bytes = hex::decode(raw).map_err(|_| {
-        LocalError::new(
-            code,
-            ErrorCategory::ParsingInput,
-            format!("{field} must be valid hex"),
-        )
-    })?;
-    String::from_utf8(bytes).map_err(|_| {
-        LocalError::new(
-            code,
-            ErrorCategory::ParsingInput,
-            format!("{field} did not decode to utf-8"),
-        )
-    })
 }
 
 fn signing_key_from_hex(raw: &str) -> Result<SigningKey, LocalError> {
