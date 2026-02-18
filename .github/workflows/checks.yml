@@ -40,10 +40,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LOG_TEE: "1"
-      CI_VERBOSE: "1"
-      NIXFIED_VERBOSE: "1"
-      NIXFIED_DEBUG: "1"
-      NIXFIED_LOG_LEVEL: "debug"
+      LOG_LEVEL: "debug"
+      OUTPUT_MODE: "both"
       RUST_BACKTRACE: "full"
       RUST_LOG: "debug"
       MFM_LOG: "debug"
