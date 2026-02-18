@@ -10,6 +10,7 @@ pkgs.writeText "mfm-ci-steps-parity-aave-v3-reth.sh" ''
   export MFM_S3_PREFIX="$MINIO_PREFIX"
 
   export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
+  export MFM_PARITY_AAVE_V3_RUN_IDS_PATH="$CI_ARTIFACTS_DIR/parity-aave-v3-run-ids.json"
 
   run_hook SVC_MINIO_BUCKET_PROBE_WRITE "$MINIO_BUCKET" "$MINIO_PREFIX"
 

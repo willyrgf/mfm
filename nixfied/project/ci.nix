@@ -714,7 +714,7 @@ in
       };
 
       parity-postgres-state-events-audit = {
-        description = "Parity: audit Postgres kernel state events after multi-state reth pipelines";
+        description = "Parity: query-only audit of Postgres kernel state events from prior parity runs";
         env = {
           AUTO_STOP_CONFLICTING = "1";
         };
@@ -723,21 +723,6 @@ in
             {
               name = "postgres";
               profile = "test";
-            }
-            {
-              name = "minio";
-              profile = "test";
-              exports = [ "s3" ];
-              bucket = "mfm-test";
-              prefix = "mfm-artifacts";
-              region = "us-east-1";
-              bootstrap = [ "mfm-test" ];
-              logName = "minio-postgres-state-events-audit.log";
-            }
-            {
-              name = "reth";
-              profile = "test";
-              logName = "reth-postgres-state-events-audit.log";
             }
           ];
           artifacts = {

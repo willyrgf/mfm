@@ -8,6 +8,7 @@ use std::time::Duration;
 use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_collectors_evm_jsonrpc_http::{EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory};
 use mfm_event_store_postgres::PostgresEventStore;
+use mfm_integration_tests::parity_run_ids::write_parity_aave_run_ids;
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
     RetryPolicy, RunConfig,
@@ -855,4 +856,6 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         report_artifact_json.get("kind").and_then(|v| v.as_str()),
         Some(SCENARIO_REPORT_KIND)
     );
+
+    write_parity_aave_run_ids(&phase_a_run.run_id, &phase_b_run.run_id);
 }
