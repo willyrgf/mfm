@@ -501,6 +501,8 @@ let
       local nginx_file="$ROOT/tests/framework/fixtures/nginx/site-lifecycle.nix"
       local helios_file="$ROOT/tests/framework/fixtures/helios/lifecycle.nix"
       local modules_file="$ROOT/tests/framework/fixtures/modules/dev.nix"
+      local reth_lifecycle_file="$ROOT/nixfied/.framework/reth/lifecycle.nix"
+      local ci_setup_file="$ROOT/nixfied/project/ci/scripts/setup.nix"
 
       require_contains "$reth_file" 'for _ in $(seq 1 240); do' "reth readiness retry loop"
       require_contains "$minio_file" 'for _ in $(seq 1 50); do' "minio readiness retry loop"
@@ -523,6 +525,11 @@ let
       require_absent "$modules_file" 'tail -50 "$PGDATA/postgres.log" >&2 || true' "modules postgres unguarded log tail"
       require_absent "$modules_file" 'tail -50 "$RETH_DIR/logs/reth.log" >&2 || true' "modules reth unguarded log tail"
       require_absent "$modules_file" 'tail -50 "$HELIOS_DIR/logs/helios.log" >&2 || true' "modules helios unguarded log tail"
+
+      require_contains "$reth_lifecycle_file" '--port "$RETH_P2P_PORT"' "reth slot-scoped p2p port arg"
+      require_contains "$reth_lifecycle_file" 'p2p_port=$RETH_P2P_PORT' "reth status includes p2p port"
+      require_contains "$ci_setup_file" 'kill_conflicting_listener "''${RETHP2P_PORT:-}" "reth-p2p" "reth" "reth"' "ci reth p2p cleanup uses slot-scoped port"
+      require_absent "$ci_setup_file" 'kill_conflicting_listener "30303" "reth-p2p" "reth" "reth"' "ci reth p2p cleanup no fixed global port"
     }
 
     if [ "$SKIP_SETUP" -ne 1 ]; then

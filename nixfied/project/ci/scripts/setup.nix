@@ -277,5 +277,5 @@ kill_conflicting_listener "''${MINIO_CONSOLE_PORT:-}" "minio-console" "minio" "m
 kill_conflicting_listener "''${RETHHTTP_PORT:-}" "reth-http" "reth" "reth"
 kill_conflicting_listener "''${RETHWS_PORT:-}" "reth-ws" "reth" "reth"
 kill_conflicting_listener "''${RETHAUTH_PORT:-}" "reth-auth" "reth" "reth"
-kill_conflicting_listener "30303" "reth-p2p" "reth" "reth"
+kill_conflicting_listener "''${RETHP2P_PORT:-}" "reth-p2p" "reth" "reth"
 ''

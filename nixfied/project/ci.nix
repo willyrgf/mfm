@@ -612,6 +612,9 @@ in
         description = "Parity: Aave v3 deploy/configure/lend/borrow scenario on reth";
         env = {
           AUTO_STOP_CONFLICTING = "1";
+          SERVICE_REUSE_POLICY = "never";
+          SERVICE_OWNER_SCOPE = "ephemeral";
+          SERVICE_DISCOVERY_SCOPE = "local";
         };
         fixtures = {
           services = [

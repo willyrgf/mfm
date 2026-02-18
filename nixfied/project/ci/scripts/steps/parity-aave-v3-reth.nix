@@ -2,6 +2,13 @@
 pkgs.writeText "mfm-ci-steps-parity-aave-v3-reth.sh" ''
   source <($SLOT_INFO)
 
+  if [ -z "''${MFM_EPHEMERAL_ROOT:-}" ]; then
+    echo "ERROR: parity-aave-v3-reth requires MFM_EPHEMERAL_ROOT for isolated runtime state" >&2
+    exit 3
+  fi
+
+  export XDG_DATA_HOME="$MFM_EPHEMERAL_ROOT/data"
+
   export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
 
   export MFM_S3_ENDPOINT="$MINIO_ENDPOINT"
