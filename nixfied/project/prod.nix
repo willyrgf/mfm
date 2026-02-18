@@ -30,10 +30,11 @@ in
       };
       env = {
         "${project.envVar}" = "prod";
+        RUSTC_WRAPPER = "sccache";
       };
       useDeps = true;
       script = ''
-        cargo build --release --all-features
+        cargo-nightly build --release --all-features
       '';
     };
   };

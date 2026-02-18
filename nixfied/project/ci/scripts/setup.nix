@@ -85,10 +85,38 @@ init_ci_cargo_paths() {
   echo "INFO: ci cargo paths target_dir=$CARGO_TARGET_DIR cargo_home=$CARGO_HOME" >&2
 }
 
+init_ci_rust_build_cache() {
+  local default_sccache_dir=""
+
+  if [ -z "''${SCCACHE_DIR:-}" ]; then
+    if [ -n "''${MFM_EPHEMERAL_ROOT:-}" ]; then
+      default_sccache_dir="$MFM_EPHEMERAL_ROOT/build/sccache"
+    else
+      default_sccache_dir="$(pwd)/.cache/sccache"
+    fi
+    export SCCACHE_DIR="$default_sccache_dir"
+  fi
+
+  mkdir -p "$SCCACHE_DIR"
+
+  if command -v sccache >/dev/null 2>&1; then
+    if [ -z "''${RUSTC_WRAPPER:-}" ]; then
+      export RUSTC_WRAPPER="sccache"
+    fi
+    if [ "$RUSTC_WRAPPER" = "sccache" ]; then
+      sccache --zero-stats >/dev/null 2>&1 || true
+    fi
+    echo "INFO: ci rust cache rustc_wrapper=$RUSTC_WRAPPER sccache_dir=$SCCACHE_DIR" >&2
+  else
+    echo "WARN: sccache not found; continuing without rustc wrapper cache" >&2
+  fi
+}
+
 source <($SLOT_INFO)
 reject_legacy_ci_logging_env
 normalize_ci_logging_env
 init_ci_cargo_paths
+init_ci_rust_build_cache
 
 kill_conflicting_listener() {
   local port="$1"

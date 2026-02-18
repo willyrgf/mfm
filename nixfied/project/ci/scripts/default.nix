@@ -17,9 +17,6 @@
     "parity-keystore-reth-tx-sign-send" = import ./steps/parity-keystore-reth-tx-sign-send.nix {
       inherit pkgs;
     };
-    "parity-portfolio-tracker-reth" = import ./steps/parity-portfolio-tracker-reth.nix {
-      inherit pkgs;
-    };
     "parity-postgres-state-events-audit" = import ./steps/parity-postgres-state-events-audit.nix {
       inherit pkgs;
     };

@@ -6,5 +6,5 @@ pkgs.writeText "mfm-ci-steps-parity-postgres.sh" ''
   export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test"
 
   LOGFILE=$(artifact_path "parity-postgres.log")
-  log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_event_store_postgres_contract
+  log_capture "$LOGFILE" -- cargo-nightly nextest run --cargo-profile ci -p mfm-integration-tests --features parity-tests --test parity_event_store_postgres_contract
 ''

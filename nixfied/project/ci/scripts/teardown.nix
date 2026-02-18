@@ -75,6 +75,13 @@ capture_service_diag() {
 capture_diag "ci-diagnostics-process-status.log" "process" nix run .#process::status -- --all
 capture_diag "ci-diagnostics-process-runs.log" "process" nix run .#process::runs -- --all
 capture_diag "ci-diagnostics-process-slots.log" "process" nix run .#process::slots -- --all
+if [ -z "''${SCCACHE_DIR:-}" ] && [ -n "''${MFM_EPHEMERAL_ROOT:-}" ]; then
+  export SCCACHE_DIR="$MFM_EPHEMERAL_ROOT/build/sccache"
+fi
+if command -v sccache >/dev/null 2>&1; then
+  sccache --show-stats >&2 || true
+  capture_diag "ci-diagnostics-sccache-stats.log" "tool" sccache --show-stats
+fi
 # CI parity modes can intentionally keep fixture services running across steps
 # (same-slot reuse). Stop the run-scoped processes before ephemeral root cleanup.
 if [ -n "''${RUN_ID:-}" ]; then

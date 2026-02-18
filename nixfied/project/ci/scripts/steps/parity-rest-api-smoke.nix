@@ -12,5 +12,5 @@ pkgs.writeText "mfm-ci-steps-parity-rest-api-smoke.sh" ''
   run_hook SVC_MINIO_BUCKET_ENSURE "$MINIO_BUCKET"
 
   LOGFILE=$(artifact_path "parity-rest-api-smoke.log")
-  log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_rest_api_postgres_s3_smoke
+  log_capture "$LOGFILE" -- cargo-nightly nextest run --cargo-profile ci -p mfm-integration-tests --features parity-tests --test parity_rest_api_postgres_s3_smoke
 ''

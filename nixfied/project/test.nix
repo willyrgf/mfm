@@ -30,10 +30,11 @@ in
       };
       env = {
         "${project.envVar}" = "test";
+        RUSTC_WRAPPER = "sccache";
       };
       useDeps = true;
       script = ''
-        cargo nextest run --workspace
+        cargo-nightly nextest run --workspace --cargo-profile ci
       '';
     };
   };

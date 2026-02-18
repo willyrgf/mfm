@@ -697,6 +697,7 @@ rec {
       pkgs.jq
       pkgs.cargo-nextest
       pkgs.cargo-audit
+      pkgs.sccache
       pkgs.foundry
       pkgs.reth
       pkgs.minio

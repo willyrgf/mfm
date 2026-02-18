@@ -291,6 +291,8 @@ in
       # steps can reuse them safely without cross-run leakage.
       CARGO_TARGET_DIR = "$MFM_EPHEMERAL_ROOT/build/cargo-target";
       CARGO_HOME = "$MFM_EPHEMERAL_ROOT/build/cargo-home";
+      RUSTC_WRAPPER = "sccache";
+      SCCACHE_DIR = "$HOME/.cache/mfm/sccache";
       RUST_BACKTRACE = "1";
       SERVICE_OWNER_SCOPE = "persistent";
       SERVICE_DISCOVERY_SCOPE = "global";
@@ -348,7 +350,6 @@ in
           "parity-rest-api-smoke"
           "parity-evm-reth"
           "parity-aave-v3-reth"
-          "parity-portfolio-tracker-reth"
           "parity-postgres-state-events-audit"
           "parity-keystore-reth-tx-sign-send"
           "parity-evm-helios-smoke"
@@ -366,7 +367,6 @@ in
           "parity-s3"
           "parity-rest-api-smoke"
           "parity-evm-reth"
-          "parity-portfolio-tracker-reth"
           "parity-keystore-reth-tx-sign-send"
           "parity-evm-helios-smoke"
         ];
@@ -559,7 +559,7 @@ in
       };
 
       parity-evm-reth = {
-        description = "Parity: EVM pipeline deploy/configure/validate on reth";
+        description = "Parity: EVM + portfolio tracker scenarios on reth";
         env = {
           AUTO_STOP_CONFLICTING = "1";
         };
@@ -639,49 +639,6 @@ in
             argv = [
               "."
               (ciStepScript "parity-aave-v3-reth")
-            ];
-          }
-        ];
-      };
-
-      parity-portfolio-tracker-reth = {
-        description = "Parity: portfolio_tracker snapshot against reth (MockERC20)";
-        env = {
-          AUTO_STOP_CONFLICTING = "1";
-        };
-        fixtures = {
-          services = [
-            {
-              name = "postgres";
-              profile = "test";
-            }
-            {
-              name = "minio";
-              profile = "test";
-              exports = [ "s3" ];
-              bucket = "mfm-test";
-              prefix = "mfm-artifacts";
-              region = "us-east-1";
-              bootstrap = [ "mfm-test" ];
-              logName = "minio-portfolio-tracker.log";
-            }
-            {
-              name = "reth";
-              profile = "test";
-              logName = "reth-portfolio-tracker.log";
-            }
-          ];
-          artifacts = {
-            logs = true;
-            prefix = "parity-portfolio-tracker-reth";
-          };
-        };
-        actions = [
-          {
-            kind = "exec";
-            argv = [
-              "."
-              (ciStepScript "parity-portfolio-tracker-reth")
             ];
           }
         ];

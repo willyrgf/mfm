@@ -14,5 +14,5 @@ pkgs.writeText "mfm-ci-steps-parity-keystore-reth-tx-sign-send.sh" ''
   unset LOG_SPAN_EVENTS
 
   LOGFILE=$(artifact_path "parity-keystore-reth-tx-sign-send.log")
-  log_capture "$LOGFILE" -- cargo nextest run -p mfm --features parity-tests --test parity_keystore_reth_tx_send
+  log_capture "$LOGFILE" -- cargo-nightly nextest run --cargo-profile ci -p mfm --features parity-tests --test parity_keystore_reth_tx_send
 ''

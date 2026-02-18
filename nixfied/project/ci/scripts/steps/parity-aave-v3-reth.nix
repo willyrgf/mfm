@@ -15,5 +15,5 @@ pkgs.writeText "mfm-ci-steps-parity-aave-v3-reth.sh" ''
   run_hook SVC_MINIO_BUCKET_ENSURE "$MINIO_BUCKET"
 
   LOGFILE=$(artifact_path "parity-aave-v3-reth.log")
-  log_capture "$LOGFILE" -- cargo nextest run -p mfm-integration-tests --features parity-tests --test parity_aave_v3_reth_scenario
+  log_capture "$LOGFILE" -- cargo-nightly nextest run --cargo-profile ci -p mfm-integration-tests --features parity-tests --test parity_aave_v3_reth_scenario
 ''
