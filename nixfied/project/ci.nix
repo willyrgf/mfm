@@ -22,6 +22,7 @@ let
     "basic"
     "audit"
     "parity"
+    "full"
     "mainnet"
   ];
   ciAppContract = {
@@ -53,6 +54,13 @@ let
         name = "parity";
         kind = "flag";
         long = "--parity";
+        type = "bool";
+        required = false;
+      }
+      {
+        name = "full";
+        kind = "flag";
+        long = "--full";
         type = "bool";
         required = false;
       }
@@ -176,7 +184,7 @@ in
           Runs the CI pipeline defined in `nixfied/project/ci.nix` (modes + steps).
 
           Supported options (from the framework CI runner):
-          - `--basic|--audit|--parity|--mainnet`: select a mode
+          - `--basic|--audit|--parity|--full|--mainnet`: select a mode
           - `--mode <name>` or `--mode=<name>`: select a mode by name
           - `--summary`: print a compact summary and write `summary.json` into the artifacts dir
           - `--bg|--background`: run in background via the run registry
@@ -197,7 +205,9 @@ in
           "nix run .#ci -- --basic --summary"
           "nix run .#ci -- --audit --summary"
           "nix run .#ci -- --parity --summary"
+          "nix run .#ci -- --full --summary"
           "nix run .#ci -- --mode basic --summary"
+          "nix run .#ci -- --mode full --summary"
           "nix run .#ci -- --mode=basic --summary"
           "nix run .#ci -- --bg"
           "nix run .#ci -- --background"
@@ -205,6 +215,7 @@ in
         examples = [
           "nix run .#ci -- --basic --summary"
           "CI_ARTIFACTS_DIR=/tmp/ci-artifacts nix run .#ci -- --parity --summary"
+          "nix run .#ci -- --full --summary"
           "nix run .#process::status -- --all"
         ];
         args = [
@@ -219,6 +230,10 @@ in
           {
             name = "--parity";
             description = "Select parity mode.";
+          }
+          {
+            name = "--full";
+            description = "Select full mode (basic + parity).";
           }
           {
             name = "--mainnet";
@@ -358,6 +373,23 @@ in
           "parity-aave-v3-reth"
           "parity-portfolio-tracker-reth"
           "parity-postgres-state-events-audit"
+          "parity-keystore-reth-tx-sign-send"
+          "parity-evm-helios-smoke"
+        ];
+      };
+      full = {
+        steps = [
+          "fmt"
+          "clippy"
+          "architecture-verify"
+          "shell-app-contracts"
+          "build"
+          "tests"
+          "parity-postgres"
+          "parity-s3"
+          "parity-rest-api-smoke"
+          "parity-evm-reth"
+          "parity-portfolio-tracker-reth"
           "parity-keystore-reth-tx-sign-send"
           "parity-evm-helios-smoke"
         ];

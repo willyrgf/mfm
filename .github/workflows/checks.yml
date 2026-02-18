@@ -38,6 +38,17 @@ jobs:
   ci-modes:
     name: Nixfied CI (${{ matrix.mode }})
     runs-on: ubuntu-latest
+    env:
+      LOG_TEE: "1"
+      CI_VERBOSE: "1"
+      NIXFIED_VERBOSE: "1"
+      NIXFIED_DEBUG: "1"
+      NIXFIED_LOG_LEVEL: "debug"
+      RUST_BACKTRACE: "full"
+      RUST_LOG: "debug"
+      MFM_LOG: "debug"
+      MFM_TEST_LOG: "1"
+      MFM_TEST_LOG_FILTER: "debug"
     strategy:
       fail-fast: false
       matrix:
@@ -69,3 +80,29 @@ jobs:
         if: matrix.mode == 'basic'
         run: |
           nix run .#mfm_cli $NIX_CMD_OPTS -- --help
+
+      - name: Debug CI artifacts (on failure)
+        if: failure()
+        run: |
+          echo "Artifacts root: /tmp/ci-artifacts"
+          ls -la /tmp/ci-artifacts || true
+          if [ -d /tmp/ci-artifacts/latest ]; then
+            echo "Latest artifact files:"
+            find /tmp/ci-artifacts/latest -maxdepth 2 -type f | sort || true
+            for log in ci-output.log tests.log; do
+              path="/tmp/ci-artifacts/latest/$log"
+              if [ -f "$path" ]; then
+                echo ""
+                echo "---- tail: $path ----"
+                tail -n 200 "$path" || true
+              fi
+            done
+          fi
+
+      - name: Upload CI artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-artifacts-${{ matrix.mode }}
+          path: /tmp/ci-artifacts
+          if-no-files-found: ignore
