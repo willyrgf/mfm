@@ -37,23 +37,6 @@ pub(crate) fn normalize_quantity_hex(
     }
 }
 
-pub(crate) fn quantity_hex_to_u128(raw: &str, message: &'static str) -> Result<u128, StateError> {
-    let trimmed = raw.trim();
-    let Some(rest) = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-    else {
-        return Err(op_errors::state_unknown("evm_response_invalid", message));
-    };
-
-    if rest.is_empty() {
-        return Ok(0);
-    }
-
-    u128::from_str_radix(rest, 16)
-        .map_err(|_| op_errors::state_unknown("evm_response_invalid", message))
-}
-
 pub(crate) fn parse_quantity_hex_u128(
     raw: &str,
     message: &'static str,
@@ -510,28 +493,4 @@ pub(crate) async fn resolve_deployer_address(
         return resolve_signing_key_address(io, state_id, env_name).await;
     }
     resolve_account_by_index(io, state_id, deployer_account_index).await
-}
-
-pub(crate) async fn account_balance(
-    io: &mut dyn IoProvider,
-    state_id: &StateId,
-    account: &str,
-) -> Result<u128, StateError> {
-    let mut client = EvmIoClient::new(state_id.clone(), io);
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_getBalance",
-            serde_json::json!([account, "latest"]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let balance_hex = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_getBalance returned non-string balance",
-    )?;
-    let normalized =
-        normalize_quantity_hex(&balance_hex, "eth_getBalance returned invalid hex balance")?;
-    quantity_hex_to_u128(&normalized, "eth_getBalance returned invalid hex balance")
 }

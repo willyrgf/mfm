@@ -22,7 +22,6 @@ Generated from `docs/repo-index.json`.
 - `crates/machine-test-support/Cargo.toml` (rust-cargo)
 - `crates/machine/Cargo.toml` (rust-cargo)
 - `crates/ops/aave-v3-origin-adapt-op/Cargo.toml` (rust-cargo)
-- `crates/ops/aave-v3-scenario-op/Cargo.toml` (rust-cargo)
 - `crates/ops/common/Cargo.toml` (rust-cargo)
 - `crates/ops/evm-deploy-configure-validate-op/Cargo.toml` (rust-cargo)
 - `crates/ops/evm-read-op/Cargo.toml` (rust-cargo)

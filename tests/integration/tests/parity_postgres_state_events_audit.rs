@@ -1,6 +1,6 @@
 #![cfg(feature = "parity-tests")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,35 +14,79 @@ use mfm_machine::config::{
 };
 use mfm_machine::context::DynContext;
 use mfm_machine::engine::{RunPhase, Stores};
-use mfm_machine::errors::{ContextError, IoError};
+use mfm_machine::errors::{ContextError, IoError, StorageError};
+use mfm_machine::events::{Event, KernelEvent, RunStatus};
 use mfm_machine::ids::{ContextKey, OpId, RunId, StateId};
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransportFactory};
-use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+use mfm_machine::stores::{ArtifactStore, EventStore};
 use mfm_machine_test_support::init_test_observability;
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::DefaultRunLauncher;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use tracing::info;
 
 const RETH_DEV_ACCOUNT0_PRIVATE_KEY: &str =
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
-const SCENARIO_REPORT_KIND: &str = "aave_v3_reth_scenario_report_v1";
-const DEPLOY_MANIFEST_KIND: &str = "aave_v3_deploy_manifest_v1";
+const EVM_REQUIRED_STATES: &[&str] = &[
+    "evm_reth_pipeline.fetch.run",
+    "evm_reth_pipeline.adapt.adapt",
+    "evm_reth_pipeline.deploy.deploy",
+    "evm_reth_pipeline.configure.configure",
+    "evm_reth_pipeline.validate.validate",
+];
+
+const AAVE_PHASE_A_REQUIRED_STATES: &[&str] = &[
+    "aave_v3_reth_pipeline.fetch_origin.run",
+    "aave_v3_reth_pipeline.compile_origin.run",
+    "aave_v3_reth_pipeline.deploy_origin_stack.run",
+    "aave_v3_reth_pipeline.adapt_origin_deploy.adapt_origin_deploy",
+];
+
+const AAVE_PHASE_B_REQUIRED_STATES: &[&str] = &[
+    "aave_v3_reth_scenario_generic_pipeline.approve_usdc.configure",
+    "aave_v3_reth_scenario_generic_pipeline.approve_wbtc.configure",
+    "aave_v3_reth_scenario_generic_pipeline.supply_usdc.configure",
+    "aave_v3_reth_scenario_generic_pipeline.supply_wbtc.configure",
+    "aave_v3_reth_scenario_generic_pipeline.borrow_usdc.configure",
+    "aave_v3_reth_scenario_generic_pipeline.validate_scenario.validate",
+];
 
 const CONTRACT_USDC: &str = "usdc";
 const CONTRACT_WBTC: &str = "wbtc";
 const CONTRACT_POOL: &str = "pool";
-const CONTRACT_USDC_A_TOKEN: &str = "usdc_a_token";
-const CONTRACT_WBTC_A_TOKEN: &str = "wbtc_a_token";
-const CONTRACT_USDC_VARIABLE_DEBT_TOKEN: &str = "usdc_variable_debt_token";
 
 const USDC_SUPPLY_AMOUNT: u64 = 1_000_000_000_000;
 const WBTC_COLLATERAL_AMOUNT: u64 = 1_000_000_000;
 const USDC_BORROW_AMOUNT: u64 = 1_000_000;
 const BORROW_RATE_MODE: u64 = 2;
+
+#[derive(Clone, Debug, Deserialize)]
+struct AaveDeployManifest {
+    contracts: Vec<AaveDeployManifestContract>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AaveDeployManifestContract {
+    id: String,
+    address: String,
+    artifact: serde_json::Value,
+}
+
+#[derive(Clone, Debug)]
+struct ScenarioActors {
+    supplier: String,
+    borrower: String,
+}
+
+#[derive(Clone, Debug)]
+struct AavePipelineRunIds {
+    phase_a_run_id: RunId,
+    phase_b_run_id: RunId,
+}
 
 #[derive(Default)]
 struct MapContext {
@@ -73,67 +117,6 @@ impl DynContext for MapContext {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct AaveDeployManifest {
-    kind: String,
-    contracts: Vec<AaveDeployManifestContract>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct AaveDeployManifestContract {
-    id: String,
-    address: String,
-    artifact: serde_json::Value,
-}
-
-#[derive(Clone, Debug)]
-struct ScenarioActors {
-    funder: String,
-    supplier: String,
-    borrower: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct AaveScenarioAccounts {
-    funder: String,
-    supplier: String,
-    borrower: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct AaveScenarioAmounts {
-    usdc_supply: u64,
-    wbtc_collateral: u64,
-    usdc_borrow: u64,
-    borrow_rate_mode: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct AaveScenarioPositionSnapshot {
-    supplier_supplied_usdc: u64,
-    borrower_collateral_wbtc: u64,
-    borrower_borrowed_usdc: u64,
-    borrower_usdc_balance: u64,
-    pool_usdc_balance: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct AaveScenarioAssertions {
-    strict: bool,
-    passed: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct AaveScenarioReport {
-    kind: String,
-    chain_id: u64,
-    accounts: AaveScenarioAccounts,
-    amounts: AaveScenarioAmounts,
-    positions: AaveScenarioPositionSnapshot,
-    assertions: AaveScenarioAssertions,
-    deploy_manifest_kind: String,
-}
-
 fn run_config_with_allowlist(allowlist: Vec<String>) -> RunConfig {
     RunConfig {
         io_mode: IoMode::Live,
@@ -159,30 +142,17 @@ fn parse_u64_hex(s: &str) -> u64 {
     u64::from_str_radix(trimmed, 16).expect("hex string must parse as u64")
 }
 
-fn snapshot_kind(snapshot: &serde_json::Value, key: &str) -> Option<String> {
-    snapshot
-        .get(format!("{key}.kind"))
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string)
-        .or_else(|| {
-            snapshot
-                .get(key)
-                .and_then(|v| v.get("kind"))
-                .and_then(|v| v.as_str())
-                .map(ToString::to_string)
-        })
-}
-
-fn snapshot_value<'a>(snapshot: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
-    if let Some(v) = snapshot.get(key) {
-        return Some(v);
-    }
-
-    let mut current = snapshot;
-    for segment in key.split('.') {
-        current = current.get(segment)?;
-    }
-    Some(current)
+fn contract_artifact_program_path() -> String {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("command -v mfm-contract-artifact-configurable-counter")
+        .output()
+        .expect("resolve mfm-contract-artifact-configurable-counter path");
+    assert!(
+        out.status.success(),
+        "mfm-contract-artifact-configurable-counter must be in PATH"
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 fn workspace_flake_ref() -> String {
@@ -200,6 +170,18 @@ fn workspace_flake_ref() -> String {
     );
 }
 
+fn snapshot_value<'a>(snapshot: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    if let Some(v) = snapshot.get(key) {
+        return Some(v);
+    }
+
+    let mut current = snapshot;
+    for segment in key.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
 fn contract_from_manifest<'a>(
     manifest: &'a AaveDeployManifest,
     id: &str,
@@ -211,12 +193,23 @@ fn contract_from_manifest<'a>(
         .unwrap_or_else(|| panic!("missing contract in deploy manifest: {id}"))
 }
 
-fn balance_of_calldata(owner: &str) -> String {
-    let normalized = owner
-        .strip_prefix("0x")
-        .unwrap_or_else(|| panic!("address must start with 0x: {owner}"));
-    assert_eq!(normalized.len(), 40, "address must be 20 bytes: {owner}");
-    format!("0x70a08231{:0>64}", normalized.to_ascii_lowercase())
+async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> PostgresEventStore {
+    let mut last_err: Option<StorageError> = None;
+    for _ in 0..max_attempts {
+        match PostgresEventStore::connect_env().await {
+            Ok(pg) => return pg,
+            Err(err) => {
+                last_err = Some(err);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "<missing>".to_string());
+    panic!(
+        "postgres config after retries (DATABASE_URL={}): {:?}",
+        db_url, last_err
+    );
 }
 
 async fn rpc_call(
@@ -257,49 +250,142 @@ async fn rpc_call(
         })
 }
 
-async fn erc20_balance_u64(
-    rpc_url: &str,
+async fn run_evm_reth_pipeline(
     events: Arc<dyn EventStore>,
     artifacts: Arc<dyn ArtifactStore>,
-    token: &str,
-    owner: &str,
-) -> u64 {
-    let value = rpc_call(
+    rpc_url: &str,
+) -> RunId {
+    let accounts = rpc_call(
         rpc_url,
-        events,
-        artifacts,
-        "eth_call",
-        serde_json::json!([
-            {
-                "to": token,
-                "data": balance_of_calldata(owner),
-            },
-            "latest"
-        ]),
+        Arc::clone(&events),
+        Arc::clone(&artifacts),
+        "eth_accounts",
+        serde_json::json!([]),
     )
     .await;
+    let from = accounts
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .expect("eth_accounts first address")
+        .to_string();
 
-    let raw = value.as_str().expect("eth_call must return hex string");
-    parse_u64_hex(raw)
-}
+    let chain_id_hex = rpc_call(
+        rpc_url,
+        Arc::clone(&events),
+        Arc::clone(&artifacts),
+        "eth_chainId",
+        serde_json::json!([]),
+    )
+    .await;
+    let expected_chain_id = chain_id_hex
+        .as_str()
+        .map(parse_u64_hex)
+        .expect("eth_chainId hex");
 
-async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> PostgresEventStore {
-    let mut last_err: Option<mfm_machine::errors::StorageError> = None;
-    for _ in 0..max_attempts {
-        match PostgresEventStore::connect_env().await {
-            Ok(pg) => return pg,
-            Err(err) => {
-                last_err = Some(err);
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            }
-        }
-    }
-
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "<missing>".to_string());
-    panic!(
-        "postgres config after retries (DATABASE_URL={}): {:?}",
-        db_url, last_err
+    std::env::set_var(
+        "MFM_EVM_PARITY_DEPLOY_SIGNING_KEY",
+        RETH_DEV_ACCOUNT0_PRIVATE_KEY,
     );
+
+    let pipeline = Pipeline {
+        machine_id: MachineId("evm_reth_pipeline".to_string()),
+        pipeline_version: "v1".to_string(),
+        steps: vec![
+            PipelineStep {
+                step_id: StepId("fetch".to_string()),
+                op_id: OpId("nix_app".to_string()),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({
+                    "program_path": contract_artifact_program_path(),
+                    "stdin_json": {},
+                    "timeout_ms": 300000,
+                    "write_result_to": "result",
+                }),
+            },
+            PipelineStep {
+                step_id: StepId("adapt".to_string()),
+                op_id: OpId("evm_contract_from_nix".to_string()),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({
+                    "result_pointer": "/artifact"
+                }),
+            },
+            PipelineStep {
+                step_id: StepId("deploy".to_string()),
+                op_id: OpId("evm_deploy".to_string()),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({
+                    "artifact_port": "contract_artifact",
+                    "from": from,
+                    "signing_key_env": "MFM_EVM_PARITY_DEPLOY_SIGNING_KEY",
+                    "constructor_args": [1],
+                    "poll_interval_ms": 200,
+                    "max_receipt_polls": 120,
+                }),
+            },
+            PipelineStep {
+                step_id: StepId("configure".to_string()),
+                op_id: OpId("evm_configure".to_string()),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({
+                    "artifact_port": "contract_artifact",
+                    "from": from,
+                    "calls": [
+                        {"function": "setValue", "args": [7]}
+                    ],
+                    "poll_interval_ms": 200,
+                    "max_receipt_polls": 120,
+                }),
+            },
+            PipelineStep {
+                step_id: StepId("validate".to_string()),
+                op_id: OpId("evm_validate".to_string()),
+                op_version: "v1".to_string(),
+                op_config: serde_json::json!({
+                    "artifact_port": "contract_artifact",
+                    "expected_chain_id": expected_chain_id,
+                    "require_client_substring": "reth",
+                    "read_assertions": [
+                        {"function": "getValue", "args": [], "expected": 7}
+                    ],
+                    "event_assertions": [
+                        {"event": "ValueSet", "min_count": 2}
+                    ],
+                }),
+            },
+        ],
+    };
+
+    let run_config = run_config_with_allowlist(mfm_machine::config::default_nix_flake_allowlist());
+    let bundle = mfm_rest_api::make_engine_bundle();
+    let launcher = DefaultRunLauncher;
+    let run = launcher
+        .start_pipeline(
+            Arc::clone(&bundle.engine),
+            Stores { events, artifacts },
+            Arc::clone(&bundle.registry),
+            Arc::clone(&bundle.planner),
+            LaunchPipeline {
+                pipeline,
+                input: serde_json::json!({}),
+                run_config,
+                build: BuildProvenance {
+                    git_commit: None,
+                    cargo_lock_hash: None,
+                    flake_lock_hash: None,
+                    rustc_version: None,
+                    target_triple: None,
+                    env_allowlist: Vec::new(),
+                },
+                initial_context: Box::new(MapContext::default()),
+            },
+        )
+        .await
+        .expect("start evm_reth_pipeline");
+
+    assert_eq!(run.phase, RunPhase::Completed);
+    run.run_id
 }
 
 fn phase_a_pipeline(workspace_flake: &str) -> Pipeline {
@@ -491,20 +577,13 @@ fn phase_b_pipeline(
     }
 }
 
-#[tokio::test]
-async fn parity_aave_v3_reth_scenario_pipeline() {
-    init_test_observability();
-
-    let pg = connect_postgres_with_retry(20, 250).await;
-    let events: Arc<dyn EventStore> = Arc::new(pg);
-
-    let s3 = S3ArtifactStore::from_env().expect("s3 config");
-    s3.ensure_bucket_exists().await.expect("bucket exists");
-    let artifacts: Arc<dyn ArtifactStore> = Arc::new(s3);
-
-    let rpc_url = std::env::var("MFM_EVM_RPC_URL").expect("MFM_EVM_RPC_URL is required");
+async fn run_aave_v3_pipelines(
+    events: Arc<dyn EventStore>,
+    artifacts: Arc<dyn ArtifactStore>,
+    rpc_url: &str,
+) -> AavePipelineRunIds {
     let chain_id_hex = rpc_call(
-        &rpc_url,
+        rpc_url,
         Arc::clone(&events),
         Arc::clone(&artifacts),
         "eth_chainId",
@@ -516,7 +595,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .map(parse_u64_hex)
         .expect("eth_chainId hex");
     let accounts_json = rpc_call(
-        &rpc_url,
+        rpc_url,
         Arc::clone(&events),
         Arc::clone(&artifacts),
         "eth_accounts",
@@ -527,11 +606,6 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .as_array()
         .expect("eth_accounts returned array");
     let actors = ScenarioActors {
-        funder: accounts
-            .first()
-            .and_then(|v| v.as_str())
-            .expect("funder account")
-            .to_string(),
         supplier: accounts
             .get(1)
             .and_then(|v| v.as_str())
@@ -592,61 +666,27 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
             },
         )
         .await
-        .expect("start phase A pipeline");
-
+        .expect("start aave_v3 phase A pipeline");
     assert_eq!(phase_a_run.phase, RunPhase::Completed);
+
     let phase_a_snapshot_id = phase_a_run
         .final_snapshot_id
+        .as_ref()
         .expect("phase A final snapshot");
     let phase_a_snapshot_bytes = artifacts
-        .get(&phase_a_snapshot_id)
+        .get(phase_a_snapshot_id)
         .await
         .expect("read phase A final snapshot");
     let phase_a_snapshot: serde_json::Value =
-        serde_json::from_slice(&phase_a_snapshot_bytes).expect("decode phase A snapshot json");
-
-    assert_eq!(
-        snapshot_kind(
-            &phase_a_snapshot,
-            "aave_v3_reth_pipeline.adapt_origin_deploy.deploy_manifest",
-        )
-        .as_deref(),
-        Some(DEPLOY_MANIFEST_KIND)
-    );
-    assert_eq!(
-        snapshot_kind(
-            &phase_a_snapshot,
-            "aave_v3_reth_pipeline.fetch_origin.result"
-        )
-        .as_deref(),
-        Some("aave_v3_origin_source_v1")
-    );
-    assert_eq!(
-        snapshot_kind(
-            &phase_a_snapshot,
-            "aave_v3_reth_pipeline.compile_origin.result"
-        )
-        .as_deref(),
-        Some("aave_v3_origin_compile_manifest_v1")
-    );
-    assert_eq!(
-        snapshot_kind(
-            &phase_a_snapshot,
-            "aave_v3_reth_pipeline.deploy_origin_stack.result"
-        )
-        .as_deref(),
-        Some("aave_v3_origin_deploy_output_v1")
-    );
-
-    let deploy_manifest = snapshot_value(
+        serde_json::from_slice(&phase_a_snapshot_bytes).expect("decode phase A snapshot");
+    let deploy_manifest_value = snapshot_value(
         &phase_a_snapshot,
         "aave_v3_reth_pipeline.adapt_origin_deploy.deploy_manifest",
     )
     .cloned()
     .expect("deploy manifest in phase A snapshot");
     let deploy_manifest: AaveDeployManifest =
-        serde_json::from_value(deploy_manifest).expect("decode deploy manifest");
-    assert_eq!(deploy_manifest.kind, DEPLOY_MANIFEST_KIND);
+        serde_json::from_value(deploy_manifest_value).expect("decode deploy manifest");
 
     let phase_b_run = launcher
         .start_pipeline(
@@ -675,109 +715,203 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
             },
         )
         .await
-        .expect("start phase B pipeline");
-
+        .expect("start aave_v3 phase B pipeline");
     assert_eq!(phase_b_run.phase, RunPhase::Completed);
 
-    let pool = contract_from_manifest(&deploy_manifest, CONTRACT_POOL);
-    let usdc = contract_from_manifest(&deploy_manifest, CONTRACT_USDC);
-    let usdc_a_token = contract_from_manifest(&deploy_manifest, CONTRACT_USDC_A_TOKEN);
-    let wbtc_a_token = contract_from_manifest(&deploy_manifest, CONTRACT_WBTC_A_TOKEN);
-    let usdc_variable_debt =
-        contract_from_manifest(&deploy_manifest, CONTRACT_USDC_VARIABLE_DEBT_TOKEN);
+    AavePipelineRunIds {
+        phase_a_run_id: phase_a_run.run_id,
+        phase_b_run_id: phase_b_run.run_id,
+    }
+}
 
-    let positions = AaveScenarioPositionSnapshot {
-        supplier_supplied_usdc: erc20_balance_u64(
-            &rpc_url,
-            Arc::clone(&events),
-            Arc::clone(&artifacts),
-            &usdc_a_token.address,
-            &actors.supplier,
-        )
-        .await,
-        borrower_collateral_wbtc: erc20_balance_u64(
-            &rpc_url,
-            Arc::clone(&events),
-            Arc::clone(&artifacts),
-            &wbtc_a_token.address,
-            &actors.borrower,
-        )
-        .await,
-        borrower_borrowed_usdc: erc20_balance_u64(
-            &rpc_url,
-            Arc::clone(&events),
-            Arc::clone(&artifacts),
-            &usdc_variable_debt.address,
-            &actors.borrower,
-        )
-        .await,
-        borrower_usdc_balance: erc20_balance_u64(
-            &rpc_url,
-            Arc::clone(&events),
-            Arc::clone(&artifacts),
-            &usdc.address,
-            &actors.borrower,
-        )
-        .await,
-        pool_usdc_balance: erc20_balance_u64(
-            &rpc_url,
-            Arc::clone(&events),
-            Arc::clone(&artifacts),
-            &usdc.address,
-            &pool.address,
-        )
-        .await,
-    };
+fn assert_required_state_order(
+    machine_id: &str,
+    entered_state_ids: &[String],
+    required_states: &[&str],
+) {
+    let mut cursor = 0usize;
+    for required in required_states {
+        let relative = entered_state_ids[cursor..]
+            .iter()
+            .position(|state| state == required)
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing required state `{required}` for `{machine_id}`; entered states={:?}",
+                    entered_state_ids
+                )
+            });
+        cursor += relative + 1;
+    }
+}
 
-    assert!(positions.supplier_supplied_usdc >= USDC_SUPPLY_AMOUNT);
-    assert!(positions.borrower_collateral_wbtc >= WBTC_COLLATERAL_AMOUNT);
-    assert!(positions.borrower_borrowed_usdc >= USDC_BORROW_AMOUNT);
-
-    let report = AaveScenarioReport {
-        kind: SCENARIO_REPORT_KIND.to_string(),
-        chain_id: expected_chain_id,
-        accounts: AaveScenarioAccounts {
-            funder: actors.funder,
-            supplier: actors.supplier,
-            borrower: actors.borrower,
-        },
-        amounts: AaveScenarioAmounts {
-            usdc_supply: USDC_SUPPLY_AMOUNT,
-            wbtc_collateral: WBTC_COLLATERAL_AMOUNT,
-            usdc_borrow: USDC_BORROW_AMOUNT,
-            borrow_rate_mode: BORROW_RATE_MODE,
-        },
-        positions,
-        assertions: AaveScenarioAssertions {
-            strict: true,
-            passed: true,
-        },
-        deploy_manifest_kind: deploy_manifest.kind,
-    };
-
-    assert_eq!(report.kind, SCENARIO_REPORT_KIND);
-    assert_eq!(report.chain_id, expected_chain_id);
-    assert_eq!(report.amounts.usdc_supply, USDC_SUPPLY_AMOUNT);
-    assert_eq!(report.amounts.wbtc_collateral, WBTC_COLLATERAL_AMOUNT);
-    assert_eq!(report.amounts.usdc_borrow, USDC_BORROW_AMOUNT);
-    assert!(report.assertions.strict);
-    assert!(report.assertions.passed);
-
-    let report_artifact_id = artifacts
-        .put(
-            ArtifactKind::Output,
-            serde_json::to_vec(&report).expect("serialize scenario report"),
-        )
-        .await
-        .expect("write scenario report artifact");
-    let report_artifact = artifacts
-        .get(&report_artifact_id)
-        .await
-        .expect("get report artifact");
-    let report_artifact_json: serde_json::Value =
-        serde_json::from_slice(&report_artifact).expect("decode report artifact");
-    assert_eq!(
-        report_artifact_json.get("kind").and_then(|v| v.as_str()),
-        Some(SCENARIO_REPORT_KIND)
+async fn audit_run_events(
+    events: Arc<dyn EventStore>,
+    run_id: RunId,
+    machine_id: &str,
+    required_states: &[&str],
+    min_state_count: usize,
+) {
+    let head_seq = events.head_seq(run_id).await.expect("head seq");
+    assert!(
+        head_seq > 0,
+        "run `{machine_id}` must emit at least one event"
     );
+
+    let stream = events
+        .read_range(run_id, 1, None)
+        .await
+        .expect("event stream");
+    assert_eq!(
+        stream.len() as u64,
+        head_seq,
+        "stream length must equal head seq for `{machine_id}`"
+    );
+    assert_eq!(stream.first().map(|e| e.seq), Some(1));
+    assert_eq!(stream.last().map(|e| e.seq), Some(head_seq));
+    for (idx, envelope) in stream.iter().enumerate() {
+        assert_eq!(
+            envelope.seq,
+            (idx + 1) as u64,
+            "event seq continuity broken for `{machine_id}` at index {idx}"
+        );
+    }
+
+    let mut entered_state_ids: Vec<String> = Vec::new();
+    let mut active_states: HashSet<String> = HashSet::new();
+    let mut entered_count = 0usize;
+    let mut terminal_count = 0usize;
+    let mut run_started_idx: Option<usize> = None;
+    let mut run_completed_idx: Option<usize> = None;
+    let mut run_completed_status: Option<RunStatus> = None;
+
+    for (idx, envelope) in stream.iter().enumerate() {
+        let Event::Kernel(kernel) = &envelope.event else {
+            continue;
+        };
+
+        match kernel {
+            KernelEvent::RunStarted { .. } => {
+                assert!(
+                    run_started_idx.is_none(),
+                    "run `{machine_id}` emitted multiple RunStarted events"
+                );
+                run_started_idx = Some(idx);
+            }
+            KernelEvent::StateEntered { state_id, .. } => {
+                let state = state_id.0.clone();
+                assert!(
+                    state.starts_with(machine_id),
+                    "run `{machine_id}` saw unexpected state id `{state}`"
+                );
+                assert!(
+                    active_states.insert(state.clone()),
+                    "state `{state}` re-entered before terminal event in `{machine_id}`"
+                );
+                entered_state_ids.push(state);
+                entered_count += 1;
+            }
+            KernelEvent::StateCompleted { state_id, .. }
+            | KernelEvent::StateFailed { state_id, .. } => {
+                let state = state_id.0.clone();
+                assert!(
+                    active_states.remove(&state),
+                    "state `{state}` terminal event without matching entry in `{machine_id}`"
+                );
+                terminal_count += 1;
+            }
+            KernelEvent::RunCompleted { status, .. } => {
+                assert!(
+                    run_completed_idx.is_none(),
+                    "run `{machine_id}` emitted multiple RunCompleted events"
+                );
+                run_completed_idx = Some(idx);
+                run_completed_status = Some(status.clone());
+            }
+        }
+    }
+
+    let started = run_started_idx.expect("missing RunStarted");
+    let completed = run_completed_idx.expect("missing RunCompleted");
+    assert!(
+        started < completed,
+        "RunStarted must happen before RunCompleted for `{machine_id}`"
+    );
+    assert_eq!(
+        run_completed_status,
+        Some(RunStatus::Completed),
+        "run `{machine_id}` must complete successfully"
+    );
+    assert_eq!(
+        entered_count, terminal_count,
+        "run `{machine_id}` has unmatched state entry/terminal counts"
+    );
+    assert!(
+        active_states.is_empty(),
+        "run `{machine_id}` left active states without terminal events: {:?}",
+        active_states
+    );
+    assert!(
+        entered_count >= min_state_count,
+        "run `{machine_id}` must emit at least {min_state_count} StateEntered events"
+    );
+
+    assert_required_state_order(machine_id, &entered_state_ids, required_states);
+
+    let report = serde_json::json!({
+        "kind": "parity_postgres_state_events_audit_report_v1",
+        "machine_id": machine_id,
+        "run_id": run_id.0.to_string(),
+        "head_seq": head_seq,
+        "state_entered_count": entered_count,
+        "state_terminal_count": terminal_count,
+        "required_states": required_states,
+    });
+    info!(
+        report = %serde_json::to_string(&report).expect("serialize report"),
+        "postgres state events audit passed"
+    );
+}
+
+#[tokio::test]
+async fn parity_postgres_state_events_audit_for_multi_state_pipelines() {
+    init_test_observability();
+
+    let pg = connect_postgres_with_retry(20, 250).await;
+    let events: Arc<dyn EventStore> = Arc::new(pg);
+
+    let s3 = S3ArtifactStore::from_env().expect("s3 config");
+    s3.ensure_bucket_exists().await.expect("bucket exists");
+    let artifacts: Arc<dyn ArtifactStore> = Arc::new(s3);
+
+    let rpc_url = std::env::var("MFM_EVM_RPC_URL").expect("MFM_EVM_RPC_URL is required");
+
+    let evm_run_id =
+        run_evm_reth_pipeline(Arc::clone(&events), Arc::clone(&artifacts), &rpc_url).await;
+    audit_run_events(
+        Arc::clone(&events),
+        evm_run_id,
+        "evm_reth_pipeline",
+        EVM_REQUIRED_STATES,
+        5,
+    )
+    .await;
+
+    let aave_run_ids =
+        run_aave_v3_pipelines(Arc::clone(&events), Arc::clone(&artifacts), &rpc_url).await;
+    audit_run_events(
+        Arc::clone(&events),
+        aave_run_ids.phase_a_run_id,
+        "aave_v3_reth_pipeline",
+        AAVE_PHASE_A_REQUIRED_STATES,
+        4,
+    )
+    .await;
+    audit_run_events(
+        events,
+        aave_run_ids.phase_b_run_id,
+        "aave_v3_reth_scenario_generic_pipeline",
+        AAVE_PHASE_B_REQUIRED_STATES,
+        6,
+    )
+    .await;
 }

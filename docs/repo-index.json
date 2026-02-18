@@ -96,11 +96,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "aave-v3-scenario-op",
-      "path": "crates/ops/aave-v3-scenario-op/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "common",
       "path": "crates/ops/common/Cargo.toml",
       "kind": "rust-cargo"
