@@ -19,7 +19,9 @@ set +e
   echo "$ci_contract" | jq -e '.args[] | select(.name == "mode") | .kind == "option" and .type == "enum" and (.values | index("basic") != null)' >/dev/null
   echo "$ci_contract" | jq -e '.args[] | select(.name == "mode") | ((["audit","basic","full","mainnet","parity"] - (.values // [])) | length) == 0' >/dev/null
   echo "$ci_contract" | jq -e '[.args[] | select((.name == "basic" or .name == "mode_basic") and .kind == "flag" and .type == "bool")] | length > 0' >/dev/null
-  echo "$ci_contract" | jq -e '[.env[].name] | index("LOG_LEVEL") != null and index("CI_LOG_LEVEL") != null and index("CI_VERBOSE") != null and index("NIXFIED_LOG_LEVEL") != null' >/dev/null
+  # CI logging env normalization is enforced in setup/teardown scripts.
+  # The shell-app contract itself should only expose artifact path env vars.
+  echo "$ci_contract" | jq -e '[(.env // [])[].name] | index("CI_ARTIFACTS_DIR") != null and index("CI_ARTIFACTS_BASE") != null and index("LOG_LEVEL") == null and index("CI_LOG_LEVEL") == null and index("CI_VERBOSE") == null and index("NIXFIED_LOG_LEVEL") == null' >/dev/null
   echo "$ci_contract" | jq -e '[.args[].long] | index("--verbose") == null and index("--debug") == null' >/dev/null
   echo "$check_contract" | jq -e '.commandClass == "typed" and .allowUnknownArgs == false and .outputs.mode == "text"' >/dev/null
   echo "$snapshot_contract" | jq -e '.commandClass == "json" and .allowUnknownArgs == false and .outputs.mode == "json"' >/dev/null
