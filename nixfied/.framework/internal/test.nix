@@ -1204,7 +1204,7 @@ let
     assert_contains "$CI_RET_SUM_FAIL_LOG" "Summary"
     assert_contains "$CI_RET_SUM_FAIL_LOG" "Time breakdown"
     assert_contains "$CI_RET_SUM_FAIL_LOG" "Exit code: 1"
-    assert_contains "$CI_RET_SUM_FAIL_LOG" "Last 50 lines"
+    assert_not_contains "$CI_RET_SUM_FAIL_LOG" "Last 50 lines"
     assert_file_exists "$CI_RET_SUM_FAIL_DIR/.ci-artifacts/fail.cleanup"
 
     log "module hooks fixture"
