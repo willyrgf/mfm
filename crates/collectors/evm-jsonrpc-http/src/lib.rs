@@ -14,6 +14,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
+use tracing::debug;
 
 use mfm_collectors_evm::JsonRpcCall;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
@@ -37,6 +38,7 @@ const CODE_EVM_ROUTE_SOURCE_UNKNOWN: &str = "evm_route_source_unknown";
 const CODE_EVM_CONFIG_INVALID: &str = "evm_config_invalid";
 const CODE_EVM_LOGS_CHUNKING_INVALID_RANGE: &str = "evm_logs_chunking_invalid_range";
 const CODE_EVM_LOGS_CHUNKING_EXHAUSTED: &str = "evm_logs_chunking_exhausted";
+const METHOD_EVM_ROUTING_ANALYSIS: &str = "mfm_debugRoutingAnalysis";
 
 const MAX_DIAGNOSTIC_MESSAGE_LEN: usize = 240;
 
@@ -381,6 +383,50 @@ struct MethodPolicy {
     chunk_logs: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct EvmRoutingAnalysisRequest {
+    method: String,
+    #[serde(default = "default_jsonrpc_params")]
+    params: serde_json::Value,
+    #[serde(default)]
+    route: Option<EvmRouteHint>,
+}
+
+fn default_jsonrpc_params() -> serde_json::Value {
+    json!([])
+}
+
+fn method_class_name(class: MethodClass) -> &'static str {
+    match class {
+        MethodClass::ReadLight => "read_light",
+        MethodClass::ReadHeavy => "read_heavy",
+        MethodClass::WriteOrSideEffect => "write_or_side_effect",
+    }
+}
+
+fn dispatch_mode_name(dispatch: DispatchMode) -> &'static str {
+    match dispatch {
+        DispatchMode::PrimaryOnly => "primary_only",
+        DispatchMode::Failover => "failover",
+        DispatchMode::HedgedLight => "hedged_light",
+    }
+}
+
+fn source_kind_name(kind: EvmSourceKind) -> &'static str {
+    match kind {
+        EvmSourceKind::Local => "local",
+        EvmSourceKind::RemotePublic => "remote_public",
+        EvmSourceKind::RemoteUser => "remote_user",
+    }
+}
+
+fn routing_strategy_name(strategy: EvmRoutingStrategy) -> &'static str {
+    match strategy {
+        EvmRoutingStrategy::Failover => "failover",
+        EvmRoutingStrategy::HedgedLight => "hedged_light",
+    }
+}
+
 fn parse_hex_u64(raw: &str) -> Option<u64> {
     let trimmed = raw.strip_prefix("0x")?;
     if trimmed.is_empty() {
@@ -513,6 +559,17 @@ fn failure_detail(source_id: &str, err: &IoError) -> serde_json::Value {
     })
 }
 
+fn io_error_summary(err: &IoError) -> serde_json::Value {
+    let info = err_info(err);
+    json!({
+        "code": info.code.0,
+        "category": info.category,
+        "retryable": info.retryable,
+        "message": info.message,
+        "details": info.details,
+    })
+}
+
 #[derive(Clone)]
 struct PreparedCall {
     source_id: String,
@@ -553,6 +610,119 @@ impl EvmJsonRpcHttpTransport {
                 Some(json!({ "reason": err.to_string() })),
             )
         })
+    }
+
+    fn routing_analysis_request_invalid_error(&self) -> IoError {
+        IoError::Other(info(
+            CODE_EVM_REQUEST_INVALID,
+            ErrorCategory::ParsingInput,
+            false,
+            "invalid evm routing analysis request",
+        ))
+    }
+
+    fn source_analysis_entry(
+        &self,
+        source_id: &str,
+        call_ordinal: u64,
+    ) -> Option<serde_json::Value> {
+        let state = self.source_states.get(source_id)?;
+        let healthy_for_call = state.disabled_until_call <= call_ordinal;
+        let cooldown_remaining_calls = if healthy_for_call {
+            0
+        } else {
+            state.disabled_until_call.saturating_sub(call_ordinal)
+        };
+        Some(json!({
+            "source_id": source_id,
+            "kind": source_kind_name(state.source.kind),
+            "score": state.score,
+            "base_rank": self.base_order.get(source_id).copied(),
+            "healthy_for_call": healthy_for_call,
+            "disabled_until_call": state.disabled_until_call,
+            "cooldown_remaining_calls": cooldown_remaining_calls,
+            "probed": state.probed,
+        }))
+    }
+
+    fn ranked_source_analysis(&self, call_ordinal: u64) -> Vec<serde_json::Value> {
+        let mut ids = self.source_states.keys().cloned().collect::<Vec<_>>();
+        ids.sort_by(|a, b| self.compare_sources(a, b));
+        ids.into_iter()
+            .filter_map(|id| self.source_analysis_entry(&id, call_ordinal))
+            .collect()
+    }
+
+    fn build_routing_analysis(
+        &self,
+        target_method: &str,
+        target_params: &serde_json::Value,
+        route_source_id: Option<&str>,
+        call_ordinal: u64,
+    ) -> serde_json::Value {
+        let method_policy = resolve_method_policy(target_method, target_params, &self.cfg);
+        let params_size_bytes = serde_json::to_vec(target_params)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX);
+        let ordered = self.ordered_source_ids(route_source_id, call_ordinal);
+        let (selected_order, selection_error) = match ordered {
+            Ok(ids) => (ids, None),
+            Err(err) => (Vec::new(), Some(io_error_summary(&err))),
+        };
+        let pending_probe_sources = selected_order
+            .iter()
+            .filter(|source_id| {
+                self.source_states
+                    .get(*source_id)
+                    .map(|state| !state.probed)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        json!({
+            "operation": METHOD_EVM_ROUTING_ANALYSIS,
+            "analysis_version": 1,
+            "call_ordinal": call_ordinal,
+            "target": {
+                "method": target_method,
+                "route_source_id": route_source_id,
+                "params_size_bytes": params_size_bytes,
+            },
+            "routing": {
+                "strategy": routing_strategy_name(self.cfg.strategy),
+                "method_class": method_class_name(method_policy.class),
+                "dispatch_mode": dispatch_mode_name(method_policy.dispatch),
+                "chunk_logs": method_policy.chunk_logs,
+                "selected_order": selected_order,
+                "pending_probe_sources": pending_probe_sources,
+                "selection_error": selection_error,
+            },
+            "sources_ranked": self.ranked_source_analysis(call_ordinal),
+        })
+    }
+
+    fn call_routing_analysis_operation(
+        &self,
+        request: &EvmTransportRequest,
+    ) -> Result<serde_json::Value, IoError> {
+        if request.route.is_some() || request.rpc_url.is_some() {
+            return Err(self.routing_analysis_request_invalid_error());
+        }
+
+        let target: EvmRoutingAnalysisRequest = serde_json::from_value(request.params.clone())
+            .map_err(|_| self.routing_analysis_request_invalid_error())?;
+        if target.method.trim().is_empty() {
+            return Err(self.routing_analysis_request_invalid_error());
+        }
+
+        let route_source_id = target.route.as_ref().map(|route| route.source_id.as_str());
+        Ok(self.build_routing_analysis(
+            &target.method,
+            &target.params,
+            route_source_id,
+            self.call_ordinal,
+        ))
     }
 
     fn score_recovery_bonus(method_class: MethodClass) -> i32 {
@@ -1238,7 +1408,14 @@ impl EvmJsonRpcHttpTransport {
         }
 
         let primary_id = source_ids[0].clone();
-        self.ensure_source_probed(&primary_id, call_ordinal).await?;
+        if let Err(err) = self.ensure_source_probed(&primary_id, call_ordinal).await {
+            if !is_retryable(&err) {
+                return Err(err);
+            }
+            return self
+                .call_failover(&source_ids[1..], req, call_ordinal, MethodClass::ReadLight)
+                .await;
+        }
 
         let prepared_primary = self.prepare_call(&primary_id, req)?;
         let mut primary = Box::pin(Self::execute_http_request(
@@ -1276,8 +1453,45 @@ impl EvmJsonRpcHttpTransport {
         }
 
         let secondary_id = source_ids[1].clone();
-        self.ensure_source_probed(&secondary_id, call_ordinal)
-            .await?;
+        if let Err(secondary_probe_err) =
+            self.ensure_source_probed(&secondary_id, call_ordinal).await
+        {
+            if !is_retryable(&secondary_probe_err) {
+                return Err(secondary_probe_err);
+            }
+
+            let mut failures = vec![failure_detail(&secondary_id, &secondary_probe_err)];
+            let primary_res = primary.await;
+            return match primary_res {
+                Ok(value) => {
+                    self.mark_source_success(&primary_id, MethodClass::ReadLight);
+                    Ok(value)
+                }
+                Err(primary_err) => {
+                    self.mark_source_failure_with_error(
+                        &primary_id,
+                        call_ordinal,
+                        &primary_err,
+                        MethodClass::ReadLight,
+                    );
+                    if !is_retryable(&primary_err) {
+                        return Err(primary_err);
+                    }
+                    failures.push(failure_detail(&primary_id, &primary_err));
+                    if source_ids.len() > 2 {
+                        self.call_failover(
+                            &source_ids[2..],
+                            req,
+                            call_ordinal,
+                            MethodClass::ReadLight,
+                        )
+                        .await
+                    } else {
+                        Err(self.hedge_exhausted_error(&failures))
+                    }
+                }
+            };
+        }
 
         let prepared_secondary = self.prepare_call(&secondary_id, req)?;
 
@@ -1378,6 +1592,21 @@ impl EvmJsonRpcHttpTransport {
         source: EvmJsonRpcSource,
         body: serde_json::Value,
     ) -> Result<serde_json::Value, IoError> {
+        let rpc_method = body
+            .get("method")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unknown>")
+            .to_string();
+        let rpc_request_id = body.get("id").and_then(|v| v.as_u64());
+        let source_kind = source_kind_name(source.kind);
+        debug!(
+            source_id = %source_id,
+            source_kind = source_kind,
+            rpc_method = %rpc_method,
+            rpc_request_id = ?rpc_request_id,
+            "dispatching evm jsonrpc http request"
+        );
+
         let mut rb = client.post(source.rpc_url).json(&body);
         if let Some(auth) = source.authorization {
             rb = rb.header(reqwest::header::AUTHORIZATION, auth);
@@ -1389,6 +1618,14 @@ impl EvmJsonRpcHttpTransport {
             } else {
                 "transport"
             };
+            debug!(
+                source_id = %source_id,
+                source_kind = source_kind,
+                rpc_method = %rpc_method,
+                rpc_request_id = ?rpc_request_id,
+                transport_error_class = err_class,
+                "evm jsonrpc http request failed before response"
+            );
             IoError::Transport(info_with_details(
                 CODE_EVM_HTTP_REQUEST_FAILED,
                 ErrorCategory::Rpc,
@@ -1403,6 +1640,14 @@ impl EvmJsonRpcHttpTransport {
 
         let status = resp.status();
         if status.as_u16() == 429 {
+            debug!(
+                source_id = %source_id,
+                source_kind = source_kind,
+                rpc_method = %rpc_method,
+                rpc_request_id = ?rpc_request_id,
+                http_status = status.as_u16(),
+                "evm jsonrpc request was rate-limited"
+            );
             return Err(IoError::RateLimited(info_with_details(
                 CODE_EVM_RATE_LIMITED,
                 ErrorCategory::Rpc,
@@ -1418,6 +1663,14 @@ impl EvmJsonRpcHttpTransport {
             )));
         }
         if !status.is_success() {
+            debug!(
+                source_id = %source_id,
+                source_kind = source_kind,
+                rpc_method = %rpc_method,
+                rpc_request_id = ?rpc_request_id,
+                http_status = status.as_u16(),
+                "evm jsonrpc request returned non-success status"
+            );
             return Err(IoError::Transport(info_with_details(
                 CODE_EVM_HTTP_STATUS,
                 ErrorCategory::Rpc,
@@ -1433,7 +1686,15 @@ impl EvmJsonRpcHttpTransport {
             )));
         }
 
-        let bytes = resp.bytes().await.map_err(|_| {
+        let bytes = resp.bytes().await.map_err(|err| {
+            debug!(
+                source_id = %source_id,
+                source_kind = source_kind,
+                rpc_method = %rpc_method,
+                rpc_request_id = ?rpc_request_id,
+                error = %err,
+                "evm jsonrpc response body read failed"
+            );
             IoError::Transport(info_with_details(
                 CODE_EVM_HTTP_BODY_READ_FAILED,
                 ErrorCategory::Rpc,
@@ -1444,6 +1705,13 @@ impl EvmJsonRpcHttpTransport {
         })?;
 
         let v = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
+            debug!(
+                source_id = %source_id,
+                source_kind = source_kind,
+                rpc_method = %rpc_method,
+                rpc_request_id = ?rpc_request_id,
+                "evm jsonrpc response was not valid json"
+            );
             IoError::Other(info_with_details(
                 CODE_EVM_RESPONSE_INVALID_JSON,
                 ErrorCategory::ParsingInput,
@@ -1454,6 +1722,13 @@ impl EvmJsonRpcHttpTransport {
         })?;
 
         let obj = v.as_object().ok_or_else(|| {
+            debug!(
+                source_id = %source_id,
+                source_kind = source_kind,
+                rpc_method = %rpc_method,
+                rpc_request_id = ?rpc_request_id,
+                "evm jsonrpc response object was invalid"
+            );
             IoError::Other(info_with_details(
                 CODE_EVM_JSONRPC_INVALID_RESPONSE,
                 ErrorCategory::ParsingInput,
@@ -1464,6 +1739,15 @@ impl EvmJsonRpcHttpTransport {
         })?;
 
         if let Some(error_value) = obj.get("error") {
+            let jsonrpc_error_code = error_value.get("code").and_then(|v| v.as_i64());
+            debug!(
+                source_id = %source_id,
+                source_kind = source_kind,
+                rpc_method = %rpc_method,
+                rpc_request_id = ?rpc_request_id,
+                jsonrpc_error_code = ?jsonrpc_error_code,
+                "evm jsonrpc returned an error object"
+            );
             return Err(IoError::Transport(info_with_details(
                 CODE_EVM_JSONRPC_ERROR,
                 ErrorCategory::Rpc,
@@ -1474,6 +1758,13 @@ impl EvmJsonRpcHttpTransport {
         }
 
         let Some(result) = obj.get("result") else {
+            debug!(
+                source_id = %source_id,
+                source_kind = source_kind,
+                rpc_method = %rpc_method,
+                rpc_request_id = ?rpc_request_id,
+                "evm jsonrpc response missing result field"
+            );
             return Err(IoError::Other(info_with_details(
                 CODE_EVM_JSONRPC_MISSING_RESULT,
                 ErrorCategory::ParsingInput,
@@ -1483,6 +1774,14 @@ impl EvmJsonRpcHttpTransport {
             )));
         };
 
+        debug!(
+            source_id = %source_id,
+            source_kind = source_kind,
+            rpc_method = %rpc_method,
+            rpc_request_id = ?rpc_request_id,
+            http_status = status.as_u16(),
+            "evm jsonrpc http request succeeded"
+        );
         Ok(result.clone())
     }
 }
@@ -1496,38 +1795,73 @@ impl LiveIoTransport for EvmJsonRpcHttpTransport {
 
         let req: EvmTransportRequest =
             serde_json::from_value(call.request).map_err(|_| self.invalid_request_error())?;
-        let method_policy = resolve_method_policy(&req.method, &req.params, &self.cfg);
+
+        if req.method.eq_ignore_ascii_case(METHOD_EVM_ROUTING_ANALYSIS) {
+            return self.call_routing_analysis_operation(&req);
+        }
 
         if req.rpc_url.is_some() {
             return Err(self.rpc_url_override_error());
         }
 
+        let method_policy = resolve_method_policy(&req.method, &req.params, &self.cfg);
         let call_ordinal = self.current_call_ordinal();
         let json_call = JsonRpcCall::new(req.method.clone(), req.params.clone());
 
         let route_source_id = req.route.as_ref().map(|route| route.source_id.as_str());
         let source_ids = self.ordered_source_ids(route_source_id, call_ordinal)?;
+        debug!(
+            call_ordinal = call_ordinal,
+            rpc_method = %req.method,
+            method_class = method_class_name(method_policy.class),
+            dispatch_mode = dispatch_mode_name(method_policy.dispatch),
+            chunk_logs = method_policy.chunk_logs,
+            route_source_id = ?route_source_id,
+            source_order = ?source_ids,
+            "resolved evm jsonrpc routing decision"
+        );
 
-        if method_policy.chunk_logs {
-            return self
-                .call_logs_chunked_failover(&source_ids, &json_call, call_ordinal)
-                .await;
+        let result = if method_policy.chunk_logs {
+            self.call_logs_chunked_failover(&source_ids, &json_call, call_ordinal)
+                .await
+        } else {
+            match method_policy.dispatch {
+                DispatchMode::PrimaryOnly => {
+                    self.call_write_primary(&source_ids, &json_call, call_ordinal)
+                        .await
+                }
+                DispatchMode::Failover => {
+                    self.call_failover(&source_ids, &json_call, call_ordinal, method_policy.class)
+                        .await
+                }
+                DispatchMode::HedgedLight => {
+                    self.call_hedged_light(&source_ids, &json_call, call_ordinal)
+                        .await
+                }
+            }
+        };
+
+        match &result {
+            Ok(_) => {
+                debug!(
+                    call_ordinal = call_ordinal,
+                    rpc_method = %req.method,
+                    "evm jsonrpc call completed"
+                );
+            }
+            Err(err) => {
+                let info = err_info(err);
+                debug!(
+                    call_ordinal = call_ordinal,
+                    rpc_method = %req.method,
+                    error_code = %info.code.0,
+                    retryable = info.retryable,
+                    "evm jsonrpc call failed"
+                );
+            }
         }
 
-        match method_policy.dispatch {
-            DispatchMode::PrimaryOnly => {
-                self.call_write_primary(&source_ids, &json_call, call_ordinal)
-                    .await
-            }
-            DispatchMode::Failover => {
-                self.call_failover(&source_ids, &json_call, call_ordinal, method_policy.class)
-                    .await
-            }
-            DispatchMode::HedgedLight => {
-                self.call_hedged_light(&source_ids, &json_call, call_ordinal)
-                    .await
-            }
-        }
+        result
     }
 }
 
@@ -2028,6 +2362,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn routing_analysis_operation_returns_order_without_network_calls() {
+        let primary = start_stub_server(StubBehavior::JsonResult(json!("0x1"))).await;
+        let secondary = start_stub_server(StubBehavior::JsonResult(json!("0x2"))).await;
+        let cfg = config_with_sources(
+            vec![
+                source("primary", &primary.url),
+                source("secondary", &secondary.url),
+            ],
+            EvmRoutingStrategy::HedgedLight,
+        );
+        let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+        let mut t = factory.make(env());
+
+        let response = call_transport(
+            t.as_mut(),
+            json!({
+                "method": METHOD_EVM_ROUTING_ANALYSIS,
+                "params": {
+                    "method": "eth_chainId",
+                    "params": [],
+                },
+            }),
+        )
+        .await
+        .expect("analysis operation should succeed");
+
+        assert_eq!(
+            response.get("operation"),
+            Some(&json!(METHOD_EVM_ROUTING_ANALYSIS))
+        );
+        assert_eq!(
+            response.pointer("/target/method"),
+            Some(&json!("eth_chainId"))
+        );
+        assert_eq!(
+            response.pointer("/routing/method_class"),
+            Some(&json!("read_light"))
+        );
+        assert_eq!(
+            response.pointer("/routing/dispatch_mode"),
+            Some(&json!("hedged_light"))
+        );
+        assert_eq!(
+            response.pointer("/routing/selected_order"),
+            Some(&json!(["primary", "secondary"]))
+        );
+
+        let ranked = response
+            .get("sources_ranked")
+            .and_then(|v| v.as_array())
+            .expect("sources_ranked array");
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].get("source_id"), Some(&json!("primary")));
+        assert_eq!(ranked[1].get("source_id"), Some(&json!("secondary")));
+
+        // Analysis is local-only and does not issue network requests.
+        assert_eq!(primary.hit_count(), 0);
+        assert_eq!(secondary.hit_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn routing_analysis_operation_reports_unknown_route_without_failing() {
+        let primary = start_stub_server(StubBehavior::JsonResult(json!("0x1"))).await;
+        let cfg = config_with_sources(
+            vec![source("primary", &primary.url)],
+            EvmRoutingStrategy::Failover,
+        );
+        let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+        let mut t = factory.make(env());
+
+        let response = call_transport(
+            t.as_mut(),
+            json!({
+                "method": METHOD_EVM_ROUTING_ANALYSIS,
+                "params": {
+                    "method": "eth_getLogs",
+                    "params": [],
+                    "route": {"source_id": "missing"},
+                },
+            }),
+        )
+        .await
+        .expect("analysis operation should return error details in response");
+
+        assert_eq!(
+            response.pointer("/routing/selected_order"),
+            Some(&json!([]))
+        );
+        assert_eq!(
+            response.pointer("/routing/selection_error/code"),
+            Some(&json!(CODE_EVM_ROUTE_SOURCE_UNKNOWN))
+        );
+        assert_eq!(primary.hit_count(), 0);
+    }
+
+    #[tokio::test]
     async fn failover_uses_secondary_on_primary_http_failure() {
         let primary = start_stub_server(StubBehavior::HttpStatus(500)).await;
         let secondary = start_stub_server(StubBehavior::JsonResult(json!("0x2"))).await;
@@ -2292,6 +2722,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hedging_falls_back_when_primary_probe_fails() {
+        let primary = start_stub_server(StubBehavior::HttpStatus(500)).await;
+        let secondary = start_stub_server(StubBehavior::JsonResult(json!("0x2"))).await;
+
+        let cfg = config_with_sources(
+            vec![
+                source("primary", &primary.url),
+                source("secondary", &secondary.url),
+            ],
+            EvmRoutingStrategy::HedgedLight,
+        );
+        let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+        let mut t = factory.make(env());
+
+        let response = call_transport(
+            t.as_mut(),
+            json!({
+                "method": "eth_chainId",
+                "params": [],
+            }),
+        )
+        .await
+        .expect("secondary should be used when primary probe fails");
+
+        assert_eq!(response, json!("0x2"));
+        assert_eq!(primary.hit_count(), 1);
+        assert_eq!(secondary.hit_count(), 3);
+    }
+
+    #[tokio::test]
     async fn hedging_does_not_start_secondary_when_primary_finishes_before_delay() {
         let primary = start_stub_server(StubBehavior::JsonResult(json!("0x1"))).await;
         let secondary = start_stub_server(StubBehavior::JsonResult(json!("0x2"))).await;
@@ -2352,6 +2812,7 @@ mod tests {
             IoError::Transport(info) => {
                 assert!(
                     info.code.0 == CODE_EVM_HEDGE_EXHAUSTED
+                        || info.code.0 == CODE_EVM_NO_HEALTHY_SOURCE
                         || info.code.0 == CODE_EVM_SOURCE_UNHEALTHY
                 );
                 assert!(info.retryable);

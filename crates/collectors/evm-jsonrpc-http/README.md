@@ -34,6 +34,38 @@ Notes:
 - `route.source_id` is optional.
 - Per-request `rpc_url` override is rejected.
 
+## Routing Analysis Operation
+
+For full routing visibility without issuing network requests, call:
+
+```json
+{
+  "method": "mfm_debugRoutingAnalysis",
+  "params": {
+    "method": "eth_chainId",
+    "params": [],
+    "route": { "source_id": "helios_local" }
+  }
+}
+```
+
+Response includes:
+- target method + param-size metadata
+- resolved method class and dispatch mode
+- selected source order (or selection error details)
+- ranked source state snapshot (score, health, cooldown, probe status)
+
+## Debug Telemetry
+
+At `debug` level, transport logs include:
+- call-level routing decision (`method_class`, `dispatch_mode`, `source_order`, `route_source_id`)
+- per-request dispatch/result fields (`source_id`, `source_kind`, `rpc_method`, `rpc_request_id`, `http_status`)
+
+Telemetry keeps diagnostics safe:
+- no full RPC URLs
+- no auth headers
+- no secret query strings
+
 Docs:
 - [`../../../docs/redesign.md`](../../../docs/redesign.md)
 - [`../../../docs/evm-rpc-routing.md`](../../../docs/evm-rpc-routing.md)

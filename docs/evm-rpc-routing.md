@@ -29,6 +29,25 @@ Notes:
 - Per-request `rpc_url` override is rejected for all EVM calls with `evm_request_invalid`.
 - URL/auth values are runtime-only config and are never persisted in facts/events/artifacts.
 
+Routing analysis operation (local-only, no network dispatch):
+
+```json
+{
+  "method": "mfm_debugRoutingAnalysis",
+  "params": {
+    "method": "eth_chainId",
+    "params": [],
+    "route": { "source_id": "helios_local" }
+  }
+}
+```
+
+Response includes:
+- target method metadata
+- resolved method class and dispatch mode
+- selected source order (or structured selection error details)
+- ranked source state snapshot (score, health, cooldown window, probe status)
+
 ## 2. Runtime Source Configuration
 
 Primary source-pool configuration:
@@ -111,6 +130,12 @@ Pool-related codes:
 Diagnostics rules:
 - Include safe source IDs and coarse error metadata only.
 - Never include full RPC URLs, authorization headers, or secret-bearing query parameters.
+
+Debug telemetry (when `LOG_LEVEL=debug` or equivalent filter enables this target):
+- call-level routing decision:
+  - `rpc_method`, `method_class`, `dispatch_mode`, `source_order`, `route_source_id`
+- per-request dispatch/result:
+  - `source_id`, `source_kind`, `rpc_method`, `rpc_request_id`, `http_status`
 
 ## 6. Replay and Determinism
 
