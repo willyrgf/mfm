@@ -52,7 +52,7 @@ How it could be “less awful”:
 Fit for MFM:
 
 * Reuse your existing `service::reth` and `service::helios` modules; add optional `service::nimbus` only if you want user-run consensus as a first-class path.
-* Have `MFM_EVM_RPC_URL` point at the local node when available.
+* Expose the local node through a shared RPC source-discovery registry (`local_reth` / `helios_local`) instead of per-command URL wiring.
 * This becomes the **“power user / operator mode”** for people who want maximum independence.
 
 When I’d recommend it:
@@ -357,8 +357,7 @@ Recommended target:
 * request payload includes `method`, `params`, and optional `route.source_id`
 * runtime resolves `source_id -> URL/auth` from env/service discovery
 * persisted facts/events/errors include source IDs only (`helios_local`, `drpc_public`, etc.)
-
-Keep `rpc_url` request override only as a temporary compatibility path, then phase it out.
+* remove `rpc_url` payload routing from the EVM read path as a breaking change
 
 ---
 
@@ -780,11 +779,11 @@ Resolution examples:
 * `drpc_public` -> env/default URL at runtime
 * `user_primary` -> env-provided URL/auth
 
-### 7.3 Compatibility/migration policy
+### 7.3 Breaking-change policy
 
-* keep current `rpc_url` support as compatibility path in short term
-* prefer source-id routing in new code paths
-* phase out per-request URL overrides from normal read operations
+* source-id routing is mandatory for `namespace="evm"` reads
+* remove per-request `rpc_url` overrides from EVM read transport
+* remove single-source fallback config paths that bypass source discovery
 
 ---
 
@@ -810,10 +809,7 @@ Expected additions:
 * method classifier
 * failover and optional hedging executor
 * optional `route_source_id` in transport request envelope (safe source ID only)
-
-Expected removals/deprecations (later):
-
-* per-request `rpc_url` override in normal flow
+* remove `rpc_url` in request envelope for EVM read flow
 
 ### 8.3 `crates/app` wiring
 
@@ -922,7 +918,7 @@ Scope:
 Exit criteria:
 
 * bounded behavior under high-volume log queries
-* stable pass rates in parity tests under fault injection
+* stable pass rates in full CI under fault injection
 
 ### 11.3 Milestone C (optional)
 
@@ -966,10 +962,10 @@ Exit criteria:
 
 ### 13.1 Rollout plan
 
-1. ship Milestone A behind opt-in env/config switch
-2. run parity CI with injected transport faults
-3. promote to default after stability threshold
-4. then implement Milestone B
+1. implement Milestone A as the default path in this branch
+2. run full CI (`nix run .#ci -- --full --summary`) after each major commit slice
+3. land Milestone B in the same branch before merge
+4. merge only after the full target behavior is complete and green
 
 ### 13.2 Runtime telemetry to collect
 
@@ -982,7 +978,7 @@ Exit criteria:
 
 * single-source fallback mode remains available
 * disable hedging via config without code revert
-* preserve existing `MFM_EVM_RPC_URL` path during migration period
+* keep source registry entries minimal (local first) when isolating incidents
 
 ---
 
@@ -990,7 +986,363 @@ Exit criteria:
 
 * Should source IDs be globally fixed strings or namespaced per env/profile?
 * Do we need separate pools for read and write calls from day one?
-* What is the exact compatibility window for `rpc_url` per-request override?
 * Which methods enter the initial hedging allowlist, and how strict are payload-size guards?
 
 These should be finalized before implementing Milestone A to avoid cross-crate churn.
+
+---
+
+## Part 15) Milestone A Implementation Checklist (File-by-File)
+
+This is an execution checklist for delivering Milestone A incrementally with low regression risk.
+
+### 15.1 Slice 0: Lock scope and policy inputs
+
+Files:
+
+* `DRAFT_RPC_PROBLEM_TT.md`
+* `docs/redesign.md` (only if contract wording needs updates)
+
+Checklist:
+
+* [ ] Freeze Milestone A scope: failover + light hedging, no quorum.
+* [ ] Freeze initial light-method allowlist and explicit no-hedge list.
+* [ ] Freeze error-code additions and redaction policy.
+* [ ] Freeze breaking changes: no `rpc_url` request override in EVM read transport.
+
+Exit gate:
+
+* [ ] Written decisions merged before transport implementation starts.
+
+### 15.2 Slice 1: Extend transport config for source pools
+
+Files:
+
+* `crates/collectors/evm-jsonrpc-http/src/lib.rs`
+* `crates/app/src/lib.rs`
+
+Checklist:
+
+* [ ] Add source-id based config model to transport (`sources`, ordering, strategy, hedge delay).
+* [ ] Remove single-source `rpc_url`/`authorization` transport config from EVM read path.
+* [ ] Add runtime-only source resolution path in app wiring.
+* [ ] Keep namespace routing unchanged (`"evm"` in `make_engine_bundle`).
+
+Acceptance tests:
+
+* [ ] New test: transport creation fails fast when source registry is empty/invalid.
+* [ ] New test: config with multiple source IDs builds transport successfully.
+
+### 15.3 Slice 2: Add method classification and routing policy
+
+Files:
+
+* `crates/collectors/evm-jsonrpc-http/src/lib.rs`
+
+Checklist:
+
+* [ ] Introduce method classifier (`read_light`, `read_heavy`, `write_or_side_effect`).
+* [ ] Add default policy: hedge only `read_light`, sequential failover for others.
+* [ ] Add explicit deny-hedge set (`eth_getLogs`, `trace_*`, `debug_*`, writes).
+* [ ] Ensure classification does not alter request payload hashing path.
+
+Acceptance tests:
+
+* [ ] Unit tests for classifier correctness across representative method set.
+* [ ] Unit test proving write methods never trigger multi-source dispatch.
+
+### 15.4 Slice 3: Implement failover executor
+
+Files:
+
+* `crates/collectors/evm-jsonrpc-http/src/lib.rs`
+
+Checklist:
+
+* [ ] Implement ordered source attempts for retryable transport failures.
+* [ ] Respect retryability categories already used by transport (`timeout`, `429`, transient HTTP).
+* [ ] Return first successful response.
+* [ ] Return stable aggregate error when all candidates fail.
+* [ ] Include safe source IDs in diagnostics; never include full URL/auth.
+
+Acceptance tests:
+
+* [ ] One source hard-fails, second succeeds -> call succeeds.
+* [ ] First source returns 429, second succeeds -> call succeeds.
+* [ ] All sources fail -> stable pool error code and retryability.
+
+### 15.5 Slice 4: Implement light hedging (max 2 sources)
+
+Files:
+
+* `crates/collectors/evm-jsonrpc-http/src/lib.rs`
+
+Checklist:
+
+* [ ] Add hedged dispatch path for `read_light` only.
+* [ ] Start primary, delay `hedge_delay_ms`, optionally start secondary.
+* [ ] Return first acceptable success; cancel/ignore loser path safely.
+* [ ] Keep hedge fanout bounded to 2 sources.
+* [ ] Keep heavy/write methods on failover-only path.
+
+Acceptance tests:
+
+* [ ] Primary slow + secondary fast -> secondary winner returned.
+* [ ] Primary fast -> secondary never started.
+* [ ] Both fail -> stable aggregate error returned.
+
+### 15.6 Slice 5: Health probing and scoring
+
+Files:
+
+* `crates/collectors/evm-jsonrpc-http/src/lib.rs`
+* `crates/app/src/lib.rs`
+* (optional config docs) `nixfied/project/dev.nix`
+
+Checklist:
+
+* [ ] Add startup probe hooks (`eth_chainId`, `eth_blockNumber`).
+* [ ] Add optional capability probe (`eth_getProof`) for Helios-backing candidates.
+* [ ] Add lightweight health score decay/recovery updates per call outcome.
+* [ ] Prefer healthy local sources before remote ones when scores are comparable.
+
+Acceptance tests:
+
+* [ ] Unhealthy source is skipped until recovery condition is met.
+* [ ] Healthy local source is preferred over equal-score remote candidate.
+
+### 15.7 Slice 6: Secret-safety and diagnostics hardening
+
+Files:
+
+* `crates/collectors/evm-jsonrpc-http/src/lib.rs`
+* `crates/app/src/lib.rs`
+* `bin/cli/README.md`
+* `bin/rest-api/README.md`
+
+Checklist:
+
+* [ ] Redact URL/auth from all error details.
+* [ ] Ensure only source IDs and non-sensitive diagnostics are persisted/logged.
+* [ ] Document runtime-only secret handling in CLI/REST docs.
+* [ ] Preserve existing stable error surfaces where unchanged.
+
+Acceptance tests:
+
+* [ ] Regression tests assert no URL/auth appears in error `details`.
+* [ ] Regression tests assert no secret-bearing fields appear in serialized outputs.
+
+### 15.8 Slice 7: Remove per-request `rpc_url` override (breaking)
+
+Files:
+
+* `crates/collectors/evm-jsonrpc-http/src/lib.rs`
+* `bin/rest-api/README.md`
+* `bin/cli/README.md`
+
+Checklist:
+
+* [ ] Remove `rpc_url` from EVM read request schema in transport deserialization.
+* [ ] Update tests and docs to use source-id routing only.
+* [ ] Keep secret-redaction rules enforced in all error paths.
+
+Acceptance tests:
+
+* [ ] Legacy per-request override request shape returns stable invalid-request error.
+* [ ] Invalid route-source requests return redacted diagnostics.
+
+### 15.9 Slice 8: Integration coverage and replay invariants
+
+Files:
+
+* `tests/integration/tests/rest_api_run_control.rs`
+* `tests/integration/tests/parity_rest_api_evm_reth_pipeline.rs`
+* `tests/integration/tests/parity_portfolio_tracker_reth_snapshot.rs`
+* (new recommended file) `tests/integration/tests/evm_rpc_pool_failover.rs`
+
+Checklist:
+
+* [ ] Add integration scenario with injected failing primary and healthy secondary.
+* [ ] Add replay scenario proving no network call in replay path after live capture.
+* [ ] Add 429 path coverage validating failover.
+* [ ] Keep existing portfolio/REST parity tests green.
+
+Acceptance tests:
+
+* [ ] Integration suite passes with Milestone A enabled.
+* [ ] No replay regressions (`MissingFactKey` behavior unchanged).
+
+### 15.10 Slice 9: Nixfied and runtime defaults
+
+Files:
+
+* `nixfied/project/conf.nix`
+* `nixfied/project/dev.nix`
+* `nixfied/project/ci.nix`
+* `nixfied/project/ci/scripts/steps/mainnet-portfolio-snapshot-helios.nix`
+
+Checklist:
+
+* [ ] Add optional env/config knobs for source IDs and hedging strategy.
+* [ ] Remove reliance on single-source `MFM_EVM_RPC_URL` as the EVM read default path.
+* [ ] Ensure `ci -- --full` runs Milestone A path by default.
+* [ ] Preserve current Helios smoke and portfolio snapshot workflows.
+
+Acceptance tests:
+
+* [ ] `nix run .#ci -- --full --summary` passes with default settings.
+* [ ] full CI includes Helios + failover path coverage.
+
+### 15.11 Slice 10: Final contract/doc sweep
+
+Files:
+
+* `crates/collectors/evm-jsonrpc-http/README.md`
+* `bin/cli/README.md`
+* `bin/rest-api/README.md`
+* `docs/architecture.md` (if boundary wording changes)
+
+Checklist:
+
+* [ ] Document source-id routing model and the breaking removal of per-request URL routing.
+* [ ] Document failover/hedging high-level behavior and guardrails.
+* [ ] Document operator-facing env vars and defaults.
+* [ ] Confirm no doc claims conflict with actual runtime behavior.
+
+Exit gate:
+
+* [ ] Reviewer can follow docs to run Milestone A locally and in CI full mode.
+
+### 15.12 Definition of Done (Milestone A)
+
+* [ ] `namespace = "evm"` remains the only state-facing IO route.
+* [ ] Existing `EvmIoClient`/`JsonRpcCall` call sites require no migration.
+* [ ] Failover and light hedging work for read calls without write fanout.
+* [ ] Replay determinism is preserved.
+* [ ] No secret leakage in persisted/logged surfaces.
+* [ ] `nix run .#ci -- --full --summary` passes (fail-fast, primary gate).
+
+### 15.13 Suggested commit breakdown
+
+1. Commit-1: Source registry config + classifier + schema break (`rpc_url` removal for read path).
+2. Commit-2: Failover executor + unit tests.
+3. Commit-3: Light hedging + unit tests.
+4. Commit-4: Integration tests + replay/security regressions.
+5. Commit-5: Nixfied/docs updates + full-CI gating.
+
+This sequence keeps each commit reviewable while still delivering Milestone A end-to-end in one branch.
+
+---
+
+## Part 16) Reusable RPC Discovery Architecture (System-wide + CI)
+
+This is the key to making RPC URL discovery fully reusable beyond one transport.
+
+### 16.1 Design goal
+
+One library-defined discovery flow should resolve EVM RPC sources for:
+
+* CLI execution
+* REST API execution
+* integration tests
+* CI health/preflight checks
+* any future component that needs EVM RPC access
+
+No component should hand-roll URL selection logic.
+
+### 16.2 Recommended module boundary
+
+Introduce a dedicated reusable library layer for discovery, for example:
+
+* `crates/collectors/evm-rpc-discovery/src/lib.rs`
+
+Alternative (if avoiding a new crate):
+
+* `crates/collectors/evm-jsonrpc-http/src/discovery.rs`
+
+Preferred is a dedicated crate so discovery is transport-agnostic and can be reused without pulling HTTP execution internals.
+
+### 16.3 Core types (reusable contract)
+
+```rust
+pub struct DiscoveryInput {
+    pub chain: String,              // "mainnet", "sepolia", "local"
+    pub profile: String,            // "dev", "test", "ci", "prod"
+    pub require_helios_compat: bool,
+}
+
+pub struct RpcSourceCandidate {
+    pub source_id: String,          // safe ID only
+    pub kind: SourceKindRef,        // local_helios/local_reth/remote_public/remote_user
+    pub endpoint: RuntimeEndpoint,  // URL/auth runtime-only
+}
+
+pub struct DiscoveredRpcPool {
+    pub ordered_sources: Vec<RpcSourceCandidate>,
+    pub strategy: RoutingStrategy,
+    pub policy: MethodPolicy,
+}
+
+pub struct DiscoveryReport {
+    pub selected_ids: Vec<String>,  // persisted/logged safe surface
+    pub rejected_ids: Vec<String>,
+}
+```
+
+Key rule:
+
+* `DiscoveredRpcPool` is runtime-only.
+* `DiscoveryReport` is safe for logs/events.
+
+### 16.4 Resolver pipeline
+
+The discovery engine should run a deterministic, composable pipeline:
+
+1. gather candidates from local services (`helios_local`, `local_reth`)
+2. gather candidates from env-mapped remote sources (`drpc_public`, `user_primary`, etc.)
+3. apply chain/profile filters
+4. probe capabilities/health (`eth_chainId`, `eth_blockNumber`, optional `eth_getProof`)
+5. score and order candidates
+6. return runtime pool + safe report
+
+### 16.5 Reuse points in this repo
+
+* `crates/app/src/lib.rs`: use discovery output when constructing EVM transport factory
+* `bin/cli`: no custom URL logic; route through app/discovery
+* `bin/rest-api`: same as CLI
+* CI: use a thin command/hook backed by the same discovery library before run steps
+
+CI usage pattern:
+
+* add a preflight command that calls discovery and prints only safe report data
+* fail fast if no healthy required source is discovered
+* then run `nix run .#ci -- --full --summary`
+
+### 16.6 Why this is generalisable
+
+* discovery concerns are separated from transport execution concerns
+* source-id abstraction works for local services, public remotes, and BYO providers
+* the same resolver can later power non-HTTP transports if needed
+* policy and probing logic become testable once, reused everywhere
+
+### 16.7 Testing contract for reuse
+
+Unit tests (discovery crate/module):
+
+* env/service candidate collection
+* filter + scoring determinism
+* probe failure behavior and rejection reasons
+
+Integration tests:
+
+* app startup path uses discovered pool
+* CLI and REST path use identical source ordering under same env
+* CI preflight and runtime see the same discovered source set
+
+### 16.8 Commit impact (updated)
+
+When implementing Milestone A with full reuse, include discovery extraction early:
+
+1. Commit-1: introduce discovery layer + source-id-only schema break
+2. Commit-2: wire app and transport to discovery output
+3. Commit-3+: failover/hedging/probing/tests/docs
