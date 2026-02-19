@@ -8,6 +8,14 @@ Key revision highlights:
 * Reuse canonical fact-key derivation (`artifact_id_for_json`) and existing no-secrets safeguards.
 * Prioritize Milestone A (`failover + light hedging`) and defer quorum to a narrow, later phase.
 
+Working status (repository baseline, 2026-02-19):
+
+* Current `evm` live transport is still single-source (`rpc_url` + optional `authorization`) in `crates/collectors/evm-jsonrpc-http/src/lib.rs`.
+* Per-request `rpc_url` override is currently accepted by transport request deserialization.
+* App wiring currently resolves `MFM_EVM_RPC_URL` / `MFM_EVM_RPC_AUTHORIZATION` in `crates/app/src/lib.rs`.
+* Milestone A transport behaviors (source-id routing, failover, hedging, source health scoring) are not implemented yet in code.
+* This draft now locks Milestone A policy inputs so implementation can proceed without reopening scope.
+
 ---
 
 # PROMPT
@@ -368,6 +376,7 @@ Start with high-value behavior only:
 * routing preference: local Helios -> local full node -> remote pool
 * **Light** calls: hedged (max 2 concurrent) with short hedge delay
 * **Heavy** calls (especially `eth_getLogs`): sequential failover only
+* **Write/side-effect** calls: primary-only single dispatch
 * no quorum in Milestone A
 
 This gives immediate reliability gains while keeping determinism and complexity under control.
@@ -709,6 +718,8 @@ Policy:
 
 * hedge only `read_light`
 * no hedge for heavy/write classes
+* sequential failover for `read_heavy` only
+* primary-only single dispatch for `write_or_side_effect`
 * never execute write methods against multiple sources
 
 Hedge algorithm (target behavior):
@@ -724,7 +735,7 @@ match classify(method) {
         }
         return first_success_or_best_error();
     }
-    _ => {
+    ReadLight | ReadHeavy => {
         for source in ordered_sources {
             if let Ok(resp) = call_once(source).await {
                 return Ok(resp);
@@ -732,6 +743,9 @@ match classify(method) {
             record_failure(source);
         }
         return Err(aggregate_error);
+    }
+    WriteOrSideEffect => {
+        return call_once(primary).await;
     }
 }
 ```
@@ -982,13 +996,36 @@ Exit criteria:
 
 ---
 
-## Part 14) Open Questions to Resolve Before Coding
+## Part 14) Resolved Decisions Before Coding (Locked For Milestone A)
 
-* Should source IDs be globally fixed strings or namespaced per env/profile?
-* Do we need separate pools for read and write calls from day one?
-* Which methods enter the initial hedging allowlist, and how strict are payload-size guards?
+### 14.1 Source ID scope
 
-These should be finalized before implementing Milestone A to avoid cross-crate churn.
+* Source IDs are globally fixed strings (`helios_local`, `local_reth`, `drpc_public`, `cloudflare_trial`, `user_primary`).
+* Env/profile controls enabled IDs and preference ordering, but does not rename IDs.
+* Persisted surfaces store IDs only; URL/auth stays runtime-only.
+
+### 14.2 Read vs write behavior
+
+* Milestone A uses one shared source registry for both read and write classification.
+* `read_light` can use hedging (bounded to 2 sources).
+* `read_heavy` uses sequential failover only.
+* `write_or_side_effect` uses primary-only single dispatch (no hedge, no cross-source failover).
+
+### 14.3 Initial method policy freeze
+
+* `read_light` hedge allowlist (initial): `eth_chainId`, `eth_blockNumber`, `eth_getBalance`, `eth_call`, `eth_getTransactionReceipt`, `eth_getBlockByNumber`.
+* Explicit no-hedge list: `eth_getLogs`, `trace_*`, `debug_*`.
+* Write/side-effect list (single-dispatch): `eth_sendRawTransaction`, `eth_sendTransaction`, `personal_*`, `admin_*`, `miner_*`, `txpool_*`, `engine_*`.
+* `eth_call` enters hedge path only when payload and timeout guards are within policy; otherwise it is treated as `read_heavy`.
+
+### 14.4 Guardrails and diagnostics freeze
+
+* Add stable pool-related codes in Milestone A: `evm_source_unhealthy`, `evm_no_healthy_source`, `evm_hedge_exhausted`.
+* Diagnostics may include source ID, HTTP status class, JSON-RPC error code, and truncated generic message.
+* Diagnostics must not include full URL, query strings, auth headers, or credential-like substrings.
+* Legacy per-request `rpc_url` in EVM read requests is a breaking removal target in Milestone A.
+
+These decisions are the policy baseline for Slices 1-10 below.
 
 ---
 
@@ -1005,14 +1042,14 @@ Files:
 
 Checklist:
 
-* [ ] Freeze Milestone A scope: failover + light hedging, no quorum.
-* [ ] Freeze initial light-method allowlist and explicit no-hedge list.
-* [ ] Freeze error-code additions and redaction policy.
-* [ ] Freeze breaking changes: no `rpc_url` request override in EVM read transport.
+* [x] Freeze Milestone A scope: failover + light hedging, no quorum.
+* [x] Freeze initial light-method allowlist and explicit no-hedge list.
+* [x] Freeze error-code additions and redaction policy.
+* [x] Freeze breaking changes: no `rpc_url` request override in EVM read transport.
 
 Exit gate:
 
-* [ ] Written decisions merged before transport implementation starts.
+* [x] Written decisions merged before transport implementation starts.
 
 ### 15.2 Slice 1: Extend transport config for source pools
 
@@ -1042,7 +1079,7 @@ Files:
 Checklist:
 
 * [ ] Introduce method classifier (`read_light`, `read_heavy`, `write_or_side_effect`).
-* [ ] Add default policy: hedge only `read_light`, sequential failover for others.
+* [ ] Add default policy: hedge only `read_light`, sequential failover for `read_heavy`, single-dispatch for `write_or_side_effect`.
 * [ ] Add explicit deny-hedge set (`eth_getLogs`, `trace_*`, `debug_*`, writes).
 * [ ] Ensure classification does not alter request payload hashing path.
 
@@ -1083,7 +1120,7 @@ Checklist:
 * [ ] Start primary, delay `hedge_delay_ms`, optionally start secondary.
 * [ ] Return first acceptable success; cancel/ignore loser path safely.
 * [ ] Keep hedge fanout bounded to 2 sources.
-* [ ] Keep heavy/write methods on failover-only path.
+* [ ] Keep heavy methods on failover-only path and writes on primary-only path.
 
 Acceptance tests:
 

@@ -383,7 +383,7 @@ Snapshots a wallet portfolio (ETH + allowlisted ERC-20 balances) with `chain_id=
 
 **Requirements:**
 - `DATABASE_URL` (event store)
-- `MFM_EVM_RPC_URL` (EVM JSON-RPC)
+- EVM source configuration (`MFM_EVM_RPC_SOURCES_JSON`, or legacy `MFM_EVM_RPC_URL`)
 
 **Usage:**
 ```sh
@@ -430,15 +430,44 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   mfm_cli run artifacts get "<ARTIFACT_ID>"
   ```
 
-- **`MFM_EVM_RPC_URL`**: HTTP(s) JSON-RPC endpoint used for `namespace="evm"` live IO (e.g. EVM read ops). This value is runtime-only and is never persisted by MFM.
+- **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON array of source objects for `namespace="evm"` live IO routing (source-id based). Runtime-only and never persisted.
   ```sh
-  export MFM_EVM_RPC_URL="https://example.invalid"
+  export MFM_EVM_RPC_SOURCES_JSON='[
+    {"id":"helios_local","rpc_url":"http://127.0.0.1:8545","kind":"local"},
+    {"id":"drpc_public","rpc_url":"https://eth.drpc.org","kind":"remote_public"}
+  ]'
   ```
 
-- **`MFM_EVM_RPC_AUTHORIZATION`**: Optional HTTP `Authorization` header value for EVM JSON-RPC. Treat this as a secret; it is runtime-only and is never persisted by MFM.
+- **`MFM_EVM_RPC_PREFERRED_ORDER`**: Optional comma-separated source IDs that set routing preference.
   ```sh
-  export MFM_EVM_RPC_AUTHORIZATION="Bearer <token>"
+  export MFM_EVM_RPC_PREFERRED_ORDER="helios_local,drpc_public"
   ```
+
+- **`MFM_EVM_RPC_STRATEGY`**: Optional EVM routing strategy (`failover` or `hedged_light`; default `hedged_light`).
+  ```sh
+  export MFM_EVM_RPC_STRATEGY="hedged_light"
+  ```
+
+- **`MFM_EVM_RPC_HEDGE_DELAY_MS`**: Optional hedge delay (milliseconds) used by `hedged_light`.
+  ```sh
+  export MFM_EVM_RPC_HEDGE_DELAY_MS="120"
+  ```
+
+- **`MFM_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS`**: Optional unhealthy cooldown in logical call-count units.
+  ```sh
+  export MFM_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS="2"
+  ```
+
+- **`MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`**: Optional comma-separated source IDs that must pass `eth_getProof` probe.
+  ```sh
+  export MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS="helios_local"
+  ```
+
+- Legacy compatibility:
+  - **`MFM_EVM_RPC_URL`**: single-source fallback endpoint mapped as source id `user_primary`.
+  - **`MFM_EVM_RPC_AUTHORIZATION`**: optional Authorization header for that legacy single source.
+
+- EVM read transport note: per-request `rpc_url` override is not supported on read paths; routing is source-id based.
 
 - **`MFM_PORTFOLIO_TOKENS_JSON`**: Optional JSON array of ERC-20 token specs used by `mfm_cli portfolio snapshot` (and the REST API feature `portfolio.snapshot`).
   ```sh

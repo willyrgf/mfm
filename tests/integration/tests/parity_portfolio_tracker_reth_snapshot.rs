@@ -7,7 +7,9 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use mfm_artifact_store_fs::FsArtifactStore;
-use mfm_collectors_evm_jsonrpc_http::{EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory};
+use mfm_collectors_evm_jsonrpc_http::{
+    EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmSourceKind,
+};
 use mfm_event_store_mem::MemEventStore;
 use mfm_machine::engine::Stores;
 use mfm_machine::ids::{RunId, StateId};
@@ -48,8 +50,14 @@ async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> ser
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(tmp.path()));
 
     let factory = EvmJsonRpcHttpTransportFactory::new(EvmJsonRpcHttpConfig {
-        rpc_url: Some(rpc_url.to_string()),
-        authorization: None,
+        sources: vec![EvmJsonRpcSource {
+            id: "helper_primary".to_string(),
+            rpc_url: rpc_url.to_string(),
+            authorization: None,
+            kind: EvmSourceKind::RemoteUser,
+            require_get_proof_probe: false,
+        }],
+        preferred_order: vec!["helper_primary".to_string()],
         ..EvmJsonRpcHttpConfig::default()
     });
     let mut t = factory.make(LiveIoEnv {

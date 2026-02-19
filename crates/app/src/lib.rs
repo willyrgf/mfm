@@ -12,7 +12,10 @@ use tracing::{debug, info, instrument, warn};
 
 use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_artifact_store_s3::S3ArtifactStore;
-use mfm_collectors_evm_jsonrpc_http::{EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory};
+use mfm_collectors_evm_jsonrpc_http::{
+    EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmRoutingStrategy,
+    EvmSourceKind,
+};
 use mfm_event_store_postgres::PostgresEventStore;
 use mfm_evm_runtime::local_evm_io::LocalEvmIoTransportFactory;
 use mfm_machine::config::{
@@ -60,6 +63,12 @@ use mfm_sdk::unstable::{
 
 const ENV_EVM_RPC_URL: &str = "MFM_EVM_RPC_URL";
 const ENV_EVM_RPC_AUTHORIZATION: &str = "MFM_EVM_RPC_AUTHORIZATION";
+const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
+const ENV_EVM_RPC_PREFERRED_ORDER: &str = "MFM_EVM_RPC_PREFERRED_ORDER";
+const ENV_EVM_RPC_STRATEGY: &str = "MFM_EVM_RPC_STRATEGY";
+const ENV_EVM_RPC_HEDGE_DELAY_MS: &str = "MFM_EVM_RPC_HEDGE_DELAY_MS";
+const ENV_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS: &str = "MFM_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS";
+const ENV_EVM_RPC_REQUIRE_GET_PROOF_IDS: &str = "MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS";
 
 const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
 const ENV_ARTIFACT_ROOT: &str = "MFM_ARTIFACT_ROOT";
@@ -435,6 +444,154 @@ impl LiveIoTransport for AppLocalIoTransport {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct EnvEvmRpcSource {
+    id: String,
+    rpc_url: String,
+    #[serde(default)]
+    authorization: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    require_get_proof_probe: bool,
+}
+
+fn parse_csv_env(var_name: &str) -> Vec<String> {
+    std::env::var(var_name)
+        .ok()
+        .into_iter()
+        .flat_map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn parse_u64_env(var_name: &str) -> Option<u64> {
+    let Ok(raw) = std::env::var(var_name) else {
+        return None;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<u64>() {
+        Ok(v) => Some(v),
+        Err(_) => {
+            warn!(env_var = var_name, "ignoring invalid numeric env var");
+            None
+        }
+    }
+}
+
+fn parse_source_kind(raw: Option<&str>) -> EvmSourceKind {
+    let normalized = raw.unwrap_or("remote_public").trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "local" | "local_helios" | "local_reth" => EvmSourceKind::Local,
+        "remote_user" | "user" => EvmSourceKind::RemoteUser,
+        "remote_public" | "public" => EvmSourceKind::RemotePublic,
+        _ => EvmSourceKind::RemotePublic,
+    }
+}
+
+fn resolve_evm_rpc_sources_from_env() -> Vec<EvmJsonRpcSource> {
+    if let Ok(raw_json) = std::env::var(ENV_EVM_RPC_SOURCES_JSON) {
+        let trimmed = raw_json.trim();
+        if !trimmed.is_empty() {
+            match serde_json::from_str::<Vec<EnvEvmRpcSource>>(trimmed) {
+                Ok(parsed) => {
+                    let mut out = Vec::new();
+                    for source in parsed {
+                        if source.id.trim().is_empty() || source.rpc_url.trim().is_empty() {
+                            warn!("skipping evm rpc source with empty id or rpc_url");
+                            continue;
+                        }
+                        out.push(EvmJsonRpcSource {
+                            id: source.id.trim().to_string(),
+                            rpc_url: source.rpc_url.trim().to_string(),
+                            authorization: source.authorization,
+                            kind: parse_source_kind(source.kind.as_deref()),
+                            require_get_proof_probe: source.require_get_proof_probe,
+                        });
+                    }
+                    return out;
+                }
+                Err(_) => {
+                    warn!("failed to parse MFM_EVM_RPC_SOURCES_JSON; falling back to legacy env");
+                }
+            }
+        }
+    }
+
+    let rpc_url = std::env::var(ENV_EVM_RPC_URL)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let Some(rpc_url) = rpc_url else {
+        return Vec::new();
+    };
+
+    vec![EvmJsonRpcSource {
+        id: "user_primary".to_string(),
+        rpc_url,
+        authorization: std::env::var(ENV_EVM_RPC_AUTHORIZATION).ok(),
+        kind: EvmSourceKind::RemoteUser,
+        require_get_proof_probe: false,
+    }]
+}
+
+fn resolve_evm_routing_strategy_from_env() -> EvmRoutingStrategy {
+    let Some(raw) = std::env::var(ENV_EVM_RPC_STRATEGY).ok() else {
+        return EvmRoutingStrategy::HedgedLight;
+    };
+
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "failover" => EvmRoutingStrategy::Failover,
+        "hedged_light" | "hedged" => EvmRoutingStrategy::HedgedLight,
+        _ => {
+            warn!(
+                env_var = ENV_EVM_RPC_STRATEGY,
+                "unknown evm routing strategy; using hedged_light"
+            );
+            EvmRoutingStrategy::HedgedLight
+        }
+    }
+}
+
+fn resolve_evm_rpc_config_from_env() -> EvmJsonRpcHttpConfig {
+    let mut sources = resolve_evm_rpc_sources_from_env();
+    let require_get_proof_ids = parse_csv_env(ENV_EVM_RPC_REQUIRE_GET_PROOF_IDS)
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    for source in &mut sources {
+        if require_get_proof_ids.contains(&source.id) {
+            source.require_get_proof_probe = true;
+        }
+    }
+
+    let mut preferred_order = parse_csv_env(ENV_EVM_RPC_PREFERRED_ORDER);
+    if preferred_order.is_empty() {
+        preferred_order = sources.iter().map(|s| s.id.clone()).collect();
+    }
+
+    let mut cfg = EvmJsonRpcHttpConfig {
+        sources,
+        preferred_order,
+        ..EvmJsonRpcHttpConfig::default()
+    };
+    cfg.strategy = resolve_evm_routing_strategy_from_env();
+    if let Some(hedge_delay_ms) = parse_u64_env(ENV_EVM_RPC_HEDGE_DELAY_MS) {
+        cfg.hedge_delay = Duration::from_millis(hedge_delay_ms);
+    }
+    if let Some(cooldown_calls) = parse_u64_env(ENV_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS) {
+        cfg.unhealthy_cooldown_calls = cooldown_calls;
+    }
+    cfg
+}
+
 #[derive(Clone)]
 pub struct EngineBundle {
     pub engine: Arc<dyn ExecutionEngine>,
@@ -467,14 +624,9 @@ pub fn make_engine_bundle() -> EngineBundle {
         Arc::clone(&planner),
     ));
 
-    let rpc_url = std::env::var(ENV_EVM_RPC_URL).ok();
-    let authorization = std::env::var(ENV_EVM_RPC_AUTHORIZATION).ok();
-    let evm_factory: Arc<dyn LiveIoTransportFactory> =
-        Arc::new(EvmJsonRpcHttpTransportFactory::new(EvmJsonRpcHttpConfig {
-            rpc_url,
-            authorization,
-            ..EvmJsonRpcHttpConfig::default()
-        }));
+    let evm_factory: Arc<dyn LiveIoTransportFactory> = Arc::new(
+        EvmJsonRpcHttpTransportFactory::new(resolve_evm_rpc_config_from_env()),
+    );
 
     let mut routes: HashMap<String, Arc<dyn LiveIoTransportFactory>> = HashMap::new();
     routes.insert("proof".to_string(), Arc::new(AppLiveIoTransportFactory));
@@ -817,11 +969,7 @@ impl AppServices {
         //
         // Note: the underlying op can still be started via `run.start` and may end in `phase=failed`,
         // but the feature is intended to behave like a request-level RPC dependency.
-        let rpc_url_missing = std::env::var(ENV_EVM_RPC_URL)
-            .ok()
-            .map(|s| s.trim().is_empty())
-            .unwrap_or(true);
-        if rpc_url_missing {
+        if resolve_evm_rpc_sources_from_env().is_empty() {
             return Err(AppError::new(
                 ErrorClass::BadGateway,
                 "evm_rpc_url_missing",
