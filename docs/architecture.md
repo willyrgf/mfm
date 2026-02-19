@@ -182,6 +182,9 @@ Internal crate/module path migrations may be performed as hard cutovers:
 ### `crates/collectors/*`
 Owns external data collection and normalization adapters.
 
+### `crates/transports/*`
+Owns local/internal live transport factories that are not external collectors.
+
 ### `crates/storages/*`
 Owns event/artifact persistence implementations only.
 
@@ -193,6 +196,18 @@ Own transport adaptation only:
 - parse requests
 - invoke run start/resume/query APIs
 - render stable output contracts
+
+### Live IO adapter model
+Canonical layering:
+- Layer 1: domain adapter clients (typically `crates/collectors/<domain>/`) expose typed request/response APIs over `IoProvider`.
+- Layer 2: live transport factories (`crates/collectors/<domain>-<impl>/` for external sources, `crates/transports/*` for local/internal concerns) perform real IO.
+
+Runtime wiring rules:
+- States depend only on `IoProvider` or typed domain adapter clients; states do not depend on transport factories.
+- Transport assembly uses `TransportRegistry` (`HashMapTransportRegistry`) + `RouterLiveIoTransportFactory::from_registry(...)`.
+- Every transport factory declares a unique `namespace_group()`. Duplicate groups are invalid.
+- Namespace routing is hierarchical longest-prefix matching (`group` or `group.*`), so narrow groups override broader groups.
+- Deterministic computed outputs should use `IoProvider::record_value(...)` for fact recording instead of passthrough transport no-ops.
 
 ## 7. Thin-Binary Request Flow
 
