@@ -12,10 +12,11 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
 - Keep binaries (`bin/cli`, `bin/rest-api`) thin:
-  - business/domain execution logic belongs in `crates/ops/*` (and reusable pieces in `crates/ops/common`)
+  - op planning logic belongs in `crates/ops/*-op`
+  - reusable executable state logic belongs in shared-state crates (`crates/states/common`, `crates/states/keystore`, `crates/states/aave-v3`, `crates/evm-runtime`)
   - binaries should parse input, start/resume runs, and render outputs only
 - Apply the three-tier thin-layer principle from `docs/three-tier-audit.md`:
-  - executable logic lives in reusable states (`crates/ops/common/src/states/*`)
+  - executable logic lives in reusable states (`crates/states/common/src/states/*` and domain shared-state crates)
   - ops stay thin and assemble state graphs
   - binaries stay transport-only
 - If you touch security-sensitive code (keystore/crypto), add or strengthen tests.
@@ -71,7 +72,9 @@ Workspace root: `Cargo.toml`
 - `crates/machine/`: state machine runtime + recovery/replay primitives.
 - `crates/machine-derive/`: proc-macro derive crate for compile-time ergonomics.
 - `crates/sdk/`: integration glue (op registry + run launch/resume helpers).
-- `crates/ops/`: domain operations (expand to state graphs).
+- `crates/ops/`: op planners (`*-op`).
+- `crates/states/`: shared-state crates (`common`, `keystore`, `aave-v3`).
+- `crates/evm-runtime/`: runtime-facing reusable EVM state primitives/helpers.
 - `crates/collectors/`: data collection/normalization libraries (HTTP/RPC/etc).
 - `crates/storages/`: persistence backends (event stores, artifact stores, indexers).
 - `bin/cli/`: CLI package `mfm` (bin `mfm_cli`).
@@ -98,19 +101,22 @@ Key docs:
 2. `crates/storages/*`: persistence backends
    - event stores (append-only, atomic append semantics)
    - artifact stores (content-addressed blobs/documents)
-3. `crates/ops/*`: domain workflows
-   - ops expand into state graphs, emit domain events, store artifacts/facts
-4. `crates/core/`: primitives + security-sensitive components
+3. `crates/ops/*-op`: domain workflow planners
+   - ops validate config and expand into state graphs
+   - ops do not execute runtime side effects
+4. shared-state layer crates (`crates/states/common`, `crates/states/keystore`, `crates/states/aave-v3`, `crates/evm-runtime`)
+   - reusable `State` implementations that execute runtime behavior
+5. `crates/core/`: primitives + security-sensitive components
    - `mfm_core::keystore`: encrypted key storage and signing utilities
    - `mfm_core::config`: YAML config models
-5. `bin/cli/`, `bin/rest-api/`: thin wrappers
+6. `bin/cli/`, `bin/rest-api/`: thin wrappers
    - parse requests, start/resume runs, render stable outputs
 
 Crate dependency graph:
 
 ```text
 bin/cli (mfm) -> crates/sdk -> crates/machine
-bin/cli (mfm) -> crates/ops/* -> crates/core + crates/collectors/* + crates/storages/*
+bin/cli (mfm) -> crates/ops/*-op -> shared-state crates -> crates/core + crates/collectors/* + crates/storages/*
 bin/rest-api (mfm-rest-api) -> crates/sdk -> crates/machine
 ```
 
@@ -225,10 +231,17 @@ These are typical, review-friendly change patterns (focus on a single outcome).
 ### Binary Boundary Enforcement
 
 - Do not add domain workflow logic directly to `bin/cli` or `bin/rest-api`.
-- If a CLI/API feature performs business execution, implement it as an op/state-machine flow in `crates/ops/*` and invoke it via run start/resume.
+- If a CLI/API feature performs business execution, implement it as an op/state-machine flow in `crates/ops/*-op` and invoke it via run start/resume.
 - `bin/cli/src/support/*` and REST handler helpers should contain transport/adaptation code only, not workflow/domain execution.
-- Shared business behavior needed by multiple ops should live in `crates/ops/common`.
-- Prefer reusable `State` implementations in `crates/ops/common/src/states/*`; keep op-local states for domain-specific output/aggregation when reuse is not justified.
+- Shared executable behavior needed by multiple ops should live in shared-state crates (`crates/states/common`, `crates/states/keystore`, `crates/states/aave-v3`, `crates/evm-runtime`).
+- Prefer reusable `State` implementations in shared-state crates; keep op-local states for domain-specific output/aggregation when reuse is not justified.
+
+### Op vs State Placement Contract
+
+- `Operation` (`expand`): planning-only (`config -> graph`), deterministic, no ambient IO.
+- `State` (`handle`): execution-only (runtime behavior through context + `IoProvider` + recorder).
+- If code builds `StateNode`/`DependencyEdge`, place it in an op crate.
+- If code implements `State::handle`, place it in a shared-state crate unless it is a justified op-local output/aggregation state.
 
 ### Logging
 
