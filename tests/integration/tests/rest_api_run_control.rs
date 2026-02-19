@@ -583,6 +583,7 @@ async fn feature_execute_run_start_happy_path() {
 async fn feature_execute_portfolio_snapshot_missing_rpc_url_is_stable_error() {
     let _guard = ENV_LOCK.lock().expect("env lock");
     let _rpc = EnvVarGuard::remove("MFM_EVM_RPC_URL");
+    let _rpc_sources = EnvVarGuard::remove("MFM_EVM_RPC_SOURCES_JSON");
 
     let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");

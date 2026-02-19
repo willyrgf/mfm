@@ -1,6 +1,6 @@
 //! Canonical JSON and `ArtifactId` hashing helpers.
 //!
-//! Milestone 1 policy:
+//! Policy:
 //! - Structured data MUST be hashed as canonical JSON bytes (RFC 8785 / JCS-style).
 //! - Hashed JSON MUST NOT contain floats (fractional numbers); use integer-scaled values or strings instead.
 
@@ -36,7 +36,7 @@ impl std::error::Error for CanonicalJsonError {}
 /// Serialize a `serde_json::Value` into canonical JSON bytes.
 ///
 /// Target semantics: RFC 8785 (JCS-style) canonicalization.
-/// Milestone 1 additional constraint: floats are rejected.
+/// Additional constraint: floats are rejected.
 pub fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, CanonicalJsonError> {
     if crate::secrets::json_contains_secrets(value) {
         return Err(CanonicalJsonError::SecretsNotAllowed);

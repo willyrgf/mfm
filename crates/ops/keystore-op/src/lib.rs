@@ -1,4 +1,4 @@
-//! Keystore op wrapper (Milestone 1).
+//! Keystore op wrapper.
 //!
 //! Source of truth: `docs/redesign.md` (v4).
 //!

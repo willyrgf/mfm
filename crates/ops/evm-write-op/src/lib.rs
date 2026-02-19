@@ -1,4 +1,4 @@
-//! EVM write/validation operations (Milestone 2).
+//! EVM write/validation operations.
 //!
 //! This crate provides four operations that can be composed as a pipeline:
 //! - `evm_deploy`   : deploy a contract from an artifact

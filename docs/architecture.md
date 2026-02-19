@@ -58,6 +58,12 @@ Execution unit model:
 9. Thin binary boundary.
 - Domain execution logic belongs in ops/state-machine layers, not in `bin/cli` or `bin/rest-api`.
 
+10. EVM network transport boundary.
+- Runtime EVM network calls (`namespace: "evm"`) must route through
+  `mfm-collectors-evm-jsonrpc-http` wiring in `crates/app`.
+- Local keystore and local signer paths (`local.keystore.*`, `local.evm.*`) remain intentionally
+  offline/local and must not be forced to depend on RPC availability.
+
 ## 4. Runtime Mental Model
 
 A run lifecycle:
@@ -104,7 +110,7 @@ Allowed exception:
 - An op resolves to a concrete `StateGraph` given `OpConfig` and `RunConfig`.
 - `expand()` must be deterministic and must not perform IO.
 
-### Flattened pipelines (Milestone 1)
+### Flattened pipelines
 - Multiple ops are flattened into one execution plan and one run.
 - Shared context is namespaced; cross-op imports/exports are explicit.
 
@@ -239,6 +245,7 @@ If the answer spans multiple layers, split responsibilities explicitly rather th
 ## 12. Related Documents
 
 - Normative contract: [`docs/redesign.md`](redesign.md)
+- EVM routing runbook: [`docs/evm-rpc-routing.md`](evm-rpc-routing.md)
 - Contribution and CI rules: [`AGENTS.md`](../AGENTS.md)
 - Root project overview: [`README.md`](../README.md)
 - CLI contract: [`bin/cli/README.md`](../bin/cli/README.md)

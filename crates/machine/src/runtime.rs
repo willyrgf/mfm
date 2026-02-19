@@ -123,7 +123,7 @@ fn validate_execution_mode(cfg: &RunConfig) -> Result<(), RunError> {
         ExecutionMode::FanOutJoin { .. } => Err(RunError::InvalidPlan(info(
             CODE_UNSUPPORTED_EXECUTION_MODE,
             ErrorCategory::Unknown,
-            "execution_mode FanOutJoin is not supported in Milestone 1",
+            "execution_mode FanOutJoin is not supported",
         ))),
     }
 }
@@ -142,7 +142,7 @@ fn validate_start_run_contract(run: &StartRun) -> Result<(), RunError> {
         ),
         crate::hashing::CanonicalJsonError::SecretsNotAllowed => invalid_plan(
             "secrets_detected",
-            "run manifest contained secrets (Milestone 1 forbids persisting secrets)",
+            "run manifest contained secrets (policy forbids persisting secrets)",
         ),
     })?;
     if computed != run.manifest_id {

@@ -146,7 +146,7 @@ async fn parity_keystore_cli_tx_sign_and_send_on_reth() {
         assert_eq!(mode, 0o600, "signed tx file must be 0600");
     }
 
-    let send_output = run_tx_send_raw(&signed_tx_path, &rpc_url);
+    let send_output = run_tx_send_raw(&signed_tx_path, "user_primary");
     assert!(
         send_output.status.success(),
         "{}",
@@ -160,7 +160,7 @@ async fn parity_keystore_cli_tx_sign_and_send_on_reth() {
     assert!(sent_hash.starts_with("0x"));
     assert_eq!(
         send_json["rpc_url_host"].as_str().map(str::to_owned),
-        Some(url_host_with_port(&rpc_url))
+        Some("user_primary".to_string())
     );
     assert!(send_json["submitted_at"].as_str().is_some());
 
@@ -348,21 +348,21 @@ fn parity_keystore_tx_send_raw_fails_with_malformed_input_file() {
     let raw_file = temp.path().join("invalid.raw");
     std::fs::write(&raw_file, "not-hex").expect("write malformed payload");
 
-    let output = run_tx_send_raw(&raw_file, "http://127.0.0.1:8545");
+    let output = run_tx_send_raw(&raw_file, "user_primary");
     assert!(!output.status.success());
     let err = parse_error_json(&output.stderr);
     assert_eq!(err["code"].as_str(), Some("InvalidRawTransaction"));
 }
 
 #[test]
-fn parity_keystore_tx_send_raw_fails_without_rpc_url() {
+fn parity_keystore_tx_send_raw_fails_without_source_id() {
     let temp = TempDir::new().expect("temp dir");
     let raw_file = temp.path().join("valid.raw");
     std::fs::write(&raw_file, "0x0201").expect("write payload");
 
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
     let output = sanitize_machine_readable_cli_env(&mut cmd)
-        .env_remove("MFM_EVM_RPC_URL")
+        .env_remove("MFM_EVM_RPC_SOURCE_ID")
         .args([
             "--output-format",
             "json",
@@ -493,7 +493,7 @@ fn run_tx_sign_with_selector(
     cmd.output().expect("execute tx-sign")
 }
 
-fn run_tx_send_raw(input_path: &Path, rpc_url: &str) -> Output {
+fn run_tx_send_raw(input_path: &Path, source_id: &str) -> Output {
     let artifact_root = test_artifact_root(input_path);
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
     sanitize_machine_readable_cli_env(&mut cmd)
@@ -503,8 +503,8 @@ fn run_tx_send_raw(input_path: &Path, rpc_url: &str) -> Output {
             "json",
             "keystore",
             "tx-send-raw",
-            "--rpc-url",
-            rpc_url,
+            "--source-id",
+            source_id,
             "--in",
             input_path.to_str().expect("path"),
         ])
@@ -662,13 +662,4 @@ fn parse_hex_u128(raw: &str) -> u128 {
         return 0;
     }
     u128::from_str_radix(hex, 16).expect("u128 hex parse")
-}
-
-fn url_host_with_port(url: &str) -> String {
-    let parsed = reqwest::Url::parse(url).expect("valid url");
-    let host = parsed.host_str().expect("host");
-    match parsed.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    }
 }

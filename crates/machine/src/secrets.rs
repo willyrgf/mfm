@@ -1,8 +1,8 @@
-//! Secrets scanning and redaction helpers (Milestone 1).
+//! Secrets scanning and redaction helpers.
 //!
 //! Source of truth: `docs/redesign.md` (v4).
 //!
-//! Milestone 1 hard rule: secrets must not appear in persisted surfaces:
+//! Hard rule: secrets must not appear in persisted surfaces:
 //! - manifests, events, artifacts (including fact payloads and context snapshots), CLI/API outputs, and error details.
 //!
 //! This module provides:
@@ -69,7 +69,7 @@ pub(crate) fn json_contains_secrets(v: &serde_json::Value) -> bool {
 }
 
 pub(crate) fn redact_error_info(info: &mut ErrorInfo) {
-    // Details are always dropped in Milestone 1; if something needs to be persisted, it must be
+    // Details are always dropped; if something needs to be persisted, it must be
     // explicitly modeled as a non-secret reference.
     info.details = None;
 

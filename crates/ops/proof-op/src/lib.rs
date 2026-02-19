@@ -1,4 +1,4 @@
-//! Proof op (Milestone 1 acceptance tests).
+//! Proof op (acceptance tests).
 //!
 //! Source of truth: `docs/redesign.md`.
 
@@ -403,7 +403,7 @@ mod tests {
         out
     }
 
-    // Parent op for Milestone 5 child-run tests.
+    // Parent op for child-run tests.
     const CHILD_PARENT_OP_ID: &str = "child_parent";
     const CHILD_PARENT_OP_VERSION: &str = "v1";
 
@@ -628,7 +628,7 @@ mod tests {
                 joined.push((rr.child_run_id, rr.final_snapshot));
             }
 
-            // Locked decision (Milestone 5): deterministic join order by child_run_id bytes.
+            // Locked decision: deterministic join order by child_run_id bytes.
             joined.sort_by(|(a, _), (b, _)| a.0.as_bytes().cmp(b.0.as_bytes()));
 
             op_ctx::write_json(

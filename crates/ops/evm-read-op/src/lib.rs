@@ -1,4 +1,4 @@
-//! EVM read-only op (Milestone 2).
+//! EVM read-only op.
 //!
 //! Source of truth: `docs/redesign.md` (v4).
 //!

@@ -1,4 +1,4 @@
-//! Encrypted secret-bearing artifacts (Milestone 4).
+//! Encrypted secret-bearing artifacts.
 //!
 //! This crate provides a wrapper for storing secret payloads as encrypted artifacts.
 //! Plaintext secrets MUST NOT be stored directly in the underlying `ArtifactStore`.

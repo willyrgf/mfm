@@ -1,4 +1,4 @@
-//! Live IO transport for Nix flake app preflight (Milestone 2).
+//! Live IO transport for Nix flake app preflight.
 //!
 //! This transport powers the `nix` namespace group.
 //!

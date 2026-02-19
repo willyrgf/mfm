@@ -1,4 +1,4 @@
-//! Engine-managed child runs (Milestone 5).
+//! Engine-managed child runs.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -487,7 +487,7 @@ impl ChildRunLiveIoTransport {
             return Err(child_io_error(
                 "secrets_detected",
                 ErrorCategory::Unknown,
-                "fact key contained secrets (Milestone 1 forbids persisting secrets)",
+                "fact key contained secrets (policy forbids persisting secrets)",
             ));
         }
 

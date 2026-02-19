@@ -9,7 +9,9 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use mfm_artifact_store_s3::S3ArtifactStore;
-use mfm_collectors_evm_jsonrpc_http::{EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory};
+use mfm_collectors_evm_jsonrpc_http::{
+    EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmSourceKind,
+};
 use mfm_event_store_postgres::PostgresEventStore;
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
@@ -133,8 +135,14 @@ async fn rpc_call(
     params: serde_json::Value,
 ) -> serde_json::Value {
     let factory = EvmJsonRpcHttpTransportFactory::new(EvmJsonRpcHttpConfig {
-        rpc_url: Some(rpc_url.to_string()),
-        authorization: None,
+        sources: vec![EvmJsonRpcSource {
+            id: "helper_primary".to_string(),
+            rpc_url: rpc_url.to_string(),
+            authorization: None,
+            kind: EvmSourceKind::RemoteUser,
+            require_get_proof_probe: false,
+        }],
+        preferred_order: vec!["helper_primary".to_string()],
         ..EvmJsonRpcHttpConfig::default()
     });
     let env = LiveIoEnv {

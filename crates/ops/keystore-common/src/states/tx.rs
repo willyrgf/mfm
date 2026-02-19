@@ -29,7 +29,7 @@ pub struct KeystoreTxSignStateConfig {
 
 #[derive(Clone, Debug)]
 pub struct KeystoreTxSendRawStateConfig {
-    pub rpc_url: String,
+    pub route_source_id: String,
     pub input_path: PathBuf,
 }
 
@@ -138,11 +138,12 @@ impl State for KeystoreTxSendRawState {
         }
 
         let submission =
-            send_raw_transaction_via_io(&self.state_id, io, &self.cfg.rpc_url, raw_tx_hex).await?;
+            send_raw_transaction_via_io(&self.state_id, io, &self.cfg.route_source_id, raw_tx_hex)
+                .await?;
 
         let report_json = serde_json::json!({
             "tx_hash": submission.tx_hash,
-            "rpc_url_host": submission.rpc_url_host,
+            "rpc_url_host": submission.rpc_source_id,
             "submitted_at": submission.submitted_at,
         });
 

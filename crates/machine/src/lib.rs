@@ -15,11 +15,11 @@ pub mod ids {
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct OpId(pub String);
 
-    /// Milestone 1 enforced: "<machine_id>.<step_id>"
+    /// Enforced: "<machine_id>.<step_id>"
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct OpPath(pub String);
 
-    /// Milestone 1 enforced: "<machine_id>.<step_id>.<state_local_id>"
+    /// Enforced: "<machine_id>.<step_id>.<state_local_id>"
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct StateId(pub String);
 
@@ -609,7 +609,7 @@ pub mod events {
         pub phase: String, // e.g. "started" | "completed"
     }
 
-    /// Reserved for later milestones (nested machines).
+    /// Reserved for later expansion (nested machines).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ChildRunSpawned {
         pub parent_run_id: RunId,

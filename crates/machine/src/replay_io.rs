@@ -1,4 +1,4 @@
-//! Replay IO implementation (Milestone 1).
+//! Replay IO implementation.
 //!
 //! Source of truth: `docs/redesign.md` (v4).
 //! Not part of the stable API contract (Appendix C.1).

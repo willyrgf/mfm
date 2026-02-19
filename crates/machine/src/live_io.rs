@@ -1,4 +1,4 @@
-//! Live IO implementation (Milestone 1).
+//! Live IO implementation.
 //!
 //! Source of truth: `docs/redesign.md` (v4).
 //! Not part of the stable API contract (Appendix C.1).
@@ -202,7 +202,7 @@ impl LiveIo {
             CanonicalJsonError::SecretsNotAllowed => io_other(
                 "secrets_detected",
                 ErrorCategory::Unknown,
-                "fact payload contained secrets (Milestone 1 forbids persisting secrets)",
+                "fact payload contained secrets (policy forbids persisting secrets)",
             ),
         })?;
 

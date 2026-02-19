@@ -1,4 +1,4 @@
-//! Portfolio tracker operation (Milestone 2+).
+//! Portfolio tracker operation.
 //!
 //! Source of truth: `docs/redesign.md` (v4).
 //!

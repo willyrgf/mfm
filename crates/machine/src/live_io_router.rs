@@ -1,4 +1,4 @@
-//! Live IO transport router (Milestone 2).
+//! Live IO transport router.
 //!
 //! This module is NOT part of the stable API contract (Appendix C.1) and may change.
 

@@ -13,7 +13,11 @@ Helios is integrated as a Nixfied-managed service module, then consumed as a loc
   - `project.modules.helios.enable = true` with local network defaults (`nixfied/project/conf.nix:819`).
 - Dev workflow consumption:
   - `mfm::portfolio::snapshot` starts/reuses Helios and waits for readiness (`nixfied/project/dev.nix:435`).
-  - It then points `MFM_EVM_RPC_URL` to Helios local RPC (`nixfied/project/dev.nix:443`).
+  - It configures source-id routing for Helios local RPC via:
+    - `MFM_EVM_RPC_SOURCES_JSON`
+    - `MFM_EVM_RPC_PREFERRED_ORDER=helios_local`
+    - `MFM_EVM_RPC_SOURCE_ID=helios_local`
+    - and also sets legacy `MFM_EVM_RPC_URL` compatibility env.
   - This flow is mainnet-only (`HELIOS_NETWORK` must be `mainnet`) (`nixfied/project/dev.nix:331`).
 - CI usage:
   - `parity-evm-helios-smoke` starts local Helios over reth execution RPC and performs an `eth_chainId` smoke call (`nixfied/project/ci/scripts/steps/parity-evm-helios-smoke.nix:6`).
@@ -103,7 +107,8 @@ Developer defaults/examples:
 - Starts/reuses Helios and checks readiness with:
   - `run_hook SVC_HELIOS_READY`, or
   - RPC probe (`eth_blockNumber`) when globally reused (`nixfied/project/dev.nix:447`).
-- Uses Helios local RPC via `MFM_EVM_RPC_URL=http://127.0.0.1:$HELIOSRPC_PORT` (`nixfied/project/dev.nix:443`).
+- Uses Helios local RPC via source-id routing (`MFM_EVM_RPC_SOURCES_JSON`, preferred order, and
+  `MFM_EVM_RPC_SOURCE_ID=helios_local`), with `MFM_EVM_RPC_URL` also set for legacy compatibility.
 
 ### CI step: parity Helios smoke
 
@@ -122,4 +127,3 @@ Developer defaults/examples:
 - `HELIOS_EXECUTION_RPC_URL` defaults to `https://eth.drpc.org`
 - `HELIOS_CONSENSUS_RPC_URL` defaults to `https://lodestar-mainnet.chainsafe.io`
 - `HELIOS_READY_TIMEOUT_SECS` defaults to `900`
-

@@ -538,12 +538,12 @@
         name = "mfm::keystore::tx-send-raw";
         summary = "Submit a signed raw transaction";
         details = "Typed wrapper over `mfm_cli keystore tx-send-raw` with fixed JSON output.";
-        usage = [ "nix run .#mfm::keystore::tx-send-raw -- --in <PATH>" ];
+        usage = [ "nix run .#mfm::keystore::tx-send-raw -- --in <PATH> [--source-id <ID>]" ];
         category = "keystore";
         args = [
           {
-            name = "--rpc-url";
-            description = "Optional RPC URL (falls back to MFM_EVM_RPC_URL).";
+            name = "--source-id";
+            description = "Optional source id (falls back to MFM_EVM_RPC_SOURCE_ID).";
           }
           {
             name = "--in";
@@ -552,14 +552,14 @@
         ];
         env = [
           {
-            name = "MFM_EVM_RPC_URL";
-            description = "Default RPC URL used when --rpc-url is not provided.";
+            name = "MFM_EVM_RPC_SOURCE_ID";
+            description = "Default source id used when --source-id is not provided.";
           }
         ];
         contractArgs = [
           (lib.appApi.arg.option {
-            name = "rpc-url";
-            long = "--rpc-url";
+            name = "source-id";
+            long = "--source-id";
             type = "string";
             required = false;
           })
@@ -572,7 +572,7 @@
         ];
         contractEnv = [
           (lib.appApi.env.string {
-            name = "MFM_EVM_RPC_URL";
+            name = "MFM_EVM_RPC_SOURCE_ID";
             required = false;
           })
         ];

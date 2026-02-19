@@ -182,6 +182,9 @@ in
         export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm"
         export MFM_REST_API_ADDR="127.0.0.1:$REST_API_PORT"
         export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
+        export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"user_primary\",\"rpc_url\":\"http://127.0.0.1:$RETHHTTP_PORT\",\"kind\":\"remote_user\"}]"
+        export MFM_EVM_RPC_PREFERRED_ORDER="user_primary"
+        export MFM_EVM_RPC_SOURCE_ID="user_primary"
 
         start_service rest-api \
           --cleanup \
@@ -438,6 +441,9 @@ in
 
         export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm"
         export MFM_EVM_RPC_URL="http://127.0.0.1:$HELIOSRPC_PORT"
+        export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"helios_local\",\"rpc_url\":\"http://127.0.0.1:$HELIOSRPC_PORT\",\"kind\":\"local\"}]"
+        export MFM_EVM_RPC_PREFERRED_ORDER="helios_local"
+        export MFM_EVM_RPC_SOURCE_ID="helios_local"
 
         echo "INFO: waiting for Helios readiness (eth_blockNumber)..." >&2
         HELIOS_STATUS_LINE="$(run_hook SVC_HELIOS_STATUS 2>/dev/null || true)"

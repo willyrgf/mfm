@@ -137,9 +137,9 @@ They do not own domain execution logic.
 2. Context snapshots are full snapshots (not deltas).
 3. Runtime emits mandatory kernel events; domain event sets are configurable.
 4. Replay returns structured IO errors for missing replay data; no hard process crash.
-5. Milestone 1 execution mode is sequential; fan-out/join is deferred.
+5. Execution mode is sequential; fan-out/join is deferred.
 6. Cargo package names remain namespaced (`mfm-*`).
-7. Milestone 1 forbids persisted secrets absolutely.
+7. Persisted secrets are forbidden absolutely.
 
 ## 6. Architecture and Boundary Rules
 
@@ -213,7 +213,7 @@ Runtime-critical rule:
 
 ### 7.3 Seq and attempts
 - `seq` is strictly increasing per run.
-- Milestone 1 convention: 1-indexed sequence, empty run head is 0.
+- Convention: 1-indexed sequence, empty run head is 0.
 - `attempt` increments on retry for a state.
 
 ### 7.4 Crash/resume semantics
@@ -222,7 +222,7 @@ Runtime-critical rule:
 - Facts recorded during orphaned attempts remain valid for replay/dedupe.
 
 ### 7.5 Checkpointing
-Milestone 1 policy:
+Checkpointing policy:
 - checkpoint after every successful state
 - snapshot IDs may dedupe to same digest when context is unchanged
 
@@ -242,7 +242,7 @@ Recommended fields:
 ### 8.2 Hashing contract
 - Structured payloads: canonical JSON bytes -> hash -> artifact ID.
 - Binary payloads: raw bytes -> hash -> artifact ID.
-- Milestone 1 hash algorithm: SHA-256.
+- Hash algorithm: SHA-256.
 
 ### 8.3 Facts as single-assignment
 Within a run:
@@ -270,13 +270,13 @@ If replay cannot resolve a requested key:
 ### 9.4 Time and randomness
 `now_millis()` and `random_bytes()` are facts when used in deterministic logic.
 
-Milestone 1 recording rule:
+Recording rule:
 - `LiveIo` records values under deterministic attempt-scoped keys derived from:
   - `run_id`, `state_id`, `attempt`, `call_ordinal`, `kind`
 - `ReplayIo` returns recorded values or `MissingFact`
 
 ### 9.5 External program execution (`nix.exec` / `exec`)
-Milestone 1 supports deterministic external execution through IO provider calls only.
+Deterministic external execution is supported through IO provider calls only.
 
 Preflight for app refs must:
 1. validate flake allowlist
@@ -297,7 +297,7 @@ Runtime must support:
 - explicit side-effect typing/idempotency
 - stable metadata and plan validation
 
-Milestone 1 execution mode contract:
+Execution mode contract:
 - `Sequential` supported
 - `FanOutJoin` requested mode must return structured `unsupported_execution_mode` error
 
@@ -306,11 +306,11 @@ Milestone 1 execution mode contract:
 ### 11.1 Ops expand to state graphs
 `expand()` takes op config + run config and returns deterministic graph output.
 
-### 11.2 Flattened composition (Milestone 1)
+### 11.2 Flattened composition
 If op A has N states and op B has M states, pipeline graph size is `N + M` states in one run.
 
 ### 11.3 ID stability rules
-Milestone 1 conventions:
+ID conventions:
 - `OpPath = <machine_id>.<step_id>`
 - `StateId = <machine_id>.<step_id>.<state_local_id>`
 - each segment must match: `^[a-z][a-z0-9_]{0,62}$`
@@ -346,7 +346,7 @@ Optional later role:
 ### 12.3 Security requirements
 - no persisted secrets in any store-backed surface
 - events may store references, never secret plaintext
-- encrypted secret-bearing artifacts are deferred post-Milestone 1
+- encrypted secret-bearing artifacts are deferred to a future encrypted-artifact layer
 
 ## 13. CLI and REST Responsibilities
 
@@ -369,7 +369,7 @@ Keystore paths remain high-risk and require strict handling:
 - zeroization
 - strict input parsing
 
-Milestone 1 hard rule remains absolute:
+Hard rule remains absolute:
 - secrets are never persisted in manifests/events/artifacts/outputs/errors
 
 ## 15. Testing Contract
@@ -455,11 +455,11 @@ pub mod ids {
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct OpId(pub String);
 
-    /// Milestone 1 enforced: "<machine_id>.<step_id>"
+    /// Enforced: "<machine_id>.<step_id>"
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct OpPath(pub String);
 
-    /// Milestone 1 enforced: "<machine_id>.<step_id>.<state_local_id>"
+    /// Enforced: "<machine_id>.<step_id>.<state_local_id>"
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct StateId(pub String);
 
@@ -865,7 +865,7 @@ pub mod events {
         pub phase: String, // e.g. "started" | "completed"
     }
 
-    /// Reserved for later milestones (nested machines).
+    /// Reserved for future nested-run support.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ChildRunSpawned {
         pub parent_run_id: RunId,
@@ -1143,17 +1143,17 @@ use mfm_machine::plan::{ExecutionPlan, StateGraph};
 pub mod ids {
     use super::*;
 
-    /// Milestone 1 enforced: `^[a-z][a-z0-9_]{0,62}$`
+    /// Enforced: `^[a-z][a-z0-9_]{0,62}$`
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct MachineId(pub String);
 
-    /// Milestone 1 enforced: `^[a-z][a-z0-9_]{0,62}$`
+    /// Enforced: `^[a-z][a-z0-9_]{0,62}$`
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct StepId(pub String);
 
     /// Local state id within an operation.
     ///
-    /// Milestone 1 enforced: `^[a-z][a-z0-9_]{0,62}$`
+    /// Enforced: `^[a-z][a-z0-9_]{0,62}$`
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct StateLocalId(pub String);
 
@@ -1233,12 +1233,12 @@ pub mod pipeline {
         pub op_config: serde_json::Value,
     }
 
-    /// A Milestone 1 flattened machine definition (ordered steps).
+    /// A flattened machine definition (ordered steps).
     ///
     /// Contract:
     /// - `machine_id` + `pipeline_version` map to `RunManifest.{op_id, op_version}`.
     /// - Step `OpPath` is "<machine_id>.<step_id>".
-    /// - Milestone 1 single-op convention: wrap a single op as a 1-step pipeline with:
+    /// - Single-op convention: wrap a single op as a 1-step pipeline with:
     ///   - `machine_id = <op_id>`
     ///   - `steps[0].step_id = "main"`
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
