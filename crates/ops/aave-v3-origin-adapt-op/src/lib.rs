@@ -4,11 +4,11 @@ use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{OpId, OpPath, StateId};
 use mfm_machine::plan::{StateGraph, StateNode};
-use mfm_state_aave_v3::states::AdaptOriginDeployOutputState;
-use mfm_state_common::errors as op_errors;
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
+use mfm_state_aave_v3::states::AdaptOriginDeployOutputState;
+use mfm_state_common::errors as op_errors;
 use serde::Deserialize;
 
 pub const AAVE_V3_ORIGIN_ADAPT_DEPLOY_OP_ID: &str = "aave_v3_origin_adapt_deploy";

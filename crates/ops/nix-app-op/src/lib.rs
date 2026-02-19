@@ -88,11 +88,11 @@ mod tests {
     use mfm_machine::replay_io::ReplayIo;
     use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
     use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-    use mfm_state_common::test_support as op_test_support;
     use mfm_sdk::ids::{MachineId, PortKey, StepId};
     use mfm_sdk::op::{OpIo, Operation};
     use mfm_sdk::pipeline::{Pipeline, PipelineStep};
     use mfm_sdk::unstable::SdkPlanResolver;
+    use mfm_state_common::test_support as op_test_support;
     use tokio::sync::Mutex;
 
     use mfm_collectors_nix_exec::{NixFlakePolicy, NixFlakeTransportFactory, NAMESPACE_NIX_EXEC};

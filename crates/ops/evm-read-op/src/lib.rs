@@ -17,10 +17,10 @@ use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, OpId, OpPath, StateId};
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 
-use mfm_state_common::errors;
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
+use mfm_state_common::errors;
 
 const OP_ID: &str = "evm_read";
 const OP_VERSION: &str = "v1";
@@ -153,8 +153,8 @@ mod tests {
     use mfm_machine::recorder::EventRecorder;
     use mfm_machine::replay_io::ReplayIo;
     use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
-    use mfm_state_common::test_support as op_test_support;
     use mfm_sdk::unstable::SdkPlanResolver;
+    use mfm_state_common::test_support as op_test_support;
     use tokio::sync::Mutex;
 
     fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {

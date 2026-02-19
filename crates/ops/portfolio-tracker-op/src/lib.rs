@@ -33,14 +33,14 @@ use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
+use mfm_sdk::errors::SdkError;
+use mfm_sdk::ids::PortKey;
+use mfm_sdk::op::{OpIo, Operation};
 use mfm_state_common::ctx as op_ctx;
 use mfm_state_common::errors as op_errors;
 use mfm_state_common::output as op_output;
 use mfm_state_common::states::meta;
 use mfm_state_keystore::tx::output_context_key;
-use mfm_sdk::errors::SdkError;
-use mfm_sdk::ids::PortKey;
-use mfm_sdk::op::{OpIo, Operation};
 
 const OP_ID: &str = "portfolio_tracker";
 const OP_VERSION: &str = "v1";
@@ -488,8 +488,8 @@ mod tests {
     use mfm_machine::live_io::{LiveIoTransport, LiveIoTransportFactory};
     use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
     use mfm_machine::runtime::DefaultExecutionEngine;
-    use mfm_state_common::test_support as op_test_support;
     use mfm_sdk::unstable::SdkPlanResolver;
+    use mfm_state_common::test_support as op_test_support;
 
     fn info(
         code: &'static str,
