@@ -161,6 +161,7 @@ Canonical responsibilities:
 - `crates/machine-derive/`: proc-macro ergonomics
 - `crates/core/`: primitives + security-sensitive keystore/crypto
 - `crates/collectors/*`: external data adapters
+- `crates/transports/*`: local/internal live transport factories
 - `crates/storages/*`: persistence implementations
 - shared-state layer crates:
   - `crates/states/common/`: cross-domain reusable state primitives
@@ -204,6 +205,19 @@ Migration policy for internal crate/module paths:
 - operation registry
 - pipeline planner helpers
 - run launch/resume glue over machine + stores
+
+### 6.4 Live IO adapter model
+Canonical layering:
+- Layer 1: domain adapter clients wrap `IoProvider` and provide typed domain requests/responses.
+- Layer 2: live transport factories execute concrete IO and are selected by namespace routing.
+
+Normative rules:
+- States MUST depend on `IoProvider` (or Layer 1 typed adapters over `IoProvider`), not on live transport factories.
+- Live transport factories MUST expose a non-empty `namespace_group()` and registrations MUST reject duplicates.
+- App/runtime transport assembly MUST use `TransportRegistry` + `RouterLiveIoTransportFactory`.
+- Router dispatch MUST resolve by hierarchical longest-prefix group match (`g` or `g.*`).
+- Computed deterministic values that need replay/fact durability SHOULD use `IoProvider::record_value(...)` rather than passthrough no-op transports.
+- Transport factories SHOULD own their config parsing (`from_env()` or equivalent), while app wiring stays assembly-only.
 
 ## 7. Execution Model
 

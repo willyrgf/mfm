@@ -9,12 +9,13 @@ Experimental, WIP toolkit for on-chain operations built around an event-sourced 
 ```mermaid
 flowchart TD
     B["bin/cli<br/>bin/rest-api<br/>(transport only)"] --> S["crates/sdk<br/>(run start/resume glue)"]
-    S --> O["crates/ops/*<br/>(op config + graph composition)"]
-    O --> C["crates/ops/common/src/states/*<br/>(main implementation layer:<br/>composable executable state logic)"]
-    C --> M["crates/machine<br/>(runtime/replay)"]
-    C --> K["crates/core<br/>(keystore + config)"]
+    S --> O["crates/ops/*-op<br/>(op config + graph composition)"]
+    O --> SH["shared state layer<br/>crates/states/common<br/>crates/states/keystore<br/>crates/states/aave-v3<br/>crates/evm-runtime/src/states/*"]
+    SH --> M["crates/machine<br/>(runtime/replay/resume)"]
     M --> ST["crates/storages/*<br/>(event/artifact persistence)"]
-    COL["crates/collectors/*<br/>(RPC/HTTP + external data normalization)"] --> C
+    K["crates/core<br/>(primitives + keystore/crypto)"] --> SH
+    AD["crates/collectors/*<br/>(typed domain adapters over IoProvider)"] --> SH
+    LT["live transport factories<br/>crates/collectors/* + crates/transports/*"] --> M
 
     classDef transport fill:#e8f0ff,stroke:#2f5aa8,color:#0f2d63,stroke-width:1px;
     classDef orchestration fill:#eefbe7,stroke:#3a7a2a,color:#1d4d12,stroke-width:1px;
@@ -25,13 +26,13 @@ flowchart TD
 
     class B transport;
     class S,O orchestration;
-    class C statecore;
+    class SH statecore;
     class M,K engine;
     class ST storage;
-    class COL adapter;
+    class AD,LT adapter;
 ```
 
-States are the core execution unit: ops compose these reusable states, and the runtime executes them with replay/resume guarantees.
+States are the core execution unit. Ops are planners (`expand` builds deterministic graphs); shared states are executors (`handle` performs one step via `IoProvider`), and binaries stay transport-only.
 
 ## Core capabilities
 
