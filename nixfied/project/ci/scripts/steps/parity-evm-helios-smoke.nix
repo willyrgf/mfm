@@ -3,6 +3,9 @@ pkgs.writeText "mfm-ci-steps-parity-evm-helios-smoke.sh" ''
   source <($SLOT_INFO)
 
   export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
+  export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"user_primary\",\"rpc_url\":\"http://127.0.0.1:$RETHHTTP_PORT\",\"kind\":\"remote_user\"}]"
+  export MFM_EVM_RPC_PREFERRED_ORDER="user_primary"
+  export MFM_EVM_RPC_SOURCE_ID="user_primary"
   export HELIOS_NETWORK="local"
   export HELIOS_EXECUTION_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
   export HELIOS_CONSENSUS_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"

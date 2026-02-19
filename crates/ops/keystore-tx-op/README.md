@@ -8,4 +8,4 @@ Purpose:
 
 Outputs:
 - `keystore_tx_sign` report: `from`, `to`, `nonce`, `chain_id`, `tx_type`, `payload_hash`, `out_path`
-- `keystore_tx_send_raw` report: `tx_hash`, `rpc_url_host`, `submitted_at`
+- `keystore_tx_send_raw` report: `tx_hash`, `rpc_url_host`, `submitted_at` (`rpc_url_host` carries source id for compatibility)

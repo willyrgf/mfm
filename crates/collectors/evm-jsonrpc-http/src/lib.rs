@@ -536,12 +536,12 @@ impl EvmJsonRpcHttpTransport {
         ))
     }
 
-    fn read_rpc_url_override_error(&self) -> IoError {
+    fn rpc_url_override_error(&self) -> IoError {
         IoError::Other(info(
             CODE_EVM_REQUEST_INVALID,
             ErrorCategory::ParsingInput,
             false,
-            "per-request rpc_url override is not allowed for evm read calls",
+            "per-request rpc_url override is not allowed for evm calls",
         ))
     }
 
@@ -1025,33 +1025,12 @@ impl LiveIoTransport for EvmJsonRpcHttpTransport {
             serde_json::from_value(call.request).map_err(|_| self.invalid_request_error())?;
         let method_class = classify_method(&req.method, &req.params, &self.cfg);
 
-        if req.route.is_some() && req.rpc_url.is_some() {
-            return Err(self.invalid_request_error());
-        }
-        if req.rpc_url.is_some() && method_class != MethodClass::WriteOrSideEffect {
-            return Err(self.read_rpc_url_override_error());
+        if req.rpc_url.is_some() {
+            return Err(self.rpc_url_override_error());
         }
 
         let call_ordinal = self.current_call_ordinal();
         let json_call = JsonRpcCall::new(req.method.clone(), req.params.clone());
-
-        if let Some(rpc_url) = req.rpc_url {
-            let source = EvmJsonRpcSource {
-                id: "__request_override".to_string(),
-                rpc_url,
-                authorization: None,
-                kind: EvmSourceKind::RemoteUser,
-                require_get_proof_probe: false,
-            };
-            let body = self.request_body(&json_call);
-            return Self::execute_http_request(
-                self.client.clone(),
-                source.id.clone(),
-                source,
-                body,
-            )
-            .await;
-        }
 
         let route_source_id = req.route.as_ref().map(|route| route.source_id.as_str());
         let source_ids = self.ordered_source_ids(route_source_id, call_ordinal)?;
@@ -1574,6 +1553,33 @@ mod tests {
         )
         .await
         .expect_err("read path should reject rpc_url override");
+
+        match err {
+            IoError::Other(info) => assert_eq!(info.code.0, CODE_EVM_REQUEST_INVALID),
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_requests_reject_per_request_rpc_url_override() {
+        let primary = start_stub_server(StubBehavior::JsonResult(json!("0x1"))).await;
+        let cfg = config_with_sources(
+            vec![source("primary", &primary.url)],
+            EvmRoutingStrategy::Failover,
+        );
+        let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+        let mut t = factory.make(env());
+
+        let err = call_transport(
+            t.as_mut(),
+            json!({
+                "method": "eth_sendRawTransaction",
+                "params": ["0x01"],
+                "rpc_url": "http://127.0.0.1:9/?token=secret",
+            }),
+        )
+        .await
+        .expect_err("write path should reject rpc_url override");
 
         match err {
             IoError::Other(info) => assert_eq!(info.code.0, CODE_EVM_REQUEST_INVALID),

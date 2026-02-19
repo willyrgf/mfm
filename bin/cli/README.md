@@ -232,21 +232,21 @@ Submits a signed raw transaction from file using `eth_sendRawTransaction`.
 
 Implementation note: this command is a thin wrapper over a run-backed op (`op_id = "keystore_tx_send_raw"`, `op_version = "v1"`). The CLI maps args to op input and calls `mfm_sdk::unstable::execute_single_op_report` to launch and decode the final report payload.
 
-The command output includes `tx_hash`, `rpc_url_host`, and `submitted_at`; it does not print raw tx payload contents.
+The command output includes `tx_hash`, `rpc_url_host`, and `submitted_at`; it does not print raw tx payload contents. For compatibility, `rpc_url_host` now carries the routed source ID.
 
 **Usage:**
 ```sh
-mfm_cli keystore tx-send-raw --in <PATH> [--rpc-url <URL>]
+mfm_cli keystore tx-send-raw --in <PATH> [--source-id <ID>]
 ```
 
 **Key options:**
 - `--in <PATH>`: file containing 0x-prefixed raw signed tx hex
-- `--rpc-url <URL>`: JSON-RPC URL (falls back to `MFM_EVM_RPC_URL`)
+- `--source-id <ID>`: EVM source ID (falls back to `MFM_EVM_RPC_SOURCE_ID`)
 
 **Example:**
 ```sh
 mfm_cli --output-format json keystore tx-send-raw \
-  --rpc-url http://127.0.0.1:8545 \
+  --source-id user_primary \
   --in /tmp/signed.tx
 ```
 
@@ -430,6 +430,11 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   mfm_cli run artifacts get "<ARTIFACT_ID>"
   ```
 
+- **`MFM_EVM_RPC_SOURCE_ID`**: Default source ID for `mfm_cli keystore tx-send-raw` when `--source-id` is not provided.
+  ```sh
+  export MFM_EVM_RPC_SOURCE_ID="user_primary"
+  ```
+
 - **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON array of source objects for `namespace="evm"` live IO routing (source-id based). Runtime-only and never persisted.
   ```sh
   export MFM_EVM_RPC_SOURCES_JSON='[
@@ -467,7 +472,7 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   - **`MFM_EVM_RPC_URL`**: single-source fallback endpoint mapped as source id `user_primary`.
   - **`MFM_EVM_RPC_AUTHORIZATION`**: optional Authorization header for that legacy single source.
 
-- EVM read transport note: per-request `rpc_url` override is not supported on read paths; routing is source-id based.
+- EVM transport note: per-request `rpc_url` override is not supported; routing is source-id based.
 
 - **`MFM_PORTFOLIO_TOKENS_JSON`**: Optional JSON array of ERC-20 token specs used by `mfm_cli portfolio snapshot` (and the REST API feature `portfolio.snapshot`).
   ```sh

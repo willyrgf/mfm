@@ -14,9 +14,9 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 pub struct TxSendRawArgs {
-    /// RPC URL (falls back to MFM_EVM_RPC_URL)
-    #[arg(long, env = "MFM_EVM_RPC_URL")]
-    pub rpc_url: Option<String>,
+    /// EVM RPC source ID (falls back to MFM_EVM_RPC_SOURCE_ID)
+    #[arg(long, env = "MFM_EVM_RPC_SOURCE_ID")]
+    pub source_id: Option<String>,
 
     /// Input file path with 0x-prefixed signed raw tx hex
     #[arg(long = "in")]
@@ -47,7 +47,7 @@ pub async fn execute(ctx: &CommandContext, args: &TxSendRawArgs) -> ! {
 
 async fn execute_internal(args: &TxSendRawArgs) -> CommandResult<TxSendRawResponse> {
     let op_config = TxSendRawOpConfig {
-        rpc_url: args.rpc_url.clone(),
+        source_id: args.source_id.clone(),
         input_path: args.input.display().to_string(),
     };
 

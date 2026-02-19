@@ -9,14 +9,13 @@ use mfm_machine::io::{IoCall, IoProvider};
 use mfm_op_common::errors as op_errors;
 use mfm_op_common::local_io_helpers::local_fact_key;
 use mfm_op_common::rpc as op_rpc;
-use url::Url;
 
 use crate::dcv as shared_dcv;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpcRawTxSubmission {
     pub tx_hash: String,
-    pub rpc_url_host: String,
+    pub rpc_source_id: String,
     pub submitted_at: String,
 }
 
@@ -494,18 +493,19 @@ pub async fn resolve_deployer_address(
 pub async fn send_raw_transaction_via_io(
     state_id: &StateId,
     io: &mut dyn IoProvider,
-    rpc_url: &str,
+    route_source_id: &str,
     raw_tx_hex: &str,
 ) -> Result<RpcRawTxSubmission, StateError> {
-    let parsed_url = parse_rpc_url(rpc_url).map_err(|_| {
-        op_errors::state_error_with_state(
+    let source_id = route_source_id.trim();
+    if source_id.is_empty() {
+        return Err(op_errors::state_error_with_state(
             state_id.clone(),
-            "InvalidRpcUrl",
+            "InvalidRpcSourceId",
             ErrorCategory::ParsingInput,
             false,
-            "rpc url must be a valid absolute URL",
-        )
-    })?;
+            "route source id must not be empty",
+        ));
+    }
     validate_raw_transaction_hex(raw_tx_hex).map_err(|_| {
         op_errors::state_error_with_state(
             state_id.clone(),
@@ -519,7 +519,9 @@ pub async fn send_raw_transaction_via_io(
     let request = serde_json::json!({
         "method": "eth_sendRawTransaction",
         "params": [raw_tx_hex],
-        "rpc_url": rpc_url,
+        "route": {
+            "source_id": source_id,
+        },
     });
     let fact_key = send_raw_fact_key(state_id, raw_tx_hex)?;
     let response = io
@@ -558,17 +560,9 @@ pub async fn send_raw_transaction_via_io(
 
     Ok(RpcRawTxSubmission {
         tx_hash,
-        rpc_url_host: url_host_with_port(&parsed_url),
+        rpc_source_id: source_id.to_string(),
         submitted_at,
     })
-}
-
-fn parse_rpc_url(raw: &str) -> Result<Url, ()> {
-    let parsed = Url::parse(raw).map_err(|_| ())?;
-    if parsed.host_str().is_none() {
-        return Err(());
-    }
-    Ok(parsed)
 }
 
 fn validate_raw_transaction_hex(raw_tx_hex: &str) -> Result<(), ()> {
@@ -593,14 +587,6 @@ fn validate_tx_hash(tx_hash: &str) -> Result<(), ()> {
         return Err(());
     }
     Ok(())
-}
-
-fn url_host_with_port(url: &Url) -> String {
-    let host = url.host_str().unwrap_or_default();
-    match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    }
 }
 
 async fn now_rfc3339(io: &mut dyn IoProvider, state_id: &StateId) -> Result<String, StateError> {

@@ -31,7 +31,6 @@ Transport request payload:
 Notes:
 
 - `route.source_id` is optional.
-- Read-path per-request `rpc_url` override is rejected.
-- Legacy write-path direct `rpc_url` is still accepted for compatibility.
+- Per-request `rpc_url` override is rejected.
 
 Docs: [`../../../docs/redesign.md`](../../../docs/redesign.md)

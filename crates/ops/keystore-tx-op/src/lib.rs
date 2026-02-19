@@ -11,8 +11,8 @@ use mfm_op_keystore_common::states::tx::{
     KeystoreTxSignStateConfig,
 };
 use mfm_op_keystore_common::tx::{
-    output_context_key, parse_address, parse_data_hex, parse_rpc_url, parse_u128_quantity,
-    Eip1559TxToSign, KeystoreTxError,
+    output_context_key, parse_address, parse_data_hex, parse_u128_quantity, Eip1559TxToSign,
+    KeystoreTxError,
 };
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -25,7 +25,7 @@ pub const TX_SIGN_OP_ID: &str = "keystore_tx_sign";
 pub const TX_SEND_RAW_OP_ID: &str = "keystore_tx_send_raw";
 
 const ENV_KEYSTORE_PATH: &str = "MFM_KEYSTORE_PATH";
-const ENV_EVM_RPC_URL: &str = "MFM_EVM_RPC_URL";
+const ENV_EVM_RPC_SOURCE_ID: &str = "MFM_EVM_RPC_SOURCE_ID";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TxSignReport {
@@ -69,7 +69,7 @@ pub struct TxSignOpConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TxSendRawOpConfig {
-    pub rpc_url: Option<String>,
+    pub source_id: Option<String>,
     pub input_path: String,
 }
 
@@ -205,15 +205,14 @@ impl Operation for KeystoreTxSendRawOp {
             )
         })?;
 
-        let rpc_url = resolve_rpc_url(cfg.rpc_url).map_err(sdk_error_from_helper)?;
-        parse_rpc_url(&rpc_url).map_err(sdk_error_from_helper)?;
+        let source_id = resolve_rpc_source_id(cfg.source_id).map_err(sdk_error_from_helper)?;
 
         let state_id = StateId(format!("{}.send_raw", op_path.0));
         let state = KeystoreTxSendRawState {
             state_id: state_id.clone(),
             output_key: tx_send_raw_report_key_for_op_path(&op_path),
             cfg: KeystoreTxSendRawStateConfig {
-                rpc_url,
+                route_source_id: source_id,
                 input_path: PathBuf::from(cfg.input_path),
             },
         };
@@ -238,12 +237,12 @@ fn resolve_keystore_path(configured: Option<String>) -> PathBuf {
         })
 }
 
-fn resolve_rpc_url(configured: Option<String>) -> Result<String, KeystoreTxError> {
-    let value = configured.or_else(|| std::env::var(ENV_EVM_RPC_URL).ok());
+fn resolve_rpc_source_id(configured: Option<String>) -> Result<String, KeystoreTxError> {
+    let value = configured.or_else(|| std::env::var(ENV_EVM_RPC_SOURCE_ID).ok());
     let Some(value) = value else {
         return Err(KeystoreTxError::new(
             "MissingArgument",
-            "Must provide --rpc-url or set MFM_EVM_RPC_URL",
+            "Must provide --source-id or set MFM_EVM_RPC_SOURCE_ID",
         ));
     };
 
@@ -251,7 +250,7 @@ fn resolve_rpc_url(configured: Option<String>) -> Result<String, KeystoreTxError
     if trimmed.is_empty() {
         return Err(KeystoreTxError::new(
             "MissingArgument",
-            "Must provide --rpc-url or set MFM_EVM_RPC_URL",
+            "Must provide --source-id or set MFM_EVM_RPC_SOURCE_ID",
         ));
     }
 
@@ -329,7 +328,7 @@ fn helper_category(code: &str) -> ErrorCategory {
         | "InvalidData"
         | "InvalidFeeConfig"
         | "InvalidRawTransaction"
-        | "InvalidRpcUrl"
+        | "InvalidRpcSourceId"
         | "InvalidPathConfig"
         | "InvalidSelectorLabel"
         | "InvalidUuid"
@@ -396,6 +395,18 @@ mod tests {
                     "unexpected json-rpc method",
                 )));
             }
+            let source_id = call
+                .request
+                .get("route")
+                .and_then(|v| v.get("source_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if source_id != "reth_local" {
+                return Err(IoError::Other(io_info(
+                    "unexpected_route_source_id",
+                    "unexpected route source id",
+                )));
+            }
             Ok(serde_json::json!(
                 "0x1111111111111111111111111111111111111111111111111111111111111111"
             ))
@@ -450,7 +461,7 @@ mod tests {
         let (registry, planner, pipeline) = op_test_support::single_op_plan(
             op,
             serde_json::json!({
-                "rpc_url": "http://127.0.0.1:8545",
+                "source_id": "reth_local",
                 "input_path": input_path.display().to_string(),
             }),
         )
@@ -499,12 +510,12 @@ mod tests {
             report.tx_hash,
             "0x1111111111111111111111111111111111111111111111111111111111111111"
         );
-        assert_eq!(report.rpc_url_host, "127.0.0.1:8545");
+        assert_eq!(report.rpc_url_host, "reth_local");
         assert!(!report.submitted_at.is_empty());
     }
 
     #[test]
-    fn tx_send_raw_requires_rpc_url() {
+    fn tx_send_raw_requires_source_id() {
         let op = KeystoreTxSendRawOp;
         let result = op
             .expand(

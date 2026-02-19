@@ -1199,14 +1199,14 @@ Files:
 
 Checklist:
 
-* [ ] Add integration scenario with injected failing primary and healthy secondary.
-* [ ] Add replay scenario proving no network call in replay path after live capture.
-* [ ] Add 429 path coverage validating failover.
-* [ ] Keep existing portfolio/REST parity tests green.
+* [x] Add integration scenario with injected failing primary and healthy secondary.
+* [x] Add replay scenario proving no network call in replay path after live capture.
+* [x] Add 429 path coverage validating failover.
+* [x] Keep existing portfolio/REST parity tests green.
 
 Acceptance tests:
 
-* [ ] Integration suite passes with Milestone A enabled.
+* [x] Integration suite passes with Milestone A enabled.
 * [ ] No replay regressions (`MissingFactKey` behavior unchanged).
 
 ### 15.10 Slice 9: Nixfied and runtime defaults
@@ -1220,15 +1220,15 @@ Files:
 
 Checklist:
 
-* [ ] Add optional env/config knobs for source IDs and hedging strategy.
-* [ ] Remove reliance on single-source `MFM_EVM_RPC_URL` as the EVM read default path.
-* [ ] Ensure `ci -- --full` runs Milestone A path by default.
-* [ ] Preserve current Helios smoke and portfolio snapshot workflows.
+* [x] Add optional env/config knobs for source IDs and hedging strategy.
+* [x] Remove reliance on single-source `MFM_EVM_RPC_URL` as the EVM read default path.
+* [x] Ensure `ci -- --full` runs Milestone A path by default.
+* [x] Preserve current Helios smoke and portfolio snapshot workflows.
 
 Acceptance tests:
 
-* [ ] `nix run .#ci -- --full --summary` passes with default settings.
-* [ ] full CI includes Helios + failover path coverage.
+* [x] `nix run .#ci -- --full --summary` passes with default settings.
+* [x] full CI includes Helios + failover path coverage.
 
 ### 15.11 Slice 10: Final contract/doc sweep
 
@@ -1241,14 +1241,14 @@ Files:
 
 Checklist:
 
-* [ ] Document source-id routing model and the breaking removal of per-request URL routing.
-* [ ] Document failover/hedging high-level behavior and guardrails.
-* [ ] Document operator-facing env vars and defaults.
-* [ ] Confirm no doc claims conflict with actual runtime behavior.
+* [x] Document source-id routing model and the breaking removal of per-request URL routing.
+* [x] Document failover/hedging high-level behavior and guardrails.
+* [x] Document operator-facing env vars and defaults.
+* [x] Confirm no doc claims conflict with actual runtime behavior.
 
 Exit gate:
 
-* [ ] Reviewer can follow docs to run Milestone A locally and in CI full mode.
+* [x] Reviewer can follow docs to run Milestone A locally and in CI full mode.
 
 ### 15.12 Definition of Done (Milestone A)
 

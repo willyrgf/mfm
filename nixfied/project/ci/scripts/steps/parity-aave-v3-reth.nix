@@ -17,6 +17,9 @@ pkgs.writeText "mfm-ci-steps-parity-aave-v3-reth.sh" ''
   export MFM_S3_PREFIX="$MINIO_PREFIX"
 
   export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
+  export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"user_primary\",\"rpc_url\":\"http://127.0.0.1:$RETHHTTP_PORT\",\"kind\":\"remote_user\"}]"
+  export MFM_EVM_RPC_PREFERRED_ORDER="user_primary"
+  export MFM_EVM_RPC_SOURCE_ID="user_primary"
   export MFM_PARITY_AAVE_V3_RUN_IDS_PATH="$CI_ARTIFACTS_DIR/parity-aave-v3-run-ids.json"
   export MFM_PARITY_AAVE_V3_RETH_PROBE_PATH="$(artifact_path "parity-aave-v3-reth-probe.jsonl")"
   : > "$MFM_PARITY_AAVE_V3_RETH_PROBE_PATH"
