@@ -1060,15 +1060,15 @@ Files:
 
 Checklist:
 
-* [ ] Add source-id based config model to transport (`sources`, ordering, strategy, hedge delay).
-* [ ] Remove single-source `rpc_url`/`authorization` transport config from EVM read path.
-* [ ] Add runtime-only source resolution path in app wiring.
-* [ ] Keep namespace routing unchanged (`"evm"` in `make_engine_bundle`).
+* [x] Add source-id based config model to transport (`sources`, ordering, strategy, hedge delay).
+* [x] Remove single-source `rpc_url`/`authorization` transport config from EVM read path.
+* [x] Add runtime-only source resolution path in app wiring.
+* [x] Keep namespace routing unchanged (`"evm"` in `make_engine_bundle`).
 
 Acceptance tests:
 
-* [ ] New test: transport creation fails fast when source registry is empty/invalid.
-* [ ] New test: config with multiple source IDs builds transport successfully.
+* [x] New test: transport creation fails fast when source registry is empty/invalid.
+* [x] New test: config with multiple source IDs builds transport successfully.
 
 ### 15.3 Slice 2: Add method classification and routing policy
 
@@ -1078,15 +1078,15 @@ Files:
 
 Checklist:
 
-* [ ] Introduce method classifier (`read_light`, `read_heavy`, `write_or_side_effect`).
-* [ ] Add default policy: hedge only `read_light`, sequential failover for `read_heavy`, single-dispatch for `write_or_side_effect`.
-* [ ] Add explicit deny-hedge set (`eth_getLogs`, `trace_*`, `debug_*`, writes).
-* [ ] Ensure classification does not alter request payload hashing path.
+* [x] Introduce method classifier (`read_light`, `read_heavy`, `write_or_side_effect`).
+* [x] Add default policy: hedge only `read_light`, sequential failover for `read_heavy`, single-dispatch for `write_or_side_effect`.
+* [x] Add explicit deny-hedge set (`eth_getLogs`, `trace_*`, `debug_*`, writes).
+* [x] Ensure classification does not alter request payload hashing path.
 
 Acceptance tests:
 
-* [ ] Unit tests for classifier correctness across representative method set.
-* [ ] Unit test proving write methods never trigger multi-source dispatch.
+* [x] Unit tests for classifier correctness across representative method set.
+* [x] Unit test proving write methods never trigger multi-source dispatch.
 
 ### 15.4 Slice 3: Implement failover executor
 
@@ -1096,17 +1096,17 @@ Files:
 
 Checklist:
 
-* [ ] Implement ordered source attempts for retryable transport failures.
-* [ ] Respect retryability categories already used by transport (`timeout`, `429`, transient HTTP).
-* [ ] Return first successful response.
-* [ ] Return stable aggregate error when all candidates fail.
-* [ ] Include safe source IDs in diagnostics; never include full URL/auth.
+* [x] Implement ordered source attempts for retryable transport failures.
+* [x] Respect retryability categories already used by transport (`timeout`, `429`, transient HTTP).
+* [x] Return first successful response.
+* [x] Return stable aggregate error when all candidates fail.
+* [x] Include safe source IDs in diagnostics; never include full URL/auth.
 
 Acceptance tests:
 
-* [ ] One source hard-fails, second succeeds -> call succeeds.
-* [ ] First source returns 429, second succeeds -> call succeeds.
-* [ ] All sources fail -> stable pool error code and retryability.
+* [x] One source hard-fails, second succeeds -> call succeeds.
+* [x] First source returns 429, second succeeds -> call succeeds.
+* [x] All sources fail -> stable pool error code and retryability.
 
 ### 15.5 Slice 4: Implement light hedging (max 2 sources)
 
@@ -1116,17 +1116,17 @@ Files:
 
 Checklist:
 
-* [ ] Add hedged dispatch path for `read_light` only.
-* [ ] Start primary, delay `hedge_delay_ms`, optionally start secondary.
-* [ ] Return first acceptable success; cancel/ignore loser path safely.
-* [ ] Keep hedge fanout bounded to 2 sources.
-* [ ] Keep heavy methods on failover-only path and writes on primary-only path.
+* [x] Add hedged dispatch path for `read_light` only.
+* [x] Start primary, delay `hedge_delay_ms`, optionally start secondary.
+* [x] Return first acceptable success; cancel/ignore loser path safely.
+* [x] Keep hedge fanout bounded to 2 sources.
+* [x] Keep heavy methods on failover-only path and writes on primary-only path.
 
 Acceptance tests:
 
-* [ ] Primary slow + secondary fast -> secondary winner returned.
-* [ ] Primary fast -> secondary never started.
-* [ ] Both fail -> stable aggregate error returned.
+* [x] Primary slow + secondary fast -> secondary winner returned.
+* [x] Primary fast -> secondary never started.
+* [x] Both fail -> stable aggregate error returned.
 
 ### 15.6 Slice 5: Health probing and scoring
 
@@ -1138,15 +1138,15 @@ Files:
 
 Checklist:
 
-* [ ] Add startup probe hooks (`eth_chainId`, `eth_blockNumber`).
-* [ ] Add optional capability probe (`eth_getProof`) for Helios-backing candidates.
-* [ ] Add lightweight health score decay/recovery updates per call outcome.
-* [ ] Prefer healthy local sources before remote ones when scores are comparable.
+* [x] Add startup probe hooks (`eth_chainId`, `eth_blockNumber`).
+* [x] Add optional capability probe (`eth_getProof`) for Helios-backing candidates.
+* [x] Add lightweight health score decay/recovery updates per call outcome.
+* [x] Prefer healthy local sources before remote ones when scores are comparable.
 
 Acceptance tests:
 
-* [ ] Unhealthy source is skipped until recovery condition is met.
-* [ ] Healthy local source is preferred over equal-score remote candidate.
+* [x] Unhealthy source is skipped until recovery condition is met.
+* [x] Healthy local source is preferred over equal-score remote candidate.
 
 ### 15.7 Slice 6: Secret-safety and diagnostics hardening
 
@@ -1159,15 +1159,15 @@ Files:
 
 Checklist:
 
-* [ ] Redact URL/auth from all error details.
-* [ ] Ensure only source IDs and non-sensitive diagnostics are persisted/logged.
-* [ ] Document runtime-only secret handling in CLI/REST docs.
-* [ ] Preserve existing stable error surfaces where unchanged.
+* [x] Redact URL/auth from all error details.
+* [x] Ensure only source IDs and non-sensitive diagnostics are persisted/logged.
+* [x] Document runtime-only secret handling in CLI/REST docs.
+* [x] Preserve existing stable error surfaces where unchanged.
 
 Acceptance tests:
 
-* [ ] Regression tests assert no URL/auth appears in error `details`.
-* [ ] Regression tests assert no secret-bearing fields appear in serialized outputs.
+* [x] Regression tests assert no URL/auth appears in error `details`.
+* [x] Regression tests assert no secret-bearing fields appear in serialized outputs.
 
 ### 15.8 Slice 7: Remove per-request `rpc_url` override (breaking)
 
@@ -1179,14 +1179,14 @@ Files:
 
 Checklist:
 
-* [ ] Remove `rpc_url` from EVM read request schema in transport deserialization.
-* [ ] Update tests and docs to use source-id routing only.
-* [ ] Keep secret-redaction rules enforced in all error paths.
+* [x] Remove `rpc_url` from EVM read request schema in transport deserialization.
+* [x] Update tests and docs to use source-id routing only.
+* [x] Keep secret-redaction rules enforced in all error paths.
 
 Acceptance tests:
 
-* [ ] Legacy per-request override request shape returns stable invalid-request error.
-* [ ] Invalid route-source requests return redacted diagnostics.
+* [x] Legacy per-request override request shape returns stable invalid-request error.
+* [x] Invalid route-source requests return redacted diagnostics.
 
 ### 15.9 Slice 8: Integration coverage and replay invariants
 
@@ -1207,7 +1207,7 @@ Checklist:
 Acceptance tests:
 
 * [x] Integration suite passes with Milestone A enabled.
-* [ ] No replay regressions (`MissingFactKey` behavior unchanged).
+* [x] No replay regressions (`MissingFactKey` behavior unchanged).
 
 ### 15.10 Slice 9: Nixfied and runtime defaults
 
@@ -1252,12 +1252,12 @@ Exit gate:
 
 ### 15.12 Definition of Done (Milestone A)
 
-* [ ] `namespace = "evm"` remains the only state-facing IO route.
-* [ ] Existing `EvmIoClient`/`JsonRpcCall` call sites require no migration.
-* [ ] Failover and light hedging work for read calls without write fanout.
-* [ ] Replay determinism is preserved.
-* [ ] No secret leakage in persisted/logged surfaces.
-* [ ] `nix run .#ci -- --full --summary` passes (fail-fast, primary gate).
+* [x] `namespace = "evm"` remains the only state-facing IO route.
+* [x] Existing `EvmIoClient`/`JsonRpcCall` call sites require no migration.
+* [x] Failover and light hedging work for read calls without write fanout.
+* [x] Replay determinism is preserved.
+* [x] No secret leakage in persisted/logged surfaces.
+* [x] `nix run .#ci -- --full --summary` passes (fail-fast, primary gate).
 
 ### 15.13 Suggested commit breakdown
 

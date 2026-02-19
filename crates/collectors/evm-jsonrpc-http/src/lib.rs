@@ -1379,6 +1379,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn classifier_covers_representative_read_classes() {
+        let cfg = EvmJsonRpcHttpConfig::default();
+        assert_eq!(
+            classify_method("eth_chainId", &json!([]), &cfg),
+            MethodClass::ReadLight
+        );
+        assert_eq!(
+            classify_method("eth_call", &json!([{"to":"0x1","data":"0x"}]), &cfg),
+            MethodClass::ReadLight
+        );
+        assert_eq!(
+            classify_method("eth_getLogs", &json!([]), &cfg),
+            MethodClass::ReadHeavy
+        );
+        assert_eq!(
+            classify_method("trace_block", &json!(["0x1"]), &cfg),
+            MethodClass::ReadHeavy
+        );
+    }
+
     #[tokio::test]
     async fn failover_uses_secondary_on_primary_http_failure() {
         let primary = start_stub_server(StubBehavior::HttpStatus(500)).await;
@@ -1435,6 +1456,40 @@ mod tests {
         .expect("secondary should succeed");
 
         assert_eq!(response, json!("0x2"));
+    }
+
+    #[tokio::test]
+    async fn failover_returns_stable_pool_error_when_all_sources_fail() {
+        let primary = start_stub_server(StubBehavior::HttpStatus(500)).await;
+        let secondary = start_stub_server(StubBehavior::HttpStatus(429)).await;
+
+        let cfg = config_with_sources(
+            vec![
+                source("primary", &primary.url),
+                source("secondary", &secondary.url),
+            ],
+            EvmRoutingStrategy::Failover,
+        );
+        let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+        let mut t = factory.make(env());
+
+        let err = call_transport(
+            t.as_mut(),
+            json!({
+                "method": "eth_getLogs",
+                "params": [],
+            }),
+        )
+        .await
+        .expect_err("all candidates should fail");
+
+        match err {
+            IoError::Transport(info) => {
+                assert_eq!(info.code.0, CODE_EVM_NO_HEALTHY_SOURCE);
+                assert!(info.retryable);
+            }
+            other => panic!("expected Transport, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1531,6 +1586,45 @@ mod tests {
 
         assert_eq!(response, json!("0x1"));
         assert_eq!(secondary.hit_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn hedging_returns_stable_error_when_primary_and_secondary_fail() {
+        let primary = start_stub_server(StubBehavior::HttpStatus(500)).await;
+        let secondary = start_stub_server(StubBehavior::HttpStatus(429)).await;
+
+        let mut cfg = config_with_sources(
+            vec![
+                source("primary", &primary.url),
+                source("secondary", &secondary.url),
+            ],
+            EvmRoutingStrategy::HedgedLight,
+        );
+        cfg.hedge_delay = Duration::from_millis(20);
+
+        let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+        let mut t = factory.make(env());
+
+        let err = call_transport(
+            t.as_mut(),
+            json!({
+                "method": "eth_chainId",
+                "params": [],
+            }),
+        )
+        .await
+        .expect_err("both candidates should fail");
+
+        match err {
+            IoError::Transport(info) => {
+                assert!(
+                    info.code.0 == CODE_EVM_HEDGE_EXHAUSTED
+                        || info.code.0 == CODE_EVM_SOURCE_UNHEALTHY
+                );
+                assert!(info.retryable);
+            }
+            other => panic!("expected Transport, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1666,6 +1760,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn healthy_local_source_is_preferred_over_equal_score_remote_source() {
+        let remote = start_stub_server(StubBehavior::JsonResult(json!("0x1"))).await;
+        let local = start_stub_server(StubBehavior::JsonResult(json!("0x2"))).await;
+
+        let cfg = EvmJsonRpcHttpConfig {
+            sources: vec![
+                EvmJsonRpcSource {
+                    id: "remote".to_string(),
+                    rpc_url: remote.url.clone(),
+                    authorization: None,
+                    kind: EvmSourceKind::RemotePublic,
+                    require_get_proof_probe: false,
+                },
+                EvmJsonRpcSource {
+                    id: "local".to_string(),
+                    rpc_url: local.url.clone(),
+                    authorization: None,
+                    kind: EvmSourceKind::Local,
+                    require_get_proof_probe: false,
+                },
+            ],
+            // Put remote first in base order to prove kind-priority tie-breaking.
+            preferred_order: vec!["remote".to_string(), "local".to_string()],
+            strategy: EvmRoutingStrategy::Failover,
+            ..EvmJsonRpcHttpConfig::default()
+        };
+
+        let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+        let mut t = factory.make(env());
+
+        let response = call_transport(
+            t.as_mut(),
+            json!({
+                "method": "eth_getLogs",
+                "params": [],
+            }),
+        )
+        .await
+        .expect("local source should be preferred");
+
+        assert_eq!(response, json!("0x2"));
+        assert!(local.hit_count() >= 1);
+        assert_eq!(remote.hit_count(), 0);
+    }
+
+    #[tokio::test]
     async fn route_source_id_must_exist() {
         let primary = start_stub_server(StubBehavior::JsonResult(json!("0x1"))).await;
         let cfg = config_with_sources(
@@ -1687,7 +1827,13 @@ mod tests {
         .expect_err("unknown source id should fail");
 
         match err {
-            IoError::Other(info) => assert_eq!(info.code.0, CODE_EVM_ROUTE_SOURCE_UNKNOWN),
+            IoError::Other(info) => {
+                assert_eq!(info.code.0, CODE_EVM_ROUTE_SOURCE_UNKNOWN);
+                let details = info.details.unwrap_or_default().to_string();
+                assert!(details.contains("missing"));
+                assert!(!details.contains("127.0.0.1"));
+                assert!(!details.contains("token="));
+            }
             other => panic!("expected Other, got {other:?}"),
         }
     }

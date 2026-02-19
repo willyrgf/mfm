@@ -16,6 +16,7 @@ use mfm_collectors_evm_jsonrpc_http::{
 };
 use mfm_event_store_mem::MemEventStore;
 use mfm_machine::engine::Stores;
+use mfm_machine::errors::IoError;
 use mfm_machine::ids::{FactKey, RunId, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
 use mfm_machine::live_io::{
@@ -256,4 +257,31 @@ async fn evm_rpc_pool_failover_uses_secondary_when_primary_is_429() {
     assert_eq!(live_result.response, json!("0x2"));
     assert!(primary.hit_count() >= 1);
     assert!(secondary.hit_count() >= 1);
+}
+
+#[tokio::test]
+async fn evm_replay_missing_fact_key_behavior_is_unchanged() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let artifacts: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(temp.path()));
+    let facts = FactIndex::default();
+    let run_id = RunId(uuid::Uuid::new_v4());
+    let state_id = StateId("parity.evm_pool.missing_fact_key".to_string());
+
+    let mut replay = ReplayIo::new(run_id, state_id, 0, artifacts, facts, false);
+    let err = replay
+        .call(IoCall {
+            namespace: "evm".to_string(),
+            request: json!({
+                "method": "eth_chainId",
+                "params": [],
+            }),
+            fact_key: None,
+        })
+        .await
+        .expect_err("replay without fact key should fail");
+
+    match err {
+        IoError::MissingFactKey(info) => assert_eq!(info.code.0, "missing_fact_key"),
+        other => panic!("expected MissingFactKey, got {other:?}"),
+    }
 }
