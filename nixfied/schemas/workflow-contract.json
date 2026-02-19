@@ -38,7 +38,16 @@
     "setup": { "type": "object" },
     "teardown": { "type": "object" },
     "artifacts": { "type": "object" },
-    "execution": { "type": "object" }
+    "execution": {
+      "type": "object",
+      "properties": {
+        "parallel": { "type": "boolean" },
+        "failFast": { "type": "boolean" },
+        "lockPolicy": { "type": "string", "enum": [ "exclusive", "shared-aware" ] },
+        "emitRegistryEvents": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    }
   },
   "additionalProperties": true
 }

@@ -1,6 +1,11 @@
 { lib, ... }:
 let
   t = lib.types;
+  runtimeWorkdirType = t.enum [
+    "projectRoot"
+    "stateRoot"
+    "custom"
+  ];
 
   argSpec = t.submodule {
     options = {
@@ -103,6 +108,38 @@ let
       description = lib.mkOption {
         type = t.str;
         default = "";
+      };
+    };
+  };
+
+  hookSpec = t.submodule {
+    options = {
+      command = lib.mkOption { type = t.lines; };
+      runtimeInputs = lib.mkOption {
+        type = t.listOf t.package;
+        default = [ ];
+      };
+      passThroughEnv = lib.mkOption {
+        type = t.listOf t.str;
+        default = [ ];
+      };
+      env = lib.mkOption {
+        type = t.attrsOf (
+          t.oneOf [
+            t.str
+            t.int
+            t.bool
+          ]
+        );
+        default = { };
+      };
+      workdir = lib.mkOption {
+        type = t.nullOr runtimeWorkdirType;
+        default = null;
+      };
+      customWorkdir = lib.mkOption {
+        type = t.nullOr t.str;
+        default = null;
       };
     };
   };
@@ -270,11 +307,7 @@ in
                 default = "optional";
               };
               workdir = lib.mkOption {
-                type = t.enum [
-                  "projectRoot"
-                  "stateRoot"
-                  "custom"
-                ];
+                type = runtimeWorkdirType;
                 default = "projectRoot";
               };
               customWorkdir = lib.mkOption {
@@ -314,6 +347,14 @@ in
               timezone = lib.mkOption {
                 type = t.str;
                 default = "UTC";
+              };
+              preHooks = lib.mkOption {
+                type = t.attrsOf hookSpec;
+                default = { };
+              };
+              postHooks = lib.mkOption {
+                type = t.attrsOf hookSpec;
+                default = { };
               };
             };
 

@@ -34,6 +34,7 @@ Dispatcher surfaces:
 
 - `nix run .#run-task -- <task-id> [-- ...]`
 - `nix run .#run-workflow -- <workflow-id> [-- ...]`
+- `nix run .#run-workflow-parallel -- <workflow-id> [-- ...]`
 
 Introspection surfaces:
 
@@ -111,3 +112,32 @@ User-facing shell task output should be plain ASCII and prefix-based:
 - `ERROR:`
 - `OK:`
 - `SKIP:`
+
+## Parallel Worker Reuse Example
+
+Use the parallel runner for multiple workflow runs, and cap worker reuse with `NIXFIED_CI_MAX_WORKERS` (or `CI_MAX_WORKERS`):
+
+```bash
+# Run a workflow with its modeled maxWorkers limit.
+nix run .#run-workflow-parallel -- workflow.test.parallel.smoke --summary
+
+# Reuse the same parallel runner for another workflow, capped to 2 workers.
+NIXFIED_CI_MAX_WORKERS=2 nix run .#run-workflow-parallel -- workflow.ci.full --summary
+```
+
+## CI Parallel Integration
+
+`nix run .#ci` uses the CI workflow model, with `execution.parallel = true` in `workflow.ci.*`.
+You can cap concurrency with `NIXFIED_CI_MAX_WORKERS` (or `CI_MAX_WORKERS`):
+
+```bash
+NIXFIED_CI_MAX_WORKERS=2 nix run .#ci -- --mode full --summary
+```
+
+For serial debugging, override the workflow setting:
+
+```bash
+NIXFIED_WORKFLOW_PARALLEL=0 nix run .#ci -- --mode full --summary
+```
+
+One extra note: GitHub Actions currently runs `nix flake check` + `nix run .#framework::test -- --summary`.

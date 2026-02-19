@@ -35,6 +35,8 @@ let
       usage ? [ ],
       examples ? [ ],
       runtimeInputs ? commonRuntimeInputs,
+      preHooks ? { },
+      postHooks ? { },
       workflowId ? null,
       contractArgs ? [ ],
     }:
@@ -107,6 +109,8 @@ let
         umask = "022";
         locale = "C.UTF-8";
         timezone = "UTC";
+        preHooks = preHooks;
+        postHooks = postHooks;
       };
 
       scheduling = {
@@ -289,10 +293,18 @@ in
           runtimeInputs = commonRuntimeInputs ++ [
             nixFormatterPkg
           ];
+          postHooks = {
+            "framework.nixfmt" = {
+              command = lib.mkDefault ''
+                set -euo pipefail
+                find . -name '*.nix' -print0 | xargs -0 nixfmt --
+                echo "OK: formatted nix files"
+              '';
+            };
+          };
           command = ''
             set -euo pipefail
-            find . -name '*.nix' -print0 | xargs -0 nixfmt --
-            echo "OK: formatted nix files"
+            echo "INFO: running format task"
           '';
         };
 
@@ -1138,6 +1150,7 @@ in
             writeSummary = true;
           };
           execution = {
+            parallel = true;
             failFast = true;
             lockPolicy = "exclusive";
             emitRegistryEvents = true;
@@ -1195,6 +1208,7 @@ in
             writeSummary = true;
           };
           execution = {
+            parallel = true;
             failFast = true;
             lockPolicy = "exclusive";
             emitRegistryEvents = true;
@@ -1262,6 +1276,7 @@ in
             writeSummary = true;
           };
           execution = {
+            parallel = true;
             failFast = true;
             lockPolicy = "exclusive";
             emitRegistryEvents = true;
@@ -1273,24 +1288,18 @@ in
           summary = "Full CI workflow";
           description = "Runs quality/tests then system checks as deterministic stages.";
           mode = "ci";
-          maxWorkers = 4;
-          units = {
-            quality = {
-              taskId = "task.ci.quality";
-            };
-            tests = {
-              taskId = "task.ci.tests";
-            };
-            system-quick = {
-              taskId = "task.ci.system-quick";
-              needs = [ "tests" ];
-            };
-            nginx-proxy = {
-              taskId = "task.ci.nginx-proxy";
-              needs = [ "tests" ];
-            };
-          };
-          stages = [ ];
+          maxWorkers = 2;
+          units = { };
+          stages = [
+            [
+              "task.ci.quality"
+              "task.ci.tests"
+            ]
+            [
+              "task.ci.system-quick"
+              "task.ci.nginx-proxy"
+            ]
+          ];
           setup.tasks = [ ];
           teardown = {
             tasks = [ ];
@@ -1303,6 +1312,7 @@ in
             writeSummary = true;
           };
           execution = {
+            parallel = true;
             failFast = true;
             lockPolicy = "exclusive";
             emitRegistryEvents = true;

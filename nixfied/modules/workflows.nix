@@ -125,6 +125,10 @@ in
             };
 
             execution = {
+              parallel = lib.mkOption {
+                type = t.bool;
+                default = false;
+              };
               failFast = lib.mkOption {
                 type = t.bool;
                 default = true;

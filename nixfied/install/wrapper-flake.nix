@@ -38,16 +38,21 @@ else
       inputs = {
         nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
         flake-utils.url = "github:numtide/flake-utils";
-        nixfied.url = "path:${vendorPath}";
       };
 
-      outputs = { self, nixpkgs, flake-utils, nixfied }:
+      outputs = { self, nixpkgs, flake-utils }:
         flake-utils.lib.eachDefaultSystem (system:
           let
-            compiled = nixfied.lib.mkNixfied {
-              inherit system;
+            pkgs = import nixpkgs { inherit system; };
+            nixfiedLib = import ${vendorPath}/lib/default.nix {
+              inherit
+                pkgs
+                system
+                ;
+            };
+            compiled = nixfiedLib.mkNixfied {
               projectRoot = ./.;
-              projectModules = [ ./nixfied/nixfied/project/module.nix ];
+              projectModules = [ ./nixfied/project/module.nix ];
               extraModules = [ ];
             };
           in {

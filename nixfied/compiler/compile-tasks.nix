@@ -11,6 +11,17 @@ let
   rawTasks = resolved.tasks or { };
   names = builtins.sort builtins.lessThan (builtins.attrNames rawTasks);
 
+  normalizeHooks =
+    hooks:
+    builtins.mapAttrs (_: hook: {
+      command = hook.command;
+      runtimeInputs = map builtins.toString hook.runtimeInputs;
+      passThroughEnv = hook.passThroughEnv;
+      env = hook.env;
+      workdir = hook.workdir;
+      customWorkdir = hook.customWorkdir;
+    }) hooks;
+
   normalizeId =
     name: rawId:
     let
@@ -54,6 +65,8 @@ let
         umask = raw.runtime.umask;
         locale = raw.runtime.locale;
         timezone = raw.runtime.timezone;
+        preHooks = normalizeHooks raw.runtime.preHooks;
+        postHooks = normalizeHooks raw.runtime.postHooks;
       };
 
       scheduling = raw.scheduling;

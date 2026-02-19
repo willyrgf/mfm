@@ -50,7 +50,57 @@
     },
     "runtime": {
       "type": "object",
-      "required": [ "slotEnv", "workdir", "hermetic", "runtimeInputs" ]
+      "required": [ "slotEnv", "workdir", "hermetic", "runtimeInputs" ],
+      "properties": {
+        "preHooks": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [ "command" ],
+            "properties": {
+              "command": { "type": "string" },
+              "runtimeInputs": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "passThroughEnv": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "env": { "type": "object" },
+              "workdir": {
+                "type": [ "string", "null" ],
+                "enum": [ "projectRoot", "stateRoot", "custom", null ]
+              },
+              "customWorkdir": { "type": [ "string", "null" ] }
+            }
+          }
+        },
+        "postHooks": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [ "command" ],
+            "properties": {
+              "command": { "type": "string" },
+              "runtimeInputs": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "passThroughEnv": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "env": { "type": "object" },
+              "workdir": {
+                "type": [ "string", "null" ],
+                "enum": [ "projectRoot", "stateRoot", "custom", null ]
+              },
+              "customWorkdir": { "type": [ "string", "null" ] }
+            }
+          }
+        }
+      }
     },
     "scheduling": { "type": "object" },
     "deps": { "type": "object" },

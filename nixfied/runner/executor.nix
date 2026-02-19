@@ -123,6 +123,73 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     registry_append_event "$REGISTRY_ROOT" "$run_id" "$workflow_id" "$task_id" "$state" "$detail_json"
   }
 
+  task_has_hooks() {
+    local task="$1"
+    local hook_count
+
+    hook_count="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '((.runtime.preHooks // {}) | length) + ((.runtime.postHooks // {}) | length)')"
+    if [ "$hook_count" -gt 0 ]; then
+      return 0
+    fi
+    return 1
+  }
+
+  run_task_hooks() {
+    local task_id="$1"
+    local task="$2"
+    local phase="$3"
+    shift 3
+
+    local hook_id
+    local hook_command
+    local hook_runtime_json
+    local hook_exit_code
+
+    while IFS= read -r hook_id; do
+      if [ -z "$hook_id" ]; then
+        continue
+      fi
+
+      echo "INFO: hook $phase $hook_id start"
+      hook_command="$(
+        printf '%s' "$task" | ${pkgs.jq}/bin/jq -r --arg phase "$phase" --arg hookId "$hook_id" '.runtime[($phase + "Hooks")][$hookId].command'
+      )"
+      hook_runtime_json="$(
+        printf '%s' "$task" | ${pkgs.jq}/bin/jq -c --arg phase "$phase" --arg hookId "$hook_id" '
+          .runtime as $taskRuntime
+          | .runtime[($phase + "Hooks")][$hookId] as $hook
+          | {
+              slotEnv: $taskRuntime.slotEnv,
+              workdir: (if ($hook.workdir // null) == null then $taskRuntime.workdir else $hook.workdir end),
+              customWorkdir:
+                (if ($hook.customWorkdir // null) != null then $hook.customWorkdir
+                 elif ($hook.workdir // null) == null then ($taskRuntime.customWorkdir // null)
+                 elif $hook.workdir == "custom" then ($taskRuntime.customWorkdir // null)
+                 else null end),
+              hermetic: $taskRuntime.hermetic,
+              runtimeInputs: (($taskRuntime.runtimeInputs // []) + ($hook.runtimeInputs // [])),
+              passThroughEnv: (($taskRuntime.passThroughEnv // []) + ($hook.passThroughEnv // [])),
+              env: (($taskRuntime.env // {}) + ($hook.env // {})),
+              umask: ($taskRuntime.umask // "022"),
+              locale: ($taskRuntime.locale // "C.UTF-8"),
+              timezone: ($taskRuntime.timezone // "UTC")
+            }
+        '
+      )"
+
+      run_in_sandbox_runtime "$hook_runtime_json" "$hook_command" "$@"
+      hook_exit_code="$?"
+      if [ "$hook_exit_code" -ne 0 ]; then
+        echo "ERROR: hook $phase $hook_id failed exitCode=$hook_exit_code"
+        return "$hook_exit_code"
+      fi
+
+      echo "OK: hook $phase $hook_id done"
+    done < <(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r --arg phase "$phase" '.runtime[($phase + "Hooks")] // {} | keys[]')
+
+    return 0
+  }
+
   execute_task_body() {
     local task_id="$1"
     shift
@@ -132,6 +199,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local command
     local nested_workflow
     local exit_code
+    local main_exit_code
+    local post_exit_code
 
     task="$(task_json "$task_id")"
     if [ -z "$task" ]; then
@@ -140,13 +209,36 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fi
 
     runner_type="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '.runner.type')"
+    if [ "$runner_type" != "shell" ] && task_has_hooks "$task"; then
+      echo "ERROR: task '$task_id' defines runtime hooks but runner type '$runner_type' is unsupported"
+      return 3
+    fi
 
     set +e
     case "$runner_type" in
       shell)
-        command="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '.runner.command')"
-        run_in_sandbox "$task" "$command" "$@"
-        exit_code="$?"
+        if run_task_hooks "$task_id" "$task" "pre" "$@"; then
+          command="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '.runner.command')"
+          run_in_sandbox "$task" "$command" "$@"
+          main_exit_code="$?"
+
+          if run_task_hooks "$task_id" "$task" "post" "$@"; then
+            post_exit_code=0
+          else
+            post_exit_code="$?"
+          fi
+
+          if [ "$post_exit_code" -ne 0 ]; then
+            if [ "$main_exit_code" -ne 0 ]; then
+              echo "ERROR: task '$task_id' main exitCode=$main_exit_code and post hook failed exitCode=$post_exit_code"
+            fi
+            exit_code="$post_exit_code"
+          else
+            exit_code="$main_exit_code"
+          fi
+        else
+          exit_code="$?"
+        fi
         ;;
       workflowRef)
         nested_workflow="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '.runner.workflowId // empty')"
@@ -286,6 +378,31 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fi
 
     printf '%s' "$effective_workers"
+  }
+
+  resolve_parallel_mode() {
+    local workflow="$1"
+    local configured_parallel
+    local env_override
+    local run_parallel=0
+
+    configured_parallel="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.execution.parallel // false')"
+    if [ "$configured_parallel" = "true" ]; then
+      run_parallel=1
+    fi
+
+    env_override="''${NIXFIED_WORKFLOW_PARALLEL:-}"
+    if [ -n "$env_override" ]; then
+      if [ "$env_override" = "1" ]; then
+        run_parallel=1
+      elif [ "$env_override" = "0" ]; then
+        run_parallel=0
+      else
+        echo "WARN: ignoring invalid NIXFIED_WORKFLOW_PARALLEL='$env_override' (expected 0 or 1)"
+      fi
+    fi
+
+    printf '%s' "$run_parallel"
   }
 
   run_workflow_serial_impl() {
@@ -755,6 +872,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local run_id
     local detail_json
     local fail_fast
+    local run_parallel
     local status=0
 
     workflow="$(workflow_json "$workflow_id")"
@@ -773,8 +891,9 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     append_event "$run_id" "$workflow_id" "" "queued" "$detail_json"
 
     fail_fast="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.execution.failFast')"
+    run_parallel="$(resolve_parallel_mode "$workflow")"
 
-    if [ "''${NIXFIED_WORKFLOW_PARALLEL:-0}" = "1" ]; then
+    if [ "$run_parallel" = "1" ]; then
       if run_workflow_parallel_impl "$run_id" "$workflow_id" "$workflow" "$fail_fast" "''${passthrough_args[@]}"; then
         status=0
       else

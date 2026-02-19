@@ -1,7 +1,7 @@
 { pkgs, projectRoot }:
 ''
-  run_in_sandbox() {
-    local task_json="$1"
+  run_in_sandbox_runtime() {
+    local runtime_json="$1"
     shift
     local command="$1"
     shift
@@ -16,8 +16,8 @@
     local base_path
     local final_path
 
-    workdir_kind="$(printf '%s' "$task_json" | ${pkgs.jq}/bin/jq -r '.runtime.workdir')"
-    custom_workdir="$(printf '%s' "$task_json" | ${pkgs.jq}/bin/jq -r '.runtime.customWorkdir // empty')"
+    workdir_kind="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.workdir')"
+    custom_workdir="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.customWorkdir // empty')"
 
     case "$workdir_kind" in
       projectRoot)
@@ -47,7 +47,7 @@
           runtime_path="$runtime_path:$runtime_input/bin"
         fi
       fi
-    done < <(printf '%s' "$task_json" | ${pkgs.jq}/bin/jq -r '.runtime.runtimeInputs[]?')
+    done < <(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.runtimeInputs[]?')
 
     base_path="${pkgs.coreutils}/bin:${pkgs.findutils}/bin:${pkgs.gnused}/bin:${pkgs.gnugrep}/bin:${pkgs.jq}/bin:${pkgs.bash}/bin"
     if [ -n "$runtime_path" ]; then
@@ -56,9 +56,9 @@
       final_path="$base_path"
     fi
 
-    locale="$(printf '%s' "$task_json" | ${pkgs.jq}/bin/jq -r '.runtime.locale // "C.UTF-8"')"
-    timezone="$(printf '%s' "$task_json" | ${pkgs.jq}/bin/jq -r '.runtime.timezone // "UTC"')"
-    umask_value="$(printf '%s' "$task_json" | ${pkgs.jq}/bin/jq -r '.runtime.umask // "022"')"
+    locale="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.locale // "C.UTF-8"')"
+    timezone="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.timezone // "UTC"')"
+    umask_value="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.umask // "022"')"
 
     local home_value
     home_value="''${HOME:-$workdir}"
@@ -70,13 +70,13 @@
       if [ -n "$pass_name" ] && [ -n "''${!pass_name+x}" ]; then
         env_cmd+=("$pass_name=''${!pass_name}")
       fi
-    done < <(printf '%s' "$task_json" | ${pkgs.jq}/bin/jq -r '.runtime.passThroughEnv[]?')
+    done < <(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.passThroughEnv[]?')
 
     while IFS=$'\t' read -r env_name env_value; do
       if [ -n "$env_name" ]; then
         env_cmd+=("$env_name=$env_value")
       fi
-    done < <(printf '%s' "$task_json" | ${pkgs.jq}/bin/jq -r '.runtime.env | to_entries[]? | [.key, (.value | tostring)] | @tsv')
+    done < <(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.env | to_entries[]? | [.key, (.value | tostring)] | @tsv')
 
     umask "$umask_value"
 
@@ -84,5 +84,15 @@
       cd "$workdir"
       "''${env_cmd[@]}" ${pkgs.bash}/bin/bash -euo pipefail -c "$command" -- "$@"
     )
+  }
+
+  run_in_sandbox() {
+    local task_json="$1"
+    shift
+    local command="$1"
+    shift
+    local runtime_json
+    runtime_json="$(printf '%s' "$task_json" | ${pkgs.jq}/bin/jq -c '.runtime')"
+    run_in_sandbox_runtime "$runtime_json" "$command" "$@"
   }
 ''
