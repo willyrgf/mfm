@@ -60,6 +60,9 @@ let
     TIMING_TEARDOWN=""
     TIMING_ACCOUNTED=""
     TIMING_UNTRACKED=""
+    PAR_MAX_WORKERS=""
+    PAR_PEAK_WORKERS=""
+    PAR_CANCELED_COUNT=""
     if [ -n "''${CI_ARTIFACTS_DIR:-}" ] && [ -f "$CI_ARTIFACTS_DIR/summary.json" ]; then
       SUMMARY_JSON="$CI_ARTIFACTS_DIR/summary.json"
     elif [ -n "$LOGFILE" ]; then
@@ -73,7 +76,7 @@ let
       echo "Source: $SUMMARY_JSON"
       ${pkgs.jq}/bin/jq -r '
         if .steps then
-          .steps[] | "  [\(if .status == "passed" then "PASS" elif .status == "skipped" then "SKIP" else "FAIL" end)] \(.name) (\(.duration // "?")s)"
+          .steps[] | "  [\(if .status == "passed" then "PASS" elif .status == "skipped" then "SKIP" elif .status == "failed" then "FAIL" elif .status == "canceled" then "FAIL" else "FAIL" end)] \(.name) (\(.duration // "?")s)"
         else
           empty
         end
@@ -99,6 +102,21 @@ let
           DURATION="$TIMING_TOTAL"
         fi
       fi
+
+      PAR_FIELDS=$(${pkgs.jq}/bin/jq -r '
+        if (.timing.parallelism and (.timing.parallelism | type == "object")) then
+          [
+            (.timing.parallelism.max_workers // ""),
+            (.timing.parallelism.peak_workers // ""),
+            (.timing.parallelism.canceled_count // "")
+          ] | @tsv
+        else
+          ""
+        end
+      ' "$SUMMARY_JSON" 2>/dev/null || true)
+      if [ -n "$PAR_FIELDS" ]; then
+        IFS=$'\t' read -r PAR_MAX_WORKERS PAR_PEAK_WORKERS PAR_CANCELED_COUNT <<< "$PAR_FIELDS"
+      fi
     fi
 
     if _is_nonneg_int "$DURATION"; then
@@ -111,6 +129,10 @@ let
       && _is_nonneg_int "$TIMING_ACCOUNTED" \
       && _is_nonneg_int "$TIMING_UNTRACKED"; then
       log_info "Time breakdown setup=''${TIMING_SETUP}s steps=''${TIMING_STEPS}s teardown=''${TIMING_TEARDOWN}s accounted=''${TIMING_ACCOUNTED}s untracked=''${TIMING_UNTRACKED}s"
+    fi
+
+    if _is_nonneg_int "$PAR_MAX_WORKERS" && _is_nonneg_int "$PAR_PEAK_WORKERS" && _is_nonneg_int "$PAR_CANCELED_COUNT"; then
+      log_info "Parallelism max_workers=$PAR_MAX_WORKERS peak_workers=$PAR_PEAK_WORKERS canceled_count=$PAR_CANCELED_COUNT"
     fi
 
     if [ "$EXIT_CODE" -ne 0 ] 2>/dev/null; then

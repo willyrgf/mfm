@@ -21,6 +21,36 @@ let
     inherit pkgs knownApps;
   };
 
+  isPositiveInt = value: builtins.isInt value && value >= 1;
+  isLockToken = value: builtins.isString value && (builtins.match "^[A-Za-z0-9._:-]+$" value) != null;
+
+  renderStringValues =
+    values:
+    builtins.concatStringsSep ", " (
+      map (value: if builtins.isString value then value else "<invalid>") values
+    );
+
+  duplicateValues =
+    values:
+    let
+      uniqueValues = lib.unique values;
+    in
+    builtins.filter (
+      value: (builtins.length (builtins.filter (other: other == value) values)) > 1
+    ) uniqueValues;
+
+  validateParallelErrors =
+    {
+      context,
+      parallel,
+    }:
+    if !builtins.isAttrs parallel then
+      [ "${context} must be an attribute set" ]
+    else
+      expect (
+        !(parallel ? maxWorkers) || isPositiveInt parallel.maxWorkers
+      ) "${context}.maxWorkers must be an integer >= 1";
+
   renderWhen =
     when:
     let
@@ -62,18 +92,22 @@ let
     }:
     let
       prefix = "ci.steps.${stepName}";
-      depends = step.dependsOn or [ ];
+      stepAttr = if builtins.isAttrs step then step else { };
+      depends = stepAttr.dependsOn or [ ];
+      locks = stepAttr.locks or [ ];
       unknownDepends = builtins.filter (dep: !(builtins.elem dep knownStepNames)) depends;
+      invalidLocks =
+        if builtins.isList locks then builtins.filter (lock: !(isLockToken lock)) locks else [ ];
       whenErrs =
-        if step ? when then
+        if stepAttr ? when then
           validateWhenErrors {
             inherit stepName;
-            when = step.when;
+            when = stepAttr.when;
           }
         else
           [ ];
-      stepActions = step.actions or [ ];
-      cleanupActions = step.cleanupActions or [ ];
+      stepActions = stepAttr.actions or [ ];
+      cleanupActions = stepAttr.cleanupActions or [ ];
     in
     if !builtins.isAttrs step then
       [ "${prefix}: step config must be an attribute set" ]
@@ -97,6 +131,12 @@ let
         unknownDepends == [ ]
       ) "${prefix}.dependsOn references unknown steps: ${builtins.concatStringsSep ", " unknownDepends}"
       ++ expect (
+        builtins.isList locks && isListOfNonEmptyStrings locks
+      ) "${prefix}.locks must be a list of non-empty strings"
+      ++
+        expect (invalidLocks == [ ])
+          "${prefix}.locks entries must match ^[A-Za-z0-9._:-]+$ (invalid: ${renderStringValues invalidLocks})"
+      ++ expect (
         !(step ? env) || isScalarAttrset (step.env or { })
       ) "${prefix}.env must be an attrset with shell-safe keys and scalar values"
       ++ whenErrs
@@ -119,26 +159,80 @@ let
     }:
     let
       prefix = "ci.modes.${modeName}";
-      modeSteps = modeCfg.steps or [ ];
-      unknown = builtins.filter (stepName: !(builtins.elem stepName knownStepNames)) modeSteps;
+      modeAttr = if builtins.isAttrs modeCfg then modeCfg else { };
+      hasSteps = modeAttr ? steps;
+      hasStages = modeAttr ? stages;
+      modeSteps = modeAttr.steps or [ ];
+      modeStages = modeAttr.stages or [ ];
+      flatStageSteps =
+        if builtins.isList modeStages then
+          builtins.concatLists (map (stage: if builtins.isList stage then stage else [ ]) modeStages)
+        else
+          [ ];
+      unknownSteps =
+        if builtins.isList modeSteps then
+          builtins.filter (stepName: !(builtins.elem stepName knownStepNames)) modeSteps
+        else
+          [ ];
+      unknownStageSteps =
+        if builtins.isList flatStageSteps then
+          builtins.filter (stepName: !(builtins.elem stepName knownStepNames)) flatStageSteps
+        else
+          [ ];
+      duplicateSteps = if builtins.isList modeSteps then duplicateValues modeSteps else [ ];
+      duplicateStageSteps =
+        if builtins.isList flatStageSteps then duplicateValues flatStageSteps else [ ];
+      stepModeErrs =
+        if !hasSteps then
+          [ ]
+        else
+          expect (isNonEmptyList modeSteps) "${prefix}.steps must be a non-empty list"
+          ++ expect (isListOfNonEmptyStrings modeSteps) "${prefix}.steps must be a list of non-empty strings"
+          ++ expect (
+            unknownSteps == [ ]
+          ) "${prefix}.steps references unknown steps: ${renderStringValues unknownSteps}"
+          ++ expect (
+            duplicateSteps == [ ]
+          ) "${prefix}.steps includes duplicate steps: ${renderStringValues duplicateSteps}";
+      stageModeErrs =
+        if !hasStages then
+          [ ]
+        else if !builtins.isList modeStages then
+          [ "${prefix}.stages must be a non-empty list of non-empty step lists" ]
+        else
+          expect (modeStages != [ ]) "${prefix}.stages must be a non-empty list"
+          ++ builtins.concatLists (
+            lib.imap0 (
+              index: stage:
+              let
+                stagePrefix = "${prefix}.stages[${toString index}]";
+              in
+              expect (isNonEmptyList stage) "${stagePrefix} must be a non-empty list"
+              ++ expect (isListOfNonEmptyStrings stage) "${stagePrefix} must be a list of non-empty step names"
+            ) modeStages
+          )
+          ++ expect (
+            unknownStageSteps == [ ]
+          ) "${prefix}.stages references unknown steps: ${renderStringValues unknownStageSteps}"
+          ++ expect (
+            duplicateStageSteps == [ ]
+          ) "${prefix}.stages includes duplicate steps: ${renderStringValues duplicateStageSteps}";
+      modeParallelErrs =
+        if modeAttr ? parallel then
+          validateParallelErrors {
+            context = "${prefix}.parallel";
+            parallel = modeAttr.parallel;
+          }
+        else
+          [ ];
     in
     if !builtins.isAttrs modeCfg then
       [ "${prefix}: mode config must be an attribute set" ]
     else
-      expect (isNonEmptyList modeSteps) "${prefix}.steps must be a non-empty list"
-      ++ expect (isListOfNonEmptyStrings modeSteps) "${prefix}.steps must be a list of non-empty strings"
-      ++ expect (
-        !(modeCfg ? sequential) || builtins.isBool modeCfg.sequential
-      ) "${prefix}.sequential must be a bool when set"
-      ++ expect (
-        !(modeCfg ? parallel) || builtins.isBool modeCfg.parallel
-      ) "${prefix}.parallel must be a bool when set"
-      ++ expect (
-        !(modeCfg ? sequential && modeCfg ? parallel)
-      ) "${prefix}.sequential and ${prefix}.parallel are mutually exclusive"
-      ++ expect (
-        unknown == [ ]
-      ) "${prefix}.steps references unknown steps: ${builtins.concatStringsSep ", " unknown}";
+      expect (hasSteps != hasStages) "${prefix} must define exactly one of .steps or .stages"
+      ++ stepModeErrs
+      ++ stageModeErrs
+      ++ modeParallelErrs;
 
   hasCycleFrom =
     steps: stepNames: path: name:
@@ -215,8 +309,12 @@ let
           actions = teardownActions;
           required = false;
         };
+      parallelErrs = validateParallelErrors {
+        context = "ci.parallel";
+        parallel = ci.parallel or { };
+      };
 
-      errs = baseErrs ++ stepErrs ++ modeErrs ++ cycleErrs ++ rootActionErrs;
+      errs = baseErrs ++ stepErrs ++ modeErrs ++ cycleErrs ++ rootActionErrs ++ parallelErrs;
 
       normalizedSteps = builtins.listToAttrs (
         map (
@@ -232,6 +330,7 @@ let
               when = renderWhen (raw.when or { });
               skip_if_missing = raw.skipIfMissing or [ ];
               depends_on = raw.dependsOn or [ ];
+              locks = lib.unique (raw.locks or [ ]);
             };
           }
         ) stepNames
@@ -241,6 +340,7 @@ let
       {
         steps = normalizedSteps;
         inherit modes;
+        parallel = ci.parallel or { };
         setupScript = actionSchema.renderActionList setupActions;
         teardownScript = actionSchema.renderActionList teardownActions;
       }

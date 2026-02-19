@@ -541,21 +541,6 @@ let
       require_absent "$modules_file" 'tail -50 "$HELIOS_DIR/logs/helios.log" >&2 || true' "modules helios unguarded log tail"
     }
 
-    check_reth_lifecycle_contracts() {
-      local reth_config="$ROOT/nixfied/.framework/reth/config.nix"
-      local reth_default="$ROOT/nixfied/.framework/reth/default.nix"
-      local reth_lifecycle="$ROOT/nixfied/.framework/reth/lifecycle.nix"
-
-      require_contains "$reth_config" 'portKeyP2p = cfg.portKeyP2p or "rethP2p";' "reth p2p port key default"
-      require_contains "$reth_default" 'p2pPortVar = slots.portVarName config.portKeyP2p;' "reth p2p artifact export"
-      require_contains "$reth_lifecycle" 'P2P_PORT_VAR="' "reth p2p runtime var"
-      require_contains "$reth_lifecycle" 'targetVar = "RETH_P2P_PORT";' "reth p2p slot resolve"
-      require_contains "$reth_lifecycle" '--port "$RETH_P2P_PORT"' "reth p2p arg wiring"
-      require_contains "$reth_lifecycle" 'p2p_port=$RETH_P2P_PORT' "reth p2p status visibility"
-      require_contains "$reth_lifecycle" 'signal_num=' "reth trap signal diagnostics"
-      require_contains "$reth_lifecycle" 'signal_trap_' "reth trap wait reason"
-    }
-
     if [ "$SKIP_SETUP" -ne 1 ]; then
       log "flake eval"
       nix flake show "path:$ROOT" >/dev/null
@@ -566,9 +551,6 @@ let
 
       log "fixture hardening contracts"
       check_fixture_hardening_contracts
-
-      log "reth lifecycle contracts"
-      check_reth_lifecycle_contracts
 
       log "core apps"
       HELP_OUT="$WORKDIR/help.txt"
@@ -979,6 +961,88 @@ let
     fi
     assert_file_exists "$CI_FAIL_DIR/.ci-artifacts/fail.cleanup"
     assert_file_exists "$CI_FAIL_DIR/.ci-artifacts/teardown.ok"
+
+    CI_SEQ_DIR="$WORKDIR/ci-sequential-legacy"
+    CI_SEQ_LOG="$WORKDIR/ci-sequential-legacy.log"
+    mkdir -p "$CI_SEQ_DIR"
+    set +e
+    (cd "$CI_SEQ_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts" "$CI_SCRIPT" --mode sequential-legacy > "$CI_SEQ_LOG" 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      fail "expected legacy sequential mode to exit zero"
+    fi
+    assert_file_exists "$CI_SEQ_DIR/.ci-artifacts/seq-one.ok"
+    assert_file_exists "$CI_SEQ_DIR/.ci-artifacts/seq-two.ok"
+
+    CI_STAGE_DIR="$WORKDIR/ci-staged"
+    CI_STAGE_LOG="$WORKDIR/ci-staged.log"
+    mkdir -p "$CI_STAGE_DIR"
+    set +e
+    (cd "$CI_STAGE_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts" "$CI_SCRIPT" --mode staged > "$CI_STAGE_LOG" 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      fail "expected staged mode to exit zero"
+    fi
+    assert_file_exists "$CI_STAGE_DIR/.ci-artifacts/parallel-one.ok"
+    assert_file_exists "$CI_STAGE_DIR/.ci-artifacts/parallel-two.ok"
+    assert_file_exists "$CI_STAGE_DIR/.ci-artifacts/stage-barrier.ok"
+    assert_contains "$CI_STAGE_DIR/.ci-artifacts/summary.json" '"parallelism"'
+    assert_contains "$CI_STAGE_DIR/.ci-artifacts/summary.json" '"max_workers": 2'
+    assert_contains "$CI_STAGE_DIR/.ci-artifacts/summary.json" '"peak_workers": 2'
+    assert_contains "$CI_STAGE_DIR/.ci-artifacts/summary.json" '"canceled_count": 0'
+
+    CI_LOCK_DIR="$WORKDIR/ci-locked"
+    CI_LOCK_LOG="$WORKDIR/ci-locked.log"
+    mkdir -p "$CI_LOCK_DIR"
+    set +e
+    (cd "$CI_LOCK_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts" "$CI_SCRIPT" --mode locked > "$CI_LOCK_LOG" 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      fail "expected locked mode to exit zero"
+    fi
+    assert_file_exists "$CI_LOCK_DIR/.ci-artifacts/lock-one.ok"
+    assert_file_exists "$CI_LOCK_DIR/.ci-artifacts/lock-two.ok"
+    assert_contains "$CI_LOCK_DIR/.ci-artifacts/summary.json" '"max_workers": 2'
+    assert_contains "$CI_LOCK_DIR/.ci-artifacts/summary.json" '"peak_workers": 1'
+
+    CI_CAP_DIR="$WORKDIR/ci-worker-cap"
+    CI_CAP_LOG="$WORKDIR/ci-worker-cap.log"
+    mkdir -p "$CI_CAP_DIR"
+    set +e
+    (cd "$CI_CAP_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts" "$CI_SCRIPT" --mode worker-cap > "$CI_CAP_LOG" 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" -ne 0 ]; then
+      fail "expected worker-cap mode to exit zero"
+    fi
+    assert_file_exists "$CI_CAP_DIR/.ci-artifacts/cap-one.ok"
+    assert_file_exists "$CI_CAP_DIR/.ci-artifacts/cap-two.ok"
+    assert_file_exists "$CI_CAP_DIR/.ci-artifacts/cap-three.ok"
+    assert_contains "$CI_CAP_DIR/.ci-artifacts/summary.json" '"max_workers": 2'
+    assert_contains "$CI_CAP_DIR/.ci-artifacts/summary.json" '"peak_workers": 2'
+
+    CI_CANCEL_DIR="$WORKDIR/ci-cancel"
+    CI_CANCEL_LOG="$WORKDIR/ci-cancel.log"
+    mkdir -p "$CI_CANCEL_DIR"
+    set +e
+    (cd "$CI_CANCEL_DIR" && CI_ARTIFACTS_DIR=".ci-artifacts" "$CI_SCRIPT" --mode cancel > "$CI_CANCEL_LOG" 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+      fail "expected cancel mode to exit non-zero"
+    fi
+    assert_file_exists "$CI_CANCEL_DIR/.ci-artifacts/cancel-fail.cleanup"
+    assert_file_exists "$CI_CANCEL_DIR/.ci-artifacts/cancel-long.started"
+    assert_file_exists "$CI_CANCEL_DIR/.ci-artifacts/cancel-long.cleanup"
+    assert_file_absent "$CI_CANCEL_DIR/.ci-artifacts/cancel-long.done"
+    assert_file_absent "$CI_CANCEL_DIR/.ci-artifacts/cancel-tail.ok"
+    assert_file_exists "$CI_CANCEL_DIR/.ci-artifacts/teardown.ok"
+    assert_contains "$CI_CANCEL_DIR/.ci-artifacts/summary.json" '"failed"'
+    assert_contains "$CI_CANCEL_DIR/.ci-artifacts/summary.json" '"canceled"'
+    assert_contains "$CI_CANCEL_DIR/.ci-artifacts/summary.json" '"canceled_count":'
 
     CI_ERR_DIR="$WORKDIR/ci-errors"
     CI_MODE_LOG="$WORKDIR/ci-unknown-mode.log"
@@ -2053,7 +2117,10 @@ let
     assert_contains "$BASIC_HELP_DEV" "Usage:"
     assert_contains "$BASIC_HELP_DEV" "nix run .#dev"
     run_app_quiet "$INSTALL_TARGET" dev
-    run_app_quiet "$INSTALL_TARGET" test
+    BASIC_TEST_LOG="$WORKDIR/basic-test.log"
+    run_app "$INSTALL_TARGET" test > "$BASIC_TEST_LOG"
+    assert_contains "$BASIC_TEST_LOG" "Summary"
+    assert_contains "$BASIC_TEST_LOG" "Parallelism max_workers="
     run_app_quiet "$INSTALL_TARGET" build
     BASIC_CHECK_DRIFT="$WORKDIR/basic-check-drift.log"
     set +e
@@ -3350,6 +3417,10 @@ let
     assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"teardown_duration"'
     assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"accounted_duration"'
     assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"untracked_duration"'
+    assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"parallelism"'
+    assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"max_workers"'
+    assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"peak_workers"'
+    assert_contains "$CI_SJ_DIR/.ci-artifacts/summary.json" '"canceled_count"'
 
     CI_SJ_EQ_LOG="$WORKDIR/ci-summary-json-equals.log"
     set +e
