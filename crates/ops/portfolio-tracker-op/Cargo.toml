@@ -13,7 +13,7 @@ mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-op-common = { path = "../../states/common" }
 mfm-evm-runtime = { path = "../../evm-runtime" }
-mfm-op-keystore-common = { path = "../keystore-common" }
+mfm-op-keystore-common = { path = "../../states/keystore" }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -11,7 +11,7 @@ hex = { workspace = true }
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-op-common = { path = "../../states/common" }
-mfm-op-keystore-common = { path = "../keystore-common" }
+mfm-op-keystore-common = { path = "../../states/keystore" }
 
 [dev-dependencies]
 async-trait = { workspace = true }

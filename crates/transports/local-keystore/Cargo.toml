@@ -19,6 +19,6 @@ url = { workspace = true }
 
 mfm-machine = { path = "../../machine" }
 mfm-op-keystore = { package = "mfm-op-keystore-shim", path = "../../ops/keystore-op" }
-mfm-op-keystore-common = { path = "../../ops/keystore-common" }
+mfm-op-keystore-common = { path = "../../states/keystore" }
 mfm-evm-core = { path = "../../evm-core" }
 mfm_core = { path = "../../core" }

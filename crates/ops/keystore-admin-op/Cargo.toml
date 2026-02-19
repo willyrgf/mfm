@@ -11,4 +11,4 @@ regex = "1.0"
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-op-common = { path = "../../states/common" }
-mfm-op-keystore-common = { path = "../keystore-common" }
+mfm-op-keystore-common = { path = "../../states/keystore" }
