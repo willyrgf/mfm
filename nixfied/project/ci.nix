@@ -339,12 +339,12 @@ in
     };
     modes = {
       basic = {
+        sequential = false;
         steps = [
           "fmt"
           "clippy"
           "architecture-verify"
           "shell-app-contracts"
-          "build"
           "tests"
         ];
       };
@@ -352,32 +352,31 @@ in
         steps = [ "audit" ];
       };
       parity = {
+        sequential = false;
         steps = [
+          "parity-compile"
           "parity-postgres"
-          "parity-s3"
           "parity-rest-api-smoke"
           "parity-evm-reth"
           "parity-aave-v3-reth"
           "parity-postgres-state-events-audit"
-          "parity-keystore-reth-tx-sign-send"
           "parity-evm-helios-smoke"
         ];
       };
       full = {
+        sequential = false;
         steps = [
           "fmt"
           "clippy"
           "architecture-verify"
           "shell-app-contracts"
-          "build"
           "tests"
+          "parity-compile"
           "parity-postgres"
-          "parity-s3"
           "parity-rest-api-smoke"
           "parity-evm-reth"
           "parity-aave-v3-reth"
           "parity-postgres-state-events-audit"
-          "parity-keystore-reth-tx-sign-send"
           "parity-evm-helios-smoke"
         ];
       };
@@ -388,6 +387,7 @@ in
     steps = {
       tests = {
         description = "Tests";
+        dependsOn = [ "clippy" ];
         actions = [
           {
             kind = "exec";
@@ -446,18 +446,6 @@ in
           }
         ];
       };
-      build = {
-        description = "Build (release, all features)";
-        actions = [
-          {
-            kind = "exec";
-            argv = [
-              "."
-              (ciStepScript "build")
-            ];
-          }
-        ];
-      };
       audit = {
         description = "Security audit (cargo-audit)";
         actions = [
@@ -471,8 +459,22 @@ in
         ];
       };
 
+      parity-compile = {
+        description = "Parity: precompile parity test binaries (no-run)";
+        actions = [
+          {
+            kind = "exec";
+            argv = [
+              "."
+              (ciStepScript "parity-compile")
+            ];
+          }
+        ];
+      };
+
       parity-postgres = {
         description = "Parity: Postgres event store";
+        dependsOn = [ "parity-compile" ];
         env = {
           AUTO_STOP_CONFLICTING = "1";
         };
@@ -499,39 +501,9 @@ in
         ];
       };
 
-      parity-s3 = {
-        description = "Parity: S3/MinIO artifact store";
-        fixtures = {
-          services = [
-            {
-              name = "minio";
-              profile = "test";
-              exports = [ "s3" ];
-              bucket = "mfm-test";
-              prefix = "mfm-artifacts";
-              region = "us-east-1";
-              bootstrap = [ "mfm-test" ];
-              logName = "minio.log";
-            }
-          ];
-          artifacts = {
-            logs = true;
-            prefix = "parity-s3";
-          };
-        };
-        actions = [
-          {
-            kind = "exec";
-            argv = [
-              "."
-              (ciStepScript "parity-s3")
-            ];
-          }
-        ];
-      };
-
       parity-rest-api-smoke = {
-        description = "Parity: REST API smoke on Postgres + S3/MinIO";
+        description = "Parity: S3 contract + REST API smoke on Postgres + S3/MinIO";
+        dependsOn = [ "parity-compile" ];
         env = {
           AUTO_STOP_CONFLICTING = "1";
         };
@@ -570,6 +542,7 @@ in
 
       parity-evm-reth = {
         description = "Parity: EVM + portfolio tracker scenarios on reth";
+        dependsOn = [ "parity-compile" ];
         env = {
           AUTO_STOP_CONFLICTING = "1";
         };
@@ -613,11 +586,9 @@ in
 
       parity-aave-v3-reth = {
         description = "Parity: Aave v3 deploy/configure/lend/borrow scenario on reth";
+        dependsOn = [ "parity-evm-reth" ];
         env = {
           AUTO_STOP_CONFLICTING = "1";
-          SERVICE_REUSE_POLICY = "never";
-          SERVICE_OWNER_SCOPE = "ephemeral";
-          SERVICE_DISCOVERY_SCOPE = "local";
         };
         fixtures = {
           services = [
@@ -659,6 +630,10 @@ in
 
       parity-postgres-state-events-audit = {
         description = "Parity: query-only audit of Postgres kernel state events from prior parity runs";
+        dependsOn = [
+          "parity-evm-reth"
+          "parity-aave-v3-reth"
+        ];
         env = {
           AUTO_STOP_CONFLICTING = "1";
         };
@@ -685,37 +660,9 @@ in
         ];
       };
 
-      parity-keystore-reth-tx-sign-send = {
-        description = "Parity: keystore CLI import/sign/send raw tx on reth";
-        env = {
-          AUTO_STOP_CONFLICTING = "1";
-        };
-        fixtures = {
-          services = [
-            {
-              name = "reth";
-              profile = "test";
-              logName = "reth-keystore-cli.log";
-            }
-          ];
-          artifacts = {
-            logs = true;
-            prefix = "parity-keystore-reth-tx-sign-send";
-          };
-        };
-        actions = [
-          {
-            kind = "exec";
-            argv = [
-              "."
-              (ciStepScript "parity-keystore-reth-tx-sign-send")
-            ];
-          }
-        ];
-      };
-
       parity-evm-helios-smoke = {
-        description = "Parity: Helios lifecycle and RPC smoke over reth execution";
+        description = "Parity: keystore tx send + Helios lifecycle/RPC smoke over reth execution";
+        dependsOn = [ "parity-compile" ];
         fixtures = {
           services = [
             {

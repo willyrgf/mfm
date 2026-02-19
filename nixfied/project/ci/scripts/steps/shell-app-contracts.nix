@@ -8,13 +8,23 @@ run_contract_checks() {
 
   SYSTEM=$(nix eval --raw --impure --expr builtins.currentSystem)
 
-  ci_contract=$(nix eval --json ".#apps.$SYSTEM.ci.meta.nixfied.api.appContract")
-  check_contract=$(nix eval --json ".#apps.$SYSTEM.check.meta.nixfied.api.appContract")
-  cli_contract=$(nix eval --json ".#apps.$SYSTEM.mfm_cli.meta.nixfied.api.appContract")
-  rest_contract=$(nix eval --json ".#apps.$SYSTEM.mfm_rest_api.meta.nixfied.api.appContract")
-  snapshot_contract=$(nix eval --json ".#apps.$SYSTEM.\"mfm::portfolio::snapshot\".meta.nixfied.api.appContract")
-  process_status_contract=$(nix eval --json ".#apps.$SYSTEM.\"process::status\".meta.nixfied.api.appContract")
-  run_start_contract=$(nix eval --json ".#apps.$SYSTEM.\"mfm::run::start\".meta.nixfied.api.appContract")
+  all_contracts=$(nix eval --json --apply 'apps: {
+    ci = apps.ci.meta.nixfied.api.appContract;
+    check = apps.check.meta.nixfied.api.appContract;
+    mfm_cli = apps.mfm_cli.meta.nixfied.api.appContract;
+    mfm_rest_api = apps.mfm_rest_api.meta.nixfied.api.appContract;
+    snapshot = apps."mfm::portfolio::snapshot".meta.nixfied.api.appContract;
+    process_status = apps."process::status".meta.nixfied.api.appContract;
+    run_start = apps."mfm::run::start".meta.nixfied.api.appContract;
+  }' ".#apps.$SYSTEM")
+
+  ci_contract=$(echo "$all_contracts" | jq -c '.ci')
+  check_contract=$(echo "$all_contracts" | jq -c '.check')
+  cli_contract=$(echo "$all_contracts" | jq -c '.mfm_cli')
+  rest_contract=$(echo "$all_contracts" | jq -c '.mfm_rest_api')
+  snapshot_contract=$(echo "$all_contracts" | jq -c '.snapshot')
+  process_status_contract=$(echo "$all_contracts" | jq -c '.process_status')
+  run_start_contract=$(echo "$all_contracts" | jq -c '.run_start')
 
   echo "$ci_contract" | jq -e '.commandClass == "batch-runner" and .allowUnknownArgs == false' >/dev/null
   echo "$ci_contract" | jq -e '.args[] | select(.name == "mode") | .kind == "option" and .type == "enum" and (.values | index("basic") != null)' >/dev/null

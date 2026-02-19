@@ -2,9 +2,14 @@
 pkgs.writeText "mfm-ci-steps-parity-evm-helios-smoke.sh" ''
   source <($SLOT_INFO)
 
+  export MFM_EVM_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
   export HELIOS_NETWORK="local"
   export HELIOS_EXECUTION_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
   export HELIOS_CONSENSUS_RPC_URL="http://127.0.0.1:$RETHHTTP_PORT"
+
+  KEYSTORE_LOGFILE=$(artifact_path "parity-keystore-reth-tx-sign-send.log")
+  log_capture "$KEYSTORE_LOGFILE" -- cargo-nightly nextest run --cargo-profile ci -p mfm --features parity-tests --test parity_keystore_reth_tx_send
+
   export HELIOS_READY_TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-120}"
   HELIOS_SERVICE_LOG=$(artifact_path "parity-evm-helios-service.log")
   fixture_start_service helios test "''${HELIOS_FIXTURE_TIMEOUT_SECS:-120}" 1 "$HELIOS_SERVICE_LOG"

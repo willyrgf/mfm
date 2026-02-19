@@ -120,7 +120,15 @@ let
   mkModePlan =
     mode:
     let
-      modeSteps = modes.${mode}.steps or [ ];
+      modeCfg = modes.${mode};
+      modeSteps = modeCfg.steps or [ ];
+      modeSequential =
+        if modeCfg ? sequential then
+          modeCfg.sequential
+        else if modeCfg ? parallel then
+          !(modeCfg.parallel)
+        else
+          true;
       mkUnit =
         index: stepName:
         let
@@ -139,7 +147,11 @@ let
                 missing = true;
                 run = "";
               };
-          sequentialDep = if index == 0 then [ ] else [ (builtins.elemAt modeSteps (index - 1)) ];
+          sequentialDep =
+            if modeSequential && index != 0 then
+              [ (builtins.elemAt modeSteps (index - 1)) ]
+            else
+              [ ];
         in
         baseUnit
         // {

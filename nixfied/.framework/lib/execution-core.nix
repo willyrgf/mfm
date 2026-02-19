@@ -116,47 +116,15 @@ let
 
         MODE_VALUE="$(${pkgs.jq}/bin/jq -r '.mode // ""' "$PLAN_FILE")"
 
-        ORDER_FILE="$(mktemp "''${TMPDIR:-/tmp}/nixfied-plan-order.XXXXXX")"
         RESULTS_FILE="$(mktemp "''${TMPDIR:-/tmp}/nixfied-plan-results.XXXXXX")"
-        trap 'rm -f "$ORDER_FILE" "$RESULTS_FILE"' EXIT
+        UNIT_RESULT_DIR="$(mktemp -d "''${TMPDIR:-/tmp}/nixfied-plan-unit-results.XXXXXX")"
+        DONE_FILE="$(mktemp "''${TMPDIR:-/tmp}/nixfied-plan-done.XXXXXX")"
+        STARTED_FILE="$(mktemp "''${TMPDIR:-/tmp}/nixfied-plan-started.XXXXXX")"
+        trap 'rm -f "$RESULTS_FILE" "$DONE_FILE" "$STARTED_FILE"; rm -rf "$UNIT_RESULT_DIR"' EXIT
         printf '[]\n' > "$RESULTS_FILE"
-
-        if ! ${pkgs.jq}/bin/jq -r '
-          def done_has($done; $name):
-            ($done | index($name)) != null;
-
-          def deps_satisfied($done; $deps):
-            (($deps // []) | all(done_has($done; .)));
-
-          .units as $units
-          | def loop($done):
-              if ($done | length) == ($units | length) then
-                $done
-              else
-                ([ $units[] | select((done_has($done; .name) | not) and deps_satisfied($done; .depends_on)) | .name ] | sort) as $ready
-                | if ($ready | length) == 0 then
-                    error("execution_plan_cycle_or_unsatisfied_dependencies")
-                  else
-                    loop($done + [$ready[0]])
-                  end
-              end;
-          loop([]) | .[]
-        ' "$PLAN_FILE" > "$ORDER_FILE"; then
-          log_error "execution plan dependency graph is not resolvable"
-          exit 1
-        fi
-
-        TOTAL_UNITS="$(wc -l < "$ORDER_FILE" | tr -d '[:space:]')"
-        case "$TOTAL_UNITS" in
-          *[!0-9]*|"")
-            log_error "failed to compute execution order"
-            exit 1
-            ;;
-        esac
-        if [ "$TOTAL_UNITS" -eq 0 ]; then
-          log_error "computed execution order is empty"
-          exit 1
-        fi
+        : > "$DONE_FILE"
+        : > "$STARTED_FILE"
+        TOTAL_UNITS="$UNIT_COUNT"
 
         record_unit() {
           local unit_id="$1"
@@ -180,6 +148,43 @@ let
           mv "$tmp_results" "$RESULTS_FILE"
         }
 
+        json_array_from_file() {
+          local list_file="$1"
+          if [ ! -s "$list_file" ]; then
+            printf '[]\n'
+            return 0
+          fi
+          ${pkgs.jq}/bin/jq -Rsc 'split("\n") | map(select(length > 0))' "$list_file"
+        }
+
+        resolve_ready_units() {
+          local done_json="$1"
+          local started_json="$2"
+
+          ${pkgs.jq}/bin/jq -r \
+            --argjson done "$done_json" \
+            --argjson started "$started_json" \
+            '
+            def has_name($names; $name):
+              ($names | index($name)) != null;
+
+            def deps_satisfied($done; $deps):
+              (($deps // []) | all(has_name($done; .)));
+
+            [
+              .units[]
+              | select(
+                  (has_name($started; .name) | not)
+                  and (has_name($done; .name) | not)
+                  and deps_satisfied($done; .depends_on)
+                )
+              | .name
+            ]
+            | sort
+            | .[]?
+            ' "$PLAN_FILE"
+        }
+
         emit_progress() {
           local unit_name="$1"
           local unit_id="$2"
@@ -199,139 +204,292 @@ let
           return 0
         }
 
+        export_unit_env() {
+          local unit_json="$1"
+          while IFS= read -r ENTRY_B64; do
+            [ -z "$ENTRY_B64" ] && continue
+            KEY="$(printf '%s' "$ENTRY_B64" | ${pkgs.coreutils}/bin/base64 -d | ${pkgs.jq}/bin/jq -r '.key')"
+            VALUE="$(printf '%s' "$ENTRY_B64" | ${pkgs.coreutils}/bin/base64 -d | ${pkgs.jq}/bin/jq -r '.value | tostring')"
+            export "$KEY=$VALUE"
+          done < <(printf '%s\n' "$unit_json" | ${pkgs.jq}/bin/jq -r '.env // {} | to_entries[] | @base64')
+        }
+
+        write_unit_result() {
+          local unit_result_file="$1"
+          local unit_id="$2"
+          local unit_name="$3"
+          local unit_status="$4"
+          local unit_duration="$5"
+          local unit_rc="$6"
+
+          ${pkgs.jq}/bin/jq -n \
+            --arg id "$unit_id" \
+            --arg name "$unit_name" \
+            --arg status "$unit_status" \
+            --arg duration "$unit_duration" \
+            --arg rc "$unit_rc" \
+            '{
+              id: $id,
+              name: $name,
+              status: $status,
+              duration: ($duration | tonumber),
+              rc: ($rc | tonumber)
+            }' > "$unit_result_file"
+        }
+
+        execute_unit() {
+          local unit_name="$1"
+          local unit_index="$2"
+          local unit_result_file="$3"
+
+          local unit_json=""
+          local unit_id=""
+          local unit_desc=""
+          local unit_start=0
+          local unit_end=0
+          local unit_duration=0
+          local unit_status=""
+          local unit_rc=0
+          local skip_reason=""
+          local unit_missing=""
+          local when_expr=""
+          local run_script_file=""
+          local cleanup_script=""
+          local cleanup_file=""
+
+          unit_json="$(${pkgs.jq}/bin/jq -c --arg name "$unit_name" '.units[] | select(.name == $name)' "$PLAN_FILE")"
+          if [ -z "$unit_json" ]; then
+            log_error "execution unit missing name=$unit_name"
+            write_unit_result "$unit_result_file" "$unit_name" "$unit_name" "failed" "0" "1"
+            return 0
+          fi
+
+          unit_id="$(printf '%s\n' "$unit_json" | ${pkgs.jq}/bin/jq -r '.id // .name')"
+          unit_desc="$(printf '%s\n' "$unit_json" | ${pkgs.jq}/bin/jq -r '.description // .name')"
+
+          export NIXFIED_UNIT_ID="$unit_id"
+          export NIXFIED_UNIT_ATTEMPT="1"
+
+          echo ""
+          log_step "$unit_index" "$TOTAL_UNITS" "$unit_desc"
+          emit_progress "$unit_name" "$unit_id" "$unit_index"
+
+          unit_start="$(${pkgs.coreutils}/bin/date +%s)"
+          unit_status=""
+          unit_rc=0
+          skip_reason=""
+
+          unit_missing="$(printf '%s\n' "$unit_json" | ${pkgs.jq}/bin/jq -r '(.missing // false) | tostring')"
+          if [ "$unit_missing" = "true" ]; then
+            echo "Unknown step: $unit_name" >&2
+            unit_status="failed"
+            unit_rc=1
+          fi
+
+          if [ -z "$unit_status" ]; then
+            while IFS= read -r MISSING_VAR; do
+              [ -z "$MISSING_VAR" ] && continue
+              if [ -z "''${!MISSING_VAR:-}" ]; then
+                skip_reason="missing $MISSING_VAR"
+                unit_status="skipped"
+                unit_rc=42
+                break
+              fi
+            done < <(printf '%s\n' "$unit_json" | ${pkgs.jq}/bin/jq -r '.skip_if_missing[]?')
+          fi
+
+          if [ -z "$unit_status" ]; then
+            when_expr="$(printf '%s\n' "$unit_json" | ${pkgs.jq}/bin/jq -r '.when // ""')"
+            if [ -n "$when_expr" ]; then
+              if ! ${pkgs.bash}/bin/bash -c "$when_expr"; then
+                skip_reason="condition not met"
+                unit_status="skipped"
+                unit_rc=42
+              fi
+            fi
+          fi
+
+          if [ -n "$skip_reason" ]; then
+            log_skip "$unit_desc: $skip_reason"
+          fi
+
+          if [ -z "$unit_status" ]; then
+            run_script_file="$(mktemp "''${TMPDIR:-/tmp}/nixfied-unit-run.XXXXXX")"
+            {
+              printf '%s\n' '#!/usr/bin/env bash'
+              printf '%s\n' 'set -euo pipefail'
+              printf '%s\n' "$unit_json" | ${pkgs.jq}/bin/jq -r '.run // ""'
+            } > "$run_script_file"
+            chmod +x "$run_script_file"
+
+            set +e
+            (
+              if [ -n "$CONTEXT_SCRIPT" ]; then
+                source "$CONTEXT_SCRIPT"
+              fi
+              export_unit_env "$unit_json"
+              source "$run_script_file"
+            )
+            unit_rc=$?
+            set -e
+            rm -f "$run_script_file"
+
+            if [ "$unit_rc" -eq 0 ]; then
+              unit_status="passed"
+            else
+              unit_status="failed"
+            fi
+          fi
+
+          cleanup_script="$(printf '%s\n' "$unit_json" | ${pkgs.jq}/bin/jq -r '.cleanup // ""')"
+          if [ -n "$cleanup_script" ]; then
+            cleanup_file="$(mktemp "''${TMPDIR:-/tmp}/nixfied-unit-cleanup.XXXXXX")"
+            {
+              printf '%s\n' '#!/usr/bin/env bash'
+              printf '%s\n' 'set -euo pipefail'
+              printf '%s\n' "$cleanup_script"
+            } > "$cleanup_file"
+            chmod +x "$cleanup_file"
+            set +e
+            (
+              if [ -n "$CONTEXT_SCRIPT" ]; then
+                source "$CONTEXT_SCRIPT"
+              fi
+              export_unit_env "$unit_json"
+              source "$cleanup_file"
+            ) >/dev/null 2>&1
+            set -e
+            rm -f "$cleanup_file"
+          fi
+
+          unit_end="$(${pkgs.coreutils}/bin/date +%s)"
+          unit_duration=$((unit_end - unit_start))
+
+          write_unit_result "$unit_result_file" "$unit_id" "$unit_name" "$unit_status" "$unit_duration" "$unit_rc"
+          return 0
+        }
+
         PLAN_START="$(${pkgs.coreutils}/bin/date +%s)"
         STEP_INDEX=0
         STEPS_DURATION=0
         EXIT_CODE=0
 
-        while IFS= read -r UNIT_NAME; do
-          [ -z "$UNIT_NAME" ] && continue
-          STEP_INDEX=$((STEP_INDEX + 1))
+        while true; do
+          DONE_COUNT="$(wc -l < "$DONE_FILE" | tr -d '[:space:]')"
+          case "$DONE_COUNT" in
+            *[!0-9]*|"")
+              log_error "failed to resolve completed-unit count"
+              EXIT_CODE=1
+              break
+              ;;
+          esac
+          if [ "$DONE_COUNT" -ge "$TOTAL_UNITS" ]; then
+            break
+          fi
 
-          UNIT_JSON="$(${pkgs.jq}/bin/jq -c --arg name "$UNIT_NAME" '.units[] | select(.name == $name)' "$PLAN_FILE")"
-          if [ -z "$UNIT_JSON" ]; then
-            log_error "execution unit missing name=$UNIT_NAME"
+          DONE_JSON="$(json_array_from_file "$DONE_FILE")"
+          STARTED_JSON="$(json_array_from_file "$STARTED_FILE")"
+          READY_UNITS="$(resolve_ready_units "$DONE_JSON" "$STARTED_JSON")"
+          if [ -z "$READY_UNITS" ]; then
+            log_error "execution plan dependency graph is not resolvable"
             EXIT_CODE=1
             break
           fi
 
-          UNIT_ID="$(printf '%s\n' "$UNIT_JSON" | ${pkgs.jq}/bin/jq -r '.id // .name')"
-          UNIT_DESC="$(printf '%s\n' "$UNIT_JSON" | ${pkgs.jq}/bin/jq -r '.description // .name')"
-          export NIXFIED_UNIT_ID="$UNIT_ID"
-          export NIXFIED_UNIT_ATTEMPT="1"
+          WAVE_NAMES_FILE="$(mktemp "''${TMPDIR:-/tmp}/nixfied-wave-names.XXXXXX")"
+          WAVE_PIDS_FILE="$(mktemp "''${TMPDIR:-/tmp}/nixfied-wave-pids.XXXXXX")"
+          WAVE_RESULTS_FILE="$(mktemp "''${TMPDIR:-/tmp}/nixfied-wave-results.XXXXXX")"
+          : > "$WAVE_NAMES_FILE"
+          : > "$WAVE_PIDS_FILE"
+          : > "$WAVE_RESULTS_FILE"
 
-          echo ""
-          log_step "$STEP_INDEX" "$TOTAL_UNITS" "$UNIT_DESC"
-          emit_progress "$UNIT_NAME" "$UNIT_ID" "$STEP_INDEX"
+          while IFS= read -r UNIT_NAME; do
+            [ -z "$UNIT_NAME" ] && continue
+            STEP_INDEX=$((STEP_INDEX + 1))
 
-          UNIT_START="$(${pkgs.coreutils}/bin/date +%s)"
-          UNIT_STATUS=""
-          UNIT_RC=0
-          SKIP_REASON=""
+            printf '%s\n' "$UNIT_NAME" >> "$STARTED_FILE"
+            UNIT_RESULT_FILE="$(mktemp "$UNIT_RESULT_DIR/unit.XXXXXX.json")"
+            (
+              execute_unit "$UNIT_NAME" "$STEP_INDEX" "$UNIT_RESULT_FILE"
+            ) &
+            UNIT_PID=$!
 
-          UNIT_MISSING="$(printf '%s\n' "$UNIT_JSON" | ${pkgs.jq}/bin/jq -r '(.missing // false) | tostring')"
-          if [ "$UNIT_MISSING" = "true" ]; then
-            echo "Unknown step: $UNIT_NAME" >&2
+            printf '%s\n' "$UNIT_NAME" >> "$WAVE_NAMES_FILE"
+            printf '%s\n' "$UNIT_PID" >> "$WAVE_PIDS_FILE"
+            printf '%s\n' "$UNIT_RESULT_FILE" >> "$WAVE_RESULTS_FILE"
+          done <<< "$READY_UNITS"
+
+          WAVE_FAILED=0
+          exec 7<"$WAVE_NAMES_FILE"
+          exec 8<"$WAVE_PIDS_FILE"
+          exec 9<"$WAVE_RESULTS_FILE"
+          while true; do
+            IFS= read -r UNIT_NAME <&7 || break
+            IFS= read -r UNIT_PID <&8 || UNIT_PID=""
+            IFS= read -r UNIT_RESULT_FILE <&9 || UNIT_RESULT_FILE=""
+
+            if [ -z "$UNIT_PID" ]; then
+              WAIT_RC=1
+            else
+              set +e
+              wait "$UNIT_PID"
+              WAIT_RC=$?
+              set -e
+            fi
+
+            UNIT_ID="$UNIT_NAME"
             UNIT_STATUS="failed"
-            UNIT_RC=1
-          fi
-
-          if [ -z "$UNIT_STATUS" ]; then
-            while IFS= read -r MISSING_VAR; do
-              [ -z "$MISSING_VAR" ] && continue
-              if [ -z "''${!MISSING_VAR:-}" ]; then
-                SKIP_REASON="missing $MISSING_VAR"
-                UNIT_STATUS="skipped"
-                UNIT_RC=42
-                break
+            UNIT_DURATION="0"
+            UNIT_RC="$WAIT_RC"
+            if [ -n "$UNIT_RESULT_FILE" ] && [ -f "$UNIT_RESULT_FILE" ]; then
+              UNIT_ID="$(${pkgs.jq}/bin/jq -r '.id // ""' "$UNIT_RESULT_FILE")"
+              if [ -z "$UNIT_ID" ]; then
+                UNIT_ID="$UNIT_NAME"
               fi
-            done < <(printf '%s\n' "$UNIT_JSON" | ${pkgs.jq}/bin/jq -r '.skip_if_missing[]?')
-          fi
+              UNIT_STATUS="$(${pkgs.jq}/bin/jq -r '.status // "failed"' "$UNIT_RESULT_FILE")"
+              UNIT_DURATION="$(${pkgs.jq}/bin/jq -r '.duration // 0' "$UNIT_RESULT_FILE")"
+              UNIT_RC="$(${pkgs.jq}/bin/jq -r '.rc // 1' "$UNIT_RESULT_FILE")"
+            fi
 
-          if [ -z "$UNIT_STATUS" ]; then
-            WHEN_EXPR="$(printf '%s\n' "$UNIT_JSON" | ${pkgs.jq}/bin/jq -r '.when // ""')"
-            if [ -n "$WHEN_EXPR" ]; then
-              if ! ${pkgs.bash}/bin/bash -c "$WHEN_EXPR"; then
-                SKIP_REASON="condition not met"
-                UNIT_STATUS="skipped"
-                UNIT_RC=42
+            case "$UNIT_DURATION" in
+              *[!0-9]*|"")
+                UNIT_DURATION=0
+                ;;
+            esac
+            case "$UNIT_RC" in
+              *[!0-9-]*|"")
+                UNIT_RC=1
+                ;;
+            esac
+
+            STEPS_DURATION=$((STEPS_DURATION + UNIT_DURATION))
+            record_unit "$UNIT_ID" "$UNIT_NAME" "$UNIT_STATUS" "$UNIT_DURATION"
+            printf '%s\n' "$UNIT_NAME" >> "$DONE_FILE"
+
+            if [ "$UNIT_STATUS" = "failed" ] || [ "$WAIT_RC" -ne 0 ]; then
+              WAVE_FAILED=1
+              if [ "$EXIT_CODE" -eq 0 ]; then
+                NORMALIZED_RC="$UNIT_RC"
+                if [ "$NORMALIZED_RC" -eq 0 ] && [ "$WAIT_RC" -ne 0 ]; then
+                  NORMALIZED_RC="$WAIT_RC"
+                fi
+                if [ "$NORMALIZED_RC" -eq 0 ] || [ "$NORMALIZED_RC" -eq 42 ]; then
+                  EXIT_CODE=1
+                else
+                  EXIT_CODE="$NORMALIZED_RC"
+                fi
               fi
             fi
-          fi
+          done
+          exec 7<&-
+          exec 8<&-
+          exec 9<&-
+          rm -f "$WAVE_NAMES_FILE" "$WAVE_PIDS_FILE" "$WAVE_RESULTS_FILE"
 
-          if [ -n "$SKIP_REASON" ]; then
-            log_skip "$UNIT_DESC: $SKIP_REASON"
-          fi
-
-          if [ -z "$UNIT_STATUS" ]; then
-            while IFS= read -r ENTRY_B64; do
-              [ -z "$ENTRY_B64" ] && continue
-              KEY="$(printf '%s' "$ENTRY_B64" | ${pkgs.coreutils}/bin/base64 -d | ${pkgs.jq}/bin/jq -r '.key')"
-              VALUE="$(printf '%s' "$ENTRY_B64" | ${pkgs.coreutils}/bin/base64 -d | ${pkgs.jq}/bin/jq -r '.value | tostring')"
-              export "$KEY=$VALUE"
-            done < <(printf '%s\n' "$UNIT_JSON" | ${pkgs.jq}/bin/jq -r '.env // {} | to_entries[] | @base64')
-
-            RUN_SCRIPT_FILE="$(mktemp "''${TMPDIR:-/tmp}/nixfied-unit-run.XXXXXX")"
-            {
-              printf '%s\n' '#!/usr/bin/env bash'
-              printf '%s\n' 'set -euo pipefail'
-              printf '%s\n' "$UNIT_JSON" | ${pkgs.jq}/bin/jq -r '.run // ""'
-            } > "$RUN_SCRIPT_FILE"
-            chmod +x "$RUN_SCRIPT_FILE"
-
-            set +e
-            (
-              if [ -n "$CONTEXT_SCRIPT" ]; then
-                source "$CONTEXT_SCRIPT"
-              fi
-              source "$RUN_SCRIPT_FILE"
-            )
-            UNIT_RC=$?
-            set -e
-            rm -f "$RUN_SCRIPT_FILE"
-
-            if [ "$UNIT_RC" -eq 0 ]; then
-              UNIT_STATUS="passed"
-            else
-              UNIT_STATUS="failed"
-            fi
-          fi
-
-          CLEANUP_SCRIPT="$(printf '%s\n' "$UNIT_JSON" | ${pkgs.jq}/bin/jq -r '.cleanup // ""')"
-          if [ -n "$CLEANUP_SCRIPT" ]; then
-            CLEANUP_FILE="$(mktemp "''${TMPDIR:-/tmp}/nixfied-unit-cleanup.XXXXXX")"
-            {
-              printf '%s\n' '#!/usr/bin/env bash'
-              printf '%s\n' 'set -euo pipefail'
-              printf '%s\n' "$CLEANUP_SCRIPT"
-            } > "$CLEANUP_FILE"
-            chmod +x "$CLEANUP_FILE"
-            set +e
-            (
-              if [ -n "$CONTEXT_SCRIPT" ]; then
-                source "$CONTEXT_SCRIPT"
-              fi
-              source "$CLEANUP_FILE"
-            ) >/dev/null 2>&1
-            set -e
-            rm -f "$CLEANUP_FILE"
-          fi
-
-          UNIT_END="$(${pkgs.coreutils}/bin/date +%s)"
-          UNIT_DURATION=$((UNIT_END - UNIT_START))
-          STEPS_DURATION=$((STEPS_DURATION + UNIT_DURATION))
-
-          record_unit "$UNIT_ID" "$UNIT_NAME" "$UNIT_STATUS" "$UNIT_DURATION"
-
-          if [ "$UNIT_STATUS" = "failed" ]; then
-            if [ "$UNIT_RC" -eq 0 ] || [ "$UNIT_RC" -eq 42 ]; then
-              EXIT_CODE=1
-            else
-              EXIT_CODE="$UNIT_RC"
-            fi
+          if [ "$WAVE_FAILED" -ne 0 ]; then
             break
           fi
-        done < "$ORDER_FILE"
+        done
 
         PLAN_END="$(${pkgs.coreutils}/bin/date +%s)"
         PLAN_DURATION=$((PLAN_END - PLAN_START))

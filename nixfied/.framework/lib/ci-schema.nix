@@ -128,6 +128,15 @@ let
       expect (isNonEmptyList modeSteps) "${prefix}.steps must be a non-empty list"
       ++ expect (isListOfNonEmptyStrings modeSteps) "${prefix}.steps must be a list of non-empty strings"
       ++ expect (
+        !(modeCfg ? sequential) || builtins.isBool modeCfg.sequential
+      ) "${prefix}.sequential must be a bool when set"
+      ++ expect (
+        !(modeCfg ? parallel) || builtins.isBool modeCfg.parallel
+      ) "${prefix}.parallel must be a bool when set"
+      ++ expect (
+        !(modeCfg ? sequential && modeCfg ? parallel)
+      ) "${prefix}.sequential and ${prefix}.parallel are mutually exclusive"
+      ++ expect (
         unknown == [ ]
       ) "${prefix}.steps references unknown steps: ${builtins.concatStringsSep ", " unknown}";
 
