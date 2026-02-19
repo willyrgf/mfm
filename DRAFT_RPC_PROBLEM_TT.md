@@ -1,7 +1,27 @@
+# DRAFT RPC Problem Proposal (Revised)
+
+Revision status: revised for current MFM architecture (2026-02-19).
+
+Key revision highlights:
+
+* Keep `namespace = "evm"` and evolve existing transports instead of introducing `evm.rpc_pool`.
+* Reuse canonical fact-key derivation (`artifact_id_for_json`) and existing no-secrets safeguards.
+* Prioritize Milestone A (`failover + light hedging`) and defer quorum to a narrow, later phase.
+
+---
+
 # PROMPT
 This is all context for our research. I'm using helios as the fastest way I found to instance a minimal ethereum node that start syncing as fast as possible so users can query their own local ethereum RPC. With this all in mind. Are there better options? If so, how would it fit this project? If helios is our best hope, how to make it sync as fast as possible? Since this is a opensource project the ideal scenario it should use open on internet, safe and reliable RPCs. What are our best options? If we can't find open, safe and reliable RPCs, what would be the next best option? parallel RPC execution and use the best information possible (in this case, I need to plan a new layer to handle it)? other best next option?
 
 # ANSWER
+## Decision Summary
+
+* Keep **Helios** as the default local RPC path for fast startup and low resource usage.
+* Build reliability by extending the existing **`namespace="evm"`** collector/transport path (not a new `evm.rpc_pool` namespace).
+* Use current canonical fact-key + replay machinery (`artifact_id_for_json`-based derivation); do not add parallel hashing logic.
+* Implement in phases: ship **Milestone A** first (failover + light hedging), then add method-aware policies; defer quorum to a narrow optional phase.
+* Keep URLs/auth strictly runtime-only; persist only safe source IDs and sanitized diagnostics.
+
 You’re using Helios for a very specific (and honestly pretty hard) goal:
 
 * **Give end users a “local” Ethereum JSON-RPC endpoint quickly**
