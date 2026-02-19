@@ -35,9 +35,9 @@ jobs:
         run: |
           nix flake check
 
-  ci-modes:
-    name: Nixfied CI (${{ matrix.mode }})
-    runs-on: ubuntu-latest
+  ci-full:
+    name: Nixfied CI (full, ${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     env:
       LOG_TEE: "1"
       LOG_LEVEL: "debug"
@@ -50,10 +50,9 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        mode:
-          - basic
-          - parity
-          - audit
+        runner:
+          - ubuntu-latest
+          - macos-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -70,12 +69,11 @@ jobs:
             ~/.cache/nix
           key: nix-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ hashFiles('flake.lock', 'flake.nix', 'Cargo.lock', '.github/workflows/checks.yml', 'nixfied/**/*.nix') }}
 
-      - name: Nixfied CI (${{ matrix.mode }})
+      - name: Nixfied CI (full)
         run: |
-          nix run .#ci $NIX_CMD_OPTS -- --${{ matrix.mode }} --summary
+          nix run .#ci $NIX_CMD_OPTS -- --full --summary
 
       - name: Smoke mfm_cli --help
-        if: matrix.mode == 'basic'
         run: |
           nix run .#mfm_cli $NIX_CMD_OPTS -- --help
 
@@ -101,6 +99,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-artifacts-${{ matrix.mode }}
+          name: ci-artifacts-full-${{ matrix.runner }}
           path: /tmp/ci-artifacts
           if-no-files-found: ignore
