@@ -13,6 +13,7 @@
     local timezone
     local umask_value
     local runtime_path=""
+    local runtime_lib_path=""
     local base_path
     local final_path
 
@@ -41,15 +42,31 @@
 
     while IFS= read -r runtime_input; do
       if [ -n "$runtime_input" ]; then
-        if [ -z "$runtime_path" ]; then
-          runtime_path="$runtime_input/bin"
-        else
-          runtime_path="$runtime_path:$runtime_input/bin"
+        if [ -d "$runtime_input/bin" ]; then
+          if [ -z "$runtime_path" ]; then
+            runtime_path="$runtime_input/bin"
+          else
+            runtime_path="$runtime_path:$runtime_input/bin"
+          fi
+        fi
+        if [ -d "$runtime_input/lib" ]; then
+          if [ -z "$runtime_lib_path" ]; then
+            runtime_lib_path="$runtime_input/lib"
+          else
+            runtime_lib_path="$runtime_lib_path:$runtime_input/lib"
+          fi
+        fi
+        if [ -d "$runtime_input/lib64" ]; then
+          if [ -z "$runtime_lib_path" ]; then
+            runtime_lib_path="$runtime_input/lib64"
+          else
+            runtime_lib_path="$runtime_lib_path:$runtime_input/lib64"
+          fi
         fi
       fi
     done < <(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.runtimeInputs[]?')
 
-    base_path="${pkgs.coreutils}/bin:${pkgs.findutils}/bin:${pkgs.gnused}/bin:${pkgs.gnugrep}/bin:${pkgs.jq}/bin:${pkgs.bash}/bin"
+    base_path="/usr/bin:/bin:${pkgs.coreutils}/bin:${pkgs.findutils}/bin:${pkgs.gnused}/bin:${pkgs.gnugrep}/bin:${pkgs.jq}/bin:${pkgs.bash}/bin"
     if [ -n "$runtime_path" ]; then
       final_path="$runtime_path:$base_path"
     else
@@ -65,6 +82,9 @@
 
     local -a env_cmd
     env_cmd=(env -i "PATH=$final_path" "LANG=$locale" "LC_ALL=$locale" "TZ=$timezone" "HOME=$home_value")
+    if [ -n "$runtime_lib_path" ]; then
+      env_cmd+=("LIBRARY_PATH=$runtime_lib_path")
+    fi
 
     while IFS= read -r pass_name; do
       if [ -n "$pass_name" ] && [ -n "''${!pass_name+x}" ]; then
