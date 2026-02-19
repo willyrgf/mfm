@@ -59,12 +59,13 @@ Response includes:
 
 At `debug` level, transport logs include:
 - call-level routing decision (`method_class`, `dispatch_mode`, `source_order`, `route_source_id`)
-- per-request dispatch/result fields (`source_id`, `source_kind`, `rpc_method`, `rpc_request_id`, `http_status`)
+- per-request dispatch/result fields (`source_id`, `source_kind`, `rpc_endpoint`, `rpc_method`, `rpc_request_id`, `http_status`)
 
 Telemetry keeps diagnostics safe:
 - no full RPC URLs
 - no auth headers
 - no secret query strings
+- `rpc_endpoint` is sanitized to `scheme://host:port`
 
 Docs:
 - [`../../../docs/redesign.md`](../../../docs/redesign.md)

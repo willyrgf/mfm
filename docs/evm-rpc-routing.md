@@ -135,7 +135,8 @@ Debug telemetry (when `LOG_LEVEL=debug` or equivalent filter enables this target
 - call-level routing decision:
   - `rpc_method`, `method_class`, `dispatch_mode`, `source_order`, `route_source_id`
 - per-request dispatch/result:
-  - `source_id`, `source_kind`, `rpc_method`, `rpc_request_id`, `http_status`
+  - `source_id`, `source_kind`, `rpc_endpoint`, `rpc_method`, `rpc_request_id`, `http_status`
+  - `rpc_endpoint` is sanitized to `scheme://host:port` only (no path/query/auth)
 
 ## 6. Replay and Determinism
 

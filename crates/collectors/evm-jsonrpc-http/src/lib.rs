@@ -427,6 +427,24 @@ fn routing_strategy_name(strategy: EvmRoutingStrategy) -> &'static str {
     }
 }
 
+fn rpc_endpoint_name(rpc_url: &str) -> String {
+    let Ok(parsed) = reqwest::Url::parse(rpc_url) else {
+        return "<unavailable>".to_string();
+    };
+    let Some(host_raw) = parsed.host_str() else {
+        return "<unavailable>".to_string();
+    };
+    let Some(port) = parsed.port_or_known_default() else {
+        return "<unavailable>".to_string();
+    };
+    let host = if host_raw.contains(':') && !host_raw.starts_with('[') {
+        format!("[{host_raw}]")
+    } else {
+        host_raw.to_string()
+    };
+    format!("{}://{}:{}", parsed.scheme(), host, port)
+}
+
 fn parse_hex_u64(raw: &str) -> Option<u64> {
     let trimmed = raw.strip_prefix("0x")?;
     if trimmed.is_empty() {
@@ -1599,9 +1617,11 @@ impl EvmJsonRpcHttpTransport {
             .to_string();
         let rpc_request_id = body.get("id").and_then(|v| v.as_u64());
         let source_kind = source_kind_name(source.kind);
+        let rpc_endpoint = rpc_endpoint_name(&source.rpc_url);
         debug!(
             source_id = %source_id,
             source_kind = source_kind,
+            rpc_endpoint = %rpc_endpoint,
             rpc_method = %rpc_method,
             rpc_request_id = ?rpc_request_id,
             "dispatching evm jsonrpc http request"
@@ -1621,6 +1641,7 @@ impl EvmJsonRpcHttpTransport {
             debug!(
                 source_id = %source_id,
                 source_kind = source_kind,
+                rpc_endpoint = %rpc_endpoint,
                 rpc_method = %rpc_method,
                 rpc_request_id = ?rpc_request_id,
                 transport_error_class = err_class,
@@ -1643,6 +1664,7 @@ impl EvmJsonRpcHttpTransport {
             debug!(
                 source_id = %source_id,
                 source_kind = source_kind,
+                rpc_endpoint = %rpc_endpoint,
                 rpc_method = %rpc_method,
                 rpc_request_id = ?rpc_request_id,
                 http_status = status.as_u16(),
@@ -1666,6 +1688,7 @@ impl EvmJsonRpcHttpTransport {
             debug!(
                 source_id = %source_id,
                 source_kind = source_kind,
+                rpc_endpoint = %rpc_endpoint,
                 rpc_method = %rpc_method,
                 rpc_request_id = ?rpc_request_id,
                 http_status = status.as_u16(),
@@ -1690,6 +1713,7 @@ impl EvmJsonRpcHttpTransport {
             debug!(
                 source_id = %source_id,
                 source_kind = source_kind,
+                rpc_endpoint = %rpc_endpoint,
                 rpc_method = %rpc_method,
                 rpc_request_id = ?rpc_request_id,
                 error = %err,
@@ -1708,6 +1732,7 @@ impl EvmJsonRpcHttpTransport {
             debug!(
                 source_id = %source_id,
                 source_kind = source_kind,
+                rpc_endpoint = %rpc_endpoint,
                 rpc_method = %rpc_method,
                 rpc_request_id = ?rpc_request_id,
                 "evm jsonrpc response was not valid json"
@@ -1725,6 +1750,7 @@ impl EvmJsonRpcHttpTransport {
             debug!(
                 source_id = %source_id,
                 source_kind = source_kind,
+                rpc_endpoint = %rpc_endpoint,
                 rpc_method = %rpc_method,
                 rpc_request_id = ?rpc_request_id,
                 "evm jsonrpc response object was invalid"
@@ -1743,6 +1769,7 @@ impl EvmJsonRpcHttpTransport {
             debug!(
                 source_id = %source_id,
                 source_kind = source_kind,
+                rpc_endpoint = %rpc_endpoint,
                 rpc_method = %rpc_method,
                 rpc_request_id = ?rpc_request_id,
                 jsonrpc_error_code = ?jsonrpc_error_code,
@@ -1761,6 +1788,7 @@ impl EvmJsonRpcHttpTransport {
             debug!(
                 source_id = %source_id,
                 source_kind = source_kind,
+                rpc_endpoint = %rpc_endpoint,
                 rpc_method = %rpc_method,
                 rpc_request_id = ?rpc_request_id,
                 "evm jsonrpc response missing result field"
@@ -1777,6 +1805,7 @@ impl EvmJsonRpcHttpTransport {
         debug!(
             source_id = %source_id,
             source_kind = source_kind,
+            rpc_endpoint = %rpc_endpoint,
             rpc_method = %rpc_method,
             rpc_request_id = ?rpc_request_id,
             http_status = status.as_u16(),
@@ -2262,6 +2291,20 @@ mod tests {
             EvmRoutingStrategy::Failover,
         );
         EvmJsonRpcHttpTransportFactory::try_new(cfg).expect("valid config");
+    }
+
+    #[test]
+    fn rpc_endpoint_name_sanitizes_to_scheme_host_port() {
+        assert_eq!(
+            rpc_endpoint_name("https://user:pass@example.com:8545/path?token=secret#frag"),
+            "https://example.com:8545"
+        );
+        assert_eq!(rpc_endpoint_name("http://127.0.0.1"), "http://127.0.0.1:80");
+        assert_eq!(
+            rpc_endpoint_name("https://[2001:db8::1]:8545/rpc"),
+            "https://[2001:db8::1]:8545"
+        );
+        assert_eq!(rpc_endpoint_name("not-a-url"), "<unavailable>");
     }
 
     #[test]
