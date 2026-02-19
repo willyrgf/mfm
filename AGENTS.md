@@ -7,6 +7,7 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 
 - Keep changes small and local; prefer 1 logical change per PR/commit.
 - Match CI (Nixfied): use `nix run .#check`, `nix run .#test`, and `nix run .#ci -- --basic/--audit/--parity/--full --summary`.
+- Default pre-commit gate: run `nix run .#ci -- --full` before every commit.
 - Do not commit raw `.sh` scripts; shell logic must be Nix-packaged and executed from Nix-evaluated paths.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
@@ -378,6 +379,7 @@ When changing CLI/REST behavior, update the relevant docs in the same change:
 ## CI Requirements
 
 Before opening a PR (or finishing a change), ensure [Code Style and Standards](#code-style-and-standards) are met.
+Before each commit, run: `nix run .#ci -- --full`.
 
 If you use Nix or need CI parity, also run: `nix flake check && nix build`.
 

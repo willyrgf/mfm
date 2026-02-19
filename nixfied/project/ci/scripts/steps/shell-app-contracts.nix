@@ -58,8 +58,16 @@ run_contract_checks() {
   grep -Fq 'OUTPUT_MODE must be one of stdout|logs|both' nixfied/project/ci/scripts/setup.nix
   grep -Fq '_ci_debug_enabled()' nixfied/project/ci/scripts/teardown.nix
   grep -Fq '_ci_output_mode()' nixfied/project/ci/scripts/teardown.nix
-  grep -Fq 'OUTPUT_MODE:-stdout' nixfied/.framework/lib/helpers.nix
-  grep -Fq 'log_capture tee=' nixfied/.framework/lib/helpers.nix
+  # Framework logging helpers changed shape across upgrades; keep this check
+  # compatible with both the legacy and current helper contracts.
+  if ! grep -Fq 'OUTPUT_MODE:-stdout' nixfied/.framework/lib/helpers.nix; then
+    grep -Fq 'output_mode="$OUTPUT_MODE"' nixfied/.framework/lib/helpers.nix
+    grep -Fq 'output_mode="$NIXFIED_OUTPUT_MODE"' nixfied/.framework/lib/helpers.nix
+  fi
+  if ! grep -Fq 'log_capture tee=' nixfied/.framework/lib/helpers.nix; then
+    grep -Fq 'log_capture() {' nixfied/.framework/lib/helpers.nix
+    grep -Fq 'LOG_TEE:-0' nixfied/.framework/lib/helpers.nix
+  fi
   grep -Fq 'OUTPUT_MODE_LOWER="' nixfied/project/ci/scripts/steps/mainnet-portfolio-snapshot-helios.nix
   grep -Fq 'log_capture "$LOGFILE" -- bash -c' nixfied/project/ci/scripts/steps/parity-evm-helios-smoke.nix
   grep -Fq 'ci-diagnostics-service-' nixfied/project/ci/scripts/teardown.nix

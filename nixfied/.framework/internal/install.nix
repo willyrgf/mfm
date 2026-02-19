@@ -161,12 +161,12 @@ let
                       - nixfied/project/test.nix -> commands.test
                       - nixfied/project/prod.nix -> commands.build (build/prod workflow)
                       - nixfied/project/quality.nix -> commands.check
-                      - nixfied/project/ci.nix -> CI pipeline DSL config (ci.modes/ci.steps) + CI command metadata
+                      - nixfied/project/ci.nix -> CI pipeline DSL config (ci.modes with steps or stages, plus ci.steps) + CI command metadata
                       - nixfied/project/conf.nix -> project identity, envs/ports, module toggles, ephemeral config
                       - nixfied/project/default.nix -> merges all project files; update if new files are added
                     - Mention the primary customization surface is nixfied/project/ (avoid editing flake.nix unless the plan proves it's necessary).
                     - Reference relevant framework features (only if applicable to this project):
-                      - CI pipeline DSL (modes/steps, artifacts, summary.json; supports --summary, --mode/--<mode>, --bg)
+                      - CI pipeline DSL (sequential steps or staged parallel groups with maxWorkers/locks, artifacts, summary.json; supports --summary, --mode/--<mode>, --bg)
                       - Ephemeral environments (slot locking, source copy, conditional cleanup; ci.useEphemeral)
                       - Module apps + hooks (db-*, nginx-*, supervisor apps; postgres backups/migrations)
                       - Run registry (used by CI --bg mode)

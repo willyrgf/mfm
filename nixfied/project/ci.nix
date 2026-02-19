@@ -337,45 +337,54 @@ in
       keepOnFailure = true;
       keepOnSuccess = false;
     };
+    parallel = {
+      # shouldnt be bigger than the biggest stage
+      maxWorkers = 4;
+    };
     modes = {
       basic = {
-        sequential = false;
-        steps = [
-          "fmt"
-          "clippy"
-          "architecture-verify"
-          "shell-app-contracts"
-          "tests"
+        stages = [
+          [
+            "fmt"
+            "clippy"
+            "architecture-verify"
+            "shell-app-contracts"
+          ]
+          [ "tests" ]
         ];
       };
       audit = {
         steps = [ "audit" ];
       };
       parity = {
-        sequential = false;
-        steps = [
-          "parity-compile"
-          "parity-rest-api-smoke"
-          "parity-evm-reth"
-          "parity-aave-v3-reth"
-          "parity-postgres-state-events-audit"
-          "parity-evm-helios-smoke"
+        stages = [
+          [ "parity-compile" ]
+          [
+            "parity-rest-api-smoke"
+            "parity-evm-helios-smoke"
+          ]
+          [ "parity-evm-reth" ]
+          [ "parity-aave-v3-reth" ]
+          [ "parity-postgres-state-events-audit" ]
         ];
       };
       full = {
-        sequential = false;
-        steps = [
-          "fmt"
-          "clippy"
-          "architecture-verify"
-          "shell-app-contracts"
-          "tests"
-          "parity-compile"
-          "parity-rest-api-smoke"
-          "parity-evm-reth"
-          "parity-aave-v3-reth"
-          "parity-postgres-state-events-audit"
-          "parity-evm-helios-smoke"
+        stages = [
+          [
+            "fmt"
+            "clippy"
+            "architecture-verify"
+            "shell-app-contracts"
+          ]
+          [ "tests" ]
+          [ "parity-compile" ]
+          [
+            "parity-rest-api-smoke"
+            "parity-evm-helios-smoke"
+          ]
+          [ "parity-evm-reth" ]
+          [ "parity-aave-v3-reth" ]
+          [ "parity-postgres-state-events-audit" ]
         ];
       };
       mainnet = {

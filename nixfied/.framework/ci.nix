@@ -1,4 +1,4 @@
-# CI pipeline generator (steps DSL)
+# CI pipeline generator (steps + staged DSL)
 {
   pkgs,
   project,
@@ -21,6 +21,8 @@ let
 
   steps = if enabled then (ciValidated.steps or { }) else { };
   modes = if enabled then (ciValidated.modes or { }) else { };
+  ciParallel = if enabled then (ciValidated.parallel or { }) else { };
+  globalMaxWorkers = ciParallel.maxWorkers or 4;
   modeNames = pkgs.lib.sort (a: b: a < b) (builtins.attrNames modes);
   modeTokenName = mode: pkgs.lib.replaceStrings [ "-" "." ":" " " "/" ] [ "_" "_" "_" "_" "_" ] mode;
   modeArgDocs = map (mode: {
@@ -106,6 +108,7 @@ let
       cleanup = step.cleanup or "";
       skip_if_missing = step.skip_if_missing or [ ];
       depends_on = step.depends_on or [ ];
+      locks = step.locks or [ ];
       missing = false;
       run = pkgs.lib.optionalString (fixturePrelude != "") (fixturePrelude + "\n") + run;
     };
@@ -122,15 +125,10 @@ let
     let
       modeCfg = modes.${mode};
       modeSteps = modeCfg.steps or [ ];
-      modeSequential =
-        if modeCfg ? sequential then
-          modeCfg.sequential
-        else if modeCfg ? parallel then
-          !(modeCfg.parallel)
-        else
-          true;
+      modeStages = modeCfg.stages or [ ];
+      modeMaxWorkers = (modeCfg.parallel or { }).maxWorkers or globalMaxWorkers;
       mkUnit =
-        index: stepName:
+        index: stepName: injectedDeps:
         let
           baseUnit =
             if builtins.hasAttr stepName stepCatalog then
@@ -144,25 +142,46 @@ let
                 cleanup = "";
                 skip_if_missing = [ ];
                 depends_on = [ ];
+                locks = [ ];
                 missing = true;
                 run = "";
               };
-          sequentialDep =
-            if modeSequential && index != 0 then
-              [ (builtins.elemAt modeSteps (index - 1)) ]
-            else
-              [ ];
         in
         baseUnit
         // {
           id = "unit.${normalizeName mode}.${toString (index + 1)}.${normalizeName stepName}";
-          depends_on = pkgs.lib.unique (sequentialDep ++ (baseUnit.depends_on or [ ]));
+          depends_on = pkgs.lib.unique (injectedDeps ++ (baseUnit.depends_on or [ ]));
+          locks = baseUnit.locks or [ ];
         };
-      units = pkgs.lib.imap0 mkUnit modeSteps;
+      legacyUnits = pkgs.lib.imap0 (
+        index: stepName:
+        let
+          sequentialDep = if index == 0 then [ ] else [ (builtins.elemAt modeSteps (index - 1)) ];
+        in
+        mkUnit index stepName sequentialDep
+      ) modeSteps;
+      buildStageUnits =
+        priorStageSteps: offset: remainingStages:
+        if remainingStages == [ ] then
+          [ ]
+        else
+          let
+            stageSteps = builtins.head remainingStages;
+            stageUnits = pkgs.lib.imap0 (
+              localIndex: stepName: mkUnit (offset + localIndex) stepName priorStageSteps
+            ) stageSteps;
+          in
+          stageUnits
+          ++ buildStageUnits stageSteps (offset + (builtins.length stageSteps)) (
+            builtins.tail remainingStages
+          );
+      stageUnits = buildStageUnits [ ] 0 modeStages;
+      units = if modeCfg ? stages then stageUnits else legacyUnits;
     in
     {
       schema_version = 2;
       mode = mode;
+      max_workers = modeMaxWorkers;
       units = units;
     };
 
@@ -350,6 +369,9 @@ let
                           local steps_json="[]"
                           local plan_id=""
                           local run_id=""
+                          local parallel_max_workers=""
+                          local parallel_peak_workers=""
+                          local parallel_canceled_count=""
 
                           accounted_duration=$((setup_duration + steps_duration + teardown_duration))
                           untracked_duration=$((total_duration - accounted_duration))
@@ -361,6 +383,9 @@ let
                             steps_json="$(${pkgs.jq}/bin/jq -c '.steps // []' "$plan_result_file" 2>/dev/null || echo "[]")"
                             plan_id="$(${pkgs.jq}/bin/jq -r '.plan_id // ""' "$plan_result_file" 2>/dev/null || true)"
                             run_id="$(${pkgs.jq}/bin/jq -r '.run_id // ""' "$plan_result_file" 2>/dev/null || true)"
+                            parallel_max_workers="$(${pkgs.jq}/bin/jq -r '.timing.parallelism.max_workers // ""' "$plan_result_file" 2>/dev/null || true)"
+                            parallel_peak_workers="$(${pkgs.jq}/bin/jq -r '.timing.parallelism.peak_workers // ""' "$plan_result_file" 2>/dev/null || true)"
+                            parallel_canceled_count="$(${pkgs.jq}/bin/jq -r '.timing.parallelism.canceled_count // ""' "$plan_result_file" 2>/dev/null || true)"
                           fi
 
                           mkdir -p "$CI_ARTIFACTS_DIR"
@@ -376,6 +401,9 @@ let
                             --arg teardown_duration "$teardown_duration" \
                             --arg accounted_duration "$accounted_duration" \
                             --arg untracked_duration "$untracked_duration" \
+                            --arg parallel_max_workers "$parallel_max_workers" \
+                            --arg parallel_peak_workers "$parallel_peak_workers" \
+                            --arg parallel_canceled_count "$parallel_canceled_count" \
                             '
                             {
                               mode: $mode,
@@ -383,14 +411,52 @@ let
                               plan_id: (if $plan_id == "" then null else $plan_id end),
                               run_id: (if $run_id == "" then null else $run_id end),
                               steps: $steps,
-                              timing: {
-                                total_duration: ($total_duration | tonumber),
-                                setup_duration: ($setup_duration | tonumber),
-                                steps_duration: ($steps_duration | tonumber),
-                                teardown_duration: ($teardown_duration | tonumber),
-                                accounted_duration: ($accounted_duration | tonumber),
-                                untracked_duration: ($untracked_duration | tonumber)
-                              }
+                              timing:
+                                (
+                                  {
+                                    total_duration: ($total_duration | tonumber),
+                                    setup_duration: ($setup_duration | tonumber),
+                                    steps_duration: ($steps_duration | tonumber),
+                                    teardown_duration: ($teardown_duration | tonumber),
+                                    accounted_duration: ($accounted_duration | tonumber),
+                                    untracked_duration: ($untracked_duration | tonumber)
+                                  }
+                                  + (
+                                    if (
+                                      $parallel_max_workers == ""
+                                      and $parallel_peak_workers == ""
+                                      and $parallel_canceled_count == ""
+                                    ) then
+                                      {}
+                                    else
+                                      {
+                                        parallelism: {
+                                          max_workers: (
+                                            if $parallel_max_workers == "" then
+                                              null
+                                            else
+                                              ($parallel_max_workers | tonumber)
+                                            end
+                                          ),
+                                          peak_workers: (
+                                            if $parallel_peak_workers == "" then
+                                              null
+                                            else
+                                              ($parallel_peak_workers | tonumber)
+                                            end
+                                          ),
+                                          canceled_count: (
+                                            if $parallel_canceled_count == "" then
+                                              null
+                                            else
+                                              ($parallel_canceled_count | tonumber)
+                                            end
+                                          )
+                                        }
+                                      }
+                                    end
+                                  )
+                                )
                             }
                             ' > "$json_file"
                         }

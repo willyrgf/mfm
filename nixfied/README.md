@@ -8,6 +8,7 @@ Nixfied is a Nix-first framework for codifying project workflows (dev, test, bui
 
 - [Quick start](#quick-start)
 - [General architecture](#general-architecture)
+- [Detailed architecture and usage guide](#detailed-architecture-and-usage-guide)
 - [Public APIs](#public-apis)
 - [Install and upgrade](#install-and-upgrade)
 - [Configuration model](#configuration-model)
@@ -28,7 +29,8 @@ nix run .#ci
 nix run .#format
 ```
 
-Template defaults are placeholders for `dev`, `test`, and `build`.
+Template defaults are placeholders for `dev` and `build`.
+By default, `test` delegates to the CI pipeline (`nix run .#ci -- --mode full --summary`).
 
 ## General architecture
 
@@ -75,6 +77,12 @@ effective_port = base_port + slot + env_offset
 Slot helpers exported to runtime:
 - `SLOT_INFO`, `SLOT_INFO_JSON`
 - `REQUIRE_SLOT_ENV`, `REQUIRE_SLOT_ENV_JSON`
+
+## Detailed architecture and usage guide
+
+For a maintainer-focused deep dive (architecture internals, contract enforcement, module architecture, and full user playbooks), see:
+
+- `docs/DETAILED.md`
 
 ## Public APIs
 
@@ -300,7 +308,9 @@ nix run .#ci -- --bg
 ```
 
 Highlights:
-- Modes and steps are defined declaratively (`ci.modes`, `ci.steps`).
+- CI modes can be declared as sequential `steps` or staged groups (`stages`).
+- Parallel execution supports global/mode worker caps and per-step locks
+  (`ci.parallel.maxWorkers`, `ci.modes.<mode>.parallel.maxWorkers`, `ci.steps.<name>.locks`).
 - `summary.json` is produced per run in CI artifacts.
 - `--bg` uses the run registry for detached execution.
 
