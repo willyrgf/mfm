@@ -62,6 +62,7 @@ Endpoints:
 
 - EVM read transport routes by source ID (`route.source_id`) and runtime source config.
 - Per-request `rpc_url` override is rejected for all EVM calls.
+- EVM routing runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)
 
 Probe semantics:
 

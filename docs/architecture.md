@@ -239,6 +239,7 @@ If the answer spans multiple layers, split responsibilities explicitly rather th
 ## 12. Related Documents
 
 - Normative contract: [`docs/redesign.md`](redesign.md)
+- EVM routing runbook: [`docs/evm-rpc-routing.md`](evm-rpc-routing.md)
 - Contribution and CI rules: [`AGENTS.md`](../AGENTS.md)
 - Root project overview: [`README.md`](../README.md)
 - CLI contract: [`bin/cli/README.md`](../bin/cli/README.md)

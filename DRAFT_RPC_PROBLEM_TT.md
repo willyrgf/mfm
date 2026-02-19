@@ -8,13 +8,15 @@ Key revision highlights:
 * Reuse canonical fact-key derivation (`artifact_id_for_json`) and existing no-secrets safeguards.
 * Prioritize Milestone A (`failover + light hedging`) and defer quorum to a narrow, later phase.
 
-Working status (repository baseline, 2026-02-19):
+Working status (repository baseline, 2026-02-19, post-implementation):
 
-* Current `evm` live transport is still single-source (`rpc_url` + optional `authorization`) in `crates/collectors/evm-jsonrpc-http/src/lib.rs`.
-* Per-request `rpc_url` override is currently accepted by transport request deserialization.
-* App wiring currently resolves `MFM_EVM_RPC_URL` / `MFM_EVM_RPC_AUTHORIZATION` in `crates/app/src/lib.rs`.
-* Milestone A transport behaviors (source-id routing, failover, hedging, source health scoring) are not implemented yet in code.
-* This draft now locks Milestone A policy inputs so implementation can proceed without reopening scope.
+* Milestone A transport is implemented in `crates/collectors/evm-jsonrpc-http/src/lib.rs`:
+  source-id routing, failover, light hedging, probing, and source health scoring.
+* Per-request `rpc_url` override is rejected for all EVM calls (`evm_request_invalid`).
+* App wiring resolves source pools from runtime env (including `MFM_EVM_RPC_SOURCES_JSON`,
+  preferred order, strategy, hedge delay, and health knobs), with legacy single-source fallback.
+* `keystore tx-send-raw` is source-id based (`--source-id` / `MFM_EVM_RPC_SOURCE_ID`).
+* Integration and CI coverage are in place, including failover, replay determinism, and 429 paths.
 
 ---
 

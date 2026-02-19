@@ -33,4 +33,6 @@ Notes:
 - `route.source_id` is optional.
 - Per-request `rpc_url` override is rejected.
 
-Docs: [`../../../docs/redesign.md`](../../../docs/redesign.md)
+Docs:
+- [`../../../docs/redesign.md`](../../../docs/redesign.md)
+- [`../../../docs/evm-rpc-routing.md`](../../../docs/evm-rpc-routing.md)

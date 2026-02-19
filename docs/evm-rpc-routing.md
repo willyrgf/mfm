@@ -1,0 +1,126 @@
+# EVM RPC Routing (Milestone A)
+
+Status: implemented and validated in repository (2026-02-19).
+
+This document is the operator and contributor runbook for the `namespace="evm"` live IO routing
+path introduced in Milestone A.
+
+Normative architecture references:
+- `docs/redesign.md`
+- `docs/architecture.md`
+
+## 1. Transport Contract
+
+The state-facing IO namespace remains unchanged:
+- `namespace = "evm"`
+
+Transport request envelope:
+
+```json
+{
+  "method": "eth_chainId",
+  "params": [],
+  "route": { "source_id": "helios_local" }
+}
+```
+
+Notes:
+- `route.source_id` is optional.
+- Per-request `rpc_url` override is rejected for all EVM calls with `evm_request_invalid`.
+- URL/auth values are runtime-only config and are never persisted in facts/events/artifacts.
+
+## 2. Runtime Source Configuration
+
+Primary source-pool configuration:
+- `MFM_EVM_RPC_SOURCES_JSON`: JSON array of source objects:
+  - `id`
+  - `rpc_url`
+  - optional `authorization`
+  - optional `kind` (`local`, `remote_user`, `remote_public`)
+  - optional `require_get_proof_probe`
+- `MFM_EVM_RPC_PREFERRED_ORDER`: comma-separated source IDs.
+- `MFM_EVM_RPC_STRATEGY`: `hedged_light` (default) or `failover`.
+- `MFM_EVM_RPC_HEDGE_DELAY_MS`: hedge delay for `hedged_light`.
+- `MFM_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS`: cooldown window after source failure.
+- `MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`: comma-separated IDs requiring `eth_getProof` probe.
+
+Compatibility fallback (single source):
+- `MFM_EVM_RPC_URL` and optional `MFM_EVM_RPC_AUTHORIZATION` map to source id `user_primary`.
+
+`tx-send-raw` write path source selection:
+- CLI arg: `--source-id`
+- env fallback: `MFM_EVM_RPC_SOURCE_ID`
+
+## 3. Method Classification and Dispatch
+
+Methods are classified into:
+- `read_light`
+- `read_heavy`
+- `write_or_side_effect`
+
+Current policy:
+- `read_light`: optional two-source hedge (`hedged_light`) or failover (`failover` mode).
+- `read_heavy`: sequential failover only.
+- `write_or_side_effect`: primary-only single dispatch (no hedge, no cross-source write fanout).
+
+Classification highlights:
+- Heavy by default unless explicitly allowlisted.
+- Explicit heavy set includes `eth_getLogs`, `trace_*`, `debug_*`.
+- Write/side-effect includes `eth_sendRawTransaction`, `eth_sendTransaction`, and
+  `personal_*`/`admin_*`/`miner_*`/`txpool_*`/`engine_*`.
+- `eth_call` is downgraded to heavy when encoded params exceed threshold
+  (`hedge_max_eth_call_params_bytes`).
+
+## 4. Health, Probing, and Ordering
+
+Probes:
+- `eth_chainId`
+- `eth_blockNumber`
+- optional `eth_getProof` when required for selected sources
+
+Health behavior:
+- Source failures can mark source unhealthy for a cooldown window.
+- Unhealthy sources are skipped unless explicitly routed by `route.source_id` (which then returns
+  `evm_source_unhealthy` when unavailable).
+
+Ordering when route hint is absent:
+1. health score (higher first)
+2. source kind priority (`local` preferred over remote kinds)
+3. configured base order (`MFM_EVM_RPC_PREFERRED_ORDER`)
+
+## 5. Stable Error Codes and Diagnostics
+
+Pool-related codes:
+- `evm_source_unhealthy`
+- `evm_no_healthy_source`
+- `evm_hedge_exhausted`
+- `evm_route_source_unknown`
+
+Diagnostics rules:
+- Include safe source IDs and coarse error metadata only.
+- Never include full RPC URLs, authorization headers, or secret-bearing query parameters.
+
+## 6. Replay and Determinism
+
+No new state-facing client was introduced.
+
+Existing state logic continues to use the standard IO provider path:
+- live mode records facts
+- replay mode serves recorded facts
+
+Replay invariants validated:
+- failover/hedging live captures replay deterministically without new network calls
+- missing fact key behavior remains `MissingFactKey` with stable `missing_fact_key` code
+
+## 7. Migration Notes
+
+Breaking change:
+- Per-request EVM `rpc_url` request override is removed from runtime behavior.
+
+CLI migration for `keystore tx-send-raw`:
+- old: `--rpc-url <URL>`
+- new: `--source-id <ID>` (or `MFM_EVM_RPC_SOURCE_ID`)
+
+Report compatibility:
+- `keystore_tx_send_raw` still exposes `rpc_url_host` field name, but value carries source ID.
+

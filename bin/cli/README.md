@@ -473,6 +473,7 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   - **`MFM_EVM_RPC_AUTHORIZATION`**: optional Authorization header for that legacy single source.
 
 - EVM transport note: per-request `rpc_url` override is not supported; routing is source-id based.
+- EVM routing runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)
 
 - **`MFM_PORTFOLIO_TOKENS_JSON`**: Optional JSON array of ERC-20 token specs used by `mfm_cli portfolio snapshot` (and the REST API feature `portfolio.snapshot`).
   ```sh
