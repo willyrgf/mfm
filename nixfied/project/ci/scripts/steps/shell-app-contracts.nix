@@ -1,8 +1,9 @@
 { pkgs }:
 pkgs.writeText "mfm-ci-steps-shell-app-contracts.sh" ''
 LOGFILE=$(artifact_path "shell-app-contracts.log")
-set +e
-(
+OUTPUT_MODE_LOWER="$(printf '%s' "''${OUTPUT_MODE:-stdout}" | tr '[:upper:]' '[:lower:]')"
+
+run_contract_checks() {
   set -euo pipefail
 
   SYSTEM=$(nix eval --raw --impure --expr builtins.currentSystem)
@@ -47,8 +48,10 @@ set +e
   grep -Fq 'OUTPUT_MODE must be one of stdout|logs|both' nixfied/project/ci/scripts/setup.nix
   grep -Fq '_ci_debug_enabled()' nixfied/project/ci/scripts/teardown.nix
   grep -Fq '_ci_output_mode()' nixfied/project/ci/scripts/teardown.nix
-  grep -Fq "case \"''\${OUTPUT_MODE:-stdout}\" in" nixfied/.framework/lib/helpers.nix
+  grep -Fq 'OUTPUT_MODE:-stdout' nixfied/.framework/lib/helpers.nix
   grep -Fq 'log_capture tee=' nixfied/.framework/lib/helpers.nix
+  grep -Fq 'OUTPUT_MODE_LOWER="' nixfied/project/ci/scripts/steps/mainnet-portfolio-snapshot-helios.nix
+  grep -Fq 'log_capture "$LOGFILE" -- bash -c' nixfied/project/ci/scripts/steps/parity-evm-helios-smoke.nix
   grep -Fq 'ci-diagnostics-service-' nixfied/project/ci/scripts/teardown.nix
   grep -Fq -- '-log.log' nixfied/project/ci/scripts/teardown.nix
   grep -Fq '`OUTPUT_MODE`' docs/architecture.md
@@ -111,11 +114,27 @@ set +e
   ARTIFACT_JSON=$(mktemp)
   nix run .#evm-contract-artifact-configurable-counter >"$ARTIFACT_JSON"
   jq -e '.artifact.abi and .artifact.bytecode.object' "$ARTIFACT_JSON" >/dev/null
-) >"$LOGFILE" 2>&1
+}
+
+set +e
+case "$OUTPUT_MODE_LOWER" in
+  logs)
+    run_contract_checks >"$LOGFILE" 2>&1
+    ;;
+  stdout|both|"")
+    run_contract_checks 2>&1 | tee "$LOGFILE"
+    ;;
+  *)
+    # Setup validates OUTPUT_MODE, but contract checks remain tolerant.
+    run_contract_checks >"$LOGFILE" 2>&1
+    ;;
+esac
 rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then
-  cat "$LOGFILE" >&2 || true
+  if [ "$OUTPUT_MODE_LOWER" = "logs" ]; then
+    echo "ERROR: shell-app-contracts failed rc=$rc log=$LOGFILE" >&2
+  fi
   exit "$rc"
 fi
 ''

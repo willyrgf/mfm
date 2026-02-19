@@ -21,9 +21,27 @@ pkgs.writeText "mfm-ci-steps-mainnet-portfolio-snapshot-helios.sh" ''
   LOGFILE=$(artifact_path "mainnet-portfolio-snapshot.log")
   RAW_OUTFILE=$(artifact_path "mainnet-portfolio-snapshot.raw.out")
   OUTFILE=$(artifact_path "mainnet-portfolio-snapshot.json")
+  OUTPUT_MODE_LOWER="$(printf '%s' "''${OUTPUT_MODE:-stdout}" | tr '[:upper:]' '[:lower:]')"
+
+  run_snapshot_capture() {
+    case "$OUTPUT_MODE_LOWER" in
+      logs)
+        nix run .#mfm::portfolio::snapshot -- "$ADDRESS" >"$RAW_OUTFILE" 2>"$LOGFILE"
+        ;;
+      stdout|both|"")
+        nix run .#mfm::portfolio::snapshot -- "$ADDRESS" \
+          > >(tee "$RAW_OUTFILE") \
+          2> >(tee "$LOGFILE" >&2)
+        ;;
+      *)
+        # Setup validates OUTPUT_MODE, but keep fallback tolerant.
+        nix run .#mfm::portfolio::snapshot -- "$ADDRESS" >"$RAW_OUTFILE" 2>"$LOGFILE"
+        ;;
+    esac
+  }
 
   set +e
-  nix run .#mfm::portfolio::snapshot -- "$ADDRESS" >"$RAW_OUTFILE" 2>"$LOGFILE"
+  run_snapshot_capture
   rc=$?
   set -e
 
