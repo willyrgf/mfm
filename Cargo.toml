@@ -21,7 +21,7 @@ members = [
 	"crates/sdk",
 	"crates/states/common",
 	"crates/states/keystore",
-	"crates/ops/aave-v3-common",
+	"crates/states/aave-v3",
 	"crates/storages/artifact-store-fs",
 	"crates/storages/artifact-store-secret",
 	"crates/storages/artifact-store-s3",
