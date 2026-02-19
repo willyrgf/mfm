@@ -355,7 +355,6 @@ in
         sequential = false;
         steps = [
           "parity-compile"
-          "parity-postgres"
           "parity-rest-api-smoke"
           "parity-evm-reth"
           "parity-aave-v3-reth"
@@ -372,7 +371,6 @@ in
           "shell-app-contracts"
           "tests"
           "parity-compile"
-          "parity-postgres"
           "parity-rest-api-smoke"
           "parity-evm-reth"
           "parity-aave-v3-reth"
@@ -472,37 +470,8 @@ in
         ];
       };
 
-      parity-postgres = {
-        description = "Parity: Postgres event store";
-        dependsOn = [ "parity-compile" ];
-        env = {
-          AUTO_STOP_CONFLICTING = "1";
-        };
-        fixtures = {
-          services = [
-            {
-              name = "postgres";
-              profile = "test";
-            }
-          ];
-          artifacts = {
-            logs = true;
-            prefix = "parity-postgres";
-          };
-        };
-        actions = [
-          {
-            kind = "exec";
-            argv = [
-              "."
-              (ciStepScript "parity-postgres")
-            ];
-          }
-        ];
-      };
-
       parity-rest-api-smoke = {
-        description = "Parity: S3 contract + REST API smoke on Postgres + S3/MinIO";
+        description = "Parity: Postgres + S3 contracts and REST API smoke on Postgres + S3/MinIO";
         dependsOn = [ "parity-compile" ];
         env = {
           AUTO_STOP_CONFLICTING = "1";
