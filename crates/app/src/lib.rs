@@ -636,6 +636,8 @@ pub fn make_engine_bundle() -> EngineBundle {
         Arc::clone(&planner),
     ));
 
+    // Invariant: runtime EVM network IO must flow through the `evm` namespace route
+    // backed by `EvmJsonRpcHttpTransportFactory`.
     let evm_factory: Arc<dyn LiveIoTransportFactory> = Arc::new(
         EvmJsonRpcHttpTransportFactory::new(resolve_evm_rpc_config_from_env()),
     );

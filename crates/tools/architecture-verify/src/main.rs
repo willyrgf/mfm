@@ -17,6 +17,7 @@ fn main() {
     check_expand_boundary(&repo_root, &mut failures);
     check_utility_duplication(&repo_root, &mut failures);
     check_shared_state_ratio(&repo_root, &mut failures);
+    check_evm_transport_invariants(&repo_root, &mut failures);
 
     if failures.is_empty() {
         println!("mfm-architecture-verify: all checks passed");
@@ -188,6 +189,117 @@ fn check_shared_state_ratio(repo_root: &Path, failures: &mut Vec<String>) {
     }
 }
 
+fn check_evm_transport_invariants(repo_root: &Path, failures: &mut Vec<String>) {
+    check_app_evm_transport_wiring(repo_root, failures);
+    check_runtime_evm_namespace_call_sites(repo_root, failures);
+    check_keystore_tx_sign_stays_local(repo_root, failures);
+}
+
+fn check_app_evm_transport_wiring(repo_root: &Path, failures: &mut Vec<String>) {
+    let app_lib = repo_root.join("crates/app/src/lib.rs");
+    let app_lib_normalized = normalize_path_for_report(&app_lib);
+    let content = match fs::read_to_string(&app_lib) {
+        Ok(c) => c,
+        Err(err) => {
+            failures.push(format!("failed to read {app_lib_normalized}: {err}"));
+            return;
+        }
+    };
+
+    let factory_wiring_count = content
+        .matches("EvmJsonRpcHttpTransportFactory::new(resolve_evm_rpc_config_from_env())")
+        .count();
+    if factory_wiring_count != 1 {
+        failures.push(format!(
+            "{app_lib_normalized}: expected exactly one EVM transport factory wiring to evm-jsonrpc-http, found {factory_wiring_count}"
+        ));
+    }
+
+    let evm_route_count = content
+        .matches("routes.insert(\"evm\".to_string(), evm_factory);")
+        .count();
+    if evm_route_count != 1 {
+        failures.push(format!(
+            "{app_lib_normalized}: expected exactly one `evm` route insertion, found {evm_route_count}"
+        ));
+    }
+}
+
+fn check_runtime_evm_namespace_call_sites(repo_root: &Path, failures: &mut Vec<String>) {
+    let allowed_call_site =
+        normalize_path_for_report(&repo_root.join("crates/evm-runtime/src/rpc.rs"));
+
+    let mut files = Vec::new();
+    collect_rs_files(&repo_root.join("crates"), &mut files);
+    collect_rs_files(&repo_root.join("bin"), &mut files);
+
+    let mut saw_allowed_call_site = false;
+
+    for file in files {
+        if !is_runtime_source_file(&file) {
+            continue;
+        }
+
+        let content = match fs::read_to_string(&file) {
+            Ok(c) => c,
+            Err(err) => {
+                failures.push(format!("failed to read {file}: {err}"));
+                continue;
+            }
+        };
+
+        let non_test_content = strip_cfg_test_items(&content);
+        let has_evm_namespace_call = non_test_content.contains("namespace: \"evm\"");
+        if !has_evm_namespace_call {
+            continue;
+        }
+
+        let normalized = normalize_path_for_report(Path::new(&file));
+        if normalized == allowed_call_site {
+            saw_allowed_call_site = true;
+            continue;
+        }
+
+        failures.push(format!(
+            "{normalized}: runtime code must not introduce direct `namespace: \"evm\"` call sites outside {allowed_call_site}"
+        ));
+    }
+
+    if !saw_allowed_call_site {
+        failures.push(format!(
+            "expected runtime `namespace: \"evm\"` call site in {allowed_call_site}"
+        ));
+    }
+}
+
+fn check_keystore_tx_sign_stays_local(repo_root: &Path, failures: &mut Vec<String>) {
+    let keystore_tx_state = repo_root.join("crates/ops/keystore-common/src/states/tx.rs");
+    let keystore_tx_state_normalized = normalize_path_for_report(&keystore_tx_state);
+
+    let content = match fs::read_to_string(&keystore_tx_state) {
+        Ok(c) => c,
+        Err(err) => {
+            failures.push(format!(
+                "failed to read {keystore_tx_state_normalized}: {err}"
+            ));
+            return;
+        }
+    };
+
+    let non_test_content = strip_cfg_test_items(&content);
+    if !non_test_content.contains("\"local.keystore.tx_sign\"") {
+        failures.push(format!(
+            "{keystore_tx_state_normalized}: expected local tx-sign namespace `local.keystore.tx_sign`"
+        ));
+    }
+
+    if non_test_content.contains("namespace: \"evm\"") {
+        failures.push(format!(
+            "{keystore_tx_state_normalized}: keystore tx-sign must remain local and must not call `namespace: \"evm\"`"
+        ));
+    }
+}
+
 fn count_state_impls_under(root: &Path) -> usize {
     if root.is_file() {
         return count_state_impls_in_file(root);
@@ -261,6 +373,15 @@ fn collect_rs_files(root: &Path, files: &mut Vec<String>) {
             files.push(path.to_string_lossy().to_string());
         }
     }
+}
+
+fn normalize_path_for_report(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn is_runtime_source_file(file: &str) -> bool {
+    let normalized = file.replace('\\', "/");
+    normalized.contains("/src/") && !normalized.contains("/tests/")
 }
 
 fn find_matching_brace(content: &str, open_brace: usize) -> Option<usize> {

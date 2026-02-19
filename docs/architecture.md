@@ -58,6 +58,12 @@ Execution unit model:
 9. Thin binary boundary.
 - Domain execution logic belongs in ops/state-machine layers, not in `bin/cli` or `bin/rest-api`.
 
+10. EVM network transport boundary.
+- Runtime EVM network calls (`namespace: "evm"`) must route through
+  `mfm-collectors-evm-jsonrpc-http` wiring in `crates/app`.
+- Local keystore and local signer paths (`local.keystore.*`, `local.evm.*`) remain intentionally
+  offline/local and must not be forced to depend on RPC availability.
+
 ## 4. Runtime Mental Model
 
 A run lifecycle:
