@@ -11,6 +11,7 @@ use crate::errors::{ErrorCategory, ErrorInfo, IoError};
 use crate::ids::ErrorCode;
 use crate::io::IoCall;
 use crate::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
+use crate::live_io_registry::{RegistryError, TransportRegistry};
 
 const CODE_IO_UNKNOWN_NAMESPACE: &str = "io_unknown_namespace";
 
@@ -24,15 +25,24 @@ fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> E
     }
 }
 
-fn namespace_group(namespace: &str) -> &str {
-    namespace.split('.').next().unwrap_or(namespace)
+fn matches_group(namespace: &str, group: &str) -> bool {
+    namespace == group || namespace.starts_with(&format!("{group}."))
+}
+
+fn longest_matching_group<'a>(
+    namespace: &str,
+    groups: impl Iterator<Item = &'a str>,
+) -> Option<&'a str> {
+    groups
+        .filter(|group| matches_group(namespace, group))
+        .max_by_key(|group| group.len())
 }
 
 /// A `LiveIoTransportFactory` that routes calls by namespace group.
 ///
 /// Routing rule:
-/// - group = first segment of `IoCall.namespace` split by `.`
-/// - e.g. `proof.read` routes to group `proof`
+/// - candidates are registered groups `g` where `namespace == g` or `namespace` starts with `g + "."`
+/// - selected route is the longest matching group
 #[derive(Clone, Default)]
 pub struct RouterLiveIoTransportFactory {
     routes: HashMap<String, Arc<dyn LiveIoTransportFactory>>,
@@ -40,6 +50,35 @@ pub struct RouterLiveIoTransportFactory {
 
 impl RouterLiveIoTransportFactory {
     pub fn new(routes: HashMap<String, Arc<dyn LiveIoTransportFactory>>) -> Self {
+        Self { routes }
+    }
+
+    pub fn from_factories(
+        factories: Vec<Arc<dyn LiveIoTransportFactory>>,
+    ) -> Result<Self, RegistryError> {
+        let mut routes = HashMap::new();
+        for factory in factories {
+            let group = factory.namespace_group().trim();
+            if group.is_empty() {
+                return Err(RegistryError::new(
+                    "transport namespace group must not be empty",
+                ));
+            }
+            if routes.contains_key(group) {
+                return Err(RegistryError::new(format!(
+                    "duplicate transport namespace group: {group}",
+                )));
+            }
+            routes.insert(group.to_string(), factory);
+        }
+        Ok(Self { routes })
+    }
+
+    pub fn from_registry(registry: &dyn TransportRegistry) -> Self {
+        let mut routes = HashMap::new();
+        for factory in registry.all() {
+            routes.insert(factory.namespace_group().to_string(), factory);
+        }
         Self { routes }
     }
 
@@ -54,6 +93,10 @@ impl RouterLiveIoTransportFactory {
 }
 
 impl LiveIoTransportFactory for RouterLiveIoTransportFactory {
+    fn namespace_group(&self) -> &str {
+        "router"
+    }
+
     fn make(&self, env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
         let mut routes = HashMap::new();
         for (group, factory) in &self.routes {
@@ -70,8 +113,10 @@ struct RouterLiveIoTransport {
 #[async_trait]
 impl LiveIoTransport for RouterLiveIoTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
-        let group = namespace_group(&call.namespace);
-        let Some(t) = self.routes.get_mut(group) else {
+        let Some(group) =
+            longest_matching_group(&call.namespace, self.routes.keys().map(String::as_str))
+                .map(str::to_string)
+        else {
             // Do not echo request payloads in errors (avoid accidental secret leakage).
             return Err(IoError::Other(info(
                 CODE_IO_UNKNOWN_NAMESPACE,
@@ -79,6 +124,11 @@ impl LiveIoTransport for RouterLiveIoTransport {
                 "unknown io namespace",
             )));
         };
+
+        let t = self
+            .routes
+            .get_mut(&group)
+            .expect("matched route must exist in route map");
         t.call(call).await
     }
 }
@@ -158,10 +208,15 @@ mod tests {
     }
 
     struct FixedFactory {
+        group: &'static str,
         response: serde_json::Value,
     }
 
     impl LiveIoTransportFactory for FixedFactory {
+        fn namespace_group(&self) -> &str {
+            self.group
+        }
+
         fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(FixedTransport {
                 response: self.response.clone(),
@@ -182,21 +237,17 @@ mod tests {
 
     #[tokio::test]
     async fn routes_by_namespace_group_prefix() {
-        let mut routes: HashMap<String, Arc<dyn LiveIoTransportFactory>> = HashMap::new();
-        routes.insert(
-            "proof".to_string(),
+        let factory = RouterLiveIoTransportFactory::from_factories(vec![
             Arc::new(FixedFactory {
+                group: "proof",
                 response: serde_json::json!({"ok": "proof"}),
             }),
-        );
-        routes.insert(
-            "evm".to_string(),
             Arc::new(FixedFactory {
+                group: "evm",
                 response: serde_json::json!({"ok": "evm"}),
             }),
-        );
-
-        let factory = RouterLiveIoTransportFactory::new(routes);
+        ])
+        .expect("factory");
         let mut t = factory.make(env());
 
         let got = t
@@ -218,6 +269,33 @@ mod tests {
             .await
             .expect("call");
         assert_eq!(got, serde_json::json!({"ok": "evm"}));
+    }
+
+    #[tokio::test]
+    async fn routes_to_longest_matching_prefix() {
+        let factory = RouterLiveIoTransportFactory::from_factories(vec![
+            Arc::new(FixedFactory {
+                group: "local",
+                response: serde_json::json!({"ok": "local"}),
+            }),
+            Arc::new(FixedFactory {
+                group: "local.fs",
+                response: serde_json::json!({"ok": "local.fs"}),
+            }),
+        ])
+        .expect("factory");
+
+        let mut t = factory.make(env());
+        let got = t
+            .call(IoCall {
+                namespace: "local.fs.read_text".to_string(),
+                request: serde_json::json!({}),
+                fact_key: None,
+            })
+            .await
+            .expect("call");
+
+        assert_eq!(got, serde_json::json!({"ok": "local.fs"}));
     }
 
     #[tokio::test]

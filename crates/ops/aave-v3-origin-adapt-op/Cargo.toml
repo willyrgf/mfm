@@ -9,5 +9,5 @@ serde_json = { workspace = true }
 
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
-mfm-op-common = { path = "../common" }
-mfm-op-aave-v3-common = { path = "../aave-v3-common" }
+mfm-state-common = { path = "../../states/common" }
+mfm-state-aave-v3 = { path = "../../states/aave-v3" }

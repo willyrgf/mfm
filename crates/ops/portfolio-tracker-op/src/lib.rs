@@ -7,7 +7,7 @@
 //! - fetch pinned `eth_blockNumber`
 //! - fetch native ETH balance via `eth_getBalance` at that pinned block
 //! - fetch allowlisted ERC-20 balances via `eth_call(balanceOf)` at that pinned block
-//! - write a content-addressed snapshot output artifact via `portfolio.output`
+//! - write a content-addressed snapshot output artifact via deterministic fact recording
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,14 +33,14 @@ use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-use mfm_op_common::ctx as op_ctx;
-use mfm_op_common::errors as op_errors;
-use mfm_op_common::output as op_output;
-use mfm_op_common::states::meta;
-use mfm_op_keystore_common::tx::output_context_key;
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
+use mfm_state_common::ctx as op_ctx;
+use mfm_state_common::errors as op_errors;
+use mfm_state_common::output as op_output;
+use mfm_state_common::states::meta;
+use mfm_state_keystore::tx::output_context_key;
 
 const OP_ID: &str = "portfolio_tracker";
 const OP_VERSION: &str = "v1";
@@ -435,7 +435,6 @@ impl State for WriteSnapshotState {
             ctx,
             io,
             rec,
-            "portfolio.output",
             output_fact_key(&self.op_path),
             snapshot,
             ctx_key(KEY_SNAPSHOT_ARTIFACT_ID),
@@ -481,8 +480,6 @@ impl State for WriteSnapshotState {
 mod tests {
     use super::*;
 
-    use std::collections::HashMap;
-
     use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
     use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
     use mfm_machine::events::{Event, KernelEvent};
@@ -491,8 +488,8 @@ mod tests {
     use mfm_machine::live_io::{LiveIoTransport, LiveIoTransportFactory};
     use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
     use mfm_machine::runtime::DefaultExecutionEngine;
-    use mfm_op_common::test_support as op_test_support;
     use mfm_sdk::unstable::SdkPlanResolver;
+    use mfm_state_common::test_support as op_test_support;
 
     fn info(
         code: &'static str,
@@ -501,24 +498,6 @@ mod tests {
         message: &str,
     ) -> ErrorInfo {
         op_errors::info(code, category, retryable, message)
-    }
-
-    #[derive(Clone)]
-    struct EchoTransportFactory;
-
-    impl LiveIoTransportFactory for EchoTransportFactory {
-        fn make(&self, _env: mfm_machine::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
-            Box::new(EchoTransport)
-        }
-    }
-
-    struct EchoTransport;
-
-    #[async_trait]
-    impl LiveIoTransport for EchoTransport {
-        async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
-            Ok(call.request)
-        }
     }
 
     #[derive(Clone)]
@@ -535,6 +514,10 @@ mod tests {
     }
 
     impl LiveIoTransportFactory for MockEvmTransportFactory {
+        fn namespace_group(&self) -> &str {
+            "evm"
+        }
+
         fn make(&self, _env: mfm_machine::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(MockEvmTransport {
                 chain_id_hex: self.chain_id_hex.clone(),
@@ -612,11 +595,10 @@ mod tests {
             Arc::clone(&planner),
         ));
 
-        let mut routes: HashMap<String, Arc<dyn LiveIoTransportFactory>> = HashMap::new();
-        routes.insert("evm".to_string(), evm_factory);
-        routes.insert("portfolio".to_string(), Arc::new(EchoTransportFactory));
-        let factory: Arc<dyn LiveIoTransportFactory> =
-            Arc::new(RouterLiveIoTransportFactory::new(routes));
+        let factory: Arc<dyn LiveIoTransportFactory> = Arc::new(
+            RouterLiveIoTransportFactory::from_factories(vec![evm_factory])
+                .expect("router factories"),
+        );
 
         let engine =
             DefaultExecutionEngine::new(resolver).with_live_transport_factory(Arc::clone(&factory));

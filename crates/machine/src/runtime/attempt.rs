@@ -221,6 +221,17 @@ impl IoProvider for AttemptIo {
         }
     }
 
+    async fn record_value(
+        &mut self,
+        key: crate::ids::FactKey,
+        value: serde_json::Value,
+    ) -> Result<ArtifactId, IoError> {
+        match self {
+            AttemptIo::Live(io) => io.record_value(key, value).await,
+            AttemptIo::Replay(io) => io.record_value(key, value).await,
+        }
+    }
+
     async fn now_millis(&mut self) -> Result<u64, IoError> {
         match self {
             AttemptIo::Live(io) => io.now_millis().await,

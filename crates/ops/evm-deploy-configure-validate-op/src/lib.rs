@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use mfm_machine::config::RunConfig;
 use mfm_machine::ids::{OpId, OpPath, StateId};
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
-use mfm_op_common::errors as op_errors;
 use mfm_op_evm_write::{EvmConfigureOp, EvmDeployOp, EvmValidateOp};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::op::{OpIo, Operation};
+use mfm_state_common::errors as op_errors;
 
 pub const EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID: &str = "evm_deploy_configure_validate";
 pub const EVM_DEPLOY_CONFIGURE_VALIDATE_OP_VERSION: &str = "v1";
@@ -161,7 +161,7 @@ mod tests {
     use super::*;
 
     use mfm_machine::ids::OpPath;
-    use mfm_op_common::test_support as op_test_support;
+    use mfm_state_common::test_support as op_test_support;
 
     fn sample_config() -> serde_json::Value {
         serde_json::json!({

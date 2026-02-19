@@ -9,11 +9,15 @@ Status: Post-refactor checkpoint; state extraction phases complete, verifier enf
 bin/{cli,rest-api}   (THIN) parse input, select op/pipeline, render output
        |
        v
-  crates/ops/*       (THIN) config validation + state graph wiring only
+  crates/ops/*-op    (THIN) config validation + state graph wiring only
        |
        v
-crates/ops/common/   (THICK) reusable single-responsibility states
-  src/states/*               + shared pure utility modules
+shared-state crates  (THICK) reusable single-responsibility states
+  crates/states/common/src/states/*
+  crates/states/keystore/src/states/*
+  crates/states/aave-v3/src/states/*
+  crates/evm-runtime/src/states/*
+  (+ shared pure utility modules)
        |
        v
 adapters/IO drivers  collectors, local_io, storages
@@ -28,7 +32,7 @@ Design rule: executable logic lives in reusable states; ops assemble state graph
 | CLI command surfaces audited | 13 |
 | REST routes audited | 9 |
 | Registered runtime ops | 14 |
-| Shared production `State` impls (`ops/common/src/states`) | 18 |
+| Shared production `State` impls (`states/common/src/states`) | 18 |
 | Op-local production `State` impls (`ops/*/src/lib.rs`) | 2 |
 | Total production `State` impls | 20 |
 | Shared state ratio (production) | 90% |
@@ -89,11 +93,11 @@ Domain-local production states intentionally retained:
 ## 3. Utility Consolidation (`B8`)
 
 Canonical shared utility modules are in place:
-- `crates/ops/common/src/hex.rs`
-- `crates/ops/common/src/rlp.rs`
-- `crates/ops/common/src/abi.rs`
-- `crates/ops/common/src/evm_encoding.rs`
-- `crates/ops/common/src/util_error.rs`
+- `crates/states/common/src/hex.rs`
+- `crates/states/common/src/rlp.rs`
+- `crates/states/common/src/abi.rs`
+- `crates/states/common/src/evm_encoding.rs`
+- `crates/states/common/src/util_error.rs`
 
 Current duplication ceilings enforced by `mfm-architecture-verify`:
 - `normalize_hex_str` <= 3

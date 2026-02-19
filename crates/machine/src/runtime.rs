@@ -1266,6 +1266,10 @@ mod tests {
     }
 
     impl LiveIoTransportFactory for SecretTransportFactory {
+        fn namespace_group(&self) -> &str {
+            "test"
+        }
+
         fn make(&self, _env: crate::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(SecretTransport)
         }
@@ -2079,6 +2083,10 @@ mod tests {
     }
 
     impl LiveIoTransportFactory for CountingTransportFactory {
+        fn namespace_group(&self) -> &str {
+            "test"
+        }
+
         fn make(&self, _env: crate::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(CountingTransport {
                 calls: Arc::clone(&self.calls),
@@ -2092,6 +2100,10 @@ mod tests {
     }
 
     impl LiveIoTransportFactory for TrackingTransportFactory {
+        fn namespace_group(&self) -> &str {
+            "test"
+        }
+
         fn make(&self, _env: crate::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
             self.makes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::new(TrackingTransport {

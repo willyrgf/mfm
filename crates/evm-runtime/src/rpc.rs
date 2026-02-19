@@ -6,9 +6,9 @@ use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{FactKey, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
-use mfm_op_common::errors as op_errors;
-use mfm_op_common::local_io_helpers::local_fact_key;
-use mfm_op_common::rpc as op_rpc;
+use mfm_state_common::errors as op_errors;
+use mfm_state_common::rpc as op_rpc;
+use mfm_transports_local_evm::{LocalEvmIoClient, LocalEvmSignLegacyCreateCall};
 
 use crate::dcv as shared_dcv;
 
@@ -194,38 +194,20 @@ pub async fn local_sign_legacy_create_raw_tx(
     req: LegacyCreateTxSigningRequest<'_>,
 ) -> Result<String, StateError> {
     let state_id = client.state_id().clone();
-    let request = serde_json::json!({
-        "env_name_hex": hex::encode(req.signing_key_env.as_bytes()),
-        "from": req.from,
-        "chain_id": req.chain_id,
-        "nonce_hex": req.nonce_hex,
-        "gas_price_hex": req.gas_price_hex,
-        "gas_limit_hex": req.gas_limit_hex,
-        "value_hex": req.value_hex,
-        "data_hex": shared_dcv::bytes_to_hex_prefixed(req.constructor_payload),
-    });
-    let fact_key = local_fact_key(&state_id, "deploy_sign_legacy_create", &request)?;
-    let res = client
-        .io_mut()
-        .call(IoCall {
-            namespace: "local.evm.sign_legacy_create".to_string(),
-            request,
-            fact_key: Some(fact_key),
+    let mut local = LocalEvmIoClient::new(state_id, client.io_mut());
+    local
+        .sign_legacy_create(LocalEvmSignLegacyCreateCall {
+            signing_key_env: req.signing_key_env.to_string(),
+            from: req.from.to_string(),
+            chain_id: req.chain_id,
+            nonce_hex: req.nonce_hex.to_string(),
+            gas_price_hex: req.gas_price_hex.to_string(),
+            gas_limit_hex: req.gas_limit_hex.to_string(),
+            value_hex: req.value_hex.to_string(),
+            data_hex: shared_dcv::bytes_to_hex_prefixed(req.constructor_payload),
         })
         .await
-        .map_err(op_errors::state_from_io)?;
-
-    let raw_tx_hex = op_rpc::expect_string(
-        &res.response["raw_tx_hex"],
-        "evm_response_invalid",
-        "local signer returned non-string raw transaction",
-    )?;
-    shared_dcv::normalize_hex_str(&raw_tx_hex).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "local signer returned invalid raw transaction hex",
-        )
-    })
+        .map_err(op_errors::state_from_io)
 }
 
 pub async fn send_signed_create_transaction(
@@ -453,29 +435,11 @@ pub async fn resolve_signing_key_address(
     state_id: &StateId,
     signing_key_env: &str,
 ) -> Result<String, StateError> {
-    let request = serde_json::json!({
-        "env_name_hex": hex::encode(signing_key_env.as_bytes()),
-    });
-    let fact_key = local_fact_key(state_id, "resolve_signing_key_address", &request)?;
-    let res = io
-        .call(IoCall {
-            namespace: "local.evm.signer_address".to_string(),
-            request,
-            fact_key: Some(fact_key),
-        })
+    let mut local = LocalEvmIoClient::new(state_id.clone(), io);
+    local
+        .signer_address(signing_key_env)
         .await
-        .map_err(op_errors::state_from_io)?;
-    let address = op_rpc::expect_string(
-        &res.response["address"],
-        "evm_response_invalid",
-        "local signer returned non-string address",
-    )?;
-    shared_dcv::normalize_address(&address).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "local signer returned invalid address",
-        )
-    })
+        .map_err(op_errors::state_from_io)
 }
 
 pub async fn resolve_deployer_address(

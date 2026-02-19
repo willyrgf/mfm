@@ -4,8 +4,6 @@
 //!
 //! This op expands into a single state that requests external execution via `namespace="exec"`.
 
-pub mod nix_exec_transport;
-
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -15,8 +13,8 @@ use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{OpId, OpPath, StateId};
 use mfm_machine::plan::StateGraph;
-use mfm_op_common::errors as op_errors;
-use mfm_op_common::states::nix::{validate_nix_exec_config, NixExecState, NixExecStateConfig};
+use mfm_state_common::errors as op_errors;
+use mfm_state_common::states::nix::{validate_nix_exec_config, NixExecState, NixExecStateConfig};
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -90,14 +88,14 @@ mod tests {
     use mfm_machine::replay_io::ReplayIo;
     use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
     use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-    use mfm_op_common::test_support as op_test_support;
     use mfm_sdk::ids::{MachineId, PortKey, StepId};
     use mfm_sdk::op::{OpIo, Operation};
     use mfm_sdk::pipeline::{Pipeline, PipelineStep};
     use mfm_sdk::unstable::SdkPlanResolver;
+    use mfm_state_common::test_support as op_test_support;
     use tokio::sync::Mutex;
 
-    use crate::nix_exec_transport::{NixFlakePolicy, NixFlakeTransportFactory, NAMESPACE_NIX_EXEC};
+    use mfm_collectors_nix_exec::{NixFlakePolicy, NixFlakeTransportFactory, NAMESPACE_NIX_EXEC};
 
     #[test]
     fn expand_accepts_flake_app_ref_config() {
@@ -162,6 +160,10 @@ mod tests {
     }
 
     impl LiveIoTransportFactory for CountingExecFactory {
+        fn namespace_group(&self) -> &str {
+            "exec"
+        }
+
         fn make(&self, _env: mfm_machine::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(CountingExecTransport {
                 counts: Arc::clone(&self.counts),
@@ -475,7 +477,7 @@ mod tests {
             })),
         );
         routes.insert(
-            "nix".to_string(),
+            NAMESPACE_NIX_EXEC.to_string(),
             Arc::new(NixFlakeTransportFactory::new(NixFlakePolicy {
                 allow_prefixes: vec![repo_prefix.clone()],
             })),
@@ -612,7 +614,7 @@ mod tests {
             })),
         );
         routes.insert(
-            "nix".to_string(),
+            NAMESPACE_NIX_EXEC.to_string(),
             Arc::new(NixFlakeTransportFactory::new(NixFlakePolicy {
                 allow_prefixes: vec![repo_prefix.clone()],
             })),

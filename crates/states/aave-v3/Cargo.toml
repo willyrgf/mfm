@@ -1,0 +1,18 @@
+[package]
+name = "mfm-state-aave-v3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+mfm-machine = { path = "../../machine" }
+mfm-collectors-evm = { path = "../../collectors/evm" }
+mfm-state-common = { path = "../common" }
+mfm-evm-core = { path = "../../evm-core" }
+mfm-evm-runtime = { path = "../../evm-runtime" }
+
+[dev-dependencies]
+tokio = { workspace = true }

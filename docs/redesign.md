@@ -36,11 +36,17 @@ Contributor read order:
 ## 3. Core Concepts
 
 ### 3.1 Operation (Op)
-Reusable workflow definition with:
+Reusable planning definition (`impl Operation`) with:
 - input schema
 - run configuration schema
 - deterministic expansion into a state graph
 - output schema
+
+Normative constraints:
+- `expand()` MUST be deterministic for equivalent `(op_config, run_config)`.
+- `expand()` MUST NOT perform ambient IO (`fs/network/time/env/process`).
+- operation code MUST NOT execute workflow side effects.
+- operation code SHOULD stay focused on config validation + state graph wiring.
 
 ### 3.2 Run
 Concrete execution of an op or flattened pipeline:
@@ -50,10 +56,16 @@ Concrete execution of an op or flattened pipeline:
 - content-addressed artifacts
 
 ### 3.3 State
-Execution step that:
+Execution step (`impl State`) that:
 - reads/writes context
 - performs side effects through IO provider abstractions
 - emits domain events via recorder
+
+Normative constraints:
+- state handlers MUST execute runtime behavior through explicit dependencies (`DynContext`, `IoProvider`, `EventRecorder`).
+- side effects MUST route through `IoProvider` only (no ambient IO).
+- reusable executable behavior SHOULD live in shared-state crates.
+- op-local states are allowed only for domain-specific output/aggregation behavior that is not a shared primitive.
 
 ### 3.4 Context
 Deterministically serialized working state:
@@ -150,22 +162,23 @@ Canonical responsibilities:
 - `crates/core/`: primitives + security-sensitive keystore/crypto
 - `crates/collectors/*`: external data adapters
 - `crates/storages/*`: persistence implementations
-- `crates/ops/common/`: cross-domain reusable state primitives
-- `crates/ops/keystore-common/`: keystore-domain reusable states/helpers
-- `crates/ops/aave-v3-common/`: Aave-domain reusable states/helpers
-- `crates/evm-runtime/`: runtime-facing reusable EVM states/helpers
-- `crates/ops/*`: domain ops that compose state graphs
+- shared-state layer crates:
+  - `crates/states/common/`: cross-domain reusable state primitives
+  - `crates/states/keystore/`: keystore-domain reusable states/helpers
+  - `crates/states/aave-v3/`: Aave-domain reusable states/helpers
+  - `crates/evm-runtime/`: runtime-facing reusable EVM states/helpers
+- `crates/ops/*-op`: domain operation planners that compose state graphs
 - `crates/sdk/`: operation/pipeline orchestration glue
 - `bin/cli`, `bin/rest-api`: thin transport adapters
 
 Three-tier rule (normative):
 - Tier 1 (`bin/*`) MUST remain transport-only.
-- Tier 2 (`crates/ops/*`) SHOULD remain thin and primarily perform config validation + graph wiring.
+- Tier 2 (`crates/ops/*-op`) SHOULD remain thin and primarily perform config validation + graph wiring.
 - Tier 3 (shared-state crates) SHOULD contain reusable executable workflow logic.
 - Approved Tier 3 roots include:
-  - `crates/ops/common/src/states/*`
-  - `crates/ops/keystore-common/src/states/*`
-  - `crates/ops/aave-v3-common/src/*`
+  - `crates/states/common/src/states/*`
+  - `crates/states/keystore/src/states/*`
+  - `crates/states/aave-v3/src/*`
   - `crates/evm-runtime/src/states/*`
 - Non-reusable domain-specific output/aggregation states MAY remain op-local.
 
@@ -305,6 +318,7 @@ Execution mode contract:
 
 ### 11.1 Ops expand to state graphs
 `expand()` takes op config + run config and returns deterministic graph output.
+`expand()` is a planning-only phase and MUST NOT execute runtime side effects.
 
 ### 11.2 Flattened composition
 If op A has N states and op B has M states, pipeline graph size is `N + M` states in one run.

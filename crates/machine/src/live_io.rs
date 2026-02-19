@@ -103,6 +103,8 @@ pub struct LiveIoEnv {
 }
 
 pub trait LiveIoTransportFactory: Send + Sync {
+    fn namespace_group(&self) -> &str;
+
     fn make(&self, env: LiveIoEnv) -> Box<dyn LiveIoTransport>;
 }
 
@@ -123,6 +125,10 @@ impl LiveIoTransport for UnimplementedLiveIoTransport {
 pub struct UnimplementedLiveIoTransportFactory;
 
 impl LiveIoTransportFactory for UnimplementedLiveIoTransportFactory {
+    fn namespace_group(&self) -> &str {
+        "unimplemented"
+    }
+
     fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
         Box::new(UnimplementedLiveIoTransport)
     }
@@ -337,6 +343,15 @@ impl IoProvider for LiveIo {
 
     async fn get_recorded_fact(&mut self, key: &FactKey) -> Result<Option<ArtifactId>, IoError> {
         Ok(self.facts.get(key).await)
+    }
+
+    async fn record_value(
+        &mut self,
+        key: FactKey,
+        value: serde_json::Value,
+    ) -> Result<ArtifactId, IoError> {
+        let (_, payload_id) = self.record_fact_json(key, value).await?;
+        Ok(payload_id)
     }
 
     async fn now_millis(&mut self) -> Result<u64, IoError> {

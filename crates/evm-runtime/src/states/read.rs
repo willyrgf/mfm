@@ -14,11 +14,11 @@ use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-use mfm_op_common::ctx::{read_u64_required, write_json};
-use mfm_op_common::errors::{
+use mfm_state_common::ctx::{read_u64_required, write_json};
+use mfm_state_common::errors::{
     state_error_with_state, state_from_io, state_unknown, state_unknown_msg,
 };
-use mfm_op_common::states::meta;
+use mfm_state_common::states::meta;
 
 pub use mfm_evm_core::encoding::{
     address_hex_lower, address_hex_lower_no0x, encode_erc20_balance_of, encode_erc20_decimals,
@@ -546,7 +546,7 @@ mod tests {
                 .to_string();
 
             let Some(response) = self.responses.get(&method) else {
-                return Err(IoError::Other(mfm_op_common::errors::info(
+                return Err(IoError::Other(mfm_state_common::errors::info(
                     "unknown_method",
                     ErrorCategory::Rpc,
                     false,
@@ -558,6 +558,14 @@ mod tests {
                 response: response.clone(),
                 recorded_payload_id: None,
             })
+        }
+
+        async fn record_value(
+            &mut self,
+            _key: FactKey,
+            _value: serde_json::Value,
+        ) -> Result<ArtifactId, IoError> {
+            Ok(ArtifactId("0".repeat(64)))
         }
 
         async fn get_recorded_fact(

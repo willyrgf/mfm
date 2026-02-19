@@ -71,6 +71,21 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "exec",
+      "path": "crates/collectors/exec/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "nix-exec",
+      "path": "crates/collectors/nix-exec/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "nix",
+      "path": "crates/collectors/nix/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "core",
       "path": "crates/core/Cargo.toml",
       "kind": "rust-cargo"
@@ -101,18 +116,8 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "aave-v3-common",
-      "path": "crates/ops/aave-v3-common/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "aave-v3-origin-adapt-op",
       "path": "crates/ops/aave-v3-origin-adapt-op/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "common",
-      "path": "crates/ops/common/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -133,11 +138,6 @@
     {
       "name": "keystore-admin-op",
       "path": "crates/ops/keystore-admin-op/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
-      "name": "keystore-common",
-      "path": "crates/ops/keystore-common/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -168,6 +168,21 @@
     {
       "name": "sdk",
       "path": "crates/sdk/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "aave-v3",
+      "path": "crates/states/aave-v3/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "common",
+      "path": "crates/states/common/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "keystore",
+      "path": "crates/states/keystore/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -203,6 +218,26 @@
     {
       "name": "architecture-verify",
       "path": "crates/tools/architecture-verify/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "local-evm",
+      "path": "crates/transports/local-evm/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "local-fs",
+      "path": "crates/transports/local-fs/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "local-keystore",
+      "path": "crates/transports/local-keystore/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "proof",
+      "path": "crates/transports/proof/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

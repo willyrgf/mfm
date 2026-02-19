@@ -16,11 +16,11 @@ use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-use mfm_op_common::ctx as op_ctx;
-use mfm_op_common::output as op_output;
-use mfm_op_common::states::io::NamespaceReadState;
-use mfm_op_common::states::meta;
-use mfm_op_common::states::side_effect::{IdempotentSideEffectState, TriggerOnce};
+use mfm_state_common::ctx as op_ctx;
+use mfm_state_common::output as op_output;
+use mfm_state_common::states::io::NamespaceReadState;
+use mfm_state_common::states::meta;
+use mfm_state_common::states::side_effect::{IdempotentSideEffectState, TriggerOnce};
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -33,9 +33,9 @@ use mfm_machine::errors::ErrorInfo;
 #[cfg(test)]
 use mfm_machine::events::DomainEvent;
 #[cfg(test)]
-use mfm_op_common::errors as op_errors;
+use mfm_state_common::errors as op_errors;
 #[cfg(test)]
-use mfm_op_common::idempotency as op_idempotency;
+use mfm_state_common::idempotency as op_idempotency;
 
 const OP_ID: &str = "proof";
 const OP_VERSION: &str = "v1";
@@ -201,7 +201,6 @@ impl State for WriteOutputState {
             ctx,
             io,
             rec,
-            "proof.output",
             output_fact_key(&self.op_path),
             output,
             ctx_key("output_artifact_id"),
@@ -238,7 +237,7 @@ mod tests {
     use mfm_machine::runtime::{
         ChildRunLiveIoTransportFactory, DefaultExecutionEngine, EngineFailpoints, PlanResolver,
     };
-    use mfm_op_common::test_support as op_test_support;
+    use mfm_state_common::test_support as op_test_support;
 
     use mfm_sdk::unstable::SdkPlanResolver;
 
@@ -287,6 +286,10 @@ mod tests {
     }
 
     impl LiveIoTransportFactory for CountingTransportFactory {
+        fn namespace_group(&self) -> &str {
+            "proof"
+        }
+
         fn make(&self, _env: mfm_machine::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(CountingTransport {
                 counts: Arc::clone(&self.counts),
@@ -726,7 +729,7 @@ mod tests {
         let got = counts.lock().await.clone();
         assert_eq!(got.get("proof.read").copied().unwrap_or(0), 1);
         assert_eq!(got.get("proof.side_effect").copied().unwrap_or(0), 1);
-        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 1);
+        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 0);
     }
 
     #[tokio::test]
@@ -998,7 +1001,7 @@ mod tests {
         let got = counts.lock().await.clone();
         assert_eq!(got.get("proof.read").copied().unwrap_or(0), 2);
         assert_eq!(got.get("proof.side_effect").copied().unwrap_or(0), 2);
-        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 2);
+        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 0);
     }
 
     #[tokio::test]
@@ -1043,6 +1046,10 @@ mod tests {
         }
 
         impl LiveIoTransportFactory for BlockingTransportFactory {
+            fn namespace_group(&self) -> &str {
+                "proof"
+            }
+
             fn make(&self, _env: mfm_machine::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
                 Box::new(BlockingTransport {
                     counts: Arc::clone(&self.counts),
@@ -1163,7 +1170,7 @@ mod tests {
         let got = counts.lock().await.clone();
         assert_eq!(got.get("proof.read").copied().unwrap_or(0), 2);
         assert_eq!(got.get("proof.side_effect").copied().unwrap_or(0), 2);
-        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 2);
+        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 0);
     }
 
     #[tokio::test]
@@ -1241,7 +1248,7 @@ mod tests {
         let got = counts.lock().await.clone();
         assert_eq!(got.get("proof.read").copied().unwrap_or(0), 2);
         assert_eq!(got.get("proof.side_effect").copied().unwrap_or(0), 2);
-        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 2);
+        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 0);
 
         // Manual replay of the parent run must still match the final snapshot id.
         let final_snapshot_id = resumed.final_snapshot_id.clone().expect("final snapshot");

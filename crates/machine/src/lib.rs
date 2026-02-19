@@ -687,6 +687,13 @@ pub mod io {
     pub trait IoProvider: Send {
         async fn call(&mut self, call: IoCall) -> Result<IoResult, IoError>;
 
+        /// Persist a deterministic structured value directly as a fact payload.
+        async fn record_value(
+            &mut self,
+            key: FactKey,
+            value: serde_json::Value,
+        ) -> Result<ArtifactId, IoError>;
+
         /// Lookup recorded fact payload by key.
         async fn get_recorded_fact(&mut self, key: &FactKey)
             -> Result<Option<ArtifactId>, IoError>;
@@ -937,6 +944,11 @@ pub mod exec_transport;
 ///
 /// Not part of the stable API contract (Appendix C.1).
 pub mod live_io_router;
+
+/// Unstable Live IO transport registry (runtime wiring).
+///
+/// Not part of the stable API contract (Appendix C.1).
+pub mod live_io_registry;
 
 /// Unstable Replay IO implementation (facts replay).
 ///

@@ -26,6 +26,7 @@ A run is defined by three immutable surfaces:
 Execution unit model:
 - Ops expand into state graphs.
 - The runtime executes states.
+- Ops are planners; states are executors.
 - CLI/REST start or resume runs and render outputs.
 
 ## 3. Non-Negotiable Invariants
@@ -87,13 +88,14 @@ The canonical architecture follows the three-tier model from `docs/three-tier-au
 bin/{cli,rest-api}                 (THIN) transport parsing/routing/output only
           |
           v
-     crates/ops/*                  (THIN) config validation + state graph wiring
+op definition crates               (THIN) config validation + state graph wiring
+  crates/ops/*-op
           |
           v
 shared state crates                (THICK) reusable single-responsibility states
-  crates/ops/common/src/states/*
-  crates/ops/keystore-common/src/states/*
-  crates/ops/aave-v3-common/src/*
+  crates/states/common/src/states/*
+  crates/states/keystore/src/states/*
+  crates/states/aave-v3/src/*
   crates/evm-runtime/src/states/*
 ```
 
@@ -105,6 +107,25 @@ Core rule:
 Allowed exception:
 - op-local state implementations are acceptable only for domain-specific output/aggregation states
   that are not reusable shared primitives.
+
+### Strict op vs state contract
+Operation (`impl Operation`) is a planning abstraction:
+- MUST validate op input shape and produce deterministic `StateGraph` output.
+- MUST declare op imports/exports (`OpIo`) as an interface contract.
+- MUST NOT execute runtime side effects.
+- MUST NOT perform ambient IO (`fs/network/time/env/process`) in `expand()`.
+- MUST NOT implement `State` handlers in reusable paths.
+
+State (`impl State`) is an execution abstraction:
+- MUST execute exactly one runtime step (`handle`) with explicit context + IO provider usage.
+- MUST encapsulate executable workflow behavior (including side effects via `IoProvider` only).
+- MUST be reusable where practical; keep scope single-responsibility.
+- MUST NOT perform pipeline/topology planning.
+- MUST NOT parse transport payloads or own CLI/REST contract decisions.
+
+Rule of thumb:
+- If code builds `StateNode`/`DependencyEdge`, it belongs to an op crate.
+- If code implements `State::handle`, it belongs to a shared state crate unless it is a justified op-local output/aggregation state.
 
 ### Ops are planning abstractions
 - An op resolves to a concrete `StateGraph` given `OpConfig` and `RunConfig`.
@@ -140,13 +161,13 @@ Owns orchestration ergonomics:
 
 Must stay thin and avoid domain-specific execution behavior.
 
-### `crates/ops/common/`
-Owns cross-domain reusable state primitives and shared op-level helpers.
+### Shared state layer crates
+`crates/states/common/` owns cross-domain reusable state primitives and shared op-level helpers.
 Domain-specific reusable states may live in dedicated shared-state crates
-(`crates/ops/keystore-common`, `crates/ops/aave-v3-common`, `crates/evm-runtime`).
+(`crates/states/keystore`, `crates/states/aave-v3`, `crates/evm-runtime`).
 
-### `crates/ops/*`
-Owns domain workflows:
+### `crates/ops/*-op`
+Owns domain workflow planning:
 - operation config validation
 - graph composition using reusable states
 - op-level tests and domain contracts
@@ -235,8 +256,8 @@ If you change CLI/REST behavior:
 ## 11. Contributor Placement Checklist
 
 Before adding code, decide scope:
-- Is it business workflow execution? Put it in `crates/ops/*`.
-- Is it reusable workflow state logic? Put it in `crates/ops/common/`.
+- Does it implement `Operation::expand` and build graph topology? Put it in `crates/ops/*-op`.
+- Does it implement `State::handle` and execute runtime behavior? Put it in a shared state crate (`crates/states/common`, `crates/states/keystore`, `crates/states/aave-v3`, `crates/evm-runtime`) unless it is a justified op-local output/aggregation state.
 - Is it runtime semantics? Put it in `crates/machine/`.
 - Is it transport parsing/rendering only? Put it in `bin/cli` or `bin/rest-api`.
 

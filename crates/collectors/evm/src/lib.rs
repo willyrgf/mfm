@@ -192,7 +192,7 @@ impl<'a> EvmIoClient<'a> {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use mfm_machine::ids::ArtifactId;
+    use mfm_machine::ids::{ArtifactId, FactKey};
 
     #[test]
     fn fact_key_is_stable_for_same_call() {
@@ -236,6 +236,14 @@ mod tests {
                 response: self.response.clone(),
                 recorded_payload_id: None,
             })
+        }
+
+        async fn record_value(
+            &mut self,
+            _key: FactKey,
+            _value: serde_json::Value,
+        ) -> Result<ArtifactId, IoError> {
+            Ok(ArtifactId("0".repeat(64)))
         }
 
         async fn get_recorded_fact(

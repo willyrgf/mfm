@@ -1,0 +1,9 @@
+[package]
+name = "mfm-transports-proof"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = { workspace = true }
+mfm-machine = { path = "../../machine" }
+serde_json = { workspace = true }

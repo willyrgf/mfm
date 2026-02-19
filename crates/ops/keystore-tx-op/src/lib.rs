@@ -5,18 +5,18 @@ use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, OpId, OpPath, StateId};
 use mfm_machine::plan::{StateGraph, StateNode};
-use mfm_op_common::errors as op_errors;
-use mfm_op_keystore_common::states::tx::{
-    KeystoreTxSendRawState, KeystoreTxSendRawStateConfig, KeystoreTxSignState,
-    KeystoreTxSignStateConfig,
-};
-use mfm_op_keystore_common::tx::{
-    output_context_key, parse_address, parse_data_hex, parse_u128_quantity, Eip1559TxToSign,
-    KeystoreTxError,
-};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
+use mfm_state_common::errors as op_errors;
+use mfm_state_keystore::states::tx::{
+    KeystoreTxSendRawState, KeystoreTxSendRawStateConfig, KeystoreTxSignState,
+    KeystoreTxSignStateConfig,
+};
+use mfm_state_keystore::tx::{
+    output_context_key, parse_address, parse_data_hex, parse_u128_quantity, Eip1559TxToSign,
+    KeystoreTxError,
+};
 use serde::{Deserialize, Serialize};
 
 pub const TX_OP_VERSION: &str = "v1";
@@ -352,11 +352,10 @@ mod tests {
     use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
     use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
     use mfm_machine::runtime::{DefaultExecutionEngine, PlanResolver};
-    use mfm_op_common::local_fs_io::LocalFsIoTransportFactory;
-    use mfm_op_common::test_support as op_test_support;
-    use mfm_op_keystore_common::local_keystore_io::LocalKeystoreIoTransportFactory;
     use mfm_sdk::unstable::SdkPlanResolver;
-    use std::collections::HashMap;
+    use mfm_state_common::test_support as op_test_support;
+    use mfm_transports_local_fs::LocalFsIoTransportFactory;
+    use mfm_transports_local_keystore::LocalKeystoreIoTransportFactory;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -374,6 +373,10 @@ mod tests {
     struct TestEvmFactory;
 
     impl LiveIoTransportFactory for TestEvmFactory {
+        fn namespace_group(&self) -> &str {
+            "evm"
+        }
+
         fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(TestEvmTransport)
         }
@@ -413,42 +416,15 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct TestLocalFactory;
-
-    impl LiveIoTransportFactory for TestLocalFactory {
-        fn make(&self, env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
-            Box::new(TestLocalTransport {
-                fs: LocalFsIoTransportFactory.make(env.clone()),
-                keystore: LocalKeystoreIoTransportFactory.make(env),
-            })
-        }
-    }
-
-    struct TestLocalTransport {
-        fs: Box<dyn LiveIoTransport>,
-        keystore: Box<dyn LiveIoTransport>,
-    }
-
-    #[async_trait]
-    impl LiveIoTransport for TestLocalTransport {
-        async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
-            match call.namespace.as_str() {
-                ns if ns.starts_with("local.keystore.") => self.keystore.call(call).await,
-                ns if ns.starts_with("local.fs.") => self.fs.call(call).await,
-                _ => Err(IoError::Other(io_info(
-                    "unknown_local_namespace",
-                    "unknown local namespace",
-                ))),
-            }
-        }
-    }
-
     fn test_transport_factory() -> Arc<dyn LiveIoTransportFactory> {
-        let mut routes: HashMap<String, Arc<dyn LiveIoTransportFactory>> = HashMap::new();
-        routes.insert("local".to_string(), Arc::new(TestLocalFactory));
-        routes.insert("evm".to_string(), Arc::new(TestEvmFactory));
-        Arc::new(RouterLiveIoTransportFactory::new(routes))
+        Arc::new(
+            RouterLiveIoTransportFactory::from_factories(vec![
+                Arc::new(LocalFsIoTransportFactory),
+                Arc::new(LocalKeystoreIoTransportFactory),
+                Arc::new(TestEvmFactory),
+            ])
+            .expect("router factories"),
+        )
     }
 
     #[tokio::test]
