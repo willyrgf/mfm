@@ -5,8 +5,11 @@ use std::path::{Path, PathBuf};
 const SHARED_RATIO_MIN: f64 = 0.80;
 const DEFAULT_SHARED_STATE_ROOTS: &[&str] = &[
     "crates/ops/common/src/states",
+    "crates/states/common/src/states",
     "crates/ops/keystore-common/src/states",
+    "crates/states/keystore/src/states",
     "crates/ops/aave-v3-common/src",
+    "crates/states/aave-v3/src",
     "crates/evm-runtime/src/states",
 ];
 
@@ -279,10 +282,29 @@ fn check_runtime_evm_namespace_call_sites(repo_root: &Path, failures: &mut Vec<S
 }
 
 fn check_keystore_tx_sign_stays_local(repo_root: &Path, failures: &mut Vec<String>) {
-    let keystore_tx_state = repo_root.join("crates/ops/keystore-common/src/states/tx.rs");
-    let keystore_tx_state_normalized = normalize_path_for_report(&keystore_tx_state);
+    let keystore_tx_state_candidates = [
+        repo_root.join("crates/states/keystore/src/states/tx.rs"),
+        repo_root.join("crates/ops/keystore-common/src/states/tx.rs"),
+    ];
 
-    let content = match fs::read_to_string(&keystore_tx_state) {
+    let Some(keystore_tx_state) = keystore_tx_state_candidates
+        .iter()
+        .find(|path| path.exists())
+    else {
+        let candidates = keystore_tx_state_candidates
+            .iter()
+            .map(|p| normalize_path_for_report(p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        failures.push(format!(
+            "failed to locate keystore tx-sign state source file; checked: {candidates}"
+        ));
+        return;
+    };
+
+    let keystore_tx_state_normalized = normalize_path_for_report(keystore_tx_state);
+
+    let content = match fs::read_to_string(keystore_tx_state) {
         Ok(c) => c,
         Err(err) => {
             failures.push(format!(
