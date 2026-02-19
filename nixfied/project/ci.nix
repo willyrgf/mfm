@@ -376,6 +376,7 @@ in
           "parity-rest-api-smoke"
           "parity-evm-reth"
           "parity-aave-v3-reth"
+          "parity-postgres-state-events-audit"
           "parity-keystore-reth-tx-sign-send"
           "parity-evm-helios-smoke"
         ];
