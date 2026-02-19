@@ -1,9 +1,9 @@
-# EVM RPC Routing (Milestone A + B)
+# EVM RPC Routing
 
 Status: implemented and validated in repository (2026-02-19).
 
 This document is the operator and contributor runbook for the `namespace="evm"` live IO routing
-path introduced in Milestone A and expanded in Milestone B.
+path implemented in this repository.
 
 Normative architecture references:
 - `docs/redesign.md`
@@ -84,7 +84,7 @@ Current policy:
 - `read_light`: optional two-source hedge (`hedged_light`) or failover (`failover` mode).
 - `read_heavy`: sequential failover only.
 - `write_or_side_effect`: primary-only single dispatch (no hedge, no cross-source write fanout).
-- `eth_getLogs` (Milestone B): adaptive chunking over block ranges with failover-only dispatch.
+- `eth_getLogs`: adaptive chunking over block ranges with failover-only dispatch.
 
 Classification highlights:
 - Heavy by default unless explicitly allowlisted.

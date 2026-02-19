@@ -104,7 +104,7 @@ Allowed exception:
 - An op resolves to a concrete `StateGraph` given `OpConfig` and `RunConfig`.
 - `expand()` must be deterministic and must not perform IO.
 
-### Flattened pipelines (Milestone 1)
+### Flattened pipelines
 - Multiple ops are flattened into one execution plan and one run.
 - Shared context is namespaced; cross-op imports/exports are explicit.
 
