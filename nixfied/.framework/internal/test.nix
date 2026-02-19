@@ -541,6 +541,21 @@ let
       require_absent "$modules_file" 'tail -50 "$HELIOS_DIR/logs/helios.log" >&2 || true' "modules helios unguarded log tail"
     }
 
+    check_reth_lifecycle_contracts() {
+      local reth_config="$ROOT/nixfied/.framework/reth/config.nix"
+      local reth_default="$ROOT/nixfied/.framework/reth/default.nix"
+      local reth_lifecycle="$ROOT/nixfied/.framework/reth/lifecycle.nix"
+
+      require_contains "$reth_config" 'portKeyP2p = cfg.portKeyP2p or "rethP2p";' "reth p2p port key default"
+      require_contains "$reth_default" 'p2pPortVar = slots.portVarName config.portKeyP2p;' "reth p2p artifact export"
+      require_contains "$reth_lifecycle" 'P2P_PORT_VAR="' "reth p2p runtime var"
+      require_contains "$reth_lifecycle" 'targetVar = "RETH_P2P_PORT";' "reth p2p slot resolve"
+      require_contains "$reth_lifecycle" '--port "$RETH_P2P_PORT"' "reth p2p arg wiring"
+      require_contains "$reth_lifecycle" 'p2p_port=$RETH_P2P_PORT' "reth p2p status visibility"
+      require_contains "$reth_lifecycle" 'signal_num=' "reth trap signal diagnostics"
+      require_contains "$reth_lifecycle" 'signal_trap_' "reth trap wait reason"
+    }
+
     if [ "$SKIP_SETUP" -ne 1 ]; then
       log "flake eval"
       nix flake show "path:$ROOT" >/dev/null
@@ -551,6 +566,9 @@ let
 
       log "fixture hardening contracts"
       check_fixture_hardening_contracts
+
+      log "reth lifecycle contracts"
+      check_reth_lifecycle_contracts
 
       log "core apps"
       HELP_OUT="$WORKDIR/help.txt"

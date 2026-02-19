@@ -89,6 +89,7 @@ serviceModule.mkServiceModule {
     httpPortVar = slots.portVarName config.portKeyHttp;
     wsPortVar = slots.portVarName config.portKeyWs;
     authPortVar = slots.portVarName config.portKeyAuth;
+    p2pPortVar = slots.portVarName config.portKeyP2p;
     dataDir = slots.getServiceDir config.dataDirName;
     network = config.network;
     devMode = config.devMode;
