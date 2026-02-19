@@ -1,0 +1,67 @@
+{ lib, canonical }:
+{
+  system,
+  projectRoot,
+  resolved,
+  runtime,
+  services,
+  tasks,
+  workflows,
+  views,
+}:
+let
+  evalHash = canonical.hashCanonical {
+    schema = {
+      kind = "nixfied-model-eval";
+      version = 1;
+    };
+    identity = resolved.identity;
+    runtime = runtime;
+    services = services;
+    tasks = tasks;
+    workflows = workflows;
+  };
+
+  model = canonical.canonicalize {
+    schema = {
+      kind = "nixfied-model";
+      version = 1;
+    };
+
+    identity = {
+      projectId = resolved.identity.projectId;
+      system = system;
+      evalHash = evalHash;
+    };
+
+    runtime = runtime;
+
+    services = services;
+    tasks = tasks;
+    workflows = workflows;
+
+    views = {
+      apps = views.apps;
+      help = views.help;
+      docs = views.docs;
+    };
+
+    state = {
+      registry = {
+        schemaVersion = 1;
+        root = resolved.state.registryRoot;
+      };
+      artifacts = {
+        root = resolved.state.artifactsRoot;
+      };
+    };
+  };
+
+  stateHash = canonical.hashCanonical model;
+in
+{
+  inherit
+    model
+    stateHash
+    ;
+}

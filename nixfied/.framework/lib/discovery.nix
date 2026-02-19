@@ -25,22 +25,17 @@ let
       path = "nixfied/project/conf.nix";
       risk = "Project identity, environment names, and port contract.";
       required_checks = [
-        "nix run .#check"
+        "nix run .#validate-env"
         "nix run .#ci -- --summary"
       ];
     }
     {
-      path = "nixfied/project/ci.nix";
-      risk = "CI pipeline behavior and release gates.";
+      path = "nixfied/project/module.nix";
+      risk = "Primary command/task/workflow surface.";
       required_checks = [
+        "nix run .#help"
+        "nix run .#framework::test"
         "nix run .#ci -- --summary"
-      ];
-    }
-    {
-      path = "nixfied/project/quality.nix";
-      risk = "Quality checks and discovery drift enforcement.";
-      required_checks = [
-        "nix run .#check"
       ];
     }
     {

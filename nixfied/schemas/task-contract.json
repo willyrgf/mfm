@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nixfied.dev/schemas/task-contract.json",
+  "title": "Nixfied Task Contract",
+  "type": "object",
+  "required": [
+    "id",
+    "kind",
+    "summary",
+    "runner",
+    "contract",
+    "runtime"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "command",
+        "service-op",
+        "supervisor-op",
+        "utility",
+        "ci-step",
+        "workflow",
+        "internal"
+      ]
+    },
+    "summary": { "type": "string" },
+    "description": { "type": "string" },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "runner": {
+      "type": "object",
+      "required": [ "type" ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [ "shell", "derivation", "workflowRef" ]
+        },
+        "command": { "type": "string" },
+        "package": { "type": [ "string", "null" ] },
+        "workflowId": { "type": [ "string", "null" ] }
+      }
+    },
+    "contract": {
+      "type": "object",
+      "required": [ "version", "input", "output", "behavior", "errors" ]
+    },
+    "runtime": {
+      "type": "object",
+      "required": [ "slotEnv", "workdir", "hermetic", "runtimeInputs" ]
+    },
+    "scheduling": { "type": "object" },
+    "deps": { "type": "object" },
+    "produces": { "type": "object" },
+    "ui": { "type": "object" }
+  },
+  "additionalProperties": true
+}
