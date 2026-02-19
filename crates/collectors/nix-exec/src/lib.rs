@@ -90,9 +90,17 @@ impl NixFlakeTransportFactory {
     pub fn new(policy: NixFlakePolicy) -> Self {
         Self { policy }
     }
+
+    pub fn from_env() -> Self {
+        Self::default()
+    }
 }
 
 impl LiveIoTransportFactory for NixFlakeTransportFactory {
+    fn namespace_group(&self) -> &str {
+        NAMESPACE_NIX_EXEC
+    }
+
     fn make(&self, env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
         Box::new(NixFlakeTransport {
             fallback_policy: self.policy.clone(),

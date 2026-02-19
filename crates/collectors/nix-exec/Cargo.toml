@@ -1,5 +1,5 @@
 [package]
-name = "mfm-op-common"
+name = "mfm-collectors-nix-exec"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,10 +7,8 @@ edition = "2021"
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-hex = { workspace = true }
+tokio = { workspace = true }
 mfm-machine = { path = "../../machine" }
-mfm-sdk = { path = "../../sdk" }
-mfm-collectors-nix = { path = "../../collectors/nix" }
-mfm-collectors-exec = { path = "../../collectors/exec" }
 
 [dev-dependencies]
+uuid = { version = "1.8.0", features = ["v4"] }

@@ -4,8 +4,6 @@
 //!
 //! This op expands into a single state that requests external execution via `namespace="exec"`.
 
-pub mod nix_exec_transport;
-
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -97,7 +95,7 @@ mod tests {
     use mfm_sdk::unstable::SdkPlanResolver;
     use tokio::sync::Mutex;
 
-    use crate::nix_exec_transport::{NixFlakePolicy, NixFlakeTransportFactory, NAMESPACE_NIX_EXEC};
+    use mfm_collectors_nix_exec::{NixFlakePolicy, NixFlakeTransportFactory, NAMESPACE_NIX_EXEC};
 
     #[test]
     fn expand_accepts_flake_app_ref_config() {
@@ -162,6 +160,10 @@ mod tests {
     }
 
     impl LiveIoTransportFactory for CountingExecFactory {
+        fn namespace_group(&self) -> &str {
+            "exec"
+        }
+
         fn make(&self, _env: mfm_machine::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(CountingExecTransport {
                 counts: Arc::clone(&self.counts),
@@ -475,7 +477,7 @@ mod tests {
             })),
         );
         routes.insert(
-            "nix".to_string(),
+            NAMESPACE_NIX_EXEC.to_string(),
             Arc::new(NixFlakeTransportFactory::new(NixFlakePolicy {
                 allow_prefixes: vec![repo_prefix.clone()],
             })),
@@ -612,7 +614,7 @@ mod tests {
             })),
         );
         routes.insert(
-            "nix".to_string(),
+            NAMESPACE_NIX_EXEC.to_string(),
             Arc::new(NixFlakeTransportFactory::new(NixFlakePolicy {
                 allow_prefixes: vec![repo_prefix.clone()],
             })),

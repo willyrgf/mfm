@@ -323,6 +323,10 @@ impl ChildRunLiveIoTransportFactory {
 }
 
 impl LiveIoTransportFactory for ChildRunLiveIoTransportFactory {
+    fn namespace_group(&self) -> &str {
+        "child_run_wrapper"
+    }
+
     fn make(&self, env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
         Box::new(ChildRunLiveIoTransport {
             env: env.clone(),

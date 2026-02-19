@@ -17,3 +17,5 @@ mfm-op-keystore-common = { path = "../keystore-common" }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tempfile = "3.0"
+mfm-transports-local-fs = { path = "../../transports/local-fs" }
+mfm-transports-local-keystore = { path = "../../transports/local-keystore" }

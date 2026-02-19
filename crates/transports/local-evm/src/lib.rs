@@ -5,12 +5,12 @@ use mfm_evm_core::hex::{
     bytes_to_hex_prefixed, hex_to_bytes, normalize_hex_str, normalize_nonempty_hex_str,
 };
 use mfm_evm_core::rlp::{rlp_encode_list, trim_leading_zero_bytes, u128_to_min_be};
-use mfm_machine::errors::{ErrorCategory, IoError};
-use mfm_machine::io::IoCall;
+use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
+use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
+use mfm_machine::ids::{ErrorCode, FactKey, StateId};
+use mfm_machine::io::{IoCall, IoProvider};
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
-use mfm_op_common::local_transport::{
-    decode_hex_utf8, encode_response, io_other, parse_request, LocalTransportError,
-};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
@@ -18,6 +18,10 @@ use zeroize::Zeroizing;
 pub struct LocalEvmIoTransportFactory;
 
 impl LiveIoTransportFactory for LocalEvmIoTransportFactory {
+    fn namespace_group(&self) -> &str {
+        "local.evm"
+    }
+
     fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
         Box::new(LocalEvmIoTransport)
     }
@@ -37,6 +41,126 @@ impl LiveIoTransport for LocalEvmIoTransport {
                 "unknown local evm io namespace",
             )),
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalEvmSignLegacyCreateCall {
+    pub signing_key_env: String,
+    pub from: String,
+    pub chain_id: u64,
+    pub nonce_hex: String,
+    pub gas_price_hex: String,
+    pub gas_limit_hex: String,
+    pub value_hex: String,
+    pub data_hex: String,
+}
+
+pub struct LocalEvmIoClient<'a> {
+    state_id: StateId,
+    io: &'a mut dyn IoProvider,
+}
+
+impl<'a> LocalEvmIoClient<'a> {
+    pub fn new(state_id: StateId, io: &'a mut dyn IoProvider) -> Self {
+        Self { state_id, io }
+    }
+
+    fn fact_key(&self, purpose: &str, request: &serde_json::Value) -> Result<FactKey, IoError> {
+        let req_id = artifact_id_for_json(request).map_err(|e| match e {
+            CanonicalJsonError::FloatNotAllowed => io_other(
+                "local_request_not_canonical",
+                ErrorCategory::ParsingInput,
+                "local io request was not canonical-json-hashable (floats are forbidden)",
+            ),
+            CanonicalJsonError::SecretsNotAllowed => io_other(
+                "secrets_detected",
+                ErrorCategory::Unknown,
+                "local io request contained secrets (policy forbids persisting secrets)",
+            ),
+        })?;
+        Ok(FactKey(format!(
+            "mfm:local|state:{}|purpose:{purpose}|req:{}",
+            self.state_id.0, req_id.0
+        )))
+    }
+
+    pub async fn signer_address(&mut self, signing_key_env: &str) -> Result<String, IoError> {
+        let request = serde_json::json!({
+            "env_name_hex": hex::encode(signing_key_env.as_bytes()),
+        });
+        let fact_key = self.fact_key("resolve_signing_key_address", &request)?;
+        let result = self
+            .io
+            .call(IoCall {
+                namespace: "local.evm.signer_address".to_string(),
+                request,
+                fact_key: Some(fact_key),
+            })
+            .await?;
+        let address = result
+            .response
+            .get("address")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                io_other(
+                    "evm_response_invalid",
+                    ErrorCategory::ParsingInput,
+                    "local signer returned non-string address",
+                )
+            })?;
+
+        normalize_address(address).map_err(|_| {
+            io_other(
+                "evm_response_invalid",
+                ErrorCategory::ParsingInput,
+                "local signer returned invalid address",
+            )
+        })
+    }
+
+    pub async fn sign_legacy_create(
+        &mut self,
+        req: LocalEvmSignLegacyCreateCall,
+    ) -> Result<String, IoError> {
+        let request = serde_json::json!({
+            "env_name_hex": hex::encode(req.signing_key_env.as_bytes()),
+            "from": req.from,
+            "chain_id": req.chain_id,
+            "nonce_hex": req.nonce_hex,
+            "gas_price_hex": req.gas_price_hex,
+            "gas_limit_hex": req.gas_limit_hex,
+            "value_hex": req.value_hex,
+            "data_hex": req.data_hex,
+        });
+        let fact_key = self.fact_key("deploy_sign_legacy_create", &request)?;
+        let result = self
+            .io
+            .call(IoCall {
+                namespace: "local.evm.sign_legacy_create".to_string(),
+                request,
+                fact_key: Some(fact_key),
+            })
+            .await?;
+        let raw_tx_hex = result
+            .response
+            .get("raw_tx_hex")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                io_other(
+                    "evm_response_invalid",
+                    ErrorCategory::ParsingInput,
+                    "local signer returned non-string raw transaction",
+                )
+            })?;
+
+        normalize_hex_str(raw_tx_hex).map_err(|_| {
+            io_other(
+                "evm_response_invalid",
+                ErrorCategory::ParsingInput,
+                "local signer returned invalid raw transaction hex",
+            )
+        })
     }
 }
 
@@ -260,6 +384,78 @@ fn normalize_address(raw: &str) -> Result<String, ()> {
         return Err(());
     }
     Ok(normalized.to_ascii_lowercase())
+}
+
+#[derive(Debug, Clone)]
+struct LocalTransportError {
+    code: &'static str,
+    category: ErrorCategory,
+    message: String,
+}
+
+impl LocalTransportError {
+    fn new(code: &'static str, category: ErrorCategory, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            category,
+            message: message.into(),
+        }
+    }
+
+    fn into_io(self) -> IoError {
+        io_other(self.code, self.category, self.message)
+    }
+}
+
+fn io_other(code: &'static str, category: ErrorCategory, message: impl Into<String>) -> IoError {
+    IoError::Other(ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category,
+        retryable: false,
+        message: message.into(),
+        details: None,
+    })
+}
+
+fn parse_request<T: DeserializeOwned>(request: serde_json::Value) -> Result<T, IoError> {
+    serde_json::from_value(request).map_err(|_| {
+        io_other(
+            "invalid_local_request",
+            ErrorCategory::ParsingInput,
+            "invalid local io request payload",
+        )
+    })
+}
+
+fn encode_response(value: serde_json::Value) -> Result<serde_json::Value, IoError> {
+    serde_json::to_value(value).map_err(|_| {
+        io_other(
+            "local_response_serialize_failed",
+            ErrorCategory::Unknown,
+            "failed to serialize local io response payload",
+        )
+    })
+}
+
+fn decode_hex_utf8(
+    raw: &str,
+    code: &'static str,
+    field: &'static str,
+) -> Result<String, LocalTransportError> {
+    let bytes = hex::decode(raw).map_err(|_| {
+        LocalTransportError::new(
+            code,
+            ErrorCategory::ParsingInput,
+            format!("{field} must be valid hex"),
+        )
+    })?;
+    String::from_utf8(bytes).map_err(|_| {
+        LocalTransportError::new(
+            code,
+            ErrorCategory::ParsingInput,
+            format!("{field} did not decode to utf-8"),
+        )
+    })
 }
 
 #[cfg(test)]

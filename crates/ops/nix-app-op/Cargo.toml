@@ -14,3 +14,4 @@ mfm-op-common = { path = "../common" }
 
 [dev-dependencies]
 uuid = { version = "1.8.0", features = ["v4"] }
+mfm-collectors-nix-exec = { path = "../../collectors/nix-exec" }

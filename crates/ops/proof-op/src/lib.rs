@@ -201,7 +201,6 @@ impl State for WriteOutputState {
             ctx,
             io,
             rec,
-            "proof.output",
             output_fact_key(&self.op_path),
             output,
             ctx_key("output_artifact_id"),
@@ -287,6 +286,10 @@ mod tests {
     }
 
     impl LiveIoTransportFactory for CountingTransportFactory {
+        fn namespace_group(&self) -> &str {
+            "proof"
+        }
+
         fn make(&self, _env: mfm_machine::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(CountingTransport {
                 counts: Arc::clone(&self.counts),
@@ -726,7 +729,7 @@ mod tests {
         let got = counts.lock().await.clone();
         assert_eq!(got.get("proof.read").copied().unwrap_or(0), 1);
         assert_eq!(got.get("proof.side_effect").copied().unwrap_or(0), 1);
-        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 1);
+        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 0);
     }
 
     #[tokio::test]
@@ -998,7 +1001,7 @@ mod tests {
         let got = counts.lock().await.clone();
         assert_eq!(got.get("proof.read").copied().unwrap_or(0), 2);
         assert_eq!(got.get("proof.side_effect").copied().unwrap_or(0), 2);
-        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 2);
+        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 0);
     }
 
     #[tokio::test]
@@ -1043,6 +1046,10 @@ mod tests {
         }
 
         impl LiveIoTransportFactory for BlockingTransportFactory {
+            fn namespace_group(&self) -> &str {
+                "proof"
+            }
+
             fn make(&self, _env: mfm_machine::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
                 Box::new(BlockingTransport {
                     counts: Arc::clone(&self.counts),
@@ -1163,7 +1170,7 @@ mod tests {
         let got = counts.lock().await.clone();
         assert_eq!(got.get("proof.read").copied().unwrap_or(0), 2);
         assert_eq!(got.get("proof.side_effect").copied().unwrap_or(0), 2);
-        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 2);
+        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 0);
     }
 
     #[tokio::test]
@@ -1241,7 +1248,7 @@ mod tests {
         let got = counts.lock().await.clone();
         assert_eq!(got.get("proof.read").copied().unwrap_or(0), 2);
         assert_eq!(got.get("proof.side_effect").copied().unwrap_or(0), 2);
-        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 2);
+        assert_eq!(got.get("proof.output").copied().unwrap_or(0), 0);
 
         // Manual replay of the parent run must still match the final snapshot id.
         let final_snapshot_id = resumed.final_snapshot_id.clone().expect("final snapshot");

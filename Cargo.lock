@@ -1907,21 +1907,23 @@ dependencies = [
  "mfm-artifact-store-fs",
  "mfm-artifact-store-s3",
  "mfm-collectors-evm-jsonrpc-http",
+ "mfm-collectors-nix-exec",
  "mfm-event-store-postgres",
- "mfm-evm-runtime",
  "mfm-machine",
  "mfm-op-aave-v3-origin-adapt",
- "mfm-op-common",
  "mfm-op-evm-deploy-configure-validate",
  "mfm-op-evm-read",
  "mfm-op-evm-write",
  "mfm-op-keystore-admin",
- "mfm-op-keystore-common",
  "mfm-op-keystore-tx",
  "mfm-op-nix-app",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-sdk",
+ "mfm-transports-local-evm",
+ "mfm-transports-local-fs",
+ "mfm-transports-local-keystore",
+ "mfm-transports-proof",
  "serde",
  "serde_json",
  "tracing",
@@ -1992,6 +1994,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-collectors-exec"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "mfm-collectors-nix"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "mfm-collectors-nix-exec"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "mfm-event-store-mem"
 version = "0.1.0"
 dependencies = [
@@ -2036,6 +2072,7 @@ dependencies = [
  "mfm-evm-core",
  "mfm-machine",
  "mfm-op-common",
+ "mfm-transports-local-evm",
  "serde",
  "serde_json",
  "tokio",
@@ -2136,6 +2173,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "hex",
+ "mfm-collectors-exec",
+ "mfm-collectors-nix",
  "mfm-machine",
  "mfm-sdk",
  "serde",
@@ -2240,6 +2279,8 @@ dependencies = [
  "mfm-op-common",
  "mfm-op-keystore-common",
  "mfm-sdk",
+ "mfm-transports-local-fs",
+ "mfm-transports-local-keystore",
  "serde",
  "serde_json",
  "tempfile",
@@ -2251,6 +2292,7 @@ name = "mfm-op-nix-app"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "mfm-collectors-nix-exec",
  "mfm-machine",
  "mfm-op-common",
  "mfm-sdk",
@@ -2313,6 +2355,64 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "mfm-transports-local-evm"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "async-trait",
+ "hex",
+ "k256",
+ "mfm-evm-core",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "zeroize",
+]
+
+[[package]]
+name = "mfm-transports-local-fs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mfm-transports-local-keystore"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "async-trait",
+ "chrono",
+ "hex",
+ "k256",
+ "mfm-evm-core",
+ "mfm-machine",
+ "mfm-op-keystore-common",
+ "mfm-op-keystore-shim",
+ "mfm_core",
+ "regex",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "mfm-transports-proof"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-machine",
+ "serde_json",
 ]
 
 [[package]]

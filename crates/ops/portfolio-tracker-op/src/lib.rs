@@ -7,7 +7,7 @@
 //! - fetch pinned `eth_blockNumber`
 //! - fetch native ETH balance via `eth_getBalance` at that pinned block
 //! - fetch allowlisted ERC-20 balances via `eth_call(balanceOf)` at that pinned block
-//! - write a content-addressed snapshot output artifact via `portfolio.output`
+//! - write a content-addressed snapshot output artifact via deterministic fact recording
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -435,7 +435,6 @@ impl State for WriteSnapshotState {
             ctx,
             io,
             rec,
-            "portfolio.output",
             output_fact_key(&self.op_path),
             snapshot,
             ctx_key(KEY_SNAPSHOT_ARTIFACT_ID),
@@ -481,8 +480,6 @@ impl State for WriteSnapshotState {
 mod tests {
     use super::*;
 
-    use std::collections::HashMap;
-
     use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
     use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
     use mfm_machine::events::{Event, KernelEvent};
@@ -504,24 +501,6 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct EchoTransportFactory;
-
-    impl LiveIoTransportFactory for EchoTransportFactory {
-        fn make(&self, _env: mfm_machine::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
-            Box::new(EchoTransport)
-        }
-    }
-
-    struct EchoTransport;
-
-    #[async_trait]
-    impl LiveIoTransport for EchoTransport {
-        async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
-            Ok(call.request)
-        }
-    }
-
-    #[derive(Clone)]
     struct MockEvmTransportFactory {
         chain_id_hex: String,
     }
@@ -535,6 +514,10 @@ mod tests {
     }
 
     impl LiveIoTransportFactory for MockEvmTransportFactory {
+        fn namespace_group(&self) -> &str {
+            "evm"
+        }
+
         fn make(&self, _env: mfm_machine::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(MockEvmTransport {
                 chain_id_hex: self.chain_id_hex.clone(),
@@ -612,11 +595,10 @@ mod tests {
             Arc::clone(&planner),
         ));
 
-        let mut routes: HashMap<String, Arc<dyn LiveIoTransportFactory>> = HashMap::new();
-        routes.insert("evm".to_string(), evm_factory);
-        routes.insert("portfolio".to_string(), Arc::new(EchoTransportFactory));
-        let factory: Arc<dyn LiveIoTransportFactory> =
-            Arc::new(RouterLiveIoTransportFactory::new(routes));
+        let factory: Arc<dyn LiveIoTransportFactory> = Arc::new(
+            RouterLiveIoTransportFactory::from_factories(vec![evm_factory])
+                .expect("router factories"),
+        );
 
         let engine =
             DefaultExecutionEngine::new(resolver).with_live_transport_factory(Arc::clone(&factory));

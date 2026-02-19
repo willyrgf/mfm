@@ -1,11 +1,12 @@
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use mfm_collectors_exec::{ExecIoClient, RunProgramRequest};
+use mfm_collectors_nix::{NixIoClient, ResolveFlakeAppRequest};
+use serde::Deserialize;
 
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::StateError;
-use mfm_machine::hashing::artifact_id_for_json;
-use mfm_machine::ids::{ContextKey, FactKey, StateId};
-use mfm_machine::io::{IoCall, IoProvider};
+use mfm_machine::ids::{ContextKey, StateId};
+use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
@@ -14,9 +15,6 @@ use crate::ctx as op_ctx;
 use crate::errors as op_errors;
 use crate::idempotency as op_idempotency;
 use crate::states::meta;
-
-const NAMESPACE_NIX_EXEC: &str = "nix.exec";
-const NAMESPACE_EXEC: &str = "exec";
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct NixExecStateConfig {
@@ -45,20 +43,6 @@ fn default_timeout_ms() -> u64 {
 
 fn default_write_result_to() -> String {
     "result".to_string()
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-enum ExecRequest {
-    #[serde(rename = "run_program_v1")]
-    RunProgramV1 {
-        program_path: String,
-        argv: Vec<String>,
-        stdin_json: serde_json::Value,
-        timeout_ms: u64,
-        #[serde(default)]
-        env: serde_json::Value,
-    },
 }
 
 pub fn validate_nix_exec_config(cfg: &NixExecStateConfig) -> Result<(), String> {
@@ -93,27 +77,14 @@ pub struct NixExecState {
 }
 
 impl NixExecState {
-    fn preflight_fact_key(&self, req: &serde_json::Value) -> Result<FactKey, StateError> {
-        let id = artifact_id_for_json(req).map_err(|_| {
-            op_errors::state_unknown(
-                "nix_preflight_request_not_canonical",
-                "nix preflight request not canonical",
-            )
-        })?;
-        Ok(FactKey(format!(
-            "mfm:nix:preflight|state:{}|req:{}",
-            self.state_id.0, id.0
-        )))
-    }
-
-    fn fact_key(&self, req: &serde_json::Value) -> Result<FactKey, StateError> {
-        let id = artifact_id_for_json(req).map_err(|_| {
-            op_errors::state_unknown("exec_request_not_canonical", "exec request not canonical")
-        })?;
-        Ok(FactKey(format!(
-            "mfm:exec|state:{}|req:{}",
-            self.state_id.0, id.0
-        )))
+    fn exec_request(&self, program_path: String) -> RunProgramRequest {
+        RunProgramRequest {
+            program_path,
+            argv: self.cfg.argv.clone(),
+            stdin_json: self.cfg.stdin_json.clone(),
+            timeout_ms: self.cfg.timeout_ms,
+            env: serde_json::json!({}),
+        }
     }
 }
 
@@ -143,55 +114,19 @@ impl State for NixExecState {
                 )
             })?;
 
-            let preflight_req = serde_json::json!({
-                "kind": "resolve_flake_app_v1",
-                "app": app,
-                "timeout_ms": self.cfg.timeout_ms,
-            });
-            let preflight_key = self.preflight_fact_key(&preflight_req)?;
-            let preflight = io
-                .call(IoCall {
-                    namespace: NAMESPACE_NIX_EXEC.to_string(),
-                    request: preflight_req,
-                    fact_key: Some(preflight_key),
-                })
-                .await
-                .map_err(op_errors::state_from_io)?;
-
-            preflight
-                .response
-                .get("program_path")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| {
-                    op_errors::state_unknown(
-                        "nix_preflight_invalid_response",
-                        "nix preflight response missing program_path",
-                    )
-                })?
+            let mut nix = NixIoClient::new(self.state_id.clone(), io);
+            nix.resolve_flake_app(ResolveFlakeAppRequest {
+                app,
+                timeout_ms: self.cfg.timeout_ms,
+            })
+            .await
+            .map_err(op_errors::state_from_io)?
+            .program_path
         };
 
-        let req = serde_json::to_value(ExecRequest::RunProgramV1 {
-            program_path,
-            argv: self.cfg.argv.clone(),
-            stdin_json: self.cfg.stdin_json.clone(),
-            timeout_ms: self.cfg.timeout_ms,
-            env: serde_json::json!({}),
-        })
-        .map_err(|_| {
-            op_errors::state_unknown(
-                "exec_request_encode_failed",
-                "failed to encode exec request",
-            )
-        })?;
-
-        let key = self.fact_key(&req)?;
-        let res = io
-            .call(IoCall {
-                namespace: NAMESPACE_EXEC.to_string(),
-                request: req,
-                fact_key: Some(key),
-            })
+        let mut exec = ExecIoClient::new(self.state_id.clone(), io);
+        let res = exec
+            .run_program(self.exec_request(program_path))
             .await
             .map_err(op_errors::state_from_io)?;
 

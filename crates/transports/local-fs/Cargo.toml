@@ -1,5 +1,5 @@
 [package]
-name = "mfm-op-common"
+name = "mfm-transports-local-fs"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,8 +9,3 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
 mfm-machine = { path = "../../machine" }
-mfm-sdk = { path = "../../sdk" }
-mfm-collectors-nix = { path = "../../collectors/nix" }
-mfm-collectors-exec = { path = "../../collectors/exec" }
-
-[dev-dependencies]

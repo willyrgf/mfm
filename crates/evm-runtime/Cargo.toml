@@ -19,3 +19,4 @@ mfm-machine = { path = "../machine" }
 mfm-collectors-evm = { path = "../collectors/evm" }
 mfm-op-common = { path = "../ops/common" }
 mfm-evm-core = { path = "../evm-core" }
+mfm-transports-local-evm = { path = "../transports/local-evm" }

@@ -87,6 +87,10 @@ impl ExecProgramTransportFactory {
 }
 
 impl LiveIoTransportFactory for ExecProgramTransportFactory {
+    fn namespace_group(&self) -> &str {
+        NAMESPACE_EXEC
+    }
+
     fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
         Box::new(ExecProgramTransport {
             policy: self.policy.clone(),

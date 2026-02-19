@@ -207,7 +207,7 @@ fn check_app_evm_transport_wiring(repo_root: &Path, failures: &mut Vec<String>) 
     };
 
     let factory_wiring_count = content
-        .matches("EvmJsonRpcHttpTransportFactory::new(resolve_evm_rpc_config_from_env())")
+        .matches("EvmJsonRpcHttpTransportFactory::from_env()")
         .count();
     if factory_wiring_count != 1 {
         failures.push(format!(
@@ -215,12 +215,18 @@ fn check_app_evm_transport_wiring(repo_root: &Path, failures: &mut Vec<String>) 
         ));
     }
 
-    let evm_route_count = content
-        .matches("routes.insert(\"evm\".to_string(), evm_factory);")
-        .count();
-    if evm_route_count != 1 {
+    let uses_legacy_route_insert = content.contains("routes.insert(\"evm\".to_string()");
+    if uses_legacy_route_insert {
         failures.push(format!(
-            "{app_lib_normalized}: expected exactly one `evm` route insertion, found {evm_route_count}"
+            "{app_lib_normalized}: legacy direct route insertion for `evm` is no longer allowed; use transport registry wiring"
+        ));
+    }
+
+    let has_registry_route_assembly = content.contains("HashMapTransportRegistry::new()")
+        && content.contains("RouterLiveIoTransportFactory::from_registry(&transports)");
+    if !has_registry_route_assembly {
+        failures.push(format!(
+            "{app_lib_normalized}: expected transport registry based route assembly"
         ));
     }
 }

@@ -179,6 +179,10 @@ mod tests {
     }
 
     impl LiveIoTransportFactory for CountingTransportFactory {
+        fn namespace_group(&self) -> &str {
+            "evm"
+        }
+
         fn make(&self, _env: mfm_machine::live_io::LiveIoEnv) -> Box<dyn LiveIoTransport> {
             Box::new(CountingTransport {
                 counts: Arc::clone(&self.counts),

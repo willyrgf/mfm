@@ -1,16 +1,15 @@
 [package]
-name = "mfm-op-common"
+name = "mfm-transports-local-evm"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+alloy-primitives = { workspace = true, features = ["k256"] }
 async-trait = { workspace = true }
+k256 = { version = "0.13", features = ["ecdsa"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
+zeroize = "1.7.0"
 mfm-machine = { path = "../../machine" }
-mfm-sdk = { path = "../../sdk" }
-mfm-collectors-nix = { path = "../../collectors/nix" }
-mfm-collectors-exec = { path = "../../collectors/exec" }
-
-[dev-dependencies]
+mfm-evm-core = { path = "../../evm-core" }

@@ -144,6 +144,17 @@ impl IoProvider for ReplayIo {
         Ok(self.facts.get(key).await)
     }
 
+    async fn record_value(
+        &mut self,
+        key: FactKey,
+        _value: serde_json::Value,
+    ) -> Result<ArtifactId, IoError> {
+        let Some(payload_id) = self.facts.get(&key).await else {
+            return Err(self.missing_fact(key));
+        };
+        Ok(payload_id)
+    }
+
     async fn now_millis(&mut self) -> Result<u64, IoError> {
         let key = self.derived_fact_key("now_millis");
         let Some(payload_id) = self.facts.get(&key).await else {

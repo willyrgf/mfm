@@ -71,6 +71,21 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "exec",
+      "path": "crates/collectors/exec/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "nix-exec",
+      "path": "crates/collectors/nix-exec/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "nix",
+      "path": "crates/collectors/nix/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "core",
       "path": "crates/core/Cargo.toml",
       "kind": "rust-cargo"
@@ -203,6 +218,26 @@
     {
       "name": "architecture-verify",
       "path": "crates/tools/architecture-verify/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "local-evm",
+      "path": "crates/transports/local-evm/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "local-fs",
+      "path": "crates/transports/local-fs/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "local-keystore",
+      "path": "crates/transports/local-keystore/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "proof",
+      "path": "crates/transports/proof/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
