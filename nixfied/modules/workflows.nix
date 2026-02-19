@@ -5,11 +5,13 @@ let
   whenSpec = t.submodule {
     options = {
       envEquals = lib.mkOption {
-        type = t.attrsOf (t.oneOf [
-          t.str
-          t.int
-          t.bool
-        ]);
+        type = t.attrsOf (
+          t.oneOf [
+            t.str
+            t.int
+            t.bool
+          ]
+        );
         default = { };
       };
       envPresent = lib.mkOption {
@@ -43,101 +45,106 @@ let
 in
 {
   options.nixfied.workflows = lib.mkOption {
-    type = t.attrsOf (t.submodule ({ name, ... }: {
-      options = {
-        id = lib.mkOption {
-          type = t.str;
-          default = name;
-        };
-        summary = lib.mkOption {
-          type = t.str;
-          default = name;
-        };
-        description = lib.mkOption {
-          type = t.str;
-          default = "";
-        };
-        mode = lib.mkOption {
-          type = t.enum [
-            "ci"
-            "dev"
-            "test"
-            "build"
-            "check"
-            "format"
-            "custom"
-          ];
-          default = "custom";
-        };
-        maxWorkers = lib.mkOption {
-          type = t.int;
-          default = 1;
-        };
+    type = t.attrsOf (
+      t.submodule (
+        { name, ... }:
+        {
+          options = {
+            id = lib.mkOption {
+              type = t.str;
+              default = name;
+            };
+            summary = lib.mkOption {
+              type = t.str;
+              default = name;
+            };
+            description = lib.mkOption {
+              type = t.str;
+              default = "";
+            };
+            mode = lib.mkOption {
+              type = t.enum [
+                "ci"
+                "dev"
+                "test"
+                "build"
+                "check"
+                "format"
+                "custom"
+              ];
+              default = "custom";
+            };
+            maxWorkers = lib.mkOption {
+              type = t.int;
+              default = 1;
+            };
 
-        units = lib.mkOption {
-          type = t.attrsOf workflowUnit;
-          default = { };
-        };
+            units = lib.mkOption {
+              type = t.attrsOf workflowUnit;
+              default = { };
+            };
 
-        stages = lib.mkOption {
-          type = t.listOf (t.listOf t.str);
-          default = [ ];
-        };
+            stages = lib.mkOption {
+              type = t.listOf (t.listOf t.str);
+              default = [ ];
+            };
 
-        setup.tasks = lib.mkOption {
-          type = t.listOf t.str;
-          default = [ ];
-        };
+            setup.tasks = lib.mkOption {
+              type = t.listOf t.str;
+              default = [ ];
+            };
 
-        teardown = {
-          tasks = lib.mkOption {
-            type = t.listOf t.str;
-            default = [ ];
-          };
-          alwaysRun = lib.mkOption {
-            type = t.bool;
-            default = true;
-          };
-        };
+            teardown = {
+              tasks = lib.mkOption {
+                type = t.listOf t.str;
+                default = [ ];
+              };
+              alwaysRun = lib.mkOption {
+                type = t.bool;
+                default = true;
+              };
+            };
 
-        artifacts = {
-          root = lib.mkOption {
-            type = t.str;
-            default = "/tmp/ci-artifacts";
-          };
-          keepOnSuccess = lib.mkOption {
-            type = t.bool;
-            default = false;
-          };
-          keepOnFailure = lib.mkOption {
-            type = t.bool;
-            default = true;
-          };
-          writeSummary = lib.mkOption {
-            type = t.bool;
-            default = true;
-          };
-        };
+            artifacts = {
+              root = lib.mkOption {
+                type = t.str;
+                default = "/tmp/ci-artifacts";
+              };
+              keepOnSuccess = lib.mkOption {
+                type = t.bool;
+                default = false;
+              };
+              keepOnFailure = lib.mkOption {
+                type = t.bool;
+                default = true;
+              };
+              writeSummary = lib.mkOption {
+                type = t.bool;
+                default = true;
+              };
+            };
 
-        execution = {
-          failFast = lib.mkOption {
-            type = t.bool;
-            default = true;
+            execution = {
+              failFast = lib.mkOption {
+                type = t.bool;
+                default = true;
+              };
+              lockPolicy = lib.mkOption {
+                type = t.enum [
+                  "exclusive"
+                  "shared-aware"
+                ];
+                default = "exclusive";
+              };
+              emitRegistryEvents = lib.mkOption {
+                type = t.bool;
+                default = true;
+              };
+            };
           };
-          lockPolicy = lib.mkOption {
-            type = t.enum [
-              "exclusive"
-              "shared-aware"
-            ];
-            default = "exclusive";
-          };
-          emitRegistryEvents = lib.mkOption {
-            type = t.bool;
-            default = true;
-          };
-        };
-      };
-    }));
+        }
+      )
+    );
     default = { };
   };
 }

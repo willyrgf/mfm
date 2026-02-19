@@ -43,13 +43,23 @@
         local detail_json="$6"
 
         local events_file="$root/events.ndjson"
+        local seq_file="$root/.seq"
+        local lock_dir="$root/.events-lock"
         local seq
         local ts
+        local rc
 
         mkdir -p "$root"
-        seq="$(registry_next_seq "$root")"
+        registry_lock_acquire "$lock_dir"
+        if [ -f "$seq_file" ]; then
+          seq="$(( $(cat "$seq_file") + 1 ))"
+        else
+          seq="1"
+        fi
+        printf '%s' "$seq" > "$seq_file"
         ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
+        set +e
         ${pkgs.jq}/bin/jq -cnS \
           --argjson schemaVersion 1 \
           --argjson seq "$seq" \
@@ -61,6 +71,10 @@
           --argjson detail "$detail_json" \
           '{detail: $detail, runId: $runId, schemaVersion: $schemaVersion, seq: $seq, state: $state, taskId: $taskId, ts: $ts, workflowId: $workflowId}' \
           >> "$events_file"
+        rc="$?"
+        set -e
+        registry_lock_release "$lock_dir"
+        return "$rc"
       }
     '';
 }

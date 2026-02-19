@@ -77,35 +77,39 @@ in
         default = 1;
       };
       defs = lib.mkOption {
-        type = t.attrsOf (t.submodule {
-          options = {
-            type = lib.mkOption {
-              type = t.enum [
-                "string"
-                "int"
-                "bool"
-                "enum"
-              ];
-              default = "string";
+        type = t.attrsOf (
+          t.submodule {
+            options = {
+              type = lib.mkOption {
+                type = t.enum [
+                  "string"
+                  "int"
+                  "bool"
+                  "enum"
+                ];
+                default = "string";
+              };
+              values = lib.mkOption {
+                type = t.listOf t.str;
+                default = [ ];
+              };
+              default = lib.mkOption {
+                type = t.nullOr (
+                  t.oneOf [
+                    t.str
+                    t.int
+                    t.bool
+                  ]
+                );
+                default = null;
+              };
+              aliases = lib.mkOption {
+                type = t.listOf t.str;
+                default = [ ];
+              };
             };
-            values = lib.mkOption {
-              type = t.listOf t.str;
-              default = [ ];
-            };
-            default = lib.mkOption {
-              type = t.nullOr (t.oneOf [
-                t.str
-                t.int
-                t.bool
-              ]);
-              default = null;
-            };
-            aliases = lib.mkOption {
-              type = t.listOf t.str;
-              default = [ ];
-            };
-          };
-        });
+          }
+        );
         default = {
           LOG_LEVEL = {
             type = "enum";

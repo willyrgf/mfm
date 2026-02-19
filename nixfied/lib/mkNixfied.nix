@@ -54,9 +54,7 @@ let
 
   modelCanonical = canonical.toCanonicalNix compiled.model;
   tasksTable = builtins.concatStringsSep "\n" (
-    map (
-      taskId: "${taskId}\t${compiled.model.tasks.${taskId}.summary}"
-    ) taskIds
+    map (taskId: "${taskId}\t${compiled.model.tasks.${taskId}.summary}") taskIds
   );
 
   taskSchema = builtins.fromJSON (builtins.readFile ../schemas/task-contract.json);
@@ -97,7 +95,9 @@ let
     map (
       taskId:
       let
-        taskFile = pkgs.writeText "task-${builtins.substring 0 10 (builtins.hashString "sha256" taskId)}.nix" "${canonical.toCanonicalNix compiled.model.tasks.${taskId}}\n";
+        taskFile = pkgs.writeText "task-${builtins.substring 0 10 (builtins.hashString "sha256" taskId)}.nix" "${
+          canonical.toCanonicalNix compiled.model.tasks.${taskId}
+        }\n";
       in
       {
         name = "task::${taskId}";
@@ -110,9 +110,9 @@ let
 
   introspectionApps = {
     model = mkApp "model" ''
-      cat <<'NIXFIED_MODEL'
-${modelCanonical}
-NIXFIED_MODEL
+            cat <<'NIXFIED_MODEL'
+      ${modelCanonical}
+      NIXFIED_MODEL
     '';
 
     stateHash = mkApp "stateHash" ''
@@ -120,9 +120,9 @@ NIXFIED_MODEL
     '';
 
     tasks = mkApp "tasks" ''
-      cat <<'NIXFIED_TASKS'
-${tasksTable}
-NIXFIED_TASKS
+            cat <<'NIXFIED_TASKS'
+      ${tasksTable}
+      NIXFIED_TASKS
     '';
 
     schema = mkApp "schema" ''
@@ -139,27 +139,26 @@ NIXFIED_TASKS
     };
 
   taskPackages = builtins.listToAttrs (
-    map (
-      taskId: {
-        name = "task::${taskId}";
-        value = pkgs.writeText "task-spec-${builtins.substring 0 10 (builtins.hashString "sha256" taskId)}.nix" "${canonical.toCanonicalNix compiled.model.tasks.${taskId}}\n";
-      }
-    ) taskIds
+    map (taskId: {
+      name = "task::${taskId}";
+      value = pkgs.writeText "task-spec-${builtins.substring 0 10 (builtins.hashString "sha256" taskId)}.nix" "${
+        canonical.toCanonicalNix compiled.model.tasks.${taskId}
+      }\n";
+    }) taskIds
   );
 
-  packages =
-    {
-      default = pkgs.runCommand "nixfied-default" { } ''
-        mkdir -p "$out/bin"
-        ln -s ${apps.default.program} "$out/bin/default"
-      '';
+  packages = {
+    default = pkgs.runCommand "nixfied-default" { } ''
+      mkdir -p "$out/bin"
+      ln -s ${apps.default.program} "$out/bin/default"
+    '';
 
-      model = pkgs.writeText "nixfied-model.nix" "${modelCanonical}\n";
-      stateHash = pkgs.writeText "nixfied-state-hash.txt" "${compiled.stateHash}\n";
-      tasks = pkgs.writeText "nixfied-tasks.txt" "${tasksTable}\n";
-      schema = schemaDir;
-    }
-    // taskPackages;
+    model = pkgs.writeText "nixfied-model.nix" "${modelCanonical}\n";
+    stateHash = pkgs.writeText "nixfied-state-hash.txt" "${compiled.stateHash}\n";
+    tasks = pkgs.writeText "nixfied-tasks.txt" "${tasksTable}\n";
+    schema = schemaDir;
+  }
+  // taskPackages;
 
   checks = {
     model-hash-stable =
@@ -176,15 +175,14 @@ NIXFIED_TASKS
 
   devShells = {
     default = pkgs.mkShell {
-      packages =
-        [
-          pkgs.coreutils
-          pkgs.jq
-          pkgs.nixfmt-rfc-style
-          pkgs.gnugrep
-          pkgs.gnused
-        ]
-        ++ compiled.resolved.tooling.devShellPackages;
+      packages = [
+        pkgs.coreutils
+        pkgs.jq
+        pkgs.nixfmt-rfc-style
+        pkgs.gnugrep
+        pkgs.gnused
+      ]
+      ++ compiled.resolved.tooling.devShellPackages;
 
       shellHook = compiled.resolved.tooling.devShellHook;
     };

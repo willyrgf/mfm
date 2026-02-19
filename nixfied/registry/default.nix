@@ -1,4 +1,7 @@
-{ pkgs, canonical ? null }:
+{
+  pkgs,
+  canonical ? null,
+}:
 let
   events = import ./events.nix { inherit pkgs; };
   snapshot = import ./snapshot.nix { inherit pkgs; };

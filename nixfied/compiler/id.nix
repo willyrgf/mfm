@@ -9,13 +9,9 @@ let
     in
     if safe == "" then "item" else safe;
 
-  ensurePrefix =
-    prefix: id:
-    if lib.hasPrefix "${prefix}." id then id else "${prefix}.${id}";
+  ensurePrefix = prefix: id: if lib.hasPrefix "${prefix}." id then id else "${prefix}.${id}";
 
-  stableSuffix =
-    payload:
-    builtins.substring 0 10 (canonical.hashCanonical payload);
+  stableSuffix = payload: builtins.substring 0 10 (canonical.hashCanonical payload);
 in
 {
   inherit

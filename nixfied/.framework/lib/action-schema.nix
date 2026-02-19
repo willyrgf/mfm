@@ -103,7 +103,7 @@ let
         fi
       ''
     else if kind == "fail" then
-      ''exit ${toString (action.code or 1)}''
+      "exit ${toString (action.code or 1)}"
     else
       throw "Unsupported action kind: ${kind}";
 

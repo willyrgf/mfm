@@ -9,15 +9,14 @@
 }:
 let
   evaluated = lib.evalModules {
-    modules =
-      [
-        {
-          imports = [ modules.core ];
-        }
-      ]
-      ++ projectModules
-      ++ extraModules
-      ++ localOverrides;
+    modules = [
+      {
+        imports = [ modules.core ];
+      }
+    ]
+    ++ projectModules
+    ++ extraModules
+    ++ localOverrides;
 
     specialArgs = {
       inherit

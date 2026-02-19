@@ -1,26 +1,20 @@
 {
-  description = "MFM Nixfied wrapper";
+  description = "Nixfied vendored wrapper";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    nixfied.url = "path:./nixfied";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, nixfied }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = import nixpkgs { inherit system; };
-        nixfiedLib = import ./nixfied/lib {
-          inherit
-            pkgs
-            system
-            ;
-        };
-        compiled = nixfiedLib.mkNixfied {
+        compiled = nixfied.lib.mkNixfied {
+          inherit system;
           projectRoot = ./.;
-          projectModules = [ ./nixfied/project/module.nix ];
+          projectModules = [ ./nixfied/nixfied/project/module.nix ];
           extraModules = [ ];
-          localOverrides = [ ];
         };
       in {
         apps = compiled.apps;
@@ -29,3 +23,4 @@
         devShells = compiled.devShells;
       });
 }
+

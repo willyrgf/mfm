@@ -76,6 +76,14 @@ in
     NIXFIED_CALLER_PWD="$PWD" exec ${executorProgram} run-workflow "$@"
   '';
 
+  "run-workflow-parallel" = mkApp "run-workflow-parallel" ''
+    if [ "$#" -lt 1 ]; then
+      echo "ERROR: usage: run-workflow-parallel <workflow-id> [-- ...]"
+      exit 2
+    fi
+    NIXFIED_WORKFLOW_PARALLEL=1 NIXFIED_CALLER_PWD="$PWD" exec ${executorProgram} run-workflow "$@"
+  '';
+
   "help" = mkApp "help" ''
     cat ${helpFile}
   '';
@@ -91,7 +99,11 @@ in
 }
 // taskApps
 // {
-  default = if builtins.hasAttr "help" taskApps then taskApps.help else mkApp "default-help" ''
-    cat ${helpFile}
-  '';
+  default =
+    if builtins.hasAttr "help" taskApps then
+      taskApps.help
+    else
+      mkApp "default-help" ''
+        cat ${helpFile}
+      '';
 }

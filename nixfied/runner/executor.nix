@@ -21,98 +21,6 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   PROJECT_ROOT=${pkgs.lib.escapeShellArg (builtins.toString projectRoot)}
   REGISTRY_ROOT_DEFAULT=${pkgs.lib.escapeShellArg model.state.registry.root}
   REGISTRY_ROOT="''${REGISTRY_ROOT:-$REGISTRY_ROOT_DEFAULT}"
-  LOG_LEVEL_DEFAULT=${pkgs.lib.escapeShellArg model.runtime.logging.levelDefault}
-  OUTPUT_MODE_DEFAULT=${pkgs.lib.escapeShellArg model.runtime.logging.outputDefault}
-
-  # Backward-compat aliases for pre-upgrade env names.
-  if [ -n "''${NIXFIED_ENV:-}" ] && [ -z "''${NIX_ENV:-}" ]; then
-    export NIX_ENV="$NIXFIED_ENV"
-  fi
-  if [ -n "''${NIXFIED_LOG_LEVEL:-}" ] && [ -z "''${LOG_LEVEL:-}" ]; then
-    export LOG_LEVEL="$NIXFIED_LOG_LEVEL"
-  fi
-  if [ -n "''${NIXFIED_OUTPUT_MODE:-}" ] && [ -z "''${OUTPUT_MODE:-}" ]; then
-    export OUTPUT_MODE="$NIXFIED_OUTPUT_MODE"
-  fi
-
-  normalize_log_level() {
-    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
-      error|warn|info|debug|trace)
-        printf '%s' "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-        ;;
-      *)
-        printf '%s' "info"
-        ;;
-    esac
-  }
-
-  normalize_output_mode() {
-    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
-      stdout|logs|both)
-        printf '%s' "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-        ;;
-      *)
-        printf '%s' "stdout"
-        ;;
-    esac
-  }
-
-  LOG_LEVEL_EFFECTIVE="$(normalize_log_level "''${LOG_LEVEL:-$LOG_LEVEL_DEFAULT}")"
-  OUTPUT_MODE_EFFECTIVE="$(normalize_output_mode "''${OUTPUT_MODE:-$OUTPUT_MODE_DEFAULT}")"
-
-  level_to_rank() {
-    case "$1" in
-      error)
-        printf '%s' "0"
-        ;;
-      warn)
-        printf '%s' "1"
-        ;;
-      info)
-        printf '%s' "2"
-        ;;
-      debug)
-        printf '%s' "3"
-        ;;
-      trace)
-        printf '%s' "4"
-        ;;
-      *)
-        printf '%s' "2"
-        ;;
-    esac
-  }
-
-  should_log() {
-    local level="$1"
-    [ "$(level_to_rank "$LOG_LEVEL_EFFECTIVE")" -ge "$(level_to_rank "$level")" ]
-  }
-
-  log_line() {
-    local level="$1"
-    shift
-    local level_upper
-    if should_log "$level"; then
-      level_upper="$(printf '%s' "$level" | tr '[:lower:]' '[:upper:]')"
-      printf '%s: %s\n' "$level_upper" "$*" >&2
-    fi
-  }
-
-  log_error() {
-    log_line error "$@"
-  }
-
-  log_warn() {
-    log_line warn "$@"
-  }
-
-  log_info() {
-    log_line info "$@"
-  }
-
-  log_debug() {
-    log_line debug "$@"
-  }
 
   ${registryShell}
   ${envSandboxShell}
@@ -215,31 +123,23 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     registry_append_event "$REGISTRY_ROOT" "$run_id" "$workflow_id" "$task_id" "$state" "$detail_json"
   }
 
-  execute_task() {
-    local run_id="$1"
-    local workflow_id="$2"
-    local task_id="$3"
-    shift 3
+  execute_task_body() {
+    local task_id="$1"
+    shift
 
     local task
     local runner_type
     local command
     local nested_workflow
-    local detail_json
     local exit_code
 
     task="$(task_json "$task_id")"
     if [ -z "$task" ]; then
-      log_error "unknown task '$task_id'"
+      echo "ERROR: unknown task '$task_id'"
       return 2
     fi
 
-    detail_json="$(${pkgs.jq}/bin/jq -cn --arg mode "task" '{mode: $mode}')"
-    append_event "$run_id" "$workflow_id" "$task_id" "queued" "$detail_json"
-    append_event "$run_id" "$workflow_id" "$task_id" "running" '{}'
-
     runner_type="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '.runner.type')"
-    log_debug "task start id=$task_id workflow=$workflow_id runId=$run_id runner=$runner_type"
 
     set +e
     case "$runner_type" in
@@ -251,32 +151,51 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       workflowRef)
         nested_workflow="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '.runner.workflowId // empty')"
         if [ -z "$nested_workflow" ]; then
-          log_error "task '$task_id' runner.workflowId is empty"
+          echo "ERROR: task '$task_id' runner.workflowId is empty"
           exit_code=3
         else
-          log_debug "task id=$task_id delegates workflow=$nested_workflow"
           run_workflow "$nested_workflow" "$@"
           exit_code="$?"
         fi
         ;;
       derivation)
-        log_error "derivation runner is not implemented for task '$task_id'"
+        echo "ERROR: derivation runner is not implemented for task '$task_id'"
         exit_code=3
         ;;
       *)
-        log_error "unsupported runner type '$runner_type' for task '$task_id'"
+        echo "ERROR: unsupported runner type '$runner_type' for task '$task_id'"
         exit_code=3
         ;;
     esac
     set -e
 
+    return "$exit_code"
+  }
+
+  execute_task() {
+    local run_id="$1"
+    local workflow_id="$2"
+    local task_id="$3"
+    shift 3
+
+    local detail_json
+    local exit_code
+
+    detail_json="$(${pkgs.jq}/bin/jq -cn --arg mode "task" '{mode: $mode}')"
+    append_event "$run_id" "$workflow_id" "$task_id" "queued" "$detail_json"
+    append_event "$run_id" "$workflow_id" "$task_id" "running" '{}'
+
+    if execute_task_body "$task_id" "$@"; then
+      exit_code=0
+    else
+      exit_code="$?"
+    fi
+
     if [ "$exit_code" -eq 0 ]; then
       append_event "$run_id" "$workflow_id" "$task_id" "passed" '{}'
-      log_debug "task passed id=$task_id workflow=$workflow_id runId=$run_id"
     else
       detail_json="$(${pkgs.jq}/bin/jq -cn --argjson exitCode "$exit_code" '{exitCode: $exitCode}')"
       append_event "$run_id" "$workflow_id" "$task_id" "failed" "$detail_json"
-      log_debug "task failed id=$task_id workflow=$workflow_id runId=$run_id exitCode=$exit_code"
       return "$exit_code"
     fi
   }
@@ -297,7 +216,6 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     args_payload="$(printf '%s\n' "$@")"
     run_id="$(compute_run_id "task" "" "$task_id" "$args_payload")"
-    log_info "run-task start taskId=$task_id runId=$run_id logLevel=$LOG_LEVEL_EFFECTIVE outputMode=$OUTPUT_MODE_EFFECTIVE"
 
     activate_run "$run_id"
     trap "deactivate_run '$run_id'" EXIT
@@ -312,12 +230,6 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     trap - EXIT
     deactivate_run "$run_id"
-
-    if [ "$status" -eq 0 ]; then
-      log_info "run-task passed taskId=$task_id runId=$run_id"
-    else
-      log_error "run-task failed taskId=$task_id runId=$run_id exitCode=$status"
-    fi
 
     return "$status"
   }
@@ -342,16 +254,452 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     printf '%s' "$workflow_id"
   }
 
-  validate_ci_mode() {
-    local mode_override="$1"
-    if [ -z "$mode_override" ]; then
+  resolve_effective_max_workers() {
+    local workflow="$1"
+    local workflow_max_workers
+    local effective_workers
+    local override_name=""
+    local override_value=""
+
+    workflow_max_workers="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.maxWorkers // 1')"
+    if ! [[ "$workflow_max_workers" =~ ^[0-9]+$ ]] || [ "$workflow_max_workers" -lt 1 ]; then
+      workflow_max_workers=1
+    fi
+    effective_workers="$workflow_max_workers"
+
+    if [ -n "''${NIXFIED_CI_MAX_WORKERS:-}" ]; then
+      override_name="NIXFIED_CI_MAX_WORKERS"
+      override_value="$NIXFIED_CI_MAX_WORKERS"
+    elif [ -n "''${CI_MAX_WORKERS:-}" ]; then
+      override_name="CI_MAX_WORKERS"
+      override_value="$CI_MAX_WORKERS"
+    fi
+
+    if [ -n "$override_name" ]; then
+      if [[ "$override_value" =~ ^[0-9]+$ ]] && [ "$override_value" -ge 1 ]; then
+        if [ "$override_value" -lt "$effective_workers" ]; then
+          effective_workers="$override_value"
+        fi
+      else
+        echo "WARN: ignoring invalid $override_name='$override_value' (expected integer >= 1)"
+      fi
+    fi
+
+    printf '%s' "$effective_workers"
+  }
+
+  run_workflow_serial_impl() {
+    local run_id="$1"
+    local workflow_id="$2"
+    local workflow="$3"
+    local fail_fast="$4"
+    shift 4
+    local -a passthrough_args
+    passthrough_args=("$@")
+
+    local status=0
+    local unit_json
+
+    while IFS= read -r unit_json; do
+      local unit_task
+      local skip=0
+      local missing=""
+
+      unit_task="$(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.taskId')"
+
+      while IFS= read -r required_env; do
+        if [ -n "$required_env" ] && [ -z "''${!required_env:-}" ]; then
+          skip=1
+          if [ -z "$missing" ]; then
+            missing="$required_env"
+          else
+            missing="$missing,$required_env"
+          fi
+        fi
+      done < <(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.skipIfMissingEnv[]?')
+
+      if [ "$skip" -eq 1 ]; then
+        local detail_json
+        detail_json="$(${pkgs.jq}/bin/jq -cn --arg reason "missing-env" --arg missing "$missing" '{reason: $reason, missing: $missing}')"
+        append_event "$run_id" "$workflow_id" "$unit_task" "canceled" "$detail_json"
+        continue
+      fi
+
+      if execute_task "$run_id" "$workflow_id" "$unit_task" "''${passthrough_args[@]}"; then
+        status=0
+      else
+        status="$?"
+      fi
+
+      if [ "$status" -ne 0 ] && [ "$fail_fast" = "true" ]; then
+        break
+      fi
+    done < <(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -c '.plan[]')
+
+    return "$status"
+  }
+
+  run_workflow_parallel_impl() {
+    local run_id="$1"
+    local workflow_id="$2"
+    local workflow="$3"
+    local fail_fast="$4"
+    shift 4
+    local -a passthrough_args
+    passthrough_args=("$@")
+
+    local max_workers
+    local lock_policy
+    local workflow_status=0
+    local stop_scheduling=0
+    local completed_count=0
+    local running_count=0
+
+    local -a unit_names
+    unit_names=()
+
+    local -A UNIT_JSON
+    local -A UNIT_TASK
+    local -A UNIT_NEEDS_LEFT
+    local -A UNIT_STATE
+    local -A UNIT_DEPENDENTS
+    local -A UNIT_LOCKS
+    local -A UNIT_PID
+    local -A PID_UNIT
+    local -A LOCK_OWNER
+    local -A CANCEL_REQUESTED
+
+    mark_unit_canceled() {
+      local unit_name="$1"
+      local reason="$2"
+      local extra_key="''${3:-}"
+      local extra_value="''${4:-}"
+      local current_state
+      local detail_json
+
+      current_state="''${UNIT_STATE[$unit_name]:-pending}"
+      if [ "$current_state" != "pending" ] && [ "$current_state" != "ready" ]; then
+        return 0
+      fi
+
+      if [ -n "$extra_key" ]; then
+        detail_json="$(${pkgs.jq}/bin/jq -cn --arg reason "$reason" --arg extraKey "$extra_key" --arg extraValue "$extra_value" '{reason: $reason} + {($extraKey): $extraValue}')"
+      else
+        detail_json="$(${pkgs.jq}/bin/jq -cn --arg reason "$reason" '{reason: $reason}')"
+      fi
+
+      append_event "$run_id" "$workflow_id" "''${UNIT_TASK[$unit_name]}" "canceled" "$detail_json"
+      UNIT_STATE[$unit_name]="canceled"
+      completed_count=$((completed_count + 1))
+    }
+
+    cancel_pending_dependents() {
+      local source_unit="$1"
+      local reason="$2"
+      local -a queue
+      local current
+      local dependent
+      queue=("$source_unit")
+
+      while [ "''${#queue[@]}" -gt 0 ]; do
+        current="''${queue[0]}"
+        queue=("''${queue[@]:1}")
+        for dependent in ''${UNIT_DEPENDENTS[$current]:-}; do
+          local before_state
+          before_state="''${UNIT_STATE[$dependent]:-pending}"
+          mark_unit_canceled "$dependent" "$reason" "dependency" "$current"
+          if [ "$before_state" = "pending" ] || [ "$before_state" = "ready" ]; then
+            queue+=("$dependent")
+          fi
+        done
+      done
+    }
+
+    cancel_pending_units() {
+      local reason="$1"
+      local unit_name
+      for unit_name in "''${unit_names[@]}"; do
+        mark_unit_canceled "$unit_name" "$reason"
+      done
+    }
+
+    unit_has_lock_conflict() {
+      local unit_name="$1"
+      local lock
+      local owner
+      for lock in ''${UNIT_LOCKS[$unit_name]:-}; do
+        owner="''${LOCK_OWNER[$lock]:-}"
+        if [ -n "$owner" ] && [ "$owner" != "$unit_name" ]; then
+          return 0
+        fi
+      done
+      return 1
+    }
+
+    assign_unit_locks() {
+      local unit_name="$1"
+      local lock
+      for lock in ''${UNIT_LOCKS[$unit_name]:-}; do
+        LOCK_OWNER[$lock]="$unit_name"
+      done
+    }
+
+    release_unit_locks() {
+      local unit_name="$1"
+      local lock
+      for lock in ''${UNIT_LOCKS[$unit_name]:-}; do
+        if [ "''${LOCK_OWNER[$lock]:-}" = "$unit_name" ]; then
+          unset "LOCK_OWNER[$lock]"
+        fi
+      done
+    }
+
+    next_ready_unit() {
+      local unit_name
+      for unit_name in "''${unit_names[@]}"; do
+        if [ "''${UNIT_STATE[$unit_name]:-pending}" != "ready" ]; then
+          continue
+        fi
+        if unit_has_lock_conflict "$unit_name"; then
+          continue
+        fi
+        printf '%s' "$unit_name"
+        return 0
+      done
+      return 1
+    }
+
+    start_unit() {
+      local unit_name="$1"
+      local unit_task
+      local detail_json
+      local pid
+
+      unit_task="''${UNIT_TASK[$unit_name]}"
+      detail_json="$(${pkgs.jq}/bin/jq -cn --arg mode "task" '{mode: $mode}')"
+      append_event "$run_id" "$workflow_id" "$unit_task" "queued" "$detail_json"
+      append_event "$run_id" "$workflow_id" "$unit_task" "running" '{}'
+
+      (
+        execute_task_body "$unit_task" "''${passthrough_args[@]}"
+      ) &
+      pid="$!"
+
+      UNIT_STATE[$unit_name]="running"
+      UNIT_PID[$unit_name]="$pid"
+      PID_UNIT[$pid]="$unit_name"
+      CANCEL_REQUESTED[$unit_name]=0
+      assign_unit_locks "$unit_name"
+      running_count=$((running_count + 1))
+    }
+
+    cancel_running_units() {
+      local pid
+      local unit_name
+
+      for pid in "''${!PID_UNIT[@]}"; do
+        unit_name="''${PID_UNIT[$pid]:-}"
+        if [ -z "$unit_name" ]; then
+          continue
+        fi
+        CANCEL_REQUESTED[$unit_name]=1
+        kill -TERM "$pid" 2>/dev/null || true
+      done
+
+      sleep 5
+      for pid in "''${!PID_UNIT[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -KILL "$pid" 2>/dev/null || true
+        fi
+      done
+    }
+
+    max_workers="$(resolve_effective_max_workers "$workflow")"
+    lock_policy="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.execution.lockPolicy // "exclusive"')"
+    if [ "$lock_policy" = "shared-aware" ]; then
+      echo "WARN: lockPolicy=shared-aware uses exclusive semantics in workflow parallel runner"
+    fi
+
+    while IFS= read -r unit_json; do
+      local unit_name
+      local unit_task
+      local needs_count
+      local lock_list
+
+      unit_name="$(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.name')"
+      unit_task="$(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.taskId')"
+      needs_count="$(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '(.needs // []) | length')"
+      lock_list="$(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.locks[]?' | ${pkgs.gawk}/bin/awk 'NF {printf "%s ", $0}')"
+
+      unit_names+=("$unit_name")
+      UNIT_JSON[$unit_name]="$unit_json"
+      UNIT_TASK[$unit_name]="$unit_task"
+      UNIT_NEEDS_LEFT[$unit_name]="$needs_count"
+      UNIT_STATE[$unit_name]="pending"
+      UNIT_DEPENDENTS[$unit_name]=""
+      UNIT_LOCKS[$unit_name]="$lock_list"
+    done < <(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -c '.plan[]')
+
+    local total_units="''${#unit_names[@]}"
+    if [ "$total_units" -eq 0 ]; then
       return 0
     fi
-    if ! ${pkgs.jq}/bin/jq -e --arg workflowId "workflow.ci.$mode_override" '.workflows[$workflowId] != null' "$MODEL_FILE" >/dev/null; then
-      log_error "unknown mode '$mode_override' (expected: basic|audit|parity|full|mainnet)"
-      return 2
-    fi
-    return 0
+
+    local unit_name
+    for unit_name in "''${unit_names[@]}"; do
+      while IFS= read -r dependency; do
+        if [ -n "$dependency" ]; then
+          UNIT_DEPENDENTS[$dependency]="''${UNIT_DEPENDENTS[$dependency]:-} $unit_name"
+        fi
+      done < <(printf '%s' "''${UNIT_JSON[$unit_name]}" | ${pkgs.jq}/bin/jq -r '.needs[]?')
+    done
+
+    for unit_name in "''${unit_names[@]}"; do
+      local unit_json
+      local missing=""
+      local skip=0
+      local when_failed=0
+      local required_env
+      local env_name
+      local expected_value
+      local actual_value
+
+      unit_json="''${UNIT_JSON[$unit_name]}"
+
+      while IFS= read -r required_env; do
+        if [ -n "$required_env" ] && [ -z "''${!required_env:-}" ]; then
+          skip=1
+          if [ -z "$missing" ]; then
+            missing="$required_env"
+          else
+            missing="$missing,$required_env"
+          fi
+        fi
+      done < <(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.skipIfMissingEnv[]?')
+
+      if [ "$skip" -eq 1 ]; then
+        mark_unit_canceled "$unit_name" "missing-env" "missing" "$missing"
+        cancel_pending_dependents "$unit_name" "dependency-not-passed"
+        continue
+      fi
+
+      while IFS= read -r required_env; do
+        if [ -n "$required_env" ] && [ -z "''${!required_env:-}" ]; then
+          when_failed=1
+          break
+        fi
+      done < <(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.when.envPresent[]?')
+
+      if [ "$when_failed" -eq 0 ]; then
+        while IFS=$'\t' read -r env_name expected_value; do
+          if [ -z "$env_name" ]; then
+            continue
+          fi
+          actual_value="''${!env_name:-}"
+          if [ "$actual_value" != "$expected_value" ]; then
+            when_failed=1
+            break
+          fi
+        done < <(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.when.envEquals // {} | to_entries[]? | [.key, (.value | tostring)] | @tsv')
+      fi
+
+      if [ "$when_failed" -eq 1 ]; then
+        mark_unit_canceled "$unit_name" "when-false"
+        cancel_pending_dependents "$unit_name" "dependency-not-passed"
+        continue
+      fi
+
+      if [ "''${UNIT_NEEDS_LEFT[$unit_name]}" -eq 0 ]; then
+        UNIT_STATE[$unit_name]="ready"
+      fi
+    done
+
+    while [ "$completed_count" -lt "$total_units" ]; do
+      if [ "$stop_scheduling" -eq 0 ]; then
+        while [ "$running_count" -lt "$max_workers" ]; do
+          local ready_unit
+          ready_unit="$(next_ready_unit || true)"
+          if [ -z "$ready_unit" ]; then
+            break
+          fi
+          start_unit "$ready_unit"
+        done
+      fi
+
+      if [ "$running_count" -eq 0 ]; then
+        if [ "$completed_count" -lt "$total_units" ] && [ "$stop_scheduling" -eq 0 ]; then
+          cancel_pending_units "blocked"
+          if [ "$workflow_status" -eq 0 ]; then
+            workflow_status=1
+          fi
+        fi
+        break
+      fi
+
+      local done_pid=""
+      local wait_rc
+      local done_unit
+      local detail_json
+
+      if wait -n -p done_pid; then
+        wait_rc=0
+      else
+        wait_rc="$?"
+      fi
+
+      done_unit="''${PID_UNIT[$done_pid]:-}"
+      if [ -z "$done_unit" ]; then
+        continue
+      fi
+
+      unset "PID_UNIT[$done_pid]"
+      unset "UNIT_PID[$done_unit]"
+      running_count=$((running_count - 1))
+      release_unit_locks "$done_unit"
+
+      if [ "''${CANCEL_REQUESTED[$done_unit]:-0}" = "1" ]; then
+        detail_json="$(${pkgs.jq}/bin/jq -cn --arg reason "fail-fast-running" '{reason: $reason}')"
+        append_event "$run_id" "$workflow_id" "''${UNIT_TASK[$done_unit]}" "canceled" "$detail_json"
+        UNIT_STATE[$done_unit]="canceled"
+        completed_count=$((completed_count + 1))
+        continue
+      fi
+
+      if [ "$wait_rc" -eq 0 ]; then
+        append_event "$run_id" "$workflow_id" "''${UNIT_TASK[$done_unit]}" "passed" '{}'
+        UNIT_STATE[$done_unit]="passed"
+        completed_count=$((completed_count + 1))
+
+        local dependent
+        for dependent in ''${UNIT_DEPENDENTS[$done_unit]:-}; do
+          if [ "''${UNIT_STATE[$dependent]:-pending}" = "pending" ]; then
+            UNIT_NEEDS_LEFT[$dependent]="$(( ''${UNIT_NEEDS_LEFT[$dependent]} - 1 ))"
+            if [ "''${UNIT_NEEDS_LEFT[$dependent]}" -eq 0 ]; then
+              UNIT_STATE[$dependent]="ready"
+            fi
+          fi
+        done
+      else
+        detail_json="$(${pkgs.jq}/bin/jq -cn --argjson exitCode "$wait_rc" '{exitCode: $exitCode}')"
+        append_event "$run_id" "$workflow_id" "''${UNIT_TASK[$done_unit]}" "failed" "$detail_json"
+        UNIT_STATE[$done_unit]="failed"
+        completed_count=$((completed_count + 1))
+
+        if [ "$workflow_status" -eq 0 ]; then
+          workflow_status="$wait_rc"
+        fi
+
+        if [ "$fail_fast" = "true" ] && [ "$stop_scheduling" -eq 0 ]; then
+          stop_scheduling=1
+          cancel_running_units
+          cancel_pending_units "fail-fast"
+        else
+          cancel_pending_dependents "$done_unit" "dependency-not-passed"
+        fi
+      fi
+    done
+
+    return "$workflow_status"
   }
 
   run_workflow() {
@@ -378,24 +726,12 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
           mode_override="$2"
           shift 2
           ;;
-        --basic|--audit|--parity|--full|--mainnet)
+        --basic|--app|--env|--full)
           mode_override="''${1#--}"
-          shift
-          ;;
-        --app)
-          mode_override="audit"
-          shift
-          ;;
-        --env)
-          mode_override="parity"
           shift
           ;;
         --summary)
           print_summary=1
-          shift
-          ;;
-        --bg|--background)
-          log_warn "--bg/--background is not supported by the model runner; continuing in foreground"
           shift
           ;;
         --)
@@ -412,10 +748,6 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       esac
     done
 
-    if [[ "$workflow_id" == workflow.ci.* ]]; then
-      validate_ci_mode "$mode_override" || return 2
-    fi
-
     workflow_id="$(resolve_workflow_mode "$workflow_id" "$mode_override")"
 
     local workflow
@@ -424,8 +756,6 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local detail_json
     local fail_fast
     local status=0
-    local unit_count=0
-    local unit_index=0
 
     workflow="$(workflow_json "$workflow_id")"
     if [ -z "$workflow" ]; then
@@ -443,73 +773,26 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     append_event "$run_id" "$workflow_id" "" "queued" "$detail_json"
 
     fail_fast="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.execution.failFast')"
-    unit_count="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.plan | length')"
 
-    log_info "run-workflow start workflowId=$workflow_id runId=$run_id units=$unit_count failFast=$fail_fast logLevel=$LOG_LEVEL_EFFECTIVE outputMode=$OUTPUT_MODE_EFFECTIVE"
-
-    while IFS= read -r unit_json; do
-      local unit_name
-      local unit_task
-      local skip=0
-      local missing=""
-      local step_started
-      local step_elapsed
-
-      unit_index="$(( unit_index + 1 ))"
-
-      unit_name="$(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.name')"
-      unit_task="$(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.taskId')"
-
-      while IFS= read -r required_env; do
-        if [ -n "$required_env" ] && [ -z "''${!required_env:-}" ]; then
-          skip=1
-          if [ -z "$missing" ]; then
-            missing="$required_env"
-          else
-            missing="$missing,$required_env"
-          fi
-        fi
-      done < <(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.skipIfMissingEnv[]?')
-
-      if [ "$skip" -eq 1 ]; then
-        detail_json="$(${pkgs.jq}/bin/jq -cn --arg reason "missing-env" --arg missing "$missing" '{reason: $reason, missing: $missing}')"
-        append_event "$run_id" "$workflow_id" "$unit_task" "canceled" "$detail_json"
-        log_warn "workflow unit skipped workflowId=$workflow_id runId=$run_id index=$unit_index/$unit_count name=$unit_name taskId=$unit_task missingEnv=$missing"
-        continue
-      fi
-
-      log_info "workflow unit start workflowId=$workflow_id runId=$run_id index=$unit_index/$unit_count name=$unit_name taskId=$unit_task"
-      step_started="$(${pkgs.coreutils}/bin/date +%s)"
-
-      set +e
-      execute_task "$run_id" "$workflow_id" "$unit_task" "''${passthrough_args[@]}"
-      status="$?"
-      set -e
-      step_elapsed="$(( $(${pkgs.coreutils}/bin/date +%s) - step_started ))"
-
-      if [ "$status" -eq 0 ]; then
-        log_info "workflow unit passed workflowId=$workflow_id runId=$run_id index=$unit_index/$unit_count name=$unit_name taskId=$unit_task durationSec=$step_elapsed"
+    if [ "''${NIXFIED_WORKFLOW_PARALLEL:-0}" = "1" ]; then
+      if run_workflow_parallel_impl "$run_id" "$workflow_id" "$workflow" "$fail_fast" "''${passthrough_args[@]}"; then
+        status=0
       else
-        log_error "workflow unit failed workflowId=$workflow_id runId=$run_id index=$unit_index/$unit_count name=$unit_name taskId=$unit_task durationSec=$step_elapsed exitCode=$status"
+        status="$?"
       fi
-
-      if [ "$status" -ne 0 ] && [ "$fail_fast" = "true" ]; then
-        log_warn "workflow fail-fast triggered workflowId=$workflow_id runId=$run_id failedTaskId=$unit_task"
-        break
+    else
+      if run_workflow_serial_impl "$run_id" "$workflow_id" "$workflow" "$fail_fast" "''${passthrough_args[@]}"; then
+        status=0
+      else
+        status="$?"
       fi
-    done < <(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -c '.plan[]')
+    fi
 
     if [ "$status" -eq 0 ]; then
       append_event "$run_id" "$workflow_id" "" "passed" '{}'
     else
       detail_json="$(${pkgs.jq}/bin/jq -cn --argjson exitCode "$status" '{exitCode: $exitCode}')"
       append_event "$run_id" "$workflow_id" "" "failed" "$detail_json"
-    fi
-
-    if [ "$status" -eq 0 ]; then
-      log_info "run-workflow passed workflowId=$workflow_id runId=$run_id"
-    else
-      log_error "run-workflow failed workflowId=$workflow_id runId=$run_id exitCode=$status"
     fi
 
     if [ "$print_summary" -eq 1 ]; then

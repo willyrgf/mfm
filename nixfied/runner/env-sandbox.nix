@@ -56,25 +56,6 @@
       final_path="$base_path"
     fi
 
-    # Some Rust build scripts on Darwin require dsymutil, but cc-wrapper may not
-    # place it on PATH. Resolve it from ld wrapper references when missing.
-    if [ "$(uname -s)" = "Darwin" ] && ! PATH="$final_path" command -v dsymutil >/dev/null 2>&1; then
-      local ld_path
-      local ld_store
-      local ref
-
-      ld_path="$(PATH="$final_path" command -v ld || true)"
-      if [ -n "$ld_path" ] && [[ "$ld_path" == /nix/store/*/bin/ld ]]; then
-        ld_store="''${ld_path%/bin/ld}"
-        while IFS= read -r ref; do
-          if [ -x "$ref/bin/dsymutil" ]; then
-            final_path="$ref/bin:$final_path"
-            break
-          fi
-        done < <(${pkgs.nix}/bin/nix-store -q --references "$ld_store" 2>/dev/null || true)
-      fi
-    fi
-
     locale="$(printf '%s' "$task_json" | ${pkgs.jq}/bin/jq -r '.runtime.locale // "C.UTF-8"')"
     timezone="$(printf '%s' "$task_json" | ${pkgs.jq}/bin/jq -r '.runtime.timezone // "UTC"')"
     umask_value="$(printf '%s' "$task_json" | ${pkgs.jq}/bin/jq -r '.runtime.umask // "022"')"

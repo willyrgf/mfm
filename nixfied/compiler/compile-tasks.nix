@@ -1,4 +1,8 @@
-{ lib, canonical, idLib }:
+{
+  lib,
+  canonical,
+  idLib,
+}:
 {
   resolved,
   runtime,
@@ -79,10 +83,8 @@ let
   ids = builtins.sort builtins.lessThan (builtins.attrNames tasksById);
 in
 builtins.listToAttrs (
-  map (
-    id: {
-      name = id;
-      value = tasksById.${id};
-    }
-  ) ids
+  map (id: {
+    name = id;
+    value = tasksById.${id};
+  }) ids
 )

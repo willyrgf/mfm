@@ -1,4 +1,8 @@
-{ lib, canonical, idLib }:
+{
+  lib,
+  canonical,
+  idLib,
+}:
 {
   resolved,
   tasks,
@@ -9,9 +13,7 @@ let
 
   unique =
     list:
-    builtins.foldl' (
-      acc: value: if builtins.elem value acc then acc else acc ++ [ value ]
-    ) [ ] list;
+    builtins.foldl' (acc: value: if builtins.elem value acc then acc else acc ++ [ value ]) [ ] list;
 
   normalizeWorkflowId =
     name: rawId:
@@ -20,15 +22,13 @@ let
     in
     idLib.ensurePrefix "workflow" effective;
 
-  normalizeUnit =
-    unit:
-    {
-      taskId = unit.taskId;
-      needs = unit.needs;
-      locks = unit.locks;
-      when = unit.when;
-      skipIfMissingEnv = unit.skipIfMissingEnv;
-    };
+  normalizeUnit = unit: {
+    taskId = unit.taskId;
+    needs = unit.needs;
+    locks = unit.locks;
+    when = unit.when;
+    skipIfMissingEnv = unit.skipIfMissingEnv;
+  };
 
   unitsFromStages =
     stages:
@@ -44,25 +44,20 @@ let
             else
               throw "workflow stage entries are duplicated: ${builtins.concatStringsSep ", " dupes}";
           unitsForStage = builtins.listToAttrs (
-            map (
-              stageEntry: {
-                name = stageEntry;
-                value = {
-                  taskId =
-                    if builtins.hasAttr stageEntry tasks then
-                      stageEntry
-                    else
-                      idLib.ensurePrefix "task" stageEntry;
-                  needs = state.previous;
-                  locks = [ ];
-                  when = {
-                    envEquals = { };
-                    envPresent = [ ];
-                  };
-                  skipIfMissingEnv = [ ];
+            map (stageEntry: {
+              name = stageEntry;
+              value = {
+                taskId =
+                  if builtins.hasAttr stageEntry tasks then stageEntry else idLib.ensurePrefix "task" stageEntry;
+                needs = state.previous;
+                locks = [ ];
+                when = {
+                  envEquals = { };
+                  envPresent = [ ];
                 };
-              }
-            ) stageUnits
+                skipIfMissingEnv = [ ];
+              };
+            }) stageUnits
           );
         in
         {
@@ -128,9 +123,9 @@ let
             throw "workflow '${workflowId}' has a dependency cycle"
           else
             readySorted
-            ++ loop
-              (completed ++ readySorted)
-              (builtins.filter (candidate: !(builtins.elem candidate readySorted)) remaining);
+            ++ loop (completed ++ readySorted) (
+              builtins.filter (candidate: !(builtins.elem candidate readySorted)) remaining
+            );
     in
     loop [ ] unitNames;
 
@@ -210,10 +205,8 @@ let
   ids = builtins.sort builtins.lessThan (builtins.attrNames workflowsById);
 in
 builtins.listToAttrs (
-  map (
-    id: {
-      name = id;
-      value = workflowsById.${id};
-    }
-  ) ids
+  map (id: {
+    name = id;
+    value = workflowsById.${id};
+  }) ids
 )

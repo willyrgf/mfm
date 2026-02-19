@@ -14,67 +14,14 @@ let
     vendorPath = "./nixfied";
   };
 
-  commonRuntimeInputs =
-    [
-      pkgs.bash
-      pkgs.coreutils
-      pkgs.findutils
-      pkgs.gnused
-      pkgs.gnugrep
-      pkgs.jq
-      pkgs.nix
-    ]
-    ++ (conf.tooling.runtimePackages or [ ]);
-
-  rustRuntimeInputs = commonRuntimeInputs;
-
-  sharedPassThroughEnv = [
-    "HOME"
-    project.envVar
-    project.slotVar
-    "CI_ARTIFACTS_DIR"
-    "CI_MAX_WORKERS"
-    "NIXFIED_CI_MAX_WORKERS"
-    "API_KEY"
-    "LOG_LEVEL"
-    "OUTPUT_MODE"
-    "RUST_LOG"
-    "MFM_LOG"
-    "LOG_FORMAT"
-    "MFM_LOG_FORMAT"
-    "LOG_SPAN_EVENTS"
-    "MFM_LOG_SPAN_EVENTS"
-    "HELIOS_NETWORK"
-    "HELIOS_EXECUTION_RPC_URL"
-    "HELIOS_CONSENSUS_RPC_URL"
-    "HELIOS_CHECKPOINT"
-    "MFM_CI_ENABLE_PARITY"
-    "MFM_CI_ENABLE_MAINNET"
+  commonRuntimeInputs = [
+    pkgs.coreutils
+    pkgs.findutils
+    pkgs.gnused
+    pkgs.gnugrep
   ];
 
-  ciStepPreamble = ''
-    artifacts_dir="''${CI_ARTIFACTS_DIR:-/tmp/ci-artifacts}"
-    mkdir -p "$artifacts_dir"
-
-    run_with_log() {
-      local logfile="$1"
-      shift
-      local mode
-      mode="$(printf '%s' "''${OUTPUT_MODE:-stdout}" | tr '[:upper:]' '[:lower:]')"
-
-      case "$mode" in
-        logs)
-          "$@" >"$logfile" 2>&1
-          ;;
-        stdout|both|"")
-          "$@" 2>&1 | tee "$logfile"
-          ;;
-        *)
-          "$@" >"$logfile" 2>&1
-          ;;
-      esac
-    }
-  '';
+  nixFormatterPkg = if pkgs ? nixfmt then pkgs.nixfmt else pkgs.nixfmt-rfc-style;
 
   mkCommandTask =
     {
@@ -90,13 +37,6 @@ let
       runtimeInputs ? commonRuntimeInputs,
       workflowId ? null,
       contractArgs ? [ ],
-      allowUnknownArgs ? true,
-      outputFormat ? "text",
-      outputChannels ? "stdout",
-      effects ? [ "writes-state" ],
-      idempotent ? false,
-      passThroughEnv ? sharedPassThroughEnv,
-      env ? { },
     }:
     {
       inherit
@@ -124,7 +64,7 @@ let
         input = {
           args = {
             parser = "typed";
-            allowUnknown = allowUnknownArgs;
+            allowUnknown = true;
             spec = contractArgs;
           };
           env = {
@@ -133,13 +73,13 @@ let
           };
         };
         output = {
-          format = outputFormat;
-          channels = outputChannels;
+          format = "text";
+          channels = "stdout";
           keys = [ ];
         };
         behavior = {
-          idempotent = idempotent;
-          effects = effects;
+          idempotent = false;
+          effects = [ "writes-state" ];
           timeoutSec = 0;
         };
         errors.codes = {
@@ -154,8 +94,16 @@ let
         workdir = "projectRoot";
         hermetic = true;
         runtimeInputs = runtimeInputs;
-        passThroughEnv = passThroughEnv;
-        inherit env;
+        passThroughEnv = [
+          "HOME"
+          project.envVar
+          project.slotVar
+          "CI_ARTIFACTS_DIR"
+          "CI_MAX_WORKERS"
+          "NIXFIED_CI_MAX_WORKERS"
+          "API_KEY"
+        ];
+        env = { };
         umask = "022";
         locale = "C.UTF-8";
         timezone = "UTC";
@@ -184,25 +132,6 @@ let
         category = "core";
         usage = usage;
         examples = examples;
-      };
-    };
-
-  mkWorkflowUnit =
-    {
-      taskId,
-      needs ? [ ],
-      skipIfMissingEnv ? [ ],
-    }:
-    {
-      inherit
-        taskId
-        needs
-        skipIfMissingEnv
-        ;
-      locks = [ ];
-      when = {
-        envEquals = { };
-        envPresent = [ ];
       };
     };
 in
@@ -299,77 +228,56 @@ in
         dev = mkCommandTask {
           id = "task.dev";
           appName = "dev";
-          summary = "Start the MFM REST API in dev mode";
+          summary = "Start the dev workflow";
           description = ''
-            Runs mfm_rest_api via cargo with developer-friendly defaults.
+            Runs the project's dev workflow.
+
+            Customize this command in nixfied/project/module.nix.
           '';
           tags = [
             "dev"
             "local"
           ];
-          usage = [ "MFM_ENV=dev NIX_ENV=0 nix run .#dev" ];
-          examples = [
-            "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mfm nix run .#dev"
-          ];
-          runtimeInputs = rustRuntimeInputs;
+          usage = [ "NIX_ENV=0 nix run .#dev" ];
+          examples = [ "NIX_ENV=0 nix run .#dev" ];
           command = ''
             set -euo pipefail
-
             echo "INFO: starting dev workflow"
-
-            if [ -z "''${DATABASE_URL:-}" ]; then
-              export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/mfm"
-            fi
-
-            if [ -z "''${MFM_EVM_RPC_URL:-}" ]; then
-              export MFM_EVM_RPC_URL="http://127.0.0.1:8545"
-            fi
-
-            if [ -z "''${MFM_REST_API_ADDR:-}" ]; then
-              export MFM_REST_API_ADDR="127.0.0.1:3001"
-            fi
-
-            echo "INFO: launching mfm_rest_api addr=$MFM_REST_API_ADDR"
-            exec cargo run -p mfm-rest-api --bin mfm_rest_api -- "$@"
+            echo "SKIP: dev command placeholder. Edit nixfied/project/module.nix to run your app."
           '';
         };
 
         build = mkCommandTask {
           id = "task.build";
           appName = "build";
-          summary = "Build release artifacts";
-          description = "Builds the workspace in release mode with all features enabled.";
+          summary = "Build artifacts";
+          description = ''
+            Runs the project's build workflow.
+
+            Customize this command in nixfied/project/module.nix.
+          '';
           usage = [ "nix run .#build" ];
-          runtimeInputs = rustRuntimeInputs;
           command = ''
             set -euo pipefail
-
-            echo "INFO: running release build"
-            cargo build --release --all-features
-            echo "OK: build completed"
+            echo "INFO: running build workflow"
+            echo "SKIP: build command placeholder. Edit nixfied/project/module.nix."
           '';
         };
 
         check = mkCommandTask {
           id = "task.check";
           appName = "check";
-          summary = "Run fmt + clippy + architecture verification";
-          description = "Runs quality checks for the workspace.";
+          summary = "Run quality checks";
+          description = ''
+            Runs quality checks for the repository.
+
+            Customize this command in nixfied/project/module.nix.
+          '';
           usage = [ "nix run .#check" ];
-          runtimeInputs = rustRuntimeInputs;
           command = ''
             set -euo pipefail
-
-            echo "INFO: running formatting checks"
-            cargo fmt --all -- --check
-
-            echo "INFO: running clippy"
-            cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings
-
-            echo "INFO: running architecture verifier"
-            cargo run -p mfm-architecture-verify --
-
-            echo "OK: quality checks completed"
+            echo "INFO: running quality checks"
+            echo "SKIP: quality checks placeholder. Edit nixfied/project/module.nix."
           '';
         };
 
@@ -378,9 +286,11 @@ in
           appName = "format";
           summary = "Format Nix files";
           usage = [ "nix run .#format" ];
+          runtimeInputs = commonRuntimeInputs ++ [
+            nixFormatterPkg
+          ];
           command = ''
             set -euo pipefail
-
             find . -name '*.nix' -print0 | xargs -0 nixfmt --
             echo "OK: formatted nix files"
           '';
@@ -389,49 +299,17 @@ in
         test = mkCommandTask {
           id = "task.test";
           appName = "test";
-          summary = "Run workspace tests";
-          description = "Runs the full workspace test suite using cargo-nextest.";
-          usage = [ "nix run .#test" ];
-          runtimeInputs = rustRuntimeInputs;
-          env =
-            {
-              RUSTC_WRAPPER = "sccache";
-              CARGO_PROFILE_CI_DEBUG = "0";
-            }
-            // lib.optionalAttrs pkgs.stdenv.isDarwin {
-              LIBRARY_PATH = "${pkgs.libiconv}/lib";
-            };
-          command = ''
-            set -euo pipefail
-
-            echo "INFO: running workspace tests"
-            cargo nextest run --workspace --cargo-profile ci
-            echo "OK: tests completed"
-          '';
-        };
-
-        ci = mkCommandTask {
-          id = "task.ci";
-          appName = "ci";
           kind = "workflow";
-          summary = "Run CI workflows (basic|audit|parity|full|mainnet)";
-          description = "Dispatches to model workflows and supports legacy CI mode flags.";
-          usage = [
-            "nix run .#ci -- --basic --summary"
-            "nix run .#ci -- --audit --summary"
-            "nix run .#ci -- --parity --summary"
-            "nix run .#ci -- --full --summary"
-            "nix run .#ci -- --mainnet --summary"
-            "nix run .#ci -- --mode parity --summary"
-          ];
-          runtimeInputs = rustRuntimeInputs;
+          summary = "Run tests";
+          description = "Run tests through the deterministic workflow executor.";
+          usage = [ "nix run .#test" ];
           workflowId = "workflow.ci.full";
           contractArgs = [
             {
               name = "summary";
               kind = "flag";
               long = "--summary";
-              description = "Print compact workflow summary output.";
+              description = "Print compact summary output.";
             }
             {
               name = "mode";
@@ -440,12 +318,45 @@ in
               type = "enum";
               values = [
                 "basic"
-                "audit"
-                "parity"
+                "app"
+                "env"
                 "full"
-                "mainnet"
               ];
-              description = "CI mode to run.";
+              description = "Select workflow mode.";
+            }
+          ];
+        };
+
+        ci = mkCommandTask {
+          id = "task.ci";
+          appName = "ci";
+          kind = "workflow";
+          summary = "Run the CI pipeline";
+          description = "Runs CI through workflow.ci.<mode> plans.";
+          usage = [
+            "nix run .#ci"
+            "nix run .#ci -- --summary"
+          ];
+          workflowId = "workflow.ci.full";
+          contractArgs = [
+            {
+              name = "summary";
+              kind = "flag";
+              long = "--summary";
+              description = "Print compact summary output.";
+            }
+            {
+              name = "mode";
+              kind = "option";
+              long = "--mode";
+              type = "enum";
+              values = [
+                "basic"
+                "app"
+                "env"
+                "full"
+              ];
+              description = "Select workflow mode.";
             }
             {
               name = "basic";
@@ -454,16 +365,16 @@ in
               description = "Alias for --mode basic.";
             }
             {
-              name = "audit";
+              name = "app";
               kind = "flag";
-              long = "--audit";
-              description = "Alias for --mode audit.";
+              long = "--app";
+              description = "Alias for --mode app.";
             }
             {
-              name = "parity";
+              name = "env";
               kind = "flag";
-              long = "--parity";
-              description = "Alias for --mode parity.";
+              long = "--env";
+              description = "Alias for --mode env.";
             }
             {
               name = "full";
@@ -471,136 +382,27 @@ in
               long = "--full";
               description = "Alias for --mode full.";
             }
-            {
-              name = "mainnet";
-              kind = "flag";
-              long = "--mainnet";
-              description = "Alias for --mode mainnet.";
-            }
-            {
-              name = "bg";
-              kind = "flag";
-              long = "--bg";
-              description = "Compatibility flag; currently runs foreground only.";
-            }
-            {
-              name = "background";
-              kind = "flag";
-              long = "--background";
-              description = "Compatibility alias for --bg.";
-            }
           ];
         };
 
-        ci-fmt =
+        ci-quality =
           mkCommandTask {
-            id = "task.ci.fmt";
-            appName = "ci-fmt";
+            id = "task.ci.quality";
+            appName = "ci-quality";
             kind = "ci-step";
-            summary = "CI formatting step";
+            summary = "Quality checks";
+            description = "Quality CI step.";
             tags = [
               "ci"
               "quality"
             ];
-            runtimeInputs = rustRuntimeInputs;
+            runtimeInputs = commonRuntimeInputs;
             command = ''
               set -euo pipefail
-              ${ciStepPreamble}
-
-              log_file="$artifacts_dir/fmt.log"
-              echo "INFO: running ci step=fmt"
-              run_with_log "$log_file" cargo fmt --all -- --check
-              echo "OK: ci step passed step=fmt log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-clippy =
-          mkCommandTask {
-            id = "task.ci.clippy";
-            appName = "ci-clippy";
-            kind = "ci-step";
-            summary = "CI clippy step";
-            tags = [
-              "ci"
-              "quality"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-
-              log_file="$artifacts_dir/clippy.log"
-              echo "INFO: running ci step=clippy"
-              run_with_log "$log_file" cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings
-              echo "OK: ci step passed step=clippy log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-architecture-verify =
-          mkCommandTask {
-            id = "task.ci.architecture-verify";
-            appName = "ci-architecture-verify";
-            kind = "ci-step";
-            summary = "CI architecture verification step";
-            tags = [
-              "ci"
-              "quality"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-
-              log_file="$artifacts_dir/architecture-verify.log"
-              echo "INFO: running ci step=architecture-verify"
-              run_with_log "$log_file" cargo run -p mfm-architecture-verify --
-              echo "OK: ci step passed step=architecture-verify log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-shell-app-contracts =
-          mkCommandTask {
-            id = "task.ci.shell-app-contracts";
-            appName = "ci-shell-app-contracts";
-            kind = "ci-step";
-            summary = "CI shell/model surface contract checks";
-            tags = [
-              "ci"
-              "quality"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-
-              ROOT="$(pwd -P)"
-              export ROOT
-
-              log_file="$artifacts_dir/shell-app-contracts.log"
-              echo "INFO: running ci step=shell-app-contracts"
-              run_with_log "$log_file" bash -euo pipefail -c '
-                test -f "$ROOT/flake.nix"
-                test -f "$ROOT/nixfied/schemas/task-contract.json"
-                test -f "$ROOT/nixfied/schemas/workflow-contract.json"
-                test -f "$ROOT/nixfied/schemas/model-export.json"
-
-                jq -e "." "$ROOT/nixfied/schemas/task-contract.json" >/dev/null
-                jq -e "." "$ROOT/nixfied/schemas/workflow-contract.json" >/dev/null
-                jq -e "." "$ROOT/nixfied/schemas/model-export.json" >/dev/null
-
-                grep -q "id = \"task.ci\";" "$ROOT/nixfied/project/module.nix"
-                grep -q "id = \"workflow.ci.full\";" "$ROOT/nixfied/project/module.nix"
-              '
-              echo "OK: ci step passed step=shell-app-contracts log=$log_file"
+              artifacts_dir="''${CI_ARTIFACTS_DIR:-/tmp/ci-artifacts}"
+              mkdir -p "$artifacts_dir"
+              touch "$artifacts_dir/quality.log"
+              echo "OK: quality step complete"
             '';
           }
           // {
@@ -612,267 +414,221 @@ in
             id = "task.ci.tests";
             appName = "ci-tests";
             kind = "ci-step";
-            summary = "CI tests step";
+            summary = "Tests";
+            description = "Test CI step.";
             tags = [
               "ci"
               "tests"
             ];
-            runtimeInputs = rustRuntimeInputs;
-            env =
-              {
-                RUSTC_WRAPPER = "sccache";
-                CARGO_PROFILE_CI_DEBUG = "0";
-              }
-              // lib.optionalAttrs pkgs.stdenv.isDarwin {
-                LIBRARY_PATH = "${pkgs.libiconv}/lib";
-              };
+            runtimeInputs = commonRuntimeInputs;
             command = ''
               set -euo pipefail
-              ${ciStepPreamble}
-
-              log_file="$artifacts_dir/tests.log"
-              echo "INFO: running ci step=tests"
-              run_with_log "$log_file" cargo nextest run --workspace --cargo-profile ci
-              echo "OK: ci step passed step=tests log=$log_file"
+              artifacts_dir="''${CI_ARTIFACTS_DIR:-/tmp/ci-artifacts}"
+              mkdir -p "$artifacts_dir"
+              touch "$artifacts_dir/tests.log"
+              echo "OK: tests step complete"
             '';
           }
           // {
             ui.app.expose = false;
           };
 
-        ci-audit =
+        ci-system-quick =
           mkCommandTask {
-            id = "task.ci.audit";
-            appName = "ci-audit";
+            id = "task.ci.system-quick";
+            appName = "ci-system-quick";
             kind = "ci-step";
-            summary = "CI security audit step";
+            summary = "Quick system tests";
+            description = "Optional system test gate.";
             tags = [
               "ci"
-              "audit"
+              "system"
             ];
-            runtimeInputs = rustRuntimeInputs;
+            runtimeInputs = commonRuntimeInputs;
             command = ''
               set -euo pipefail
-              ${ciStepPreamble}
-
-              log_file="$artifacts_dir/audit.log"
-              echo "INFO: running ci step=audit"
-              run_with_log "$log_file" cargo audit
-              echo "OK: ci step passed step=audit log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-parity-compile =
-          mkCommandTask {
-            id = "task.ci.parity-compile";
-            appName = "ci-parity-compile";
-            kind = "ci-step";
-            summary = "CI parity precompile step";
-            tags = [
-              "ci"
-              "parity"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-
-              log_file="$artifacts_dir/parity-compile.log"
-              echo "INFO: running ci step=parity-compile"
-              run_with_log "$log_file" cargo nextest run --no-run --cargo-profile ci -p mfm-integration-tests --features parity-tests -p mfm --features parity-tests
-              echo "OK: ci step passed step=parity-compile log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-parity-rest-api-smoke =
-          mkCommandTask {
-            id = "task.ci.parity-rest-api-smoke";
-            appName = "ci-parity-rest-api-smoke";
-            kind = "ci-step";
-            summary = "CI parity REST API smoke tests";
-            tags = [
-              "ci"
-              "parity"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-
-              log_file="$artifacts_dir/parity-rest-api-smoke.log"
-              echo "INFO: running ci step=parity-rest-api-smoke"
-              run_with_log "$log_file" cargo nextest run --cargo-profile ci --jobs 1 -p mfm-integration-tests --features parity-tests --test parity_event_store_postgres_contract --test parity_artifact_store_s3_contract --test parity_rest_api_postgres_s3_smoke
-              echo "OK: ci step passed step=parity-rest-api-smoke log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-parity-evm-helios-smoke =
-          mkCommandTask {
-            id = "task.ci.parity-evm-helios-smoke";
-            appName = "ci-parity-evm-helios-smoke";
-            kind = "ci-step";
-            summary = "CI parity helios smoke tests";
-            tags = [
-              "ci"
-              "parity"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-
-              key_log_file="$artifacts_dir/parity-keystore-reth-tx-sign-send.log"
-              smoke_log_file="$artifacts_dir/parity-evm-helios-smoke.log"
-              response_file="$artifacts_dir/parity-evm-helios-smoke.response.json"
-
-              echo "INFO: running ci step=parity-evm-helios-smoke"
-              run_with_log "$key_log_file" cargo nextest run --cargo-profile ci -p mfm --features parity-tests --test parity_keystore_reth_tx_send
-
-              if [ -z "''${MFM_EVM_RPC_URL:-}" ]; then
-                echo "SKIP: MFM_EVM_RPC_URL is unset; skipping helios RPC curl probe"
+              if [ -z "''${API_KEY:-}" ]; then
+                echo "SKIP: API_KEY not set"
                 exit 0
               fi
-
-              run_with_log "$smoke_log_file" bash -euo pipefail -c '
-                curl -fsS \
-                  -H "content-type: application/json" \
-                  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[]}" \
-                  "$MFM_EVM_RPC_URL" \
-                  | tee "$response_file"
-              '
-
-              jq -e '.result | strings' "$response_file" >/dev/null
-              echo "OK: ci step passed step=parity-evm-helios-smoke log=$smoke_log_file"
+              artifacts_dir="''${CI_ARTIFACTS_DIR:-/tmp/ci-artifacts}"
+              mkdir -p "$artifacts_dir"
+              touch "$artifacts_dir/system-quick.log"
+              echo "OK: quick system step complete"
             '';
           }
           // {
             ui.app.expose = false;
           };
 
-        ci-parity-evm-reth =
+        ci-nginx-proxy =
           mkCommandTask {
-            id = "task.ci.parity-evm-reth";
-            appName = "ci-parity-evm-reth";
+            id = "task.ci.nginx-proxy";
+            appName = "ci-nginx-proxy";
             kind = "ci-step";
-            summary = "CI parity EVM + portfolio tracker tests";
+            summary = "Nginx proxy test";
+            description = "Nginx proxy CI step.";
             tags = [
               "ci"
-              "parity"
+              "proxy"
             ];
-            runtimeInputs = rustRuntimeInputs;
+            runtimeInputs = commonRuntimeInputs;
             command = ''
               set -euo pipefail
-              ${ciStepPreamble}
-
-              log_file="$artifacts_dir/parity-evm-reth.log"
-              echo "INFO: running ci step=parity-evm-reth"
-              run_with_log "$log_file" cargo nextest run --cargo-profile ci -p mfm-integration-tests --features parity-tests --test evm_rpc_pool_failover --test evm_rpc_getlogs_chunking --test parity_rest_api_evm_reth_pipeline --test parity_portfolio_tracker_reth_mock_erc20 --test parity_portfolio_tracker_reth_snapshot
-              echo "OK: ci step passed step=parity-evm-reth log=$log_file"
+              artifacts_dir="''${CI_ARTIFACTS_DIR:-/tmp/ci-artifacts}"
+              mkdir -p "$artifacts_dir"
+              touch "$artifacts_dir/nginx-proxy.log"
+              echo "OK: nginx proxy step complete"
             '';
           }
           // {
             ui.app.expose = false;
           };
 
-        ci-parity-aave-v3-reth =
+        test-parallel-sleep-a =
           mkCommandTask {
-            id = "task.ci.parity-aave-v3-reth";
-            appName = "ci-parity-aave-v3-reth";
-            kind = "ci-step";
-            summary = "CI parity Aave v3 scenario tests";
-            tags = [
-              "ci"
-              "parity"
-            ];
-            runtimeInputs = rustRuntimeInputs;
+            id = "task.test.parallel.sleep-a";
+            appName = "test-parallel-sleep-a";
+            kind = "internal";
+            summary = "Parallel smoke unit A";
+            description = "Sleeps for 1 second for workflow scheduler validation.";
+            runtimeInputs = commonRuntimeInputs;
             command = ''
               set -euo pipefail
-              ${ciStepPreamble}
-
-              log_file="$artifacts_dir/parity-aave-v3-reth.log"
-              echo "INFO: running ci step=parity-aave-v3-reth"
-              run_with_log "$log_file" cargo nextest run --cargo-profile ci -p mfm-integration-tests --features parity-tests --test parity_aave_v3_reth_scenario
-              echo "OK: ci step passed step=parity-aave-v3-reth log=$log_file"
+              echo "INFO: parallel smoke sleep-a start"
+              sleep 1
+              echo "OK: parallel smoke sleep-a done"
             '';
           }
           // {
             ui.app.expose = false;
           };
 
-        ci-parity-postgres-state-events-audit =
+        test-parallel-sleep-b =
           mkCommandTask {
-            id = "task.ci.parity-postgres-state-events-audit";
-            appName = "ci-parity-postgres-state-events-audit";
-            kind = "ci-step";
-            summary = "CI parity postgres state event audit";
-            tags = [
-              "ci"
-              "parity"
-            ];
-            runtimeInputs = rustRuntimeInputs;
+            id = "task.test.parallel.sleep-b";
+            appName = "test-parallel-sleep-b";
+            kind = "internal";
+            summary = "Parallel smoke unit B";
+            description = "Sleeps for 1 second for workflow scheduler validation.";
+            runtimeInputs = commonRuntimeInputs;
             command = ''
               set -euo pipefail
-              ${ciStepPreamble}
-
-              log_file="$artifacts_dir/parity-postgres-state-events-audit.log"
-              echo "INFO: running ci step=parity-postgres-state-events-audit"
-              run_with_log "$log_file" cargo nextest run --cargo-profile ci -p mfm-integration-tests --features parity-tests --test parity_postgres_state_events_audit
-              echo "OK: ci step passed step=parity-postgres-state-events-audit log=$log_file"
+              echo "INFO: parallel smoke sleep-b start"
+              sleep 1
+              echo "OK: parallel smoke sleep-b done"
             '';
           }
           // {
             ui.app.expose = false;
           };
 
-        ci-mainnet-portfolio-snapshot-helios =
+        test-parallel-sleep-c =
           mkCommandTask {
-            id = "task.ci.mainnet-portfolio-snapshot-helios";
-            appName = "ci-mainnet-portfolio-snapshot-helios";
-            kind = "ci-step";
-            summary = "CI mainnet portfolio snapshot validation";
-            tags = [
-              "ci"
-              "mainnet"
-            ];
-            runtimeInputs = rustRuntimeInputs;
+            id = "task.test.parallel.sleep-c";
+            appName = "test-parallel-sleep-c";
+            kind = "internal";
+            summary = "Parallel smoke dependent unit";
+            description = "Sleeps for 1 second and depends on unit A in smoke workflow.";
+            runtimeInputs = commonRuntimeInputs;
             command = ''
               set -euo pipefail
-              ${ciStepPreamble}
+              echo "INFO: parallel smoke sleep-c start"
+              sleep 1
+              echo "OK: parallel smoke sleep-c done"
+            '';
+          }
+          // {
+            ui.app.expose = false;
+          };
 
-              address="''${MFM_CI_MAINNET_ADDRESS:-0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045}"
-              log_file="$artifacts_dir/mainnet-portfolio-snapshot.log"
-              out_file="$artifacts_dir/mainnet-portfolio-snapshot.json"
+        test-parallel-sleep-d =
+          mkCommandTask {
+            id = "task.test.parallel.sleep-d";
+            appName = "test-parallel-sleep-d";
+            kind = "internal";
+            summary = "Parallel smoke lock unit";
+            description = "Sleeps for 1 second and shares lock with unit B.";
+            runtimeInputs = commonRuntimeInputs;
+            command = ''
+              set -euo pipefail
+              echo "INFO: parallel smoke sleep-d start"
+              sleep 1
+              echo "OK: parallel smoke sleep-d done"
+            '';
+          }
+          // {
+            ui.app.expose = false;
+          };
 
-              export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
-              export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-https://eth.drpc.org}"
+        test-parallel-skip =
+          mkCommandTask {
+            id = "task.test.parallel.skip";
+            appName = "test-parallel-skip";
+            kind = "internal";
+            summary = "Parallel smoke when-skip unit";
+            description = "No-op task canceled by when.envPresent in smoke workflow.";
+            runtimeInputs = commonRuntimeInputs;
+            command = ''
+              set -euo pipefail
+              echo "WARN: parallel smoke skip task should not run"
+            '';
+          }
+          // {
+            ui.app.expose = false;
+          };
 
-              echo "INFO: running ci step=mainnet-portfolio-snapshot-helios address=$address"
+        test-parallel-fail =
+          mkCommandTask {
+            id = "task.test.parallel.fail";
+            appName = "test-parallel-fail";
+            kind = "internal";
+            summary = "Parallel fail-fast trigger";
+            description = "Fails intentionally for fail-fast workflow validation.";
+            runtimeInputs = commonRuntimeInputs;
+            command = ''
+              set -euo pipefail
+              echo "ERROR: intentional fail-fast trigger"
+              sleep 1
+              exit 7
+            '';
+          }
+          // {
+            ui.app.expose = false;
+          };
 
-              mode="$(printf '%s' "''${OUTPUT_MODE:-stdout}" | tr '[:upper:]' '[:lower:]')"
-              case "$mode" in
-                logs)
-                  cargo run -q -p mfm --bin mfm_cli -- --output-format json portfolio snapshot "$address" --chain-id 1 >"$out_file" 2>"$log_file"
-                  ;;
-                stdout|both|"")
-                  cargo run -q -p mfm --bin mfm_cli -- --output-format json portfolio snapshot "$address" --chain-id 1 > >(tee "$out_file") 2> >(tee "$log_file" >&2)
-                  ;;
-                *)
-                  cargo run -q -p mfm --bin mfm_cli -- --output-format json portfolio snapshot "$address" --chain-id 1 >"$out_file" 2>"$log_file"
-                  ;;
-              esac
+        test-parallel-slow-a =
+          mkCommandTask {
+            id = "task.test.parallel.slow-a";
+            appName = "test-parallel-slow-a";
+            kind = "internal";
+            summary = "Parallel fail-fast slow unit A";
+            description = "Long-running unit that should be canceled by fail-fast.";
+            runtimeInputs = commonRuntimeInputs;
+            command = ''
+              set -euo pipefail
+              echo "INFO: fail-fast slow-a start"
+              sleep 10
+              echo "OK: fail-fast slow-a done"
+            '';
+          }
+          // {
+            ui.app.expose = false;
+          };
 
-              jq -e '.status == "success"' "$out_file" >/dev/null
-              jq -e '.data.result.phase == "completed"' "$out_file" >/dev/null
-              echo "OK: ci step passed step=mainnet-portfolio-snapshot-helios log=$log_file"
+        test-parallel-slow-b =
+          mkCommandTask {
+            id = "task.test.parallel.slow-b";
+            appName = "test-parallel-slow-b";
+            kind = "internal";
+            summary = "Parallel fail-fast slow unit B";
+            description = "Long-running unit that should be canceled by fail-fast.";
+            runtimeInputs = commonRuntimeInputs;
+            command = ''
+              set -euo pipefail
+              echo "INFO: fail-fast slow-b start"
+              sleep 10
+              echo "OK: fail-fast slow-b done"
             '';
           }
           // {
@@ -883,19 +639,26 @@ in
           id = "task.framework.test";
           appName = "framework::test";
           kind = "utility";
-          summary = "Run framework validation shards";
+          summary = "Run framework validation in the model";
           description = ''
-            Runs deterministic framework validation shards.
+            Runs deterministic validation shards.
           '';
-          runtimeInputs = rustRuntimeInputs;
+          runtimeInputs = [
+            pkgs.bash
+            pkgs.coreutils
+            pkgs.findutils
+            pkgs.gnugrep
+            pkgs.gnused
+            pkgs.nix
+          ];
           usage = [
             "nix run .#framework::test"
             "nix run .#framework::test -- --summary"
-            "nix run .#framework::test -- --mode parity --summary"
+            "nix run .#framework::test -- --mode env --summary-json /tmp/framework-summary.json"
           ];
           examples = [
             "nix run .#framework::test -- --list-shards"
-            "nix run .#framework::test -- --shard workflow-ci"
+            "nix run .#framework::test -- --shard flake-check"
             "FRAMEWORK_ISOLATION=1 nix run .#framework::test -- --summary"
           ];
           contractArgs = [
@@ -911,6 +674,14 @@ in
               long = "--summary-json";
               type = "string";
               description = "Write summary JSON to a file.";
+            }
+            {
+              name = "profile";
+              kind = "option";
+              long = "--profile";
+              type = "enum";
+              values = [ "ci" ];
+              description = "Test profile to run (ci only).";
             }
             {
               name = "shard";
@@ -939,10 +710,9 @@ in
               type = "enum";
               values = [
                 "basic"
-                "audit"
-                "parity"
+                "app"
+                "env"
                 "full"
-                "mainnet"
               ];
               description = "CI workflow mode used by the workflow-ci shard.";
             }
@@ -953,16 +723,16 @@ in
               description = "Alias for --mode basic.";
             }
             {
-              name = "audit";
+              name = "app";
               kind = "flag";
-              long = "--audit";
-              description = "Alias for --mode audit.";
+              long = "--app";
+              description = "Alias for --mode app.";
             }
             {
-              name = "parity";
+              name = "env";
               kind = "flag";
-              long = "--parity";
-              description = "Alias for --mode parity.";
+              long = "--env";
+              description = "Alias for --mode env.";
             }
             {
               name = "full";
@@ -970,17 +740,12 @@ in
               long = "--full";
               description = "Alias for --mode full.";
             }
-            {
-              name = "mainnet";
-              kind = "flag";
-              long = "--mainnet";
-              description = "Alias for --mode mainnet.";
-            }
           ];
           command = ''
             set -euo pipefail
 
             ROOT="$(pwd -P)"
+            PROFILE="ci"
             MODE="full"
             SHARD=""
             LIST_SHARDS=0
@@ -1001,6 +766,10 @@ in
               printf 'INFO: %s\n' "$*"
             }
 
+            log_warn() {
+              printf 'WARN: %s\n' "$*"
+            }
+
             log_error() {
               printf 'ERROR: %s\n' "$*" >&2
             }
@@ -1014,16 +783,16 @@ in
             }
 
             usage() {
-              cat <<'USAGE'
-            Usage: nix run .#framework::test [-- --mode <basic|audit|parity|full|mainnet>] [--summary] [--summary-json <path>] [--shard <name>] [--list-shards]
+              cat <<'EOF'
+            Usage: nix run .#framework::test [-- --profile ci] [--mode <basic|app|env|full>] [--summary] [--summary-json <path>] [--shard <name>] [--list-shards]
 
             Shards:
               flake-check   Run nix flake check for the current project root.
               help          Validate generated help output.
-              workflow-test Run the test app surface.
-              workflow-ci   Run the ci app surface in selected mode.
+              workflow-test Run the test workflow surface.
+              workflow-ci   Run the CI workflow surface in selected mode.
               isolation     Run isolation checks when FRAMEWORK_ISOLATION=1 or explicitly selected.
-            USAGE
+            EOF
             }
 
             print_shards() {
@@ -1052,6 +821,7 @@ in
               mkdir -p "$(dirname "$SUMMARY_JSON")"
               cat > "$SUMMARY_JSON" <<JSON
             {
+              "profile": "$PROFILE",
               "mode": "$MODE",
               "shard": $(if [ -n "$SHARD" ]; then printf '"%s"' "$SHARD"; else printf 'null'; fi),
               "executed_shards": $EXECUTED,
@@ -1087,7 +857,7 @@ in
             }
 
             shard_workflow_test() {
-              nix run "path:$ROOT"#test
+              nix run "path:$ROOT"#test -- --summary
             }
 
             shard_workflow_ci() {
@@ -1130,6 +900,14 @@ in
 
             while [ "$#" -gt 0 ]; do
               case "$1" in
+                --profile)
+                  if [ "$#" -lt 2 ]; then
+                    log_error "--profile requires a value"
+                    exit 2
+                  fi
+                  PROFILE="$2"
+                  shift 2
+                  ;;
                 --mode)
                   if [ "$#" -lt 2 ]; then
                     log_error "--mode requires a value"
@@ -1138,7 +916,7 @@ in
                   MODE="$2"
                   shift 2
                   ;;
-                --basic|--audit|--parity|--full|--mainnet)
+                --basic|--app|--env|--full)
                   MODE="''${1#--}"
                   shift
                   ;;
@@ -1187,11 +965,24 @@ in
               exit 2
             fi
 
-            case "$MODE" in
-              basic|audit|parity|full|mainnet)
+            case "$PROFILE" in
+              ci)
+                ;;
+              full)
+                log_error "profile 'full' is no longer supported; use --profile ci."
+                exit 2
                 ;;
               *)
-                log_error "unknown mode '$MODE' (expected: basic|audit|parity|full|mainnet)"
+                log_error "unknown profile '$PROFILE' (expected: ci)"
+                exit 2
+                ;;
+            esac
+
+            case "$MODE" in
+              basic|app|env|full)
+                ;;
+              *)
+                log_error "unknown mode '$MODE' (expected: basic|app|env|full)"
                 exit 2
                 ;;
             esac
@@ -1225,7 +1016,7 @@ in
             fi
 
             if [ "$SUMMARY" -eq 1 ]; then
-              log_info "summary mode=$MODE executed_shards=$EXECUTED"
+              log_info "summary profile=$PROFILE mode=$MODE executed_shards=$EXECUTED"
             fi
 
             log_ok "framework::test completed"
@@ -1248,55 +1039,59 @@ in
             "nix run .#framework::install -- --vendor"
           ];
           command = ''
-            set -euo pipefail
+                        set -euo pipefail
 
-            source_root="${builtins.toString ../.}"
-            target="."
-            vendor=0
+                        source_root="${builtins.toString ../.}"
+                        repo_root="${builtins.toString ../../.}"
+                        target="."
+                        vendor=0
 
-            while [ "$#" -gt 0 ]; do
-              case "$1" in
-                --vendor)
-                  vendor=1
-                  shift
-                  ;;
-                --target)
-                  if [ "$#" -lt 2 ]; then
-                    echo "ERROR: --target requires a value"
-                    exit 2
-                  fi
-                  target="$2"
-                  shift 2
-                  ;;
-                *)
-                  echo "ERROR: unknown argument '$1'"
-                  exit 2
-                  ;;
-              esac
-            done
+                        while [ "$#" -gt 0 ]; do
+                          case "$1" in
+                            --vendor)
+                              vendor=1
+                              shift
+                              ;;
+                            --target)
+                              if [ "$#" -lt 2 ]; then
+                                echo "ERROR: --target requires a value"
+                                exit 2
+                              fi
+                              target="$2"
+                              shift 2
+                              ;;
+                            *)
+                              echo "ERROR: unknown argument '$1'"
+                              exit 2
+                              ;;
+                          esac
+                        done
 
-            mkdir -p "$target"
+                        mkdir -p "$target"
 
-            if [ "$vendor" -eq 1 ]; then
-              if [ -e "$target/nixfied" ]; then
-                chmod -R u+w "$target/nixfied" 2>/dev/null || true
-                rm -rf "$target/nixfied"
-              fi
-              mkdir -p "$target/nixfied"
-              cp -R "$source_root/." "$target/nixfied"
-              chmod -R u+w "$target/nixfied" 2>/dev/null || true
-              rm -rf "$target/nixfied/.git"
-              rm -f "$target/nixfied/result"
-              cat > "$target/flake.nix" <<'NIXFIED_WRAPPER'
+                        if [ "$vendor" -eq 1 ]; then
+                          if [ -e "$target/nixfied" ]; then
+                            chmod -R u+w "$target/nixfied" 2>/dev/null || true
+                            rm -rf "$target/nixfied"
+                          fi
+                          mkdir -p "$target/nixfied"
+                          cp -R "$source_root/." "$target/nixfied"
+                          if [ -f "$repo_root/README.md" ]; then
+                            cp "$repo_root/README.md" "$target/nixfied/README.md"
+                          fi
+                          chmod -R u+w "$target/nixfied" 2>/dev/null || true
+                          rm -rf "$target/nixfied/.git"
+                          rm -f "$target/nixfied/result"
+                          cat > "$target/flake.nix" <<'NIXFIED_WRAPPER'
             ${vendoredWrapperFlake}
             NIXFIED_WRAPPER
-              echo "OK: vendored wrapper flake generated at $target/flake.nix"
-            else
-              cat > "$target/flake.nix" <<'NIXFIED_WRAPPER'
+                          echo "OK: vendored wrapper flake generated at $target/flake.nix"
+                        else
+                          cat > "$target/flake.nix" <<'NIXFIED_WRAPPER'
             ${thinWrapperFlake}
             NIXFIED_WRAPPER
-              echo "OK: thin wrapper flake generated at $target/flake.nix"
-            fi
+                          echo "OK: thin wrapper flake generated at $target/flake.nix"
+                        fi
           '';
         };
       };
@@ -1309,30 +1104,25 @@ in
           mode = "ci";
           maxWorkers = 4;
           units = {
-            fmt = mkWorkflowUnit {
-              taskId = "task.ci.fmt";
+            quality = {
+              taskId = "task.ci.quality";
+              needs = [ ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ ];
             };
-
-            clippy = mkWorkflowUnit {
-              taskId = "task.ci.clippy";
-            };
-
-            architecture = mkWorkflowUnit {
-              taskId = "task.ci.architecture-verify";
-            };
-
-            shell-app-contracts = mkWorkflowUnit {
-              taskId = "task.ci.shell-app-contracts";
-            };
-
-            tests = mkWorkflowUnit {
+            tests = {
               taskId = "task.ci.tests";
-              needs = [
-                "fmt"
-                "clippy"
-                "architecture"
-                "shell-app-contracts"
-              ];
+              needs = [ ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ ];
             };
           };
           stages = [ ];
@@ -1354,15 +1144,42 @@ in
           };
         };
 
-        ci-audit = {
-          id = "workflow.ci.audit";
-          summary = "Audit CI workflow";
-          description = "Runs cargo-audit security checks.";
+        ci-app = {
+          id = "workflow.ci.app";
+          summary = "App CI workflow";
+          description = "Basic workflow plus quick system checks.";
           mode = "ci";
-          maxWorkers = 1;
+          maxWorkers = 4;
           units = {
-            audit = mkWorkflowUnit {
-              taskId = "task.ci.audit";
+            quality = {
+              taskId = "task.ci.quality";
+              needs = [ ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ ];
+            };
+            tests = {
+              taskId = "task.ci.tests";
+              needs = [ "quality" ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ ];
+            };
+            system-quick = {
+              taskId = "task.ci.system-quick";
+              needs = [ "tests" ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ "API_KEY" ];
             };
           };
           stages = [ ];
@@ -1384,46 +1201,52 @@ in
           };
         };
 
-        ci-parity = {
-          id = "workflow.ci.parity";
-          summary = "Parity CI workflow";
-          description = "Runs parity compile/integration/audit steps.";
+        ci-env = {
+          id = "workflow.ci.env";
+          summary = "Environment CI workflow";
+          description = "App workflow plus nginx proxy checks.";
           mode = "ci";
-          maxWorkers = 2;
+          maxWorkers = 4;
           units = {
-            parity-compile = mkWorkflowUnit {
-              taskId = "task.ci.parity-compile";
+            quality = {
+              taskId = "task.ci.quality";
+              needs = [ ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ ];
             };
-
-            parity-rest-api-smoke = mkWorkflowUnit {
-              taskId = "task.ci.parity-rest-api-smoke";
-              needs = [ "parity-compile" ];
+            tests = {
+              taskId = "task.ci.tests";
+              needs = [ "quality" ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ ];
             };
-
-            parity-evm-helios-smoke = mkWorkflowUnit {
-              taskId = "task.ci.parity-evm-helios-smoke";
-              needs = [ "parity-compile" ];
+            system-quick = {
+              taskId = "task.ci.system-quick";
+              needs = [ "tests" ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ "API_KEY" ];
             };
-
-            parity-evm-reth = mkWorkflowUnit {
-              taskId = "task.ci.parity-evm-reth";
-              needs = [
-                "parity-rest-api-smoke"
-                "parity-evm-helios-smoke"
-              ];
-            };
-
-            parity-aave-v3-reth = mkWorkflowUnit {
-              taskId = "task.ci.parity-aave-v3-reth";
-              needs = [ "parity-evm-reth" ];
-            };
-
-            parity-postgres-state-events-audit = mkWorkflowUnit {
-              taskId = "task.ci.parity-postgres-state-events-audit";
-              needs = [
-                "parity-evm-reth"
-                "parity-aave-v3-reth"
-              ];
+            nginx-proxy = {
+              taskId = "task.ci.nginx-proxy";
+              needs = [ "system-quick" ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ ];
             };
           };
           stages = [ ];
@@ -1448,70 +1271,23 @@ in
         ci-full = {
           id = "workflow.ci.full";
           summary = "Full CI workflow";
-          description = "Runs basic checks/tests followed by the full parity stage sequence.";
+          description = "Runs quality/tests then system checks as deterministic stages.";
           mode = "ci";
-          maxWorkers = 2;
+          maxWorkers = 4;
           units = {
-            fmt = mkWorkflowUnit {
-              taskId = "task.ci.fmt";
+            quality = {
+              taskId = "task.ci.quality";
             };
-
-            clippy = mkWorkflowUnit {
-              taskId = "task.ci.clippy";
-            };
-
-            architecture = mkWorkflowUnit {
-              taskId = "task.ci.architecture-verify";
-            };
-
-            shell-app-contracts = mkWorkflowUnit {
-              taskId = "task.ci.shell-app-contracts";
-            };
-
-            tests = mkWorkflowUnit {
+            tests = {
               taskId = "task.ci.tests";
-              needs = [
-                "fmt"
-                "clippy"
-                "architecture"
-                "shell-app-contracts"
-              ];
             };
-
-            parity-compile = mkWorkflowUnit {
-              taskId = "task.ci.parity-compile";
+            system-quick = {
+              taskId = "task.ci.system-quick";
               needs = [ "tests" ];
             };
-
-            parity-rest-api-smoke = mkWorkflowUnit {
-              taskId = "task.ci.parity-rest-api-smoke";
-              needs = [ "parity-compile" ];
-            };
-
-            parity-evm-helios-smoke = mkWorkflowUnit {
-              taskId = "task.ci.parity-evm-helios-smoke";
-              needs = [ "parity-compile" ];
-            };
-
-            parity-evm-reth = mkWorkflowUnit {
-              taskId = "task.ci.parity-evm-reth";
-              needs = [
-                "parity-rest-api-smoke"
-                "parity-evm-helios-smoke"
-              ];
-            };
-
-            parity-aave-v3-reth = mkWorkflowUnit {
-              taskId = "task.ci.parity-aave-v3-reth";
-              needs = [ "parity-evm-reth" ];
-            };
-
-            parity-postgres-state-events-audit = mkWorkflowUnit {
-              taskId = "task.ci.parity-postgres-state-events-audit";
-              needs = [
-                "parity-evm-reth"
-                "parity-aave-v3-reth"
-              ];
+            nginx-proxy = {
+              taskId = "task.ci.nginx-proxy";
+              needs = [ "tests" ];
             };
           };
           stages = [ ];
@@ -1533,16 +1309,131 @@ in
           };
         };
 
-        ci-mainnet = {
-          id = "workflow.ci.mainnet";
-          summary = "Mainnet CI workflow";
-          description = "Runs mainnet Helios-backed portfolio snapshot checks.";
-          mode = "ci";
-          maxWorkers = 1;
+        test-parallel-smoke = {
+          id = "workflow.test.parallel.smoke";
+          summary = "Parallel runner smoke workflow";
+          description = "Validates worker cap, dependency gating, locks, and when behavior.";
+          mode = "custom";
+          maxWorkers = 2;
           units = {
-            mainnet-portfolio-snapshot-helios = mkWorkflowUnit {
-              taskId = "task.ci.mainnet-portfolio-snapshot-helios";
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_MAINNET" ];
+            alpha = {
+              taskId = "task.test.parallel.sleep-a";
+              needs = [ ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ "NIXFIED_PARALLEL_SMOKE" ];
+              };
+              skipIfMissingEnv = [ ];
+            };
+            beta = {
+              taskId = "task.test.parallel.sleep-b";
+              needs = [ ];
+              locks = [ "smoke-lock" ];
+              when = {
+                envEquals = {
+                  NIXFIED_PARALLEL_SMOKE = "1";
+                };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ ];
+            };
+            gamma = {
+              taskId = "task.test.parallel.sleep-c";
+              needs = [ "alpha" ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ ];
+            };
+            delta = {
+              taskId = "task.test.parallel.sleep-d";
+              needs = [ ];
+              locks = [ "smoke-lock" ];
+              when = {
+                envEquals = { };
+                envPresent = [ "NIXFIED_PARALLEL_SMOKE" ];
+              };
+              skipIfMissingEnv = [ ];
+            };
+            skip = {
+              taskId = "task.test.parallel.skip";
+              needs = [ ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ "NIXFIED_PARALLEL_SKIP" ];
+              };
+              skipIfMissingEnv = [ ];
+            };
+          };
+          stages = [ ];
+          setup.tasks = [ ];
+          teardown = {
+            tasks = [ ];
+            alwaysRun = true;
+          };
+          artifacts = {
+            root = "/tmp/ci-artifacts";
+            keepOnSuccess = false;
+            keepOnFailure = true;
+            writeSummary = true;
+          };
+          execution = {
+            failFast = true;
+            lockPolicy = "exclusive";
+            emitRegistryEvents = true;
+          };
+        };
+
+        test-parallel-failfast = {
+          id = "workflow.test.parallel.failfast";
+          summary = "Parallel runner fail-fast workflow";
+          description = "Validates fail-fast cancellation of running and pending units.";
+          mode = "custom";
+          maxWorkers = 3;
+          units = {
+            fail = {
+              taskId = "task.test.parallel.fail";
+              needs = [ ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ ];
+            };
+            slow-a = {
+              taskId = "task.test.parallel.slow-a";
+              needs = [ ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ ];
+            };
+            slow-b = {
+              taskId = "task.test.parallel.slow-b";
+              needs = [ ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ ];
+            };
+            after = {
+              taskId = "task.test.parallel.sleep-c";
+              needs = [ "slow-a" ];
+              locks = [ ];
+              when = {
+                envEquals = { };
+                envPresent = [ ];
+              };
+              skipIfMissingEnv = [ ];
             };
           };
           stages = [ ];

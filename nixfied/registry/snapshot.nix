@@ -1,4 +1,6 @@
-{ pkgs ? null }:
+{
+  pkgs ? null,
+}:
 {
   fromEvents =
     events:

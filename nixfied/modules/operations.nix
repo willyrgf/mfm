@@ -1,21 +1,22 @@
-{ lib, config, pkgs, ... }:
+{
+  lib,
+  config,
+  pkgs,
+  ...
+}:
 let
   cfg = config.nixfied.operations;
   runtime = config.nixfied.runtime;
 
   envNames = runtime.env.names;
   envPattern =
-    if envNames == [ ] then
-      runtime.env.default
-    else
-      builtins.concatStringsSep "|" envNames;
+    if envNames == [ ] then runtime.env.default else builtins.concatStringsSep "|" envNames;
 
-  envOffsetCase =
-    builtins.concatStringsSep "\n" (
-      map (
-        envName: "    ${envName}) env_offset=${toString (runtime.env.offsets.${envName} or 0)} ;;"
-      ) envNames
-    );
+  envOffsetCase = builtins.concatStringsSep "\n" (
+    map (
+      envName: "    ${envName}) env_offset=${toString (runtime.env.offsets.${envName} or 0)} ;;"
+    ) envNames
+  );
 
   portNames = builtins.sort builtins.lessThan (builtins.attrNames runtime.ports);
   portEmitLines = builtins.concatStringsSep "\n" (
@@ -163,49 +164,49 @@ let
   '';
 
   portsScript = ''
-    set -euo pipefail
+        set -euo pipefail
 
-    slot_var=${lib.escapeShellArg runtime.slot.var}
-    env_var=${lib.escapeShellArg runtime.env.var}
-    slot_default=${toString runtime.slot.default}
-    env_default=${lib.escapeShellArg runtime.env.default}
+        slot_var=${lib.escapeShellArg runtime.slot.var}
+        env_var=${lib.escapeShellArg runtime.env.var}
+        slot_default=${toString runtime.slot.default}
+        env_default=${lib.escapeShellArg runtime.env.default}
 
-    slot_value="''${!slot_var:-$slot_default}"
-    env_value="''${!env_var:-$env_default}"
+        slot_value="''${!slot_var:-$slot_default}"
+        env_value="''${!env_var:-$env_default}"
 
-    case "$env_value" in
-${envOffsetCase}
-      *)
-        echo "ERROR: unsupported $env_var '$env_value'"
-        exit 3
-        ;;
-    esac
+        case "$env_value" in
+    ${envOffsetCase}
+          *)
+            echo "ERROR: unsupported $env_var '$env_value'"
+            exit 3
+            ;;
+        esac
 
-    echo "INFO: Port assignments for slot ''${slot_value} env ''${env_value}"
-${portEmitLines}
+        echo "INFO: Port assignments for slot ''${slot_value} env ''${env_value}"
+    ${portEmitLines}
   '';
 
   checkPortsScript = ''
-    set -euo pipefail
+        set -euo pipefail
 
-    slot_var=${lib.escapeShellArg runtime.slot.var}
-    env_var=${lib.escapeShellArg runtime.env.var}
-    slot_default=${toString runtime.slot.default}
-    env_default=${lib.escapeShellArg runtime.env.default}
+        slot_var=${lib.escapeShellArg runtime.slot.var}
+        env_var=${lib.escapeShellArg runtime.env.var}
+        slot_default=${toString runtime.slot.default}
+        env_default=${lib.escapeShellArg runtime.env.default}
 
-    slot_value="''${!slot_var:-$slot_default}"
-    env_value="''${!env_var:-$env_default}"
+        slot_value="''${!slot_var:-$slot_default}"
+        env_value="''${!env_var:-$env_default}"
 
-    case "$env_value" in
-${envOffsetCase}
-      *)
-        echo "ERROR: unsupported $env_var '$env_value'"
-        exit 3
-        ;;
-    esac
+        case "$env_value" in
+    ${envOffsetCase}
+          *)
+            echo "ERROR: unsupported $env_var '$env_value'"
+            exit 3
+            ;;
+        esac
 
-    echo "INFO: Port status for slot ''${slot_value} env ''${env_value}"
-${portCheckLines}
+        echo "INFO: Port status for slot ''${slot_value} env ''${env_value}"
+    ${portCheckLines}
   '';
 
   isolationScript = ''

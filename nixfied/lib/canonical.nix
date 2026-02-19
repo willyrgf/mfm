@@ -1,9 +1,11 @@
-{ lib ? null }:
+{
+  lib ? null,
+}:
 let
   sortNames = attrs: builtins.sort builtins.lessThan (builtins.attrNames attrs);
 
-  renderAttrName = name:
-    if builtins.match "[A-Za-z_][A-Za-z0-9_'-]*" name != null then name else builtins.toJSON name;
+  renderAttrName =
+    name: if builtins.match "[A-Za-z_][A-Za-z0-9_'-]*" name != null then name else builtins.toJSON name;
 
   canonicalize =
     value:
@@ -12,12 +14,10 @@ let
     in
     if valueType == "set" then
       builtins.listToAttrs (
-        map (
-          name: {
-            inherit name;
-            value = canonicalize value.${name};
-          }
-        ) (sortNames value)
+        map (name: {
+          inherit name;
+          value = canonicalize value.${name};
+        }) (sortNames value)
       )
     else if valueType == "list" then
       map canonicalize value

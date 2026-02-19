@@ -38,67 +38,60 @@ let
 
   workflowIds = builtins.sort builtins.lessThan (builtins.attrNames workflows);
 
-  helpLines =
-    [
-      "Nixfied commands (model-generated)"
-      ""
-      "Core apps:"
-    ]
-    ++ map (
-      appName: "  ${appName} - ${apps.${appName}.summary}"
-    ) appNames
-    ++ [
-      ""
-      "Dispatcher:"
-      "  run-task <task-id> [-- ...]"
-      "  run-workflow <workflow-id> [-- ...]"
-      ""
-      "Workflows:"
-    ]
-    ++ map (
-      workflowId: "  ${workflowId} - ${workflows.${workflowId}.summary}"
-    ) workflowIds;
+  helpLines = [
+    "Nixfied commands (model-generated)"
+    ""
+    "Core apps:"
+  ]
+  ++ map (appName: "  ${appName} - ${apps.${appName}.summary}") appNames
+  ++ [
+    ""
+    "Dispatcher:"
+    "  run-task <task-id> [-- ...]"
+    "  run-workflow <workflow-id> [-- ...]"
+    "  run-workflow-parallel <workflow-id> [-- ...]"
+    ""
+    "Workflows:"
+  ]
+  ++ map (workflowId: "  ${workflowId} - ${workflows.${workflowId}.summary}") workflowIds;
 
-  docsLines =
-    [
-      "# Nixfied Detailed Model"
-      ""
-      "This document is generated from nixfiedModel."
-      ""
-      "## Runtime"
-      ""
-      "- Slot variable: ${runtime.slot.var}"
-      "- Slot default: ${toString runtime.slot.default}"
-      "- Environment variable: ${runtime.env.var}"
-      "- Environment names: ${builtins.concatStringsSep ", " runtime.env.names}"
-      ""
-      "## Exposed Apps"
-    ]
-    ++ map (appName: "- ${appName}: ${apps.${appName}.summary}") appNames
-    ++ [
-      ""
-      "## Workflows"
-    ]
-    ++ map (
-      workflowId:
-      let
-        workflow = workflows.${workflowId};
-        order = map (unit: unit.name) workflow.plan;
-      in
-      "- ${workflowId}: ${builtins.concatStringsSep " -> " order}"
-    ) workflowIds;
+  docsLines = [
+    "# Nixfied Detailed Model"
+    ""
+    "This document is generated from nixfiedModel."
+    ""
+    "## Runtime"
+    ""
+    "- Slot variable: ${runtime.slot.var}"
+    "- Slot default: ${toString runtime.slot.default}"
+    "- Environment variable: ${runtime.env.var}"
+    "- Environment names: ${builtins.concatStringsSep ", " runtime.env.names}"
+    ""
+    "## Exposed Apps"
+  ]
+  ++ map (appName: "- ${appName}: ${apps.${appName}.summary}") appNames
+  ++ [
+    ""
+    "## Workflows"
+  ]
+  ++ map (
+    workflowId:
+    let
+      workflow = workflows.${workflowId};
+      order = map (unit: unit.name) workflow.plan;
+    in
+    "- ${workflowId}: ${builtins.concatStringsSep " -> " order}"
+  ) workflowIds;
 in
 {
   inherit apps;
 
   help = {
     lines = helpLines;
-    commands = map (
-      appName: {
-        name = appName;
-        summary = apps.${appName}.summary;
-      }
-    ) appNames;
+    commands = map (appName: {
+      name = appName;
+      summary = apps.${appName}.summary;
+    }) appNames;
   };
 
   docs = {
