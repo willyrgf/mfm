@@ -468,6 +468,21 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   export MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS="helios_local"
   ```
 
+- **`MFM_EVM_RPC_LOGS_MAX_BLOCK_SPAN`**: Optional initial max block span for `eth_getLogs` chunking.
+  ```sh
+  export MFM_EVM_RPC_LOGS_MAX_BLOCK_SPAN="2000"
+  ```
+
+- **`MFM_EVM_RPC_LOGS_MIN_BLOCK_SPAN`**: Optional minimum block span for `eth_getLogs` adaptive split.
+  ```sh
+  export MFM_EVM_RPC_LOGS_MIN_BLOCK_SPAN="64"
+  ```
+
+- **`MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL`**: Optional chunk/retry budget for a single `eth_getLogs` request.
+  ```sh
+  export MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL="256"
+  ```
+
 - Legacy compatibility:
   - **`MFM_EVM_RPC_URL`**: single-source fallback endpoint mapped as source id `user_primary`.
   - **`MFM_EVM_RPC_AUTHORIZATION`**: optional Authorization header for that legacy single source.

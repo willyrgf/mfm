@@ -1,9 +1,9 @@
-# EVM RPC Routing (Milestone A)
+# EVM RPC Routing (Milestone A + B)
 
 Status: implemented and validated in repository (2026-02-19).
 
 This document is the operator and contributor runbook for the `namespace="evm"` live IO routing
-path introduced in Milestone A.
+path introduced in Milestone A and expanded in Milestone B.
 
 Normative architecture references:
 - `docs/redesign.md`
@@ -43,6 +43,9 @@ Primary source-pool configuration:
 - `MFM_EVM_RPC_HEDGE_DELAY_MS`: hedge delay for `hedged_light`.
 - `MFM_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS`: cooldown window after source failure.
 - `MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`: comma-separated IDs requiring `eth_getProof` probe.
+- `MFM_EVM_RPC_LOGS_MAX_BLOCK_SPAN`: initial max block span for `eth_getLogs` chunking.
+- `MFM_EVM_RPC_LOGS_MIN_BLOCK_SPAN`: minimum block span before chunking stops splitting.
+- `MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL`: retry/chunk budget cap for a single logs request.
 
 Compatibility fallback (single source):
 - `MFM_EVM_RPC_URL` and optional `MFM_EVM_RPC_AUTHORIZATION` map to source id `user_primary`.
@@ -62,6 +65,7 @@ Current policy:
 - `read_light`: optional two-source hedge (`hedged_light`) or failover (`failover` mode).
 - `read_heavy`: sequential failover only.
 - `write_or_side_effect`: primary-only single dispatch (no hedge, no cross-source write fanout).
+- `eth_getLogs` (Milestone B): adaptive chunking over block ranges with failover-only dispatch.
 
 Classification highlights:
 - Heavy by default unless explicitly allowlisted.
@@ -70,6 +74,11 @@ Classification highlights:
   `personal_*`/`admin_*`/`miner_*`/`txpool_*`/`engine_*`.
 - `eth_call` is downgraded to heavy when encoded params exceed threshold
   (`hedge_max_eth_call_params_bytes`).
+- `eth_getLogs` chunking behavior:
+  - requires filter-based block range (`fromBlock`/`toBlock`)
+  - splits using `logs_max_block_span`
+  - on retryable failures, bisects down to `logs_min_block_span`
+  - enforces `logs_max_chunks_per_call` budget
 
 ## 4. Health, Probing, and Ordering
 
@@ -80,6 +89,7 @@ Probes:
 
 Health behavior:
 - Source failures can mark source unhealthy for a cooldown window.
+- Score decay/recovery is weighted by failure class and method class.
 - Unhealthy sources are skipped unless explicitly routed by `route.source_id` (which then returns
   `evm_source_unhealthy` when unavailable).
 
@@ -95,6 +105,8 @@ Pool-related codes:
 - `evm_no_healthy_source`
 - `evm_hedge_exhausted`
 - `evm_route_source_unknown`
+- `evm_logs_chunking_invalid_range`
+- `evm_logs_chunking_exhausted`
 
 Diagnostics rules:
 - Include safe source IDs and coarse error metadata only.
@@ -123,4 +135,3 @@ CLI migration for `keystore tx-send-raw`:
 
 Report compatibility:
 - `keystore_tx_send_raw` still exposes `rpc_url_host` field name, but value carries source ID.
-

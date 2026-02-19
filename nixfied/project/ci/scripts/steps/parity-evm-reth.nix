@@ -18,5 +18,5 @@ pkgs.writeText "mfm-ci-steps-parity-evm-reth.sh" ''
   run_hook SVC_MINIO_BUCKET_ENSURE "$MINIO_BUCKET"
 
   LOGFILE=$(artifact_path "parity-evm-reth.log")
-  log_capture "$LOGFILE" -- cargo-nightly nextest run --cargo-profile ci -p mfm-integration-tests --features parity-tests --test evm_rpc_pool_failover --test parity_rest_api_evm_reth_pipeline --test parity_portfolio_tracker_reth_mock_erc20 --test parity_portfolio_tracker_reth_snapshot
+  log_capture "$LOGFILE" -- cargo-nightly nextest run --cargo-profile ci -p mfm-integration-tests --features parity-tests --test evm_rpc_pool_failover --test evm_rpc_getlogs_chunking --test parity_rest_api_evm_reth_pipeline --test parity_portfolio_tracker_reth_mock_erc20 --test parity_portfolio_tracker_reth_snapshot
 ''

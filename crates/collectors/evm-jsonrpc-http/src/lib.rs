@@ -8,7 +8,7 @@
 //! - Errors MUST NOT include request payloads, response bodies, or authorization values.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -35,6 +35,8 @@ const CODE_EVM_NO_HEALTHY_SOURCE: &str = "evm_no_healthy_source";
 const CODE_EVM_HEDGE_EXHAUSTED: &str = "evm_hedge_exhausted";
 const CODE_EVM_ROUTE_SOURCE_UNKNOWN: &str = "evm_route_source_unknown";
 const CODE_EVM_CONFIG_INVALID: &str = "evm_config_invalid";
+const CODE_EVM_LOGS_CHUNKING_INVALID_RANGE: &str = "evm_logs_chunking_invalid_range";
+const CODE_EVM_LOGS_CHUNKING_EXHAUSTED: &str = "evm_logs_chunking_exhausted";
 
 const MAX_DIAGNOSTIC_MESSAGE_LEN: usize = 240;
 
@@ -158,6 +160,9 @@ pub struct EvmJsonRpcHttpConfig {
     pub timeout: Duration,
     pub unhealthy_cooldown_calls: u64,
     pub hedge_max_eth_call_params_bytes: usize,
+    pub logs_max_block_span: u64,
+    pub logs_min_block_span: u64,
+    pub logs_max_chunks_per_call: u64,
 }
 
 impl Default for EvmJsonRpcHttpConfig {
@@ -170,6 +175,9 @@ impl Default for EvmJsonRpcHttpConfig {
             timeout: Duration::from_secs(30),
             unhealthy_cooldown_calls: 2,
             hedge_max_eth_call_params_bytes: 4096,
+            logs_max_block_span: 2_000,
+            logs_min_block_span: 64,
+            logs_max_chunks_per_call: 256,
         }
     }
 }
@@ -180,6 +188,8 @@ pub enum EvmJsonRpcHttpConfigError {
     EmptySourceId,
     DuplicateSourceId(String),
     UnknownPreferredSourceId(String),
+    InvalidLogsChunkingRange,
+    InvalidLogsChunkingChunkLimit,
 }
 
 impl std::fmt::Display for EvmJsonRpcHttpConfigError {
@@ -196,6 +206,18 @@ impl std::fmt::Display for EvmJsonRpcHttpConfigError {
             }
             EvmJsonRpcHttpConfigError::UnknownPreferredSourceId(id) => {
                 write!(f, "preferred source id not found in registry: {id}")
+            }
+            EvmJsonRpcHttpConfigError::InvalidLogsChunkingRange => {
+                write!(
+                    f,
+                    "logs chunking config is invalid: min/max block span must be > 0 and min <= max"
+                )
+            }
+            EvmJsonRpcHttpConfigError::InvalidLogsChunkingChunkLimit => {
+                write!(
+                    f,
+                    "logs chunking config is invalid: max chunks per call must be > 0"
+                )
             }
         }
     }
@@ -226,6 +248,16 @@ fn validate_config(cfg: &EvmJsonRpcHttpConfig) -> Result<(), EvmJsonRpcHttpConfi
                 preferred.clone(),
             ));
         }
+    }
+
+    if cfg.logs_min_block_span == 0
+        || cfg.logs_max_block_span == 0
+        || cfg.logs_min_block_span > cfg.logs_max_block_span
+    {
+        return Err(EvmJsonRpcHttpConfigError::InvalidLogsChunkingRange);
+    }
+    if cfg.logs_max_chunks_per_call == 0 {
+        return Err(EvmJsonRpcHttpConfigError::InvalidLogsChunkingChunkLimit);
     }
 
     Ok(())
@@ -335,6 +367,28 @@ enum MethodClass {
     WriteOrSideEffect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchMode {
+    PrimaryOnly,
+    Failover,
+    HedgedLight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MethodPolicy {
+    class: MethodClass,
+    dispatch: DispatchMode,
+    chunk_logs: bool,
+}
+
+fn parse_hex_u64(raw: &str) -> Option<u64> {
+    let trimmed = raw.strip_prefix("0x")?;
+    if trimmed.is_empty() {
+        return None;
+    }
+    u64::from_str_radix(trimmed, 16).ok()
+}
+
 fn is_write_method(method_lc: &str) -> bool {
     method_lc == "eth_sendrawtransaction"
         || method_lc == "eth_sendtransaction"
@@ -390,6 +444,28 @@ fn classify_method(
     }
 
     MethodClass::ReadHeavy
+}
+
+fn resolve_method_policy(
+    method: &str,
+    params: &serde_json::Value,
+    cfg: &EvmJsonRpcHttpConfig,
+) -> MethodPolicy {
+    let class = classify_method(method, params, cfg);
+    let dispatch = match class {
+        MethodClass::WriteOrSideEffect => DispatchMode::PrimaryOnly,
+        MethodClass::ReadHeavy => DispatchMode::Failover,
+        MethodClass::ReadLight => match cfg.strategy {
+            EvmRoutingStrategy::Failover => DispatchMode::Failover,
+            EvmRoutingStrategy::HedgedLight => DispatchMode::HedgedLight,
+        },
+    };
+    let chunk_logs = method.eq_ignore_ascii_case("eth_getLogs");
+    MethodPolicy {
+        class,
+        dispatch,
+        chunk_logs,
+    }
 }
 
 fn source_base_order(cfg: &EvmJsonRpcHttpConfig) -> HashMap<String, usize> {
@@ -479,21 +555,84 @@ impl EvmJsonRpcHttpTransport {
         })
     }
 
-    fn mark_source_success(&mut self, source_id: &str) {
+    fn score_recovery_bonus(method_class: MethodClass) -> i32 {
+        match method_class {
+            MethodClass::ReadLight => 1,
+            MethodClass::ReadHeavy => 2,
+            MethodClass::WriteOrSideEffect => 3,
+        }
+    }
+
+    fn score_failure_penalty(err: &IoError, method_class: MethodClass) -> i32 {
+        let info = err_info(err);
+        let mut penalty = match info.code.0.as_str() {
+            CODE_EVM_RATE_LIMITED => 8,
+            CODE_EVM_HTTP_REQUEST_FAILED => {
+                let class = info
+                    .details
+                    .as_ref()
+                    .and_then(|v| v.get("transport_error_class"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("transport");
+                if class == "timeout" {
+                    6
+                } else {
+                    5
+                }
+            }
+            CODE_EVM_HTTP_STATUS => {
+                let status_class = info
+                    .details
+                    .as_ref()
+                    .and_then(|v| v.get("http_status_class"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5);
+                if status_class >= 5 {
+                    5
+                } else {
+                    4
+                }
+            }
+            CODE_EVM_JSONRPC_ERROR => 4,
+            CODE_EVM_SOURCE_UNHEALTHY | CODE_EVM_NO_HEALTHY_SOURCE | CODE_EVM_HEDGE_EXHAUSTED => 3,
+            _ => 3,
+        };
+
+        penalty += match method_class {
+            MethodClass::ReadLight => 0,
+            MethodClass::ReadHeavy => 1,
+            MethodClass::WriteOrSideEffect => 2,
+        };
+
+        penalty.clamp(1, 20)
+    }
+
+    fn mark_source_success(&mut self, source_id: &str, method_class: MethodClass) {
         if let Some(state) = self.source_states.get_mut(source_id) {
-            state.score = (state.score + 1).clamp(-100, 100);
+            state.score = (state.score + Self::score_recovery_bonus(method_class)).clamp(-100, 100);
             state.disabled_until_call = 0;
         }
     }
 
-    fn mark_source_failure(&mut self, source_id: &str, call_ordinal: u64) {
+    fn mark_source_failure(&mut self, source_id: &str, call_ordinal: u64, penalty: i32) {
         if let Some(state) = self.source_states.get_mut(source_id) {
-            state.score = (state.score - 3).clamp(-100, 100);
+            state.score = (state.score - penalty).clamp(-100, 100);
             if self.cfg.unhealthy_cooldown_calls > 0 {
                 state.disabled_until_call =
                     call_ordinal.saturating_add(self.cfg.unhealthy_cooldown_calls);
             }
         }
+    }
+
+    fn mark_source_failure_with_error(
+        &mut self,
+        source_id: &str,
+        call_ordinal: u64,
+        err: &IoError,
+        method_class: MethodClass,
+    ) {
+        let penalty = Self::score_failure_penalty(err, method_class);
+        self.mark_source_failure(source_id, call_ordinal, penalty);
     }
 
     fn source_unhealthy_error(&self, source_id: &str) -> IoError {
@@ -523,6 +662,37 @@ impl EvmJsonRpcHttpTransport {
             true,
             "evm hedged call failed for all candidates",
             Some(json!({ "failures": failures })),
+        ))
+    }
+
+    fn logs_chunking_invalid_range_error(
+        &self,
+        message: &'static str,
+        details: Option<serde_json::Value>,
+    ) -> IoError {
+        IoError::Other(info_with_details(
+            CODE_EVM_LOGS_CHUNKING_INVALID_RANGE,
+            ErrorCategory::ParsingInput,
+            false,
+            message,
+            details,
+        ))
+    }
+
+    fn logs_chunking_exhausted_error(
+        &self,
+        attempted_chunks: u64,
+        failures: &[serde_json::Value],
+    ) -> IoError {
+        IoError::Transport(info_with_details(
+            CODE_EVM_LOGS_CHUNKING_EXHAUSTED,
+            ErrorCategory::Rpc,
+            true,
+            "eth_getLogs chunking exhausted retry budget",
+            Some(json!({
+                "attempted_chunks": attempted_chunks,
+                "failures": failures,
+            })),
         ))
     }
 
@@ -613,6 +783,267 @@ impl EvmJsonRpcHttpTransport {
             })
     }
 
+    async fn resolve_latest_block_number(
+        &mut self,
+        source_ids: &[String],
+        call_ordinal: u64,
+    ) -> Result<u64, IoError> {
+        let latest_call = JsonRpcCall::new("eth_blockNumber", json!([]));
+        let latest = self
+            .call_failover(
+                source_ids,
+                &latest_call,
+                call_ordinal,
+                MethodClass::ReadLight,
+            )
+            .await?;
+
+        let latest_str = latest.as_str().ok_or_else(|| {
+            self.logs_chunking_invalid_range_error(
+                "eth_blockNumber returned non-string during logs chunk planning",
+                None,
+            )
+        })?;
+        parse_hex_u64(latest_str).ok_or_else(|| {
+            self.logs_chunking_invalid_range_error(
+                "eth_blockNumber returned invalid hex during logs chunk planning",
+                None,
+            )
+        })
+    }
+
+    async fn parse_logs_block_bound(
+        &mut self,
+        source_ids: &[String],
+        call_ordinal: u64,
+        value: &serde_json::Value,
+    ) -> Result<Option<u64>, IoError> {
+        if let Some(raw) = value.as_str() {
+            let lowered = raw.to_ascii_lowercase();
+            if lowered == "latest" {
+                return self
+                    .resolve_latest_block_number(source_ids, call_ordinal)
+                    .await
+                    .map(Some);
+            }
+            if lowered == "earliest" {
+                return Ok(Some(0));
+            }
+            if lowered == "safe" || lowered == "finalized" || lowered == "pending" {
+                // Preserve exact tag semantics by falling back to non-chunked execution.
+                return Ok(None);
+            }
+            if let Some(parsed) = parse_hex_u64(raw) {
+                return Ok(Some(parsed));
+            }
+            if let Ok(parsed) = raw.parse::<u64>() {
+                return Ok(Some(parsed));
+            }
+            return Err(self.logs_chunking_invalid_range_error(
+                "eth_getLogs block tag must be latest/earliest or numeric block number",
+                Some(json!({ "value": raw })),
+            ));
+        }
+
+        if let Some(parsed) = value.as_u64() {
+            return Ok(Some(parsed));
+        }
+
+        Err(self.logs_chunking_invalid_range_error(
+            "eth_getLogs block tag must be a string or integer",
+            None,
+        ))
+    }
+
+    fn initial_logs_ranges(&self, from_block: u64, to_block: u64) -> Vec<(u64, u64)> {
+        let mut ranges = Vec::new();
+        let mut cursor = from_block;
+        while cursor <= to_block {
+            let end = cursor
+                .saturating_add(self.cfg.logs_max_block_span.saturating_sub(1))
+                .min(to_block);
+            ranges.push((cursor, end));
+            if end == u64::MAX {
+                break;
+            }
+            cursor = end.saturating_add(1);
+        }
+        ranges
+    }
+
+    async fn plan_logs_ranges(
+        &mut self,
+        source_ids: &[String],
+        req: &JsonRpcCall,
+        call_ordinal: u64,
+    ) -> Result<Option<Vec<(u64, u64)>>, IoError> {
+        if !req.method.eq_ignore_ascii_case("eth_getLogs") {
+            return Ok(None);
+        }
+
+        let Some(params) = req.params.as_array() else {
+            return Ok(None);
+        };
+        let Some(first) = params.first() else {
+            return Ok(None);
+        };
+        let Some(filter) = first.as_object() else {
+            return Ok(None);
+        };
+        if filter.get("blockHash").is_some() {
+            return Ok(None);
+        }
+
+        let Some(from_raw) = filter.get("fromBlock") else {
+            return Ok(None);
+        };
+        let Some(to_raw) = filter.get("toBlock") else {
+            return Ok(None);
+        };
+
+        let Some(from_block) = self
+            .parse_logs_block_bound(source_ids, call_ordinal, from_raw)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some(to_block) = self
+            .parse_logs_block_bound(source_ids, call_ordinal, to_raw)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        if from_block > to_block {
+            return Err(self.logs_chunking_invalid_range_error(
+                "eth_getLogs fromBlock must be <= toBlock",
+                Some(json!({
+                    "from_block": format!("0x{from_block:x}"),
+                    "to_block": format!("0x{to_block:x}"),
+                })),
+            ));
+        }
+
+        Ok(Some(self.initial_logs_ranges(from_block, to_block)))
+    }
+
+    fn build_logs_chunk_call(
+        &self,
+        req: &JsonRpcCall,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<JsonRpcCall, IoError> {
+        let Some(mut params) = req.params.as_array().cloned() else {
+            return Err(
+                self.logs_chunking_invalid_range_error("eth_getLogs params must be an array", None)
+            );
+        };
+        let Some(first) = params.first_mut() else {
+            return Err(self.logs_chunking_invalid_range_error(
+                "eth_getLogs params must include a filter object",
+                None,
+            ));
+        };
+        let Some(filter) = first.as_object_mut() else {
+            return Err(self.logs_chunking_invalid_range_error(
+                "eth_getLogs first param must be a filter object",
+                None,
+            ));
+        };
+
+        filter.insert("fromBlock".to_string(), json!(format!("0x{from_block:x}")));
+        filter.insert("toBlock".to_string(), json!(format!("0x{to_block:x}")));
+
+        Ok(JsonRpcCall::new(
+            req.method.clone(),
+            serde_json::Value::Array(params),
+        ))
+    }
+
+    fn extend_logs_results(
+        &self,
+        out: &mut Vec<serde_json::Value>,
+        value: serde_json::Value,
+    ) -> Result<(), IoError> {
+        let Some(items) = value.as_array() else {
+            return Err(IoError::Other(info(
+                CODE_EVM_JSONRPC_INVALID_RESPONSE,
+                ErrorCategory::ParsingInput,
+                false,
+                "eth_getLogs response was not an array",
+            )));
+        };
+        out.extend(items.iter().cloned());
+        Ok(())
+    }
+
+    async fn call_logs_chunked_failover(
+        &mut self,
+        source_ids: &[String],
+        req: &JsonRpcCall,
+        call_ordinal: u64,
+    ) -> Result<serde_json::Value, IoError> {
+        let Some(initial_ranges) = self.plan_logs_ranges(source_ids, req, call_ordinal).await?
+        else {
+            return self
+                .call_failover(source_ids, req, call_ordinal, MethodClass::ReadHeavy)
+                .await;
+        };
+
+        let mut pending: VecDeque<(u64, u64)> = initial_ranges.into_iter().collect();
+        let mut merged_logs = Vec::new();
+        let mut attempted_chunks = 0_u64;
+        let mut failures = Vec::new();
+
+        while let Some((from_block, to_block)) = pending.pop_front() {
+            if attempted_chunks >= self.cfg.logs_max_chunks_per_call {
+                return Err(self.logs_chunking_exhausted_error(attempted_chunks, &failures));
+            }
+            attempted_chunks = attempted_chunks.saturating_add(1);
+
+            let chunk_call = self.build_logs_chunk_call(req, from_block, to_block)?;
+            match self
+                .call_failover(
+                    source_ids,
+                    &chunk_call,
+                    call_ordinal,
+                    MethodClass::ReadHeavy,
+                )
+                .await
+            {
+                Ok(response) => {
+                    self.extend_logs_results(&mut merged_logs, response)?;
+                }
+                Err(err) => {
+                    failures.push(json!({
+                        "from_block": format!("0x{from_block:x}"),
+                        "to_block": format!("0x{to_block:x}"),
+                        "code": err_info(&err).code.0,
+                        "retryable": err_info(&err).retryable,
+                    }));
+
+                    let span = to_block.saturating_sub(from_block).saturating_add(1);
+                    if is_retryable(&err) && span > self.cfg.logs_min_block_span {
+                        let mid = from_block + (to_block - from_block) / 2;
+                        if mid < to_block {
+                            // Preserve deterministic log ordering by processing lower range first.
+                            pending.push_front((mid.saturating_add(1), to_block));
+                            pending.push_front((from_block, mid));
+                            continue;
+                        }
+                    }
+
+                    if is_retryable(&err) {
+                        return Err(self.logs_chunking_exhausted_error(attempted_chunks, &failures));
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
+        Ok(serde_json::Value::Array(merged_logs))
+    }
+
     async fn ensure_source_probed(
         &mut self,
         source_id: &str,
@@ -640,12 +1071,16 @@ impl EvmJsonRpcHttpTransport {
 
         match probe_result {
             Ok(()) => {
-                self.mark_source_success(source_id);
+                self.mark_source_success(source_id, MethodClass::ReadLight);
                 Ok(())
             }
             Err(err) => {
-                self.mark_source_failure(source_id, call_ordinal);
-                let _ = err;
+                self.mark_source_failure_with_error(
+                    source_id,
+                    call_ordinal,
+                    &err,
+                    MethodClass::ReadHeavy,
+                );
                 Err(self.source_unhealthy_error(source_id))
             }
         }
@@ -724,6 +1159,7 @@ impl EvmJsonRpcHttpTransport {
         source_ids: &[String],
         req: &JsonRpcCall,
         call_ordinal: u64,
+        method_class: MethodClass,
     ) -> Result<serde_json::Value, IoError> {
         let mut failures = Vec::new();
 
@@ -741,11 +1177,16 @@ impl EvmJsonRpcHttpTransport {
 
             match self.call_source(source_id, req).await {
                 Ok(result) => {
-                    self.mark_source_success(source_id);
+                    self.mark_source_success(source_id, method_class);
                     return Ok(result);
                 }
                 Err(err) => {
-                    self.mark_source_failure(source_id, call_ordinal);
+                    self.mark_source_failure_with_error(
+                        source_id,
+                        call_ordinal,
+                        &err,
+                        method_class,
+                    );
                     failures.push(failure_detail(source_id, &err));
                     if !is_retryable(&err) {
                         return Err(err);
@@ -769,11 +1210,16 @@ impl EvmJsonRpcHttpTransport {
 
         match self.call_source(primary_id, req).await {
             Ok(result) => {
-                self.mark_source_success(primary_id);
+                self.mark_source_success(primary_id, MethodClass::WriteOrSideEffect);
                 Ok(result)
             }
             Err(err) => {
-                self.mark_source_failure(primary_id, call_ordinal);
+                self.mark_source_failure_with_error(
+                    primary_id,
+                    call_ordinal,
+                    &err,
+                    MethodClass::WriteOrSideEffect,
+                );
                 Err(err)
             }
         }
@@ -786,7 +1232,9 @@ impl EvmJsonRpcHttpTransport {
         call_ordinal: u64,
     ) -> Result<serde_json::Value, IoError> {
         if source_ids.len() < 2 {
-            return self.call_failover(source_ids, req, call_ordinal).await;
+            return self
+                .call_failover(source_ids, req, call_ordinal, MethodClass::ReadLight)
+                .await;
         }
 
         let primary_id = source_ids[0].clone();
@@ -807,16 +1255,21 @@ impl EvmJsonRpcHttpTransport {
         if let Some(primary_res) = early_primary {
             match primary_res {
                 Ok(value) => {
-                    self.mark_source_success(&primary_id);
+                    self.mark_source_success(&primary_id, MethodClass::ReadLight);
                     return Ok(value);
                 }
                 Err(err) => {
-                    self.mark_source_failure(&primary_id, call_ordinal);
+                    self.mark_source_failure_with_error(
+                        &primary_id,
+                        call_ordinal,
+                        &err,
+                        MethodClass::ReadLight,
+                    );
                     if !is_retryable(&err) {
                         return Err(err);
                     }
                     return self
-                        .call_failover(&source_ids[1..], req, call_ordinal)
+                        .call_failover(&source_ids[1..], req, call_ordinal, MethodClass::ReadLight)
                         .await;
                 }
             }
@@ -849,41 +1302,61 @@ impl EvmJsonRpcHttpTransport {
 
         match first {
             FirstOutcome::Primary(Ok(value)) => {
-                self.mark_source_success(&primary_id);
+                self.mark_source_success(&primary_id, MethodClass::ReadLight);
                 return Ok(value);
             }
             FirstOutcome::Secondary(Ok(value)) => {
-                self.mark_source_success(&secondary_id);
+                self.mark_source_success(&secondary_id, MethodClass::ReadLight);
                 return Ok(value);
             }
             FirstOutcome::Primary(Err(primary_err)) => {
-                self.mark_source_failure(&primary_id, call_ordinal);
+                self.mark_source_failure_with_error(
+                    &primary_id,
+                    call_ordinal,
+                    &primary_err,
+                    MethodClass::ReadLight,
+                );
                 failures.push(failure_detail(&primary_id, &primary_err));
 
                 let secondary_res = secondary.await;
                 match secondary_res {
                     Ok(value) => {
-                        self.mark_source_success(&secondary_id);
+                        self.mark_source_success(&secondary_id, MethodClass::ReadLight);
                         return Ok(value);
                     }
                     Err(secondary_err) => {
-                        self.mark_source_failure(&secondary_id, call_ordinal);
+                        self.mark_source_failure_with_error(
+                            &secondary_id,
+                            call_ordinal,
+                            &secondary_err,
+                            MethodClass::ReadLight,
+                        );
                         failures.push(failure_detail(&secondary_id, &secondary_err));
                     }
                 }
             }
             FirstOutcome::Secondary(Err(secondary_err)) => {
-                self.mark_source_failure(&secondary_id, call_ordinal);
+                self.mark_source_failure_with_error(
+                    &secondary_id,
+                    call_ordinal,
+                    &secondary_err,
+                    MethodClass::ReadLight,
+                );
                 failures.push(failure_detail(&secondary_id, &secondary_err));
 
                 let primary_res = primary.await;
                 match primary_res {
                     Ok(value) => {
-                        self.mark_source_success(&primary_id);
+                        self.mark_source_success(&primary_id, MethodClass::ReadLight);
                         return Ok(value);
                     }
                     Err(primary_err) => {
-                        self.mark_source_failure(&primary_id, call_ordinal);
+                        self.mark_source_failure_with_error(
+                            &primary_id,
+                            call_ordinal,
+                            &primary_err,
+                            MethodClass::ReadLight,
+                        );
                         failures.push(failure_detail(&primary_id, &primary_err));
                     }
                 }
@@ -892,7 +1365,7 @@ impl EvmJsonRpcHttpTransport {
 
         if source_ids.len() > 2 {
             return self
-                .call_failover(&source_ids[2..], req, call_ordinal)
+                .call_failover(&source_ids[2..], req, call_ordinal, MethodClass::ReadLight)
                 .await;
         }
 
@@ -1023,7 +1496,7 @@ impl LiveIoTransport for EvmJsonRpcHttpTransport {
 
         let req: EvmTransportRequest =
             serde_json::from_value(call.request).map_err(|_| self.invalid_request_error())?;
-        let method_class = classify_method(&req.method, &req.params, &self.cfg);
+        let method_policy = resolve_method_policy(&req.method, &req.params, &self.cfg);
 
         if req.rpc_url.is_some() {
             return Err(self.rpc_url_override_error());
@@ -1035,25 +1508,25 @@ impl LiveIoTransport for EvmJsonRpcHttpTransport {
         let route_source_id = req.route.as_ref().map(|route| route.source_id.as_str());
         let source_ids = self.ordered_source_ids(route_source_id, call_ordinal)?;
 
-        match method_class {
-            MethodClass::WriteOrSideEffect => {
+        if method_policy.chunk_logs {
+            return self
+                .call_logs_chunked_failover(&source_ids, &json_call, call_ordinal)
+                .await;
+        }
+
+        match method_policy.dispatch {
+            DispatchMode::PrimaryOnly => {
                 self.call_write_primary(&source_ids, &json_call, call_ordinal)
                     .await
             }
-            MethodClass::ReadHeavy => {
-                self.call_failover(&source_ids, &json_call, call_ordinal)
+            DispatchMode::Failover => {
+                self.call_failover(&source_ids, &json_call, call_ordinal, method_policy.class)
                     .await
             }
-            MethodClass::ReadLight => match self.cfg.strategy {
-                EvmRoutingStrategy::Failover => {
-                    self.call_failover(&source_ids, &json_call, call_ordinal)
-                        .await
-                }
-                EvmRoutingStrategy::HedgedLight => {
-                    self.call_hedged_light(&source_ids, &json_call, call_ordinal)
-                        .await
-                }
-            },
+            DispatchMode::HedgedLight => {
+                self.call_hedged_light(&source_ids, &json_call, call_ordinal)
+                    .await
+            }
         }
     }
 }
@@ -1161,6 +1634,9 @@ mod tests {
             timeout: Duration::from_millis(800),
             unhealthy_cooldown_calls: 2,
             hedge_max_eth_call_params_bytes: 1024,
+            logs_max_block_span: 128,
+            logs_min_block_span: 8,
+            logs_max_chunks_per_call: 128,
         }
     }
 
@@ -1185,6 +1661,10 @@ mod tests {
             result: serde_json::Value,
         },
         HttpStatus(u16),
+        LogsRangeGate {
+            max_ok_span: u64,
+            fail_status: u16,
+        },
     }
 
     struct StubServer {
@@ -1266,6 +1746,49 @@ mod tests {
         }
     }
 
+    fn parse_request_json(raw_http_request: &[u8]) -> Option<serde_json::Value> {
+        let header_end = header_end(raw_http_request)?;
+        let body = raw_http_request.get((header_end + 4)..)?;
+        serde_json::from_slice(body).ok()
+    }
+
+    fn parse_logs_range_span(request: &serde_json::Value) -> Option<u64> {
+        let method = request.get("method")?.as_str()?;
+        if !method.eq_ignore_ascii_case("eth_getLogs") {
+            return None;
+        }
+
+        let filter = request.get("params")?.as_array()?.first()?.as_object()?;
+
+        let parse_bound = |value: &serde_json::Value| -> Option<u64> {
+            if let Some(raw) = value.as_str() {
+                if raw.eq_ignore_ascii_case("latest") {
+                    return None;
+                }
+                return parse_hex_u64(raw).or_else(|| raw.parse::<u64>().ok());
+            }
+            value.as_u64()
+        };
+
+        let from = parse_bound(filter.get("fromBlock")?)?;
+        let to = parse_bound(filter.get("toBlock")?)?;
+        if from > to {
+            return None;
+        }
+        Some(to.saturating_sub(from).saturating_add(1))
+    }
+
+    fn parse_logs_from_block(request: &serde_json::Value) -> String {
+        request
+            .get("params")
+            .and_then(|v| v.as_array())
+            .and_then(|v| v.first())
+            .and_then(|v| v.get("fromBlock"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "0x0".to_string())
+    }
+
     async fn handle_stub_connection(
         mut stream: TcpStream,
         behavior: StubBehavior,
@@ -1302,6 +1825,13 @@ mod tests {
             tokio::time::sleep(*delay).await;
         }
 
+        let request_json = parse_request_json(&buf);
+        let request_method = request_json
+            .as_ref()
+            .and_then(|v| v.get("method"))
+            .and_then(|v| v.as_str())
+            .map(str::to_ascii_lowercase);
+
         let (status, body) = match behavior {
             StubBehavior::JsonResult(result) => {
                 let body = json!({
@@ -1327,6 +1857,40 @@ mod tests {
                 })
                 .to_string();
                 (code, body)
+            }
+            StubBehavior::LogsRangeGate {
+                max_ok_span,
+                fail_status,
+            } => {
+                let span = request_json.as_ref().and_then(parse_logs_range_span);
+                if span.is_some_and(|value| value > max_ok_span) {
+                    let body = json!({
+                        "error": "range too large",
+                    })
+                    .to_string();
+                    (fail_status, body)
+                } else {
+                    let result = match request_method.as_deref() {
+                        Some("eth_getlogs") => json!([{
+                            "blockNumber": request_json
+                                .as_ref()
+                                .map(parse_logs_from_block)
+                                .unwrap_or_else(|| "0x0".to_string()),
+                            "logIndex": "0x0",
+                            "transactionHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+                        }]),
+                        Some("eth_blocknumber") => json!("0x100"),
+                        Some("eth_chainid") => json!("0x1"),
+                        _ => json!("0x1"),
+                    };
+                    let body = json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": result,
+                    })
+                    .to_string();
+                    (200, body)
+                }
             }
         };
 
@@ -1400,6 +1964,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn method_policy_enforces_no_hedge_for_logs_and_writes() {
+        let cfg = EvmJsonRpcHttpConfig {
+            strategy: EvmRoutingStrategy::HedgedLight,
+            ..EvmJsonRpcHttpConfig::default()
+        };
+
+        let logs = resolve_method_policy("eth_getLogs", &json!([{}]), &cfg);
+        assert_eq!(logs.class, MethodClass::ReadHeavy);
+        assert_eq!(logs.dispatch, DispatchMode::Failover);
+        assert!(logs.chunk_logs);
+
+        let write = resolve_method_policy("eth_sendRawTransaction", &json!(["0x01"]), &cfg);
+        assert_eq!(write.class, MethodClass::WriteOrSideEffect);
+        assert_eq!(write.dispatch, DispatchMode::PrimaryOnly);
+        assert!(!write.chunk_logs);
+    }
+
+    #[test]
+    fn weighted_failure_penalty_prioritizes_rate_limits_and_writes() {
+        let timeout = IoError::Transport(info_with_details(
+            CODE_EVM_HTTP_REQUEST_FAILED,
+            ErrorCategory::Rpc,
+            true,
+            "timeout",
+            Some(json!({"transport_error_class": "timeout"})),
+        ));
+        let rate_limit = IoError::RateLimited(info_with_details(
+            CODE_EVM_RATE_LIMITED,
+            ErrorCategory::Rpc,
+            true,
+            "rate limited",
+            Some(json!({"http_status": 429})),
+        ));
+
+        let timeout_read =
+            EvmJsonRpcHttpTransport::score_failure_penalty(&timeout, MethodClass::ReadLight);
+        let rate_read =
+            EvmJsonRpcHttpTransport::score_failure_penalty(&rate_limit, MethodClass::ReadLight);
+        let rate_write = EvmJsonRpcHttpTransport::score_failure_penalty(
+            &rate_limit,
+            MethodClass::WriteOrSideEffect,
+        );
+
+        assert!(rate_read > timeout_read);
+        assert!(rate_write > rate_read);
+    }
+
+    #[test]
+    fn transport_creation_rejects_invalid_logs_chunking_config() {
+        let mut cfg = config_with_sources(
+            vec![source("primary", "http://127.0.0.1:8545")],
+            EvmRoutingStrategy::Failover,
+        );
+        cfg.logs_min_block_span = 64;
+        cfg.logs_max_block_span = 32;
+        let result = EvmJsonRpcHttpTransportFactory::try_new(cfg);
+        assert!(matches!(
+            result,
+            Err(EvmJsonRpcHttpConfigError::InvalidLogsChunkingRange)
+        ));
+    }
+
     #[tokio::test]
     async fn failover_uses_secondary_on_primary_http_failure() {
         let primary = start_stub_server(StubBehavior::HttpStatus(500)).await;
@@ -1428,6 +2055,112 @@ mod tests {
         assert_eq!(response, json!("0x2"));
         assert_eq!(primary.hit_count(), 1); // probe failure marks source unhealthy
         assert_eq!(secondary.hit_count(), 3); // probes + call
+    }
+
+    #[tokio::test]
+    async fn logs_chunking_splits_large_ranges_and_merges_results() {
+        let primary = start_stub_server(StubBehavior::LogsRangeGate {
+            max_ok_span: 32,
+            fail_status: 429,
+        })
+        .await;
+        let secondary = start_stub_server(StubBehavior::LogsRangeGate {
+            max_ok_span: 32,
+            fail_status: 429,
+        })
+        .await;
+
+        let mut cfg = config_with_sources(
+            vec![
+                source("primary", &primary.url),
+                source("secondary", &secondary.url),
+            ],
+            EvmRoutingStrategy::HedgedLight,
+        );
+        cfg.logs_max_block_span = 64;
+        cfg.logs_min_block_span = 8;
+        cfg.logs_max_chunks_per_call = 64;
+        let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+        let mut t = factory.make(env());
+
+        let response = call_transport(
+            t.as_mut(),
+            json!({
+                "method": "eth_getLogs",
+                "params": [{
+                    "address": "0x0000000000000000000000000000000000000000",
+                    "fromBlock": "0x1",
+                    "toBlock": "0x80",
+                    "topics": [],
+                }],
+            }),
+        )
+        .await
+        .expect("logs chunking should succeed");
+
+        let logs = response.as_array().expect("array response");
+        let from_blocks = logs
+            .iter()
+            .filter_map(|v| v.get("blockNumber"))
+            .filter_map(|v| v.as_str())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            from_blocks,
+            vec![
+                "0x1".to_string(),
+                "0x21".to_string(),
+                "0x41".to_string(),
+                "0x61".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn logs_chunking_exhausts_when_retryable_failures_persist() {
+        let primary = start_stub_server(StubBehavior::LogsRangeGate {
+            max_ok_span: 0,
+            fail_status: 429,
+        })
+        .await;
+        let secondary = start_stub_server(StubBehavior::LogsRangeGate {
+            max_ok_span: 0,
+            fail_status: 429,
+        })
+        .await;
+
+        let mut cfg = config_with_sources(
+            vec![
+                source("primary", &primary.url),
+                source("secondary", &secondary.url),
+            ],
+            EvmRoutingStrategy::Failover,
+        );
+        cfg.logs_max_block_span = 16;
+        cfg.logs_min_block_span = 8;
+        cfg.logs_max_chunks_per_call = 10;
+        let factory = EvmJsonRpcHttpTransportFactory::new(cfg);
+        let mut t = factory.make(env());
+
+        let err = call_transport(
+            t.as_mut(),
+            json!({
+                "method": "eth_getLogs",
+                "params": [{
+                    "address": "0x0000000000000000000000000000000000000000",
+                    "fromBlock": "0x1",
+                    "toBlock": "0x40",
+                    "topics": [],
+                }],
+            }),
+        )
+        .await
+        .expect_err("chunking should eventually exhaust");
+
+        match err {
+            IoError::Transport(info) => assert_eq!(info.code.0, CODE_EVM_LOGS_CHUNKING_EXHAUSTED),
+            other => panic!("expected Transport, got {other:?}"),
+        }
     }
 
     #[tokio::test]

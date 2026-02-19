@@ -34,6 +34,9 @@ Environment variables:
 - `MFM_EVM_RPC_HEDGE_DELAY_MS`: optional hedge delay in milliseconds for `hedged_light`.
 - `MFM_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS`: optional unhealthy cooldown in logical call-count units.
 - `MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`: optional comma-separated source IDs that must pass `eth_getProof` probe.
+- `MFM_EVM_RPC_LOGS_MAX_BLOCK_SPAN`: optional initial max block span for `eth_getLogs` chunking.
+- `MFM_EVM_RPC_LOGS_MIN_BLOCK_SPAN`: optional minimum block span for adaptive `eth_getLogs` splitting.
+- `MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL`: optional chunk/retry budget cap for a single `eth_getLogs` request.
 - Legacy compatibility:
   - `MFM_EVM_RPC_URL`: single-source fallback endpoint (mapped to source id `user_primary`).
   - `MFM_EVM_RPC_AUTHORIZATION`: optional Authorization header for that legacy single source.

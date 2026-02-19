@@ -69,6 +69,9 @@ const ENV_EVM_RPC_STRATEGY: &str = "MFM_EVM_RPC_STRATEGY";
 const ENV_EVM_RPC_HEDGE_DELAY_MS: &str = "MFM_EVM_RPC_HEDGE_DELAY_MS";
 const ENV_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS: &str = "MFM_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS";
 const ENV_EVM_RPC_REQUIRE_GET_PROOF_IDS: &str = "MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS";
+const ENV_EVM_RPC_LOGS_MAX_BLOCK_SPAN: &str = "MFM_EVM_RPC_LOGS_MAX_BLOCK_SPAN";
+const ENV_EVM_RPC_LOGS_MIN_BLOCK_SPAN: &str = "MFM_EVM_RPC_LOGS_MIN_BLOCK_SPAN";
+const ENV_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL: &str = "MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL";
 
 const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
 const ENV_ARTIFACT_ROOT: &str = "MFM_ARTIFACT_ROOT";
@@ -588,6 +591,15 @@ fn resolve_evm_rpc_config_from_env() -> EvmJsonRpcHttpConfig {
     }
     if let Some(cooldown_calls) = parse_u64_env(ENV_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS) {
         cfg.unhealthy_cooldown_calls = cooldown_calls;
+    }
+    if let Some(max_span) = parse_u64_env(ENV_EVM_RPC_LOGS_MAX_BLOCK_SPAN) {
+        cfg.logs_max_block_span = max_span;
+    }
+    if let Some(min_span) = parse_u64_env(ENV_EVM_RPC_LOGS_MIN_BLOCK_SPAN) {
+        cfg.logs_min_block_span = min_span;
+    }
+    if let Some(max_chunks) = parse_u64_env(ENV_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL) {
+        cfg.logs_max_chunks_per_call = max_chunks;
     }
     cfg
 }

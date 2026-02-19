@@ -12,11 +12,16 @@ Working status (repository baseline, 2026-02-19, post-implementation):
 
 * Milestone A transport is implemented in `crates/collectors/evm-jsonrpc-http/src/lib.rs`:
   source-id routing, failover, light hedging, probing, and source health scoring.
+* Milestone B transport extensions are implemented:
+  method-aware policy dispatch, `eth_getLogs` adaptive chunking with no-hedge enforcement, and
+  weighted health decay/recovery tuning.
 * Per-request `rpc_url` override is rejected for all EVM calls (`evm_request_invalid`).
 * App wiring resolves source pools from runtime env (including `MFM_EVM_RPC_SOURCES_JSON`,
-  preferred order, strategy, hedge delay, and health knobs), with legacy single-source fallback.
+  preferred order, strategy, hedge delay, health knobs, and logs chunking knobs), with legacy
+  single-source fallback.
 * `keystore tx-send-raw` is source-id based (`--source-id` / `MFM_EVM_RPC_SOURCE_ID`).
-* Integration and CI coverage are in place, including failover, replay determinism, and 429 paths.
+* Integration and CI coverage are in place, including failover, replay determinism, 429 paths, and
+  adaptive `eth_getLogs` chunking behavior.
 
 ---
 
@@ -429,7 +434,7 @@ That keeps ops and state code thin and stable.
   * no-secrets behavior in errors/facts
   * fallback behavior under timeout/429.
 
-### Milestone B
+### Milestone B (implemented)
 
 * Method-aware policies (`eth_getLogs` chunking and no-hedge enforcement).
 * Better endpoint health decay/recovery scoring.

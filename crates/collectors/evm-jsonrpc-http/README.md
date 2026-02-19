@@ -2,13 +2,14 @@
 
 HTTP live transport for the `namespace = "evm"` IO surface (EVM JSON-RPC).
 
-## Current Behavior (Milestone A Core)
+## Current Behavior (Milestone A + B)
 
 - Source-id based runtime routing (`EvmJsonRpcHttpConfig.sources` + `preferred_order`)
 - Method classification:
   - `read_light`: optional hedging (`hedged_light`)
   - `read_heavy`: sequential failover
   - `write_or_side_effect`: primary-only single dispatch
+  - `eth_getLogs`: failover-only adaptive chunking (`max/min span` + `chunk budget`)
 - Health behavior:
   - startup/lazy probes (`eth_chainId`, `eth_blockNumber`, optional `eth_getProof`)
   - unhealthy cooldown by logical call count
