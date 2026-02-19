@@ -11,9 +11,9 @@ alloy-primitives = { workspace = true, features = ["serde"] }
 
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
-mfm-op-common = { path = "../../states/common" }
+mfm-state-common = { path = "../../states/common" }
 mfm-evm-runtime = { path = "../../evm-runtime" }
-mfm-op-keystore-common = { path = "../../states/keystore" }
+mfm-state-keystore = { path = "../../states/keystore" }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -34,8 +34,8 @@ use mfm_machine::config::RunConfig;
 use mfm_machine::errors::StateError;
 use mfm_machine::ids::{OpId, OpPath, StateId};
 use mfm_machine::plan::{StateGraph, StateNode};
-use mfm_op_common::errors as op_errors;
-use mfm_op_common::rpc as op_rpc;
+use mfm_state_common::errors as op_errors;
+use mfm_state_common::rpc as op_rpc;
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;

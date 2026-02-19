@@ -5,12 +5,12 @@ use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, OpId, OpPath, StateId};
 use mfm_machine::plan::{StateGraph, StateNode};
-use mfm_op_common::errors as op_errors;
-use mfm_op_keystore_common::states::tx::{
+use mfm_state_common::errors as op_errors;
+use mfm_state_keystore::states::tx::{
     KeystoreTxSendRawState, KeystoreTxSendRawStateConfig, KeystoreTxSignState,
     KeystoreTxSignStateConfig,
 };
-use mfm_op_keystore_common::tx::{
+use mfm_state_keystore::tx::{
     output_context_key, parse_address, parse_data_hex, parse_u128_quantity, Eip1559TxToSign,
     KeystoreTxError,
 };
@@ -352,7 +352,7 @@ mod tests {
     use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
     use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
     use mfm_machine::runtime::{DefaultExecutionEngine, PlanResolver};
-    use mfm_op_common::test_support as op_test_support;
+    use mfm_state_common::test_support as op_test_support;
     use mfm_sdk::unstable::SdkPlanResolver;
     use mfm_transports_local_fs::LocalFsIoTransportFactory;
     use mfm_transports_local_keystore::LocalKeystoreIoTransportFactory;

@@ -6,8 +6,8 @@ use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{FactKey, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
-use mfm_op_common::errors as op_errors;
-use mfm_op_common::rpc as op_rpc;
+use mfm_state_common::errors as op_errors;
+use mfm_state_common::rpc as op_rpc;
 use mfm_transports_local_evm::{LocalEvmIoClient, LocalEvmSignLegacyCreateCall};
 
 use crate::dcv as shared_dcv;

@@ -13,8 +13,8 @@ use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{OpId, OpPath, StateId};
 use mfm_machine::plan::StateGraph;
-use mfm_op_common::errors as op_errors;
-use mfm_op_common::states::nix::{validate_nix_exec_config, NixExecState, NixExecStateConfig};
+use mfm_state_common::errors as op_errors;
+use mfm_state_common::states::nix::{validate_nix_exec_config, NixExecState, NixExecStateConfig};
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -88,7 +88,7 @@ mod tests {
     use mfm_machine::replay_io::ReplayIo;
     use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
     use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-    use mfm_op_common::test_support as op_test_support;
+    use mfm_state_common::test_support as op_test_support;
     use mfm_sdk::ids::{MachineId, PortKey, StepId};
     use mfm_sdk::op::{OpIo, Operation};
     use mfm_sdk::pipeline::{Pipeline, PipelineStep};

@@ -1,5 +1,5 @@
 [package]
-name = "mfm-op-common"
+name = "mfm-state-common"
 version = "0.1.0"
 edition = "2021"
 

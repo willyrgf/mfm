@@ -9,11 +9,11 @@ use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_op_keystore::{Keystore, KeystoreConfig};
-use mfm_op_keystore_common::states::admin::{
+use mfm_state_keystore::states::admin::{
     KeystoreDeleteReport, KeystoreImportReport, KeystoreImportType, KeystoreListKey,
     KeystoreListReport, KeystoreListSortBy,
 };
-use mfm_op_keystore_common::tx::{
+use mfm_state_keystore::tx::{
     parse_address, parse_data_hex, parse_u128_quantity, resolve_key_id, sign_eip1559_transaction,
     write_raw_transaction_file, Eip1559TxToSign, KeystoreTxError,
 };

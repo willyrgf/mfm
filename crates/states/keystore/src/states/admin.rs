@@ -9,11 +9,11 @@ use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-use mfm_op_common::ctx as op_ctx;
-use mfm_op_common::errors as op_errors;
-use mfm_op_common::idempotency as op_idempotency;
-use mfm_op_common::local_io_helpers::{emit_report_event, local_call};
-use mfm_op_common::states::meta;
+use mfm_state_common::ctx as op_ctx;
+use mfm_state_common::errors as op_errors;
+use mfm_state_common::idempotency as op_idempotency;
+use mfm_state_common::local_io_helpers::{emit_report_event, local_call};
+use mfm_state_common::states::meta;
 use mfm_sdk::errors::SdkError;
 use serde::{Deserialize, Serialize};
 

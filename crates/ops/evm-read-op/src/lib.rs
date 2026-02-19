@@ -17,7 +17,7 @@ use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, OpId, OpPath, StateId};
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 
-use mfm_op_common::errors;
+use mfm_state_common::errors;
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
@@ -153,7 +153,7 @@ mod tests {
     use mfm_machine::recorder::EventRecorder;
     use mfm_machine::replay_io::ReplayIo;
     use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
-    use mfm_op_common::test_support as op_test_support;
+    use mfm_state_common::test_support as op_test_support;
     use mfm_sdk::unstable::SdkPlanResolver;
     use tokio::sync::Mutex;
 

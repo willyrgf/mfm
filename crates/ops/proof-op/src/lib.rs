@@ -16,11 +16,11 @@ use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
-use mfm_op_common::ctx as op_ctx;
-use mfm_op_common::output as op_output;
-use mfm_op_common::states::io::NamespaceReadState;
-use mfm_op_common::states::meta;
-use mfm_op_common::states::side_effect::{IdempotentSideEffectState, TriggerOnce};
+use mfm_state_common::ctx as op_ctx;
+use mfm_state_common::output as op_output;
+use mfm_state_common::states::io::NamespaceReadState;
+use mfm_state_common::states::meta;
+use mfm_state_common::states::side_effect::{IdempotentSideEffectState, TriggerOnce};
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -33,9 +33,9 @@ use mfm_machine::errors::ErrorInfo;
 #[cfg(test)]
 use mfm_machine::events::DomainEvent;
 #[cfg(test)]
-use mfm_op_common::errors as op_errors;
+use mfm_state_common::errors as op_errors;
 #[cfg(test)]
-use mfm_op_common::idempotency as op_idempotency;
+use mfm_state_common::idempotency as op_idempotency;
 
 const OP_ID: &str = "proof";
 const OP_VERSION: &str = "v1";
@@ -237,7 +237,7 @@ mod tests {
     use mfm_machine::runtime::{
         ChildRunLiveIoTransportFactory, DefaultExecutionEngine, EngineFailpoints, PlanResolver,
     };
-    use mfm_op_common::test_support as op_test_support;
+    use mfm_state_common::test_support as op_test_support;
 
     use mfm_sdk::unstable::SdkPlanResolver;
 

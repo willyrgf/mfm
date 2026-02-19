@@ -1,5 +1,5 @@
 [package]
-name = "mfm-op-aave-v3-common"
+name = "mfm-state-aave-v3"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,7 +10,7 @@ serde_json = { workspace = true }
 
 mfm-machine = { path = "../../machine" }
 mfm-collectors-evm = { path = "../../collectors/evm" }
-mfm-op-common = { path = "../common" }
+mfm-state-common = { path = "../common" }
 mfm-evm-core = { path = "../../evm-core" }
 mfm-evm-runtime = { path = "../../evm-runtime" }
 

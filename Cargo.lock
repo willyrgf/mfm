@@ -2071,7 +2071,7 @@ dependencies = [
  "mfm-collectors-evm",
  "mfm-evm-core",
  "mfm-machine",
- "mfm-op-common",
+ "mfm-state-common",
  "mfm-transports-local-evm",
  "serde",
  "serde_json",
@@ -2141,42 +2141,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-op-aave-v3-common"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "mfm-collectors-evm",
- "mfm-evm-core",
- "mfm-evm-runtime",
- "mfm-machine",
- "mfm-op-common",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "mfm-op-aave-v3-origin-adapt"
 version = "0.1.0"
 dependencies = [
  "mfm-machine",
- "mfm-op-aave-v3-common",
- "mfm-op-common",
  "mfm-sdk",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "mfm-op-common"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "hex",
- "mfm-collectors-exec",
- "mfm-collectors-nix",
- "mfm-machine",
- "mfm-sdk",
+ "mfm-state-aave-v3",
+ "mfm-state-common",
  "serde",
  "serde_json",
 ]
@@ -2186,9 +2157,9 @@ name = "mfm-op-evm-deploy-configure-validate"
 version = "0.1.0"
 dependencies = [
  "mfm-machine",
- "mfm-op-common",
  "mfm-op-evm-write",
  "mfm-sdk",
+ "mfm-state-common",
  "serde",
  "serde_json",
 ]
@@ -2200,8 +2171,8 @@ dependencies = [
  "async-trait",
  "mfm-evm-runtime",
  "mfm-machine",
- "mfm-op-common",
  "mfm-sdk",
+ "mfm-state-common",
  "serde",
  "serde_json",
  "tokio",
@@ -2217,8 +2188,8 @@ dependencies = [
  "mfm-collectors-evm",
  "mfm-evm-runtime",
  "mfm-machine",
- "mfm-op-common",
  "mfm-sdk",
+ "mfm-state-common",
  "serde",
  "serde_json",
  "zeroize",
@@ -2229,37 +2200,12 @@ name = "mfm-op-keystore-admin"
 version = "0.1.0"
 dependencies = [
  "mfm-machine",
- "mfm-op-common",
- "mfm-op-keystore-common",
  "mfm-sdk",
+ "mfm-state-common",
+ "mfm-state-keystore",
  "regex",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "mfm-op-keystore-common"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "async-trait",
- "chrono",
- "hex",
- "k256",
- "mfm-evm-core",
- "mfm-evm-runtime",
- "mfm-machine",
- "mfm-op-common",
- "mfm-op-keystore-shim",
- "mfm-sdk",
- "mfm_core",
- "regex",
- "rpassword",
- "serde",
- "serde_json",
- "url",
- "uuid",
- "zeroize",
 ]
 
 [[package]]
@@ -2276,9 +2222,9 @@ dependencies = [
  "async-trait",
  "hex",
  "mfm-machine",
- "mfm-op-common",
- "mfm-op-keystore-common",
  "mfm-sdk",
+ "mfm-state-common",
+ "mfm-state-keystore",
  "mfm-transports-local-fs",
  "mfm-transports-local-keystore",
  "serde",
@@ -2294,8 +2240,8 @@ dependencies = [
  "async-trait",
  "mfm-collectors-nix-exec",
  "mfm-machine",
- "mfm-op-common",
  "mfm-sdk",
+ "mfm-state-common",
  "serde",
  "serde_json",
  "tokio",
@@ -2310,9 +2256,9 @@ dependencies = [
  "async-trait",
  "mfm-evm-runtime",
  "mfm-machine",
- "mfm-op-common",
- "mfm-op-keystore-common",
  "mfm-sdk",
+ "mfm-state-common",
+ "mfm-state-keystore",
  "serde",
  "serde_json",
  "tokio",
@@ -2324,8 +2270,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mfm-machine",
- "mfm-op-common",
  "mfm-sdk",
+ "mfm-state-common",
  "serde_json",
  "tokio",
 ]
@@ -2355,6 +2301,60 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "mfm-state-aave-v3"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-collectors-evm",
+ "mfm-evm-core",
+ "mfm-evm-runtime",
+ "mfm-machine",
+ "mfm-state-common",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "mfm-state-common"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "mfm-collectors-exec",
+ "mfm-collectors-nix",
+ "mfm-machine",
+ "mfm-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mfm-state-keystore"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "async-trait",
+ "chrono",
+ "hex",
+ "k256",
+ "mfm-evm-core",
+ "mfm-evm-runtime",
+ "mfm-machine",
+ "mfm-op-keystore-shim",
+ "mfm-sdk",
+ "mfm-state-common",
+ "mfm_core",
+ "regex",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "url",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2394,8 +2394,8 @@ dependencies = [
  "k256",
  "mfm-evm-core",
  "mfm-machine",
- "mfm-op-keystore-common",
  "mfm-op-keystore-shim",
+ "mfm-state-keystore",
  "mfm_core",
  "regex",
  "rpassword",

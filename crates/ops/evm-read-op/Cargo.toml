@@ -8,7 +8,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
-mfm-op-common = { path = "../../states/common" }
+mfm-state-common = { path = "../../states/common" }
 mfm-evm-runtime = { path = "../../evm-runtime" }
 
 [dev-dependencies]
