@@ -3,12 +3,34 @@
   pkgs ? null,
 }:
 
+let
+  fenix = if pkgs == null then null else pkgs.fenix or null;
+
+  stableToolchain =
+    if fenix != null && fenix ? stable && fenix.stable ? toolchain then
+      fenix.stable.toolchain
+    else
+      null;
+
+  rustToolchainPackages =
+    if stableToolchain != null then
+      [ stableToolchain ]
+    else if pkgs == null then
+      [ ]
+    else
+      [
+        pkgs.cargo
+        pkgs.rustc
+        pkgs.rustfmt
+        pkgs.clippy
+      ];
+in
 rec {
   project = {
-    name = "Nixfied Project";
-    id = "nixfied-project";
-    description = "Reusable Nix development framework";
-    envVar = "PROJECT_ENV";
+    name = "MFM";
+    id = "mfm";
+    description = "WIP toolkit for on-chain operations";
+    envVar = "MFM_ENV";
     slotVar = "NIX_ENV";
   };
 
@@ -28,22 +50,31 @@ rec {
   # Slot behavior for port calculations
   slots = {
     max = 9;
-    stride = 1;
+    # Keep per-slot ports disjoint even when multiple port roles are adjacent.
+    stride = 100;
     default = 0;
   };
 
   # Port roles (keys become <KEY>_PORT in slot scripts)
   ports = {
+    rest_api = 3001;
     backend = 3000;
     frontend = 3100;
     http = 8080;
     https = 8443;
+
     postgres = 5432;
+
+    minio = 9000;
+    minio_console = 9001;
     minioApi = 9000;
     minioConsole = 9001;
+
     rethHttp = 8545;
     rethWs = 8546;
     rethAuth = 8551;
+    rethP2p = 30303;
+
     heliosRpc = 8547;
   };
 
@@ -57,15 +88,38 @@ rec {
     output = "stdout";
   };
 
-  tooling = {
-    runtimePackages = [
-      pkgs.coreutils
-      pkgs.gnused
-    ];
-    devShellPackages = [ ];
+  tooling = rec {
+    runtimePackages =
+      (if pkgs == null then
+        [ ]
+      else
+        [
+          pkgs.bash
+          pkgs.coreutils
+          pkgs.findutils
+          pkgs.gnugrep
+          pkgs.gnused
+          pkgs.git
+          pkgs.lsof
+          pkgs.curl
+          pkgs.jq
+          pkgs.nix
+          pkgs.nixfmt
+          pkgs.cargo-nextest
+          pkgs.cargo-audit
+          pkgs.sccache
+          pkgs.foundry
+          pkgs.reth
+          pkgs.minio
+        ])
+      ++ rustToolchainPackages;
+
+    devShellPackages = runtimePackages;
+
     devShellHook = ''
-      echo "Nix framework dev shell ready."
+      echo "MFM dev shell ready. Use: nix run .#help"
     '';
+
     envFile = {
       enable = true;
       strict = false;
@@ -80,9 +134,8 @@ rec {
     requiredDocs = [
       "README.md"
       "AGENTS.md"
-      "CLAUDE.md"
-      "ARCHITECTURE.md"
-      "REDESIGN.md"
+      "docs/architecture.md"
+      "docs/redesign.md"
     ];
   };
 
@@ -96,14 +149,17 @@ rec {
   };
 
   ephemeral = {
-    enable = false;
+    enable = true;
     excludePatterns = [
       ".git"
+      ".direnv"
       "node_modules"
       ".next"
       "dist"
       ".turbo"
       ".cache"
+      "target"
+      "result"
       "*.log"
       "test-results"
       "coverage"
@@ -117,9 +173,9 @@ rec {
 
   modules = {
     postgres = {
-      enable = false;
-      database = "app";
-      testDatabase = "app_test";
+      enable = true;
+      database = "mfm";
+      testDatabase = "mfm_test";
       extensions = [ ];
       package = if pkgs != null then pkgs.postgresql_16 else null;
       portKey = "postgres";
@@ -136,42 +192,48 @@ rec {
         sourceDatabase = null;
       };
     };
+
     nginx = {
       enable = false;
       portKeyHttp = "http";
       portKeyHttps = "https";
       dataDirName = "nginx";
     };
+
     minio = {
-      enable = false;
+      enable = true;
       package = if pkgs != null then pkgs.minio else null;
       clientPackage = if pkgs != null then pkgs.minio-client else null;
-      portKeyApi = "minioApi";
-      portKeyConsole = "minioConsole";
+      portKeyApi = "minio";
+      portKeyConsole = "minio_console";
       dataDirName = "minio";
-      rootUser = "minioadmin";
-      rootPassword = "minioadmin";
+      rootUser = "minio";
+      rootPassword = "minio123456";
       browser = true;
     };
+
     reth = {
-      enable = false;
+      enable = true;
       package = if pkgs != null then pkgs.reth else null;
       portKeyHttp = "rethHttp";
       portKeyWs = "rethWs";
       portKeyAuth = "rethAuth";
+      portKeyP2p = "rethP2p";
       dataDirName = "reth";
       network = "local";
       devMode = true;
       extraArgs = [ ];
     };
+
     helios = {
-      enable = false;
+      enable = true;
       package = if pkgs != null then pkgs.callPackage ../.framework/helios/package.nix { } else null;
       portKeyRpc = "heliosRpc";
       dataDirName = "helios";
       network = "local";
       executionRpcPortKey = "rethHttp";
-      executionRpcUrl = "";
+      # Mainnet default for workflows that do not set HELIOS_EXECUTION_RPC_URL explicitly.
+      executionRpcUrl = "https://eth.drpc.org";
       consensusRpcUrl = "";
       checkpoint = "";
       extraArgs = [ ];
