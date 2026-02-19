@@ -440,3 +440,557 @@ Practical guardrails:
 * hedge only light reads
 * avoid hedging heavy/sensitive methods
 * prefer local Helios/fullnode first whenever healthy
+
+---
+
+# Deep Dive Expansion (All Proposal Parts)
+
+This section expands each proposal item above into concrete, implementation-level guidance that fits the current MFM tree (`crates/collectors/evm`, `crates/collectors/evm-jsonrpc-http`, `crates/app`, and Nixfied Helios service wiring).
+
+## Part 0) Ground Rules and Success Criteria
+
+### 0.1 Architecture constraints that this plan must preserve
+
+* Keep business execution logic out of `bin/*`; transport/routing behavior lives in collectors/runtime wiring.
+* Keep `namespace = "evm"` as the sole IO surface for EVM JSON-RPC.
+* Preserve deterministic replay by continuing to bind one logical request to one `FactKey -> payload_id`.
+* Preserve no-secrets surfaces: URLs with keys and authorization headers remain runtime-only.
+* Preserve canonical JSON hashing via existing `artifact_id_for_json` derivation paths.
+
+### 0.2 Primary outcome metrics
+
+* Startup UX: time from `svc::helios::start` to first successful `eth_blockNumber`.
+* Availability: percentage of successful EVM read calls under injected timeout/429 faults.
+* Replay correctness: same run replay returns the recorded payloads without network calls.
+* Secret safety: no URL credentials/auth headers in events, artifacts, errors, or logs.
+
+---
+
+## Part 1) Decision Summary Deep Dive
+
+### 1.1 Keep Helios as default local RPC
+
+Why this is still the right default for MFM:
+
+* Existing Nixfied integration already starts/stops Helios and uses it in parity/mainnet workflows.
+* Fast bootstrap is a product-level requirement; Helios is optimized for exactly that.
+* It keeps local resource requirements low compared to full-node defaults.
+
+How to operationalize:
+
+* Default to local Helios first in source ordering when healthy.
+* Keep Helios `data_dir` persistent so restarts avoid repeated cold bootstrap.
+* Treat execution/consensus upstreams as unreliable dependencies and add pool logic around them.
+
+### 1.2 Extend existing `evm` collector path instead of new namespace
+
+Why:
+
+* Current states/ops already depend on `EvmIoClient` and `JsonRpcCall`.
+* Introducing `evm.rpc_pool` would add broad routing and migration churn without early value.
+* Existing `RouterLiveIoTransportFactory` already routes by namespace, so behavior can be upgraded in-place.
+
+Implementation principle:
+
+* Keep state-facing API stable.
+* Concentrate failover/hedging/probing inside `crates/collectors/evm-jsonrpc-http`.
+
+### 1.3 Reuse canonical fact-key derivation
+
+Current in-tree behavior already does what we need:
+
+* `crates/collectors/evm/src/lib.rs` derives `FactKey` from canonical JSON hash of `JsonRpcCall`.
+* Secrets/floats are rejected by canonical hash path.
+
+Required discipline:
+
+* Do not add parallel hash builders for EVM requests.
+* Any transport-internal routing state must not alter `JsonRpcCall` hashing unless explicitly intended.
+
+### 1.4 Ship Milestone A first; defer quorum
+
+Why this sequencing is important:
+
+* Availability gains mostly come from failover and light hedging.
+* Quorum adds complexity, latency, and comparison semantics risk.
+* Quorum is only defensible for narrow, trivially comparable read methods.
+
+Milestone A scope (strict):
+
+* failover for retryable transport failures
+* hedge only lightweight idempotent reads
+* capability probes and endpoint scoring
+* no quorum
+
+### 1.5 Keep URLs/auth runtime-only
+
+Threat surfaces:
+
+* request payload overrides (`rpc_url`)
+* error details payloads
+* structured logs and diagnostics
+* run artifacts/events
+
+Controls:
+
+* persist source identifiers only (`helios_local`, `drpc_public`, etc.)
+* sanitize diagnostics to host/class only
+* never persist raw URL or header values
+
+---
+
+## Part 2) Option Analysis Deep Dive
+
+### 2.1 Option A: Full node mode (max independence)
+
+Use case:
+
+* users needing broad method support, heavy log scans, and stronger privacy
+
+Fit in MFM:
+
+* continue using same `namespace = "evm"` IO calls
+* local full node becomes a preferred source entry in the same pool
+
+Tradeoff:
+
+* slower bootstrap and heavier resource footprint
+* best for advanced/operator profile
+
+### 2.2 Option B: Helios + robust upstream pool (default)
+
+Use case:
+
+* fastest path to a local endpoint with practical resilience
+
+Fit in MFM:
+
+* no state API changes
+* implement routing/probing/failover in live transport
+
+Tradeoff:
+
+* upstream dependency and metadata privacy leakage remain
+
+### 2.3 Option C: Portal/P2P light data (future)
+
+Use case:
+
+* long-term decentralization of light-client data retrieval
+
+Fit in MFM:
+
+* future collector backend under same `evm` boundary
+
+Tradeoff:
+
+* ecosystem maturity and coverage constraints today
+
+---
+
+## Part 3) Architecture Fit Deep Dive
+
+### 3.1 End-to-end call path today
+
+1. state uses `EvmIoClient::call(JsonRpcCall)`
+2. `FactKey` derived from canonical JSON request hash
+3. call routed to `namespace = "evm"` live transport factory
+4. HTTP transport executes JSON-RPC
+5. response recorded by live IO for replay
+
+### 3.2 Where new logic belongs
+
+Allowed:
+
+* source pool model and probing in `crates/collectors/evm-jsonrpc-http`
+* env/config parsing and transport wiring in `crates/app`
+* service lifecycle and defaults in `nixfied/project/*`
+
+Not allowed:
+
+* embedding domain workflow logic in CLI/API transport layers
+* adding ambient IO to state logic
+
+### 3.3 Determinism model with hedging
+
+Live mode:
+
+* transport may issue multiple upstream requests for one logical IO call
+* returns first acceptable success according to policy
+
+Replay mode:
+
+* same `FactKey` resolves to recorded payload id
+* no network calls, no re-hedging
+
+Determinism claim:
+
+* run replay remains deterministic even if live winner endpoint was nondeterministic.
+
+---
+
+## Part 4) Helios Fast-Start Deep Dive
+
+### 4.1 Startup-critical knobs
+
+* checkpoint freshness and availability
+* consensus endpoint responsiveness
+* execution endpoint `eth_getProof` support
+* persistent local data directory
+
+### 4.2 Concrete MFM defaults/tuning targets
+
+* prefer persistent Helios service scope for developer workflows where practical
+* make explicit execution/consensus defaults visible and overrideable in Nixfied apps
+* keep readiness probe gated on `eth_blockNumber` success
+* keep a checkpoint strategy that avoids frequent recomputation in happy path
+
+### 4.3 Probe contract before selecting an endpoint
+
+Minimum probe set:
+
+* `eth_chainId` returns expected chain id
+* `eth_blockNumber` returns valid hex quantity
+* `eth_getProof` probe for sources that must back Helios execution path
+
+Failure policy:
+
+* endpoint failing required probes is excluded from active candidate set
+* emit safe diagnostics by source id and error class only
+
+---
+
+## Part 5) Open/Safe/Reliable Triangle Deep Dive
+
+### 5.1 Explicit tradeoff matrix
+
+| Mode | Open | Safety (verification) | Reliability | Privacy |
+|---|---|---|---|---|
+| Helios + public endpoints | High | Medium/High | Medium | Medium/Low |
+| Helios + paid provider(s) | Low/Medium | Medium/High | High | Medium/Low |
+| Full node local | Medium | High | High | High |
+
+Interpretation:
+
+* one default cannot maximize all axes
+* product should expose mode selection, not hide tradeoffs
+
+### 5.2 Recommended default policy
+
+* default mode: Helios + curated public pool
+* reliability mode: bring-your-own provider via env
+* independence mode: full local node source first
+
+---
+
+## Part 6) Tiered Strategy Deep Dive
+
+### 6.1 Tier 1 (curated public pool)
+
+Inputs:
+
+* static source IDs in config
+* runtime URL resolution from env or service discovery
+
+Behavior:
+
+* startup probes + health score initialization
+* primary selection by source class and score
+* failover on retryable transport categories
+
+### 6.2 Tier 2 (hedged reads + scoring)
+
+Method classes:
+
+* `read_light`: `eth_chainId`, `eth_blockNumber`, `eth_call`, `eth_getBalance`, etc.
+* `read_heavy`: `eth_getLogs`, very large `eth_call`, tracing/debug endpoints
+* `write_or_side_effect`: `eth_sendRawTransaction`, admin/debug mutating methods
+
+Policy:
+
+* hedge only `read_light`
+* no hedge for heavy/write classes
+* never execute write methods against multiple sources
+
+Hedge algorithm (target behavior):
+
+```rust
+// Pseudocode for one logical IO call
+match classify(method) {
+    ReadLight if strategy == HedgedLight => {
+        start(primary);
+        wait(hedge_delay_ms);
+        if !primary_completed {
+            start(secondary);
+        }
+        return first_success_or_best_error();
+    }
+    _ => {
+        for source in ordered_sources {
+            if let Ok(resp) = call_once(source).await {
+                return Ok(resp);
+            }
+            record_failure(source);
+        }
+        return Err(aggregate_error);
+    }
+}
+```
+
+### 6.3 Tier 3 (BYO provider)
+
+Requirements:
+
+* URLs and auth only from environment/runtime
+* no persisted provider secrets
+* stable source id still used in diagnostics/events
+
+### 6.4 Tier 4 (full-node-first mode)
+
+Behavior:
+
+* source order prioritizes local full node, then Helios, then remote pool
+* read/write split remains in effect
+
+---
+
+## Part 7) Configuration Model Deep Dive
+
+### 7.1 Persisted model (safe only)
+
+Persisted values should include:
+
+* source IDs
+* source kinds (`local_helios`, `local_fullnode`, `remote_public`, `remote_user`)
+* preferred order and strategy selection
+* method policy toggles (hedge on/off per class)
+
+Persisted values should not include:
+
+* full URLs
+* bearer tokens/API keys
+* headers
+
+### 7.2 Runtime resolution model
+
+Resolution examples:
+
+* `helios_local` -> `http://127.0.0.1:$HELIOSRPC_PORT`
+* `local_reth` -> `http://127.0.0.1:$RETHHTTP_PORT`
+* `drpc_public` -> env/default URL at runtime
+* `user_primary` -> env-provided URL/auth
+
+### 7.3 Compatibility/migration policy
+
+* keep current `rpc_url` support as compatibility path in short term
+* prefer source-id routing in new code paths
+* phase out per-request URL overrides from normal read operations
+
+---
+
+## Part 8) API and Transport Shape Deep Dive
+
+### 8.1 `crates/collectors/evm` (state-facing)
+
+Near-term plan:
+
+* keep `JsonRpcCall { method, params }` unchanged
+* keep `fact_key_for_jsonrpc_call` unchanged
+
+Reason:
+
+* avoids fact-key churn across all existing ops
+* avoids mass refactor across `evm-runtime` and ops crates
+
+### 8.2 `crates/collectors/evm-jsonrpc-http` (live transport)
+
+Expected additions:
+
+* internal source registry + health scores
+* method classifier
+* failover and optional hedging executor
+* optional `route_source_id` in transport request envelope (safe source ID only)
+
+Expected removals/deprecations (later):
+
+* per-request `rpc_url` override in normal flow
+
+### 8.3 `crates/app` wiring
+
+Expected additions:
+
+* runtime construction of multi-source EVM transport config
+* env parsing for source URLs/auth at startup only
+* keep namespace routing unchanged (`"evm"` route)
+
+---
+
+## Part 9) Error Model and No-Secrets Deep Dive
+
+### 9.1 Error code strategy
+
+Keep stable high-level classes:
+
+* request parsing/config errors -> non-retryable
+* transport status/timeouts/rate limit -> retryable where appropriate
+* JSON-RPC error object -> retryability based on method/error class policy
+
+Additions for pool behavior:
+
+* `evm_source_unhealthy`
+* `evm_no_healthy_source`
+* `evm_hedge_exhausted`
+
+### 9.2 Diagnostic detail policy
+
+Allowed in details:
+
+* source ID
+* HTTP status class
+* JSON-RPC error code
+* truncated generic message
+
+Disallowed in details:
+
+* full request payloads containing credentials
+* full URLs with query params
+* authorization header values
+
+### 9.3 Logging contract
+
+* log to stderr only
+* include correlation keys (`run_id`, `op_id`, `state_id`, `attempt`, `event_seq` when present)
+* never log secret-bearing values
+
+---
+
+## Part 10) Method-Aware Policy Deep Dive
+
+### 10.1 Lightweight read allowlist for hedging
+
+Candidate methods:
+
+* `eth_chainId`
+* `eth_blockNumber`
+* `eth_getBalance`
+* `eth_call` (bounded payload/timeout policy)
+* `eth_getTransactionReceipt`
+* `eth_getBlockByNumber`
+
+### 10.2 Heavy/no-hedge methods
+
+* `eth_getLogs`
+* `trace_*`
+* `debug_*`
+* methods known to trigger large payloads or long tail latencies
+
+### 10.3 `eth_getLogs` special handling (Milestone B)
+
+Policy outline:
+
+* chunk block ranges by configurable max span
+* sequential failover only
+* optional per-source cache key by `(from,to,address,topics)`
+
+---
+
+## Part 11) Milestones with Exit Criteria
+
+### 11.1 Milestone A (ship first)
+
+Scope:
+
+* source probing and scoring
+* failover for retryable faults
+* hedged light reads (2-source max)
+* no secret leakage
+
+Exit criteria:
+
+* integration tests demonstrate successful fallback on timeout and 429
+* replay determinism tests pass for hedged/failover calls
+* no regression in existing `namespace = "evm"` state consumers
+
+### 11.2 Milestone B
+
+Scope:
+
+* method-aware policy engine
+* `eth_getLogs` chunking + no-hedge enforcement
+* health decay/recovery tuning
+
+Exit criteria:
+
+* bounded behavior under high-volume log queries
+* stable pass rates in parity tests under fault injection
+
+### 11.3 Milestone C (optional)
+
+Scope:
+
+* quorum only for tiny allowlist of trivially comparable methods
+
+Exit criteria:
+
+* measurable correctness benefit justifies latency/cost
+* no regression in replay behavior or secret safety
+
+---
+
+## Part 12) Test Strategy Deep Dive
+
+### 12.1 Unit tests (`crates/collectors/evm-jsonrpc-http`)
+
+* method classifier correctness
+* scoring/ranking updates under success/failure sequences
+* hedge timing behavior (primary-only success, secondary wins, both fail)
+* error sanitization and detail redaction
+
+### 12.2 Integration tests (workspace)
+
+* end-to-end fallback with one failing and one healthy endpoint
+* rate-limit path maps to retryable categories and failover works
+* replay run uses recorded fact without network access
+
+### 12.3 Security regression tests
+
+* ensure URL auth/query secrets never appear in:
+  * event payloads
+  * artifact payloads
+  * error details
+  * CLI/REST outputs
+
+---
+
+## Part 13) Rollout and Operational Deep Dive
+
+### 13.1 Rollout plan
+
+1. ship Milestone A behind opt-in env/config switch
+2. run parity CI with injected transport faults
+3. promote to default after stability threshold
+4. then implement Milestone B
+
+### 13.2 Runtime telemetry to collect
+
+* selected source ID per request class
+* failover counts by error code
+* hedge trigger rate and winner distribution
+* p50/p95 latency by method class and source
+
+### 13.3 Safe rollback
+
+* single-source fallback mode remains available
+* disable hedging via config without code revert
+* preserve existing `MFM_EVM_RPC_URL` path during migration period
+
+---
+
+## Part 14) Open Questions to Resolve Before Coding
+
+* Should source IDs be globally fixed strings or namespaced per env/profile?
+* Do we need separate pools for read and write calls from day one?
+* What is the exact compatibility window for `rpc_url` per-request override?
+* Which methods enter the initial hedging allowlist, and how strict are payload-size guards?
+
+These should be finalized before implementing Milestone A to avoid cross-crate churn.
