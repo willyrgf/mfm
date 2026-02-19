@@ -1393,31 +1393,29 @@ in
           units = {
             parity-compile = mkWorkflowUnit {
               taskId = "task.ci.parity-compile";
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_PARITY" ];
             };
 
             parity-rest-api-smoke = mkWorkflowUnit {
               taskId = "task.ci.parity-rest-api-smoke";
               needs = [ "parity-compile" ];
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_PARITY" ];
             };
 
             parity-evm-helios-smoke = mkWorkflowUnit {
               taskId = "task.ci.parity-evm-helios-smoke";
               needs = [ "parity-compile" ];
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_PARITY" ];
             };
 
             parity-evm-reth = mkWorkflowUnit {
               taskId = "task.ci.parity-evm-reth";
-              needs = [ "parity-compile" ];
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_PARITY" ];
+              needs = [
+                "parity-rest-api-smoke"
+                "parity-evm-helios-smoke"
+              ];
             };
 
             parity-aave-v3-reth = mkWorkflowUnit {
               taskId = "task.ci.parity-aave-v3-reth";
               needs = [ "parity-evm-reth" ];
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_PARITY" ];
             };
 
             parity-postgres-state-events-audit = mkWorkflowUnit {
@@ -1426,7 +1424,6 @@ in
                 "parity-evm-reth"
                 "parity-aave-v3-reth"
               ];
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_PARITY" ];
             };
           };
           stages = [ ];
@@ -1451,7 +1448,7 @@ in
         ci-full = {
           id = "workflow.ci.full";
           summary = "Full CI workflow";
-          description = "Runs basic checks/tests followed by parity stages when enabled.";
+          description = "Runs basic checks/tests followed by the full parity stage sequence.";
           mode = "ci";
           maxWorkers = 2;
           units = {
@@ -1484,31 +1481,29 @@ in
             parity-compile = mkWorkflowUnit {
               taskId = "task.ci.parity-compile";
               needs = [ "tests" ];
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_PARITY" ];
             };
 
             parity-rest-api-smoke = mkWorkflowUnit {
               taskId = "task.ci.parity-rest-api-smoke";
               needs = [ "parity-compile" ];
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_PARITY" ];
             };
 
             parity-evm-helios-smoke = mkWorkflowUnit {
               taskId = "task.ci.parity-evm-helios-smoke";
               needs = [ "parity-compile" ];
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_PARITY" ];
             };
 
             parity-evm-reth = mkWorkflowUnit {
               taskId = "task.ci.parity-evm-reth";
-              needs = [ "parity-compile" ];
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_PARITY" ];
+              needs = [
+                "parity-rest-api-smoke"
+                "parity-evm-helios-smoke"
+              ];
             };
 
             parity-aave-v3-reth = mkWorkflowUnit {
               taskId = "task.ci.parity-aave-v3-reth";
               needs = [ "parity-evm-reth" ];
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_PARITY" ];
             };
 
             parity-postgres-state-events-audit = mkWorkflowUnit {
@@ -1517,7 +1512,6 @@ in
                 "parity-evm-reth"
                 "parity-aave-v3-reth"
               ];
-              skipIfMissingEnv = [ "MFM_CI_ENABLE_PARITY" ];
             };
           };
           stages = [ ];
