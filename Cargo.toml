@@ -19,7 +19,7 @@ members = [
 	"crates/machine-derive",
 	"crates/machine-test-support",
 	"crates/sdk",
-	"crates/ops/common",
+	"crates/states/common",
 	"crates/ops/keystore-common",
 	"crates/ops/aave-v3-common",
 	"crates/storages/artifact-store-fs",

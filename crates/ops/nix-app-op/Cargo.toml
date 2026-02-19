@@ -10,7 +10,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
-mfm-op-common = { path = "../common" }
+mfm-op-common = { path = "../../states/common" }
 
 [dev-dependencies]
 uuid = { version = "1.8.0", features = ["v4"] }
