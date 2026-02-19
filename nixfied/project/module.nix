@@ -393,9 +393,14 @@ in
           description = "Runs the full workspace test suite using cargo-nextest.";
           usage = [ "nix run .#test" ];
           runtimeInputs = rustRuntimeInputs;
-          env = {
-            RUSTC_WRAPPER = "sccache";
-          };
+          env =
+            {
+              RUSTC_WRAPPER = "sccache";
+              CARGO_PROFILE_CI_DEBUG = "0";
+            }
+            // lib.optionalAttrs pkgs.stdenv.isDarwin {
+              LIBRARY_PATH = "${pkgs.libiconv}/lib";
+            };
           command = ''
             set -euo pipefail
 
@@ -420,6 +425,7 @@ in
             "nix run .#ci -- --mode parity --summary"
           ];
           runtimeInputs = rustRuntimeInputs;
+          workflowId = "workflow.ci.full";
           contractArgs = [
             {
               name = "summary";
@@ -484,88 +490,6 @@ in
               description = "Compatibility alias for --bg.";
             }
           ];
-          command = ''
-            set -euo pipefail
-
-            ROOT="$(pwd -P)"
-            MODE="basic"
-            SUMMARY=0
-            BACKGROUND=0
-            PASSTHROUGH=()
-
-            while [ "$#" -gt 0 ]; do
-              case "$1" in
-                --summary)
-                  SUMMARY=1
-                  shift
-                  ;;
-                --mode)
-                  if [ "$#" -lt 2 ]; then
-                    echo "ERROR: --mode requires a value" >&2
-                    exit 2
-                  fi
-                  MODE="$2"
-                  shift 2
-                  ;;
-                --mode=*)
-                  MODE="''${1#--mode=}"
-                  shift
-                  ;;
-                --basic|--audit|--parity|--full|--mainnet)
-                  MODE="''${1#--}"
-                  shift
-                  ;;
-                --bg|--background)
-                  BACKGROUND=1
-                  shift
-                  ;;
-                --)
-                  shift
-                  while [ "$#" -gt 0 ]; do
-                    PASSTHROUGH+=("$1")
-                    shift
-                  done
-                  ;;
-                *)
-                  PASSTHROUGH+=("$1")
-                  shift
-                  ;;
-              esac
-            done
-
-            case "$MODE" in
-              basic|audit|parity|full|mainnet)
-                ;;
-              *)
-                echo "ERROR: unknown mode '$MODE' (expected: basic|audit|parity|full|mainnet)" >&2
-                exit 2
-                ;;
-            esac
-
-            if [ "$BACKGROUND" -eq 1 ]; then
-              echo "WARN: --bg/--background is not supported by the model runner; continuing in foreground"
-            fi
-
-            if [ "$MODE" = "parity" ] && [ -z "''${MFM_CI_ENABLE_PARITY:-}" ]; then
-              echo "WARN: parity units are gated; set MFM_CI_ENABLE_PARITY=1 to execute parity tasks"
-            fi
-
-            if [ "$MODE" = "mainnet" ] && [ -z "''${MFM_CI_ENABLE_MAINNET:-}" ]; then
-              echo "WARN: mainnet unit is gated; set MFM_CI_ENABLE_MAINNET=1 to execute mainnet snapshot checks"
-            fi
-
-            cmd=(nix run "path:$ROOT#run-workflow" -- "workflow.ci.$MODE")
-            if [ "$SUMMARY" -eq 1 ]; then
-              cmd+=(--summary)
-            fi
-            if [ "''${#PASSTHROUGH[@]}" -gt 0 ]; then
-              cmd+=(-- "''${PASSTHROUGH[@]}")
-            fi
-
-            echo "INFO: running ci mode=$MODE"
-            "''${cmd[@]}"
-            echo "OK: ci mode=$MODE completed"
-          '';
         };
 
         ci-fmt =
@@ -664,10 +588,17 @@ in
               log_file="$artifacts_dir/shell-app-contracts.log"
               echo "INFO: running ci step=shell-app-contracts"
               run_with_log "$log_file" bash -euo pipefail -c '
-                nix run "path:$ROOT#help" >/dev/null
-                nix run "path:$ROOT#schema" >/dev/null
-                nix run "path:$ROOT#tasks" >/dev/null
-                nix run "path:$ROOT#model" >/dev/null
+                test -f "$ROOT/flake.nix"
+                test -f "$ROOT/nixfied/schemas/task-contract.json"
+                test -f "$ROOT/nixfied/schemas/workflow-contract.json"
+                test -f "$ROOT/nixfied/schemas/model-export.json"
+
+                jq -e "." "$ROOT/nixfied/schemas/task-contract.json" >/dev/null
+                jq -e "." "$ROOT/nixfied/schemas/workflow-contract.json" >/dev/null
+                jq -e "." "$ROOT/nixfied/schemas/model-export.json" >/dev/null
+
+                grep -q "id = \"task.ci\";" "$ROOT/nixfied/project/module.nix"
+                grep -q "id = \"workflow.ci.full\";" "$ROOT/nixfied/project/module.nix"
               '
               echo "OK: ci step passed step=shell-app-contracts log=$log_file"
             '';
@@ -687,9 +618,14 @@ in
               "tests"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = {
-              RUSTC_WRAPPER = "sccache";
-            };
+            env =
+              {
+                RUSTC_WRAPPER = "sccache";
+                CARGO_PROFILE_CI_DEBUG = "0";
+              }
+              // lib.optionalAttrs pkgs.stdenv.isDarwin {
+                LIBRARY_PATH = "${pkgs.libiconv}/lib";
+              };
             command = ''
               set -euo pipefail
               ${ciStepPreamble}

@@ -108,6 +108,8 @@ rec {
           pkgs.cargo-nextest
           pkgs.cargo-audit
           pkgs.sccache
+          pkgs.stdenv.cc
+          pkgs.libiconv
           pkgs.foundry
           pkgs.reth
           pkgs.minio
