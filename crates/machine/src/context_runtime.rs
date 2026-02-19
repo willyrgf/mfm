@@ -173,7 +173,7 @@ pub(crate) async fn write_full_snapshot_value(
         }
         CanonicalJsonError::SecretsNotAllowed => RunError::Context(ContextError::Other(info(
             "secrets_detected",
-            "context snapshot contained secrets (Milestone 1 forbids persisting secrets)",
+            "context snapshot contained secrets (policy forbids persisting secrets)",
         ))),
     })?;
 

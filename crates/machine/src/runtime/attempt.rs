@@ -100,7 +100,7 @@ impl FactRecorder for RuntimeFactRecorder {
             return Err(IoError::Other(super::info(
                 "secrets_detected",
                 ErrorCategory::Unknown,
-                "fact key contained secrets (Milestone 1 forbids persisting secrets)",
+                "fact key contained secrets (policy forbids persisting secrets)",
             )));
         }
 
@@ -121,7 +121,7 @@ impl FactRecorder for RuntimeFactRecorder {
             return Err(IoError::Other(super::info(
                 "secrets_detected",
                 ErrorCategory::Unknown,
-                "fact binding payload contained secrets (Milestone 1 forbids persisting secrets)",
+                "fact binding payload contained secrets (policy forbids persisting secrets)",
             )));
         }
 
@@ -161,7 +161,7 @@ impl EventRecorder for AppendEventRecorder {
             return Err(RunError::Other(super::info(
                 "secrets_detected",
                 ErrorCategory::Unknown,
-                "domain event contained secrets (Milestone 1 forbids persisting secrets)",
+                "domain event contained secrets (policy forbids persisting secrets)",
             )));
         }
 
@@ -182,7 +182,7 @@ impl EventRecorder for AppendEventRecorder {
                 return Err(RunError::Other(super::info(
                     "secrets_detected",
                     ErrorCategory::Unknown,
-                    "domain event contained secrets (Milestone 1 forbids persisting secrets)",
+                    "domain event contained secrets (policy forbids persisting secrets)",
                 )));
             }
         }
@@ -255,7 +255,7 @@ impl SanitizedStateError {
             err.state_id = Some(state_id.clone());
         }
 
-        // Milestone 1: never persist secrets in error details.
+        // Never persist secrets in error details.
         crate::secrets::redact_error_info(&mut err.info);
 
         Self(err)

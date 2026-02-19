@@ -1,4 +1,4 @@
-//! EVM collectors (Milestone 2).
+//! EVM collectors.
 //!
 //! This crate defines typed adapters over the generic `IoCall` surface for EVM JSON-RPC reads.
 //! It intentionally does NOT perform IO itself.
@@ -153,7 +153,7 @@ impl<'a> EvmIoClient<'a> {
                 io_other(
                     "secrets_detected",
                     ErrorCategory::Unknown,
-                    "evm request contained secrets (Milestone 1 forbids persisting secrets)",
+                    "evm request contained secrets (policy forbids persisting secrets)",
                 )
             }
         })?;

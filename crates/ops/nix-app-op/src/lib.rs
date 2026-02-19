@@ -1,4 +1,4 @@
-//! Nix-app execution op (Milestone 2).
+//! Nix-app execution op.
 //!
 //! Source of truth: `docs/redesign.md` (v4), especially the Replay/IO contract.
 //!

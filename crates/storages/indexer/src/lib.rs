@@ -1,4 +1,4 @@
-//! Derived projection/indexer store scaffold (Milestone 6).
+//! Derived projection/indexer store scaffold.
 //!
 //! This crate is intentionally a scaffold:
 //! - projections are derived-only and must never become correctness-critical for resume/replay

@@ -1,4 +1,4 @@
-//! v4 SDK (Milestone 1).
+//! v4 SDK.
 //!
 //! Source of truth: `docs/redesign.md` (v4) Appendix C.2.
 //!
@@ -20,17 +20,17 @@ use mfm_machine::plan::{ExecutionPlan, StateGraph};
 pub mod ids {
     use super::*;
 
-    /// Milestone 1 enforced: `^[a-z][a-z0-9_]{0,62}$`
+    /// Enforced: `^[a-z][a-z0-9_]{0,62}$`
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct MachineId(pub String);
 
-    /// Milestone 1 enforced: `^[a-z][a-z0-9_]{0,62}$`
+    /// Enforced: `^[a-z][a-z0-9_]{0,62}$`
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct StepId(pub String);
 
     /// Local state id within an operation.
     ///
-    /// Milestone 1 enforced: `^[a-z][a-z0-9_]{0,62}$`
+    /// Enforced: `^[a-z][a-z0-9_]{0,62}$`
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct StateLocalId(pub String);
 
@@ -110,12 +110,12 @@ pub mod pipeline {
         pub op_config: serde_json::Value,
     }
 
-    /// A Milestone 1 flattened machine definition (ordered steps).
+    /// A flattened machine definition (ordered steps).
     ///
     /// Contract:
     /// - `machine_id` + `pipeline_version` map to `RunManifest.{op_id, op_version}`.
     /// - Step `OpPath` is "<machine_id>.<step_id>".
-    /// - Milestone 1 single-op convention: wrap a single op as a 1-step pipeline with:
+    /// - Single-op convention: wrap a single op as a 1-step pipeline with:
     ///   - `machine_id = <op_id>`
     ///   - `steps[0].step_id = "main"`
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

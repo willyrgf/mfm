@@ -1,4 +1,4 @@
-//! Unstable helper implementations for planning and launching (Milestone 1).
+//! Unstable helper implementations for planning and launching.
 //!
 //! Source of truth: `docs/redesign.md` (v4).
 //! Not part of the stable API contract (Appendix C.2).
@@ -116,7 +116,7 @@ fn validate_pipeline(p: &Pipeline) -> Result<(), SdkError> {
             ));
         }
 
-        // Enforce Milestone 1: op_config must be canonical-JSON hashable (floats forbidden).
+        // Enforce policy: op_config must be canonical-JSON hashable (floats forbidden).
         canonical_json_bytes(&s.op_config).map_err(|e| match e {
             CanonicalJsonError::FloatNotAllowed => sdk_error(
                 "op_config_not_canonical",
@@ -126,7 +126,7 @@ fn validate_pipeline(p: &Pipeline) -> Result<(), SdkError> {
             CanonicalJsonError::SecretsNotAllowed => sdk_error(
                 "secrets_detected",
                 ErrorCategory::ParsingInput,
-                "op_config contained secrets (Milestone 1 forbids persisting secrets)",
+                "op_config contained secrets (policy forbids persisting secrets)",
             ),
         })?;
     }
@@ -306,7 +306,7 @@ impl OperationRegistry for HashMapOperationRegistry {
     }
 }
 
-/// Default Milestone 1 pipeline planner.
+/// Default pipeline planner.
 #[derive(Clone, Default)]
 pub struct DefaultPipelinePlanner;
 
@@ -496,7 +496,7 @@ impl State for NamespacedState {
     }
 }
 
-/// Default Milestone 1 run launcher.
+/// Default run launcher.
 #[derive(Clone, Default)]
 pub struct DefaultRunLauncher;
 
@@ -556,7 +556,7 @@ impl RunLauncher for DefaultRunLauncher {
                 "secrets_detected",
                 ErrorCategory::ParsingInput,
                 false,
-                "run manifest contained secrets (Milestone 1 forbids persisting secrets)",
+                "run manifest contained secrets (policy forbids persisting secrets)",
             )),
         })?;
         let computed_id = artifact_id_for_bytes(&bytes);
@@ -571,7 +571,7 @@ impl RunLauncher for DefaultRunLauncher {
                 "secrets_detected",
                 ErrorCategory::ParsingInput,
                 false,
-                "run manifest contained secrets (Milestone 1 forbids persisting secrets)",
+                "run manifest contained secrets (policy forbids persisting secrets)",
             )),
         })?;
         debug_assert_eq!(computed_id, computed_from_value);
@@ -668,7 +668,7 @@ impl mfm_machine::runtime::PlanResolver for SdkPlanResolver {
     }
 }
 
-/// Helper for the Milestone 1 single-op run convention.
+/// Helper for the single-op run convention.
 pub fn single_op_pipeline(
     op_id: OpId,
     op_version: String,
@@ -952,7 +952,7 @@ pub async fn execute_single_op_report<T: serde::de::DeserializeOwned>(
     })
 }
 
-/// Helpers for spawning and awaiting engine-managed child runs (Milestone 5).
+/// Helpers for spawning and awaiting engine-managed child runs.
 ///
 /// These helpers are intentionally `unstable`:
 /// - the IO surface is stringly-typed (`IoCall.namespace`)

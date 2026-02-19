@@ -2,7 +2,7 @@
 
 HTTP live transport for the `namespace = "evm"` IO surface (EVM JSON-RPC).
 
-## Current Behavior (Milestone A + B)
+## Current Behavior
 
 - Source-id based runtime routing (`EvmJsonRpcHttpConfig.sources` + `preferred_order`)
 - Method classification:

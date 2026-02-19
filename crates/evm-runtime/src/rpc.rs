@@ -621,7 +621,7 @@ fn send_raw_fact_key(state_id: &StateId, raw_tx_hex: &str) -> Result<FactKey, St
             "secrets_detected",
             ErrorCategory::Unknown,
             false,
-            "raw tx request contained secrets (Milestone 1 forbids persisting secrets)",
+            "raw tx request contained secrets (policy forbids persisting secrets)",
         ),
     })?;
 

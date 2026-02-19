@@ -1,4 +1,4 @@
-//! Live IO transport for external program execution (Milestone 2).
+//! Live IO transport for external program execution.
 //!
 //! This transport powers the `exec` namespace. It is NOT part of the stable API contract
 //! (Appendix C.1) and may change.
