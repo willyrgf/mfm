@@ -6,8 +6,14 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = import nixpkgs { inherit system; };
         nixfiedLib = import ./nixfied/lib/default.nix {
@@ -21,11 +27,12 @@
           projectModules = [ ./nixfied/project/module.nix ];
           extraModules = [ ];
         };
-      in {
+      in
+      {
         apps = compiled.apps;
         packages = compiled.packages;
         checks = compiled.checks;
         devShells = compiled.devShells;
-      });
+      }
+    );
 }
-

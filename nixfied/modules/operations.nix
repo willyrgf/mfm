@@ -67,26 +67,26 @@ let
   );
 
   slotEnvPrelude = ''
-    slot_var=${lib.escapeShellArg runtime.slot.var}
-    env_var=${lib.escapeShellArg runtime.env.var}
-    slot_default=${toString runtime.slot.default}
-    env_default=${lib.escapeShellArg runtime.env.default}
+        slot_var=${lib.escapeShellArg runtime.slot.var}
+        env_var=${lib.escapeShellArg runtime.env.var}
+        slot_default=${toString runtime.slot.default}
+        env_default=${lib.escapeShellArg runtime.env.default}
 
-    slot_value="''${!slot_var:-$slot_default}"
-    env_value="''${!env_var:-$env_default}"
+        slot_value="''${!slot_var:-$slot_default}"
+        env_value="''${!env_var:-$env_default}"
 
-    if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
-      echo "ERROR: $slot_var must be an integer"
-      exit 3
-    fi
+        if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
+          echo "ERROR: $slot_var must be an integer"
+          exit 3
+        fi
 
-    case "$env_value" in
-${envOffsetCase}
-      *)
-        echo "ERROR: unsupported $env_var '$env_value'"
-        exit 3
-        ;;
-    esac
+        case "$env_value" in
+    ${envOffsetCase}
+          *)
+            echo "ERROR: unsupported $env_var '$env_value'"
+            exit 3
+            ;;
+        esac
   '';
 
   portNames = builtins.sort builtins.lessThan (builtins.attrNames runtime.ports);

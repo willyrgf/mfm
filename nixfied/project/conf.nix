@@ -25,11 +25,7 @@ let
         pkgs.clippy
       ];
 
-  aaveOriginTools =
-    if pkgs == null then
-      null
-    else
-      import ./aave-origin-tools.nix { inherit pkgs; };
+  aaveOriginTools = if pkgs == null then null else import ./aave-origin-tools.nix { inherit pkgs; };
 in
 rec {
   project = {
@@ -96,33 +92,35 @@ rec {
 
   tooling = rec {
     runtimePackages =
-      (if pkgs == null then
-        [ ]
-      else
-        [
-          pkgs.bash
-          pkgs.coreutils
-          pkgs.findutils
-          pkgs.gnugrep
-          pkgs.gnused
-          pkgs.git
-          pkgs.lsof
-          pkgs.curl
-          pkgs.jq
-          pkgs.nix
-          pkgs.nixfmt
-          pkgs.cargo-nextest
-          pkgs.cargo-audit
-          pkgs.sccache
-          pkgs.stdenv.cc
-          pkgs.libiconv
-          pkgs.foundry
-          pkgs.reth
-          pkgs.minio
-          aaveOriginTools.aaveV3OriginFetchTool
-          aaveOriginTools.aaveV3OriginCompileTool
-          aaveOriginTools.aaveV3OriginDeployTool
-        ])
+      (
+        if pkgs == null then
+          [ ]
+        else
+          [
+            pkgs.bash
+            pkgs.coreutils
+            pkgs.findutils
+            pkgs.gnugrep
+            pkgs.gnused
+            pkgs.git
+            pkgs.lsof
+            pkgs.curl
+            pkgs.jq
+            pkgs.nix
+            pkgs.nixfmt
+            pkgs.cargo-nextest
+            pkgs.cargo-audit
+            pkgs.sccache
+            pkgs.stdenv.cc
+            pkgs.libiconv
+            pkgs.foundry
+            pkgs.reth
+            pkgs.minio
+            aaveOriginTools.aaveV3OriginFetchTool
+            aaveOriginTools.aaveV3OriginCompileTool
+            aaveOriginTools.aaveV3OriginDeployTool
+          ]
+      )
       ++ rustToolchainPackages;
 
     devShellPackages = runtimePackages;

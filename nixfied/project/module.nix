@@ -14,17 +14,16 @@ let
     vendorPath = "./nixfied";
   };
 
-  commonRuntimeInputs =
-    [
-      pkgs.bash
-      pkgs.coreutils
-      pkgs.findutils
-      pkgs.gnused
-      pkgs.gnugrep
-      pkgs.jq
-      pkgs.nix
-    ]
-    ++ (conf.tooling.runtimePackages or [ ]);
+  commonRuntimeInputs = [
+    pkgs.bash
+    pkgs.coreutils
+    pkgs.findutils
+    pkgs.gnused
+    pkgs.gnugrep
+    pkgs.jq
+    pkgs.nix
+  ]
+  ++ (conf.tooling.runtimePackages or [ ]);
 
   solcPackage = if pkgs ? solc then pkgs.solc else null;
 
@@ -176,33 +175,37 @@ let
   );
 
   ciServicePortPrelude = ''
-    slot_var=${lib.escapeShellArg project.slotVar}
-    env_var=${lib.escapeShellArg project.envVar}
-    slot_default=${toString conf.slots.default}
-    env_default=${lib.escapeShellArg "dev"}
+        slot_var=${lib.escapeShellArg project.slotVar}
+        env_var=${lib.escapeShellArg project.envVar}
+        slot_default=${toString conf.slots.default}
+        env_default=${lib.escapeShellArg "dev"}
 
-    slot_value="''${!slot_var:-$slot_default}"
-    env_value="''${!env_var:-$env_default}"
+        slot_value="''${!slot_var:-$slot_default}"
+        env_value="''${!env_var:-$env_default}"
 
-    if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
-      echo "ERROR: $slot_var must be an integer"
-      exit 3
-    fi
+        if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
+          echo "ERROR: $slot_var must be an integer"
+          exit 3
+        fi
 
-    case "$env_value" in
-${ciEnvOffsetCase}
-      *)
-        echo "ERROR: unsupported $env_var '$env_value'"
-        exit 3
-        ;;
-    esac
+        case "$env_value" in
+    ${ciEnvOffsetCase}
+          *)
+            echo "ERROR: unsupported $env_var '$env_value'"
+            exit 3
+            ;;
+        esac
 
-    POSTGRES_PORT=$(( ${toString conf.ports.postgres} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
-    MINIO_API_PORT=$(( ${toString (conf.ports.minioApi or conf.ports.minio)} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
-    MINIO_CONSOLE_PORT=$(( ${toString (conf.ports.minioConsole or conf.ports.minio_console)} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
-    RETH_HTTP_PORT=$(( ${toString conf.ports.rethHttp} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
-    RETH_WS_PORT=$(( ${toString conf.ports.rethWs} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
-    RETH_AUTH_PORT=$(( ${toString conf.ports.rethAuth} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+        POSTGRES_PORT=$(( ${toString conf.ports.postgres} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+        MINIO_API_PORT=$(( ${
+          toString (conf.ports.minioApi or conf.ports.minio)
+        } + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+        MINIO_CONSOLE_PORT=$(( ${
+          toString (conf.ports.minioConsole or conf.ports.minio_console)
+        } + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+        RETH_HTTP_PORT=$(( ${toString conf.ports.rethHttp} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+        RETH_WS_PORT=$(( ${toString conf.ports.rethWs} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+        RETH_AUTH_PORT=$(( ${toString conf.ports.rethAuth} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
   '';
 
   ciParityServiceEnv = ''
@@ -447,9 +450,10 @@ in
         validateEnv.enable = true;
         testIsolation = {
           enable = conf.isolation.enable or true;
-          slots = conf.isolation.slots or [
-            conf.slots.default
-          ];
+          slots =
+            conf.isolation.slots or [
+              conf.slots.default
+            ];
           envs =
             let
               configured = conf.isolation.envs or [ ];
@@ -551,13 +555,15 @@ in
         format = mkCommandTask {
           id = "task.format";
           appName = "format";
-          summary = "Format Nix files";
+          summary = "Format Rust and Nix files";
           usage = [ "nix run .#format" ];
+          runtimeInputs = rustRuntimeInputs;
           command = ''
             set -euo pipefail
 
+            cargo fmt --all
             find . -name '*.nix' -print0 | xargs -0 nixfmt --
-            echo "OK: formatted nix files"
+            echo "OK: formatted rust and nix files"
           '';
         };
 
@@ -568,14 +574,13 @@ in
           description = "Runs the full workspace test suite using cargo-nextest.";
           usage = [ "nix run .#test" ];
           runtimeInputs = rustRuntimeInputs;
-          env =
-            {
-              RUSTC_WRAPPER = "sccache";
-              CARGO_PROFILE_CI_DEBUG = "0";
-            }
-            // lib.optionalAttrs pkgs.stdenv.isDarwin {
-              LIBRARY_PATH = "${pkgs.libiconv}/lib";
-            };
+          env = {
+            RUSTC_WRAPPER = "sccache";
+            CARGO_PROFILE_CI_DEBUG = "0";
+          }
+          // lib.optionalAttrs pkgs.stdenv.isDarwin {
+            LIBRARY_PATH = "${pkgs.libiconv}/lib";
+          };
           command = ''
             set -euo pipefail
 
@@ -832,14 +837,13 @@ in
               "tests"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env =
-              {
-                RUSTC_WRAPPER = "sccache";
-                CARGO_PROFILE_CI_DEBUG = "0";
-              }
-              // lib.optionalAttrs pkgs.stdenv.isDarwin {
-                LIBRARY_PATH = "${pkgs.libiconv}/lib";
-              };
+            env = {
+              RUSTC_WRAPPER = "sccache";
+              CARGO_PROFILE_CI_DEBUG = "0";
+            }
+            // lib.optionalAttrs pkgs.stdenv.isDarwin {
+              LIBRARY_PATH = "${pkgs.libiconv}/lib";
+            };
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
