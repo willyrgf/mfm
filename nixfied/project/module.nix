@@ -119,6 +119,10 @@ let
     "API_KEY"
     "LOG_LEVEL"
     "OUTPUT_MODE"
+    "RUSTFLAGS"
+    "RUSTDOCFLAGS"
+    "CARGO_BUILD_RUSTFLAGS"
+    "CARGO_ENCODED_RUSTFLAGS"
     "RUST_LOG"
     "MFM_LOG"
     "LOG_FORMAT"
@@ -143,6 +147,20 @@ let
     "AWS_DEFAULT_REGION"
     "AWS_EC2_METADATA_DISABLED"
   ];
+
+  sharedCargoRustEnv =
+    {
+      RUSTC_WRAPPER = "sccache";
+      CARGO_PROFILE_CI_DEBUG = "0";
+    }
+    // lib.optionalAttrs pkgs.stdenv.isDarwin {
+      LIBRARY_PATH = "${pkgs.libiconv}/lib";
+    };
+
+  cargoFmtCheckCmd = "cargo fmt --all -- --check";
+  cargoClippyCmd = "cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings";
+  cargoNextestCiCmd = "cargo nextest run --cargo-profile ci";
+  cargoNextestWorkspaceCiCmd = "${cargoNextestCiCmd} --workspace";
 
   ciStepPreamble = ''
     artifacts_dir="''${CI_ARTIFACTS_DIR:-/tmp/ci-artifacts}"
@@ -536,14 +554,15 @@ in
           description = "Runs quality checks for the workspace.";
           usage = [ "nix run .#check" ];
           runtimeInputs = rustRuntimeInputs;
+          env = sharedCargoRustEnv;
           command = ''
             set -euo pipefail
 
             echo "INFO: running formatting checks"
-            cargo fmt --all -- --check
+            ${cargoFmtCheckCmd}
 
             echo "INFO: running clippy"
-            cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings
+            ${cargoClippyCmd}
 
             echo "INFO: running architecture verifier"
             cargo run -p mfm-architecture-verify --
@@ -574,18 +593,12 @@ in
           description = "Runs the full workspace test suite using cargo-nextest.";
           usage = [ "nix run .#test" ];
           runtimeInputs = rustRuntimeInputs;
-          env = {
-            RUSTC_WRAPPER = "sccache";
-            CARGO_PROFILE_CI_DEBUG = "0";
-          }
-          // lib.optionalAttrs pkgs.stdenv.isDarwin {
-            LIBRARY_PATH = "${pkgs.libiconv}/lib";
-          };
+          env = sharedCargoRustEnv;
           command = ''
             set -euo pipefail
 
             echo "INFO: running workspace tests"
-            cargo nextest run --workspace --cargo-profile ci
+            ${cargoNextestWorkspaceCiCmd}
             echo "OK: tests completed"
           '';
         };
@@ -604,6 +617,7 @@ in
             "nix run .#ci -- --mode mainnet --summary"
           ];
           runtimeInputs = rustRuntimeInputs;
+          env = sharedCargoRustEnv;
           workflowId = "workflow.ci.full";
           contractArgs = [
             {
@@ -673,13 +687,14 @@ in
               "quality"
             ];
             runtimeInputs = rustRuntimeInputs;
+            env = sharedCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
 
               log_file="$artifacts_dir/fmt.log"
               echo "INFO: running ci step=fmt"
-              run_with_log "$log_file" cargo fmt --all -- --check
+              run_with_log "$log_file" ${cargoFmtCheckCmd}
               echo "OK: ci step passed step=fmt log=$log_file"
             '';
           }
@@ -698,13 +713,14 @@ in
               "quality"
             ];
             runtimeInputs = rustRuntimeInputs;
+            env = sharedCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
 
               log_file="$artifacts_dir/clippy.log"
               echo "INFO: running ci step=clippy"
-              run_with_log "$log_file" cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings
+              run_with_log "$log_file" ${cargoClippyCmd}
               echo "OK: ci step passed step=clippy log=$log_file"
             '';
           }
@@ -723,6 +739,7 @@ in
               "quality"
             ];
             runtimeInputs = rustRuntimeInputs;
+            env = sharedCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -799,20 +816,14 @@ in
               "tests"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = {
-              RUSTC_WRAPPER = "sccache";
-              CARGO_PROFILE_CI_DEBUG = "0";
-            }
-            // lib.optionalAttrs pkgs.stdenv.isDarwin {
-              LIBRARY_PATH = "${pkgs.libiconv}/lib";
-            };
+            env = sharedCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
 
               log_file="$artifacts_dir/tests.log"
               echo "INFO: running ci step=tests"
-              run_with_log "$log_file" cargo nextest run --workspace --cargo-profile ci
+              run_with_log "$log_file" ${cargoNextestWorkspaceCiCmd}
               echo "OK: ci step passed step=tests log=$log_file"
             '';
           }
@@ -1053,6 +1064,7 @@ in
               "audit"
             ];
             runtimeInputs = rustRuntimeInputs;
+            env = sharedCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -1078,13 +1090,14 @@ in
               "parity"
             ];
             runtimeInputs = rustRuntimeInputs;
+            env = sharedCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
 
               log_file="$artifacts_dir/parity-compile.log"
               echo "INFO: running ci step=parity-compile"
-              run_with_log "$log_file" cargo nextest run --no-run --cargo-profile ci -p mfm-integration-tests --features parity-tests -p mfm --features parity-tests
+              run_with_log "$log_file" ${cargoNextestCiCmd} --no-run -p mfm-integration-tests --features parity-tests -p mfm --features parity-tests
               echo "OK: ci step passed step=parity-compile log=$log_file"
             '';
           }
@@ -1103,6 +1116,7 @@ in
               "parity"
             ];
             runtimeInputs = rustRuntimeInputs;
+            env = sharedCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -1110,7 +1124,7 @@ in
 
               log_file="$artifacts_dir/parity-rest-api-smoke.log"
               echo "INFO: running ci step=parity-rest-api-smoke"
-              run_with_log "$log_file" cargo nextest run --cargo-profile ci --jobs 1 -p mfm-integration-tests --features parity-tests --test parity_event_store_postgres_contract --test parity_artifact_store_s3_contract --test parity_rest_api_postgres_s3_smoke
+              run_with_log "$log_file" ${cargoNextestCiCmd} --jobs 1 -p mfm-integration-tests --features parity-tests --test parity_event_store_postgres_contract --test parity_artifact_store_s3_contract --test parity_rest_api_postgres_s3_smoke
               echo "OK: ci step passed step=parity-rest-api-smoke log=$log_file"
             '';
           }
@@ -1129,6 +1143,7 @@ in
               "parity"
             ];
             runtimeInputs = rustRuntimeInputs;
+            env = sharedCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -1139,7 +1154,7 @@ in
               response_file="$artifacts_dir/parity-evm-helios-smoke.response.json"
 
               echo "INFO: running ci step=parity-evm-helios-smoke"
-              run_with_log "$key_log_file" cargo nextest run --cargo-profile ci -p mfm --features parity-tests --test parity_keystore_reth_tx_send
+              run_with_log "$key_log_file" ${cargoNextestCiCmd} -p mfm --features parity-tests --test parity_keystore_reth_tx_send
 
               if [ -z "''${MFM_EVM_RPC_URL:-}" ]; then
                 echo "SKIP: MFM_EVM_RPC_URL is unset; skipping helios RPC curl probe"
@@ -1175,6 +1190,7 @@ in
               "parity"
             ];
             runtimeInputs = rustRuntimeInputs;
+            env = sharedCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -1182,7 +1198,7 @@ in
 
               log_file="$artifacts_dir/parity-evm-reth.log"
               echo "INFO: running ci step=parity-evm-reth"
-              run_with_log "$log_file" cargo nextest run --cargo-profile ci --jobs 1 -p mfm-integration-tests --features parity-tests --test evm_rpc_pool_failover --test evm_rpc_getlogs_chunking --test parity_rest_api_evm_reth_pipeline --test parity_portfolio_tracker_reth_mock_erc20 --test parity_portfolio_tracker_reth_snapshot
+              run_with_log "$log_file" ${cargoNextestCiCmd} --jobs 1 -p mfm-integration-tests --features parity-tests --test evm_rpc_pool_failover --test evm_rpc_getlogs_chunking --test parity_rest_api_evm_reth_pipeline --test parity_portfolio_tracker_reth_mock_erc20 --test parity_portfolio_tracker_reth_snapshot
               echo "OK: ci step passed step=parity-evm-reth log=$log_file"
             '';
           }
@@ -1201,6 +1217,7 @@ in
               "parity"
             ];
             runtimeInputs = rustRuntimeInputs;
+            env = sharedCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -1208,7 +1225,7 @@ in
 
               log_file="$artifacts_dir/parity-aave-v3-reth.log"
               echo "INFO: running ci step=parity-aave-v3-reth"
-              run_with_log "$log_file" cargo nextest run --cargo-profile ci -p mfm-integration-tests --features parity-tests --test parity_aave_v3_reth_scenario
+              run_with_log "$log_file" ${cargoNextestCiCmd} -p mfm-integration-tests --features parity-tests --test parity_aave_v3_reth_scenario
               echo "OK: ci step passed step=parity-aave-v3-reth log=$log_file"
             '';
           }
@@ -1227,6 +1244,7 @@ in
               "parity"
             ];
             runtimeInputs = rustRuntimeInputs;
+            env = sharedCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -1234,7 +1252,7 @@ in
 
               log_file="$artifacts_dir/parity-postgres-state-events-audit.log"
               echo "INFO: running ci step=parity-postgres-state-events-audit"
-              run_with_log "$log_file" cargo nextest run --cargo-profile ci -p mfm-integration-tests --features parity-tests --test parity_postgres_state_events_audit
+              run_with_log "$log_file" ${cargoNextestCiCmd} -p mfm-integration-tests --features parity-tests --test parity_postgres_state_events_audit
               echo "OK: ci step passed step=parity-postgres-state-events-audit log=$log_file"
             '';
           }
@@ -1253,6 +1271,7 @@ in
               "mainnet"
             ];
             runtimeInputs = rustRuntimeInputs;
+            env = sharedCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
