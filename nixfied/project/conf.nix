@@ -238,7 +238,7 @@ rec {
 
     helios = {
       enable = true;
-      package = if pkgs != null then pkgs.callPackage ../.framework/helios/package.nix { } else null;
+      package = if pkgs != null && pkgs ? helios then pkgs.helios else null;
       portKeyRpc = "heliosRpc";
       dataDirName = "helios";
       network = "local";

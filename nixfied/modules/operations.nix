@@ -11,11 +11,13 @@ let
 
   postgresCfg = services.postgres;
   nginxCfg = services.nginx;
+  minioCfg = services.minio;
   rethCfg = services.reth;
   heliosCfg = services.helios;
 
   postgresEnabled = postgresCfg.enable;
   nginxEnabled = nginxCfg.enable;
+  minioEnabled = minioCfg.enable;
   rethEnabled = rethCfg.enable;
   heliosEnabled = heliosCfg.enable;
 
@@ -28,7 +30,11 @@ let
 
   postgresPortBase = if postgresEnabled then resolvePortBase postgresCfg.portKey else 0;
   nginxHttpPortBase = if nginxEnabled then resolvePortBase nginxCfg.portKeyHttp else 0;
+  minioApiPortBase = if minioEnabled then resolvePortBase minioCfg.portKeyApi else 0;
+  minioConsolePortBase = if minioEnabled then resolvePortBase minioCfg.portKeyConsole else 0;
   rethHttpPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyHttp else 0;
+  rethWsPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyWs else 0;
+  rethAuthPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyAuth else 0;
   heliosRpcPortBase = if heliosEnabled then resolvePortBase heliosCfg.portKeyRpc else 0;
 
   netcatPkg =
@@ -40,6 +46,31 @@ let
       throw "nixfied.operations: netcat package is required for readiness probes";
 
   postgresProbePkg = if pkgs ? postgresql_16 then pkgs.postgresql_16 else pkgs.postgresql;
+  postgresRuntimePath =
+    if postgresCfg.package != null then postgresCfg.package else builtins.toString postgresProbePkg;
+  minioRuntimePath = if minioCfg.package != null then minioCfg.package else builtins.toString pkgs.minio;
+  minioClientRuntimePath =
+    if minioCfg.clientPackage != null then minioCfg.clientPackage else builtins.toString pkgs.minio-client;
+  rethRuntimePath = if rethCfg.package != null then rethCfg.package else builtins.toString pkgs.reth;
+  rethModeFlags =
+    if rethCfg.devMode or false then
+      [ "--dev" ]
+    else if (rethCfg.network or "") != "" then
+      [
+        "--chain"
+        (rethCfg.network or "local")
+      ]
+    else
+      [ ];
+  rethModeArgLines = builtins.concatStringsSep "\n" (
+    map (arg: "      reth_cmd+=(${lib.escapeShellArg arg})") rethModeFlags
+  );
+  rethExtraArgLines = builtins.concatStringsSep "\n" (
+    map (arg: "      reth_cmd+=(${lib.escapeShellArg arg})") (rethCfg.extraArgs or [ ])
+  );
+  minioRootUserDefault = minioCfg.rootUser or "minio";
+  minioRootPasswordDefault = minioCfg.rootPassword or "minio123456";
+  minioBrowserEnabled = minioCfg.browser or true;
   serviceProbeRuntimeInputs = [
     pkgs.coreutils
     pkgs.gnugrep
@@ -47,6 +78,16 @@ let
     pkgs.curl
     netcatPkg
     postgresProbePkg
+  ];
+  serviceLifecycleRuntimeInputs = [
+    pkgs.coreutils
+    pkgs.gnugrep
+    pkgs.gnused
+    pkgs.curl
+    postgresProbePkg
+    pkgs.minio
+    pkgs.minio-client
+    pkgs.reth
   ];
 
   envNames = runtime.env.names;
@@ -132,15 +173,27 @@ ${envOffsetCase}
       summary,
       description,
       command,
+      kind ? "utility",
       runtimeInputs ? [ ],
+      passThroughEnv ? [
+        "HOME"
+        runtime.env.var
+        runtime.slot.var
+      ],
+      env ? { },
+      effects ? [ "none" ],
+      idempotent ? true,
+      exposeApp ? true,
+      usage ? [ "nix run .#${appName}" ],
+      category ? "ops",
     }:
     {
       inherit
         id
+        kind
         summary
         description
         ;
-      kind = "utility";
       runner = {
         type = "shell";
         command = command;
@@ -152,8 +205,7 @@ ${envOffsetCase}
           channels = "stdout";
         };
         behavior = {
-          idempotent = true;
-          effects = [ "none" ];
+          inherit idempotent effects;
           timeoutSec = 0;
         };
         errors.codes = {
@@ -167,12 +219,10 @@ ${envOffsetCase}
         workdir = "projectRoot";
         hermetic = true;
         runtimeInputs = runtimeInputs;
-        passThroughEnv = [
-          "HOME"
-          runtime.env.var
-          runtime.slot.var
-        ];
-        env = { };
+        inherit
+          passThroughEnv
+          env
+          ;
         umask = "022";
         locale = "C.UTF-8";
         timezone = "UTC";
@@ -192,10 +242,10 @@ ${envOffsetCase}
         stateKeys = [ ];
       };
       ui.app = {
-        expose = true;
+        expose = exposeApp;
         name = appName;
-        category = "ops";
-        usage = [ "nix run .#${appName}" ];
+        category = category;
+        inherit usage;
         examples = [ ];
       };
     };
@@ -426,6 +476,275 @@ ${envOffsetCase}
     fi
 
     echo "OK: readiness checks passed services=$checks"
+  '';
+
+  servicesStartScript = ''
+    set -euo pipefail
+    ${slotEnvPrelude}
+
+    artifacts_dir="''${CI_ARTIFACTS_DIR:-/tmp/ci-artifacts}"
+    mkdir -p "$artifacts_dir"
+
+    services_root="$artifacts_dir/services"
+    mkdir -p "$services_root"
+
+    started=0
+
+    if [ ${if postgresEnabled then "1" else "0"} -eq 1 ]; then
+      started=$((started + 1))
+      postgres_port=$(( ${toString postgresPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      postgres_root="$services_root/postgres"
+      postgres_data="$postgres_root/data"
+      postgres_log="$artifacts_dir/postgres-service.log"
+      postgres_db=${lib.escapeShellArg (postgresCfg.database or "app")}
+      postgres_test_db=${lib.escapeShellArg (postgresCfg.testDatabase or "app_test")}
+      mkdir -p "$postgres_data"
+
+      if ! ${postgresRuntimePath}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$postgres_port" -q 2>/dev/null; then
+        if [ ! -f "$postgres_data/PG_VERSION" ]; then
+          ${postgresRuntimePath}/bin/initdb -D "$postgres_data" -U postgres --no-locale --encoding=UTF8 -A trust >/dev/null
+          printf '%s\n' \
+            '# TYPE  DATABASE        USER  ADDRESS       METHOD' \
+            'local   all             all                 trust' \
+            'host    all             all   127.0.0.1/32  trust' \
+            'host    all             all   ::1/128       trust' \
+            > "$postgres_data/pg_hba.conf"
+        fi
+
+        if [ -f "$postgres_data/postmaster.pid" ]; then
+          stale_pid="$(head -1 "$postgres_data/postmaster.pid" 2>/dev/null || true)"
+          if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+            rm -f "$postgres_data/postmaster.pid"
+          fi
+        fi
+
+        ${postgresRuntimePath}/bin/pg_ctl -D "$postgres_data" -l "$postgres_log" -o "-p $postgres_port -h 127.0.0.1" start
+      fi
+
+      for _ in $(seq 1 120); do
+        if ${postgresRuntimePath}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$postgres_port" -q 2>/dev/null; then
+          break
+        fi
+        sleep 0.25
+      done
+
+      if ! ${postgresRuntimePath}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$postgres_port" -q 2>/dev/null; then
+        echo "ERROR: postgres failed to become ready port=$postgres_port"
+        exit 1
+      fi
+
+      ${postgresRuntimePath}/bin/createdb -h 127.0.0.1 -p "$postgres_port" -U postgres "$postgres_db" >/dev/null 2>&1 || true
+      if [ "$postgres_test_db" != "$postgres_db" ]; then
+        ${postgresRuntimePath}/bin/createdb -h 127.0.0.1 -p "$postgres_port" -U postgres "$postgres_test_db" >/dev/null 2>&1 || true
+      fi
+      echo "OK: postgres ready port=$postgres_port"
+    else
+      echo "SKIP: postgres lifecycle disabled"
+    fi
+
+    if [ ${if minioEnabled then "1" else "0"} -eq 1 ]; then
+      started=$((started + 1))
+      minio_api_port=$(( ${toString minioApiPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      minio_console_port=$(( ${toString minioConsolePortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      minio_root="$services_root/minio"
+      minio_data="$minio_root/data"
+      minio_log="$artifacts_dir/minio-service.log"
+      minio_root_user="''${AWS_ACCESS_KEY_ID:-}"
+      minio_root_password="''${AWS_SECRET_ACCESS_KEY:-}"
+      minio_bucket="''${MFM_S3_BUCKET:-mfm-test}"
+      mkdir -p "$minio_data"
+
+      if [ -z "$minio_root_user" ]; then
+        minio_root_user=${lib.escapeShellArg minioRootUserDefault}
+      fi
+      if [ -z "$minio_root_password" ]; then
+        minio_root_password=${lib.escapeShellArg minioRootPasswordDefault}
+      fi
+
+      if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$minio_api_port/minio/health/ready" >/dev/null 2>&1; then
+        if [ ${if minioBrowserEnabled then "1" else "0"} -eq 0 ]; then
+          export MINIO_BROWSER=off
+        fi
+        MINIO_ROOT_USER="$minio_root_user" \
+        MINIO_ROOT_PASSWORD="$minio_root_password" \
+        ${minioRuntimePath}/bin/minio server "$minio_data" \
+          --address "127.0.0.1:$minio_api_port" \
+          --console-address "127.0.0.1:$minio_console_port" \
+          >"$minio_log" 2>&1 &
+        echo "$!" > "$minio_root/minio.pid"
+      fi
+
+      for _ in $(seq 1 120); do
+        if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$minio_api_port/minio/health/ready" >/dev/null 2>&1; then
+          break
+        fi
+        sleep 0.25
+      done
+
+      if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$minio_api_port/minio/health/ready" >/dev/null 2>&1; then
+        echo "ERROR: minio failed to become ready port=$minio_api_port"
+        if [ -f "$minio_log" ]; then
+          tail -50 "$minio_log" >&2 || true
+        fi
+        exit 1
+      fi
+
+      ${minioClientRuntimePath}/bin/mc alias set ci "http://127.0.0.1:$minio_api_port" "$minio_root_user" "$minio_root_password" >/dev/null
+      ${minioClientRuntimePath}/bin/mc mb --ignore-existing "ci/$minio_bucket" >/dev/null
+      echo "OK: minio ready api=$minio_api_port console=$minio_console_port bucket=$minio_bucket"
+    else
+      echo "SKIP: minio lifecycle disabled"
+    fi
+
+    if [ ${if rethEnabled then "1" else "0"} -eq 1 ]; then
+      started=$((started + 1))
+      reth_http_port=$(( ${toString rethHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      reth_ws_port=$(( ${toString rethWsPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      reth_auth_port=$(( ${toString rethAuthPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      reth_root="$services_root/reth"
+      reth_data="$reth_root/data"
+      reth_run="$reth_root/run"
+      reth_log="$artifacts_dir/reth-service.log"
+      mkdir -p "$reth_data" "$reth_run"
+
+      reth_jwt="$reth_root/jwt.hex"
+      if [ ! -f "$reth_jwt" ]; then
+        printf '%064x\n' 0 > "$reth_jwt"
+      fi
+      chmod 600 "$reth_jwt" 2>/dev/null || true
+
+      if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+        -H 'content-type: application/json' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+        "http://127.0.0.1:$reth_http_port" \
+        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+        reth_cmd=(
+          ${rethRuntimePath}/bin/reth
+          node
+        )
+${rethModeArgLines}
+        reth_cmd+=(
+          --datadir "$reth_data"
+          --ipcpath "$reth_run/reth.ipc"
+          --http
+          --http.addr 127.0.0.1
+          --http.port "$reth_http_port"
+          --ws
+          --ws.addr 127.0.0.1
+          --ws.port "$reth_ws_port"
+          --authrpc.addr 127.0.0.1
+          --authrpc.port "$reth_auth_port"
+          --authrpc.jwtsecret "$reth_jwt"
+        )
+${rethExtraArgLines}
+        "''${reth_cmd[@]}" >"$reth_log" 2>&1 &
+        echo "$!" > "$reth_root/reth.pid"
+      fi
+
+      for _ in $(seq 1 160); do
+        if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+          -H 'content-type: application/json' \
+          --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+          "http://127.0.0.1:$reth_http_port" \
+          | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+          break
+        fi
+        sleep 0.25
+      done
+
+      if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+        -H 'content-type: application/json' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+        "http://127.0.0.1:$reth_http_port" \
+        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+        echo "ERROR: reth failed to become ready port=$reth_http_port"
+        if [ -f "$reth_log" ]; then
+          tail -50 "$reth_log" >&2 || true
+        fi
+        exit 1
+      fi
+      echo "OK: reth ready http=$reth_http_port ws=$reth_ws_port auth=$reth_auth_port"
+    else
+      echo "SKIP: reth lifecycle disabled"
+    fi
+
+    if [ "$started" -eq 0 ]; then
+      echo "SKIP: no enabled services for lifecycle start"
+      exit 0
+    fi
+
+    echo "OK: services started count=$started"
+  '';
+
+  servicesStopScript = ''
+    set -euo pipefail
+
+    artifacts_dir="''${CI_ARTIFACTS_DIR:-/tmp/ci-artifacts}"
+    services_root="$artifacts_dir/services"
+
+    stopped=0
+
+    if [ ${if rethEnabled then "1" else "0"} -eq 1 ]; then
+      reth_pid_file="$services_root/reth/reth.pid"
+      if [ -f "$reth_pid_file" ]; then
+        reth_pid="$(cat "$reth_pid_file" 2>/dev/null || true)"
+        if [ -n "$reth_pid" ] && kill -0 "$reth_pid" 2>/dev/null; then
+          kill "$reth_pid" 2>/dev/null || true
+          for _ in $(seq 1 40); do
+            if ! kill -0 "$reth_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 0.25
+          done
+          kill -KILL "$reth_pid" 2>/dev/null || true
+        fi
+        rm -f "$reth_pid_file"
+      fi
+      stopped=$((stopped + 1))
+      echo "OK: reth stopped"
+    else
+      echo "SKIP: reth lifecycle disabled"
+    fi
+
+    if [ ${if minioEnabled then "1" else "0"} -eq 1 ]; then
+      minio_pid_file="$services_root/minio/minio.pid"
+      if [ -f "$minio_pid_file" ]; then
+        minio_pid="$(cat "$minio_pid_file" 2>/dev/null || true)"
+        if [ -n "$minio_pid" ] && kill -0 "$minio_pid" 2>/dev/null; then
+          kill "$minio_pid" 2>/dev/null || true
+          for _ in $(seq 1 40); do
+            if ! kill -0 "$minio_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 0.25
+          done
+          kill -KILL "$minio_pid" 2>/dev/null || true
+        fi
+        rm -f "$minio_pid_file"
+      fi
+      stopped=$((stopped + 1))
+      echo "OK: minio stopped"
+    else
+      echo "SKIP: minio lifecycle disabled"
+    fi
+
+    if [ ${if postgresEnabled then "1" else "0"} -eq 1 ]; then
+      postgres_data="$services_root/postgres/data"
+      if [ -f "$postgres_data/postmaster.pid" ]; then
+        ${postgresRuntimePath}/bin/pg_ctl -D "$postgres_data" stop -m fast >/dev/null 2>&1 || true
+      fi
+      stopped=$((stopped + 1))
+      echo "OK: postgres stopped"
+    else
+      echo "SKIP: postgres lifecycle disabled"
+    fi
+
+    if [ "$stopped" -eq 0 ]; then
+      echo "SKIP: no enabled services for lifecycle stop"
+      exit 0
+    fi
+
+    echo "OK: services stopped count=$stopped"
   '';
 
   isolationScript = ''
@@ -709,6 +1028,11 @@ in
       type = lib.types.bool;
       default = true;
     };
+
+    servicesLifecycle.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+    };
   };
 
   config = lib.mkMerge [
@@ -788,6 +1112,54 @@ in
         '';
         command = readyScript;
         runtimeInputs = serviceProbeRuntimeInputs;
+      };
+    })
+
+    (lib.mkIf (cfg.enable && cfg.servicesLifecycle.enable) {
+      nixfied.tasks."services-start" = mkTask {
+        id = "task.ops.services-start";
+        appName = "services-start";
+        kind = "service-op";
+        summary = "Start modeled local services";
+        description = ''
+          Starts enabled local services (postgres, minio, reth) using typed nixfied.services configuration.
+        '';
+        command = servicesStartScript;
+        runtimeInputs = serviceLifecycleRuntimeInputs;
+        passThroughEnv = [
+          "HOME"
+          runtime.env.var
+          runtime.slot.var
+          "CI_ARTIFACTS_DIR"
+          "AWS_ACCESS_KEY_ID"
+          "AWS_SECRET_ACCESS_KEY"
+          "MFM_S3_BUCKET"
+        ];
+        effects = [
+          "starts-daemon"
+          "writes-state"
+        ];
+        idempotent = true;
+      };
+
+      nixfied.tasks."services-stop" = mkTask {
+        id = "task.ops.services-stop";
+        appName = "services-stop";
+        kind = "service-op";
+        summary = "Stop modeled local services";
+        description = ''
+          Stops enabled local services (postgres, minio, reth) that were started by task.ops.services-start.
+        '';
+        command = servicesStopScript;
+        runtimeInputs = serviceLifecycleRuntimeInputs;
+        passThroughEnv = [
+          "HOME"
+          runtime.env.var
+          runtime.slot.var
+          "CI_ARTIFACTS_DIR"
+        ];
+        effects = [ "writes-state" ];
+        idempotent = true;
       };
     })
   ];
