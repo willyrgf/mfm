@@ -264,6 +264,7 @@ let
       runtimeInputs ? commonRuntimeInputs,
       workflowId ? null,
       contractArgs ? [ ],
+      argParser ? "typed",
       allowUnknownArgs ? true,
       outputFormat ? "text",
       outputChannels ? "stdout",
@@ -297,7 +298,7 @@ let
         version = 1;
         input = {
           args = {
-            parser = "typed";
+            parser = argParser;
             allowUnknown = allowUnknownArgs;
             spec = contractArgs;
           };
@@ -526,6 +527,54 @@ in
 
             echo "INFO: launching mfm_rest_api addr=$MFM_REST_API_ADDR"
             exec cargo run -p mfm-rest-api --bin mfm_rest_api -- "$@"
+          '';
+        };
+
+        mfm_cli = mkCommandTask {
+          id = "task.mfm_cli";
+          appName = "mfm_cli";
+          summary = "Run the mfm_cli compatibility wrapper";
+          description = ''
+            Passthrough entrypoint that forwards all CLI arguments to mfm_cli.
+          '';
+          tags = [
+            "cli"
+            "compat"
+          ];
+          usage = [
+            "nix run .#mfm_cli -- --help"
+            "nix run .#mfm_cli -- keystore list"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          argParser = "passthrough";
+          allowUnknownArgs = true;
+          env = sharedCargoRustEnv;
+          command = ''
+            set -euo pipefail
+
+            exec cargo run -q -p mfm --bin mfm_cli -- "$@"
+          '';
+        };
+
+        mfm_rest_api = mkCommandTask {
+          id = "task.mfm_rest_api";
+          appName = "mfm_rest_api";
+          summary = "Run the mfm_rest_api server";
+          description = ''
+            Typed entrypoint for launching the REST API process.
+          '';
+          tags = [
+            "api"
+            "server"
+          ];
+          usage = [ "nix run .#mfm_rest_api" ];
+          runtimeInputs = rustRuntimeInputs;
+          allowUnknownArgs = false;
+          env = sharedCargoRustEnv;
+          command = ''
+            set -euo pipefail
+
+            exec cargo run -q -p mfm-rest-api --bin mfm_rest_api -- "$@"
           '';
         };
 
@@ -787,6 +836,8 @@ in
                 grep -q "id = \"task.ci.services-stop\";" "$ROOT/nixfied/project/module.nix"
                 grep -q "id = \"task.ci.workflow-basic\";" "$ROOT/nixfied/project/module.nix"
                 grep -q "id = \"task.ci.workflow-parity\";" "$ROOT/nixfied/project/module.nix"
+                grep -q "id = \"task.mfm_cli\";" "$ROOT/nixfied/project/module.nix"
+                grep -q "id = \"task.mfm_rest_api\";" "$ROOT/nixfied/project/module.nix"
                 grep -q "id = \"workflow.ci.full\";" "$ROOT/nixfied/project/module.nix"
                 grep -q "taskId = \"task.ci.workflow-basic\";" "$ROOT/nixfied/project/module.nix"
                 grep -q "taskId = \"task.ci.workflow-parity\";" "$ROOT/nixfied/project/module.nix"
