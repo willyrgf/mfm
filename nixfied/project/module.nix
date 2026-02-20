@@ -903,6 +903,12 @@ in
 
               if ! ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
                 echo "ERROR: postgres failed to become ready port=$POSTGRES_PORT"
+                if [ -f "$postgres_log" ]; then
+                  tail -50 "$postgres_log" >&2 || true
+                fi
+                if command -v lsof >/dev/null 2>&1; then
+                  lsof -nP -iTCP:"$POSTGRES_PORT" -sTCP:LISTEN >&2 || true
+                fi
                 exit 1
               fi
 
@@ -936,6 +942,10 @@ in
                 if [ -f "$minio_log" ]; then
                   tail -50 "$minio_log" >&2 || true
                 fi
+                if command -v lsof >/dev/null 2>&1; then
+                  lsof -nP -iTCP:"$MINIO_API_PORT" -sTCP:LISTEN >&2 || true
+                  lsof -nP -iTCP:"$MINIO_CONSOLE_PORT" -sTCP:LISTEN >&2 || true
+                fi
                 exit 1
               fi
 
@@ -944,6 +954,9 @@ in
                 if [ -f "$minio_log" ]; then
                   tail -50 "$minio_log" >&2 || true
                 fi
+                if command -v lsof >/dev/null 2>&1; then
+                  lsof -nP -iTCP:"$MINIO_API_PORT" -sTCP:LISTEN >&2 || true
+                fi
                 exit 1
               fi
 
@@ -951,6 +964,9 @@ in
                 echo "ERROR: failed to ensure minio bucket bucket=$MFM_S3_BUCKET"
                 if [ -f "$minio_log" ]; then
                   tail -50 "$minio_log" >&2 || true
+                fi
+                if command -v lsof >/dev/null 2>&1; then
+                  lsof -nP -iTCP:"$MINIO_API_PORT" -sTCP:LISTEN >&2 || true
                 fi
                 exit 1
               fi
@@ -1008,6 +1024,11 @@ in
                 echo "ERROR: reth failed to become ready port=$RETH_HTTP_PORT"
                 if [ -f "$reth_log" ]; then
                   tail -50 "$reth_log" >&2 || true
+                fi
+                if command -v lsof >/dev/null 2>&1; then
+                  lsof -nP -iTCP:"$RETH_HTTP_PORT" -sTCP:LISTEN >&2 || true
+                  lsof -nP -iTCP:"$RETH_WS_PORT" -sTCP:LISTEN >&2 || true
+                  lsof -nP -iTCP:"$RETH_AUTH_PORT" -sTCP:LISTEN >&2 || true
                 fi
                 exit 1
               fi
