@@ -594,15 +594,14 @@ in
           id = "task.ci";
           appName = "ci";
           kind = "workflow";
-          summary = "Run CI workflows (basic|audit|parity|full|mainnet)";
-          description = "Dispatches to model workflows and supports legacy CI mode flags.";
+          summary = "Run CI workflows (use --mode <mode>)";
+          description = "Dispatches to model-derived CI workflows.";
           usage = [
-            "nix run .#ci -- --basic --summary"
-            "nix run .#ci -- --audit --summary"
-            "nix run .#ci -- --parity --summary"
-            "nix run .#ci -- --full --summary"
-            "nix run .#ci -- --mainnet --summary"
+            "nix run .#ci -- --mode basic --summary"
+            "nix run .#ci -- --mode audit --summary"
             "nix run .#ci -- --mode parity --summary"
+            "nix run .#ci -- --mode full --summary"
+            "nix run .#ci -- --mode mainnet --summary"
           ];
           runtimeInputs = rustRuntimeInputs;
           workflowId = "workflow.ci.full";
@@ -617,45 +616,8 @@ in
               name = "mode";
               kind = "option";
               long = "--mode";
-              type = "enum";
-              values = [
-                "basic"
-                "audit"
-                "parity"
-                "full"
-                "mainnet"
-              ];
-              description = "CI mode to run.";
-            }
-            {
-              name = "basic";
-              kind = "flag";
-              long = "--basic";
-              description = "Alias for --mode basic.";
-            }
-            {
-              name = "audit";
-              kind = "flag";
-              long = "--audit";
-              description = "Alias for --mode audit.";
-            }
-            {
-              name = "parity";
-              kind = "flag";
-              long = "--parity";
-              description = "Alias for --mode parity.";
-            }
-            {
-              name = "full";
-              kind = "flag";
-              long = "--full";
-              description = "Alias for --mode full.";
-            }
-            {
-              name = "mainnet";
-              kind = "flag";
-              long = "--mainnet";
-              description = "Alias for --mode mainnet.";
+              type = "string";
+              description = "CI mode to run (resolved from workflow.ci.* in the compiled model).";
             }
             {
               name = "bg";
@@ -1369,6 +1331,9 @@ in
                 "help"
                 "workflow-test"
                 "workflow-ci"
+                "workflow-mode-valid"
+                "workflow-mode-invalid"
+                "workflow-mode-dotted-shorthand"
                 "isolation"
               ];
               description = "Run one shard only.";
@@ -1383,45 +1348,8 @@ in
               name = "mode";
               kind = "option";
               long = "--mode";
-              type = "enum";
-              values = [
-                "basic"
-                "audit"
-                "parity"
-                "full"
-                "mainnet"
-              ];
+              type = "string";
               description = "CI workflow mode used by the workflow-ci shard.";
-            }
-            {
-              name = "basic";
-              kind = "flag";
-              long = "--basic";
-              description = "Alias for --mode basic.";
-            }
-            {
-              name = "audit";
-              kind = "flag";
-              long = "--audit";
-              description = "Alias for --mode audit.";
-            }
-            {
-              name = "parity";
-              kind = "flag";
-              long = "--parity";
-              description = "Alias for --mode parity.";
-            }
-            {
-              name = "full";
-              kind = "flag";
-              long = "--full";
-              description = "Alias for --mode full.";
-            }
-            {
-              name = "mainnet";
-              kind = "flag";
-              long = "--mainnet";
-              description = "Alias for --mode mainnet.";
             }
           ];
           command = ''
@@ -1438,6 +1366,9 @@ in
               "help"
               "workflow-test"
               "workflow-ci"
+              "workflow-mode-valid"
+              "workflow-mode-invalid"
+              "workflow-mode-dotted-shorthand"
               "isolation"
             )
             EXECUTED=0
@@ -1462,13 +1393,16 @@ in
 
             usage() {
               cat <<'USAGE'
-            Usage: nix run .#framework::test [-- --mode <basic|audit|parity|full|mainnet>] [--summary] [--summary-json <path>] [--shard <name>] [--list-shards]
+            Usage: nix run .#framework::test [-- --mode <mode>] [--summary] [--summary-json <path>] [--shard <name>] [--list-shards]
 
             Shards:
               flake-check   Run nix flake check for the current project root.
               help          Validate generated help output.
               workflow-test Run the test app surface.
               workflow-ci   Run the ci app surface in selected mode.
+              workflow-mode-valid             Validate a model-derived CI mode via --mode.
+              workflow-mode-invalid           Validate unknown mode handling and expected-mode output.
+              workflow-mode-dotted-shorthand Validate dotted shorthand flags are rejected.
               isolation     Run isolation checks when FRAMEWORK_ISOLATION=1 or explicitly selected.
             USAGE
             }
@@ -1489,6 +1423,62 @@ in
                 fi
               done
               return 1
+            }
+
+            list_ci_modes() {
+              if [ -n "''${CI_MODES_CACHE:-}" ]; then
+                printf '%s\n' "$CI_MODES_CACHE"
+                return 0
+              fi
+
+              CI_MODES_CACHE="$(
+                nix run "path:$ROOT"#help \
+                  | sed -n 's/^  workflow\.ci\.\([a-z0-9.-]\+\) - .*$/\1/p'
+              )"
+              if [ -z "$CI_MODES_CACHE" ]; then
+                log_error "unable to derive workflow.ci modes from model-generated help output"
+                return 1
+              fi
+
+              printf '%s\n' "$CI_MODES_CACHE"
+            }
+
+            ci_mode_choices() {
+              local mode_name expected=""
+              while IFS= read -r mode_name; do
+                if [ -z "$mode_name" ]; then
+                  continue
+                fi
+                if [ -z "$expected" ]; then
+                  expected="$mode_name"
+                else
+                  expected="$expected|$mode_name"
+                fi
+              done < <(list_ci_modes)
+              printf '%s' "$expected"
+            }
+
+            mode_exists() {
+              local candidate="$1"
+              local mode_name
+              while IFS= read -r mode_name; do
+                if [ "$candidate" = "$mode_name" ]; then
+                  return 0
+                fi
+              done < <(list_ci_modes)
+              return 1
+            }
+
+            first_ci_mode() {
+              if mode_exists "mainnet"; then
+                printf '%s\n' "mainnet"
+                return 0
+              fi
+              if mode_exists "basic"; then
+                printf '%s\n' "basic"
+                return 0
+              fi
+              list_ci_modes | head -n 1
             }
 
             write_summary_json() {
@@ -1520,7 +1510,8 @@ in
                 log_ok "shard passed name=$shard_name"
                 return 0
               fi
-              local rc=$?
+              local rc
+              rc=$?
               log_error "shard failed name=$shard_name rc=$rc"
               return "$rc"
             }
@@ -1539,6 +1530,77 @@ in
 
             shard_workflow_ci() {
               nix run "path:$ROOT"#ci -- --mode "$MODE" --summary
+            }
+
+            shard_workflow_mode_valid() {
+              local derived_mode
+              derived_mode="$(first_ci_mode)"
+              if [ -z "$derived_mode" ]; then
+                log_error "no model-derived workflow.ci mode found"
+                return 1
+              fi
+              nix run "path:$ROOT"#ci -- --mode "$derived_mode" --summary
+            }
+
+            shard_workflow_mode_invalid() {
+              local output rc expected_mode
+              expected_mode="$(first_ci_mode)"
+              if [ -z "$expected_mode" ]; then
+                log_error "no model-derived workflow.ci mode found"
+                return 1
+              fi
+
+              set +e
+              output="$(nix run "path:$ROOT"#ci -- --mode "__invalid_mode__" --summary 2>&1)"
+              rc=$?
+              set -e
+
+              if [ "$rc" -eq 0 ]; then
+                log_error "expected invalid mode command to fail"
+                return 1
+              fi
+
+              printf '%s' "$output" | grep -F "unknown mode '__invalid_mode__'" >/dev/null || {
+                log_error "invalid mode output missing unknown-mode marker"
+                printf '%s\n' "$output" >&2
+                return 1
+              }
+              printf '%s' "$output" | grep -F "expected:" >/dev/null || {
+                log_error "invalid mode output missing expected-mode marker"
+                printf '%s\n' "$output" >&2
+                return 1
+              }
+              printf '%s' "$output" | grep -F "$expected_mode" >/dev/null || {
+                log_error "invalid mode output missing derived mode '$expected_mode'"
+                printf '%s\n' "$output" >&2
+                return 1
+              }
+            }
+
+            shard_workflow_mode_dotted_shorthand() {
+              local derived_mode dotted_mode output rc
+              derived_mode="$(first_ci_mode)"
+              if [ -z "$derived_mode" ]; then
+                log_error "no model-derived workflow.ci mode found"
+                return 1
+              fi
+              dotted_mode="$derived_mode.probe"
+
+              set +e
+              output="$(nix run "path:$ROOT"#ci -- "--$dotted_mode" --summary 2>&1)"
+              rc=$?
+              set -e
+
+              if [ "$rc" -eq 0 ]; then
+                log_error "expected dotted shorthand '--$dotted_mode' to fail"
+                return 1
+              fi
+
+              printf '%s' "$output" | grep -F "unknown option '--$dotted_mode'" >/dev/null || {
+                log_error "dotted shorthand rejection output missing expected marker"
+                printf '%s\n' "$output" >&2
+                return 1
+              }
             }
 
             shard_isolation() {
@@ -1565,6 +1627,15 @@ in
                 workflow-ci)
                   run_shard "$shard_name" shard_workflow_ci
                   ;;
+                workflow-mode-valid)
+                  run_shard "$shard_name" shard_workflow_mode_valid
+                  ;;
+                workflow-mode-invalid)
+                  run_shard "$shard_name" shard_workflow_mode_invalid
+                  ;;
+                workflow-mode-dotted-shorthand)
+                  run_shard "$shard_name" shard_workflow_mode_dotted_shorthand
+                  ;;
                 isolation)
                   run_shard "$shard_name" shard_isolation
                   ;;
@@ -1584,10 +1655,6 @@ in
                   fi
                   MODE="$2"
                   shift 2
-                  ;;
-                --basic|--audit|--parity|--full|--mainnet)
-                  MODE="''${1#--}"
-                  shift
                   ;;
                 --summary)
                   SUMMARY=1
@@ -1634,14 +1701,15 @@ in
               exit 2
             fi
 
-            case "$MODE" in
-              basic|audit|parity|full|mainnet)
-                ;;
-              *)
-                log_error "unknown mode '$MODE' (expected: basic|audit|parity|full|mainnet)"
-                exit 2
-                ;;
-            esac
+            if ! mode_exists "$MODE"; then
+              expected_modes="$(ci_mode_choices)"
+              if [ -n "$expected_modes" ]; then
+                log_error "unknown mode '$MODE' (expected: $expected_modes)"
+              else
+                log_error "unknown mode '$MODE'"
+              fi
+              exit 2
+            fi
 
             if [ "$LIST_SHARDS" -eq 1 ]; then
               print_shards

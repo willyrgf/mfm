@@ -83,12 +83,19 @@ nix run .#help
 nix run .#dev
 nix run .#check
 nix run .#test
-nix run .#ci -- --basic --summary
-nix run .#ci -- --audit --summary
-nix run .#ci -- --parity --summary
-nix run .#ci -- --full --summary
 nix run .#ci -- --mode basic --summary
+nix run .#ci -- --mode audit --summary
+nix run .#ci -- --mode parity --summary
+nix run .#ci -- --mode full --summary
+nix run .#ci -- --mode <mode> --summary
 ```
+
+### Behavioral changes (workflow modes)
+
+- `--mode <value>` is the canonical interface for workflow mode selection.
+- Shorthand `--<mode>` is only accepted for simple mode names matching `[a-z0-9-]+`.
+- Dotted/complex modes must use `--mode` (for example `--mode parallel.smoke`).
+- Unknown mode errors now print expected modes derived from the compiled model.
 
 ### Contract notes:
 

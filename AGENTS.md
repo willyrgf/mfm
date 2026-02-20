@@ -6,8 +6,8 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 ## Read First (Non-Negotiables)
 
 - Keep changes small and local; prefer 1 logical change per PR/commit.
-- Match CI (Nixfied): use `nix run .#check`, `nix run .#test`, and `nix run .#ci -- --basic/--audit/--parity/--full --summary`.
-- Default pre-commit gate: run `nix run .#ci -- --full` before every commit.
+- Match CI (Nixfied): use `nix run .#check`, `nix run .#test`, and `nix run .#ci -- --mode <mode> --summary`.
+- Default pre-commit gate: run `nix run .#ci -- --mode full` before every commit.
 - Do not commit raw `.sh` scripts; shell logic must be Nix-packaged and executed from Nix-evaluated paths.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
@@ -46,10 +46,10 @@ Nixfied is the canonical entrypoint for dev/test/build/check/ci:
 - `nix run .#check`
 - `nix run .#test`
 - `nix run .#build`
-- `nix run .#ci -- --basic --summary`
-- `nix run .#ci -- --audit --summary`
-- `nix run .#ci -- --parity --summary`
-- `nix run .#ci -- --full --summary`
+- `nix run .#ci -- --mode basic --summary`
+- `nix run .#ci -- --mode audit --summary`
+- `nix run .#ci -- --mode parity --summary`
+- `nix run .#ci -- --mode full --summary`
 
 ## Project Overview
 
@@ -146,7 +146,7 @@ nix run .#test
 
 3. **Security Audit**:
 ```bash
-nix run .#ci -- --audit --summary
+nix run .#ci -- --mode audit --summary
 ```
 
 ### Nix (CI Parity)
@@ -392,7 +392,7 @@ When changing CLI/REST behavior, update the relevant docs in the same change:
 ## CI Requirements
 
 Before opening a PR (or finishing a change), ensure [Code Style and Standards](#code-style-and-standards) are met.
-Before each commit, run: `nix run .#ci -- --full`.
+Before each commit, run: `nix run .#ci -- --mode full`.
 
 If you use Nix or need CI parity, also run: `nix flake check && nix build`.
 
@@ -448,12 +448,12 @@ nix run .#check
 nix run .#test
 
 # Security audit
-nix run .#ci -- --audit --summary
+nix run .#ci -- --mode audit --summary
 
 # CI modes
-nix run .#ci -- --basic --summary
-nix run .#ci -- --parity --summary
-nix run .#ci -- --full --summary
+nix run .#ci -- --mode basic --summary
+nix run .#ci -- --mode parity --summary
+nix run .#ci -- --mode full --summary
 
 # Release build (all features)
 nix run .#build

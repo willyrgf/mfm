@@ -8,6 +8,9 @@ let
   lib = pkgs.lib;
   modelFile = pkgs.writeText "nixfied-model.json" (builtins.toJSON model);
   registryShell = registry.events.mkShellLib { };
+  workflowModesShell = import ./workflow-modes.nix {
+    inherit pkgs;
+  };
   executor = import ./executor.nix {
     inherit
       pkgs
@@ -34,6 +37,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
   SETSID_BIN=${lib.escapeShellArg setsidBin}
 
   ${registryShell}
+  ${workflowModesShell}
 
   mkdir -p "$RUNS_DIR" "$RUN_LOCKS_DIR" "$RUN_LOG_DIR" "$RUN_COUNTER_ROOT"
 
@@ -162,6 +166,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
     local parse_opts=1
     local arg
+    local mode_value
+    local shorthand_mode
 
     while [ "$#" -gt 0 ]; do
       arg="$1"
@@ -180,11 +186,23 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
             echo "ERROR: --mode requires a value"
             return 2
           fi
+          mode_value="$1"
           shift
+          workflow_resolve_mode_id "$workflow_id" "$mode_value" >/dev/null || return $?
           ;;
         --mode=*)
+          mode_value="''${arg#--mode=}"
+          workflow_resolve_mode_id "$workflow_id" "$mode_value" >/dev/null || return $?
           ;;
-        --summary|--basic|--app|--env|--full)
+        --summary)
+          ;;
+        --*)
+          shorthand_mode="''${arg#--}"
+          if workflow_simple_shorthand_exists_for_family "$workflow_id" "$shorthand_mode"; then
+            continue
+          fi
+          echo "ERROR: unknown option '$arg' for workflow '$workflow_id'"
+          return 2
           ;;
         -*)
           echo "ERROR: unknown option '$arg' for workflow '$workflow_id'"
@@ -812,10 +830,15 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
       return 2
     fi
 
-    split_process_mode "$@"
-    validate_typed_task_args "$task_id" "''${FORWARD_ARGS[@]}"
-
     workflow_ref="$(resolve_task_workflow_ref "$task_id")"
+
+    split_process_mode "$@"
+    if [ -n "$workflow_ref" ]; then
+      validate_workflow_args "$workflow_ref" "''${FORWARD_ARGS[@]}"
+    else
+      validate_typed_task_args "$task_id" "''${FORWARD_ARGS[@]}"
+    fi
+
     if [ -n "$workflow_ref" ]; then
       workflow_mode="$(workflow_mode_name "$workflow_ref")"
       execution_mode="workflow"

@@ -7,6 +7,9 @@
 let
   modelFile = pkgs.writeText "nixfied-model.json" (builtins.toJSON model);
   registryShell = registry.events.mkShellLib { };
+  workflowModesShell = import ./workflow-modes.nix {
+    inherit pkgs;
+  };
   envSandboxShell = import ./env-sandbox.nix {
     inherit
       pkgs
@@ -23,6 +26,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   REGISTRY_ROOT="''${REGISTRY_ROOT:-$REGISTRY_ROOT_DEFAULT}"
 
   ${registryShell}
+  ${workflowModesShell}
   ${envSandboxShell}
 
   sha256_text() {
@@ -349,22 +353,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local workflow_id="$1"
     local mode_override="$2"
 
-    if [ -z "$mode_override" ]; then
-      printf '%s' "$workflow_id"
-      return
-    fi
-
-    if [[ "$workflow_id" == workflow.ci.* ]]; then
-      local candidate="workflow.ci.$mode_override"
-      if ${pkgs.jq}/bin/jq -e --arg workflowId "$candidate" '.workflows[$workflowId] != null' "$MODEL_FILE" >/dev/null; then
-        printf '%s' "$candidate"
-        return
-      fi
-      echo "ERROR: unknown mode '$mode_override' (expected: basic|app|env|full)" >&2
-      return 2
-    fi
-
-    printf '%s' "$workflow_id"
+    workflow_resolve_mode_id "$workflow_id" "$mode_override"
   }
 
   resolve_effective_max_workers() {
@@ -1424,6 +1413,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local -a passthrough_args
     passthrough_args=()
     local arg
+    local shorthand_mode
 
     while [ "$#" -gt 0 ]; do
       arg="$1"
@@ -1446,14 +1436,20 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         --mode=*)
           mode_override="''${arg#--mode=}"
           ;;
-        --basic|--app|--env|--full)
-          mode_override="''${arg#--}"
-          ;;
         --summary)
           print_summary=1
           ;;
         --)
           parse_options=0
+          ;;
+        --*)
+          shorthand_mode="''${arg#--}"
+          if workflow_simple_shorthand_exists_for_family "$workflow_id" "$shorthand_mode"; then
+            mode_override="$shorthand_mode"
+          else
+            echo "ERROR: unknown option '$arg'"
+            return 2
+          fi
           ;;
         -*)
           echo "ERROR: unknown option '$arg'"
