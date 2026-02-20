@@ -119,10 +119,6 @@ let
     "API_KEY"
     "LOG_LEVEL"
     "OUTPUT_MODE"
-    "RUSTFLAGS"
-    "RUSTDOCFLAGS"
-    "CARGO_BUILD_RUSTFLAGS"
-    "CARGO_ENCODED_RUSTFLAGS"
     "RUST_LOG"
     "MFM_LOG"
     "LOG_FORMAT"
@@ -155,6 +151,8 @@ let
     }
     // lib.optionalAttrs pkgs.stdenv.isDarwin {
       LIBRARY_PATH = "${pkgs.libiconv}/lib";
+      CC = "/usr/bin/cc";
+      CXX = "/usr/bin/c++";
     };
 
   cargoFmtCheckCmd = "cargo fmt --all -- --check";
