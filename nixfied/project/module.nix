@@ -854,8 +854,9 @@ in
 
               postgres_root="$services_root/postgres"
               postgres_data="$postgres_root/data"
+              postgres_run="$postgres_root/run"
               postgres_log="$artifacts_dir/postgres-service.log"
-              mkdir -p "$postgres_data"
+              mkdir -p "$postgres_data" "$postgres_run"
 
               if ! ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
                 if [ ! -f "$postgres_data/PG_VERSION" ]; then
@@ -881,7 +882,7 @@ in
                   fi
                 fi
 
-                if ! ${postgresPackage}/bin/pg_ctl -D "$postgres_data" -l "$postgres_log" -o "-p $POSTGRES_PORT -h 127.0.0.1" start; then
+                if ! ${postgresPackage}/bin/pg_ctl -D "$postgres_data" -l "$postgres_log" -o "-p $POSTGRES_PORT -h 127.0.0.1 -k $postgres_run" start; then
                   echo "ERROR: postgres failed to start port=$POSTGRES_PORT data=$postgres_data"
                   if [ -f "$postgres_log" ]; then
                     tail -50 "$postgres_log" >&2 || true
