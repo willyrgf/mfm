@@ -6,6 +6,7 @@
 }:
 let
   lib = pkgs.lib;
+  workspaceMarkerPresent = builtins.pathExists "${projectRoot}/nixfied/.framework/.workspace";
 
   orchestrator = import ./orchestrator.nix {
     inherit
@@ -58,6 +59,20 @@ let
 
   helpFile = pkgs.writeText "nixfied-help.txt" "${helpText}\n";
   docsFile = pkgs.writeText "nixfied-docs.md" "${docsText}\n";
+
+  frameworkProxyApps =
+    if workspaceMarkerPresent then
+      { }
+    else
+      {
+        "framework::install" = mkApp "framework::install" ''
+          NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied#run-task --refresh -- task.framework.install "$@"
+        '';
+
+        "framework::upgrade" = mkApp "framework::upgrade" ''
+          NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied#run-task --refresh -- task.framework.upgrade "$@"
+        '';
+      };
 in
 {
   "run-task" = mkApp "run-task" ''
@@ -118,6 +133,7 @@ in
   };
 }
 // taskApps
+// frameworkProxyApps
 // {
   default =
     if builtins.hasAttr "help" taskApps then

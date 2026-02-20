@@ -88,6 +88,7 @@ in
       };
 
       views = compileViews {
+        inherit projectRoot;
         resolved = resolvedModuleGraph.config;
         inherit
           runtime
