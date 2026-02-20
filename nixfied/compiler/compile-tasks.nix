@@ -10,6 +10,11 @@
 let
   rawTasks = resolved.tasks or { };
   names = builtins.sort builtins.lessThan (builtins.attrNames rawTasks);
+  globalRuntimeInputs = map builtins.toString (resolved.tooling.runtimePackages or [ ]);
+
+  unique =
+    list:
+    builtins.foldl' (acc: value: if builtins.elem value acc then acc else acc ++ [ value ]) [ ] list;
 
   normalizeHooks =
     hooks:
@@ -59,7 +64,7 @@ let
         workdir = raw.runtime.workdir;
         customWorkdir = raw.runtime.customWorkdir;
         hermetic = raw.runtime.hermetic;
-        runtimeInputs = map builtins.toString raw.runtime.runtimeInputs;
+        runtimeInputs = unique (map builtins.toString raw.runtime.runtimeInputs ++ globalRuntimeInputs);
         passThroughEnv = raw.runtime.passThroughEnv;
         env = raw.runtime.env;
         umask = raw.runtime.umask;

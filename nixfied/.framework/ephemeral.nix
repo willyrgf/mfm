@@ -57,13 +57,20 @@ let
     inherit pkgs project;
     loggingPrelude = resolvedLoggingPrelude;
   };
-  processRegistry = import ./lib/process-registry.nix {
-    inherit pkgs project;
-    loggingPrelude = resolvedLoggingPrelude;
-  };
+  processRegistry =
+    if builtins.pathExists ./lib/process-registry.nix then
+      import ./lib/process-registry.nix {
+        inherit pkgs project;
+        loggingPrelude = resolvedLoggingPrelude;
+      }
+    else
+      {
+        emitEvent = pkgs.writeShellScript "emit-event-noop" ''
+          exit 0
+        '';
+      };
   shellContract = import ./lib/shell-contract.nix { inherit pkgs; };
 
-  lockDir = "/tmp";
   lockPrefix = "${projectId}-slot";
 
   slotMax = (project.slots or { }).max or 9;
@@ -90,13 +97,19 @@ let
 
     set -euo pipefail
 
-    LOCK_DIR="${lockDir}"
+    LOCK_DIR="''${NIXFIED_EPHEMERAL_LOCK_DIR:-''${TMPDIR:-/tmp}}"
     LOCK_PREFIX="${lockPrefix}"
+    if ! mkdir -p "$LOCK_DIR"; then
+      log_error "Unable to create ephemeral lock directory '$LOCK_DIR'"
+      exit 1
+    fi
 
     for slot in $(seq 0 ${toString slotMax}); do
       LOCK_FILE="$LOCK_DIR/$LOCK_PREFIX-$slot.lock"
       FD=$((200 + slot))
-      eval "exec $FD>\"$LOCK_FILE\""
+      if ! eval "exec $FD>\"$LOCK_FILE\""; then
+        continue
+      fi
 
       if ${pkgs.flock}/bin/flock -n "$FD" 2>/dev/null; then
         echo "export ${projectIdUpper}_EPHEMERAL_SLOT=$slot"
@@ -126,8 +139,13 @@ let
   mkEphemeralRoot = pkgs.writeShellScript "mk-ephemeral-root" ''
     set -euo pipefail
 
-    UNIQUE_ID=$(${mkUniqueId})
-    EPHEMERAL_ROOT="/tmp/${projectId}-ephemeral-$UNIQUE_ID"
+    EPHEMERAL_BASE="''${NIXFIED_EPHEMERAL_ROOT_BASE:-''${TMPDIR:-/tmp}}"
+    if ! mkdir -p "$EPHEMERAL_BASE"; then
+      echo "ERROR: Unable to create ephemeral base directory '$EPHEMERAL_BASE'" >&2
+      exit 1
+    fi
+
+    EPHEMERAL_ROOT="$(${pkgs.coreutils}/bin/mktemp -d "$EPHEMERAL_BASE/${projectId}-ephemeral-XXXXXX")"
 
     mkdir -p "$EPHEMERAL_ROOT"/{source,data/${projectId},build}
     ${pkgs.lib.concatMapStringsSep "\n" (dir: ''
@@ -235,7 +253,7 @@ let
 
       set -euo pipefail
 
-      export ORIGINAL_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+      export ORIGINAL_ROOT="''${NIXFIED_CALLER_PWD:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
       # Compatibility aliases:
       # - NIXFIED_ENV: alias for the configured slot variable (default: NIX_ENV).
@@ -249,12 +267,16 @@ let
         export ${projectIdUpper}_SLOT_LOCK_FD=""
         log_info "Using pre-set slot: ''${${slotVar}} (no lock - caller managed)"
       else
-        eval "$(${acquireSlotLock})"
+        if ! eval "$(${acquireSlotLock})"; then
+          exit 1
+        fi
       fi
 
       export ${envVar}="''${${envVar}:-test}"
 
-      export RUN_ID="$(${id.resolveId} "''${RUN_ID:-}")"
+      if [ -z "''${RUN_ID:-}" ]; then
+        export RUN_ID="$(${pkgs.coreutils}/bin/date -u +%Y%m%d-%H%M%S)-$$-''${RANDOM:-0}"
+      fi
 
       export ${projectIdUpper}_EPHEMERAL_ROOT=$(${mkEphemeralRoot})
       export ${projectIdUpper}_EPHEMERAL=1
@@ -344,7 +366,6 @@ in
     getEphemeralPaths
     acquireSlotLock
     releaseSlotLock
-    lockDir
     lockPrefix
     ;
 }

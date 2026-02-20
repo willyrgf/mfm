@@ -11,11 +11,13 @@ let
 
   postgresCfg = services.postgres;
   nginxCfg = services.nginx;
+  minioCfg = services.minio;
   rethCfg = services.reth;
   heliosCfg = services.helios;
 
   postgresEnabled = postgresCfg.enable;
   nginxEnabled = nginxCfg.enable;
+  minioEnabled = minioCfg.enable;
   rethEnabled = rethCfg.enable;
   heliosEnabled = heliosCfg.enable;
 
@@ -28,8 +30,14 @@ let
 
   postgresPortBase = if postgresEnabled then resolvePortBase postgresCfg.portKey else 0;
   nginxHttpPortBase = if nginxEnabled then resolvePortBase nginxCfg.portKeyHttp else 0;
+  nginxHttpsPortBase = if nginxEnabled then resolvePortBase nginxCfg.portKeyHttps else 0;
+  minioApiPortBase = if minioEnabled then resolvePortBase minioCfg.portKeyApi else 0;
+  minioConsolePortBase = if minioEnabled then resolvePortBase minioCfg.portKeyConsole else 0;
   rethHttpPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyHttp else 0;
+  rethWsPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyWs else 0;
+  rethAuthPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyAuth else 0;
   heliosRpcPortBase = if heliosEnabled then resolvePortBase heliosCfg.portKeyRpc else 0;
+  heliosExecutionRpcPortBase = if heliosEnabled then resolvePortBase heliosCfg.executionRpcPortKey else 0;
 
   netcatPkg =
     if pkgs ? netcat then
@@ -287,8 +295,9 @@ ${envOffsetCase}
     fi
 
     if [ ${if nginxEnabled then "1" else "0"} -eq 1 ]; then
-      checks=$((checks + 1))
+      checks=$((checks + 2))
       nginx_http_port=$(( ${toString nginxHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      nginx_https_port=$(( ${toString nginxHttpsPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       echo "INFO: checking nginx health port=$nginx_http_port"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_http_port" >/dev/null 2>&1; then
         echo "OK: nginx healthy port=$nginx_http_port"
@@ -296,13 +305,44 @@ ${envOffsetCase}
         echo "ERROR: nginx unhealthy port=$nginx_http_port"
         exit 1
       fi
+      echo "INFO: checking nginx health port=$nginx_https_port"
+      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_https_port" >/dev/null 2>&1; then
+        echo "OK: nginx healthy port=$nginx_https_port"
+      else
+        echo "ERROR: nginx unhealthy port=$nginx_https_port"
+        exit 1
+      fi
     else
       echo "SKIP: nginx health check disabled"
     fi
 
+    if [ ${if minioEnabled then "1" else "0"} -eq 1 ]; then
+      checks=$((checks + 2))
+      minio_api_port=$(( ${toString minioApiPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      minio_console_port=$(( ${toString minioConsolePortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      echo "INFO: checking minio health port=$minio_api_port"
+      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$minio_api_port" >/dev/null 2>&1; then
+        echo "OK: minio healthy port=$minio_api_port"
+      else
+        echo "ERROR: minio unhealthy port=$minio_api_port"
+        exit 1
+      fi
+      echo "INFO: checking minio health port=$minio_console_port"
+      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$minio_console_port" >/dev/null 2>&1; then
+        echo "OK: minio healthy port=$minio_console_port"
+      else
+        echo "ERROR: minio unhealthy port=$minio_console_port"
+        exit 1
+      fi
+    else
+      echo "SKIP: minio health check disabled"
+    fi
+
     if [ ${if rethEnabled then "1" else "0"} -eq 1 ]; then
-      checks=$((checks + 1))
+      checks=$((checks + 3))
       reth_http_port=$(( ${toString rethHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      reth_ws_port=$(( ${toString rethWsPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      reth_auth_port=$(( ${toString rethAuthPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       echo "INFO: checking reth health port=$reth_http_port"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
@@ -314,13 +354,28 @@ ${envOffsetCase}
         echo "ERROR: reth unhealthy port=$reth_http_port"
         exit 1
       fi
+      echo "INFO: checking reth health port=$reth_ws_port"
+      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$reth_ws_port" >/dev/null 2>&1; then
+        echo "OK: reth healthy port=$reth_ws_port"
+      else
+        echo "ERROR: reth unhealthy port=$reth_ws_port"
+        exit 1
+      fi
+      echo "INFO: checking reth health port=$reth_auth_port"
+      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$reth_auth_port" >/dev/null 2>&1; then
+        echo "OK: reth healthy port=$reth_auth_port"
+      else
+        echo "ERROR: reth unhealthy port=$reth_auth_port"
+        exit 1
+      fi
     else
       echo "SKIP: reth health check disabled"
     fi
 
     if [ ${if heliosEnabled then "1" else "0"} -eq 1 ]; then
-      checks=$((checks + 1))
+      checks=$((checks + 2))
       helios_rpc_port=$(( ${toString heliosRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      helios_execution_rpc_port=$(( ${toString heliosExecutionRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       echo "INFO: checking helios health port=$helios_rpc_port"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
@@ -330,6 +385,17 @@ ${envOffsetCase}
         echo "OK: helios healthy port=$helios_rpc_port"
       else
         echo "ERROR: helios unhealthy port=$helios_rpc_port"
+        exit 1
+      fi
+      echo "INFO: checking helios execution health port=$helios_execution_rpc_port"
+      if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+        -H 'content-type: application/json' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+        "http://127.0.0.1:$helios_execution_rpc_port" \
+        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+        echo "OK: helios execution healthy port=$helios_execution_rpc_port"
+      else
+        echo "ERROR: helios execution unhealthy port=$helios_execution_rpc_port"
         exit 1
       fi
     else
@@ -353,6 +419,7 @@ ${envOffsetCase}
     if [ ${if postgresEnabled then "1" else "0"} -eq 1 ]; then
       checks=$((checks + 1))
       postgres_port=$(( ${toString postgresPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      postgres_db=${lib.escapeShellArg postgresCfg.database}
       echo "INFO: checking postgres readiness port=$postgres_port"
 
       if ! ${postgresProbePkg}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$postgres_port" -q 2>/dev/null; then
@@ -360,10 +427,10 @@ ${envOffsetCase}
         exit 1
       fi
 
-      if ${postgresProbePkg}/bin/psql -h 127.0.0.1 -p "$postgres_port" -U postgres -d postgres -Atqc "select 1;" >/dev/null 2>&1; then
-        echo "OK: postgres ready port=$postgres_port"
+      if ${postgresProbePkg}/bin/psql -h 127.0.0.1 -p "$postgres_port" -U postgres -d "$postgres_db" -Atqc "select 1;" >/dev/null 2>&1; then
+        echo "OK: postgres ready port=$postgres_port database=$postgres_db"
       else
-        echo "ERROR: postgres not ready port=$postgres_port (query failed)"
+        echo "ERROR: postgres not ready port=$postgres_port database=$postgres_db (query failed)"
         exit 1
       fi
     else
@@ -371,8 +438,9 @@ ${envOffsetCase}
     fi
 
     if [ ${if nginxEnabled then "1" else "0"} -eq 1 ]; then
-      checks=$((checks + 1))
+      checks=$((checks + 2))
       nginx_http_port=$(( ${toString nginxHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      nginx_https_port=$(( ${toString nginxHttpsPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       echo "INFO: checking nginx readiness port=$nginx_http_port"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_http_port" >/dev/null 2>&1; then
         echo "OK: nginx ready port=$nginx_http_port"
@@ -380,13 +448,44 @@ ${envOffsetCase}
         echo "ERROR: nginx not ready port=$nginx_http_port"
         exit 1
       fi
+      echo "INFO: checking nginx readiness port=$nginx_https_port"
+      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_https_port" >/dev/null 2>&1; then
+        echo "OK: nginx ready port=$nginx_https_port"
+      else
+        echo "ERROR: nginx not ready port=$nginx_https_port"
+        exit 1
+      fi
     else
       echo "SKIP: nginx readiness check disabled"
     fi
 
+    if [ ${if minioEnabled then "1" else "0"} -eq 1 ]; then
+      checks=$((checks + 2))
+      minio_api_port=$(( ${toString minioApiPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      minio_console_port=$(( ${toString minioConsolePortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      echo "INFO: checking minio readiness port=$minio_api_port"
+      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$minio_api_port" >/dev/null 2>&1; then
+        echo "OK: minio ready port=$minio_api_port"
+      else
+        echo "ERROR: minio not ready port=$minio_api_port"
+        exit 1
+      fi
+      echo "INFO: checking minio readiness port=$minio_console_port"
+      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$minio_console_port" >/dev/null 2>&1; then
+        echo "OK: minio ready port=$minio_console_port"
+      else
+        echo "ERROR: minio not ready port=$minio_console_port"
+        exit 1
+      fi
+    else
+      echo "SKIP: minio readiness check disabled"
+    fi
+
     if [ ${if rethEnabled then "1" else "0"} -eq 1 ]; then
-      checks=$((checks + 1))
+      checks=$((checks + 3))
       reth_http_port=$(( ${toString rethHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      reth_ws_port=$(( ${toString rethWsPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      reth_auth_port=$(( ${toString rethAuthPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       echo "INFO: checking reth readiness port=$reth_http_port"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
@@ -398,13 +497,28 @@ ${envOffsetCase}
         echo "ERROR: reth not ready port=$reth_http_port"
         exit 1
       fi
+      echo "INFO: checking reth readiness port=$reth_ws_port"
+      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$reth_ws_port" >/dev/null 2>&1; then
+        echo "OK: reth ready port=$reth_ws_port"
+      else
+        echo "ERROR: reth not ready port=$reth_ws_port"
+        exit 1
+      fi
+      echo "INFO: checking reth readiness port=$reth_auth_port"
+      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$reth_auth_port" >/dev/null 2>&1; then
+        echo "OK: reth ready port=$reth_auth_port"
+      else
+        echo "ERROR: reth not ready port=$reth_auth_port"
+        exit 1
+      fi
     else
       echo "SKIP: reth readiness check disabled"
     fi
 
     if [ ${if heliosEnabled then "1" else "0"} -eq 1 ]; then
-      checks=$((checks + 1))
+      checks=$((checks + 2))
       helios_rpc_port=$(( ${toString heliosRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      helios_execution_rpc_port=$(( ${toString heliosExecutionRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       echo "INFO: checking helios readiness port=$helios_rpc_port"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
@@ -414,6 +528,17 @@ ${envOffsetCase}
         echo "OK: helios ready port=$helios_rpc_port"
       else
         echo "ERROR: helios not ready port=$helios_rpc_port"
+        exit 1
+      fi
+      echo "INFO: checking helios execution readiness port=$helios_execution_rpc_port"
+      if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+        -H 'content-type: application/json' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+        "http://127.0.0.1:$helios_execution_rpc_port" \
+        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+        echo "OK: helios execution ready port=$helios_execution_rpc_port"
+      else
+        echo "ERROR: helios execution not ready port=$helios_execution_rpc_port"
         exit 1
       fi
     else
@@ -770,7 +895,8 @@ in
         summary = "Run service health checks";
         description = ''
           Runs health checks for enabled services:
-          postgres, nginx, reth, and helios.
+          postgres, nginx (http+https), minio (api+console),
+          reth (http+ws+auth), and helios (rpc+execution).
         '';
         command = healthScript;
         runtimeInputs = serviceProbeRuntimeInputs;
@@ -784,7 +910,8 @@ in
         summary = "Run service readiness checks";
         description = ''
           Runs readiness checks for enabled services:
-          postgres, nginx, reth, and helios.
+          postgres, nginx (http+https), minio (api+console),
+          reth (http+ws+auth), and helios (rpc+execution).
         '';
         command = readyScript;
         runtimeInputs = serviceProbeRuntimeInputs;

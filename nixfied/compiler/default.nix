@@ -91,6 +91,7 @@ in
         resolved = resolvedModuleGraph.config;
         inherit
           runtime
+          services
           tasks
           workflows
           ;

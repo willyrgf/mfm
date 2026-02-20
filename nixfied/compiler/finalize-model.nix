@@ -30,6 +30,8 @@ let
 
     identity = {
       projectId = resolved.identity.projectId;
+      projectName = resolved.identity.projectName;
+      description = resolved.identity.description;
       system = system;
       evalHash = evalHash;
     };

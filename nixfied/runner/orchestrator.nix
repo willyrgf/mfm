@@ -19,6 +19,45 @@ let
       projectRoot
       ;
   };
+  frameworkEphemeral = import ../.framework/ephemeral.nix {
+    inherit pkgs;
+    project = {
+      project = {
+        id = model.identity.projectId;
+        slotVar = model.runtime.slot.var;
+        envVar = model.runtime.env.var;
+      };
+      slots = {
+        max = model.runtime.slot.max;
+      };
+      install = {
+        deps = "";
+      };
+      tooling = {
+        runtimePackages = [
+          pkgs.coreutils
+          pkgs.findutils
+          pkgs.gnused
+          pkgs.gnugrep
+          pkgs.gawk
+          pkgs.jq
+          pkgs.git
+        ];
+      };
+    };
+  };
+  ephemeralExecutorWrapper = frameworkEphemeral.mkEphemeralWrapper {
+    name = "orchestrator-executor";
+    installDeps = false;
+    script = ''
+      if [ "$#" -lt 1 ]; then
+        echo "ERROR: missing command for ephemeral wrapper"
+        exit 2
+      fi
+      export NIXFIED_CALLER_PWD="$(pwd -P)"
+      exec "$@"
+    '';
+  };
   setsidBin = if pkgs ? util-linux then "${pkgs.util-linux}/bin/setsid" else "";
 in
 pkgs.writeShellScriptBin "nixfied-orchestrator" ''
@@ -26,6 +65,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
   MODEL_FILE=${lib.escapeShellArg (builtins.toString modelFile)}
   EXECUTOR_PROGRAM=${lib.escapeShellArg "${executor}/bin/nixfied-executor"}
+  EPHEMERAL_EXECUTOR_WRAPPER=${lib.escapeShellArg (builtins.toString ephemeralExecutorWrapper)}
   PROJECT_ROOT=${lib.escapeShellArg (builtins.toString projectRoot)}
   REGISTRY_ROOT_DEFAULT=${lib.escapeShellArg model.state.registry.root}
   REGISTRY_ROOT="''${REGISTRY_ROOT:-$REGISTRY_ROOT_DEFAULT}"
@@ -859,7 +899,11 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
     ensure_artifacts_root "$run_id" "$ephemeral_enabled" "$workflow_ref"
 
-    launch_command "$run_id" "$PROCESS_MODE" "$EXECUTOR_PROGRAM" run-task "$task_id" "''${FORWARD_ARGS[@]}"
+    if [ "$ephemeral_enabled" = "1" ]; then
+      launch_command "$run_id" "$PROCESS_MODE" "$EPHEMERAL_EXECUTOR_WRAPPER" "$EXECUTOR_PROGRAM" run-task "$task_id" "''${FORWARD_ARGS[@]}"
+    else
+      launch_command "$run_id" "$PROCESS_MODE" "$EXECUTOR_PROGRAM" run-task "$task_id" "''${FORWARD_ARGS[@]}"
+    fi
   }
 
   run_workflow() {
@@ -901,7 +945,11 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
     ensure_artifacts_root "$run_id" "$ephemeral_enabled" "$workflow_id"
 
-    launch_command "$run_id" "$PROCESS_MODE" "$EXECUTOR_PROGRAM" run-workflow "$workflow_id" "''${FORWARD_ARGS[@]}"
+    if [ "$ephemeral_enabled" = "1" ]; then
+      launch_command "$run_id" "$PROCESS_MODE" "$EPHEMERAL_EXECUTOR_WRAPPER" "$EXECUTOR_PROGRAM" run-workflow "$workflow_id" "''${FORWARD_ARGS[@]}"
+    else
+      launch_command "$run_id" "$PROCESS_MODE" "$EXECUTOR_PROGRAM" run-workflow "$workflow_id" "''${FORWARD_ARGS[@]}"
+    fi
   }
 
   main() {

@@ -51,10 +51,20 @@ let
   };
 
   taskIds = builtins.sort builtins.lessThan (builtins.attrNames compiled.model.tasks);
+  serviceIds = builtins.sort builtins.lessThan (builtins.attrNames compiled.model.services);
 
   modelCanonical = canonical.toCanonicalNix compiled.model;
   tasksTable = builtins.concatStringsSep "\n" (
     map (taskId: "${taskId}\t${compiled.model.tasks.${taskId}.summary}") taskIds
+  );
+  servicesTable = builtins.concatStringsSep "\n" (
+    map (
+      serviceId:
+      let
+        service = compiled.model.services.${serviceId};
+      in
+      "${service.id}\t${service.name}\t${if service.enable then "enabled" else "disabled"}"
+    ) serviceIds
   );
 
   taskSchema = builtins.fromJSON (builtins.readFile ../schemas/task-contract.json);
@@ -125,6 +135,12 @@ let
       NIXFIED_TASKS
     '';
 
+    services = mkApp "services" ''
+            cat <<'NIXFIED_SERVICES'
+      ${servicesTable}
+      NIXFIED_SERVICES
+    '';
+
     schema = mkApp "schema" ''
       cat ${schemaBundleFile}
     '';
@@ -156,6 +172,7 @@ let
     model = pkgs.writeText "nixfied-model.nix" "${modelCanonical}\n";
     stateHash = pkgs.writeText "nixfied-state-hash.txt" "${compiled.stateHash}\n";
     tasks = pkgs.writeText "nixfied-tasks.txt" "${tasksTable}\n";
+    services = pkgs.writeText "nixfied-services.txt" "${servicesTable}\n";
     schema = schemaDir;
   }
   // taskPackages;
@@ -192,6 +209,7 @@ in
   model = compiled.model;
   stateHash = compiled.stateHash;
   tasks = compiled.model.tasks;
+  services = compiled.model.services;
   workflows = compiled.model.workflows;
 
   apps = apps;

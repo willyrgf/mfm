@@ -24,10 +24,10 @@ let
 
   normalizeUnit = unit: {
     taskId = unit.taskId;
-    needs = unit.needs;
-    locks = unit.locks;
+    needs = unique unit.needs;
+    locks = unique unit.locks;
     when = unit.when;
-    skipIfMissingEnv = unit.skipIfMissingEnv;
+    skipIfMissingEnv = unique unit.skipIfMissingEnv;
   };
 
   unitsFromStages =
@@ -129,6 +129,103 @@ let
     in
     loop [ ] unitNames;
 
+  deriveStages =
+    workflowId: units:
+    let
+      unitNames = builtins.sort builtins.lessThan (builtins.attrNames units);
+
+      loop =
+        completed: remaining:
+        if remaining == [ ] then
+          [ ]
+        else
+          let
+            ready = builtins.filter (
+              unitName:
+              let
+                deps = units.${unitName}.needs;
+              in
+              builtins.all (dep: builtins.elem dep completed) deps
+            ) remaining;
+            readySorted = builtins.sort builtins.lessThan ready;
+          in
+          if readySorted == [ ] then
+            throw "workflow '${workflowId}' has a dependency cycle while deriving stages"
+          else
+            [ readySorted ]
+            ++ loop (completed ++ readySorted) (
+              builtins.filter (candidate: !(builtins.elem candidate readySorted)) remaining
+            );
+    in
+    loop [ ] unitNames;
+
+  unitNamesByTask =
+    units:
+    let
+      namesByUnit = builtins.sort builtins.lessThan (builtins.attrNames units);
+    in
+    builtins.foldl' (
+      acc: unitName:
+      let
+        taskId = units.${unitName}.taskId;
+        existing = acc.${taskId} or [ ];
+      in
+      acc
+      // {
+        ${taskId} = existing ++ [ unitName ];
+      }
+    ) { } namesByUnit;
+
+  resolveHardTaskDeps =
+    workflowId: unitsByTask: unitName: depTaskId:
+    let
+      depUnits = unitsByTask.${depTaskId} or [ ];
+    in
+    if depUnits == [ ] then
+      throw "workflow '${workflowId}' unit '${unitName}' task dependency '${depTaskId}' is not present in workflow units"
+    else
+      depUnits;
+
+  resolveSoftTaskDeps =
+    unitsByTask: depTaskId:
+    unitsByTask.${depTaskId} or [ ];
+
+  mergeTaskMetadata =
+    workflowId: units:
+    let
+      unitsByTask = unitNamesByTask units;
+    in
+    builtins.mapAttrs (
+      unitName: unit:
+      let
+        task = tasks.${unit.taskId};
+        taskScheduling = task.scheduling;
+        taskDeps = task.deps;
+        taskProduces = task.produces;
+
+        hardNeeds = builtins.concatLists (
+          map (depTaskId: resolveHardTaskDeps workflowId unitsByTask unitName depTaskId) (taskDeps.needs or [ ])
+        );
+
+        softNeeds = builtins.concatLists (
+          map (depTaskId: resolveSoftTaskDeps unitsByTask depTaskId) (taskDeps.softNeeds or [ ])
+        );
+      in
+      unit
+      // {
+        needs = unique (unit.needs ++ hardNeeds ++ softNeeds);
+        locks = unique (unit.locks ++ (taskScheduling.locks or [ ]));
+        priority = taskScheduling.priority or 100;
+        scheduling = {
+          maxAttempts = taskScheduling.maxAttempts or 1;
+          retryBackoffSec = taskScheduling.retryBackoffSec or [ ];
+          priority = taskScheduling.priority or 100;
+        };
+        deps = taskDeps;
+        produces = taskProduces;
+      }
+    ) units;
+
   compileWorkflow =
     name:
     let
@@ -145,14 +242,22 @@ let
         else
           true;
 
-      unitMap =
+      authoredUnits =
         if usesUnits then
           builtins.mapAttrs (_: unit: normalizeUnit unit) raw.units
         else
           unitsFromStages raw.stages;
 
+      unitMap = mergeTaskMetadata workflowId authoredUnits;
+
       _validated = validateUnits workflowId unitMap;
       order = topoSort workflowId unitMap;
+
+      workflowStages =
+        if usesStages then
+          map (stage: builtins.sort builtins.lessThan stage) raw.stages
+        else
+          deriveStages workflowId unitMap;
 
       plan = map (
         unitName:
@@ -166,6 +271,10 @@ let
           locks = unit.locks;
           when = unit.when;
           skipIfMissingEnv = unit.skipIfMissingEnv;
+          priority = unit.priority;
+          scheduling = unit.scheduling;
+          deps = unit.deps;
+          produces = unit.produces;
         }
       ) order;
     in
@@ -176,7 +285,7 @@ let
       mode = raw.mode;
       maxWorkers = if raw.maxWorkers < 1 then 1 else raw.maxWorkers;
       units = unitMap;
-      stages = raw.stages;
+      stages = workflowStages;
       preRun = raw.preRun;
       postRun = raw.postRun;
       artifacts = raw.artifacts;

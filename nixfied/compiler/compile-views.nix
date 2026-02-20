@@ -2,6 +2,7 @@
 {
   resolved,
   runtime,
+  services,
   tasks,
   workflows,
 }:
@@ -37,9 +38,19 @@ let
   appNames = builtins.sort builtins.lessThan (builtins.attrNames apps);
 
   workflowIds = builtins.sort builtins.lessThan (builtins.attrNames workflows);
+  serviceIds = builtins.sort builtins.lessThan (builtins.attrNames services);
+  enabledServiceNames = map (serviceId: services.${serviceId}.name) (
+    builtins.filter (serviceId: services.${serviceId}.enable or false) serviceIds
+  );
+  enabledServicesLine =
+    if enabledServiceNames == [ ] then
+      "none"
+    else
+      builtins.concatStringsSep ", " enabledServiceNames;
 
   helpLines = [
-    "Nixfied commands (model-generated)"
+    "${resolved.identity.projectName} commands (model-generated)"
+    resolved.identity.description
     ""
     "Core apps:"
   ]
@@ -63,12 +74,20 @@ let
     ""
     "This document is generated from nixfiedModel."
     ""
+    "## Identity"
+    ""
+    "- Project id: ${resolved.identity.projectId}"
+    "- Project name: ${resolved.identity.projectName}"
+    "- Description: ${resolved.identity.description}"
+    ""
     "## Runtime"
     ""
     "- Slot variable: ${runtime.slot.var}"
     "- Slot default: ${toString runtime.slot.default}"
     "- Environment variable: ${runtime.env.var}"
     "- Environment names: ${builtins.concatStringsSep ", " runtime.env.names}"
+    "- Runtime directory base: ${runtime.directories.base}"
+    "- Enabled services: ${enabledServicesLine}"
     ""
     "## Exposed Apps"
   ]

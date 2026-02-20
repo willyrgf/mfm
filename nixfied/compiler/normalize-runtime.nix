@@ -39,4 +39,6 @@ in
   directories = {
     base = resolved.runtime.directories.base;
   };
+
+  runtimePackages = map builtins.toString (resolved.tooling.runtimePackages or [ ]);
 }
