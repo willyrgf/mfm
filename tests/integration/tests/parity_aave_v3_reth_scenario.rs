@@ -1,7 +1,6 @@
 #![cfg(feature = "parity-tests")]
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -189,19 +188,14 @@ fn snapshot_value<'a>(snapshot: &'a serde_json::Value, key: &str) -> Option<&'a 
     Some(current)
 }
 
-fn workspace_flake_ref() -> String {
-    let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for dir in start.ancestors() {
-        if dir.join("flake.nix").is_file() {
-            let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-            return format!("path:{}", canonical.display());
-        }
-    }
-
-    panic!(
-        "could not locate workspace root from CARGO_MANIFEST_DIR={}",
-        start.display()
-    );
+fn required_program_path(program: &str) -> String {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {program}"))
+        .output()
+        .unwrap_or_else(|_| panic!("resolve {program} path"));
+    assert!(out.status.success(), "{program} must be in PATH");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 fn contract_from_manifest<'a>(
@@ -440,10 +434,10 @@ async fn run_failure_diagnostics(events: Arc<dyn EventStore>, run_id: RunId) -> 
     parts.join("; ")
 }
 
-fn phase_a_pipeline(workspace_flake: &str) -> Pipeline {
-    let fetch_origin_app = format!("{workspace_flake}#aave-v3-origin-fetch");
-    let compile_origin_app = format!("{workspace_flake}#aave-v3-origin-compile");
-    let deploy_origin_app = format!("{workspace_flake}#aave-v3-origin-deploy");
+fn phase_a_pipeline() -> Pipeline {
+    let fetch_origin_program = required_program_path("mfm-aave-v3-origin-fetch");
+    let compile_origin_program = required_program_path("mfm-aave-v3-origin-compile");
+    let deploy_origin_program = required_program_path("mfm-aave-v3-origin-deploy");
 
     Pipeline {
         machine_id: MachineId("aave_v3_reth_pipeline".to_string()),
@@ -454,7 +448,7 @@ fn phase_a_pipeline(workspace_flake: &str) -> Pipeline {
                 op_id: OpId("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
-                    "app": fetch_origin_app,
+                    "program_path": fetch_origin_program,
                     "stdin_json": {},
                     "timeout_ms": 300000,
                     "write_result_to": "result",
@@ -465,9 +459,9 @@ fn phase_a_pipeline(workspace_flake: &str) -> Pipeline {
                 op_id: OpId("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
-                    "app": compile_origin_app,
+                    "program_path": compile_origin_program,
                     "stdin_json": {},
-                    "timeout_ms": 300000,
+                    "timeout_ms": 600000,
                     "write_result_to": "result",
                 }),
             },
@@ -476,7 +470,7 @@ fn phase_a_pipeline(workspace_flake: &str) -> Pipeline {
                 op_id: OpId("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
-                    "app": deploy_origin_app,
+                    "program_path": deploy_origin_program,
                     "stdin_json": {},
                     "timeout_ms": 600000,
                     "write_result_to": "result",
@@ -697,10 +691,8 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         WBTC_COLLATERAL_AMOUNT.to_string(),
     );
 
-    let workspace_flake = workspace_flake_ref();
-    let mut allowlist = mfm_machine::config::default_nix_flake_allowlist();
-    allowlist.push(workspace_flake.clone());
-    let run_config_phase_a = run_config_with_allowlist(allowlist);
+    let run_config_phase_a =
+        run_config_with_allowlist(mfm_machine::config::default_nix_flake_allowlist());
 
     let bundle = mfm_rest_api::make_engine_bundle();
     let launcher = DefaultRunLauncher;
@@ -715,7 +707,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
             Arc::clone(&bundle.registry),
             Arc::clone(&bundle.planner),
             LaunchPipeline {
-                pipeline: phase_a_pipeline(&workspace_flake),
+                pipeline: phase_a_pipeline(),
                 input: serde_json::json!({}),
                 run_config: run_config_phase_a,
                 build: BuildProvenance {

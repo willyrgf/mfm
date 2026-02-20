@@ -405,6 +405,35 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     printf '%s' "$run_parallel"
   }
 
+  run_workflow_lifecycle_tasks() {
+    local run_id="$1"
+    local workflow_id="$2"
+    local workflow="$3"
+    local phase="$4"
+    shift 4
+    local -a passthrough_args
+    passthrough_args=("$@")
+
+    local lifecycle_task
+    local status=0
+
+    while IFS= read -r lifecycle_task; do
+      if [ -z "$lifecycle_task" ]; then
+        continue
+      fi
+
+      if execute_task "$run_id" "$workflow_id" "$lifecycle_task" "''${passthrough_args[@]}"; then
+        status=0
+      else
+        status="$?"
+        echo "ERROR: workflow '$workflow_id' $phase task '$lifecycle_task' failed exitCode=$status"
+        return "$status"
+      fi
+    done < <(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r --arg phase "$phase" '.[$phase].tasks[]?')
+
+    return "$status"
+  }
+
   run_workflow_serial_impl() {
     local run_id="$1"
     local workflow_id="$2"
@@ -873,6 +902,10 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local detail_json
     local fail_fast
     local run_parallel
+    local setup_status=0
+    local workflow_status=0
+    local teardown_status=0
+    local teardown_always_run
     local status=0
 
     workflow="$(workflow_json "$workflow_id")"
@@ -893,17 +926,41 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fail_fast="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.execution.failFast')"
     run_parallel="$(resolve_parallel_mode "$workflow")"
 
-    if [ "$run_parallel" = "1" ]; then
-      if run_workflow_parallel_impl "$run_id" "$workflow_id" "$workflow" "$fail_fast" "''${passthrough_args[@]}"; then
-        status=0
-      else
-        status="$?"
-      fi
+    if run_workflow_lifecycle_tasks "$run_id" "$workflow_id" "$workflow" "setup" "''${passthrough_args[@]}"; then
+      setup_status=0
     else
-      if run_workflow_serial_impl "$run_id" "$workflow_id" "$workflow" "$fail_fast" "''${passthrough_args[@]}"; then
-        status=0
+      setup_status="$?"
+      status="$setup_status"
+    fi
+
+    if [ "$setup_status" -eq 0 ]; then
+      if [ "$run_parallel" = "1" ]; then
+        if run_workflow_parallel_impl "$run_id" "$workflow_id" "$workflow" "$fail_fast" "''${passthrough_args[@]}"; then
+          workflow_status=0
+        else
+          workflow_status="$?"
+        fi
       else
-        status="$?"
+        if run_workflow_serial_impl "$run_id" "$workflow_id" "$workflow" "$fail_fast" "''${passthrough_args[@]}"; then
+          workflow_status=0
+        else
+          workflow_status="$?"
+        fi
+      fi
+      status="$workflow_status"
+    fi
+
+    teardown_always_run="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.teardown.alwaysRun // true')"
+    if [ "$teardown_always_run" = "true" ] || [ "$status" -eq 0 ]; then
+      if run_workflow_lifecycle_tasks "$run_id" "$workflow_id" "$workflow" "teardown" "''${passthrough_args[@]}"; then
+        teardown_status=0
+      else
+        teardown_status="$?"
+        if [ "$status" -eq 0 ]; then
+          status="$teardown_status"
+        else
+          echo "ERROR: workflow '$workflow_id' teardown failed exitCode=$teardown_status (workflow already failed exitCode=$status)"
+        fi
       fi
     fi
 

@@ -26,7 +26,83 @@ let
     ]
     ++ (conf.tooling.runtimePackages or [ ]);
 
-  rustRuntimeInputs = commonRuntimeInputs;
+  solcPackage = if pkgs ? solc then pkgs.solc else null;
+
+  mkContractArtifactProgram =
+    {
+      name,
+      sourceFile,
+      contractName,
+    }:
+    pkgs.writeShellScriptBin name ''
+      set -euo pipefail
+
+      find_workspace_root() {
+        local dir="''${MFM_WORKSPACE_ROOT:-$PWD}"
+        while [ "$dir" != "/" ]; do
+          if [ -f "$dir/${sourceFile}" ]; then
+            printf '%s' "$dir"
+            return 0
+          fi
+          dir="$(dirname "$dir")"
+        done
+        echo "ERROR: unable to locate workspace root containing ${sourceFile}" >&2
+        exit 3
+      }
+
+      workspace_root="$(find_workspace_root)"
+      source_rel="${sourceFile}"
+      source_key="${sourceFile}:${contractName}"
+      solc_bin=${lib.escapeShellArg (if solcPackage != null then "${solcPackage}/bin/solc" else "")}
+
+      if [ -z "$solc_bin" ] || [ ! -x "$solc_bin" ]; then
+        echo "ERROR: solc compiler is unavailable in runtime" >&2
+        exit 3
+      fi
+
+      compile_json="$(
+        cd "$workspace_root"
+        "$solc_bin" --combined-json abi,bin "$source_rel"
+      )"
+      abi_json="$(
+        printf '%s' "$compile_json" \
+          | ${pkgs.jq}/bin/jq -ce --arg key "$source_key" '
+            .contracts[$key].abi
+            | if type == "string" then fromjson else . end
+          '
+      )"
+      bytecode_hex="$(
+        printf '%s' "$compile_json" \
+          | ${pkgs.jq}/bin/jq -re --arg key "$source_key" '.contracts[$key].bin'
+      )"
+
+      ${pkgs.jq}/bin/jq -cn --argjson abi "$abi_json" --arg bytecode "0x$bytecode_hex" \
+        '{artifact: {abi: $abi, bytecode: $bytecode}}'
+    '';
+
+  configurableCounterArtifactProgram = mkContractArtifactProgram {
+    name = "mfm-contract-artifact-configurable-counter";
+    sourceFile = "contracts/src/ConfigurableCounter.sol";
+    contractName = "ConfigurableCounter";
+  };
+
+  mockErc20ArtifactProgram = mkContractArtifactProgram {
+    name = "mfm-contract-artifact-mock-erc20";
+    sourceFile = "contracts/src/MockERC20.sol";
+    contractName = "MockERC20";
+  };
+
+  rustRuntimeInputs = commonRuntimeInputs ++ [
+    configurableCounterArtifactProgram
+    mockErc20ArtifactProgram
+  ];
+  postgresPackage = conf.modules.postgres.package or pkgs.postgresql_16;
+  minioPackage = conf.modules.minio.package or pkgs.minio;
+  minioClientPackage = conf.modules.minio.clientPackage or pkgs.minio-client;
+  rethPackage = conf.modules.reth.package or pkgs.reth;
+
+  minioRootUser = conf.modules.minio.rootUser or "minio";
+  minioRootPassword = conf.modules.minio.rootPassword or "minio123456";
 
   sharedPassThroughEnv = [
     "HOME"
@@ -56,6 +132,17 @@ let
     "HELIOS_CHECKPOINT"
     "MFM_CI_ENABLE_PARITY"
     "MFM_CI_ENABLE_MAINNET"
+    "DATABASE_URL"
+    "MFM_EVM_RPC_URL"
+    "MFM_S3_ENDPOINT"
+    "MFM_S3_REGION"
+    "MFM_S3_BUCKET"
+    "MFM_S3_PREFIX"
+    "AWS_ACCESS_KEY_ID"
+    "AWS_SECRET_ACCESS_KEY"
+    "AWS_REGION"
+    "AWS_DEFAULT_REGION"
+    "AWS_EC2_METADATA_DISABLED"
   ];
 
   ciStepPreamble = ''
@@ -81,6 +168,69 @@ let
       esac
     }
   '';
+
+  ciEnvOffsetCase = builtins.concatStringsSep "\n" (
+    map (
+      envName: "    ${envName}) env_offset=${toString (conf.envs.${envName}.offset or 0)} ;;"
+    ) envNames
+  );
+
+  ciServicePortPrelude = ''
+    slot_var=${lib.escapeShellArg project.slotVar}
+    env_var=${lib.escapeShellArg project.envVar}
+    slot_default=${toString conf.slots.default}
+    env_default=${lib.escapeShellArg "dev"}
+
+    slot_value="''${!slot_var:-$slot_default}"
+    env_value="''${!env_var:-$env_default}"
+
+    if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: $slot_var must be an integer"
+      exit 3
+    fi
+
+    case "$env_value" in
+${ciEnvOffsetCase}
+      *)
+        echo "ERROR: unsupported $env_var '$env_value'"
+        exit 3
+        ;;
+    esac
+
+    POSTGRES_PORT=$(( ${toString conf.ports.postgres} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+    MINIO_API_PORT=$(( ${toString (conf.ports.minioApi or conf.ports.minio)} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+    MINIO_CONSOLE_PORT=$(( ${toString (conf.ports.minioConsole or conf.ports.minio_console)} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+    RETH_HTTP_PORT=$(( ${toString conf.ports.rethHttp} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+    RETH_WS_PORT=$(( ${toString conf.ports.rethWs} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+    RETH_AUTH_PORT=$(( ${toString conf.ports.rethAuth} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+  '';
+
+  ciParityServiceEnv = ''
+    ${ciServicePortPrelude}
+
+    export MFM_WORKSPACE_ROOT="''${MFM_WORKSPACE_ROOT:-$(pwd -P)}"
+    export MFM_PARITY_EVM_RETH_RUN_IDS_PATH="''${MFM_PARITY_EVM_RETH_RUN_IDS_PATH:-$artifacts_dir/parity-evm-reth-run-ids.json}"
+    export MFM_PARITY_AAVE_V3_RUN_IDS_PATH="''${MFM_PARITY_AAVE_V3_RUN_IDS_PATH:-$artifacts_dir/parity-aave-v3-run-ids.json}"
+    export MFM_PARITY_AAVE_V3_RETH_PROBE_PATH="''${MFM_PARITY_AAVE_V3_RETH_PROBE_PATH:-$artifacts_dir/parity-aave-v3-reth-probe.json}"
+    export DATABASE_URL="''${DATABASE_URL:-postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test}"
+    export MFM_EVM_RPC_URL="''${MFM_EVM_RPC_URL:-http://127.0.0.1:$RETH_HTTP_PORT}"
+    export MFM_S3_ENDPOINT="''${MFM_S3_ENDPOINT:-http://127.0.0.1:$MINIO_API_PORT}"
+    export MFM_S3_REGION="''${MFM_S3_REGION:-us-east-1}"
+    export MFM_S3_BUCKET="''${MFM_S3_BUCKET:-mfm-test}"
+    export MFM_S3_PREFIX="''${MFM_S3_PREFIX:-mfm-artifacts}"
+    export AWS_ACCESS_KEY_ID="''${AWS_ACCESS_KEY_ID:-${minioRootUser}}"
+    export AWS_SECRET_ACCESS_KEY="''${AWS_SECRET_ACCESS_KEY:-${minioRootPassword}}"
+    export AWS_REGION="''${AWS_REGION:-''${MFM_S3_REGION}}"
+    export AWS_DEFAULT_REGION="''${AWS_DEFAULT_REGION:-''${MFM_S3_REGION}}"
+    export AWS_EC2_METADATA_DISABLED="''${AWS_EC2_METADATA_DISABLED:-true}"
+  '';
+
+  ciServicesRuntimeInputs = commonRuntimeInputs ++ [
+    postgresPackage
+    minioPackage
+    minioClientPackage
+    rethPackage
+  ];
 
   mkCommandTask =
     {
@@ -287,7 +437,7 @@ in
         };
 
         helios = {
-          enable = conf.modules.helios.enable or false;
+          enable = false;
           portKeyRpc = conf.modules.helios.portKeyRpc or "heliosRpc";
           executionRpcPortKey = conf.modules.helios.executionRpcPortKey or "rethHttp";
         };
@@ -646,6 +796,228 @@ in
             ui.app.expose = false;
           };
 
+        ci-services-start =
+          mkCommandTask {
+            id = "task.ci.services-start";
+            appName = "ci-services-start";
+            kind = "ci-step";
+            summary = "Start local CI parity services";
+            description = "Boots local postgres/minio/reth dependencies for deterministic parity checks.";
+            tags = [
+              "ci"
+              "parity"
+              "services"
+            ];
+            runtimeInputs = ciServicesRuntimeInputs;
+            command = ''
+              set -euo pipefail
+              ${ciStepPreamble}
+              ${ciParityServiceEnv}
+
+              services_root="$artifacts_dir/services"
+              mkdir -p "$services_root"
+
+              postgres_root="$services_root/postgres"
+              postgres_data="$postgres_root/data"
+              postgres_log="$artifacts_dir/postgres-service.log"
+              mkdir -p "$postgres_data"
+
+              if ! ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
+                if [ ! -f "$postgres_data/PG_VERSION" ]; then
+                  ${postgresPackage}/bin/initdb -D "$postgres_data" -U postgres --no-locale --encoding=UTF8 -A trust >/dev/null
+                  cat > "$postgres_data/pg_hba.conf" <<'EOF'
+              # TYPE  DATABASE        USER  ADDRESS       METHOD
+              local   all             all                 trust
+              host    all             all   127.0.0.1/32  trust
+              host    all             all   ::1/128       trust
+              EOF
+                fi
+
+                if [ -f "$postgres_data/postmaster.pid" ]; then
+                  stale_pid="$(head -1 "$postgres_data/postmaster.pid" 2>/dev/null || true)"
+                  if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+                    rm -f "$postgres_data/postmaster.pid"
+                  fi
+                fi
+
+                ${postgresPackage}/bin/pg_ctl -D "$postgres_data" -l "$postgres_log" -o "-p $POSTGRES_PORT -h 127.0.0.1" start
+              fi
+
+              for _ in $(seq 1 120); do
+                if ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
+                  break
+                fi
+                sleep 0.25
+              done
+
+              if ! ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
+                echo "ERROR: postgres failed to become ready port=$POSTGRES_PORT"
+                exit 1
+              fi
+
+              ${postgresPackage}/bin/createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres mfm >/dev/null 2>&1 || true
+              ${postgresPackage}/bin/createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres mfm_test >/dev/null 2>&1 || true
+
+              minio_root="$services_root/minio"
+              minio_data="$minio_root/data"
+              minio_log="$artifacts_dir/minio-service.log"
+              mkdir -p "$minio_data"
+
+              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready" >/dev/null 2>&1; then
+                export MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID"
+                export MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY"
+                ${minioPackage}/bin/minio server "$minio_data" \
+                  --address "127.0.0.1:$MINIO_API_PORT" \
+                  --console-address "127.0.0.1:$MINIO_CONSOLE_PORT" \
+                  >"$minio_log" 2>&1 &
+                echo "$!" > "$minio_root/minio.pid"
+              fi
+
+              for _ in $(seq 1 120); do
+                if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready" >/dev/null 2>&1; then
+                  break
+                fi
+                sleep 0.25
+              done
+
+              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready" >/dev/null 2>&1; then
+                echo "ERROR: minio failed to become ready port=$MINIO_API_PORT"
+                if [ -f "$minio_log" ]; then
+                  tail -50 "$minio_log" >&2 || true
+                fi
+                exit 1
+              fi
+
+              ${minioClientPackage}/bin/mc alias set ci "http://127.0.0.1:$MINIO_API_PORT" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" >/dev/null
+              ${minioClientPackage}/bin/mc mb --ignore-existing "ci/$MFM_S3_BUCKET" >/dev/null
+
+              reth_root="$services_root/reth"
+              reth_data="$reth_root/data"
+              reth_run="$reth_root/run"
+              reth_log="$artifacts_dir/reth-service.log"
+              mkdir -p "$reth_data" "$reth_run"
+
+              reth_jwt="$reth_root/jwt.hex"
+              if [ ! -f "$reth_jwt" ]; then
+                printf '%064x\n' 0 > "$reth_jwt"
+              fi
+              chmod 600 "$reth_jwt" 2>/dev/null || true
+
+              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                -H 'content-type: application/json' \
+                --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+                "http://127.0.0.1:$RETH_HTTP_PORT" \
+                | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+                ${rethPackage}/bin/reth node \
+                  --dev \
+                  --datadir "$reth_data" \
+                  --ipcpath "$reth_run/reth.ipc" \
+                  --http \
+                  --http.addr 127.0.0.1 \
+                  --http.port "$RETH_HTTP_PORT" \
+                  --ws \
+                  --ws.addr 127.0.0.1 \
+                  --ws.port "$RETH_WS_PORT" \
+                  --authrpc.addr 127.0.0.1 \
+                  --authrpc.port "$RETH_AUTH_PORT" \
+                  --authrpc.jwtsecret "$reth_jwt" \
+                  >"$reth_log" 2>&1 &
+                echo "$!" > "$reth_root/reth.pid"
+              fi
+
+              for _ in $(seq 1 160); do
+                if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                  -H 'content-type: application/json' \
+                  --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+                  "http://127.0.0.1:$RETH_HTTP_PORT" \
+                  | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+                  break
+                fi
+                sleep 0.25
+              done
+
+              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                -H 'content-type: application/json' \
+                --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+                "http://127.0.0.1:$RETH_HTTP_PORT" \
+                | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+                echo "ERROR: reth failed to become ready port=$RETH_HTTP_PORT"
+                if [ -f "$reth_log" ]; then
+                  tail -50 "$reth_log" >&2 || true
+                fi
+                exit 1
+              fi
+
+              echo "OK: ci services ready postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT"
+            '';
+          }
+          // {
+            ui.app.expose = false;
+          };
+
+        ci-services-stop =
+          mkCommandTask {
+            id = "task.ci.services-stop";
+            appName = "ci-services-stop";
+            kind = "ci-step";
+            summary = "Stop local CI parity services";
+            description = "Stops local postgres/minio/reth service processes started for CI.";
+            tags = [
+              "ci"
+              "parity"
+              "services"
+            ];
+            runtimeInputs = ciServicesRuntimeInputs;
+            command = ''
+              set -euo pipefail
+              ${ciStepPreamble}
+
+              services_root="$artifacts_dir/services"
+              postgres_data="$services_root/postgres/data"
+              minio_pid_file="$services_root/minio/minio.pid"
+              reth_pid_file="$services_root/reth/reth.pid"
+
+              if [ -f "$reth_pid_file" ]; then
+                reth_pid="$(cat "$reth_pid_file" 2>/dev/null || true)"
+                if [ -n "$reth_pid" ] && kill -0 "$reth_pid" 2>/dev/null; then
+                  kill "$reth_pid" 2>/dev/null || true
+                  for _ in $(seq 1 40); do
+                    if ! kill -0 "$reth_pid" 2>/dev/null; then
+                      break
+                    fi
+                    sleep 0.25
+                  done
+                  kill -KILL "$reth_pid" 2>/dev/null || true
+                fi
+                rm -f "$reth_pid_file"
+              fi
+
+              if [ -f "$minio_pid_file" ]; then
+                minio_pid="$(cat "$minio_pid_file" 2>/dev/null || true)"
+                if [ -n "$minio_pid" ] && kill -0 "$minio_pid" 2>/dev/null; then
+                  kill "$minio_pid" 2>/dev/null || true
+                  for _ in $(seq 1 40); do
+                    if ! kill -0 "$minio_pid" 2>/dev/null; then
+                      break
+                    fi
+                    sleep 0.25
+                  done
+                  kill -KILL "$minio_pid" 2>/dev/null || true
+                fi
+                rm -f "$minio_pid_file"
+              fi
+
+              if [ -f "$postgres_data/postmaster.pid" ]; then
+                ${postgresPackage}/bin/pg_ctl -D "$postgres_data" stop -m fast >/dev/null 2>&1 || true
+              fi
+
+              echo "OK: ci services stopped"
+            '';
+          }
+          // {
+            ui.app.expose = false;
+          };
+
         ci-audit =
           mkCommandTask {
             id = "task.ci.audit";
@@ -710,6 +1082,7 @@ in
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
+              ${ciParityServiceEnv}
 
               log_file="$artifacts_dir/parity-rest-api-smoke.log"
               echo "INFO: running ci step=parity-rest-api-smoke"
@@ -735,6 +1108,7 @@ in
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
+              ${ciParityServiceEnv}
 
               key_log_file="$artifacts_dir/parity-keystore-reth-tx-sign-send.log"
               smoke_log_file="$artifacts_dir/parity-evm-helios-smoke.log"
@@ -749,12 +1123,14 @@ in
               fi
 
               run_with_log "$smoke_log_file" bash -euo pipefail -c '
+                response_file="$1"
+                rpc_url="$2"
                 curl -fsS \
                   -H "content-type: application/json" \
                   --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[]}" \
-                  "$MFM_EVM_RPC_URL" \
+                  "$rpc_url" \
                   | tee "$response_file"
-              '
+              ' _ "$response_file" "$MFM_EVM_RPC_URL"
 
               jq -e '.result | strings' "$response_file" >/dev/null
               echo "OK: ci step passed step=parity-evm-helios-smoke log=$smoke_log_file"
@@ -778,10 +1154,11 @@ in
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
+              ${ciParityServiceEnv}
 
               log_file="$artifacts_dir/parity-evm-reth.log"
               echo "INFO: running ci step=parity-evm-reth"
-              run_with_log "$log_file" cargo nextest run --cargo-profile ci -p mfm-integration-tests --features parity-tests --test evm_rpc_pool_failover --test evm_rpc_getlogs_chunking --test parity_rest_api_evm_reth_pipeline --test parity_portfolio_tracker_reth_mock_erc20 --test parity_portfolio_tracker_reth_snapshot
+              run_with_log "$log_file" cargo nextest run --cargo-profile ci --jobs 1 -p mfm-integration-tests --features parity-tests --test evm_rpc_pool_failover --test evm_rpc_getlogs_chunking --test parity_rest_api_evm_reth_pipeline --test parity_portfolio_tracker_reth_mock_erc20 --test parity_portfolio_tracker_reth_snapshot
               echo "OK: ci step passed step=parity-evm-reth log=$log_file"
             '';
           }
@@ -803,6 +1180,7 @@ in
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
+              ${ciParityServiceEnv}
 
               log_file="$artifacts_dir/parity-aave-v3-reth.log"
               echo "INFO: running ci step=parity-aave-v3-reth"
@@ -828,6 +1206,7 @@ in
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
+              ${ciParityServiceEnv}
 
               log_file="$artifacts_dir/parity-postgres-state-events-audit.log"
               echo "INFO: running ci step=parity-postgres-state-events-audit"
@@ -1435,9 +1814,13 @@ in
             };
           };
           stages = [ ];
-          setup.tasks = [ ];
+          setup.tasks = [
+            "task.ci.services-start"
+            "task.ops.ready"
+            "task.ops.health"
+          ];
           teardown = {
-            tasks = [ ];
+            tasks = [ "task.ci.services-stop" ];
             alwaysRun = true;
           };
           artifacts = {
@@ -1524,9 +1907,13 @@ in
             };
           };
           stages = [ ];
-          setup.tasks = [ ];
+          setup.tasks = [
+            "task.ci.services-start"
+            "task.ops.ready"
+            "task.ops.health"
+          ];
           teardown = {
-            tasks = [ ];
+            tasks = [ "task.ci.services-stop" ];
             alwaysRun = true;
           };
           artifacts = {

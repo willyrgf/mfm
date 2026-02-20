@@ -25,7 +25,9 @@ Model-generated app surfaces:
 - `nix run .#format`
 - `nix run .#framework::install`
 - `nix run .#framework::test`
+- `nix run .#health`
 - `nix run .#ports`
+- `nix run .#ready`
 - `nix run .#test`
 - `nix run .#test-isolation`
 - `nix run .#validate-env`

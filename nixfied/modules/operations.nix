@@ -7,6 +7,50 @@
 let
   cfg = config.nixfied.operations;
   runtime = config.nixfied.runtime;
+  services = config.nixfied.services;
+
+  postgresCfg = services.postgres;
+  minioCfg = services.minio;
+  nginxCfg = services.nginx;
+  rethCfg = services.reth;
+  heliosCfg = services.helios;
+
+  postgresEnabled = postgresCfg.enable;
+  minioEnabled = minioCfg.enable;
+  nginxEnabled = nginxCfg.enable;
+  rethEnabled = rethCfg.enable;
+  heliosEnabled = heliosCfg.enable;
+
+  resolvePortBase =
+    key:
+    if builtins.hasAttr key runtime.ports then
+      runtime.ports.${key}
+    else
+      throw "nixfied.operations: port key '${key}' is not defined in nixfied.runtime.ports";
+
+  postgresPortBase = if postgresEnabled then resolvePortBase postgresCfg.portKey else 0;
+  minioApiPortBase = if minioEnabled then resolvePortBase minioCfg.portKeyApi else 0;
+  nginxHttpPortBase = if nginxEnabled then resolvePortBase nginxCfg.portKeyHttp else 0;
+  rethHttpPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyHttp else 0;
+  heliosRpcPortBase = if heliosEnabled then resolvePortBase heliosCfg.portKeyRpc else 0;
+
+  netcatPkg =
+    if pkgs ? netcat then
+      pkgs.netcat
+    else if pkgs ? netcat-openbsd then
+      pkgs.netcat-openbsd
+    else
+      throw "nixfied.operations: netcat package is required for readiness probes";
+
+  postgresProbePkg = if pkgs ? postgresql_16 then pkgs.postgresql_16 else pkgs.postgresql;
+  serviceProbeRuntimeInputs = [
+    pkgs.coreutils
+    pkgs.gnugrep
+    pkgs.gnused
+    pkgs.curl
+    netcatPkg
+    postgresProbePkg
+  ];
 
   envNames = runtime.env.names;
   envPattern =
@@ -17,6 +61,29 @@ let
       envName: "    ${envName}) env_offset=${toString (runtime.env.offsets.${envName} or 0)} ;;"
     ) envNames
   );
+
+  slotEnvPrelude = ''
+    slot_var=${lib.escapeShellArg runtime.slot.var}
+    env_var=${lib.escapeShellArg runtime.env.var}
+    slot_default=${toString runtime.slot.default}
+    env_default=${lib.escapeShellArg runtime.env.default}
+
+    slot_value="''${!slot_var:-$slot_default}"
+    env_value="''${!env_var:-$env_default}"
+
+    if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: $slot_var must be an integer"
+      exit 3
+    fi
+
+    case "$env_value" in
+${envOffsetCase}
+      *)
+        echo "ERROR: unsupported $env_var '$env_value'"
+        exit 3
+        ;;
+    esac
+  '';
 
   portNames = builtins.sort builtins.lessThan (builtins.attrNames runtime.ports);
   portEmitLines = builtins.concatStringsSep "\n" (
@@ -189,24 +256,200 @@ let
   checkPortsScript = ''
         set -euo pipefail
 
-        slot_var=${lib.escapeShellArg runtime.slot.var}
-        env_var=${lib.escapeShellArg runtime.env.var}
-        slot_default=${toString runtime.slot.default}
-        env_default=${lib.escapeShellArg runtime.env.default}
-
-        slot_value="''${!slot_var:-$slot_default}"
-        env_value="''${!env_var:-$env_default}"
-
-        case "$env_value" in
-    ${envOffsetCase}
-          *)
-            echo "ERROR: unsupported $env_var '$env_value'"
-            exit 3
-            ;;
-        esac
+    ${slotEnvPrelude}
 
         echo "INFO: Port status for slot ''${slot_value} env ''${env_value}"
     ${portCheckLines}
+  '';
+
+  healthScript = ''
+    set -euo pipefail
+    ${slotEnvPrelude}
+
+    checks=0
+
+    if [ ${if postgresEnabled then "1" else "0"} -eq 1 ]; then
+      checks=$((checks + 1))
+      postgres_port=$(( ${toString postgresPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      echo "INFO: checking postgres health port=$postgres_port"
+      if ${postgresProbePkg}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$postgres_port" -q 2>/dev/null; then
+        echo "OK: postgres healthy port=$postgres_port"
+      else
+        echo "ERROR: postgres unhealthy port=$postgres_port"
+        exit 1
+      fi
+    else
+      echo "SKIP: postgres health check disabled"
+    fi
+
+    if [ ${if minioEnabled then "1" else "0"} -eq 1 ]; then
+      checks=$((checks + 1))
+      minio_api_port=$(( ${toString minioApiPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      echo "INFO: checking minio health port=$minio_api_port"
+      if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$minio_api_port/minio/health/live" >/dev/null 2>&1; then
+        echo "OK: minio healthy port=$minio_api_port"
+      else
+        echo "ERROR: minio unhealthy port=$minio_api_port"
+        exit 1
+      fi
+    else
+      echo "SKIP: minio health check disabled"
+    fi
+
+    if [ ${if nginxEnabled then "1" else "0"} -eq 1 ]; then
+      checks=$((checks + 1))
+      nginx_http_port=$(( ${toString nginxHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      echo "INFO: checking nginx health port=$nginx_http_port"
+      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_http_port" >/dev/null 2>&1; then
+        echo "OK: nginx healthy port=$nginx_http_port"
+      else
+        echo "ERROR: nginx unhealthy port=$nginx_http_port"
+        exit 1
+      fi
+    else
+      echo "SKIP: nginx health check disabled"
+    fi
+
+    if [ ${if rethEnabled then "1" else "0"} -eq 1 ]; then
+      checks=$((checks + 1))
+      reth_http_port=$(( ${toString rethHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      echo "INFO: checking reth health port=$reth_http_port"
+      if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+        -H 'content-type: application/json' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+        "http://127.0.0.1:$reth_http_port" \
+        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+        echo "OK: reth healthy port=$reth_http_port"
+      else
+        echo "ERROR: reth unhealthy port=$reth_http_port"
+        exit 1
+      fi
+    else
+      echo "SKIP: reth health check disabled"
+    fi
+
+    if [ ${if heliosEnabled then "1" else "0"} -eq 1 ]; then
+      checks=$((checks + 1))
+      helios_rpc_port=$(( ${toString heliosRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      echo "INFO: checking helios health port=$helios_rpc_port"
+      if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+        -H 'content-type: application/json' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+        "http://127.0.0.1:$helios_rpc_port" \
+        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+        echo "OK: helios healthy port=$helios_rpc_port"
+      else
+        echo "ERROR: helios unhealthy port=$helios_rpc_port"
+        exit 1
+      fi
+    else
+      echo "SKIP: helios health check disabled"
+    fi
+
+    if [ "$checks" -eq 0 ]; then
+      echo "SKIP: no enabled services for health checks"
+      exit 0
+    fi
+
+    echo "OK: health checks passed services=$checks"
+  '';
+
+  readyScript = ''
+    set -euo pipefail
+    ${slotEnvPrelude}
+
+    checks=0
+
+    if [ ${if postgresEnabled then "1" else "0"} -eq 1 ]; then
+      checks=$((checks + 1))
+      postgres_port=$(( ${toString postgresPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      echo "INFO: checking postgres readiness port=$postgres_port"
+
+      if ! ${postgresProbePkg}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$postgres_port" -q 2>/dev/null; then
+        echo "ERROR: postgres not ready port=$postgres_port (pg_isready failed)"
+        exit 1
+      fi
+
+      if ${postgresProbePkg}/bin/psql -h 127.0.0.1 -p "$postgres_port" -U postgres -d postgres -Atqc "select 1;" >/dev/null 2>&1; then
+        echo "OK: postgres ready port=$postgres_port"
+      else
+        echo "ERROR: postgres not ready port=$postgres_port (query failed)"
+        exit 1
+      fi
+    else
+      echo "SKIP: postgres readiness check disabled"
+    fi
+
+    if [ ${if minioEnabled then "1" else "0"} -eq 1 ]; then
+      checks=$((checks + 1))
+      minio_api_port=$(( ${toString minioApiPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      echo "INFO: checking minio readiness port=$minio_api_port"
+      if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$minio_api_port/minio/health/ready" >/dev/null 2>&1; then
+        echo "OK: minio ready port=$minio_api_port"
+      else
+        echo "ERROR: minio not ready port=$minio_api_port"
+        exit 1
+      fi
+    else
+      echo "SKIP: minio readiness check disabled"
+    fi
+
+    if [ ${if nginxEnabled then "1" else "0"} -eq 1 ]; then
+      checks=$((checks + 1))
+      nginx_http_port=$(( ${toString nginxHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      echo "INFO: checking nginx readiness port=$nginx_http_port"
+      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_http_port" >/dev/null 2>&1; then
+        echo "OK: nginx ready port=$nginx_http_port"
+      else
+        echo "ERROR: nginx not ready port=$nginx_http_port"
+        exit 1
+      fi
+    else
+      echo "SKIP: nginx readiness check disabled"
+    fi
+
+    if [ ${if rethEnabled then "1" else "0"} -eq 1 ]; then
+      checks=$((checks + 1))
+      reth_http_port=$(( ${toString rethHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      echo "INFO: checking reth readiness port=$reth_http_port"
+      if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+        -H 'content-type: application/json' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+        "http://127.0.0.1:$reth_http_port" \
+        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+        echo "OK: reth ready port=$reth_http_port"
+      else
+        echo "ERROR: reth not ready port=$reth_http_port"
+        exit 1
+      fi
+    else
+      echo "SKIP: reth readiness check disabled"
+    fi
+
+    if [ ${if heliosEnabled then "1" else "0"} -eq 1 ]; then
+      checks=$((checks + 1))
+      helios_rpc_port=$(( ${toString heliosRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      echo "INFO: checking helios readiness port=$helios_rpc_port"
+      if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+        -H 'content-type: application/json' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+        "http://127.0.0.1:$helios_rpc_port" \
+        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+        echo "OK: helios ready port=$helios_rpc_port"
+      else
+        echo "ERROR: helios not ready port=$helios_rpc_port"
+        exit 1
+      fi
+    else
+      echo "SKIP: helios readiness check disabled"
+    fi
+
+    if [ "$checks" -eq 0 ]; then
+      echo "SKIP: no enabled services for readiness checks"
+      exit 0
+    fi
+
+    echo "OK: readiness checks passed services=$checks"
   '';
 
   isolationScript = ''
@@ -239,6 +482,16 @@ in
     };
 
     checkPorts.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+    };
+
+    health.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+    };
+
+    ready.enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
     };
@@ -288,6 +541,34 @@ in
           pkgs.gnused
           (if pkgs ? lsof then pkgs.lsof else pkgs.coreutils)
         ];
+      };
+    })
+
+    (lib.mkIf (cfg.enable && cfg.health.enable) {
+      nixfied.tasks."health" = mkTask {
+        id = "task.ops.health";
+        appName = "health";
+        summary = "Run service health checks";
+        description = ''
+          Runs health checks for enabled services:
+          postgres, minio, nginx, reth, and helios.
+        '';
+        command = healthScript;
+        runtimeInputs = serviceProbeRuntimeInputs;
+      };
+    })
+
+    (lib.mkIf (cfg.enable && cfg.ready.enable) {
+      nixfied.tasks."ready" = mkTask {
+        id = "task.ops.ready";
+        appName = "ready";
+        summary = "Run service readiness checks";
+        description = ''
+          Runs readiness checks for enabled services:
+          postgres, minio, nginx, reth, and helios.
+        '';
+        command = readyScript;
+        runtimeInputs = serviceProbeRuntimeInputs;
       };
     })
   ];

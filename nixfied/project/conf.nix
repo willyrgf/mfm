@@ -24,6 +24,12 @@ let
         pkgs.rustfmt
         pkgs.clippy
       ];
+
+  aaveOriginTools =
+    if pkgs == null then
+      null
+    else
+      import ./aave-origin-tools.nix { inherit pkgs; };
 in
 rec {
   project = {
@@ -113,6 +119,9 @@ rec {
           pkgs.foundry
           pkgs.reth
           pkgs.minio
+          aaveOriginTools.aaveV3OriginFetchTool
+          aaveOriginTools.aaveV3OriginCompileTool
+          aaveOriginTools.aaveV3OriginDeployTool
         ])
       ++ rustToolchainPackages;
 
