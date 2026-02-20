@@ -847,6 +847,8 @@ in
               ${ciStepPreamble}
               ${ciParityServiceEnv}
 
+              echo "INFO: starting ci services env=$env_value slot=$slot_value postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT"
+
               services_root="$artifacts_dir/services"
               mkdir -p "$services_root"
 
@@ -857,7 +859,13 @@ in
 
               if ! ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
                 if [ ! -f "$postgres_data/PG_VERSION" ]; then
-                  ${postgresPackage}/bin/initdb -D "$postgres_data" -U postgres --no-locale --encoding=UTF8 -A trust >/dev/null
+                  if ! ${postgresPackage}/bin/initdb -D "$postgres_data" -U postgres --no-locale --encoding=UTF8 -A trust >/dev/null; then
+                    echo "ERROR: postgres initdb failed port=$POSTGRES_PORT data=$postgres_data"
+                    if [ -f "$postgres_log" ]; then
+                      tail -50 "$postgres_log" >&2 || true
+                    fi
+                    exit 1
+                  fi
                   cat > "$postgres_data/pg_hba.conf" <<'EOF'
               # TYPE  DATABASE        USER  ADDRESS       METHOD
               local   all             all                 trust
@@ -873,7 +881,16 @@ in
                   fi
                 fi
 
-                ${postgresPackage}/bin/pg_ctl -D "$postgres_data" -l "$postgres_log" -o "-p $POSTGRES_PORT -h 127.0.0.1" start
+                if ! ${postgresPackage}/bin/pg_ctl -D "$postgres_data" -l "$postgres_log" -o "-p $POSTGRES_PORT -h 127.0.0.1" start; then
+                  echo "ERROR: postgres failed to start port=$POSTGRES_PORT data=$postgres_data"
+                  if [ -f "$postgres_log" ]; then
+                    tail -50 "$postgres_log" >&2 || true
+                  fi
+                  if command -v lsof >/dev/null 2>&1; then
+                    lsof -nP -iTCP:"$POSTGRES_PORT" -sTCP:LISTEN >&2 || true
+                  fi
+                  exit 1
+                fi
               fi
 
               for _ in $(seq 1 120); do
@@ -921,8 +938,21 @@ in
                 exit 1
               fi
 
-              ${minioClientPackage}/bin/mc alias set ci "http://127.0.0.1:$MINIO_API_PORT" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" >/dev/null
-              ${minioClientPackage}/bin/mc mb --ignore-existing "ci/$MFM_S3_BUCKET" >/dev/null
+              if ! ${minioClientPackage}/bin/mc alias set ci "http://127.0.0.1:$MINIO_API_PORT" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" >/dev/null; then
+                echo "ERROR: failed to configure minio alias endpoint=http://127.0.0.1:$MINIO_API_PORT"
+                if [ -f "$minio_log" ]; then
+                  tail -50 "$minio_log" >&2 || true
+                fi
+                exit 1
+              fi
+
+              if ! ${minioClientPackage}/bin/mc mb --ignore-existing "ci/$MFM_S3_BUCKET" >/dev/null; then
+                echo "ERROR: failed to ensure minio bucket bucket=$MFM_S3_BUCKET"
+                if [ -f "$minio_log" ]; then
+                  tail -50 "$minio_log" >&2 || true
+                fi
+                exit 1
+              fi
 
               reth_root="$services_root/reth"
               reth_data="$reth_root/data"
