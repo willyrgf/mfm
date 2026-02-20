@@ -15,6 +15,8 @@
     local runtime_path=""
     local base_path
     local final_path
+    local host_developer_dir=""
+    local host_sdkroot=""
 
     workdir_kind="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.workdir')"
     custom_workdir="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.customWorkdir // empty')"
@@ -63,6 +65,20 @@
     local home_value
     home_value="''${HOME:-$workdir}"
 
+    if [ "$(${pkgs.coreutils}/bin/uname -s)" = "Darwin" ]; then
+      host_developer_dir="''${DEVELOPER_DIR:-}"
+      host_sdkroot="''${SDKROOT:-}"
+      if [ -z "$host_sdkroot" ] && [ -x /usr/bin/xcrun ]; then
+        if [ -n "$host_developer_dir" ]; then
+          host_sdkroot="$(
+            DEVELOPER_DIR="$host_developer_dir" /usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null || true
+          )"
+        else
+          host_sdkroot="$(/usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+        fi
+      fi
+    fi
+
     local -a env_cmd
     env_cmd=(env -i "PATH=$final_path" "LANG=$locale" "LC_ALL=$locale" "TZ=$timezone" "HOME=$home_value")
 
@@ -71,6 +87,13 @@
         env_cmd+=("$pass_name=''${!pass_name}")
       fi
     done < <(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.passThroughEnv[]?')
+
+    if [ -n "$host_developer_dir" ] && [ -z "''${DEVELOPER_DIR+x}" ]; then
+      env_cmd+=("DEVELOPER_DIR=$host_developer_dir")
+    fi
+    if [ -n "$host_sdkroot" ] && [ -z "''${SDKROOT+x}" ]; then
+      env_cmd+=("SDKROOT=$host_sdkroot")
+    fi
 
     while IFS=$'\t' read -r env_name env_value; do
       if [ -n "$env_name" ]; then

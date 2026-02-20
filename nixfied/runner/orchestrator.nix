@@ -184,7 +184,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
           ;;
         --mode=*)
           ;;
-        --summary|--basic|--audit|--parity|--full|--mainnet|--app|--env)
+        --summary|--basic|--app|--env|--full)
           ;;
         -*)
           echo "ERROR: unknown option '$arg' for workflow '$workflow_id'"
