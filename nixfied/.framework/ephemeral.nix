@@ -41,6 +41,8 @@ let
       "dist"
       ".turbo"
       ".cache"
+      "result"
+      "result-*"
       "*.log"
       "test-results"
       "coverage"
@@ -191,8 +193,16 @@ let
       else
         echo ""
         log_info "Cleaning up ephemeral state (slot ''${${projectIdUpper}_EPHEMERAL_SLOT:-unknown})"
-        rm -rf "${refEphRoot}"
-        log_ok "Ephemeral state cleaned"
+        if rm -rf "${refEphRoot}" 2>/dev/null; then
+          log_ok "Ephemeral state cleaned"
+        else
+          chmod -R u+w "${refEphRoot}" 2>/dev/null || true
+          if rm -rf "${refEphRoot}" 2>/dev/null; then
+            log_ok "Ephemeral state cleaned"
+          else
+            log_warn "Ephemeral cleanup incomplete root=${refEphRoot}; preserving for manual cleanup"
+          fi
+        fi
       fi
 
       ${processRegistry.emitEvent} \

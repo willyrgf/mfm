@@ -856,6 +856,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local task_id="$1"
     shift
 
+    local command_started_at
+    local command_started_epoch
     local task
     local workflow_ref=""
     local workflow_mode="custom"
@@ -863,6 +865,9 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local ephemeral_enabled="0"
     local run_id
     local args_json
+
+    command_started_at="$(iso_now)"
+    command_started_epoch="$(date +%s)"
 
     task="$(task_json "$task_id")"
     if [ -z "$task" ]; then
@@ -896,6 +901,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     export NIXFIED_ORCHESTRATOR_RUN_ID="$run_id"
     export NIXFIED_ORCHESTRATOR_PROCESS_MODE="$PROCESS_MODE"
     export NIXFIED_ORCHESTRATOR_WORKFLOW_ID="$workflow_ref"
+    export NIXFIED_WORKFLOW_SETUP_STARTED_AT="$command_started_at"
+    export NIXFIED_WORKFLOW_SETUP_STARTED_EPOCH="$command_started_epoch"
 
     ensure_artifacts_root "$run_id" "$ephemeral_enabled" "$workflow_ref"
 
@@ -915,11 +922,16 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local workflow_id="$1"
     shift
 
+    local command_started_at
+    local command_started_epoch
     local workflow
     local mode="workflow"
     local run_id
     local args_json
     local ephemeral_enabled
+
+    command_started_at="$(iso_now)"
+    command_started_epoch="$(date +%s)"
 
     workflow="$(workflow_json "$workflow_id")"
     if [ -z "$workflow" ]; then
@@ -942,6 +954,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     export NIXFIED_ORCHESTRATOR_RUN_ID="$run_id"
     export NIXFIED_ORCHESTRATOR_PROCESS_MODE="$PROCESS_MODE"
     export NIXFIED_ORCHESTRATOR_WORKFLOW_ID="$workflow_id"
+    export NIXFIED_WORKFLOW_SETUP_STARTED_AT="$command_started_at"
+    export NIXFIED_WORKFLOW_SETUP_STARTED_EPOCH="$command_started_epoch"
 
     ensure_artifacts_root "$run_id" "$ephemeral_enabled" "$workflow_id"
 

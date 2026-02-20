@@ -1119,6 +1119,26 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     esac
   }
 
+  workflow_setup_timing_fields() {
+    local started_epoch="$1"
+    local started_at="$2"
+    local summary_started_epoch="$started_epoch"
+    local summary_started_at="$started_at"
+    local setup_duration=0
+    local setup_started_epoch="''${NIXFIED_WORKFLOW_SETUP_STARTED_EPOCH:-}"
+    local setup_started_at="''${NIXFIED_WORKFLOW_SETUP_STARTED_AT:-}"
+
+    if is_nonneg_int "$setup_started_epoch" && [ "$setup_started_epoch" -le "$started_epoch" ]; then
+      summary_started_epoch="$setup_started_epoch"
+      setup_duration="$(( started_epoch - setup_started_epoch ))"
+      if [ -n "$setup_started_at" ]; then
+        summary_started_at="$setup_started_at"
+      fi
+    fi
+
+    printf '%s\t%s\t%s' "$summary_started_epoch" "$summary_started_at" "$setup_duration"
+  }
+
   format_duration_seconds() {
     local seconds="$1"
     if ! is_nonneg_int "$seconds"; then
@@ -1473,6 +1493,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local mode
     local artifacts_dir
     local summary_file
+    local summary_started_at="$started_at"
+    local summary_started_epoch="$started_epoch"
     local finished_at
     local duration_seconds
     local passed
@@ -1492,6 +1514,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local parallel_canceled_count_json="null"
     local leaf_task_ids_json="[]"
     local events_file="$REGISTRY_ROOT/events.ndjson"
+    local setup_timing_fields
 
     LAST_WORKFLOW_SUMMARY_FILE=""
 
@@ -1519,8 +1542,11 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       fi
     fi
 
+    setup_timing_fields="$(workflow_setup_timing_fields "$started_epoch" "$started_at")"
+    IFS=$'\t' read -r summary_started_epoch summary_started_at setup_duration <<< "$setup_timing_fields"
+
     finished_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    duration_seconds="$(( $(date +%s) - started_epoch ))"
+    duration_seconds="$(( $(date +%s) - summary_started_epoch ))"
     if [ "$duration_seconds" -lt 0 ]; then
       duration_seconds=0
     fi
@@ -1579,7 +1605,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         --arg workflowId "$workflow_id" \
         --arg mode "$mode" \
         --argjson exitCode "$exit_code" \
-        --arg startedAt "$started_at" \
+        --arg startedAt "$summary_started_at" \
         --arg finishedAt "$finished_at" \
         --argjson durationSeconds "$duration_seconds" \
         --argjson passed "$passed" \
