@@ -96,6 +96,10 @@ let
     configurableCounterArtifactProgram
     mockErc20ArtifactProgram
   ];
+  postgresPackage = conf.modules.postgres.package or pkgs.postgresql_16;
+  minioPackage = conf.modules.minio.package or pkgs.minio;
+  minioClientPackage = conf.modules.minio.clientPackage or pkgs.minio-client;
+  rethPackage = conf.modules.reth.package or pkgs.reth;
 
   minioRootUser = conf.modules.minio.rootUser or "minio";
   minioRootPassword = conf.modules.minio.rootPassword or "minio123456";
@@ -220,6 +224,12 @@ ${ciEnvOffsetCase}
     export AWS_DEFAULT_REGION="''${AWS_DEFAULT_REGION:-''${MFM_S3_REGION}}"
     export AWS_EC2_METADATA_DISABLED="''${AWS_EC2_METADATA_DISABLED:-true}"
   '';
+  ciServicesRuntimeInputs = commonRuntimeInputs ++ [
+    postgresPackage
+    minioPackage
+    minioClientPackage
+    rethPackage
+  ];
 
   mkCommandTask =
     {
@@ -403,12 +413,6 @@ in
         postgres = {
           enable = conf.modules.postgres.enable or false;
           database = conf.modules.postgres.database or "app";
-          testDatabase = conf.modules.postgres.testDatabase or "app_test";
-          package =
-            if conf.modules.postgres.package != null then
-              builtins.toString conf.modules.postgres.package
-            else
-              null;
           portKey = conf.modules.postgres.portKey or "postgres";
         };
 
@@ -420,53 +424,21 @@ in
 
         minio = {
           enable = conf.modules.minio.enable or false;
-          package =
-            if conf.modules.minio.package != null then
-              builtins.toString conf.modules.minio.package
-            else
-              null;
-          clientPackage =
-            if conf.modules.minio.clientPackage != null then
-              builtins.toString conf.modules.minio.clientPackage
-            else
-              null;
           portKeyApi = conf.modules.minio.portKeyApi or "minioApi";
           portKeyConsole = conf.modules.minio.portKeyConsole or "minioConsole";
-          rootUser = conf.modules.minio.rootUser or "minio";
-          rootPassword = conf.modules.minio.rootPassword or "minio123456";
-          browser = conf.modules.minio.browser or true;
         };
 
         reth = {
           enable = conf.modules.reth.enable or false;
-          package =
-            if conf.modules.reth.package != null then
-              builtins.toString conf.modules.reth.package
-            else
-              null;
           portKeyHttp = conf.modules.reth.portKeyHttp or "rethHttp";
           portKeyWs = conf.modules.reth.portKeyWs or "rethWs";
           portKeyAuth = conf.modules.reth.portKeyAuth or "rethAuth";
-          network = conf.modules.reth.network or "local";
-          devMode = conf.modules.reth.devMode or true;
-          extraArgs = conf.modules.reth.extraArgs or [ ];
         };
 
         helios = {
           enable = false;
-          package =
-            if conf.modules.helios.package != null then
-              builtins.toString conf.modules.helios.package
-            else
-              null;
           portKeyRpc = conf.modules.helios.portKeyRpc or "heliosRpc";
-          dataDirName = conf.modules.helios.dataDirName or "helios";
-          network = conf.modules.helios.network or "local";
           executionRpcPortKey = conf.modules.helios.executionRpcPortKey or "rethHttp";
-          executionRpcUrl = conf.modules.helios.executionRpcUrl or "";
-          consensusRpcUrl = conf.modules.helios.consensusRpcUrl or "";
-          checkpoint = conf.modules.helios.checkpoint or "";
-          extraArgs = conf.modules.helios.extraArgs or [ ];
         };
       };
 
@@ -496,7 +468,6 @@ in
         checkPorts.enable = true;
         health.enable = true;
         ready.enable = true;
-        servicesLifecycle.enable = true;
       };
 
       tasks = {
@@ -830,8 +801,8 @@ in
                 jq -e "." "$ROOT/nixfied/schemas/model-export.json" >/dev/null
 
                 grep -q "id = \"task.ci\";" "$ROOT/nixfied/project/module.nix"
-                grep -q "id = \"task.ops.services-start\";" "$ROOT/nixfied/modules/operations.nix"
-                grep -q "id = \"task.ops.services-stop\";" "$ROOT/nixfied/modules/operations.nix"
+                grep -q "id = \"task.ci.services-start\";" "$ROOT/nixfied/project/module.nix"
+                grep -q "id = \"task.ci.services-stop\";" "$ROOT/nixfied/project/module.nix"
                 grep -q "id = \"task.ci.workflow-basic\";" "$ROOT/nixfied/project/module.nix"
                 grep -q "id = \"task.ci.workflow-parity\";" "$ROOT/nixfied/project/module.nix"
                 grep -q "id = \"workflow.ci.full\";" "$ROOT/nixfied/project/module.nix"
@@ -889,14 +860,154 @@ in
             appName = "ci-services-start";
             kind = "ci-step";
             summary = "Start local CI parity services";
-            description = "Compatibility wrapper around task.ops.services-start.";
+            description = "Boots local postgres/minio/reth dependencies for deterministic parity checks.";
             tags = [
               "ci"
               "parity"
               "services"
             ];
-            runtimeInputs = rustRuntimeInputs;
-            workflowId = "workflow.ops.services-start";
+            runtimeInputs = ciServicesRuntimeInputs;
+            command = ''
+              set -euo pipefail
+              ${ciStepPreamble}
+              ${ciParityServiceEnv}
+
+              services_root="$artifacts_dir/services"
+              mkdir -p "$services_root"
+
+              postgres_root="$services_root/postgres"
+              postgres_data="$postgres_root/data"
+              postgres_log="$artifacts_dir/postgres-service.log"
+              mkdir -p "$postgres_data"
+
+              if ! ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
+                if [ ! -f "$postgres_data/PG_VERSION" ]; then
+                  ${postgresPackage}/bin/initdb -D "$postgres_data" -U postgres --no-locale --encoding=UTF8 -A trust >/dev/null
+                  cat > "$postgres_data/pg_hba.conf" <<'EOF'
+              # TYPE  DATABASE        USER  ADDRESS       METHOD
+              local   all             all                 trust
+              host    all             all   127.0.0.1/32  trust
+              host    all             all   ::1/128       trust
+              EOF
+                fi
+
+                if [ -f "$postgres_data/postmaster.pid" ]; then
+                  stale_pid="$(head -1 "$postgres_data/postmaster.pid" 2>/dev/null || true)"
+                  if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+                    rm -f "$postgres_data/postmaster.pid"
+                  fi
+                fi
+
+                ${postgresPackage}/bin/pg_ctl -D "$postgres_data" -l "$postgres_log" -o "-p $POSTGRES_PORT -h 127.0.0.1" start
+              fi
+
+              for _ in $(seq 1 120); do
+                if ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
+                  break
+                fi
+                sleep 0.25
+              done
+
+              if ! ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
+                echo "ERROR: postgres failed to become ready port=$POSTGRES_PORT"
+                exit 1
+              fi
+
+              ${postgresPackage}/bin/createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres mfm >/dev/null 2>&1 || true
+              ${postgresPackage}/bin/createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres mfm_test >/dev/null 2>&1 || true
+
+              minio_root="$services_root/minio"
+              minio_data="$minio_root/data"
+              minio_log="$artifacts_dir/minio-service.log"
+              mkdir -p "$minio_data"
+
+              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready" >/dev/null 2>&1; then
+                export MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID"
+                export MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY"
+                ${minioPackage}/bin/minio server "$minio_data" \
+                  --address "127.0.0.1:$MINIO_API_PORT" \
+                  --console-address "127.0.0.1:$MINIO_CONSOLE_PORT" \
+                  >"$minio_log" 2>&1 &
+                echo "$!" > "$minio_root/minio.pid"
+              fi
+
+              for _ in $(seq 1 120); do
+                if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready" >/dev/null 2>&1; then
+                  break
+                fi
+                sleep 0.25
+              done
+
+              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready" >/dev/null 2>&1; then
+                echo "ERROR: minio failed to become ready port=$MINIO_API_PORT"
+                if [ -f "$minio_log" ]; then
+                  tail -50 "$minio_log" >&2 || true
+                fi
+                exit 1
+              fi
+
+              ${minioClientPackage}/bin/mc alias set ci "http://127.0.0.1:$MINIO_API_PORT" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" >/dev/null
+              ${minioClientPackage}/bin/mc mb --ignore-existing "ci/$MFM_S3_BUCKET" >/dev/null
+
+              reth_root="$services_root/reth"
+              reth_data="$reth_root/data"
+              reth_run="$reth_root/run"
+              reth_log="$artifacts_dir/reth-service.log"
+              mkdir -p "$reth_data" "$reth_run"
+
+              reth_jwt="$reth_root/jwt.hex"
+              if [ ! -f "$reth_jwt" ]; then
+                printf '%064x\n' 0 > "$reth_jwt"
+              fi
+              chmod 600 "$reth_jwt" 2>/dev/null || true
+
+              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                -H 'content-type: application/json' \
+                --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+                "http://127.0.0.1:$RETH_HTTP_PORT" \
+                | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+                ${rethPackage}/bin/reth node \
+                  --dev \
+                  --datadir "$reth_data" \
+                  --ipcpath "$reth_run/reth.ipc" \
+                  --http \
+                  --http.addr 127.0.0.1 \
+                  --http.port "$RETH_HTTP_PORT" \
+                  --ws \
+                  --ws.addr 127.0.0.1 \
+                  --ws.port "$RETH_WS_PORT" \
+                  --authrpc.addr 127.0.0.1 \
+                  --authrpc.port "$RETH_AUTH_PORT" \
+                  --authrpc.jwtsecret "$reth_jwt" \
+                  >"$reth_log" 2>&1 &
+                echo "$!" > "$reth_root/reth.pid"
+              fi
+
+              for _ in $(seq 1 160); do
+                if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                  -H 'content-type: application/json' \
+                  --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+                  "http://127.0.0.1:$RETH_HTTP_PORT" \
+                  | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+                  break
+                fi
+                sleep 0.25
+              done
+
+              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                -H 'content-type: application/json' \
+                --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+                "http://127.0.0.1:$RETH_HTTP_PORT" \
+                | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+                echo "ERROR: reth failed to become ready port=$RETH_HTTP_PORT"
+                if [ -f "$reth_log" ]; then
+                  tail -50 "$reth_log" >&2 || true
+                fi
+                exit 1
+              fi
+
+              echo "OK: ci services ready postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT"
+            '';
           }
           // {
             ui.app.expose = false;
@@ -908,14 +1019,58 @@ in
             appName = "ci-services-stop";
             kind = "ci-step";
             summary = "Stop local CI parity services";
-            description = "Compatibility wrapper around task.ops.services-stop.";
+            description = "Stops local postgres/minio/reth service processes started for CI.";
             tags = [
               "ci"
               "parity"
               "services"
             ];
-            runtimeInputs = rustRuntimeInputs;
-            workflowId = "workflow.ops.services-stop";
+            runtimeInputs = ciServicesRuntimeInputs;
+            command = ''
+              set -euo pipefail
+              ${ciStepPreamble}
+
+              services_root="$artifacts_dir/services"
+              postgres_data="$services_root/postgres/data"
+              minio_pid_file="$services_root/minio/minio.pid"
+              reth_pid_file="$services_root/reth/reth.pid"
+
+              if [ -f "$reth_pid_file" ]; then
+                reth_pid="$(cat "$reth_pid_file" 2>/dev/null || true)"
+                if [ -n "$reth_pid" ] && kill -0 "$reth_pid" 2>/dev/null; then
+                  kill "$reth_pid" 2>/dev/null || true
+                  for _ in $(seq 1 40); do
+                    if ! kill -0 "$reth_pid" 2>/dev/null; then
+                      break
+                    fi
+                    sleep 0.25
+                  done
+                  kill -KILL "$reth_pid" 2>/dev/null || true
+                fi
+                rm -f "$reth_pid_file"
+              fi
+
+              if [ -f "$minio_pid_file" ]; then
+                minio_pid="$(cat "$minio_pid_file" 2>/dev/null || true)"
+                if [ -n "$minio_pid" ] && kill -0 "$minio_pid" 2>/dev/null; then
+                  kill "$minio_pid" 2>/dev/null || true
+                  for _ in $(seq 1 40); do
+                    if ! kill -0 "$minio_pid" 2>/dev/null; then
+                      break
+                    fi
+                    sleep 0.25
+                  done
+                  kill -KILL "$minio_pid" 2>/dev/null || true
+                fi
+                rm -f "$minio_pid_file"
+              fi
+
+              if [ -f "$postgres_data/postmaster.pid" ]; then
+                ${postgresPackage}/bin/pg_ctl -D "$postgres_data" stop -m fast >/dev/null 2>&1 || true
+              fi
+
+              echo "OK: ci services stopped"
+            '';
           }
           // {
             ui.app.expose = false;
@@ -1590,68 +1745,6 @@ in
       };
 
       workflows = {
-        ops-services-start = {
-          id = "workflow.ops.services-start";
-          summary = "Start modeled local services";
-          description = "Internal workflow wrapper for task.ops.services-start.";
-          mode = "custom";
-          maxWorkers = 1;
-          units = {
-            services-start = mkWorkflowUnit {
-              taskId = "task.ops.services-start";
-            };
-          };
-          stages = [ ];
-          preRun.tasks = [ ];
-          postRun = {
-            tasks = [ ];
-            alwaysRun = true;
-          };
-          artifacts = {
-            root = "/tmp/ci-artifacts";
-            keepOnSuccess = false;
-            keepOnFailure = true;
-            writeSummary = true;
-          };
-          execution = {
-            parallel = false;
-            failFast = true;
-            lockPolicy = "exclusive";
-            emitRegistryEvents = true;
-          };
-        };
-
-        ops-services-stop = {
-          id = "workflow.ops.services-stop";
-          summary = "Stop modeled local services";
-          description = "Internal workflow wrapper for task.ops.services-stop.";
-          mode = "custom";
-          maxWorkers = 1;
-          units = {
-            services-stop = mkWorkflowUnit {
-              taskId = "task.ops.services-stop";
-            };
-          };
-          stages = [ ];
-          preRun.tasks = [ ];
-          postRun = {
-            tasks = [ ];
-            alwaysRun = true;
-          };
-          artifacts = {
-            root = "/tmp/ci-artifacts";
-            keepOnSuccess = false;
-            keepOnFailure = true;
-            writeSummary = true;
-          };
-          execution = {
-            parallel = false;
-            failFast = true;
-            lockPolicy = "exclusive";
-            emitRegistryEvents = true;
-          };
-        };
-
         ci-basic = {
           id = "workflow.ci.basic";
           summary = "Basic CI workflow";
@@ -1780,12 +1873,12 @@ in
           };
           stages = [ ];
           preRun.tasks = [
-            "task.ops.services-start"
+            "task.ci.services-start"
             "task.ops.ready"
             "task.ops.health"
           ];
           postRun = {
-            tasks = [ "task.ops.services-stop" ];
+            tasks = [ "task.ci.services-stop" ];
             alwaysRun = true;
           };
           artifacts = {

@@ -360,7 +360,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         printf '%s' "$candidate"
         return
       fi
-      echo "ERROR: unknown mode '$mode_override' (expected: basic|app|env|full)" >&2
+      echo "ERROR: unknown mode '$mode_override' (expected: basic|audit|parity|full|mainnet|app|env)" >&2
       return 2
     fi
 
@@ -1446,7 +1446,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         --mode=*)
           mode_override="''${arg#--mode=}"
           ;;
-        --basic|--app|--env|--full)
+        --basic|--audit|--parity|--full|--mainnet|--app|--env)
           mode_override="''${arg#--}"
           ;;
         --summary)
