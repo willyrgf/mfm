@@ -19,7 +19,7 @@ if vendorPath == null then
             compiled = nixfied.lib.mkNixfied {
               inherit system;
               projectRoot = ./.;
-              projectModules = [ ./nixfied/project/module.nix ];
+              projectModules = [ ./nixfied/project/default.nix ];
               extraModules = [ ];
             };
           in {
@@ -52,7 +52,7 @@ else
             };
             compiled = nixfiedLib.mkNixfied {
               projectRoot = ./.;
-              projectModules = [ ./nixfied/project/module.nix ];
+              projectModules = [ ./nixfied/project/default.nix ];
               extraModules = [ ];
             };
           in {

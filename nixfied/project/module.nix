@@ -2,6 +2,13 @@
 let
   conf = import ./conf.nix { inherit pkgs; };
   project = conf.project;
+  ciRuntime = import ./ci-runtime.nix {
+    inherit
+      lib
+      conf
+      project
+      ;
+  };
 
   envNames = builtins.attrNames conf.envs;
   envOffsets = lib.mapAttrs (_: value: value.offset or 0) conf.envs;
@@ -184,45 +191,7 @@ let
     }
   '';
 
-  ciEnvOffsetCase = builtins.concatStringsSep "\n" (
-    map (
-      envName: "    ${envName}) env_offset=${toString (conf.envs.${envName}.offset or 0)} ;;"
-    ) envNames
-  );
-
-  ciServicePortPrelude = ''
-        slot_var=${lib.escapeShellArg project.slotVar}
-        env_var=${lib.escapeShellArg project.envVar}
-        slot_default=${toString conf.slots.default}
-        env_default=${lib.escapeShellArg "dev"}
-
-        slot_value="''${!slot_var:-$slot_default}"
-        env_value="''${!env_var:-$env_default}"
-
-        if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
-          echo "ERROR: $slot_var must be an integer"
-          exit 3
-        fi
-
-        case "$env_value" in
-    ${ciEnvOffsetCase}
-          *)
-            echo "ERROR: unsupported $env_var '$env_value'"
-            exit 3
-            ;;
-        esac
-
-        POSTGRES_PORT=$(( ${toString conf.ports.postgres} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
-        MINIO_API_PORT=$(( ${
-          toString (conf.ports.minioApi or conf.ports.minio)
-        } + env_offset + (slot_value * ${toString conf.slots.stride}) ))
-        MINIO_CONSOLE_PORT=$(( ${
-          toString (conf.ports.minioConsole or conf.ports.minio_console)
-        } + env_offset + (slot_value * ${toString conf.slots.stride}) ))
-        RETH_HTTP_PORT=$(( ${toString conf.ports.rethHttp} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
-        RETH_WS_PORT=$(( ${toString conf.ports.rethWs} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
-        RETH_AUTH_PORT=$(( ${toString conf.ports.rethAuth} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
-  '';
+  ciServicePortPrelude = ciRuntime.servicePortPrelude;
 
   ciParityServiceEnv = ''
     ${ciServicePortPrelude}
@@ -826,23 +795,67 @@ in
                 test -f "$ROOT/nixfied/schemas/task-contract.json"
                 test -f "$ROOT/nixfied/schemas/workflow-contract.json"
                 test -f "$ROOT/nixfied/schemas/model-export.json"
+                test -f "$ROOT/nixfied/project/model-introspection.nix"
 
                 jq -e "." "$ROOT/nixfied/schemas/task-contract.json" >/dev/null
                 jq -e "." "$ROOT/nixfied/schemas/workflow-contract.json" >/dev/null
                 jq -e "." "$ROOT/nixfied/schemas/model-export.json" >/dev/null
 
-                grep -q "id = \"task.ci\";" "$ROOT/nixfied/project/module.nix"
-                grep -q "id = \"task.ci.services-start\";" "$ROOT/nixfied/project/module.nix"
-                grep -q "id = \"task.ci.services-stop\";" "$ROOT/nixfied/project/module.nix"
-                grep -q "id = \"task.ci.workflow-basic\";" "$ROOT/nixfied/project/module.nix"
-                grep -q "id = \"task.ci.workflow-parity\";" "$ROOT/nixfied/project/module.nix"
-                grep -q "id = \"task.mfm_cli\";" "$ROOT/nixfied/project/module.nix"
-                grep -q "id = \"task.mfm_rest_api\";" "$ROOT/nixfied/project/module.nix"
-                grep -q "id = \"workflow.ci.full\";" "$ROOT/nixfied/project/module.nix"
-                grep -q "taskId = \"task.ci.workflow-basic\";" "$ROOT/nixfied/project/module.nix"
-                grep -q "taskId = \"task.ci.workflow-parity\";" "$ROOT/nixfied/project/module.nix"
+                nix run "path:$ROOT"#model >/dev/null
 
-                if grep -R -n "[.]framework/" "$ROOT/nixfied/project" --include='*.nix' >/dev/null; then
+                MODEL_INFO_JSON="$(nix eval --impure --json --file "$ROOT/nixfied/project/model-introspection.nix")"
+                SYSTEM="$(jq -r ".system" <<<"$MODEL_INFO_JSON")"
+                APPS_JSON="$(nix eval --json "path:$ROOT#apps.$SYSTEM")"
+
+                require_app() {
+                  local app_name="$1"
+                  if ! jq -e --arg name "$app_name" "has(\$name) and .[\$name].type == \"app\"" <<<"$APPS_JSON" >/dev/null; then
+                    echo "ERROR: missing required app surface app=$app_name system=$SYSTEM"
+                    exit 1
+                  fi
+                }
+
+                require_task() {
+                  local task_id="$1"
+                  if ! jq -e --arg id "$task_id" ".taskIds | index(\$id) != null" <<<"$MODEL_INFO_JSON" >/dev/null; then
+                    echo "ERROR: missing required compiled task id=$task_id"
+                    exit 1
+                  fi
+                }
+
+                require_workflow() {
+                  local workflow_id="$1"
+                  if ! jq -e --arg id "$workflow_id" ".workflowIds | index(\$id) != null" <<<"$MODEL_INFO_JSON" >/dev/null; then
+                    echo "ERROR: missing required compiled workflow id=$workflow_id"
+                    exit 1
+                  fi
+                }
+
+                require_workflow_plan_task() {
+                  local workflow_id="$1"
+                  local task_id="$2"
+                  if ! jq -e --arg workflow "$workflow_id" --arg task "$task_id" "(.workflowPlanTaskIds[\$workflow] // []) | index(\$task) != null" <<<"$MODEL_INFO_JSON" >/dev/null; then
+                    echo "ERROR: workflow plan missing task workflow=$workflow_id task=$task_id"
+                    exit 1
+                  fi
+                }
+
+                require_app "mfm_cli"
+                require_app "mfm_rest_api"
+
+                require_task "task.ci"
+                require_task "task.ci.services-start"
+                require_task "task.ci.services-stop"
+                require_task "task.ci.workflow-basic"
+                require_task "task.ci.workflow-parity"
+                require_task "task.mfm_cli"
+                require_task "task.mfm_rest_api"
+
+                require_workflow "workflow.ci.full"
+                require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-basic"
+                require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-parity"
+
+                if grep -R -n "[.]framework/" "$ROOT/nixfied/project" --include="*.nix" >/dev/null; then
                   echo "ERROR: project layer references framework-private paths"
                   exit 1
                 fi
@@ -1476,6 +1489,7 @@ in
             set -euo pipefail
 
             ROOT="$(pwd -P)"
+            MODEL_INTROSPECTION_FILE="$ROOT/nixfied/project/model-introspection.nix"
             MODE="full"
             SHARD=""
             LIST_SHARDS=0
@@ -1551,12 +1565,17 @@ in
                 return 0
               fi
 
+              if [ ! -f "$MODEL_INTROSPECTION_FILE" ]; then
+                log_error "missing model introspection file: $MODEL_INTROSPECTION_FILE"
+                return 1
+              fi
+
               CI_MODES_CACHE="$(
-                nix run "path:$ROOT"#help \
-                  | sed -n 's/^  workflow\.ci\.\([a-z0-9.-]\+\) - .*$/\1/p'
+                nix eval --impure --json --file "$MODEL_INTROSPECTION_FILE" \
+                  | jq -r ".ciModes[]?"
               )"
               if [ -z "$CI_MODES_CACHE" ]; then
-                log_error "unable to derive workflow.ci modes from model-generated help output"
+                log_error "unable to derive workflow.ci modes from compiled model"
                 return 1
               fi
 
