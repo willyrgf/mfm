@@ -16,23 +16,17 @@ if vendorPath == null then
       outputs = { self, nixpkgs, flake-utils, nixfied }:
         flake-utils.lib.eachDefaultSystem (system:
           let
-            pkgs = import nixpkgs { inherit system; };
             compiled = nixfied.lib.mkNixfied {
               inherit system;
               projectRoot = ./.;
               projectModules = [ ./nixfied/project/module.nix ];
               extraModules = [ ];
             };
-            local = import ./nixfied/local/default.nix {
-              inherit pkgs;
-              project = { };
-              lib = pkgs.lib;
-            };
           in {
-            apps = compiled.apps // (local.apps or { });
-            packages = compiled.packages // (local.packages or { });
+            apps = compiled.apps;
+            packages = compiled.packages;
             checks = compiled.checks;
-            devShells = compiled.devShells // (local.devShells or { });
+            devShells = compiled.devShells;
           });
     }
   ''
@@ -61,16 +55,11 @@ else
               projectModules = [ ./nixfied/project/module.nix ];
               extraModules = [ ];
             };
-            local = import ./nixfied/local/default.nix {
-              inherit pkgs;
-              project = { };
-              lib = pkgs.lib;
-            };
           in {
-            apps = compiled.apps // (local.apps or { });
-            packages = compiled.packages // (local.packages or { });
+            apps = compiled.apps;
+            packages = compiled.packages;
             checks = compiled.checks;
-            devShells = compiled.devShells // (local.devShells or { });
+            devShells = compiled.devShells;
           });
     }
   ''

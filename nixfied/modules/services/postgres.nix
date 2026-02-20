@@ -12,14 +12,6 @@ in
       type = t.str;
       default = "app";
     };
-    testDatabase = lib.mkOption {
-      type = t.str;
-      default = "app_test";
-    };
-    package = lib.mkOption {
-      type = t.nullOr t.str;
-      default = null;
-    };
     portKey = lib.mkOption {
       type = t.str;
       default = "postgres";

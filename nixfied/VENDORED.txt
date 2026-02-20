@@ -5,7 +5,7 @@ This repository vendors the Nixfied framework under `nixfied/`.
 
 Framework source revision workflow:
 - initialized via `framework::install`
-- no in-repo `framework::upgrade` command is currently exposed
+- upgraded via `framework::upgrade` (preserves `nixfied/project/` and `nixfied/local/` by default)
 
 Framework-owned paths:
 - `flake.nix`, `flake.lock`

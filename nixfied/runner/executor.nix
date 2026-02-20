@@ -39,6 +39,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   }
 
   RUN_SUFFIX_REASON=""
+  LAST_WORKFLOW_SUMMARY_FILE=""
 
   compute_run_id() {
     local mode="$1"
@@ -246,7 +247,11 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
           echo "ERROR: task '$task_id' runner.workflowId is empty"
           exit_code=3
         else
-          run_workflow "$nested_workflow" "$@"
+          if [ -n "''${NIXFIED_PARENT_WORKFLOW_ID:-}" ]; then
+            NIXFIED_WORKFLOW_NESTED=1 run_workflow "$nested_workflow" "$@"
+          else
+            run_workflow "$nested_workflow" "$@"
+          fi
           exit_code="$?"
         fi
         ;;
@@ -277,7 +282,13 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     append_event "$run_id" "$workflow_id" "$task_id" "queued" "$detail_json"
     append_event "$run_id" "$workflow_id" "$task_id" "running" '{}'
 
-    if execute_task_body "$task_id" "$@"; then
+    if [ -n "$workflow_id" ]; then
+      if NIXFIED_PARENT_WORKFLOW_ID="$workflow_id" execute_task_body "$task_id" "$@"; then
+        exit_code=0
+      else
+        exit_code="$?"
+      fi
+    elif execute_task_body "$task_id" "$@"; then
       exit_code=0
     else
       exit_code="$?"
@@ -349,6 +360,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         printf '%s' "$candidate"
         return
       fi
+      echo "ERROR: unknown mode '$mode_override' (expected: basic|app|env|full)" >&2
+      return 2
     fi
 
     printf '%s' "$workflow_id"
@@ -381,7 +394,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
           effective_workers="$override_value"
         fi
       else
-        echo "WARN: ignoring invalid $override_name='$override_value' (expected integer >= 1)"
+        echo "ERROR: $override_name must be an integer >= 1 (got '$override_value')" >&2
+        return 2
       fi
     fi
 
@@ -639,7 +653,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       done
     }
 
-    max_workers="$(resolve_effective_max_workers "$workflow")"
+    max_workers="$(resolve_effective_max_workers "$workflow")" || return $?
     lock_policy="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.execution.lockPolicy // "exclusive"')"
     if [ "$lock_policy" = "shared-aware" ]; then
       echo "WARN: lockPolicy=shared-aware uses exclusive semantics in workflow parallel runner"
@@ -855,6 +869,359 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     return "$phase_status"
   }
 
+  is_nonneg_int() {
+    case "''${1:-}" in
+      ""|*[!0-9]*)
+        return 1
+        ;;
+      *)
+        return 0
+        ;;
+    esac
+  }
+
+  format_duration_seconds() {
+    local seconds="$1"
+    if ! is_nonneg_int "$seconds"; then
+      printf '%s' "?"
+      return 0
+    fi
+
+    if [ "$seconds" -lt 60 ]; then
+      printf '%s' "''${seconds}s"
+      return 0
+    fi
+
+    local mins
+    local secs
+    mins="$(( seconds / 60 ))"
+    secs="$(( seconds % 60 ))"
+    printf '%s' "''${mins}m ''${secs}s"
+  }
+
+  task_runner_type() {
+    local task_id="$1"
+    if [ -z "$task_id" ]; then
+      printf '%s' "shell"
+      return 0
+    fi
+
+    ${pkgs.jq}/bin/jq -r --arg taskId "$task_id" '.tasks[$taskId].runner.type // "shell"' "$MODEL_FILE"
+  }
+
+  workflow_step_records_tsv() {
+    local run_id="$1"
+    local events_file="$2"
+
+    if [ ! -f "$events_file" ]; then
+      return 0
+    fi
+
+    ${pkgs.jq}/bin/jq -r -s --arg runId "$run_id" '
+      map(
+        select(
+          .runId == $runId
+          and (.taskId // "") != ""
+          and (
+            .state == "queued"
+            or .state == "running"
+            or .state == "passed"
+            or .state == "failed"
+            or .state == "canceled"
+          )
+        )
+      )
+      | sort_by(.seq)
+      | reduce .[] as $event (
+          { active: {}, rows: [] };
+          (((($event.workflowId // "") + "\u001f" + $event.taskId)) as $key
+          | if ($event.state == "queued" or $event.state == "running") then
+              .active[$key] = (
+                (.active[$key] // {
+                  task_id: $event.taskId,
+                  workflow_id: ($event.workflowId // ""),
+                  order_seq: $event.seq,
+                  running_ts: null
+                })
+                | .order_seq = (if .order_seq > $event.seq then $event.seq else .order_seq end)
+                | if $event.state == "running" then .running_ts = $event.ts else . end
+              )
+            elif ($event.state == "passed" or $event.state == "failed" or $event.state == "canceled") then
+              (.active[$key] // {
+                task_id: $event.taskId,
+                workflow_id: ($event.workflowId // ""),
+                order_seq: $event.seq,
+                running_ts: null
+              }) as $entry
+              | .rows += [
+                  {
+                    task_id: $entry.task_id,
+                    workflow_id: (if $entry.workflow_id == "" then ($event.workflowId // "") else $entry.workflow_id end),
+                    order_seq: $entry.order_seq,
+                    state: $event.state,
+                    reason: ($event.detail.reason // ""),
+                    exit_code: ($event.detail.exitCode // ""),
+                    duration_seconds: (
+                      if ($entry.running_ts != null)
+                        and ($entry.running_ts | type == "string")
+                        and ($event.ts | type == "string")
+                      then
+                        (((($event.ts | fromdateiso8601) - ($entry.running_ts | fromdateiso8601)) | floor) | if . < 0 then 0 else . end)
+                      else
+                        0
+                      end
+                    )
+                  }
+                ]
+              | del(.active[$key])
+            else
+              .
+            end)
+        )
+      | .rows
+      | sort_by(.order_seq)
+      | .[]
+      | [
+          .task_id,
+          .workflow_id,
+          (.order_seq | tostring),
+          .state,
+          (.duration_seconds | tostring),
+          (.reason | tostring),
+          (if .exit_code == null or .exit_code == "" then "" else (.exit_code | tostring) end)
+        ]
+      | @tsv
+    ' "$events_file"
+  }
+
+  workflow_steps_json() {
+    local run_id="$1"
+    local events_file="$2"
+    local steps_json="[]"
+    local task_id
+    local workflow_id
+    local order_seq
+    local state
+    local duration
+    local reason
+    local exit_code
+    local runner_type
+    local status
+    local duration_json
+    local order_seq_json
+    local exit_code_json
+
+    if [ ! -f "$events_file" ]; then
+      printf '%s' "$steps_json"
+      return 0
+    fi
+
+    while IFS=$'\t' read -r task_id workflow_id order_seq state duration reason exit_code; do
+      if [ -z "$task_id" ]; then
+        continue
+      fi
+
+      runner_type="$(task_runner_type "$task_id")"
+      if [ "$runner_type" = "workflowRef" ]; then
+        continue
+      fi
+
+      status="$state"
+      if [ "$state" = "canceled" ]; then
+        case "$reason" in
+          missing-env|when-false)
+            status="skipped"
+            ;;
+          *)
+            status="canceled"
+            ;;
+        esac
+      fi
+
+      if is_nonneg_int "$duration"; then
+        duration_json="$duration"
+      else
+        duration_json=0
+      fi
+
+      if is_nonneg_int "$order_seq"; then
+        order_seq_json="$order_seq"
+      else
+        order_seq_json=0
+      fi
+
+      if [ -n "$exit_code" ] && [[ "$exit_code" =~ ^-?[0-9]+$ ]]; then
+        exit_code_json="$exit_code"
+      else
+        exit_code_json="null"
+      fi
+
+      steps_json="$(
+        ${pkgs.jq}/bin/jq -cn \
+          --argjson steps "$steps_json" \
+          --arg name "$task_id" \
+          --arg status "$status" \
+          --arg state "$state" \
+          --arg workflowId "$workflow_id" \
+          --arg reason "$reason" \
+          --argjson duration "$duration_json" \
+          --argjson orderSeq "$order_seq_json" \
+          --argjson exitCode "$exit_code_json" \
+          '$steps + [{
+            name: $name,
+            status: $status,
+            state: $state,
+            duration: $duration,
+            order: $orderSeq,
+            workflow_id: (if $workflowId == "" then null else $workflowId end),
+            reason: (if $reason == "" then null else $reason end),
+            exit_code: $exitCode
+          }]'
+      )"
+    done < <(workflow_step_records_tsv "$run_id" "$events_file")
+
+    printf '%s' "$steps_json" | ${pkgs.jq}/bin/jq -c 'sort_by(.order)'
+  }
+
+  workflow_peak_workers() {
+    local run_id="$1"
+    local events_file="$2"
+    local leaf_task_ids_json="$3"
+
+    if [ ! -f "$events_file" ]; then
+      printf '%s' "0"
+      return 0
+    fi
+
+    ${pkgs.jq}/bin/jq -r -s --arg runId "$run_id" --argjson taskIds "$leaf_task_ids_json" '
+      map(
+        select(
+          .runId == $runId
+          and (.taskId // "") != ""
+          and ((.taskId as $id | ($taskIds | index($id)) != null))
+          and (
+            .state == "running"
+            or .state == "passed"
+            or .state == "failed"
+            or .state == "canceled"
+          )
+        )
+      )
+      | sort_by(.seq)
+      | reduce .[] as $event (
+          { running: 0, max: 0 };
+          if $event.state == "running" then
+            .running += 1
+            | .max = (if .running > .max then .running else .max end)
+          else
+            .running = (if .running > 0 then .running - 1 else 0 end)
+          end
+        )
+      | .max
+    ' "$events_file"
+  }
+
+  print_workflow_summary_report() {
+    local run_id="$1"
+    local workflow_id="$2"
+    local exit_code="$3"
+    local duration_seconds="$4"
+    local summary_file="$5"
+    local events_file="$REGISTRY_ROOT/events.ndjson"
+    local steps_json="[]"
+    local timing_fields=""
+    local summary_duration=""
+    local timing_setup=""
+    local timing_steps=""
+    local timing_teardown=""
+    local timing_accounted=""
+    local timing_untracked=""
+    local parallel_max_workers=""
+    local parallel_peak_workers=""
+    local parallel_canceled_count=""
+
+    echo ""
+    echo "------------------------------------------------------------"
+    echo "Summary"
+    echo "------------------------------------------------------------"
+
+    if [ -n "$summary_file" ] && [ -f "$summary_file" ]; then
+      echo "Source: $summary_file"
+      steps_json="$(${pkgs.jq}/bin/jq -c '.steps // []' "$summary_file" 2>/dev/null || echo "[]")"
+      summary_duration="$(${pkgs.jq}/bin/jq -r '.timing.total_duration // .duration_seconds // ""' "$summary_file" 2>/dev/null || true)"
+      if is_nonneg_int "$summary_duration"; then
+        duration_seconds="$summary_duration"
+      fi
+      timing_fields="$(
+        ${pkgs.jq}/bin/jq -r '
+          [
+            (.timing.setup_duration // ""),
+            (.timing.steps_duration // ""),
+            (.timing.teardown_duration // ""),
+            (.timing.accounted_duration // ""),
+            (.timing.untracked_duration // ""),
+            (.timing.parallelism.max_workers // ""),
+            (.timing.parallelism.peak_workers // ""),
+            (.timing.parallelism.canceled_count // "")
+          ] | @tsv
+        ' "$summary_file" 2>/dev/null || true
+      )"
+      if [ -n "$timing_fields" ]; then
+        IFS=$'\t' read -r timing_setup timing_steps timing_teardown timing_accounted timing_untracked parallel_max_workers parallel_peak_workers parallel_canceled_count <<< "$timing_fields"
+      fi
+    elif [ -f "$events_file" ]; then
+      steps_json="$(workflow_steps_json "$run_id" "$events_file" 2>/dev/null || echo "[]")"
+    fi
+
+    printf '%s' "$steps_json" | ${pkgs.jq}/bin/jq -r '
+      .[] |
+      "  [\(
+        if .status == "passed" then
+          "PASS"
+        elif .status == "skipped" then
+          "SKIP"
+        elif .status == "failed" then
+          "FAIL"
+        elif .status == "canceled" then
+          "FAIL"
+        else
+          "FAIL"
+        end
+      )] \(.name) (\((.duration // "?") | tostring)s)"
+    ' 2>/dev/null || true
+
+    if is_nonneg_int "$duration_seconds"; then
+      echo "Total time: $(format_duration_seconds "$duration_seconds")"
+    fi
+
+    if is_nonneg_int "$timing_setup" \
+      && is_nonneg_int "$timing_steps" \
+      && is_nonneg_int "$timing_teardown" \
+      && is_nonneg_int "$timing_accounted" \
+      && is_nonneg_int "$timing_untracked"; then
+      echo "INFO: Time breakdown setup=''${timing_setup}s steps=''${timing_steps}s teardown=''${timing_teardown}s accounted=''${timing_accounted}s untracked=''${timing_untracked}s"
+    fi
+
+    if is_nonneg_int "$parallel_max_workers" \
+      && is_nonneg_int "$parallel_peak_workers" \
+      && is_nonneg_int "$parallel_canceled_count"; then
+      echo "INFO: Parallelism max_workers=$parallel_max_workers peak_workers=$parallel_peak_workers canceled_count=$parallel_canceled_count"
+    fi
+
+    if [ "$exit_code" -eq 0 ]; then
+      echo "OK: Exit code: 0"
+    else
+      echo "ERROR: Exit code: $exit_code"
+    fi
+
+    if [ -n "$summary_file" ] && [ -f "$summary_file" ]; then
+      echo ""
+      echo "Artifacts: $(dirname "$summary_file")"
+    fi
+
+    echo "------------------------------------------------------------"
+  }
+
   write_workflow_summary_json() {
     local run_id="$1"
     local workflow_id="$2"
@@ -872,7 +1239,22 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local passed
     local failed
     local canceled
+    local steps_json
+    local steps_duration
+    local setup_duration=0
+    local teardown_duration=0
+    local accounted_duration
+    local untracked_duration
+    local parallel_max_workers
+    local parallel_peak_workers
+    local parallel_canceled_count
+    local parallel_max_workers_json="null"
+    local parallel_peak_workers_json="null"
+    local parallel_canceled_count_json="null"
+    local leaf_task_ids_json="[]"
     local events_file="$REGISTRY_ROOT/events.ndjson"
+
+    LAST_WORKFLOW_SUMMARY_FILE=""
 
     should_write="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.artifacts.writeSummary // false')"
     if [ "$should_write" != "true" ]; then
@@ -898,44 +1280,112 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       fi
     fi
 
-    if [ -f "$events_file" ]; then
-      passed="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "passed") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^passed$' || true)"
-      failed="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "failed") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^failed$' || true)"
-      canceled="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "canceled") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^canceled$' || true)"
-    else
-      passed=0
-      failed=0
-      canceled=0
-    fi
-
     finished_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     duration_seconds="$(( $(date +%s) - started_epoch ))"
+    if [ "$duration_seconds" -lt 0 ]; then
+      duration_seconds=0
+    fi
 
-    if ! ${pkgs.jq}/bin/jq -n -S \
-      --arg runId "$run_id" \
-      --arg workflowId "$workflow_id" \
-      --arg mode "$mode" \
-      --argjson exitCode "$exit_code" \
-      --arg startedAt "$started_at" \
-      --arg finishedAt "$finished_at" \
-      --argjson durationSeconds "$duration_seconds" \
-      --argjson passed "$passed" \
-      --argjson failed "$failed" \
-      --argjson canceled "$canceled" \
-      '{
-        run_id: $runId,
-        workflow_id: $workflowId,
-        mode: $mode,
-        exit_code: $exitCode,
-        started_at: $startedAt,
-        finished_at: $finishedAt,
-        duration_seconds: $durationSeconds,
-        counts: {
-          passed: $passed,
-          failed: $failed,
-          canceled: $canceled
-        }
-      }' > "$summary_file"; then
+    if [ -f "$events_file" ]; then
+      if steps_json="$(workflow_steps_json "$run_id" "$events_file")"; then
+        :
+      else
+        echo "WARN: failed to collect step summary from '$events_file'; using empty step list"
+        steps_json="[]"
+      fi
+    else
+      steps_json="[]"
+    fi
+
+    passed="$(printf '%s' "$steps_json" | ${pkgs.jq}/bin/jq -r '[.[] | select(.state == "passed")] | length' 2>/dev/null || echo 0)"
+    failed="$(printf '%s' "$steps_json" | ${pkgs.jq}/bin/jq -r '[.[] | select(.state == "failed")] | length' 2>/dev/null || echo 0)"
+    canceled="$(printf '%s' "$steps_json" | ${pkgs.jq}/bin/jq -r '[.[] | select(.state == "canceled")] | length' 2>/dev/null || echo 0)"
+
+    steps_duration="$(printf '%s' "$steps_json" | ${pkgs.jq}/bin/jq -r '[.[] | (.duration // 0)] | add // 0' 2>/dev/null || echo 0)"
+    if ! is_nonneg_int "$steps_duration"; then
+      steps_duration=0
+    fi
+    accounted_duration="$(( setup_duration + steps_duration + teardown_duration ))"
+    untracked_duration="$(( duration_seconds - accounted_duration ))"
+    if [ "$untracked_duration" -lt 0 ]; then
+      untracked_duration=0
+    fi
+
+    if parallel_max_workers="$(resolve_effective_max_workers "$workflow" 2>/dev/null || true)"; then
+      :
+    fi
+    if is_nonneg_int "$parallel_max_workers"; then
+      parallel_max_workers_json="$parallel_max_workers"
+    fi
+
+    leaf_task_ids_json="$(printf '%s' "$steps_json" | ${pkgs.jq}/bin/jq -c '[.[] | .name] | unique' 2>/dev/null || echo '[]')"
+    if [ -f "$events_file" ]; then
+      parallel_peak_workers="$(workflow_peak_workers "$run_id" "$events_file" "$leaf_task_ids_json" 2>/dev/null || echo 0)"
+    else
+      parallel_peak_workers=0
+    fi
+    if is_nonneg_int "$parallel_peak_workers"; then
+      parallel_peak_workers_json="$parallel_peak_workers"
+    fi
+
+    parallel_canceled_count="$canceled"
+    if is_nonneg_int "$parallel_canceled_count"; then
+      parallel_canceled_count_json="$parallel_canceled_count"
+    fi
+
+    write_summary_payload() {
+      local target_file="$1"
+      ${pkgs.jq}/bin/jq -n -S \
+        --arg runId "$run_id" \
+        --arg workflowId "$workflow_id" \
+        --arg mode "$mode" \
+        --argjson exitCode "$exit_code" \
+        --arg startedAt "$started_at" \
+        --arg finishedAt "$finished_at" \
+        --argjson durationSeconds "$duration_seconds" \
+        --argjson passed "$passed" \
+        --argjson failed "$failed" \
+        --argjson canceled "$canceled" \
+        --argjson steps "$steps_json" \
+        --argjson setupDuration "$setup_duration" \
+        --argjson stepsDuration "$steps_duration" \
+        --argjson teardownDuration "$teardown_duration" \
+        --argjson accountedDuration "$accounted_duration" \
+        --argjson untrackedDuration "$untracked_duration" \
+        --argjson parallelMaxWorkers "$parallel_max_workers_json" \
+        --argjson parallelPeakWorkers "$parallel_peak_workers_json" \
+        --argjson parallelCanceledCount "$parallel_canceled_count_json" \
+        '{
+          run_id: $runId,
+          workflow_id: $workflowId,
+          mode: $mode,
+          exit_code: $exitCode,
+          started_at: $startedAt,
+          finished_at: $finishedAt,
+          duration_seconds: $durationSeconds,
+          counts: {
+            passed: $passed,
+            failed: $failed,
+            canceled: $canceled
+          },
+          steps: $steps,
+          timing: {
+            total_duration: $durationSeconds,
+            setup_duration: $setupDuration,
+            steps_duration: $stepsDuration,
+            teardown_duration: $teardownDuration,
+            accounted_duration: $accountedDuration,
+            untracked_duration: $untrackedDuration,
+            parallelism: {
+              max_workers: $parallelMaxWorkers,
+              peak_workers: $parallelPeakWorkers,
+              canceled_count: $parallelCanceledCount
+            }
+          }
+        }' > "$target_file"
+    }
+
+    if ! write_summary_payload "$summary_file"; then
       if [ -z "''${CI_ARTIFACTS_DIR:-}" ]; then
         artifacts_dir="$REGISTRY_ROOT/artifacts/$run_id"
         summary_file="$artifacts_dir/summary.json"
@@ -943,31 +1393,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
           echo "ERROR: failed to create fallback artifacts directory '$artifacts_dir'"
           return 1
         fi
-        if ! ${pkgs.jq}/bin/jq -n -S \
-          --arg runId "$run_id" \
-          --arg workflowId "$workflow_id" \
-          --arg mode "$mode" \
-          --argjson exitCode "$exit_code" \
-          --arg startedAt "$started_at" \
-          --arg finishedAt "$finished_at" \
-          --argjson durationSeconds "$duration_seconds" \
-          --argjson passed "$passed" \
-          --argjson failed "$failed" \
-          --argjson canceled "$canceled" \
-          '{
-            run_id: $runId,
-            workflow_id: $workflowId,
-            mode: $mode,
-            exit_code: $exitCode,
-            started_at: $startedAt,
-            finished_at: $finishedAt,
-            duration_seconds: $durationSeconds,
-            counts: {
-              passed: $passed,
-              failed: $failed,
-              canceled: $canceled
-            }
-          }' > "$summary_file"; then
+        if ! write_summary_payload "$summary_file"; then
           echo "ERROR: failed to write summary file '$summary_file'"
           return 1
         fi
@@ -978,6 +1404,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       fi
     fi
 
+    LAST_WORKFLOW_SUMMARY_FILE="$summary_file"
     echo "INFO: summary_json=$summary_file"
     return 0
   }
@@ -1019,11 +1446,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         --mode=*)
           mode_override="''${arg#--mode=}"
           ;;
-        --basic|--audit|--parity|--app|--env|--full|--mainnet)
+        --basic|--app|--env|--full)
           mode_override="''${arg#--}"
-          ;;
-        --bg|--background)
-          # Compatibility no-op; process mode is orchestrator-owned.
           ;;
         --summary)
           print_summary=1
@@ -1041,7 +1465,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       esac
     done
 
-    workflow_id="$(resolve_workflow_mode "$workflow_id" "$mode_override")"
+    workflow_id="$(resolve_workflow_mode "$workflow_id" "$mode_override")" || return $?
 
     local workflow
     local args_payload
@@ -1054,7 +1478,14 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local post_always=true
     local started_at
     local started_epoch
+    local duration_seconds
+    local summary_file=""
+    local nested_workflow_call=0
     local managed_by_orchestrator=0
+
+    if [ "''${NIXFIED_WORKFLOW_NESTED:-0}" = "1" ]; then
+      nested_workflow_call=1
+    fi
 
     workflow="$(workflow_json "$workflow_id")"
     if [ -z "$workflow" ]; then
@@ -1124,21 +1555,35 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       append_event "$run_id" "$workflow_id" "" "failed" "$detail_json"
     fi
 
-    if ! write_workflow_summary_json "$run_id" "$workflow_id" "$workflow" "$status" "$started_at" "$started_epoch"; then
-      if [ "$status" -eq 0 ]; then
-        status=1
-        detail_json="$(${pkgs.jq}/bin/jq -cn --arg reason "summary-write-failed" '{reason: $reason, exitCode: 1}')"
-        append_event "$run_id" "$workflow_id" "" "failed" "$detail_json"
-      fi
+    duration_seconds="$(( $(date +%s) - started_epoch ))"
+    if [ "$duration_seconds" -lt 0 ]; then
+      duration_seconds=0
     fi
 
-    if [ "$print_summary" -eq 1 ]; then
+    if [ "$nested_workflow_call" -eq 0 ]; then
+      if ! write_workflow_summary_json "$run_id" "$workflow_id" "$workflow" "$status" "$started_at" "$started_epoch"; then
+        if [ "$status" -eq 0 ]; then
+          status=1
+          detail_json="$(${pkgs.jq}/bin/jq -cn --arg reason "summary-write-failed" '{reason: $reason, exitCode: 1}')"
+          append_event "$run_id" "$workflow_id" "" "failed" "$detail_json"
+        fi
+      fi
+      summary_file="$LAST_WORKFLOW_SUMMARY_FILE"
+    fi
+
+    if [ "$print_summary" -eq 1 ] && [ "$nested_workflow_call" -eq 0 ]; then
       local events_file="$REGISTRY_ROOT/events.ndjson"
       local passed failed canceled
-      if [ -f "$events_file" ]; then
-        passed="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId) | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^passed$' || true)"
-        failed="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId) | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^failed$' || true)"
-        canceled="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId) | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^canceled$' || true)"
+      print_workflow_summary_report "$run_id" "$workflow_id" "$status" "$duration_seconds" "$summary_file"
+
+      if [ -n "$summary_file" ] && [ -f "$summary_file" ]; then
+        passed="$(${pkgs.jq}/bin/jq -r '.counts.passed // 0' "$summary_file" 2>/dev/null || echo 0)"
+        failed="$(${pkgs.jq}/bin/jq -r '.counts.failed // 0' "$summary_file" 2>/dev/null || echo 0)"
+        canceled="$(${pkgs.jq}/bin/jq -r '.counts.canceled // 0' "$summary_file" 2>/dev/null || echo 0)"
+      elif [ -f "$events_file" ]; then
+        passed="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "passed") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^passed$' || true)"
+        failed="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "failed") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^failed$' || true)"
+        canceled="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "canceled") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^canceled$' || true)"
       else
         passed=0
         failed=0

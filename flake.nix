@@ -21,15 +21,11 @@
           projectModules = [ ./nixfied/project/module.nix ];
           extraModules = [ ];
         };
-        local = import ./nixfied/local/default.nix {
-          inherit pkgs;
-          project = { };
-          lib = pkgs.lib;
-        };
       in {
-        apps = compiled.apps // (local.apps or { });
-        packages = compiled.packages // (local.packages or { });
+        apps = compiled.apps;
+        packages = compiled.packages;
         checks = compiled.checks;
-        devShells = compiled.devShells // (local.devShells or { });
+        devShells = compiled.devShells;
       });
 }
+

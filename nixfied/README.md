@@ -25,11 +25,10 @@ Model-generated app surfaces:
 - `nix run .#format`
 - `nix run .#framework::install`
 - `nix run .#framework::test`
+- `nix run .#framework::upgrade`
 - `nix run .#health`
 - `nix run .#ports`
 - `nix run .#ready`
-- `nix run .#services-start`
-- `nix run .#services-stop`
 - `nix run .#test`
 - `nix run .#test-isolation`
 - `nix run .#validate-env`
@@ -58,10 +57,6 @@ Primary edit points:
 - `nixfied/project/conf.nix` for project identity, envs, ports, and module settings.
 - `nixfied/project/module.nix` for task/workflow modeling and exposed app names.
 - `nixfied/modules/` for typed module options.
-
-Service package/config overrides should be expressed through `nixfied.services.*` typed options in
-`nixfied/project/module.nix` and `nixfied/project/conf.nix` (for example, `nixfied.services.helios.package`),
-without importing private `nixfied/.framework/*` paths from project files.
 
 Environment defaults:
 
