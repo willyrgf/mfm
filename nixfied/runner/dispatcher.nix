@@ -7,7 +7,7 @@
 let
   lib = pkgs.lib;
 
-  executor = import ./executor.nix {
+  orchestrator = import ./orchestrator.nix {
     inherit
       pkgs
       model
@@ -18,7 +18,7 @@ let
 
   replayTool = registry.mkReplayApp;
 
-  executorProgram = "${executor}/bin/nixfied-executor";
+  orchestratorProgram = "${orchestrator}/bin/nixfied-orchestrator";
 
   mkApp =
     appName: body:
@@ -47,7 +47,7 @@ let
       {
         name = appName;
         value = mkApp appName ''
-          NIXFIED_CALLER_PWD="$PWD" exec ${executorProgram} run-task ${lib.escapeShellArg taskId} "$@"
+          NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-task ${lib.escapeShellArg taskId} "$@"
         '';
       }
     ) viewAppNames
@@ -65,7 +65,7 @@ in
       echo "ERROR: usage: run-task <task-id> [-- ...]"
       exit 2
     fi
-    NIXFIED_CALLER_PWD="$PWD" exec ${executorProgram} run-task "$@"
+    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-task "$@"
   '';
 
   "run-workflow" = mkApp "run-workflow" ''
@@ -73,7 +73,7 @@ in
       echo "ERROR: usage: run-workflow <workflow-id> [-- ...]"
       exit 2
     fi
-    NIXFIED_CALLER_PWD="$PWD" exec ${executorProgram} run-workflow "$@"
+    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-workflow "$@"
   '';
 
   "run-workflow-parallel" = mkApp "run-workflow-parallel" ''
@@ -81,7 +81,27 @@ in
       echo "ERROR: usage: run-workflow-parallel <workflow-id> [-- ...]"
       exit 2
     fi
-    NIXFIED_WORKFLOW_PARALLEL=1 NIXFIED_CALLER_PWD="$PWD" exec ${executorProgram} run-workflow "$@"
+    NIXFIED_WORKFLOW_PARALLEL=1 NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-workflow "$@"
+  '';
+
+  "runs" = mkApp "runs" ''
+    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} runs "$@"
+  '';
+
+  "stop-run" = mkApp "stop-run" ''
+    if [ "$#" -ne 1 ]; then
+      echo "ERROR: usage: stop-run <run-id>"
+      exit 2
+    fi
+    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} stop-run "$@"
+  '';
+
+  "stop-all-runs" = mkApp "stop-all-runs" ''
+    if [ "$#" -ne 0 ]; then
+      echo "ERROR: usage: stop-all-runs"
+      exit 2
+    fi
+    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} stop-all-runs
   '';
 
   "help" = mkApp "help" ''

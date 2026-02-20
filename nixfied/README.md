@@ -37,6 +37,9 @@ Dispatcher surfaces:
 - `nix run .#run-task -- <task-id> [-- ...]`
 - `nix run .#run-workflow -- <workflow-id> [-- ...]`
 - `nix run .#run-workflow-parallel -- <workflow-id> [-- ...]`
+- `nix run .#runs [-- <run-id>]`
+- `nix run .#stop-run -- <run-id>`
+- `nix run .#stop-all-runs`
 
 Introspection surfaces:
 
@@ -64,7 +67,7 @@ Environment defaults:
 - Modules: `lib.evalModules` + typed options from `nixfied/modules/*.nix`.
 - Compiler: deterministic pass pipeline in `nixfied/compiler/*.nix`.
 - Hashing: `stateHash = sha256(toCanonicalNix(model))`.
-- Runner: single dispatcher for task/workflow execution.
+- Runner: dispatcher routes to orchestrator, then executor (`dispatcher -> orchestrator -> executor`).
 - Registry: append-only NDJSON event stream with replay support.
 
 ## Docs

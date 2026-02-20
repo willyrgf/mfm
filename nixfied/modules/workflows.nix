@@ -89,12 +89,12 @@ in
               default = [ ];
             };
 
-            setup.tasks = lib.mkOption {
+            preRun.tasks = lib.mkOption {
               type = t.listOf t.str;
               default = [ ];
             };
 
-            teardown = {
+            postRun = {
               tasks = lib.mkOption {
                 type = t.listOf t.str;
                 default = [ ];
@@ -143,6 +143,12 @@ in
               emitRegistryEvents = lib.mkOption {
                 type = t.bool;
                 default = true;
+              };
+              ephemeral = {
+                enable = lib.mkOption {
+                  type = t.nullOr t.bool;
+                  default = null;
+                };
               };
             };
           };

@@ -10,13 +10,11 @@ let
   services = config.nixfied.services;
 
   postgresCfg = services.postgres;
-  minioCfg = services.minio;
   nginxCfg = services.nginx;
   rethCfg = services.reth;
   heliosCfg = services.helios;
 
   postgresEnabled = postgresCfg.enable;
-  minioEnabled = minioCfg.enable;
   nginxEnabled = nginxCfg.enable;
   rethEnabled = rethCfg.enable;
   heliosEnabled = heliosCfg.enable;
@@ -29,7 +27,6 @@ let
       throw "nixfied.operations: port key '${key}' is not defined in nixfied.runtime.ports";
 
   postgresPortBase = if postgresEnabled then resolvePortBase postgresCfg.portKey else 0;
-  minioApiPortBase = if minioEnabled then resolvePortBase minioCfg.portKeyApi else 0;
   nginxHttpPortBase = if nginxEnabled then resolvePortBase nginxCfg.portKeyHttp else 0;
   rethHttpPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyHttp else 0;
   heliosRpcPortBase = if heliosEnabled then resolvePortBase heliosCfg.portKeyRpc else 0;
@@ -55,6 +52,13 @@ let
   envNames = runtime.env.names;
   envPattern =
     if envNames == [ ] then runtime.env.default else builtins.concatStringsSep "|" envNames;
+  isolationSlotVar = runtime.slot.var;
+  isolationEnvVar = runtime.env.var;
+  isolationMaxSlot = runtime.slot.max;
+  isolationSlotsJson = builtins.toJSON cfg.testIsolation.slots;
+  isolationEnvsJson = builtins.toJSON cfg.testIsolation.envs;
+  isolationRunArgsJson = builtins.toJSON cfg.testIsolation.runArgs;
+  isolationRunEnvJson = builtins.toJSON cfg.testIsolation.runEnv;
 
   envOffsetCase = builtins.concatStringsSep "\n" (
     map (
@@ -282,20 +286,6 @@ ${envOffsetCase}
       echo "SKIP: postgres health check disabled"
     fi
 
-    if [ ${if minioEnabled then "1" else "0"} -eq 1 ]; then
-      checks=$((checks + 1))
-      minio_api_port=$(( ${toString minioApiPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking minio health port=$minio_api_port"
-      if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$minio_api_port/minio/health/live" >/dev/null 2>&1; then
-        echo "OK: minio healthy port=$minio_api_port"
-      else
-        echo "ERROR: minio unhealthy port=$minio_api_port"
-        exit 1
-      fi
-    else
-      echo "SKIP: minio health check disabled"
-    fi
-
     if [ ${if nginxEnabled then "1" else "0"} -eq 1 ]; then
       checks=$((checks + 1))
       nginx_http_port=$(( ${toString nginxHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
@@ -380,20 +370,6 @@ ${envOffsetCase}
       echo "SKIP: postgres readiness check disabled"
     fi
 
-    if [ ${if minioEnabled then "1" else "0"} -eq 1 ]; then
-      checks=$((checks + 1))
-      minio_api_port=$(( ${toString minioApiPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking minio readiness port=$minio_api_port"
-      if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$minio_api_port/minio/health/ready" >/dev/null 2>&1; then
-        echo "OK: minio ready port=$minio_api_port"
-      else
-        echo "ERROR: minio not ready port=$minio_api_port"
-        exit 1
-      fi
-    else
-      echo "SKIP: minio readiness check disabled"
-    fi
-
     if [ ${if nginxEnabled then "1" else "0"} -eq 1 ]; then
       checks=$((checks + 1))
       nginx_http_port=$(( ${toString nginxHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
@@ -454,9 +430,191 @@ ${envOffsetCase}
 
   isolationScript = ''
     set -euo pipefail
-    echo "INFO: Starting deterministic isolation smoke run"
-    echo "SKIP: isolation orchestration is not configured for this project"
-    echo "OK: test-isolation completed"
+    slot_var=${lib.escapeShellArg isolationSlotVar}
+    env_var=${lib.escapeShellArg isolationEnvVar}
+    slot_max=${toString isolationMaxSlot}
+    max_parallel=${toString cfg.testIsolation.maxParallel}
+    logs_root=${lib.escapeShellArg cfg.testIsolation.logsDir}
+    run_app=${lib.escapeShellArg cfg.testIsolation.runApp}
+    validate_app=${lib.escapeShellArg cfg.testIsolation.validateApp}
+    keep_logs_success=${if cfg.testIsolation.keepLogsOnSuccess then "1" else "0"}
+    keep_logs_failure=${if cfg.testIsolation.keepLogsOnFailure then "1" else "0"}
+
+    slots_json='${isolationSlotsJson}'
+    envs_json='${isolationEnvsJson}'
+    run_args_json='${isolationRunArgsJson}'
+    run_env_json='${isolationRunEnvJson}'
+    project_root="$(pwd -P)"
+
+    if [ -z "$run_app" ]; then
+      echo "ERROR: test-isolation runApp is empty"
+      exit 3
+    fi
+
+    if [ -z "$validate_app" ]; then
+      echo "ERROR: test-isolation validateApp is empty"
+      exit 3
+    fi
+
+    if ! [[ "$max_parallel" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: test-isolation maxParallel is not an integer: $max_parallel"
+      exit 3
+    fi
+
+    if [ "$max_parallel" -lt 1 ]; then
+      echo "ERROR: test-isolation maxParallel must be >= 1"
+      exit 3
+    fi
+
+    mapfile -t isolation_slots < <(${pkgs.jq}/bin/jq -r '.[]' <<<"$slots_json")
+    mapfile -t isolation_envs < <(${pkgs.jq}/bin/jq -r '.[]' <<<"$envs_json")
+    mapfile -t run_args < <(${pkgs.jq}/bin/jq -r '.[]' <<<"$run_args_json")
+    mapfile -t run_env_entries < <(${pkgs.jq}/bin/jq -r 'to_entries[]? | [.key, (.value | tostring)] | @tsv' <<<"$run_env_json")
+
+    if [ "''${#isolation_slots[@]}" -eq 0 ]; then
+      echo "ERROR: test-isolation matrix has no slots"
+      exit 3
+    fi
+
+    if [ "''${#isolation_envs[@]}" -eq 0 ]; then
+      echo "ERROR: test-isolation matrix has no environments"
+      exit 3
+    fi
+
+    mkdir -p "$logs_root"
+    echo "INFO: test-isolation matrix slots=''${#isolation_slots[@]} envs=''${#isolation_envs[@]}"
+
+    statuses_dir="$(mktemp -d "$logs_root/.status.XXXXXX")"
+    semaphore_dir="$(mktemp -d "$logs_root/.semaphore.XXXXXX")"
+    semaphore_fifo="$semaphore_dir/tokens.fifo"
+    mkfifo "$semaphore_fifo"
+    exec 9<>"$semaphore_fifo"
+    rm -f "$semaphore_fifo"
+
+    token_count=0
+    while [ "$token_count" -lt "$max_parallel" ]; do
+      printf 'token\n' >&9
+      token_count=$((token_count + 1))
+    done
+
+    total=0
+    failed=0
+    worker_pids=()
+    status_files=()
+
+    for slot_value in "''${isolation_slots[@]}"; do
+      if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: matrix slot is not an integer: $slot_value"
+        failed=$((failed + 1))
+        continue
+      fi
+      if [ "$slot_value" -gt "$slot_max" ]; then
+        echo "ERROR: matrix slot exceeds max slot ($slot_max): $slot_value"
+        failed=$((failed + 1))
+        continue
+      fi
+
+      for env_value in "''${isolation_envs[@]}"; do
+        total=$((total + 1))
+
+        case "$env_value" in
+          ${envPattern})
+            ;;
+          *)
+            echo "ERROR: unsupported environment in matrix: $env_value"
+            failed=$((failed + 1))
+            continue
+            ;;
+        esac
+
+        cell_name="slot-''${slot_value}__env-''${env_value}"
+        cell_dir="$logs_root/$cell_name"
+        artifacts_dir="$cell_dir/artifacts"
+        validate_log="$cell_dir/validate.log"
+        run_log="$cell_dir/run.log"
+        status_file="$statuses_dir/$cell_name.rc"
+
+        mkdir -p "$cell_dir" "$artifacts_dir"
+        echo "INFO: isolation cell start slot=$slot_value env=$env_value"
+        status_files+=("$status_file")
+
+        IFS= read -r -u 9 _
+        (
+          set +e
+          rc=1
+          export "$slot_var=$slot_value"
+          export "$env_var=$env_value"
+          export CI_ARTIFACTS_DIR="$artifacts_dir"
+
+          for run_env_entry in "''${run_env_entries[@]}"; do
+            run_env_key="''${run_env_entry%%$'\t'*}"
+            run_env_value="''${run_env_entry#*$'\t'}"
+            export "$run_env_key=$run_env_value"
+          done
+
+          nix run "path:$project_root"#"$validate_app" > "$validate_log" 2>&1
+          rc="$?"
+          if [ "$rc" -eq 0 ]; then
+            nix run "path:$project_root"#"$run_app" -- "''${run_args[@]}" > "$run_log" 2>&1
+            rc="$?"
+          fi
+
+          printf '%s\n' "$rc" > "$status_file"
+          if [ "$rc" -eq 0 ]; then
+            echo "OK: isolation cell passed slot=$slot_value env=$env_value"
+            if [ "$keep_logs_success" -eq 0 ]; then
+              rm -rf "$cell_dir"
+            fi
+          else
+            echo "ERROR: isolation cell failed slot=$slot_value env=$env_value rc=$rc"
+          fi
+
+          printf 'token\n' >&9
+          exit 0
+        ) &
+        worker_pids+=("$!")
+      done
+    done
+
+    for worker_pid in "''${worker_pids[@]}"; do
+      wait "$worker_pid" || true
+    done
+
+    exec 9>&-
+    exec 9<&-
+    rm -rf "$semaphore_dir"
+
+    for status_file in "''${status_files[@]}"; do
+      if [ ! -f "$status_file" ]; then
+        failed=$((failed + 1))
+        echo "ERROR: isolation cell status missing file=$status_file"
+        continue
+      fi
+
+      rc="$(cat "$status_file")"
+      if [ "$rc" != "0" ]; then
+        failed=$((failed + 1))
+      fi
+    done
+    rm -rf "$statuses_dir"
+
+    if [ "$total" -eq 0 ]; then
+      echo "ERROR: test-isolation matrix did not execute any cells"
+      exit 3
+    fi
+
+    if [ "$failed" -ne 0 ]; then
+      echo "ERROR: test-isolation completed with failures failed=$failed total=$total"
+      if [ "$keep_logs_failure" -eq 0 ]; then
+        rm -rf "$logs_root"
+      fi
+      exit 1
+    fi
+
+    if [ "$keep_logs_success" -eq 1 ]; then
+      echo "INFO: isolation logs preserved at $logs_root"
+    fi
+    echo "OK: test-isolation completed total=$total"
   '';
 in
 {
@@ -474,6 +632,62 @@ in
     testIsolation.enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
+    };
+
+    testIsolation.slots = lib.mkOption {
+      type = lib.types.listOf lib.types.int;
+      default = [ runtime.slot.default ];
+    };
+
+    testIsolation.envs = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = runtime.env.names;
+    };
+
+    testIsolation.logsDir = lib.mkOption {
+      type = lib.types.str;
+      default = "/tmp/${config.nixfied.identity.projectId}-isolation";
+    };
+
+    testIsolation.keepLogsOnSuccess = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+    };
+
+    testIsolation.keepLogsOnFailure = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+    };
+
+    testIsolation.maxParallel = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 4;
+    };
+
+    testIsolation.runApp = lib.mkOption {
+      type = lib.types.str;
+      default = "ci";
+    };
+
+    testIsolation.runArgs = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "--summary" ];
+    };
+
+    testIsolation.validateApp = lib.mkOption {
+      type = lib.types.str;
+      default = "validate-env";
+    };
+
+    testIsolation.runEnv = lib.mkOption {
+      type = lib.types.attrsOf (
+        lib.types.oneOf [
+          lib.types.str
+          lib.types.int
+          lib.types.bool
+        ]
+      );
+      default = { };
     };
 
     ports.enable = lib.mkOption {
@@ -515,6 +729,11 @@ in
         summary = "Run isolation checks";
         description = "Runs deterministic isolation smoke checks from model metadata.";
         command = isolationScript;
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.jq
+          pkgs.nix
+        ];
       };
     })
 
@@ -551,7 +770,7 @@ in
         summary = "Run service health checks";
         description = ''
           Runs health checks for enabled services:
-          postgres, minio, nginx, reth, and helios.
+          postgres, nginx, reth, and helios.
         '';
         command = healthScript;
         runtimeInputs = serviceProbeRuntimeInputs;
@@ -565,7 +784,7 @@ in
         summary = "Run service readiness checks";
         description = ''
           Runs readiness checks for enabled services:
-          postgres, minio, nginx, reth, and helios.
+          postgres, nginx, reth, and helios.
         '';
         command = readyScript;
         runtimeInputs = serviceProbeRuntimeInputs;

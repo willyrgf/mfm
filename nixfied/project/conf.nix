@@ -267,6 +267,7 @@ rec {
     logsDir = "/tmp/${project.id}-isolation";
     keepLogsOnSuccess = false;
     keepLogsOnFailure = true;
+    maxParallel = 12;
     useDeps = false;
     run = {
       kind = "runApp";

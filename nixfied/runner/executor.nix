@@ -305,12 +305,18 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local run_id
     local detail_json
     local status
+    local managed_by_orchestrator=0
 
-    args_payload="$(printf '%s\n' "$@")"
-    run_id="$(compute_run_id "task" "" "$task_id" "$args_payload")"
-
-    activate_run "$run_id"
-    trap "deactivate_run '$run_id'" EXIT
+    if [ -n "''${NIXFIED_ORCHESTRATOR_RUN_ID:-}" ]; then
+      run_id="$NIXFIED_ORCHESTRATOR_RUN_ID"
+      RUN_SUFFIX_REASON="orchestrator"
+      managed_by_orchestrator=1
+    else
+      args_payload="$(printf '%s\n' "$@")"
+      run_id="$(compute_run_id "task" "" "$task_id" "$args_payload")"
+      activate_run "$run_id"
+      trap "deactivate_run '$run_id'" EXIT
+    fi
 
     detail_json="$(${pkgs.jq}/bin/jq -cn --arg suffix "$RUN_SUFFIX_REASON" '{mode: "task", suffixReason: (if $suffix == "" then null else $suffix end)}')"
     append_event "$run_id" "" "$task_id" "queued" "$detail_json"
@@ -320,8 +326,10 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     status="$?"
     set -e
 
-    trap - EXIT
-    deactivate_run "$run_id"
+    if [ "$managed_by_orchestrator" -eq 0 ]; then
+      trap - EXIT
+      deactivate_run "$run_id"
+    fi
 
     return "$status"
   }
@@ -403,35 +411,6 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fi
 
     printf '%s' "$run_parallel"
-  }
-
-  run_workflow_lifecycle_tasks() {
-    local run_id="$1"
-    local workflow_id="$2"
-    local workflow="$3"
-    local phase="$4"
-    shift 4
-    local -a passthrough_args
-    passthrough_args=("$@")
-
-    local lifecycle_task
-    local status=0
-
-    while IFS= read -r lifecycle_task; do
-      if [ -z "$lifecycle_task" ]; then
-        continue
-      fi
-
-      if execute_task "$run_id" "$workflow_id" "$lifecycle_task" "''${passthrough_args[@]}"; then
-        status=0
-      else
-        status="$?"
-        echo "ERROR: workflow '$workflow_id' $phase task '$lifecycle_task' failed exitCode=$status"
-        return "$status"
-      fi
-    done < <(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r --arg phase "$phase" '.[$phase].tasks[]?')
-
-    return "$status"
   }
 
   run_workflow_serial_impl() {
@@ -848,6 +827,161 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     return "$workflow_status"
   }
 
+  run_workflow_phase_tasks() {
+    local run_id="$1"
+    local workflow_id="$2"
+    local workflow="$3"
+    local phase_key="$4"
+    shift 4
+    local -a passthrough_args
+    passthrough_args=("$@")
+
+    local phase_task
+    local phase_status=0
+
+    while IFS= read -r phase_task; do
+      if [ -z "$phase_task" ]; then
+        continue
+      fi
+
+      if execute_task "$run_id" "$workflow_id" "$phase_task" "''${passthrough_args[@]}"; then
+        phase_status=0
+      else
+        phase_status="$?"
+        break
+      fi
+    done < <(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r --arg phase "$phase_key" '.[$phase].tasks[]?')
+
+    return "$phase_status"
+  }
+
+  write_workflow_summary_json() {
+    local run_id="$1"
+    local workflow_id="$2"
+    local workflow="$3"
+    local exit_code="$4"
+    local started_at="$5"
+    local started_epoch="$6"
+
+    local should_write
+    local mode
+    local artifacts_dir
+    local summary_file
+    local finished_at
+    local duration_seconds
+    local passed
+    local failed
+    local canceled
+    local events_file="$REGISTRY_ROOT/events.ndjson"
+
+    should_write="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.artifacts.writeSummary // false')"
+    if [ "$should_write" != "true" ]; then
+      return 0
+    fi
+
+    mode="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.mode // "custom"')"
+    artifacts_dir="''${CI_ARTIFACTS_DIR:-$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.artifacts.root // "/tmp/ci-artifacts"')}"
+    summary_file="$artifacts_dir/summary.json"
+
+    if ! mkdir -p "$artifacts_dir"; then
+      if [ -z "''${CI_ARTIFACTS_DIR:-}" ]; then
+        artifacts_dir="$REGISTRY_ROOT/artifacts/$run_id"
+        summary_file="$artifacts_dir/summary.json"
+        if ! mkdir -p "$artifacts_dir"; then
+          echo "ERROR: failed to create artifacts directory '$artifacts_dir'"
+          return 1
+        fi
+        echo "WARN: artifacts root was not writable; using fallback '$artifacts_dir'"
+      else
+        echo "ERROR: failed to create artifacts directory '$artifacts_dir'"
+        return 1
+      fi
+    fi
+
+    if [ -f "$events_file" ]; then
+      passed="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "passed") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^passed$' || true)"
+      failed="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "failed") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^failed$' || true)"
+      canceled="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "canceled") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^canceled$' || true)"
+    else
+      passed=0
+      failed=0
+      canceled=0
+    fi
+
+    finished_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    duration_seconds="$(( $(date +%s) - started_epoch ))"
+
+    if ! ${pkgs.jq}/bin/jq -n -S \
+      --arg runId "$run_id" \
+      --arg workflowId "$workflow_id" \
+      --arg mode "$mode" \
+      --argjson exitCode "$exit_code" \
+      --arg startedAt "$started_at" \
+      --arg finishedAt "$finished_at" \
+      --argjson durationSeconds "$duration_seconds" \
+      --argjson passed "$passed" \
+      --argjson failed "$failed" \
+      --argjson canceled "$canceled" \
+      '{
+        run_id: $runId,
+        workflow_id: $workflowId,
+        mode: $mode,
+        exit_code: $exitCode,
+        started_at: $startedAt,
+        finished_at: $finishedAt,
+        duration_seconds: $durationSeconds,
+        counts: {
+          passed: $passed,
+          failed: $failed,
+          canceled: $canceled
+        }
+      }' > "$summary_file"; then
+      if [ -z "''${CI_ARTIFACTS_DIR:-}" ]; then
+        artifacts_dir="$REGISTRY_ROOT/artifacts/$run_id"
+        summary_file="$artifacts_dir/summary.json"
+        if ! mkdir -p "$artifacts_dir"; then
+          echo "ERROR: failed to create fallback artifacts directory '$artifacts_dir'"
+          return 1
+        fi
+        if ! ${pkgs.jq}/bin/jq -n -S \
+          --arg runId "$run_id" \
+          --arg workflowId "$workflow_id" \
+          --arg mode "$mode" \
+          --argjson exitCode "$exit_code" \
+          --arg startedAt "$started_at" \
+          --arg finishedAt "$finished_at" \
+          --argjson durationSeconds "$duration_seconds" \
+          --argjson passed "$passed" \
+          --argjson failed "$failed" \
+          --argjson canceled "$canceled" \
+          '{
+            run_id: $runId,
+            workflow_id: $workflowId,
+            mode: $mode,
+            exit_code: $exitCode,
+            started_at: $startedAt,
+            finished_at: $finishedAt,
+            duration_seconds: $durationSeconds,
+            counts: {
+              passed: $passed,
+              failed: $failed,
+              canceled: $canceled
+            }
+          }' > "$summary_file"; then
+          echo "ERROR: failed to write summary file '$summary_file'"
+          return 1
+        fi
+        echo "WARN: artifacts root was not writable; using fallback '$artifacts_dir'"
+      else
+        echo "ERROR: failed to write summary file '$summary_file'"
+        return 1
+      fi
+    fi
+
+    echo "INFO: summary_json=$summary_file"
+    return 0
+  }
+
   run_workflow() {
     if [ "$#" -lt 1 ]; then
       echo "ERROR: usage: run-workflow <workflow-id> [-- ...]"
@@ -859,37 +993,50 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     local mode_override=""
     local print_summary=0
+    local parse_options=1
     local -a passthrough_args
     passthrough_args=()
+    local arg
 
     while [ "$#" -gt 0 ]; do
-      case "$1" in
+      arg="$1"
+      shift
+
+      if [ "$parse_options" -eq 0 ]; then
+        passthrough_args+=("$arg")
+        continue
+      fi
+
+      case "$arg" in
         --mode)
-          if [ "$#" -lt 2 ]; then
+          if [ "$#" -lt 1 ]; then
             echo "ERROR: --mode requires a value"
             return 2
           fi
-          mode_override="$2"
-          shift 2
-          ;;
-        --basic|--app|--env|--full)
-          mode_override="''${1#--}"
+          mode_override="$1"
           shift
+          ;;
+        --mode=*)
+          mode_override="''${arg#--mode=}"
+          ;;
+        --basic|--audit|--parity|--app|--env|--full|--mainnet)
+          mode_override="''${arg#--}"
+          ;;
+        --bg|--background)
+          # Compatibility no-op; process mode is orchestrator-owned.
           ;;
         --summary)
           print_summary=1
-          shift
           ;;
         --)
-          shift
-          while [ "$#" -gt 0 ]; do
-            passthrough_args+=("$1")
-            shift
-          done
+          parse_options=0
+          ;;
+        -*)
+          echo "ERROR: unknown option '$arg'"
+          return 2
           ;;
         *)
-          passthrough_args+=("$1")
-          shift
+          passthrough_args+=("$arg")
           ;;
       esac
     done
@@ -902,11 +1049,12 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local detail_json
     local fail_fast
     local run_parallel
-    local setup_status=0
-    local workflow_status=0
-    local teardown_status=0
-    local teardown_always_run
     local status=0
+    local post_status=0
+    local post_always=true
+    local started_at
+    local started_epoch
+    local managed_by_orchestrator=0
 
     workflow="$(workflow_json "$workflow_id")"
     if [ -z "$workflow" ]; then
@@ -914,11 +1062,19 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       return 2
     fi
 
-    args_payload="$(printf '%s\n' "''${passthrough_args[@]}")"
-    run_id="$(compute_run_id "workflow" "$workflow_id" "" "$args_payload")"
+    started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    started_epoch="$(date +%s)"
 
-    activate_run "$run_id"
-    trap "deactivate_run '$run_id'" EXIT
+    if [ -n "''${NIXFIED_ORCHESTRATOR_RUN_ID:-}" ]; then
+      run_id="$NIXFIED_ORCHESTRATOR_RUN_ID"
+      RUN_SUFFIX_REASON="orchestrator"
+      managed_by_orchestrator=1
+    else
+      args_payload="$(printf '%s\n' "''${passthrough_args[@]}")"
+      run_id="$(compute_run_id "workflow" "$workflow_id" "" "$args_payload")"
+      activate_run "$run_id"
+      trap "deactivate_run '$run_id'" EXIT
+    fi
 
     detail_json="$(${pkgs.jq}/bin/jq -cn --arg suffix "$RUN_SUFFIX_REASON" --arg mode "workflow" '{mode: $mode, suffixReason: (if $suffix == "" then null else $suffix end)}')"
     append_event "$run_id" "$workflow_id" "" "queued" "$detail_json"
@@ -926,41 +1082,38 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fail_fast="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.execution.failFast')"
     run_parallel="$(resolve_parallel_mode "$workflow")"
 
-    if run_workflow_lifecycle_tasks "$run_id" "$workflow_id" "$workflow" "setup" "''${passthrough_args[@]}"; then
-      setup_status=0
+    if run_workflow_phase_tasks "$run_id" "$workflow_id" "$workflow" "preRun" "''${passthrough_args[@]}"; then
+      status=0
     else
-      setup_status="$?"
-      status="$setup_status"
+      status="$?"
     fi
 
-    if [ "$setup_status" -eq 0 ]; then
+    if [ "$status" -eq 0 ]; then
       if [ "$run_parallel" = "1" ]; then
         if run_workflow_parallel_impl "$run_id" "$workflow_id" "$workflow" "$fail_fast" "''${passthrough_args[@]}"; then
-          workflow_status=0
+          status=0
         else
-          workflow_status="$?"
+          status="$?"
         fi
       else
         if run_workflow_serial_impl "$run_id" "$workflow_id" "$workflow" "$fail_fast" "''${passthrough_args[@]}"; then
-          workflow_status=0
+          status=0
         else
-          workflow_status="$?"
+          status="$?"
         fi
       fi
-      status="$workflow_status"
     fi
 
-    teardown_always_run="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.teardown.alwaysRun // true')"
-    if [ "$teardown_always_run" = "true" ] || [ "$status" -eq 0 ]; then
-      if run_workflow_lifecycle_tasks "$run_id" "$workflow_id" "$workflow" "teardown" "''${passthrough_args[@]}"; then
-        teardown_status=0
+    post_always="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r 'if .postRun.alwaysRun == null then true else .postRun.alwaysRun end')"
+    if [ "$post_always" = "true" ] || [ "$status" -eq 0 ]; then
+      if run_workflow_phase_tasks "$run_id" "$workflow_id" "$workflow" "postRun" "''${passthrough_args[@]}"; then
+        post_status=0
       else
-        teardown_status="$?"
-        if [ "$status" -eq 0 ]; then
-          status="$teardown_status"
-        else
-          echo "ERROR: workflow '$workflow_id' teardown failed exitCode=$teardown_status (workflow already failed exitCode=$status)"
-        fi
+        post_status="$?"
+      fi
+
+      if [ "$post_status" -ne 0 ] && [ "$status" -eq 0 ]; then
+        status="$post_status"
       fi
     fi
 
@@ -969,6 +1122,14 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     else
       detail_json="$(${pkgs.jq}/bin/jq -cn --argjson exitCode "$status" '{exitCode: $exitCode}')"
       append_event "$run_id" "$workflow_id" "" "failed" "$detail_json"
+    fi
+
+    if ! write_workflow_summary_json "$run_id" "$workflow_id" "$workflow" "$status" "$started_at" "$started_epoch"; then
+      if [ "$status" -eq 0 ]; then
+        status=1
+        detail_json="$(${pkgs.jq}/bin/jq -cn --arg reason "summary-write-failed" '{reason: $reason, exitCode: 1}')"
+        append_event "$run_id" "$workflow_id" "" "failed" "$detail_json"
+      fi
     fi
 
     if [ "$print_summary" -eq 1 ]; then
@@ -986,8 +1147,11 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       echo "INFO: runId=$run_id passed=$passed failed=$failed canceled=$canceled"
     fi
 
-    trap - EXIT
-    deactivate_run "$run_id"
+    if [ "$managed_by_orchestrator" -eq 0 ]; then
+      trap - EXIT
+      deactivate_run "$run_id"
+    fi
+
     return "$status"
   }
 

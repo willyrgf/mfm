@@ -50,6 +50,9 @@ let
     "  run-task <task-id> [-- ...]"
     "  run-workflow <workflow-id> [-- ...]"
     "  run-workflow-parallel <workflow-id> [-- ...]"
+    "  runs [run-id]"
+    "  stop-run <run-id>"
+    "  stop-all-runs"
     ""
     "Workflows:"
   ]

@@ -10,6 +10,9 @@
     "maxWorkers",
     "units",
     "stages",
+    "preRun",
+    "postRun",
+    "artifacts",
     "execution"
   ],
   "properties": {
@@ -35,8 +38,8 @@
         "items": { "type": "string" }
       }
     },
-    "setup": { "type": "object" },
-    "teardown": { "type": "object" },
+    "preRun": { "type": "object" },
+    "postRun": { "type": "object" },
     "artifacts": { "type": "object" },
     "execution": {
       "type": "object",
@@ -44,7 +47,14 @@
         "parallel": { "type": "boolean" },
         "failFast": { "type": "boolean" },
         "lockPolicy": { "type": "string", "enum": [ "exclusive", "shared-aware" ] },
-        "emitRegistryEvents": { "type": "boolean" }
+        "emitRegistryEvents": { "type": "boolean" },
+        "ephemeral": {
+          "type": "object",
+          "properties": {
+            "enable": { "type": [ "boolean", "null" ] }
+          },
+          "additionalProperties": true
+        }
       },
       "additionalProperties": true
     }

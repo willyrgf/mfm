@@ -446,9 +446,29 @@ in
       operations = {
         enable = true;
         validateEnv.enable = true;
-        testIsolation.enable = true;
+        testIsolation = {
+          enable = conf.isolation.enable or true;
+          slots = conf.isolation.slots or [
+            conf.slots.default
+          ];
+          envs =
+            let
+              configured = conf.isolation.envs or [ ];
+            in
+            if configured == [ ] then envNames else configured;
+          logsDir = conf.isolation.logsDir or "/tmp/${project.id}-isolation";
+          keepLogsOnSuccess = conf.isolation.keepLogsOnSuccess or false;
+          keepLogsOnFailure = conf.isolation.keepLogsOnFailure or true;
+          maxParallel = conf.isolation.maxParallel or 4;
+          runApp = conf.isolation.run.app or "ci";
+          runArgs = conf.isolation.run.args or [ "--summary" ];
+          validateApp = conf.isolation.validate.app or "validate-env";
+          runEnv = conf.isolation.runEnv or { };
+        };
         ports.enable = true;
         checkPorts.enable = true;
+        health.enable = true;
+        ready.enable = true;
       };
 
       tasks = {
@@ -1721,8 +1741,8 @@ in
             };
           };
           stages = [ ];
-          setup.tasks = [ ];
-          teardown = {
+          preRun.tasks = [ ];
+          postRun = {
             tasks = [ ];
             alwaysRun = true;
           };
@@ -1752,8 +1772,8 @@ in
             };
           };
           stages = [ ];
-          setup.tasks = [ ];
-          teardown = {
+          preRun.tasks = [ ];
+          postRun = {
             tasks = [ ];
             alwaysRun = true;
           };
@@ -1814,12 +1834,12 @@ in
             };
           };
           stages = [ ];
-          setup.tasks = [
+          preRun.tasks = [
             "task.ci.services-start"
             "task.ops.ready"
             "task.ops.health"
           ];
-          teardown = {
+          postRun = {
             tasks = [ "task.ci.services-stop" ];
             alwaysRun = true;
           };
@@ -1907,12 +1927,12 @@ in
             };
           };
           stages = [ ];
-          setup.tasks = [
+          preRun.tasks = [
             "task.ci.services-start"
             "task.ops.ready"
             "task.ops.health"
           ];
-          teardown = {
+          postRun = {
             tasks = [ "task.ci.services-stop" ];
             alwaysRun = true;
           };
@@ -1943,8 +1963,8 @@ in
             };
           };
           stages = [ ];
-          setup.tasks = [ ];
-          teardown = {
+          preRun.tasks = [ ];
+          postRun = {
             tasks = [ ];
             alwaysRun = true;
           };

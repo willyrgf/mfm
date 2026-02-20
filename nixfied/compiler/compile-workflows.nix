@@ -177,8 +177,8 @@ let
       maxWorkers = if raw.maxWorkers < 1 then 1 else raw.maxWorkers;
       units = unitMap;
       stages = raw.stages;
-      setup = raw.setup;
-      teardown = raw.teardown;
+      preRun = raw.preRun;
+      postRun = raw.postRun;
       artifacts = raw.artifacts;
       execution = raw.execution;
       plan = plan;
