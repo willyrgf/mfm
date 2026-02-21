@@ -44,6 +44,7 @@ let
           pkgs.git
         ];
       };
+      ephemeral = model.runtime.ephemeral or { };
     };
   };
   ephemeralExecutorWrapper = frameworkEphemeral.mkEphemeralWrapper {
@@ -167,6 +168,32 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     return 1
   }
 
+  validate_log_level_value() {
+    local value="$1"
+    case "$value" in
+      error|warn|info|debug|trace)
+        return 0
+        ;;
+      *)
+        echo "ERROR: invalid --log-level '$value' (expected: error|warn|info|debug|trace)"
+        return 2
+        ;;
+    esac
+  }
+
+  validate_output_mode_value() {
+    local value="$1"
+    case "$value" in
+      stdout|logs|both)
+        return 0
+        ;;
+      *)
+        echo "ERROR: invalid --output-mode '$value' (expected: stdout|logs|both)"
+        return 2
+        ;;
+    esac
+  }
+
   split_process_mode() {
     PROCESS_MODE="fg"
     FORWARD_ARGS=()
@@ -235,6 +262,28 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
           workflow_resolve_mode_id "$workflow_id" "$mode_value" >/dev/null || return $?
           ;;
         --summary)
+          ;;
+        --log-level)
+          if [ "$#" -lt 1 ]; then
+            echo "ERROR: --log-level requires a value"
+            return 2
+          fi
+          validate_log_level_value "$1" || return $?
+          shift
+          ;;
+        --log-level=*)
+          validate_log_level_value "''${arg#--log-level=}" || return $?
+          ;;
+        --output-mode)
+          if [ "$#" -lt 1 ]; then
+            echo "ERROR: --output-mode requires a value"
+            return 2
+          fi
+          validate_output_mode_value "$1" || return $?
+          shift
+          ;;
+        --output-mode=*)
+          validate_output_mode_value "''${arg#--output-mode=}" || return $?
           ;;
         --*)
           shorthand_mode="''${arg#--}"

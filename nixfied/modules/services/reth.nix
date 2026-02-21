@@ -20,5 +20,13 @@ in
       type = t.str;
       default = "rethAuth";
     };
+    sourceKeys = lib.mkOption {
+      type = t.listOf t.str;
+      default = [ ];
+    };
+    defaultSource = lib.mkOption {
+      type = t.str;
+      default = "";
+    };
   };
 }

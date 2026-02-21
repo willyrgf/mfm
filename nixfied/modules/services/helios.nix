@@ -16,5 +16,13 @@ in
       type = t.str;
       default = "rethHttp";
     };
+    sourceKeys = lib.mkOption {
+      type = t.listOf t.str;
+      default = [ ];
+    };
+    defaultSource = lib.mkOption {
+      type = t.str;
+      default = "";
+    };
   };
 }

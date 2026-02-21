@@ -21,6 +21,32 @@ let
   rethEnabled = rethCfg.enable;
   heliosEnabled = heliosCfg.enable;
 
+  serviceNames = [
+    "postgres"
+    "nginx"
+    "minio"
+    "reth"
+    "helios"
+  ];
+
+  serviceEnabledByName = {
+    postgres = postgresEnabled;
+    nginx = nginxEnabled;
+    minio = minioEnabled;
+    reth = rethEnabled;
+    helios = heliosEnabled;
+  };
+
+  serviceConfigByName = {
+    postgres = postgresCfg;
+    nginx = nginxCfg;
+    minio = minioCfg;
+    reth = rethCfg;
+    helios = heliosCfg;
+  };
+
+  enabledServiceNames = builtins.filter (serviceName: serviceEnabledByName.${serviceName}) serviceNames;
+
   resolvePortBase =
     key:
     if builtins.hasAttr key runtime.ports then
@@ -133,6 +159,203 @@ ${envOffsetCase}
     ) portNames
   );
 
+  serviceSelectionContractArgs = [
+    {
+      name = "service";
+      kind = "option";
+      long = "--service";
+      type = "enum";
+      values = serviceNames ++ [ "all" ];
+      description = "Select one enabled service or 'all' (default).";
+    }
+    {
+      name = "source";
+      kind = "option";
+      long = "--source";
+      type = "string";
+      description = "Override source key for selected service (requires --service).";
+    }
+  ];
+
+  knownServiceCase = builtins.concatStringsSep "\n" (
+    map (serviceName: "      ${serviceName}) return 0 ;;") serviceNames
+  );
+
+  serviceEnabledCase = builtins.concatStringsSep "\n" (
+    map (
+      serviceName: "      ${serviceName}) echo ${if serviceEnabledByName.${serviceName} then "1" else "0"} ;;"
+    ) serviceNames
+  );
+
+  serviceDefaultSourceCase = builtins.concatStringsSep "\n" (
+    map (
+      serviceName:
+      "      ${serviceName}) printf '%s' ${lib.escapeShellArg (serviceConfigByName.${serviceName}.defaultSource or "")} ;;"
+    ) serviceNames
+  );
+
+  serviceHasSourceCase = builtins.concatStringsSep "\n" (
+    map (
+      serviceName:
+      let
+        sourceKeys = serviceConfigByName.${serviceName}.sourceKeys or [ ];
+        sourceArgs = builtins.concatStringsSep " " (map lib.escapeShellArg sourceKeys);
+      in
+      ''
+              ${serviceName})
+                source_key_matches "$source"${if sourceArgs == "" then "" else " ${sourceArgs}"}
+                return $?
+                ;;
+      ''
+    ) serviceNames
+  );
+
+  enabledServiceArrayInit =
+    if enabledServiceNames == [ ] then
+      "selected_services=()"
+    else
+      "selected_services=("
+      + builtins.concatStringsSep " " (map lib.escapeShellArg enabledServiceNames)
+      + ")";
+
+  serviceSelectionPrelude = ''
+    target_service="all"
+    target_source=""
+
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --service)
+          if [ "$#" -lt 2 ]; then
+            echo "ERROR: --service requires a value"
+            exit 2
+          fi
+          target_service="$2"
+          shift 2
+          ;;
+        --service=*)
+          target_service="''${1#--service=}"
+          shift
+          ;;
+        --source)
+          if [ "$#" -lt 2 ]; then
+            echo "ERROR: --source requires a value"
+            exit 2
+          fi
+          target_source="$2"
+          shift 2
+          ;;
+        --source=*)
+          target_source="''${1#--source=}"
+          shift
+          ;;
+        --)
+          shift
+          break
+          ;;
+        *)
+          echo "ERROR: unknown argument '$1'"
+          exit 2
+          ;;
+      esac
+    done
+
+    if [ "$#" -gt 0 ]; then
+      echo "ERROR: unexpected positional arguments: $*"
+      exit 2
+    fi
+
+    is_known_service() {
+      case "$1" in
+${knownServiceCase}
+        *) return 1 ;;
+      esac
+    }
+
+    is_service_enabled() {
+      case "$1" in
+${serviceEnabledCase}
+        *) echo "0" ;;
+      esac
+    }
+
+    service_default_source() {
+      case "$1" in
+${serviceDefaultSourceCase}
+        *) printf '%s' "" ;;
+      esac
+    }
+
+    source_key_matches() {
+      local wanted="$1"
+      shift
+      local candidate
+      for candidate in "$@"; do
+        if [ "$candidate" = "$wanted" ]; then
+          return 0
+        fi
+      done
+      return 1
+    }
+
+    service_has_source() {
+      local service="$1"
+      local source="$2"
+      case "$service" in
+${serviceHasSourceCase}
+        *)
+          return 1
+          ;;
+      esac
+    }
+
+    service_selected() {
+      local service="$1"
+      local selected
+      for selected in "''${selected_services[@]}"; do
+        if [ "$selected" = "$service" ]; then
+          return 0
+        fi
+      done
+      return 1
+    }
+
+    resolve_service_source() {
+      local service="$1"
+      if [ -n "$target_source" ]; then
+        printf '%s' "$target_source"
+        return 0
+      fi
+      service_default_source "$service"
+    }
+
+    if [ "$target_service" != "all" ] && ! is_known_service "$target_service"; then
+      echo "ERROR: unknown --service '$target_service'"
+      exit 2
+    fi
+
+    if [ "$target_service" = "all" ]; then
+      ${enabledServiceArrayInit}
+    else
+      if [ "$(is_service_enabled "$target_service")" != "1" ]; then
+        echo "ERROR: selected service '$target_service' is disabled"
+        exit 3
+      fi
+      selected_services=("$target_service")
+    fi
+
+    if [ -n "$target_source" ]; then
+      if [ "$target_service" = "all" ]; then
+        echo "ERROR: --source requires --service"
+        exit 2
+      fi
+      if ! service_has_source "$target_service" "$target_source"; then
+        echo "ERROR: unknown source '$target_source' for service '$target_service'"
+        exit 3
+      fi
+    fi
+
+  '';
+
   mkTask =
     {
       id,
@@ -141,6 +364,7 @@ ${envOffsetCase}
       description,
       command,
       runtimeInputs ? [ ],
+      contractArgs ? [ ],
     }:
     {
       inherit
@@ -155,6 +379,17 @@ ${envOffsetCase}
       };
       contract = {
         version = 1;
+        input = {
+          args = {
+            parser = "typed";
+            allowUnknown = false;
+            spec = contractArgs;
+          };
+          env = {
+            schemaRef = "runtimePrimitives";
+            extra = [ ];
+          };
+        };
         output = {
           format = "text";
           channels = "stdout";
@@ -277,13 +512,18 @@ ${envOffsetCase}
   healthScript = ''
     set -euo pipefail
     ${slotEnvPrelude}
+    ${serviceSelectionPrelude}
 
     checks=0
 
-    if [ ${if postgresEnabled then "1" else "0"} -eq 1 ]; then
+    if service_selected "postgres"; then
+      postgres_source="$(resolve_service_source "postgres")"
+      if [ -z "$postgres_source" ]; then
+        postgres_source="unspecified"
+      fi
       checks=$((checks + 1))
       postgres_port=$(( ${toString postgresPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking postgres health port=$postgres_port"
+      echo "INFO: checking postgres health port=$postgres_port source=$postgres_source"
       if ${postgresProbePkg}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$postgres_port" -q 2>/dev/null; then
         echo "OK: postgres healthy port=$postgres_port"
       else
@@ -291,21 +531,25 @@ ${envOffsetCase}
         exit 1
       fi
     else
-      echo "SKIP: postgres health check disabled"
+      echo "SKIP: postgres health check not selected"
     fi
 
-    if [ ${if nginxEnabled then "1" else "0"} -eq 1 ]; then
+    if service_selected "nginx"; then
+      nginx_source="$(resolve_service_source "nginx")"
+      if [ -z "$nginx_source" ]; then
+        nginx_source="unspecified"
+      fi
       checks=$((checks + 2))
       nginx_http_port=$(( ${toString nginxHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       nginx_https_port=$(( ${toString nginxHttpsPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking nginx health port=$nginx_http_port"
+      echo "INFO: checking nginx health port=$nginx_http_port source=$nginx_source"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_http_port" >/dev/null 2>&1; then
         echo "OK: nginx healthy port=$nginx_http_port"
       else
         echo "ERROR: nginx unhealthy port=$nginx_http_port"
         exit 1
       fi
-      echo "INFO: checking nginx health port=$nginx_https_port"
+      echo "INFO: checking nginx health port=$nginx_https_port source=$nginx_source"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_https_port" >/dev/null 2>&1; then
         echo "OK: nginx healthy port=$nginx_https_port"
       else
@@ -313,21 +557,25 @@ ${envOffsetCase}
         exit 1
       fi
     else
-      echo "SKIP: nginx health check disabled"
+      echo "SKIP: nginx health check not selected"
     fi
 
-    if [ ${if minioEnabled then "1" else "0"} -eq 1 ]; then
+    if service_selected "minio"; then
+      minio_source="$(resolve_service_source "minio")"
+      if [ -z "$minio_source" ]; then
+        minio_source="unspecified"
+      fi
       checks=$((checks + 2))
       minio_api_port=$(( ${toString minioApiPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       minio_console_port=$(( ${toString minioConsolePortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking minio health port=$minio_api_port"
+      echo "INFO: checking minio health port=$minio_api_port source=$minio_source"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$minio_api_port" >/dev/null 2>&1; then
         echo "OK: minio healthy port=$minio_api_port"
       else
         echo "ERROR: minio unhealthy port=$minio_api_port"
         exit 1
       fi
-      echo "INFO: checking minio health port=$minio_console_port"
+      echo "INFO: checking minio health port=$minio_console_port source=$minio_source"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$minio_console_port" >/dev/null 2>&1; then
         echo "OK: minio healthy port=$minio_console_port"
       else
@@ -335,15 +583,19 @@ ${envOffsetCase}
         exit 1
       fi
     else
-      echo "SKIP: minio health check disabled"
+      echo "SKIP: minio health check not selected"
     fi
 
-    if [ ${if rethEnabled then "1" else "0"} -eq 1 ]; then
+    if service_selected "reth"; then
+      reth_source="$(resolve_service_source "reth")"
+      if [ -z "$reth_source" ]; then
+        reth_source="unspecified"
+      fi
       checks=$((checks + 3))
       reth_http_port=$(( ${toString rethHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       reth_ws_port=$(( ${toString rethWsPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       reth_auth_port=$(( ${toString rethAuthPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking reth health port=$reth_http_port"
+      echo "INFO: checking reth health port=$reth_http_port source=$reth_source"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
         --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
@@ -354,14 +606,14 @@ ${envOffsetCase}
         echo "ERROR: reth unhealthy port=$reth_http_port"
         exit 1
       fi
-      echo "INFO: checking reth health port=$reth_ws_port"
+      echo "INFO: checking reth health port=$reth_ws_port source=$reth_source"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$reth_ws_port" >/dev/null 2>&1; then
         echo "OK: reth healthy port=$reth_ws_port"
       else
         echo "ERROR: reth unhealthy port=$reth_ws_port"
         exit 1
       fi
-      echo "INFO: checking reth health port=$reth_auth_port"
+      echo "INFO: checking reth health port=$reth_auth_port source=$reth_source"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$reth_auth_port" >/dev/null 2>&1; then
         echo "OK: reth healthy port=$reth_auth_port"
       else
@@ -369,14 +621,18 @@ ${envOffsetCase}
         exit 1
       fi
     else
-      echo "SKIP: reth health check disabled"
+      echo "SKIP: reth health check not selected"
     fi
 
-    if [ ${if heliosEnabled then "1" else "0"} -eq 1 ]; then
+    if service_selected "helios"; then
+      helios_source="$(resolve_service_source "helios")"
+      if [ -z "$helios_source" ]; then
+        helios_source="unspecified"
+      fi
       checks=$((checks + 2))
       helios_rpc_port=$(( ${toString heliosRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       helios_execution_rpc_port=$(( ${toString heliosExecutionRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking helios health port=$helios_rpc_port"
+      echo "INFO: checking helios health port=$helios_rpc_port source=$helios_source"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
         --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
@@ -387,7 +643,7 @@ ${envOffsetCase}
         echo "ERROR: helios unhealthy port=$helios_rpc_port"
         exit 1
       fi
-      echo "INFO: checking helios execution health port=$helios_execution_rpc_port"
+      echo "INFO: checking helios execution health port=$helios_execution_rpc_port source=$helios_source"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
         --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
@@ -399,7 +655,7 @@ ${envOffsetCase}
         exit 1
       fi
     else
-      echo "SKIP: helios health check disabled"
+      echo "SKIP: helios health check not selected"
     fi
 
     if [ "$checks" -eq 0 ]; then
@@ -413,14 +669,19 @@ ${envOffsetCase}
   readyScript = ''
     set -euo pipefail
     ${slotEnvPrelude}
+    ${serviceSelectionPrelude}
 
     checks=0
 
-    if [ ${if postgresEnabled then "1" else "0"} -eq 1 ]; then
+    if service_selected "postgres"; then
+      postgres_source="$(resolve_service_source "postgres")"
+      if [ -z "$postgres_source" ]; then
+        postgres_source="unspecified"
+      fi
       checks=$((checks + 1))
       postgres_port=$(( ${toString postgresPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       postgres_db=${lib.escapeShellArg postgresCfg.database}
-      echo "INFO: checking postgres readiness port=$postgres_port"
+      echo "INFO: checking postgres readiness port=$postgres_port source=$postgres_source"
 
       if ! ${postgresProbePkg}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$postgres_port" -q 2>/dev/null; then
         echo "ERROR: postgres not ready port=$postgres_port (pg_isready failed)"
@@ -434,21 +695,25 @@ ${envOffsetCase}
         exit 1
       fi
     else
-      echo "SKIP: postgres readiness check disabled"
+      echo "SKIP: postgres readiness check not selected"
     fi
 
-    if [ ${if nginxEnabled then "1" else "0"} -eq 1 ]; then
+    if service_selected "nginx"; then
+      nginx_source="$(resolve_service_source "nginx")"
+      if [ -z "$nginx_source" ]; then
+        nginx_source="unspecified"
+      fi
       checks=$((checks + 2))
       nginx_http_port=$(( ${toString nginxHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       nginx_https_port=$(( ${toString nginxHttpsPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking nginx readiness port=$nginx_http_port"
+      echo "INFO: checking nginx readiness port=$nginx_http_port source=$nginx_source"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_http_port" >/dev/null 2>&1; then
         echo "OK: nginx ready port=$nginx_http_port"
       else
         echo "ERROR: nginx not ready port=$nginx_http_port"
         exit 1
       fi
-      echo "INFO: checking nginx readiness port=$nginx_https_port"
+      echo "INFO: checking nginx readiness port=$nginx_https_port source=$nginx_source"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_https_port" >/dev/null 2>&1; then
         echo "OK: nginx ready port=$nginx_https_port"
       else
@@ -456,21 +721,25 @@ ${envOffsetCase}
         exit 1
       fi
     else
-      echo "SKIP: nginx readiness check disabled"
+      echo "SKIP: nginx readiness check not selected"
     fi
 
-    if [ ${if minioEnabled then "1" else "0"} -eq 1 ]; then
+    if service_selected "minio"; then
+      minio_source="$(resolve_service_source "minio")"
+      if [ -z "$minio_source" ]; then
+        minio_source="unspecified"
+      fi
       checks=$((checks + 2))
       minio_api_port=$(( ${toString minioApiPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       minio_console_port=$(( ${toString minioConsolePortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking minio readiness port=$minio_api_port"
+      echo "INFO: checking minio readiness port=$minio_api_port source=$minio_source"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$minio_api_port" >/dev/null 2>&1; then
         echo "OK: minio ready port=$minio_api_port"
       else
         echo "ERROR: minio not ready port=$minio_api_port"
         exit 1
       fi
-      echo "INFO: checking minio readiness port=$minio_console_port"
+      echo "INFO: checking minio readiness port=$minio_console_port source=$minio_source"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$minio_console_port" >/dev/null 2>&1; then
         echo "OK: minio ready port=$minio_console_port"
       else
@@ -478,15 +747,19 @@ ${envOffsetCase}
         exit 1
       fi
     else
-      echo "SKIP: minio readiness check disabled"
+      echo "SKIP: minio readiness check not selected"
     fi
 
-    if [ ${if rethEnabled then "1" else "0"} -eq 1 ]; then
+    if service_selected "reth"; then
+      reth_source="$(resolve_service_source "reth")"
+      if [ -z "$reth_source" ]; then
+        reth_source="unspecified"
+      fi
       checks=$((checks + 3))
       reth_http_port=$(( ${toString rethHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       reth_ws_port=$(( ${toString rethWsPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       reth_auth_port=$(( ${toString rethAuthPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking reth readiness port=$reth_http_port"
+      echo "INFO: checking reth readiness port=$reth_http_port source=$reth_source"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
         --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
@@ -497,14 +770,14 @@ ${envOffsetCase}
         echo "ERROR: reth not ready port=$reth_http_port"
         exit 1
       fi
-      echo "INFO: checking reth readiness port=$reth_ws_port"
+      echo "INFO: checking reth readiness port=$reth_ws_port source=$reth_source"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$reth_ws_port" >/dev/null 2>&1; then
         echo "OK: reth ready port=$reth_ws_port"
       else
         echo "ERROR: reth not ready port=$reth_ws_port"
         exit 1
       fi
-      echo "INFO: checking reth readiness port=$reth_auth_port"
+      echo "INFO: checking reth readiness port=$reth_auth_port source=$reth_source"
       if ${netcatPkg}/bin/nc -z 127.0.0.1 "$reth_auth_port" >/dev/null 2>&1; then
         echo "OK: reth ready port=$reth_auth_port"
       else
@@ -512,14 +785,18 @@ ${envOffsetCase}
         exit 1
       fi
     else
-      echo "SKIP: reth readiness check disabled"
+      echo "SKIP: reth readiness check not selected"
     fi
 
-    if [ ${if heliosEnabled then "1" else "0"} -eq 1 ]; then
+    if service_selected "helios"; then
+      helios_source="$(resolve_service_source "helios")"
+      if [ -z "$helios_source" ]; then
+        helios_source="unspecified"
+      fi
       checks=$((checks + 2))
       helios_rpc_port=$(( ${toString heliosRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       helios_execution_rpc_port=$(( ${toString heliosExecutionRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking helios readiness port=$helios_rpc_port"
+      echo "INFO: checking helios readiness port=$helios_rpc_port source=$helios_source"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
         --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
@@ -530,7 +807,7 @@ ${envOffsetCase}
         echo "ERROR: helios not ready port=$helios_rpc_port"
         exit 1
       fi
-      echo "INFO: checking helios execution readiness port=$helios_execution_rpc_port"
+      echo "INFO: checking helios execution readiness port=$helios_execution_rpc_port source=$helios_source"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
         --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
@@ -542,7 +819,7 @@ ${envOffsetCase}
         exit 1
       fi
     else
-      echo "SKIP: helios readiness check disabled"
+      echo "SKIP: helios readiness check not selected"
     fi
 
     if [ "$checks" -eq 0 ]; then
@@ -894,12 +1171,14 @@ in
         appName = "health";
         summary = "Run service health checks";
         description = ''
-          Runs health checks for enabled services:
+          Runs health checks for selected enabled services:
           postgres, nginx (http+https), minio (api+console),
           reth (http+ws+auth), and helios (rpc+execution).
+          Optional selectors: --service <name|all> and --source <key>.
         '';
         command = healthScript;
         runtimeInputs = serviceProbeRuntimeInputs;
+        contractArgs = serviceSelectionContractArgs;
       };
     })
 
@@ -909,12 +1188,14 @@ in
         appName = "ready";
         summary = "Run service readiness checks";
         description = ''
-          Runs readiness checks for enabled services:
+          Runs readiness checks for selected enabled services:
           postgres, nginx (http+https), minio (api+console),
           reth (http+ws+auth), and helios (rpc+execution).
+          Optional selectors: --service <name|all> and --source <key>.
         '';
         command = readyScript;
         runtimeInputs = serviceProbeRuntimeInputs;
+        contractArgs = serviceSelectionContractArgs;
       };
     })
   ];

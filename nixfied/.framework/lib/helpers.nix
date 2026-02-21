@@ -68,8 +68,6 @@ let
         output_mode="$OUTPUT_MODE"
       elif [ -n "''${NIXFIED_OUTPUT_MODE:-}" ]; then
         output_mode="$NIXFIED_OUTPUT_MODE"
-      elif [ "''${_NIXFIED_LOG_LEVEL_RAW:-info}" = "debug" ]; then
-        output_mode="both"
       else
         output_mode="stdout"
       fi

@@ -63,6 +63,22 @@ Environment defaults:
 - `NIX_ENV=0`
 - `PROJECT_ENV=dev`
 
+Ephemeral execution defaults (configured in `nixfied/project/conf.nix`):
+
+- `ephemeral.copyMode = "git-files"`: copies tracked + non-ignored untracked files.
+- `ephemeral.excludePatterns = [...]`: fallback excludes for `static-excludes` copy mode.
+- `ephemeral.keepFailures = true`: failed ephemeral roots are retained for debugging.
+- `ephemeral.maxFailedRoots = 8`: cap on retained failed roots.
+- `ephemeral.maxFailedRootAgeHours = 72`: age-based pruning for retained failed roots.
+- `ephemeral.maxCopyBytes = 0`: disabled by default; set `> 0` to enforce a pre-copy size cap.
+- `ephemeral.minFreeBytesAfterCopy = 0`: disabled by default; set `> 0` to enforce free-space floor after copy estimate.
+
+Ephemeral runtime behavior:
+
+- Success path: ephemeral root is cleaned.
+- Failure path: root is preserved (or dropped if `keepFailures = false`), then pruned by age/count policy.
+- Budget checks run before copy and fail fast with `ERROR:` if limits are exceeded.
+
 ## Architecture Summary
 
 - Modules: `lib.evalModules` + typed options from `nixfied/modules/*.nix`.

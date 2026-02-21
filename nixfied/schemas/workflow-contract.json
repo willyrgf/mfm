@@ -38,6 +38,20 @@
         "items": { "type": "string" }
       }
     },
+    "logging": {
+      "type": "object",
+      "properties": {
+        "levelDefault": {
+          "type": [ "string", "null" ],
+          "enum": [ "error", "warn", "info", "debug", "trace", null ]
+        },
+        "outputDefault": {
+          "type": [ "string", "null" ],
+          "enum": [ "stdout", "logs", "both", null ]
+        }
+      },
+      "additionalProperties": true
+    },
     "preRun": { "type": "object" },
     "postRun": { "type": "object" },
     "artifacts": { "type": "object" },

@@ -76,6 +76,20 @@
             }
           }
         },
+        "logging": {
+          "type": "object",
+          "properties": {
+            "levelDefault": {
+              "type": [ "string", "null" ],
+              "enum": [ "error", "warn", "info", "debug", "trace", null ]
+            },
+            "outputDefault": {
+              "type": [ "string", "null" ],
+              "enum": [ "stdout", "logs", "both", null ]
+            }
+          },
+          "additionalProperties": true
+        },
         "postHooks": {
           "type": "object",
           "additionalProperties": {

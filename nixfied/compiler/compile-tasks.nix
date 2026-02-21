@@ -66,6 +66,7 @@ let
         hermetic = raw.runtime.hermetic;
         runtimeInputs = unique (map builtins.toString raw.runtime.runtimeInputs ++ globalRuntimeInputs);
         passThroughEnv = raw.runtime.passThroughEnv;
+        logging = raw.runtime.logging;
         env = raw.runtime.env;
         umask = raw.runtime.umask;
         locale = raw.runtime.locale;

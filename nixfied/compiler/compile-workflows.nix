@@ -284,6 +284,7 @@ let
       description = raw.description;
       mode = raw.mode;
       maxWorkers = if raw.maxWorkers < 1 then 1 else raw.maxWorkers;
+      logging = raw.logging;
       units = unitMap;
       stages = workflowStages;
       preRun = raw.preRun;

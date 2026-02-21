@@ -119,6 +119,116 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     ${pkgs.jq}/bin/jq -c --arg workflowId "$workflow_id" '.workflows[$workflowId] // empty' "$MODEL_FILE"
   }
 
+  valid_log_level() {
+    local value="$1"
+    case "$value" in
+      error|warn|info|debug|trace)
+        return 0
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  }
+
+  valid_output_mode() {
+    local value="$1"
+    case "$value" in
+      stdout|logs|both)
+        return 0
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  }
+
+  LOGGING_FILTERED_ARGS=()
+
+  extract_logging_override_args() {
+    local parse_options=1
+    local arg=""
+    local value=""
+    local resolved_log_level="''${NIXFIED_CLI_LOG_LEVEL_OVERRIDE:-}"
+    local resolved_output_mode="''${NIXFIED_CLI_OUTPUT_MODE_OVERRIDE:-}"
+
+    LOGGING_FILTERED_ARGS=()
+
+    while [ "$#" -gt 0 ]; do
+      arg="$1"
+      shift
+
+      if [ "$parse_options" -eq 0 ]; then
+        LOGGING_FILTERED_ARGS+=("$arg")
+        continue
+      fi
+
+      case "$arg" in
+        --)
+          parse_options=0
+          LOGGING_FILTERED_ARGS+=("--")
+          ;;
+        --log-level)
+          if [ "$#" -lt 1 ]; then
+            echo "ERROR: --log-level requires a value"
+            return 2
+          fi
+          value="$1"
+          shift
+          if ! valid_log_level "$value"; then
+            echo "ERROR: invalid --log-level '$value' (expected: error|warn|info|debug|trace)"
+            return 2
+          fi
+          resolved_log_level="$value"
+          ;;
+        --log-level=*)
+          value="''${arg#--log-level=}"
+          if ! valid_log_level "$value"; then
+            echo "ERROR: invalid --log-level '$value' (expected: error|warn|info|debug|trace)"
+            return 2
+          fi
+          resolved_log_level="$value"
+          ;;
+        --output-mode)
+          if [ "$#" -lt 1 ]; then
+            echo "ERROR: --output-mode requires a value"
+            return 2
+          fi
+          value="$1"
+          shift
+          if ! valid_output_mode "$value"; then
+            echo "ERROR: invalid --output-mode '$value' (expected: stdout|logs|both)"
+            return 2
+          fi
+          resolved_output_mode="$value"
+          ;;
+        --output-mode=*)
+          value="''${arg#--output-mode=}"
+          if ! valid_output_mode "$value"; then
+            echo "ERROR: invalid --output-mode '$value' (expected: stdout|logs|both)"
+            return 2
+          fi
+          resolved_output_mode="$value"
+          ;;
+        *)
+          LOGGING_FILTERED_ARGS+=("$arg")
+          ;;
+      esac
+    done
+
+    if [ -n "$resolved_log_level" ]; then
+      export NIXFIED_CLI_LOG_LEVEL_OVERRIDE="$resolved_log_level"
+    else
+      unset NIXFIED_CLI_LOG_LEVEL_OVERRIDE || true
+    fi
+
+    if [ -n "$resolved_output_mode" ]; then
+      export NIXFIED_CLI_OUTPUT_MODE_OVERRIDE="$resolved_output_mode"
+    else
+      unset NIXFIED_CLI_OUTPUT_MODE_OVERRIDE || true
+    fi
+  }
+
   append_event() {
     local run_id="$1"
     local workflow_id="$2"
@@ -431,13 +541,19 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local detail_json
     local status
     local managed_by_orchestrator=0
+    local NIXFIED_WORKFLOW_CONTEXT="0"
+    local -a filtered_args
+    filtered_args=()
+
+    extract_logging_override_args "$@" || return $?
+    filtered_args=("''${LOGGING_FILTERED_ARGS[@]}")
 
     if [ -n "''${NIXFIED_ORCHESTRATOR_RUN_ID:-}" ]; then
       run_id="$NIXFIED_ORCHESTRATOR_RUN_ID"
       RUN_SUFFIX_REASON="orchestrator"
       managed_by_orchestrator=1
     else
-      args_payload="$(printf '%s\n' "$@")"
+      args_payload="$(printf '%s\n' "''${filtered_args[@]}")"
       run_id="$(compute_run_id "task" "" "$task_id" "$args_payload")"
       activate_run "$run_id"
       trap "deactivate_run '$run_id'" EXIT
@@ -521,7 +637,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     }
 
     set +e
-    run_task_with_deps "$task_id" "$@"
+    run_task_with_deps "$task_id" "''${filtered_args[@]}"
     status="$?"
     set -e
 
@@ -1686,10 +1802,16 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local mode_override=""
     local print_summary=0
     local parse_options=1
+    local -a input_args
+    input_args=()
     local -a passthrough_args
     passthrough_args=()
     local arg
     local shorthand_mode
+
+    extract_logging_override_args "$@" || return $?
+    input_args=("''${LOGGING_FILTERED_ARGS[@]}")
+    set -- "''${input_args[@]}"
 
     while [ "$#" -gt 0 ]; do
       arg="$1"
@@ -1754,6 +1876,9 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local summary_file=""
     local nested_workflow_call=0
     local managed_by_orchestrator=0
+    local NIXFIED_WORKFLOW_CONTEXT="1"
+    local NIXFIED_WORKFLOW_LOG_LEVEL_DEFAULT=""
+    local NIXFIED_WORKFLOW_OUTPUT_MODE_DEFAULT=""
 
     if [ "''${NIXFIED_WORKFLOW_NESTED:-0}" = "1" ]; then
       nested_workflow_call=1
@@ -1764,6 +1889,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       echo "ERROR: unknown workflow '$workflow_id'"
       return 2
     fi
+    NIXFIED_WORKFLOW_LOG_LEVEL_DEFAULT="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.logging.levelDefault // empty')"
+    NIXFIED_WORKFLOW_OUTPUT_MODE_DEFAULT="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.logging.outputDefault // empty')"
 
     started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     started_epoch="$(date +%s)"

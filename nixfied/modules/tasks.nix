@@ -326,6 +326,30 @@ in
                 type = t.listOf t.str;
                 default = [ ];
               };
+              logging = {
+                levelDefault = lib.mkOption {
+                  type = t.nullOr (
+                    t.enum [
+                      "error"
+                      "warn"
+                      "info"
+                      "debug"
+                      "trace"
+                    ]
+                  );
+                  default = null;
+                };
+                outputDefault = lib.mkOption {
+                  type = t.nullOr (
+                    t.enum [
+                      "stdout"
+                      "logs"
+                      "both"
+                    ]
+                  );
+                  default = null;
+                };
+              };
               env = lib.mkOption {
                 type = t.attrsOf (
                   t.oneOf [

@@ -18,7 +18,7 @@
         };
         compiled = nixfiedLib.mkNixfied {
           projectRoot = ./.;
-          projectModules = [ ./nixfied/project/default.nix ];
+          projectModules = [ ./nixfied/project/module.nix ];
           extraModules = [ ];
         };
       in {
@@ -28,3 +28,4 @@
         devShells = compiled.devShells;
       });
 }
+

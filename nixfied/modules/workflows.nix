@@ -94,6 +94,31 @@ in
               default = [ ];
             };
 
+            logging = {
+              levelDefault = lib.mkOption {
+                type = t.nullOr (
+                  t.enum [
+                    "error"
+                    "warn"
+                    "info"
+                    "debug"
+                    "trace"
+                  ]
+                );
+                default = null;
+              };
+              outputDefault = lib.mkOption {
+                type = t.nullOr (
+                  t.enum [
+                    "stdout"
+                    "logs"
+                    "both"
+                  ]
+                );
+                default = null;
+              };
+            };
+
             postRun = {
               tasks = lib.mkOption {
                 type = t.listOf t.str;
