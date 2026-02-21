@@ -106,6 +106,7 @@ let
   minioPackage = conf.modules.minio.package or pkgs.minio;
   minioClientPackage = conf.modules.minio.clientPackage or pkgs.minio-client;
   rethPackage = conf.modules.reth.package or pkgs.reth;
+  heliosPackage = conf.modules.helios.package or null;
 
   minioRootUser = conf.modules.minio.rootUser or "minio";
   minioRootPassword = conf.modules.minio.rootPassword or "minio123456";
@@ -136,6 +137,12 @@ let
     "HELIOS_EXECUTION_RPC_URL"
     "HELIOS_CONSENSUS_RPC_URL"
     "HELIOS_CHECKPOINT"
+    "HELIOS_READY_TIMEOUT_SECS"
+    "HELIOS_READY_INTERVAL_SECS"
+    "SERVICE_REUSE_POLICY"
+    "SERVICE_OWNER_SCOPE"
+    "SERVICE_DISCOVERY_SCOPE"
+    "MFM_KEEP_SERVICES"
     "MFM_CI_ENABLE_PARITY"
     "MFM_CI_ENABLE_MAINNET"
     "DATABASE_URL"
@@ -430,7 +437,7 @@ in
         };
 
         helios = {
-          enable = false;
+          enable = conf.modules.helios.enable or false;
           portKeyRpc = conf.modules.helios.portKeyRpc or "heliosRpc";
           executionRpcPortKey = conf.modules.helios.executionRpcPortKey or "rethHttp";
         };
@@ -501,6 +508,376 @@ in
 
             echo "INFO: launching mfm_rest_api addr=$MFM_REST_API_ADDR"
             exec cargo run -p mfm-rest-api --bin mfm_rest_api -- "$@"
+          '';
+        };
+
+        mfm-portfolio-snapshot = mkCommandTask {
+          id = "task.mfm.portfolio.snapshot";
+          appName = "mfm::portfolio::snapshot";
+          summary = "Snapshot a wallet with Helios-backed mainnet RPC";
+          description = ''
+            Starts/reuses Postgres + Helios, waits for Helios RPC readiness,
+            then runs `mfm_cli --output-format json portfolio snapshot`.
+          '';
+          tags = [
+            "mfm"
+            "portfolio"
+            "json"
+          ];
+          usage = [ "nix run .#mfm::portfolio::snapshot -- <ADDRESS>" ];
+          examples = [
+            "MFM_ENV=dev HELIOS_NETWORK=mainnet SERVICE_REUSE_POLICY=same-slot nix run .#mfm::portfolio::snapshot -- 0x000000000000000000000000000000000000dead"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          argParser = "typed";
+          allowUnknownArgs = false;
+          outputFormat = "json";
+          outputChannels = "stdout";
+          contractArgs = [
+            {
+              name = "help";
+              kind = "flag";
+              long = "--help";
+              short = "-h";
+              description = "Show usage.";
+            }
+            {
+              name = "address";
+              kind = "positional";
+              type = "string";
+              required = false;
+              description = "Ethereum address to snapshot.";
+            }
+          ];
+          env = sharedCargoRustEnv;
+          command = ''
+            set -euo pipefail
+
+            # Reserve stdout for the final JSON payload.
+            exec 3>&1
+            exec 1>&2
+
+            if [ "$#" -ne 1 ] || [ "''${1:-}" = "--help" ] || [ "''${1:-}" = "-h" ]; then
+              echo "usage: nix run .#mfm::portfolio::snapshot -- <ADDRESS>" >&2
+              exit 2
+            fi
+
+            ADDRESS="$1"
+            ${ciServicePortPrelude}
+
+            HELIOS_RPC_PORT=$(( ${toString (conf.ports.heliosRpc or 8547)} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+            export HELIOS_RPC_PORT
+            export HELIOSRPC_PORT="$HELIOS_RPC_PORT"
+
+            if [ -z "''${POSTGRES_PORT:-}" ]; then
+              echo "ERROR: POSTGRES_PORT is not set after slot initialization" >&2
+              exit 1
+            fi
+
+            if [ -z "$HELIOS_RPC_PORT" ]; then
+              echo "ERROR: HELIOSRPC_PORT/HELIOS_RPC_PORT is not set after slot initialization" >&2
+              exit 1
+            fi
+
+            # Keep this app mainnet-only (chain-id 1) to avoid accidental local/reth wiring.
+            if [ "''${HELIOS_NETWORK:-}" != "mainnet" ]; then
+              echo "ERROR: HELIOS_NETWORK must be 'mainnet' for mfm::portfolio::snapshot" >&2
+              exit 1
+            fi
+
+            export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-https://eth.drpc.org}"
+
+            if [ "''${MFM_KEEP_SERVICES+x}" = "x" ]; then
+              echo "ERROR: MFM_KEEP_SERVICES has been removed from mfm::portfolio::snapshot" >&2
+              echo "Use process-first controls instead:" >&2
+              echo "  SERVICE_REUSE_POLICY=never|same-root|same-slot|cross-run" >&2
+              echo "  SERVICE_OWNER_SCOPE=ephemeral|persistent" >&2
+              echo "  SERVICE_DISCOVERY_SCOPE=local|global" >&2
+              exit 1
+            fi
+
+            SNAPSHOT_KEEP_RUNNING="0"
+
+            case "''${SERVICE_REUSE_POLICY:-}" in
+              ""|never)
+                ;;
+              same-root|same-slot|cross-run)
+                SNAPSHOT_KEEP_RUNNING="1"
+                ;;
+              *)
+                echo "ERROR: SERVICE_REUSE_POLICY must be one of never|same-root|same-slot|cross-run" >&2
+                exit 1
+                ;;
+            esac
+
+            case "''${SERVICE_OWNER_SCOPE:-}" in
+              ""|ephemeral)
+                ;;
+              persistent)
+                SNAPSHOT_KEEP_RUNNING="1"
+                ;;
+              *)
+                echo "ERROR: SERVICE_OWNER_SCOPE must be one of ephemeral|persistent" >&2
+                exit 1
+                ;;
+            esac
+
+            case "''${SERVICE_DISCOVERY_SCOPE:-}" in
+              ""|local)
+                ;;
+              global)
+                SNAPSHOT_KEEP_RUNNING="1"
+                ;;
+              *)
+                echo "ERROR: SERVICE_DISCOVERY_SCOPE must be one of local|global" >&2
+                exit 1
+                ;;
+            esac
+
+            HELIOS_BIN=${lib.escapeShellArg (if heliosPackage != null then "${heliosPackage}/bin/helios" else "")}
+            if [ -z "$HELIOS_BIN" ] || [ ! -x "$HELIOS_BIN" ]; then
+              echo "ERROR: helios binary is unavailable; configure modules.helios.package in nixfied/project/conf.nix" >&2
+              exit 1
+            fi
+
+            services_root_base="''${TMPDIR:-/tmp}/mfm-portfolio-services"
+            case "''${SERVICE_REUSE_POLICY:-}" in
+              same-slot)
+                services_root="$services_root_base/slot-$env_value-$slot_value"
+                ;;
+              same-root|cross-run)
+                services_root="$services_root_base/shared"
+                ;;
+              ""|never)
+                services_root="$services_root_base/run-$$-$RANDOM"
+                ;;
+              *)
+                echo "ERROR: unsupported SERVICE_REUSE_POLICY=''${SERVICE_REUSE_POLICY:-}" >&2
+                exit 1
+                ;;
+            esac
+
+            postgres_root="$services_root/postgres"
+            postgres_data="$postgres_root/data"
+            postgres_run="$postgres_root/run"
+            postgres_log="$postgres_root/postgres.log"
+            postgres_pid_file="$postgres_data/postmaster.pid"
+
+            helios_root="$services_root/helios"
+            helios_data="$helios_root/data"
+            helios_log="$helios_root/helios.log"
+            helios_pid_file="$helios_root/helios.pid"
+
+            mkdir -p "$postgres_data" "$postgres_run" "$helios_data"
+
+            STARTED_POSTGRES=0
+            STARTED_HELIOS=0
+            out_file=""
+
+            cleanup_services() {
+              if [ "$SNAPSHOT_KEEP_RUNNING" = "1" ]; then
+                return 0
+              fi
+
+              if [ "$STARTED_HELIOS" = "1" ] && [ -f "$helios_pid_file" ]; then
+                helios_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
+                if [ -n "$helios_pid" ] && kill -0 "$helios_pid" 2>/dev/null; then
+                  kill "$helios_pid" 2>/dev/null || true
+                  for _ in $(seq 1 80); do
+                    if ! kill -0 "$helios_pid" 2>/dev/null; then
+                      break
+                    fi
+                    sleep 0.25
+                  done
+                  kill -KILL "$helios_pid" 2>/dev/null || true
+                fi
+                rm -f "$helios_pid_file"
+              fi
+
+              if [ "$STARTED_POSTGRES" = "1" ] && [ -f "$postgres_pid_file" ]; then
+                ${postgresPackage}/bin/pg_ctl -D "$postgres_data" stop -m fast >/dev/null 2>&1 || true
+              fi
+
+              if [ -n "$out_file" ] && [ -f "$out_file" ]; then
+                rm -f "$out_file"
+              fi
+            }
+            trap cleanup_services EXIT INT TERM
+
+            wait_postgres_ready() {
+              for _ in $(seq 1 120); do
+                if ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
+                  return 0
+                fi
+                sleep 0.25
+              done
+              return 1
+            }
+
+            wait_helios_rpc_ready() {
+              local timeout_secs="''${HELIOS_READY_TIMEOUT_SECS:-300}"
+              local interval_secs="''${HELIOS_READY_INTERVAL_SECS:-1}"
+              local start_ts
+              local now_ts
+              local attempt
+              local resp
+              local err_msg
+
+              case "$timeout_secs" in
+                *[!0-9]*|"")
+                  echo "ERROR: HELIOS_READY_TIMEOUT_SECS must be an integer seconds value (got '$timeout_secs')" >&2
+                  return 1
+                  ;;
+              esac
+
+              case "$interval_secs" in
+                *[!0-9.]*|""|*.*.*|.*|*.)
+                  echo "ERROR: HELIOS_READY_INTERVAL_SECS must be a positive number (got '$interval_secs')" >&2
+                  return 1
+                  ;;
+              esac
+
+              start_ts=$(date +%s)
+              attempt=0
+
+              while true; do
+                attempt=$((attempt + 1))
+                resp="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                  -H 'content-type: application/json' \
+                  --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+                  "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null || true)"
+
+                if [ -n "$resp" ] && echo "$resp" | ${pkgs.jq}/bin/jq -e '.result | strings' >/dev/null 2>&1; then
+                  return 0
+                fi
+
+                if [ $((attempt % 10)) -eq 0 ]; then
+                  err_msg=""
+                  if [ -n "$resp" ]; then
+                    err_msg="$(echo "$resp" | ${pkgs.jq}/bin/jq -r '.error.message // empty' 2>/dev/null || true)"
+                  fi
+                  if [ -n "$err_msg" ]; then
+                    echo "INFO: helios not ready yet: $err_msg" >&2
+                  fi
+                fi
+
+                now_ts=$(date +%s)
+                if [ $((now_ts - start_ts)) -ge "$timeout_secs" ]; then
+                  echo "ERROR: helios not ready after $timeout_secs s (eth_blockNumber still failing) rpc_port=$HELIOS_RPC_PORT" >&2
+                  echo "HINT: set HELIOS_CHECKPOINT and HELIOS_CONSENSUS_RPC_URL explicitly for mainnet." >&2
+                  return 1
+                fi
+
+                sleep "$interval_secs"
+              done
+            }
+
+            if ! ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
+              if [ ! -f "$postgres_data/PG_VERSION" ]; then
+                ${postgresPackage}/bin/initdb -D "$postgres_data" -U postgres --no-locale --encoding=UTF8 -A trust >/dev/null
+                cat > "$postgres_data/pg_hba.conf" <<'EOF'
+            # TYPE  DATABASE        USER  ADDRESS       METHOD
+            local   all             all                 trust
+            host    all             all   127.0.0.1/32  trust
+            host    all             all   ::1/128       trust
+            EOF
+              fi
+
+              if [ -f "$postgres_pid_file" ]; then
+                stale_pid="$(head -1 "$postgres_pid_file" 2>/dev/null || true)"
+                if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+                  rm -f "$postgres_pid_file"
+                fi
+              fi
+
+              ${postgresPackage}/bin/pg_ctl -D "$postgres_data" -l "$postgres_log" -o "-p $POSTGRES_PORT -h 127.0.0.1 -k $postgres_run" start >/dev/null
+              STARTED_POSTGRES=1
+            fi
+
+            if ! wait_postgres_ready; then
+              echo "ERROR: postgres failed to become ready port=$POSTGRES_PORT" >&2
+              if [ -f "$postgres_log" ]; then
+                tail -50 "$postgres_log" >&2 || true
+              fi
+              exit 1
+            fi
+
+            ${postgresPackage}/bin/createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres mfm >/dev/null 2>&1 || true
+
+            if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+              -H 'content-type: application/json' \
+              --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+              "http://127.0.0.1:$HELIOS_RPC_PORT" \
+              | ${pkgs.jq}/bin/jq -e '.result | strings' >/dev/null 2>&1; then
+              if [ -f "$helios_pid_file" ]; then
+                stale_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
+                if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+                  rm -f "$helios_pid_file"
+                fi
+              fi
+
+              existing_listener_pid="$(${pkgs.lsof}/bin/lsof -tiTCP:"$HELIOS_RPC_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+              if [ -n "$existing_listener_pid" ]; then
+                kill "$existing_listener_pid" 2>/dev/null || true
+                for _ in $(seq 1 40); do
+                  if ! kill -0 "$existing_listener_pid" 2>/dev/null; then
+                    break
+                  fi
+                  sleep 0.25
+                done
+                kill -KILL "$existing_listener_pid" 2>/dev/null || true
+              fi
+
+              HELIOS_ARGS=(
+                ethereum
+                --network "$HELIOS_NETWORK"
+                --rpc-port "$HELIOS_RPC_PORT"
+                --data-dir "$helios_data"
+                --execution-rpc "$HELIOS_EXECUTION_RPC_URL"
+              )
+
+              if [ -n "''${HELIOS_CONSENSUS_RPC_URL:-}" ]; then
+                HELIOS_ARGS+=(--consensus-rpc "$HELIOS_CONSENSUS_RPC_URL")
+              fi
+
+              if [ -n "''${HELIOS_CHECKPOINT:-}" ]; then
+                HELIOS_ARGS+=(--checkpoint "$HELIOS_CHECKPOINT")
+              fi
+
+              "$HELIOS_BIN" "''${HELIOS_ARGS[@]}" >"$helios_log" 2>&1 &
+              echo "$!" > "$helios_pid_file"
+              STARTED_HELIOS=1
+            fi
+
+            if ! wait_helios_rpc_ready; then
+              echo "ERROR: helios failed readiness probe rpc_port=$HELIOS_RPC_PORT" >&2
+              if [ -f "$helios_log" ]; then
+                tail -50 "$helios_log" >&2 || true
+              fi
+              exit 1
+            fi
+
+            export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm"
+            export MFM_EVM_RPC_URL="http://127.0.0.1:$HELIOS_RPC_PORT"
+            export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"helios_local\",\"rpc_url\":\"http://127.0.0.1:$HELIOS_RPC_PORT\",\"kind\":\"local\"}]"
+            export MFM_EVM_RPC_PREFERRED_ORDER="helios_local"
+            export MFM_EVM_RPC_SOURCE_ID="helios_local"
+
+            out_file="$(mktemp "''${TMPDIR:-/tmp}/mfm-portfolio-snapshot.XXXXXX.json")"
+
+            cargo run -q -p mfm --bin mfm_cli -- \
+              --output-format json \
+              portfolio snapshot "$ADDRESS" \
+              --chain-id 1 \
+              >"$out_file"
+
+            if ! ${pkgs.jq}/bin/jq -e . "$out_file" >/dev/null; then
+              echo "ERROR: snapshot output is not valid JSON" >&2
+              cat "$out_file" >&2 || true
+              exit 1
+            fi
+
+            cat "$out_file" >&3
           '';
         };
 
@@ -846,6 +1223,7 @@ in
                 }
 
                 require_app "mfm_cli"
+                require_app "mfm::portfolio::snapshot"
                 require_app "mfm_rest_api"
 
                 require_task "task.ci"
@@ -854,6 +1232,7 @@ in
                 require_task "task.ci.workflow-basic"
                 require_task "task.ci.workflow-parity"
                 require_task "task.mfm_cli"
+                require_task "task.mfm.portfolio.snapshot"
                 require_task "task.mfm_rest_api"
 
                 require_workflow "workflow.ci.full"

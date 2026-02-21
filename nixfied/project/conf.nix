@@ -26,6 +26,13 @@ let
       ];
 
   aaveOriginTools = if pkgs == null then null else import ./aave-origin-tools.nix { inherit pkgs; };
+  heliosPackage =
+    if pkgs == null then
+      null
+    else if pkgs ? helios then
+      pkgs.helios
+    else
+      pkgs.callPackage ./helios-package.nix { };
 in
 rec {
   project = {
@@ -236,7 +243,7 @@ rec {
 
     helios = {
       enable = true;
-      package = if pkgs != null && pkgs ? helios then pkgs.helios else null;
+      package = heliosPackage;
       portKeyRpc = "heliosRpc";
       dataDirName = "helios";
       network = "local";

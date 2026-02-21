@@ -102,8 +102,8 @@ nix run .#ci -- --mode <mode> --summary
 - Service hooks (for example `run_hook MINIO_START`) and service apps (for example `nix run .#service::minio::start`) share the same launcher path and argument/slot-env enforcement.
 - Local supervisor wrappers in `nixfied/local/default.nix` (`up`, `down`, `svc-*`) are intentional prod-only overrides.
 - `mfm_cli` is the compatibility passthrough wrapper; `mfm_rest_api`/`svc-*` now use strict typed contracts.
-- Workflow-oriented strict json apps are available under `mfm::keystore::*` and `mfm::run::*`.
-- `nix run .#help` currently lists project commands + module apps; invoke `mfm::keystore::*` and `mfm::run::*` apps directly by name.
+- `mfm::portfolio::snapshot` is restored as a strict json app that orchestrates Postgres + Helios and emits raw `mfm_cli` JSON payloads.
+- `nix run .#help` lists exposed core apps; invoke `mfm::portfolio::snapshot` directly by name.
 - CI help/docs metadata comes from `nixfied/project/ci.nix` at `commands.ci.api`, and is mirrored into `apps.<system>.ci.meta.nixfied.api`.
 - Project scripts should prefer framework policy helpers (for example `start_service_should_register_cleanup`) over duplicating `SERVICE_*` policy matrix logic.
 - `nix run .#dev` intentionally uses `start_service ... --cleanup` for deterministic teardown.
@@ -112,11 +112,11 @@ nix run .#ci -- --mode <mode> --summary
 
 - Explicit shell app classes are now enforced:
   - `typed` for strict text commands (`check`, `test`, `build`, `mfm_rest_api`, `svc-*`)
-  - `json` for machine-output workflows (`mfm::portfolio::snapshot`, `mfm::keystore::*`, `mfm::run::*`, EVM artifact apps)
+  - `json` for machine-output workflows (`mfm::portfolio::snapshot`, and other machine-output apps)
   - `batch-runner` for `ci`
   - `passthrough` retained for compatibility on `mfm_cli`
 - Unknown args are rejected at the shell-contract boundary for typed/json commands before domain execution.
-- New workflow-first wrappers (`mfm::keystore::*`, `mfm::run::*`) provide stable JSON automation surfaces while preserving `mfm_cli`.
+- `mfm::portfolio::snapshot` preserves `mfm_cli` as the output-contract authority and returns the raw JSON payload unchanged.
 - CI now validates command class policies and runtime behavior (including unknown-arg probes and JSON-shape checks) in `shell-app-contracts`.
 
 ### Process-first ops:
@@ -146,8 +146,7 @@ nix run .#ci -- --mode <mode> --summary
 ```bash
 nix run .#mfm_cli -- --help
 nix run .#mfm_rest_api
-nix run .#mfm::keystore::list
-nix run .#mfm::run::status -- <RUN_ID>
+nix run .#mfm::portfolio::snapshot -- <ADDRESS>
 ```
 
 ## License

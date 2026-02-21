@@ -169,7 +169,7 @@ Nixfied is vendored under `nixfied/`. Vendoring boundaries (canonical doc: `nixf
 Prefer editing `nixfied/project/` and `nixfied/local/` (not `flake.nix` or framework code under `nixfied/.framework/`) for workflow changes:
 
 - `nixfied/project/conf.nix`: project identity, env vars, envs/ports, module toggles, slot behavior.
-- `nixfied/project/dev.nix`: `nix run .#dev`, plus convenience runners like `nix run .#mfm_cli` / `nix run .#mfm_rest_api`.
+- `nixfied/project/module.nix`: `nix run .#dev`, `nix run .#mfm_cli`, `nix run .#mfm_rest_api`, and app/task wiring including `mfm::portfolio::snapshot`.
 - `nixfied/project/test.nix`: `nix run .#test` (nextest).
 - `nixfied/project/quality.nix`: `nix run .#check` (nightly fmt + clippy).
 - `nixfied/project/prod.nix`: `nix run .#build` (release build).
