@@ -26,13 +26,25 @@ let
       ];
 
   aaveOriginTools = if pkgs == null then null else import ./aave-origin-tools.nix { inherit pkgs; };
+  cachedFrameworkHeliosNames =
+    if builtins.pathExists /nix/store then
+      builtins.filter
+        (name: builtins.match ".*-helios-unstable-[0-9-]+$" name != null)
+        (builtins.attrNames (builtins.readDir /nix/store))
+    else
+      [ ];
+  cachedFrameworkHeliosPackage =
+    if cachedFrameworkHeliosNames == [ ] then
+      null
+    else
+      builtins.storePath "/nix/store/${builtins.head cachedFrameworkHeliosNames}";
   heliosPackage =
     if pkgs == null then
       null
     else if pkgs ? helios then
       pkgs.helios
     else
-      pkgs.callPackage ../.framework/helios/package.nix { };
+      cachedFrameworkHeliosPackage;
 in
 rec {
   project = {

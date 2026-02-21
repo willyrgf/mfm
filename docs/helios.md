@@ -19,6 +19,8 @@ The wrapper is implemented in `nixfied/project/module.nix` (`task.mfm.portfolio.
 - defaults `HELIOS_NETWORK` to `mainnet` and rejects non-mainnet values
 - fallback `HELIOS_EXECUTION_RPC_URL=https://eth.drpc.org` when unset
 - fallback `HELIOS_CONSENSUS_RPC_URL=https://www.lightclientdata.org` when unset
+- runtime Helios binary resolution via `HELIOS_BIN`, `PATH`, or cached real
+  `/nix/store/*-helios-unstable-*/bin/helios`
 - Postgres + Helios lifecycle orchestration with reuse policy envs
 - Helios readiness gating via framework `health` polling + `ready` checks
   using local Helios RPC plus execution endpoint resolution
@@ -47,6 +49,7 @@ Legacy `MFM_KEEP_SERVICES` is rejected.
 Important Helios env vars:
 
 - `HELIOS_NETWORK`
+- `HELIOS_BIN`
 - `HELIOS_EXECUTION_RPC_URL`
 - `HELIOS_CONSENSUS_RPC_URL`
 - `HELIOS_CHECKPOINT`
@@ -69,8 +72,9 @@ Canonical service metadata now lives in `nixfied/project/conf.nix` under `servic
 (`sourceKeys`, `defaultSource`, and port keys).
 
 - `services.helios` in `nixfied/project/module.nix` is sourced from `conf.services.helios` (with module fallbacks).
-- `modules.helios.package` defaults to `pkgs.helios` when available, with framework
-  `nixfied/.framework/helios/package.nix` as fallback.
+- `modules.helios.package` defaults to `pkgs.helios` when available.
+- When `pkgs.helios` is unavailable, project config reuses an already cached
+  real Helios `-helios-unstable-*` store package when present.
 
 `mfm::portfolio::snapshot` now reuses framework `ready/health` for Helios.
 Execution endpoint checks resolve in this order:
