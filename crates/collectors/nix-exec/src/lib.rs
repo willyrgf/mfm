@@ -12,7 +12,6 @@
 //!   as facts via the engine (handled by `LiveIo`).
 
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +24,7 @@ use mfm_machine::events::{Event, KernelEvent};
 use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
+use mfm_machine::process_exec::{run_command, ProcessRunError, ProcessRunResult, StreamLimit};
 use mfm_machine::stores::{ArtifactStore, EventStore};
 
 pub const NAMESPACE_NIX_EXEC: &str = "nix.exec";
@@ -36,8 +36,12 @@ const CODE_NIX_MANIFEST_INVALID: &str = "nix_manifest_invalid";
 const CODE_NIX_EVAL_FAILED: &str = "nix_eval_failed";
 const CODE_NIX_BUILD_FAILED: &str = "nix_build_failed";
 const CODE_NIX_TIMEOUT: &str = "nix_timeout";
+const CODE_NIX_STDOUT_TOO_LARGE: &str = "nix_stdout_too_large";
+const CODE_NIX_STDERR_TOO_LARGE: &str = "nix_stderr_too_large";
 const MAX_STDERR_DETAIL_BYTES: usize = 4096;
 const MAX_STDOUT_DETAIL_BYTES: usize = 1024;
+const MAX_NIX_STDOUT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_NIX_STDERR_BYTES: usize = 4 * 1024 * 1024;
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
@@ -127,7 +131,22 @@ struct ResolveFlakeAppV1 {
 }
 
 fn flake_ref_allowed(policy: &NixFlakePolicy, app: &str) -> bool {
-    policy.allow_prefixes.iter().any(|p| app.starts_with(p))
+    policy
+        .allow_prefixes
+        .iter()
+        .any(|prefix| flake_ref_matches_prefix(prefix, app))
+}
+
+fn flake_ref_matches_prefix(prefix: &str, app: &str) -> bool {
+    if !app.starts_with(prefix) {
+        return false;
+    }
+
+    let suffix = &app[prefix.len()..];
+    suffix.is_empty()
+        || suffix.starts_with('#')
+        || suffix.starts_with('?')
+        || suffix.starts_with('/')
 }
 
 fn nix_system() -> String {
@@ -349,38 +368,94 @@ impl NixFlakeTransport {
 }
 
 async fn run_with_timeout(
-    mut cmd: Command,
+    cmd: Command,
     timeout_ms: u64,
-) -> Result<std::process::Output, IoError> {
-    cmd.kill_on_drop(true);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
+) -> Result<ProcessRunResult, ProcessRunError> {
+    run_command(
+        cmd,
+        None,
+        Duration::from_millis(timeout_ms),
+        StreamLimit {
+            max_stdout_bytes: MAX_NIX_STDOUT_BYTES,
+            max_stderr_bytes: MAX_NIX_STDERR_BYTES,
+        },
+    )
+    .await
+}
 
-    let duration = Duration::from_millis(timeout_ms);
-    let child = cmd.spawn().map_err(|_| {
-        IoError::Transport(info(
-            CODE_NIX_EVAL_FAILED,
+fn map_runner_error(
+    err: ProcessRunError,
+    failure_code: &'static str,
+    command: &str,
+    target: &str,
+    timeout_ms: u64,
+) -> IoError {
+    match err {
+        ProcessRunError::SpawnFailed => IoError::Transport(info_with_details(
+            failure_code,
             ErrorCategory::Unknown,
-            "failed to spawn nix",
-        ))
-    })?;
+            "failed to spawn nix command",
+            serde_json::json!({
+                "command": command,
+                "target": target,
+            }),
+        )),
+        ProcessRunError::Timeout => IoError::Transport(info_with_details(
+            CODE_NIX_TIMEOUT,
+            ErrorCategory::Unknown,
+            "nix command timed out",
+            serde_json::json!({
+                "command": command,
+                "target": target,
+                "timeout_ms": timeout_ms,
+            }),
+        )),
+        ProcessRunError::WaitFailed
+        | ProcessRunError::StdoutReadFailed
+        | ProcessRunError::StderrReadFailed => IoError::Transport(info_with_details(
+            failure_code,
+            ErrorCategory::Unknown,
+            "nix command failed",
+            serde_json::json!({
+                "command": command,
+                "target": target,
+            }),
+        )),
+    }
+}
 
-    tokio::time::timeout(duration, child.wait_with_output())
-        .await
-        .map_err(|_| {
-            IoError::Transport(info(
-                CODE_NIX_TIMEOUT,
-                ErrorCategory::Unknown,
-                "nix command timed out",
-            ))
-        })?
-        .map_err(|_| {
-            IoError::Transport(info(
-                CODE_NIX_EVAL_FAILED,
-                ErrorCategory::Unknown,
-                "nix command failed",
-            ))
-        })
+fn ensure_bounded_output(
+    command: &str,
+    target: &str,
+    out: &ProcessRunResult,
+) -> Result<(), IoError> {
+    if out.stdout.overflowed {
+        return Err(IoError::Transport(info_with_details(
+            CODE_NIX_STDOUT_TOO_LARGE,
+            ErrorCategory::Unknown,
+            "nix command stdout exceeded maximum size",
+            serde_json::json!({
+                "command": command,
+                "target": target,
+                "max_stdout_bytes": MAX_NIX_STDOUT_BYTES,
+                "stdout_bytes": out.stdout.total_bytes,
+            }),
+        )));
+    }
+    if out.stderr.overflowed {
+        return Err(IoError::Transport(info_with_details(
+            CODE_NIX_STDERR_TOO_LARGE,
+            ErrorCategory::Unknown,
+            "nix command stderr exceeded maximum size",
+            serde_json::json!({
+                "command": command,
+                "target": target,
+                "max_stderr_bytes": MAX_NIX_STDERR_BYTES,
+                "stderr_bytes": out.stderr.total_bytes,
+            }),
+        )));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -412,7 +487,18 @@ impl LiveIoTransport for NixFlakeTransport {
             .arg("--no-write-lock-file")
             .arg(&target);
 
-        let out = run_with_timeout(eval, req.timeout_ms).await?;
+        let out = run_with_timeout(eval, req.timeout_ms)
+            .await
+            .map_err(|err| {
+                map_runner_error(
+                    err,
+                    CODE_NIX_EVAL_FAILED,
+                    "nix eval",
+                    &target,
+                    req.timeout_ms,
+                )
+            })?;
+        ensure_bounded_output("nix eval", &target, &out)?;
         if !out.status.success() {
             return Err(IoError::Transport(info_with_details(
                 CODE_NIX_EVAL_FAILED,
@@ -422,13 +508,15 @@ impl LiveIoTransport for NixFlakeTransport {
                     "nix eval",
                     &target,
                     out.status.code(),
-                    &out.stdout,
-                    &out.stderr,
+                    &out.stdout.bytes,
+                    &out.stderr.bytes,
                 ),
             )));
         }
 
-        let program_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let program_path = String::from_utf8_lossy(&out.stdout.bytes)
+            .trim()
+            .to_string();
         if !program_path.starts_with("/nix/store/") {
             return Err(IoError::Other(info(
                 CODE_NIX_REQUEST_INVALID,
@@ -453,7 +541,18 @@ impl LiveIoTransport for NixFlakeTransport {
                 .arg("--no-write-lock-file")
                 .arg(&target);
 
-            let out = run_with_timeout(build, req.timeout_ms).await?;
+            let out = run_with_timeout(build, req.timeout_ms)
+                .await
+                .map_err(|err| {
+                    map_runner_error(
+                        err,
+                        CODE_NIX_BUILD_FAILED,
+                        "nix build",
+                        &target,
+                        req.timeout_ms,
+                    )
+                })?;
+            ensure_bounded_output("nix build", &target, &out)?;
             if !out.status.success() {
                 return Err(IoError::Transport(info_with_details(
                     CODE_NIX_BUILD_FAILED,
@@ -463,8 +562,8 @@ impl LiveIoTransport for NixFlakeTransport {
                         "nix build",
                         &target,
                         out.status.code(),
-                        &out.stdout,
-                        &out.stderr,
+                        &out.stdout.bytes,
+                        &out.stderr.bytes,
                     ),
                 )));
             }
@@ -721,6 +820,18 @@ mod tests {
     fn flake_installable_target_uses_attr_path() {
         let got = flake_installable_target("path:/repo", "apps.x86_64-linux.app.program");
         assert_eq!(got, "path:/repo#apps.x86_64-linux.app.program");
+    }
+
+    #[test]
+    fn flake_ref_prefix_matching_is_boundary_aware() {
+        assert!(flake_ref_matches_prefix(
+            "github:willyrgf/mfm",
+            "github:willyrgf/mfm#jq_fmt_example"
+        ));
+        assert!(!flake_ref_matches_prefix(
+            "github:willyrgf/mfm",
+            "github:willyrgf/mfm-malicious#jq_fmt_example"
+        ));
     }
 
     #[test]
