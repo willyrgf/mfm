@@ -326,6 +326,7 @@ rec {
       enable = modules.helios.enable;
       portKeyRpc = modules.helios.portKeyRpc;
       executionRpcPortKey = modules.helios.executionRpcPortKey;
+      executionRpcUrl = modules.helios.executionRpcUrl;
       sourceKeys = [ "local" ];
       defaultSource = "local";
     };

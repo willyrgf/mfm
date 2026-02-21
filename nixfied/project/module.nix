@@ -145,8 +145,6 @@ let
     "HELIOS_CHECKPOINT"
     "HELIOS_READY_TIMEOUT_SECS"
     "HELIOS_READY_INTERVAL_SECS"
-    "HELIOS_SYNC_MAX_LAG_BLOCKS"
-    "HELIOS_REQUIRE_SYNC"
     "SERVICE_REUSE_POLICY"
     "SERVICE_OWNER_SCOPE"
     "SERVICE_DISCOVERY_SCOPE"
@@ -459,8 +457,12 @@ in
           portKeyRpc = heliosService.portKeyRpc or (conf.modules.helios.portKeyRpc or "heliosRpc");
           executionRpcPortKey =
             heliosService.executionRpcPortKey or (conf.modules.helios.executionRpcPortKey or "rethHttp");
+          executionRpcUrl =
+            heliosService.executionRpcUrl or (conf.modules.helios.executionRpcUrl or "");
           sourceKeys = heliosService.sourceKeys or [ "local" ];
           defaultSource = heliosService.defaultSource or "local";
+          sourceKinds = heliosService.sourceKinds or { };
+          readiness = heliosService.readiness or { };
         };
       };
 
@@ -607,7 +609,7 @@ in
               exit 1
             fi
 
-            export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-https://eth.drpc.org}"
+            export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${conf.modules.helios.executionRpcUrl or "https://eth.drpc.org"}}"
 
             if [ "''${MFM_KEEP_SERVICES+x}" = "x" ]; then
               echo "ERROR: MFM_KEEP_SERVICES has been removed from mfm::portfolio::snapshot" >&2
@@ -783,145 +785,46 @@ in
               done
             }
 
-            wait_helios_rpc_ready() {
-              local timeout_secs="''${HELIOS_READY_TIMEOUT_SECS:-300}"
-              local interval_secs="''${HELIOS_READY_INTERVAL_SECS:-1}"
-              local require_sync="''${HELIOS_REQUIRE_SYNC:-1}"
-              local max_lag_blocks="''${HELIOS_SYNC_MAX_LAG_BLOCKS:-64}"
+            wait_for_framework_ready() {
+              local service="$1"
+              local timeout_secs="$2"
+              local interval_secs="$3"
+              local source_key="''${4:-local}"
+              local ready_log="''${TMPDIR:-/tmp}/mfm-''${service}-ready.$$.log"
               local start_ts
               local now_ts
-              local attempt
-              local block_resp
-              local block_hex
-              local block_val
-              local sync_resp
-              local sync_state
-              local upstream_resp
-              local upstream_block_hex
-              local upstream_block_val
-              local lag_blocks
-              local err_msg
-
-              is_hex_quantity() {
-                case "$1" in
-                  0x[0-9a-fA-F]*|0X[0-9a-fA-F]*)
-                    [ "$1" != "0x" ] && [ "$1" != "0X" ]
-                    ;;
-                  *)
-                    return 1
-                    ;;
-                esac
-              }
-
-              hex_to_dec() {
-                local quantity="$1"
-                local digits
-                digits="''${quantity#0x}"
-                digits="''${digits#0X}"
-                printf '%d' "$((16#$digits))"
-              }
 
               case "$timeout_secs" in
                 *[!0-9]*|"")
-                  echo "ERROR: HELIOS_READY_TIMEOUT_SECS must be an integer seconds value (got '$timeout_secs')" >&2
+                  echo "ERROR: timeout for service '$service' must be integer seconds (got '$timeout_secs')" >&2
                   return 1
                   ;;
               esac
 
               case "$interval_secs" in
                 *[!0-9.]*|""|*.*.*|.*|*.)
-                  echo "ERROR: HELIOS_READY_INTERVAL_SECS must be a positive number (got '$interval_secs')" >&2
-                  return 1
-                  ;;
-              esac
-
-              case "$require_sync" in
-                0|1)
-                  ;;
-                *)
-                  echo "ERROR: HELIOS_REQUIRE_SYNC must be 0 or 1 (got '$require_sync')" >&2
-                  return 1
-                  ;;
-              esac
-
-              case "$max_lag_blocks" in
-                *[!0-9]*|"")
-                  echo "ERROR: HELIOS_SYNC_MAX_LAG_BLOCKS must be an integer >= 0 (got '$max_lag_blocks')" >&2
+                  echo "ERROR: interval for service '$service' must be a positive number (got '$interval_secs')" >&2
                   return 1
                   ;;
               esac
 
               start_ts=$(date +%s)
-              attempt=0
 
               while true; do
-                attempt=$((attempt + 1))
-                block_hex=""
-                sync_state=""
-                upstream_block_hex=""
-                lag_blocks=""
-                block_resp="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
-                  -H 'content-type: application/json' \
-                  --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-                  "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null || true)"
-
-                block_hex="$(echo "$block_resp" | ${pkgs.jq}/bin/jq -r '.result // empty' 2>/dev/null || true)"
-                sync_resp="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
-                  -H 'content-type: application/json' \
-                  --data '{"jsonrpc":"2.0","id":1,"method":"eth_syncing","params":[]}' \
-                  "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null || true)"
-                sync_state="$(echo "$sync_resp" | ${pkgs.jq}/bin/jq -c '.result // empty' 2>/dev/null || true)"
-
-                if [ "$require_sync" = "0" ]; then
-                  if is_hex_quantity "$block_hex"; then
-                    return 0
-                  fi
-                else
-                  if is_hex_quantity "$block_hex" && [ "$sync_state" = "false" ]; then
-                    upstream_resp="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
-                      -H 'content-type: application/json' \
-                      --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-                      "$HELIOS_EXECUTION_RPC_URL" 2>/dev/null || true)"
-                    upstream_block_hex="$(echo "$upstream_resp" | ${pkgs.jq}/bin/jq -r '.result // empty' 2>/dev/null || true)"
-
-                    if is_hex_quantity "$upstream_block_hex"; then
-                      block_val="$(hex_to_dec "$block_hex")"
-                      upstream_block_val="$(hex_to_dec "$upstream_block_hex")"
-                      lag_blocks=$((upstream_block_val - block_val))
-                      if [ "$lag_blocks" -lt 0 ]; then
-                        lag_blocks=0
-                      fi
-                      if [ "$lag_blocks" -le "$max_lag_blocks" ]; then
-                        return 0
-                      fi
-                    fi
-                  fi
-                fi
-
-                if [ $((attempt % 10)) -eq 0 ]; then
-                  err_msg=""
-                  if [ -n "$block_resp" ]; then
-                    err_msg="$(echo "$block_resp" | ${pkgs.jq}/bin/jq -r '.error.message // empty' 2>/dev/null || true)"
-                  fi
-                  if [ -n "$err_msg" ]; then
-                    echo "INFO: helios not ready yet: $err_msg" >&2
-                  else
-                    if [ "$require_sync" = "1" ]; then
-                      echo "INFO: helios not ready yet: sync_state=''${sync_state:-unknown} local_block=''${block_hex:-unknown} upstream_block=''${upstream_block_hex:-unknown} lag_blocks=''${lag_blocks:-unknown} max_lag_blocks=$max_lag_blocks" >&2
-                    else
-                      echo "INFO: helios not ready yet: waiting for eth_blockNumber response" >&2
-                    fi
-                  fi
+                if ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
+                  HELIOS_EXECUTION_RPC_URL="$HELIOS_EXECUTION_RPC_URL" \
+                  nix run .#ready -- --service "$service" --source "$source_key" >"$ready_log" 2>&1; then
+                  rm -f "$ready_log"
+                  return 0
                 fi
 
                 now_ts=$(date +%s)
                 if [ $((now_ts - start_ts)) -ge "$timeout_secs" ]; then
-                  if [ "$require_sync" = "1" ]; then
-                    echo "ERROR: helios not ready after $timeout_secs s (sync requirement not met) rpc_port=$HELIOS_RPC_PORT local_block=''${block_hex:-unknown} upstream_block=''${upstream_block_hex:-unknown} sync_state=''${sync_state:-unknown} lag_blocks=''${lag_blocks:-unknown} max_lag_blocks=$max_lag_blocks" >&2
-                  else
-                    echo "ERROR: helios not ready after $timeout_secs s (eth_blockNumber still failing) rpc_port=$HELIOS_RPC_PORT" >&2
+                  echo "ERROR: framework readiness check failed for service '$service' after $timeout_secs s" >&2
+                  if [ -f "$ready_log" ]; then
+                    tail -50 "$ready_log" >&2 || true
+                    rm -f "$ready_log"
                   fi
-                  echo "HINT: set HELIOS_CHECKPOINT and HELIOS_CONSENSUS_RPC_URL explicitly for mainnet." >&2
                   return 1
                 fi
 
@@ -1015,8 +918,16 @@ in
               STARTED_HELIOS=1
             fi
 
-            if ! wait_helios_rpc_ready; then
-              echo "ERROR: helios failed readiness probe rpc_port=$HELIOS_RPC_PORT" >&2
+            if ! wait_for_framework_health "helios" "120" "1" "local"; then
+              echo "ERROR: helios failed to become healthy port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
+              if [ -f "$helios_log" ]; then
+                tail -50 "$helios_log" >&2 || true
+              fi
+              exit 1
+            fi
+
+            if ! wait_for_framework_ready "helios" "120" "1" "local"; then
+              echo "ERROR: helios failed framework readiness checks port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
               if [ -f "$helios_log" ]; then
                 tail -50 "$helios_log" >&2 || true
               fi
@@ -1700,6 +1611,7 @@ in
 
               HELIOS_NETWORK_VALUE="''${HELIOS_NETWORK:-${conf.modules.helios.network or "local"}}"
               HELIOS_EXECUTION_RPC_URL_VALUE="''${HELIOS_EXECUTION_RPC_URL:-http://127.0.0.1:$RETH_HTTP_PORT}"
+              export HELIOS_EXECUTION_RPC_URL="$HELIOS_EXECUTION_RPC_URL_VALUE"
 
               if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
                 -H 'content-type: application/json' \

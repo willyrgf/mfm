@@ -20,10 +20,8 @@ The wrapper is implemented in `nixfied/project/module.nix` (`task.mfm.portfolio.
 - fallback `HELIOS_EXECUTION_RPC_URL=https://eth.drpc.org` when unset
 - Postgres + Helios lifecycle orchestration with reuse policy envs
 - fail-fast on mainnet when the project fallback shim binary is configured
-- Helios readiness gating that requires:
-  - `eth_blockNumber` success
-  - `eth_syncing == false` (unless disabled)
-  - bounded head lag versus `HELIOS_EXECUTION_RPC_URL`
+- Helios readiness gating via framework `health` polling + `ready` checks
+  using local Helios RPC plus execution endpoint resolution
 - raw `mfm_cli` JSON output only on stdout (`--output-format json`)
 
 Framework-level service checks are also available:
@@ -54,8 +52,6 @@ Important Helios env vars:
 - `HELIOS_CHECKPOINT`
 - `HELIOS_READY_TIMEOUT_SECS`
 - `HELIOS_READY_INTERVAL_SECS`
-- `HELIOS_REQUIRE_SYNC` (`1` default for snapshot task; set `0` to restore basic readiness)
-- `HELIOS_SYNC_MAX_LAG_BLOCKS` (`64` default; max tolerated lag vs execution RPC head)
 
 Runtime routing exported by the wrapper:
 
@@ -75,8 +71,9 @@ Canonical service metadata now lives in `nixfied/project/conf.nix` under `servic
 - `services.helios` in `nixfied/project/module.nix` is sourced from `conf.services.helios` (with module fallbacks).
 - If `pkgs.helios` is unavailable, project config falls back to `nixfied/project/helios-package.nix`.
 
-Note for `mfm::portfolio::snapshot`: it intentionally keeps a custom Helios readiness loop because
-it defaults to a remote execution RPC (`HELIOS_EXECUTION_RPC_URL=https://eth.drpc.org`) while
-framework `ready/health` for `helios` currently assume local execution RPC port checks.
+`mfm::portfolio::snapshot` now reuses framework `ready/health` for Helios.
+Execution endpoint checks resolve in this order:
 
-This keeps Helios packaging in project-owned files and avoids project-layer references to framework-private paths.
+1. `HELIOS_EXECUTION_RPC_URL` (environment override)
+2. `services.helios.executionRpcUrl` (project config)
+3. local fallback from `services.helios.executionRpcPortKey`

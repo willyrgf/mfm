@@ -64,6 +64,7 @@ let
   rethAuthPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyAuth else 0;
   heliosRpcPortBase = if heliosEnabled then resolvePortBase heliosCfg.portKeyRpc else 0;
   heliosExecutionRpcPortBase = if heliosEnabled then resolvePortBase heliosCfg.executionRpcPortKey else 0;
+  heliosExecutionRpcUrl = if heliosEnabled then (heliosCfg.executionRpcUrl or "") else "";
 
   netcatPkg =
     if pkgs ? netcat then
@@ -340,6 +341,41 @@ ${heliosSourceKindCase}
           printf '%s' "unknown"
           ;;
       esac
+    }
+
+    resolve_helios_execution_rpc_url() {
+      local fallback_port="$1"
+      local env_url="''${HELIOS_EXECUTION_RPC_URL:-}"
+      local configured_url=${lib.escapeShellArg heliosExecutionRpcUrl}
+
+      if [ -n "$env_url" ]; then
+        printf '%s' "$env_url"
+        return 0
+      fi
+
+      if [ -n "$configured_url" ]; then
+        printf '%s' "$configured_url"
+        return 0
+      fi
+
+      printf 'http://127.0.0.1:%s' "$fallback_port"
+    }
+
+    helios_execution_rpc_origin() {
+      local env_url="''${HELIOS_EXECUTION_RPC_URL:-}"
+      local configured_url=${lib.escapeShellArg heliosExecutionRpcUrl}
+
+      if [ -n "$env_url" ]; then
+        printf '%s' "env"
+        return 0
+      fi
+
+      if [ -n "$configured_url" ]; then
+        printf '%s' "config"
+        return 0
+      fi
+
+      printf '%s' "port"
     }
 
     service_has_source() {
@@ -677,6 +713,8 @@ ${serviceHasSourceCase}
       checks=$((checks + 2))
       helios_rpc_port=$(( ${toString heliosRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       helios_execution_rpc_port=$(( ${toString heliosExecutionRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      helios_execution_rpc_url="$(resolve_helios_execution_rpc_url "$helios_execution_rpc_port")"
+      helios_execution_rpc_origin_value="$(helios_execution_rpc_origin)"
       echo "INFO: checking helios health port=$helios_rpc_port source=$helios_source"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
@@ -688,15 +726,15 @@ ${serviceHasSourceCase}
         echo "ERROR: helios unhealthy port=$helios_rpc_port"
         exit 1
       fi
-      echo "INFO: checking helios execution health port=$helios_execution_rpc_port source=$helios_source"
+      echo "INFO: checking helios execution health source=$helios_source endpoint_origin=$helios_execution_rpc_origin_value fallback_port=$helios_execution_rpc_port"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
         --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
-        "http://127.0.0.1:$helios_execution_rpc_port" \
+        "$helios_execution_rpc_url" \
         | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-        echo "OK: helios execution healthy port=$helios_execution_rpc_port"
+        echo "OK: helios execution healthy endpoint_origin=$helios_execution_rpc_origin_value fallback_port=$helios_execution_rpc_port"
       else
-        echo "ERROR: helios execution unhealthy port=$helios_execution_rpc_port"
+        echo "ERROR: helios execution unhealthy endpoint_origin=$helios_execution_rpc_origin_value fallback_port=$helios_execution_rpc_port"
         exit 1
       fi
     else
@@ -844,6 +882,8 @@ ${serviceHasSourceCase}
       checks=$((checks + 2))
       helios_rpc_port=$(( ${toString heliosRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       helios_execution_rpc_port=$(( ${toString heliosExecutionRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
+      helios_execution_rpc_url="$(resolve_helios_execution_rpc_url "$helios_execution_rpc_port")"
+      helios_execution_rpc_origin_value="$(helios_execution_rpc_origin)"
       echo "INFO: checking helios readiness port=$helios_rpc_port source=$helios_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile"
       if source_kind_disallowed "$helios_source_kind_value" ${heliosReadinessDisallowSourceKindArgs}; then
         echo "ERROR: helios not ready port=$helios_rpc_port source=$helios_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile (source kind disallowed)"
@@ -876,15 +916,15 @@ ${serviceHasSourceCase}
         echo "SKIP: helios sync gate disabled profile=$helios_readiness_profile"
       fi
 
-      echo "INFO: checking helios execution readiness port=$helios_execution_rpc_port source=$helios_source"
+      echo "INFO: checking helios execution readiness source=$helios_source endpoint_origin=$helios_execution_rpc_origin_value fallback_port=$helios_execution_rpc_port"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
         --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
-        "http://127.0.0.1:$helios_execution_rpc_port" \
+        "$helios_execution_rpc_url" \
         | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-        echo "OK: helios execution ready port=$helios_execution_rpc_port"
+        echo "OK: helios execution ready endpoint_origin=$helios_execution_rpc_origin_value fallback_port=$helios_execution_rpc_port"
       else
-        echo "ERROR: helios execution not ready port=$helios_execution_rpc_port"
+        echo "ERROR: helios execution not ready endpoint_origin=$helios_execution_rpc_origin_value fallback_port=$helios_execution_rpc_port"
         exit 1
       fi
     else
