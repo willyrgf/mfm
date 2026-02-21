@@ -516,7 +516,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
     export NIXFIED_EXECUTION_EPHEMERAL=0
     if [ -z "''${CI_ARTIFACTS_DIR:-}" ] && [ -n "$configured_root" ]; then
-      export CI_ARTIFACTS_DIR="$configured_root"
+      export CI_ARTIFACTS_DIR="$configured_root/$run_id"
     fi
 
     if [ -n "''${CI_ARTIFACTS_DIR:-}" ]; then

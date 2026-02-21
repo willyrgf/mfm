@@ -37,6 +37,21 @@
     esac
   }
 
+  is_sensitive_env_name() {
+    local env_name="$1"
+    local upper_name
+    upper_name="$(printf '%s' "$env_name" | ${pkgs.coreutils}/bin/tr '[:lower:]' '[:upper:]')"
+
+    case "$upper_name" in
+      API_KEY|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|*_TOKEN|*_SECRET|*_PASSWORD|*_PRIVATE_KEY)
+        return 0
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  }
+
   run_in_sandbox_runtime() {
     local runtime_json="$1"
     shift
@@ -98,6 +113,7 @@
     local logs_root
     local logs_dir
     local log_file_run_token
+    local allow_sensitive_pass_through
 
     workdir_kind="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.workdir')"
     custom_workdir="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.customWorkdir // empty')"
@@ -152,6 +168,9 @@
     locale="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.locale // "C.UTF-8"')"
     timezone="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.timezone // "UTC"')"
     umask_value="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.umask // "022"')"
+    allow_sensitive_pass_through="$(
+      printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r 'if (.allowSensitivePassThrough // false) then "1" else "0" end'
+    )"
 
     slot_var="$(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r '.slot.var')"
     env_var="$(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r '.env.var')"
@@ -507,7 +526,16 @@
     )
 
     while IFS= read -r pass_name; do
-      if [ -n "$pass_name" ] && [ -n "''${!pass_name+x}" ]; then
+      if [ -z "$pass_name" ]; then
+        continue
+      fi
+
+      if [ "$allow_sensitive_pass_through" != "1" ] && is_sensitive_env_name "$pass_name"; then
+        echo "ERROR: sensitive passthrough env blocked name=$pass_name"
+        return 3
+      fi
+
+      if [ -n "''${!pass_name+x}" ]; then
         env_cmd+=("$pass_name=''${!pass_name}")
       fi
     done < <(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.passThroughEnv[]?')

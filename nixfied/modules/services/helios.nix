@@ -27,10 +27,6 @@ in
       type = t.str;
       default = "rethHttp";
     };
-    executionRpcUrl = lib.mkOption {
-      type = t.str;
-      default = "";
-    };
     sourceKeys = lib.mkOption {
       type = t.listOf t.str;
       default = [ ];

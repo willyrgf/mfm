@@ -326,6 +326,10 @@ in
                 type = t.listOf t.str;
                 default = [ ];
               };
+              allowSensitivePassThrough = lib.mkOption {
+                type = t.bool;
+                default = false;
+              };
               logging = {
                 levelDefault = lib.mkOption {
                   type = t.nullOr (
