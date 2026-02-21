@@ -940,6 +940,11 @@ pub mod live_io;
 /// Not part of the stable API contract (Appendix C.1).
 pub mod exec_transport;
 
+/// Unstable shared process execution helpers for live IO transports.
+///
+/// Not part of the stable API contract (Appendix C.1).
+pub mod process_exec;
+
 /// Unstable Live IO transport router (namespace dispatch).
 ///
 /// Not part of the stable API contract (Appendix C.1).

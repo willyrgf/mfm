@@ -11,18 +11,17 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use nix::unistd::{access, AccessFlags};
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::errors::{ErrorCategory, ErrorInfo, IoError};
 use crate::ids::ErrorCode;
 use crate::io::IoCall;
 use crate::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
+use crate::process_exec::{run_command, ProcessRunError, StreamLimit};
 
 pub const NAMESPACE_EXEC: &str = "exec";
 
@@ -32,9 +31,16 @@ const CODE_EXEC_PROGRAM_MISSING: &str = "exec_program_missing";
 const CODE_EXEC_PROGRAM_NOT_EXECUTABLE: &str = "exec_program_not_executable";
 const CODE_EXEC_SPAWN_FAILED: &str = "exec_spawn_failed";
 const CODE_EXEC_STDIN_WRITE_FAILED: &str = "exec_stdin_write_failed";
+const CODE_EXEC_STDIN_TOO_LARGE: &str = "exec_stdin_too_large";
 const CODE_EXEC_TIMEOUT: &str = "exec_timeout";
 const CODE_EXEC_FAILED: &str = "exec_failed";
 const CODE_EXEC_STDOUT_INVALID_JSON: &str = "exec_stdout_invalid_json";
+const CODE_EXEC_STDOUT_TOO_LARGE: &str = "exec_stdout_too_large";
+const CODE_EXEC_STDERR_TOO_LARGE: &str = "exec_stderr_too_large";
+
+const MAX_EXEC_STDIN_BYTES: usize = 1024 * 1024;
+const MAX_EXEC_STDOUT_BYTES: usize = 1024 * 1024;
+const MAX_EXEC_STDERR_BYTES: usize = 1024 * 1024;
 
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
@@ -187,16 +193,14 @@ fn parse_request(call: &IoCall) -> Result<ExecRequestV1, IoError> {
     })
 }
 
-fn program_allowed(policy: &ExecPolicy, program_path: &str) -> bool {
+fn program_allowed(policy: &ExecPolicy, program_path: &Path) -> bool {
     policy
         .allow_prefixes
         .iter()
-        .any(|p| program_path.starts_with(p))
+        .any(|prefix| program_path.starts_with(Path::new(prefix)))
 }
 
-fn ensure_program_accessible(program_path: &str) -> Result<(), IoError> {
-    let path = Path::new(program_path);
-
+fn ensure_program_accessible(path: &Path) -> Result<(), IoError> {
     access(path, AccessFlags::F_OK).map_err(|_| {
         IoError::Other(info(
             CODE_EXEC_PROGRAM_MISSING,
@@ -216,20 +220,64 @@ fn ensure_program_accessible(program_path: &str) -> Result<(), IoError> {
     Ok(())
 }
 
+fn resolve_program_path(policy: &ExecPolicy, requested_path: &str) -> Result<String, IoError> {
+    let requested = Path::new(requested_path);
+    ensure_program_accessible(requested)?;
+
+    let canonical = std::fs::canonicalize(requested).map_err(|_| {
+        IoError::Other(info(
+            CODE_EXEC_PROGRAM_MISSING,
+            ErrorCategory::Unknown,
+            "program_path does not exist",
+        ))
+    })?;
+
+    if !program_allowed(policy, &canonical) {
+        return Err(IoError::Other(info(
+            CODE_EXEC_PROGRAM_NOT_ALLOWED,
+            ErrorCategory::Unknown,
+            "program_path is not allowed by policy",
+        )));
+    }
+
+    Ok(canonical.to_string_lossy().to_string())
+}
+
+fn failure_details(program_path: &str, status: &std::process::ExitStatus) -> serde_json::Value {
+    let mut details = serde_json::Map::new();
+    details.insert(
+        "program_path".to_string(),
+        serde_json::Value::String(program_path.to_string()),
+    );
+    details.insert(
+        "exit_code".to_string(),
+        status
+            .code()
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    let signal_value = {
+        #[cfg(unix)]
+        {
+            status
+                .signal()
+                .map(serde_json::Value::from)
+                .unwrap_or(serde_json::Value::Null)
+        }
+        #[cfg(not(unix))]
+        {
+            serde_json::Value::Null
+        }
+    };
+    details.insert("signal".to_string(), signal_value);
+    serde_json::Value::Object(details)
+}
+
 #[async_trait]
 impl LiveIoTransport for ExecProgramTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
         let req = parse_request(&call)?;
-
-        if !program_allowed(&self.policy, &req.program_path) {
-            return Err(IoError::Other(info(
-                CODE_EXEC_PROGRAM_NOT_ALLOWED,
-                ErrorCategory::Unknown,
-                "program_path is not allowed by policy",
-            )));
-        }
-
-        ensure_program_accessible(&req.program_path)?;
+        let program_path = resolve_program_path(&self.policy, &req.program_path)?;
 
         let stdin_bytes = serde_json::to_vec(&req.stdin_json).map_err(|_| {
             IoError::Other(info(
@@ -239,102 +287,137 @@ impl LiveIoTransport for ExecProgramTransport {
             ))
         })?;
 
-        let mut cmd = Command::new(&req.program_path);
-        cmd.kill_on_drop(true);
+        if stdin_bytes.len() > MAX_EXEC_STDIN_BYTES {
+            return Err(IoError::Transport(info_with_details(
+                CODE_EXEC_STDIN_TOO_LARGE,
+                ErrorCategory::ParsingInput,
+                "stdin_json exceeded maximum size",
+                serde_json::json!({
+                    "program_path": program_path.clone(),
+                    "max_stdin_bytes": MAX_EXEC_STDIN_BYTES,
+                    "stdin_bytes": stdin_bytes.len(),
+                }),
+            )));
+        }
+
+        let mut cmd = Command::new(&program_path);
         cmd.args(&req.argv);
-        cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
 
         for (k, v) in &req.env {
             cmd.env(k, v);
         }
 
-        let mut child = cmd.spawn().map_err(|_| {
-            IoError::Transport(info_with_details(
+        let result = run_command(
+            cmd,
+            Some(stdin_bytes),
+            Duration::from_millis(req.timeout_ms),
+            StreamLimit {
+                max_stdout_bytes: MAX_EXEC_STDOUT_BYTES,
+                max_stderr_bytes: MAX_EXEC_STDERR_BYTES,
+            },
+        )
+        .await
+        .map_err(|err| match err {
+            ProcessRunError::SpawnFailed => IoError::Transport(info_with_details(
                 CODE_EXEC_SPAWN_FAILED,
                 ErrorCategory::Unknown,
                 "failed to spawn program",
                 serde_json::json!({
-                    "program_path": req.program_path.clone(),
+                    "program_path": program_path.clone(),
                 }),
-            ))
+            )),
+            ProcessRunError::Timeout => IoError::Transport(info_with_details(
+                CODE_EXEC_TIMEOUT,
+                ErrorCategory::Unknown,
+                "program execution timed out",
+                serde_json::json!({
+                    "program_path": program_path.clone(),
+                    "timeout_ms": req.timeout_ms,
+                }),
+            )),
+            ProcessRunError::WaitFailed
+            | ProcessRunError::StdoutReadFailed
+            | ProcessRunError::StderrReadFailed => IoError::Transport(info_with_details(
+                CODE_EXEC_FAILED,
+                ErrorCategory::Unknown,
+                "program execution failed",
+                serde_json::json!({
+                    "program_path": program_path.clone(),
+                }),
+            )),
         })?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&stdin_bytes).await.map_err(|_| {
-                IoError::Transport(info(
+        if result.stdout.overflowed {
+            return Err(IoError::Transport(info_with_details(
+                CODE_EXEC_STDOUT_TOO_LARGE,
+                ErrorCategory::Unknown,
+                "program stdout exceeded maximum size",
+                serde_json::json!({
+                    "program_path": program_path.clone(),
+                    "max_stdout_bytes": MAX_EXEC_STDOUT_BYTES,
+                    "stdout_bytes": result.stdout.total_bytes,
+                }),
+            )));
+        }
+        if result.stderr.overflowed {
+            return Err(IoError::Transport(info_with_details(
+                CODE_EXEC_STDERR_TOO_LARGE,
+                ErrorCategory::Unknown,
+                "program stderr exceeded maximum size",
+                serde_json::json!({
+                    "program_path": program_path.clone(),
+                    "max_stderr_bytes": MAX_EXEC_STDERR_BYTES,
+                    "stderr_bytes": result.stderr.total_bytes,
+                }),
+            )));
+        }
+
+        if let Some(stdin_err) = result.stdin_write_error {
+            if stdin_err.kind == std::io::ErrorKind::BrokenPipe && !result.status.success() {
+                return Err(IoError::Transport(info_with_details(
+                    CODE_EXEC_FAILED,
+                    ErrorCategory::Unknown,
+                    "program exited with non-zero status",
+                    failure_details(&program_path, &result.status),
+                )));
+            }
+            if stdin_err.kind != std::io::ErrorKind::BrokenPipe {
+                return Err(IoError::Transport(info_with_details(
                     CODE_EXEC_STDIN_WRITE_FAILED,
                     ErrorCategory::Unknown,
                     "failed to write program stdin",
-                ))
-            })?;
+                    serde_json::json!({
+                        "program_path": program_path.clone(),
+                        "io_error_kind": format!("{:?}", stdin_err.kind),
+                    }),
+                )));
+            }
         }
 
-        let duration = Duration::from_millis(req.timeout_ms);
-        let output = tokio::time::timeout(duration, child.wait_with_output())
-            .await
-            .map_err(|_| {
-                IoError::Transport(info_with_details(
-                    CODE_EXEC_TIMEOUT,
+        if let Some(stdin_err) = result.stdin_close_error {
+            if stdin_err.kind != std::io::ErrorKind::BrokenPipe {
+                return Err(IoError::Transport(info_with_details(
+                    CODE_EXEC_STDIN_WRITE_FAILED,
                     ErrorCategory::Unknown,
-                    "program execution timed out",
+                    "failed to close program stdin",
                     serde_json::json!({
-                        "program_path": req.program_path.clone(),
-                        "timeout_ms": req.timeout_ms,
+                        "program_path": program_path.clone(),
+                        "io_error_kind": format!("{:?}", stdin_err.kind),
                     }),
-                ))
-            })?
-            .map_err(|_| {
-                IoError::Transport(info_with_details(
-                    CODE_EXEC_FAILED,
-                    ErrorCategory::Unknown,
-                    "program execution failed",
-                    serde_json::json!({
-                        "program_path": req.program_path.clone(),
-                    }),
-                ))
-            })?;
+                )));
+            }
+        }
 
-        if !output.status.success() {
-            let mut details = serde_json::Map::new();
-            details.insert(
-                "program_path".to_string(),
-                serde_json::Value::String(req.program_path.clone()),
-            );
-            details.insert(
-                "exit_code".to_string(),
-                output
-                    .status
-                    .code()
-                    .map(serde_json::Value::from)
-                    .unwrap_or(serde_json::Value::Null),
-            );
-            let signal_value = {
-                #[cfg(unix)]
-                {
-                    output
-                        .status
-                        .signal()
-                        .map(serde_json::Value::from)
-                        .unwrap_or(serde_json::Value::Null)
-                }
-                #[cfg(not(unix))]
-                {
-                    serde_json::Value::Null
-                }
-            };
-            details.insert("signal".to_string(), signal_value);
-
+        if !result.status.success() {
             return Err(IoError::Transport(info_with_details(
                 CODE_EXEC_FAILED,
                 ErrorCategory::Unknown,
                 "program exited with non-zero status",
-                serde_json::Value::Object(details),
+                failure_details(&program_path, &result.status),
             )));
         }
 
-        serde_json::from_slice::<serde_json::Value>(&output.stdout).map_err(|_| {
+        serde_json::from_slice::<serde_json::Value>(&result.stdout.bytes).map_err(|_| {
             IoError::Other(info(
                 CODE_EXEC_STDOUT_INVALID_JSON,
                 ErrorCategory::ParsingInput,
@@ -357,7 +440,7 @@ mod tests {
     use async_trait::async_trait;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     #[derive(Clone)]
@@ -437,8 +520,15 @@ mod tests {
             perms.set_mode(0o755);
             std::fs::set_permissions(&program, perms).expect("chmod test program");
         }
-        let allow_prefix = format!("{}/", root.display());
+        let canonical_root = std::fs::canonicalize(&root).expect("canonicalize test dir");
+        let allow_prefix = format!("{}/", canonical_root.display());
         (program, allow_prefix)
+    }
+
+    fn cleanup_test_program(program: &Path) {
+        std::fs::remove_file(program).expect("cleanup test program");
+        std::fs::remove_dir_all(program.parent().expect("program parent"))
+            .expect("cleanup test dir");
     }
 
     #[tokio::test]
@@ -516,6 +606,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_path_traversal_that_escapes_allow_prefix() {
+        let root = std::env::temp_dir().join(format!(
+            "mfm-exec-transport-path-traversal-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let allowed = root.join("allowed");
+        std::fs::create_dir_all(&allowed).expect("create allowlist dir");
+
+        let program = root.join("outside.sh");
+        std::fs::write(&program, "#!/bin/sh\ncat >/dev/null\nprintf '{}'\n")
+            .expect("write program");
+        #[cfg(unix)]
+        {
+            let mut perms = std::fs::metadata(&program).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&program, perms).expect("chmod");
+        }
+
+        let canonical_allowed =
+            std::fs::canonicalize(&allowed).expect("canonicalize allowlist dir");
+        let allow_prefix = format!("{}/", canonical_allowed.display());
+        let traversed = allowed.join("../outside.sh");
+
+        let factory = ExecProgramTransportFactory::new(ExecPolicy {
+            allow_prefixes: vec![allow_prefix],
+        });
+        let mut t = factory.make(env());
+
+        let err = t
+            .call(IoCall {
+                namespace: "exec".to_string(),
+                request: serde_json::json!({
+                    "kind": "run_program_v1",
+                    "program_path": traversed.to_string_lossy(),
+                    "argv": [],
+                    "stdin_json": {},
+                    "timeout_ms": 5_000
+                }),
+                fact_key: None,
+            })
+            .await
+            .expect_err("expected allowlist rejection");
+
+        match err {
+            IoError::Other(info) => assert_eq!(info.code.0, CODE_EXEC_PROGRAM_NOT_ALLOWED),
+            other => panic!("expected Other, got: {other:?}"),
+        }
+
+        std::fs::remove_file(&program).expect("cleanup program");
+        std::fs::remove_dir_all(&root).expect("cleanup root");
+    }
+
+    #[tokio::test]
     async fn non_zero_exit_includes_safe_failure_metadata() {
         // Drain stdin first so the test exercises non-zero exit handling instead
         // of racing against a broken pipe while writing stdin.
@@ -544,9 +687,10 @@ mod tests {
             IoError::Transport(info) => {
                 assert_eq!(info.code.0, CODE_EXEC_FAILED);
                 let details = info.details.expect("details");
+                let canonical = std::fs::canonicalize(&program).expect("canonical program path");
                 assert_eq!(
                     details.get("program_path").and_then(|v| v.as_str()),
-                    Some(program.to_string_lossy().as_ref())
+                    Some(canonical.to_string_lossy().as_ref())
                 );
                 assert_eq!(details.get("exit_code").and_then(|v| v.as_i64()), Some(42));
                 assert!(details.get("signal").is_some());
@@ -554,14 +698,12 @@ mod tests {
             other => panic!("expected Transport, got: {other:?}"),
         }
 
-        std::fs::remove_file(&program).expect("cleanup test program");
-        std::fs::remove_dir_all(program.parent().expect("program parent"))
-            .expect("cleanup test dir");
+        cleanup_test_program(&program);
     }
 
     #[tokio::test]
     async fn timeout_includes_program_and_timeout_metadata() {
-        let (program, allow_prefix) = write_test_program("sleep 2\nprintf '{}'");
+        let (program, allow_prefix) = write_test_program("while :; do :; done");
         let factory = ExecProgramTransportFactory::new(ExecPolicy {
             allow_prefixes: vec![allow_prefix],
         });
@@ -575,7 +717,7 @@ mod tests {
                     "program_path": program.to_string_lossy(),
                     "argv": [],
                     "stdin_json": {},
-                    "timeout_ms": 1
+                    "timeout_ms": 20
                 }),
                 fact_key: None,
             })
@@ -586,17 +728,132 @@ mod tests {
             IoError::Transport(info) => {
                 assert_eq!(info.code.0, CODE_EXEC_TIMEOUT);
                 let details = info.details.expect("details");
+                let canonical = std::fs::canonicalize(&program).expect("canonical program path");
                 assert_eq!(
                     details.get("program_path").and_then(|v| v.as_str()),
-                    Some(program.to_string_lossy().as_ref())
+                    Some(canonical.to_string_lossy().as_ref())
                 );
-                assert_eq!(details.get("timeout_ms").and_then(|v| v.as_u64()), Some(1));
+                assert_eq!(details.get("timeout_ms").and_then(|v| v.as_u64()), Some(20));
             }
             other => panic!("expected Transport, got: {other:?}"),
         }
 
-        std::fs::remove_file(&program).expect("cleanup test program");
-        std::fs::remove_dir_all(program.parent().expect("program parent"))
-            .expect("cleanup test dir");
+        cleanup_test_program(&program);
+    }
+
+    #[tokio::test]
+    async fn timeout_applies_while_writing_stdin() {
+        let (program, allow_prefix) = write_test_program("while :; do :; done");
+        let factory = ExecProgramTransportFactory::new(ExecPolicy {
+            allow_prefixes: vec![allow_prefix],
+        });
+        let mut t = factory.make(env());
+
+        let large_payload = "a".repeat(256 * 1024);
+        let err = t
+            .call(IoCall {
+                namespace: "exec".to_string(),
+                request: serde_json::json!({
+                    "kind": "run_program_v1",
+                    "program_path": program.to_string_lossy(),
+                    "argv": [],
+                    "stdin_json": large_payload,
+                    "timeout_ms": 20
+                }),
+                fact_key: None,
+            })
+            .await
+            .expect_err("expected timeout");
+
+        match err {
+            IoError::Transport(info) => assert_eq!(info.code.0, CODE_EXEC_TIMEOUT),
+            other => panic!("expected Transport, got: {other:?}"),
+        }
+
+        cleanup_test_program(&program);
+    }
+
+    #[tokio::test]
+    async fn rejects_stdin_payloads_larger_than_limit() {
+        let (program, allow_prefix) = write_test_program("cat >/dev/null\nprintf '{}'");
+        let factory = ExecProgramTransportFactory::new(ExecPolicy {
+            allow_prefixes: vec![allow_prefix],
+        });
+        let mut t = factory.make(env());
+
+        let huge = "a".repeat(MAX_EXEC_STDIN_BYTES + 1);
+        let err = t
+            .call(IoCall {
+                namespace: "exec".to_string(),
+                request: serde_json::json!({
+                    "kind": "run_program_v1",
+                    "program_path": program.to_string_lossy(),
+                    "argv": [],
+                    "stdin_json": huge,
+                    "timeout_ms": 1_000
+                }),
+                fact_key: None,
+            })
+            .await
+            .expect_err("expected stdin size error");
+
+        match err {
+            IoError::Transport(info) => {
+                assert_eq!(info.code.0, CODE_EXEC_STDIN_TOO_LARGE);
+                let details = info.details.expect("details");
+                assert_eq!(
+                    details.get("max_stdin_bytes").and_then(|v| v.as_u64()),
+                    Some(MAX_EXEC_STDIN_BYTES as u64)
+                );
+            }
+            other => panic!("expected Transport, got: {other:?}"),
+        }
+
+        cleanup_test_program(&program);
+    }
+
+    #[tokio::test]
+    async fn stdout_overflow_reports_bounded_failure_metadata() {
+        let (program, allow_prefix) = write_test_program("head -c 1200000 /dev/zero");
+        let factory = ExecProgramTransportFactory::new(ExecPolicy {
+            allow_prefixes: vec![allow_prefix],
+        });
+        let mut t = factory.make(env());
+
+        let err = t
+            .call(IoCall {
+                namespace: "exec".to_string(),
+                request: serde_json::json!({
+                    "kind": "run_program_v1",
+                    "program_path": program.to_string_lossy(),
+                    "argv": [],
+                    "stdin_json": {},
+                    "timeout_ms": 5_000
+                }),
+                fact_key: None,
+            })
+            .await
+            .expect_err("expected stdout overflow");
+
+        match err {
+            IoError::Transport(info) => {
+                assert_eq!(info.code.0, CODE_EXEC_STDOUT_TOO_LARGE);
+                let details = info.details.expect("details");
+                assert_eq!(
+                    details.get("max_stdout_bytes").and_then(|v| v.as_u64()),
+                    Some(MAX_EXEC_STDOUT_BYTES as u64)
+                );
+                assert!(
+                    details
+                        .get("stdout_bytes")
+                        .and_then(|v| v.as_u64())
+                        .expect("stdout_bytes")
+                        > MAX_EXEC_STDOUT_BYTES as u64
+                );
+            }
+            other => panic!("expected Transport, got: {other:?}"),
+        }
+
+        cleanup_test_program(&program);
     }
 }
