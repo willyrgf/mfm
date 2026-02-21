@@ -60,10 +60,20 @@ fn default_chain_id() -> u64 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortfolioBalanceReport {
+    pub symbol: String,
+    pub raw_u256_dec: String,
+    pub decimals: u8,
+    pub amount_dec: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PortfolioTrackerReport {
     pub snapshot_artifact_id: String,
     pub chain_id: u64,
     pub block_number: u64,
+    #[serde(default)]
+    pub native_balance: Option<PortfolioBalanceReport>,
 }
 
 pub fn portfolio_tracker_report_context_key() -> ContextKey {
@@ -331,7 +341,21 @@ impl Operation for PortfolioTrackerOp {
         });
         states.push(StateNode {
             id: out_sid.clone(),
-            state: Arc::new(WriteSnapshotState { op_path, cfg }),
+            state: Arc::new(WriteSnapshotState {
+                op_path: op_path.clone(),
+                cfg,
+            }),
+        });
+
+        // write summary report
+        let report_sid = StateId::must_new(format!("{}.report", op_path.0));
+        edges.push(DependencyEdge {
+            from: out_sid,
+            to: report_sid.clone(),
+        });
+        states.push(StateNode {
+            id: report_sid,
+            state: Arc::new(WriteReportState),
         });
 
         Ok(StateGraph { states, edges })
@@ -409,6 +433,38 @@ impl State for WriteSnapshotState {
         )
         .await?;
 
+        Ok(StateOutcome {
+            snapshot: SnapshotPolicy::OnSuccess,
+        })
+    }
+}
+
+struct WriteReportState;
+
+#[async_trait]
+impl State for WriteReportState {
+    fn meta(&self) -> StateMeta {
+        meta::pure()
+    }
+
+    async fn handle(
+        &self,
+        ctx: &mut dyn DynContext,
+        _io: &mut dyn IoProvider,
+        rec: &mut dyn EventRecorder,
+    ) -> Result<StateOutcome, StateError> {
+        let chain_id = op_ctx::read_u64_required(
+            ctx,
+            &ctx_key(KEY_CHAIN_ID),
+            "missing_chain_id",
+            "missing chain_id in context",
+        )?;
+        let block_number = op_ctx::read_u64_required(
+            ctx,
+            &ctx_key(KEY_BLOCK_NUMBER),
+            "missing_block_number",
+            "missing block_number in context",
+        )?;
         let snapshot_artifact_id = op_ctx::read_string_required(
             ctx,
             &ctx_key(KEY_SNAPSHOT_ARTIFACT_ID),
@@ -418,11 +474,29 @@ impl State for WriteSnapshotState {
             "snapshot artifact id in context must be a string",
         )?;
 
+        let native_balance: Option<PortfolioBalanceReport> = op_ctx::read_json_required(
+            ctx,
+            &ctx_key(KEY_NATIVE),
+            "missing_native",
+            "missing native balance in context",
+        )
+        .and_then(|native| {
+            serde_json::from_value(native).map_err(|_| {
+                op_errors::state_unknown(
+                    "native_balance_decode_failed",
+                    "failed to decode native balance report",
+                )
+            })
+        })
+        .map(Some)?;
+
         let report = PortfolioTrackerReport {
             snapshot_artifact_id,
             chain_id,
             block_number,
+            native_balance,
         };
+
         let report_json = serde_json::to_value(&report).map_err(|_| {
             op_errors::state_unknown(
                 "serialize_report_failed",
@@ -625,6 +699,15 @@ mod tests {
             .expect("token_balance state for 0x...beef");
 
         assert!(i1 < ib, "token balance states must be sorted by address");
+        let iw = ids
+            .iter()
+            .position(|id| id == "portfolio_tracker.main.write_snapshot")
+            .expect("write_snapshot state");
+        let ir = ids
+            .iter()
+            .position(|id| id == "portfolio_tracker.main.report")
+            .expect("report state");
+        assert!(iw < ir, "report state must run after write_snapshot");
     }
 
     #[tokio::test]
@@ -841,5 +924,22 @@ mod tests {
                 .map(|a| a.len()),
             Some(1)
         );
+
+        let report_key = portfolio_tracker_report_context_key();
+        let report: PortfolioTrackerReport = serde_json::from_value(
+            snapshot
+                .get(&report_key.0)
+                .cloned()
+                .unwrap_or_else(|| panic!("report context key missing: {snapshot}")),
+        )
+        .expect("report decode");
+        assert_eq!(report.snapshot_artifact_id, out_id);
+        assert_eq!(report.chain_id, 1);
+        assert_eq!(report.block_number, 100);
+        let native_balance = report.native_balance.expect("native balance in report");
+        assert_eq!(native_balance.symbol, "ETH");
+        assert_eq!(native_balance.decimals, 18);
+        assert_eq!(native_balance.raw_u256_dec, "1000000000000000000");
+        assert_eq!(native_balance.amount_dec, "1.000000000000000000");
     }
 }

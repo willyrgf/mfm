@@ -394,6 +394,10 @@ mfm_cli portfolio snapshot <ADDRESS> [OPTIONS]
 - `--chain-id <N>`: EVM chain id to snapshot (default: 1)
 - `--tokens-json <JSON>`: Optional JSON array to include/override allowlisted tokens (default: `[]`)
 
+**Output Notes:**
+- Result metadata includes run ids and snapshot ids.
+- The response also includes a `native_balance` report object with `symbol`, `raw_u256_dec`, `decimals`, and `amount_dec`.
+
 ## Configuration
 
 The CLI's behavior can be modified using environment variables, which is ideal for CI/CD pipelines and automated scripts.

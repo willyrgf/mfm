@@ -42,7 +42,8 @@ use mfm_op_keystore_admin::{KeystoreDeleteOp, KeystoreImportOp, KeystoreListOp};
 use mfm_op_keystore_tx::{KeystoreTxSendRawOp, KeystoreTxSignOp};
 use mfm_op_nix_app::NixAppOp;
 use mfm_op_portfolio_tracker::{
-    portfolio_tracker_report_context_key, PortfolioTrackerOp, PortfolioTrackerReport,
+    portfolio_tracker_report_context_key, PortfolioBalanceReport, PortfolioTrackerOp,
+    PortfolioTrackerReport,
 };
 use mfm_op_proof::ProofOp;
 use mfm_sdk::ids::{MachineId, StepId};
@@ -794,6 +795,7 @@ impl AppServices {
         let mut snapshot_artifact_id = None;
         let mut chain_id = None;
         let mut block_number = None;
+        let mut native_balance = None;
 
         if let Some(final_snapshot_id) = &run.final_snapshot_id {
             let report_key = portfolio_tracker_report_context_key();
@@ -823,6 +825,7 @@ impl AppServices {
                 snapshot_artifact_id = Some(report.snapshot_artifact_id);
                 chain_id = Some(report.chain_id);
                 block_number = Some(report.block_number);
+                native_balance = report.native_balance;
             }
         }
 
@@ -833,6 +836,7 @@ impl AppServices {
             snapshot_artifact_id,
             chain_id,
             block_number,
+            native_balance,
         })
     }
 
@@ -1328,7 +1332,17 @@ impl FeatureCatalog {
                         "final_snapshot_id": {"type": ["string", "null"]},
                         "snapshot_artifact_id": {"type": ["string", "null"]},
                         "chain_id": {"type": ["integer", "null"]},
-                        "block_number": {"type": ["integer", "null"]}
+                        "block_number": {"type": ["integer", "null"]},
+                        "native_balance": {
+                            "type": ["object", "null"],
+                            "properties": {
+                                "symbol": {"type": "string"},
+                                "raw_u256_dec": {"type": "string"},
+                                "decimals": {"type": "integer"},
+                                "amount_dec": {"type": "string"}
+                            },
+                            "required": ["symbol", "raw_u256_dec", "decimals", "amount_dec"]
+                        }
                     },
                     "required": ["run_id", "phase"]
                 }),
@@ -1537,4 +1551,5 @@ pub struct PortfolioSnapshotResponse {
     pub snapshot_artifact_id: Option<String>,
     pub chain_id: Option<u64>,
     pub block_number: Option<u64>,
+    pub native_balance: Option<PortfolioBalanceReport>,
 }
