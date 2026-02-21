@@ -74,11 +74,34 @@ let
       throw "nixfied.operations: netcat package is required for readiness probes";
 
   postgresProbePkg = if pkgs ? postgresql_16 then pkgs.postgresql_16 else pkgs.postgresql;
+  heliosSourceKinds = heliosCfg.sourceKinds or { };
+  heliosSourceKindCase = builtins.concatStringsSep "\n" (
+    map (
+      sourceName:
+      "      ${lib.escapeShellArg sourceName}) printf '%s' ${
+        lib.escapeShellArg (heliosSourceKinds.${sourceName} or "unknown")
+      } ;;"
+    ) (builtins.sort builtins.lessThan (builtins.attrNames heliosSourceKinds))
+  );
+  heliosReadinessProfile = heliosCfg.readiness.profile or "fast";
+  heliosReadinessRequireNotSyncing =
+    (heliosCfg.readiness.requireNotSyncing or false) || heliosReadinessProfile == "strict";
+  heliosReadinessDisallowSourceKinds =
+    lib.unique (
+      (heliosCfg.readiness.disallowSourceKinds or [ ])
+      ++ lib.optionals (heliosReadinessProfile == "strict") [
+        "shim"
+        "unknown"
+      ]
+    );
+  heliosReadinessDisallowSourceKindArgs =
+    builtins.concatStringsSep " " (map lib.escapeShellArg heliosReadinessDisallowSourceKinds);
   serviceProbeRuntimeInputs = [
     pkgs.coreutils
     pkgs.gnugrep
     pkgs.gnused
     pkgs.curl
+    pkgs.jq
     netcatPkg
     postgresProbePkg
   ];
@@ -295,6 +318,28 @@ ${serviceDefaultSourceCase}
         fi
       done
       return 1
+    }
+
+    source_kind_disallowed() {
+      local source_kind="$1"
+      shift
+      local blocked_kind
+      for blocked_kind in "$@"; do
+        if [ "$blocked_kind" = "$source_kind" ]; then
+          return 0
+        fi
+      done
+      return 1
+    }
+
+    helios_source_kind() {
+      local source="$1"
+      case "$source" in
+${heliosSourceKindCase}
+        *)
+          printf '%s' "unknown"
+          ;;
+      esac
     }
 
     service_has_source() {
@@ -793,20 +838,44 @@ ${serviceHasSourceCase}
       if [ -z "$helios_source" ]; then
         helios_source="unspecified"
       fi
+      helios_source_kind_value="$(helios_source_kind "$helios_source")"
+      helios_readiness_profile=${lib.escapeShellArg heliosReadinessProfile}
+      helios_require_not_syncing=${if heliosReadinessRequireNotSyncing then "1" else "0"}
       checks=$((checks + 2))
       helios_rpc_port=$(( ${toString heliosRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
       helios_execution_rpc_port=$(( ${toString heliosExecutionRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking helios readiness port=$helios_rpc_port source=$helios_source"
-      if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-        -H 'content-type: application/json' \
-        --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-        "http://127.0.0.1:$helios_rpc_port" \
-        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-        echo "OK: helios ready port=$helios_rpc_port"
-      else
-        echo "ERROR: helios not ready port=$helios_rpc_port"
+      echo "INFO: checking helios readiness port=$helios_rpc_port source=$helios_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile"
+      if source_kind_disallowed "$helios_source_kind_value" ${heliosReadinessDisallowSourceKindArgs}; then
+        echo "ERROR: helios not ready port=$helios_rpc_port source=$helios_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile (source kind disallowed)"
         exit 1
       fi
+
+      helios_block_json="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
+        -H 'content-type: application/json' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+        "http://127.0.0.1:$helios_rpc_port")" || true
+      helios_block_number="$(printf '%s' "$helios_block_json" | ${pkgs.jq}/bin/jq -r '.result // empty')" || true
+      if [ -z "$helios_block_number" ] || ! [[ "$helios_block_number" =~ ^0x[0-9a-fA-F]+$ ]]; then
+        echo "ERROR: helios not ready port=$helios_rpc_port source=$helios_source source_kind=$helios_source_kind_value (invalid eth_blockNumber result)"
+        exit 1
+      fi
+      echo "OK: helios ready port=$helios_rpc_port block_number=$helios_block_number"
+
+      if [ "$helios_require_not_syncing" = "1" ]; then
+        helios_syncing_json="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
+          -H 'content-type: application/json' \
+          --data '{"jsonrpc":"2.0","id":1,"method":"eth_syncing","params":[]}' \
+          "http://127.0.0.1:$helios_rpc_port")" || true
+        helios_syncing_result="$(printf '%s' "$helios_syncing_json" | ${pkgs.jq}/bin/jq -c '.result')" || true
+        if [ "$helios_syncing_result" != "false" ]; then
+          echo "ERROR: helios not ready port=$helios_rpc_port source=$helios_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile (eth_syncing=$helios_syncing_result)"
+          exit 1
+        fi
+        echo "OK: helios sync status ready port=$helios_rpc_port"
+      else
+        echo "SKIP: helios sync gate disabled profile=$helios_readiness_profile"
+      fi
+
       echo "INFO: checking helios execution readiness port=$helios_execution_rpc_port source=$helios_source"
       if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
         -H 'content-type: application/json' \
