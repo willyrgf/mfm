@@ -63,7 +63,7 @@ async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> ser
     let mut t = factory.make(LiveIoEnv {
         stores: Stores { events, artifacts },
         run_id: RunId(uuid::Uuid::new_v4()),
-        state_id: StateId("parity.main.rpc".to_string()),
+        state_id: StateId::must_new("parity.main.rpc".to_string()),
         attempt: 0,
     });
 

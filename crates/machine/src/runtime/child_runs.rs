@@ -505,8 +505,16 @@ impl ChildRunLiveIoTransport {
             req.op_config.clone(),
             req.input.clone(),
         );
+        let op_id = OpId::new(req.op_id.clone()).map_err(|_| {
+            child_io_error(
+                CODE_CHILD_RUN_REQUEST_INVALID,
+                ErrorCategory::ParsingInput,
+                "invalid child run op_id",
+            )
+        })?;
+
         let manifest = RunManifest {
-            op_id: OpId(req.op_id.clone()),
+            op_id,
             op_version: req.op_version.clone(),
             input_params,
             run_config: req.run_config.clone(),

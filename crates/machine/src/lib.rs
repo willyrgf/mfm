@@ -9,11 +9,36 @@ use std::time::Duration;
 
 pub mod ids {
     use super::*;
+    use std::fmt;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct IdValidationError {
+        kind: &'static str,
+        value: String,
+    }
+
+    impl IdValidationError {
+        fn new(kind: &'static str, value: impl Into<String>) -> Self {
+            Self {
+                kind,
+                value: value.into(),
+            }
+        }
+    }
+
+    impl fmt::Display for IdValidationError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "invalid {}: {}", self.kind, self.value)
+        }
+    }
+
+    impl std::error::Error for IdValidationError {}
 
     /// Stable identifier for an operation (human meaningful).
     /// Invariant: stable across environments; should not be random.
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    pub struct OpId(pub String);
+    #[serde(try_from = "String", into = "String")]
+    pub struct OpId(String);
 
     /// Enforced: "<machine_id>.<step_id>"
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -21,7 +46,8 @@ pub mod ids {
 
     /// Enforced: "<machine_id>.<step_id>.<state_local_id>"
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    pub struct StateId(pub String);
+    #[serde(try_from = "String", into = "String")]
+    pub struct StateId(String);
 
     /// Unique run identifier (can be random).
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -67,6 +93,52 @@ pub mod ids {
         true
     }
 
+    impl OpId {
+        pub fn new(value: impl Into<String>) -> Result<Self, IdValidationError> {
+            let value = value.into();
+            if !is_valid_id_segment(&value) {
+                return Err(IdValidationError::new("op_id", value));
+            }
+            Ok(Self(value))
+        }
+
+        pub fn must_new(value: impl Into<String>) -> Self {
+            Self::new(value).expect("op id must satisfy ^[a-z][a-z0-9_]{0,62}$")
+        }
+
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    impl TryFrom<String> for OpId {
+        type Error = IdValidationError;
+
+        fn try_from(value: String) -> Result<Self, Self::Error> {
+            Self::new(value)
+        }
+    }
+
+    impl TryFrom<&str> for OpId {
+        type Error = IdValidationError;
+
+        fn try_from(value: &str) -> Result<Self, Self::Error> {
+            Self::new(value)
+        }
+    }
+
+    impl From<OpId> for String {
+        fn from(value: OpId) -> Self {
+            value.0
+        }
+    }
+
+    impl fmt::Display for OpId {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn validate_op_path(value: &str) -> bool {
         let mut it = value.split('.');
@@ -100,6 +172,52 @@ pub mod ids {
         is_valid_id_segment(machine_id)
             && is_valid_id_segment(step_id)
             && is_valid_id_segment(state_local_id)
+    }
+
+    impl StateId {
+        pub fn new(value: impl Into<String>) -> Result<Self, IdValidationError> {
+            let value = value.into();
+            if !validate_state_id(&value) {
+                return Err(IdValidationError::new("state_id", value));
+            }
+            Ok(Self(value))
+        }
+
+        pub fn must_new(value: impl Into<String>) -> Self {
+            Self::new(value).expect("state id must satisfy <machine_id>.<step_id>.<state_local_id>")
+        }
+
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    impl TryFrom<String> for StateId {
+        type Error = IdValidationError;
+
+        fn try_from(value: String) -> Result<Self, Self::Error> {
+            Self::new(value)
+        }
+    }
+
+    impl TryFrom<&str> for StateId {
+        type Error = IdValidationError;
+
+        fn try_from(value: &str) -> Result<Self, Self::Error> {
+            Self::new(value)
+        }
+    }
+
+    impl From<StateId> for String {
+        fn from(value: StateId) -> Self {
+            value.0
+        }
+    }
+
+    impl fmt::Display for StateId {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0)
+        }
     }
 
     #[cfg(test)]
@@ -136,6 +254,30 @@ pub mod ids {
             assert!(!validate_state_id("machine.main.setup.extra"));
             assert!(!validate_state_id("machine.Main.setup"));
             assert!(!validate_state_id("machine.main.set-up"));
+        }
+
+        #[test]
+        fn op_id_constructor_enforces_segment_rules() {
+            assert!(OpId::new("portfolio_tracker").is_ok());
+            assert!(OpId::new("PortfolioTracker").is_err());
+            assert!(OpId::new("portfolio-tracker").is_err());
+        }
+
+        #[test]
+        fn state_id_constructor_enforces_shape_and_segment_rules() {
+            assert!(StateId::new("machine.main.setup").is_ok());
+            assert!(StateId::new("machine.main").is_err());
+            assert!(StateId::new("machine.main.setup.extra").is_err());
+            assert!(StateId::new("machine.main.set-up").is_err());
+        }
+
+        #[test]
+        fn serde_rejects_invalid_op_and_state_ids() {
+            let bad_op_id = serde_json::from_str::<OpId>("\"bad-op\"");
+            assert!(bad_op_id.is_err());
+
+            let bad_state_id = serde_json::from_str::<StateId>("\"machine.main.extra.parts\"");
+            assert!(bad_state_id.is_err());
         }
     }
 }

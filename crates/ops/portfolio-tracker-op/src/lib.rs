@@ -26,7 +26,6 @@ use mfm_machine::config::RunConfig;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::errors::StateError;
-use mfm_machine::events::DomainEvent;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
 use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
@@ -38,6 +37,7 @@ use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
 use mfm_state_common::ctx as op_ctx;
 use mfm_state_common::errors as op_errors;
+use mfm_state_common::local_io_helpers::emit_report_event;
 use mfm_state_common::output as op_output;
 use mfm_state_common::states::meta;
 use mfm_state_keystore::tx::output_context_key;
@@ -50,8 +50,6 @@ const KEY_BLOCK_NUMBER: &str = "block_number";
 const KEY_NATIVE: &str = "native";
 const KEY_SNAPSHOT_ARTIFACT_ID: &str = "snapshot_artifact_id";
 const KEY_REPORT: &str = "report";
-
-const ENV_PORTFOLIO_TOKENS_JSON: &str = "MFM_PORTFOLIO_TOKENS_JSON";
 
 fn ctx_key(suffix: &'static str) -> ContextKey {
     ContextKey(suffix.to_string())
@@ -132,19 +130,6 @@ fn normalize_eth_address(s: &str) -> Option<String> {
     Some(format!("0x{}", rest.to_ascii_lowercase()))
 }
 
-fn load_portfolio_tokens_from_env() -> Result<Vec<PortfolioSnapshotTokenConfig>, SdkError> {
-    let Ok(raw) = std::env::var(ENV_PORTFOLIO_TOKENS_JSON) else {
-        return Ok(Vec::new());
-    };
-
-    serde_json::from_str::<Vec<PortfolioSnapshotTokenConfig>>(&raw).map_err(|_| {
-        sdk_input_error(
-            "InvalidPortfolioTokensJson",
-            format!("invalid {ENV_PORTFOLIO_TOKENS_JSON}"),
-        )
-    })
-}
-
 fn parse_token_address(
     raw: &str,
     code: &'static str,
@@ -163,23 +148,6 @@ fn normalize_snapshot_input(
         parse_token_address(&cfg.address, "InvalidAddress", "invalid ethereum address")?;
 
     let mut merged: HashMap<String, PortfolioSnapshotTokenConfig> = HashMap::new();
-
-    for token in load_portfolio_tokens_from_env()? {
-        let normalized = normalize_eth_address(&token.address).ok_or_else(|| {
-            sdk_input_error(
-                "InvalidPortfolioTokensJson",
-                "invalid token address in MFM_PORTFOLIO_TOKENS_JSON",
-            )
-        })?;
-        merged.insert(
-            normalized.clone(),
-            PortfolioSnapshotTokenConfig {
-                address: normalized,
-                symbol: token.symbol,
-                decimals: token.decimals,
-            },
-        );
-    }
 
     for token in cfg.tokens {
         let normalized = normalize_eth_address(&token.address)
@@ -245,7 +213,7 @@ pub struct PortfolioTrackerOp;
 
 impl Operation for PortfolioTrackerOp {
     fn op_id(&self) -> OpId {
-        OpId(OP_ID.to_string())
+        OpId::must_new(OP_ID.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -279,7 +247,7 @@ impl Operation for PortfolioTrackerOp {
         let mut edges: Vec<DependencyEdge> = Vec::new();
 
         // chain id (validates network)
-        let chain_id_sid = StateId(format!("{}.chain_id", op_path.0));
+        let chain_id_sid = StateId::must_new(format!("{}.chain_id", op_path.0));
         states.push(StateNode {
             id: chain_id_sid.clone(),
             state: Arc::new(
@@ -299,7 +267,7 @@ impl Operation for PortfolioTrackerOp {
         let mut last = chain_id_sid;
 
         // block number
-        let block_sid = StateId(format!("{}.block_number", op_path.0));
+        let block_sid = StateId::must_new(format!("{}.block_number", op_path.0));
         edges.push(DependencyEdge {
             from: last.clone(),
             to: block_sid.clone(),
@@ -316,7 +284,7 @@ impl Operation for PortfolioTrackerOp {
         last = block_sid;
 
         // ETH balance
-        let eth_sid = StateId(format!("{}.eth_balance", op_path.0));
+        let eth_sid = StateId::must_new(format!("{}.eth_balance", op_path.0));
         edges.push(DependencyEdge {
             from: last.clone(),
             to: eth_sid.clone(),
@@ -335,7 +303,7 @@ impl Operation for PortfolioTrackerOp {
         // ERC-20 balances (allowlist)
         for t in cfg.tokens.clone() {
             let addr_no0x = address_hex_lower_no0x(&t.address);
-            let sid = StateId(format!("{}.token_balance_{}", op_path.0, addr_no0x));
+            let sid = StateId::must_new(format!("{}.token_balance_{}", op_path.0, addr_no0x));
             edges.push(DependencyEdge {
                 from: last.clone(),
                 to: sid.clone(),
@@ -356,7 +324,7 @@ impl Operation for PortfolioTrackerOp {
         }
 
         // write snapshot output
-        let out_sid = StateId(format!("{}.write_snapshot", op_path.0));
+        let out_sid = StateId::must_new(format!("{}.write_snapshot", op_path.0));
         edges.push(DependencyEdge {
             from: last,
             to: out_sid.clone(),
@@ -462,13 +430,7 @@ impl State for WriteSnapshotState {
             )
         })?;
         op_ctx::write_json(ctx, ctx_key(KEY_REPORT), report_json.clone())?;
-        rec.emit(DomainEvent {
-            name: "portfolio_tracker.completed".to_string(),
-            payload: report_json,
-            payload_ref: None,
-        })
-        .await
-        .map_err(|_| op_errors::state_unknown("emit_failed", "failed to emit domain event"))?;
+        emit_report_event(rec, "portfolio_tracker.completed", report_json).await?;
 
         Ok(StateOutcome {
             snapshot: SnapshotPolicy::OnSuccess,
@@ -646,7 +608,7 @@ mod tests {
             )
             .expect("expand");
 
-        let ids: Vec<String> = g.states.iter().map(|n| n.id.0.clone()).collect();
+        let ids: Vec<String> = g.states.iter().map(|n| n.id.as_str().to_string()).collect();
 
         let a1 = "0000000000000000000000000000000000000001";
         let abeef = "000000000000000000000000000000000000beef";
@@ -695,7 +657,7 @@ mod tests {
             else {
                 continue;
             };
-            if state_id.0 != "portfolio_tracker.main.chain_id" {
+            if state_id.as_str() != "portfolio_tracker.main.chain_id" {
                 continue;
             }
             assert_eq!(error.info.code.0, "chain_id_mismatch");

@@ -1,5 +1,5 @@
-use mfm_machine::context::DynContext;
-use mfm_machine::errors::StateError;
+use mfm_machine::context::{DynContext, TypedContextExt};
+use mfm_machine::errors::{ContextError, StateError};
 use mfm_machine::ids::ContextKey;
 
 use crate::errors::state_unknown;
@@ -70,8 +70,12 @@ pub fn read_typed<T: serde::de::DeserializeOwned>(
     type_code: &'static str,
     type_message: &'static str,
 ) -> Result<T, StateError> {
-    let value = read_json_required(ctx, key, missing_code, missing_message)?;
-    serde_json::from_value(value).map_err(|_| state_unknown(type_code, type_message))
+    match ctx.read_typed::<T>(key) {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) => Err(state_unknown(missing_code, missing_message)),
+        Err(ContextError::Serialization(_)) => Err(state_unknown(type_code, type_message)),
+        Err(_) => Err(state_unknown("ctx_read_failed", "context read failed")),
+    }
 }
 
 pub fn write_json(

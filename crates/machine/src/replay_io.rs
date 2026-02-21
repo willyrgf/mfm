@@ -84,7 +84,9 @@ impl ReplayIo {
         self.call_ordinal += 1;
         FactKey(format!(
             "mfm:{kind}|run:{}|state:{}|attempt:{}|ord:{ord}",
-            self.run_id.0, self.state_id.0, self.attempt
+            self.run_id.0,
+            self.state_id.as_str(),
+            self.attempt
         ))
     }
 
@@ -238,7 +240,7 @@ mod tests {
         let facts = FactIndex::default();
         let mut io = ReplayIo::new(
             RunId(uuid::Uuid::new_v4()),
-            StateId("machine.main.s1".to_string()),
+            StateId::must_new("machine.main.s1".to_string()),
             0,
             artifacts,
             facts,
@@ -266,7 +268,7 @@ mod tests {
         let facts = FactIndex::default();
         let mut io = ReplayIo::new(
             RunId(uuid::Uuid::new_v4()),
-            StateId("machine.main.s1".to_string()),
+            StateId::must_new("machine.main.s1".to_string()),
             0,
             artifacts,
             facts,

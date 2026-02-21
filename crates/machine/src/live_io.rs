@@ -172,7 +172,9 @@ impl LiveIo {
         self.call_ordinal += 1;
         FactKey(format!(
             "mfm:{kind}|run:{}|state:{}|attempt:{}|ord:{ord}",
-            self.run_id.0, self.state_id.0, self.attempt
+            self.run_id.0,
+            self.state_id.as_str(),
+            self.attempt
         ))
     }
 

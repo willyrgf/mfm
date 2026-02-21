@@ -51,7 +51,8 @@ pub fn fact_key_for_jsonrpc_call(
     let req_id = artifact_id_for_json(&request).map_err(FactKeyDerivationError::NotCanonical)?;
     Ok(FactKey(format!(
         "mfm:evm|state:{}|req:{}",
-        state_id.0, req_id.0
+        state_id.as_str(),
+        req_id.0
     )))
 }
 
@@ -196,7 +197,7 @@ mod tests {
 
     #[test]
     fn fact_key_is_stable_for_same_call() {
-        let sid = StateId("m.main.chain_id".to_string());
+        let sid = StateId::must_new("m.main.chain_id".to_string());
         let call = JsonRpcCall::new("eth_chainId", serde_json::json!([]));
 
         let k1 = fact_key_for_jsonrpc_call(&sid, &call).expect("key");
@@ -267,7 +268,8 @@ mod tests {
         let mut io = FixedIo {
             response: serde_json::json!("0x1"),
         };
-        let mut client = EvmIoClient::new(StateId("m.main.chain_id".to_string()), &mut io);
+        let mut client =
+            EvmIoClient::new(StateId::must_new("m.main.chain_id".to_string()), &mut io);
         let id = client.chain_id_u64().await.expect("chain id");
         assert_eq!(id, 1);
     }

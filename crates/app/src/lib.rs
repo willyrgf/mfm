@@ -61,6 +61,7 @@ use mfm_transports_proof::ProofIoTransportFactory;
 const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
 const ENV_ARTIFACT_ROOT: &str = "MFM_ARTIFACT_ROOT";
 const ENV_DATABASE_URL: &str = "DATABASE_URL";
+const ENV_PORTFOLIO_TOKENS_JSON: &str = "MFM_PORTFOLIO_TOKENS_JSON";
 const ENV_S3_ENSURE_BUCKET: &str = "MFM_S3_ENSURE_BUCKET";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,70 +313,143 @@ pub struct EngineBundle {
     pub planner: Arc<dyn PipelinePlanner>,
 }
 
-pub fn make_engine_bundle() -> EngineBundle {
-    let mut reg = HashMapOperationRegistry::default();
-    reg.register(Arc::new(ProofOp::default()));
-    reg.register(Arc::new(KeystoreImportOp));
-    reg.register(Arc::new(KeystoreListOp));
-    reg.register(Arc::new(KeystoreDeleteOp));
-    reg.register(Arc::new(KeystoreTxSignOp));
-    reg.register(Arc::new(KeystoreTxSendRawOp));
-    reg.register(Arc::new(EvmReadOp));
-    reg.register(Arc::new(EvmContractFromNixOp));
-    reg.register(Arc::new(EvmDeployOp));
-    reg.register(Arc::new(EvmConfigureOp));
-    reg.register(Arc::new(EvmValidateOp));
-    reg.register(Arc::new(EvmDeployConfigureValidateOp));
-    reg.register(Arc::new(PortfolioTrackerOp));
-    reg.register(Arc::new(NixAppOp));
-    reg.register(Arc::new(AaveV3OriginAdaptDeployOp));
-    let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
+pub trait OperationPlugin: Send + Sync {
+    fn register_operations(&self, registry: &mut HashMapOperationRegistry);
+}
 
-    let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
-    let resolver: Arc<dyn PlanResolver> = Arc::new(SdkPlanResolver::new(
-        Arc::clone(&registry),
-        Arc::clone(&planner),
-    ));
+pub trait TransportPlugin: Send + Sync {
+    fn register_transports(&self, registry: &mut HashMapTransportRegistry) -> Result<(), AppError>;
+}
 
-    let mut transports = HashMapTransportRegistry::new();
-    transports
-        .register(Arc::new(ProofIoTransportFactory))
-        .expect("register proof transport");
-    transports
-        .register(Arc::new(ExecProgramTransportFactory::default()))
-        .expect("register exec transport");
-    transports
-        .register(Arc::new(NixFlakeTransportFactory::from_env()))
-        .expect("register nix transport");
-    transports
-        .register(Arc::new(LocalFsIoTransportFactory))
-        .expect("register local fs transport");
-    transports
-        .register(Arc::new(LocalEvmIoTransportFactory))
-        .expect("register local evm transport");
-    transports
-        .register(Arc::new(LocalKeystoreIoTransportFactory))
-        .expect("register local keystore transport");
-    transports
-        .register(Arc::new(
-            EvmJsonRpcHttpTransportFactory::from_env().expect("build evm transport from env"),
-        ))
-        .expect("register evm transport");
+#[derive(Clone, Default)]
+pub struct DefaultOperationPlugin;
 
-    let base_factory: Arc<dyn LiveIoTransportFactory> =
-        Arc::new(RouterLiveIoTransportFactory::from_registry(&transports));
-    let factory: Arc<dyn LiveIoTransportFactory> = Arc::new(ChildRunLiveIoTransportFactory::new(
-        Arc::clone(&resolver),
-        Arc::clone(&base_factory),
-    ));
-    let engine: Arc<dyn ExecutionEngine> =
-        Arc::new(DefaultExecutionEngine::new(resolver).with_live_transport_factory(factory));
-
-    EngineBundle {
-        engine,
-        registry,
-        planner,
+impl OperationPlugin for DefaultOperationPlugin {
+    fn register_operations(&self, registry: &mut HashMapOperationRegistry) {
+        registry.register(Arc::new(ProofOp::default()));
+        registry.register(Arc::new(KeystoreImportOp));
+        registry.register(Arc::new(KeystoreListOp));
+        registry.register(Arc::new(KeystoreDeleteOp));
+        registry.register(Arc::new(KeystoreTxSignOp));
+        registry.register(Arc::new(KeystoreTxSendRawOp));
+        registry.register(Arc::new(EvmReadOp));
+        registry.register(Arc::new(EvmContractFromNixOp));
+        registry.register(Arc::new(EvmDeployOp));
+        registry.register(Arc::new(EvmConfigureOp));
+        registry.register(Arc::new(EvmValidateOp));
+        registry.register(Arc::new(EvmDeployConfigureValidateOp));
+        registry.register(Arc::new(PortfolioTrackerOp));
+        registry.register(Arc::new(NixAppOp));
+        registry.register(Arc::new(AaveV3OriginAdaptDeployOp));
     }
+}
+
+#[derive(Clone, Default)]
+pub struct DefaultTransportPlugin;
+
+impl TransportPlugin for DefaultTransportPlugin {
+    fn register_transports(&self, registry: &mut HashMapTransportRegistry) -> Result<(), AppError> {
+        register_transport_factory(registry, Arc::new(ProofIoTransportFactory))?;
+        register_transport_factory(registry, Arc::new(ExecProgramTransportFactory::default()))?;
+        register_transport_factory(registry, Arc::new(NixFlakeTransportFactory::from_env()))?;
+        register_transport_factory(registry, Arc::new(LocalFsIoTransportFactory))?;
+        register_transport_factory(registry, Arc::new(LocalEvmIoTransportFactory))?;
+        register_transport_factory(registry, Arc::new(LocalKeystoreIoTransportFactory))?;
+
+        let evm_transport = EvmJsonRpcHttpTransportFactory::from_env().map_err(|err| {
+            AppError::new(
+                ErrorClass::Internal,
+                "EvmTransportConfigInvalid",
+                err.to_string(),
+            )
+        })?;
+        register_transport_factory(registry, Arc::new(evm_transport))?;
+        Ok(())
+    }
+}
+
+fn register_transport_factory(
+    registry: &mut HashMapTransportRegistry,
+    factory: Arc<dyn LiveIoTransportFactory>,
+) -> Result<(), AppError> {
+    registry.register(factory).map_err(|err| {
+        AppError::new(
+            ErrorClass::Internal,
+            "TransportRegistrationFailed",
+            err.to_string(),
+        )
+    })
+}
+
+pub struct AppBuilder {
+    operation_plugins: Vec<Arc<dyn OperationPlugin>>,
+    transport_plugins: Vec<Arc<dyn TransportPlugin>>,
+    planner: Arc<dyn PipelinePlanner>,
+}
+
+impl Default for AppBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AppBuilder {
+    pub fn new() -> Self {
+        Self {
+            operation_plugins: vec![Arc::new(DefaultOperationPlugin)],
+            transport_plugins: vec![Arc::new(DefaultTransportPlugin)],
+            planner: Arc::new(DefaultPipelinePlanner),
+        }
+    }
+
+    pub fn with_operation_plugin(mut self, plugin: Arc<dyn OperationPlugin>) -> Self {
+        self.operation_plugins.push(plugin);
+        self
+    }
+
+    pub fn with_transport_plugin(mut self, plugin: Arc<dyn TransportPlugin>) -> Self {
+        self.transport_plugins.push(plugin);
+        self
+    }
+
+    pub fn build(self) -> Result<EngineBundle, AppError> {
+        let mut reg = HashMapOperationRegistry::default();
+        for plugin in &self.operation_plugins {
+            plugin.register_operations(&mut reg);
+        }
+        let registry: Arc<dyn OperationRegistry> = Arc::new(reg);
+
+        let planner = self.planner;
+        let resolver: Arc<dyn PlanResolver> = Arc::new(SdkPlanResolver::new(
+            Arc::clone(&registry),
+            Arc::clone(&planner),
+        ));
+
+        let mut transports = HashMapTransportRegistry::new();
+        for plugin in &self.transport_plugins {
+            plugin.register_transports(&mut transports)?;
+        }
+
+        let base_factory: Arc<dyn LiveIoTransportFactory> =
+            Arc::new(RouterLiveIoTransportFactory::from_registry(&transports));
+        let factory: Arc<dyn LiveIoTransportFactory> = Arc::new(
+            ChildRunLiveIoTransportFactory::new(Arc::clone(&resolver), Arc::clone(&base_factory)),
+        );
+        let engine: Arc<dyn ExecutionEngine> =
+            Arc::new(DefaultExecutionEngine::new(resolver).with_live_transport_factory(factory));
+
+        Ok(EngineBundle {
+            engine,
+            registry,
+            planner,
+        })
+    }
+}
+
+pub fn make_engine_bundle() -> EngineBundle {
+    AppBuilder::new()
+        .build()
+        .expect("default app builder must build an engine bundle")
 }
 
 #[derive(Clone)]
@@ -415,10 +489,17 @@ impl AppServices {
             RunsStartRequest::Single(req) => {
                 tracing::Span::current().record("request_kind", "single");
                 tracing::Span::current().record("op_id", req.op_id.as_str());
-                let pipeline = single_op_pipeline(OpId(req.op_id), req.op_version, req.op_config)
-                    .map_err(|e| {
-                    AppError::new(ErrorClass::BadRequest, e.info.code.0, e.info.message)
+                let op_id = OpId::new(req.op_id).map_err(|_| {
+                    AppError::new(
+                        ErrorClass::BadRequest,
+                        "invalid_op_id",
+                        "op_id must match ^[a-z][a-z0-9_]{0,62}$",
+                    )
                 })?;
+                let pipeline =
+                    single_op_pipeline(op_id, req.op_version, req.op_config).map_err(|e| {
+                        AppError::new(ErrorClass::BadRequest, e.info.code.0, e.info.message)
+                    })?;
                 (pipeline, serde_json::json!({}), default_run_config())
             }
             RunsStartRequest::Pipeline(req) => {
@@ -534,7 +615,7 @@ impl AppServices {
                     manifest_id: mid,
                     initial_snapshot_id: _,
                 } => {
-                    op_id = Some(oid.0.clone());
+                    op_id = Some(oid.to_string());
                     manifest_id = Some(mid.0.clone());
                 }
                 KernelEvent::RunCompleted {
@@ -692,6 +773,11 @@ impl AppServices {
 
         const OP_ID: &str = "portfolio_tracker";
         const OP_VERSION: &str = "v1";
+
+        let mut req = req;
+        let mut tokens = load_portfolio_tokens_from_env()?;
+        tokens.extend(req.tokens);
+        req.tokens = tokens;
 
         let op_config = serde_json::to_value(&req).map_err(|_| {
             AppError::invalid_request("failed to encode portfolio snapshot request")
@@ -961,7 +1047,7 @@ pub fn pipeline_from_deploy_configure_validate_spec(spec: DeployConfigureValidat
         pipeline_version: spec.pipeline_version,
         steps: vec![PipelineStep {
             step_id: StepId("main".to_string()),
-            op_id: OpId(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string()),
+            op_id: OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string()),
             op_version: EVM_DEPLOY_CONFIGURE_VALIDATE_OP_VERSION.to_string(),
             op_config: serde_json::json!({
                 "deploy": spec.deploy,
@@ -1374,6 +1460,64 @@ pub fn parse_portfolio_tokens_json(tokens_json: &str) -> Result<Vec<PortfolioTok
             "--tokens-json entries must be valid token objects",
         )
     })
+}
+
+fn normalize_eth_address(s: &str) -> Option<String> {
+    let s = s.trim();
+    let rest = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
+    if rest.len() != 40 {
+        return None;
+    }
+    if !rest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("0x{}", rest.to_ascii_lowercase()))
+}
+
+fn parse_portfolio_tokens_from_env(raw: &str) -> Result<Vec<PortfolioTokenSpec>, AppError> {
+    let tokens_value: serde_json::Value = serde_json::from_str(raw).map_err(|_| {
+        AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidPortfolioTokensJson",
+            format!("invalid {ENV_PORTFOLIO_TOKENS_JSON}"),
+        )
+    })?;
+
+    if !tokens_value.is_array() {
+        return Err(AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidPortfolioTokensJson",
+            format!("invalid {ENV_PORTFOLIO_TOKENS_JSON}"),
+        ));
+    }
+
+    let tokens: Vec<PortfolioTokenSpec> = serde_json::from_value(tokens_value).map_err(|_| {
+        AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidPortfolioTokensJson",
+            format!("invalid {ENV_PORTFOLIO_TOKENS_JSON}"),
+        )
+    })?;
+
+    if tokens
+        .iter()
+        .any(|token| normalize_eth_address(&token.address).is_none())
+    {
+        return Err(AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidPortfolioTokensJson",
+            format!("invalid token address in {ENV_PORTFOLIO_TOKENS_JSON}"),
+        ));
+    }
+
+    Ok(tokens)
+}
+
+fn load_portfolio_tokens_from_env() -> Result<Vec<PortfolioTokenSpec>, AppError> {
+    let Ok(raw) = std::env::var(ENV_PORTFOLIO_TOKENS_JSON) else {
+        return Ok(Vec::new());
+    };
+    parse_portfolio_tokens_from_env(&raw)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

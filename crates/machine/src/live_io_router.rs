@@ -202,7 +202,7 @@ mod tests {
                 artifacts: Arc::new(NoopArtifactStore),
             },
             run_id: RunId(uuid::Uuid::new_v4()),
-            state_id: StateId("machine.main.s1".to_string()),
+            state_id: StateId::must_new("machine.main.s1".to_string()),
             attempt: 0,
         }
     }

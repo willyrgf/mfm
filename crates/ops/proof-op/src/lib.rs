@@ -81,7 +81,7 @@ impl ProofOp {
 
 impl Operation for ProofOp {
     fn op_id(&self) -> OpId {
-        OpId(OP_ID.to_string())
+        OpId::must_new(OP_ID.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -105,9 +105,9 @@ impl Operation for ProofOp {
         let side_id = format!("{}.apply_side_effect", op_path.0);
         let out_id = format!("{}.write_output", op_path.0);
 
-        let read_sid = mfm_machine::ids::StateId(read_id);
-        let side_sid = mfm_machine::ids::StateId(side_id);
-        let out_sid = mfm_machine::ids::StateId(out_id);
+        let read_sid = mfm_machine::ids::StateId::must_new(read_id);
+        let side_sid = mfm_machine::ids::StateId::must_new(side_id);
+        let out_sid = mfm_machine::ids::StateId::must_new(out_id);
 
         let read = Arc::new(NamespaceReadState {
             namespace: "proof.read".to_string(),
@@ -359,7 +359,7 @@ mod tests {
                 ..
             }) = &e.event
             {
-                if sid.0 == state_id {
+                if sid.as_str() == state_id {
                     atts.push(*attempt);
                 }
             }
@@ -445,7 +445,7 @@ mod tests {
 
     impl Operation for ChildParentOp {
         fn op_id(&self) -> OpId {
-            OpId(CHILD_PARENT_OP_ID.to_string())
+            OpId::must_new(CHILD_PARENT_OP_ID.to_string())
         }
 
         fn op_version(&self) -> String {
@@ -465,8 +465,10 @@ mod tests {
             _op_config: &serde_json::Value,
             run_config: &RunConfig,
         ) -> Result<StateGraph, SdkError> {
-            let spawn_sid = mfm_machine::ids::StateId(format!("{}.spawn_children", op_path.0));
-            let join_sid = mfm_machine::ids::StateId(format!("{}.join_children", op_path.0));
+            let spawn_sid =
+                mfm_machine::ids::StateId::must_new(format!("{}.spawn_children", op_path.0));
+            let join_sid =
+                mfm_machine::ids::StateId::must_new(format!("{}.join_children", op_path.0));
 
             let spawn = Arc::new(SpawnChildrenState {
                 state_id: spawn_sid.clone(),
@@ -527,7 +529,7 @@ mod tests {
                     rec,
                     fact_key,
                     mfm_sdk::unstable::child_runs::SpawnChildRunV1 {
-                        op_id: OpId(OP_ID.to_string()),
+                        op_id: OpId::must_new(OP_ID.to_string()),
                         op_version: OP_VERSION.to_string(),
                         op_config: serde_json::json!({}),
                         input: serde_json::json!({"i": i}),

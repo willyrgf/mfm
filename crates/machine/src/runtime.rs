@@ -410,7 +410,7 @@ fn next_attempt(last_attempt_by_state: &HashMap<StateId, u32>, state_id: &StateI
         live_factory,
         failpoints
     ),
-    fields(run_id = %run_id.0, op_id = %plan.op_id.0)
+    fields(run_id = %run_id.0, op_id = %plan.op_id)
 )]
 async fn run_states(
     stores: &Stores,
@@ -440,7 +440,7 @@ async fn run_states(
 
     for node in ordered {
         if completed_states.contains(&node.id) {
-            debug!(state_id = %node.id.0, "state already completed, skipping");
+            debug!(state_id = %node.id, "state already completed, skipping");
             continue;
         }
 
@@ -463,7 +463,7 @@ async fn run_states(
 
         let state = Arc::clone(&node.state);
         let state_meta = state.meta();
-        info!(state_id = %state_id.0, attempt, "starting state execution");
+        info!(state_id = %state_id, attempt, "starting state execution");
 
         loop {
             let mut attempt_ctx = attempt::AttemptCtx::new(
@@ -485,7 +485,7 @@ async fn run_states(
                 attempt::AttemptExec::Completed { snapshot_id } => {
                     current_snapshot_id = snapshot_id;
                     info!(
-                        state_id = %state_id.0,
+                        state_id = %state_id,
                         attempt,
                         snapshot_id = %current_snapshot_id.0,
                         "state execution completed"
@@ -494,7 +494,7 @@ async fn run_states(
                 }
                 attempt::AttemptExec::StopAfterHandler => {
                     warn!(
-                        state_id = %state_id.0,
+                        state_id = %state_id,
                         attempt,
                         "execution stopped after handler due to failpoint"
                     );
@@ -509,7 +509,7 @@ async fn run_states(
                     if retryable && next < run_config.retry_policy.max_attempts {
                         let d = compute_backoff(&run_config.retry_policy.backoff, attempt);
                         warn!(
-                            state_id = %state_id.0,
+                            state_id = %state_id,
                             attempt,
                             next_attempt = next,
                             backoff_ms = d.as_millis() as u64,
@@ -524,7 +524,7 @@ async fn run_states(
 
                     phase = RunPhase::Failed;
                     warn!(
-                        state_id = %state_id.0,
+                        state_id = %state_id,
                         attempt,
                         retryable,
                         max_attempts = run_config.retry_policy.max_attempts,
@@ -575,7 +575,7 @@ async fn run_states(
 
 #[async_trait]
 impl ExecutionEngine for DefaultExecutionEngine {
-    #[instrument(level = "info", skip(self, stores, run), fields(op_id = %run.plan.op_id.0))]
+    #[instrument(level = "info", skip(self, stores, run), fields(op_id = %run.plan.op_id))]
     async fn start(&self, stores: Stores, run: StartRun) -> Result<RunResult, RunError> {
         validate_execution_mode(&run.run_config)?;
         validate_start_run_contract(&run)?;
@@ -697,7 +697,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
                 "RunStarted.op_id did not match manifest.op_id",
             ));
         }
-        debug!(op_id = %manifest.op_id.0, "manifest loaded for resume");
+        debug!(op_id = %manifest.op_id, "manifest loaded for resume");
 
         let plan = self.resolver.resolve(&manifest)?;
         if plan.op_id != manifest.op_id {
@@ -716,7 +716,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
         // Orphan attempt handling: retry from base snapshot with attempt+1.
         if let Some(orphan) = &history.orphan_attempt {
             warn!(
-                state_id = %orphan.state_id.0,
+                state_id = %orphan.state_id,
                 previous_attempt = orphan.attempt,
                 "retrying orphan attempt from base snapshot"
             );
@@ -774,7 +774,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
             let next = attempt + 1;
             if !*retryable || next >= manifest.run_config.retry_policy.max_attempts {
                 warn!(
-                    state_id = %next_state_id.0,
+                    state_id = %next_state_id,
                     attempt = *attempt,
                     retryable = *retryable,
                     max_attempts = manifest.run_config.retry_policy.max_attempts,
@@ -797,7 +797,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
             }
 
             info!(
-                state_id = %next_state_id.0,
+                state_id = %next_state_id,
                 next_attempt = next,
                 base_snapshot_id = %base_snapshot.0,
                 "resuming from failed state with retry"
@@ -825,7 +825,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
             history.last_checkpoint.clone(),
         );
         info!(
-            state_id = %next_state_id.0,
+            state_id = %next_state_id,
             attempt = start.1,
             base_snapshot_id = %history.last_checkpoint.0,
             "resuming run at next state"
@@ -1296,7 +1296,7 @@ mod tests {
 
         let run_config = base_run_config();
         let manifest = RunManifest {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "0".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config.clone(),
@@ -1311,7 +1311,7 @@ mod tests {
         };
         let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
 
-        let state_id = StateId("machine.main.s1".to_string());
+        let state_id = StateId::must_new("machine.main.s1".to_string());
         let plan = ExecutionPlan {
             op_id: manifest.op_id.clone(),
             graph: StateGraph {
@@ -1371,7 +1371,7 @@ mod tests {
 
         let run_config = base_run_config();
         let manifest = RunManifest {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "0".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config.clone(),
@@ -1386,7 +1386,7 @@ mod tests {
         };
         let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
 
-        let state_id = StateId("machine.main.s1".to_string());
+        let state_id = StateId::must_new("machine.main.s1".to_string());
         let plan = ExecutionPlan {
             op_id: manifest.op_id.clone(),
             graph: StateGraph {
@@ -1446,7 +1446,7 @@ mod tests {
         run_config.event_profile = crate::config::EventProfile::Normal;
 
         let manifest = RunManifest {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "0".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config.clone(),
@@ -1465,7 +1465,7 @@ mod tests {
             op_id: manifest.op_id.clone(),
             graph: StateGraph {
                 states: vec![StateNode {
-                    id: StateId("machine.main.s1".to_string()),
+                    id: StateId::must_new("machine.main.s1".to_string()),
                     state: Arc::new(EmitSecretDomainEventState),
                 }],
                 edges: Vec::new(),
@@ -1512,7 +1512,7 @@ mod tests {
         run_config.event_profile = crate::config::EventProfile::Normal;
 
         let manifest = RunManifest {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "0".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config.clone(),
@@ -1531,7 +1531,7 @@ mod tests {
             op_id: manifest.op_id.clone(),
             graph: StateGraph {
                 states: vec![StateNode {
-                    id: StateId("machine.main.s1".to_string()),
+                    id: StateId::must_new("machine.main.s1".to_string()),
                     state: Arc::new(SecretFactIoState),
                 }],
                 edges: Vec::new(),
@@ -1581,7 +1581,7 @@ mod tests {
 
         let run_config = base_run_config();
         let manifest = RunManifest {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "0".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config.clone(),
@@ -1596,7 +1596,7 @@ mod tests {
         };
         let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
 
-        let state_id = StateId("machine.main.s1".to_string());
+        let state_id = StateId::must_new("machine.main.s1".to_string());
         let plan = ExecutionPlan {
             op_id: manifest.op_id.clone(),
             graph: StateGraph {
@@ -1712,7 +1712,7 @@ mod tests {
 
         let run_config = base_run_config();
         let manifest = RunManifest {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "0".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config.clone(),
@@ -1727,7 +1727,7 @@ mod tests {
         };
         let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
 
-        let state_id = StateId("machine.main.s1".to_string());
+        let state_id = StateId::must_new("machine.main.s1".to_string());
         let plan = ExecutionPlan {
             op_id: manifest.op_id.clone(),
             graph: StateGraph {
@@ -1786,7 +1786,7 @@ mod tests {
         let mut run_config = base_run_config();
         run_config.execution_mode = ExecutionMode::FanOutJoin { max_concurrency: 2 };
         let manifest = RunManifest {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "0".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config.clone(),
@@ -1805,7 +1805,7 @@ mod tests {
             op_id: manifest.op_id.clone(),
             graph: StateGraph {
                 states: vec![StateNode {
-                    id: StateId("machine.main.s1".to_string()),
+                    id: StateId::must_new("machine.main.s1".to_string()),
                     state: Arc::new(SetKeyState),
                 }],
                 edges: Vec::new(),
@@ -1847,7 +1847,7 @@ mod tests {
         let mut run_config = base_run_config();
         run_config.skip_tags = vec![Tag(standard_tags::APPLY_SIDE_EFFECT.to_string())];
         let manifest = RunManifest {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "0".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config.clone(),
@@ -1864,8 +1864,8 @@ mod tests {
 
         let called = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
-        let s1 = StateId("machine.main.s1".to_string());
-        let s2 = StateId("machine.main.s2".to_string());
+        let s1 = StateId::must_new("machine.main.s1".to_string());
+        let s2 = StateId::must_new("machine.main.s2".to_string());
         let plan = ExecutionPlan {
             op_id: manifest.op_id.clone(),
             graph: StateGraph {
@@ -1968,7 +1968,7 @@ mod tests {
 
         let run_config = base_run_config();
         let manifest = RunManifest {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "0".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config.clone(),
@@ -1988,7 +1988,7 @@ mod tests {
             calls: Arc::clone(&calls),
         });
 
-        let state_id = StateId("machine.main.s1".to_string());
+        let state_id = StateId::must_new("machine.main.s1".to_string());
         let plan = ExecutionPlan {
             op_id: manifest.op_id.clone(),
             graph: StateGraph {
@@ -2191,7 +2191,7 @@ mod tests {
 
         let run_config = base_run_config();
         let manifest = RunManifest {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "0".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config.clone(),
@@ -2211,7 +2211,7 @@ mod tests {
             calls: Arc::clone(&calls),
         });
 
-        let state_id = StateId("machine.main.s1".to_string());
+        let state_id = StateId::must_new("machine.main.s1".to_string());
         let plan = ExecutionPlan {
             op_id: manifest.op_id.clone(),
             graph: StateGraph {
@@ -2305,7 +2305,7 @@ mod tests {
 
         let run_config = base_run_config();
         let manifest = RunManifest {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "0".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config.clone(),
@@ -2320,7 +2320,7 @@ mod tests {
         };
         let manifest_id = store_manifest(artifacts.as_ref(), &manifest).await;
 
-        let state_id = StateId("machine.main.s1".to_string());
+        let state_id = StateId::must_new("machine.main.s1".to_string());
         let plan = ExecutionPlan {
             op_id: manifest.op_id.clone(),
             graph: StateGraph {
@@ -2382,7 +2382,7 @@ mod tests {
 
         let run_config = replay_run_config();
         let manifest = RunManifest {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "0".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config.clone(),
@@ -2455,7 +2455,7 @@ mod tests {
             calls: Arc::clone(&calls),
         });
 
-        let state_id = StateId("machine.main.s1".to_string());
+        let state_id = StateId::must_new("machine.main.s1".to_string());
         let plan = ExecutionPlan {
             op_id: manifest.op_id.clone(),
             graph: StateGraph {
@@ -2529,7 +2529,7 @@ mod tests {
 
         let run_config = replay_run_config();
         let manifest = RunManifest {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "0".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config.clone(),
@@ -2575,7 +2575,7 @@ mod tests {
             calls: Arc::clone(&calls),
         });
 
-        let state_id = StateId("machine.main.s1".to_string());
+        let state_id = StateId::must_new("machine.main.s1".to_string());
         let plan = ExecutionPlan {
             op_id: manifest.op_id.clone(),
             graph: StateGraph {

@@ -142,7 +142,7 @@ fn build_transport(
     factory.make(LiveIoEnv {
         stores: Stores { events, artifacts },
         run_id: RunId(uuid::Uuid::new_v4()),
-        state_id: StateId("parity.evm_pool.transport".to_string()),
+        state_id: StateId::must_new("parity.evm_pool.transport".to_string()),
         attempt: 0,
     })
 }
@@ -171,7 +171,7 @@ async fn evm_rpc_pool_failover_live_then_replay_keeps_network_quiet() {
     let secondary = start_stub_server(StubBehavior::JsonResult(json!("0x2"))).await;
 
     let run_id = RunId(uuid::Uuid::new_v4());
-    let state_id = StateId("parity.evm_pool.failover".to_string());
+    let state_id = StateId::must_new("parity.evm_pool.failover".to_string());
     let fact_key = FactKey("parity:evm_pool:failover".to_string());
     let facts = FactIndex::default();
 
@@ -227,7 +227,7 @@ async fn evm_rpc_pool_failover_uses_secondary_when_primary_is_429() {
     let secondary = start_stub_server(StubBehavior::JsonResult(json!("0x2"))).await;
 
     let run_id = RunId(uuid::Uuid::new_v4());
-    let state_id = StateId("parity.evm_pool.rate_limit".to_string());
+    let state_id = StateId::must_new("parity.evm_pool.rate_limit".to_string());
     let fact_key = FactKey("parity:evm_pool:rate_limit".to_string());
     let facts = FactIndex::default();
 
@@ -265,7 +265,7 @@ async fn evm_replay_missing_fact_key_behavior_is_unchanged() {
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(temp.path()));
     let facts = FactIndex::default();
     let run_id = RunId(uuid::Uuid::new_v4());
-    let state_id = StateId("parity.evm_pool.missing_fact_key".to_string());
+    let state_id = StateId::must_new("parity.evm_pool.missing_fact_key".to_string());
 
     let mut replay = ReplayIo::new(run_id, state_id, 0, artifacts, facts, false);
     let err = replay

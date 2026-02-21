@@ -306,7 +306,7 @@ impl AttemptStep for CallHandler {
     async fn run(&self, ctx: &mut AttemptCtx<'_>) -> Result<Self::Output, RunError> {
         debug!(
             run_id = %ctx.run_id.0,
-            state_id = %ctx.state_id.0,
+            state_id = %ctx.state_id,
             attempt = ctx.attempt,
             io_mode = ?ctx.run_config.io_mode,
             "executing state handler"
@@ -437,7 +437,7 @@ pub(super) enum AttemptExec {
 pub(super) async fn execute_attempt(ctx: &mut AttemptCtx<'_>) -> Result<AttemptExec, RunError> {
     info!(
         run_id = %ctx.run_id.0,
-        state_id = %ctx.state_id.0,
+        state_id = %ctx.state_id,
         attempt = ctx.attempt,
         base_snapshot_id = %ctx.base_snapshot_id.0,
         "state attempt started"
@@ -462,7 +462,7 @@ pub(super) async fn execute_attempt(ctx: &mut AttemptCtx<'_>) -> Result<AttemptE
         AttemptOutcome::StopAfterHandler => {
             warn!(
                 run_id = %ctx.run_id.0,
-                state_id = %ctx.state_id.0,
+                state_id = %ctx.state_id,
                 attempt = ctx.attempt,
                 "state attempt interrupted by failpoint"
             );
@@ -471,7 +471,7 @@ pub(super) async fn execute_attempt(ctx: &mut AttemptCtx<'_>) -> Result<AttemptE
         AttemptOutcome::Skipped => {
             info!(
                 run_id = %ctx.run_id.0,
-                state_id = %ctx.state_id.0,
+                state_id = %ctx.state_id,
                 attempt = ctx.attempt,
                 "state skipped due to run config tags"
             );
@@ -493,7 +493,7 @@ pub(super) async fn execute_attempt(ctx: &mut AttemptCtx<'_>) -> Result<AttemptE
                 write_full_snapshot_value(ctx.stores.artifacts.as_ref(), snapshot).await?;
             info!(
                 run_id = %ctx.run_id.0,
-                state_id = %ctx.state_id.0,
+                state_id = %ctx.state_id,
                 attempt = ctx.attempt,
                 snapshot_id = %snapshot_id.0,
                 "state attempt completed"
@@ -511,7 +511,7 @@ pub(super) async fn execute_attempt(ctx: &mut AttemptCtx<'_>) -> Result<AttemptE
         AttemptOutcome::Err(err) => {
             warn!(
                 run_id = %ctx.run_id.0,
-                state_id = %ctx.state_id.0,
+                state_id = %ctx.state_id,
                 attempt = ctx.attempt,
                 error_code = %err.0.info.code.0,
                 retryable = err.retryable(),

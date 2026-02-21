@@ -238,7 +238,7 @@ async fn rpc_call(
     let env = LiveIoEnv {
         stores: Stores { events, artifacts },
         run_id: RunId(uuid::Uuid::new_v4()),
-        state_id: StateId("rpc.helper.call".to_string()),
+        state_id: StateId::must_new("rpc.helper.call".to_string()),
         attempt: 0,
     };
     let mut transport = factory.make(env);
@@ -383,7 +383,7 @@ async fn run_failure_diagnostics(events: Arc<dyn EventStore>, run_id: RunId) -> 
             Event::Kernel(KernelEvent::StateEntered {
                 state_id, attempt, ..
             }) => {
-                last_state_entered = Some((envelope.seq, state_id.0, attempt));
+                last_state_entered = Some((envelope.seq, state_id.to_string(), attempt));
             }
             Event::Kernel(KernelEvent::StateFailed {
                 state_id, error, ..
@@ -391,7 +391,7 @@ async fn run_failure_diagnostics(events: Arc<dyn EventStore>, run_id: RunId) -> 
                 let detail_summary = summarize_exec_error_details(error.info.details.as_ref());
                 last_state_failed = Some((
                     envelope.seq,
-                    state_id.0,
+                    state_id.to_string(),
                     error.info.code.0,
                     error.info.retryable,
                     error.info.message,
@@ -445,7 +445,7 @@ fn phase_a_pipeline() -> Pipeline {
         steps: vec![
             PipelineStep {
                 step_id: StepId("fetch_origin".to_string()),
-                op_id: OpId("nix_app".to_string()),
+                op_id: OpId::must_new("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "program_path": fetch_origin_program,
@@ -456,7 +456,7 @@ fn phase_a_pipeline() -> Pipeline {
             },
             PipelineStep {
                 step_id: StepId("compile_origin".to_string()),
-                op_id: OpId("nix_app".to_string()),
+                op_id: OpId::must_new("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "program_path": compile_origin_program,
@@ -467,7 +467,7 @@ fn phase_a_pipeline() -> Pipeline {
             },
             PipelineStep {
                 step_id: StepId("deploy_origin_stack".to_string()),
-                op_id: OpId("nix_app".to_string()),
+                op_id: OpId::must_new("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "program_path": deploy_origin_program,
@@ -478,7 +478,7 @@ fn phase_a_pipeline() -> Pipeline {
             },
             PipelineStep {
                 step_id: StepId("adapt_origin_deploy".to_string()),
-                op_id: OpId("aave_v3_origin_adapt_deploy".to_string()),
+                op_id: OpId::must_new("aave_v3_origin_adapt_deploy".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "origin_deploy_port": "result",
@@ -512,7 +512,7 @@ fn phase_b_pipeline(
         steps: vec![
             PipelineStep {
                 step_id: StepId("approve_usdc".to_string()),
-                op_id: OpId("evm_configure".to_string()),
+                op_id: OpId::must_new("evm_configure".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact": usdc_artifact,
@@ -528,7 +528,7 @@ fn phase_b_pipeline(
             },
             PipelineStep {
                 step_id: StepId("approve_wbtc".to_string()),
-                op_id: OpId("evm_configure".to_string()),
+                op_id: OpId::must_new("evm_configure".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact": wbtc_artifact,
@@ -544,7 +544,7 @@ fn phase_b_pipeline(
             },
             PipelineStep {
                 step_id: StepId("supply_usdc".to_string()),
-                op_id: OpId("evm_configure".to_string()),
+                op_id: OpId::must_new("evm_configure".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact": pool_artifact.clone(),
@@ -565,7 +565,7 @@ fn phase_b_pipeline(
             },
             PipelineStep {
                 step_id: StepId("supply_wbtc".to_string()),
-                op_id: OpId("evm_configure".to_string()),
+                op_id: OpId::must_new("evm_configure".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact": pool_artifact.clone(),
@@ -586,7 +586,7 @@ fn phase_b_pipeline(
             },
             PipelineStep {
                 step_id: StepId("borrow_usdc".to_string()),
-                op_id: OpId("evm_configure".to_string()),
+                op_id: OpId::must_new("evm_configure".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact": pool_artifact.clone(),
@@ -608,7 +608,7 @@ fn phase_b_pipeline(
             },
             PipelineStep {
                 step_id: StepId("validate_scenario".to_string()),
-                op_id: OpId("evm_validate".to_string()),
+                op_id: OpId::must_new("evm_validate".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact": pool_artifact,

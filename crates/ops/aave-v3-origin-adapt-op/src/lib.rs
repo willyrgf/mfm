@@ -45,7 +45,7 @@ pub struct AaveV3OriginAdaptDeployOp;
 
 impl Operation for AaveV3OriginAdaptDeployOp {
     fn op_id(&self) -> OpId {
-        OpId(AAVE_V3_ORIGIN_ADAPT_DEPLOY_OP_ID.to_string())
+        OpId::must_new(AAVE_V3_ORIGIN_ADAPT_DEPLOY_OP_ID.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -87,7 +87,7 @@ impl Operation for AaveV3OriginAdaptDeployOp {
             op_errors::sdk_error("invalid_op_config", ErrorCategory::ParsingInput, false, msg)
         })?;
 
-        let state_id = StateId(format!("{}.adapt_origin_deploy", op_path.0));
+        let state_id = StateId::must_new(format!("{}.adapt_origin_deploy", op_path.0));
         Ok(StateGraph {
             states: vec![StateNode {
                 id: state_id.clone(),

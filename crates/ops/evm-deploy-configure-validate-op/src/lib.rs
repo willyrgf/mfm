@@ -25,7 +25,7 @@ pub struct EvmDeployConfigureValidateOp;
 
 impl Operation for EvmDeployConfigureValidateOp {
     fn op_id(&self) -> OpId {
-        OpId(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string())
+        OpId::must_new(EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -80,17 +80,17 @@ impl Operation for EvmDeployConfigureValidateOp {
             })?;
 
         let deploy_graph = EvmDeployOp.expand(
-            OpPath(format!("{}.deploy", op_path.0)),
+            op_path_with_step_suffix(&op_path, "deploy")?,
             &cfg.deploy,
             run_config,
         )?;
         let configure_graph = EvmConfigureOp.expand(
-            OpPath(format!("{}.configure", op_path.0)),
+            op_path_with_step_suffix(&op_path, "configure")?,
             &cfg.configure,
             run_config,
         )?;
         let validate_graph = EvmValidateOp.expand(
-            OpPath(format!("{}.validate", op_path.0)),
+            op_path_with_step_suffix(&op_path, "validate")?,
             &cfg.validate,
             run_config,
         )?;
@@ -107,6 +107,30 @@ impl Operation for EvmDeployConfigureValidateOp {
 
         Ok(StateGraph { states, edges })
     }
+}
+
+fn op_path_with_step_suffix(base: &OpPath, suffix: &str) -> Result<OpPath, SdkError> {
+    let mut segments = base.0.split('.');
+    let Some(machine_id) = segments.next() else {
+        return Err(op_errors::sdk_parse_error(
+            "invalid_op_path",
+            "invalid operation path",
+        ));
+    };
+    let Some(step_id) = segments.next() else {
+        return Err(op_errors::sdk_parse_error(
+            "invalid_op_path",
+            "invalid operation path",
+        ));
+    };
+    if segments.next().is_some() {
+        return Err(op_errors::sdk_parse_error(
+            "invalid_op_path",
+            "invalid operation path",
+        ));
+    }
+
+    Ok(OpPath(format!("{machine_id}.{step_id}_{suffix}")))
 }
 
 fn append_graph(states: &mut Vec<StateNode>, edges: &mut Vec<DependencyEdge>, graph: StateGraph) {
@@ -131,13 +155,13 @@ fn connect_graphs(edges: &mut Vec<DependencyEdge>, left: &StateGraph, right: &St
 fn source_state_ids(graph: &StateGraph) -> Vec<StateId> {
     let mut incoming: HashSet<String> = HashSet::new();
     for edge in &graph.edges {
-        incoming.insert(edge.to.0.clone());
+        incoming.insert(edge.to.as_str().to_string());
     }
 
     graph
         .states
         .iter()
-        .filter(|node| !incoming.contains(&node.id.0))
+        .filter(|node| !incoming.contains(node.id.as_str()))
         .map(|node| node.id.clone())
         .collect()
 }
@@ -145,13 +169,13 @@ fn source_state_ids(graph: &StateGraph) -> Vec<StateId> {
 fn sink_state_ids(graph: &StateGraph) -> Vec<StateId> {
     let mut outgoing: HashSet<String> = HashSet::new();
     for edge in &graph.edges {
-        outgoing.insert(edge.from.0.clone());
+        outgoing.insert(edge.from.as_str().to_string());
     }
 
     graph
         .states
         .iter()
-        .filter(|node| !outgoing.contains(&node.id.0))
+        .filter(|node| !outgoing.contains(node.id.as_str()))
         .map(|node| node.id.clone())
         .collect()
 }
@@ -196,15 +220,15 @@ mod tests {
         assert!(graph
             .states
             .iter()
-            .any(|s| s.id.0 == "evm_deploy_configure_validate.main.deploy.deploy"));
+            .any(|s| s.id.as_str() == "evm_deploy_configure_validate.main_deploy.deploy"));
         assert!(graph
             .states
             .iter()
-            .any(|s| s.id.0 == "evm_deploy_configure_validate.main.configure.configure"));
+            .any(|s| s.id.as_str() == "evm_deploy_configure_validate.main_configure.configure"));
         assert!(graph
             .states
             .iter()
-            .any(|s| s.id.0 == "evm_deploy_configure_validate.main.validate.validate"));
+            .any(|s| s.id.as_str() == "evm_deploy_configure_validate.main_validate.validate"));
     }
 
     #[test]

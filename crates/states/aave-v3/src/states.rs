@@ -882,7 +882,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_deployer_address_signed_mode_uses_local_signer_address() {
-        let state_id = StateId("m.test.aave_v3.resolve_deployer".to_string());
+        let state_id = StateId::must_new("m.test.resolve_deployer".to_string());
         let mut io = ResolveDeployerTestIo::default();
 
         let deployer =
@@ -896,7 +896,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_deployer_address_unsigned_mode_uses_eth_accounts() {
-        let state_id = StateId("m.test.aave_v3.resolve_deployer".to_string());
+        let state_id = StateId::must_new("m.test.resolve_deployer".to_string());
         let mut io = ResolveDeployerTestIo::default();
 
         let deployer = evm_rpc::resolve_deployer_address(&mut io, &state_id, 0, None)

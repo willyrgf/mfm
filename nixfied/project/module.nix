@@ -171,6 +171,11 @@ let
     artifacts_dir="''${CI_ARTIFACTS_DIR:-/tmp/ci-artifacts}"
     mkdir -p "$artifacts_dir"
 
+    # Keep Cargo artifacts outside the workspace root so parallel CI steps do
+    # not race with flake/model evaluation over mutable target/ files.
+    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-''${TMPDIR:-/tmp}/mfm-ci-target/''${NIX_ENV:-0}}"
+    mkdir -p "$CARGO_TARGET_DIR"
+
     run_with_log() {
       local logfile="$1"
       shift

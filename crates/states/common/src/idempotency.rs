@@ -5,7 +5,7 @@ use mfm_machine::ids::{OpPath, StateId};
 use crate::errors::state_unknown_msg;
 
 pub fn state_scope(scope: impl AsRef<str>, state_id: &StateId) -> String {
-    format!("{}|state:{}", scope.as_ref(), state_id.0)
+    format!("{}|state:{}", scope.as_ref(), state_id.as_str())
 }
 
 pub fn op_scope(scope: impl AsRef<str>, op_path: &OpPath) -> String {
@@ -22,7 +22,7 @@ pub fn canonical(op: impl AsRef<str>, state: impl AsRef<str>, purpose: impl AsRe
 }
 
 pub fn state_purpose(op: impl AsRef<str>, state_id: &StateId, purpose: impl AsRef<str>) -> String {
-    canonical(op, &state_id.0, purpose)
+    canonical(op, state_id.as_str(), purpose)
 }
 
 pub fn op_purpose(op: impl AsRef<str>, op_path: &OpPath, purpose: impl AsRef<str>) -> String {
@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn state_scope_shape_is_stable() {
-        let out = state_scope("mfm:exec", &StateId("m.main.run".to_string()));
+        let out = state_scope("mfm:exec", &StateId::must_new("m.main.run".to_string()));
         assert_eq!(out, "mfm:exec|state:m.main.run");
     }
 
@@ -71,7 +71,11 @@ mod tests {
 
     #[test]
     fn state_purpose_shape_is_stable() {
-        let out = state_purpose("nix_app", &StateId("nix_app.main.run".to_string()), "exec");
+        let out = state_purpose(
+            "nix_app",
+            &StateId::must_new("nix_app.main.run".to_string()),
+            "exec",
+        );
         assert_eq!(out, "mfm:nix_app|state:nix_app.main.run|purpose:exec");
     }
 

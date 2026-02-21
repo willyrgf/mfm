@@ -100,7 +100,7 @@ pub struct KeystoreTxSignOp;
 
 impl Operation for KeystoreTxSignOp {
     fn op_id(&self) -> OpId {
-        OpId(TX_SIGN_OP_ID.to_string())
+        OpId::must_new(TX_SIGN_OP_ID.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -145,7 +145,7 @@ impl Operation for KeystoreTxSignOp {
             data,
         };
 
-        let state_id = StateId(format!("{}.sign_and_write", op_path.0));
+        let state_id = StateId::must_new(format!("{}.sign_and_write", op_path.0));
         let by_label =
             decode_selector_label(cfg.by_label, cfg.by_label_hex).map_err(sdk_error_from_helper)?;
         let keystore_path =
@@ -178,7 +178,7 @@ pub struct KeystoreTxSendRawOp;
 
 impl Operation for KeystoreTxSendRawOp {
     fn op_id(&self) -> OpId {
-        OpId(TX_SEND_RAW_OP_ID.to_string())
+        OpId::must_new(TX_SEND_RAW_OP_ID.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -207,7 +207,7 @@ impl Operation for KeystoreTxSendRawOp {
 
         let source_id = resolve_rpc_source_id(cfg.source_id).map_err(sdk_error_from_helper)?;
 
-        let state_id = StateId(format!("{}.send_raw", op_path.0));
+        let state_id = StateId::must_new(format!("{}.send_raw", op_path.0));
         let state = KeystoreTxSendRawState {
             state_id: state_id.clone(),
             output_key: tx_send_raw_report_key_for_op_path(&op_path),

@@ -655,7 +655,7 @@ pub struct EvmContractFromNixOp;
 
 impl Operation for EvmContractFromNixOp {
     fn op_id(&self) -> OpId {
-        OpId(OP_ID_CONTRACT_FROM_NIX.to_string())
+        OpId::must_new(OP_ID_CONTRACT_FROM_NIX.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -703,7 +703,7 @@ impl Operation for EvmContractFromNixOp {
             ));
         }
 
-        let state_id = StateId(format!("{}.adapt", op_path.0));
+        let state_id = StateId::must_new(format!("{}.adapt", op_path.0));
         let state = Arc::new(NixArtifactToEvmContractState {
             result_pointer: cfg.result_pointer,
         });
@@ -723,7 +723,7 @@ pub struct EvmDeployOp;
 
 impl Operation for EvmDeployOp {
     fn op_id(&self) -> OpId {
-        OpId(OP_ID_DEPLOY.to_string())
+        OpId::must_new(OP_ID_DEPLOY.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -793,7 +793,7 @@ impl Operation for EvmDeployOp {
         let value_hex = shared_dcv::parse_value_wei_to_hex(&cfg.value_wei)
             .map_err(|_| op_errors::sdk_parse_error("invalid_op_config", "invalid value_wei"))?;
 
-        let state_id = StateId(format!("{}.deploy", op_path.0));
+        let state_id = StateId::must_new(format!("{}.deploy", op_path.0));
         let state = Arc::new(SharedDeployState {
             state_id: state_id.clone(),
             cfg: SharedDeployStateConfig {
@@ -826,7 +826,7 @@ pub struct EvmConfigureOp;
 
 impl Operation for EvmConfigureOp {
     fn op_id(&self) -> OpId {
-        OpId(OP_ID_CONFIGURE.to_string())
+        OpId::must_new(OP_ID_CONFIGURE.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -928,7 +928,7 @@ impl Operation for EvmConfigureOp {
             });
         }
 
-        let state_id = StateId(format!("{}.configure", op_path.0));
+        let state_id = StateId::must_new(format!("{}.configure", op_path.0));
         let state = Arc::new(SharedConfigureState {
             state_id: state_id.clone(),
             cfg: SharedConfigureStateConfig {
@@ -967,7 +967,7 @@ pub struct EvmValidateOp;
 
 impl Operation for EvmValidateOp {
     fn op_id(&self) -> OpId {
-        OpId(OP_ID_VALIDATE.to_string())
+        OpId::must_new(OP_ID_VALIDATE.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -1049,7 +1049,7 @@ impl Operation for EvmValidateOp {
                 })?;
         }
 
-        let state_id = StateId(format!("{}.validate", op_path.0));
+        let state_id = StateId::must_new(format!("{}.validate", op_path.0));
         let state = Arc::new(SharedValidateState {
             state_id: state_id.clone(),
             cfg: SharedValidateStateConfig {

@@ -9,6 +9,7 @@ let
     projectModules = [ ../../nixfied/project/default.nix ];
     extraModules = [ ];
   };
+  stripContext = value: builtins.unsafeDiscardStringContext (toString value);
 
   hasPrefix =
     prefix: value:
@@ -18,7 +19,9 @@ let
 
   ciWorkflowPrefix = "workflow.ci.";
   ciWorkflowPrefixLen = builtins.stringLength ciWorkflowPrefix;
-  workflowIds = builtins.sort builtins.lessThan (builtins.attrNames compiled.workflows);
+  workflowIds = builtins.sort builtins.lessThan (
+    map stripContext (builtins.attrNames compiled.workflows)
+  );
   ciModes = builtins.sort builtins.lessThan (
     pkgs.lib.unique (
       map (
@@ -32,10 +35,12 @@ let
 in
 {
   system = system;
-  taskIds = builtins.sort builtins.lessThan (builtins.attrNames compiled.tasks);
+  taskIds = builtins.sort builtins.lessThan (
+    map stripContext (builtins.attrNames compiled.tasks)
+  );
   workflowPlanTaskIds = builtins.mapAttrs (
     _: workflow:
-    map (unit: unit.taskId) (workflow.plan or [ ])
+    map (unit: stripContext unit.taskId) (workflow.plan or [ ])
   ) compiled.workflows;
   inherit
     workflowIds

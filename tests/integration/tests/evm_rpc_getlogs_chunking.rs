@@ -211,7 +211,7 @@ fn build_transport(
     factory.make(LiveIoEnv {
         stores: Stores { events, artifacts },
         run_id: RunId(uuid::Uuid::new_v4()),
-        state_id: StateId("parity.evm_logs_chunking.transport".to_string()),
+        state_id: StateId::must_new("parity.evm_logs_chunking.transport".to_string()),
         attempt: 0,
     })
 }
@@ -244,7 +244,7 @@ async fn evm_getlogs_chunking_succeeds_with_adaptive_split_and_failover() {
     .await;
 
     let run_id = RunId(uuid::Uuid::new_v4());
-    let state_id = StateId("parity.evm_logs_chunking.success".to_string());
+    let state_id = StateId::must_new("parity.evm_logs_chunking.success".to_string());
     let facts = FactIndex::default();
     let temp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(temp.path()));
@@ -302,7 +302,7 @@ async fn evm_getlogs_chunking_returns_exhausted_when_retryable_failures_persist(
     .await;
 
     let run_id = RunId(uuid::Uuid::new_v4());
-    let state_id = StateId("parity.evm_logs_chunking.exhausted".to_string());
+    let state_id = StateId::must_new("parity.evm_logs_chunking.exhausted".to_string());
     let facts = FactIndex::default();
     let temp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(temp.path()));
@@ -348,7 +348,7 @@ async fn evm_getlogs_chunking_live_then_replay_is_network_quiet() {
     .await;
 
     let run_id = RunId(uuid::Uuid::new_v4());
-    let state_id = StateId("parity.evm_logs_chunking.replay".to_string());
+    let state_id = StateId::must_new("parity.evm_logs_chunking.replay".to_string());
     let fact_key = FactKey("parity:evm_logs_chunking:replay".to_string());
     let facts = FactIndex::default();
 

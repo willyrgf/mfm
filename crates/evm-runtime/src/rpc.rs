@@ -310,7 +310,9 @@ pub async fn wait_for_receipt(
                 request,
                 fact_key: Some(FactKey(format!(
                     "mfm:evm|state:{}|receipt_poll:{}|tx:{}",
-                    state_id.0, poll_index, normalized_tx
+                    state_id.as_str(),
+                    poll_index,
+                    normalized_tx
                 ))),
             })
             .await
@@ -591,6 +593,7 @@ fn send_raw_fact_key(state_id: &StateId, raw_tx_hex: &str) -> Result<FactKey, St
 
     Ok(FactKey(format!(
         "mfm:evm_send_raw|state:{}|req:{}",
-        state_id.0, req_id.0
+        state_id.as_str(),
+        req_id.0
     )))
 }

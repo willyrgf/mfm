@@ -81,7 +81,8 @@ impl<'a> LocalEvmIoClient<'a> {
         })?;
         Ok(FactKey(format!(
             "mfm:local|state:{}|purpose:{purpose}|req:{}",
-            self.state_id.0, req_id.0
+            self.state_id.as_str(),
+            req_id.0
         )))
     }
 

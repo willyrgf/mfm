@@ -106,7 +106,7 @@ pub struct KeystoreImportOp;
 
 impl Operation for KeystoreImportOp {
     fn op_id(&self) -> OpId {
-        OpId(KEYSTORE_IMPORT_OP_ID.to_string())
+        OpId::must_new(KEYSTORE_IMPORT_OP_ID.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -137,7 +137,7 @@ impl Operation for KeystoreImportOp {
         let label = decode_optional_hex_string(cfg.label, cfg.label_hex, "label")
             .map_err(sdk_error_from_helper)?;
 
-        let state_id = StateId(format!("{}.import", op_path.0));
+        let state_id = StateId::must_new(format!("{}.import", op_path.0));
         let state = KeystoreImportState::new(
             state_id.clone(),
             KEYSTORE_IMPORT_OP_ID,
@@ -167,7 +167,7 @@ pub struct KeystoreListOp;
 
 impl Operation for KeystoreListOp {
     fn op_id(&self) -> OpId {
-        OpId(KEYSTORE_LIST_OP_ID.to_string())
+        OpId::must_new(KEYSTORE_LIST_OP_ID.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -210,7 +210,7 @@ impl Operation for KeystoreListOp {
         let keystore_path =
             decode_optional_hex_string(cfg.keystore_path, cfg.keystore_path_hex, "keystore_path")
                 .map_err(sdk_error_from_helper)?;
-        let state_id = StateId(format!("{}.list", op_path.0));
+        let state_id = StateId::must_new(format!("{}.list", op_path.0));
         let state = KeystoreListState::new(
             state_id.clone(),
             KEYSTORE_LIST_OP_ID,
@@ -239,7 +239,7 @@ pub struct KeystoreDeleteOp;
 
 impl Operation for KeystoreDeleteOp {
     fn op_id(&self) -> OpId {
-        OpId(KEYSTORE_DELETE_OP_ID.to_string())
+        OpId::must_new(KEYSTORE_DELETE_OP_ID.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -269,7 +269,7 @@ impl Operation for KeystoreDeleteOp {
             decode_optional_hex_string(cfg.keystore_path, cfg.keystore_path_hex, "keystore_path")
                 .map_err(sdk_error_from_helper)?;
 
-        let state_id = StateId(format!("{}.delete", op_path.0));
+        let state_id = StateId::must_new(format!("{}.delete", op_path.0));
         let state = KeystoreDeleteState::new(
             state_id.clone(),
             KEYSTORE_DELETE_OP_ID,

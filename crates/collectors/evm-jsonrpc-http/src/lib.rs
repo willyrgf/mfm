@@ -2145,7 +2145,7 @@ mod tests {
             },
             run_id: serde_json::from_str::<RunId>("\"00000000-0000-0000-0000-000000000000\"")
                 .expect("valid RunId"),
-            state_id: StateId("machine.main.s1".to_string()),
+            state_id: StateId::must_new("machine.main.s1".to_string()),
             attempt: 0,
         }
     }

@@ -103,7 +103,14 @@ impl State for NixArtifactToEvmContractState {
         _io: &mut dyn IoProvider,
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let result = context_read_json(ctx, KEY_NIX_RESULT)?;
+        let result = op_ctx::read_typed::<serde_json::Value>(
+            ctx,
+            &ContextKey(KEY_NIX_RESULT.to_string()),
+            "ctx_missing_key",
+            "required context key was missing",
+            "ctx_type_mismatch",
+            "context value was invalid",
+        )?;
 
         let artifact_value = if self.result_pointer.is_empty() {
             result
@@ -430,26 +437,6 @@ impl State for EvmValidateState {
     }
 }
 
-fn context_read_string(ctx: &dyn DynContext, key: &str) -> Result<String, StateError> {
-    op_ctx::read_string_required(
-        ctx,
-        &ContextKey(key.to_string()),
-        "ctx_missing_key",
-        "required context key was missing",
-        "ctx_type_mismatch",
-        "context value was not a string",
-    )
-}
-
-fn context_read_json(ctx: &dyn DynContext, key: &str) -> Result<serde_json::Value, StateError> {
-    op_ctx::read_json_required(
-        ctx,
-        &ContextKey(key.to_string()),
-        "ctx_missing_key",
-        "required context key was missing",
-    )
-}
-
 pub(crate) fn resolve_artifact_config(
     ctx: &dyn DynContext,
     configured: &Option<shared_dcv::ContractArtifactConfig>,
@@ -459,10 +446,14 @@ pub(crate) fn resolve_artifact_config(
         return Ok(artifact.clone());
     }
 
-    let v = context_read_json(ctx, artifact_port)?;
-    serde_json::from_value::<shared_dcv::ContractArtifactConfig>(v).map_err(|_| {
-        op_errors::state_unknown("ctx_type_mismatch", "context artifact value was invalid")
-    })
+    op_ctx::read_typed(
+        ctx,
+        &ContextKey(artifact_port.to_string()),
+        "ctx_missing_key",
+        "required context key was missing",
+        "ctx_type_mismatch",
+        "context artifact value was invalid",
+    )
 }
 
 fn context_write_json(
@@ -482,7 +473,14 @@ pub(crate) fn resolve_contract_address(
             op_errors::state_unknown("invalid_op_config", "contract_address was invalid")
         }),
         None => {
-            let a = context_read_string(ctx, KEY_CONTRACT_ADDRESS)?;
+            let a = op_ctx::read_typed::<String>(
+                ctx,
+                &ContextKey(KEY_CONTRACT_ADDRESS.to_string()),
+                "ctx_missing_key",
+                "required context key was missing",
+                "ctx_type_mismatch",
+                "context value was not a string",
+            )?;
             shared_dcv::normalize_address(&a).map_err(|_| {
                 op_errors::state_unknown("ctx_type_mismatch", "context contract address invalid")
             })

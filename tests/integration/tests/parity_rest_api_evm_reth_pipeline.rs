@@ -115,7 +115,7 @@ async fn rpc_call(
     let env = LiveIoEnv {
         stores: Stores { events, artifacts },
         run_id: RunId(uuid::Uuid::new_v4()),
-        state_id: StateId("rpc.helper.call".to_string()),
+        state_id: StateId::must_new("rpc.helper.call".to_string()),
         attempt: 0,
     };
     let mut transport = factory.make(env);
@@ -211,7 +211,7 @@ async fn parity_reth_pipeline_contract_from_nix() {
         steps: vec![
             PipelineStep {
                 step_id: StepId("fetch".to_string()),
-                op_id: OpId("nix_app".to_string()),
+                op_id: OpId::must_new("nix_app".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "program_path": contract_program_path,
@@ -222,7 +222,7 @@ async fn parity_reth_pipeline_contract_from_nix() {
             },
             PipelineStep {
                 step_id: StepId("adapt".to_string()),
-                op_id: OpId("evm_contract_from_nix".to_string()),
+                op_id: OpId::must_new("evm_contract_from_nix".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "result_pointer": "/artifact"
@@ -230,7 +230,7 @@ async fn parity_reth_pipeline_contract_from_nix() {
             },
             PipelineStep {
                 step_id: StepId("deploy".to_string()),
-                op_id: OpId("evm_deploy".to_string()),
+                op_id: OpId::must_new("evm_deploy".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact_port": "contract_artifact",
@@ -243,7 +243,7 @@ async fn parity_reth_pipeline_contract_from_nix() {
             },
             PipelineStep {
                 step_id: StepId("configure".to_string()),
-                op_id: OpId("evm_configure".to_string()),
+                op_id: OpId::must_new("evm_configure".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact_port": "contract_artifact",
@@ -257,7 +257,7 @@ async fn parity_reth_pipeline_contract_from_nix() {
             },
             PipelineStep {
                 step_id: StepId("validate".to_string()),
-                op_id: OpId("evm_validate".to_string()),
+                op_id: OpId::must_new("evm_validate".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact_port": "contract_artifact",

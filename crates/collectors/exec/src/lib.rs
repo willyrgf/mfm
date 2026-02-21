@@ -67,7 +67,8 @@ pub fn fact_key_for_run_program(
     let req_id = artifact_id_for_json(&request).map_err(FactKeyDerivationError::NotCanonical)?;
     Ok(FactKey(format!(
         "mfm:exec|state:{}|req:{}",
-        state_id.0, req_id.0
+        state_id.as_str(),
+        req_id.0
     )))
 }
 

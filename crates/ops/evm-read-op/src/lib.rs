@@ -60,7 +60,7 @@ pub struct EvmReadOp;
 
 impl Operation for EvmReadOp {
     fn op_id(&self) -> OpId {
-        OpId(OP_ID.to_string())
+        OpId::must_new(OP_ID.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -98,7 +98,7 @@ impl Operation for EvmReadOp {
         let mut last: Option<StateId> = None;
 
         if cfg.include_chain_id {
-            let id = StateId(format!("{}.chain_id", op_path.0));
+            let id = StateId::must_new(format!("{}.chain_id", op_path.0));
             let st = Arc::new(ReadU64HexState::new(
                 id.clone(),
                 "eth_chainId",
@@ -113,7 +113,7 @@ impl Operation for EvmReadOp {
         }
 
         if cfg.include_block_number {
-            let id = StateId(format!("{}.block_number", op_path.0));
+            let id = StateId::must_new(format!("{}.block_number", op_path.0));
             let st = Arc::new(ReadU64HexState::new(
                 id.clone(),
                 "eth_blockNumber",
@@ -237,7 +237,7 @@ mod tests {
             .iter()
             .filter_map(|(id, deg)| (*deg == 0).then_some(*id))
             .collect();
-        ready.sort_by(|a, b| a.0.cmp(&b.0));
+        ready.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
         let mut out = Vec::new();
         while let Some(id) = ready.pop() {
@@ -249,7 +249,7 @@ mod tests {
                 *deg -= 1;
                 if *deg == 0 {
                     ready.push(&e.to);
-                    ready.sort_by(|a, b| a.0.cmp(&b.0));
+                    ready.sort_by(|a, b| a.as_str().cmp(b.as_str()));
                 }
             }
         }

@@ -75,7 +75,8 @@ pub fn local_fact_key(
 
     Ok(FactKey(format!(
         "mfm:local|state:{}|purpose:{purpose}|req:{}",
-        state_id.0, req_id.0
+        state_id.as_str(),
+        req_id.0
     )))
 }
 

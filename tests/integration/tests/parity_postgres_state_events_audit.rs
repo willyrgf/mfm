@@ -130,7 +130,7 @@ async fn audit_run_events(
                 run_started_idx = Some(idx);
             }
             KernelEvent::StateEntered { state_id, .. } => {
-                let state = state_id.0.clone();
+                let state = state_id.as_str().to_string();
                 assert!(
                     state.starts_with(machine_id),
                     "run `{machine_id}` saw unexpected state id `{state}`"
@@ -144,7 +144,7 @@ async fn audit_run_events(
             }
             KernelEvent::StateCompleted { state_id, .. }
             | KernelEvent::StateFailed { state_id, .. } => {
-                let state = state_id.0.clone();
+                let state = state_id.as_str().to_string();
                 assert!(
                     active_states.remove(&state),
                     "state `{state}` terminal event without matching entry in `{machine_id}`"

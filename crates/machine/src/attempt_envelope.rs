@@ -143,7 +143,7 @@ mod tests {
             run_id,
             1,
             Event::Kernel(KernelEvent::RunStarted {
-                op_id: OpId("op".to_string()),
+                op_id: OpId::must_new("op".to_string()),
                 manifest_id: ArtifactId("0".repeat(64)),
                 initial_snapshot_id: ArtifactId("1".repeat(64)),
             }),
@@ -153,7 +153,7 @@ mod tests {
             run_id,
             2,
             Event::Kernel(KernelEvent::StateEntered {
-                state_id: StateId("machine.main.s1".to_string()),
+                state_id: StateId::must_new("machine.main.s1".to_string()),
                 attempt: 0,
                 base_snapshot_id: ArtifactId("2".repeat(64)),
             }),
@@ -173,7 +173,7 @@ mod tests {
             run_id,
             4,
             Event::Kernel(KernelEvent::StateCompleted {
-                state_id: StateId("machine.main.s1".to_string()),
+                state_id: StateId::must_new("machine.main.s1".to_string()),
                 context_snapshot_id: ArtifactId("3".repeat(64)),
             }),
         );
@@ -202,7 +202,7 @@ mod tests {
                 run_id,
                 3,
                 Event::Kernel(KernelEvent::StateCompleted {
-                    state_id: StateId("machine.main.s1".to_string()),
+                    state_id: StateId::must_new("machine.main.s1".to_string()),
                     context_snapshot_id: ArtifactId("3".repeat(64)),
                 }),
             ),
@@ -234,7 +234,7 @@ mod tests {
             run_id,
             1,
             Event::Kernel(KernelEvent::StateEntered {
-                state_id: StateId("machine.main.s1".to_string()),
+                state_id: StateId::must_new("machine.main.s1".to_string()),
                 attempt: 7,
                 base_snapshot_id: ArtifactId("2".repeat(64)),
             }),
@@ -254,7 +254,7 @@ mod tests {
             run_id,
             1,
             Event::Kernel(KernelEvent::StateCompleted {
-                state_id: StateId("machine.main.s1".to_string()),
+                state_id: StateId::must_new("machine.main.s1".to_string()),
                 context_snapshot_id: ArtifactId("2".repeat(64)),
             }),
         )];

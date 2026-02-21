@@ -143,7 +143,7 @@ fn validate_state_id_shape(
     machine_id: &MachineId,
     step_id: &StepId,
 ) -> Result<(), SdkError> {
-    let mut it = state_id.0.split('.');
+    let mut it = state_id.as_str().split('.');
     let Some(m) = it.next() else {
         return Err(sdk_error(
             "invalid_state_id",
@@ -220,7 +220,7 @@ fn validate_state_graph(
                         retryable: false,
                         message: format!(
                             "apply_side_effect state must declare Idempotency::Key: {}",
-                            n.id.0
+                            n.id.as_str()
                         ),
                         details: None,
                     },
@@ -403,7 +403,7 @@ impl PipelinePlanner for DefaultPipelinePlanner {
         }
 
         Ok(ExecutionPlan {
-            op_id: OpId(pipeline.machine_id.0.clone()),
+            op_id: OpId::must_new(pipeline.machine_id.0.clone()),
             graph: StateGraph {
                 states: all_states,
                 edges: all_edges,
@@ -528,7 +528,7 @@ impl RunLauncher for DefaultRunLauncher {
         })?;
 
         let manifest = RunManifest {
-            op_id: OpId(req.pipeline.machine_id.0.clone()),
+            op_id: OpId::must_new(req.pipeline.machine_id.0.clone()),
             op_version: req.pipeline.pipeline_version.clone(),
             input_params,
             run_config: req.run_config.clone(),
@@ -645,7 +645,7 @@ impl mfm_machine::runtime::PlanResolver for SdkPlanResolver {
             })?;
 
         let PipelineManifestInput { pipeline, .. } = parsed;
-        if OpId(pipeline.machine_id.0.clone()) != manifest.op_id {
+        if OpId::must_new(pipeline.machine_id.0.clone()) != manifest.op_id {
             return Err(RunError::InvalidPlan(info(
                 "manifest_op_id_mismatch",
                 ErrorCategory::ParsingInput,
@@ -674,7 +674,7 @@ pub fn single_op_pipeline(
     op_version: String,
     op_config: serde_json::Value,
 ) -> Result<Pipeline, SdkError> {
-    let machine_id = MachineId(op_id.0.clone());
+    let machine_id = MachineId(op_id.as_str().to_string());
     validate_machine_id(&machine_id)?;
 
     let step_id = StepId("main".to_string());
@@ -889,7 +889,10 @@ pub async fn execute_single_op_report<T: serde::de::DeserializeOwned>(
     planner: Arc<dyn PipelinePlanner>,
     req: SingleOpReportRequest,
 ) -> Result<T, SingleOpReportError> {
-    let pipeline = single_op_pipeline(OpId(req.op_id), req.op_version, req.op_config)
+    let op_id = OpId::new(req.op_id).map_err(|_| {
+        SingleOpReportError::new("invalid_op_id", "op_id must match ^[a-z][a-z0-9_]{0,62}$")
+    })?;
+    let pipeline = single_op_pipeline(op_id, req.op_version, req.op_config)
         .map_err(single_op_report_error_from_sdk)?;
 
     let launcher = DefaultRunLauncher;
@@ -1034,7 +1037,7 @@ pub mod child_runs {
 
         let request = serde_json::to_value(SpawnRequestV1 {
             kind: "child_run_spawn_v1",
-            op_id: req.op_id.0,
+            op_id: req.op_id.to_string(),
             op_version: req.op_version,
             op_config: req.op_config,
             input: req.input,
@@ -1464,12 +1467,12 @@ mod tests {
         ) -> Self {
             let state: DynState = Arc::new(WriteKeyState { key, value });
             Self {
-                op_id: OpId(op_id.to_string()),
+                op_id: OpId::must_new(op_id.to_string()),
                 op_version: op_version.to_string(),
                 io,
                 graph: StateGraph {
                     states: vec![StateNode {
-                        id: StateId(state_id.to_string()),
+                        id: StateId::must_new(state_id.to_string()),
                         state,
                     }],
                     edges: Vec::new(),
@@ -1490,12 +1493,12 @@ mod tests {
                 write_key,
             });
             Self {
-                op_id: OpId(op_id.to_string()),
+                op_id: OpId::must_new(op_id.to_string()),
                 op_version: op_version.to_string(),
                 io,
                 graph: StateGraph {
                     states: vec![StateNode {
-                        id: StateId(state_id.to_string()),
+                        id: StateId::must_new(state_id.to_string()),
                         state,
                     }],
                     edges: Vec::new(),
@@ -1559,13 +1562,13 @@ mod tests {
             steps: vec![
                 PipelineStep {
                     step_id: StepId("step1".to_string()),
-                    op_id: OpId("op1".to_string()),
+                    op_id: OpId::must_new("op1".to_string()),
                     op_version: "v1".to_string(),
                     op_config: serde_json::json!({}),
                 },
                 PipelineStep {
                     step_id: StepId("step2".to_string()),
-                    op_id: OpId("op2".to_string()),
+                    op_id: OpId::must_new("op2".to_string()),
                     op_version: "v1".to_string(),
                     op_config: serde_json::json!({}),
                 },
@@ -1580,7 +1583,7 @@ mod tests {
             plan.graph
                 .edges
                 .iter()
-                .any(|e| e.from.0 == "m.step1.s1" && e.to.0 == "m.step2.s1"),
+                .any(|e| e.from.as_str() == "m.step1.s1" && e.to.as_str() == "m.step2.s1"),
             "expected barrier edge from step1 to step2"
         );
     }
@@ -1616,7 +1619,7 @@ mod tests {
 
         let mut reg = HashMapOperationRegistry::default();
         reg.register(Arc::new(TestOp {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             op_version: "v1".to_string(),
             io: OpIo {
                 imports: Vec::new(),
@@ -1624,7 +1627,7 @@ mod tests {
             },
             graph: StateGraph {
                 states: vec![StateNode {
-                    id: StateId("op.main.s1".to_string()),
+                    id: StateId::must_new("op.main.s1".to_string()),
                     state: Arc::new(ApplyNoIdemState),
                 }],
                 edges: Vec::new(),
@@ -1632,7 +1635,7 @@ mod tests {
         }));
 
         let pipeline = single_op_pipeline(
-            OpId("op".to_string()),
+            OpId::must_new("op".to_string()),
             "v1".to_string(),
             serde_json::json!({}),
         )
@@ -1669,7 +1672,7 @@ mod tests {
             pipeline_version: "v".to_string(),
             steps: vec![PipelineStep {
                 step_id: StepId("step1".to_string()),
-                op_id: OpId("op1".to_string()),
+                op_id: OpId::must_new("op1".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({}),
             }],
@@ -1696,7 +1699,7 @@ mod tests {
             pipeline_version: "v".to_string(),
             steps: vec![PipelineStep {
                 step_id: StepId("step1".to_string()),
-                op_id: OpId("op1".to_string()),
+                op_id: OpId::must_new("op1".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({ "password": "x" }),
             }],
@@ -1751,7 +1754,7 @@ mod tests {
             pipeline_version: "v".to_string(),
             steps: vec![PipelineStep {
                 step_id: StepId("step1".to_string()),
-                op_id: OpId("op1".to_string()),
+                op_id: OpId::must_new("op1".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({}),
             }],
@@ -1853,19 +1856,19 @@ mod tests {
             steps: vec![
                 PipelineStep {
                     step_id: StepId("step1".to_string()),
-                    op_id: OpId("op1".to_string()),
+                    op_id: OpId::must_new("op1".to_string()),
                     op_version: "v1".to_string(),
                     op_config: serde_json::json!({}),
                 },
                 PipelineStep {
                     step_id: StepId("step2".to_string()),
-                    op_id: OpId("op2".to_string()),
+                    op_id: OpId::must_new("op2".to_string()),
                     op_version: "v1".to_string(),
                     op_config: serde_json::json!({}),
                 },
                 PipelineStep {
                     step_id: StepId("step3".to_string()),
-                    op_id: OpId("op3".to_string()),
+                    op_id: OpId::must_new("op3".to_string()),
                     op_version: "v1".to_string(),
                     op_config: serde_json::json!({}),
                 },
@@ -1937,14 +1940,14 @@ mod tests {
             pipeline_version: "v".to_string(),
             steps: vec![PipelineStep {
                 step_id: StepId("step1".to_string()),
-                op_id: OpId("op1".to_string()),
+                op_id: OpId::must_new("op1".to_string()),
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({}),
             }],
         };
 
         let manifest = RunManifest {
-            op_id: OpId("m".to_string()),
+            op_id: OpId::must_new("m".to_string()),
             op_version: "v".to_string(),
             input_params: serde_json::to_value(PipelineManifestInput {
                 pipeline: pipeline.clone(),
@@ -1963,9 +1966,9 @@ mod tests {
         };
 
         let plan = resolver.resolve(&manifest).expect("resolve plan");
-        assert_eq!(plan.op_id.0, "m");
+        assert_eq!(plan.op_id.as_str(), "m");
         assert_eq!(plan.graph.states.len(), 1);
-        assert_eq!(plan.graph.states[0].id.0, "m.step1.s1");
+        assert_eq!(plan.graph.states[0].id.as_str(), "m.step1.s1");
     }
 
     #[tokio::test]
@@ -2083,7 +2086,7 @@ mod tests {
             _rec: &mut dyn EventRecorder,
         ) -> Result<StateOutcome, StateError> {
             Err(StateError {
-                state_id: Some(StateId("fail_op.main.s1".to_string())),
+                state_id: Some(StateId::must_new("fail_op.main.s1".to_string())),
                 info: ErrorInfo {
                     code: ErrorCode(self.code.to_string()),
                     category: ErrorCategory::Unknown,
@@ -2099,7 +2102,7 @@ mod tests {
 
     impl crate::op::Operation for FailOp {
         fn op_id(&self) -> OpId {
-            OpId("fail_op".to_string())
+            OpId::must_new("fail_op".to_string())
         }
 
         fn op_version(&self) -> String {
@@ -2121,7 +2124,7 @@ mod tests {
         ) -> Result<StateGraph, SdkError> {
             Ok(StateGraph {
                 states: vec![StateNode {
-                    id: StateId("fail_op.main.s1".to_string()),
+                    id: StateId::must_new("fail_op.main.s1".to_string()),
                     state: Arc::new(FailingState {
                         code: "IntentionalFailure",
                         message: "intentional test failure",

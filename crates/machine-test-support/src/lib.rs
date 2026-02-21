@@ -116,7 +116,7 @@ async fn append_and_read(store: &dyn EventStore) {
         seq: 1,
         ts_millis: Some(1),
         event: Event::Kernel(KernelEvent::RunStarted {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             manifest_id: ArtifactId("0".repeat(64)),
             initial_snapshot_id: ArtifactId("1".repeat(64)),
         }),
@@ -137,7 +137,7 @@ async fn append_and_read(store: &dyn EventStore) {
         seq: 2,
         ts_millis: Some(2),
         event: Event::Kernel(KernelEvent::StateEntered {
-            state_id: StateId("machine.main.setup".to_string()),
+            state_id: StateId::must_new("machine.main.setup".to_string()),
             attempt: 0,
             base_snapshot_id: ArtifactId("2".repeat(64)),
         }),
@@ -173,7 +173,7 @@ async fn expected_seq_concurrency(store: &dyn EventStore) {
         seq: 1,
         ts_millis: None,
         event: Event::Kernel(KernelEvent::RunStarted {
-            op_id: OpId("op".to_string()),
+            op_id: OpId::must_new("op".to_string()),
             manifest_id: ArtifactId("0".repeat(64)),
             initial_snapshot_id: ArtifactId("1".repeat(64)),
         }),

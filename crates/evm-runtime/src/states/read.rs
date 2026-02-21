@@ -28,6 +28,94 @@ fn parse_error(err: UtilError) -> StateError {
     state_unknown_msg(err.code, err.message)
 }
 
+trait RpcResponseParser {
+    fn parse(
+        &self,
+        state_id: &StateId,
+        response: &serde_json::Value,
+    ) -> Result<serde_json::Value, StateError>;
+}
+
+async fn execute_rpc_read<P: RpcResponseParser>(
+    state_id: &StateId,
+    method: &str,
+    params: &serde_json::Value,
+    output_key: &ContextKey,
+    parser: &P,
+    ctx: &mut dyn DynContext,
+    io: &mut dyn IoProvider,
+) -> Result<StateOutcome, StateError> {
+    let mut client = EvmIoClient::new(state_id.clone(), io);
+    let res = client
+        .call(JsonRpcCall::new(method.to_string(), params.clone()))
+        .await
+        .map_err(state_from_io)?;
+    let parsed = parser.parse(state_id, &res.response)?;
+    write_json(ctx, output_key.clone(), parsed)?;
+
+    Ok(StateOutcome {
+        snapshot: SnapshotPolicy::OnSuccess,
+    })
+}
+
+#[derive(Clone, Debug, Default)]
+struct HexStringParser;
+
+impl RpcResponseParser for HexStringParser {
+    fn parse(
+        &self,
+        _state_id: &StateId,
+        response: &serde_json::Value,
+    ) -> Result<serde_json::Value, StateError> {
+        let value = parse_hex_string_response(response).map_err(parse_error)?;
+        Ok(serde_json::json!(value))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct U256HexParser;
+
+impl RpcResponseParser for U256HexParser {
+    fn parse(
+        &self,
+        _state_id: &StateId,
+        response: &serde_json::Value,
+    ) -> Result<serde_json::Value, StateError> {
+        let value = parse_u256_hex_response(response).map_err(parse_error)?;
+        Ok(serde_json::json!(value))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct U64HexParser {
+    expectation: Option<U64Expectation>,
+}
+
+impl RpcResponseParser for U64HexParser {
+    fn parse(
+        &self,
+        state_id: &StateId,
+        response: &serde_json::Value,
+    ) -> Result<serde_json::Value, StateError> {
+        let value = parse_u64_hex_value(response)
+            .map_err(|_| state_unknown("evm_response_invalid", "evm response was not a hex u64"))?;
+
+        if let Some(expectation) = &self.expectation {
+            if value != expectation.expected {
+                return Err(state_error_with_state(
+                    state_id.clone(),
+                    expectation.mismatch_code,
+                    expectation.mismatch_category.clone(),
+                    expectation.mismatch_retryable,
+                    expectation.mismatch_message,
+                ));
+            }
+        }
+
+        Ok(serde_json::json!(value))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct U64Expectation {
     pub expected: u64,
@@ -89,17 +177,16 @@ impl State for ReadHexStringState {
         io: &mut dyn IoProvider,
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let mut client = EvmIoClient::new(self.state_id.clone(), io);
-        let res = client
-            .call(JsonRpcCall::new(self.method.clone(), self.params.clone()))
-            .await
-            .map_err(state_from_io)?;
-        let value = parse_hex_string_response(&res.response).map_err(parse_error)?;
-        write_json(ctx, self.output_key.clone(), serde_json::json!(value))?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
+        execute_rpc_read(
+            &self.state_id,
+            &self.method,
+            &self.params,
+            &self.output_key,
+            &HexStringParser,
+            ctx,
+            io,
+        )
+        .await
     }
 }
 
@@ -139,17 +226,16 @@ impl State for ReadU256HexState {
         io: &mut dyn IoProvider,
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let mut client = EvmIoClient::new(self.state_id.clone(), io);
-        let res = client
-            .call(JsonRpcCall::new(self.method.clone(), self.params.clone()))
-            .await
-            .map_err(state_from_io)?;
-        let value = parse_u256_hex_response(&res.response).map_err(parse_error)?;
-        write_json(ctx, self.output_key.clone(), serde_json::json!(value))?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
+        execute_rpc_read(
+            &self.state_id,
+            &self.method,
+            &self.params,
+            &self.output_key,
+            &U256HexParser,
+            ctx,
+            io,
+        )
+        .await
     }
 }
 
@@ -286,32 +372,18 @@ impl State for ReadU64HexState {
         io: &mut dyn IoProvider,
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let mut client = EvmIoClient::new(self.state_id.clone(), io);
-        let res = client
-            .call(JsonRpcCall::new(self.method.clone(), self.params.clone()))
-            .await
-            .map_err(state_from_io)?;
-
-        let value = parse_u64_hex_value(&res.response)
-            .map_err(|_| state_unknown("evm_response_invalid", "evm response was not a hex u64"))?;
-
-        if let Some(expectation) = &self.expectation {
-            if value != expectation.expected {
-                return Err(state_error_with_state(
-                    self.state_id.clone(),
-                    expectation.mismatch_code,
-                    expectation.mismatch_category.clone(),
-                    expectation.mismatch_retryable,
-                    expectation.mismatch_message,
-                ));
-            }
-        }
-
-        write_json(ctx, self.output_key.clone(), serde_json::json!(value))?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
+        execute_rpc_read(
+            &self.state_id,
+            &self.method,
+            &self.params,
+            &self.output_key,
+            &U64HexParser {
+                expectation: self.expectation.clone(),
+            },
+            ctx,
+            io,
+        )
+        .await
     }
 }
 
@@ -600,7 +672,7 @@ mod tests {
     #[tokio::test]
     async fn reads_u64_and_writes_context() {
         let state = ReadU64HexState::new(
-            StateId("m.main.chain_id".to_string()),
+            StateId::must_new("m.main.chain_id".to_string()),
             "eth_chainId",
             serde_json::json!([]),
             ContextKey("chain_id".to_string()),
@@ -626,7 +698,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_hex_response_fails_with_stable_code() {
         let state = ReadU64HexState::new(
-            StateId("m.main.chain_id".to_string()),
+            StateId::must_new("m.main.chain_id".to_string()),
             "eth_chainId",
             serde_json::json!([]),
             ContextKey("chain_id".to_string()),
@@ -648,7 +720,7 @@ mod tests {
     #[tokio::test]
     async fn expectation_mismatch_fails_with_state_scoped_error() {
         let state = ReadU64HexState::new(
-            StateId("m.main.chain_id".to_string()),
+            StateId::must_new("m.main.chain_id".to_string()),
             "eth_chainId",
             serde_json::json!([]),
             ContextKey("chain_id".to_string()),
@@ -670,7 +742,10 @@ mod tests {
             .await
             .expect_err("expected mismatch");
         assert_eq!(err.info.code.0, "chain_id_mismatch");
-        assert_eq!(err.state_id, Some(StateId("m.main.chain_id".to_string())));
+        assert_eq!(
+            err.state_id,
+            Some(StateId::must_new("m.main.chain_id".to_string()))
+        );
     }
 
     #[test]
@@ -690,7 +765,7 @@ mod tests {
     #[tokio::test]
     async fn read_hex_string_writes_string_value() {
         let state = ReadHexStringState::new(
-            StateId("m.main.client_version".to_string()),
+            StateId::must_new("m.main.client_version".to_string()),
             "web3_clientVersion",
             serde_json::json!([]),
             ContextKey("client_version".to_string()),
@@ -718,7 +793,7 @@ mod tests {
     #[tokio::test]
     async fn read_u256_hex_rejects_overflow() {
         let state = ReadU256HexState::new(
-            StateId("m.main.balance".to_string()),
+            StateId::must_new("m.main.balance".to_string()),
             "eth_getBalance",
             serde_json::json!(["0xabc", "latest"]),
             ContextKey("balance".to_string()),
@@ -742,7 +817,7 @@ mod tests {
     #[tokio::test]
     async fn eth_call_u64_decode_writes_numeric_value() {
         let state = EthCallState::new(
-            StateId("m.main.eth_call".to_string()),
+            StateId::must_new("m.main.eth_call".to_string()),
             "0x0000000000000000000000000000000000000000",
             "0x313ce567",
             ContextKey("decimals".to_string()),

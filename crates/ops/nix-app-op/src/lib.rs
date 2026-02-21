@@ -28,7 +28,7 @@ pub struct NixAppOp;
 
 impl Operation for NixAppOp {
     fn op_id(&self) -> OpId {
-        OpId(OP_ID.to_string())
+        OpId::must_new(OP_ID.to_string())
     }
 
     fn op_version(&self) -> String {
@@ -55,7 +55,7 @@ impl Operation for NixAppOp {
             op_errors::sdk_error("invalid_op_config", ErrorCategory::Unknown, false, msg)
         })?;
 
-        let sid = StateId(format!("{}.run", op_path.0));
+        let sid = StateId::must_new(format!("{}.run", op_path.0));
         let state = Arc::new(NixExecState {
             state_id: sid.clone(),
             cfg,
@@ -223,7 +223,7 @@ mod tests {
 
     impl Operation for MarkerOp {
         fn op_id(&self) -> OpId {
-            OpId("marker".to_string())
+            OpId::must_new("marker".to_string())
         }
 
         fn op_version(&self) -> String {
@@ -256,7 +256,7 @@ mod tests {
                 ));
             }
 
-            let state_id = StateId(format!("{}.write", op_path.0));
+            let state_id = StateId::must_new(format!("{}.write", op_path.0));
             Ok(mfm_machine::plan::StateGraph {
                 states: vec![mfm_machine::plan::StateNode {
                     id: state_id,
@@ -570,7 +570,7 @@ mod tests {
             steps: vec![
                 PipelineStep {
                     step_id: StepId("prep".to_string()),
-                    op_id: OpId("marker".to_string()),
+                    op_id: OpId::must_new("marker".to_string()),
                     op_version: "v1".to_string(),
                     op_config: serde_json::json!({
                         "key": "prep",
@@ -579,7 +579,7 @@ mod tests {
                 },
                 PipelineStep {
                     step_id: StepId("fmt".to_string()),
-                    op_id: OpId("nix_app".to_string()),
+                    op_id: OpId::must_new("nix_app".to_string()),
                     op_version: "v1".to_string(),
                     op_config: serde_json::json!({
                         "app": app_ref,
@@ -591,7 +591,7 @@ mod tests {
                 },
                 PipelineStep {
                     step_id: StepId("post".to_string()),
-                    op_id: OpId("marker".to_string()),
+                    op_id: OpId::must_new("marker".to_string()),
                     op_version: "v1".to_string(),
                     op_config: serde_json::json!({
                         "key": "post",

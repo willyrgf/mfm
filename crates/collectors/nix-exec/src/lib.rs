@@ -556,7 +556,7 @@ mod tests {
                 artifacts: Arc::new(NoopArtifactStore),
             },
             run_id: RunId(uuid::Uuid::new_v4()),
-            state_id: StateId("machine.main.s1".to_string()),
+            state_id: StateId::must_new("machine.main.s1".to_string()),
             attempt: 0,
         }
     }
@@ -654,7 +654,7 @@ mod tests {
         let initial_snapshot_id = ArtifactId("2".repeat(64));
 
         let manifest = RunManifest {
-            op_id: OpId("nix_app".to_string()),
+            op_id: OpId::must_new("nix_app".to_string()),
             op_version: "v1".to_string(),
             input_params: serde_json::json!({}),
             run_config: run_config_with_allowlist(prefixes),
@@ -682,7 +682,7 @@ mod tests {
             seq: 1,
             ts_millis: Some(0),
             event: Event::Kernel(KernelEvent::RunStarted {
-                op_id: OpId("nix_app".to_string()),
+                op_id: OpId::must_new("nix_app".to_string()),
                 manifest_id,
                 initial_snapshot_id,
             }),
@@ -696,7 +696,7 @@ mod tests {
                 artifacts,
             },
             run_id,
-            state_id: StateId("machine.main.s1".to_string()),
+            state_id: StateId::must_new("machine.main.s1".to_string()),
             attempt: 0,
         }
     }
