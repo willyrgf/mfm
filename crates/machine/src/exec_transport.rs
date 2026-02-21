@@ -517,7 +517,9 @@ mod tests {
 
     #[tokio::test]
     async fn non_zero_exit_includes_safe_failure_metadata() {
-        let (program, allow_prefix) = write_test_program("exit 42");
+        // Drain stdin first so the test exercises non-zero exit handling instead
+        // of racing against a broken pipe while writing stdin.
+        let (program, allow_prefix) = write_test_program("cat >/dev/null\nexit 42");
         let factory = ExecProgramTransportFactory::new(ExecPolicy {
             allow_prefixes: vec![allow_prefix],
         });
