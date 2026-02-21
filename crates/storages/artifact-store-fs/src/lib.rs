@@ -5,8 +5,11 @@
 //! - `put()` computes the id from bytes
 //! - `get()` verifies the hash and returns `StorageError::Corruption` on mismatch
 
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
@@ -19,6 +22,8 @@ use tokio::io::AsyncWriteExt;
 pub struct FsArtifactStore {
     root: PathBuf,
 }
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl FsArtifactStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -68,6 +73,18 @@ impl FsArtifactStore {
             Err(e) => Err(Self::other(format!("failed to read artifact: {e}"))),
         }
     }
+
+    fn temp_path_for(path: &Path) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seq = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut name = OsString::from(".");
+        name.push(path.file_name().unwrap_or_else(|| OsStr::new("artifact")));
+        name.push(format!(".tmp-{}-{nanos}-{seq}", std::process::id()));
+        path.with_file_name(name)
+    }
 }
 
 #[async_trait]
@@ -88,25 +105,64 @@ impl ArtifactStore for FsArtifactStore {
             return Ok(id);
         }
 
+        // Write to a private temp file first so readers never observe partial bytes.
+        let temp_path = Self::temp_path_for(&path);
         let mut file = match tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&path)
+            .open(&temp_path)
             .await
         {
             Ok(f) => f,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(id),
-            Err(e) => return Err(Self::other(format!("failed to create artifact: {e}"))),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(Self::other(format!(
+                    "failed to reserve temp artifact path: {e}"
+                )))
+            }
+            Err(e) => return Err(Self::other(format!("failed to create temp artifact: {e}"))),
         };
 
         if let Err(e) = file.write_all(&bytes).await {
-            // Best-effort cleanup; partial files are treated as corruption on read anyway.
-            let _ = tokio::fs::remove_file(&path).await;
-            return Err(Self::other(format!("failed to write artifact: {e}")));
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(Self::other(format!("failed to write temp artifact: {e}")));
         }
         if let Err(e) = file.sync_all().await {
-            let _ = tokio::fs::remove_file(&path).await;
-            return Err(Self::other(format!("failed to sync artifact: {e}")));
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(Self::other(format!("failed to sync temp artifact: {e}")));
+        }
+        drop(file);
+
+        match tokio::fs::hard_link(&temp_path, &path).await {
+            Ok(()) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                if let Some(existing) = Self::read_existing(&path).await? {
+                    let existing_id = artifact_id_for_bytes(&existing);
+                    if existing_id != id {
+                        return Err(Self::corruption(
+                            "artifact exists on disk but its contents do not match its id",
+                        ));
+                    }
+                    return Ok(id);
+                }
+                return Err(Self::other(
+                    "artifact appeared as existing, then disappeared during put",
+                ));
+            }
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+                if let Err(rename_err) = tokio::fs::rename(&temp_path, &path).await {
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+                    return Err(Self::other(format!(
+                        "failed to materialize artifact after hard-link fallback: {rename_err}"
+                    )));
+                }
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(Self::other(format!("failed to materialize artifact: {e}")));
+            }
         }
 
         Ok(id)
@@ -143,6 +199,7 @@ impl ArtifactStore for FsArtifactStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn get_detects_corruption() {
@@ -162,5 +219,40 @@ mod tests {
             Err(StorageError::Corruption(_)) => {}
             other => panic!("expected corruption, got: {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_put_same_bytes_is_race_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FsArtifactStore::new(dir.path()));
+        let bytes = b"shared-payload".to_vec();
+        let kind = ArtifactKind::Other("race".to_string());
+        let gate = Arc::new(tokio::sync::Barrier::new(32));
+
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let store = Arc::clone(&store);
+            let payload = bytes.clone();
+            let kind = kind.clone();
+            let gate = Arc::clone(&gate);
+            handles.push(tokio::spawn(async move {
+                gate.wait().await;
+                store.put(kind, payload).await
+            }));
+        }
+
+        let mut expected = None;
+        for handle in handles {
+            let id = handle.await.unwrap().unwrap();
+            if let Some(seen) = &expected {
+                assert_eq!(&id, seen);
+            } else {
+                expected = Some(id);
+            }
+        }
+
+        let id = expected.expect("at least one put result");
+        let got = store.get(&id).await.unwrap();
+        assert_eq!(got, bytes);
     }
 }
