@@ -145,6 +145,8 @@ let
     "HELIOS_CHECKPOINT"
     "HELIOS_READY_TIMEOUT_SECS"
     "HELIOS_READY_INTERVAL_SECS"
+    "HELIOS_SYNC_MAX_LAG_BLOCKS"
+    "HELIOS_REQUIRE_SYNC"
     "SERVICE_REUSE_POLICY"
     "SERVICE_OWNER_SCOPE"
     "SERVICE_DISCOVERY_SCOPE"
@@ -660,6 +662,17 @@ in
               exit 1
             fi
 
+            HELIOS_BIN_IS_SHIM=0
+            if ${pkgs.gnugrep}/bin/grep -q "helios-proxy/1.0" "$HELIOS_BIN" 2>/dev/null; then
+              HELIOS_BIN_IS_SHIM=1
+            fi
+
+            if [ "$HELIOS_NETWORK" = "mainnet" ] && [ "$HELIOS_BIN_IS_SHIM" = "1" ]; then
+              echo "ERROR: mainnet snapshot requires a real Helios binary; detected project shim at $HELIOS_BIN" >&2
+              echo "HINT: configure modules.helios.package in nixfied/project/conf.nix to a real pkgs.helios package." >&2
+              exit 1
+            fi
+
             services_root_base="''${TMPDIR:-/tmp}/mfm-portfolio-services"
             case "''${SERVICE_REUSE_POLICY:-}" in
               same-slot)
@@ -773,11 +786,40 @@ in
             wait_helios_rpc_ready() {
               local timeout_secs="''${HELIOS_READY_TIMEOUT_SECS:-300}"
               local interval_secs="''${HELIOS_READY_INTERVAL_SECS:-1}"
+              local require_sync="''${HELIOS_REQUIRE_SYNC:-1}"
+              local max_lag_blocks="''${HELIOS_SYNC_MAX_LAG_BLOCKS:-64}"
               local start_ts
               local now_ts
               local attempt
-              local resp
+              local block_resp
+              local block_hex
+              local block_val
+              local sync_resp
+              local sync_state
+              local upstream_resp
+              local upstream_block_hex
+              local upstream_block_val
+              local lag_blocks
               local err_msg
+
+              is_hex_quantity() {
+                case "$1" in
+                  0x[0-9a-fA-F]*|0X[0-9a-fA-F]*)
+                    [ "$1" != "0x" ] && [ "$1" != "0X" ]
+                    ;;
+                  *)
+                    return 1
+                    ;;
+                esac
+              }
+
+              hex_to_dec() {
+                local quantity="$1"
+                local digits
+                digits="''${quantity#0x}"
+                digits="''${digits#0X}"
+                printf '%d' "$((16#$digits))"
+              }
 
               case "$timeout_secs" in
                 *[!0-9]*|"")
@@ -793,33 +835,92 @@ in
                   ;;
               esac
 
+              case "$require_sync" in
+                0|1)
+                  ;;
+                *)
+                  echo "ERROR: HELIOS_REQUIRE_SYNC must be 0 or 1 (got '$require_sync')" >&2
+                  return 1
+                  ;;
+              esac
+
+              case "$max_lag_blocks" in
+                *[!0-9]*|"")
+                  echo "ERROR: HELIOS_SYNC_MAX_LAG_BLOCKS must be an integer >= 0 (got '$max_lag_blocks')" >&2
+                  return 1
+                  ;;
+              esac
+
               start_ts=$(date +%s)
               attempt=0
 
               while true; do
                 attempt=$((attempt + 1))
-                resp="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                block_hex=""
+                sync_state=""
+                upstream_block_hex=""
+                lag_blocks=""
+                block_resp="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
                   -H 'content-type: application/json' \
                   --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
                   "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null || true)"
 
-                if [ -n "$resp" ] && echo "$resp" | ${pkgs.jq}/bin/jq -e '.result | strings' >/dev/null 2>&1; then
-                  return 0
+                block_hex="$(echo "$block_resp" | ${pkgs.jq}/bin/jq -r '.result // empty' 2>/dev/null || true)"
+                sync_resp="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                  -H 'content-type: application/json' \
+                  --data '{"jsonrpc":"2.0","id":1,"method":"eth_syncing","params":[]}' \
+                  "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null || true)"
+                sync_state="$(echo "$sync_resp" | ${pkgs.jq}/bin/jq -c '.result // empty' 2>/dev/null || true)"
+
+                if [ "$require_sync" = "0" ]; then
+                  if is_hex_quantity "$block_hex"; then
+                    return 0
+                  fi
+                else
+                  if is_hex_quantity "$block_hex" && [ "$sync_state" = "false" ]; then
+                    upstream_resp="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                      -H 'content-type: application/json' \
+                      --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+                      "$HELIOS_EXECUTION_RPC_URL" 2>/dev/null || true)"
+                    upstream_block_hex="$(echo "$upstream_resp" | ${pkgs.jq}/bin/jq -r '.result // empty' 2>/dev/null || true)"
+
+                    if is_hex_quantity "$upstream_block_hex"; then
+                      block_val="$(hex_to_dec "$block_hex")"
+                      upstream_block_val="$(hex_to_dec "$upstream_block_hex")"
+                      lag_blocks=$((upstream_block_val - block_val))
+                      if [ "$lag_blocks" -lt 0 ]; then
+                        lag_blocks=0
+                      fi
+                      if [ "$lag_blocks" -le "$max_lag_blocks" ]; then
+                        return 0
+                      fi
+                    fi
+                  fi
                 fi
 
                 if [ $((attempt % 10)) -eq 0 ]; then
                   err_msg=""
-                  if [ -n "$resp" ]; then
-                    err_msg="$(echo "$resp" | ${pkgs.jq}/bin/jq -r '.error.message // empty' 2>/dev/null || true)"
+                  if [ -n "$block_resp" ]; then
+                    err_msg="$(echo "$block_resp" | ${pkgs.jq}/bin/jq -r '.error.message // empty' 2>/dev/null || true)"
                   fi
                   if [ -n "$err_msg" ]; then
                     echo "INFO: helios not ready yet: $err_msg" >&2
+                  else
+                    if [ "$require_sync" = "1" ]; then
+                      echo "INFO: helios not ready yet: sync_state=''${sync_state:-unknown} local_block=''${block_hex:-unknown} upstream_block=''${upstream_block_hex:-unknown} lag_blocks=''${lag_blocks:-unknown} max_lag_blocks=$max_lag_blocks" >&2
+                    else
+                      echo "INFO: helios not ready yet: waiting for eth_blockNumber response" >&2
+                    fi
                   fi
                 fi
 
                 now_ts=$(date +%s)
                 if [ $((now_ts - start_ts)) -ge "$timeout_secs" ]; then
-                  echo "ERROR: helios not ready after $timeout_secs s (eth_blockNumber still failing) rpc_port=$HELIOS_RPC_PORT" >&2
+                  if [ "$require_sync" = "1" ]; then
+                    echo "ERROR: helios not ready after $timeout_secs s (sync requirement not met) rpc_port=$HELIOS_RPC_PORT local_block=''${block_hex:-unknown} upstream_block=''${upstream_block_hex:-unknown} sync_state=''${sync_state:-unknown} lag_blocks=''${lag_blocks:-unknown} max_lag_blocks=$max_lag_blocks" >&2
+                  else
+                    echo "ERROR: helios not ready after $timeout_secs s (eth_blockNumber still failing) rpc_port=$HELIOS_RPC_PORT" >&2
+                  fi
                   echo "HINT: set HELIOS_CHECKPOINT and HELIOS_CONSENSUS_RPC_URL explicitly for mainnet." >&2
                   return 1
                 fi
