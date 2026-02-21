@@ -16,7 +16,7 @@ nix run .#mfm::portfolio::snapshot -- <ADDRESS>
 The wrapper is implemented in `nixfied/project/module.nix` (`task.mfm.portfolio.snapshot`) and enforces:
 
 - exactly one positional address argument
-- `HELIOS_NETWORK=mainnet` (hard precondition)
+- defaults `HELIOS_NETWORK` to `mainnet` and rejects non-mainnet values
 - fallback `HELIOS_EXECUTION_RPC_URL=https://eth.drpc.org` when unset
 - Postgres + Helios lifecycle orchestration with reuse policy envs
 - Helios readiness gating via RPC `eth_blockNumber` probe loop

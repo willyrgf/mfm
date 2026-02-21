@@ -599,7 +599,8 @@ in
             fi
 
             # Keep this app mainnet-only (chain-id 1) to avoid accidental local/reth wiring.
-            if [ "''${HELIOS_NETWORK:-}" != "mainnet" ]; then
+            export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
+            if [ "$HELIOS_NETWORK" != "mainnet" ]; then
               echo "ERROR: HELIOS_NETWORK must be 'mainnet' for mfm::portfolio::snapshot" >&2
               exit 1
             fi
