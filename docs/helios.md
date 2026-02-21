@@ -69,7 +69,8 @@ Canonical service metadata now lives in `nixfied/project/conf.nix` under `servic
 (`sourceKeys`, `defaultSource`, and port keys).
 
 - `services.helios` in `nixfied/project/module.nix` is sourced from `conf.services.helios` (with module fallbacks).
-- `modules.helios.package` defaults to the framework Helios package (`nixfied/.framework/helios/package.nix`).
+- `modules.helios.package` defaults to `pkgs.helios` when available, with framework
+  `nixfied/.framework/helios/package.nix` as fallback.
 
 `mfm::portfolio::snapshot` now reuses framework `ready/health` for Helios.
 Execution endpoint checks resolve in this order:

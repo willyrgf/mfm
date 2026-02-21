@@ -29,6 +29,8 @@ let
   heliosPackage =
     if pkgs == null then
       null
+    else if pkgs ? helios then
+      pkgs.helios
     else
       pkgs.callPackage ../.framework/helios/package.nix { };
 in
