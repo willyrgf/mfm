@@ -18,8 +18,8 @@ The wrapper is implemented in `nixfied/project/module.nix` (`task.mfm.portfolio.
 - exactly one positional address argument
 - defaults `HELIOS_NETWORK` to `mainnet` and rejects non-mainnet values
 - fallback `HELIOS_EXECUTION_RPC_URL=https://eth.drpc.org` when unset
+- fallback `HELIOS_CONSENSUS_RPC_URL=https://www.lightclientdata.org` when unset
 - Postgres + Helios lifecycle orchestration with reuse policy envs
-- fail-fast on mainnet when the project fallback shim binary is configured
 - Helios readiness gating via framework `health` polling + `ready` checks
   using local Helios RPC plus execution endpoint resolution
 - raw `mfm_cli` JSON output only on stdout (`--output-format json`)
@@ -69,7 +69,7 @@ Canonical service metadata now lives in `nixfied/project/conf.nix` under `servic
 (`sourceKeys`, `defaultSource`, and port keys).
 
 - `services.helios` in `nixfied/project/module.nix` is sourced from `conf.services.helios` (with module fallbacks).
-- If `pkgs.helios` is unavailable, project config falls back to `nixfied/project/helios-package.nix`.
+- `modules.helios.package` defaults to the framework Helios package (`nixfied/.framework/helios/package.nix`).
 
 `mfm::portfolio::snapshot` now reuses framework `ready/health` for Helios.
 Execution endpoint checks resolve in this order:

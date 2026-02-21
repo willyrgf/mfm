@@ -29,10 +29,8 @@ let
   heliosPackage =
     if pkgs == null then
       null
-    else if pkgs ? helios then
-      pkgs.helios
     else
-      pkgs.callPackage ./helios-package.nix { };
+      pkgs.callPackage ../.framework/helios/package.nix { };
 in
 rec {
   project = {
@@ -250,7 +248,8 @@ rec {
       executionRpcPortKey = "rethHttp";
       # Mainnet default for workflows that do not set HELIOS_EXECUTION_RPC_URL explicitly.
       executionRpcUrl = "https://eth.drpc.org";
-      consensusRpcUrl = "";
+      # Mainnet default consensus endpoint used by Helios snapshot workflows.
+      consensusRpcUrl = "https://www.lightclientdata.org";
       checkpoint = "";
       extraArgs = [ ];
     };

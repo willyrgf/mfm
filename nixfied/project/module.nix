@@ -610,6 +610,7 @@ in
             fi
 
             export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${conf.modules.helios.executionRpcUrl or "https://eth.drpc.org"}}"
+            export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${conf.modules.helios.consensusRpcUrl or "https://www.lightclientdata.org"}}"
 
             if [ "''${MFM_KEEP_SERVICES+x}" = "x" ]; then
               echo "ERROR: MFM_KEEP_SERVICES has been removed from mfm::portfolio::snapshot" >&2
@@ -661,17 +662,6 @@ in
             HELIOS_BIN=${lib.escapeShellArg (if heliosPackage != null then "${heliosPackage}/bin/helios" else "")}
             if [ -z "$HELIOS_BIN" ] || [ ! -x "$HELIOS_BIN" ]; then
               echo "ERROR: helios binary is unavailable; configure modules.helios.package in nixfied/project/conf.nix" >&2
-              exit 1
-            fi
-
-            HELIOS_BIN_IS_SHIM=0
-            if ${pkgs.gnugrep}/bin/grep -q "helios-proxy/1.0" "$HELIOS_BIN" 2>/dev/null; then
-              HELIOS_BIN_IS_SHIM=1
-            fi
-
-            if [ "$HELIOS_NETWORK" = "mainnet" ] && [ "$HELIOS_BIN_IS_SHIM" = "1" ]; then
-              echo "ERROR: mainnet snapshot requires a real Helios binary; detected project shim at $HELIOS_BIN" >&2
-              echo "HINT: configure modules.helios.package in nixfied/project/conf.nix to a real pkgs.helios package." >&2
               exit 1
             fi
 
@@ -1980,7 +1970,8 @@ in
               out_file="$artifacts_dir/mainnet-portfolio-snapshot.json"
 
               export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
-              export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-https://eth.drpc.org}"
+              export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${conf.modules.helios.executionRpcUrl or "https://eth.drpc.org"}}"
+              export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${conf.modules.helios.consensusRpcUrl or "https://www.lightclientdata.org"}}"
 
               echo "INFO: running ci step=mainnet-portfolio-snapshot-helios address=$address"
 
