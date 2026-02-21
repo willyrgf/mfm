@@ -229,7 +229,8 @@ let
     minioPackage
     minioClientPackage
     rethPackage
-  ];
+  ]
+  ++ lib.optional (heliosPackage != null) heliosPackage;
 
   mkCommandTask =
     {
@@ -1283,7 +1284,7 @@ in
             appName = "ci-services-start";
             kind = "ci-step";
             summary = "Start local CI parity services";
-            description = "Boots local postgres/minio/reth dependencies for deterministic parity checks.";
+            description = "Boots local postgres/minio/reth/helios dependencies for deterministic parity checks.";
             tags = [
               "ci"
               "parity"
@@ -1295,7 +1296,7 @@ in
               ${ciStepPreamble}
               ${ciParityServiceEnv}
 
-              echo "INFO: starting ci services env=$env_value slot=$slot_value postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT"
+              echo "INFO: starting ci services env=$env_value slot=$slot_value postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT helios=$HELIOS_RPC_PORT"
 
               services_root="$artifacts_dir/services"
               mkdir -p "$services_root"
@@ -1481,7 +1482,80 @@ in
                 exit 1
               fi
 
-              echo "OK: ci services ready postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT"
+              helios_root="$services_root/helios"
+              helios_data="$helios_root/data"
+              helios_log="$artifacts_dir/helios-service.log"
+              helios_pid_file="$helios_root/helios.pid"
+              mkdir -p "$helios_data"
+
+              HELIOS_BIN=${lib.escapeShellArg (if heliosPackage != null then "${heliosPackage}/bin/helios" else "")}
+              if [ -z "$HELIOS_BIN" ] || [ ! -x "$HELIOS_BIN" ]; then
+                echo "ERROR: helios binary is unavailable; configure modules.helios.package in nixfied/project/conf.nix"
+                exit 1
+              fi
+
+              HELIOS_NETWORK_VALUE="''${HELIOS_NETWORK:-${conf.modules.helios.network or "local"}}"
+              HELIOS_EXECUTION_RPC_URL_VALUE="''${HELIOS_EXECUTION_RPC_URL:-http://127.0.0.1:$RETH_HTTP_PORT}"
+
+              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                -H 'content-type: application/json' \
+                --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+                "http://127.0.0.1:$HELIOS_RPC_PORT" \
+                | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+                if [ -f "$helios_pid_file" ]; then
+                  stale_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
+                  if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+                    rm -f "$helios_pid_file"
+                  fi
+                fi
+
+                HELIOS_ARGS=(
+                  ethereum
+                  --network "$HELIOS_NETWORK_VALUE"
+                  --rpc-port "$HELIOS_RPC_PORT"
+                  --data-dir "$helios_data"
+                  --execution-rpc "$HELIOS_EXECUTION_RPC_URL_VALUE"
+                )
+
+                if [ -n "''${HELIOS_CONSENSUS_RPC_URL:-}" ]; then
+                  HELIOS_ARGS+=(--consensus-rpc "$HELIOS_CONSENSUS_RPC_URL")
+                fi
+
+                if [ -n "''${HELIOS_CHECKPOINT:-}" ]; then
+                  HELIOS_ARGS+=(--checkpoint "$HELIOS_CHECKPOINT")
+                fi
+
+                "$HELIOS_BIN" "''${HELIOS_ARGS[@]}" >"$helios_log" 2>&1 &
+                echo "$!" > "$helios_pid_file"
+              fi
+
+              for _ in $(seq 1 160); do
+                if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                  -H 'content-type: application/json' \
+                  --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+                  "http://127.0.0.1:$HELIOS_RPC_PORT" \
+                  | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+                  break
+                fi
+                sleep 0.25
+              done
+
+              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                -H 'content-type: application/json' \
+                --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+                "http://127.0.0.1:$HELIOS_RPC_PORT" \
+                | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+                echo "ERROR: helios failed to become ready port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL_VALUE"
+                if [ -f "$helios_log" ]; then
+                  tail -50 "$helios_log" >&2 || true
+                fi
+                if command -v lsof >/dev/null 2>&1; then
+                  lsof -nP -iTCP:"$HELIOS_RPC_PORT" -sTCP:LISTEN >&2 || true
+                fi
+                exit 1
+              fi
+
+              echo "OK: ci services ready postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT helios=$HELIOS_RPC_PORT"
             '';
           }
           // {
@@ -1494,7 +1568,7 @@ in
             appName = "ci-services-stop";
             kind = "ci-step";
             summary = "Stop local CI parity services";
-            description = "Stops local postgres/minio/reth service processes started for CI.";
+            description = "Stops local postgres/minio/reth/helios service processes started for CI.";
             tags = [
               "ci"
               "parity"
@@ -1509,6 +1583,22 @@ in
               postgres_data="$services_root/postgres/data"
               minio_pid_file="$services_root/minio/minio.pid"
               reth_pid_file="$services_root/reth/reth.pid"
+              helios_pid_file="$services_root/helios/helios.pid"
+
+              if [ -f "$helios_pid_file" ]; then
+                helios_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
+                if [ -n "$helios_pid" ] && kill -0 "$helios_pid" 2>/dev/null; then
+                  kill "$helios_pid" 2>/dev/null || true
+                  for _ in $(seq 1 40); do
+                    if ! kill -0 "$helios_pid" 2>/dev/null; then
+                      break
+                    fi
+                    sleep 0.25
+                  done
+                  kill -KILL "$helios_pid" 2>/dev/null || true
+                fi
+                rm -f "$helios_pid_file"
+              fi
 
               if [ -f "$reth_pid_file" ]; then
                 reth_pid="$(cat "$reth_pid_file" 2>/dev/null || true)"
