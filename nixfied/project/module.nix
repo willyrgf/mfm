@@ -110,6 +110,12 @@ let
 
   minioRootUser = conf.modules.minio.rootUser or "minio";
   minioRootPassword = conf.modules.minio.rootPassword or "minio123456";
+  configuredServices = conf.services or { };
+  postgresService = configuredServices.postgres or { };
+  nginxService = configuredServices.nginx or { };
+  minioService = configuredServices.minio or { };
+  rethService = configuredServices.reth or { };
+  heliosService = configuredServices.helios or { };
 
   sharedPassThroughEnv = [
     "HOME"
@@ -413,34 +419,46 @@ in
 
       services = {
         postgres = {
-          enable = conf.modules.postgres.enable or false;
-          database = conf.modules.postgres.database or "app";
-          portKey = conf.modules.postgres.portKey or "postgres";
+          enable = postgresService.enable or (conf.modules.postgres.enable or false);
+          database = postgresService.database or (conf.modules.postgres.database or "app");
+          portKey = postgresService.portKey or (conf.modules.postgres.portKey or "postgres");
+          sourceKeys = postgresService.sourceKeys or [ "local" ];
+          defaultSource = postgresService.defaultSource or "local";
         };
 
         nginx = {
-          enable = conf.modules.nginx.enable or false;
-          portKeyHttp = conf.modules.nginx.portKeyHttp or "http";
-          portKeyHttps = conf.modules.nginx.portKeyHttps or "https";
+          enable = nginxService.enable or (conf.modules.nginx.enable or false);
+          portKeyHttp = nginxService.portKeyHttp or (conf.modules.nginx.portKeyHttp or "http");
+          portKeyHttps = nginxService.portKeyHttps or (conf.modules.nginx.portKeyHttps or "https");
+          sourceKeys = nginxService.sourceKeys or [ "local" ];
+          defaultSource = nginxService.defaultSource or "local";
         };
 
         minio = {
-          enable = conf.modules.minio.enable or false;
-          portKeyApi = conf.modules.minio.portKeyApi or "minioApi";
-          portKeyConsole = conf.modules.minio.portKeyConsole or "minioConsole";
+          enable = minioService.enable or (conf.modules.minio.enable or false);
+          portKeyApi = minioService.portKeyApi or (conf.modules.minio.portKeyApi or "minioApi");
+          portKeyConsole =
+            minioService.portKeyConsole or (conf.modules.minio.portKeyConsole or "minioConsole");
+          sourceKeys = minioService.sourceKeys or [ "local" ];
+          defaultSource = minioService.defaultSource or "local";
         };
 
         reth = {
-          enable = conf.modules.reth.enable or false;
-          portKeyHttp = conf.modules.reth.portKeyHttp or "rethHttp";
-          portKeyWs = conf.modules.reth.portKeyWs or "rethWs";
-          portKeyAuth = conf.modules.reth.portKeyAuth or "rethAuth";
+          enable = rethService.enable or (conf.modules.reth.enable or false);
+          portKeyHttp = rethService.portKeyHttp or (conf.modules.reth.portKeyHttp or "rethHttp");
+          portKeyWs = rethService.portKeyWs or (conf.modules.reth.portKeyWs or "rethWs");
+          portKeyAuth = rethService.portKeyAuth or (conf.modules.reth.portKeyAuth or "rethAuth");
+          sourceKeys = rethService.sourceKeys or [ "local" ];
+          defaultSource = rethService.defaultSource or "local";
         };
 
         helios = {
-          enable = conf.modules.helios.enable or false;
-          portKeyRpc = conf.modules.helios.portKeyRpc or "heliosRpc";
-          executionRpcPortKey = conf.modules.helios.executionRpcPortKey or "rethHttp";
+          enable = heliosService.enable or (conf.modules.helios.enable or false);
+          portKeyRpc = heliosService.portKeyRpc or (conf.modules.helios.portKeyRpc or "heliosRpc");
+          executionRpcPortKey =
+            heliosService.executionRpcPortKey or (conf.modules.helios.executionRpcPortKey or "rethHttp");
+          sourceKeys = heliosService.sourceKeys or [ "local" ];
+          defaultSource = heliosService.defaultSource or "local";
         };
       };
 
@@ -804,6 +822,15 @@ in
             fi
 
             ${postgresPackage}/bin/createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres mfm >/dev/null 2>&1 || true
+
+            if ! ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
+              nix run .#ready -- --service postgres --source local >/dev/null 2>&1; then
+              echo "ERROR: postgres failed framework readiness checks port=$POSTGRES_PORT" >&2
+              if [ -f "$postgres_log" ]; then
+                tail -50 "$postgres_log" >&2 || true
+              fi
+              exit 1
+            fi
 
             if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
               -H 'content-type: application/json' \
@@ -1301,6 +1328,56 @@ in
               services_root="$artifacts_dir/services"
               mkdir -p "$services_root"
 
+              run_ready_task() {
+                local service="$1"
+                local source_key="$2"
+                ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
+                  nix run .#ready -- --service "$service" --source "$source_key"
+              }
+
+              wait_for_ready_task() {
+                local service="$1"
+                local timeout_secs="$2"
+                local interval_secs="$3"
+                local source_key="''${4:-local}"
+                local ready_log="$artifacts_dir/''${service}-ready.log"
+                local start_ts
+                local now_ts
+
+                case "$timeout_secs" in
+                  *[!0-9]*|"")
+                    echo "ERROR: timeout for service '$service' must be integer seconds (got '$timeout_secs')" >&2
+                    return 1
+                    ;;
+                esac
+
+                case "$interval_secs" in
+                  *[!0-9.]*|""|*.*.*|.*|*.)
+                    echo "ERROR: interval for service '$service' must be a positive number (got '$interval_secs')" >&2
+                    return 1
+                    ;;
+                esac
+
+                start_ts=$(date +%s)
+
+                while true; do
+                  if run_ready_task "$service" "$source_key" >"$ready_log" 2>&1; then
+                    return 0
+                  fi
+
+                  now_ts=$(date +%s)
+                  if [ $((now_ts - start_ts)) -ge "$timeout_secs" ]; then
+                    echo "ERROR: service '$service' failed readiness checks after $timeout_secs s" >&2
+                    if [ -f "$ready_log" ]; then
+                      tail -50 "$ready_log" >&2 || true
+                    fi
+                    return 1
+                  fi
+
+                  sleep "$interval_secs"
+                done
+              }
+
               postgres_root="$services_root/postgres"
               postgres_data="$postgres_root/data"
               postgres_run="$postgres_root/run"
@@ -1364,6 +1441,17 @@ in
               ${postgresPackage}/bin/createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres mfm >/dev/null 2>&1 || true
               ${postgresPackage}/bin/createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres mfm_test >/dev/null 2>&1 || true
 
+              if ! wait_for_ready_task "postgres" "30" "1" "local"; then
+                echo "ERROR: postgres failed framework readiness checks port=$POSTGRES_PORT" >&2
+                if [ -f "$postgres_log" ]; then
+                  tail -50 "$postgres_log" >&2 || true
+                fi
+                if command -v lsof >/dev/null 2>&1; then
+                  lsof -nP -iTCP:"$POSTGRES_PORT" -sTCP:LISTEN >&2 || true
+                fi
+                exit 1
+              fi
+
               minio_root="$services_root/minio"
               minio_data="$minio_root/data"
               minio_log="$artifacts_dir/minio-service.log"
@@ -1379,15 +1467,8 @@ in
                 echo "$!" > "$minio_root/minio.pid"
               fi
 
-              for _ in $(seq 1 120); do
-                if ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready" >/dev/null 2>&1; then
-                  break
-                fi
-                sleep 0.25
-              done
-
-              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready" >/dev/null 2>&1; then
-                echo "ERROR: minio failed to become ready port=$MINIO_API_PORT"
+              if ! wait_for_ready_task "minio" "45" "1" "local"; then
+                echo "ERROR: minio failed to become ready port=$MINIO_API_PORT" >&2
                 if [ -f "$minio_log" ]; then
                   tail -50 "$minio_log" >&2 || true
                 fi
@@ -1435,7 +1516,7 @@ in
               if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
                 -H 'content-type: application/json' \
                 --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
-                "http://127.0.0.1:$RETH_HTTP_PORT" \
+                "http://127.0.0.1:$RETH_HTTP_PORT" 2>/dev/null \
                 | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
                 ${rethPackage}/bin/reth node \
                   --dev \
@@ -1454,23 +1535,8 @@ in
                 echo "$!" > "$reth_root/reth.pid"
               fi
 
-              for _ in $(seq 1 160); do
-                if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-                  -H 'content-type: application/json' \
-                  --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
-                  "http://127.0.0.1:$RETH_HTTP_PORT" \
-                  | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-                  break
-                fi
-                sleep 0.25
-              done
-
-              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-                -H 'content-type: application/json' \
-                --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
-                "http://127.0.0.1:$RETH_HTTP_PORT" \
-                | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-                echo "ERROR: reth failed to become ready port=$RETH_HTTP_PORT"
+              if ! wait_for_ready_task "reth" "60" "1" "local"; then
+                echo "ERROR: reth failed to become ready port=$RETH_HTTP_PORT" >&2
                 if [ -f "$reth_log" ]; then
                   tail -50 "$reth_log" >&2 || true
                 fi
@@ -1500,7 +1566,7 @@ in
               if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
                 -H 'content-type: application/json' \
                 --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-                "http://127.0.0.1:$HELIOS_RPC_PORT" \
+                "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null \
                 | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
                 if [ -f "$helios_pid_file" ]; then
                   stale_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
@@ -1529,28 +1595,23 @@ in
                 echo "$!" > "$helios_pid_file"
               fi
 
-              for _ in $(seq 1 160); do
-                if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-                  -H 'content-type: application/json' \
-                  --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-                  "http://127.0.0.1:$HELIOS_RPC_PORT" \
-                  | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-                  break
-                fi
-                sleep 0.25
-              done
-
-              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-                -H 'content-type: application/json' \
-                --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-                "http://127.0.0.1:$HELIOS_RPC_PORT" \
-                | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-                echo "ERROR: helios failed to become ready port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL_VALUE"
+              if ! wait_for_ready_task "helios" "120" "1" "local"; then
+                echo "ERROR: helios failed to become ready port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL_VALUE" >&2
                 if [ -f "$helios_log" ]; then
                   tail -50 "$helios_log" >&2 || true
                 fi
                 if command -v lsof >/dev/null 2>&1; then
                   lsof -nP -iTCP:"$HELIOS_RPC_PORT" -sTCP:LISTEN >&2 || true
+                fi
+                exit 1
+              fi
+
+              health_log="$artifacts_dir/services-health.log"
+              if ! ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
+                nix run .#health -- --service all >"$health_log" 2>&1; then
+                echo "ERROR: framework health checks failed for ci services" >&2
+                if [ -f "$health_log" ]; then
+                  tail -50 "$health_log" >&2 || true
                 fi
                 exit 1
               fi

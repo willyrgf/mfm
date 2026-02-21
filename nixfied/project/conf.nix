@@ -289,8 +289,46 @@ rec {
   };
 
   services = {
-    names = [ ];
-    sockets = { };
+    postgres = {
+      enable = modules.postgres.enable;
+      database = modules.postgres.database;
+      portKey = modules.postgres.portKey;
+      sourceKeys = [ "local" ];
+      defaultSource = "local";
+    };
+
+    nginx = {
+      enable = modules.nginx.enable;
+      portKeyHttp = modules.nginx.portKeyHttp;
+      portKeyHttps = modules.nginx.portKeyHttps;
+      sourceKeys = [ "local" ];
+      defaultSource = "local";
+    };
+
+    minio = {
+      enable = modules.minio.enable;
+      portKeyApi = modules.minio.portKeyApi;
+      portKeyConsole = modules.minio.portKeyConsole;
+      sourceKeys = [ "local" ];
+      defaultSource = "local";
+    };
+
+    reth = {
+      enable = modules.reth.enable;
+      portKeyHttp = modules.reth.portKeyHttp;
+      portKeyWs = modules.reth.portKeyWs;
+      portKeyAuth = modules.reth.portKeyAuth;
+      sourceKeys = [ "local" ];
+      defaultSource = "local";
+    };
+
+    helios = {
+      enable = modules.helios.enable;
+      portKeyRpc = modules.helios.portKeyRpc;
+      executionRpcPortKey = modules.helios.executionRpcPortKey;
+      sourceKeys = [ "local" ];
+      defaultSource = "local";
+    };
   };
 
   packages = { };
