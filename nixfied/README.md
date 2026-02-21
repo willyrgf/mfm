@@ -63,6 +63,14 @@ Environment defaults:
 - `NIX_ENV=0`
 - `PROJECT_ENV=dev`
 
+Service configuration and selectors:
+
+- Configure services in `nixfied/project/conf.nix` under `services.<name>` (`enable`, `ports`, `sources`, `defaultSource`).
+- Service probes accept composable selectors on health/readiness checks: `--service <name|all>` and optional `--source <key>`.
+- `nix run .#health -- --service <name|all> [--source <key>]`
+- `nix run .#ready -- --service <name|all> [--source <key>]`
+- See `docs/modules/README.md` for service-specific configuration details.
+
 Ephemeral execution defaults (configured in `nixfied/project/conf.nix`):
 
 - `ephemeral.copyMode = "git-files"`: copies tracked + non-ignored untracked files.
@@ -89,7 +97,7 @@ Ephemeral runtime behavior:
 
 ## Docs
 
-- `ARCHITECTURE.md` for high-level architecture.
+- `docs/ARCHITECTURE.md` for high-level architecture.
 - `docs/DETAILED.md` for model, runtime, workflow, and registry contracts.
 - `REDESIGN.md` for redesign and migration context.
 - `docs/repo-map.md` for a repository-oriented index.

@@ -723,14 +723,50 @@ in
             }
             trap cleanup_services EXIT INT TERM
 
-            wait_postgres_ready() {
-              for _ in $(seq 1 120); do
-                if ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
+            wait_for_framework_health() {
+              local service="$1"
+              local timeout_secs="$2"
+              local interval_secs="$3"
+              local source_key="''${4:-local}"
+              local health_log="''${TMPDIR:-/tmp}/mfm-''${service}-health.$$.log"
+              local start_ts
+              local now_ts
+
+              case "$timeout_secs" in
+                *[!0-9]*|"")
+                  echo "ERROR: timeout for service '$service' must be integer seconds (got '$timeout_secs')" >&2
+                  return 1
+                  ;;
+              esac
+
+              case "$interval_secs" in
+                *[!0-9.]*|""|*.*.*|.*|*.)
+                  echo "ERROR: interval for service '$service' must be a positive number (got '$interval_secs')" >&2
+                  return 1
+                  ;;
+              esac
+
+              start_ts=$(date +%s)
+
+              while true; do
+                if ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
+                  nix run .#health -- --service "$service" --source "$source_key" >"$health_log" 2>&1; then
+                  rm -f "$health_log"
                   return 0
                 fi
-                sleep 0.25
+
+                now_ts=$(date +%s)
+                if [ $((now_ts - start_ts)) -ge "$timeout_secs" ]; then
+                  echo "ERROR: framework health check failed for service '$service' after $timeout_secs s" >&2
+                  if [ -f "$health_log" ]; then
+                    tail -50 "$health_log" >&2 || true
+                    rm -f "$health_log"
+                  fi
+                  return 1
+                fi
+
+                sleep "$interval_secs"
               done
-              return 1
             }
 
             wait_helios_rpc_ready() {
@@ -813,7 +849,7 @@ in
               STARTED_POSTGRES=1
             fi
 
-            if ! wait_postgres_ready; then
+            if ! wait_for_framework_health "postgres" "30" "1" "local"; then
               echo "ERROR: postgres failed to become ready port=$POSTGRES_PORT" >&2
               if [ -f "$postgres_log" ]; then
                 tail -50 "$postgres_log" >&2 || true
