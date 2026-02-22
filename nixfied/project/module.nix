@@ -354,6 +354,7 @@ let
       effects ? [ "writes-state" ],
       idempotent ? false,
       passThroughEnv ? sharedPassThroughEnv,
+      allowSensitivePassThrough ? true,
       env ? { },
     }:
     {
@@ -413,6 +414,7 @@ let
         hermetic = true;
         runtimeInputs = runtimeInputs;
         passThroughEnv = passThroughEnv;
+        allowSensitivePassThrough = allowSensitivePassThrough;
         inherit env;
         umask = "022";
         locale = "C.UTF-8";
@@ -552,8 +554,6 @@ in
           portKeyRpc = heliosService.portKeyRpc or (conf.modules.helios.portKeyRpc or "heliosRpc");
           executionRpcPortKey =
             heliosService.executionRpcPortKey or (conf.modules.helios.executionRpcPortKey or "rethHttp");
-          executionRpcUrl =
-            heliosService.executionRpcUrl or (conf.modules.helios.executionRpcUrl or "");
           sourceKeys = heliosService.sourceKeys or [ "local" ];
           defaultSource = heliosService.defaultSource or "local";
           sourceKinds = heliosService.sourceKinds or { };
@@ -705,7 +705,7 @@ in
             fi
 
             export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${conf.modules.helios.executionRpcUrl or "https://eth.drpc.org"}}"
-            export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${conf.modules.helios.consensusRpcUrl or "https://www.lightclientdata.org"}}"
+            export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${conf.modules.helios.consensusRpcUrl or "https://lodestar-mainnet.chainsafe.io"}}"
 
             if [ "''${MFM_KEEP_SERVICES+x}" = "x" ]; then
               echo "ERROR: MFM_KEEP_SERVICES has been removed from mfm::portfolio::snapshot" >&2
@@ -904,25 +904,64 @@ in
               done
             }
 
-            wait_for_framework_ready() {
-              local service="$1"
-              local timeout_secs="$2"
-              local interval_secs="$3"
-              local source_key="''${4:-local}"
-              local ready_log="''${TMPDIR:-/tmp}/mfm-''${service}-ready.$$.log"
+            command_is_real_helios() {
+              local cmd="$1"
+              if [ -z "$cmd" ]; then
+                return 1
+              fi
+              printf '%s\n' "$cmd" | ${pkgs.gnugrep}/bin/grep -Eq '(^|[[:space:]])[^[:space:]]*helios([[:space:]]|$)'
+            }
+
+            resolve_listener_pid() {
+              ${pkgs.lsof}/bin/lsof -t -nP -iTCP:"$HELIOS_RPC_PORT" -sTCP:LISTEN 2>/dev/null | head -n1 || true
+            }
+
+            resolve_listener_cmd() {
+              local pid="$1"
+              if [ -z "$pid" ]; then
+                return 0
+              fi
+              /bin/ps -p "$pid" -o command= 2>/dev/null || true
+            }
+
+            kill_listener_pid() {
+              local pid="$1"
+              if [ -z "$pid" ]; then
+                return 0
+              fi
+              kill "$pid" 2>/dev/null || true
+              for _ in $(seq 1 40); do
+                if ! kill -0 "$pid" 2>/dev/null; then
+                  return 0
+                fi
+                sleep 0.25
+              done
+              kill -KILL "$pid" 2>/dev/null || true
+            }
+
+            wait_for_helios_mainnet_sync() {
+              local timeout_secs="$1"
+              local interval_secs="$2"
               local start_ts
               local now_ts
+              local listener_pid
+              local listener_cmd
+              local block_json
+              local block_hex
+              local block_dec
+              local syncing_json
+              local syncing_result
 
               case "$timeout_secs" in
                 *[!0-9]*|"")
-                  echo "ERROR: timeout for service '$service' must be integer seconds (got '$timeout_secs')" >&2
+                  echo "ERROR: helios timeout must be integer seconds (got '$timeout_secs')" >&2
                   return 1
                   ;;
               esac
 
               case "$interval_secs" in
                 *[!0-9.]*|""|*.*.*|.*|*.)
-                  echo "ERROR: interval for service '$service' must be a positive number (got '$interval_secs')" >&2
+                  echo "ERROR: helios interval must be a positive number (got '$interval_secs')" >&2
                   return 1
                   ;;
               esac
@@ -930,20 +969,38 @@ in
               start_ts=$(date +%s)
 
               while true; do
-                if ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
-                  HELIOS_EXECUTION_RPC_URL="$HELIOS_EXECUTION_RPC_URL" \
-                  nix run .#ready -- --service "$service" --source "$source_key" >"$ready_log" 2>&1; then
-                  rm -f "$ready_log"
+                listener_pid="$(resolve_listener_pid)"
+                listener_cmd="$(resolve_listener_cmd "$listener_pid")"
+
+                block_json="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                  -H 'content-type: application/json' \
+                  --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+                  "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null || true)"
+                block_hex="$(printf '%s' "$block_json" | ${pkgs.jq}/bin/jq -r '.result // empty' 2>/dev/null || true)"
+                block_dec=-1
+                if [[ "$block_hex" =~ ^0x[0-9a-fA-F]+$ ]]; then
+                  block_dec=$((16#''${block_hex#0x}))
+                fi
+
+                syncing_json="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                  -H 'content-type: application/json' \
+                  --data '{"jsonrpc":"2.0","id":1,"method":"eth_syncing","params":[]}' \
+                  "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null || true)"
+                syncing_result="$(printf '%s' "$syncing_json" | ${pkgs.jq}/bin/jq -c '.result' 2>/dev/null || true)"
+
+                if command_is_real_helios "$listener_cmd" && [ "$syncing_result" = "false" ] && [ "$block_dec" -gt 1 ]; then
+                  echo "INFO: helios sync ready port=$HELIOS_RPC_PORT pid=$listener_pid block_number=$block_hex syncing=false"
                   return 0
                 fi
 
                 now_ts=$(date +%s)
                 if [ $((now_ts - start_ts)) -ge "$timeout_secs" ]; then
-                  echo "ERROR: framework readiness check failed for service '$service' after $timeout_secs s" >&2
-                  if [ -f "$ready_log" ]; then
-                    tail -50 "$ready_log" >&2 || true
-                    rm -f "$ready_log"
+                  echo "ERROR: helios sync gate timed out after $timeout_secs s port=$HELIOS_RPC_PORT" >&2
+                  if [ -n "$listener_pid" ]; then
+                    echo "ERROR: helios listener pid=$listener_pid cmd=$listener_cmd" >&2
                   fi
+                  echo "ERROR: helios eth_blockNumber response: ''${block_json:-<none>}" >&2
+                  echo "ERROR: helios eth_syncing response: ''${syncing_json:-<none>}" >&2
                   return 1
                 fi
 
@@ -992,11 +1049,20 @@ in
               exit 1
             fi
 
-            if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+            existing_listener_pid="$(resolve_listener_pid)"
+            existing_listener_cmd="$(resolve_listener_cmd "$existing_listener_pid")"
+            reuse_helios_listener=0
+
+            if command_is_real_helios "$existing_listener_cmd" && ${pkgs.curl}/bin/curl -fsS --max-time 2 \
               -H 'content-type: application/json' \
               --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
               "http://127.0.0.1:$HELIOS_RPC_PORT" \
               | ${pkgs.jq}/bin/jq -e '.result | strings' >/dev/null 2>&1; then
+              reuse_helios_listener=1
+              echo "INFO: reusing existing helios listener pid=$existing_listener_pid port=$HELIOS_RPC_PORT"
+            fi
+
+            if [ "$reuse_helios_listener" != "1" ]; then
               if [ -f "$helios_pid_file" ]; then
                 stale_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
                 if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
@@ -1004,16 +1070,12 @@ in
                 fi
               fi
 
-              existing_listener_pid="$(${pkgs.lsof}/bin/lsof -tiTCP:"$HELIOS_RPC_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+              if [ -n "$existing_listener_pid" ] && ! command_is_real_helios "$existing_listener_cmd"; then
+                echo "WARN: replacing non-helios listener on port=$HELIOS_RPC_PORT pid=$existing_listener_pid cmd=$existing_listener_cmd" >&2
+              fi
+
               if [ -n "$existing_listener_pid" ]; then
-                kill "$existing_listener_pid" 2>/dev/null || true
-                for _ in $(seq 1 40); do
-                  if ! kill -0 "$existing_listener_pid" 2>/dev/null; then
-                    break
-                  fi
-                  sleep 0.25
-                done
-                kill -KILL "$existing_listener_pid" 2>/dev/null || true
+                kill_listener_pid "$existing_listener_pid"
               fi
 
               HELIOS_ARGS=(
@@ -1037,16 +1099,8 @@ in
               STARTED_HELIOS=1
             fi
 
-            if ! wait_for_framework_health "helios" "120" "1" "local"; then
-              echo "ERROR: helios failed to become healthy port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
-              if [ -f "$helios_log" ]; then
-                tail -50 "$helios_log" >&2 || true
-              fi
-              exit 1
-            fi
-
-            if ! wait_for_framework_ready "helios" "120" "1" "local"; then
-              echo "ERROR: helios failed framework readiness checks port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
+            if ! wait_for_helios_mainnet_sync "180" "1"; then
+              echo "ERROR: helios failed mainnet sync checks port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
               if [ -f "$helios_log" ]; then
                 tail -50 "$helios_log" >&2 || true
               fi
@@ -2093,7 +2147,7 @@ in
 
               export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
               export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${conf.modules.helios.executionRpcUrl or "https://eth.drpc.org"}}"
-              export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${conf.modules.helios.consensusRpcUrl or "https://www.lightclientdata.org"}}"
+              export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${conf.modules.helios.consensusRpcUrl or "https://lodestar-mainnet.chainsafe.io"}}"
 
               echo "INFO: running ci step=mainnet-portfolio-snapshot-helios address=$address"
 

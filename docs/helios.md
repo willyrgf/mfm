@@ -18,7 +18,7 @@ The wrapper is implemented in `nixfied/project/module.nix` (`task.mfm.portfolio.
 - exactly one positional address argument
 - defaults `HELIOS_NETWORK` to `mainnet` and rejects non-mainnet values
 - fallback `HELIOS_EXECUTION_RPC_URL=https://eth.drpc.org` when unset
-- fallback `HELIOS_CONSENSUS_RPC_URL=https://www.lightclientdata.org` when unset
+- fallback `HELIOS_CONSENSUS_RPC_URL=https://lodestar-mainnet.chainsafe.io` when unset
 - runtime Helios binary resolution via `HELIOS_BIN`, `PATH`, or cached real
   `/nix/store/*-helios-unstable-*/bin/helios`
 - Postgres + Helios lifecycle orchestration with reuse policy envs

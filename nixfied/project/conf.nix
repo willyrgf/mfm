@@ -263,7 +263,7 @@ rec {
       # Mainnet default for workflows that do not set HELIOS_EXECUTION_RPC_URL explicitly.
       executionRpcUrl = "https://eth.drpc.org";
       # Mainnet default consensus endpoint used by Helios snapshot workflows.
-      consensusRpcUrl = "https://www.lightclientdata.org";
+      consensusRpcUrl = "https://lodestar-mainnet.chainsafe.io";
       checkpoint = "";
       extraArgs = [ ];
     };
@@ -339,7 +339,6 @@ rec {
       enable = modules.helios.enable;
       portKeyRpc = modules.helios.portKeyRpc;
       executionRpcPortKey = modules.helios.executionRpcPortKey;
-      executionRpcUrl = modules.helios.executionRpcUrl;
       sourceKeys = [ "local" ];
       defaultSource = "local";
     };
