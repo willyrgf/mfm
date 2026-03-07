@@ -175,13 +175,19 @@ let
       CXX = "/usr/bin/c++";
     };
 
+  # CI runs under ephemeral roots, so persistent sccache state can retain stale
+  # temp paths across repeated runs.
+  ciCargoRustEnv = builtins.removeAttrs sharedCargoRustEnv [ "RUSTC_WRAPPER" ];
+  ciArtifactsRoot = conf.process.artifactsRoot or "/tmp/ci-artifacts/${project.id}";
+  ciShellAppContractsTimeoutSec = 300;
+
   cargoFmtCheckCmd = "cargo fmt --all -- --check";
   cargoClippyCmd = "cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings";
   cargoNextestCiCmd = "cargo nextest run --cargo-profile ci";
   cargoNextestWorkspaceCiCmd = "${cargoNextestCiCmd} --workspace";
 
   ciStepPreamble = ''
-    artifacts_dir="''${CI_ARTIFACTS_DIR:-/tmp/ci-artifacts}"
+    artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
     mkdir -p "$artifacts_dir"
 
     # Keep Cargo artifacts outside the workspace root so parallel CI steps do
@@ -504,8 +510,9 @@ in
       };
 
       state = {
+        workspaceId = conf.process.workspaceId or project.id;
         registryRoot = conf.process.registryRoot;
-        artifactsRoot = "/tmp/ci-artifacts";
+        artifactsRoot = ciArtifactsRoot;
       };
 
       tooling = {
@@ -1265,7 +1272,7 @@ in
             "nix run .#ci -- --mode mainnet --summary"
           ];
           runtimeInputs = rustRuntimeInputs;
-          env = sharedCargoRustEnv;
+          env = ciCargoRustEnv;
           workflowId = "workflow.ci.full";
           contractArgs = [
             {
@@ -1335,7 +1342,7 @@ in
               "quality"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = sharedCargoRustEnv;
+            env = ciCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -1361,7 +1368,7 @@ in
               "quality"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = sharedCargoRustEnv;
+            env = ciCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -1387,7 +1394,7 @@ in
               "quality"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = sharedCargoRustEnv;
+            env = ciCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -1413,6 +1420,7 @@ in
               "quality"
             ];
             runtimeInputs = rustRuntimeInputs;
+            env = ciCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -1433,7 +1441,15 @@ in
                 jq -e "." "$ROOT/nixfied/schemas/workflow-contract.json" >/dev/null
                 jq -e "." "$ROOT/nixfied/schemas/model-export.json" >/dev/null
 
-                nix run "path:$ROOT"#model >/dev/null
+                model_rc=0
+                ${pkgs.coreutils}/bin/timeout --signal=TERM --kill-after=10s ${toString ciShellAppContractsTimeoutSec} \
+                  nix run "path:$ROOT"#model >/dev/null || model_rc="$?"
+                if [ "$model_rc" -ne 0 ]; then
+                  if [ "$model_rc" -eq 124 ]; then
+                    echo "ERROR: model export timed out after ${toString ciShellAppContractsTimeoutSec}s"
+                  fi
+                  exit "$model_rc"
+                fi
 
                 MODEL_INFO_JSON="$(nix eval --impure --json --file "$ROOT/nixfied/project/model-introspection.nix")"
                 SYSTEM="$(jq -r ".system" <<<"$MODEL_INFO_JSON")"
@@ -1512,7 +1528,7 @@ in
               "tests"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = sharedCargoRustEnv;
+            env = ciCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -1929,7 +1945,7 @@ in
               "audit"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = sharedCargoRustEnv;
+            env = ciCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -1955,7 +1971,7 @@ in
               "parity"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = sharedCargoRustEnv;
+            env = ciCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -1981,7 +1997,7 @@ in
               "parity"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = sharedCargoRustEnv;
+            env = ciCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -2008,7 +2024,7 @@ in
               "parity"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = sharedCargoRustEnv;
+            env = ciCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -2055,7 +2071,7 @@ in
               "parity"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = sharedCargoRustEnv;
+            env = ciCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -2082,7 +2098,7 @@ in
               "parity"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = sharedCargoRustEnv;
+            env = ciCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -2109,7 +2125,7 @@ in
               "parity"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = sharedCargoRustEnv;
+            env = ciCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -2136,7 +2152,7 @@ in
               "mainnet"
             ];
             runtimeInputs = rustRuntimeInputs;
-            env = sharedCargoRustEnv;
+            env = ciCargoRustEnv;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -2748,7 +2764,7 @@ in
             alwaysRun = true;
           };
           artifacts = {
-            root = "/tmp/ci-artifacts";
+            root = ciArtifactsRoot;
             keepOnSuccess = false;
             keepOnFailure = true;
             writeSummary = true;
@@ -2779,7 +2795,7 @@ in
             alwaysRun = true;
           };
           artifacts = {
-            root = "/tmp/ci-artifacts";
+            root = ciArtifactsRoot;
             keepOnSuccess = false;
             keepOnFailure = true;
             writeSummary = true;
@@ -2845,7 +2861,7 @@ in
             alwaysRun = true;
           };
           artifacts = {
-            root = "/tmp/ci-artifacts";
+            root = ciArtifactsRoot;
             keepOnSuccess = false;
             keepOnFailure = true;
             writeSummary = true;
@@ -2881,7 +2897,7 @@ in
             alwaysRun = true;
           };
           artifacts = {
-            root = "/tmp/ci-artifacts";
+            root = ciArtifactsRoot;
             keepOnSuccess = false;
             keepOnFailure = true;
             writeSummary = true;
@@ -2913,7 +2929,7 @@ in
             alwaysRun = true;
           };
           artifacts = {
-            root = "/tmp/ci-artifacts";
+            root = ciArtifactsRoot;
             keepOnSuccess = false;
             keepOnFailure = true;
             writeSummary = true;

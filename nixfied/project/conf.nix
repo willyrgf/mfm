@@ -28,9 +28,9 @@ let
   aaveOriginTools = if pkgs == null then null else import ./aave-origin-tools.nix { inherit pkgs; };
   cachedFrameworkHeliosNames =
     if builtins.pathExists /nix/store then
-      builtins.filter
-        (name: builtins.match ".*-helios-unstable-[0-9-]+$" name != null)
-        (builtins.attrNames (builtins.readDir /nix/store))
+      builtins.filter (name: builtins.match ".*-helios-unstable-[0-9-]+$" name != null) (
+        builtins.attrNames (builtins.readDir /nix/store)
+      )
     else
       [ ];
   cachedFrameworkHeliosPackage =
@@ -197,6 +197,8 @@ rec {
 
   process = {
     registryRoot = "/tmp/nixfied-runtime/${project.id}";
+    artifactsRoot = "/tmp/ci-artifacts/${project.id}";
+    workspaceId = project.id;
   };
 
   modules = {
