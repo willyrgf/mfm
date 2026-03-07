@@ -6,6 +6,39 @@
 //! Security notes:
 //! - RPC URLs and authorization headers are runtime configuration and MUST NOT be persisted.
 //! - Errors MUST NOT include request payloads, response bodies, or authorization values.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use std::time::Duration;
+//!
+//! use mfm_collectors_evm_jsonrpc_http::{
+//!     EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmRoutingStrategy,
+//!     EvmSourceKind,
+//! };
+//!
+//! let factory = EvmJsonRpcHttpTransportFactory::new(EvmJsonRpcHttpConfig {
+//!     sources: vec![EvmJsonRpcSource {
+//!         id: "primary".to_string(),
+//!         rpc_url: "http://127.0.0.1:8545".to_string(),
+//!         authorization: None,
+//!         kind: EvmSourceKind::Local,
+//!         require_get_proof_probe: false,
+//!     }],
+//!     preferred_order: vec!["primary".to_string()],
+//!     strategy: EvmRoutingStrategy::Failover,
+//!     hedge_delay: Duration::from_millis(100),
+//!     timeout: Duration::from_secs(5),
+//!     unhealthy_cooldown_calls: 1,
+//!     hedge_max_eth_call_params_bytes: 4096,
+//!     logs_max_block_span: 512,
+//!     logs_min_block_span: 64,
+//!     logs_max_chunks_per_call: 16,
+//! });
+//!
+//! let _ = factory;
+//! ```
+#![warn(missing_docs)]
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -132,10 +165,14 @@ fn jsonrpc_error_details(
     )
 }
 
+/// Classification of an RPC source used for routing and failover scoring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvmSourceKind {
+    /// A local node or light client on the same host or LAN.
     Local,
+    /// A shared public endpoint with lower trust and lower preference.
     RemotePublic,
+    /// A user-configured remote endpoint expected to be more stable than public ones.
     RemoteUser,
 }
 
@@ -149,32 +186,52 @@ impl EvmSourceKind {
     }
 }
 
+/// Single RPC endpoint entry used by the HTTP transport.
 #[derive(Debug, Clone)]
 pub struct EvmJsonRpcSource {
+    /// Stable source identifier used for routing hints and diagnostics.
     pub id: String,
+    /// Full RPC URL for the endpoint.
     pub rpc_url: String,
+    /// Optional authorization header value used for authenticated endpoints.
     pub authorization: Option<String>,
+    /// Source classification used during source ordering.
     pub kind: EvmSourceKind,
+    /// Whether the source must pass an `eth_getProof` capability probe before use.
     pub require_get_proof_probe: bool,
 }
 
+/// High-level routing strategy for read-only RPC calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvmRoutingStrategy {
+    /// Send requests to one source at a time and fail over on retriable errors.
     Failover,
+    /// Hedge lightweight read calls across multiple sources after a short delay.
     HedgedLight,
 }
 
+/// Runtime configuration for the EVM JSON-RPC HTTP transport.
 #[derive(Clone)]
 pub struct EvmJsonRpcHttpConfig {
+    /// Registered RPC sources available to the transport.
     pub sources: Vec<EvmJsonRpcSource>,
+    /// Preferred source ordering by source id.
     pub preferred_order: Vec<String>,
+    /// Routing strategy for read-only calls.
     pub strategy: EvmRoutingStrategy,
+    /// Delay before dispatching a hedged call.
     pub hedge_delay: Duration,
+    /// Per-request HTTP timeout.
     pub timeout: Duration,
+    /// Number of calls a source remains unhealthy before re-entry.
     pub unhealthy_cooldown_calls: u64,
+    /// Maximum serialized params size eligible for hedged `eth_call`.
     pub hedge_max_eth_call_params_bytes: usize,
+    /// Maximum block span per chunked `eth_getLogs` request.
     pub logs_max_block_span: u64,
+    /// Minimum block span when progressively shrinking `eth_getLogs` chunks.
     pub logs_min_block_span: u64,
+    /// Maximum number of `eth_getLogs` chunks attempted for one logical call.
     pub logs_max_chunks_per_call: u64,
 }
 
@@ -195,13 +252,20 @@ impl Default for EvmJsonRpcHttpConfig {
     }
 }
 
+/// Validation errors for [`EvmJsonRpcHttpConfig`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvmJsonRpcHttpConfigError {
+    /// No RPC sources were configured.
     NoSources,
+    /// A configured source id was empty.
     EmptySourceId,
+    /// Two configured sources used the same id.
     DuplicateSourceId(String),
+    /// Preferred ordering referenced a source id not present in `sources`.
     UnknownPreferredSourceId(String),
+    /// `eth_getLogs` chunk sizing configuration was inconsistent.
     InvalidLogsChunkingRange,
+    /// `eth_getLogs` chunk count limit was zero.
     InvalidLogsChunkingChunkLimit,
 }
 
@@ -276,6 +340,7 @@ fn validate_config(cfg: &EvmJsonRpcHttpConfig) -> Result<(), EvmJsonRpcHttpConfi
     Ok(())
 }
 
+/// Live-IO transport factory for the `evm` namespace group.
 #[derive(Clone)]
 pub struct EvmJsonRpcHttpTransportFactory {
     cfg: EvmJsonRpcHttpConfig,
@@ -336,6 +401,7 @@ fn parse_source_kind(raw: Option<&str>) -> EvmSourceKind {
     }
 }
 
+/// Resolves the EVM RPC source registry from the supported environment variables.
 pub fn resolve_evm_rpc_sources_from_env() -> Vec<EvmJsonRpcSource> {
     if let Ok(raw_json) = std::env::var(ENV_EVM_RPC_SOURCES_JSON) {
         let trimmed = raw_json.trim();
@@ -441,6 +507,7 @@ fn resolve_evm_rpc_config_from_env() -> EvmJsonRpcHttpConfig {
 }
 
 impl EvmJsonRpcHttpTransportFactory {
+    /// Creates a new transport factory and stores any config validation error for later use.
     pub fn new(cfg: EvmJsonRpcHttpConfig) -> Self {
         let client = reqwest::Client::builder()
             .timeout(cfg.timeout)
@@ -454,6 +521,7 @@ impl EvmJsonRpcHttpTransportFactory {
         }
     }
 
+    /// Validates the configuration and constructs a transport factory.
     pub fn try_new(cfg: EvmJsonRpcHttpConfig) -> Result<Self, EvmJsonRpcHttpConfigError> {
         validate_config(&cfg)?;
         let client = reqwest::Client::builder()
@@ -467,6 +535,7 @@ impl EvmJsonRpcHttpTransportFactory {
         })
     }
 
+    /// Builds a transport factory from environment-derived configuration.
     pub fn from_env() -> Result<Self, EvmJsonRpcHttpConfigError> {
         Ok(Self::new(resolve_evm_rpc_config_from_env()))
     }

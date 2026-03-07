@@ -2,6 +2,7 @@ use mfm_machine::errors::StateError;
 
 use crate::errors::state_unknown;
 
+/// Maps low-level validation parse failures to stable user-facing messages.
 pub fn validation_assertion_error_message(err: &str) -> &'static str {
     match err {
         "read assertion did not match ABI" => "read assertion did not match ABI",
@@ -15,6 +16,7 @@ pub fn validation_assertion_error_message(err: &str) -> &'static str {
     }
 }
 
+/// Expects a JSON string response and maps mismatches to a stable state error.
 pub fn expect_string(
     response: &serde_json::Value,
     code: &'static str,
@@ -26,6 +28,7 @@ pub fn expect_string(
         .ok_or_else(|| state_unknown(code, message))
 }
 
+/// Expects a JSON array response and maps mismatches to a stable state error.
 pub fn expect_array<'a>(
     response: &'a serde_json::Value,
     code: &'static str,
@@ -36,6 +39,7 @@ pub fn expect_array<'a>(
         .ok_or_else(|| state_unknown(code, message))
 }
 
+/// Returns `Ok(())` when `condition` is true, otherwise returns a stable state error.
 pub fn assert_condition(
     condition: bool,
     code: &'static str,

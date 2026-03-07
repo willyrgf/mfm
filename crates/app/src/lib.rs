@@ -1,3 +1,25 @@
+#![warn(missing_docs)]
+//! Application-facing orchestration bridge for MFM binaries and transports.
+//!
+//! `mfm-app` wires together the operation registry, transport registry, storage defaults, and
+//! higher-level request/response helpers used by the CLI and REST API. It keeps binary crates thin
+//! by exposing transport-safe entrypoints that map requests onto SDK launch/resume flows.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use mfm_app::{
+//!     make_default_artifact_store, make_default_event_store, make_engine_bundle, AppServices,
+//! };
+//!
+//! async fn boot() -> Result<AppServices, mfm_app::AppError> {
+//!     let bundle = make_engine_bundle();
+//!     let events = make_default_event_store().await?;
+//!     let artifacts = make_default_artifact_store().await?;
+//!     Ok(AppServices::new(bundle, events, artifacts))
+//! }
+//! ```
+/// Shared observability configuration used by the CLI and REST API.
 pub mod observability;
 
 use std::collections::HashMap;
@@ -65,23 +87,34 @@ const ENV_DATABASE_URL: &str = "DATABASE_URL";
 const ENV_PORTFOLIO_TOKENS_JSON: &str = "MFM_PORTFOLIO_TOKENS_JSON";
 const ENV_S3_ENSURE_BUCKET: &str = "MFM_S3_ENSURE_BUCKET";
 
+/// High-level error classes used by application-facing APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorClass {
+    /// The caller provided invalid input.
     BadRequest,
+    /// The requested run, artifact, or feature was not found.
     NotFound,
+    /// The request conflicted with current persisted state.
     Conflict,
+    /// A downstream dependency such as RPC failed.
     BadGateway,
+    /// An internal application error occurred.
     Internal,
 }
 
+/// Stable error payload returned by application-facing helper APIs.
 #[derive(Debug, Clone)]
 pub struct AppError {
+    /// High-level error classification for HTTP/CLI mapping.
     pub class: ErrorClass,
+    /// Stable machine-readable error code.
     pub code: String,
+    /// Human-readable message safe to display to callers.
     pub message: String,
 }
 
 impl AppError {
+    /// Creates an application error from the supplied classification, code, and message.
     pub fn new(class: ErrorClass, code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             class,
@@ -90,6 +123,7 @@ impl AppError {
         }
     }
 
+    /// Returns the standard invalid-JSON error payload.
     pub fn invalid_json() -> Self {
         Self::new(
             ErrorClass::BadRequest,
@@ -98,18 +132,22 @@ impl AppError {
         )
     }
 
+    /// Returns the standard invalid-UUID error payload.
     pub fn invalid_uuid() -> Self {
         Self::new(ErrorClass::BadRequest, "InvalidUuid", "Invalid UUID format")
     }
 
+    /// Returns a generic bad-request error with the supplied message.
     pub fn invalid_request(message: impl Into<String>) -> Self {
         Self::new(ErrorClass::BadRequest, "InvalidRequest", message)
     }
 
+    /// Returns a not-found error with an explicit code and message.
     pub fn not_found(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self::new(ErrorClass::NotFound, code, message)
     }
 
+    /// Returns the canonical error for unknown feature identifiers.
     pub fn feature_not_found(feature_id: &str) -> Self {
         Self::new(
             ErrorClass::NotFound,
@@ -127,6 +165,7 @@ impl fmt::Display for AppError {
 
 impl std::error::Error for AppError {}
 
+/// Maps a storage-layer error into the application error contract.
 pub fn app_error_from_storage_error(err: StorageError) -> AppError {
     match err {
         StorageError::Concurrency(info) => {
@@ -141,6 +180,7 @@ pub fn app_error_from_storage_error(err: StorageError) -> AppError {
     }
 }
 
+/// Maps an engine `RunError` into the application error contract.
 pub fn app_error_from_run_error(err: RunError) -> AppError {
     let info = match err {
         RunError::InvalidPlan(info) => info,
@@ -179,6 +219,7 @@ pub fn app_error_from_run_error(err: RunError) -> AppError {
     AppError::new(class, info.code.0, info.message)
 }
 
+/// In-memory context implementation used by default request flows.
 #[derive(Default)]
 pub struct MapContext {
     inner: HashMap<String, serde_json::Value>,
@@ -208,10 +249,12 @@ impl DynContext for MapContext {
     }
 }
 
+/// Returns the default empty initial context for new runs.
 pub fn default_initial_context() -> Box<dyn DynContext> {
     Box::new(MapContext::default())
 }
 
+/// Returns build provenance defaults for application-triggered runs.
 pub fn default_build_provenance() -> BuildProvenance {
     BuildProvenance {
         git_commit: None,
@@ -223,6 +266,7 @@ pub fn default_build_provenance() -> BuildProvenance {
     }
 }
 
+/// Returns the baseline run configuration used by app-facing helpers.
 pub fn default_run_config() -> RunConfig {
     RunConfig {
         io_mode: IoMode::Live,
@@ -241,6 +285,7 @@ pub fn default_run_config() -> RunConfig {
     }
 }
 
+/// Converts an engine phase to the stable lowercase response string.
 pub fn phase_str(phase: &RunPhase) -> &'static str {
     match phase {
         RunPhase::Running => "running",
@@ -250,6 +295,7 @@ pub fn phase_str(phase: &RunPhase) -> &'static str {
     }
 }
 
+/// Resolves the default local artifact root from `MFM_ARTIFACT_ROOT` or `$HOME/.mfm/run_artifacts`.
 pub fn default_artifact_root() -> PathBuf {
     std::env::var(ENV_ARTIFACT_ROOT)
         .ok()
@@ -260,6 +306,7 @@ pub fn default_artifact_root() -> PathBuf {
         })
 }
 
+/// Builds the default artifact store from environment configuration.
 #[instrument(level = "info", skip_all)]
 pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, AppError> {
     let backend = std::env::var(ENV_ARTIFACT_BACKEND).unwrap_or_else(|_| "fs".to_string());
@@ -289,6 +336,7 @@ pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, App
     }
 }
 
+/// Builds the default event store from environment configuration.
 #[instrument(level = "info", skip_all)]
 pub async fn make_default_event_store() -> Result<Arc<dyn EventStore>, AppError> {
     let database_url = std::env::var(ENV_DATABASE_URL).map_err(|_| {
@@ -307,21 +355,30 @@ pub async fn make_default_event_store() -> Result<Arc<dyn EventStore>, AppError>
     Ok(Arc::new(store))
 }
 
+/// Shared engine wiring used by application-facing services.
 #[derive(Clone)]
 pub struct EngineBundle {
+    /// Execution engine used for start and resume requests.
     pub engine: Arc<dyn ExecutionEngine>,
+    /// Operation registry used for planning and resume.
     pub registry: Arc<dyn OperationRegistry>,
+    /// Pipeline planner used to build execution plans.
     pub planner: Arc<dyn PipelinePlanner>,
 }
 
+/// Extension point for registering operations into the default app bundle.
 pub trait OperationPlugin: Send + Sync {
+    /// Registers operations on the mutable registry during application boot.
     fn register_operations(&self, registry: &mut HashMapOperationRegistry);
 }
 
+/// Extension point for registering live-IO transports into the default app bundle.
 pub trait TransportPlugin: Send + Sync {
+    /// Registers transports on the mutable registry during application boot.
     fn register_transports(&self, registry: &mut HashMapTransportRegistry) -> Result<(), AppError>;
 }
 
+/// Default operation plugin that installs the built-in operation catalog.
 #[derive(Clone, Default)]
 pub struct DefaultOperationPlugin;
 
@@ -345,6 +402,7 @@ impl OperationPlugin for DefaultOperationPlugin {
     }
 }
 
+/// Default transport plugin that installs the built-in transport catalog.
 #[derive(Clone, Default)]
 pub struct DefaultTransportPlugin;
 
@@ -382,6 +440,7 @@ fn register_transport_factory(
     })
 }
 
+/// Builder for the default application engine bundle.
 pub struct AppBuilder {
     operation_plugins: Vec<Arc<dyn OperationPlugin>>,
     transport_plugins: Vec<Arc<dyn TransportPlugin>>,
@@ -395,6 +454,7 @@ impl Default for AppBuilder {
 }
 
 impl AppBuilder {
+    /// Creates an application builder with the default plugins installed.
     pub fn new() -> Self {
         Self {
             operation_plugins: vec![Arc::new(DefaultOperationPlugin)],
@@ -403,16 +463,19 @@ impl AppBuilder {
         }
     }
 
+    /// Adds an operation plugin to the application builder.
     pub fn with_operation_plugin(mut self, plugin: Arc<dyn OperationPlugin>) -> Self {
         self.operation_plugins.push(plugin);
         self
     }
 
+    /// Adds a transport plugin to the application builder.
     pub fn with_transport_plugin(mut self, plugin: Arc<dyn TransportPlugin>) -> Self {
         self.transport_plugins.push(plugin);
         self
     }
 
+    /// Builds the engine bundle used by `AppServices`.
     pub fn build(self) -> Result<EngineBundle, AppError> {
         let mut reg = HashMapOperationRegistry::default();
         for plugin in &self.operation_plugins {
@@ -447,20 +510,26 @@ impl AppBuilder {
     }
 }
 
+/// Builds the default engine bundle and panics only if the built-in wiring is invalid.
 pub fn make_engine_bundle() -> EngineBundle {
     AppBuilder::new()
         .build()
         .expect("default app builder must build an engine bundle")
 }
 
+/// High-level service facade used by the CLI and REST API.
 #[derive(Clone)]
 pub struct AppServices {
+    /// Engine bundle used for planning and execution.
     pub bundle: EngineBundle,
+    /// Event store used for run status and event queries.
     pub events: Arc<dyn EventStore>,
+    /// Artifact store used for snapshots, facts, and outputs.
     pub artifacts: Arc<dyn ArtifactStore>,
 }
 
 impl AppServices {
+    /// Creates a new service facade from the supplied engine bundle and stores.
     pub fn new(
         bundle: EngineBundle,
         events: Arc<dyn EventStore>,
@@ -485,6 +554,7 @@ impl AppServices {
         skip(self, req),
         fields(op_id, machine_id, request_kind)
     )]
+    /// Starts a new run from either a single-op request or a full pipeline request.
     pub async fn start_run(&self, req: RunsStartRequest) -> Result<RunStartResponse, AppError> {
         let (pipeline, input, run_config) = match req {
             RunsStartRequest::Single(req) => {
@@ -549,6 +619,7 @@ impl AppServices {
     }
 
     #[instrument(level = "info", skip(self), fields(run_id = run_id))]
+    /// Resumes a previously started run by UUID string.
     pub async fn resume_run(&self, run_id: &str) -> Result<RunResumeResponse, AppError> {
         let uuid = uuid::Uuid::parse_str(run_id).map_err(|_| AppError::invalid_uuid())?;
         let run_id = RunId(uuid);
@@ -578,6 +649,7 @@ impl AppServices {
     }
 
     #[instrument(level = "debug", skip(self), fields(run_id = run_id))]
+    /// Returns the current run status by scanning the persisted event stream.
     pub async fn run_status(&self, run_id: &str) -> Result<RunStatusResponse, AppError> {
         let uuid = uuid::Uuid::parse_str(run_id).map_err(|_| AppError::invalid_uuid())?;
         let run_id = RunId(uuid);
@@ -659,6 +731,7 @@ impl AppServices {
         skip(self, query),
         fields(run_id = run_id, from_seq = query.from_seq, to_seq = ?query.to_seq)
     )]
+    /// Returns a range of persisted events for the requested run.
     pub async fn run_events(
         &self,
         run_id: &str,
@@ -699,10 +772,12 @@ impl AppServices {
     }
 
     #[instrument(level = "debug", skip(self), fields(artifact_id = artifact_id))]
+    /// Loads an artifact by content address and returns a transport-friendly body.
     pub async fn artifact_get(&self, artifact_id: &str) -> Result<ArtifactGetResponse, AppError> {
         get_artifact_from_store(Arc::clone(&self.artifacts), artifact_id).await
     }
 
+    /// Starts the standard deploy-configure-validate pipeline template.
     pub async fn start_deploy_configure_validate(
         &self,
         spec: DeployConfigureValidateSpec,
@@ -716,6 +791,7 @@ impl AppServices {
         .await
     }
 
+    /// Starts the deploy-configure-validate template from raw JSON or a JSON file.
     pub async fn start_deploy_configure_validate_from_spec_input(
         &self,
         spec_json: Option<String>,
@@ -756,6 +832,7 @@ impl AppServices {
         self.start_deploy_configure_validate(spec).await
     }
 
+    /// Starts a portfolio snapshot run and extracts the final report when available.
     pub async fn start_portfolio_snapshot(
         &self,
         req: PortfolioSnapshotRequest,
@@ -840,6 +917,7 @@ impl AppServices {
         })
     }
 
+    /// Starts a portfolio snapshot run using a CLI-style `--tokens-json` string.
     pub async fn start_portfolio_snapshot_from_tokens_json(
         &self,
         address: String,
@@ -857,6 +935,7 @@ impl AppServices {
     }
 }
 
+/// Loads an artifact from the supplied store and returns a JSON-or-hex response body.
 pub async fn get_artifact_from_store(
     artifacts: Arc<dyn ArtifactStore>,
     artifact_id: &str,
@@ -884,38 +963,53 @@ pub async fn get_artifact_from_store(
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
+/// Start-run request accepted by app-facing transports.
 pub enum RunsStartRequest {
+    /// Starts a run by wrapping a single operation into the one-step pipeline convention.
     Single(SingleOpStartRequest),
+    /// Starts a run from an explicit pipeline payload.
     Pipeline(PipelineStartRequest),
 }
 
+/// Request payload for starting a single operation run.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SingleOpStartRequest {
+    /// Operation identifier, defaulting to `proof`.
     #[serde(default = "default_op_id")]
     pub op_id: String,
 
+    /// Operation version, defaulting to `v1`.
     #[serde(default = "default_op_version")]
     pub op_version: String,
 
+    /// Canonical JSON config passed to the operation.
     #[serde(default = "default_empty_object")]
     pub op_config: serde_json::Value,
 }
 
+/// Request payload for starting an explicit pipeline run.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PipelineStartRequest {
+    /// Pipeline template to launch.
     pub pipeline: Pipeline,
 
+    /// Canonical JSON input embedded in the manifest.
     #[serde(default = "default_empty_object")]
     pub input: serde_json::Value,
 
+    /// Optional run configuration override.
     #[serde(default)]
     pub run_config: Option<RunConfig>,
 }
 
+/// Response returned after starting a new run.
 #[derive(Clone, Debug, Serialize)]
 pub struct RunStartResponse {
+    /// UUID string of the started run.
     pub run_id: String,
+    /// Current run phase string.
     pub phase: String,
+    /// Final snapshot id if the run finished immediately.
     pub final_snapshot_id: Option<String>,
 }
 
@@ -930,10 +1024,14 @@ impl fmt::Display for RunStartResponse {
     }
 }
 
+/// Response returned after resuming a run.
 #[derive(Clone, Debug, Serialize)]
 pub struct RunResumeResponse {
+    /// UUID string of the resumed run.
     pub run_id: String,
+    /// Current run phase string.
     pub phase: String,
+    /// Final snapshot id if the run completed.
     pub final_snapshot_id: Option<String>,
 }
 
@@ -948,13 +1046,20 @@ impl fmt::Display for RunResumeResponse {
     }
 }
 
+/// Current status projection for a run.
 #[derive(Clone, Debug, Serialize)]
 pub struct RunStatusResponse {
+    /// UUID string of the run.
     pub run_id: String,
+    /// Current head sequence in the run event stream.
     pub head_seq: u64,
+    /// Operation id recorded at run start, when available.
     pub op_id: Option<String>,
+    /// Manifest artifact id recorded at run start, when available.
     pub manifest_id: Option<String>,
+    /// Current phase string.
     pub phase: String,
+    /// Final snapshot id when the run has completed.
     pub final_snapshot_id: Option<String>,
 }
 
@@ -981,17 +1086,24 @@ fn default_from_seq() -> u64 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+/// Query parameters for fetching a run event range.
 pub struct RunsEventsQuery {
+    /// First sequence number to include, defaulting to `1`.
     #[serde(default = "default_from_seq")]
     pub from_seq: u64,
 
+    /// Optional inclusive upper bound for the event range.
     pub to_seq: Option<u64>,
 }
 
+/// Response returned by the run-events query.
 #[derive(Clone, Debug, Serialize)]
 pub struct RunsEventsResponse {
+    /// UUID string of the run.
     pub run_id: String,
+    /// Current head sequence in the run event stream.
     pub head_seq: u64,
+    /// Events in the requested range.
     pub events: Vec<EventEnvelope>,
 }
 
@@ -1002,9 +1114,12 @@ impl fmt::Display for RunsEventsResponse {
     }
 }
 
+/// Artifact fetch response returned by app-facing transports.
 #[derive(Debug, Clone, Serialize)]
 pub struct ArtifactGetResponse {
+    /// Content-addressed artifact identifier.
     pub artifact_id: String,
+    /// Decoded body representation.
     #[serde(flatten)]
     pub body: ArtifactBody,
 }
@@ -1024,27 +1139,44 @@ impl fmt::Display for ArtifactGetResponse {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "encoding", rename_all = "lowercase")]
+/// Artifact body encoded either as structured JSON or hex bytes.
 pub enum ArtifactBody {
-    Json { value: serde_json::Value },
-    Hex { hex: String },
+    /// Artifact body successfully decoded as JSON.
+    Json {
+        /// Structured JSON value decoded from the artifact bytes.
+        value: serde_json::Value,
+    },
+    /// Artifact body returned as lowercase hex.
+    Hex {
+        /// Lowercase hex encoding of the raw artifact bytes.
+        hex: String,
+    },
 }
 
+/// Input payload for the standard deploy-configure-validate pipeline feature.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DeployConfigureValidateSpec {
+    /// Machine id to assign to the generated pipeline.
     #[serde(default = "default_machine_id")]
     pub machine_id: String,
 
+    /// Version string to assign to the generated pipeline.
     #[serde(default = "default_pipeline_version")]
     pub pipeline_version: String,
 
+    /// Additional pipeline input forwarded into the run manifest.
     #[serde(default = "default_empty_object")]
     pub input: serde_json::Value,
 
+    /// Operation config for the deploy phase.
     pub deploy: serde_json::Value,
+    /// Operation config for the configure phase.
     pub configure: serde_json::Value,
+    /// Operation config for the validate phase.
     pub validate: serde_json::Value,
 }
 
+/// Converts a deploy-configure-validate spec into the canonical single-step pipeline template.
 pub fn pipeline_from_deploy_configure_validate_spec(spec: DeployConfigureValidateSpec) -> Pipeline {
     Pipeline {
         machine_id: MachineId(spec.machine_id),
@@ -1084,33 +1216,51 @@ fn default_empty_object() -> serde_json::Value {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Category of a built-in application feature.
 pub enum FeatureKind {
+    /// Feature that directly starts an operation.
     Operation,
+    /// Feature that expands into a reusable pipeline template.
     PipelineTemplate,
+    /// Feature that controls or inspects existing runs.
     RunControl,
+    /// Feature that fetches artifacts.
     Artifact,
 }
 
+/// Metadata describing a built-in feature surface.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FeatureDescriptor {
+    /// Stable feature identifier.
     pub id: String,
+    /// Feature version string.
     pub version: String,
+    /// Feature category.
     pub kind: FeatureKind,
+    /// Human-readable feature summary.
     pub description: String,
+    /// JSON Schema-like input description.
     pub input_schema: serde_json::Value,
+    /// JSON Schema-like output description.
     pub output_schema: serde_json::Value,
 }
 
+/// Request payload for executing a built-in feature.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FeatureRequest {
+    /// Stable feature identifier to execute.
     pub feature_id: String,
+    /// Canonical JSON payload passed to that feature.
     #[serde(default = "default_empty_object")]
     pub payload: serde_json::Value,
 }
 
+/// Result returned after a feature executes successfully.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FeatureExecutionResult {
+    /// Executed feature identifier.
     pub feature_id: String,
+    /// Feature-specific result payload.
     pub result: serde_json::Value,
 }
 
@@ -1124,6 +1274,7 @@ impl fmt::Display for FeatureExecutionResult {
     }
 }
 
+/// Registry of built-in feature descriptors and dispatch handlers.
 #[derive(Clone, Default)]
 pub struct FeatureCatalog {
     handlers: HashMap<String, BuiltinFeature>,
@@ -1142,6 +1293,7 @@ enum BuiltinFeature {
 }
 
 impl FeatureCatalog {
+    /// Builds the default catalog used by the CLI and REST API.
     pub fn with_builtins() -> Self {
         let mut handlers = HashMap::new();
         handlers.insert("run.start".to_string(), BuiltinFeature::RunStart);
@@ -1355,10 +1507,12 @@ impl FeatureCatalog {
         }
     }
 
+    /// Returns the static descriptors for all registered built-in features.
     pub fn descriptors(&self) -> &[FeatureDescriptor] {
         &self.descriptors
     }
 
+    /// Executes a built-in feature request against the provided services.
     pub async fn execute(
         &self,
         services: &AppServices,
@@ -1444,13 +1598,18 @@ struct RunEventsInput {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+/// Request payload for the portfolio snapshot feature.
 pub struct PortfolioSnapshotRequest {
+    /// Wallet address to inspect.
     pub address: String,
+    /// Optional chain id override. Defaults are handled by the feature itself.
     pub chain_id: Option<u64>,
+    /// Additional token descriptors to include in the snapshot.
     #[serde(default)]
     pub tokens: Vec<PortfolioTokenSpec>,
 }
 
+/// Parses the CLI/REST `tokens_json` string into token descriptors.
 pub fn parse_portfolio_tokens_json(tokens_json: &str) -> Result<Vec<PortfolioTokenSpec>, AppError> {
     let tokens_value: serde_json::Value = serde_json::from_str(tokens_json).map_err(|_| {
         AppError::new(
@@ -1535,21 +1694,33 @@ fn load_portfolio_tokens_from_env() -> Result<Vec<PortfolioTokenSpec>, AppError>
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+/// Token descriptor used by the portfolio snapshot feature.
 pub struct PortfolioTokenSpec {
+    /// ERC-20 token contract address.
     pub address: String,
+    /// Optional symbol hint for output formatting.
     #[serde(default)]
     pub symbol: Option<String>,
+    /// Optional decimals hint for output formatting.
     #[serde(default)]
     pub decimals: Option<u8>,
 }
 
+/// Response returned after starting a portfolio snapshot feature run.
 #[derive(Clone, Debug, Serialize)]
 pub struct PortfolioSnapshotResponse {
+    /// UUID string of the run.
     pub run_id: String,
+    /// Current run phase string.
     pub phase: String,
+    /// Final snapshot id when the run completed.
     pub final_snapshot_id: Option<String>,
+    /// Report artifact id containing the portfolio snapshot, when available.
     pub snapshot_artifact_id: Option<String>,
+    /// Resolved chain id from the final report.
     pub chain_id: Option<u64>,
+    /// Resolved block number from the final report.
     pub block_number: Option<u64>,
+    /// Native balance from the final report, when present.
     pub native_balance: Option<PortfolioBalanceReport>,
 }

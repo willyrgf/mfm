@@ -1,7 +1,26 @@
-//! Encrypted secret-bearing artifacts.
+#![warn(missing_docs)]
+//! Encrypted storage wrapper for secret-bearing artifacts.
 //!
-//! This crate provides a wrapper for storing secret payloads as encrypted artifacts.
-//! Plaintext secrets MUST NOT be stored directly in the underlying `ArtifactStore`.
+//! This crate encrypts secret payloads before delegating persistence to another
+//! [`ArtifactStore`](mfm_machine::stores::ArtifactStore). Plaintext secrets MUST NOT be stored
+//! directly in the underlying artifact store.
+//!
+//! # Security
+//!
+//! The encryption envelope uses AES-256-GCM with fixed additional authenticated data that binds
+//! ciphertexts to this storage format. Secret keys and decrypted buffers are kept in zeroizing
+//! containers where possible.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_artifact_store_secret::SecretKey;
+//!
+//! let _key = SecretKey::from_hex(
+//!     "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f",
+//! )
+//! .expect("valid 32-byte key");
+//! ```
 
 use std::sync::Arc;
 
@@ -18,6 +37,7 @@ const CODE_SECRET_ENCRYPT_FAILED: &str = "secret_encrypt_failed";
 const CODE_SECRET_CIPHERTEXT_INVALID: &str = "secret_ciphertext_invalid";
 const CODE_SECRET_DECRYPT_FAILED: &str = "secret_decrypt_failed";
 
+/// Environment variable that carries the secret-artifact encryption key.
 const ENV_SECRET_KEY_HEX: &str = "MFM_SECRET_KEY_HEX";
 
 // Envelope format:
@@ -46,6 +66,7 @@ fn other(code: &'static str, category: ErrorCategory, message: &'static str) -> 
     StorageError::Other(info(code, category, message))
 }
 
+/// 256-bit encryption key used for secret artifact payloads.
 #[derive(Clone)]
 pub struct SecretKey {
     bytes: Zeroizing<[u8; 32]>,
@@ -58,12 +79,14 @@ impl std::fmt::Debug for SecretKey {
 }
 
 impl SecretKey {
+    /// Creates a secret key from raw 32-byte key material.
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self {
             bytes: Zeroizing::new(bytes),
         }
     }
 
+    /// Parses a 32-byte secret key from a hex string.
     pub fn from_hex(s: &str) -> Result<Self, StorageError> {
         let s = s.strip_prefix("0x").unwrap_or(s);
         let decoded = Zeroizing::new(hex::decode(s).map_err(|_| {
@@ -86,6 +109,7 @@ impl SecretKey {
         Ok(Self::from_bytes(bytes))
     }
 
+    /// Reads and parses [`ENV_SECRET_KEY_HEX`].
     pub fn from_env() -> Result<Self, StorageError> {
         let v = std::env::var(ENV_SECRET_KEY_HEX).map_err(|_| {
             other(
@@ -98,6 +122,7 @@ impl SecretKey {
     }
 }
 
+/// Artifact-store wrapper that encrypts secret payloads before persistence.
 #[derive(Clone)]
 pub struct SecretArtifactStore {
     inner: Arc<dyn ArtifactStore>,
@@ -106,6 +131,7 @@ pub struct SecretArtifactStore {
 }
 
 impl SecretArtifactStore {
+    /// Creates a new secret store backed by `inner`.
     pub fn new(inner: Arc<dyn ArtifactStore>, key: SecretKey) -> Self {
         Self {
             inner,
@@ -114,11 +140,13 @@ impl SecretArtifactStore {
         }
     }
 
+    /// Builds a secret store using [`ENV_SECRET_KEY_HEX`] for its encryption key.
     pub fn from_env(inner: Arc<dyn ArtifactStore>) -> Result<Self, StorageError> {
         let key = SecretKey::from_env()?;
         Ok(Self::new(inner, key))
     }
 
+    /// Encrypts and stores secret bytes in the underlying artifact store.
     pub async fn put_secret_bytes(&self, plaintext: &[u8]) -> Result<ArtifactId, StorageError> {
         let ciphertext = self.seal_v1(plaintext)?;
         self.inner
@@ -126,6 +154,7 @@ impl SecretArtifactStore {
             .await
     }
 
+    /// Loads and decrypts secret bytes from the underlying artifact store.
     pub async fn get_secret_bytes(
         &self,
         id: &ArtifactId,

@@ -1,9 +1,18 @@
-//! S3/MinIO `ArtifactStore` (parity lane).
+#![warn(missing_docs)]
+//! S3 and MinIO-backed `ArtifactStore`.
 //!
 //! Storage model:
 //! - objects keyed by `ArtifactId` (SHA-256 hex)
 //! - `put()` computes the id from bytes and uploads to `prefix/<id_prefix>/<id>`
 //! - `get()` verifies the hash and returns `StorageError::Corruption` on mismatch
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use mfm_artifact_store_s3::S3ArtifactStore;
+//!
+//! let _store = S3ArtifactStore::from_env().expect("valid S3 configuration");
+//! ```
 
 use async_trait::async_trait;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
@@ -16,6 +25,7 @@ use s3::creds::Credentials;
 use s3::error::S3Error;
 use s3::{BucketConfiguration, Region};
 
+/// S3-compatible immutable artifact store.
 #[derive(Clone, Debug)]
 pub struct S3ArtifactStore {
     bucket: Bucket,
@@ -23,6 +33,7 @@ pub struct S3ArtifactStore {
 }
 
 impl S3ArtifactStore {
+    /// Creates a store from an already configured bucket handle and object prefix.
     pub fn new(bucket: Bucket, prefix: impl Into<String>) -> Self {
         Self {
             bucket,
@@ -30,6 +41,7 @@ impl S3ArtifactStore {
         }
     }
 
+    /// Builds a store from the standard `MFM_S3_*` environment variables.
     pub fn from_env() -> Result<Self, StorageError> {
         let endpoint = std::env::var("MFM_S3_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:9000".to_string());
@@ -59,7 +71,9 @@ impl S3ArtifactStore {
         Ok(Self::new(bucket, prefix))
     }
 
-    /// Ensure the configured bucket exists (best-effort helper for tests and local dev).
+    /// Ensures the configured bucket exists.
+    ///
+    /// This is a best-effort helper intended for tests and local development.
     pub async fn ensure_bucket_exists(&self) -> Result<(), StorageError> {
         let config = BucketConfiguration::default();
         let credentials = Credentials::default().map_err(|e| {

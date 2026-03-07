@@ -6,6 +6,7 @@ use crate::support::run_stores::{make_stores, RunStoresArgs};
 use clap::Args;
 use mfm_app::{RunStartResponse, RunsStartRequest, SingleOpStartRequest};
 
+/// Arguments for `mfm run start`.
 #[derive(Args)]
 pub struct StartArgs {
     /// Operation id (default: proof)
@@ -20,10 +21,12 @@ pub struct StartArgs {
     #[arg(long, default_value = "{}")]
     pub op_config_json: String,
 
+    /// Storage configuration for the run's event and artifact backends.
     #[command(flatten)]
     pub stores: RunStoresArgs,
 }
 
+/// Executes the start command and terminates the process.
 pub async fn execute(ctx: &CommandContext, args: &StartArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);

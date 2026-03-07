@@ -2,6 +2,7 @@ use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, StateError};
 use mfm_machine::ids::{ErrorCode, StateId};
 use mfm_sdk::errors::SdkError;
 
+/// Builds a stable [`ErrorInfo`] payload from the supplied fields.
 pub fn info(
     code: &'static str,
     category: ErrorCategory,
@@ -17,6 +18,7 @@ pub fn info(
     }
 }
 
+/// Builds an [`SdkError`] from the supplied stable error fields.
 pub fn sdk_error(
     code: &'static str,
     category: ErrorCategory,
@@ -28,14 +30,17 @@ pub fn sdk_error(
     }
 }
 
+/// Builds a non-retryable SDK parsing error.
 pub fn sdk_parse_error(code: &'static str, message: &'static str) -> SdkError {
     sdk_error(code, ErrorCategory::ParsingInput, false, message)
 }
 
+/// Builds a non-retryable SDK error in the unknown category.
 pub fn sdk_unknown_error(code: &'static str, message: &'static str) -> SdkError {
     sdk_error(code, ErrorCategory::Unknown, false, message)
 }
 
+/// Builds a [`StateError`] that is not yet attached to a specific state id.
 pub fn state_error(
     code: &'static str,
     category: ErrorCategory,
@@ -48,6 +53,7 @@ pub fn state_error(
     }
 }
 
+/// Builds a [`StateError`] that is attached to a specific state id.
 pub fn state_error_with_state(
     state_id: StateId,
     code: &'static str,
@@ -61,14 +67,17 @@ pub fn state_error_with_state(
     }
 }
 
+/// Builds a non-retryable unknown-category [`StateError`] with a static message.
 pub fn state_unknown(code: &'static str, message: &'static str) -> StateError {
     state_error(code, ErrorCategory::Unknown, false, message)
 }
 
+/// Builds a non-retryable unknown-category [`StateError`] with an owned message.
 pub fn state_unknown_msg(code: &'static str, message: impl Into<String>) -> StateError {
     state_error(code, ErrorCategory::Unknown, false, message)
 }
 
+/// Converts an [`IoError`] into a [`StateError`] while preserving the original error info.
 pub fn state_from_io(err: IoError) -> StateError {
     let info = match err {
         IoError::MissingFactKey(info)
@@ -84,6 +93,7 @@ pub fn state_from_io(err: IoError) -> StateError {
     }
 }
 
+/// Maps keystore-specific error codes into coarse-grained state error categories.
 pub fn keystore_error_category(code: &str) -> ErrorCategory {
     match code {
         "InvalidPrivateKey"

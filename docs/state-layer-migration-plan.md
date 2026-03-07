@@ -1,10 +1,11 @@
 # State Layer Relocation Plan
 
-> Status: Draft proposal.
+> Status: Completed.
 > Date: 2026-02-19.
 > Scope: Move reusable state crates out of `crates/ops/` so repository structure matches the `Operation` (planning) vs `State` (execution) contract.
 > Migration policy: hard cutover for internal paths; no compatibility shims/re-exports.
 > Execution model: commit-by-commit on a shared dev branch (no PR slicing required).
+> Completion note: the reusable state crates now live under `crates/states/common`, `crates/states/keystore`, and `crates/states/aave-v3`. This document is retained as the historical implementation plan for that migration.
 
 ## 1. Objective
 
@@ -230,7 +231,13 @@ Migration is complete when all are true:
   - `nix run .#ci -- --full --summary`
 - Docs and discovery artifacts reflect new paths.
 
-## 9. Immediate Next Commit
+## 9. Outcome
 
-Start with Commit 0 (`state-layout: bridge architecture-verify for old+new state roots`) to de-risk subsequent move commits.
-This is the smallest enabling change and provides safe CI continuity for the whole migration.
+The planned relocation landed. The canonical shared-state paths are now:
+
+- `crates/states/common`
+- `crates/states/keystore`
+- `crates/states/aave-v3`
+- `crates/evm-runtime`
+
+Follow-up work should treat this plan as historical context rather than an active migration checklist.

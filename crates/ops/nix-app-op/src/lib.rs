@@ -1,8 +1,19 @@
+#![warn(missing_docs)]
 //! Nix-app execution op.
 //!
 //! Source of truth: `docs/redesign.md` (v4), especially the Replay/IO contract.
 //!
 //! This op expands into a single state that requests external execution via `namespace="exec"`.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_op_nix_app::NixAppOp;
+//! use mfm_sdk::op::Operation;
+//!
+//! let op = NixAppOp;
+//! assert_eq!(op.op_id().as_str(), "nix_app");
+//! ```
 
 use std::sync::Arc;
 
@@ -23,6 +34,7 @@ use mfm_sdk::op::{OpIo, Operation};
 const OP_ID: &str = "nix_app";
 const OP_VERSION: &str = "v1";
 
+/// Thin planner op that validates nix execution config and expands to a single shared exec state.
 #[derive(Clone, Default)]
 pub struct NixAppOp;
 

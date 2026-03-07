@@ -1,5 +1,6 @@
 use crate::util_error::UtilError;
 
+/// Normalizes a prefixed hex string to lowercase with an even number of digits.
 pub fn normalize_hex_str(raw: &str) -> Result<String, UtilError> {
     let trimmed = raw.trim();
     let rest = trimmed
@@ -28,6 +29,7 @@ pub fn normalize_hex_str(raw: &str) -> Result<String, UtilError> {
     Ok(format!("0x{even}"))
 }
 
+/// Normalizes a prefixed hex string and rejects the empty payload form `0x`.
 pub fn normalize_nonempty_hex_str(raw: &str) -> Result<String, UtilError> {
     let normalized = normalize_hex_str(raw)?;
     if normalized == "0x" {
@@ -36,6 +38,7 @@ pub fn normalize_nonempty_hex_str(raw: &str) -> Result<String, UtilError> {
     Ok(normalized)
 }
 
+/// Decodes a prefixed hex string into bytes.
 pub fn hex_to_bytes(raw: &str) -> Result<Vec<u8>, UtilError> {
     let normalized = normalize_hex_str(raw)?;
     let rest = normalized.strip_prefix("0x").expect("prefix");
@@ -45,14 +48,17 @@ pub fn hex_to_bytes(raw: &str) -> Result<Vec<u8>, UtilError> {
     hex::decode(rest).map_err(|_| UtilError::new("hex_decode_failed", "invalid hex"))
 }
 
+/// Encodes bytes as a lowercase `0x`-prefixed hex string.
 pub fn bytes_to_hex_prefixed(bytes: &[u8]) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
+/// Hex-encodes a UTF-8 string without adding a `0x` prefix.
 pub fn hex_encode_utf8(value: &str) -> String {
     hex::encode(value.as_bytes())
 }
 
+/// Converts a single ASCII hex digit into its numeric value.
 pub fn hex_nibble(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),

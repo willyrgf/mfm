@@ -16,6 +16,7 @@ use mfm_state_common::idempotency as op_idempotency;
 use mfm_state_common::states::meta;
 use serde::{Deserialize, Serialize};
 
+/// Re-exported manifest types, constants, and validation helpers used by Aave runtime states.
 pub use crate::manifest::{
     contract_from_manifest, decode_compile_manifest, decode_deploy_manifest,
     decode_origin_deploy_output, origin_contract_from_output, validate_compile_manifest,
@@ -61,70 +62,104 @@ struct PendingRuntimeCall {
     tx_hash: String,
 }
 
+/// State that loads and validates the compile manifest from context.
 #[derive(Clone, Debug)]
 pub struct LoadCompileManifestState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Context key that contains the compile manifest JSON value.
     pub compile_manifest_port: String,
 }
 
+/// State that submits deployment transactions for every contract in the compile manifest.
 #[derive(Clone, Debug)]
 pub struct DeployContractState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Runtime deployment configuration.
     pub cfg: AaveDeployRuntimeConfig,
 }
 
+/// State that waits for deployment transaction receipts.
 #[derive(Clone, Debug)]
 pub struct WaitForReceiptState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Delay between receipt polls in milliseconds.
     pub poll_interval_ms: u64,
+    /// Maximum number of receipt polls before timing out.
     pub max_receipt_polls: u64,
 }
 
+/// State that converts deployment receipts into a validated deploy manifest.
 #[derive(Clone, Debug)]
 pub struct CollectDeployOutputsState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
 }
 
+/// State that writes the deploy manifest to its exported context key.
 #[derive(Clone, Debug)]
 pub struct WriteDeployManifestState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Context key used to export the deploy manifest.
     pub deploy_manifest_export_key: String,
 }
 
+/// State that adapts an origin deploy output into the standard deploy manifest shape.
 #[derive(Clone, Debug)]
 pub struct AdaptOriginDeployOutputState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Context key that contains the origin deploy output.
     pub origin_deploy_port: String,
+    /// Context key used to export the adapted deploy manifest.
     pub deploy_manifest_export_key: String,
 }
 
+/// State that loads and validates a deploy manifest from context.
 #[derive(Clone, Debug)]
 pub struct LoadDeployManifestState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Context key that contains the deploy manifest JSON value.
     pub deploy_manifest_port: String,
 }
 
+/// State that submits runtime configuration transactions.
 #[derive(Clone, Debug)]
 pub struct ConfigureRuntimeCallState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Runtime configuration for the configuration flow.
     pub cfg: AaveConfigureRuntimeConfig,
 }
 
+/// State that waits for configuration transaction receipts.
 #[derive(Clone, Debug)]
 pub struct WaitForConfigReceiptState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Delay between receipt polls in milliseconds.
     pub poll_interval_ms: u64,
+    /// Maximum number of receipt polls before timing out.
     pub max_receipt_polls: u64,
 }
 
+/// State that collects configuration receipts into a report payload.
 #[derive(Clone, Debug)]
 pub struct CollectConfigOutputsState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
 }
 
+/// State that writes the configuration report to its exported context key.
 #[derive(Clone, Debug)]
 pub struct WriteConfigReportState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Context key used to export the configuration report.
     pub config_report_export_key: String,
 }
 

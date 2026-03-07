@@ -27,10 +27,12 @@ use mfm_sdk::unstable::{
     single_op_pipeline, DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry,
 };
 
+/// Returns a standard live [`RunConfig`] with a single attempt.
 pub fn run_config_live() -> RunConfig {
     run_config_live_with_retry_attempts(1)
 }
 
+/// Returns a standard live [`RunConfig`] with the supplied retry-attempt budget.
 pub fn run_config_live_with_retry_attempts(max_attempts: u32) -> RunConfig {
     RunConfig {
         io_mode: IoMode::Live,
@@ -49,12 +51,14 @@ pub fn run_config_live_with_retry_attempts(max_attempts: u32) -> RunConfig {
     }
 }
 
+/// Returns the default live run config with a custom nix flake allowlist.
 pub fn run_config_live_with_allowlist(prefixes: Vec<String>) -> RunConfig {
     let mut cfg = run_config_live();
     cfg.nix_flake_allowlist = prefixes;
     cfg
 }
 
+/// Returns an empty [`BuildProvenance`] value suitable for most tests.
 pub fn build_provenance_default() -> BuildProvenance {
     BuildProvenance {
         git_commit: None,
@@ -66,12 +70,14 @@ pub fn build_provenance_default() -> BuildProvenance {
     }
 }
 
+/// Convenience bundle used by tests that plan a single operation.
 pub type SingleOpPlan = (
     Arc<dyn OperationRegistry>,
     Arc<dyn PipelinePlanner>,
     Pipeline,
 );
 
+/// Builds an in-memory operation registry preloaded with the supplied operations.
 pub fn registry_with_ops(
     ops: impl IntoIterator<Item = DynOperation>,
 ) -> Arc<dyn OperationRegistry> {
@@ -82,10 +88,12 @@ pub fn registry_with_ops(
     Arc::new(reg)
 }
 
+/// Returns the default pipeline planner used by op/state tests.
 pub fn default_pipeline_planner() -> Arc<dyn PipelinePlanner> {
     Arc::new(DefaultPipelinePlanner)
 }
 
+/// Builds a single-op pipeline manifest from an operation and its JSON config.
 pub fn single_op_pipeline_for(
     op: &DynOperation,
     op_config: serde_json::Value,
@@ -93,6 +101,7 @@ pub fn single_op_pipeline_for(
     single_op_pipeline(op.op_id(), op.op_version(), op_config)
 }
 
+/// Builds the standard registry/planner/pipeline tuple for a single operation.
 pub fn single_op_plan(
     op: DynOperation,
     op_config: serde_json::Value,
@@ -103,6 +112,7 @@ pub fn single_op_plan(
     Ok((registry, planner, pipeline))
 }
 
+/// Starts a pipeline with the default launcher, provenance, and empty in-memory context.
 pub async fn start_pipeline_with_defaults(
     engine: Arc<dyn ExecutionEngine>,
     stores: &Stores,
@@ -132,6 +142,7 @@ pub async fn start_pipeline_with_defaults(
         .await
 }
 
+/// Resumes a pipeline with the default launcher and the supplied run id.
 pub async fn resume_pipeline_with_defaults(
     engine: Arc<dyn ExecutionEngine>,
     stores: &Stores,
@@ -154,12 +165,14 @@ pub async fn resume_pipeline_with_defaults(
         .await
 }
 
+/// Minimal in-memory context implementation used by tests.
 #[derive(Default)]
 pub struct MapContext {
     inner: HashMap<String, serde_json::Value>,
 }
 
 impl MapContext {
+    /// Rehydrates the context from a previously dumped JSON snapshot.
     pub fn from_snapshot(v: serde_json::Value) -> Self {
         let obj = v.as_object().cloned().unwrap_or_default();
         let mut inner = HashMap::new();
@@ -210,6 +223,7 @@ fn lock_map<'a, T>(mutex: &'a Mutex<T>) -> Result<MutexGuard<'a, T>, StorageErro
     })
 }
 
+/// In-memory [`EventStore`] used by tests.
 #[derive(Clone, Default)]
 pub struct MemEventStore {
     inner: Arc<Mutex<HashMap<RunId, Vec<EventEnvelope>>>>,
@@ -266,6 +280,7 @@ impl EventStore for MemEventStore {
     }
 }
 
+/// In-memory [`ArtifactStore`] used by tests.
 #[derive(Clone, Default)]
 pub struct MemArtifactStore {
     inner: Arc<Mutex<HashMap<ArtifactId, Vec<u8>>>>,
@@ -291,6 +306,7 @@ impl ArtifactStore for MemArtifactStore {
     }
 }
 
+/// Returns a [`Stores`] bundle backed by in-memory event and artifact stores.
 pub fn in_memory_stores() -> Stores {
     Stores {
         events: Arc::new(MemEventStore::default()),
@@ -298,6 +314,9 @@ pub fn in_memory_stores() -> Stores {
     }
 }
 
+/// Extracts the manifest id and initial snapshot id from a run's event stream.
+///
+/// Panics if the stream does not contain a `RunStarted` event.
 pub fn run_started(stream: &[EventEnvelope]) -> (ArtifactId, ArtifactId) {
     for e in stream {
         if let Event::Kernel(KernelEvent::RunStarted {
@@ -312,6 +331,7 @@ pub fn run_started(stream: &[EventEnvelope]) -> (ArtifactId, ArtifactId) {
     panic!("missing RunStarted");
 }
 
+/// Returns the final snapshot id recorded by `RunCompleted`, if one exists.
 pub fn run_completed_snapshot_id(stream: &[EventEnvelope]) -> Option<ArtifactId> {
     for e in stream {
         if let Event::Kernel(KernelEvent::RunCompleted {

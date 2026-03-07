@@ -1,11 +1,20 @@
+//! Shared metadata builders for reusable states.
+
 use mfm_machine::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta, Tag};
 
+/// Stable tags used by reusable shared states.
 pub mod tags {
+    /// Tag for states that apply an external side effect.
     pub const APPLY_SIDE_EFFECT: &str = "apply_side_effect";
+    /// Tag for configuration-loading or validation states.
     pub const CONFIG: &str = "config";
+    /// Tag for execution states.
     pub const EXECUTE: &str = "execute";
+    /// Tag for data-fetching states.
     pub const FETCH_DATA: &str = "fetch_data";
+    /// Tag for read-only IO states that do not mutate external systems.
     pub const READ_ONLY_IO: &str = "read_only_io";
+    /// Tag for validation-only states.
     pub const VALIDATE: &str = "validate";
 }
 
@@ -19,22 +28,27 @@ fn mk_meta(tags: Vec<Tag>, side_effects: SideEffectKind, idempotency: Idempotenc
     }
 }
 
+/// Returns metadata for a read-only data-fetching state.
 pub fn fetch_data() -> StateMeta {
     read_only_io_with_tag(tags::FETCH_DATA)
 }
 
+/// Returns metadata for a read-only validation state.
 pub fn validate() -> StateMeta {
     read_only_io_with_tag(tags::VALIDATE)
 }
 
+/// Returns metadata for a pure state with no default tags.
 pub fn pure() -> StateMeta {
     mk_meta(Vec::new(), SideEffectKind::Pure, Idempotency::None)
 }
 
+/// Returns metadata for a pure configuration state.
 pub fn config() -> StateMeta {
     pure_with_tag(tags::CONFIG)
 }
 
+/// Returns metadata for a pure state with one classification tag.
 pub fn pure_with_tag(tag: impl Into<String>) -> StateMeta {
     mk_meta(
         vec![Tag(tag.into())],
@@ -43,6 +57,7 @@ pub fn pure_with_tag(tag: impl Into<String>) -> StateMeta {
     )
 }
 
+/// Returns metadata for a read-only IO state with one classification tag.
 pub fn read_only_io_with_tag(tag: impl Into<String>) -> StateMeta {
     mk_meta(
         vec![Tag(tag.into())],
@@ -51,14 +66,17 @@ pub fn read_only_io_with_tag(tag: impl Into<String>) -> StateMeta {
     )
 }
 
+/// Returns metadata for a side-effecting state tagged as `apply_side_effect`.
 pub fn apply_side_effect(idempotency_key: impl Into<String>) -> StateMeta {
     apply_side_effect_with_tag(tags::APPLY_SIDE_EFFECT, idempotency_key)
 }
 
+/// Returns metadata for a side-effecting execution state.
 pub fn execute(idempotency_key: impl Into<String>) -> StateMeta {
     apply_side_effect_with_tag(tags::EXECUTE, idempotency_key)
 }
 
+/// Returns metadata for a side-effecting state with a custom tag and idempotency key.
 pub fn apply_side_effect_with_tag(
     tag: impl Into<String>,
     idempotency_key: impl Into<String>,

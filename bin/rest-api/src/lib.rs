@@ -1,3 +1,23 @@
+#![warn(missing_docs)]
+//! REST API wiring for MFM application services.
+//!
+//! This crate adapts [`mfm_app`] request/response helpers onto an `axum` router while keeping
+//! domain execution inside shared app and SDK crates.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use mfm_rest_api::{make_app, AppState};
+//!
+//! async fn build_router() -> Result<axum::Router, mfm_rest_api::ApiError> {
+//!     let state = AppState {
+//!         bundle: mfm_rest_api::make_engine_bundle(),
+//!         events: mfm_rest_api::make_default_event_store().await?,
+//!         artifacts: mfm_rest_api::make_default_artifact_store().await?,
+//!     };
+//!     Ok(make_app(state))
+//! }
+//! ```
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,13 +54,18 @@ fn err(code: impl Into<String>, message: impl Into<String>) -> serde_json::Value
 }
 
 #[derive(Debug, Clone)]
+/// Error payload mapped onto HTTP responses.
 pub struct ApiError {
+    /// HTTP status to return.
     pub status: StatusCode,
+    /// Stable machine-readable error code.
     pub code: String,
+    /// Human-readable error message.
     pub message: String,
 }
 
 impl ApiError {
+    /// Creates an API error with an explicit HTTP status, code, and message.
     pub fn new(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             status,
@@ -49,6 +74,7 @@ impl ApiError {
         }
     }
 
+    /// Returns the standard invalid-JSON error.
     pub fn invalid_json() -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
@@ -57,6 +83,7 @@ impl ApiError {
         )
     }
 
+    /// Returns the standard invalid-UUID error.
     pub fn invalid_uuid() -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
@@ -94,26 +121,33 @@ impl axum::response::IntoResponse for ApiError {
     }
 }
 
+/// Builds the default artifact store used by the REST API.
 pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, ApiError> {
     mfm_app::make_default_artifact_store()
         .await
         .map_err(Into::into)
 }
 
+/// Builds the default event store used by the REST API.
 pub async fn make_default_event_store() -> Result<Arc<dyn EventStore>, ApiError> {
     mfm_app::make_default_event_store()
         .await
         .map_err(Into::into)
 }
 
+/// Builds the default engine bundle used by the REST API.
 pub fn make_engine_bundle() -> EngineBundle {
     mfm_app::make_engine_bundle()
 }
 
 #[derive(Clone)]
+/// Shared router state injected into request handlers.
 pub struct AppState {
+    /// Engine bundle used for planning and execution.
     pub bundle: EngineBundle,
+    /// Event store used for run queries.
     pub events: Arc<dyn EventStore>,
+    /// Artifact store used for snapshot and output retrieval.
     pub artifacts: Arc<dyn ArtifactStore>,
 }
 
@@ -133,6 +167,7 @@ impl RouterState {
     }
 }
 
+/// Builds the `axum` router for the public REST API surface.
 pub fn make_app(state: AppState) -> Router {
     let request_id_header = HeaderName::from_static("x-request-id");
     let make_span_header = request_id_header.clone();

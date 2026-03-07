@@ -3,27 +3,44 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
+/// Supported token families in static configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
+    /// ERC-20-compatible fungible token.
     Erc20,
 }
 
+/// Network-specific token deployment configuration.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct TokenNetwork {
+    /// Human-readable token name for this network.
     pub name: String,
+    /// Token family identifier.
     pub kind: Kind,
+    /// Logical network identifier where this token is deployed.
     pub network_id: String,
+    /// Token contract address.
     pub address: Address,
+    /// Default slippage tolerance expressed as a percentage string.
     pub slippage: String,
+    /// Path token identifier used for routing or quoting.
     pub path_token: String,
+    /// Token decimals, when known.
     pub decimals: Option<u8>,
 }
 
+/// Errors raised while parsing configured slippage values.
 #[derive(Debug, Error)]
 pub enum SlippageParseError {
+    /// The configured slippage string was malformed or out of range.
     #[error("invalid slippage {value:?}: {reason}")]
-    InvalidSlippage { value: String, reason: String },
+    InvalidSlippage {
+        /// Original configured value.
+        value: String,
+        /// Parse or range-check failure reason.
+        reason: String,
+    },
 }
 
 impl TokenNetwork {
@@ -111,33 +128,41 @@ impl TokenNetwork {
     }
 }
 
+/// Mapping of named network-specific token definitions.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct TokenNetworks(HashMap<String, TokenNetwork>);
 
 impl TokenNetworks {
+    /// Returns the underlying map of token-network definitions.
     pub fn hashmap(&self) -> &HashMap<String, TokenNetwork> {
         &self.0
     }
 
+    /// Looks up a token-network definition by key.
     pub fn get(&self, key: &str) -> Option<&TokenNetwork> {
         self.0.get(key)
     }
 }
 
+/// Static token definition spanning one or more networks.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Token {
     // TODO: rethink tokens to be any kind of token, but each
     // chain/network will may have an different token kind.
+    /// Per-network deployments for this logical token.
     pub networks: TokenNetworks,
 }
 
+/// Mapping of named token definitions.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Tokens(HashMap<String, Token>);
 impl Tokens {
+    /// Returns the underlying map of token definitions.
     pub fn hashmap(&self) -> &HashMap<String, Token> {
         &self.0
     }
 
+    /// Looks up a token definition by key.
     pub fn get(&self, key: &str) -> Option<&Token> {
         self.0.get(key)
     }

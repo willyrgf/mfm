@@ -388,6 +388,11 @@ When changing CLI/REST behavior, update the relevant docs in the same change:
 - `bin/rest-api/README.md` for REST surface/contract changes.
 - `docs/architecture.md` if architectural boundaries or responsibilities change.
 - `docs/redesign.md` if runtime/storage/replay contract semantics change.
+- Public library API changes must update rustdoc in the same change.
+- Keep `#![warn(missing_docs)]` enabled in library crates; new library crates should add it from the start.
+- New public items must include rustdoc on the item and its public fields or methods.
+- If a crate's main entrypoint or usage changes, update or add at least one rustdoc example in the same change.
+- Do not treat documentation as follow-up work for public APIs.
 
 ## CI Requirements
 
@@ -395,6 +400,11 @@ Before opening a PR (or finishing a change), ensure [Code Style and Standards](#
 Before each commit, run: `nix run .#ci -- --mode full`.
 
 If you use Nix or need CI parity, also run: `nix flake check && nix build`.
+
+If a change touches public library APIs or rustdoc examples, also run:
+
+- `RUSTFLAGS='-Dmissing-docs' cargo check --workspace --lib --message-format short`
+- `cargo test --workspace --doc`
 
 ## Debugging Tips
 

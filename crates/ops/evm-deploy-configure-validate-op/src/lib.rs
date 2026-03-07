@@ -1,3 +1,20 @@
+#![warn(missing_docs)]
+//! Thin planner op that composes deploy, configure, and validate EVM sub-ops.
+//!
+//! This op preserves the thin-layer contract by delegating executable behavior to the shared
+//! EVM state crates. Its responsibility is limited to validating the composite config, expanding
+//! the three sub-ops, and connecting their graphs in sequence.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_op_evm_deploy_configure_validate::EvmDeployConfigureValidateOp;
+//! use mfm_sdk::op::Operation;
+//!
+//! let op = EvmDeployConfigureValidateOp;
+//! assert_eq!(op.op_id().as_str(), "evm_deploy_configure_validate");
+//! ```
+
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
@@ -10,16 +27,23 @@ use mfm_sdk::errors::SdkError;
 use mfm_sdk::op::{OpIo, Operation};
 use mfm_state_common::errors as op_errors;
 
+/// Stable operation identifier for the composite deploy-configure-validate workflow.
 pub const EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID: &str = "evm_deploy_configure_validate";
+/// Stable operation version for the composite deploy-configure-validate workflow.
 pub const EVM_DEPLOY_CONFIGURE_VALIDATE_OP_VERSION: &str = "v1";
 
+/// Config for the composite deploy-configure-validate workflow.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EvmDeployConfigureValidateOpConfig {
+    /// JSON config forwarded to the deploy sub-op.
     pub deploy: serde_json::Value,
+    /// JSON config forwarded to the configure sub-op.
     pub configure: serde_json::Value,
+    /// JSON config forwarded to the validate sub-op.
     pub validate: serde_json::Value,
 }
 
+/// Planner op that expands deploy, configure, and validate sub-graphs in order.
 #[derive(Clone, Default)]
 pub struct EvmDeployConfigureValidateOp;
 

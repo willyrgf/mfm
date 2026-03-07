@@ -4,14 +4,17 @@ use mfm_machine::ids::{OpPath, StateId};
 
 use crate::errors::state_unknown_msg;
 
+/// Builds a stable idempotency scope string for a specific state.
 pub fn state_scope(scope: impl AsRef<str>, state_id: &StateId) -> String {
     format!("{}|state:{}", scope.as_ref(), state_id.as_str())
 }
 
+/// Builds a stable idempotency scope string for an operation path.
 pub fn op_scope(scope: impl AsRef<str>, op_path: &OpPath) -> String {
     format!("{}|op:{}", scope.as_ref(), op_path.0)
 }
 
+/// Builds the canonical `mfm:` scope string used by shared states.
 pub fn canonical(op: impl AsRef<str>, state: impl AsRef<str>, purpose: impl AsRef<str>) -> String {
     format!(
         "mfm:{}|state:{}|purpose:{}",
@@ -21,10 +24,12 @@ pub fn canonical(op: impl AsRef<str>, state: impl AsRef<str>, purpose: impl AsRe
     )
 }
 
+/// Builds the canonical idempotency purpose string for a state id.
 pub fn state_purpose(op: impl AsRef<str>, state_id: &StateId, purpose: impl AsRef<str>) -> String {
     canonical(op, state_id.as_str(), purpose)
 }
 
+/// Builds the canonical idempotency purpose string for an operation path.
 pub fn op_purpose(op: impl AsRef<str>, op_path: &OpPath, purpose: impl AsRef<str>) -> String {
     format!(
         "mfm:{}|op:{}|purpose:{}",
@@ -34,6 +39,9 @@ pub fn op_purpose(op: impl AsRef<str>, op_path: &OpPath, purpose: impl AsRef<str
     )
 }
 
+/// Hashes a canonical JSON value into a stable idempotency key.
+///
+/// Non-canonical JSON values, including floats, map to a stable state error.
 pub fn idempotency_key_for_value(v: &serde_json::Value) -> Result<String, StateError> {
     let id = artifact_id_for_json(v).map_err(|_| {
         state_unknown_msg(

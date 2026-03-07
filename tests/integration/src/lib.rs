@@ -1,14 +1,29 @@
-//! Shared workspace integration and parity tests.
+#![warn(missing_docs)]
+//! Shared workspace integration and parity test helpers.
+//!
+//! This crate keeps cross-workspace test plumbing in one place so parity suites can coordinate
+//! run ids and shared setup without duplicating helper code in every test binary.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use mfm_integration_tests::parity_run_ids::read_parity_evm_run_id;
+//!
+//! let _run_id = read_parity_evm_run_id();
+//! ```
 
 use std::path::{Path, PathBuf};
 
 use mfm_machine::ids::RunId;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+/// Helpers for persisting parity run ids between coordinated integration-test phases.
 pub mod parity_run_ids {
     use super::*;
 
+    /// Environment variable that points to the handoff file for EVM parity run ids.
     pub const PARITY_EVM_RUN_IDS_PATH_ENV: &str = "MFM_PARITY_EVM_RETH_RUN_IDS_PATH";
+    /// Environment variable that points to the handoff file for Aave parity run ids.
     pub const PARITY_AAVE_RUN_IDS_PATH_ENV: &str = "MFM_PARITY_AAVE_V3_RUN_IDS_PATH";
 
     const PARITY_EVM_RUN_IDS_KIND: &str = "parity_evm_reth_run_ids_v1";
@@ -27,6 +42,7 @@ pub mod parity_run_ids {
         phase_b_run_id: String,
     }
 
+    /// Writes a single EVM parity run id to the configured handoff file.
     pub fn write_parity_evm_run_id(run_id: &RunId) {
         let path = required_env_path(PARITY_EVM_RUN_IDS_PATH_ENV);
         let payload = ParityEvmRunIds {
@@ -36,6 +52,7 @@ pub mod parity_run_ids {
         write_json_atomic(&path, &payload, "evm parity run ids");
     }
 
+    /// Writes the phase A and phase B Aave parity run ids to the configured handoff file.
     pub fn write_parity_aave_run_ids(phase_a_run_id: &RunId, phase_b_run_id: &RunId) {
         let path = required_env_path(PARITY_AAVE_RUN_IDS_PATH_ENV);
         let payload = ParityAaveRunIds {
@@ -46,6 +63,7 @@ pub mod parity_run_ids {
         write_json_atomic(&path, &payload, "aave parity run ids");
     }
 
+    /// Reads the EVM parity run id from the configured handoff file.
     pub fn read_parity_evm_run_id() -> RunId {
         let path = required_env_path(PARITY_EVM_RUN_IDS_PATH_ENV);
         let payload: ParityEvmRunIds = read_json(&path, "evm parity run ids");
@@ -58,6 +76,7 @@ pub mod parity_run_ids {
         parse_run_id("evm_run_id", &payload.evm_run_id)
     }
 
+    /// Reads the phase A and phase B Aave parity run ids from the configured handoff file.
     pub fn read_parity_aave_run_ids() -> (RunId, RunId) {
         let path = required_env_path(PARITY_AAVE_RUN_IDS_PATH_ENV);
         let payload: ParityAaveRunIds = read_json(&path, "aave parity run ids");

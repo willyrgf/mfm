@@ -27,67 +27,107 @@ const KEY_VALIDATED: &str = "validated";
 const KEY_CHAIN_ID: &str = "chain_id";
 const KEY_CLIENT_VERSION: &str = "client_version";
 
+/// Runtime configuration for [`EvmDeployState`].
 #[derive(Clone, Debug)]
 pub struct EvmDeployStateConfig {
+    /// Optional inline contract artifact; falls back to `artifact_port` when absent.
     pub artifact: Option<shared_dcv::ContractArtifactConfig>,
+    /// Context key used to load the contract artifact when `artifact` is absent.
     pub artifact_port: String,
+    /// Deployer address or sender address.
     pub from: String,
+    /// Constructor arguments passed during deployment.
     pub constructor_args: Vec<serde_json::Value>,
+    /// Optional deployment value expressed as a hex quantity.
     pub value_hex: Option<String>,
+    /// Optional environment variable name used for local signing.
     pub signing_key_env: Option<String>,
+    /// Delay between receipt polls in milliseconds.
     pub poll_interval_ms: u64,
+    /// Maximum number of receipt polls before timing out.
     pub max_receipt_polls: u64,
 }
 
+/// Single runtime configuration call submitted by [`EvmConfigureState`].
 #[derive(Clone, Debug)]
 pub struct EvmConfigureRuntimeCall {
+    /// Function name to invoke.
     pub function: String,
+    /// Positional arguments passed to the function call.
     pub args: Vec<serde_json::Value>,
+    /// Optional call value expressed as a hex quantity.
     pub value_hex: Option<String>,
 }
 
+/// Runtime configuration for [`EvmConfigureState`].
 #[derive(Clone, Debug)]
 pub struct EvmConfigureStateConfig {
+    /// Optional inline contract artifact; falls back to `artifact_port` when absent.
     pub artifact: Option<shared_dcv::ContractArtifactConfig>,
+    /// Context key used to load the contract artifact when `artifact` is absent.
     pub artifact_port: String,
+    /// Sender address used for configuration transactions.
     pub from: String,
+    /// Optional inline contract address; falls back to context when absent.
     pub contract_address: Option<String>,
+    /// Calls to execute against the deployed contract.
     pub calls: Vec<EvmConfigureRuntimeCall>,
+    /// Delay between receipt polls in milliseconds.
     pub poll_interval_ms: u64,
+    /// Maximum number of receipt polls before timing out.
     pub max_receipt_polls: u64,
 }
 
+/// Runtime configuration for [`EvmValidateState`].
 #[derive(Clone, Debug)]
 pub struct EvmValidateStateConfig {
+    /// Optional inline contract artifact; falls back to `artifact_port` when absent.
     pub artifact: Option<shared_dcv::ContractArtifactConfig>,
+    /// Context key used to load the contract artifact when `artifact` is absent.
     pub artifact_port: String,
+    /// Optional inline contract address; falls back to context when absent.
     pub contract_address: Option<String>,
+    /// Expected chain id for the connected RPC endpoint.
     pub expected_chain_id: u64,
+    /// Substring that must appear in `web3_clientVersion`.
     pub require_client_substring: String,
+    /// Read assertions evaluated with `eth_call`.
     pub read_assertions: Vec<shared_dcv::ReadAssertionConfig>,
+    /// Event assertions evaluated with `eth_getLogs`.
     pub event_assertions: Vec<shared_dcv::EventAssertionConfig>,
 }
 
+/// State that extracts a contract artifact from a Nix build result.
 #[derive(Clone, Debug)]
 pub struct NixArtifactToEvmContractState {
+    /// JSON pointer applied to the Nix result payload.
     pub result_pointer: String,
 }
 
+/// State that deploys a contract and records its address plus receipt in context.
 #[derive(Clone, Debug)]
 pub struct EvmDeployState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Deployment runtime configuration.
     pub cfg: EvmDeployStateConfig,
 }
 
+/// State that submits runtime configuration transactions to a deployed contract.
 #[derive(Clone, Debug)]
 pub struct EvmConfigureState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Configuration runtime configuration.
     pub cfg: EvmConfigureStateConfig,
 }
 
+/// State that validates deployed contract behavior against configured assertions.
 #[derive(Clone, Debug)]
 pub struct EvmValidateState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Validation runtime configuration.
     pub cfg: EvmValidateStateConfig,
 }
 

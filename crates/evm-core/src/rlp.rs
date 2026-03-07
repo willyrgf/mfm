@@ -1,3 +1,4 @@
+/// Removes all leading zero bytes from a big-endian integer encoding.
 pub fn trim_leading_zero_bytes(bytes: &[u8]) -> Vec<u8> {
     let mut idx = 0usize;
     while idx < bytes.len() && bytes[idx] == 0 {
@@ -6,6 +7,7 @@ pub fn trim_leading_zero_bytes(bytes: &[u8]) -> Vec<u8> {
     bytes[idx..].to_vec()
 }
 
+/// Encodes a `u64` as the shortest possible big-endian byte string.
 pub fn u64_to_min_be(mut value: u64) -> Vec<u8> {
     if value == 0 {
         return Vec::new();
@@ -20,6 +22,7 @@ pub fn u64_to_min_be(mut value: u64) -> Vec<u8> {
     out
 }
 
+/// Encodes a `u128` as the shortest possible big-endian byte string.
 pub fn u128_to_min_be(mut value: u128) -> Vec<u8> {
     if value == 0 {
         return Vec::new();
@@ -34,6 +37,10 @@ pub fn u128_to_min_be(mut value: u128) -> Vec<u8> {
     out
 }
 
+/// Encodes a `usize` as the shortest possible big-endian byte string.
+///
+/// Unlike the integer helpers above, `0` is encoded as a single zero byte because the value is
+/// primarily used as an RLP length prefix.
 pub fn usize_to_min_be(mut value: usize) -> Vec<u8> {
     if value == 0 {
         return vec![0];
@@ -48,6 +55,7 @@ pub fn usize_to_min_be(mut value: usize) -> Vec<u8> {
     out
 }
 
+/// RLP-encodes a single byte string.
 pub fn rlp_encode_bytes(bytes: &[u8]) -> Vec<u8> {
     if bytes.len() == 1 && bytes[0] < 0x80 {
         return vec![bytes[0]];
@@ -67,6 +75,9 @@ pub fn rlp_encode_bytes(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// RLP-encodes a list of raw byte strings.
+///
+/// Each item is individually encoded as a byte string before the outer list prefix is applied.
 pub fn rlp_encode_list(items: &[Vec<u8>]) -> Vec<u8> {
     let mut payload = Vec::new();
     for item in items {
@@ -87,6 +98,7 @@ pub fn rlp_encode_list(items: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
+/// RLP-encodes a list whose items are already RLP-encoded.
 pub fn rlp_encode_list_preencoded(items: &[Vec<u8>]) -> Vec<u8> {
     let mut payload = Vec::new();
     for item in items {

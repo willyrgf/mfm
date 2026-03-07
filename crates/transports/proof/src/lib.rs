@@ -1,3 +1,19 @@
+//! Minimal proof transport used by proof-oriented examples and tests.
+//!
+//! This transport keeps the `proof` namespace group wired into Live IO without introducing
+//! external dependencies.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_machine::live_io::LiveIoTransportFactory;
+//! use mfm_transports_proof::ProofIoTransportFactory;
+//!
+//! let factory = ProofIoTransportFactory;
+//! assert_eq!(factory.namespace_group(), "proof");
+//! ```
+#![warn(missing_docs)]
+
 use async_trait::async_trait;
 
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
@@ -15,6 +31,7 @@ fn info(code: &'static str, category: ErrorCategory, message: impl Into<String>)
     }
 }
 
+/// Transport factory for the `proof` namespace group.
 #[derive(Clone, Default)]
 pub struct ProofIoTransportFactory;
 

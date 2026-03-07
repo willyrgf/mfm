@@ -10,6 +10,20 @@
 //! - Do not echo request payloads in error messages (avoid accidental secret leakage).
 //! - `nix` may access the network in Live mode; the resulting *outputs* must still be recorded
 //!   as facts via the engine (handled by `LiveIo`).
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_collectors_nix_exec::{NAMESPACE_NIX_EXEC, NixFlakePolicy, NixFlakeTransportFactory};
+//! use mfm_machine::live_io::LiveIoTransportFactory;
+//!
+//! let factory = NixFlakeTransportFactory::new(NixFlakePolicy {
+//!     allow_prefixes: vec!["github:willyrgf/mfm".to_string()],
+//! });
+//!
+//! assert_eq!(factory.namespace_group(), NAMESPACE_NIX_EXEC);
+//! ```
+#![warn(missing_docs)]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -27,6 +41,7 @@ use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::process_exec::{run_command, ProcessRunError, ProcessRunResult, StreamLimit};
 use mfm_machine::stores::{ArtifactStore, EventStore};
 
+/// Namespace group handled by the Nix flake transport factory.
 pub const NAMESPACE_NIX_EXEC: &str = "nix.exec";
 
 const CODE_NIX_REQUEST_INVALID: &str = "nix_request_invalid";
@@ -68,6 +83,7 @@ fn info_with_details(
     }
 }
 
+/// Allowlist policy for flake references that may be resolved at runtime.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NixFlakePolicy {
     /// Allowlisted flake ref prefixes.
@@ -85,16 +101,19 @@ impl Default for NixFlakePolicy {
     }
 }
 
+/// Live transport factory that resolves flake apps into realized store programs.
 #[derive(Clone, Default)]
 pub struct NixFlakeTransportFactory {
     policy: NixFlakePolicy,
 }
 
 impl NixFlakeTransportFactory {
+    /// Creates a new factory with the supplied allowlist policy.
     pub fn new(policy: NixFlakePolicy) -> Self {
         Self { policy }
     }
 
+    /// Builds a factory from environment-derived configuration.
     pub fn from_env() -> Self {
         Self::default()
     }

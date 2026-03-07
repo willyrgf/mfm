@@ -1,3 +1,32 @@
+//! Local EVM helper transport for signing and address derivation.
+//!
+//! This crate exposes a `LiveIoTransportFactory` for the `local.evm.*` namespaces used by shared
+//! runtime states. The transport reads signing keys from the local environment and never persists
+//! the secret material itself.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_machine::live_io::LiveIoTransportFactory;
+//! use mfm_transports_local_evm::{LocalEvmIoTransportFactory, LocalEvmSignLegacyCreateCall};
+//!
+//! let factory = LocalEvmIoTransportFactory;
+//! let call = LocalEvmSignLegacyCreateCall {
+//!     signing_key_env: "MFM_SIGNING_KEY".to_string(),
+//!     from: "0x0000000000000000000000000000000000000000".to_string(),
+//!     chain_id: 1,
+//!     nonce_hex: "0x0".to_string(),
+//!     gas_price_hex: "0x1".to_string(),
+//!     gas_limit_hex: "0x5208".to_string(),
+//!     value_hex: "0x0".to_string(),
+//!     data_hex: "0x".to_string(),
+//! };
+//!
+//! assert_eq!(factory.namespace_group(), "local.evm");
+//! assert_eq!(call.chain_id, 1);
+//! ```
+#![warn(missing_docs)]
+
 use alloy_primitives::keccak256;
 use async_trait::async_trait;
 use k256::ecdsa::SigningKey;
@@ -14,6 +43,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
+/// Transport factory for local EVM helper namespaces.
 #[derive(Clone, Default)]
 pub struct LocalEvmIoTransportFactory;
 
@@ -44,24 +74,35 @@ impl LiveIoTransport for LocalEvmIoTransport {
     }
 }
 
+/// Request shape for signing a legacy contract-creation transaction locally.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalEvmSignLegacyCreateCall {
+    /// Environment variable containing the private key hex.
     pub signing_key_env: String,
+    /// Expected sender address for the signing key.
     pub from: String,
+    /// Chain ID used for replay protection.
     pub chain_id: u64,
+    /// Nonce encoded as a hex quantity.
     pub nonce_hex: String,
+    /// Gas price encoded as a hex quantity.
     pub gas_price_hex: String,
+    /// Gas limit encoded as a hex quantity.
     pub gas_limit_hex: String,
+    /// Value encoded as a hex quantity.
     pub value_hex: String,
+    /// Deployment calldata encoded as hex.
     pub data_hex: String,
 }
 
+/// Thin typed client for the `local.evm.*` helper namespaces.
 pub struct LocalEvmIoClient<'a> {
     state_id: StateId,
     io: &'a mut dyn IoProvider,
 }
 
 impl<'a> LocalEvmIoClient<'a> {
+    /// Creates a new local EVM client for the given state and IO provider.
     pub fn new(state_id: StateId, io: &'a mut dyn IoProvider) -> Self {
         Self { state_id, io }
     }
@@ -86,6 +127,7 @@ impl<'a> LocalEvmIoClient<'a> {
         )))
     }
 
+    /// Resolves the signer address for a configured private-key environment variable.
     pub async fn signer_address(&mut self, signing_key_env: &str) -> Result<String, IoError> {
         let request = serde_json::json!({
             "env_name_hex": hex::encode(signing_key_env.as_bytes()),
@@ -120,6 +162,7 @@ impl<'a> LocalEvmIoClient<'a> {
         })
     }
 
+    /// Signs a legacy contract-creation transaction through the local transport.
     pub async fn sign_legacy_create(
         &mut self,
         req: LocalEvmSignLegacyCreateCall,

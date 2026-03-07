@@ -11,6 +11,7 @@ use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
 
+/// Arguments for `mfm keystore tx-sign`.
 #[derive(Args)]
 pub struct TxSignArgs {
     /// Key ID (UUID) to use for signing
@@ -62,6 +63,7 @@ pub struct TxSignArgs {
     pub keystore: Option<PathBuf>,
 }
 
+/// Response returned after writing a signed transaction payload.
 #[derive(Debug, Clone, Serialize)]
 pub struct TxSignResponse {
     from: String,
@@ -83,6 +85,7 @@ impl fmt::Display for TxSignResponse {
     }
 }
 
+/// Executes the signing command and terminates the process.
 pub async fn execute(ctx: &CommandContext, args: &TxSignArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);

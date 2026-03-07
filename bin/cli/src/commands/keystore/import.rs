@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 const ENV_IMPORT_PASSPHRASE: &str = "MFM_KEYSTORE_IMPORT_BIP39_EXTRA";
 
+/// Arguments for `mfm keystore import`.
 #[derive(Args)]
 pub struct ImportArgs {
     /// Import type: privatekey, mnemonic
@@ -45,14 +46,18 @@ pub struct ImportArgs {
     pub stdin: bool,
 }
 
+/// Supported keystore import sources.
 #[derive(clap::ValueEnum, Clone)]
 pub enum ImportType {
+    /// Import a raw private key.
     #[value(name = "privatekey", alias = "private-key")]
     PrivateKey,
+    /// Import a BIP-39 mnemonic phrase.
     #[value(name = "mnemonic")]
     Mnemonic,
 }
 
+/// Response returned after successfully importing a key.
 #[derive(Serialize)]
 pub struct ImportResponse {
     id: String,
@@ -72,6 +77,7 @@ impl fmt::Display for ImportResponse {
     }
 }
 
+/// Executes the import command and terminates the process.
 pub async fn execute(ctx: &CommandContext, args: &ImportArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);

@@ -3,30 +3,50 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
+/// Supported network families in static configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
+    /// EVM-compatible network.
     Evm,
 }
 
+/// Static network definition keyed from [`Networks`].
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Network {
+    /// Human-readable network name.
     pub name: String,
+    /// Network family identifier.
     pub kind: Kind,
+    /// Native coin symbol.
     pub symbol: String,
+    /// Native coin decimals, when known.
     pub decimals: Option<u8>,
+    /// EVM chain identifier.
     pub chain_id: u32,
+    /// Preferred HTTP RPC endpoint.
     pub node_url_http: Option<String>,
+    /// Preferred gRPC endpoint.
     pub node_url_grpc: Option<String>,
+    /// Optional block explorer base URL.
     pub blockexplorer_url: Option<String>,
+    /// Minimum balance threshold expressed in whole coins.
     pub min_balance_coin: String,
+    /// Wrapped native token identifier, when applicable.
     pub wrapped_token: Option<String>,
 }
 
+/// Errors raised while converting configured network values into runtime primitives.
 #[derive(Debug, Error)]
 pub enum NetworkValueError {
+    /// `min_balance_coin` could not be parsed into base units.
     #[error("invalid min_balance_coin {value:?}: {reason}")]
-    InvalidMinBalance { value: String, reason: String },
+    InvalidMinBalance {
+        /// Original configured value.
+        value: String,
+        /// Parse or range-check failure reason.
+        reason: String,
+    },
 }
 
 impl Network {
@@ -125,13 +145,16 @@ fn parse_u256_decimal(s: &str) -> Result<U256, String> {
     Ok(v)
 }
 
+/// Mapping of named network definitions.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Networks(HashMap<String, Network>);
 impl Networks {
+    /// Looks up a network definition by key.
     pub fn get(&self, key: &str) -> Option<&Network> {
         self.0.get(key)
     }
 
+    /// Returns the underlying map of named network definitions.
     pub fn hashmap(&self) -> &HashMap<String, Network> {
         &self.0
     }

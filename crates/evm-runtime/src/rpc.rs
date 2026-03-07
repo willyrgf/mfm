@@ -12,13 +12,18 @@ use mfm_transports_local_evm::{LocalEvmIoClient, LocalEvmSignLegacyCreateCall};
 
 use crate::dcv as shared_dcv;
 
+/// Result payload returned after submitting a raw transaction through routed IO.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpcRawTxSubmission {
+    /// Submitted transaction hash.
     pub tx_hash: String,
+    /// RPC source identifier selected for the submission.
     pub rpc_source_id: String,
+    /// RFC3339 timestamp recorded at submission time.
     pub submitted_at: String,
 }
 
+/// Normalizes an RPC hex quantity into canonical lowercase `0x` form.
 pub fn normalize_quantity_hex(raw: &str, message: &'static str) -> Result<String, StateError> {
     let trimmed = raw.trim();
     let Some(rest) = trimmed
@@ -43,6 +48,7 @@ pub fn normalize_quantity_hex(raw: &str, message: &'static str) -> Result<String
     }
 }
 
+/// Parses an RPC hex quantity into `u128`.
 pub fn parse_quantity_hex_u128(raw: &str, message: &'static str) -> Result<u128, StateError> {
     let normalized = normalize_quantity_hex(raw, message)?;
     let digits = normalized
@@ -52,6 +58,7 @@ pub fn parse_quantity_hex_u128(raw: &str, message: &'static str) -> Result<u128,
         .map_err(|_| op_errors::state_unknown("evm_response_invalid", message))
 }
 
+/// Submits a transaction through `eth_sendTransaction`, filling gas and gas price when absent.
 pub async fn send_transaction(
     client: &mut EvmIoClient<'_>,
     mut tx_obj: serde_json::Value,
@@ -85,6 +92,7 @@ pub async fn send_transaction(
     })
 }
 
+/// Submits a raw signed transaction through `eth_sendRawTransaction`.
 pub async fn send_raw_transaction(
     client: &mut EvmIoClient<'_>,
     raw_tx_hex: &str,
@@ -110,6 +118,7 @@ pub async fn send_raw_transaction(
     })
 }
 
+/// Estimates gas for the supplied transaction object and returns a canonical hex quantity.
 pub async fn estimate_gas_hex(
     client: &mut EvmIoClient<'_>,
     tx_obj: &serde_json::Value,
@@ -130,6 +139,7 @@ pub async fn estimate_gas_hex(
     normalize_quantity_hex(&gas, "eth_estimateGas returned invalid hex gas value")
 }
 
+/// Fetches the current gas price as a canonical hex quantity.
 pub async fn gas_price_hex(client: &mut EvmIoClient<'_>) -> Result<String, StateError> {
     let res = client
         .call(JsonRpcCall::new("eth_gasPrice", serde_json::json!([])))
@@ -144,6 +154,7 @@ pub async fn gas_price_hex(client: &mut EvmIoClient<'_>) -> Result<String, State
     normalize_quantity_hex(&gas_price, "eth_gasPrice returned invalid hex gas price")
 }
 
+/// Fetches the pending transaction count for `from` as a canonical hex quantity.
 pub async fn transaction_count_hex(
     client: &mut EvmIoClient<'_>,
     from: &str,
@@ -164,6 +175,7 @@ pub async fn transaction_count_hex(
     normalize_quantity_hex(&nonce, "eth_getTransactionCount returned invalid hex nonce")
 }
 
+/// Resolves the pending nonce for `from` as a `u128`.
 pub async fn pending_nonce_u128(
     io: &mut dyn IoProvider,
     state_id: &StateId,
@@ -177,18 +189,28 @@ pub async fn pending_nonce_u128(
     )
 }
 
+/// Inputs required to locally sign a legacy contract-creation transaction.
 #[derive(Clone, Debug)]
 pub struct LegacyCreateTxSigningRequest<'a> {
+    /// Environment variable name that contains the signing key.
     pub signing_key_env: &'a str,
+    /// Sender address.
     pub from: &'a str,
+    /// Chain id used for signing.
     pub chain_id: u64,
+    /// Nonce expressed as a canonical hex quantity.
     pub nonce_hex: &'a str,
+    /// Gas price expressed as a canonical hex quantity.
     pub gas_price_hex: &'a str,
+    /// Gas limit expressed as a canonical hex quantity.
     pub gas_limit_hex: &'a str,
+    /// Value expressed as a canonical hex quantity.
     pub value_hex: &'a str,
+    /// Constructor payload bytes.
     pub constructor_payload: &'a [u8],
 }
 
+/// Asks the local EVM transport to sign a legacy contract-creation transaction.
 pub async fn local_sign_legacy_create_raw_tx(
     client: &mut EvmIoClient<'_>,
     req: LegacyCreateTxSigningRequest<'_>,
@@ -210,6 +232,7 @@ pub async fn local_sign_legacy_create_raw_tx(
         .map_err(op_errors::state_from_io)
 }
 
+/// Signs and submits a contract-creation transaction using the next pending nonce.
 pub async fn send_signed_create_transaction(
     client: &mut EvmIoClient<'_>,
     signing_key_env: &str,
@@ -229,6 +252,7 @@ pub async fn send_signed_create_transaction(
     .await
 }
 
+/// Signs and submits a contract-creation transaction using the supplied nonce.
 pub async fn send_signed_create_transaction_with_nonce(
     client: &mut EvmIoClient<'_>,
     signing_key_env: &str,
@@ -281,6 +305,7 @@ pub async fn send_signed_create_transaction_with_nonce(
     send_raw_transaction(client, &raw_tx_hex).await
 }
 
+/// Polls until a transaction receipt is available or the poll budget is exhausted.
 pub async fn wait_for_receipt(
     state_id: &StateId,
     io: &mut dyn IoProvider,
@@ -329,6 +354,7 @@ pub async fn wait_for_receipt(
     ))
 }
 
+/// Ensures a transaction receipt reports success.
 pub fn ensure_receipt_success(receipt: &serde_json::Value) -> Result<(), StateError> {
     let Some(obj) = receipt.as_object() else {
         return Err(op_errors::state_unknown(
@@ -357,6 +383,7 @@ pub fn ensure_receipt_success(receipt: &serde_json::Value) -> Result<(), StateEr
     Ok(())
 }
 
+/// Extracts and normalizes the deployed contract address from a transaction receipt.
 pub fn receipt_contract_address(receipt: &serde_json::Value) -> Result<String, StateError> {
     let Some(obj) = receipt.as_object() else {
         return Err(op_errors::state_unknown(
@@ -379,6 +406,7 @@ pub fn receipt_contract_address(receipt: &serde_json::Value) -> Result<String, S
     })
 }
 
+/// Fetches and normalizes the account list returned by `eth_accounts`.
 pub async fn rpc_accounts(
     io: &mut dyn IoProvider,
     state_id: &StateId,
@@ -412,6 +440,7 @@ pub async fn rpc_accounts(
     Ok(out)
 }
 
+/// Returns the account at `idx` or a structured range error.
 pub fn account_at(accounts: &[String], idx: usize) -> Result<String, StateError> {
     accounts.get(idx).cloned().ok_or_else(|| {
         op_errors::state_error(
@@ -423,6 +452,7 @@ pub fn account_at(accounts: &[String], idx: usize) -> Result<String, StateError>
     })
 }
 
+/// Resolves an account by index through `eth_accounts`.
 pub async fn resolve_account_by_index(
     io: &mut dyn IoProvider,
     state_id: &StateId,
@@ -432,6 +462,7 @@ pub async fn resolve_account_by_index(
     account_at(&accounts, idx)
 }
 
+/// Resolves the address for a locally configured signing key.
 pub async fn resolve_signing_key_address(
     io: &mut dyn IoProvider,
     state_id: &StateId,
@@ -444,6 +475,7 @@ pub async fn resolve_signing_key_address(
         .map_err(op_errors::state_from_io)
 }
 
+/// Resolves the deployer address from either a signing key or an account index.
 pub async fn resolve_deployer_address(
     io: &mut dyn IoProvider,
     state_id: &StateId,
@@ -456,6 +488,7 @@ pub async fn resolve_deployer_address(
     resolve_account_by_index(io, state_id, deployer_account_index).await
 }
 
+/// Submits a raw transaction through routed IO and records a replay fact key for the request.
 pub async fn send_raw_transaction_via_io(
     state_id: &StateId,
     io: &mut dyn IoProvider,

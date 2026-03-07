@@ -1,7 +1,7 @@
 # Three-Tier Thin-Layer Alignment Audit
 
 Date: 2026-02-14
-Status: Post-refactor checkpoint; state extraction phases complete, verifier enforced in CI, final strictness/testing follow-ups pending
+Status: Historical checkpoint after the thin-layer refactor. State extraction and the state-layer path migration are complete; canonical shared-state paths now live under `crates/states/*`, and any remaining follow-up items should be read in that context.
 
 ## 0. Architectural Model
 

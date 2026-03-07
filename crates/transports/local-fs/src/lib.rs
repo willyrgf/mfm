@@ -1,3 +1,19 @@
+//! Local filesystem transport for reading small text inputs.
+//!
+//! This transport is intentionally narrow and currently exposes only `local.fs.read_text`, which
+//! allows state logic to read files through the Live IO abstraction rather than ambient file IO.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_machine::live_io::LiveIoTransportFactory;
+//! use mfm_transports_local_fs::LocalFsIoTransportFactory;
+//!
+//! let factory = LocalFsIoTransportFactory;
+//! assert_eq!(factory.namespace_group(), "local.fs");
+//! ```
+#![warn(missing_docs)]
+
 use async_trait::async_trait;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
 use mfm_machine::ids::ErrorCode;
@@ -6,6 +22,7 @@ use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
+/// Transport factory for the `local.fs` namespace group.
 #[derive(Clone, Default)]
 pub struct LocalFsIoTransportFactory;
 
