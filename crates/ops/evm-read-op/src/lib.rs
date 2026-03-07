@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! EVM read-only op.
 //!
 //! Source of truth: `docs/redesign.md` (v4).
@@ -6,6 +7,16 @@
 //! - deterministic facts recording in live mode
 //! - replay determinism
 //! - crash/resume determinism (orphan attempt reuse)
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_op_evm_read::EvmReadOp;
+//! use mfm_sdk::op::Operation;
+//!
+//! let op = EvmReadOp;
+//! assert_eq!(op.op_id().as_str(), "evm_read");
+//! ```
 
 use std::sync::Arc;
 
@@ -55,6 +66,7 @@ impl Default for EvmReadConfig {
     }
 }
 
+/// Planner for read-only EVM RPC queries such as chain ID and block number.
 #[derive(Clone, Default)]
 pub struct EvmReadOp;
 

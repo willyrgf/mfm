@@ -36,12 +36,23 @@ fn repo_root() -> PathBuf {
         return PathBuf::from(raw);
     }
 
-    // crates/tools/architecture-verify -> repo root is 3 ancestors up
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("repo root")
-        .to_path_buf()
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(root) = find_repo_root(&cwd) {
+            return root;
+        }
+    }
+
+    find_repo_root(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("repo root")
+}
+
+fn find_repo_root(start: &Path) -> Option<PathBuf> {
+    start.ancestors().find_map(|candidate| {
+        if candidate.join("Cargo.toml").is_file() && candidate.join("crates").is_dir() {
+            Some(candidate.to_path_buf())
+        } else {
+            None
+        }
+    })
 }
 
 fn check_expand_boundary(repo_root: &Path, failures: &mut Vec<String>) {

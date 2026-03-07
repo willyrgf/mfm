@@ -1,7 +1,7 @@
 # Thin-Layer Alignment Audit
 
 Date: 2026-02-14
-Status: Option A checkpoint implemented; hardening in progress (`B6` convergence + parity validation)
+Status: Historical checkpoint after Option A implementation. The later state-layer relocation is complete, so current canonical shared-state paths are under `crates/states/*`; path references below remain useful as point-in-time audit evidence.
 
 ## 0. Implementation Update (Option A Checkpoint)
 

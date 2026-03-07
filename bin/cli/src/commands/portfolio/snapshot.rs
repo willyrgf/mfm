@@ -7,6 +7,7 @@ use crate::presentation::output::handle_command_result;
 use crate::support::app_services::{command_error_from_app_error, make_app_services};
 use crate::support::run_stores::{make_stores, RunStoresArgs};
 
+/// Arguments for `mfm portfolio snapshot`.
 #[derive(Args)]
 pub struct SnapshotArgs {
     /// Wallet public address (0x...)
@@ -20,10 +21,12 @@ pub struct SnapshotArgs {
     #[arg(long, default_value = "[]")]
     pub tokens_json: String,
 
+    /// Storage configuration for the run's event and artifact backends.
     #[command(flatten)]
     pub stores: RunStoresArgs,
 }
 
+/// Executes the portfolio snapshot command and terminates the process.
 pub async fn execute(ctx: &CommandContext, args: &SnapshotArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);

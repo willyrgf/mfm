@@ -44,6 +44,8 @@
 //! - **Single-threaded usage** - not designed for concurrent access
 //! - **Local-only operation** - no network features or remote storage
 //! - **Trusted application environment** - assumes application is not compromised
+//! - **No secret-bearing persistence outside the keystore file** - callers must not log or store
+//!   exported secrets elsewhere
 //!
 //! ## Design Principles
 //!
@@ -56,6 +58,7 @@
 //!
 //! For comprehensive documentation including security considerations, usage patterns,
 //! and troubleshooting, see [`KEYSTORE.md`](./KEYSTORE.md).
+/// Error types produced by keystore operations.
 pub mod error;
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -162,8 +165,13 @@ impl KeystoreConfig {
 /// Key type for different storage formats
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum KeyType {
+    /// Raw secp256k1 private key material.
     PrivateKey,
-    Mnemonic { derivation_path: String },
+    /// BIP-39 mnemonic material plus its derivation path.
+    Mnemonic {
+        /// Derivation path used to recover the signing key.
+        derivation_path: String,
+    },
 }
 
 impl KeyType {
@@ -175,22 +183,34 @@ impl KeyType {
 /// Key entry stored in keystore
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyEntry {
+    /// Stable identifier for the stored key entry.
     pub id: Uuid,
+    /// Optional human-readable alias.
     pub alias: Option<String>,
+    /// Derived Ethereum address for the key material.
     pub address: Address,
+    /// Stored key format.
     pub key_type: KeyType,
+    /// Encrypted key payload bytes.
     pub encrypted_data: Vec<u8>,
+    /// AES-GCM nonce used to encrypt `encrypted_data`.
     pub nonce: [u8; 12],
+    /// Creation timestamp in UTC.
     pub created_at: DateTime<Utc>,
 }
 
 /// Key metadata for listing operations
 #[derive(Debug, Clone)]
 pub struct KeyInfo {
+    /// Stable identifier for the stored key entry.
     pub id: Uuid,
+    /// Optional human-readable alias.
     pub alias: Option<String>,
+    /// Derived Ethereum address for the key material.
     pub address: Address,
+    /// Stored key format.
     pub key_type: KeyType,
+    /// Creation timestamp in UTC.
     pub created_at: DateTime<Utc>,
 }
 
@@ -206,24 +226,56 @@ impl From<&KeyEntry> for KeyInfo {
     }
 }
 
+/// Audit events appended to the in-memory and persisted keystore audit log.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditEvent {
+    /// An unlock attempt occurred.
     Unlock,
+    /// The keystore was locked.
     Lock,
-    ImportPrivateKey { id: Uuid },
-    ImportMnemonic { id: Uuid },
-    GetPrivateKey { id: Uuid },
-    ExportPrivateKey { id: Uuid },
-    ExportMnemonic { id: Uuid },
-    DeleteKey { id: Uuid },
+    /// A private key import was attempted.
+    ImportPrivateKey {
+        /// Identifier assigned to the imported entry.
+        id: Uuid,
+    },
+    /// A mnemonic import was attempted.
+    ImportMnemonic {
+        /// Identifier assigned to the imported entry.
+        id: Uuid,
+    },
+    /// A private key retrieval was attempted for signing.
+    GetPrivateKey {
+        /// Identifier of the requested entry.
+        id: Uuid,
+    },
+    /// A private key export was attempted.
+    ExportPrivateKey {
+        /// Identifier of the requested entry.
+        id: Uuid,
+    },
+    /// A mnemonic export was attempted.
+    ExportMnemonic {
+        /// Identifier of the requested entry.
+        id: Uuid,
+    },
+    /// A key deletion was attempted.
+    DeleteKey {
+        /// Identifier of the deleted entry.
+        id: Uuid,
+    },
+    /// A password rotation was attempted.
     ChangePassword,
 }
 
+/// One persisted audit-log record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditLogEntry {
+    /// UTC timestamp when the event was recorded.
     pub timestamp: DateTime<Utc>,
+    /// Operation that was attempted.
     pub event: AuditEvent,
+    /// Whether the attempted operation succeeded.
     pub success: bool,
 }
 
@@ -434,6 +486,7 @@ impl Keystore {
         self.auto_lock_timeout = timeout;
     }
 
+    /// Returns the persisted audit log for this keystore instance.
     pub fn audit_log(&self) -> &[AuditLogEntry] {
         &self.audit_log
     }

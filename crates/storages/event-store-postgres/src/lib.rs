@@ -1,7 +1,20 @@
-//! PostgreSQL `EventStore` (parity lane).
+#![warn(missing_docs)]
+//! PostgreSQL `EventStore` for parity tests and durable deployments.
 //!
-//! This backend is intended for parity/integration testing and real deployments.
-//! Fast-lane tests should use `mfm-event-store-mem`.
+//! This backend persists append-only run event streams in PostgreSQL while preserving the runtime
+//! optimistic-concurrency contract.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use mfm_event_store_postgres::PostgresEventStore;
+//!
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> Result<(), mfm_machine::errors::StorageError> {
+//! let _store = PostgresEventStore::connect("postgres://postgres:postgres@localhost/mfm").await?;
+//! # Ok(())
+//! # }
+//! ```
 
 use std::sync::Arc;
 
@@ -14,12 +27,14 @@ use tokio::sync::Mutex;
 use tokio_postgres::{Client, NoTls, Transaction};
 use tracing::{debug, info, warn};
 
+/// PostgreSQL-backed append-only event store.
 #[derive(Clone)]
 pub struct PostgresEventStore {
     client: Arc<Mutex<Client>>,
 }
 
 impl PostgresEventStore {
+    /// Connects to PostgreSQL, initializes the schema, and returns a ready store.
     pub async fn connect(database_url: &str) -> Result<Self, StorageError> {
         info!("connecting postgres event store");
         let (client, connection) = tokio_postgres::connect(database_url, NoTls)
@@ -39,6 +54,7 @@ impl PostgresEventStore {
         Ok(store)
     }
 
+    /// Connects using the `DATABASE_URL` environment variable.
     pub async fn connect_env() -> Result<Self, StorageError> {
         let database_url = std::env::var("DATABASE_URL").map_err(|_| {
             StorageError::Other(Self::info("pg_missing_env", "missing DATABASE_URL"))

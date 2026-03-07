@@ -1,36 +1,47 @@
 /// Simplified error types for minimal keystore
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum KeystoreError {
+    /// The supplied password did not unlock the keystore.
     #[error("Invalid password")]
     InvalidPassword,
 
+    /// The keystore must be unlocked before the operation can proceed.
     #[error("Keystore is locked")]
     Locked,
 
+    /// The requested key identifier does not exist in the keystore.
     #[error("Key not found: {0}")]
     KeyNotFound(uuid::Uuid),
 
+    /// The supplied private key bytes or hex string were invalid.
     #[error("Invalid private key format")]
     InvalidPrivateKey,
 
+    /// The supplied mnemonic phrase failed validation.
     #[error("Invalid mnemonic: {0}")]
     InvalidMnemonic(String),
 
+    /// The supplied derivation path failed validation.
     #[error("Invalid derivation path: {0}")]
     InvalidDerivationPath(String),
 
+    /// A cryptographic primitive returned an error.
     #[error("Cryptographic operation failed: {0}")]
     CryptoError(String),
 
+    /// A filesystem operation failed.
     #[error("File operation failed: {0}")]
     FileError(String),
 
+    /// Serialization or deserialization failed.
     #[error("Serialization failed: {0}")]
     SerializationError(String),
 
+    /// The caller supplied an invalid input value.
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
+    /// The requested operation is disabled by policy.
     #[error("Operation not permitted: {0}")]
     OperationNotPermitted(String),
 }

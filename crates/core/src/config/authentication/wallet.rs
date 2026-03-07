@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Wallet file configuration used by [`super::Method::Wallet`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Wallet {
+    /// Path to the wallet file on disk.
     pub private_key_path: PathBuf,
+    /// Whether the file already contains plaintext key material.
     pub not_encrypted: Option<bool>,
 }
 
@@ -16,6 +19,10 @@ impl PartialEq for Wallet {
 impl Eq for Wallet {}
 
 impl Wallet {
+    /// Reads the configured private key from disk.
+    ///
+    /// Encrypted wallet files are intentionally unsupported; callers must opt into plaintext
+    /// loading with `not_encrypted: true`.
     pub fn read_private_key(
         &self,
         _password: Option<&str>,

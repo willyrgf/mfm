@@ -1,3 +1,5 @@
+//! Reusable idempotent side-effect state helpers.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -17,6 +19,7 @@ use crate::errors as op_errors;
 use crate::idempotency as op_idempotency;
 use crate::states::meta;
 
+/// Test-only trigger that arms a single post-handler failpoint.
 #[derive(Clone)]
 pub struct TriggerOnce {
     stop_after_handler_once: Arc<AtomicBool>,
@@ -24,6 +27,7 @@ pub struct TriggerOnce {
 }
 
 impl TriggerOnce {
+    /// Arms a one-shot trigger backed by the supplied atomic failpoint flag.
     pub fn arm(stop_after_handler_once: Arc<AtomicBool>) -> Self {
         Self {
             stop_after_handler_once,
@@ -38,17 +42,28 @@ impl TriggerOnce {
     }
 }
 
+/// Generic side-effecting state that records an idempotency key and reuses recorded facts.
 #[derive(Clone)]
 pub struct IdempotentSideEffectState {
+    /// Stable id of the state executing the side effect.
     pub state_id: StateId,
+    /// Operation id used when building idempotency scopes.
     pub op_id: &'static str,
+    /// Operation path used in recorded fact keys.
     pub op_path: OpPath,
+    /// Context key that holds the input payload used to derive the idempotency key.
     pub input_key: ContextKey,
+    /// Context key that receives the derived idempotency key.
     pub idempotency_key_output: ContextKey,
+    /// Context key that receives the side-effect response payload.
     pub output_key: ContextKey,
+    /// IO namespace that performs the side effect.
     pub namespace: String,
+    /// Prefix used when constructing the recorded fact key.
     pub fact_key_prefix: &'static str,
+    /// Domain-event name emitted before a new side effect is applied.
     pub event_name: String,
+    /// Optional one-shot failpoint trigger used by recovery tests.
     pub orphan_after_side_effect: Option<TriggerOnce>,
 }
 

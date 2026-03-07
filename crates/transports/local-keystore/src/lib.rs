@@ -1,3 +1,20 @@
+//! Local keystore transport used by keystore administration and signing states.
+//!
+//! The transport bridges keystore-specific local side effects into the generic Live IO interface.
+//! It intentionally keeps secrets in local process memory and avoids emitting secret-bearing
+//! values in transport responses.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_machine::live_io::LiveIoTransportFactory;
+//! use mfm_transports_local_keystore::LocalKeystoreIoTransportFactory;
+//!
+//! let factory = LocalKeystoreIoTransportFactory;
+//! assert_eq!(factory.namespace_group(), "local.keystore");
+//! ```
+#![warn(missing_docs)]
+
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -27,6 +44,7 @@ const ENV_KEYSTORE_PASSWORD: &str = "MFM_KEYSTORE_PASSWORD";
 const ENV_INTEGRATION_TEST: &str = "MFM_INTEGRATION_TEST";
 const ENV_IMPORT_MNEMONIC_EXTRA: &str = "MFM_KEYSTORE_IMPORT_BIP39_EXTRA";
 
+/// Transport factory for the `local.keystore` namespace group.
 #[derive(Clone, Default)]
 pub struct LocalKeystoreIoTransportFactory;
 

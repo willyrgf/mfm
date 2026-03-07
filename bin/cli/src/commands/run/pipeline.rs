@@ -9,22 +9,26 @@ use crate::presentation::output::handle_command_result;
 use crate::support::app_services::{command_error_from_app_error, make_app_services};
 use crate::support::run_stores::{make_stores, RunStoresArgs};
 
+/// Subcommands under `mfm run pipeline`.
 #[derive(Subcommand)]
 pub enum PipelineCommand {
     /// Start a run from an explicit pipeline JSON payload
     Start {
+        /// Parsed arguments for the explicit pipeline start command.
         #[command(flatten)]
         args: PipelineStartArgs,
     },
 
     /// Start the standard deploy->configure->validate pipeline from a compact spec
     DeployConfigureValidate {
+        /// Parsed arguments for the deploy-configure-validate helper command.
         #[command(flatten)]
         args: DeployConfigureValidateArgs,
     },
 }
 
 impl PipelineCommand {
+    /// Dispatches the selected pipeline subcommand and terminates the process.
     pub async fn execute(&self, ctx: &CommandContext) -> ! {
         match self {
             PipelineCommand::Start { args } => {
@@ -37,6 +41,7 @@ impl PipelineCommand {
     }
 }
 
+/// Arguments for `mfm run pipeline start`.
 #[derive(Args)]
 pub struct PipelineStartArgs {
     /// Pipeline JSON payload
@@ -47,10 +52,12 @@ pub struct PipelineStartArgs {
     #[arg(long, default_value = "{}")]
     pub input_json: String,
 
+    /// Storage configuration for the run's event and artifact backends.
     #[command(flatten)]
     pub stores: RunStoresArgs,
 }
 
+/// Arguments for `mfm run pipeline deploy-configure-validate`.
 #[derive(Args)]
 pub struct DeployConfigureValidateArgs {
     /// Spec JSON payload describing deploy/configure/validate op configs
@@ -61,6 +68,7 @@ pub struct DeployConfigureValidateArgs {
     #[arg(long)]
     pub spec_file: Option<PathBuf>,
 
+    /// Storage configuration for the run's event and artifact backends.
     #[command(flatten)]
     pub stores: RunStoresArgs,
 }

@@ -6,24 +6,33 @@ use crate::commands::{result::CommandResult, OutputFormat};
 /// Standardized error response structure for JSON output
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
+    /// Top-level response status.
     pub status: ResponseStatus,
+    /// Structured error details payload.
     pub error: ErrorDetails,
 }
 
+/// Status field used in JSON responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ResponseStatus {
+    /// The command completed successfully.
     Success,
+    /// The command failed.
     Error,
 }
 
+/// Machine-readable error details for JSON responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorDetails {
+    /// Stable machine-readable error code.
     pub code: String,
+    /// Human-readable error message.
     pub message: String,
 }
 
 impl ErrorResponse {
+    /// Builds a JSON error response from a code and message.
     pub fn new(code: &str, message: &str) -> Self {
         Self {
             status: ResponseStatus::Error,
@@ -35,12 +44,18 @@ impl ErrorResponse {
     }
 }
 
+/// Public key metadata used by text and JSON keystore list output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyDisplay {
+    /// Stable key identifier.
     pub id: String,
+    /// Human-readable key label.
     pub label: String,
+    /// Normalized key type string.
     pub key_type: String,
+    /// Optional derived address.
     pub address: Option<String>,
+    /// Creation timestamp string.
     pub created: String,
 }
 
@@ -57,11 +72,14 @@ impl fmt::Display for KeyDisplay {
 /// Standardized success response structure for JSON output
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuccessResponse<T> {
+    /// Top-level response status.
     pub status: ResponseStatus,
+    /// Structured success payload.
     pub data: T,
 }
 
 impl<T> SuccessResponse<T> {
+    /// Builds a JSON success response from the supplied payload.
     pub fn new(data: T) -> Self {
         Self {
             status: ResponseStatus::Success,
@@ -109,6 +127,7 @@ pub fn print_error(code: &str, message: &str, format: &OutputFormat) {
     }
 }
 
+/// Formats a keystore list response as an ASCII table for text output.
 pub fn format_keys_table(keys: &[KeyDisplay], show_addresses: bool) -> String {
     if show_addresses {
         let headers = ["id", "label", "key_type", "address", "created"];

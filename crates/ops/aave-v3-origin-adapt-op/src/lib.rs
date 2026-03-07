@@ -1,3 +1,20 @@
+#![warn(missing_docs)]
+//! Thin planner op that adapts Aave Origin deploy output into an Aave V3 deploy manifest.
+//!
+//! This crate keeps business execution in `mfm-state-aave-v3` and only plans a single reusable
+//! adaptation state. It exists so binaries and higher-level apps can treat the adaptation as a
+//! normal operation with stable imports and exports.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_op_aave_v3_origin_adapt::AaveV3OriginAdaptDeployOp;
+//! use mfm_sdk::op::Operation;
+//!
+//! let op = AaveV3OriginAdaptDeployOp;
+//! assert_eq!(op.op_id().as_str(), "aave_v3_origin_adapt_deploy");
+//! ```
+
 use std::sync::Arc;
 
 use mfm_machine::config::RunConfig;
@@ -11,7 +28,9 @@ use mfm_state_aave_v3::states::AdaptOriginDeployOutputState;
 use mfm_state_common::errors as op_errors;
 use serde::Deserialize;
 
+/// Stable operation identifier for the Aave Origin deploy adaptation workflow.
 pub const AAVE_V3_ORIGIN_ADAPT_DEPLOY_OP_ID: &str = "aave_v3_origin_adapt_deploy";
+/// Stable operation version for the Aave Origin deploy adaptation workflow.
 pub const AAVE_V3_ORIGIN_ADAPT_DEPLOY_OP_VERSION: &str = "v1";
 
 fn default_origin_deploy_port() -> String {
@@ -22,10 +41,13 @@ fn default_deploy_manifest_export_key() -> String {
     "deploy_manifest".to_string()
 }
 
+/// Config for adapting Origin deploy output into a deploy manifest export.
 #[derive(Clone, Debug, Deserialize)]
 pub struct AaveV3OriginAdaptDeployConfig {
+    /// Imported port that contains the raw Origin deploy output payload.
     #[serde(default = "default_origin_deploy_port")]
     pub origin_deploy_port: String,
+    /// Exported port that will receive the adapted deploy manifest.
     #[serde(default = "default_deploy_manifest_export_key")]
     pub deploy_manifest_export_key: String,
 }
@@ -40,6 +62,7 @@ fn validate_config(cfg: &AaveV3OriginAdaptDeployConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Planner op that expands into a single Aave Origin adaptation state.
 #[derive(Clone, Default)]
 pub struct AaveV3OriginAdaptDeployOp;
 

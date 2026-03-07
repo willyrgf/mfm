@@ -1,3 +1,5 @@
+//! Reusable states for signing and submitting raw transactions via keystore-backed flows.
+
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -18,32 +20,49 @@ use serde::Deserialize;
 
 use crate::tx::Eip1559TxToSign;
 
+/// Runtime configuration for a keystore-backed transaction signing state.
 #[derive(Clone, Debug)]
 pub struct KeystoreTxSignStateConfig {
+    /// Optional UUID selector for the signing key.
     pub id: Option<String>,
+    /// Optional alias selector for the signing key.
     pub by_label: Option<String>,
+    /// Transaction payload to sign.
     pub tx: Eip1559TxToSign,
+    /// Destination path for the signed raw transaction file.
     pub out_path: PathBuf,
+    /// Filesystem path of the keystore directory.
     pub keystore_path: PathBuf,
 }
 
+/// Runtime configuration for a raw-transaction submission state.
 #[derive(Clone, Debug)]
 pub struct KeystoreTxSendRawStateConfig {
+    /// Route source identifier used by the EVM RPC transport.
     pub route_source_id: String,
+    /// Filesystem path to the file that contains the raw transaction payload.
     pub input_path: PathBuf,
 }
 
+/// State that signs an EIP-1559 transaction through the local keystore transport.
 #[derive(Clone, Debug)]
 pub struct KeystoreTxSignState {
+    /// Stable state identifier assigned by the planner.
     pub state_id: StateId,
+    /// Context key that receives the serialized signing report.
     pub output_key: ContextKey,
+    /// Execution-time configuration for signing.
     pub cfg: KeystoreTxSignStateConfig,
 }
 
+/// State that submits a raw signed transaction through an EVM RPC route.
 #[derive(Clone, Debug)]
 pub struct KeystoreTxSendRawState {
+    /// Stable state identifier assigned by the planner.
     pub state_id: StateId,
+    /// Context key that receives the submission report.
     pub output_key: ContextKey,
+    /// Execution-time configuration for submission.
     pub cfg: KeystoreTxSendRawStateConfig,
 }
 

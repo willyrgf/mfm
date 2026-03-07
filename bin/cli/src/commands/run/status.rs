@@ -6,15 +6,18 @@ use crate::support::run_stores::{make_stores, RunStoresArgs};
 use clap::Args;
 use mfm_app::RunStatusResponse;
 
+/// Arguments for `mfm run status`.
 #[derive(Args)]
 pub struct StatusArgs {
     /// Run id (UUID)
     pub run_id: String,
 
+    /// Storage configuration for the run's event and artifact backends.
     #[command(flatten)]
     pub stores: RunStoresArgs,
 }
 
+/// Executes the status command and terminates the process.
 pub async fn execute(ctx: &CommandContext, args: &StatusArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);

@@ -2,6 +2,20 @@
 //!
 //! This crate defines typed adapters over the generic `IoCall` surface for EVM JSON-RPC reads.
 //! It intentionally does NOT perform IO itself.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_collectors_evm::{fact_key_for_jsonrpc_call, JsonRpcCall};
+//! use mfm_machine::ids::StateId;
+//!
+//! let state_id = StateId::must_new("machine.read.balance".to_string());
+//! let call = JsonRpcCall::new("eth_chainId", serde_json::json!([]));
+//! let key = fact_key_for_jsonrpc_call(&state_id, &call).expect("fact key");
+//!
+//! assert!(key.0.starts_with("mfm:evm|state:"));
+//! ```
+#![warn(missing_docs)]
 
 use serde::{Deserialize, Serialize};
 
@@ -10,15 +24,20 @@ use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{ErrorCode, FactKey, StateId};
 use mfm_machine::io::{IoCall, IoProvider, IoResult};
 
+/// Canonical namespace used for EVM JSON-RPC `IoCall`s.
 pub const NAMESPACE_EVM: &str = "evm";
 
+/// Minimal JSON-RPC request shape used by the EVM IO helpers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsonRpcCall {
+    /// JSON-RPC method name such as `eth_call`.
     pub method: String,
+    /// JSON-RPC params array or object payload.
     pub params: serde_json::Value,
 }
 
 impl JsonRpcCall {
+    /// Creates a new JSON-RPC request wrapper.
     pub fn new(method: impl Into<String>, params: serde_json::Value) -> Self {
         Self {
             method: method.into(),
@@ -27,8 +46,10 @@ impl JsonRpcCall {
     }
 }
 
+/// Error returned when a fact key cannot be derived from a request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FactKeyDerivationError {
+    /// The request could not be canonically hashed for fact recording.
     NotCanonical(CanonicalJsonError),
 }
 
@@ -42,6 +63,7 @@ impl std::fmt::Display for FactKeyDerivationError {
 
 impl std::error::Error for FactKeyDerivationError {}
 
+/// Derives a deterministic fact key for an EVM JSON-RPC request.
 pub fn fact_key_for_jsonrpc_call(
     state_id: &StateId,
     call: &JsonRpcCall,
@@ -56,6 +78,7 @@ pub fn fact_key_for_jsonrpc_call(
     )))
 }
 
+/// Wraps a typed JSON-RPC call in the generic `IoCall` envelope.
 pub fn evm_io_call(call: JsonRpcCall, fact_key: FactKey) -> IoCall {
     let request =
         serde_json::to_value(call).expect("JsonRpcCall must be serializable to serde_json::Value");
@@ -66,11 +89,16 @@ pub fn evm_io_call(call: JsonRpcCall, fact_key: FactKey) -> IoCall {
     }
 }
 
+/// Error returned while parsing hex-encoded numeric responses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParseHexError {
+    /// The string did not start with `0x`.
     MissingPrefix,
+    /// The string was `0x` with no digits.
     Empty,
+    /// The value was not valid hexadecimal.
     Invalid,
+    /// The value could not fit in `u64`.
     Overflow,
 }
 
@@ -88,6 +116,7 @@ impl std::fmt::Display for ParseHexError {
 
 impl std::error::Error for ParseHexError {}
 
+/// Parses a `0x`-prefixed quantity string into `u64`.
 pub fn parse_u64_hex(s: &str) -> Result<u64, ParseHexError> {
     let Some(rest) = s.strip_prefix("0x") else {
         return Err(ParseHexError::MissingPrefix);
@@ -101,6 +130,7 @@ pub fn parse_u64_hex(s: &str) -> Result<u64, ParseHexError> {
     u64::from_str_radix(rest, 16).map_err(|_| ParseHexError::Invalid)
 }
 
+/// Parses a JSON value that should contain a `0x`-prefixed quantity string.
 pub fn parse_u64_hex_value(v: &serde_json::Value) -> Result<u64, ParseHexError> {
     let Some(s) = v.as_str() else {
         return Err(ParseHexError::Invalid);
@@ -131,18 +161,22 @@ pub struct EvmIoClient<'a> {
 }
 
 impl<'a> EvmIoClient<'a> {
+    /// Creates a new client for the given state and IO provider.
     pub fn new(state_id: StateId, io: &'a mut dyn IoProvider) -> Self {
         Self { state_id, io }
     }
 
+    /// Returns the state identifier used when deriving fact keys.
     pub fn state_id(&self) -> &StateId {
         &self.state_id
     }
 
+    /// Returns the underlying IO provider.
     pub fn io_mut(&mut self) -> &mut dyn IoProvider {
         self.io
     }
 
+    /// Executes a JSON-RPC call through the generic IO provider.
     pub async fn call(&mut self, call: JsonRpcCall) -> Result<IoResult, IoError> {
         let key = fact_key_for_jsonrpc_call(&self.state_id, &call).map_err(|e| match e {
             FactKeyDerivationError::NotCanonical(CanonicalJsonError::FloatNotAllowed) => io_other(
@@ -162,6 +196,7 @@ impl<'a> EvmIoClient<'a> {
         self.io.call(evm_io_call(call, key)).await
     }
 
+    /// Fetches the remote chain ID and parses it as `u64`.
     pub async fn chain_id_u64(&mut self) -> Result<u64, IoError> {
         let res = self
             .call(JsonRpcCall::new("eth_chainId", serde_json::json!([])))
@@ -175,6 +210,7 @@ impl<'a> EvmIoClient<'a> {
         })
     }
 
+    /// Fetches the latest block number and parses it as `u64`.
     pub async fn block_number_u64(&mut self) -> Result<u64, IoError> {
         let res = self
             .call(JsonRpcCall::new("eth_blockNumber", serde_json::json!([])))

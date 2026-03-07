@@ -12,6 +12,7 @@ use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
 
+/// Arguments for `mfm keystore list`.
 #[derive(Args)]
 pub struct ListArgs {
     /// Keystore file path
@@ -31,16 +32,21 @@ pub struct ListArgs {
     pub sort_by: SortBy,
 }
 
+/// Sort orders supported by the list command.
 #[derive(clap::ValueEnum, Clone)]
 pub enum SortBy {
+    /// Sort keys lexicographically by label.
     #[value(name = "label")]
     Label,
+    /// Sort keys by creation timestamp.
     #[value(name = "created")]
     Created,
+    /// Sort keys by stored key type.
     #[value(name = "type")]
     Type,
 }
 
+/// Response returned by the list command.
 #[derive(Serialize)]
 pub struct ListResponse {
     keys: Vec<KeyDisplay>,
@@ -57,6 +63,7 @@ impl fmt::Display for ListResponse {
     }
 }
 
+/// Executes the list command and terminates the process.
 pub async fn execute(ctx: &CommandContext, args: &ListArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);

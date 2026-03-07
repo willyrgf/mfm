@@ -1,3 +1,19 @@
+#![warn(missing_docs)]
+//! Keystore-backed transaction planning operations.
+//!
+//! These operations validate input, wire state graphs, and leave signing or submission side
+//! effects to `mfm-state-keystore`.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_op_keystore_tx::{KeystoreTxSignOp, TX_SIGN_OP_ID};
+//! use mfm_sdk::op::Operation;
+//!
+//! let op = KeystoreTxSignOp;
+//! assert_eq!(op.op_id().as_str(), TX_SIGN_OP_ID);
+//! ```
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,57 +35,90 @@ use mfm_state_keystore::tx::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Stable version string for keystore transaction operations.
 pub const TX_OP_VERSION: &str = "v1";
 
+/// Operation identifier for transaction signing.
 pub const TX_SIGN_OP_ID: &str = "keystore_tx_sign";
+/// Operation identifier for raw transaction submission.
 pub const TX_SEND_RAW_OP_ID: &str = "keystore_tx_send_raw";
 
 const ENV_KEYSTORE_PATH: &str = "MFM_KEYSTORE_PATH";
 const ENV_EVM_RPC_SOURCE_ID: &str = "MFM_EVM_RPC_SOURCE_ID";
 
+/// Report emitted after a transaction is signed and written locally.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TxSignReport {
+    /// Signer address.
     pub from: String,
+    /// Recipient address.
     pub to: String,
+    /// Nonce included in the signed transaction.
     pub nonce: u64,
+    /// Chain identifier included in the signed transaction.
     pub chain_id: u64,
+    /// Transaction type label, typically `eip1559`.
     pub tx_type: String,
+    /// Hash of the signed transaction payload.
     pub payload_hash: String,
+    /// Output path where the signed raw transaction was written.
     pub out_path: String,
 }
 
+/// Report emitted after a raw transaction is submitted.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TxSendRawReport {
+    /// Submitted transaction hash.
     pub tx_hash: String,
+    /// Host portion of the RPC URL used for submission.
     pub rpc_url_host: String,
+    /// Submission timestamp recorded by the state.
     pub submitted_at: String,
 }
 
+/// Planning input for the keystore transaction signing operation.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TxSignOpConfig {
+    /// Optional exact key identifier.
     pub id: Option<String>,
+    /// Optional UTF-8 label selector.
     #[serde(default)]
     pub by_label: Option<String>,
+    /// Optional hex-encoded UTF-8 label selector.
     #[serde(default)]
     pub by_label_hex: Option<String>,
+    /// Recipient address.
     pub to: String,
+    /// Transfer value in wei, encoded as decimal or quantity string supported by helpers.
     pub value_wei: String,
+    /// Chain ID for signing.
     pub chain_id: u64,
+    /// Nonce for the transaction.
     pub nonce: u64,
+    /// Max fee per gas.
     pub max_fee_per_gas: String,
+    /// Max priority fee per gas.
     pub max_priority_fee_per_gas: String,
+    /// Gas limit for the transaction.
     pub gas_limit: u64,
+    /// Output file for the raw signed transaction.
     pub out_path: String,
+    /// Hex-encoded calldata.
     #[serde(default = "default_tx_data")]
     pub data: String,
+    /// Optional keystore directory path.
     pub keystore_path: Option<String>,
+    /// Optional hex-encoded keystore directory path.
     #[serde(default)]
     pub keystore_path_hex: Option<String>,
 }
 
+/// Planning input for the raw transaction submission operation.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TxSendRawOpConfig {
+    /// Optional route source identifier for the RPC transport.
     pub source_id: Option<String>,
+    /// File containing the raw signed transaction.
     pub input_path: String,
 }
 
@@ -87,14 +136,17 @@ fn tx_send_raw_report_key_for_op_path(op_path: &OpPath) -> ContextKey {
     ContextKey("report".to_string())
 }
 
+/// Returns the context key used to publish signing reports.
 pub fn tx_sign_report_context_key() -> ContextKey {
     output_context_key(&format!("{TX_SIGN_OP_ID}.main"))
 }
 
+/// Returns the context key used to publish raw-send reports.
 pub fn tx_send_raw_report_context_key() -> ContextKey {
     output_context_key(&format!("{TX_SEND_RAW_OP_ID}.main"))
 }
 
+/// Planner for keystore-backed EIP-1559 signing.
 #[derive(Clone, Default)]
 pub struct KeystoreTxSignOp;
 
@@ -173,6 +225,7 @@ impl Operation for KeystoreTxSignOp {
     }
 }
 
+/// Planner for raw transaction submission.
 #[derive(Clone, Default)]
 pub struct KeystoreTxSendRawOp;
 

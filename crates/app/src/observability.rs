@@ -7,30 +7,48 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{AppError, ErrorClass};
 
+/// Legacy component-specific log filter override.
 pub const ENV_MFM_LOG: &str = "MFM_LOG";
+/// Legacy component-specific log format override.
 pub const ENV_MFM_LOG_FORMAT: &str = "MFM_LOG_FORMAT";
+/// Legacy component-specific span-event override.
 pub const ENV_MFM_LOG_SPAN_EVENTS: &str = "MFM_LOG_SPAN_EVENTS";
+/// Canonical baseline log filter override.
 pub const ENV_LOG_LEVEL: &str = "LOG_LEVEL";
+/// Canonical log format selector.
 pub const ENV_LOG_FORMAT: &str = "LOG_FORMAT";
+/// Canonical span lifecycle selector.
 pub const ENV_LOG_SPAN_EVENTS: &str = "LOG_SPAN_EVENTS";
+/// Standard Rust fallback log filter override.
 pub const ENV_RUST_LOG: &str = "RUST_LOG";
 
 const DEFAULT_FILTER: &str = "warn,mfm=info,tower_http=info";
 
+/// Supported log output encodings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
+    /// Compact human-readable text logs.
     Text,
+    /// Structured JSON logs.
     Json,
 }
 
+/// Fully resolved observability settings for an application process.
 #[derive(Debug, Clone)]
 pub struct ObservabilityConfig {
+    /// Application name used in initialization errors.
     pub app_name: &'static str,
+    /// Default filter used when no environment override is present.
     pub default_filter: String,
+    /// Effective filter resolved from the environment.
     pub filter: String,
+    /// Effective output format.
     pub format: LogFormat,
+    /// Whether log target names should be included.
     pub include_targets: bool,
+    /// Whether ANSI colors should be emitted.
     pub ansi: bool,
+    /// Span lifecycle events to emit.
     pub span_events: FmtSpan,
 }
 
@@ -86,10 +104,12 @@ where
     FmtSpan::NONE
 }
 
+/// Resolves observability settings from environment variables using the default filter.
 pub fn observability_from_env(app_name: &'static str) -> ObservabilityConfig {
     observability_from_env_with_default(app_name, DEFAULT_FILTER)
 }
 
+/// Resolves observability settings from environment variables with an explicit default filter.
 pub fn observability_from_env_with_default(
     app_name: &'static str,
     default_filter: &str,
@@ -112,6 +132,7 @@ pub fn observability_from_env_with_default(
     }
 }
 
+/// Installs the process-wide tracing subscriber from the provided configuration.
 pub fn init_observability(config: ObservabilityConfig) -> Result<(), AppError> {
     let filter = EnvFilter::try_new(config.filter.clone()).map_err(|_| {
         AppError::new(

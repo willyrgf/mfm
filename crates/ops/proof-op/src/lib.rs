@@ -1,6 +1,20 @@
+#![warn(missing_docs)]
 //! Proof op (acceptance tests).
 //!
 //! Source of truth: `docs/redesign.md`.
+//!
+//! This crate is intentionally thin: it assembles reusable shared states into a deterministic
+//! acceptance-test workflow that exercises read IO, idempotent side effects, and output writing.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_op_proof::ProofOp;
+//! use mfm_sdk::op::Operation;
+//!
+//! let op = ProofOp::default();
+//! assert_eq!(op.op_id().as_str(), "proof");
+//! ```
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;

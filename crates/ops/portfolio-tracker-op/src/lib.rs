@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Portfolio tracker operation.
 //!
 //! Source of truth: `docs/redesign.md` (v4).
@@ -8,6 +9,16 @@
 //! - fetch native ETH balance via `eth_getBalance` at that pinned block
 //! - fetch allowlisted ERC-20 balances via `eth_call(balanceOf)` at that pinned block
 //! - write a content-addressed snapshot output artifact via deterministic fact recording
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_op_portfolio_tracker::PortfolioTrackerOp;
+//! use mfm_sdk::op::Operation;
+//!
+//! let op = PortfolioTrackerOp;
+//! assert_eq!(op.op_id().as_str(), "portfolio_tracker");
+//! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -59,23 +70,34 @@ fn default_chain_id() -> u64 {
     1
 }
 
+/// Rendered balance for one asset in the portfolio snapshot report.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PortfolioBalanceReport {
+    /// Human-readable asset symbol.
     pub symbol: String,
+    /// Raw integer balance rendered as a decimal string.
     pub raw_u256_dec: String,
+    /// Token decimals used to interpret the raw balance.
     pub decimals: u8,
+    /// Decimal-formatted amount using `decimals`.
     pub amount_dec: String,
 }
 
+/// Summary report written to context after the snapshot artifact is produced.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PortfolioTrackerReport {
+    /// Content-addressed identifier of the snapshot output artifact.
     pub snapshot_artifact_id: String,
+    /// Chain id used for the snapshot.
     pub chain_id: u64,
+    /// Block number pinned for all balance reads.
     pub block_number: u64,
     #[serde(default)]
+    /// Native balance summary, when present.
     pub native_balance: Option<PortfolioBalanceReport>,
 }
 
+/// Returns the context key that stores the final portfolio tracker report.
 pub fn portfolio_tracker_report_context_key() -> ContextKey {
     output_context_key("portfolio_tracker.main")
 }
@@ -218,6 +240,7 @@ fn ctx_key_erc20_token(token_addr_no0x: &str) -> ContextKey {
     ContextKey(format!("erc20.{}", token_addr_no0x))
 }
 
+/// Thin planner op that expands the portfolio snapshot workflow into reusable read/write states.
 #[derive(Clone, Default)]
 pub struct PortfolioTrackerOp;
 

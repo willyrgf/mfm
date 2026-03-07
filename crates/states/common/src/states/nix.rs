@@ -1,3 +1,5 @@
+//! Shared state for nix app resolution and command execution.
+
 use async_trait::async_trait;
 use mfm_collectors_exec::{ExecIoClient, RunProgramRequest};
 use mfm_collectors_nix::{NixIoClient, ResolveFlakeAppRequest};
@@ -16,23 +18,30 @@ use crate::errors as op_errors;
 use crate::idempotency as op_idempotency;
 use crate::states::meta;
 
+/// Configuration for [`NixExecState`].
 #[derive(Clone, Debug, Deserialize)]
 pub struct NixExecStateConfig {
+    /// Fully resolved nix store path to execute directly.
     #[serde(default)]
     pub program_path: Option<String>,
 
+    /// Flake app reference to resolve before execution.
     #[serde(default)]
     pub app: Option<String>,
 
+    /// Arguments passed to the resolved program.
     #[serde(default)]
     pub argv: Vec<String>,
 
+    /// JSON payload written to the child process stdin.
     #[serde(default)]
     pub stdin_json: serde_json::Value,
 
+    /// Execution timeout in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
 
+    /// Context key that receives the JSON-encoded execution result.
     #[serde(default = "default_write_result_to")]
     pub write_result_to: String,
 }
@@ -45,6 +54,7 @@ fn default_write_result_to() -> String {
     "result".to_string()
 }
 
+/// Validates the mutually exclusive `program_path` and `app` configuration contract.
 pub fn validate_nix_exec_config(cfg: &NixExecStateConfig) -> Result<(), String> {
     match (&cfg.program_path, &cfg.app) {
         (Some(program_path), None) => {
@@ -70,9 +80,12 @@ pub fn validate_nix_exec_config(cfg: &NixExecStateConfig) -> Result<(), String> 
     }
 }
 
+/// State that resolves a nix app when needed, executes it, and writes the result to context.
 #[derive(Clone, Debug)]
 pub struct NixExecState {
+    /// State id used for idempotency scope construction.
     pub state_id: StateId,
+    /// Execution configuration for the nix call.
     pub cfg: NixExecStateConfig,
 }
 

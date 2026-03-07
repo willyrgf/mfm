@@ -1,8 +1,27 @@
+//! Shared library surface for the `mfm` CLI.
+//!
+//! The CLI keeps transport concerns in this crate and delegates workflow execution to `mfm-app`
+//! and the op/state-machine layers.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm::{APP_NAME, DEFAULT_LOG_LEVEL, ExitCode};
+//!
+//! assert_eq!(APP_NAME, "mfm");
+//! assert_eq!(DEFAULT_LOG_LEVEL, "info");
+//! assert_eq!(ExitCode::Ok as i32, 0);
+//! ```
+/// Stable CLI application name used in help output and observability setup.
 pub const APP_NAME: &str = "mfm";
+/// Default CLI log level used when no explicit override is provided.
 pub const DEFAULT_LOG_LEVEL: &str = "info";
 
+/// CLI command parsing and dispatch modules.
 pub mod commands;
+/// CLI output formatting helpers.
 pub mod presentation;
+/// Thin CLI adaptation helpers for app services and stores.
 pub mod support;
 
 // Since the exit code names e.g. `SIGBUS` are most appropriate yet trigger a test error with the

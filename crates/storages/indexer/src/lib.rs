@@ -1,8 +1,16 @@
-//! Derived projection/indexer store scaffold.
+#![warn(missing_docs)]
+//! Derived projection/indexer scaffold.
 //!
-//! This crate is intentionally a scaffold:
-//! - projections are derived-only and must never become correctness-critical for resume/replay
-//! - wiring and schema migrations will be implemented incrementally
+//! Projections produced by this crate are derived-only and must never become correctness-critical
+//! for resume or replay semantics.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_indexer::ProjectionIndexer;
+//!
+//! let _indexer = ProjectionIndexer::new();
+//! ```
 
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
 use mfm_machine::events::EventEnvelope;
@@ -22,10 +30,12 @@ fn other(code: &'static str, message: &'static str) -> StorageError {
     StorageError::Other(info(code, message))
 }
 
+/// Placeholder projection indexer for future read-model support.
 #[derive(Clone, Debug)]
 pub struct ProjectionIndexer;
 
 impl ProjectionIndexer {
+    /// Creates a new projection indexer scaffold.
     pub fn new() -> Self {
         Self
     }

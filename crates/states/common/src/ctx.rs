@@ -4,6 +4,7 @@ use mfm_machine::ids::ContextKey;
 
 use crate::errors::state_unknown;
 
+/// Reads a raw JSON value from context and maps context failures to a stable state error.
 pub fn read_json(
     ctx: &dyn DynContext,
     key: &ContextKey,
@@ -12,6 +13,9 @@ pub fn read_json(
         .map_err(|_| state_unknown("ctx_read_failed", "context read failed"))
 }
 
+/// Reads a required integer value from context.
+///
+/// Missing keys and non-`u64` values both map to the supplied stable error code and message.
 pub fn read_u64_required(
     ctx: &dyn DynContext,
     key: &ContextKey,
@@ -23,6 +27,9 @@ pub fn read_u64_required(
         .ok_or_else(|| state_unknown(missing_code, missing_message))
 }
 
+/// Reads a required JSON value from context.
+///
+/// Missing keys map to the supplied stable error code and message.
 pub fn read_json_required(
     ctx: &dyn DynContext,
     key: &ContextKey,
@@ -32,6 +39,10 @@ pub fn read_json_required(
     read_json(ctx, key)?.ok_or_else(|| state_unknown(missing_code, missing_message))
 }
 
+/// Reads a required string value from context.
+///
+/// Missing keys use `missing_code`/`missing_message`; non-string values use
+/// `type_code`/`type_message`.
 pub fn read_string_required(
     ctx: &dyn DynContext,
     key: &ContextKey,
@@ -47,6 +58,10 @@ pub fn read_string_required(
         .ok_or_else(|| state_unknown(type_code, type_message))
 }
 
+/// Reads a required JSON array from context.
+///
+/// Missing keys use `missing_code`/`missing_message`; non-array values use
+/// `type_code`/`type_message`.
 pub fn read_array_required(
     ctx: &dyn DynContext,
     key: &ContextKey,
@@ -62,6 +77,10 @@ pub fn read_array_required(
         .ok_or_else(|| state_unknown(type_code, type_message))
 }
 
+/// Reads and deserializes a required typed value from context.
+///
+/// Missing keys use `missing_code`/`missing_message`; deserialization failures use
+/// `type_code`/`type_message`.
 pub fn read_typed<T: serde::de::DeserializeOwned>(
     ctx: &dyn DynContext,
     key: &ContextKey,
@@ -78,6 +97,7 @@ pub fn read_typed<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Writes a raw JSON value into context and maps write failures to a stable state error.
 pub fn write_json(
     ctx: &mut dyn DynContext,
     key: ContextKey,

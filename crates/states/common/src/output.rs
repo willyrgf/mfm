@@ -9,6 +9,10 @@ use mfm_machine::stores::ArtifactKind;
 use crate::ctx::write_json;
 use crate::errors::state_unknown;
 
+/// Records a JSON output payload as an output artifact and stores its id in context.
+///
+/// When the fact key was not already bound, this helper also emits the standard
+/// `artifact_written` domain event for the new output artifact.
 pub async fn write_output_artifact(
     ctx: &mut dyn DynContext,
     io: &mut dyn IoProvider,

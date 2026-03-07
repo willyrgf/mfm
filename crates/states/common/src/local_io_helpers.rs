@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 
 use crate::errors as op_errors;
 
+/// Emits a small in-memory domain event without attaching an artifact payload.
 pub async fn emit_report_event(
     rec: &mut dyn EventRecorder,
     name: &str,
@@ -22,6 +23,9 @@ pub async fn emit_report_event(
     .map_err(|_| op_errors::state_unknown("emit_failed", "failed to emit domain event"))
 }
 
+/// Performs a local IO call and deserializes the response payload into `T`.
+///
+/// The fact key is derived from the state id, purpose, and canonical request payload.
 pub async fn local_call<T: DeserializeOwned>(
     state_id: &StateId,
     io: &mut dyn IoProvider,
@@ -51,6 +55,9 @@ pub async fn local_call<T: DeserializeOwned>(
     })
 }
 
+/// Builds the fact key used for deterministic local IO requests.
+///
+/// The request payload must be canonical-JSON hashable and must not contain secrets.
 pub fn local_fact_key(
     state_id: &StateId,
     purpose: &str,
@@ -80,6 +87,7 @@ pub fn local_fact_key(
     )))
 }
 
+/// Ensures a [`StateError`] is attached to the supplied state id.
 pub fn attach_state_id(state_id: &StateId, mut err: StateError) -> StateError {
     if err.state_id.is_none() {
         err.state_id = Some(state_id.clone());

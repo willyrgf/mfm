@@ -12,13 +12,20 @@ use crate::ctx as op_ctx;
 use crate::errors as op_errors;
 use crate::states::meta;
 
+/// Generic read-only IO state that stores the JSON response in context.
 #[derive(Clone, Debug)]
 pub struct NamespaceReadState {
+    /// IO namespace routed through the active [`IoProvider`](mfm_machine::io::IoProvider).
     pub namespace: String,
+    /// JSON request payload sent to the namespace client.
     pub request: serde_json::Value,
+    /// Fact key used to record and replay the request.
     pub fact_key: FactKey,
+    /// Context key that receives the JSON response payload.
     pub output_key: ContextKey,
+    /// Stable error code returned when the IO call fails.
     pub io_error_code: &'static str,
+    /// Human-readable error message returned when the IO call fails.
     pub io_error_message: &'static str,
 }
 

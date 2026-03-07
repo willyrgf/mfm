@@ -7,20 +7,27 @@ use mfm_evm_core::hex as common_hex;
 
 pub use common_abi::{AbiEvent, AbiFunction, ParsedAbi};
 
+/// JSON contract artifact used by deploy/configure/validate flows.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ContractArtifactConfig {
+    /// Contract ABI JSON payload.
     pub abi: serde_json::Value,
+    /// Contract bytecode JSON payload.
     pub bytecode: serde_json::Value,
 }
 
+/// Runtime configuration for a single on-chain function call.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ConfigureCallConfig {
+    /// Function name to invoke.
     pub function: String,
 
     #[serde(default)]
+    /// Positional arguments passed to the function call.
     pub args: Vec<serde_json::Value>,
 
     #[serde(default)]
+    /// Optional call value expressed in wei.
     pub value_wei: Option<String>,
 }
 
@@ -28,69 +35,96 @@ fn default_min_count() -> u64 {
     1
 }
 
+/// Block selector used by validation reads and event queries.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 pub enum BlockTag {
+    /// Explicit block number.
     Number(u64),
+    /// Symbolic tag such as `latest` or `earliest`.
     Tag(String),
 }
 
+/// Read assertion to evaluate through `eth_call`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ReadAssertionConfig {
+    /// Function name to call.
     pub function: String,
 
     #[serde(default)]
+    /// Positional arguments passed to the function call.
     pub args: Vec<serde_json::Value>,
 
+    /// Expected decoded value.
     pub expected: serde_json::Value,
 }
 
+/// Event assertion to evaluate with `eth_getLogs`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct EventAssertionConfig {
+    /// Event name expected in the ABI.
     pub event: String,
 
     #[serde(default = "default_min_count")]
+    /// Minimum matching log count required for success.
     pub min_count: u64,
 
     #[serde(default)]
+    /// Optional lower bound for the log query.
     pub from_block: Option<BlockTag>,
 
     #[serde(default)]
+    /// Optional upper bound for the log query.
     pub to_block: Option<BlockTag>,
 }
 
+/// Prepared read assertion ready for runtime execution.
 #[derive(Clone, Debug)]
 pub struct PreparedReadAssertion {
+    /// Encoded calldata for the asserted function call.
     pub data_hex: String,
+    /// Expected decoded value.
     pub expected: serde_json::Value,
+    /// ABI output types used during decoding.
     pub outputs: Vec<String>,
 }
 
+/// Prepared event assertion ready for runtime execution.
 #[derive(Clone, Debug)]
 pub struct PreparedEventAssertion {
+    /// Event name referenced by the assertion.
     pub event: String,
+    /// Keccak event signature topic.
     pub topic0_hex: String,
+    /// Minimum matching log count required for success.
     pub min_count: u64,
+    /// Lower bound for the log query.
     pub from_block: serde_json::Value,
+    /// Upper bound for the log query.
     pub to_block: serde_json::Value,
 }
 
+/// Parses an ABI JSON value into the shared ABI representation.
 pub fn parse_abi(abi: &serde_json::Value) -> Result<ParsedAbi, String> {
     common_abi::parse_abi(abi).map_err(|e| e.message)
 }
 
+/// Normalizes a hex string to lowercase `0x`-prefixed form.
 pub fn normalize_hex_str(s: &str) -> Result<String, String> {
     common_hex::normalize_hex_str(s).map_err(|e| e.message)
 }
 
+/// Decodes a hex string into bytes.
 pub fn hex_to_bytes(s: &str) -> Result<Vec<u8>, String> {
     common_hex::hex_to_bytes(s).map_err(|e| e.message)
 }
 
+/// Encodes bytes as a lowercase `0x`-prefixed hex string.
 pub fn bytes_to_hex_prefixed(bytes: &[u8]) -> String {
     common_hex::bytes_to_hex_prefixed(bytes)
 }
 
+/// Resolves and encodes a function call from ABI name plus JSON arguments.
 pub fn resolve_function_call(
     abi: &ParsedAbi,
     function_name: &str,
@@ -99,6 +133,7 @@ pub fn resolve_function_call(
     common_abi::resolve_function_call(abi, function_name, args).map_err(|e| e.message)
 }
 
+/// Encodes constructor bytecode plus constructor arguments.
 pub fn constructor_data(
     abi: &ParsedAbi,
     bytecode: &[u8],
@@ -107,6 +142,7 @@ pub fn constructor_data(
     common_abi::constructor_data(abi, bytecode, constructor_args).map_err(|e| e.message)
 }
 
+/// Parses a contract artifact into validated ABI and bytecode components.
 pub fn parse_artifact(cfg: &ContractArtifactConfig) -> Result<(ParsedAbi, Vec<u8>), String> {
     let abi = parse_abi(&cfg.abi)?;
     let bytecode = common_abi::parse_bytecode(&cfg.bytecode).map_err(|e| e.message)?;
@@ -122,6 +158,7 @@ fn block_tag_to_rpc_value(block: &Option<BlockTag>, default_latest: bool) -> ser
     }
 }
 
+/// Prepares read and event assertions for runtime validation.
 pub fn prepare_validate_assertions(
     abi: &ParsedAbi,
     read_assertions: &[ReadAssertionConfig],
@@ -165,10 +202,12 @@ pub fn prepare_validate_assertions(
     Ok((reads, events))
 }
 
+/// Normalizes an optional wei value into RPC hex quantity form.
 pub fn parse_value_wei_to_hex(value_wei: &Option<String>) -> Result<Option<String>, String> {
     common_abi::parse_value_wei_to_hex(value_wei).map_err(|e| e.message)
 }
 
+/// Ensures the receipt-poll budget is non-zero.
 pub fn ensure_nonzero_polls(max_receipt_polls: u64) -> Result<(), String> {
     if max_receipt_polls == 0 {
         return Err("max_receipt_polls must be > 0".to_string());
@@ -176,6 +215,7 @@ pub fn ensure_nonzero_polls(max_receipt_polls: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Ensures the configured artifact context port is non-empty.
 pub fn ensure_nonempty_artifact_port(artifact_port: &str) -> Result<(), String> {
     if artifact_port.trim().is_empty() {
         return Err("artifact_port must be non-empty".to_string());
@@ -183,10 +223,12 @@ pub fn ensure_nonempty_artifact_port(artifact_port: &str) -> Result<(), String> 
     Ok(())
 }
 
+/// Normalizes an EVM address to canonical lowercase `0x`-prefixed form.
 pub fn normalize_address(s: &str) -> Result<String, String> {
     encoding::normalize_address(s).map_err(|e| e.message)
 }
 
+/// Decodes a single-output `eth_call` response into JSON.
 pub fn decode_single_output_to_json(
     outputs: &[String],
     raw_hex: &str,
@@ -209,6 +251,7 @@ pub fn decode_single_output_to_json(
     Ok(decoded)
 }
 
+/// Returns whether `actual` satisfies the configured expected value.
 pub fn expected_matches(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
     if expected == actual {
         return true;

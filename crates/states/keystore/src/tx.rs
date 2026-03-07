@@ -1,3 +1,5 @@
+//! Helpers for parsing keystore transaction inputs and producing signed EIP-1559 payloads.
+
 use std::path::Path;
 
 use alloy_primitives::{keccak256, Address, PrimitiveSignature, B256};
@@ -15,13 +17,17 @@ use uuid::Uuid;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+/// Error returned by keystore transaction helpers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeystoreTxError {
+    /// Stable machine-readable error code.
     pub code: &'static str,
+    /// Human-readable message that is safe to surface to callers.
     pub message: String,
 }
 
 impl KeystoreTxError {
+    /// Creates a new helper error.
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -29,6 +35,7 @@ impl KeystoreTxError {
         }
     }
 
+    /// Converts this helper error into a state-scoped runtime error.
     pub fn to_state_error(&self, state_id: &StateId, category: ErrorCategory) -> StateError {
         state_error_with_state(
             state_id.clone(),
@@ -48,25 +55,39 @@ impl std::fmt::Display for KeystoreTxError {
 
 impl std::error::Error for KeystoreTxError {}
 
+/// Canonical EIP-1559 transaction fields required for signing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Eip1559TxToSign {
+    /// Destination address for the transaction.
     pub to: Address,
+    /// Native token value in wei.
     pub value_wei: u128,
+    /// Chain ID used for replay protection.
     pub chain_id: u64,
+    /// Sender account nonce.
     pub nonce: u64,
+    /// Maximum total gas price in wei.
     pub max_fee_per_gas: u128,
+    /// Maximum priority fee in wei.
     pub max_priority_fee_per_gas: u128,
+    /// Gas limit for the transaction.
     pub gas_limit: u64,
+    /// ABI-encoded calldata bytes.
     pub data: Vec<u8>,
 }
 
+/// Result of signing an EIP-1559 transaction with a keystore key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedEip1559Tx {
+    /// Hex-encoded sender address recovered from the signing key.
     pub from: String,
+    /// Keccak-256 hash of the typed transaction preimage.
     pub payload_hash: String,
+    /// Hex-encoded raw signed transaction ready for RPC submission.
     pub raw_tx_hex: String,
 }
 
+/// Parses a `0x`-prefixed Ethereum address.
 pub fn parse_address(raw: &str, field_name: &str) -> Result<Address, KeystoreTxError> {
     raw.parse::<Address>().map_err(|_| {
         KeystoreTxError::new(
@@ -76,6 +97,7 @@ pub fn parse_address(raw: &str, field_name: &str) -> Result<Address, KeystoreTxE
     })
 }
 
+/// Parses a decimal or `0x`-prefixed quantity into `u128`.
 pub fn parse_u128_quantity(raw: &str, field_name: &str) -> Result<u128, KeystoreTxError> {
     let value = raw.trim();
     if value.is_empty() {
@@ -111,6 +133,7 @@ pub fn parse_u128_quantity(raw: &str, field_name: &str) -> Result<u128, Keystore
     })
 }
 
+/// Parses optional transaction calldata from `0x`-prefixed hex.
 pub fn parse_data_hex(raw: &str) -> Result<Vec<u8>, KeystoreTxError> {
     let value = raw.trim();
     let normalized = value
@@ -131,6 +154,7 @@ pub fn parse_data_hex(raw: &str) -> Result<Vec<u8>, KeystoreTxError> {
         .map_err(|_| KeystoreTxError::new("InvalidData", "data must be valid hex"))
 }
 
+/// Parses and validates an RPC URL used for transaction submission.
 pub fn parse_rpc_url(raw: &str) -> Result<Url, KeystoreTxError> {
     let parsed = Url::parse(raw).map_err(|_| {
         KeystoreTxError::new(
@@ -147,6 +171,7 @@ pub fn parse_rpc_url(raw: &str) -> Result<Url, KeystoreTxError> {
     Ok(parsed)
 }
 
+/// Validates a signed raw transaction string before it is submitted or persisted.
 pub fn validate_raw_transaction_hex(raw_tx_hex: &str) -> Result<(), KeystoreTxError> {
     let value = raw_tx_hex.trim();
     if !value.starts_with("0x") {
@@ -170,6 +195,7 @@ pub fn validate_raw_transaction_hex(raw_tx_hex: &str) -> Result<(), KeystoreTxEr
     Ok(())
 }
 
+/// Resolves a keystore key selector expressed either by UUID or by alias.
 pub fn resolve_key_id(
     keystore: &Keystore,
     id: Option<&str>,
@@ -210,6 +236,7 @@ pub fn resolve_key_id(
     }
 }
 
+/// Signs an EIP-1559 transaction and returns the sender, payload hash, and raw payload.
 pub fn sign_eip1559_transaction(
     keystore: &mut Keystore,
     key_id: Uuid,
@@ -253,6 +280,7 @@ pub fn sign_eip1559_transaction(
     })
 }
 
+/// Writes a signed raw transaction to disk with restrictive permissions.
 pub fn write_raw_transaction_file(path: &Path, raw_tx_hex: &str) -> Result<(), KeystoreTxError> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).truncate(true).write(true);
@@ -296,6 +324,7 @@ pub fn write_raw_transaction_file(path: &Path, raw_tx_hex: &str) -> Result<(), K
     Ok(())
 }
 
+/// Returns the standard context key used to store a keystore transaction report.
 pub fn output_context_key(op_path: &str) -> ContextKey {
     ContextKey(format!("{op_path}.report"))
 }

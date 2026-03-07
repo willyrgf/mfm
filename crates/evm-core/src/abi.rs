@@ -5,24 +5,36 @@ use crate::encoding::{encode_len_word, parse_address_hex};
 use crate::hex::{bytes_to_hex_prefixed, hex_nibble, hex_to_bytes, normalize_hex_str};
 use crate::util_error::UtilError;
 
+/// Simplified function entry extracted from a JSON ABI.
 #[derive(Clone, Debug)]
 pub struct AbiFunction {
+    /// Solidity function name.
     pub name: String,
+    /// Canonical Solidity input types.
     pub inputs: Vec<String>,
+    /// Canonical Solidity output types.
     pub outputs: Vec<String>,
 }
 
+/// Simplified event entry extracted from a JSON ABI.
 #[derive(Clone, Debug)]
 pub struct AbiEvent {
+    /// Solidity event name.
     pub name: String,
+    /// Canonical Solidity input types.
     pub inputs: Vec<String>,
+    /// Whether the event omits topic 0.
     pub anonymous: bool,
 }
 
+/// Parsed ABI summary used by higher-level planning code.
 #[derive(Clone, Debug, Default)]
 pub struct ParsedAbi {
+    /// Canonical constructor input types.
     pub constructor_inputs: Vec<String>,
+    /// Parsed function entries.
     pub functions: Vec<AbiFunction>,
+    /// Parsed event entries.
     pub events: Vec<AbiEvent>,
 }
 
@@ -50,6 +62,7 @@ struct AbiItemJson {
     anonymous: Option<bool>,
 }
 
+/// Parses a JSON ABI array into a simplified [`ParsedAbi`] representation.
 pub fn parse_abi(abi: &serde_json::Value) -> Result<ParsedAbi, UtilError> {
     let items: Vec<AbiItemJson> = serde_json::from_value(abi.clone()).map_err(|_| {
         UtilError::new("invalid_abi", "artifact.abi must be a valid JSON ABI array")
@@ -91,6 +104,7 @@ pub fn parse_abi(abi: &serde_json::Value) -> Result<ParsedAbi, UtilError> {
     Ok(out)
 }
 
+/// Parses compiler bytecode output from either a raw string or `{ object: ... }` form.
 pub fn parse_bytecode(v: &serde_json::Value) -> Result<Vec<u8>, UtilError> {
     match v {
         serde_json::Value::String(s) => hex_to_bytes(s),
@@ -116,6 +130,7 @@ pub fn parse_bytecode(v: &serde_json::Value) -> Result<Vec<u8>, UtilError> {
     }
 }
 
+/// Computes the first four bytes of the Keccak-256 function signature hash.
 pub fn function_selector(name: &str, input_types: &[String]) -> [u8; 4] {
     let sig = format!("{}({})", name, input_types.join(","));
     let h = keccak256(sig.as_bytes());
@@ -329,6 +344,10 @@ fn encode_static_value(t: &str, v: &serde_json::Value) -> Result<[u8; 32], UtilE
     ))
 }
 
+/// ABI-encodes function or constructor arguments.
+///
+/// Supported dynamic types are `bytes` and `string`. Supported static types include `address`,
+/// integer types, `bool`, and `bytesM`.
 pub fn encode_params(types: &[String], args: &[serde_json::Value]) -> Result<Vec<u8>, UtilError> {
     if types.len() != args.len() {
         return Err(UtilError::new(
@@ -377,6 +396,9 @@ pub fn encode_params(types: &[String], args: &[serde_json::Value]) -> Result<Vec
     Ok(out)
 }
 
+/// Resolves an overloaded function name against the provided arguments and returns calldata.
+///
+/// The returned tuple contains the complete calldata and the resolved output type list.
 pub fn resolve_function_call(
     abi: &ParsedAbi,
     function: &str,
@@ -411,6 +433,7 @@ pub fn resolve_function_call(
     }
 }
 
+/// Appends ABI-encoded constructor arguments to contract bytecode.
 pub fn constructor_data(
     abi: &ParsedAbi,
     bytecode: &[u8],
@@ -423,6 +446,7 @@ pub fn constructor_data(
     Ok(out)
 }
 
+/// Normalizes optional transaction value input from decimal or hex into lowercase hex.
 pub fn parse_value_wei_to_hex(value_wei: &Option<String>) -> Result<Option<String>, UtilError> {
     let Some(raw) = value_wei else {
         return Ok(None);
@@ -436,6 +460,9 @@ pub fn parse_value_wei_to_hex(value_wei: &Option<String>) -> Result<Option<Strin
     Ok(Some(format!("0x{:x}", v)))
 }
 
+/// Decodes a single-output `eth_call` response into a JSON value when the type is supported.
+///
+/// Unsupported output types fall back to the normalized hex string.
 pub fn decode_single_output_to_json(
     outputs: &[String],
     raw_hex: &str,

@@ -6,6 +6,7 @@ use crate::support::run_stores::{make_stores, RunStoresArgs};
 use clap::Args;
 use mfm_app::{RunsEventsQuery, RunsEventsResponse};
 
+/// Arguments for `mfm run events`.
 #[derive(Args)]
 pub struct EventsArgs {
     /// Run id (UUID)
@@ -19,10 +20,12 @@ pub struct EventsArgs {
     #[arg(long)]
     pub to_seq: Option<u64>,
 
+    /// Storage configuration for the run's event and artifact backends.
     #[command(flatten)]
     pub stores: RunStoresArgs,
 }
 
+/// Executes the events command and terminates the process.
 pub async fn execute(ctx: &CommandContext, args: &EventsArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);

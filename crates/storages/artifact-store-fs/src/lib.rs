@@ -1,9 +1,18 @@
-//! Filesystem `ArtifactStore` (fast lane, service-free).
+#![warn(missing_docs)]
+//! Filesystem `ArtifactStore` for tests and local development.
 //!
 //! Storage model:
 //! - content-addressed blobs keyed by `ArtifactId` (SHA-256 hex)
 //! - `put()` computes the id from bytes
 //! - `get()` verifies the hash and returns `StorageError::Corruption` on mismatch
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_artifact_store_fs::FsArtifactStore;
+//!
+//! let _store = FsArtifactStore::new("/tmp/mfm-artifacts");
+//! ```
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -18,6 +27,7 @@ use mfm_machine::ids::{ArtifactId, ErrorCode};
 use mfm_machine::stores::{ArtifactKind, ArtifactStore};
 use tokio::io::AsyncWriteExt;
 
+/// Filesystem-backed immutable artifact store rooted at a directory path.
 #[derive(Clone, Debug)]
 pub struct FsArtifactStore {
     root: PathBuf,
@@ -26,6 +36,7 @@ pub struct FsArtifactStore {
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl FsArtifactStore {
+    /// Creates a store rooted at `root`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }

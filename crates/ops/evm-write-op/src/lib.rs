@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! EVM write/validation operations.
 //!
 //! This crate provides four operations that can be composed as a pipeline:
@@ -9,6 +10,16 @@
 //! Notes:
 //! - All network interaction flows through `namespace = "evm"` IO.
 //! - No secrets are persisted in op_config or outputs.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_op_evm_write::EvmDeployOp;
+//! use mfm_sdk::op::Operation;
+//!
+//! let op = EvmDeployOp;
+//! assert_eq!(op.op_id().as_str(), "evm_deploy");
+//! ```
 
 use std::sync::Arc;
 
@@ -650,6 +661,7 @@ fn signer_address_hex(signing_key: &SigningKey) -> String {
     bytes_to_hex_prefixed(&hash.as_slice()[12..])
 }
 
+/// Planner that adapts a `nix_app` result into a contract artifact export.
 #[derive(Clone, Default)]
 pub struct EvmContractFromNixOp;
 
@@ -718,6 +730,7 @@ impl Operation for EvmContractFromNixOp {
     }
 }
 
+/// Planner that deploys an EVM contract artifact.
 #[derive(Clone, Default)]
 pub struct EvmDeployOp;
 
@@ -821,6 +834,7 @@ impl Operation for EvmDeployOp {
     }
 }
 
+/// Planner that executes post-deploy contract calls.
 #[derive(Clone, Default)]
 pub struct EvmConfigureOp;
 
@@ -962,6 +976,7 @@ impl Operation for EvmConfigureOp {
     }
 }
 
+/// Planner that validates deployed contracts and chain assumptions.
 #[derive(Clone, Default)]
 pub struct EvmValidateOp;
 

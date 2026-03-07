@@ -116,16 +116,23 @@ impl RpcResponseParser for U64HexParser {
     }
 }
 
+/// Expected `u64` response contract for read states that validate a scalar result.
 #[derive(Clone, Debug)]
 pub struct U64Expectation {
+    /// Expected `u64` value.
     pub expected: u64,
+    /// Error code used when the actual value mismatches `expected`.
     pub mismatch_code: &'static str,
+    /// Error category used when the actual value mismatches `expected`.
     pub mismatch_category: ErrorCategory,
+    /// Whether the mismatch is retryable.
     pub mismatch_retryable: bool,
+    /// Human-readable mismatch message.
     pub mismatch_message: &'static str,
 }
 
 impl U64Expectation {
+    /// Builds a non-retryable parsing-input expectation.
     pub fn parsing_input(
         expected: u64,
         mismatch_code: &'static str,
@@ -141,15 +148,21 @@ impl U64Expectation {
     }
 }
 
+/// Generic state that reads a hex-string RPC response into context.
 #[derive(Clone, Debug)]
 pub struct ReadHexStringState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// JSON-RPC method to invoke.
     pub method: String,
+    /// JSON-RPC params to pass to `method`.
     pub params: serde_json::Value,
+    /// Context key that receives the parsed result.
     pub output_key: ContextKey,
 }
 
 impl ReadHexStringState {
+    /// Creates a new hex-string read state.
     pub fn new(
         state_id: StateId,
         method: impl Into<String>,
@@ -190,15 +203,21 @@ impl State for ReadHexStringState {
     }
 }
 
+/// Generic state that reads a U256 hex quantity RPC response into context.
 #[derive(Clone, Debug)]
 pub struct ReadU256HexState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// JSON-RPC method to invoke.
     pub method: String,
+    /// JSON-RPC params to pass to `method`.
     pub params: serde_json::Value,
+    /// Context key that receives the parsed result.
     pub output_key: ContextKey,
 }
 
 impl ReadU256HexState {
+    /// Creates a new U256-hex read state.
     pub fn new(
         state_id: StateId,
         method: impl Into<String>,
@@ -239,25 +258,37 @@ impl State for ReadU256HexState {
     }
 }
 
+/// Output decoding mode for [`EthCallState`].
 #[derive(Clone, Debug, Default)]
 pub enum EthCallDecode {
+    /// Preserve the raw hex string.
     #[default]
     HexString,
+    /// Parse the result as a hex-encoded `u64`.
     U64,
+    /// Parse the result as a hex-encoded U256 quantity string.
     U256Hex,
 }
 
+/// State that executes `eth_call` and writes the decoded response to context.
 #[derive(Clone, Debug)]
 pub struct EthCallState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Contract address targeted by the call.
     pub to: String,
+    /// Hex-encoded calldata.
     pub data: String,
+    /// Block selector passed as the second `eth_call` parameter.
     pub block: serde_json::Value,
+    /// Context key that receives the parsed result.
     pub output_key: ContextKey,
+    /// Decoding mode applied to the RPC response.
     pub decode: EthCallDecode,
 }
 
 impl EthCallState {
+    /// Creates a new `eth_call` state that defaults to the `latest` block and hex-string decode.
     pub fn new(
         state_id: StateId,
         to: impl Into<String>,
@@ -274,11 +305,13 @@ impl EthCallState {
         }
     }
 
+    /// Overrides the block selector used by the `eth_call`.
     pub fn with_block(mut self, block: serde_json::Value) -> Self {
         self.block = block;
         self
     }
 
+    /// Overrides the response decoding mode.
     pub fn with_decode(mut self, decode: EthCallDecode) -> Self {
         self.decode = decode;
         self
@@ -329,16 +362,23 @@ impl State for EthCallState {
     }
 }
 
+/// Generic state that reads a `u64` hex quantity RPC response into context.
 #[derive(Clone, Debug)]
 pub struct ReadU64HexState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// JSON-RPC method to invoke.
     pub method: String,
+    /// JSON-RPC params to pass to `method`.
     pub params: serde_json::Value,
+    /// Context key that receives the parsed result.
     pub output_key: ContextKey,
+    /// Optional expectation enforced against the parsed value.
     pub expectation: Option<U64Expectation>,
 }
 
 impl ReadU64HexState {
+    /// Creates a new `u64`-hex read state.
     pub fn new(
         state_id: StateId,
         method: impl Into<String>,
@@ -354,6 +394,7 @@ impl ReadU64HexState {
         }
     }
 
+    /// Configures an exact-value expectation for the parsed response.
     pub fn with_expectation(mut self, expectation: U64Expectation) -> Self {
         self.expectation = Some(expectation);
         self
@@ -387,17 +428,25 @@ impl State for ReadU64HexState {
     }
 }
 
+/// State that reads the native-token balance for a wallet at a context-provided block.
 #[derive(Clone, Debug)]
 pub struct NativeBalanceState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Wallet address whose native balance should be queried.
     pub wallet: Address,
+    /// Context key that contains the block number to query against.
     pub block_key: ContextKey,
+    /// Context key that receives the formatted balance object.
     pub output_key: ContextKey,
+    /// Native token symbol written into the output object.
     pub symbol: String,
+    /// Native token decimals written into the output object.
     pub decimals: u8,
 }
 
 impl NativeBalanceState {
+    /// Creates a native-balance state with `ETH`/18-decimal defaults.
     pub fn new(
         state_id: StateId,
         wallet: Address,
@@ -459,18 +508,27 @@ impl State for NativeBalanceState {
     }
 }
 
+/// State that reads an ERC-20 token balance for a wallet at a context-provided block.
 #[derive(Clone, Debug)]
 pub struct TokenBalanceState {
+    /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Token contract address.
     pub token: Address,
+    /// Wallet address whose token balance should be queried.
     pub wallet: Address,
+    /// Optional token symbol to surface in the output object.
     pub symbol: Option<String>,
+    /// Optional token decimals override; fetched on-chain when absent.
     pub decimals: Option<u8>,
+    /// Context key that contains the block number to query against.
     pub block_key: ContextKey,
+    /// Context key that receives the formatted balance object.
     pub output_key: ContextKey,
 }
 
 impl TokenBalanceState {
+    /// Creates a token-balance state.
     pub fn new(
         state_id: StateId,
         token: Address,

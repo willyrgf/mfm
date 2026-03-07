@@ -1,3 +1,25 @@
+//! Typed adapters for Nix flake-app preflight IO.
+//!
+//! This crate wraps the `nix.exec` namespace so states can request flake-app resolution through
+//! `IoProvider` without hand-writing transport payloads.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_collectors_nix::{fact_key_for_resolve_flake_app, ResolveFlakeAppRequest};
+//! use mfm_machine::ids::StateId;
+//!
+//! let request = ResolveFlakeAppRequest {
+//!     app: "github:willyrgf/mfm#help".to_string(),
+//!     timeout_ms: 30_000,
+//! };
+//! let state_id = StateId::must_new("machine.preflight.nix".to_string());
+//! let key = fact_key_for_resolve_flake_app(&state_id, &request).expect("fact key");
+//!
+//! assert!(key.0.contains("mfm:nix:preflight"));
+//! ```
+#![warn(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
@@ -5,21 +27,29 @@ use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{ErrorCode, FactKey, StateId};
 use mfm_machine::io::{IoCall, IoProvider};
 
+/// Canonical namespace used for Nix flake-app preflight IO calls.
 pub const NAMESPACE_NIX_EXEC: &str = "nix.exec";
 
+/// Request payload for resolving a flake app into a realized program path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolveFlakeAppRequest {
+    /// Flake installable reference such as `github:org/repo#app`.
     pub app: String,
+    /// Timeout in milliseconds for the resolution flow.
     pub timeout_ms: u64,
 }
 
+/// Response returned by the Nix preflight transport.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NixResolveResult {
+    /// Realized program path inside `/nix/store`.
     pub program_path: String,
 }
 
+/// Error returned when a Nix fact key cannot be derived.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FactKeyDerivationError {
+    /// The request payload could not be canonically hashed.
     NotCanonical(CanonicalJsonError),
 }
 
@@ -47,6 +77,7 @@ fn io_other(code: &'static str, category: ErrorCategory, message: &'static str) 
     IoError::Other(info(code, category, message))
 }
 
+/// Derives a deterministic fact key for a Nix flake-app resolution request.
 pub fn fact_key_for_resolve_flake_app(
     state_id: &StateId,
     req: &ResolveFlakeAppRequest,
@@ -64,16 +95,19 @@ pub fn fact_key_for_resolve_flake_app(
     )))
 }
 
+/// Thin typed client for the `nix.exec` IO namespace.
 pub struct NixIoClient<'a> {
     state_id: StateId,
     io: &'a mut dyn IoProvider,
 }
 
 impl<'a> NixIoClient<'a> {
+    /// Creates a new Nix preflight client for the given state and IO provider.
     pub fn new(state_id: StateId, io: &'a mut dyn IoProvider) -> Self {
         Self { state_id, io }
     }
 
+    /// Resolves a flake app into a program path through the generic IO provider.
     pub async fn resolve_flake_app(
         &mut self,
         req: ResolveFlakeAppRequest,

@@ -285,6 +285,7 @@ pub struct HashMapOperationRegistry {
 }
 
 impl HashMapOperationRegistry {
+    /// Registers or replaces an operation implementation by its `(op_id, op_version)` key.
     pub fn register(&mut self, op: DynOperation) {
         self.ops
             .insert((op.op_id(), op.op_version().to_string()), op);
@@ -627,6 +628,7 @@ pub struct SdkPlanResolver {
 }
 
 impl SdkPlanResolver {
+    /// Builds a resolver from the shared operation registry and pipeline planner.
     pub fn new(registry: Arc<dyn OperationRegistry>, planner: Arc<dyn PipelinePlanner>) -> Self {
         Self { registry, planner }
     }
@@ -695,16 +697,22 @@ pub fn single_op_pipeline(
 /// Inputs for single-op run execution with typed report extraction from final snapshot context.
 #[derive(Clone, Debug)]
 pub struct SingleOpReportRequest {
+    /// Operation identifier to wrap into the single-step pipeline convention.
     pub op_id: String,
+    /// Operation version to execute.
     pub op_version: String,
+    /// Canonical JSON operation config passed to `Operation::expand`.
     pub op_config: serde_json::Value,
+    /// Context key that should contain the final typed report.
     pub report_context_key: String,
 }
 
 /// Typed error for single-op report execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SingleOpReportError {
+    /// Stable machine-readable error code.
     pub code: String,
+    /// Human-readable message safe to display to callers.
     pub message: String,
 }
 
@@ -957,6 +965,8 @@ pub async fn execute_single_op_report<T: serde::de::DeserializeOwned>(
 
 /// Helpers for spawning and awaiting engine-managed child runs.
 ///
+/// Helpers for spawning and awaiting child runs through the runtime IO surface.
+///
 /// These helpers are intentionally `unstable`:
 /// - the IO surface is stringly-typed (`IoCall.namespace`)
 /// - request/response schemas may evolve
@@ -986,20 +996,31 @@ pub mod child_runs {
         })
     }
 
+    /// Request payload for the `child_run_spawn_v1` helper.
     #[derive(Clone, Debug)]
     pub struct SpawnChildRunV1 {
+        /// Operation identifier for the child run.
         pub op_id: OpId,
+        /// Operation version for the child run.
         pub op_version: String,
+        /// Canonical JSON config passed to the child operation.
         pub op_config: serde_json::Value,
+        /// Canonical JSON input payload embedded in the child manifest.
         pub input: serde_json::Value,
+        /// Effective run configuration for the child run.
         pub run_config: RunConfig,
+        /// Optional initial context snapshot for the child run.
         pub initial_context: Option<serde_json::Value>,
     }
 
+    /// Result returned after successfully spawning a child run.
     #[derive(Clone, Debug)]
     pub struct SpawnChildRunResult {
+        /// Parent run that issued the spawn request.
         pub parent_run_id: RunId,
+        /// Newly created child run identifier.
         pub child_run_id: RunId,
+        /// Child run manifest artifact identifier.
         pub child_manifest_id: ArtifactId,
     }
 
@@ -1022,6 +1043,7 @@ pub mod child_runs {
         child_manifest_id: ArtifactId,
     }
 
+    /// Spawns a child run via the configured IO transport and emits the linkage event once.
     pub async fn spawn_child_run_v1(
         io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,
@@ -1098,17 +1120,25 @@ pub mod child_runs {
         })
     }
 
+    /// Request payload for the `child_run_await_v1` helper.
     #[derive(Clone, Debug)]
     pub struct AwaitChildRunV1 {
+        /// Child run identifier to wait for.
         pub child_run_id: RunId,
+        /// Manifest artifact recorded when the child run was spawned.
         pub child_manifest_id: ArtifactId,
     }
 
+    /// Result returned after waiting for a child run to finish.
     #[derive(Clone, Debug)]
     pub struct AwaitChildRunResult {
+        /// Child run that finished.
         pub child_run_id: RunId,
+        /// Final run status reported by the child.
         pub status: RunStatus,
+        /// Final snapshot identifier, if any.
         pub final_snapshot_id: Option<ArtifactId>,
+        /// Decoded final snapshot payload returned by the transport.
         pub final_snapshot: serde_json::Value,
     }
 
@@ -1128,6 +1158,7 @@ pub mod child_runs {
         final_snapshot: serde_json::Value,
     }
 
+    /// Waits for a previously spawned child run and emits the completion event once.
     pub async fn await_child_run_v1(
         io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,

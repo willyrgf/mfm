@@ -2,9 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+/// Authentication-method configuration entries.
 pub mod authentication;
+/// DEX registry configuration entries.
 pub mod dexes;
+/// Network registry configuration entries.
 pub mod network;
+/// Token registry configuration entries.
 pub mod token;
 
 use alloy_primitives::Address;
@@ -14,24 +18,37 @@ use token::Tokens;
 
 use self::authentication::Methods;
 
+/// Top-level MFM configuration loaded from YAML.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Config {
+    /// Named network definitions keyed by logical identifier.
     pub networks: Networks,
+    /// Named DEX definitions keyed by logical identifier.
     pub dexes: Dexes,
+    /// Named token definitions keyed by logical identifier.
     pub tokens: Tokens,
+    /// Supported authentication methods for wallet access.
     pub auth_methods: Methods,
+    /// Active network selection for the current run.
     pub network: NetworkConfig,
+    /// Active wallet selection for the current run.
     pub wallet: WalletConfig,
+    /// Active DEX selection for the current run.
     pub dex: DexConfig,
 }
 
+/// Runtime network selection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NetworkConfig {
+    /// Candidate RPC endpoints for failover-aware clients.
     #[serde(default)]
     pub rpc_urls: Vec<String>,
+    /// Primary RPC endpoint used by older callers.
     #[serde(default = "default_rpc_url")]
     pub rpc_url: String,
+    /// EVM chain identifier for the selected network.
     pub chain_id: u64,
+    /// Human-readable network name.
     pub name: String,
 }
 
@@ -39,29 +56,37 @@ fn default_rpc_url() -> String {
     "".to_string()
 }
 
+/// Runtime wallet selection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WalletConfig {
+    /// Expected wallet address for the selected signer.
     pub address: Address,
+    /// Filesystem path to a plaintext private key used by legacy flows.
     #[serde(skip_serializing)]
     pub private_key_path: PathBuf,
 }
 
+/// Runtime DEX selection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DexConfig {
+    /// Key of the selected DEX entry in [`Config::dexes`].
     pub provider: String,
 }
 
+/// Zeroizing wallet material loaded from configuration.
 pub struct SecureWallet {
     private_key: Zeroizing<String>,
 }
 
 impl SecureWallet {
+    /// Wraps a private key string in a zeroizing container.
     pub fn new(private_key: String) -> Self {
         Self {
             private_key: Zeroizing::new(private_key),
         }
     }
 
+    /// Returns the private key as a borrowed string slice.
     pub fn get_private_key(&self) -> &str {
         &self.private_key
     }
@@ -79,6 +104,7 @@ fn expand_path(path: &Path) -> PathBuf {
 }
 
 impl Config {
+    /// Loads, deserializes, and validates a YAML configuration file.
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let config: Config = serde_yaml::from_str(&std::fs::read_to_string(path)?)?;
         if let Err(errors) = config.validate() {
@@ -91,6 +117,7 @@ impl Config {
         Ok(config)
     }
 
+    /// Validates cross-references across networks, tokens, and DEX definitions.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
 
@@ -131,6 +158,8 @@ impl Config {
         }
     }
 
+    /// Loads wallet material using configured authentication methods, falling back to the legacy
+    /// plaintext wallet path when necessary.
     pub fn load_wallet(
         &self,
         password: Option<&str>,

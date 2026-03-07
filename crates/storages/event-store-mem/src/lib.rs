@@ -1,6 +1,16 @@
-//! In-memory `EventStore` (fast lane, service-free).
+#![warn(missing_docs)]
+//! In-memory `EventStore` implementation for tests and local development.
 //!
-//! This store provides per-run append-only event streams with optimistic concurrency.
+//! This backend keeps per-run append-only event streams in process memory and enforces the same
+//! optimistic-concurrency contract as the durable stores.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_event_store_mem::MemEventStore;
+//!
+//! let _store = MemEventStore::new();
+//! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,12 +22,14 @@ use mfm_machine::ids::{ErrorCode, RunId};
 use mfm_machine::stores::EventStore;
 use tokio::sync::Mutex;
 
+/// In-memory append-only event store keyed by [`RunId`](mfm_machine::ids::RunId).
 #[derive(Clone, Default)]
 pub struct MemEventStore {
     inner: Arc<Mutex<HashMap<RunId, Vec<EventEnvelope>>>>,
 }
 
 impl MemEventStore {
+    /// Creates an empty in-memory event store.
     pub fn new() -> Self {
         Self::default()
     }

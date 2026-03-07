@@ -1,3 +1,5 @@
+//! Reusable states for keystore administration flows.
+
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -19,13 +21,17 @@ use serde::{Deserialize, Serialize};
 
 const ENV_KEYSTORE_PATH: &str = "MFM_KEYSTORE_PATH";
 
+/// Error returned by keystore administration helpers.
 #[derive(Debug, Clone)]
 pub struct KeystoreAdminError {
+    /// Stable machine-readable error code.
     pub code: &'static str,
+    /// Human-readable message safe to return to callers.
     pub message: String,
 }
 
 impl KeystoreAdminError {
+    /// Creates a new helper error.
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -34,87 +40,135 @@ impl KeystoreAdminError {
     }
 }
 
+/// Supported keystore import input formats.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum KeystoreImportType {
+    /// Import a raw private key.
     #[serde(rename = "pk")]
     PrivateKey,
+    /// Import a mnemonic phrase.
     #[serde(rename = "mn")]
     Mnemonic,
 }
 
+/// Report written after a successful keystore import.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KeystoreImportReport {
+    /// Identifier of the imported key entry.
     pub id: String,
+    /// Alias recorded for the key.
     pub label: String,
+    /// Key type recorded by the keystore.
     pub key_type: String,
+    /// Derived address for the imported key.
     pub address: String,
+    /// RFC3339 timestamp captured by the import flow.
     pub created_at: String,
 }
 
+/// Sort order supported by the keystore list flow.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum KeystoreListSortBy {
+    /// Sort by alias.
     Label,
+    /// Sort by creation timestamp.
     Created,
+    /// Sort by key type.
     Type,
 }
 
+/// Single keystore entry returned by the list flow.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KeystoreListKey {
+    /// Identifier of the key entry.
     pub id: String,
+    /// Alias recorded for the key.
     pub label: String,
+    /// Key type recorded by the keystore.
     pub key_type: String,
+    /// Optional derived address when address display is enabled.
     pub address: Option<String>,
+    /// RFC3339 creation timestamp.
     pub created: String,
 }
 
+/// Report written after listing keystore entries.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KeystoreListReport {
+    /// Keys included in the report.
     pub keys: Vec<KeystoreListKey>,
+    /// Whether addresses were requested for display.
     pub show_addresses: bool,
 }
 
+/// Report written after deleting a keystore entry.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KeystoreDeleteReport {
+    /// Identifier of the deleted key.
     pub id: String,
+    /// Alias of the deleted key.
     pub label: String,
 }
 
+/// Runtime configuration for the keystore import state.
 #[derive(Clone, Debug)]
 pub struct KeystoreImportStateConfig {
+    /// Input kind to import.
     pub import_type: KeystoreImportType,
+    /// Optional alias to assign to the imported key.
     pub label: Option<String>,
+    /// Derivation path used for mnemonic imports.
     pub derivation_path: String,
+    /// Filesystem path of the keystore directory.
     pub keystore_path: PathBuf,
+    /// Whether the secret material should be read from stdin.
     pub stdin: bool,
 }
 
+/// Runtime configuration for the keystore list state.
 #[derive(Clone, Debug)]
 pub struct KeystoreListStateConfig {
+    /// Filesystem path of the keystore directory.
     pub keystore_path: PathBuf,
+    /// Whether derived addresses should be resolved for output.
     pub show_addresses: bool,
+    /// Optional alias filter applied before sorting.
     pub filter_label: Option<String>,
+    /// Sort order for the final report.
     pub sort_by: KeystoreListSortBy,
 }
 
+/// Runtime configuration for the keystore delete state.
 #[derive(Clone, Debug)]
 pub struct KeystoreDeleteStateConfig {
+    /// Optional UUID selector for the key to delete.
     pub id: Option<String>,
+    /// Optional alias selector for the key to delete.
     pub by_label: Option<String>,
+    /// Whether deletion confirmation has already been granted.
     pub yes: bool,
+    /// Filesystem path of the keystore directory.
     pub keystore_path: PathBuf,
 }
 
+/// State that imports a key into the local keystore transport.
 #[derive(Clone)]
 pub struct KeystoreImportState {
+    /// Stable state identifier assigned by the planner.
     pub state_id: StateId,
+    /// Operation identifier used to build shared metadata.
     pub op_id_for_meta: &'static str,
+    /// Context key that receives the serialized report.
     pub report_key: ContextKey,
+    /// Domain-event name emitted for the import report.
     pub event_name: &'static str,
+    /// Execution-time configuration for the import.
     pub cfg: KeystoreImportStateConfig,
 }
 
 impl KeystoreImportState {
+    /// Creates a new import state instance.
     pub fn new(
         state_id: StateId,
         op_id_for_meta: &'static str,
@@ -182,16 +236,23 @@ impl State for KeystoreImportState {
     }
 }
 
+/// State that lists keystore entries through the local keystore transport.
 #[derive(Clone)]
 pub struct KeystoreListState {
+    /// Stable state identifier assigned by the planner.
     pub state_id: StateId,
+    /// Operation identifier used to build shared metadata.
     pub op_id_for_meta: &'static str,
+    /// Context key that receives the serialized report.
     pub report_key: ContextKey,
+    /// Domain-event name emitted for the list report.
     pub event_name: &'static str,
+    /// Execution-time configuration for the list flow.
     pub cfg: KeystoreListStateConfig,
 }
 
 impl KeystoreListState {
+    /// Creates a new list state instance.
     pub fn new(
         state_id: StateId,
         op_id_for_meta: &'static str,
@@ -258,16 +319,23 @@ impl State for KeystoreListState {
     }
 }
 
+/// State that deletes a key through the local keystore transport.
 #[derive(Clone)]
 pub struct KeystoreDeleteState {
+    /// Stable state identifier assigned by the planner.
     pub state_id: StateId,
+    /// Operation identifier used to build shared metadata.
     pub op_id_for_meta: &'static str,
+    /// Context key that receives the serialized report.
     pub report_key: ContextKey,
+    /// Domain-event name emitted for the delete report.
     pub event_name: &'static str,
+    /// Execution-time configuration for the delete flow.
     pub cfg: KeystoreDeleteStateConfig,
 }
 
 impl KeystoreDeleteState {
+    /// Creates a new delete state instance.
     pub fn new(
         state_id: StateId,
         op_id_for_meta: &'static str,
@@ -334,6 +402,7 @@ impl State for KeystoreDeleteState {
     }
 }
 
+/// Decodes a string field supplied in either raw or hex-encoded form.
 pub fn decode_optional_hex_string(
     raw: Option<String>,
     raw_hex: Option<String>,
@@ -364,6 +433,7 @@ pub fn decode_optional_hex_string(
     }
 }
 
+/// Resolves the effective keystore path from explicit config, environment, or the default home path.
 pub fn resolve_keystore_path(configured: Option<String>) -> PathBuf {
     configured
         .map(PathBuf::from)
@@ -374,6 +444,7 @@ pub fn resolve_keystore_path(configured: Option<String>) -> PathBuf {
         })
 }
 
+/// Converts a helper error into the SDK error shape expected by op planners.
 pub fn sdk_error_from_helper(err: KeystoreAdminError) -> SdkError {
     let category = op_errors::keystore_error_category(err.code);
     op_errors::sdk_error(err.code, category, false, err.message)
