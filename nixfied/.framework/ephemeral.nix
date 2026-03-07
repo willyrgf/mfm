@@ -155,7 +155,18 @@ let
 
     EPHEMERAL_ROOT="$(${pkgs.coreutils}/bin/mktemp -d "$EPHEMERAL_BASE/${projectId}-ephemeral-XXXXXX")"
 
-    mkdir -p "$EPHEMERAL_ROOT"/{source,data/${projectId},build}
+    mkdir -p \
+      "$EPHEMERAL_ROOT/source" \
+      "$EPHEMERAL_ROOT/build" \
+      "$EPHEMERAL_ROOT/home" \
+      "$EPHEMERAL_ROOT/tmp" \
+      "$EPHEMERAL_ROOT/registry" \
+      "$EPHEMERAL_ROOT/artifacts" \
+      "$EPHEMERAL_ROOT/logs" \
+      "$EPHEMERAL_ROOT/services" \
+      "$EPHEMERAL_ROOT/xdg/data" \
+      "$EPHEMERAL_ROOT/xdg/state" \
+      "$EPHEMERAL_ROOT/xdg/cache"
     ${pkgs.lib.concatMapStringsSep "\n" (dir: ''
       mkdir -p "$EPHEMERAL_ROOT/${dir}"
     '') extraDirs}
@@ -213,17 +224,17 @@ let
       log_info "Ephemeral copy budget bytes_required=$copy_bytes bytes_free=$free_bytes bytes_remaining=$remaining_bytes"
 
       if [ "$MAX_COPY_BYTES" -gt 0 ] && [ "$copy_bytes" -gt "$MAX_COPY_BYTES" ]; then
-        log_error "ephemeral copy budget exceeded: bytes_required=$copy_bytes max_copy_bytes=$MAX_COPY_BYTES"
+        printf 'ERROR: ephemeral copy budget exceeded: bytes_required=%s max_copy_bytes=%s\n' "$copy_bytes" "$MAX_COPY_BYTES"
         exit 1
       fi
 
       if [ "$free_bytes" -le "$copy_bytes" ]; then
-        log_error "ephemeral copy budget exceeded: bytes_required=$copy_bytes bytes_free=$free_bytes"
+        printf 'ERROR: ephemeral copy budget exceeded: bytes_required=%s bytes_free=%s\n' "$copy_bytes" "$free_bytes"
         exit 1
       fi
 
       if [ "$MIN_FREE_BYTES_AFTER_COPY" -gt 0 ] && [ "$remaining_bytes" -lt "$MIN_FREE_BYTES_AFTER_COPY" ]; then
-        log_error "ephemeral copy budget exceeded: bytes_remaining=$remaining_bytes min_free_after_copy=$MIN_FREE_BYTES_AFTER_COPY"
+        printf 'ERROR: ephemeral copy budget exceeded: bytes_remaining=%s min_free_after_copy=%s\n' "$remaining_bytes" "$MIN_FREE_BYTES_AFTER_COPY"
         exit 1
       fi
     }
@@ -353,10 +364,10 @@ let
             slot_label="$(printf '%s' "$slot_label" | ${pkgs.gnused}/bin/sed -E 's/[^A-Za-z0-9_.-]+/_/g')"
             failed_root="$eph_base/${projectId}-ephemeral-failed-$failed_stamp-slot$slot_label-$$"
             if mv "$eph_root" "$failed_root" 2>/dev/null; then
-              log_warn "Preserving failed ephemeral state at $failed_root"
+              printf 'WARN: Preserving failed ephemeral state at %s\n' "$failed_root" >&2
             else
               failed_root="$eph_root"
-              log_warn "Preserving failed ephemeral state at $failed_root"
+              printf 'WARN: Preserving failed ephemeral state at %s\n' "$failed_root" >&2
             fi
             prune_failed_roots "$eph_base"
           else
@@ -486,7 +497,26 @@ let
 
       ${mkSourceCopy} "$ORIGINAL_ROOT" "${refEphRoot}/source"
 
-      export XDG_DATA_HOME="${refEphRoot}/data"
+      export HOME="${refEphRoot}/home"
+      export TMPDIR="${refEphRoot}/tmp"
+      export XDG_DATA_HOME="${refEphRoot}/xdg/data"
+      export XDG_STATE_HOME="${refEphRoot}/xdg/state"
+      export XDG_CACHE_HOME="${refEphRoot}/xdg/cache"
+      export REGISTRY_ROOT="${refEphRoot}/registry"
+      if [ -z "''${CI_ARTIFACTS_DIR:-}" ]; then
+        export CI_ARTIFACTS_DIR="${refEphRoot}/artifacts"
+      fi
+      export NIXFIED_SERVICE_ROOT="${refEphRoot}/services"
+      mkdir -p \
+        "$HOME" \
+        "$TMPDIR" \
+        "$XDG_DATA_HOME" \
+        "$XDG_STATE_HOME" \
+        "$XDG_CACHE_HOME" \
+        "$REGISTRY_ROOT" \
+        "$CI_ARTIFACTS_DIR" \
+        "$NIXFIED_SERVICE_ROOT" \
+        "${refEphRoot}/logs"
 
       ${extraEnv}
 
@@ -532,11 +562,29 @@ let
   getEphemeralPaths = pkgs.writeShellScript "get-ephemeral-paths" ''
     if [ "''${${projectIdUpper}_EPHEMERAL:-}" = "1" ] && [ -n "''${${projectIdUpper}_EPHEMERAL_ROOT:-}" ]; then
       echo "EPHEMERAL_SOURCE=${refEphRoot}/source"
-      echo "EPHEMERAL_DATA=${refEphRoot}/data"
+      echo "EPHEMERAL_HOME=${refEphRoot}/home"
+      echo "EPHEMERAL_TMP=${refEphRoot}/tmp"
+      echo "EPHEMERAL_DATA=${refEphRoot}/xdg/data"
+      echo "EPHEMERAL_XDG_DATA=${refEphRoot}/xdg/data"
+      echo "EPHEMERAL_XDG_STATE=${refEphRoot}/xdg/state"
+      echo "EPHEMERAL_XDG_CACHE=${refEphRoot}/xdg/cache"
+      echo "EPHEMERAL_REGISTRY=${refEphRoot}/registry"
+      echo "EPHEMERAL_ARTIFACTS=${refEphRoot}/artifacts"
+      echo "EPHEMERAL_LOGS=${refEphRoot}/logs"
+      echo "EPHEMERAL_SERVICES=${refEphRoot}/services"
       echo "EPHEMERAL_BUILD=${refEphRoot}/build"
     else
       echo "EPHEMERAL_SOURCE=$(pwd)"
+      echo "EPHEMERAL_HOME=''${HOME:-$(pwd)}"
+      echo "EPHEMERAL_TMP=''${TMPDIR:-/tmp}"
       echo "EPHEMERAL_DATA=''${XDG_DATA_HOME:-$HOME/.local/share}"
+      echo "EPHEMERAL_XDG_DATA=''${XDG_DATA_HOME:-$HOME/.local/share}"
+      echo "EPHEMERAL_XDG_STATE=''${XDG_STATE_HOME:-$HOME/.local/state}"
+      echo "EPHEMERAL_XDG_CACHE=''${XDG_CACHE_HOME:-$HOME/.cache}"
+      echo "EPHEMERAL_REGISTRY=''${REGISTRY_ROOT:-}"
+      echo "EPHEMERAL_ARTIFACTS=''${CI_ARTIFACTS_DIR:-}"
+      echo "EPHEMERAL_LOGS=''${NIXFIED_LOGS_DIR:-}"
+      echo "EPHEMERAL_SERVICES=''${NIXFIED_SERVICE_ROOT:-}"
       echo "EPHEMERAL_BUILD=$(pwd)"
     fi
   '';

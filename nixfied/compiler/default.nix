@@ -4,6 +4,7 @@
   modules,
   system,
   projectRoot,
+  frameworkSourceRevision,
 }:
 let
   lib = pkgs.lib;
@@ -63,6 +64,7 @@ in
           pkgs
           system
           projectRoot
+          frameworkSourceRevision
           projectModules
           extraModules
           localOverrides

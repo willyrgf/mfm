@@ -99,6 +99,7 @@ Ephemeral runtime behavior:
 
 - `docs/ARCHITECTURE.md` for high-level architecture.
 - `docs/DETAILED.md` for model, runtime, workflow, and registry contracts.
+- `docs/UPGRADE.md` for downstream upgrade notes and behavior changes.
 - `REDESIGN.md` for redesign and migration context.
 - `docs/repo-map.md` for a repository-oriented index.
 - `docs/modules/README.md` for module-specific configuration notes.

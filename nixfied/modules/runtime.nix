@@ -146,7 +146,7 @@ in
     directories = {
       base = lib.mkOption {
         type = t.str;
-        default = "\${XDG_DATA_HOME:-$HOME/.local/share}/nixfied-project";
+        default = "/tmp/nixfied-runtime/nixfied-project/runtime";
       };
     };
 

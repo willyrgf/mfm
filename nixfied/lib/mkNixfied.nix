@@ -5,6 +5,7 @@
   projectModules,
   extraModules ? [ ],
   localOverrides ? [ ],
+  frameworkSourceRevision ? "unknown",
 }:
 let
   lib = pkgs.lib;
@@ -27,6 +28,7 @@ let
       modules
       system
       projectRoot
+      frameworkSourceRevision
       ;
   };
 

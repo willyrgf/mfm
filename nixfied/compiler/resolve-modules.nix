@@ -3,6 +3,7 @@
   pkgs,
   system,
   projectRoot,
+  frameworkSourceRevision,
   projectModules,
   extraModules ? [ ],
   localOverrides ? [ ],
@@ -23,6 +24,7 @@ let
         pkgs
         system
         projectRoot
+        frameworkSourceRevision
         modules
         ;
     };

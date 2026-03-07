@@ -1,5 +1,5 @@
 {
-  frameworkInput ? "github:willyrgf/nixfied",
+  frameworkInput ? "github:willyrgf/nixfied/dev",
   vendorPath ? null,
 }:
 if vendorPath == null then

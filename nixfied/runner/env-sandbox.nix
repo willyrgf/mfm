@@ -52,6 +52,13 @@
     esac
   }
 
+  ensure_runtime_dir() {
+    local path="$1"
+    if [ -n "$path" ]; then
+      mkdir -p "$path"
+    fi
+  }
+
   run_in_sandbox_runtime() {
     local runtime_json="$1"
     shift
@@ -79,6 +86,7 @@
     local env_value
     local env_offset
     local runtime_dir_base
+    local runtime_scope_root
     local log_level_default
     local output_mode_default
     local task_log_level_default
@@ -114,13 +122,78 @@
     local logs_dir
     local log_file_run_token
     local allow_sensitive_pass_through
+    local home_value
+    local tmp_value
+    local xdg_data_value
+    local xdg_state_value
+    local xdg_cache_value
+    local registry_root_value
+    local artifacts_dir_value
+    local services_root
+
+    resolve_project_root_workdir() {
+      local project_root_real="${builtins.toString projectRoot}"
+      local anchor_root="$project_root_real"
+      local effective_root="$project_root_real"
+      local caller_pwd="''${NIXFIED_CALLER_PWD:-}"
+      local caller_pwd_real=""
+      local caller_relative=""
+
+      if [ -d "$project_root_real" ]; then
+        project_root_real="$(cd "$project_root_real" && pwd -P)"
+      fi
+
+      if [ -n "''${ORIGINAL_ROOT:-}" ] && [ -d "$ORIGINAL_ROOT" ]; then
+        anchor_root="$(cd "$ORIGINAL_ROOT" && pwd -P)"
+      else
+        anchor_root="$project_root_real"
+      fi
+
+      if [ "''${NIXFIED_EXECUTION_EPHEMERAL:-0}" = "1" ]; then
+        effective_root="$(pwd -P)"
+      else
+        effective_root="$project_root_real"
+      fi
+
+      if [ -n "$caller_pwd" ] && [ -d "$caller_pwd" ]; then
+        caller_pwd_real="$(cd "$caller_pwd" && pwd -P)"
+
+        case "$caller_pwd_real" in
+          "$effective_root")
+            printf '%s' "$effective_root"
+            return 0
+            ;;
+          "$effective_root"/*)
+            printf '%s' "$caller_pwd_real"
+            return 0
+            ;;
+          "$anchor_root")
+            caller_relative="."
+            ;;
+          "$anchor_root"/*)
+            caller_relative="''${caller_pwd_real#"$anchor_root"/}"
+            ;;
+        esac
+
+        if [ -n "$caller_relative" ]; then
+          if [ "$caller_relative" = "." ]; then
+            printf '%s' "$effective_root"
+          else
+            printf '%s/%s' "$effective_root" "$caller_relative"
+          fi
+          return 0
+        fi
+      fi
+
+      printf '%s' "$effective_root"
+    }
 
     workdir_kind="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.workdir')"
     custom_workdir="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.customWorkdir // empty')"
 
     case "$workdir_kind" in
       projectRoot)
-        workdir="''${NIXFIED_CALLER_PWD:-${builtins.toString projectRoot}}"
+        workdir="$(resolve_project_root_workdir)"
         ;;
       stateRoot)
         workdir="$REGISTRY_ROOT"
@@ -196,8 +269,28 @@
     log_level_default="$(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r '.logging.levelDefault // "info"')"
     output_mode_default="$(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r '.logging.outputDefault // "stdout"')"
 
-    local home_value
-    home_value="''${HOME:-$workdir}"
+    if [ -z "$runtime_dir_base" ] || [[ "$runtime_dir_base" == *"$"* ]]; then
+      runtime_dir_base="$REGISTRY_ROOT/runtime"
+    fi
+    runtime_scope_root="$runtime_dir_base/$env_value/slot-$slot_value"
+
+    home_value="''${HOME:-$runtime_scope_root/home}"
+    tmp_value="''${TMPDIR:-$runtime_scope_root/tmp}"
+    xdg_data_value="''${XDG_DATA_HOME:-$runtime_scope_root/xdg/data}"
+    xdg_state_value="''${XDG_STATE_HOME:-$runtime_scope_root/xdg/state}"
+    xdg_cache_value="''${XDG_CACHE_HOME:-$runtime_scope_root/xdg/cache}"
+    registry_root_value="''${REGISTRY_ROOT:-$runtime_scope_root/registry}"
+    artifacts_dir_value="''${CI_ARTIFACTS_DIR:-$runtime_scope_root/artifacts}"
+    services_root="''${NIXFIED_SERVICE_ROOT:-$runtime_scope_root/services}"
+
+    ensure_runtime_dir "$home_value"
+    ensure_runtime_dir "$tmp_value"
+    ensure_runtime_dir "$xdg_data_value"
+    ensure_runtime_dir "$xdg_state_value"
+    ensure_runtime_dir "$xdg_cache_value"
+    ensure_runtime_dir "$registry_root_value"
+    ensure_runtime_dir "$artifacts_dir_value"
+    ensure_runtime_dir "$services_root"
 
     if ! valid_log_level "$log_level_default"; then
       echo "ERROR: invalid runtime default LOG_LEVEL value='$log_level_default' (expected: error|warn|info|debug|trace)"
@@ -417,11 +510,26 @@
     fi
 
     local -a env_cmd
-    env_cmd=(env -i "PATH=$final_path" "LANG=$locale" "LC_ALL=$locale" "TZ=$timezone" "HOME=$home_value")
+    env_cmd=(
+      env -i
+      "PATH=$final_path"
+      "LANG=$locale"
+      "LC_ALL=$locale"
+      "TZ=$timezone"
+      "HOME=$home_value"
+      "TMPDIR=$tmp_value"
+      "XDG_DATA_HOME=$xdg_data_value"
+      "XDG_STATE_HOME=$xdg_state_value"
+      "XDG_CACHE_HOME=$xdg_cache_value"
+      "REGISTRY_ROOT=$registry_root_value"
+      "CI_ARTIFACTS_DIR=$artifacts_dir_value"
+      "NIXFIED_SERVICE_ROOT=$services_root"
+    )
 
     env_cmd+=("NIXFIED_PROJECT_NAME=$PROJECT_NAME")
     env_cmd+=("NIXFIED_PROJECT_DESCRIPTION=$PROJECT_DESCRIPTION")
     env_cmd+=("NIXFIED_RUNTIME_DIR_BASE=$runtime_dir_base")
+    env_cmd+=("NIXFIED_RUNTIME_DIR_SCOPE=$runtime_scope_root")
     env_cmd+=("LOG_LEVEL=$resolved_log_level")
     env_cmd+=("NIXFIED_LOG_LEVEL=$resolved_log_level")
     env_cmd+=("OUTPUT_MODE=$resolved_output_mode")
@@ -523,6 +631,35 @@
           | .value as $service
           | ($service.config // {} | to_entries[]? | [ $service.name, .key, (.value | tostring) ] | @tsv)
         '
+    )
+
+    while IFS= read -r service_name; do
+      local service_token
+      local service_root
+      local service_data_dir
+      local service_state_dir
+      local service_log_dir
+
+      if [ -z "$service_name" ]; then
+        continue
+      fi
+
+      service_token="$(normalize_env_token "$service_name")"
+      service_root="$services_root/$service_name"
+      service_data_dir="$service_root/data"
+      service_state_dir="$service_root/state"
+      service_log_dir="$service_root/log"
+
+      ensure_runtime_dir "$service_data_dir"
+      ensure_runtime_dir "$service_state_dir"
+      ensure_runtime_dir "$service_log_dir"
+
+      env_cmd+=("NIXFIED_SERVICE_''${service_token}_DATA_DIR=$service_data_dir")
+      env_cmd+=("NIXFIED_SERVICE_''${service_token}_STATE_DIR=$service_state_dir")
+      env_cmd+=("NIXFIED_SERVICE_''${service_token}_LOG_DIR=$service_log_dir")
+    done < <(
+      printf '%s' "$SERVICES_JSON" |
+        ${pkgs.jq}/bin/jq -r 'to_entries[]? | .value.name'
     )
 
     while IFS= read -r pass_name; do

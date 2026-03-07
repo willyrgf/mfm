@@ -69,6 +69,12 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
   EPHEMERAL_EXECUTOR_WRAPPER=${lib.escapeShellArg (builtins.toString ephemeralExecutorWrapper)}
   PROJECT_ROOT=${lib.escapeShellArg (builtins.toString projectRoot)}
   REGISTRY_ROOT_DEFAULT=${lib.escapeShellArg model.state.registry.root}
+  ARTIFACTS_ROOT_DEFAULT=${lib.escapeShellArg model.state.artifacts.root}
+  if [ -n "''${REGISTRY_ROOT+x}" ]; then
+    REGISTRY_ROOT_EXPLICIT=1
+  else
+    REGISTRY_ROOT_EXPLICIT=0
+  fi
   REGISTRY_ROOT="''${REGISTRY_ROOT:-$REGISTRY_ROOT_DEFAULT}"
 
   RUNS_DIR="$REGISTRY_ROOT/orchestrator/runs"
@@ -105,8 +111,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local parent_pgid
     local pgid
 
-    parent_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]' || true)"
-    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
+    parent_pgid="$(${pkgs.procps}/bin/ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]' || true)"
+    pgid="$(${pkgs.procps}/bin/ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
 
     if [ -z "$pgid" ] || [ "$pgid" = "$parent_pgid" ]; then
       printf '0'
@@ -474,6 +480,67 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     printf '%s' "$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.artifacts.root // empty')"
   }
 
+  normalize_run_artifacts_dir() {
+    local base_dir="$1"
+    local run_id="$2"
+
+    case "$base_dir" in
+      */"$run_id")
+        printf '%s' "$base_dir"
+        ;;
+      *)
+        printf '%s/%s' "$base_dir" "$run_id"
+        ;;
+    esac
+  }
+
+  artifacts_root_uses_legacy_default() {
+    local root="$1"
+
+    case "$root" in
+      "/tmp/ci-artifacts"|"$ARTIFACTS_ROOT_DEFAULT")
+        return 0
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  }
+
+  resolve_run_artifacts_dir() {
+    local run_id="$1"
+    local workflow_id="$2"
+    local configured_root
+    local caller_root="''${CI_ARTIFACTS_ROOT:-}"
+    local caller_dir="''${CI_ARTIFACTS_DIR:-}"
+    local base_dir=""
+
+    configured_root="$(workflow_artifacts_root "$workflow_id")"
+
+    if [ -n "$caller_root" ] && [ -n "$caller_dir" ]; then
+      echo "ERROR: CI_ARTIFACTS_ROOT and CI_ARTIFACTS_DIR cannot both be set"
+      return 2
+    fi
+
+    if [ -n "$caller_root" ]; then
+      base_dir="$caller_root"
+    elif [ -n "$caller_dir" ]; then
+      base_dir="$caller_dir"
+    elif [ -n "$configured_root" ]; then
+      if [ "$REGISTRY_ROOT_EXPLICIT" = "1" ] && artifacts_root_uses_legacy_default "$configured_root"; then
+        base_dir="$REGISTRY_ROOT/artifacts"
+      else
+        base_dir="$configured_root"
+      fi
+    elif [ "$REGISTRY_ROOT_EXPLICIT" = "1" ]; then
+      base_dir="$REGISTRY_ROOT/artifacts"
+    else
+      base_dir="$ARTIFACTS_ROOT_DEFAULT"
+    fi
+
+    normalize_run_artifacts_dir "$base_dir" "$run_id"
+  }
+
   resolve_task_workflow_ref() {
     local task_id="$1"
     local task
@@ -499,28 +566,37 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local ephemeral_enabled="$2"
     local workflow_id="$3"
 
-    local configured_root
-    configured_root="$(workflow_artifacts_root "$workflow_id")"
+    local artifacts_dir
+    local caller_root="''${CI_ARTIFACTS_ROOT:-}"
+    local caller_dir="''${CI_ARTIFACTS_DIR:-}"
 
     if [ "$ephemeral_enabled" = "1" ]; then
       export NIXFIED_EXECUTION_EPHEMERAL=1
-      if [ -z "''${CI_ARTIFACTS_DIR:-}" ]; then
-        export CI_ARTIFACTS_DIR="$REGISTRY_ROOT/artifacts/$run_id"
+
+      if [ -n "$caller_root" ] || [ -n "$caller_dir" ]; then
+        artifacts_dir="$(resolve_run_artifacts_dir "$run_id" "$workflow_id")" || return $?
+        export CI_ARTIFACTS_DIR="$artifacts_dir"
+        if ! mkdir -p "$CI_ARTIFACTS_DIR"; then
+          echo "ERROR: failed to prepare CI_ARTIFACTS_DIR '$CI_ARTIFACTS_DIR'"
+          return 3
+        fi
+      else
+        unset CI_ARTIFACTS_DIR || true
       fi
-      if ! mkdir -p "$CI_ARTIFACTS_DIR"; then
-        echo "ERROR: failed to prepare CI_ARTIFACTS_DIR '$CI_ARTIFACTS_DIR'"
-        return 3
-      fi
+
+      unset CI_ARTIFACTS_ROOT || true
       return 0
     fi
 
     export NIXFIED_EXECUTION_EPHEMERAL=0
-    if [ -z "''${CI_ARTIFACTS_DIR:-}" ] && [ -n "$configured_root" ]; then
-      export CI_ARTIFACTS_DIR="$configured_root/$run_id"
-    fi
+    artifacts_dir="$(resolve_run_artifacts_dir "$run_id" "$workflow_id")" || return $?
+    export CI_ARTIFACTS_DIR="$artifacts_dir"
 
-    if [ -n "''${CI_ARTIFACTS_DIR:-}" ]; then
-      mkdir -p "$CI_ARTIFACTS_DIR"
+    if [ -n "$CI_ARTIFACTS_DIR" ]; then
+      if ! mkdir -p "$CI_ARTIFACTS_DIR"; then
+        echo "ERROR: failed to prepare CI_ARTIFACTS_DIR '$CI_ARTIFACTS_DIR'"
+        return 3
+      fi
     fi
   }
 
@@ -536,11 +612,17 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
     local run_file
     local now
+    local lock_file
+    local lock_fd
+    local tmp
 
     run_file="$(run_file_for "$run_id")"
     now="$(iso_now)"
+    lock_file="$(run_lock_for "$run_id")"
+    lock_fd="$(registry_lock_acquire "$lock_file" "orchestrator-create-run-record:$run_id" 30)" || return 1
+    tmp="$(mktemp "$run_file.tmp.XXXXXX")"
 
-    ${pkgs.jq}/bin/jq -cnS \
+    if ! ${pkgs.jq}/bin/jq -cnS \
       --arg runId "$run_id" \
       --arg command "$command_name" \
       --arg workflowId "$workflow_id" \
@@ -574,7 +656,14 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
             at: $ts
           }
         ]
-      }' > "$run_file"
+      }' > "$tmp"; then
+      rm -f "$tmp"
+      registry_lock_release "$lock_fd" "$lock_file"
+      return 1
+    fi
+
+    mv "$tmp" "$run_file"
+    registry_lock_release "$lock_fd" "$lock_file"
   }
 
   update_run_state() {
@@ -586,19 +675,20 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local pgid="$6"
 
     local run_file
-    local lock_dir
+    local lock_file
+    local lock_fd
     local tmp
     local now
 
     run_file="$(run_file_for "$run_id")"
-    lock_dir="$(run_lock_for "$run_id")"
+    lock_file="$(run_lock_for "$run_id")"
     now="$(iso_now)"
 
     if [ ! -f "$run_file" ]; then
       return 1
     fi
 
-    registry_lock_acquire "$lock_dir"
+    lock_fd="$(registry_lock_acquire "$lock_file" "orchestrator-update-run-state:$run_id" 30)" || return 1
     tmp="$(mktemp "$run_file.tmp.XXXXXX")"
 
     if ! ${pkgs.jq}/bin/jq -cS \
@@ -620,22 +710,27 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
       | .stop_reason = (if $stopReason == "" then .stop_reason else $stopReason end)
       ' "$run_file" > "$tmp"; then
       rm -f "$tmp"
-      registry_lock_release "$lock_dir"
+      registry_lock_release "$lock_fd" "$lock_file"
       return 1
     fi
 
     mv "$tmp" "$run_file"
-    registry_lock_release "$lock_dir"
+    registry_lock_release "$lock_fd" "$lock_file"
     return 0
   }
 
   terminal_from_events() {
     local run_id="$1"
-    local events_file="$REGISTRY_ROOT/events.ndjson"
+    local events_file
     local terminal_state
     local exit_code
 
-    if [ ! -f "$events_file" ]; then
+    events_file="$(registry_events_snapshot "$REGISTRY_ROOT")" || {
+      echo "failed 1"
+      return
+    }
+
+    if [ -z "$events_file" ] || [ ! -f "$events_file" ]; then
       echo "failed 1"
       return
     fi
@@ -646,15 +741,18 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     ' "$events_file" | ${pkgs.coreutils}/bin/tail -n 1)"
 
     if [ -z "$terminal_state" ]; then
+      registry_snapshot_cleanup "$events_file"
       echo "failed 1"
       return
     fi
 
     case "$terminal_state" in
       passed)
+        registry_snapshot_cleanup "$events_file"
         echo "passed 0"
         ;;
       canceled)
+        registry_snapshot_cleanup "$events_file"
         echo "canceled 130"
         ;;
       failed)
@@ -665,9 +763,11 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
         if [ -z "$exit_code" ]; then
           exit_code=1
         fi
+        registry_snapshot_cleanup "$events_file"
         echo "failed $exit_code"
         ;;
       *)
+        registry_snapshot_cleanup "$events_file"
         echo "failed 1"
         ;;
     esac
@@ -748,13 +848,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
       return 0
     fi
 
-    if [ -n "$SETSID_BIN" ] && [ -x "$SETSID_BIN" ]; then
-      "$SETSID_BIN" "''${cmd[@]}" &
-    elif command -v setsid >/dev/null 2>&1; then
-      setsid "''${cmd[@]}" &
-    else
-      "''${cmd[@]}" &
-    fi
+    "''${cmd[@]}" &
 
     pid="$!"
     pgid="$(pgid_of_pid "$pid")"

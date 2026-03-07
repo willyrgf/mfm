@@ -112,6 +112,7 @@ let
     "- Project id: ${resolved.identity.projectId}"
     "- Project name: ${resolved.identity.projectName}"
     "- Description: ${resolved.identity.description}"
+    "- Workspace id: ${resolved.state.workspaceId}"
     ""
     "## Runtime"
     ""

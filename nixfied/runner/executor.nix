@@ -24,6 +24,12 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   MODEL_FILE=${pkgs.lib.escapeShellArg (builtins.toString modelFile)}
   PROJECT_ROOT=${pkgs.lib.escapeShellArg (builtins.toString projectRoot)}
   REGISTRY_ROOT_DEFAULT=${pkgs.lib.escapeShellArg model.state.registry.root}
+  ARTIFACTS_ROOT_DEFAULT=${pkgs.lib.escapeShellArg model.state.artifacts.root}
+  if [ -n "''${REGISTRY_ROOT+x}" ]; then
+    REGISTRY_ROOT_EXPLICIT=1
+  else
+    REGISTRY_ROOT_EXPLICIT=0
+  fi
   REGISTRY_ROOT="''${REGISTRY_ROOT:-$REGISTRY_ROOT_DEFAULT}"
 
   ${registryShell}
@@ -45,6 +51,92 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
   RUN_SUFFIX_REASON=""
   LAST_WORKFLOW_SUMMARY_FILE=""
+
+  normalize_run_artifacts_dir() {
+    local base_dir="$1"
+    local run_id="$2"
+
+    case "$base_dir" in
+      */"$run_id")
+        printf '%s' "$base_dir"
+        ;;
+      *)
+        printf '%s/%s' "$base_dir" "$run_id"
+        ;;
+    esac
+  }
+
+  artifacts_root_uses_legacy_default() {
+    local root="$1"
+
+    case "$root" in
+      "/tmp/ci-artifacts"|"$ARTIFACTS_ROOT_DEFAULT")
+        return 0
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  }
+
+  resolve_run_artifacts_dir() {
+    local run_id="$1"
+    local workflow="$2"
+    local caller_root="''${CI_ARTIFACTS_ROOT:-}"
+    local caller_dir="''${CI_ARTIFACTS_DIR:-}"
+    local configured_root=""
+    local base_dir=""
+
+    if [ -n "$caller_root" ] && [ -n "$caller_dir" ]; then
+      echo "ERROR: CI_ARTIFACTS_ROOT and CI_ARTIFACTS_DIR cannot both be set"
+      return 2
+    fi
+
+    if [ -n "$workflow" ]; then
+      configured_root="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.artifacts.root // empty')"
+    fi
+
+    if [ -n "$caller_root" ]; then
+      base_dir="$caller_root"
+    elif [ -n "$caller_dir" ]; then
+      base_dir="$caller_dir"
+    elif [ -n "$configured_root" ]; then
+      if [ "$REGISTRY_ROOT_EXPLICIT" = "1" ] && artifacts_root_uses_legacy_default "$configured_root"; then
+        base_dir="$REGISTRY_ROOT/artifacts"
+      else
+        base_dir="$configured_root"
+      fi
+    elif [ "$REGISTRY_ROOT_EXPLICIT" = "1" ]; then
+      base_dir="$REGISTRY_ROOT/artifacts"
+    else
+      base_dir="$ARTIFACTS_ROOT_DEFAULT"
+    fi
+
+    normalize_run_artifacts_dir "$base_dir" "$run_id"
+  }
+
+  ensure_run_artifacts_dir() {
+    local run_id="$1"
+    local workflow="$2"
+    local managed_by_orchestrator="$3"
+    local artifacts_dir
+
+    if [ -n "''${CI_ARTIFACTS_DIR:-}" ] && {
+      [ "$managed_by_orchestrator" = "1" ] ||
+      [ "''${NIXFIED_WORKFLOW_NESTED:-0}" = "1" ] ||
+      [ "''${NIXFIED_EXECUTION_EPHEMERAL:-0}" = "1" ]
+    }; then
+      mkdir -p "$CI_ARTIFACTS_DIR"
+      return 0
+    fi
+
+    artifacts_dir="$(resolve_run_artifacts_dir "$run_id" "$workflow")" || return $?
+    export CI_ARTIFACTS_DIR="$artifacts_dir"
+    if ! mkdir -p "$CI_ARTIFACTS_DIR"; then
+      echo "ERROR: failed to create artifacts directory '$CI_ARTIFACTS_DIR'"
+      return 1
+    fi
+  }
 
   compute_run_id() {
     local mode="$1"
@@ -79,17 +171,18 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     mkdir -p "$REGISTRY_ROOT/active" "$REGISTRY_ROOT/counters"
 
     if [ -e "$REGISTRY_ROOT/active/$run_id" ]; then
-      local lock_dir="$REGISTRY_ROOT/counters/.lock-$run_base"
+      local lock_file="$REGISTRY_ROOT/counters/$run_base.lock"
       local counter_file="$REGISTRY_ROOT/counters/$run_base"
       local counter="0"
+      local lock_fd
 
-      registry_lock_acquire "$lock_dir"
+      lock_fd="$(registry_lock_acquire "$lock_file" "executor-run-counter:$run_base" 30)" || return 1
       if [ -f "$counter_file" ]; then
         counter="$(cat "$counter_file")"
       fi
       counter="$(( counter + 1 ))"
       printf '%s' "$counter" > "$counter_file"
-      registry_lock_release "$lock_dir"
+      registry_lock_release "$lock_fd" "$lock_file"
 
       run_id="$run_id-$(printf 'c%03d' "$counter")"
       RUN_SUFFIX_REASON="active-collision"
@@ -559,6 +652,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       trap "deactivate_run '$run_id'" EXIT
     fi
 
+    ensure_run_artifacts_dir "$run_id" "" "$managed_by_orchestrator" || return $?
+
     detail_json="$(${pkgs.jq}/bin/jq -cn --arg suffix "$RUN_SUFFIX_REASON" '{mode: "task", suffixReason: (if $suffix == "" then null else $suffix end)}')"
     append_event "$run_id" "" "$task_id" "queued" "$detail_json"
 
@@ -689,6 +784,30 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fi
 
     printf '%s' "$effective_workers"
+  }
+
+  parallel_worker_cap_override_error() {
+    local override_name=""
+    local override_value=""
+
+    if [ -n "''${NIXFIED_CI_MAX_WORKERS:-}" ]; then
+      override_name="NIXFIED_CI_MAX_WORKERS"
+      override_value="$NIXFIED_CI_MAX_WORKERS"
+    elif [ -n "''${CI_MAX_WORKERS:-}" ]; then
+      override_name="CI_MAX_WORKERS"
+      override_value="$CI_MAX_WORKERS"
+    fi
+
+    if [ -z "$override_name" ]; then
+      return 1
+    fi
+
+    if [[ "$override_value" =~ ^[0-9]+$ ]] && [ "$override_value" -ge 1 ]; then
+      return 1
+    fi
+
+    printf "ERROR: %s must be an integer >= 1 (got '%s')" "$override_name" "$override_value"
+    return 0
   }
 
   resolve_parallel_mode() {
@@ -1007,7 +1126,11 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       done
     }
 
-    max_workers="$(resolve_effective_max_workers "$workflow")" || return $?
+    if max_workers="$(resolve_effective_max_workers "$workflow")"; then
+      :
+    else
+      return "$?"
+    fi
     lock_policy="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.execution.lockPolicy // "exclusive"')"
     if [ "$lock_policy" = "shared-aware" ]; then
       echo "WARN: lockPolicy=shared-aware uses exclusive semantics in workflow parallel runner"
@@ -1502,7 +1625,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local exit_code="$3"
     local duration_seconds="$4"
     local summary_file="$5"
-    local events_file="$REGISTRY_ROOT/events.ndjson"
+    local events_file=""
     local steps_json="[]"
     local timing_fields=""
     local summary_duration=""
@@ -1544,8 +1667,11 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       if [ -n "$timing_fields" ]; then
         IFS=$'\t' read -r timing_setup timing_steps timing_teardown timing_accounted timing_untracked parallel_max_workers parallel_peak_workers parallel_canceled_count <<< "$timing_fields"
       fi
-    elif [ -f "$events_file" ]; then
-      steps_json="$(workflow_steps_json "$run_id" "$events_file" 2>/dev/null || echo "[]")"
+    else
+      events_file="$(registry_events_snapshot "$REGISTRY_ROOT" 2>/dev/null || true)"
+      if [ -n "$events_file" ] && [ -f "$events_file" ]; then
+        steps_json="$(workflow_steps_json "$run_id" "$events_file" 2>/dev/null || echo "[]")"
+      fi
     fi
 
     printf '%s' "$steps_json" | ${pkgs.jq}/bin/jq -r '
@@ -1595,6 +1721,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fi
 
     echo "------------------------------------------------------------"
+    registry_snapshot_cleanup "$events_file"
   }
 
   write_workflow_summary_json() {
@@ -1609,6 +1736,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local mode
     local artifacts_dir
     local summary_file
+    local summary_tmp
     local summary_started_at="$started_at"
     local summary_started_epoch="$started_epoch"
     local finished_at
@@ -1629,7 +1757,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local parallel_peak_workers_json="null"
     local parallel_canceled_count_json="null"
     local leaf_task_ids_json="[]"
-    local events_file="$REGISTRY_ROOT/events.ndjson"
+    local events_file=""
     local setup_timing_fields
 
     LAST_WORKFLOW_SUMMARY_FILE=""
@@ -1640,22 +1768,16 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fi
 
     mode="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.mode // "custom"')"
-    artifacts_dir="''${CI_ARTIFACTS_DIR:-$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.artifacts.root // "/tmp/ci-artifacts"')}"
+    artifacts_dir="''${CI_ARTIFACTS_DIR:-}"
+    if [ -z "$artifacts_dir" ]; then
+      echo "ERROR: CI_ARTIFACTS_DIR is not set for run '$run_id'"
+      return 1
+    fi
     summary_file="$artifacts_dir/summary.json"
 
     if ! mkdir -p "$artifacts_dir"; then
-      if [ -z "''${CI_ARTIFACTS_DIR:-}" ]; then
-        artifacts_dir="$REGISTRY_ROOT/artifacts/$run_id"
-        summary_file="$artifacts_dir/summary.json"
-        if ! mkdir -p "$artifacts_dir"; then
-          echo "ERROR: failed to create artifacts directory '$artifacts_dir'"
-          return 1
-        fi
-        echo "WARN: artifacts root was not writable; using fallback '$artifacts_dir'"
-      else
-        echo "ERROR: failed to create artifacts directory '$artifacts_dir'"
-        return 1
-      fi
+      echo "ERROR: failed to create artifacts directory '$artifacts_dir'"
+      return 1
     fi
 
     setup_timing_fields="$(workflow_setup_timing_fields "$started_epoch" "$started_at")"
@@ -1667,7 +1789,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       duration_seconds=0
     fi
 
-    if [ -f "$events_file" ]; then
+    events_file="$(registry_events_snapshot "$REGISTRY_ROOT" 2>/dev/null || true)"
+    if [ -n "$events_file" ] && [ -f "$events_file" ]; then
       if steps_json="$(workflow_steps_json "$run_id" "$events_file")"; then
         :
       else
@@ -1700,7 +1823,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fi
 
     leaf_task_ids_json="$(printf '%s' "$steps_json" | ${pkgs.jq}/bin/jq -c '[.[] | .name] | unique' 2>/dev/null || echo '[]')"
-    if [ -f "$events_file" ]; then
+    if [ -n "$events_file" ] && [ -f "$events_file" ]; then
       parallel_peak_workers="$(workflow_peak_workers "$run_id" "$events_file" "$leaf_task_ids_json" 2>/dev/null || echo 0)"
     else
       parallel_peak_workers=0
@@ -1766,27 +1889,18 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         }' > "$target_file"
     }
 
-    if ! write_summary_payload "$summary_file"; then
-      if [ -z "''${CI_ARTIFACTS_DIR:-}" ]; then
-        artifacts_dir="$REGISTRY_ROOT/artifacts/$run_id"
-        summary_file="$artifacts_dir/summary.json"
-        if ! mkdir -p "$artifacts_dir"; then
-          echo "ERROR: failed to create fallback artifacts directory '$artifacts_dir'"
-          return 1
-        fi
-        if ! write_summary_payload "$summary_file"; then
-          echo "ERROR: failed to write summary file '$summary_file'"
-          return 1
-        fi
-        echo "WARN: artifacts root was not writable; using fallback '$artifacts_dir'"
-      else
-        echo "ERROR: failed to write summary file '$summary_file'"
-        return 1
-      fi
+    summary_tmp="$(mktemp "$summary_file.tmp.XXXXXX")"
+    if ! write_summary_payload "$summary_tmp"; then
+      rm -f "$summary_tmp"
+      registry_snapshot_cleanup "$events_file"
+      echo "ERROR: failed to write summary file '$summary_file'"
+      return 1
     fi
+    mv "$summary_tmp" "$summary_file"
 
     LAST_WORKFLOW_SUMMARY_FILE="$summary_file"
     echo "INFO: summary_json=$summary_file"
+    registry_snapshot_cleanup "$events_file"
     return 0
   }
 
@@ -1906,11 +2020,20 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       trap "deactivate_run '$run_id'" EXIT
     fi
 
+    ensure_run_artifacts_dir "$run_id" "$workflow" "$managed_by_orchestrator" || return $?
+
     detail_json="$(${pkgs.jq}/bin/jq -cn --arg suffix "$RUN_SUFFIX_REASON" --arg mode "workflow" '{mode: $mode, suffixReason: (if $suffix == "" then null else $suffix end)}')"
     append_event "$run_id" "$workflow_id" "" "queued" "$detail_json"
 
     fail_fast="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.execution.failFast')"
     run_parallel="$(resolve_parallel_mode "$workflow")"
+    if [ "$run_parallel" = "1" ]; then
+      local parallel_cap_error=""
+      if parallel_cap_error="$(parallel_worker_cap_override_error)"; then
+        printf '%s\n' "$parallel_cap_error"
+        return 2
+      fi
+    fi
 
     if run_workflow_phase_tasks "$run_id" "$workflow_id" "$workflow" "preRun" "''${passthrough_args[@]}"; then
       status=0
@@ -1971,7 +2094,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fi
 
     if [ "$print_summary" -eq 1 ] && [ "$nested_workflow_call" -eq 0 ]; then
-      local events_file="$REGISTRY_ROOT/events.ndjson"
+      local events_file=""
       local passed failed canceled
       print_workflow_summary_report "$run_id" "$workflow_id" "$status" "$duration_seconds" "$summary_file"
 
@@ -1979,14 +2102,18 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         passed="$(${pkgs.jq}/bin/jq -r '.counts.passed // 0' "$summary_file" 2>/dev/null || echo 0)"
         failed="$(${pkgs.jq}/bin/jq -r '.counts.failed // 0' "$summary_file" 2>/dev/null || echo 0)"
         canceled="$(${pkgs.jq}/bin/jq -r '.counts.canceled // 0' "$summary_file" 2>/dev/null || echo 0)"
-      elif [ -f "$events_file" ]; then
-        passed="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "passed") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^passed$' || true)"
-        failed="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "failed") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^failed$' || true)"
-        canceled="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "canceled") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^canceled$' || true)"
       else
-        passed=0
-        failed=0
-        canceled=0
+        events_file="$(registry_events_snapshot "$REGISTRY_ROOT" 2>/dev/null || true)"
+        if [ -n "$events_file" ] && [ -f "$events_file" ]; then
+          passed="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "passed") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^passed$' || true)"
+          failed="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "failed") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^failed$' || true)"
+          canceled="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" 'select(.runId == $runId and .taskId != "" and .state == "canceled") | .state' "$events_file" | ${pkgs.gnugrep}/bin/grep -c '^canceled$' || true)"
+          registry_snapshot_cleanup "$events_file"
+        else
+          passed=0
+          failed=0
+          canceled=0
+        fi
       fi
       echo "INFO: runId=$run_id passed=$passed failed=$failed canceled=$canceled"
     fi

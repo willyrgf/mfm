@@ -186,9 +186,7 @@ let
     else
       depUnits;
 
-  resolveSoftTaskDeps =
-    unitsByTask: depTaskId:
-    unitsByTask.${depTaskId} or [ ];
+  resolveSoftTaskDeps = unitsByTask: depTaskId: unitsByTask.${depTaskId} or [ ];
 
   mergeTaskMetadata =
     workflowId: units:
@@ -204,7 +202,9 @@ let
         taskProduces = task.produces;
 
         hardNeeds = builtins.concatLists (
-          map (depTaskId: resolveHardTaskDeps workflowId unitsByTask unitName depTaskId) (taskDeps.needs or [ ])
+          map (depTaskId: resolveHardTaskDeps workflowId unitsByTask unitName depTaskId) (
+            taskDeps.needs or [ ]
+          )
         );
 
         softNeeds = builtins.concatLists (

@@ -32,6 +32,7 @@ let
       projectId = resolved.identity.projectId;
       projectName = resolved.identity.projectName;
       description = resolved.identity.description;
+      workspaceId = resolved.state.workspaceId;
       system = system;
       evalHash = evalHash;
     };
@@ -49,6 +50,7 @@ let
     };
 
     state = {
+      workspaceId = resolved.state.workspaceId;
       registry = {
         schemaVersion = 1;
         root = resolved.state.registryRoot;

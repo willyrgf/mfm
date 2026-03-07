@@ -35,14 +35,19 @@ in
     };
 
     state = {
+      workspaceId = lib.mkOption {
+        type = t.str;
+        default = "default";
+      };
+
       registryRoot = lib.mkOption {
         type = t.str;
-        default = "/tmp/nixfied-runtime/nixfied-project";
+        default = "/tmp/nixfied-runtime/nixfied-project/registry";
       };
 
       artifactsRoot = lib.mkOption {
         type = t.str;
-        default = "/tmp/ci-artifacts";
+        default = "/tmp/ci-artifacts/nixfied-project";
       };
     };
 

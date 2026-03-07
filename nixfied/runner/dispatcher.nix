@@ -66,11 +66,11 @@ let
     else
       {
         "framework::install" = mkApp "framework::install" ''
-          NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied#run-task --refresh -- task.framework.install "$@"
+          NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#run-task --refresh -- task.framework.install "$@"
         '';
 
         "framework::upgrade" = mkApp "framework::upgrade" ''
-          NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied#run-task --refresh -- task.framework.upgrade "$@"
+          NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#run-task --refresh -- task.framework.upgrade "$@"
         '';
       };
 in

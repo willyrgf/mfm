@@ -45,7 +45,9 @@ let
     helios = heliosCfg;
   };
 
-  enabledServiceNames = builtins.filter (serviceName: serviceEnabledByName.${serviceName}) serviceNames;
+  enabledServiceNames = builtins.filter (
+    serviceName: serviceEnabledByName.${serviceName}
+  ) serviceNames;
 
   resolvePortBase =
     key:
@@ -63,7 +65,8 @@ let
   rethWsPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyWs else 0;
   rethAuthPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyAuth else 0;
   heliosRpcPortBase = if heliosEnabled then resolvePortBase heliosCfg.portKeyRpc else 0;
-  heliosExecutionRpcPortBase = if heliosEnabled then resolvePortBase heliosCfg.executionRpcPortKey else 0;
+  heliosExecutionRpcPortBase =
+    if heliosEnabled then resolvePortBase heliosCfg.executionRpcPortKey else 0;
 
   netcatPkg =
     if pkgs ? netcat then
@@ -79,23 +82,23 @@ let
     map (
       sourceName:
       "      ${lib.escapeShellArg sourceName}) printf '%s' ${
-        lib.escapeShellArg (heliosSourceKinds.${sourceName} or "unknown")
-      } ;;"
+              lib.escapeShellArg (heliosSourceKinds.${sourceName} or "unknown")
+            } ;;"
     ) (builtins.sort builtins.lessThan (builtins.attrNames heliosSourceKinds))
   );
   heliosReadinessProfile = heliosCfg.readiness.profile or "fast";
   heliosReadinessRequireNotSyncing =
     (heliosCfg.readiness.requireNotSyncing or false) || heliosReadinessProfile == "strict";
-  heliosReadinessDisallowSourceKinds =
-    lib.unique (
-      (heliosCfg.readiness.disallowSourceKinds or [ ])
-      ++ lib.optionals (heliosReadinessProfile == "strict") [
-        "shim"
-        "unknown"
-      ]
-    );
-  heliosReadinessDisallowSourceKindArgs =
-    builtins.concatStringsSep " " (map lib.escapeShellArg heliosReadinessDisallowSourceKinds);
+  heliosReadinessDisallowSourceKinds = lib.unique (
+    (heliosCfg.readiness.disallowSourceKinds or [ ])
+    ++ lib.optionals (heliosReadinessProfile == "strict") [
+      "shim"
+      "unknown"
+    ]
+  );
+  heliosReadinessDisallowSourceKindArgs = builtins.concatStringsSep " " (
+    map lib.escapeShellArg heliosReadinessDisallowSourceKinds
+  );
   serviceProbeRuntimeInputs = [
     pkgs.coreutils
     pkgs.gnugrep
@@ -124,26 +127,26 @@ let
   );
 
   slotEnvPrelude = ''
-    slot_var=${lib.escapeShellArg runtime.slot.var}
-    env_var=${lib.escapeShellArg runtime.env.var}
-    slot_default=${toString runtime.slot.default}
-    env_default=${lib.escapeShellArg runtime.env.default}
+        slot_var=${lib.escapeShellArg runtime.slot.var}
+        env_var=${lib.escapeShellArg runtime.env.var}
+        slot_default=${toString runtime.slot.default}
+        env_default=${lib.escapeShellArg runtime.env.default}
 
-    slot_value="''${!slot_var:-$slot_default}"
-    env_value="''${!env_var:-$env_default}"
+        slot_value="''${!slot_var:-$slot_default}"
+        env_value="''${!env_var:-$env_default}"
 
-    if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
-      echo "ERROR: $slot_var must be an integer"
-      exit 3
-    fi
+        if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
+          echo "ERROR: $slot_var must be an integer"
+          exit 3
+        fi
 
-    case "$env_value" in
-${envOffsetCase}
-      *)
-        echo "ERROR: unsupported $env_var '$env_value'"
-        exit 3
-        ;;
-    esac
+        case "$env_value" in
+    ${envOffsetCase}
+          *)
+            echo "ERROR: unsupported $env_var '$env_value'"
+            exit 3
+            ;;
+        esac
   '';
 
   portNames = builtins.sort builtins.lessThan (builtins.attrNames runtime.ports);
@@ -206,14 +209,17 @@ ${envOffsetCase}
 
   serviceEnabledCase = builtins.concatStringsSep "\n" (
     map (
-      serviceName: "      ${serviceName}) echo ${if serviceEnabledByName.${serviceName} then "1" else "0"} ;;"
+      serviceName:
+      "      ${serviceName}) echo ${if serviceEnabledByName.${serviceName} then "1" else "0"} ;;"
     ) serviceNames
   );
 
   serviceDefaultSourceCase = builtins.concatStringsSep "\n" (
     map (
       serviceName:
-      "      ${serviceName}) printf '%s' ${lib.escapeShellArg (serviceConfigByName.${serviceName}.defaultSource or "")} ;;"
+      "      ${serviceName}) printf '%s' ${
+              lib.escapeShellArg (serviceConfigByName.${serviceName}.defaultSource or "")
+            } ;;"
     ) serviceNames
   );
 
@@ -225,10 +231,10 @@ ${envOffsetCase}
         sourceArgs = builtins.concatStringsSep " " (map lib.escapeShellArg sourceKeys);
       in
       ''
-              ${serviceName})
-                source_key_matches "$source"${if sourceArgs == "" then "" else " ${sourceArgs}"}
-                return $?
-                ;;
+        ${serviceName})
+          source_key_matches "$source"${if sourceArgs == "" then "" else " ${sourceArgs}"}
+          return $?
+          ;;
       ''
     ) serviceNames
   );
@@ -242,162 +248,162 @@ ${envOffsetCase}
       + ")";
 
   serviceSelectionPrelude = ''
-    target_service="all"
-    target_source=""
+        target_service="all"
+        target_source=""
 
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        --service)
-          if [ "$#" -lt 2 ]; then
-            echo "ERROR: --service requires a value"
-            exit 2
-          fi
-          target_service="$2"
-          shift 2
-          ;;
-        --service=*)
-          target_service="''${1#--service=}"
-          shift
-          ;;
-        --source)
-          if [ "$#" -lt 2 ]; then
-            echo "ERROR: --source requires a value"
-            exit 2
-          fi
-          target_source="$2"
-          shift 2
-          ;;
-        --source=*)
-          target_source="''${1#--source=}"
-          shift
-          ;;
-        --)
-          shift
-          break
-          ;;
-        *)
-          echo "ERROR: unknown argument '$1'"
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --service)
+              if [ "$#" -lt 2 ]; then
+                echo "ERROR: --service requires a value"
+                exit 2
+              fi
+              target_service="$2"
+              shift 2
+              ;;
+            --service=*)
+              target_service="''${1#--service=}"
+              shift
+              ;;
+            --source)
+              if [ "$#" -lt 2 ]; then
+                echo "ERROR: --source requires a value"
+                exit 2
+              fi
+              target_source="$2"
+              shift 2
+              ;;
+            --source=*)
+              target_source="''${1#--source=}"
+              shift
+              ;;
+            --)
+              shift
+              break
+              ;;
+            *)
+              echo "ERROR: unknown argument '$1'"
+              exit 2
+              ;;
+          esac
+        done
+
+        if [ "$#" -gt 0 ]; then
+          echo "ERROR: unexpected positional arguments: $*"
           exit 2
-          ;;
-      esac
-    done
-
-    if [ "$#" -gt 0 ]; then
-      echo "ERROR: unexpected positional arguments: $*"
-      exit 2
-    fi
-
-    is_known_service() {
-      case "$1" in
-${knownServiceCase}
-        *) return 1 ;;
-      esac
-    }
-
-    is_service_enabled() {
-      case "$1" in
-${serviceEnabledCase}
-        *) echo "0" ;;
-      esac
-    }
-
-    service_default_source() {
-      case "$1" in
-${serviceDefaultSourceCase}
-        *) printf '%s' "" ;;
-      esac
-    }
-
-    source_key_matches() {
-      local wanted="$1"
-      shift
-      local candidate
-      for candidate in "$@"; do
-        if [ "$candidate" = "$wanted" ]; then
-          return 0
         fi
-      done
-      return 1
-    }
 
-    source_kind_disallowed() {
-      local source_kind="$1"
-      shift
-      local blocked_kind
-      for blocked_kind in "$@"; do
-        if [ "$blocked_kind" = "$source_kind" ]; then
-          return 0
-        fi
-      done
-      return 1
-    }
+        is_known_service() {
+          case "$1" in
+    ${knownServiceCase}
+            *) return 1 ;;
+          esac
+        }
 
-    helios_source_kind() {
-      local source="$1"
-      case "$source" in
-${heliosSourceKindCase}
-        *)
-          printf '%s' "unknown"
-          ;;
-      esac
-    }
+        is_service_enabled() {
+          case "$1" in
+    ${serviceEnabledCase}
+            *) echo "0" ;;
+          esac
+        }
 
-    service_has_source() {
-      local service="$1"
-      local source="$2"
-      case "$service" in
-${serviceHasSourceCase}
-        *)
+        service_default_source() {
+          case "$1" in
+    ${serviceDefaultSourceCase}
+            *) printf '%s' "" ;;
+          esac
+        }
+
+        source_key_matches() {
+          local wanted="$1"
+          shift
+          local candidate
+          for candidate in "$@"; do
+            if [ "$candidate" = "$wanted" ]; then
+              return 0
+            fi
+          done
           return 1
-          ;;
-      esac
-    }
+        }
 
-    service_selected() {
-      local service="$1"
-      local selected
-      for selected in "''${selected_services[@]}"; do
-        if [ "$selected" = "$service" ]; then
-          return 0
+        source_kind_disallowed() {
+          local source_kind="$1"
+          shift
+          local blocked_kind
+          for blocked_kind in "$@"; do
+            if [ "$blocked_kind" = "$source_kind" ]; then
+              return 0
+            fi
+          done
+          return 1
+        }
+
+        helios_source_kind() {
+          local source="$1"
+          case "$source" in
+    ${heliosSourceKindCase}
+            *)
+              printf '%s' "unknown"
+              ;;
+          esac
+        }
+
+        service_has_source() {
+          local service="$1"
+          local source="$2"
+          case "$service" in
+    ${serviceHasSourceCase}
+            *)
+              return 1
+              ;;
+          esac
+        }
+
+        service_selected() {
+          local service="$1"
+          local selected
+          for selected in "''${selected_services[@]}"; do
+            if [ "$selected" = "$service" ]; then
+              return 0
+            fi
+          done
+          return 1
+        }
+
+        resolve_service_source() {
+          local service="$1"
+          if [ -n "$target_source" ]; then
+            printf '%s' "$target_source"
+            return 0
+          fi
+          service_default_source "$service"
+        }
+
+        if [ "$target_service" != "all" ] && ! is_known_service "$target_service"; then
+          echo "ERROR: unknown --service '$target_service'"
+          exit 2
         fi
-      done
-      return 1
-    }
 
-    resolve_service_source() {
-      local service="$1"
-      if [ -n "$target_source" ]; then
-        printf '%s' "$target_source"
-        return 0
-      fi
-      service_default_source "$service"
-    }
+        if [ "$target_service" = "all" ]; then
+          ${enabledServiceArrayInit}
+        else
+          if [ "$(is_service_enabled "$target_service")" != "1" ]; then
+            echo "ERROR: selected service '$target_service' is disabled"
+            exit 3
+          fi
+          selected_services=("$target_service")
+        fi
 
-    if [ "$target_service" != "all" ] && ! is_known_service "$target_service"; then
-      echo "ERROR: unknown --service '$target_service'"
-      exit 2
-    fi
-
-    if [ "$target_service" = "all" ]; then
-      ${enabledServiceArrayInit}
-    else
-      if [ "$(is_service_enabled "$target_service")" != "1" ]; then
-        echo "ERROR: selected service '$target_service' is disabled"
-        exit 3
-      fi
-      selected_services=("$target_service")
-    fi
-
-    if [ -n "$target_source" ]; then
-      if [ "$target_service" = "all" ]; then
-        echo "ERROR: --source requires --service"
-        exit 2
-      fi
-      if ! service_has_source "$target_service" "$target_source"; then
-        echo "ERROR: unknown source '$target_source' for service '$target_service'"
-        exit 3
-      fi
-    fi
+        if [ -n "$target_source" ]; then
+          if [ "$target_service" = "all" ]; then
+            echo "ERROR: --source requires --service"
+            exit 2
+          fi
+          if ! service_has_source "$target_service" "$target_source"; then
+            echo "ERROR: unknown source '$target_source' for service '$target_service'"
+            exit 3
+          fi
+        fi
 
   '';
 
