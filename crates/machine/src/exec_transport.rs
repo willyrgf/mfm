@@ -23,6 +23,7 @@ use crate::io::IoCall;
 use crate::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use crate::process_exec::{run_command, ProcessRunError, StreamLimit};
 
+/// Namespace group handled by the program-execution transport.
 pub const NAMESPACE_EXEC: &str = "exec";
 
 const CODE_EXEC_REQUEST_INVALID: &str = "exec_request_invalid";
@@ -67,8 +68,10 @@ fn info_with_details(
     }
 }
 
+/// Policy used by the `exec` transport to constrain which programs may be executed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecPolicy {
+    /// Canonical path prefixes that executable targets must reside under.
     pub allow_prefixes: Vec<String>,
 }
 
@@ -81,12 +84,14 @@ impl Default for ExecPolicy {
     }
 }
 
+/// Factory that produces Live IO transports for the [`NAMESPACE_EXEC`] namespace group.
 #[derive(Clone, Default)]
 pub struct ExecProgramTransportFactory {
     policy: ExecPolicy,
 }
 
 impl ExecProgramTransportFactory {
+    /// Creates a factory that enforces the provided execution policy for all `exec` requests.
     pub fn new(policy: ExecPolicy) -> Self {
         Self { policy }
     }

@@ -11,42 +11,68 @@ use tokio::time::{timeout_at, Instant};
 
 const READ_CHUNK_SIZE: usize = 8 * 1024;
 
+/// Output limits applied while collecting child stdout and stderr.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamLimit {
+    /// Maximum number of stdout bytes retained in memory before truncation is reported.
     pub max_stdout_bytes: usize,
+    /// Maximum number of stderr bytes retained in memory before truncation is reported.
     pub max_stderr_bytes: usize,
 }
 
+/// Bounded capture of a single child output stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollectedStream {
+    /// Retained prefix of the stream, bounded by the configured stream limit.
     pub bytes: Vec<u8>,
+    /// Total number of bytes read from the child stream, including truncated bytes.
     pub total_bytes: usize,
+    /// Whether additional bytes were observed after the retained prefix filled the limit.
     pub overflowed: bool,
 }
 
+/// Reduced IO error information captured while interacting with child stdin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StdinWriteError {
+    /// `std::io::ErrorKind` captured while writing to or closing child stdin.
     pub kind: std::io::ErrorKind,
 }
 
+/// Result of a completed child-process execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessRunResult {
+    /// Final exit status returned by the child process.
     pub status: ExitStatus,
+    /// Bounded stdout capture collected during execution.
     pub stdout: CollectedStream,
+    /// Bounded stderr capture collected during execution.
     pub stderr: CollectedStream,
+    /// Error returned while writing stdin, if the write failed after spawn succeeded.
     pub stdin_write_error: Option<StdinWriteError>,
+    /// Error returned while closing stdin, if shutdown failed after writing.
     pub stdin_close_error: Option<StdinWriteError>,
 }
 
+/// Failure modes returned by [`run_command`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessRunError {
+    /// Spawning the child process failed before execution began.
     SpawnFailed,
+    /// The command exceeded the supplied deadline and was killed.
     Timeout,
+    /// Waiting for process termination failed after spawn succeeded.
     WaitFailed,
+    /// Reading stdout failed or the stdout capture task terminated unexpectedly.
     StdoutReadFailed,
+    /// Reading stderr failed or the stderr capture task terminated unexpectedly.
     StderrReadFailed,
 }
 
+/// Runs a child process with bounded stdout/stderr capture and deadline enforcement.
+///
+/// The child is configured with piped stdin/stdout/stderr, killed on drop, and reaped on timeout.
+/// Stdin write or close failures are surfaced in [`ProcessRunResult`] when the process otherwise
+/// runs to completion.
 pub async fn run_command(
     mut cmd: Command,
     stdin_bytes: Option<Vec<u8>>,

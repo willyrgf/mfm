@@ -1,16 +1,100 @@
-//! `mfm-machine` public API contract (types + traits only).
+//! Public API contract for the MFM runtime.
+//!
+//! `mfm-machine` defines the stable identifiers, execution-plan types, context and IO
+//! abstractions, and storage interfaces used throughout the workspace. Runtime implementations
+//! live in unstable submodules such as [`runtime`] and [`live_io`], while the types in this file
+//! model the architectural contract described in `docs/redesign.md`.
+//!
+//! # Example
+//!
+//! ```rust
+//! use async_trait::async_trait;
+//! use mfm_machine::context::DynContext;
+//! use mfm_machine::errors::{ContextError, StateError};
+//! use mfm_machine::ids::{ContextKey, OpId, StateId};
+//! use mfm_machine::io::IoProvider;
+//! use mfm_machine::meta::{DependencyStrategy, Idempotency, SideEffectKind, StateMeta, Tag};
+//! use mfm_machine::plan::{ExecutionPlan, StateGraph, StateNode};
+//! use mfm_machine::recorder::EventRecorder;
+//! use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
+//! use serde_json::Value;
+//! use std::sync::Arc;
+//!
+//! struct ExampleState;
+//!
+//! #[async_trait]
+//! impl State for ExampleState {
+//!     fn meta(&self) -> StateMeta {
+//!         StateMeta {
+//!             tags: vec![Tag("report".to_string())],
+//!             depends_on: Vec::new(),
+//!             depends_on_strategy: DependencyStrategy::Latest,
+//!             side_effects: SideEffectKind::Pure,
+//!             idempotency: Idempotency::None,
+//!         }
+//!     }
+//!
+//!     async fn handle(
+//!         &self,
+//!         _ctx: &mut dyn DynContext,
+//!         _io: &mut dyn IoProvider,
+//!         _rec: &mut dyn EventRecorder,
+//!     ) -> Result<StateOutcome, StateError> {
+//!         Ok(StateOutcome {
+//!             snapshot: SnapshotPolicy::OnSuccess,
+//!         })
+//!     }
+//! }
+//!
+//! struct NullContext;
+//!
+//! impl DynContext for NullContext {
+//!     fn read(&self, _key: &ContextKey) -> Result<Option<Value>, ContextError> {
+//!         Ok(None)
+//!     }
+//!
+//!     fn write(&mut self, _key: ContextKey, _value: Value) -> Result<(), ContextError> {
+//!         Ok(())
+//!     }
+//!
+//!     fn delete(&mut self, _key: &ContextKey) -> Result<(), ContextError> {
+//!         Ok(())
+//!     }
+//!
+//!     fn dump(&self) -> Result<Value, ContextError> {
+//!         Ok(serde_json::json!({}))
+//!     }
+//! }
+//!
+//! let _context = NullContext;
+//! let plan = ExecutionPlan {
+//!     op_id: OpId::must_new("portfolio_snapshot"),
+//!     graph: StateGraph {
+//!         states: vec![StateNode {
+//!             id: StateId::must_new("machine.main.report"),
+//!             state: Arc::new(ExampleState),
+//!         }],
+//!         edges: Vec::new(),
+//!     },
+//! };
+//!
+//! assert_eq!(plan.op_id.as_str(), "portfolio_snapshot");
+//! ```
 //!
 //! Source of truth: `docs/redesign.md` Appendix C.1.
+#![warn(missing_docs)]
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Stable identifier types shared by manifests, plans, events, and persisted records.
 pub mod ids {
     use super::*;
     use std::fmt;
 
+    /// Error returned when an identifier fails the runtime naming contract.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct IdValidationError {
         kind: &'static str,
@@ -94,6 +178,7 @@ pub mod ids {
     }
 
     impl OpId {
+        /// Creates an operation identifier after validating the naming contract.
         pub fn new(value: impl Into<String>) -> Result<Self, IdValidationError> {
             let value = value.into();
             if !is_valid_id_segment(&value) {
@@ -102,10 +187,12 @@ pub mod ids {
             Ok(Self(value))
         }
 
+        /// Creates an [`OpId`] and panics if the value is invalid.
         pub fn must_new(value: impl Into<String>) -> Self {
             Self::new(value).expect("op id must satisfy ^[a-z][a-z0-9_]{0,62}$")
         }
 
+        /// Returns the validated identifier as a borrowed string slice.
         pub fn as_str(&self) -> &str {
             &self.0
         }
@@ -175,6 +262,7 @@ pub mod ids {
     }
 
     impl StateId {
+        /// Creates a state identifier after validating the `<machine>.<step>.<state>` shape.
         pub fn new(value: impl Into<String>) -> Result<Self, IdValidationError> {
             let value = value.into();
             if !validate_state_id(&value) {
@@ -183,10 +271,12 @@ pub mod ids {
             Ok(Self(value))
         }
 
+        /// Creates a [`StateId`] and panics if the value is invalid.
         pub fn must_new(value: impl Into<String>) -> Self {
             Self::new(value).expect("state id must satisfy <machine_id>.<step_id>.<state_local_id>")
         }
 
+        /// Returns the validated identifier as a borrowed string slice.
         pub fn as_str(&self) -> &str {
             &self.0
         }
@@ -282,6 +372,7 @@ pub mod ids {
     }
 }
 
+/// Marker traits for canonical JSON hashing policy.
 pub mod canonical {
     /// Canonical JSON policy marker.
     ///
@@ -293,6 +384,7 @@ pub mod canonical {
     pub trait CanonicalJsonPolicy: Send + Sync {}
 }
 
+/// Run configuration types that shape execution, replay, and provenance behavior.
 pub mod config {
     use super::*;
     use crate::ids::OpId;
@@ -301,27 +393,38 @@ pub mod config {
     /// Whether a run is allowed to perform live IO or must replay from recorded facts/artifacts.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum IoMode {
+        /// Execute side effects through live transports and record replay inputs.
         Live,
+        /// Disallow live side effects and resolve deterministic IO from recorded facts.
         Replay,
     }
 
     /// Controls domain event verbosity. Kernel events are always emitted.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum EventProfile {
+        /// Emit only the minimal domain-event surface alongside kernel events.
         Minimal,
+        /// Emit the default domain-event surface for normal operation.
         Normal,
+        /// Emit the richest built-in domain-event surface.
         Verbose,
+        /// Use an operation-specific profile string.
         Custom(String),
     }
 
     /// Backoff policy for retryable errors.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum BackoffPolicy {
+        /// Retry after the same delay for every attempt.
         Fixed {
+            /// Delay applied before each retry.
             delay: Duration,
         },
+        /// Increase the retry delay between attempts until reaching a cap.
         Exponential {
+            /// Base delay used for the first exponential retry step.
             base_delay: Duration,
+            /// Maximum retry delay once the exponential curve saturates.
             max_delay: Duration,
         },
     }
@@ -329,16 +432,20 @@ pub mod config {
     /// Retry policy for retryable errors (including replay missing-fact errors if configured retryable).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct RetryPolicy {
+        /// Maximum number of total attempts, including the first execution.
         pub max_attempts: u32,
+        /// Backoff policy applied between retry attempts.
         pub backoff: BackoffPolicy,
     }
 
     /// Execution mode.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum ExecutionMode {
+        /// Run one ready state at a time.
         Sequential,
         /// Explicit fan-out/join model. Avoids concurrent writes to shared context.
         FanOutJoin {
+            /// Maximum number of states the executor may run concurrently.
             max_concurrency: u32,
         },
     }
@@ -348,6 +455,7 @@ pub mod config {
     /// Default is `AfterEveryState` to keep resume semantics simple (no replay required on resume).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum ContextCheckpointing {
+        /// Persist a fresh context snapshot after every state transition.
         AfterEveryState,
         /// Reserved for future: periodic/tag-based checkpointing policies.
         Custom(String),
@@ -356,10 +464,15 @@ pub mod config {
     /// Run-level execution configuration (policy).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct RunConfig {
+        /// Whether execution uses live IO or replay-only IO.
         pub io_mode: IoMode,
+        /// Retry policy applied to retryable failures.
         pub retry_policy: RetryPolicy,
+        /// Desired domain-event verbosity profile.
         pub event_profile: EventProfile,
+        /// Scheduler policy used to execute ready states.
         pub execution_mode: ExecutionMode,
+        /// Policy for persisting run-level context snapshots.
         pub context_checkpointing: ContextCheckpointing,
 
         /// If true, ReplayIo MissingFact errors are retryable (default false).
@@ -376,6 +489,7 @@ pub mod config {
         pub nix_flake_allowlist: Vec<String>,
     }
 
+    /// Returns the default allowlist for `nix.exec` flake resolution.
     pub fn default_nix_flake_allowlist() -> Vec<String> {
         vec!["github:willyrgf/mfm".to_string()]
     }
@@ -384,25 +498,37 @@ pub mod config {
     /// Note: `input_params` MUST be canonical-JSON hashable and MUST NOT contain secrets.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct RunManifest {
+        /// Stable identifier for the operation being executed.
         pub op_id: OpId,
+        /// Operation version string included in the manifest hash.
         pub op_version: String,
+        /// Canonical JSON input parameters for the operation.
         pub input_params: serde_json::Value,
+        /// Run policy captured as part of the manifest.
         pub run_config: RunConfig,
+        /// Build metadata used for reproducibility and provenance.
         pub build: BuildProvenance,
     }
 
     /// Build provenance (reproducibility metadata).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct BuildProvenance {
+        /// Git commit of the build, if available.
         pub git_commit: Option<String>,
+        /// Hash of `Cargo.lock`, if captured by the caller.
         pub cargo_lock_hash: Option<String>,
+        /// Hash of `flake.lock`, if captured by the caller.
         pub flake_lock_hash: Option<String>,
+        /// Rust compiler version used to build the operation.
         pub rustc_version: Option<String>,
+        /// Target triple of the built artifact.
         pub target_triple: Option<String>,
+        /// Environment-variable names intentionally allowed into provenance.
         pub env_allowlist: Vec<String>,
     }
 }
 
+/// Metadata used to classify states and express recovery or idempotency intent.
 pub mod meta {
     use super::*;
 
@@ -414,23 +540,31 @@ pub mod meta {
     /// Standard tags (stable identifiers).
     /// Implementations may provide helpers, but these string constants are the contract.
     pub mod standard_tags {
-        // kind tags
+        /// Marks a configuration or validation state.
         pub const CONFIG: &str = "config";
+        /// Marks a state whose primary job is to retrieve external data.
         pub const FETCH_DATA: &str = "fetch_data";
+        /// Marks a pure computation or transformation state.
         pub const COMPUTE: &str = "compute";
+        /// Marks a state that performs or prepares executable work.
         pub const EXECUTE: &str = "execute";
+        /// Marks a reporting or output-producing state.
         pub const REPORT: &str = "report";
 
-        // behavior tags
+        /// Marks a state that applies an external side effect.
         pub const APPLY_SIDE_EFFECT: &str = "apply_side_effect";
+        /// Marks a state whose behavior is not purely deterministic.
         pub const IMPURE: &str = "impure";
     }
 
     /// Side-effect classification (affects replay and retry semantics).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum SideEffectKind {
+        /// The state is pure and does not interact with external systems.
         Pure,
+        /// The state performs read-only IO.
         ReadOnlyIo,
+        /// The state applies a side effect to an external system.
         ApplySideEffect,
     }
 
@@ -438,15 +572,20 @@ pub mod meta {
     /// Key semantics: stable value used for dedupe (e.g., tx intent hash).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum Idempotency {
+        /// The state does not declare an idempotency key.
         None,
+        /// Stable key used to deduplicate externally visible effects.
         Key(String),
     }
 
     /// Strategy for choosing a recovery point among dependency candidates.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum DependencyStrategy {
+        /// Recover from the latest matching dependency candidate.
         Latest,
+        /// Recover from the earliest matching dependency candidate.
         Earliest,
+        /// Recover from the latest dependency candidate that completed successfully.
         LatestSuccessful,
     }
 
@@ -457,17 +596,22 @@ pub mod meta {
     /// - Execution correctness is governed by explicit plan edges.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct StateMeta {
+        /// Classification tags applied to the state.
         pub tags: Vec<Tag>,
 
         /// Optional authoring-time dependency hints expressed as tags.
         pub depends_on: Vec<Tag>,
+        /// Strategy used when resolving tag-based dependency hints.
         pub depends_on_strategy: DependencyStrategy,
 
+        /// Side-effect classification used by replay and retry policy.
         pub side_effects: SideEffectKind,
+        /// Declared idempotency behavior for the state.
         pub idempotency: Idempotency,
     }
 }
 
+/// Structured error types used by state handlers, storage layers, and the engine.
 pub mod errors {
     use super::*;
     use crate::ids::{ErrorCode, StateId};
@@ -478,29 +622,43 @@ pub mod errors {
     /// Error category used for stable handling and policies.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum ErrorCategory {
+        /// Failed while parsing user input or structured payloads.
         ParsingInput,
+        /// Failed while interacting with on-chain state or transactions.
         OnChain,
+        /// Failed while interacting with off-chain systems or services.
         OffChain,
+        /// Failed while talking to RPC-like endpoints.
         Rpc,
+        /// Failed while reading or writing persisted state.
         Storage,
+        /// Failed while reading or mutating execution context.
         Context,
+        /// Failed for an uncategorized reason.
         Unknown,
     }
 
     /// Structured error info (canonical-JSON compatible; MUST NOT contain secrets).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ErrorInfo {
+        /// Stable machine-readable error code.
         pub code: ErrorCode,
+        /// High-level category for policy decisions and display.
         pub category: ErrorCategory,
+        /// Whether the operation may be retried safely.
         pub retryable: bool,
+        /// Human-readable message safe to persist and display.
         pub message: String,
+        /// Optional structured details that must remain secret-free.
         pub details: Option<serde_json::Value>,
     }
 
     /// Errors returned by state handlers (no secrets).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct StateError {
+        /// State identifier, if the failure can be attributed to a specific planned state.
         pub state_id: Option<StateId>,
+        /// Structured error payload safe for persistence.
         pub info: ErrorInfo,
     }
 
@@ -510,43 +668,64 @@ pub mod errors {
         /// Replay was asked to perform deterministic IO without a fact key.
         MissingFactKey(ErrorInfo),
 
+        /// A requested recorded fact was not found.
         MissingFact {
+            /// Missing fact key.
             key: crate::ids::FactKey,
+            /// Structured details about the lookup failure.
             info: ErrorInfo,
         },
+        /// The underlying transport returned an error.
         Transport(ErrorInfo),
+        /// The underlying transport reported a rate limit.
         RateLimited(ErrorInfo),
+        /// Any other IO failure that does not fit the more specific variants.
         Other(ErrorInfo),
     }
 
     /// Context errors.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum ContextError {
+        /// A requested context key was not present.
         MissingKey {
+            /// Missing context key.
             key: crate::ids::ContextKey,
+            /// Structured details about the lookup failure.
             info: ErrorInfo,
         },
+        /// JSON serialization or deserialization failed.
         Serialization(ErrorInfo),
+        /// Any other context failure.
         Other(ErrorInfo),
     }
 
     /// Storage errors (event store / artifact store).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum StorageError {
+        /// Append failed because the optimistic concurrency expectation was stale.
         Concurrency(ErrorInfo),
+        /// A requested record or artifact was not found.
         NotFound(ErrorInfo),
+        /// Persisted data existed but failed integrity or shape checks.
         Corruption(ErrorInfo),
+        /// Any other storage failure.
         Other(ErrorInfo),
     }
 
     /// Run-level errors from the engine.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum RunError {
+        /// The supplied execution plan violated structural invariants.
         InvalidPlan(ErrorInfo),
+        /// The run failed because a storage backend returned an error.
         Storage(StorageError),
+        /// The run failed because the execution context returned an error.
         Context(ContextError),
+        /// The run failed because the IO provider returned an error.
         Io(IoError),
+        /// The run failed because a state handler returned an error.
         State(StateError),
+        /// Any other run-level failure.
         Other(ErrorInfo),
     }
 
@@ -575,6 +754,7 @@ pub mod errors {
     }
 }
 
+/// Context traits for reading, mutating, and snapshotting state-machine data.
 pub mod context {
     use super::*;
     use crate::errors::ContextError;
@@ -586,8 +766,11 @@ pub mod context {
     /// - `dump()` returns a **full snapshot** of current state (canonical JSON object recommended).
     /// - Implementations MUST ensure deterministic serialization of snapshot artifacts.
     pub trait DynContext: Send {
+        /// Reads a raw JSON value from context.
         fn read(&self, key: &ContextKey) -> Result<Option<serde_json::Value>, ContextError>;
+        /// Writes a raw JSON value into context.
         fn write(&mut self, key: ContextKey, value: serde_json::Value) -> Result<(), ContextError>;
+        /// Deletes a context entry if it exists.
         fn delete(&mut self, key: &ContextKey) -> Result<(), ContextError>;
 
         /// Full snapshot of current context state.
@@ -596,11 +779,13 @@ pub mod context {
 
     /// Typed convenience extension (no default bodies; implementations may blanket-impl internally).
     pub trait TypedContextExt {
+        /// Reads a context value and deserializes it into `T`.
         fn read_typed<T: serde::de::DeserializeOwned>(
             &self,
             key: &ContextKey,
         ) -> Result<Option<T>, ContextError>;
 
+        /// Serializes `value` and writes it into context.
         fn write_typed<T: Serialize>(
             &mut self,
             key: ContextKey,
@@ -648,6 +833,7 @@ pub mod context {
     }
 }
 
+/// Event types emitted by the engine and by state handlers during a run.
 pub mod events {
     use super::*;
     use crate::errors::StateError;
@@ -655,46 +841,68 @@ pub mod events {
 
     /// Recommended stable `DomainEvent.name` values.
     pub const DOMAIN_EVENT_FACT_RECORDED: &str = "fact_recorded";
+    /// Recommended `DomainEvent.name` for artifact-write notifications.
     pub const DOMAIN_EVENT_ARTIFACT_WRITTEN: &str = "artifact_written";
+    /// Recommended `DomainEvent.name` for operation boundary markers.
     pub const DOMAIN_EVENT_OP_BOUNDARY: &str = "op_boundary";
+    /// Recommended `DomainEvent.name` for child-run spawn notifications.
     pub const DOMAIN_EVENT_CHILD_RUN_SPAWNED: &str = "child_run_spawned";
+    /// Recommended `DomainEvent.name` for child-run completion notifications.
     pub const DOMAIN_EVENT_CHILD_RUN_COMPLETED: &str = "child_run_completed";
 
     /// Run completion status.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum RunStatus {
+        /// The run completed successfully.
         Completed,
+        /// The run terminated because a state failed.
         Failed,
+        /// The run was cancelled before completion.
         Cancelled,
     }
 
     /// Kernel event variants required for recovery/resume correctness.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum KernelEvent {
+        /// Marks the start of a run and records its manifest and initial snapshot.
         RunStarted {
+            /// Operation identifier for the run.
             op_id: OpId,
+            /// Manifest artifact identifier.
             manifest_id: ArtifactId,
             /// Snapshot of initial context at run start.
             initial_snapshot_id: ArtifactId,
         },
+        /// Marks entry into a state attempt.
         StateEntered {
+            /// Planned state being entered.
             state_id: StateId,
+            /// Zero-based attempt number for this state.
             attempt: u32,
             /// Snapshot the attempt starts from (resume/retry boundary).
             base_snapshot_id: ArtifactId,
         },
+        /// Marks successful completion of a state.
         StateCompleted {
+            /// State that completed successfully.
             state_id: StateId,
+            /// Context snapshot captured after completion.
             context_snapshot_id: ArtifactId,
         },
+        /// Marks failure of a state attempt.
         StateFailed {
+            /// State that failed.
             state_id: StateId,
+            /// Structured failure payload.
             error: StateError,
             /// Diagnostic-only snapshot (must not be used as a resume boundary).
             failure_snapshot_id: Option<ArtifactId>,
         },
+        /// Marks the terminal status of the run.
         RunCompleted {
+            /// Final run status.
             status: RunStatus,
+            /// Final context snapshot, if one was produced.
             final_snapshot_id: Option<ArtifactId>,
         },
     }
@@ -707,62 +915,88 @@ pub mod events {
     /// - large payloads SHOULD be stored as artifacts and referenced via `payload_ref`
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct DomainEvent {
+        /// Stable event name defined by the operation or a shared convention.
         pub name: String,
+        /// Canonical JSON payload safe to persist.
         pub payload: serde_json::Value,
+        /// Optional artifact reference for large payloads.
         pub payload_ref: Option<ArtifactId>,
     }
 
+    /// Envelope type used by event stores.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum Event {
+        /// Engine-level event required for resume and recovery.
         Kernel(KernelEvent),
+        /// Operation-defined event emitted during state handling.
         Domain(DomainEvent),
     }
 
     /// Envelope stored in the event store.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct EventEnvelope {
+        /// Run to which this event belongs.
         pub run_id: RunId,
+        /// Monotonic per-run sequence number.
         pub seq: u64,
 
         /// Informational timestamp; must not be required for deterministic replay semantics.
         pub ts_millis: Option<u64>,
 
+        /// Event payload stored at this sequence number.
         pub event: Event,
     }
 
     /// Recommended standard domain event payloads (not required by engine).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct FactRecorded {
+        /// Fact key that was recorded.
         pub key: crate::ids::FactKey,
+        /// Artifact containing the recorded payload.
         pub payload_id: ArtifactId,
+        /// Operation-defined metadata about the fact.
         pub meta: serde_json::Value,
     }
 
+    /// Recommended payload for domain events that announce artifact writes.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ArtifactWritten {
+        /// Artifact identifier that was written.
         pub artifact_id: ArtifactId,
+        /// Kind assigned to the written artifact.
         pub kind: crate::stores::ArtifactKind,
+        /// Operation-defined metadata about the artifact.
         pub meta: serde_json::Value,
     }
 
+    /// Recommended payload for domain events that mark op boundaries.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct OpBoundary {
+        /// Nested operation path being reported.
         pub op_path: OpPath,
+        /// Boundary phase, typically values such as `started` or `completed`.
         pub phase: String, // e.g. "started" | "completed"
     }
 
     /// Reserved for later expansion (nested machines).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ChildRunSpawned {
+        /// Parent run that spawned the child.
         pub parent_run_id: RunId,
+        /// Newly created child run identifier.
         pub child_run_id: RunId,
+        /// Manifest artifact for the child run.
         pub child_manifest_id: ArtifactId,
     }
 
+    /// Recommended payload for domain events that announce child-run completion.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ChildRunCompleted {
+        /// Child run that finished.
         pub child_run_id: RunId,
+        /// Final status of the child run.
         pub status: RunStatus,
+        /// Final snapshot produced by the child run, if any.
         pub final_snapshot_id: Option<ArtifactId>,
     }
 
@@ -795,6 +1029,7 @@ pub mod events {
     }
 }
 
+/// IO request and response abstractions used by live and replay providers.
 pub mod io {
     use super::*;
     use crate::errors::IoError;
@@ -827,6 +1062,7 @@ pub mod io {
     /// IO provider (LiveIo/ReplayIo are implementations).
     #[async_trait]
     pub trait IoProvider: Send {
+        /// Executes an IO request and returns the structured response.
         async fn call(&mut self, call: IoCall) -> Result<IoResult, IoError>;
 
         /// Persist a deterministic structured value directly as a fact payload.
@@ -848,6 +1084,7 @@ pub mod io {
     }
 }
 
+/// Traits for recording operation-defined domain events during state execution.
 pub mod recorder {
     use super::*;
     use crate::errors::RunError;
@@ -861,11 +1098,14 @@ pub mod recorder {
     /// - A state attempt MAY span multiple transactional appends; each append is atomic.
     #[async_trait]
     pub trait EventRecorder: Send {
+        /// Emits a single domain event.
         async fn emit(&mut self, event: DomainEvent) -> Result<(), RunError>;
+        /// Emits multiple domain events in order.
         async fn emit_many(&mut self, events: Vec<DomainEvent>) -> Result<(), RunError>;
     }
 }
 
+/// State trait and outcome types used by planned execution nodes.
 pub mod state {
     use super::*;
     use crate::context::DynContext;
@@ -877,13 +1117,18 @@ pub mod state {
     /// Indicates whether the engine should snapshot context after the state.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum SnapshotPolicy {
+        /// Do not request an additional snapshot for this state outcome.
         Never,
+        /// Request a snapshot only when the state succeeds.
         OnSuccess,
+        /// Request a snapshot even if the state fails.
         Always,
     }
 
+    /// Result returned by a successful state handler.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct StateOutcome {
+        /// Snapshot hint returned by the state handler.
         pub snapshot: SnapshotPolicy,
     }
 
@@ -894,8 +1139,10 @@ pub mod state {
     /// State behavior. States do NOT own their `StateId` — IDs are assigned by the plan.
     #[async_trait]
     pub trait State: Send + Sync {
+        /// Returns metadata used for planning, replay, and policy decisions.
         fn meta(&self) -> StateMeta;
 
+        /// Executes the state against the provided context, IO provider, and event recorder.
         async fn handle(
             &self,
             ctx: &mut dyn DynContext,
@@ -904,9 +1151,11 @@ pub mod state {
         ) -> Result<StateOutcome, StateError>;
     }
 
+    /// Shared trait-object form used by planners and executors.
     pub type DynState = Arc<dyn State>;
 }
 
+/// Types that represent the executable state graph for a run.
 pub mod plan {
     use super::*;
     use crate::ids::{OpId, StateId};
@@ -915,79 +1164,109 @@ pub mod plan {
     /// An edge `from -> to` means `from` must complete before `to` can run.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct DependencyEdge {
+        /// Upstream state that must complete first.
         pub from: StateId,
+        /// Downstream state that depends on `from`.
         pub to: StateId,
     }
 
+    /// Planned state plus the runtime implementation that will execute it.
     #[derive(Clone)]
     pub struct StateNode {
+        /// Stable identifier assigned by the planner.
         pub id: StateId,
+        /// Runtime implementation invoked for this node.
         pub state: DynState,
     }
 
     /// A state graph is the executable structure derived from ops/pipelines.
     #[derive(Clone)]
     pub struct StateGraph {
+        /// Planned states included in the graph.
         pub states: Vec<StateNode>,
+        /// Dependency edges connecting those states.
         pub edges: Vec<DependencyEdge>,
     }
 
+    /// Operation-specific executable plan passed to the engine.
     #[derive(Clone)]
     pub struct ExecutionPlan {
+        /// Operation identifier associated with this plan.
         pub op_id: OpId,
+        /// Executable state graph for the run.
         pub graph: StateGraph,
     }
 
     /// Plan validation errors (fail-fast).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum PlanValidationError {
+        /// The plan contained no states.
         EmptyPlan,
+        /// A state identifier appeared more than once.
         DuplicateStateId {
+            /// Duplicated state identifier.
             state_id: StateId,
         },
+        /// A dependency edge referenced a state that does not exist in the graph.
         MissingStateForEdge {
+            /// Referenced state that could not be found.
             missing: StateId,
         },
+        /// The graph contained a cycle.
         CircularDependency {
+            /// State identifiers participating in the detected cycle.
             cycle: Vec<StateId>,
         },
 
         /// Optional: if planners derive edges from tag dependencies, they may validate those too.
         DanglingDependencyTag {
+            /// State whose dependency hint could not be resolved.
             state_id: StateId,
+            /// Missing tag referenced by that dependency hint.
             missing_tag: crate::meta::Tag,
         },
     }
 
+    /// Validator interface for rejecting malformed execution plans before a run starts.
     pub trait PlanValidator: Send + Sync {
+        /// Validates the supplied execution plan.
         fn validate(&self, plan: &ExecutionPlan) -> Result<(), PlanValidationError>;
     }
 }
 
+/// Storage traits for append-only events and immutable artifacts.
 pub mod stores {
     use super::*;
     use crate::errors::StorageError;
     use crate::events::EventEnvelope;
     use crate::ids::{ArtifactId, RunId};
 
+    /// Artifact classification used for retention, validation, and output handling.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum ArtifactKind {
+        /// Run manifest artifact.
         Manifest,
+        /// Serialized context snapshot artifact.
         ContextSnapshot,
+        /// Recorded fact payload artifact.
         FactPayload,
         /// Encrypted secret payload (ciphertext bytes only).
         ///
         /// Secret plaintext MUST NOT be stored directly in the artifact store.
         SecretPayload,
+        /// User-facing output artifact.
         Output,
+        /// Operation- or backend-specific artifact kind.
         Other(String),
     }
 
     /// Append-only event store with optimistic concurrency.
     #[async_trait]
     pub trait EventStore: Send + Sync {
+        /// Returns the current head sequence for `run_id`.
         async fn head_seq(&self, run_id: RunId) -> Result<u64, StorageError>;
 
+        /// Appends events atomically if `expected_seq` matches the current head.
         async fn append(
             &self,
             run_id: RunId,
@@ -995,6 +1274,7 @@ pub mod stores {
             events: Vec<EventEnvelope>,
         ) -> Result<u64, StorageError>;
 
+        /// Reads a contiguous event range starting at `from_seq`.
         async fn read_range(
             &self,
             run_id: RunId,
@@ -1006,13 +1286,17 @@ pub mod stores {
     /// Immutable, content-addressed artifact store.
     #[async_trait]
     pub trait ArtifactStore: Send + Sync {
+        /// Stores bytes under a content-derived identifier and returns that identifier.
         async fn put(&self, kind: ArtifactKind, bytes: Vec<u8>)
             -> Result<ArtifactId, StorageError>;
+        /// Loads the bytes for an existing artifact identifier.
         async fn get(&self, id: &ArtifactId) -> Result<Vec<u8>, StorageError>;
+        /// Returns whether an artifact exists without loading its bytes.
         async fn exists(&self, id: &ArtifactId) -> Result<bool, StorageError>;
     }
 }
 
+/// Engine traits and input/output types for starting or resuming runs.
 pub mod engine {
     use super::*;
     use crate::config::{RunConfig, RunManifest};
@@ -1025,39 +1309,56 @@ pub mod engine {
     /// Current run phase (observability).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum RunPhase {
+        /// The run is still executing.
         Running,
+        /// The run completed successfully.
         Completed,
+        /// The run ended because of a failure.
         Failed,
+        /// The run was cancelled.
         Cancelled,
     }
 
+    /// Summary returned by the execution engine after start or resume.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct RunResult {
+        /// Run identifier that was started or resumed.
         pub run_id: RunId,
+        /// Final or current phase of the run.
         pub phase: RunPhase,
+        /// Final context snapshot, if one exists.
         pub final_snapshot_id: Option<ArtifactId>,
     }
 
     /// Inputs required to start a run.
     pub struct StartRun {
+        /// Manifest content for the run.
         pub manifest: RunManifest,
+        /// Content-addressed manifest identifier.
         pub manifest_id: ArtifactId,
+        /// Execution plan derived for the manifest.
         pub plan: ExecutionPlan,
+        /// Effective run configuration used by the engine.
         pub run_config: RunConfig,
+        /// Initial context snapshot used as the run's starting point.
         pub initial_context: Box<dyn DynContext>,
     }
 
     /// Store bundle passed to the engine.
     #[derive(Clone)]
     pub struct Stores {
+        /// Event store used for append-only kernel and domain events.
         pub events: Arc<dyn EventStore>,
+        /// Artifact store used for manifests, snapshots, facts, and outputs.
         pub artifacts: Arc<dyn ArtifactStore>,
     }
 
     /// Execution engine interface.
     #[async_trait]
     pub trait ExecutionEngine: Send + Sync {
+        /// Starts a new run from the supplied manifest, plan, and initial context.
         async fn start(&self, stores: Stores, run: StartRun) -> Result<RunResult, RunError>;
+        /// Resumes a previously started run from persisted state.
         async fn resume(&self, stores: Stores, run_id: RunId) -> Result<RunResult, RunError>;
     }
 }

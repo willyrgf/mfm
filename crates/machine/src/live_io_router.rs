@@ -49,10 +49,12 @@ pub struct RouterLiveIoTransportFactory {
 }
 
 impl RouterLiveIoTransportFactory {
+    /// Creates a router from an already-validated namespace-group map.
     pub fn new(routes: HashMap<String, Arc<dyn LiveIoTransportFactory>>) -> Self {
         Self { routes }
     }
 
+    /// Builds a router from factories, rejecting empty or duplicate namespace groups.
     pub fn from_factories(
         factories: Vec<Arc<dyn LiveIoTransportFactory>>,
     ) -> Result<Self, RegistryError> {
@@ -74,6 +76,7 @@ impl RouterLiveIoTransportFactory {
         Ok(Self { routes })
     }
 
+    /// Creates a router from all factories currently registered in `registry`.
     pub fn from_registry(registry: &dyn TransportRegistry) -> Self {
         let mut routes = HashMap::new();
         for factory in registry.all() {
@@ -82,6 +85,7 @@ impl RouterLiveIoTransportFactory {
         Self { routes }
     }
 
+    /// Adds or replaces a route for the supplied namespace group.
     pub fn with_route(
         mut self,
         group: impl Into<String>,

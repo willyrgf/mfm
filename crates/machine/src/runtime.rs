@@ -33,12 +33,21 @@ pub use child_runs::ChildRunLiveIoTransportFactory;
 
 const CODE_UNSUPPORTED_EXECUTION_MODE: &str = "unsupported_execution_mode";
 
+/// Resolves an executable plan from a validated run manifest.
+///
+/// Runtime entry points use this trait to recreate a plan on `start` and `resume`
+/// without hard-coding domain planners into the engine.
 pub trait PlanResolver: Send + Sync {
+    /// Builds the execution plan for `manifest`.
     fn resolve(&self, manifest: &RunManifest) -> Result<ExecutionPlan, RunError>;
 }
 
+/// Test-only hooks that let integration tests interrupt engine progress at known points.
 #[derive(Clone, Default)]
 pub struct EngineFailpoints {
+    /// Stops the next state attempt after the handler returns but before the engine advances.
+    ///
+    /// The flag is single-use: once observed, it is reset to `false`.
     pub stop_after_handler_once: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -49,6 +58,10 @@ impl EngineFailpoints {
     }
 }
 
+/// Default runtime implementation for the unstable v4 execution engine.
+///
+/// The engine validates the run contract, rehydrates facts from prior events, and
+/// executes states in topological order with retry/resume semantics.
 #[derive(Clone)]
 pub struct DefaultExecutionEngine {
     resolver: Arc<dyn PlanResolver>,
@@ -57,6 +70,7 @@ pub struct DefaultExecutionEngine {
 }
 
 impl DefaultExecutionEngine {
+    /// Creates an engine that resolves plans with `resolver` and rejects live IO by default.
     pub fn new(resolver: Arc<dyn PlanResolver>) -> Self {
         Self {
             resolver,
@@ -65,11 +79,13 @@ impl DefaultExecutionEngine {
         }
     }
 
+    /// Installs the live IO transport factory used for state execution in live mode.
     pub fn with_live_transport_factory(mut self, factory: Arc<dyn LiveIoTransportFactory>) -> Self {
         self.live_transport_factory = factory;
         self
     }
 
+    /// Enables test failpoints for the returned engine instance.
     pub fn with_failpoints(mut self, failpoints: EngineFailpoints) -> Self {
         self.failpoints = Some(failpoints);
         self

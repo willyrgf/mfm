@@ -1,7 +1,20 @@
-//! Test harnesses for `mfm-machine` trait contracts.
+#![warn(missing_docs)]
+//! Shared contract tests for `mfm-machine` storage traits.
 //!
-//! This crate is intentionally tiny and depends only on `mfm-machine` so storage backends can
-//! share correctness tests without creating dependency cycles.
+//! This crate stays intentionally small so storage backend crates can reuse the same
+//! conformance checks without creating dependency cycles back into the runtime.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_machine::stores::ArtifactStore;
+//! use mfm_machine_test_support::{artifact_store_contract_tests, init_test_observability};
+//!
+//! async fn assert_artifact_store(store: &dyn ArtifactStore) {
+//!     init_test_observability();
+//!     artifact_store_contract_tests(store).await;
+//! }
+//! ```
 
 use std::sync::Once;
 
@@ -38,6 +51,11 @@ where
     }
 }
 
+/// Initializes a process-wide tracing subscriber for integration and contract tests.
+///
+/// The filter resolution order matches the repository test contract:
+/// `MFM_TEST_LOG_FILTER`, `MFM_LOG`, `LOG_LEVEL`, `RUST_LOG`, then `MFM_TEST_LOG`.
+/// Repeated calls are harmless and only the first invocation installs the subscriber.
 pub fn init_test_observability() {
     static INIT: Once = Once::new();
 
@@ -55,12 +73,23 @@ pub fn init_test_observability() {
     });
 }
 
+/// Runs the shared `ArtifactStore` contract suite against a backend.
+///
+/// The suite currently verifies:
+/// - content-addressed writes
+/// - round-trip reads
+/// - missing-artifact behavior for `exists` and `get`
 pub async fn artifact_store_contract_tests(store: &dyn ArtifactStore) {
     put_get_roundtrip(store).await;
     content_addressed(store).await;
     exists_and_not_found(store).await;
 }
 
+/// Runs the shared `EventStore` contract suite against a backend.
+///
+/// The suite currently verifies:
+/// - append/read round trips
+/// - optimistic concurrency via `expected_seq`
 pub async fn event_store_contract_tests(store: &dyn EventStore) {
     append_and_read(store).await;
     expected_seq_concurrency(store).await;

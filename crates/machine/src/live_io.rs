@@ -33,12 +33,19 @@ fn io_other(code: &'static str, category: ErrorCategory, message: &'static str) 
     IoError::Other(info(code, category, message))
 }
 
+/// In-memory index of durable `FactKey -> ArtifactId` bindings.
+///
+/// The engine rebuilds this index from prior domain events before executing a run.
 #[derive(Clone, Default)]
 pub struct FactIndex {
     inner: Arc<Mutex<HashMap<FactKey, ArtifactId>>>,
 }
 
 impl FactIndex {
+    /// Rebuilds the durable fact bindings recorded in an event stream.
+    ///
+    /// Only the first durable binding for a given key is kept, matching the
+    /// single-assignment contract used by live/replay IO.
     pub fn from_event_stream(stream: &[EventEnvelope]) -> Self {
         let mut m = HashMap::new();
         for e in stream {
@@ -62,10 +69,15 @@ impl FactIndex {
         }
     }
 
+    /// Returns the currently bound payload id for `key`, if one exists.
     pub async fn get(&self, key: &FactKey) -> Option<ArtifactId> {
         self.inner.lock().await.get(key).cloned()
     }
 
+    /// Binds `key` to `payload_id` only if the key is not already bound.
+    ///
+    /// Returns the effective payload id together with a flag indicating whether a
+    /// new binding was inserted.
     pub async fn bind_if_unset(&self, key: FactKey, payload_id: ArtifactId) -> (ArtifactId, bool) {
         let mut inner = self.inner.lock().await;
         match inner.get(&key) {
@@ -77,6 +89,10 @@ impl FactIndex {
         }
     }
 
+    /// Removes the binding for `key` only when it still points to `payload_id`.
+    ///
+    /// This is used to roll back optimistic in-memory bindings when durable
+    /// recording fails.
     pub async fn unbind_if_matches(&self, key: &FactKey, payload_id: &ArtifactId) -> bool {
         let mut inner = self.inner.lock().await;
         match inner.get(key) {
@@ -89,22 +105,32 @@ impl FactIndex {
     }
 }
 
+/// Namespace-specific live IO transport used by [`LiveIo`].
 #[async_trait]
 pub trait LiveIoTransport: Send {
+    /// Executes an opaque IO call and returns its canonical JSON response.
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError>;
 }
 
+/// Runtime context passed to a [`LiveIoTransportFactory`] when creating a transport.
 #[derive(Clone)]
 pub struct LiveIoEnv {
+    /// Stores used by the active run.
     pub stores: Stores,
+    /// Parent run identifier.
     pub run_id: RunId,
+    /// State currently issuing live IO.
     pub state_id: StateId,
+    /// Attempt number for the active state.
     pub attempt: u32,
 }
 
+/// Factory for creating transports for one namespace group.
 pub trait LiveIoTransportFactory: Send + Sync {
+    /// Returns the namespace group handled by transports built from this factory.
     fn namespace_group(&self) -> &str;
 
+    /// Creates a transport scoped to a particular run/state attempt.
     fn make(&self, env: LiveIoEnv) -> Box<dyn LiveIoTransport>;
 }
 
@@ -121,6 +147,7 @@ impl LiveIoTransport for UnimplementedLiveIoTransport {
     }
 }
 
+/// Fallback transport factory used when live IO is not configured.
 #[derive(Clone, Default)]
 pub struct UnimplementedLiveIoTransportFactory;
 
@@ -134,6 +161,7 @@ impl LiveIoTransportFactory for UnimplementedLiveIoTransportFactory {
     }
 }
 
+/// Live-mode IO provider that records deterministic facts for later replay.
 pub struct LiveIo {
     run_id: RunId,
     state_id: StateId,
@@ -146,6 +174,7 @@ pub struct LiveIo {
 }
 
 impl LiveIo {
+    /// Creates a live IO provider for a specific state attempt.
     pub fn new(
         run_id: RunId,
         state_id: StateId,
@@ -405,6 +434,7 @@ impl IoProvider for LiveIo {
 /// Design contract: fact bindings MUST be durable regardless of `EventProfile`.
 #[async_trait]
 pub trait FactRecorder: Send + Sync {
+    /// Persists the durable `FactKey -> payload_id` binding for replay and resume.
     async fn record_fact_binding(
         &self,
         key: FactKey,

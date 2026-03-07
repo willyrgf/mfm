@@ -1,4 +1,7 @@
 //! Engine-managed child runs.
+//!
+//! This module wraps a live IO transport factory with two extra namespaces that let
+//! a parent run spawn and await child runs through the same runtime invariants.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -301,6 +304,9 @@ impl ChildRunEngine {
     }
 }
 
+/// Live IO transport factory that adds child-run spawn and await namespaces.
+///
+/// It forwards all unrelated namespaces to the wrapped factory.
 #[derive(Clone)]
 pub struct ChildRunLiveIoTransportFactory {
     inner: Arc<dyn LiveIoTransportFactory>,
@@ -309,6 +315,9 @@ pub struct ChildRunLiveIoTransportFactory {
 }
 
 impl ChildRunLiveIoTransportFactory {
+    /// Wraps `inner` with child-run spawn/await handling backed by `resolver`.
+    ///
+    /// Calls outside the reserved child-run namespaces are forwarded to `inner`.
     pub fn new(resolver: Arc<dyn PlanResolver>, inner: Arc<dyn LiveIoTransportFactory>) -> Self {
         Self {
             inner: Arc::clone(&inner),

@@ -6,9 +6,12 @@
 
 use crate::ids::ArtifactId;
 
+/// Errors returned when a JSON value cannot participate in canonical hashing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CanonicalJsonError {
+    /// A floating-point number was encountered in a value that must be canonically hashable.
     FloatNotAllowed,
+    /// The value appears to contain secret-bearing fields and cannot be persisted or hashed.
     SecretsNotAllowed,
 }
 

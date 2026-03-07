@@ -28,6 +28,10 @@ fn info(
     }
 }
 
+/// [`IoProvider`] implementation that replays previously recorded facts instead of performing live IO.
+///
+/// Missing deterministic facts are surfaced as structured [`IoError`] values so resume and retry
+/// policy can stay consistent with the run configuration.
 pub struct ReplayIo {
     run_id: RunId,
     state_id: StateId,
@@ -39,6 +43,7 @@ pub struct ReplayIo {
 }
 
 impl ReplayIo {
+    /// Creates a replay provider scoped to a specific run, state attempt, and fact index.
     pub fn new(
         run_id: RunId,
         state_id: StateId,
