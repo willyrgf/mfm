@@ -1,7 +1,0 @@
-[profile.default]
-src = "contracts/src"
-out = "contracts/out"
-libs = ["contracts/lib"]
-optimizer = true
-optimizer_runs = 200
-solc = "0.8.24"
