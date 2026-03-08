@@ -1,7 +1,5 @@
 //! Helpers for parsing keystore transaction inputs and producing signed EIP-1559 payloads.
 
-use std::path::Path;
-
 use alloy_primitives::{keccak256, Address, PrimitiveSignature, B256};
 use mfm_evm_core::rlp::{
     rlp_encode_bytes, rlp_encode_list_preencoded, trim_leading_zero_bytes, u128_to_min_be,
@@ -13,9 +11,6 @@ use mfm_op_keystore::Keystore;
 use mfm_state_common::errors::state_error_with_state;
 use url::Url;
 use uuid::Uuid;
-
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 /// Error returned by keystore transaction helpers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,50 +273,6 @@ pub fn sign_eip1559_transaction(
         payload_hash: format!("0x{}", hex::encode(hash.as_slice())),
         raw_tx_hex: format!("0x{}", hex::encode(raw)),
     })
-}
-
-/// Writes a signed raw transaction to disk with restrictive permissions.
-pub fn write_raw_transaction_file(path: &Path, raw_tx_hex: &str) -> Result<(), KeystoreTxError> {
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-
-    #[cfg(unix)]
-    {
-        options.mode(0o600);
-    }
-
-    let mut file = options.open(path).map_err(|e| {
-        KeystoreTxError::new(
-            "FileWriteError",
-            format!("Failed to open output file '{}': {e}", path.display()),
-        )
-    })?;
-
-    use std::io::Write;
-    file.write_all(raw_tx_hex.as_bytes()).map_err(|e| {
-        KeystoreTxError::new(
-            "FileWriteError",
-            format!(
-                "Failed to write signed transaction file '{}': {e}",
-                path.display()
-            ),
-        )
-    })?;
-
-    #[cfg(unix)]
-    {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
-            KeystoreTxError::new(
-                "FileWriteError",
-                format!(
-                    "Failed to set output file permissions '{}': {e}",
-                    path.display()
-                ),
-            )
-        })?;
-    }
-
-    Ok(())
 }
 
 /// Returns the standard context key used to store a keystore transaction report.

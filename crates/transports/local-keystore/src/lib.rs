@@ -17,6 +17,8 @@
 #![warn(missing_docs)]
 
 use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -38,7 +40,7 @@ use mfm_state_keystore::states::admin::{
 };
 use mfm_state_keystore::tx::{
     parse_address, parse_data_hex, parse_u128_quantity, resolve_key_id, sign_eip1559_transaction,
-    write_raw_transaction_file, Eip1559TxToSign, KeystoreTxError,
+    Eip1559TxToSign, KeystoreTxError,
 };
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
@@ -365,6 +367,48 @@ fn keystore_tx_sign(req: KeystoreTxSignRequest) -> Result<serde_json::Value, Loc
         "payload_hash": signed.payload_hash,
         "out_path": out_path.display().to_string(),
     }))
+}
+
+fn write_raw_transaction_file(path: &Path, raw_tx_hex: &str) -> Result<(), KeystoreTxError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+
+    let mut file = options.open(path).map_err(|e| {
+        KeystoreTxError::new(
+            "FileWriteError",
+            format!("Failed to open output file '{}': {e}", path.display()),
+        )
+    })?;
+
+    file.write_all(raw_tx_hex.as_bytes()).map_err(|e| {
+        KeystoreTxError::new(
+            "FileWriteError",
+            format!(
+                "Failed to write signed transaction file '{}': {e}",
+                path.display()
+            ),
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            KeystoreTxError::new(
+                "FileWriteError",
+                format!(
+                    "Failed to set output file permissions '{}': {e}",
+                    path.display()
+                ),
+            )
+        })?;
+    }
+
+    Ok(())
 }
 
 fn create_keystore_if_needed(path: &Path) -> Result<Keystore, LocalError> {

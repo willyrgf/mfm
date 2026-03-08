@@ -795,6 +795,7 @@ impl AppServices {
     }
 
     /// Starts the deploy-configure-validate template from raw JSON or a JSON file.
+    #[allow(clippy::disallowed_methods)]
     pub async fn start_deploy_configure_validate_from_spec_input(
         &self,
         spec_json: Option<String>,
