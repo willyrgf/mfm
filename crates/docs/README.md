@@ -4,6 +4,8 @@ Umbrella documentation entry point for the MFM workspace.
 
 `docs.rs` publishes crates one at a time and does not provide a workspace landing page. This crate fills that gap by acting as the top-level navigation page for the published MFM surface.
 
+Only crates that are already live on docs.rs are linked below. Remaining workspace crates stay listed by path until their publish window completes.
+
 Use this page to jump between crate families:
 
 - engine and SDK
@@ -41,10 +43,10 @@ The live runtime inventory still lives in the repository docs:
 
 | Package | Role | docs.rs | Workspace Path |
 | --- | --- | --- | --- |
-| `mfm-state-common` | Cross-domain reusable execution states. | <https://docs.rs/mfm-state-common> | `crates/states/common` |
-| `mfm-evm-runtime` | Shared EVM read and write runtime states. | <https://docs.rs/mfm-evm-runtime> | `crates/evm-runtime` |
-| `mfm-state-keystore` | Shared keystore administration and transaction states. | <https://docs.rs/mfm-state-keystore> | `crates/states/keystore` |
-| `mfm-state-aave-v3` | Shared Aave V3 deploy and configure states. | <https://docs.rs/mfm-state-aave-v3> | `crates/states/aave-v3` |
+| `mfm-state-common` | Cross-domain reusable execution states. | pending | `crates/states/common` |
+| `mfm-evm-runtime` | Shared EVM read and write runtime states. | pending | `crates/evm-runtime` |
+| `mfm-state-keystore` | Shared keystore administration and transaction states. | pending | `crates/states/keystore` |
+| `mfm-state-aave-v3` | Shared Aave V3 deploy and configure states. | pending | `crates/states/aave-v3` |
 
 ## Ops
 
@@ -76,13 +78,13 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 
 ## Collectors
 
-| Package | Role | Workspace Path |
-| --- | --- | --- |
-| `mfm-collectors-evm` | EVM collector traits and payloads. | `crates/collectors/evm` |
-| `mfm-collectors-evm-jsonrpc-http` | HTTP JSON-RPC collector implementation for EVM. | `crates/collectors/evm-jsonrpc-http` |
-| `mfm-collectors-exec` | Command-execution collector interfaces. | `crates/collectors/exec` |
-| `mfm-collectors-nix` | Nix evaluation collector interfaces. | `crates/collectors/nix` |
-| `mfm-collectors-nix-exec` | Nix execution collector implementation. | `crates/collectors/nix-exec` |
+| Package | Role | docs.rs | Workspace Path |
+| --- | --- | --- | --- |
+| `mfm-collectors-evm` | EVM collector traits and payloads. | <https://docs.rs/mfm-collectors-evm> | `crates/collectors/evm` |
+| `mfm-collectors-evm-jsonrpc-http` | HTTP JSON-RPC collector implementation for EVM. | pending | `crates/collectors/evm-jsonrpc-http` |
+| `mfm-collectors-exec` | Command-execution collector interfaces. | pending | `crates/collectors/exec` |
+| `mfm-collectors-nix` | Nix evaluation collector interfaces. | pending | `crates/collectors/nix` |
+| `mfm-collectors-nix-exec` | Nix execution collector implementation. | pending | `crates/collectors/nix-exec` |
 
 ## Transports
 
@@ -105,7 +107,7 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 
 ## Publishing Notes
 
-- Publish this crate after the first docs.rs wave so the direct links above resolve.
+- Publish this crate after the first published docs.rs surface is live, then add links for later crates as they land.
 - Keep this page role-oriented and high-level; detailed inventories belong in the repository docs.
 - When a repo-local crate is published, add its `docs.rs` link here in the next release of `mfm-docs`.
 - The publish order is tracked in `crates/docs/publish-wave.json` and consumed by `nix run .#publish-docs`.

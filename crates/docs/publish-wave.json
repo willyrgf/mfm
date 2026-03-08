@@ -44,6 +44,12 @@
       "docs_rs": "https://docs.rs/mfm-collectors-evm"
     },
     {
+      "name": "mfm-docs",
+      "group": "umbrella",
+      "workspace_path": "crates/docs",
+      "docs_rs": "https://docs.rs/mfm-docs"
+    },
+    {
       "name": "mfm-collectors-exec",
       "group": "dependents",
       "workspace_path": "crates/collectors/exec",
@@ -90,12 +96,6 @@
       "group": "state-consumers",
       "workspace_path": "crates/states/aave-v3",
       "docs_rs": "https://docs.rs/mfm-state-aave-v3"
-    },
-    {
-      "name": "mfm-docs",
-      "group": "umbrella",
-      "workspace_path": "crates/docs",
-      "docs_rs": "https://docs.rs/mfm-docs"
     }
   ]
 }
