@@ -131,6 +131,28 @@
     local artifacts_dir_value
     local services_root
 
+    discover_caller_project_root() {
+      local dir="$1"
+
+      while [ -n "$dir" ]; do
+        if [ -f "$dir/flake.nix" ] && [ -f "$dir/nixfied/project/module.nix" ]; then
+          printf '%s' "$dir"
+          return 0
+        fi
+
+        if [ "$dir" = "/" ]; then
+          break
+        fi
+
+        dir="''${dir%/*}"
+        if [ -z "$dir" ]; then
+          dir="/"
+        fi
+      done
+
+      return 1
+    }
+
     resolve_project_root_workdir() {
       local project_root_real="${builtins.toString projectRoot}"
       local anchor_root="$project_root_real"
@@ -138,26 +160,44 @@
       local caller_pwd="''${NIXFIED_CALLER_PWD:-}"
       local caller_pwd_real=""
       local caller_relative=""
+      local caller_root=""
+      local project_root_is_store=0
 
       if [ -d "$project_root_real" ]; then
         project_root_real="$(cd "$project_root_real" && pwd -P)"
       fi
 
+      case "$project_root_real" in
+        /nix/store/*)
+          project_root_is_store=1
+          ;;
+      esac
+
+      if [ -n "$caller_pwd" ] && [ -d "$caller_pwd" ]; then
+        caller_pwd_real="$(cd "$caller_pwd" && pwd -P)"
+        caller_root="$(discover_caller_project_root "$caller_pwd_real" || true)"
+      fi
+
       if [ -n "''${ORIGINAL_ROOT:-}" ] && [ -d "$ORIGINAL_ROOT" ]; then
         anchor_root="$(cd "$ORIGINAL_ROOT" && pwd -P)"
+      elif [ -n "$caller_root" ]; then
+        anchor_root="$caller_root"
       else
         anchor_root="$project_root_real"
       fi
 
       if [ "''${NIXFIED_EXECUTION_EPHEMERAL:-0}" = "1" ]; then
         effective_root="$(pwd -P)"
+      elif [ "$project_root_is_store" -eq 1 ] && [ -n "$caller_root" ]; then
+        # Wrapper apps are evaluated from a read-only store snapshot. Rebind
+        # projectRoot tasks to the live caller workspace when available so
+        # cargo-backed commands do not try to write target/ under /nix/store.
+        effective_root="$caller_root"
       else
         effective_root="$project_root_real"
       fi
 
-      if [ -n "$caller_pwd" ] && [ -d "$caller_pwd" ]; then
-        caller_pwd_real="$(cd "$caller_pwd" && pwd -P)"
-
+      if [ -n "$caller_pwd_real" ]; then
         case "$caller_pwd_real" in
           "$effective_root")
             printf '%s' "$effective_root"
