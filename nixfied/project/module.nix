@@ -1275,7 +1275,26 @@ in
             set -euo pipefail
             ${cargoWorkspaceTargetPreamble}
 
-            catalog="crates/docs/publish-wave.json"
+            find_workspace_root() {
+              local dir="''${MFM_WORKSPACE_ROOT:-$PWD}"
+              while [ "$dir" != "/" ]; do
+                if [ -f "$dir/crates/docs/publish-wave.json" ] && [ -f "$dir/Cargo.toml" ]; then
+                  printf '%s' "$dir"
+                  return 0
+                fi
+                dir="$(dirname "$dir")"
+              done
+              return 1
+            }
+
+            workspace_root="$(find_workspace_root || true)"
+            if [ -z "$workspace_root" ]; then
+              echo "ERROR: unable to locate live workspace root" >&2
+              exit 3
+            fi
+
+            cd "$workspace_root"
+            catalog="$workspace_root/crates/docs/publish-wave.json"
             dry_run=0
             allow_dirty=0
             from_pkg=""
