@@ -44,6 +44,7 @@ members = [
 	"crates/ops/aave-v3-origin-adapt-op",
 	"crates/ops/proof-op",
 	"crates/tools/architecture-verify",
+	"crates/tools/publish-docs",
 ]
 
 # Core dependencies

@@ -1,6 +1,7 @@
 .DS_Store
 /.env
 /.codex
+/.mfm
 /target
 /cache
 /contracts/out

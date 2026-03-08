@@ -1242,11 +1242,13 @@ in
         publish-docs = mkCommandTask {
           id = "task.publish-docs";
           appName = "publish-docs";
-          summary = "Publish the docs.rs crate wave in catalog order";
+          summary = "Plan or publish the docs.rs crate wave with exact crates.io observation";
           description = ''
-            Reads `crates/docs/publish-wave.json` and publishes each package in order.
-            By default this performs a real `cargo publish`; pass `--dry-run` to validate
-            the current wave without uploading crates.
+            Runs the Rust Phase-1 publish-docs tool against `crates/docs/publish-wave.json`.
+            The tool resolves local versions from `cargo metadata`, checks exact crates.io package
+            versions, emits sanitized run artifacts under `.mfm/publish-docs/runs/`, and either
+            plans or applies publish actions. By default this performs a real `cargo publish`;
+            pass `--dry-run` to build a plan without uploading crates.
           '';
           tags = [
             "release"
@@ -1254,12 +1256,14 @@ in
           ];
           usage = [
             "nix run .#publish-docs -- --dry-run"
+            "nix run .#publish-docs -- plan --json"
             "nix run .#publish-docs -- --from mfm-state-common"
             "nix run .#publish-docs -- --only mfm-docs"
             "nix run .#publish-docs"
           ];
           examples = [
             "nix run .#publish-docs -- --dry-run"
+            "nix run .#publish-docs -- apply --json"
             "nix run .#publish-docs -- --from mfm-evm-runtime"
           ];
           runtimeInputs = rustRuntimeInputs ++ [ pkgs.git ];
@@ -1269,155 +1273,13 @@ in
             "CARGO_HOME"
             "CARGO_REGISTRY_TOKEN"
             "CARGO_REGISTRIES_CRATES_IO_TOKEN"
+            "MFM_OUTPUT_FORMAT"
           ];
           env = sharedCargoRustEnv;
           command = ''
             set -euo pipefail
             ${cargoWorkspaceTargetPreamble}
-
-            find_workspace_root() {
-              local dir="''${MFM_WORKSPACE_ROOT:-$PWD}"
-              while [ "$dir" != "/" ]; do
-                if [ -f "$dir/crates/docs/publish-wave.json" ] && [ -f "$dir/Cargo.toml" ]; then
-                  printf '%s' "$dir"
-                  return 0
-                fi
-                dir="$(dirname "$dir")"
-              done
-              return 1
-            }
-
-            workspace_root="$(find_workspace_root || true)"
-            if [ -z "$workspace_root" ]; then
-              echo "ERROR: unable to locate live workspace root" >&2
-              exit 3
-            fi
-
-            cd "$workspace_root"
-            catalog="$workspace_root/crates/docs/publish-wave.json"
-            dry_run=0
-            allow_dirty=0
-            from_pkg=""
-            only_pkg=""
-
-            usage() {
-              cat <<'EOF'
-Usage: nix run .#publish-docs -- [--dry-run] [--allow-dirty] [--from <package>] [--only <package>]
-
-Options:
-  --dry-run      Validate the publish wave without uploading crates.
-  --allow-dirty  Forward --allow-dirty to cargo publish and skip the clean-tree check.
-  --from <pkg>   Start publishing from the named package in the catalog.
-  --only <pkg>   Publish exactly one package from the catalog.
-  --help         Show this help text.
-EOF
-            }
-
-            while [ "$#" -gt 0 ]; do
-              case "$1" in
-                --dry-run)
-                  dry_run=1
-                  ;;
-                --allow-dirty)
-                  allow_dirty=1
-                  ;;
-                --from)
-                  shift
-                  if [ "$#" -eq 0 ]; then
-                    echo "ERROR: --from requires a package name" >&2
-                    usage >&2
-                    exit 2
-                  fi
-                  from_pkg="$1"
-                  ;;
-                --only)
-                  shift
-                  if [ "$#" -eq 0 ]; then
-                    echo "ERROR: --only requires a package name" >&2
-                    usage >&2
-                    exit 2
-                  fi
-                  only_pkg="$1"
-                  ;;
-                --help|-h)
-                  usage
-                  exit 0
-                  ;;
-                --)
-                  shift
-                  break
-                  ;;
-                *)
-                  echo "ERROR: unknown argument: $1" >&2
-                  usage >&2
-                  exit 2
-                  ;;
-              esac
-              shift
-            done
-
-            if [ "$#" -gt 0 ]; then
-              echo "ERROR: unexpected positional arguments: $*" >&2
-              usage >&2
-              exit 2
-            fi
-
-            if [ ! -f "$catalog" ]; then
-              echo "ERROR: publish catalog not found at $catalog" >&2
-              exit 3
-            fi
-
-            if [ "$allow_dirty" -ne 1 ]; then
-              if ! git diff --quiet --ignore-submodules HEAD -- || ! git diff --cached --quiet --ignore-submodules --; then
-                echo "ERROR: working tree has uncommitted changes; commit first or pass --allow-dirty" >&2
-                exit 3
-              fi
-            fi
-
-            packages="$(
-              ${pkgs.jq}/bin/jq -r \
-                --arg only "$only_pkg" \
-                --arg from "$from_pkg" '
-                  .packages as $packages
-                  | if $only != "" then
-                      [ $packages[] | select(.name == $only) | .name ]
-                    elif $from != "" then
-                      ([ $packages[] | .name ] as $names
-                       | ($names | index($from)) as $idx
-                       | if $idx == null then error("unknown starting package: " + $from) else $names[$idx:] end)
-                    else
-                      [ $packages[] | .name ]
-                    end
-                  | if length == 0 then error("selection matched no packages") else . end
-                  | .[]
-                ' "$catalog"
-            )"
-
-            wave_name="$(${pkgs.jq}/bin/jq -r '.wave' "$catalog")"
-            cargo_dirty_flag=""
-            if [ "$allow_dirty" -eq 1 ]; then
-              cargo_dirty_flag="--allow-dirty"
-            fi
-
-            echo "INFO: publish wave=$wave_name"
-            printf '%s\n' "$packages" | sed 's/^/INFO: package /'
-
-            printf '%s\n' "$packages" | while IFS= read -r pkg; do
-              [ -n "$pkg" ] || continue
-              if [ "$dry_run" -eq 1 ]; then
-                echo "INFO: cargo publish --dry-run --locked $cargo_dirty_flag -p $pkg"
-                cargo publish --dry-run --locked $cargo_dirty_flag -p "$pkg"
-              else
-                echo "INFO: cargo publish --locked $cargo_dirty_flag -p $pkg"
-                cargo publish --locked $cargo_dirty_flag -p "$pkg"
-              fi
-            done
-
-            if [ "$dry_run" -eq 1 ]; then
-              echo "OK: publish dry-run completed for $wave_name"
-            else
-              echo "OK: published $wave_name"
-            fi
+            exec cargo run -p mfm-publish-docs -- "$@"
           '';
         };
 
