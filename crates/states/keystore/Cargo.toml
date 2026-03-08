@@ -3,7 +3,7 @@ name = "mfm-state-keystore"
 version = "0.1.0"
 edition = "2021"
 description = "Reusable keystore administration and transaction states for MFM"
-repository = "https://github.com/willyrgf/mfm2"
+repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
 

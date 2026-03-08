@@ -3,7 +3,7 @@ name = "mfm-transports-local-evm"
 version = "0.1.0"
 edition = "2021"
 description = "Local EVM signing and transaction transport helpers for MFM"
-repository = "https://github.com/willyrgf/mfm2"
+repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [dependencies]

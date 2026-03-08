@@ -3,7 +3,7 @@ name = "mfm-collectors-nix"
 version = "0.1.0"
 edition = "2021"
 description = "Nix evaluation collector interfaces for MFM runtime states"
-repository = "https://github.com/willyrgf/mfm2"
+repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [dependencies]

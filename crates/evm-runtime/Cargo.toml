@@ -3,7 +3,7 @@ name = "mfm-evm-runtime"
 version = "0.1.0"
 edition = "2021"
 description = "Reusable EVM read and write runtime states for MFM"
-repository = "https://github.com/willyrgf/mfm2"
+repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
 

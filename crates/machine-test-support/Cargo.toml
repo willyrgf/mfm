@@ -3,7 +3,7 @@ name = "mfm-machine-test-support"
 version = "0.1.0"
 edition = "2021"
 description = "Shared contract tests and observability helpers for MFM machine backends"
-repository = "https://github.com/willyrgf/mfm2"
+repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
 

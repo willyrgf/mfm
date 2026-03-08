@@ -3,7 +3,7 @@ name = "mfm-sdk"
 version = "0.1.0"
 edition = "2021"
 description = "Operation and pipeline orchestration helpers for MFM"
-repository = "https://github.com/willyrgf/mfm2"
+repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
 
