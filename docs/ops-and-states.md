@@ -61,10 +61,8 @@ runtime behavior reused by thin ops.
 
 | Module | State types | Purpose | Used by built-in ops |
 |---|---|---|---|
-| `crates/states/common/src/states/io.rs` | `NamespaceReadState` | Generic namespace-backed read step that records a fact and writes a context value | Reusable escape hatch for typed-state migrations |
 | `crates/states/common/src/states/nix.rs` | `NixExecState` | Execute a nix-resolved or pre-resolved program through the exec namespace | `nix_app` |
 | `crates/states/common/src/states/proof.rs` | `ProofReadState`, `ProofApplySideEffectState` | Typed proof read and side-effect states that avoid raw proof namespace strings | `proof` |
-| `crates/states/common/src/states/side_effect.rs` | `IdempotentSideEffectState` | Generic idempotent side-effect escape hatch used while remaining call sites migrate to typed clients | Shared migrations and tests |
 | `crates/states/keystore/src/states/admin.rs` | `KeystoreImportState`, `KeystoreListState`, `KeystoreDeleteState` | Reusable keystore administration flows | `keystore_import`, `keystore_list`, `keystore_delete` |
 | `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState` | Reusable local keystore signing flow | `keystore_tx_sign` |
 | `crates/states/keystore-submit/src/tx.rs` | `KeystoreTxSendRawState` | Reusable raw-transaction submission flow with remote EVM routing | `keystore_tx_send_raw` |

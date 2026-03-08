@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 //! EVM collectors.
 //!
-//! This crate defines typed adapters over the generic `IoCall` surface for EVM JSON-RPC reads.
+//! This crate defines typed adapters over the generic `IoCall` surface for EVM JSON-RPC requests.
 //! It intentionally does NOT perform IO itself.
 //!
 //! # Examples
@@ -35,6 +35,16 @@ pub struct JsonRpcCall {
     pub method: String,
     /// JSON-RPC params array or object payload.
     pub params: serde_json::Value,
+    /// Optional transport routing hint that selects a specific configured EVM source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<JsonRpcRoute>,
+}
+
+/// Optional route selector for an EVM JSON-RPC request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsonRpcRoute {
+    /// Stable source identifier registered in the EVM transport config.
+    pub source_id: String,
 }
 
 impl JsonRpcCall {
@@ -43,7 +53,16 @@ impl JsonRpcCall {
         Self {
             method: method.into(),
             params,
+            route: None,
         }
+    }
+
+    /// Returns a copy of the request with an explicit route source hint.
+    pub fn with_route_source_id(mut self, source_id: impl Into<String>) -> Self {
+        self.route = Some(JsonRpcRoute {
+            source_id: source_id.into(),
+        });
+        self
     }
 }
 
@@ -177,6 +196,15 @@ impl<'a> EvmIoClient<'a> {
         self.io
     }
 
+    /// Executes a JSON-RPC call through the generic IO provider with an explicit fact key.
+    pub async fn call_with_fact_key(
+        &mut self,
+        call: JsonRpcCall,
+        fact_key: FactKey,
+    ) -> Result<IoResult, IoError> {
+        self.io.call(evm_io_call(call, fact_key)).await
+    }
+
     /// Executes a JSON-RPC call through the generic IO provider.
     pub async fn call(&mut self, call: JsonRpcCall) -> Result<IoResult, IoError> {
         let key = fact_key_for_jsonrpc_call(&self.state_id, &call).map_err(|e| match e {
@@ -194,7 +222,7 @@ impl<'a> EvmIoClient<'a> {
             }
         })?;
 
-        self.io.call(evm_io_call(call, key)).await
+        self.call_with_fact_key(call, key).await
     }
 
     /// Fetches the remote chain ID and parses it as `u64`.
@@ -260,6 +288,26 @@ mod tests {
         assert_eq!(
             parse_u64_hex("0x0123456789abcdef0").unwrap_err(),
             ParseHexError::Overflow
+        );
+    }
+
+    #[test]
+    fn routed_call_serializes_route_hint() {
+        let request = serde_json::to_value(
+            JsonRpcCall::new("eth_sendRawTransaction", serde_json::json!(["0x01"]))
+                .with_route_source_id("reth_local"),
+        )
+        .expect("request json");
+
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "method": "eth_sendRawTransaction",
+                "params": ["0x01"],
+                "route": {
+                    "source_id": "reth_local"
+                }
+            })
         );
     }
 

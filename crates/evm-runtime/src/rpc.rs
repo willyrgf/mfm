@@ -5,7 +5,7 @@ use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{FactKey, StateId};
-use mfm_machine::io::{IoCall, IoProvider};
+use mfm_machine::io::IoProvider;
 use mfm_state_common::errors as op_errors;
 use mfm_state_common::rpc as op_rpc;
 use mfm_transports_local_evm::{LocalEvmIoClient, LocalEvmSignLegacyCreateCall};
@@ -322,24 +322,22 @@ pub async fn wait_for_receipt(
 
     let normalized_tx = shared_dcv::normalize_hex_str(tx_hash)
         .map_err(|_| op_errors::state_unknown("invalid_tx_hash", "tx hash was invalid hex"))?;
+    let mut client = EvmIoClient::new(state_id.clone(), io);
 
     for poll_index in 0..max_receipt_polls {
-        let request = serde_json::to_value(JsonRpcCall::new(
-            "eth_getTransactionReceipt",
-            serde_json::json!([normalized_tx]),
-        ))
-        .expect("JsonRpcCall must serialize");
-        let res = io
-            .call(IoCall {
-                namespace: "evm".to_string(),
-                request,
-                fact_key: Some(FactKey(format!(
+        let res = client
+            .call_with_fact_key(
+                JsonRpcCall::new(
+                    "eth_getTransactionReceipt",
+                    serde_json::json!([normalized_tx.clone()]),
+                ),
+                FactKey(format!(
                     "mfm:evm|state:{}|receipt_poll:{}|tx:{}",
                     state_id.as_str(),
                     poll_index,
                     normalized_tx
-                ))),
-            })
+                )),
+            )
             .await
             .map_err(op_errors::state_from_io)?;
         if !res.response.is_null() {
@@ -515,20 +513,14 @@ pub async fn send_raw_transaction_via_io(
         )
     })?;
 
-    let request = serde_json::json!({
-        "method": "eth_sendRawTransaction",
-        "params": [raw_tx_hex],
-        "route": {
-            "source_id": source_id,
-        },
-    });
     let fact_key = send_raw_fact_key(state_id, raw_tx_hex)?;
-    let response = io
-        .call(IoCall {
-            namespace: "evm".to_string(),
-            request,
-            fact_key: Some(fact_key),
-        })
+    let mut client = EvmIoClient::new(state_id.clone(), io);
+    let response = client
+        .call_with_fact_key(
+            JsonRpcCall::new("eth_sendRawTransaction", serde_json::json!([raw_tx_hex]))
+                .with_route_source_id(source_id),
+            fact_key,
+        )
         .await
         .map_err(op_errors::state_from_io)?;
 

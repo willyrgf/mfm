@@ -57,6 +57,11 @@ fn check_expand_boundary(repo_root: &Path, failures: &mut Vec<String>) {
             continue;
         }
 
+        let normalized = normalize_path_for_report(Path::new(&file));
+        if normalized.contains("/crates/tools/architecture-verify/") {
+            continue;
+        }
+
         let content = match fs::read_to_string(&file) {
             Ok(c) => c,
             Err(err) => {
@@ -107,16 +112,22 @@ fn check_evm_transport_invariants(repo_root: &Path, failures: &mut Vec<String>) 
 
 fn check_runtime_evm_namespace_call_sites(repo_root: &Path, failures: &mut Vec<String>) {
     let allowed_call_site =
-        normalize_path_for_report(&repo_root.join("crates/evm-runtime/src/rpc.rs"));
+        normalize_path_for_report(&repo_root.join("crates/collectors/evm/src/lib.rs"));
 
     let mut files = Vec::new();
     collect_rs_files(&repo_root.join("crates"), &mut files);
     collect_rs_files(&repo_root.join("bin"), &mut files);
 
     let mut saw_allowed_call_site = false;
+    let direct_namespace_patterns = ["namespace: \"evm\"", "namespace: NAMESPACE_EVM.to_string()"];
 
     for file in files {
         if !is_runtime_source_file(&file) {
+            continue;
+        }
+
+        let normalized = normalize_path_for_report(Path::new(&file));
+        if normalized.contains("/crates/tools/architecture-verify/") {
             continue;
         }
 
@@ -129,25 +140,26 @@ fn check_runtime_evm_namespace_call_sites(repo_root: &Path, failures: &mut Vec<S
         };
 
         let non_test_content = strip_cfg_test_items(&content);
-        let has_evm_namespace_call = non_test_content.contains("namespace: \"evm\"");
+        let has_evm_namespace_call = direct_namespace_patterns
+            .iter()
+            .any(|pattern| non_test_content.contains(pattern));
         if !has_evm_namespace_call {
             continue;
         }
 
-        let normalized = normalize_path_for_report(Path::new(&file));
         if normalized == allowed_call_site {
             saw_allowed_call_site = true;
             continue;
         }
 
         failures.push(format!(
-            "{normalized}: runtime code must not introduce direct `namespace: \"evm\"` call sites outside {allowed_call_site}"
+            "{normalized}: runtime code must not introduce direct EVM namespace call sites outside {allowed_call_site}"
         ));
     }
 
     if !saw_allowed_call_site {
         failures.push(format!(
-            "expected runtime `namespace: \"evm\"` call site in {allowed_call_site}"
+            "expected direct EVM namespace bridge call site in {allowed_call_site}"
         ));
     }
 }
