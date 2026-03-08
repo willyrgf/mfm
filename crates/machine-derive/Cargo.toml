@@ -2,9 +2,12 @@
 name = "mfm-machine-derive"
 version = "0.1.0"
 edition = "2021"
+description = "Proc-macro helpers for deriving MFM machine contracts"
+repository = "https://github.com/willyrgf/mfm2"
+license = "MIT"
+readme = "README.md"
 
 [lib]
 proc-macro = true
 
 [dependencies]
-

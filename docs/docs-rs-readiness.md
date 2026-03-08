@@ -14,6 +14,41 @@
 - Recent progress on 2026-03-08:
   - wave-1 landing pages and examples are now in place for `mfm-machine`, `mfm-machine-derive`, `mfm-machine-test-support`, `mfm-sdk`, `mfm_core::config`, and `mfm-evm-core`
   - `nix run .#check` is no longer blocked by the readonly Cargo target-dir issue in Nixfied task apps
+  - publish-wave manifests now use `path + version` for the near-term docs.rs release chain
+
+## Current Publish Order
+
+`docs.rs` only builds crate documentation after a crate has been published to crates.io. Repository docs such as `docs/ops-and-states.md` stay in-repo; crate-level rustdoc and README content are what appear on docs.rs.
+
+Current near-term release chain:
+
+1. Foundation:
+   - `mfm-machine`
+   - `mfm-machine-derive`
+   - `mfm_core`
+   - `mfm-evm-core`
+2. First dependents:
+   - `mfm-sdk`
+   - `mfm-machine-test-support`
+   - `mfm-collectors-evm`
+   - `mfm-collectors-exec`
+   - `mfm-collectors-nix`
+   - `mfm-transports-local-evm`
+   - `mfm-op-keystore-shim`
+3. Shared-state base:
+   - `mfm-state-common`
+4. Runtime layer:
+   - `mfm-evm-runtime`
+5. State consumers:
+   - `mfm-state-keystore`
+   - `mfm-state-aave-v3`
+
+Notes:
+
+- `cargo publish --dry-run` for a crate with `path + version` dependencies still expects the versioned upstream crate to exist on crates.io. A dry-run failure like `no matching package named 'mfm-machine' found` is expected until the earlier publish step has completed.
+- Use `cargo check -p <crate> --lib` for local compile validation before the upstream versions exist in the registry.
+- Use `cargo package --allow-dirty --list -p <crate>` when you want to inspect the files that would be packaged without requiring the upstream versions to exist in the registry.
+- Keep `mfm-app` out of the first publish wave; its dependency surface and end-user positioning still need curation.
 
 ## Global Requirements (Apply to Every Crate)
 

@@ -2,9 +2,13 @@
 name = "mfm-op-keystore-shim"
 version = "0.1.0"
 edition = "2021"
+description = "Compatibility shim types shared by MFM keystore planners and states"
+repository = "https://github.com/willyrgf/mfm2"
+license = "MIT"
+readme = "README.md"
 
 [lib]
 name = "mfm_op_keystore"
 
 [dependencies]
-mfm_core = { path = "../../core" }
+mfm_core = { path = "../../core", version = "0.1.29" }

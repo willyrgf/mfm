@@ -2,6 +2,9 @@
 name = "mfm-transports-local-evm"
 version = "0.1.0"
 edition = "2021"
+description = "Local EVM signing and transaction transport helpers for MFM"
+repository = "https://github.com/willyrgf/mfm2"
+license = "MIT"
 
 [dependencies]
 alloy-primitives = { workspace = true, features = ["k256"] }
@@ -11,5 +14,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
 zeroize = "1.7.0"
-mfm-machine = { path = "../../machine" }
-mfm-evm-core = { path = "../../evm-core" }
+mfm-machine = { path = "../../machine", version = "0.1.0" }
+mfm-evm-core = { path = "../../evm-core", version = "0.1.0" }

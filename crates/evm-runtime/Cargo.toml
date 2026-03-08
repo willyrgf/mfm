@@ -5,6 +5,7 @@ edition = "2021"
 description = "Reusable EVM read and write runtime states for MFM"
 repository = "https://github.com/willyrgf/mfm2"
 license = "MIT"
+readme = "README.md"
 
 [dependencies]
 async-trait = { workspace = true }
@@ -18,8 +19,8 @@ url = { workspace = true }
 k256 = { version = "0.13", features = ["ecdsa"] }
 zeroize = "1.7.0"
 
-mfm-machine = { path = "../machine" }
-mfm-collectors-evm = { path = "../collectors/evm" }
-mfm-state-common = { path = "../states/common" }
-mfm-evm-core = { path = "../evm-core" }
-mfm-transports-local-evm = { path = "../transports/local-evm" }
+mfm-machine = { path = "../machine", version = "0.1.0" }
+mfm-collectors-evm = { path = "../collectors/evm", version = "0.1.0" }
+mfm-state-common = { path = "../states/common", version = "0.1.0" }
+mfm-evm-core = { path = "../evm-core", version = "0.1.0" }
+mfm-transports-local-evm = { path = "../transports/local-evm", version = "0.1.0" }

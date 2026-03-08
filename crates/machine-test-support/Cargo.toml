@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Shared contract tests and observability helpers for MFM machine backends"
 repository = "https://github.com/willyrgf/mfm2"
+license = "MIT"
 readme = "README.md"
 
 [dependencies]
-mfm-machine = { path = "../machine" }
+mfm-machine = { path = "../machine", version = "0.1.0" }
 uuid = { version = "1", features = ["v4"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
