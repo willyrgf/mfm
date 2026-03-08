@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 #![warn(missing_docs)]
 //! Application-facing orchestration bridge for MFM binaries and transports.
 //!
@@ -297,6 +296,7 @@ pub fn phase_str(phase: &RunPhase) -> &'static str {
 }
 
 /// Resolves the default local artifact root from `MFM_ARTIFACT_ROOT` or `$HOME/.mfm/run_artifacts`.
+#[allow(clippy::disallowed_methods)]
 pub fn default_artifact_root() -> PathBuf {
     std::env::var(ENV_ARTIFACT_ROOT)
         .ok()
@@ -309,6 +309,7 @@ pub fn default_artifact_root() -> PathBuf {
 
 /// Builds the default artifact store from environment configuration.
 #[instrument(level = "info", skip_all)]
+#[allow(clippy::disallowed_methods)]
 pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, AppError> {
     let backend = std::env::var(ENV_ARTIFACT_BACKEND).unwrap_or_else(|_| "fs".to_string());
     info!(backend = %backend, "initializing artifact store");
@@ -339,6 +340,7 @@ pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, App
 
 /// Builds the default event store from environment configuration.
 #[instrument(level = "info", skip_all)]
+#[allow(clippy::disallowed_methods)]
 pub async fn make_default_event_store() -> Result<Arc<dyn EventStore>, AppError> {
     let database_url = std::env::var(ENV_DATABASE_URL).map_err(|_| {
         AppError::new(
@@ -1687,6 +1689,7 @@ fn parse_portfolio_tokens_from_env(raw: &str) -> Result<Vec<PortfolioTokenSpec>,
     Ok(tokens)
 }
 
+#[allow(clippy::disallowed_methods)]
 fn load_portfolio_tokens_from_env() -> Result<Vec<PortfolioTokenSpec>, AppError> {
     let Ok(raw) = std::env::var(ENV_PORTFOLIO_TOKENS_JSON) else {
         return Ok(Vec::new());
@@ -1727,6 +1730,7 @@ pub struct PortfolioSnapshotResponse {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
