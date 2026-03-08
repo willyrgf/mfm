@@ -215,6 +215,13 @@ let
     }
   '';
 
+  cargoWorkspaceTargetPreamble = ''
+    # Task apps execute from the flake source under /nix/store, so Cargo outputs
+    # must be redirected into a writable per-run location.
+    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-''${CI_ARTIFACTS_DIR:-''${TMPDIR:-/tmp}/mfm-task-artifacts}/cargo-target}"
+    mkdir -p "$CARGO_TARGET_DIR"
+  '';
+
   ciServicePortPrelude = ciRuntime.servicePortPrelude;
 
   ciParityServiceEnv = ''
@@ -616,6 +623,7 @@ in
           runtimeInputs = rustRuntimeInputs;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             echo "INFO: starting dev workflow"
 
@@ -677,6 +685,7 @@ in
           env = sharedCargoRustEnv;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             # Reserve stdout for the final JSON payload.
             exec 3>&1
@@ -1159,6 +1168,7 @@ in
           env = ciCargoRustEnv;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             exec cargo run -q -p mfm --bin mfm_cli -- "$@"
           '';
@@ -1181,6 +1191,7 @@ in
           env = sharedCargoRustEnv;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             exec cargo run -q -p mfm-rest-api --bin mfm_rest_api -- "$@"
           '';
@@ -1195,6 +1206,7 @@ in
           runtimeInputs = rustRuntimeInputs;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             echo "INFO: running release build"
             cargo build --release --all-features
@@ -1212,6 +1224,7 @@ in
           env = sharedCargoRustEnv;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             echo "INFO: running formatting checks"
             ${cargoFmtCheckCmd}
@@ -1251,6 +1264,7 @@ in
           env = sharedCargoRustEnv;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             echo "INFO: running workspace tests"
             ${cargoNextestWorkspaceCiCmd}
