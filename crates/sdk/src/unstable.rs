@@ -1,7 +1,33 @@
 //! Unstable helper implementations for planning and launching.
 //!
+//! This module provides batteries-included implementations for the public SDK traits:
+//! - [`crate::op::OperationRegistry`] via [`HashMapOperationRegistry`]
+//! - [`crate::pipeline::PipelinePlanner`] via [`DefaultPipelinePlanner`]
+//! - [`crate::launcher::RunLauncher`] via [`DefaultRunLauncher`]
+//!
+//! It also exposes convenience helpers such as [`single_op_pipeline`] and runtime-facing child-run
+//! IO helpers under [`child_runs`].
+//!
 //! Source of truth: `docs/redesign.md` (v4).
 //! Not part of the stable API contract (Appendix C.2).
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_machine::ids::OpId;
+//! use mfm_sdk::unstable::single_op_pipeline;
+//!
+//! let pipeline = single_op_pipeline(
+//!     OpId::must_new("keystore_list"),
+//!     "v1".to_string(),
+//!     serde_json::json!({"sort_by": "name"}),
+//! )?;
+//!
+//! assert_eq!(pipeline.machine_id.0, "keystore_list");
+//! assert_eq!(pipeline.steps.len(), 1);
+//! assert_eq!(pipeline.steps[0].step_id.0, "main");
+//! # Ok::<(), mfm_sdk::errors::SdkError>(())
+//! ```
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -307,7 +333,13 @@ impl OperationRegistry for HashMapOperationRegistry {
     }
 }
 
-/// Default pipeline planner.
+/// Default planner that validates a [`Pipeline`] and flattens it into an [`ExecutionPlan`].
+///
+/// The planner is responsible for:
+/// - validating stable machine/step/state identifier shapes
+/// - enforcing import/export wiring between adjacent pipeline steps
+/// - wrapping step-local states in a namespaced context view
+/// - preserving deterministic step ordering by linking sink states to the next step's sources
 #[derive(Clone, Default)]
 pub struct DefaultPipelinePlanner;
 
@@ -497,7 +529,10 @@ impl State for NamespacedState {
     }
 }
 
-/// Default run launcher.
+/// Default launcher that persists the manifest and delegates start/resume to an execution engine.
+///
+/// Use this when callers want the standard MFM manifest layout and artifact-id derivation rules
+/// without reimplementing engine orchestration.
 #[derive(Clone, Default)]
 pub struct DefaultRunLauncher;
 
@@ -621,7 +656,8 @@ impl RunLauncher for DefaultRunLauncher {
 
 /// A `mfm-machine` runtime plan resolver that rebuilds the execution plan from the stored manifest.
 ///
-/// This is used by `DefaultExecutionEngine` during `resume()`.
+/// This is used by `DefaultExecutionEngine` during `resume()` to recover the pipeline definition
+/// from `RunManifest.input_params` and rebuild the deterministic execution plan on demand.
 pub struct SdkPlanResolver {
     registry: Arc<dyn OperationRegistry>,
     planner: Arc<dyn PipelinePlanner>,
@@ -670,7 +706,10 @@ impl mfm_machine::runtime::PlanResolver for SdkPlanResolver {
     }
 }
 
-/// Helper for the single-op run convention.
+/// Builds the standard single-step pipeline wrapper for one operation.
+///
+/// This is the recommended bridge for transport layers that expose "run one op" ergonomics while
+/// still executing through the pipeline-based SDK contract.
 pub fn single_op_pipeline(
     op_id: OpId,
     op_version: String,

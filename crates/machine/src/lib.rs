@@ -482,7 +482,10 @@ pub mod meta {
     pub struct Tag(pub String);
 
     /// Standard tags (stable identifiers).
-    /// Implementations may provide helpers, but these string constants are the contract.
+    ///
+    /// These constants are the stable classification vocabulary shared across planners,
+    /// executors, and policy code. Prefer reusing them instead of inventing near-duplicate
+    /// spellings in downstream crates.
     pub mod standard_tags {
         /// Marks a configuration or validation state.
         pub const CONFIG: &str = "config";
@@ -1172,6 +1175,11 @@ pub mod plan {
     }
 
     /// Validator interface for rejecting malformed execution plans before a run starts.
+    ///
+    /// Typical validators enforce graph-shape rules such as:
+    /// - all state identifiers are unique
+    /// - every dependency edge points to an existing state
+    /// - the plan is acyclic
     pub trait PlanValidator: Send + Sync {
         /// Validates the supplied execution plan.
         fn validate(&self, plan: &ExecutionPlan) -> Result<(), PlanValidationError>;
@@ -1264,6 +1272,9 @@ pub mod engine {
     }
 
     /// Summary returned by the execution engine after start or resume.
+    ///
+    /// `phase` reports the final or current lifecycle state, while `final_snapshot_id` is populated
+    /// only when a snapshot exists at the point the engine returns.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct RunResult {
         /// Run identifier that was started or resumed.
@@ -1275,6 +1286,9 @@ pub mod engine {
     }
 
     /// Inputs required to start a run.
+    ///
+    /// Callers usually construct this once planning is complete and the manifest has already been
+    /// content-addressed and persisted or prepared for persistence.
     pub struct StartRun {
         /// Manifest content for the run.
         pub manifest: RunManifest,
@@ -1289,6 +1303,9 @@ pub mod engine {
     }
 
     /// Store bundle passed to the engine.
+    ///
+    /// Keeping the stores grouped makes it easier for higher layers to swap persistence backends
+    /// without threading each store separately through every engine constructor.
     #[derive(Clone)]
     pub struct Stores {
         /// Event store used for append-only kernel and domain events.

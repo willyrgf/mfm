@@ -1,3 +1,20 @@
+//! Hex normalization and byte-conversion helpers.
+//!
+//! These helpers centralize the repo's basic hex-string rules: values should be `0x`-prefixed,
+//! lowercase, and even-length before they are persisted or passed to lower-level encoders.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_evm_core::hex::{bytes_to_hex_prefixed, hex_to_bytes, normalize_hex_str};
+//!
+//! let normalized = normalize_hex_str("0Xabc")?;
+//! assert_eq!(normalized, "0x0abc");
+//! assert_eq!(hex_to_bytes(&normalized)?, vec![0x0a, 0xbc]);
+//! assert_eq!(bytes_to_hex_prefixed(&[0x0a, 0xbc]), "0x0abc");
+//! # Ok::<(), mfm_evm_core::util_error::UtilError>(())
+//! ```
+
 use crate::util_error::UtilError;
 
 /// Normalizes a prefixed hex string to lowercase with an even number of digits.

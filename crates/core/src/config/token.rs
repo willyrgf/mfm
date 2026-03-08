@@ -1,3 +1,9 @@
+//! Static token registry configuration.
+//!
+//! Token definitions are keyed by logical asset name and expanded into per-network deployment
+//! records. Helpers in this module keep user-authored slippage strings in a normalized basis-point
+//! form for downstream execution layers.
+
 use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

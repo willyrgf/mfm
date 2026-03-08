@@ -1,3 +1,29 @@
+//! ABI parsing and calldata construction helpers.
+//!
+//! This module intentionally keeps the supported surface small: enough to parse compiler ABI JSON,
+//! derive selectors, and build common constructor/function call payloads used by higher-level
+//! runtime crates.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_evm_core::abi::{function_selector, parse_abi};
+//!
+//! let abi = serde_json::json!([
+//!   {
+//!     "type": "function",
+//!     "name": "balanceOf",
+//!     "inputs": [{"type": "address"}],
+//!     "outputs": [{"type": "uint256"}]
+//!   }
+//! ]);
+//!
+//! let parsed = parse_abi(&abi)?;
+//! assert_eq!(parsed.functions[0].name, "balanceOf");
+//! assert_eq!(function_selector("balanceOf", &["address".to_string()]), [0x70, 0xa0, 0x82, 0x31]);
+//! # Ok::<(), mfm_evm_core::util_error::UtilError>(())
+//! ```
+
 use alloy_primitives::keccak256;
 use serde::Deserialize;
 
@@ -131,6 +157,8 @@ pub fn parse_bytecode(v: &serde_json::Value) -> Result<Vec<u8>, UtilError> {
 }
 
 /// Computes the first four bytes of the Keccak-256 function signature hash.
+///
+/// This is the standard Ethereum ABI selector derivation used for function calldata prefixes.
 pub fn function_selector(name: &str, input_types: &[String]) -> [u8; 4] {
     let sig = format!("{}({})", name, input_types.join(","));
     let h = keccak256(sig.as_bytes());

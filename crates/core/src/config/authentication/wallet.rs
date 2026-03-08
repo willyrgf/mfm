@@ -1,3 +1,8 @@
+//! Wallet-file authentication configuration.
+//!
+//! This module intentionally models only local file-based key loading. Encrypted wallet file
+//! support was removed, so callers must opt into plaintext loading explicitly.
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -23,6 +28,11 @@ impl Wallet {
     ///
     /// Encrypted wallet files are intentionally unsupported; callers must opt into plaintext
     /// loading with `not_encrypted: true`.
+    ///
+    /// # Security
+    ///
+    /// The returned string contains raw secret material. Callers should minimize its lifetime,
+    /// avoid logging it, and wrap it in a zeroizing container before broader use.
     pub fn read_private_key(
         &self,
         _password: Option<&str>,

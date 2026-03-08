@@ -1,3 +1,9 @@
+//! Authentication-method configuration.
+//!
+//! The configuration file can advertise more than one wallet-loading strategy. Runtime callers are
+//! expected to walk the configured methods in declaration order and choose the first supported
+//! option.
+
 /// Wallet-based authentication configuration.
 pub mod wallet;
 

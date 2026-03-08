@@ -1,3 +1,8 @@
+//! Static network registry configuration.
+//!
+//! These types describe the configured networks that token and DEX entries reference, plus helper
+//! conversions for moving human-readable balance thresholds into base units.
+
 use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

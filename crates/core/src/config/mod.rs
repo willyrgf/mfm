@@ -1,3 +1,66 @@
+//! Workspace-wide YAML configuration models.
+//!
+//! This module groups the static registries (`networks`, `tokens`, `dexes`, and
+//! `auth_methods`) with the runtime selections that higher layers use after configuration is
+//! loaded and validated.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_core::config::Config;
+//!
+//! let raw = r#"
+//! networks:
+//!   mainnet:
+//!     name: Ethereum
+//!     kind: evm
+//!     symbol: ETH
+//!     decimals: 18
+//!     chain_id: 1
+//!     node_url_http: https://example.invalid
+//!     node_url_grpc: null
+//!     blockexplorer_url: null
+//!     min_balance_coin: "0.1"
+//!     wrapped_token: weth
+//! dexes:
+//!   uniswap:
+//!     name: Uniswap
+//!     kind: uniswap_v3
+//!     router_address: null
+//!     factory_address: null
+//!     network_id: mainnet
+//!     settlement_contract: null
+//!     api_url: null
+//! tokens:
+//!   weth:
+//!     networks:
+//!       mainnet:
+//!         name: Wrapped Ether
+//!         kind: erc20
+//!         network_id: mainnet
+//!         address: "0x0000000000000000000000000000000000000000"
+//!         slippage: "0.50"
+//!         path_token: weth
+//!         decimals: 18
+//! auth_methods:
+//!   - method: meta_mask
+//! network:
+//!   rpc_urls: []
+//!   rpc_url: https://example.invalid
+//!   chain_id: 1
+//!   name: Ethereum
+//! wallet:
+//!   address: "0x0000000000000000000000000000000000000000"
+//!   private_key_path: /tmp/example.key
+//! dex:
+//!   provider: uniswap
+//! "#;
+//!
+//! let config: Config = serde_yaml::from_str(raw)?;
+//! config.validate().expect("cross references should be valid");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;

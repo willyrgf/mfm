@@ -1,3 +1,8 @@
+//! Static DEX registry configuration.
+//!
+//! These types model the named exchange backends that runtime config selects from, including both
+//! on-chain router/factory addresses and off-chain API endpoints when a DEX relies on them.
+
 use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
