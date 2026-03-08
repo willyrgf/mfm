@@ -29,6 +29,8 @@ pub struct Methods(Vec<Method>);
 
 impl Methods {
     /// Returns the configured authentication methods in declaration order.
+    ///
+    /// Callers typically iterate this list and use the first method they support at runtime.
     pub fn get_methods(&self) -> &Vec<Method> {
         &self.0
     }

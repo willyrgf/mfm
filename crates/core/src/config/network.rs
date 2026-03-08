@@ -56,6 +56,31 @@ pub enum NetworkValueError {
 
 impl Network {
     /// Parses `min_balance_coin` as a decimal coin amount into base units (e.g. wei).
+    ///
+    /// This is useful when a human-authored config stores thresholds in whole-coin notation but
+    /// execution code needs integer base units for comparisons or RPC calls.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use mfm_core::config::network::{Kind, Network};
+    ///
+    /// let network = Network {
+    ///     name: "Ethereum".to_string(),
+    ///     kind: Kind::Evm,
+    ///     symbol: "ETH".to_string(),
+    ///     decimals: Some(18),
+    ///     chain_id: 1,
+    ///     node_url_http: None,
+    ///     node_url_grpc: None,
+    ///     blockexplorer_url: None,
+    ///     min_balance_coin: "0.5".to_string(),
+    ///     wrapped_token: Some("weth".to_string()),
+    /// };
+    ///
+    /// assert_eq!(network.min_balance_wei(18)?.to_string(), "500000000000000000");
+    /// # Ok::<(), mfm_core::config::network::NetworkValueError>(())
+    /// ```
     pub fn min_balance_wei(&self, decimals: u8) -> Result<U256, NetworkValueError> {
         decimal_str_to_u256_units(&self.min_balance_coin, decimals).map_err(|reason| {
             NetworkValueError::InvalidMinBalance {
@@ -155,11 +180,16 @@ fn parse_u256_decimal(s: &str) -> Result<U256, String> {
 pub struct Networks(HashMap<String, Network>);
 impl Networks {
     /// Looks up a network definition by key.
+    ///
+    /// Keys are the logical identifiers from the YAML registry, not human-readable names.
     pub fn get(&self, key: &str) -> Option<&Network> {
         self.0.get(key)
     }
 
     /// Returns the underlying map of named network definitions.
+    ///
+    /// Prefer [`Self::get`] when you only need one entry; use this when validating or iterating
+    /// across the full registry.
     pub fn hashmap(&self) -> &HashMap<String, Network> {
         &self.0
     }

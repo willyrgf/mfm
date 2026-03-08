@@ -43,11 +43,16 @@ pub struct Dex {
 pub struct Dexes(HashMap<String, Dex>);
 impl Dexes {
     /// Returns the underlying map of named DEX definitions.
+    ///
+    /// Use this when validating the full registry or when building derived lookup structures.
     pub fn hashmap(&self) -> &HashMap<String, Dex> {
         &self.0
     }
 
     /// Looks up a DEX definition by key.
+    ///
+    /// Keys are the logical DEX identifiers from the YAML registry, not the human-readable
+    /// [`Dex::name`] field.
     pub fn get(&self, key: &str) -> Option<&Dex> {
         self.0.get(key)
     }

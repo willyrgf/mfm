@@ -11,6 +11,9 @@
 - Several core and state crates already have crate-level docs and examples.
 - The remaining gap is concentrated in item-level docs, publish-wave prioritization, and crate landing-page polish.
 - This document tracks rustdoc/docs.rs readiness only; current ops/states inventory lives in `docs/ops-and-states.md`.
+- Recent progress on 2026-03-08:
+  - wave-1 landing pages and examples are now in place for `mfm-machine`, `mfm-machine-derive`, `mfm-machine-test-support`, `mfm-sdk`, `mfm_core::config`, and `mfm-evm-core`
+  - `nix run .#check` is no longer blocked by the readonly Cargo target-dir issue in Nixfied task apps
 
 ## Global Requirements (Apply to Every Crate)
 
@@ -35,8 +38,6 @@ Current publish-wave framing:
 Remaining work in this tier:
 
 - deepen `mfm-machine` item-level docs around IDs, event types, execution plans, and standard tags
-- add more example-driven docs for `mfm-machine` and `mfm-machine-derive`
-- finish test-helper documentation in `mfm-machine-test-support`
 - keep this tier as the reference foundation that downstream crate docs link back to
 
 ---
@@ -51,8 +52,6 @@ Current publish-wave framing:
 Remaining work in this tier:
 
 - expand item-level docs in `mfm_core` config models and security-sensitive keystore support types
-- make `mfm-evm-core` the strongest low-level reference layer with examples for ABI, encoding, hex, and RLP helpers
-- improve `mfm-sdk` examples around operation registration, pipeline planning, and run launch surfaces
 - treat `mfm-app` as a later publish target because packaging topology and surface curation matter as much as raw rustdoc coverage
 
 ---
@@ -141,14 +140,14 @@ All 6 crates have good crate-level docs but lack item-level documentation.
 
 Keep only items here that directly affect docs.rs readiness:
 
-1. **Wave-1 crate landing pages need polish** — add package metadata and module landing pages for the selected publish wave.
+1. **Wave-1 landing pages are in place** — remaining work is deeper item-level coverage and publish-surface curation.
 2. **`crates/app/` is still a later publish target** — publishing topology is a larger issue than raw rustdoc coverage.
 3. **Selected state crates are close to publishable** — preserve that status and avoid regressing `missing_docs`.
 
 ## Suggested Workflow for the Engineer Agent
 
-1. **Start with Tier 1** (machine, machine-derive, machine-test-support) — these define the core types everything depends on.
-2. **Move to Tier 2** (core, evm-core, sdk, app) — focus on evm-core and app first since they're the worst.
+1. **Finish targeted item-level docs in Tier 1** — keep improving the core engine reference surface around IDs, events, execution plans, and engine-boundary types.
+2. **Finish targeted item-level docs in Tier 2** — especially `mfm_core` config types and security-sensitive support surfaces; keep `mfm-app` as a later publish target.
 3. **Then Tier 3** (states) — document the shared state primitives.
 4. **Then Tier 4-6** (ops, storages, collectors, transports) — these follow patterns established in earlier tiers.
 5. After each crate is documented, preserve or tighten `#![warn(missing_docs)]` to prevent regressions.

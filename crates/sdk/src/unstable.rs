@@ -11,6 +11,14 @@
 //! Source of truth: `docs/redesign.md` (v4).
 //! Not part of the stable API contract (Appendix C.2).
 //!
+//! Typical usage:
+//! 1. register operations in [`HashMapOperationRegistry`]
+//! 2. flatten a [`crate::pipeline::Pipeline`] via [`DefaultPipelinePlanner`]
+//! 3. start or resume runs via [`DefaultRunLauncher`]
+//! 4. rebuild plans during resume via [`SdkPlanResolver`]
+//! 5. use [`single_op_pipeline`] or [`execute_single_op_report`] from transport layers that expose
+//!    one-op convenience APIs
+//!
 //! # Examples
 //!
 //! ```rust
@@ -304,7 +312,11 @@ fn sources_and_sinks(g: &StateGraph) -> (Vec<StateId>, Vec<StateId>) {
     (sources, sinks)
 }
 
-/// A simple `OperationRegistry` implementation backed by a hash map.
+/// A simple [`crate::op::OperationRegistry`] implementation backed by a hash map.
+///
+/// Use this when callers want explicit runtime registration of a known set of operations without
+/// adding their own registry abstraction. Re-registering the same `(op_id, op_version)` pair
+/// replaces the previous implementation.
 #[derive(Default)]
 pub struct HashMapOperationRegistry {
     ops: HashMap<(OpId, String), DynOperation>,
@@ -312,6 +324,9 @@ pub struct HashMapOperationRegistry {
 
 impl HashMapOperationRegistry {
     /// Registers or replaces an operation implementation by its `(op_id, op_version)` key.
+    ///
+    /// This is typically performed once during application startup while assembling the operation
+    /// plugin or test harness registry.
     pub fn register(&mut self, op: DynOperation) {
         self.ops
             .insert((op.op_id(), op.op_version().to_string()), op);
@@ -340,6 +355,10 @@ impl OperationRegistry for HashMapOperationRegistry {
 /// - enforcing import/export wiring between adjacent pipeline steps
 /// - wrapping step-local states in a namespaced context view
 /// - preserving deterministic step ordering by linking sink states to the next step's sources
+///
+/// Use this planner for the repository's default flattened-composition contract: each pipeline
+/// step expands independently, exports feed later imports, and cross-step ordering is enforced by
+/// dependency edges between sink and source states.
 #[derive(Clone, Default)]
 pub struct DefaultPipelinePlanner;
 
@@ -532,7 +551,8 @@ impl State for NamespacedState {
 /// Default launcher that persists the manifest and delegates start/resume to an execution engine.
 ///
 /// Use this when callers want the standard MFM manifest layout and artifact-id derivation rules
-/// without reimplementing engine orchestration.
+/// without reimplementing engine orchestration. Pair it with [`SdkPlanResolver`] so resumed runs
+/// rebuild the same execution plan from the stored manifest input.
 #[derive(Clone, Default)]
 pub struct DefaultRunLauncher;
 
@@ -658,6 +678,18 @@ impl RunLauncher for DefaultRunLauncher {
 ///
 /// This is used by `DefaultExecutionEngine` during `resume()` to recover the pipeline definition
 /// from `RunManifest.input_params` and rebuild the deterministic execution plan on demand.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::sync::Arc;
+///
+/// use mfm_sdk::unstable::{DefaultPipelinePlanner, HashMapOperationRegistry, SdkPlanResolver};
+///
+/// let registry = Arc::new(HashMapOperationRegistry::default());
+/// let planner = Arc::new(DefaultPipelinePlanner);
+/// let _resolver = SdkPlanResolver::new(registry, planner);
+/// ```
 pub struct SdkPlanResolver {
     registry: Arc<dyn OperationRegistry>,
     planner: Arc<dyn PipelinePlanner>,
@@ -734,6 +766,25 @@ pub fn single_op_pipeline(
 }
 
 /// Inputs for single-op run execution with typed report extraction from final snapshot context.
+///
+/// This is a transport-facing convenience wrapper for APIs that conceptually execute "one op" but
+/// still rely on the pipeline-based launcher and manifest contract under the hood.
+///
+/// # Examples
+///
+/// ```rust
+/// use mfm_sdk::unstable::SingleOpReportRequest;
+///
+/// let request = SingleOpReportRequest {
+///     op_id: "keystore_list".to_string(),
+///     op_version: "v1".to_string(),
+///     op_config: serde_json::json!({"sort_by": "name"}),
+///     report_context_key: "report".to_string(),
+/// };
+///
+/// assert_eq!(request.op_id, "keystore_list");
+/// assert_eq!(request.report_context_key, "report");
+/// ```
 #[derive(Clone, Debug)]
 pub struct SingleOpReportRequest {
     /// Operation identifier to wrap into the single-step pipeline convention.
@@ -747,6 +798,9 @@ pub struct SingleOpReportRequest {
 }
 
 /// Typed error for single-op report execution.
+///
+/// The error is intentionally reduced to a stable code and safe display message so transport
+/// layers can forward it directly without leaking engine internals or secret-bearing details.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SingleOpReportError {
     /// Stable machine-readable error code.
@@ -929,6 +983,10 @@ async fn single_op_report_error_from_failed_run(
 }
 
 /// Executes a single-op run and decodes a typed report from final snapshot context.
+///
+/// This helper is best suited for CLI or HTTP adapters that want a typed "run op and return the
+/// final report" abstraction without reimplementing pipeline wrapping, launcher setup, manifest
+/// persistence, or snapshot decoding.
 pub async fn execute_single_op_report<T: serde::de::DeserializeOwned>(
     engine: Arc<dyn ExecutionEngine>,
     stores: Stores,
@@ -1002,13 +1060,20 @@ pub async fn execute_single_op_report<T: serde::de::DeserializeOwned>(
     })
 }
 
-/// Helpers for spawning and awaiting engine-managed child runs.
-///
-/// Helpers for spawning and awaiting child runs through the runtime IO surface.
+/// Helpers for spawning and awaiting engine-managed child runs through the runtime IO surface.
 ///
 /// These helpers are intentionally `unstable`:
 /// - the IO surface is stringly-typed (`IoCall.namespace`)
 /// - request/response schemas may evolve
+///
+/// Typical flow:
+/// 1. call [`spawn_child_run_v1`] with a fact key dedicated to the child-run spawn request
+/// 2. persist the returned identifiers or emit them in higher-level state output
+/// 3. later call [`await_child_run_v1`] with a second fact key to wait for completion
+/// 4. decode the returned snapshot or status into parent-state domain output
+///
+/// The helpers are replay-safe: if the fact key already exists, they avoid emitting duplicate
+/// linkage events on resume.
 pub mod child_runs {
     use serde::{Deserialize, Serialize};
 
@@ -1036,6 +1101,8 @@ pub mod child_runs {
     }
 
     /// Request payload for the `child_run_spawn_v1` helper.
+    ///
+    /// This is the typed front-end to the `"machine.child_run.spawn"` IO namespace.
     #[derive(Clone, Debug)]
     pub struct SpawnChildRunV1 {
         /// Operation identifier for the child run.
@@ -1053,6 +1120,9 @@ pub mod child_runs {
     }
 
     /// Result returned after successfully spawning a child run.
+    ///
+    /// These identifiers are typically persisted in parent-state context or artifacts so later
+    /// states can await or report on the child run deterministically.
     #[derive(Clone, Debug)]
     pub struct SpawnChildRunResult {
         /// Parent run that issued the spawn request.
@@ -1083,6 +1153,9 @@ pub mod child_runs {
     }
 
     /// Spawns a child run via the configured IO transport and emits the linkage event once.
+    ///
+    /// If the supplied fact key already exists, the transport call reuses recorded IO and the
+    /// helper suppresses duplicate `ChildRunSpawned` emission during replay or resume.
     pub async fn spawn_child_run_v1(
         io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,
@@ -1160,6 +1233,8 @@ pub mod child_runs {
     }
 
     /// Request payload for the `child_run_await_v1` helper.
+    ///
+    /// This is the typed front-end to the `"machine.child_run.await"` IO namespace.
     #[derive(Clone, Debug)]
     pub struct AwaitChildRunV1 {
         /// Child run identifier to wait for.
@@ -1169,6 +1244,9 @@ pub mod child_runs {
     }
 
     /// Result returned after waiting for a child run to finish.
+    ///
+    /// The response includes both the reported run status and the decoded final snapshot payload
+    /// returned by the child-run transport.
     #[derive(Clone, Debug)]
     pub struct AwaitChildRunResult {
         /// Child run that finished.
@@ -1198,6 +1276,9 @@ pub mod child_runs {
     }
 
     /// Waits for a previously spawned child run and emits the completion event once.
+    ///
+    /// If the supplied fact key already exists, the transport call reuses recorded IO and the
+    /// helper suppresses duplicate `ChildRunCompleted` emission during replay or resume.
     pub async fn await_child_run_v1(
         io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,

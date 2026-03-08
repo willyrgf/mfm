@@ -5,6 +5,25 @@
 //! These states interact with local keystore transport namespaces and must not persist secrets into
 //! context, artifacts, reports, or error details. Keep user-facing outputs limited to metadata that
 //! is already safe to expose.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use std::path::PathBuf;
+//!
+//! use mfm_state_keystore::states::admin::{KeystoreImportStateConfig, KeystoreImportType};
+//!
+//! let cfg = KeystoreImportStateConfig {
+//!     import_type: KeystoreImportType::PrivateKey,
+//!     label: Some("deploy".to_string()),
+//!     derivation_path: "m/44'/60'/0'/0/0".to_string(),
+//!     keystore_path: PathBuf::from("/tmp/keystore"),
+//!     stdin: true,
+//! };
+//!
+//! assert_eq!(cfg.label.as_deref(), Some("deploy"));
+//! assert!(cfg.stdin);
+//! ```
 
 use std::path::PathBuf;
 
@@ -118,6 +137,9 @@ pub struct KeystoreDeleteReport {
 }
 
 /// Runtime configuration for the keystore import state.
+///
+/// Secret material itself is never stored here; the state reads it from stdin or a local transport
+/// endpoint at execution time.
 #[derive(Clone, Debug)]
 pub struct KeystoreImportStateConfig {
     /// Input kind to import.
@@ -146,6 +168,8 @@ pub struct KeystoreListStateConfig {
 }
 
 /// Runtime configuration for the keystore delete state.
+///
+/// Exactly one of `id` or `by_label` should be supplied by the planner.
 #[derive(Clone, Debug)]
 pub struct KeystoreDeleteStateConfig {
     /// Optional UUID selector for the key to delete.

@@ -124,6 +124,12 @@ fn default_rpc_url() -> String {
 pub struct WalletConfig {
     /// Expected wallet address for the selected signer.
     pub address: Address,
+    ///
+    /// # Security
+    ///
+    /// This path points to secret-bearing material. The path itself is safe to serialize, but the
+    /// file contents must never be logged or persisted outside the keystore/config loading flow.
+    ///
     /// Filesystem path to a plaintext private key used by legacy flows.
     #[serde(skip_serializing)]
     pub private_key_path: PathBuf,
@@ -137,6 +143,11 @@ pub struct DexConfig {
 }
 
 /// Zeroizing wallet material loaded from configuration.
+///
+/// # Security
+///
+/// This type owns raw private-key text. Keep its lifetime short and avoid exposing the borrowed
+/// contents in logs, errors, or serialized output.
 pub struct SecureWallet {
     private_key: Zeroizing<String>,
 }
@@ -150,6 +161,11 @@ impl SecureWallet {
     }
 
     /// Returns the private key as a borrowed string slice.
+    ///
+    /// # Security
+    ///
+    /// The returned slice still references secret material. Borrow it only for the minimum scope
+    /// needed to hand off to signing or keystore code.
     pub fn get_private_key(&self) -> &str {
         &self.private_key
     }
@@ -168,6 +184,9 @@ fn expand_path(path: &Path) -> PathBuf {
 
 impl Config {
     /// Loads, deserializes, and validates a YAML configuration file.
+    ///
+    /// Validation is always performed after deserialization so callers do not accidentally operate
+    /// on a partially-wired registry.
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let config: Config = serde_yaml::from_str(&std::fs::read_to_string(path)?)?;
         if let Err(errors) = config.validate() {
@@ -181,6 +200,43 @@ impl Config {
     }
 
     /// Validates cross-references across networks, tokens, and DEX definitions.
+    ///
+    /// The current checks ensure that:
+    /// - `dex.provider` points at a configured DEX
+    /// - each token-network entry points at a configured network
+    /// - each DEX entry points at a configured network
+    ///
+    /// All discovered issues are returned together so callers can present a full config report
+    /// instead of failing on only the first mismatch.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use mfm_core::config::Config;
+    ///
+    /// let raw = r#"
+    /// networks: {}
+    /// dexes: {}
+    /// tokens: {}
+    /// auth_methods:
+    ///   - method: meta_mask
+    /// network:
+    ///   rpc_urls: []
+    ///   rpc_url: https://example.invalid
+    ///   chain_id: 1
+    ///   name: Ethereum
+    /// wallet:
+    ///   address: "0x0000000000000000000000000000000000000000"
+    ///   private_key_path: /tmp/example.key
+    /// dex:
+    ///   provider: missing
+    /// "#;
+    ///
+    /// let config: Config = serde_yaml::from_str(raw)?;
+    /// let errors = config.validate().expect_err("missing dex registry entry should fail");
+    /// assert!(errors.iter().any(|msg| msg.contains("dex.provider")));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
 
@@ -223,6 +279,19 @@ impl Config {
 
     /// Loads wallet material using configured authentication methods, falling back to the legacy
     /// plaintext wallet path when necessary.
+    ///
+    /// Runtime callers should prefer `auth_methods` because it makes the loading strategy explicit
+    /// in configuration. The fallback path exists for older configs that still rely on
+    /// [`WalletConfig::private_key_path`].
+    ///
+    /// # Security
+    ///
+    /// This method reads raw private-key text from disk. The returned [`SecureWallet`] zeroizes its
+    /// owned buffer on drop, but callers must still avoid logging or serializing the secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no configured wallet source can be read successfully.
     pub fn load_wallet(
         &self,
         password: Option<&str>,

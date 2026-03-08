@@ -95,6 +95,9 @@ pub mod ids {
     use std::fmt;
 
     /// Error returned when an identifier fails the runtime naming contract.
+    ///
+    /// The stable identifier family deliberately keeps validation strict so identifiers remain
+    /// safe to embed in manifests, event streams, context keys, and artifact-derived metadata.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct IdValidationError {
         kind: &'static str,
@@ -179,6 +182,18 @@ pub mod ids {
 
     impl OpId {
         /// Creates an operation identifier after validating the naming contract.
+        ///
+        /// Accepted values match `^[a-z][a-z0-9_]{0,62}$`.
+        ///
+        /// # Examples
+        ///
+        /// ```rust
+        /// use mfm_machine::ids::OpId;
+        ///
+        /// let op_id = OpId::new("keystore_list")?;
+        /// assert_eq!(op_id.as_str(), "keystore_list");
+        /// # Ok::<(), mfm_machine::ids::IdValidationError>(())
+        /// ```
         pub fn new(value: impl Into<String>) -> Result<Self, IdValidationError> {
             let value = value.into();
             if !is_valid_id_segment(&value) {
@@ -263,6 +278,18 @@ pub mod ids {
 
     impl StateId {
         /// Creates a state identifier after validating the `<machine>.<step>.<state>` shape.
+        ///
+        /// Each segment must satisfy the same naming contract as [`OpId`].
+        ///
+        /// # Examples
+        ///
+        /// ```rust
+        /// use mfm_machine::ids::StateId;
+        ///
+        /// let state_id = StateId::new("portfolio_snapshot.fetch_balances.read_eth")?;
+        /// assert_eq!(state_id.as_str(), "portfolio_snapshot.fetch_balances.read_eth");
+        /// # Ok::<(), mfm_machine::ids::IdValidationError>(())
+        /// ```
         pub fn new(value: impl Into<String>) -> Result<Self, IdValidationError> {
             let value = value.into();
             if !validate_state_id(&value) {
@@ -486,6 +513,16 @@ pub mod meta {
     /// These constants are the stable classification vocabulary shared across planners,
     /// executors, and policy code. Prefer reusing them instead of inventing near-duplicate
     /// spellings in downstream crates.
+    ///
+    /// A good default mapping is:
+    /// - `CONFIG` for validation and config-shaping nodes
+    /// - `FETCH_DATA` for read/fact acquisition nodes
+    /// - `COMPUTE` for pure transforms
+    /// - `EXECUTE` for imperative runtime work
+    /// - `REPORT` for user-facing output assembly
+    ///
+    /// `APPLY_SIDE_EFFECT` and `IMPURE` are stronger policy signals and should be reserved for
+    /// states whose replay or retry behavior genuinely depends on those classifications.
     pub mod standard_tags {
         /// Marks a configuration or validation state.
         pub const CONFIG: &str = "config";
@@ -871,6 +908,9 @@ pub mod events {
     }
 
     /// Envelope type used by event stores.
+    ///
+    /// The event store contract expects values of this enum to be wrapped in [`EventEnvelope`]
+    /// with strictly increasing per-run sequence numbers.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum Event {
         /// Engine-level event required for resume and recovery.
@@ -880,6 +920,9 @@ pub mod events {
     }
 
     /// Envelope stored in the event store.
+    ///
+    /// `ts_millis` is informational only; replay semantics come from event order and payload
+    /// content, not wall-clock time.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct EventEnvelope {
         /// Run to which this event belongs.
@@ -1136,6 +1179,9 @@ pub mod plan {
     }
 
     /// Operation-specific executable plan passed to the engine.
+    ///
+    /// The engine treats this as immutable input: planners finish all graph shaping first, then
+    /// the engine executes the resulting nodes and dependency edges exactly as supplied.
     #[derive(Clone)]
     pub struct ExecutionPlan {
         /// Operation identifier associated with this plan.
@@ -1145,6 +1191,10 @@ pub mod plan {
     }
 
     /// Plan validation errors (fail-fast).
+    ///
+    /// These errors are intended for plan construction time, before a run is started. They help
+    /// callers distinguish malformed planner output from runtime failures that occur later inside
+    /// the execution engine.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum PlanValidationError {
         /// The plan contained no states.
@@ -1275,6 +1325,9 @@ pub mod engine {
     ///
     /// `phase` reports the final or current lifecycle state, while `final_snapshot_id` is populated
     /// only when a snapshot exists at the point the engine returns.
+    ///
+    /// This is intentionally compact so transport layers can expose a stable run result without
+    /// forcing callers to inspect raw event streams for the common success/failure path.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct RunResult {
         /// Run identifier that was started or resumed.
@@ -1289,6 +1342,10 @@ pub mod engine {
     ///
     /// Callers usually construct this once planning is complete and the manifest has already been
     /// content-addressed and persisted or prepared for persistence.
+    ///
+    /// Keeping the manifest, derived plan, run config, and initial context together makes the
+    /// engine boundary explicit: everything above this type is planning/orchestration, everything
+    /// below it is execution and persistence.
     pub struct StartRun {
         /// Manifest content for the run.
         pub manifest: RunManifest,

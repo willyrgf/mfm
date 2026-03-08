@@ -79,6 +79,9 @@ pub fn init_test_observability() {
 /// - content-addressed writes
 /// - round-trip reads
 /// - missing-artifact behavior for `exists` and `get`
+///
+/// Backend crates typically call this from their own async integration tests after provisioning
+/// a clean store instance for the test case.
 pub async fn artifact_store_contract_tests(store: &dyn ArtifactStore) {
     put_get_roundtrip(store).await;
     content_addressed(store).await;
@@ -90,6 +93,9 @@ pub async fn artifact_store_contract_tests(store: &dyn ArtifactStore) {
 /// The suite currently verifies:
 /// - append/read round trips
 /// - optimistic concurrency via `expected_seq`
+///
+/// The supplied store should start from an isolated test database or namespace so the sequence and
+/// concurrency assertions do not interact with events written by other tests.
 pub async fn event_store_contract_tests(store: &dyn EventStore) {
     append_and_read(store).await;
     expected_seq_concurrency(store).await;

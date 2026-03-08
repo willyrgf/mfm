@@ -5,6 +5,36 @@
 //! These states bridge local keystore material and network submission paths. They must not leak
 //! passwords, raw key material, or decrypted secret buffers through persisted context, reports, or
 //! error messages.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use std::path::PathBuf;
+//!
+//! use alloy_primitives::Address;
+//! use mfm_state_keystore::states::tx::KeystoreTxSignStateConfig;
+//! use mfm_state_keystore::tx::Eip1559TxToSign;
+//!
+//! let cfg = KeystoreTxSignStateConfig {
+//!     id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+//!     by_label: None,
+//!     tx: Eip1559TxToSign {
+//!         to: Address::from([0u8; 20]),
+//!         value_wei: 0,
+//!         chain_id: 1,
+//!         nonce: 7,
+//!         max_fee_per_gas: 10,
+//!         max_priority_fee_per_gas: 1,
+//!         gas_limit: 21_000,
+//!         data: Vec::new(),
+//!     },
+//!     out_path: PathBuf::from("/tmp/raw-tx.hex"),
+//!     keystore_path: PathBuf::from("/tmp/keystore"),
+//! };
+//!
+//! assert_eq!(cfg.tx.chain_id, 1);
+//! assert_eq!(cfg.out_path, PathBuf::from("/tmp/raw-tx.hex"));
+//! ```
 
 use std::path::PathBuf;
 
@@ -27,6 +57,8 @@ use serde::Deserialize;
 use crate::tx::Eip1559TxToSign;
 
 /// Runtime configuration for a keystore-backed transaction signing state.
+///
+/// Exactly one of `id` or `by_label` should be populated by the planner.
 #[derive(Clone, Debug)]
 pub struct KeystoreTxSignStateConfig {
     /// Optional UUID selector for the signing key.
@@ -42,6 +74,8 @@ pub struct KeystoreTxSignStateConfig {
 }
 
 /// Runtime configuration for a raw-transaction submission state.
+///
+/// The referenced file is expected to contain a `0x`-prefixed signed transaction payload.
 #[derive(Clone, Debug)]
 pub struct KeystoreTxSendRawStateConfig {
     /// Route source identifier used by the EVM RPC transport.

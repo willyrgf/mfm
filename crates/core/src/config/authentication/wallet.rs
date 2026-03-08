@@ -29,6 +29,11 @@ impl Wallet {
     /// Encrypted wallet files are intentionally unsupported; callers must opt into plaintext
     /// loading with `not_encrypted: true`.
     ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or if `not_encrypted` is not explicitly set to
+    /// `true`.
+    ///
     /// # Security
     ///
     /// The returned string contains raw secret material. Callers should minimize its lifetime,

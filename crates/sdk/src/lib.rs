@@ -183,6 +183,9 @@ pub mod op {
     pub type DynOperation = Arc<dyn Operation>;
 
     /// Registry used to resolve operations (by id + version) at plan/launch/resume time.
+    ///
+    /// For the default in-memory implementation used by most binaries and tests, see
+    /// [`crate::unstable::HashMapOperationRegistry`].
     pub trait OperationRegistry: Send + Sync {
         /// Resolves an operation implementation for the requested id and version.
         fn resolve(&self, op_id: &OpId, op_version: &str) -> Result<DynOperation, SdkError>;
@@ -241,6 +244,9 @@ pub mod pipeline {
     }
 
     /// Pipeline planning contract (flattened composition).
+    ///
+    /// For the standard implementation that validates pipeline wiring and produces the flattened
+    /// execution graph used by `mfm-machine`, see [`crate::unstable::DefaultPipelinePlanner`].
     pub trait PipelinePlanner: Send + Sync {
         /// Implementations MUST:
         /// - resolve ops via `OperationRegistry`
@@ -264,6 +270,9 @@ pub mod launcher {
     use crate::pipeline::{Pipeline, PipelinePlanner};
 
     /// Start inputs for launching a pipeline run.
+    ///
+    /// This request bundles everything a launcher needs to compute the plan, persist the
+    /// manifest, and hand the run to an execution engine.
     pub struct LaunchPipeline {
         /// Pipeline template to execute.
         pub pipeline: Pipeline,
@@ -282,6 +291,9 @@ pub mod launcher {
     /// - compute + store the `RunManifest` artifact (content-addressed)
     ///   - `RunManifest.input_params` SHOULD embed `PipelineManifestInput { pipeline, input }` (no secrets)
     /// - call `ExecutionEngine::{start,resume}`
+    ///
+    /// For the standard implementation that follows the repository manifest layout and resume
+    /// contract, see [`crate::unstable::DefaultRunLauncher`].
     #[async_trait]
     pub trait RunLauncher: Send + Sync {
         /// Plans the supplied pipeline, persists its manifest, and starts a new run.

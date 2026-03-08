@@ -14,4 +14,7 @@
 //! // depend on the package name that future derive macros will live under.
 //! use mfm_machine_derive as _;
 //! ```
+//!
+//! This avoids a future package rename when derive macros are introduced for common
+//! `mfm-machine` patterns.
 #![warn(missing_docs)]
