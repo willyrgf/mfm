@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
 //! Reusable EVM execution helpers and runtime states.
 //!
