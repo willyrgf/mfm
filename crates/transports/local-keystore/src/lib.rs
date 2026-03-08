@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 //! Local keystore transport used by keystore administration and signing states.
 //!
 //! The transport bridges keystore-specific local side effects into the generic Live IO interface.
@@ -20,6 +21,12 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use mfm_collectors_local_keystore::{
+    KeystoreDeleteRequest, KeystoreImportRequest, KeystoreImportType, KeystoreListRequest,
+    KeystoreListSortBy, KeystoreTxSignRequest, NAMESPACE_LOCAL_KEYSTORE_DELETE,
+    NAMESPACE_LOCAL_KEYSTORE_IMPORT, NAMESPACE_LOCAL_KEYSTORE_LIST,
+    NAMESPACE_LOCAL_KEYSTORE_TX_SIGN,
+};
 use mfm_core::keystore::{KeyType, KeystoreError};
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
 use mfm_machine::ids::ErrorCode;
@@ -27,15 +34,13 @@ use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_op_keystore::{Keystore, KeystoreConfig};
 use mfm_state_keystore::states::admin::{
-    KeystoreDeleteReport, KeystoreImportReport, KeystoreImportType, KeystoreListKey,
-    KeystoreListReport, KeystoreListSortBy,
+    KeystoreDeleteReport, KeystoreImportReport, KeystoreListKey, KeystoreListReport,
 };
 use mfm_state_keystore::tx::{
     parse_address, parse_data_hex, parse_u128_quantity, resolve_key_id, sign_eip1559_transaction,
     write_raw_transaction_file, Eip1559TxToSign, KeystoreTxError,
 };
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -64,10 +69,10 @@ struct LocalKeystoreIoTransport;
 impl LiveIoTransport for LocalKeystoreIoTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
         match call.namespace.as_str() {
-            "local.keystore.import" => handle_keystore_import(call.request),
-            "local.keystore.list" => handle_keystore_list(call.request),
-            "local.keystore.delete" => handle_keystore_delete(call.request),
-            "local.keystore.tx_sign" => handle_keystore_tx_sign(call.request),
+            NAMESPACE_LOCAL_KEYSTORE_IMPORT => handle_keystore_import(call.request),
+            NAMESPACE_LOCAL_KEYSTORE_LIST => handle_keystore_list(call.request),
+            NAMESPACE_LOCAL_KEYSTORE_DELETE => handle_keystore_delete(call.request),
+            NAMESPACE_LOCAL_KEYSTORE_TX_SIGN => handle_keystore_tx_sign(call.request),
             _ => Err(io_other(
                 "unknown_namespace",
                 ErrorCategory::Unknown,
@@ -75,76 +80,6 @@ impl LiveIoTransport for LocalKeystoreIoTransport {
             )),
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct KeystoreImportRequest {
-    kind: KeystoreImportType,
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default)]
-    label_hex: Option<String>,
-    derive_path: String,
-    #[serde(default)]
-    store_path: Option<String>,
-    #[serde(default)]
-    store_path_hex: Option<String>,
-    stdin_mode: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct KeystoreListRequest {
-    #[serde(default)]
-    store_path: Option<String>,
-    #[serde(default)]
-    store_path_hex: Option<String>,
-    show_addrs: bool,
-    #[serde(default)]
-    filter_label: Option<String>,
-    #[serde(default)]
-    filter_label_hex: Option<String>,
-    sort_by: KeystoreListSortBy,
-}
-
-#[derive(Debug, Deserialize)]
-struct KeystoreDeleteRequest {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default)]
-    label_hex: Option<String>,
-    confirm_yes: bool,
-    #[serde(default)]
-    store_path: Option<String>,
-    #[serde(default)]
-    store_path_hex: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct KeystoreTxSignRequest {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default)]
-    label_hex: Option<String>,
-    #[serde(default)]
-    store_path: Option<String>,
-    #[serde(default)]
-    store_path_hex: Option<String>,
-    #[serde(default)]
-    out_path: Option<String>,
-    #[serde(default)]
-    out_path_hex: Option<String>,
-    to: String,
-    value_wei: String,
-    chain_id: u64,
-    nonce: u64,
-    max_fee_per_gas: String,
-    max_priority_fee_per_gas: String,
-    gas_limit: u64,
-    data_hex: String,
 }
 
 type LocalError = LocalTransportError;

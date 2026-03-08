@@ -1,4 +1,5 @@
 #![cfg(feature = "parity-tests")]
+#![allow(clippy::disallowed_methods)]
 
 use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_machine_test_support::artifact_store_contract_tests;

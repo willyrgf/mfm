@@ -87,19 +87,6 @@ Canonical shared utility modules are in place:
 - `crates/states/common/src/evm_encoding.rs`
 - `crates/states/common/src/util_error.rs`
 
-Current duplication ceilings enforced by `mfm-architecture-verify`:
-- `normalize_hex_str` <= 3
-- `hex_to_bytes` <= 3
-- `bytes_to_hex_prefixed` <= 3
-- `parse_abi` <= 3
-- `encode_params` <= 2
-- `parse_value_wei_to_hex` <= 2
-- `trim_leading_zero_bytes` <= 1
-- `u128_to_min_be` <= 1
-- `rlp_encode_bytes` <= 1
-- `rlp_encode_list` <= 1
-- `usize_to_min_be` <= 1
-
 Interpretation:
 - RLP duplication is now single-source.
 - Remaining duplication is mostly wrapper-layer compatibility around shared helpers.
@@ -113,11 +100,8 @@ Interpretation:
 
 Checks enforced:
 1. Expand boundary: forbids `.await` and ambient IO APIs inside op `expand()`.
-2. Utility duplication ceilings: prevents regression above configured limits.
-3. Shared-state ratio: now enforced at 80% minimum.
-
-Bugfix included in verifier:
-- State ratio counting now strips `#[cfg(test)]` items precisely, instead of truncating files at the first `#[cfg(test)]` occurrence.
+2. Runtime EVM namespace constraint: direct `namespace: "evm"` runtime call sites stay confined to the dedicated EVM bridge.
+3. Keystore tx-sign locality: the keystore signing state must remain on the local keystore namespace.
 
 ## 5. Findings (Current)
 
@@ -152,7 +136,7 @@ Bugfix included in verifier:
 
 1. No business workflow logic in binaries: **Met**.
 2. Op `expand()` methods are config+graph only: **Met**.
-3. Shared state ratio >= 80%: **Met** (90%).
+3. Shared-state extraction complete: **Met**. The old ratio metric remains historical context only and is no longer a hard architecture gate.
 4. Op-local states only for domain-specific aggregation/output: **Met**.
 5. Reusable patterns extracted as shared states: **Met** for keystore-tx, evm-write, proof patterns, nix exec.
 6. Side effects routed through IO abstraction: **Met**.

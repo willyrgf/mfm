@@ -6,4 +6,6 @@ edition = "2021"
 [dependencies]
 async-trait = { workspace = true }
 mfm-machine = { path = "../../machine" }
+mfm-collectors-proof = { path = "../../collectors/proof" }
+serde = { workspace = true }
 serde_json = { workspace = true }

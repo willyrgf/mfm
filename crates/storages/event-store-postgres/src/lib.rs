@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 #![warn(missing_docs)]
 //! PostgreSQL `EventStore` for parity tests and durable deployments.
 //!

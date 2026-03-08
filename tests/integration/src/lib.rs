@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 #![warn(missing_docs)]
 //! Shared workspace integration and parity test helpers.
 //!

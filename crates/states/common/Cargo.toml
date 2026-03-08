@@ -16,5 +16,6 @@ mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-collectors-nix = { path = "../../collectors/nix" }
 mfm-collectors-exec = { path = "../../collectors/exec" }
+mfm-collectors-proof = { path = "../../collectors/proof" }
 
 [dev-dependencies]

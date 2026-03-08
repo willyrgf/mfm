@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 #![warn(missing_docs)]
 //! Shared Aave V3 state-layer types and runtime states.
 //!

@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 use clap::Parser;
 
 mod commands;

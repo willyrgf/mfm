@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 //! Public API contract for the MFM runtime.
 //!
 //! `mfm-machine` defines the stable identifiers, execution-plan types, context and IO

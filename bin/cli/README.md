@@ -241,7 +241,7 @@ mfm_cli keystore tx-send-raw --in <PATH> [--source-id <ID>]
 
 **Key options:**
 - `--in <PATH>`: file containing 0x-prefixed raw signed tx hex
-- `--source-id <ID>`: EVM source ID (falls back to `MFM_EVM_RPC_SOURCE_ID`)
+- `--source-id <ID>`: EVM source ID (the CLI resolves `MFM_EVM_RPC_SOURCE_ID` before starting the op when this flag is omitted)
 
 **Example:**
 ```sh
@@ -408,7 +408,7 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   mfm_cli keystore list  # Will output JSON
   ```
 
-- **`MFM_KEYSTORE_PATH`**: Overrides the default keystore path (`~/.mfm/keystore`). If a `--keystore` flag is provided, it takes precedence.
+- **`MFM_KEYSTORE_PATH`**: Default keystore path used by keystore CLI commands when `--keystore` is not provided. The CLI resolves this before launching the underlying op.
   ```sh
   export MFM_KEYSTORE_PATH="/etc/mfm/prod.keystore"
   mfm_cli keystore list
@@ -434,7 +434,7 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   mfm_cli run artifacts get "<ARTIFACT_ID>"
   ```
 
-- **`MFM_EVM_RPC_SOURCE_ID`**: Default source ID for `mfm_cli keystore tx-send-raw` when `--source-id` is not provided.
+- **`MFM_EVM_RPC_SOURCE_ID`**: Default source ID for `mfm_cli keystore tx-send-raw` when `--source-id` is not provided. The CLI resolves this before launching the underlying op.
   ```sh
   export MFM_EVM_RPC_SOURCE_ID="user_primary"
   ```

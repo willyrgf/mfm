@@ -81,7 +81,7 @@ Changes:
 - Update `mfm-architecture-verify` to accept both old and new shared-state roots.
 - Update keystore tx-sign local-only check to probe both paths:
   - old: `crates/ops/keystore-common/src/states/tx.rs`
-  - new: `crates/states/keystore/src/states/tx.rs`
+  - new: `crates/states/keystore/src/states/tx.rs` for local signing, with remote submission isolated under `crates/states/keystore-submit/src/tx.rs`
 
 Rationale:
 - Prevent avoidable churn while moving crates one-by-one.

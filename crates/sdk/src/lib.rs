@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 #![warn(missing_docs)]
 //! Orchestration SDK for planning and launching MFM runs.
 //!

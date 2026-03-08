@@ -35,7 +35,7 @@ impl TriggerOnce {
         }
     }
 
-    fn trigger_if_armed(&self) {
+    pub(crate) fn trigger_if_armed(&self) {
         if self.armed_once.swap(false, Ordering::SeqCst) {
             self.stop_after_handler_once.store(true, Ordering::SeqCst);
         }

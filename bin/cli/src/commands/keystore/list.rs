@@ -1,7 +1,7 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::{format_keys_table, handle_command_result, KeyDisplay};
-use crate::support::{app_services, run_stores};
+use crate::support::{app_services, command_defaults, run_stores};
 use clap::Args;
 use mfm_op_keystore_admin::{
     keystore_list_report_context_key, KeystoreListOpConfig, KeystoreListReport, KeystoreListSortBy,
@@ -70,12 +70,10 @@ pub async fn execute(ctx: &CommandContext, args: &ListArgs) -> ! {
 }
 
 async fn execute_internal(args: &ListArgs) -> CommandResult<ListResponse> {
+    let keystore_path = command_defaults::resolve_keystore_path(args.keystore.as_ref());
     let op_config = KeystoreListOpConfig {
         keystore_path: None,
-        keystore_path_hex: args
-            .keystore
-            .as_ref()
-            .map(|path| hex::encode(path.to_string_lossy().as_bytes())),
+        keystore_path_hex: Some(hex::encode(keystore_path.to_string_lossy().as_bytes())),
         show_addresses: args.show_addresses,
         filter_label: None,
         filter_label_hex: args

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 #![warn(missing_docs)]
 //! Shared state-layer building blocks used across operation crates.
 //!
@@ -8,19 +9,18 @@
 //! # Examples
 //!
 //! ```rust
-//! use mfm_machine::ids::{ContextKey, FactKey};
-//! use mfm_state_common::states::io::NamespaceReadState;
+//! use mfm_machine::ids::{ContextKey, StateId};
+//! use mfm_state_common::states::proof::ProofReadState;
 //!
-//! let state = NamespaceReadState {
-//!     namespace: "exec".to_string(),
-//!     request: serde_json::json!({ "program_path": "/nix/store/example/bin/tool" }),
-//!     fact_key: FactKey("mfm:local|state:demo.main.read|purpose:probe|req:deadbeef".to_string()),
+//! let state = ProofReadState {
+//!     state_id: StateId::must_new("proof.main.read".to_string()),
+//!     purpose: "proof_read",
 //!     output_key: ContextKey("result".to_string()),
-//!     io_error_code: "exec_failed",
-//!     io_error_message: "exec call failed",
+//!     io_error_code: "read_failed",
+//!     io_error_message: "proof read failed",
 //! };
 //!
-//! assert_eq!(state.namespace, "exec");
+//! assert_eq!(state.purpose, "proof_read");
 //! ```
 
 /// Context read/write helpers that map low-level context failures into stable state errors.

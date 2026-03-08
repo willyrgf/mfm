@@ -2,7 +2,7 @@
 name = "mfm-state-keystore"
 version = "0.1.0"
 edition = "2021"
-description = "Reusable keystore administration and transaction states for MFM"
+description = "Reusable keystore administration and local signing states for MFM"
 repository = "https://github.com/willyrgf/mfm2"
 license = "MIT"
 
@@ -24,6 +24,6 @@ mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-op-keystore = { package = "mfm-op-keystore-shim", path = "../../ops/keystore-op" }
 mfm-state-common = { path = "../common" }
+mfm-collectors-local-keystore = { path = "../../collectors/local-keystore" }
 mfm-evm-core = { path = "../../evm-core" }
-mfm-evm-runtime = { path = "../../evm-runtime" }
 mfm_core = { path = "../../core" }

@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
+#![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
 //! Proof op (acceptance tests).
 //!
@@ -32,9 +34,9 @@ use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_state_common::ctx as op_ctx;
 use mfm_state_common::output as op_output;
-use mfm_state_common::states::io::NamespaceReadState;
 use mfm_state_common::states::meta;
-use mfm_state_common::states::side_effect::{IdempotentSideEffectState, TriggerOnce};
+use mfm_state_common::states::proof::{ProofApplySideEffectState, ProofReadState};
+use mfm_state_common::states::side_effect::TriggerOnce;
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
@@ -64,10 +66,6 @@ fn info(code: &'static str, category: ErrorCategory, retryable: bool, message: &
 
 fn ctx_key(s: &'static str) -> ContextKey {
     ContextKey(s.to_string())
-}
-
-fn read_fact_key(op_path: &OpPath) -> FactKey {
-    FactKey(format!("proof:read|op:{}", op_path.0))
 }
 
 fn output_fact_key(op_path: &OpPath) -> FactKey {
@@ -123,24 +121,21 @@ impl Operation for ProofOp {
         let side_sid = mfm_machine::ids::StateId::must_new(side_id);
         let out_sid = mfm_machine::ids::StateId::must_new(out_id);
 
-        let read = Arc::new(NamespaceReadState {
-            namespace: "proof.read".to_string(),
-            request: serde_json::json!({}),
-            fact_key: read_fact_key(&op_path),
+        let read = Arc::new(ProofReadState {
+            state_id: read_sid.clone(),
+            purpose: "proof_read",
             output_key: ctx_key("read_fact"),
             io_error_code: "read_fact_io_failed",
             io_error_message: "failed to read input fact",
         });
-        let side = Arc::new(IdempotentSideEffectState {
+        let side = Arc::new(ProofApplySideEffectState {
             state_id: side_sid.clone(),
             op_id: OP_ID,
-            op_path: op_path.clone(),
             input_key: ctx_key("read_fact"),
             idempotency_key_output: ctx_key("idempotency_key"),
             output_key: ctx_key("side_effect_result"),
-            namespace: "proof.side_effect".to_string(),
-            fact_key_prefix: "proof:side_effect",
             event_name: DOMAIN_EVENT_IDEMPOTENCY_KEY.to_string(),
+            purpose: "proof_side_effect",
             orphan_after_side_effect: self.orphan_after_side_effect.clone(),
         });
         let out = Arc::new(WriteOutputState {

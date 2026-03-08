@@ -6,5 +6,7 @@ pub mod io;
 pub mod meta;
 /// Reusable state for pre-resolved or flake-resolved nix program execution.
 pub mod nix;
+/// Typed proof states that avoid raw proof namespace strings in op planners.
+pub mod proof;
 /// Reusable state for idempotent side-effect application.
 pub mod side_effect;

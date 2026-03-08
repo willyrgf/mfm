@@ -1,7 +1,7 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::{app_services, run_stores};
+use crate::support::{app_services, command_defaults, run_stores};
 use clap::Args;
 use mfm_op_keystore_tx::{
     tx_send_raw_report_context_key, TxSendRawOpConfig, TxSendRawReport, TX_OP_VERSION,
@@ -49,8 +49,9 @@ pub async fn execute(ctx: &CommandContext, args: &TxSendRawArgs) -> ! {
 }
 
 async fn execute_internal(args: &TxSendRawArgs) -> CommandResult<TxSendRawResponse> {
+    let source_id = command_defaults::resolve_rpc_source_id(args.source_id.as_deref())?;
     let op_config = TxSendRawOpConfig {
-        source_id: args.source_id.clone(),
+        source_id: Some(source_id),
         input_path: args.input.display().to_string(),
     };
 

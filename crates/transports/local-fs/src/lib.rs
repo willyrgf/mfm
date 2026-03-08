@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 //! Local filesystem transport for reading small text inputs.
 //!
 //! This transport is intentionally narrow and currently exposes only `local.fs.read_text`, which
@@ -15,12 +16,12 @@
 #![warn(missing_docs)]
 
 use async_trait::async_trait;
+use mfm_collectors_local_fs::{ReadTextRequest, ReadTextResponse, NAMESPACE_LOCAL_FS_READ_TEXT};
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError};
 use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
 
 /// Transport factory for the `local.fs` namespace group.
 #[derive(Clone, Default)]
@@ -42,7 +43,7 @@ struct LocalFsIoTransport;
 impl LiveIoTransport for LocalFsIoTransport {
     async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
         match call.namespace.as_str() {
-            "local.fs.read_text" => handle_read_text(call.request),
+            NAMESPACE_LOCAL_FS_READ_TEXT => handle_read_text(call.request),
             _ => Err(io_other(
                 "unknown_namespace",
                 ErrorCategory::Unknown,
@@ -50,14 +51,6 @@ impl LiveIoTransport for LocalFsIoTransport {
             )),
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct ReadTextRequest {
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    path_hex: Option<String>,
 }
 
 fn handle_read_text(request: serde_json::Value) -> Result<serde_json::Value, IoError> {
@@ -71,7 +64,7 @@ fn handle_read_text(request: serde_json::Value) -> Result<serde_json::Value, IoE
             format!("Failed to read input file '{path}': {e}"),
         )
     })?;
-    encode_response(serde_json::json!({ "text": text }))
+    encode_response(ReadTextResponse { text })
 }
 
 #[derive(Debug, Clone)]
@@ -115,7 +108,7 @@ fn parse_request<T: DeserializeOwned>(request: serde_json::Value) -> Result<T, I
     })
 }
 
-fn encode_response(value: serde_json::Value) -> Result<serde_json::Value, IoError> {
+fn encode_response<T: serde::Serialize>(value: T) -> Result<serde_json::Value, IoError> {
     serde_json::to_value(value).map_err(|_| {
         io_other(
             "local_response_serialize_failed",

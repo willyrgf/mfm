@@ -1,7 +1,7 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::{app_services, run_stores};
+use crate::support::{app_services, command_defaults, run_stores};
 use clap::Args;
 use mfm_op_keystore_admin::{
     keystore_import_report_context_key, KeystoreImportOpConfig, KeystoreImportReport,
@@ -88,6 +88,7 @@ async fn execute_internal(args: &ImportArgs) -> CommandResult<ImportResponse> {
         .passphrase
         .as_ref()
         .map(|passphrase| ScopedEnvVar::set(ENV_IMPORT_PASSPHRASE, passphrase));
+    let keystore_path = command_defaults::resolve_keystore_path(args.keystore.as_ref());
 
     let op_config = KeystoreImportOpConfig {
         import_type: match args.import_type {
@@ -101,10 +102,7 @@ async fn execute_internal(args: &ImportArgs) -> CommandResult<ImportResponse> {
             .map(|label| hex::encode(label.as_bytes())),
         derivation_path: args.derivation_path.clone(),
         keystore_path: None,
-        keystore_path_hex: args
-            .keystore
-            .as_ref()
-            .map(|path| hex::encode(path.to_string_lossy().as_bytes())),
+        keystore_path_hex: Some(hex::encode(keystore_path.to_string_lossy().as_bytes())),
         stdin: args.stdin,
     };
 

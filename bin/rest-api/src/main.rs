@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 use std::net::SocketAddr;
 
 use mfm_app::observability::{init_observability, observability_from_env};

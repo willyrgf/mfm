@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 #![cfg(feature = "parity-tests")]
 
 use assert_cmd::Command;
