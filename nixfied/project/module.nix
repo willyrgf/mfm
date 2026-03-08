@@ -1156,7 +1156,7 @@ in
           runtimeInputs = rustRuntimeInputs;
           argParser = "passthrough";
           allowUnknownArgs = true;
-          env = sharedCargoRustEnv;
+          env = ciCargoRustEnv;
           command = ''
             set -euo pipefail
 

@@ -1,9 +1,0 @@
-[advisories]
-# NOTE: Keep an (optional) ignore list here for rare cases where a RustSec
-# advisory is accepted temporarily. Keep ignores small, documented, and
-# time-bounded. Uncomment only with a clear reason + a tracking issue.
-# ignore = [
-#     "RUSTSEC-2024-0388",  # derivative is unmaintained
-#     "RUSTSEC-2024-0436",  # paste is no longer maintained
-#     "RUSTSEC-2024-0370",  # proc-macro-error is unmaintained
-# ]
