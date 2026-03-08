@@ -2028,6 +2028,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-docs"
+version = "0.1.0"
+
+[[package]]
 name = "mfm-event-store-mem"
 version = "0.1.0"
 dependencies = [

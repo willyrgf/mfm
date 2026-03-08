@@ -42,12 +42,16 @@ Current near-term release chain:
 5. State consumers:
    - `mfm-state-keystore`
    - `mfm-state-aave-v3`
+6. Umbrella landing page:
+   - `mfm-docs`
 
 Notes:
 
 - `cargo publish --dry-run` for a crate with `path + version` dependencies still expects the versioned upstream crate to exist on crates.io. A dry-run failure like `no matching package named 'mfm-machine' found` is expected until the earlier publish step has completed.
 - Use `cargo check -p <crate> --lib` for local compile validation before the upstream versions exist in the registry.
 - Use `cargo package --allow-dirty --list -p <crate>` when you want to inspect the files that would be packaged without requiring the upstream versions to exist in the registry.
+- Use `nix run .#publish-docs -- --dry-run` to validate the current ordered wave from `crates/docs/publish-wave.json`.
+- Publish `mfm-docs` after the first wave it links to, otherwise the landing page will contain avoidable `docs.rs` 404s.
 - Keep `mfm-app` out of the first publish wave; its dependency surface and end-user positioning still need curation.
 
 ## Global Requirements (Apply to Every Crate)

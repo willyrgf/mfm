@@ -13,6 +13,7 @@ members = [
 	"crates/collectors/nix",
 	"crates/collectors/nix-exec",
 	"crates/core",
+	"crates/docs",
 	"crates/evm-core",
 	"crates/evm-runtime",
 	"crates/machine",
