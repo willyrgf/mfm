@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 use std::path::PathBuf;
 
 use crate::commands::result::CommandError;

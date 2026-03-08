@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_methods)]
 use std::net::SocketAddr;
 
 use mfm_app::observability::{init_observability, observability_from_env};
@@ -12,6 +11,7 @@ async fn shutdown_signal() {
 }
 
 #[tokio::main]
+#[allow(clippy::disallowed_methods)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_observability(observability_from_env("mfm_rest_api"))
         .map_err(|e| std::io::Error::other(format!("observability init failed: {}", e.message)))?;

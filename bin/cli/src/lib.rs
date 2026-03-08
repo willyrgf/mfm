@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_methods)]
 //! Shared library surface for the `mfm` CLI.
 //!
 //! The CLI keeps transport concerns in this crate and delegates workflow execution to `mfm-app`

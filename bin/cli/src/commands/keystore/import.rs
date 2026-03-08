@@ -145,6 +145,7 @@ struct ScopedEnvVar {
 }
 
 impl ScopedEnvVar {
+    #[allow(clippy::disallowed_methods)]
     fn set(key: &str, value: &str) -> Self {
         let previous = std::env::var(key).ok();
         std::env::set_var(key, value);
