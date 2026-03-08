@@ -5,7 +5,7 @@
 > Scope: Move reusable state crates out of `crates/ops/` so repository structure matches the `Operation` (planning) vs `State` (execution) contract.
 > Migration policy: hard cutover for internal paths; no compatibility shims/re-exports.
 > Execution model: commit-by-commit on a shared dev branch (no PR slicing required).
-> Completion note: the reusable state crates now live under `crates/states/common`, `crates/states/keystore`, and `crates/states/aave-v3`. This document is retained as the historical implementation plan for that migration.
+> Completion note: the reusable state crates now live under `crates/states/common`, `crates/states/keystore`, and `crates/states/aave-v3`. This document is retained as the historical implementation plan for that migration. The temporary `mfm-architecture-verify` tool referenced below was later removed once compile-time lint and crate-boundary checks replaced it.
 
 ## 1. Objective
 
@@ -224,7 +224,7 @@ Risk: stale audit docs with old path evidence.
 Migration is complete when all are true:
 - No shared reusable state crate remains under `crates/ops/`.
 - `crates/ops/` contains only op planner crates (`*-op`) and op-specific implementation code.
-- Architecture verifier default shared roots point to the new state-layer paths.
+- At migration cutover, architecture verifier default shared roots point to the new state-layer paths.
 - Workspace builds/tests pass via canonical commands:
   - `nix run .#check`
   - `nix run .#test`
@@ -241,3 +241,4 @@ The planned relocation landed. The canonical shared-state paths are now:
 - `crates/evm-runtime`
 
 Follow-up work should treat this plan as historical context rather than an active migration checklist.
+The temporary architecture verifier used during this migration has since been retired.

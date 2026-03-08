@@ -46,7 +46,6 @@ members = [
 	"crates/ops/nix-app-op",
 	"crates/ops/aave-v3-origin-adapt-op",
 	"crates/ops/proof-op",
-	"crates/tools/architecture-verify",
 ]
 
 # Core dependencies

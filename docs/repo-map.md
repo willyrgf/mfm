@@ -47,7 +47,6 @@ Generated from `docs/repo-index.json`.
 - `crates/storages/event-store-mem/Cargo.toml` (rust-cargo)
 - `crates/storages/event-store-postgres/Cargo.toml` (rust-cargo)
 - `crates/storages/indexer/Cargo.toml` (rust-cargo)
-- `crates/tools/architecture-verify/Cargo.toml` (rust-cargo)
 - `crates/transports/local-evm/Cargo.toml` (rust-cargo)
 - `crates/transports/local-fs/Cargo.toml` (rust-cargo)
 - `crates/transports/local-keystore/Cargo.toml` (rust-cargo)

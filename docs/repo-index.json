@@ -222,11 +222,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "architecture-verify",
-      "path": "crates/tools/architecture-verify/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "local-evm",
       "path": "crates/transports/local-evm/Cargo.toml",
       "kind": "rust-cargo"

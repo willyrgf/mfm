@@ -1933,10 +1933,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-architecture-verify"
-version = "0.1.0"
-
-[[package]]
 name = "mfm-artifact-store-fs"
 version = "0.1.0"
 dependencies = [

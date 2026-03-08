@@ -94,14 +94,12 @@ Interpretation:
 
 ## 4. Guardrails and CI
 
-`mfm-architecture-verify` is integrated into:
-- `nix run .#check`
-- CI basic mode (`nixfied/project/ci.nix` step: `architecture-verify`)
+`mfm-architecture-verify` was an interim guardrail during the thin-layer and compile-time boundary refactors. It was later retired once its remaining checks were enforced more directly by compile-time boundaries and crate structure.
 
-Checks enforced:
-1. Expand boundary: forbids `.await` and ambient IO APIs inside op `expand()`.
-2. Runtime EVM namespace constraint: direct `namespace: "evm"` runtime call sites stay confined to the dedicated EVM bridge.
-3. Keystore tx-sign locality: the keystore signing state must remain on the local keystore namespace.
+Current guardrails come from:
+1. The `Operation::expand()` contract in `crates/sdk/src/lib.rs` remains synchronous and deterministic, so `.await` is already a type error there.
+2. `clippy.toml` now bans raw `IoProvider::call` and other ambient APIs from planner/state-facing crates, leaving direct EVM bridge construction confined to the dedicated collector path.
+3. Keystore signing and remote submission now live in separate crates, so the old mixed local-signing plus remote-submit path is enforced structurally instead of by a text scan.
 
 ## 5. Findings (Current)
 
