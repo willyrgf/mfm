@@ -2,6 +2,9 @@
 name = "mfm-evm-core"
 version = "0.1.0"
 edition = "2021"
+description = "Low-level EVM ABI, encoding, hex, and RLP helpers for MFM"
+repository = "https://github.com/willyrgf/mfm2"
+license = "MIT"
 
 [dependencies]
 alloy-primitives = { workspace = true }

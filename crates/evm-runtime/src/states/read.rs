@@ -1,3 +1,11 @@
+//! Reusable EVM read/query states.
+//!
+//! These states record deterministic read facts from the `evm` namespace and write normalized
+//! results back into context for downstream states and report assembly.
+//!
+//! Use this module for read-only chain queries such as raw hex reads, `eth_call`, block-number
+//! checks, and native/ERC-20 balance inspection.
+
 use async_trait::async_trait;
 
 use alloy_primitives::Address;

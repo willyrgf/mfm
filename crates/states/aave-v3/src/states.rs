@@ -1,3 +1,12 @@
+//! Reusable Aave V3 deploy/configure flow states.
+//!
+//! The state family in this module is split across two phases:
+//! - deploy-time manifest loading, contract deployment, receipt waiting, and manifest emission
+//! - configure-time manifest loading, runtime call submission, receipt waiting, and report output
+//!
+//! The built-in app bundle currently registers only the adaptation op directly, but the remaining
+//! states are available as shared building blocks for richer Aave workflows.
+
 use async_trait::async_trait;
 use mfm_collectors_evm::EvmIoClient;
 use mfm_evm_core::abi as common_abi;

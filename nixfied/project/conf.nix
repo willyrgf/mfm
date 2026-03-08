@@ -163,6 +163,7 @@ rec {
       "README.md"
       "AGENTS.md"
       "docs/architecture.md"
+      "docs/ops-and-states.md"
       "docs/redesign.md"
     ];
   };

@@ -1,3 +1,10 @@
+//! Reusable EVM deploy/configure/validate states.
+//!
+//! These states own the executable runtime behavior behind contract artifact adaptation, contract
+//! deployment, post-deploy runtime calls, and validation assertions against live or replayed IO.
+//!
+//! Thin op crates should compose these states rather than reimplementing write-path behavior.
+
 use async_trait::async_trait;
 use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
 use mfm_machine::context::DynContext;

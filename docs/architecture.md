@@ -12,6 +12,8 @@ Read order for contributors:
 2. [`docs/redesign.md`](redesign.md) for normative execution and storage semantics.
 3. [`AGENTS.md`](../AGENTS.md) for workflow, CI parity, and contribution rules.
 
+For the current registered ops and production states, see [`docs/ops-and-states.md`](ops-and-states.md).
+
 If code conflicts with `docs/redesign.md`, treat that as a contract violation until the contract is intentionally updated.
 
 ## 2. MFM In 5 Minutes
@@ -82,7 +84,7 @@ Replay/resume behavior:
 ## 5. Composition Model
 
 ### Three-tier thin-layer principle
-The canonical architecture follows the three-tier model from `docs/three-tier-audit.md`:
+The canonical architecture follows the three-tier thin-layer model below:
 
 ```text
 bin/{cli,rest-api}                 (THIN) transport parsing/routing/output only
@@ -107,6 +109,9 @@ Core rule:
 Allowed exception:
 - op-local state implementations are acceptable only for domain-specific output/aggregation states
   that are not reusable shared primitives.
+
+For the current inventory of registered ops and production states, see
+[`docs/ops-and-states.md`](ops-and-states.md).
 
 ### Strict op vs state contract
 Operation (`impl Operation`) is a planning abstraction:
@@ -166,12 +171,17 @@ Must stay thin and avoid domain-specific execution behavior.
 Domain-specific reusable states may live in dedicated shared-state crates
 (`crates/states/keystore`, `crates/states/aave-v3`, `crates/evm-runtime`).
 
+See [`docs/ops-and-states.md`](ops-and-states.md) for the current concrete inventory and owning
+crates.
+
 ### `crates/ops/*-op`
 Owns domain workflow planning:
 - operation config validation
 - graph composition using reusable states
 - op-level tests and domain contracts
 Prefer thin ops: avoid embedding thick executable logic when a reusable state belongs in a shared-state crate.
+
+See [`docs/ops-and-states.md`](ops-and-states.md) for the current built-in op catalog.
 
 ### Breaking Internal Refactors
 Internal crate/module path migrations may be performed as hard cutovers:
@@ -280,6 +290,7 @@ If the answer spans multiple layers, split responsibilities explicitly rather th
 
 ## 12. Related Documents
 
+- Current ops/states inventory: [`docs/ops-and-states.md`](ops-and-states.md)
 - Normative contract: [`docs/redesign.md`](redesign.md)
 - EVM routing runbook: [`docs/evm-rpc-routing.md`](evm-rpc-routing.md)
 - Contribution and CI rules: [`AGENTS.md`](../AGENTS.md)

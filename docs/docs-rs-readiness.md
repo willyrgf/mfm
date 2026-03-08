@@ -1,20 +1,20 @@
 # docs.rs Publishing Readiness Guide
 
-> Generated: 2026-03-07
+> Generated: 2026-03-08
 > Purpose: Actionable checklist for the engineer agent adding code documentation and examples across the workspace.
 
 ## Executive Summary
 
-**Current state: NOT READY for docs.rs publishing.**
+**Current state: PARTIALLY READY, but not workspace-ready.**
 
-- 0/36 crates enforce `#![warn(missing_docs)]` or `#![deny(missing_docs)]`
-- ~500+ public items lack doc comments across the workspace
-- 1 crate has a single doc example (crates/core keystore); all others have zero
-- 7+ crates are missing crate-level `//!` documentation entirely
+- Many crates now enforce `#![warn(missing_docs)]`, so the earlier zero-coverage snapshot is stale.
+- Several core and state crates already have crate-level docs and examples.
+- The remaining gap is concentrated in item-level docs, publish-wave prioritization, and crate landing-page polish.
+- This document tracks rustdoc/docs.rs readiness only; current ops/states inventory lives in `docs/ops-and-states.md`.
 
 ## Global Requirements (Apply to Every Crate)
 
-1. Add `#![warn(missing_docs)]` to every `lib.rs` (upgrade to `#![deny(missing_docs)]` once coverage is complete).
+1. Preserve `#![warn(missing_docs)]` in every `lib.rs` and upgrade targeted publish-wave crates toward stricter enforcement once coverage is complete.
 2. Every `lib.rs` must have a crate-level `//!` doc block explaining purpose, relationship to the architecture, and a minimal usage example.
 3. Every public item (`pub fn`, `pub struct`, `pub enum`, `pub trait`, `pub type`, `pub const`, `pub mod`) must have a `///` doc comment.
 4. Every public struct/enum field must have a `///` doc comment.
@@ -28,175 +28,71 @@
 
 These crates define the execution model and are the foundation everything else depends on.
 
-#### crates/machine/ — State machine runtime
-- **Crate doc:** Present but minimal (3 lines)
-- **Missing docs lint:** No
-- **Doc examples:** None
-- **Undocumented public items (~30):**
-  - `lib.rs:15` — `IdValidationError`
-  - `lib.rs:97` — `OpId::new()`
-  - `lib.rs:105` — `OpId::must_new()`
-  - `lib.rs:109` — `OpId::as_str()`
-  - `lib.rs:178` — `StateId::new()`
-  - `lib.rs:186` — `StateId::must_new()`
-  - `lib.rs:190` — `StateId::as_str()`
-  - `lib.rs:379` — `default_nix_flake_allowlist()`
-  - `lib.rs:416-427` — All `standard_tags` constants (`CONFIG`, `FETCH_DATA`, `COMPUTE`, `EXECUTE`, `REPORT`, `APPLY_SIDE_EFFECT`, `IMPURE`)
-  - `lib.rs:658-661` — Domain event name constants
-  - `lib.rs:716` — `Event` enum
-  - `lib.rs:742` — `ArtifactWritten`
-  - `lib.rs:749` — `OpBoundary`
-  - `lib.rs:763` — `ChildRunCompleted`
-  - `lib.rs:886` — `StateOutcome`
-  - `lib.rs:907` — `DynState` type alias
-  - `lib.rs:923` — `StateNode`
-  - `lib.rs:936` — `ExecutionPlan`
-  - `lib.rs:962` — `PlanValidator` trait
-  - `lib.rs:974` — `ArtifactKind` enum
-  - `lib.rs:1035` — `RunResult`
-- **Example ideas:** Show how to define a simple `State`, build a `StateNode`, create an `ExecutionPlan`, and execute a run.
+Current publish-wave framing:
 
-#### crates/machine-derive/ — Proc-macro crate
-- **Crate doc:** Present (3 lines)
-- **Undocumented items:** 0 (minimal public surface)
-- **Action:** Expand crate doc with usage example showing `#[derive(...)]` on a state struct.
+- `Wave 1`: `mfm-machine`, `mfm-machine-derive`, `mfm-machine-test-support`
 
-#### crates/machine-test-support/ — Test utilities
-- **Crate doc:** Present (4 lines)
-- **Undocumented items (3):**
-  - `lib.rs:41` — `init_test_observability()`
-  - `lib.rs:58` — `artifact_store_contract_tests()`
-  - `lib.rs:64` — `event_store_contract_tests()`
-- **Action:** Document each function and add a doc example showing test setup.
+Remaining work in this tier:
+
+- deepen `mfm-machine` item-level docs around IDs, event types, execution plans, and standard tags
+- add more example-driven docs for `mfm-machine` and `mfm-machine-derive`
+- finish test-helper documentation in `mfm-machine-test-support`
+- keep this tier as the reference foundation that downstream crate docs link back to
 
 ---
 
 ### Tier 2 — Core Primitives & SDK
 
-#### crates/core/ — Primitives + keystore
-- **Crate doc:** MISSING
-- **Doc examples:** Partial (keystore module only, at `keystore/mod.rs:10-39`)
-- **Undocumented items (~40+):**
-  - `lib.rs` — No crate doc, undocumented module declarations
-  - `config/mod.rs:18` — `Config`, `NetworkConfig`, `WalletConfig`, `DexConfig`, `SecureWallet` and all their methods (`load()`, `validate()`, `load_wallet()`)
-  - `config/network.rs:8` — `Kind` enum, `Network` struct, `Networks` wrapper, `NetworkValueError`
-  - `config/token.rs:8` — `Kind` enum, `TokenNetwork`, `TokenNetworks`, `Token`, `Tokens`, `SlippageParseError`
-  - `config/dexes.rs:7` — `Kind` enum, `Dex`, `Dexes`
-  - `config/authentication/mod.rs:9` — `Method` enum, `Methods`
-  - `config/authentication/wallet.rs:5` — `Wallet`, `read_private_key()`
-  - `keystore/mod.rs:211` — `AuditEvent`, `AuditLogEntry`
-  - Note: Keystore core types (`Keystore`, `KeyEntry`, `KeyInfo`, `SecureKey`, `KeystoreConfig`, `KeyType`, `KeystoreError`) ARE documented
-- **Action:** Add crate doc. Document all config types. Expand keystore doc example.
+Current publish-wave framing:
 
-#### crates/evm-core/ — EVM utilities
-- **Crate doc:** MISSING
-- **Doc examples:** None
-- **Undocumented items (~45, every public item):**
-  - `lib.rs:1-5` — All module declarations (`abi`, `encoding`, `hex`, `rlp`, `util_error`)
-  - `abi.rs` — `AbiFunction`, `AbiEvent`, `ParsedAbi`, `parse_abi()`, `parse_bytecode()`, `function_selector()`, `encode_params()`, `resolve_function_call()`, `constructor_data()`, `parse_value_wei_to_hex()`, `decode_single_output_to_json()`
-  - `encoding.rs` — `ERC20_SELECTOR_BALANCE_OF`, `ERC20_SELECTOR_DECIMALS`, `address_hex_lower()`, `encode_erc20_balance_of()`, `u64_hex_quantity()`, `format_u256_units()`, `parse_u256_hex()`, `parse_u256_hex_value()`, `parse_u8_u256()`, `parse_hex_string_response()`, `parse_u256_hex_response()`, `normalize_address()`, `address_to_hex_prefixed()`, and ~10 more
-  - `hex.rs` — `normalize_hex_str()`, `hex_to_bytes()`, `bytes_to_hex_prefixed()`, `hex_encode_utf8()`, `hex_nibble()`
-  - `rlp.rs` — All 6 public RLP functions
-  - `util_error.rs` — `UtilError`
-- **Action:** This is the worst-documented crate. Add crate doc explaining it's the low-level EVM encoding/decoding layer. Document every function with parameter/return descriptions and examples for hex/ABI utilities.
+- `Wave 1`: `mfm_core`, `mfm-evm-core`, `mfm-sdk`
+- `Later / topology-dependent`: `mfm-app`
 
-#### crates/sdk/ — Orchestration SDK
-- **Crate doc:** Present (3 lines)
-- **Doc examples:** None
-- **Undocumented items (~20):**
-  - `lib.rs:44` — `mod errors` (module doc)
-  - `lib.rs:54` — `mod op` (module doc)
-  - `lib.rs:86` — `DynOperation` type alias
-  - `lib.rs:94` — `mod pipeline` (module doc)
-  - `lib.rs:150` — `mod launcher` (module doc)
-  - All trait method docs on `Operation`, `OperationRegistry`, `PipelinePlanner`, `RunLauncher`
-  - All struct field docs on `OpIo`, `PipelineStep`, `Pipeline`, `PipelineManifestInput`, `LaunchPipeline`
-  - `unstable.rs` — `HashMapOperationRegistry::register()`, `SdkPlanResolver::new()`, `SpawnChildRunV1`, `SpawnChildRunResult`, `AwaitChildRunV1`, `AwaitChildRunResult`, `spawn_child_run_v1()`, `await_child_run_v1()`
-- **Action:** Add doc examples showing how to define an Operation, register it, build a pipeline, and launch a run.
+Remaining work in this tier:
 
-#### crates/app/ — Application orchestration bridge
-- **Crate doc:** MISSING
-- **Doc examples:** None
-- **Undocumented items (~80+, every public item):**
-  - `lib.rs` — `ErrorClass`, `AppError`, `MapContext`, all `default_*()` helpers, `EngineBundle`, `OperationPlugin` trait, `TransportPlugin` trait, `DefaultOperationPlugin`, `DefaultTransportPlugin`, `AppBuilder`, `AppServices` and all its methods (`start_run()`, `resume_run()`, `run_status()`, `run_events()`, `artifact_get()`, `start_portfolio_snapshot()`, etc.)
-  - All request/response types: `RunsStartRequest`, `SingleOpStartRequest`, `PipelineStartRequest`, `RunStartResponse`, `RunResumeResponse`, `RunStatusResponse`, `RunsEventsQuery`, `RunsEventsResponse`, `ArtifactGetResponse`, `ArtifactBody`
-  - `DeployConfigureValidateSpec`, `FeatureKind`, `FeatureDescriptor`, `FeatureRequest`, `FeatureExecutionResult`, `FeatureCatalog`
-  - `PortfolioSnapshotRequest`, `PortfolioSnapshotResponse`, `PortfolioTokenSpec`, `parse_portfolio_tokens_json()`
-  - `observability.rs` — 7 env-var constants, `LogFormat`, `ObservabilityConfig`, `observability_from_env()`, `init_observability()`
-- **Action:** This is the second-worst crate. Add crate doc explaining it's the bridge between binaries and the engine. Document all public types. Add example showing `AppBuilder` -> `AppServices` -> `start_run()`.
+- expand item-level docs in `mfm_core` config models and security-sensitive keystore support types
+- make `mfm-evm-core` the strongest low-level reference layer with examples for ABI, encoding, hex, and RLP helpers
+- improve `mfm-sdk` examples around operation registration, pipeline planning, and run launch surfaces
+- treat `mfm-app` as a later publish target because packaging topology and surface curation matter as much as raw rustdoc coverage
 
 ---
 
 ### Tier 3 — States Layer
 
-#### crates/states/common/ — Cross-domain reusable states
-- **Crate doc:** Present (4 lines)
-- **Doc examples:** None
-- **Undocumented items (~50+):**
-  - `ctx.rs` — `read_json()`, `read_u64_required()`, `read_json_required()`, `read_string_required()`, `read_array_required()`, `read_typed()`, `write_json()`
-  - `errors.rs` — `info()`, `sdk_error()`, `sdk_parse_error()`, `sdk_unknown_error()`, `state_error()`, `state_error_with_state()`, `state_unknown()`, `state_unknown_msg()`, `state_from_io()`, `keystore_error_category()`
-  - `idempotency.rs` — `state_scope()`, `op_scope()`, `canonical()`, `state_purpose()`, `op_purpose()`, `idempotency_key_for_value()`
-  - `local_io_helpers.rs` — `emit_report_event()`, `local_call()`, `local_fact_key()`, `attach_state_id()`
-  - `output.rs` — `write_output_artifact()`
-  - `rpc.rs` — `validation_assertion_error_message()`, `expect_string()`, `expect_array()`, `assert_condition()`
-  - `test_support.rs` — ~20 public items (test helpers, `MapContext`, `MemEventStore`, `MemArtifactStore`, etc.)
-  - `states/io.rs` — `NamespaceReadState`
-  - `states/meta.rs` — All `tags` module functions and metadata builder functions
-  - `states/nix.rs` — `NixExecStateConfig`, `validate_nix_exec_config()`, `NixExecState`
-  - `states/side_effect.rs` — `TriggerOnce`, `IdempotentSideEffectState`
-- **Action:** Document all context helpers, error builders, and state types. Add examples for `NamespaceReadState` and `IdempotentSideEffectState`.
+The live catalog of current production states now lives in `docs/ops-and-states.md`.
+This section tracks publish readiness, not runtime inventory.
 
-#### crates/states/keystore/ — Keystore domain states
-- **Crate doc:** MISSING
-- **Doc examples:** None
-- **Undocumented items (~30+):**
-  - `lib.rs:1-2` — Module declarations
-  - `tx.rs` — `KeystoreTxError`, `Eip1559TxToSign`, `SignedEip1559Tx`, `parse_address()`, `parse_u128_quantity()`, `parse_data_hex()`, `parse_rpc_url()`, `validate_raw_transaction_hex()`, `resolve_key_id()`, `sign_eip1559_transaction()`, `write_raw_transaction_file()`, `output_context_key()`
-  - `states/admin.rs` — `KeystoreAdminError`, `KeystoreImportType`, `KeystoreImportReport`, `KeystoreListSortBy`, `KeystoreListKey`, `KeystoreListReport`, `KeystoreDeleteReport`, config structs, state structs and constructors, `decode_optional_hex_string()`, `resolve_keystore_path()`, `sdk_error_from_helper()`
-  - `states/tx.rs` — `KeystoreTxSignStateConfig`, `KeystoreTxSendRawStateConfig`, `KeystoreTxSignState`, `KeystoreTxSendRawState`
+Current publish-wave framing:
 
-#### crates/states/aave-v3/ — Aave V3 domain states
-- **Crate doc:** MISSING
-- **Doc examples:** None
-- **Undocumented items (~40+):**
-  - `manifest.rs` — `ContractArtifactJson`, `AaveCompileManifestContract`, `AaveCompileManifest`, `AaveDeployManifestContract`, `AaveDeployManifest`, `AaveOriginDeployOutputContract`, `AaveOriginDeployOutput`, `AaveConfigCallRecord`, `AaveConfigReport`, `AaveDeployRuntimeConfig`, `AaveConfigureRuntimeConfig`, all `validate_*()` and `decode_*()` functions
-  - `states.rs` — All 11 state structs (`LoadCompileManifestState`, `DeployContractState`, `WaitForReceiptState`, etc.)
+- `Wave 1`: `mfm-evm-runtime`, `mfm-state-keystore`, `mfm-state-common`
+- `Wave 2`: `mfm-state-aave-v3`
 
-#### crates/evm-runtime/ — EVM execution states
-- **Crate doc:** MISSING
-- **Doc examples:** None
-- **Undocumented items (~60+, every public item):**
-  - `dcv.rs` — `ContractArtifactConfig`, `ConfigureCallConfig`, `BlockTag`, `ReadAssertionConfig`, `EventAssertionConfig`, `PreparedReadAssertion`, `PreparedEventAssertion`, and 15+ functions
-  - `rpc.rs` — `RpcRawTxSubmission`, `LegacyCreateTxSigningRequest`, and 20+ public async functions (`send_transaction()`, `estimate_gas_hex()`, `gas_price_hex()`, `wait_for_receipt()`, etc.)
-  - `states/read.rs` — `U64Expectation`, `ReadHexStringState`, `ReadU256HexState`, `EthCallDecode`, `EthCallState`, `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState`
-  - `states/write.rs` — `EvmDeployStateConfig`, `EvmConfigureRuntimeCall`, `EvmConfigureStateConfig`, `EvmValidateStateConfig`, `NixArtifactToEvmContractState`, `EvmDeployState`, `EvmConfigureState`, `EvmValidateState`
+Remaining work in this tier:
+
+- improve module landing pages for state families, especially `evm-runtime` read/write modules
+- add stronger security/context notes to keystore state modules
+- separate test-support visibility from state-catalog visibility in `mfm-state-common`
+- add crate/package metadata that improves crates.io/docs.rs landing pages
 
 ---
 
 ### Tier 4 — Ops Layer
 
-All 10 op crates follow the same pattern. None have `#![warn(missing_docs)]`. Only 6/10 have crate-level docs.
+The live catalog of registered ops now lives in `docs/ops-and-states.md`.
+This section tracks planner-crate publish readiness, not the current built-in registry.
 
-#### Missing crate-level docs (4 crates):
-- `crates/ops/keystore-tx-op/`
-- `crates/ops/keystore-admin-op/`
-- `crates/ops/evm-deploy-configure-validate-op/`
-- `crates/ops/aave-v3-origin-adapt-op/`
+Current publish-wave framing:
 
-#### Have crate-level docs (6 crates):
-- `crates/ops/keystore-op/` — minimal (re-export wrapper)
-- `crates/ops/evm-read-op/`
-- `crates/ops/evm-write-op/`
-- `crates/ops/portfolio-tracker-op/`
-- `crates/ops/nix-app-op/`
-- `crates/ops/proof-op/`
+- `Wave 1 within ops`: `mfm-op-keystore-admin`, `mfm-op-keystore-tx`, `mfm-op-evm-read`, `mfm-op-evm-write`
+- `Wave 2`: `mfm-op-portfolio-tracker`, `mfm-op-aave-v3-origin-adapt`, `mfm-op-nix-app`, `mfm-op-evm-deploy-configure-validate`
+- `Later / low priority`: `mfm-op-proof`, `mfm-op-keystore-shim`
 
-#### Common undocumented items across ops:
-- Operation structs and their `OpConfig` types
-- All struct fields (especially config fields that users must populate)
-- Op-local state structs (in portfolio-tracker-op and proof-op)
-- Report/output types and their fields
-- Zero doc examples in all 10 crates
+Remaining work in this tier:
+
+- keep planner docs focused on config validation and graph composition
+- improve crate landing pages for the highest-value user-facing ops
+- avoid making thin wrapper crates the primary docs.rs navigation surface
+- document op-local report/output types where they remain intentional
 
 ---
 
@@ -243,11 +139,11 @@ All 6 crates have good crate-level docs but lack item-level documentation.
 
 ## Documentation Gaps from Prior Review
 
-These items were identified during the architecture review and should also be addressed:
+Keep only items here that directly affect docs.rs readiness:
 
-1. **`crates/app/` lacks a README.md** — Add one explaining the orchestration bridge role.
-2. **`docs/state-layer-migration-plan.md`** — Mark as completed (migration is done).
-3. **`docs/three-tier-audit.md`** and **`docs/thin-layer-audit.md`** — Update status sections.
+1. **Wave-1 crate landing pages need polish** — add package metadata and module landing pages for the selected publish wave.
+2. **`crates/app/` is still a later publish target** — publishing topology is a larger issue than raw rustdoc coverage.
+3. **Selected state crates are close to publishable** — preserve that status and avoid regressing `missing_docs`.
 
 ## Suggested Workflow for the Engineer Agent
 
@@ -255,7 +151,7 @@ These items were identified during the architecture review and should also be ad
 2. **Move to Tier 2** (core, evm-core, sdk, app) — focus on evm-core and app first since they're the worst.
 3. **Then Tier 3** (states) — document the shared state primitives.
 4. **Then Tier 4-6** (ops, storages, collectors, transports) — these follow patterns established in earlier tiers.
-5. After each crate is documented, add `#![warn(missing_docs)]` to prevent regressions.
+5. After each crate is documented, preserve or tighten `#![warn(missing_docs)]` to prevent regressions.
 6. Run `nix run .#check` after each crate to verify compilation.
 7. Run `cargo doc --no-deps --document-private-items` to preview docs.rs output.
 

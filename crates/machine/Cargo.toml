@@ -2,6 +2,10 @@
 name = "mfm-machine"
 version = "0.1.0"
 edition = "2021"
+description = "Runtime contracts and execution-plan types for MFM workflows"
+repository = "https://github.com/willyrgf/mfm2"
+license = "MIT"
+readme = "README.md"
 
 [dependencies]
 async-trait = { workspace = true }

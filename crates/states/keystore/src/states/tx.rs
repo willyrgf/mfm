@@ -1,4 +1,10 @@
 //! Reusable states for signing and submitting raw transactions via keystore-backed flows.
+//!
+//! # Security
+//!
+//! These states bridge local keystore material and network submission paths. They must not leak
+//! passwords, raw key material, or decrypted secret buffers through persisted context, reports, or
+//! error messages.
 
 use std::path::PathBuf;
 

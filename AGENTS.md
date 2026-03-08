@@ -10,19 +10,21 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 - Default pre-commit gate: run `nix run .#ci -- --mode full` before every commit.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
-- Apply the three-tier thin-layer principle from `docs/three-tier-audit.md`:
+- Keep binaries (`bin/cli`, `bin/rest-api`) thin:
+  - op planning logic belongs in `crates/ops/*-op`
+  - reusable executable state logic belongs in shared-state crates (`crates/states/common`, `crates/states/keystore`, `crates/states/aave-v3`, `crates/evm-runtime`)
+  - binaries should parse input, start/resume runs, and render outputs only
+- Apply the three-tier thin-layer principle from `docs/architecture.md`; use `docs/ops-and-states.md` for the current ops/state catalog:
   - executable logic lives in reusable states (`crates/states/common/src/states/*` and domain shared-state crates)
   - ops stay thin and assemble state graphs
-  - binaries stay transport-only (e.g., `bin/cli`, `bin/rest-api`):
-      - op planning logic belongs in `crates/ops/*-op`
-      - reusable executable state logic belongs in shared-state crates
-      - binaries should parse input, start/resume runs, and render outputs only
+  - binaries stay transport-only
 - If you touch security-sensitive code (keystore/crypto), add or strengthen tests.
 
 ## Design Contract (Architecture Invariants)
 
 - `docs/redesign.md` is the design contract. If code disagrees with it, the code is wrong (until the doc is updated).
 - `docs/architecture.md` is the contributor-facing one-pager.
+- `docs/ops-and-states.md` is the current inventory of registered ops and production state implementations.
 
 Key invariants to preserve (high risk if violated):
 
@@ -55,6 +57,7 @@ Nixfied is the canonical entrypoint for dev/test/build/check/ci:
 - `docs/repo-map.md`: Repository map
 - `docs/architecture.md`: one-page architecture overview + invariants.
 - `docs/redesign.md`: full design contract (authoritative).
+- `docs/ops-and-states.md`: current inventory of registered ops and production state implementations.
 - `bin/cli/README.md`: CLI behavior and JSON output contract.
 - `crates/machine/README.md`: state machine concepts and usage.
 - `crates/machine-derive/README.md`: proc-macro notes.
@@ -99,6 +102,12 @@ Nixfied is vendored under `nixfied/`. Vendoring boundaries (canonical doc: `nixf
 
 Prefer editing `nixfied/project/` and `nixfied/local/` (not `flake.nix` or framework code under `nixfied/.framework/`) for workflow changes:
 
+- `nixfied/project/conf.nix`: project identity, env vars, envs/ports, module toggles, slot behavior.
+- `nixfied/project/module.nix`: `nix run .#dev`, `nix run .#mfm_cli`, `nix run .#mfm_rest_api`, `nix run .#build`, `nix run .#check`, `nix run .#test`, and `nix run .#ci` task/workflow wiring including `mfm::portfolio::snapshot`.
+- `nixfied/project/ci-runtime.nix`: CI runtime environment helpers and command assembly used by the CI task/workflow layer.
+- `nixfied/project/model-introspection.nix`: generated model export/introspection surfaces used by `nix run .#model`, `.#tasks`, and related tooling.
+- `nixfied/project/default.nix`: merges project files; update it if you add a new `nixfied/project/*.nix` part.
+- `nixfied/local/default.nix`: optional extension point for extra flake `apps`/`packages`/`devShells` that should survive framework upgrades.
 Environment variables you should expect:
 
 - `MFM_ENV`: environment name (`dev|test|prod`).

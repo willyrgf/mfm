@@ -2,6 +2,10 @@
 name = "mfm-state-common"
 version = "0.1.0"
 edition = "2021"
+description = "Reusable cross-domain state building blocks for thin MFM ops"
+repository = "https://github.com/willyrgf/mfm2"
+license = "MIT"
+readme = "README.md"
 
 [dependencies]
 async-trait = { workspace = true }

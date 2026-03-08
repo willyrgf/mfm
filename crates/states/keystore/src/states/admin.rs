@@ -1,4 +1,10 @@
 //! Reusable states for keystore administration flows.
+//!
+//! # Security
+//!
+//! These states interact with local keystore transport namespaces and must not persist secrets into
+//! context, artifacts, reports, or error details. Keep user-facing outputs limited to metadata that
+//! is already safe to expose.
 
 use std::path::PathBuf;
 

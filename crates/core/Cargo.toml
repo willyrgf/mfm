@@ -2,6 +2,10 @@
 name = "mfm_core"
 version = "0.1.29"
 edition = "2021"
+description = "Core configuration models and security-sensitive keystore primitives for MFM"
+repository = "https://github.com/willyrgf/mfm2"
+license = "MIT"
+readme = "README.md"
 
 [lib]
 name = "mfm_core"

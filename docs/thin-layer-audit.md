@@ -1,7 +1,10 @@
 # Thin-Layer Alignment Audit
 
 Date: 2026-02-14
-Status: Historical checkpoint after Option A implementation. The later state-layer relocation is complete, so current canonical shared-state paths are under `crates/states/*`; path references below remain useful as point-in-time audit evidence.
+Status: Historical checkpoint after Option A implementation. The later state-layer relocation is complete, so current approved shared-state roots span `crates/states/*` and `crates/evm-runtime/src/states/*`; path references below remain useful as point-in-time audit evidence.
+
+Historical checkpoint only. For the current ops/state inventory, see
+[`docs/ops-and-states.md`](ops-and-states.md).
 
 ## 0. Implementation Update (Option A Checkpoint)
 
@@ -66,7 +69,9 @@ Status labels:
 - `Contract gap`
 - `Packaging gap`
 
-## 3. Coverage
+## 3. Historical Coverage Snapshot
+
+These counts are frozen as of 2026-02-14 and should not be treated as the current inventory.
 
 Audited surfaces:
 
@@ -88,7 +93,7 @@ Primary entry/registry evidence:
 
 ### 4.1 CLI Commands
 
-| CLI Surface | Execution Path Today | Run-backed | State-composed | Status | Evidence |
+| CLI Surface | Execution Path At Audit Time | Run-backed | State-composed | Status | Evidence |
 |---|---|---:|---:|---|---|
 | `mfm keystore import` | CLI wrapper -> single-op helper -> `keystore_import` op -> shared keystore admin state -> local IO | Yes | Yes | Aligned | `bin/cli/src/commands/keystore/import.rs:103`, `crates/ops/keystore-admin-op/src/lib.rs:101`, `crates/ops/common/src/states/keystore_admin.rs:138`, `crates/ops/common/src/local_io.rs:48` |
 | `mfm keystore list` | CLI wrapper -> single-op helper -> `keystore_list` op -> shared keystore admin state -> local IO | Yes | Yes | Aligned | `bin/cli/src/commands/keystore/list.rs:83`, `crates/ops/keystore-admin-op/src/lib.rs:160`, `crates/ops/common/src/states/keystore_admin.rs:215`, `crates/ops/common/src/local_io.rs:49` |
@@ -106,7 +111,7 @@ Primary entry/registry evidence:
 
 ### 4.2 REST Routes
 
-| Route | Execution Path Today | Status | Evidence |
+| Route | Execution Path At Audit Time | Status | Evidence |
 |---|---|---|---|
 | `GET /v1/health` | Infra probe only | Aligned | `bin/rest-api/src/lib.rs:146`, `bin/rest-api/src/lib.rs:196` |
 | `GET /v1/ready` | Store readiness checks only | Aligned | `bin/rest-api/src/lib.rs:147`, `bin/rest-api/src/lib.rs:201` |
@@ -130,34 +135,20 @@ Primary entry/registry evidence:
 | `pipeline.deploy_configure_validate.start` | App helper builds pipeline envelope that targets composed op | Yes | Aligned | `crates/app/src/lib.rs:693`, `crates/app/src/lib.rs:975`, `crates/app/src/lib.rs:1213`, `crates/app/src/lib.rs:1323` |
 | `portfolio.snapshot` | App helper starts `portfolio_tracker` op and returns typed report fields | Yes | Aligned | `crates/app/src/lib.rs:706`, `crates/app/src/lib.rs:1241`, `crates/app/src/lib.rs:1328`, `crates/ops/portfolio-tracker-op/src/lib.rs:302` |
 
-## 5. Registered Ops Matrix
+## 5. Historical Op Registry Note
 
-| Registered Op | State-Graph Expansion | Boundary Status | Evidence |
-|---|---|---|---|
-| `proof` | Yes | Aligned | `crates/app/src/lib.rs:386`, `crates/ops/proof-op/src/lib.rs:116`, `crates/ops/proof-op/src/lib.rs:132` |
-| `keystore_import` | Yes | Aligned | `crates/app/src/lib.rs:387`, `crates/ops/keystore-admin-op/src/lib.rs:101`, `crates/ops/common/src/states/keystore_admin.rs:138` |
-| `keystore_list` | Yes | Aligned | `crates/app/src/lib.rs:388`, `crates/ops/keystore-admin-op/src/lib.rs:160`, `crates/ops/common/src/states/keystore_admin.rs:215` |
-| `keystore_delete` | Yes | Aligned | `crates/app/src/lib.rs:389`, `crates/ops/keystore-admin-op/src/lib.rs:229`, `crates/ops/common/src/states/keystore_admin.rs:291` |
-| `keystore_tx_sign` | Yes | Aligned | `crates/app/src/lib.rs:390`, `crates/ops/keystore-tx-op/src/lib.rs:113`, `crates/ops/keystore-tx-op/src/lib.rs:275`, `crates/ops/common/src/local_io.rs:51` |
-| `keystore_tx_send_raw` | Yes | Aligned | `crates/app/src/lib.rs:391`, `crates/ops/keystore-tx-op/src/lib.rs:191`, `crates/ops/keystore-tx-op/src/lib.rs:350`, `crates/ops/common/src/local_io.rs:52` |
-| `evm_read` | Yes | Aligned | `crates/app/src/lib.rs:392`, `crates/ops/evm-read-op/src/lib.rs:61`, `crates/ops/evm-read-op/src/lib.rs:80` |
-| `evm_contract_from_nix` | Yes | Aligned | `crates/app/src/lib.rs:393`, `crates/ops/evm-write-op/src/lib.rs:1223`, `crates/ops/evm-write-op/src/lib.rs:1293` |
-| `evm_deploy` | Yes | Aligned | `crates/app/src/lib.rs:394`, `crates/ops/evm-write-op/src/lib.rs:1345`, `crates/ops/evm-write-op/src/lib.rs:1448`, `crates/ops/evm-write-op/src/lib.rs:962`, `crates/ops/common/src/local_io.rs:53` |
-| `evm_configure` | Yes | Aligned | `crates/app/src/lib.rs:395`, `crates/ops/evm-write-op/src/lib.rs:1525`, `crates/ops/evm-write-op/src/lib.rs:1659` |
-| `evm_validate` | Yes | Aligned | `crates/app/src/lib.rs:396`, `crates/ops/evm-write-op/src/lib.rs:1741`, `crates/ops/evm-write-op/src/lib.rs:1855` |
-| `evm_deploy_configure_validate` | Yes | Aligned | `crates/app/src/lib.rs:397`, `crates/ops/evm-deploy-configure-validate-op/src/lib.rs:26`, `crates/ops/evm-deploy-configure-validate-op/src/lib.rs:68` |
-| `portfolio_tracker` | Yes | Aligned | `crates/app/src/lib.rs:398`, `crates/ops/portfolio-tracker-op/src/lib.rs:349`, `crates/ops/portfolio-tracker-op/src/lib.rs:476` |
-| `nix_app` | Yes | Aligned | `crates/app/src/lib.rs:399`, `crates/ops/nix-app-op/src/lib.rs:84`, `crates/ops/nix-app-op/src/lib.rs:190` |
+This checkpoint audited the ops that were registered at the time and scored whether they expanded
+into state graphs in a boundary-aligned way.
 
-Additional packaging observation:
+For the current built-in registry, see [`docs/ops-and-states.md`](ops-and-states.md).
 
-- `mfm-op-keystore` remains a re-export wrapper, not an operation implementation: `crates/ops/keystore-op/src/lib.rs:8`, `crates/ops/keystore-op/README.md:3`.
+Historical packaging observation:
 
-Reusable state-library observation:
+- `mfm-op-keystore` remained a re-export wrapper rather than an operation implementation.
 
-- Shared state library adoption improved (`7` shared state impls), but op-local states still dominate (`16` impls):
-  - shared: `crates/ops/common/src/states/keystore_admin.rs`, `crates/ops/common/src/states/evm.rs`
-  - op-local examples: `crates/ops/evm-write-op/src/lib.rs:1448`, `crates/ops/portfolio-tracker-op/src/lib.rs:476`, `crates/ops/keystore-tx-op/src/lib.rs:260`
+Historical reusable state observation:
+
+- Shared state-library adoption had improved, but op-local implementations still dominated at this checkpoint.
 
 ## 6. Findings (Ordered by Severity)
 

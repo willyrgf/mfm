@@ -1,7 +1,10 @@
 # Three-Tier Thin-Layer Alignment Audit
 
 Date: 2026-02-14
-Status: Historical checkpoint after the thin-layer refactor. State extraction and the state-layer path migration are complete; canonical shared-state paths now live under `crates/states/*`, and any remaining follow-up items should be read in that context.
+Status: Historical checkpoint after the thin-layer refactor. State extraction and the state-layer path migration are complete; the current approved shared-state roots span `crates/states/*` and `crates/evm-runtime/src/states/*`, and any remaining follow-up items should be read in that context.
+
+For the current catalog of registered ops and production states, see
+[`docs/ops-and-states.md`](ops-and-states.md). This file is a 2026-02-14 checkpoint.
 
 ## 0. Architectural Model
 
@@ -25,7 +28,10 @@ adapters/IO drivers  collectors, local_io, storages
 
 Design rule: executable logic lives in reusable states; ops assemble state graphs; binaries stay transport-only.
 
-## 1. Current Snapshot
+## 1. Checkpoint Snapshot (Historical)
+
+The metrics below are frozen as of 2026-02-14. They are checkpoint evidence, not the current
+inventory.
 
 | Metric | Current |
 |---|---:|
@@ -54,41 +60,23 @@ Notes:
 
 ### 2.2 Tier 2: Ops Layer (Thin)
 
-| Op | Thinness | Notes |
-|---|---|---|
-| `keystore_import` | Thin | Wires shared keystore admin state |
-| `keystore_list` | Thin | Wires shared keystore admin state |
-| `keystore_delete` | Thin | Wires shared keystore admin state |
-| `keystore_tx_sign` | Thin | Wires shared `KeystoreTxSignState` |
-| `keystore_tx_send_raw` | Thin | Wires shared `KeystoreTxSendRawState` |
-| `evm_read` | Thin | Wires shared EVM read states |
-| `evm_contract_from_nix` | Thin | Wires shared `NixArtifactToEvmContractState` |
-| `evm_deploy` | Thin | Wires shared `EvmDeployState` |
-| `evm_configure` | Thin | Wires shared `EvmConfigureState` |
-| `evm_validate` | Thin | Wires shared `EvmValidateState` |
-| `evm_deploy_configure_validate` | Thin | Composes child ops only |
-| `nix_app` | Thin | Wires shared `NixExecState` |
-| `portfolio_tracker` | Mixed | Keeps domain-specific `WriteSnapshotState` |
-| `proof` | Mixed | Keeps domain-specific `WriteOutputState` |
+Historical summary at this checkpoint:
 
-Summary: 12/14 Thin, 2/14 Mixed, 0/14 Thick.
+- `12/14` ops were thin
+- `2/14` ops were mixed
+- `0/14` ops were thick
+
+For the current built-in op catalog and owning crates, see [`docs/ops-and-states.md`](ops-and-states.md).
 
 ### 2.3 Tier 3: State Layer (Thick + Reusable)
 
-Shared state modules now include:
-- `evm.rs`
-- `keystore_admin.rs`
-- `keystore_tx.rs`
-- `evm_write.rs`
-- `io.rs`
-- `side_effect.rs`
-- `nix.rs`
-- `meta.rs` (state metadata helpers)
-- `evm_dcv.rs` (shared DCV config/validation helpers)
+Historical summary at this checkpoint:
 
-Domain-local production states intentionally retained:
-- `portfolio_tracker::WriteSnapshotState`
-- `proof::WriteOutputState`
+- reusable state extraction had completed for keystore, EVM read/write, nix exec, and proof patterns
+- a small number of op-local output aggregation states were still retained by design
+
+For the current production state inventory and current exceptions, see
+[`docs/ops-and-states.md`](ops-and-states.md).
 
 ## 3. Utility Consolidation (`B8`)
 

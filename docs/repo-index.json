@@ -33,6 +33,12 @@
       "exists": true
     },
     {
+      "path": "docs/ops-and-states.md",
+      "purpose": "Project documentation.",
+      "priority": 20,
+      "exists": true
+    },
+    {
       "path": "docs/redesign.md",
       "purpose": "Project documentation.",
       "priority": 20,

@@ -50,6 +50,7 @@ Start here:
 
 - Design contract (source of truth): [`docs/redesign.md`](docs/redesign.md)
 - One-page overview + invariants: [`docs/architecture.md`](docs/architecture.md)
+- Current ops/states inventory: [`docs/ops-and-states.md`](docs/ops-and-states.md)
 - Contribution rules / CI parity: [`AGENTS.md`](AGENTS.md)
 
 User-facing docs:

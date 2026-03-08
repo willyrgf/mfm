@@ -18,8 +18,12 @@ This contract exists to lock in:
 
 Contributor read order:
 1. [`docs/architecture.md`](architecture.md) for boundaries and placement.
-2. This contract for normative behavior.
-3. `AGENTS.md` for contribution and CI rules.
+2. [`docs/ops-and-states.md`](ops-and-states.md) for the current inventory of registered ops and production `State` implementations.
+3. This contract for normative behavior.
+4. `AGENTS.md` for contribution and CI rules.
+
+`docs/ops-and-states.md` is descriptive and current-state oriented.
+This contract remains the normative source of truth for semantics, invariants, and allowed boundaries.
 
 ## 2. Guiding Priorities
 
@@ -171,6 +175,10 @@ Canonical responsibilities:
 - `crates/ops/*-op`: domain operation planners that compose state graphs
 - `crates/sdk/`: operation/pipeline orchestration glue
 - `bin/cli`, `bin/rest-api`: thin transport adapters
+
+Inventory note:
+- The current catalog of registered ops and production `State` implementations lives in [`docs/ops-and-states.md`](ops-and-states.md).
+- This document defines where those components belong and what rules they must obey; it does not enumerate them exhaustively.
 
 Three-tier rule (normative):
 - Tier 1 (`bin/*`) MUST remain transport-only.
@@ -332,6 +340,8 @@ Execution mode contract:
 
 ### 11.1 Ops expand to state graphs
 `expand()` takes op config + run config and returns deterministic graph output.
+
+For the current registry-backed op catalog, see [`docs/ops-and-states.md`](ops-and-states.md).
 `expand()` is a planning-only phase and MUST NOT execute runtime side effects.
 
 ### 11.2 Flattened composition
