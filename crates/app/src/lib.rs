@@ -441,6 +441,23 @@ fn register_transport_factory(
 }
 
 /// Builder for the default application engine bundle.
+///
+/// This is the main customization point for callers that want the built-in MFM wiring with a few
+/// additional operation or transport plugins layered in before boot.
+///
+/// # Examples
+///
+/// ```rust
+/// use mfm_app::{AppBuilder, DefaultOperationPlugin};
+/// use std::sync::Arc;
+///
+/// let bundle = AppBuilder::new()
+///     .with_operation_plugin(Arc::new(DefaultOperationPlugin))
+///     .build()
+///     .expect("builder should assemble the default engine");
+///
+/// let _engine = bundle.engine.clone();
+/// ```
 pub struct AppBuilder {
     operation_plugins: Vec<Arc<dyn OperationPlugin>>,
     transport_plugins: Vec<Arc<dyn TransportPlugin>>,
