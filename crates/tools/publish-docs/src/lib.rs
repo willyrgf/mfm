@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
