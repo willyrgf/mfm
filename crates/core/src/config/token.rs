@@ -1,3 +1,9 @@
+//! Static token registry configuration.
+//!
+//! Token definitions are keyed by logical asset name and expanded into per-network deployment
+//! records. Helpers in this module keep user-authored slippage strings in a normalized basis-point
+//! form for downstream execution layers.
+
 use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -45,6 +51,29 @@ pub enum SlippageParseError {
 
 impl TokenNetwork {
     /// Parses slippage (in percent, e.g. `"0.50"` for 0.50%) into basis points (bps).
+    ///
+    /// The parser accepts an optional trailing `%` and enforces at most two decimal places because
+    /// one basis point equals `0.01%`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use alloy_primitives::Address;
+    /// use mfm_core::config::token::{Kind, TokenNetwork};
+    ///
+    /// let token = TokenNetwork {
+    ///     name: "Wrapped Ether".to_string(),
+    ///     kind: Kind::Erc20,
+    ///     network_id: "mainnet".to_string(),
+    ///     address: Address::ZERO,
+    ///     slippage: "0.50%".to_string(),
+    ///     path_token: "weth".to_string(),
+    ///     decimals: Some(18),
+    /// };
+    ///
+    /// assert_eq!(token.slippage_bps()?, 50);
+    /// # Ok::<(), mfm_core::config::token::SlippageParseError>(())
+    /// ```
     pub fn slippage_bps(&self) -> Result<u32, SlippageParseError> {
         let raw = self.slippage.trim();
         let raw = raw.strip_suffix('%').unwrap_or(raw).trim();
@@ -134,11 +163,15 @@ pub struct TokenNetworks(HashMap<String, TokenNetwork>);
 
 impl TokenNetworks {
     /// Returns the underlying map of token-network definitions.
+    ///
+    /// This is mainly useful for validation or full-registry iteration.
     pub fn hashmap(&self) -> &HashMap<String, TokenNetwork> {
         &self.0
     }
 
     /// Looks up a token-network definition by key.
+    ///
+    /// Keys are the logical per-network identifiers nested under a token entry.
     pub fn get(&self, key: &str) -> Option<&TokenNetwork> {
         self.0.get(key)
     }
@@ -158,11 +191,15 @@ pub struct Token {
 pub struct Tokens(HashMap<String, Token>);
 impl Tokens {
     /// Returns the underlying map of token definitions.
+    ///
+    /// Prefer [`Self::get`] when you only need one token entry.
     pub fn hashmap(&self) -> &HashMap<String, Token> {
         &self.0
     }
 
     /// Looks up a token definition by key.
+    ///
+    /// Keys are the logical token identifiers from the YAML registry such as `weth` or `usdc`.
     pub fn get(&self, key: &str) -> Option<&Token> {
         self.0.get(key)
     }

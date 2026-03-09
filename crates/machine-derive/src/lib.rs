@@ -10,6 +10,11 @@
 //!
 //! ```rust
 //! // `mfm-machine-derive` currently reserves the proc-macro crate slot for future derives.
+//! // Importing the crate today is effectively a no-op, but downstream crates can already
+//! // depend on the package name that future derive macros will live under.
 //! use mfm_machine_derive as _;
 //! ```
+//!
+//! This avoids a future package rename when derive macros are introduced for common
+//! `mfm-machine` patterns.
 #![warn(missing_docs)]

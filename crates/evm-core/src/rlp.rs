@@ -1,3 +1,17 @@
+//! Minimal Recursive Length Prefix (RLP) encoders.
+//!
+//! These helpers are intentionally small and focused on the byte-string/list encodings used by
+//! the transaction-building codepaths in this repository.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_evm_core::rlp::{rlp_encode_bytes, rlp_encode_list};
+//!
+//! assert_eq!(rlp_encode_bytes(b"dog"), vec![0x83, b'd', b'o', b'g']);
+//! assert_eq!(rlp_encode_list(&[b"cat".to_vec(), b"dog".to_vec()])[0], 0xc8);
+//! ```
+
 /// Removes all leading zero bytes from a big-endian integer encoding.
 pub fn trim_leading_zero_bytes(bytes: &[u8]) -> Vec<u8> {
     let mut idx = 0usize;
@@ -77,7 +91,8 @@ pub fn rlp_encode_bytes(bytes: &[u8]) -> Vec<u8> {
 
 /// RLP-encodes a list of raw byte strings.
 ///
-/// Each item is individually encoded as a byte string before the outer list prefix is applied.
+/// Each item is individually encoded as a byte string before the outer list prefix is applied, so
+/// callers should pass raw payloads here rather than pre-encoded RLP items.
 pub fn rlp_encode_list(items: &[Vec<u8>]) -> Vec<u8> {
     let mut payload = Vec::new();
     for item in items {

@@ -215,6 +215,13 @@ let
     }
   '';
 
+  cargoWorkspaceTargetPreamble = ''
+    # Task apps execute from the flake source under /nix/store, so Cargo outputs
+    # must be redirected into a writable per-run location.
+    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-''${CI_ARTIFACTS_DIR:-''${TMPDIR:-/tmp}/mfm-task-artifacts}/cargo-target}"
+    mkdir -p "$CARGO_TARGET_DIR"
+  '';
+
   ciServicePortPrelude = ciRuntime.servicePortPrelude;
 
   ciParityServiceEnv = ''
@@ -616,6 +623,7 @@ in
           runtimeInputs = rustRuntimeInputs;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             echo "INFO: starting dev workflow"
 
@@ -677,6 +685,7 @@ in
           env = sharedCargoRustEnv;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             # Reserve stdout for the final JSON payload.
             exec 3>&1
@@ -1159,6 +1168,7 @@ in
           env = ciCargoRustEnv;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             exec cargo run -q -p mfm --bin mfm_cli -- "$@"
           '';
@@ -1181,6 +1191,7 @@ in
           env = sharedCargoRustEnv;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             exec cargo run -q -p mfm-rest-api --bin mfm_rest_api -- "$@"
           '';
@@ -1195,6 +1206,7 @@ in
           runtimeInputs = rustRuntimeInputs;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             echo "INFO: running release build"
             cargo build --release --all-features
@@ -1212,6 +1224,7 @@ in
           env = sharedCargoRustEnv;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             echo "INFO: running formatting checks"
             ${cargoFmtCheckCmd}
@@ -1220,6 +1233,50 @@ in
             ${cargoClippyCmd}
 
             echo "OK: quality checks completed"
+          '';
+        };
+
+        publish-docs = mkCommandTask {
+          id = "task.publish-docs";
+          appName = "publish-docs";
+          summary = "Plan or publish the docs.rs crate wave with exact crates.io observation";
+          description = ''
+            Runs the Rust Phase-1 publish-docs tool against `crates/docs/publish-wave.json`.
+            The tool resolves local versions from `cargo metadata`, checks exact crates.io package
+            versions, emits sanitized run artifacts under `.mfm/publish-docs/runs/`, and either
+            plans or applies publish actions. By default this performs a real `cargo publish`;
+            pass `--dry-run` to build a plan without uploading crates.
+          '';
+          tags = [
+            "release"
+            "docs"
+          ];
+          usage = [
+            "nix run .#publish-docs -- --dry-run"
+            "nix run .#publish-docs -- plan --json"
+            "nix run .#publish-docs -- --from mfm-state-common"
+            "nix run .#publish-docs -- --only mfm-docs"
+            "nix run .#publish-docs"
+          ];
+          examples = [
+            "nix run .#publish-docs -- --dry-run"
+            "nix run .#publish-docs -- apply --json"
+            "nix run .#publish-docs -- --from mfm-evm-runtime"
+          ];
+          runtimeInputs = rustRuntimeInputs ++ [ pkgs.git ];
+          argParser = "passthrough";
+          allowUnknownArgs = true;
+          passThroughEnv = sharedPassThroughEnv ++ [
+            "CARGO_HOME"
+            "CARGO_REGISTRY_TOKEN"
+            "CARGO_REGISTRIES_CRATES_IO_TOKEN"
+            "MFM_OUTPUT_FORMAT"
+          ];
+          env = sharedCargoRustEnv;
+          command = ''
+            set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
+            exec cargo run -p mfm-publish-docs -- "$@"
           '';
         };
 
@@ -1248,6 +1305,7 @@ in
           env = sharedCargoRustEnv;
           command = ''
             set -euo pipefail
+            ${cargoWorkspaceTargetPreamble}
 
             echo "INFO: running workspace tests"
             ${cargoNextestWorkspaceCiCmd}

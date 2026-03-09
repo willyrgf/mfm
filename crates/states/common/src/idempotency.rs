@@ -1,3 +1,27 @@
+//! Helpers for constructing stable idempotency scopes and keys.
+//!
+//! Shared states use these helpers to keep fact keys and idempotency scopes deterministic across
+//! planning, live execution, and replay.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_machine::ids::StateId;
+//! use mfm_state_common::idempotency::{canonical, state_purpose, state_scope};
+//!
+//! let state_id = StateId::must_new("demo.main.read".to_string());
+//!
+//! assert_eq!(state_scope("mfm:exec", &state_id), "mfm:exec|state:demo.main.read");
+//! assert_eq!(
+//!     state_purpose("demo", &state_id, "read"),
+//!     "mfm:demo|state:demo.main.read|purpose:read"
+//! );
+//! assert_eq!(
+//!     canonical("demo", "demo.main.read", "read"),
+//!     "mfm:demo|state:demo.main.read|purpose:read"
+//! );
+//! ```
+
 use mfm_machine::errors::StateError;
 use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{OpPath, StateId};

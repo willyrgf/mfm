@@ -1,3 +1,8 @@
+//! Shared lightweight error type for low-level EVM utilities.
+//!
+//! `UtilError` is intentionally simple so helper modules can return stable machine-readable error
+//! codes without pulling in transport- or runtime-specific error wrappers.
+
 /// Error returned by low-level EVM utility helpers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UtilError {

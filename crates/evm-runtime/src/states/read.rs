@@ -141,6 +141,23 @@ pub struct U64Expectation {
 
 impl U64Expectation {
     /// Builds a non-retryable parsing-input expectation.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use mfm_evm_runtime::states::read::U64Expectation;
+    /// use mfm_machine::errors::ErrorCategory;
+    ///
+    /// let expectation = U64Expectation::parsing_input(
+    ///     1,
+    ///     "chain_id_mismatch",
+    ///     "rpc chain id did not match expected_chain_id",
+    /// );
+    ///
+    /// assert_eq!(expectation.expected, 1);
+    /// assert_eq!(expectation.mismatch_category, ErrorCategory::ParsingInput);
+    /// assert!(!expectation.mismatch_retryable);
+    /// ```
     pub fn parsing_input(
         expected: u64,
         mismatch_code: &'static str,
@@ -171,6 +188,23 @@ pub struct ReadHexStringState {
 
 impl ReadHexStringState {
     /// Creates a new hex-string read state.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use mfm_evm_runtime::states::read::ReadHexStringState;
+    /// use mfm_machine::ids::{ContextKey, StateId};
+    ///
+    /// let state = ReadHexStringState::new(
+    ///     StateId::must_new("evm.main.client_version".to_string()),
+    ///     "web3_clientVersion",
+    ///     serde_json::json!([]),
+    ///     ContextKey("client_version".to_string()),
+    /// );
+    ///
+    /// assert_eq!(state.method, "web3_clientVersion");
+    /// assert_eq!(state.output_key.0, "client_version");
+    /// ```
     pub fn new(
         state_id: StateId,
         method: impl Into<String>,
@@ -297,6 +331,24 @@ pub struct EthCallState {
 
 impl EthCallState {
     /// Creates a new `eth_call` state that defaults to the `latest` block and hex-string decode.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use mfm_evm_runtime::states::read::{EthCallDecode, EthCallState};
+    /// use mfm_machine::ids::{ContextKey, StateId};
+    ///
+    /// let state = EthCallState::new(
+    ///     StateId::must_new("evm.main.call".to_string()),
+    ///     "0x0000000000000000000000000000000000000001",
+    ///     "0x70a08231",
+    ///     ContextKey("call_result".to_string()),
+    /// )
+    /// .with_decode(EthCallDecode::HexString);
+    ///
+    /// assert_eq!(state.output_key.0, "call_result");
+    /// assert_eq!(state.block, serde_json::json!("latest"));
+    /// ```
     pub fn new(
         state_id: StateId,
         to: impl Into<String>,
@@ -455,6 +507,24 @@ pub struct NativeBalanceState {
 
 impl NativeBalanceState {
     /// Creates a native-balance state with `ETH`/18-decimal defaults.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use alloy_primitives::Address;
+    /// use mfm_evm_runtime::states::read::NativeBalanceState;
+    /// use mfm_machine::ids::{ContextKey, StateId};
+    ///
+    /// let state = NativeBalanceState::new(
+    ///     StateId::must_new("evm.main.native_balance".to_string()),
+    ///     Address::from([0u8; 20]),
+    ///     ContextKey("block_number".to_string()),
+    ///     ContextKey("native_balance".to_string()),
+    /// );
+    ///
+    /// assert_eq!(state.symbol, "ETH");
+    /// assert_eq!(state.decimals, 18);
+    /// ```
     pub fn new(
         state_id: StateId,
         wallet: Address,

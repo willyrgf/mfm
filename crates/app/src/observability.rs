@@ -1,3 +1,9 @@
+//! Shared observability helpers for application-facing binaries.
+//!
+//! The CLI and REST API use this module to resolve environment-driven tracing configuration while
+//! preserving the repository-wide logging contract: logs on stderr, stable payloads on stdout, and
+//! compatibility support for both canonical and legacy environment variables.
+
 use std::io::IsTerminal;
 
 use tracing_subscriber::fmt::format::FmtSpan;

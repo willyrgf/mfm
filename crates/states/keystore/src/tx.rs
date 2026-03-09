@@ -1,4 +1,18 @@
 //! Helpers for parsing keystore transaction inputs and producing signed EIP-1559 payloads.
+//!
+//! These helpers sit below the reusable keystore transaction states and above the raw keystore
+//! implementation. They normalize user/config input into canonical transaction data and stable
+//! report keys without exposing secret-bearing details.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_state_keystore::tx::{output_context_key, parse_data_hex, validate_raw_transaction_hex};
+//!
+//! assert_eq!(parse_data_hex("0x").unwrap(), Vec::<u8>::new());
+//! validate_raw_transaction_hex("0x00").unwrap();
+//! assert_eq!(output_context_key("keystore_tx.sign").0, "keystore_tx.sign.report");
+//! ```
 
 use alloy_primitives::{keccak256, Address, PrimitiveSignature, B256};
 use mfm_evm_core::rlp::{
@@ -51,6 +65,9 @@ impl std::fmt::Display for KeystoreTxError {
 impl std::error::Error for KeystoreTxError {}
 
 /// Canonical EIP-1559 transaction fields required for signing.
+///
+/// This type is intentionally transport-agnostic: op planners can build it from CLI, API, or
+/// replayed input before passing it into keystore-backed signing states.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Eip1559TxToSign {
     /// Destination address for the transaction.

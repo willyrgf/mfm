@@ -1,3 +1,9 @@
+//! Reusable EVM runtime states grouped by execution intent.
+//!
+//! Use [`read`] for deterministic read-only RPC queries that normalize results into context. Use
+//! [`write`] for contract deployment, post-deploy configuration, and validation flows that depend
+//! on prepared artifacts and assertions from [`crate::dcv`].
+
 /// Reusable EVM read/query states.
 pub mod read;
 /// Reusable EVM deploy/configure/validate states.

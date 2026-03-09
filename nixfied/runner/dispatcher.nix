@@ -36,6 +36,16 @@ let
       program = "${script}/bin/${binName}";
     };
 
+  callerRootPrelude = ''
+    NIXFIED_CALLER_PWD="$PWD"
+    export NIXFIED_CALLER_PWD
+    if ORIGINAL_ROOT="$(${pkgs.git}/bin/git -C "$NIXFIED_CALLER_PWD" rev-parse --show-toplevel 2>/dev/null)"; then
+      export ORIGINAL_ROOT
+    else
+      export ORIGINAL_ROOT="$NIXFIED_CALLER_PWD"
+    fi
+  '';
+
   viewApps = model.views.apps;
   viewAppNames = builtins.sort builtins.lessThan (builtins.attrNames viewApps);
 
@@ -48,7 +58,8 @@ let
       {
         name = appName;
         value = mkApp appName ''
-          NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-task ${lib.escapeShellArg taskId} "$@"
+          ${callerRootPrelude}
+          exec ${orchestratorProgram} run-task ${lib.escapeShellArg taskId} "$@"
         '';
       }
     ) viewAppNames
@@ -66,11 +77,13 @@ let
     else
       {
         "framework::install" = mkApp "framework::install" ''
-          NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#run-task --refresh -- task.framework.install "$@"
+          ${callerRootPrelude}
+          exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#run-task --refresh -- task.framework.install "$@"
         '';
 
         "framework::upgrade" = mkApp "framework::upgrade" ''
-          NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#run-task --refresh -- task.framework.upgrade "$@"
+          ${callerRootPrelude}
+          exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#run-task --refresh -- task.framework.upgrade "$@"
         '';
       };
 in
@@ -80,7 +93,8 @@ in
       echo "ERROR: usage: run-task <task-id> [-- ...]"
       exit 2
     fi
-    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-task "$@"
+    ${callerRootPrelude}
+    exec ${orchestratorProgram} run-task "$@"
   '';
 
   "run-workflow" = mkApp "run-workflow" ''
@@ -88,7 +102,8 @@ in
       echo "ERROR: usage: run-workflow <workflow-id> [-- ...]"
       exit 2
     fi
-    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-workflow "$@"
+    ${callerRootPrelude}
+    exec ${orchestratorProgram} run-workflow "$@"
   '';
 
   "run-workflow-parallel" = mkApp "run-workflow-parallel" ''
@@ -96,11 +111,13 @@ in
       echo "ERROR: usage: run-workflow-parallel <workflow-id> [-- ...]"
       exit 2
     fi
-    NIXFIED_WORKFLOW_PARALLEL=1 NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-workflow "$@"
+    ${callerRootPrelude}
+    NIXFIED_WORKFLOW_PARALLEL=1 exec ${orchestratorProgram} run-workflow "$@"
   '';
 
   "runs" = mkApp "runs" ''
-    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} runs "$@"
+    ${callerRootPrelude}
+    exec ${orchestratorProgram} runs "$@"
   '';
 
   "stop-run" = mkApp "stop-run" ''
@@ -108,7 +125,8 @@ in
       echo "ERROR: usage: stop-run <run-id>"
       exit 2
     fi
-    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} stop-run "$@"
+    ${callerRootPrelude}
+    exec ${orchestratorProgram} stop-run "$@"
   '';
 
   "stop-all-runs" = mkApp "stop-all-runs" ''
@@ -116,7 +134,8 @@ in
       echo "ERROR: usage: stop-all-runs"
       exit 2
     fi
-    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} stop-all-runs
+    ${callerRootPrelude}
+    exec ${orchestratorProgram} stop-all-runs
   '';
 
   "help" = mkApp "help" ''

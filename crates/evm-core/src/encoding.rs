@@ -1,3 +1,25 @@
+//! EVM encoding helpers for common JSON-RPC and ERC-20 interactions.
+//!
+//! The functions here are intentionally transport-agnostic. They normalize addresses, format
+//! JSON-RPC quantities, and build small ABI snippets that runtime callers can embed into requests.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use alloy_primitives::Address;
+//! use mfm_evm_core::encoding::{encode_erc20_balance_of, normalize_address, u64_hex_quantity};
+//!
+//! let owner = Address::from([0x11; 20]);
+//! let calldata = encode_erc20_balance_of(&owner);
+//! assert!(calldata.starts_with("0x70a08231"));
+//! assert_eq!(u64_hex_quantity(15), "0xf");
+//! assert_eq!(
+//!     normalize_address("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")?,
+//!     "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+//! );
+//! # Ok::<(), mfm_evm_core::util_error::UtilError>(())
+//! ```
+
 use alloy_primitives::{Address, U256};
 
 use crate::hex::{bytes_to_hex_prefixed, hex_to_bytes, normalize_hex_str};
@@ -179,6 +201,9 @@ pub fn parse_address_hex(raw: &str) -> Result<[u8; 20], UtilError> {
 }
 
 /// Normalizes an address string to lowercase `0x`-prefixed form.
+///
+/// This helper accepts upper- or lower-case input, enforces 20-byte width, and returns the
+/// canonical lowercase form used elsewhere in MFM docs and manifests.
 pub fn normalize_address(raw: &str) -> Result<String, UtilError> {
     let normalized = normalize_hex_str(raw)?;
     let rest = normalized.strip_prefix("0x").unwrap_or_default();

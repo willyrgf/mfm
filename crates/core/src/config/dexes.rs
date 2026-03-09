@@ -1,3 +1,8 @@
+//! Static DEX registry configuration.
+//!
+//! These types model the named exchange backends that runtime config selects from, including both
+//! on-chain router/factory addresses and off-chain API endpoints when a DEX relies on them.
+
 use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -38,11 +43,16 @@ pub struct Dex {
 pub struct Dexes(HashMap<String, Dex>);
 impl Dexes {
     /// Returns the underlying map of named DEX definitions.
+    ///
+    /// Use this when validating the full registry or when building derived lookup structures.
     pub fn hashmap(&self) -> &HashMap<String, Dex> {
         &self.0
     }
 
     /// Looks up a DEX definition by key.
+    ///
+    /// Keys are the logical DEX identifiers from the YAML registry, not the human-readable
+    /// [`Dex::name`] field.
     pub fn get(&self, key: &str) -> Option<&Dex> {
         self.0.get(key)
     }

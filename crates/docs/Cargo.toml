@@ -1,0 +1,11 @@
+[package]
+name = "mfm-docs"
+version = "0.1.0"
+edition = "2021"
+description = "Umbrella docs.rs landing page for the MFM workspace"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"

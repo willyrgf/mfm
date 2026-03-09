@@ -1,4 +1,12 @@
 //! Reusable state implementations and metadata helpers shared across ops.
+//!
+//! This module is the main docs.rs entry point for shared execution-time building blocks.
+//! Op crates typically pull states from here when they need:
+//!
+//! - stable machine metadata tags via [`meta`]
+//! - Nix-backed execution via [`nix`]
+//! - typed proof flows via [`proof`]
+//! - shared failpoint helpers via [`side_effect`]
 
 /// Helpers for constructing consistent shared-state metadata.
 pub mod meta;

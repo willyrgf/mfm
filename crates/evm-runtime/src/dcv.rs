@@ -1,3 +1,57 @@
+//! Deploy/configure/validate helpers shared by reusable EVM runtime states.
+//!
+//! This module owns the pure data-shaping layer behind the EVM write-path states:
+//!
+//! - contract artifact parsing
+//! - ABI-based calldata encoding
+//! - validation assertion preparation
+//! - small normalization helpers for addresses, blocks, and values
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mfm_evm_runtime::dcv::{
+//!     prepare_validate_assertions, BlockTag, EventAssertionConfig, ReadAssertionConfig,
+//! };
+//!
+//! let abi = mfm_evm_runtime::dcv::parse_abi(&serde_json::json!([
+//!     {
+//!         "type": "function",
+//!         "name": "owner",
+//!         "inputs": [],
+//!         "outputs": [{ "name": "", "type": "address" }],
+//!         "stateMutability": "view"
+//!     },
+//!     {
+//!         "type": "event",
+//!         "name": "Configured",
+//!         "inputs": [],
+//!         "anonymous": false
+//!     }
+//! ]))
+//! .unwrap();
+//!
+//! let (reads, events) = prepare_validate_assertions(
+//!     &abi,
+//!     &[ReadAssertionConfig {
+//!         function: "owner".to_string(),
+//!         args: vec![],
+//!         expected: serde_json::json!("0x0000000000000000000000000000000000000000"),
+//!     }],
+//!     &[EventAssertionConfig {
+//!         event: "Configured".to_string(),
+//!         min_count: 1,
+//!         from_block: Some(BlockTag::Number(0)),
+//!         to_block: Some(BlockTag::Tag("latest".to_string())),
+//!     }],
+//! )
+//! .unwrap();
+//!
+//! assert_eq!(reads.len(), 1);
+//! assert_eq!(events[0].event, "Configured");
+//! assert!(events[0].topic0_hex.starts_with("0x"));
+//! ```
+
 use alloy_primitives::keccak256;
 use serde::Deserialize;
 
@@ -36,6 +90,8 @@ fn default_min_count() -> u64 {
 }
 
 /// Block selector used by validation reads and event queries.
+///
+/// Numeric blocks are rendered as hex quantities; string tags are passed through as-is.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 pub enum BlockTag {

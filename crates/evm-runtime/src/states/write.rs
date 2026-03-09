@@ -35,6 +35,26 @@ const KEY_CHAIN_ID: &str = "chain_id";
 const KEY_CLIENT_VERSION: &str = "client_version";
 
 /// Runtime configuration for [`EvmDeployState`].
+///
+/// # Examples
+///
+/// ```rust
+/// use mfm_evm_runtime::states::write::EvmDeployStateConfig;
+///
+/// let cfg = EvmDeployStateConfig {
+///     artifact: None,
+///     artifact_port: "contract_artifact".to_string(),
+///     from: "0x0000000000000000000000000000000000000001".to_string(),
+///     constructor_args: vec![serde_json::json!(42)],
+///     value_hex: Some("0x0".to_string()),
+///     signing_key_env: Some("MFM_DEPLOYER_KEY".to_string()),
+///     poll_interval_ms: 1_000,
+///     max_receipt_polls: 30,
+/// };
+///
+/// assert_eq!(cfg.artifact_port, "contract_artifact");
+/// assert_eq!(cfg.max_receipt_polls, 30);
+/// ```
 #[derive(Clone, Debug)]
 pub struct EvmDeployStateConfig {
     /// Optional inline contract artifact; falls back to `artifact_port` when absent.
@@ -86,6 +106,8 @@ pub struct EvmConfigureStateConfig {
 }
 
 /// Runtime configuration for [`EvmValidateState`].
+///
+/// `require_client_substring` is matched case-insensitively against `web3_clientVersion`.
 #[derive(Clone, Debug)]
 pub struct EvmValidateStateConfig {
     /// Optional inline contract artifact; falls back to `artifact_port` when absent.
@@ -105,6 +127,9 @@ pub struct EvmValidateStateConfig {
 }
 
 /// State that extracts a contract artifact from a Nix build result.
+///
+/// The extracted artifact is normalized into the shared `contract_artifact` context slot expected
+/// by the downstream deploy/configure/validate states.
 #[derive(Clone, Debug)]
 pub struct NixArtifactToEvmContractState {
     /// JSON pointer applied to the Nix result payload.

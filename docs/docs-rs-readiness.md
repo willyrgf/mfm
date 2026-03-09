@@ -11,6 +11,53 @@
 - Several core and state crates already have crate-level docs and examples.
 - The remaining gap is concentrated in item-level docs, publish-wave prioritization, and crate landing-page polish.
 - This document tracks rustdoc/docs.rs readiness only; current ops/states inventory lives in `docs/ops-and-states.md`.
+- Recent progress on 2026-03-08:
+  - wave-1 landing pages and examples are now in place for `mfm-machine`, `mfm-machine-derive`, `mfm-machine-test-support`, `mfm-sdk`, `mfm_core::config`, and `mfm-evm-core`
+  - `nix run .#check` is no longer blocked by the readonly Cargo target-dir issue in Nixfied task apps
+  - publish-wave manifests now use `path + version` for the near-term docs.rs release chain
+
+## Current Publish Order
+
+`docs.rs` only builds crate documentation after a crate has been published to crates.io. Repository docs such as `docs/ops-and-states.md` stay in-repo; crate-level rustdoc and README content are what appear on docs.rs.
+
+Current near-term release chain:
+
+1. Foundation:
+   - `mfm-machine`
+   - `mfm-machine-derive`
+   - `mfm_core`
+   - `mfm-evm-core`
+2. First dependents:
+   - `mfm-sdk`
+   - `mfm-machine-test-support`
+   - `mfm-collectors-evm`
+   - `mfm-collectors-exec`
+   - `mfm-collectors-nix`
+   - `mfm-transports-local-evm`
+   - `mfm-op-keystore-shim`
+3. Shared-state base:
+   - `mfm-state-common`
+4. Runtime layer:
+   - `mfm-evm-runtime`
+5. State consumers:
+   - `mfm-state-keystore`
+   - `mfm-state-keystore-submit`
+   - `mfm-state-aave-v3`
+6. Umbrella landing page:
+   - `mfm-docs`
+
+Notes:
+
+- `cargo publish --dry-run` for a crate with `path + version` dependencies still expects the versioned upstream crate to exist on crates.io. A dry-run failure like `no matching package named 'mfm-machine' found` is expected until the earlier publish step has completed.
+- Use `cargo check -p <crate> --lib` for local compile validation before the upstream versions exist in the registry.
+- Use `cargo package --allow-dirty --list -p <crate>` when you want to inspect the files that would be packaged without requiring the upstream versions to exist in the registry.
+- Use `nix run .#publish-docs -- --dry-run` to validate the current ordered wave from `crates/docs/publish-wave.json`.
+- `publish-docs` now uses the crates.io sparse index as the primary registry signal for planning; transient or cached uncertainty is treated as `wait_registry`, not as permission to publish.
+- Normal `publish-docs` planning only observes the selected wave. Full-catalog registry observation now happens in `nix run .#publish-docs -- sync-umbrella`.
+- `nix run .#publish-docs` now auto-runs the umbrella sync during `apply`/`resume` when `mfm-docs` needs it, then re-plans against the refreshed sync artifact.
+- If that auto-sync updates `crates/docs/README.md` and publishable actions remain, commit the README first or rerun with `--allow-dirty`.
+- Publish `mfm-docs` after the first wave it links to, otherwise the landing page will contain avoidable `docs.rs` 404s.
+- Keep `mfm-app` out of the first publish wave; its dependency surface and end-user positioning still need curation.
 
 ## Global Requirements (Apply to Every Crate)
 
@@ -35,8 +82,6 @@ Current publish-wave framing:
 Remaining work in this tier:
 
 - deepen `mfm-machine` item-level docs around IDs, event types, execution plans, and standard tags
-- add more example-driven docs for `mfm-machine` and `mfm-machine-derive`
-- finish test-helper documentation in `mfm-machine-test-support`
 - keep this tier as the reference foundation that downstream crate docs link back to
 
 ---
@@ -51,8 +96,6 @@ Current publish-wave framing:
 Remaining work in this tier:
 
 - expand item-level docs in `mfm_core` config models and security-sensitive keystore support types
-- make `mfm-evm-core` the strongest low-level reference layer with examples for ABI, encoding, hex, and RLP helpers
-- improve `mfm-sdk` examples around operation registration, pipeline planning, and run launch surfaces
 - treat `mfm-app` as a later publish target because packaging topology and surface curation matter as much as raw rustdoc coverage
 
 ---
@@ -64,7 +107,7 @@ This section tracks publish readiness, not runtime inventory.
 
 Current publish-wave framing:
 
-- `Wave 1`: `mfm-evm-runtime`, `mfm-state-keystore`, `mfm-state-common`
+- `Wave 1`: `mfm-evm-runtime`, `mfm-state-keystore`, `mfm-state-keystore-submit`, `mfm-state-common`
 - `Wave 2`: `mfm-state-aave-v3`
 
 Remaining work in this tier:
@@ -141,14 +184,14 @@ All 6 crates have good crate-level docs but lack item-level documentation.
 
 Keep only items here that directly affect docs.rs readiness:
 
-1. **Wave-1 crate landing pages need polish** — add package metadata and module landing pages for the selected publish wave.
+1. **Wave-1 landing pages are in place** — remaining work is deeper item-level coverage and publish-surface curation.
 2. **`crates/app/` is still a later publish target** — publishing topology is a larger issue than raw rustdoc coverage.
 3. **Selected state crates are close to publishable** — preserve that status and avoid regressing `missing_docs`.
 
 ## Suggested Workflow for the Engineer Agent
 
-1. **Start with Tier 1** (machine, machine-derive, machine-test-support) — these define the core types everything depends on.
-2. **Move to Tier 2** (core, evm-core, sdk, app) — focus on evm-core and app first since they're the worst.
+1. **Finish targeted item-level docs in Tier 1** — keep improving the core engine reference surface around IDs, events, execution plans, and engine-boundary types.
+2. **Finish targeted item-level docs in Tier 2** — especially `mfm_core` config types and security-sensitive support surfaces; keep `mfm-app` as a later publish target.
 3. **Then Tier 3** (states) — document the shared state primitives.
 4. **Then Tier 4-6** (ops, storages, collectors, transports) — these follow patterns established in earlier tiers.
 5. After each crate is documented, preserve or tighten `#![warn(missing_docs)]` to prevent regressions.
