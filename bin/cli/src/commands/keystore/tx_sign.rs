@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 /// Arguments for `mfm keystore tx-sign`.
 #[derive(Args)]
-pub struct TxSignArgs {
+pub(crate) struct TxSignArgs {
     /// Key ID (UUID) to use for signing
     #[arg(long)]
     pub id: Option<String>,
@@ -65,7 +65,7 @@ pub struct TxSignArgs {
 
 /// Response returned after writing a signed transaction payload.
 #[derive(Debug, Clone, Serialize)]
-pub struct TxSignResponse {
+pub(crate) struct TxSignResponse {
     from: String,
     to: String,
     nonce: u64,
@@ -86,7 +86,7 @@ impl fmt::Display for TxSignResponse {
 }
 
 /// Executes the signing command and terminates the process.
-pub async fn execute(ctx: &CommandContext, args: &TxSignArgs) -> ! {
+pub(crate) async fn execute(ctx: &CommandContext, args: &TxSignArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);
 }

@@ -12,12 +12,12 @@ use crate::{
 };
 
 /// Relative path to the current publish wave file.
-pub const PUBLISH_WAVE_PATH: &str = "crates/docs/publish-wave.json";
+pub(crate) const PUBLISH_WAVE_PATH: &str = "crates/docs/publish-wave.json";
 /// Relative path to the desired-state catalog.
-pub const DESIRED_CATALOG_PATH: &str = "crates/docs/catalog.toml";
+pub(crate) const DESIRED_CATALOG_PATH: &str = "crates/docs/catalog.toml";
 
 /// Loads `publish-wave.json` from the workspace root.
-pub fn load_publish_wave(workspace_root: &Path) -> Result<PublishWave, PublishDocsError> {
+pub(crate) fn load_publish_wave(workspace_root: &Path) -> Result<PublishWave, PublishDocsError> {
     let path = publish_wave_path(workspace_root);
     let bytes = fs::read(&path)?;
     let wave = serde_json::from_slice(&bytes)?;
@@ -25,12 +25,12 @@ pub fn load_publish_wave(workspace_root: &Path) -> Result<PublishWave, PublishDo
 }
 
 /// Returns the absolute path to `publish-wave.json` for the workspace root.
-pub fn publish_wave_path(workspace_root: &Path) -> PathBuf {
+pub(crate) fn publish_wave_path(workspace_root: &Path) -> PathBuf {
     workspace_root.join(PUBLISH_WAVE_PATH)
 }
 
 /// Loads `catalog.toml` from the workspace root and validates it against the workspace inventory.
-pub fn load_desired_catalog(
+pub(crate) fn load_desired_catalog(
     workspace_root: &Path,
     workspace: &WorkspaceState,
 ) -> Result<DesiredCatalog, PublishDocsError> {
@@ -66,7 +66,7 @@ pub fn load_desired_catalog(
 }
 
 /// Applies `--only` and `--from` selection semantics to the wave.
-pub fn select_packages(
+pub(crate) fn select_packages(
     wave: &PublishWave,
     filter: &PackageFilter,
 ) -> Result<Vec<WavePackage>, PublishDocsError> {
@@ -101,7 +101,10 @@ pub fn select_packages(
 }
 
 /// Returns a catalog entry by package name.
-pub fn catalog_entry<'a>(catalog: &'a DesiredCatalog, name: &str) -> Option<&'a CatalogPackage> {
+pub(crate) fn catalog_entry<'a>(
+    catalog: &'a DesiredCatalog,
+    name: &str,
+) -> Option<&'a CatalogPackage> {
     catalog.packages.iter().find(|package| package.name == name)
 }
 

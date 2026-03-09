@@ -8,7 +8,7 @@ const ENV_EVM_RPC_SOURCE_ID: &str = "MFM_EVM_RPC_SOURCE_ID";
 const ENV_KEYSTORE_PATH: &str = "MFM_KEYSTORE_PATH";
 
 /// Resolves the effective keystore path from explicit CLI input, environment, or the standard default.
-pub fn resolve_keystore_path(configured: Option<&PathBuf>) -> PathBuf {
+pub(crate) fn resolve_keystore_path(configured: Option<&PathBuf>) -> PathBuf {
     configured
         .cloned()
         .or_else(|| std::env::var(ENV_KEYSTORE_PATH).ok().map(PathBuf::from))
@@ -19,7 +19,7 @@ pub fn resolve_keystore_path(configured: Option<&PathBuf>) -> PathBuf {
 }
 
 /// Resolves the effective RPC source id from explicit CLI input or environment.
-pub fn resolve_rpc_source_id(configured: Option<&str>) -> Result<String, CommandError> {
+pub(crate) fn resolve_rpc_source_id(configured: Option<&str>) -> Result<String, CommandError> {
     let value = configured
         .map(str::to_string)
         .or_else(|| std::env::var(ENV_EVM_RPC_SOURCE_ID).ok())

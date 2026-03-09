@@ -4,7 +4,7 @@ use thiserror::Error;
 
 /// Top-level error type for the Phase-1 publish-docs tool.
 #[derive(Debug, Error)]
-pub enum PublishDocsError {
+pub(crate) enum PublishDocsError {
     /// The workspace root could not be located from the current directory.
     #[error("unable to locate workspace root from {start_dir}")]
     WorkspaceRootNotFound {

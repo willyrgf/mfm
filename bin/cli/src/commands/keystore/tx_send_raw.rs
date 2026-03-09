@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 /// Arguments for `mfm keystore tx-send-raw`.
 #[derive(Args)]
-pub struct TxSendRawArgs {
+pub(crate) struct TxSendRawArgs {
     /// EVM RPC source ID (falls back to MFM_EVM_RPC_SOURCE_ID)
     #[arg(long, env = "MFM_EVM_RPC_SOURCE_ID")]
     pub source_id: Option<String>,
@@ -26,7 +26,7 @@ pub struct TxSendRawArgs {
 
 /// Response returned after broadcasting a signed raw transaction.
 #[derive(Debug, Clone, Serialize)]
-pub struct TxSendRawResponse {
+pub(crate) struct TxSendRawResponse {
     tx_hash: String,
     rpc_url_host: String,
     submitted_at: String,
@@ -43,7 +43,7 @@ impl fmt::Display for TxSendRawResponse {
 }
 
 /// Executes the raw-transaction submission command and terminates the process.
-pub async fn execute(ctx: &CommandContext, args: &TxSendRawArgs) -> ! {
+pub(crate) async fn execute(ctx: &CommandContext, args: &TxSendRawArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);
 }

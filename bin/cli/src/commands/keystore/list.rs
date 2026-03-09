@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 /// Arguments for `mfm keystore list`.
 #[derive(Args)]
-pub struct ListArgs {
+pub(crate) struct ListArgs {
     /// Keystore file path
     #[arg(long)]
     pub keystore: Option<PathBuf>,
@@ -34,7 +34,7 @@ pub struct ListArgs {
 
 /// Sort orders supported by the list command.
 #[derive(clap::ValueEnum, Clone)]
-pub enum SortBy {
+pub(crate) enum SortBy {
     /// Sort keys lexicographically by label.
     #[value(name = "label")]
     Label,
@@ -48,7 +48,7 @@ pub enum SortBy {
 
 /// Response returned by the list command.
 #[derive(Serialize)]
-pub struct ListResponse {
+pub(crate) struct ListResponse {
     keys: Vec<KeyDisplay>,
     show_addresses: bool,
 }
@@ -64,7 +64,7 @@ impl fmt::Display for ListResponse {
 }
 
 /// Executes the list command and terminates the process.
-pub async fn execute(ctx: &CommandContext, args: &ListArgs) -> ! {
+pub(crate) async fn execute(ctx: &CommandContext, args: &ListArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);
 }

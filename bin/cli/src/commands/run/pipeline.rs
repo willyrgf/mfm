@@ -6,12 +6,12 @@ use std::path::PathBuf;
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::app_services::{command_error_from_app_error, make_app_services};
-use crate::support::run_stores::{make_stores, RunStoresArgs};
+use crate::support::app_services::{command_error_from_app_error, make_app_services_from_args};
+use crate::support::run_stores::RunStoresArgs;
 
 /// Subcommands under `mfm run pipeline`.
 #[derive(Subcommand)]
-pub enum PipelineCommand {
+pub(crate) enum PipelineCommand {
     /// Start a run from an explicit pipeline JSON payload
     Start {
         /// Parsed arguments for the explicit pipeline start command.
@@ -29,7 +29,7 @@ pub enum PipelineCommand {
 
 impl PipelineCommand {
     /// Dispatches the selected pipeline subcommand and terminates the process.
-    pub async fn execute(&self, ctx: &CommandContext) -> ! {
+    pub(crate) async fn execute(&self, ctx: &CommandContext) -> ! {
         match self {
             PipelineCommand::Start { args } => {
                 handle_command_result(execute_start_internal(args).await, &ctx.output_format)
@@ -43,7 +43,7 @@ impl PipelineCommand {
 
 /// Arguments for `mfm run pipeline start`.
 #[derive(Args)]
-pub struct PipelineStartArgs {
+pub(crate) struct PipelineStartArgs {
     /// Pipeline JSON payload
     #[arg(long)]
     pub pipeline_json: String,
@@ -59,7 +59,7 @@ pub struct PipelineStartArgs {
 
 /// Arguments for `mfm run pipeline deploy-configure-validate`.
 #[derive(Args)]
-pub struct DeployConfigureValidateArgs {
+pub(crate) struct DeployConfigureValidateArgs {
     /// Spec JSON payload describing deploy/configure/validate op configs
     #[arg(long)]
     pub spec_json: Option<String>,
@@ -87,21 +87,11 @@ fn parse_input_json(s: &str) -> Result<serde_json::Value, CommandError> {
         .map_err(|_| CommandError::new("InvalidJson", "Failed to parse --input-json as JSON"))
 }
 
-async fn app_services(stores_args: &RunStoresArgs) -> Result<mfm_app::AppServices, CommandError> {
-    let stores = make_stores(
-        stores_args.artifact_root.clone(),
-        stores_args.database_url.clone(),
-    )
-    .await?;
-
-    Ok(make_app_services(stores))
-}
-
 async fn execute_start_internal(args: &PipelineStartArgs) -> CommandResult<RunStartResponse> {
     let pipeline = parse_pipeline_json(&args.pipeline_json)?;
     let input = parse_input_json(&args.input_json)?;
 
-    let services = app_services(&args.stores).await?;
+    let services = make_app_services_from_args(&args.stores).await?;
 
     let response = services
         .start_run(RunsStartRequest::Pipeline(PipelineStartRequest {
@@ -118,7 +108,7 @@ async fn execute_start_internal(args: &PipelineStartArgs) -> CommandResult<RunSt
 async fn execute_dcv_internal(
     args: &DeployConfigureValidateArgs,
 ) -> CommandResult<RunStartResponse> {
-    let services = app_services(&args.stores).await?;
+    let services = make_app_services_from_args(&args.stores).await?;
     let response = services
         .start_deploy_configure_validate_from_spec_input(
             args.spec_json.clone(),

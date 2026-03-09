@@ -89,7 +89,7 @@ impl<T> SuccessResponse<T> {
 }
 
 /// Print a success response in the specified format
-pub fn print_success<T: Serialize>(data: T, format: &OutputFormat) {
+pub(crate) fn print_success<T: Serialize>(data: T, format: &OutputFormat) {
     match format {
         OutputFormat::Text => {
             // For text format, we assume the data implements Display or similar
@@ -109,7 +109,7 @@ pub fn print_success<T: Serialize>(data: T, format: &OutputFormat) {
 }
 
 /// Print an error response in the specified format  
-pub fn print_error(code: &str, message: &str, format: &OutputFormat) {
+pub(crate) fn print_error(code: &str, message: &str, format: &OutputFormat) {
     match format {
         OutputFormat::Text => {
             eprintln!("Error: {message}");
@@ -221,7 +221,7 @@ fn build_row(cells: &[&str], widths: &[usize]) -> String {
 }
 
 /// Handles the output formatting for command results
-pub fn handle_command_result<T>(result: CommandResult<T>, format: &OutputFormat) -> !
+pub(crate) fn handle_command_result<T>(result: CommandResult<T>, format: &OutputFormat) -> !
 where
     T: Serialize + fmt::Display,
 {

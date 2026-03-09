@@ -13,29 +13,19 @@ use mfm_machine::stores::{ArtifactStore, EventStore};
 
 /// Shared store selection arguments for commands that access persisted runs.
 #[derive(Args, Debug, Clone)]
-pub struct RunStoresArgs {
+pub(crate) struct RunStoresArgs {
     /// Root directory for run artifacts (default: $MFM_ARTIFACT_ROOT or ~/.mfm/run_artifacts)
     #[arg(long)]
-    pub artifact_root: Option<PathBuf>,
+    pub(crate) artifact_root: Option<PathBuf>,
 
     /// PostgreSQL connection string for the event store (default: $DATABASE_URL)
     #[arg(long)]
-    pub database_url: Option<String>,
-}
-
-fn default_artifact_root() -> PathBuf {
-    std::env::var("MFM_ARTIFACT_ROOT")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".mfm").join("run_artifacts")
-        })
+    pub(crate) database_url: Option<String>,
 }
 
 /// Builds the artifact store selected by CLI arguments and environment.
-pub fn make_artifact_store(artifact_root: Option<PathBuf>) -> Arc<dyn ArtifactStore> {
-    let artifact_root = artifact_root.unwrap_or_else(default_artifact_root);
+pub(crate) fn make_artifact_store(artifact_root: Option<PathBuf>) -> Arc<dyn ArtifactStore> {
+    let artifact_root = artifact_root.unwrap_or_else(mfm_app::default_artifact_root);
     Arc::new(FsArtifactStore::new(artifact_root))
 }
 
@@ -67,7 +57,7 @@ async fn make_event_store(
 }
 
 /// Builds the persistent event and artifact stores selected by CLI arguments.
-pub async fn make_stores(
+pub(crate) async fn make_stores(
     artifact_root: Option<PathBuf>,
     database_url: Option<String>,
 ) -> Result<Stores, CommandError> {
@@ -78,7 +68,7 @@ pub async fn make_stores(
 }
 
 /// Builds in-memory event storage with the standard artifact store for ephemeral commands.
-pub fn make_ephemeral_stores(artifact_root: Option<PathBuf>) -> Stores {
+pub(crate) fn make_ephemeral_stores(artifact_root: Option<PathBuf>) -> Stores {
     let artifacts = make_artifact_store(artifact_root);
     let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
 

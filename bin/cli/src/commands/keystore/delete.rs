@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 /// Arguments for `mfm keystore delete`.
 #[derive(Args)]
-pub struct DeleteArgs {
+pub(crate) struct DeleteArgs {
     /// Key ID (UUID) to delete
     pub id: Option<String>,
 
@@ -33,7 +33,7 @@ pub struct DeleteArgs {
 
 /// Response returned after successfully deleting a key.
 #[derive(Serialize)]
-pub struct DeleteResponse {
+pub(crate) struct DeleteResponse {
     id: String,
     label: String,
 }
@@ -45,7 +45,7 @@ impl fmt::Display for DeleteResponse {
 }
 
 /// Executes the delete command and terminates the process.
-pub async fn execute(ctx: &CommandContext, args: &DeleteArgs) -> ! {
+pub(crate) async fn execute(ctx: &CommandContext, args: &DeleteArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);
 }

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// Output formats supported by the tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum OutputFormat {
+pub(crate) enum OutputFormat {
     /// Human-readable text output.
     Text,
     /// Machine-readable JSON output.
@@ -15,7 +15,7 @@ pub enum OutputFormat {
 /// Supported command modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Mode {
+pub(crate) enum Mode {
     /// Build a plan without publishing crates.
     Plan,
     /// Execute publishable actions.
@@ -30,7 +30,7 @@ pub enum Mode {
 
 /// Selection filter derived from CLI flags.
 #[derive(Debug, Clone, Default)]
-pub struct PackageFilter {
+pub(crate) struct PackageFilter {
     /// Optional package at which catalog processing should start.
     pub from: Option<String>,
     /// Optional package to process exclusively.
@@ -39,7 +39,7 @@ pub struct PackageFilter {
 
 /// One package entry from the publish wave file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WavePackage {
+pub(crate) struct WavePackage {
     /// Cargo package name.
     pub name: String,
     /// Human-facing wave group name.
@@ -52,7 +52,7 @@ pub struct WavePackage {
 
 /// Normalized publish wave description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublishWave {
+pub(crate) struct PublishWave {
     /// Wave name from `publish-wave.json`.
     pub wave: String,
     /// Ordered packages in the wave.
@@ -62,7 +62,7 @@ pub struct PublishWave {
 /// Desired public visibility for a catalog entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Visibility {
+pub(crate) enum Visibility {
     /// Crate is part of the intended public surface.
     Public,
     /// Crate is internal and should not be treated as public surface.
@@ -73,7 +73,7 @@ pub enum Visibility {
 
 /// Docs hosting policy for a catalog entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DocsPolicy {
+pub(crate) enum DocsPolicy {
     /// docs.rs is the intended docs surface.
     #[serde(rename = "docs-rs")]
     DocsRs,
@@ -87,7 +87,7 @@ pub enum DocsPolicy {
 
 /// Umbrella inclusion policy for a catalog entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum UmbrellaPolicy {
+pub(crate) enum UmbrellaPolicy {
     /// Always show on the umbrella page.
     #[serde(rename = "always")]
     Always,
@@ -101,7 +101,7 @@ pub enum UmbrellaPolicy {
 
 /// Ordering section for umbrella generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum CatalogSection {
+pub(crate) enum CatalogSection {
     /// Engine and SDK crates.
     #[serde(rename = "engine_sdk")]
     EngineSdk,
@@ -130,7 +130,7 @@ pub enum CatalogSection {
 
 /// One desired-state catalog entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CatalogPackage {
+pub(crate) struct CatalogPackage {
     /// Cargo package name.
     pub name: String,
     /// Relative workspace path.
@@ -157,7 +157,7 @@ pub struct CatalogPackage {
 
 /// Desired-state catalog for the docs surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DesiredCatalog {
+pub(crate) struct DesiredCatalog {
     /// Schema version.
     pub catalog_version: u32,
     /// Package name of the umbrella crate.
@@ -168,7 +168,7 @@ pub struct DesiredCatalog {
 
 /// Local workspace package facts used by the planner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LocalPackage {
+pub(crate) struct LocalPackage {
     /// Cargo package name.
     pub name: String,
     /// Parsed local version.
@@ -193,7 +193,7 @@ pub struct LocalPackage {
 
 /// Aggregated local workspace state for the selected wave.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceState {
+pub(crate) struct WorkspaceState {
     /// Ordered selected package names.
     pub selected: Vec<String>,
     /// Local package facts across the workspace.
@@ -203,7 +203,7 @@ pub struct WorkspaceState {
 /// High-level registry observation status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RegistryStatus {
+pub(crate) enum RegistryStatus {
     /// The crate is not present remotely.
     Absent,
     /// The crate exists remotely.
@@ -221,7 +221,7 @@ pub enum RegistryStatus {
 /// Source used to obtain registry visibility data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RegistryObservationSource {
+pub(crate) enum RegistryObservationSource {
     /// The crates.io sparse index.
     Index,
     /// The crates.io HTTP API.
@@ -231,7 +231,7 @@ pub enum RegistryObservationSource {
 /// Freshness classification for registry visibility data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RegistryFreshness {
+pub(crate) enum RegistryFreshness {
     /// Data was fetched or revalidated during the current run.
     Fresh,
     /// Data came from cache and was not refreshed successfully during the current run.
@@ -242,7 +242,7 @@ pub enum RegistryFreshness {
 
 /// Normalized remote registry facts for one package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegistryObservation {
+pub(crate) struct RegistryObservation {
     /// Package name.
     pub package: String,
     /// Status of the registry observation.
@@ -263,13 +263,13 @@ pub struct RegistryObservation {
 
 impl RegistryObservation {
     /// Returns whether the observation is fresh enough to authorize planner decisions.
-    pub fn is_authoritative(&self) -> bool {
+    pub(crate) fn is_authoritative(&self) -> bool {
         matches!(self.source, RegistryObservationSource::Index)
             && matches!(self.freshness, RegistryFreshness::Fresh)
     }
 
     /// Returns whether the exact local version is authoritatively visible in the registry.
-    pub fn exact_version_visible_for_planning(&self) -> bool {
+    pub(crate) fn exact_version_visible_for_planning(&self) -> bool {
         self.is_authoritative()
             && matches!(self.status, RegistryStatus::Present)
             && self.exact_version_present
@@ -279,7 +279,7 @@ impl RegistryObservation {
 /// docs.rs availability status for a package version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DocsRsStatus {
+pub(crate) enum DocsRsStatus {
     /// docs.rs is not expected for this crate.
     NotExpected,
     /// No published docs are currently visible.
@@ -296,7 +296,7 @@ pub enum DocsRsStatus {
 
 /// Normalized docs.rs observation for one package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocsRsObservation {
+pub(crate) struct DocsRsObservation {
     /// Package name.
     pub package: String,
     /// Observation status.
@@ -310,7 +310,7 @@ pub struct DocsRsObservation {
 /// Planner action for a package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PlanAction {
+pub(crate) enum PlanAction {
     /// The exact local version already exists remotely.
     Noop,
     /// The exact local version should be published.
@@ -333,7 +333,7 @@ pub enum PlanAction {
 
 /// Planned outcome for one selected package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlannedPackage {
+pub(crate) struct PlannedPackage {
     /// Package name.
     pub name: String,
     /// Local package version.
@@ -354,7 +354,7 @@ pub struct PlannedPackage {
 
 /// Aggregated planning result for the current run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Plan {
+pub(crate) struct Plan {
     /// Schema version for machine-readable artifacts.
     pub schema_version: u32,
     /// Stable run identifier.
@@ -375,7 +375,7 @@ pub struct Plan {
 
 /// Result for one completed apply action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompletedAction {
+pub(crate) struct CompletedAction {
     /// Package name.
     pub name: String,
     /// Action that was evaluated.
@@ -386,7 +386,7 @@ pub struct CompletedAction {
 
 /// Result for one blocked package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockedAction {
+pub(crate) struct BlockedAction {
     /// Package name.
     pub name: String,
     /// Blocked action.
@@ -397,7 +397,7 @@ pub struct BlockedAction {
 
 /// Aggregated apply result for the current run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApplyResult {
+pub(crate) struct ApplyResult {
     /// Schema version for machine-readable artifacts.
     pub schema_version: u32,
     /// Stable run identifier.
@@ -412,7 +412,7 @@ pub struct ApplyResult {
 
 /// Result for umbrella README synchronization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncUmbrellaResult {
+pub(crate) struct SyncUmbrellaResult {
     /// Schema version for machine-readable artifacts.
     pub schema_version: u32,
     /// Stable run identifier.
@@ -425,7 +425,7 @@ pub struct SyncUmbrellaResult {
 
 /// Persisted local umbrella sync state used by plan/apply to avoid full-catalog fanout.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UmbrellaSyncState {
+pub(crate) struct UmbrellaSyncState {
     /// Schema version for machine-readable consumers.
     pub schema_version: u32,
     /// Stable run identifier that produced the sync state.
@@ -446,7 +446,7 @@ pub struct UmbrellaSyncState {
 
 /// Result for an explicit yank request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct YankResult {
+pub(crate) struct YankResult {
     /// Schema version for machine-readable artifacts.
     pub schema_version: u32,
     /// Package name that was yanked.
@@ -459,7 +459,7 @@ pub struct YankResult {
 
 /// Immutable release fact persisted after successful publish.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReleaseRecord {
+pub(crate) struct ReleaseRecord {
     /// Published version.
     pub version: Version,
     /// Commit checked out when the publish occurred, if known.
@@ -474,7 +474,7 @@ pub struct ReleaseRecord {
 
 /// Release provenance ledger.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReleaseLedger {
+pub(crate) struct ReleaseLedger {
     /// Schema version.
     pub schema_version: u32,
     /// Package-to-release history map.
@@ -483,7 +483,7 @@ pub struct ReleaseLedger {
 
 /// Summary counts for JSON output and summary artifacts.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SummaryCounts {
+pub(crate) struct SummaryCounts {
     /// Number of `noop` packages.
     pub noop: usize,
     /// Number of `publish` packages.

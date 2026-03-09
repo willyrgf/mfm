@@ -3,19 +3,19 @@ use clap::Subcommand;
 use super::CommandContext;
 
 /// Delete-key command implementation.
-pub mod delete;
+mod delete;
 /// Import-key command implementation.
-pub mod import;
+mod import;
 /// List-keys command implementation.
-pub mod list;
+mod list;
 /// Raw-transaction submission command implementation.
-pub mod tx_send_raw;
+mod tx_send_raw;
 /// Transaction signing command implementation.
-pub mod tx_sign;
+mod tx_sign;
 
 /// Subcommands under `mfm keystore`.
 #[derive(Subcommand)]
-pub enum KeystoreCommand {
+pub(crate) enum KeystoreCommand {
     /// Import a private key or mnemonic
     Import {
         /// Parsed arguments for the import command.
@@ -50,7 +50,7 @@ pub enum KeystoreCommand {
 
 impl KeystoreCommand {
     /// Dispatches the selected keystore subcommand and terminates the process.
-    pub async fn execute(&self, ctx: &CommandContext) -> ! {
+    pub(crate) async fn execute(&self, ctx: &CommandContext) -> ! {
         match self {
             KeystoreCommand::Import { args } => {
                 import::execute(ctx, args).await;

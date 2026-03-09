@@ -38,7 +38,7 @@ const AUTO_SYNC_ALLOW_DIRTY_MESSAGE: &str =
     "umbrella README was updated during apply; commit crates/docs/README.md or rerun with --allow-dirty";
 
 /// Runs the selected CLI command and prints the final response.
-pub async fn run(cli: Cli) -> ExitCode {
+pub(crate) async fn run(cli: Cli) -> ExitCode {
     let output_format = resolved_output_format(&cli);
     let mode = resolved_mode(&cli);
     tracing::info!(

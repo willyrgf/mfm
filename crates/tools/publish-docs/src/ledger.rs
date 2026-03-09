@@ -8,10 +8,12 @@ use crate::{
 };
 
 /// Relative path to the release provenance ledger.
-pub const RELEASE_LEDGER_PATH: &str = "crates/docs/releases.json";
+pub(crate) const RELEASE_LEDGER_PATH: &str = "crates/docs/releases.json";
 
 /// Loads the committed release ledger.
-pub fn load_release_ledger(workspace_root: &Path) -> Result<ReleaseLedger, PublishDocsError> {
+pub(crate) fn load_release_ledger(
+    workspace_root: &Path,
+) -> Result<ReleaseLedger, PublishDocsError> {
     let path = workspace_root.join(RELEASE_LEDGER_PATH);
     if !path.exists() {
         return Ok(empty_ledger());
@@ -21,7 +23,7 @@ pub fn load_release_ledger(workspace_root: &Path) -> Result<ReleaseLedger, Publi
 }
 
 /// Writes the release ledger back to disk.
-pub fn save_release_ledger(
+pub(crate) fn save_release_ledger(
     workspace_root: &Path,
     ledger: &ReleaseLedger,
 ) -> Result<(), PublishDocsError> {
@@ -32,7 +34,7 @@ pub fn save_release_ledger(
 }
 
 /// Appends a release record immutably to the ledger.
-pub fn append_release_record(
+pub(crate) fn append_release_record(
     ledger: &mut ReleaseLedger,
     package: &str,
     record: ReleaseRecord,
@@ -51,7 +53,10 @@ pub fn append_release_record(
 }
 
 /// Returns the latest known release record for a package.
-pub fn latest_release<'a>(ledger: &'a ReleaseLedger, package: &str) -> Option<&'a ReleaseRecord> {
+pub(crate) fn latest_release<'a>(
+    ledger: &'a ReleaseLedger,
+    package: &str,
+) -> Option<&'a ReleaseRecord> {
     ledger
         .packages
         .get(package)
@@ -59,7 +64,7 @@ pub fn latest_release<'a>(ledger: &'a ReleaseLedger, package: &str) -> Option<&'
 }
 
 /// Builds a release record for a successful publish.
-pub fn current_release_record(
+pub(crate) fn current_release_record(
     workspace_root: &Path,
     version: semver::Version,
     dirty: bool,
@@ -76,7 +81,9 @@ pub fn current_release_record(
 }
 
 /// Returns the current git commit hash if available.
-pub fn current_git_commit(workspace_root: &Path) -> Result<Option<String>, PublishDocsError> {
+pub(crate) fn current_git_commit(
+    workspace_root: &Path,
+) -> Result<Option<String>, PublishDocsError> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(workspace_root)
@@ -90,7 +97,7 @@ pub fn current_git_commit(workspace_root: &Path) -> Result<Option<String>, Publi
 }
 
 /// Returns whether the working tree is currently dirty.
-pub fn workspace_is_dirty(workspace_root: &Path) -> Result<bool, PublishDocsError> {
+pub(crate) fn workspace_is_dirty(workspace_root: &Path) -> Result<bool, PublishDocsError> {
     let unstaged = Command::new("git")
         .args(["diff", "--quiet", "--ignore-submodules", "HEAD", "--"])
         .current_dir(workspace_root)
@@ -103,7 +110,7 @@ pub fn workspace_is_dirty(workspace_root: &Path) -> Result<bool, PublishDocsErro
 }
 
 /// Returns whether a package path changed since the recorded release commit.
-pub fn package_changed_since_release(
+pub(crate) fn package_changed_since_release(
     workspace_root: &Path,
     workspace_path: &Path,
     record: &ReleaseRecord,

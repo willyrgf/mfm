@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 /// Shared HTTP executor configuration for remote observers.
 #[derive(Debug, Clone)]
-pub struct HttpExecutorConfig {
+pub(crate) struct HttpExecutorConfig {
     /// Maximum number of in-flight tasks spawned by higher-level observers.
     pub max_in_flight: usize,
     /// Minimum delay between requests to the same host.
@@ -34,7 +34,7 @@ impl Default for HttpExecutorConfig {
 
 /// Result of a completed HTTP execution attempt.
 #[derive(Debug)]
-pub struct ExecutedRequest {
+pub(crate) struct ExecutedRequest {
     /// Final response returned by the executor.
     pub response: reqwest::Response,
 }
@@ -46,7 +46,7 @@ struct HttpState {
 
 /// Shared paced and retrying HTTP request executor.
 #[derive(Debug, Clone)]
-pub struct HttpExecutor {
+pub(crate) struct HttpExecutor {
     client: reqwest::Client,
     config: HttpExecutorConfig,
     state: Arc<HttpState>,
@@ -54,7 +54,7 @@ pub struct HttpExecutor {
 
 impl HttpExecutor {
     /// Builds a new executor.
-    pub fn new(config: HttpExecutorConfig) -> Result<Self, reqwest::Error> {
+    pub(crate) fn new(config: HttpExecutorConfig) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .user_agent(concat!(
                 env!("CARGO_PKG_NAME"),
@@ -72,17 +72,17 @@ impl HttpExecutor {
     }
 
     /// Returns the shared reqwest client.
-    pub fn client(&self) -> &reqwest::Client {
+    pub(crate) fn client(&self) -> &reqwest::Client {
         &self.client
     }
 
     /// Returns the configured maximum number of in-flight tasks.
-    pub fn max_in_flight(&self) -> usize {
+    pub(crate) fn max_in_flight(&self) -> usize {
         self.config.max_in_flight.max(1)
     }
 
     /// Returns a host label for pacing derived from a URL.
-    pub fn host_for_url(&self, url: &str) -> String {
+    pub(crate) fn host_for_url(&self, url: &str) -> String {
         reqwest::Url::parse(url)
             .ok()
             .and_then(|parsed| parsed.host_str().map(str::to_string))
@@ -90,7 +90,7 @@ impl HttpExecutor {
     }
 
     /// Executes a paced request with limited retries for retryable failures.
-    pub async fn execute<F>(&self, host: &str, build: F) -> Option<ExecutedRequest>
+    pub(crate) async fn execute<F>(&self, host: &str, build: F) -> Option<ExecutedRequest>
     where
         F: Fn() -> reqwest::RequestBuilder,
     {

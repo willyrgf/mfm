@@ -10,7 +10,7 @@ use crate::model::OutputFormat;
     after_help = "Logging: use MFM_LOG (or LOG_LEVEL / RUST_LOG) to set the filter. Use MFM_LOG_FORMAT / LOG_FORMAT for text or json logs."
 )]
 #[command(version)]
-pub struct Cli {
+pub(crate) struct Cli {
     /// Output format for command responses.
     #[arg(
         long = "output-format",
@@ -43,7 +43,7 @@ pub struct Cli {
 
 /// Top-level subcommands supported by the tool.
 #[derive(Debug, Subcommand)]
-pub enum Command {
+pub(crate) enum Command {
     /// Build a plan without publishing crates.
     Plan(CommandArgs),
     /// Execute publishable actions.
@@ -58,7 +58,7 @@ pub enum Command {
 
 /// Shared arguments used by command variants that only need `--json`.
 #[derive(Debug, Clone, Args, Default)]
-pub struct CommandArgs {
+pub(crate) struct CommandArgs {
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
@@ -66,7 +66,7 @@ pub struct CommandArgs {
 
 /// Arguments for `resume`.
 #[derive(Debug, Clone, Args)]
-pub struct ResumeArgs {
+pub(crate) struct ResumeArgs {
     /// Prior run identifier whose selection should be replayed.
     pub run_id: String,
 
@@ -77,7 +77,7 @@ pub struct ResumeArgs {
 
 /// Arguments for `sync-umbrella`.
 #[derive(Debug, Clone, Args)]
-pub struct SyncUmbrellaArgs {
+pub(crate) struct SyncUmbrellaArgs {
     /// Emit machine-readable JSON.
     #[arg(long)]
     pub json: bool,
@@ -89,7 +89,7 @@ pub struct SyncUmbrellaArgs {
 
 /// Arguments for `yank`.
 #[derive(Debug, Clone, Args)]
-pub struct YankArgs {
+pub(crate) struct YankArgs {
     /// Cargo package name to yank.
     pub package: String,
 

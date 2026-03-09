@@ -15,7 +15,7 @@ const README_PATH: &str = "crates/docs/README.md";
 const UMBRELLA_SYNC_STATE_PATH: &str = ".mfm/publish-docs/umbrella-sync.json";
 
 /// Renders the umbrella README deterministically from catalog plus observed remote state.
-pub fn render_readme(
+pub(crate) fn render_readme(
     catalog: &DesiredCatalog,
     registry: &BTreeMap<String, RegistryObservation>,
     docs: &BTreeMap<String, DocsRsObservation>,
@@ -106,12 +106,12 @@ pub fn render_readme(
 }
 
 /// Reads the current umbrella README from disk.
-pub fn load_current_readme(workspace_root: &Path) -> Result<String, std::io::Error> {
+pub(crate) fn load_current_readme(workspace_root: &Path) -> Result<String, std::io::Error> {
     fs::read_to_string(workspace_root.join(README_PATH))
 }
 
 /// Writes the generated README if it changed. Returns whether the file changed.
-pub fn sync_readme(workspace_root: &Path, generated: &str) -> Result<bool, std::io::Error> {
+pub(crate) fn sync_readme(workspace_root: &Path, generated: &str) -> Result<bool, std::io::Error> {
     let path = workspace_root.join(README_PATH);
     let current = fs::read_to_string(&path).unwrap_or_default();
     if current == generated {
@@ -122,12 +122,14 @@ pub fn sync_readme(workspace_root: &Path, generated: &str) -> Result<bool, std::
 }
 
 /// Returns the absolute path to the persisted umbrella sync state.
-pub fn umbrella_sync_state_path(workspace_root: &Path) -> PathBuf {
+pub(crate) fn umbrella_sync_state_path(workspace_root: &Path) -> PathBuf {
     workspace_root.join(UMBRELLA_SYNC_STATE_PATH)
 }
 
 /// Loads the persisted umbrella sync state from disk if it exists.
-pub fn load_sync_state(workspace_root: &Path) -> Result<Option<UmbrellaSyncState>, std::io::Error> {
+pub(crate) fn load_sync_state(
+    workspace_root: &Path,
+) -> Result<Option<UmbrellaSyncState>, std::io::Error> {
     let path = umbrella_sync_state_path(workspace_root);
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -139,7 +141,7 @@ pub fn load_sync_state(workspace_root: &Path) -> Result<Option<UmbrellaSyncState
 }
 
 /// Persists umbrella sync state to disk.
-pub fn write_sync_state(
+pub(crate) fn write_sync_state(
     workspace_root: &Path,
     state: &UmbrellaSyncState,
 ) -> Result<(), std::io::Error> {
@@ -153,7 +155,7 @@ pub fn write_sync_state(
 }
 
 /// Builds persisted umbrella sync state from the current full-catalog observation.
-pub fn build_sync_state(
+pub(crate) fn build_sync_state(
     run_id: impl Into<String>,
     git_commit: Option<String>,
     catalog: &DesiredCatalog,
@@ -177,7 +179,7 @@ pub fn build_sync_state(
 }
 
 /// Returns whether a persisted umbrella sync state still matches current local inputs.
-pub fn sync_state_matches_workspace(
+pub(crate) fn sync_state_matches_workspace(
     state: &UmbrellaSyncState,
     current_git_commit: Option<&str>,
     catalog: &DesiredCatalog,

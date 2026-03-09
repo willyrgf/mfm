@@ -9,14 +9,14 @@ const DEFAULT_DOCS_RS_BASE: &str = "https://docs.rs";
 
 /// docs.rs observer for versioned page availability.
 #[derive(Debug, Clone)]
-pub struct DocsRsClient {
+pub(crate) struct DocsRsClient {
     http: HttpExecutor,
     base_url: String,
 }
 
 impl DocsRsClient {
     /// Builds the default docs.rs observer.
-    pub fn new() -> Result<Self, reqwest::Error> {
+    pub(crate) fn new() -> Result<Self, reqwest::Error> {
         Ok(Self {
             http: HttpExecutor::new(HttpExecutorConfig::default())?,
             base_url: DEFAULT_DOCS_RS_BASE.to_string(),
@@ -25,7 +25,7 @@ impl DocsRsClient {
 
     /// Builds an observer targeting a custom base URL. Intended for tests.
     #[cfg(test)]
-    pub fn with_base_url(base_url: impl Into<String>) -> Result<Self, reqwest::Error> {
+    pub(crate) fn with_base_url(base_url: impl Into<String>) -> Result<Self, reqwest::Error> {
         Ok(Self {
             http: HttpExecutor::new(HttpExecutorConfig::default())?,
             base_url: base_url.into(),
@@ -33,7 +33,7 @@ impl DocsRsClient {
     }
 
     /// Observes docs.rs for one package using the crate version landing page.
-    pub async fn observe_package(
+    pub(crate) async fn observe_package(
         &self,
         local: &LocalPackage,
         catalog: &CatalogPackage,
@@ -166,7 +166,7 @@ impl DocsRsClient {
     }
 
     /// Observes docs.rs for many packages while preserving input order.
-    pub async fn observe_packages(
+    pub(crate) async fn observe_packages(
         &self,
         inputs: &[(&LocalPackage, &CatalogPackage, &RegistryObservation)],
     ) -> Vec<DocsRsObservation> {

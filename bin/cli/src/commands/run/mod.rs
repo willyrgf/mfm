@@ -3,21 +3,21 @@ use clap::Subcommand;
 use super::CommandContext;
 
 /// Artifact inspection subcommands.
-pub mod artifacts;
+mod artifacts;
 /// Run-event query command implementation.
-pub mod events;
+mod events;
 /// Pipeline-start command implementations.
-pub mod pipeline;
+mod pipeline;
 /// Run-resume command implementation.
-pub mod resume;
+mod resume;
 /// Run-start command implementation.
-pub mod start;
+mod start;
 /// Run-status command implementation.
-pub mod status;
+mod status;
 
 /// Subcommands under `mfm run`.
 #[derive(Subcommand)]
-pub enum RunCommand {
+pub(crate) enum RunCommand {
     /// Start a run (currently supports built-in ops like `proof`)
     Start {
         /// Parsed arguments for the start command.
@@ -58,7 +58,7 @@ pub enum RunCommand {
 
 impl RunCommand {
     /// Dispatches the selected run subcommand and terminates the process.
-    pub async fn execute(&self, ctx: &CommandContext) -> ! {
+    pub(crate) async fn execute(&self, ctx: &CommandContext) -> ! {
         match self {
             RunCommand::Start { args } => start::execute(ctx, args).await,
             RunCommand::Pipeline { command } => command.execute(ctx).await,

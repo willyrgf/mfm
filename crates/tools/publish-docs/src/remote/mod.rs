@@ -1,10 +1,10 @@
 //! Remote registry adapters.
 
 /// docs.rs observation support.
-pub mod docs_rs;
+pub(crate) mod docs_rs;
 /// Shared paced/retrying HTTP execution.
-pub mod http;
+pub(crate) mod http;
 /// crates.io sparse-index observation support.
-pub mod index;
+pub(crate) mod index;
 /// Shared ordered async observation helpers.
-pub mod observer;
+pub(crate) mod observer;

@@ -24,7 +24,7 @@ const MAX_RETRIES: usize = 2;
 
 /// Sparse-index-backed registry observer with local cache support.
 #[derive(Debug, Clone)]
-pub struct IndexRegistryObserver {
+pub(crate) struct IndexRegistryObserver {
     client: reqwest::Client,
     base_url: String,
     cache_root: PathBuf,
@@ -34,7 +34,7 @@ pub struct IndexRegistryObserver {
 
 impl IndexRegistryObserver {
     /// Builds the default index observer rooted under `.mfm/publish-docs/cache/registry-index`.
-    pub fn new(workspace_root: &Path) -> Result<Self, reqwest::Error> {
+    pub(crate) fn new(workspace_root: &Path) -> Result<Self, reqwest::Error> {
         Self::with_base_url(
             workspace_root,
             DEFAULT_INDEX_BASE_URL.to_string(),
@@ -43,7 +43,7 @@ impl IndexRegistryObserver {
     }
 
     /// Builds an index observer using a custom base URL and cache root.
-    pub fn with_base_url(
+    pub(crate) fn with_base_url(
         workspace_root: &Path,
         base_url: String,
         cache_relative_path: PathBuf,
@@ -67,7 +67,10 @@ impl IndexRegistryObserver {
     }
 
     /// Observes many packages while preserving input order.
-    pub async fn observe_packages(&self, packages: &[&LocalPackage]) -> Vec<RegistryObservation> {
+    pub(crate) async fn observe_packages(
+        &self,
+        packages: &[&LocalPackage],
+    ) -> Vec<RegistryObservation> {
         let mut tasks = JoinSet::new();
         for (index, package) in packages.iter().enumerate() {
             let observer = self.clone();
@@ -88,7 +91,7 @@ impl IndexRegistryObserver {
     }
 
     /// Observes one package against the sparse index, falling back to cache when possible.
-    pub async fn observe_package(&self, package: &LocalPackage) -> RegistryObservation {
+    pub(crate) async fn observe_package(&self, package: &LocalPackage) -> RegistryObservation {
         let relative_path = sparse_index_relative_path(&package.name);
         let url = format!(
             "{}/{}",

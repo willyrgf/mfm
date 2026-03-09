@@ -9,7 +9,7 @@ use crate::model::{
 
 /// Summary artifact written alongside plan and result payloads.
 #[derive(Debug, Serialize)]
-pub struct SummaryArtifact<'a> {
+pub(crate) struct SummaryArtifact<'a> {
     /// Schema version for machine-readable consumers.
     pub schema_version: u32,
     /// Stable run identifier.
@@ -24,7 +24,7 @@ pub struct SummaryArtifact<'a> {
 
 /// Writes sanitized artifacts for the current run.
 #[allow(clippy::too_many_arguments)]
-pub fn write_run_artifacts(
+pub(crate) fn write_run_artifacts(
     artifact_dir: &Path,
     wave: &PublishWave,
     catalog: &DesiredCatalog,

@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Executes the publishable subset of the plan serially.
-pub fn apply_plan(
+pub(crate) fn apply_plan(
     workspace_root: &Path,
     workspace: &WorkspaceState,
     plan: &Plan,
@@ -81,7 +81,7 @@ pub fn apply_plan(
 }
 
 /// Executes `cargo yank` for one package and version.
-pub fn yank_version(
+pub(crate) fn yank_version(
     workspace_root: &Path,
     package: &str,
     version: &Version,

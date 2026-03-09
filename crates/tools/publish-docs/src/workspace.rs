@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// Finds the workspace root by honoring `MFM_WORKSPACE_ROOT` first and then walking upward.
-pub fn find_workspace_root(start_dir: &Path) -> Result<PathBuf, PublishDocsError> {
+pub(crate) fn find_workspace_root(start_dir: &Path) -> Result<PathBuf, PublishDocsError> {
     if let Some(root) = env::var_os("MFM_WORKSPACE_ROOT") {
         let root = PathBuf::from(root);
         if is_workspace_root(&root) {
@@ -41,7 +41,7 @@ pub fn find_workspace_root(start_dir: &Path) -> Result<PathBuf, PublishDocsError
 }
 
 /// Enforces a clean working tree unless the caller explicitly allows dirty state.
-pub fn ensure_clean_worktree(workspace_root: &Path) -> Result<(), PublishDocsError> {
+pub(crate) fn ensure_clean_worktree(workspace_root: &Path) -> Result<(), PublishDocsError> {
     let unstaged = Command::new("git")
         .args(["diff", "--quiet", "--ignore-submodules", "HEAD", "--"])
         .current_dir(workspace_root)
@@ -59,7 +59,7 @@ pub fn ensure_clean_worktree(workspace_root: &Path) -> Result<(), PublishDocsErr
 }
 
 /// Loads local workspace facts for the selected wave packages from `cargo metadata`.
-pub fn load_workspace_state(
+pub(crate) fn load_workspace_state(
     workspace_root: &Path,
     selected_packages: &[WavePackage],
 ) -> Result<WorkspaceState, PublishDocsError> {
@@ -97,7 +97,7 @@ pub fn load_workspace_state(
 }
 
 /// Returns selected packages from the workspace state in wave order.
-pub fn selected_packages(
+pub(crate) fn selected_packages(
     workspace: &WorkspaceState,
 ) -> Result<Vec<&LocalPackage>, PublishDocsError> {
     let packages_by_name: BTreeMap<_, _> = workspace
@@ -119,7 +119,7 @@ pub fn selected_packages(
 }
 
 /// Returns a workspace package by cargo package name.
-pub fn workspace_package<'a>(
+pub(crate) fn workspace_package<'a>(
     workspace: &'a WorkspaceState,
     name: &str,
 ) -> Option<&'a LocalPackage> {

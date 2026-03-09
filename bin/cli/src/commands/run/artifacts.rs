@@ -8,7 +8,7 @@ use mfm_app::{get_artifact_from_store, ArtifactGetResponse};
 
 /// Subcommands under `mfm run artifacts`.
 #[derive(Subcommand)]
-pub enum ArtifactsCommand {
+pub(crate) enum ArtifactsCommand {
     /// Fetch an artifact by id
     Get {
         /// Parsed arguments for the artifact fetch command.
@@ -19,7 +19,7 @@ pub enum ArtifactsCommand {
 
 impl ArtifactsCommand {
     /// Dispatches the selected artifact subcommand and terminates the process.
-    pub async fn execute(&self, ctx: &CommandContext) -> ! {
+    pub(crate) async fn execute(&self, ctx: &CommandContext) -> ! {
         match self {
             ArtifactsCommand::Get { args } => execute_get(ctx, args).await,
         }
@@ -28,7 +28,7 @@ impl ArtifactsCommand {
 
 /// Arguments for `mfm run artifacts get`.
 #[derive(Args)]
-pub struct GetArgs {
+pub(crate) struct GetArgs {
     /// Artifact id (SHA-256 lowercase hex, 64 chars)
     pub artifact_id: String,
 

@@ -1,7 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 use std::io::IsTerminal;
 
-use clap::Parser;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -83,5 +82,5 @@ fn init_observability() {
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     init_observability();
-    mfm_publish_docs::app::run(mfm_publish_docs::cli::Cli::parse()).await
+    mfm_publish_docs::run().await
 }

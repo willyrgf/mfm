@@ -16,7 +16,7 @@ const ENV_IMPORT_PASSPHRASE: &str = "MFM_KEYSTORE_IMPORT_BIP39_EXTRA";
 
 /// Arguments for `mfm keystore import`.
 #[derive(Args)]
-pub struct ImportArgs {
+pub(crate) struct ImportArgs {
     /// Import type: privatekey, mnemonic
     #[arg(short = 't', long, value_enum)]
     pub import_type: ImportType,
@@ -48,7 +48,7 @@ pub struct ImportArgs {
 
 /// Supported keystore import sources.
 #[derive(clap::ValueEnum, Clone)]
-pub enum ImportType {
+pub(crate) enum ImportType {
     /// Import a raw private key.
     #[value(name = "privatekey", alias = "private-key")]
     PrivateKey,
@@ -59,7 +59,7 @@ pub enum ImportType {
 
 /// Response returned after successfully importing a key.
 #[derive(Serialize)]
-pub struct ImportResponse {
+pub(crate) struct ImportResponse {
     id: String,
     label: String,
     key_type: String,
@@ -78,7 +78,7 @@ impl fmt::Display for ImportResponse {
 }
 
 /// Executes the import command and terminates the process.
-pub async fn execute(ctx: &CommandContext, args: &ImportArgs) -> ! {
+pub(crate) async fn execute(ctx: &CommandContext, args: &ImportArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);
 }

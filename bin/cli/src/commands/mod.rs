@@ -1,17 +1,17 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
 /// Keystore-oriented CLI commands.
-pub mod keystore;
+mod keystore;
 /// Portfolio feature commands.
-pub mod portfolio;
+mod portfolio;
 /// Shared command result types.
-pub mod result;
+pub(crate) mod result;
 /// Run lifecycle and artifact commands.
-pub mod run;
+mod run;
 
 /// Output encodings supported by the CLI library.
 #[derive(Debug, Clone, ValueEnum, Default)]
-pub enum OutputFormat {
+pub(crate) enum OutputFormat {
     /// Human-readable text output (default)
     #[default]
     Text,
@@ -21,14 +21,14 @@ pub enum OutputFormat {
 
 /// Context passed to CLI commands containing shared output settings.
 #[derive(Debug, Clone)]
-pub struct CommandContext {
+struct CommandContext {
     /// Output format requested by the caller.
-    pub output_format: OutputFormat,
+    output_format: OutputFormat,
 }
 
 impl CommandContext {
     /// Builds a command context for the supplied output format.
-    pub fn new(output_format: OutputFormat) -> Self {
+    fn new(output_format: OutputFormat) -> Self {
         Self { output_format }
     }
 }
@@ -38,19 +38,19 @@ impl CommandContext {
 #[command(name = "mfm")]
 #[command(about = "MFM - On-chain operations tool")]
 #[command(version)]
-pub struct Cli {
+pub(crate) struct Cli {
     /// Output format for command results
     #[arg(long = "output-format", value_enum, env = "MFM_OUTPUT_FORMAT", default_value_t = OutputFormat::Text)]
-    pub output_format: OutputFormat,
+    output_format: OutputFormat,
 
     /// Top-level command selected by the caller.
     #[command(subcommand)]
-    pub command: Commands,
+    command: Commands,
 }
 
 /// Top-level CLI command tree.
 #[derive(Subcommand)]
-pub enum Commands {
+enum Commands {
     /// Keystore management operations
     Keystore {
         /// Nested keystore command to execute.
@@ -73,7 +73,7 @@ pub enum Commands {
 
 impl Cli {
     /// Dispatches the parsed command and terminates the process with the command's exit code.
-    pub async fn execute(&self) -> ! {
+    pub(crate) async fn execute(&self) -> ! {
         let ctx = CommandContext::new(self.output_format.clone());
 
         match &self.command {

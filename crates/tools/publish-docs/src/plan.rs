@@ -15,7 +15,7 @@ use crate::{
 
 /// Builds the planner output for the current run.
 #[allow(clippy::too_many_arguments)]
-pub fn build_plan(
+pub(crate) fn build_plan(
     run_id: String,
     wave_name: String,
     mode: Mode,
@@ -291,7 +291,7 @@ fn classify_action(
 }
 
 /// Converts planner output into aggregate summary counts.
-pub fn summarize_plan(plan: &Plan) -> SummaryCounts {
+pub(crate) fn summarize_plan(plan: &Plan) -> SummaryCounts {
     let mut summary = SummaryCounts::default();
     for package in &plan.packages {
         match package.action {

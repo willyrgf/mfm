@@ -4,12 +4,12 @@ use mfm_app::{FeatureExecutionResult, PortfolioSnapshotRequest, PortfolioSnapsho
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::app_services::{command_error_from_app_error, make_app_services};
-use crate::support::run_stores::{make_stores, RunStoresArgs};
+use crate::support::app_services::{command_error_from_app_error, make_app_services_from_args};
+use crate::support::run_stores::RunStoresArgs;
 
 /// Arguments for `mfm portfolio snapshot`.
 #[derive(Args)]
-pub struct SnapshotArgs {
+pub(crate) struct SnapshotArgs {
     /// Wallet public address (0x...)
     pub address: String,
 
@@ -27,7 +27,7 @@ pub struct SnapshotArgs {
 }
 
 /// Executes the portfolio snapshot command and terminates the process.
-pub async fn execute(ctx: &CommandContext, args: &SnapshotArgs) -> ! {
+pub(crate) async fn execute(ctx: &CommandContext, args: &SnapshotArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);
 }
@@ -36,13 +36,7 @@ async fn execute_internal(args: &SnapshotArgs) -> CommandResult<FeatureExecution
     let tokens = mfm_app::parse_portfolio_tokens_json(&args.tokens_json)
         .map_err(command_error_from_app_error)?;
 
-    let stores = make_stores(
-        args.stores.artifact_root.clone(),
-        args.stores.database_url.clone(),
-    )
-    .await?;
-
-    let services = make_app_services(stores);
+    let services = make_app_services_from_args(&args.stores).await?;
     let response: PortfolioSnapshotResponse = services
         .start_portfolio_snapshot(PortfolioSnapshotRequest {
             address: args.address.clone(),

@@ -3,7 +3,7 @@ use std::future::Future;
 use tokio::task::JoinSet;
 
 /// Runs async work over owned inputs while preserving input order and bounding concurrency.
-pub async fn observe_many_ordered<I, O, F, Fut>(
+pub(crate) async fn observe_many_ordered<I, O, F, Fut>(
     inputs: Vec<I>,
     max_in_flight: usize,
     f: F,
