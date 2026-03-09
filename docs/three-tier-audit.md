@@ -94,7 +94,7 @@ Interpretation:
 
 ## 4. Guardrails and CI
 
-`mfm-architecture-verify` was an interim guardrail during the thin-layer and compile-time boundary refactors. It was later retired once its remaining checks were enforced more directly by compile-time boundaries and crate structure.
+The temporary verifier was an interim guardrail during the thin-layer and compile-time boundary refactors. It was later retired once its remaining checks were enforced more directly by compile-time boundaries and crate structure.
 
 Current guardrails come from:
 1. The `Operation::expand()` contract in `crates/sdk/src/lib.rs` remains synchronous and deterministic, so `.await` is already a type error there.
