@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
+#![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
 //! Keystore administration operations.
 //!
@@ -14,6 +16,7 @@
 //! assert_eq!(op.op_id().as_str(), KEYSTORE_IMPORT_OP_ID);
 //! ```
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use regex::Regex;
@@ -28,7 +31,7 @@ use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
 use mfm_state_common::errors as op_errors;
 use mfm_state_keystore::states::admin::{
-    decode_optional_hex_string, resolve_keystore_path, sdk_error_from_helper, KeystoreDeleteState,
+    decode_optional_hex_string, sdk_error_from_helper, KeystoreAdminError, KeystoreDeleteState,
     KeystoreDeleteStateConfig, KeystoreImportState, KeystoreImportStateConfig, KeystoreListState,
     KeystoreListStateConfig,
 };
@@ -194,7 +197,8 @@ impl Operation for KeystoreImportOp {
                 import_type: cfg.import_type,
                 label,
                 derivation_path: cfg.derivation_path,
-                keystore_path: resolve_keystore_path(keystore_path),
+                keystore_path: require_keystore_path(keystore_path)
+                    .map_err(sdk_error_from_helper)?,
                 stdin: cfg.stdin,
             },
         );
@@ -265,7 +269,8 @@ impl Operation for KeystoreListOp {
             report_key_for_op_path(&op_path),
             "keystore_list.completed",
             KeystoreListStateConfig {
-                keystore_path: resolve_keystore_path(keystore_path),
+                keystore_path: require_keystore_path(keystore_path)
+                    .map_err(sdk_error_from_helper)?,
                 show_addresses: cfg.show_addresses,
                 filter_label,
                 sort_by: cfg.sort_by,
@@ -328,7 +333,8 @@ impl Operation for KeystoreDeleteOp {
                 id: cfg.id,
                 by_label,
                 yes: cfg.yes,
-                keystore_path: resolve_keystore_path(keystore_path),
+                keystore_path: require_keystore_path(keystore_path)
+                    .map_err(sdk_error_from_helper)?,
             },
         );
 
@@ -340,4 +346,18 @@ impl Operation for KeystoreDeleteOp {
             edges: Vec::new(),
         })
     }
+}
+
+fn require_keystore_path(configured: Option<String>) -> Result<PathBuf, KeystoreAdminError> {
+    let Some(value) = configured
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    else {
+        return Err(KeystoreAdminError::new(
+            "MissingArgument",
+            "Must provide keystore_path or keystore_path_hex",
+        ));
+    };
+
+    Ok(PathBuf::from(value))
 }

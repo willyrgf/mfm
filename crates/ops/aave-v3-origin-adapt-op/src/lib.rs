@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
+#![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
 //! Thin planner op that adapts Aave Origin deploy output into an Aave V3 deploy manifest.
 //!

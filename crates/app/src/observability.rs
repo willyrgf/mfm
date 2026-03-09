@@ -116,6 +116,7 @@ pub fn observability_from_env(app_name: &'static str) -> ObservabilityConfig {
 }
 
 /// Resolves observability settings from environment variables with an explicit default filter.
+#[allow(clippy::disallowed_methods)]
 pub fn observability_from_env_with_default(
     app_name: &'static str,
     default_filter: &str,

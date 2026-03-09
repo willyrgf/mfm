@@ -1,4 +1,5 @@
 #![cfg(feature = "parity-tests")]
+#![allow(clippy::disallowed_methods)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

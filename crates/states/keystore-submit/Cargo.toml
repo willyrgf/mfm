@@ -1,0 +1,17 @@
+[package]
+name = "mfm-state-keystore-submit"
+version = "0.1.0"
+edition = "2021"
+description = "Reusable remote-capable raw transaction submission state for MFM"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[dependencies]
+async-trait = { workspace = true }
+hex = { workspace = true }
+serde_json = { workspace = true }
+
+mfm-machine = { path = "../../machine", version = "0.1.0" }
+mfm-state-common = { path = "../common", version = "0.1.0" }
+mfm-collectors-local-fs = { path = "../../collectors/local-fs", version = "0.1.0" }
+mfm-evm-runtime = { path = "../../evm-runtime", version = "0.1.0" }

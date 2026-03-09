@@ -34,3 +34,4 @@ mfm-artifact-store-s3 = { path = "../storages/artifact-store-s3" }
 mfm-event-store-postgres = { path = "../storages/event-store-postgres" }
 
 [dev-dependencies]
+tokio = { workspace = true }

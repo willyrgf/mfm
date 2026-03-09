@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 //! Local EVM helper transport for signing and address derivation.
 //!
 //! This crate exposes a `LiveIoTransportFactory` for the `local.evm.*` namespaces used by shared

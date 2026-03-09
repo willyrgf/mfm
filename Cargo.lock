@@ -1932,14 +1932,11 @@ dependencies = [
  "mfm-transports-proof",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",
 ]
-
-[[package]]
-name = "mfm-architecture-verify"
-version = "0.1.0"
 
 [[package]]
 name = "mfm-artifact-store-fs"
@@ -2011,6 +2008,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-collectors-local-fs"
+version = "0.1.0"
+dependencies = [
+ "mfm-machine",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mfm-collectors-local-keystore"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mfm-collectors-nix"
 version = "0.1.0"
 dependencies = [
@@ -2031,6 +2048,17 @@ dependencies = [
  "serde_json",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "mfm-collectors-proof"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2235,6 +2263,7 @@ dependencies = [
  "mfm-sdk",
  "mfm-state-common",
  "mfm-state-keystore",
+ "mfm-state-keystore-submit",
  "mfm-transports-local-fs",
  "mfm-transports-local-keystore",
  "serde",
@@ -2357,6 +2386,7 @@ dependencies = [
  "hex",
  "mfm-collectors-exec",
  "mfm-collectors-nix",
+ "mfm-collectors-proof",
  "mfm-machine",
  "mfm-sdk",
  "serde",
@@ -2372,8 +2402,8 @@ dependencies = [
  "chrono",
  "hex",
  "k256",
+ "mfm-collectors-local-keystore",
  "mfm-evm-core",
- "mfm-evm-runtime",
  "mfm-machine",
  "mfm-op-keystore-shim",
  "mfm-sdk",
@@ -2386,6 +2416,19 @@ dependencies = [
  "url",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "mfm-state-keystore-submit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "mfm-collectors-local-fs",
+ "mfm-evm-runtime",
+ "mfm-machine",
+ "mfm-state-common",
+ "serde_json",
 ]
 
 [[package]]
@@ -2409,6 +2452,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "hex",
+ "mfm-collectors-local-fs",
  "mfm-machine",
  "serde",
  "serde_json",
@@ -2423,6 +2467,7 @@ dependencies = [
  "chrono",
  "hex",
  "k256",
+ "mfm-collectors-local-keystore",
  "mfm-evm-core",
  "mfm-machine",
  "mfm-op-keystore-shim",
@@ -2442,7 +2487,9 @@ name = "mfm-transports-proof"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "mfm-collectors-proof",
  "mfm-machine",
+ "serde",
  "serde_json",
 ]
 

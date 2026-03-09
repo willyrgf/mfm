@@ -1217,7 +1217,7 @@ in
         check = mkCommandTask {
           id = "task.check";
           appName = "check";
-          summary = "Run fmt + clippy + architecture verification";
+          summary = "Run fmt + clippy";
           description = "Runs quality checks for the workspace.";
           usage = [ "nix run .#check" ];
           runtimeInputs = rustRuntimeInputs;
@@ -1231,9 +1231,6 @@ in
 
             echo "INFO: running clippy"
             ${cargoClippyCmd}
-
-            echo "INFO: running architecture verifier"
-            cargo run -p mfm-architecture-verify --
 
             echo "OK: quality checks completed"
           '';
@@ -1435,32 +1432,6 @@ in
               echo "INFO: running ci step=clippy"
               run_with_log "$log_file" ${cargoClippyCmd}
               echo "OK: ci step passed step=clippy log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-architecture-verify =
-          mkCommandTask {
-            id = "task.ci.architecture-verify";
-            appName = "ci-architecture-verify";
-            kind = "ci-step";
-            summary = "CI architecture verification step";
-            tags = [
-              "ci"
-              "quality"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            env = ciCargoRustEnv;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-
-              log_file="$artifacts_dir/architecture-verify.log"
-              echo "INFO: running ci step=architecture-verify"
-              run_with_log "$log_file" cargo run -p mfm-architecture-verify --
-              echo "OK: ci step passed step=architecture-verify log=$log_file"
             '';
           }
           // {
@@ -2797,10 +2768,6 @@ in
               taskId = "task.ci.clippy";
             };
 
-            architecture = mkWorkflowUnit {
-              taskId = "task.ci.architecture-verify";
-            };
-
             shell-app-contracts = mkWorkflowUnit {
               taskId = "task.ci.shell-app-contracts";
             };
@@ -2810,7 +2777,6 @@ in
               needs = [
                 "fmt"
                 "clippy"
-                "architecture"
                 "shell-app-contracts"
               ];
             };

@@ -1,0 +1,7 @@
+disallowed-methods = [
+    { path = "mfm_machine::io::IoProvider::call", reason = "Use typed IO clients from collector or bridge modules instead of raw IoProvider::call." },
+    { path = "std::env::var", reason = "Resolve environment defaults in CLI/app or transport assembly layers instead of op/state crates." },
+    { path = "std::env::var_os", reason = "Resolve environment defaults in CLI/app or transport assembly layers instead of op/state crates." },
+    { path = "std::fs::read_to_string", reason = "Route filesystem reads through explicit app/transport assembly or typed IO clients instead of planner/state crates." },
+    { path = "std::process::Command::new", reason = "Do not spawn ambient subprocesses from planner/state-facing crates; keep process execution in dedicated transport/exec layers or explicitly allowlisted tests." },
+]

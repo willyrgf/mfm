@@ -4,6 +4,7 @@ Keystore transaction operations (`op_id = "keystore_tx_sign"` and `op_id = "keys
 
 Purpose:
 - keep tx signing/send domain execution in `crates/ops/*`
+- keep local signing in `mfm-state-keystore` and remote-capable submission in `mfm-state-keystore-submit`
 - keep CLI/REST as thin wrappers over run start/resume/report rendering
 
 Outputs:

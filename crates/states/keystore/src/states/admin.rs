@@ -28,6 +28,9 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use mfm_collectors_local_keystore::{
+    KeystoreDeleteRequest, KeystoreImportRequest, KeystoreListRequest, LocalKeystoreIoClient,
+};
 use mfm_evm_core::hex::hex_encode_utf8;
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::{ErrorCategory, StateError};
@@ -40,11 +43,9 @@ use mfm_sdk::errors::SdkError;
 use mfm_state_common::ctx as op_ctx;
 use mfm_state_common::errors as op_errors;
 use mfm_state_common::idempotency as op_idempotency;
-use mfm_state_common::local_io_helpers::{emit_report_event, local_call};
+use mfm_state_common::local_io_helpers::{attach_state_id, emit_report_event};
 use mfm_state_common::states::meta;
 use serde::{Deserialize, Serialize};
-
-const ENV_KEYSTORE_PATH: &str = "MFM_KEYSTORE_PATH";
 
 /// Error returned by keystore administration helpers.
 #[derive(Debug, Clone)]
@@ -65,16 +66,7 @@ impl KeystoreAdminError {
     }
 }
 
-/// Supported keystore import input formats.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum KeystoreImportType {
-    /// Import a raw private key.
-    #[serde(rename = "pk")]
-    PrivateKey,
-    /// Import a mnemonic phrase.
-    #[serde(rename = "mn")]
-    Mnemonic,
-}
+pub use mfm_collectors_local_keystore::KeystoreImportType;
 
 /// Report written after a successful keystore import.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,17 +83,7 @@ pub struct KeystoreImportReport {
     pub created_at: String,
 }
 
-/// Sort order supported by the keystore list flow.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum KeystoreListSortBy {
-    /// Sort by alias.
-    Label,
-    /// Sort by creation timestamp.
-    Created,
-    /// Sort by key type.
-    Type,
-}
+pub use mfm_collectors_local_keystore::KeystoreListSortBy;
 
 /// Single keystore entry returned by the list flow.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -232,20 +214,25 @@ impl State for KeystoreImportState {
         io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let report: KeystoreImportReport = local_call(
-            &self.state_id,
-            io,
-            "local.keystore.import",
-            "keystore_import",
-            serde_json::json!({
-                "kind": self.cfg.import_type.clone(),
-                "label_hex": self.cfg.label.as_ref().map(|v| hex_encode_utf8(v)),
-                "derive_path": self.cfg.derivation_path.clone(),
-                "store_path_hex": hex_encode_utf8(self.cfg.keystore_path.to_string_lossy().as_ref()),
-                "stdin_mode": self.cfg.stdin,
-            }),
-        )
-        .await?;
+        let mut client = LocalKeystoreIoClient::new(self.state_id.clone(), io);
+        let report: KeystoreImportReport = client
+            .import(
+                "keystore_import",
+                KeystoreImportRequest {
+                    kind: self.cfg.import_type.clone(),
+                    label: None,
+                    label_hex: self.cfg.label.as_ref().map(|v| hex_encode_utf8(v)),
+                    derive_path: self.cfg.derivation_path.clone(),
+                    store_path: None,
+                    store_path_hex: Some(hex_encode_utf8(
+                        self.cfg.keystore_path.to_string_lossy().as_ref(),
+                    )),
+                    stdin_mode: self.cfg.stdin,
+                },
+            )
+            .await
+            .map_err(op_errors::state_from_io)
+            .map_err(|err| attach_state_id(&self.state_id, err))?;
 
         let report_json = serde_json::to_value(&report).map_err(|_| {
             op_errors::state_error_with_state(
@@ -316,19 +303,24 @@ impl State for KeystoreListState {
         io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let report: KeystoreListReport = local_call(
-            &self.state_id,
-            io,
-            "local.keystore.list",
-            "keystore_list",
-            serde_json::json!({
-                "store_path_hex": hex_encode_utf8(self.cfg.keystore_path.to_string_lossy().as_ref()),
-                "show_addrs": self.cfg.show_addresses,
-                "filter_label_hex": self.cfg.filter_label.as_ref().map(|v| hex_encode_utf8(v)),
-                "sort_by": self.cfg.sort_by.clone(),
-            }),
-        )
-        .await?;
+        let mut client = LocalKeystoreIoClient::new(self.state_id.clone(), io);
+        let report: KeystoreListReport = client
+            .list(
+                "keystore_list",
+                KeystoreListRequest {
+                    store_path: None,
+                    store_path_hex: Some(hex_encode_utf8(
+                        self.cfg.keystore_path.to_string_lossy().as_ref(),
+                    )),
+                    show_addrs: self.cfg.show_addresses,
+                    filter_label: None,
+                    filter_label_hex: self.cfg.filter_label.as_ref().map(|v| hex_encode_utf8(v)),
+                    sort_by: self.cfg.sort_by.clone(),
+                },
+            )
+            .await
+            .map_err(op_errors::state_from_io)
+            .map_err(|err| attach_state_id(&self.state_id, err))?;
 
         let report_json = serde_json::to_value(&report).map_err(|_| {
             op_errors::state_error_with_state(
@@ -399,19 +391,24 @@ impl State for KeystoreDeleteState {
         io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let report: KeystoreDeleteReport = local_call(
-            &self.state_id,
-            io,
-            "local.keystore.delete",
-            "keystore_delete",
-            serde_json::json!({
-                "id": self.cfg.id.clone(),
-                "label_hex": self.cfg.by_label.as_ref().map(|v| hex_encode_utf8(v)),
-                "confirm_yes": self.cfg.yes,
-                "store_path_hex": hex_encode_utf8(self.cfg.keystore_path.to_string_lossy().as_ref()),
-            }),
-        )
-        .await?;
+        let mut client = LocalKeystoreIoClient::new(self.state_id.clone(), io);
+        let report: KeystoreDeleteReport = client
+            .delete(
+                "keystore_delete",
+                KeystoreDeleteRequest {
+                    id: self.cfg.id.clone(),
+                    label: None,
+                    label_hex: self.cfg.by_label.as_ref().map(|v| hex_encode_utf8(v)),
+                    confirm_yes: self.cfg.yes,
+                    store_path: None,
+                    store_path_hex: Some(hex_encode_utf8(
+                        self.cfg.keystore_path.to_string_lossy().as_ref(),
+                    )),
+                },
+            )
+            .await
+            .map_err(op_errors::state_from_io)
+            .map_err(|err| attach_state_id(&self.state_id, err))?;
 
         let report_json = serde_json::to_value(&report).map_err(|_| {
             op_errors::state_error_with_state(
@@ -461,17 +458,6 @@ pub fn decode_optional_hex_string(
         }
         (None, None) => Ok(None),
     }
-}
-
-/// Resolves the effective keystore path from explicit config, environment, or the default home path.
-pub fn resolve_keystore_path(configured: Option<String>) -> PathBuf {
-    configured
-        .map(PathBuf::from)
-        .or_else(|| std::env::var(ENV_KEYSTORE_PATH).ok().map(PathBuf::from))
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".mfm").join("keystore")
-        })
 }
 
 /// Converts a helper error into the SDK error shape expected by op planners.

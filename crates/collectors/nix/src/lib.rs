@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 //! Typed adapters for Nix flake-app preflight IO.
 //!
 //! This crate wraps the `nix.exec` namespace so states can request flake-app resolution through

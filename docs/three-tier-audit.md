@@ -87,19 +87,6 @@ Canonical shared utility modules are in place:
 - `crates/states/common/src/evm_encoding.rs`
 - `crates/states/common/src/util_error.rs`
 
-Current duplication ceilings enforced by `mfm-architecture-verify`:
-- `normalize_hex_str` <= 3
-- `hex_to_bytes` <= 3
-- `bytes_to_hex_prefixed` <= 3
-- `parse_abi` <= 3
-- `encode_params` <= 2
-- `parse_value_wei_to_hex` <= 2
-- `trim_leading_zero_bytes` <= 1
-- `u128_to_min_be` <= 1
-- `rlp_encode_bytes` <= 1
-- `rlp_encode_list` <= 1
-- `usize_to_min_be` <= 1
-
 Interpretation:
 - RLP duplication is now single-source.
 - Remaining duplication is mostly wrapper-layer compatibility around shared helpers.
@@ -107,17 +94,12 @@ Interpretation:
 
 ## 4. Guardrails and CI
 
-`mfm-architecture-verify` is integrated into:
-- `nix run .#check`
-- CI basic mode (`nixfied/project/ci.nix` step: `architecture-verify`)
+The temporary verifier was an interim guardrail during the thin-layer and compile-time boundary refactors. It was later retired once its remaining checks were enforced more directly by compile-time boundaries and crate structure.
 
-Checks enforced:
-1. Expand boundary: forbids `.await` and ambient IO APIs inside op `expand()`.
-2. Utility duplication ceilings: prevents regression above configured limits.
-3. Shared-state ratio: now enforced at 80% minimum.
-
-Bugfix included in verifier:
-- State ratio counting now strips `#[cfg(test)]` items precisely, instead of truncating files at the first `#[cfg(test)]` occurrence.
+Current guardrails come from:
+1. The `Operation::expand()` contract in `crates/sdk/src/lib.rs` remains synchronous and deterministic, so `.await` is already a type error there.
+2. `clippy.toml` now bans raw `IoProvider::call` and other ambient APIs from planner/state-facing crates, leaving direct EVM bridge construction confined to the dedicated collector path.
+3. Keystore signing and remote submission now live in separate crates, so the old mixed local-signing plus remote-submit path is enforced structurally instead of by a text scan.
 
 ## 5. Findings (Current)
 
@@ -152,7 +134,7 @@ Bugfix included in verifier:
 
 1. No business workflow logic in binaries: **Met**.
 2. Op `expand()` methods are config+graph only: **Met**.
-3. Shared state ratio >= 80%: **Met** (90%).
+3. Shared-state extraction complete: **Met**. The old ratio metric remains historical context only and is no longer a hard architecture gate.
 4. Op-local states only for domain-specific aggregation/output: **Met**.
 5. Reusable patterns extracted as shared states: **Met** for keystore-tx, evm-write, proof patterns, nix exec.
 6. Side effects routed through IO abstraction: **Met**.

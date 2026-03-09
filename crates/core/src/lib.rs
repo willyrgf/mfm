@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 #![warn(missing_docs)]
 //! Core primitives for MFM configuration and secret-bearing key material.
 //!

@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
+#![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
 //! Thin planner op that composes deploy, configure, and validate EVM sub-ops.
 //!

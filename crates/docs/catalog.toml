@@ -78,7 +78,16 @@ name = "mfm-state-keystore"
 workspace_path = "crates/states/keystore"
 visibility = "public"
 section = "states"
-summary = "Shared keystore administration and transaction states."
+summary = "Shared keystore administration and local signing states."
+docs_policy = "docs-rs"
+umbrella_policy = "when-published"
+
+[[packages]]
+name = "mfm-state-keystore-submit"
+workspace_path = "crates/states/keystore-submit"
+visibility = "public"
+section = "states"
+summary = "Shared raw-transaction submission state with remote EVM routing."
 docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
@@ -340,15 +349,6 @@ workspace_path = "crates/app"
 visibility = "public"
 section = "binaries_tooling"
 summary = "App-level registry and observability glue."
-docs_policy = "repo-only"
-umbrella_policy = "always"
-
-[[packages]]
-name = "mfm-architecture-verify"
-workspace_path = "crates/tools/architecture-verify"
-visibility = "public"
-section = "binaries_tooling"
-summary = "Architecture contract verifier."
 docs_policy = "repo-only"
 umbrella_policy = "always"
 

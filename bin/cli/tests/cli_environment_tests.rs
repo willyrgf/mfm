@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 #![allow(clippy::needless_borrows_for_generic_args)]
 
 use assert_cmd::Command;

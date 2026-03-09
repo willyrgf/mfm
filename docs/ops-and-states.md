@@ -4,8 +4,8 @@
 >
 > Source of truth:
 > - built-in op registry: `crates/app/src/lib.rs`
-> - approved shared-state roots: `crates/tools/architecture-verify/src/main.rs`
-> - concrete production states: `impl State for` definitions under the approved roots, plus the
+> - shared production state modules documented below under `crates/states/*` and `crates/evm-runtime/src/states/*`
+> - concrete production states: `impl State for` definitions under those shared modules, plus the
 >   intentional op-local exceptions documented below
 
 ## How To Use This Document
@@ -23,7 +23,7 @@ Use `docs/redesign.md` for normative semantics and invariants.
 Current snapshot:
 
 - Built-in registered ops: `15`
-- Shared production `State` impls: `29`
+- Shared production `State` impls: `31`
 - Intentional op-local production `State` impls: `3`
 
 ## Built-In Ops
@@ -32,7 +32,7 @@ The built-in app bundle registers these ops in `DefaultOperationPlugin::register
 
 | Op ID | Version | Owner | Purpose | Primary states | Entry points |
 |---|---|---|---|---|---|
-| `proof` | `v1` | `crates/ops/proof-op` | Determinism and resume acceptance workflow | `NamespaceReadState`, `IdempotentSideEffectState`, `WriteOutputState` | `mfm run start`, feature `run.start` |
+| `proof` | `v1` | `crates/ops/proof-op` | Determinism and resume acceptance workflow | `ProofReadState`, `ProofApplySideEffectState`, `WriteOutputState` | `mfm run start`, feature `run.start` |
 | `keystore_import` | `v1` | `crates/ops/keystore-admin-op` | Import a key into the keystore | `KeystoreImportState` | `mfm keystore import`, feature `run.start` |
 | `keystore_list` | `v1` | `crates/ops/keystore-admin-op` | List keystore entries | `KeystoreListState` | `mfm keystore list`, feature `run.start` |
 | `keystore_delete` | `v1` | `crates/ops/keystore-admin-op` | Delete a keystore entry | `KeystoreDeleteState` | `mfm keystore delete`, feature `run.start` |
@@ -56,16 +56,16 @@ Notes:
 
 ## Shared Production States
 
-These modules live under the approved shared-state roots and currently define the production
+These modules live under the documented shared-state roots and currently define the production
 runtime behavior reused by thin ops.
 
 | Module | State types | Purpose | Used by built-in ops |
 |---|---|---|---|
-| `crates/states/common/src/states/io.rs` | `NamespaceReadState` | Generic namespace-backed read step that records a fact and writes a context value | `proof` and other reusable read patterns |
 | `crates/states/common/src/states/nix.rs` | `NixExecState` | Execute a nix-resolved or pre-resolved program through the exec namespace | `nix_app` |
-| `crates/states/common/src/states/side_effect.rs` | `IdempotentSideEffectState` | Apply a side effect behind a stable idempotency key | `proof` |
+| `crates/states/common/src/states/proof.rs` | `ProofReadState`, `ProofApplySideEffectState` | Typed proof read and side-effect states that avoid raw proof namespace strings | `proof` |
 | `crates/states/keystore/src/states/admin.rs` | `KeystoreImportState`, `KeystoreListState`, `KeystoreDeleteState` | Reusable keystore administration flows | `keystore_import`, `keystore_list`, `keystore_delete` |
-| `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState`, `KeystoreTxSendRawState` | Reusable signing and raw-transaction submission flows | `keystore_tx_sign`, `keystore_tx_send_raw` |
+| `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState` | Reusable local keystore signing flow | `keystore_tx_sign` |
+| `crates/states/keystore-submit/src/tx.rs` | `KeystoreTxSendRawState` | Reusable raw-transaction submission flow with remote EVM routing | `keystore_tx_send_raw` |
 | `crates/evm-runtime/src/states/read.rs` | `ReadHexStringState`, `ReadU256HexState`, `EthCallState`, `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState` | Reusable chain read/query states | `evm_read`, `portfolio_tracker` |
 | `crates/evm-runtime/src/states/write.rs` | `NixArtifactToEvmContractState`, `EvmDeployState`, `EvmConfigureState`, `EvmValidateState` | Reusable contract artifact adaptation and deploy/configure/validate states | `evm_contract_from_nix`, `evm_deploy`, `evm_configure`, `evm_validate` |
 | `crates/states/aave-v3/src/states.rs` | `LoadCompileManifestState`, `DeployContractState`, `WaitForReceiptState`, `CollectDeployOutputsState`, `WriteDeployManifestState`, `AdaptOriginDeployOutputState`, `LoadDeployManifestState`, `ConfigureRuntimeCallState`, `WaitForConfigReceiptState`, `CollectConfigOutputsState`, `WriteConfigReportState` | Reusable Aave V3 deploy/configure/adaptation flow states | Direct built-in use today: `aave_v3_origin_adapt_deploy` for adaptation; the remaining states are reusable flow building blocks not yet registered as standalone built-in ops |
@@ -87,13 +87,13 @@ Update this document in the same change whenever any of the following happen:
 
 - a built-in op is added to or removed from `DefaultOperationPlugin::register_operations`
 - an op ID or version changes
-- a new production `impl State for` lands under the approved shared-state roots
+- a new production `impl State for` lands under the shared-state modules documented above
 - a new intentional op-local production state is introduced
 - a CLI command or built-in feature becomes a first-class entry point for an op
 
 Minimum code locations to check when updating:
 
 - `crates/app/src/lib.rs` for built-in op registration and built-in features
-- `crates/tools/architecture-verify/src/main.rs` for approved shared-state roots
+- the shared-state module list in this document plus `crates/states/*` and `crates/evm-runtime/src/states/*`
 - `crates/states/*` and `crates/evm-runtime/src/states/*` for shared production states
 - `crates/ops/*/src/lib.rs` for intentional op-local `State` implementations

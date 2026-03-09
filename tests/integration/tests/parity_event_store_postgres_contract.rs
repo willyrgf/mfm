@@ -1,4 +1,5 @@
 #![cfg(feature = "parity-tests")]
+#![allow(clippy::disallowed_methods)]
 
 use mfm_event_store_postgres::PostgresEventStore;
 use mfm_machine_test_support::event_store_contract_tests;

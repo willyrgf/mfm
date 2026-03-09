@@ -91,6 +91,7 @@ pub mod parity_run_ids {
         (phase_a_run_id, phase_b_run_id)
     }
 
+    #[allow(clippy::disallowed_methods)]
     fn required_env_path(env_var: &str) -> PathBuf {
         let path = std::env::var(env_var)
             .unwrap_or_else(|_| panic!("`{env_var}` must be set for parity run-id handoff"));

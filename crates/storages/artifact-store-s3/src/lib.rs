@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 #![warn(missing_docs)]
 //! S3 and MinIO-backed `ArtifactStore`.
 //!

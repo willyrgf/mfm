@@ -1,8 +1,10 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
+#![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
 //! Keystore-backed transaction planning operations.
 //!
 //! These operations validate input, wire state graphs, and leave signing or submission side
-//! effects to `mfm-state-keystore`.
+//! effects to the shared keystore state crates.
 //!
 //! # Examples
 //!
@@ -25,14 +27,12 @@ use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
 use mfm_state_common::errors as op_errors;
-use mfm_state_keystore::states::tx::{
-    KeystoreTxSendRawState, KeystoreTxSendRawStateConfig, KeystoreTxSignState,
-    KeystoreTxSignStateConfig,
-};
+use mfm_state_keystore::states::tx::{KeystoreTxSignState, KeystoreTxSignStateConfig};
 use mfm_state_keystore::tx::{
     output_context_key, parse_address, parse_data_hex, parse_u128_quantity, Eip1559TxToSign,
     KeystoreTxError,
 };
+use mfm_state_keystore_submit::tx::{KeystoreTxSendRawState, KeystoreTxSendRawStateConfig};
 use serde::{Deserialize, Serialize};
 
 /// Stable version string for keystore transaction operations.
@@ -42,9 +42,6 @@ pub const TX_OP_VERSION: &str = "v1";
 pub const TX_SIGN_OP_ID: &str = "keystore_tx_sign";
 /// Operation identifier for raw transaction submission.
 pub const TX_SEND_RAW_OP_ID: &str = "keystore_tx_send_raw";
-
-const ENV_KEYSTORE_PATH: &str = "MFM_KEYSTORE_PATH";
-const ENV_EVM_RPC_SOURCE_ID: &str = "MFM_EVM_RPC_SOURCE_ID";
 
 /// Report emitted after a transaction is signed and written locally.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -211,7 +208,8 @@ impl Operation for KeystoreTxSignOp {
                 by_label,
                 tx,
                 out_path: PathBuf::from(cfg.out_path),
-                keystore_path: resolve_keystore_path(keystore_path),
+                keystore_path: require_keystore_path(keystore_path)
+                    .map_err(sdk_error_from_helper)?,
             },
         };
 
@@ -258,7 +256,7 @@ impl Operation for KeystoreTxSendRawOp {
             )
         })?;
 
-        let source_id = resolve_rpc_source_id(cfg.source_id).map_err(sdk_error_from_helper)?;
+        let source_id = require_rpc_source_id(cfg.source_id).map_err(sdk_error_from_helper)?;
 
         let state_id = StateId::must_new(format!("{}.send_raw", op_path.0));
         let state = KeystoreTxSendRawState {
@@ -280,22 +278,26 @@ impl Operation for KeystoreTxSendRawOp {
     }
 }
 
-fn resolve_keystore_path(configured: Option<String>) -> PathBuf {
-    configured
-        .map(PathBuf::from)
-        .or_else(|| std::env::var(ENV_KEYSTORE_PATH).ok().map(PathBuf::from))
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".mfm").join("keystore")
-        })
+fn require_keystore_path(configured: Option<String>) -> Result<PathBuf, KeystoreTxError> {
+    let Some(value) = configured
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    else {
+        return Err(KeystoreTxError::new(
+            "MissingArgument",
+            "Must provide keystore_path or keystore_path_hex",
+        ));
+    };
+
+    Ok(PathBuf::from(value))
 }
 
-fn resolve_rpc_source_id(configured: Option<String>) -> Result<String, KeystoreTxError> {
-    let value = configured.or_else(|| std::env::var(ENV_EVM_RPC_SOURCE_ID).ok());
+fn require_rpc_source_id(configured: Option<String>) -> Result<String, KeystoreTxError> {
+    let value = configured;
     let Some(value) = value else {
         return Err(KeystoreTxError::new(
             "MissingArgument",
-            "Must provide --source-id or set MFM_EVM_RPC_SOURCE_ID",
+            "Must provide source_id",
         ));
     };
 
@@ -303,7 +305,7 @@ fn resolve_rpc_source_id(configured: Option<String>) -> Result<String, KeystoreT
     if trimmed.is_empty() {
         return Err(KeystoreTxError::new(
             "MissingArgument",
-            "Must provide --source-id or set MFM_EVM_RPC_SOURCE_ID",
+            "Must provide source_id",
         ));
     }
 

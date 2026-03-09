@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
+#![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
 //! EVM write/validation operations.
 //!
@@ -622,6 +624,7 @@ fn ensure_nonempty_env_name(env_name: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 fn signing_key_from_env(signing_key_env: &str) -> Result<SigningKey, StateError> {
     let raw = Zeroizing::new(std::env::var(signing_key_env).map_err(|_| {
         op_errors::state_unknown(

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 //! Typed adapters for the `exec` IO namespace.
 //!
 //! This crate models requests and responses for running local programs through the generic

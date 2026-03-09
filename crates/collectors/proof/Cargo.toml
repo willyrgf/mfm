@@ -1,0 +1,13 @@
+[package]
+name = "mfm-collectors-proof"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+mfm-machine = { path = "../../machine" }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true }

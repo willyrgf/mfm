@@ -1,7 +1,7 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::{app_services, run_stores};
+use crate::support::{app_services, command_defaults, run_stores};
 use clap::Args;
 use mfm_op_keystore_tx::{
     tx_sign_report_context_key, TxSignOpConfig, TxSignReport, TX_OP_VERSION, TX_SIGN_OP_ID,
@@ -92,6 +92,7 @@ pub async fn execute(ctx: &CommandContext, args: &TxSignArgs) -> ! {
 }
 
 async fn execute_internal(args: &TxSignArgs) -> CommandResult<TxSignResponse> {
+    let keystore_path = command_defaults::resolve_keystore_path(args.keystore.as_ref());
     let op_config = TxSignOpConfig {
         id: args.id.clone(),
         by_label: None,
@@ -109,10 +110,7 @@ async fn execute_internal(args: &TxSignArgs) -> CommandResult<TxSignResponse> {
         out_path: args.out.display().to_string(),
         data: args.data.clone(),
         keystore_path: None,
-        keystore_path_hex: args
-            .keystore
-            .as_ref()
-            .map(|path| hex::encode(path.to_string_lossy().as_bytes())),
+        keystore_path_hex: Some(hex::encode(keystore_path.to_string_lossy().as_bytes())),
     };
 
     let report_key = tx_sign_report_context_key();
@@ -125,8 +123,7 @@ async fn execute_internal(args: &TxSignArgs) -> CommandResult<TxSignResponse> {
         SingleOpReportRequest {
             op_id: TX_SIGN_OP_ID.to_string(),
             op_version: TX_OP_VERSION.to_string(),
-            op_config: serde_json::to_value(op_config)
-                .expect("tx sign op config should serialize to json value"),
+            op_config: app_services::serialize_op_config(&op_config, "tx sign")?,
             report_context_key: report_key.0,
         },
     )

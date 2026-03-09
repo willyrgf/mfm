@@ -1,7 +1,7 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::{app_services, run_stores};
+use crate::support::{app_services, command_defaults, run_stores};
 use clap::Args;
 use mfm_op_keystore_admin::{
     keystore_delete_report_context_key, KeystoreDeleteOpConfig, KeystoreDeleteReport,
@@ -51,6 +51,7 @@ pub async fn execute(ctx: &CommandContext, args: &DeleteArgs) -> ! {
 }
 
 async fn execute_internal(args: &DeleteArgs) -> CommandResult<DeleteResponse> {
+    let keystore_path = command_defaults::resolve_keystore_path(args.keystore.as_ref());
     let op_config = KeystoreDeleteOpConfig {
         id: args.id.clone(),
         by_label: None,
@@ -60,10 +61,7 @@ async fn execute_internal(args: &DeleteArgs) -> CommandResult<DeleteResponse> {
             .map(|label| hex::encode(label.as_bytes())),
         yes: args.yes,
         keystore_path: None,
-        keystore_path_hex: args
-            .keystore
-            .as_ref()
-            .map(|path| hex::encode(path.to_string_lossy().as_bytes())),
+        keystore_path_hex: Some(hex::encode(keystore_path.to_string_lossy().as_bytes())),
     };
 
     let report_key = keystore_delete_report_context_key();
@@ -76,8 +74,7 @@ async fn execute_internal(args: &DeleteArgs) -> CommandResult<DeleteResponse> {
         SingleOpReportRequest {
             op_id: KEYSTORE_DELETE_OP_ID.to_string(),
             op_version: KEYSTORE_ADMIN_OP_VERSION.to_string(),
-            op_config: serde_json::to_value(op_config)
-                .expect("keystore delete op config should serialize to json value"),
+            op_config: app_services::serialize_op_config(&op_config, "keystore delete")?,
             report_context_key: report_key.0,
         },
     )

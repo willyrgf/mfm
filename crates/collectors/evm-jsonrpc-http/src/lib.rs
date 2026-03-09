@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 //! EVM JSON-RPC over HTTP live transport.
 //!
 //! This crate implements a `LiveIoTransportFactory` for the `namespace = "evm"` IO surface.

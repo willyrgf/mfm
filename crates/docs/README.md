@@ -46,7 +46,8 @@ The live runtime inventory still lives in the repository docs:
 | `mfm-evm-runtime` | Shared EVM read and write runtime states. | pending | `crates/evm-runtime` |
 | `mfm-state-aave-v3` | Shared Aave V3 deploy and configure states. | pending | `crates/states/aave-v3` |
 | `mfm-state-common` | Cross-domain reusable execution states. | pending | `crates/states/common` |
-| `mfm-state-keystore` | Shared keystore administration and transaction states. | pending | `crates/states/keystore` |
+| `mfm-state-keystore` | Shared keystore administration and local signing states. | pending | `crates/states/keystore` |
+| `mfm-state-keystore-submit` | Shared raw-transaction submission state with remote EVM routing. | pending | `crates/states/keystore-submit` |
 
 ## Ops
 
@@ -101,8 +102,8 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | --- | --- | --- |
 | `mfm` | CLI package and `mfm_cli` binary. | `bin/cli` |
 | `mfm-app` | App-level registry and observability glue. | `crates/app` |
-| `mfm-architecture-verify` | Architecture contract verifier. | `crates/tools/architecture-verify` |
 | `mfm-integration-tests` | Workspace integration-test crate. | `tests/integration` |
+| `mfm-publish-docs` | Typed planner, reconciler, and lifecycle tool for docs publishing. | `crates/tools/publish-docs` |
 | `mfm-rest-api` | REST API package and `mfm_rest_api` binary. | `bin/rest-api` |
 
 ## Publishing Notes

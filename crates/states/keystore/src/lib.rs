@@ -1,9 +1,11 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
+#![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
 //! Reusable keystore-oriented runtime states and signing helpers.
 //!
-//! This crate keeps keystore execution logic out of binaries and thin op planners by packaging
-//! the reusable `State` implementations and transaction helpers needed for key management and raw
-//! transaction workflows.
+//! This crate keeps local keystore execution logic out of binaries and thin op planners by
+//! packaging the reusable `State` implementations and transaction helpers needed for key
+//! management and transaction signing workflows.
 //!
 //! # Examples
 //!
@@ -28,7 +30,7 @@
 //! assert_eq!(report_key.0, "keystore_tx.sign.report");
 //! ```
 
-/// Keystore-specific `State` implementations used by op planners.
+/// Local keystore-specific `State` implementations used by op planners.
 pub mod states;
 /// Transaction parsing, signing, and output helpers for keystore flows.
 pub mod tx;

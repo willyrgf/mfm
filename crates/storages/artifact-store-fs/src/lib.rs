@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 #![warn(missing_docs)]
 //! Filesystem `ArtifactStore` for tests and local development.
 //!

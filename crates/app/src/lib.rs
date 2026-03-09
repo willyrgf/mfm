@@ -296,6 +296,7 @@ pub fn phase_str(phase: &RunPhase) -> &'static str {
 }
 
 /// Resolves the default local artifact root from `MFM_ARTIFACT_ROOT` or `$HOME/.mfm/run_artifacts`.
+#[allow(clippy::disallowed_methods)]
 pub fn default_artifact_root() -> PathBuf {
     std::env::var(ENV_ARTIFACT_ROOT)
         .ok()
@@ -308,6 +309,7 @@ pub fn default_artifact_root() -> PathBuf {
 
 /// Builds the default artifact store from environment configuration.
 #[instrument(level = "info", skip_all)]
+#[allow(clippy::disallowed_methods)]
 pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, AppError> {
     let backend = std::env::var(ENV_ARTIFACT_BACKEND).unwrap_or_else(|_| "fs".to_string());
     info!(backend = %backend, "initializing artifact store");
@@ -338,6 +340,7 @@ pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, App
 
 /// Builds the default event store from environment configuration.
 #[instrument(level = "info", skip_all)]
+#[allow(clippy::disallowed_methods)]
 pub async fn make_default_event_store() -> Result<Arc<dyn EventStore>, AppError> {
     let database_url = std::env::var(ENV_DATABASE_URL).map_err(|_| {
         AppError::new(
@@ -809,6 +812,7 @@ impl AppServices {
     }
 
     /// Starts the deploy-configure-validate template from raw JSON or a JSON file.
+    #[allow(clippy::disallowed_methods)]
     pub async fn start_deploy_configure_validate_from_spec_input(
         &self,
         spec_json: Option<String>,
@@ -1703,6 +1707,7 @@ fn parse_portfolio_tokens_from_env(raw: &str) -> Result<Vec<PortfolioTokenSpec>,
     Ok(tokens)
 }
 
+#[allow(clippy::disallowed_methods)]
 fn load_portfolio_tokens_from_env() -> Result<Vec<PortfolioTokenSpec>, AppError> {
     let Ok(raw) = std::env::var(ENV_PORTFOLIO_TOKENS_JSON) else {
         return Ok(Vec::new());
@@ -1740,4 +1745,197 @@ pub struct PortfolioSnapshotResponse {
     pub block_number: Option<u64>,
     /// Native balance from the final report, when present.
     pub native_balance: Option<PortfolioBalanceReport>,
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+
+    use async_trait::async_trait;
+    use mfm_machine::engine::Stores;
+    use mfm_machine::errors::{IoError, RunError, StorageError};
+    use mfm_machine::events::EventEnvelope;
+    use mfm_machine::ids::{ArtifactId, FactKey, RunId, StateId};
+    use mfm_machine::io::IoCall;
+    use mfm_machine::live_io::{LiveIoEnv, LiveIoTransportFactory};
+    use mfm_machine::live_io_registry::{HashMapTransportRegistry, TransportRegistry};
+    use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
+    use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, PlanResolver};
+    use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct NoopEventStore;
+
+    #[async_trait]
+    impl EventStore for NoopEventStore {
+        async fn head_seq(&self, _run_id: RunId) -> Result<u64, StorageError> {
+            Ok(0)
+        }
+
+        async fn append(
+            &self,
+            _run_id: RunId,
+            _expected_seq: u64,
+            _events: Vec<EventEnvelope>,
+        ) -> Result<u64, StorageError> {
+            Ok(0)
+        }
+
+        async fn read_range(
+            &self,
+            _run_id: RunId,
+            _from_seq: u64,
+            _to_seq: Option<u64>,
+        ) -> Result<Vec<EventEnvelope>, StorageError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Clone)]
+    struct NoopArtifactStore;
+
+    #[async_trait]
+    impl ArtifactStore for NoopArtifactStore {
+        async fn put(
+            &self,
+            _kind: ArtifactKind,
+            _bytes: Vec<u8>,
+        ) -> Result<ArtifactId, StorageError> {
+            Ok(ArtifactId("0".repeat(64)))
+        }
+
+        async fn get(&self, _id: &ArtifactId) -> Result<Vec<u8>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn exists(&self, _id: &ArtifactId) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+    }
+
+    struct PanicResolver;
+
+    impl PlanResolver for PanicResolver {
+        fn resolve(
+            &self,
+            _manifest: &mfm_machine::config::RunManifest,
+        ) -> Result<mfm_machine::plan::ExecutionPlan, RunError> {
+            panic!("child-run resolver should not be used in these transport tests")
+        }
+    }
+
+    fn default_transport_registry() -> HashMapTransportRegistry {
+        let mut registry = HashMapTransportRegistry::new();
+        DefaultTransportPlugin
+            .register_transports(&mut registry)
+            .expect("default transports should register");
+        registry
+    }
+
+    fn test_live_io_env() -> LiveIoEnv {
+        LiveIoEnv {
+            stores: Stores {
+                events: Arc::new(NoopEventStore),
+                artifacts: Arc::new(NoopArtifactStore),
+            },
+            run_id: RunId(uuid::Uuid::new_v4()),
+            state_id: StateId::must_new("app.tests.proof".to_string()),
+            attempt: 0,
+        }
+    }
+
+    fn assert_io_error_code(err: IoError, expected: &str) {
+        match err {
+            IoError::Other(info) => assert_eq!(info.code.0, expected),
+            other => panic!("unexpected io error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_transport_plugin_registers_expected_namespace_groups() {
+        let registry = default_transport_registry();
+
+        for group in [
+            "proof",
+            "exec",
+            "nix.exec",
+            "local.fs",
+            "local.evm",
+            "local.keystore",
+            "evm",
+        ] {
+            assert!(
+                registry.resolve(group).is_some(),
+                "expected namespace group {group} to be registered"
+            );
+        }
+        assert_eq!(registry.all().len(), 7);
+    }
+
+    #[tokio::test]
+    async fn router_from_default_registry_routes_proof_namespace() {
+        let registry = default_transport_registry();
+        let factory = RouterLiveIoTransportFactory::from_registry(&registry);
+        let mut transport = factory.make(test_live_io_env());
+
+        let response = transport
+            .call(IoCall {
+                namespace: "proof.read".to_string(),
+                request: serde_json::json!({}),
+                fact_key: None,
+            })
+            .await
+            .expect("proof route should succeed");
+        assert_eq!(response, serde_json::json!({ "n": 1 }));
+
+        let err = transport
+            .call(IoCall {
+                namespace: "unknown.namespace".to_string(),
+                request: serde_json::json!({}),
+                fact_key: None,
+            })
+            .await
+            .expect_err("unknown namespace should fail");
+        assert_io_error_code(err, "io_unknown_namespace");
+    }
+
+    #[tokio::test]
+    async fn child_run_wrapper_forwards_non_child_namespaces() {
+        let registry = default_transport_registry();
+        let base_factory: Arc<dyn LiveIoTransportFactory> =
+            Arc::new(RouterLiveIoTransportFactory::from_registry(&registry));
+        let wrapper = ChildRunLiveIoTransportFactory::new(Arc::new(PanicResolver), base_factory);
+        let mut transport = wrapper.make(test_live_io_env());
+
+        let response = transport
+            .call(IoCall {
+                namespace: "proof.read".to_string(),
+                request: serde_json::json!({}),
+                fact_key: None,
+            })
+            .await
+            .expect("proof route should survive child-run wrapper");
+        assert_eq!(response, serde_json::json!({ "n": 1 }));
+    }
+
+    #[tokio::test]
+    async fn child_run_wrapper_intercepts_reserved_namespaces() {
+        let registry = default_transport_registry();
+        let base_factory: Arc<dyn LiveIoTransportFactory> =
+            Arc::new(RouterLiveIoTransportFactory::from_registry(&registry));
+        let wrapper = ChildRunLiveIoTransportFactory::new(Arc::new(PanicResolver), base_factory);
+        let mut transport = wrapper.make(test_live_io_env());
+
+        let err = transport
+            .call(IoCall {
+                namespace: "machine.child_run.spawn".to_string(),
+                request: serde_json::json!({}),
+                fact_key: Some(FactKey("mfm:child-run:test".to_string())),
+            })
+            .await
+            .expect_err("invalid child-run payload should fail at wrapper boundary");
+        assert_io_error_code(err, "child_run_request_invalid");
+    }
 }

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 use assert_cmd::Command;
 use mfm::presentation::output::{ErrorResponse, ResponseStatus, SuccessResponse};
 use mfm_artifact_store_fs::FsArtifactStore;
