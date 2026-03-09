@@ -14,14 +14,19 @@ use crate::{
     catalog::{catalog_entry, load_desired_catalog, load_publish_wave, select_packages},
     cli::{Cli, Command, ResumeArgs, SyncUmbrellaArgs, YankArgs},
     error::PublishDocsError,
-    ledger::{latest_release, load_release_ledger, package_changed_since_release},
+    ledger::{
+        current_git_commit, latest_release, load_release_ledger, package_changed_since_release,
+    },
     model::{
         ApplyResult, DesiredCatalog, DocsRsObservation, Mode, OutputFormat, PackageFilter, Plan,
         RegistryObservation, SummaryCounts, SyncUmbrellaResult, WorkspaceState, YankResult,
     },
     plan::{build_plan, summarize_plan},
-    remote::{crates_io::CratesIoClient, docs_rs::DocsRsClient},
-    umbrella::{load_current_readme, render_readme, sync_readme},
+    remote::{docs_rs::DocsRsClient, index::IndexRegistryObserver},
+    umbrella::{
+        build_sync_state, load_current_readme, load_sync_state, render_readme, sync_readme,
+        sync_state_matches_workspace, write_sync_state,
+    },
     workspace::{
         ensure_clean_worktree, find_workspace_root, load_workspace_state, selected_packages,
         workspace_package,
@@ -33,6 +38,13 @@ const README_PATH: &str = "crates/docs/README.md";
 /// Runs the selected CLI command and prints the final response.
 pub async fn run(cli: Cli) -> ExitCode {
     let output_format = resolved_output_format(&cli);
+    let mode = resolved_mode(&cli);
+    tracing::info!(
+        target: "mfm_publish_docs",
+        ?mode,
+        ?output_format,
+        "publish-docs command starting"
+    );
     match execute(cli).await {
         Ok(output) => {
             print_success(&output, output_format);
@@ -40,6 +52,13 @@ pub async fn run(cli: Cli) -> ExitCode {
         }
         Err(error) => {
             let command_error = map_error(error);
+            tracing::error!(
+                target: "mfm_publish_docs",
+                code = command_error.code,
+                exit_code = command_error.exit_code,
+                message = %command_error.message,
+                "publish-docs command failed"
+            );
             print_error(&command_error, output_format);
             ExitCode::from(command_error.exit_code)
         }
@@ -220,17 +239,31 @@ async fn execute_sync_umbrella(
     let wave = load_publish_wave(&workspace_root)?;
     let workspace = load_workspace_state(&workspace_root, &wave.packages)?;
     let catalog = load_desired_catalog(&workspace_root, &workspace)?;
-    let registry = observe_catalog_registry(&workspace, &catalog).await?;
+    let registry = observe_catalog_registry(&workspace_root, &workspace, &catalog).await?;
     let docs = observe_catalog_docs(&workspace, &catalog, &registry).await?;
     let generated_readme = generated_readme(&catalog, &registry, &docs);
     let changed = load_current_readme(&workspace_root).unwrap_or_default() != generated_readme;
+    let run_id = new_run_id();
     if changed && !args.check {
         sync_readme(&workspace_root, &generated_readme)?;
+    }
+    if !args.check {
+        write_sync_state(
+            &workspace_root,
+            &build_sync_state(
+                run_id.clone(),
+                current_git_commit(&workspace_root)?,
+                &catalog,
+                &registry,
+                &docs,
+                generated_readme.clone(),
+            )?,
+        )?;
     }
 
     Ok(CommandOutput::SyncUmbrella(SyncUmbrellaResult {
         schema_version: 1,
-        run_id: new_run_id(),
+        run_id,
         changed,
         path: README_PATH.to_string(),
     }))
@@ -285,22 +318,27 @@ async fn prepare_run(
     let selected_wave_packages = select_packages(&wave, &filter)?;
     let workspace = load_workspace_state(&workspace_root, &selected_wave_packages)?;
     let catalog = load_desired_catalog(&workspace_root, &workspace)?;
-    let observe_full_catalog = workspace
+    let registry = observe_selected_registry(&workspace_root, &workspace).await?;
+    let docs = observe_selected_docs(&workspace, &catalog, &registry).await?;
+    let current_readme = load_current_readme(&workspace_root).unwrap_or_default();
+    let current_commit = current_git_commit(&workspace_root)?;
+    let (generated_readme, umbrella_synced) = if workspace
         .selected
         .iter()
-        .any(|name| name == &catalog.umbrella_package);
-    let (registry, docs, generated_readme, umbrella_changed) = if observe_full_catalog {
-        let registry = observe_catalog_registry(&workspace, &catalog).await?;
-        let docs = observe_catalog_docs(&workspace, &catalog, &registry).await?;
-        let generated_readme = generated_readme(&catalog, &registry, &docs);
-        let umbrella_changed =
-            load_current_readme(&workspace_root).unwrap_or_default() != generated_readme;
-        (registry, docs, generated_readme, umbrella_changed)
+        .any(|name| name == &catalog.umbrella_package)
+    {
+        match load_sync_state(&workspace_root).ok().flatten() {
+            Some(state)
+                if sync_state_matches_workspace(&state, current_commit.as_deref(), &catalog)
+                    .unwrap_or(false)
+                    && current_readme == state.generated_readme =>
+            {
+                (state.generated_readme, true)
+            }
+            _ => (current_readme.clone(), false),
+        }
     } else {
-        let registry = observe_selected_registry(&workspace).await?;
-        let docs = observe_selected_docs(&workspace, &catalog, &registry).await?;
-        let generated_readme = load_current_readme(&workspace_root).unwrap_or_default();
-        (registry, docs, generated_readme, false)
+        (current_readme.clone(), true)
     };
     let ledger = load_release_ledger(&workspace_root)?;
     let changed_since_release = changed_since_release_map(&workspace_root, &workspace, &ledger)?;
@@ -317,7 +355,7 @@ async fn prepare_run(
         &registry,
         &docs,
         &changed_since_release,
-        umbrella_changed,
+        umbrella_synced,
     )?;
     let summary = summarize_plan(&plan);
     let artifact_dir = workspace_root
@@ -416,18 +454,20 @@ fn observe_catalog_inputs<'a>(
 }
 
 async fn observe_selected_registry(
+    workspace_root: &Path,
     workspace: &WorkspaceState,
 ) -> Result<Vec<RegistryObservation>, PublishDocsError> {
-    let client = CratesIoClient::new()?;
+    let client = IndexRegistryObserver::new(workspace_root)?;
     let packages = selected_packages(workspace)?;
     Ok(client.observe_packages(&packages).await)
 }
 
 async fn observe_catalog_registry(
+    workspace_root: &Path,
     workspace: &WorkspaceState,
     catalog: &DesiredCatalog,
 ) -> Result<Vec<RegistryObservation>, PublishDocsError> {
-    let client = CratesIoClient::new()?;
+    let client = IndexRegistryObserver::new(workspace_root)?;
     let inputs = observe_catalog_inputs(workspace, catalog)?;
     let packages: Vec<_> = inputs.iter().map(|(local, _)| *local).collect();
     Ok(client.observe_packages(&packages).await)
@@ -591,7 +631,7 @@ fn print_success(output: &CommandOutput, format: OutputFormat) {
             };
             match serde_json::to_string_pretty(&response) {
                 Ok(json) => println!("{json}"),
-                Err(_) => eprintln!(
+                Err(_) => println!(
                     r#"{{"status":"error","error":{{"code":"SerializationError","message":"Failed to serialize response"}}}}"#
                 ),
             }
@@ -611,8 +651,8 @@ fn print_error(error: &CommandError, format: OutputFormat) {
                 },
             };
             match serde_json::to_string_pretty(&response) {
-                Ok(json) => eprintln!("{json}"),
-                Err(_) => eprintln!(
+                Ok(json) => println!("{json}"),
+                Err(_) => println!(
                     r#"{{"status":"error","error":{{"code":"SerializationError","message":"Failed to serialize error response"}}}}"#
                 ),
             }

@@ -11,7 +11,6 @@ use crate::{
         ApplyResult, BlockedAction, CompletedAction, LocalPackage, Plan, PlanAction, ReleaseLedger,
         WorkspaceState, YankResult,
     },
-    umbrella::sync_readme,
 };
 
 /// Executes the publishable subset of the plan serially.
@@ -19,7 +18,7 @@ pub fn apply_plan(
     workspace_root: &Path,
     workspace: &WorkspaceState,
     plan: &Plan,
-    generated_readme: &str,
+    _generated_readme: &str,
     ledger: &mut ReleaseLedger,
     allow_dirty: bool,
 ) -> Result<ApplyResult, PublishDocsError> {
@@ -50,27 +49,11 @@ pub fn apply_plan(
                 });
             }
             PlanAction::RefreshUmbrella => {
-                if !allow_dirty {
-                    blocked_actions.push(BlockedAction {
-                        name: package.name.clone(),
-                        action: package.action,
-                        reason: "umbrella-readme-stale; rerun with --allow-dirty or sync and commit first"
-                            .to_string(),
-                    });
-                    continue;
-                }
-
-                let changed = sync_readme(workspace_root, generated_readme)?;
-                let local = required_local_package(&packages_by_name, &package.name)?;
-                publish_and_record(workspace_root, local, ledger, true)?;
-                completed_actions.push(CompletedAction {
+                blocked_actions.push(BlockedAction {
                     name: package.name.clone(),
                     action: package.action,
-                    result: if changed {
-                        "readme-synced-and-published".to_string()
-                    } else {
-                        "published".to_string()
-                    },
+                    reason: "umbrella-sync-required; run `publish-docs sync-umbrella` first"
+                        .to_string(),
                 });
             }
             PlanAction::WaitDependencies

@@ -1,11 +1,18 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
+
+use time::OffsetDateTime;
 
 use crate::model::{
     CatalogPackage, CatalogSection, DesiredCatalog, DocsPolicy, DocsRsObservation, DocsRsStatus,
-    RegistryObservation, UmbrellaPolicy, Visibility,
+    RegistryObservation, UmbrellaPolicy, UmbrellaSyncState, Visibility,
 };
 
 const README_PATH: &str = "crates/docs/README.md";
+const UMBRELLA_SYNC_STATE_PATH: &str = ".mfm/publish-docs/umbrella-sync.json";
 
 /// Renders the umbrella README deterministically from catalog plus observed remote state.
 pub fn render_readme(
@@ -114,6 +121,72 @@ pub fn sync_readme(workspace_root: &Path, generated: &str) -> Result<bool, std::
     Ok(true)
 }
 
+/// Returns the absolute path to the persisted umbrella sync state.
+pub fn umbrella_sync_state_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(UMBRELLA_SYNC_STATE_PATH)
+}
+
+/// Loads the persisted umbrella sync state from disk if it exists.
+pub fn load_sync_state(workspace_root: &Path) -> Result<Option<UmbrellaSyncState>, std::io::Error> {
+    let path = umbrella_sync_state_path(workspace_root);
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Persists umbrella sync state to disk.
+pub fn write_sync_state(
+    workspace_root: &Path,
+    state: &UmbrellaSyncState,
+) -> Result<(), std::io::Error> {
+    let path = umbrella_sync_state_path(workspace_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(state)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    fs::write(path, bytes)
+}
+
+/// Builds persisted umbrella sync state from the current full-catalog observation.
+pub fn build_sync_state(
+    run_id: impl Into<String>,
+    git_commit: Option<String>,
+    catalog: &DesiredCatalog,
+    registry: &[RegistryObservation],
+    docs: &[DocsRsObservation],
+    generated_readme: String,
+) -> Result<UmbrellaSyncState, std::io::Error> {
+    let generated_at = OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(UmbrellaSyncState {
+        schema_version: 1,
+        run_id: run_id.into(),
+        generated_at,
+        git_commit,
+        generated_readme,
+        catalog: catalog.clone(),
+        registry: registry.to_vec(),
+        docs: docs.to_vec(),
+    })
+}
+
+/// Returns whether a persisted umbrella sync state still matches current local inputs.
+pub fn sync_state_matches_workspace(
+    state: &UmbrellaSyncState,
+    current_git_commit: Option<&str>,
+    catalog: &DesiredCatalog,
+) -> Result<bool, serde_json::Error> {
+    let catalog_matches = serde_json::to_vec(catalog)? == serde_json::to_vec(&state.catalog)?;
+    let git_matches = state.git_commit.as_deref() == current_git_commit;
+    Ok(catalog_matches && git_matches)
+}
+
 fn section_entries(catalog: &DesiredCatalog, section: CatalogSection) -> Vec<&CatalogPackage> {
     let mut entries: Vec<_> = catalog
         .packages
@@ -171,19 +244,23 @@ fn docs_cell(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, fs, path::PathBuf};
 
     use semver::Version;
+    use tempfile::tempdir;
 
-    use super::render_readme;
+    use super::{
+        build_sync_state, load_sync_state, render_readme, sync_readme,
+        sync_state_matches_workspace, umbrella_sync_state_path, write_sync_state,
+    };
     use crate::model::{
         CatalogPackage, CatalogSection, DesiredCatalog, DocsPolicy, DocsRsObservation,
-        DocsRsStatus, RegistryObservation, RegistryStatus, UmbrellaPolicy, Visibility,
+        DocsRsStatus, RegistryFreshness, RegistryObservation, RegistryObservationSource,
+        RegistryStatus, UmbrellaPolicy, Visibility,
     };
 
-    #[test]
-    fn renders_pending_and_available_docs_rows() {
-        let catalog = DesiredCatalog {
+    fn catalog() -> DesiredCatalog {
+        DesiredCatalog {
             catalog_version: 1,
             umbrella_package: "mfm-docs".into(),
             packages: vec![
@@ -214,26 +291,28 @@ mod tests {
                     notes: String::new(),
                 },
             ],
-        };
+        }
+    }
+
+    fn registry_observation(package: &str) -> RegistryObservation {
+        RegistryObservation {
+            package: package.into(),
+            status: RegistryStatus::Present,
+            latest_version: Some(Version::parse("0.1.0").expect("version")),
+            exact_version_present: true,
+            source: RegistryObservationSource::Index,
+            freshness: RegistryFreshness::Fresh,
+            observed_at: Some("2026-03-09T00:00:00Z".into()),
+            diagnostic_code: None,
+        }
+    }
+
+    #[test]
+    fn renders_pending_and_available_docs_rows() {
+        let catalog = catalog();
         let mut registry = BTreeMap::new();
-        registry.insert(
-            "mfm-machine".into(),
-            RegistryObservation {
-                package: "mfm-machine".into(),
-                status: RegistryStatus::Present,
-                latest_version: Some(Version::parse("0.1.0").expect("version")),
-                exact_version_present: true,
-            },
-        );
-        registry.insert(
-            "mfm-sdk".into(),
-            RegistryObservation {
-                package: "mfm-sdk".into(),
-                status: RegistryStatus::Present,
-                latest_version: Some(Version::parse("0.1.0").expect("version")),
-                exact_version_present: true,
-            },
-        );
+        registry.insert("mfm-machine".into(), registry_observation("mfm-machine"));
+        registry.insert("mfm-sdk".into(), registry_observation("mfm-sdk"));
         let mut docs = BTreeMap::new();
         docs.insert(
             "mfm-machine".into(),
@@ -257,5 +336,54 @@ mod tests {
         let rendered = render_readme(&catalog, &registry, &docs);
         assert!(rendered.contains("<https://docs.rs/mfm-machine>"));
         assert!(rendered.contains("| `mfm-sdk` | sdk | pending | `crates/sdk` |"));
+    }
+
+    #[test]
+    fn writes_and_loads_sync_state() {
+        let dir = tempdir().expect("tempdir");
+        let catalog = catalog();
+        let registry = vec![registry_observation("mfm-machine")];
+        let docs = vec![DocsRsObservation {
+            package: "mfm-machine".into(),
+            status: DocsRsStatus::Available,
+            latest_available_version: Some(Version::parse("0.1.0").expect("version")),
+            exact_version_available: true,
+        }];
+        let state = build_sync_state(
+            "run_1",
+            Some("abc123".into()),
+            &catalog,
+            &registry,
+            &docs,
+            "# mfm-docs\n".into(),
+        )
+        .expect("build state");
+
+        write_sync_state(dir.path(), &state).expect("write state");
+        let loaded = load_sync_state(dir.path())
+            .expect("load state")
+            .expect("state exists");
+
+        assert_eq!(loaded.run_id, "run_1");
+        assert_eq!(umbrella_sync_state_path(dir.path()), {
+            let mut path = PathBuf::from(dir.path());
+            path.push(".mfm/publish-docs/umbrella-sync.json");
+            path
+        });
+        assert!(sync_state_matches_workspace(&loaded, Some("abc123"), &catalog).expect("match"));
+        assert!(!sync_state_matches_workspace(&loaded, Some("def456"), &catalog).expect("match"));
+    }
+
+    #[test]
+    fn sync_readme_writes_only_when_content_changes() {
+        let dir = tempdir().expect("tempdir");
+        let docs_dir = dir.path().join("crates/docs");
+        fs::create_dir_all(&docs_dir).expect("create docs dir");
+        fs::write(docs_dir.join("README.md"), "old").expect("write readme");
+
+        let changed = sync_readme(dir.path(), "new").expect("sync readme");
+        assert!(changed);
+        let changed = sync_readme(dir.path(), "new").expect("sync readme");
+        assert!(!changed);
     }
 }

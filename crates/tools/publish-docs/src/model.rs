@@ -231,6 +231,28 @@ pub enum RegistryStatus {
     InvalidResponse,
 }
 
+/// Source used to obtain registry visibility data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryObservationSource {
+    /// The crates.io sparse index.
+    Index,
+    /// The crates.io HTTP API.
+    Api,
+}
+
+/// Freshness classification for registry visibility data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryFreshness {
+    /// Data was fetched or revalidated during the current run.
+    Fresh,
+    /// Data came from cache and was not refreshed successfully during the current run.
+    Cached,
+    /// No usable registry data was available.
+    Unavailable,
+}
+
 /// Normalized remote registry facts for one package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryObservation {
@@ -242,6 +264,29 @@ pub struct RegistryObservation {
     pub latest_version: Option<Version>,
     /// Whether the exact local version is already present remotely.
     pub exact_version_present: bool,
+    /// Source used to obtain the observation.
+    pub source: RegistryObservationSource,
+    /// Freshness of the observation.
+    pub freshness: RegistryFreshness,
+    /// RFC3339 timestamp for the observation, if available.
+    pub observed_at: Option<String>,
+    /// Stable sanitized diagnostic code, if any.
+    pub diagnostic_code: Option<String>,
+}
+
+impl RegistryObservation {
+    /// Returns whether the observation is fresh enough to authorize planner decisions.
+    pub fn is_authoritative(&self) -> bool {
+        matches!(self.source, RegistryObservationSource::Index)
+            && matches!(self.freshness, RegistryFreshness::Fresh)
+    }
+
+    /// Returns whether the exact local version is authoritatively visible in the registry.
+    pub fn exact_version_visible_for_planning(&self) -> bool {
+        self.is_authoritative()
+            && matches!(self.status, RegistryStatus::Present)
+            && self.exact_version_present
+    }
 }
 
 /// docs.rs availability status for a package version.
@@ -389,6 +434,27 @@ pub struct SyncUmbrellaResult {
     pub changed: bool,
     /// Workspace-relative path that was synced.
     pub path: String,
+}
+
+/// Persisted local umbrella sync state used by plan/apply to avoid full-catalog fanout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UmbrellaSyncState {
+    /// Schema version for machine-readable consumers.
+    pub schema_version: u32,
+    /// Stable run identifier that produced the sync state.
+    pub run_id: String,
+    /// RFC3339 timestamp when the sync state was generated.
+    pub generated_at: String,
+    /// Current git commit when the sync state was produced, if available.
+    pub git_commit: Option<String>,
+    /// Current README content rendered from the catalog and remote observations.
+    pub generated_readme: String,
+    /// Full desired-state catalog used to render the README.
+    pub catalog: DesiredCatalog,
+    /// Full-catalog registry observations used to render the README.
+    pub registry: Vec<RegistryObservation>,
+    /// Full-catalog docs.rs observations used to render the README.
+    pub docs: Vec<DocsRsObservation>,
 }
 
 /// Result for an explicit yank request.

@@ -1,51 +1,41 @@
-use std::time::Duration;
-
 use crate::model::{
-    CatalogPackage, DocsPolicy, DocsRsObservation, DocsRsStatus, LocalPackage, RegistryObservation,
+    CatalogPackage, DocsPolicy, DocsRsObservation, DocsRsStatus, LocalPackage, RegistryFreshness,
+    RegistryObservation, RegistryStatus,
 };
-use tokio::task::JoinSet;
+use crate::remote::http::{HttpExecutor, HttpExecutorConfig};
+use crate::remote::observer::observe_many_ordered;
 
 const DEFAULT_DOCS_RS_BASE: &str = "https://docs.rs";
 
-/// Simple docs.rs observer for versioned page availability.
+/// docs.rs observer for versioned page availability.
 #[derive(Debug, Clone)]
 pub struct DocsRsClient {
-    client: reqwest::Client,
+    http: HttpExecutor,
     base_url: String,
 }
 
 impl DocsRsClient {
     /// Builds the default docs.rs observer.
     pub fn new() -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder()
-            .user_agent(concat!(
-                env!("CARGO_PKG_NAME"),
-                "/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(10))
-            .build()?;
         Ok(Self {
-            client,
+            http: HttpExecutor::new(HttpExecutorConfig::default())?,
             base_url: DEFAULT_DOCS_RS_BASE.to_string(),
         })
+    }
+
+    /// Builds an observer with an explicit executor.
+    pub fn with_http(http: HttpExecutor, base_url: impl Into<String>) -> Self {
+        Self {
+            http,
+            base_url: base_url.into(),
+        }
     }
 
     /// Builds an observer targeting a custom base URL. Intended for tests.
     #[cfg(test)]
     pub fn with_base_url(base_url: impl Into<String>) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder()
-            .user_agent(concat!(
-                env!("CARGO_PKG_NAME"),
-                "/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(10))
-            .build()?;
         Ok(Self {
-            client,
+            http: HttpExecutor::new(HttpExecutorConfig::default())?,
             base_url: base_url.into(),
         })
     }
@@ -67,10 +57,7 @@ impl DocsRsClient {
         }
 
         match registry.status {
-            crate::model::RegistryStatus::TemporaryError
-            | crate::model::RegistryStatus::RateLimited
-            | crate::model::RegistryStatus::AuthError
-            | crate::model::RegistryStatus::InvalidResponse => {
+            RegistryStatus::AuthError | RegistryStatus::InvalidResponse => {
                 return DocsRsObservation {
                     package: local.name.clone(),
                     status: DocsRsStatus::TemporaryError,
@@ -78,10 +65,30 @@ impl DocsRsClient {
                     exact_version_available: false,
                 };
             }
-            crate::model::RegistryStatus::Absent | crate::model::RegistryStatus::Present => {}
+            RegistryStatus::TemporaryError | RegistryStatus::RateLimited => {
+                return DocsRsObservation {
+                    package: local.name.clone(),
+                    status: DocsRsStatus::TemporaryError,
+                    latest_available_version: None,
+                    exact_version_available: false,
+                };
+            }
+            RegistryStatus::Absent | RegistryStatus::Present => {}
         }
 
-        if !registry.exact_version_present {
+        if matches!(
+            registry.freshness,
+            RegistryFreshness::Cached | RegistryFreshness::Unavailable
+        ) {
+            return DocsRsObservation {
+                package: local.name.clone(),
+                status: DocsRsStatus::TemporaryError,
+                latest_available_version: None,
+                exact_version_available: false,
+            };
+        }
+
+        if !registry.exact_version_visible_for_planning() {
             return DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::Absent,
@@ -96,19 +103,21 @@ impl DocsRsClient {
             local.name,
             local.version
         );
-        let response = match self.client.get(url).send().await {
-            Ok(response) => response,
-            Err(_) => {
-                return DocsRsObservation {
-                    package: local.name.clone(),
-                    status: DocsRsStatus::TemporaryError,
-                    latest_available_version: None,
-                    exact_version_available: false,
-                };
-            }
+        let host = self.http.host_for_url(&url);
+        let Some(result) = self
+            .http
+            .execute(&host, || self.http.client().get(url.clone()))
+            .await
+        else {
+            return DocsRsObservation {
+                package: local.name.clone(),
+                status: DocsRsStatus::TemporaryError,
+                latest_available_version: None,
+                exact_version_available: false,
+            };
         };
 
-        let status = response.status();
+        let status = result.response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return DocsRsObservation {
                 package: local.name.clone(),
@@ -117,7 +126,7 @@ impl DocsRsClient {
                 exact_version_available: false,
             };
         }
-        if status.is_server_error() {
+        if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::TemporaryError,
@@ -134,7 +143,7 @@ impl DocsRsClient {
             };
         }
 
-        let body = match response.text().await {
+        let body = match result.response.text().await {
             Ok(body) => body,
             Err(_) => {
                 return DocsRsObservation {
@@ -164,35 +173,25 @@ impl DocsRsClient {
         }
     }
 
-    /// Observes docs.rs for many packages in parallel while preserving input order.
+    /// Observes docs.rs for many packages while preserving input order.
     pub async fn observe_packages(
         &self,
         inputs: &[(&LocalPackage, &CatalogPackage, &RegistryObservation)],
     ) -> Vec<DocsRsObservation> {
-        let mut tasks = JoinSet::new();
-        for (index, (local, catalog, registry)) in inputs.iter().enumerate() {
+        let inputs = inputs
+            .iter()
+            .map(|(local, catalog, registry)| {
+                ((*local).clone(), (*catalog).clone(), (*registry).clone())
+            })
+            .collect::<Vec<_>>();
+        observe_many_ordered(inputs, self.http.max_in_flight(), {
             let client = self.clone();
-            let local = (*local).clone();
-            let catalog = (*catalog).clone();
-            let registry = (*registry).clone();
-            tasks.spawn(async move {
-                (
-                    index,
-                    client.observe_package(&local, &catalog, &registry).await,
-                )
-            });
-        }
-
-        let mut observations = vec![None; inputs.len()];
-        while let Some(result) = tasks.join_next().await {
-            let (index, observation) = result.expect("observation task panicked");
-            observations[index] = Some(observation);
-        }
-
-        observations
-            .into_iter()
-            .map(|observation| observation.expect("all observation slots filled"))
-            .collect()
+            move |(local, catalog, registry)| {
+                let client = client.clone();
+                async move { client.observe_package(&local, &catalog, &registry).await }
+            }
+        })
+        .await
     }
 }
 
@@ -206,8 +205,8 @@ mod tests {
 
     use super::DocsRsClient;
     use crate::model::{
-        CatalogPackage, CatalogSection, DocsPolicy, DocsRsStatus, LocalPackage,
-        RegistryObservation, RegistryStatus, UmbrellaPolicy, Visibility,
+        CatalogPackage, CatalogSection, DocsPolicy, DocsRsStatus, LocalPackage, RegistryFreshness,
+        RegistryObservation, RegistryObservationSource, RegistryStatus, UmbrellaPolicy, Visibility,
     };
 
     fn local_package() -> LocalPackage {
@@ -241,6 +240,19 @@ mod tests {
         }
     }
 
+    fn fresh_present_registry() -> RegistryObservation {
+        RegistryObservation {
+            package: "mfm-machine".into(),
+            status: RegistryStatus::Present,
+            latest_version: Some(Version::parse("0.1.0").expect("version")),
+            exact_version_present: true,
+            source: RegistryObservationSource::Index,
+            freshness: RegistryFreshness::Fresh,
+            observed_at: None,
+            diagnostic_code: None,
+        }
+    }
+
     #[tokio::test]
     async fn pending_when_registry_present_but_docs_page_missing() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -261,17 +273,23 @@ mod tests {
             .observe_package(
                 &local_package(),
                 &catalog_package(),
-                &RegistryObservation {
-                    package: "mfm-machine".into(),
-                    status: RegistryStatus::Present,
-                    latest_version: Some(Version::parse("0.1.0").expect("version")),
-                    exact_version_present: true,
-                },
+                &fresh_present_registry(),
             )
             .await;
         server.join().expect("server");
 
         assert!(matches!(observation.status, DocsRsStatus::Pending));
+    }
+
+    #[tokio::test]
+    async fn treats_cached_registry_state_as_temporary_error() {
+        let client = DocsRsClient::with_base_url("http://127.0.0.1:1").expect("client");
+        let mut registry = fresh_present_registry();
+        registry.freshness = RegistryFreshness::Cached;
+        let observation = client
+            .observe_package(&local_package(), &catalog_package(), &registry)
+            .await;
+        assert!(matches!(observation.status, DocsRsStatus::TemporaryError));
     }
 
     #[tokio::test]
@@ -297,12 +315,7 @@ mod tests {
             .observe_package(
                 &local_package(),
                 &catalog_package(),
-                &RegistryObservation {
-                    package: "mfm-machine".into(),
-                    status: RegistryStatus::Present,
-                    latest_version: Some(Version::parse("0.1.0").expect("version")),
-                    exact_version_present: true,
-                },
+                &fresh_present_registry(),
             )
             .await;
         server.join().expect("server");

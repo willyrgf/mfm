@@ -87,8 +87,9 @@ mod tests {
     use super::write_run_artifacts;
     use crate::model::{
         CatalogPackage, CatalogSection, DesiredCatalog, DocsPolicy, DocsRsStatus, Mode, Plan,
-        PlanAction, PlannedPackage, PublishWave, RegistryObservation, RegistryStatus,
-        SummaryCounts, UmbrellaPolicy, Visibility, WavePackage, WorkspaceState,
+        PlanAction, PlannedPackage, PublishWave, RegistryFreshness, RegistryObservation,
+        RegistryObservationSource, RegistryStatus, SummaryCounts, UmbrellaPolicy, Visibility,
+        WavePackage, WorkspaceState,
     };
 
     #[test]
@@ -129,6 +130,10 @@ mod tests {
             status: RegistryStatus::Absent,
             latest_version: None,
             exact_version_present: false,
+            source: RegistryObservationSource::Index,
+            freshness: RegistryFreshness::Fresh,
+            observed_at: Some("2026-03-09T00:00:00Z".into()),
+            diagnostic_code: None,
         }];
         let docs = vec![crate::model::DocsRsObservation {
             package: "mfm-machine".into(),

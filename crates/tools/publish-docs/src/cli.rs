@@ -6,6 +6,9 @@ use crate::model::OutputFormat;
 #[derive(Debug, Parser)]
 #[command(name = "mfm-publish-docs")]
 #[command(about = "Planner, reconciler, and lifecycle tool for the docs.rs publish wave")]
+#[command(
+    after_help = "Logging: use MFM_LOG (or LOG_LEVEL / RUST_LOG) to set the filter. Use MFM_LOG_FORMAT / LOG_FORMAT for text or json logs."
+)]
 #[command(version)]
 pub struct Cli {
     /// Output format for command responses.

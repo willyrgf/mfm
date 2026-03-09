@@ -7,8 +7,8 @@ use crate::{
     error::PublishDocsError,
     model::{
         DesiredCatalog, DocsPolicy, DocsRsObservation, DocsRsStatus, Mode, Plan, PlanAction,
-        PlannedPackage, RegistryObservation, RegistryStatus, ReleaseLedger, SummaryCounts,
-        WorkspaceState,
+        PlannedPackage, RegistryFreshness, RegistryObservation, RegistryObservationSource,
+        RegistryStatus, ReleaseLedger, SummaryCounts, WorkspaceState,
     },
     workspace::selected_packages,
 };
@@ -28,7 +28,7 @@ pub fn build_plan(
     registry_observations: &[RegistryObservation],
     docs_observations: &[DocsRsObservation],
     changed_since_release: &BTreeMap<String, bool>,
-    umbrella_changed: bool,
+    umbrella_synced: bool,
 ) -> Result<Plan, PublishDocsError> {
     let registry_by_name: BTreeMap<_, _> = registry_observations
         .iter()
@@ -82,7 +82,7 @@ pub fn build_plan(
                 .filter(|dependency| {
                     registry_by_name
                         .get(dependency.as_str())
-                        .map(|observation| !observation.exact_version_present)
+                        .map(|observation| !observation.exact_version_visible_for_planning())
                         .unwrap_or(true)
                 })
                 .cloned()
@@ -98,7 +98,7 @@ pub fn build_plan(
                 docs_status,
                 changed,
                 !blocking_dependencies.is_empty(),
-                umbrella_changed,
+                umbrella_synced,
             );
 
             PlannedPackage {
@@ -136,8 +136,65 @@ fn classify_action(
     docs_status: Option<DocsRsStatus>,
     changed_since_release: bool,
     has_blocking_dependencies: bool,
-    umbrella_changed: bool,
+    umbrella_synced: bool,
 ) -> (PlanAction, String) {
+    if package_name == umbrella_package && !umbrella_synced {
+        return (
+            PlanAction::RefreshUmbrella,
+            "umbrella-sync-required".to_string(),
+        );
+    }
+
+    if !matches!(remote.source, RegistryObservationSource::Index) {
+        return match remote.status {
+            RegistryStatus::AuthError => {
+                (PlanAction::ManualReview, "registry-auth-error".to_string())
+            }
+            RegistryStatus::InvalidResponse => (
+                PlanAction::ManualReview,
+                "registry-invalid-response".to_string(),
+            ),
+            RegistryStatus::RateLimited => (
+                PlanAction::WaitRegistry,
+                "registry-rate-limited".to_string(),
+            ),
+            RegistryStatus::TemporaryError | RegistryStatus::Absent | RegistryStatus::Present => (
+                PlanAction::WaitRegistry,
+                "registry-refresh-failed".to_string(),
+            ),
+        };
+    }
+
+    match remote.freshness {
+        RegistryFreshness::Cached => {
+            return (PlanAction::WaitRegistry, "registry-cached-only".to_string());
+        }
+        RegistryFreshness::Unavailable => match remote.status {
+            RegistryStatus::RateLimited => {
+                return (
+                    PlanAction::WaitRegistry,
+                    "registry-rate-limited".to_string(),
+                );
+            }
+            RegistryStatus::TemporaryError | RegistryStatus::Absent | RegistryStatus::Present => {
+                return (
+                    PlanAction::WaitRegistry,
+                    "registry-refresh-failed".to_string(),
+                );
+            }
+            RegistryStatus::AuthError => {
+                return (PlanAction::ManualReview, "registry-auth-error".to_string());
+            }
+            RegistryStatus::InvalidResponse => {
+                return (
+                    PlanAction::ManualReview,
+                    "registry-invalid-response".to_string(),
+                );
+            }
+        },
+        RegistryFreshness::Fresh => {}
+    }
+
     match remote.status {
         RegistryStatus::RateLimited => {
             return (
@@ -147,8 +204,8 @@ fn classify_action(
         }
         RegistryStatus::TemporaryError => {
             return (
-                PlanAction::ManualReview,
-                "registry-temporary-error".to_string(),
+                PlanAction::WaitRegistry,
+                "registry-refresh-failed".to_string(),
             );
         }
         RegistryStatus::AuthError => {
@@ -186,14 +243,7 @@ fn classify_action(
         }
     }
 
-    if remote.exact_version_present {
-        if package_name == umbrella_package && umbrella_changed {
-            return (
-                PlanAction::NeedsVersionBump,
-                "umbrella-content-changed".to_string(),
-            );
-        }
-
+    if remote.exact_version_visible_for_planning() {
         if changed_since_release {
             return (
                 PlanAction::NeedsVersionBump,
@@ -228,13 +278,6 @@ fn classify_action(
         }
 
         return (PlanAction::Noop, "exact-version-present".to_string());
-    }
-
-    if package_name == umbrella_package && umbrella_changed {
-        return (
-            PlanAction::RefreshUmbrella,
-            "umbrella-content-changed".to_string(),
-        );
     }
 
     if has_blocking_dependencies {
@@ -275,9 +318,28 @@ mod tests {
     use super::{build_plan, summarize_plan};
     use crate::model::{
         CatalogPackage, CatalogSection, DesiredCatalog, DocsPolicy, DocsRsObservation,
-        DocsRsStatus, LocalPackage, Mode, PlanAction, RegistryObservation, RegistryStatus,
-        ReleaseLedger, UmbrellaPolicy, Visibility, WorkspaceState,
+        DocsRsStatus, LocalPackage, Mode, PlanAction, RegistryFreshness, RegistryObservation,
+        RegistryObservationSource, RegistryStatus, ReleaseLedger, UmbrellaPolicy, Visibility,
+        WorkspaceState,
     };
+
+    fn registry_observation(
+        package: &str,
+        status: RegistryStatus,
+        latest_version: Option<Version>,
+        exact_version_present: bool,
+    ) -> RegistryObservation {
+        RegistryObservation {
+            package: package.into(),
+            status,
+            latest_version,
+            exact_version_present,
+            source: RegistryObservationSource::Index,
+            freshness: RegistryFreshness::Fresh,
+            observed_at: Some("2026-03-09T00:00:00Z".into()),
+            diagnostic_code: None,
+        }
+    }
 
     fn catalog() -> DesiredCatalog {
         DesiredCatalog {
@@ -352,18 +414,8 @@ mod tests {
             ],
         };
         let observations = vec![
-            RegistryObservation {
-                package: "mfm-machine".into(),
-                status: RegistryStatus::Absent,
-                latest_version: None,
-                exact_version_present: false,
-            },
-            RegistryObservation {
-                package: "mfm-sdk".into(),
-                status: RegistryStatus::Absent,
-                latest_version: None,
-                exact_version_present: false,
-            },
+            registry_observation("mfm-machine", RegistryStatus::Absent, None, false),
+            registry_observation("mfm-sdk", RegistryStatus::Absent, None, false),
         ];
 
         let plan = build_plan(
@@ -404,12 +456,12 @@ mod tests {
             selected: vec!["mfm-machine".into()],
             packages: vec![local_package("mfm-machine", "crates/machine", Vec::new())],
         };
-        let observations = vec![RegistryObservation {
-            package: "mfm-machine".into(),
-            status: RegistryStatus::Present,
-            latest_version: Some(Version::parse("0.1.0").expect("version")),
-            exact_version_present: true,
-        }];
+        let observations = vec![registry_observation(
+            "mfm-machine",
+            RegistryStatus::Present,
+            Some(Version::parse("0.1.0").expect("version")),
+            true,
+        )];
         let docs = vec![DocsRsObservation {
             package: "mfm-machine".into(),
             status: DocsRsStatus::Pending,
@@ -446,12 +498,12 @@ mod tests {
             selected: vec!["mfm-machine".into()],
             packages: vec![local_package("mfm-machine", "crates/machine", Vec::new())],
         };
-        let observations = vec![RegistryObservation {
-            package: "mfm-machine".into(),
-            status: RegistryStatus::Present,
-            latest_version: Some(Version::parse("0.1.0").expect("version")),
-            exact_version_present: true,
-        }];
+        let observations = vec![registry_observation(
+            "mfm-machine",
+            RegistryStatus::Present,
+            Some(Version::parse("0.1.0").expect("version")),
+            true,
+        )];
         let docs = vec![DocsRsObservation {
             package: "mfm-machine".into(),
             status: DocsRsStatus::Available,
@@ -489,12 +541,12 @@ mod tests {
             selected: vec!["mfm-machine".into()],
             packages: vec![local_package("mfm-machine", "crates/machine", Vec::new())],
         };
-        let observations = vec![RegistryObservation {
-            package: "mfm-machine".into(),
-            status: RegistryStatus::Present,
-            latest_version: Some(Version::parse("0.2.0").expect("version")),
-            exact_version_present: false,
-        }];
+        let observations = vec![registry_observation(
+            "mfm-machine",
+            RegistryStatus::Present,
+            Some(Version::parse("0.2.0").expect("version")),
+            false,
+        )];
 
         let plan = build_plan(
             "run_1".into(),
@@ -526,12 +578,12 @@ mod tests {
             selected: vec!["mfm-docs".into()],
             packages: vec![local_package("mfm-docs", "crates/docs", Vec::new())],
         };
-        let observations = vec![RegistryObservation {
-            package: "mfm-docs".into(),
-            status: RegistryStatus::Absent,
-            latest_version: None,
-            exact_version_present: false,
-        }];
+        let observations = vec![registry_observation(
+            "mfm-docs",
+            RegistryStatus::Absent,
+            None,
+            false,
+        )];
 
         let plan = build_plan(
             "run_1".into(),
@@ -549,10 +601,86 @@ mod tests {
             &observations,
             &[],
             &BTreeMap::new(),
-            true,
+            false,
         )
         .expect("plan");
 
         assert_eq!(plan.packages[0].action, PlanAction::RefreshUmbrella);
+    }
+
+    #[test]
+    fn classifies_cached_registry_visibility_as_wait_registry() {
+        let workspace = WorkspaceState {
+            selected: vec!["mfm-machine".into()],
+            packages: vec![local_package("mfm-machine", "crates/machine", Vec::new())],
+        };
+        let observations = vec![RegistryObservation {
+            freshness: RegistryFreshness::Cached,
+            ..registry_observation(
+                "mfm-machine",
+                RegistryStatus::Present,
+                Some(Version::parse("0.1.0").expect("version")),
+                true,
+            )
+        }];
+
+        let plan = build_plan(
+            "run_1".into(),
+            "docs-rs-wave-1".into(),
+            Mode::Plan,
+            None,
+            None,
+            None,
+            &workspace,
+            &catalog(),
+            &ReleaseLedger {
+                schema_version: 1,
+                packages: BTreeMap::new(),
+            },
+            &observations,
+            &[],
+            &BTreeMap::new(),
+            false,
+        )
+        .expect("plan");
+
+        assert_eq!(plan.packages[0].action, PlanAction::WaitRegistry);
+        assert_eq!(plan.packages[0].reason, "registry-cached-only");
+    }
+
+    #[test]
+    fn classifies_unavailable_registry_refresh_as_wait_registry() {
+        let workspace = WorkspaceState {
+            selected: vec!["mfm-machine".into()],
+            packages: vec![local_package("mfm-machine", "crates/machine", Vec::new())],
+        };
+        let observations = vec![RegistryObservation {
+            freshness: RegistryFreshness::Unavailable,
+            diagnostic_code: Some("registry-timeout".into()),
+            ..registry_observation("mfm-machine", RegistryStatus::TemporaryError, None, false)
+        }];
+
+        let plan = build_plan(
+            "run_1".into(),
+            "docs-rs-wave-1".into(),
+            Mode::Plan,
+            None,
+            None,
+            None,
+            &workspace,
+            &catalog(),
+            &ReleaseLedger {
+                schema_version: 1,
+                packages: BTreeMap::new(),
+            },
+            &observations,
+            &[],
+            &BTreeMap::new(),
+            false,
+        )
+        .expect("plan");
+
+        assert_eq!(plan.packages[0].action, PlanAction::WaitRegistry);
+        assert_eq!(plan.packages[0].reason, "registry-refresh-failed");
     }
 }
