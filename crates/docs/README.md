@@ -36,17 +36,17 @@ The live runtime inventory still lives in the repository docs:
 
 | Package | Role | docs.rs | Workspace Path |
 | --- | --- | --- | --- |
-| `mfm_core` | Security-sensitive keystore, config, and primitives. | <https://docs.rs/mfm_core> | `crates/core` |
 | `mfm-evm-core` | EVM ABI, encoding, hex, and transaction support types. | <https://docs.rs/mfm-evm-core> | `crates/evm-core` |
+| `mfm_core` | Security-sensitive keystore, config, and primitives. | pending | `crates/core` |
 
 ## Shared States
 
 | Package | Role | docs.rs | Workspace Path |
 | --- | --- | --- | --- |
-| `mfm-state-common` | Cross-domain reusable execution states. | pending | `crates/states/common` |
 | `mfm-evm-runtime` | Shared EVM read and write runtime states. | pending | `crates/evm-runtime` |
-| `mfm-state-keystore` | Shared keystore administration and transaction states. | pending | `crates/states/keystore` |
 | `mfm-state-aave-v3` | Shared Aave V3 deploy and configure states. | pending | `crates/states/aave-v3` |
+| `mfm-state-common` | Cross-domain reusable execution states. | pending | `crates/states/common` |
+| `mfm-state-keystore` | Shared keystore administration and transaction states. | pending | `crates/states/keystore` |
 
 ## Ops
 
@@ -54,15 +54,15 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 
 | Package | Role | Workspace Path |
 | --- | --- | --- |
-| `mfm-op-keystore-shim` | Keystore compatibility shim types shared with state crates. | `crates/ops/keystore-op` |
-| `mfm-op-keystore-admin` | Keystore admin planner. | `crates/ops/keystore-admin-op` |
-| `mfm-op-keystore-tx` | Keystore transaction planner. | `crates/ops/keystore-tx-op` |
+| `mfm-op-aave-v3-origin-adapt` | Aave origin adaptation planner. | `crates/ops/aave-v3-origin-adapt-op` |
+| `mfm-op-evm-deploy-configure-validate` | EVM deploy/configure/validate planner. | `crates/ops/evm-deploy-configure-validate-op` |
 | `mfm-op-evm-read` | EVM read planner. | `crates/ops/evm-read-op` |
 | `mfm-op-evm-write` | EVM write planner. | `crates/ops/evm-write-op` |
-| `mfm-op-evm-deploy-configure-validate` | EVM deploy/configure/validate planner. | `crates/ops/evm-deploy-configure-validate-op` |
-| `mfm-op-portfolio-tracker` | Portfolio tracking planner. | `crates/ops/portfolio-tracker-op` |
+| `mfm-op-keystore-admin` | Keystore admin planner. | `crates/ops/keystore-admin-op` |
+| `mfm-op-keystore-shim` | Keystore compatibility shim types shared with state crates. | `crates/ops/keystore-op` |
+| `mfm-op-keystore-tx` | Keystore transaction planner. | `crates/ops/keystore-tx-op` |
 | `mfm-op-nix-app` | Nix app execution planner. | `crates/ops/nix-app-op` |
-| `mfm-op-aave-v3-origin-adapt` | Aave origin adaptation planner. | `crates/ops/aave-v3-origin-adapt-op` |
+| `mfm-op-portfolio-tracker` | Portfolio tracking planner. | `crates/ops/portfolio-tracker-op` |
 | `mfm-op-proof` | Proof-generation planner. | `crates/ops/proof-op` |
 
 ## Storages
@@ -70,8 +70,8 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | Package | Role | Workspace Path |
 | --- | --- | --- |
 | `mfm-artifact-store-fs` | Filesystem artifact store. | `crates/storages/artifact-store-fs` |
-| `mfm-artifact-store-secret` | Secret-wrapping artifact store. | `crates/storages/artifact-store-secret` |
 | `mfm-artifact-store-s3` | S3-backed artifact store. | `crates/storages/artifact-store-s3` |
+| `mfm-artifact-store-secret` | Secret-wrapping artifact store. | `crates/storages/artifact-store-secret` |
 | `mfm-event-store-mem` | In-memory event store. | `crates/storages/event-store-mem` |
 | `mfm-event-store-postgres` | PostgreSQL event store. | `crates/storages/event-store-postgres` |
 | `mfm-indexer` | Projection/indexing support. | `crates/storages/indexer` |
@@ -100,15 +100,13 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | Package | Role | Workspace Path |
 | --- | --- | --- |
 | `mfm` | CLI package and `mfm_cli` binary. | `bin/cli` |
-| `mfm-rest-api` | REST API package and `mfm_rest_api` binary. | `bin/rest-api` |
 | `mfm-app` | App-level registry and observability glue. | `crates/app` |
 | `mfm-architecture-verify` | Architecture contract verifier. | `crates/tools/architecture-verify` |
 | `mfm-integration-tests` | Workspace integration-test crate. | `tests/integration` |
+| `mfm-rest-api` | REST API package and `mfm_rest_api` binary. | `bin/rest-api` |
 
 ## Publishing Notes
 
 - Publish this crate after the first published docs.rs surface is live, then add links for later crates as they land.
 - Keep this page role-oriented and high-level; detailed inventories belong in the repository docs.
-- When a repo-local crate is published, add its `docs.rs` link here in the next release of `mfm-docs`.
 - The publish order is tracked in `crates/docs/publish-wave.json` and consumed by `nix run .#publish-docs`.
-- `nix run .#publish-docs` will auto-sync this README during `apply` when `mfm-docs` needs a fresh umbrella view; use `sync-umbrella` when you want to preview or commit the README update ahead of publish.

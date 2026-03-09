@@ -1,4 +1,14 @@
 {
   "schema_version": 1,
-  "packages": {}
+  "packages": {
+    "mfm-docs": [
+      {
+        "version": "0.1.0",
+        "git_commit": "2d628bb9d0d424d63c78d21813879b45d26ac82c",
+        "dirty": true,
+        "published_at": "2026-03-09T08:59:29.325225Z",
+        "registry": "crates-io"
+      }
+    ]
+  }
 }
