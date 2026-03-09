@@ -100,44 +100,6 @@ let
 
   mkUniqueId = id.mkUniqueId;
 
-  acquireSlotLock = pkgs.writeShellScript "acquire-slot-lock" ''
-    ${resolvedLoggingPrelude}
-
-    set -euo pipefail
-
-    LOCK_DIR="''${NIXFIED_EPHEMERAL_LOCK_DIR:-''${TMPDIR:-/tmp}}"
-    LOCK_PREFIX="${lockPrefix}"
-    if ! mkdir -p "$LOCK_DIR"; then
-      log_error "Unable to create ephemeral lock directory '$LOCK_DIR'"
-      exit 1
-    fi
-
-    for slot in $(seq 0 ${toString slotMax}); do
-      LOCK_FILE="$LOCK_DIR/$LOCK_PREFIX-$slot.lock"
-      FD=$((200 + slot))
-      if ! eval "exec $FD>\"$LOCK_FILE\""; then
-        continue
-      fi
-
-      if ${pkgs.flock}/bin/flock -n "$FD" 2>/dev/null; then
-        echo "export ${projectIdUpper}_EPHEMERAL_SLOT=$slot"
-        echo "export ${projectIdUpper}_SLOT_LOCK_FD=$FD"
-        echo "export ${slotVar}=$slot"
-        exit 0
-      else
-        eval "exec $FD>&-"
-      fi
-    done
-
-    log_error "All $((${toString slotMax} + 1)) ephemeral slots (0-${toString slotMax}) are in use"
-    echo "" >&2
-    echo "   This means $((${toString slotMax} + 1)) concurrent runs are already running." >&2
-    echo "   Wait for one to complete or check for stale locks:" >&2
-    echo "   ls -la $LOCK_DIR/$LOCK_PREFIX-*.lock" >&2
-    echo "" >&2
-    exit 1
-  '';
-
   releaseSlotLock = pkgs.writeShellScript "release-slot-lock" ''
     if [ -n "''${${projectIdUpper}_SLOT_LOCK_FD:-}" ]; then
       eval "exec ${refLockFd}>&-" 2>/dev/null || true
@@ -465,7 +427,40 @@ let
         export ${projectIdUpper}_SLOT_LOCK_FD=""
         log_info "Using pre-set slot: ''${${slotVar}} (no lock - caller managed)"
       else
-        if ! eval "$(${acquireSlotLock})"; then
+        LOCK_DIR="''${NIXFIED_EPHEMERAL_LOCK_DIR:-/tmp/nixfied-ephemeral-locks}"
+        LOCK_PREFIX="${lockPrefix}"
+        SLOT_ACQUIRED=0
+
+        if ! mkdir -p "$LOCK_DIR"; then
+          log_error "Unable to create ephemeral lock directory '$LOCK_DIR'"
+          exit 1
+        fi
+
+        for slot in $(seq 0 ${toString slotMax}); do
+          LOCK_FILE="$LOCK_DIR/$LOCK_PREFIX-$slot.lock"
+          FD=$((200 + slot))
+          if ! eval "exec $FD>\"$LOCK_FILE\""; then
+            continue
+          fi
+
+          if ${pkgs.flock}/bin/flock -n "$FD" 2>/dev/null; then
+            export ${projectIdUpper}_EPHEMERAL_SLOT="$slot"
+            export ${projectIdUpper}_SLOT_LOCK_FD="$FD"
+            export ${slotVar}="$slot"
+            SLOT_ACQUIRED=1
+            break
+          fi
+
+          eval "exec $FD>&-" 2>/dev/null || true
+        done
+
+        if [ "$SLOT_ACQUIRED" -ne 1 ]; then
+          log_error "All $((${toString slotMax} + 1)) ephemeral slots (0-${toString slotMax}) are in use"
+          echo "" >&2
+          echo "   This means $((${toString slotMax} + 1)) concurrent runs are already running." >&2
+          echo "   Wait for one to complete or check for stale locks:" >&2
+          echo "   ls -la $LOCK_DIR/$LOCK_PREFIX-*.lock" >&2
+          echo "" >&2
           exit 1
         fi
       fi
@@ -599,7 +594,6 @@ in
     mkEphemeralWrapper
     isEphemeral
     getEphemeralPaths
-    acquireSlotLock
     releaseSlotLock
     lockPrefix
     ;
