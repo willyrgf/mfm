@@ -201,7 +201,7 @@ Full-catalog remote observation is not part of normal publish gating.
 
 ### Publish gating for `mfm-docs`
 
-Publishing `mfm-docs` requires an explicit umbrella sync state produced by `sync-umbrella`.
+Publishing `mfm-docs` requires a fresh umbrella sync state.
 
 `sync-umbrella` will write a local sync artifact containing at least:
 
@@ -216,7 +216,15 @@ If `mfm-docs` is selected and the sync artifact is missing or stale, the planner
 
 - `action=refresh_umbrella`
 
-This keeps normal publish gating small and makes umbrella fanout explicit.
+`apply` / `resume` should treat that action as an internal prerequisite:
+
+- run the same full-catalog umbrella sync path automatically
+- persist the refreshed sync artifact
+- re-plan against the refreshed state
+
+If that auto-sync changes `crates/docs/README.md` and publish actions still remain, stop with an explicit “commit or pass --allow-dirty” error rather than silently bypassing the dirty-tree policy.
+
+This keeps normal publish gating small, makes umbrella fanout explicit, and still lets the default `nix run .#publish-docs` path self-heal when umbrella state is the only missing prerequisite.
 
 ## 8. Observability Reuse
 

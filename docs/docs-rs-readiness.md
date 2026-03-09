@@ -53,7 +53,8 @@ Notes:
 - Use `nix run .#publish-docs -- --dry-run` to validate the current ordered wave from `crates/docs/publish-wave.json`.
 - `publish-docs` now uses the crates.io sparse index as the primary registry signal for planning; transient or cached uncertainty is treated as `wait_registry`, not as permission to publish.
 - Normal `publish-docs` planning only observes the selected wave. Full-catalog registry observation now happens in `nix run .#publish-docs -- sync-umbrella`.
-- Run `nix run .#publish-docs -- sync-umbrella` before publishing `mfm-docs`; the `mfm-docs` publish step now requires a fresh matching umbrella-sync artifact instead of doing an implicit full-catalog sync during `apply`.
+- `nix run .#publish-docs` now auto-runs the umbrella sync during `apply`/`resume` when `mfm-docs` needs it, then re-plans against the refreshed sync artifact.
+- If that auto-sync updates `crates/docs/README.md` and publishable actions remain, commit the README first or rerun with `--allow-dirty`.
 - Publish `mfm-docs` after the first wave it links to, otherwise the landing page will contain avoidable `docs.rs` 404s.
 - Keep `mfm-app` out of the first publish wave; its dependency surface and end-user positioning still need curation.
 

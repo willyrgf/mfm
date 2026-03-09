@@ -34,6 +34,8 @@ use crate::{
 };
 
 const README_PATH: &str = "crates/docs/README.md";
+const AUTO_SYNC_ALLOW_DIRTY_MESSAGE: &str =
+    "umbrella README was updated during apply; commit crates/docs/README.md or rerun with --allow-dirty";
 
 /// Runs the selected CLI command and prints the final response.
 pub async fn run(cli: Cli) -> ExitCode {
@@ -133,16 +135,14 @@ async fn execute(cli: Cli) -> Result<CommandOutput, PublishDocsError> {
 
 async fn execute_plan_or_apply(cli: &Cli) -> Result<CommandOutput, PublishDocsError> {
     let mode = resolved_mode(cli);
-    let prepared = prepare_run(
-        cli,
-        mode,
-        PackageFilter {
-            from: cli.from.clone(),
-            only: cli.only.clone(),
-        },
-        None,
-    )
-    .await?;
+    let filter = PackageFilter {
+        from: cli.from.clone(),
+        only: cli.only.clone(),
+    };
+    let prepared = match mode {
+        Mode::Apply => prepare_apply_run(cli, mode, filter, None).await?,
+        _ => prepare_run(cli, mode, filter, None).await?,
+    };
 
     match mode {
         Mode::Plan => {
@@ -193,7 +193,7 @@ async fn execute_plan_or_apply(cli: &Cli) -> Result<CommandOutput, PublishDocsEr
 async fn execute_resume(cli: &Cli, args: &ResumeArgs) -> Result<CommandOutput, PublishDocsError> {
     let workspace_root = workspace_root_from_cli()?;
     let prior_plan = load_prior_plan(&workspace_root, &args.run_id)?;
-    let prepared = prepare_run(
+    let prepared = prepare_apply_run(
         cli,
         Mode::Resume,
         PackageFilter {
@@ -232,41 +232,8 @@ async fn execute_sync_umbrella(
     args: &SyncUmbrellaArgs,
 ) -> Result<CommandOutput, PublishDocsError> {
     let workspace_root = workspace_root_from_cli()?;
-    if !cli.allow_dirty {
-        ensure_clean_worktree(&workspace_root)?;
-    }
-
-    let wave = load_publish_wave(&workspace_root)?;
-    let workspace = load_workspace_state(&workspace_root, &wave.packages)?;
-    let catalog = load_desired_catalog(&workspace_root, &workspace)?;
-    let registry = observe_catalog_registry(&workspace_root, &workspace, &catalog).await?;
-    let docs = observe_catalog_docs(&workspace, &catalog, &registry).await?;
-    let generated_readme = generated_readme(&catalog, &registry, &docs);
-    let changed = load_current_readme(&workspace_root).unwrap_or_default() != generated_readme;
-    let run_id = new_run_id();
-    if changed && !args.check {
-        sync_readme(&workspace_root, &generated_readme)?;
-    }
-    if !args.check {
-        write_sync_state(
-            &workspace_root,
-            &build_sync_state(
-                run_id.clone(),
-                current_git_commit(&workspace_root)?,
-                &catalog,
-                &registry,
-                &docs,
-                generated_readme.clone(),
-            )?,
-        )?;
-    }
-
-    Ok(CommandOutput::SyncUmbrella(SyncUmbrellaResult {
-        schema_version: 1,
-        run_id,
-        changed,
-        path: README_PATH.to_string(),
-    }))
+    let sync = run_sync_umbrella(&workspace_root, cli.allow_dirty, args.check, true).await?;
+    Ok(CommandOutput::SyncUmbrella(sync))
 }
 
 async fn execute_yank(_cli: &Cli, args: &YankArgs) -> Result<CommandOutput, PublishDocsError> {
@@ -308,8 +275,43 @@ async fn prepare_run(
     filter: PackageFilter,
     resumed_from_run_id: Option<String>,
 ) -> Result<PreparedRun, PublishDocsError> {
+    prepare_run_with_options(cli, mode, filter, resumed_from_run_id, true).await
+}
+
+async fn prepare_apply_run(
+    cli: &Cli,
+    mode: Mode,
+    filter: PackageFilter,
+    resumed_from_run_id: Option<String>,
+) -> Result<PreparedRun, PublishDocsError> {
+    let mut prepared =
+        prepare_run_with_options(cli, mode, filter.clone(), resumed_from_run_id.clone(), true)
+            .await?;
+
+    if !plan_requires_umbrella_sync(&prepared.plan) {
+        return Ok(prepared);
+    }
+
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %prepared.plan.run_id,
+        "auto-syncing umbrella README before apply"
+    );
+    let sync = run_sync_umbrella(&prepared.workspace_root, cli.allow_dirty, false, false).await?;
+    prepared = prepare_run_with_options(cli, mode, filter, resumed_from_run_id, false).await?;
+    ensure_apply_can_continue_after_auto_sync(&prepared.plan, sync.changed, cli.allow_dirty)?;
+    Ok(prepared)
+}
+
+async fn prepare_run_with_options(
+    cli: &Cli,
+    mode: Mode,
+    filter: PackageFilter,
+    resumed_from_run_id: Option<String>,
+    enforce_clean_worktree: bool,
+) -> Result<PreparedRun, PublishDocsError> {
     let workspace_root = workspace_root_from_cli()?;
-    if !cli.allow_dirty {
+    if enforce_clean_worktree && !cli.allow_dirty {
         ensure_clean_worktree(&workspace_root)?;
     }
 
@@ -377,6 +379,75 @@ async fn prepare_run(
         generated_readme,
         ledger,
     })
+}
+
+async fn run_sync_umbrella(
+    workspace_root: &Path,
+    allow_dirty: bool,
+    check_only: bool,
+    enforce_clean_worktree: bool,
+) -> Result<SyncUmbrellaResult, PublishDocsError> {
+    if enforce_clean_worktree && !allow_dirty {
+        ensure_clean_worktree(workspace_root)?;
+    }
+
+    let wave = load_publish_wave(workspace_root)?;
+    let workspace = load_workspace_state(workspace_root, &wave.packages)?;
+    let catalog = load_desired_catalog(workspace_root, &workspace)?;
+    let registry = observe_catalog_registry(workspace_root, &workspace, &catalog).await?;
+    let docs = observe_catalog_docs(&workspace, &catalog, &registry).await?;
+    let generated_readme = generated_readme(&catalog, &registry, &docs);
+    let changed = load_current_readme(workspace_root).unwrap_or_default() != generated_readme;
+    let run_id = new_run_id();
+
+    if changed && !check_only {
+        sync_readme(workspace_root, &generated_readme)?;
+    }
+    if !check_only {
+        write_sync_state(
+            workspace_root,
+            &build_sync_state(
+                run_id.clone(),
+                current_git_commit(workspace_root)?,
+                &catalog,
+                &registry,
+                &docs,
+                generated_readme,
+            )?,
+        )?;
+    }
+
+    Ok(SyncUmbrellaResult {
+        schema_version: 1,
+        run_id,
+        changed,
+        path: README_PATH.to_string(),
+    })
+}
+
+fn plan_requires_umbrella_sync(plan: &Plan) -> bool {
+    plan.packages
+        .iter()
+        .any(|package| matches!(package.action, crate::model::PlanAction::RefreshUmbrella))
+}
+
+fn plan_has_publish_actions(plan: &Plan) -> bool {
+    plan.packages
+        .iter()
+        .any(|package| matches!(package.action, crate::model::PlanAction::Publish))
+}
+
+fn ensure_apply_can_continue_after_auto_sync(
+    plan: &Plan,
+    changed: bool,
+    allow_dirty: bool,
+) -> Result<(), PublishDocsError> {
+    if changed && !allow_dirty && plan_has_publish_actions(plan) {
+        return Err(PublishDocsError::CommandFailed {
+            message: AUTO_SYNC_ALLOW_DIRTY_MESSAGE.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn resolved_mode(cli: &Cli) -> Mode {
@@ -726,4 +797,67 @@ fn print_yank_text(result: &YankResult) {
         "YANK package={} version={} result={}",
         result.package, result.version, result.result
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use semver::Version;
+
+    use super::{
+        ensure_apply_can_continue_after_auto_sync, plan_has_publish_actions,
+        plan_requires_umbrella_sync, AUTO_SYNC_ALLOW_DIRTY_MESSAGE,
+    };
+    use crate::model::{Mode, Plan, PlanAction, PlannedPackage};
+
+    fn plan_with_actions(actions: &[PlanAction]) -> Plan {
+        Plan {
+            schema_version: 1,
+            run_id: "run_1".into(),
+            mode: Mode::Apply,
+            wave: "docs-rs-wave-1".into(),
+            selection_from: None,
+            selection_only: None,
+            resumed_from_run_id: None,
+            packages: actions
+                .iter()
+                .enumerate()
+                .map(|(index, action)| PlannedPackage {
+                    name: format!("pkg-{index}"),
+                    local_version: Version::parse("0.1.0").expect("version"),
+                    remote_version: None,
+                    docs_status: None,
+                    action: *action,
+                    reason: "test".into(),
+                    blocking_dependencies: Vec::new(),
+                    synthetic: false,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn detects_refresh_umbrella_actions() {
+        let plan = plan_with_actions(&[PlanAction::RefreshUmbrella, PlanAction::WaitRegistry]);
+        assert!(plan_requires_umbrella_sync(&plan));
+    }
+
+    #[test]
+    fn detects_publish_actions() {
+        let plan = plan_with_actions(&[PlanAction::Noop, PlanAction::Publish]);
+        assert!(plan_has_publish_actions(&plan));
+    }
+
+    #[test]
+    fn auto_sync_can_continue_when_no_publish_will_run() {
+        let plan = plan_with_actions(&[PlanAction::Noop]);
+        assert!(ensure_apply_can_continue_after_auto_sync(&plan, true, false).is_ok());
+    }
+
+    #[test]
+    fn auto_sync_requires_allow_dirty_when_publish_remains() {
+        let plan = plan_with_actions(&[PlanAction::Publish]);
+        let error =
+            ensure_apply_can_continue_after_auto_sync(&plan, true, false).expect_err("error");
+        assert_eq!(error.to_string(), AUTO_SYNC_ALLOW_DIRTY_MESSAGE);
+    }
 }

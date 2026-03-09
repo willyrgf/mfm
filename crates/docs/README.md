@@ -111,4 +111,4 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 - Keep this page role-oriented and high-level; detailed inventories belong in the repository docs.
 - When a repo-local crate is published, add its `docs.rs` link here in the next release of `mfm-docs`.
 - The publish order is tracked in `crates/docs/publish-wave.json` and consumed by `nix run .#publish-docs`.
-- Before publishing `mfm-docs`, run `nix run .#publish-docs -- sync-umbrella` so the umbrella README reflects the current published workspace surface.
+- `nix run .#publish-docs` will auto-sync this README during `apply` when `mfm-docs` needs a fresh umbrella view; use `sync-umbrella` when you want to preview or commit the README update ahead of publish.
