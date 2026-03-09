@@ -8,18 +8,14 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
-alloy-primitives = { workspace = true, features = ["k256"] }
-k256 = { version = "0.13", features = ["ecdsa"] }
 uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 zeroize = "1.7.0"
 rpassword = "7.0"
 regex = "1.0"
-url = { workspace = true }
 
 mfm-machine = { path = "../../machine" }
 mfm-collectors-local-keystore = { path = "../../collectors/local-keystore" }
 mfm-op-keystore = { package = "mfm-op-keystore-shim", path = "../../ops/keystore-op" }
 mfm-state-keystore = { path = "../../states/keystore" }
-mfm-evm-core = { path = "../../evm-core" }
 mfm_core = { path = "../../core" }

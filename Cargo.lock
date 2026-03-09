@@ -2000,11 +2000,9 @@ dependencies = [
 name = "mfm-collectors-exec"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "mfm-machine",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -2031,11 +2029,9 @@ dependencies = [
 name = "mfm-collectors-nix"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "mfm-machine",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -2044,7 +2040,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mfm-machine",
- "serde",
  "serde_json",
  "tokio",
  "uuid",
@@ -2104,8 +2099,6 @@ dependencies = [
  "alloy-primitives",
  "async-trait",
  "chrono",
- "hex",
- "k256",
  "mfm-collectors-evm",
  "mfm-evm-core",
  "mfm-machine",
@@ -2114,8 +2107,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "url",
- "zeroize",
 ]
 
 [[package]]
@@ -2284,7 +2275,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -2383,7 +2373,6 @@ name = "mfm-state-common"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "hex",
  "mfm-collectors-exec",
  "mfm-collectors-nix",
  "mfm-collectors-proof",
@@ -2399,7 +2388,6 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "async-trait",
- "chrono",
  "hex",
  "k256",
  "mfm-collectors-local-keystore",
@@ -2408,14 +2396,10 @@ dependencies = [
  "mfm-op-keystore-shim",
  "mfm-sdk",
  "mfm-state-common",
- "mfm_core",
- "regex",
- "rpassword",
  "serde",
  "serde_json",
  "url",
  "uuid",
- "zeroize",
 ]
 
 [[package]]
@@ -2462,13 +2446,10 @@ dependencies = [
 name = "mfm-transports-local-keystore"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
  "async-trait",
  "chrono",
  "hex",
- "k256",
  "mfm-collectors-local-keystore",
- "mfm-evm-core",
  "mfm-machine",
  "mfm-op-keystore-shim",
  "mfm-state-keystore",
@@ -2477,7 +2458,6 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
- "url",
  "uuid",
  "zeroize",
 ]

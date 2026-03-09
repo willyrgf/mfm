@@ -34,19 +34,6 @@ pub enum PublishDocsError {
     #[error("working tree has uncommitted changes; commit first or pass --allow-dirty")]
     DirtyWorkingTree,
 
-    /// The remote registry reported a version newer than the local package version.
-    #[error(
-        "remote version is newer than local package={package} local_version={local_version} remote_version={remote_version}"
-    )]
-    RemoteNewerThanLocal {
-        /// Package name.
-        package: String,
-        /// Local version string.
-        local_version: String,
-        /// Remote version string.
-        remote_version: String,
-    },
-
     /// A JSON payload could not be rendered.
     #[error("failed to render json output: {0}")]
     Json(#[from] serde_json::Error),

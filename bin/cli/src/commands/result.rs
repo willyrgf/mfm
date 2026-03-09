@@ -21,15 +21,6 @@ impl<T> CommandOutput<T> {
             message: None,
         }
     }
-
-    #[allow(dead_code)]
-    /// Builds a successful command output with an explicit text-mode message.
-    pub fn with_message(data: T, message: impl Into<String>) -> Self {
-        Self {
-            data,
-            message: Some(message.into()),
-        }
-    }
 }
 
 /// Standardized error type for all CLI commands

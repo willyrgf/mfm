@@ -96,15 +96,6 @@ impl ApiError {
             "Failed to parse request body as JSON",
         )
     }
-
-    /// Returns the standard invalid-UUID error.
-    pub fn invalid_uuid() -> Self {
-        Self::new(
-            StatusCode::BAD_REQUEST,
-            "InvalidUuid",
-            "Invalid UUID format",
-        )
-    }
 }
 
 impl From<AppError> for ApiError {

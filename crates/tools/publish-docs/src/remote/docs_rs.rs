@@ -23,14 +23,6 @@ impl DocsRsClient {
         })
     }
 
-    /// Builds an observer with an explicit executor.
-    pub fn with_http(http: HttpExecutor, base_url: impl Into<String>) -> Self {
-        Self {
-            http,
-            base_url: base_url.into(),
-        }
-    }
-
     /// Builds an observer targeting a custom base URL. Intended for tests.
     #[cfg(test)]
     pub fn with_base_url(base_url: impl Into<String>) -> Result<Self, reqwest::Error> {

@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
@@ -34,4 +33,5 @@ mfm-artifact-store-s3 = { path = "../storages/artifact-store-s3" }
 mfm-event-store-postgres = { path = "../storages/event-store-postgres" }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 tokio = { workspace = true }

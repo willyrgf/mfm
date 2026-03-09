@@ -11,13 +11,9 @@ readme = "README.md"
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-hex = { workspace = true }
 tokio = { workspace = true }
 alloy-primitives = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
-url = { workspace = true }
-k256 = { version = "0.13", features = ["ecdsa"] }
-zeroize = "1.7.0"
 
 mfm-machine = { path = "../machine", version = "0.1.0" }
 mfm-collectors-evm = { path = "../collectors/evm", version = "0.1.0" }

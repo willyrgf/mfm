@@ -15,11 +15,7 @@ hex = { workspace = true }
 alloy-primitives = { workspace = true, features = ["k256"] }
 k256 = { version = "0.13", features = ["ecdsa"] }
 uuid = { version = "1.0", features = ["v4"] }
-chrono = { version = "0.4", features = ["serde"] }
 url = { workspace = true }
-regex = "1.0"
-zeroize = "1.7.0"
-rpassword = "7.0"
 
 mfm-machine = { path = "../../machine", version = "0.1.0" }
 mfm-sdk = { path = "../../sdk", version = "0.1.0" }
@@ -27,4 +23,3 @@ mfm-op-keystore = { package = "mfm-op-keystore-shim", path = "../../ops/keystore
 mfm-state-common = { path = "../common", version = "0.1.0" }
 mfm-collectors-local-keystore = { path = "../../collectors/local-keystore", version = "0.1.0" }
 mfm-evm-core = { path = "../../evm-core", version = "0.1.0" }
-mfm_core = { path = "../../core", version = "0.1.30" }

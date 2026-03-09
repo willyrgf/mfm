@@ -11,24 +11,24 @@
 /// Orchestration entrypoints used by the binary.
 pub mod app;
 /// Apply-phase execution helpers.
-pub mod apply;
+mod apply;
 /// Sanitized per-run artifact emission.
-pub mod artifacts;
+mod artifacts;
 /// Wave catalog loading and package selection.
-pub mod catalog;
+mod catalog;
 /// CLI parsing and presentation helpers.
 pub mod cli;
 /// Shared error types.
-pub mod error;
+mod error;
 /// Release provenance ledger helpers.
-pub mod ledger;
+mod ledger;
 /// Shared internal data model.
-pub mod model;
+mod model;
 /// Planning and action classification.
-pub mod plan;
+mod plan;
 /// Remote observation adapters.
-pub mod remote;
+mod remote;
 /// Umbrella README generation.
-pub mod umbrella;
+mod umbrella;
 /// Local workspace discovery.
-pub mod workspace;
+mod workspace;

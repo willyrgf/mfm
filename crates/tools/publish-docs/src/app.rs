@@ -649,11 +649,6 @@ fn map_error(error: PublishDocsError) -> CommandError {
             message: error.to_string(),
             exit_code: 1,
         },
-        PublishDocsError::RemoteNewerThanLocal { .. } => CommandError {
-            code: "RemoteNewerThanLocal",
-            message: error.to_string(),
-            exit_code: 1,
-        },
         PublishDocsError::CommandFailed { .. } => CommandError {
             code: "CommandFailed",
             message: error.to_string(),

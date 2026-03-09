@@ -1,18 +1,6 @@
 use std::future::Future;
-use std::pin::Pin;
 
 use tokio::task::JoinSet;
-
-use crate::model::{LocalPackage, RegistryObservation};
-
-/// Source-agnostic registry observer.
-pub trait RegistryObserver: Send + Sync {
-    /// Observes the provided packages while preserving input order.
-    fn observe_packages<'a>(
-        &'a self,
-        packages: &'a [&'a LocalPackage],
-    ) -> Pin<Box<dyn Future<Output = Vec<RegistryObservation>> + Send + 'a>>;
-}
 
 /// Runs async work over owned inputs while preserving input order and bounding concurrency.
 pub async fn observe_many_ordered<I, O, F, Fut>(

@@ -105,22 +105,6 @@ pub fn catalog_entry<'a>(catalog: &'a DesiredCatalog, name: &str) -> Option<&'a 
     catalog.packages.iter().find(|package| package.name == name)
 }
 
-/// Returns public catalog packages in stable section/priority/name order.
-pub fn public_catalog_packages(catalog: &DesiredCatalog) -> Vec<&CatalogPackage> {
-    let mut packages: Vec<_> = catalog
-        .packages
-        .iter()
-        .filter(|package| matches!(package.visibility, Visibility::Public))
-        .collect();
-    packages.sort_by(|left, right| {
-        left.section
-            .cmp(&right.section)
-            .then_with(|| right.release_priority.cmp(&left.release_priority))
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    packages
-}
-
 fn validate_catalog(
     catalog: &DesiredCatalog,
     workspace: &WorkspaceState,

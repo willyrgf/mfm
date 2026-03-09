@@ -28,19 +28,6 @@ pub enum Mode {
     Yank,
 }
 
-/// Runtime configuration shared across planning and apply flows.
-#[derive(Debug, Clone)]
-pub struct RunContext {
-    /// Workspace root resolved from the current directory.
-    pub workspace_root: PathBuf,
-    /// Stable run identifier used for artifact emission.
-    pub run_id: String,
-    /// Per-run artifact directory.
-    pub artifact_dir: PathBuf,
-    /// Whether dirty working trees are allowed.
-    pub allow_dirty: bool,
-}
-
 /// Selection filter derived from CLI flags.
 #[derive(Debug, Clone, Default)]
 pub struct PackageFilter {

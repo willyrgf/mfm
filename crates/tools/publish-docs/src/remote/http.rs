@@ -37,8 +37,6 @@ impl Default for HttpExecutorConfig {
 pub struct ExecutedRequest {
     /// Final response returned by the executor.
     pub response: reqwest::Response,
-    /// Number of attempts performed.
-    pub attempts: usize,
 }
 
 #[derive(Debug, Default)]
@@ -91,13 +89,6 @@ impl HttpExecutor {
             .unwrap_or_else(|| "unknown".to_string())
     }
 
-    /// Returns the current time encoded as RFC3339.
-    pub fn now_rfc3339(&self) -> String {
-        time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
-    }
-
     /// Executes a paced request with limited retries for retryable failures.
     pub async fn execute<F>(&self, host: &str, build: F) -> Option<ExecutedRequest>
     where
@@ -109,10 +100,7 @@ impl HttpExecutor {
             match result {
                 Ok(response) if self.should_retry_status(response.status()) => {
                     if attempt == self.config.max_attempts {
-                        return Some(ExecutedRequest {
-                            response,
-                            attempts: attempt,
-                        });
+                        return Some(ExecutedRequest { response });
                     }
                     let retry_delay = self
                         .retry_after(&response)
@@ -120,10 +108,7 @@ impl HttpExecutor {
                     tokio::time::sleep(retry_delay).await;
                 }
                 Ok(response) => {
-                    return Some(ExecutedRequest {
-                        response,
-                        attempts: attempt,
-                    });
+                    return Some(ExecutedRequest { response });
                 }
                 Err(_) if attempt < self.config.max_attempts => {
                     tokio::time::sleep(self.backoff_delay(attempt)).await;
