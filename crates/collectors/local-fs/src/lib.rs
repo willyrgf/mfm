@@ -52,14 +52,20 @@ impl std::fmt::Display for FactKeyDerivationError {
 
 impl std::error::Error for FactKeyDerivationError {}
 
+fn read_text_request_value(request: &ReadTextRequest) -> serde_json::Value {
+    serde_json::json!({
+        "path": request.path,
+        "path_hex": request.path_hex,
+    })
+}
+
 /// Derives a deterministic fact key for a local filesystem request.
 pub fn fact_key_for_request(
     state_id: &StateId,
     purpose: &str,
     request: &ReadTextRequest,
 ) -> Result<FactKey, FactKeyDerivationError> {
-    let request =
-        serde_json::to_value(request).expect("ReadTextRequest must serialize to serde_json::Value");
+    let request = read_text_request_value(request);
     let req_id = artifact_id_for_json(&request).map_err(FactKeyDerivationError::NotCanonical)?;
     Ok(FactKey(format!(
         "mfm:local|state:{}|purpose:{purpose}|req:{}",
@@ -70,11 +76,9 @@ pub fn fact_key_for_request(
 
 /// Wraps a typed text-read request in the generic `IoCall` envelope.
 pub fn read_text_call(request: ReadTextRequest, fact_key: FactKey) -> IoCall {
-    let request =
-        serde_json::to_value(request).expect("ReadTextRequest must serialize to serde_json::Value");
     IoCall {
         namespace: NAMESPACE_LOCAL_FS_READ_TEXT.to_string(),
-        request,
+        request: read_text_request_value(&request),
         fact_key: Some(fact_key),
     }
 }

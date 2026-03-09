@@ -83,13 +83,30 @@ impl std::fmt::Display for FactKeyDerivationError {
 
 impl std::error::Error for FactKeyDerivationError {}
 
+fn jsonrpc_call_value(call: &JsonRpcCall) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "method".to_string(),
+        serde_json::Value::String(call.method.clone()),
+    );
+    object.insert("params".to_string(), call.params.clone());
+    if let Some(route) = &call.route {
+        object.insert(
+            "route".to_string(),
+            serde_json::json!({
+                "source_id": route.source_id,
+            }),
+        );
+    }
+    serde_json::Value::Object(object)
+}
+
 /// Derives a deterministic fact key for an EVM JSON-RPC request.
 pub fn fact_key_for_jsonrpc_call(
     state_id: &StateId,
     call: &JsonRpcCall,
 ) -> Result<FactKey, FactKeyDerivationError> {
-    let request =
-        serde_json::to_value(call).expect("JsonRpcCall must be serializable to serde_json::Value");
+    let request = jsonrpc_call_value(call);
     let req_id = artifact_id_for_json(&request).map_err(FactKeyDerivationError::NotCanonical)?;
     Ok(FactKey(format!(
         "mfm:evm|state:{}|req:{}",
@@ -100,11 +117,9 @@ pub fn fact_key_for_jsonrpc_call(
 
 /// Wraps a typed JSON-RPC call in the generic `IoCall` envelope.
 pub fn evm_io_call(call: JsonRpcCall, fact_key: FactKey) -> IoCall {
-    let request =
-        serde_json::to_value(call).expect("JsonRpcCall must be serializable to serde_json::Value");
     IoCall {
         namespace: NAMESPACE_EVM.to_string(),
-        request,
+        request: jsonrpc_call_value(&call),
         fact_key: Some(fact_key),
     }
 }

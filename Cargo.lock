@@ -2014,9 +2014,11 @@ dependencies = [
 name = "mfm-collectors-local-keystore"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "mfm-machine",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

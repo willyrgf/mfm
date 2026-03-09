@@ -65,8 +65,7 @@ async fn execute_internal(args: &TxSendRawArgs) -> CommandResult<TxSendRawRespon
         SingleOpReportRequest {
             op_id: TX_SEND_RAW_OP_ID.to_string(),
             op_version: TX_OP_VERSION.to_string(),
-            op_config: serde_json::to_value(op_config)
-                .expect("tx send raw op config should serialize to json value"),
+            op_config: app_services::serialize_op_config(&op_config, "tx send raw")?,
             report_context_key: report_key.0,
         },
     )

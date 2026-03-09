@@ -74,8 +74,7 @@ async fn execute_internal(args: &DeleteArgs) -> CommandResult<DeleteResponse> {
         SingleOpReportRequest {
             op_id: KEYSTORE_DELETE_OP_ID.to_string(),
             op_version: KEYSTORE_ADMIN_OP_VERSION.to_string(),
-            op_config: serde_json::to_value(op_config)
-                .expect("keystore delete op config should serialize to json value"),
+            op_config: app_services::serialize_op_config(&op_config, "keystore delete")?,
             report_context_key: report_key.0,
         },
     )

@@ -53,6 +53,20 @@ fn err(code: impl Into<String>, message: impl Into<String>) -> serde_json::Value
     })
 }
 
+fn serialize_response<T: Serialize>(data: T) -> Result<serde_json::Value, ApiError> {
+    serde_json::to_value(data).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SerializationError",
+            "Failed to serialize response payload",
+        )
+    })
+}
+
+fn json_ok<T: Serialize>(data: T) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(ok(serialize_response(data)?)))
+}
+
 #[derive(Debug, Clone)]
 /// Error payload mapped onto HTTP responses.
 pub struct ApiError {
@@ -285,9 +299,7 @@ async fn runs_start(
     let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
     let data = state.services().start_run(req).await?;
 
-    Ok(Json(ok(
-        serde_json::to_value(data).expect("run start response must serialize")
-    )))
+    json_ok(data)
 }
 
 #[instrument(level = "info", skip(state), fields(run_id = run_id.as_str()))]
@@ -297,9 +309,7 @@ async fn runs_resume(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let data = state.services().resume_run(&run_id).await?;
 
-    Ok(Json(ok(
-        serde_json::to_value(data).expect("run resume response must serialize")
-    )))
+    json_ok(data)
 }
 
 #[instrument(level = "debug", skip(state), fields(run_id = run_id.as_str()))]
@@ -309,9 +319,7 @@ async fn runs_status(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let data = state.services().run_status(&run_id).await?;
 
-    Ok(Json(ok(
-        serde_json::to_value(data).expect("run status response must serialize")
-    )))
+    json_ok(data)
 }
 
 #[instrument(
@@ -326,9 +334,7 @@ async fn runs_events(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let data = state.services().run_events(&run_id, query).await?;
 
-    Ok(Json(ok(
-        serde_json::to_value(data).expect("run events response must serialize")
-    )))
+    json_ok(data)
 }
 
 #[instrument(level = "debug", skip(state), fields(artifact_id = artifact_id.as_str()))]
@@ -338,9 +344,7 @@ async fn artifacts_get(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let data = state.services().artifact_get(&artifact_id).await?;
 
-    Ok(Json(ok(
-        serde_json::to_value(data).expect("artifact response must serialize")
-    )))
+    json_ok(data)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -372,11 +376,12 @@ struct FeaturesListResponse {
 }
 
 #[instrument(level = "debug", skip(state))]
-async fn features_list(State(state): State<RouterState>) -> Json<serde_json::Value> {
-    Json(ok(serde_json::to_value(FeaturesListResponse {
+async fn features_list(
+    State(state): State<RouterState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    json_ok(FeaturesListResponse {
         features: state.catalog.descriptors().to_vec(),
     })
-    .expect("feature list response must serialize")))
 }
 
 #[instrument(level = "info", skip(state, body), fields(feature_id = feature_id.as_str()))]
@@ -398,7 +403,31 @@ async fn features_execute(
         )
         .await?;
 
-    Ok(Json(ok(
-        serde_json::to_value(result).expect("feature execute response must serialize")
-    )))
+    json_ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FailingSerialize;
+
+    impl Serialize for FailingSerialize {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("boom"))
+        }
+    }
+
+    #[test]
+    fn serialize_response_returns_api_error_instead_of_panicking() {
+        let err = serialize_response(FailingSerialize)
+            .expect_err("serialization failures should be returned as api errors");
+
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.code, "SerializationError");
+        assert_eq!(err.message, "Failed to serialize response payload");
+    }
 }
