@@ -17,6 +17,7 @@
 {
   pkgs,
   project,
+  projectRoot ? null,
   loggingPrelude ? null,
 }:
 
@@ -33,7 +34,6 @@ let
   envVar = projectMeta.envVar or "PROJECT_ENV";
 
   ephemeralCfg = project.ephemeral or { };
-  copyMode = ephemeralCfg.copyMode or "git-files";
   excludePatterns =
     ephemeralCfg.excludePatterns or [
       ".git"
@@ -52,8 +52,6 @@ let
   keepFailures = ephemeralCfg.keepFailures or true;
   maxFailedRoots = ephemeralCfg.maxFailedRoots or 8;
   maxFailedRootAgeHours = ephemeralCfg.maxFailedRootAgeHours or 72;
-  maxCopyBytes = ephemeralCfg.maxCopyBytes or 0;
-  minFreeBytesAfterCopy = ephemeralCfg.minFreeBytesAfterCopy or 0;
 
   depsScript = project.install.deps or "";
   runtimePackages = project.tooling.runtimePackages or [ ];
@@ -65,9 +63,9 @@ let
     inherit pkgs project;
     loggingPrelude = resolvedLoggingPrelude;
   };
-  processRegistry =
-    if builtins.pathExists ./lib/process-registry.nix then
-      import ./lib/process-registry.nix {
+  runtimeEvents =
+    if builtins.pathExists ./lib/runtime-events.nix then
+      import ./lib/runtime-events.nix {
         inherit pkgs project;
         loggingPrelude = resolvedLoggingPrelude;
       }
@@ -78,6 +76,14 @@ let
         '';
       };
   shellContract = import ./lib/shell-contract.nix { inherit pkgs; };
+  sourceMaterialization = import ./lib/ephemeral-materialization.nix {
+    inherit
+      pkgs
+      project
+      projectRoot
+      ;
+    loggingPrelude = resolvedLoggingPrelude;
+  };
 
   lockPrefix = "${projectId}-slot";
 
@@ -136,128 +142,7 @@ let
     echo "$EPHEMERAL_ROOT"
   '';
 
-  rsyncExcludes = pkgs.lib.concatMapStringsSep " " (pat: "--exclude='${pat}'") excludePatterns;
-
-  mkSourceCopy = pkgs.writeShellScript "mk-source-copy" ''
-    ${resolvedLoggingPrelude}
-
-    set -euo pipefail
-
-    SOURCE_DIR="$1"
-    DEST_DIR="$2"
-    COPY_MODE=${pkgs.lib.escapeShellArg copyMode}
-    MAX_COPY_BYTES=${toString maxCopyBytes}
-    MIN_FREE_BYTES_AFTER_COPY=${toString minFreeBytesAfterCopy}
-
-    extract_total_file_size_bytes() {
-      local stats="$1"
-      local total=""
-      total="$(printf '%s\n' "$stats" | ${pkgs.gawk}/bin/awk '
-        /^Total file size:/ {
-          gsub(/[^0-9]/, "", $4)
-          print $4
-          exit
-        }
-      ')"
-      if [ -z "$total" ]; then
-        printf '0'
-      else
-        printf '%s' "$total"
-      fi
-    }
-
-    available_bytes_for_dest() {
-      local free_kib
-      free_kib="$(${pkgs.coreutils}/bin/df -Pk "$DEST_DIR" | ${pkgs.gawk}/bin/awk 'NR==2 {print $4}')"
-      if [ -z "$free_kib" ]; then
-        printf '0'
-      else
-        printf '%s' "$((free_kib * 1024))"
-      fi
-    }
-
-    enforce_copy_budget() {
-      local copy_bytes="$1"
-      local free_bytes
-      local remaining_bytes
-      free_bytes="$(available_bytes_for_dest)"
-      remaining_bytes=$((free_bytes - copy_bytes))
-
-      log_info "Ephemeral copy budget bytes_required=$copy_bytes bytes_free=$free_bytes bytes_remaining=$remaining_bytes"
-
-      if [ "$MAX_COPY_BYTES" -gt 0 ] && [ "$copy_bytes" -gt "$MAX_COPY_BYTES" ]; then
-        printf 'ERROR: ephemeral copy budget exceeded: bytes_required=%s max_copy_bytes=%s\n' "$copy_bytes" "$MAX_COPY_BYTES"
-        exit 1
-      fi
-
-      if [ "$free_bytes" -le "$copy_bytes" ]; then
-        printf 'ERROR: ephemeral copy budget exceeded: bytes_required=%s bytes_free=%s\n' "$copy_bytes" "$free_bytes"
-        exit 1
-      fi
-
-      if [ "$MIN_FREE_BYTES_AFTER_COPY" -gt 0 ] && [ "$remaining_bytes" -lt "$MIN_FREE_BYTES_AFTER_COPY" ]; then
-        printf 'ERROR: ephemeral copy budget exceeded: bytes_remaining=%s min_free_after_copy=%s\n' "$remaining_bytes" "$MIN_FREE_BYTES_AFTER_COPY"
-        exit 1
-      fi
-    }
-
-    static_copy() {
-      local dry_run_stats copy_bytes
-      log_info "Using static-excludes copy mode"
-      dry_run_stats="$(${pkgs.rsync}/bin/rsync -an --stats \
-        ${rsyncExcludes} \
-        "$SOURCE_DIR/" "$DEST_DIR/")"
-      copy_bytes="$(extract_total_file_size_bytes "$dry_run_stats")"
-      enforce_copy_budget "$copy_bytes"
-      ${pkgs.rsync}/bin/rsync -a \
-        ${rsyncExcludes} \
-        "$SOURCE_DIR/" "$DEST_DIR/"
-    }
-
-    git_copy() {
-      local manifest dry_run_stats copy_bytes
-      manifest="$(${pkgs.coreutils}/bin/mktemp)"
-
-      (
-        cd "$SOURCE_DIR"
-        ${pkgs.git}/bin/git ls-files -z --cached --others --exclude-standard
-      ) > "$manifest"
-
-      log_info "Using git-files copy mode"
-
-      if [ ! -s "$manifest" ]; then
-        log_warn "Git file manifest is empty; source copy may be incomplete"
-      fi
-
-      dry_run_stats="$(${pkgs.rsync}/bin/rsync -an --stats --from0 --files-from="$manifest" "$SOURCE_DIR/" "$DEST_DIR/")"
-      copy_bytes="$(extract_total_file_size_bytes "$dry_run_stats")"
-      enforce_copy_budget "$copy_bytes"
-      ${pkgs.rsync}/bin/rsync -a --from0 --files-from="$manifest" "$SOURCE_DIR/" "$DEST_DIR/"
-      rm -f "$manifest"
-    }
-
-    log_info "Copying project source to ephemeral location"
-
-    case "$COPY_MODE" in
-      git-files)
-        if ${pkgs.git}/bin/git -C "$SOURCE_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
-          git_copy
-        else
-          log_warn "git-files copy mode unavailable outside a git worktree; falling back to static-excludes"
-          static_copy
-        fi
-        ;;
-      static-excludes)
-        static_copy
-        ;;
-      *)
-        log_error "Unsupported ephemeral copy mode: $COPY_MODE"
-        exit 2
-        ;;
-    esac
-
-    log_ok "Source copied to $DEST_DIR"
-  '';
+  mkSourceCopy = sourceMaterialization.mkSourceCopy;
 
   mkConditionalCleanup = pkgs.writeShellScript "mk-conditional-cleanup" ''
     ${resolvedLoggingPrelude}
@@ -350,12 +235,12 @@ let
         fi
       fi
 
-      ${processRegistry.emitEvent} \
+      emit_slot_event \
         --event-type slot_released \
         --state released \
         --slot "''${${slotVar}:-}" \
         --env "''${${envVar}:-}" \
-        --wait-reason "ephemeral_cleanup exit_code=$exit_code" >/dev/null 2>&1 || true
+        --wait-reason "ephemeral_cleanup exit_code=$exit_code"
 
       if [ -n "''${${projectIdUpper}_SLOT_LOCK_FD:-}" ]; then
         eval "exec ${refLockFd}>&-" 2>/dev/null || true
@@ -381,12 +266,21 @@ let
           null
         else
           pkgs.writeText "ephemeral-${name}-app-contract.json" (builtins.toJSON appContract);
+      contractRuntime =
+        if appContract == null then
+          null
+        else
+          shellContract.mkContractRuntime {
+            inherit name;
+            contract = appContract;
+          };
       contractPrelude =
         if appContract == null then
           ""
         else
           ''
             NIXFIED_APP_CONTRACT_FILE="${toString contractFile}"
+            NIXFIED_APP_CONTRACT_RUNTIME="${toString contractRuntime}"
             source ${toString shellContract.runtime}
             nixfied_contract_validate_env "$NIXFIED_APP_CONTRACT_FILE"
             nixfied_contract_validate_args "$NIXFIED_APP_CONTRACT_FILE" "$@"
@@ -466,6 +360,7 @@ let
       fi
 
       export ${envVar}="''${${envVar}:-test}"
+      HOST_REGISTRY_ROOT="''${REGISTRY_ROOT:-}"
 
       if [ -z "''${RUN_ID:-}" ]; then
         export RUN_ID="$(${pkgs.coreutils}/bin/date -u +%Y%m%d-%H%M%S)-$$-''${RANDOM:-0}"
@@ -480,12 +375,20 @@ let
       log_info "Slot: ${refEphSlot} (${slotVar}=''${${slotVar}}, ${envVar}=''${${envVar}})"
       echo ""
 
-      ${processRegistry.emitEvent} \
+      emit_slot_event() {
+        if [ -n "''${HOST_REGISTRY_ROOT:-}" ]; then
+          REGISTRY_ROOT="$HOST_REGISTRY_ROOT" ${runtimeEvents.emitEvent} "$@" >/dev/null 2>&1 || true
+        else
+          ${runtimeEvents.emitEvent} "$@" >/dev/null 2>&1 || true
+        fi
+      }
+
+      emit_slot_event \
         --event-type slot_acquired \
         --state busy \
         --slot "''${${slotVar}}" \
         --env "''${${envVar}}" \
-        --wait-reason "ephemeral_start" >/dev/null 2>&1 || true
+        --wait-reason "ephemeral_start"
 
       source ${mkConditionalCleanup}
       trap _ephemeral_cleanup EXIT INT TERM
@@ -498,6 +401,7 @@ let
       export XDG_STATE_HOME="${refEphRoot}/xdg/state"
       export XDG_CACHE_HOME="${refEphRoot}/xdg/cache"
       export REGISTRY_ROOT="${refEphRoot}/registry"
+      export NIXFIED_RUNTIME_DIR_SCOPE_OVERRIDE="${refEphRoot}"
       if [ -z "''${CI_ARTIFACTS_DIR:-}" ]; then
         export CI_ARTIFACTS_DIR="${refEphRoot}/artifacts"
       fi
@@ -530,9 +434,7 @@ let
 
       ${pathBlock}
 
-      # Load .env from original location (secrets shouldn't be copied) and
-      # source into this shell so exported keys are visible to app scripts.
-      source ${envLoader.loadEnvFile} "$ORIGINAL_ROOT/.env"
+      source ${sourceMaterialization.loadHostEnv} "$ORIGINAL_ROOT"
 
       ${contractPrelude}
 

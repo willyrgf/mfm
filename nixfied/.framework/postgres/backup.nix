@@ -3,15 +3,15 @@
   pkgs,
   project,
   slots,
+  config,
   loggingPrelude,
 }:
 
 let
-  cfg = project.modules.postgres or { };
-  dataDirName = cfg.dataDirName or "postgres";
+  dataDirName = config.dataDirName or "postgres";
   pgdataExpr = slots.getServiceDir dataDirName;
-  postgres = cfg.package or pkgs.postgresql_16;
-  portKey = cfg.portKey or "postgres";
+  postgres = config.package or pkgs.postgresql_16;
+  portKey = config.portKey or "postgres";
   portVar = slots.portVarName portKey;
 
   archiveWal = pkgs.writeShellScript "postgres-archive-wal" ''
@@ -115,6 +115,34 @@ let
 
     set -euo pipefail
 
+    STAGED_PGDATA=""
+    PREVIOUS_PGDATA=""
+
+    cleanup_restore() {
+      local rc="$?"
+
+      if [ "$rc" -ne 0 ] && [ -n "$PREVIOUS_PGDATA" ] && [ -d "$PREVIOUS_PGDATA" ] && [ ! -e "$PGDATA" ]; then
+        mv "$PREVIOUS_PGDATA" "$PGDATA" 2>/dev/null || true
+      fi
+
+      if [ -n "$STAGED_PGDATA" ] && [ -d "$STAGED_PGDATA" ]; then
+        rm -rf "$STAGED_PGDATA"
+      fi
+
+      return "$rc"
+    }
+
+    validate_restored_pgdata() {
+      local candidate_dir="$1"
+
+      if [ ! -f "$candidate_dir/PG_VERSION" ]; then
+        log_error "restored backup is missing PG_VERSION dir=$candidate_dir"
+        exit 1
+      fi
+    }
+
+    trap cleanup_restore EXIT
+
     source <(${slots.getSlotInfo})
 
     BACKUP_PATH="''${1:-}"
@@ -162,17 +190,33 @@ let
       sleep 2
     fi
 
-    # Clear existing data
-    rm -rf "$PGDATA"
-    mkdir -p "$PGDATA"
+    PGDATA_PARENT="$(dirname "$PGDATA")"
+    mkdir -p "$PGDATA_PARENT"
+    STAGED_PGDATA="$(${pkgs.coreutils}/bin/mktemp -d "$PGDATA_PARENT/.postgres-restore-staging.XXXXXX")"
 
-    # Restore from tar
+    # Restore into a staging directory first so failed extracts do not destroy the live data dir.
     if [ -f "$BACKUP_PATH/base.tar.gz" ]; then
-      tar xzf "$BACKUP_PATH/base.tar.gz" -C "$PGDATA"
+      tar xzf "$BACKUP_PATH/base.tar.gz" -C "$STAGED_PGDATA"
     else
-      cp -a "$BACKUP_PATH/." "$PGDATA/"
+      cp -a "$BACKUP_PATH/." "$STAGED_PGDATA/"
     fi
 
+    validate_restored_pgdata "$STAGED_PGDATA"
+
+    if [ -e "$PGDATA" ]; then
+      PREVIOUS_PGDATA="$PGDATA.previous.$(${pkgs.coreutils}/bin/date +%Y%m%d-%H%M%S)-$$"
+      mv "$PGDATA" "$PREVIOUS_PGDATA"
+    fi
+
+    mv "$STAGED_PGDATA" "$PGDATA"
+    STAGED_PGDATA=""
+
+    if [ -n "$PREVIOUS_PGDATA" ] && [ -d "$PREVIOUS_PGDATA" ]; then
+      rm -rf "$PREVIOUS_PGDATA"
+      PREVIOUS_PGDATA=""
+    fi
+
+    trap - EXIT
     log_ok "Backup restored to $PGDATA"
   '';
 
@@ -192,8 +236,8 @@ let
     for manifest in "$BACKUP_DIR"/*.manifest.json; do
       [ -f "$manifest" ] || continue
       NAME=$(basename "$manifest" .manifest.json)
-      CREATED=$(cat "$manifest" | grep '"created_at"' | cut -d'"' -f4 2>/dev/null || echo "unknown")
-      COMMIT=$(cat "$manifest" | grep '"git_commit"' | cut -d'"' -f4 2>/dev/null || echo "unknown")
+      CREATED=$(${pkgs.jq}/bin/jq -r '.created_at // "unknown"' "$manifest" 2>/dev/null || echo "unknown")
+      COMMIT=$(${pkgs.jq}/bin/jq -r '.git_commit // "unknown"' "$manifest" 2>/dev/null || echo "unknown")
       echo "  $NAME (created: $CREATED, commit: $COMMIT)"
     done
   '';

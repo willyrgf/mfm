@@ -4,7 +4,6 @@
 let
   lib = pkgs.lib;
   jqBin = "${pkgs.jq}/bin/jq";
-  base64Bin = "${pkgs.coreutils}/bin/base64";
 in
 rec {
   loadSlotEnvFromJson =
@@ -14,8 +13,19 @@ rec {
       envVar ? "ENV",
     }:
     ''
-      ${slotVar}="$(${jqBin} -r '.slot' <<<"${"$" + jsonVar}")"
-      ${envVar}="$(${jqBin} -r '.env' <<<"${"$" + jsonVar}")"
+      eval "$(
+        ${jqBin} -r \
+          --arg slotVar ${lib.escapeShellArg slotVar} \
+          --arg envVar ${lib.escapeShellArg envVar} \
+          '
+            def emit($name; $value): "\($name)=\($value | @sh)";
+            [
+              emit($slotVar; (.slot // "")),
+              emit($envVar; (.env // ""))
+            ]
+            | .[]
+          ' <<<"${"$" + jsonVar}"
+      )"
     '';
 
   exportVarsFromJson =
@@ -23,12 +33,14 @@ rec {
       jsonVar,
     }:
     ''
-      while IFS= read -r ENTRY_B64; do
-        [ -z "$ENTRY_B64" ] && continue
-        KEY="$(printf '%s' "$ENTRY_B64" | ${base64Bin} -d | ${jqBin} -r '.key')"
-        VALUE="$(printf '%s' "$ENTRY_B64" | ${base64Bin} -d | ${jqBin} -r '.value | tostring')"
-        export "$KEY=$VALUE"
-      done < <(printf '%s\n' "${"$" + jsonVar}" | ${jqBin} -r '.vars // {} | to_entries[] | @base64')
+      eval "$(
+        ${jqBin} -r '
+          (.vars // {})
+          | to_entries
+          | map("export " + .key + "=" + (.value | tostring | @sh))
+          | .[]
+        ' <<<"${"$" + jsonVar}"
+      )"
     '';
 
   loadSlotEnvAndVarsFromJson =

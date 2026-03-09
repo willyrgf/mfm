@@ -3,16 +3,17 @@
   pkgs,
   project,
   slots,
+  config,
   templates,
   lifecycle,
   loggingPrelude,
 }:
 
 let
-  cfg = project.modules.nginx or { };
-  portVarHttp = slots.portVarName (cfg.portKeyHttp or "http");
-  portVarHttps = slots.portVarName (cfg.portKeyHttps or "https");
-  dataDirName = cfg.dataDirName or "nginx";
+  resolvedTemplates = (import ./templates.nix { inherit pkgs; }) // templates;
+  portVarHttp = slots.portVarName (config.portKeyHttp or "http");
+  portVarHttps = slots.portVarName (config.portKeyHttps or "https");
+  dataDirName = config.dataDirName or "nginx";
   nginxDirExpr = slots.getServiceDir dataDirName;
   siteHelpers = ''
     validate_domain() {
@@ -72,8 +73,44 @@ let
       return 0
     }
 
-    escape_sed_replacement() {
-      printf '%s' "$1" | ${pkgs.gnused}/bin/sed -e 's/[|&\\]/\\&/g'
+    write_config_atomic() {
+      local target="$1"
+      local parent_dir
+      local tmp
+
+      parent_dir=$(${pkgs.coreutils}/bin/dirname "$target")
+      mkdir -p "$parent_dir"
+      tmp=$(${pkgs.coreutils}/bin/mktemp "$target.tmp.XXXXXX")
+      cat > "$tmp"
+      mv "$tmp" "$target"
+    }
+
+    render_site_template() {
+      local template="$1"
+      local nginx_dir="$2"
+      local http_port="$3"
+      local https_port="$4"
+      local domain="$5"
+      local upstream_host="''${6:-}"
+      local upstream_port="''${7:-}"
+      local site_root="''${8:-}"
+
+      NIXFIED_TEMPLATE_NGINX_DIR="$nginx_dir" \
+      NIXFIED_TEMPLATE_HTTP_PORT="$http_port" \
+      NIXFIED_TEMPLATE_HTTPS_PORT="$https_port" \
+      NIXFIED_TEMPLATE_SITE_DOMAIN="$domain" \
+      NIXFIED_TEMPLATE_UPSTREAM_HOST="$upstream_host" \
+      NIXFIED_TEMPLATE_UPSTREAM_PORT="$upstream_port" \
+      NIXFIED_TEMPLATE_SITE_ROOT="$site_root" \
+        ${pkgs.perl}/bin/perl -0pe '
+          s/\QNGINX_DIR\E/$ENV{NIXFIED_TEMPLATE_NGINX_DIR}/g;
+          s/\QHTTP_PORT\E/$ENV{NIXFIED_TEMPLATE_HTTP_PORT}/g;
+          s/\QHTTPS_PORT\E/$ENV{NIXFIED_TEMPLATE_HTTPS_PORT}/g;
+          s/\QSITE_DOMAIN\E/$ENV{NIXFIED_TEMPLATE_SITE_DOMAIN}/g;
+          s/\QUPSTREAM_HOST\E/$ENV{NIXFIED_TEMPLATE_UPSTREAM_HOST}/g;
+          s/\QUPSTREAM_PORT\E/$ENV{NIXFIED_TEMPLATE_UPSTREAM_PORT}/g;
+          s/\QSITE_ROOT\E/$ENV{NIXFIED_TEMPLATE_SITE_ROOT}/g;
+        ' "$template"
     }
   '';
 
@@ -102,15 +139,8 @@ let
 
     NGINX_DIR="${nginxDirExpr}"
     CONF="$NGINX_DIR/conf/sites-available/$DOMAIN.conf"
-
-    ${pkgs.gnused}/bin/sed \
-      -e "s|NGINX_DIR|$(escape_sed_replacement "$NGINX_DIR")|g" \
-      -e "s|HTTP_PORT|$(escape_sed_replacement "$HTTP_PORT")|g" \
-      -e "s|HTTPS_PORT|$(escape_sed_replacement "$HTTPS_PORT")|g" \
-      -e "s|SITE_DOMAIN|$(escape_sed_replacement "$DOMAIN")|g" \
-      -e "s|UPSTREAM_HOST|$(escape_sed_replacement "$UPSTREAM_HOST")|g" \
-      -e "s|UPSTREAM_PORT|$(escape_sed_replacement "$UPSTREAM_PORT")|g" \
-      "${templates.siteProxyTemplate}" > "$CONF"
+    render_site_template ${pkgs.lib.escapeShellArg (toString resolvedTemplates.siteProxyTemplate)} "$NGINX_DIR" "$HTTP_PORT" "$HTTPS_PORT" "$DOMAIN" "$UPSTREAM_HOST" "$UPSTREAM_PORT" \
+      | write_config_atomic "$CONF"
 
     ln -sf "$CONF" "$NGINX_DIR/conf/sites-enabled/$DOMAIN.conf"
     ${lifecycle.generateSelfSignedCert} "$DOMAIN" "$NGINX_DIR/ssl"
@@ -139,14 +169,8 @@ let
 
     NGINX_DIR="${nginxDirExpr}"
     CONF="$NGINX_DIR/conf/sites-available/$DOMAIN.conf"
-
-    ${pkgs.gnused}/bin/sed \
-      -e "s|NGINX_DIR|$(escape_sed_replacement "$NGINX_DIR")|g" \
-      -e "s|HTTP_PORT|$(escape_sed_replacement "$HTTP_PORT")|g" \
-      -e "s|HTTPS_PORT|$(escape_sed_replacement "$HTTPS_PORT")|g" \
-      -e "s|SITE_DOMAIN|$(escape_sed_replacement "$DOMAIN")|g" \
-      -e "s|SITE_ROOT|$(escape_sed_replacement "$SITE_ROOT")|g" \
-      "${templates.siteStaticTemplate}" > "$CONF"
+    render_site_template ${pkgs.lib.escapeShellArg (toString resolvedTemplates.siteStaticTemplate)} "$NGINX_DIR" "$HTTP_PORT" "$HTTPS_PORT" "$DOMAIN" "" "" "$SITE_ROOT" \
+      | write_config_atomic "$CONF"
 
     ln -sf "$CONF" "$NGINX_DIR/conf/sites-enabled/$DOMAIN.conf"
     ${lifecycle.generateSelfSignedCert} "$DOMAIN" "$NGINX_DIR/ssl"

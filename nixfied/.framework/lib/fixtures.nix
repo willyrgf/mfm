@@ -6,13 +6,25 @@
 
 let
   lib = pkgs.lib;
+  serviceConfig = import ../../lib/service-config.nix { inherit lib; };
   servicePolicy = import ./service-policy.nix { inherit pkgs; };
 
-  modules = project.modules or { };
-  postgresCfg = modules.postgres or { };
-  minioCfg = modules.minio or { };
-  rethCfg = modules.reth or { };
-  heliosCfg = modules.helios or { };
+  postgresCfg = serviceConfig.getProjectServiceConfig {
+    inherit project;
+    name = "postgres";
+  };
+  minioCfg = serviceConfig.getProjectServiceConfig {
+    inherit project;
+    name = "minio";
+  };
+  rethCfg = serviceConfig.getProjectServiceConfig {
+    inherit project;
+    name = "reth";
+  };
+  heliosCfg = serviceConfig.getProjectServiceConfig {
+    inherit project;
+    name = "helios";
+  };
   defaultPostgresDatabase = postgresCfg.testDatabase or (postgresCfg.database or "app_test");
 
   portVarFromKey =
@@ -42,13 +54,17 @@ let
     serviceSpec:
     let
       name = serviceSpec.name or (throw "Fixture service entry missing `name`");
-      cfg = modules.${name} or null;
-      enabled = if cfg == null then false else (cfg.enable or false);
+      cfg = serviceConfig.getProjectServiceEntry {
+        inherit project name;
+      };
+      enabled = serviceConfig.isProjectServiceEnabled {
+        inherit project name;
+      };
     in
     if cfg == null then
       throw "Unknown fixture service: ${name}"
     else if !enabled then
-      throw "Fixture service `${name}` requires project.modules.${name}.enable = true"
+      throw "Fixture service `${name}` requires services.${name}.enable = true"
     else
       serviceSpec;
 

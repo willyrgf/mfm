@@ -3,6 +3,8 @@
   pkgs,
   project,
   loggingPrelude ? "",
+  commandSurfaces ? null,
+  featureInventory ? null,
 }:
 
 let
@@ -10,13 +12,16 @@ let
   enabled = cfg.enable or true;
   strict = cfg.strict or true;
   refreshArg = cfg.refreshArg or "--refresh-discovery";
+  resolvedCommandSurfaces = cfg.commandSurfaces or commandSurfaces;
+  resolvedFeatureInventory = cfg.featureInventory or featureInventory;
 
   defaultRequiredDocs = [
     "README.md"
+    "CLEANUPS.md"
     "AGENTS.md"
-    "CLAUDE.md"
-    "ARCHITECTURE.md"
-    "REDESIGN.md"
+    "docs/ARCHITECTURE.md"
+    "docs/DETAILED.md"
+    "docs/UPGRADE.md"
   ];
   requiredDocs = cfg.requiredDocs or defaultRequiredDocs;
 
@@ -50,6 +55,10 @@ let
 
   requiredDocsJson = builtins.toJSON requiredDocs;
   riskAreasJson = builtins.toJSON riskAreas;
+  commandSurfacesJson =
+    if resolvedCommandSurfaces == null then "null" else builtins.toJSON resolvedCommandSurfaces;
+  featureInventoryJson =
+    if resolvedFeatureInventory == null then "null" else builtins.toJSON resolvedFeatureInventory;
 
   tool = pkgs.writeShellScriptBin "nixfied-discovery-index" ''
         ${loggingPrelude}
@@ -122,6 +131,8 @@ let
 
         REQUIRED_DOCS_JSON='${requiredDocsJson}'
         RISK_AREAS_JSON='${riskAreasJson}'
+        COMPILED_COMMAND_SURFACES_JSON='${commandSurfacesJson}'
+        COMPILED_FEATURE_INVENTORY_JSON='${featureInventoryJson}'
         HAS_GIT_TRACKING="0"
         if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
           HAS_GIT_TRACKING="1"
@@ -130,9 +141,12 @@ let
         doc_purpose() {
           case "$1" in
             README.md) echo "Primary repository overview and command entrypoints." ;;
+            CLEANUPS.md) echo "Current repository cleanup ledger and maintenance queue." ;;
             AGENTS.md) echo "Agent instructions and collaboration constraints." ;;
             CLAUDE.md) echo "Additional assistant guidance for this repository." ;;
-            ARCHITECTURE.md) echo "Architecture and system design details." ;;
+            ARCHITECTURE.md|docs/ARCHITECTURE.md) echo "High-level architecture reference." ;;
+            docs/DETAILED.md) echo "Detailed model architecture and contracts." ;;
+            docs/UPGRADE.md) echo "Downstream upgrade notes for behavioral and path contract changes." ;;
             REDESIGN.md) echo "Redesign notes and migration context." ;;
             *) echo "Project documentation." ;;
           esac
@@ -141,10 +155,13 @@ let
         doc_priority() {
           case "$1" in
             README.md) echo 1 ;;
-            AGENTS.md) echo 2 ;;
-            CLAUDE.md) echo 3 ;;
-            ARCHITECTURE.md) echo 4 ;;
-            REDESIGN.md) echo 5 ;;
+            CLEANUPS.md) echo 2 ;;
+            docs/DETAILED.md) echo 3 ;;
+            docs/UPGRADE.md) echo 4 ;;
+            ARCHITECTURE.md|docs/ARCHITECTURE.md) echo 5 ;;
+            REDESIGN.md) echo 6 ;;
+            AGENTS.md) echo 7 ;;
+            CLAUDE.md) echo 7 ;;
             *) echo 20 ;;
           esac
         }
@@ -251,37 +268,81 @@ let
           | sort_by(.path)
         ' "$COMPONENTS_TSV")
 
-        COMMANDS_TSV="$TMP_DIR/commands.tsv"
-        : > "$COMMANDS_TSV"
-        if [ -d "$ROOT/nixfied/project" ]; then
-          while IFS= read -r command_name; do
-            [ -z "$command_name" ] && continue
-            owner_file=$(
-              ${pkgs.ripgrep}/bin/rg -l "commands\\.''${command_name}\\b" "$ROOT/nixfied/project" 2>/dev/null \
-                | ${pkgs.coreutils}/bin/head -n 1 || true
+        if [ "$COMPILED_COMMAND_SURFACES_JSON" = "null" ]; then
+          COMMANDS_TSV="$TMP_DIR/commands.tsv"
+          : > "$COMMANDS_TSV"
+          if [ -d "$ROOT/nixfied/project" ]; then
+            while IFS= read -r command_name; do
+              [ -z "$command_name" ] && continue
+              owner_file=$(
+                ${pkgs.ripgrep}/bin/rg -l "commands\\.''${command_name}\\b" "$ROOT/nixfied/project" 2>/dev/null \
+                  | ${pkgs.coreutils}/bin/head -n 1 || true
+              )
+              if [ -z "$owner_file" ]; then
+                owner_file="nixfied/project"
+              else
+                owner_file="''${owner_file#"$ROOT"/}"
+              fi
+              printf '%s\t%s\n' "$command_name" "$owner_file" >> "$COMMANDS_TSV"
+            done < <(
+              ${pkgs.ripgrep}/bin/rg -o --no-filename 'commands\.[A-Za-z0-9:_-]+' "$ROOT/nixfied/project" 2>/dev/null \
+                | ${pkgs.gnused}/bin/sed 's/^commands\.//' \
+                | ${pkgs.coreutils}/bin/sort -u
             )
-            if [ -z "$owner_file" ]; then
-              owner_file="nixfied/project"
-            else
-              owner_file="''${owner_file#"$ROOT"/}"
-            fi
-            printf '%s\t%s\n' "$command_name" "$owner_file" >> "$COMMANDS_TSV"
-          done < <(
-            ${pkgs.ripgrep}/bin/rg -o --no-filename 'commands\.[A-Za-z0-9:_-]+' "$ROOT/nixfied/project" 2>/dev/null \
-              | ${pkgs.gnused}/bin/sed 's/^commands\.//' \
-              | ${pkgs.coreutils}/bin/sort -u
-          )
+          fi
+
+          COMMANDS_JSON=$(${pkgs.jq}/bin/jq -R -s '
+            split("\n")
+            | map(select(length > 0))
+            | map(split("\t") | {
+                name: .[0],
+                owner_file: .[1]
+              })
+            | sort_by(.name)
+          ' "$COMMANDS_TSV")
+        else
+          COMMANDS_JSON="$(
+            printf '%s\n' "$COMPILED_COMMAND_SURFACES_JSON" | ${pkgs.jq}/bin/jq -c '
+              map(
+                select((.name // "") != "")
+                | {
+                    name: .name,
+                    owner_file:
+                      ((.owner_file // .ownerFile // "nixfied/project/module.nix")
+                       | if . == "" then "nixfied/project/module.nix" else . end)
+                  }
+              )
+              | unique_by(.name + "\u0000" + .owner_file)
+              | sort_by(.name, .owner_file)
+            '
+          )"
         fi
 
-        COMMANDS_JSON=$(${pkgs.jq}/bin/jq -R -s '
-          split("\n")
-          | map(select(length > 0))
-          | map(split("\t") | {
-              name: .[0],
-              owner_file: .[1]
-            })
-          | sort_by(.name)
-        ' "$COMMANDS_TSV")
+        if [ "$COMPILED_FEATURE_INVENTORY_JSON" = "null" ]; then
+          FEATURES_JSON='[]'
+        else
+          FEATURES_JSON="$(
+            printf '%s\n' "$COMPILED_FEATURE_INVENTORY_JSON" | ${pkgs.jq}/bin/jq -c '
+              if type == "array" then
+                .
+              else
+                to_entries | map(.value + { id: (.value.id // .key) })
+              end
+              | map(
+                  select((.id // "") != "")
+                  | {
+                      id: .id,
+                      kind: (.kind // "unknown"),
+                      summary: (.summary // ""),
+                      status: (.status // ""),
+                      coverage_required: (.coverageRequired // false)
+                    }
+                )
+              | unique_by(.id)
+              | sort_by(.id)
+            '
+          )"
+        fi
 
         RISK_AREAS_NORM_JSON=$(printf '%s\n' "$RISK_AREAS_JSON" | ${pkgs.jq}/bin/jq -c '
           map({
@@ -296,6 +357,7 @@ let
           --argjson docs "$DOCS_JSON" \
           --argjson components "$COMPONENTS_JSON" \
           --argjson command_surfaces "$COMMANDS_JSON" \
+          --argjson features "$FEATURES_JSON" \
           --argjson risk_areas "$RISK_AREAS_NORM_JSON" \
           '{
             schema_version: 1,
@@ -303,7 +365,8 @@ let
             docs: $docs,
             components: $components,
             risk_areas: $risk_areas,
-            command_surfaces: $command_surfaces
+            command_surfaces: $command_surfaces,
+            features: $features
           }' > "$TMP_INDEX"
 
         {
@@ -332,6 +395,27 @@ let
             end
           ' "$TMP_INDEX"
           echo ""
+          echo "## Features"
+          ${pkgs.jq}/bin/jq -r '
+            if (.features | length) == 0 then
+              "- (none detected)"
+            else
+              .features[]
+              | "- `" + .id + "` [" + .kind + "] - " + .summary
+                + (if .coverage_required then " (coverage required)" else "" end)
+            end
+          ' "$TMP_INDEX"
+          echo ""
+          echo "## Dispatcher and Introspection"
+          echo '- `run-task -- <task-id> [-- ...]` from `nixfied/runner/dispatcher.nix`'
+          echo '- `run-workflow -- <workflow-id> [-- ...]` from `nixfied/runner/dispatcher.nix`'
+          echo '- `run-workflow-parallel -- <workflow-id> [-- ...]` from `nixfied/runner/dispatcher.nix`'
+          echo '- `runs [run-id]` from `nixfied/runner/dispatcher.nix`'
+          echo '- `stop-run -- <run-id>` from `nixfied/runner/dispatcher.nix`'
+          echo '- `stop-all-runs` from `nixfied/runner/dispatcher.nix`'
+          echo '- `features` from `nixfied/runner/dispatcher.nix`'
+          echo '- `model`, `stateHash`, `tasks`, `services`, `task::<id>`, `schema` from `nixfied/lib/mkNixfied.nix`'
+          echo ""
           echo "## Sensitive Zones"
           ${pkgs.jq}/bin/jq -r '
             if (.risk_areas | length) == 0 then
@@ -353,12 +437,21 @@ let
           echo '- `nix run .#test`'
           echo '- `nix run .#build`'
           echo '- `nix run .#check`'
+          echo '- `nix run .#format`'
           echo '- `nix run .#ci -- --summary`'
+          echo '- `nix run .#validate-env`'
+          echo '- `nix run .#test-isolation`'
+          echo '- `nix run .#ports`'
+          echo '- `nix run .#check-ports`'
+          echo '- `nix run .#features`'
+          echo '- `nix run .#framework::test`'
+          echo '- `nix run .#framework::install`'
+          echo '- `nix run .#framework::upgrade`'
           echo ""
           echo "## Invariants"
           echo '- Treat `nixfied/project/` as the primary customization surface.'
-          echo '- Keep command metadata (`api`) aligned with script behavior.'
-          echo '- Keep this map and `docs/repo-index.json` in sync via `nix run .#check`.'
+          echo '- Keep command metadata aligned with script behavior.'
+          echo '- Keep this map and `docs/repo-index.json` in sync when command surfaces or key docs change.'
         } > "$TMP_MAP"
 
         verify_file() {
@@ -408,7 +501,7 @@ let
 
         if [ "$rc" -ne 0 ]; then
           log_error "discovery artifacts are out of date."
-          log_info "refresh with: nix run .#check -- ${refreshArg}"
+          log_info "refresh the committed discovery artifacts with the configured discovery generator"
           exit "$rc"
         fi
 

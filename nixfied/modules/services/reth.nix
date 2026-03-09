@@ -1,6 +1,14 @@
 { lib, ... }:
 let
   t = lib.types;
+  sourceSpec = t.submodule {
+    options = {
+      package = lib.mkOption {
+        type = t.nullOr t.package;
+        default = null;
+      };
+    };
+  };
 in
 {
   options.nixfied.services.reth = {
@@ -19,6 +27,26 @@ in
     portKeyAuth = lib.mkOption {
       type = t.str;
       default = "rethAuth";
+    };
+    dataDirName = lib.mkOption {
+      type = t.str;
+      default = "reth";
+    };
+    network = lib.mkOption {
+      type = t.str;
+      default = "local";
+    };
+    devMode = lib.mkOption {
+      type = t.bool;
+      default = false;
+    };
+    extraArgs = lib.mkOption {
+      type = t.listOf t.str;
+      default = [ ];
+    };
+    sources = lib.mkOption {
+      type = t.attrsOf sourceSpec;
+      default = { };
     };
     sourceKeys = lib.mkOption {
       type = t.listOf t.str;

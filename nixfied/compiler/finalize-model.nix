@@ -7,6 +7,7 @@
   services,
   tasks,
   workflows,
+  features,
   views,
 }:
 let
@@ -20,6 +21,7 @@ let
     services = services;
     tasks = tasks;
     workflows = workflows;
+    features = features;
   };
 
   model = canonical.canonicalize {
@@ -42,11 +44,13 @@ let
     services = services;
     tasks = tasks;
     workflows = workflows;
+    features = features;
 
     views = {
       apps = views.apps;
       help = views.help;
       docs = views.docs;
+      features = views.features;
     };
 
     state = {

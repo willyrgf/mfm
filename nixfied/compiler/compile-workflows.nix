@@ -259,24 +259,50 @@ let
         else
           deriveStages workflowId unitMap;
 
-      plan = map (
-        unitName:
-        let
-          unit = unitMap.${unitName};
-        in
-        {
-          name = unitName;
-          taskId = unit.taskId;
-          needs = unit.needs;
-          locks = unit.locks;
-          when = unit.when;
-          skipIfMissingEnv = unit.skipIfMissingEnv;
-          priority = unit.priority;
-          scheduling = unit.scheduling;
-          deps = unit.deps;
-          produces = unit.produces;
-        }
-      ) order;
+      stageIndexByUnit = builtins.listToAttrs (
+        builtins.concatLists (
+          lib.imap0 (
+            stageIndex: stageUnits:
+            map (unitName: {
+              name = unitName;
+              value = stageIndex;
+            }) stageUnits
+          ) workflowStages
+        )
+      );
+
+      plan =
+        builtins.sort
+          (
+            a: b:
+            if a.stage != b.stage then
+              a.stage < b.stage
+            else if a.priority != b.priority then
+              a.priority > b.priority
+            else
+              a.name < b.name
+          )
+          (
+            map (
+              unitName:
+              let
+                unit = unitMap.${unitName};
+              in
+              {
+                name = unitName;
+                stage = stageIndexByUnit.${unitName};
+                taskId = unit.taskId;
+                needs = unit.needs;
+                locks = unit.locks;
+                when = unit.when;
+                skipIfMissingEnv = unit.skipIfMissingEnv;
+                priority = unit.priority;
+                scheduling = unit.scheduling;
+                deps = unit.deps;
+                produces = unit.produces;
+              }
+            ) order
+          );
     in
     canonical.canonicalize {
       id = workflowId;

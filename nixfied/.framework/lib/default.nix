@@ -4,6 +4,8 @@
   pkgs,
   project,
   hooks ? { },
+  commandSurfaces ? null,
+  featureInventory ? null,
 }:
 
 let
@@ -51,6 +53,10 @@ let
   discovery = import ./discovery.nix {
     inherit pkgs project;
     inherit (helpers) loggingPrelude;
+    inherit
+      commandSurfaces
+      featureInventory
+      ;
   };
   process = import ./process.nix {
     inherit pkgs;
@@ -60,10 +66,11 @@ let
     inherit pkgs project;
     inherit (helpers) loggingPrelude;
   };
-  processRegistry = import ./process-registry.nix {
+  runtimeEvents = import ./runtime-events.nix {
     inherit pkgs project;
     inherit (helpers) loggingPrelude;
   };
+  managedServiceLifecycle = import ./managed-service-lifecycle.nix { inherit pkgs; };
   slotEnvRuntime = import ./slot-env-runtime.nix { inherit pkgs; };
   servicePolicy = import ./service-policy.nix { inherit pkgs; };
   portUtils = import ./port-utils.nix {
@@ -103,6 +110,7 @@ in
   inherit appApi;
   inherit serviceApi;
   inherit discovery;
+  inherit managedServiceLifecycle;
   inherit (process) mkSignalHandler mkProcessManager;
   inherit (id)
     mkPlanId
@@ -110,13 +118,7 @@ in
     mkRunId
     resolveId
     ;
-  inherit (processRegistry)
-    processStatus
-    processSlots
-    processRuns
-    processInspect
-    processStop
-    processGc
+  inherit (runtimeEvents)
     emitEvent
     serviceEvents
     serviceLogs

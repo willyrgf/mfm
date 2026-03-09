@@ -6,7 +6,6 @@
 }:
 
 let
-  cfg = project.modules.postgres or { };
   summary = import ../lib/summary.nix { inherit pkgs project; };
   helpers = import ../lib/helpers.nix {
     inherit pkgs project;
@@ -14,27 +13,27 @@ let
   };
   loggingPrelude = helpers.loggingPrelude;
   serviceApi = import ../lib/service-api.nix { inherit pkgs; };
-  processRegistry = import ../lib/process-registry.nix { inherit pkgs project; };
+  runtimeEvents = import ../lib/runtime-events.nix { inherit pkgs project; };
   observability = import ../lib/service-observability.nix {
     inherit
       pkgs
       slots
-      processRegistry
+      runtimeEvents
       ;
   };
-  pgPackage = cfg.package or pkgs.postgresql_16;
-  pgDatabase = cfg.database or "app";
-  testDatabase = cfg.testDatabase or "${pgDatabase}_test";
-  portKey = cfg.portKey or "postgres";
+  config = import ./config.nix { inherit pkgs project; };
+  pgPackage = config.package or pkgs.postgresql_16;
+  pgDatabase = config.database or "app";
+  testDatabase = config.testDatabase or "${pgDatabase}_test";
+  portKey = config.portKey or "postgres";
   portVar = slots.portVarName portKey;
-  dataDirName = cfg.dataDirName or "postgres";
+  dataDirName = config.dataDirName or "postgres";
   pgdataExpr = slots.getServiceDir dataDirName;
   runtimePrimitives = serviceApi.mkRuntimePrimitivesV1 {
     logLevelDefault = toString ((project.logging or { }).level or "info");
     outputModeDefault = toString ((project.logging or { }).output or "stdout");
   };
 
-  config = import ./config.nix { inherit pkgs project; };
   lifecycle = import ./lifecycle.nix {
     inherit
       pkgs
@@ -49,6 +48,7 @@ let
       pkgs
       project
       slots
+      config
       loggingPrelude
       ;
   };
@@ -57,6 +57,7 @@ let
       pkgs
       project
       slots
+      config
       loggingPrelude
       ;
   };
@@ -65,6 +66,7 @@ let
       pkgs
       project
       slots
+      config
       loggingPrelude
       ;
   };
@@ -73,150 +75,13 @@ let
       pkgs
       project
       slots
+      config
       loggingPrelude
       ;
   };
   portMgmt = import ./port-management.nix {
     inherit pkgs loggingPrelude;
   };
-
-  restart = pkgs.writeShellScript "postgres-restart" ''
-    set -euo pipefail
-    source <(${slots.getSlotInfo})
-
-    PORT_VAR="${portVar}"
-    export PGPORT="''${!PORT_VAR}"
-    export PGDATA="${pgdataExpr}"
-    SOCKET_HASH=$(printf '%s' "''${RUN_DIR:-$PGDATA}" | ${pkgs.coreutils}/bin/cksum | ${pkgs.coreutils}/bin/cut -d ' ' -f1)
-    export PGSOCKET_DIR="''${PGSOCKET_DIR:-/tmp/nixfied-pg-$SOCKET_HASH}"
-
-    ${lifecycle.stop}
-    ${lifecycle.start}
-  '';
-
-  status = pkgs.writeShellScript "postgres-status" ''
-    set -euo pipefail
-    source <(${slots.getSlotInfo})
-
-    PORT_VAR="${portVar}"
-    PGPORT="''${PGPORT:-''${!PORT_VAR}}"
-    PGDATA="''${PGDATA:-${pgdataExpr}}"
-
-    RUNNING=false
-    if ${pgPackage}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
-      RUNNING=true
-    fi
-
-    PID=""
-    if [ -f "$PGDATA/postmaster.pid" ]; then
-      PID=$(head -1 "$PGDATA/postmaster.pid" 2>/dev/null || true)
-    fi
-
-    ${observability.mkStatusMergeBlock {
-      service = "postgres";
-      defaultLogPathExpr = ''"$PGDATA/postgres.log"'';
-    }}
-
-    echo "service=postgres slot=$SLOT env=$ENV port=$PGPORT pgdata=$PGDATA running=$RUNNING pid=''${PID:-unknown} scope=$SCOPE owner_run_id=''${OWNER_RUN_ID:-unknown} owner_scope=''${OWNER_SCOPE:-unknown} ephemeral_root=''${EPHEMERAL_ROOT:-none} registry_state=''${REGISTRY_STATE:-unknown} slot_owner=''${SLOT_OWNER:-unknown} wait_reason=''${WAIT_REASON:-none} log_path=$EFFECTIVE_LOG_PATH"
-
-    if [ "$RUNNING" = "true" ]; then
-      exit 0
-    fi
-    exit 1
-  '';
-
-  health = pkgs.writeShellScript "postgres-health" ''
-    ${loggingPrelude}
-
-    set -euo pipefail
-    source <(${slots.getSlotInfo})
-
-    PORT_VAR="${portVar}"
-    PGPORT="''${PGPORT:-''${!PORT_VAR}}"
-
-    if ${pgPackage}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
-      log_ok "PostgreSQL healthy port=$PGPORT"
-      exit 0
-    fi
-
-    log_error "PostgreSQL unhealthy port=$PGPORT"
-    exit 1
-  '';
-
-  ready = pkgs.writeShellScript "postgres-ready" ''
-    ${loggingPrelude}
-
-    set -euo pipefail
-    source <(${slots.getSlotInfo})
-
-    PORT_VAR="${portVar}"
-    PGPORT="''${PGPORT:-''${!PORT_VAR}}"
-
-    if ! ${pgPackage}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
-      log_error "PostgreSQL not ready port=$PGPORT (pg_isready failed)"
-      exit 1
-    fi
-
-    if ${pgPackage}/bin/psql -h localhost -p "$PGPORT" -U postgres -d postgres -Atqc "select 1;" >/dev/null 2>&1; then
-      log_ok "PostgreSQL ready port=$PGPORT"
-      exit 0
-    fi
-
-    log_error "PostgreSQL not ready port=$PGPORT (query failed)"
-    exit 1
-  '';
-
-  readyTest = pkgs.writeShellScript "postgres-ready-test" ''
-    ${loggingPrelude}
-
-    set -euo pipefail
-    source <(${slots.getSlotInfo})
-
-    PORT_VAR="${portVar}"
-    PGPORT="''${PGPORT:-''${!PORT_VAR}}"
-    PGDATABASE="''${PGDATABASE:-${testDatabase}}"
-
-    if ! ${pgPackage}/bin/pg_isready -U postgres -h localhost -p "$PGPORT" -q 2>/dev/null; then
-      log_error "PostgreSQL not ready for test db port=$PGPORT database=$PGDATABASE (pg_isready failed)"
-      exit 1
-    fi
-
-    if ! ${pgPackage}/bin/psql -h localhost -p "$PGPORT" -U postgres -d postgres -Atqc "select 1;" >/dev/null 2>&1; then
-      log_error "PostgreSQL not ready for test db port=$PGPORT database=$PGDATABASE (maintenance query failed)"
-      exit 1
-    fi
-
-    if ${pgPackage}/bin/psql -h localhost -p "$PGPORT" -U postgres -d "$PGDATABASE" -Atqc "select 1;" >/dev/null 2>&1; then
-      log_ok "PostgreSQL ready for test db port=$PGPORT database=$PGDATABASE"
-      exit 0
-    fi
-
-    log_error "PostgreSQL not ready for test db port=$PGPORT database=$PGDATABASE (database query failed)"
-    exit 1
-  '';
-
-  checkConfig = pkgs.writeShellScript "postgres-check-config" ''
-    ${loggingPrelude}
-
-    set -euo pipefail
-    source <(${slots.getSlotInfo})
-
-    PGDATA="${pgdataExpr}"
-
-    if [ ! -f "$PGDATA/postgresql.conf" ]; then
-      log_error "missing postgresql.conf at $PGDATA"
-      exit 1
-    fi
-
-    if ${pgPackage}/bin/postgres -D "$PGDATA" -C port >/dev/null 2>&1; then
-      log_ok "PostgreSQL configuration valid pgdata=$PGDATA"
-      exit 0
-    fi
-
-    log_error "PostgreSQL configuration invalid pgdata=$PGDATA"
-    exit 1
-  '';
-
   shell = pkgs.writeShellScript "postgres-shell" ''
     set -euo pipefail
     source <(${slots.getSlotInfo})
@@ -268,22 +133,22 @@ let
         details = "Stops PostgreSQL for the current slot and environment.";
       };
       restart = {
-        script = restart;
+        script = lifecycle.restart;
         summary = "Restart PostgreSQL server";
         details = "Stops then starts PostgreSQL for the current slot and environment.";
       };
       status = {
-        script = status;
+        script = lifecycle.status;
         summary = "Show PostgreSQL status";
         details = "Prints PostgreSQL status for the current slot and environment.";
       };
       health = {
-        script = health;
+        script = lifecycle.health;
         summary = "Run PostgreSQL health check";
         details = "Checks PostgreSQL readiness on the configured port.";
       };
       check-config = {
-        script = checkConfig;
+        script = lifecycle.checkConfig;
         summary = "Validate PostgreSQL configuration";
         details = "Validates postgresql.conf for the current slot and environment.";
       };
@@ -308,13 +173,13 @@ let
         details = "Performs init/start/setup-db using the configured test database.";
       };
       ready = {
-        script = ready;
+        script = lifecycle.ready;
         hook = "READY";
         summary = "Wait for PostgreSQL readiness";
         details = "Checks PostgreSQL accepts local SQL queries on the configured port.";
       };
       ready-test = {
-        script = readyTest;
+        script = lifecycle.readyTest;
         hook = "READY_TEST";
         summary = "Wait for PostgreSQL test-database readiness";
         details = "Checks PostgreSQL and the configured test database accept local SQL queries.";
@@ -399,6 +264,12 @@ in
     init
     start
     stop
+    restart
+    status
+    health
+    ready
+    readyTest
+    checkConfig
     setupDb
     fullStart
     fullStartTest
@@ -407,11 +278,6 @@ in
 
   # Extended lifecycle
   inherit
-    restart
-    status
-    health
-    ready
-    checkConfig
     shell
     log
     logs

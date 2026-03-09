@@ -42,6 +42,13 @@ let
       ;
   };
 
+  compileFeatures = import ./compile-features.nix {
+    inherit
+      lib
+      canonical
+      ;
+  };
+
   compileViews = import ./compile-views.nix { inherit lib; };
 
   finalizeModel = import ./finalize-model.nix {
@@ -89,10 +96,21 @@ in
         inherit tasks;
       };
 
+      features = compileFeatures {
+        inherit
+          projectRoot
+          runtime
+          services
+          tasks
+          workflows
+          ;
+      };
+
       views = compileViews {
         inherit projectRoot;
         resolved = resolvedModuleGraph.config;
         inherit
+          features
           runtime
           services
           tasks
@@ -108,6 +126,7 @@ in
           services
           tasks
           workflows
+          features
           views
           ;
         resolved = resolvedModuleGraph.config;
@@ -121,5 +140,6 @@ in
       views = views;
       runtime = runtime;
       services = services;
+      features = features;
     };
 }

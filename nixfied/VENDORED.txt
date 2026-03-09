@@ -4,7 +4,7 @@ Vendored Framework
 This repository vendors the Nixfied framework under `nixfied/`.
 
 Framework source revision (install/upgrade):
-- 6efb1c1c797226a63167f8b3e9e0d6f0f6132099
+- f00c972765c15b98d3057246ca1658ae2d50fe07
 
 Framework source revision workflow:
 - initialized via `framework::install`

@@ -74,12 +74,21 @@ let
           null
         else
           pkgs.writeText "${name}-app-contract.json" (builtins.toJSON appContract);
+      contractRuntime =
+        if appContract == null then
+          null
+        else
+          shellContract.mkContractRuntime {
+            inherit name;
+            contract = appContract;
+          };
       contractPrelude =
         if appContract == null then
           ""
         else
           ''
             NIXFIED_APP_CONTRACT_FILE="${toString contractFile}"
+            NIXFIED_APP_CONTRACT_RUNTIME="${toString contractRuntime}"
             nixfied_contract_validate_env "$NIXFIED_APP_CONTRACT_FILE"
             nixfied_contract_validate_args "$NIXFIED_APP_CONTRACT_FILE" "$@"
           '';

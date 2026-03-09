@@ -561,10 +561,177 @@ let
       };
     };
 
+  valueToString =
+    value:
+    if value == null then
+      ""
+    else if builtins.isBool value then
+      if value then "true" else "false"
+    else
+      toString value;
+
+  normalizeArgSpec =
+    argSpec:
+    let
+      kind =
+        if !(argSpec ? kind) || argSpec.kind == null then
+          if (argSpec ? long) || (argSpec ? short) then "option" else "positional"
+        else
+          argSpec.kind;
+      type = argSpec.type or (if kind == "flag" then "bool" else "string");
+    in
+    {
+      name = argSpec.name or "";
+      inherit
+        kind
+        type
+        ;
+      long = argSpec.long or "";
+      short = argSpec.short or "";
+      required = argSpec.required or false;
+      values = argSpec.values or [ ];
+      min = if argSpec ? min then argSpec.min else null;
+      max = if argSpec ? max then argSpec.max else null;
+    };
+
+  normalizeEnvSpec =
+    envSpec:
+    {
+      name = envSpec.name or "";
+      type = envSpec.type or "string";
+      required = envSpec.required or false;
+      hasDefault = envSpec ? default;
+      default = if envSpec ? default then envSpec.default else null;
+      min = if envSpec ? min then envSpec.min else null;
+      max = if envSpec ? max then envSpec.max else null;
+      values = envSpec.values or [ ];
+      aliases = envSpec.aliases or [ ];
+    };
+
+  mkShellArray =
+    var: values: ''
+      declare -ag ${var}=(
+    ${lib.concatStringsSep "\n" (map (value: "  ${lib.escapeShellArg value}") values)}
+      )
+    '';
+
+  mkShellAssoc =
+    var: entries: ''
+      declare -Ag ${var}=()
+    ${lib.concatStringsSep "\n" (
+      map (entry: "${var}[${lib.escapeShellArg entry.key}]=${lib.escapeShellArg entry.value}") entries
+    )}
+    '';
+
+  mkContractRuntime =
+    { name, contract }:
+    let
+      validated = validateAppContract { inherit name contract; };
+      noneSentinel = "__NIXFIED_NONE__";
+      normalizedArgs = map normalizeArgSpec (validated.args or [ ]);
+      normalizedEnv = map normalizeEnvSpec (validated.env or [ ]);
+      failureCodes = validated.failureCodes or defaultFailureCodes;
+      positionalArgNames = map (argSpec: argSpec.name) (
+        builtins.filter (argSpec: argSpec.kind == "positional") normalizedArgs
+      );
+      argEntries = extractor: map (argSpec: {
+        key = argSpec.name;
+        value = extractor argSpec;
+      }) normalizedArgs;
+      envEntries = extractor: map (envSpec: {
+        key = envSpec.name;
+        value = extractor envSpec;
+      }) normalizedEnv;
+      longEntries = builtins.filter (entry: entry.key != "") (map (argSpec: {
+        key = argSpec.long;
+        value = argSpec.name;
+      }) normalizedArgs);
+      shortEntries = builtins.filter (entry: entry.key != "") (map (argSpec: {
+        key = argSpec.short;
+        value = argSpec.name;
+      }) normalizedArgs);
+      failureCodeEntries = map (failureName: {
+        key = toString failureCodes.${failureName};
+        value = failureName;
+      }) (builtins.attrNames failureCodes);
+    in
+    pkgs.writeText "${name}-app-contract-runtime.sh" ''
+      NIXFIED_CONTRACT_PLAN_NAME=${lib.escapeShellArg validated.name}
+      NIXFIED_CONTRACT_ALLOW_UNKNOWN=${lib.escapeShellArg (if validated.allowUnknownArgs or false then "true" else "false")}
+
+      ${mkShellArray "NIXFIED_CONTRACT_ARG_NAMES" (map (argSpec: argSpec.name) normalizedArgs)}
+      ${mkShellArray "NIXFIED_CONTRACT_POSITIONAL_SPECS" positionalArgNames}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ARG_KIND" (argEntries (argSpec: argSpec.kind))}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ARG_TYPE" (argEntries (argSpec: argSpec.type))}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ARG_REQUIRED" (
+        argEntries (argSpec: if argSpec.required then "true" else "false")
+      )}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ARG_VALUES" (
+        argEntries (argSpec: lib.concatStringsSep "\n" argSpec.values)
+      )}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ARG_VALUES_LABEL" (
+        argEntries (argSpec: lib.concatStringsSep "," argSpec.values)
+      )}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ARG_MIN" (
+        argEntries (argSpec: if argSpec.min == null then noneSentinel else toString argSpec.min)
+      )}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ARG_MAX" (
+        argEntries (argSpec: if argSpec.max == null then noneSentinel else toString argSpec.max)
+      )}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ARG_BY_LONG" longEntries}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ARG_BY_SHORT" shortEntries}
+
+      ${mkShellArray "NIXFIED_CONTRACT_ENV_NAMES" (map (envSpec: envSpec.name) normalizedEnv)}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ENV_TYPE" (envEntries (envSpec: envSpec.type))}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ENV_REQUIRED" (
+        envEntries (envSpec: if envSpec.required then "true" else "false")
+      )}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ENV_DEFAULT" (
+        envEntries (
+          envSpec: if envSpec.hasDefault then valueToString envSpec.default else noneSentinel
+        )
+      )}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ENV_MIN" (
+        envEntries (envSpec: if envSpec.min == null then noneSentinel else toString envSpec.min)
+      )}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ENV_MAX" (
+        envEntries (envSpec: if envSpec.max == null then noneSentinel else toString envSpec.max)
+      )}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ENV_VALUES" (
+        envEntries (envSpec: lib.concatStringsSep "\n" envSpec.values)
+      )}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ENV_VALUES_LABEL" (
+        envEntries (envSpec: lib.concatStringsSep "," envSpec.values)
+      )}
+      ${mkShellAssoc "NIXFIED_CONTRACT_ENV_ALIASES" (
+        envEntries (envSpec: lib.concatStringsSep "\n" envSpec.aliases)
+      )}
+
+      ${mkShellAssoc "NIXFIED_CONTRACT_FAILURE_CODE" failureCodeEntries}
+    '';
+
   runtime = pkgs.writeShellScript "nixfied-shell-contract-runtime" ''
     NIXFIED_CONTRACT_JQ="${pkgs.jq}/bin/jq"
     NIXFIED_CONTRACT_NONE="__NIXFIED_NONE__"
     NIXFIED_CONTRACT_RESOLVED_VALUE=""
+    NIXFIED_CONTRACT_PLAN_LOADED="0"
+    NIXFIED_CONTRACT_PLAN_FILE=""
+    NIXFIED_CONTRACT_RUNTIME_LOG_LEVEL_ALIASES=${
+      lib.escapeShellArg (lib.concatStringsSep "\n" runtimeLogLevelAliases)
+    }
+    NIXFIED_CONTRACT_RUNTIME_LOG_LEVEL_VALUES=${lib.escapeShellArg (lib.concatStringsSep "\n" runtimeLogLevels)}
+    NIXFIED_CONTRACT_RUNTIME_LOG_LEVEL_VALUES_LABEL=${
+      lib.escapeShellArg (lib.concatStringsSep "," runtimeLogLevels)
+    }
+    NIXFIED_CONTRACT_RUNTIME_OUTPUT_MODE_ALIASES=${
+      lib.escapeShellArg (lib.concatStringsSep "\n" runtimeOutputModeAliases)
+    }
+    NIXFIED_CONTRACT_RUNTIME_OUTPUT_MODE_VALUES=${
+      lib.escapeShellArg (lib.concatStringsSep "\n" runtimeOutputModes)
+    }
+    NIXFIED_CONTRACT_RUNTIME_OUTPUT_MODE_VALUES_LABEL=${
+      lib.escapeShellArg (lib.concatStringsSep "," runtimeOutputModes)
+    }
 
     _nixfied_contract_err() {
       if command -v log_error >/dev/null 2>&1; then
@@ -592,9 +759,37 @@ let
       [ "''${!name+x}" = "x" ]
     }
 
+    _nixfied_contract_load_runtime_plan() {
+      local contract_file="''${1:-}"
+      local runtime_file="''${NIXFIED_APP_CONTRACT_RUNTIME:-}"
+
+      if [ "''${NIXFIED_CONTRACT_PLAN_LOADED:-0}" = "1" ] && [ "$runtime_file" = "''${NIXFIED_CONTRACT_PLAN_FILE:-}" ]; then
+        return 0
+      fi
+
+      if [ -z "$runtime_file" ]; then
+        _nixfied_contract_err "app contract runtime plan not configured"
+        if [ -n "$contract_file" ]; then
+          _nixfied_contract_err "set NIXFIED_APP_CONTRACT_RUNTIME alongside NIXFIED_APP_CONTRACT_FILE=$contract_file"
+        fi
+        return 1
+      fi
+
+      if [ ! -f "$runtime_file" ]; then
+        _nixfied_contract_err "app contract runtime plan missing path=$runtime_file"
+        return 1
+      fi
+
+      # shellcheck source=/dev/null
+      source "$runtime_file"
+      NIXFIED_CONTRACT_PLAN_FILE="$runtime_file"
+      NIXFIED_CONTRACT_PLAN_LOADED="1"
+      return 0
+    }
+
     _nixfied_contract_resolve_env_with_aliases() {
       local name="$1"
-      local aliases_json="$2"
+      local aliases_block="$2"
       local default="$3"
       local label="$4"
       local strict="$5"
@@ -609,8 +804,8 @@ let
         canonical_value="''${!name-}"
       fi
 
-      if [ -n "$aliases_json" ] && [ "$aliases_json" != "[]" ]; then
-        while IFS= read -r current_alias; do
+      if [ -n "$aliases_block" ]; then
+        while IFS= read -r current_alias || [ -n "$current_alias" ]; do
           [ -z "$current_alias" ] && continue
           if ! _nixfied_contract_var_is_set "$current_alias"; then
             continue
@@ -626,7 +821,7 @@ let
             _nixfied_contract_err "$label has conflicting alias values alias=$alias_name and alias=$current_alias; set one alias or use matching values"
             return 1
           fi
-        done < <(printf '%s' "$aliases_json" | "$NIXFIED_CONTRACT_JQ" -r '.[]')
+        done <<< "$aliases_block"
       fi
 
       if [ "$strict" = "1" ]; then
@@ -680,7 +875,13 @@ let
           ;;
       esac
 
-      if ! _nixfied_contract_resolve_env_with_aliases "LOG_LEVEL" '["NIXFIED_LOG_LEVEL"]' "$log_level_default" "env:LOG_LEVEL" "1"; then
+      if ! _nixfied_contract_resolve_env_with_aliases \
+        "LOG_LEVEL" \
+        "$NIXFIED_CONTRACT_RUNTIME_LOG_LEVEL_ALIASES" \
+        "$log_level_default" \
+        "env:LOG_LEVEL" \
+        "1"
+      then
         return 2
       fi
       log_level="$NIXFIED_CONTRACT_RESOLVED_VALUE"
@@ -697,7 +898,13 @@ let
           ;;
       esac
 
-      if ! _nixfied_contract_resolve_env_with_aliases "OUTPUT_MODE" '["NIXFIED_OUTPUT_MODE"]' "$NIXFIED_CONTRACT_NONE" "env:OUTPUT_MODE" "1"; then
+      if ! _nixfied_contract_resolve_env_with_aliases \
+        "OUTPUT_MODE" \
+        "$NIXFIED_CONTRACT_RUNTIME_OUTPUT_MODE_ALIASES" \
+        "$NIXFIED_CONTRACT_NONE" \
+        "env:OUTPUT_MODE" \
+        "1"
+      then
         return 2
       fi
       output_mode="$NIXFIED_CONTRACT_RESOLVED_VALUE"
@@ -728,11 +935,14 @@ let
     _nixfied_contract_validate_scalar() {
       local type="$1"
       local value="$2"
-      local values_json="$3"
-      local min="$4"
-      local max="$5"
-      local label="$6"
+      local values_block="$3"
+      local values_label="$4"
+      local min="$5"
+      local max="$6"
+      local label="$7"
       local num=0
+      local enum_value=""
+      local enum_match=0
 
       case "$type" in
         string)
@@ -768,8 +978,15 @@ let
           fi
           ;;
         enum)
-          if ! printf '%s' "$values_json" | "$NIXFIED_CONTRACT_JQ" -e --arg value "$value" 'index($value) != null' >/dev/null 2>&1; then
-            _nixfied_contract_err "$label must be one of $(printf '%s' "$values_json" | "$NIXFIED_CONTRACT_JQ" -r 'join(",")') (got '$value')"
+          while IFS= read -r enum_value || [ -n "$enum_value" ]; do
+            [ -z "$enum_value" ] && continue
+            if [ "$enum_value" = "$value" ]; then
+              enum_match=1
+              break
+            fi
+          done <<< "$values_block"
+          if [ "$enum_match" != "1" ]; then
+            _nixfied_contract_err "$label must be one of $values_label (got '$value')"
             return 1
           fi
           return 0
@@ -830,28 +1047,28 @@ let
     }
 
     nixfied_contract_validate_env() {
-      local contract_file="$1"
+      local contract_file="''${1:-}"
       local failures=0
-      local name="" type="" required="" default="" min="" max="" values_json="" aliases_json="" env_spec_json=""
+      local name="" type="" required="" default="" min="" max="" values_block="" values_label="" aliases_block=""
       local strict_runtime_env=0
       local value=""
 
-      while IFS= read -r env_spec_json; do
-        [ -z "$env_spec_json" ] && continue
-        name="$(printf '%s' "$env_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '.name // ""')"
-        type="$(printf '%s' "$env_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '.type // "string"')"
-        required="$(printf '%s' "$env_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '(.required // false) | tostring')"
-        default="$(printf '%s' "$env_spec_json" | "$NIXFIED_CONTRACT_JQ" -r 'if has("default") then (.default | tostring) else "__NIXFIED_NONE__" end')"
-        min="$(printf '%s' "$env_spec_json" | "$NIXFIED_CONTRACT_JQ" -r 'if has("min") then (.min | tostring) else "__NIXFIED_NONE__" end')"
-        max="$(printf '%s' "$env_spec_json" | "$NIXFIED_CONTRACT_JQ" -r 'if has("max") then (.max | tostring) else "__NIXFIED_NONE__" end')"
-        values_json="$(printf '%s' "$env_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '(.values // []) | @json')"
-        aliases_json="$(printf '%s' "$env_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '(.aliases // []) | @json')"
-        [ -z "$name" ] && continue
+      _nixfied_contract_load_runtime_plan "$contract_file" || return 2
+
+      for name in "''${NIXFIED_CONTRACT_ENV_NAMES[@]}"; do
+        type="''${NIXFIED_CONTRACT_ENV_TYPE[$name]}"
+        required="''${NIXFIED_CONTRACT_ENV_REQUIRED[$name]}"
+        default="''${NIXFIED_CONTRACT_ENV_DEFAULT[$name]}"
+        min="''${NIXFIED_CONTRACT_ENV_MIN[$name]}"
+        max="''${NIXFIED_CONTRACT_ENV_MAX[$name]}"
+        values_block="''${NIXFIED_CONTRACT_ENV_VALUES[$name]}"
+        values_label="''${NIXFIED_CONTRACT_ENV_VALUES_LABEL[$name]}"
+        aliases_block="''${NIXFIED_CONTRACT_ENV_ALIASES[$name]}"
         strict_runtime_env=0
         if [ "$name" = "LOG_LEVEL" ] || [ "$name" = "OUTPUT_MODE" ]; then
           strict_runtime_env=1
         fi
-        if ! _nixfied_contract_resolve_env_with_aliases "$name" "$aliases_json" "$default" "env:$name" "$strict_runtime_env"; then
+        if ! _nixfied_contract_resolve_env_with_aliases "$name" "$aliases_block" "$default" "env:$name" "$strict_runtime_env"; then
           failures=1
           continue
         fi
@@ -864,13 +1081,21 @@ let
         fi
 
         if [ -n "$value" ]; then
-          if ! _nixfied_contract_validate_scalar "$type" "$value" "$values_json" "$min" "$max" "env:$name"; then
+          if ! _nixfied_contract_validate_scalar \
+            "$type" \
+            "$value" \
+            "$values_block" \
+            "$values_label" \
+            "$min" \
+            "$max" \
+            "env:$name"
+          then
             failures=1
             continue
           fi
           export "$name=$value"
         fi
-      done < <("$NIXFIED_CONTRACT_JQ" -c '(.env // [])[]' "$contract_file")
+      done
 
       if [ "$failures" -ne 0 ]; then
         return 2
@@ -879,72 +1104,18 @@ let
     }
 
     nixfied_contract_validate_args() {
-      local contract_file="$1"
+      local contract_file="''${1:-}"
       shift || true
 
-      local allow_unknown=""
-      allow_unknown="$("$NIXFIED_CONTRACT_JQ" -r '.allowUnknownArgs // false' "$contract_file")"
+      _nixfied_contract_load_runtime_plan "$contract_file" || return 2
+
+      local allow_unknown="$NIXFIED_CONTRACT_ALLOW_UNKNOWN"
 
       local failures=0
-      local name="" kind="" long="" short="" type="" required="" values_json="" min="" max="" arg_spec_json=""
-      local token="" value="" lookup_name=""
-      local -a arg_names=()
-      local -a positional_specs=()
+      local name="" long="" lookup_name="" token="" value=""
       local -a positional_values=()
       local -a short_cluster=()
-      declare -A spec_kind=()
-      declare -A spec_type=()
-      declare -A spec_required=()
-      declare -A spec_values=()
-      declare -A spec_min=()
-      declare -A spec_max=()
-      declare -A by_long=()
-      declare -A by_short=()
       declare -A seen=()
-
-      while IFS= read -r arg_spec_json; do
-        [ -z "$arg_spec_json" ] && continue
-        name="$(printf '%s' "$arg_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '.name // ""')"
-        kind="$(printf '%s' "$arg_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '.kind // ""')"
-        long="$(printf '%s' "$arg_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '.long // ""')"
-        short="$(printf '%s' "$arg_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '.short // ""')"
-        type="$(printf '%s' "$arg_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '.type // ""')"
-        required="$(printf '%s' "$arg_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '(.required // false) | tostring')"
-        values_json="$(printf '%s' "$arg_spec_json" | "$NIXFIED_CONTRACT_JQ" -r '(.values // []) | @json')"
-        min="$(printf '%s' "$arg_spec_json" | "$NIXFIED_CONTRACT_JQ" -r 'if has("min") then (.min | tostring) else "__NIXFIED_NONE__" end')"
-        max="$(printf '%s' "$arg_spec_json" | "$NIXFIED_CONTRACT_JQ" -r 'if has("max") then (.max | tostring) else "__NIXFIED_NONE__" end')"
-        [ -z "$name" ] && continue
-        if [ -z "$kind" ]; then
-          if [ -n "$long" ] || [ -n "$short" ]; then
-            kind="option"
-          else
-            kind="positional"
-          fi
-        fi
-        if [ -z "$type" ]; then
-          if [ "$kind" = "flag" ]; then
-            type="bool"
-          else
-            type="string"
-          fi
-        fi
-        arg_names+=("$name")
-        spec_kind["$name"]="$kind"
-        spec_type["$name"]="$type"
-        spec_required["$name"]="$required"
-        spec_values["$name"]="$values_json"
-        spec_min["$name"]="$min"
-        spec_max["$name"]="$max"
-        if [ "$kind" = "positional" ]; then
-          positional_specs+=("$name")
-        fi
-        if [ -n "$long" ]; then
-          by_long["$long"]="$name"
-        fi
-        if [ -n "$short" ]; then
-          by_short["$short"]="$name"
-        fi
-      done < <("$NIXFIED_CONTRACT_JQ" -c '(.args // [])[]' "$contract_file")
 
       while [ "$#" -gt 0 ]; do
         token="$1"
@@ -961,7 +1132,7 @@ let
           --*=*)
             long="''${token%%=*}"
             value="''${token#*=}"
-            lookup_name="''${by_long[$long]:-}"
+            lookup_name="''${NIXFIED_CONTRACT_ARG_BY_LONG[$long]:-}"
             if [ -z "$lookup_name" ]; then
               if [ "$allow_unknown" = "true" ]; then
                 continue
@@ -970,17 +1141,18 @@ let
               failures=1
               continue
             fi
-            if [ "''${spec_kind[$lookup_name]}" = "flag" ]; then
+            if [ "''${NIXFIED_CONTRACT_ARG_KIND[$lookup_name]}" = "flag" ]; then
               _nixfied_contract_err "flag does not accept a value token=$long"
               failures=1
               continue
             fi
             if ! _nixfied_contract_validate_scalar \
-              "''${spec_type[$lookup_name]}" \
+              "''${NIXFIED_CONTRACT_ARG_TYPE[$lookup_name]}" \
               "$value" \
-              "''${spec_values[$lookup_name]}" \
-              "''${spec_min[$lookup_name]}" \
-              "''${spec_max[$lookup_name]}" \
+              "''${NIXFIED_CONTRACT_ARG_VALUES[$lookup_name]}" \
+              "''${NIXFIED_CONTRACT_ARG_VALUES_LABEL[$lookup_name]}" \
+              "''${NIXFIED_CONTRACT_ARG_MIN[$lookup_name]}" \
+              "''${NIXFIED_CONTRACT_ARG_MAX[$lookup_name]}" \
               "arg:$lookup_name"
             then
               failures=1
@@ -990,7 +1162,7 @@ let
             export "NIXFIED_ARG_$(_nixfied_contract_sanitize_name "$lookup_name")=$value"
             ;;
           --*)
-            lookup_name="''${by_long[$token]:-}"
+            lookup_name="''${NIXFIED_CONTRACT_ARG_BY_LONG[$token]:-}"
             if [ -z "$lookup_name" ]; then
               if [ "$allow_unknown" = "true" ]; then
                 continue
@@ -1000,7 +1172,7 @@ let
               continue
             fi
 
-            if [ "''${spec_kind[$lookup_name]}" = "flag" ]; then
+            if [ "''${NIXFIED_CONTRACT_ARG_KIND[$lookup_name]}" = "flag" ]; then
               seen["$lookup_name"]="1"
               export "NIXFIED_ARG_$(_nixfied_contract_sanitize_name "$lookup_name")=true"
               continue
@@ -1014,11 +1186,12 @@ let
             value="$1"
             shift
             if ! _nixfied_contract_validate_scalar \
-              "''${spec_type[$lookup_name]}" \
+              "''${NIXFIED_CONTRACT_ARG_TYPE[$lookup_name]}" \
               "$value" \
-              "''${spec_values[$lookup_name]}" \
-              "''${spec_min[$lookup_name]}" \
-              "''${spec_max[$lookup_name]}" \
+              "''${NIXFIED_CONTRACT_ARG_VALUES[$lookup_name]}" \
+              "''${NIXFIED_CONTRACT_ARG_VALUES_LABEL[$lookup_name]}" \
+              "''${NIXFIED_CONTRACT_ARG_MIN[$lookup_name]}" \
+              "''${NIXFIED_CONTRACT_ARG_MAX[$lookup_name]}" \
               "arg:$lookup_name"
             then
               failures=1
@@ -1028,9 +1201,9 @@ let
             export "NIXFIED_ARG_$(_nixfied_contract_sanitize_name "$lookup_name")=$value"
             ;;
           -*)
-            lookup_name="''${by_short[$token]:-}"
+            lookup_name="''${NIXFIED_CONTRACT_ARG_BY_SHORT[$token]:-}"
             if [ -n "$lookup_name" ]; then
-              if [ "''${spec_kind[$lookup_name]}" = "flag" ]; then
+              if [ "''${NIXFIED_CONTRACT_ARG_KIND[$lookup_name]}" = "flag" ]; then
                 seen["$lookup_name"]="1"
                 export "NIXFIED_ARG_$(_nixfied_contract_sanitize_name "$lookup_name")=true"
               else
@@ -1042,11 +1215,12 @@ let
                 value="$1"
                 shift
                 if ! _nixfied_contract_validate_scalar \
-                  "''${spec_type[$lookup_name]}" \
+                  "''${NIXFIED_CONTRACT_ARG_TYPE[$lookup_name]}" \
                   "$value" \
-                  "''${spec_values[$lookup_name]}" \
-                  "''${spec_min[$lookup_name]}" \
-                  "''${spec_max[$lookup_name]}" \
+                  "''${NIXFIED_CONTRACT_ARG_VALUES[$lookup_name]}" \
+                  "''${NIXFIED_CONTRACT_ARG_VALUES_LABEL[$lookup_name]}" \
+                  "''${NIXFIED_CONTRACT_ARG_MIN[$lookup_name]}" \
+                  "''${NIXFIED_CONTRACT_ARG_MAX[$lookup_name]}" \
                   "arg:$lookup_name"
                 then
                   failures=1
@@ -1070,15 +1244,15 @@ let
               local cluster_ok=1
               local short_tok=""
               for short_tok in "''${short_cluster[@]}"; do
-                lookup_name="''${by_short[$short_tok]:-}"
-                if [ -z "$lookup_name" ] || [ "''${spec_kind[$lookup_name]}" != "flag" ]; then
+                lookup_name="''${NIXFIED_CONTRACT_ARG_BY_SHORT[$short_tok]:-}"
+                if [ -z "$lookup_name" ] || [ "''${NIXFIED_CONTRACT_ARG_KIND[$lookup_name]}" != "flag" ]; then
                   cluster_ok=0
                   break
                 fi
               done
               if [ "$cluster_ok" -eq 1 ]; then
                 for short_tok in "''${short_cluster[@]}"; do
-                  lookup_name="''${by_short[$short_tok]}"
+                  lookup_name="''${NIXFIED_CONTRACT_ARG_BY_SHORT[$short_tok]}"
                   seen["$lookup_name"]="1"
                   export "NIXFIED_ARG_$(_nixfied_contract_sanitize_name "$lookup_name")=true"
                 done
@@ -1100,15 +1274,16 @@ let
 
       local pos_index=0
       local pos_name=""
-      for pos_name in "''${positional_specs[@]}"; do
+      for pos_name in "''${NIXFIED_CONTRACT_POSITIONAL_SPECS[@]}"; do
         if [ "$pos_index" -lt "''${#positional_values[@]}" ]; then
           value="''${positional_values[$pos_index]}"
           if ! _nixfied_contract_validate_scalar \
-            "''${spec_type[$pos_name]}" \
+            "''${NIXFIED_CONTRACT_ARG_TYPE[$pos_name]}" \
             "$value" \
-            "''${spec_values[$pos_name]}" \
-            "''${spec_min[$pos_name]}" \
-            "''${spec_max[$pos_name]}" \
+            "''${NIXFIED_CONTRACT_ARG_VALUES[$pos_name]}" \
+            "''${NIXFIED_CONTRACT_ARG_VALUES_LABEL[$pos_name]}" \
+            "''${NIXFIED_CONTRACT_ARG_MIN[$pos_name]}" \
+            "''${NIXFIED_CONTRACT_ARG_MAX[$pos_name]}" \
             "arg:$pos_name"
           then
             failures=1
@@ -1117,7 +1292,7 @@ let
             export "NIXFIED_ARG_$(_nixfied_contract_sanitize_name "$pos_name")=$value"
           fi
           pos_index=$((pos_index + 1))
-        elif [ "''${spec_required[$pos_name]}" = "true" ]; then
+        elif [ "''${NIXFIED_CONTRACT_ARG_REQUIRED[$pos_name]}" = "true" ]; then
           _nixfied_contract_err "missing required positional arg name=$pos_name"
           failures=1
         fi
@@ -1128,8 +1303,8 @@ let
         failures=1
       fi
 
-      for name in "''${arg_names[@]}"; do
-        if [ "''${spec_required[$name]}" = "true" ] && [ -z "''${seen[$name]:-}" ]; then
+      for name in "''${NIXFIED_CONTRACT_ARG_NAMES[@]}"; do
+        if [ "''${NIXFIED_CONTRACT_ARG_REQUIRED[$name]}" = "true" ] && [ -z "''${seen[$name]:-}" ]; then
           _nixfied_contract_err "missing required arg name=$name"
           failures=1
         fi
@@ -1142,18 +1317,16 @@ let
     }
 
     nixfied_contract_validate_exit() {
-      local contract_file="$1"
+      local contract_file="''${1:-}"
       local exit_code="$2"
 
       if [ "$exit_code" -eq 0 ]; then
         return 0
       fi
 
-      if "$NIXFIED_CONTRACT_JQ" -e --argjson code "$exit_code" '
-        (.failureCodes // {})
-        | to_entries
-        | any(.value == $code)
-      ' "$contract_file" >/dev/null 2>&1; then
+      _nixfied_contract_load_runtime_plan "$contract_file" || return 2
+
+      if [ -n "''${NIXFIED_CONTRACT_FAILURE_CODE[$exit_code]+x}" ]; then
         return 0
       fi
 
@@ -1201,6 +1374,7 @@ in
     validateAppContractErrors
     validateAppContract
     mkDefaultAppContract
+    mkContractRuntime
     runtime
     ;
 }

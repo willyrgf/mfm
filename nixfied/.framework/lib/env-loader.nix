@@ -92,9 +92,40 @@ let
         ${renderErrors allErrs}
       '';
 
-  allowSpecsFile = pkgs.writeText "nixfied-env-file-specs.json" (
-    builtins.toJSON normalizedAllowSpecs
-  );
+  valueToString =
+    value:
+    if value == null then
+      ""
+    else if builtins.isBool value then
+      if value then "1" else "0"
+    else
+      toString value;
+
+  allowSpecNames = map (spec: spec.name) (builtins.filter (spec: spec.name != "") normalizedAllowSpecs);
+
+  allowSpecsRuntime = pkgs.writeText "nixfied-env-file-specs.sh" ''
+    declare -ag NIXFIED_ENV_SPEC_NAMES=(
+  ${lib.concatStringsSep "\n" (map (name: "  ${lib.escapeShellArg name}") allowSpecNames)}
+    )
+    declare -Ag NIXFIED_ENV_SPEC_TYPE=()
+    declare -Ag NIXFIED_ENV_SPEC_REQUIRED=()
+    declare -Ag NIXFIED_ENV_SPEC_HAS_DEFAULT=()
+    declare -Ag NIXFIED_ENV_SPEC_DEFAULT=()
+  ${lib.concatStringsSep "\n" (
+    map (
+      spec:
+      let
+        name = spec.name;
+      in
+      ''
+        NIXFIED_ENV_SPEC_TYPE[${lib.escapeShellArg name}]=${lib.escapeShellArg spec.type}
+        NIXFIED_ENV_SPEC_REQUIRED[${lib.escapeShellArg name}]=${lib.escapeShellArg (if spec.required then "1" else "0")}
+        NIXFIED_ENV_SPEC_HAS_DEFAULT[${lib.escapeShellArg name}]=${lib.escapeShellArg (if spec.hasDefault then "1" else "0")}
+        NIXFIED_ENV_SPEC_DEFAULT[${lib.escapeShellArg name}]=${lib.escapeShellArg (valueToString spec.default)}
+      ''
+    ) (builtins.filter (spec: spec.name != "") normalizedAllowSpecs)
+  )}
+  '';
 
   loadEnvFile = pkgs.writeShellScript "nixfied-load-env-file" ''
     ${loggingPrelude}
@@ -104,12 +135,18 @@ let
     ENV_FILE="''${1:-.env}"
     ENV_FILE_ENABLED="${if envFileEnabled then "1" else "0"}"
     ENV_FILE_STRICT="${if envFileStrict then "1" else "0"}"
-    ENV_SPECS_FILE="${allowSpecsFile}"
+    ENV_SPECS_RUNTIME="${allowSpecsRuntime}"
     if [ "''${BASH_SOURCE[0]:-}" != "$0" ]; then
       NIXFIED_ENV_LOADER_SOURCED=1
     else
       NIXFIED_ENV_LOADER_SOURCED=0
     fi
+    source "$ENV_SPECS_RUNTIME"
+
+    nixfied_env_spec_is_known() {
+      local key="$1"
+      [ -n "''${NIXFIED_ENV_SPEC_TYPE[$key]+x}" ]
+    }
 
     validate_env_value() {
       local key="$1"
@@ -196,21 +233,16 @@ let
 
       if [ ! -f "$ENV_FILE" ]; then
         if [ "$ENV_FILE_STRICT" = "1" ]; then
-          while IFS= read -r SPEC_B64; do
-            [ -z "$SPEC_B64" ] && continue
-            SPEC_JSON="$(printf '%s' "$SPEC_B64" | ${pkgs.coreutils}/bin/base64 -d)"
-            SPEC_NAME="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.name')"
-            SPEC_REQUIRED="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.required')"
-            if [ "$SPEC_REQUIRED" = "true" ] && [ -z "''${!SPEC_NAME:-}" ]; then
+          for SPEC_NAME in "''${NIXFIED_ENV_SPEC_NAMES[@]}"; do
+            SPEC_REQUIRED="''${NIXFIED_ENV_SPEC_REQUIRED[$SPEC_NAME]}"
+            if [ "$SPEC_REQUIRED" = "1" ] && [ -z "''${!SPEC_NAME:-}" ]; then
               log_error "required env key missing key=$SPEC_NAME source=.env"
               return 1
             fi
-          done < <(${pkgs.jq}/bin/jq -r '.[] | @base64' "$ENV_SPECS_FILE")
+          done
         fi
         return 0
       fi
-
-      SPECS_MAP_JSON="$(${pkgs.jq}/bin/jq -c 'reduce .[] as $spec ({}; . + {($spec.name): $spec})' "$ENV_SPECS_FILE")"
 
       while IFS= read -r RAW_LINE || [ -n "$RAW_LINE" ]; do
         LINE="$(printf '%s' "$RAW_LINE" | ${pkgs.gnused}/bin/sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
@@ -239,8 +271,11 @@ let
 
         value="$(printf '%s' "$value" | ${pkgs.gnused}/bin/sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
 
-        SPEC_JSON="$(printf '%s\n' "$SPECS_MAP_JSON" | ${pkgs.jq}/bin/jq -c --arg key "$key" '.[$key] // null')"
-        KNOWN_KEY="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r 'if . == null then "0" else "1" end')"
+        if nixfied_env_spec_is_known "$key"; then
+          KNOWN_KEY="1"
+        else
+          KNOWN_KEY="0"
+        fi
 
         if [ "$KNOWN_KEY" != "1" ] && [ "$ENV_FILE_STRICT" = "1" ]; then
           log_error "unknown .env key key=$key (strict mode enabled)"
@@ -248,7 +283,7 @@ let
         fi
 
         if [ "$KNOWN_KEY" = "1" ]; then
-          SPEC_TYPE="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.type // "string"')"
+          SPEC_TYPE="''${NIXFIED_ENV_SPEC_TYPE[$key]}"
           if [ -z "''${!key:-}" ]; then
             validate_env_value "$key" "$SPEC_TYPE" "$value" || return 1
           else
@@ -261,27 +296,24 @@ let
         fi
       done < "$ENV_FILE"
 
-      while IFS= read -r SPEC_B64; do
-        [ -z "$SPEC_B64" ] && continue
-        SPEC_JSON="$(printf '%s' "$SPEC_B64" | ${pkgs.coreutils}/bin/base64 -d)"
-        SPEC_NAME="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.name')"
-        SPEC_TYPE="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.type // "string"')"
-        SPEC_REQUIRED="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.required')"
-        SPEC_HAS_DEFAULT="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.hasDefault')"
+      for SPEC_NAME in "''${NIXFIED_ENV_SPEC_NAMES[@]}"; do
+        SPEC_TYPE="''${NIXFIED_ENV_SPEC_TYPE[$SPEC_NAME]}"
+        SPEC_REQUIRED="''${NIXFIED_ENV_SPEC_REQUIRED[$SPEC_NAME]}"
+        SPEC_HAS_DEFAULT="''${NIXFIED_ENV_SPEC_HAS_DEFAULT[$SPEC_NAME]}"
 
         if [ -z "''${!SPEC_NAME:-}" ]; then
-          if [ "$SPEC_HAS_DEFAULT" = "true" ]; then
-            SPEC_DEFAULT="$(printf '%s\n' "$SPEC_JSON" | ${pkgs.jq}/bin/jq -r '.default | tostring')"
+          if [ "$SPEC_HAS_DEFAULT" = "1" ]; then
+            SPEC_DEFAULT="''${NIXFIED_ENV_SPEC_DEFAULT[$SPEC_NAME]}"
             validate_env_value "$SPEC_NAME" "$SPEC_TYPE" "$SPEC_DEFAULT" || return 1
             export "$SPEC_NAME=$SPEC_DEFAULT"
-          elif [ "$SPEC_REQUIRED" = "true" ]; then
+          elif [ "$SPEC_REQUIRED" = "1" ]; then
             log_error "required env key missing key=$SPEC_NAME source=.env"
             return 1
           fi
         else
           validate_env_value "$SPEC_NAME" "$SPEC_TYPE" "''${!SPEC_NAME}" || return 1
         fi
-      done < <(${pkgs.jq}/bin/jq -r '.[] | @base64' "$ENV_SPECS_FILE")
+      done
 
       return 0
     }

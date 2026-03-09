@@ -42,6 +42,7 @@ in
 
   ephemeral = {
     copyMode = resolved.runtime.ephemeral.copyMode;
+    includeUntracked = resolved.runtime.ephemeral.includeUntracked;
     excludePatterns = resolved.runtime.ephemeral.excludePatterns;
     extraDirs = resolved.runtime.ephemeral.extraDirs;
     keepFailures = resolved.runtime.ephemeral.keepFailures;
@@ -49,6 +50,8 @@ in
     maxFailedRootAgeHours = resolved.runtime.ephemeral.maxFailedRootAgeHours;
     maxCopyBytes = resolved.runtime.ephemeral.maxCopyBytes;
     minFreeBytesAfterCopy = resolved.runtime.ephemeral.minFreeBytesAfterCopy;
+    envFileMode = resolved.runtime.ephemeral.envFileMode;
+    envFilePath = resolved.runtime.ephemeral.envFilePath;
   };
 
   runtimePackages = map builtins.toString (resolved.tooling.runtimePackages or [ ]);

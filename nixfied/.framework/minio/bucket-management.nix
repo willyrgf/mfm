@@ -8,8 +8,7 @@
 }:
 
 let
-  cfg = project.modules.minio or { };
-  mc = cfg.clientPackage or pkgs.minio-client;
+  mc = config.clientPackage or pkgs.minio-client;
   apiPortVar = slots.portVarName config.portKeyApi;
   minioDirExpr = slots.getServiceDir config.dataDirName;
 

@@ -13,7 +13,7 @@ let
   };
   loggingPrelude = helpers.loggingPrelude;
   serviceModule = import ../lib/service-module.nix { inherit pkgs project slots; };
-  config = import ./config.nix { inherit project; };
+  config = import ./config.nix { inherit pkgs project; };
   lifecycle = import ./lifecycle.nix {
     inherit
       pkgs

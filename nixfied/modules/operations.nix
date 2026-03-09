@@ -8,6 +8,19 @@ let
   cfg = config.nixfied.operations;
   runtime = config.nixfied.runtime;
   services = config.nixfied.services;
+  probeCommands = import ../.framework/lib/probe-commands.nix { inherit pkgs; };
+  probeRuntime = import ../.framework/lib/operations-probe-runtime.nix {
+    inherit
+      lib
+      pkgs
+      probeCommands
+      resolveServicePortBase
+      ;
+    inherit postgresProbePkg;
+    runtimeStride = runtime.slot.stride;
+  };
+  serviceConfigLib = import ../lib/service-config.nix { inherit lib; };
+  testIsolationRuntime = import ../.framework/lib/test-isolation-runtime.nix { inherit lib pkgs; };
 
   postgresCfg = services.postgres;
   nginxCfg = services.nginx;
@@ -45,6 +58,14 @@ let
     helios = heliosCfg;
   };
 
+  resolvedServiceConfigByName = builtins.mapAttrs (
+    serviceName: serviceCfg:
+    serviceConfigLib.normalizeServiceConfig {
+      name = serviceName;
+      config = serviceCfg;
+    }
+  ) serviceConfigByName;
+
   enabledServiceNames = builtins.filter (
     serviceName: serviceEnabledByName.${serviceName}
   ) serviceNames;
@@ -56,17 +77,10 @@ let
     else
       throw "nixfied.operations: port key '${key}' is not defined in nixfied.runtime.ports";
 
-  postgresPortBase = if postgresEnabled then resolvePortBase postgresCfg.portKey else 0;
-  nginxHttpPortBase = if nginxEnabled then resolvePortBase nginxCfg.portKeyHttp else 0;
-  nginxHttpsPortBase = if nginxEnabled then resolvePortBase nginxCfg.portKeyHttps else 0;
-  minioApiPortBase = if minioEnabled then resolvePortBase minioCfg.portKeyApi else 0;
-  minioConsolePortBase = if minioEnabled then resolvePortBase minioCfg.portKeyConsole else 0;
-  rethHttpPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyHttp else 0;
-  rethWsPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyWs else 0;
-  rethAuthPortBase = if rethEnabled then resolvePortBase rethCfg.portKeyAuth else 0;
-  heliosRpcPortBase = if heliosEnabled then resolvePortBase heliosCfg.portKeyRpc else 0;
-  heliosExecutionRpcPortBase =
-    if heliosEnabled then resolvePortBase heliosCfg.executionRpcPortKey else 0;
+  resolveServicePortBase =
+    serviceName: endpointName:
+    resolvePortBase
+      resolvedServiceConfigByName.${serviceName}.resolved.endpoints.${endpointName}.portKey;
 
   netcatPkg =
     if pkgs ? netcat then
@@ -77,28 +91,6 @@ let
       throw "nixfied.operations: netcat package is required for readiness probes";
 
   postgresProbePkg = if pkgs ? postgresql_16 then pkgs.postgresql_16 else pkgs.postgresql;
-  heliosSourceKinds = heliosCfg.sourceKinds or { };
-  heliosSourceKindCase = builtins.concatStringsSep "\n" (
-    map (
-      sourceName:
-      "      ${lib.escapeShellArg sourceName}) printf '%s' ${
-              lib.escapeShellArg (heliosSourceKinds.${sourceName} or "unknown")
-            } ;;"
-    ) (builtins.sort builtins.lessThan (builtins.attrNames heliosSourceKinds))
-  );
-  heliosReadinessProfile = heliosCfg.readiness.profile or "fast";
-  heliosReadinessRequireNotSyncing =
-    (heliosCfg.readiness.requireNotSyncing or false) || heliosReadinessProfile == "strict";
-  heliosReadinessDisallowSourceKinds = lib.unique (
-    (heliosCfg.readiness.disallowSourceKinds or [ ])
-    ++ lib.optionals (heliosReadinessProfile == "strict") [
-      "shim"
-      "unknown"
-    ]
-  );
-  heliosReadinessDisallowSourceKindArgs = builtins.concatStringsSep " " (
-    map lib.escapeShellArg heliosReadinessDisallowSourceKinds
-  );
   serviceProbeRuntimeInputs = [
     pkgs.coreutils
     pkgs.gnugrep
@@ -112,11 +104,14 @@ let
   envNames = runtime.env.names;
   envPattern =
     if envNames == [ ] then runtime.env.default else builtins.concatStringsSep "|" envNames;
+  isolationEnvValues = if envNames == [ ] then [ runtime.env.default ] else envNames;
   isolationSlotVar = runtime.slot.var;
   isolationEnvVar = runtime.env.var;
   isolationMaxSlot = runtime.slot.max;
   isolationSlotsJson = builtins.toJSON cfg.testIsolation.slots;
   isolationEnvsJson = builtins.toJSON cfg.testIsolation.envs;
+  isolationRunTaskId = cfg.testIsolation.runTaskId;
+  isolationValidateTaskId = cfg.testIsolation.validateTaskId;
   isolationRunArgsJson = builtins.toJSON cfg.testIsolation.runArgs;
   isolationRunEnvJson = builtins.toJSON cfg.testIsolation.runEnv;
 
@@ -203,6 +198,32 @@ let
     }
   ];
 
+  testIsolationContractArgs = [
+    {
+      name = "slot";
+      kind = "option";
+      long = "--slot";
+      type = "int";
+      description = "Run a single isolation slot (requires --env).";
+    }
+    {
+      name = "env";
+      kind = "option";
+      long = "--env";
+      type = "enum";
+      values = isolationEnvValues;
+      description = "Run a single isolation environment (requires --slot).";
+    }
+    {
+      name = "max-parallel";
+      kind = "option";
+      long = "--max-parallel";
+      type = "int";
+      min = 1;
+      description = "Override the isolation worker cap for this invocation.";
+    }
+  ];
+
   knownServiceCase = builtins.concatStringsSep "\n" (
     map (serviceName: "      ${serviceName}) return 0 ;;") serviceNames
   );
@@ -218,7 +239,7 @@ let
     map (
       serviceName:
       "      ${serviceName}) printf '%s' ${
-              lib.escapeShellArg (serviceConfigByName.${serviceName}.defaultSource or "")
+              lib.escapeShellArg (resolvedServiceConfigByName.${serviceName}.defaultSource or "")
             } ;;"
     ) serviceNames
   );
@@ -227,7 +248,7 @@ let
     map (
       serviceName:
       let
-        sourceKeys = serviceConfigByName.${serviceName}.sourceKeys or [ ];
+        sourceKeys = resolvedServiceConfigByName.${serviceName}.sourceKeys or [ ];
         sourceArgs = builtins.concatStringsSep " " (map lib.escapeShellArg sourceKeys);
       in
       ''
@@ -338,16 +359,6 @@ let
           return 1
         }
 
-        helios_source_kind() {
-          local source="$1"
-          case "$source" in
-    ${heliosSourceKindCase}
-            *)
-              printf '%s' "unknown"
-              ;;
-          esac
-        }
-
         service_has_source() {
           local service="$1"
           local source="$2"
@@ -407,6 +418,89 @@ let
 
   '';
 
+  mkServiceProbeSection =
+    mode: serviceName: spec:
+    let
+      modeLabel = if mode == "health" then "health" else "readiness";
+      skipMessage = spec.skipMessage or "SKIP: ${serviceName} ${modeLabel} check not selected";
+    in
+    ''
+      if service_selected "${serviceName}"; then
+        service_source="$(resolve_service_source "${serviceName}")"
+        if [ -z "$service_source" ]; then
+          service_source="unspecified"
+        fi
+        checks=$((checks + ${toString spec.count}))
+        ${spec.body}
+      else
+        echo ${lib.escapeShellArg skipMessage}
+      fi
+    '';
+
+  mkProbeScript =
+    {
+      mode,
+      serviceSpecs,
+      emptyMessage,
+      successMessage,
+    }:
+    ''
+      set -euo pipefail
+      ${slotEnvPrelude}
+      ${serviceSelectionPrelude}
+
+      if [ "$target_service" = "all" ] && [ ${toString (builtins.length enabledServiceNames)} -eq 0 ]; then
+        echo ${lib.escapeShellArg emptyMessage}
+        exit 0
+      fi
+
+      checks=0
+
+      ${builtins.concatStringsSep "\n\n" (
+        map (serviceName: mkServiceProbeSection mode serviceName serviceSpecs.${serviceName}) serviceNames
+      )}
+
+      if [ "$checks" -eq 0 ]; then
+        echo ${lib.escapeShellArg emptyMessage}
+        exit 0
+      fi
+
+      printf '%s services=%s\n' ${lib.escapeShellArg successMessage} "$checks"
+    '';
+
+  probePlan =
+    mode: serviceName:
+    resolvedServiceConfigByName.${serviceName}.resolved.operationProbes.${mode} or {
+      count = 0;
+      steps = [ ];
+    };
+  renderProbeStep = probeRuntime.renderProbeStep;
+
+  mkServiceProbeSpec =
+    mode: serviceName:
+    let
+      plan = probePlan mode serviceName;
+      steps = plan.steps or [ ];
+    in
+    {
+      count = if plan ? count then plan.count else builtins.length steps;
+      body = builtins.concatStringsSep "\n" (map (step: renderProbeStep mode serviceName step) steps);
+    };
+
+  healthProbeSpecs = builtins.listToAttrs (
+    map (serviceName: {
+      name = serviceName;
+      value = mkServiceProbeSpec "health" serviceName;
+    }) serviceNames
+  );
+
+  readyProbeSpecs = builtins.listToAttrs (
+    map (serviceName: {
+      name = serviceName;
+      value = mkServiceProbeSpec "ready" serviceName;
+    }) serviceNames
+  );
+
   mkTask =
     {
       id,
@@ -462,7 +556,6 @@ let
         hermetic = true;
         runtimeInputs = runtimeInputs;
         passThroughEnv = [
-          "HOME"
           runtime.env.var
           runtime.slot.var
         ];
@@ -491,6 +584,7 @@ let
         category = "ops";
         usage = [ "nix run .#${appName}" ];
         examples = [ ];
+        ownerFile = "nixfied/modules/operations.nix";
       };
     };
 
@@ -560,539 +654,36 @@ let
     ${portCheckLines}
   '';
 
-  healthScript = ''
-    set -euo pipefail
-    ${slotEnvPrelude}
-    ${serviceSelectionPrelude}
+  healthScript = mkProbeScript {
+    mode = "health";
+    serviceSpecs = healthProbeSpecs;
+    emptyMessage = "SKIP: no enabled services for health checks";
+    successMessage = "OK: health checks passed";
+  };
 
-    checks=0
+  readyScript = mkProbeScript {
+    mode = "ready";
+    serviceSpecs = readyProbeSpecs;
+    emptyMessage = "SKIP: no enabled services for readiness checks";
+    successMessage = "OK: readiness checks passed";
+  };
 
-    if service_selected "postgres"; then
-      postgres_source="$(resolve_service_source "postgres")"
-      if [ -z "$postgres_source" ]; then
-        postgres_source="unspecified"
-      fi
-      checks=$((checks + 1))
-      postgres_port=$(( ${toString postgresPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking postgres health port=$postgres_port source=$postgres_source"
-      if ${postgresProbePkg}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$postgres_port" -q 2>/dev/null; then
-        echo "OK: postgres healthy port=$postgres_port"
-      else
-        echo "ERROR: postgres unhealthy port=$postgres_port"
-        exit 1
-      fi
-    else
-      echo "SKIP: postgres health check not selected"
-    fi
-
-    if service_selected "nginx"; then
-      nginx_source="$(resolve_service_source "nginx")"
-      if [ -z "$nginx_source" ]; then
-        nginx_source="unspecified"
-      fi
-      checks=$((checks + 2))
-      nginx_http_port=$(( ${toString nginxHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      nginx_https_port=$(( ${toString nginxHttpsPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking nginx health port=$nginx_http_port source=$nginx_source"
-      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_http_port" >/dev/null 2>&1; then
-        echo "OK: nginx healthy port=$nginx_http_port"
-      else
-        echo "ERROR: nginx unhealthy port=$nginx_http_port"
-        exit 1
-      fi
-      echo "INFO: checking nginx health port=$nginx_https_port source=$nginx_source"
-      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_https_port" >/dev/null 2>&1; then
-        echo "OK: nginx healthy port=$nginx_https_port"
-      else
-        echo "ERROR: nginx unhealthy port=$nginx_https_port"
-        exit 1
-      fi
-    else
-      echo "SKIP: nginx health check not selected"
-    fi
-
-    if service_selected "minio"; then
-      minio_source="$(resolve_service_source "minio")"
-      if [ -z "$minio_source" ]; then
-        minio_source="unspecified"
-      fi
-      checks=$((checks + 2))
-      minio_api_port=$(( ${toString minioApiPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      minio_console_port=$(( ${toString minioConsolePortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking minio health port=$minio_api_port source=$minio_source"
-      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$minio_api_port" >/dev/null 2>&1; then
-        echo "OK: minio healthy port=$minio_api_port"
-      else
-        echo "ERROR: minio unhealthy port=$minio_api_port"
-        exit 1
-      fi
-      echo "INFO: checking minio health port=$minio_console_port source=$minio_source"
-      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$minio_console_port" >/dev/null 2>&1; then
-        echo "OK: minio healthy port=$minio_console_port"
-      else
-        echo "ERROR: minio unhealthy port=$minio_console_port"
-        exit 1
-      fi
-    else
-      echo "SKIP: minio health check not selected"
-    fi
-
-    if service_selected "reth"; then
-      reth_source="$(resolve_service_source "reth")"
-      if [ -z "$reth_source" ]; then
-        reth_source="unspecified"
-      fi
-      checks=$((checks + 3))
-      reth_http_port=$(( ${toString rethHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      reth_ws_port=$(( ${toString rethWsPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      reth_auth_port=$(( ${toString rethAuthPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking reth health port=$reth_http_port source=$reth_source"
-      if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-        -H 'content-type: application/json' \
-        --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
-        "http://127.0.0.1:$reth_http_port" \
-        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-        echo "OK: reth healthy port=$reth_http_port"
-      else
-        echo "ERROR: reth unhealthy port=$reth_http_port"
-        exit 1
-      fi
-      echo "INFO: checking reth health port=$reth_ws_port source=$reth_source"
-      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$reth_ws_port" >/dev/null 2>&1; then
-        echo "OK: reth healthy port=$reth_ws_port"
-      else
-        echo "ERROR: reth unhealthy port=$reth_ws_port"
-        exit 1
-      fi
-      echo "INFO: checking reth health port=$reth_auth_port source=$reth_source"
-      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$reth_auth_port" >/dev/null 2>&1; then
-        echo "OK: reth healthy port=$reth_auth_port"
-      else
-        echo "ERROR: reth unhealthy port=$reth_auth_port"
-        exit 1
-      fi
-    else
-      echo "SKIP: reth health check not selected"
-    fi
-
-    if service_selected "helios"; then
-      helios_source="$(resolve_service_source "helios")"
-      if [ -z "$helios_source" ]; then
-        helios_source="unspecified"
-      fi
-      checks=$((checks + 2))
-      helios_rpc_port=$(( ${toString heliosRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      helios_execution_rpc_port=$(( ${toString heliosExecutionRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking helios health port=$helios_rpc_port source=$helios_source"
-      if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-        -H 'content-type: application/json' \
-        --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
-        "http://127.0.0.1:$helios_rpc_port" \
-        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-        echo "OK: helios healthy port=$helios_rpc_port"
-      else
-        echo "ERROR: helios unhealthy port=$helios_rpc_port"
-        exit 1
-      fi
-      echo "INFO: checking helios execution health port=$helios_execution_rpc_port source=$helios_source"
-      if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-        -H 'content-type: application/json' \
-        --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
-        "http://127.0.0.1:$helios_execution_rpc_port" \
-        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-        echo "OK: helios execution healthy port=$helios_execution_rpc_port"
-      else
-        echo "ERROR: helios execution unhealthy port=$helios_execution_rpc_port"
-        exit 1
-      fi
-    else
-      echo "SKIP: helios health check not selected"
-    fi
-
-    if [ "$checks" -eq 0 ]; then
-      echo "SKIP: no enabled services for health checks"
-      exit 0
-    fi
-
-    echo "OK: health checks passed services=$checks"
-  '';
-
-  readyScript = ''
-    set -euo pipefail
-    ${slotEnvPrelude}
-    ${serviceSelectionPrelude}
-
-    checks=0
-
-    if service_selected "postgres"; then
-      postgres_source="$(resolve_service_source "postgres")"
-      if [ -z "$postgres_source" ]; then
-        postgres_source="unspecified"
-      fi
-      checks=$((checks + 1))
-      postgres_port=$(( ${toString postgresPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      postgres_db=${lib.escapeShellArg postgresCfg.database}
-      echo "INFO: checking postgres readiness port=$postgres_port source=$postgres_source"
-
-      if ! ${postgresProbePkg}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$postgres_port" -q 2>/dev/null; then
-        echo "ERROR: postgres not ready port=$postgres_port (pg_isready failed)"
-        exit 1
-      fi
-
-      if ${postgresProbePkg}/bin/psql -h 127.0.0.1 -p "$postgres_port" -U postgres -d "$postgres_db" -Atqc "select 1;" >/dev/null 2>&1; then
-        echo "OK: postgres ready port=$postgres_port database=$postgres_db"
-      else
-        echo "ERROR: postgres not ready port=$postgres_port database=$postgres_db (query failed)"
-        exit 1
-      fi
-    else
-      echo "SKIP: postgres readiness check not selected"
-    fi
-
-    if service_selected "nginx"; then
-      nginx_source="$(resolve_service_source "nginx")"
-      if [ -z "$nginx_source" ]; then
-        nginx_source="unspecified"
-      fi
-      checks=$((checks + 2))
-      nginx_http_port=$(( ${toString nginxHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      nginx_https_port=$(( ${toString nginxHttpsPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking nginx readiness port=$nginx_http_port source=$nginx_source"
-      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_http_port" >/dev/null 2>&1; then
-        echo "OK: nginx ready port=$nginx_http_port"
-      else
-        echo "ERROR: nginx not ready port=$nginx_http_port"
-        exit 1
-      fi
-      echo "INFO: checking nginx readiness port=$nginx_https_port source=$nginx_source"
-      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$nginx_https_port" >/dev/null 2>&1; then
-        echo "OK: nginx ready port=$nginx_https_port"
-      else
-        echo "ERROR: nginx not ready port=$nginx_https_port"
-        exit 1
-      fi
-    else
-      echo "SKIP: nginx readiness check not selected"
-    fi
-
-    if service_selected "minio"; then
-      minio_source="$(resolve_service_source "minio")"
-      if [ -z "$minio_source" ]; then
-        minio_source="unspecified"
-      fi
-      checks=$((checks + 2))
-      minio_api_port=$(( ${toString minioApiPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      minio_console_port=$(( ${toString minioConsolePortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking minio readiness port=$minio_api_port source=$minio_source"
-      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$minio_api_port" >/dev/null 2>&1; then
-        echo "OK: minio ready port=$minio_api_port"
-      else
-        echo "ERROR: minio not ready port=$minio_api_port"
-        exit 1
-      fi
-      echo "INFO: checking minio readiness port=$minio_console_port source=$minio_source"
-      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$minio_console_port" >/dev/null 2>&1; then
-        echo "OK: minio ready port=$minio_console_port"
-      else
-        echo "ERROR: minio not ready port=$minio_console_port"
-        exit 1
-      fi
-    else
-      echo "SKIP: minio readiness check not selected"
-    fi
-
-    if service_selected "reth"; then
-      reth_source="$(resolve_service_source "reth")"
-      if [ -z "$reth_source" ]; then
-        reth_source="unspecified"
-      fi
-      checks=$((checks + 3))
-      reth_http_port=$(( ${toString rethHttpPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      reth_ws_port=$(( ${toString rethWsPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      reth_auth_port=$(( ${toString rethAuthPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking reth readiness port=$reth_http_port source=$reth_source"
-      if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-        -H 'content-type: application/json' \
-        --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
-        "http://127.0.0.1:$reth_http_port" \
-        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-        echo "OK: reth ready port=$reth_http_port"
-      else
-        echo "ERROR: reth not ready port=$reth_http_port"
-        exit 1
-      fi
-      echo "INFO: checking reth readiness port=$reth_ws_port source=$reth_source"
-      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$reth_ws_port" >/dev/null 2>&1; then
-        echo "OK: reth ready port=$reth_ws_port"
-      else
-        echo "ERROR: reth not ready port=$reth_ws_port"
-        exit 1
-      fi
-      echo "INFO: checking reth readiness port=$reth_auth_port source=$reth_source"
-      if ${netcatPkg}/bin/nc -z 127.0.0.1 "$reth_auth_port" >/dev/null 2>&1; then
-        echo "OK: reth ready port=$reth_auth_port"
-      else
-        echo "ERROR: reth not ready port=$reth_auth_port"
-        exit 1
-      fi
-    else
-      echo "SKIP: reth readiness check not selected"
-    fi
-
-    if service_selected "helios"; then
-      helios_source="$(resolve_service_source "helios")"
-      if [ -z "$helios_source" ]; then
-        helios_source="unspecified"
-      fi
-      helios_source_kind_value="$(helios_source_kind "$helios_source")"
-      helios_readiness_profile=${lib.escapeShellArg heliosReadinessProfile}
-      helios_require_not_syncing=${if heliosReadinessRequireNotSyncing then "1" else "0"}
-      checks=$((checks + 2))
-      helios_rpc_port=$(( ${toString heliosRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      helios_execution_rpc_port=$(( ${toString heliosExecutionRpcPortBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))
-      echo "INFO: checking helios readiness port=$helios_rpc_port source=$helios_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile"
-      if source_kind_disallowed "$helios_source_kind_value" ${heliosReadinessDisallowSourceKindArgs}; then
-        echo "ERROR: helios not ready port=$helios_rpc_port source=$helios_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile (source kind disallowed)"
-        exit 1
-      fi
-
-      helios_block_json="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
-        -H 'content-type: application/json' \
-        --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-        "http://127.0.0.1:$helios_rpc_port")" || true
-      helios_block_number="$(printf '%s' "$helios_block_json" | ${pkgs.jq}/bin/jq -r '.result // empty')" || true
-      if [ -z "$helios_block_number" ] || ! [[ "$helios_block_number" =~ ^0x[0-9a-fA-F]+$ ]]; then
-        echo "ERROR: helios not ready port=$helios_rpc_port source=$helios_source source_kind=$helios_source_kind_value (invalid eth_blockNumber result)"
-        exit 1
-      fi
-      echo "OK: helios ready port=$helios_rpc_port block_number=$helios_block_number"
-
-      if [ "$helios_require_not_syncing" = "1" ]; then
-        helios_syncing_json="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
-          -H 'content-type: application/json' \
-          --data '{"jsonrpc":"2.0","id":1,"method":"eth_syncing","params":[]}' \
-          "http://127.0.0.1:$helios_rpc_port")" || true
-        helios_syncing_result="$(printf '%s' "$helios_syncing_json" | ${pkgs.jq}/bin/jq -c '.result')" || true
-        if [ "$helios_syncing_result" != "false" ]; then
-          echo "ERROR: helios not ready port=$helios_rpc_port source=$helios_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile (eth_syncing=$helios_syncing_result)"
-          exit 1
-        fi
-        echo "OK: helios sync status ready port=$helios_rpc_port"
-      else
-        echo "SKIP: helios sync gate disabled profile=$helios_readiness_profile"
-      fi
-
-      echo "INFO: checking helios execution readiness port=$helios_execution_rpc_port source=$helios_source"
-      if ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-        -H 'content-type: application/json' \
-        --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
-        "http://127.0.0.1:$helios_execution_rpc_port" \
-        | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-        echo "OK: helios execution ready port=$helios_execution_rpc_port"
-      else
-        echo "ERROR: helios execution not ready port=$helios_execution_rpc_port"
-        exit 1
-      fi
-    else
-      echo "SKIP: helios readiness check not selected"
-    fi
-
-    if [ "$checks" -eq 0 ]; then
-      echo "SKIP: no enabled services for readiness checks"
-      exit 0
-    fi
-
-    echo "OK: readiness checks passed services=$checks"
-  '';
-
-  isolationScript = ''
-    set -euo pipefail
-    slot_var=${lib.escapeShellArg isolationSlotVar}
-    env_var=${lib.escapeShellArg isolationEnvVar}
-    slot_max=${toString isolationMaxSlot}
-    max_parallel=${toString cfg.testIsolation.maxParallel}
-    logs_root=${lib.escapeShellArg cfg.testIsolation.logsDir}
-    run_app=${lib.escapeShellArg cfg.testIsolation.runApp}
-    validate_app=${lib.escapeShellArg cfg.testIsolation.validateApp}
-    keep_logs_success=${if cfg.testIsolation.keepLogsOnSuccess then "1" else "0"}
-    keep_logs_failure=${if cfg.testIsolation.keepLogsOnFailure then "1" else "0"}
-
-    slots_json='${isolationSlotsJson}'
-    envs_json='${isolationEnvsJson}'
-    run_args_json='${isolationRunArgsJson}'
-    run_env_json='${isolationRunEnvJson}'
-    project_root="$(pwd -P)"
-
-    if [ -z "$run_app" ]; then
-      echo "ERROR: test-isolation runApp is empty"
-      exit 3
-    fi
-
-    if [ -z "$validate_app" ]; then
-      echo "ERROR: test-isolation validateApp is empty"
-      exit 3
-    fi
-
-    if ! [[ "$max_parallel" =~ ^[0-9]+$ ]]; then
-      echo "ERROR: test-isolation maxParallel is not an integer: $max_parallel"
-      exit 3
-    fi
-
-    if [ "$max_parallel" -lt 1 ]; then
-      echo "ERROR: test-isolation maxParallel must be >= 1"
-      exit 3
-    fi
-
-    mapfile -t isolation_slots < <(${pkgs.jq}/bin/jq -r '.[]' <<<"$slots_json")
-    mapfile -t isolation_envs < <(${pkgs.jq}/bin/jq -r '.[]' <<<"$envs_json")
-    mapfile -t run_args < <(${pkgs.jq}/bin/jq -r '.[]' <<<"$run_args_json")
-    mapfile -t run_env_entries < <(${pkgs.jq}/bin/jq -r 'to_entries[]? | [.key, (.value | tostring)] | @tsv' <<<"$run_env_json")
-
-    if [ "''${#isolation_slots[@]}" -eq 0 ]; then
-      echo "ERROR: test-isolation matrix has no slots"
-      exit 3
-    fi
-
-    if [ "''${#isolation_envs[@]}" -eq 0 ]; then
-      echo "ERROR: test-isolation matrix has no environments"
-      exit 3
-    fi
-
-    mkdir -p "$logs_root"
-    echo "INFO: test-isolation matrix slots=''${#isolation_slots[@]} envs=''${#isolation_envs[@]}"
-
-    statuses_dir="$(mktemp -d "$logs_root/.status.XXXXXX")"
-    semaphore_dir="$(mktemp -d "$logs_root/.semaphore.XXXXXX")"
-    semaphore_fifo="$semaphore_dir/tokens.fifo"
-    mkfifo "$semaphore_fifo"
-    exec 9<>"$semaphore_fifo"
-    rm -f "$semaphore_fifo"
-
-    token_count=0
-    while [ "$token_count" -lt "$max_parallel" ]; do
-      printf 'token\n' >&9
-      token_count=$((token_count + 1))
-    done
-
-    total=0
-    failed=0
-    worker_pids=()
-    status_files=()
-
-    for slot_value in "''${isolation_slots[@]}"; do
-      if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: matrix slot is not an integer: $slot_value"
-        failed=$((failed + 1))
-        continue
-      fi
-      if [ "$slot_value" -gt "$slot_max" ]; then
-        echo "ERROR: matrix slot exceeds max slot ($slot_max): $slot_value"
-        failed=$((failed + 1))
-        continue
-      fi
-
-      for env_value in "''${isolation_envs[@]}"; do
-        total=$((total + 1))
-
-        case "$env_value" in
-          ${envPattern})
-            ;;
-          *)
-            echo "ERROR: unsupported environment in matrix: $env_value"
-            failed=$((failed + 1))
-            continue
-            ;;
-        esac
-
-        cell_name="slot-''${slot_value}__env-''${env_value}"
-        cell_dir="$logs_root/$cell_name"
-        artifacts_dir="$cell_dir/artifacts"
-        validate_log="$cell_dir/validate.log"
-        run_log="$cell_dir/run.log"
-        status_file="$statuses_dir/$cell_name.rc"
-
-        mkdir -p "$cell_dir" "$artifacts_dir"
-        echo "INFO: isolation cell start slot=$slot_value env=$env_value"
-        status_files+=("$status_file")
-
-        IFS= read -r -u 9 _
-        (
-          set +e
-          rc=1
-          export "$slot_var=$slot_value"
-          export "$env_var=$env_value"
-          export CI_ARTIFACTS_DIR="$artifacts_dir"
-
-          for run_env_entry in "''${run_env_entries[@]}"; do
-            run_env_key="''${run_env_entry%%$'\t'*}"
-            run_env_value="''${run_env_entry#*$'\t'}"
-            export "$run_env_key=$run_env_value"
-          done
-
-          nix run "path:$project_root"#"$validate_app" > "$validate_log" 2>&1
-          rc="$?"
-          if [ "$rc" -eq 0 ]; then
-            nix run "path:$project_root"#"$run_app" -- "''${run_args[@]}" > "$run_log" 2>&1
-            rc="$?"
-          fi
-
-          printf '%s\n' "$rc" > "$status_file"
-          if [ "$rc" -eq 0 ]; then
-            echo "OK: isolation cell passed slot=$slot_value env=$env_value"
-            if [ "$keep_logs_success" -eq 0 ]; then
-              rm -rf "$cell_dir"
-            fi
-          else
-            echo "ERROR: isolation cell failed slot=$slot_value env=$env_value rc=$rc"
-          fi
-
-          printf 'token\n' >&9
-          exit 0
-        ) &
-        worker_pids+=("$!")
-      done
-    done
-
-    for worker_pid in "''${worker_pids[@]}"; do
-      wait "$worker_pid" || true
-    done
-
-    exec 9>&-
-    exec 9<&-
-    rm -rf "$semaphore_dir"
-
-    for status_file in "''${status_files[@]}"; do
-      if [ ! -f "$status_file" ]; then
-        failed=$((failed + 1))
-        echo "ERROR: isolation cell status missing file=$status_file"
-        continue
-      fi
-
-      rc="$(cat "$status_file")"
-      if [ "$rc" != "0" ]; then
-        failed=$((failed + 1))
-      fi
-    done
-    rm -rf "$statuses_dir"
-
-    if [ "$total" -eq 0 ]; then
-      echo "ERROR: test-isolation matrix did not execute any cells"
-      exit 3
-    fi
-
-    if [ "$failed" -ne 0 ]; then
-      echo "ERROR: test-isolation completed with failures failed=$failed total=$total"
-      if [ "$keep_logs_failure" -eq 0 ]; then
-        rm -rf "$logs_root"
-      fi
-      exit 1
-    fi
-
-    if [ "$keep_logs_success" -eq 1 ]; then
-      echo "INFO: isolation logs preserved at $logs_root"
-    fi
-    echo "OK: test-isolation completed total=$total"
-  '';
+  isolationScript = testIsolationRuntime.mkIsolationScript {
+    slotVar = isolationSlotVar;
+    envVar = isolationEnvVar;
+    slotMax = isolationMaxSlot;
+    maxParallelDefault = cfg.testIsolation.maxParallel;
+    logsRootBase = cfg.testIsolation.logsDir;
+    runTaskId = isolationRunTaskId;
+    validateTaskId = isolationValidateTaskId;
+    keepLogsSuccess = cfg.testIsolation.keepLogsOnSuccess;
+    keepLogsFailure = cfg.testIsolation.keepLogsOnFailure;
+    slotsJson = isolationSlotsJson;
+    envsJson = isolationEnvsJson;
+    runArgsJson = isolationRunArgsJson;
+    runEnvJson = isolationRunEnvJson;
+    inherit envPattern;
+  };
 in
 {
   options.nixfied.operations = {
@@ -1141,6 +732,11 @@ in
       default = 4;
     };
 
+    testIsolation.runTaskId = lib.mkOption {
+      type = lib.types.str;
+      default = "task.ci";
+    };
+
     testIsolation.runApp = lib.mkOption {
       type = lib.types.str;
       default = "ci";
@@ -1154,6 +750,11 @@ in
     testIsolation.validateApp = lib.mkOption {
       type = lib.types.str;
       default = "validate-env";
+    };
+
+    testIsolation.validateTaskId = lib.mkOption {
+      type = lib.types.str;
+      default = "task.ops.validate-env";
     };
 
     testIsolation.runEnv = lib.mkOption {
@@ -1206,10 +807,10 @@ in
         summary = "Run isolation checks";
         description = "Runs deterministic isolation smoke checks from model metadata.";
         command = isolationScript;
+        contractArgs = testIsolationContractArgs;
         runtimeInputs = [
           pkgs.coreutils
           pkgs.jq
-          pkgs.nix
         ];
       };
     })

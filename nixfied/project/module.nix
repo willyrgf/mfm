@@ -117,10 +117,8 @@ let
   heliosService = configuredServices.helios or { };
 
   sharedPassThroughEnv = [
-    "HOME"
     project.envVar
     project.slotVar
-    "CI_ARTIFACTS_DIR"
     "CI_MAX_WORKERS"
     "NIXFIED_CI_MAX_WORKERS"
     "NIX_CFLAGS_COMPILE"
@@ -164,16 +162,15 @@ let
     "AWS_EC2_METADATA_DISABLED"
   ];
 
-  sharedCargoRustEnv =
-    {
-      RUSTC_WRAPPER = "sccache";
-      CARGO_PROFILE_CI_DEBUG = "0";
-    }
-    // lib.optionalAttrs pkgs.stdenv.isDarwin {
-      LIBRARY_PATH = "${pkgs.libiconv}/lib";
-      CC = "/usr/bin/cc";
-      CXX = "/usr/bin/c++";
-    };
+  sharedCargoRustEnv = {
+    RUSTC_WRAPPER = "sccache";
+    CARGO_PROFILE_CI_DEBUG = "0";
+  }
+  // lib.optionalAttrs pkgs.stdenv.isDarwin {
+    LIBRARY_PATH = "${pkgs.libiconv}/lib";
+    CC = "/usr/bin/cc";
+    CXX = "/usr/bin/c++";
+  };
 
   # CI runs under ephemeral roots, so persistent sccache state can retain stale
   # temp paths across repeated runs.
@@ -533,6 +530,7 @@ in
           enable = postgresService.enable or (conf.modules.postgres.enable or false);
           database = postgresService.database or (conf.modules.postgres.database or "app");
           portKey = postgresService.portKey or (conf.modules.postgres.portKey or "postgres");
+          sources = postgresService.sources or { local = { }; };
           sourceKeys = postgresService.sourceKeys or [ "local" ];
           defaultSource = postgresService.defaultSource or "local";
         };
@@ -541,6 +539,7 @@ in
           enable = nginxService.enable or (conf.modules.nginx.enable or false);
           portKeyHttp = nginxService.portKeyHttp or (conf.modules.nginx.portKeyHttp or "http");
           portKeyHttps = nginxService.portKeyHttps or (conf.modules.nginx.portKeyHttps or "https");
+          sources = nginxService.sources or { local = { }; };
           sourceKeys = nginxService.sourceKeys or [ "local" ];
           defaultSource = nginxService.defaultSource or "local";
         };
@@ -550,6 +549,7 @@ in
           portKeyApi = minioService.portKeyApi or (conf.modules.minio.portKeyApi or "minioApi");
           portKeyConsole =
             minioService.portKeyConsole or (conf.modules.minio.portKeyConsole or "minioConsole");
+          sources = minioService.sources or { local = { }; };
           sourceKeys = minioService.sourceKeys or [ "local" ];
           defaultSource = minioService.defaultSource or "local";
         };
@@ -559,6 +559,7 @@ in
           portKeyHttp = rethService.portKeyHttp or (conf.modules.reth.portKeyHttp or "rethHttp");
           portKeyWs = rethService.portKeyWs or (conf.modules.reth.portKeyWs or "rethWs");
           portKeyAuth = rethService.portKeyAuth or (conf.modules.reth.portKeyAuth or "rethAuth");
+          sources = rethService.sources or { local = { }; };
           sourceKeys = rethService.sourceKeys or [ "local" ];
           defaultSource = rethService.defaultSource or "local";
         };
@@ -568,6 +569,7 @@ in
           portKeyRpc = heliosService.portKeyRpc or (conf.modules.helios.portKeyRpc or "heliosRpc");
           executionRpcPortKey =
             heliosService.executionRpcPortKey or (conf.modules.helios.executionRpcPortKey or "rethHttp");
+          sources = heliosService.sources or { local = { }; };
           sourceKeys = heliosService.sourceKeys or [ "local" ];
           defaultSource = heliosService.defaultSource or "local";
           sourceKinds = heliosService.sourceKinds or { };
@@ -699,7 +701,9 @@ in
             ADDRESS="$1"
             ${ciServicePortPrelude}
 
-            HELIOS_RPC_PORT=$(( ${toString (conf.ports.heliosRpc or 8547)} + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+            HELIOS_RPC_PORT=$(( ${
+              toString (conf.ports.heliosRpc or 8547)
+            } + env_offset + (slot_value * ${toString conf.slots.stride}) ))
             export HELIOS_RPC_PORT
             export HELIOSRPC_PORT="$HELIOS_RPC_PORT"
 
@@ -720,8 +724,12 @@ in
               exit 1
             fi
 
-            export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${conf.modules.helios.executionRpcUrl or "https://eth.drpc.org"}}"
-            export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${conf.modules.helios.consensusRpcUrl or "https://lodestar-mainnet.chainsafe.io"}}"
+            export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
+              conf.modules.helios.executionRpcUrl or "https://eth.drpc.org"
+            }}"
+            export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${
+              conf.modules.helios.consensusRpcUrl or "https://lodestar-mainnet.chainsafe.io"
+            }}"
 
             if [ "''${MFM_KEEP_SERVICES+x}" = "x" ]; then
               echo "ERROR: MFM_KEEP_SERVICES has been removed from mfm::portfolio::snapshot" >&2
@@ -2191,8 +2199,12 @@ in
               out_file="$artifacts_dir/mainnet-portfolio-snapshot.json"
 
               export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
-              export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${conf.modules.helios.executionRpcUrl or "https://eth.drpc.org"}}"
-              export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${conf.modules.helios.consensusRpcUrl or "https://lodestar-mainnet.chainsafe.io"}}"
+              export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
+                conf.modules.helios.executionRpcUrl or "https://eth.drpc.org"
+              }}"
+              export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${
+                conf.modules.helios.consensusRpcUrl or "https://lodestar-mainnet.chainsafe.io"
+              }}"
 
               echo "INFO: running ci step=mainnet-portfolio-snapshot-helios address=$address"
 

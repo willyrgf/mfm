@@ -449,6 +449,10 @@ in
                   type = t.listOf t.str;
                   default = [ ];
                 };
+                ownerFile = lib.mkOption {
+                  type = t.nullOr t.str;
+                  default = null;
+                };
               };
             };
           };

@@ -3,19 +3,19 @@
   pkgs,
   project,
   slots,
+  config,
   loggingPrelude,
 }:
 
 let
-  cfg = project.modules.postgres or { };
-  postgres = cfg.package or pkgs.postgresql_16;
-  migrationsCfg = cfg.migrations or { };
+  postgres = config.package or pkgs.postgresql_16;
+  migrationsCfg = config.migrations or { };
   migrationsDir = migrationsCfg.dir or "migrations";
   migrateCommand = migrationsCfg.command or "";
   sourceDatabase = migrationsCfg.sourceDatabase or null;
-  portKey = cfg.portKey or "postgres";
+  portKey = config.portKey or "postgres";
   portVar = slots.portVarName portKey;
-  database = cfg.database or "app";
+  database = config.database or "app";
 
   testMigrations = pkgs.writeShellScript "postgres-test-migrations" ''
     ${loggingPrelude}

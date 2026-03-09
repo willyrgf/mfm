@@ -10,6 +10,7 @@
     "services",
     "tasks",
     "workflows",
+    "features",
     "views",
     "state"
   ],
@@ -27,6 +28,7 @@
     "services": { "type": "object" },
     "tasks": { "type": "object" },
     "workflows": { "type": "object" },
+    "features": { "type": "object" },
     "views": { "type": "object" },
     "state": { "type": "object" }
   },

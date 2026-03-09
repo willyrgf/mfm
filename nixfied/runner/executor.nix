@@ -8,7 +8,10 @@ let
   modelFile = pkgs.writeText "nixfied-model.json" (builtins.toJSON model);
   registryShell = registry.events.mkShellLib { };
   workflowModesShell = import ./workflow-modes.nix {
-    inherit pkgs;
+    inherit
+      pkgs
+      model
+      ;
   };
   envSandboxShell = import ./env-sandbox.nix {
     inherit
@@ -17,11 +20,15 @@ let
       model
       ;
   };
+  executorRuntimeShell = import ./executor-runtime.nix { inherit pkgs; };
 in
 pkgs.writeShellScriptBin "nixfied-executor" ''
   set -euo pipefail
+  export NIXFIED_EXECUTOR_BIN="$0"
+  export NIXFIED_EXECUTOR_SELF="$0"
 
   MODEL_FILE=${pkgs.lib.escapeShellArg (builtins.toString modelFile)}
+  export NIXFIED_MODEL_FILE="$MODEL_FILE"
   PROJECT_ROOT=${pkgs.lib.escapeShellArg (builtins.toString projectRoot)}
   REGISTRY_ROOT_DEFAULT=${pkgs.lib.escapeShellArg model.state.registry.root}
   ARTIFACTS_ROOT_DEFAULT=${pkgs.lib.escapeShellArg model.state.artifacts.root}
@@ -35,6 +42,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   ${registryShell}
   ${workflowModesShell}
   ${envSandboxShell}
+  ${executorRuntimeShell}
 
   sha256_text() {
     printf '%s' "$1" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.gawk}/bin/awk '{print $1}'
@@ -51,92 +59,6 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
   RUN_SUFFIX_REASON=""
   LAST_WORKFLOW_SUMMARY_FILE=""
-
-  normalize_run_artifacts_dir() {
-    local base_dir="$1"
-    local run_id="$2"
-
-    case "$base_dir" in
-      */"$run_id")
-        printf '%s' "$base_dir"
-        ;;
-      *)
-        printf '%s/%s' "$base_dir" "$run_id"
-        ;;
-    esac
-  }
-
-  artifacts_root_uses_legacy_default() {
-    local root="$1"
-
-    case "$root" in
-      "/tmp/ci-artifacts"|"$ARTIFACTS_ROOT_DEFAULT")
-        return 0
-        ;;
-      *)
-        return 1
-        ;;
-    esac
-  }
-
-  resolve_run_artifacts_dir() {
-    local run_id="$1"
-    local workflow="$2"
-    local caller_root="''${CI_ARTIFACTS_ROOT:-}"
-    local caller_dir="''${CI_ARTIFACTS_DIR:-}"
-    local configured_root=""
-    local base_dir=""
-
-    if [ -n "$caller_root" ] && [ -n "$caller_dir" ]; then
-      echo "ERROR: CI_ARTIFACTS_ROOT and CI_ARTIFACTS_DIR cannot both be set"
-      return 2
-    fi
-
-    if [ -n "$workflow" ]; then
-      configured_root="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.artifacts.root // empty')"
-    fi
-
-    if [ -n "$caller_root" ]; then
-      base_dir="$caller_root"
-    elif [ -n "$caller_dir" ]; then
-      base_dir="$caller_dir"
-    elif [ -n "$configured_root" ]; then
-      if [ "$REGISTRY_ROOT_EXPLICIT" = "1" ] && artifacts_root_uses_legacy_default "$configured_root"; then
-        base_dir="$REGISTRY_ROOT/artifacts"
-      else
-        base_dir="$configured_root"
-      fi
-    elif [ "$REGISTRY_ROOT_EXPLICIT" = "1" ]; then
-      base_dir="$REGISTRY_ROOT/artifacts"
-    else
-      base_dir="$ARTIFACTS_ROOT_DEFAULT"
-    fi
-
-    normalize_run_artifacts_dir "$base_dir" "$run_id"
-  }
-
-  ensure_run_artifacts_dir() {
-    local run_id="$1"
-    local workflow="$2"
-    local managed_by_orchestrator="$3"
-    local artifacts_dir
-
-    if [ -n "''${CI_ARTIFACTS_DIR:-}" ] && {
-      [ "$managed_by_orchestrator" = "1" ] ||
-      [ "''${NIXFIED_WORKFLOW_NESTED:-0}" = "1" ] ||
-      [ "''${NIXFIED_EXECUTION_EPHEMERAL:-0}" = "1" ]
-    }; then
-      mkdir -p "$CI_ARTIFACTS_DIR"
-      return 0
-    fi
-
-    artifacts_dir="$(resolve_run_artifacts_dir "$run_id" "$workflow")" || return $?
-    export CI_ARTIFACTS_DIR="$artifacts_dir"
-    if ! mkdir -p "$CI_ARTIFACTS_DIR"; then
-      echo "ERROR: failed to create artifacts directory '$CI_ARTIFACTS_DIR'"
-      return 1
-    fi
-  }
 
   compute_run_id() {
     local mode="$1"
@@ -202,126 +124,6 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     rm -f "$REGISTRY_ROOT/active/$run_id"
   }
 
-  task_json() {
-    local task_id="$1"
-    ${pkgs.jq}/bin/jq -c --arg taskId "$task_id" '.tasks[$taskId] // empty' "$MODEL_FILE"
-  }
-
-  workflow_json() {
-    local workflow_id="$1"
-    ${pkgs.jq}/bin/jq -c --arg workflowId "$workflow_id" '.workflows[$workflowId] // empty' "$MODEL_FILE"
-  }
-
-  valid_log_level() {
-    local value="$1"
-    case "$value" in
-      error|warn|info|debug|trace)
-        return 0
-        ;;
-      *)
-        return 1
-        ;;
-    esac
-  }
-
-  valid_output_mode() {
-    local value="$1"
-    case "$value" in
-      stdout|logs|both)
-        return 0
-        ;;
-      *)
-        return 1
-        ;;
-    esac
-  }
-
-  LOGGING_FILTERED_ARGS=()
-
-  extract_logging_override_args() {
-    local parse_options=1
-    local arg=""
-    local value=""
-    local resolved_log_level="''${NIXFIED_CLI_LOG_LEVEL_OVERRIDE:-}"
-    local resolved_output_mode="''${NIXFIED_CLI_OUTPUT_MODE_OVERRIDE:-}"
-
-    LOGGING_FILTERED_ARGS=()
-
-    while [ "$#" -gt 0 ]; do
-      arg="$1"
-      shift
-
-      if [ "$parse_options" -eq 0 ]; then
-        LOGGING_FILTERED_ARGS+=("$arg")
-        continue
-      fi
-
-      case "$arg" in
-        --)
-          parse_options=0
-          LOGGING_FILTERED_ARGS+=("--")
-          ;;
-        --log-level)
-          if [ "$#" -lt 1 ]; then
-            echo "ERROR: --log-level requires a value"
-            return 2
-          fi
-          value="$1"
-          shift
-          if ! valid_log_level "$value"; then
-            echo "ERROR: invalid --log-level '$value' (expected: error|warn|info|debug|trace)"
-            return 2
-          fi
-          resolved_log_level="$value"
-          ;;
-        --log-level=*)
-          value="''${arg#--log-level=}"
-          if ! valid_log_level "$value"; then
-            echo "ERROR: invalid --log-level '$value' (expected: error|warn|info|debug|trace)"
-            return 2
-          fi
-          resolved_log_level="$value"
-          ;;
-        --output-mode)
-          if [ "$#" -lt 1 ]; then
-            echo "ERROR: --output-mode requires a value"
-            return 2
-          fi
-          value="$1"
-          shift
-          if ! valid_output_mode "$value"; then
-            echo "ERROR: invalid --output-mode '$value' (expected: stdout|logs|both)"
-            return 2
-          fi
-          resolved_output_mode="$value"
-          ;;
-        --output-mode=*)
-          value="''${arg#--output-mode=}"
-          if ! valid_output_mode "$value"; then
-            echo "ERROR: invalid --output-mode '$value' (expected: stdout|logs|both)"
-            return 2
-          fi
-          resolved_output_mode="$value"
-          ;;
-        *)
-          LOGGING_FILTERED_ARGS+=("$arg")
-          ;;
-      esac
-    done
-
-    if [ -n "$resolved_log_level" ]; then
-      export NIXFIED_CLI_LOG_LEVEL_OVERRIDE="$resolved_log_level"
-    else
-      unset NIXFIED_CLI_LOG_LEVEL_OVERRIDE || true
-    fi
-
-    if [ -n "$resolved_output_mode" ]; then
-      export NIXFIED_CLI_OUTPUT_MODE_OVERRIDE="$resolved_output_mode"
-    else
-      unset NIXFIED_CLI_OUTPUT_MODE_OVERRIDE || true
-    fi
-  }
-
   append_event() {
     local run_id="$1"
     local workflow_id="$2"
@@ -333,10 +135,9 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   }
 
   task_has_hooks() {
-    local task="$1"
     local hook_count
 
-    hook_count="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '((.runtime.preHooks // {}) | length) + ((.runtime.postHooks // {}) | length)')"
+    hook_count="$(task_hook_count "$1")"
     if [ "$hook_count" -gt 0 ]; then
       return 0
     fi
@@ -345,9 +146,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
   run_task_hooks() {
     local task_id="$1"
-    local task="$2"
-    local phase="$3"
-    shift 3
+    local phase="$2"
+    shift 2
 
     local hook_id
     local hook_command
@@ -360,31 +160,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       fi
 
       echo "INFO: hook $phase $hook_id start"
-      hook_command="$(
-        printf '%s' "$task" | ${pkgs.jq}/bin/jq -r --arg phase "$phase" --arg hookId "$hook_id" '.runtime[($phase + "Hooks")][$hookId].command'
-      )"
-      hook_runtime_json="$(
-        printf '%s' "$task" | ${pkgs.jq}/bin/jq -c --arg phase "$phase" --arg hookId "$hook_id" '
-          .runtime as $taskRuntime
-          | .runtime[($phase + "Hooks")][$hookId] as $hook
-          | {
-              slotEnv: $taskRuntime.slotEnv,
-              workdir: (if ($hook.workdir // null) == null then $taskRuntime.workdir else $hook.workdir end),
-              customWorkdir:
-                (if ($hook.customWorkdir // null) != null then $hook.customWorkdir
-                 elif ($hook.workdir // null) == null then ($taskRuntime.customWorkdir // null)
-                 elif $hook.workdir == "custom" then ($taskRuntime.customWorkdir // null)
-                 else null end),
-              hermetic: $taskRuntime.hermetic,
-              runtimeInputs: (($taskRuntime.runtimeInputs // []) + ($hook.runtimeInputs // [])),
-              passThroughEnv: (($taskRuntime.passThroughEnv // []) + ($hook.passThroughEnv // [])),
-              env: (($taskRuntime.env // {}) + ($hook.env // {})),
-              umask: ($taskRuntime.umask // "022"),
-              locale: ($taskRuntime.locale // "C.UTF-8"),
-              timezone: ($taskRuntime.timezone // "UTC")
-            }
-        '
-      )"
+      hook_command="$(task_hook_command "$task_id" "$phase" "$hook_id")" || return 3
+      hook_runtime_json="$(task_hook_runtime_json "$task_id" "$phase" "$hook_id")" || return 3
 
       run_in_sandbox_runtime "$hook_runtime_json" "$hook_command" "$@"
       hook_exit_code="$?"
@@ -394,56 +171,25 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       fi
 
       echo "OK: hook $phase $hook_id done"
-    done < <(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r --arg phase "$phase" '.runtime[($phase + "Hooks")] // {} | keys[]')
+    done < <(task_hook_ids "$task_id" "$phase")
 
     return 0
   }
 
-  task_runtime_with_runner_package() {
-    local task="$1"
-    printf '%s' "$task" | ${pkgs.jq}/bin/jq -c '
-      .runtime as $runtime
-      | .runner.package as $package
-      | $runtime + {
-          runtimeInputs: (($runtime.runtimeInputs // []) + (if ($package // "") == "" then [] else [$package] end))
-        }
-    '
-  }
-
-  task_produces_json() {
-    local task="$1"
-    printf '%s' "$task" | ${pkgs.jq}/bin/jq -c '{
-      artifacts: (.produces.artifacts // []),
-      stateKeys: (.produces.stateKeys // [])
-    }'
-  }
-
   task_pass_detail_json() {
     local task_id="$1"
-    local task
-    task="$(task_json "$task_id")"
-    if [ -z "$task" ]; then
+    if ! task_descriptor_exists "$task_id"; then
       printf '%s' '{}'
       return 0
     fi
-    task_produces_json "$task"
-  }
-
-  task_max_attempts() {
-    local task="$1"
-    local attempts
-    attempts="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '.scheduling.maxAttempts // 1')"
-    if ! [[ "$attempts" =~ ^[0-9]+$ ]] || [ "$attempts" -lt 1 ]; then
-      attempts=1
-    fi
-    printf '%s' "$attempts"
+    task_produces_json "$task_id"
   }
 
   task_retry_backoff_for_attempt() {
-    local task="$1"
+    local task_id="$1"
     local retry_index="$2"
-    printf '%s' "$task" | ${pkgs.jq}/bin/jq -r --argjson idx "$retry_index" '
-      .scheduling.retryBackoffSec as $backoff
+    task_retry_backoff_json "$task_id" | ${pkgs.jq}/bin/jq -r --argjson idx "$retry_index" '
+      . as $backoff
       | if ($backoff | type) != "array" or ($backoff | length) == 0 then
           0
         elif $idx < ($backoff | length) then
@@ -456,8 +202,6 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
   execute_task_once() {
     local task_id="$1"
-    local task="$2"
-    shift
     shift
 
     local runner_type
@@ -469,22 +213,22 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local main_exit_code
     local post_exit_code
 
-    runner_type="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '.runner.type')"
-    if [ "$runner_type" != "shell" ] && task_has_hooks "$task"; then
+    runner_type="$(task_runner_type "$task_id")"
+    if [ "$runner_type" != "shell" ] && task_has_hooks "$task_id"; then
       echo "ERROR: task '$task_id' defines runtime hooks but runner type '$runner_type' is unsupported"
       return 3
     fi
-    runtime_json="$(task_runtime_with_runner_package "$task")"
+    runtime_json="$(task_runtime_json "$task_id")" || return 3
 
     set +e
     case "$runner_type" in
       shell)
-        if run_task_hooks "$task_id" "$task" "pre" "$@"; then
-          command="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '.runner.command')"
+        if run_task_hooks "$task_id" "pre" "$@"; then
+          command="$(task_runner_command "$task_id")"
           run_in_sandbox_runtime "$runtime_json" "$command" "$@"
           main_exit_code="$?"
 
-          if run_task_hooks "$task_id" "$task" "post" "$@"; then
+          if run_task_hooks "$task_id" "post" "$@"; then
             post_exit_code=0
           else
             post_exit_code="$?"
@@ -503,7 +247,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         fi
         ;;
       workflowRef)
-        nested_workflow="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '.runner.workflowId // empty')"
+        nested_workflow="$(task_runner_workflow_id "$task_id")"
         if [ -z "$nested_workflow" ]; then
           echo "ERROR: task '$task_id' runner.workflowId is empty"
           exit_code=3
@@ -517,8 +261,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         fi
         ;;
       derivation)
-        package_path="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '.runner.package // empty')"
-        command="$(printf '%s' "$task" | ${pkgs.jq}/bin/jq -r '.runner.command // empty')"
+        package_path="$(task_runner_package "$task_id")"
+        command="$(task_runner_command "$task_id")"
         if [ -z "$package_path" ]; then
           echo "ERROR: task '$task_id' derivation runner requires runner.package"
           exit_code=3
@@ -544,23 +288,21 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local task_id="$1"
     shift
 
-    local task
     local max_attempts
     local attempt=1
     local exit_code=0
     local retry_index
     local backoff_sec
 
-    task="$(task_json "$task_id")"
-    if [ -z "$task" ]; then
+    if ! task_descriptor_exists "$task_id"; then
       echo "ERROR: unknown task '$task_id'"
       return 2
     fi
 
-    max_attempts="$(task_max_attempts "$task")"
+    max_attempts="$(task_max_attempts "$task_id")"
 
     while [ "$attempt" -le "$max_attempts" ]; do
-      if execute_task_once "$task_id" "$task" "$@"; then
+      if execute_task_once "$task_id" "$@"; then
         return 0
       else
         exit_code="$?"
@@ -571,7 +313,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       fi
 
       retry_index=$((attempt - 1))
-      backoff_sec="$(task_retry_backoff_for_attempt "$task" "$retry_index")"
+      backoff_sec="$(task_retry_backoff_for_attempt "$task_id" "$retry_index")"
       if ! [[ "$backoff_sec" =~ ^[0-9]+$ ]]; then
         backoff_sec=0
       fi
@@ -633,6 +375,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local run_id
     local detail_json
     local status
+    local runner_type
     local managed_by_orchestrator=0
     local NIXFIED_WORKFLOW_CONTEXT="0"
     local -a filtered_args
@@ -640,6 +383,23 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     extract_logging_override_args "$@" || return $?
     filtered_args=("''${LOGGING_FILTERED_ARGS[@]}")
+    extract_machine_output_args "''${filtered_args[@]}" || return $?
+    filtered_args=("''${MACHINE_FILTERED_ARGS[@]}")
+
+    if ! task_descriptor_exists "$task_id"; then
+      echo "ERROR: unknown task '$task_id'"
+      return 2
+    fi
+    runner_type="$(task_runner_type "$task_id")"
+
+    if [ "$runner_type" != "workflowRef" ] && [ -n "$MACHINE_SUMMARY_FILE" ]; then
+      echo "ERROR: --summary-file is only supported for workflow runs"
+      return 2
+    fi
+    if [ "$runner_type" != "workflowRef" ] && [ "$MACHINE_JSON" = "1" ]; then
+      echo "ERROR: --json is only supported for workflow runs"
+      return 2
+    fi
 
     if [ -n "''${NIXFIED_ORCHESTRATOR_RUN_ID:-}" ]; then
       run_id="$NIXFIED_ORCHESTRATOR_RUN_ID"
@@ -653,6 +413,11 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fi
 
     ensure_run_artifacts_dir "$run_id" "" "$managed_by_orchestrator" || return $?
+    export NIXFIED_RUN_ID="$run_id"
+
+    if [ "$runner_type" != "workflowRef" ] && [ -n "$MACHINE_RUN_ID_FILE" ]; then
+      write_text_file_atomic "$MACHINE_RUN_ID_FILE" "$run_id" || return $?
+    fi
 
     detail_json="$(${pkgs.jq}/bin/jq -cn --arg suffix "$RUN_SUFFIX_REASON" '{mode: "task", suffixReason: (if $suffix == "" then null else $suffix end)}')"
     append_event "$run_id" "" "$task_id" "queued" "$detail_json"
@@ -663,7 +428,6 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     run_task_with_deps() {
       local current_task="$1"
       shift
-      local current_task_json
       local dep_task
       local dep_rc=0
       local rc=0
@@ -677,8 +441,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         return 3
       fi
 
-      current_task_json="$(task_json "$current_task")"
-      if [ -z "$current_task_json" ]; then
+      if ! task_descriptor_exists "$current_task"; then
         echo "ERROR: unknown task '$current_task'"
         return 2
       fi
@@ -698,13 +461,13 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
           unset "active_tasks[$current_task]"
           return "$dep_rc"
         fi
-      done < <(printf '%s' "$current_task_json" | ${pkgs.jq}/bin/jq -r '.deps.needs[]?')
+      done < <(task_needs "$current_task")
 
       while IFS= read -r dep_task; do
         if [ -z "$dep_task" ]; then
           continue
         fi
-        if [ -z "$(task_json "$dep_task")" ]; then
+        if ! task_descriptor_exists "$dep_task"; then
           echo "WARN: task '$current_task' soft dependency '$dep_task' is not defined"
           continue
         fi
@@ -716,12 +479,24 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         if [ "$dep_rc" -ne 0 ]; then
           echo "WARN: task '$current_task' soft dependency '$dep_task' failed exitCode=$dep_rc"
         fi
-      done < <(printf '%s' "$current_task_json" | ${pkgs.jq}/bin/jq -r '.deps.softNeeds[]?')
+      done < <(task_soft_needs "$current_task")
+
+      if [ "$current_task" = "$task_id" ] && [ "$runner_type" = "workflowRef" ]; then
+        export NIXFIED_JSON_OUTPUT_OVERRIDE="$MACHINE_JSON"
+        export NIXFIED_RUN_ID_FILE_OVERRIDE="$MACHINE_RUN_ID_FILE"
+        export NIXFIED_SUMMARY_FILE_OVERRIDE="$MACHINE_SUMMARY_FILE"
+      fi
 
       if execute_task "$run_id" "" "$current_task" "$@"; then
         rc=0
       else
         rc="$?"
+      fi
+
+      if [ "$current_task" = "$task_id" ] && [ "$runner_type" = "workflowRef" ]; then
+        unset NIXFIED_JSON_OUTPUT_OVERRIDE || true
+        unset NIXFIED_RUN_ID_FILE_OVERRIDE || true
+        unset NIXFIED_SUMMARY_FILE_OVERRIDE || true
       fi
 
       unset "active_tasks[$current_task]"
@@ -752,13 +527,13 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   }
 
   resolve_effective_max_workers() {
-    local workflow="$1"
+    local workflow_id="$1"
     local workflow_max_workers
     local effective_workers
     local override_name=""
     local override_value=""
 
-    workflow_max_workers="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.maxWorkers // 1')"
+    workflow_max_workers="$(workflow_max_workers "$workflow_id")"
     if ! [[ "$workflow_max_workers" =~ ^[0-9]+$ ]] || [ "$workflow_max_workers" -lt 1 ]; then
       workflow_max_workers=1
     fi
@@ -811,12 +586,12 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   }
 
   resolve_parallel_mode() {
-    local workflow="$1"
+    local workflow_id="$1"
     local configured_parallel
     local env_override
     local run_parallel=0
 
-    configured_parallel="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.execution.parallel // false')"
+    configured_parallel="$(workflow_parallel_enabled "$workflow_id")"
     if [ "$configured_parallel" = "true" ]; then
       run_parallel=1
     fi
@@ -836,44 +611,15 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   }
 
   workflow_unit_records() {
-    local workflow="$1"
-    printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -c '
-      .stages as $stages
-      | .units as $units
-      | [
-          range(0; ($stages | length)) as $stageIndex
-          | $stages[$stageIndex][] as $unitName
-          | ($units[$unitName] // error("workflow stage references unknown unit: " + $unitName)) as $unit
-          | {
-              stage: $stageIndex,
-              name: $unitName,
-              taskId: $unit.taskId,
-              needs: ($unit.needs // []),
-              locks: ($unit.locks // []),
-              when: ($unit.when // { envEquals: {}, envPresent: [] }),
-              skipIfMissingEnv: ($unit.skipIfMissingEnv // []),
-              priority: ($unit.priority // 100),
-              scheduling:
-                {
-                  maxAttempts: ($unit.scheduling.maxAttempts // 1),
-                  retryBackoffSec: ($unit.scheduling.retryBackoffSec // []),
-                  priority: ($unit.scheduling.priority // ($unit.priority // 100))
-                },
-              deps: ($unit.deps // { needs: [], softNeeds: [] }),
-              produces: ($unit.produces // { artifacts: [], stateKeys: [] })
-            }
-        ]
-      | sort_by(.stage, -(.priority), .name)
-      | .[]
-    '
+    local workflow_id="$1"
+    workflow_plan_records "$workflow_id"
   }
 
   run_workflow_serial_impl() {
     local run_id="$1"
     local workflow_id="$2"
-    local workflow="$3"
-    local fail_fast="$4"
-    shift 4
+    local fail_fast="$3"
+    shift 3
     local -a passthrough_args
     passthrough_args=("$@")
 
@@ -882,55 +628,19 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     while IFS= read -r unit_json; do
       local unit_task
-      local skip=0
       local missing=""
-      local when_failed=0
-      local required_env
-      local env_name
-      local expected_value
-      local actual_value
 
-      unit_task="$(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.taskId')"
+      unit_task="$(workflow_unit_task_id "$unit_json")"
+      missing="$(workflow_unit_missing_env_csv "$unit_json")"
 
-      while IFS= read -r required_env; do
-        if [ -n "$required_env" ] && [ -z "''${!required_env:-}" ]; then
-          skip=1
-          if [ -z "$missing" ]; then
-            missing="$required_env"
-          else
-            missing="$missing,$required_env"
-          fi
-        fi
-      done < <(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.skipIfMissingEnv[]?')
-
-      if [ "$skip" -eq 1 ]; then
+      if [ -n "$missing" ]; then
         local detail_json
         detail_json="$(${pkgs.jq}/bin/jq -cn --arg reason "missing-env" --arg missing "$missing" '{reason: $reason, missing: $missing}')"
         append_event "$run_id" "$workflow_id" "$unit_task" "canceled" "$detail_json"
         continue
       fi
 
-      while IFS= read -r required_env; do
-        if [ -n "$required_env" ] && [ -z "''${!required_env:-}" ]; then
-          when_failed=1
-          break
-        fi
-      done < <(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.when.envPresent[]?')
-
-      if [ "$when_failed" -eq 0 ]; then
-        while IFS=$'\t' read -r env_name expected_value; do
-          if [ -z "$env_name" ]; then
-            continue
-          fi
-          actual_value="''${!env_name:-}"
-          if [ "$actual_value" != "$expected_value" ]; then
-            when_failed=1
-            break
-          fi
-        done < <(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.when.envEquals // {} | to_entries[]? | [.key, (.value | tostring)] | @tsv')
-      fi
-
-      if [ "$when_failed" -eq 1 ]; then
+      if ! workflow_unit_when_matches "$unit_json"; then
         local detail_json
         detail_json="$(${pkgs.jq}/bin/jq -cn --arg reason "when-false" '{reason: $reason}')"
         append_event "$run_id" "$workflow_id" "$unit_task" "canceled" "$detail_json"
@@ -946,7 +656,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       if [ "$status" -ne 0 ] && [ "$fail_fast" = "true" ]; then
         break
       fi
-    done < <(workflow_unit_records "$workflow")
+    done < <(workflow_unit_records "$workflow_id")
 
     return "$status"
   }
@@ -954,9 +664,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   run_workflow_parallel_impl() {
     local run_id="$1"
     local workflow_id="$2"
-    local workflow="$3"
-    local fail_fast="$4"
-    shift 4
+    local fail_fast="$3"
+    shift 3
     local -a passthrough_args
     passthrough_args=("$@")
 
@@ -1126,12 +835,12 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       done
     }
 
-    if max_workers="$(resolve_effective_max_workers "$workflow")"; then
+    if max_workers="$(resolve_effective_max_workers "$workflow_id")"; then
       :
     else
       return "$?"
     fi
-    lock_policy="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.execution.lockPolicy // "exclusive"')"
+    lock_policy="$(workflow_lock_policy "$workflow_id")"
     if [ "$lock_policy" = "shared-aware" ]; then
       echo "WARN: lockPolicy=shared-aware uses exclusive semantics in workflow parallel runner"
     fi
@@ -1142,10 +851,10 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       local needs_count
       local lock_list
 
-      unit_name="$(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.name')"
-      unit_task="$(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.taskId')"
-      needs_count="$(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '(.needs // []) | length')"
-      lock_list="$(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.locks[]?' | ${pkgs.gawk}/bin/awk 'NF {printf "%s ", $0}')"
+      unit_name="$(workflow_unit_name "$unit_json")"
+      unit_task="$(workflow_unit_task_id "$unit_json")"
+      needs_count="$(workflow_unit_needs_count "$unit_json")"
+      lock_list="$(workflow_unit_lock_list "$unit_json")"
 
       unit_names+=("$unit_name")
       UNIT_JSON[$unit_name]="$unit_json"
@@ -1154,7 +863,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       UNIT_STATE[$unit_name]="pending"
       UNIT_DEPENDENTS[$unit_name]=""
       UNIT_LOCKS[$unit_name]="$lock_list"
-    done < <(workflow_unit_records "$workflow")
+    done < <(workflow_unit_records "$workflow_id")
 
     local total_units="''${#unit_names[@]}"
     if [ "$total_units" -eq 0 ]; then
@@ -1167,59 +876,23 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         if [ -n "$dependency" ]; then
           UNIT_DEPENDENTS[$dependency]="''${UNIT_DEPENDENTS[$dependency]:-} $unit_name"
         fi
-      done < <(printf '%s' "''${UNIT_JSON[$unit_name]}" | ${pkgs.jq}/bin/jq -r '.needs[]?')
+      done < <(workflow_unit_dependencies "''${UNIT_JSON[$unit_name]}")
     done
 
     for unit_name in "''${unit_names[@]}"; do
       local unit_json
       local missing=""
-      local skip=0
-      local when_failed=0
-      local required_env
-      local env_name
-      local expected_value
-      local actual_value
 
       unit_json="''${UNIT_JSON[$unit_name]}"
+      missing="$(workflow_unit_missing_env_csv "$unit_json")"
 
-      while IFS= read -r required_env; do
-        if [ -n "$required_env" ] && [ -z "''${!required_env:-}" ]; then
-          skip=1
-          if [ -z "$missing" ]; then
-            missing="$required_env"
-          else
-            missing="$missing,$required_env"
-          fi
-        fi
-      done < <(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.skipIfMissingEnv[]?')
-
-      if [ "$skip" -eq 1 ]; then
+      if [ -n "$missing" ]; then
         mark_unit_canceled "$unit_name" "missing-env" "missing" "$missing"
         cancel_pending_dependents "$unit_name" "dependency-not-passed"
         continue
       fi
 
-      while IFS= read -r required_env; do
-        if [ -n "$required_env" ] && [ -z "''${!required_env:-}" ]; then
-          when_failed=1
-          break
-        fi
-      done < <(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.when.envPresent[]?')
-
-      if [ "$when_failed" -eq 0 ]; then
-        while IFS=$'\t' read -r env_name expected_value; do
-          if [ -z "$env_name" ]; then
-            continue
-          fi
-          actual_value="''${!env_name:-}"
-          if [ "$actual_value" != "$expected_value" ]; then
-            when_failed=1
-            break
-          fi
-        done < <(printf '%s' "$unit_json" | ${pkgs.jq}/bin/jq -r '.when.envEquals // {} | to_entries[]? | [.key, (.value | tostring)] | @tsv')
-      fi
-
-      if [ "$when_failed" -eq 1 ]; then
+      if ! workflow_unit_when_matches "$unit_json"; then
         mark_unit_canceled "$unit_name" "when-false"
         cancel_pending_dependents "$unit_name" "dependency-not-passed"
         continue
@@ -1282,7 +955,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       fi
 
       if [ "$wait_rc" -eq 0 ]; then
-        detail_json="$(${pkgs.jq}/bin/jq -cn --argjson produces "$(printf '%s' "''${UNIT_JSON[$done_unit]}" | ${pkgs.jq}/bin/jq -c '.produces // {artifacts: [], stateKeys: []}')" '{produces: $produces}')"
+        detail_json="$(${pkgs.jq}/bin/jq -cn --argjson produces "$(workflow_unit_produces_json "''${UNIT_JSON[$done_unit]}")" '{produces: $produces}')"
         append_event "$run_id" "$workflow_id" "''${UNIT_TASK[$done_unit]}" "passed" "$detail_json"
         UNIT_STATE[$done_unit]="passed"
         completed_count=$((completed_count + 1))
@@ -1322,9 +995,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   run_workflow_phase_tasks() {
     local run_id="$1"
     local workflow_id="$2"
-    local workflow="$3"
-    local phase_key="$4"
-    shift 4
+    local phase_key="$3"
+    shift 3
     local -a passthrough_args
     passthrough_args=("$@")
 
@@ -1342,7 +1014,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         phase_status="$?"
         break
       fi
-    done < <(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r --arg phase "$phase_key" '.[$phase].tasks[]?')
+    done < <(workflow_phase_tasks "$workflow_id" "$phase_key")
 
     return "$phase_status"
   }
@@ -1395,16 +1067,6 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     mins="$(( seconds / 60 ))"
     secs="$(( seconds % 60 ))"
     printf '%s' "''${mins}m ''${secs}s"
-  }
-
-  task_runner_type() {
-    local task_id="$1"
-    if [ -z "$task_id" ]; then
-      printf '%s' "shell"
-      return 0
-    fi
-
-    ${pkgs.jq}/bin/jq -r --arg taskId "$task_id" '.tasks[$taskId].runner.type // "shell"' "$MODEL_FILE"
   }
 
   workflow_step_records_tsv() {
@@ -1727,10 +1389,10 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   write_workflow_summary_json() {
     local run_id="$1"
     local workflow_id="$2"
-    local workflow="$3"
-    local exit_code="$4"
-    local started_at="$5"
-    local started_epoch="$6"
+    local exit_code="$3"
+    local started_at="$4"
+    local started_epoch="$5"
+    local summary_file_override="$6"
 
     local should_write
     local mode
@@ -1762,12 +1424,12 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     LAST_WORKFLOW_SUMMARY_FILE=""
 
-    should_write="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.artifacts.writeSummary // false')"
+    should_write="$(workflow_write_summary "$workflow_id")"
     if [ "$should_write" != "true" ]; then
       return 0
     fi
 
-    mode="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.mode // "custom"')"
+    mode="$(workflow_mode_name "$workflow_id")"
     artifacts_dir="''${CI_ARTIFACTS_DIR:-}"
     if [ -z "$artifacts_dir" ]; then
       echo "ERROR: CI_ARTIFACTS_DIR is not set for run '$run_id'"
@@ -1815,7 +1477,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       untracked_duration=0
     fi
 
-    if parallel_max_workers="$(resolve_effective_max_workers "$workflow" 2>/dev/null || true)"; then
+    if parallel_max_workers="$(resolve_effective_max_workers "$workflow_id" 2>/dev/null || true)"; then
       :
     fi
     if is_nonneg_int "$parallel_max_workers"; then
@@ -1898,6 +1560,14 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fi
     mv "$summary_tmp" "$summary_file"
 
+    if [ -n "$summary_file_override" ] && [ "$summary_file_override" != "$summary_file" ]; then
+      if ! copy_file_atomic "$summary_file" "$summary_file_override"; then
+        registry_snapshot_cleanup "$events_file"
+        echo "ERROR: failed to write summary file '$summary_file_override'"
+        return 1
+      fi
+    fi
+
     LAST_WORKFLOW_SUMMARY_FILE="$summary_file"
     echo "INFO: summary_json=$summary_file"
     registry_snapshot_cleanup "$events_file"
@@ -1925,6 +1595,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     extract_logging_override_args "$@" || return $?
     input_args=("''${LOGGING_FILTERED_ARGS[@]}")
+    extract_machine_output_args "''${input_args[@]}" || return $?
+    input_args=("''${MACHINE_FILTERED_ARGS[@]}")
     set -- "''${input_args[@]}"
 
     while [ "$#" -gt 0 ]; do
@@ -1975,7 +1647,11 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     workflow_id="$(resolve_workflow_mode "$workflow_id" "$mode_override")" || return $?
 
-    local workflow
+    if [ "$print_summary" -eq 1 ] && [ "$MACHINE_JSON" = "1" ]; then
+      echo "ERROR: --json and --summary cannot be combined"
+      return 2
+    fi
+
     local args_payload
     local run_id
     local detail_json
@@ -1998,13 +1674,12 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       nested_workflow_call=1
     fi
 
-    workflow="$(workflow_json "$workflow_id")"
-    if [ -z "$workflow" ]; then
+    if ! workflow_id_exists "$workflow_id"; then
       echo "ERROR: unknown workflow '$workflow_id'"
       return 2
     fi
-    NIXFIED_WORKFLOW_LOG_LEVEL_DEFAULT="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.logging.levelDefault // empty')"
-    NIXFIED_WORKFLOW_OUTPUT_MODE_DEFAULT="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.logging.outputDefault // empty')"
+    NIXFIED_WORKFLOW_LOG_LEVEL_DEFAULT="$(workflow_logging_level_default "$workflow_id")"
+    NIXFIED_WORKFLOW_OUTPUT_MODE_DEFAULT="$(workflow_logging_output_default "$workflow_id")"
 
     started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     started_epoch="$(date +%s)"
@@ -2020,13 +1695,18 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       trap "deactivate_run '$run_id'" EXIT
     fi
 
-    ensure_run_artifacts_dir "$run_id" "$workflow" "$managed_by_orchestrator" || return $?
+    if [ -n "$MACHINE_RUN_ID_FILE" ]; then
+      write_text_file_atomic "$MACHINE_RUN_ID_FILE" "$run_id" || return $?
+    fi
+
+    ensure_run_artifacts_dir "$run_id" "$workflow_id" "$managed_by_orchestrator" || return $?
+    export NIXFIED_RUN_ID="$run_id"
 
     detail_json="$(${pkgs.jq}/bin/jq -cn --arg suffix "$RUN_SUFFIX_REASON" --arg mode "workflow" '{mode: $mode, suffixReason: (if $suffix == "" then null else $suffix end)}')"
     append_event "$run_id" "$workflow_id" "" "queued" "$detail_json"
 
-    fail_fast="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.execution.failFast')"
-    run_parallel="$(resolve_parallel_mode "$workflow")"
+    fail_fast="$(workflow_fail_fast "$workflow_id")"
+    run_parallel="$(resolve_parallel_mode "$workflow_id")"
     if [ "$run_parallel" = "1" ]; then
       local parallel_cap_error=""
       if parallel_cap_error="$(parallel_worker_cap_override_error)"; then
@@ -2035,7 +1715,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       fi
     fi
 
-    if run_workflow_phase_tasks "$run_id" "$workflow_id" "$workflow" "preRun" "''${passthrough_args[@]}"; then
+    if run_workflow_phase_tasks "$run_id" "$workflow_id" "preRun" "''${passthrough_args[@]}"; then
       status=0
     else
       status="$?"
@@ -2043,13 +1723,13 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     if [ "$status" -eq 0 ]; then
       if [ "$run_parallel" = "1" ]; then
-        if run_workflow_parallel_impl "$run_id" "$workflow_id" "$workflow" "$fail_fast" "''${passthrough_args[@]}"; then
+        if run_workflow_parallel_impl "$run_id" "$workflow_id" "$fail_fast" "''${passthrough_args[@]}"; then
           status=0
         else
           status="$?"
         fi
       else
-        if run_workflow_serial_impl "$run_id" "$workflow_id" "$workflow" "$fail_fast" "''${passthrough_args[@]}"; then
+        if run_workflow_serial_impl "$run_id" "$workflow_id" "$fail_fast" "''${passthrough_args[@]}"; then
           status=0
         else
           status="$?"
@@ -2057,9 +1737,9 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       fi
     fi
 
-    post_always="$(printf '%s' "$workflow" | ${pkgs.jq}/bin/jq -r '.postRun.alwaysRun')"
+    post_always="$(workflow_post_run_always "$workflow_id")"
     if [ "$post_always" = "true" ] || [ "$status" -eq 0 ]; then
-      if run_workflow_phase_tasks "$run_id" "$workflow_id" "$workflow" "postRun" "''${passthrough_args[@]}"; then
+      if run_workflow_phase_tasks "$run_id" "$workflow_id" "postRun" "''${passthrough_args[@]}"; then
         post_status=0
       else
         post_status="$?"
@@ -2083,7 +1763,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fi
 
     if [ "$nested_workflow_call" -eq 0 ]; then
-      if ! write_workflow_summary_json "$run_id" "$workflow_id" "$workflow" "$status" "$started_at" "$started_epoch"; then
+      if ! write_workflow_summary_json "$run_id" "$workflow_id" "$status" "$started_at" "$started_epoch" "$MACHINE_SUMMARY_FILE"; then
         if [ "$status" -eq 0 ]; then
           status=1
           detail_json="$(${pkgs.jq}/bin/jq -cn --arg reason "summary-write-failed" '{reason: $reason, exitCode: 1}')"
@@ -2116,6 +1796,10 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         fi
       fi
       echo "INFO: runId=$run_id passed=$passed failed=$failed canceled=$canceled"
+    fi
+
+    if [ "$MACHINE_JSON" = "1" ] && [ "$nested_workflow_call" -eq 0 ]; then
+      emit_workflow_result_json "$run_id" "$workflow_id" "$summary_file" "$status"
     fi
 
     if [ "$managed_by_orchestrator" -eq 0 ]; then

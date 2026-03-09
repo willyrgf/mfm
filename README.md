@@ -74,6 +74,7 @@ Crate docs:
 Design notes / planning:
 
 - Nixfied vendoring boundaries: [`nixfied/VENDORED.txt`](nixfied/VENDORED.txt)
+- Framework upgrade notes: [`docs/UPGRADE.md`](docs/UPGRADE.md)
 
 ## Development
 

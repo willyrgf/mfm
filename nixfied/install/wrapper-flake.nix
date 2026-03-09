@@ -16,11 +16,26 @@ if vendorPath == null then
       outputs = { self, nixpkgs, flake-utils, nixfied }:
         flake-utils.lib.eachDefaultSystem (system:
           let
+            frameworkSourceRevision =
+              let
+                dirtyRev = if nixfied ? dirtyRev then nixfied.dirtyRev else null;
+                rev = if nixfied ? rev then nixfied.rev else null;
+                fallbackRevision = builtins.substring 0 12 (
+                  builtins.hashString "sha256" (builtins.toString nixfied.outPath)
+                );
+              in
+              if dirtyRev != null then
+                dirtyRev
+              else if rev != null then
+                rev
+              else
+                fallbackRevision;
             compiled = nixfied.lib.mkNixfied {
               inherit system;
               projectRoot = ./.;
               projectModules = [ ./nixfied/project/module.nix ];
               extraModules = [ ];
+              inherit frameworkSourceRevision;
             };
           in {
             apps = compiled.apps;
@@ -50,10 +65,15 @@ else
                 system
                 ;
             };
+            frameworkSourceRevision = import ./nixfied/lib/framework-revision.nix {
+              sourcePath = ./nixfied;
+              metadataPath = ./nixfied/VENDORED.txt;
+            };
             compiled = nixfiedLib.mkNixfied {
               projectRoot = ./.;
               projectModules = [ ./nixfied/project/module.nix ];
               extraModules = [ ];
+              inherit frameworkSourceRevision;
             };
           in {
             apps = compiled.apps;

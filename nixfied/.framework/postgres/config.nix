@@ -5,7 +5,11 @@
 }:
 
 let
-  cfg = project.modules.postgres or { };
+  serviceConfig = import ../../lib/service-config.nix { lib = pkgs.lib; };
+  cfg = serviceConfig.getProjectServiceConfig {
+    inherit project;
+    name = "postgres";
+  };
   extensions = cfg.extensions or [ ];
   extraConfig = cfg.extraConfig or "";
   userEnvConfigs = cfg.envConfigs or { };
@@ -65,10 +69,31 @@ let
       ${extraConfig}
       ${userConfStr}
     '';
-in
-{
+
   devConf = mkEnvConf "dev" devDefaults;
   prodConf = mkEnvConf "prod" prodDefaults;
   testConf = mkEnvConf "test" testDefaults;
-  inherit baseConf extensions;
+
+  mkEnvConfFile = envName: conf: pkgs.writeText "postgresql-${envName}.conf" conf;
+
+  pgHbaConf = ''
+    # TYPE  DATABASE        USER  ADDRESS       METHOD
+    local   all             all                 trust
+    host    all             all   127.0.0.1/32  trust
+    host    all             all   ::1/128       trust
+  '';
+in
+{
+  inherit
+    baseConf
+    extensions
+    devConf
+    prodConf
+    testConf
+    pgHbaConf
+    ;
+  devConfFile = mkEnvConfFile "dev" devConf;
+  prodConfFile = mkEnvConfFile "prod" prodConf;
+  testConfFile = mkEnvConfFile "test" testConf;
+  pgHbaConfFile = pkgs.writeText "pg_hba.conf" pgHbaConf;
 }

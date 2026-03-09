@@ -3,13 +3,13 @@
   pkgs,
   project,
   slots,
+  config,
   lifecycle,
   loggingPrelude,
 }:
 
 let
-  cfg = project.modules.nginx or { };
-  dataDirName = cfg.dataDirName or "nginx";
+  dataDirName = config.dataDirName or "nginx";
   nginxDirExpr = slots.getServiceDir dataDirName;
 
   obtainCert = pkgs.writeShellScript "nginx-cert-obtain" ''

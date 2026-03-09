@@ -153,10 +153,16 @@ in
     ephemeral = {
       copyMode = lib.mkOption {
         type = t.enum [
+          "nix-source"
           "git-files"
           "static-excludes"
         ];
-        default = "git-files";
+        default = "nix-source";
+      };
+
+      includeUntracked = lib.mkOption {
+        type = t.bool;
+        default = false;
       };
 
       excludePatterns = lib.mkOption {
@@ -204,6 +210,19 @@ in
       minFreeBytesAfterCopy = lib.mkOption {
         type = t.ints.unsigned;
         default = 0;
+      };
+
+      envFileMode = lib.mkOption {
+        type = t.enum [
+          "disabled"
+          "original-root"
+        ];
+        default = "disabled";
+      };
+
+      envFilePath = lib.mkOption {
+        type = t.str;
+        default = ".env";
       };
     };
   };

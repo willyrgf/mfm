@@ -2,10 +2,11 @@
 {
   pkgs,
   slots,
-  processRegistry,
+  runtimeEvents,
 }:
 
 let
+  lib = pkgs.lib;
   slotEnvRuntime = import ./slot-env-runtime.nix { inherit pkgs; };
   mkLogScript =
     service:
@@ -16,7 +17,7 @@ let
         command = toString slots.getSlotInfoJson;
         exportVars = false;
       }}
-      exec ${processRegistry.serviceLogs} --service ${service} --slot "$SLOT" --env "$ENV" "$@"
+      exec ${runtimeEvents.serviceLogs} --service ${service} --slot "$SLOT" --env "$ENV" "$@"
     '';
 
   mkEventsScript =
@@ -28,7 +29,7 @@ let
         command = toString slots.getSlotInfoJson;
         exportVars = false;
       }}
-      exec ${processRegistry.serviceEvents} --service ${service} --slot "$SLOT" --env "$ENV" "$@"
+      exec ${runtimeEvents.serviceEvents} --service ${service} --slot "$SLOT" --env "$ENV" "$@"
     '';
 
   mkStatusMergeBlock =
@@ -49,7 +50,7 @@ let
       SLOT_OWNER=""
       REGISTRY_SCOPE="global"
 
-      REG_OUT="$(${processRegistry.serviceStatus} --service ${service} --slot "$SLOT" --env "$ENV" 2>/dev/null || true)"
+      REG_OUT="$(${runtimeEvents.serviceStatus} --service ${service} --slot "$SLOT" --env "$ENV" 2>/dev/null || true)"
       if [ -n "$REG_OUT" ]; then
         eval "$REG_OUT"
       fi
@@ -71,12 +72,45 @@ let
       fi
     '';
 
+  mkStatusLine =
+    {
+      service,
+      beforeRunningFields ? [ ],
+      afterPidFields ? [ ],
+    }:
+    let
+      fields = [
+        "service=${service}"
+        "slot=$SLOT"
+        "env=$ENV"
+      ]
+      ++ beforeRunningFields
+      ++ [
+        "running=$RUNNING"
+        "pid=\${PID:-unknown}"
+      ]
+      ++ afterPidFields
+      ++ [
+        "scope=$SCOPE"
+        "owner_run_id=\${OWNER_RUN_ID:-unknown}"
+        "owner_scope=\${OWNER_SCOPE:-unknown}"
+        "ephemeral_root=\${EPHEMERAL_ROOT:-none}"
+        "registry_state=\${REGISTRY_STATE:-unknown}"
+        "slot_owner=\${SLOT_OWNER:-unknown}"
+        "wait_reason=\${WAIT_REASON:-none}"
+        "log_path=$EFFECTIVE_LOG_PATH"
+      ];
+    in
+    ''
+      echo "${lib.concatStringsSep " " fields}"
+    '';
+
   mkEmitServiceEventFunction = service: ''
     emit_service_event() {
       local event_type="$1"
       local state="$2"
       shift 2 || true
-      ${processRegistry.emitEvent} \
+      ${runtimeEvents.emitEvent} \
         --event-type "$event_type" \
         --service ${service} \
         --state "$state" \
@@ -115,6 +149,7 @@ in
     mkLogScript
     mkEventsScript
     mkStatusMergeBlock
+    mkStatusLine
     mkEmitServiceEventFunction
     mkLogEventExtensions
     ;

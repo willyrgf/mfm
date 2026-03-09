@@ -149,14 +149,42 @@ let
   ];
   projectTemplates = lib.sort (a: b: a.order < b.order) (map mkTemplate templateSpecs);
 
+  requiredTemplateKeys = map (t: t.key) (builtins.filter (t: t.required or false) projectTemplates);
+  optionalTemplatePlans = map (
+    t: {
+      inherit (t)
+        key
+        file
+        order
+        ;
+    }
+  ) (builtins.filter (t: !(t.required or false)) projectTemplates);
+
   templateKeys = map (t: t.key) projectTemplates;
   templateFiles = map (t: t.file) projectTemplates;
   templateFilterTokens = builtins.concatLists (
     map (t: [ t.key ] ++ (t.aliases or [ ])) projectTemplates
   );
+  templateTokenToKey = builtins.listToAttrs (
+    builtins.concatLists (
+      map (
+        t:
+        map (token: {
+          name = token;
+          value = t.key;
+        }) ([ t.key ] ++ (t.aliases or [ ]))
+      ) projectTemplates
+    )
+  );
   templateFilterDisplayTokens = builtins.concatLists (
     map (t: if t.filterDisplay == null then [ t.key ] else t.filterDisplay) projectTemplates
   );
+
+  templateFilterPlanData = {
+    requiredKeys = requiredTemplateKeys;
+    optionalTemplates = optionalTemplatePlans;
+    tokenToKey = templateTokenToKey;
+  };
 
   _templateKeysUnique = assertUnique "template key" templateKeys;
   _templateFilesUnique = assertUnique "template file" templateFiles;
@@ -226,5 +254,6 @@ in
     projectTemplates
     frameworkHelpers
     templateFilterDisplayTokens
+    templateFilterPlanData
     ;
 }

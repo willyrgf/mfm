@@ -1,6 +1,14 @@
 { lib, ... }:
 let
   t = lib.types;
+  sourceSpec = t.submodule {
+    options = {
+      package = lib.mkOption {
+        type = t.nullOr t.package;
+        default = null;
+      };
+    };
+  };
   sourceKindType = t.enum [
     "real"
     "shim"
@@ -26,6 +34,38 @@ in
     executionRpcPortKey = lib.mkOption {
       type = t.str;
       default = "rethHttp";
+    };
+    dataDirName = lib.mkOption {
+      type = t.str;
+      default = "helios";
+    };
+    network = lib.mkOption {
+      type = t.str;
+      default = "local";
+    };
+    executionRpcUrl = lib.mkOption {
+      type = t.str;
+      default = "";
+    };
+    consensusRpcUrl = lib.mkOption {
+      type = t.str;
+      default = "";
+    };
+    defaultConsensusRpcUrl = lib.mkOption {
+      type = t.str;
+      default = "https://www.lightclientdata.org";
+    };
+    checkpoint = lib.mkOption {
+      type = t.str;
+      default = "";
+    };
+    extraArgs = lib.mkOption {
+      type = t.listOf t.str;
+      default = [ ];
+    };
+    sources = lib.mkOption {
+      type = t.attrsOf sourceSpec;
+      default = { };
     };
     sourceKeys = lib.mkOption {
       type = t.listOf t.str;

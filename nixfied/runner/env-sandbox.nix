@@ -3,38 +3,111 @@
   projectRoot,
   model,
 }:
+let
+  lib = pkgs.lib;
+  commonRuntimeShell = import ./common-runtime.nix { inherit pkgs; };
+
+  valueToString =
+    value:
+    if value == null then
+      ""
+    else if builtins.isBool value then
+      if value then "1" else "0"
+    else if builtins.isAttrs value || builtins.isList value then
+      builtins.toJSON value
+    else
+      toString value;
+
+  normalizeStaticToken =
+    value:
+    lib.toUpper (lib.replaceStrings [ "." "-" ":" "/" " " ] [ "_" "_" "_" "_" "_" ] value);
+
+  runtimeEnvOffsetNames = builtins.sort builtins.lessThan (builtins.attrNames (model.runtime.env.offsets or { }));
+  runtimePrimitiveNames =
+    builtins.sort builtins.lessThan (builtins.attrNames (model.runtime.primitives.defs or { }));
+  runtimePortNames = builtins.sort builtins.lessThan (builtins.attrNames (model.runtime.ports or { }));
+  serviceIds = builtins.sort builtins.lessThan (builtins.attrNames (model.services or { }));
+
+  staticRuntimePackagesPath = lib.concatStringsSep ":" (map (runtimeInput: "${runtimeInput}/bin") model.runtime.runtimePackages);
+
+  staticRuntimeEnvOffsetCase = lib.concatStringsSep "\n" (
+    map (envName: ''
+      ${lib.escapeShellArg envName})
+        printf '%s' ${lib.escapeShellArg (toString model.runtime.env.offsets.${envName})}
+        ;;
+    '') runtimeEnvOffsetNames
+  );
+
+  staticRuntimePrimitivesTsv = lib.concatStringsSep "\n" (
+    map (
+      primitiveName:
+      let
+        primitive = model.runtime.primitives.defs.${primitiveName};
+      in
+      "${primitiveName}\t${
+        if primitive.default == null then "__NIXFIED_NULL__" else valueToString primitive.default
+      }\t${lib.concatStringsSep " " (primitive.aliases or [ ])}"
+    ) runtimePrimitiveNames
+  );
+
+  staticRuntimePortsTsv = lib.concatStringsSep "\n" (
+    map (portName: "${portName}\t${toString model.runtime.ports.${portName}}") runtimePortNames
+  );
+
+  staticServiceNames = lib.concatStringsSep "\n" (map (serviceId: model.services.${serviceId}.name) serviceIds);
+
+  staticServiceEnvCmds = lib.concatStringsSep "\n" (
+    map (
+      serviceId:
+      let
+        service = model.services.${serviceId};
+        serviceToken = normalizeStaticToken service.name;
+        configKeys = builtins.sort builtins.lessThan (builtins.attrNames (service.config or { }));
+        configCmds = lib.concatStringsSep "\n" (
+          map (
+            configKey:
+            let
+              configToken = normalizeStaticToken configKey;
+            in
+            "    env_cmd+=(${lib.escapeShellArg "NIXFIED_SERVICE_${serviceToken}_${configToken}=${valueToString service.config.${configKey}}"})"
+          ) configKeys
+        );
+      in
+      ''
+        env_cmd+=(${lib.escapeShellArg "NIXFIED_SERVICE_${serviceToken}_ENABLED=${if service.enable then "1" else "0"}"})
+      '' + lib.optionalString (configCmds != "") ''
+        ${configCmds}
+      ''
+    ) serviceIds
+  );
+in
 ''
-  RUNTIME_JSON=${pkgs.lib.escapeShellArg (builtins.toJSON model.runtime)}
-  SERVICES_JSON=${pkgs.lib.escapeShellArg (builtins.toJSON model.services)}
+  ${commonRuntimeShell}
+
   PROJECT_NAME=${pkgs.lib.escapeShellArg model.identity.projectName}
   PROJECT_DESCRIPTION=${pkgs.lib.escapeShellArg model.identity.description}
+  PROJECT_ID=${pkgs.lib.escapeShellArg model.identity.projectId}
+  PROJECT_ID_UPPER=${
+    pkgs.lib.escapeShellArg (
+      pkgs.lib.toUpper (pkgs.lib.replaceStrings [ "-" "." ] [ "_" "_" ] model.identity.projectId)
+      )
+  }
+  RUNTIME_DIR_BASE_DEFAULT=${pkgs.lib.escapeShellArg model.runtime.directories.base}
+  ENV_SANDBOX_STATIC_RUNTIME_PACKAGES_PATH=${lib.escapeShellArg staticRuntimePackagesPath}
+  ENV_SANDBOX_STATIC_RUNTIME_SLOT_VAR=${lib.escapeShellArg model.runtime.slot.var}
+  ENV_SANDBOX_STATIC_RUNTIME_ENV_VAR=${lib.escapeShellArg model.runtime.env.var}
+  ENV_SANDBOX_STATIC_RUNTIME_SLOT_DEFAULT=${lib.escapeShellArg (toString model.runtime.slot.default)}
+  ENV_SANDBOX_STATIC_RUNTIME_ENV_DEFAULT=${lib.escapeShellArg model.runtime.env.default}
+  ENV_SANDBOX_STATIC_RUNTIME_SLOT_STRIDE=${lib.escapeShellArg (toString model.runtime.slot.stride)}
+  ENV_SANDBOX_STATIC_RUNTIME_DIR_BASE=${lib.escapeShellArg model.runtime.directories.base}
+  ENV_SANDBOX_STATIC_LOG_LEVEL_DEFAULT=${lib.escapeShellArg model.runtime.logging.levelDefault}
+  ENV_SANDBOX_STATIC_OUTPUT_MODE_DEFAULT=${lib.escapeShellArg model.runtime.logging.outputDefault}
+  ENV_SANDBOX_STATIC_RUNTIME_PRIMITIVES_TSV=${lib.escapeShellArg staticRuntimePrimitivesTsv}
+  ENV_SANDBOX_STATIC_RUNTIME_PORTS_TSV=${lib.escapeShellArg staticRuntimePortsTsv}
+  ENV_SANDBOX_STATIC_SERVICE_NAMES=${lib.escapeShellArg staticServiceNames}
 
   normalize_env_token() {
     printf '%s' "$1" | ${pkgs.coreutils}/bin/tr '[:lower:].-' '[:upper:]__' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_'
-  }
-
-  valid_log_level() {
-    local value="$1"
-    case "$value" in
-      error|warn|info|debug|trace)
-        return 0
-        ;;
-      *)
-        return 1
-        ;;
-    esac
-  }
-
-  valid_output_mode() {
-    local value="$1"
-    case "$value" in
-      stdout|logs|both)
-        return 0
-        ;;
-      *)
-        return 1
-        ;;
-    esac
   }
 
   is_sensitive_env_name() {
@@ -52,11 +125,100 @@
     esac
   }
 
+  is_reserved_runtime_env_name() {
+    local env_name="$1"
+
+    case "$env_name" in
+      HOME|TMPDIR|XDG_DATA_HOME|XDG_STATE_HOME|XDG_CACHE_HOME|REGISTRY_ROOT|CI_ARTIFACTS_DIR|NIXFIED_SERVICE_ROOT)
+        return 0
+        ;;
+      NIXFIED_RUNTIME_DIR_SCOPE_OVERRIDE|NIXFIED_RUNTIME_DIR_SCOPE|NIXFIED_RUNTIME_DIR_BASE)
+        return 0
+        ;;
+      NIXFIED_RUNTIME_HOME|NIXFIED_RUNTIME_TMPDIR|NIXFIED_RUNTIME_XDG_DATA_HOME|NIXFIED_RUNTIME_XDG_STATE_HOME|NIXFIED_RUNTIME_XDG_CACHE_HOME)
+        return 0
+        ;;
+      NIXFIED_RUNTIME_REGISTRY_ROOT|NIXFIED_RUNTIME_ARTIFACTS_DIR|NIXFIED_RUNTIME_SERVICE_ROOT)
+        return 0
+        ;;
+      NIXFIED_MODEL_FILE|NIXFIED_RUN_ID)
+        return 0
+        ;;
+      NIXFIED_EXECUTOR_BIN|NIXFIED_ORCHESTRATOR_BIN|NIXFIED_EXECUTOR_SELF|NIXFIED_ORCHESTRATOR_SELF)
+        return 0
+        ;;
+      NIXFIED_EXECUTION_EPHEMERAL|NIXFIED_ORCHESTRATOR_RUN_ID|NIXFIED_ORCHESTRATOR_PROCESS_MODE|NIXFIED_ORCHESTRATOR_WORKFLOW_ID)
+        return 0
+        ;;
+      NIXFIED_WORKFLOW_SETUP_STARTED_AT|NIXFIED_WORKFLOW_SETUP_STARTED_EPOCH)
+        return 0
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  }
+
   ensure_runtime_dir() {
     local path="$1"
     if [ -n "$path" ]; then
       mkdir -p "$path"
     fi
+  }
+
+  env_sandbox_runtime_env_offset() {
+    case "$1" in
+${staticRuntimeEnvOffsetCase}
+      *)
+        return 1
+        ;;
+    esac
+  }
+
+  load_runtime_plan() {
+    local runtime_json="$1"
+    local runtime_plan_shell=""
+
+    runtime_plan_shell="$(
+      printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '
+        def emit($name; $value): "\($name)=\($value | @sh)";
+        . as $runtime
+        | ($runtime.env // {}) as $env
+        | [
+            emit("runtime_inputs_path"; (($runtime.runtimeInputs // []) | map(. + "/bin") | join(":"))),
+            emit("locale"; ($runtime.locale // "C.UTF-8")),
+            emit("timezone"; ($runtime.timezone // "UTC")),
+            emit("umask_value"; ($runtime.umask // "022")),
+            emit("allow_sensitive_pass_through"; (if ($runtime.allowSensitivePassThrough // false) then "1" else "0" end)),
+            emit("workdir_kind"; ($runtime.workdir // "projectRoot")),
+            emit("custom_workdir"; ($runtime.customWorkdir // "")),
+            emit("task_log_level_default"; ($runtime.logging.levelDefault // "")),
+            emit("task_output_mode_default"; ($runtime.logging.outputDefault // "")),
+            emit("runtime_env_tsv"; (($env | to_entries | map([.key, (.value | tostring)] | @tsv) | join("\n")))),
+            emit("pass_through_env_tsv"; (($runtime.passThroughEnv // []) | join("\n"))),
+            emit("runtime_log_level_set"; (if ($env | has("LOG_LEVEL")) then "1" else "0" end)),
+            emit("runtime_log_level_alias_set"; (if ($env | has("NIXFIED_LOG_LEVEL")) then "1" else "0" end)),
+            emit("runtime_log_level_value"; (if ($env | has("LOG_LEVEL")) then ($env.LOG_LEVEL | tostring) else "" end)),
+            emit("runtime_log_level_alias_value"; (if ($env | has("NIXFIED_LOG_LEVEL")) then ($env.NIXFIED_LOG_LEVEL | tostring) else "" end)),
+            emit("runtime_output_mode_set"; (if ($env | has("OUTPUT_MODE")) then "1" else "0" end)),
+            emit("runtime_output_mode_alias_set"; (if ($env | has("NIXFIED_OUTPUT_MODE")) then "1" else "0" end)),
+            emit("runtime_output_mode_value"; (if ($env | has("OUTPUT_MODE")) then ($env.OUTPUT_MODE | tostring) else "" end)),
+            emit("runtime_output_mode_alias_value"; (if ($env | has("NIXFIED_OUTPUT_MODE")) then ($env.NIXFIED_OUTPUT_MODE | tostring) else "" end)),
+            emit("runtime_log_file_set"; (if ($env | has("NIXFIED_LOG_FILE")) then "1" else "0" end)),
+            emit("runtime_log_file_value"; (if ($env | has("NIXFIED_LOG_FILE")) then ($env.NIXFIED_LOG_FILE | tostring) else "" end)),
+            emit("runtime_has_rust_log"; (if ($env | has("RUST_LOG")) then "1" else "0" end)),
+            emit("runtime_has_mfm_log"; (if ($env | has("MFM_LOG")) then "1" else "0" end)),
+            emit("runtime_has_mfm_test_log_filter"; (if ($env | has("MFM_TEST_LOG_FILTER")) then "1" else "0" end)),
+            emit("runtime_has_mfm_test_log"; (if ($env | has("MFM_TEST_LOG")) then "1" else "0" end))
+          ]
+        | .[]
+      '
+    )" || {
+      echo "ERROR: failed to parse runtime plan"
+      return 1
+    }
+
+    eval "$runtime_plan_shell"
   }
 
   run_in_sandbox_runtime() {
@@ -72,10 +234,13 @@
     local timezone
     local umask_value
     local runtime_path=""
+    local runtime_inputs_path=""
     local base_path
     local final_path
     local host_developer_dir=""
     local host_sdkroot=""
+    local pass_through_env_tsv=""
+    local runtime_env_tsv=""
 
     local slot_var
     local env_var
@@ -87,6 +252,10 @@
     local env_offset
     local runtime_dir_base
     local runtime_scope_root
+    local runtime_scope_override
+    local project_ephemeral_flag_var
+    local project_ephemeral_root_var
+    local ephemeral_root=""
     local log_level_default
     local output_mode_default
     local task_log_level_default
@@ -117,6 +286,10 @@
     local resolved_output_mode
     local runtime_log_file_set
     local runtime_log_file_value
+    local runtime_has_rust_log="0"
+    local runtime_has_mfm_log="0"
+    local runtime_has_mfm_test_log_filter="0"
+    local runtime_has_mfm_test_log="0"
     local resolved_log_file=""
     local logs_root
     local logs_dir
@@ -131,28 +304,6 @@
     local artifacts_dir_value
     local services_root
 
-    discover_caller_project_root() {
-      local dir="$1"
-
-      while [ -n "$dir" ]; do
-        if [ -f "$dir/flake.nix" ] && [ -f "$dir/nixfied/project/module.nix" ]; then
-          printf '%s' "$dir"
-          return 0
-        fi
-
-        if [ "$dir" = "/" ]; then
-          break
-        fi
-
-        dir="''${dir%/*}"
-        if [ -z "$dir" ]; then
-          dir="/"
-        fi
-      done
-
-      return 1
-    }
-
     resolve_project_root_workdir() {
       local project_root_real="${builtins.toString projectRoot}"
       local anchor_root="$project_root_real"
@@ -160,44 +311,26 @@
       local caller_pwd="''${NIXFIED_CALLER_PWD:-}"
       local caller_pwd_real=""
       local caller_relative=""
-      local caller_root=""
-      local project_root_is_store=0
 
       if [ -d "$project_root_real" ]; then
         project_root_real="$(cd "$project_root_real" && pwd -P)"
       fi
 
-      case "$project_root_real" in
-        /nix/store/*)
-          project_root_is_store=1
-          ;;
-      esac
-
-      if [ -n "$caller_pwd" ] && [ -d "$caller_pwd" ]; then
-        caller_pwd_real="$(cd "$caller_pwd" && pwd -P)"
-        caller_root="$(discover_caller_project_root "$caller_pwd_real" || true)"
-      fi
-
       if [ -n "''${ORIGINAL_ROOT:-}" ] && [ -d "$ORIGINAL_ROOT" ]; then
         anchor_root="$(cd "$ORIGINAL_ROOT" && pwd -P)"
-      elif [ -n "$caller_root" ]; then
-        anchor_root="$caller_root"
       else
         anchor_root="$project_root_real"
       fi
 
       if [ "''${NIXFIED_EXECUTION_EPHEMERAL:-0}" = "1" ]; then
         effective_root="$(pwd -P)"
-      elif [ "$project_root_is_store" -eq 1 ] && [ -n "$caller_root" ]; then
-        # Wrapper apps are evaluated from a read-only store snapshot. Rebind
-        # projectRoot tasks to the live caller workspace when available so
-        # cargo-backed commands do not try to write target/ under /nix/store.
-        effective_root="$caller_root"
       else
         effective_root="$project_root_real"
       fi
 
-      if [ -n "$caller_pwd_real" ]; then
+      if [ -n "$caller_pwd" ] && [ -d "$caller_pwd" ]; then
+        caller_pwd_real="$(cd "$caller_pwd" && pwd -P)"
+
         case "$caller_pwd_real" in
           "$effective_root")
             printf '%s' "$effective_root"
@@ -223,20 +356,100 @@
           fi
           return 0
         fi
+
+        case "$project_root_real" in
+          /nix/store/*)
+            # Remote framework proxy apps execute from a store path, but they
+            # should treat the caller checkout as the project root by default.
+            printf '%s' "$caller_pwd_real"
+            return 0
+            ;;
+        esac
       fi
 
       printf '%s' "$effective_root"
     }
 
-    workdir_kind="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.workdir')"
-    custom_workdir="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.customWorkdir // empty')"
+    load_runtime_plan "$runtime_json" || return 1
+
+    runtime_path="$ENV_SANDBOX_STATIC_RUNTIME_PACKAGES_PATH"
+    if [ -n "$runtime_inputs_path" ]; then
+      if [ -z "$runtime_path" ]; then
+        runtime_path="$runtime_inputs_path"
+      else
+        runtime_path="$runtime_path:$runtime_inputs_path"
+      fi
+    fi
+
+    base_path="${pkgs.coreutils}/bin:${pkgs.findutils}/bin:${pkgs.gnused}/bin:${pkgs.gnugrep}/bin:${pkgs.jq}/bin:${pkgs.bash}/bin"
+    if [ -n "$runtime_path" ]; then
+      final_path="$runtime_path:$base_path"
+    else
+      final_path="$base_path"
+    fi
+
+    slot_var="$ENV_SANDBOX_STATIC_RUNTIME_SLOT_VAR"
+    env_var="$ENV_SANDBOX_STATIC_RUNTIME_ENV_VAR"
+    slot_default="$ENV_SANDBOX_STATIC_RUNTIME_SLOT_DEFAULT"
+    env_default="$ENV_SANDBOX_STATIC_RUNTIME_ENV_DEFAULT"
+    slot_stride="$ENV_SANDBOX_STATIC_RUNTIME_SLOT_STRIDE"
+
+    slot_value="''${!slot_var:-$slot_default}"
+    env_value="''${!env_var:-$env_default}"
+
+    if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: $slot_var must be an integer"
+      return 3
+    fi
+
+    if ! env_offset="$(env_sandbox_runtime_env_offset "$env_value")"; then
+      echo "ERROR: unsupported $env_var '$env_value'"
+      return 3
+    fi
+
+    runtime_dir_base="$ENV_SANDBOX_STATIC_RUNTIME_DIR_BASE"
+    project_ephemeral_flag_var="''${PROJECT_ID_UPPER}_EPHEMERAL"
+    project_ephemeral_root_var="''${PROJECT_ID_UPPER}_EPHEMERAL_ROOT"
+    ephemeral_root="''${!project_ephemeral_root_var:-}"
+    runtime_scope_override="''${NIXFIED_RUNTIME_DIR_SCOPE_OVERRIDE:-}"
+    log_level_default="$ENV_SANDBOX_STATIC_LOG_LEVEL_DEFAULT"
+    output_mode_default="$ENV_SANDBOX_STATIC_OUTPUT_MODE_DEFAULT"
+
+    if [ -z "$runtime_dir_base" ] || [[ "$runtime_dir_base" == *"$"* ]]; then
+      runtime_dir_base="$RUNTIME_DIR_BASE_DEFAULT"
+    fi
+    if [ -n "$runtime_scope_override" ]; then
+      runtime_scope_root="$runtime_scope_override"
+    elif [ -n "$ephemeral_root" ]; then
+      runtime_scope_root="$ephemeral_root"
+    else
+      runtime_scope_root="$runtime_dir_base/$env_value/slot-$slot_value"
+    fi
+
+    home_value="$runtime_scope_root/home"
+    tmp_value="$runtime_scope_root/tmp"
+    xdg_data_value="$runtime_scope_root/xdg/data"
+    xdg_state_value="$runtime_scope_root/xdg/state"
+    xdg_cache_value="$runtime_scope_root/xdg/cache"
+    registry_root_value="$runtime_scope_root/registry"
+    artifacts_dir_value="$runtime_scope_root/artifacts"
+    services_root="$runtime_scope_root/services"
+
+    ensure_runtime_dir "$home_value"
+    ensure_runtime_dir "$tmp_value"
+    ensure_runtime_dir "$xdg_data_value"
+    ensure_runtime_dir "$xdg_state_value"
+    ensure_runtime_dir "$xdg_cache_value"
+    ensure_runtime_dir "$registry_root_value"
+    ensure_runtime_dir "$artifacts_dir_value"
+    ensure_runtime_dir "$services_root"
 
     case "$workdir_kind" in
       projectRoot)
         workdir="$(resolve_project_root_workdir)"
         ;;
       stateRoot)
-        workdir="$REGISTRY_ROOT"
+        workdir="$registry_root_value"
         ;;
       custom)
         if [ -z "$custom_workdir" ]; then
@@ -251,87 +464,6 @@
         ;;
     esac
 
-    while IFS= read -r runtime_input; do
-      if [ -n "$runtime_input" ]; then
-        if [ -z "$runtime_path" ]; then
-          runtime_path="$runtime_input/bin"
-        else
-          runtime_path="$runtime_path:$runtime_input/bin"
-        fi
-      fi
-    done < <(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r '.runtimePackages[]?')
-
-    while IFS= read -r runtime_input; do
-      if [ -n "$runtime_input" ]; then
-        if [ -z "$runtime_path" ]; then
-          runtime_path="$runtime_input/bin"
-        else
-          runtime_path="$runtime_path:$runtime_input/bin"
-        fi
-      fi
-    done < <(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.runtimeInputs[]?')
-
-    base_path="${pkgs.coreutils}/bin:${pkgs.findutils}/bin:${pkgs.gnused}/bin:${pkgs.gnugrep}/bin:${pkgs.jq}/bin:${pkgs.bash}/bin"
-    if [ -n "$runtime_path" ]; then
-      final_path="$runtime_path:$base_path"
-    else
-      final_path="$base_path"
-    fi
-
-    locale="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.locale // "C.UTF-8"')"
-    timezone="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.timezone // "UTC"')"
-    umask_value="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.umask // "022"')"
-    allow_sensitive_pass_through="$(
-      printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r 'if (.allowSensitivePassThrough // false) then "1" else "0" end'
-    )"
-
-    slot_var="$(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r '.slot.var')"
-    env_var="$(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r '.env.var')"
-    slot_default="$(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r '.slot.default')"
-    env_default="$(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r '.env.default')"
-    slot_stride="$(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r '.slot.stride')"
-
-    slot_value="''${!slot_var:-$slot_default}"
-    env_value="''${!env_var:-$env_default}"
-
-    if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
-      echo "ERROR: $slot_var must be an integer"
-      return 3
-    fi
-
-    env_offset="$(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r --arg env "$env_value" '.env.offsets[$env] // empty')"
-    if [ -z "$env_offset" ]; then
-      echo "ERROR: unsupported $env_var '$env_value'"
-      return 3
-    fi
-
-    runtime_dir_base="$(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r '.directories.base // empty')"
-    log_level_default="$(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r '.logging.levelDefault // "info"')"
-    output_mode_default="$(printf '%s' "$RUNTIME_JSON" | ${pkgs.jq}/bin/jq -r '.logging.outputDefault // "stdout"')"
-
-    if [ -z "$runtime_dir_base" ] || [[ "$runtime_dir_base" == *"$"* ]]; then
-      runtime_dir_base="$REGISTRY_ROOT/runtime"
-    fi
-    runtime_scope_root="$runtime_dir_base/$env_value/slot-$slot_value"
-
-    home_value="''${HOME:-$runtime_scope_root/home}"
-    tmp_value="''${TMPDIR:-$runtime_scope_root/tmp}"
-    xdg_data_value="''${XDG_DATA_HOME:-$runtime_scope_root/xdg/data}"
-    xdg_state_value="''${XDG_STATE_HOME:-$runtime_scope_root/xdg/state}"
-    xdg_cache_value="''${XDG_CACHE_HOME:-$runtime_scope_root/xdg/cache}"
-    registry_root_value="''${REGISTRY_ROOT:-$runtime_scope_root/registry}"
-    artifacts_dir_value="''${CI_ARTIFACTS_DIR:-$runtime_scope_root/artifacts}"
-    services_root="''${NIXFIED_SERVICE_ROOT:-$runtime_scope_root/services}"
-
-    ensure_runtime_dir "$home_value"
-    ensure_runtime_dir "$tmp_value"
-    ensure_runtime_dir "$xdg_data_value"
-    ensure_runtime_dir "$xdg_state_value"
-    ensure_runtime_dir "$xdg_cache_value"
-    ensure_runtime_dir "$registry_root_value"
-    ensure_runtime_dir "$artifacts_dir_value"
-    ensure_runtime_dir "$services_root"
-
     if ! valid_log_level "$log_level_default"; then
       echo "ERROR: invalid runtime default LOG_LEVEL value='$log_level_default' (expected: error|warn|info|debug|trace)"
       return 2
@@ -341,8 +473,6 @@
       return 2
     fi
 
-    task_log_level_default="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.logging.levelDefault // empty')"
-    task_output_mode_default="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.logging.outputDefault // empty')"
     workflow_log_level_default=""
     workflow_output_mode_default=""
     if [ "''${NIXFIED_WORKFLOW_CONTEXT:-0}" = "1" ]; then
@@ -375,10 +505,6 @@
       return 2
     fi
 
-    runtime_log_level_set="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r 'if (.env // {} | has("LOG_LEVEL")) then "1" else "0" end')"
-    runtime_log_level_alias_set="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r 'if (.env // {} | has("NIXFIED_LOG_LEVEL")) then "1" else "0" end')"
-    runtime_log_level_value="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.env.LOG_LEVEL // empty')"
-    runtime_log_level_alias_value="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.env.NIXFIED_LOG_LEVEL // empty')"
     if [ "$runtime_log_level_set" = "1" ] && [ -z "$runtime_log_level_value" ]; then
       echo "ERROR: runtime env LOG_LEVEL cannot be empty when set"
       return 2
@@ -397,10 +523,6 @@
       runtime_log_level_override="$runtime_log_level_alias_value"
     fi
 
-    runtime_output_mode_set="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r 'if (.env // {} | has("OUTPUT_MODE")) then "1" else "0" end')"
-    runtime_output_mode_alias_set="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r 'if (.env // {} | has("NIXFIED_OUTPUT_MODE")) then "1" else "0" end')"
-    runtime_output_mode_value="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.env.OUTPUT_MODE // empty')"
-    runtime_output_mode_alias_value="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.env.NIXFIED_OUTPUT_MODE // empty')"
     if [ "$runtime_output_mode_set" = "1" ] && [ -z "$runtime_output_mode_value" ]; then
       echo "ERROR: runtime env OUTPUT_MODE cannot be empty when set"
       return 2
@@ -488,8 +610,6 @@
     OUTPUT_MODE="$resolved_output_mode"
     NIXFIED_OUTPUT_MODE="$resolved_output_mode"
 
-    runtime_log_file_set="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r 'if (.env // {} | has("NIXFIED_LOG_FILE")) then "1" else "0" end')"
-    runtime_log_file_value="$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.env.NIXFIED_LOG_FILE // empty')"
     if [ -n "''${NIXFIED_LOG_FILE+x}" ]; then
       resolved_log_file="$NIXFIED_LOG_FILE"
     elif [ "$runtime_log_file_set" = "1" ]; then
@@ -515,16 +635,16 @@
       unset NIXFIED_LOG_FILE || true
     fi
 
-    if [ -z "''${RUST_LOG+x}" ] && [ "$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r 'if (.env // {} | has("RUST_LOG")) then "1" else "0" end')" != "1" ]; then
+    if [ -z "''${RUST_LOG+x}" ] && [ "$runtime_has_rust_log" != "1" ]; then
       RUST_LOG="$resolved_log_level"
     fi
-    if [ -z "''${MFM_LOG+x}" ] && [ "$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r 'if (.env // {} | has("MFM_LOG")) then "1" else "0" end')" != "1" ]; then
+    if [ -z "''${MFM_LOG+x}" ] && [ "$runtime_has_mfm_log" != "1" ]; then
       MFM_LOG="$resolved_log_level"
     fi
-    if [ -z "''${MFM_TEST_LOG_FILTER+x}" ] && [ "$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r 'if (.env // {} | has("MFM_TEST_LOG_FILTER")) then "1" else "0" end')" != "1" ]; then
+    if [ -z "''${MFM_TEST_LOG_FILTER+x}" ] && [ "$runtime_has_mfm_test_log_filter" != "1" ]; then
       MFM_TEST_LOG_FILTER="$resolved_log_level"
     fi
-    if [ -z "''${MFM_TEST_LOG+x}" ] && [ "$(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r 'if (.env // {} | has("MFM_TEST_LOG")) then "1" else "0" end')" != "1" ]; then
+    if [ -z "''${MFM_TEST_LOG+x}" ] && [ "$runtime_has_mfm_test_log" != "1" ]; then
       case "$resolved_log_level" in
         debug|trace)
           MFM_TEST_LOG="1"
@@ -570,15 +690,65 @@
     env_cmd+=("NIXFIED_PROJECT_DESCRIPTION=$PROJECT_DESCRIPTION")
     env_cmd+=("NIXFIED_RUNTIME_DIR_BASE=$runtime_dir_base")
     env_cmd+=("NIXFIED_RUNTIME_DIR_SCOPE=$runtime_scope_root")
+    env_cmd+=("NIXFIED_RUNTIME_HOME=$home_value")
+    env_cmd+=("NIXFIED_RUNTIME_TMPDIR=$tmp_value")
+    env_cmd+=("NIXFIED_RUNTIME_XDG_DATA_HOME=$xdg_data_value")
+    env_cmd+=("NIXFIED_RUNTIME_XDG_STATE_HOME=$xdg_state_value")
+    env_cmd+=("NIXFIED_RUNTIME_XDG_CACHE_HOME=$xdg_cache_value")
+    env_cmd+=("NIXFIED_RUNTIME_REGISTRY_ROOT=$registry_root_value")
+    env_cmd+=("NIXFIED_RUNTIME_ARTIFACTS_DIR=$artifacts_dir_value")
+    env_cmd+=("NIXFIED_RUNTIME_SERVICE_ROOT=$services_root")
     env_cmd+=("LOG_LEVEL=$resolved_log_level")
     env_cmd+=("NIXFIED_LOG_LEVEL=$resolved_log_level")
     env_cmd+=("OUTPUT_MODE=$resolved_output_mode")
     env_cmd+=("NIXFIED_OUTPUT_MODE=$resolved_output_mode")
+    if [ -n "''${NIXFIED_EXECUTOR_BIN:-}" ]; then
+      env_cmd+=("NIXFIED_EXECUTOR_BIN=$NIXFIED_EXECUTOR_BIN")
+    fi
+    if [ -n "''${NIXFIED_ORCHESTRATOR_BIN:-}" ]; then
+      env_cmd+=("NIXFIED_ORCHESTRATOR_BIN=$NIXFIED_ORCHESTRATOR_BIN")
+    fi
+    if [ -n "$ephemeral_root" ]; then
+      env_cmd+=("''${project_ephemeral_root_var}=$ephemeral_root")
+    fi
+    if [ -n "''${!project_ephemeral_flag_var:-}" ]; then
+      env_cmd+=("''${project_ephemeral_flag_var}=1")
+    fi
     if [ -n "''${NIXFIED_LOG_FILE+x}" ]; then
       env_cmd+=("NIXFIED_LOG_FILE=$NIXFIED_LOG_FILE")
     fi
+    if [ -n "''${NIXFIED_EXECUTOR_SELF:-}" ]; then
+      env_cmd+=("NIXFIED_EXECUTOR_SELF=$NIXFIED_EXECUTOR_SELF")
+    fi
+    if [ -n "''${NIXFIED_ORCHESTRATOR_SELF:-}" ]; then
+      env_cmd+=("NIXFIED_ORCHESTRATOR_SELF=$NIXFIED_ORCHESTRATOR_SELF")
+    fi
+    if [ -n "''${NIXFIED_EXECUTION_EPHEMERAL:-}" ]; then
+      env_cmd+=("NIXFIED_EXECUTION_EPHEMERAL=$NIXFIED_EXECUTION_EPHEMERAL")
+    fi
+    if [ -n "''${NIXFIED_ORCHESTRATOR_RUN_ID:-}" ]; then
+      env_cmd+=("NIXFIED_ORCHESTRATOR_RUN_ID=$NIXFIED_ORCHESTRATOR_RUN_ID")
+    fi
+    if [ -n "''${NIXFIED_ORCHESTRATOR_PROCESS_MODE:-}" ]; then
+      env_cmd+=("NIXFIED_ORCHESTRATOR_PROCESS_MODE=$NIXFIED_ORCHESTRATOR_PROCESS_MODE")
+    fi
+    if [ -n "''${NIXFIED_ORCHESTRATOR_WORKFLOW_ID:-}" ]; then
+      env_cmd+=("NIXFIED_ORCHESTRATOR_WORKFLOW_ID=$NIXFIED_ORCHESTRATOR_WORKFLOW_ID")
+    fi
+    if [ -n "''${NIXFIED_WORKFLOW_SETUP_STARTED_AT:-}" ]; then
+      env_cmd+=("NIXFIED_WORKFLOW_SETUP_STARTED_AT=$NIXFIED_WORKFLOW_SETUP_STARTED_AT")
+    fi
+    if [ -n "''${NIXFIED_WORKFLOW_SETUP_STARTED_EPOCH:-}" ]; then
+      env_cmd+=("NIXFIED_WORKFLOW_SETUP_STARTED_EPOCH=$NIXFIED_WORKFLOW_SETUP_STARTED_EPOCH")
+    fi
+    if [ -n "''${NIXFIED_MODEL_FILE:-}" ]; then
+      env_cmd+=("NIXFIED_MODEL_FILE=$NIXFIED_MODEL_FILE")
+    fi
+    if [ -n "''${NIXFIED_RUN_ID:-}" ]; then
+      env_cmd+=("NIXFIED_RUN_ID=$NIXFIED_RUN_ID")
+    fi
 
-    while IFS=$'\t' read -r primitive_name primitive_default primitive_aliases_json; do
+    while IFS=$'\t' read -r primitive_name primitive_default primitive_aliases; do
       local effective_value
       local alias
 
@@ -598,26 +768,14 @@
         continue
       fi
 
-      while IFS= read -r alias; do
+      for alias in $primitive_aliases; do
         if [ -n "$alias" ] && [ -z "''${!alias+x}" ]; then
           env_cmd+=("$alias=$effective_value")
         fi
-      done < <(printf '%s' "$primitive_aliases_json" | ${pkgs.jq}/bin/jq -r '.[]?')
-    done < <(
-      printf '%s' "$RUNTIME_JSON" |
-        ${pkgs.jq}/bin/jq -r '
-          .primitives.defs // {}
-          | to_entries[]?
-          | [
-              .key,
-              (if .value.default == null then "__NIXFIED_NULL__" else (.value.default | tostring) end),
-              ((.value.aliases // []) | tojson)
-            ]
-          | @tsv
-        '
-    )
+      done
+    done <<< "$ENV_SANDBOX_STATIC_RUNTIME_PRIMITIVES_TSV"
 
-    while IFS=$'\t' read -r port_name port_base; do
+    while IFS=$'\t' read -r port_name port_base || [ -n "$port_name" ]; do
       local port_token
       local port_var
       local port_value
@@ -630,50 +788,11 @@
       port_var="''${port_token}_PORT"
       port_value="$(( port_base + env_offset + (slot_value * slot_stride) ))"
       env_cmd+=("$port_var=$port_value")
-    done < <(
-      printf '%s' "$RUNTIME_JSON" |
-        ${pkgs.jq}/bin/jq -r '.ports // {} | to_entries[]? | [.key, (.value | tostring)] | @tsv'
-    )
+    done <<< "$ENV_SANDBOX_STATIC_RUNTIME_PORTS_TSV"
 
-    while IFS=$'\t' read -r service_name service_enabled; do
-      local service_token
-      local service_var
+${staticServiceEnvCmds}
 
-      if [ -z "$service_name" ]; then
-        continue
-      fi
-
-      service_token="$(normalize_env_token "$service_name")"
-      service_var="NIXFIED_SERVICE_''${service_token}_ENABLED"
-      env_cmd+=("$service_var=$service_enabled")
-    done < <(
-      printf '%s' "$SERVICES_JSON" |
-        ${pkgs.jq}/bin/jq -r 'to_entries[]? | [.value.name, (if .value.enable then "1" else "0" end)] | @tsv'
-    )
-
-    while IFS=$'\t' read -r service_name config_key config_value; do
-      local service_token
-      local config_token
-      local config_var
-
-      if [ -z "$service_name" ] || [ -z "$config_key" ]; then
-        continue
-      fi
-
-      service_token="$(normalize_env_token "$service_name")"
-      config_token="$(normalize_env_token "$config_key")"
-      config_var="NIXFIED_SERVICE_''${service_token}_''${config_token}"
-      env_cmd+=("$config_var=$config_value")
-    done < <(
-      printf '%s' "$SERVICES_JSON" |
-        ${pkgs.jq}/bin/jq -r '
-          to_entries[]?
-          | .value as $service
-          | ($service.config // {} | to_entries[]? | [ $service.name, .key, (.value | tostring) ] | @tsv)
-        '
-    )
-
-    while IFS= read -r service_name; do
+    while IFS= read -r service_name || [ -n "$service_name" ]; do
       local service_token
       local service_root
       local service_data_dir
@@ -697,14 +816,16 @@
       env_cmd+=("NIXFIED_SERVICE_''${service_token}_DATA_DIR=$service_data_dir")
       env_cmd+=("NIXFIED_SERVICE_''${service_token}_STATE_DIR=$service_state_dir")
       env_cmd+=("NIXFIED_SERVICE_''${service_token}_LOG_DIR=$service_log_dir")
-    done < <(
-      printf '%s' "$SERVICES_JSON" |
-        ${pkgs.jq}/bin/jq -r 'to_entries[]? | .value.name'
-    )
+    done <<< "$ENV_SANDBOX_STATIC_SERVICE_NAMES"
 
-    while IFS= read -r pass_name; do
+    while IFS= read -r pass_name || [ -n "$pass_name" ]; do
       if [ -z "$pass_name" ]; then
         continue
+      fi
+
+      if is_reserved_runtime_env_name "$pass_name"; then
+        echo "ERROR: runtime-owned passthrough env blocked name=$pass_name"
+        return 3
       fi
 
       if [ "$allow_sensitive_pass_through" != "1" ] && is_sensitive_env_name "$pass_name"; then
@@ -715,7 +836,7 @@
       if [ -n "''${!pass_name+x}" ]; then
         env_cmd+=("$pass_name=''${!pass_name}")
       fi
-    done < <(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.passThroughEnv[]?')
+    done <<< "$pass_through_env_tsv"
 
     if [ -n "$host_developer_dir" ] && [ -z "''${DEVELOPER_DIR+x}" ]; then
       env_cmd+=("DEVELOPER_DIR=$host_developer_dir")
@@ -724,7 +845,7 @@
       env_cmd+=("SDKROOT=$host_sdkroot")
     fi
 
-    while IFS=$'\t' read -r env_name env_value; do
+    while IFS=$'\t' read -r env_name env_value || [ -n "$env_name" ]; do
       if [ -n "$env_name" ]; then
         if [ "$env_name" = "LOG_LEVEL" ] || [ "$env_name" = "NIXFIED_LOG_LEVEL" ]; then
           continue
@@ -735,9 +856,13 @@
         if [ "$env_name" = "NIXFIED_LOG_FILE" ]; then
           continue
         fi
+        if is_reserved_runtime_env_name "$env_name"; then
+          echo "ERROR: runtime-owned env override blocked name=$env_name"
+          return 3
+        fi
         env_cmd+=("$env_name=$env_value")
       fi
-    done < <(printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '.env | to_entries[]? | [.key, (.value | tostring)] | @tsv')
+    done <<< "$runtime_env_tsv"
 
     umask "$umask_value"
 

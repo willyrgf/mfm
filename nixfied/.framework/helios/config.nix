@@ -2,7 +2,11 @@
 { pkgs, project }:
 
 let
-  cfg = project.modules.helios or { };
+  serviceConfig = import ../../lib/service-config.nix { lib = pkgs.lib; };
+  cfg = serviceConfig.getProjectServiceConfig {
+    inherit project;
+    name = "helios";
+  };
 in
 {
   package = cfg.package or (if pkgs != null then pkgs.callPackage ./package.nix { } else null);

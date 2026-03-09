@@ -36,16 +36,6 @@ let
       program = "${script}/bin/${binName}";
     };
 
-  callerRootPrelude = ''
-    NIXFIED_CALLER_PWD="$PWD"
-    export NIXFIED_CALLER_PWD
-    if ORIGINAL_ROOT="$(${pkgs.git}/bin/git -C "$NIXFIED_CALLER_PWD" rev-parse --show-toplevel 2>/dev/null)"; then
-      export ORIGINAL_ROOT
-    else
-      export ORIGINAL_ROOT="$NIXFIED_CALLER_PWD"
-    fi
-  '';
-
   viewApps = model.views.apps;
   viewAppNames = builtins.sort builtins.lessThan (builtins.attrNames viewApps);
 
@@ -58,8 +48,7 @@ let
       {
         name = appName;
         value = mkApp appName ''
-          ${callerRootPrelude}
-          exec ${orchestratorProgram} run-task ${lib.escapeShellArg taskId} "$@"
+          NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-task ${lib.escapeShellArg taskId} "$@"
         '';
       }
     ) viewAppNames
@@ -67,9 +56,11 @@ let
 
   helpText = builtins.concatStringsSep "\n" model.views.help.lines;
   docsText = builtins.concatStringsSep "\n" model.views.docs.lines;
+  featuresText = builtins.concatStringsSep "\n" model.views.features.lines;
 
   helpFile = pkgs.writeText "nixfied-help.txt" "${helpText}\n";
   docsFile = pkgs.writeText "nixfied-docs.md" "${docsText}\n";
+  featuresFile = pkgs.writeText "nixfied-features.txt" "${featuresText}\n";
 
   frameworkProxyApps =
     if workspaceMarkerPresent then
@@ -77,13 +68,11 @@ let
     else
       {
         "framework::install" = mkApp "framework::install" ''
-          ${callerRootPrelude}
-          exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#run-task --refresh -- task.framework.install "$@"
+          NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#run-task --refresh -- task.framework.install "$@"
         '';
 
         "framework::upgrade" = mkApp "framework::upgrade" ''
-          ${callerRootPrelude}
-          exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#run-task --refresh -- task.framework.upgrade "$@"
+          NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#run-task --refresh -- task.framework.upgrade "$@"
         '';
       };
 in
@@ -93,8 +82,7 @@ in
       echo "ERROR: usage: run-task <task-id> [-- ...]"
       exit 2
     fi
-    ${callerRootPrelude}
-    exec ${orchestratorProgram} run-task "$@"
+    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-task "$@"
   '';
 
   "run-workflow" = mkApp "run-workflow" ''
@@ -102,8 +90,7 @@ in
       echo "ERROR: usage: run-workflow <workflow-id> [-- ...]"
       exit 2
     fi
-    ${callerRootPrelude}
-    exec ${orchestratorProgram} run-workflow "$@"
+    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-workflow "$@"
   '';
 
   "run-workflow-parallel" = mkApp "run-workflow-parallel" ''
@@ -111,13 +98,11 @@ in
       echo "ERROR: usage: run-workflow-parallel <workflow-id> [-- ...]"
       exit 2
     fi
-    ${callerRootPrelude}
-    NIXFIED_WORKFLOW_PARALLEL=1 exec ${orchestratorProgram} run-workflow "$@"
+    NIXFIED_WORKFLOW_PARALLEL=1 NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-workflow "$@"
   '';
 
   "runs" = mkApp "runs" ''
-    ${callerRootPrelude}
-    exec ${orchestratorProgram} runs "$@"
+    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} runs "$@"
   '';
 
   "stop-run" = mkApp "stop-run" ''
@@ -125,8 +110,7 @@ in
       echo "ERROR: usage: stop-run <run-id>"
       exit 2
     fi
-    ${callerRootPrelude}
-    exec ${orchestratorProgram} stop-run "$@"
+    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} stop-run "$@"
   '';
 
   "stop-all-runs" = mkApp "stop-all-runs" ''
@@ -134,8 +118,7 @@ in
       echo "ERROR: usage: stop-all-runs"
       exit 2
     fi
-    ${callerRootPrelude}
-    exec ${orchestratorProgram} stop-all-runs
+    NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} stop-all-runs
   '';
 
   "help" = mkApp "help" ''
@@ -144,6 +127,10 @@ in
 
   "docs" = mkApp "docs" ''
     cat ${docsFile}
+  '';
+
+  "features" = mkApp "features" ''
+    cat ${featuresFile}
   '';
 
   "registry::replay" = {

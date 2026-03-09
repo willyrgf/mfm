@@ -69,12 +69,14 @@ Runtime routing exported by the wrapper:
 
 Helios configuration lives in `nixfied/project/conf.nix` under `modules.helios`.
 Canonical service metadata now lives in `nixfied/project/conf.nix` under `services.helios`
-(`sourceKeys`, `defaultSource`, and port keys).
+(`sources`, `defaultSource`, `sourceKinds`, readiness policy, and port keys).
 
 - `services.helios` in `nixfied/project/module.nix` is sourced from `conf.services.helios` (with module fallbacks).
 - `modules.helios.package` defaults to `pkgs.helios` when available.
 - When `pkgs.helios` is unavailable, project config reuses an already cached
   real Helios `-helios-unstable-*` store package when present.
+- The local source is explicitly marked `real`, and framework readiness uses the `strict`
+  profile so `ready -- --service helios --source local` rejects shim or unknown source kinds.
 
 `mfm::portfolio::snapshot` now reuses framework `ready/health` for Helios.
 Execution endpoint checks resolve in this order:

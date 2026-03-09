@@ -161,10 +161,11 @@ rec {
     refreshArg = "--refresh-discovery";
     requiredDocs = [
       "README.md"
+      "CLEANUPS.md"
       "AGENTS.md"
       "docs/architecture.md"
-      "docs/ops-and-states.md"
-      "docs/redesign.md"
+      "docs/DETAILED.md"
+      "docs/UPGRADE.md"
     ];
   };
 
@@ -179,6 +180,8 @@ rec {
 
   ephemeral = {
     enable = true;
+    copyMode = "git-files";
+    includeUntracked = true;
     excludePatterns = [
       ".git"
       ".direnv"
@@ -309,7 +312,7 @@ rec {
       enable = modules.postgres.enable;
       database = modules.postgres.database;
       portKey = modules.postgres.portKey;
-      sourceKeys = [ "local" ];
+      sources.local = { };
       defaultSource = "local";
     };
 
@@ -317,7 +320,7 @@ rec {
       enable = modules.nginx.enable;
       portKeyHttp = modules.nginx.portKeyHttp;
       portKeyHttps = modules.nginx.portKeyHttps;
-      sourceKeys = [ "local" ];
+      sources.local = { };
       defaultSource = "local";
     };
 
@@ -325,7 +328,7 @@ rec {
       enable = modules.minio.enable;
       portKeyApi = modules.minio.portKeyApi;
       portKeyConsole = modules.minio.portKeyConsole;
-      sourceKeys = [ "local" ];
+      sources.local = { };
       defaultSource = "local";
     };
 
@@ -334,7 +337,7 @@ rec {
       portKeyHttp = modules.reth.portKeyHttp;
       portKeyWs = modules.reth.portKeyWs;
       portKeyAuth = modules.reth.portKeyAuth;
-      sourceKeys = [ "local" ];
+      sources.local = { };
       defaultSource = "local";
     };
 
@@ -342,8 +345,10 @@ rec {
       enable = modules.helios.enable;
       portKeyRpc = modules.helios.portKeyRpc;
       executionRpcPortKey = modules.helios.executionRpcPortKey;
-      sourceKeys = [ "local" ];
+      sources.local = { };
       defaultSource = "local";
+      sourceKinds.local = "real";
+      readiness.profile = "strict";
     };
   };
 

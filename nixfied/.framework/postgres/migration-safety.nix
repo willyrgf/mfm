@@ -3,12 +3,12 @@
   pkgs,
   project,
   slots,
+  config,
   loggingPrelude,
 }:
 
 let
-  cfg = project.modules.postgres or { };
-  migrationsCfg = cfg.migrations or { };
+  migrationsCfg = config.migrations or { };
   migrationsDir = migrationsCfg.dir or "migrations";
 
   getMigrationHash = pkgs.writeShellScript "postgres-get-migration-hash" ''

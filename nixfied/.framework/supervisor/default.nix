@@ -13,7 +13,7 @@ let
   };
   loggingPrelude = helpers.loggingPrelude;
   config = import ./config.nix { inherit pkgs project slots; };
-  lifecycle = import ./lifecycle.nix {
+  runtime = import ./runtime.nix {
     inherit
       pkgs
       project
@@ -22,11 +22,22 @@ let
       loggingPrelude
       ;
   };
+  lifecycle = import ./lifecycle.nix {
+    inherit
+      pkgs
+      project
+      slots
+      config
+      runtime
+      loggingPrelude
+      ;
+  };
   statusMod = import ./status.nix {
     inherit
       pkgs
       slots
       config
+      runtime
       loggingPrelude
       ;
   };
@@ -35,6 +46,7 @@ let
       pkgs
       slots
       config
+      runtime
       loggingPrelude
       ;
   };

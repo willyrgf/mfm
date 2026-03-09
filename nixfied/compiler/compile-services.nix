@@ -1,4 +1,7 @@
 { lib }:
+let
+  serviceConfig = import ../lib/service-config.nix { inherit lib; };
+in
 { resolved }:
 let
   services = resolved.services or { };
@@ -11,7 +14,11 @@ builtins.listToAttrs (
       id = "service.${name}";
       name = name;
       enable = services.${name}.enable or false;
-      config = lib.removeAttrs services.${name} [ "enable" ];
+      config = serviceConfig.normalizeServiceConfig {
+        discardContext = true;
+        inherit name;
+        config = lib.removeAttrs services.${name} [ "enable" ];
+      };
     };
   }) names
 )

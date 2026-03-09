@@ -28,7 +28,10 @@ in
       fi
 
       ${pkgs.jq}/bin/jq -cs '
-        reduce (sort_by(.seq)[]) as $event ({};
+        reduce (
+          sort_by(.seq)[]
+          | select((.taskId // "") != "" or (.workflowId // "") != "")
+        ) as $event ({};
           .[(if ($event.taskId // "") != "" then "task:" + $event.taskId else "workflow:" + ($event.workflowId // "unknown") end)] = $event.state
         )
       ' "$events_file"

@@ -1,8 +1,12 @@
 # Reth module config defaults
-{ project }:
+{ pkgs, project }:
 
 let
-  cfg = project.modules.reth or { };
+  serviceConfig = import ../../lib/service-config.nix { lib = pkgs.lib; };
+  cfg = serviceConfig.getProjectServiceConfig {
+    inherit project;
+    name = "reth";
+  };
 in
 {
   package = cfg.package or null;
