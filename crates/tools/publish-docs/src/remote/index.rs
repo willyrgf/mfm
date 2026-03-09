@@ -98,8 +98,15 @@ impl IndexRegistryObserver {
             self.base_url.trim_end_matches('/'),
             relative_path.replace('\\', "/")
         );
+        tracing::debug!(
+            target: "mfm_publish_docs",
+            package = %package.name,
+            local_version = %package.version,
+            url,
+            "observing registry package via sparse index"
+        );
 
-        match self.fetch_index_payload(&url).await {
+        let observation = match self.fetch_index_payload(&url).await {
             Ok(FetchOutcome::NotFound) => {
                 self.fresh_observation(package, RegistryStatus::Absent, None, false, None)
             }
@@ -158,7 +165,8 @@ impl IndexRegistryObserver {
                     },
                 }
             }
-        }
+        };
+        finish_registry_observation(observation)
     }
 
     async fn fetch_index_payload(
@@ -180,7 +188,17 @@ impl IndexRegistryObserver {
                     let retryable = error.is_timeout() || error.is_connect() || error.is_request();
                     if retryable && attempt < MAX_RETRIES {
                         attempt += 1;
-                        sleep(backoff_for_attempt(attempt)).await;
+                        let retry_delay = backoff_for_attempt(attempt);
+                        tracing::debug!(
+                            target: "mfm_publish_docs",
+                            url,
+                            attempt,
+                            max_retries = MAX_RETRIES,
+                            error = %error,
+                            retry_delay_ms = retry_delay.as_millis(),
+                            "retrying sparse-index request after transport error"
+                        );
+                        sleep(retry_delay).await;
                         continue;
                     }
                     return Err((RegistryStatus::TemporaryError, "index-request-failed"));
@@ -200,11 +218,18 @@ impl IndexRegistryObserver {
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 if attempt < MAX_RETRIES {
                     attempt += 1;
-                    sleep(
-                        retry_after_duration(response.headers())
-                            .unwrap_or_else(|| backoff_for_attempt(attempt)),
-                    )
-                    .await;
+                    let retry_delay = retry_after_duration(response.headers())
+                        .unwrap_or_else(|| backoff_for_attempt(attempt));
+                    tracing::debug!(
+                        target: "mfm_publish_docs",
+                        url,
+                        attempt,
+                        max_retries = MAX_RETRIES,
+                        status = status.as_u16(),
+                        retry_delay_ms = retry_delay.as_millis(),
+                        "retrying sparse-index request after rate limit"
+                    );
+                    sleep(retry_delay).await;
                     continue;
                 }
                 return Err((RegistryStatus::RateLimited, "index-rate-limited"));
@@ -212,7 +237,17 @@ impl IndexRegistryObserver {
             if status.is_server_error() {
                 if attempt < MAX_RETRIES {
                     attempt += 1;
-                    sleep(backoff_for_attempt(attempt)).await;
+                    let retry_delay = backoff_for_attempt(attempt);
+                    tracing::debug!(
+                        target: "mfm_publish_docs",
+                        url,
+                        attempt,
+                        max_retries = MAX_RETRIES,
+                        status = status.as_u16(),
+                        retry_delay_ms = retry_delay.as_millis(),
+                        "retrying sparse-index request after server error"
+                    );
+                    sleep(retry_delay).await;
                     continue;
                 }
                 return Err((RegistryStatus::TemporaryError, "index-server-error"));
@@ -267,6 +302,20 @@ impl IndexRegistryObserver {
 enum FetchOutcome {
     NotFound,
     Body(Vec<u8>),
+}
+
+fn finish_registry_observation(observation: RegistryObservation) -> RegistryObservation {
+    tracing::debug!(
+        target: "mfm_publish_docs",
+        package = %observation.package,
+        status = ?observation.status,
+        freshness = ?observation.freshness,
+        latest_version = ?observation.latest_version,
+        exact_version_present = observation.exact_version_present,
+        diagnostic_code = ?observation.diagnostic_code,
+        "completed registry package observation"
+    );
+    observation
 }
 
 #[derive(Debug, Deserialize)]

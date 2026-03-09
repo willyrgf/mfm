@@ -3,7 +3,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::ExitCode,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
@@ -316,12 +316,113 @@ async fn prepare_run_with_options(
     }
 
     let run_id = new_run_id();
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        ?mode,
+        selection_from = ?filter.from,
+        selection_only = ?filter.only,
+        resumed_from_run_id = ?resumed_from_run_id,
+        enforce_clean_worktree,
+        "preparing publish-docs run"
+    );
+    tracing::debug!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        workspace_root = %workspace_root.display(),
+        "resolved workspace root for publish-docs run"
+    );
+
     let wave = load_publish_wave(&workspace_root)?;
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        wave = %wave.wave,
+        wave_packages = wave.packages.len(),
+        "loaded publish wave"
+    );
     let selected_wave_packages = select_packages(&wave, &filter)?;
+    let selected_wave_package_names = selected_wave_packages
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect::<Vec<_>>();
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        selected_packages = selected_wave_packages.len(),
+        "selected publish-wave packages"
+    );
+    tracing::debug!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        selected_packages = ?selected_wave_package_names,
+        "selected publish-wave package names"
+    );
+
+    let workspace_started_at = Instant::now();
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        selected_packages = selected_wave_packages.len(),
+        "loading workspace metadata for selected packages"
+    );
     let workspace = load_workspace_state(&workspace_root, &selected_wave_packages)?;
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        selected_packages = workspace.selected.len(),
+        elapsed_ms = workspace_started_at.elapsed().as_millis(),
+        "loaded workspace metadata for selected packages"
+    );
+
+    let catalog_started_at = Instant::now();
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        "loading desired docs catalog"
+    );
     let catalog = load_desired_catalog(&workspace_root, &workspace)?;
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        catalog_packages = catalog.packages.len(),
+        elapsed_ms = catalog_started_at.elapsed().as_millis(),
+        "loaded desired docs catalog"
+    );
+
+    let registry_started_at = Instant::now();
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        selected_packages = workspace.selected.len(),
+        "observing crates.io sparse index for selected packages"
+    );
     let registry = observe_selected_registry(&workspace_root, &workspace).await?;
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        observed_packages = registry.len(),
+        elapsed_ms = registry_started_at.elapsed().as_millis(),
+        "completed crates.io sparse index observation"
+    );
+    log_registry_observation_summary("selected", &run_id, &registry);
+
+    let docs_started_at = Instant::now();
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        selected_packages = workspace.selected.len(),
+        "observing docs.rs availability for selected packages"
+    );
     let docs = observe_selected_docs(&workspace, &catalog, &registry).await?;
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        observed_packages = docs.len(),
+        elapsed_ms = docs_started_at.elapsed().as_millis(),
+        "completed docs.rs observation"
+    );
+    log_docs_observation_summary("selected", &run_id, &docs);
     let current_readme = load_current_readme(&workspace_root).unwrap_or_default();
     let current_commit = current_git_commit(&workspace_root)?;
     let (generated_readme, umbrella_synced) = if workspace
@@ -344,6 +445,13 @@ async fn prepare_run_with_options(
     };
     let ledger = load_release_ledger(&workspace_root)?;
     let changed_since_release = changed_since_release_map(&workspace_root, &workspace, &ledger)?;
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        selected_packages = workspace.selected.len(),
+        umbrella_synced,
+        "building publish-docs plan"
+    );
     let plan = build_plan(
         run_id.clone(),
         wave.wave.clone(),
@@ -360,6 +468,7 @@ async fn prepare_run_with_options(
         umbrella_synced,
     )?;
     let summary = summarize_plan(&plan);
+    log_plan_summary(&plan, &summary);
     let artifact_dir = workspace_root
         .join(".mfm")
         .join("publish-docs")
@@ -391,19 +500,113 @@ async fn run_sync_umbrella(
         ensure_clean_worktree(workspace_root)?;
     }
 
+    let run_id = new_run_id();
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        check_only,
+        enforce_clean_worktree,
+        "preparing umbrella README sync"
+    );
+
     let wave = load_publish_wave(workspace_root)?;
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        wave = %wave.wave,
+        wave_packages = wave.packages.len(),
+        "loaded publish wave for umbrella sync"
+    );
+
+    let workspace_started_at = Instant::now();
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        wave_packages = wave.packages.len(),
+        "loading workspace metadata for umbrella sync"
+    );
     let workspace = load_workspace_state(workspace_root, &wave.packages)?;
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        selected_packages = workspace.selected.len(),
+        elapsed_ms = workspace_started_at.elapsed().as_millis(),
+        "loaded workspace metadata for umbrella sync"
+    );
+
+    let catalog_started_at = Instant::now();
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        "loading desired docs catalog for umbrella sync"
+    );
     let catalog = load_desired_catalog(workspace_root, &workspace)?;
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        catalog_packages = catalog.packages.len(),
+        elapsed_ms = catalog_started_at.elapsed().as_millis(),
+        "loaded desired docs catalog for umbrella sync"
+    );
+
+    let registry_started_at = Instant::now();
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        catalog_packages = catalog.packages.len(),
+        "observing crates.io sparse index for umbrella catalog"
+    );
     let registry = observe_catalog_registry(workspace_root, &workspace, &catalog).await?;
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        observed_packages = registry.len(),
+        elapsed_ms = registry_started_at.elapsed().as_millis(),
+        "completed crates.io sparse index observation for umbrella catalog"
+    );
+    log_registry_observation_summary("catalog", &run_id, &registry);
+
+    let docs_started_at = Instant::now();
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        catalog_packages = catalog.packages.len(),
+        "observing docs.rs availability for umbrella catalog"
+    );
     let docs = observe_catalog_docs(&workspace, &catalog, &registry).await?;
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        observed_packages = docs.len(),
+        elapsed_ms = docs_started_at.elapsed().as_millis(),
+        "completed docs.rs observation for umbrella catalog"
+    );
+    log_docs_observation_summary("catalog", &run_id, &docs);
     let generated_readme = generated_readme(&catalog, &registry, &docs);
     let changed = load_current_readme(workspace_root).unwrap_or_default() != generated_readme;
-    let run_id = new_run_id();
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %run_id,
+        changed,
+        check_only,
+        "umbrella README sync state computed"
+    );
 
     if changed && !check_only {
+        tracing::info!(
+            target: "mfm_publish_docs",
+            run_id = %run_id,
+            path = README_PATH,
+            "writing umbrella README"
+        );
         sync_readme(workspace_root, &generated_readme)?;
     }
     if !check_only {
+        tracing::info!(
+            target: "mfm_publish_docs",
+            run_id = %run_id,
+            "writing umbrella sync state"
+        );
         write_sync_state(
             workspace_root,
             &build_sync_state(
@@ -604,6 +807,166 @@ fn changed_since_release_map(
         changed.insert(package.name.clone(), package_changed);
     }
     Ok(changed)
+}
+
+fn log_plan_summary(plan: &Plan, summary: &SummaryCounts) {
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id = %plan.run_id,
+        wave = %plan.wave,
+        planned_packages = plan.packages.len(),
+        noop = summary.noop,
+        publish = summary.publish,
+        wait_dependencies = summary.wait_dependencies,
+        wait_registry = summary.wait_registry,
+        wait_docs_rs = summary.wait_docs_rs,
+        needs_version_bump = summary.needs_version_bump,
+        refresh_umbrella = summary.refresh_umbrella,
+        yank = summary.yank,
+        manual_review = summary.manual_review,
+        "publish-docs plan prepared"
+    );
+
+    for package in &plan.packages {
+        tracing::debug!(
+            target: "mfm_publish_docs",
+            run_id = %plan.run_id,
+            package = %package.name,
+            action = ?package.action,
+            local_version = %package.local_version,
+            remote_version = ?package.remote_version,
+            docs_status = ?package.docs_status,
+            reason = %package.reason,
+            blocking_dependencies = ?package.blocking_dependencies,
+            synthetic = package.synthetic,
+            "planned package action"
+        );
+    }
+}
+
+fn log_registry_observation_summary(
+    scope: &'static str,
+    run_id: &str,
+    observations: &[RegistryObservation],
+) {
+    let mut present = 0usize;
+    let mut absent = 0usize;
+    let mut temporary_error = 0usize;
+    let mut rate_limited = 0usize;
+    let mut auth_error = 0usize;
+    let mut invalid_response = 0usize;
+    let mut fresh = 0usize;
+    let mut cached = 0usize;
+    let mut unavailable = 0usize;
+    let mut exact_version_present = 0usize;
+
+    for observation in observations {
+        match observation.status {
+            crate::model::RegistryStatus::Present => present += 1,
+            crate::model::RegistryStatus::Absent => absent += 1,
+            crate::model::RegistryStatus::TemporaryError => temporary_error += 1,
+            crate::model::RegistryStatus::RateLimited => rate_limited += 1,
+            crate::model::RegistryStatus::AuthError => auth_error += 1,
+            crate::model::RegistryStatus::InvalidResponse => invalid_response += 1,
+        }
+        match observation.freshness {
+            crate::model::RegistryFreshness::Fresh => fresh += 1,
+            crate::model::RegistryFreshness::Cached => cached += 1,
+            crate::model::RegistryFreshness::Unavailable => unavailable += 1,
+        }
+        if observation.exact_version_present {
+            exact_version_present += 1;
+        }
+    }
+
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id,
+        scope,
+        observed_packages = observations.len(),
+        present,
+        absent,
+        temporary_error,
+        rate_limited,
+        auth_error,
+        invalid_response,
+        fresh,
+        cached,
+        unavailable,
+        exact_version_present,
+        "registry observation summary"
+    );
+
+    for observation in observations {
+        tracing::debug!(
+            target: "mfm_publish_docs",
+            run_id,
+            scope,
+            package = %observation.package,
+            status = ?observation.status,
+            freshness = ?observation.freshness,
+            latest_version = ?observation.latest_version,
+            exact_version_present = observation.exact_version_present,
+            diagnostic_code = ?observation.diagnostic_code,
+            "registry observation detail"
+        );
+    }
+}
+
+fn log_docs_observation_summary(
+    scope: &'static str,
+    run_id: &str,
+    observations: &[DocsRsObservation],
+) {
+    let mut not_expected = 0usize;
+    let mut absent = 0usize;
+    let mut pending = 0usize;
+    let mut available = 0usize;
+    let mut failed = 0usize;
+    let mut temporary_error = 0usize;
+    let mut exact_version_available = 0usize;
+
+    for observation in observations {
+        match observation.status {
+            crate::model::DocsRsStatus::NotExpected => not_expected += 1,
+            crate::model::DocsRsStatus::Absent => absent += 1,
+            crate::model::DocsRsStatus::Pending => pending += 1,
+            crate::model::DocsRsStatus::Available => available += 1,
+            crate::model::DocsRsStatus::Failed => failed += 1,
+            crate::model::DocsRsStatus::TemporaryError => temporary_error += 1,
+        }
+        if observation.exact_version_available {
+            exact_version_available += 1;
+        }
+    }
+
+    tracing::info!(
+        target: "mfm_publish_docs",
+        run_id,
+        scope,
+        observed_packages = observations.len(),
+        not_expected,
+        absent,
+        pending,
+        available,
+        failed,
+        temporary_error,
+        exact_version_available,
+        "docs.rs observation summary"
+    );
+
+    for observation in observations {
+        tracing::debug!(
+            target: "mfm_publish_docs",
+            run_id,
+            scope,
+            package = %observation.package,
+            status = ?observation.status,
+            latest_available_version = ?observation.latest_available_version,
+            exact_version_available = observation.exact_version_available,
+            "docs.rs observation detail"
+        );
+    }
 }
 
 fn generated_readme(

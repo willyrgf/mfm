@@ -39,31 +39,39 @@ impl DocsRsClient {
         catalog: &CatalogPackage,
         registry: &RegistryObservation,
     ) -> DocsRsObservation {
+        tracing::debug!(
+            target: "mfm_publish_docs",
+            package = %local.name,
+            local_version = %local.version,
+            registry_status = ?registry.status,
+            registry_freshness = ?registry.freshness,
+            "observing docs.rs package"
+        );
         if !matches!(catalog.docs_policy, DocsPolicy::DocsRs) {
-            return DocsRsObservation {
+            return finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::NotExpected,
                 latest_available_version: None,
                 exact_version_available: false,
-            };
+            });
         }
 
         match registry.status {
             RegistryStatus::AuthError | RegistryStatus::InvalidResponse => {
-                return DocsRsObservation {
+                return finish_docs_observation(DocsRsObservation {
                     package: local.name.clone(),
                     status: DocsRsStatus::TemporaryError,
                     latest_available_version: None,
                     exact_version_available: false,
-                };
+                });
             }
             RegistryStatus::TemporaryError | RegistryStatus::RateLimited => {
-                return DocsRsObservation {
+                return finish_docs_observation(DocsRsObservation {
                     package: local.name.clone(),
                     status: DocsRsStatus::TemporaryError,
                     latest_available_version: None,
                     exact_version_available: false,
-                };
+                });
             }
             RegistryStatus::Absent | RegistryStatus::Present => {}
         }
@@ -72,21 +80,21 @@ impl DocsRsClient {
             registry.freshness,
             RegistryFreshness::Cached | RegistryFreshness::Unavailable
         ) {
-            return DocsRsObservation {
+            return finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::TemporaryError,
                 latest_available_version: None,
                 exact_version_available: false,
-            };
+            });
         }
 
         if !registry.exact_version_visible_for_planning() {
-            return DocsRsObservation {
+            return finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::Absent,
                 latest_available_version: None,
                 exact_version_available: false,
-            };
+            });
         }
 
         let url = format!(
@@ -101,49 +109,49 @@ impl DocsRsClient {
             .execute(&host, || self.http.client().get(url.clone()))
             .await
         else {
-            return DocsRsObservation {
+            return finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::TemporaryError,
                 latest_available_version: None,
                 exact_version_available: false,
-            };
+            });
         };
 
         let status = result.response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
-            return DocsRsObservation {
+            return finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::Pending,
                 latest_available_version: None,
                 exact_version_available: false,
-            };
+            });
         }
         if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return DocsRsObservation {
+            return finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::TemporaryError,
                 latest_available_version: None,
                 exact_version_available: false,
-            };
+            });
         }
         if !status.is_success() {
-            return DocsRsObservation {
+            return finish_docs_observation(DocsRsObservation {
                 package: local.name.clone(),
                 status: DocsRsStatus::Pending,
                 latest_available_version: None,
                 exact_version_available: false,
-            };
+            });
         }
 
         let body = match result.response.text().await {
             Ok(body) => body,
             Err(_) => {
-                return DocsRsObservation {
+                return finish_docs_observation(DocsRsObservation {
                     package: local.name.clone(),
                     status: DocsRsStatus::TemporaryError,
                     latest_available_version: None,
                     exact_version_available: false,
-                };
+                });
             }
         };
 
@@ -157,12 +165,12 @@ impl DocsRsClient {
             DocsRsStatus::Available
         };
 
-        DocsRsObservation {
+        finish_docs_observation(DocsRsObservation {
             package: local.name.clone(),
             status: docs_status,
             latest_available_version: Some(local.version.clone()),
             exact_version_available: matches!(docs_status, DocsRsStatus::Available),
-        }
+        })
     }
 
     /// Observes docs.rs for many packages while preserving input order.
@@ -185,6 +193,18 @@ impl DocsRsClient {
         })
         .await
     }
+}
+
+fn finish_docs_observation(observation: DocsRsObservation) -> DocsRsObservation {
+    tracing::debug!(
+        target: "mfm_publish_docs",
+        package = %observation.package,
+        status = ?observation.status,
+        latest_available_version = ?observation.latest_available_version,
+        exact_version_available = observation.exact_version_available,
+        "completed docs.rs package observation"
+    );
+    observation
 }
 
 #[cfg(test)]

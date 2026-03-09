@@ -99,21 +99,64 @@ impl HttpExecutor {
             let result = build().send().await;
             match result {
                 Ok(response) if self.should_retry_status(response.status()) => {
+                    let status = response.status();
                     if attempt == self.config.max_attempts {
+                        tracing::debug!(
+                            target: "mfm_publish_docs",
+                            host,
+                            attempt,
+                            status = status.as_u16(),
+                            "returning final retryable HTTP status without another retry"
+                        );
                         return Some(ExecutedRequest { response });
                     }
                     let retry_delay = self
                         .retry_after(&response)
                         .unwrap_or_else(|| self.backoff_delay(attempt));
+                    tracing::debug!(
+                        target: "mfm_publish_docs",
+                        host,
+                        attempt,
+                        max_attempts = self.config.max_attempts,
+                        status = status.as_u16(),
+                        retry_delay_ms = retry_delay.as_millis(),
+                        "retrying HTTP request after retryable status"
+                    );
                     tokio::time::sleep(retry_delay).await;
                 }
                 Ok(response) => {
+                    tracing::debug!(
+                        target: "mfm_publish_docs",
+                        host,
+                        attempt,
+                        status = response.status().as_u16(),
+                        "completed HTTP request"
+                    );
                     return Some(ExecutedRequest { response });
                 }
-                Err(_) if attempt < self.config.max_attempts => {
-                    tokio::time::sleep(self.backoff_delay(attempt)).await;
+                Err(error) if attempt < self.config.max_attempts => {
+                    let retry_delay = self.backoff_delay(attempt);
+                    tracing::debug!(
+                        target: "mfm_publish_docs",
+                        host,
+                        attempt,
+                        max_attempts = self.config.max_attempts,
+                        error = %error,
+                        retry_delay_ms = retry_delay.as_millis(),
+                        "retrying HTTP request after transport error"
+                    );
+                    tokio::time::sleep(retry_delay).await;
                 }
-                Err(_) => return None,
+                Err(error) => {
+                    tracing::debug!(
+                        target: "mfm_publish_docs",
+                        host,
+                        attempt,
+                        error = %error,
+                        "HTTP request failed without a response"
+                    );
+                    return None;
+                }
             }
         }
         None

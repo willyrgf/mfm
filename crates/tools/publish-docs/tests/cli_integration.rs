@@ -132,5 +132,7 @@ fn json_output_stays_on_stdout_when_logs_are_enabled() {
     let parsed = verify_error_response(&stdout);
     assert_eq!(parsed["error"]["code"], "UnknownPackage");
     assert!(stderr.contains("publish-docs command starting"));
+    assert!(stderr.contains("preparing publish-docs run"));
+    assert!(stderr.contains("loaded publish wave"));
     assert!(!stderr.contains("\"status\""));
 }
