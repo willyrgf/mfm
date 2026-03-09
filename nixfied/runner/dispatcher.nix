@@ -38,6 +38,7 @@ let
 
   callerRootPrelude = ''
     NIXFIED_CALLER_PWD="$PWD"
+    export NIXFIED_CALLER_PWD
     if ORIGINAL_ROOT="$(${pkgs.git}/bin/git -C "$NIXFIED_CALLER_PWD" rev-parse --show-toplevel 2>/dev/null)"; then
       export ORIGINAL_ROOT
     else
