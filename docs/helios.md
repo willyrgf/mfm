@@ -13,6 +13,13 @@ export HELIOS_NETWORK=mainnet
 nix run .#mfm::portfolio::snapshot -- <ADDRESS>
 ```
 
+If you want flake evaluation to reuse an already cached real Helios package from
+`/nix/store`, use `--impure`:
+
+```bash
+nix run --impure .#mfm::portfolio::snapshot -- <ADDRESS>
+```
+
 The wrapper is implemented in `nixfied/project/module.nix` (`task.mfm.portfolio.snapshot`) and enforces:
 
 - exactly one positional address argument
@@ -75,6 +82,8 @@ Canonical service metadata now lives in `nixfied/project/conf.nix` under `servic
 - `modules.helios.package` defaults to `pkgs.helios` when available.
 - When `pkgs.helios` is unavailable, project config reuses an already cached
   real Helios `-helios-unstable-*` store package when present.
+  Plain pure flake evaluation cannot inspect `/nix/store`, so this cached-package
+  fallback only applies under `nix ... --impure`.
 - The local source is explicitly marked `real`, and framework readiness uses the `strict`
   profile so `ready -- --service helios --source local` rejects shim or unknown source kinds.
 

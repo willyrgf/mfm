@@ -7,9 +7,18 @@ let
     inherit project;
     name = "helios";
   };
+  moduleCfg = project.modules.helios or { };
 in
 {
-  package = cfg.package or (if pkgs != null then pkgs.callPackage ./package.nix { } else null);
+  package =
+    if (cfg ? package) && cfg.package != null then
+      cfg.package
+    else if (moduleCfg ? package) && moduleCfg.package != null then
+      moduleCfg.package
+    else if pkgs != null then
+      pkgs.callPackage ./package.nix { }
+    else
+      null;
   portKeyRpc = cfg.portKeyRpc or "heliosRpc";
   dataDirName = cfg.dataDirName or "helios";
   network = cfg.network or "local";
