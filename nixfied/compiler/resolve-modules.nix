@@ -32,6 +32,4 @@ let
 in
 {
   config = evaluated.config.nixfied;
-  fullConfig = evaluated.config;
-  options = evaluated.options;
 }

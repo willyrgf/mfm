@@ -80,36 +80,20 @@ let
         value = sources.${selectedSource} or { };
       };
 
-  resolvePackageField =
-    {
-      discardContext,
-      cfg,
-      selected,
-      field,
-    }:
-    if (builtins.hasAttr field selected.value) && builtins.getAttr field selected.value != null then
-      packagePath {
-        inherit discardContext;
-        pkg = builtins.getAttr field selected.value;
-      }
-    else if (builtins.hasAttr field cfg) && builtins.getAttr field cfg != null then
-      packagePath {
-        inherit discardContext;
-        pkg = builtins.getAttr field cfg;
-      }
-    else
-      null;
-
   normalizePostgres =
     discardContext: cfg:
     let
       keys = sourceKeys cfg;
       normalizedSources = normalizeSources discardContext keys (cfg.sources or { });
       selected = sourceValue "postgres" cfg;
-      package = resolvePackageField {
-        inherit discardContext cfg selected;
-        field = "package";
-      };
+      package =
+        if (selected.value ? package) && selected.value.package != null then
+          packagePath {
+            inherit discardContext;
+            pkg = selected.value.package;
+          }
+        else
+          null;
     in
     cfg
     // {
@@ -195,10 +179,14 @@ let
       keys = sourceKeys cfg;
       normalizedSources = normalizeSources discardContext keys (cfg.sources or { });
       selected = sourceValue "nginx" cfg;
-      package = resolvePackageField {
-        inherit discardContext cfg selected;
-        field = "package";
-      };
+      package =
+        if (selected.value ? package) && selected.value.package != null then
+          packagePath {
+            inherit discardContext;
+            pkg = selected.value.package;
+          }
+        else
+          null;
     in
     cfg
     // {
@@ -281,14 +269,22 @@ let
       keys = sourceKeys cfg;
       normalizedSources = normalizeSources discardContext keys (cfg.sources or { });
       selected = sourceValue "minio" cfg;
-      package = resolvePackageField {
-        inherit discardContext cfg selected;
-        field = "package";
-      };
-      clientPackage = resolvePackageField {
-        inherit discardContext cfg selected;
-        field = "clientPackage";
-      };
+      package =
+        if (selected.value ? package) && selected.value.package != null then
+          packagePath {
+            inherit discardContext;
+            pkg = selected.value.package;
+          }
+        else
+          null;
+      clientPackage =
+        if (selected.value ? clientPackage) && selected.value.clientPackage != null then
+          packagePath {
+            inherit discardContext;
+            pkg = selected.value.clientPackage;
+          }
+        else
+          null;
     in
     cfg
     // {
@@ -373,10 +369,14 @@ let
       keys = sourceKeys cfg;
       normalizedSources = normalizeSources discardContext keys (cfg.sources or { });
       selected = sourceValue "reth" cfg;
-      package = resolvePackageField {
-        inherit discardContext cfg selected;
-        field = "package";
-      };
+      package =
+        if (selected.value ? package) && selected.value.package != null then
+          packagePath {
+            inherit discardContext;
+            pkg = selected.value.package;
+          }
+        else
+          null;
     in
     cfg
     // {
@@ -483,10 +483,14 @@ let
       keys = sourceKeys cfg;
       normalizedSources = normalizeSources discardContext keys (cfg.sources or { });
       selected = sourceValue "helios" cfg;
-      package = resolvePackageField {
-        inherit discardContext cfg selected;
-        field = "package";
-      };
+      package =
+        if (selected.value ? package) && selected.value.package != null then
+          packagePath {
+            inherit discardContext;
+            pkg = selected.value.package;
+          }
+        else
+          null;
     in
     cfg
     // {

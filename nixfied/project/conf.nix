@@ -26,25 +26,13 @@ let
       ];
 
   aaveOriginTools = if pkgs == null then null else import ./aave-origin-tools.nix { inherit pkgs; };
-  cachedFrameworkHeliosNames =
-    if builtins.pathExists /nix/store then
-      builtins.filter (name: builtins.match ".*-helios-unstable-[0-9-]+$" name != null) (
-        builtins.attrNames (builtins.readDir /nix/store)
-      )
-    else
-      [ ];
-  cachedFrameworkHeliosPackage =
-    if cachedFrameworkHeliosNames == [ ] then
-      null
-    else
-      builtins.storePath "/nix/store/${builtins.head cachedFrameworkHeliosNames}";
   heliosPackage =
     if pkgs == null then
       null
     else if pkgs ? helios then
       pkgs.helios
     else
-      cachedFrameworkHeliosPackage;
+      null;
 in
 rec {
   project = {
@@ -161,10 +149,11 @@ rec {
     refreshArg = "--refresh-discovery";
     requiredDocs = [
       "README.md"
-      "CLEANUPS.md"
       "AGENTS.md"
       "docs/architecture.md"
       "docs/DETAILED.md"
+      "docs/redesign.md"
+      "docs/ops-and-states.md"
       "docs/UPGRADE.md"
     ];
   };
@@ -312,7 +301,9 @@ rec {
       enable = modules.postgres.enable;
       database = modules.postgres.database;
       portKey = modules.postgres.portKey;
-      sources.local = { };
+      sources.local = {
+        package = modules.postgres.package;
+      };
       defaultSource = "local";
     };
 
@@ -328,7 +319,10 @@ rec {
       enable = modules.minio.enable;
       portKeyApi = modules.minio.portKeyApi;
       portKeyConsole = modules.minio.portKeyConsole;
-      sources.local = { };
+      sources.local = {
+        package = modules.minio.package;
+        clientPackage = modules.minio.clientPackage;
+      };
       defaultSource = "local";
     };
 
@@ -337,7 +331,9 @@ rec {
       portKeyHttp = modules.reth.portKeyHttp;
       portKeyWs = modules.reth.portKeyWs;
       portKeyAuth = modules.reth.portKeyAuth;
-      sources.local = { };
+      sources.local = {
+        package = modules.reth.package;
+      };
       defaultSource = "local";
     };
 
@@ -345,7 +341,9 @@ rec {
       enable = modules.helios.enable;
       portKeyRpc = modules.helios.portKeyRpc;
       executionRpcPortKey = modules.helios.executionRpcPortKey;
-      sources.local = { };
+      sources.local = {
+        package = modules.helios.package;
+      };
       defaultSource = "local";
       sourceKinds.local = "real";
       readiness.profile = "strict";

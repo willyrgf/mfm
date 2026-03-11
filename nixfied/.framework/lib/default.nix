@@ -85,10 +85,6 @@ let
     inherit pkgs project;
     inherit (helpers) loggingPrelude;
   };
-  executionCore = import ./execution-core.nix {
-    inherit pkgs project;
-    inherit (helpers) loggingPrelude;
-  };
 in
 {
   inherit (helpers)
@@ -130,5 +126,4 @@ in
   inherit (portUtils) mkPortCleanup mkPortConflictChecker;
   inherit (parallel) mkParallelRunner;
   inherit (runRegistry) runRegistryStart;
-  inherit (executionCore) runPlan;
 }

@@ -3,7 +3,6 @@
   model,
   registry,
   projectRoot,
-  serviceRuntime ? { },
 }:
 let
   modelFile = pkgs.writeText "nixfied-model.json" (builtins.toJSON model);
@@ -19,7 +18,6 @@ let
       pkgs
       projectRoot
       model
-      serviceRuntime
       ;
   };
   executorRuntimeShell = import ./executor-runtime.nix { inherit pkgs; };
@@ -391,6 +389,13 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     if ! task_descriptor_exists "$task_id"; then
       echo "ERROR: unknown task '$task_id'"
       return 2
+    fi
+    if task_help_requested "''${filtered_args[@]}"; then
+      if ! task_print_help "$task_id"; then
+        echo "ERROR: unknown task '$task_id'"
+        return 2
+      fi
+      return 0
     fi
     runner_type="$(task_runner_type "$task_id")"
 

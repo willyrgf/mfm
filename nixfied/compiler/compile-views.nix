@@ -9,7 +9,8 @@
   workflows,
 }:
 let
-  workspaceMarkerPresent = builtins.pathExists "${projectRoot}/nixfied/.framework/.workspace";
+  safeProjectRoot = builtins.unsafeDiscardStringContext (builtins.toString projectRoot);
+  workspaceMarkerPresent = builtins.pathExists "${safeProjectRoot}/nixfied/.framework/.workspace";
 
   frameworkHiddenApps = [
     "framework::install"
@@ -176,7 +177,6 @@ let
     "- Environment variable: ${runtime.env.var}"
     "- Environment names: ${builtins.concatStringsSep ", " runtime.env.names}"
     "- Runtime directory base: ${runtime.directories.base}"
-    "- Persistent service-state root: ${resolved.state.serviceStateRoot}"
     "- Enabled services: ${enabledServicesLine}"
     "- Feature count: ${toString (builtins.length featureIds)}"
     ""

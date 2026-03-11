@@ -11,6 +11,7 @@
 }:
 let
   featureCatalog = import ./feature-catalog.nix { inherit runtime; };
+  safeProjectRoot = builtins.unsafeDiscardStringContext (builtins.toString projectRoot);
 
   unique =
     list:
@@ -19,7 +20,7 @@ let
     );
 
   maybeExistingPaths =
-    paths: unique (builtins.filter (path: builtins.pathExists "${projectRoot}/${path}") paths);
+    paths: unique (builtins.filter (path: builtins.pathExists "${safeProjectRoot}/${path}") paths);
 
   taskOwnerFiles =
     taskId:

@@ -115,6 +115,37 @@ let
   minioService = configuredServices.minio or { };
   rethService = configuredServices.reth or { };
   heliosService = configuredServices.helios or { };
+  mergeLocalSourceDefaults =
+    localDefaults: serviceSources:
+    lib.recursiveUpdate { local = localDefaults; } serviceSources;
+
+  # The upgraded framework resolves service packages from the selected source.
+  postgresSources = mergeLocalSourceDefaults
+    (lib.optionalAttrs ((conf.modules.postgres.package or null) != null) {
+      package = conf.modules.postgres.package;
+    })
+    (postgresService.sources or { });
+  nginxSources = mergeLocalSourceDefaults { } (nginxService.sources or { });
+  minioSources = mergeLocalSourceDefaults
+    (
+      (lib.optionalAttrs ((conf.modules.minio.package or null) != null) {
+        package = conf.modules.minio.package;
+      })
+      // (lib.optionalAttrs ((conf.modules.minio.clientPackage or null) != null) {
+        clientPackage = conf.modules.minio.clientPackage;
+      })
+    )
+    (minioService.sources or { });
+  rethSources = mergeLocalSourceDefaults
+    (lib.optionalAttrs ((conf.modules.reth.package or null) != null) {
+      package = conf.modules.reth.package;
+    })
+    (rethService.sources or { });
+  heliosSources = mergeLocalSourceDefaults
+    (lib.optionalAttrs ((conf.modules.helios.package or null) != null) {
+      package = conf.modules.helios.package;
+    })
+    (heliosService.sources or { });
 
   sharedPassThroughEnv = [
     project.envVar
@@ -168,8 +199,8 @@ let
   }
   // lib.optionalAttrs pkgs.stdenv.isDarwin {
     LIBRARY_PATH = "${pkgs.libiconv}/lib";
-    CC = "/usr/bin/cc";
-    CXX = "/usr/bin/c++";
+    CC = "/usr/bin/clang";
+    CXX = "/usr/bin/clang++";
   };
 
   # CI runs under ephemeral roots, so persistent sccache state can retain stale
@@ -525,6 +556,8 @@ in
         devShellHook = conf.tooling.devShellHook;
       };
 
+      packages = conf.packages;
+
       services = {
         postgres = {
           enable = postgresService.enable or (conf.modules.postgres.enable or false);
@@ -532,8 +565,8 @@ in
           testDatabase = postgresService.testDatabase or (conf.modules.postgres.testDatabase or "app_test");
           portKey = postgresService.portKey or (conf.modules.postgres.portKey or "postgres");
           dataDirName = postgresService.dataDirName or (conf.modules.postgres.dataDirName or "postgres");
-          sources = postgresService.sources or { local = { }; };
-          sourceKeys = postgresService.sourceKeys or [ "local" ];
+          sources = postgresSources;
+          sourceKeys = postgresService.sourceKeys or builtins.attrNames postgresSources;
           defaultSource = postgresService.defaultSource or "local";
         };
 
@@ -541,8 +574,8 @@ in
           enable = nginxService.enable or (conf.modules.nginx.enable or false);
           portKeyHttp = nginxService.portKeyHttp or (conf.modules.nginx.portKeyHttp or "http");
           portKeyHttps = nginxService.portKeyHttps or (conf.modules.nginx.portKeyHttps or "https");
-          sources = nginxService.sources or { local = { }; };
-          sourceKeys = nginxService.sourceKeys or [ "local" ];
+          sources = nginxSources;
+          sourceKeys = nginxService.sourceKeys or builtins.attrNames nginxSources;
           defaultSource = nginxService.defaultSource or "local";
         };
 
@@ -551,8 +584,8 @@ in
           portKeyApi = minioService.portKeyApi or (conf.modules.minio.portKeyApi or "minioApi");
           portKeyConsole =
             minioService.portKeyConsole or (conf.modules.minio.portKeyConsole or "minioConsole");
-          sources = minioService.sources or { local = { }; };
-          sourceKeys = minioService.sourceKeys or [ "local" ];
+          sources = minioSources;
+          sourceKeys = minioService.sourceKeys or builtins.attrNames minioSources;
           defaultSource = minioService.defaultSource or "local";
         };
 
@@ -561,8 +594,8 @@ in
           portKeyHttp = rethService.portKeyHttp or (conf.modules.reth.portKeyHttp or "rethHttp");
           portKeyWs = rethService.portKeyWs or (conf.modules.reth.portKeyWs or "rethWs");
           portKeyAuth = rethService.portKeyAuth or (conf.modules.reth.portKeyAuth or "rethAuth");
-          sources = rethService.sources or { local = { }; };
-          sourceKeys = rethService.sourceKeys or [ "local" ];
+          sources = rethSources;
+          sourceKeys = rethService.sourceKeys or builtins.attrNames rethSources;
           defaultSource = rethService.defaultSource or "local";
         };
 
@@ -579,8 +612,8 @@ in
             heliosService.defaultConsensusRpcUrl or (conf.modules.helios.defaultConsensusRpcUrl or "");
           checkpoint = heliosService.checkpoint or (conf.modules.helios.checkpoint or "");
           extraArgs = heliosService.extraArgs or (conf.modules.helios.extraArgs or [ ]);
-          sources = heliosService.sources or { local = { }; };
-          sourceKeys = heliosService.sourceKeys or [ "local" ];
+          sources = heliosSources;
+          sourceKeys = heliosService.sourceKeys or builtins.attrNames heliosSources;
           defaultSource = heliosService.defaultSource or "local";
           sourceKinds = heliosService.sourceKinds or { };
           readiness = heliosService.readiness or { };
@@ -2565,6 +2598,27 @@ in
             NIXFIED_WRAPPER
               echo "OK: thin wrapper flake generated at $target/flake.nix"
             fi
+          '';
+        };
+
+        framework-upgrade = mkCommandTask {
+          id = "task.framework.upgrade";
+          appName = "framework::upgrade";
+          kind = "utility";
+          summary = "Upgrade framework bundle in-place";
+          description =
+            "Upgrades the Nixfied framework in-place while preserving nixfied/project and nixfied/local by default.";
+          runtimeInputs = [
+            pkgs.nix
+          ];
+          usage = [
+            "nix run .#framework::upgrade"
+            "nix run .#framework::upgrade -- --force"
+            "nix run .#framework::upgrade -- --reset-project"
+          ];
+          command = ''
+            set -euo pipefail
+            exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#framework::upgrade --refresh -- "$@"
           '';
         };
       };

@@ -7,7 +7,6 @@
   mkApps =
     {
       model,
-      serviceRuntime ? { },
     }:
     import ./dispatcher.nix {
       inherit
@@ -15,7 +14,6 @@
         model
         projectRoot
         registry
-        serviceRuntime
         ;
     };
 }

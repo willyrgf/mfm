@@ -77,7 +77,6 @@ let
 in
 {
   inherit
-    pc
     start
     stop
     startDaemon

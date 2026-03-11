@@ -1,10 +1,9 @@
 {
   pkgs,
-  canonical ? null,
 }:
 let
   events = import ./events.nix { inherit pkgs; };
-  snapshot = import ./snapshot.nix { inherit pkgs; };
+  snapshot = import ./snapshot.nix { };
   replay = import ./replay.nix { inherit pkgs; };
 in
 {

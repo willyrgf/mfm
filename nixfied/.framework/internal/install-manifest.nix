@@ -150,15 +150,13 @@ let
   projectTemplates = lib.sort (a: b: a.order < b.order) (map mkTemplate templateSpecs);
 
   requiredTemplateKeys = map (t: t.key) (builtins.filter (t: t.required or false) projectTemplates);
-  optionalTemplatePlans = map (
-    t: {
-      inherit (t)
-        key
-        file
-        order
-        ;
-    }
-  ) (builtins.filter (t: !(t.required or false)) projectTemplates);
+  optionalTemplatePlans = map (t: {
+    inherit (t)
+      key
+      file
+      order
+      ;
+  }) (builtins.filter (t: !(t.required or false)) projectTemplates);
 
   templateKeys = map (t: t.key) projectTemplates;
   templateFiles = map (t: t.file) projectTemplates;

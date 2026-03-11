@@ -594,34 +594,30 @@ let
       max = if argSpec ? max then argSpec.max else null;
     };
 
-  normalizeEnvSpec =
-    envSpec:
-    {
-      name = envSpec.name or "";
-      type = envSpec.type or "string";
-      required = envSpec.required or false;
-      hasDefault = envSpec ? default;
-      default = if envSpec ? default then envSpec.default else null;
-      min = if envSpec ? min then envSpec.min else null;
-      max = if envSpec ? max then envSpec.max else null;
-      values = envSpec.values or [ ];
-      aliases = envSpec.aliases or [ ];
-    };
+  normalizeEnvSpec = envSpec: {
+    name = envSpec.name or "";
+    type = envSpec.type or "string";
+    required = envSpec.required or false;
+    hasDefault = envSpec ? default;
+    default = if envSpec ? default then envSpec.default else null;
+    min = if envSpec ? min then envSpec.min else null;
+    max = if envSpec ? max then envSpec.max else null;
+    values = envSpec.values or [ ];
+    aliases = envSpec.aliases or [ ];
+  };
 
-  mkShellArray =
-    var: values: ''
+  mkShellArray = var: values: ''
       declare -ag ${var}=(
     ${lib.concatStringsSep "\n" (map (value: "  ${lib.escapeShellArg value}") values)}
       )
-    '';
+  '';
 
-  mkShellAssoc =
-    var: entries: ''
+  mkShellAssoc = var: entries: ''
       declare -Ag ${var}=()
     ${lib.concatStringsSep "\n" (
       map (entry: "${var}[${lib.escapeShellArg entry.key}]=${lib.escapeShellArg entry.value}") entries
     )}
-    '';
+  '';
 
   mkContractRuntime =
     { name, contract }:
@@ -634,22 +630,30 @@ let
       positionalArgNames = map (argSpec: argSpec.name) (
         builtins.filter (argSpec: argSpec.kind == "positional") normalizedArgs
       );
-      argEntries = extractor: map (argSpec: {
-        key = argSpec.name;
-        value = extractor argSpec;
-      }) normalizedArgs;
-      envEntries = extractor: map (envSpec: {
-        key = envSpec.name;
-        value = extractor envSpec;
-      }) normalizedEnv;
-      longEntries = builtins.filter (entry: entry.key != "") (map (argSpec: {
-        key = argSpec.long;
-        value = argSpec.name;
-      }) normalizedArgs);
-      shortEntries = builtins.filter (entry: entry.key != "") (map (argSpec: {
-        key = argSpec.short;
-        value = argSpec.name;
-      }) normalizedArgs);
+      argEntries =
+        extractor:
+        map (argSpec: {
+          key = argSpec.name;
+          value = extractor argSpec;
+        }) normalizedArgs;
+      envEntries =
+        extractor:
+        map (envSpec: {
+          key = envSpec.name;
+          value = extractor envSpec;
+        }) normalizedEnv;
+      longEntries = builtins.filter (entry: entry.key != "") (
+        map (argSpec: {
+          key = argSpec.long;
+          value = argSpec.name;
+        }) normalizedArgs
+      );
+      shortEntries = builtins.filter (entry: entry.key != "") (
+        map (argSpec: {
+          key = argSpec.short;
+          value = argSpec.name;
+        }) normalizedArgs
+      );
       failureCodeEntries = map (failureName: {
         key = toString failureCodes.${failureName};
         value = failureName;
@@ -657,7 +661,9 @@ let
     in
     pkgs.writeText "${name}-app-contract-runtime.sh" ''
       NIXFIED_CONTRACT_PLAN_NAME=${lib.escapeShellArg validated.name}
-      NIXFIED_CONTRACT_ALLOW_UNKNOWN=${lib.escapeShellArg (if validated.allowUnknownArgs or false then "true" else "false")}
+      NIXFIED_CONTRACT_ALLOW_UNKNOWN=${
+        lib.escapeShellArg (if validated.allowUnknownArgs or false then "true" else "false")
+      }
 
       ${mkShellArray "NIXFIED_CONTRACT_ARG_NAMES" (map (argSpec: argSpec.name) normalizedArgs)}
       ${mkShellArray "NIXFIED_CONTRACT_POSITIONAL_SPECS" positionalArgNames}
@@ -687,9 +693,7 @@ let
         envEntries (envSpec: if envSpec.required then "true" else "false")
       )}
       ${mkShellAssoc "NIXFIED_CONTRACT_ENV_DEFAULT" (
-        envEntries (
-          envSpec: if envSpec.hasDefault then valueToString envSpec.default else noneSentinel
-        )
+        envEntries (envSpec: if envSpec.hasDefault then valueToString envSpec.default else noneSentinel)
       )}
       ${mkShellAssoc "NIXFIED_CONTRACT_ENV_MIN" (
         envEntries (envSpec: if envSpec.min == null then noneSentinel else toString envSpec.min)
@@ -716,22 +720,12 @@ let
     NIXFIED_CONTRACT_RESOLVED_VALUE=""
     NIXFIED_CONTRACT_PLAN_LOADED="0"
     NIXFIED_CONTRACT_PLAN_FILE=""
-    NIXFIED_CONTRACT_RUNTIME_LOG_LEVEL_ALIASES=${
-      lib.escapeShellArg (lib.concatStringsSep "\n" runtimeLogLevelAliases)
-    }
+    NIXFIED_CONTRACT_RUNTIME_LOG_LEVEL_ALIASES=${lib.escapeShellArg (lib.concatStringsSep "\n" runtimeLogLevelAliases)}
     NIXFIED_CONTRACT_RUNTIME_LOG_LEVEL_VALUES=${lib.escapeShellArg (lib.concatStringsSep "\n" runtimeLogLevels)}
-    NIXFIED_CONTRACT_RUNTIME_LOG_LEVEL_VALUES_LABEL=${
-      lib.escapeShellArg (lib.concatStringsSep "," runtimeLogLevels)
-    }
-    NIXFIED_CONTRACT_RUNTIME_OUTPUT_MODE_ALIASES=${
-      lib.escapeShellArg (lib.concatStringsSep "\n" runtimeOutputModeAliases)
-    }
-    NIXFIED_CONTRACT_RUNTIME_OUTPUT_MODE_VALUES=${
-      lib.escapeShellArg (lib.concatStringsSep "\n" runtimeOutputModes)
-    }
-    NIXFIED_CONTRACT_RUNTIME_OUTPUT_MODE_VALUES_LABEL=${
-      lib.escapeShellArg (lib.concatStringsSep "," runtimeOutputModes)
-    }
+    NIXFIED_CONTRACT_RUNTIME_LOG_LEVEL_VALUES_LABEL=${lib.escapeShellArg (lib.concatStringsSep "," runtimeLogLevels)}
+    NIXFIED_CONTRACT_RUNTIME_OUTPUT_MODE_ALIASES=${lib.escapeShellArg (lib.concatStringsSep "\n" runtimeOutputModeAliases)}
+    NIXFIED_CONTRACT_RUNTIME_OUTPUT_MODE_VALUES=${lib.escapeShellArg (lib.concatStringsSep "\n" runtimeOutputModes)}
+    NIXFIED_CONTRACT_RUNTIME_OUTPUT_MODE_VALUES_LABEL=${lib.escapeShellArg (lib.concatStringsSep "," runtimeOutputModes)}
 
     _nixfied_contract_err() {
       if command -v log_error >/dev/null 2>&1; then

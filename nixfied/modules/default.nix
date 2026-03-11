@@ -15,6 +15,5 @@
 
   profiles = {
     webapp = import ./profiles/webapp.nix;
-    eth = import ./profiles/eth.nix;
   };
 }

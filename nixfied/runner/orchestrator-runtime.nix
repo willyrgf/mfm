@@ -268,6 +268,9 @@ in
       fi
 
       case "$arg" in
+        --help|-h)
+          continue
+          ;;
         --*=*)
           key="''${arg%%=*}"
           if [ "$key" = "--run-id-file" ] || [ "$key" = "--summary-file" ]; then

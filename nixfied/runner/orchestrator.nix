@@ -3,7 +3,6 @@
   model,
   registry,
   projectRoot,
-  serviceRuntime ? { },
 }:
 let
   lib = pkgs.lib;
@@ -21,7 +20,6 @@ let
       model
       registry
       projectRoot
-      serviceRuntime
       ;
   };
   frameworkEphemeral = import ../.framework/ephemeral.nix {
@@ -586,6 +584,13 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     workflow_ref="$(resolve_task_workflow_ref "$task_id")"
 
     split_process_mode "$@"
+    if task_help_requested "''${FORWARD_ARGS[@]}"; then
+      if ! task_print_help "$task_id"; then
+        echo "ERROR: unknown task '$task_id'"
+        return 2
+      fi
+      return 0
+    fi
     if [ -n "$workflow_ref" ]; then
       validate_workflow_args "$workflow_ref" "''${FORWARD_ARGS[@]}"
     else

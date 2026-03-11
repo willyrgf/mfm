@@ -101,30 +101,36 @@ let
     else
       toString value;
 
-  allowSpecNames = map (spec: spec.name) (builtins.filter (spec: spec.name != "") normalizedAllowSpecs);
+  allowSpecNames = map (spec: spec.name) (
+    builtins.filter (spec: spec.name != "") normalizedAllowSpecs
+  );
 
   allowSpecsRuntime = pkgs.writeText "nixfied-env-file-specs.sh" ''
-    declare -ag NIXFIED_ENV_SPEC_NAMES=(
-  ${lib.concatStringsSep "\n" (map (name: "  ${lib.escapeShellArg name}") allowSpecNames)}
-    )
-    declare -Ag NIXFIED_ENV_SPEC_TYPE=()
-    declare -Ag NIXFIED_ENV_SPEC_REQUIRED=()
-    declare -Ag NIXFIED_ENV_SPEC_HAS_DEFAULT=()
-    declare -Ag NIXFIED_ENV_SPEC_DEFAULT=()
-  ${lib.concatStringsSep "\n" (
-    map (
-      spec:
-      let
-        name = spec.name;
-      in
-      ''
-        NIXFIED_ENV_SPEC_TYPE[${lib.escapeShellArg name}]=${lib.escapeShellArg spec.type}
-        NIXFIED_ENV_SPEC_REQUIRED[${lib.escapeShellArg name}]=${lib.escapeShellArg (if spec.required then "1" else "0")}
-        NIXFIED_ENV_SPEC_HAS_DEFAULT[${lib.escapeShellArg name}]=${lib.escapeShellArg (if spec.hasDefault then "1" else "0")}
-        NIXFIED_ENV_SPEC_DEFAULT[${lib.escapeShellArg name}]=${lib.escapeShellArg (valueToString spec.default)}
-      ''
-    ) (builtins.filter (spec: spec.name != "") normalizedAllowSpecs)
-  )}
+      declare -ag NIXFIED_ENV_SPEC_NAMES=(
+    ${lib.concatStringsSep "\n" (map (name: "  ${lib.escapeShellArg name}") allowSpecNames)}
+      )
+      declare -Ag NIXFIED_ENV_SPEC_TYPE=()
+      declare -Ag NIXFIED_ENV_SPEC_REQUIRED=()
+      declare -Ag NIXFIED_ENV_SPEC_HAS_DEFAULT=()
+      declare -Ag NIXFIED_ENV_SPEC_DEFAULT=()
+    ${lib.concatStringsSep "\n" (
+      map (
+        spec:
+        let
+          name = spec.name;
+        in
+        ''
+          NIXFIED_ENV_SPEC_TYPE[${lib.escapeShellArg name}]=${lib.escapeShellArg spec.type}
+          NIXFIED_ENV_SPEC_REQUIRED[${lib.escapeShellArg name}]=${
+            lib.escapeShellArg (if spec.required then "1" else "0")
+          }
+          NIXFIED_ENV_SPEC_HAS_DEFAULT[${lib.escapeShellArg name}]=${
+            lib.escapeShellArg (if spec.hasDefault then "1" else "0")
+          }
+          NIXFIED_ENV_SPEC_DEFAULT[${lib.escapeShellArg name}]=${lib.escapeShellArg (valueToString spec.default)}
+        ''
+      ) (builtins.filter (spec: spec.name != "") normalizedAllowSpecs)
+    )}
   '';
 
   loadEnvFile = pkgs.writeShellScript "nixfied-load-env-file" ''

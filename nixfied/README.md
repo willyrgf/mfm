@@ -98,7 +98,6 @@ Ephemeral runtime behavior:
 
 ## Docs
 
-- `CLEANUPS.md` for the current cleanup ledger and repo-tightening queue.
 - `docs/ARCHITECTURE.md` for high-level architecture.
 - `docs/DETAILED.md` for model, runtime, workflow, and registry contracts.
 - `docs/UPGRADE.md` for downstream upgrade notes and behavior changes.

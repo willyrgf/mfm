@@ -1,4 +1,4 @@
-{ lib, config, ... }:
+{ lib, ... }:
 let
   t = lib.types;
 in
@@ -49,11 +49,6 @@ in
         type = t.str;
         default = "/tmp/ci-artifacts/nixfied-project";
       };
-
-      serviceStateRoot = lib.mkOption {
-        type = t.str;
-        default = "${config.nixfied.state.registryRoot}/service-state";
-      };
     };
 
     tooling = {
@@ -73,6 +68,11 @@ in
           echo "INFO: nixfied dev shell ready"
         '';
       };
+    };
+
+    packages = lib.mkOption {
+      type = t.attrsOf t.package;
+      default = { };
     };
   };
 }

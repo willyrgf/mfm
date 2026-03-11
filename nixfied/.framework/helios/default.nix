@@ -71,12 +71,6 @@ let
       summary = "Init/check/start Helios";
       details = "Performs init + check-config + start for Helios.";
     };
-    ensure = {
-      script = lifecycle.ensure;
-      hook = "ENSURE";
-      summary = "Ensure Helios is running";
-      details = "Ensures Helios is detached, running, and framework-ready for the current slot and environment.";
-    };
     full-start-test = {
       script = lifecycle.fullStartTest;
       hook = "FULL_START_TEST";
@@ -127,7 +121,6 @@ serviceModule.mkServiceModule {
       checkConfig
       ready
       fullStart
-      ensure
       fullStartTest
       ;
   };

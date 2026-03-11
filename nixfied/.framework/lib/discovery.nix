@@ -17,7 +17,6 @@ let
 
   defaultRequiredDocs = [
     "README.md"
-    "CLEANUPS.md"
     "AGENTS.md"
     "docs/ARCHITECTURE.md"
     "docs/DETAILED.md"
@@ -141,7 +140,6 @@ let
         doc_purpose() {
           case "$1" in
             README.md) echo "Primary repository overview and command entrypoints." ;;
-            CLEANUPS.md) echo "Current repository cleanup ledger and maintenance queue." ;;
             AGENTS.md) echo "Agent instructions and collaboration constraints." ;;
             CLAUDE.md) echo "Additional assistant guidance for this repository." ;;
             ARCHITECTURE.md|docs/ARCHITECTURE.md) echo "High-level architecture reference." ;;
@@ -155,10 +153,9 @@ let
         doc_priority() {
           case "$1" in
             README.md) echo 1 ;;
-            CLEANUPS.md) echo 2 ;;
-            docs/DETAILED.md) echo 3 ;;
-            docs/UPGRADE.md) echo 4 ;;
-            ARCHITECTURE.md|docs/ARCHITECTURE.md) echo 5 ;;
+            docs/DETAILED.md) echo 2 ;;
+            docs/UPGRADE.md) echo 3 ;;
+            ARCHITECTURE.md|docs/ARCHITECTURE.md) echo 4 ;;
             REDESIGN.md) echo 6 ;;
             AGENTS.md) echo 7 ;;
             CLAUDE.md) echo 7 ;;

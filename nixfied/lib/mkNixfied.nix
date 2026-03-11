@@ -16,20 +16,10 @@ let
   modules = import ../modules;
 
   canonical = import ./canonical.nix { inherit lib; };
-  serviceApi = import ../.framework/lib/service-api.nix { inherit pkgs; };
-  runtimeSlots = import ./runtime-slots.nix {
-    inherit
-      pkgs
-      lib
-      ;
-  } {
-    model = compiled.model;
-  };
 
   registry = import ../registry {
     inherit
       pkgs
-      canonical
       ;
   };
 
@@ -52,38 +42,6 @@ let
       ;
   };
 
-  serviceEnabled =
-    name:
-    let
-      services = compiled.resolved.services or { };
-    in
-    builtins.hasAttr name services && (services.${name}.enable or false);
-
-  frameworkServiceModules =
-    (lib.optionalAttrs (serviceEnabled "postgres") {
-      postgres = import ../.framework/postgres/default.nix {
-        inherit pkgs;
-        project = compiled.resolved;
-        slots = runtimeSlots;
-      };
-    })
-    // (lib.optionalAttrs (serviceEnabled "helios") {
-      helios = import ../.framework/helios/default.nix {
-        inherit pkgs;
-        project = compiled.resolved;
-        slots = runtimeSlots;
-      };
-    });
-
-  serviceApis = serviceApi.mkServiceApisFromModules frameworkServiceModules;
-  serviceHookEnv = serviceApi.mkServiceHookEnvFromContract serviceApis;
-  serviceLaunchers = serviceApi.mkServiceLaunchersFromContract serviceApis;
-  serviceRuntime = {
-    hookEnv = serviceHookEnv;
-    slotInfo = runtimeSlots.getSlotInfo;
-    slotInfoJson = runtimeSlots.getSlotInfoJson;
-  };
-
   runner = import ../runner {
     inherit
       pkgs
@@ -94,7 +52,6 @@ let
 
   baseApps = runner.mkApps {
     model = compiled.model;
-    inherit serviceRuntime;
   };
 
   taskIds = builtins.sort builtins.lessThan (builtins.attrNames compiled.model.tasks);
@@ -159,19 +116,6 @@ let
       program = "${script}/bin/${binName}";
     };
 
-  serviceApps = builtins.mapAttrs (
-    appName: launcher:
-    let
-      slotInfoJsonProgram = toString runtimeSlots.getSlotInfoJson;
-    in
-    mkApp appName ''
-      export SLOT_INFO_JSON="''${SLOT_INFO_JSON:-${slotInfoJsonProgram}}"
-      export REQUIRE_SLOT_ENV_JSON="''${REQUIRE_SLOT_ENV_JSON:-$SLOT_INFO_JSON}"
-
-      exec ${toString launcher.launcher} "$@"
-    ''
-  ) serviceLaunchers;
-
   taskApps = builtins.listToAttrs (
     map (
       taskId:
@@ -220,7 +164,6 @@ let
 
   apps =
     baseApps
-    // serviceApps
     // introspectionApps
     // {
       default = if baseApps ? help then baseApps.help else baseApps.default;
@@ -248,7 +191,8 @@ let
     features = pkgs.writeText "nixfied-features.txt" "${featuresTable}\n";
     schema = schemaDir;
   }
-  // taskPackages;
+  // taskPackages
+  // compiled.resolved.packages;
 
   checks = {
     model-hash-stable =

@@ -166,12 +166,6 @@ let
         summary = "Init, start, and set up PostgreSQL";
         details = "Performs init/start/setup-db in one operation.";
       };
-      ensure = {
-        script = lifecycle.ensure;
-        hook = "ENSURE";
-        summary = "Ensure PostgreSQL is running";
-        details = "Performs init/start/setup-db and validates readiness for the current slot and environment.";
-      };
       full-start-test = {
         script = lifecycle.fullStartTest;
         hook = "FULL_START_TEST";
@@ -278,7 +272,6 @@ in
     checkConfig
     setupDb
     fullStart
-    ensure
     fullStartTest
     listInstances
     ;

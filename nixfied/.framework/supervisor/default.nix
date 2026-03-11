@@ -52,9 +52,7 @@ let
   };
 in
 {
-  # Backward compat
   inherit (lifecycle)
-    pc
     start
     stop
     startDaemon

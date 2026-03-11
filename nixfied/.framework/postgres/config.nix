@@ -10,7 +10,6 @@ let
     inherit project;
     name = "postgres";
   };
-  moduleCfg = project.modules.postgres or { };
   extensions = cfg.extensions or [ ];
   extraConfig = cfg.extraConfig or "";
   userEnvConfigs = cfg.envConfigs or { };
@@ -84,20 +83,7 @@ let
     host    all             all   ::1/128       trust
   '';
 in
-rec {
-  package =
-    if (cfg ? package) && cfg.package != null then
-      cfg.package
-    else if (moduleCfg ? package) && moduleCfg.package != null then
-      moduleCfg.package
-    else if pkgs != null then
-      pkgs.postgresql_16
-    else
-      null;
-  database = cfg.database or "app";
-  testDatabase = cfg.testDatabase or "${database}_test";
-  portKey = cfg.portKey or "postgres";
-  dataDirName = cfg.dataDirName or "postgres";
+{
   inherit
     baseConf
     extensions

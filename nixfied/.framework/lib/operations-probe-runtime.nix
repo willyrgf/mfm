@@ -1,7 +1,15 @@
-{ lib, pkgs, probeCommands, postgresProbePkg, runtimeStride, resolveServicePortBase }:
+{
+  lib,
+  pkgs,
+  probeCommands,
+  postgresProbePkg,
+  runtimeStride,
+  resolveServicePortBase,
+}:
 
 let
-  portValueExpr = base: "$(( ${toString base} + env_offset + (slot_value * ${toString runtimeStride}) ))";
+  portValueExpr =
+    base: "$(( ${toString base} + env_offset + (slot_value * ${toString runtimeStride}) ))";
   shellVar = name: "$" + name;
   probePortVar = serviceName: endpointName: "${serviceName}_${endpointName}_port";
 
@@ -11,8 +19,8 @@ let
       map (
         sourceName:
         "        ${lib.escapeShellArg sourceName}) helios_source_kind_value=${
-                lib.escapeShellArg (sourceKinds.${sourceName} or "unknown")
-              } ;;"
+                  lib.escapeShellArg (sourceKinds.${sourceName} or "unknown")
+                } ;;"
       ) (builtins.sort builtins.lessThan (builtins.attrNames sourceKinds))
     );
 
@@ -139,54 +147,54 @@ let
       disallowArgs = builtins.concatStringsSep " " (map lib.escapeShellArg disallowSourceKinds);
     in
     ''
-      ${portVar}=${portValueExpr portBase}
-      helios_source_kind_value="unknown"
-      case "$service_source" in
-${sourceKindCase}
-        *)
-          helios_source_kind_value="unknown"
-          ;;
-      esac
-      helios_readiness_profile=${lib.escapeShellArg readinessProfile}
-      helios_require_not_syncing=${if requireNotSyncing then "1" else "0"}
-      echo "INFO: checking helios readiness port=${shellVar portVar} source=$service_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile"
-      if source_kind_disallowed "$helios_source_kind_value"${
-        if disallowArgs == "" then "" else " " + disallowArgs
-      }; then
-        echo "ERROR: helios not ready port=${shellVar portVar} source=$service_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile (source kind disallowed)"
-        exit 1
-      fi
+            ${portVar}=${portValueExpr portBase}
+            helios_source_kind_value="unknown"
+            case "$service_source" in
+      ${sourceKindCase}
+              *)
+                helios_source_kind_value="unknown"
+                ;;
+            esac
+            helios_readiness_profile=${lib.escapeShellArg readinessProfile}
+            helios_require_not_syncing=${if requireNotSyncing then "1" else "0"}
+            echo "INFO: checking helios readiness port=${shellVar portVar} source=$service_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile"
+            if source_kind_disallowed "$helios_source_kind_value"${
+              if disallowArgs == "" then "" else " " + disallowArgs
+            }; then
+              echo "ERROR: helios not ready port=${shellVar portVar} source=$service_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile (source kind disallowed)"
+              exit 1
+            fi
 
-      helios_block_json="$(${
-        probeCommands.jsonRpcRequestCmd {
-          urlExpr = "http://127.0.0.1:${shellVar portVar}";
-          method = "eth_blockNumber";
-        }
-      })" || true
-      helios_block_number="$(printf '%s' "$helios_block_json" | ${pkgs.jq}/bin/jq -r '.result // empty')" || true
-      if [ -z "$helios_block_number" ] || ! [[ "$helios_block_number" =~ ^0x[0-9a-fA-F]+$ ]]; then
-        echo "ERROR: helios not ready port=${shellVar portVar} source=$service_source source_kind=$helios_source_kind_value (invalid eth_blockNumber result)"
-        exit 1
-      fi
-      echo "OK: helios ready port=${shellVar portVar} block_number=$helios_block_number"
+            helios_block_json="$(${
+              probeCommands.jsonRpcRequestCmd {
+                urlExpr = "http://127.0.0.1:${shellVar portVar}";
+                method = "eth_blockNumber";
+              }
+            })" || true
+            helios_block_number="$(printf '%s' "$helios_block_json" | ${pkgs.jq}/bin/jq -r '.result // empty')" || true
+            if [ -z "$helios_block_number" ] || ! [[ "$helios_block_number" =~ ^0x[0-9a-fA-F]+$ ]]; then
+              echo "ERROR: helios not ready port=${shellVar portVar} source=$service_source source_kind=$helios_source_kind_value (invalid eth_blockNumber result)"
+              exit 1
+            fi
+            echo "OK: helios ready port=${shellVar portVar} block_number=$helios_block_number"
 
-      if [ "$helios_require_not_syncing" = "1" ]; then
-        helios_syncing_result="$(${
-          probeCommands.jsonRpcFieldCmd {
-            urlExpr = "http://127.0.0.1:${shellVar portVar}";
-            method = "eth_syncing";
-            jqExpr = ".result";
-            raw = false;
-          }
-        })" || true
-        if [ "$helios_syncing_result" != "false" ]; then
-          echo "ERROR: helios not ready port=${shellVar portVar} source=$service_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile (eth_syncing=$helios_syncing_result)"
-          exit 1
-        fi
-        echo "OK: helios sync status ready port=${shellVar portVar}"
-      else
-        echo "SKIP: helios sync gate disabled profile=$helios_readiness_profile"
-      fi
+            if [ "$helios_require_not_syncing" = "1" ]; then
+              helios_syncing_result="$(${
+                probeCommands.jsonRpcFieldCmd {
+                  urlExpr = "http://127.0.0.1:${shellVar portVar}";
+                  method = "eth_syncing";
+                  jqExpr = ".result";
+                  raw = false;
+                }
+              })" || true
+              if [ "$helios_syncing_result" != "false" ]; then
+                echo "ERROR: helios not ready port=${shellVar portVar} source=$service_source source_kind=$helios_source_kind_value profile=$helios_readiness_profile (eth_syncing=$helios_syncing_result)"
+                exit 1
+              fi
+              echo "OK: helios sync status ready port=${shellVar portVar}"
+            else
+              echo "SKIP: helios sync gate disabled profile=$helios_readiness_profile"
+            fi
     '';
 
   renderProbeStep =

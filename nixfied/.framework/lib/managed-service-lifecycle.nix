@@ -57,8 +57,7 @@ let
       failureBody ? "",
     }:
     ''
-      if ${probeCommand}
-      then
+      if ${probeCommand}; then
         ${successBody}
         log_ok "${successMessage}"
         exit 0

@@ -46,7 +46,7 @@ let
       jsonVar = "SLOT_INFO_JSON_OUT";
       keyExpr = "$HELIOS_EXECUTION_PORT_VAR";
     }}
-    HELIOS_DIR="''${HELIOS_DIR:-${heliosDirExpr}}"
+    HELIOS_DIR="${heliosDirExpr}"
     HELIOS_PID_FILE="$HELIOS_DIR/run/helios.pid"
     HELIOS_LOG_FILE="$HELIOS_DIR/logs/helios.log"
     SERVICE_DIR="$HELIOS_DIR"
@@ -93,132 +93,6 @@ let
     urlExpr = heliosRpcUrlExpr;
     method = "eth_chainId";
   };
-  ensureArgsSetup = ''
-    if [ ! -x "${helios}/bin/helios" ]; then
-      log_error "missing helios binary at ${helios}/bin/helios"
-      exit 1
-    fi
-
-    if [ -z "$HELIOS_EXECUTION_RPC_URL" ]; then
-      log_error "HELIOS_EXECUTION_RPC_URL is required (or set executionRpcPortKey to a valid port key)"
-      exit 1
-    fi
-
-    # Derive a recent weak-subjectivity checkpoint when not pinned explicitly.
-    #
-    # This avoids a common failure mode where Helios stays "healthy" but remains unable to answer
-    # `eth_blockNumber` because the consensus light client never bootstrapped.
-    if [ "$HELIOS_NETWORK" != "local" ] && [ -z "$HELIOS_CHECKPOINT" ]; then
-      if [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
-        log_error "cannot derive HELIOS_CHECKPOINT: HELIOS_CONSENSUS_RPC_URL is empty"
-        exit 1
-      fi
-
-      # Mainnet fallback: lightclientdata can be temporarily unavailable (e.g. 503).
-      # Prefer it first (Helios upstream default), then try a known public Lodestar endpoint.
-      CONS_CANDIDATES=("$HELIOS_CONSENSUS_RPC_URL")
-      if [ "$HELIOS_NETWORK" = "mainnet" ] && [ "$HELIOS_CONSENSUS_RPC_URL" = "https://www.lightclientdata.org" ]; then
-        CONS_CANDIDATES+=("https://lodestar-mainnet.chainsafe.io")
-      fi
-
-      DERIVED=0
-      for CONS in "''${CONS_CANDIDATES[@]}"; do
-        if [ -z "''${CONS:-}" ]; then
-          continue
-        fi
-        CONS="''${CONS%/}"
-
-        log_info "deriving HELIOS_CHECKPOINT from consensus endpoint cons=$CONS"
-
-        FINALIZED_URL="$CONS/eth/v1/beacon/headers/finalized"
-        if ! FINALIZED_JSON="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
-          --retry 3 --retry-delay 1 --retry-max-time 30 \
-          -H 'accept: application/json' \
-          "$FINALIZED_URL" 2>&1)"; then
-          log_warn "failed to fetch finalized header cons=$CONS url=$FINALIZED_URL"
-          echo "DETAIL: $FINALIZED_JSON" >&2
-          continue
-        fi
-
-        slot="$(echo "$FINALIZED_JSON" | ${pkgs.jq}/bin/jq -r '.data.header.message.slot|tonumber' 2>/dev/null || true)"
-        case "$slot" in
-          *[!0-9]*|"")
-            log_warn "failed to parse finalized slot from consensus response cons=$CONS"
-            continue
-            ;;
-        esac
-
-        epoch_start=$((slot - (slot % 32)))
-
-        EPOCH_URL="$CONS/eth/v1/beacon/headers/$epoch_start"
-        if ! EPOCH_JSON="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
-          --retry 3 --retry-delay 1 --retry-max-time 30 \
-          -H 'accept: application/json' \
-          "$EPOCH_URL" 2>&1)"; then
-          log_warn "failed to fetch epoch boundary header cons=$CONS url=$EPOCH_URL"
-          echo "DETAIL: $EPOCH_JSON" >&2
-          continue
-        fi
-
-        checkpoint="$(echo "$EPOCH_JSON" | ${pkgs.jq}/bin/jq -r '.data.root // empty' 2>/dev/null || true)"
-        if ! echo "$checkpoint" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]{64}$'; then
-          log_warn "invalid checkpoint root from consensus endpoint cons=$CONS root='$checkpoint'"
-          continue
-        fi
-
-        # Sanity-check that the light-client bootstrap endpoint is served for this checkpoint.
-        BOOTSTRAP_URL="$CONS/eth/v1/beacon/light_client/bootstrap/$checkpoint"
-        if ! BOOTSTRAP_ERR="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
-          --retry 3 --retry-delay 1 --retry-max-time 30 \
-          -H 'accept: application/json' \
-          -o /dev/null \
-          "$BOOTSTRAP_URL" 2>&1)"; then
-          log_warn "consensus endpoint does not serve light_client/bootstrap cons=$CONS url=$BOOTSTRAP_URL"
-          echo "DETAIL: $BOOTSTRAP_ERR" >&2
-          continue
-        fi
-
-        HELIOS_CONSENSUS_RPC_URL="$CONS"
-        HELIOS_CHECKPOINT="$checkpoint"
-        log_info "derived HELIOS_CHECKPOINT=$HELIOS_CHECKPOINT (cons=$HELIOS_CONSENSUS_RPC_URL)"
-        DERIVED=1
-        break
-      done
-
-      if [ "$DERIVED" -ne 1 ]; then
-        log_error "failed to derive HELIOS_CHECKPOINT from consensus endpoint(s)."
-        log_hint "set HELIOS_CONSENSUS_RPC_URL and HELIOS_CHECKPOINT explicitly."
-        exit 1
-      fi
-    fi
-
-    if [ "$HELIOS_NETWORK" != "local" ] && [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
-      log_error "HELIOS_CONSENSUS_RPC_URL is required when network is not local"
-      exit 1
-    fi
-
-    ARGS=(
-      ethereum
-      --network "$HELIOS_NETWORK"
-      --rpc-bind-ip 127.0.0.1
-      --rpc-port "$HELIOS_RPC_PORT"
-      --data-dir "$HELIOS_DIR/data"
-      --execution-rpc "$HELIOS_EXECUTION_RPC_URL"
-    )
-
-    if [ -n "$HELIOS_CONSENSUS_RPC_URL" ]; then
-      ARGS+=(--consensus-rpc "$HELIOS_CONSENSUS_RPC_URL")
-    fi
-
-    if [ -n "$HELIOS_CHECKPOINT" ]; then
-      ARGS+=(--checkpoint "$HELIOS_CHECKPOINT")
-    fi
-
-    ${lib.optionalString ((config.extraArgs or [ ]) != [ ]) ''
-      EXTRA_ARGS=(${extraArgs})
-      ARGS+=("''${EXTRA_ARGS[@]}")
-    ''}
-  '';
   managedLifecycle = managedServiceLifecycle.mkPidFileManagedLifecycle {
     service = "helios";
     inherit
@@ -253,7 +127,132 @@ let
       ${helios}/bin/helios ethereum --help >/dev/null 2>&1
       log_ok "helios configuration valid dir=$HELIOS_DIR network=$HELIOS_NETWORK"
     '';
-    startPreflight = ensureArgsSetup;
+    startPreflight = ''
+      if [ ! -x "${helios}/bin/helios" ]; then
+        log_error "missing helios binary at ${helios}/bin/helios"
+        exit 1
+      fi
+
+      if [ -z "$HELIOS_EXECUTION_RPC_URL" ]; then
+        log_error "HELIOS_EXECUTION_RPC_URL is required (or set executionRpcPortKey to a valid port key)"
+        exit 1
+      fi
+
+      # Derive a recent weak-subjectivity checkpoint when not pinned explicitly.
+      #
+      # This avoids a common failure mode where Helios stays "healthy" but remains unable to answer
+      # `eth_blockNumber` because the consensus light client never bootstrapped.
+      if [ "$HELIOS_NETWORK" != "local" ] && [ -z "$HELIOS_CHECKPOINT" ]; then
+        if [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
+          log_error "cannot derive HELIOS_CHECKPOINT: HELIOS_CONSENSUS_RPC_URL is empty"
+          exit 1
+        fi
+
+        # Mainnet fallback: lightclientdata can be temporarily unavailable (e.g. 503).
+        # Prefer it first (Helios upstream default), then try a known public Lodestar endpoint.
+        CONS_CANDIDATES=("$HELIOS_CONSENSUS_RPC_URL")
+        if [ "$HELIOS_NETWORK" = "mainnet" ] && [ "$HELIOS_CONSENSUS_RPC_URL" = "https://www.lightclientdata.org" ]; then
+          CONS_CANDIDATES+=("https://lodestar-mainnet.chainsafe.io")
+        fi
+
+        DERIVED=0
+        for CONS in "''${CONS_CANDIDATES[@]}"; do
+          if [ -z "''${CONS:-}" ]; then
+            continue
+          fi
+          CONS="''${CONS%/}"
+
+          log_info "deriving HELIOS_CHECKPOINT from consensus endpoint cons=$CONS"
+
+          FINALIZED_URL="$CONS/eth/v1/beacon/headers/finalized"
+          if ! FINALIZED_JSON="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
+            --retry 3 --retry-delay 1 --retry-max-time 30 \
+            -H 'accept: application/json' \
+            "$FINALIZED_URL" 2>&1)"; then
+            log_warn "failed to fetch finalized header cons=$CONS url=$FINALIZED_URL"
+            echo "DETAIL: $FINALIZED_JSON" >&2
+            continue
+          fi
+
+          slot="$(echo "$FINALIZED_JSON" | ${pkgs.jq}/bin/jq -r '.data.header.message.slot|tonumber' 2>/dev/null || true)"
+          case "$slot" in
+            *[!0-9]*|"")
+              log_warn "failed to parse finalized slot from consensus response cons=$CONS"
+              continue
+              ;;
+          esac
+
+          epoch_start=$((slot - (slot % 32)))
+
+          EPOCH_URL="$CONS/eth/v1/beacon/headers/$epoch_start"
+          if ! EPOCH_JSON="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
+            --retry 3 --retry-delay 1 --retry-max-time 30 \
+            -H 'accept: application/json' \
+            "$EPOCH_URL" 2>&1)"; then
+            log_warn "failed to fetch epoch boundary header cons=$CONS url=$EPOCH_URL"
+            echo "DETAIL: $EPOCH_JSON" >&2
+            continue
+          fi
+
+          checkpoint="$(echo "$EPOCH_JSON" | ${pkgs.jq}/bin/jq -r '.data.root // empty' 2>/dev/null || true)"
+          if ! echo "$checkpoint" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]{64}$'; then
+            log_warn "invalid checkpoint root from consensus endpoint cons=$CONS root='$checkpoint'"
+            continue
+          fi
+
+          # Sanity-check that the light-client bootstrap endpoint is served for this checkpoint.
+          BOOTSTRAP_URL="$CONS/eth/v1/beacon/light_client/bootstrap/$checkpoint"
+          if ! BOOTSTRAP_ERR="$(${pkgs.curl}/bin/curl -fsS --max-time 10 \
+            --retry 3 --retry-delay 1 --retry-max-time 30 \
+            -H 'accept: application/json' \
+            -o /dev/null \
+            "$BOOTSTRAP_URL" 2>&1)"; then
+            log_warn "consensus endpoint does not serve light_client/bootstrap cons=$CONS url=$BOOTSTRAP_URL"
+            echo "DETAIL: $BOOTSTRAP_ERR" >&2
+            continue
+          fi
+
+          HELIOS_CONSENSUS_RPC_URL="$CONS"
+          HELIOS_CHECKPOINT="$checkpoint"
+          log_info "derived HELIOS_CHECKPOINT=$HELIOS_CHECKPOINT (cons=$HELIOS_CONSENSUS_RPC_URL)"
+          DERIVED=1
+          break
+        done
+
+        if [ "$DERIVED" -ne 1 ]; then
+          log_error "failed to derive HELIOS_CHECKPOINT from consensus endpoint(s)."
+          log_hint "set HELIOS_CONSENSUS_RPC_URL and HELIOS_CHECKPOINT explicitly."
+          exit 1
+        fi
+      fi
+
+      if [ "$HELIOS_NETWORK" != "local" ] && [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
+        log_error "HELIOS_CONSENSUS_RPC_URL is required when network is not local"
+        exit 1
+      fi
+
+      ARGS=(
+        ethereum
+        --network "$HELIOS_NETWORK"
+        --rpc-bind-ip 127.0.0.1
+        --rpc-port "$HELIOS_RPC_PORT"
+        --data-dir "$HELIOS_DIR/data"
+        --execution-rpc "$HELIOS_EXECUTION_RPC_URL"
+      )
+
+      if [ -n "$HELIOS_CONSENSUS_RPC_URL" ]; then
+        ARGS+=(--consensus-rpc "$HELIOS_CONSENSUS_RPC_URL")
+      fi
+
+      if [ -n "$HELIOS_CHECKPOINT" ]; then
+        ARGS+=(--checkpoint "$HELIOS_CHECKPOINT")
+      fi
+
+      ${lib.optionalString ((config.extraArgs or [ ]) != [ ]) ''
+        EXTRA_ARGS=(${extraArgs})
+        ARGS+=("''${EXTRA_ARGS[@]}")
+      ''}
+    '';
     startCommand = ''
       "${helios}/bin/helios" "''${ARGS[@]}" > "$LOG_FILE" 2>&1 &
     '';
@@ -414,67 +413,6 @@ let
     fullStart
     fullStartTest
     ;
-  ensure = managedServiceLifecycle.mkWrappedScript {
-    name = "helios-ensure";
-    inherit
-      loggingPrelude
-      runtimePrelude
-      ;
-    body = ''
-      ${init}
-      ${checkConfig}
-
-      if [ -f "$HELIOS_PID_FILE" ]; then
-        PID="$(cat "$HELIOS_PID_FILE" 2>/dev/null || true)"
-        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-          if ${ready} >/dev/null 2>&1; then
-            emit_service_event service_ready ready --pid "$PID" --log-path "$HELIOS_LOG_FILE"
-            log_ok "helios already running pid=$PID rpc_port=$HELIOS_RPC_PORT"
-            exit 0
-          fi
-
-          log_error "helios ensure found running pid=$PID but readiness failed rpc_port=$HELIOS_RPC_PORT"
-          exit 1
-        fi
-
-        rm -f "$HELIOS_PID_FILE"
-      fi
-
-      ${ensureArgsSetup}
-
-      mkdir -p "$HELIOS_DIR/run" "$HELIOS_DIR/logs"
-      emit_service_event service_starting starting --log-path "$HELIOS_LOG_FILE"
-
-      if command -v setsid >/dev/null 2>&1; then
-        setsid "${helios}/bin/helios" "''${ARGS[@]}" </dev/null > "$HELIOS_LOG_FILE" 2>&1 &
-      elif command -v nohup >/dev/null 2>&1; then
-        nohup "${helios}/bin/helios" "''${ARGS[@]}" </dev/null > "$HELIOS_LOG_FILE" 2>&1 &
-      else
-        "${helios}/bin/helios" "''${ARGS[@]}" </dev/null > "$HELIOS_LOG_FILE" 2>&1 &
-      fi
-
-      CHILD_PID=$!
-      echo "$CHILD_PID" > "$HELIOS_PID_FILE"
-
-      if ! ${ready} >/dev/null 2>&1; then
-        if kill -0 "$CHILD_PID" 2>/dev/null; then
-          kill "$CHILD_PID" 2>/dev/null || true
-          wait "$CHILD_PID" 2>/dev/null || true
-        fi
-        rm -f "$HELIOS_PID_FILE"
-        emit_service_event service_degraded degraded \
-          --pid "$CHILD_PID" \
-          --log-path "$HELIOS_LOG_FILE" \
-          --wait-reason "helios_ensure_ready_failed" \
-          --last-error "helios ensure failed readiness checks"
-        log_error "helios ensure failed readiness checks rpc_port=$HELIOS_RPC_PORT"
-        exit 1
-      fi
-
-      emit_service_event service_ready ready --pid "$CHILD_PID" --log-path "$HELIOS_LOG_FILE"
-      log_ok "helios ensured pid=$CHILD_PID rpc_port=$HELIOS_RPC_PORT"
-    '';
-  };
 in
 {
   inherit helios;
@@ -490,5 +428,4 @@ in
     fullStart
     fullStartTest
     ;
-  inherit ensure;
 }
