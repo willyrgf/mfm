@@ -444,6 +444,22 @@ let
     '';
   };
 
+  ensure = mkPgScript {
+    name = "postgres-ensure";
+    body = ''
+      log_info "Ensuring PostgreSQL slot=$SLOT env=$ENV port=$PGPORT"
+
+      ${fullStart}
+
+      if ! ${ready} >/dev/null 2>&1; then
+        log_error "PostgreSQL ensure failed readiness checks port=$PGPORT"
+        exit 1
+      fi
+
+      log_ok "PostgreSQL ensured port=$PGPORT database=$PGDATABASE"
+    '';
+  };
+
   listInstances = mkWrappedScript {
     name = "postgres-list-instances";
     body = ''
@@ -479,6 +495,7 @@ in
     setupDb
     fullStart
     fullStartTest
+    ensure
     listInstances
     ;
 }

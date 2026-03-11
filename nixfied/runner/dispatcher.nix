@@ -3,6 +3,7 @@
   model,
   projectRoot,
   registry,
+  serviceRuntime ? { },
 }:
 let
   lib = pkgs.lib;
@@ -14,6 +15,7 @@ let
       model
       registry
       projectRoot
+      serviceRuntime
       ;
   };
 

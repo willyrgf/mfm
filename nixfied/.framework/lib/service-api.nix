@@ -481,6 +481,47 @@ let
     in
     builtins.foldl' dedup { } pairs;
 
+  mkServiceLaunchersFromContract =
+    serviceApis:
+    let
+      ops = builtins.filter (op: op.includeApp) (collectServiceOps serviceApis);
+      pairs = map (op: {
+        name = op.appName;
+        value = {
+          inherit
+            (op)
+            appName
+            serviceName
+            opName
+            hookName
+            launcher
+            usage
+            category
+            class
+            idempotent
+            ;
+          summary = op.opCfg.summary;
+          details = op.opCfg.details;
+          examples = op.opCfg.examples or [ ];
+          args = op.opCfg.args or [ ];
+          env = op.opCfg.env or [ ];
+        };
+      }) ops;
+      dedup =
+        acc: pair:
+        if builtins.hasAttr pair.name acc then
+          throw "Nixfied service API app name collision: ${pair.name}"
+        else
+          acc
+          // (builtins.listToAttrs [
+            {
+              name = pair.name;
+              value = pair.value;
+            }
+          ]);
+    in
+    builtins.foldl' dedup { } pairs;
+
   mkServiceAppsFromContract =
     serviceApis:
     let
@@ -527,6 +568,7 @@ in
     mkServiceApiV3
     mkServiceApisFromModules
     mkServiceHookEnvFromContract
+    mkServiceLaunchersFromContract
     mkServiceAppsFromContract
     ;
 }

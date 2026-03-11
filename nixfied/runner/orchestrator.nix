@@ -3,6 +3,7 @@
   model,
   registry,
   projectRoot,
+  serviceRuntime ? { },
 }:
 let
   lib = pkgs.lib;
@@ -20,6 +21,7 @@ let
       model
       registry
       projectRoot
+      serviceRuntime
       ;
   };
   frameworkEphemeral = import ../.framework/ephemeral.nix {

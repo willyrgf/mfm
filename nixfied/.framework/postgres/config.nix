@@ -83,7 +83,12 @@ let
     host    all             all   ::1/128       trust
   '';
 in
-{
+rec {
+  package = cfg.package or null;
+  database = cfg.database or "app";
+  testDatabase = cfg.testDatabase or "${database}_test";
+  portKey = cfg.portKey or "postgres";
+  dataDirName = cfg.dataDirName or "postgres";
   inherit
     baseConf
     extensions

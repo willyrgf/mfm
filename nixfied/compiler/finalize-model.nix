@@ -62,6 +62,9 @@ let
       artifacts = {
         root = resolved.state.artifactsRoot;
       };
+      serviceState = {
+        root = resolved.state.serviceStateRoot;
+      };
     };
   };
 

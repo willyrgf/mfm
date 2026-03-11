@@ -1,4 +1,4 @@
-{ lib, ... }:
+{ lib, config, ... }:
 let
   t = lib.types;
 in
@@ -48,6 +48,11 @@ in
       artifactsRoot = lib.mkOption {
         type = t.str;
         default = "/tmp/ci-artifacts/nixfied-project";
+      };
+
+      serviceStateRoot = lib.mkOption {
+        type = t.str;
+        default = "${config.nixfied.state.registryRoot}/service-state";
       };
     };
 

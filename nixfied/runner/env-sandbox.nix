@@ -2,10 +2,12 @@
   pkgs,
   projectRoot,
   model,
+  serviceRuntime ? { },
 }:
 let
   lib = pkgs.lib;
   commonRuntimeShell = import ./common-runtime.nix { inherit pkgs; };
+  servicePolicy = import ../.framework/lib/service-policy.nix { inherit pkgs; };
 
   valueToString =
     value:
@@ -27,6 +29,14 @@ let
     builtins.sort builtins.lessThan (builtins.attrNames (model.runtime.primitives.defs or { }));
   runtimePortNames = builtins.sort builtins.lessThan (builtins.attrNames (model.runtime.ports or { }));
   serviceIds = builtins.sort builtins.lessThan (builtins.attrNames (model.services or { }));
+  hookEnv = serviceRuntime.hookEnv or { };
+  hookNames = builtins.sort builtins.lessThan (builtins.attrNames hookEnv);
+  slotInfoPath = if (serviceRuntime.slotInfo or null) == null then "" else toString serviceRuntime.slotInfo;
+  slotInfoJsonPath =
+    if (serviceRuntime.slotInfoJson or null) == null then
+      ""
+    else
+      toString serviceRuntime.slotInfoJson;
 
   staticRuntimePackagesPath = lib.concatStringsSep ":" (map (runtimeInput: "${runtimeInput}/bin") model.runtime.runtimePackages);
 
@@ -80,9 +90,17 @@ let
       ''
     ) serviceIds
   );
+
+  staticHookEnvCmds = lib.concatStringsSep "\n" (
+    map (
+      hookName:
+      "    env_cmd+=(${lib.escapeShellArg "${hookName}=${hookEnv.${hookName}}"})"
+    ) hookNames
+  );
 in
 ''
   ${commonRuntimeShell}
+  ${servicePolicy.policyRuntimeFunctions}
 
   PROJECT_NAME=${pkgs.lib.escapeShellArg model.identity.projectName}
   PROJECT_DESCRIPTION=${pkgs.lib.escapeShellArg model.identity.description}
@@ -93,6 +111,11 @@ in
       )
   }
   RUNTIME_DIR_BASE_DEFAULT=${pkgs.lib.escapeShellArg model.runtime.directories.base}
+  PERSISTENT_SERVICE_ROOT_BASE_DEFAULT=${
+    pkgs.lib.escapeShellArg (
+      (model.state.serviceState or { }).root or "${model.state.registry.root}/service-state"
+    )
+  }
   ENV_SANDBOX_STATIC_RUNTIME_PACKAGES_PATH=${lib.escapeShellArg staticRuntimePackagesPath}
   ENV_SANDBOX_STATIC_RUNTIME_SLOT_VAR=${lib.escapeShellArg model.runtime.slot.var}
   ENV_SANDBOX_STATIC_RUNTIME_ENV_VAR=${lib.escapeShellArg model.runtime.env.var}
@@ -105,6 +128,8 @@ in
   ENV_SANDBOX_STATIC_RUNTIME_PRIMITIVES_TSV=${lib.escapeShellArg staticRuntimePrimitivesTsv}
   ENV_SANDBOX_STATIC_RUNTIME_PORTS_TSV=${lib.escapeShellArg staticRuntimePortsTsv}
   ENV_SANDBOX_STATIC_SERVICE_NAMES=${lib.escapeShellArg staticServiceNames}
+  ENV_SANDBOX_STATIC_SLOT_INFO=${lib.escapeShellArg slotInfoPath}
+  ENV_SANDBOX_STATIC_SLOT_INFO_JSON=${lib.escapeShellArg slotInfoJsonPath}
 
   normalize_env_token() {
     printf '%s' "$1" | ${pkgs.coreutils}/bin/tr '[:lower:].-' '[:upper:]__' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_'
@@ -141,7 +166,16 @@ in
       NIXFIED_RUNTIME_REGISTRY_ROOT|NIXFIED_RUNTIME_ARTIFACTS_DIR|NIXFIED_RUNTIME_SERVICE_ROOT)
         return 0
         ;;
+      NIXFIED_RUNTIME_SLOT|NIXFIED_RUNTIME_ENV)
+        return 0
+        ;;
+      NIXFIED_PERSISTENT_SERVICE_ROOT_BASE|NIXFIED_RUNTIME_PERSISTENT_SERVICE_ROOT_BASE|NIXFIED_REUSE_SERVICE_ROOT|NIXFIED_RUNTIME_REUSE_SERVICE_ROOT)
+        return 0
+        ;;
       NIXFIED_MODEL_FILE|NIXFIED_RUN_ID)
+        return 0
+        ;;
+      SLOT_INFO_JSON|REQUIRE_SLOT_ENV_JSON)
         return 0
         ;;
       NIXFIED_EXECUTOR_BIN|NIXFIED_ORCHESTRATOR_BIN|NIXFIED_EXECUTOR_SELF|NIXFIED_ORCHESTRATOR_SELF)
@@ -303,6 +337,8 @@ ${staticRuntimeEnvOffsetCase}
     local registry_root_value
     local artifacts_dir_value
     local services_root
+    local persistent_service_root_base
+    local reuse_service_root
 
     resolve_project_root_workdir() {
       local project_root_real="${builtins.toString projectRoot}"
@@ -434,6 +470,8 @@ ${staticRuntimeEnvOffsetCase}
     registry_root_value="$runtime_scope_root/registry"
     artifacts_dir_value="$runtime_scope_root/artifacts"
     services_root="$runtime_scope_root/services"
+    persistent_service_root_base="$PERSISTENT_SERVICE_ROOT_BASE_DEFAULT"
+    reuse_service_root="$(nixfied_policy_resolve_service_root "$services_root" "$persistent_service_root_base" "$slot_value" "$env_value")" || return 3
 
     ensure_runtime_dir "$home_value"
     ensure_runtime_dir "$tmp_value"
@@ -443,6 +481,8 @@ ${staticRuntimeEnvOffsetCase}
     ensure_runtime_dir "$registry_root_value"
     ensure_runtime_dir "$artifacts_dir_value"
     ensure_runtime_dir "$services_root"
+    ensure_runtime_dir "$persistent_service_root_base"
+    ensure_runtime_dir "$reuse_service_root"
 
     case "$workdir_kind" in
       projectRoot)
@@ -684,10 +724,14 @@ ${staticRuntimeEnvOffsetCase}
       "REGISTRY_ROOT=$registry_root_value"
       "CI_ARTIFACTS_DIR=$artifacts_dir_value"
       "NIXFIED_SERVICE_ROOT=$services_root"
+      "NIXFIED_PERSISTENT_SERVICE_ROOT_BASE=$persistent_service_root_base"
+      "NIXFIED_REUSE_SERVICE_ROOT=$reuse_service_root"
     )
 
     env_cmd+=("NIXFIED_PROJECT_NAME=$PROJECT_NAME")
     env_cmd+=("NIXFIED_PROJECT_DESCRIPTION=$PROJECT_DESCRIPTION")
+    env_cmd+=("NIXFIED_RUNTIME_SLOT=$slot_value")
+    env_cmd+=("NIXFIED_RUNTIME_ENV=$env_value")
     env_cmd+=("NIXFIED_RUNTIME_DIR_BASE=$runtime_dir_base")
     env_cmd+=("NIXFIED_RUNTIME_DIR_SCOPE=$runtime_scope_root")
     env_cmd+=("NIXFIED_RUNTIME_HOME=$home_value")
@@ -698,6 +742,8 @@ ${staticRuntimeEnvOffsetCase}
     env_cmd+=("NIXFIED_RUNTIME_REGISTRY_ROOT=$registry_root_value")
     env_cmd+=("NIXFIED_RUNTIME_ARTIFACTS_DIR=$artifacts_dir_value")
     env_cmd+=("NIXFIED_RUNTIME_SERVICE_ROOT=$services_root")
+    env_cmd+=("NIXFIED_RUNTIME_PERSISTENT_SERVICE_ROOT_BASE=$persistent_service_root_base")
+    env_cmd+=("NIXFIED_RUNTIME_REUSE_SERVICE_ROOT=$reuse_service_root")
     env_cmd+=("LOG_LEVEL=$resolved_log_level")
     env_cmd+=("NIXFIED_LOG_LEVEL=$resolved_log_level")
     env_cmd+=("OUTPUT_MODE=$resolved_output_mode")
@@ -747,6 +793,10 @@ ${staticRuntimeEnvOffsetCase}
     if [ -n "''${NIXFIED_RUN_ID:-}" ]; then
       env_cmd+=("NIXFIED_RUN_ID=$NIXFIED_RUN_ID")
     fi
+    if [ -n "$ENV_SANDBOX_STATIC_SLOT_INFO_JSON" ]; then
+      env_cmd+=("SLOT_INFO_JSON=$ENV_SANDBOX_STATIC_SLOT_INFO_JSON")
+      env_cmd+=("REQUIRE_SLOT_ENV_JSON=$ENV_SANDBOX_STATIC_SLOT_INFO_JSON")
+    fi
 
     while IFS=$'\t' read -r primitive_name primitive_default primitive_aliases; do
       local effective_value
@@ -791,6 +841,7 @@ ${staticRuntimeEnvOffsetCase}
     done <<< "$ENV_SANDBOX_STATIC_RUNTIME_PORTS_TSV"
 
 ${staticServiceEnvCmds}
+${staticHookEnvCmds}
 
     while IFS= read -r service_name || [ -n "$service_name" ]; do
       local service_token

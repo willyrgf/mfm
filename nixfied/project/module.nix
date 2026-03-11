@@ -529,7 +529,9 @@ in
         postgres = {
           enable = postgresService.enable or (conf.modules.postgres.enable or false);
           database = postgresService.database or (conf.modules.postgres.database or "app");
+          testDatabase = postgresService.testDatabase or (conf.modules.postgres.testDatabase or "app_test");
           portKey = postgresService.portKey or (conf.modules.postgres.portKey or "postgres");
+          dataDirName = postgresService.dataDirName or (conf.modules.postgres.dataDirName or "postgres");
           sources = postgresService.sources or { local = { }; };
           sourceKeys = postgresService.sourceKeys or [ "local" ];
           defaultSource = postgresService.defaultSource or "local";
@@ -569,6 +571,14 @@ in
           portKeyRpc = heliosService.portKeyRpc or (conf.modules.helios.portKeyRpc or "heliosRpc");
           executionRpcPortKey =
             heliosService.executionRpcPortKey or (conf.modules.helios.executionRpcPortKey or "rethHttp");
+          dataDirName = heliosService.dataDirName or (conf.modules.helios.dataDirName or "helios");
+          network = heliosService.network or (conf.modules.helios.network or "local");
+          executionRpcUrl = heliosService.executionRpcUrl or (conf.modules.helios.executionRpcUrl or "");
+          consensusRpcUrl = heliosService.consensusRpcUrl or (conf.modules.helios.consensusRpcUrl or "");
+          defaultConsensusRpcUrl =
+            heliosService.defaultConsensusRpcUrl or (conf.modules.helios.defaultConsensusRpcUrl or "");
+          checkpoint = heliosService.checkpoint or (conf.modules.helios.checkpoint or "");
+          extraArgs = heliosService.extraArgs or (conf.modules.helios.extraArgs or [ ]);
           sources = heliosService.sources or { local = { }; };
           sourceKeys = heliosService.sourceKeys or [ "local" ];
           defaultSource = heliosService.defaultSource or "local";
@@ -699,23 +709,44 @@ in
             fi
 
             ADDRESS="$1"
-            ${ciServicePortPrelude}
+            if [ -z "''${SLOT_INFO_JSON:-}" ] || [ ! -x "$SLOT_INFO_JSON" ]; then
+              echo "ERROR: SLOT_INFO_JSON is not available in the snapshot runtime" >&2
+              exit 1
+            fi
 
-            HELIOS_RPC_PORT=$(( ${
-              toString (conf.ports.heliosRpc or 8547)
-            } + env_offset + (slot_value * ${toString conf.slots.stride}) ))
+            slot_info_json="$("$SLOT_INFO_JSON")" || {
+              echo "ERROR: failed to resolve slot/runtime info for snapshot" >&2
+              exit 1
+            }
+
+            POSTGRES_PORT="$(printf '%s' "$slot_info_json" | ${pkgs.jq}/bin/jq -r '.ports.POSTGRES_PORT // empty')"
+            HELIOS_RPC_PORT="$(printf '%s' "$slot_info_json" | ${pkgs.jq}/bin/jq -r '.ports.HELIOS_RPC_PORT // empty')"
+
+            export POSTGRES_PORT
             export HELIOS_RPC_PORT
             export HELIOSRPC_PORT="$HELIOS_RPC_PORT"
 
-            if [ -z "''${POSTGRES_PORT:-}" ]; then
-              echo "ERROR: POSTGRES_PORT is not set after slot initialization" >&2
+            if [ -z "$POSTGRES_PORT" ]; then
+              echo "ERROR: POSTGRES_PORT is not set for snapshot" >&2
               exit 1
             fi
 
             if [ -z "$HELIOS_RPC_PORT" ]; then
-              echo "ERROR: HELIOSRPC_PORT/HELIOS_RPC_PORT is not set after slot initialization" >&2
+              echo "ERROR: HELIOS_RPC_PORT is not set for snapshot" >&2
               exit 1
             fi
+
+            for hook_var in \
+              SVC_POSTGRES_ENSURE \
+              SVC_POSTGRES_STOP \
+              SVC_HELIOS_ENSURE \
+              SVC_HELIOS_STOP
+            do
+              if [ -z "''${!hook_var:-}" ] || [ ! -x "''${!hook_var}" ]; then
+                echo "ERROR: required framework service hook '$hook_var' is unavailable" >&2
+                exit 1
+              fi
+            done
 
             # Keep this app mainnet-only (chain-id 1) to avoid accidental local/reth wiring.
             export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
@@ -740,201 +771,30 @@ in
               exit 1
             fi
 
-            SNAPSHOT_KEEP_RUNNING="0"
-
-            case "''${SERVICE_REUSE_POLICY:-}" in
-              ""|never)
-                ;;
-              same-root|same-slot|cross-run)
-                SNAPSHOT_KEEP_RUNNING="1"
-                ;;
-              *)
-                echo "ERROR: SERVICE_REUSE_POLICY must be one of never|same-root|same-slot|cross-run" >&2
-                exit 1
-                ;;
-            esac
-
-            case "''${SERVICE_OWNER_SCOPE:-}" in
-              ""|ephemeral)
-                ;;
-              persistent)
-                SNAPSHOT_KEEP_RUNNING="1"
-                ;;
-              *)
-                echo "ERROR: SERVICE_OWNER_SCOPE must be one of ephemeral|persistent" >&2
-                exit 1
-                ;;
-            esac
-
-            case "''${SERVICE_DISCOVERY_SCOPE:-}" in
-              ""|local)
-                ;;
-              global)
-                SNAPSHOT_KEEP_RUNNING="1"
-                ;;
-              *)
-                echo "ERROR: SERVICE_DISCOVERY_SCOPE must be one of local|global" >&2
-                exit 1
-                ;;
-            esac
-
-            resolve_helios_bin() {
-              local candidate
-
-              if [ -n "''${HELIOS_BIN:-}" ]; then
-                if [ -x "$HELIOS_BIN" ]; then
-                  printf '%s' "$HELIOS_BIN"
-                  return 0
-                fi
-                echo "ERROR: HELIOS_BIN is set but not executable: $HELIOS_BIN" >&2
-                return 1
-              fi
-
-              if command -v helios >/dev/null 2>&1; then
-                candidate="$(command -v helios)"
-                if [ -x "$candidate" ]; then
-                  printf '%s' "$candidate"
-                  return 0
-                fi
-              fi
-
-              for candidate in /nix/store/*-helios-unstable-*/bin/helios /nix/store/*-helios-*/bin/helios; do
-                if [ ! -x "$candidate" ]; then
-                  continue
-                fi
-                # Skip shell-script shims and prefer real Helios binaries.
-                if ${pkgs.coreutils}/bin/head -c 2 "$candidate" 2>/dev/null | ${pkgs.gnugrep}/bin/grep -q '^#!'; then
-                  continue
-                fi
-                printf '%s' "$candidate"
-                return 0
-              done
-
-              return 1
-            }
-
-            if ! HELIOS_BIN="$(resolve_helios_bin)"; then
-              echo "ERROR: helios binary is unavailable; set HELIOS_BIN or configure modules.helios.package in nixfied/project/conf.nix" >&2
-              exit 1
+            reuse_service_root="$(printf '%s' "$slot_info_json" | ${pkgs.jq}/bin/jq -r '.directories.reuseServiceRoot // .directories.runtimeServiceRoot // empty')"
+            runtime_service_root="$(printf '%s' "$slot_info_json" | ${pkgs.jq}/bin/jq -r '.directories.runtimeServiceRoot // empty')"
+            helios_data_dir_name="''${NIXFIED_SERVICE_HELIOS_DATADIRNAME:-${conf.modules.helios.dataDirName or "helios"}}"
+            helios_root=""
+            helios_log=""
+            helios_pid_file=""
+            if [ -n "$reuse_service_root" ]; then
+              helios_root="$reuse_service_root/$helios_data_dir_name"
+              helios_log="$helios_root/logs/helios.log"
+              helios_pid_file="$helios_root/run/helios.pid"
             fi
-
-            services_root_base="''${TMPDIR:-/tmp}/mfm-portfolio-services"
-            case "''${SERVICE_REUSE_POLICY:-}" in
-              same-slot)
-                services_root="$services_root_base/slot-$env_value-$slot_value"
-                ;;
-              same-root|cross-run)
-                services_root="$services_root_base/shared"
-                ;;
-              ""|never)
-                services_root="$services_root_base/run-$$-$RANDOM"
-                ;;
-              *)
-                echo "ERROR: unsupported SERVICE_REUSE_POLICY=''${SERVICE_REUSE_POLICY:-}" >&2
-                exit 1
-                ;;
-            esac
-
-            postgres_root="$services_root/postgres"
-            postgres_data="$postgres_root/data"
-            postgres_run="$postgres_root/run"
-            postgres_log="$postgres_root/postgres.log"
-            postgres_pid_file="$postgres_data/postmaster.pid"
-
-            helios_root="$services_root/helios"
-            helios_data="$helios_root/data"
-            helios_log="$helios_root/helios.log"
-            helios_pid_file="$helios_root/helios.pid"
-
-            mkdir -p "$postgres_data" "$postgres_run" "$helios_data"
-
-            STARTED_POSTGRES=0
-            STARTED_HELIOS=0
             out_file=""
 
             cleanup_services() {
-              if [ "$SNAPSHOT_KEEP_RUNNING" = "1" ]; then
-                return 0
-              fi
-
-              if [ "$STARTED_HELIOS" = "1" ] && [ -f "$helios_pid_file" ]; then
-                helios_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
-                if [ -n "$helios_pid" ] && kill -0 "$helios_pid" 2>/dev/null; then
-                  kill "$helios_pid" 2>/dev/null || true
-                  for _ in $(seq 1 80); do
-                    if ! kill -0 "$helios_pid" 2>/dev/null; then
-                      break
-                    fi
-                    sleep 0.25
-                  done
-                  kill -KILL "$helios_pid" 2>/dev/null || true
-                fi
-                rm -f "$helios_pid_file"
-              fi
-
-              if [ "$STARTED_POSTGRES" = "1" ] && [ -f "$postgres_pid_file" ]; then
-                ${postgresPackage}/bin/pg_ctl -D "$postgres_data" stop -m fast >/dev/null 2>&1 || true
-              fi
-
               if [ -n "$out_file" ] && [ -f "$out_file" ]; then
                 rm -f "$out_file"
               fi
+
+              if [ -n "$reuse_service_root" ] && [ -n "$runtime_service_root" ] && [ "$reuse_service_root" = "$runtime_service_root" ]; then
+                "$SVC_HELIOS_STOP" >/dev/null 2>&1 || true
+                "$SVC_POSTGRES_STOP" >/dev/null 2>&1 || true
+              fi
             }
             trap cleanup_services EXIT INT TERM
-
-            wait_for_framework_health() {
-              local service="$1"
-              local timeout_secs="$2"
-              local interval_secs="$3"
-              local source_key="''${4:-local}"
-              local health_log="''${TMPDIR:-/tmp}/mfm-''${service}-health.$$.log"
-              local start_ts
-              local now_ts
-
-              case "$timeout_secs" in
-                *[!0-9]*|"")
-                  echo "ERROR: timeout for service '$service' must be integer seconds (got '$timeout_secs')" >&2
-                  return 1
-                  ;;
-              esac
-
-              case "$interval_secs" in
-                *[!0-9.]*|""|*.*.*|.*|*.)
-                  echo "ERROR: interval for service '$service' must be a positive number (got '$interval_secs')" >&2
-                  return 1
-                  ;;
-              esac
-
-              start_ts=$(date +%s)
-
-              while true; do
-                if ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
-                  nix run .#health -- --service "$service" --source "$source_key" >"$health_log" 2>&1; then
-                  rm -f "$health_log"
-                  return 0
-                fi
-
-                now_ts=$(date +%s)
-                if [ $((now_ts - start_ts)) -ge "$timeout_secs" ]; then
-                  echo "ERROR: framework health check failed for service '$service' after $timeout_secs s" >&2
-                  if [ -f "$health_log" ]; then
-                    tail -50 "$health_log" >&2 || true
-                    rm -f "$health_log"
-                  fi
-                  return 1
-                fi
-
-                sleep "$interval_secs"
-              done
-            }
-
-            command_is_real_helios() {
-              local cmd="$1"
-              if [ -z "$cmd" ]; then
-                return 1
-              fi
-              printf '%s\n' "$cmd" | ${pkgs.gnugrep}/bin/grep -Eq '(^|[[:space:]])[^[:space:]]*helios([[:space:]]|$)'
-            }
 
             resolve_listener_pid() {
               ${pkgs.lsof}/bin/lsof -t -nP -iTCP:"$HELIOS_RPC_PORT" -sTCP:LISTEN 2>/dev/null | head -n1 || true
@@ -968,6 +828,7 @@ in
               local interval_secs="$2"
               local start_ts
               local now_ts
+              local managed_helios_pid
               local listener_pid
               local listener_cmd
               local block_json
@@ -993,6 +854,15 @@ in
               start_ts=$(date +%s)
 
               while true; do
+                managed_helios_pid=""
+                if [ -n "$helios_pid_file" ] && [ -f "$helios_pid_file" ]; then
+                  managed_helios_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
+                  if [ -n "$managed_helios_pid" ] && ! kill -0 "$managed_helios_pid" 2>/dev/null; then
+                    echo "ERROR: helios exited before sync completed pid=$managed_helios_pid port=$HELIOS_RPC_PORT" >&2
+                    return 1
+                  fi
+                fi
+
                 listener_pid="$(resolve_listener_pid)"
                 listener_cmd="$(resolve_listener_cmd "$listener_pid")"
 
@@ -1012,7 +882,7 @@ in
                   "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null || true)"
                 syncing_result="$(printf '%s' "$syncing_json" | ${pkgs.jq}/bin/jq -c '.result' 2>/dev/null || true)"
 
-                if command_is_real_helios "$listener_cmd" && [ "$syncing_result" = "false" ] && [ "$block_dec" -gt 1 ]; then
+                if [ "$syncing_result" = "false" ] && [ "$block_dec" -gt 1 ]; then
                   echo "INFO: helios sync ready port=$HELIOS_RPC_PORT pid=$listener_pid block_number=$block_hex syncing=false"
                   return 0
                 fi
@@ -1032,106 +902,18 @@ in
               done
             }
 
-            if ! ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
-              if [ ! -f "$postgres_data/PG_VERSION" ]; then
-                ${postgresPackage}/bin/initdb -D "$postgres_data" -U postgres --no-locale --encoding=UTF8 -A trust >/dev/null
-                cat > "$postgres_data/pg_hba.conf" <<'EOF'
-            # TYPE  DATABASE        USER  ADDRESS       METHOD
-            local   all             all                 trust
-            host    all             all   127.0.0.1/32  trust
-            host    all             all   ::1/128       trust
-            EOF
-              fi
-
-              if [ -f "$postgres_pid_file" ]; then
-                stale_pid="$(head -1 "$postgres_pid_file" 2>/dev/null || true)"
-                if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
-                  rm -f "$postgres_pid_file"
-                fi
-              fi
-
-              ${postgresPackage}/bin/pg_ctl -D "$postgres_data" -l "$postgres_log" -o "-p $POSTGRES_PORT -h 127.0.0.1 -k $postgres_run" start >/dev/null
-              STARTED_POSTGRES=1
-            fi
-
-            if ! wait_for_framework_health "postgres" "30" "1" "local"; then
-              echo "ERROR: postgres failed to become ready port=$POSTGRES_PORT" >&2
-              if [ -f "$postgres_log" ]; then
-                tail -50 "$postgres_log" >&2 || true
-              fi
-              exit 1
-            fi
-
-            ${postgresPackage}/bin/createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres mfm >/dev/null 2>&1 || true
-
-            if ! ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
-              nix run .#ready -- --service postgres --source local >/dev/null 2>&1; then
-              echo "ERROR: postgres failed framework readiness checks port=$POSTGRES_PORT" >&2
-              if [ -f "$postgres_log" ]; then
-                tail -50 "$postgres_log" >&2 || true
-              fi
-              exit 1
-            fi
-
-            existing_listener_pid="$(resolve_listener_pid)"
-            existing_listener_cmd="$(resolve_listener_cmd "$existing_listener_pid")"
-            reuse_helios_listener=0
-
-            if command_is_real_helios "$existing_listener_cmd" && ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-              -H 'content-type: application/json' \
-              --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-              "http://127.0.0.1:$HELIOS_RPC_PORT" \
-              | ${pkgs.jq}/bin/jq -e '.result | strings' >/dev/null 2>&1; then
-              reuse_helios_listener=1
-              echo "INFO: reusing existing helios listener pid=$existing_listener_pid port=$HELIOS_RPC_PORT"
-            fi
-
-            if [ "$reuse_helios_listener" != "1" ]; then
-              if [ -f "$helios_pid_file" ]; then
-                stale_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
-                if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
-                  rm -f "$helios_pid_file"
-                fi
-              fi
-
-              if [ -n "$existing_listener_pid" ] && ! command_is_real_helios "$existing_listener_cmd"; then
-                echo "WARN: replacing non-helios listener on port=$HELIOS_RPC_PORT pid=$existing_listener_pid cmd=$existing_listener_cmd" >&2
-              fi
-
-              if [ -n "$existing_listener_pid" ]; then
-                kill_listener_pid "$existing_listener_pid"
-              fi
-
-              HELIOS_ARGS=(
-                ethereum
-                --network "$HELIOS_NETWORK"
-                --rpc-port "$HELIOS_RPC_PORT"
-                --data-dir "$helios_data"
-                --execution-rpc "$HELIOS_EXECUTION_RPC_URL"
-              )
-
-              if [ -n "''${HELIOS_CONSENSUS_RPC_URL:-}" ]; then
-                HELIOS_ARGS+=(--consensus-rpc "$HELIOS_CONSENSUS_RPC_URL")
-              fi
-
-              if [ -n "''${HELIOS_CHECKPOINT:-}" ]; then
-                HELIOS_ARGS+=(--checkpoint "$HELIOS_CHECKPOINT")
-              fi
-
-              "$HELIOS_BIN" "''${HELIOS_ARGS[@]}" >"$helios_log" 2>&1 &
-              echo "$!" > "$helios_pid_file"
-              STARTED_HELIOS=1
-            fi
+            "$SVC_POSTGRES_ENSURE"
+            "$SVC_HELIOS_ENSURE"
 
             if ! wait_for_helios_mainnet_sync "180" "1"; then
               echo "ERROR: helios failed mainnet sync checks port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
-              if [ -f "$helios_log" ]; then
+              if [ -n "$helios_log" ] && [ -f "$helios_log" ]; then
                 tail -50 "$helios_log" >&2 || true
               fi
               exit 1
             fi
 
-            export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm"
+            export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/${conf.modules.postgres.database or "mfm"}"
             export MFM_EVM_RPC_URL="http://127.0.0.1:$HELIOS_RPC_PORT"
             export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"helios_local\",\"rpc_url\":\"http://127.0.0.1:$HELIOS_RPC_PORT\",\"kind\":\"local\"}]"
             export MFM_EVM_RPC_PREFERRED_ORDER="helios_local"
@@ -1860,7 +1642,30 @@ in
                   fi
                 fi
 
-                ${pkgs.python3}/bin/python3 ${ciHeliosShimScript} "$HELIOS_RPC_PORT" "$HELIOS_EXECUTION_RPC_URL_VALUE" >"$helios_log" 2>&1 &
+                if [ -x "${pkgs.util-linux}/bin/setsid" ]; then
+                  "${pkgs.util-linux}/bin/setsid" \
+                    ${pkgs.python3}/bin/python3 \
+                    ${ciHeliosShimScript} \
+                    "$HELIOS_RPC_PORT" \
+                    "$HELIOS_EXECUTION_RPC_URL_VALUE" \
+                    </dev/null >"$helios_log" 2>&1 &
+                elif command -v setsid >/dev/null 2>&1; then
+                  setsid \
+                    ${pkgs.python3}/bin/python3 \
+                    ${ciHeliosShimScript} \
+                    "$HELIOS_RPC_PORT" \
+                    "$HELIOS_EXECUTION_RPC_URL_VALUE" \
+                    </dev/null >"$helios_log" 2>&1 &
+                elif command -v nohup >/dev/null 2>&1; then
+                  nohup \
+                    ${pkgs.python3}/bin/python3 \
+                    ${ciHeliosShimScript} \
+                    "$HELIOS_RPC_PORT" \
+                    "$HELIOS_EXECUTION_RPC_URL_VALUE" \
+                    </dev/null >"$helios_log" 2>&1 &
+                else
+                  ${pkgs.python3}/bin/python3 ${ciHeliosShimScript} "$HELIOS_RPC_PORT" "$HELIOS_EXECUTION_RPC_URL_VALUE" </dev/null >"$helios_log" 2>&1 &
+                fi
                 echo "$!" > "$helios_pid_file"
               fi
 

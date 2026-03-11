@@ -3,6 +3,7 @@
   model,
   registry,
   projectRoot,
+  serviceRuntime ? { },
 }:
 let
   modelFile = pkgs.writeText "nixfied-model.json" (builtins.toJSON model);
@@ -18,6 +19,7 @@ let
       pkgs
       projectRoot
       model
+      serviceRuntime
       ;
   };
   executorRuntimeShell = import ./executor-runtime.nix { inherit pkgs; };
