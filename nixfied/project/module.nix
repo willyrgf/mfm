@@ -102,10 +102,6 @@ let
   ];
   leanRuntimeInputs = coreRuntimeInputs;
   postgresPackage = conf.modules.postgres.package or pkgs.postgresql_16;
-  heliosPackage = conf.modules.helios.package or null;
-  heliosBinary = if heliosPackage != null then "${heliosPackage}/bin/helios" else "";
-  mfmCliPackage = conf.packages."mfm-cli" or null;
-  mfmCliBinary = if mfmCliPackage != null then "${mfmCliPackage}/bin/mfm_cli" else "";
   minioPackage = conf.modules.minio.package or pkgs.minio;
   minioClientPackage = conf.modules.minio.clientPackage or pkgs.minio-client;
   rethPackage = conf.modules.reth.package or pkgs.reth;
@@ -257,6 +253,68 @@ let
   '';
 
   ciServicePortPrelude = ciRuntime.servicePortPrelude;
+  resolvePackagedMfmCliShell = ''
+    resolve_packaged_mfm_cli_binary() {
+      local flake_root=""
+      local flake_ref=""
+      local out_path=""
+      local bin_path=""
+
+      if [ -n "''${NIXFIED_CALLER_PWD:-}" ] && [ -d "''${NIXFIED_CALLER_PWD:-}" ]; then
+        flake_root="$(cd "$NIXFIED_CALLER_PWD" && pwd -P)"
+      else
+        flake_root="$(pwd -P)"
+      fi
+
+      flake_ref="path:$flake_root"
+      echo "INFO: resolving packaged mfm-cli from $flake_ref#mfm-cli" >&2
+
+      if ! out_path="$(${pkgs.nix}/bin/nix build --no-link --print-out-paths "$flake_ref#mfm-cli")"; then
+        echo "ERROR: failed to resolve packaged mfm-cli from $flake_ref#mfm-cli" >&2
+        return 1
+      fi
+
+      out_path="$(printf '%s\n' "$out_path" | tail -n1)"
+      bin_path="$out_path/bin/mfm_cli"
+      if [ -z "$out_path" ] || [ ! -x "$bin_path" ]; then
+        echo "ERROR: packaged mfm_cli binary missing after build path=$out_path" >&2
+        return 1
+      fi
+
+      printf '%s' "$bin_path"
+    }
+  '';
+  resolvePackagedHeliosShell = ''
+    resolve_packaged_helios_binary() {
+      local flake_root=""
+      local flake_ref=""
+      local out_path=""
+      local bin_path=""
+
+      if [ -n "''${NIXFIED_CALLER_PWD:-}" ] && [ -d "''${NIXFIED_CALLER_PWD:-}" ]; then
+        flake_root="$(cd "$NIXFIED_CALLER_PWD" && pwd -P)"
+      else
+        flake_root="$(pwd -P)"
+      fi
+
+      flake_ref="path:$flake_root"
+      echo "INFO: resolving packaged helios from $flake_ref#helios" >&2
+
+      if ! out_path="$(${pkgs.nix}/bin/nix build --no-link --print-out-paths "$flake_ref#helios")"; then
+        echo "ERROR: failed to resolve packaged helios from $flake_ref#helios" >&2
+        return 1
+      fi
+
+      out_path="$(printf '%s\n' "$out_path" | tail -n1)"
+      bin_path="$out_path/bin/helios"
+      if [ -z "$out_path" ] || [ ! -x "$bin_path" ]; then
+        echo "ERROR: packaged helios binary missing after build path=$out_path" >&2
+        return 1
+      fi
+
+      printf '%s' "$bin_path"
+    }
+  '';
 
   ciParityServiceEnv = ''
     ${ciServicePortPrelude}
@@ -733,8 +791,7 @@ in
                 postgresPackage
                 pkgs.curl
                 pkgs.lsof
-              ]
-              ++ lib.optional (heliosPackage != null) heliosPackage;
+              ];
             allowUnknownArgs = false;
             contractArgs = [
               {
@@ -748,6 +805,7 @@ in
             ];
             command = ''
               set -euo pipefail
+              ${resolvePackagedHeliosShell}
 
               handoff_file=""
               while [ "$#" -gt 0 ]; do
@@ -1018,11 +1076,6 @@ in
                 exit 1
               fi
 
-              if [ -z "${heliosBinary}" ] || [ ! -x "${heliosBinary}" ]; then
-                echo "ERROR: helios binary is unavailable in runtime" >&2
-                exit 1
-              fi
-
               HELIOS_RPC_PORT="$HELIOSRPC_PORT"
               HELIOS_EXECUTION_RPC_URL_VALUE="''${HELIOS_EXECUTION_RPC_URL:-${
                 conf.modules.helios.executionRpcUrl or "https://eth.drpc.org"
@@ -1123,6 +1176,15 @@ in
               else
                 helios_owned=1
 
+                resolved_helios_bin="''${HELIOS_BIN:-}"
+                if [ -z "$resolved_helios_bin" ]; then
+                  resolved_helios_bin="$(resolve_packaged_helios_binary)" || exit 1
+                fi
+                if [ ! -x "$resolved_helios_bin" ]; then
+                  echo "ERROR: helios binary is unavailable in runtime" >&2
+                  exit 1
+                fi
+
                 if [ -f "$helios_pid_file" ]; then
                   stale_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
                   if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
@@ -1151,15 +1213,41 @@ in
 
                 echo "INFO: starting helios port=$HELIOS_RPC_PORT network=$HELIOS_NETWORK execution_rpc=$HELIOS_EXECUTION_RPC_URL_VALUE"
                 if command -v nohup >/dev/null 2>&1; then
-                  nohup "${heliosBinary}" "''${ARGS[@]}" </dev/null >"$helios_log" 2>&1 &
+                  nohup "$resolved_helios_bin" "''${ARGS[@]}" </dev/null >"$helios_log" 2>&1 &
                 else
-                  "${heliosBinary}" "''${ARGS[@]}" </dev/null >"$helios_log" 2>&1 &
+                  "$resolved_helios_bin" "''${ARGS[@]}" </dev/null >"$helios_log" 2>&1 &
                 fi
                 echo "$!" > "$helios_pid_file"
               fi
 
-              if ! NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.ops.ready --service helios --source local; then
-                echo "ERROR: helios failed framework readiness checks port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL_VALUE" >&2
+              helios_ready_timeout_secs="''${HELIOS_READY_TIMEOUT_SECS:-120}"
+              helios_ready_interval_secs="''${HELIOS_READY_INTERVAL_SECS:-1}"
+              helios_ready=0
+              helios_deadline="$(( $(date +%s) + helios_ready_timeout_secs ))"
+              echo "INFO: waiting for snapshot helios readiness port=$HELIOS_RPC_PORT timeout=''${helios_ready_timeout_secs}s interval=''${helios_ready_interval_secs}s"
+              while [ "$(date +%s)" -lt "$helios_deadline" ]; do
+                helios_block_json="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                  -H 'content-type: application/json' \
+                  --data '{"id":1,"jsonrpc":"2.0","method":"eth_blockNumber","params":[]}' \
+                  "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null || true)"
+                helios_block_number="$(printf '%s' "$helios_block_json" | ${pkgs.jq}/bin/jq -r '.result // empty' 2>/dev/null || true)"
+                if [ -n "$helios_block_number" ] && echo "$helios_block_number" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]+$'; then
+                  helios_syncing_result="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                    -H 'content-type: application/json' \
+                    --data '{"id":1,"jsonrpc":"2.0","method":"eth_syncing","params":[]}' \
+                    "http://127.0.0.1:$HELIOS_RPC_PORT" \
+                    | ${pkgs.jq}/bin/jq -c '.result' 2>/dev/null || true)"
+                  if [ "$helios_syncing_result" = "false" ]; then
+                    echo "OK: snapshot helios ready port=$HELIOS_RPC_PORT block_number=$helios_block_number"
+                    helios_ready=1
+                    break
+                  fi
+                fi
+                sleep "$helios_ready_interval_secs"
+              done
+
+              if [ "$helios_ready" -ne 1 ]; then
+                echo "ERROR: helios failed snapshot readiness checks port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL_VALUE" >&2
                 if [ -f "$helios_log" ]; then
                   tail -50 "$helios_log" >&2 || true
                 fi
@@ -1402,10 +1490,11 @@ in
             kind = "internal";
             summary = "Run the packaged snapshot CLI";
             description = "Internal task that runs the packaged mfm_cli binary and writes the raw JSON result file.";
-            runtimeInputs = leanRuntimeInputs ++ lib.optional (mfmCliPackage != null) mfmCliPackage;
+            runtimeInputs = leanRuntimeInputs;
             allowUnknownArgs = false;
             command = ''
               set -euo pipefail
+              ${resolvePackagedMfmCliShell}
 
               if [ "$#" -ne 0 ]; then
                 echo "ERROR: task.mfm.portfolio.snapshot.exec does not accept arguments" >&2
@@ -1432,10 +1521,7 @@ in
                 exit 1
               fi
 
-              if [ -z "${mfmCliBinary}" ] || [ ! -x "${mfmCliBinary}" ]; then
-                echo "ERROR: packaged mfm_cli binary is unavailable in runtime" >&2
-                exit 1
-              fi
+              mfm_cli_bin="$(resolve_packaged_mfm_cli_binary)" || exit 1
 
               HELIOS_RPC_PORT="$HELIOSRPC_PORT"
               export HELIOS_RPC_PORT
@@ -1446,7 +1532,7 @@ in
               export MFM_EVM_RPC_SOURCE_ID="helios_local"
 
               echo "INFO: launching packaged mfm_cli portfolio snapshot address=$MFM_SNAPSHOT_ADDRESS chain_id=1 rpc=$MFM_EVM_RPC_URL"
-              "${mfmCliBinary}" --output-format json portfolio snapshot "$MFM_SNAPSHOT_ADDRESS" --chain-id 1 >"$MFM_SNAPSHOT_RESULT_FILE"
+              "$mfm_cli_bin" --output-format json portfolio snapshot "$MFM_SNAPSHOT_ADDRESS" --chain-id 1 >"$MFM_SNAPSHOT_RESULT_FILE"
             '';
           }
           // {
@@ -1615,18 +1701,16 @@ in
             "nix run .#mfm_cli -- --help"
             "nix run .#mfm_cli -- keystore list"
           ];
-          runtimeInputs = leanRuntimeInputs ++ lib.optional (mfmCliPackage != null) mfmCliPackage;
+          runtimeInputs = leanRuntimeInputs;
           argParser = "passthrough";
           allowUnknownArgs = true;
           command = ''
             set -euo pipefail
+            ${resolvePackagedMfmCliShell}
 
-            if [ -z "${mfmCliBinary}" ] || [ ! -x "${mfmCliBinary}" ]; then
-              echo "ERROR: packaged mfm_cli binary is unavailable in runtime" >&2
-              exit 1
-            fi
+            mfm_cli_bin="$(resolve_packaged_mfm_cli_binary)" || exit 1
 
-            exec "${mfmCliBinary}" "$@"
+            exec "$mfm_cli_bin" "$@"
           '';
         };
 
@@ -2659,10 +2743,11 @@ in
               "ci"
               "mainnet"
             ];
-            runtimeInputs = leanRuntimeInputs ++ lib.optional (mfmCliPackage != null) mfmCliPackage;
+            runtimeInputs = leanRuntimeInputs;
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
+              ${resolvePackagedMfmCliShell}
 
               address="''${MFM_CI_MAINNET_ADDRESS:-0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045}"
               log_file="$artifacts_dir/mainnet-portfolio-snapshot.log"
@@ -2678,21 +2763,22 @@ in
 
               echo "INFO: running ci step=mainnet-portfolio-snapshot-helios address=$address"
 
-              if [ -z "${mfmCliBinary}" ] || [ ! -x "${mfmCliBinary}" ]; then
-                echo "ERROR: packaged mfm_cli binary is unavailable in runtime" >&2
-                exit 1
-              fi
+              run_packaged_mfm_cli_snapshot() {
+                local mfm_cli_bin=""
+                mfm_cli_bin="$(resolve_packaged_mfm_cli_binary)" || return 1
+                "$mfm_cli_bin" --output-format json portfolio snapshot "$address" --chain-id 1
+              }
 
               mode="$(printf '%s' "''${OUTPUT_MODE:-stdout}" | tr '[:upper:]' '[:lower:]')"
               case "$mode" in
                 logs)
-                  "${mfmCliBinary}" --output-format json portfolio snapshot "$address" --chain-id 1 >"$out_file" 2>"$log_file"
+                  run_packaged_mfm_cli_snapshot >"$out_file" 2>"$log_file"
                   ;;
                 stdout|both|"")
-                  "${mfmCliBinary}" --output-format json portfolio snapshot "$address" --chain-id 1 > >(tee "$out_file") 2> >(tee "$log_file" >&2)
+                  run_packaged_mfm_cli_snapshot > >(tee "$out_file") 2> >(tee "$log_file" >&2)
                   ;;
                 *)
-                  "${mfmCliBinary}" --output-format json portfolio snapshot "$address" --chain-id 1 >"$out_file" 2>"$log_file"
+                  run_packaged_mfm_cli_snapshot >"$out_file" 2>"$log_file"
                   ;;
               esac
 

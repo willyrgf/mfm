@@ -29,10 +29,8 @@ let
   heliosPackage =
     if pkgs == null then
       null
-    else if pkgs ? helios then
-      pkgs.helios
     else
-      null;
+      pkgs.callPackage ../framework/runtime/services/helios/package.nix { };
 in
 rec {
   project = {
@@ -355,6 +353,7 @@ rec {
       { }
     else
       {
+        helios = modules.helios.package;
         "mfm-cli" = pkgs.rustPlatform.buildRustPackage rec {
           pname = "mfm-cli";
           version = "0.1.29";
