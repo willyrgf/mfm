@@ -1,4 +1,9 @@
-{ lib, pkgs, ... }:
+{
+  lib,
+  pkgs,
+  frameworkSourceRevision,
+  ...
+}:
 let
   conf = import ./conf.nix { inherit pkgs; };
   project = conf.project;
@@ -12,14 +17,6 @@ let
 
   envNames = builtins.attrNames conf.envs;
   envOffsets = lib.mapAttrs (_: value: value.offset or 0) conf.envs;
-
-  thinWrapperFlake = import ../install/wrapper-flake.nix {
-    frameworkInput = "github:willyrgf/nixfied";
-  };
-
-  vendoredWrapperFlake = import ../install/wrapper-flake.nix {
-    vendorPath = "./nixfied";
-  };
 
   commonRuntimeInputs = [
     pkgs.bash
@@ -378,6 +375,7 @@ let
     {
       id,
       appName,
+      ownerFile ? null,
       summary,
       description ? "",
       command ? "",
@@ -482,6 +480,7 @@ let
       ui.app = {
         expose = true;
         name = appName;
+        inherit ownerFile;
         category = "core";
         usage = usage;
         examples = examples;
@@ -506,6 +505,14 @@ let
         envPresent = [ ];
       };
     };
+
+  frameworkInstallPreset = import ../framework/presets/install.nix {
+    inherit
+      mkCommandTask
+      pkgs
+      frameworkSourceRevision
+      ;
+  };
 in
 {
   imports = [
@@ -649,7 +656,8 @@ in
         ready.enable = true;
       };
 
-      tasks = {
+      tasks =
+        {
         dev = mkCommandTask {
           id = "task.dev";
           appName = "dev";
@@ -2533,95 +2541,8 @@ in
           '';
         };
 
-        framework-install = mkCommandTask {
-          id = "task.framework.install";
-          appName = "framework::install";
-          kind = "utility";
-          summary = "Install thin wrapper flake";
-          description = "Creates a thin wrapper flake by default, or vendored wrapper with --vendor.";
-          runtimeInputs = [
-            pkgs.coreutils
-            pkgs.findutils
-            pkgs.gnused
-          ];
-          usage = [
-            "nix run .#framework::install"
-            "nix run .#framework::install -- --vendor"
-          ];
-          command = ''
-            set -euo pipefail
-
-            source_root="${builtins.toString ../.}"
-            target="."
-            vendor=0
-
-            while [ "$#" -gt 0 ]; do
-              case "$1" in
-                --vendor)
-                  vendor=1
-                  shift
-                  ;;
-                --target)
-                  if [ "$#" -lt 2 ]; then
-                    echo "ERROR: --target requires a value"
-                    exit 2
-                  fi
-                  target="$2"
-                  shift 2
-                  ;;
-                *)
-                  echo "ERROR: unknown argument '$1'"
-                  exit 2
-                  ;;
-              esac
-            done
-
-            mkdir -p "$target"
-
-            if [ "$vendor" -eq 1 ]; then
-              if [ -e "$target/nixfied" ]; then
-                chmod -R u+w "$target/nixfied" 2>/dev/null || true
-                rm -rf "$target/nixfied"
-              fi
-              mkdir -p "$target/nixfied"
-              cp -R "$source_root/." "$target/nixfied"
-              chmod -R u+w "$target/nixfied" 2>/dev/null || true
-              rm -rf "$target/nixfied/.git"
-              rm -f "$target/nixfied/result"
-              cat > "$target/flake.nix" <<'NIXFIED_WRAPPER'
-            ${vendoredWrapperFlake}
-            NIXFIED_WRAPPER
-              echo "OK: vendored wrapper flake generated at $target/flake.nix"
-            else
-              cat > "$target/flake.nix" <<'NIXFIED_WRAPPER'
-            ${thinWrapperFlake}
-            NIXFIED_WRAPPER
-              echo "OK: thin wrapper flake generated at $target/flake.nix"
-            fi
-          '';
-        };
-
-        framework-upgrade = mkCommandTask {
-          id = "task.framework.upgrade";
-          appName = "framework::upgrade";
-          kind = "utility";
-          summary = "Upgrade framework bundle in-place";
-          description =
-            "Upgrades the Nixfied framework in-place while preserving nixfied/project and nixfied/local by default.";
-          runtimeInputs = [
-            pkgs.nix
-          ];
-          usage = [
-            "nix run .#framework::upgrade"
-            "nix run .#framework::upgrade -- --force"
-            "nix run .#framework::upgrade -- --reset-project"
-          ];
-          command = ''
-            set -euo pipefail
-            exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#framework::upgrade --refresh -- "$@"
-          '';
-        };
-      };
+      }
+      // frameworkInstallPreset.tasks;
 
       workflows = {
         ci-basic = {
