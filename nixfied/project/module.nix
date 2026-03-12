@@ -520,14 +520,6 @@ let
       conf
       mkCommandTask
       ;
-    ciModes = [
-      "basic"
-      "audit"
-      "parity"
-      "full"
-      "mainnet"
-    ];
-    modeExample = "parity";
   };
   frameworkSelfhostPreset = import ../framework/presets/selfhost.nix {
     inherit

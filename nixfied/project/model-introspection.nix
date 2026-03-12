@@ -3,7 +3,7 @@ let
   flake = builtins.getFlake (toString root);
   system = builtins.currentSystem;
   pkgs = import flake.inputs.nixpkgs { inherit system; };
-  nixfiedLib = import ../../nixfied/lib/default.nix { inherit pkgs system; };
+  nixfiedLib = import ../../nixfied/framework/core/default.nix { inherit pkgs system; };
   compiled = nixfiedLib.mkNixfied {
     projectRoot = root;
     projectModules = [ ../../nixfied/project/default.nix ];
