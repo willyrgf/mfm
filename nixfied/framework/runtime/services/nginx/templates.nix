@@ -1,8 +1,11 @@
 # Nginx configuration templates with production-hardened defaults
-{ pkgs }:
+{
+  pkgs,
+  package ? pkgs.nginx,
+}:
 
 let
-  nginx = pkgs.nginx;
+  nginx = package;
 
   nginxConfTemplate = pkgs.writeText "nginx.conf.template" ''
     worker_processes auto;

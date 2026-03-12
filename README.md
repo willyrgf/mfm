@@ -101,13 +101,13 @@ nix run .#ci -- --mode <mode> --summary
 
 ### Contract notes:
 
-- Service hooks (for example `run_hook MINIO_START`) and service apps (for example `nix run .#service::minio::start`) share the same launcher path and argument/slot-env enforcement.
+- Framework service hooks and model-level service tasks share the same launcher/runtime policy path, but this repo does not currently expose public `service::*::start` apps.
 - Local supervisor wrappers in `nixfied/local/default.nix` (`up`, `down`, `svc-*`) are intentional prod-only overrides.
-- `mfm_cli` is the compatibility passthrough wrapper; `mfm_rest_api`/`svc-*` now use strict typed contracts.
-- `mfm::portfolio::snapshot` is restored as a strict json app that orchestrates Postgres + Helios and emits raw `mfm_cli` JSON payloads.
+- `mfm_cli` is the compatibility passthrough wrapper over the packaged `mfm-cli` binary; `mfm_rest_api`/`svc-*` now use strict typed contracts.
+- `mfm::portfolio::snapshot` is a strict json app that owns stdout, delegates sequencing to `workflow.mfm.portfolio.snapshot`, and emits validated raw `mfm_cli` JSON payloads.
 - `nix run .#help` lists exposed core apps; invoke `mfm::portfolio::snapshot` directly by name.
 - CI help/docs metadata comes from `nixfied/project/ci.nix` at `commands.ci.api`, and is mirrored into `apps.<system>.ci.meta.nixfied.api`.
-- Project scripts should prefer framework policy helpers (for example `start_service_should_register_cleanup`) over duplicating `SERVICE_*` policy matrix logic.
+- Project scripts should prefer framework policy helpers and `task.ops.ready`/`task.ops.health` surfaces over duplicating service policy or readiness logic.
 - `nix run .#dev` intentionally uses `start_service ... --cleanup` for deterministic teardown.
 
 ### Reliability improvements:
@@ -131,17 +131,18 @@ nix run .#ci -- --mode <mode> --summary
   - `nix run .#process::stop -- --run-id <id>`
   - `nix run .#process::stop -- --run-id <id> --scope slot-env`
   - `nix run .#process::stop -- --run-id <id> --dry-run`
-- Service diagnostics:
-  - `nix run .#service::postgres::events -- --limit 100`
-  - `nix run .#service::postgres::log -- --lines 200`
-  - `nix run .#service::helios::events -- --limit 100`
+- Service model surfaces:
+  - `nix run .#services`
+  - `nix run .#ready -- --service postgres --source local`
+  - `nix run .#ready -- --service helios --source local`
+  - `nix run .#health -- --service all`
 - Policy controls (optional overrides):
   - `SERVICE_REUSE_POLICY=never|same-root|same-slot|cross-run`
   - `SERVICE_OWNER_SCOPE=ephemeral|persistent`
   - `SERVICE_DISCOVERY_SCOPE=local|global`
 - Migration note:
   - `MFM_KEEP_SERVICES` has been removed from `mfm::portfolio::snapshot`.
-  - Start reusable services explicitly via `service::*::start`, then inspect ownership with `process::status`.
+  - Preserve or tear down snapshot-managed services via `SERVICE_*` policy envs on `mfm::portfolio::snapshot`; the underlying workflow and lifecycle tasks are internal.
 
 ### Run binaries:
 

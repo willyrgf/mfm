@@ -13,25 +13,30 @@ export HELIOS_NETWORK=mainnet
 nix run .#mfm::portfolio::snapshot -- <ADDRESS>
 ```
 
-If you want flake evaluation to reuse an already cached real Helios package from
-`/nix/store`, use `--impure`:
+The public wrapper lives in `nixfied/project/module.nix` as `task.mfm.portfolio.snapshot`.
+It owns stdout and delegates sequencing to the internal workflow:
 
-```bash
-nix run --impure .#mfm::portfolio::snapshot -- <ADDRESS>
-```
+- `workflow.mfm.portfolio.snapshot`
 
-The wrapper is implemented in `nixfied/project/module.nix` (`task.mfm.portfolio.snapshot`) and enforces:
+That workflow currently composes hidden implementation tasks:
+
+- `task.mfm.portfolio.services-start`
+- `task.mfm.portfolio.snapshot.exec`
+- `task.mfm.portfolio.services-stop`
+
+The public task remains the stdout authority. It enforces:
 
 - exactly one positional address argument
 - defaults `HELIOS_NETWORK` to `mainnet` and rejects non-mainnet values
-- fallback `HELIOS_EXECUTION_RPC_URL=https://eth.drpc.org` when unset
-- fallback `HELIOS_CONSENSUS_RPC_URL=https://lodestar-mainnet.chainsafe.io` when unset
-- runtime Helios binary resolution via `HELIOS_BIN`, `PATH`, or cached real
-  `/nix/store/*-helios-unstable-*/bin/helios`
-- Postgres + Helios lifecycle orchestration with reuse policy envs
-- Helios readiness gating via framework `health` polling + `ready` checks
-  using local Helios RPC plus execution endpoint resolution
-- raw `mfm_cli` JSON output only on stdout (`--output-format json`)
+- Postgres + Helios lifecycle orchestration with `SERVICE_*` policy envs
+- workflow sequencing with preflight, service start, packaged CLI execution, and always-run teardown
+- validated `mfm_cli --output-format json` output only on stdout
+
+The wrapper validates the JSON envelope before replaying it to the original stdout:
+
+- `.status == "success"`
+- `.data.feature_id == "portfolio.snapshot"`
+- `.data.result` exists
 
 Framework-level service checks are also available:
 
@@ -51,19 +56,25 @@ nix run .#health -- --service helios --source local
 
 Legacy `MFM_KEEP_SERVICES` is rejected.
 
+The helper tasks are internal implementation details. This repo does not expose
+public `service::*::start` apps for Postgres or Helios.
+
 ## Runtime Environment
 
 Important Helios env vars:
 
 - `HELIOS_NETWORK`
-- `HELIOS_BIN`
 - `HELIOS_EXECUTION_RPC_URL`
 - `HELIOS_CONSENSUS_RPC_URL`
 - `HELIOS_CHECKPOINT`
 - `HELIOS_READY_TIMEOUT_SECS`
 - `HELIOS_READY_INTERVAL_SECS`
 
-Runtime routing exported by the wrapper:
+Model-derived executor env uses `HELIOSRPC_PORT`. Internal snapshot tasks export
+`HELIOS_RPC_PORT` locally only where Helios process wiring or CLI routing still
+expects that alias.
+
+Runtime routing reconstructed inside `task.mfm.portfolio.snapshot.exec`:
 
 - `DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm`
 - `MFM_EVM_RPC_URL=http://127.0.0.1:$HELIOS_RPC_PORT`
@@ -71,6 +82,14 @@ Runtime routing exported by the wrapper:
   - `MFM_EVM_RPC_SOURCES_JSON`
   - `MFM_EVM_RPC_PREFERRED_ORDER=helios_local`
   - `MFM_EVM_RPC_SOURCE_ID=helios_local`
+
+Secret-bearing env is reconstructed per task and is not persisted in the
+services handoff file. The handoff JSON stores only non-secret ownership and
+path metadata needed for teardown.
+
+`mfm_cli` is no longer launched via `cargo run` from the snapshot path. It is
+packaged once through `conf.packages."mfm-cli"` and reused by both
+`nix run .#mfm_cli` and `task.mfm.portfolio.snapshot.exec`.
 
 ## Project Wiring
 
@@ -80,15 +99,14 @@ Canonical service metadata now lives in `nixfied/project/conf.nix` under `servic
 
 - `services.helios` in `nixfied/project/module.nix` is sourced from `conf.services.helios` (with module fallbacks).
 - `modules.helios.package` defaults to `pkgs.helios` when available.
-- When `pkgs.helios` is unavailable, project config reuses an already cached
-  real Helios `-helios-unstable-*` store package when present.
-  Plain pure flake evaluation cannot inspect `/nix/store`, so this cached-package
-  fallback only applies under `nix ... --impure`.
 - The local source is explicitly marked `real`, and framework readiness uses the `strict`
   profile so `ready -- --service helios --source local` rejects shim or unknown source kinds.
 
-`mfm::portfolio::snapshot` now reuses framework `ready/health` for Helios.
-Execution endpoint checks resolve in this order:
+`task.mfm.portfolio.services-start` currently remains the coarse lifecycle task.
+It reuses framework `task.ops.ready` for both Postgres and Helios, while the
+public wrapper keeps stdout clean and the internal workflow manages sequencing.
+
+Execution endpoint inputs resolve in this order:
 
 1. `HELIOS_EXECUTION_RPC_URL` (environment override)
 2. `services.helios.executionRpcUrl` (project config)

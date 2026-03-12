@@ -25,7 +25,10 @@ let
   dataDirName = config.dataDirName or "nginx";
   nginxDirExpr = slots.getServiceDir dataDirName;
 
-  templates = import ./templates.nix { inherit pkgs; };
+  templates = import ./templates.nix {
+    inherit pkgs;
+    package = config.package or pkgs.nginx;
+  };
   lifecycle = import ./lifecycle.nix {
     inherit
       pkgs

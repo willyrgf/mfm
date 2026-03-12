@@ -512,6 +512,8 @@ let
       command,
       runtimeInputs ? [ ],
       contractArgs ? [ ],
+      usage ? [ "nix run .#${appName}" ],
+      examples ? [ ],
     }:
     {
       inherit
@@ -584,8 +586,8 @@ let
         expose = true;
         name = appName;
         category = "ops";
-        usage = [ "nix run .#${appName}" ];
-        examples = [ ];
+        usage = usage;
+        examples = examples;
         ownerFile = "nixfied/modules/operations.nix";
       };
     };
@@ -853,10 +855,20 @@ in
           postgres, nginx (http+https), minio (api+console),
           reth (http+ws+auth), and helios (rpc+execution).
           Optional selectors: --service <name|all> and --source <key>.
+          One service selector is accepted per invocation.
         '';
         command = healthScript;
         runtimeInputs = serviceProbeRuntimeInputs;
         contractArgs = serviceSelectionContractArgs;
+        usage = [
+          "nix run .#health"
+          "nix run .#health -- --service postgres"
+          "nix run .#health -- --service helios --source real"
+        ];
+        examples = [
+          "nix run .#health -- --service postgres"
+          "nix run .#health -- --service helios --source real"
+        ];
       };
     })
 
@@ -870,10 +882,20 @@ in
           postgres, nginx (http+https), minio (api+console),
           reth (http+ws+auth), and helios (rpc+execution).
           Optional selectors: --service <name|all> and --source <key>.
+          One service selector is accepted per invocation.
         '';
         command = readyScript;
         runtimeInputs = serviceProbeRuntimeInputs;
         contractArgs = serviceSelectionContractArgs;
+        usage = [
+          "nix run .#ready"
+          "nix run .#ready -- --service postgres"
+          "nix run .#ready -- --service helios --source real"
+        ];
+        examples = [
+          "nix run .#ready -- --service postgres"
+          "nix run .#ready -- --service helios --source real"
+        ];
       };
     })
   ];

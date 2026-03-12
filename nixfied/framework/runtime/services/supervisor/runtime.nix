@@ -13,6 +13,26 @@ let
   slotEnvRuntime = import ../../helpers/slot-env-runtime.nix { inherit pkgs; };
   ports = project.ports or { };
   portNames = builtins.attrNames ports;
+  orphanCleanupBody =
+    if portNames == [ ] then
+      ":"
+    else
+      pkgs.lib.concatMapStringsSep "\n" (
+        name:
+        let
+          portVar = slots.portVarName name;
+        in
+        ''
+          PORT="''${${portVar}:-}"
+          if [ -n "$PORT" ] && command -v lsof >/dev/null 2>&1; then
+            ORPHANS=$(lsof -ti:"$PORT" 2>/dev/null || true)
+            if [ -n "$ORPHANS" ]; then
+              log_info "Cleaning orphan processes on port $PORT (${name}): $ORPHANS"
+              echo "$ORPHANS" | xargs kill -TERM 2>/dev/null || true
+            fi
+          fi
+        ''
+      ) portNames;
 
   slotPrelude = ''
     ${slotEnvRuntime.loadJsonFromCommand {
@@ -114,22 +134,7 @@ let
     }
 
     supervisor_cleanup_orphans() {
-      ${pkgs.lib.concatMapStringsSep "\n" (
-        name:
-        let
-          portVar = slots.portVarName name;
-        in
-        ''
-          PORT="''${${portVar}:-}"
-          if [ -n "$PORT" ] && command -v lsof >/dev/null 2>&1; then
-            ORPHANS=$(lsof -ti:"$PORT" 2>/dev/null || true)
-            if [ -n "$ORPHANS" ]; then
-              log_info "Cleaning orphan processes on port $PORT (${name}): $ORPHANS"
-              echo "$ORPHANS" | xargs kill -TERM 2>/dev/null || true
-            fi
-          fi
-        ''
-      ) portNames}
+      ${orphanCleanupBody}
     }
 
     supervisor_clear_state() {

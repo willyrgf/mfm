@@ -350,5 +350,37 @@ rec {
     };
   };
 
-  packages = { };
+  packages =
+    if pkgs == null then
+      { }
+    else
+      {
+        "mfm-cli" = pkgs.rustPlatform.buildRustPackage rec {
+          pname = "mfm-cli";
+          version = "0.1.29";
+
+          src = ../..;
+          cargoLock.lockFile = ../../Cargo.lock;
+
+          cargoBuildFlags = [
+            "-p"
+            "mfm"
+            "--bin"
+            "mfm_cli"
+          ];
+
+          cargoTestFlags = cargoBuildFlags;
+          doCheck = false;
+
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = if pkgs.stdenv.isDarwin then [ pkgs.libiconv ] else [ ];
+
+          meta = with pkgs.lib; {
+            description = "Packaged MFM CLI binary";
+            mainProgram = "mfm_cli";
+            license = licenses.mit;
+            platforms = platforms.unix;
+          };
+        };
+      };
 }

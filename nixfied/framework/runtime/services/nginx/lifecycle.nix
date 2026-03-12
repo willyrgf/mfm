@@ -10,6 +10,7 @@
 
 let
   serviceScripts = import ../../helpers/managed-service-lifecycle.nix { inherit pkgs; };
+  probeCommands = import ../../helpers/probe-commands.nix { inherit pkgs; };
   slotEnvRuntime = import ../../helpers/slot-env-runtime.nix { inherit pkgs; };
   runtimeEvents = import ../../helpers/runtime-events.nix { inherit pkgs project; };
   observability = import ../../helpers/service-observability.nix {
