@@ -513,6 +513,28 @@ let
       frameworkSourceRevision
       ;
   };
+  frameworkTestPreset = import ../framework/presets/framework-test.nix {
+    inherit
+      lib
+      pkgs
+      conf
+      mkCommandTask
+      ;
+    ciModes = [
+      "basic"
+      "audit"
+      "parity"
+      "full"
+      "mainnet"
+    ];
+    modeExample = "parity";
+  };
+  frameworkSelfhostPreset = import ../framework/presets/selfhost.nix {
+    inherit
+      mkCommandTask
+      commonRuntimeInputs
+      ;
+  };
 in
 {
   imports = [
@@ -2076,475 +2098,13 @@ in
             ui.app.expose = false;
           };
 
-        framework-test = mkCommandTask {
-          id = "task.framework.test";
-          appName = "framework::test";
-          kind = "utility";
-          summary = "Run framework validation shards";
-          description = ''
-            Runs deterministic framework validation shards.
-          '';
-          runtimeInputs = rustRuntimeInputs;
-          usage = [
-            "nix run .#framework::test"
-            "nix run .#framework::test -- --summary"
-            "nix run .#framework::test -- --mode parity --summary"
-          ];
-          examples = [
-            "nix run .#framework::test -- --list-shards"
-            "nix run .#framework::test -- --shard workflow-ci"
-            "FRAMEWORK_ISOLATION=1 nix run .#framework::test -- --summary"
-          ];
-          contractArgs = [
-            {
-              name = "summary";
-              kind = "flag";
-              long = "--summary";
-              description = "Print compact summary output.";
-            }
-            {
-              name = "summary-json";
-              kind = "option";
-              long = "--summary-json";
-              type = "string";
-              description = "Write summary JSON to a file.";
-            }
-            {
-              name = "shard";
-              kind = "option";
-              long = "--shard";
-              type = "string";
-              values = [
-                "flake-check"
-                "help"
-                "workflow-test"
-                "workflow-ci"
-                "workflow-mode-valid"
-                "workflow-mode-invalid"
-                "workflow-mode-dotted-shorthand"
-                "isolation"
-              ];
-              description = "Run one shard only.";
-            }
-            {
-              name = "list-shards";
-              kind = "flag";
-              long = "--list-shards";
-              description = "List available shards and exit.";
-            }
-            {
-              name = "mode";
-              kind = "option";
-              long = "--mode";
-              type = "string";
-              description = "CI workflow mode used by the workflow-ci shard.";
-            }
-          ];
-          command = ''
-            set -euo pipefail
-
-            ROOT="$(pwd -P)"
-            MODEL_INTROSPECTION_FILE="$ROOT/nixfied/project/model-introspection.nix"
-            MODE="full"
-            SHARD=""
-            LIST_SHARDS=0
-            SUMMARY=0
-            SUMMARY_JSON=""
-            SHARDS=(
-              "flake-check"
-              "help"
-              "workflow-test"
-              "workflow-ci"
-              "workflow-mode-valid"
-              "workflow-mode-invalid"
-              "workflow-mode-dotted-shorthand"
-              "isolation"
-            )
-            EXECUTED=0
-            STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            START_EPOCH="$(date +%s)"
-
-            log_info() {
-              printf 'INFO: %s\n' "$*"
-            }
-
-            log_error() {
-              printf 'ERROR: %s\n' "$*" >&2
-            }
-
-            log_ok() {
-              printf 'OK: %s\n' "$*"
-            }
-
-            log_skip() {
-              printf 'SKIP: %s\n' "$*"
-            }
-
-            usage() {
-              cat <<'USAGE'
-            Usage: nix run .#framework::test [-- --mode <mode>] [--summary] [--summary-json <path>] [--shard <name>] [--list-shards]
-
-            Shards:
-              flake-check   Run nix flake check for the current project root.
-              help          Validate generated help output.
-              workflow-test Run the test app surface.
-              workflow-ci   Run the ci app surface in selected mode.
-              workflow-mode-valid             Validate a model-derived CI mode via --mode.
-              workflow-mode-invalid           Validate unknown mode handling and expected-mode output.
-              workflow-mode-dotted-shorthand Validate dotted shorthand flags are rejected.
-              isolation     Run isolation checks when FRAMEWORK_ISOLATION=1 or explicitly selected.
-            USAGE
-            }
-
-            print_shards() {
-              local shard_name
-              for shard_name in "''${SHARDS[@]}"; do
-                printf '%s\n' "$shard_name"
-              done
-            }
-
-            shard_exists() {
-              local candidate="$1"
-              local shard_name
-              for shard_name in "''${SHARDS[@]}"; do
-                if [ "$candidate" = "$shard_name" ]; then
-                  return 0
-                fi
-              done
-              return 1
-            }
-
-            list_ci_modes() {
-              if [ -n "''${CI_MODES_CACHE:-}" ]; then
-                printf '%s\n' "$CI_MODES_CACHE"
-                return 0
-              fi
-
-              if [ ! -f "$MODEL_INTROSPECTION_FILE" ]; then
-                log_error "missing model introspection file: $MODEL_INTROSPECTION_FILE"
-                return 1
-              fi
-
-              CI_MODES_CACHE="$(
-                nix eval --impure --json --file "$MODEL_INTROSPECTION_FILE" \
-                  | jq -r ".ciModes[]?"
-              )"
-              if [ -z "$CI_MODES_CACHE" ]; then
-                log_error "unable to derive workflow.ci modes from compiled model"
-                return 1
-              fi
-
-              printf '%s\n' "$CI_MODES_CACHE"
-            }
-
-            ci_mode_choices() {
-              local mode_name expected=""
-              while IFS= read -r mode_name; do
-                if [ -z "$mode_name" ]; then
-                  continue
-                fi
-                if [ -z "$expected" ]; then
-                  expected="$mode_name"
-                else
-                  expected="$expected|$mode_name"
-                fi
-              done < <(list_ci_modes)
-              printf '%s' "$expected"
-            }
-
-            mode_exists() {
-              local candidate="$1"
-              local mode_name
-              while IFS= read -r mode_name; do
-                if [ "$candidate" = "$mode_name" ]; then
-                  return 0
-                fi
-              done < <(list_ci_modes)
-              return 1
-            }
-
-            first_ci_mode() {
-              if mode_exists "mainnet"; then
-                printf '%s\n' "mainnet"
-                return 0
-              fi
-              if mode_exists "basic"; then
-                printf '%s\n' "basic"
-                return 0
-              fi
-              list_ci_modes | head -n 1
-            }
-
-            write_summary_json() {
-              local rc="$1"
-              local finished_at duration
-              finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-              duration="$(( $(date +%s) - START_EPOCH ))"
-              mkdir -p "$(dirname "$SUMMARY_JSON")"
-              cat > "$SUMMARY_JSON" <<JSON
-            {
-              "mode": "$MODE",
-              "shard": $(if [ -n "$SHARD" ]; then printf '"%s"' "$SHARD"; else printf 'null'; fi),
-              "executed_shards": $EXECUTED,
-              "exit_code": $rc,
-              "duration_seconds": $duration,
-              "started_at": "$STARTED_AT",
-              "finished_at": "$finished_at"
-            }
-            JSON
-              log_info "wrote summary json path=$SUMMARY_JSON"
-            }
-
-            run_shard() {
-              local shard_name="$1"
-              shift
-              log_info "running shard=$shard_name"
-              if "$@"; then
-                EXECUTED="$((EXECUTED + 1))"
-                log_ok "shard passed name=$shard_name"
-                return 0
-              fi
-              local rc
-              rc=$?
-              log_error "shard failed name=$shard_name rc=$rc"
-              return "$rc"
-            }
-
-            shard_flake_check() {
-              nix flake check "path:$ROOT"
-            }
-
-            shard_help() {
-              nix run "path:$ROOT"#help >/dev/null
-            }
-
-            shard_workflow_test() {
-              nix run "path:$ROOT"#test
-            }
-
-            shard_workflow_ci() {
-              nix run "path:$ROOT"#ci -- --mode "$MODE" --summary
-            }
-
-            shard_workflow_mode_valid() {
-              local derived_mode
-              derived_mode="$(first_ci_mode)"
-              if [ -z "$derived_mode" ]; then
-                log_error "no model-derived workflow.ci mode found"
-                return 1
-              fi
-              nix run "path:$ROOT"#ci -- --mode "$derived_mode" --summary
-            }
-
-            shard_workflow_mode_invalid() {
-              local output rc expected_mode
-              expected_mode="$(first_ci_mode)"
-              if [ -z "$expected_mode" ]; then
-                log_error "no model-derived workflow.ci mode found"
-                return 1
-              fi
-
-              set +e
-              output="$(nix run "path:$ROOT"#ci -- --mode "__invalid_mode__" --summary 2>&1)"
-              rc=$?
-              set -e
-
-              if [ "$rc" -eq 0 ]; then
-                log_error "expected invalid mode command to fail"
-                return 1
-              fi
-
-              printf '%s' "$output" | grep -F "unknown mode '__invalid_mode__'" >/dev/null || {
-                log_error "invalid mode output missing unknown-mode marker"
-                printf '%s\n' "$output" >&2
-                return 1
-              }
-              printf '%s' "$output" | grep -F "expected:" >/dev/null || {
-                log_error "invalid mode output missing expected-mode marker"
-                printf '%s\n' "$output" >&2
-                return 1
-              }
-              printf '%s' "$output" | grep -F "$expected_mode" >/dev/null || {
-                log_error "invalid mode output missing derived mode '$expected_mode'"
-                printf '%s\n' "$output" >&2
-                return 1
-              }
-            }
-
-            shard_workflow_mode_dotted_shorthand() {
-              local derived_mode dotted_mode output rc
-              derived_mode="$(first_ci_mode)"
-              if [ -z "$derived_mode" ]; then
-                log_error "no model-derived workflow.ci mode found"
-                return 1
-              fi
-              dotted_mode="$derived_mode.probe"
-
-              set +e
-              output="$(nix run "path:$ROOT"#ci -- "--$dotted_mode" --summary 2>&1)"
-              rc=$?
-              set -e
-
-              if [ "$rc" -eq 0 ]; then
-                log_error "expected dotted shorthand '--$dotted_mode' to fail"
-                return 1
-              fi
-
-              printf '%s' "$output" | grep -F "unknown option '--$dotted_mode'" >/dev/null || {
-                log_error "dotted shorthand rejection output missing expected marker"
-                printf '%s\n' "$output" >&2
-                return 1
-              }
-            }
-
-            shard_isolation() {
-              if [ "''${FRAMEWORK_ISOLATION:-}" = "1" ] || [ "$SHARD" = "isolation" ]; then
-                nix run "path:$ROOT"#test-isolation
-                return 0
-              fi
-              log_skip "isolation shard disabled (set FRAMEWORK_ISOLATION=1 to enable)"
-              return 0
-            }
-
-            run_named_shard() {
-              local shard_name="$1"
-              case "$shard_name" in
-                flake-check)
-                  run_shard "$shard_name" shard_flake_check
-                  ;;
-                help)
-                  run_shard "$shard_name" shard_help
-                  ;;
-                workflow-test)
-                  run_shard "$shard_name" shard_workflow_test
-                  ;;
-                workflow-ci)
-                  run_shard "$shard_name" shard_workflow_ci
-                  ;;
-                workflow-mode-valid)
-                  run_shard "$shard_name" shard_workflow_mode_valid
-                  ;;
-                workflow-mode-invalid)
-                  run_shard "$shard_name" shard_workflow_mode_invalid
-                  ;;
-                workflow-mode-dotted-shorthand)
-                  run_shard "$shard_name" shard_workflow_mode_dotted_shorthand
-                  ;;
-                isolation)
-                  run_shard "$shard_name" shard_isolation
-                  ;;
-                *)
-                  log_error "unknown shard '$shard_name'"
-                  return 2
-                  ;;
-              esac
-            }
-
-            while [ "$#" -gt 0 ]; do
-              case "$1" in
-                --mode)
-                  if [ "$#" -lt 2 ]; then
-                    log_error "--mode requires a value"
-                    exit 2
-                  fi
-                  MODE="$2"
-                  shift 2
-                  ;;
-                --summary)
-                  SUMMARY=1
-                  shift
-                  ;;
-                --summary-json)
-                  if [ "$#" -lt 2 ]; then
-                    log_error "--summary-json requires a value"
-                    exit 2
-                  fi
-                  SUMMARY_JSON="$2"
-                  shift 2
-                  ;;
-                --shard)
-                  if [ "$#" -lt 2 ]; then
-                    log_error "--shard requires a value"
-                    exit 2
-                  fi
-                  SHARD="$2"
-                  shift 2
-                  ;;
-                --list-shards)
-                  LIST_SHARDS=1
-                  shift
-                  ;;
-                --help|-h)
-                  usage
-                  exit 0
-                  ;;
-                --)
-                  shift
-                  break
-                  ;;
-                *)
-                  log_error "unknown option '$1'"
-                  usage >&2
-                  exit 2
-                  ;;
-              esac
-            done
-
-            if [ "$#" -gt 0 ]; then
-              log_error "unexpected positional arguments: $*"
-              exit 2
-            fi
-
-            if ! mode_exists "$MODE"; then
-              expected_modes="$(ci_mode_choices)"
-              if [ -n "$expected_modes" ]; then
-                log_error "unknown mode '$MODE' (expected: $expected_modes)"
-              else
-                log_error "unknown mode '$MODE'"
-              fi
-              exit 2
-            fi
-
-            if [ "$LIST_SHARDS" -eq 1 ]; then
-              print_shards
-              exit 0
-            fi
-
-            if [ -n "$SHARD" ] && ! shard_exists "$SHARD"; then
-              log_error "unknown shard '$SHARD'"
-              log_info "valid shards: $(print_shards | tr '\n' ' ')"
-              exit 2
-            fi
-
-            cleanup() {
-              local rc=$?
-              if [ -n "$SUMMARY_JSON" ]; then
-                write_summary_json "$rc"
-              fi
-              return "$rc"
-            }
-            trap cleanup EXIT
-
-            if [ -n "$SHARD" ]; then
-              run_named_shard "$SHARD"
-            else
-              for shard_name in "''${SHARDS[@]}"; do
-                run_named_shard "$shard_name"
-              done
-            fi
-
-            if [ "$SUMMARY" -eq 1 ]; then
-              log_info "summary mode=$MODE executed_shards=$EXECUTED"
-            fi
-
-            log_ok "framework::test completed"
-          '';
-        };
-
       }
-      // frameworkInstallPreset.tasks;
+      // frameworkInstallPreset.tasks
+      // frameworkTestPreset.tasks
+      // frameworkSelfhostPreset.tasks;
 
-      workflows = {
+      workflows =
+        {
         ci-basic = {
           id = "workflow.ci.basic";
           summary = "Basic CI workflow";
@@ -2757,7 +2317,8 @@ in
             emitRegistryEvents = true;
           };
         };
-      };
+      }
+      // frameworkSelfhostPreset.workflows;
     };
   };
 }

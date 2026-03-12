@@ -104,6 +104,7 @@ let
     '';
 
   frameworkInstallHelpFile = mkTaskHelpFile "task.framework.install";
+  frameworkTestHelpFile = mkTaskHelpFile "task.framework.test";
   frameworkUpgradeHelpFile = mkTaskHelpFile "task.framework.upgrade";
 
   taskApps = builtins.listToAttrs (
@@ -149,6 +150,21 @@ let
               esac
             fi
             NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#framework::install --refresh -- "$@"
+          '';
+        };
+
+        "framework::test" = mkShellApp {
+          appName = "framework::test";
+          body = ''
+            if [ "$#" -gt 0 ]; then
+              case "$1" in
+                --help|-h)
+                  cat ${frameworkTestHelpFile}
+                  exit 0
+                  ;;
+              esac
+            fi
+            NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-task task.framework.test "$@"
           '';
         };
 
