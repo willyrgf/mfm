@@ -171,7 +171,7 @@ pkgs.writeText "nixfied-vendored-metadata.sh" ''
       echo "Framework-owned paths:"
       echo "- \`flake.nix\`, \`flake.lock\`"
       echo "- \`nixfied/framework/\`"
-      echo "- \`nixfied/lib/\`, \`nixfied/install/\`, \`nixfied/runner/\`, \`nixfied/registry/\` (compatibility shims)"
+      echo "- \`nixfied/lib/\`, \`nixfied/install/\`, \`nixfied/runner/\`, \`nixfied/registry/\` (transitional compatibility shims; prefer canonical \`nixfied/framework/...\` paths)"
       echo ""
       echo "User-owned customization paths:"
       echo "- \`nixfied/project/\` (primary command/task/workflow customization surface)"

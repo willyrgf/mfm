@@ -119,48 +119,6 @@ in
       printf '%s' "$1" | ${pkgs.coreutils}/bin/tr '[:lower:].-' '[:upper:]__' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_'
     }
 
-    resolve_runtime_dir_base() {
-      local value="$1"
-      local host_home
-      local host_tmpdir
-      local dollar='$'
-      local lbrace='{'
-      local rbrace='}'
-      local xdg_data_prefix="$dollar$lbrace"'XDG_DATA_HOME:-$HOME/.local/share'"$rbrace"
-      local xdg_state_prefix="$dollar$lbrace"'XDG_STATE_HOME:-$HOME/.local/state'"$rbrace"
-      local xdg_cache_prefix="$dollar$lbrace"'XDG_CACHE_HOME:-$HOME/.cache'"$rbrace"
-      local home_prefix='$HOME'
-      local tmpdir_prefix="$dollar$lbrace"'TMPDIR:-/tmp'"$rbrace"
-      local tmp_prefix='$TMPDIR'
-
-      host_home="''${HOME:-}"
-      host_tmpdir="''${TMPDIR:-/tmp}"
-
-      case "$value" in
-        "$xdg_data_prefix"*)
-          printf '%s%s' "''${XDG_DATA_HOME:-$host_home/.local/share}" "''${value#$xdg_data_prefix}"
-          ;;
-        "$xdg_state_prefix"*)
-          printf '%s%s' "''${XDG_STATE_HOME:-$host_home/.local/state}" "''${value#$xdg_state_prefix}"
-          ;;
-        "$xdg_cache_prefix"*)
-          printf '%s%s' "''${XDG_CACHE_HOME:-$host_home/.cache}" "''${value#$xdg_cache_prefix}"
-          ;;
-        "$home_prefix"*)
-          printf '%s%s' "$host_home" "''${value#$home_prefix}"
-          ;;
-        "$tmpdir_prefix"*)
-          printf '%s%s' "$host_tmpdir" "''${value#$tmpdir_prefix}"
-          ;;
-        "$tmp_prefix"*)
-          printf '%s%s' "$host_tmpdir" "''${value#$tmp_prefix}"
-          ;;
-        *)
-          printf '%s' "$value"
-          ;;
-      esac
-    }
-
     is_sensitive_env_name() {
       local env_name="$1"
       local upper_name
@@ -469,7 +427,6 @@ in
       if [ -z "$runtime_dir_base" ] || [[ "$runtime_dir_base" == *"$"* ]]; then
         runtime_dir_base="$RUNTIME_DIR_BASE_DEFAULT"
       fi
-      runtime_dir_base="$(resolve_runtime_dir_base "$runtime_dir_base")"
       if [ -n "$runtime_scope_override" ]; then
         runtime_scope_root="$runtime_scope_override"
       elif [ -n "$ephemeral_root" ]; then

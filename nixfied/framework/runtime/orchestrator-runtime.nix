@@ -449,8 +449,7 @@ in
     export NIXFIED_EXECUTION_EPHEMERAL=0
     artifacts_dir="$(resolve_run_artifacts_dir "$run_id" "$workflow_id")" || return $?
     export CI_ARTIFACTS_DIR="$artifacts_dir"
-    # Keep runtime scope paths short enough for Unix socket users like reth on Darwin.
-    runtime_scope_dir="/tmp/nf/$run_id"
+    runtime_scope_dir="$artifacts_dir/.runtime"
     export NIXFIED_RUNTIME_DIR_SCOPE_OVERRIDE="$runtime_scope_dir"
 
     if [ -n "$CI_ARTIFACTS_DIR" ]; then

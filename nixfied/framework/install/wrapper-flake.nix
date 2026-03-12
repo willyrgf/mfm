@@ -59,13 +59,13 @@ else
         flake-utils.lib.eachDefaultSystem (system:
           let
             pkgs = import nixpkgs { inherit system; };
-            nixfiedLib = import ${vendorPath}/lib/default.nix {
+            nixfiedLib = import ${vendorPath}/framework/core/default.nix {
               inherit
                 pkgs
                 system
                 ;
             };
-            frameworkSourceRevision = import ./nixfied/lib/framework-revision.nix {
+            frameworkSourceRevision = import ./nixfied/framework/core/framework-revision.nix {
               sourcePath = ./nixfied;
               metadataPath = ./nixfied/VENDORED.txt;
             };
