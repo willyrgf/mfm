@@ -272,7 +272,7 @@
       ]
     },
     {
-      "path": "nixfied/.framework",
+      "path": "nixfied/framework",
       "risk": "Framework internals; avoid direct edits in installed repos.",
       "required_checks": [
         "nix run .#help"

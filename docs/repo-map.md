@@ -60,7 +60,7 @@ Generated from `docs/repo-index.json`.
 ## Sensitive Zones
 - `crates/core/src/keystore` - Security-sensitive key handling, tamper detection, and persisted keystore compatibility. (checks: nix run .#check, nix run .#test, nix run .#ci -- --audit --summary)
 - `crates/machine` - Recovery, replay, and deterministic state-machine runtime semantics. (checks: nix run .#check, nix run .#test, nix run .#ci -- --parity --summary)
-- `nixfied/.framework` - Framework internals; avoid direct edits in installed repos. (checks: nix run .#help)
+- `nixfied/framework` - Framework internals; avoid direct edits in installed repos. (checks: nix run .#help)
 - `nixfied/project/ci.nix` - CI pipeline behavior and release gates. (checks: nix run .#ci -- --summary)
 - `nixfied/project/conf.nix` - Project identity, environment names, and port contract. (checks: nix run .#check, nix run .#ci -- --summary)
 - `nixfied/project/quality.nix` - Quality checks and discovery drift enforcement. (checks: nix run .#check)

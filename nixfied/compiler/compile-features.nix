@@ -10,17 +10,15 @@
   workflows,
 }:
 let
+  listUtils = import ../framework/core/list-utils.nix;
   featureCatalog = import ./feature-catalog.nix { inherit runtime; };
   safeProjectRoot = builtins.unsafeDiscardStringContext (builtins.toString projectRoot);
 
-  unique =
-    list:
-    builtins.foldl' (acc: value: if builtins.elem value acc then acc else acc ++ [ value ]) [ ] (
-      builtins.filter (value: value != null && value != "") list
-    );
-
   maybeExistingPaths =
-    paths: unique (builtins.filter (path: builtins.pathExists "${safeProjectRoot}/${path}") paths);
+    paths:
+    listUtils.uniqueNonEmptyPreserveOrder (
+      builtins.filter (path: builtins.pathExists "${safeProjectRoot}/${path}") paths
+    );
 
   taskOwnerFiles =
     taskId:
@@ -29,7 +27,7 @@ let
       app = task.ui.app or { };
       appOwner = if (app.ownerFile or null) == null then "" else app.ownerFile;
     in
-    unique (
+    listUtils.uniqueNonEmptyPreserveOrder (
       maybeExistingPaths [ appOwner ]
       ++ maybeExistingPaths [
         "nixfied/project/module.nix"
@@ -77,7 +75,7 @@ let
 
   workflowTaskIds =
     workflow:
-    unique (
+    listUtils.uniquePreserveOrder (
       map (unit: unit.taskId) workflow.plan
       ++ (workflow.preRun.tasks or [ ])
       ++ (workflow.postRun.tasks or [ ])
@@ -87,7 +85,9 @@ let
     workflowId:
     let
       workflow = workflows.${workflowId};
-      ownerFiles = unique (builtins.concatLists (map taskOwnerFiles (workflowTaskIds workflow)));
+      ownerFiles = listUtils.uniqueNonEmptyPreserveOrder (
+        builtins.concatLists (map taskOwnerFiles (workflowTaskIds workflow))
+      );
     in
     canonical.canonicalize {
       id = workflowId;

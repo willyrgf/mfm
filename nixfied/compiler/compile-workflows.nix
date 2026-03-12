@@ -8,12 +8,9 @@
   tasks,
 }:
 let
+  listUtils = import ../framework/core/list-utils.nix;
   rawWorkflows = resolved.workflows or { };
   names = builtins.sort builtins.lessThan (builtins.attrNames rawWorkflows);
-
-  unique =
-    list:
-    builtins.foldl' (acc: value: if builtins.elem value acc then acc else acc ++ [ value ]) [ ] list;
 
   normalizeWorkflowId =
     name: rawId:
@@ -24,10 +21,10 @@ let
 
   normalizeUnit = unit: {
     taskId = unit.taskId;
-    needs = unique unit.needs;
-    locks = unique unit.locks;
+    needs = listUtils.uniquePreserveOrder unit.needs;
+    locks = listUtils.uniquePreserveOrder unit.locks;
     when = unit.when;
-    skipIfMissingEnv = unique unit.skipIfMissingEnv;
+    skipIfMissingEnv = listUtils.uniquePreserveOrder unit.skipIfMissingEnv;
   };
 
   unitsFromStages =
@@ -213,8 +210,8 @@ let
       in
       unit
       // {
-        needs = unique (unit.needs ++ hardNeeds ++ softNeeds);
-        locks = unique (unit.locks ++ (taskScheduling.locks or [ ]));
+        needs = listUtils.uniquePreserveOrder (unit.needs ++ hardNeeds ++ softNeeds);
+        locks = listUtils.uniquePreserveOrder (unit.locks ++ (taskScheduling.locks or [ ]));
         priority = taskScheduling.priority or 100;
         scheduling = {
           maxAttempts = taskScheduling.maxAttempts or 1;

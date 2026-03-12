@@ -4,6 +4,7 @@ This document tracks downstream expectations when the vendored Nixfied framework
 
 ## What To Recheck After A Framework Upgrade
 
+- If the upgrade adds new vendored files under `nixfied/framework/` or `nixfied/lib/`, track them before running `nix run .#...`; flake evaluation from a dirty Git tree omits untracked files.
 - `nix run .#help`
 - `nix run .#services`
 - `nix run .#features`

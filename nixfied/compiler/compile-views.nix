@@ -9,8 +9,8 @@
   workflows,
 }:
 let
-  safeProjectRoot = builtins.unsafeDiscardStringContext (builtins.toString projectRoot);
-  workspaceMarkerPresent = builtins.pathExists "${safeProjectRoot}/nixfied/.framework/.workspace";
+  workspaceMarker = import ../framework/workspace-marker.nix;
+  workspaceMarkerPresent = workspaceMarker.isPresent projectRoot;
 
   frameworkHiddenApps = [
     "framework::install"
@@ -76,7 +76,7 @@ let
             {
               name = "framework::upgrade";
               summary = upgradeFallbackSummary;
-              owner_file = "nixfied/runner/dispatcher.nix";
+              owner_file = "nixfied/framework/runtime/dispatcher.nix";
             }
           ]
         else
@@ -88,37 +88,37 @@ let
     {
       name = "docs";
       summary = "Render detailed model documentation";
-      owner_file = "nixfied/runner/dispatcher.nix";
+      owner_file = "nixfied/framework/runtime/dispatcher.nix";
     }
     {
       name = "features";
       summary = "List compiled feature inventory";
-      owner_file = "nixfied/runner/dispatcher.nix";
+      owner_file = "nixfied/framework/runtime/dispatcher.nix";
     }
     {
       name = "model";
       summary = "Print canonical compiled model";
-      owner_file = "nixfied/lib/mkNixfied.nix";
+      owner_file = "nixfied/framework/core/mkNixfied.nix";
     }
     {
       name = "schema";
       summary = "Print bundled export schemas";
-      owner_file = "nixfied/lib/mkNixfied.nix";
+      owner_file = "nixfied/framework/core/mkNixfied.nix";
     }
     {
       name = "services";
       summary = "List compiled services";
-      owner_file = "nixfied/lib/mkNixfied.nix";
+      owner_file = "nixfied/framework/core/mkNixfied.nix";
     }
     {
       name = "stateHash";
       summary = "Print canonical model hash";
-      owner_file = "nixfied/lib/mkNixfied.nix";
+      owner_file = "nixfied/framework/core/mkNixfied.nix";
     }
     {
       name = "tasks";
       summary = "List compiled tasks";
-      owner_file = "nixfied/lib/mkNixfied.nix";
+      owner_file = "nixfied/framework/core/mkNixfied.nix";
     }
   ];
 

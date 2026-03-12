@@ -1,6 +1,6 @@
 { lib }:
 let
-  serviceConfig = import ../lib/service-config.nix { inherit lib; };
+  serviceConfig = import ../framework/core/service-config.nix { inherit lib; };
 in
 { resolved }:
 let
