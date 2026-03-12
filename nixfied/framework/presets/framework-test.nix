@@ -3,57 +3,10 @@
   pkgs,
   conf,
   mkCommandTask,
-  ciModes ? [
-    "basic"
-    "app"
-    "env"
-    "full"
-  ],
-  defaultMode ? "full",
-  modeExample ? defaultMode,
   ownerFile ? "nixfied/framework/presets/framework-test.nix",
 }:
 let
   plainShellLogging = import ../core/plain-shell-logging.nix;
-  resolvedCiModes =
-    if !(builtins.isList ciModes) || ciModes == [ ] || !(lib.all builtins.isString ciModes) then
-      throw "ERROR: framework-test preset ciModes must be a non-empty list of strings"
-    else
-      lib.unique ciModes;
-  validatedCiModes =
-    if !(builtins.elem defaultMode resolvedCiModes) then
-      throw "ERROR: framework-test preset defaultMode must be a member of ciModes"
-    else if !(builtins.elem modeExample resolvedCiModes) then
-      throw "ERROR: framework-test preset modeExample must be a member of ciModes"
-    else
-      resolvedCiModes;
-  ciModeChoices = builtins.concatStringsSep "|" validatedCiModes;
-  modeAliasContractArgs = map (mode: {
-    name = mode;
-    kind = "flag";
-    long = "--${mode}";
-    description = "Alias for --mode ${mode}.";
-  }) validatedCiModes;
-  modeAliasCaseArms = builtins.concatStringsSep "\n" (
-    map (
-      mode: ''
-                    --${mode})
-                      MODE=${lib.escapeShellArg mode}
-                      shift
-                      ;;
-      ''
-    ) validatedCiModes
-  );
-  usageFile = pkgs.writeText "framework-test-usage.txt" ''
-    Usage: nix run .#framework::test [-- --profile ci] [--mode <${ciModeChoices}>] [--summary] [--summary-json <path>] [--shard <name>] [--max-parallel-shards <n|auto>] [--serial] [--list-shards]
-
-    Shards:
-      flake-check   Evaluate nix flake checks for the current project root.
-      help          Validate generated help output.
-      workflow-ci   Run the CI workflow surface in selected mode.
-      isolation     Run isolation checks.
-      self-host     Run a workflow that exercises framework entry points.
-  '';
   frameworkTestMaxParallelShardsRaw = conf.frameworkTest.maxParallelShards or "auto";
   frameworkTestMaxParallelShards =
     if builtins.isInt frameworkTestMaxParallelShardsRaw then
@@ -84,7 +37,7 @@ in
       usage = [
         "nix run .#framework::test"
         "nix run .#framework::test -- --summary"
-        "nix run .#framework::test -- --mode ${modeExample} --summary-json /tmp/framework-summary.json"
+        "nix run .#framework::test -- --mode env --summary-json /tmp/framework-summary.json"
       ];
       examples = [
         "nix run .#framework::test -- --list-shards"
@@ -152,17 +105,45 @@ in
           kind = "option";
           long = "--mode";
           type = "enum";
-          values = validatedCiModes;
+          values = [
+            "basic"
+            "app"
+            "env"
+            "full"
+          ];
           description = "CI workflow mode used by the workflow-ci shard.";
         }
-      ]
-      ++ modeAliasContractArgs;
+        {
+          name = "basic";
+          kind = "flag";
+          long = "--basic";
+          description = "Alias for --mode basic.";
+        }
+        {
+          name = "app";
+          kind = "flag";
+          long = "--app";
+          description = "Alias for --mode app.";
+        }
+        {
+          name = "env";
+          kind = "flag";
+          long = "--env";
+          description = "Alias for --mode env.";
+        }
+        {
+          name = "full";
+          kind = "flag";
+          long = "--full";
+          description = "Alias for --mode full.";
+        }
+      ];
       command = ''
         set -euo pipefail
 
         ROOT="$(pwd -P)"
         PROFILE="ci"
-        MODE=${lib.escapeShellArg defaultMode}
+        MODE="full"
         SHARD=""
         LIST_SHARDS=0
         SUMMARY=0
@@ -187,7 +168,16 @@ in
         ${plainShellLogging { }}
 
         usage() {
-          cat ${usageFile}
+          cat <<'EOF'
+        Usage: nix run .#framework::test [-- --profile ci] [--mode <basic|app|env|full>] [--summary] [--summary-json <path>] [--shard <name>] [--max-parallel-shards <n|auto>] [--serial] [--list-shards]
+
+        Shards:
+          flake-check   Evaluate nix flake checks for the current project root.
+          help          Validate generated help output.
+          workflow-ci   Run the CI workflow surface in selected mode.
+          isolation     Run isolation checks.
+          self-host     Run a workflow that exercises framework entry points.
+        EOF
         }
 
         print_shards() {
@@ -217,25 +207,21 @@ in
           summary_dir="$(dirname "$SUMMARY_JSON")"
           mkdir -p "$summary_dir"
           summary_tmp="$(mktemp "$SUMMARY_JSON.tmp.XXXXXX")"
-          {
-            printf '{\n'
-            printf '  "profile": "%s",\n' "$PROFILE"
-            printf '  "mode": "%s",\n' "$MODE"
-            if [ -n "$SHARD" ]; then
-              printf '  "shard": "%s",\n' "$SHARD"
-            else
-              printf '  "shard": null,\n'
-            fi
-            printf '  "executed_shards": %s,\n' "$EXECUTED"
-            printf '  "failed_shards": %s,\n' "$FAILED_SHARDS"
-            printf '  "exit_1_shards": %s,\n' "$EXIT_1_SHARDS"
-            printf '  "canceled_shards": %s,\n' "$CANCELED_SHARDS"
-            printf '  "exit_code": %s,\n' "$rc"
-            printf '  "duration_seconds": %s,\n' "$duration"
-            printf '  "started_at": "%s",\n' "$STARTED_AT"
-            printf '  "finished_at": "%s"\n' "$finished_at"
-            printf '}\n'
-          } > "$summary_tmp"
+          cat > "$summary_tmp" <<JSON
+        {
+          "profile": "$PROFILE",
+          "mode": "$MODE",
+          "shard": $(if [ -n "$SHARD" ]; then printf '"%s"' "$SHARD"; else printf 'null'; fi),
+          "executed_shards": $EXECUTED,
+          "failed_shards": $FAILED_SHARDS,
+          "exit_1_shards": $EXIT_1_SHARDS,
+          "canceled_shards": $CANCELED_SHARDS,
+          "exit_code": $rc,
+          "duration_seconds": $duration,
+          "started_at": "$STARTED_AT",
+          "finished_at": "$finished_at"
+        }
+        JSON
           mv "$summary_tmp" "$SUMMARY_JSON"
           log_info "wrote summary json path=$SUMMARY_JSON"
         }
@@ -501,7 +487,10 @@ in
               MODE="$2"
               shift 2
               ;;
-${modeAliasCaseArms}
+            --basic|--app|--env|--full)
+              MODE="''${1#--}"
+              shift
+              ;;
             --summary)
               SUMMARY=1
               shift
@@ -573,10 +562,10 @@ ${modeAliasCaseArms}
         esac
 
         case "$MODE" in
-          ${ciModeChoices})
+          basic|app|env|full)
             ;;
           *)
-            log_error "unknown mode '$MODE' (expected: ${ciModeChoices})"
+            log_error "unknown mode '$MODE' (expected: basic|app|env|full)"
             exit 2
             ;;
         esac

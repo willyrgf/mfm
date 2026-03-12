@@ -12,12 +12,12 @@
 let
   listUtils = import ../framework/core/list-utils.nix;
   featureCatalog = import ./feature-catalog.nix { inherit runtime; };
-  safeProjectRoot = builtins.unsafeDiscardStringContext (builtins.toString projectRoot);
+  projectRootPath = builtins.toString projectRoot;
 
   maybeExistingPaths =
     paths:
     listUtils.uniqueNonEmptyPreserveOrder (
-      builtins.filter (path: builtins.pathExists "${safeProjectRoot}/${path}") paths
+      builtins.filter (path: builtins.pathExists "${projectRootPath}/${path}") paths
     );
 
   taskOwnerFiles =

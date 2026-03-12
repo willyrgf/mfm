@@ -103,11 +103,6 @@ let
                                       chmod -R u+w "$ROOT/nixfied" 2>/dev/null || true
                                     fi
 
-                                    # Remove the legacy hidden framework path during upgrade/install.
-                                    if [ -e "$ROOT/nixfied/.framework" ]; then
-                                      rm -rf "$ROOT/nixfied/.framework"
-                                    fi
-
                             	        RSYNC_EXCLUDES=()
                             	        PRESERVE_MSG=""
                             	        if [ "$PRESERVE_PROJECT" = "true" ]; then
@@ -145,8 +140,6 @@ let
                                       chattr -R -i "$ROOT/nixfied" 2>/dev/null || true
                                     fi
                                     rm -f "$ROOT/.workspace"
-                                    rm -f "$ROOT/nixfied/.framework/.workspace"
-                                    rm -rf "$ROOT/nixfied/.framework"
 
                                     if [ -n "$FILTERS_RAW" ]; then
                                       FILTER_PLAN_JSON="$(compute_template_filter_plan "$FILTERS_RAW")"

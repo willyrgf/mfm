@@ -231,7 +231,6 @@ let
               rm -rf "$stage_dir/nixfied/.git"
               rm -f "$stage_dir/nixfied/result"
               rm -f "$stage_dir/.workspace"
-              rm -f "$stage_dir/nixfied/.framework/.workspace"
 
               preserve_project=0
               preserve_local=0
@@ -268,7 +267,6 @@ let
 
               ${pkgs.rsync}/bin/rsync "''${rsync_args[@]}" "$stage_dir/nixfied/" "$target/nixfied/"
               rm -f "$target/.workspace"
-              rm -f "$target/nixfied/.framework/.workspace"
 
               write_vendored_metadata "$target/nixfied/VENDORED.txt"
 

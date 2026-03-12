@@ -19,19 +19,6 @@ in
     esac
   }
 
-  artifacts_root_uses_legacy_default() {
-    local root="$1"
-
-    case "$root" in
-      "/tmp/ci-artifacts"|"$ARTIFACTS_ROOT_DEFAULT")
-        return 0
-        ;;
-      *)
-        return 1
-        ;;
-    esac
-  }
-
   resolve_run_artifacts_dir() {
     local run_id="$1"
     local workflow_id="$2"
@@ -54,11 +41,7 @@ in
     elif [ -n "$caller_dir" ]; then
       base_dir="$caller_dir"
     elif [ -n "$configured_root" ]; then
-      if [ "$REGISTRY_ROOT_EXPLICIT" = "1" ] && artifacts_root_uses_legacy_default "$configured_root"; then
-        base_dir="$REGISTRY_ROOT/artifacts"
-      else
-        base_dir="$configured_root"
-      fi
+      base_dir="$configured_root"
     elif [ "$REGISTRY_ROOT_EXPLICIT" = "1" ]; then
       base_dir="$REGISTRY_ROOT/artifacts"
     else
