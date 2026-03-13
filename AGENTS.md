@@ -8,6 +8,7 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 - Keep changes small and local; prefer 1 logical change per PR/commit.
 - Match CI (Nixfied): use `nix run .#check`, `nix run .#test`, and `nix run .#ci -- --mode <mode> --summary`.
 - Default pre-commit gate: run `nix run .#ci -- --mode full` before every commit.
+- Write commit subjects in lower case. Examples: `mfm-core bump to 0.1.30`, `fix nix task wrappers to preserve caller cwd`, `implement phased publish-docs reconciler`, `docs: publish umbrella earlier with live links only`, `docs: point crate metadata at mfm repo`.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
 - Keep binaries (`bin/cli`, `bin/rest-api`) thin:
