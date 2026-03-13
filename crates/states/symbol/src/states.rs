@@ -363,6 +363,60 @@ impl State for CollectObservationsState {
     }
 }
 
+/// Merges multiple observation vectors into one canonical, deterministically ordered output.
+#[derive(Clone, Debug)]
+pub struct MergeObservationsState {
+    /// Stable state identifier assigned by the execution plan.
+    pub state_id: StateId,
+    /// Context keys that contain `Vec<Observation>` payloads.
+    pub input_keys: Vec<ContextKey>,
+    /// Context key that receives the merged observations.
+    pub output_key: ContextKey,
+}
+
+#[async_trait]
+impl State for MergeObservationsState {
+    fn meta(&self) -> StateMeta {
+        meta::pure()
+    }
+
+    async fn handle(
+        &self,
+        ctx: &mut dyn DynContext,
+        _io: &mut dyn IoProvider,
+        _rec: &mut dyn EventRecorder,
+    ) -> Result<StateOutcome, StateError> {
+        let mut observations = Vec::new();
+        for input_key in &self.input_keys {
+            let mut next: Vec<Observation> = read_typed(
+                ctx,
+                input_key,
+                "missing_observations",
+                "missing observations in context",
+                "observations_decode_failed",
+                "failed to decode observations",
+            )?;
+            observations.append(&mut next);
+        }
+
+        observations.sort_by(|left, right| {
+            (left.wallet_id.as_str(), left.symbol_id.as_str())
+                .cmp(&(right.wallet_id.as_str(), right.symbol_id.as_str()))
+        });
+        let value = serde_json::to_value(&observations).map_err(|_| {
+            state_unknown(
+                "observations_serialize_failed",
+                "failed to serialize observations",
+            )
+        })?;
+        write_json(ctx, self.output_key.clone(), value)?;
+
+        Ok(StateOutcome {
+            snapshot: SnapshotPolicy::OnSuccess,
+        })
+    }
+}
+
 async fn build_observation(
     state_id: &StateId,
     io: &mut dyn IoProvider,
@@ -430,7 +484,7 @@ async fn build_observation(
         }
     };
 
-    let values = build_observation_values(symbol, &amount_dec, direct_prices_by_id)?;
+    let values = build_observation_values_from_lookup(symbol, &amount_dec, direct_prices_by_id)?;
 
     Ok(Observation {
         wallet_id: wallet.wallet_id.clone(),
@@ -455,7 +509,21 @@ async fn build_observation(
     })
 }
 
-fn build_observation_values(
+/// Builds canonical valuation outputs for one symbol amount using the already-resolved direct
+/// prices available to the current pinned portfolio view.
+pub fn build_observation_values(
+    symbol: &SymbolConfig,
+    amount_dec: &str,
+    direct_prices: &[DirectPriceValue],
+) -> Result<Vec<ObservationValue>, StateError> {
+    let direct_prices_by_id: HashMap<_, _> = direct_prices
+        .iter()
+        .map(|price| (price.source_id.as_str(), price))
+        .collect();
+    build_observation_values_from_lookup(symbol, amount_dec, &direct_prices_by_id)
+}
+
+fn build_observation_values_from_lookup(
     symbol: &SymbolConfig,
     amount_dec: &str,
     direct_prices_by_id: &HashMap<&str, &DirectPriceValue>,

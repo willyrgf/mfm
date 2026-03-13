@@ -161,6 +161,28 @@ impl LiveIoTransport for CountingTransport {
                     ("0x0000000000000000000000000000000000001003", LATEST_ROUND_DATA_SELECTOR) => {
                         Ok(chainlink_round_data_hex(100_000_000))
                     }
+                    ("0x0000000000000000000000000000000000002001", d)
+                        if d.starts_with(BALANCE_OF_SELECTOR_PREFIX) =>
+                    {
+                        Ok(ok_u256_as_32byte_hex(1_500_000))
+                    }
+                    ("0x0000000000000000000000000000000000002001", ERC20_DECIMALS_SELECTOR)
+                    | ("0x0000000000000000000000000000000000002002", ERC20_DECIMALS_SELECTOR) => {
+                        Ok(ok_u256_as_32byte_hex(6))
+                    }
+                    ("0x0000000000000000000000000000000000002002", d)
+                        if d.starts_with(BALANCE_OF_SELECTOR_PREFIX) =>
+                    {
+                        Ok(ok_u256_as_32byte_hex(750_000))
+                    }
+                    ("0x0000000000000000000000000000000000002003", d)
+                        if d.starts_with(BALANCE_OF_SELECTOR_PREFIX) =>
+                    {
+                        Ok(ok_u256_as_32byte_hex(200_000_000))
+                    }
+                    ("0x0000000000000000000000000000000000002003", ERC20_DECIMALS_SELECTOR) => {
+                        Ok(ok_u256_as_32byte_hex(8))
+                    }
                     _ => Err(IoError::Other(info(
                         "unexpected_eth_call",
                         ErrorCategory::Unknown,
@@ -386,6 +408,8 @@ fn expand_uses_canonical_multi_network_graph() {
             "portfolio_tracker.main.resolve_wallets",
             "portfolio_tracker.main.read_direct_prices",
             "portfolio_tracker.main.collect_observations",
+            "portfolio_tracker.main.collect_aave_observations",
+            "portfolio_tracker.main.merge_observations",
             "portfolio_tracker.main.write_snapshot",
             "portfolio_tracker.main.write_report",
         ]
@@ -409,8 +433,24 @@ fn expand_uses_canonical_multi_network_graph() {
         "portfolio_tracker.main.collect_observations".to_string()
     )));
     assert!(edges.contains(&(
+        "portfolio_tracker.main.resolve_wallets".to_string(),
+        "portfolio_tracker.main.collect_aave_observations".to_string()
+    )));
+    assert!(edges.contains(&(
         "portfolio_tracker.main.read_direct_prices".to_string(),
         "portfolio_tracker.main.collect_observations".to_string()
+    )));
+    assert!(edges.contains(&(
+        "portfolio_tracker.main.read_direct_prices".to_string(),
+        "portfolio_tracker.main.collect_aave_observations".to_string()
+    )));
+    assert!(edges.contains(&(
+        "portfolio_tracker.main.collect_aave_observations".to_string(),
+        "portfolio_tracker.main.merge_observations".to_string()
+    )));
+    assert!(edges.contains(&(
+        "portfolio_tracker.main.collect_observations".to_string(),
+        "portfolio_tracker.main.merge_observations".to_string()
     )));
 }
 
@@ -637,6 +677,98 @@ async fn at_crash_resume_orphan_attempt_reuses_pinned_network_facts() {
     );
 }
 
+#[tokio::test]
+async fn collects_aave_protocol_positions_through_the_op_boundary() {
+    let counts = Arc::new(Mutex::new(HashMap::new()));
+    let factory: Arc<dyn LiveIoTransportFactory> =
+        Arc::new(CountingTransportFactory::new(Arc::clone(&counts)));
+    let Harness {
+        engine,
+        registry,
+        planner,
+        pipeline,
+        stores,
+        cfg,
+    } = build_harness(canonical_aave_op_config(), factory, None);
+
+    let res = op_test_support::start_pipeline_with_defaults(
+        Arc::clone(&engine),
+        &stores,
+        Arc::clone(&registry),
+        Arc::clone(&planner),
+        pipeline,
+        cfg,
+    )
+    .await
+    .expect("start");
+
+    assert_eq!(res.phase, RunPhase::Completed);
+    let final_snapshot_id = res.final_snapshot_id.expect("final snapshot");
+    let context_snapshot = load_context_snapshot(&stores, &final_snapshot_id).await;
+    let report: PortfolioReport = serde_json::from_value(read_required_context_value(
+        &context_snapshot,
+        &portfolio_snapshot_report_context_key(),
+    ))
+    .expect("typed report");
+    assert_eq!(report.portfolio_id, "portfolio_aave");
+    assert_eq!(report.error_count, 0);
+
+    let snapshot = load_snapshot_artifact(&stores, &context_snapshot).await;
+    assert_eq!(snapshot.wallets.len(), 2);
+
+    let supplier = snapshot
+        .wallets
+        .iter()
+        .find(|wallet| wallet.wallet_id == "wallet_supplier")
+        .expect("supplier wallet");
+    assert_eq!(supplier.observations.len(), 1);
+    assert_eq!(
+        supplier.observations[0].source.balance_reader_kind,
+        "protocol_position:aave_v3:reserve_position"
+    );
+    assert_eq!(supplier.observations[0].quantity.raw_dec, "1500000");
+
+    let borrower = snapshot
+        .wallets
+        .iter()
+        .find(|wallet| wallet.wallet_id == "wallet_borrower")
+        .expect("borrower wallet");
+    assert_eq!(borrower.observations.len(), 2);
+    let debt = borrower
+        .observations
+        .iter()
+        .find(|observation| observation.symbol_id == "aave_v3.usdc.debt.ethereum-mainnet")
+        .expect("debt observation");
+    assert_eq!(debt.role, mfm_state_symbol::model::SymbolRole::Debt);
+    assert_eq!(
+        debt.metadata.get("debt_kind"),
+        Some(&serde_json::json!("variable"))
+    );
+    assert_eq!(
+        debt.source.balance_reader_kind,
+        "protocol_position:aave_v3:debt_position"
+    );
+    assert_eq!(
+        debt.values[0].priced_symbol_id,
+        "usdc.wallet.ethereum-mainnet"
+    );
+
+    let collateral = borrower
+        .observations
+        .iter()
+        .find(|observation| observation.symbol_id == "aave_v3.wbtc.collateral.ethereum-mainnet")
+        .expect("collateral observation");
+    assert_eq!(
+        collateral.source.balance_reader_kind,
+        "protocol_position:aave_v3:reserve_position"
+    );
+    assert_eq!(collateral.quantity.raw_dec, "200000000");
+    assert_eq!(
+        collateral.values[0].priced_symbol_id,
+        "wbtc.wallet.ethereum-mainnet"
+    );
+}
+
 fn canonical_op_config() -> serde_json::Value {
     serde_json::json!({
         "portfolio": {
@@ -846,6 +978,279 @@ fn canonical_op_config() -> serde_json::Value {
                     "metadata": {}
                 }
             ]
+        }
+    })
+}
+
+fn canonical_aave_op_config() -> serde_json::Value {
+    serde_json::json!({
+        "portfolio": {
+            "portfolio_id": "portfolio_aave",
+            "quote_codes": ["USD"],
+            "networks": [
+                {
+                    "network_id": "ethereum-mainnet",
+                    "chain_id": 1,
+                    "rpc_source_id": "mainnet_primary",
+                    "metadata": {}
+                }
+            ],
+            "wallets": [
+                {
+                    "wallet_id": "wallet_supplier",
+                    "address": "0x000000000000000000000000000000000000dead",
+                    "network_id": "ethereum-mainnet",
+                    "implementation": { "kind": "address_only" },
+                    "symbol_ids": ["aave_v3.usdc.asset.ethereum-mainnet"],
+                    "metadata": {}
+                },
+                {
+                    "wallet_id": "wallet_borrower",
+                    "address": "0x000000000000000000000000000000000000beef",
+                    "network_id": "ethereum-mainnet",
+                    "implementation": { "kind": "address_only" },
+                    "symbol_ids": [
+                        "aave_v3.wbtc.collateral.ethereum-mainnet",
+                        "aave_v3.usdc.debt.ethereum-mainnet"
+                    ],
+                    "metadata": {}
+                }
+            ],
+            "symbol_configs": [
+                {
+                    "symbol_id": "usdc.wallet.ethereum-mainnet",
+                    "display_symbol": "USDC",
+                    "kind": "erc20_balance",
+                    "role": "asset",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": null,
+                    "balance_reader": {
+                        "kind": "erc20_balance",
+                        "token_address": "0x0000000000000000000000000000000000000001"
+                    },
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "1.00"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": 6,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                },
+                {
+                    "symbol_id": "wbtc.wallet.ethereum-mainnet",
+                    "display_symbol": "WBTC",
+                    "kind": "erc20_balance",
+                    "role": "asset",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": null,
+                    "balance_reader": {
+                        "kind": "erc20_balance",
+                        "token_address": "0x0000000000000000000000000000000000000002"
+                    },
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "wbtc.wallet.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "70000.00"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": 8,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                },
+                {
+                    "symbol_id": "aave_v3.usdc.asset.ethereum-mainnet",
+                    "display_symbol": "USDC",
+                    "kind": "protocol_position",
+                    "role": "asset",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": "aave_v3",
+                    "balance_reader": {
+                        "kind": "protocol_position",
+                        "protocol": "aave_v3",
+                        "reader": "reserve_position",
+                        "config": {
+                            "market": {
+                                "market_id": "aave-v3-mainnet",
+                                "network_id": "ethereum-mainnet",
+                                "chain_id": 1,
+                                "pool_address": "0x0000000000000000000000000000000000003000",
+                                "reserves": [
+                                    {
+                                        "reserve_id": "usdc",
+                                        "reserve_index": 0,
+                                        "underlying_token_address": "0x0000000000000000000000000000000000000001",
+                                        "a_token_address": "0x0000000000000000000000000000000000002001",
+                                        "variable_debt_token_address": "0x0000000000000000000000000000000000002002",
+                                        "stable_debt_token_address": null,
+                                        "metadata": {}
+                                    },
+                                    {
+                                        "reserve_id": "wbtc",
+                                        "reserve_index": 1,
+                                        "underlying_token_address": "0x0000000000000000000000000000000000000002",
+                                        "a_token_address": "0x0000000000000000000000000000000000002003",
+                                        "variable_debt_token_address": null,
+                                        "stable_debt_token_address": null,
+                                        "metadata": {}
+                                    }
+                                ],
+                                "metadata": {}
+                            },
+                            "reserve_id": "usdc"
+                        }
+                    },
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "1.00"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": null,
+                    "underlying_symbol_id": "usdc.wallet.ethereum-mainnet",
+                    "metadata": {}
+                },
+                {
+                    "symbol_id": "aave_v3.wbtc.collateral.ethereum-mainnet",
+                    "display_symbol": "WBTC",
+                    "kind": "protocol_position",
+                    "role": "collateral",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": "aave_v3",
+                    "balance_reader": {
+                        "kind": "protocol_position",
+                        "protocol": "aave_v3",
+                        "reader": "reserve_position",
+                        "config": {
+                            "market": {
+                                "market_id": "aave-v3-mainnet",
+                                "network_id": "ethereum-mainnet",
+                                "chain_id": 1,
+                                "pool_address": "0x0000000000000000000000000000000000003000",
+                                "reserves": [
+                                    {
+                                        "reserve_id": "usdc",
+                                        "reserve_index": 0,
+                                        "underlying_token_address": "0x0000000000000000000000000000000000000001",
+                                        "a_token_address": "0x0000000000000000000000000000000000002001",
+                                        "variable_debt_token_address": "0x0000000000000000000000000000000000002002",
+                                        "stable_debt_token_address": null,
+                                        "metadata": {}
+                                    },
+                                    {
+                                        "reserve_id": "wbtc",
+                                        "reserve_index": 1,
+                                        "underlying_token_address": "0x0000000000000000000000000000000000000002",
+                                        "a_token_address": "0x0000000000000000000000000000000000002003",
+                                        "variable_debt_token_address": null,
+                                        "stable_debt_token_address": null,
+                                        "metadata": {}
+                                    }
+                                ],
+                                "metadata": {}
+                            },
+                            "reserve_id": "wbtc"
+                        }
+                    },
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "wbtc.wallet.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "70000.00"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": null,
+                    "underlying_symbol_id": "wbtc.wallet.ethereum-mainnet",
+                    "metadata": {}
+                },
+                {
+                    "symbol_id": "aave_v3.usdc.debt.ethereum-mainnet",
+                    "display_symbol": "USDC",
+                    "kind": "protocol_position",
+                    "role": "debt",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": "aave_v3",
+                    "balance_reader": {
+                        "kind": "protocol_position",
+                        "protocol": "aave_v3",
+                        "reader": "debt_position",
+                        "config": {
+                            "market": {
+                                "market_id": "aave-v3-mainnet",
+                                "network_id": "ethereum-mainnet",
+                                "chain_id": 1,
+                                "pool_address": "0x0000000000000000000000000000000000003000",
+                                "reserves": [
+                                    {
+                                        "reserve_id": "usdc",
+                                        "reserve_index": 0,
+                                        "underlying_token_address": "0x0000000000000000000000000000000000000001",
+                                        "a_token_address": "0x0000000000000000000000000000000000002001",
+                                        "variable_debt_token_address": "0x0000000000000000000000000000000000002002",
+                                        "stable_debt_token_address": null,
+                                        "metadata": {}
+                                    },
+                                    {
+                                        "reserve_id": "wbtc",
+                                        "reserve_index": 1,
+                                        "underlying_token_address": "0x0000000000000000000000000000000000000002",
+                                        "a_token_address": "0x0000000000000000000000000000000000002003",
+                                        "variable_debt_token_address": null,
+                                        "stable_debt_token_address": null,
+                                        "metadata": {}
+                                    }
+                                ],
+                                "metadata": {}
+                            },
+                            "reserve_id": "usdc",
+                            "debt_kind": "variable"
+                        }
+                    },
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "1.00"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": null,
+                    "underlying_symbol_id": "usdc.wallet.ethereum-mainnet",
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        },
+        "valuation_source_registry": {
+            "sources": []
         }
     })
 }

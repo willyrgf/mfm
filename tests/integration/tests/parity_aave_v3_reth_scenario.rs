@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_collectors_evm_jsonrpc_http::{
     EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmSourceKind,
@@ -29,6 +31,7 @@ use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::DefaultRunLauncher;
 use serde::{Deserialize, Serialize};
+use tower::ServiceExt;
 
 const RETH_DEV_ACCOUNT0_PRIVATE_KEY: &str =
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -187,6 +190,316 @@ fn snapshot_value<'a>(snapshot: &'a serde_json::Value, key: &str) -> Option<&'a 
         current = current.get(segment)?;
     }
     Some(current)
+}
+
+fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
+    let s = serde_json::to_string(&body).expect("json request must serialize");
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(s))
+        .expect("request")
+}
+
+async fn response_json(resp: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    serde_json::from_slice(&bytes).expect("json response")
+}
+
+fn aave_portfolio_snapshot_payload(
+    chain_id: u64,
+    deploy_manifest: &AaveDeployManifest,
+    actors: &ScenarioActors,
+) -> serde_json::Value {
+    let pool = contract_from_manifest(deploy_manifest, CONTRACT_POOL);
+    let usdc = contract_from_manifest(deploy_manifest, CONTRACT_USDC);
+    let wbtc = contract_from_manifest(deploy_manifest, CONTRACT_WBTC);
+    let usdc_a_token = contract_from_manifest(deploy_manifest, CONTRACT_USDC_A_TOKEN);
+    let wbtc_a_token = contract_from_manifest(deploy_manifest, CONTRACT_WBTC_A_TOKEN);
+    let usdc_variable_debt =
+        contract_from_manifest(deploy_manifest, CONTRACT_USDC_VARIABLE_DEBT_TOKEN);
+
+    serde_json::json!({
+        "portfolio": {
+            "portfolio_id": "aave-v3-reth-portfolio",
+            "quote_codes": ["USD"],
+            "networks": [
+                {
+                    "network_id": "reth-local",
+                    "chain_id": chain_id,
+                    "rpc_source_id": null,
+                    "metadata": {}
+                }
+            ],
+            "wallets": [
+                {
+                    "wallet_id": "wallet_supplier",
+                    "address": actors.supplier,
+                    "network_id": "reth-local",
+                    "implementation": { "kind": "address_only" },
+                    "symbol_ids": ["aave_v3.usdc.asset.reth-local"],
+                    "metadata": {}
+                },
+                {
+                    "wallet_id": "wallet_borrower",
+                    "address": actors.borrower,
+                    "network_id": "reth-local",
+                    "implementation": { "kind": "address_only" },
+                    "symbol_ids": [
+                        "aave_v3.wbtc.collateral.reth-local",
+                        "aave_v3.usdc.debt.reth-local"
+                    ],
+                    "metadata": {}
+                }
+            ],
+            "symbol_configs": [
+                {
+                    "symbol_id": "usdc.wallet.reth-local",
+                    "display_symbol": "USDC",
+                    "kind": "erc20_balance",
+                    "role": "asset",
+                    "network_id": "reth-local",
+                    "protocol": null,
+                    "balance_reader": {
+                        "kind": "erc20_balance",
+                        "token_address": usdc.address
+                    },
+                    "valuation": {
+                        "quotes": [{
+                            "quote": "USD",
+                            "priced_symbol_id": "usdc.wallet.reth-local",
+                            "reader": {
+                                "kind": "fixed_unit_price",
+                                "unit_price_dec": "1.00"
+                            }
+                        }]
+                    },
+                    "decimals": 6,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                },
+                {
+                    "symbol_id": "wbtc.wallet.reth-local",
+                    "display_symbol": "WBTC",
+                    "kind": "erc20_balance",
+                    "role": "asset",
+                    "network_id": "reth-local",
+                    "protocol": null,
+                    "balance_reader": {
+                        "kind": "erc20_balance",
+                        "token_address": wbtc.address
+                    },
+                    "valuation": {
+                        "quotes": [{
+                            "quote": "USD",
+                            "priced_symbol_id": "wbtc.wallet.reth-local",
+                            "reader": {
+                                "kind": "fixed_unit_price",
+                                "unit_price_dec": "70000.00"
+                            }
+                        }]
+                    },
+                    "decimals": 8,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                },
+                {
+                    "symbol_id": "aave_v3.usdc.asset.reth-local",
+                    "display_symbol": "USDC",
+                    "kind": "protocol_position",
+                    "role": "asset",
+                    "network_id": "reth-local",
+                    "protocol": "aave_v3",
+                    "balance_reader": {
+                        "kind": "protocol_position",
+                        "protocol": "aave_v3",
+                        "reader": "reserve_position",
+                        "config": {
+                            "market": {
+                                "market_id": "aave-v3-reth",
+                                "network_id": "reth-local",
+                                "chain_id": chain_id,
+                                "pool_address": pool.address,
+                                "reserves": [
+                                    {
+                                        "reserve_id": "usdc",
+                                        "reserve_index": 0,
+                                        "underlying_token_address": usdc.address,
+                                        "a_token_address": usdc_a_token.address,
+                                        "variable_debt_token_address": usdc_variable_debt.address,
+                                        "stable_debt_token_address": null,
+                                        "metadata": {}
+                                    },
+                                    {
+                                        "reserve_id": "wbtc",
+                                        "reserve_index": 1,
+                                        "underlying_token_address": wbtc.address,
+                                        "a_token_address": wbtc_a_token.address,
+                                        "variable_debt_token_address": null,
+                                        "stable_debt_token_address": null,
+                                        "metadata": {}
+                                    }
+                                ],
+                                "metadata": {}
+                            },
+                            "reserve_id": "usdc"
+                        }
+                    },
+                    "valuation": {
+                        "quotes": [{
+                            "quote": "USD",
+                            "priced_symbol_id": "usdc.wallet.reth-local",
+                            "reader": {
+                                "kind": "fixed_unit_price",
+                                "unit_price_dec": "1.00"
+                            }
+                        }]
+                    },
+                    "decimals": null,
+                    "underlying_symbol_id": "usdc.wallet.reth-local",
+                    "metadata": {}
+                },
+                {
+                    "symbol_id": "aave_v3.wbtc.collateral.reth-local",
+                    "display_symbol": "WBTC",
+                    "kind": "protocol_position",
+                    "role": "collateral",
+                    "network_id": "reth-local",
+                    "protocol": "aave_v3",
+                    "balance_reader": {
+                        "kind": "protocol_position",
+                        "protocol": "aave_v3",
+                        "reader": "reserve_position",
+                        "config": {
+                            "market": {
+                                "market_id": "aave-v3-reth",
+                                "network_id": "reth-local",
+                                "chain_id": chain_id,
+                                "pool_address": pool.address,
+                                "reserves": [
+                                    {
+                                        "reserve_id": "usdc",
+                                        "reserve_index": 0,
+                                        "underlying_token_address": usdc.address,
+                                        "a_token_address": usdc_a_token.address,
+                                        "variable_debt_token_address": usdc_variable_debt.address,
+                                        "stable_debt_token_address": null,
+                                        "metadata": {}
+                                    },
+                                    {
+                                        "reserve_id": "wbtc",
+                                        "reserve_index": 1,
+                                        "underlying_token_address": wbtc.address,
+                                        "a_token_address": wbtc_a_token.address,
+                                        "variable_debt_token_address": null,
+                                        "stable_debt_token_address": null,
+                                        "metadata": {}
+                                    }
+                                ],
+                                "metadata": {}
+                            },
+                            "reserve_id": "wbtc"
+                        }
+                    },
+                    "valuation": {
+                        "quotes": [{
+                            "quote": "USD",
+                            "priced_symbol_id": "wbtc.wallet.reth-local",
+                            "reader": {
+                                "kind": "fixed_unit_price",
+                                "unit_price_dec": "70000.00"
+                            }
+                        }]
+                    },
+                    "decimals": null,
+                    "underlying_symbol_id": "wbtc.wallet.reth-local",
+                    "metadata": {}
+                },
+                {
+                    "symbol_id": "aave_v3.usdc.debt.reth-local",
+                    "display_symbol": "USDC",
+                    "kind": "protocol_position",
+                    "role": "debt",
+                    "network_id": "reth-local",
+                    "protocol": "aave_v3",
+                    "balance_reader": {
+                        "kind": "protocol_position",
+                        "protocol": "aave_v3",
+                        "reader": "debt_position",
+                        "config": {
+                            "market": {
+                                "market_id": "aave-v3-reth",
+                                "network_id": "reth-local",
+                                "chain_id": chain_id,
+                                "pool_address": pool.address,
+                                "reserves": [
+                                    {
+                                        "reserve_id": "usdc",
+                                        "reserve_index": 0,
+                                        "underlying_token_address": usdc.address,
+                                        "a_token_address": usdc_a_token.address,
+                                        "variable_debt_token_address": usdc_variable_debt.address,
+                                        "stable_debt_token_address": null,
+                                        "metadata": {}
+                                    },
+                                    {
+                                        "reserve_id": "wbtc",
+                                        "reserve_index": 1,
+                                        "underlying_token_address": wbtc.address,
+                                        "a_token_address": wbtc_a_token.address,
+                                        "variable_debt_token_address": null,
+                                        "stable_debt_token_address": null,
+                                        "metadata": {}
+                                    }
+                                ],
+                                "metadata": {}
+                            },
+                            "reserve_id": "usdc",
+                            "debt_kind": "variable"
+                        }
+                    },
+                    "valuation": {
+                        "quotes": [{
+                            "quote": "USD",
+                            "priced_symbol_id": "usdc.wallet.reth-local",
+                            "reader": {
+                                "kind": "fixed_unit_price",
+                                "unit_price_dec": "1.00"
+                            }
+                        }]
+                    },
+                    "decimals": null,
+                    "underlying_symbol_id": "usdc.wallet.reth-local",
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        },
+        "valuation_source_registry": {
+            "sources": []
+        }
+    })
+}
+
+fn find_wallet<'a>(snapshot: &'a serde_json::Value, wallet_id: &str) -> &'a serde_json::Value {
+    snapshot["wallets"]
+        .as_array()
+        .expect("wallets array")
+        .iter()
+        .find(|wallet| wallet["wallet_id"] == wallet_id)
+        .unwrap_or_else(|| panic!("wallet not found: {wallet_id}"))
+}
+
+fn find_observation<'a>(wallet: &'a serde_json::Value, symbol_id: &str) -> &'a serde_json::Value {
+    wallet["observations"]
+        .as_array()
+        .expect("observations array")
+        .iter()
+        .find(|observation| observation["symbol_id"] == symbol_id)
+        .unwrap_or_else(|| panic!("observation not found: {symbol_id}"))
 }
 
 fn required_program_path(program: &str) -> String {
@@ -880,9 +1193,9 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         kind: SCENARIO_REPORT_KIND.to_string(),
         chain_id: expected_chain_id,
         accounts: AaveScenarioAccounts {
-            funder: actors.funder,
-            supplier: actors.supplier,
-            borrower: actors.borrower,
+            funder: actors.funder.clone(),
+            supplier: actors.supplier.clone(),
+            borrower: actors.borrower.clone(),
         },
         amounts: AaveScenarioAmounts {
             usdc_supply: USDC_SUPPLY_AMOUNT,
@@ -895,7 +1208,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
             strict: true,
             passed: true,
         },
-        deploy_manifest_kind: deploy_manifest.kind,
+        deploy_manifest_kind: deploy_manifest.kind.clone(),
     };
 
     assert_eq!(report.kind, SCENARIO_REPORT_KIND);
@@ -922,6 +1235,104 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         report_artifact_json.get("kind").and_then(|v| v.as_str()),
         Some(SCENARIO_REPORT_KIND)
+    );
+
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        bundle: mfm_rest_api::make_engine_bundle(),
+        events: Arc::clone(&events),
+        artifacts: Arc::clone(&artifacts),
+    });
+    let resp = app
+        .clone()
+        .oneshot(json_post(
+            "/v1/features/portfolio.snapshot/execute",
+            serde_json::json!({
+                "payload": aave_portfolio_snapshot_payload(expected_chain_id, &deploy_manifest, &actors)
+            }),
+        ))
+        .await
+        .expect("portfolio snapshot feature response");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let feature = response_json(resp).await;
+    assert_eq!(feature["status"], "success");
+    assert_eq!(feature["data"]["feature_id"], "portfolio.snapshot");
+    assert_eq!(feature["data"]["result"]["phase"], "completed");
+    assert_eq!(
+        feature["data"]["result"]["report"]["portfolio_id"],
+        "aave-v3-reth-portfolio"
+    );
+    assert_eq!(feature["data"]["result"]["report"]["error_count"], 0);
+
+    let snapshot_artifact_id = feature["data"]["result"]["snapshot_artifact_id"]
+        .as_str()
+        .expect("snapshot_artifact_id")
+        .to_string();
+    let artifact_resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/artifacts/{snapshot_artifact_id}"))
+                .body(Body::empty())
+                .expect("artifact request"),
+        )
+        .await
+        .expect("artifact response");
+    assert_eq!(artifact_resp.status(), StatusCode::OK);
+
+    let snapshot_response = response_json(artifact_resp).await;
+    let snapshot = snapshot_response["data"]["value"].clone();
+    assert_eq!(snapshot["portfolio_id"], "aave-v3-reth-portfolio");
+    assert_eq!(snapshot["network_pins"][0]["chain_id"], expected_chain_id);
+
+    let supplier_wallet = find_wallet(&snapshot, "wallet_supplier");
+    let supplier_usdc = find_observation(supplier_wallet, "aave_v3.usdc.asset.reth-local");
+    let supplier_usdc_raw: u64 = supplier_usdc["quantity"]["raw_dec"]
+        .as_str()
+        .expect("supplier raw_dec")
+        .parse()
+        .expect("supplier raw quantity");
+    assert!(supplier_usdc_raw >= USDC_SUPPLY_AMOUNT);
+    assert_eq!(
+        supplier_usdc["source"]["balance_reader_kind"],
+        "protocol_position:aave_v3:reserve_position"
+    );
+    assert_eq!(
+        supplier_usdc["values"][0]["priced_symbol_id"],
+        "usdc.wallet.reth-local"
+    );
+
+    let borrower_wallet = find_wallet(&snapshot, "wallet_borrower");
+    let borrower_collateral =
+        find_observation(borrower_wallet, "aave_v3.wbtc.collateral.reth-local");
+    let borrower_collateral_raw: u64 = borrower_collateral["quantity"]["raw_dec"]
+        .as_str()
+        .expect("collateral raw_dec")
+        .parse()
+        .expect("collateral raw quantity");
+    assert!(borrower_collateral_raw >= WBTC_COLLATERAL_AMOUNT);
+    assert_eq!(borrower_collateral["role"], "collateral");
+    assert_eq!(
+        borrower_collateral["values"][0]["priced_symbol_id"],
+        "wbtc.wallet.reth-local"
+    );
+
+    let borrower_debt = find_observation(borrower_wallet, "aave_v3.usdc.debt.reth-local");
+    let borrower_debt_raw: u64 = borrower_debt["quantity"]["raw_dec"]
+        .as_str()
+        .expect("debt raw_dec")
+        .parse()
+        .expect("debt raw quantity");
+    assert!(borrower_debt_raw >= USDC_BORROW_AMOUNT);
+    assert_eq!(borrower_debt["role"], "debt");
+    assert_eq!(
+        borrower_debt["source"]["balance_reader_kind"],
+        "protocol_position:aave_v3:debt_position"
+    );
+    assert_eq!(borrower_debt["metadata"]["debt_kind"], "variable");
+    assert_eq!(
+        borrower_debt["values"][0]["priced_symbol_id"],
+        "usdc.wallet.reth-local"
     );
 
     write_parity_aave_run_ids(&phase_a_run.run_id, &phase_b_run.run_id);

@@ -3,9 +3,12 @@
 #![warn(missing_docs)]
 //! Shared Aave V3 state-layer types and runtime states.
 //!
-//! This crate holds reusable manifest contracts and execution states for the Aave V3 deploy and
-//! configure flows. Operations should wire these states into plans rather than reimplementing
-//! the runtime behavior in binary or op layers.
+//! This crate holds reusable manifest contracts and execution states for:
+//! - Aave V3 deploy/configure flows
+//! - canonical Aave V3 `protocol_position` portfolio collection
+//!
+//! Operations should wire these states into plans rather than reimplementing the runtime behavior
+//! in binary or op layers.
 //!
 //! # Examples
 //!
@@ -23,5 +26,7 @@
 //! ```
 /// Manifest types and validation helpers for Aave V3 deploy/configure flows.
 pub mod manifest;
+/// Shared Aave V3 portfolio-position config models and runtime states.
+pub mod portfolio;
 /// Reusable runtime `State` implementations for Aave V3 deploy/configure flows.
 pub mod states;

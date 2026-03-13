@@ -20,6 +20,7 @@
 //! assert_eq!(op.op_id().as_str(), "portfolio_tracker");
 //! ```
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use mfm_machine::config::RunConfig;
@@ -29,6 +30,10 @@ use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
+use mfm_state_aave_v3::portfolio::model::{
+    is_aave_protocol_position, validate_aave_portfolio_config,
+};
+use mfm_state_aave_v3::portfolio::states::CollectAaveObservationsState;
 use mfm_state_common::errors as op_errors;
 use mfm_state_portfolio::model::{
     decode_portfolio_config, validate_portfolio_bundle, PortfolioConfig,
@@ -38,8 +43,9 @@ use mfm_state_portfolio::states::{
 };
 use mfm_state_symbol::model::{decode_valuation_source_registry, ValuationSourceRegistry};
 use mfm_state_symbol::states::{
-    CollectObservationsState, NetworkRouteConfig, ReadDirectPricesState,
+    CollectObservationsState, MergeObservationsState, NetworkRouteConfig, ReadDirectPricesState,
 };
+use mfm_state_wallet::model::WalletConfig;
 use mfm_state_wallet::states::ResolveWalletsState;
 use serde_json::Value;
 
@@ -50,6 +56,8 @@ const MAIN_OP_PATH: &str = "portfolio_tracker.main";
 const KEY_RESOLVED_WALLETS: &str = "resolved_wallets";
 const KEY_NETWORK_PINS: &str = "network_pins";
 const KEY_DIRECT_PRICES: &str = "direct_prices";
+const KEY_BASE_OBSERVATIONS: &str = "base_observations";
+const KEY_AAVE_OBSERVATIONS: &str = "aave_observations";
 const KEY_OBSERVATIONS: &str = "observations";
 const KEY_SNAPSHOT: &str = "snapshot";
 const KEY_SNAPSHOT_ARTIFACT_ID: &str = "snapshot_artifact_id";
@@ -113,6 +121,8 @@ fn parse_config(op_config: &Value) -> Result<PortfolioTrackerConfig, SdkError> {
             .map_err(|err| sdk_input_error("invalid_valuation_source_registry", err.to_string()))?;
     validate_portfolio_bundle(&portfolio, &valuation_source_registry)
         .map_err(|err| sdk_input_error("invalid_portfolio_bundle", err.to_string()))?;
+    validate_aave_portfolio_config(&portfolio)
+        .map_err(|err| sdk_input_error("invalid_aave_portfolio_config", err.to_string()))?;
 
     Ok(PortfolioTrackerConfig {
         portfolio,
@@ -131,6 +141,40 @@ fn network_routes(portfolio: &PortfolioConfig) -> Vec<NetworkRouteConfig> {
         .map(|network| NetworkRouteConfig {
             network_id: network.network_id.clone(),
             rpc_source_id: network.rpc_source_id.clone(),
+        })
+        .collect()
+}
+
+fn split_symbols(
+    portfolio: &PortfolioConfig,
+) -> (
+    Vec<mfm_state_symbol::model::SymbolConfig>,
+    Vec<mfm_state_symbol::model::SymbolConfig>,
+) {
+    let mut base_symbols = Vec::new();
+    let mut aave_symbols = Vec::new();
+    for symbol in &portfolio.symbol_configs {
+        if is_aave_protocol_position(symbol) {
+            aave_symbols.push(symbol.clone());
+        } else {
+            base_symbols.push(symbol.clone());
+        }
+    }
+    (base_symbols, aave_symbols)
+}
+
+fn filter_wallets_for_symbol_ids(
+    wallets: &[WalletConfig],
+    allowed_symbol_ids: &HashSet<String>,
+) -> Vec<WalletConfig> {
+    wallets
+        .iter()
+        .filter_map(|wallet| {
+            let mut wallet = wallet.clone();
+            wallet
+                .symbol_ids
+                .retain(|symbol_id| allowed_symbol_ids.contains(symbol_id));
+            (!wallet.symbol_ids.is_empty()).then_some(wallet)
         })
         .collect()
 }
@@ -166,6 +210,17 @@ impl Operation for PortfolioTrackerOp {
     ) -> Result<StateGraph, SdkError> {
         let cfg = parse_config(op_config)?;
         let routes = network_routes(&cfg.portfolio);
+        let (base_symbols, aave_symbols) = split_symbols(&cfg.portfolio);
+        let base_symbol_ids: HashSet<_> = base_symbols
+            .iter()
+            .map(|symbol| symbol.symbol_id.clone())
+            .collect();
+        let aave_symbol_ids: HashSet<_> = aave_symbols
+            .iter()
+            .map(|symbol| symbol.symbol_id.clone())
+            .collect();
+        let base_wallets = filter_wallets_for_symbol_ids(&cfg.portfolio.wallets, &base_symbol_ids);
+        let aave_wallets = filter_wallets_for_symbol_ids(&cfg.portfolio.wallets, &aave_symbol_ids);
 
         let mut states = Vec::new();
         let mut edges = Vec::new();
@@ -215,30 +270,75 @@ impl Operation for PortfolioTrackerOp {
         let collect_observations_sid =
             StateId::must_new(format!("{}.collect_observations", op_path.0));
         edges.push(DependencyEdge {
-            from: resolve_wallets_sid,
+            from: resolve_wallets_sid.clone(),
             to: collect_observations_sid.clone(),
         });
         edges.push(DependencyEdge {
-            from: read_direct_prices_sid,
+            from: read_direct_prices_sid.clone(),
             to: collect_observations_sid.clone(),
         });
         states.push(StateNode {
             id: collect_observations_sid.clone(),
             state: Arc::new(CollectObservationsState {
                 state_id: collect_observations_sid.clone(),
-                wallets: cfg.portfolio.wallets.clone(),
-                symbols: cfg.portfolio.symbol_configs.clone(),
-                networks: routes,
+                wallets: base_wallets,
+                symbols: base_symbols,
+                networks: routes.clone(),
                 resolved_wallets_key: ctx_key(KEY_RESOLVED_WALLETS),
                 network_pins_key: ctx_key(KEY_NETWORK_PINS),
                 direct_prices_key: ctx_key(KEY_DIRECT_PRICES),
+                output_key: ctx_key(KEY_BASE_OBSERVATIONS),
+            }),
+        });
+
+        let collect_aave_observations_sid =
+            StateId::must_new(format!("{}.collect_aave_observations", op_path.0));
+        edges.push(DependencyEdge {
+            from: resolve_wallets_sid.clone(),
+            to: collect_aave_observations_sid.clone(),
+        });
+        edges.push(DependencyEdge {
+            from: read_direct_prices_sid.clone(),
+            to: collect_aave_observations_sid.clone(),
+        });
+        states.push(StateNode {
+            id: collect_aave_observations_sid.clone(),
+            state: Arc::new(CollectAaveObservationsState {
+                state_id: collect_aave_observations_sid.clone(),
+                wallets: aave_wallets,
+                symbols: aave_symbols,
+                networks: routes.clone(),
+                resolved_wallets_key: ctx_key(KEY_RESOLVED_WALLETS),
+                network_pins_key: ctx_key(KEY_NETWORK_PINS),
+                direct_prices_key: ctx_key(KEY_DIRECT_PRICES),
+                output_key: ctx_key(KEY_AAVE_OBSERVATIONS),
+            }),
+        });
+
+        let merge_observations_sid = StateId::must_new(format!("{}.merge_observations", op_path.0));
+        edges.push(DependencyEdge {
+            from: collect_observations_sid,
+            to: merge_observations_sid.clone(),
+        });
+        edges.push(DependencyEdge {
+            from: collect_aave_observations_sid,
+            to: merge_observations_sid.clone(),
+        });
+        states.push(StateNode {
+            id: merge_observations_sid.clone(),
+            state: Arc::new(MergeObservationsState {
+                state_id: merge_observations_sid.clone(),
+                input_keys: vec![
+                    ctx_key(KEY_BASE_OBSERVATIONS),
+                    ctx_key(KEY_AAVE_OBSERVATIONS),
+                ],
                 output_key: ctx_key(KEY_OBSERVATIONS),
             }),
         });
 
         let write_snapshot_sid = StateId::must_new(format!("{}.write_snapshot", op_path.0));
         edges.push(DependencyEdge {
-            from: collect_observations_sid,
+            from: merge_observations_sid,
             to: write_snapshot_sid.clone(),
         });
         states.push(StateNode {
