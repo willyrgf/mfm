@@ -380,17 +380,24 @@ fn derive_quote_totals(
             let entry = totals.entry(value.quote).or_default();
             match observation.role {
                 SymbolRole::Native | SymbolRole::Asset => {
-                    entry.assets_value = entry.assets_value.add(&DecimalValue::parse(&value.value_dec)?);
+                    entry.assets_value = entry
+                        .assets_value
+                        .add(&DecimalValue::parse(&value.value_dec)?);
                 }
                 SymbolRole::Collateral => {
-                    entry.collateral_value =
-                        entry.collateral_value.add(&DecimalValue::parse(&value.value_dec)?);
+                    entry.collateral_value = entry
+                        .collateral_value
+                        .add(&DecimalValue::parse(&value.value_dec)?);
                 }
                 SymbolRole::Debt => {
-                    entry.debt_value = entry.debt_value.add(&DecimalValue::parse(&value.value_dec)?);
+                    entry.debt_value = entry
+                        .debt_value
+                        .add(&DecimalValue::parse(&value.value_dec)?);
                 }
                 SymbolRole::Staked => {
-                    entry.staked_value = entry.staked_value.add(&DecimalValue::parse(&value.value_dec)?);
+                    entry.staked_value = entry
+                        .staked_value
+                        .add(&DecimalValue::parse(&value.value_dec)?);
                 }
             }
         }
@@ -398,7 +405,9 @@ fn derive_quote_totals(
     Ok(totals)
 }
 
-fn initialized_quote_totals(report_quotes: &[QuoteCode]) -> BTreeMap<QuoteCode, QuoteTotalsAccumulator> {
+fn initialized_quote_totals(
+    report_quotes: &[QuoteCode],
+) -> BTreeMap<QuoteCode, QuoteTotalsAccumulator> {
     report_quotes
         .iter()
         .copied()
@@ -949,7 +958,10 @@ mod tests {
             .find(|wallet| wallet.wallet_id == "wallet_ops_arb")
             .expect("ops wallet report");
         let wallet_ops_arb_usd = find_quote_total(&wallet_ops_arb.totals_by_quote, QuoteCode::Usd);
-        assert_eq!(wallet_ops_arb_usd.assets_value_dec, "400.000000000000000000");
+        assert_eq!(
+            wallet_ops_arb_usd.assets_value_dec,
+            "400.000000000000000000"
+        );
         assert_eq!(wallet_ops_arb_usd.collateral_value_dec, "0");
         assert_eq!(wallet_ops_arb_usd.debt_value_dec, "0");
         assert_eq!(wallet_ops_arb_usd.staked_value_dec, "0");
@@ -966,14 +978,20 @@ mod tests {
             wallet_treasury_eth_usd.assets_value_dec,
             "12.000000000000000000"
         );
-        assert_eq!(wallet_treasury_eth_usd.net_value_dec, "12.000000000000000000");
+        assert_eq!(
+            wallet_treasury_eth_usd.net_value_dec,
+            "12.000000000000000000"
+        );
         let wallet_treasury_eth_btc =
             find_quote_total(&wallet_treasury_eth.totals_by_quote, QuoteCode::Btc);
         assert_eq!(
             wallet_treasury_eth_btc.assets_value_dec,
             "0.060000000000000000"
         );
-        assert_eq!(wallet_treasury_eth_btc.net_value_dec, "0.060000000000000000");
+        assert_eq!(
+            wallet_treasury_eth_btc.net_value_dec,
+            "0.060000000000000000"
+        );
 
         let portfolio_usd = find_quote_total(&report.totals_by_quote, QuoteCode::Usd);
         assert_eq!(portfolio_usd.assets_value_dec, "412.000000000000000000");
@@ -1066,7 +1084,8 @@ mod tests {
                 .expect("report"),
         )
         .expect("typed report");
-        let wallet_usd = find_quote_total(&report.wallet_summaries[0].totals_by_quote, QuoteCode::Usd);
+        let wallet_usd =
+            find_quote_total(&report.wallet_summaries[0].totals_by_quote, QuoteCode::Usd);
         assert_eq!(wallet_usd.assets_value_dec, "12.50");
         assert_eq!(wallet_usd.collateral_value_dec, "7.25");
         assert_eq!(wallet_usd.debt_value_dec, "30.00");
@@ -1307,10 +1326,7 @@ mod tests {
         }
     }
 
-    fn find_quote_total(
-        totals: &[PortfolioQuoteTotal],
-        quote: QuoteCode,
-    ) -> PortfolioQuoteTotal {
+    fn find_quote_total(totals: &[PortfolioQuoteTotal], quote: QuoteCode) -> PortfolioQuoteTotal {
         totals
             .iter()
             .find(|total| total.quote == quote)

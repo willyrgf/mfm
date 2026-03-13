@@ -204,7 +204,8 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     assert_eq!(v["data"]["result"]["report"]["error_count"], 0);
     let report_wallet = &v["data"]["result"]["report"]["wallet_summaries"][0];
     let report_wallet_usd = find_quote_total(&report_wallet["totals_by_quote"], "USD");
-    let report_portfolio_usd = find_quote_total(&v["data"]["result"]["report"]["totals_by_quote"], "USD");
+    let report_portfolio_usd =
+        find_quote_total(&v["data"]["result"]["report"]["totals_by_quote"], "USD");
     assert_eq!(report_wallet_usd["collateral_value_dec"], "0");
     assert_eq!(report_wallet_usd["debt_value_dec"], "0");
     assert_eq!(report_wallet_usd["staked_value_dec"], "0");

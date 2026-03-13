@@ -221,6 +221,14 @@ fn aave_portfolio_snapshot_payload(
     let wbtc_a_token = contract_from_manifest(deploy_manifest, CONTRACT_WBTC_A_TOKEN);
     let usdc_variable_debt =
         contract_from_manifest(deploy_manifest, CONTRACT_USDC_VARIABLE_DEBT_TOKEN);
+    let supplier_address = normalize_address_lower(&actors.supplier);
+    let borrower_address = normalize_address_lower(&actors.borrower);
+    let pool_address = normalize_address_lower(&pool.address);
+    let usdc_address = normalize_address_lower(&usdc.address);
+    let wbtc_address = normalize_address_lower(&wbtc.address);
+    let usdc_a_token_address = normalize_address_lower(&usdc_a_token.address);
+    let wbtc_a_token_address = normalize_address_lower(&wbtc_a_token.address);
+    let usdc_variable_debt_address = normalize_address_lower(&usdc_variable_debt.address);
 
     serde_json::json!({
         "portfolio": {
@@ -237,7 +245,7 @@ fn aave_portfolio_snapshot_payload(
             "wallets": [
                 {
                     "wallet_id": "wallet_supplier",
-                    "address": actors.supplier,
+                    "address": supplier_address,
                     "network_id": "reth-local",
                     "implementation": { "kind": "address_only" },
                     "symbol_ids": ["aave_v3.usdc.asset.reth-local"],
@@ -245,7 +253,7 @@ fn aave_portfolio_snapshot_payload(
                 },
                 {
                     "wallet_id": "wallet_borrower",
-                    "address": actors.borrower,
+                    "address": borrower_address,
                     "network_id": "reth-local",
                     "implementation": { "kind": "address_only" },
                     "symbol_ids": [
@@ -265,7 +273,7 @@ fn aave_portfolio_snapshot_payload(
                     "protocol": null,
                     "balance_reader": {
                         "kind": "erc20_balance",
-                        "token_address": usdc.address
+                        "token_address": usdc_address
                     },
                     "valuation": {
                         "quotes": [{
@@ -290,7 +298,7 @@ fn aave_portfolio_snapshot_payload(
                     "protocol": null,
                     "balance_reader": {
                         "kind": "erc20_balance",
-                        "token_address": wbtc.address
+                        "token_address": wbtc_address
                     },
                     "valuation": {
                         "quotes": [{
@@ -322,22 +330,22 @@ fn aave_portfolio_snapshot_payload(
                                 "market_id": "aave-v3-reth",
                                 "network_id": "reth-local",
                                 "chain_id": chain_id,
-                                "pool_address": pool.address,
+                                "pool_address": pool_address,
                                 "reserves": [
                                     {
                                         "reserve_id": "usdc",
                                         "reserve_index": 0,
-                                        "underlying_token_address": usdc.address,
-                                        "a_token_address": usdc_a_token.address,
-                                        "variable_debt_token_address": usdc_variable_debt.address,
+                                        "underlying_token_address": usdc_address,
+                                        "a_token_address": usdc_a_token_address,
+                                        "variable_debt_token_address": usdc_variable_debt_address,
                                         "stable_debt_token_address": null,
                                         "metadata": {}
                                     },
                                     {
                                         "reserve_id": "wbtc",
                                         "reserve_index": 1,
-                                        "underlying_token_address": wbtc.address,
-                                        "a_token_address": wbtc_a_token.address,
+                                        "underlying_token_address": wbtc_address,
+                                        "a_token_address": wbtc_a_token_address,
                                         "variable_debt_token_address": null,
                                         "stable_debt_token_address": null,
                                         "metadata": {}
@@ -378,22 +386,22 @@ fn aave_portfolio_snapshot_payload(
                                 "market_id": "aave-v3-reth",
                                 "network_id": "reth-local",
                                 "chain_id": chain_id,
-                                "pool_address": pool.address,
+                                "pool_address": pool_address,
                                 "reserves": [
                                     {
                                         "reserve_id": "usdc",
                                         "reserve_index": 0,
-                                        "underlying_token_address": usdc.address,
-                                        "a_token_address": usdc_a_token.address,
-                                        "variable_debt_token_address": usdc_variable_debt.address,
+                                        "underlying_token_address": usdc_address,
+                                        "a_token_address": usdc_a_token_address,
+                                        "variable_debt_token_address": usdc_variable_debt_address,
                                         "stable_debt_token_address": null,
                                         "metadata": {}
                                     },
                                     {
                                         "reserve_id": "wbtc",
                                         "reserve_index": 1,
-                                        "underlying_token_address": wbtc.address,
-                                        "a_token_address": wbtc_a_token.address,
+                                        "underlying_token_address": wbtc_address,
+                                        "a_token_address": wbtc_a_token_address,
                                         "variable_debt_token_address": null,
                                         "stable_debt_token_address": null,
                                         "metadata": {}
@@ -434,22 +442,22 @@ fn aave_portfolio_snapshot_payload(
                                 "market_id": "aave-v3-reth",
                                 "network_id": "reth-local",
                                 "chain_id": chain_id,
-                                "pool_address": pool.address,
+                                "pool_address": pool_address,
                                 "reserves": [
                                     {
                                         "reserve_id": "usdc",
                                         "reserve_index": 0,
-                                        "underlying_token_address": usdc.address,
-                                        "a_token_address": usdc_a_token.address,
-                                        "variable_debt_token_address": usdc_variable_debt.address,
+                                        "underlying_token_address": usdc_address,
+                                        "a_token_address": usdc_a_token_address,
+                                        "variable_debt_token_address": usdc_variable_debt_address,
                                         "stable_debt_token_address": null,
                                         "metadata": {}
                                     },
                                     {
                                         "reserve_id": "wbtc",
                                         "reserve_index": 1,
-                                        "underlying_token_address": wbtc.address,
-                                        "a_token_address": wbtc_a_token.address,
+                                        "underlying_token_address": wbtc_address,
+                                        "a_token_address": wbtc_a_token_address,
                                         "variable_debt_token_address": null,
                                         "stable_debt_token_address": null,
                                         "metadata": {}
@@ -484,6 +492,20 @@ fn aave_portfolio_snapshot_payload(
     })
 }
 
+fn normalize_address_lower(s: &str) -> String {
+    let s = s.trim();
+    let rest = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .expect("0x");
+    assert_eq!(rest.len(), 40, "address must be 20 bytes hex");
+    assert!(
+        rest.chars().all(|c| c.is_ascii_hexdigit()),
+        "address must be hex"
+    );
+    format!("0x{}", rest.to_ascii_lowercase())
+}
+
 fn find_wallet<'a>(snapshot: &'a serde_json::Value, wallet_id: &str) -> &'a serde_json::Value {
     snapshot["wallets"]
         .as_array()
@@ -491,6 +513,18 @@ fn find_wallet<'a>(snapshot: &'a serde_json::Value, wallet_id: &str) -> &'a serd
         .iter()
         .find(|wallet| wallet["wallet_id"] == wallet_id)
         .unwrap_or_else(|| panic!("wallet not found: {wallet_id}"))
+}
+
+fn find_wallet_summary<'a>(
+    report: &'a serde_json::Value,
+    wallet_id: &str,
+) -> &'a serde_json::Value {
+    report["wallet_summaries"]
+        .as_array()
+        .expect("wallet_summaries array")
+        .iter()
+        .find(|wallet| wallet["wallet_id"] == wallet_id)
+        .unwrap_or_else(|| panic!("wallet summary not found: {wallet_id}"))
 }
 
 fn find_observation<'a>(wallet: &'a serde_json::Value, symbol_id: &str) -> &'a serde_json::Value {
@@ -1272,8 +1306,9 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         "aave-v3-reth-portfolio"
     );
     assert_eq!(feature["data"]["result"]["report"]["error_count"], 0);
+    let report = &feature["data"]["result"]["report"];
     let supplier_report_usd = find_quote_total(
-        &feature["data"]["result"]["report"]["wallet_summaries"][0]["totals_by_quote"],
+        &find_wallet_summary(report, "wallet_supplier")["totals_by_quote"],
         "USD",
     );
     assert_eq!(supplier_report_usd["collateral_value_dec"], "0");
@@ -1360,7 +1395,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     );
 
     let borrower_report_usd = find_quote_total(
-        &feature["data"]["result"]["report"]["wallet_summaries"][1]["totals_by_quote"],
+        &find_wallet_summary(report, "wallet_borrower")["totals_by_quote"],
         "USD",
     );
     assert_eq!(
@@ -1373,18 +1408,16 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     );
     assert_eq!(borrower_report_usd["assets_value_dec"], "0");
     assert_eq!(borrower_report_usd["staked_value_dec"], "0");
-    assert!(
-        borrower_report_usd["net_value_dec"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
+    assert!(borrower_report_usd["net_value_dec"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    let portfolio_report_usd = find_quote_total(
+        &feature["data"]["result"]["report"]["totals_by_quote"],
+        "USD",
     );
-    let portfolio_report_usd =
-        find_quote_total(&feature["data"]["result"]["report"]["totals_by_quote"], "USD");
-    assert!(
-        portfolio_report_usd["net_value_dec"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
-    );
+    assert!(portfolio_report_usd["net_value_dec"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
 
     write_parity_aave_run_ids(&phase_a_run.run_id, &phase_b_run.run_id);
 }

@@ -491,12 +491,16 @@ async fn at_live_then_replay_determinism() {
     assert_eq!(report.portfolio_id, "portfolio_main");
     assert_eq!(report.error_count, 0);
     assert_eq!(report.wallet_summaries.len(), 2);
-    let portfolio_usd =
-        find_quote_total(&report.totals_by_quote, mfm_state_symbol::model::QuoteCode::Usd);
+    let portfolio_usd = find_quote_total(
+        &report.totals_by_quote,
+        mfm_state_symbol::model::QuoteCode::Usd,
+    );
     assert_eq!(portfolio_usd.assets_value_dec, "6010.000000000000000000");
     assert_eq!(portfolio_usd.net_value_dec, "6010.000000000000000000");
-    let portfolio_btc =
-        find_quote_total(&report.totals_by_quote, mfm_state_symbol::model::QuoteCode::Btc);
+    let portfolio_btc = find_quote_total(
+        &report.totals_by_quote,
+        mfm_state_symbol::model::QuoteCode::Btc,
+    );
     assert_eq!(portfolio_btc.assets_value_dec, "0.300500000000000000");
     assert_eq!(portfolio_btc.net_value_dec, "0.300500000000000000");
 
@@ -657,8 +661,10 @@ async fn at_crash_resume_orphan_attempt_reuses_pinned_network_facts() {
     ))
     .expect("typed report");
     assert_eq!(report.error_count, 0);
-    let portfolio_usd =
-        find_quote_total(&report.totals_by_quote, mfm_state_symbol::model::QuoteCode::Usd);
+    let portfolio_usd = find_quote_total(
+        &report.totals_by_quote,
+        mfm_state_symbol::model::QuoteCode::Usd,
+    );
     assert_eq!(portfolio_usd.assets_value_dec, "6010.000000000000000000");
     assert_eq!(portfolio_usd.net_value_dec, "6010.000000000000000000");
     let snapshot = load_snapshot_artifact(&stores, &context_snapshot).await;
@@ -747,8 +753,10 @@ async fn collects_aave_protocol_positions_through_the_op_boundary() {
     assert_eq!(borrower_usd.collateral_value_dec, "140000.00000000");
     assert_eq!(borrower_usd.debt_value_dec, "0.750000");
     assert_eq!(borrower_usd.net_value_dec, "139999.25000000");
-    let portfolio_usd =
-        find_quote_total(&report.totals_by_quote, mfm_state_symbol::model::QuoteCode::Usd);
+    let portfolio_usd = find_quote_total(
+        &report.totals_by_quote,
+        mfm_state_symbol::model::QuoteCode::Usd,
+    );
     assert_eq!(portfolio_usd.assets_value_dec, "1.500000");
     assert_eq!(portfolio_usd.collateral_value_dec, "140000.00000000");
     assert_eq!(portfolio_usd.debt_value_dec, "0.750000");
