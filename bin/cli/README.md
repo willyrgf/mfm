@@ -410,6 +410,7 @@ The request JSON must use the same in-place contract as the `portfolio.snapshot`
 - Result metadata includes run ids and snapshot ids.
 - The response includes `snapshot_artifact_id` when the run completed.
 - The response includes the canonical portfolio `report` when available.
+- `report.wallet_summaries[*].totals_by_quote[*]` and `report.totals_by_quote[*]` expose derived per-quote `assets_value_dec`, `collateral_value_dec`, `debt_value_dec`, `staked_value_dec`, and `net_value_dec`.
 
 ## Configuration
 

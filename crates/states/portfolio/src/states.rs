@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use async_trait::async_trait;
 use mfm_collectors_evm::{parse_u64_hex_value, EvmIoClient, JsonRpcCall};
@@ -16,11 +16,14 @@ use mfm_state_common::errors::{
 use mfm_state_common::local_io_helpers::emit_report_event;
 use mfm_state_common::output::write_output_artifact;
 use mfm_state_common::states::meta;
+use mfm_state_symbol::model::{Observation, QuoteCode, SymbolRole};
 use mfm_state_wallet::model::ResolvedWallet;
+use num_bigint::BigInt;
+use num_traits::{Signed, Zero};
 
 use crate::model::{
-    validate_portfolio_bundle, NetworkPin, PortfolioConfig, PortfolioReport, PortfolioSnapshot,
-    PortfolioSnapshotError, WalletReport, WalletSnapshot,
+    validate_portfolio_bundle, NetworkPin, PortfolioConfig, PortfolioQuoteTotal, PortfolioReport,
+    PortfolioSnapshot, PortfolioSnapshotError, WalletReport, WalletSnapshot,
 };
 
 /// Pins each required network to a concrete block for one portfolio execution.
@@ -292,20 +295,28 @@ impl State for WritePortfolioReportState {
             "failed to decode portfolio snapshot",
         )?;
 
+        let report_quotes = collect_report_quotes(&snapshot);
+        let mut portfolio_totals = initialized_quote_totals(&report_quotes);
+        let wallet_summaries = snapshot
+            .wallets
+            .iter()
+            .map(|wallet| {
+                let wallet_totals = derive_quote_totals(&report_quotes, &wallet.observations)?;
+                merge_quote_totals(&mut portfolio_totals, &wallet_totals);
+                Ok(WalletReport {
+                    wallet_id: wallet.wallet_id.clone(),
+                    network_id: wallet.network_id.clone(),
+                    totals_by_quote: quote_totals_to_vec(wallet_totals),
+                })
+            })
+            .collect::<Result<Vec<_>, StateError>>()?;
+
         let mut report = PortfolioReport {
             portfolio_id: snapshot.portfolio_id.clone(),
             generated_at_ms: snapshot.generated_at_ms,
             network_pins: snapshot.network_pins.clone(),
-            wallet_summaries: snapshot
-                .wallets
-                .iter()
-                .map(|wallet| WalletReport {
-                    wallet_id: wallet.wallet_id.clone(),
-                    network_id: wallet.network_id.clone(),
-                    totals_by_quote: Vec::new(),
-                })
-                .collect(),
-            totals_by_quote: Vec::new(),
+            wallet_summaries,
+            totals_by_quote: quote_totals_to_vec(portfolio_totals),
             error_count: snapshot.errors.len() as u64,
         };
         report.normalize();
@@ -326,9 +337,9 @@ impl State for WritePortfolioReportState {
 }
 
 fn group_observations_by_wallet(
-    mut observations: Vec<mfm_state_symbol::model::Observation>,
-) -> HashMap<String, Vec<mfm_state_symbol::model::Observation>> {
-    let mut grouped: HashMap<String, Vec<mfm_state_symbol::model::Observation>> = HashMap::new();
+    mut observations: Vec<Observation>,
+) -> HashMap<String, Vec<Observation>> {
+    let mut grouped: HashMap<String, Vec<Observation>> = HashMap::new();
     observations.sort_by(|left, right| {
         (left.wallet_id.as_str(), left.symbol_id.as_str())
             .cmp(&(right.wallet_id.as_str(), right.symbol_id.as_str()))
@@ -340,6 +351,248 @@ fn group_observations_by_wallet(
             .push(observation);
     }
     grouped
+}
+
+fn collect_report_quotes(snapshot: &PortfolioSnapshot) -> Vec<QuoteCode> {
+    let mut quotes = BTreeSet::new();
+    for symbol in &snapshot.symbol_configs {
+        for quote in &symbol.valuation.quotes {
+            quotes.insert(quote.quote);
+        }
+    }
+    for wallet in &snapshot.wallets {
+        for observation in &wallet.observations {
+            for value in &observation.values {
+                quotes.insert(value.quote);
+            }
+        }
+    }
+    quotes.into_iter().collect()
+}
+
+fn derive_quote_totals(
+    report_quotes: &[QuoteCode],
+    observations: &[Observation],
+) -> Result<BTreeMap<QuoteCode, QuoteTotalsAccumulator>, StateError> {
+    let mut totals = initialized_quote_totals(report_quotes);
+    for observation in observations {
+        for value in &observation.values {
+            let entry = totals.entry(value.quote).or_default();
+            match observation.role {
+                SymbolRole::Native | SymbolRole::Asset => {
+                    entry.assets_value = entry.assets_value.add(&DecimalValue::parse(&value.value_dec)?);
+                }
+                SymbolRole::Collateral => {
+                    entry.collateral_value =
+                        entry.collateral_value.add(&DecimalValue::parse(&value.value_dec)?);
+                }
+                SymbolRole::Debt => {
+                    entry.debt_value = entry.debt_value.add(&DecimalValue::parse(&value.value_dec)?);
+                }
+                SymbolRole::Staked => {
+                    entry.staked_value = entry.staked_value.add(&DecimalValue::parse(&value.value_dec)?);
+                }
+            }
+        }
+    }
+    Ok(totals)
+}
+
+fn initialized_quote_totals(report_quotes: &[QuoteCode]) -> BTreeMap<QuoteCode, QuoteTotalsAccumulator> {
+    report_quotes
+        .iter()
+        .copied()
+        .map(|quote| (quote, QuoteTotalsAccumulator::default()))
+        .collect()
+}
+
+fn merge_quote_totals(
+    target: &mut BTreeMap<QuoteCode, QuoteTotalsAccumulator>,
+    source: &BTreeMap<QuoteCode, QuoteTotalsAccumulator>,
+) {
+    for (quote, totals) in source {
+        target
+            .entry(*quote)
+            .and_modify(|acc| acc.merge(totals))
+            .or_insert_with(|| totals.clone());
+    }
+}
+
+fn quote_totals_to_vec(
+    totals: BTreeMap<QuoteCode, QuoteTotalsAccumulator>,
+) -> Vec<PortfolioQuoteTotal> {
+    totals
+        .into_iter()
+        .map(|(quote, totals)| totals.into_report_total(quote))
+        .collect()
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct QuoteTotalsAccumulator {
+    assets_value: DecimalValue,
+    collateral_value: DecimalValue,
+    debt_value: DecimalValue,
+    staked_value: DecimalValue,
+}
+
+impl QuoteTotalsAccumulator {
+    fn merge(&mut self, other: &Self) {
+        self.assets_value = self.assets_value.add(&other.assets_value);
+        self.collateral_value = self.collateral_value.add(&other.collateral_value);
+        self.debt_value = self.debt_value.add(&other.debt_value);
+        self.staked_value = self.staked_value.add(&other.staked_value);
+    }
+
+    fn into_report_total(self, quote: QuoteCode) -> PortfolioQuoteTotal {
+        let positive_value = self
+            .assets_value
+            .add(&self.collateral_value)
+            .add(&self.staked_value);
+        let net_value = positive_value.sub(&self.debt_value);
+        PortfolioQuoteTotal {
+            quote,
+            assets_value_dec: self.assets_value.to_canonical_string(),
+            collateral_value_dec: self.collateral_value.to_canonical_string(),
+            debt_value_dec: self.debt_value.to_canonical_string(),
+            staked_value_dec: self.staked_value.to_canonical_string(),
+            net_value_dec: net_value.to_canonical_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DecimalValue {
+    digits: BigInt,
+    scale: u32,
+}
+
+impl Default for DecimalValue {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+impl DecimalValue {
+    fn zero() -> Self {
+        Self {
+            digits: BigInt::ZERO,
+            scale: 0,
+        }
+    }
+
+    fn parse(input: &str) -> Result<Self, StateError> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(state_unknown_msg(
+                "invalid_decimal_string",
+                format!("invalid decimal string `{input}`"),
+            ));
+        }
+
+        let (negative, digits_part) = match trimmed.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, trimmed),
+        };
+        let parts: Vec<_> = digits_part.split('.').collect();
+        if parts.len() > 2
+            || parts
+                .iter()
+                .any(|part| !part.is_empty() && !part.chars().all(|ch| ch.is_ascii_digit()))
+        {
+            return Err(state_unknown_msg(
+                "invalid_decimal_string",
+                format!("invalid decimal string `{input}`"),
+            ));
+        }
+
+        let whole = parts[0];
+        let frac = parts.get(1).copied().unwrap_or("");
+        let digits = format!("{whole}{frac}");
+        let digits = if digits.is_empty() {
+            "0"
+        } else {
+            digits.as_str()
+        };
+        let mut parsed: BigInt = digits.parse().map_err(|_| {
+            state_unknown_msg(
+                "invalid_decimal_string",
+                format!("invalid decimal string `{input}`"),
+            )
+        })?;
+        if negative && !parsed.is_zero() {
+            parsed = -parsed;
+        }
+        Ok(Self {
+            digits: parsed,
+            scale: frac.len() as u32,
+        })
+    }
+
+    fn add(&self, other: &Self) -> Self {
+        let scale = self.scale.max(other.scale);
+        Self {
+            digits: self.scaled_digits(scale) + other.scaled_digits(scale),
+            scale,
+        }
+    }
+
+    fn sub(&self, other: &Self) -> Self {
+        let scale = self.scale.max(other.scale);
+        Self {
+            digits: self.scaled_digits(scale) - other.scaled_digits(scale),
+            scale,
+        }
+    }
+
+    fn scaled_digits(&self, scale: u32) -> BigInt {
+        if self.scale == scale {
+            self.digits.clone()
+        } else {
+            &self.digits * ten_pow(scale - self.scale)
+        }
+    }
+
+    fn to_canonical_string(&self) -> String {
+        self.to_string_with_min_scale(self.scale)
+    }
+
+    fn to_string_with_min_scale(&self, min_scale: u32) -> String {
+        let negative = self.digits.is_negative();
+        let digits = self.digits.abs().to_string();
+        let scale = self.scale as usize;
+        let mut out = if scale == 0 {
+            digits
+        } else if digits.len() <= scale {
+            format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
+        } else {
+            let split = digits.len() - scale;
+            format!("{}.{}", &digits[..split], &digits[split..])
+        };
+
+        if let Some((whole, frac)) = out.split_once('.') {
+            let mut frac = frac.to_string();
+            while frac.len() > min_scale as usize && frac.ends_with('0') {
+                frac.pop();
+            }
+            if frac.len() < min_scale as usize {
+                frac.push_str(&"0".repeat(min_scale as usize - frac.len()));
+            }
+            out = format!("{whole}.{frac}");
+        } else if min_scale > 0 {
+            out.push('.');
+            out.push_str(&"0".repeat(min_scale as usize));
+        }
+
+        if negative && out != "0" {
+            format!("-{out}")
+        } else {
+            out
+        }
+    }
+}
+
+fn ten_pow(n: u32) -> BigInt {
+    BigInt::from(10u8).pow(n)
 }
 
 async fn read_u64_rpc(
@@ -690,6 +943,47 @@ mod tests {
         assert_eq!(report.portfolio_id, "portfolio_main");
         assert_eq!(report.error_count, 0);
         assert_eq!(report.wallet_summaries.len(), 2);
+        let wallet_ops_arb = report
+            .wallet_summaries
+            .iter()
+            .find(|wallet| wallet.wallet_id == "wallet_ops_arb")
+            .expect("ops wallet report");
+        let wallet_ops_arb_usd = find_quote_total(&wallet_ops_arb.totals_by_quote, QuoteCode::Usd);
+        assert_eq!(wallet_ops_arb_usd.assets_value_dec, "400.000000000000000000");
+        assert_eq!(wallet_ops_arb_usd.collateral_value_dec, "0");
+        assert_eq!(wallet_ops_arb_usd.debt_value_dec, "0");
+        assert_eq!(wallet_ops_arb_usd.staked_value_dec, "0");
+        assert_eq!(wallet_ops_arb_usd.net_value_dec, "400.000000000000000000");
+
+        let wallet_treasury_eth = report
+            .wallet_summaries
+            .iter()
+            .find(|wallet| wallet.wallet_id == "wallet_treasury_eth")
+            .expect("treasury wallet report");
+        let wallet_treasury_eth_usd =
+            find_quote_total(&wallet_treasury_eth.totals_by_quote, QuoteCode::Usd);
+        assert_eq!(
+            wallet_treasury_eth_usd.assets_value_dec,
+            "12.000000000000000000"
+        );
+        assert_eq!(wallet_treasury_eth_usd.net_value_dec, "12.000000000000000000");
+        let wallet_treasury_eth_btc =
+            find_quote_total(&wallet_treasury_eth.totals_by_quote, QuoteCode::Btc);
+        assert_eq!(
+            wallet_treasury_eth_btc.assets_value_dec,
+            "0.060000000000000000"
+        );
+        assert_eq!(wallet_treasury_eth_btc.net_value_dec, "0.060000000000000000");
+
+        let portfolio_usd = find_quote_total(&report.totals_by_quote, QuoteCode::Usd);
+        assert_eq!(portfolio_usd.assets_value_dec, "412.000000000000000000");
+        assert_eq!(portfolio_usd.collateral_value_dec, "0");
+        assert_eq!(portfolio_usd.debt_value_dec, "0");
+        assert_eq!(portfolio_usd.staked_value_dec, "0");
+        assert_eq!(portfolio_usd.net_value_dec, "412.000000000000000000");
+        let portfolio_btc = find_quote_total(&report.totals_by_quote, QuoteCode::Btc);
+        assert_eq!(portfolio_btc.assets_value_dec, "0.080000000000000000");
+        assert_eq!(portfolio_btc.net_value_dec, "0.080000000000000000");
 
         let direct_prices: Vec<DirectPriceValue> = serde_json::from_value(
             ctx.read(&ContextKey("direct_prices".to_string()))
@@ -698,6 +992,89 @@ mod tests {
         )
         .expect("typed direct prices");
         assert_eq!(direct_prices.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn write_portfolio_report_derives_net_exposure_buckets() {
+        let snapshot = PortfolioSnapshot {
+            portfolio_id: "portfolio_roles".to_string(),
+            generated_at_ms: 1234,
+            network_pins: vec![NetworkPin {
+                network_id: "ethereum-mainnet".to_string(),
+                chain_id: 1,
+                block_number: 100,
+            }],
+            wallets: vec![WalletSnapshot {
+                wallet_id: "wallet_main".to_string(),
+                address: "0x000000000000000000000000000000000000dead".to_string(),
+                network_id: "ethereum-mainnet".to_string(),
+                observations: vec![
+                    observation_with_value(
+                        "wallet_main",
+                        "asset.main",
+                        SymbolRole::Asset,
+                        QuoteCode::Usd,
+                        "12.50",
+                    ),
+                    observation_with_value(
+                        "wallet_main",
+                        "collateral.main",
+                        SymbolRole::Collateral,
+                        QuoteCode::Usd,
+                        "7.25",
+                    ),
+                    observation_with_value(
+                        "wallet_main",
+                        "debt.main",
+                        SymbolRole::Debt,
+                        QuoteCode::Usd,
+                        "30.00",
+                    ),
+                    observation_with_value(
+                        "wallet_main",
+                        "staked.main",
+                        SymbolRole::Staked,
+                        QuoteCode::Usd,
+                        "1.25",
+                    ),
+                ],
+            }],
+            symbol_configs: vec![],
+            errors: vec![],
+        };
+
+        let mut ctx = MapContext::default();
+        ctx.write(
+            ContextKey("snapshot".to_string()),
+            serde_json::to_value(&snapshot).expect("snapshot json"),
+        )
+        .expect("write snapshot");
+
+        WritePortfolioReportState {
+            state_id: StateId::must_new("portfolio.main.report".to_string()),
+            snapshot_key: ContextKey("snapshot".to_string()),
+            output_key: ContextKey("report".to_string()),
+            event_name: "portfolio_snapshot.completed",
+        }
+        .handle(&mut ctx, &mut MockIo::default(), &mut NoopRecorder)
+        .await
+        .expect("write report");
+
+        let report: PortfolioReport = serde_json::from_value(
+            ctx.read(&ContextKey("report".to_string()))
+                .expect("read")
+                .expect("report"),
+        )
+        .expect("typed report");
+        let wallet_usd = find_quote_total(&report.wallet_summaries[0].totals_by_quote, QuoteCode::Usd);
+        assert_eq!(wallet_usd.assets_value_dec, "12.50");
+        assert_eq!(wallet_usd.collateral_value_dec, "7.25");
+        assert_eq!(wallet_usd.debt_value_dec, "30.00");
+        assert_eq!(wallet_usd.staked_value_dec, "1.25");
+        assert_eq!(wallet_usd.net_value_dec, "-9.00");
+
+        let portfolio_usd = find_quote_total(&report.totals_by_quote, QuoteCode::Usd);
+        assert_eq!(portfolio_usd, wallet_usd);
     }
 
     fn chainlink_round_data_hex(answer: u64) -> serde_json::Value {
@@ -927,6 +1304,54 @@ mod tests {
                     metadata: BTreeMap::new(),
                 },
             ],
+        }
+    }
+
+    fn find_quote_total(
+        totals: &[PortfolioQuoteTotal],
+        quote: QuoteCode,
+    ) -> PortfolioQuoteTotal {
+        totals
+            .iter()
+            .find(|total| total.quote == quote)
+            .cloned()
+            .unwrap_or_else(|| panic!("missing quote total for {}", quote))
+    }
+
+    fn observation_with_value(
+        wallet_id: &str,
+        symbol_id: &str,
+        role: SymbolRole,
+        quote: QuoteCode,
+        value_dec: &str,
+    ) -> Observation {
+        Observation {
+            wallet_id: wallet_id.to_string(),
+            symbol_id: symbol_id.to_string(),
+            display_symbol: None,
+            kind: SymbolKind::ProtocolPosition,
+            role,
+            network_id: "ethereum-mainnet".to_string(),
+            protocol: None,
+            quantity: mfm_state_symbol::model::ObservationQuantity {
+                raw_dec: "1".to_string(),
+                decimals: 0,
+                amount_dec: "1".to_string(),
+            },
+            values: vec![mfm_state_symbol::model::ObservationValue {
+                quote,
+                priced_symbol_id: symbol_id.to_string(),
+                value_dec: value_dec.to_string(),
+                unit_price_dec: value_dec.to_string(),
+                valuation_reader_kind: "fixed_unit_price".to_string(),
+                source_refs: Vec::new(),
+            }],
+            source: mfm_state_symbol::model::ObservationSource {
+                balance_reader_kind: "test".to_string(),
+                network_id: "ethereum-mainnet".to_string(),
+                block_number: 100,
+            },
+            metadata: BTreeMap::new(),
         }
     }
 }

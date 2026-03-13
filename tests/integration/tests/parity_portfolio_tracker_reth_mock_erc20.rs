@@ -171,6 +171,15 @@ async fn response_json(resp: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).expect("json response")
 }
 
+fn find_quote_total<'a>(totals: &'a serde_json::Value, quote: &str) -> &'a serde_json::Value {
+    totals
+        .as_array()
+        .expect("quote totals array")
+        .iter()
+        .find(|total| total["quote"] == quote)
+        .unwrap_or_else(|| panic!("missing quote total for {quote}"))
+}
+
 fn run_config_with_allowlist(allowlist: Vec<String>) -> RunConfig {
     RunConfig {
         io_mode: IoMode::Live,
@@ -467,6 +476,14 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
         "reth-mock-erc20"
     );
     assert_eq!(v["data"]["result"]["report"]["error_count"], 0);
+    let report_wallet = &v["data"]["result"]["report"]["wallet_summaries"][0];
+    let report_wallet_usd = find_quote_total(&report_wallet["totals_by_quote"], "USD");
+    let report_portfolio_usd = find_quote_total(&v["data"]["result"]["report"]["totals_by_quote"], "USD");
+    assert_eq!(report_wallet_usd, report_portfolio_usd);
+    assert_eq!(report_wallet_usd["collateral_value_dec"], "0");
+    assert_eq!(report_wallet_usd["debt_value_dec"], "0");
+    assert_eq!(report_wallet_usd["staked_value_dec"], "0");
+    assert_eq!(report_wallet_usd["assets_value_dec"], report_wallet_usd["net_value_dec"]);
 
     let snapshot_artifact_id = v["data"]["result"]["snapshot_artifact_id"]
         .as_str()

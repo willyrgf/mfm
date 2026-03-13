@@ -11,6 +11,8 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+num-bigint = "0.4"
+num-traits = "0.2"
 
 mfm-evm-runtime = { path = "../../evm-runtime", version = "0.1.0" }
 mfm-collectors-evm = { path = "../../collectors/evm", version = "0.1.0" }

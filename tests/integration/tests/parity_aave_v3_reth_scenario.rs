@@ -502,6 +502,15 @@ fn find_observation<'a>(wallet: &'a serde_json::Value, symbol_id: &str) -> &'a s
         .unwrap_or_else(|| panic!("observation not found: {symbol_id}"))
 }
 
+fn find_quote_total<'a>(totals: &'a serde_json::Value, quote: &str) -> &'a serde_json::Value {
+    totals
+        .as_array()
+        .expect("quote totals array")
+        .iter()
+        .find(|total| total["quote"] == quote)
+        .unwrap_or_else(|| panic!("quote total not found: {quote}"))
+}
+
 fn required_program_path(program: &str) -> String {
     let out = std::process::Command::new("sh")
         .arg("-c")
@@ -1263,6 +1272,13 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         "aave-v3-reth-portfolio"
     );
     assert_eq!(feature["data"]["result"]["report"]["error_count"], 0);
+    let supplier_report_usd = find_quote_total(
+        &feature["data"]["result"]["report"]["wallet_summaries"][0]["totals_by_quote"],
+        "USD",
+    );
+    assert_eq!(supplier_report_usd["collateral_value_dec"], "0");
+    assert_eq!(supplier_report_usd["debt_value_dec"], "0");
+    assert_eq!(supplier_report_usd["staked_value_dec"], "0");
 
     let snapshot_artifact_id = feature["data"]["result"]["snapshot_artifact_id"]
         .as_str()
@@ -1301,6 +1317,14 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         supplier_usdc["values"][0]["priced_symbol_id"],
         "usdc.wallet.reth-local"
     );
+    assert_eq!(
+        supplier_report_usd["assets_value_dec"],
+        supplier_usdc["values"][0]["value_dec"]
+    );
+    assert_eq!(
+        supplier_report_usd["net_value_dec"],
+        supplier_usdc["values"][0]["value_dec"]
+    );
 
     let borrower_wallet = find_wallet(&snapshot, "wallet_borrower");
     let borrower_collateral =
@@ -1333,6 +1357,33 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     assert_eq!(
         borrower_debt["values"][0]["priced_symbol_id"],
         "usdc.wallet.reth-local"
+    );
+
+    let borrower_report_usd = find_quote_total(
+        &feature["data"]["result"]["report"]["wallet_summaries"][1]["totals_by_quote"],
+        "USD",
+    );
+    assert_eq!(
+        borrower_report_usd["collateral_value_dec"],
+        borrower_collateral["values"][0]["value_dec"]
+    );
+    assert_eq!(
+        borrower_report_usd["debt_value_dec"],
+        borrower_debt["values"][0]["value_dec"]
+    );
+    assert_eq!(borrower_report_usd["assets_value_dec"], "0");
+    assert_eq!(borrower_report_usd["staked_value_dec"], "0");
+    assert!(
+        borrower_report_usd["net_value_dec"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    let portfolio_report_usd =
+        find_quote_total(&feature["data"]["result"]["report"]["totals_by_quote"], "USD");
+    assert!(
+        portfolio_report_usd["net_value_dec"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
     );
 
     write_parity_aave_run_ids(&phase_a_run.run_id, &phase_b_run.run_id);

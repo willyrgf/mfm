@@ -104,6 +104,11 @@ curl -s "http://127.0.0.1:3001/v1/features/portfolio.snapshot/execute" \
   }'
 ```
 
+Successful `portfolio.snapshot` responses include the canonical `report` when the run completes.
+`report.wallet_summaries[*].totals_by_quote[*]` and `report.totals_by_quote[*]` carry the derived
+per-quote `assets_value_dec`, `collateral_value_dec`, `debt_value_dec`, `staked_value_dec`, and
+`net_value_dec` summary fields.
+
 Supported `op_id` values (current):
 
 - `proof` (default)

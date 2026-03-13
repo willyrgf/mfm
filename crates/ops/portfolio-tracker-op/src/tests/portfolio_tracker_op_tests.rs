@@ -19,7 +19,7 @@ use mfm_machine::replay_io::ReplayIo;
 use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
 use mfm_sdk::unstable::SdkPlanResolver;
 use mfm_state_common::test_support as op_test_support;
-use mfm_state_portfolio::model::{PortfolioReport, PortfolioSnapshot};
+use mfm_state_portfolio::model::{PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot};
 use tokio::sync::Mutex;
 
 const ERC20_DECIMALS_SELECTOR: &str = "0x313ce567";
@@ -491,6 +491,14 @@ async fn at_live_then_replay_determinism() {
     assert_eq!(report.portfolio_id, "portfolio_main");
     assert_eq!(report.error_count, 0);
     assert_eq!(report.wallet_summaries.len(), 2);
+    let portfolio_usd =
+        find_quote_total(&report.totals_by_quote, mfm_state_symbol::model::QuoteCode::Usd);
+    assert_eq!(portfolio_usd.assets_value_dec, "6010.000000000000000000");
+    assert_eq!(portfolio_usd.net_value_dec, "6010.000000000000000000");
+    let portfolio_btc =
+        find_quote_total(&report.totals_by_quote, mfm_state_symbol::model::QuoteCode::Btc);
+    assert_eq!(portfolio_btc.assets_value_dec, "0.300500000000000000");
+    assert_eq!(portfolio_btc.net_value_dec, "0.300500000000000000");
 
     let snapshot = load_snapshot_artifact(&stores, &context_snapshot).await;
     assert_eq!(snapshot.portfolio_id, "portfolio_main");
@@ -649,6 +657,10 @@ async fn at_crash_resume_orphan_attempt_reuses_pinned_network_facts() {
     ))
     .expect("typed report");
     assert_eq!(report.error_count, 0);
+    let portfolio_usd =
+        find_quote_total(&report.totals_by_quote, mfm_state_symbol::model::QuoteCode::Usd);
+    assert_eq!(portfolio_usd.assets_value_dec, "6010.000000000000000000");
+    assert_eq!(portfolio_usd.net_value_dec, "6010.000000000000000000");
     let snapshot = load_snapshot_artifact(&stores, &context_snapshot).await;
     assert_eq!(snapshot.wallets.len(), 2);
 
@@ -712,6 +724,35 @@ async fn collects_aave_protocol_positions_through_the_op_boundary() {
     .expect("typed report");
     assert_eq!(report.portfolio_id, "portfolio_aave");
     assert_eq!(report.error_count, 0);
+    let supplier_usd = find_quote_total(
+        &report
+            .wallet_summaries
+            .iter()
+            .find(|wallet| wallet.wallet_id == "wallet_supplier")
+            .expect("supplier wallet report")
+            .totals_by_quote,
+        mfm_state_symbol::model::QuoteCode::Usd,
+    );
+    assert_eq!(supplier_usd.assets_value_dec, "1.500000");
+    assert_eq!(supplier_usd.net_value_dec, "1.500000");
+    let borrower_usd = find_quote_total(
+        &report
+            .wallet_summaries
+            .iter()
+            .find(|wallet| wallet.wallet_id == "wallet_borrower")
+            .expect("borrower wallet report")
+            .totals_by_quote,
+        mfm_state_symbol::model::QuoteCode::Usd,
+    );
+    assert_eq!(borrower_usd.collateral_value_dec, "140000.00000000");
+    assert_eq!(borrower_usd.debt_value_dec, "0.750000");
+    assert_eq!(borrower_usd.net_value_dec, "139999.25000000");
+    let portfolio_usd =
+        find_quote_total(&report.totals_by_quote, mfm_state_symbol::model::QuoteCode::Usd);
+    assert_eq!(portfolio_usd.assets_value_dec, "1.500000");
+    assert_eq!(portfolio_usd.collateral_value_dec, "140000.00000000");
+    assert_eq!(portfolio_usd.debt_value_dec, "0.750000");
+    assert_eq!(portfolio_usd.net_value_dec, "140000.75000000");
 
     let snapshot = load_snapshot_artifact(&stores, &context_snapshot).await;
     assert_eq!(snapshot.wallets.len(), 2);
@@ -767,6 +808,17 @@ async fn collects_aave_protocol_positions_through_the_op_boundary() {
         collateral.values[0].priced_symbol_id,
         "wbtc.wallet.ethereum-mainnet"
     );
+}
+
+fn find_quote_total(
+    totals: &[PortfolioQuoteTotal],
+    quote: mfm_state_symbol::model::QuoteCode,
+) -> PortfolioQuoteTotal {
+    totals
+        .iter()
+        .find(|total| total.quote == quote)
+        .cloned()
+        .unwrap_or_else(|| panic!("missing quote total for {}", quote))
 }
 
 fn canonical_op_config() -> serde_json::Value {
