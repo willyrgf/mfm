@@ -44,7 +44,7 @@ The built-in app bundle registers these ops in `DefaultOperationPlugin::register
 | `evm_configure` | `v1` | `crates/ops/evm-write-op` | Execute post-deploy runtime calls | `EvmConfigureState` | `mfm run start`, feature `run.start` |
 | `evm_validate` | `v1` | `crates/ops/evm-write-op` | Enforce read/event/client assertions | `EvmValidateState` | `mfm run start`, feature `run.start` |
 | `evm_deploy_configure_validate` | `v1` | `crates/ops/evm-deploy-configure-validate-op` | Compose deploy/configure/validate into one op boundary | Child ops `evm_deploy`, `evm_configure`, `evm_validate` | `mfm run pipeline deploy-configure-validate`, feature `pipeline.deploy_configure_validate.start`, feature `run.start` |
-| `portfolio_tracker` | `v1` | `crates/ops/portfolio-tracker-op` | Produce a replayable portfolio snapshot and typed report | `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState`, `WriteSnapshotState`, `WriteReportState` | `mfm portfolio snapshot`, feature `portfolio.snapshot`, feature `run.start` |
+| `portfolio_tracker` | `v1` | `crates/ops/portfolio-tracker-op` | Produce a canonical replayable multi-network portfolio snapshot and typed report | `PinPortfolioNetworksState`, `ResolveWalletsState`, `ReadDirectPricesState`, `CollectObservationsState`, `WritePortfolioSnapshotState`, `WritePortfolioReportState` | `mfm portfolio snapshot`, feature `portfolio.snapshot`, feature `run.start` |
 | `nix_app` | `v1` | `crates/ops/nix-app-op` | Run a nix-resolved program via the exec namespace | `NixExecState` | `mfm run start`, feature `run.start` |
 | `aave_v3_origin_adapt_deploy` | `v1` | `crates/ops/aave-v3-origin-adapt-op` | Adapt Origin deploy output into an Aave V3 deploy manifest | `AdaptOriginDeployOutputState` | `mfm run start`, feature `run.start` |
 
@@ -67,6 +67,10 @@ runtime behavior reused by thin ops.
 | `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState` | Reusable local keystore signing flow | `keystore_tx_sign` |
 | `crates/states/keystore-submit/src/tx.rs` | `KeystoreTxSendRawState` | Reusable raw-transaction submission flow with remote EVM routing | `keystore_tx_send_raw` |
 | `crates/evm-runtime/src/states/read.rs` | `ReadHexStringState`, `ReadU256HexState`, `EthCallState`, `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState` | Reusable chain read/query states | `evm_read`, `portfolio_tracker` |
+| `crates/evm-runtime/src/states/price.rs` | `read_evm_oracle_unit_price` | Reusable pinned EVM oracle price reads for valuation source execution | `portfolio_tracker` |
+| `crates/states/wallet/src/states.rs` | `ResolveWalletsState` | Reusable wallet-resolution flow for canonical portfolio execution | `portfolio_tracker` |
+| `crates/states/symbol/src/states.rs` | `ReadDirectPricesState`, `CollectObservationsState` | Reusable valuation-source execution plus canonical observation normalization | `portfolio_tracker` |
+| `crates/states/portfolio/src/states.rs` | `PinPortfolioNetworksState`, `WritePortfolioSnapshotState`, `WritePortfolioReportState` | Reusable network pinning and canonical snapshot/report assembly | `portfolio_tracker` |
 | `crates/evm-runtime/src/states/write.rs` | `NixArtifactToEvmContractState`, `EvmDeployState`, `EvmConfigureState`, `EvmValidateState` | Reusable contract artifact adaptation and deploy/configure/validate states | `evm_contract_from_nix`, `evm_deploy`, `evm_configure`, `evm_validate` |
 | `crates/states/aave-v3/src/states.rs` | `LoadCompileManifestState`, `DeployContractState`, `WaitForReceiptState`, `CollectDeployOutputsState`, `WriteDeployManifestState`, `AdaptOriginDeployOutputState`, `LoadDeployManifestState`, `ConfigureRuntimeCallState`, `WaitForConfigReceiptState`, `CollectConfigOutputsState`, `WriteConfigReportState` | Reusable Aave V3 deploy/configure/adaptation flow states | Direct built-in use today: `aave_v3_origin_adapt_deploy` for adaptation; the remaining states are reusable flow building blocks not yet registered as standalone built-in ops |
 
@@ -78,8 +82,6 @@ assemble domain-specific outputs rather than reusable execution primitives.
 | Owner | State type | Why still local |
 |---|---|---|
 | `crates/ops/proof-op` | `WriteOutputState` | Domain-specific output artifact for the proof acceptance workflow |
-| `crates/ops/portfolio-tracker-op` | `WriteSnapshotState` | Portfolio-specific snapshot assembly and output writing |
-| `crates/ops/portfolio-tracker-op` | `WriteReportState` | Portfolio-specific typed report assembly |
 
 ## Update Policy
 

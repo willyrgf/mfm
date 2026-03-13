@@ -2281,14 +2281,13 @@ dependencies = [
 name = "mfm-op-portfolio-tracker"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
  "async-trait",
- "mfm-evm-runtime",
  "mfm-machine",
  "mfm-sdk",
  "mfm-state-common",
- "mfm-state-keystore",
- "serde",
+ "mfm-state-portfolio",
+ "mfm-state-symbol",
+ "mfm-state-wallet",
  "serde_json",
  "tokio",
 ]

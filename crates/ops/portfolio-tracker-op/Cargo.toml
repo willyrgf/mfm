@@ -4,16 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-async-trait = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-alloy-primitives = { workspace = true, features = ["serde"] }
 
 mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-state-common = { path = "../../states/common" }
-mfm-evm-runtime = { path = "../../evm-runtime" }
-mfm-state-keystore = { path = "../../states/keystore" }
+mfm-state-portfolio = { path = "../../states/portfolio" }
+mfm-state-symbol = { path = "../../states/symbol" }
+mfm-state-wallet = { path = "../../states/wallet" }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 tokio = { workspace = true }

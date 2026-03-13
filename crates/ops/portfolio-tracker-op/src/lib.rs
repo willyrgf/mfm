@@ -1,16 +1,14 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
 #![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
-//! Portfolio tracker operation.
+//! Canonical portfolio snapshot planner op.
 //!
-//! Source of truth: `docs/redesign.md` (v4).
+//! Source of truth:
+//! - `REVAMP_PORTFOLIO_SNAPSHOT.md`
+//! - `docs/redesign.md`
 //!
-//! Current scope (v1):
-//! - validate `eth_chainId` matches configured `chain_id` (default: 1)
-//! - fetch pinned `eth_blockNumber`
-//! - fetch native ETH balance via `eth_getBalance` at that pinned block
-//! - fetch allowlisted ERC-20 balances via `eth_call(balanceOf)` at that pinned block
-//! - write a content-addressed snapshot output artifact via deterministic fact recording
+//! `portfolio_tracker` remains a thin planner that validates canonical config inputs and wires the
+//! reusable shared-state runtime for multi-network portfolio execution.
 //!
 //! # Examples
 //!
@@ -22,45 +20,38 @@
 //! assert_eq!(op.op_id().as_str(), "portfolio_tracker");
 //! ```
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-
-use alloy_primitives::Address;
-#[cfg(test)]
-use mfm_evm_runtime::states::read::encode_erc20_decimals;
-use mfm_evm_runtime::states::read::{
-    address_hex_lower, address_hex_lower_no0x, NativeBalanceState, ReadU64HexState,
-    TokenBalanceState, U64Expectation,
-};
 use mfm_machine::config::RunConfig;
-use mfm_machine::context::DynContext;
 use mfm_machine::errors::ErrorCategory;
-use mfm_machine::errors::StateError;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
-use mfm_machine::io::IoProvider;
-use mfm_machine::meta::StateMeta;
 use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
-use mfm_machine::recorder::EventRecorder;
-use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
-use mfm_state_common::ctx as op_ctx;
 use mfm_state_common::errors as op_errors;
-use mfm_state_common::local_io_helpers::emit_report_event;
-use mfm_state_common::output as op_output;
-use mfm_state_common::states::meta;
-use mfm_state_keystore::tx::output_context_key;
+use mfm_state_portfolio::model::{
+    decode_portfolio_config, validate_portfolio_bundle, PortfolioConfig,
+};
+use mfm_state_portfolio::states::{
+    PinPortfolioNetworksState, WritePortfolioReportState, WritePortfolioSnapshotState,
+};
+use mfm_state_symbol::model::{decode_valuation_source_registry, ValuationSourceRegistry};
+use mfm_state_symbol::states::{
+    CollectObservationsState, NetworkRouteConfig, ReadDirectPricesState,
+};
+use mfm_state_wallet::states::ResolveWalletsState;
+use serde_json::Value;
 
 const OP_ID: &str = "portfolio_tracker";
 const OP_VERSION: &str = "v1";
+const MAIN_OP_PATH: &str = "portfolio_tracker.main";
 
-const KEY_CHAIN_ID: &str = "chain_id";
-const KEY_BLOCK_NUMBER: &str = "block_number";
-const KEY_NATIVE: &str = "native";
+const KEY_RESOLVED_WALLETS: &str = "resolved_wallets";
+const KEY_NETWORK_PINS: &str = "network_pins";
+const KEY_DIRECT_PRICES: &str = "direct_prices";
+const KEY_OBSERVATIONS: &str = "observations";
+const KEY_SNAPSHOT: &str = "snapshot";
 const KEY_SNAPSHOT_ARTIFACT_ID: &str = "snapshot_artifact_id";
 const KEY_REPORT: &str = "report";
 
@@ -68,181 +59,83 @@ fn ctx_key(suffix: &'static str) -> ContextKey {
     ContextKey(suffix.to_string())
 }
 
-fn default_chain_id() -> u64 {
-    1
+/// Returns the context key that stores the canonical portfolio snapshot JSON.
+pub fn portfolio_snapshot_context_key() -> ContextKey {
+    ContextKey(format!("{MAIN_OP_PATH}.{KEY_SNAPSHOT}"))
 }
 
-/// Rendered balance for one asset in the portfolio snapshot report.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PortfolioBalanceReport {
-    /// Human-readable asset symbol.
-    pub symbol: String,
-    /// Raw integer balance rendered as a decimal string.
-    pub raw_u256_dec: String,
-    /// Token decimals used to interpret the raw balance.
-    pub decimals: u8,
-    /// Decimal-formatted amount using `decimals`.
-    pub amount_dec: String,
+/// Returns the context key that stores the canonical portfolio snapshot artifact id.
+pub fn portfolio_snapshot_artifact_id_context_key() -> ContextKey {
+    ContextKey(format!("{MAIN_OP_PATH}.{KEY_SNAPSHOT_ARTIFACT_ID}"))
 }
 
-/// Summary report written to context after the snapshot artifact is produced.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PortfolioTrackerReport {
-    /// Content-addressed identifier of the snapshot output artifact.
-    pub snapshot_artifact_id: String,
-    /// Chain id used for the snapshot.
-    pub chain_id: u64,
-    /// Block number pinned for all balance reads.
-    pub block_number: u64,
-    #[serde(default)]
-    /// Native balance summary, when present.
-    pub native_balance: Option<PortfolioBalanceReport>,
+/// Returns the context key that stores the canonical portfolio report JSON.
+pub fn portfolio_snapshot_report_context_key() -> ContextKey {
+    ContextKey(format!("{MAIN_OP_PATH}.{KEY_REPORT}"))
 }
 
-/// Returns the context key that stores the final portfolio tracker report.
-pub fn portfolio_tracker_report_context_key() -> ContextKey {
-    output_context_key("portfolio_tracker.main")
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct TokenConfig {
-    address: Address,
-    #[serde(default)]
-    symbol: Option<String>,
-    #[serde(default)]
-    decimals: Option<u8>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 struct PortfolioTrackerConfig {
-    wallet_address: Address,
-
-    #[serde(default = "default_chain_id")]
-    chain_id: u64,
-
-    #[serde(default)]
-    tokens: Vec<TokenConfig>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct PortfolioSnapshotTokenConfig {
-    address: String,
-    #[serde(default)]
-    symbol: Option<String>,
-    #[serde(default)]
-    decimals: Option<u8>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct PortfolioSnapshotInputConfig {
-    address: String,
-    chain_id: Option<u64>,
-    #[serde(default)]
-    tokens: Vec<PortfolioSnapshotTokenConfig>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-enum PortfolioTrackerInputConfig {
-    Tracker(PortfolioTrackerConfig),
-    Snapshot(PortfolioSnapshotInputConfig),
+    portfolio: PortfolioConfig,
+    valuation_source_registry: ValuationSourceRegistry,
 }
 
 fn sdk_input_error(code: &'static str, message: impl Into<String>) -> SdkError {
     op_errors::sdk_error(code, ErrorCategory::ParsingInput, false, message)
 }
 
-fn normalize_eth_address(s: &str) -> Option<String> {
-    let s = s.trim();
-    let rest = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
-    if rest.len() != 40 {
-        return None;
-    }
-    if !rest.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(format!("0x{}", rest.to_ascii_lowercase()))
-}
+fn parse_config(op_config: &Value) -> Result<PortfolioTrackerConfig, SdkError> {
+    let obj = op_config.as_object().ok_or_else(|| {
+        op_errors::sdk_parse_error(
+            "invalid_op_config",
+            "portfolio_tracker op_config must be a JSON object",
+        )
+    })?;
 
-fn parse_token_address(
-    raw: &str,
-    code: &'static str,
-    message: &'static str,
-) -> Result<Address, SdkError> {
-    let normalized = normalize_eth_address(raw).ok_or_else(|| sdk_input_error(code, message))?;
-    normalized
-        .parse::<Address>()
-        .map_err(|_| sdk_input_error(code, message))
-}
-
-fn normalize_snapshot_input(
-    cfg: PortfolioSnapshotInputConfig,
-) -> Result<PortfolioTrackerConfig, SdkError> {
-    let wallet_address =
-        parse_token_address(&cfg.address, "InvalidAddress", "invalid ethereum address")?;
-
-    let mut merged: HashMap<String, PortfolioSnapshotTokenConfig> = HashMap::new();
-
-    for token in cfg.tokens {
-        let normalized = normalize_eth_address(&token.address)
-            .ok_or_else(|| sdk_input_error("InvalidTokenAddress", "invalid token address"))?;
-        merged.insert(
-            normalized.clone(),
-            PortfolioSnapshotTokenConfig {
-                address: normalized,
-                symbol: token.symbol,
-                decimals: token.decimals,
-            },
-        );
-    }
-
-    let mut addresses: Vec<String> = merged.keys().cloned().collect();
-    addresses.sort();
-
-    let mut tokens = Vec::with_capacity(addresses.len());
-    for address in addresses {
-        let Some(token) = merged.remove(&address) else {
-            continue;
-        };
-        tokens.push(TokenConfig {
-            address: parse_token_address(
-                &token.address,
-                "InvalidTokenAddress",
-                "invalid token address",
-            )?,
-            symbol: token.symbol,
-            decimals: token.decimals,
-        });
-    }
-
-    Ok(PortfolioTrackerConfig {
-        wallet_address,
-        chain_id: cfg.chain_id.unwrap_or_else(default_chain_id),
-        tokens,
-    })
-}
-
-fn parse_config(op_config: &serde_json::Value) -> Result<PortfolioTrackerConfig, SdkError> {
-    let cfg: PortfolioTrackerInputConfig =
-        serde_json::from_value(op_config.clone()).map_err(|_| {
-            op_errors::sdk_parse_error("invalid_op_config", "invalid portfolio_tracker op_config")
+    let portfolio_value = obj.get("portfolio").ok_or_else(|| {
+        sdk_input_error(
+            "missing_portfolio_config",
+            "portfolio_tracker op_config must contain `portfolio`",
+        )
+    })?;
+    let valuation_source_registry_value =
+        obj.get("valuation_source_registry").ok_or_else(|| {
+            sdk_input_error(
+                "missing_valuation_source_registry",
+                "portfolio_tracker op_config must contain `valuation_source_registry`",
+            )
         })?;
 
-    match cfg {
-        PortfolioTrackerInputConfig::Tracker(cfg) => Ok(cfg),
-        PortfolioTrackerInputConfig::Snapshot(cfg) => normalize_snapshot_input(cfg),
-    }
+    let portfolio = decode_portfolio_config(portfolio_value)
+        .map_err(|err| sdk_input_error("invalid_portfolio_config", err.to_string()))?;
+    let valuation_source_registry =
+        decode_valuation_source_registry(valuation_source_registry_value)
+            .map_err(|err| sdk_input_error("invalid_valuation_source_registry", err.to_string()))?;
+    validate_portfolio_bundle(&portfolio, &valuation_source_registry)
+        .map_err(|err| sdk_input_error("invalid_portfolio_bundle", err.to_string()))?;
+
+    Ok(PortfolioTrackerConfig {
+        portfolio,
+        valuation_source_registry,
+    })
 }
 
 fn output_fact_key(op_path: &OpPath) -> FactKey {
     FactKey(format!("portfolio:output|op:{}", op_path.0))
 }
 
-fn ctx_key_erc20_token(token_addr_no0x: &str) -> ContextKey {
-    ContextKey(format!("erc20.{}", token_addr_no0x))
+fn network_routes(portfolio: &PortfolioConfig) -> Vec<NetworkRouteConfig> {
+    portfolio
+        .networks
+        .iter()
+        .map(|network| NetworkRouteConfig {
+            network_id: network.network_id.clone(),
+            rpc_source_id: network.rpc_source_id.clone(),
+        })
+        .collect()
 }
 
-/// Thin planner op that expands the portfolio snapshot workflow into reusable read/write states.
+/// Thin planner op that validates canonical portfolio inputs and wires the shared runtime states.
 #[derive(Clone, Default)]
 pub struct PortfolioTrackerOp;
 
@@ -255,12 +148,10 @@ impl Operation for PortfolioTrackerOp {
         OP_VERSION.to_string()
     }
 
-    fn io(&self, _op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
+    fn io(&self, _op_config: &Value) -> Result<OpIo, SdkError> {
         Ok(OpIo {
             imports: Vec::new(),
             exports: vec![
-                PortKey(KEY_CHAIN_ID.to_string()),
-                PortKey(KEY_BLOCK_NUMBER.to_string()),
                 PortKey(KEY_SNAPSHOT_ARTIFACT_ID.to_string()),
                 PortKey(KEY_REPORT.to_string()),
             ],
@@ -270,270 +161,116 @@ impl Operation for PortfolioTrackerOp {
     fn expand(
         &self,
         op_path: OpPath,
-        op_config: &serde_json::Value,
+        op_config: &Value,
         _run_config: &RunConfig,
     ) -> Result<StateGraph, SdkError> {
-        let mut cfg = parse_config(op_config)?;
+        let cfg = parse_config(op_config)?;
+        let routes = network_routes(&cfg.portfolio);
 
-        cfg.tokens
-            .sort_by_key(|t| address_hex_lower_no0x(&t.address));
+        let mut states = Vec::new();
+        let mut edges = Vec::new();
 
-        let mut states: Vec<StateNode> = Vec::new();
-        let mut edges: Vec<DependencyEdge> = Vec::new();
-
-        // chain id (validates network)
-        let chain_id_sid = StateId::must_new(format!("{}.chain_id", op_path.0));
+        let pin_networks_sid = StateId::must_new(format!("{}.pin_networks", op_path.0));
         states.push(StateNode {
-            id: chain_id_sid.clone(),
-            state: Arc::new(
-                ReadU64HexState::new(
-                    chain_id_sid.clone(),
-                    "eth_chainId",
-                    serde_json::json!([]),
-                    ctx_key(KEY_CHAIN_ID),
-                )
-                .with_expectation(U64Expectation::parsing_input(
-                    cfg.chain_id,
-                    "chain_id_mismatch",
-                    "rpc chain_id did not match configured chain_id",
-                )),
-            ),
-        });
-        let mut last = chain_id_sid;
-
-        // block number
-        let block_sid = StateId::must_new(format!("{}.block_number", op_path.0));
-        edges.push(DependencyEdge {
-            from: last.clone(),
-            to: block_sid.clone(),
-        });
-        states.push(StateNode {
-            id: block_sid.clone(),
-            state: Arc::new(ReadU64HexState::new(
-                block_sid.clone(),
-                "eth_blockNumber",
-                serde_json::json!([]),
-                ctx_key(KEY_BLOCK_NUMBER),
-            )),
-        });
-        last = block_sid;
-
-        // ETH balance
-        let eth_sid = StateId::must_new(format!("{}.eth_balance", op_path.0));
-        edges.push(DependencyEdge {
-            from: last.clone(),
-            to: eth_sid.clone(),
-        });
-        states.push(StateNode {
-            id: eth_sid.clone(),
-            state: Arc::new(NativeBalanceState::new(
-                eth_sid.clone(),
-                cfg.wallet_address,
-                ctx_key(KEY_BLOCK_NUMBER),
-                ctx_key(KEY_NATIVE),
-            )),
-        });
-        last = eth_sid;
-
-        // ERC-20 balances (allowlist)
-        for t in cfg.tokens.clone() {
-            let addr_no0x = address_hex_lower_no0x(&t.address);
-            let sid = StateId::must_new(format!("{}.token_balance_{}", op_path.0, addr_no0x));
-            edges.push(DependencyEdge {
-                from: last.clone(),
-                to: sid.clone(),
-            });
-            states.push(StateNode {
-                id: sid.clone(),
-                state: Arc::new(TokenBalanceState::new(
-                    sid.clone(),
-                    t.address,
-                    cfg.wallet_address,
-                    t.symbol,
-                    t.decimals,
-                    ctx_key(KEY_BLOCK_NUMBER),
-                    ctx_key_erc20_token(&addr_no0x),
-                )),
-            });
-            last = sid;
-        }
-
-        // write snapshot output
-        let out_sid = StateId::must_new(format!("{}.write_snapshot", op_path.0));
-        edges.push(DependencyEdge {
-            from: last,
-            to: out_sid.clone(),
-        });
-        states.push(StateNode {
-            id: out_sid.clone(),
-            state: Arc::new(WriteSnapshotState {
-                op_path: op_path.clone(),
-                cfg,
+            id: pin_networks_sid.clone(),
+            state: Arc::new(PinPortfolioNetworksState {
+                state_id: pin_networks_sid.clone(),
+                portfolio: cfg.portfolio.clone(),
+                valuation_sources: cfg.valuation_source_registry.clone(),
+                output_key: ctx_key(KEY_NETWORK_PINS),
             }),
         });
 
-        // write summary report
-        let report_sid = StateId::must_new(format!("{}.report", op_path.0));
+        let resolve_wallets_sid = StateId::must_new(format!("{}.resolve_wallets", op_path.0));
         edges.push(DependencyEdge {
-            from: out_sid,
-            to: report_sid.clone(),
+            from: pin_networks_sid.clone(),
+            to: resolve_wallets_sid.clone(),
         });
         states.push(StateNode {
-            id: report_sid,
-            state: Arc::new(WriteReportState),
+            id: resolve_wallets_sid.clone(),
+            state: Arc::new(ResolveWalletsState {
+                state_id: resolve_wallets_sid.clone(),
+                wallets: cfg.portfolio.wallets.clone(),
+                output_key: ctx_key(KEY_RESOLVED_WALLETS),
+            }),
+        });
+
+        let read_direct_prices_sid = StateId::must_new(format!("{}.read_direct_prices", op_path.0));
+        edges.push(DependencyEdge {
+            from: pin_networks_sid,
+            to: read_direct_prices_sid.clone(),
+        });
+        states.push(StateNode {
+            id: read_direct_prices_sid.clone(),
+            state: Arc::new(ReadDirectPricesState {
+                state_id: read_direct_prices_sid.clone(),
+                symbols: cfg.portfolio.symbol_configs.clone(),
+                valuation_sources: cfg.valuation_source_registry.clone(),
+                networks: routes.clone(),
+                network_pins_key: ctx_key(KEY_NETWORK_PINS),
+                output_key: ctx_key(KEY_DIRECT_PRICES),
+            }),
+        });
+
+        let collect_observations_sid =
+            StateId::must_new(format!("{}.collect_observations", op_path.0));
+        edges.push(DependencyEdge {
+            from: resolve_wallets_sid,
+            to: collect_observations_sid.clone(),
+        });
+        edges.push(DependencyEdge {
+            from: read_direct_prices_sid,
+            to: collect_observations_sid.clone(),
+        });
+        states.push(StateNode {
+            id: collect_observations_sid.clone(),
+            state: Arc::new(CollectObservationsState {
+                state_id: collect_observations_sid.clone(),
+                wallets: cfg.portfolio.wallets.clone(),
+                symbols: cfg.portfolio.symbol_configs.clone(),
+                networks: routes,
+                resolved_wallets_key: ctx_key(KEY_RESOLVED_WALLETS),
+                network_pins_key: ctx_key(KEY_NETWORK_PINS),
+                direct_prices_key: ctx_key(KEY_DIRECT_PRICES),
+                output_key: ctx_key(KEY_OBSERVATIONS),
+            }),
+        });
+
+        let write_snapshot_sid = StateId::must_new(format!("{}.write_snapshot", op_path.0));
+        edges.push(DependencyEdge {
+            from: collect_observations_sid,
+            to: write_snapshot_sid.clone(),
+        });
+        states.push(StateNode {
+            id: write_snapshot_sid.clone(),
+            state: Arc::new(WritePortfolioSnapshotState {
+                state_id: write_snapshot_sid.clone(),
+                portfolio: cfg.portfolio,
+                resolved_wallets_key: ctx_key(KEY_RESOLVED_WALLETS),
+                network_pins_key: ctx_key(KEY_NETWORK_PINS),
+                observations_key: ctx_key(KEY_OBSERVATIONS),
+                fact_key: output_fact_key(&op_path),
+                artifact_id_output_key: ctx_key(KEY_SNAPSHOT_ARTIFACT_ID),
+                snapshot_output_key: ctx_key(KEY_SNAPSHOT),
+            }),
+        });
+
+        let write_report_sid = StateId::must_new(format!("{}.write_report", op_path.0));
+        edges.push(DependencyEdge {
+            from: write_snapshot_sid,
+            to: write_report_sid.clone(),
+        });
+        states.push(StateNode {
+            id: write_report_sid.clone(),
+            state: Arc::new(WritePortfolioReportState {
+                state_id: write_report_sid,
+                snapshot_key: ctx_key(KEY_SNAPSHOT),
+                output_key: ctx_key(KEY_REPORT),
+                event_name: "portfolio_tracker.completed",
+            }),
         });
 
         Ok(StateGraph { states, edges })
-    }
-}
-
-struct WriteSnapshotState {
-    op_path: OpPath,
-    cfg: PortfolioTrackerConfig,
-}
-
-#[async_trait]
-impl State for WriteSnapshotState {
-    fn meta(&self) -> StateMeta {
-        meta::pure()
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let chain_id = op_ctx::read_u64_required(
-            ctx,
-            &ctx_key(KEY_CHAIN_ID),
-            "missing_chain_id",
-            "missing chain_id in context",
-        )?;
-        let block_number = op_ctx::read_u64_required(
-            ctx,
-            &ctx_key(KEY_BLOCK_NUMBER),
-            "missing_block_number",
-            "missing block_number in context",
-        )?;
-
-        let native = op_ctx::read_json_required(
-            ctx,
-            &ctx_key(KEY_NATIVE),
-            "missing_native",
-            "missing native balance in context",
-        )?;
-
-        let mut tokens = Vec::with_capacity(self.cfg.tokens.len());
-        for t in &self.cfg.tokens {
-            let addr_no0x = address_hex_lower_no0x(&t.address);
-            let k = ctx_key_erc20_token(&addr_no0x);
-            let tok = op_ctx::read_json_required(
-                ctx,
-                &k,
-                "missing_token",
-                "missing token balance in context",
-            )?;
-            tokens.push(tok);
-        }
-
-        let generated_at_ms = io.now_millis().await.map_err(op_errors::state_from_io)?;
-        let snapshot = serde_json::json!({
-            "wallet_address": address_hex_lower(&self.cfg.wallet_address),
-            "chain_id": chain_id,
-            "block_number": block_number,
-            "generated_at_ms": generated_at_ms,
-            "native": native,
-            "tokens": tokens,
-            "errors": [],
-        });
-
-        op_output::write_output_artifact(
-            ctx,
-            io,
-            rec,
-            output_fact_key(&self.op_path),
-            snapshot,
-            ctx_key(KEY_SNAPSHOT_ARTIFACT_ID),
-        )
-        .await?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
-    }
-}
-
-struct WriteReportState;
-
-#[async_trait]
-impl State for WriteReportState {
-    fn meta(&self) -> StateMeta {
-        meta::pure()
-    }
-
-    async fn handle(
-        &self,
-        ctx: &mut dyn DynContext,
-        _io: &mut dyn IoProvider,
-        rec: &mut dyn EventRecorder,
-    ) -> Result<StateOutcome, StateError> {
-        let chain_id = op_ctx::read_u64_required(
-            ctx,
-            &ctx_key(KEY_CHAIN_ID),
-            "missing_chain_id",
-            "missing chain_id in context",
-        )?;
-        let block_number = op_ctx::read_u64_required(
-            ctx,
-            &ctx_key(KEY_BLOCK_NUMBER),
-            "missing_block_number",
-            "missing block_number in context",
-        )?;
-        let snapshot_artifact_id = op_ctx::read_string_required(
-            ctx,
-            &ctx_key(KEY_SNAPSHOT_ARTIFACT_ID),
-            "missing_snapshot_artifact_id",
-            "missing snapshot artifact id in context",
-            "snapshot_artifact_id_not_string",
-            "snapshot artifact id in context must be a string",
-        )?;
-
-        let native_balance: Option<PortfolioBalanceReport> = op_ctx::read_json_required(
-            ctx,
-            &ctx_key(KEY_NATIVE),
-            "missing_native",
-            "missing native balance in context",
-        )
-        .and_then(|native| {
-            serde_json::from_value(native).map_err(|_| {
-                op_errors::state_unknown(
-                    "native_balance_decode_failed",
-                    "failed to decode native balance report",
-                )
-            })
-        })
-        .map(Some)?;
-
-        let report = PortfolioTrackerReport {
-            snapshot_artifact_id,
-            chain_id,
-            block_number,
-            native_balance,
-        };
-
-        let report_json = serde_json::to_value(&report).map_err(|_| {
-            op_errors::state_unknown(
-                "serialize_report_failed",
-                "failed to serialize snapshot report",
-            )
-        })?;
-        op_ctx::write_json(ctx, ctx_key(KEY_REPORT), report_json.clone())?;
-        emit_report_event(rec, "portfolio_tracker.completed", report_json).await?;
-
-        Ok(StateOutcome {
-            snapshot: SnapshotPolicy::OnSuccess,
-        })
     }
 }
 
