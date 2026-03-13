@@ -954,16 +954,21 @@ That model breaks down once we want:
 
 ### Explicit break decision
 
-This effort should not preserve compatibility with the current portfolio snapshot request, response, or internal config model.
+This effort should not preserve compatibility with the current portfolio snapshot request, response, artifact, or internal config model.
 
 This means:
 
 - no `PortfolioSnapshotV2`
-- no requirement to preserve the current single-wallet request shape
-- no requirement to preserve the current typed report shape
+- no compatibility shim for the current single-wallet request shape
+- no compatibility shim for the current typed report shape
+- no compatibility shim for the current artifact shape
 - no requirement to preserve old portfolio snapshot config compatibility
+- the existing `portfolio snapshot` surface is replaced in place
 
-The goal is to define the new canonical `PortfolioSnapshot`.
+This repository is currently on a dev branch, so this in-place break is acceptable and preferred.
+The goal is to avoid spending design energy on compatibility baggage while the canonical portfolio model is still being defined.
+
+The goal is to define the new canonical `PortfolioSnapshot` and update the CLI, app, REST, Nix tasks, CI expectations, and docs in the same change whenever the implementation lands.
 
 ### Core idea
 
@@ -1010,6 +1015,26 @@ Example `symbol_id`s:
 - `aave_v3.usdc.variable_debt.mainnet`
 - `aave_v3.aave.staked.mainnet`
 
+### Multi-network is first-class in the first implementation
+
+Multi-network support is not an optional future extension.
+It is part of the base canonical model.
+
+That means:
+
+- `PortfolioConfig.networks` is required from day one
+- every wallet is attached to exactly one `network_id`
+- every symbol is attached to exactly one `network_id`
+- every valuation source reference includes an explicit `network_id`
+- `PortfolioSnapshot.network_pins` records one pinned block per referenced network
+
+This is the only clean way to make the type system and integration points correct across:
+
+- multiple wallets on one network
+- multiple wallets across multiple networks
+- balance reads on one network with valuation reads on another network
+- future protocol integrations that depend on network-local contracts
+
 ## Proposed Domain Model
 
 ### Portfolio
@@ -1020,8 +1045,14 @@ Suggested responsibilities:
 
 - stable `portfolio_id`
 - list of wallets
-- shared symbol registry / config map
+- shared symbol registry
+- shared network registry
 - optional portfolio-level metadata
+
+Important canonical encoding rule:
+
+- the registries are logical maps keyed by ID
+- the serialized JSON form uses sorted arrays for deterministic hashing and stable diffs
 
 ### Wallet
 
@@ -1031,8 +1062,8 @@ Suggested fields:
 
 - `wallet_id`
 - `address`
-- `network`
-- `tracked_symbols`
+- `network_id`
+- `symbol_ids`
 
 ### Symbol config
 
@@ -1046,32 +1077,60 @@ Suggested shape:
 
 ```json
 {
-  "symbol_id": "aave_v3.usdc.collateral.mainnet",
+  "symbol_id": "aave_v3.usdc.collateral.ethereum-mainnet",
   "display_symbol": "USDC",
   "kind": "protocol_position",
   "role": "collateral",
-  "network": "ethereum-mainnet",
+  "network_id": "ethereum-mainnet",
   "protocol": "aave_v3",
   "balance_reader": {
-    "kind": "aave_v3_reserve_position",
-    "market_id": "aave-v3-mainnet",
-    "reserve_symbol": "USDC"
-  },
-  "valuation": {
-    "quotes": {
-      "USD": {
-        "kind": "oracle_price",
-        "source": "chainlink",
-        "pair": "USDC/USD"
-      },
-      "BTC": {
-        "kind": "derived_cross_quote",
-        "via": ["USDC/USD", "BTC/USD"]
-      }
+    "kind": "protocol_position",
+    "protocol": "aave_v3",
+    "reader": "reserve_position",
+    "config": {
+      "market_id": "aave-v3-mainnet",
+      "reserve_id": "usdc",
+      "use_as_collateral_required": true
     }
   },
+  "valuation": {
+    "quotes": [
+      {
+        "quote": "USD",
+        "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
+        "reader": {
+          "kind": "direct_price",
+          "source": {
+            "source_id": "chainlink_usdc_usd",
+            "network_id": "ethereum-mainnet",
+            "base_symbol_id": "usdc.wallet.ethereum-mainnet",
+            "quote": "USD"
+          }
+        }
+      },
+      {
+        "quote": "BTC",
+        "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
+        "reader": {
+          "kind": "derived_unit_price",
+          "numerator": {
+            "source_id": "chainlink_usdc_usd",
+            "network_id": "ethereum-mainnet",
+            "base_symbol_id": "usdc.wallet.ethereum-mainnet",
+            "quote": "USD"
+          },
+          "denominator": {
+            "source_id": "chainlink_btc_usd",
+            "network_id": "ethereum-mainnet",
+            "base_symbol_id": "btc.wallet.ethereum-mainnet",
+            "quote": "USD"
+          }
+        }
+      }
+    ]
+  },
   "decimals": 6,
-  "underlying_symbol_id": "usdc.wallet.mainnet",
+  "underlying_symbol_id": "usdc.wallet.ethereum-mainnet",
   "metadata": {
     "notes": "position derived from Aave reserve state"
   }
@@ -1084,7 +1143,7 @@ Suggested top-level config fields:
 - `display_symbol`
 - `kind`
 - `role`
-- `network`
+- `network_id`
 - `protocol`
 - `balance_reader`
 - `valuation`
@@ -1145,6 +1204,48 @@ Initial quote targets should include at least:
 This means the snapshot pipeline should not stop at raw balances.
 It must also produce value observations for configured quote units.
 
+`quote_codes` is portfolio-level configuration.
+Every `SymbolConfig` must provide exactly one valuation route for every configured quote code.
+
+### Valuation semantics must stay simple and composable
+
+The valuation model should be based on explicit unit-price routes.
+
+Core semantics:
+
+- every valuation computes a unit price first
+- `value_dec = amount_dec * unit_price_dec`
+- the unit price applies to `priced_symbol_id`, not to a display symbol string
+- protocol positions usually price through `underlying_symbol_id`
+- every direct price source is explicitly identified by `source_id` and `network_id`
+- every derived price route is explicit arithmetic over direct price sources
+
+Canonical route semantics:
+
+- `fixed_unit_price`
+  - use a fixed decimal-string unit price
+  - mostly useful for tests or tightly scoped manual configs
+- `direct_price`
+  - read one unit price from one source
+  - example: `ETH/USD`, `USDC/USD`, `ETH/BTC`
+- `derived_unit_price`
+  - compute `numerator / denominator`
+  - both inputs must share the same quote unit
+  - example: `USDC/BTC = (USDC/USD) / (BTC/USD)`
+
+Replay semantics:
+
+- each direct price source carries `network_id`
+- each `ObservationValue` records the concrete source refs that were used
+- each source ref resolves against a pinned network block from `network_pins`
+
+This keeps valuation:
+
+- deterministic
+- multi-network aware
+- composable
+- reusable across wallet balances, protocol positions, and staked positions
+
 ## Canonical Type Definitions
 
 This section turns the model into an exact starting schema.
@@ -1160,6 +1261,10 @@ They are not final Rust code yet, but they are close enough to drive the crate/m
 - collections should be sorted deterministically before hashing / persistence
 - debt quantities should be stored as positive quantities with `role = debt`
   - netting should happen only in derived summaries
+- `metadata` and protocol config blobs must still be canonical JSON objects
+  - no floats
+  - no secrets
+  - deterministic key ordering before persistence
 
 Suggested scalar aliases:
 
@@ -1192,17 +1297,18 @@ Suggested scalar aliases:
   - `QuoteCode`
   - `SymbolKind`
   - `SymbolRole`
-  - `AaveDebtKind`
   - `SymbolConfig`
   - `BalanceReaderConfig`
   - `SymbolValuationConfig`
   - `QuoteValuationConfig`
+  - `PriceSourceRef`
   - `ValuationReaderConfig`
   - `ResolvedSymbolBalanceReader`
   - `ResolvedSymbolValuationReader`
   - `Observation`
   - `ObservationQuantity`
   - `ObservationValue`
+  - `ObservationValueSourceRef`
   - `ObservationSource`
   - `PortfolioSnapshotError`
 
@@ -1227,11 +1333,6 @@ pub enum SymbolRole {
     Collateral,
     Debt,
     Staked,
-}
-
-pub enum AaveDebtKind {
-    Variable,
-    Stable,
 }
 ```
 
@@ -1329,19 +1430,10 @@ pub enum BalanceReaderConfig {
     Erc20Balance {
         token_address: String,
     },
-    AaveV3ReservePosition {
-        market_id: String,
-        reserve_id: String,
-        use_as_collateral_required: Option<bool>,
-    },
-    AaveV3DebtPosition {
-        market_id: String,
-        reserve_id: String,
-        debt_kind: AaveDebtKind,
-    },
-    AaveV3StakingPosition {
-        market_id: String,
-        staking_contract: String,
+    ProtocolPosition {
+        protocol: String,
+        reader: String,
+        config: std::collections::BTreeMap<String, serde_json::Value>,
     },
 }
 
@@ -1351,7 +1443,15 @@ pub struct SymbolValuationConfig {
 
 pub struct QuoteValuationConfig {
     pub quote: QuoteCode,
+    pub priced_symbol_id: String,
     pub reader: ValuationReaderConfig,
+}
+
+pub struct PriceSourceRef {
+    pub source_id: String,
+    pub network_id: String,
+    pub base_symbol_id: String,
+    pub quote: QuoteCode,
 }
 
 pub struct ResolvedSymbolBalanceReader {
@@ -1367,18 +1467,15 @@ pub struct ResolvedSymbolValuationReader {
 
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ValuationReaderConfig {
-    FixedQuote {
-        value_dec: String,
+    FixedUnitPrice {
+        unit_price_dec: String,
     },
-    OraclePrice {
-        source_id: String,
-        base_symbol: String,
-        quote: QuoteCode,
+    DirectPrice {
+        source: PriceSourceRef,
     },
-    DerivedCrossQuote {
-        left_source_id: String,
-        right_source_id: String,
-        intermediate_quote: QuoteCode,
+    DerivedUnitPrice {
+        numerator: PriceSourceRef,
+        denominator: PriceSourceRef,
     },
 }
 ```
@@ -1434,10 +1531,17 @@ pub struct ObservationQuantity {
 
 pub struct ObservationValue {
     pub quote: QuoteCode,
+    pub priced_symbol_id: String,
     pub value_dec: String,
     pub unit_price_dec: String,
     pub valuation_reader_kind: String,
-    pub source_ref: String,
+    pub source_refs: Vec<ObservationValueSourceRef>,
+}
+
+pub struct ObservationValueSourceRef {
+    pub source_id: String,
+    pub network_id: String,
+    pub block_number: u64,
 }
 
 pub struct ObservationSource {
@@ -1499,25 +1603,44 @@ pub struct PortfolioQuoteTotal {
       "chain_id": 1,
       "rpc_source_id": "mainnet_primary",
       "metadata": {}
+    },
+    {
+      "network_id": "arbitrum-mainnet",
+      "chain_id": 42161,
+      "rpc_source_id": "arbitrum_primary",
+      "metadata": {}
     }
   ],
   "wallets": [
     {
-      "wallet_id": "wallet_treasury",
+      "wallet_id": "wallet_treasury_eth",
       "address": "0x000000000000000000000000000000000000dead",
+      "implementation": {
+        "kind": "address_only"
+      },
       "network_id": "ethereum-mainnet",
       "symbol_ids": [
-        "eth.native.mainnet",
-        "usdc.wallet.mainnet",
-        "aave_v3.usdc.collateral.mainnet",
-        "aave_v3.usdc.variable_debt.mainnet"
+        "eth.native.ethereum-mainnet",
+        "usdc.wallet.ethereum-mainnet"
+      ],
+      "metadata": {}
+    },
+    {
+      "wallet_id": "wallet_ops_arb",
+      "address": "0x000000000000000000000000000000000000beef",
+      "implementation": {
+        "kind": "address_only"
+      },
+      "network_id": "arbitrum-mainnet",
+      "symbol_ids": [
+        "eth.native.arbitrum-mainnet"
       ],
       "metadata": {}
     }
   ],
   "symbol_configs": [
     {
-      "symbol_id": "eth.native.mainnet",
+      "symbol_id": "eth.native.ethereum-mainnet",
       "display_symbol": "ETH",
       "kind": "native_balance",
       "role": "native",
@@ -1530,20 +1653,123 @@ pub struct PortfolioQuoteTotal {
         "quotes": [
           {
             "quote": "USD",
+            "priced_symbol_id": "eth.native.ethereum-mainnet",
             "reader": {
-              "kind": "oracle_price",
-              "source_id": "chainlink_eth_usd",
-              "base_symbol": "ETH",
-              "quote": "USD"
+              "kind": "direct_price",
+              "source": {
+                "source_id": "chainlink_eth_usd",
+                "network_id": "ethereum-mainnet",
+                "base_symbol_id": "eth.native.ethereum-mainnet",
+                "quote": "USD"
+              }
             }
           },
           {
             "quote": "BTC",
+            "priced_symbol_id": "eth.native.ethereum-mainnet",
             "reader": {
-              "kind": "oracle_price",
-              "source_id": "chainlink_eth_btc",
-              "base_symbol": "ETH",
-              "quote": "BTC"
+              "kind": "direct_price",
+              "source": {
+                "source_id": "chainlink_eth_btc",
+                "network_id": "ethereum-mainnet",
+                "base_symbol_id": "eth.native.ethereum-mainnet",
+                "quote": "BTC"
+              }
+            }
+          }
+        ]
+      },
+      "decimals": 18,
+      "underlying_symbol_id": null,
+      "metadata": {}
+    },
+    {
+      "symbol_id": "usdc.wallet.ethereum-mainnet",
+      "display_symbol": "USDC",
+      "kind": "erc20_balance",
+      "role": "asset",
+      "network_id": "ethereum-mainnet",
+      "protocol": null,
+      "balance_reader": {
+        "kind": "erc20_balance",
+        "token_address": "0x0000000000000000000000000000000000000001"
+      },
+      "valuation": {
+        "quotes": [
+          {
+            "quote": "USD",
+            "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
+            "reader": {
+              "kind": "direct_price",
+              "source": {
+                "source_id": "chainlink_usdc_usd",
+                "network_id": "ethereum-mainnet",
+                "base_symbol_id": "usdc.wallet.ethereum-mainnet",
+                "quote": "USD"
+              }
+            }
+          },
+          {
+            "quote": "BTC",
+            "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
+            "reader": {
+              "kind": "derived_unit_price",
+              "numerator": {
+                "source_id": "chainlink_usdc_usd",
+                "network_id": "ethereum-mainnet",
+                "base_symbol_id": "usdc.wallet.ethereum-mainnet",
+                "quote": "USD"
+              },
+              "denominator": {
+                "source_id": "chainlink_btc_usd",
+                "network_id": "ethereum-mainnet",
+                "base_symbol_id": "btc.wallet.ethereum-mainnet",
+                "quote": "USD"
+              }
+            }
+          }
+        ]
+      },
+      "decimals": 6,
+      "underlying_symbol_id": null,
+      "metadata": {}
+    },
+    {
+      "symbol_id": "eth.native.arbitrum-mainnet",
+      "display_symbol": "ETH",
+      "kind": "native_balance",
+      "role": "native",
+      "network_id": "arbitrum-mainnet",
+      "protocol": null,
+      "balance_reader": {
+        "kind": "native_balance"
+      },
+      "valuation": {
+        "quotes": [
+          {
+            "quote": "USD",
+            "priced_symbol_id": "eth.native.arbitrum-mainnet",
+            "reader": {
+              "kind": "direct_price",
+              "source": {
+                "source_id": "chainlink_eth_usd",
+                "network_id": "arbitrum-mainnet",
+                "base_symbol_id": "eth.native.arbitrum-mainnet",
+                "quote": "USD"
+              }
+            }
+          },
+          {
+            "quote": "BTC",
+            "priced_symbol_id": "eth.native.arbitrum-mainnet",
+            "reader": {
+              "kind": "direct_price",
+              "source": {
+                "source_id": "chainlink_eth_btc",
+                "network_id": "arbitrum-mainnet",
+                "base_symbol_id": "eth.native.arbitrum-mainnet",
+                "quote": "BTC"
+              }
             }
           }
         ]
@@ -1561,8 +1787,8 @@ pub struct PortfolioQuoteTotal {
 
 ```json
 {
-  "wallet_id": "wallet_treasury",
-  "symbol_id": "aave_v3.usdc.variable_debt.mainnet",
+  "wallet_id": "wallet_treasury_eth",
+  "symbol_id": "aave_v3.usdc.variable_debt.ethereum-mainnet",
   "display_symbol": "USDC",
   "kind": "protocol_position",
   "role": "debt",
@@ -1576,21 +1802,40 @@ pub struct PortfolioQuoteTotal {
   "values": [
     {
       "quote": "USD",
+      "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
       "value_dec": "10.000000",
       "unit_price_dec": "1.000000",
-      "valuation_reader_kind": "oracle_price",
-      "source_ref": "chainlink_usdc_usd"
+      "valuation_reader_kind": "direct_price",
+      "source_refs": [
+        {
+          "source_id": "chainlink_usdc_usd",
+          "network_id": "ethereum-mainnet",
+          "block_number": 12345678
+        }
+      ]
     },
     {
       "quote": "BTC",
+      "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
       "value_dec": "0.00010000",
       "unit_price_dec": "0.00001000",
-      "valuation_reader_kind": "derived_cross_quote",
-      "source_ref": "chainlink_usdc_usd x chainlink_btc_usd"
+      "valuation_reader_kind": "derived_unit_price",
+      "source_refs": [
+        {
+          "source_id": "chainlink_usdc_usd",
+          "network_id": "ethereum-mainnet",
+          "block_number": 12345678
+        },
+        {
+          "source_id": "chainlink_btc_usd",
+          "network_id": "ethereum-mainnet",
+          "block_number": 12345678
+        }
+      ]
     }
   ],
   "source": {
-    "balance_reader_kind": "aave_v3_debt_position",
+    "balance_reader_kind": "protocol_position:aave_v3:debt_position",
     "network_id": "ethereum-mainnet",
     "block_number": 12345678
   },
@@ -1613,9 +1858,16 @@ At minimum, validation should enforce:
 - every `symbol.network_id` exists in `networks`
 - `quote_codes` are unique
 - `symbol.valuation.quotes[].quote` are unique per symbol
+- every `symbol.valuation.quotes[].priced_symbol_id` exists in `symbol_configs`
+- every symbol defines exactly one valuation route for each portfolio-level `quote_code`
 - `underlying_symbol_id`, when present, must refer to an existing symbol
 - all addresses are valid normalized EVM addresses when the reader requires them
 - all decimals are integers and never floats
+- all protocol reader `config` objects are canonical JSON objects with no floats
+- all `metadata` objects are canonical JSON objects with no floats
+- direct price sources reference configured `network_id`s
+- derived price sources use the same quote unit in numerator and denominator
+- no metadata or protocol config may contain secrets
 
 ### Deterministic ordering rules
 
@@ -1632,43 +1884,8 @@ For stable hashing and replay, sort these before persistence:
 
 ## Proposed Observation Model
 
-Every read should normalize into one observation shape, regardless of source.
-
-Suggested normalized observation:
-
-```json
-{
-  "wallet_id": "wallet_a",
-  "symbol_id": "aave_v3.usdc.collateral.mainnet",
-  "display_symbol": "USDC",
-  "kind": "protocol_position",
-  "role": "collateral",
-  "network": "ethereum-mainnet",
-  "protocol": "aave_v3",
-  "raw_u256_dec": "1000000",
-  "decimals": 6,
-  "amount_dec": "1.000000",
-  "value": {
-    "USD": {
-      "raw_dec": "1.000000",
-      "price_reference": "USDC/USD",
-      "pricing_source_kind": "oracle_price"
-    },
-    "BTC": {
-      "raw_dec": "0.00001000",
-      "price_reference": "USDC/USD x BTC/USD",
-      "pricing_source_kind": "derived_cross_quote"
-    }
-  },
-  "source": {
-    "reader_kind": "aave_v3_reserve_position",
-    "block_number": 12345678
-  },
-  "metadata": {
-    "use_as_collateral": true
-  }
-}
-```
+Every read should normalize into the exact `Observation` shape defined above.
+There is no separate alternate observation envelope.
 
 This gives us one pipeline for:
 
@@ -1681,76 +1898,79 @@ This gives us one pipeline for:
 
 ## Proposed Snapshot Shape
 
-The current snapshot artifact should evolve toward something like:
+The canonical snapshot artifact should use the exact `PortfolioSnapshot` shape defined above.
+An aligned JSON example is:
 
 ```json
 {
   "portfolio_id": "portfolio_x",
   "generated_at_ms": 1234567890,
-  "network_pins": {
-    "ethereum-mainnet": {
+  "network_pins": [
+    {
+      "network_id": "arbitrum-mainnet",
+      "chain_id": 42161,
+      "block_number": 230000000
+    },
+    {
+      "network_id": "ethereum-mainnet",
       "chain_id": 1,
       "block_number": 12345678
     }
-  },
+  ],
   "wallets": [
     {
       "wallet_id": "wallet_a",
       "address": "0x...",
-      "network": "ethereum-mainnet",
+      "network_id": "ethereum-mainnet",
       "observations": [
         {
-          "symbol_id": "eth.native.mainnet",
+          "symbol_id": "eth.native.ethereum-mainnet",
+          "display_symbol": "ETH",
+          "kind": "native_balance",
           "role": "native",
-          "amount_dec": "1.000000000000000000",
-          "value": {
-            "USD": { "raw_dec": "3500.00" },
-            "BTC": { "raw_dec": "0.05000000" }
-          }
-        },
-        {
-          "symbol_id": "usdc.wallet.mainnet",
-          "role": "asset",
-          "amount_dec": "100.000000",
-          "value": {
-            "USD": { "raw_dec": "100.000000" },
-            "BTC": { "raw_dec": "0.00100000" }
-          }
-        },
-        {
-          "symbol_id": "aave_v3.usdc.collateral.mainnet",
-          "role": "collateral",
-          "amount_dec": "50.000000",
-          "value": {
-            "USD": { "raw_dec": "50.000000" },
-            "BTC": { "raw_dec": "0.00050000" }
-          }
-        },
-        {
-          "symbol_id": "aave_v3.usdc.variable_debt.mainnet",
-          "role": "debt",
-          "amount_dec": "10.000000",
-          "value": {
-            "USD": { "raw_dec": "10.000000" },
-            "BTC": { "raw_dec": "0.00010000" }
-          }
+          "network_id": "ethereum-mainnet",
+          "protocol": null,
+          "quantity": {
+            "raw_dec": "1000000000000000000",
+            "decimals": 18,
+            "amount_dec": "1.000000000000000000"
+          },
+          "values": [
+            {
+              "quote": "USD",
+              "priced_symbol_id": "eth.native.ethereum-mainnet",
+              "value_dec": "3500.00000000",
+              "unit_price_dec": "3500.00000000",
+              "valuation_reader_kind": "direct_price",
+              "source_refs": [
+                {
+                  "source_id": "chainlink_eth_usd",
+                  "network_id": "ethereum-mainnet",
+                  "block_number": 12345678
+                }
+              ]
+            }
+          ],
+          "source": {
+            "balance_reader_kind": "native_balance",
+            "network_id": "ethereum-mainnet",
+            "block_number": 12345678
+          },
+          "metadata": {}
         }
       ]
     }
   ],
-  "symbol_configs": {
-    "eth.native.mainnet": { "...": "..." },
-    "usdc.wallet.mainnet": { "...": "..." },
-    "aave_v3.usdc.collateral.mainnet": { "...": "..." },
-    "aave_v3.usdc.variable_debt.mainnet": { "...": "..." }
-  },
+  "symbol_configs": [
+    { "...": "..." }
+  ],
   "errors": []
 }
 ```
 
 ## Why per-network pins matter
 
-The user model implies that one portfolio can eventually include:
+The user model requires that one portfolio can include, from the first implementation:
 
 - multiple wallets
 - multiple networks
@@ -1779,10 +1999,10 @@ That means the snapshot should record enough information to replay valuation, fo
 - quote units requested
 - pricing source kind
 - pricing source identifiers
-- network / block pins when prices come from chain data
+- network / block pins for every direct source reference used in valuation
 
-For some pricing sources, the same per-network block pin may be enough.
-For others, we may need explicit valuation-source pinning.
+For the first implementation, valuation sources should stay within the pinned network model.
+If a later source family cannot be expressed this way, it should not be added until its replay contract is fully specified.
 
 ## Aave V3 Requirements
 
@@ -1817,6 +2037,13 @@ So we likely need Aave-specific read states, not just more `TokenBalanceState`s.
 ### Suggested Aave-specific shared states
 
 These should live in `crates/states/aave-v3` as reusable state-layer building blocks.
+
+In the canonical portfolio model, these are selected through:
+
+- `balance_reader.kind = "protocol_position"`
+- `balance_reader.protocol = "aave_v3"`
+- `balance_reader.reader = <aave reader name>`
+- `balance_reader.config = <aave-specific canonical JSON object>`
 
 Possible additions:
 
@@ -1860,6 +2087,12 @@ That means:
 The valuation workflow should not treat Aave positions as special one-off report logic.
 They should use the same symbol-driven valuation path as every other symbol.
 
+In other words:
+
+- the portfolio crate owns the canonical observation and valuation model
+- the Aave crate owns the typed meaning of `protocol = "aave_v3"` plus the concrete `reader` names and config validation
+- the op wires the two together without hard-coding Aave-specific reporting logic into the generic portfolio model
+
 ## Workflow Direction
 
 ### Current workflow
@@ -1878,25 +2111,27 @@ Current `portfolio_tracker` is effectively:
 A more general workflow should look like:
 
 1. load portfolio config
-2. validate wallet + symbol config references
-3. pin block per network
-4. dispatch balance readers by `symbol_config.balance_reader.kind`
-5. dispatch valuation readers by `symbol_config.valuation`
-6. normalize each result into a common observation shape
-7. aggregate observations per wallet
-8. aggregate observations per portfolio
-9. write artifact
-10. write report
+2. validate wallet, symbol, network, and valuation route references
+3. compute the required network set from wallets plus valuation source refs
+4. pin block per network
+5. dispatch balance readers by `symbol_config.balance_reader.kind`
+6. dispatch protocol readers by `(protocol, reader)` where `kind = protocol_position`
+7. dispatch valuation readers by explicit unit-price routes
+8. normalize each result into the canonical observation shape
+9. aggregate observations per wallet
+10. aggregate observations per portfolio
+11. write artifact
+12. write report
 
 Reader dispatch examples:
 
 - `native_balance`
 - `erc20_balance`
-- `aave_v3_reserve_position`
-- `aave_v3_account_summary`
-- `aave_v3_staked_position`
-- `oracle_price`
-- `derived_cross_quote`
+- `protocol_position` with `protocol = "aave_v3"` and `reader = "reserve_position"`
+- `protocol_position` with `protocol = "aave_v3"` and `reader = "debt_position"`
+- `protocol_position` with `protocol = "aave_v3"` and `reader = "staked_position"`
+- `direct_price`
+- `derived_unit_price`
 
 ## Typed Report Direction
 
@@ -1973,17 +2208,18 @@ This matters especially for Aave V3 positions where a portfolio may span many re
 
 ### Phase 0: define the new canonical model
 
-- define the new canonical `PortfolioSnapshot`
-- remove compatibility requirements with the current request / response model
-- define `portfolio`, `wallet`, `symbol_config`, `observation`, and valuation shapes
+- freeze the exact canonical `PortfolioSnapshot` schema in this document
+- keep the break decision in place instead of introducing a compatibility layer
+- define `portfolio`, `wallet`, `symbol_config`, `observation`, and valuation shapes as one coherent model
 
-### Phase 1: implement base wallet + valuation support
+### Phase 1: implement the base multi-network wallet + valuation slice
 
 - add `portfolio_id`
+- add multi-network config and per-network pins
 - add multi-wallet config
 - add symbol registry / symbol config map
-- keep network pinning explicit
 - add quote support for at least `USD` and `BTC`
+- require one valuation route per symbol for every portfolio-level quote
 - normalize all reads and values into a common observation shape
 
 ### Phase 2: add Aave V3 portfolio reads
@@ -2010,39 +2246,313 @@ This matters especially for Aave V3 positions where a portfolio may span many re
 ## Recommended Decisions
 
 - Keep `portfolio_tracker` thin; put reusable runtime behavior in shared states.
+- Replace the current portfolio snapshot surface in place on the dev branch.
 - Use `symbol_id` as the canonical machine identity, not raw `symbol`.
 - Model native, wallet, collateral, debt, and staked positions with one normalized observation shape.
+- Keep multi-network semantics in the base model and first implementation.
 - Make valuation a core responsibility of symbol config, not a separate optional afterthought.
+- Use explicit unit-price routes with `direct_price` and `derived_unit_price`.
+- Configure quotes at the portfolio level and require every symbol to satisfy them.
 - Pin blocks per network, not globally.
 - Treat Aave V3 as protocol-backed symbol configs, not as a separate portfolio system.
-- Break and replace the current portfolio snapshot shape rather than carrying compatibility baggage.
+- Represent debt as a positive quantity with `role = debt`; netting happens only in derived summaries.
 
 ## Open Questions
 
-- Does one portfolio need to support multiple networks in the first version, or only one network with multiple wallets?
 - What exactly counts as "staked assets"?
 - Are Aave rewards in scope, or only principal positions?
 - Do we need discovery, or is all tracking config-driven?
 - Do we want best-effort snapshots, or strict fail-fast semantics?
-- Which pricing sources are in scope first for valuation?
-- Should quote support be configurable per portfolio, per wallet, or per symbol?
-- How do we want to represent debt in quote summaries?
-- Should debt be represented as:
-  - positive amount with `role = debt`
-  - negative amount
-  - both
+- Which concrete on-chain pricing sources ship first for `USD` and `BTC` valuation?
+- Do we want health-factor-style protocol summaries in the base Aave slice, or only raw observations first?
 
 ## Immediate Next Steps
 
-1. Write the new canonical `PortfolioSnapshot` request and artifact schemas.
-2. Define `symbol_config` so it owns both balance acquisition and valuation acquisition.
-3. Add quote support requirements for at least `USD` and `BTC`.
-4. Add Aave V3 shared read states in `crates/states/aave-v3`.
-5. Keep the planner op thin and assemble native / ERC-20 / Aave readers through one normalized workflow.
+1. Mirror the canonical schema in code without adding a compatibility layer for the old surface.
+2. Add validators for multi-network refs, portfolio-level quote coverage, and valuation source routes.
+3. Implement the base multi-network wallet/native/ERC-20/valuation slice first.
+4. Add Aave V3 shared read states in `crates/states/aave-v3` using the `protocol_position` reader envelope.
+5. Keep the planner op thin and assemble native / ERC-20 / protocol readers through one normalized workflow.
 
 ## Next Time
 
-- Write the exact canonical `PortfolioSnapshot` request and artifact schemas before changing code.
+- Start mapping the exact canonical schema in this document into `crates/states/portfolio`, `crates/states/wallet`, and `crates/states/symbol`.
 - Decide whether Aave V3 position reads should use generic ABI-decoded calls or dedicated Aave-specific states.
-- Resolve the first pricing sources for `USD` and `BTC` valuation.
+- Resolve the first concrete on-chain pricing sources for `USD` and `BTC` valuation.
 - Resolve the meaning of "staked assets" before implementing the Aave slice.
+
+## Appendix A: Concrete Implementation Plan
+
+This appendix turns the design direction above into a concrete repo rollout plan.
+
+The implementation strategy is:
+
+- land one commit-oriented milestone at a time
+- keep runtime behavior small and testable at each step
+- delay Aave-specific reads until the base multi-network portfolio flow is stable
+- update CLI / app / REST / Nix surfaces in the same milestone that switches the runtime contract
+- commit the work directly on the current branch instead of planning separate review batches
+
+### Milestone 1: freeze the schema in code
+
+Goal:
+
+- mirror the canonical model in code without changing the runtime execution path yet
+
+Primary files and crates:
+
+- `Cargo.toml`
+- `crates/states/portfolio/`
+- `crates/states/wallet/`
+- `crates/states/symbol/`
+
+Tasks:
+
+- add workspace members for:
+  - `crates/states/portfolio`
+  - `crates/states/wallet`
+  - `crates/states/symbol`
+- add model-only crates first:
+  - serde types
+  - rustdoc
+  - validation helpers
+  - deterministic sorting / normalization helpers
+- keep executable runtime logic out of these crates for this milestone
+- add schema-focused tests for:
+  - valid canonical config decoding
+  - invalid ref detection
+  - no-float validation on metadata and protocol config blobs
+  - deterministic ordering normalization
+
+Acceptance criteria:
+
+- workspace builds with the new crates added
+- canonical model types exist in code
+- validation rules from this document are covered by tests
+- no app / CLI / runtime behavior changes yet
+
+### Milestone 2: add the base reusable runtime slice
+
+Goal:
+
+- implement the minimum reusable runtime needed for the first real portfolio run
+
+Scope for this milestone:
+
+- wallet implementations:
+  - `address_only` only
+- balance readers:
+  - `native_balance`
+  - `erc20_balance`
+- valuation readers:
+  - `direct_price`
+  - `derived_unit_price`
+- networks:
+  - multi-network from the start
+
+Primary files and crates:
+
+- `crates/evm-runtime/src/states/read.rs`
+- optionally new modules under `crates/evm-runtime/src/states/`
+- `crates/states/portfolio/src/*`
+- `crates/states/wallet/src/*`
+- `crates/states/symbol/src/*`
+
+Tasks:
+
+- add reusable network-pinning states for per-network block pins
+- add reusable direct price read states in `evm-runtime`
+- keep `derived_unit_price` pure when possible
+- implement wallet resolution states for `address_only`
+- implement symbol dispatch and normalization states for:
+  - native balances
+  - ERC-20 balances
+  - valuation application
+- write canonical `Observation` and `PortfolioSnapshot` assembly states
+
+Acceptance criteria:
+
+- a single run can read multiple wallets across multiple networks
+- all observations use the canonical shape
+- all values use portfolio-level quote requirements
+- valuation source refs are recorded deterministically against pinned blocks
+
+### Milestone 3: replace the planner op in place
+
+Goal:
+
+- switch `portfolio_tracker` from the old single-wallet slice to the new canonical flow
+
+Primary files and crates:
+
+- `crates/ops/portfolio-tracker-op/src/lib.rs`
+- `crates/ops/portfolio-tracker-op/src/tests/portfolio_tracker_op_tests.rs`
+
+Tasks:
+
+- replace the current op config parsing with canonical `PortfolioConfig`
+- replace the linear:
+  - chain id
+  - block
+  - native
+  - token
+  - report
+  flow with the canonical multi-network planner
+- keep the op thin:
+  - config validation
+  - graph wiring
+  - no domain execution logic in the op
+- keep snapshot and report writers either:
+  - in shared portfolio state crates
+  - or as narrow op-local output exceptions only if still justified
+
+Acceptance criteria:
+
+- `portfolio_tracker` runs the new canonical flow
+- old request / response / artifact shape is gone
+- deterministic ordering is covered by tests
+- replay / resume coverage exists for the new portfolio flow
+
+### Milestone 4: switch app, CLI, REST, and Nix surfaces
+
+Goal:
+
+- move all transport and workflow entrypoints to the new in-place contract
+
+Primary files:
+
+- `crates/app/src/lib.rs`
+- `bin/cli/src/commands/portfolio/snapshot.rs`
+- `bin/cli/README.md`
+- `bin/rest-api/README.md`
+- `docs/ops-and-states.md`
+- `docs/architecture.md`
+- `nixfied/project/module.nix`
+
+Tasks:
+
+- replace `PortfolioSnapshotRequest` and `PortfolioSnapshotResponse`
+- update feature schemas in `crates/app`
+- update CLI args:
+  - stop assuming `<ADDRESS>` plus `--chain-id` plus `--tokens-json`
+  - accept canonical config input instead
+- update REST examples and feature docs
+- update Nix task wiring and CI assumptions to use the new request shape
+
+Acceptance criteria:
+
+- CLI, app, REST, and Nix all invoke the same canonical contract
+- docs reflect the breaking change in place
+- no compatibility shim for the old surface remains
+
+### Milestone 5: add Aave V3 `protocol_position`
+
+Goal:
+
+- add the first protocol-backed symbol implementation on top of the stable base flow
+
+Primary files and crates:
+
+- `crates/states/aave-v3/src/portfolio/*`
+- `crates/states/aave-v3/src/lib.rs`
+- `crates/states/aave-v3/src/states.rs`
+- portfolio op tests and integration tests
+
+Tasks:
+
+- define canonical Aave market config types
+- implement Aave `protocol_position` readers for:
+  - reserve positions
+  - debt positions
+  - optional staking positions depending on scoped meaning
+- normalize Aave reads into generic `Observation`s
+- route valuation through `underlying_symbol_id`
+- add protocol-specific validation for Aave config blobs
+
+Acceptance criteria:
+
+- Aave observations appear in the same canonical artifact shape as wallet balances
+- no Aave-specific report-only branch exists outside the Aave crate
+- Aave valuation uses the same generic quote path as other symbols
+
+### Milestone 6: summaries and hardening
+
+Goal:
+
+- add derived reporting, operational hardening, and final parity coverage
+
+Primary files:
+
+- `crates/states/portfolio/src/*`
+- `crates/app/src/lib.rs`
+- integration tests
+- docs
+
+Tasks:
+
+- add wallet and portfolio quote totals
+- add net exposure summaries
+- decide and implement fail-fast vs best-effort behavior
+- add integration tests for:
+  - multi-network runs
+  - replay determinism
+  - crash / resume
+  - valuation determinism
+  - CLI / REST contract behavior
+- update docs and inventories fully
+
+Acceptance criteria:
+
+- summary reporting is stable and tested
+- replay / resume guarantees are explicitly covered for the new portfolio flow
+- docs and code inventory are in sync
+
+### Recommended execution order
+
+The recommended order is:
+
+1. Milestone 1
+2. Milestone 2
+3. Milestone 3
+4. Milestone 4
+5. Milestone 5
+6. Milestone 6
+
+This order matters because:
+
+- Milestone 1 freezes the schema before runtime churn starts
+- Milestone 2 proves the base model without protocol complexity
+- Milestone 3 switches the runtime core once the base pieces exist
+- Milestone 4 moves public entrypoints only after the runtime is ready
+- Milestone 5 adds Aave on top of a stable generic path
+- Milestone 6 is where aggregation and operational hardening belong
+
+### First implementation cut
+
+To keep momentum and review size under control, the first fully runnable implementation should be:
+
+- multi-network
+- multi-wallet
+- address-only wallets
+- native balances
+- ERC-20 balances
+- direct USD pricing
+- derived BTC pricing
+- canonical artifact and report
+
+Explicitly not required for the first runnable cut:
+
+- keystore-backed wallet execution
+- node-managed or external signer execution
+- Aave reads
+- staked assets
+- risk summaries
+- discovery
+
+That first cut is enough to validate:
+
+- the canonical schema
+- multi-network semantics
+- valuation semantics
+- thin-op boundaries
+- transport integration
