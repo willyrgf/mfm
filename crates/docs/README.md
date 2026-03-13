@@ -103,7 +103,6 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | `mfm` | CLI package and `mfm_cli` binary. | `bin/cli` |
 | `mfm-app` | App-level registry and observability glue. | `crates/app` |
 | `mfm-integration-tests` | Workspace integration-test crate. | `tests/integration` |
-| `mfm-publish-docs` | Typed planner, reconciler, and lifecycle tool for docs publishing. | `crates/tools/publish-docs` |
 | `mfm-rest-api` | REST API package and `mfm_rest_api` binary. | `bin/rest-api` |
 
 ## Publishing Notes
