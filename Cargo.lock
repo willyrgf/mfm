@@ -2416,6 +2416,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-state-portfolio"
+version = "0.1.0"
+dependencies = [
+ "mfm-machine",
+ "mfm-state-symbol",
+ "mfm-state-wallet",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "mfm-state-symbol"
+version = "0.1.0"
+dependencies = [
+ "mfm-evm-core",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "mfm-state-wallet"
+version = "0.1.0"
+dependencies = [
+ "mfm-evm-core",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "mfm-transports-local-evm"
 version = "0.1.0"
 dependencies = [

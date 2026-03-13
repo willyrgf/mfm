@@ -1,0 +1,16 @@
+[package]
+name = "mfm-state-portfolio"
+version = "0.1.0"
+edition = "2021"
+description = "Reusable portfolio-domain schema and validation for canonical MFM portfolio snapshots"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+mfm-machine = { path = "../../machine", version = "0.1.0" }
+mfm-state-symbol = { path = "../symbol", version = "0.1.0" }
+mfm-state-wallet = { path = "../wallet", version = "0.1.0" }
