@@ -1926,6 +1926,8 @@ dependencies = [
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-sdk",
+ "mfm-state-portfolio",
+ "mfm-state-symbol",
  "mfm-transports-local-evm",
  "mfm-transports-local-fs",
  "mfm-transports-local-keystore",

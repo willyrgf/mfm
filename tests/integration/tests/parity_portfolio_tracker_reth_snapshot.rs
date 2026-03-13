@@ -28,6 +28,69 @@ fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
         .expect("request")
 }
 
+fn canonical_portfolio_snapshot_payload(wallet_address: &str, chain_id: u64) -> serde_json::Value {
+    serde_json::json!({
+        "portfolio": {
+            "portfolio_id": "reth-eth-only",
+            "quote_codes": ["USD"],
+            "networks": [
+                {
+                    "network_id": "ethereum-mainnet",
+                    "chain_id": chain_id,
+                    "rpc_source_id": null,
+                    "metadata": {}
+                }
+            ],
+            "wallets": [
+                {
+                    "wallet_id": "wallet_mainnet",
+                    "address": wallet_address,
+                    "implementation": {
+                        "kind": "address_only"
+                    },
+                    "network_id": "ethereum-mainnet",
+                    "symbol_ids": [
+                        "eth.native.ethereum-mainnet"
+                    ],
+                    "metadata": {}
+                }
+            ],
+            "symbol_configs": [
+                {
+                    "symbol_id": "eth.native.ethereum-mainnet",
+                    "display_symbol": "ETH",
+                    "kind": "native_balance",
+                    "role": "native",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": null,
+                    "balance_reader": {
+                        "kind": "native_balance"
+                    },
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "eth.native.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "1800.00"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": 18,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        },
+        "valuation_source_registry": {
+            "sources": []
+        }
+    })
+}
+
 async fn response_json(resp: axum::response::Response) -> serde_json::Value {
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
@@ -113,11 +176,7 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
         .oneshot(json_post(
             "/v1/features/portfolio.snapshot/execute",
             serde_json::json!({
-                "payload": {
-                    "address": wallet_address,
-                    "chain_id": chain_id,
-                    "tokens": [],
-                }
+                "payload": canonical_portfolio_snapshot_payload(wallet_address, chain_id)
             }),
         ))
         .await
@@ -129,8 +188,11 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     assert_eq!(v["status"], "success");
     assert_eq!(v["data"]["feature_id"], "portfolio.snapshot");
     assert_eq!(v["data"]["result"]["phase"], "completed");
-    assert_eq!(v["data"]["result"]["chain_id"], chain_id);
-    assert!(v["data"]["result"]["block_number"].as_u64().is_some());
+    assert_eq!(
+        v["data"]["result"]["report"]["portfolio_id"],
+        "reth-eth-only"
+    );
+    assert_eq!(v["data"]["result"]["report"]["error_count"], 0);
 
     let snapshot_artifact_id = v["data"]["result"]["snapshot_artifact_id"]
         .as_str()
@@ -154,13 +216,26 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     assert_eq!(a["status"], "success");
     assert_eq!(a["data"]["artifact_id"], snapshot_artifact_id);
     assert_eq!(a["data"]["encoding"], "json");
+    let out = a["data"]["value"].clone();
+    assert_eq!(out["portfolio_id"], "reth-eth-only");
+    assert_eq!(out["network_pins"][0]["chain_id"], chain_id);
+    assert_eq!(out["wallets"][0]["address"], wallet_address);
     assert_eq!(
-        a["data"]["value"]["wallet_address"].as_str(),
-        Some(wallet_address)
+        out["wallets"][0]["observations"]
+            .as_array()
+            .map(|v| v.len()),
+        Some(1)
     );
-    assert_eq!(a["data"]["value"]["chain_id"].as_u64(), Some(chain_id));
     assert_eq!(
-        a["data"]["value"]["tokens"].as_array().map(|a| a.len()),
-        Some(0)
+        out["wallets"][0]["observations"][0]["symbol_id"],
+        "eth.native.ethereum-mainnet"
+    );
+    assert_eq!(
+        out["wallets"][0]["observations"][0]["values"][0]["quote"],
+        "USD"
+    );
+    assert_eq!(
+        out["wallets"][0]["observations"][0]["values"][0]["unit_price_dec"],
+        "1800.00"
     );
 }

@@ -28,6 +28,8 @@ mfm-op-evm-deploy-configure-validate = { path = "../ops/evm-deploy-configure-val
 mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
 mfm-op-nix-app = { path = "../ops/nix-app-op" }
 mfm-op-aave-v3-origin-adapt = { path = "../ops/aave-v3-origin-adapt-op" }
+mfm-state-portfolio = { path = "../states/portfolio" }
+mfm-state-symbol = { path = "../states/symbol" }
 mfm-artifact-store-fs = { path = "../storages/artifact-store-fs" }
 mfm-artifact-store-s3 = { path = "../storages/artifact-store-s3" }
 mfm-event-store-postgres = { path = "../storages/event-store-postgres" }

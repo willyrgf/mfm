@@ -379,7 +379,9 @@ mfm_cli run artifacts get <ARTIFACT_ID> [OPTIONS]
 
 ### `portfolio snapshot`
 
-Snapshots a wallet portfolio (ETH + allowlisted ERC-20 balances) with `chain_id=1` by default.
+Starts the canonical portfolio snapshot flow from a full request object containing:
+- `portfolio`
+- `valuation_source_registry`
 
 **Requirements:**
 - `DATABASE_URL` (event store)
@@ -387,16 +389,27 @@ Snapshots a wallet portfolio (ETH + allowlisted ERC-20 balances) with `chain_id=
 
 **Usage:**
 ```sh
-mfm_cli portfolio snapshot <ADDRESS> [OPTIONS]
+mfm_cli portfolio snapshot --request-file <REQUEST_FILE> [OPTIONS]
+mfm_cli portfolio snapshot --request-json '<REQUEST_JSON>' [OPTIONS]
 ```
 
 **Key Options:**
-- `--chain-id <N>`: EVM chain id to snapshot (default: 1)
-- `--tokens-json <JSON>`: Optional JSON array to include/override allowlisted tokens (default: `[]`)
+- `--request-file <PATH>`: Path to a canonical request JSON file
+- `--request-json <JSON>`: Inline canonical request JSON payload
+
+The request JSON must use the same in-place contract as the `portfolio.snapshot` feature:
+
+```json
+{
+  "portfolio": { "...": "canonical PortfolioConfig" },
+  "valuation_source_registry": { "...": "canonical ValuationSourceRegistry" }
+}
+```
 
 **Output Notes:**
 - Result metadata includes run ids and snapshot ids.
-- The response also includes a `native_balance` report object with `symbol`, `raw_u256_dec`, `decimals`, and `amount_dec`.
+- The response includes `snapshot_artifact_id` when the run completed.
+- The response includes the canonical portfolio `report` when available.
 
 ## Configuration
 
@@ -493,13 +506,6 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 
 - EVM transport note: per-request `rpc_url` override is not supported; routing is source-id based.
 - EVM routing runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)
-
-- **`MFM_PORTFOLIO_TOKENS_JSON`**: Optional JSON array of ERC-20 token specs used by `mfm_cli portfolio snapshot` (and the REST API feature `portfolio.snapshot`).
-  ```sh
-  export MFM_PORTFOLIO_TOKENS_JSON='[
-    {"address":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","symbol":"USDC","decimals":6}
-  ]'
-  ```
 
 ## Best Practices
 

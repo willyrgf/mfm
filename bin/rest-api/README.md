@@ -40,7 +40,6 @@ Environment variables:
 - Legacy compatibility:
   - `MFM_EVM_RPC_URL`: single-source fallback endpoint (mapped to source id `user_primary`).
   - `MFM_EVM_RPC_AUTHORIZATION`: optional Authorization header for that legacy single source.
-- `MFM_PORTFOLIO_TOKENS_JSON`: optional JSON array of ERC-20 token specs used by `feature_id = "portfolio.snapshot"`
 
 ## API
 
@@ -93,7 +92,16 @@ Portfolio snapshot feature:
 ```bash
 curl -s "http://127.0.0.1:3001/v1/features/portfolio.snapshot/execute" \
   -H "content-type: application/json" \
-  -d '{"payload":{"address":"0x000000000000000000000000000000000000dead","chain_id":1,"tokens":[]}}'
+  -d '{
+    "payload": {
+      "portfolio": {
+        "...": "canonical PortfolioConfig"
+      },
+      "valuation_source_registry": {
+        "...": "canonical ValuationSourceRegistry"
+      }
+    }
+  }'
 ```
 
 Supported `op_id` values (current):

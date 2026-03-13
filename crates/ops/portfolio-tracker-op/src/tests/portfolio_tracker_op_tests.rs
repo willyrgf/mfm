@@ -26,6 +26,15 @@ const ERC20_DECIMALS_SELECTOR: &str = "0x313ce567";
 const LATEST_ROUND_DATA_SELECTOR: &str = "0xfeaf968c";
 const BALANCE_OF_SELECTOR_PREFIX: &str = "0x70a08231";
 
+struct Harness {
+    engine: Arc<dyn ExecutionEngine>,
+    registry: Arc<dyn mfm_sdk::op::OperationRegistry>,
+    planner: Arc<dyn mfm_sdk::pipeline::PipelinePlanner>,
+    pipeline: mfm_sdk::pipeline::Pipeline,
+    stores: Stores,
+    cfg: mfm_machine::config::RunConfig,
+}
+
 fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
     ErrorInfo {
         code: ErrorCode(code.to_string()),
@@ -229,17 +238,11 @@ fn build_harness(
     op_config: serde_json::Value,
     evm_factory: Arc<dyn LiveIoTransportFactory>,
     failpoints: Option<EngineFailpoints>,
-) -> (
-    Arc<dyn ExecutionEngine>,
-    Arc<dyn mfm_sdk::op::OperationRegistry>,
-    Arc<dyn mfm_sdk::pipeline::PipelinePlanner>,
-    mfm_sdk::pipeline::Pipeline,
-    Stores,
-    mfm_machine::config::RunConfig,
-) {
+) -> Harness {
     let op: mfm_sdk::op::DynOperation = Arc::new(PortfolioTrackerOp);
     let (registry, planner, pipeline) =
         op_test_support::single_op_plan(op, op_config).expect("pipeline");
+    let stores = op_test_support::in_memory_stores();
 
     let resolver = Arc::new(SdkPlanResolver::new(
         Arc::clone(&registry),
@@ -254,14 +257,14 @@ fn build_harness(
         engine = engine.with_failpoints(failpoints);
     }
 
-    (
-        Arc::new(engine),
+    Harness {
+        engine: Arc::new(engine),
         registry,
         planner,
         pipeline,
-        op_test_support::in_memory_stores(),
-        op_test_support::run_config_live(),
-    )
+        stores,
+        cfg: op_test_support::run_config_live(),
+    }
 }
 
 async fn load_context_snapshot(stores: &Stores, snapshot_id: &ArtifactId) -> serde_json::Value {
@@ -416,8 +419,14 @@ async fn at_live_then_replay_determinism() {
     let counts = Arc::new(Mutex::new(HashMap::new()));
     let factory: Arc<dyn LiveIoTransportFactory> =
         Arc::new(CountingTransportFactory::new(Arc::clone(&counts)));
-    let (engine, registry, planner, pipeline, stores, cfg) =
-        build_harness(canonical_op_config(), factory, None);
+    let Harness {
+        engine,
+        registry,
+        planner,
+        pipeline,
+        stores,
+        cfg,
+    } = build_harness(canonical_op_config(), factory, None);
 
     let res = op_test_support::start_pipeline_with_defaults(
         Arc::clone(&engine),
@@ -555,8 +564,14 @@ async fn at_crash_resume_orphan_attempt_reuses_pinned_network_facts() {
         .stop_after_handler_once
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
-    let (engine, registry, planner, pipeline, stores, cfg) =
-        build_harness(canonical_op_config(), factory, Some(failpoints.clone()));
+    let Harness {
+        engine,
+        registry,
+        planner,
+        pipeline,
+        stores,
+        cfg,
+    } = build_harness(canonical_op_config(), factory, Some(failpoints.clone()));
 
     let first = op_test_support::start_pipeline_with_defaults(
         Arc::clone(&engine),

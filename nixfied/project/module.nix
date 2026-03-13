@@ -177,7 +177,7 @@ let
     "SERVICE_OWNER_SCOPE"
     "SERVICE_DISCOVERY_SCOPE"
     "MFM_KEEP_SERVICES"
-    "MFM_SNAPSHOT_ADDRESS"
+    "MFM_SNAPSHOT_REQUEST_FILE"
     "MFM_SNAPSHOT_HANDOFF_FILE"
     "MFM_SNAPSHOT_RESULT_FILE"
     "MFM_CI_ENABLE_PARITY"
@@ -1405,8 +1405,18 @@ in
                 exit 2
               fi
 
-              if [ -z "''${MFM_SNAPSHOT_ADDRESS:-}" ]; then
-                echo "ERROR: MFM_SNAPSHOT_ADDRESS is required for the snapshot workflow" >&2
+              if [ -z "''${MFM_SNAPSHOT_REQUEST_FILE:-}" ]; then
+                echo "ERROR: MFM_SNAPSHOT_REQUEST_FILE is required for the snapshot workflow" >&2
+                exit 1
+              fi
+
+              if [ ! -f "$MFM_SNAPSHOT_REQUEST_FILE" ]; then
+                echo "ERROR: MFM_SNAPSHOT_REQUEST_FILE does not exist: $MFM_SNAPSHOT_REQUEST_FILE" >&2
+                exit 1
+              fi
+
+              if [ ! -r "$MFM_SNAPSHOT_REQUEST_FILE" ]; then
+                echo "ERROR: MFM_SNAPSHOT_REQUEST_FILE is not readable: $MFM_SNAPSHOT_REQUEST_FILE" >&2
                 exit 1
               fi
 
@@ -1453,7 +1463,7 @@ in
               mkdir -p "$(dirname "$MFM_SNAPSHOT_HANDOFF_FILE")"
               mkdir -p "$(dirname "$MFM_SNAPSHOT_RESULT_FILE")"
 
-              echo "OK: snapshot preflight address=$MFM_SNAPSHOT_ADDRESS"
+              echo "OK: snapshot preflight request_file=$MFM_SNAPSHOT_REQUEST_FILE"
             '';
           }
           // {
@@ -1515,8 +1525,8 @@ in
                 exit 2
               fi
 
-              if [ -z "''${MFM_SNAPSHOT_ADDRESS:-}" ]; then
-                echo "ERROR: MFM_SNAPSHOT_ADDRESS is required for snapshot execution" >&2
+              if [ -z "''${MFM_SNAPSHOT_REQUEST_FILE:-}" ]; then
+                echo "ERROR: MFM_SNAPSHOT_REQUEST_FILE is required for snapshot execution" >&2
                 exit 1
               fi
 
@@ -1535,7 +1545,7 @@ in
                 exit 1
               fi
 
-              echo "INFO: snapshot exec preparing packaged mfm_cli address=$MFM_SNAPSHOT_ADDRESS chain_id=1 result_file=$MFM_SNAPSHOT_RESULT_FILE"
+              echo "INFO: snapshot exec preparing packaged mfm_cli request_file=$MFM_SNAPSHOT_REQUEST_FILE result_file=$MFM_SNAPSHOT_RESULT_FILE"
               mfm_cli_bin="$(resolve_packaged_mfm_cli_binary)" || exit 1
 
               HELIOS_RPC_PORT="$HELIOSRPC_PORT"
@@ -1546,8 +1556,8 @@ in
               export MFM_EVM_RPC_PREFERRED_ORDER="helios_local"
               export MFM_EVM_RPC_SOURCE_ID="helios_local"
 
-              echo "INFO: launching packaged mfm_cli portfolio snapshot address=$MFM_SNAPSHOT_ADDRESS chain_id=1 rpc=$MFM_EVM_RPC_URL"
-              "$mfm_cli_bin" --output-format json portfolio snapshot "$MFM_SNAPSHOT_ADDRESS" --chain-id 1 >"$MFM_SNAPSHOT_RESULT_FILE"
+              echo "INFO: launching packaged mfm_cli portfolio snapshot request_file=$MFM_SNAPSHOT_REQUEST_FILE rpc=$MFM_EVM_RPC_URL"
+              "$mfm_cli_bin" --output-format json portfolio snapshot --request-file "$MFM_SNAPSHOT_REQUEST_FILE" >"$MFM_SNAPSHOT_RESULT_FILE"
             '';
           }
           // {
@@ -1594,19 +1604,19 @@ in
         mfm-portfolio-snapshot = mkCommandTask {
           id = "task.mfm.portfolio.snapshot";
           appName = "mfm::portfolio::snapshot";
-          summary = "Snapshot a wallet with Helios-backed mainnet RPC";
+          summary = "Snapshot a portfolio request with Helios-backed mainnet RPC";
           description = ''
             Starts/reuses Postgres + Helios, waits for Helios RPC readiness,
-            then runs `mfm_cli --output-format json portfolio snapshot`.
+            then runs `mfm_cli --output-format json portfolio snapshot --request-file`.
           '';
           tags = [
             "mfm"
             "portfolio"
             "json"
           ];
-          usage = [ "nix run .#mfm::portfolio::snapshot -- <ADDRESS>" ];
+          usage = [ "nix run .#mfm::portfolio::snapshot -- <REQUEST_FILE>" ];
           examples = [
-            "MFM_ENV=dev HELIOS_NETWORK=mainnet SERVICE_REUSE_POLICY=same-slot nix run .#mfm::portfolio::snapshot -- 0x000000000000000000000000000000000000dead"
+            "MFM_ENV=dev HELIOS_NETWORK=mainnet SERVICE_REUSE_POLICY=same-slot nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json"
           ];
           runtimeInputs = leanRuntimeInputs;
           argParser = "typed";
@@ -1622,11 +1632,11 @@ in
               description = "Show usage.";
             }
             {
-              name = "address";
+              name = "request_file";
               kind = "positional";
               type = "string";
               required = false;
-              description = "Ethereum address to snapshot.";
+              description = "Path to the canonical portfolio snapshot request JSON file.";
             }
           ];
           command = ''
@@ -1645,12 +1655,12 @@ in
             exec 2>&4
 
             if [ "''${1:-}" = "--help" ] || [ "''${1:-}" = "-h" ]; then
-              echo "usage: nix run .#mfm::portfolio::snapshot -- <ADDRESS>" >&2
+              echo "usage: nix run .#mfm::portfolio::snapshot -- <REQUEST_FILE>" >&2
               exit 0
             fi
 
             if [ "$#" -ne 1 ]; then
-              echo "usage: nix run .#mfm::portfolio::snapshot -- <ADDRESS>" >&2
+              echo "usage: nix run .#mfm::portfolio::snapshot -- <REQUEST_FILE>" >&2
               exit 2
             fi
 
@@ -1675,11 +1685,14 @@ in
               exit 1
             fi
 
-            ADDRESS="$1"
+            REQUEST_FILE="$1"
+            if [ "''${REQUEST_FILE#/}" = "$REQUEST_FILE" ]; then
+              REQUEST_FILE="$PWD/$REQUEST_FILE"
+            fi
             session_dir="$(mktemp -d "''${TMPDIR:-/tmp}/mfm-portfolio-snapshot.XXXXXX")"
             handoff_file="$session_dir/services.json"
             out_file="$session_dir/result.json"
-            export MFM_SNAPSHOT_ADDRESS="$ADDRESS"
+            export MFM_SNAPSHOT_REQUEST_FILE="$REQUEST_FILE"
             export MFM_SNAPSHOT_HANDOFF_FILE="$handoff_file"
             export MFM_SNAPSHOT_RESULT_FILE="$out_file"
 
@@ -1695,7 +1708,7 @@ in
             trap 'exit 130' INT
             trap 'exit 143' TERM
 
-            echo "INFO: snapshot workflow bootstrap address=$ADDRESS chain_id=1 postgres_port=$POSTGRES_PORT heliosrpc_port=$HELIOSRPC_PORT reuse=''${SERVICE_REUSE_POLICY:-default}"
+            echo "INFO: snapshot workflow bootstrap request_file=$REQUEST_FILE postgres_port=$POSTGRES_PORT heliosrpc_port=$HELIOSRPC_PORT reuse=''${SERVICE_REUSE_POLICY:-default}"
             echo "INFO: snapshot workflow session_dir=$session_dir handoff_file=$handoff_file result_file=$out_file"
             echo "INFO: snapshot workflow phases: preflight -> services-start/reuse -> snapshot.exec -> services-stop"
             NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-workflow workflow.mfm.portfolio.snapshot
@@ -2781,6 +2794,7 @@ in
               address="''${MFM_CI_MAINNET_ADDRESS:-0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045}"
               log_file="$artifacts_dir/mainnet-portfolio-snapshot.log"
               out_file="$artifacts_dir/mainnet-portfolio-snapshot.json"
+              request_file="$artifacts_dir/mainnet-portfolio-snapshot-request.json"
 
               export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
               export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
@@ -2792,10 +2806,120 @@ in
 
               echo "INFO: running ci step=mainnet-portfolio-snapshot-helios address=$address"
 
+              cat >"$request_file" <<EOF
+              {
+                "portfolio": {
+                  "portfolio_id": "ci-mainnet-portfolio",
+                  "quote_codes": ["USD", "BTC"],
+                  "networks": [
+                    {
+                      "network_id": "ethereum-mainnet",
+                      "chain_id": 1,
+                      "rpc_source_id": "helios_local",
+                      "metadata": {}
+                    }
+                  ],
+                  "wallets": [
+                    {
+                      "wallet_id": "wallet_mainnet",
+                      "address": "$address",
+                      "network_id": "ethereum-mainnet",
+                      "implementation": { "kind": "address_only" },
+                      "symbol_ids": ["eth.native.ethereum-mainnet"],
+                      "metadata": {}
+                    }
+                  ],
+                  "symbol_configs": [
+                    {
+                      "symbol_id": "eth.native.ethereum-mainnet",
+                      "display_symbol": "ETH",
+                      "kind": "native_balance",
+                      "role": "native",
+                      "network_id": "ethereum-mainnet",
+                      "protocol": null,
+                      "balance_reader": { "kind": "native_balance" },
+                      "valuation": {
+                        "quotes": [
+                          {
+                            "quote": "USD",
+                            "priced_symbol_id": "eth.native.ethereum-mainnet",
+                            "reader": {
+                              "kind": "direct_price",
+                              "source": {
+                                "source_id": "chainlink_eth_usd_mainnet",
+                                "network_id": "ethereum-mainnet",
+                                "base_symbol_id": "eth.native.ethereum-mainnet",
+                                "quote": "USD"
+                              }
+                            }
+                          },
+                          {
+                            "quote": "BTC",
+                            "priced_symbol_id": "eth.native.ethereum-mainnet",
+                            "reader": {
+                              "kind": "derived_unit_price",
+                              "numerator": {
+                                "source_id": "chainlink_eth_usd_mainnet",
+                                "network_id": "ethereum-mainnet",
+                                "base_symbol_id": "eth.native.ethereum-mainnet",
+                                "quote": "USD"
+                              },
+                              "denominator": {
+                                "source_id": "chainlink_btc_usd_mainnet",
+                                "network_id": "ethereum-mainnet",
+                                "base_symbol_id": "btc.native.ethereum-mainnet",
+                                "quote": "USD"
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "decimals": 18,
+                      "underlying_symbol_id": null,
+                      "metadata": {}
+                    }
+                  ],
+                  "metadata": {}
+                },
+                "valuation_source_registry": {
+                  "sources": [
+                    {
+                      "source_id": "chainlink_eth_usd_mainnet",
+                      "network_id": "ethereum-mainnet",
+                      "base_symbol_id": "eth.native.ethereum-mainnet",
+                      "quote": "USD",
+                      "reader": {
+                        "kind": "evm_oracle",
+                        "oracle_kind": "chainlink_aggregator_v3",
+                        "config": {
+                          "contract_address": "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419"
+                        }
+                      },
+                      "metadata": {}
+                    },
+                    {
+                      "source_id": "chainlink_btc_usd_mainnet",
+                      "network_id": "ethereum-mainnet",
+                      "base_symbol_id": "btc.native.ethereum-mainnet",
+                      "quote": "USD",
+                      "reader": {
+                        "kind": "evm_oracle",
+                        "oracle_kind": "chainlink_aggregator_v3",
+                        "config": {
+                          "contract_address": "0xf4030086522a5beea4988f8ca5b36dbc97bee88c"
+                        }
+                      },
+                      "metadata": {}
+                    }
+                  ]
+                }
+              }
+              EOF
+
               run_packaged_mfm_cli_snapshot() {
                 local mfm_cli_bin=""
                 mfm_cli_bin="$(resolve_packaged_mfm_cli_binary)" || return 1
-                "$mfm_cli_bin" --output-format json portfolio snapshot "$address" --chain-id 1
+                "$mfm_cli_bin" --output-format json portfolio snapshot --request-file "$request_file"
               }
 
               mode="$(printf '%s' "''${OUTPUT_MODE:-stdout}" | tr '[:upper:]' '[:lower:]')"

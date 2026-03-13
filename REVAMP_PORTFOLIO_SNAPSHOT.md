@@ -469,14 +469,14 @@ Relevant code:
 
 ### Current inputs
 
-Current feature inputs are:
+Legacy feature inputs before this revamp were:
 
 - `address`
 - optional `chain_id`
 - `tokens`
 
-The CLI exposes `tokens` through `--tokens-json`.
-The app also merges `MFM_PORTFOLIO_TOKENS_JSON` into the request.
+The legacy CLI exposed `tokens` through `--tokens-json`.
+The legacy app also merged `MFM_PORTFOLIO_TOKENS_JSON` into the request.
 
 Important limitations:
 

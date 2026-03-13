@@ -64,8 +64,8 @@ use mfm_op_keystore_admin::{KeystoreDeleteOp, KeystoreImportOp, KeystoreListOp};
 use mfm_op_keystore_tx::{KeystoreTxSendRawOp, KeystoreTxSignOp};
 use mfm_op_nix_app::NixAppOp;
 use mfm_op_portfolio_tracker::{
-    portfolio_tracker_report_context_key, PortfolioBalanceReport, PortfolioTrackerOp,
-    PortfolioTrackerReport,
+    portfolio_snapshot_artifact_id_context_key, portfolio_snapshot_report_context_key,
+    PortfolioTrackerOp,
 };
 use mfm_op_proof::ProofOp;
 use mfm_sdk::ids::{MachineId, StepId};
@@ -76,6 +76,8 @@ use mfm_sdk::unstable::{
     single_op_pipeline, DefaultPipelinePlanner, DefaultRunLauncher, HashMapOperationRegistry,
     SdkPlanResolver,
 };
+use mfm_state_portfolio::model::{validate_portfolio_bundle, PortfolioReport};
+use mfm_state_symbol::model::ValuationSourceRegistry;
 use mfm_transports_local_evm::LocalEvmIoTransportFactory;
 use mfm_transports_local_fs::LocalFsIoTransportFactory;
 use mfm_transports_local_keystore::LocalKeystoreIoTransportFactory;
@@ -84,7 +86,6 @@ use mfm_transports_proof::ProofIoTransportFactory;
 const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
 const ENV_ARTIFACT_ROOT: &str = "MFM_ARTIFACT_ROOT";
 const ENV_DATABASE_URL: &str = "DATABASE_URL";
-const ENV_PORTFOLIO_TOKENS_JSON: &str = "MFM_PORTFOLIO_TOKENS_JSON";
 const ENV_S3_ENSURE_BUCKET: &str = "MFM_S3_ENSURE_BUCKET";
 
 /// High-level error classes used by application-facing APIs.
@@ -873,10 +874,9 @@ impl AppServices {
         const OP_ID: &str = "portfolio_tracker";
         const OP_VERSION: &str = "v1";
 
-        let mut req = req;
-        let mut tokens = load_portfolio_tokens_from_env()?;
-        tokens.extend(req.tokens);
-        req.tokens = tokens;
+        validate_portfolio_bundle(&req.portfolio, &req.valuation_source_registry).map_err(
+            |err| AppError::invalid_request(format!("invalid portfolio snapshot request: {err}")),
+        )?;
 
         let op_config = serde_json::to_value(&req).map_err(|_| {
             AppError::invalid_request("failed to encode portfolio snapshot request")
@@ -891,12 +891,11 @@ impl AppServices {
             .await?;
 
         let mut snapshot_artifact_id = None;
-        let mut chain_id = None;
-        let mut block_number = None;
-        let mut native_balance = None;
+        let mut report = None;
 
         if let Some(final_snapshot_id) = &run.final_snapshot_id {
-            let report_key = portfolio_tracker_report_context_key();
+            let report_key = portfolio_snapshot_report_context_key();
+            let snapshot_artifact_id_key = portfolio_snapshot_artifact_id_context_key();
             let bytes = self
                 .artifacts
                 .get(&ArtifactId(final_snapshot_id.clone()))
@@ -911,19 +910,26 @@ impl AppServices {
                 )
             })?;
 
-            if let Some(report_value) = v.get(&report_key.0).cloned() {
-                let report: PortfolioTrackerReport =
-                    serde_json::from_value(report_value).map_err(|_| {
+            if let Some(snapshot_artifact_id_value) = v.get(&snapshot_artifact_id_key.0).cloned() {
+                snapshot_artifact_id = Some(
+                    serde_json::from_value(snapshot_artifact_id_value).map_err(|_| {
                         AppError::new(
                             ErrorClass::Internal,
-                            "PortfolioSnapshotReportDecodeFailed",
-                            "failed to decode portfolio snapshot report",
+                            "PortfolioSnapshotArtifactIdDecodeFailed",
+                            "failed to decode portfolio snapshot artifact id",
                         )
-                    })?;
-                snapshot_artifact_id = Some(report.snapshot_artifact_id);
-                chain_id = Some(report.chain_id);
-                block_number = Some(report.block_number);
-                native_balance = report.native_balance;
+                    })?,
+                );
+            }
+
+            if let Some(report_value) = v.get(&report_key.0).cloned() {
+                report = Some(serde_json::from_value(report_value).map_err(|_| {
+                    AppError::new(
+                        ErrorClass::Internal,
+                        "PortfolioSnapshotReportDecodeFailed",
+                        "failed to decode portfolio snapshot report",
+                    )
+                })?);
             }
         }
 
@@ -932,28 +938,52 @@ impl AppServices {
             phase: run.phase,
             final_snapshot_id: run.final_snapshot_id,
             snapshot_artifact_id,
-            chain_id,
-            block_number,
-            native_balance,
+            report,
         })
     }
 
-    /// Starts a portfolio snapshot run using a CLI-style `--tokens-json` string.
-    pub async fn start_portfolio_snapshot_from_tokens_json(
+    /// Starts a portfolio snapshot run from either an inline JSON payload or a JSON file.
+    pub async fn start_portfolio_snapshot_from_request_input(
         &self,
-        address: String,
-        chain_id: u64,
-        tokens_json: String,
+        request_json: Option<String>,
+        request_file: Option<PathBuf>,
     ) -> Result<PortfolioSnapshotResponse, AppError> {
-        let tokens = parse_portfolio_tokens_json(&tokens_json)?;
-
-        self.start_portfolio_snapshot(PortfolioSnapshotRequest {
-            address,
-            chain_id: Some(chain_id),
-            tokens,
-        })
-        .await
+        let request = parse_portfolio_snapshot_request_input(request_json, request_file)?;
+        self.start_portfolio_snapshot(request).await
     }
+}
+
+/// Parses a portfolio snapshot request from either an inline JSON payload or a JSON file.
+pub fn parse_portfolio_snapshot_request_input(
+    request_json: Option<String>,
+    request_file: Option<PathBuf>,
+) -> Result<PortfolioSnapshotRequest, AppError> {
+    let raw_request = match (request_json, request_file) {
+        (Some(_), Some(_)) => {
+            return Err(AppError::new(
+                ErrorClass::BadRequest,
+                "InvalidArguments",
+                "Pass only one of --request-json or --request-file",
+            ));
+        }
+        (None, None) => {
+            return Err(AppError::new(
+                ErrorClass::BadRequest,
+                "MissingArgument",
+                "Pass one of --request-json or --request-file",
+            ));
+        }
+        (Some(raw), None) => raw,
+        (None, Some(path)) => std::fs::read_to_string(path).map_err(|_| {
+            AppError::new(
+                ErrorClass::BadRequest,
+                "InvalidRequestFile",
+                "Failed to read --request-file contents",
+            )
+        })?,
+    };
+
+    serde_json::from_str(&raw_request).map_err(|_| AppError::invalid_json())
 }
 
 /// Loads an artifact from the supplied store and returns a JSON-or-hex response body.
@@ -1487,15 +1517,16 @@ impl FeatureCatalog {
                 id: "portfolio.snapshot".to_string(),
                 version: "v1".to_string(),
                 kind: FeatureKind::Operation,
-                description: "Start a portfolio snapshot run from a single wallet address (default chain_id: 1)".to_string(),
+                description:
+                    "Start a canonical portfolio snapshot run from portfolio config plus valuation source registry"
+                        .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "address": {"type": "string"},
-                        "chain_id": {"type": "integer"},
-                        "tokens": {"type": "array"}
+                        "portfolio": {"type": "object"},
+                        "valuation_source_registry": {"type": "object"}
                     },
-                    "required": ["address"]
+                    "required": ["portfolio", "valuation_source_registry"]
                 }),
                 output_schema: serde_json::json!({
                     "type": "object",
@@ -1504,18 +1535,7 @@ impl FeatureCatalog {
                         "phase": {"type": "string"},
                         "final_snapshot_id": {"type": ["string", "null"]},
                         "snapshot_artifact_id": {"type": ["string", "null"]},
-                        "chain_id": {"type": ["integer", "null"]},
-                        "block_number": {"type": ["integer", "null"]},
-                        "native_balance": {
-                            "type": ["object", "null"],
-                            "properties": {
-                                "symbol": {"type": "string"},
-                                "raw_u256_dec": {"type": "string"},
-                                "decimals": {"type": "integer"},
-                                "amount_dec": {"type": "string"}
-                            },
-                            "required": ["symbol", "raw_u256_dec", "decimals", "amount_dec"]
-                        }
+                        "report": {"type": ["object", "null"]}
                     },
                     "required": ["run_id", "phase"]
                 }),
@@ -1621,111 +1641,10 @@ struct RunEventsInput {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 /// Request payload for the portfolio snapshot feature.
 pub struct PortfolioSnapshotRequest {
-    /// Wallet address to inspect.
-    pub address: String,
-    /// Optional chain id override. Defaults are handled by the feature itself.
-    pub chain_id: Option<u64>,
-    /// Additional token descriptors to include in the snapshot.
-    #[serde(default)]
-    pub tokens: Vec<PortfolioTokenSpec>,
-}
-
-/// Parses the CLI/REST `tokens_json` string into token descriptors.
-pub fn parse_portfolio_tokens_json(tokens_json: &str) -> Result<Vec<PortfolioTokenSpec>, AppError> {
-    let tokens_value: serde_json::Value = serde_json::from_str(tokens_json).map_err(|_| {
-        AppError::new(
-            ErrorClass::BadRequest,
-            "InvalidJson",
-            "Failed to parse --tokens-json as JSON",
-        )
-    })?;
-    if !tokens_value.is_array() {
-        return Err(AppError::new(
-            ErrorClass::BadRequest,
-            "InvalidJson",
-            "--tokens-json must be a JSON array",
-        ));
-    }
-
-    serde_json::from_value(tokens_value).map_err(|_| {
-        AppError::new(
-            ErrorClass::BadRequest,
-            "InvalidJson",
-            "--tokens-json entries must be valid token objects",
-        )
-    })
-}
-
-fn normalize_eth_address(s: &str) -> Option<String> {
-    let s = s.trim();
-    let rest = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
-    if rest.len() != 40 {
-        return None;
-    }
-    if !rest.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(format!("0x{}", rest.to_ascii_lowercase()))
-}
-
-fn parse_portfolio_tokens_from_env(raw: &str) -> Result<Vec<PortfolioTokenSpec>, AppError> {
-    let tokens_value: serde_json::Value = serde_json::from_str(raw).map_err(|_| {
-        AppError::new(
-            ErrorClass::BadRequest,
-            "InvalidPortfolioTokensJson",
-            format!("invalid {ENV_PORTFOLIO_TOKENS_JSON}"),
-        )
-    })?;
-
-    if !tokens_value.is_array() {
-        return Err(AppError::new(
-            ErrorClass::BadRequest,
-            "InvalidPortfolioTokensJson",
-            format!("invalid {ENV_PORTFOLIO_TOKENS_JSON}"),
-        ));
-    }
-
-    let tokens: Vec<PortfolioTokenSpec> = serde_json::from_value(tokens_value).map_err(|_| {
-        AppError::new(
-            ErrorClass::BadRequest,
-            "InvalidPortfolioTokensJson",
-            format!("invalid {ENV_PORTFOLIO_TOKENS_JSON}"),
-        )
-    })?;
-
-    if tokens
-        .iter()
-        .any(|token| normalize_eth_address(&token.address).is_none())
-    {
-        return Err(AppError::new(
-            ErrorClass::BadRequest,
-            "InvalidPortfolioTokensJson",
-            format!("invalid token address in {ENV_PORTFOLIO_TOKENS_JSON}"),
-        ));
-    }
-
-    Ok(tokens)
-}
-
-#[allow(clippy::disallowed_methods)]
-fn load_portfolio_tokens_from_env() -> Result<Vec<PortfolioTokenSpec>, AppError> {
-    let Ok(raw) = std::env::var(ENV_PORTFOLIO_TOKENS_JSON) else {
-        return Ok(Vec::new());
-    };
-    parse_portfolio_tokens_from_env(&raw)
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-/// Token descriptor used by the portfolio snapshot feature.
-pub struct PortfolioTokenSpec {
-    /// ERC-20 token contract address.
-    pub address: String,
-    /// Optional symbol hint for output formatting.
-    #[serde(default)]
-    pub symbol: Option<String>,
-    /// Optional decimals hint for output formatting.
-    #[serde(default)]
-    pub decimals: Option<u8>,
+    /// Canonical portfolio-owned config surface.
+    pub portfolio: mfm_state_portfolio::model::PortfolioConfig,
+    /// Sibling valuation source registry surface loaded alongside the portfolio config.
+    pub valuation_source_registry: ValuationSourceRegistry,
 }
 
 /// Response returned after starting a portfolio snapshot feature run.
@@ -1737,14 +1656,10 @@ pub struct PortfolioSnapshotResponse {
     pub phase: String,
     /// Final snapshot id when the run completed.
     pub final_snapshot_id: Option<String>,
-    /// Report artifact id containing the portfolio snapshot, when available.
+    /// Canonical portfolio snapshot artifact id, when available.
     pub snapshot_artifact_id: Option<String>,
-    /// Resolved chain id from the final report.
-    pub chain_id: Option<u64>,
-    /// Resolved block number from the final report.
-    pub block_number: Option<u64>,
-    /// Native balance from the final report, when present.
-    pub native_balance: Option<PortfolioBalanceReport>,
+    /// Canonical portfolio report derived from the snapshot artifact, when available.
+    pub report: Option<PortfolioReport>,
 }
 
 #[cfg(test)]

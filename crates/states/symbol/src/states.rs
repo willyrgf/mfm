@@ -641,8 +641,8 @@ fn divide_decimal_strings(numerator: &str, denominator: &str) -> Result<String, 
 
     let min_scale = numerator.scale.max(denominator.scale).max(8);
     let working_scale = min_scale + 18;
-    let scaled_numerator = numerator.digits * ten_pow((working_scale + denominator.scale) as u32);
-    let scaled_denominator = denominator.digits * ten_pow(numerator.scale as u32);
+    let scaled_numerator = numerator.digits * ten_pow(working_scale + denominator.scale);
+    let scaled_denominator = denominator.digits * ten_pow(numerator.scale);
     let quotient = scaled_numerator / scaled_denominator;
     Ok(DecimalValue {
         digits: quotient,

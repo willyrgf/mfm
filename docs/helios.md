@@ -10,7 +10,7 @@ Helios is consumed by the restored Nixfied app:
 export MFM_ENV=dev
 export SERVICE_REUSE_POLICY=same-slot
 export HELIOS_NETWORK=mainnet
-nix run .#mfm::portfolio::snapshot -- <ADDRESS>
+nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json
 ```
 
 The public wrapper lives in `nixfied/project/module.nix` as `task.mfm.portfolio.snapshot`.
@@ -20,13 +20,14 @@ It owns stdout and delegates sequencing to the internal workflow:
 
 That workflow currently composes hidden implementation tasks:
 
-- `task.mfm.portfolio.services-start`
+- `task.mfm.portfolio.snapshot.services-start`
 - `task.mfm.portfolio.snapshot.exec`
-- `task.mfm.portfolio.services-stop`
+- `task.mfm.portfolio.snapshot.services-stop`
 
 The public task remains the stdout authority. It enforces:
 
-- exactly one positional address argument
+- exactly one positional request-file argument
+- a readable canonical portfolio snapshot request JSON file
 - defaults `HELIOS_NETWORK` to `mainnet` and rejects non-mainnet values
 - Postgres + Helios lifecycle orchestration with `SERVICE_*` policy envs
 - workflow sequencing with preflight, service start, packaged CLI execution, and always-run teardown
@@ -78,6 +79,7 @@ Runtime routing reconstructed inside `task.mfm.portfolio.snapshot.exec`:
 
 - `DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm`
 - `MFM_EVM_RPC_URL=http://127.0.0.1:$HELIOS_RPC_PORT`
+- `MFM_SNAPSHOT_REQUEST_FILE=/absolute/path/to/portfolio-request.json`
 - source-id routing:
   - `MFM_EVM_RPC_SOURCES_JSON`
   - `MFM_EVM_RPC_PREFERRED_ORDER=helios_local`
@@ -102,7 +104,7 @@ Canonical service metadata now lives in `nixfied/project/conf.nix` under `servic
 - The local source is explicitly marked `real`, and framework readiness uses the `strict`
   profile so `ready -- --service helios --source local` rejects shim or unknown source kinds.
 
-`task.mfm.portfolio.services-start` currently remains the coarse lifecycle task.
+`task.mfm.portfolio.snapshot.services-start` currently remains the coarse lifecycle task.
 It reuses framework `task.ops.ready` for both Postgres and Helios, while the
 public wrapper keeps stdout clean and the internal workflow manages sequencing.
 

@@ -1,5 +1,7 @@
+use std::path::PathBuf;
+
 use clap::Args;
-use mfm_app::{FeatureExecutionResult, PortfolioSnapshotRequest, PortfolioSnapshotResponse};
+use mfm_app::{FeatureExecutionResult, PortfolioSnapshotResponse};
 
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
@@ -10,16 +12,13 @@ use crate::support::run_stores::RunStoresArgs;
 /// Arguments for `mfm portfolio snapshot`.
 #[derive(Args)]
 pub(crate) struct SnapshotArgs {
-    /// Wallet public address (0x...)
-    pub address: String,
+    /// Canonical portfolio snapshot request JSON payload
+    #[arg(long)]
+    pub request_json: Option<String>,
 
-    /// EVM chain id to snapshot (default: 1)
-    #[arg(long, default_value_t = 1)]
-    pub chain_id: u64,
-
-    /// Optional tokens JSON array to include/override allowlisted tokens (default: [])
-    #[arg(long, default_value = "[]")]
-    pub tokens_json: String,
+    /// Path to a canonical portfolio snapshot request JSON file
+    #[arg(long)]
+    pub request_file: Option<PathBuf>,
 
     /// Storage configuration for the run's event and artifact backends.
     #[command(flatten)]
@@ -33,16 +32,15 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &SnapshotArgs) -> ! {
 }
 
 async fn execute_internal(args: &SnapshotArgs) -> CommandResult<FeatureExecutionResult> {
-    let tokens = mfm_app::parse_portfolio_tokens_json(&args.tokens_json)
-        .map_err(command_error_from_app_error)?;
+    let request = mfm_app::parse_portfolio_snapshot_request_input(
+        args.request_json.clone(),
+        args.request_file.clone(),
+    )
+    .map_err(command_error_from_app_error)?;
 
     let services = make_app_services_from_args(&args.stores).await?;
     let response: PortfolioSnapshotResponse = services
-        .start_portfolio_snapshot(PortfolioSnapshotRequest {
-            address: args.address.clone(),
-            chain_id: Some(args.chain_id),
-            tokens,
-        })
+        .start_portfolio_snapshot(request)
         .await
         .map_err(command_error_from_app_error)?;
 

@@ -48,6 +48,60 @@ fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
         .expect("request")
 }
 
+fn canonical_portfolio_snapshot_payload() -> serde_json::Value {
+    serde_json::json!({
+        "portfolio": {
+            "portfolio_id": "portfolio_main",
+            "quote_codes": [],
+            "networks": [
+                {
+                    "network_id": "ethereum-mainnet",
+                    "chain_id": 1,
+                    "rpc_source_id": null,
+                    "metadata": {}
+                }
+            ],
+            "wallets": [
+                {
+                    "wallet_id": "wallet_mainnet",
+                    "address": "0x000000000000000000000000000000000000dead",
+                    "implementation": {
+                        "kind": "address_only"
+                    },
+                    "network_id": "ethereum-mainnet",
+                    "symbol_ids": [
+                        "eth.native.ethereum-mainnet"
+                    ],
+                    "metadata": {}
+                }
+            ],
+            "symbol_configs": [
+                {
+                    "symbol_id": "eth.native.ethereum-mainnet",
+                    "display_symbol": "ETH",
+                    "kind": "native_balance",
+                    "role": "native",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": null,
+                    "balance_reader": {
+                        "kind": "native_balance"
+                    },
+                    "valuation": {
+                        "quotes": []
+                    },
+                    "decimals": 18,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        },
+        "valuation_source_registry": {
+            "sources": []
+        }
+    })
+}
+
 async fn response_json(resp: axum::response::Response) -> serde_json::Value {
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
@@ -603,7 +657,7 @@ async fn feature_execute_portfolio_snapshot_missing_rpc_url_is_stable_error() {
         .oneshot(json_post(
             "/v1/features/portfolio.snapshot/execute",
             serde_json::json!({
-                "payload": { "address": "0x000000000000000000000000000000000000dead" }
+                "payload": canonical_portfolio_snapshot_payload()
             }),
         ))
         .await

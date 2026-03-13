@@ -69,6 +69,101 @@ fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
         .expect("request")
 }
 
+fn canonical_mock_erc20_snapshot_payload(
+    wallet_address: &str,
+    chain_id: u64,
+    token_address: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "portfolio": {
+            "portfolio_id": "reth-mock-erc20",
+            "quote_codes": ["USD"],
+            "networks": [
+                {
+                    "network_id": "ethereum-mainnet",
+                    "chain_id": chain_id,
+                    "rpc_source_id": null,
+                    "metadata": {}
+                }
+            ],
+            "wallets": [
+                {
+                    "wallet_id": "wallet_mainnet",
+                    "address": wallet_address,
+                    "implementation": {
+                        "kind": "address_only"
+                    },
+                    "network_id": "ethereum-mainnet",
+                    "symbol_ids": [
+                        "eth.native.ethereum-mainnet",
+                        "mock.wallet.ethereum-mainnet"
+                    ],
+                    "metadata": {}
+                }
+            ],
+            "symbol_configs": [
+                {
+                    "symbol_id": "eth.native.ethereum-mainnet",
+                    "display_symbol": "ETH",
+                    "kind": "native_balance",
+                    "role": "native",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": null,
+                    "balance_reader": {
+                        "kind": "native_balance"
+                    },
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "eth.native.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "1800.00"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": 18,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                },
+                {
+                    "symbol_id": "mock.wallet.ethereum-mainnet",
+                    "display_symbol": "MOCK",
+                    "kind": "erc20_balance",
+                    "role": "asset",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": null,
+                    "balance_reader": {
+                        "kind": "erc20_balance",
+                        "token_address": token_address
+                    },
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "mock.wallet.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "1.00"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": null,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        },
+        "valuation_source_registry": {
+            "sources": []
+        }
+    })
+}
+
 async fn response_json(resp: axum::response::Response) -> serde_json::Value {
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
@@ -352,17 +447,11 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
         .oneshot(json_post(
             "/v1/features/portfolio.snapshot/execute",
             serde_json::json!({
-                "payload": {
-                    "address": from_norm,
-                    "chain_id": chain_id,
-                    "tokens": [
-                        {
-                            "address": token_address_norm,
-                            "symbol": "MOCK",
-                            "decimals": null
-                        }
-                    ],
-                }
+                "payload": canonical_mock_erc20_snapshot_payload(
+                    &from_norm,
+                    chain_id,
+                    &token_address_norm
+                )
             }),
         ))
         .await
@@ -373,6 +462,11 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
     assert_eq!(v["status"], "success");
     assert_eq!(v["data"]["feature_id"], "portfolio.snapshot");
     assert_eq!(v["data"]["result"]["phase"], "completed");
+    assert_eq!(
+        v["data"]["result"]["report"]["portfolio_id"],
+        "reth-mock-erc20"
+    );
+    assert_eq!(v["data"]["result"]["report"]["error_count"], 0);
 
     let snapshot_artifact_id = v["data"]["result"]["snapshot_artifact_id"]
         .as_str()
@@ -403,33 +497,63 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
         .expect("output value");
 
     assert_eq!(
-        out.get("wallet_address").and_then(|v| v.as_str()),
+        out.get("portfolio_id").and_then(|v| v.as_str()),
+        Some("reth-mock-erc20")
+    );
+    assert_eq!(
+        out.get("network_pins")
+            .and_then(|v| v.as_array())
+            .and_then(|pins| pins.first())
+            .and_then(|pin| pin.get("chain_id"))
+            .and_then(|v| v.as_u64()),
+        Some(chain_id)
+    );
+    let wallet = out
+        .get("wallets")
+        .and_then(|v| v.as_array())
+        .and_then(|wallets| wallets.first())
+        .expect("wallet snapshot");
+    assert_eq!(
+        wallet.get("address").and_then(|v| v.as_str()),
         Some(from_norm.as_str())
     );
-    assert_eq!(out.get("chain_id").and_then(|v| v.as_u64()), Some(chain_id));
-    assert!(out.get("block_number").and_then(|v| v.as_u64()).is_some());
-    assert!(out.get("native").is_some());
-
-    let tokens = out
-        .get("tokens")
+    let observations = wallet
+        .get("observations")
         .and_then(|v| v.as_array())
-        .expect("tokens array");
-    assert_eq!(tokens.len(), 1);
+        .expect("observations array");
+    assert_eq!(observations.len(), 2);
+    let token_observation = observations
+        .iter()
+        .find(|observation| {
+            observation.get("symbol_id").and_then(|v| v.as_str())
+                == Some("mock.wallet.ethereum-mainnet")
+        })
+        .expect("mock token observation");
     assert_eq!(
-        tokens[0].get("address").and_then(|v| v.as_str()),
-        Some(token_address_norm.as_str())
-    );
-    assert_eq!(
-        tokens[0].get("symbol").and_then(|v| v.as_str()),
+        token_observation
+            .get("display_symbol")
+            .and_then(|v| v.as_str()),
         Some("MOCK")
     );
-    assert_eq!(tokens[0].get("decimals").and_then(|v| v.as_u64()), Some(6));
+    assert_eq!(token_observation["quantity"]["decimals"].as_u64(), Some(6));
     assert_eq!(
-        tokens[0].get("raw_u256_dec").and_then(|v| v.as_str()),
+        token_observation["quantity"]["raw_dec"].as_str(),
         Some("1000000")
     );
     assert_eq!(
-        tokens[0].get("amount_dec").and_then(|v| v.as_str()),
+        token_observation["quantity"]["amount_dec"].as_str(),
         Some("1.000000")
+    );
+    assert_eq!(
+        token_observation["values"][0]["quote"].as_str(),
+        Some("USD")
+    );
+    assert_eq!(
+        token_observation["values"][0]["unit_price_dec"].as_str(),
+        Some("1.00")
+    );
+    assert_eq!(
+        token_observation["source"]["balance_reader_kind"].as_str(),
+        Some("erc20_balance")
     );
 }
