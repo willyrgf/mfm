@@ -4,8 +4,8 @@
 //! Canonical portfolio snapshot planner op.
 //!
 //! Source of truth:
-//! - `REVAMP_PORTFOLIO_SNAPSHOT.md`
 //! - `docs/redesign.md`
+//! - `docs/ops-and-states.md`
 //!
 //! `portfolio_tracker` remains a thin planner that validates canonical config inputs and wires the
 //! reusable shared-state runtime for multi-network portfolio execution.

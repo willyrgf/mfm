@@ -3,8 +3,8 @@
 #![warn(missing_docs)]
 //! Shared portfolio-domain schema and validation helpers for canonical portfolio snapshots.
 //!
-//! Milestone 1 intentionally stops at the schema boundary: canonical serde types, validation, and
-//! deterministic normalization helpers live here while runtime orchestration states land later.
+//! This crate owns the canonical portfolio-domain schema plus the reusable runtime states that pin
+//! networks and assemble deterministic snapshot/report artifacts for the portfolio flow.
 //!
 //! # Examples
 //!

@@ -3,8 +3,8 @@
 #![warn(missing_docs)]
 //! Shared wallet-domain schema and validation helpers for canonical portfolio snapshots.
 //!
-//! Milestone 1 keeps this crate model-only so later ops and binaries can depend on a single
-//! canonical wallet surface without pulling in execution logic prematurely.
+//! This crate owns the canonical wallet-domain schema plus reusable wallet-resolution runtime
+//! states used by the portfolio flow.
 //!
 //! # Examples
 //!

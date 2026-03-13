@@ -3,9 +3,8 @@
 #![warn(missing_docs)]
 //! Shared symbol-domain schema and validation helpers for canonical portfolio snapshots.
 //!
-//! Milestone 1 intentionally keeps this crate at the model layer: serde types, validation, and
-//! deterministic normalization helpers only. Runtime `State` implementations land in later
-//! milestones.
+//! This crate owns the canonical symbol-domain schema plus reusable valuation and observation
+//! runtime states used by the portfolio flow.
 //!
 //! # Examples
 //!

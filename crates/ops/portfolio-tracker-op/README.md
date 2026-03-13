@@ -7,5 +7,6 @@ the canonical `portfolio` plus `valuation_source_registry` config surfaces and w
 wallet, symbol, Aave, and portfolio shared states.
 
 Docs:
-- `REVAMP_PORTFOLIO_SNAPSHOT.md`
 - `docs/redesign.md`
+- `docs/ops-and-states.md`
+- `bin/cli/README.md`
