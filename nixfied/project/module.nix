@@ -268,8 +268,9 @@ let
 
       flake_ref="path:$flake_root"
       echo "INFO: resolving packaged mfm-cli from $flake_ref#mfm-cli" >&2
+      echo "INFO: packaged mfm-cli resolution may trigger a local nix build; build logs will stream if realization is needed" >&2
 
-      if ! out_path="$(${pkgs.nix}/bin/nix build --no-link --print-out-paths "$flake_ref#mfm-cli")"; then
+      if ! out_path="$(${pkgs.nix}/bin/nix build -L --no-link --print-out-paths "$flake_ref#mfm-cli")"; then
         echo "ERROR: failed to resolve packaged mfm-cli from $flake_ref#mfm-cli" >&2
         return 1
       fi
@@ -280,6 +281,8 @@ let
         echo "ERROR: packaged mfm_cli binary missing after build path=$out_path" >&2
         return 1
       fi
+
+      echo "INFO: packaged mfm-cli ready path=$bin_path" >&2
 
       printf '%s' "$bin_path"
     }
@@ -299,8 +302,9 @@ let
 
       flake_ref="path:$flake_root"
       echo "INFO: resolving packaged helios from $flake_ref#helios" >&2
+      echo "INFO: packaged helios resolution may trigger a local nix build; build logs will stream if realization is needed" >&2
 
-      if ! out_path="$(${pkgs.nix}/bin/nix build --no-link --print-out-paths "$flake_ref#helios")"; then
+      if ! out_path="$(${pkgs.nix}/bin/nix build -L --no-link --print-out-paths "$flake_ref#helios")"; then
         echo "ERROR: failed to resolve packaged helios from $flake_ref#helios" >&2
         return 1
       fi
@@ -311,6 +315,8 @@ let
         echo "ERROR: packaged helios binary missing after build path=$out_path" >&2
         return 1
       fi
+
+      echo "INFO: packaged helios ready path=$bin_path" >&2
 
       printf '%s' "$bin_path"
     }
@@ -805,6 +811,9 @@ in
             ];
             command = ''
               set -euo pipefail
+              if [ -w /dev/tty ]; then
+                exec >/dev/tty 2>&1
+              fi
               ${resolvePackagedHeliosShell}
 
               handoff_file=""
@@ -1062,13 +1071,15 @@ in
 
               ${postgresPackage}/bin/createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres ${conf.modules.postgres.database or "mfm"} >/dev/null 2>&1 || true
 
-              if ! NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.ops.ready --service postgres --source local; then
+              echo "INFO: validating postgres readiness via framework probe service=postgres source=local"
+              if ! NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.ops.ready --service postgres --source local >/dev/null 2>&1; then
                 echo "ERROR: postgres failed framework readiness checks port=$POSTGRES_PORT" >&2
                 if [ -f "$postgres_log" ]; then
                   tail -50 "$postgres_log" >&2 || true
                 fi
                 exit 1
               fi
+              echo "OK: postgres readiness validated service=postgres source=local"
 
               HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
               if [ "$HELIOS_NETWORK" != "mainnet" ]; then
@@ -1494,6 +1505,9 @@ in
             allowUnknownArgs = false;
             command = ''
               set -euo pipefail
+              if [ -w /dev/tty ]; then
+                exec >/dev/tty 2>&1
+              fi
               ${resolvePackagedMfmCliShell}
 
               if [ "$#" -ne 0 ]; then
@@ -1521,6 +1535,7 @@ in
                 exit 1
               fi
 
+              echo "INFO: snapshot exec preparing packaged mfm_cli address=$MFM_SNAPSHOT_ADDRESS chain_id=1 result_file=$MFM_SNAPSHOT_RESULT_FILE"
               mfm_cli_bin="$(resolve_packaged_mfm_cli_binary)" || exit 1
 
               HELIOS_RPC_PORT="$HELIOSRPC_PORT"
@@ -1550,6 +1565,9 @@ in
             allowUnknownArgs = false;
             command = ''
               set -euo pipefail
+              if [ -w /dev/tty ]; then
+                exec >/dev/tty 2>&1
+              fi
 
               if [ "$#" -ne 0 ]; then
                 echo "ERROR: task.mfm.portfolio.snapshot.services-stop does not accept arguments" >&2
@@ -1614,9 +1632,17 @@ in
           command = ''
             set -euo pipefail
 
-            # Reserve stdout for the final JSON payload.
+            # Reserve stdout for the final JSON payload and route progress logs to
+            # the controlling terminal when available, because nested nixfied task
+            # stderr is otherwise swallowed by the app launcher.
             exec 3>&1
-            exec 1>&2
+            if [ -w /dev/tty ]; then
+              exec 4>/dev/tty
+            else
+              exec 4>&2
+            fi
+            exec 1>&4
+            exec 2>&4
 
             if [ "''${1:-}" = "--help" ] || [ "''${1:-}" = "-h" ]; then
               echo "usage: nix run .#mfm::portfolio::snapshot -- <ADDRESS>" >&2
@@ -1669,9 +1695,12 @@ in
             trap 'exit 130' INT
             trap 'exit 143' TERM
 
-            echo "INFO: snapshot workflow bootstrap address=$ADDRESS chain_id=1 postgres_port=$POSTGRES_PORT heliosrpc_port=$HELIOSRPC_PORT"
+            echo "INFO: snapshot workflow bootstrap address=$ADDRESS chain_id=1 postgres_port=$POSTGRES_PORT heliosrpc_port=$HELIOSRPC_PORT reuse=''${SERVICE_REUSE_POLICY:-default}"
+            echo "INFO: snapshot workflow session_dir=$session_dir handoff_file=$handoff_file result_file=$out_file"
+            echo "INFO: snapshot workflow phases: preflight -> services-start/reuse -> snapshot.exec -> services-stop"
             NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-workflow workflow.mfm.portfolio.snapshot
 
+            echo "INFO: snapshot workflow finished; validating JSON envelope"
             if ! ${pkgs.jq}/bin/jq -e '
               .status == "success"
               and .data.feature_id == "portfolio.snapshot"
