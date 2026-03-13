@@ -28,18 +28,26 @@ This is intended as a design note, not a final spec.
 
 The cleanest placement is:
 
-- new portfolio-domain shared state crate for the canonical portfolio model and workflow
+- new portfolio-domain shared state crate for orchestration and aggregation
+- new wallet-domain shared state crate for wallet implementations and signing concerns
+- new symbol-domain shared state crate for balance/value implementations and symbol behavior
 - Aave-specific portfolio readers in the Aave shared state crate
+- existing keystore crates reused as wallet implementation building blocks
 - protocol-agnostic EVM primitives in `evm-runtime`
 - thin planning / transport layers on top
 
-### 1. New shared portfolio crate
+### 1. Portfolio orchestration crate
 
 Preferred new crate:
 
 - `crates/states/portfolio/`
 
-This crate should become the home for the new canonical `PortfolioSnapshot` model and the reusable portfolio runtime states.
+This crate should become the home for:
+
+- the top-level `PortfolioConfig`
+- the top-level `PortfolioSnapshot`
+- the top-level `PortfolioReport`
+- portfolio orchestration and aggregation states
 
 Suggested contents:
 
@@ -48,45 +56,140 @@ Suggested contents:
 - `crates/states/portfolio/src/model.rs`
   - `PortfolioSnapshot`
   - `PortfolioConfig`
-  - `WalletConfig`
-  - `SymbolConfig`
-  - `Observation`
-  - quote / valuation types
-- `crates/states/portfolio/src/portfolio/mod.rs`
-- `crates/states/portfolio/src/portfolio/states.rs`
+- `crates/states/portfolio/src/states.rs`
   - portfolio-level aggregation states
-- `crates/states/portfolio/src/portfolio/writers.rs`
+- `crates/states/portfolio/src/writers.rs`
   - portfolio-level writers
-- `crates/states/portfolio/src/valuation.rs`
-  - quote configuration
-  - valuation result types
-  - valuation normalization helpers
-- `crates/states/portfolio/src/wallet/mod.rs`
-- `crates/states/portfolio/src/wallet/states.rs`
+
+Why:
+
+- portfolio should orchestrate wallets and symbols, not own their internal implementations
+- wallet and symbol should be reusable state domains in `crates/states/`, not portfolio-private modules
+- this keeps the op thin, which matches the repo architecture
+- the app, CLI, and API can all depend on one canonical portfolio orchestration surface
+
+### 2. Wallet shared-state crate
+
+Preferred new crate:
+
+- `crates/states/wallet/`
+
+This crate should become the first-class wallet domain.
+
+Wallet should be treated as its own shared-state boundary because it will carry:
+
+- wallet identity and address resolution
+- signer implementations
+- signer capability discovery
+- transaction building / signing / submission preparation
+- wallet metadata
+- wallet capability discovery
+- wallet-scoped orchestration
+- wallet-level readers / writers
+
+Suggested contents:
+
+- `crates/states/wallet/src/lib.rs`
+- `crates/states/wallet/src/model.rs`
+  - `WalletConfig`
+  - `WalletSnapshot`
+  - `WalletCapabilities`
+  - `ResolvedWallet`
+  - `WalletImplementationConfig`
+  - `WalletSignerConfig`
+- `crates/states/wallet/src/states.rs`
   - wallet-level orchestration states
-  - wallet-level readers / aggregation helpers
-- `crates/states/portfolio/src/wallet/writers.rs`
-  - wallet-level output shaping / writing helpers
-- `crates/states/portfolio/src/symbol/mod.rs`
-- `crates/states/portfolio/src/symbol/states.rs`
+  - wallet execution preparation states
+- `crates/states/wallet/src/readers.rs`
+  - wallet metadata readers
+  - wallet capability readers
+- `crates/states/wallet/src/signers.rs`
+  - signer resolution
+  - signing request preparation
+  - payload signing helpers
+- `crates/states/wallet/src/submit.rs`
+  - wallet-scoped submission helpers
+- `crates/states/wallet/src/writers.rs`
+  - wallet observation writers
+- `crates/states/wallet/src/implementations/address_only.rs`
+- `crates/states/wallet/src/implementations/keystore.rs`
+- `crates/states/wallet/src/implementations/node_managed.rs`
+- `crates/states/wallet/src/implementations/external.rs`
+
+Important note:
+
+- `crates/states/wallet/` should not reimplement keystore internals
+- it should compose:
+  - `crates/states/keystore/`
+  - `crates/states/keystore-submit/`
+  - any future signer/backends
+- protocol crates should not decide directly between keystore, node-managed, or external signer flows
+- portfolio snapshots may start mostly read-only, but wallet should still be designed as a repo-level execution domain
+
+### 3. Symbol shared-state crate
+
+Preferred new crate:
+
+- `crates/states/symbol/`
+
+This crate should become the first-class symbol domain.
+
+Symbol should be treated as its own shared-state boundary because it will carry:
+
+- symbol identity and metadata
+- symbol implementation selection
+- balance reader selection
+- valuation reader selection
+- symbol normalization rules
+- symbol implementation dispatch
+- underlying-asset / protocol-position relationships
+
+Suggested contents:
+
+- `crates/states/symbol/src/lib.rs`
+- `crates/states/symbol/src/model.rs`
+  - `SymbolConfig`
+  - `ResolvedSymbolBalanceReader`
+  - `ResolvedSymbolValuationReader`
+  - `Observation`
+  - `ObservationQuantity`
+  - `ObservationValue`
+  - `BalanceReaderConfig`
+  - `SymbolValuationConfig`
+  - `ValuationReaderConfig`
+- `crates/states/symbol/src/states.rs`
   - symbol-level orchestration states
   - dispatch balance readers
   - dispatch valuation readers
   - normalize symbol observations
-- `crates/states/portfolio/src/symbol/readers.rs`
-  - symbol-specific reader dispatch glue
-- `crates/states/portfolio/src/symbol/writers.rs`
-  - symbol-level output shaping / persistence helpers
+- `crates/states/symbol/src/readers.rs`
+  - generic symbol reader dispatch
+- `crates/states/symbol/src/registry.rs`
+  - symbol registry loading
+  - symbol lookup helpers
+- `crates/states/symbol/src/normalize.rs`
+  - canonical observation normalization
+- `crates/states/symbol/src/writers.rs`
+  - symbol observation writers
+- `crates/states/symbol/src/implementations/mod.rs`
+- `crates/states/symbol/src/implementations/native.rs`
+- `crates/states/symbol/src/implementations/erc20.rs`
 
-Why:
+Important note:
 
-- the portfolio model is now large enough to deserve its own reusable domain boundary
-- this keeps the op thin, which matches the repo architecture
-- the app, CLI, and API can all depend on one canonical portfolio library surface
+- `crates/states/symbol/` should own generic symbol behavior
+- protocol-specific symbol implementations should stay in their protocol crates
+- portfolio should not need to understand how native, ERC-20, debt, or staked symbol implementations differ internally
 
-### Wallet and symbol need separate state families
+Examples:
+
+- native and ERC-20 symbol implementations can live in `crates/states/symbol/`
+- Aave-specific symbol implementations should live in `crates/states/aave-v3/`
+
+### Wallet and symbol need separate state families and separate crates
 
 Wallet and symbol should not be treated as one flat pool of states.
+They also should not be hidden as only submodules of the portfolio crate.
 
 They are distinct workflow layers:
 
@@ -96,18 +199,26 @@ They are distinct workflow layers:
 - wallet layer
   - owns wallet-scoped orchestration
   - owns wallet network association and wallet-scoped aggregation
-  - can grow wallet-specific readers / writers over time
+  - owns wallet implementation and signing concerns
 - symbol layer
   - owns symbol-scoped balance readers
   - owns symbol-scoped valuation readers
-  - owns observation normalization for native / ERC-20 / protocol / debt / staked symbols
+  - owns observation normalization and implementation dispatch for native / ERC-20 / protocol / debt / staked symbols
+
+And they are also distinct reusable repo-level domains:
+
+- wallet should serve portfolio snapshots, deploy/configure flows, and future transaction-oriented workflows
+- symbol should serve portfolio snapshots, protocol adapters, valuation pipelines, and later symbol discovery / registry workflows
 
 This split matters because both wallet and symbol will grow:
 
-- wallets may eventually need their own metadata, pinning, filters, partial errors, and wallet-level summaries
-- symbols will definitely need their own balance and valuation logic
+- wallets may eventually need their own metadata, pinning, filters, partial errors, wallet-level summaries, and multiple signer implementations
+- symbols will definitely need their own balance logic, valuation logic, protocol adapters, and implementation routing
 
-So the implementation should reflect that growth early instead of collapsing everything into one generic `states.rs`.
+So the implementation should reflect that growth early instead of:
+
+- collapsing everything into one generic `states.rs`
+- burying wallet and symbol logic inside portfolio-only modules
 
 ### Concrete initial file skeleton
 
@@ -118,63 +229,95 @@ crates/states/portfolio/
   src/
     lib.rs
     model.rs
-    valuation.rs
-    portfolio/
+    states.rs
+    writers.rs
+
+crates/states/wallet/
+  src/
+    lib.rs
+    model.rs
+    states.rs
+    readers.rs
+    signers.rs
+    submit.rs
+    writers.rs
+    implementations/
+      address_only.rs
+      keystore.rs
+      node_managed.rs
+      external.rs
+
+crates/states/symbol/
+  src/
+    lib.rs
+    model.rs
+    states.rs
+    readers.rs
+    registry.rs
+    normalize.rs
+    writers.rs
+    implementations/
       mod.rs
-      states.rs
-      writers.rs
-    wallet/
-      mod.rs
-      model.rs
-      states.rs
-      readers.rs
-      writers.rs
-    symbol/
-      mod.rs
-      model.rs
-      states.rs
-      readers.rs
-      writers.rs
+      native.rs
+      erc20.rs
 ```
 
 Suggested first-pass state inventory:
 
-- `crates/states/portfolio/src/portfolio/states.rs`
+- `crates/states/portfolio/src/states.rs`
   - `LoadPortfolioConfigState`
   - `PinPortfolioNetworksState`
+  - `CollectPortfolioWalletSnapshotsState`
   - `CollectPortfolioObservationsState`
-- `crates/states/portfolio/src/portfolio/writers.rs`
+  - `CollectPortfolioTotalsState`
+- `crates/states/portfolio/src/writers.rs`
   - `WritePortfolioSnapshotState`
   - `WritePortfolioReportState`
 
-- `crates/states/portfolio/src/wallet/states.rs`
+- `crates/states/wallet/src/states.rs`
   - `LoadWalletSetState`
+  - `ResolveWalletAddressState`
+  - `ResolveWalletCapabilitiesState`
   - `PrepareWalletExecutionState`
   - `CollectWalletObservationsState`
-- `crates/states/portfolio/src/wallet/readers.rs`
+- `crates/states/wallet/src/readers.rs`
   - `ReadWalletNativeBalanceState`
   - `ReadWalletMetadataState`
-- `crates/states/portfolio/src/wallet/writers.rs`
+  - `ResolveWalletImplementationState`
+- `crates/states/wallet/src/signers.rs`
+  - `ResolveWalletSignerState`
+  - `BuildWalletSigningRequestState`
+  - `SignWalletPayloadState`
+- `crates/states/wallet/src/submit.rs`
+  - `SubmitWalletTransactionState`
+- `crates/states/wallet/src/writers.rs`
   - `WriteWalletObservationSetState`
+  - `WriteWalletCapabilityReportState`
 
-- `crates/states/portfolio/src/symbol/states.rs`
+- `crates/states/symbol/src/states.rs`
+  - `LoadSymbolRegistryState`
   - `ResolveSymbolConfigState`
+  - `ResolveSymbolImplementationState`
   - `ReadSymbolBalanceState`
   - `ReadSymbolValuationState`
   - `NormalizeSymbolObservationState`
-- `crates/states/portfolio/src/symbol/readers.rs`
+- `crates/states/symbol/src/readers.rs`
   - `DispatchSymbolBalanceReaderState`
   - `DispatchSymbolValuationReaderState`
-- `crates/states/portfolio/src/symbol/writers.rs`
+- `crates/states/symbol/src/registry.rs`
+  - `LookupSymbolConfigState`
+- `crates/states/symbol/src/normalize.rs`
+  - `ResolveUnderlyingSymbolState`
+- `crates/states/symbol/src/writers.rs`
   - `WriteSymbolObservationState`
 
 This is intentionally split so:
 
 - portfolio states do cross-wallet orchestration and final aggregation
-- wallet states do wallet-scoped orchestration
-- symbol states do symbol-scoped reading and normalization
+- wallet states do wallet-scoped orchestration, implementation/signing resolution, and later transaction execution
+- symbol states do symbol-scoped reading, valuation, normalization, and implementation dispatch
 
-### Concrete Aave module skeleton
+### 4. Keep Aave portfolio reads in the Aave shared state crate
 
 For the Aave side, I would start with:
 
@@ -206,9 +349,11 @@ Suggested first-pass Aave portfolio state inventory:
   - reserve lookup helpers
   - account summary lookup helpers
 - `crates/states/aave-v3/src/portfolio/normalize.rs`
-  - Aave raw read -> canonical portfolio observation
+  - Aave raw read -> canonical symbol/portfolio observation
 
-### Concrete `evm-runtime` expansion points
+This crate should implement Aave-specific symbol behavior, not generic symbol infrastructure.
+
+### 5. Concrete `evm-runtime` expansion points
 
 I would keep generic reusable expansions here:
 
@@ -234,66 +379,7 @@ Suggested first-pass generic additions:
 
 This keeps the protocol-independent building blocks reusable across portfolio, Aave, and any later protocol integrations.
 
-### 2. Keep Aave portfolio reads in the Aave shared state crate
-
-Preferred location:
-
-- `crates/states/aave-v3/`
-
-Do not put Aave-specific portfolio logic in the generic portfolio crate.
-The generic portfolio crate should understand symbol-driven workflows, but not Aave internals.
-
-Suggested additions:
-
-- `crates/states/aave-v3/src/portfolio/mod.rs`
-- `crates/states/aave-v3/src/portfolio/states.rs`
-  - `AaveMarketConfig`
-  - `ReadAaveUserAccountSummaryState`
-  - `ReadAaveReservePositionState`
-  - `ReadAaveDebtPositionState`
-  - `ReadAaveStakingPositionState`
-- `crates/states/aave-v3/src/portfolio/normalize.rs`
-  - normalization helpers from raw Aave reads into portfolio observations or intermediate Aave position types
-
-Why:
-
-- Aave is a protocol-specific domain
-- the repo already uses `crates/states/aave-v3/` as the Aave shared-state boundary
-- deploy/configure logic and read/portfolio logic can live in the same crate while remaining separated by module
-
-Important note:
-
-- avoid continuing to grow `crates/states/aave-v3/src/states.rs` into one giant mixed-purpose file
-- prefer adding a dedicated module such as `portfolio.rs` or `reads.rs`
-
-### 3. Put generic chain primitives in `evm-runtime`
-
-Preferred location:
-
-- `crates/evm-runtime/src/states/read.rs`
-- possibly additional modules under `crates/evm-runtime/src/states/`
-
-This is where protocol-agnostic pieces belong, for example:
-
-- richer ABI-decoded `eth_call`
-- multicall / batched read support
-- generic oracle price reads
-- generic event / logs reads when needed
-- reusable helpers for deterministic pinned-block chain reads
-
-Why:
-
-- these are not portfolio-specific
-- these are not Aave-specific
-- other ops and state crates should be able to reuse them
-
-Rule of thumb:
-
-- if it works for many protocols, it belongs in `evm-runtime`
-- if it only makes sense for portfolio assembly, it belongs in `crates/states/portfolio`
-- if it only makes sense for Aave, it belongs in `crates/states/aave-v3`
-
-### 4. Keep the current portfolio op thin
+### 6. Keep the current portfolio op thin
 
 Current location:
 
@@ -317,7 +403,7 @@ It should not own:
 If we keep the existing crate name, that is fine for now.
 If we later want to rename it to match the new canonical model more closely, that can be done separately.
 
-### 5. Keep app / CLI / REST transport-only
+### 7. Keep app / CLI / REST transport-only
 
 Keep thin surfaces in:
 
@@ -339,7 +425,7 @@ They should not implement:
 - valuation rules
 - portfolio aggregation logic
 
-### 6. Docs to update alongside implementation
+### 8. Docs to update alongside implementation
 
 When the implementation starts landing, update:
 
@@ -353,9 +439,12 @@ When the implementation starts landing, update:
 
 If I had to choose one concrete direction now:
 
-- add `crates/states/portfolio/` as the new shared home for the canonical portfolio model
-- extend `crates/states/aave-v3/` with portfolio-reading modules
+- add `crates/states/portfolio/` for top-level portfolio orchestration and aggregation
+- add `crates/states/wallet/` as a first-class wallet state domain
+- add `crates/states/symbol/` as a first-class symbol state domain
+- extend `crates/states/aave-v3/` with Aave-specific symbol implementations and portfolio-reading modules
 - extend `crates/evm-runtime/` only for protocol-agnostic read / valuation primitives
+- keep existing keystore crates as wallet implementation building blocks
 - keep `crates/ops/portfolio-tracker-op/`, `crates/app/`, and `bin/*` thin
 
 ## What Exists Today
@@ -501,7 +590,10 @@ This is the most concrete way to think about the current Aave crate:
   - persist normalized typed JSON back into context
 - recommended destination:
   - do not move this exact state
-  - mirror the pattern in `crates/states/portfolio/`
+  - mirror the pattern across:
+    - `crates/states/portfolio/`
+    - `crates/states/wallet/`
+    - `crates/states/symbol/`
 - concrete analogs:
   - `LoadPortfolioConfigState`
   - `LoadWalletSetState`
@@ -517,7 +609,10 @@ This is the most concrete way to think about the current Aave crate:
 - current responsibility:
   - load and validate a typed deploy artifact
 - recommended destination:
-  - pattern should be reused in both `crates/states/portfolio/` and Aave portfolio modules
+  - pattern should be reused in:
+    - `crates/states/portfolio/`
+    - `crates/states/symbol/`
+    - Aave portfolio modules
 - concrete analogs:
   - `LoadAaveMarketConfigState`
   - `LoadValuationSourceConfigState`
@@ -647,7 +742,10 @@ This is the most concrete way to think about the current Aave crate:
 - current responsibility:
   - context read + typed decode wrapper
 - recommended destination:
-  - portfolio equivalents should live near the corresponding portfolio model loaders
+  - equivalents should live near the corresponding:
+    - portfolio model loaders
+    - wallet model loaders
+    - symbol model loaders
 - reason:
   - tiny helper
   - useful style, not worth lifting as-is
@@ -676,16 +774,19 @@ This is the most concrete way to think about the current Aave crate:
 ##### `send_contract_transaction`
 
 - classification:
-  - strong candidate to generalize for write-path code
+  - split candidate, not reusable as-is
 - current responsibility:
   - normalize sender
   - attach calldata
   - send EVM transaction
 - recommended destination:
-  - `crates/evm-runtime/` write helpers
+  - split the responsibility across:
+    - `crates/states/wallet/` for sender / signer resolution
+    - `crates/evm-runtime/` for raw EVM transaction submission helpers
+    - protocol crates for protocol-specific call intent
 - reason:
-  - generic EVM transaction submission pattern
-  - not portfolio-specific, but broadly reusable
+  - the current helper bundles wallet concerns, transport concerns, and Aave call intent
+  - the new architecture should keep those boundaries separate
 
 #### C. Manifest / validation audit
 
@@ -786,8 +887,48 @@ So the right move is:
 
 - reuse patterns aggressively
 - extract only truly generic helper logic
+- split wallet-related execution concerns out of protocol helpers instead of generalizing mixed helpers unchanged
 - keep Aave portfolio reads as new code in the Aave crate
 - keep portfolio orchestration as new code in the portfolio crate
+- keep wallet implementation logic as new code in the wallet crate
+- keep symbol implementation / dispatch logic as new code in the symbol crate
+
+### Boundary correction implied by first-class wallet and symbol crates
+
+The current Aave deploy/configure states make sense for today, but they also show a boundary we should tighten in the new architecture.
+
+Right now a protocol state can still end up owning too much of:
+
+- wallet selection
+- signer resolution
+- calldata preparation
+- transaction submission
+- protocol-specific intent
+
+The new split should be:
+
+- wallet crate:
+  - wallet implementation selection
+  - signer capability discovery
+  - signer resolution
+  - wallet-scoped signing / submission preparation
+- `evm-runtime`:
+  - generic ABI encode / decode
+  - generic EVM call / receipt / submit helpers
+- symbol crate:
+  - generic symbol implementation routing
+  - canonical observation normalization
+- Aave crate:
+  - Aave market / reserve / user-position logic
+  - Aave-specific symbol implementations
+  - Aave raw reads -> canonical symbol observations
+
+That gives us a cleaner long-term rule:
+
+- protocol crates should describe protocol intent and protocol-specific decoding
+- wallet crates should describe who is acting and how they can sign / submit
+- symbol crates should describe how a symbol is observed and valued
+- portfolio crates should aggregate the results
 
 ## Problem Statement
 
@@ -1030,6 +1171,41 @@ Suggested scalar aliases:
 - `DecimalString = String`
 - `AddressString = String`
 
+### Recommended type ownership by crate
+
+- `crates/states/portfolio/src/model.rs`
+  - `PortfolioConfig`
+  - `NetworkConfig`
+  - `PortfolioSnapshot`
+  - `NetworkPin`
+  - `PortfolioReport`
+  - `WalletReport`
+  - `PortfolioQuoteTotal`
+- `crates/states/wallet/src/model.rs`
+  - `WalletConfig`
+  - `WalletSnapshot`
+  - `WalletCapabilities`
+  - `ResolvedWallet`
+  - `WalletImplementationConfig`
+  - `WalletSignerConfig`
+- `crates/states/symbol/src/model.rs`
+  - `QuoteCode`
+  - `SymbolKind`
+  - `SymbolRole`
+  - `AaveDebtKind`
+  - `SymbolConfig`
+  - `BalanceReaderConfig`
+  - `SymbolValuationConfig`
+  - `QuoteValuationConfig`
+  - `ValuationReaderConfig`
+  - `ResolvedSymbolBalanceReader`
+  - `ResolvedSymbolValuationReader`
+  - `Observation`
+  - `ObservationQuantity`
+  - `ObservationValue`
+  - `ObservationSource`
+  - `PortfolioSnapshotError`
+
 ### Core enums
 
 ```rust
@@ -1082,10 +1258,53 @@ pub struct WalletConfig {
     pub wallet_id: String,
     pub address: String,
     pub network_id: String,
+    pub implementation: WalletImplementationConfig,
     pub symbol_ids: Vec<String>,
     pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
 }
+```
 
+### Canonical wallet implementation types
+
+```rust
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WalletImplementationConfig {
+    AddressOnly {},
+    KeystoreEntry {
+        entry_id: String,
+    },
+    NodeManagedAccount {
+        account_index: usize,
+    },
+    ExternalSigner {
+        signer_id: String,
+    },
+}
+
+pub struct WalletSignerConfig {
+    pub signer_kind: String,
+    pub signer_ref: String,
+}
+
+pub struct WalletCapabilities {
+    pub can_resolve_address: bool,
+    pub can_sign: bool,
+    pub can_submit: bool,
+}
+
+pub struct ResolvedWallet {
+    pub wallet_id: String,
+    pub address: String,
+    pub network_id: String,
+    pub implementation_kind: String,
+    pub capabilities: WalletCapabilities,
+    pub signer: Option<WalletSignerConfig>,
+}
+```
+
+### Canonical symbol config type
+
+```rust
 pub struct SymbolConfig {
     pub symbol_id: String,
     pub display_symbol: Option<String>,
@@ -1133,6 +1352,17 @@ pub struct SymbolValuationConfig {
 pub struct QuoteValuationConfig {
     pub quote: QuoteCode,
     pub reader: ValuationReaderConfig,
+}
+
+pub struct ResolvedSymbolBalanceReader {
+    pub kind: String,
+    pub implementation_ref: String,
+}
+
+pub struct ResolvedSymbolValuationReader {
+    pub quote: QuoteCode,
+    pub kind: String,
+    pub implementation_ref: String,
 }
 
 #[serde(tag = "kind", rename_all = "snake_case")]
