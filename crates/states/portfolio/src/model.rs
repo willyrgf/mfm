@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use mfm_machine::hashing::{canonical_json_bytes, CanonicalJsonError};
 use mfm_state_symbol::model::{
-    validate_symbol_config, Observation, QuoteCode, SymbolConfig, SymbolConfigError,
-    ValuationReaderConfig,
+    validate_symbol_config, validate_valuation_source_registry, Observation, PriceSourceRef,
+    QuoteCode, SymbolConfig, SymbolConfigError, ValuationReaderConfig, ValuationSourceRegistry,
+    ValuationSourceRegistryError,
 };
 use mfm_state_wallet::model::{validate_wallet_config, WalletConfig, WalletConfigError};
 use serde::{Deserialize, Serialize};
@@ -306,6 +307,20 @@ pub enum PortfolioConfigError {
         /// Unknown symbol id.
         symbol_id: String,
     },
+    /// Wallet referenced a symbol configured for a different network.
+    #[error(
+        "wallet `{wallet_id}` on network `{wallet_network_id}` referenced symbol `{symbol_id}` on network `{symbol_network_id}`"
+    )]
+    WalletSymbolNetworkMismatch {
+        /// Wallet id associated with the failure.
+        wallet_id: String,
+        /// Symbol id associated with the failure.
+        symbol_id: String,
+        /// Wallet network id.
+        wallet_network_id: String,
+        /// Symbol network id.
+        symbol_network_id: String,
+    },
     /// Two symbols shared the same symbol id.
     #[error("symbol_id `{symbol_id}` must be unique")]
     DuplicateSymbolId {
@@ -385,6 +400,46 @@ pub enum PortfolioConfigError {
         network_id: String,
         /// Reader kind that held the invalid ref.
         reader_kind: &'static str,
+    },
+    /// The valuation source registry failed local validation.
+    #[error("valuation source registry is invalid: {source}")]
+    InvalidValuationSourceRegistry {
+        /// Underlying registry validation failure.
+        source: ValuationSourceRegistryError,
+    },
+    /// A valuation source registry entry referenced an unknown network.
+    #[error("valuation source `{source_id}` referenced unknown network `{network_id}`")]
+    UnknownValuationSourceNetwork {
+        /// Valuation source id associated with the failure.
+        source_id: String,
+        /// Unknown network id.
+        network_id: String,
+    },
+    /// A price source ref did not resolve through the valuation source registry.
+    #[error(
+        "symbol `{symbol_id}` quote `{quote}` referenced unknown valuation source `{source_id}`"
+    )]
+    UnknownValuationSource {
+        /// Symbol id associated with the failure.
+        symbol_id: String,
+        /// Quote associated with the invalid route.
+        quote: QuoteCode,
+        /// Unknown valuation source id.
+        source_id: String,
+    },
+    /// A resolved valuation source entry did not match the referring source ref.
+    #[error(
+        "symbol `{symbol_id}` quote `{quote}` source `{source_id}` mismatched registry field `{field}`"
+    )]
+    ValuationSourceMismatch {
+        /// Symbol id associated with the failure.
+        symbol_id: String,
+        /// Quote associated with the invalid route.
+        quote: QuoteCode,
+        /// Resolved valuation source id.
+        source_id: String,
+        /// Registry field that mismatched the ref.
+        field: &'static str,
     },
 }
 
@@ -480,6 +535,80 @@ pub fn validate_portfolio_config(cfg: &PortfolioConfig) -> Result<(), PortfolioC
                     symbol_id: symbol_id.clone(),
                 });
             }
+            let symbol = cfg
+                .symbol_configs
+                .iter()
+                .find(|symbol| symbol.symbol_id == *symbol_id)
+                .expect("validated symbol id must exist");
+            if symbol.network_id != wallet.network_id {
+                return Err(PortfolioConfigError::WalletSymbolNetworkMismatch {
+                    wallet_id: wallet.wallet_id.clone(),
+                    symbol_id: symbol.symbol_id.clone(),
+                    wallet_network_id: wallet.network_id.clone(),
+                    symbol_network_id: symbol.network_id.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates the canonical portfolio config together with its valuation source registry.
+pub fn validate_portfolio_bundle(
+    cfg: &PortfolioConfig,
+    registry: &ValuationSourceRegistry,
+) -> Result<(), PortfolioConfigError> {
+    validate_portfolio_config(cfg)?;
+    validate_valuation_source_registry(registry)
+        .map_err(|source| PortfolioConfigError::InvalidValuationSourceRegistry { source })?;
+
+    let network_ids: HashSet<_> = cfg
+        .networks
+        .iter()
+        .map(|network| network.network_id.clone())
+        .collect();
+    let mut sources_by_id = BTreeMap::new();
+    for source in &registry.sources {
+        if !network_ids.contains(&source.network_id) {
+            return Err(PortfolioConfigError::UnknownValuationSourceNetwork {
+                source_id: source.source_id.clone(),
+                network_id: source.network_id.clone(),
+            });
+        }
+        sources_by_id.insert(source.source_id.clone(), source);
+    }
+
+    for symbol in &cfg.symbol_configs {
+        for quote in &symbol.valuation.quotes {
+            match &quote.reader {
+                ValuationReaderConfig::FixedUnitPrice { .. } => {}
+                ValuationReaderConfig::DirectPrice { source } => {
+                    validate_price_source_registry_match(
+                        symbol,
+                        quote.quote,
+                        source,
+                        &sources_by_id,
+                    )?;
+                }
+                ValuationReaderConfig::DerivedUnitPrice {
+                    numerator,
+                    denominator,
+                } => {
+                    validate_price_source_registry_match(
+                        symbol,
+                        quote.quote,
+                        numerator,
+                        &sources_by_id,
+                    )?;
+                    validate_price_source_registry_match(
+                        symbol,
+                        quote.quote,
+                        denominator,
+                        &sources_by_id,
+                    )?;
+                }
+            }
         }
     }
 
@@ -574,6 +703,48 @@ fn validate_symbol_quote_routes(
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+fn validate_price_source_registry_match(
+    symbol: &SymbolConfig,
+    quote: QuoteCode,
+    source_ref: &PriceSourceRef,
+    sources_by_id: &BTreeMap<String, &mfm_state_symbol::model::ValuationSourceConfig>,
+) -> Result<(), PortfolioConfigError> {
+    let Some(source_cfg) = sources_by_id.get(&source_ref.source_id) else {
+        return Err(PortfolioConfigError::UnknownValuationSource {
+            symbol_id: symbol.symbol_id.clone(),
+            quote,
+            source_id: source_ref.source_id.clone(),
+        });
+    };
+
+    if source_cfg.network_id != source_ref.network_id {
+        return Err(PortfolioConfigError::ValuationSourceMismatch {
+            symbol_id: symbol.symbol_id.clone(),
+            quote,
+            source_id: source_ref.source_id.clone(),
+            field: "network_id",
+        });
+    }
+    if source_cfg.base_symbol_id != source_ref.base_symbol_id {
+        return Err(PortfolioConfigError::ValuationSourceMismatch {
+            symbol_id: symbol.symbol_id.clone(),
+            quote,
+            source_id: source_ref.source_id.clone(),
+            field: "base_symbol_id",
+        });
+    }
+    if source_cfg.quote != source_ref.quote {
+        return Err(PortfolioConfigError::ValuationSourceMismatch {
+            symbol_id: symbol.symbol_id.clone(),
+            quote,
+            source_id: source_ref.source_id.clone(),
+            field: "quote",
+        });
     }
 
     Ok(())

@@ -73,3 +73,5 @@
 //! ```
 /// Canonical portfolio-domain models, validation helpers, and normalization utilities.
 pub mod model;
+/// Reusable portfolio-domain runtime states for canonical portfolio execution.
+pub mod states;

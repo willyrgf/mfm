@@ -7,10 +7,17 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [dependencies]
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
+mfm-evm-runtime = { path = "../../evm-runtime", version = "0.1.0" }
+mfm-collectors-evm = { path = "../../collectors/evm", version = "0.1.0" }
 mfm-machine = { path = "../../machine", version = "0.1.0" }
+mfm-state-common = { path = "../common", version = "0.1.0" }
 mfm-state-symbol = { path = "../symbol", version = "0.1.0" }
 mfm-state-wallet = { path = "../wallet", version = "0.1.0" }
+
+[dev-dependencies]
+tokio = { workspace = true }

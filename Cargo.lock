@@ -2419,34 +2419,51 @@ dependencies = [
 name = "mfm-state-portfolio"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "mfm-collectors-evm",
+ "mfm-evm-runtime",
  "mfm-machine",
+ "mfm-state-common",
  "mfm-state-symbol",
  "mfm-state-wallet",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
 name = "mfm-state-symbol"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "async-trait",
+ "mfm-collectors-evm",
  "mfm-evm-core",
+ "mfm-evm-runtime",
  "mfm-machine",
+ "mfm-state-common",
+ "mfm-state-wallet",
+ "num-bigint",
+ "num-traits",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
 name = "mfm-state-wallet"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "mfm-evm-core",
  "mfm-machine",
+ "mfm-state-common",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

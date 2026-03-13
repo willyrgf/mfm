@@ -26,3 +26,5 @@
 //! ```
 /// Canonical wallet-domain models, validation helpers, and normalization utilities.
 pub mod model;
+/// Reusable wallet-domain runtime states for canonical portfolio execution.
+pub mod states;

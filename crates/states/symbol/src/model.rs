@@ -180,6 +180,45 @@ pub struct PriceSourceRef {
     pub quote: QuoteCode,
 }
 
+/// Typed registry of valuation sources referenced by symbol valuation routes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ValuationSourceRegistry {
+    /// Configured valuation sources keyed by `source_id`.
+    pub sources: Vec<ValuationSourceConfig>,
+}
+
+impl ValuationSourceRegistry {
+    /// Sorts nested collections into the canonical order used for persistence.
+    pub fn normalize(&mut self) {
+        self.sources
+            .sort_by(|left, right| left.source_id.cmp(&right.source_id));
+    }
+
+    /// Returns a normalized clone of the valuation source registry.
+    pub fn normalized(mut self) -> Self {
+        self.normalize();
+        self
+    }
+}
+
+/// Typed registry entry for one valuation source.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ValuationSourceConfig {
+    /// Stable logical source identifier.
+    pub source_id: String,
+    /// Network on which the source must be pinned.
+    pub network_id: String,
+    /// Symbol identity used by the source.
+    pub base_symbol_id: String,
+    /// Quote unit returned by the source.
+    pub quote: QuoteCode,
+    /// Reader family and its typed config blob.
+    pub reader: ValuationSourceReaderConfig,
+    /// Canonical metadata surface.
+    #[serde(default)]
+    pub metadata: BTreeMap<String, Value>,
+}
+
 /// Resolved balance reader selected by runtime planning.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedSymbolBalanceReader {
@@ -198,6 +237,20 @@ pub struct ResolvedSymbolValuationReader {
     pub kind: String,
     /// Opaque runtime implementation reference.
     pub implementation_ref: String,
+}
+
+/// Supported valuation source reader kinds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ValuationSourceReaderConfig {
+    /// EVM oracle reader selected by `oracle_kind`.
+    EvmOracle {
+        /// Concrete oracle family used at runtime.
+        oracle_kind: String,
+        /// Canonical oracle config blob.
+        #[serde(default)]
+        config: BTreeMap<String, Value>,
+    },
 }
 
 /// Supported valuation reader kinds.
@@ -407,12 +460,60 @@ pub enum SymbolConfigError {
     },
 }
 
+/// Validation errors for valuation source registries.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum ValuationSourceRegistryError {
+    /// The JSON payload could not be decoded into the canonical type.
+    #[error("valuation source registry decode failed: {0}")]
+    Decode(String),
+    /// `source_id` was empty.
+    #[error("source_id must be non-empty")]
+    EmptySourceId,
+    /// `network_id` was empty.
+    #[error("network_id must be non-empty")]
+    EmptyNetworkId,
+    /// `base_symbol_id` was empty.
+    #[error("base_symbol_id must be non-empty")]
+    EmptyBaseSymbolId,
+    /// Registry metadata violated canonical JSON rules.
+    #[error("valuation source metadata must be canonical JSON: {reason}")]
+    MetadataNotCanonical {
+        /// Underlying canonical JSON failure.
+        reason: CanonicalJsonError,
+    },
+    /// `oracle_kind` was empty.
+    #[error("evm_oracle.oracle_kind must be non-empty")]
+    EmptyOracleKind,
+    /// Oracle config violated canonical JSON rules.
+    #[error("evm_oracle.config must be canonical JSON: {reason}")]
+    OracleConfigNotCanonical {
+        /// Underlying canonical JSON failure.
+        reason: CanonicalJsonError,
+    },
+    /// The same `source_id` appeared more than once.
+    #[error("valuation source `{source_id}` must be unique")]
+    DuplicateSourceId {
+        /// Duplicate valuation source id.
+        source_id: String,
+    },
+}
+
 /// Decodes and validates a canonical symbol config.
 pub fn decode_symbol_config(value: &Value) -> Result<SymbolConfig, SymbolConfigError> {
     let cfg = serde_json::from_value(value.clone())
         .map_err(|err| SymbolConfigError::Decode(err.to_string()))?;
     validate_symbol_config(&cfg)?;
     Ok(cfg)
+}
+
+/// Decodes and validates a valuation source registry.
+pub fn decode_valuation_source_registry(
+    value: &Value,
+) -> Result<ValuationSourceRegistry, ValuationSourceRegistryError> {
+    let registry = serde_json::from_value(value.clone())
+        .map_err(|err| ValuationSourceRegistryError::Decode(err.to_string()))?;
+    validate_valuation_source_registry(&registry)?;
+    Ok(registry)
 }
 
 /// Validates a canonical symbol config.
@@ -480,6 +581,46 @@ pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigErro
     Ok(())
 }
 
+/// Validates a valuation source registry.
+pub fn validate_valuation_source_registry(
+    registry: &ValuationSourceRegistry,
+) -> Result<(), ValuationSourceRegistryError> {
+    let mut seen_ids = HashSet::new();
+    for source in &registry.sources {
+        if source.source_id.trim().is_empty() {
+            return Err(ValuationSourceRegistryError::EmptySourceId);
+        }
+        if !seen_ids.insert(source.source_id.clone()) {
+            return Err(ValuationSourceRegistryError::DuplicateSourceId {
+                source_id: source.source_id.clone(),
+            });
+        }
+        if source.network_id.trim().is_empty() {
+            return Err(ValuationSourceRegistryError::EmptyNetworkId);
+        }
+        if source.base_symbol_id.trim().is_empty() {
+            return Err(ValuationSourceRegistryError::EmptyBaseSymbolId);
+        }
+        validate_canonical_json_map(&source.metadata)
+            .map_err(|reason| ValuationSourceRegistryError::MetadataNotCanonical { reason })?;
+        match &source.reader {
+            ValuationSourceReaderConfig::EvmOracle {
+                oracle_kind,
+                config,
+            } => {
+                if oracle_kind.trim().is_empty() {
+                    return Err(ValuationSourceRegistryError::EmptyOracleKind);
+                }
+                validate_canonical_json_map(config).map_err(|reason| {
+                    ValuationSourceRegistryError::OracleConfigNotCanonical { reason }
+                })?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_valuation_reader_config(
     quote: QuoteCode,
     reader: &ValuationReaderConfig,
@@ -529,11 +670,13 @@ fn validate_price_source_ref(
     Ok(())
 }
 
-fn validate_canonical_json_map(map: &BTreeMap<String, Value>) -> Result<(), CanonicalJsonError> {
+pub(crate) fn validate_canonical_json_map(
+    map: &BTreeMap<String, Value>,
+) -> Result<(), CanonicalJsonError> {
     canonical_json_bytes(&json_object_value(map)).map(|_| ())
 }
 
-fn json_object_value(map: &BTreeMap<String, Value>) -> Value {
+pub(crate) fn json_object_value(map: &BTreeMap<String, Value>) -> Value {
     Value::Object(
         map.iter()
             .map(|(key, value)| (key.clone(), value.clone()))
@@ -541,7 +684,7 @@ fn json_object_value(map: &BTreeMap<String, Value>) -> Value {
     )
 }
 
-fn validate_normalized_address(raw: &str) -> Result<(), String> {
+pub(crate) fn validate_normalized_address(raw: &str) -> Result<(), String> {
     if raw.trim().is_empty() {
         return Err("address must be non-empty".to_string());
     }

@@ -49,3 +49,5 @@
 //! ```
 /// Canonical symbol-domain models, validation helpers, and normalization utilities.
 pub mod model;
+/// Reusable symbol-domain runtime states for canonical portfolio observations and valuation.
+pub mod states;

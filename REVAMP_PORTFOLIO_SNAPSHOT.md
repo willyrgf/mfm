@@ -1065,6 +1065,72 @@ Suggested fields:
 - `network_id`
 - `symbol_ids`
 
+### Valuation source registry and price resolution
+
+Valuation sources must be first-class config, not hidden runtime wiring.
+
+The canonical contract must keep these identities separate:
+
+- `PriceSourceRef.source_id`
+  - logical valuation source identity
+- `NetworkConfig.rpc_source_id`
+  - transport routing hint for EVM JSON-RPC reads on a network
+
+A valuation `source_id` must not be overloaded as an RPC transport selector.
+It resolves through a typed valuation source registry loaded alongside the portfolio config.
+
+This means runtime "price discovery" is intentionally narrow in the base design:
+
+- snapshot execution is config-driven
+- runtime resolves explicit `source_id` refs from symbol valuation routes
+- runtime deduplicates direct price reads across symbols that share the same source
+- runtime does not heuristically choose an oracle from a raw symbol string or display symbol
+
+If a future discovery feature is added, it must run before snapshot execution and materialize:
+
+- explicit `PriceSourceRef` entries in symbol configs
+- explicit `ValuationSourceConfig` entries in the valuation source registry
+
+Suggested first-pass registry shape:
+
+```json
+{
+  "sources": [
+    {
+      "source_id": "chainlink_eth_usd",
+      "network_id": "ethereum-mainnet",
+      "base_symbol_id": "eth.native.ethereum-mainnet",
+      "quote": "USD",
+      "reader": {
+        "kind": "evm_oracle",
+        "oracle_kind": "chainlink_aggregator_v3",
+        "config": {
+          "contract_address": "0x0000000000000000000000000000000000000000"
+        }
+      }
+    }
+  ]
+}
+```
+
+Validation rules:
+
+- every `PriceSourceRef.source_id` must resolve to exactly one valuation source entry
+- the registry entry must match the referring `PriceSourceRef` on:
+  - `network_id`
+  - `base_symbol_id`
+  - `quote`
+- unknown or mismatched source refs are configuration errors
+- unsupported valuation source reader kinds must raise structured errors
+  - no implicit fallback
+  - no hidden oracle selection
+
+This contract lets the revamp proceed before live oracle integrations are finished:
+
+- `fixed_unit_price` remains sufficient for tests and tightly scoped manual configs
+- live source families can land incrementally behind `ValuationSourceReaderConfig.kind`
+- source-kind scaffolding may return `unsupported_valuation_source_kind` until implemented
+
 ### Symbol config
 
 A symbol config describes how a portfolio entry should be:
@@ -1239,6 +1305,13 @@ Replay semantics:
 - each `ObservationValue` records the concrete source refs that were used
 - each source ref resolves against a pinned network block from `network_pins`
 
+Registry resolution semantics:
+
+- `PriceSourceRef.source_id` resolves through the valuation source registry, not the network transport registry
+- the resolved source config determines the concrete reader implementation family
+- the network used for the read comes from the resolved source config plus the pinned `network_id`
+- `rpc_source_id` remains a transport concern of `NetworkConfig`, never a valuation-source concern
+
 This keeps valuation:
 
 - deterministic
@@ -1298,10 +1371,13 @@ Suggested scalar aliases:
   - `SymbolKind`
   - `SymbolRole`
   - `SymbolConfig`
+  - `ValuationSourceRegistry`
+  - `ValuationSourceConfig`
   - `BalanceReaderConfig`
   - `SymbolValuationConfig`
   - `QuoteValuationConfig`
   - `PriceSourceRef`
+  - `ValuationSourceReaderConfig`
   - `ValuationReaderConfig`
   - `ResolvedSymbolBalanceReader`
   - `ResolvedSymbolValuationReader`
@@ -1338,6 +1414,9 @@ pub enum SymbolRole {
 
 ### Canonical request / config types
 
+`PortfolioConfig` remains the canonical portfolio-owned config surface.
+Valuation source resolution uses a sibling registry surface that is loaded by a dedicated config state and validated alongside the portfolio config.
+
 ```rust
 pub struct PortfolioConfig {
     pub portfolio_id: String,
@@ -1346,6 +1425,10 @@ pub struct PortfolioConfig {
     pub wallets: Vec<WalletConfig>,
     pub symbol_configs: Vec<SymbolConfig>,
     pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+pub struct ValuationSourceRegistry {
+    pub sources: Vec<ValuationSourceConfig>,
 }
 
 pub struct NetworkConfig {
@@ -1454,6 +1537,15 @@ pub struct PriceSourceRef {
     pub quote: QuoteCode,
 }
 
+pub struct ValuationSourceConfig {
+    pub source_id: String,
+    pub network_id: String,
+    pub base_symbol_id: String,
+    pub quote: QuoteCode,
+    pub reader: ValuationSourceReaderConfig,
+    pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
 pub struct ResolvedSymbolBalanceReader {
     pub kind: String,
     pub implementation_ref: String,
@@ -1463,6 +1555,14 @@ pub struct ResolvedSymbolValuationReader {
     pub quote: QuoteCode,
     pub kind: String,
     pub implementation_ref: String,
+}
+
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ValuationSourceReaderConfig {
+    EvmOracle {
+        oracle_kind: String,
+        config: std::collections::BTreeMap<String, serde_json::Value>,
+    },
 }
 
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -2111,17 +2211,20 @@ Current `portfolio_tracker` is effectively:
 A more general workflow should look like:
 
 1. load portfolio config
-2. validate wallet, symbol, network, and valuation route references
-3. compute the required network set from wallets plus valuation source refs
-4. pin block per network
-5. dispatch balance readers by `symbol_config.balance_reader.kind`
-6. dispatch protocol readers by `(protocol, reader)` where `kind = protocol_position`
-7. dispatch valuation readers by explicit unit-price routes
-8. normalize each result into the canonical observation shape
-9. aggregate observations per wallet
-10. aggregate observations per portfolio
-11. write artifact
-12. write report
+2. load valuation source registry
+3. validate wallet, symbol, network, valuation route, and valuation source refs
+4. compute the required network set from wallets plus valuation source refs
+5. pin block per network
+6. dispatch balance readers by `symbol_config.balance_reader.kind`
+7. dispatch protocol readers by `(protocol, reader)` where `kind = protocol_position`
+8. resolve direct `source_id` refs through the valuation source registry
+9. execute each unique direct price read once per pinned source network
+10. derive composite unit prices from direct price reads
+11. normalize each result into the canonical observation shape
+12. aggregate observations per wallet
+13. aggregate observations per portfolio
+14. write artifact
+15. write report
 
 Reader dispatch examples:
 
@@ -2201,6 +2304,7 @@ So the revamp should keep an eye on:
 - multicall-style reads
 - avoiding one-state-per-call explosion
 - avoiding one-price-read-per-symbol explosion
+- deduplicating direct source reads across symbols and wallets that share the same valuation source
 
 This matters especially for Aave V3 positions where a portfolio may span many reserves.
 
@@ -2218,8 +2322,11 @@ This matters especially for Aave V3 positions where a portfolio may span many re
 - add multi-network config and per-network pins
 - add multi-wallet config
 - add symbol registry / symbol config map
+- add valuation source registry / source-id resolution
 - add quote support for at least `USD` and `BTC`
 - require one valuation route per symbol for every portfolio-level quote
+- validate every `PriceSourceRef` against the valuation source registry
+- ship fixed-price and source-registry plumbing before any live oracle family is required
 - normalize all reads and values into a common observation shape
 
 ### Phase 2: add Aave V3 portfolio reads
@@ -2252,33 +2359,37 @@ This matters especially for Aave V3 positions where a portfolio may span many re
 - Keep multi-network semantics in the base model and first implementation.
 - Make valuation a core responsibility of symbol config, not a separate optional afterthought.
 - Use explicit unit-price routes with `direct_price` and `derived_unit_price`.
+- Make valuation-source resolution config-driven, not heuristic discovery.
+- Keep valuation `source_id` separate from network `rpc_source_id`.
 - Configure quotes at the portfolio level and require every symbol to satisfy them.
 - Pin blocks per network, not globally.
 - Treat Aave V3 as protocol-backed symbol configs, not as a separate portfolio system.
 - Represent debt as a positive quantity with `role = debt`; netting happens only in derived summaries.
+- Allow the base runtime to return structured `unsupported_valuation_source_kind` errors until live source families are implemented.
 
 ## Open Questions
 
 - What exactly counts as "staked assets"?
 - Are Aave rewards in scope, or only principal positions?
-- Do we need discovery, or is all tracking config-driven?
+- Do we need a future preflight discovery tool that materializes explicit portfolio and valuation-source config, or is hand-authored config sufficient?
 - Do we want best-effort snapshots, or strict fail-fast semantics?
-- Which concrete on-chain pricing sources ship first for `USD` and `BTC` valuation?
+- Which concrete `ValuationSourceReaderConfig.kind` ships first for live `USD` and `BTC` valuation?
 - Do we want health-factor-style protocol summaries in the base Aave slice, or only raw observations first?
 
 ## Immediate Next Steps
 
-1. Mirror the canonical schema in code without adding a compatibility layer for the old surface.
-2. Add validators for multi-network refs, portfolio-level quote coverage, and valuation source routes.
-3. Implement the base multi-network wallet/native/ERC-20/valuation slice first.
-4. Add Aave V3 shared read states in `crates/states/aave-v3` using the `protocol_position` reader envelope.
-5. Keep the planner op thin and assemble native / ERC-20 / protocol readers through one normalized workflow.
+1. Mirror the canonical schema and valuation source registry contract in code without adding a compatibility layer for the old surface.
+2. Add validators for multi-network refs, portfolio-level quote coverage, valuation source routes, and registry/source-ref agreement.
+3. Implement the base multi-network wallet/native/ERC-20/valuation slice with `fixed_unit_price`, registry plumbing, and structured unsupported-source errors.
+4. Add the first reusable live valuation source state family under `crates/evm-runtime/src/states/price.rs`.
+5. Add Aave V3 shared read states in `crates/states/aave-v3` using the `protocol_position` reader envelope.
+6. Keep the planner op thin and assemble native / ERC-20 / protocol readers through one normalized workflow.
 
 ## Next Time
 
 - Start mapping the exact canonical schema in this document into `crates/states/portfolio`, `crates/states/wallet`, and `crates/states/symbol`.
 - Decide whether Aave V3 position reads should use generic ABI-decoded calls or dedicated Aave-specific states.
-- Resolve the first concrete on-chain pricing sources for `USD` and `BTC` valuation.
+- Resolve the first concrete live valuation source reader kind and initial registry entries for `USD` and `BTC` valuation.
 - Resolve the meaning of "staked assets" before implementing the Aave slice.
 
 ## Appendix A: Concrete Implementation Plan
