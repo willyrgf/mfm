@@ -6,7 +6,6 @@
   pkg-config,
   perl,
 }:
-
 rustPlatform.buildRustPackage rec {
   pname = "helios";
   version = "unstable-2026-02-04";
@@ -18,7 +17,12 @@ rustPlatform.buildRustPackage rec {
     hash = "sha256-AJps+uQrN2fvtT78TsNaRiUtM+GaiPVBHfWumyNzt5M=";
   };
 
-  cargoHash = "sha256-RSTwadwdmZ35RwIjsomIjFdsvdayAxP13Y6GzXTJBQI=";
+  cargoLock = {
+    lockFile = "${src}/Cargo.lock";
+    outputHashes = {
+      "ethereum_hashing-0.7.0" = "sha256-v0fY93t0tFZ/Tb02xKgTI0Z5gMNrXhmKwj3sLW7knpE=";
+    };
+  };
 
   patches = [
     ./patches/0001-disable-reqwest-hickory-dns.patch

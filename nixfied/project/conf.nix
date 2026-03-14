@@ -254,7 +254,7 @@ rec {
       network = "local";
       executionRpcPortKey = "rethHttp";
       # Mainnet default for workflows that do not set HELIOS_EXECUTION_RPC_URL explicitly.
-      executionRpcUrl = "https://eth.drpc.org";
+      executionRpcUrl = "https://ethereum-rpc.publicnode.com";
       # Mainnet default consensus endpoint used by Helios snapshot workflows.
       consensusRpcUrl = "https://lodestar-mainnet.chainsafe.io";
       checkpoint = "";

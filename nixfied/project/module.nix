@@ -253,6 +253,40 @@ let
   '';
 
   ciServicePortPrelude = ciRuntime.servicePortPrelude;
+  frameworkProject = conf.project // {
+    services = conf.services;
+    logging = conf.logging;
+  };
+  frameworkPortVarNames = {
+    postgres = "POSTGRES_PORT";
+    rethHttp = "RETH_HTTP_PORT";
+    heliosRpc = "HELIOS_RPC_PORT";
+  };
+  frameworkServiceDirExprs = {
+    postgres = "$NIXFIED_RUNTIME_DIR_SCOPE/services/postgres/data";
+    helios = "$NIXFIED_RUNTIME_DIR_SCOPE/services/helios";
+  };
+  frameworkServiceSlots = {
+    getSlotInfoJson = "$SLOT_INFO_JSON";
+    portVarName =
+      portKey:
+      frameworkPortVarNames.${portKey}
+      or (throw "unsupported framework service port key for snapshot task: ${portKey}");
+    getServiceDir =
+      dataDirName:
+      frameworkServiceDirExprs.${dataDirName}
+      or (throw "unsupported framework service data dir for snapshot task: ${dataDirName}");
+  };
+  frameworkPostgresService = import ../framework/runtime/services/postgres/default.nix {
+    inherit pkgs;
+    project = frameworkProject;
+    slots = frameworkServiceSlots;
+  };
+  frameworkHeliosService = import ../framework/runtime/services/helios/default.nix {
+    inherit pkgs;
+    project = frameworkProject;
+    slots = frameworkServiceSlots;
+  };
   resolvePackagedMfmCliShell = ''
     resolve_packaged_mfm_cli_binary() {
       local flake_root=""
@@ -283,40 +317,6 @@ let
       fi
 
       echo "INFO: packaged mfm-cli ready path=$bin_path" >&2
-
-      printf '%s' "$bin_path"
-    }
-  '';
-  resolvePackagedHeliosShell = ''
-    resolve_packaged_helios_binary() {
-      local flake_root=""
-      local flake_ref=""
-      local out_path=""
-      local bin_path=""
-
-      if [ -n "''${NIXFIED_CALLER_PWD:-}" ] && [ -d "''${NIXFIED_CALLER_PWD:-}" ]; then
-        flake_root="$(cd "$NIXFIED_CALLER_PWD" && pwd -P)"
-      else
-        flake_root="$(pwd -P)"
-      fi
-
-      flake_ref="path:$flake_root"
-      echo "INFO: resolving packaged helios from $flake_ref#helios" >&2
-      echo "INFO: packaged helios resolution may trigger a local nix build; build logs will stream if realization is needed" >&2
-
-      if ! out_path="$(${pkgs.nix}/bin/nix build -L --no-link --print-out-paths "$flake_ref#helios")"; then
-        echo "ERROR: failed to resolve packaged helios from $flake_ref#helios" >&2
-        return 1
-      fi
-
-      out_path="$(printf '%s\n' "$out_path" | tail -n1)"
-      bin_path="$out_path/bin/helios"
-      if [ -z "$out_path" ] || [ ! -x "$bin_path" ]; then
-        echo "ERROR: packaged helios binary missing after build path=$out_path" >&2
-        return 1
-      fi
-
-      echo "INFO: packaged helios ready path=$bin_path" >&2
 
       printf '%s' "$bin_path"
     }
@@ -814,7 +814,6 @@ in
               if [ -w /dev/tty ]; then
                 exec >/dev/tty 2>&1
               fi
-              ${resolvePackagedHeliosShell}
 
               handoff_file=""
               while [ "$#" -gt 0 ]; do
@@ -850,9 +849,8 @@ in
                 exit 1
               fi
 
-              if [ -z "''${NIXFIED_EXECUTOR_SELF:-}" ]; then
-                echo "ERROR: NIXFIED_EXECUTOR_SELF is required for nested service probes" >&2
-                exit 1
+              if [ -z "''${NIXFIED_RUNTIME_DIR_SCOPE:-}" ]; then
+                :
               fi
 
               if [ -z "''${NIXFIED_SERVICE_POSTGRES_DATA_DIR:-}" ] || [ -z "''${NIXFIED_SERVICE_POSTGRES_STATE_DIR:-}" ] || [ -z "''${NIXFIED_SERVICE_POSTGRES_LOG_DIR:-}" ]; then
@@ -866,6 +864,42 @@ in
               fi
 
               mkdir -p "$(dirname "$handoff_file")"
+              runtime_root="$(cd "$(dirname "$handoff_file")/../.." && pwd -P)"
+              export NIXFIED_RUNTIME_DIR_SCOPE="$runtime_root"
+              export NIXFIED_SERVICE_ROOT="$runtime_root/services"
+              export HELIOS_RPC_PORT="$HELIOSRPC_PORT"
+              mkdir -p "$NIXFIED_SERVICE_ROOT"
+              mkdir -p "$runtime_root/run"
+
+              slot_info_json_path="$runtime_root/slot-info.json"
+              slot_info_json_script="$runtime_root/slot-info-json.sh"
+              ${pkgs.jq}/bin/jq -n \
+                --arg slot "''${NIX_ENV:-0}" \
+                --arg env "''${MFM_ENV:-dev}" \
+                --arg run_dir "$runtime_root/run" \
+                --arg postgres_port "$POSTGRES_PORT" \
+                --arg helios_rpc_port "$HELIOS_RPC_PORT" \
+                --arg reth_http_port "''${RETH_HTTP_PORT:-}" \
+                '{
+                  slot: $slot,
+                  env: $env,
+                  directories: {
+                    run: $run_dir
+                  },
+                  ports: (
+                    {
+                      POSTGRES_PORT: $postgres_port,
+                      HELIOS_RPC_PORT: $helios_rpc_port
+                    }
+                    + (if $reth_http_port == "" then {} else { RETH_HTTP_PORT: $reth_http_port } end)
+                  )
+                }' > "$slot_info_json_path"
+              cat > "$slot_info_json_script" <<EOF
+              #!/bin/sh
+              cat "$slot_info_json_path"
+              EOF
+              chmod +x "$slot_info_json_script"
+              export SLOT_INFO_JSON="$slot_info_json_script"
 
               resolve_owner_scope() {
                 if [ -n "''${SERVICE_OWNER_SCOPE:-}" ]; then
@@ -987,10 +1021,6 @@ in
                 fi
               }
 
-              listener_pid_on_port() {
-                ${pkgs.lsof}/bin/lsof -t -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | head -n1 || true
-              }
-
               owner_scope="$(resolve_owner_scope)"
               discovery_scope="$(resolve_discovery_scope "$owner_scope")"
               reuse_policy="$(resolve_reuse_policy "$owner_scope" "$discovery_scope")"
@@ -1003,50 +1033,78 @@ in
 
               echo "INFO: snapshot service policy reuse=$reuse_policy owner=$owner_scope discovery=$discovery_scope"
 
-              postgres_data="$NIXFIED_SERVICE_POSTGRES_DATA_DIR"
-              postgres_run="$NIXFIED_SERVICE_POSTGRES_STATE_DIR"
-              postgres_log_dir="$NIXFIED_SERVICE_POSTGRES_LOG_DIR"
-              postgres_log="$postgres_log_dir/postgres.log"
-              mkdir -p "$postgres_data" "$postgres_run" "$postgres_log_dir"
+              service_scope_root="$runtime_root"
+              if [ "$owner_scope" = "persistent" ] || [ "$discovery_scope" = "global" ]; then
+                service_env_name="''${MFM_ENV:-''${ENV:-dev}}"
+                service_slot="''${NIX_ENV:-''${SLOT:-0}}"
+                service_runtime_base="''${MFM_SNAPSHOT_RUNTIME_DIR_BASE:-}"
+                if [ -z "$service_runtime_base" ]; then
+                  service_user_name="$(id -un 2>/dev/null || true)"
+                  if [ -n "$service_user_name" ]; then
+                    service_user_home="$(eval printf '%s' "~$service_user_name")"
+                    if [ -n "$service_user_home" ] && [ "$service_user_home" != "~$service_user_name" ]; then
+                      service_runtime_base="$service_user_home/.local/share/${project.id}"
+                    fi
+                  fi
+                fi
+                if [ -n "$service_runtime_base" ]; then
+                  service_scope_root="$service_runtime_base/$service_env_name/slot-$service_slot"
+                fi
+              fi
+              service_root="$service_scope_root/services"
 
+              export NIXFIED_RUNTIME_DIR_SCOPE="$service_scope_root"
+              export NIXFIED_SERVICE_ROOT="$service_root"
+              export NIXFIED_SERVICE_POSTGRES_DATA_DIR="$service_root/postgres/data"
+              export NIXFIED_SERVICE_POSTGRES_STATE_DIR="$service_root/postgres/state"
+              export NIXFIED_SERVICE_POSTGRES_LOG_DIR="$service_root/postgres/log"
+              export NIXFIED_SERVICE_HELIOS_DATA_DIR="$service_root/helios/data"
+              export NIXFIED_SERVICE_HELIOS_STATE_DIR="$service_root/helios/state"
+              export NIXFIED_SERVICE_HELIOS_LOG_DIR="$service_root/helios/log"
+
+              mkdir -p "$NIXFIED_SERVICE_ROOT"
+              mkdir -p "$NIXFIED_SERVICE_POSTGRES_DATA_DIR" "$NIXFIED_SERVICE_POSTGRES_STATE_DIR" "$NIXFIED_SERVICE_POSTGRES_LOG_DIR"
+              mkdir -p "$NIXFIED_SERVICE_HELIOS_DATA_DIR" "$NIXFIED_SERVICE_HELIOS_STATE_DIR" "$NIXFIED_SERVICE_HELIOS_LOG_DIR"
+
+              echo "INFO: snapshot service scope root=$service_scope_root service_root=$service_root"
+
+              postgres_data="$NIXFIED_SERVICE_POSTGRES_DATA_DIR"
+              postgres_log="$postgres_data/postgres.log"
               postgres_owned=0
-              postgres_listener_pid="$(listener_pid_on_port "$POSTGRES_PORT")"
-              if [ -n "$postgres_listener_pid" ]; then
+
+              postgres_is_running() {
+                local pid=""
+                if [ ! -f "$postgres_data/postmaster.pid" ]; then
+                  return 1
+                fi
+                pid="$(head -1 "$postgres_data/postmaster.pid" 2>/dev/null || true)"
+                [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+              }
+
+              postgres_port_ready() {
+                ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null
+              }
+
+              if postgres_is_running; then
                 if [ "$reuse_policy" = "never" ]; then
-                  echo "ERROR: postgres already listening on port $POSTGRES_PORT and reuse policy is 'never'" >&2
-                  /bin/ps -p "$postgres_listener_pid" -o command= >&2 || true
+                  echo "ERROR: postgres already managed for this slot and reuse policy is 'never'" >&2
                   exit 1
                 fi
-                echo "INFO: reusing postgres listener pid=$postgres_listener_pid port=$POSTGRES_PORT"
+                echo "INFO: reusing framework-managed postgres port=$POSTGRES_PORT data=$postgres_data"
+              elif postgres_port_ready; then
+                if [ "$reuse_policy" = "never" ]; then
+                  echo "ERROR: postgres already listening on port $POSTGRES_PORT and reuse policy is 'never'" >&2
+                  exit 1
+                fi
+                echo "INFO: reusing healthy postgres on slot port=$POSTGRES_PORT outside expected data dir=$postgres_data"
               else
                 postgres_owned=1
+                echo "INFO: starting framework-managed postgres port=$POSTGRES_PORT data=$postgres_data"
+              fi
 
-                if [ ! -f "$postgres_data/PG_VERSION" ]; then
-                  if ! ${postgresPackage}/bin/initdb -D "$postgres_data" -U postgres --no-locale --encoding=UTF8 -A trust >/dev/null; then
-                    echo "ERROR: postgres initdb failed port=$POSTGRES_PORT data=$postgres_data" >&2
-                    if [ -f "$postgres_log" ]; then
-                      tail -50 "$postgres_log" >&2 || true
-                    fi
-                    exit 1
-                  fi
-                  cat > "$postgres_data/pg_hba.conf" <<'EOF'
-              # TYPE  DATABASE        USER  ADDRESS       METHOD
-              local   all             all                 trust
-              host    all             all   127.0.0.1/32  trust
-              host    all             all   ::1/128       trust
-              EOF
-                fi
-
-                if [ -f "$postgres_data/postmaster.pid" ]; then
-                  stale_pid="$(head -1 "$postgres_data/postmaster.pid" 2>/dev/null || true)"
-                  if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
-                    rm -f "$postgres_data/postmaster.pid"
-                  fi
-                fi
-
-                echo "INFO: starting postgres port=$POSTGRES_PORT data=$postgres_data"
-                if ! ${postgresPackage}/bin/pg_ctl -D "$postgres_data" -l "$postgres_log" -o "-p $POSTGRES_PORT -h 127.0.0.1 -k $postgres_run" start; then
-                  echo "ERROR: postgres failed to start port=$POSTGRES_PORT data=$postgres_data" >&2
+              if [ "$postgres_owned" = "1" ]; then
+                if ! ${frameworkPostgresService.fullStart}; then
+                  echo "ERROR: postgres full-start failed port=$POSTGRES_PORT data=$postgres_data" >&2
                   if [ -f "$postgres_log" ]; then
                     tail -50 "$postgres_log" >&2 || true
                   fi
@@ -1054,30 +1112,18 @@ in
                 fi
               fi
 
-              for _ in $(seq 1 120); do
-                if ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
-                  break
-                fi
-                sleep 0.25
-              done
-
-              if ! ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
-                echo "ERROR: postgres failed to become ready port=$POSTGRES_PORT" >&2
-                if [ -f "$postgres_log" ]; then
-                  tail -50 "$postgres_log" >&2 || true
-                fi
-                exit 1
-              fi
-
-              ${postgresPackage}/bin/createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres ${conf.modules.postgres.database or "mfm"} >/dev/null 2>&1 || true
-
-              echo "INFO: validating postgres readiness via framework probe service=postgres source=local"
-              if ! NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.ops.ready --service postgres --source local >/dev/null 2>&1; then
+              if ! ${frameworkPostgresService.ready}; then
                 echo "ERROR: postgres failed framework readiness checks port=$POSTGRES_PORT" >&2
                 if [ -f "$postgres_log" ]; then
                   tail -50 "$postgres_log" >&2 || true
                 fi
                 exit 1
+              fi
+              if [ "$postgres_owned" != "1" ]; then
+                if ! ${frameworkPostgresService.setupDb}; then
+                  echo "ERROR: postgres setup-db failed on reused instance port=$POSTGRES_PORT" >&2
+                  exit 1
+                fi
               fi
               echo "OK: postgres readiness validated service=postgres source=local"
 
@@ -1087,178 +1133,70 @@ in
                 exit 1
               fi
 
-              HELIOS_RPC_PORT="$HELIOSRPC_PORT"
-              HELIOS_EXECUTION_RPC_URL_VALUE="''${HELIOS_EXECUTION_RPC_URL:-${
-                conf.modules.helios.executionRpcUrl or "https://eth.drpc.org"
+              export HELIOS_RPC_PORT="$HELIOSRPC_PORT"
+              export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
+                conf.modules.helios.executionRpcUrl or "https://ethereum-rpc.publicnode.com"
               }}"
-              HELIOS_CONSENSUS_RPC_URL_VALUE="''${HELIOS_CONSENSUS_RPC_URL:-${
-                conf.modules.helios.consensusRpcUrl or "https://lodestar-mainnet.chainsafe.io"
-              }}"
-              HELIOS_CONSENSUS_RPC_URL_VALUE="''${HELIOS_CONSENSUS_RPC_URL_VALUE%/}"
-              HELIOS_CHECKPOINT_VALUE="''${HELIOS_CHECKPOINT:-${conf.modules.helios.checkpoint or ""}}"
+              export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-}"
+              export HELIOS_CHECKPOINT="''${HELIOS_CHECKPOINT:-}"
 
-              if [ -z "$HELIOS_EXECUTION_RPC_URL_VALUE" ]; then
+              if [ -z "$HELIOS_EXECUTION_RPC_URL" ]; then
                 echo "ERROR: HELIOS_EXECUTION_RPC_URL is required for snapshot startup" >&2
                 exit 1
               fi
 
-              if [ -z "$HELIOS_CONSENSUS_RPC_URL_VALUE" ]; then
-                echo "ERROR: HELIOS_CONSENSUS_RPC_URL is required for mainnet snapshot startup" >&2
-                exit 1
-              fi
-
-              if [ -z "$HELIOS_CHECKPOINT_VALUE" ]; then
-                CONS_CANDIDATES=("$HELIOS_CONSENSUS_RPC_URL_VALUE")
-                if [ "$HELIOS_CONSENSUS_RPC_URL_VALUE" = "https://www.lightclientdata.org" ]; then
-                  CONS_CANDIDATES+=("https://lodestar-mainnet.chainsafe.io")
-                fi
-
-                derived_checkpoint=0
-                for cons in "''${CONS_CANDIDATES[@]}"; do
-                  [ -z "''${cons:-}" ] && continue
-                  cons="''${cons%/}"
-                  echo "INFO: deriving HELIOS_CHECKPOINT from consensus endpoint cons=$cons"
-
-                  finalized_url="$cons/eth/v1/beacon/headers/finalized"
-                  if ! finalized_json="$(${pkgs.curl}/bin/curl -fsS --max-time 10 --retry 3 --retry-delay 1 --retry-max-time 30 -H 'accept: application/json' "$finalized_url" 2>&1)"; then
-                    echo "WARN: failed to fetch finalized header cons=$cons url=$finalized_url" >&2
-                    echo "DETAIL: $finalized_json" >&2
-                    continue
-                  fi
-
-                  slot="$(echo "$finalized_json" | ${pkgs.jq}/bin/jq -r '.data.header.message.slot|tonumber' 2>/dev/null || true)"
-                  case "$slot" in
-                    *[!0-9]*|"")
-                      echo "WARN: failed to parse finalized slot from consensus response cons=$cons" >&2
-                      continue
-                      ;;
-                  esac
-
-                  epoch_start=$((slot - (slot % 32)))
-                  epoch_url="$cons/eth/v1/beacon/headers/$epoch_start"
-                  if ! epoch_json="$(${pkgs.curl}/bin/curl -fsS --max-time 10 --retry 3 --retry-delay 1 --retry-max-time 30 -H 'accept: application/json' "$epoch_url" 2>&1)"; then
-                    echo "WARN: failed to fetch epoch boundary header cons=$cons url=$epoch_url" >&2
-                    echo "DETAIL: $epoch_json" >&2
-                    continue
-                  fi
-
-                  checkpoint="$(echo "$epoch_json" | ${pkgs.jq}/bin/jq -r '.data.root // empty' 2>/dev/null || true)"
-                  if ! echo "$checkpoint" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]{64}$'; then
-                    echo "WARN: invalid checkpoint root from consensus endpoint cons=$cons root='$checkpoint'" >&2
-                    continue
-                  fi
-
-                  bootstrap_url="$cons/eth/v1/beacon/light_client/bootstrap/$checkpoint"
-                  if ! bootstrap_err="$(${pkgs.curl}/bin/curl -fsS --max-time 10 --retry 3 --retry-delay 1 --retry-max-time 30 -H 'accept: application/json' -o /dev/null "$bootstrap_url" 2>&1)"; then
-                    echo "WARN: consensus endpoint does not serve light_client/bootstrap cons=$cons url=$bootstrap_url" >&2
-                    echo "DETAIL: $bootstrap_err" >&2
-                    continue
-                  fi
-
-                  HELIOS_CONSENSUS_RPC_URL_VALUE="$cons"
-                  HELIOS_CHECKPOINT_VALUE="$checkpoint"
-                  echo "INFO: derived HELIOS_CHECKPOINT=$HELIOS_CHECKPOINT_VALUE cons=$HELIOS_CONSENSUS_RPC_URL_VALUE"
-                  derived_checkpoint=1
-                  break
-                done
-
-                if [ "$derived_checkpoint" -ne 1 ]; then
-                  echo "ERROR: failed to derive HELIOS_CHECKPOINT from consensus endpoint(s)" >&2
-                  exit 1
-                fi
-              fi
-
-              helios_data="$NIXFIED_SERVICE_HELIOS_DATA_DIR"
-              helios_state_dir="$NIXFIED_SERVICE_HELIOS_STATE_DIR"
-              helios_log_dir="$NIXFIED_SERVICE_HELIOS_LOG_DIR"
-              helios_log="$helios_log_dir/helios.log"
-              helios_pid_file="$helios_state_dir/helios.pid"
-              mkdir -p "$helios_data" "$helios_state_dir" "$helios_log_dir"
-
+              helios_root="$service_root/helios"
+              helios_log="$helios_root/logs/helios.log"
+              helios_pid_file="$helios_root/run/helios.pid"
               helios_owned=0
-              helios_listener_pid="$(listener_pid_on_port "$HELIOS_RPC_PORT")"
-              if [ -n "$helios_listener_pid" ]; then
-                if [ "$reuse_policy" = "never" ]; then
-                  echo "ERROR: helios already listening on port $HELIOS_RPC_PORT and reuse policy is 'never'" >&2
-                  /bin/ps -p "$helios_listener_pid" -o command= >&2 || true
-                  exit 1
-                fi
-                echo "INFO: reusing helios listener pid=$helios_listener_pid port=$HELIOS_RPC_PORT"
-              else
-                helios_owned=1
 
-                resolved_helios_bin="''${HELIOS_BIN:-}"
-                if [ -z "$resolved_helios_bin" ]; then
-                  resolved_helios_bin="$(resolve_packaged_helios_binary)" || exit 1
+              helios_is_running() {
+                local pid=""
+                if [ ! -f "$helios_pid_file" ]; then
+                  return 1
                 fi
-                if [ ! -x "$resolved_helios_bin" ]; then
-                  echo "ERROR: helios binary is unavailable in runtime" >&2
-                  exit 1
-                fi
+                pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
+                [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+              }
 
-                if [ -f "$helios_pid_file" ]; then
-                  stale_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
-                  if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
-                    rm -f "$helios_pid_file"
-                  fi
-                fi
-
-                ARGS=(
-                  ethereum
-                  --network "$HELIOS_NETWORK"
-                  --rpc-bind-ip 127.0.0.1
-                  --rpc-port "$HELIOS_RPC_PORT"
-                  --data-dir "$helios_data"
-                  --execution-rpc "$HELIOS_EXECUTION_RPC_URL_VALUE"
-                )
-                if [ -n "$HELIOS_CONSENSUS_RPC_URL_VALUE" ]; then
-                  ARGS+=(--consensus-rpc "$HELIOS_CONSENSUS_RPC_URL_VALUE")
-                fi
-                if [ -n "$HELIOS_CHECKPOINT_VALUE" ]; then
-                  ARGS+=(--checkpoint "$HELIOS_CHECKPOINT_VALUE")
-                fi
-                EXTRA_ARGS=(${lib.escapeShellArgs (conf.modules.helios.extraArgs or [ ])})
-                if [ "''${#EXTRA_ARGS[@]}" -gt 0 ]; then
-                  ARGS+=("''${EXTRA_ARGS[@]}")
-                fi
-
-                echo "INFO: starting helios port=$HELIOS_RPC_PORT network=$HELIOS_NETWORK execution_rpc=$HELIOS_EXECUTION_RPC_URL_VALUE"
-                if command -v nohup >/dev/null 2>&1; then
-                  nohup "$resolved_helios_bin" "''${ARGS[@]}" </dev/null >"$helios_log" 2>&1 &
-                else
-                  "$resolved_helios_bin" "''${ARGS[@]}" </dev/null >"$helios_log" 2>&1 &
-                fi
-                echo "$!" > "$helios_pid_file"
-              fi
-
-              helios_ready_timeout_secs="''${HELIOS_READY_TIMEOUT_SECS:-120}"
-              helios_ready_interval_secs="''${HELIOS_READY_INTERVAL_SECS:-1}"
-              helios_ready=0
-              helios_deadline="$(( $(date +%s) + helios_ready_timeout_secs ))"
-              echo "INFO: waiting for snapshot helios readiness port=$HELIOS_RPC_PORT timeout=''${helios_ready_timeout_secs}s interval=''${helios_ready_interval_secs}s"
-              while [ "$(date +%s)" -lt "$helios_deadline" ]; do
-                helios_block_json="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
+              helios_port_ready() {
+                local response=""
+                response="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
                   -H 'content-type: application/json' \
                   --data '{"id":1,"jsonrpc":"2.0","method":"eth_blockNumber","params":[]}' \
                   "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null || true)"
-                helios_block_number="$(printf '%s' "$helios_block_json" | ${pkgs.jq}/bin/jq -r '.result // empty' 2>/dev/null || true)"
-                if [ -n "$helios_block_number" ] && echo "$helios_block_number" | ${pkgs.gnugrep}/bin/grep -Eq '^0x[0-9a-fA-F]+$'; then
-                  helios_syncing_result="$(${pkgs.curl}/bin/curl -fsS --max-time 2 \
-                    -H 'content-type: application/json' \
-                    --data '{"id":1,"jsonrpc":"2.0","method":"eth_syncing","params":[]}' \
-                    "http://127.0.0.1:$HELIOS_RPC_PORT" \
-                    | ${pkgs.jq}/bin/jq -c '.result' 2>/dev/null || true)"
-                  if [ "$helios_syncing_result" = "false" ]; then
-                    echo "OK: snapshot helios ready port=$HELIOS_RPC_PORT block_number=$helios_block_number"
-                    helios_ready=1
-                    break
-                  fi
-                fi
-                sleep "$helios_ready_interval_secs"
-              done
+                echo "$response" | ${pkgs.gnugrep}/bin/grep -q '"result"'
+              }
 
-              if [ "$helios_ready" -ne 1 ]; then
-                echo "ERROR: helios failed snapshot readiness checks port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL_VALUE" >&2
+              if helios_is_running; then
+                if [ "$reuse_policy" = "never" ]; then
+                  echo "ERROR: helios already managed for this slot and reuse policy is 'never'" >&2
+                  exit 1
+                fi
+                echo "INFO: reusing framework-managed helios port=$HELIOS_RPC_PORT root=$helios_root"
+              elif helios_port_ready; then
+                if [ "$reuse_policy" = "never" ]; then
+                  echo "ERROR: helios already serving on port $HELIOS_RPC_PORT and reuse policy is 'never'" >&2
+                  exit 1
+                fi
+                echo "INFO: reusing healthy helios on slot port=$HELIOS_RPC_PORT outside expected pid file=$helios_pid_file"
+              else
+                helios_owned=1
+                echo "INFO: starting framework-managed helios port=$HELIOS_RPC_PORT root=$helios_root execution_rpc=$HELIOS_EXECUTION_RPC_URL"
+              fi
+
+              if [ "$helios_owned" = "1" ]; then
+                if ! ${frameworkHeliosService.fullStart}; then
+                  echo "ERROR: helios full-start failed port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
+                  if [ -f "$helios_log" ]; then
+                    tail -50 "$helios_log" >&2 || true
+                  fi
+                  exit 1
+                fi
+              fi
+
+              if ! ${frameworkHeliosService.ready}; then
+                echo "ERROR: helios failed snapshot readiness checks port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
                 if [ -f "$helios_log" ]; then
                   tail -50 "$helios_log" >&2 || true
                 fi
@@ -1281,6 +1219,8 @@ in
                   owner_scope: $owner_scope,
                   discovery_scope: $discovery_scope,
                   cleanup_required: ($cleanup_required == "1"),
+                  service_scope_root: $service_scope_root,
+                  service_root: $service_root,
                   postgres_owned: ($postgres_owned == "1"),
                   helios_owned: ($helios_owned == "1"),
                   postgres_data: $postgres_data,
@@ -1692,9 +1632,20 @@ in
             session_dir="$(mktemp -d "''${TMPDIR:-/tmp}/mfm-portfolio-snapshot.XXXXXX")"
             handoff_file="$session_dir/services.json"
             out_file="$session_dir/result.json"
+            snapshot_runtime_dir_base="''${MFM_SNAPSHOT_RUNTIME_DIR_BASE:-}"
+            if [ -z "$snapshot_runtime_dir_base" ]; then
+              snapshot_user_name="$(id -un 2>/dev/null || true)"
+              if [ -n "$snapshot_user_name" ]; then
+                snapshot_user_home="$(eval printf '%s' "~$snapshot_user_name")"
+                if [ -n "$snapshot_user_home" ] && [ "$snapshot_user_home" != "~$snapshot_user_name" ]; then
+                  snapshot_runtime_dir_base="$snapshot_user_home/.local/share/${project.id}"
+                fi
+              fi
+            fi
             export MFM_SNAPSHOT_REQUEST_FILE="$REQUEST_FILE"
             export MFM_SNAPSHOT_HANDOFF_FILE="$handoff_file"
             export MFM_SNAPSHOT_RESULT_FILE="$out_file"
+            export MFM_SNAPSHOT_RUNTIME_DIR_BASE="$snapshot_runtime_dir_base"
 
             cleanup() {
               local rc=$?
@@ -2798,7 +2749,7 @@ in
 
               export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
               export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
-                conf.modules.helios.executionRpcUrl or "https://eth.drpc.org"
+                conf.modules.helios.executionRpcUrl or "https://ethereum-rpc.publicnode.com"
               }}"
               export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${
                 conf.modules.helios.consensusRpcUrl or "https://lodestar-mainnet.chainsafe.io"
