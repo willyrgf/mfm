@@ -385,7 +385,8 @@ impl RpcSourceRecord {
         }
     }
 
-    fn to_new_stream_record(&self) -> Result<NewStreamRecord, StorageError> {
+    /// Encodes the typed record into a generic append-only stream record payload.
+    pub fn to_new_stream_record(&self) -> Result<NewStreamRecord, StorageError> {
         let payload = match self {
             RpcSourceRecord::Observed(record) => serde_json::to_value(record),
             RpcSourceRecord::Probed(record) => serde_json::to_value(record),
@@ -703,7 +704,8 @@ impl SourcePoolRecord {
         }
     }
 
-    fn to_new_stream_record(&self) -> Result<NewStreamRecord, StorageError> {
+    /// Encodes the typed record into a generic append-only stream record payload.
+    pub fn to_new_stream_record(&self) -> Result<NewStreamRecord, StorageError> {
         self.validate().map_err(|message| {
             storage_other(
                 "control_plane_record_invalid",

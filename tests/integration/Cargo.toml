@@ -11,6 +11,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { version = "1.0", features = ["v4"] }
 mfm-machine = { path = "../../crates/machine" }
+mfm-collectors-rpc-control = { path = "../../crates/collectors/rpc-control" }
+mfm-transports-rpc-control = { path = "../../crates/transports/rpc-control" }
+mfm-collectors-evm-jsonrpc-http = { path = "../../crates/collectors/evm-jsonrpc-http" }
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -28,4 +31,3 @@ mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
 mfm-artifact-store-s3 = { path = "../../crates/storages/artifact-store-s3" }
 mfm-stream-store-mem = { path = "../../crates/storages/stream-store-mem" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
-mfm-collectors-evm-jsonrpc-http = { path = "../../crates/collectors/evm-jsonrpc-http" }

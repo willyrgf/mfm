@@ -10,19 +10,15 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use mfm_artifact_store_s3::S3ArtifactStore;
-use mfm_collectors_evm_jsonrpc_http::{
-    EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmSourceKind,
-};
+use mfm_integration_tests::rpc_control;
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
     RetryPolicy, RunConfig,
 };
 use mfm_machine::context::DynContext;
 use mfm_machine::engine::{RunPhase, Stores};
-use mfm_machine::errors::{ContextError, IoError};
-use mfm_machine::ids::{ContextKey, OpId, RunId, StateId};
-use mfm_machine::io::IoCall;
-use mfm_machine::live_io::{LiveIoEnv, LiveIoTransportFactory};
+use mfm_machine::errors::ContextError;
+use mfm_machine::ids::{ContextKey, OpId};
 use mfm_machine::stores::{ArtifactStore, StreamStore};
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
@@ -238,41 +234,7 @@ async fn rpc_call(
     method: &str,
     params: serde_json::Value,
 ) -> serde_json::Value {
-    let factory = EvmJsonRpcHttpTransportFactory::new(EvmJsonRpcHttpConfig {
-        sources: vec![EvmJsonRpcSource {
-            id: "helper_primary".to_string(),
-            rpc_url: rpc_url.to_string(),
-            authorization: None,
-            kind: EvmSourceKind::RemoteUser,
-            require_get_proof_probe: false,
-        }],
-        preferred_order: vec!["helper_primary".to_string()],
-        ..EvmJsonRpcHttpConfig::default()
-    });
-    let env = LiveIoEnv {
-        stores: Stores { streams, artifacts },
-        run_id: RunId(uuid::Uuid::new_v4()),
-        state_id: StateId::must_new("rpc.helper.call".to_string()),
-        attempt: 0,
-    };
-    let mut transport = factory.make(env);
-    transport
-        .call(IoCall {
-            namespace: "evm".to_string(),
-            request: serde_json::json!({
-                "method": method,
-                "params": params,
-            }),
-            fact_key: None,
-        })
-        .await
-        .unwrap_or_else(|err| match err {
-            IoError::MissingFactKey(info)
-            | IoError::MissingFact { info, .. }
-            | IoError::Transport(info)
-            | IoError::RateLimited(info)
-            | IoError::Other(info) => panic!("rpc call failed: {}", info.code.0),
-        })
+    rpc_control::call(rpc_url, streams, artifacts, method, params).await
 }
 
 async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> PostgresStreamStore {

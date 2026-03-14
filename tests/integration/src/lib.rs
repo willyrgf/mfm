@@ -13,8 +13,19 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use mfm_machine::ids::RunId;
+use mfm_collectors_evm_jsonrpc_http::EvmSourceKind;
+use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall};
+use mfm_machine::engine::Stores;
+use mfm_machine::ids::{FactKey, RunId, StateId};
+use mfm_machine::live_io::{
+    FactIndex, LiveIo, LiveIoEnv, LiveIoTransportFactory, NoopFactRecorder,
+};
+use mfm_machine::stores::{ArtifactStore, StreamStore};
+use mfm_transports_rpc_control::{
+    RpcControlBootstrapSource, RpcControlPlaneStorageMode, RpcControlTransportFactory,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 /// Helpers for persisting parity run ids between coordinated integration-test phases.
@@ -141,5 +152,118 @@ pub mod parity_run_ids {
         let parsed = uuid::Uuid::parse_str(value)
             .unwrap_or_else(|err| panic!("invalid uuid in `{field}` (`{value}`): {err}"));
         RunId(parsed)
+    }
+}
+
+/// Shared helpers for tests that should exercise the managed RPC control plane.
+pub mod rpc_control {
+    use super::*;
+
+    /// Builds a control-plane source using a single remote-user RPC endpoint.
+    pub fn single_remote_user_source(id: &str, rpc_url: &str) -> RpcControlBootstrapSource {
+        RpcControlBootstrapSource {
+            id: id.to_string(),
+            network_id: None,
+            rpc_url: rpc_url.to_string(),
+            authorization: None,
+            kind: EvmSourceKind::RemoteUser,
+            require_get_proof_probe: false,
+        }
+    }
+
+    /// Returns a single-source control transport for a specific state and run.
+    pub fn transport_for_state(
+        streams: Arc<dyn StreamStore>,
+        artifacts: Arc<dyn ArtifactStore>,
+        run_id: RunId,
+        state_id: StateId,
+        sources: Vec<RpcControlBootstrapSource>,
+    ) -> Box<dyn mfm_machine::live_io::LiveIoTransport> {
+        let factory = RpcControlTransportFactory::new(sources)
+            .with_control_plane_storage_mode(RpcControlPlaneStorageMode::StreamStore);
+        let env = LiveIoEnv {
+            stores: Stores { streams, artifacts },
+            run_id,
+            state_id,
+            attempt: 0,
+        };
+        factory.make(env)
+    }
+
+    /// Executes a managed RPC call through `rpc.control` and returns the response payload.
+    pub async fn call(
+        rpc_url: &str,
+        streams: Arc<dyn StreamStore>,
+        artifacts: Arc<dyn ArtifactStore>,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let state_id = StateId::must_new("rpc_control.integration.helper_call".to_string());
+        let run_id = RunId(uuid::Uuid::new_v4());
+        let stream_store = Arc::clone(&streams);
+        let artifacts_store = Arc::clone(&artifacts);
+        let transport = transport_for_state(
+            stream_store,
+            artifacts_store,
+            run_id,
+            state_id.clone(),
+            vec![single_remote_user_source("helper_primary", rpc_url)],
+        );
+        let mut live = LiveIo::new(
+            run_id,
+            state_id.clone(),
+            0,
+            artifacts,
+            FactIndex::default(),
+            Arc::new(NoopFactRecorder),
+            transport,
+        );
+        let mut client = EvmIoClient::new(state_id, &mut live);
+        client
+            .call(JsonRpcCall::new(method, params))
+            .await
+            .unwrap_or_else(|err| {
+                panic!("rpc.control call failed: {err:?}");
+            })
+            .response
+    }
+
+    /// Convenience alias for making a control-plane call with an explicit fact key.
+    pub async fn call_with_fact_key(
+        rpc_url: &str,
+        streams: Arc<dyn StreamStore>,
+        artifacts: Arc<dyn ArtifactStore>,
+        state_id: StateId,
+        fact_key: FactKey,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let run_id = RunId(uuid::Uuid::new_v4());
+        let stream_store = Arc::clone(&streams);
+        let artifacts_store = Arc::clone(&artifacts);
+        let transport = transport_for_state(
+            stream_store,
+            artifacts_store,
+            run_id,
+            state_id.clone(),
+            vec![single_remote_user_source("helper_primary", rpc_url)],
+        );
+        let mut live = LiveIo::new(
+            run_id,
+            state_id.clone(),
+            0,
+            artifacts,
+            FactIndex::default(),
+            Arc::new(NoopFactRecorder),
+            transport,
+        );
+        let mut client = EvmIoClient::new(state_id, &mut live);
+        client
+            .call_with_fact_key(JsonRpcCall::new(method, params), fact_key)
+            .await
+            .unwrap_or_else(|err| {
+                panic!("rpc.control call failed: {err:?}");
+            })
+            .response
     }
 }

@@ -8,13 +8,7 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use mfm_artifact_store_fs::FsArtifactStore;
-use mfm_collectors_evm_jsonrpc_http::{
-    EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmSourceKind,
-};
-use mfm_machine::engine::Stores;
-use mfm_machine::ids::{RunId, StateId};
-use mfm_machine::io::IoCall;
-use mfm_machine::live_io::{LiveIoEnv, LiveIoTransportFactory};
+use mfm_integration_tests::rpc_control;
 use mfm_machine::stores::{ArtifactStore, StreamStore};
 use mfm_stream_store_mem::MemStreamStore;
 
@@ -117,41 +111,10 @@ fn parse_u64_hex(s: &str) -> u64 {
 }
 
 async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> serde_json::Value {
-    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(tmp.path()));
-
-    let factory = EvmJsonRpcHttpTransportFactory::new(EvmJsonRpcHttpConfig {
-        sources: vec![EvmJsonRpcSource {
-            id: "helper_primary".to_string(),
-            rpc_url: rpc_url.to_string(),
-            authorization: None,
-            kind: EvmSourceKind::RemoteUser,
-            require_get_proof_probe: false,
-        }],
-        preferred_order: vec!["helper_primary".to_string()],
-        ..EvmJsonRpcHttpConfig::default()
-    });
-    let mut t = factory.make(LiveIoEnv {
-        stores: Stores { streams, artifacts },
-        run_id: RunId(uuid::Uuid::new_v4()),
-        state_id: StateId::must_new("parity.main.rpc".to_string()),
-        attempt: 0,
-    });
-
-    let v = t
-        .call(IoCall {
-            namespace: "evm".to_string(),
-            request: serde_json::json!({
-                "method": method,
-                "params": params,
-            }),
-            fact_key: None,
-        })
-        .await
-        .expect("rpc call");
-
-    v
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
+    rpc_control::call(rpc_url, streams, artifacts, method, params).await
 }
 
 #[tokio::test]

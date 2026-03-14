@@ -13,6 +13,7 @@
 //! concrete source before dispatch, so route choice and cooldown authority stay here.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -28,15 +29,16 @@ use mfm_collectors_rpc_control::{
     NAMESPACE_RPC_CONTROL,
 };
 use mfm_control_plane_postgres::{
-    ControlPlanePostgresStore, RpcSourceObservedRecord, RpcSourceOutcome, RpcSourceProbeKind,
-    RpcSourceProbedRecord, RpcSourceRecord, RpcSourceRef, RpcSourceState,
-    SourcePoolMembershipDeclaredRecord, SourcePoolRankedRecord, SourcePoolRecord, SourcePoolRef,
-    SourcePoolState,
+    rebuild_rpc_source_state, rebuild_source_pool_state, ControlPlanePostgresStore,
+    RpcSourceObservedRecord, RpcSourceOutcome, RpcSourceProbeKind, RpcSourceProbedRecord,
+    RpcSourceRecord, RpcSourceRef, RpcSourceState, SourcePoolMembershipDeclaredRecord,
+    SourcePoolRankedRecord, SourcePoolRecord, SourcePoolRef, SourcePoolState,
 };
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, StorageError};
 use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
+use mfm_machine::stores::{StreamAppend, StreamStore};
 
 const ENV_EVM_RPC_URL: &str = "MFM_EVM_RPC_URL";
 const ENV_EVM_RPC_AUTHORIZATION: &str = "MFM_EVM_RPC_AUTHORIZATION";
@@ -48,6 +50,52 @@ const DEFAULT_NETWORK_SCOPE: &str = "__default__";
 const DEFAULT_POOL_KIND: &str = "default";
 const PROBE_REFRESH_INTERVAL_MS: u64 = 15_000;
 const FAILURE_COOLDOWN_MS: u64 = 15_000;
+
+/// Control-plane persistence backend used by `rpc.control`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RpcControlPlaneStorageMode {
+    /// Use the dedicated Postgres control-plane store discovered from `DATABASE_URL`.
+    #[default]
+    PostgresEnv,
+    /// Persist control-plane stream families directly through the runtime `StreamStore`.
+    StreamStore,
+}
+
+/// Typed tuning knobs forwarded to the inner EVM executor used by `rpc.control`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RpcControlExecutorTuning {
+    /// Maximum block span per chunked `eth_getLogs` request.
+    pub logs_max_block_span: u64,
+    /// Minimum block span while shrinking retryable `eth_getLogs` chunks.
+    pub logs_min_block_span: u64,
+    /// Maximum number of `eth_getLogs` chunks attempted for one logical call.
+    pub logs_max_chunks_per_call: u64,
+}
+
+impl RpcControlExecutorTuning {
+    /// Creates explicit executor tuning for the inner `evm` transport.
+    pub fn new(
+        logs_max_block_span: u64,
+        logs_min_block_span: u64,
+        logs_max_chunks_per_call: u64,
+    ) -> Self {
+        Self {
+            logs_max_block_span,
+            logs_min_block_span,
+            logs_max_chunks_per_call,
+        }
+    }
+}
+
+impl Default for RpcControlExecutorTuning {
+    fn default() -> Self {
+        Self {
+            logs_max_block_span: 2_000,
+            logs_min_block_span: 64,
+            logs_max_chunks_per_call: 256,
+        }
+    }
+}
 
 fn info(
     code: &'static str,
@@ -89,6 +137,29 @@ fn io_from_storage(err: StorageError) -> IoError {
         StorageError::Corruption(info) => IoError::Other(info),
         StorageError::Other(info) => IoError::Other(info),
     }
+}
+
+fn io_projection_invalid(
+    code: &'static str,
+    stream_id: &str,
+    err: impl std::fmt::Display,
+) -> IoError {
+    io_other(
+        code,
+        ErrorCategory::Storage,
+        false,
+        format!("invalid control-plane projection for `{stream_id}`: {err}"),
+    )
+}
+
+fn io_control_plane_concurrency(info: ErrorInfo) -> IoError {
+    IoError::Other(ErrorInfo {
+        code: ErrorCode("control_plane_concurrency".to_string()),
+        category: info.category,
+        retryable: info.retryable,
+        message: info.message,
+        details: info.details,
+    })
 }
 
 fn io_error_code(err: &IoError) -> String {
@@ -174,6 +245,260 @@ pub struct RpcControlBootstrapSource {
 struct BootstrapCatalog {
     sources: Vec<RpcControlBootstrapSource>,
     preferred_order: Vec<String>,
+}
+
+#[derive(Clone)]
+struct StreamBackedControlPlaneStore {
+    streams: Arc<dyn StreamStore>,
+}
+
+impl StreamBackedControlPlaneStore {
+    fn new(streams: Arc<dyn StreamStore>) -> Self {
+        Self { streams }
+    }
+
+    async fn read_all_records(
+        &self,
+        stream_id: &mfm_machine::stores::StreamId,
+    ) -> Result<Option<Vec<mfm_machine::stores::StreamRecord>>, IoError> {
+        let head_seq = match self.streams.head_seq(stream_id).await {
+            Ok(head_seq) => head_seq,
+            Err(StorageError::NotFound(_)) => return Ok(None),
+            Err(err) => return Err(io_from_storage(err)),
+        };
+        if head_seq == 0 {
+            return Ok(None);
+        }
+        self.streams
+            .read_range(stream_id, 1, Some(head_seq))
+            .await
+            .map(Some)
+            .map_err(io_from_storage)
+    }
+
+    async fn rpc_source_state(
+        &self,
+        source_ref: &RpcSourceRef,
+    ) -> Result<Option<RpcSourceState>, IoError> {
+        let stream_id = source_ref.stream_id();
+        let Some(records) = self.read_all_records(&stream_id).await? else {
+            return Ok(None);
+        };
+        rebuild_rpc_source_state(source_ref.clone(), &records)
+            .map(Some)
+            .map_err(|err| {
+                io_projection_invalid("control_plane_projection_invalid", stream_id.as_str(), err)
+            })
+    }
+
+    async fn append_rpc_source_records(
+        &self,
+        source_ref: &RpcSourceRef,
+        expected_seq: u64,
+        records: Vec<RpcSourceRecord>,
+    ) -> Result<RpcSourceState, IoError> {
+        if records.is_empty() {
+            return Err(io_other(
+                "control_plane_append_invalid",
+                ErrorCategory::Storage,
+                false,
+                "rpc_source append must include at least one record",
+            ));
+        }
+
+        let stream_id = source_ref.stream_id();
+        let encoded_records = records
+            .iter()
+            .map(RpcSourceRecord::to_new_stream_record)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io_from_storage)?;
+        let head_seq = self
+            .streams
+            .append(StreamAppend::new(
+                stream_id.clone(),
+                expected_seq,
+                encoded_records,
+            ))
+            .await
+            .map_err(|err| match err {
+                StorageError::Concurrency(info) => io_control_plane_concurrency(info),
+                other => io_from_storage(other),
+            })?;
+        let records = self
+            .streams
+            .read_range(&stream_id, 1, Some(head_seq))
+            .await
+            .map_err(io_from_storage)?;
+        rebuild_rpc_source_state(source_ref.clone(), &records).map_err(|err| {
+            io_projection_invalid("control_plane_projection_invalid", stream_id.as_str(), err)
+        })
+    }
+
+    async fn source_pool_state(
+        &self,
+        pool_ref: &SourcePoolRef,
+    ) -> Result<Option<SourcePoolState>, IoError> {
+        let stream_id = pool_ref.stream_id();
+        let Some(records) = self.read_all_records(&stream_id).await? else {
+            return Ok(None);
+        };
+        rebuild_source_pool_state(pool_ref.clone(), &records)
+            .map(Some)
+            .map_err(|err| {
+                io_projection_invalid("control_plane_projection_invalid", stream_id.as_str(), err)
+            })
+    }
+
+    async fn append_source_pool_records(
+        &self,
+        pool_ref: &SourcePoolRef,
+        expected_seq: u64,
+        records: Vec<SourcePoolRecord>,
+    ) -> Result<SourcePoolState, IoError> {
+        if records.is_empty() {
+            return Err(io_other(
+                "control_plane_append_invalid",
+                ErrorCategory::Storage,
+                false,
+                "source_pool append must include at least one record",
+            ));
+        }
+
+        let stream_id = pool_ref.stream_id();
+        let encoded_records = records
+            .iter()
+            .map(SourcePoolRecord::to_new_stream_record)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io_from_storage)?;
+        let head_seq = self
+            .streams
+            .append(StreamAppend::new(
+                stream_id.clone(),
+                expected_seq,
+                encoded_records,
+            ))
+            .await
+            .map_err(|err| match err {
+                StorageError::Concurrency(info) => io_control_plane_concurrency(info),
+                other => io_from_storage(other),
+            })?;
+        let records = self
+            .streams
+            .read_range(&stream_id, 1, Some(head_seq))
+            .await
+            .map_err(io_from_storage)?;
+        rebuild_source_pool_state(pool_ref.clone(), &records).map_err(|err| {
+            io_projection_invalid("control_plane_projection_invalid", stream_id.as_str(), err)
+        })
+    }
+}
+
+enum ControlPlaneStore {
+    PostgresEnv {
+        store: Option<ControlPlanePostgresStore>,
+    },
+    StreamBacked(StreamBackedControlPlaneStore),
+}
+
+impl ControlPlaneStore {
+    fn from_mode(mode: RpcControlPlaneStorageMode, streams: Arc<dyn StreamStore>) -> Self {
+        match mode {
+            RpcControlPlaneStorageMode::PostgresEnv => Self::PostgresEnv { store: None },
+            RpcControlPlaneStorageMode::StreamStore => {
+                Self::StreamBacked(StreamBackedControlPlaneStore::new(streams))
+            }
+        }
+    }
+
+    async fn rpc_source_state(
+        &mut self,
+        source_ref: &RpcSourceRef,
+    ) -> Result<Option<RpcSourceState>, IoError> {
+        match self {
+            ControlPlaneStore::PostgresEnv { store } => {
+                let store = ensure_postgres_control_plane_store(store).await?;
+                store
+                    .rpc_source_state(source_ref)
+                    .await
+                    .map_err(io_from_storage)
+            }
+            ControlPlaneStore::StreamBacked(store) => store.rpc_source_state(source_ref).await,
+        }
+    }
+
+    async fn append_rpc_source_records(
+        &mut self,
+        source_ref: &RpcSourceRef,
+        expected_seq: u64,
+        records: Vec<RpcSourceRecord>,
+    ) -> Result<RpcSourceState, IoError> {
+        match self {
+            ControlPlaneStore::PostgresEnv { store } => {
+                let store = ensure_postgres_control_plane_store(store).await?;
+                store
+                    .append_rpc_source_records(source_ref, expected_seq, records)
+                    .await
+                    .map_err(io_from_storage)
+            }
+            ControlPlaneStore::StreamBacked(store) => {
+                store
+                    .append_rpc_source_records(source_ref, expected_seq, records)
+                    .await
+            }
+        }
+    }
+
+    async fn source_pool_state(
+        &mut self,
+        pool_ref: &SourcePoolRef,
+    ) -> Result<Option<SourcePoolState>, IoError> {
+        match self {
+            ControlPlaneStore::PostgresEnv { store } => {
+                let store = ensure_postgres_control_plane_store(store).await?;
+                store
+                    .source_pool_state(pool_ref)
+                    .await
+                    .map_err(io_from_storage)
+            }
+            ControlPlaneStore::StreamBacked(store) => store.source_pool_state(pool_ref).await,
+        }
+    }
+
+    async fn append_source_pool_records(
+        &mut self,
+        pool_ref: &SourcePoolRef,
+        expected_seq: u64,
+        records: Vec<SourcePoolRecord>,
+    ) -> Result<SourcePoolState, IoError> {
+        match self {
+            ControlPlaneStore::PostgresEnv { store } => {
+                let store = ensure_postgres_control_plane_store(store).await?;
+                store
+                    .append_source_pool_records(pool_ref, expected_seq, records)
+                    .await
+                    .map_err(io_from_storage)
+            }
+            ControlPlaneStore::StreamBacked(store) => {
+                store
+                    .append_source_pool_records(pool_ref, expected_seq, records)
+                    .await
+            }
+        }
+    }
+}
+
+async fn ensure_postgres_control_plane_store(
+    store: &mut Option<ControlPlanePostgresStore>,
+) -> Result<ControlPlanePostgresStore, IoError> {
+    if let Some(store) = store {
+        return Ok(store.clone());
+    }
+
+    let connected = ControlPlanePostgresStore::connect_env()
+        .await
+        .map_err(io_from_storage)?;
+    *store = Some(connected.clone());
+    Ok(connected)
 }
 
 /// Validation errors for the bootstrap `rpc.control` source catalog.
@@ -335,7 +660,10 @@ fn resolve_bootstrap_catalog_from_env() -> BootstrapCatalog {
     }
 }
 
-fn inner_executor_config(catalog: &BootstrapCatalog) -> EvmJsonRpcHttpConfig {
+fn inner_executor_config(
+    catalog: &BootstrapCatalog,
+    tuning: RpcControlExecutorTuning,
+) -> EvmJsonRpcHttpConfig {
     let sources = catalog
         .sources
         .iter()
@@ -353,6 +681,9 @@ fn inner_executor_config(catalog: &BootstrapCatalog) -> EvmJsonRpcHttpConfig {
         preferred_order: catalog.preferred_order.clone(),
         strategy: EvmRoutingStrategy::Failover,
         unhealthy_cooldown_calls: 0,
+        logs_max_block_span: tuning.logs_max_block_span,
+        logs_min_block_span: tuning.logs_min_block_span,
+        logs_max_chunks_per_call: tuning.logs_max_chunks_per_call,
         ..EvmJsonRpcHttpConfig::default()
     }
 }
@@ -362,6 +693,8 @@ fn inner_executor_config(catalog: &BootstrapCatalog) -> EvmJsonRpcHttpConfig {
 pub struct RpcControlTransportFactory {
     catalog: BootstrapCatalog,
     config_error: Option<RpcControlConfigError>,
+    control_plane_storage_mode: RpcControlPlaneStorageMode,
+    executor_tuning: RpcControlExecutorTuning,
 }
 
 impl RpcControlTransportFactory {
@@ -376,6 +709,8 @@ impl RpcControlTransportFactory {
         Self {
             catalog,
             config_error,
+            control_plane_storage_mode: RpcControlPlaneStorageMode::default(),
+            executor_tuning: RpcControlExecutorTuning::default(),
         }
     }
 
@@ -386,7 +721,21 @@ impl RpcControlTransportFactory {
         Self {
             catalog,
             config_error,
+            control_plane_storage_mode: RpcControlPlaneStorageMode::default(),
+            executor_tuning: RpcControlExecutorTuning::default(),
         }
+    }
+
+    /// Returns a copy of the factory configured to use `mode` for control-plane persistence.
+    pub fn with_control_plane_storage_mode(mut self, mode: RpcControlPlaneStorageMode) -> Self {
+        self.control_plane_storage_mode = mode;
+        self
+    }
+
+    /// Returns a copy of the factory configured with explicit inner-executor tuning.
+    pub fn with_executor_tuning(mut self, tuning: RpcControlExecutorTuning) -> Self {
+        self.executor_tuning = tuning;
+        self
     }
 }
 
@@ -402,9 +751,17 @@ impl LiveIoTransportFactory for RpcControlTransportFactory {
     }
 
     fn make(&self, env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
+        let control_plane_store = ControlPlaneStore::from_mode(
+            self.control_plane_storage_mode,
+            Arc::clone(&env.stores.streams),
+        );
         let executor = if self.config_error.is_none() {
             Some(
-                EvmJsonRpcHttpTransportFactory::new(inner_executor_config(&self.catalog)).make(env),
+                EvmJsonRpcHttpTransportFactory::new(inner_executor_config(
+                    &self.catalog,
+                    self.executor_tuning,
+                ))
+                .make(env),
             )
         } else {
             None
@@ -412,7 +769,7 @@ impl LiveIoTransportFactory for RpcControlTransportFactory {
 
         Box::new(RpcControlTransport {
             executor,
-            store: None,
+            control_plane_store,
             catalog: self.catalog.clone(),
             config_error: self.config_error.clone(),
         })
@@ -421,7 +778,7 @@ impl LiveIoTransportFactory for RpcControlTransportFactory {
 
 struct RpcControlTransport {
     executor: Option<Box<dyn LiveIoTransport>>,
-    store: Option<ControlPlanePostgresStore>,
+    control_plane_store: ControlPlaneStore,
     catalog: BootstrapCatalog,
     config_error: Option<RpcControlConfigError>,
 }
@@ -434,18 +791,6 @@ struct RankedSource {
 }
 
 impl RpcControlTransport {
-    async fn ensure_store(&mut self) -> Result<ControlPlanePostgresStore, IoError> {
-        if let Some(store) = &self.store {
-            return Ok(store.clone());
-        }
-
-        let store = ControlPlanePostgresStore::connect_env()
-            .await
-            .map_err(io_from_storage)?;
-        self.store = Some(store.clone());
-        Ok(store)
-    }
-
     fn ensure_executor(&mut self) -> Result<&mut (dyn LiveIoTransport + '_), IoError> {
         match &self.config_error {
             Some(err) => Err(io_transport(
@@ -617,22 +962,24 @@ impl RpcControlTransport {
         source_ref: &RpcSourceRef,
         records: Vec<RpcSourceRecord>,
     ) -> Result<RpcSourceState, IoError> {
-        let store = self.ensure_store().await?;
         let mut last_err = None;
         for _ in 0..3 {
-            let expected_seq = store
+            let expected_seq = self
+                .control_plane_store
                 .rpc_source_state(source_ref)
-                .await
-                .map_err(io_from_storage)?
+                .await?
                 .map(|state| state.head_seq)
                 .unwrap_or(0);
-            match store
+            match self
+                .control_plane_store
                 .append_rpc_source_records(source_ref, expected_seq, records.clone())
                 .await
             {
                 Ok(state) => return Ok(state),
-                Err(StorageError::Concurrency(info)) => last_err = Some(IoError::Other(info)),
-                Err(err) => return Err(io_from_storage(err)),
+                Err(IoError::Other(info)) if info.code.0 == "control_plane_concurrency" => {
+                    last_err = Some(IoError::Other(info))
+                }
+                Err(err) => return Err(err),
             }
         }
 
@@ -651,22 +998,24 @@ impl RpcControlTransport {
         pool_ref: &SourcePoolRef,
         records: Vec<SourcePoolRecord>,
     ) -> Result<SourcePoolState, IoError> {
-        let store = self.ensure_store().await?;
         let mut last_err = None;
         for _ in 0..3 {
-            let expected_seq = store
+            let expected_seq = self
+                .control_plane_store
                 .source_pool_state(pool_ref)
-                .await
-                .map_err(io_from_storage)?
+                .await?
                 .map(|state| state.head_seq)
                 .unwrap_or(0);
-            match store
+            match self
+                .control_plane_store
                 .append_source_pool_records(pool_ref, expected_seq, records.clone())
                 .await
             {
                 Ok(state) => return Ok(state),
-                Err(StorageError::Concurrency(info)) => last_err = Some(IoError::Other(info)),
-                Err(err) => return Err(io_from_storage(err)),
+                Err(IoError::Other(info)) if info.code.0 == "control_plane_concurrency" => {
+                    last_err = Some(IoError::Other(info))
+                }
+                Err(err) => return Err(err),
             }
         }
 
@@ -965,11 +1314,10 @@ impl RpcControlTransport {
             )
         })?;
 
-        let store = self.ensure_store().await?;
-        let current_pool = store
+        let current_pool = self
+            .control_plane_store
             .source_pool_state(&pool_ref)
-            .await
-            .map_err(io_from_storage)?;
+            .await?;
         if current_pool
             .as_ref()
             .map(|state| state.member_source_ids.as_slice())
@@ -999,10 +1347,10 @@ impl RpcControlTransport {
                         err.to_string(),
                     )
                 })?;
-            let existing = store
+            let existing = self
+                .control_plane_store
                 .rpc_source_state(&source_ref)
-                .await
-                .map_err(io_from_storage)?;
+                .await?;
             let state = if self.needs_probe(source, existing.as_ref(), current_ms) {
                 self.probe_source(network_scope, source).await?
             } else {
@@ -1016,10 +1364,10 @@ impl RpcControlTransport {
             .iter()
             .map(|entry| entry.source.id.clone())
             .collect::<Vec<_>>();
-        let current_pool = store
+        let current_pool = self
+            .control_plane_store
             .source_pool_state(&pool_ref)
-            .await
-            .map_err(io_from_storage)?;
+            .await?;
         if current_pool
             .as_ref()
             .map(|state| state.ranked_source_ids.as_slice())
@@ -1211,7 +1559,7 @@ mod tests {
         let preferred_order = sources.iter().map(|source| source.id.clone()).collect();
         RpcControlTransport {
             executor: None,
-            store: None,
+            control_plane_store: ControlPlaneStore::PostgresEnv { store: None },
             catalog: BootstrapCatalog {
                 sources,
                 preferred_order,
