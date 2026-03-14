@@ -6,10 +6,10 @@ use std::sync::Arc;
 use crate::commands::result::CommandError;
 use clap::Args;
 use mfm_artifact_store_fs::FsArtifactStore;
-use mfm_event_store_mem::MemEventStore;
-use mfm_event_store_postgres::PostgresEventStore;
 use mfm_machine::engine::Stores;
 use mfm_machine::stores::{ArtifactStore, StreamStore};
+use mfm_stream_store_mem::MemStreamStore;
+use mfm_stream_store_postgres::PostgresStreamStore;
 
 /// Shared store selection arguments for commands that access persisted runs.
 #[derive(Args, Debug, Clone)]
@@ -18,7 +18,7 @@ pub(crate) struct RunStoresArgs {
     #[arg(long)]
     pub(crate) artifact_root: Option<PathBuf>,
 
-    /// PostgreSQL connection string for the event store (default: $DATABASE_URL)
+    /// PostgreSQL connection string for the stream store (default: $DATABASE_URL)
     #[arg(long)]
     pub(crate) database_url: Option<String>,
 }
@@ -29,7 +29,7 @@ pub(crate) fn make_artifact_store(artifact_root: Option<PathBuf>) -> Arc<dyn Art
     Arc::new(FsArtifactStore::new(artifact_root))
 }
 
-async fn make_event_store(
+async fn make_stream_store(
     database_url: Option<String>,
 ) -> Result<Arc<dyn StreamStore>, CommandError> {
     let database_url = match database_url.or_else(|| std::env::var("DATABASE_URL").ok()) {
@@ -42,7 +42,7 @@ async fn make_event_store(
         }
     };
 
-    let store = PostgresEventStore::connect(&database_url)
+    let store = PostgresStreamStore::connect(&database_url)
         .await
         .map_err(|e| match e {
             mfm_machine::errors::StorageError::Concurrency(info)
@@ -56,27 +56,21 @@ async fn make_event_store(
     Ok(Arc::new(store))
 }
 
-/// Builds the persistent event and artifact stores selected by CLI arguments.
+/// Builds the persistent stream and artifact stores selected by CLI arguments.
 pub(crate) async fn make_stores(
     artifact_root: Option<PathBuf>,
     database_url: Option<String>,
 ) -> Result<Stores, CommandError> {
     let artifacts = make_artifact_store(artifact_root);
-    let events = make_event_store(database_url).await?;
+    let streams = make_stream_store(database_url).await?;
 
-    Ok(Stores {
-        streams: events,
-        artifacts,
-    })
+    Ok(Stores { streams, artifacts })
 }
 
-/// Builds in-memory event storage with the standard artifact store for ephemeral commands.
+/// Builds in-memory stream storage with the standard artifact store for ephemeral commands.
 pub(crate) fn make_ephemeral_stores(artifact_root: Option<PathBuf>) -> Stores {
     let artifacts = make_artifact_store(artifact_root);
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
 
-    Stores {
-        streams: events,
-        artifacts,
-    }
+    Stores { streams, artifacts }
 }

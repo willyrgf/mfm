@@ -13,7 +13,6 @@ use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_collectors_evm_jsonrpc_http::{
     EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmSourceKind,
 };
-use mfm_event_store_postgres::PostgresEventStore;
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
     RetryPolicy, RunConfig,
@@ -29,6 +28,7 @@ use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::DefaultRunLauncher;
+use mfm_stream_store_postgres::PostgresStreamStore;
 
 #[derive(Default)]
 struct MapContext {
@@ -234,7 +234,7 @@ fn contract_artifact_program_path_mock_erc20() -> String {
 
 async fn rpc_call(
     rpc_url: &str,
-    events: Arc<dyn StreamStore>,
+    streams: Arc<dyn StreamStore>,
     artifacts: Arc<dyn ArtifactStore>,
     method: &str,
     params: serde_json::Value,
@@ -251,10 +251,7 @@ async fn rpc_call(
         ..EvmJsonRpcHttpConfig::default()
     });
     let env = LiveIoEnv {
-        stores: Stores {
-            streams: events,
-            artifacts,
-        },
+        stores: Stores { streams, artifacts },
         run_id: RunId(uuid::Uuid::new_v4()),
         state_id: StateId::must_new("rpc.helper.call".to_string()),
         attempt: 0,
@@ -279,10 +276,10 @@ async fn rpc_call(
         })
 }
 
-async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> PostgresEventStore {
+async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> PostgresStreamStore {
     let mut last_err: Option<mfm_machine::errors::StorageError> = None;
     for _ in 0..max_attempts {
-        match PostgresEventStore::connect_env().await {
+        match PostgresStreamStore::connect_env().await {
             Ok(pg) => return pg,
             Err(err) => {
                 last_err = Some(err);
@@ -304,7 +301,7 @@ const RETH_DEV_ACCOUNT0_PRIVATE_KEY: &str =
 #[tokio::test]
 async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
     let pg = connect_postgres_with_retry(20, 250).await;
-    let events: Arc<dyn StreamStore> = Arc::new(pg);
+    let streams: Arc<dyn StreamStore> = Arc::new(pg);
 
     let s3 = S3ArtifactStore::from_env().expect("s3 config");
     s3.ensure_bucket_exists().await.expect("bucket exists");
@@ -314,7 +311,7 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
 
     let accounts = rpc_call(
         &rpc_url,
-        Arc::clone(&events),
+        Arc::clone(&streams),
         Arc::clone(&artifacts),
         "eth_accounts",
         serde_json::json!([]),
@@ -334,7 +331,7 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
 
     let chain_id_hex = rpc_call(
         &rpc_url,
-        Arc::clone(&events),
+        Arc::clone(&streams),
         Arc::clone(&artifacts),
         "eth_chainId",
         serde_json::json!([]),
@@ -408,7 +405,7 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
         .start_pipeline(
             Arc::clone(&bundle.engine),
             Stores {
-                streams: Arc::clone(&events),
+                streams: Arc::clone(&streams),
                 artifacts: Arc::clone(&artifacts),
             },
             Arc::clone(&bundle.registry),
@@ -450,7 +447,7 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
     // 2) Run `portfolio.snapshot` feature end-to-end (REST feature execution path).
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events: Arc::clone(&events),
+        streams: Arc::clone(&streams),
         artifacts: Arc::clone(&artifacts),
     });
 

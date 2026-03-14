@@ -218,20 +218,20 @@ docs_policy = "repo-only"
 umbrella_policy = "always"
 
 [[packages]]
-name = "mfm-event-store-mem"
-workspace_path = "crates/storages/event-store-mem"
+name = "mfm-stream-store-mem"
+workspace_path = "crates/storages/stream-store-mem"
 visibility = "public"
 section = "storages"
-summary = "In-memory event store."
+summary = "In-memory stream store."
 docs_policy = "repo-only"
 umbrella_policy = "always"
 
 [[packages]]
-name = "mfm-event-store-postgres"
-workspace_path = "crates/storages/event-store-postgres"
+name = "mfm-stream-store-postgres"
+workspace_path = "crates/storages/stream-store-postgres"
 visibility = "public"
 section = "storages"
-summary = "PostgreSQL event store."
+summary = "PostgreSQL stream store."
 docs_policy = "repo-only"
 umbrella_policy = "always"
 

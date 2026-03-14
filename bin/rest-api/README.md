@@ -1,6 +1,6 @@
 # MFM REST API Documentation
 
-Experimental REST API (Axum) for starting/resuming runs and inspecting run events/artifacts.
+Experimental REST API (Axum) for starting/resuming runs and inspecting run stream records/artifacts.
 
 ## Running (Nixfied)
 
@@ -17,7 +17,7 @@ nix run .#mfm_rest_api
 Environment variables:
 
 - `MFM_REST_API_ADDR`: bind address (default: `127.0.0.1:3001`)
-- `DATABASE_URL`: Postgres URL for the event store (required)
+- `DATABASE_URL`: Postgres URL for the stream store (required)
 - `MFM_ARTIFACT_BACKEND`: `fs` (default) or `s3`
 - `MFM_ARTIFACT_ROOT`: artifact root dir when using `fs` (default: `~/.mfm/run_artifacts`)
 - `MFM_S3_ENSURE_BUCKET`: if set (any value), ensure the S3 bucket exists on startup
@@ -57,7 +57,7 @@ Endpoints:
 - `POST /v1/runs/start`
 - `POST /v1/runs/:run_id/resume`
 - `GET /v1/runs/:run_id/status`
-- `GET /v1/runs/:run_id/events?from_seq=1&to_seq=<optional>`
+- `GET /v1/runs/:run_id/stream?from_seq=1&to_seq=<optional>`
 - `GET /v1/artifacts/:artifact_id`
 
 `namespace="evm"` routing notes:
@@ -69,7 +69,7 @@ Endpoints:
 Probe semantics:
 
 - `/v1/health`: liveness only (process is running)
-- `/v1/ready`: readiness (event store + artifact store probes must succeed)
+- `/v1/ready`: readiness (stream store + artifact store probes must succeed)
 
 Start a run:
 

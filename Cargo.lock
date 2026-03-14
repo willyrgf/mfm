@@ -1887,8 +1887,6 @@ dependencies = [
  "hex",
  "mfm-app",
  "mfm-artifact-store-fs",
- "mfm-event-store-mem",
- "mfm-event-store-postgres",
  "mfm-machine",
  "mfm-op-keystore-admin",
  "mfm-op-keystore-shim",
@@ -1896,6 +1894,8 @@ dependencies = [
  "mfm-sdk",
  "mfm-state-portfolio",
  "mfm-state-symbol",
+ "mfm-stream-store-mem",
+ "mfm-stream-store-postgres",
  "predicates",
  "rand 0.9.1",
  "reqwest",
@@ -1916,7 +1916,6 @@ dependencies = [
  "mfm-artifact-store-s3",
  "mfm-collectors-evm-jsonrpc-http",
  "mfm-collectors-nix-exec",
- "mfm-event-store-postgres",
  "mfm-machine",
  "mfm-op-aave-v3-origin-adapt",
  "mfm-op-evm-deploy-configure-validate",
@@ -1930,6 +1929,7 @@ dependencies = [
  "mfm-sdk",
  "mfm-state-portfolio",
  "mfm-state-symbol",
+ "mfm-stream-store-postgres",
  "mfm-transports-local-evm",
  "mfm-transports-local-fs",
  "mfm-transports-local-keystore",
@@ -2065,28 +2065,6 @@ name = "mfm-docs"
 version = "0.1.0"
 
 [[package]]
-name = "mfm-event-store-mem"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "mfm-machine",
- "mfm-machine-test-support",
- "tokio",
-]
-
-[[package]]
-name = "mfm-event-store-postgres"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "mfm-machine",
- "serde_json",
- "tokio",
- "tokio-postgres",
- "tracing",
-]
-
-[[package]]
 name = "mfm-evm-core"
 version = "0.1.0"
 dependencies = [
@@ -2129,12 +2107,12 @@ dependencies = [
  "mfm-artifact-store-fs",
  "mfm-artifact-store-s3",
  "mfm-collectors-evm-jsonrpc-http",
- "mfm-event-store-mem",
- "mfm-event-store-postgres",
  "mfm-machine",
  "mfm-machine-test-support",
  "mfm-rest-api",
  "mfm-sdk",
+ "mfm-stream-store-mem",
+ "mfm-stream-store-postgres",
  "serde",
  "serde_json",
  "tempfile",
@@ -2477,6 +2455,28 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "mfm-stream-store-mem"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-machine",
+ "mfm-machine-test-support",
+ "tokio",
+]
+
+[[package]]
+name = "mfm-stream-store-postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-machine",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
 ]
 
 [[package]]

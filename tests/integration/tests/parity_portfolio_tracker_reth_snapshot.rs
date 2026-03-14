@@ -11,12 +11,12 @@ use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_collectors_evm_jsonrpc_http::{
     EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmSourceKind,
 };
-use mfm_event_store_mem::MemEventStore;
 use mfm_machine::engine::Stores;
 use mfm_machine::ids::{RunId, StateId};
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransportFactory};
 use mfm_machine::stores::{ArtifactStore, StreamStore};
+use mfm_stream_store_mem::MemStreamStore;
 
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
     let s = serde_json::to_string(&body).expect("json request must serialize");
@@ -118,7 +118,7 @@ fn parse_u64_hex(s: &str) -> u64 {
 }
 
 async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> serde_json::Value {
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(tmp.path()));
 
@@ -134,10 +134,7 @@ async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> ser
         ..EvmJsonRpcHttpConfig::default()
     });
     let mut t = factory.make(LiveIoEnv {
-        stores: Stores {
-            streams: events,
-            artifacts,
-        },
+        stores: Stores { streams, artifacts },
         run_id: RunId(uuid::Uuid::new_v4()),
         state_id: StateId::must_new("parity.main.rpc".to_string()),
         attempt: 0,
@@ -168,7 +165,7 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
         .map(parse_u64_hex)
         .expect("eth_chainId hex");
 
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(tmp.path()));
 
@@ -179,7 +176,7 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events: Arc::clone(&events),
+        streams: Arc::clone(&streams),
         artifacts: Arc::clone(&artifacts),
     });
 

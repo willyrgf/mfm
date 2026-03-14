@@ -12,7 +12,7 @@
 //! async fn build_router() -> Result<axum::Router, mfm_rest_api::ApiError> {
 //!     let state = AppState {
 //!         bundle: mfm_rest_api::make_engine_bundle(),
-//!         events: mfm_rest_api::make_default_event_store().await?,
+//!         streams: mfm_rest_api::make_default_stream_store().await?,
 //!         artifacts: mfm_rest_api::make_default_artifact_store().await?,
 //!     };
 //!     Ok(make_app(state))
@@ -29,7 +29,7 @@ use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
     AppError, AppServices, EngineBundle, ErrorClass, FeatureCatalog, FeatureRequest,
-    RunsEventsQuery, RunsStartRequest,
+    RunsStartRequest, RunsStreamQuery,
 };
 use mfm_machine::ids::{ArtifactId, RunId};
 use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
@@ -133,9 +133,9 @@ pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, Api
         .map_err(Into::into)
 }
 
-/// Builds the default event store used by the REST API.
-pub async fn make_default_event_store() -> Result<Arc<dyn StreamStore>, ApiError> {
-    mfm_app::make_default_event_store()
+/// Builds the default stream store used by the REST API.
+pub async fn make_default_stream_store() -> Result<Arc<dyn StreamStore>, ApiError> {
+    mfm_app::make_default_stream_store()
         .await
         .map_err(Into::into)
 }
@@ -150,8 +150,8 @@ pub fn make_engine_bundle() -> EngineBundle {
 pub struct AppState {
     /// Engine bundle used for planning and execution.
     pub bundle: EngineBundle,
-    /// Event store used for run queries.
-    pub events: Arc<dyn StreamStore>,
+    /// Stream store used for run queries.
+    pub streams: Arc<dyn StreamStore>,
     /// Artifact store used for snapshot and output retrieval.
     pub artifacts: Arc<dyn ArtifactStore>,
 }
@@ -166,7 +166,7 @@ impl RouterState {
     fn services(&self) -> AppServices {
         AppServices::new(
             self.app.bundle.clone(),
-            Arc::clone(&self.app.events),
+            Arc::clone(&self.app.streams),
             Arc::clone(&self.app.artifacts),
         )
     }
@@ -190,7 +190,7 @@ pub fn make_app(state: AppState) -> Router {
         .route("/v1/runs/start", post(runs_start))
         .route("/v1/runs/:run_id/resume", post(runs_resume))
         .route("/v1/runs/:run_id/status", get(runs_status))
-        .route("/v1/runs/:run_id/events", get(runs_events))
+        .route("/v1/runs/:run_id/stream", get(runs_stream))
         .route("/v1/artifacts/:artifact_id", get(artifacts_get))
         .fallback(not_found)
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
@@ -239,17 +239,17 @@ async fn health() -> Json<serde_json::Value> {
 
 #[instrument(level = "debug", skip(state))]
 async fn ready(State(state): State<RouterState>) -> Result<Json<serde_json::Value>, ApiError> {
-    // Liveness probe for the event store.
+    // Liveness probe for the stream store.
     state
         .app
-        .events
+        .streams
         .head_seq(&StreamId::run(RunId(uuid::Uuid::nil())))
         .await
         .map_err(|_| {
             ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "NotReady",
-                "event store is not ready",
+                "stream store is not ready",
             )
         })?;
 
@@ -272,7 +272,7 @@ async fn ready(State(state): State<RouterState>) -> Result<Json<serde_json::Valu
     Ok(Json(ok(json!({
       "ok": true,
       "checks": {
-        "event_store": "ready",
+        "stream_store": "ready",
         "artifact_store": "ready"
       }
     }))))
@@ -318,12 +318,12 @@ async fn runs_status(
     skip(state, query),
     fields(run_id = run_id.as_str(), from_seq = query.from_seq, to_seq = ?query.to_seq)
 )]
-async fn runs_events(
+async fn runs_stream(
     State(state): State<RouterState>,
     Path(run_id): Path<String>,
-    Query(query): Query<RunsEventsQuery>,
+    Query(query): Query<RunsStreamQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let data = state.services().run_events(&run_id, query).await?;
+    let data = state.services().run_stream(&run_id, query).await?;
 
     json_ok(data)
 }

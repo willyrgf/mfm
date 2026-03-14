@@ -9,14 +9,14 @@
 //!
 //! ```no_run
 //! use mfm_app::{
-//!     make_default_artifact_store, make_default_event_store, make_engine_bundle, AppServices,
+//!     make_default_artifact_store, make_default_stream_store, make_engine_bundle, AppServices,
 //! };
 //!
 //! async fn boot() -> Result<AppServices, mfm_app::AppError> {
 //!     let bundle = make_engine_bundle();
-//!     let events = make_default_event_store().await?;
+//!     let streams = make_default_stream_store().await?;
 //!     let artifacts = make_default_artifact_store().await?;
-//!     Ok(AppServices::new(bundle, events, artifacts))
+//!     Ok(AppServices::new(bundle, streams, artifacts))
 //! }
 //! ```
 /// Shared observability configuration used by the CLI and REST API.
@@ -37,7 +37,6 @@ use mfm_collectors_evm_jsonrpc_http::{
     resolve_evm_rpc_sources_from_env, EvmJsonRpcHttpTransportFactory,
 };
 use mfm_collectors_nix_exec::NixFlakeTransportFactory;
-use mfm_event_store_postgres::PostgresEventStore;
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
     RetryPolicy, RunConfig,
@@ -54,7 +53,7 @@ use mfm_machine::live_io::LiveIoTransportFactory;
 use mfm_machine::live_io_registry::{HashMapTransportRegistry, TransportRegistry};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
-use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
+use mfm_machine::stores::{ArtifactStore, StreamId, StreamRecord, StreamStore};
 use mfm_op_aave_v3_origin_adapt::AaveV3OriginAdaptDeployOp;
 use mfm_op_evm_deploy_configure_validate::{
     EvmDeployConfigureValidateOp, EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID,
@@ -80,6 +79,7 @@ use mfm_sdk::unstable::{
 };
 use mfm_state_portfolio::model::{validate_portfolio_bundle, PortfolioReport};
 use mfm_state_symbol::model::ValuationSourceRegistry;
+use mfm_stream_store_postgres::PostgresStreamStore;
 use mfm_transports_local_evm::LocalEvmIoTransportFactory;
 use mfm_transports_local_fs::LocalFsIoTransportFactory;
 use mfm_transports_local_keystore::LocalKeystoreIoTransportFactory;
@@ -194,16 +194,25 @@ async fn run_stream_head(store: &dyn StreamStore, run_id: RunId) -> Result<u64, 
         .map_err(app_error_from_storage_error)
 }
 
-async fn read_run_events(
+async fn read_run_stream_records(
+    store: &dyn StreamStore,
+    run_id: RunId,
+    from_seq: u64,
+    to_seq: Option<u64>,
+) -> Result<Vec<StreamRecord>, AppError> {
+    store
+        .read_range(&run_stream_id(run_id), from_seq, to_seq)
+        .await
+        .map_err(app_error_from_storage_error)
+}
+
+async fn read_run_stream_events(
     store: &dyn StreamStore,
     run_id: RunId,
     from_seq: u64,
     to_seq: Option<u64>,
 ) -> Result<Vec<EventEnvelope>, AppError> {
-    let records = store
-        .read_range(&run_stream_id(run_id), from_seq, to_seq)
-        .await
-        .map_err(app_error_from_storage_error)?;
+    let records = read_run_stream_records(store, run_id, from_seq, to_seq).await?;
     event_envelopes_from_stream_records(run_id, records).map_err(app_error_from_storage_error)
 }
 
@@ -365,10 +374,10 @@ pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, App
     }
 }
 
-/// Builds the default event store from environment configuration.
+/// Builds the default stream store from environment configuration.
 #[instrument(level = "info", skip_all)]
 #[allow(clippy::disallowed_methods)]
-pub async fn make_default_event_store() -> Result<Arc<dyn StreamStore>, AppError> {
+pub async fn make_default_stream_store() -> Result<Arc<dyn StreamStore>, AppError> {
     let database_url = std::env::var(ENV_DATABASE_URL).map_err(|_| {
         AppError::new(
             ErrorClass::Internal,
@@ -377,8 +386,11 @@ pub async fn make_default_event_store() -> Result<Arc<dyn StreamStore>, AppError
         )
     })?;
 
-    info!(database_url_set = true, "initializing postgres event store");
-    let store = PostgresEventStore::connect(&database_url)
+    info!(
+        database_url_set = true,
+        "initializing postgres stream store"
+    );
+    let store = PostgresStreamStore::connect(&database_url)
         .await
         .map_err(app_error_from_storage_error)?;
 
@@ -569,8 +581,8 @@ pub fn make_engine_bundle() -> EngineBundle {
 pub struct AppServices {
     /// Engine bundle used for planning and execution.
     pub bundle: EngineBundle,
-    /// Event store used for run status and event queries.
-    pub events: Arc<dyn StreamStore>,
+    /// Stream store used for run status and run-stream queries.
+    pub streams: Arc<dyn StreamStore>,
     /// Artifact store used for snapshots, facts, and outputs.
     pub artifacts: Arc<dyn ArtifactStore>,
 }
@@ -579,19 +591,19 @@ impl AppServices {
     /// Creates a new service facade from the supplied engine bundle and stores.
     pub fn new(
         bundle: EngineBundle,
-        events: Arc<dyn StreamStore>,
+        streams: Arc<dyn StreamStore>,
         artifacts: Arc<dyn ArtifactStore>,
     ) -> Self {
         Self {
             bundle,
-            events,
+            streams,
             artifacts,
         }
     }
 
     fn stores(&self) -> Stores {
         Stores {
-            streams: Arc::clone(&self.events),
+            streams: Arc::clone(&self.streams),
             artifacts: Arc::clone(&self.artifacts),
         }
     }
@@ -696,22 +708,22 @@ impl AppServices {
     }
 
     #[instrument(level = "debug", skip(self), fields(run_id = run_id))]
-    /// Returns the current run status by scanning the persisted event stream.
+    /// Returns the current run status by scanning the persisted run stream.
     pub async fn run_status(&self, run_id: &str) -> Result<RunStatusResponse, AppError> {
         let uuid = uuid::Uuid::parse_str(run_id).map_err(|_| AppError::invalid_uuid())?;
         let run_id = RunId(uuid);
 
-        let head = run_stream_head(self.events.as_ref(), run_id).await?;
+        let head = run_stream_head(self.streams.as_ref(), run_id).await?;
         if head == 0 {
             warn!("run not found while reading status");
             return Err(AppError::not_found(
                 "run_not_found",
-                "run event stream was not found",
+                "run stream was not found",
             ));
         }
 
-        let stream = read_run_events(self.events.as_ref(), run_id, 1, None).await?;
-        debug!(event_count = stream.len(), "loaded run event stream");
+        let stream = read_run_stream_events(self.streams.as_ref(), run_id, 1, None).await?;
+        debug!(event_count = stream.len(), "loaded run stream events");
 
         let mut op_id = None;
         let mut manifest_id = None;
@@ -770,36 +782,37 @@ impl AppServices {
         skip(self, query),
         fields(run_id = run_id, from_seq = query.from_seq, to_seq = ?query.to_seq)
     )]
-    /// Returns a range of persisted events for the requested run.
-    pub async fn run_events(
+    /// Returns a range of persisted records for the requested run stream.
+    pub async fn run_stream(
         &self,
         run_id: &str,
-        query: RunsEventsQuery,
-    ) -> Result<RunsEventsResponse, AppError> {
+        query: RunsStreamQuery,
+    ) -> Result<RunsStreamResponse, AppError> {
         let uuid = uuid::Uuid::parse_str(run_id).map_err(|_| AppError::invalid_uuid())?;
         let run_id = RunId(uuid);
 
-        let head = run_stream_head(self.events.as_ref(), run_id).await?;
+        let head = run_stream_head(self.streams.as_ref(), run_id).await?;
         if head == 0 {
-            warn!("run not found while reading events");
+            warn!("run not found while reading stream");
             return Err(AppError::not_found(
                 "run_not_found",
-                "run event stream was not found",
+                "run stream was not found",
             ));
         }
 
-        let events =
-            read_run_events(self.events.as_ref(), run_id, query.from_seq, query.to_seq).await?;
+        let records =
+            read_run_stream_records(self.streams.as_ref(), run_id, query.from_seq, query.to_seq)
+                .await?;
         debug!(
-            event_count = events.len(),
+            record_count = records.len(),
             head_seq = head,
-            "run events loaded"
+            "run stream loaded"
         );
 
-        Ok(RunsEventsResponse {
+        Ok(RunsStreamResponse {
             run_id: run_id.0.to_string(),
             head_seq: head,
-            events,
+            records,
         })
     }
 
@@ -1113,7 +1126,7 @@ impl fmt::Display for RunResumeResponse {
 pub struct RunStatusResponse {
     /// UUID string of the run.
     pub run_id: String,
-    /// Current head sequence in the run event stream.
+    /// Current head sequence in the run stream.
     pub head_seq: u64,
     /// Operation id recorded at run start, when available.
     pub op_id: Option<String>,
@@ -1148,30 +1161,30 @@ fn default_from_seq() -> u64 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-/// Query parameters for fetching a run event range.
-pub struct RunsEventsQuery {
+/// Query parameters for fetching a run stream range.
+pub struct RunsStreamQuery {
     /// First sequence number to include, defaulting to `1`.
     #[serde(default = "default_from_seq")]
     pub from_seq: u64,
 
-    /// Optional inclusive upper bound for the event range.
+    /// Optional inclusive upper bound for the record range.
     pub to_seq: Option<u64>,
 }
 
-/// Response returned by the run-events query.
+/// Response returned by the run-stream query.
 #[derive(Clone, Debug, Serialize)]
-pub struct RunsEventsResponse {
+pub struct RunsStreamResponse {
     /// UUID string of the run.
     pub run_id: String,
-    /// Current head sequence in the run event stream.
+    /// Current head sequence in the run stream.
     pub head_seq: u64,
-    /// Events in the requested range.
-    pub events: Vec<EventEnvelope>,
+    /// Records in the requested range.
+    pub records: Vec<StreamRecord>,
 }
 
-impl fmt::Display for RunsEventsResponse {
+impl fmt::Display for RunsStreamResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = serde_json::to_string_pretty(&self.events).unwrap_or_else(|_| "[]".to_string());
+        let s = serde_json::to_string_pretty(&self.records).unwrap_or_else(|_| "[]".to_string());
         write!(f, "{s}")
     }
 }
@@ -1348,7 +1361,7 @@ enum BuiltinFeature {
     RunStart,
     RunResume,
     RunStatus,
-    RunEvents,
+    RunStream,
     ArtifactGet,
     PipelineDeployConfigureValidateStart,
     PortfolioSnapshot,
@@ -1361,7 +1374,7 @@ impl FeatureCatalog {
         handlers.insert("run.start".to_string(), BuiltinFeature::RunStart);
         handlers.insert("run.resume".to_string(), BuiltinFeature::RunResume);
         handlers.insert("run.status".to_string(), BuiltinFeature::RunStatus);
-        handlers.insert("run.events".to_string(), BuiltinFeature::RunEvents);
+        handlers.insert("run.stream".to_string(), BuiltinFeature::RunStream);
         handlers.insert("artifact.get".to_string(), BuiltinFeature::ArtifactGet);
         handlers.insert(
             "pipeline.deploy_configure_validate.start".to_string(),
@@ -1454,10 +1467,10 @@ impl FeatureCatalog {
                 }),
             },
             FeatureDescriptor {
-                id: "run.events".to_string(),
+                id: "run.stream".to_string(),
                 version: "v1".to_string(),
                 kind: FeatureKind::RunControl,
-                description: "Read run events in a sequence range".to_string(),
+                description: "Read run stream records in a sequence range".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1472,9 +1485,9 @@ impl FeatureCatalog {
                     "properties": {
                         "run_id": {"type": "string"},
                         "head_seq": {"type": "integer"},
-                        "events": {"type": "array"}
+                        "records": {"type": "array"}
                     },
-                    "required": ["run_id", "head_seq", "events"]
+                    "required": ["run_id", "head_seq", "records"]
                 }),
             },
             FeatureDescriptor {
@@ -1592,14 +1605,14 @@ impl FeatureCatalog {
                     serde_json::from_value(req.payload).map_err(|_| AppError::invalid_json())?;
                 serde_json::to_value(services.run_status(&parsed.run_id).await?)
             }
-            BuiltinFeature::RunEvents => {
-                let parsed: RunEventsInput =
+            BuiltinFeature::RunStream => {
+                let parsed: RunStreamInput =
                     serde_json::from_value(req.payload).map_err(|_| AppError::invalid_json())?;
-                let query = RunsEventsQuery {
+                let query = RunsStreamQuery {
                     from_seq: parsed.from_seq.unwrap_or(1),
                     to_seq: parsed.to_seq,
                 };
-                serde_json::to_value(services.run_events(&parsed.run_id, query).await?)
+                serde_json::to_value(services.run_stream(&parsed.run_id, query).await?)
             }
             BuiltinFeature::ArtifactGet => {
                 let parsed: ArtifactIdInput =
@@ -1643,7 +1656,7 @@ struct ArtifactIdInput {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct RunEventsInput {
+struct RunStreamInput {
     run_id: String,
     from_seq: Option<u64>,
     to_seq: Option<u64>,
@@ -1694,10 +1707,10 @@ mod tests {
     use std::sync::Arc;
 
     #[derive(Clone)]
-    struct NoopEventStore;
+    struct NoopStreamStore;
 
     #[async_trait]
-    impl StreamStore for NoopEventStore {
+    impl StreamStore for NoopStreamStore {
         async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
             Ok(0)
         }
@@ -1769,7 +1782,7 @@ mod tests {
     fn test_live_io_env() -> LiveIoEnv {
         LiveIoEnv {
             stores: Stores {
-                streams: Arc::new(NoopEventStore),
+                streams: Arc::new(NoopStreamStore),
                 artifacts: Arc::new(NoopArtifactStore),
             },
             run_id: RunId(uuid::Uuid::new_v4()),

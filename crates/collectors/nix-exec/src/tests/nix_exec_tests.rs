@@ -17,10 +17,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
-struct NoopEventStore;
+struct NoopStreamStore;
 
 #[async_trait]
-impl StreamStore for NoopEventStore {
+impl StreamStore for NoopStreamStore {
     async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
         Ok(0)
     }
@@ -64,7 +64,7 @@ impl ArtifactStore for NoopArtifactStore {
 fn env() -> LiveIoEnv {
     LiveIoEnv {
         stores: Stores {
-            streams: Arc::new(NoopEventStore),
+            streams: Arc::new(NoopStreamStore),
             artifacts: Arc::new(NoopArtifactStore),
         },
         run_id: RunId(uuid::Uuid::new_v4()),
@@ -92,12 +92,12 @@ fn run_config_with_allowlist(prefixes: Vec<String>) -> RunConfig {
 }
 
 #[derive(Clone)]
-struct FixedEventStore {
+struct FixedStreamStore {
     stream: Arc<Vec<EventEnvelope>>,
 }
 
 #[async_trait]
-impl StreamStore for FixedEventStore {
+impl StreamStore for FixedStreamStore {
     async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
         Ok(self.stream.last().map(|e| e.seq).unwrap_or(0))
     }
@@ -216,7 +216,7 @@ async fn env_with_manifest_allowlist(prefixes: Vec<String>) -> LiveIoEnv {
 
     LiveIoEnv {
         stores: Stores {
-            streams: Arc::new(FixedEventStore {
+            streams: Arc::new(FixedStreamStore {
                 stream: Arc::new(stream),
             }),
             artifacts,

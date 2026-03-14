@@ -344,7 +344,7 @@ impl NixFlakeTransport {
                 IoError::Other(info(
                     CODE_NIX_MANIFEST_LOOKUP_FAILED,
                     ErrorCategory::Storage,
-                    "failed to read run events for nix policy",
+                    "failed to read run stream for nix policy",
                 ))
             })?;
         let stream = mfm_machine::events::event_envelopes_from_stream_records(self.run_id, stream)
@@ -352,7 +352,7 @@ impl NixFlakeTransport {
                 IoError::Other(info(
                     CODE_NIX_MANIFEST_LOOKUP_FAILED,
                     ErrorCategory::Storage,
-                    "run event stream was invalid",
+                    "run stream was invalid",
                 ))
             })?;
 

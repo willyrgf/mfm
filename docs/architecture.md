@@ -22,7 +22,7 @@ MFM is an event-sourced execution engine for reproducible workflows.
 
 A run is defined by three immutable surfaces:
 - A content-addressed manifest.
-- An append-only event stream.
+- An append-only `run:*` stream in the shared stream store.
 - Content-addressed artifacts (snapshots, facts, outputs).
 
 Execution unit model:
@@ -33,11 +33,12 @@ Execution unit model:
 
 ## 3. Non-Negotiable Invariants
 
-1. Append-only event streams.
-- Historical events are never mutated.
+1. Append-only run streams.
+- Historical records are never mutated; for `run:*`, those records encode machine events.
 
 2. Per-append atomicity.
-- Each `EventStore::append([...])` is all-or-nothing.
+- Each `StreamStore::append(...)` is all-or-nothing.
+- Each `StreamStore::append_batch(...)` is all-or-nothing across every touched stream.
 
 3. Attempt envelope semantics.
 - Each state attempt is bounded by `StateEntered` and exactly one terminal kernel event (`StateCompleted` or `StateFailed`).
@@ -56,7 +57,7 @@ Execution unit model:
 - State handlers interact through an IO provider abstraction that supports live and replay.
 
 8. No secrets in persisted or contract surfaces.
-- Secrets must never appear in manifests, events, artifacts, snapshots, CLI/API outputs, or error details.
+- Secrets must never appear in manifests, run-stream records, artifacts, snapshots, CLI/API outputs, or error details.
 
 9. Thin binary boundary.
 - Domain execution logic belongs in ops/state-machine layers, not in `bin/cli` or `bin/rest-api`.
@@ -196,7 +197,7 @@ Owns external data collection and normalization adapters.
 Owns local/internal live transport factories that are not external collectors.
 
 ### `crates/storages/*`
-Owns event/artifact persistence implementations only.
+Owns stream/artifact persistence implementations only.
 
 ### `crates/core/`
 Owns primitives and security-sensitive keystore/crypto code.

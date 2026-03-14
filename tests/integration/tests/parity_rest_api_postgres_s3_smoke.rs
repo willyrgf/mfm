@@ -8,8 +8,8 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use mfm_artifact_store_s3::S3ArtifactStore;
-use mfm_event_store_postgres::PostgresEventStore;
 use mfm_machine::stores::{ArtifactStore, StreamStore};
+use mfm_stream_store_postgres::PostgresStreamStore;
 
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
     let s = serde_json::to_string(&body).expect("json request must serialize");
@@ -30,10 +30,10 @@ async fn response_json(resp: axum::response::Response) -> serde_json::Value {
 
 #[tokio::test]
 async fn parity_postgres_s3_smoke() {
-    let pg = PostgresEventStore::connect_env()
+    let pg = PostgresStreamStore::connect_env()
         .await
         .expect("postgres config");
-    let events: Arc<dyn StreamStore> = Arc::new(pg);
+    let streams: Arc<dyn StreamStore> = Arc::new(pg);
 
     let s3 = S3ArtifactStore::from_env().expect("s3 config");
     s3.ensure_bucket_exists().await.expect("bucket exists");
@@ -42,7 +42,7 @@ async fn parity_postgres_s3_smoke() {
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events,
+        streams,
         artifacts,
     });
 
@@ -87,16 +87,16 @@ async fn parity_postgres_s3_smoke() {
     assert_eq!(artifact_v["data"]["encoding"], "json");
     assert!(artifact_v["data"]["value"].is_object());
 
-    let events_resp = app
+    let stream_resp = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("/v1/runs/{run_id}/events?from_seq=1"))
+                .uri(format!("/v1/runs/{run_id}/stream?from_seq=1"))
                 .body(Body::empty())
                 .expect("request"),
         )
         .await
-        .expect("events response");
-    assert_eq!(events_resp.status(), StatusCode::OK);
+        .expect("stream response");
+    assert_eq!(stream_resp.status(), StatusCode::OK);
 }

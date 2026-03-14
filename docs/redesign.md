@@ -56,7 +56,7 @@ Normative constraints:
 Concrete execution of an op or flattened pipeline:
 - run ID
 - content-addressed manifest
-- append-only event stream
+- append-only `run:*` stream
 - content-addressed artifacts
 
 ### 3.3 State
@@ -98,10 +98,11 @@ External or non-deterministic input captured for replay:
 ## 4. Non-Negotiable Invariants
 
 ### 4.1 Append-only stream
-- Runs append events; historical events are never mutated.
+- The shared stream store is append-only; `run:*` streams append machine events and historical records are never mutated.
 
 ### 4.2 Per-append atomicity
-- `EventStore::append([...])` is all-or-nothing.
+- `StreamStore::append(...)` is all-or-nothing.
+- `StreamStore::append_batch(...)` is all-or-nothing across every touched stream.
 - Partially visible append results are forbidden.
 
 ### 4.3 Attempt envelope semantics
@@ -370,20 +371,24 @@ When introduced, linkage events are required (`ChildRunSpawned`).
 ## 12. Storage Contract
 
 ### 12.1 Two mandatory roles
-1. Event store (append-only, optimistic concurrency)
+1. Stream store (append-only, optimistic concurrency)
 2. Artifact store (immutable, content-addressed)
 
 Optional later role:
 - projection/index store
 
+The stream store is one shared physical substrate:
+- `run:*` stores machine runtime records
+- future families such as `wallet_lane:*`, `tx_intent:*`, and `rpc_source:*` use the same append-only contract
+
 ### 12.2 Backend strategy
-- PostgreSQL as primary transactional event store
+- PostgreSQL as primary transactional stream store
 - MinIO/S3 as primary artifact storage
 - local fast implementations retained for unit and dev loops
 
 ### 12.3 Security requirements
 - no persisted secrets in any store-backed surface
-- events may store references, never secret plaintext
+- stream records may store references, never secret plaintext
 - encrypted secret-bearing artifacts are deferred to a future encrypted-artifact layer
 
 ## 13. CLI and REST Responsibilities
@@ -752,7 +757,7 @@ pub mod errors {
         Other(ErrorInfo),
     }
 
-    /// Storage errors (event store / artifact store).
+    /// Storage errors (stream store / artifact store).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum StorageError {
         Concurrency(ErrorInfo),
@@ -870,7 +875,7 @@ pub mod events {
         Domain(DomainEvent),
     }
 
-    /// Envelope stored in the event store.
+    /// Machine event envelope encoded into `run:*` stream records.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct EventEnvelope {
         pub run_id: RunId,
@@ -1080,24 +1085,87 @@ pub mod stores {
         Other(String),
     }
 
-    /// Append-only event store with optimistic concurrency.
-    #[async_trait]
-    pub trait EventStore: Send + Sync {
-        async fn head_seq(&self, run_id: RunId) -> Result<u64, StorageError>;
+    /// Validated append-only stream identifier.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(try_from = "String", into = "String")]
+    pub struct StreamId(String);
 
-        async fn append(
+    impl StreamId {
+        pub fn new(value: impl Into<String>) -> Result<Self, crate::ids::IdValidationError> {
+            let value = value.into();
+            let Some((family, key)) = value.split_once(':') else {
+                return Err(crate::ids::IdValidationError::new("stream_id", value));
+            };
+            if !is_valid_id_segment(family)
+                || key.is_empty()
+                || key
+                    .chars()
+                    .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
+            {
+                return Err(crate::ids::IdValidationError::new("stream_id", value));
+            }
+            Ok(Self(value))
+        }
+
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+
+        pub fn run(run_id: RunId) -> Self {
+            Self(format!("run:{}", run_id.0))
+        }
+    }
+
+    /// Persisted record in an append-only stream.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct StreamRecord {
+        pub stream_id: StreamId,
+        pub seq: u64,
+        pub ts_millis: Option<u64>,
+        pub kind: String,
+        pub payload: serde_json::Value,
+    }
+
+    /// Record to append into a stream.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct NewStreamRecord {
+        pub ts_millis: Option<u64>,
+        pub kind: String,
+        pub payload: serde_json::Value,
+    }
+
+    /// Atomic compare-and-append request for one stream.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct StreamAppend {
+        pub stream_id: StreamId,
+        pub expected_seq: u64,
+        pub records: Vec<NewStreamRecord>,
+    }
+
+    /// Head sequences returned by an atomic multi-stream append.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct AppendBatchResult {
+        pub stream_heads: Vec<(StreamId, u64)>,
+    }
+
+    /// Append-only stream store with optimistic concurrency.
+    #[async_trait]
+    pub trait StreamStore: Send + Sync {
+        async fn head_seq(&self, stream_id: &StreamId) -> Result<u64, StorageError>;
+
+        async fn append(&self, append: StreamAppend) -> Result<u64, StorageError>;
+
+        async fn append_batch(
             &self,
-            run_id: RunId,
-            expected_seq: u64,
-            events: Vec<EventEnvelope>,
-        ) -> Result<u64, StorageError>;
+            appends: Vec<StreamAppend>,
+        ) -> Result<AppendBatchResult, StorageError>;
 
         async fn read_range(
             &self,
-            run_id: RunId,
+            stream_id: &StreamId,
             from_seq: u64,
             to_seq: Option<u64>,
-        ) -> Result<Vec<EventEnvelope>, StorageError>;
+        ) -> Result<Vec<StreamRecord>, StorageError>;
     }
 
     /// Immutable, content-addressed artifact store.
@@ -1116,7 +1184,7 @@ pub mod engine {
     use crate::errors::RunError;
     use crate::ids::{ArtifactId, RunId};
     use crate::plan::ExecutionPlan;
-    use crate::stores::{ArtifactStore, EventStore};
+    use crate::stores::{ArtifactStore, StreamStore};
 
     /// Current run phase (observability).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1145,7 +1213,7 @@ pub mod engine {
 
     /// Store bundle passed to the engine.
     pub struct Stores {
-        pub events: Arc<dyn EventStore>,
+        pub streams: Arc<dyn StreamStore>,
         pub artifacts: Arc<dyn ArtifactStore>,
     }
 

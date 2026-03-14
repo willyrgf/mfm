@@ -73,8 +73,8 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | `mfm-artifact-store-fs` | Filesystem artifact store. | `crates/storages/artifact-store-fs` |
 | `mfm-artifact-store-s3` | S3-backed artifact store. | `crates/storages/artifact-store-s3` |
 | `mfm-artifact-store-secret` | Secret-wrapping artifact store. | `crates/storages/artifact-store-secret` |
-| `mfm-event-store-mem` | In-memory event store. | `crates/storages/event-store-mem` |
-| `mfm-event-store-postgres` | PostgreSQL event store. | `crates/storages/event-store-postgres` |
+| `mfm-stream-store-mem` | In-memory stream store. | `crates/storages/stream-store-mem` |
+| `mfm-stream-store-postgres` | PostgreSQL stream store. | `crates/storages/stream-store-postgres` |
 | `mfm-indexer` | Projection/indexing support. | `crates/storages/indexer` |
 
 ## Collectors

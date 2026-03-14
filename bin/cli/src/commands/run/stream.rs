@@ -4,11 +4,11 @@ use crate::presentation::output::handle_command_result;
 use crate::support::app_services::{command_error_from_app_error, make_app_services_from_args};
 use crate::support::run_stores::RunStoresArgs;
 use clap::Args;
-use mfm_app::{RunsEventsQuery, RunsEventsResponse};
+use mfm_app::{RunsStreamQuery, RunsStreamResponse};
 
-/// Arguments for `mfm run events`.
+/// Arguments for `mfm run stream`.
 #[derive(Args)]
-pub(crate) struct EventsArgs {
+pub(crate) struct StreamArgs {
     /// Run id (UUID)
     pub run_id: String,
 
@@ -20,27 +20,27 @@ pub(crate) struct EventsArgs {
     #[arg(long)]
     pub to_seq: Option<u64>,
 
-    /// Storage configuration for the run's event and artifact backends.
+    /// Storage configuration for the run's stream and artifact backends.
     #[command(flatten)]
     pub stores: RunStoresArgs,
 }
 
-/// Executes the events command and terminates the process.
-pub(crate) async fn execute(ctx: &CommandContext, args: &EventsArgs) -> ! {
+/// Executes the stream command and terminates the process.
+pub(crate) async fn execute(ctx: &CommandContext, args: &StreamArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);
 }
 
-async fn execute_internal(args: &EventsArgs) -> CommandResult<RunsEventsResponse> {
+async fn execute_internal(args: &StreamArgs) -> CommandResult<RunsStreamResponse> {
     uuid::Uuid::parse_str(&args.run_id)
         .map_err(|_| CommandError::invalid_uuid("Invalid UUID format"))?;
 
     let services = make_app_services_from_args(&args.stores).await?;
 
     let response = services
-        .run_events(
+        .run_stream(
             &args.run_id,
-            RunsEventsQuery {
+            RunsStreamQuery {
                 from_seq: args.from_seq,
                 to_seq: args.to_seq,
             },

@@ -66,8 +66,8 @@ Crate docs:
 - SDK (orchestration helpers): [`crates/sdk/README.md`](crates/sdk/README.md)
 - Ops (proof op): [`crates/ops/proof-op/README.md`](crates/ops/proof-op/README.md)
 - Ops (keystore op): [`crates/ops/keystore-op/README.md`](crates/ops/keystore-op/README.md)
-- Storage (EventStore, mem): [`crates/storages/event-store-mem/README.md`](crates/storages/event-store-mem/README.md)
-- Storage (EventStore, Postgres): [`crates/storages/event-store-postgres/README.md`](crates/storages/event-store-postgres/README.md)
+- Storage (StreamStore, mem): [`crates/storages/stream-store-mem/README.md`](crates/storages/stream-store-mem/README.md)
+- Storage (StreamStore, Postgres): [`crates/storages/stream-store-postgres/README.md`](crates/storages/stream-store-postgres/README.md)
 - Storage (ArtifactStore, fs): [`crates/storages/artifact-store-fs/README.md`](crates/storages/artifact-store-fs/README.md)
 - Storage (ArtifactStore, S3/MinIO): [`crates/storages/artifact-store-s3/README.md`](crates/storages/artifact-store-s3/README.md)
 

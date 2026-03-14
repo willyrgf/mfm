@@ -207,13 +207,13 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "event-store-mem",
-      "path": "crates/storages/event-store-mem/Cargo.toml",
+      "name": "stream-store-mem",
+      "path": "crates/storages/stream-store-mem/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
-      "name": "event-store-postgres",
-      "path": "crates/storages/event-store-postgres/Cargo.toml",
+      "name": "stream-store-postgres",
+      "path": "crates/storages/stream-store-postgres/Cargo.toml",
       "kind": "rust-cargo"
     },
     {

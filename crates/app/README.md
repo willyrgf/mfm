@@ -16,13 +16,13 @@ stays in op crates and executable behavior stays in shared-state crates.
 
 ```no_run
 use mfm_app::{
-    make_default_artifact_store, make_default_event_store, make_engine_bundle, AppServices,
+    make_default_artifact_store, make_default_stream_store, make_engine_bundle, AppServices,
 };
 
 async fn boot() -> Result<AppServices, mfm_app::AppError> {
     let bundle = make_engine_bundle();
-    let events = make_default_event_store().await?;
+    let streams = make_default_stream_store().await?;
     let artifacts = make_default_artifact_store().await?;
-    Ok(AppServices::new(bundle, events, artifacts))
+    Ok(AppServices::new(bundle, streams, artifacts))
 }
 ```

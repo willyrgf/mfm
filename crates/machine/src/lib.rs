@@ -684,7 +684,7 @@ pub mod errors {
         Other(ErrorInfo),
     }
 
-    /// Storage errors (event store / artifact store).
+    /// Storage errors (stream store / artifact store).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum StorageError {
         /// Append failed because the optimistic concurrency expectation was stale.
@@ -911,9 +911,9 @@ pub mod events {
         pub payload_ref: Option<ArtifactId>,
     }
 
-    /// Envelope type used by event stores.
+    /// Envelope type used by stream stores.
     ///
-    /// The event store contract expects values of this enum to be wrapped in [`EventEnvelope`]
+    /// The stream store contract expects values of this enum to be wrapped in [`EventEnvelope`]
     /// with strictly increasing per-run sequence numbers.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum Event {
@@ -923,7 +923,7 @@ pub mod events {
         Domain(DomainEvent),
     }
 
-    /// Envelope stored in the event store.
+    /// Envelope stored in the stream store.
     ///
     /// `ts_millis` is informational only; replay semantics come from event order and payload
     /// content, not wall-clock time.
@@ -988,7 +988,7 @@ pub mod events {
         if record.kind != STREAM_RECORD_KIND_MACHINE_EVENT {
             return Err(stream_decode_error(
                 "machine_event_record_kind_mismatch",
-                "unexpected record kind in run event stream",
+                "unexpected record kind in run stream",
             ));
         }
 

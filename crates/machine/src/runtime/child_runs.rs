@@ -140,7 +140,7 @@ impl ChildRunEngine {
         if head == 0 {
             return Err(RunError::Storage(storage_not_found(
                 "run_not_found",
-                "run event stream was not found",
+                "run stream was not found",
             )));
         }
 
@@ -621,7 +621,7 @@ impl ChildRunLiveIoTransport {
                     child_io_error(
                         CODE_CHILD_RUN_ENGINE_FAILED,
                         ErrorCategory::Storage,
-                        "failed to read child run event stream",
+                        "failed to read child run stream",
                     )
                 })?;
             let stream = crate::events::event_envelopes_from_stream_records(child_run_id, records)
@@ -629,14 +629,14 @@ impl ChildRunLiveIoTransport {
                     child_io_error(
                         CODE_CHILD_RUN_ENGINE_FAILED,
                         ErrorCategory::Storage,
-                        "invalid child run event stream",
+                        "invalid child run stream",
                     )
                 })?;
             let history = read_run_history(child_run_id, &stream).map_err(|_| {
                 child_io_error(
                     CODE_CHILD_RUN_ENGINE_FAILED,
                     ErrorCategory::Storage,
-                    "invalid child run event stream",
+                    "invalid child run stream",
                 )
             })?;
             if history.started.manifest_id != stored_id {

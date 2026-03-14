@@ -29,8 +29,8 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 
 Key invariants to preserve (high risk if violated):
 
-- Append-only event streams (no mutation of past events).
-- Per-append atomicity in event stores: each append is all-or-nothing.
+- Append-only stream families, with `run:*` carrying machine events (no mutation of past records).
+- Per-append atomicity in stream stores: each append is all-or-nothing.
 - Content addressing for manifests, snapshots, facts, and outputs.
 - Canonical JSON for hashing structured data (target semantics: RFC 8785 / JCS-style).
   - Hashed structures MUST NOT contain floats (use integer-scaled values or decimal strings).

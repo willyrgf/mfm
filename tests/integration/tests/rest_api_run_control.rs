@@ -8,13 +8,13 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use mfm_artifact_store_fs::FsArtifactStore;
-use mfm_event_store_mem::MemEventStore;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
 use mfm_machine::ids::{ArtifactId, ErrorCode};
 use mfm_machine::stores::{
     AppendBatchResult, ArtifactKind, ArtifactStore, StreamAppend, StreamId, StreamRecord,
     StreamStore,
 };
+use mfm_stream_store_mem::MemStreamStore;
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -121,21 +121,21 @@ fn storage_other(code: &str, message: &str) -> StorageError {
     })
 }
 
-struct FailingEventStore;
+struct FailingStreamStore;
 
 #[async_trait]
-impl StreamStore for FailingEventStore {
+impl StreamStore for FailingStreamStore {
     async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
         Err(storage_other(
-            "event_store_unavailable",
-            "event store unavailable",
+            "stream_store_unavailable",
+            "stream store unavailable",
         ))
     }
 
     async fn append(&self, _append: StreamAppend) -> Result<u64, StorageError> {
         Err(storage_other(
-            "event_store_unavailable",
-            "event store unavailable",
+            "stream_store_unavailable",
+            "stream store unavailable",
         ))
     }
 
@@ -144,8 +144,8 @@ impl StreamStore for FailingEventStore {
         _appends: Vec<StreamAppend>,
     ) -> Result<AppendBatchResult, StorageError> {
         Err(storage_other(
-            "event_store_unavailable",
-            "event store unavailable",
+            "stream_store_unavailable",
+            "stream store unavailable",
         ))
     }
 
@@ -156,8 +156,8 @@ impl StreamStore for FailingEventStore {
         _to_seq: Option<u64>,
     ) -> Result<Vec<StreamRecord>, StorageError> {
         Err(storage_other(
-            "event_store_unavailable",
-            "event store unavailable",
+            "stream_store_unavailable",
+            "stream store unavailable",
         ))
     }
 }
@@ -190,7 +190,7 @@ impl ArtifactStore for FailingArtifactStore {
 
 #[tokio::test]
 async fn health_endpoint_reports_liveness() {
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -198,7 +198,7 @@ async fn health_endpoint_reports_liveness() {
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events,
+        streams,
         artifacts,
     });
 
@@ -221,7 +221,7 @@ async fn health_endpoint_reports_liveness() {
 
 #[tokio::test]
 async fn ready_endpoint_reports_readiness_when_stores_are_usable() {
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -229,7 +229,7 @@ async fn ready_endpoint_reports_readiness_when_stores_are_usable() {
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events,
+        streams,
         artifacts,
     });
 
@@ -248,13 +248,13 @@ async fn ready_endpoint_reports_readiness_when_stores_are_usable() {
     let v = response_json(resp).await;
     assert_eq!(v["status"], "success");
     assert_eq!(v["data"]["ok"], true);
-    assert_eq!(v["data"]["checks"]["event_store"], "ready");
+    assert_eq!(v["data"]["checks"]["stream_store"], "ready");
     assert_eq!(v["data"]["checks"]["artifact_store"], "ready");
 }
 
 #[tokio::test]
-async fn ready_endpoint_returns_503_when_event_store_is_unavailable() {
-    let events: Arc<dyn StreamStore> = Arc::new(FailingEventStore);
+async fn ready_endpoint_returns_503_when_stream_store_is_unavailable() {
+    let streams: Arc<dyn StreamStore> = Arc::new(FailingStreamStore);
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -262,7 +262,7 @@ async fn ready_endpoint_returns_503_when_event_store_is_unavailable() {
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events,
+        streams,
         artifacts,
     });
 
@@ -281,18 +281,18 @@ async fn ready_endpoint_returns_503_when_event_store_is_unavailable() {
     let v = response_json(resp).await;
     assert_eq!(v["status"], "error");
     assert_eq!(v["error"]["code"], "NotReady");
-    assert_eq!(v["error"]["message"], "event store is not ready");
+    assert_eq!(v["error"]["message"], "stream store is not ready");
 }
 
 #[tokio::test]
 async fn ready_endpoint_returns_503_when_artifact_store_is_unavailable() {
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(FailingArtifactStore);
 
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events,
+        streams,
         artifacts,
     });
 
@@ -316,7 +316,7 @@ async fn ready_endpoint_returns_503_when_artifact_store_is_unavailable() {
 
 #[tokio::test]
 async fn start_status_resume_happy_path() {
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -324,7 +324,7 @@ async fn start_status_resume_happy_path() {
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events,
+        streams,
         artifacts,
     });
 
@@ -372,26 +372,26 @@ async fn start_status_resume_happy_path() {
     assert_eq!(status_v["data"]["phase"], "completed");
     assert_eq!(status_v["data"]["final_snapshot_id"], final_snapshot_id);
 
-    let events = app
+    let stream_resp = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("/v1/runs/{run_id}/events?from_seq=1"))
+                .uri(format!("/v1/runs/{run_id}/stream?from_seq=1"))
                 .body(Body::empty())
                 .expect("request"),
         )
         .await
-        .expect("events response");
+        .expect("stream response");
 
-    assert_eq!(events.status(), StatusCode::OK);
-    let events_v = response_json(events).await;
-    assert_eq!(events_v["status"], "success");
-    assert_eq!(events_v["data"]["run_id"], run_id);
-    assert!(events_v["data"]["head_seq"].as_u64().expect("head_seq") > 0);
-    assert!(!events_v["data"]["events"]
+    assert_eq!(stream_resp.status(), StatusCode::OK);
+    let stream_v = response_json(stream_resp).await;
+    assert_eq!(stream_v["status"], "success");
+    assert_eq!(stream_v["data"]["run_id"], run_id);
+    assert!(stream_v["data"]["head_seq"].as_u64().expect("head_seq") > 0);
+    assert!(!stream_v["data"]["records"]
         .as_array()
-        .expect("events")
+        .expect("records")
         .is_empty());
 
     let artifact = app
@@ -434,7 +434,7 @@ async fn start_status_resume_happy_path() {
 
 #[tokio::test]
 async fn start_pipeline_payload_happy_path() {
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -442,7 +442,7 @@ async fn start_pipeline_payload_happy_path() {
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events,
+        streams,
         artifacts,
     });
 
@@ -477,7 +477,7 @@ async fn start_pipeline_payload_happy_path() {
 
 #[tokio::test]
 async fn artifacts_not_found_is_404() {
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -485,7 +485,7 @@ async fn artifacts_not_found_is_404() {
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events,
+        streams,
         artifacts,
     });
 
@@ -507,7 +507,7 @@ async fn artifacts_not_found_is_404() {
 
 #[tokio::test]
 async fn status_invalid_uuid_is_stable_error() {
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -515,7 +515,7 @@ async fn status_invalid_uuid_is_stable_error() {
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events,
+        streams,
         artifacts,
     });
 
@@ -538,7 +538,7 @@ async fn status_invalid_uuid_is_stable_error() {
 
 #[tokio::test]
 async fn start_invalid_json_is_stable_error() {
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -546,7 +546,7 @@ async fn start_invalid_json_is_stable_error() {
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events,
+        streams,
         artifacts,
     });
 
@@ -570,7 +570,7 @@ async fn start_invalid_json_is_stable_error() {
 
 #[tokio::test]
 async fn features_list_exposes_builtin_catalog() {
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -578,7 +578,7 @@ async fn features_list_exposes_builtin_catalog() {
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events,
+        streams,
         artifacts,
     });
 
@@ -601,14 +601,14 @@ async fn features_list_exposes_builtin_catalog() {
     assert!(features.iter().any(|f| f["id"] == "run.start"));
     assert!(features.iter().any(|f| f["id"] == "run.resume"));
     assert!(features.iter().any(|f| f["id"] == "run.status"));
-    assert!(features.iter().any(|f| f["id"] == "run.events"));
+    assert!(features.iter().any(|f| f["id"] == "run.stream"));
     assert!(features.iter().any(|f| f["id"] == "artifact.get"));
     assert!(features.iter().any(|f| f["id"] == "portfolio.snapshot"));
 }
 
 #[tokio::test]
 async fn feature_execute_run_start_happy_path() {
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -616,7 +616,7 @@ async fn feature_execute_run_start_happy_path() {
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events,
+        streams,
         artifacts,
     });
 
@@ -648,7 +648,7 @@ async fn feature_execute_portfolio_snapshot_missing_rpc_url_is_stable_error() {
     let _rpc = EnvVarGuard::remove("MFM_EVM_RPC_URL");
     let _rpc_sources = EnvVarGuard::remove("MFM_EVM_RPC_SOURCES_JSON");
 
-    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
+    let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -656,7 +656,7 @@ async fn feature_execute_portfolio_snapshot_missing_rpc_url_is_stable_error() {
     let bundle = mfm_rest_api::make_engine_bundle();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle,
-        events,
+        streams,
         artifacts,
     });
 

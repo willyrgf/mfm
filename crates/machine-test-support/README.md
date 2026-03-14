@@ -2,7 +2,7 @@
 
 Shared contract tests and observability helpers for `mfm-machine` backends.
 
-Use this crate when implementing a new `EventStore` or `ArtifactStore` and you want the same
+Use this crate when implementing a new `StreamStore` or `ArtifactStore` and you want the same
 conformance checks that the built-in storage crates run in CI.
 
 ## Example

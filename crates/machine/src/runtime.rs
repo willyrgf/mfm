@@ -690,7 +690,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
         if head == 0 {
             return Err(RunError::Storage(storage_not_found(
                 "run_not_found",
-                "run event stream was not found",
+                "run stream was not found",
             )));
         }
         debug!(head_seq = head, "resuming run from event stream");

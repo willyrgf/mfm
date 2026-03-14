@@ -4,8 +4,6 @@ use super::CommandContext;
 
 /// Artifact inspection subcommands.
 mod artifacts;
-/// Run-event query command implementation.
-mod events;
 /// Pipeline-start command implementations.
 mod pipeline;
 /// Run-resume command implementation.
@@ -14,6 +12,8 @@ mod resume;
 mod start;
 /// Run-status command implementation.
 mod status;
+/// Run-stream query command implementation.
+mod stream;
 
 /// Subcommands under `mfm run`.
 #[derive(Subcommand)]
@@ -42,11 +42,11 @@ pub(crate) enum RunCommand {
         #[command(flatten)]
         args: status::StatusArgs,
     },
-    /// Print run events
-    Events {
-        /// Parsed arguments for the events command.
+    /// Print run stream records
+    Stream {
+        /// Parsed arguments for the stream command.
         #[command(flatten)]
-        args: events::EventsArgs,
+        args: stream::StreamArgs,
     },
     /// Artifact operations
     Artifacts {
@@ -64,7 +64,7 @@ impl RunCommand {
             RunCommand::Pipeline { command } => command.execute(ctx).await,
             RunCommand::Resume { args } => resume::execute(ctx, args).await,
             RunCommand::Status { args } => status::execute(ctx, args).await,
-            RunCommand::Events { args } => events::execute(ctx, args).await,
+            RunCommand::Stream { args } => stream::execute(ctx, args).await,
             RunCommand::Artifacts { command } => command.execute(ctx).await,
         }
     }

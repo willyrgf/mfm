@@ -230,11 +230,11 @@ fn lock_map<'a, T>(mutex: &'a Mutex<T>) -> Result<MutexGuard<'a, T>, StorageErro
 
 /// In-memory [`StreamStore`] used by tests.
 #[derive(Clone, Default)]
-pub struct MemEventStore {
+pub struct MemStreamStore {
     inner: Arc<Mutex<HashMap<StreamId, Vec<StreamRecord>>>>,
 }
 
-impl MemEventStore {
+impl MemStreamStore {
     /// Reads one run stream and decodes it back into machine event envelopes.
     pub async fn read_run_stream(
         &self,
@@ -286,7 +286,7 @@ impl MemEventStore {
 }
 
 #[async_trait]
-impl StreamStore for MemEventStore {
+impl StreamStore for MemStreamStore {
     async fn head_seq(&self, stream_id: &StreamId) -> Result<u64, StorageError> {
         let inner = lock_map(&self.inner)?;
         Ok(inner
@@ -302,7 +302,7 @@ impl StreamStore for MemEventStore {
         let head = stream.last().map(|record| record.seq).unwrap_or(0);
         if head != append.expected_seq {
             return Err(StorageError::Concurrency(storage_info(
-                "event_store_concurrency",
+                "stream_store_concurrency",
                 "head seq did not match expected seq",
             )));
         }
@@ -336,7 +336,7 @@ impl StreamStore for MemEventStore {
                 .unwrap_or(0);
             if head != append.expected_seq {
                 return Err(StorageError::Concurrency(storage_info(
-                    "event_store_concurrency",
+                    "stream_store_concurrency",
                     "head seq did not match expected seq",
                 )));
             }
@@ -414,7 +414,7 @@ impl ArtifactStore for MemArtifactStore {
 /// Returns a [`Stores`] bundle backed by in-memory event and artifact stores.
 pub fn in_memory_stores() -> Stores {
     Stores {
-        streams: Arc::new(MemEventStore::default()),
+        streams: Arc::new(MemStreamStore::default()),
         artifacts: Arc::new(MemArtifactStore::default()),
     }
 }

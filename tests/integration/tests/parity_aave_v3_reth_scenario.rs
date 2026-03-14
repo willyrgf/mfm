@@ -11,7 +11,6 @@ use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_collectors_evm_jsonrpc_http::{
     EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmSourceKind,
 };
-use mfm_event_store_postgres::PostgresEventStore;
 use mfm_integration_tests::parity_run_ids::write_parity_aave_run_ids;
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
@@ -30,6 +29,7 @@ use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::DefaultRunLauncher;
+use mfm_stream_store_postgres::PostgresStreamStore;
 use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 
@@ -576,7 +576,7 @@ fn balance_of_calldata(owner: &str) -> String {
 
 async fn rpc_call(
     rpc_url: &str,
-    events: Arc<dyn StreamStore>,
+    streams: Arc<dyn StreamStore>,
     artifacts: Arc<dyn ArtifactStore>,
     method: &str,
     params: serde_json::Value,
@@ -593,10 +593,7 @@ async fn rpc_call(
         ..EvmJsonRpcHttpConfig::default()
     });
     let env = LiveIoEnv {
-        stores: Stores {
-            streams: events,
-            artifacts,
-        },
+        stores: Stores { streams, artifacts },
         run_id: RunId(uuid::Uuid::new_v4()),
         state_id: StateId::must_new("rpc.helper.call".to_string()),
         attempt: 0,
@@ -623,14 +620,14 @@ async fn rpc_call(
 
 async fn erc20_balance_u64(
     rpc_url: &str,
-    events: Arc<dyn StreamStore>,
+    streams: Arc<dyn StreamStore>,
     artifacts: Arc<dyn ArtifactStore>,
     token: &str,
     owner: &str,
 ) -> u64 {
     let value = rpc_call(
         rpc_url,
-        events,
+        streams,
         artifacts,
         "eth_call",
         serde_json::json!([
@@ -647,10 +644,10 @@ async fn erc20_balance_u64(
     parse_u64_hex(raw)
 }
 
-async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> PostgresEventStore {
+async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> PostgresStreamStore {
     let mut last_err: Option<mfm_machine::errors::StorageError> = None;
     for _ in 0..max_attempts {
-        match PostgresEventStore::connect_env().await {
+        match PostgresStreamStore::connect_env().await {
             Ok(pg) => return pg,
             Err(err) => {
                 last_err = Some(err);
@@ -726,8 +723,8 @@ fn read_reth_probe_diagnostics() -> Option<String> {
     }
 }
 
-async fn run_failure_diagnostics(events: Arc<dyn StreamStore>, run_id: RunId) -> String {
-    let stream = match events
+async fn run_failure_diagnostics(streams: Arc<dyn StreamStore>, run_id: RunId) -> String {
+    let stream = match streams
         .read_range(&StreamId::run(run_id), 1, None)
         .await
         .and_then(|records| event_envelopes_from_stream_records(run_id, records))
@@ -992,7 +989,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     init_test_observability();
 
     let pg = connect_postgres_with_retry(20, 250).await;
-    let events: Arc<dyn StreamStore> = Arc::new(pg);
+    let streams: Arc<dyn StreamStore> = Arc::new(pg);
 
     let s3 = S3ArtifactStore::from_env().expect("s3 config");
     s3.ensure_bucket_exists().await.expect("bucket exists");
@@ -1001,7 +998,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     let rpc_url = std::env::var("MFM_EVM_RPC_URL").expect("MFM_EVM_RPC_URL is required");
     let chain_id_hex = rpc_call(
         &rpc_url,
-        Arc::clone(&events),
+        Arc::clone(&streams),
         Arc::clone(&artifacts),
         "eth_chainId",
         serde_json::json!([]),
@@ -1013,7 +1010,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .expect("eth_chainId hex");
     let accounts_json = rpc_call(
         &rpc_url,
-        Arc::clone(&events),
+        Arc::clone(&streams),
         Arc::clone(&artifacts),
         "eth_accounts",
         serde_json::json!([]),
@@ -1065,7 +1062,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .start_pipeline(
             Arc::clone(&bundle.engine),
             Stores {
-                streams: Arc::clone(&events),
+                streams: Arc::clone(&streams),
                 artifacts: Arc::clone(&artifacts),
             },
             Arc::clone(&bundle.registry),
@@ -1089,7 +1086,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .expect("start phase A pipeline");
 
     if phase_a_run.phase != RunPhase::Completed {
-        let diagnostics = run_failure_diagnostics(Arc::clone(&events), phase_a_run.run_id).await;
+        let diagnostics = run_failure_diagnostics(Arc::clone(&streams), phase_a_run.run_id).await;
         panic!(
             "phase A expected Completed, got {:?}; {}",
             phase_a_run.phase, diagnostics
@@ -1152,7 +1149,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .start_pipeline(
             Arc::clone(&bundle.engine),
             Stores {
-                streams: Arc::clone(&events),
+                streams: Arc::clone(&streams),
                 artifacts: Arc::clone(&artifacts),
             },
             Arc::clone(&bundle.registry),
@@ -1178,7 +1175,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .expect("start phase B pipeline");
 
     if phase_b_run.phase != RunPhase::Completed {
-        let diagnostics = run_failure_diagnostics(Arc::clone(&events), phase_b_run.run_id).await;
+        let diagnostics = run_failure_diagnostics(Arc::clone(&streams), phase_b_run.run_id).await;
         panic!(
             "phase B expected Completed, got {:?}; {}",
             phase_b_run.phase, diagnostics
@@ -1195,7 +1192,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     let positions = AaveScenarioPositionSnapshot {
         supplier_supplied_usdc: erc20_balance_u64(
             &rpc_url,
-            Arc::clone(&events),
+            Arc::clone(&streams),
             Arc::clone(&artifacts),
             &usdc_a_token.address,
             &actors.supplier,
@@ -1203,7 +1200,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .await,
         borrower_collateral_wbtc: erc20_balance_u64(
             &rpc_url,
-            Arc::clone(&events),
+            Arc::clone(&streams),
             Arc::clone(&artifacts),
             &wbtc_a_token.address,
             &actors.borrower,
@@ -1211,7 +1208,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .await,
         borrower_borrowed_usdc: erc20_balance_u64(
             &rpc_url,
-            Arc::clone(&events),
+            Arc::clone(&streams),
             Arc::clone(&artifacts),
             &usdc_variable_debt.address,
             &actors.borrower,
@@ -1219,7 +1216,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .await,
         borrower_usdc_balance: erc20_balance_u64(
             &rpc_url,
-            Arc::clone(&events),
+            Arc::clone(&streams),
             Arc::clone(&artifacts),
             &usdc.address,
             &actors.borrower,
@@ -1227,7 +1224,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .await,
         pool_usdc_balance: erc20_balance_u64(
             &rpc_url,
-            Arc::clone(&events),
+            Arc::clone(&streams),
             Arc::clone(&artifacts),
             &usdc.address,
             &pool.address,
@@ -1289,7 +1286,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
 
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         bundle: mfm_rest_api::make_engine_bundle(),
-        events: Arc::clone(&events),
+        streams: Arc::clone(&streams),
         artifacts: Arc::clone(&artifacts),
     });
     let resp = app

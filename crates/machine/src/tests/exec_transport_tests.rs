@@ -15,10 +15,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Clone)]
-struct NoopEventStore;
+struct NoopStreamStore;
 
 #[async_trait]
-impl StreamStore for NoopEventStore {
+impl StreamStore for NoopStreamStore {
     async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
         Ok(0)
     }
@@ -67,7 +67,7 @@ impl ArtifactStore for NoopArtifactStore {
 fn env() -> LiveIoEnv {
     LiveIoEnv {
         stores: Stores {
-            streams: Arc::new(NoopEventStore),
+            streams: Arc::new(NoopStreamStore),
             artifacts: Arc::new(NoopArtifactStore),
         },
         run_id: RunId(uuid::Uuid::new_v4()),

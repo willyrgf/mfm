@@ -145,8 +145,8 @@ All 6 crates have good crate-level docs but lack item-level documentation.
 
 | Crate | Crate Doc | Undocumented Items |
 |-------|-----------|-------------------|
-| `event-store-mem` | Good | `MemEventStore`, `new()` |
-| `event-store-postgres` | Good | `PostgresEventStore`, `connect()`, `connect_env()` |
+| `stream-store-mem` | Good | `MemStreamStore`, `new()` |
+| `stream-store-postgres` | Good | `PostgresStreamStore`, `connect()`, `connect_env()` |
 | `artifact-store-fs` | Good | `FsArtifactStore`, `new()` |
 | `artifact-store-s3` | Good | `S3ArtifactStore`, `new()`, `from_env()` |
 | `artifact-store-secret` | Good | `SecretKey` (all methods), `SecretArtifactStore` (all methods) |

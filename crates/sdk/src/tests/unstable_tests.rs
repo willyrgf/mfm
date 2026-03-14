@@ -58,12 +58,12 @@ impl DynContext for MapContext {
 }
 
 #[derive(Clone, Default)]
-struct MemEventStore {
+struct MemStreamStore {
     inner: Arc<Mutex<HashMap<StreamId, Vec<StreamRecord>>>>,
 }
 
 #[async_trait]
-impl StreamStore for MemEventStore {
+impl StreamStore for MemStreamStore {
     async fn head_seq(
         &self,
         stream_id: &StreamId,
@@ -82,7 +82,7 @@ impl StreamStore for MemEventStore {
         let head = stream.last().map(|record| record.seq).unwrap_or(0);
         if head != append.expected_seq {
             return Err(mfm_machine::errors::StorageError::Concurrency(info(
-                "event_store_concurrency",
+                "stream_store_concurrency",
                 ErrorCategory::Storage,
                 false,
                 "head seq did not match expected seq",
@@ -117,7 +117,7 @@ impl StreamStore for MemEventStore {
                 .unwrap_or(0);
             if head != append.expected_seq {
                 return Err(mfm_machine::errors::StorageError::Concurrency(info(
-                    "event_store_concurrency",
+                    "stream_store_concurrency",
                     ErrorCategory::Storage,
                     false,
                     "head seq did not match expected seq",
@@ -592,7 +592,7 @@ async fn launcher_rejects_secrets_in_manifest_input() {
     let engine: Arc<dyn ExecutionEngine> =
         Arc::new(DefaultExecutionEngine::new(Arc::new(NeverResolver)));
     let stores = Stores {
-        streams: Arc::new(MemEventStore::default()),
+        streams: Arc::new(MemStreamStore::default()),
         artifacts: Arc::new(MemArtifactStore::default()),
     };
 
@@ -693,7 +693,7 @@ async fn namespacing_prevents_context_collisions_and_wires_imports() {
     let engine: Arc<dyn ExecutionEngine> =
         Arc::new(DefaultExecutionEngine::new(Arc::new(NeverResolver)));
     let stores = Stores {
-        streams: Arc::new(MemEventStore::default()),
+        streams: Arc::new(MemStreamStore::default()),
         artifacts: Arc::new(MemArtifactStore::default()),
     };
 
@@ -841,7 +841,7 @@ async fn single_op_report_returns_typed_report() {
     ));
     let engine: Arc<dyn ExecutionEngine> = Arc::new(DefaultExecutionEngine::new(resolver));
     let stores = Stores {
-        streams: Arc::new(MemEventStore::default()),
+        streams: Arc::new(MemStreamStore::default()),
         artifacts: Arc::new(MemArtifactStore::default()),
     };
 
@@ -886,7 +886,7 @@ async fn single_op_report_errors_when_report_key_missing() {
     ));
     let engine: Arc<dyn ExecutionEngine> = Arc::new(DefaultExecutionEngine::new(resolver));
     let stores = Stores {
-        streams: Arc::new(MemEventStore::default()),
+        streams: Arc::new(MemStreamStore::default()),
         artifacts: Arc::new(MemArtifactStore::default()),
     };
 
@@ -995,7 +995,7 @@ async fn single_op_report_maps_failed_run_state_error() {
     ));
     let engine: Arc<dyn ExecutionEngine> = Arc::new(DefaultExecutionEngine::new(resolver));
     let stores = Stores {
-        streams: Arc::new(MemEventStore::default()),
+        streams: Arc::new(MemStreamStore::default()),
         artifacts: Arc::new(MemArtifactStore::default()),
     };
 

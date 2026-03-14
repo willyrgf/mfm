@@ -256,12 +256,12 @@ Run operations are available under the `run` subcommand.
 
 These commands are intended for parity/integration testing and early workflows. They currently use:
 
-- a PostgreSQL-backed event store (requires `DATABASE_URL` or `--database-url`)
+- a PostgreSQL-backed stream store (requires `DATABASE_URL` or `--database-url`)
 - a filesystem artifact store (defaults to `$MFM_ARTIFACT_ROOT` or `~/.mfm/run_artifacts`, or use `--artifact-root`)
 
 Run commands and REST API run endpoints are backed by the same shared feature catalog/runtime layer (`mfm-app`) to keep both entrypoints behaviorally aligned.
 
-Keystore tx commands are also run-backed and use the same shared op registry; they intentionally keep domain execution out of `bin/cli`. They use ephemeral in-memory event storage (no `DATABASE_URL` requirement) plus filesystem artifacts.
+Keystore tx commands are also run-backed and use the same shared op registry; they intentionally keep domain execution out of `bin/cli`. They use ephemeral in-memory stream storage (no `DATABASE_URL` requirement) plus filesystem artifacts.
 
 ### `run start`
 
@@ -347,13 +347,14 @@ Shows run status without executing states.
 mfm_cli run status <RUN_ID> [OPTIONS]
 ```
 
-### `run events`
+### `run stream`
 
-Prints run events from the event store.
+Prints run stream records from the stream store.
+For `run:*`, these records encode machine event payloads.
 
 **Usage:**
 ```sh
-mfm_cli run events <RUN_ID> [OPTIONS]
+mfm_cli run stream <RUN_ID> [OPTIONS]
 ```
 
 **Key Options:**
@@ -384,7 +385,7 @@ Starts the canonical portfolio snapshot flow from a full request object containi
 - `valuation_source_registry`
 
 **Requirements:**
-- `DATABASE_URL` (event store)
+- `DATABASE_URL` (stream store)
 - EVM source configuration (`MFM_EVM_RPC_SOURCES_JSON`, or legacy `MFM_EVM_RPC_URL`)
 
 **Usage:**

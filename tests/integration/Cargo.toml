@@ -26,6 +26,6 @@ mfm-machine-test-support = { path = "../../crates/machine-test-support" }
 
 mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
 mfm-artifact-store-s3 = { path = "../../crates/storages/artifact-store-s3" }
-mfm-event-store-mem = { path = "../../crates/storages/event-store-mem" }
-mfm-event-store-postgres = { path = "../../crates/storages/event-store-postgres" }
+mfm-stream-store-mem = { path = "../../crates/storages/stream-store-mem" }
+mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-collectors-evm-jsonrpc-http = { path = "../../crates/collectors/evm-jsonrpc-http" }

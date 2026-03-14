@@ -8,11 +8,11 @@
 //! # Examples
 //!
 //! ```no_run
-//! use mfm_event_store_postgres::PostgresEventStore;
+//! use mfm_stream_store_postgres::PostgresStreamStore;
 //!
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> Result<(), mfm_machine::errors::StorageError> {
-//! let _store = PostgresEventStore::connect("postgres://postgres:postgres@localhost/mfm").await?;
+//! let _store = PostgresStreamStore::connect("postgres://postgres:postgres@localhost/mfm").await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -27,16 +27,16 @@ use tokio::sync::Mutex;
 use tokio_postgres::{Client, NoTls, Transaction};
 use tracing::{debug, info, warn};
 
-/// PostgreSQL-backed append-only event store.
+/// PostgreSQL-backed append-only stream store.
 #[derive(Clone)]
-pub struct PostgresEventStore {
+pub struct PostgresStreamStore {
     client: Arc<Mutex<Client>>,
 }
 
-impl PostgresEventStore {
+impl PostgresStreamStore {
     /// Connects to PostgreSQL, initializes the schema, and returns a ready store.
     pub async fn connect(database_url: &str) -> Result<Self, StorageError> {
-        info!("connecting postgres event store");
+        info!("connecting postgres stream store");
         let (client, connection) = tokio_postgres::connect(database_url, NoTls)
             .await
             .map_err(|_| StorageError::Other(Self::info("pg_connect_failed", "connect failed")))?;
@@ -50,7 +50,7 @@ impl PostgresEventStore {
             client: Arc::new(Mutex::new(client)),
         };
         store.init().await?;
-        info!("postgres event store connected");
+        info!("postgres stream store connected");
         Ok(store)
     }
 
@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS mfm_stream_records (
             .batch_execute(ddl)
             .await
             .map_err(|_| StorageError::Other(Self::info("pg_init_failed", "init failed")))?;
-        debug!("postgres event store schema ensured");
+        debug!("postgres stream store schema ensured");
         Ok(())
     }
 
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS mfm_stream_records (
     }
 
     fn concurrency(message: impl Into<String>) -> StorageError {
-        StorageError::Concurrency(Self::info("event_store_concurrency", message))
+        StorageError::Concurrency(Self::info("stream_store_concurrency", message))
     }
 
     fn other(code: &'static str, message: impl Into<String>) -> StorageError {
@@ -152,7 +152,7 @@ CREATE TABLE IF NOT EXISTS mfm_stream_records (
 }
 
 #[async_trait]
-impl StreamStore for PostgresEventStore {
+impl StreamStore for PostgresStreamStore {
     async fn head_seq(&self, stream_id: &StreamId) -> Result<u64, StorageError> {
         let row = self
             .client

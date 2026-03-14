@@ -28,11 +28,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 #[derive(Clone, Default)]
-struct MemEventStore {
+struct MemStreamStore {
     inner: Arc<Mutex<HashMap<StreamId, Vec<StreamRecord>>>>,
 }
 
-impl MemEventStore {
+impl MemStreamStore {
     async fn append_run_events(
         &self,
         run_id: RunId,
@@ -84,7 +84,7 @@ impl MemEventStore {
 }
 
 #[async_trait]
-impl StreamStore for MemEventStore {
+impl StreamStore for MemStreamStore {
     async fn head_seq(&self, stream_id: &StreamId) -> Result<u64, StorageError> {
         let inner = self.inner.lock().await;
         Ok(inner
@@ -100,7 +100,7 @@ impl StreamStore for MemEventStore {
         let head = stream.last().map(|record| record.seq).unwrap_or(0);
         if head != append.expected_seq {
             return Err(StorageError::Concurrency(info(
-                "event_store_concurrency",
+                "stream_store_concurrency",
                 ErrorCategory::Storage,
                 "head seq did not match expected seq",
             )));
@@ -136,7 +136,7 @@ impl StreamStore for MemEventStore {
                 .unwrap_or(0);
             if head != append.expected_seq {
                 return Err(StorageError::Concurrency(info(
-                    "event_store_concurrency",
+                    "stream_store_concurrency",
                     ErrorCategory::Storage,
                     "head seq did not match expected seq",
                 )));
@@ -538,10 +538,10 @@ async fn assert_no_secret_bytes_in_artifacts(artifacts: &MemArtifactStore, needl
 
 #[tokio::test]
 async fn secrets_in_initial_context_are_rejected_and_not_persisted() {
-    let events = Arc::new(MemEventStore::default());
+    let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = Stores {
-        streams: events.clone(),
+        streams: streams.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -607,16 +607,16 @@ async fn secrets_in_initial_context_are_rejected_and_not_persisted() {
     }
 
     // No event stream was created, and no artifact contains the secret.
-    assert!(events.inner.lock().await.is_empty());
+    assert!(streams.inner.lock().await.is_empty());
     assert_no_secret_bytes_in_artifacts(&artifacts, &[SECRET_MNEMONIC, "mnemonic"]).await;
 }
 
 #[tokio::test]
 async fn state_failed_error_messages_are_redacted_before_persisting() {
-    let events = Arc::new(MemEventStore::default());
+    let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = Stores {
-        streams: events.clone(),
+        streams: streams.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -668,7 +668,7 @@ async fn state_failed_error_messages_are_redacted_before_persisting() {
 
     assert_eq!(r.phase, RunPhase::Failed);
 
-    let stream = events
+    let stream = streams
         .read_run_stream(r.run_id, 1, None)
         .await
         .expect("read");
@@ -689,10 +689,10 @@ async fn state_failed_error_messages_are_redacted_before_persisting() {
 
 #[tokio::test]
 async fn domain_events_with_secrets_are_rejected() {
-    let events = Arc::new(MemEventStore::default());
+    let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = Stores {
-        streams: events.clone(),
+        streams: streams.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -745,7 +745,7 @@ async fn domain_events_with_secrets_are_rejected() {
 
     assert_eq!(r.phase, RunPhase::Failed);
 
-    let stream = events
+    let stream = streams
         .read_run_stream(r.run_id, 1, None)
         .await
         .expect("read");
@@ -758,10 +758,10 @@ async fn domain_events_with_secrets_are_rejected() {
 
 #[tokio::test]
 async fn fact_payloads_with_secrets_are_rejected() {
-    let events = Arc::new(MemEventStore::default());
+    let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = Stores {
-        streams: events.clone(),
+        streams: streams.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -815,7 +815,7 @@ async fn fact_payloads_with_secrets_are_rejected() {
 
     assert_eq!(r.phase, RunPhase::Failed);
 
-    let stream = events
+    let stream = streams
         .read_run_stream(r.run_id, 1, None)
         .await
         .expect("read");
@@ -832,10 +832,10 @@ async fn fact_payloads_with_secrets_are_rejected() {
 
 #[tokio::test]
 async fn start_then_resume_retries_orphan_attempt_from_base_snapshot() {
-    let events = Arc::new(MemEventStore::default());
+    let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        streams: events.clone(),
+        streams: streams.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -902,7 +902,7 @@ async fn start_then_resume_retries_orphan_attempt_from_base_snapshot() {
             .expect("read snapshot");
     assert_eq!(snapshot, serde_json::json!({"x": 1}));
 
-    let stream = events
+    let stream = streams
         .read_run_stream(r1.run_id, 1, None)
         .await
         .expect("read");
@@ -913,7 +913,7 @@ async fn start_then_resume_retries_orphan_attempt_from_base_snapshot() {
                 state_id: sid,
                 attempt,
                 ..
-            }) if sid == &state_id => Some(*attempt),
+            }) if *sid == state_id => Some(*attempt),
             _ => None,
         })
         .collect();
@@ -964,10 +964,10 @@ impl State for FlakyRetryableState {
 
 #[tokio::test]
 async fn retry_policy_retries_retryable_errors() {
-    let events = Arc::new(MemEventStore::default());
+    let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        streams: events.clone(),
+        streams: streams.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1020,7 +1020,7 @@ async fn retry_policy_retries_retryable_errors() {
         .expect("start");
     assert_eq!(r.phase, RunPhase::Completed);
 
-    let stream = events
+    let stream = streams
         .read_run_stream(r.run_id, 1, None)
         .await
         .expect("read");
@@ -1031,7 +1031,7 @@ async fn retry_policy_retries_retryable_errors() {
                 state_id: sid,
                 attempt,
                 ..
-            }) if sid == &state_id => Some(*attempt),
+            }) if *sid == state_id => Some(*attempt),
             _ => None,
         })
         .collect();
@@ -1040,10 +1040,10 @@ async fn retry_policy_retries_retryable_errors() {
 
 #[tokio::test]
 async fn rejects_fanout_join_execution_mode() {
-    let events = Arc::new(MemEventStore::default());
+    let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        streams: events.clone(),
+        streams: streams.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1101,10 +1101,10 @@ async fn rejects_fanout_join_execution_mode() {
 
 #[tokio::test]
 async fn skip_tags_skips_tagged_states_without_running_handler() {
-    let events = Arc::new(MemEventStore::default());
+    let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        streams: events.clone(),
+        streams: streams.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1183,7 +1183,7 @@ async fn skip_tags_skips_tagged_states_without_running_handler() {
             .expect("read snapshot");
     assert_eq!(snapshot, serde_json::json!({"x": 1}));
 
-    let stream = events
+    let stream = streams
         .read_run_stream(r.run_id, 1, None)
         .await
         .expect("read");
@@ -1196,20 +1196,20 @@ async fn skip_tags_skips_tagged_states_without_running_handler() {
             Event::Kernel(KernelEvent::StateCompleted {
                 state_id,
                 context_snapshot_id,
-            }) if state_id == &s1 => {
+            }) if *state_id == s1 => {
                 s1_snapshot = Some(context_snapshot_id.clone());
             }
             Event::Kernel(KernelEvent::StateEntered {
                 state_id,
                 base_snapshot_id,
                 ..
-            }) if state_id == &s2 => {
+            }) if *state_id == s2 => {
                 s2_enter_base = Some(base_snapshot_id.clone());
             }
             Event::Kernel(KernelEvent::StateCompleted {
                 state_id,
                 context_snapshot_id,
-            }) if state_id == &s2 => {
+            }) if *state_id == s2 => {
                 s2_completed_snapshot = Some(context_snapshot_id.clone());
             }
             _ => {}
@@ -1224,10 +1224,10 @@ async fn skip_tags_skips_tagged_states_without_running_handler() {
 
 #[tokio::test]
 async fn crash_resume_orphan_attempt_reuses_facts() {
-    let events = Arc::new(MemEventStore::default());
+    let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        streams: events.clone(),
+        streams: streams.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1302,7 +1302,7 @@ async fn crash_resume_orphan_attempt_reuses_facts() {
             .expect("read snapshot");
     assert_eq!(snapshot, serde_json::json!({"x": 1}));
 
-    let stream = events
+    let stream = streams
         .read_run_stream(r1.run_id, 1, None)
         .await
         .expect("read");
@@ -1313,7 +1313,7 @@ async fn crash_resume_orphan_attempt_reuses_facts() {
                 state_id: sid,
                 attempt,
                 ..
-            }) if sid == &state_id => Some(*attempt),
+            }) if *sid == state_id => Some(*attempt),
             _ => None,
         })
         .collect();
@@ -1448,10 +1448,10 @@ impl State for RecordFactThenFailOnce {
 
 #[tokio::test]
 async fn facts_are_single_assignment_and_reused_across_retries() {
-    let events = Arc::new(MemEventStore::default());
+    let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        streams: events.clone(),
+        streams: streams.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1514,7 +1514,7 @@ async fn facts_are_single_assignment_and_reused_across_retries() {
         "transport call should be deduped by fact key"
     );
 
-    let stream = events
+    let stream = streams
         .read_run_stream(r.run_id, 1, None)
         .await
         .expect("read");
@@ -1565,10 +1565,10 @@ impl State for TimeAndRandomState {
 
 #[tokio::test]
 async fn time_and_random_are_recorded_as_facts() {
-    let events = Arc::new(MemEventStore::default());
+    let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        streams: events.clone(),
+        streams: streams.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1619,7 +1619,7 @@ async fn time_and_random_are_recorded_as_facts() {
         .expect("start");
     assert_eq!(r.phase, RunPhase::Completed);
 
-    let stream = events
+    let stream = streams
         .read_run_stream(r.run_id, 1, None)
         .await
         .expect("read");
@@ -1645,10 +1645,10 @@ async fn time_and_random_are_recorded_as_facts() {
 
 #[tokio::test]
 async fn replay_mode_serves_recorded_facts_without_live_io() {
-    let events = Arc::new(MemEventStore::default());
+    let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        streams: events.clone(),
+        streams: streams.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1693,7 +1693,7 @@ async fn replay_mode_serves_recorded_facts_without_live_io() {
     };
 
     let run_id = RunId(uuid::Uuid::new_v4());
-    events
+    streams
         .append_run_events(
             run_id,
             0,
@@ -1791,10 +1791,10 @@ impl State for ReplayMissingFactState {
 
 #[tokio::test]
 async fn replay_mode_missing_fact_fails_without_live_io() {
-    let events = Arc::new(MemEventStore::default());
+    let streams = Arc::new(MemStreamStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        streams: events.clone(),
+        streams: streams.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1820,7 +1820,7 @@ async fn replay_mode_missing_fact_fails_without_live_io() {
         .expect("initial snapshot");
 
     let run_id = RunId(uuid::Uuid::new_v4());
-    events
+    streams
         .append_run_events(
             run_id,
             0,

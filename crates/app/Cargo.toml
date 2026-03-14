@@ -32,7 +32,7 @@ mfm-state-portfolio = { path = "../states/portfolio" }
 mfm-state-symbol = { path = "../states/symbol" }
 mfm-artifact-store-fs = { path = "../storages/artifact-store-fs" }
 mfm-artifact-store-s3 = { path = "../storages/artifact-store-s3" }
-mfm-event-store-postgres = { path = "../storages/event-store-postgres" }
+mfm-stream-store-postgres = { path = "../storages/stream-store-postgres" }
 
 [dev-dependencies]
 async-trait = { workspace = true }

@@ -9,7 +9,6 @@ use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_collectors_evm_jsonrpc_http::{
     EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmSourceKind,
 };
-use mfm_event_store_postgres::PostgresEventStore;
 use mfm_integration_tests::parity_run_ids::write_parity_evm_run_id;
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
@@ -28,6 +27,7 @@ use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::DefaultRunLauncher;
+use mfm_stream_store_postgres::PostgresStreamStore;
 
 #[derive(Default)]
 struct MapContext {
@@ -98,7 +98,7 @@ fn contract_artifact_program_path() -> String {
 
 async fn rpc_call(
     rpc_url: &str,
-    events: Arc<dyn StreamStore>,
+    streams: Arc<dyn StreamStore>,
     artifacts: Arc<dyn ArtifactStore>,
     method: &str,
     params: serde_json::Value,
@@ -115,10 +115,7 @@ async fn rpc_call(
         ..EvmJsonRpcHttpConfig::default()
     });
     let env = LiveIoEnv {
-        stores: Stores {
-            streams: events,
-            artifacts,
-        },
+        stores: Stores { streams, artifacts },
         run_id: RunId(uuid::Uuid::new_v4()),
         state_id: StateId::must_new("rpc.helper.call".to_string()),
         attempt: 0,
@@ -143,10 +140,10 @@ async fn rpc_call(
         })
 }
 
-async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> PostgresEventStore {
+async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> PostgresStreamStore {
     let mut last_err: Option<mfm_machine::errors::StorageError> = None;
     for _ in 0..max_attempts {
-        match PostgresEventStore::connect_env().await {
+        match PostgresStreamStore::connect_env().await {
             Ok(pg) => return pg,
             Err(err) => {
                 last_err = Some(err);
@@ -170,7 +167,7 @@ async fn parity_reth_pipeline_contract_from_nix() {
     init_test_observability();
 
     let pg = connect_postgres_with_retry(20, 250).await;
-    let events: Arc<dyn StreamStore> = Arc::new(pg);
+    let streams: Arc<dyn StreamStore> = Arc::new(pg);
 
     let s3 = S3ArtifactStore::from_env().expect("s3 config");
     s3.ensure_bucket_exists().await.expect("bucket exists");
@@ -180,7 +177,7 @@ async fn parity_reth_pipeline_contract_from_nix() {
 
     let accounts = rpc_call(
         &rpc_url,
-        Arc::clone(&events),
+        Arc::clone(&streams),
         Arc::clone(&artifacts),
         "eth_accounts",
         serde_json::json!([]),
@@ -197,7 +194,7 @@ async fn parity_reth_pipeline_contract_from_nix() {
 
     let chain_id_hex = rpc_call(
         &rpc_url,
-        Arc::clone(&events),
+        Arc::clone(&streams),
         Arc::clone(&artifacts),
         "eth_chainId",
         serde_json::json!([]),
@@ -287,7 +284,7 @@ async fn parity_reth_pipeline_contract_from_nix() {
         .start_pipeline(
             Arc::clone(&bundle.engine),
             Stores {
-                streams: Arc::clone(&events),
+                streams: Arc::clone(&streams),
                 artifacts: Arc::clone(&artifacts),
             },
             Arc::clone(&bundle.registry),
@@ -355,12 +352,12 @@ async fn parity_reth_pipeline_contract_from_nix() {
         .expect("validate client version");
     assert!(client_version.to_ascii_lowercase().contains("reth"));
 
-    let head = events
+    let head = streams
         .head_seq(&StreamId::run(run.run_id))
         .await
         .expect("head seq");
     assert!(head > 0);
-    let stream = events
+    let stream = streams
         .read_range(&StreamId::run(run.run_id), 1, None)
         .await
         .and_then(|records| event_envelopes_from_stream_records(run.run_id, records))

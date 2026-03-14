@@ -7,9 +7,9 @@
 //! # Examples
 //!
 //! ```rust
-//! use mfm_event_store_mem::MemEventStore;
+//! use mfm_stream_store_mem::MemStreamStore;
 //!
-//! let _store = MemEventStore::new();
+//! let _store = MemStreamStore::new();
 //! ```
 
 use std::collections::HashMap;
@@ -23,12 +23,12 @@ use tokio::sync::Mutex;
 
 /// In-memory append-only stream store keyed by [`StreamId`].
 #[derive(Clone, Default)]
-pub struct MemEventStore {
+pub struct MemStreamStore {
     inner: Arc<Mutex<HashMap<StreamId, Vec<StreamRecord>>>>,
 }
 
-impl MemEventStore {
-    /// Creates an empty in-memory event store.
+impl MemStreamStore {
+    /// Creates an empty in-memory stream store.
     pub fn new() -> Self {
         Self::default()
     }
@@ -44,11 +44,11 @@ impl MemEventStore {
     }
 
     fn concurrency(message: impl Into<String>) -> StorageError {
-        StorageError::Concurrency(Self::info("event_store_concurrency", message))
+        StorageError::Concurrency(Self::info("stream_store_concurrency", message))
     }
 
     fn other(message: impl Into<String>) -> StorageError {
-        StorageError::Other(Self::info("event_store_mem", message))
+        StorageError::Other(Self::info("stream_store_mem", message))
     }
 
     fn validate_append(append: &StreamAppend) -> Result<(), StorageError> {
@@ -73,7 +73,7 @@ impl MemEventStore {
 }
 
 #[async_trait]
-impl StreamStore for MemEventStore {
+impl StreamStore for MemStreamStore {
     async fn head_seq(&self, stream_id: &StreamId) -> Result<u64, StorageError> {
         let inner = self.inner.lock().await;
         Ok(inner
