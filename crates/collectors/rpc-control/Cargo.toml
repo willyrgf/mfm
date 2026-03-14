@@ -1,0 +1,16 @@
+[package]
+name = "mfm-collectors-rpc-control"
+version = "0.1.0"
+edition = "2021"
+description = "Typed rpc.control client adapters for managed network IO"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+mfm-machine = { path = "../../machine", version = "0.1.0" }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true }

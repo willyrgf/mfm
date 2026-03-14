@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
+use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall};
 use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{FactKey, StateId};

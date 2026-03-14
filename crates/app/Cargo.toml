@@ -13,13 +13,13 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"
 
 mfm-machine = { path = "../machine" }
 mfm-sdk = { path = "../sdk" }
-mfm-collectors-evm-jsonrpc-http = { path = "../collectors/evm-jsonrpc-http" }
 mfm-collectors-nix-exec = { path = "../collectors/nix-exec" }
 mfm-op-proof = { path = "../ops/proof-op" }
 mfm-transports-local-fs = { path = "../transports/local-fs" }
 mfm-transports-local-evm = { path = "../transports/local-evm" }
 mfm-transports-local-keystore = { path = "../transports/local-keystore" }
 mfm-transports-proof = { path = "../transports/proof" }
+mfm-transports-rpc-control = { path = "../transports/rpc-control" }
 mfm-op-keystore-tx = { path = "../ops/keystore-tx-op" }
 mfm-op-keystore-admin = { path = "../ops/keystore-admin-op" }
 mfm-op-evm-read = { path = "../ops/evm-read-op" }

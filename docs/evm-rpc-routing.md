@@ -1,163 +1,121 @@
 # EVM RPC Routing
 
-Status: implemented and validated in repository (2026-02-19).
+Status: `rpc.control` is the canonical state-facing RPC ingress in the default app bundle.
 
-This document is the operator and contributor runbook for the `namespace="evm"` live IO routing
-path implemented in this repository.
+This document is the operator and contributor runbook for two related surfaces:
+
+- `namespace = "rpc.control"`: the canonical managed ingress used by shared runtime states and
+  built-in app flows
+- `namespace = "evm"`: the internal/direct executor surface retained for explicit low-level tests
+  and control-plane internals
 
 Normative architecture references:
 - `docs/redesign.md`
 - `docs/architecture.md`
+- `RPC_CONTROL_PLANE_WIRE_UP.md`
 
-## 1. Transport Contract
+## 1. Canonical Runtime Contract
 
-The state-facing IO namespace remains unchanged:
-- `namespace = "evm"`
+Canonical runtime callers should use `rpc.control`.
 
-Transport request envelope:
+Managed EVM read/write request envelope:
 
 ```json
 {
+  "kind": "evm_call",
+  "network_id": "ethereum-mainnet",
   "method": "eth_chainId",
-  "params": [],
-  "route": { "source_id": "helios_local" }
+  "params": []
+}
+```
+
+Control-plane preflight/setup request envelope:
+
+```json
+{
+  "kind": "prepare_sources",
+  "network_id": "ethereum-mainnet"
 }
 ```
 
 Notes:
-- `route.source_id` is optional.
-- Per-request `rpc_url` override is rejected for all EVM calls with `evm_request_invalid`.
-- URL/auth values are runtime-only config and are never persisted in facts/events/artifacts.
+- Canonical callers should supply `network_id` whenever they know the stable network context.
+- `route.source_id` remains available only as a migration/compatibility escape hatch. It is not the
+  final canonical read contract.
+- Per-request raw `rpc_url` overrides are rejected.
+- Canonical app wiring no longer exposes the raw `evm` transport as the default state-facing
+  routing authority.
 
-Routing analysis operation (local-only, no network dispatch):
+## 2. Bootstrap Source Configuration
 
-```json
-{
-  "method": "mfm_debugRoutingAnalysis",
-  "params": {
-    "method": "eth_chainId",
-    "params": [],
-    "route": { "source_id": "helios_local" }
-  }
-}
-```
+The control plane bootstraps its source catalog from runtime-only environment variables:
 
-Response includes:
-- target method metadata
-- resolved method class and dispatch mode
-- selected source order (or structured selection error details)
-- ranked source state snapshot (score, health, cooldown window, probe status)
-
-## 2. Runtime Source Configuration
-
-Primary source-pool configuration:
 - `MFM_EVM_RPC_SOURCES_JSON`: JSON array of source objects:
   - `id`
   - `rpc_url`
   - optional `authorization`
   - optional `kind` (`local`, `remote_user`, `remote_public`)
+  - optional `network_id`
   - optional `require_get_proof_probe`
-- `MFM_EVM_RPC_PREFERRED_ORDER`: comma-separated source IDs.
-- `MFM_EVM_RPC_STRATEGY`: `hedged_light` (default) or `failover`.
-- `MFM_EVM_RPC_HEDGE_DELAY_MS`: hedge delay for `hedged_light`.
-- `MFM_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS`: cooldown window after source failure.
-- `MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`: comma-separated IDs requiring `eth_getProof` probe.
-- `MFM_EVM_RPC_LOGS_MAX_BLOCK_SPAN`: initial max block span for `eth_getLogs` chunking.
-- `MFM_EVM_RPC_LOGS_MIN_BLOCK_SPAN`: minimum block span before chunking stops splitting.
-- `MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL`: retry/chunk budget cap for a single logs request.
+- `MFM_EVM_RPC_PREFERRED_ORDER`: comma-separated source IDs used as base ordering hints.
+- `MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`: comma-separated source IDs that must pass `eth_getProof`
+  probing.
 
-Compatibility fallback (single source):
-- `MFM_EVM_RPC_URL` and optional `MFM_EVM_RPC_AUTHORIZATION` map to source id `user_primary`.
+Compatibility fallback:
+- `MFM_EVM_RPC_URL`
+- `MFM_EVM_RPC_AUTHORIZATION`
 
-`tx-send-raw` write path source selection:
-- CLI arg: `--source-id`
-- env fallback: `MFM_EVM_RPC_SOURCE_ID`
+When only the legacy single-source fallback is configured, the control plane maps it to source id
+`user_primary`.
 
-## 3. Method Classification and Dispatch
+Legacy compatibility surface:
+- `MFM_EVM_RPC_SOURCE_ID` remains only for the low-level `keystore tx-send-raw` compatibility
+  command. It is not part of the canonical portfolio/symbol/Aave read contract.
 
-Methods are classified into:
-- `read_light`
-- `read_heavy`
-- `write_or_side_effect`
+## 3. Runtime Behavior
 
-Current policy:
-- `read_light`: optional two-source hedge (`hedged_light`) or failover (`failover` mode).
-- `read_heavy`: sequential failover only.
-- `write_or_side_effect`: primary-only single dispatch (no hedge, no cross-source write fanout).
-- `eth_getLogs`: adaptive chunking over block ranges with failover-only dispatch.
+`rpc.control` owns the managed path for:
 
-Classification highlights:
-- Heavy by default unless explicitly allowlisted.
-- Explicit heavy set includes `eth_getLogs`, `trace_*`, `debug_*`.
-- Write/side-effect includes `eth_sendRawTransaction`, `eth_sendTransaction`, and
-  `personal_*`/`admin_*`/`miner_*`/`txpool_*`/`engine_*`.
-- `eth_call` is downgraded to heavy when encoded params exceed threshold
-  (`hedge_max_eth_call_params_bytes`).
-- `eth_getLogs` chunking behavior:
-  - requires filter-based block range (`fromBlock`/`toBlock`)
-  - splits using `logs_max_block_span`
-  - on retryable failures, bisects down to `logs_min_block_span`
-  - enforces `logs_max_chunks_per_call` budget
+- source-pool membership bootstrap
+- source probing and capability checks
+- durable ranking snapshots
+- managed source selection for unpinned EVM calls
+- best-effort runtime observation writes after live calls
 
-## 4. Health, Probing, and Ordering
+Current managed behavior:
+- `prepare_sources` syncs membership, probes stale or missing sources, computes ranked order, and
+  persists source-pool state in the Postgres control-plane store.
+- `evm_call` selects a source from the durable pool unless the call is explicitly route-pinned for
+  compatibility reasons.
+- If multiple network-specific bootstrap catalogs exist, managed callers must provide `network_id`.
 
-Probes:
-- `eth_chainId`
-- `eth_blockNumber`
-- optional `eth_getProof` when required for selected sources
+The raw `evm` transport remains useful for:
 
-Health behavior:
-- Source failures can mark source unhealthy for a cooldown window.
-- Score decay/recovery is weighted by failure class and method class.
-- Unhealthy sources are skipped unless explicitly routed by `route.source_id` (which then returns
-  `evm_source_unhealthy` when unavailable).
+- the internal executor embedded by `mfm-transports-rpc-control`
+- explicit low-level routing/failover tests
+- direct helper code that intentionally exercises executor behavior outside the canonical app bundle
 
-Ordering when route hint is absent:
-1. health score (higher first)
-2. source kind priority (`local` preferred over remote kinds)
-3. configured base order (`MFM_EVM_RPC_PREFERRED_ORDER`)
+## 4. Error and Diagnostic Shape
 
-## 5. Stable Error Codes and Diagnostics
+Common `rpc.control` error codes include:
 
-Pool-related codes:
-- `evm_source_unhealthy`
-- `evm_no_healthy_source`
-- `evm_hedge_exhausted`
-- `evm_route_source_unknown`
-- `evm_logs_chunking_invalid_range`
-- `evm_logs_chunking_exhausted`
+- `rpc_control_no_sources`
+- `rpc_control_network_required`
+- `rpc_control_network_invalid`
+- `rpc_control_source_unknown`
+- `rpc_control_source_invalid`
+- `rpc_control_pool_invalid`
 
-Diagnostics rules:
-- Include safe source IDs and coarse error metadata only.
-- Never include full RPC URLs, authorization headers, or secret-bearing query parameters.
+`prepare_sources` returns ranked-source summaries that expose:
 
-Debug telemetry (when `LOG_LEVEL=debug` or equivalent filter enables this target):
-- call-level routing decision:
-  - `rpc_method`, `method_class`, `dispatch_mode`, `source_order`, `route_source_id`
-- per-request dispatch/result:
-  - `source_id`, `source_kind`, `rpc_endpoint`, `rpc_method`, `rpc_request_id`, `http_status`
-  - `rpc_endpoint` is sanitized to `scheme://host:port` only (no path/query/auth)
+- `available_source_ids`
+- `ranked_source_ids`
+- per-source health/cooldown/get-proof diagnostics
 
-## 6. Replay and Determinism
+## 5. Contributor Guidance
 
-No new state-facing client was introduced.
-
-Existing state logic continues to use the standard IO provider path:
-- live mode records facts
-- replay mode serves recorded facts
-
-Replay invariants validated:
-- failover/hedging live captures replay deterministically without new network calls
-- missing fact key behavior remains `MissingFactKey` with stable `missing_fact_key` code
-
-## 7. Migration Notes
-
-Breaking change:
-- Per-request EVM `rpc_url` request override is removed from runtime behavior.
-
-CLI migration for `keystore tx-send-raw`:
-- old: `--rpc-url <URL>`
-- new: `--source-id <ID>` (or `MFM_EVM_RPC_SOURCE_ID`)
-
-Report compatibility:
-- `keystore_tx_send_raw` still exposes `rpc_url_host` field name, but value carries source ID.
+- Shared runtime states should use the typed `mfm-collectors-rpc-control` client.
+- New canonical read APIs should pass `network_id`, not `rpc_source_id`.
+- New canonical write APIs should not introduce fresh caller-controlled source selection.
+- If you need to test raw executor behavior directly, do so explicitly and document that it is a
+  direct/internal test rather than a canonical app-routing path.

@@ -230,6 +230,8 @@ mfm_cli --output-format json keystore tx-sign \
 
 Submits a signed raw transaction from file using `eth_sendRawTransaction`.
 
+This is a low-level compatibility command, not the final managed control-plane submit API.
+
 Implementation note: this command is a thin wrapper over a run-backed op (`op_id = "keystore_tx_send_raw"`, `op_version = "v1"`). The CLI maps args to op input and calls `mfm_sdk::unstable::execute_single_op_report` to launch and decode the final report payload.
 
 The command output includes `tx_hash`, `rpc_url_host`, and `submitted_at`; it does not print raw tx payload contents. For compatibility, `rpc_url_host` now carries the routed source ID.
@@ -386,7 +388,7 @@ Starts the canonical portfolio snapshot flow from a full request object containi
 
 **Requirements:**
 - `DATABASE_URL` (stream store)
-- EVM source configuration (`MFM_EVM_RPC_SOURCES_JSON`, or legacy `MFM_EVM_RPC_URL`)
+- managed RPC bootstrap configuration (`MFM_EVM_RPC_SOURCES_JSON`, or legacy `MFM_EVM_RPC_URL`)
 
 **Usage:**
 ```sh
@@ -454,60 +456,49 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   export MFM_EVM_RPC_SOURCE_ID="user_primary"
   ```
 
-- **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON array of source objects for `namespace="evm"` live IO routing (source-id based). Runtime-only and never persisted.
+- **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON array of source objects used to bootstrap the canonical `rpc.control` source catalog. Runtime-only and never persisted.
   ```sh
   export MFM_EVM_RPC_SOURCES_JSON='[
-    {"id":"helios_local","rpc_url":"http://127.0.0.1:8545","kind":"local"},
+    {"id":"helios_local","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:8545","kind":"local"},
     {"id":"drpc_public","rpc_url":"https://eth.drpc.org","kind":"remote_public"}
   ]'
   ```
 
-- **`MFM_EVM_RPC_PREFERRED_ORDER`**: Optional comma-separated source IDs that set routing preference.
+- **`MFM_EVM_RPC_PREFERRED_ORDER`**: Optional comma-separated source IDs that seed canonical control-plane ranking order.
   ```sh
   export MFM_EVM_RPC_PREFERRED_ORDER="helios_local,drpc_public"
   ```
 
-- **`MFM_EVM_RPC_STRATEGY`**: Optional EVM routing strategy (`failover` or `hedged_light`; default `hedged_light`).
-  ```sh
-  export MFM_EVM_RPC_STRATEGY="hedged_light"
-  ```
-
-- **`MFM_EVM_RPC_HEDGE_DELAY_MS`**: Optional hedge delay (milliseconds) used by `hedged_light`.
-  ```sh
-  export MFM_EVM_RPC_HEDGE_DELAY_MS="120"
-  ```
-
-- **`MFM_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS`**: Optional unhealthy cooldown in logical call-count units.
-  ```sh
-  export MFM_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS="2"
-  ```
-
-- **`MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`**: Optional comma-separated source IDs that must pass `eth_getProof` probe.
+- **`MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`**: Optional comma-separated source IDs that must pass `eth_getProof` during control-plane bootstrap/probe.
   ```sh
   export MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS="helios_local"
   ```
 
-- **`MFM_EVM_RPC_LOGS_MAX_BLOCK_SPAN`**: Optional initial max block span for `eth_getLogs` chunking.
+- Legacy compatibility:
+  - **`MFM_EVM_RPC_URL`**: single-source bootstrap endpoint mapped as source id `user_primary`.
+  - **`MFM_EVM_RPC_AUTHORIZATION`**: optional Authorization header for that legacy single source.
+
+- Direct-executor compatibility knobs:
+  These still affect the internal `namespace="evm"` executor and direct executor tests. Canonical
+  `rpc.control` reads and writes should not rely on them for routing authority.
+  - **`MFM_EVM_RPC_STRATEGY`**: optional executor strategy (`failover` or `hedged_light`; default `hedged_light`).
+  - **`MFM_EVM_RPC_HEDGE_DELAY_MS`**: optional hedge delay (milliseconds) used by `hedged_light`.
+  - **`MFM_EVM_RPC_UNHEALTHY_COOLDOWN_CALLS`**: optional executor unhealthy cooldown in logical call-count units.
+  - **`MFM_EVM_RPC_LOGS_MAX_BLOCK_SPAN`**: optional initial max block span for `eth_getLogs` chunking.
+  - **`MFM_EVM_RPC_LOGS_MIN_BLOCK_SPAN`**: optional minimum block span for `eth_getLogs` adaptive split.
+  - **`MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL`**: optional chunk/retry budget for a single `eth_getLogs` request.
   ```sh
   export MFM_EVM_RPC_LOGS_MAX_BLOCK_SPAN="2000"
   ```
-
-- **`MFM_EVM_RPC_LOGS_MIN_BLOCK_SPAN`**: Optional minimum block span for `eth_getLogs` adaptive split.
   ```sh
   export MFM_EVM_RPC_LOGS_MIN_BLOCK_SPAN="64"
   ```
-
-- **`MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL`**: Optional chunk/retry budget for a single `eth_getLogs` request.
   ```sh
   export MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL="256"
   ```
 
-- Legacy compatibility:
-  - **`MFM_EVM_RPC_URL`**: single-source fallback endpoint mapped as source id `user_primary`.
-  - **`MFM_EVM_RPC_AUTHORIZATION`**: optional Authorization header for that legacy single source.
-
-- EVM transport note: per-request `rpc_url` override is not supported; routing is source-id based.
-- EVM routing runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)
+- Managed RPC note: per-request `rpc_url` override is not supported. Canonical routing enters through `rpc.control`; migration-only write paths may still pin `source_id`.
+- Managed RPC runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)
 
 ## Best Practices
 

@@ -73,6 +73,7 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | `mfm-artifact-store-fs` | Filesystem artifact store. | `crates/storages/artifact-store-fs` |
 | `mfm-artifact-store-s3` | S3-backed artifact store. | `crates/storages/artifact-store-s3` |
 | `mfm-artifact-store-secret` | Secret-wrapping artifact store. | `crates/storages/artifact-store-secret` |
+| `mfm-control-plane-postgres` | Durable RPC control-plane stream/projection storage. | `crates/storages/control-plane-postgres` |
 | `mfm-stream-store-mem` | In-memory stream store. | `crates/storages/stream-store-mem` |
 | `mfm-stream-store-postgres` | PostgreSQL stream store. | `crates/storages/stream-store-postgres` |
 | `mfm-indexer` | Projection/indexing support. | `crates/storages/indexer` |
@@ -82,7 +83,8 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | Package | Role | docs.rs | Workspace Path |
 | --- | --- | --- | --- |
 | `mfm-collectors-evm` | EVM collector traits and payloads. | <https://docs.rs/mfm-collectors-evm> | `crates/collectors/evm` |
-| `mfm-collectors-evm-jsonrpc-http` | HTTP JSON-RPC collector implementation for EVM. | pending | `crates/collectors/evm-jsonrpc-http` |
+| `mfm-collectors-evm-jsonrpc-http` | Internal/direct HTTP JSON-RPC executor for EVM. | pending | `crates/collectors/evm-jsonrpc-http` |
+| `mfm-collectors-rpc-control` | Typed `rpc.control` adapters for managed EVM RPC calls. | pending | `crates/collectors/rpc-control` |
 | `mfm-collectors-exec` | Command-execution collector interfaces. | pending | `crates/collectors/exec` |
 | `mfm-collectors-nix` | Nix evaluation collector interfaces. | pending | `crates/collectors/nix` |
 | `mfm-collectors-nix-exec` | Nix execution collector implementation. | pending | `crates/collectors/nix-exec` |
@@ -93,6 +95,7 @@ Ops stay thin and focus on graph composition and config validation. Most are sti
 | --- | --- | --- |
 | `mfm-transports-local-evm` | Local EVM signing and transaction transport. | `crates/transports/local-evm` |
 | `mfm-transports-local-fs` | Local filesystem transport helpers. | `crates/transports/local-fs` |
+| `mfm-transports-rpc-control` | Managed `rpc.control` transport over the internal EVM executor. | `crates/transports/rpc-control` |
 | `mfm-transports-local-keystore` | Local keystore-backed transport helpers. | `crates/transports/local-keystore` |
 | `mfm-transports-proof` | Proof transport helpers. | `crates/transports/proof` |
 

@@ -1914,7 +1914,6 @@ dependencies = [
  "hex",
  "mfm-artifact-store-fs",
  "mfm-artifact-store-s3",
- "mfm-collectors-evm-jsonrpc-http",
  "mfm-collectors-nix-exec",
  "mfm-machine",
  "mfm-op-aave-v3-origin-adapt",
@@ -1934,6 +1933,7 @@ dependencies = [
  "mfm-transports-local-fs",
  "mfm-transports-local-keystore",
  "mfm-transports-proof",
+ "mfm-transports-rpc-control",
  "serde",
  "serde_json",
  "tokio",
@@ -2061,6 +2061,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-collectors-rpc-control"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mfm-control-plane-postgres"
 version = "0.1.0"
 dependencies = [
@@ -2093,7 +2104,7 @@ dependencies = [
  "alloy-primitives",
  "async-trait",
  "chrono",
- "mfm-collectors-evm",
+ "mfm-collectors-rpc-control",
  "mfm-evm-core",
  "mfm-machine",
  "mfm-state-common",
@@ -2355,7 +2366,7 @@ dependencies = [
  "alloy-primitives",
  "async-trait",
  "hex",
- "mfm-collectors-evm",
+ "mfm-collectors-rpc-control",
  "mfm-evm-core",
  "mfm-evm-runtime",
  "mfm-machine",
@@ -2421,7 +2432,7 @@ name = "mfm-state-portfolio"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "mfm-collectors-evm",
+ "mfm-collectors-rpc-control",
  "mfm-evm-runtime",
  "mfm-machine",
  "mfm-state-common",
@@ -2441,7 +2452,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "async-trait",
- "mfm-collectors-evm",
+ "mfm-collectors-rpc-control",
  "mfm-evm-core",
  "mfm-evm-runtime",
  "mfm-machine",
@@ -2547,6 +2558,21 @@ dependencies = [
  "mfm-machine",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "mfm-transports-rpc-control"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mfm-collectors-evm-jsonrpc-http",
+ "mfm-collectors-rpc-control",
+ "mfm-control-plane-postgres",
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -20,7 +20,9 @@ The intended model should be:
 
 - `MFM_EVM_RPC_URL` and `MFM_EVM_RPC_SOURCES_JSON` are source-registration inputs only.
 - Application code, CLI code, REST code, ops, and parity tests should not select raw URLs directly.
-- All external EVM RPC requests should go through the routed EVM transport using source ids and route hints.
+- All canonical EVM RPC calls should go through `rpc.control`.
+- This includes reads, writes, setup, source probes, and source ranking updates.
+- The routed EVM transport should be an internal executor selected by `rpc.control`, not the public canonical ingress.
 - The routed transport should consult the RPC control plane for source health, probe capability, cooldown, and source selection.
 - The transport should then send the HTTP request directly to the selected endpoint.
 - The transport should append durable `rpc_source:*` observation and probe records back into the control plane after calls.
@@ -28,6 +30,10 @@ The intended model should be:
 In that model, the control plane does not need to be a separate HTTP proxy. It can remain an in-process routing decision layer backed by correctness-critical Postgres state.
 
 The important consequence is that `MFM_EVM_RPC_URL` is a bootstrap input for registering one available source, not a caller-facing escape hatch.
+
+Setting `MFM_EVM_RPC_URL` or `MFM_EVM_RPC_SOURCES_JSON` in a harness is therefore not itself a bug. The bug is letting canonical callers read those raw values directly, or letting env-derived config remain the routing authority instead of a control-plane setup/sync step.
+
+Likewise, `rpc_source_id` is best treated as a migration bridge, not a final canonical request contract. During cutover it is useful for replacing raw URLs with stable named sources such as `reth_local` and `helios_local`. After cutover, canonical request models should stop asking callers to choose source ids directly and let `rpc.control` select sources internally.
 
 This is also consistent with the existing transport contract that already rejects per-request `rpc_url` overrides in `crates/collectors/evm-jsonrpc-http/src/lib.rs`.
 
@@ -74,13 +80,18 @@ Examples include:
 
 This makes parity behavior process-local rather than control-plane-coordinated. Even if the control-plane store exists, parity runs do not depend on it for source health decisions.
 
-## 4. Shared parity CI wiring still exports a raw RPC URL for Reth
+## 4. Shared parity CI wiring still treats a raw RPC URL as the operative Reth contract
 
 The shared parity service environment in `nixfied/project/module.nix` exports:
 
 - `MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_HTTP_PORT"`
 
-This means the parity lane can talk to Reth directly via a raw URL without going through a named control-plane source.
+Exporting that bootstrap input is not inherently wrong.
+
+The problem is that the parity lane still treats the raw URL as the operative contract:
+
+- there is no required setup/sync step that turns that bootstrap input into control-plane-managed source state
+- parity code still reads the raw URL directly instead of going through named control-plane-managed sources
 
 The `ci-parity-evm-reth` task in `nixfied/project/module.nix` runs the parity integration tests under that environment.
 
@@ -114,7 +125,7 @@ That bypasses:
 - shared source registry behavior
 - any future control-plane-backed resolution logic unless those helpers are removed
 
-## 7. Several parity request payloads do not specify `rpc_source_id`
+## 7. During migration, several parity request payloads do not specify `rpc_source_id`
 
 Parity fixtures for portfolio and Aave requests often set:
 
@@ -131,7 +142,11 @@ The state logic does support routing hints via `rpc_source_id`:
 - portfolio state routing in `crates/states/portfolio/src/states.rs`
 - Aave portfolio routing in `crates/states/aave-v3/src/portfolio/states.rs`
 
-But parity fixtures are not consistently using that surface, so the parity lane is not asserting control-plane-managed source identity at the request boundary.
+During migration, this matters because named source ids are the safest bridge away from raw URL selection.
+
+This is not the final-state contract. In the final canonical design, request-level `rpc_source_id` disappears from normal read APIs and source selection moves into `rpc.control`.
+
+But parity fixtures are not even consistently using the transitional source-id surface today, so the parity lane is not yet asserting named source identity at the request boundary during cutover.
 
 ## 8. The legacy `user_primary` fallback weakens source identity guarantees
 
@@ -157,7 +172,7 @@ See `bin/cli/tests/parity_keystore_reth_tx_send.rs`.
 
 So even this path, which is closer to source-id routing than other parity tests, still depends on the legacy env fallback rather than an explicit control-plane-owned source identity.
 
-## 10. Helios parity wiring is better, but still env-configured rather than control-plane-backed
+## 10. Helios parity wiring is better, but still bootstrap-plus-route-hint rather than control-plane-backed
 
 The packaged Helios snapshot path in `nixfied/project/module.nix` sets:
 
@@ -170,7 +185,9 @@ and uses `helios_local` in the request payload.
 
 This is better than the Reth parity path because it uses an explicit source id.
 
-But it is still env-configured routing. It does not prove that the transport is consulting `ControlPlanePostgresStore` or writing `rpc_source:*` observations/probes to Postgres during parity execution.
+The remaining issue is not that bootstrap env is present. The issue is that parity still stops at env bootstrap plus a caller-selected source id.
+
+It does not prove that the transport is consulting `ControlPlanePostgresStore` or writing `rpc_source:*` observations/probes to Postgres during parity execution.
 
 ## 11. There is no enforcement that parity traffic updates control-plane state
 
@@ -188,24 +205,27 @@ There is no CI or test-level guard preventing parity code from:
 
 - reading `MFM_EVM_RPC_URL` directly
 - constructing explicit literal-URL `EvmJsonRpcHttpConfig` instances
-- leaving `rpc_source_id` unset in parity request fixtures
+- leaving `rpc_source_id` unset in parity request fixtures while source-id bridging remains in place
 
 That makes regressions easy even if some parts of the parity lane are later moved closer to the control plane.
 
-## 13. The current architecture boundary leaves an unresolved ownership question
+## 13. The current top-level architecture docs still leave the ownership boundary ambiguous
 
 The architecture doc says correctness-critical control-plane coordination belongs in the sibling Postgres storage crate and must not widen `StreamStore` in v1:
 
 - `docs/architecture.md`
 
-That boundary is reasonable, but it leaves an unresolved design decision:
+That boundary is reasonable, but the current top-level docs still do not make the intended ownership split explicit enough:
 
-- Does the control plane own only health/probe state?
-- Or does it also own source registration and endpoint metadata?
+- endpoint URLs and auth remain runtime bootstrap inputs only
+- durable control-plane state owns sanitized source identity, health/probe state, cooldown, and pool/ranking state
+- canonical callers should not treat bootstrap env as the routing authority
 
 Today endpoint URLs are still env-owned via `EvmJsonRpcSource` in `crates/collectors/evm-jsonrpc-http/src/lib.rs`, while health/probe persistence is isolated in `crates/storages/control-plane-postgres`.
 
-Until that ownership boundary is made explicit in code, parity cannot be said to be fully using the RPC control plane.
+The intended split is already described more clearly in `RPC_CONTROL_PLANE_WIRE_UP.md`, but `docs/architecture.md` has not yet been updated to make that boundary normative.
+
+Until that architecture contract is updated in the top-level docs and then implemented in code, parity cannot be said to be fully using the RPC control plane.
 
 ## Current Non-Control-Plane EVM RPC Usages
 
@@ -303,6 +323,10 @@ Current source-less request payloads include:
 
 Some of these are examples or non-parity fixtures, but they still normalize the idea that `rpc_source_id` may be omitted in EVM-facing requests.
 
+During migration that weakens the cutover away from raw URLs, because the bridge contract is supposed to move callers from direct URLs to stable named sources first.
+
+It should not be read as a claim that `rpc_source_id` is part of the final canonical API. In the final canonical design, request-level `rpc_source_id` disappears and `rpc.control` owns source choice.
+
 ### H. Transport-level integration tests that intentionally build direct source configs
 
 These tests build direct source registries from stub URLs:
@@ -346,9 +370,11 @@ This appendix turns the problem inventory into a concrete refactor sequence.
 The plan assumes the intended model above:
 
 - env-driven RPC URLs remain bootstrap source-registration inputs only
-- canonical callers use source ids and routed IO only
+- canonical callers use `rpc.control` and routed IO only
+- request-level `rpc_source_id` and route hints are transitional migration surfaces only
 - the control plane owns source health, probe capability, cooldown, and durable route state
 - the transport consults the control plane and then executes the HTTP request directly against the selected endpoint
+- setup, probes, ranking, reads, and writes are all part of the control-plane-owned path
 
 ### Phase 0. Lock The Contract First
 
@@ -359,16 +385,22 @@ Objective:
 Work:
 
 - treat `MFM_EVM_RPC_URL` as bootstrap-only, not a caller-facing contract
-- declare canonical local source ids for parity and local development:
+- declare canonical local source ids for setup/bootstrap only:
   - `reth_local`
   - `helios_local`
+- update the top-level architecture contract so:
+  - `rpc.control` is canonical ingress
+  - `evm` is executor-only
 - document that raw URL selection is not allowed in canonical runtime or parity code
 - document that transport-level stub tests may remain direct, but only as explicitly scoped test fixtures
+- document that `rpc_source_id` and route hints are migration-only and disappear from final canonical read APIs
+- document that source setup and ranking happen through `rpc.control` setup/probe/rank ops and workflows
 
 Files to update:
 
 - `RPC_CONTROL_PLANE_WIRE_UP.md`
 - `PROBLEMS_PARITY_RPC_CONTROL_PLANE.md`
+- `docs/architecture.md`
 - `docs/evm-rpc-routing.md`
 - `bin/cli/README.md`
 - `bin/rest-api/README.md`
@@ -388,6 +420,12 @@ Objective:
 Work:
 
 - add a control-plane-backed adapter around `EvmJsonRpcHttpTransportFactory`
+- add an idempotent startup setup step that syncs runtime source bootstrap config into durable
+  control-plane pool state
+- model that setup step as reusable states plus thin `rpc.control` setup ops/workflows, not as ad hoc
+  application boot code
+- add reusable probe and ranking ops/workflows that record response time per source and publish pool
+  ranking snapshots per network
 - before source selection:
   - read durable source state from the control plane
   - apply health, cooldown, and capability constraints from `mfm_rpc_source_state`
@@ -397,6 +435,7 @@ Work:
 - keep endpoint URL and authorization runtime-only
   - do not persist raw URLs or auth headers into control-plane storage
 - keep `evm-jsonrpc-http` as the HTTP executor, not the durable routing authority
+- keep any source-id-based bridging explicitly transitional
 
 Primary code areas:
 
@@ -413,6 +452,8 @@ Exit criteria:
 
 - EVM source selection and probe state are no longer purely process-local
 - successful and failed live calls update `rpc_source:*` durable records
+- startup source setup is idempotent and required before canonical request handling
+- ranking snapshots are durable and reusable across later canonical RPC calls
 
 ### Phase 2. Rebind App Bootstrap And Canonical Runtime Surfaces
 
@@ -423,9 +464,10 @@ Objective:
 Work:
 
 - replace env-only transport bootstrap in `mfm-app`
-- make canonical app startup validate source registration through the control-plane-backed path
+- make canonical app startup run control-plane source setup before request handling
+- make canonical app startup run control-plane probe and ranking workflows before request handling
 - remove env-only assumptions from higher-level fail-fast checks
-- keep route hints/source ids as the caller-facing contract
+- begin migrating callers away from route hints/source ids entirely
 
 Primary code areas:
 
@@ -438,7 +480,7 @@ Primary code areas:
 Exit criteria:
 
 - canonical app/CLI/REST entrypoints no longer treat env-only source resolution as the authority
-- canonical write/read surfaces use the control-plane-backed routed transport
+- canonical write/read surfaces use `rpc.control` or the transitional bridge toward it
 
 ### Phase 3. Migrate Parity Harness And Local Task Wiring
 
@@ -449,13 +491,15 @@ Objective:
 Work:
 
 - update parity env wiring to export canonical source ids and source registries, not raw-URL-only contracts
-- add parity bootstrap that seeds the control-plane source rows required for:
+- add parity bootstrap workflow that seeds the control-plane source rows required for:
   - `reth_local`
   - `helios_local`
-- replace raw curl-based parity probes with routed or control-plane-aware checks
+- replace raw curl-based parity probes with `rpc.control` setup/probe/rank workflows and
+  control-plane-aware checks
 - decide whether direct forge-based deploy tooling stays:
-  - if yes, mark it explicitly direct/non-canonical
-  - if no, migrate it to routed control-plane-backed submission
+  - if it remains temporarily, keep it outside the canonical managed path
+  - final milestone should migrate it to control-plane-backed submission or remove it from the
+    canonical workflow
 
 Primary code areas:
 
@@ -466,6 +510,7 @@ Exit criteria:
 
 - parity services start with canonical named source ids
 - parity setup no longer depends on `MFM_EVM_RPC_URL` as the main contract
+- parity preflight publishes durable ranking state before tests execute
 
 ### Phase 4. Remove Parity Test Bypasses
 
@@ -478,8 +523,8 @@ Work:
 - replace direct `std::env::var("MFM_EVM_RPC_URL")` setup patterns with a shared routed helper
 - remove parity helpers that construct one-off `EvmJsonRpcHttpConfig` registries from literal URLs
 - remove direct raw HTTP JSON-RPC helpers from parity tests
-- change parity fixtures to use canonical source ids instead of `rpc_source_id: null`
-- change parity keystore flows from `user_primary` to canonical named sources such as `reth_local`
+- during migration, use setup-defined canonical source ids instead of `user_primary`
+- by final cutover, remove request-level `rpc_source_id` from canonical parity request models too
 
 Primary code areas:
 
@@ -497,7 +542,7 @@ Exit criteria:
 
 - no parity test constructs an ad hoc literal-URL source registry
 - no parity test reads `MFM_EVM_RPC_URL` directly
-- parity requests use canonical source ids
+- parity uses the same control-plane-backed path as canonical runtime flows
 
 ### Phase 5. Clean Up Canonical Examples And Default Fixtures
 
@@ -509,7 +554,8 @@ Work:
 
 - replace `user_primary` in canonical docs/examples with explicit named sources
 - remove or downgrade docs that present `MFM_EVM_RPC_URL` as a normal first-class calling contract
-- update example request payloads that currently leave `rpc_source_id` unset when the surface is meant to be canonical
+- update transitional examples to use setup-defined source ids only where required during migration
+- remove `rpc_source_id` from final canonical request examples
 
 Primary code areas:
 
@@ -538,6 +584,7 @@ Work:
   - ad hoc `EvmJsonRpcHttpConfig` construction in parity tests
   - canonical parity fixtures with `rpc_source_id: null`
 - add integration assertions that parity execution appends `rpc_source:*` records
+- add integration assertions that setup/probe/rank workflows append `source_pool:*` ranking records
 - add integration assertions that `mfm_rpc_source_state` rows exist and change during parity execution
 - add restart/replay checks proving source health state is durable across process boundaries
 
@@ -556,27 +603,32 @@ Exit criteria:
 
 Objective:
 
-- make any surviving bypasses explicit and non-canonical
+- remove public canonical bypasses completely and leave only tightly scoped internal test fixtures
 
 Work:
 
 - keep transport-unit tests that need direct stub URLs, but clearly treat them as scoped exceptions
-- rename any intentionally retained operator/dev bypass tools to explicit `*-direct` surfaces
+- remove public operator/dev bypass tools from canonical surfaces
 - remove compatibility language that makes direct/raw paths look canonical
 
 Exit criteria:
 
 - there is no ambiguity about which RPC paths are canonical and which are explicit bypass tools
+- there are no surviving public canonical bypass tools
 
 ## Appendix A Acceptance Criteria
 
 The problem is considered solved only when all of the following are true:
 
 - canonical runtime EVM traffic does not select raw URLs directly
+- canonical runtime EVM traffic enters through `rpc.control`
+- canonical setup, probe, ranking, reads, and writes all enter through `rpc.control`
 - parity tests do not read `MFM_EVM_RPC_URL` directly
 - parity tests do not build literal-URL one-off source registries
-- parity requests use canonical named source ids
+- startup source setup is required and idempotent
+- source ranking is produced by reusable control-plane probe/rank workflows and reused by later calls
+- transitional source ids do not leak into final canonical request APIs
 - control-plane durable state participates in source selection
 - live probes and call outcomes append `rpc_source:*` records
 - parity success demonstrates control-plane-backed routing, not just node reachability
-- any remaining direct/raw EVM surfaces are explicitly marked non-canonical
+- no current public direct/raw EVM surfaces remain canonical after cutover

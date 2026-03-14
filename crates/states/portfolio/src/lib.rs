@@ -19,7 +19,6 @@
 //!         {
 //!             "network_id": "ethereum-mainnet",
 //!             "chain_id": 1,
-//!             "rpc_source_id": "mainnet_primary",
 //!             "metadata": {}
 //!         }
 //!     ],

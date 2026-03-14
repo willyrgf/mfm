@@ -1494,7 +1494,6 @@ in
               export MFM_EVM_RPC_URL="http://127.0.0.1:$HELIOS_RPC_PORT"
               export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"helios_local\",\"rpc_url\":\"http://127.0.0.1:$HELIOS_RPC_PORT\",\"kind\":\"local\"}]"
               export MFM_EVM_RPC_PREFERRED_ORDER="helios_local"
-              export MFM_EVM_RPC_SOURCE_ID="helios_local"
 
               echo "INFO: launching packaged mfm_cli portfolio snapshot request_file=$MFM_SNAPSHOT_REQUEST_FILE rpc=$MFM_EVM_RPC_URL"
               "$mfm_cli_bin" --output-format json portfolio snapshot --request-file "$MFM_SNAPSHOT_REQUEST_FILE" >"$MFM_SNAPSHOT_RESULT_FILE"
@@ -2766,7 +2765,6 @@ in
                     {
                       "network_id": "ethereum-mainnet",
                       "chain_id": 1,
-                      "rpc_source_id": "helios_local",
                       "metadata": {}
                     }
                   ],

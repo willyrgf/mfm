@@ -238,7 +238,6 @@ fn aave_portfolio_snapshot_payload(
                 {
                     "network_id": "reth-local",
                     "chain_id": chain_id,
-                    "rpc_source_id": null,
                     "metadata": {}
                 }
             ],

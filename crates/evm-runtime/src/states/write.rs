@@ -6,7 +6,7 @@
 //! Thin op crates should compose these states rather than reimplementing write-path behavior.
 
 use async_trait::async_trait;
-use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
+use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall};
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::StateError;
 use mfm_machine::ids::{ContextKey, StateId};

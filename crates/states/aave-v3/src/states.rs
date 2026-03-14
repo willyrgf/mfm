@@ -8,7 +8,7 @@
 //! states are available as shared building blocks for richer Aave workflows.
 
 use async_trait::async_trait;
-use mfm_collectors_evm::EvmIoClient;
+use mfm_collectors_rpc_control::EvmIoClient;
 use mfm_evm_core::abi as common_abi;
 use mfm_evm_runtime::dcv as shared_dcv;
 use mfm_evm_runtime::rpc as evm_rpc;
@@ -857,7 +857,7 @@ mod tests {
     impl ResolveDeployerTestIo {
         fn saw_eth_accounts(&self) -> bool {
             self.calls.iter().any(|call| {
-                call.namespace == "evm"
+                call.namespace == "rpc.control"
                     && call.request.get("method").and_then(|v| v.as_str()) == Some("eth_accounts")
             })
         }
@@ -883,7 +883,7 @@ mod tests {
                 });
             }
 
-            if call.namespace == "evm"
+            if call.namespace == "rpc.control"
                 && call.request.get("method").and_then(|v| v.as_str()) == Some("eth_accounts")
             {
                 return Ok(IoResult {

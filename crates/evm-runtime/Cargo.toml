@@ -16,7 +16,7 @@ alloy-primitives = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
 
 mfm-machine = { path = "../machine", version = "0.1.0" }
-mfm-collectors-evm = { path = "../collectors/evm", version = "0.1.0" }
+mfm-collectors-rpc-control = { path = "../collectors/rpc-control", version = "0.1.0" }
 mfm-state-common = { path = "../states/common", version = "0.1.0" }
 mfm-evm-core = { path = "../evm-core", version = "0.1.0" }
 mfm-transports-local-evm = { path = "../transports/local-evm", version = "0.1.0" }

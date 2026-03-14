@@ -75,15 +75,14 @@ Model-derived executor env uses `HELIOSRPC_PORT`. Internal snapshot tasks export
 `HELIOS_RPC_PORT` locally only where Helios process wiring or CLI routing still
 expects that alias.
 
-Runtime routing reconstructed inside `task.mfm.portfolio.snapshot.exec`:
+Runtime bootstrap reconstructed inside `task.mfm.portfolio.snapshot.exec`:
 
 - `DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm`
 - `MFM_EVM_RPC_URL=http://127.0.0.1:$HELIOS_RPC_PORT`
 - `MFM_SNAPSHOT_REQUEST_FILE=/absolute/path/to/portfolio-request.json`
-- source-id routing:
+- managed RPC bootstrap:
   - `MFM_EVM_RPC_SOURCES_JSON`
   - `MFM_EVM_RPC_PREFERRED_ORDER=helios_local`
-  - `MFM_EVM_RPC_SOURCE_ID=helios_local`
 
 Secret-bearing env is reconstructed per task and is not persisted in the
 services handoff file. The handoff JSON stores only non-secret ownership and

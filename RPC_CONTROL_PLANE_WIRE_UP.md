@@ -20,11 +20,14 @@ Scope: implementation-ready plan for making the control plane the canonical rout
 - Canonical cutover is a hard cut.
   - No compatibility aliases remain for old canonical CLI commands, REST surfaces, op ids, or
     report fields.
-  - Retained bypass tools are renamed in the same change to explicit `*-direct` names.
+  - No current public bypass tools remain as canonical user-facing surfaces after the cut.
 - A typed client layer must sit on top of `rpc.control`.
   - States and reusable runtime helpers should use the typed client, not hand-roll `IoCall`s.
 - `namespace = "evm"` remains in the repo, but only as an internal EVM data-plane executor surface.
   - It must stop being the canonical state-facing routing authority.
+- All canonical RPC calls go through `rpc.control`.
+  - This includes reads, writes, startup setup, source probes, and ranking observations.
+  - `evm` must not remain a canonical ingress for any of those behaviors.
 - All state-facing RPC callers migrate to the new boundary.
   - This includes portfolio, symbol, Aave, `evm_read`, reusable EVM runtime read helpers, Aave
     deploy/configure flows, node-managed-account flows, and any other shared-state caller that
@@ -32,14 +35,10 @@ Scope: implementation-ready plan for making the control plane the canonical rout
 - If `evm_read` is kept, it stays public only as a control-plane-backed read tool.
   - It must not remain source-pinned or bypass the control plane.
   - It must not be renamed to `*_direct`.
-- Offline/direct signer tools may still exist explicitly.
-  - `keystore tx-sign` does not remain grandfathered under the old name.
-  - If retained, it becomes an explicit direct surface such as `keystore tx-sign-direct`.
-  - It is not the canonical managed write path.
-- Raw-send bypass tools are not canonical.
-  - `keystore tx-send-raw` does not remain a normal managed surface.
-  - If a raw-send bypass is retained, it becomes `keystore tx-send-raw-direct` /
-    `keystore_tx_send_raw_direct` only.
+- Current public bypass tools do not survive as public canonical surfaces.
+  - `keystore tx-sign` does not remain the public write contract.
+  - `keystore tx-send-raw` does not remain the public managed submit contract.
+  - If any direct helper survives at all, it is test-only or explicitly internal.
 - Canonical managed submit signs once per intent and performs true multi-source broadcast of the
   same signed payload.
   - The control plane derives one canonical tx hash from the signed payload before broadcast.
@@ -57,7 +56,9 @@ Scope: implementation-ready plan for making the control plane the canonical rout
   - `MFM_EVM_RPC_URL` and `MFM_EVM_RPC_SOURCES_JSON` may register available sources at process
     start.
   - Callers, ops, and parity tests must not select raw URLs directly.
-  - Canonical callers use source ids and control-plane-backed routing only.
+  - Transitional setup code may still use source ids while canonical callers are being migrated.
+  - Final canonical callers do not select source ids directly; they use control-plane-backed reads
+    and writes only.
 - The control plane does not need to be a separate HTTP proxy service.
   - The routed transport may consult durable control-plane state, select the correct source, and
     then execute the HTTP request directly against that endpoint.
@@ -242,8 +243,13 @@ raw transports / protocols
   - read admission
   - idempotency
   - source quality and cooldown
+  - source setup orchestration
+  - ranking policy inputs and projection updates
   - shared storage transaction helpers
 - EVM control-plane adapter:
+  - runtime source setup for EVM networks
+  - source probing and latency observation
+  - source ranking proposal generation for EVM pools
   - anchored read-session planning
   - wallet-lane reservation
   - tx-intent lifecycle
@@ -255,6 +261,134 @@ raw transports / protocols
   - performs probes
   - returns sanitized results
   - does not own durable ranking memory
+
+## Runtime Source Setup Contract
+
+### Why A Setup Step Exists
+
+- Source health and cooldown are durable control-plane state.
+- Endpoint URLs and authorization remain runtime-only bootstrap config.
+- The control plane therefore needs an explicit setup or sync step that binds:
+  - runtime source descriptors
+  - durable source-pool membership and ranking state
+- Without that step, the control plane cannot plan reads or writes safely on process startup.
+
+### Required Runtime Inputs
+
+- Runtime source bootstrap config resolves to a `RuntimeSourceCatalog`.
+- The first EVM milestone may populate that catalog from:
+  - `MFM_EVM_RPC_SOURCES_JSON`
+  - transitional single-source `MFM_EVM_RPC_URL`
+  - Nix-generated local service config
+- The catalog entry for one source must contain at least:
+  - `network_id`
+  - `source_id`
+  - runtime-only endpoint URL
+  - runtime-only auth or authorization reference
+  - source kind
+  - required pool memberships
+  - any static probe or capability policy such as `require_get_proof_probe`
+
+### Persistence Boundary
+
+- Persist only sanitized source identity and pool configuration.
+- Do not persist:
+  - raw URLs
+  - auth headers
+  - private query strings
+  - private locator details
+- Durable setup data should be represented through append-only pool-family records.
+
+### Proposed Setup Operation
+
+- Setup must not be a hidden bootstrap side effect only.
+- Model setup as reusable states plus thin ops/workflows, exposed through `rpc.control`.
+- V1 should include a setup operation such as:
+  - `rpc_control_setup_sources`
+- That operation or workflow:
+  - validates the runtime source catalog
+  - validates that required canonical source ids exist for the active profile
+  - appends `source_pool:*` records for desired membership
+  - appends initial `pool_ranked` snapshots when static preference is known
+  - leaves endpoint/auth material in the runtime source registry only
+
+### Proposed Probe And Ranking Operations
+
+- Add reusable control-plane probe and ranking flows, also modeled as states plus thin ops/workflows.
+- V1 should include at least:
+  - `rpc_control_probe_sources`
+  - `rpc_control_rank_sources`
+- `rpc_control_probe_sources` should:
+  - execute per-network, per-source health and capability probes through the EVM data plane
+  - measure response time and record latency samples
+  - append `rpc_source:*` observation and probe records
+- `rpc_control_rank_sources` should:
+  - read current `rpc_source_state`
+  - compute ranked pool order for each network and pool kind
+  - append `source_pool:*` `pool_ranked` records
+
+### Ranking Inputs
+
+- Ranking must be reusable control-plane state, not process-local memory.
+- V1 ranking inputs should include at least:
+  - observed response time
+  - success and failure rates
+  - cooldown state
+  - required capability bits such as `eth_getProof`
+  - head freshness where relevant
+- Response time alone is not sufficient for final ranking, but it must be a first-class input.
+
+### Idempotency Rule
+
+- Setup must be safe to run on every process start and every parity bootstrap.
+- The simplest v1 rule is:
+  - `pool_membership_declared` records carry a full desired membership snapshot for one pool
+  - `pool_ranked` records carry a full desired ranking snapshot for one pool
+- The latest snapshot wins in projection rebuild.
+- This avoids needing ad hoc delete or revoke semantics just to handle removed members at startup.
+
+### Startup Wiring
+
+- App bootstrap:
+  - load runtime source catalog
+  - connect persistent control-plane store
+  - run `rpc_control_setup_sources`
+  - run an initial `rpc_control_probe_sources` pass when required by the active profile
+  - run `rpc_control_rank_sources`
+  - register `rpc.control`
+  - begin serving requests only after setup succeeds
+- CLI bootstrap:
+  - canonical CLI commands run the same setup path before starting managed reads or writes
+- Parity and Nix bootstrap:
+  - the parity prelude runs the same setup path before tests execute
+  - parity profiles define canonical local sources such as `reth_local` and `helios_local`
+
+### Workflow Shape
+
+- Startup and parity bootstrap should be modeled as workflows over thin setup/probe/rank ops.
+- Recommended v1 workflows:
+  - `rpc_control_startup_sync`
+    - setup sources
+    - probe required sources
+    - compute rank snapshots
+  - `rpc_control_refresh_rankings`
+    - probe sources
+    - recompute rankings
+  - `rpc_control_parity_preflight`
+    - setup local parity sources
+    - probe expected local sources
+    - publish rank snapshots before parity tests run
+
+### Failure Rule
+
+- Canonical reads and writes fail fast if persistent control-plane setup cannot complete.
+- There is no fallback to env-only routing for canonical surfaces after cutover.
+
+### Transitional Rule
+
+- During migration, existing source-id-aware callers may still be bridged internally.
+- That bridge is transitional only.
+- The final public contract does not expose request-level `rpc_source_id` or route hints.
 
 ## Namespace And Client Contract
 
@@ -348,8 +482,8 @@ raw transports / protocols
   - `local_keystore` and `node_managed_account` are resolved from runtime-only configuration
   - signer locator details stay out of manifests, events, facts, snapshots, outputs, and error
     details
-- Explicit offline/direct tools may still accept concrete local filesystem paths because they are not
-  the canonical managed path.
+- Internal or test-only helpers may still accept concrete local filesystem paths when needed, but
+  that does not define the public canonical contract.
 
 ### Persistence Rules
 
@@ -363,8 +497,6 @@ raw transports / protocols
 ### V1 Scope
 
 - Support `local_keystore` and `node_managed_account` in v1.
-- Keep offline/direct `keystore tx-sign-direct` as a non-canonical signer tool if that bypass is
-  retained.
 - Do not design v1 around interactive browser signers.
   - MetaMask-style signers may be added later behind the same abstraction.
   - They should not drive the core contract for this milestone.
@@ -411,14 +543,11 @@ raw transports / protocols
 
 ### Explicit Offline Or Direct Tools
 
-- Offline/direct tools may remain only when they are explicitly named and documented as non-canonical.
-- First example:
-  - `keystore tx-sign-direct`
-- If a raw-send bypass remains, it must use an explicitly direct name.
-- These tools:
-  - do not define the canonical write contract
-  - do not choose canonical routing policy
-  - do not replace managed submit
+- No current public CLI or REST bypass tool remains part of the canonical surface after cutover.
+- If any internal or test-only helper survives:
+  - it is not documented as a public user-facing contract
+  - it does not define canonical routing policy
+  - it does not replace managed submit
 
 ## Chosen Ownership
 
@@ -733,7 +862,7 @@ raw transports / protocols
   - `evm_read` remains public only if it uses the control plane
   - signer model is wallet plus signer, not wallet equals signer
   - cutover is a hard cut with no compatibility aliases
-  - direct tools are explicitly renamed with `-direct` / `_direct`
+  - current public bypass tools are removed or refactored onto `rpc.control`
   - canonical managed submit is true multi-source broadcast
   - all state-facing RPC callers migrate, including current Aave write paths and node-managed
     account flows
@@ -754,6 +883,7 @@ raw transports / protocols
 - Implement durable source quality first.
 - Implement source cooldown first.
 - Implement pool ranking and budgets first.
+- Implement startup setup plus periodic probe/rank workflows first.
 - Add a temporary bridge so current `namespace = "evm"` execution can consult and update durable
   source quality and cooldown while `rpc.control` is not yet canonical ingress.
   - This bridge is transitional only.
@@ -767,6 +897,9 @@ raw transports / protocols
 - Add the `rpc.control` transport and typed client layer.
 - Keep `evm` executor wiring internal for now.
 - Ensure the typed client owns fact-capture and replay contract for:
+  - source setup flows
+  - source probe flows
+  - source ranking flows
   - anchored read sessions
   - write-intent planning
   - intent observation and resume
@@ -786,9 +919,10 @@ raw transports / protocols
 - Register `rpc.control` as the canonical ingress in `crates/app/src/lib.rs`.
 - `evm-jsonrpc-http` becomes an internal executor used by the EVM control plane.
 - Canonical shared states must enter through the typed `rpc.control` client.
+- Canonical setup, probe, and rank workflows must also enter through `rpc.control`.
 - Execute the hard cut in the same change:
   - old canonical command names and op ids are removed
-  - retained direct tools are renamed explicitly
+  - current public direct-tool contracts are removed or refactored onto `rpc.control`
   - compatibility report fields such as `rpc_url_host` are removed or replaced with new explicit
     shapes rather than aliased
 
@@ -806,7 +940,6 @@ raw transports / protocols
   - Aave deploy/configure flows
   - node-managed-account paths
   - current reusable EVM write helpers in shared-state crates
-- Retained offline/direct tools remain non-canonical and explicitly renamed.
 - Remove canonical use of:
   - `eth_getTransactionCount("pending")`
   - `eth_sendTransaction`
@@ -912,6 +1045,7 @@ raw transports / protocols
 
 - Canonical shared states and canonical ops enter managed network behavior through `rpc.control`.
 - `namespace = "evm"` is no longer the canonical state-facing routing authority.
+- Canonical setup, probe, ranking, reads, and writes all enter through `rpc.control`.
 - Route choice survives restart because quality and cooldown are durable.
 - Two concurrent writes from the same EVM wallet reserve ordered nonces without duplication.
 - Canonical write APIs no longer require caller nonce or caller source id.
@@ -920,6 +1054,7 @@ raw transports / protocols
 - Portfolio snapshot reads run through anchored read sessions.
 - Helios is preferred only when fresh and healthy, and automatically bypassed when stale.
 - Default CLI, REST, and app flows use persistent store-backed control-plane behavior.
+- Startup setup and ranking workflows run before canonical request handling.
 - Canonical managed submit fails fast when persistent control-plane storage is unavailable.
 - If `evm_read` remains public, it uses the control plane.
 - Managed submit signs once, derives one canonical tx hash, and records per-source outcomes for the
@@ -927,9 +1062,7 @@ raw transports / protocols
 - Broadcast-step success requires at least one success-equivalent source acknowledgement.
 - All state-facing RPC callers are migrated, including current Aave write flows and node-managed
   account paths.
-- Offline/direct signing tools are explicitly renamed and documented as non-canonical.
-- If a raw-send bypass remains, it is explicitly named as direct and is not documented as the normal
-  managed path.
+- No current public direct/raw CLI or REST bypass remains canonical after cutover.
 - Old canonical command names, op ids, and compatibility report fields are removed in the hard-cut
   change.
 
@@ -940,6 +1073,9 @@ raw transports / protocols
 - source-quality projection updates
 - cooldown persistence
 - projection rebuild from stream-family records
+- setup-source idempotency
+- ranking snapshot replacement semantics
+- latency-based ranking inputs
 - lane reservation idempotency
 - `max_inflight_per_lane = 1`
 - multi-stream CAS conflict handling
@@ -958,6 +1094,8 @@ raw transports / protocols
 - anchored snapshot session pins block and reuses it across reads
 - stale Helios is bypassed automatically
 - canonical CLI and REST flows require persistent store-backed control-plane wiring
+- startup setup workflow publishes source pool membership and ranking before request handling
+- periodic probe/rank workflow updates source order using latency and reliability observations
 - retained `evm_read` path uses the control plane and not direct source hints
 - old canonical CLI/op names are absent after the hard cut
 - Aave deploy/configure and node-managed-account write paths execute through managed control-plane

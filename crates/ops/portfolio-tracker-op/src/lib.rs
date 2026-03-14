@@ -140,7 +140,6 @@ fn network_routes(portfolio: &PortfolioConfig) -> Vec<NetworkRouteConfig> {
         .iter()
         .map(|network| NetworkRouteConfig {
             network_id: network.network_id.clone(),
-            rpc_source_id: network.rpc_source_id.clone(),
         })
         .collect()
 }

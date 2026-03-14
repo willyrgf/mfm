@@ -429,7 +429,7 @@ mod tests {
 
     impl LiveIoTransportFactory for TestEvmFactory {
         fn namespace_group(&self) -> &str {
-            "evm"
+            "rpc.control"
         }
 
         fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
@@ -442,6 +442,17 @@ mod tests {
     #[async_trait]
     impl LiveIoTransport for TestEvmTransport {
         async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
+            let kind = call
+                .request
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if kind != "evm_call" {
+                return Err(IoError::Other(io_info(
+                    "unexpected_request_kind",
+                    "unexpected rpc.control request kind",
+                )));
+            }
             let method = call
                 .request
                 .get("method")

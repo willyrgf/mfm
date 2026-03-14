@@ -37,8 +37,8 @@ The built-in app bundle registers these ops in `DefaultOperationPlugin::register
 | `keystore_list` | `v1` | `crates/ops/keystore-admin-op` | List keystore entries | `KeystoreListState` | `mfm keystore list`, feature `run.start` |
 | `keystore_delete` | `v1` | `crates/ops/keystore-admin-op` | Delete a keystore entry | `KeystoreDeleteState` | `mfm keystore delete`, feature `run.start` |
 | `keystore_tx_sign` | `v1` | `crates/ops/keystore-tx-op` | Sign an EIP-1559 transaction via the keystore | `KeystoreTxSignState` | `mfm keystore tx-sign`, feature `run.start` |
-| `keystore_tx_send_raw` | `v1` | `crates/ops/keystore-tx-op` | Submit a signed raw transaction | `KeystoreTxSendRawState` | `mfm keystore tx-send-raw`, feature `run.start` |
-| `evm_read` | `v1` | `crates/ops/evm-read-op` | Read chain data through reusable EVM read states | EVM read state family | `mfm run start`, feature `run.start` |
+| `keystore_tx_send_raw` | `v1` | `crates/ops/keystore-tx-op` | Legacy compatibility op for submitting a signed raw transaction | `KeystoreTxSendRawState` | `mfm keystore tx-send-raw`, feature `run.start` |
+| `evm_read` | `v1` | `crates/ops/evm-read-op` | Low-level chain read op backed by the reusable `rpc.control` read states | EVM read state family | `mfm run start`, feature `run.start` |
 | `evm_contract_from_nix` | `v1` | `crates/ops/evm-write-op` | Adapt nix output into a contract artifact export | `NixArtifactToEvmContractState` | `mfm run start`, feature `run.start` |
 | `evm_deploy` | `v1` | `crates/ops/evm-write-op` | Deploy a contract artifact to EVM | `EvmDeployState` | `mfm run start`, feature `run.start` |
 | `evm_configure` | `v1` | `crates/ops/evm-write-op` | Execute post-deploy runtime calls | `EvmConfigureState` | `mfm run start`, feature `run.start` |
@@ -52,6 +52,8 @@ Notes:
 
 - `mfm-op-keystore-shim` is a helper wrapper crate, not a registered runtime op.
 - Built-in feature entry points are owned by `FeatureCatalog` in `crates/app/src/lib.rs`.
+- The default app transport bundle exposes `rpc.control` as the canonical state-facing EVM ingress;
+  the raw `evm` executor is kept for internal/direct use only.
 - CLI/API transport layers stay thin; dedicated CLI commands exist only for a subset of ops.
 
 ## Shared Production States
@@ -65,14 +67,14 @@ runtime behavior reused by thin ops.
 | `crates/states/common/src/states/proof.rs` | `ProofReadState`, `ProofApplySideEffectState` | Typed proof read and side-effect states that avoid raw proof namespace strings | `proof` |
 | `crates/states/keystore/src/states/admin.rs` | `KeystoreImportState`, `KeystoreListState`, `KeystoreDeleteState` | Reusable keystore administration flows | `keystore_import`, `keystore_list`, `keystore_delete` |
 | `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState` | Reusable local keystore signing flow | `keystore_tx_sign` |
-| `crates/states/keystore-submit/src/tx.rs` | `KeystoreTxSendRawState` | Reusable raw-transaction submission flow with remote EVM routing | `keystore_tx_send_raw` |
-| `crates/evm-runtime/src/states/read.rs` | `ReadHexStringState`, `ReadU256HexState`, `EthCallState`, `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState` | Reusable chain read/query states | `evm_read`, `portfolio_tracker` |
-| `crates/evm-runtime/src/states/price.rs` | `read_evm_oracle_unit_price` | Reusable pinned EVM oracle price reads for valuation source execution | `portfolio_tracker` |
+| `crates/states/keystore-submit/src/tx.rs` | `KeystoreTxSendRawState` | Legacy raw-transaction submission compatibility flow routed through `rpc.control` | `keystore_tx_send_raw` |
+| `crates/evm-runtime/src/states/read.rs` | `ReadHexStringState`, `ReadU256HexState`, `EthCallState`, `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState` | Reusable control-plane-backed chain read/query states | `evm_read`, `portfolio_tracker` |
+| `crates/evm-runtime/src/states/price.rs` | `read_evm_oracle_unit_price` | Reusable control-plane-backed EVM oracle price reads for valuation source execution | `portfolio_tracker` |
 | `crates/states/wallet/src/states.rs` | `ResolveWalletsState` | Reusable wallet-resolution flow for canonical portfolio execution | `portfolio_tracker` |
 | `crates/states/symbol/src/states.rs` | `ReadDirectPricesState`, `CollectObservationsState`, `MergeObservationsState` | Reusable valuation-source execution plus canonical observation normalization/merge | `portfolio_tracker` |
 | `crates/states/portfolio/src/states.rs` | `PinPortfolioNetworksState`, `WritePortfolioSnapshotState`, `WritePortfolioReportState` | Reusable network pinning and canonical snapshot/report assembly | `portfolio_tracker` |
 | `crates/states/aave-v3/src/portfolio/states.rs` | `CollectAaveObservationsState` | Reusable Aave V3 `protocol_position` observation collection normalized into the canonical portfolio artifact shape | `portfolio_tracker` |
-| `crates/evm-runtime/src/states/write.rs` | `NixArtifactToEvmContractState`, `EvmDeployState`, `EvmConfigureState`, `EvmValidateState` | Reusable contract artifact adaptation and deploy/configure/validate states | `evm_contract_from_nix`, `evm_deploy`, `evm_configure`, `evm_validate` |
+| `crates/evm-runtime/src/states/write.rs` | `NixArtifactToEvmContractState`, `EvmDeployState`, `EvmConfigureState`, `EvmValidateState` | Reusable contract artifact adaptation and deploy/configure/validate states routed through `rpc.control` | `evm_contract_from_nix`, `evm_deploy`, `evm_configure`, `evm_validate` |
 | `crates/states/aave-v3/src/states.rs` | `LoadCompileManifestState`, `DeployContractState`, `WaitForReceiptState`, `CollectDeployOutputsState`, `WriteDeployManifestState`, `AdaptOriginDeployOutputState`, `LoadDeployManifestState`, `ConfigureRuntimeCallState`, `WaitForConfigReceiptState`, `CollectConfigOutputsState`, `WriteConfigReportState` | Reusable Aave V3 deploy/configure/adaptation flow states | Direct built-in use today: `aave_v3_origin_adapt_deploy` for adaptation; the remaining states are reusable flow building blocks not yet registered as standalone built-in ops |
 
 ## Intentional Op-Local Production States

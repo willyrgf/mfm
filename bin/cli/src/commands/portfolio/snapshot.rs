@@ -178,7 +178,6 @@ mod tests {
                     {
                         "network_id": "ethereum-mainnet",
                         "chain_id": 1,
-                        "rpc_source_id": null,
                         "metadata": {}
                     }
                 ],

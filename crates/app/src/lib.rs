@@ -33,9 +33,6 @@ use tracing::{debug, info, instrument, warn};
 
 use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_artifact_store_s3::S3ArtifactStore;
-use mfm_collectors_evm_jsonrpc_http::{
-    resolve_evm_rpc_sources_from_env, EvmJsonRpcHttpTransportFactory,
-};
 use mfm_collectors_nix_exec::NixFlakeTransportFactory;
 use mfm_machine::config::{
     BackoffPolicy, BuildProvenance, ContextCheckpointing, EventProfile, ExecutionMode, IoMode,
@@ -84,6 +81,9 @@ use mfm_transports_local_evm::LocalEvmIoTransportFactory;
 use mfm_transports_local_fs::LocalFsIoTransportFactory;
 use mfm_transports_local_keystore::LocalKeystoreIoTransportFactory;
 use mfm_transports_proof::ProofIoTransportFactory;
+use mfm_transports_rpc_control::{
+    resolve_rpc_control_bootstrap_sources_from_env, RpcControlTransportFactory,
+};
 
 const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
 const ENV_ARTIFACT_ROOT: &str = "MFM_ARTIFACT_ROOT";
@@ -456,15 +456,7 @@ impl TransportPlugin for DefaultTransportPlugin {
         register_transport_factory(registry, Arc::new(LocalFsIoTransportFactory))?;
         register_transport_factory(registry, Arc::new(LocalEvmIoTransportFactory))?;
         register_transport_factory(registry, Arc::new(LocalKeystoreIoTransportFactory))?;
-
-        let evm_transport = EvmJsonRpcHttpTransportFactory::from_env().map_err(|err| {
-            AppError::new(
-                ErrorClass::Internal,
-                "EvmTransportConfigInvalid",
-                err.to_string(),
-            )
-        })?;
-        register_transport_factory(registry, Arc::new(evm_transport))?;
+        register_transport_factory(registry, Arc::new(RpcControlTransportFactory::from_env()))?;
         Ok(())
     }
 }
@@ -887,11 +879,11 @@ impl AppServices {
         //
         // Note: the underlying op can still be started via `run.start` and may end in `phase=failed`,
         // but the feature is intended to behave like a request-level RPC dependency.
-        if resolve_evm_rpc_sources_from_env().is_empty() {
+        if resolve_rpc_control_bootstrap_sources_from_env().is_empty() {
             return Err(AppError::new(
                 ErrorClass::BadGateway,
-                "evm_rpc_url_missing",
-                "evm rpc url is not configured",
+                "rpc_control_no_sources",
+                "rpc.control bootstrap sources are not configured",
             ));
         }
 
@@ -1809,7 +1801,7 @@ mod tests {
             "local.fs",
             "local.evm",
             "local.keystore",
-            "evm",
+            "rpc.control",
         ] {
             assert!(
                 registry.resolve(group).is_some(),

@@ -1,7 +1,7 @@
 //! Reusable EVM read/query states.
 //!
-//! These states record deterministic read facts from the `evm` namespace and write normalized
-//! results back into context for downstream states and report assembly.
+//! These states record deterministic read facts through the `rpc.control` namespace and write
+//! normalized results back into context for downstream states and report assembly.
 //!
 //! Use this module for read-only chain queries such as raw hex reads, `eth_call`, block-number
 //! checks, and native/ERC-20 balance inspection.
@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 
 use alloy_primitives::Address;
-use mfm_collectors_evm::{parse_u64_hex_value, EvmIoClient, JsonRpcCall};
+use mfm_collectors_rpc_control::{parse_u64_hex_value, EvmIoClient, JsonRpcCall};
 use mfm_evm_core::encoding::{
     format_u256_units, parse_hex_string_response, parse_u256_hex_response, parse_u256_hex_value,
     parse_u8_u256, u64_hex_quantity,

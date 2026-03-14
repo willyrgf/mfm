@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use alloy_primitives::{Address, U256};
 use async_trait::async_trait;
-use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
+use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall};
 use mfm_evm_core::abi::function_selector;
 use mfm_evm_core::encoding::{
     encode_erc20_balance_of, format_u256_units, parse_u256_hex_value, parse_u8_u256,
@@ -149,7 +149,7 @@ impl State for CollectAaveObservationsState {
                         wallet,
                         symbol,
                         pin,
-                        route.rpc_source_id.as_deref(),
+                        &route.network_id,
                         &direct_prices,
                     )
                     .await?,
@@ -181,7 +181,7 @@ async fn build_aave_observation(
     wallet: &ResolvedWallet,
     symbol: &SymbolConfig,
     pin: &PinnedNetwork,
-    route_source_id: Option<&str>,
+    network_id: &str,
     direct_prices: &[DirectPriceValue],
 ) -> Result<Observation, StateError> {
     let cfg = decode_aave_protocol_position_config(symbol).map_err(|err| {
@@ -211,7 +211,7 @@ async fn build_aave_observation(
                     let enabled = read_user_collateral_enabled(
                         state_id,
                         io,
-                        route_source_id,
+                        network_id,
                         reserve_cfg.market.pool_address.as_str(),
                         &wallet.address,
                         reserve.reserve_index,
@@ -229,7 +229,7 @@ async fn build_aave_observation(
                     read_erc20_balance(
                         state_id,
                         io,
-                        route_source_id,
+                        network_id,
                         reserve.a_token_address.as_str(),
                         &wallet.address,
                         pin.block_number,
@@ -293,7 +293,7 @@ async fn build_aave_observation(
             let raw = read_erc20_balance(
                 state_id,
                 io,
-                route_source_id,
+                network_id,
                 token_address,
                 &wallet.address,
                 pin.block_number,
@@ -325,14 +325,7 @@ async fn build_aave_observation(
     let decimals = match symbol.decimals {
         Some(decimals) => decimals,
         None => {
-            read_token_decimals(
-                state_id,
-                io,
-                route_source_id,
-                token_address,
-                pin.block_number,
-            )
-            .await?
+            read_token_decimals(state_id, io, network_id, token_address, pin.block_number).await?
         }
     };
     let amount_dec = format_u256_units(&raw, decimals);
@@ -364,12 +357,12 @@ async fn build_aave_observation(
 async fn read_token_decimals(
     state_id: &StateId,
     io: &mut dyn IoProvider,
-    route_source_id: Option<&str>,
+    network_id: &str,
     token_address: &str,
     block_number: u64,
 ) -> Result<u8, StateError> {
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let mut call = JsonRpcCall::new(
+    let call = JsonRpcCall::new(
         "eth_call",
         serde_json::json!([
             {
@@ -378,10 +371,8 @@ async fn read_token_decimals(
             },
             u64_hex_quantity(block_number)
         ]),
-    );
-    if let Some(route_source_id) = route_source_id {
-        call = call.with_route_source_id(route_source_id.to_string());
-    }
+    )
+    .with_network_id(network_id);
     let res = client.call(call).await.map_err(state_from_io)?;
     let raw = parse_u256_hex_value(&res.response).map_err(|err| {
         state_unknown_msg(
@@ -400,7 +391,7 @@ async fn read_token_decimals(
 async fn read_erc20_balance(
     state_id: &StateId,
     io: &mut dyn IoProvider,
-    route_source_id: Option<&str>,
+    network_id: &str,
     token_address: &str,
     wallet_address: &str,
     block_number: u64,
@@ -412,16 +403,14 @@ async fn read_erc20_balance(
         )
     })?;
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let mut call = JsonRpcCall::new(
+    let call = JsonRpcCall::new(
         "eth_call",
         serde_json::json!([
             {"to": token_address, "data": encode_erc20_balance_of(&wallet)},
             u64_hex_quantity(block_number)
         ]),
-    );
-    if let Some(route_source_id) = route_source_id {
-        call = call.with_route_source_id(route_source_id.to_string());
-    }
+    )
+    .with_network_id(network_id);
     let res = client.call(call).await.map_err(state_from_io)?;
     parse_u256_hex_value(&res.response).map_err(|err| {
         state_unknown_msg(
@@ -434,7 +423,7 @@ async fn read_erc20_balance(
 async fn read_user_collateral_enabled(
     state_id: &StateId,
     io: &mut dyn IoProvider,
-    route_source_id: Option<&str>,
+    network_id: &str,
     pool_address: &str,
     wallet_address: &str,
     reserve_index: u16,
@@ -447,16 +436,14 @@ async fn read_user_collateral_enabled(
         )
     })?;
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let mut call = JsonRpcCall::new(
+    let call = JsonRpcCall::new(
         "eth_call",
         serde_json::json!([
             {"to": pool_address, "data": encode_get_user_configuration(&wallet)},
             u64_hex_quantity(block_number)
         ]),
-    );
-    if let Some(route_source_id) = route_source_id {
-        call = call.with_route_source_id(route_source_id.to_string());
-    }
+    )
+    .with_network_id(network_id);
     let res = client.call(call).await.map_err(state_from_io)?;
     let raw = parse_u256_hex_value(&res.response).map_err(|err| {
         state_unknown_msg(
@@ -825,7 +812,6 @@ mod tests {
             symbols,
             networks: vec![NetworkRouteConfig {
                 network_id: "ethereum-mainnet".to_string(),
-                rpc_source_id: None,
             }],
             resolved_wallets_key: ContextKey("resolved_wallets".to_string()),
             network_pins_key: ContextKey("network_pins".to_string()),
@@ -910,7 +896,7 @@ mod tests {
             &resolved_wallet,
             &symbol,
             &pin,
-            None,
+            "ethereum-mainnet",
             &[],
         )
         .await

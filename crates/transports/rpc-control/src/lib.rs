@@ -1,0 +1,1396 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![warn(missing_docs)]
+//! Live `rpc.control` transport for managed EVM RPC routing.
+//!
+//! This transport keeps `rpc.control` as the canonical state-facing ingress while reusing the
+//! existing HTTP JSON-RPC executor internally. It owns:
+//! - bootstrap source catalog parsing from env
+//! - durable `rpc_source:*` and `source_pool:*` updates
+//! - source probing and ranking
+//! - managed source selection for unpinned EVM calls
+//!
+//! The inner `evm` transport is treated as an executor only. Every managed call is pinned to one
+//! concrete source before dispatch, so route choice and cooldown authority stay here.
+
+use std::collections::{BTreeSet, HashMap};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
+use serde::Deserialize;
+use tracing::warn;
+
+use mfm_collectors_evm_jsonrpc_http::{
+    EvmJsonRpcHttpConfig, EvmJsonRpcHttpTransportFactory, EvmJsonRpcSource, EvmRoutingStrategy,
+    EvmSourceKind,
+};
+use mfm_collectors_rpc_control::{
+    parse_u64_hex_value, PrepareSourcesResponse, PreparedSourceSummary, RpcControlRequest,
+    NAMESPACE_RPC_CONTROL,
+};
+use mfm_control_plane_postgres::{
+    ControlPlanePostgresStore, RpcSourceObservedRecord, RpcSourceOutcome, RpcSourceProbeKind,
+    RpcSourceProbedRecord, RpcSourceRecord, RpcSourceRef, RpcSourceState,
+    SourcePoolMembershipDeclaredRecord, SourcePoolRankedRecord, SourcePoolRecord, SourcePoolRef,
+    SourcePoolState,
+};
+use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, StorageError};
+use mfm_machine::ids::ErrorCode;
+use mfm_machine::io::IoCall;
+use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
+
+const ENV_EVM_RPC_URL: &str = "MFM_EVM_RPC_URL";
+const ENV_EVM_RPC_AUTHORIZATION: &str = "MFM_EVM_RPC_AUTHORIZATION";
+const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
+const ENV_EVM_RPC_PREFERRED_ORDER: &str = "MFM_EVM_RPC_PREFERRED_ORDER";
+const ENV_EVM_RPC_REQUIRE_GET_PROOF_IDS: &str = "MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS";
+
+const DEFAULT_NETWORK_SCOPE: &str = "__default__";
+const DEFAULT_POOL_KIND: &str = "default";
+const PROBE_REFRESH_INTERVAL_MS: u64 = 15_000;
+const FAILURE_COOLDOWN_MS: u64 = 15_000;
+
+fn info(
+    code: &'static str,
+    category: ErrorCategory,
+    retryable: bool,
+    message: impl Into<String>,
+) -> ErrorInfo {
+    ErrorInfo {
+        code: ErrorCode(code.to_string()),
+        category,
+        retryable,
+        message: message.into(),
+        details: None,
+    }
+}
+
+fn io_other(
+    code: &'static str,
+    category: ErrorCategory,
+    retryable: bool,
+    message: impl Into<String>,
+) -> IoError {
+    IoError::Other(info(code, category, retryable, message))
+}
+
+fn io_transport(
+    code: &'static str,
+    category: ErrorCategory,
+    retryable: bool,
+    message: impl Into<String>,
+) -> IoError {
+    IoError::Transport(info(code, category, retryable, message))
+}
+
+fn io_from_storage(err: StorageError) -> IoError {
+    match err {
+        StorageError::Concurrency(info) => IoError::Other(info),
+        StorageError::NotFound(info) => IoError::Other(info),
+        StorageError::Corruption(info) => IoError::Other(info),
+        StorageError::Other(info) => IoError::Other(info),
+    }
+}
+
+fn io_error_code(err: &IoError) -> String {
+    match err {
+        IoError::MissingFactKey(info)
+        | IoError::Transport(info)
+        | IoError::RateLimited(info)
+        | IoError::Other(info) => info.code.0.clone(),
+        IoError::MissingFact { info, .. } => info.code.0.clone(),
+    }
+}
+
+fn now_ms() -> Result<u64, IoError> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| {
+            io_other(
+                "time_unavailable",
+                ErrorCategory::Unknown,
+                false,
+                "system time is not available",
+            )
+        })?
+        .as_millis() as u64)
+}
+
+fn parse_csv_env(var_name: &str) -> Vec<String> {
+    std::env::var(var_name)
+        .ok()
+        .into_iter()
+        .flat_map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn parse_source_kind(raw: Option<&str>) -> EvmSourceKind {
+    let normalized = raw.unwrap_or("remote_public").trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "local" | "local_helios" | "local_reth" => EvmSourceKind::Local,
+        "remote_user" | "user" => EvmSourceKind::RemoteUser,
+        "remote_public" | "public" => EvmSourceKind::RemotePublic,
+        _ => EvmSourceKind::RemotePublic,
+    }
+}
+
+fn kind_rank(kind: EvmSourceKind) -> u8 {
+    match kind {
+        EvmSourceKind::Local => 0,
+        EvmSourceKind::RemoteUser => 1,
+        EvmSourceKind::RemotePublic => 2,
+    }
+}
+
+fn normalize_optional_field(raw: Option<String>) -> Option<String> {
+    raw.map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Bootstrap source definition used by the `rpc.control` transport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RpcControlBootstrapSource {
+    /// Stable source identifier.
+    pub id: String,
+    /// Optional stable network identifier. When omitted, the source belongs to the default/global
+    /// scope and can be used when no network-specific sources exist.
+    pub network_id: Option<String>,
+    /// Full RPC URL.
+    pub rpc_url: String,
+    /// Optional authorization header value.
+    pub authorization: Option<String>,
+    /// Source kind used during ranking.
+    pub kind: EvmSourceKind,
+    /// Whether the source must pass an `eth_getProof` capability probe before normal selection.
+    pub require_get_proof_probe: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct BootstrapCatalog {
+    sources: Vec<RpcControlBootstrapSource>,
+    preferred_order: Vec<String>,
+}
+
+/// Validation errors for the bootstrap `rpc.control` source catalog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RpcControlConfigError {
+    /// No bootstrap sources were configured.
+    NoSources,
+    /// A configured source id was empty.
+    EmptySourceId,
+    /// Two configured sources shared the same id.
+    DuplicateSourceId(String),
+    /// Preferred ordering referenced an unknown source id.
+    UnknownPreferredSourceId(String),
+}
+
+impl std::fmt::Display for RpcControlConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RpcControlConfigError::NoSources => {
+                write!(f, "rpc.control bootstrap source registry is empty")
+            }
+            RpcControlConfigError::EmptySourceId => {
+                write!(f, "rpc.control source id must not be empty")
+            }
+            RpcControlConfigError::DuplicateSourceId(source_id) => {
+                write!(f, "duplicate rpc.control source id: {source_id}")
+            }
+            RpcControlConfigError::UnknownPreferredSourceId(source_id) => {
+                write!(f, "preferred source id not found in registry: {source_id}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RpcControlConfigError {}
+
+#[derive(Debug, Clone, Deserialize)]
+struct EnvBootstrapSource {
+    id: String,
+    #[serde(default)]
+    network_id: Option<String>,
+    rpc_url: String,
+    #[serde(default)]
+    authorization: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    require_get_proof_probe: bool,
+}
+
+fn validate_catalog(catalog: &BootstrapCatalog) -> Result<(), RpcControlConfigError> {
+    if catalog.sources.is_empty() {
+        return Err(RpcControlConfigError::NoSources);
+    }
+
+    let mut seen = BTreeSet::new();
+    for source in &catalog.sources {
+        if source.id.trim().is_empty() {
+            return Err(RpcControlConfigError::EmptySourceId);
+        }
+        if !seen.insert(source.id.as_str()) {
+            return Err(RpcControlConfigError::DuplicateSourceId(source.id.clone()));
+        }
+    }
+
+    for source_id in &catalog.preferred_order {
+        if !seen.contains(source_id.as_str()) {
+            return Err(RpcControlConfigError::UnknownPreferredSourceId(
+                source_id.clone(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_bootstrap_sources_from_json(raw_json: &str) -> Vec<RpcControlBootstrapSource> {
+    let Ok(parsed) = serde_json::from_str::<Vec<EnvBootstrapSource>>(raw_json) else {
+        warn!("failed to parse MFM_EVM_RPC_SOURCES_JSON for rpc.control bootstrap");
+        return Vec::new();
+    };
+
+    parsed
+        .into_iter()
+        .filter_map(|source| {
+            let id = source.id.trim().to_string();
+            let rpc_url = source.rpc_url.trim().to_string();
+            if id.is_empty() || rpc_url.is_empty() {
+                warn!("skipping rpc.control bootstrap source with empty id or rpc_url");
+                return None;
+            }
+
+            Some(RpcControlBootstrapSource {
+                id,
+                network_id: normalize_optional_field(source.network_id),
+                rpc_url,
+                authorization: normalize_optional_field(source.authorization),
+                kind: parse_source_kind(source.kind.as_deref()),
+                require_get_proof_probe: source.require_get_proof_probe,
+            })
+        })
+        .collect()
+}
+
+/// Resolves the bootstrap `rpc.control` source registry from supported environment variables.
+pub fn resolve_rpc_control_bootstrap_sources_from_env() -> Vec<RpcControlBootstrapSource> {
+    let mut sources = if let Ok(raw_json) = std::env::var(ENV_EVM_RPC_SOURCES_JSON) {
+        let trimmed = raw_json.trim();
+        if trimmed.is_empty() {
+            Vec::new()
+        } else {
+            parse_bootstrap_sources_from_json(trimmed)
+        }
+    } else {
+        Vec::new()
+    };
+
+    if sources.is_empty() {
+        let rpc_url = std::env::var(ENV_EVM_RPC_URL)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(rpc_url) = rpc_url {
+            sources.push(RpcControlBootstrapSource {
+                id: "user_primary".to_string(),
+                network_id: None,
+                rpc_url,
+                authorization: normalize_optional_field(
+                    std::env::var(ENV_EVM_RPC_AUTHORIZATION).ok(),
+                ),
+                kind: EvmSourceKind::RemoteUser,
+                require_get_proof_probe: false,
+            });
+        }
+    }
+
+    let require_get_proof_ids = parse_csv_env(ENV_EVM_RPC_REQUIRE_GET_PROOF_IDS)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    for source in &mut sources {
+        if require_get_proof_ids.contains(source.id.as_str()) {
+            source.require_get_proof_probe = true;
+        }
+    }
+
+    sources
+}
+
+fn resolve_bootstrap_catalog_from_env() -> BootstrapCatalog {
+    let sources = resolve_rpc_control_bootstrap_sources_from_env();
+    let mut preferred_order = parse_csv_env(ENV_EVM_RPC_PREFERRED_ORDER);
+    if preferred_order.is_empty() {
+        preferred_order = sources.iter().map(|source| source.id.clone()).collect();
+    }
+
+    BootstrapCatalog {
+        sources,
+        preferred_order,
+    }
+}
+
+fn inner_executor_config(catalog: &BootstrapCatalog) -> EvmJsonRpcHttpConfig {
+    let sources = catalog
+        .sources
+        .iter()
+        .map(|source| EvmJsonRpcSource {
+            id: source.id.clone(),
+            rpc_url: source.rpc_url.clone(),
+            authorization: source.authorization.clone(),
+            kind: source.kind,
+            require_get_proof_probe: false,
+        })
+        .collect();
+
+    EvmJsonRpcHttpConfig {
+        sources,
+        preferred_order: catalog.preferred_order.clone(),
+        strategy: EvmRoutingStrategy::Failover,
+        unhealthy_cooldown_calls: 0,
+        ..EvmJsonRpcHttpConfig::default()
+    }
+}
+
+/// Live transport factory for the `rpc.control` namespace.
+#[derive(Clone)]
+pub struct RpcControlTransportFactory {
+    catalog: BootstrapCatalog,
+    config_error: Option<RpcControlConfigError>,
+}
+
+impl RpcControlTransportFactory {
+    /// Builds a transport factory from the supplied bootstrap catalog.
+    pub fn new(catalog: Vec<RpcControlBootstrapSource>) -> Self {
+        let mut preferred_order = catalog.iter().map(|source| source.id.clone()).collect();
+        let catalog = BootstrapCatalog {
+            sources: catalog,
+            preferred_order: std::mem::take(&mut preferred_order),
+        };
+        let config_error = validate_catalog(&catalog).err();
+        Self {
+            catalog,
+            config_error,
+        }
+    }
+
+    /// Builds a transport factory from environment-derived bootstrap config.
+    pub fn from_env() -> Self {
+        let catalog = resolve_bootstrap_catalog_from_env();
+        let config_error = validate_catalog(&catalog).err();
+        Self {
+            catalog,
+            config_error,
+        }
+    }
+}
+
+impl Default for RpcControlTransportFactory {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl LiveIoTransportFactory for RpcControlTransportFactory {
+    fn namespace_group(&self) -> &str {
+        "rpc.control"
+    }
+
+    fn make(&self, env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
+        let executor = if self.config_error.is_none() {
+            Some(
+                EvmJsonRpcHttpTransportFactory::new(inner_executor_config(&self.catalog)).make(env),
+            )
+        } else {
+            None
+        };
+
+        Box::new(RpcControlTransport {
+            executor,
+            store: None,
+            catalog: self.catalog.clone(),
+            config_error: self.config_error.clone(),
+        })
+    }
+}
+
+struct RpcControlTransport {
+    executor: Option<Box<dyn LiveIoTransport>>,
+    store: Option<ControlPlanePostgresStore>,
+    catalog: BootstrapCatalog,
+    config_error: Option<RpcControlConfigError>,
+}
+
+#[derive(Clone, Debug)]
+struct RankedSource {
+    source: RpcControlBootstrapSource,
+    state: Option<RpcSourceState>,
+    healthy: bool,
+}
+
+impl RpcControlTransport {
+    async fn ensure_store(&mut self) -> Result<ControlPlanePostgresStore, IoError> {
+        if let Some(store) = &self.store {
+            return Ok(store.clone());
+        }
+
+        let store = ControlPlanePostgresStore::connect_env()
+            .await
+            .map_err(io_from_storage)?;
+        self.store = Some(store.clone());
+        Ok(store)
+    }
+
+    fn ensure_executor(&mut self) -> Result<&mut (dyn LiveIoTransport + '_), IoError> {
+        match &self.config_error {
+            Some(err) => Err(io_transport(
+                "rpc_control_config_invalid",
+                ErrorCategory::ParsingInput,
+                false,
+                err.to_string(),
+            )),
+            None => match self.executor.as_mut() {
+                Some(executor) => Ok(executor.as_mut()),
+                None => Err(io_transport(
+                    "rpc_control_executor_missing",
+                    ErrorCategory::Unknown,
+                    false,
+                    "rpc.control executor is not configured",
+                )),
+            },
+        }
+    }
+
+    fn source_by_id(&self, source_id: &str) -> Option<RpcControlBootstrapSource> {
+        self.catalog
+            .sources
+            .iter()
+            .find(|source| source.id == source_id)
+            .cloned()
+    }
+
+    fn global_sources(&self) -> Vec<RpcControlBootstrapSource> {
+        self.catalog
+            .sources
+            .iter()
+            .filter(|source| source.network_id.is_none())
+            .cloned()
+            .collect()
+    }
+
+    fn sources_for_scope(&self, network_scope: &str) -> Vec<RpcControlBootstrapSource> {
+        if network_scope == DEFAULT_NETWORK_SCOPE {
+            return self.global_sources();
+        }
+
+        let specific = self
+            .catalog
+            .sources
+            .iter()
+            .filter(|source| source.network_id.as_deref() == Some(network_scope))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !specific.is_empty() {
+            return specific;
+        }
+
+        self.global_sources()
+    }
+
+    fn ordered_candidate_sources(
+        &self,
+        network_scope: &str,
+    ) -> Result<Vec<RpcControlBootstrapSource>, IoError> {
+        let sources = self.sources_for_scope(network_scope);
+        if sources.is_empty() {
+            return Err(io_transport(
+                "rpc_control_no_sources",
+                ErrorCategory::Unknown,
+                false,
+                format!("no bootstrap sources configured for network scope `{network_scope}`"),
+            ));
+        }
+
+        let mut by_id = sources
+            .into_iter()
+            .map(|source| (source.id.clone(), source))
+            .collect::<HashMap<_, _>>();
+        let mut ordered = Vec::new();
+        for source_id in &self.catalog.preferred_order {
+            if let Some(source) = by_id.remove(source_id) {
+                ordered.push(source);
+            }
+        }
+
+        let mut remaining = by_id.into_values().collect::<Vec<_>>();
+        remaining.sort_by(|left, right| left.id.cmp(&right.id));
+        ordered.extend(remaining);
+        Ok(ordered)
+    }
+
+    fn resolve_network_scope(
+        &self,
+        requested_network_id: Option<&str>,
+        route_source_id: Option<&str>,
+    ) -> Result<String, IoError> {
+        if let Some(network_id) = requested_network_id {
+            let trimmed = network_id.trim();
+            if trimmed.is_empty() {
+                return Err(io_transport(
+                    "rpc_control_network_invalid",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    "network_id must not be empty",
+                ));
+            }
+            return Ok(trimmed.to_string());
+        }
+
+        if let Some(source_id) = route_source_id {
+            let Some(source) = self.source_by_id(source_id) else {
+                return Err(io_transport(
+                    "rpc_control_source_unknown",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    format!("unknown rpc source id `{source_id}`"),
+                ));
+            };
+            return Ok(source
+                .network_id
+                .unwrap_or_else(|| DEFAULT_NETWORK_SCOPE.to_string()));
+        }
+
+        let global_sources = self.global_sources();
+        if !global_sources.is_empty() {
+            return Ok(DEFAULT_NETWORK_SCOPE.to_string());
+        }
+
+        let networks = self
+            .catalog
+            .sources
+            .iter()
+            .filter_map(|source| source.network_id.clone())
+            .collect::<BTreeSet<_>>();
+        if networks.len() == 1 {
+            return Ok(networks
+                .into_iter()
+                .next()
+                .expect("single network set should contain one value"));
+        }
+
+        Err(io_transport(
+            "rpc_control_network_required",
+            ErrorCategory::ParsingInput,
+            false,
+            "network_id is required when multiple network-specific rpc source catalogs exist",
+        ))
+    }
+
+    async fn execute_inner(
+        &mut self,
+        source_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, IoError> {
+        let call = IoCall {
+            namespace: "evm".to_string(),
+            request: serde_json::json!({
+                "method": method,
+                "params": params,
+                "route": {
+                    "source_id": source_id,
+                },
+            }),
+            fact_key: None,
+        };
+
+        self.ensure_executor()?.call(call).await
+    }
+
+    async fn append_source_records_retry(
+        &mut self,
+        source_ref: &RpcSourceRef,
+        records: Vec<RpcSourceRecord>,
+    ) -> Result<RpcSourceState, IoError> {
+        let store = self.ensure_store().await?;
+        let mut last_err = None;
+        for _ in 0..3 {
+            let expected_seq = store
+                .rpc_source_state(source_ref)
+                .await
+                .map_err(io_from_storage)?
+                .map(|state| state.head_seq)
+                .unwrap_or(0);
+            match store
+                .append_rpc_source_records(source_ref, expected_seq, records.clone())
+                .await
+            {
+                Ok(state) => return Ok(state),
+                Err(StorageError::Concurrency(info)) => last_err = Some(IoError::Other(info)),
+                Err(err) => return Err(io_from_storage(err)),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            io_other(
+                "rpc_control_append_retry_exhausted",
+                ErrorCategory::Storage,
+                true,
+                "rpc.control source append retry exhausted",
+            )
+        }))
+    }
+
+    async fn append_source_pool_records_retry(
+        &mut self,
+        pool_ref: &SourcePoolRef,
+        records: Vec<SourcePoolRecord>,
+    ) -> Result<SourcePoolState, IoError> {
+        let store = self.ensure_store().await?;
+        let mut last_err = None;
+        for _ in 0..3 {
+            let expected_seq = store
+                .source_pool_state(pool_ref)
+                .await
+                .map_err(io_from_storage)?
+                .map(|state| state.head_seq)
+                .unwrap_or(0);
+            match store
+                .append_source_pool_records(pool_ref, expected_seq, records.clone())
+                .await
+            {
+                Ok(state) => return Ok(state),
+                Err(StorageError::Concurrency(info)) => last_err = Some(IoError::Other(info)),
+                Err(err) => return Err(io_from_storage(err)),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            io_other(
+                "rpc_control_append_retry_exhausted",
+                ErrorCategory::Storage,
+                true,
+                "rpc.control source pool append retry exhausted",
+            )
+        }))
+    }
+
+    async fn append_runtime_observation(
+        &mut self,
+        network_scope: &str,
+        source_id: &str,
+        method: &str,
+        response: Result<(&serde_json::Value, u64), (&IoError, u64)>,
+    ) {
+        let Ok(source_ref) = RpcSourceRef::new(network_scope, source_id) else {
+            return;
+        };
+
+        let observed_at_ms = match now_ms() {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+
+        let record = match response {
+            Ok((value, latency_ms)) => RpcSourceRecord::Observed(RpcSourceObservedRecord {
+                observed_at_ms,
+                outcome: RpcSourceOutcome::Success,
+                head_block_number: if method == "eth_blockNumber" {
+                    parse_u64_hex_value(value).ok()
+                } else {
+                    None
+                },
+                latency_ms: Some(latency_ms),
+                cooldown_until_ms: None,
+                diagnostic_code: None,
+            }),
+            Err((err, latency_ms)) => RpcSourceRecord::Observed(RpcSourceObservedRecord {
+                observed_at_ms,
+                outcome: RpcSourceOutcome::Failure,
+                head_block_number: None,
+                latency_ms: Some(latency_ms),
+                cooldown_until_ms: Some(observed_at_ms.saturating_add(FAILURE_COOLDOWN_MS)),
+                diagnostic_code: Some(io_error_code(err)),
+            }),
+        };
+
+        if let Err(err) = self
+            .append_source_records_retry(&source_ref, vec![record])
+            .await
+        {
+            warn!(error = %io_error_code(&err), source_id, "failed to persist rpc.control observation");
+        }
+    }
+
+    fn needs_probe(
+        &self,
+        source: &RpcControlBootstrapSource,
+        state: Option<&RpcSourceState>,
+        now_ms: u64,
+    ) -> bool {
+        let Some(state) = state else {
+            return true;
+        };
+
+        let Some(last_recorded_at_ms) = state.last_recorded_at_ms else {
+            return true;
+        };
+        if now_ms.saturating_sub(last_recorded_at_ms) > PROBE_REFRESH_INTERVAL_MS {
+            return true;
+        }
+        if source.require_get_proof_probe && state.supports_get_proof != Some(true) {
+            return true;
+        }
+        false
+    }
+
+    async fn probe_source(
+        &mut self,
+        network_scope: &str,
+        source: &RpcControlBootstrapSource,
+    ) -> Result<RpcSourceState, IoError> {
+        let source_ref = RpcSourceRef::new(network_scope, source.id.clone()).map_err(|err| {
+            io_transport(
+                "rpc_control_source_invalid",
+                ErrorCategory::ParsingInput,
+                false,
+                err.to_string(),
+            )
+        })?;
+
+        let probed_at_ms = now_ms()?;
+        let mut records = Vec::new();
+
+        let start = Instant::now();
+        let basic_probe = self
+            .execute_inner(&source.id, "eth_blockNumber", serde_json::json!([]))
+            .await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+
+        match basic_probe {
+            Ok(response) => {
+                records.push(RpcSourceRecord::Observed(RpcSourceObservedRecord {
+                    observed_at_ms: probed_at_ms,
+                    outcome: RpcSourceOutcome::Success,
+                    head_block_number: parse_u64_hex_value(&response).ok(),
+                    latency_ms: Some(latency_ms),
+                    cooldown_until_ms: None,
+                    diagnostic_code: None,
+                }));
+                records.push(RpcSourceRecord::Probed(RpcSourceProbedRecord {
+                    probed_at_ms,
+                    probe_kind: RpcSourceProbeKind::Basic,
+                    outcome: RpcSourceOutcome::Success,
+                    latency_ms: Some(latency_ms),
+                    supports_get_proof: None,
+                    cooldown_until_ms: None,
+                    diagnostic_code: None,
+                }));
+            }
+            Err(err) => {
+                let code = io_error_code(&err);
+                let cooldown_until_ms = Some(probed_at_ms.saturating_add(FAILURE_COOLDOWN_MS));
+                records.push(RpcSourceRecord::Observed(RpcSourceObservedRecord {
+                    observed_at_ms: probed_at_ms,
+                    outcome: RpcSourceOutcome::Failure,
+                    head_block_number: None,
+                    latency_ms: Some(latency_ms),
+                    cooldown_until_ms,
+                    diagnostic_code: Some(code.clone()),
+                }));
+                records.push(RpcSourceRecord::Probed(RpcSourceProbedRecord {
+                    probed_at_ms,
+                    probe_kind: RpcSourceProbeKind::Basic,
+                    outcome: RpcSourceOutcome::Failure,
+                    latency_ms: Some(latency_ms),
+                    supports_get_proof: None,
+                    cooldown_until_ms,
+                    diagnostic_code: Some(code),
+                }));
+                return self.append_source_records_retry(&source_ref, records).await;
+            }
+        }
+
+        if source.require_get_proof_probe {
+            let start = Instant::now();
+            let get_proof = self
+                .execute_inner(
+                    &source.id,
+                    "eth_getProof",
+                    serde_json::json!(["0x0000000000000000000000000000000000000000", [], "latest"]),
+                )
+                .await;
+            let latency_ms = start.elapsed().as_millis() as u64;
+            match get_proof {
+                Ok(_) => records.push(RpcSourceRecord::Probed(RpcSourceProbedRecord {
+                    probed_at_ms,
+                    probe_kind: RpcSourceProbeKind::GetProof,
+                    outcome: RpcSourceOutcome::Success,
+                    latency_ms: Some(latency_ms),
+                    supports_get_proof: Some(true),
+                    cooldown_until_ms: None,
+                    diagnostic_code: None,
+                })),
+                Err(err) => records.push(RpcSourceRecord::Probed(RpcSourceProbedRecord {
+                    probed_at_ms,
+                    probe_kind: RpcSourceProbeKind::GetProof,
+                    outcome: RpcSourceOutcome::Failure,
+                    latency_ms: Some(latency_ms),
+                    supports_get_proof: Some(false),
+                    cooldown_until_ms: Some(probed_at_ms.saturating_add(FAILURE_COOLDOWN_MS)),
+                    diagnostic_code: Some(io_error_code(&err)),
+                })),
+            }
+        }
+
+        self.append_source_records_retry(&source_ref, records).await
+    }
+
+    fn source_healthy(
+        &self,
+        source: &RpcControlBootstrapSource,
+        state: Option<&RpcSourceState>,
+        now_ms: u64,
+    ) -> bool {
+        let Some(state) = state else {
+            return false;
+        };
+        let cooldown_active = state
+            .cooldown_until_ms
+            .map(|deadline| deadline > now_ms)
+            .unwrap_or(false);
+        let capability_ok =
+            !source.require_get_proof_probe || state.supports_get_proof == Some(true);
+        capability_ok && !cooldown_active && state.consecutive_failures == 0
+    }
+
+    fn rank_sources(
+        &self,
+        candidates: Vec<RpcControlBootstrapSource>,
+        states: &HashMap<String, RpcSourceState>,
+        now_ms: u64,
+    ) -> Vec<RankedSource> {
+        let preferred_index = self
+            .catalog
+            .preferred_order
+            .iter()
+            .enumerate()
+            .map(|(index, source_id)| (source_id.as_str(), index))
+            .collect::<HashMap<_, _>>();
+
+        let mut ranked = candidates
+            .into_iter()
+            .map(|source| {
+                let state = states.get(source.id.as_str()).cloned();
+                let healthy = self.source_healthy(&source, state.as_ref(), now_ms);
+                RankedSource {
+                    source,
+                    state,
+                    healthy,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        ranked.sort_by(|left, right| {
+            let left_state = left.state.as_ref();
+            let right_state = right.state.as_ref();
+
+            let left_cooldown = left_state
+                .and_then(|state| state.cooldown_until_ms)
+                .map(|deadline| deadline > now_ms)
+                .unwrap_or(true);
+            let right_cooldown = right_state
+                .and_then(|state| state.cooldown_until_ms)
+                .map(|deadline| deadline > now_ms)
+                .unwrap_or(true);
+            let left_capability = !left.source.require_get_proof_probe
+                || left_state.and_then(|state| state.supports_get_proof) == Some(true);
+            let right_capability = !right.source.require_get_proof_probe
+                || right_state.and_then(|state| state.supports_get_proof) == Some(true);
+            let left_failures = left_state
+                .map(|state| state.consecutive_failures)
+                .unwrap_or(u64::MAX);
+            let right_failures = right_state
+                .map(|state| state.consecutive_failures)
+                .unwrap_or(u64::MAX);
+            let left_latency = left_state
+                .and_then(|state| state.last_probe_latency_ms.or(state.last_latency_ms))
+                .unwrap_or(u64::MAX);
+            let right_latency = right_state
+                .and_then(|state| state.last_probe_latency_ms.or(state.last_latency_ms))
+                .unwrap_or(u64::MAX);
+            let left_pref = preferred_index
+                .get(left.source.id.as_str())
+                .copied()
+                .unwrap_or(usize::MAX);
+            let right_pref = preferred_index
+                .get(right.source.id.as_str())
+                .copied()
+                .unwrap_or(usize::MAX);
+
+            (!left.healthy)
+                .cmp(&!right.healthy)
+                .then_with(|| (!left_capability).cmp(&!right_capability))
+                .then_with(|| left_cooldown.cmp(&right_cooldown))
+                .then_with(|| left_failures.cmp(&right_failures))
+                .then_with(|| left_latency.cmp(&right_latency))
+                .then_with(|| kind_rank(left.source.kind).cmp(&kind_rank(right.source.kind)))
+                .then_with(|| left_pref.cmp(&right_pref))
+                .then_with(|| left.source.id.cmp(&right.source.id))
+        });
+
+        ranked
+    }
+
+    async fn prepare_sources_impl(
+        &mut self,
+        network_scope: &str,
+    ) -> Result<PrepareSourcesResponse, IoError> {
+        let candidates = self.ordered_candidate_sources(network_scope)?;
+        let available_source_ids = candidates
+            .iter()
+            .map(|source| source.id.clone())
+            .collect::<Vec<_>>();
+        let pool_ref = SourcePoolRef::new(network_scope, DEFAULT_POOL_KIND).map_err(|err| {
+            io_transport(
+                "rpc_control_pool_invalid",
+                ErrorCategory::ParsingInput,
+                false,
+                err.to_string(),
+            )
+        })?;
+
+        let store = self.ensure_store().await?;
+        let current_pool = store
+            .source_pool_state(&pool_ref)
+            .await
+            .map_err(io_from_storage)?;
+        if current_pool
+            .as_ref()
+            .map(|state| state.member_source_ids.as_slice())
+            != Some(available_source_ids.as_slice())
+        {
+            self.append_source_pool_records_retry(
+                &pool_ref,
+                vec![SourcePoolRecord::MembershipDeclared(
+                    SourcePoolMembershipDeclaredRecord {
+                        declared_at_ms: now_ms()?,
+                        member_source_ids: available_source_ids.clone(),
+                    },
+                )],
+            )
+            .await?;
+        }
+
+        let mut states = HashMap::new();
+        let current_ms = now_ms()?;
+        for source in &candidates {
+            let source_ref =
+                RpcSourceRef::new(network_scope, source.id.clone()).map_err(|err| {
+                    io_transport(
+                        "rpc_control_source_invalid",
+                        ErrorCategory::ParsingInput,
+                        false,
+                        err.to_string(),
+                    )
+                })?;
+            let existing = store
+                .rpc_source_state(&source_ref)
+                .await
+                .map_err(io_from_storage)?;
+            let state = if self.needs_probe(source, existing.as_ref(), current_ms) {
+                self.probe_source(network_scope, source).await?
+            } else {
+                existing.expect("existing state checked above")
+            };
+            states.insert(source.id.clone(), state);
+        }
+
+        let ranked = self.rank_sources(candidates.clone(), &states, current_ms);
+        let ranked_source_ids = ranked
+            .iter()
+            .map(|entry| entry.source.id.clone())
+            .collect::<Vec<_>>();
+        let current_pool = store
+            .source_pool_state(&pool_ref)
+            .await
+            .map_err(io_from_storage)?;
+        if current_pool
+            .as_ref()
+            .map(|state| state.ranked_source_ids.as_slice())
+            != Some(ranked_source_ids.as_slice())
+        {
+            self.append_source_pool_records_retry(
+                &pool_ref,
+                vec![SourcePoolRecord::Ranked(SourcePoolRankedRecord {
+                    ranked_at_ms: now_ms()?,
+                    ranked_source_ids: ranked_source_ids.clone(),
+                })],
+            )
+            .await?;
+        }
+
+        let summaries = ranked
+            .iter()
+            .map(|entry| PreparedSourceSummary {
+                source_id: entry.source.id.clone(),
+                healthy: entry.healthy,
+                supports_get_proof: entry
+                    .state
+                    .as_ref()
+                    .and_then(|state| state.supports_get_proof),
+                cooldown_until_ms: entry
+                    .state
+                    .as_ref()
+                    .and_then(|state| state.cooldown_until_ms),
+                last_error_code: entry
+                    .state
+                    .as_ref()
+                    .and_then(|state| state.last_error_code.clone()),
+            })
+            .collect::<Vec<_>>();
+
+        Ok(PrepareSourcesResponse {
+            network_id: network_scope.to_string(),
+            pool_kind: DEFAULT_POOL_KIND.to_string(),
+            available_source_ids,
+            ranked_source_ids,
+            sources: summaries,
+        })
+    }
+
+    async fn handle_prepare_sources(
+        &mut self,
+        network_id: &str,
+    ) -> Result<serde_json::Value, IoError> {
+        let response = self.prepare_sources_impl(network_id).await?;
+        serde_json::to_value(response).map_err(|_| {
+            io_transport(
+                "rpc_control_response_encode_failed",
+                ErrorCategory::ParsingInput,
+                false,
+                "failed to encode rpc.control prepare_sources response",
+            )
+        })
+    }
+
+    async fn select_managed_source(&mut self, network_scope: &str) -> Result<String, IoError> {
+        let prepared = self.prepare_sources_impl(network_scope).await?;
+        prepared
+            .sources
+            .iter()
+            .find(|source| source.healthy)
+            .map(|source| source.source_id.clone())
+            .or_else(|| prepared.ranked_source_ids.first().cloned())
+            .ok_or_else(|| {
+                io_transport(
+                    "rpc_control_no_sources",
+                    ErrorCategory::Unknown,
+                    false,
+                    format!("no managed rpc sources available for network scope `{network_scope}`"),
+                )
+            })
+    }
+
+    async fn handle_evm_call(
+        &mut self,
+        managed_call: mfm_collectors_rpc_control::JsonRpcCall,
+    ) -> Result<serde_json::Value, IoError> {
+        let requested_network_id = managed_call.network_id.as_deref();
+        let route_source_id = managed_call
+            .route
+            .as_ref()
+            .map(|route| route.source_id.as_str());
+        let network_scope = self.resolve_network_scope(requested_network_id, route_source_id)?;
+
+        let source_id = if let Some(source_id) = route_source_id {
+            let Some(_) = self.source_by_id(source_id) else {
+                return Err(io_transport(
+                    "rpc_control_source_unknown",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    format!("unknown rpc source id `{source_id}`"),
+                ));
+            };
+            source_id.to_string()
+        } else {
+            self.select_managed_source(&network_scope).await?
+        };
+
+        let start = Instant::now();
+        let result = self
+            .execute_inner(
+                &source_id,
+                &managed_call.method,
+                managed_call.params.clone(),
+            )
+            .await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(response) => {
+                self.append_runtime_observation(
+                    &network_scope,
+                    &source_id,
+                    &managed_call.method,
+                    Ok((&response, latency_ms)),
+                )
+                .await;
+                Ok(response)
+            }
+            Err(err) => {
+                self.append_runtime_observation(
+                    &network_scope,
+                    &source_id,
+                    &managed_call.method,
+                    Err((&err, latency_ms)),
+                )
+                .await;
+                Err(err)
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl LiveIoTransport for RpcControlTransport {
+    async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
+        if call.namespace != NAMESPACE_RPC_CONTROL {
+            return Err(io_transport(
+                "unknown_namespace",
+                ErrorCategory::Unknown,
+                false,
+                format!("unknown rpc.control namespace `{}`", call.namespace),
+            ));
+        }
+
+        let request: RpcControlRequest = serde_json::from_value(call.request).map_err(|_| {
+            io_transport(
+                "rpc_control_request_invalid",
+                ErrorCategory::ParsingInput,
+                false,
+                "rpc.control request payload was invalid",
+            )
+        })?;
+
+        match request {
+            RpcControlRequest::EvmCall { call } => self.handle_evm_call(call).await,
+            RpcControlRequest::PrepareSources { network_id } => {
+                self.handle_prepare_sources(&network_id).await
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(
+        id: &str,
+        network_id: Option<&str>,
+        kind: EvmSourceKind,
+        require_get_proof_probe: bool,
+    ) -> RpcControlBootstrapSource {
+        RpcControlBootstrapSource {
+            id: id.to_string(),
+            network_id: network_id.map(str::to_string),
+            rpc_url: format!("http://127.0.0.1/{}", id),
+            authorization: None,
+            kind,
+            require_get_proof_probe,
+        }
+    }
+
+    fn transport_for_tests(sources: Vec<RpcControlBootstrapSource>) -> RpcControlTransport {
+        let preferred_order = sources.iter().map(|source| source.id.clone()).collect();
+        RpcControlTransport {
+            executor: None,
+            store: None,
+            catalog: BootstrapCatalog {
+                sources,
+                preferred_order,
+            },
+            config_error: None,
+        }
+    }
+
+    #[test]
+    fn legacy_env_fallback_maps_to_user_primary() {
+        std::env::remove_var(ENV_EVM_RPC_SOURCES_JSON);
+        std::env::set_var(ENV_EVM_RPC_URL, "http://127.0.0.1:8545");
+        std::env::remove_var(ENV_EVM_RPC_REQUIRE_GET_PROOF_IDS);
+
+        let sources = resolve_rpc_control_bootstrap_sources_from_env();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].id, "user_primary");
+        assert_eq!(sources[0].network_id, None);
+        assert_eq!(sources[0].rpc_url, "http://127.0.0.1:8545");
+
+        std::env::remove_var(ENV_EVM_RPC_URL);
+    }
+
+    #[test]
+    fn network_scope_defaults_to_global_when_available() {
+        let transport = transport_for_tests(vec![
+            source("global_primary", None, EvmSourceKind::RemoteUser, false),
+            source("global_backup", None, EvmSourceKind::RemotePublic, false),
+        ]);
+        let scope = transport
+            .resolve_network_scope(None, None)
+            .expect("global scope should resolve");
+        assert_eq!(scope, DEFAULT_NETWORK_SCOPE);
+    }
+
+    #[test]
+    fn route_source_can_imply_specific_network_scope() {
+        let transport = transport_for_tests(vec![
+            source(
+                "reth_local",
+                Some("reth-local"),
+                EvmSourceKind::Local,
+                false,
+            ),
+            source(
+                "archive_local",
+                Some("reth-local"),
+                EvmSourceKind::Local,
+                false,
+            ),
+        ]);
+        let scope = transport
+            .resolve_network_scope(None, Some("reth_local"))
+            .expect("route source should resolve network");
+        assert_eq!(scope, "reth-local");
+    }
+
+    #[test]
+    fn ranking_prefers_healthy_low_latency_sources() {
+        let transport = transport_for_tests(vec![
+            source(
+                "local_fast",
+                Some("ethereum-mainnet"),
+                EvmSourceKind::Local,
+                false,
+            ),
+            source(
+                "remote_slow",
+                Some("ethereum-mainnet"),
+                EvmSourceKind::RemotePublic,
+                false,
+            ),
+            source(
+                "proof_missing",
+                Some("ethereum-mainnet"),
+                EvmSourceKind::Local,
+                true,
+            ),
+        ]);
+        let mut states = HashMap::new();
+        states.insert(
+            "local_fast".to_string(),
+            RpcSourceState {
+                source_ref: RpcSourceRef::new("ethereum-mainnet", "local_fast").unwrap(),
+                stream_id: RpcSourceRef::new("ethereum-mainnet", "local_fast")
+                    .unwrap()
+                    .stream_id(),
+                head_seq: 1,
+                last_recorded_at_ms: Some(100),
+                last_observed_at_ms: Some(100),
+                last_probed_at_ms: Some(100),
+                last_observed_head: Some(1),
+                last_latency_ms: Some(10),
+                last_probe_latency_ms: Some(10),
+                supports_get_proof: Some(true),
+                success_count: 1,
+                failure_count: 0,
+                consecutive_failures: 0,
+                cooldown_until_ms: None,
+                last_error_code: None,
+            },
+        );
+        states.insert(
+            "remote_slow".to_string(),
+            RpcSourceState {
+                source_ref: RpcSourceRef::new("ethereum-mainnet", "remote_slow").unwrap(),
+                stream_id: RpcSourceRef::new("ethereum-mainnet", "remote_slow")
+                    .unwrap()
+                    .stream_id(),
+                head_seq: 1,
+                last_recorded_at_ms: Some(100),
+                last_observed_at_ms: Some(100),
+                last_probed_at_ms: Some(100),
+                last_observed_head: Some(1),
+                last_latency_ms: Some(80),
+                last_probe_latency_ms: Some(80),
+                supports_get_proof: Some(true),
+                success_count: 1,
+                failure_count: 0,
+                consecutive_failures: 0,
+                cooldown_until_ms: None,
+                last_error_code: None,
+            },
+        );
+        states.insert(
+            "proof_missing".to_string(),
+            RpcSourceState {
+                source_ref: RpcSourceRef::new("ethereum-mainnet", "proof_missing").unwrap(),
+                stream_id: RpcSourceRef::new("ethereum-mainnet", "proof_missing")
+                    .unwrap()
+                    .stream_id(),
+                head_seq: 1,
+                last_recorded_at_ms: Some(100),
+                last_observed_at_ms: Some(100),
+                last_probed_at_ms: Some(100),
+                last_observed_head: Some(1),
+                last_latency_ms: Some(5),
+                last_probe_latency_ms: Some(5),
+                supports_get_proof: Some(false),
+                success_count: 1,
+                failure_count: 0,
+                consecutive_failures: 0,
+                cooldown_until_ms: None,
+                last_error_code: None,
+            },
+        );
+
+        let ranked = transport.rank_sources(
+            transport.sources_for_scope("ethereum-mainnet"),
+            &states,
+            1_000,
+        );
+        assert_eq!(
+            ranked
+                .into_iter()
+                .map(|entry| entry.source.id)
+                .collect::<Vec<_>>(),
+            vec![
+                "local_fast".to_string(),
+                "remote_slow".to_string(),
+                "proof_missing".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_scope_requires_network_when_catalog_is_multi_network_only() {
+        let transport = transport_for_tests(vec![
+            source(
+                "mainnet",
+                Some("ethereum-mainnet"),
+                EvmSourceKind::Local,
+                false,
+            ),
+            source("arb", Some("arbitrum-mainnet"), EvmSourceKind::Local, false),
+        ]);
+        let err = transport
+            .resolve_network_scope(None, None)
+            .expect_err("multi-network catalog should require network");
+        assert_eq!(io_error_code(&err), "rpc_control_network_required");
+    }
+}

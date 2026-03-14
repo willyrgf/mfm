@@ -59,7 +59,7 @@ impl CountingTransportFactory {
 
 impl LiveIoTransportFactory for CountingTransportFactory {
     fn namespace_group(&self) -> &str {
-        "evm"
+        "rpc.control"
     }
 
     fn make(&self, _env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
@@ -81,11 +81,9 @@ impl LiveIoTransport for CountingTransport {
             .get("method")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown");
-        let route_source_id = call
+        let network_id = call
             .request
-            .get("route")
-            .and_then(serde_json::Value::as_object)
-            .and_then(|route| route.get("source_id"))
+            .get("network_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("default");
 
@@ -96,19 +94,19 @@ impl LiveIoTransport for CountingTransport {
             .cloned()
             .unwrap_or_default();
 
-        let count_key = classify_call(method, route_source_id, &params);
+        let count_key = classify_call(method, network_id, &params);
         {
             let mut counts = self.counts.lock().await;
             *counts.entry(count_key).or_default() += 1;
         }
 
         match method {
-            "eth_chainId" => Ok(match route_source_id {
-                "arbitrum_primary" => serde_json::json!("0xa4b1"),
+            "eth_chainId" => Ok(match network_id {
+                "arbitrum-mainnet" => serde_json::json!("0xa4b1"),
                 _ => serde_json::json!("0x1"),
             }),
-            "eth_blockNumber" => Ok(match route_source_id {
-                "arbitrum_primary" => serde_json::json!("0xc8"),
+            "eth_blockNumber" => Ok(match network_id {
+                "arbitrum-mainnet" => serde_json::json!("0xc8"),
                 _ => serde_json::json!("0x64"),
             }),
             "eth_getBalance" => match params.first().and_then(serde_json::Value::as_str) {
@@ -200,15 +198,15 @@ impl LiveIoTransport for CountingTransport {
     }
 }
 
-fn classify_call(method: &str, route_source_id: &str, params: &[serde_json::Value]) -> String {
+fn classify_call(method: &str, network_id: &str, params: &[serde_json::Value]) -> String {
     match method {
-        "eth_chainId" | "eth_blockNumber" => format!("{method}@{route_source_id}"),
+        "eth_chainId" | "eth_blockNumber" => format!("{method}@{network_id}"),
         "eth_getBalance" => {
             let wallet = params
                 .first()
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("unknown");
-            format!("{method}:{wallet}@{route_source_id}")
+            format!("{method}:{wallet}@{network_id}")
         }
         "eth_call" => {
             let target = params
@@ -233,9 +231,9 @@ fn classify_call(method: &str, route_source_id: &str, params: &[serde_json::Valu
             } else {
                 "unknown"
             };
-            format!("eth_call:{label}:{to}@{route_source_id}")
+            format!("eth_call:{label}:{to}@{network_id}")
         }
-        _ => format!("{method}@{route_source_id}"),
+        _ => format!("{method}@{network_id}"),
     }
 }
 
@@ -554,30 +552,32 @@ async fn at_live_then_replay_determinism() {
 
     let got = counts.lock().await.clone();
     assert_eq!(
-        got.get("eth_chainId@mainnet_primary").copied().unwrap_or(0),
-        1
-    );
-    assert_eq!(
-        got.get("eth_chainId@arbitrum_primary")
+        got.get("eth_chainId@ethereum-mainnet")
             .copied()
             .unwrap_or(0),
         1
     );
     assert_eq!(
-        got.get("eth_blockNumber@mainnet_primary")
+        got.get("eth_chainId@arbitrum-mainnet")
             .copied()
             .unwrap_or(0),
         1
     );
     assert_eq!(
-        got.get("eth_blockNumber@arbitrum_primary")
+        got.get("eth_blockNumber@ethereum-mainnet")
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        got.get("eth_blockNumber@arbitrum-mainnet")
             .copied()
             .unwrap_or(0),
         1
     );
     assert_eq!(
         got.get(
-            "eth_call:latest_round_data:0x0000000000000000000000000000000000001001@mainnet_primary"
+            "eth_call:latest_round_data:0x0000000000000000000000000000000000001001@ethereum-mainnet"
         )
         .copied()
         .unwrap_or(0),
@@ -585,7 +585,7 @@ async fn at_live_then_replay_determinism() {
     );
     assert_eq!(
         got.get(
-            "eth_call:latest_round_data:0x0000000000000000000000000000000000001002@mainnet_primary"
+            "eth_call:latest_round_data:0x0000000000000000000000000000000000001002@ethereum-mainnet"
         )
         .copied()
         .unwrap_or(0),
@@ -593,14 +593,14 @@ async fn at_live_then_replay_determinism() {
     );
     assert_eq!(
         got.get(
-            "eth_call:latest_round_data:0x0000000000000000000000000000000000001003@mainnet_primary"
+            "eth_call:latest_round_data:0x0000000000000000000000000000000000001003@ethereum-mainnet"
         )
         .copied()
         .unwrap_or(0),
         1
     );
     assert_eq!(
-        got.get("eth_call:balance_of:0x0000000000000000000000000000000000000001@mainnet_primary")
+        got.get("eth_call:balance_of:0x0000000000000000000000000000000000000001@ethereum-mainnet")
             .copied()
             .unwrap_or(0),
         1
@@ -674,23 +674,25 @@ async fn at_crash_resume_orphan_attempt_reuses_pinned_network_facts() {
 
     let got = counts.lock().await.clone();
     assert_eq!(
-        got.get("eth_chainId@mainnet_primary").copied().unwrap_or(0),
-        1
-    );
-    assert_eq!(
-        got.get("eth_chainId@arbitrum_primary")
+        got.get("eth_chainId@ethereum-mainnet")
             .copied()
             .unwrap_or(0),
         1
     );
     assert_eq!(
-        got.get("eth_blockNumber@mainnet_primary")
+        got.get("eth_chainId@arbitrum-mainnet")
             .copied()
             .unwrap_or(0),
         1
     );
     assert_eq!(
-        got.get("eth_blockNumber@arbitrum_primary")
+        got.get("eth_blockNumber@ethereum-mainnet")
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        got.get("eth_blockNumber@arbitrum-mainnet")
             .copied()
             .unwrap_or(0),
         1
@@ -840,13 +842,11 @@ fn canonical_op_config() -> serde_json::Value {
                 {
                     "network_id": "ethereum-mainnet",
                     "chain_id": 1,
-                    "rpc_source_id": "mainnet_primary",
                     "metadata": {}
                 },
                 {
                     "network_id": "arbitrum-mainnet",
                     "chain_id": 42161,
-                    "rpc_source_id": "arbitrum_primary",
                     "metadata": {}
                 }
             ],
@@ -1053,7 +1053,6 @@ fn canonical_aave_op_config() -> serde_json::Value {
                 {
                     "network_id": "ethereum-mainnet",
                     "chain_id": 1,
-                    "rpc_source_id": "mainnet_primary",
                     "metadata": {}
                 }
             ],

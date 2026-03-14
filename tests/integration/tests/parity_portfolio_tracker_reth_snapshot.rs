@@ -37,7 +37,6 @@ fn canonical_portfolio_snapshot_payload(wallet_address: &str, chain_id: u64) -> 
                 {
                     "network_id": "ethereum-mainnet",
                     "chain_id": chain_id,
-                    "rpc_source_id": null,
                     "metadata": {}
                 }
             ],

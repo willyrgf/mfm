@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use alloy_primitives::{Address, U256};
 use async_trait::async_trait;
-use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
+use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall};
 use mfm_evm_core::encoding::{
     encode_erc20_balance_of, format_u256_units, parse_u256_hex_value, parse_u8_u256,
     u64_hex_quantity,
@@ -33,8 +33,6 @@ use crate::model::{
 pub struct NetworkRouteConfig {
     /// Stable network identifier.
     pub network_id: String,
-    /// Optional routed RPC source id for the network.
-    pub rpc_source_id: Option<String>,
 }
 
 /// Minimal pinned-network view consumed by symbol runtime states.
@@ -175,7 +173,7 @@ impl State for ReadDirectPricesState {
                     mfm_evm_runtime::states::price::read_evm_oracle_unit_price(
                         &self.state_id,
                         io,
-                        network.rpc_source_id.as_deref(),
+                        &network.network_id,
                         oracle_kind,
                         config,
                         pin.block_number,
@@ -337,7 +335,7 @@ impl State for CollectObservationsState {
                         wallet,
                         symbol,
                         pin,
-                        route.rpc_source_id.as_deref(),
+                        &route.network_id,
                         &direct_prices_by_id,
                     )
                     .await?,
@@ -423,19 +421,14 @@ async fn build_observation(
     wallet: &ResolvedWallet,
     symbol: &SymbolConfig,
     pin: &PinnedNetwork,
-    route_source_id: Option<&str>,
+    network_id: &str,
     direct_prices_by_id: &HashMap<&str, &DirectPriceValue>,
 ) -> Result<Observation, StateError> {
     let (raw_dec, decimals, amount_dec, balance_reader_kind) = match &symbol.balance_reader {
         BalanceReaderConfig::NativeBalance {} => {
-            let raw = read_native_balance(
-                state_id,
-                io,
-                route_source_id,
-                &wallet.address,
-                pin.block_number,
-            )
-            .await?;
+            let raw =
+                read_native_balance(state_id, io, network_id, &wallet.address, pin.block_number)
+                    .await?;
             let decimals = symbol.decimals.unwrap_or(18);
             (
                 raw.to_string(),
@@ -448,20 +441,14 @@ async fn build_observation(
             let decimals = match symbol.decimals {
                 Some(decimals) => decimals,
                 None => {
-                    read_token_decimals(
-                        state_id,
-                        io,
-                        route_source_id,
-                        token_address,
-                        pin.block_number,
-                    )
-                    .await?
+                    read_token_decimals(state_id, io, network_id, token_address, pin.block_number)
+                        .await?
                 }
             };
             let raw = read_erc20_balance(
                 state_id,
                 io,
-                route_source_id,
+                network_id,
                 token_address,
                 &wallet.address,
                 pin.block_number,
@@ -599,18 +586,16 @@ fn build_observation_values_from_lookup(
 async fn read_native_balance(
     state_id: &StateId,
     io: &mut dyn IoProvider,
-    route_source_id: Option<&str>,
+    network_id: &str,
     wallet_address: &str,
     block_number: u64,
 ) -> Result<U256, StateError> {
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let mut call = JsonRpcCall::new(
+    let call = JsonRpcCall::new(
         "eth_getBalance",
         serde_json::json!([wallet_address, u64_hex_quantity(block_number)]),
-    );
-    if let Some(route_source_id) = route_source_id {
-        call = call.with_route_source_id(route_source_id.to_string());
-    }
+    )
+    .with_network_id(network_id);
     let res = client.call(call).await.map_err(state_from_io)?;
     parse_u256_hex_value(&res.response).map_err(|err| {
         state_unknown_msg(
@@ -623,21 +608,19 @@ async fn read_native_balance(
 async fn read_token_decimals(
     state_id: &StateId,
     io: &mut dyn IoProvider,
-    route_source_id: Option<&str>,
+    network_id: &str,
     token_address: &str,
     block_number: u64,
 ) -> Result<u8, StateError> {
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let mut call = JsonRpcCall::new(
+    let call = JsonRpcCall::new(
         "eth_call",
         serde_json::json!([
             {"to": token_address, "data": mfm_evm_runtime::states::read::encode_erc20_decimals()},
             u64_hex_quantity(block_number)
         ]),
-    );
-    if let Some(route_source_id) = route_source_id {
-        call = call.with_route_source_id(route_source_id.to_string());
-    }
+    )
+    .with_network_id(network_id);
     let res = client.call(call).await.map_err(state_from_io)?;
     let raw = parse_u256_hex_value(&res.response).map_err(|err| {
         state_unknown_msg(
@@ -656,7 +639,7 @@ async fn read_token_decimals(
 async fn read_erc20_balance(
     state_id: &StateId,
     io: &mut dyn IoProvider,
-    route_source_id: Option<&str>,
+    network_id: &str,
     token_address: &str,
     wallet_address: &str,
     block_number: u64,
@@ -668,16 +651,14 @@ async fn read_erc20_balance(
         )
     })?;
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let mut call = JsonRpcCall::new(
+    let call = JsonRpcCall::new(
         "eth_call",
         serde_json::json!([
             {"to": token_address, "data": encode_erc20_balance_of(&wallet)},
             u64_hex_quantity(block_number)
         ]),
-    );
-    if let Some(route_source_id) = route_source_id {
-        call = call.with_route_source_id(route_source_id.to_string());
-    }
+    )
+    .with_network_id(network_id);
     let res = client.call(call).await.map_err(state_from_io)?;
     parse_u256_hex_value(&res.response).map_err(|err| {
         state_unknown_msg(

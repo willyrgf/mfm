@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use alloy_primitives::U256;
-use mfm_collectors_evm::{EvmIoClient, JsonRpcCall};
+use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall};
 use mfm_evm_core::abi::function_selector;
 use mfm_evm_core::encoding::{
     parse_hex_string_response, parse_u256_hex_value, parse_u8_u256, u64_hex_quantity,
@@ -32,21 +32,15 @@ pub struct OracleUnitPrice {
 pub async fn read_evm_oracle_unit_price(
     state_id: &StateId,
     io: &mut dyn IoProvider,
-    route_source_id: Option<&str>,
+    network_id: &str,
     oracle_kind: &str,
     config: &BTreeMap<String, Value>,
     block_number: u64,
 ) -> Result<OracleUnitPrice, StateError> {
     match oracle_kind {
         "chainlink_aggregator_v3" => {
-            read_chainlink_aggregator_v3_unit_price(
-                state_id,
-                io,
-                route_source_id,
-                config,
-                block_number,
-            )
-            .await
+            read_chainlink_aggregator_v3_unit_price(state_id, io, network_id, config, block_number)
+                .await
         }
         _ => Err(state_error_with_state(
             state_id.clone(),
@@ -61,7 +55,7 @@ pub async fn read_evm_oracle_unit_price(
 async fn read_chainlink_aggregator_v3_unit_price(
     state_id: &StateId,
     io: &mut dyn IoProvider,
-    route_source_id: Option<&str>,
+    network_id: &str,
     config: &BTreeMap<String, Value>,
     block_number: u64,
 ) -> Result<OracleUnitPrice, StateError> {
@@ -71,7 +65,7 @@ async fn read_chainlink_aggregator_v3_unit_price(
     let decimals_raw = eth_call_with_route(
         state_id,
         io,
-        route_source_id,
+        network_id,
         &contract_address,
         &crate::states::read::encode_erc20_decimals(),
         block.clone(),
@@ -93,7 +87,7 @@ async fn read_chainlink_aggregator_v3_unit_price(
     let round_data_raw = eth_call_with_route(
         state_id,
         io,
-        route_source_id,
+        network_id,
         &contract_address,
         &encode_latest_round_data(),
         block,
@@ -125,22 +119,20 @@ fn chainlink_contract_address(config: &BTreeMap<String, Value>) -> Result<String
 async fn eth_call_with_route(
     state_id: &StateId,
     io: &mut dyn IoProvider,
-    route_source_id: Option<&str>,
+    network_id: &str,
     to: &str,
     data: &str,
     block: Value,
 ) -> Result<Value, StateError> {
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let mut call = JsonRpcCall::new(
+    let call = JsonRpcCall::new(
         "eth_call",
         serde_json::json!([
             {"to": to, "data": data},
             block
         ]),
-    );
-    if let Some(route_source_id) = route_source_id {
-        call = call.with_route_source_id(route_source_id.to_string());
-    }
+    )
+    .with_network_id(network_id);
     let res = client.call(call).await.map_err(state_from_io)?;
     Ok(res.response)
 }
@@ -286,7 +278,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_chainlink_unit_price_with_route_and_pin() {
+    async fn reads_chainlink_unit_price_with_network_and_pin() {
         let mut io = FixedIo::default();
         let state_id = StateId::must_new("price.main.read".to_string());
         let config = BTreeMap::from([(
@@ -297,7 +289,7 @@ mod tests {
         let price = read_evm_oracle_unit_price(
             &state_id,
             &mut io,
-            Some("mainnet_primary"),
+            "ethereum-mainnet",
             "chainlink_aggregator_v3",
             &config,
             123,
@@ -308,12 +300,8 @@ mod tests {
         assert_eq!(price.unit_price_dec, "2.00000000");
         assert_eq!(io.calls.len(), 2);
         assert_eq!(
-            io.calls[0]
-                .get("route")
-                .and_then(Value::as_object)
-                .and_then(|route| route.get("source_id"))
-                .and_then(Value::as_str),
-            Some("mainnet_primary")
+            io.calls[0].get("network_id").and_then(Value::as_str),
+            Some("ethereum-mainnet")
         );
         assert_eq!(
             io.calls[0]
@@ -332,7 +320,7 @@ mod tests {
         let err = read_evm_oracle_unit_price(
             &state_id,
             &mut io,
-            None,
+            "ethereum-mainnet",
             "unknown_oracle",
             &BTreeMap::new(),
             1,

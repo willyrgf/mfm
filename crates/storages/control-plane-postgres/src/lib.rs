@@ -4,8 +4,8 @@
 //!
 //! This crate owns correctness-critical control-plane persistence that must share the same physical
 //! PostgreSQL database and SQL transaction boundary as the shared append-only stream substrate.
-//! The initial slice implements durable `rpc_source:*` stream-family appends plus a rebuildable
-//! `mfm_rpc_source_state` projection table.
+//! The initial slice implements durable `rpc_source:*` and `source_pool:*` stream-family appends
+//! plus rebuildable `mfm_rpc_source_state` and `mfm_source_pool_state` projection tables.
 //!
 //! # Examples
 //!
@@ -22,7 +22,7 @@
 //! # }
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -37,9 +37,13 @@ use mfm_machine::stores::{NewStreamRecord, StreamId, StreamRecord};
 
 /// Stream family used for source-quality and probe history.
 pub const RPC_SOURCE_STREAM_FAMILY: &str = "rpc_source";
+/// Stream family used for source-pool membership and ranking snapshots.
+pub const SOURCE_POOL_STREAM_FAMILY: &str = "source_pool";
 
 const RECORD_KIND_SOURCE_OBSERVED: &str = "source_observed";
 const RECORD_KIND_SOURCE_PROBED: &str = "source_probed";
+const RECORD_KIND_POOL_MEMBERSHIP_DECLARED: &str = "pool_membership_declared";
+const RECORD_KIND_POOL_RANKED: &str = "pool_ranked";
 
 fn storage_info(code: &'static str, message: impl Into<String>) -> ErrorInfo {
     ErrorInfo {
@@ -187,6 +191,109 @@ impl RpcSourceRef {
 impl fmt::Display for RpcSourceRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.network_id, self.source_id)
+    }
+}
+
+/// Validation error for [`SourcePoolRef`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourcePoolRefError {
+    /// One of the id components was empty or contained a reserved character.
+    InvalidComponent {
+        /// The invalid field name.
+        name: &'static str,
+        /// The invalid value.
+        value: String,
+    },
+    /// The stream id did not follow the `source_pool:<network_id>:<pool_kind>` shape.
+    InvalidStreamId(String),
+}
+
+impl fmt::Display for SourcePoolRefError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SourcePoolRefError::InvalidComponent { name, value } => {
+                write!(f, "{name} must be non-empty and must not contain whitespace, control characters, or ':' (got `{value}`)")
+            }
+            SourcePoolRefError::InvalidStreamId(value) => write!(
+                f,
+                "source pool stream id must follow `source_pool:<network_id>:<pool_kind>` (got `{value}`)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SourcePoolRefError {}
+
+/// Stable identity for one control-plane-managed source pool.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SourcePoolRef {
+    network_id: String,
+    pool_kind: String,
+}
+
+impl SourcePoolRef {
+    /// Creates a validated source-pool reference.
+    pub fn new(
+        network_id: impl Into<String>,
+        pool_kind: impl Into<String>,
+    ) -> Result<Self, SourcePoolRefError> {
+        Ok(Self {
+            network_id: validate_component("network_id", network_id).map_err(|err| match err {
+                RpcSourceRefError::InvalidComponent { name, value } => {
+                    SourcePoolRefError::InvalidComponent { name, value }
+                }
+                RpcSourceRefError::InvalidStreamId(value) => {
+                    SourcePoolRefError::InvalidStreamId(value)
+                }
+            })?,
+            pool_kind: validate_component("pool_kind", pool_kind).map_err(|err| match err {
+                RpcSourceRefError::InvalidComponent { name, value } => {
+                    SourcePoolRefError::InvalidComponent { name, value }
+                }
+                RpcSourceRefError::InvalidStreamId(value) => {
+                    SourcePoolRefError::InvalidStreamId(value)
+                }
+            })?,
+        })
+    }
+
+    /// Parses a typed source-pool reference from a stream id.
+    pub fn from_stream_id(stream_id: &StreamId) -> Result<Self, SourcePoolRefError> {
+        if stream_id.family() != SOURCE_POOL_STREAM_FAMILY {
+            return Err(SourcePoolRefError::InvalidStreamId(
+                stream_id.as_str().to_string(),
+            ));
+        }
+        let Some((network_id, pool_kind)) = stream_id.key().split_once(':') else {
+            return Err(SourcePoolRefError::InvalidStreamId(
+                stream_id.as_str().to_string(),
+            ));
+        };
+        Self::new(network_id, pool_kind)
+    }
+
+    /// Returns the network identifier.
+    pub fn network_id(&self) -> &str {
+        &self.network_id
+    }
+
+    /// Returns the pool kind identifier.
+    pub fn pool_kind(&self) -> &str {
+        &self.pool_kind
+    }
+
+    /// Returns the canonical stream id for this pool.
+    pub fn stream_id(&self) -> StreamId {
+        StreamId::must_new(format!(
+            "{SOURCE_POOL_STREAM_FAMILY}:{}:{}",
+            self.network_id, self.pool_kind
+        ))
+    }
+}
+
+impl fmt::Display for SourcePoolRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.network_id, self.pool_kind)
     }
 }
 
@@ -523,6 +630,316 @@ pub fn rebuild_rpc_source_state(
     Ok(state)
 }
 
+fn validate_source_id_snapshot(source_ids: &[String]) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for source_id in source_ids {
+        validate_component("source_id", source_id.clone()).map_err(|err| match err {
+            RpcSourceRefError::InvalidComponent { value, .. } => {
+                format!("invalid source_id `{value}` in source snapshot")
+            }
+            RpcSourceRefError::InvalidStreamId(value) => {
+                format!("invalid source_id `{value}` in source snapshot")
+            }
+        })?;
+        if !seen.insert(source_id.clone()) {
+            return Err(format!(
+                "duplicate source_id `{source_id}` in source snapshot"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Durable `pool_membership_declared` payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourcePoolMembershipDeclaredRecord {
+    /// Snapshot timestamp in milliseconds since the Unix epoch.
+    pub declared_at_ms: u64,
+    /// Full desired pool membership snapshot, as stable source ids.
+    pub member_source_ids: Vec<String>,
+}
+
+/// Durable `pool_ranked` payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourcePoolRankedRecord {
+    /// Ranking timestamp in milliseconds since the Unix epoch.
+    pub ranked_at_ms: u64,
+    /// Full desired ranking snapshot, as stable source ids.
+    pub ranked_source_ids: Vec<String>,
+}
+
+/// Typed `source_pool:*` stream-family record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourcePoolRecord {
+    /// `pool_membership_declared`
+    MembershipDeclared(SourcePoolMembershipDeclaredRecord),
+    /// `pool_ranked`
+    Ranked(SourcePoolRankedRecord),
+}
+
+impl SourcePoolRecord {
+    fn kind(&self) -> &'static str {
+        match self {
+            SourcePoolRecord::MembershipDeclared(_) => RECORD_KIND_POOL_MEMBERSHIP_DECLARED,
+            SourcePoolRecord::Ranked(_) => RECORD_KIND_POOL_RANKED,
+        }
+    }
+
+    fn recorded_at_ms(&self) -> u64 {
+        match self {
+            SourcePoolRecord::MembershipDeclared(record) => record.declared_at_ms,
+            SourcePoolRecord::Ranked(record) => record.ranked_at_ms,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            SourcePoolRecord::MembershipDeclared(record) => {
+                validate_source_id_snapshot(&record.member_source_ids)
+            }
+            SourcePoolRecord::Ranked(record) => {
+                validate_source_id_snapshot(&record.ranked_source_ids)
+            }
+        }
+    }
+
+    fn to_new_stream_record(&self) -> Result<NewStreamRecord, StorageError> {
+        self.validate().map_err(|message| {
+            storage_other(
+                "control_plane_record_invalid",
+                format!("invalid source_pool record payload: {message}"),
+            )
+        })?;
+
+        let payload = match self {
+            SourcePoolRecord::MembershipDeclared(record) => serde_json::to_value(record),
+            SourcePoolRecord::Ranked(record) => serde_json::to_value(record),
+        }
+        .map_err(|err| {
+            storage_other(
+                "control_plane_record_encode_failed",
+                format!("failed to encode source_pool record payload: {err}"),
+            )
+        })?;
+
+        Ok(NewStreamRecord {
+            ts_millis: Some(self.recorded_at_ms()),
+            kind: self.kind().to_string(),
+            payload,
+        })
+    }
+
+    fn from_stream_record(record: &StreamRecord) -> Result<Self, SourcePoolProjectionError> {
+        match record.kind.as_str() {
+            RECORD_KIND_POOL_MEMBERSHIP_DECLARED => serde_json::from_value(record.payload.clone())
+                .map(SourcePoolRecord::MembershipDeclared)
+                .map_err(|err| SourcePoolProjectionError::InvalidPayload {
+                    kind: record.kind.clone(),
+                    message: err.to_string(),
+                }),
+            RECORD_KIND_POOL_RANKED => serde_json::from_value(record.payload.clone())
+                .map(SourcePoolRecord::Ranked)
+                .map_err(|err| SourcePoolProjectionError::InvalidPayload {
+                    kind: record.kind.clone(),
+                    message: err.to_string(),
+                }),
+            other => Err(SourcePoolProjectionError::UnsupportedRecordKind(
+                other.to_string(),
+            )),
+        }
+    }
+}
+
+/// Rebuildable projection for one `source_pool:*` stream.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourcePoolState {
+    /// Stable source-pool identity.
+    pub pool_ref: SourcePoolRef,
+    /// Canonical stream id backing this projection.
+    pub stream_id: StreamId,
+    /// Last projected stream sequence.
+    pub head_seq: u64,
+    /// Timestamp of the most recent record applied to this projection.
+    pub last_recorded_at_ms: Option<u64>,
+    /// Timestamp of the most recent `pool_membership_declared` record.
+    pub last_membership_declared_at_ms: Option<u64>,
+    /// Timestamp of the most recent `pool_ranked` record.
+    pub last_ranked_at_ms: Option<u64>,
+    /// Latest membership snapshot for this pool.
+    pub member_source_ids: Vec<String>,
+    /// Latest raw ranking snapshot for this pool.
+    pub ranked_source_ids: Vec<String>,
+}
+
+impl SourcePoolState {
+    /// Creates an empty projection for `pool_ref`.
+    pub fn new(pool_ref: SourcePoolRef) -> Self {
+        let stream_id = pool_ref.stream_id();
+        Self {
+            pool_ref,
+            stream_id,
+            head_seq: 0,
+            last_recorded_at_ms: None,
+            last_membership_declared_at_ms: None,
+            last_ranked_at_ms: None,
+            member_source_ids: Vec::new(),
+            ranked_source_ids: Vec::new(),
+        }
+    }
+
+    fn apply_record(
+        &mut self,
+        seq: u64,
+        record: &SourcePoolRecord,
+    ) -> Result<(), SourcePoolProjectionError> {
+        record
+            .validate()
+            .map_err(SourcePoolProjectionError::InvalidSourceSnapshot)?;
+        self.head_seq = seq;
+        self.last_recorded_at_ms = Some(record.recorded_at_ms());
+
+        match record {
+            SourcePoolRecord::MembershipDeclared(declared) => {
+                self.last_membership_declared_at_ms = Some(declared.declared_at_ms);
+                self.member_source_ids = declared.member_source_ids.clone();
+            }
+            SourcePoolRecord::Ranked(ranked) => {
+                self.last_ranked_at_ms = Some(ranked.ranked_at_ms);
+                self.ranked_source_ids = ranked.ranked_source_ids.clone();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns the effective ordered source ids for this pool.
+    ///
+    /// Ranking is filtered to the current membership snapshot. Any current member that is absent
+    /// from the latest ranking snapshot is appended in membership order.
+    pub fn ordered_source_ids(&self) -> Vec<String> {
+        let member_ids = self
+            .member_source_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut ordered = Vec::with_capacity(self.member_source_ids.len());
+        let mut seen = BTreeSet::new();
+
+        for source_id in &self.ranked_source_ids {
+            if member_ids.contains(source_id) && seen.insert(source_id.clone()) {
+                ordered.push(source_id.clone());
+            }
+        }
+
+        for source_id in &self.member_source_ids {
+            if seen.insert(source_id.clone()) {
+                ordered.push(source_id.clone());
+            }
+        }
+
+        ordered
+    }
+
+    /// Returns the effective ordered source refs for this pool.
+    pub fn ordered_source_refs(&self) -> Result<Vec<RpcSourceRef>, RpcSourceRefError> {
+        self.ordered_source_ids()
+            .into_iter()
+            .map(|source_id| RpcSourceRef::new(self.pool_ref.network_id(), source_id))
+            .collect()
+    }
+}
+
+/// Rebuild error for `source_pool:*` projections.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourcePoolProjectionError {
+    /// The stream id did not belong to the expected `SourcePoolRef`.
+    StreamIdMismatch {
+        /// Expected stream id.
+        expected: StreamId,
+        /// Actual stream id.
+        actual: StreamId,
+    },
+    /// The records were not contiguous from `seq = 1`.
+    NonContiguousSeq {
+        /// Expected next sequence number.
+        expected: u64,
+        /// Observed sequence number.
+        actual: u64,
+    },
+    /// The stream id did not parse as `source_pool:<network_id>:<pool_kind>`.
+    InvalidStreamId(String),
+    /// The record kind was not one of the v1 `source_pool:*` kinds.
+    UnsupportedRecordKind(String),
+    /// The record payload did not decode into the typed v1 shape.
+    InvalidPayload {
+        /// Record kind being decoded.
+        kind: String,
+        /// Serde error message.
+        message: String,
+    },
+    /// The membership or ranking snapshot carried invalid source ids.
+    InvalidSourceSnapshot(String),
+}
+
+impl fmt::Display for SourcePoolProjectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SourcePoolProjectionError::StreamIdMismatch { expected, actual } => write!(
+                f,
+                "source_pool rebuild expected stream `{expected}` but found `{actual}`"
+            ),
+            SourcePoolProjectionError::NonContiguousSeq { expected, actual } => write!(
+                f,
+                "source_pool rebuild expected seq {expected} but found {actual}"
+            ),
+            SourcePoolProjectionError::InvalidStreamId(value) => {
+                write!(f, "invalid source_pool stream id `{value}`")
+            }
+            SourcePoolProjectionError::UnsupportedRecordKind(kind) => {
+                write!(f, "unsupported source_pool record kind `{kind}`")
+            }
+            SourcePoolProjectionError::InvalidPayload { kind, message } => {
+                write!(f, "invalid `{kind}` payload: {message}")
+            }
+            SourcePoolProjectionError::InvalidSourceSnapshot(message) => {
+                write!(f, "invalid source snapshot: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SourcePoolProjectionError {}
+
+/// Rebuilds one `source_pool:*` projection from append-only stream records.
+pub fn rebuild_source_pool_state(
+    pool_ref: SourcePoolRef,
+    records: &[StreamRecord],
+) -> Result<SourcePoolState, SourcePoolProjectionError> {
+    let expected_stream_id = pool_ref.stream_id();
+    let mut expected_seq = 1_u64;
+    let mut state = SourcePoolState::new(pool_ref);
+
+    for record in records {
+        if record.stream_id != expected_stream_id {
+            return Err(SourcePoolProjectionError::StreamIdMismatch {
+                expected: expected_stream_id.clone(),
+                actual: record.stream_id.clone(),
+            });
+        }
+        if record.seq != expected_seq {
+            return Err(SourcePoolProjectionError::NonContiguousSeq {
+                expected: expected_seq,
+                actual: record.seq,
+            });
+        }
+        let typed = SourcePoolRecord::from_stream_record(record)?;
+        state.apply_record(record.seq, &typed)?;
+        expected_seq = expected_seq.saturating_add(1);
+    }
+
+    Ok(state)
+}
+
 /// Correctness-critical Postgres storage for control-plane stream families.
 #[derive(Clone)]
 pub struct ControlPlanePostgresStore {
@@ -592,6 +1009,20 @@ CREATE TABLE IF NOT EXISTS mfm_rpc_source_state (
   last_error_code TEXT NULL,
   PRIMARY KEY (network_id, source_id),
   CONSTRAINT mfm_rpc_source_state_stream_fk FOREIGN KEY (stream_id) REFERENCES mfm_streams(stream_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS mfm_source_pool_state (
+  network_id TEXT NOT NULL,
+  pool_kind TEXT NOT NULL,
+  stream_id TEXT NOT NULL UNIQUE,
+  head_seq BIGINT NOT NULL,
+  last_recorded_at_ms BIGINT NULL,
+  last_membership_declared_at_ms BIGINT NULL,
+  last_ranked_at_ms BIGINT NULL,
+  member_source_ids JSONB NOT NULL,
+  ranked_source_ids JSONB NOT NULL,
+  PRIMARY KEY (network_id, pool_kind),
+  CONSTRAINT mfm_source_pool_state_stream_fk FOREIGN KEY (stream_id) REFERENCES mfm_streams(stream_id) ON DELETE CASCADE
 );
 "#;
 
@@ -723,6 +1154,118 @@ WHERE network_id = $1 AND source_id = $2
         })
     }
 
+    fn source_id_snapshot_to_json(
+        source_ids: &[String],
+        field: &'static str,
+    ) -> Result<serde_json::Value, StorageError> {
+        validate_source_id_snapshot(source_ids).map_err(|message| {
+            storage_other(
+                "control_plane_projection_invalid",
+                format!("invalid {field}: {message}"),
+            )
+        })?;
+        serde_json::to_value(source_ids).map_err(|err| {
+            storage_other(
+                "control_plane_record_encode_failed",
+                format!("failed to encode {field}: {err}"),
+            )
+        })
+    }
+
+    fn source_id_snapshot_from_json(
+        value: serde_json::Value,
+        field: &'static str,
+    ) -> Result<Vec<String>, StorageError> {
+        let source_ids: Vec<String> = serde_json::from_value(value).map_err(|err| {
+            storage_corruption(
+                "control_plane_projection_invalid",
+                format!("invalid {field} JSON shape: {err}"),
+            )
+        })?;
+        validate_source_id_snapshot(&source_ids).map_err(|message| {
+            storage_corruption(
+                "control_plane_projection_invalid",
+                format!("invalid {field}: {message}"),
+            )
+        })?;
+        Ok(source_ids)
+    }
+
+    async fn load_source_pool_state_tx(
+        tx: &Transaction<'_>,
+        pool_ref: &SourcePoolRef,
+    ) -> Result<Option<SourcePoolState>, StorageError> {
+        let row = tx
+            .query_opt(
+                r#"
+SELECT
+  network_id,
+  pool_kind,
+  stream_id,
+  head_seq,
+  last_recorded_at_ms,
+  last_membership_declared_at_ms,
+  last_ranked_at_ms,
+  member_source_ids,
+  ranked_source_ids
+FROM mfm_source_pool_state
+WHERE network_id = $1 AND pool_kind = $2
+"#,
+                &[&pool_ref.network_id(), &pool_ref.pool_kind()],
+            )
+            .await
+            .map_err(|_| {
+                storage_other(
+                    "control_plane_pg_query_failed",
+                    "failed to load source_pool projection row",
+                )
+            })?;
+
+        row.map(Self::source_pool_state_from_row).transpose()
+    }
+
+    fn source_pool_state_from_row(row: Row) -> Result<SourcePoolState, StorageError> {
+        let network_id: String = row.get(0);
+        let pool_kind: String = row.get(1);
+        let pool_ref = SourcePoolRef::new(network_id, pool_kind).map_err(|err| {
+            storage_corruption(
+                "control_plane_projection_invalid",
+                format!("invalid source_pool projection identity: {err}"),
+            )
+        })?;
+        let stream_id = StreamId::new(row.get::<_, String>(2)).map_err(|err| {
+            storage_corruption(
+                "control_plane_projection_invalid",
+                format!("invalid source_pool projection stream id: {err}"),
+            )
+        })?;
+        Ok(SourcePoolState {
+            pool_ref,
+            stream_id,
+            head_seq: i64_to_u64(row.get::<_, i64>(3), "mfm_source_pool_state.head_seq")?,
+            last_recorded_at_ms: opt_i64_to_u64(
+                row.get::<_, Option<i64>>(4),
+                "mfm_source_pool_state.last_recorded_at_ms",
+            )?,
+            last_membership_declared_at_ms: opt_i64_to_u64(
+                row.get::<_, Option<i64>>(5),
+                "mfm_source_pool_state.last_membership_declared_at_ms",
+            )?,
+            last_ranked_at_ms: opt_i64_to_u64(
+                row.get::<_, Option<i64>>(6),
+                "mfm_source_pool_state.last_ranked_at_ms",
+            )?,
+            member_source_ids: Self::source_id_snapshot_from_json(
+                row.get::<_, serde_json::Value>(7),
+                "mfm_source_pool_state.member_source_ids",
+            )?,
+            ranked_source_ids: Self::source_id_snapshot_from_json(
+                row.get::<_, serde_json::Value>(8),
+                "mfm_source_pool_state.ranked_source_ids",
+            )?,
+        })
+    }
+
     async fn upsert_rpc_source_state_tx(
         tx: &Transaction<'_>,
         state: &RpcSourceState,
@@ -811,6 +1354,70 @@ ON CONFLICT (network_id, source_id) DO UPDATE SET
             storage_other(
                 "control_plane_pg_update_failed",
                 "failed to upsert rpc_source projection row",
+            )
+        })?;
+        Ok(())
+    }
+
+    async fn upsert_source_pool_state_tx(
+        tx: &Transaction<'_>,
+        state: &SourcePoolState,
+    ) -> Result<(), StorageError> {
+        let member_source_ids =
+            Self::source_id_snapshot_to_json(&state.member_source_ids, "member_source_ids")?;
+        let ranked_source_ids =
+            Self::source_id_snapshot_to_json(&state.ranked_source_ids, "ranked_source_ids")?;
+
+        tx.execute(
+            r#"
+INSERT INTO mfm_source_pool_state (
+  network_id,
+  pool_kind,
+  stream_id,
+  head_seq,
+  last_recorded_at_ms,
+  last_membership_declared_at_ms,
+  last_ranked_at_ms,
+  member_source_ids,
+  ranked_source_ids
+) VALUES (
+  $1, $2, $3, $4, $5, $6, $7, $8, $9
+)
+ON CONFLICT (network_id, pool_kind) DO UPDATE SET
+  stream_id = EXCLUDED.stream_id,
+  head_seq = EXCLUDED.head_seq,
+  last_recorded_at_ms = EXCLUDED.last_recorded_at_ms,
+  last_membership_declared_at_ms = EXCLUDED.last_membership_declared_at_ms,
+  last_ranked_at_ms = EXCLUDED.last_ranked_at_ms,
+  member_source_ids = EXCLUDED.member_source_ids,
+  ranked_source_ids = EXCLUDED.ranked_source_ids
+"#,
+            &[
+                &state.pool_ref.network_id(),
+                &state.pool_ref.pool_kind(),
+                &state.stream_id.as_str(),
+                &u64_to_i64(state.head_seq, "head_seq")?,
+                &state
+                    .last_recorded_at_ms
+                    .map(|value| u64_to_i64(value, "last_recorded_at_ms"))
+                    .transpose()?,
+                &state
+                    .last_membership_declared_at_ms
+                    .map(|value| u64_to_i64(value, "last_membership_declared_at_ms"))
+                    .transpose()?,
+                &state
+                    .last_ranked_at_ms
+                    .map(|value| u64_to_i64(value, "last_ranked_at_ms"))
+                    .transpose()?,
+                &member_source_ids,
+                &ranked_source_ids,
+            ],
+        )
+        .await
+        .map_err(|_| {
+            storage_other(
+                "control_plane_pg_update_failed",
+                "failed to upsert source_pool projection row",
             )
         })?;
         Ok(())
@@ -913,6 +1520,105 @@ ON CONFLICT (network_id, source_id) DO UPDATE SET
         Ok(state)
     }
 
+    /// Appends one atomic batch of `source_pool:*` records and updates the projection in the same transaction.
+    pub async fn append_source_pool_records(
+        &self,
+        pool_ref: &SourcePoolRef,
+        expected_seq: u64,
+        records: Vec<SourcePoolRecord>,
+    ) -> Result<SourcePoolState, StorageError> {
+        if records.is_empty() {
+            return Err(storage_other(
+                "control_plane_append_invalid",
+                "source_pool append must include at least one record",
+            ));
+        }
+
+        let stream_id = pool_ref.stream_id();
+        let encoded_records = records
+            .iter()
+            .map(SourcePoolRecord::to_new_stream_record)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(|_| {
+            storage_other("control_plane_pg_tx_failed", "failed to start transaction")
+        })?;
+
+        tx.execute(
+            "INSERT INTO mfm_streams (stream_id, head_seq) VALUES ($1, 0) ON CONFLICT (stream_id) DO NOTHING",
+            &[&stream_id.as_str()],
+        )
+        .await
+        .map_err(|_| storage_other("control_plane_pg_insert_failed", "failed to insert stream head"))?;
+
+        let head = Self::read_head_for_update(&tx, &stream_id).await?;
+        if head != expected_seq {
+            return Err(storage_concurrency(format!(
+                "source_pool head seq did not match expected seq for `{}`",
+                stream_id
+            )));
+        }
+
+        let existing = Self::load_source_pool_state_tx(&tx, pool_ref).await?;
+        if let Some(existing) = &existing {
+            if existing.head_seq != head {
+                return Err(storage_corruption(
+                    "control_plane_projection_desynced",
+                    format!(
+                        "source_pool projection head {} did not match stream head {} for `{}`",
+                        existing.head_seq, head, stream_id
+                    ),
+                ));
+            }
+        }
+
+        let mut state = existing.unwrap_or_else(|| SourcePoolState::new(pool_ref.clone()));
+        let mut seq = expected_seq;
+        for (record, encoded) in records.iter().zip(encoded_records.iter()) {
+            seq = seq.saturating_add(1);
+            tx.execute(
+                "INSERT INTO mfm_stream_records (stream_id, seq, ts_millis, kind, payload) VALUES ($1, $2, $3, $4, $5)",
+                &[
+                    &stream_id.as_str(),
+                    &u64_to_i64(seq, "seq")?,
+                    &encoded.ts_millis.map(|value| u64_to_i64(value, "ts_millis")).transpose()?,
+                    &encoded.kind,
+                    &encoded.payload,
+                ],
+            )
+            .await
+            .map_err(|_| {
+                storage_other(
+                    "control_plane_pg_insert_failed",
+                    "failed to insert source_pool stream record",
+                )
+            })?;
+            state
+                .apply_record(seq, record)
+                .map_err(|err| storage_other("control_plane_record_invalid", err.to_string()))?;
+        }
+
+        Self::upsert_source_pool_state_tx(&tx, &state).await?;
+        tx.execute(
+            "UPDATE mfm_streams SET head_seq = $2 WHERE stream_id = $1",
+            &[&stream_id.as_str(), &u64_to_i64(seq, "head_seq")?],
+        )
+        .await
+        .map_err(|_| {
+            storage_other(
+                "control_plane_pg_update_failed",
+                "failed to update source_pool stream head",
+            )
+        })?;
+
+        tx.commit().await.map_err(|_| {
+            storage_other("control_plane_pg_tx_failed", "failed to commit transaction")
+        })?;
+
+        Ok(state)
+    }
+
     /// Loads the current projection row for one RPC source.
     pub async fn rpc_source_state(
         &self,
@@ -952,6 +1658,137 @@ WHERE network_id = $1 AND source_id = $2
                 )
             })?;
         row.map(Self::rpc_source_state_from_row).transpose()
+    }
+
+    /// Lists all RPC-source projections for one network.
+    pub async fn list_rpc_source_states(
+        &self,
+        network_id: &str,
+    ) -> Result<Vec<RpcSourceState>, StorageError> {
+        let client = self.client.lock().await;
+        let rows = client
+            .query(
+                r#"
+SELECT
+  network_id,
+  source_id,
+  stream_id,
+  head_seq,
+  last_recorded_at_ms,
+  last_observed_at_ms,
+  last_probed_at_ms,
+  last_observed_head,
+  last_latency_ms,
+  last_probe_latency_ms,
+  supports_get_proof,
+  success_count,
+  failure_count,
+  consecutive_failures,
+  cooldown_until_ms,
+  last_error_code
+FROM mfm_rpc_source_state
+WHERE network_id = $1
+ORDER BY source_id ASC
+"#,
+                &[&network_id],
+            )
+            .await
+            .map_err(|_| {
+                storage_other(
+                    "control_plane_pg_query_failed",
+                    "failed to list rpc_source projection rows",
+                )
+            })?;
+        rows.into_iter()
+            .map(Self::rpc_source_state_from_row)
+            .collect()
+    }
+
+    /// Loads the current projection row for one source pool.
+    pub async fn source_pool_state(
+        &self,
+        pool_ref: &SourcePoolRef,
+    ) -> Result<Option<SourcePoolState>, StorageError> {
+        let client = self.client.lock().await;
+        let row = client
+            .query_opt(
+                r#"
+SELECT
+  network_id,
+  pool_kind,
+  stream_id,
+  head_seq,
+  last_recorded_at_ms,
+  last_membership_declared_at_ms,
+  last_ranked_at_ms,
+  member_source_ids,
+  ranked_source_ids
+FROM mfm_source_pool_state
+WHERE network_id = $1 AND pool_kind = $2
+"#,
+                &[&pool_ref.network_id(), &pool_ref.pool_kind()],
+            )
+            .await
+            .map_err(|_| {
+                storage_other(
+                    "control_plane_pg_query_failed",
+                    "failed to query source_pool projection row",
+                )
+            })?;
+        row.map(Self::source_pool_state_from_row).transpose()
+    }
+
+    /// Lists all source-pool projections for one network.
+    pub async fn list_source_pool_states(
+        &self,
+        network_id: &str,
+    ) -> Result<Vec<SourcePoolState>, StorageError> {
+        let client = self.client.lock().await;
+        let rows = client
+            .query(
+                r#"
+SELECT
+  network_id,
+  pool_kind,
+  stream_id,
+  head_seq,
+  last_recorded_at_ms,
+  last_membership_declared_at_ms,
+  last_ranked_at_ms,
+  member_source_ids,
+  ranked_source_ids
+FROM mfm_source_pool_state
+WHERE network_id = $1
+ORDER BY pool_kind ASC
+"#,
+                &[&network_id],
+            )
+            .await
+            .map_err(|_| {
+                storage_other(
+                    "control_plane_pg_query_failed",
+                    "failed to list source_pool projection rows",
+                )
+            })?;
+        rows.into_iter()
+            .map(Self::source_pool_state_from_row)
+            .collect()
+    }
+
+    /// Returns the effective ordered source refs for one pool.
+    pub async fn source_pool_ordered_sources(
+        &self,
+        pool_ref: &SourcePoolRef,
+    ) -> Result<Vec<RpcSourceRef>, StorageError> {
+        let Some(state) = self.source_pool_state(pool_ref).await? else {
+            return Ok(Vec::new());
+        };
+        state.ordered_source_refs().map_err(|err| {
+            storage_corruption(
+                "control_plane_projection_invalid",
+                format!("invalid source_pool ordered source refs: {err}"),
+            )
+        })
     }
 
     /// Rebuilds every `mfm_rpc_source_state` row from append-only `rpc_source:*` stream records.
@@ -1040,6 +1877,94 @@ ORDER BY stream_id ASC, seq ASC
 
         Ok(rebuilt)
     }
+
+    /// Rebuilds every `mfm_source_pool_state` row from append-only `source_pool:*` stream records.
+    pub async fn rebuild_all_source_pool_states(
+        &self,
+    ) -> Result<Vec<SourcePoolState>, StorageError> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(|_| {
+            storage_other("control_plane_pg_tx_failed", "failed to start transaction")
+        })?;
+
+        let rows = tx
+            .query(
+                r#"
+SELECT stream_id, seq, ts_millis, kind, payload
+FROM mfm_stream_records
+WHERE stream_id LIKE 'source_pool:%'
+ORDER BY stream_id ASC, seq ASC
+"#,
+                &[],
+            )
+            .await
+            .map_err(|_| {
+                storage_other(
+                    "control_plane_pg_query_failed",
+                    "failed to query source_pool stream records",
+                )
+            })?;
+
+        let mut by_stream = BTreeMap::<String, Vec<StreamRecord>>::new();
+        for row in rows {
+            let stream_id = StreamId::new(row.get::<_, String>(0)).map_err(|err| {
+                storage_corruption(
+                    "control_plane_stream_invalid",
+                    format!("invalid source_pool stream id in record table: {err}"),
+                )
+            })?;
+            let record = StreamRecord {
+                stream_id: stream_id.clone(),
+                seq: i64_to_u64(row.get::<_, i64>(1), "mfm_stream_records.seq")?,
+                ts_millis: opt_i64_to_u64(
+                    row.get::<_, Option<i64>>(2),
+                    "mfm_stream_records.ts_millis",
+                )?,
+                kind: row.get(3),
+                payload: row.get(4),
+            };
+            by_stream
+                .entry(stream_id.as_str().to_string())
+                .or_default()
+                .push(record);
+        }
+
+        let mut rebuilt = Vec::with_capacity(by_stream.len());
+        for records in by_stream.into_values() {
+            let pool_ref = SourcePoolRef::from_stream_id(&records[0].stream_id).map_err(|err| {
+                storage_corruption(
+                    "control_plane_stream_invalid",
+                    format!("invalid source_pool stream id in rebuild: {err}"),
+                )
+            })?;
+            let state = rebuild_source_pool_state(pool_ref, &records).map_err(|err| {
+                storage_corruption(
+                    "control_plane_projection_rebuild_failed",
+                    format!("failed to rebuild source_pool projection: {err}"),
+                )
+            })?;
+            rebuilt.push(state);
+        }
+
+        tx.execute("DELETE FROM mfm_source_pool_state", &[])
+            .await
+            .map_err(|_| {
+                storage_other(
+                    "control_plane_pg_delete_failed",
+                    "failed to clear source_pool projection table during rebuild",
+                )
+            })?;
+
+        for state in &rebuilt {
+            Self::upsert_source_pool_state_tx(&tx, state).await?;
+        }
+
+        tx.commit().await.map_err(|_| {
+            storage_other("control_plane_pg_tx_failed", "failed to commit transaction")
+        })?;
+
+        Ok(rebuilt)
+    }
 }
 
 #[cfg(test)]
@@ -1048,6 +1973,10 @@ mod tests {
 
     fn source_ref() -> RpcSourceRef {
         RpcSourceRef::new("eth-mainnet", "primary").expect("valid source ref")
+    }
+
+    fn pool_ref() -> SourcePoolRef {
+        SourcePoolRef::new("eth-mainnet", "default").expect("valid source pool ref")
     }
 
     #[test]
@@ -1067,6 +1996,27 @@ mod tests {
             RpcSourceRefError::InvalidComponent {
                 name: "network_id",
                 value: "eth:mainnet".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn source_pool_ref_round_trips_through_stream_id() {
+        let pool_ref = pool_ref();
+        let stream_id = pool_ref.stream_id();
+        let decoded = SourcePoolRef::from_stream_id(&stream_id).expect("decode stream id");
+        assert_eq!(decoded, pool_ref);
+        assert_eq!(stream_id.as_str(), "source_pool:eth-mainnet:default");
+    }
+
+    #[test]
+    fn source_pool_ref_rejects_reserved_characters() {
+        let err = SourcePoolRef::new("eth-mainnet", "default pool").expect_err("invalid pool kind");
+        assert_eq!(
+            err,
+            SourcePoolRefError::InvalidComponent {
+                name: "pool_kind",
+                value: "default pool".to_string(),
             }
         );
     }
@@ -1207,6 +2157,155 @@ mod tests {
         assert_eq!(
             err,
             RpcSourceProjectionError::NonContiguousSeq {
+                expected: 1,
+                actual: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn rebuild_source_pool_state_applies_membership_and_ranking() {
+        let pool_ref = pool_ref();
+        let stream_id = pool_ref.stream_id();
+        let records = vec![
+            StreamRecord {
+                stream_id: stream_id.clone(),
+                seq: 1,
+                ts_millis: Some(100),
+                kind: RECORD_KIND_POOL_MEMBERSHIP_DECLARED.to_string(),
+                payload: serde_json::json!({
+                    "declared_at_ms": 100_u64,
+                    "member_source_ids": ["reth_local", "helios_local", "fallback_local"],
+                }),
+            },
+            StreamRecord {
+                stream_id: stream_id.clone(),
+                seq: 2,
+                ts_millis: Some(110),
+                kind: RECORD_KIND_POOL_RANKED.to_string(),
+                payload: serde_json::json!({
+                    "ranked_at_ms": 110_u64,
+                    "ranked_source_ids": ["helios_local", "reth_local", "unknown_local"],
+                }),
+            },
+            StreamRecord {
+                stream_id,
+                seq: 3,
+                ts_millis: Some(120),
+                kind: RECORD_KIND_POOL_MEMBERSHIP_DECLARED.to_string(),
+                payload: serde_json::json!({
+                    "declared_at_ms": 120_u64,
+                    "member_source_ids": ["reth_local", "helios_local", "archive_local"],
+                }),
+            },
+        ];
+
+        let state = rebuild_source_pool_state(pool_ref, &records).expect("rebuild succeeds");
+        assert_eq!(state.head_seq, 3);
+        assert_eq!(state.last_recorded_at_ms, Some(120));
+        assert_eq!(state.last_membership_declared_at_ms, Some(120));
+        assert_eq!(state.last_ranked_at_ms, Some(110));
+        assert_eq!(
+            state.member_source_ids,
+            vec![
+                "reth_local".to_string(),
+                "helios_local".to_string(),
+                "archive_local".to_string()
+            ]
+        );
+        assert_eq!(
+            state.ranked_source_ids,
+            vec![
+                "helios_local".to_string(),
+                "reth_local".to_string(),
+                "unknown_local".to_string()
+            ]
+        );
+        assert_eq!(
+            state.ordered_source_ids(),
+            vec![
+                "helios_local".to_string(),
+                "reth_local".to_string(),
+                "archive_local".to_string()
+            ]
+        );
+        assert_eq!(
+            state
+                .ordered_source_refs()
+                .expect("ordered source refs should be valid"),
+            vec![
+                RpcSourceRef::new("eth-mainnet", "helios_local").expect("valid"),
+                RpcSourceRef::new("eth-mainnet", "reth_local").expect("valid"),
+                RpcSourceRef::new("eth-mainnet", "archive_local").expect("valid"),
+            ]
+        );
+    }
+
+    #[test]
+    fn rebuild_source_pool_state_rejects_duplicate_source_ids() {
+        let pool_ref = pool_ref();
+        let err = rebuild_source_pool_state(
+            pool_ref.clone(),
+            &[StreamRecord {
+                stream_id: pool_ref.stream_id(),
+                seq: 1,
+                ts_millis: Some(100),
+                kind: RECORD_KIND_POOL_MEMBERSHIP_DECLARED.to_string(),
+                payload: serde_json::json!({
+                    "declared_at_ms": 100_u64,
+                    "member_source_ids": ["reth_local", "reth_local"],
+                }),
+            }],
+        )
+        .expect_err("duplicate source ids must fail");
+        assert_eq!(
+            err,
+            SourcePoolProjectionError::InvalidSourceSnapshot(
+                "duplicate source_id `reth_local` in source snapshot".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn rebuild_source_pool_state_rejects_unknown_kind() {
+        let pool_ref = pool_ref();
+        let err = rebuild_source_pool_state(
+            pool_ref.clone(),
+            &[StreamRecord {
+                stream_id: pool_ref.stream_id(),
+                seq: 1,
+                ts_millis: None,
+                kind: "unexpected_kind".to_string(),
+                payload: serde_json::json!({}),
+            }],
+        )
+        .expect_err("unknown kind must fail");
+        assert_eq!(
+            err,
+            SourcePoolProjectionError::UnsupportedRecordKind("unexpected_kind".to_string())
+        );
+    }
+
+    #[test]
+    fn rebuild_source_pool_state_rejects_seq_gaps() {
+        let pool_ref = pool_ref();
+        let err = rebuild_source_pool_state(
+            pool_ref.clone(),
+            &[StreamRecord {
+                stream_id: pool_ref.stream_id(),
+                seq: 2,
+                ts_millis: None,
+                kind: RECORD_KIND_POOL_RANKED.to_string(),
+                payload: serde_json::json!({
+                    "ranked_at_ms": 100_u64,
+                    "ranked_source_ids": ["reth_local"],
+                }),
+            }],
+        )
+        .expect_err("seq gap must fail");
+        assert_eq!(
+            err,
+            SourcePoolProjectionError::NonContiguousSeq {
                 expected: 1,
                 actual: 2,
             }

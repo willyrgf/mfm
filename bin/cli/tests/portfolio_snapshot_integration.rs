@@ -36,6 +36,7 @@ fn portfolio_snapshot_requires_request_json_or_file() {
     let output = cmd
         .env_remove("DATABASE_URL")
         .env_remove("MFM_EVM_RPC_URL")
+        .env_remove("MFM_EVM_RPC_SOURCES_JSON")
         .args(["--output-format", "json", "portfolio", "snapshot"])
         .output()
         .expect("command output");
@@ -51,6 +52,7 @@ fn portfolio_snapshot_invalid_request_json_is_stable_error() {
     let output = cmd
         .env_remove("DATABASE_URL")
         .env_remove("MFM_EVM_RPC_URL")
+        .env_remove("MFM_EVM_RPC_SOURCES_JSON")
         .args([
             "--output-format",
             "json",
@@ -75,6 +77,7 @@ fn portfolio_snapshot_rejects_both_request_json_and_file() {
     let output = cmd
         .env_remove("DATABASE_URL")
         .env_remove("MFM_EVM_RPC_URL")
+        .env_remove("MFM_EVM_RPC_SOURCES_JSON")
         .args([
             "--output-format",
             "json",

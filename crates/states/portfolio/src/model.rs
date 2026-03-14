@@ -61,8 +61,6 @@ pub struct NetworkConfig {
     pub network_id: String,
     /// EVM chain id for the network.
     pub chain_id: u64,
-    /// Optional RPC source id used by runtime states.
-    pub rpc_source_id: Option<String>,
     /// Canonical metadata surface.
     #[serde(default)]
     pub metadata: BTreeMap<String, Value>,
@@ -261,12 +259,6 @@ pub enum PortfolioConfigError {
     #[error("network_id `{network_id}` must be unique")]
     DuplicateNetworkId {
         /// Duplicate network id.
-        network_id: String,
-    },
-    /// `rpc_source_id` was present but empty.
-    #[error("rpc_source_id must be non-empty when present for network `{network_id}`")]
-    EmptyRpcSourceId {
-        /// Network that carried the invalid rpc source id.
         network_id: String,
     },
     /// Network metadata violated canonical JSON rules.
@@ -618,15 +610,6 @@ pub fn validate_portfolio_bundle(
 fn validate_network_config(network: &NetworkConfig) -> Result<(), PortfolioConfigError> {
     if network.network_id.trim().is_empty() {
         return Err(PortfolioConfigError::EmptyNetworkId);
-    }
-    if network
-        .rpc_source_id
-        .as_deref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        return Err(PortfolioConfigError::EmptyRpcSourceId {
-            network_id: network.network_id.clone(),
-        });
     }
     validate_canonical_json_map(&network.metadata).map_err(|reason| {
         PortfolioConfigError::NetworkMetadataNotCanonical {
@@ -1173,13 +1156,11 @@ mod tests {
                 {
                     "network_id": "ethereum-mainnet",
                     "chain_id": 1,
-                    "rpc_source_id": "mainnet_primary",
                     "metadata": {}
                 },
                 {
                     "network_id": "arbitrum-mainnet",
                     "chain_id": 42161,
-                    "rpc_source_id": "arbitrum_primary",
                     "metadata": {}
                 }
             ],

@@ -82,7 +82,6 @@ fn canonical_mock_erc20_snapshot_payload(
                 {
                     "network_id": "ethereum-mainnet",
                     "chain_id": chain_id,
-                    "rpc_source_id": null,
                     "metadata": {}
                 }
             ],

@@ -59,7 +59,6 @@ fn canonical_portfolio_snapshot_payload() -> serde_json::Value {
                 {
                     "network_id": "ethereum-mainnet",
                     "chain_id": 1,
-                    "rpc_source_id": null,
                     "metadata": {}
                 }
             ],
@@ -643,7 +642,7 @@ async fn feature_execute_run_start_happy_path() {
 // and need to prevent cross-test interference under concurrent test execution.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn feature_execute_portfolio_snapshot_missing_rpc_url_is_stable_error() {
+async fn feature_execute_portfolio_snapshot_missing_rpc_sources_is_stable_error() {
     let _guard = ENV_LOCK.lock().expect("env lock");
     let _rpc = EnvVarGuard::remove("MFM_EVM_RPC_URL");
     let _rpc_sources = EnvVarGuard::remove("MFM_EVM_RPC_SOURCES_JSON");
@@ -673,5 +672,5 @@ async fn feature_execute_portfolio_snapshot_missing_rpc_url_is_stable_error() {
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     let v = response_json(resp).await;
     assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "evm_rpc_url_missing");
+    assert_eq!(v["error"]["code"], "rpc_control_no_sources");
 }

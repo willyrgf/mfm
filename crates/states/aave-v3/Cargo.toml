@@ -16,7 +16,7 @@ alloy-primitives = { workspace = true }
 hex = { workspace = true }
 
 mfm-machine = { path = "../../machine", version = "0.1.0" }
-mfm-collectors-evm = { path = "../../collectors/evm", version = "0.1.0" }
+mfm-collectors-rpc-control = { path = "../../collectors/rpc-control", version = "0.1.0" }
 mfm-state-common = { path = "../common", version = "0.1.0" }
 mfm-state-portfolio = { path = "../portfolio", version = "0.1.0" }
 mfm-state-symbol = { path = "../symbol", version = "0.1.0" }
