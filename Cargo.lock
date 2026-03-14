@@ -2061,6 +2061,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-control-plane-postgres"
+version = "0.1.0"
+dependencies = [
+ "mfm-machine",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+]
+
+[[package]]
 name = "mfm-docs"
 version = "0.1.0"
 

@@ -198,6 +198,11 @@ Owns local/internal live transport factories that are not external collectors.
 
 ### `crates/storages/*`
 Owns stream/artifact persistence implementations only.
+Correctness-critical control-plane coordination uses a sibling Postgres storage crate
+(`crates/storages/control-plane-postgres`) that writes control-plane stream-family records into the
+shared append-only stream tables and updates projection tables in the same SQL transaction.
+This boundary must not push control-plane semantics into `crates/machine`, and it does not widen
+the generic `StreamStore` trait for v1.
 
 ### `crates/core/`
 Owns primitives and security-sensitive keystore/crypto code.

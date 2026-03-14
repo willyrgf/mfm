@@ -33,6 +33,7 @@ members = [
 	"crates/storages/artifact-store-fs",
 	"crates/storages/artifact-store-secret",
 	"crates/storages/artifact-store-s3",
+	"crates/storages/control-plane-postgres",
 	"crates/storages/indexer",
 	"crates/storages/stream-store-mem",
 	"crates/storages/stream-store-postgres",

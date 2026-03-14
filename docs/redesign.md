@@ -168,6 +168,11 @@ Canonical responsibilities:
 - `crates/collectors/*`: external data adapters
 - `crates/transports/*`: local/internal live transport factories
 - `crates/storages/*`: persistence implementations
+  - correctness-critical control-plane coordination uses a sibling Postgres storage crate
+    (`crates/storages/control-plane-postgres`) that writes control-plane stream families into the
+    shared append-only stream tables and updates its projection tables in the same SQL transaction
+  - this does not move control-plane semantics into `crates/machine` or extend the generic
+    `StreamStore` trait for v1
 - shared-state layer crates:
   - `crates/states/common/`: cross-domain reusable state primitives
   - `crates/states/keystore/`: keystore-domain reusable states/helpers
