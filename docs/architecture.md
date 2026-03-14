@@ -13,6 +13,8 @@ Read order for contributors:
 3. [`AGENTS.md`](../AGENTS.md) for workflow, CI parity, and contribution rules.
 
 For the current registered ops and production states, see [`docs/ops-and-states.md`](ops-and-states.md).
+For the v1 RPC control-plane cutover and migration handoff, see
+[`RPC_CONTROL_PLANE_WIRE_UP.md`](../RPC_CONTROL_PLANE_WIRE_UP.md).
 
 If code conflicts with `docs/redesign.md`, treat that as a contract violation until the contract is intentionally updated.
 
@@ -298,6 +300,7 @@ If the answer spans multiple layers, split responsibilities explicitly rather th
 
 - Current ops/states inventory: [`docs/ops-and-states.md`](ops-and-states.md)
 - Normative contract: [`docs/redesign.md`](redesign.md)
+- RPC control-plane implementation handoff: [`RPC_CONTROL_PLANE_WIRE_UP.md`](../RPC_CONTROL_PLANE_WIRE_UP.md)
 - EVM routing runbook: [`docs/evm-rpc-routing.md`](evm-rpc-routing.md)
 - Contribution and CI rules: [`AGENTS.md`](../AGENTS.md)
 - Root project overview: [`README.md`](../README.md)

@@ -6,7 +6,10 @@ Generated from `docs/repo-index.json`.
 - `docs/repo-index.json` - Canonical deterministic repository index.
 - `docs/repo-map.md` - LLM-facing repository map generated from docs/repo-index.json.
 - `README.md` - Primary repository overview and command entrypoints.
+- `docs/DETAILED.md` - Detailed model architecture and contracts.
+- `docs/UPGRADE.md` - Downstream upgrade notes for behavioral and path contract changes.
 - `AGENTS.md` - Agent instructions and collaboration constraints.
+- `RPC_CONTROL_PLANE_WIRE_UP.md` - Project documentation.
 - `docs/architecture.md` - Project documentation.
 - `docs/ops-and-states.md` - Project documentation.
 - `docs/redesign.md` - Project documentation.
@@ -19,9 +22,13 @@ Generated from `docs/repo-index.json`.
 - `crates/collectors/evm-jsonrpc-http/Cargo.toml` (rust-cargo)
 - `crates/collectors/evm/Cargo.toml` (rust-cargo)
 - `crates/collectors/exec/Cargo.toml` (rust-cargo)
+- `crates/collectors/local-fs/Cargo.toml` (rust-cargo)
+- `crates/collectors/local-keystore/Cargo.toml` (rust-cargo)
 - `crates/collectors/nix-exec/Cargo.toml` (rust-cargo)
 - `crates/collectors/nix/Cargo.toml` (rust-cargo)
+- `crates/collectors/proof/Cargo.toml` (rust-cargo)
 - `crates/core/Cargo.toml` (rust-cargo)
+- `crates/docs/Cargo.toml` (rust-cargo)
 - `crates/evm-core/Cargo.toml` (rust-cargo)
 - `crates/evm-runtime/Cargo.toml` (rust-cargo)
 - `crates/machine-derive/Cargo.toml` (rust-cargo)
@@ -40,13 +47,19 @@ Generated from `docs/repo-index.json`.
 - `crates/sdk/Cargo.toml` (rust-cargo)
 - `crates/states/aave-v3/Cargo.toml` (rust-cargo)
 - `crates/states/common/Cargo.toml` (rust-cargo)
+- `crates/states/keystore-submit/Cargo.toml` (rust-cargo)
 - `crates/states/keystore/Cargo.toml` (rust-cargo)
+- `crates/states/portfolio/Cargo.toml` (rust-cargo)
+- `crates/states/symbol/Cargo.toml` (rust-cargo)
+- `crates/states/wallet/Cargo.toml` (rust-cargo)
 - `crates/storages/artifact-store-fs/Cargo.toml` (rust-cargo)
 - `crates/storages/artifact-store-s3/Cargo.toml` (rust-cargo)
 - `crates/storages/artifact-store-secret/Cargo.toml` (rust-cargo)
+- `crates/storages/control-plane-postgres/Cargo.toml` (rust-cargo)
+- `crates/storages/indexer/Cargo.toml` (rust-cargo)
 - `crates/storages/stream-store-mem/Cargo.toml` (rust-cargo)
 - `crates/storages/stream-store-postgres/Cargo.toml` (rust-cargo)
-- `crates/storages/indexer/Cargo.toml` (rust-cargo)
+- `crates/tools/publish-docs/Cargo.toml` (rust-cargo)
 - `crates/transports/local-evm/Cargo.toml` (rust-cargo)
 - `crates/transports/local-fs/Cargo.toml` (rust-cargo)
 - `crates/transports/local-keystore/Cargo.toml` (rust-cargo)
@@ -56,6 +69,19 @@ Generated from `docs/repo-index.json`.
 
 ## Command Surfaces
 - `ci` from `nixfied/project/ci.nix`
+
+## Features
+- (none detected)
+
+## Dispatcher and Introspection
+- `run-task -- <task-id> [-- ...]` from `nixfied/framework/runtime/dispatcher.nix`
+- `run-workflow -- <workflow-id> [-- ...]` from `nixfied/framework/runtime/dispatcher.nix`
+- `run-workflow-parallel -- <workflow-id> [-- ...]` from `nixfied/framework/runtime/dispatcher.nix`
+- `runs [run-id]` from `nixfied/framework/runtime/dispatcher.nix`
+- `stop-run -- <run-id>` from `nixfied/framework/runtime/dispatcher.nix`
+- `stop-all-runs` from `nixfied/framework/runtime/dispatcher.nix`
+- `features` from `nixfied/framework/runtime/dispatcher.nix`
+- `model`, `stateHash`, `tasks`, `services`, `task::<id>`, `schema` from `nixfied/framework/core/mkNixfied.nix`
 
 ## Sensitive Zones
 - `crates/core/src/keystore` - Security-sensitive key handling, tamper detection, and persisted keystore compatibility. (checks: nix run .#check, nix run .#test, nix run .#ci -- --audit --summary)
@@ -71,9 +97,18 @@ Generated from `docs/repo-index.json`.
 - `nix run .#test`
 - `nix run .#build`
 - `nix run .#check`
+- `nix run .#format`
 - `nix run .#ci -- --summary`
+- `nix run .#validate-env`
+- `nix run .#test-isolation`
+- `nix run .#ports`
+- `nix run .#check-ports`
+- `nix run .#features`
+- `nix run .#framework::test`
+- `nix run .#framework::install`
+- `nix run .#framework::upgrade`
 
 ## Invariants
 - Treat `nixfied/project/` as the primary customization surface.
-- Keep command metadata (`api`) aligned with script behavior.
-- Keep this map and `docs/repo-index.json` in sync via `nix run .#check`.
+- Keep command metadata aligned with script behavior.
+- Keep this map and `docs/repo-index.json` in sync when command surfaces or key docs change.

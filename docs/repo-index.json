@@ -21,9 +21,27 @@
       "exists": true
     },
     {
+      "path": "docs/DETAILED.md",
+      "purpose": "Detailed model architecture and contracts.",
+      "priority": 2,
+      "exists": true
+    },
+    {
+      "path": "docs/UPGRADE.md",
+      "purpose": "Downstream upgrade notes for behavioral and path contract changes.",
+      "priority": 3,
+      "exists": true
+    },
+    {
       "path": "AGENTS.md",
       "purpose": "Agent instructions and collaboration constraints.",
-      "priority": 2,
+      "priority": 7,
+      "exists": true
+    },
+    {
+      "path": "RPC_CONTROL_PLANE_WIRE_UP.md",
+      "purpose": "Project documentation.",
+      "priority": 20,
       "exists": true
     },
     {
@@ -82,6 +100,16 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "local-fs",
+      "path": "crates/collectors/local-fs/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "local-keystore",
+      "path": "crates/collectors/local-keystore/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "nix-exec",
       "path": "crates/collectors/nix-exec/Cargo.toml",
       "kind": "rust-cargo"
@@ -92,8 +120,18 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "proof",
+      "path": "crates/collectors/proof/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "core",
       "path": "crates/core/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "docs",
+      "path": "crates/docs/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -187,8 +225,28 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "keystore-submit",
+      "path": "crates/states/keystore-submit/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "keystore",
       "path": "crates/states/keystore/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "portfolio",
+      "path": "crates/states/portfolio/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "symbol",
+      "path": "crates/states/symbol/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "wallet",
+      "path": "crates/states/wallet/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -207,6 +265,16 @@
       "kind": "rust-cargo"
     },
     {
+      "name": "control-plane-postgres",
+      "path": "crates/storages/control-plane-postgres/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
+      "name": "indexer",
+      "path": "crates/storages/indexer/Cargo.toml",
+      "kind": "rust-cargo"
+    },
+    {
       "name": "stream-store-mem",
       "path": "crates/storages/stream-store-mem/Cargo.toml",
       "kind": "rust-cargo"
@@ -217,8 +285,8 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "indexer",
-      "path": "crates/storages/indexer/Cargo.toml",
+      "name": "publish-docs",
+      "path": "crates/tools/publish-docs/Cargo.toml",
       "kind": "rust-cargo"
     },
     {
@@ -306,5 +374,6 @@
       "name": "ci",
       "owner_file": "nixfied/project/ci.nix"
     }
-  ]
+  ],
+  "features": []
 }

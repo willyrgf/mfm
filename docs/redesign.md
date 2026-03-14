@@ -24,6 +24,8 @@ Contributor read order:
 
 `docs/ops-and-states.md` is descriptive and current-state oriented.
 This contract remains the normative source of truth for semantics, invariants, and allowed boundaries.
+For the v1 RPC control-plane cutover contract and implementation sequence, use
+[`RPC_CONTROL_PLANE_WIRE_UP.md`](../RPC_CONTROL_PLANE_WIRE_UP.md) alongside this document.
 
 ## 2. Guiding Priorities
 
