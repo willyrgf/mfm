@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use mfm_machine::context::DynContext;
 use mfm_machine::engine::{ExecutionEngine, RunPhase};
 use mfm_machine::errors::{ErrorCategory, ErrorInfo};
+use mfm_machine::events::event_envelopes_from_stream_records;
 use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
@@ -13,6 +14,7 @@ use mfm_machine::live_io::{FactIndex, LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::replay_io::ReplayIo;
 use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
+use mfm_machine::stores::StreamId;
 use mfm_sdk::unstable::SdkPlanResolver;
 use mfm_state_common::test_support as op_test_support;
 use tokio::sync::Mutex;
@@ -152,9 +154,10 @@ async fn at_live_then_replay_determinism() {
 
     // Manual replay (reconstruct from initial snapshot + recorded facts).
     let stream = stores
-        .events
-        .read_range(res.run_id, 1, None)
+        .streams
+        .read_range(&StreamId::run(res.run_id), 1, None)
         .await
+        .and_then(|records| event_envelopes_from_stream_records(res.run_id, records))
         .expect("read_range");
     let facts = FactIndex::from_event_stream(&stream);
     let (_manifest_id, initial_snapshot_id) = op_test_support::run_started(&stream);

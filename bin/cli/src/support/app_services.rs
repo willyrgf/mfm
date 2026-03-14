@@ -12,7 +12,7 @@ pub(crate) fn make_engine_bundle() -> EngineBundle {
 
 /// Builds the shared app service facade from CLI-selected stores.
 pub(crate) fn make_app_services(stores: Stores) -> AppServices {
-    AppServices::new(make_engine_bundle(), stores.events, stores.artifacts)
+    AppServices::new(make_engine_bundle(), stores.streams, stores.artifacts)
 }
 
 /// Builds app services from shared run-store arguments.

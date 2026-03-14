@@ -45,14 +45,16 @@ use mfm_machine::config::{
 use mfm_machine::context::DynContext;
 use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
 use mfm_machine::errors::{ContextError, ErrorCategory, IoError, RunError, StorageError};
-use mfm_machine::events::{Event, EventEnvelope, KernelEvent, RunStatus};
+use mfm_machine::events::{
+    event_envelopes_from_stream_records, Event, EventEnvelope, KernelEvent, RunStatus,
+};
 use mfm_machine::exec_transport::ExecProgramTransportFactory;
 use mfm_machine::ids::{ArtifactId, ContextKey, OpId, RunId};
 use mfm_machine::live_io::LiveIoTransportFactory;
 use mfm_machine::live_io_registry::{HashMapTransportRegistry, TransportRegistry};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
-use mfm_machine::stores::{ArtifactStore, EventStore};
+use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
 use mfm_op_aave_v3_origin_adapt::AaveV3OriginAdaptDeployOp;
 use mfm_op_evm_deploy_configure_validate::{
     EvmDeployConfigureValidateOp, EVM_DEPLOY_CONFIGURE_VALIDATE_OP_ID,
@@ -179,6 +181,30 @@ pub fn app_error_from_storage_error(err: StorageError) -> AppError {
             AppError::new(ErrorClass::Internal, info.code.0, info.message)
         }
     }
+}
+
+fn run_stream_id(run_id: RunId) -> StreamId {
+    StreamId::run(run_id)
+}
+
+async fn run_stream_head(store: &dyn StreamStore, run_id: RunId) -> Result<u64, AppError> {
+    store
+        .head_seq(&run_stream_id(run_id))
+        .await
+        .map_err(app_error_from_storage_error)
+}
+
+async fn read_run_events(
+    store: &dyn StreamStore,
+    run_id: RunId,
+    from_seq: u64,
+    to_seq: Option<u64>,
+) -> Result<Vec<EventEnvelope>, AppError> {
+    let records = store
+        .read_range(&run_stream_id(run_id), from_seq, to_seq)
+        .await
+        .map_err(app_error_from_storage_error)?;
+    event_envelopes_from_stream_records(run_id, records).map_err(app_error_from_storage_error)
 }
 
 /// Maps an engine `RunError` into the application error contract.
@@ -342,7 +368,7 @@ pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, App
 /// Builds the default event store from environment configuration.
 #[instrument(level = "info", skip_all)]
 #[allow(clippy::disallowed_methods)]
-pub async fn make_default_event_store() -> Result<Arc<dyn EventStore>, AppError> {
+pub async fn make_default_event_store() -> Result<Arc<dyn StreamStore>, AppError> {
     let database_url = std::env::var(ENV_DATABASE_URL).map_err(|_| {
         AppError::new(
             ErrorClass::Internal,
@@ -544,7 +570,7 @@ pub struct AppServices {
     /// Engine bundle used for planning and execution.
     pub bundle: EngineBundle,
     /// Event store used for run status and event queries.
-    pub events: Arc<dyn EventStore>,
+    pub events: Arc<dyn StreamStore>,
     /// Artifact store used for snapshots, facts, and outputs.
     pub artifacts: Arc<dyn ArtifactStore>,
 }
@@ -553,7 +579,7 @@ impl AppServices {
     /// Creates a new service facade from the supplied engine bundle and stores.
     pub fn new(
         bundle: EngineBundle,
-        events: Arc<dyn EventStore>,
+        events: Arc<dyn StreamStore>,
         artifacts: Arc<dyn ArtifactStore>,
     ) -> Self {
         Self {
@@ -565,7 +591,7 @@ impl AppServices {
 
     fn stores(&self) -> Stores {
         Stores {
-            events: Arc::clone(&self.events),
+            streams: Arc::clone(&self.events),
             artifacts: Arc::clone(&self.artifacts),
         }
     }
@@ -675,11 +701,7 @@ impl AppServices {
         let uuid = uuid::Uuid::parse_str(run_id).map_err(|_| AppError::invalid_uuid())?;
         let run_id = RunId(uuid);
 
-        let head = self
-            .events
-            .head_seq(run_id)
-            .await
-            .map_err(app_error_from_storage_error)?;
+        let head = run_stream_head(self.events.as_ref(), run_id).await?;
         if head == 0 {
             warn!("run not found while reading status");
             return Err(AppError::not_found(
@@ -688,11 +710,7 @@ impl AppServices {
             ));
         }
 
-        let stream = self
-            .events
-            .read_range(run_id, 1, None)
-            .await
-            .map_err(app_error_from_storage_error)?;
+        let stream = read_run_events(self.events.as_ref(), run_id, 1, None).await?;
         debug!(event_count = stream.len(), "loaded run event stream");
 
         let mut op_id = None;
@@ -761,11 +779,7 @@ impl AppServices {
         let uuid = uuid::Uuid::parse_str(run_id).map_err(|_| AppError::invalid_uuid())?;
         let run_id = RunId(uuid);
 
-        let head = self
-            .events
-            .head_seq(run_id)
-            .await
-            .map_err(app_error_from_storage_error)?;
+        let head = run_stream_head(self.events.as_ref(), run_id).await?;
         if head == 0 {
             warn!("run not found while reading events");
             return Err(AppError::not_found(
@@ -774,11 +788,8 @@ impl AppServices {
             ));
         }
 
-        let events = self
-            .events
-            .read_range(run_id, query.from_seq, query.to_seq)
-            .await
-            .map_err(app_error_from_storage_error)?;
+        let events =
+            read_run_events(self.events.as_ref(), run_id, query.from_seq, query.to_seq).await?;
         debug!(
             event_count = events.len(),
             head_seq = head,
@@ -1670,40 +1681,46 @@ mod tests {
     use async_trait::async_trait;
     use mfm_machine::engine::Stores;
     use mfm_machine::errors::{IoError, RunError, StorageError};
-    use mfm_machine::events::EventEnvelope;
     use mfm_machine::ids::{ArtifactId, FactKey, RunId, StateId};
     use mfm_machine::io::IoCall;
     use mfm_machine::live_io::{LiveIoEnv, LiveIoTransportFactory};
     use mfm_machine::live_io_registry::{HashMapTransportRegistry, TransportRegistry};
     use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
     use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, PlanResolver};
-    use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+    use mfm_machine::stores::{
+        AppendBatchResult, ArtifactKind, ArtifactStore, StreamAppend, StreamId, StreamRecord,
+        StreamStore,
+    };
     use std::sync::Arc;
 
     #[derive(Clone)]
     struct NoopEventStore;
 
     #[async_trait]
-    impl EventStore for NoopEventStore {
-        async fn head_seq(&self, _run_id: RunId) -> Result<u64, StorageError> {
+    impl StreamStore for NoopEventStore {
+        async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
             Ok(0)
         }
 
-        async fn append(
-            &self,
-            _run_id: RunId,
-            _expected_seq: u64,
-            _events: Vec<EventEnvelope>,
-        ) -> Result<u64, StorageError> {
+        async fn append(&self, _append: StreamAppend) -> Result<u64, StorageError> {
             Ok(0)
+        }
+
+        async fn append_batch(
+            &self,
+            _appends: Vec<StreamAppend>,
+        ) -> Result<AppendBatchResult, StorageError> {
+            Ok(AppendBatchResult {
+                stream_heads: Vec::new(),
+            })
         }
 
         async fn read_range(
             &self,
-            _run_id: RunId,
+            _stream_id: &StreamId,
             _from_seq: u64,
             _to_seq: Option<u64>,
-        ) -> Result<Vec<EventEnvelope>, StorageError> {
+        ) -> Result<Vec<StreamRecord>, StorageError> {
             Ok(Vec::new())
         }
     }
@@ -1752,7 +1769,7 @@ mod tests {
     fn test_live_io_env() -> LiveIoEnv {
         LiveIoEnv {
             stores: Stores {
-                events: Arc::new(NoopEventStore),
+                streams: Arc::new(NoopEventStore),
                 artifacts: Arc::new(NoopArtifactStore),
             },
             run_id: RunId(uuid::Uuid::new_v4()),

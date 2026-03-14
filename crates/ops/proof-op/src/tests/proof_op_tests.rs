@@ -7,8 +7,8 @@ use mfm_machine::config::RunConfig;
 use mfm_machine::engine::{ExecutionEngine, RunPhase, Stores};
 use mfm_machine::errors::{IoError, RunError};
 use mfm_machine::events::{
-    ChildRunCompleted, ChildRunSpawned, Event, EventEnvelope, KernelEvent,
-    DOMAIN_EVENT_CHILD_RUN_COMPLETED, DOMAIN_EVENT_CHILD_RUN_SPAWNED,
+    event_envelopes_from_stream_records, ChildRunCompleted, ChildRunSpawned, Event, EventEnvelope,
+    KernelEvent, DOMAIN_EVENT_CHILD_RUN_COMPLETED, DOMAIN_EVENT_CHILD_RUN_SPAWNED,
 };
 use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{ArtifactId, RunId, StateId};
@@ -20,6 +20,7 @@ use mfm_machine::replay_io::ReplayIo;
 use mfm_machine::runtime::{
     ChildRunLiveIoTransportFactory, DefaultExecutionEngine, EngineFailpoints, PlanResolver,
 };
+use mfm_machine::stores::StreamId;
 use mfm_state_common::test_support as op_test_support;
 
 use mfm_sdk::unstable::SdkPlanResolver;
@@ -131,6 +132,15 @@ fn topo(plan: &ExecutionPlan) -> Vec<StateNode> {
         }
     }
     out
+}
+
+async fn read_run_stream(stores: &Stores, run_id: RunId) -> Vec<EventEnvelope> {
+    stores
+        .streams
+        .read_range(&StreamId::run(run_id), 1, None)
+        .await
+        .and_then(|records| event_envelopes_from_stream_records(run_id, records))
+        .expect("read run stream")
 }
 
 fn count_state_entered_attempts(stream: &[EventEnvelope], state_id: &str) -> Vec<u32> {
@@ -470,11 +480,7 @@ async fn at06_live_then_replay_determinism() {
     let final_snapshot_id = res.final_snapshot_id.clone().expect("final snapshot");
 
     // Manual replay using ReplayIo + recorded facts must reproduce the final snapshot id.
-    let stream = stores
-        .events
-        .read_range(res.run_id, 1, None)
-        .await
-        .expect("read_range");
+    let stream = read_run_stream(&stores, res.run_id).await;
     let facts = FactIndex::from_event_stream(&stream);
     let (_manifest_id, initial_snapshot_id) = op_test_support::run_started(&stream);
 
@@ -569,11 +575,7 @@ async fn at07_crash_resume_determinism_and_at08_side_effect_idempotency() {
     assert_eq!(resumed.phase, RunPhase::Completed);
     let final_snapshot_id = resumed.final_snapshot_id.clone().expect("snapshot id");
 
-    let stream = stores
-        .events
-        .read_range(first.run_id, 1, None)
-        .await
-        .expect("read_range");
+    let stream = read_run_stream(&stores, first.run_id).await;
 
     // The side-effect state must have been attempted twice (orphan + retry).
     let atts = count_state_entered_attempts(&stream, "proof.main.apply_side_effect");
@@ -660,11 +662,7 @@ async fn at09_child_runs_live_then_replay_determinism_across_tree() {
     assert_eq!(res.phase, RunPhase::Completed);
     let final_snapshot_id = res.final_snapshot_id.clone().expect("final snapshot");
 
-    let parent_stream = stores
-        .events
-        .read_range(res.run_id, 1, None)
-        .await
-        .expect("read_range");
+    let parent_stream = read_run_stream(&stores, res.run_id).await;
 
     // Linkage events are the audit trail.
     assert_eq!(
@@ -729,11 +727,7 @@ async fn at09_child_runs_live_then_replay_determinism_across_tree() {
             mfm_machine::events::RunStatus::Completed
         ));
 
-        let child_stream = stores
-            .events
-            .read_range(s.child_run_id, 1, None)
-            .await
-            .expect("read child stream");
+        let child_stream = read_run_stream(&stores, s.child_run_id).await;
         let child_facts = FactIndex::from_event_stream(&child_stream);
 
         let (manifest_id, child_initial_snapshot_id) = op_test_support::run_started(&child_stream);
@@ -891,19 +885,16 @@ async fn at10_child_runs_crash_resume_spawned_but_not_completed() {
     assert_eq!(first.phase, RunPhase::Running);
 
     // Ensure children are not completed before we let them proceed.
-    let parent_stream = stores
-        .events
-        .read_range(first.run_id, 1, None)
-        .await
-        .expect("read parent stream");
+    let parent_stream = read_run_stream(&stores, first.run_id).await;
     let spawned = child_run_spawned(&parent_stream);
     assert_eq!(spawned.len(), 2);
 
     for s in &spawned {
         let child_stream = stores
-            .events
-            .read_range(s.child_run_id, 1, None)
+            .streams
+            .read_range(&StreamId::run(s.child_run_id), 1, None)
             .await
+            .and_then(|records| event_envelopes_from_stream_records(s.child_run_id, records))
             .expect("read child stream");
         assert!(op_test_support::run_completed_snapshot_id(&child_stream).is_none());
     }
@@ -912,7 +903,7 @@ async fn at10_child_runs_crash_resume_spawned_but_not_completed() {
     let resume_task = tokio::spawn({
         let engine = Arc::clone(&engine);
         let stores = Stores {
-            events: Arc::clone(&stores.events),
+            streams: Arc::clone(&stores.streams),
             artifacts: Arc::clone(&stores.artifacts),
         };
         let registry = Arc::clone(&registry);
@@ -935,11 +926,7 @@ async fn at10_child_runs_crash_resume_spawned_but_not_completed() {
     let resumed = resume_task.await.expect("join").expect("resume");
     assert_eq!(resumed.phase, RunPhase::Completed);
 
-    let parent_stream = stores
-        .events
-        .read_range(first.run_id, 1, None)
-        .await
-        .expect("read parent stream");
+    let parent_stream = read_run_stream(&stores, first.run_id).await;
     assert_eq!(
         count_domain_event(&parent_stream, DOMAIN_EVENT_CHILD_RUN_SPAWNED),
         2
@@ -1013,11 +1000,7 @@ async fn at11_child_runs_crash_resume_completed_but_parent_did_not_record_join()
     .expect("resume");
     assert_eq!(resumed.phase, RunPhase::Completed);
 
-    let parent_stream = stores
-        .events
-        .read_range(first.run_id, 1, None)
-        .await
-        .expect("read parent stream");
+    let parent_stream = read_run_stream(&stores, first.run_id).await;
     assert_eq!(
         count_domain_event(&parent_stream, DOMAIN_EVENT_CHILD_RUN_SPAWNED),
         2

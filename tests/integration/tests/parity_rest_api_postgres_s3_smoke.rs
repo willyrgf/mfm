@@ -9,7 +9,7 @@ use tower::ServiceExt;
 
 use mfm_artifact_store_s3::S3ArtifactStore;
 use mfm_event_store_postgres::PostgresEventStore;
-use mfm_machine::stores::{ArtifactStore, EventStore};
+use mfm_machine::stores::{ArtifactStore, StreamStore};
 
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
     let s = serde_json::to_string(&body).expect("json request must serialize");
@@ -33,7 +33,7 @@ async fn parity_postgres_s3_smoke() {
     let pg = PostgresEventStore::connect_env()
         .await
         .expect("postgres config");
-    let events: Arc<dyn EventStore> = Arc::new(pg);
+    let events: Arc<dyn StreamStore> = Arc::new(pg);
 
     let s3 = S3ArtifactStore::from_env().expect("s3 config");
     s3.ensure_bucket_exists().await.expect("bucket exists");

@@ -26,6 +26,8 @@ use mfm_state_common::test_support as op_test_support;
 use tokio::sync::Mutex;
 
 use mfm_collectors_nix_exec::{NixFlakePolicy, NixFlakeTransportFactory, NAMESPACE_NIX_EXEC};
+use mfm_machine::events::event_envelopes_from_stream_records;
+use mfm_machine::stores::StreamId;
 
 #[test]
 fn expand_accepts_flake_app_ref_config() {
@@ -266,9 +268,10 @@ async fn at_live_then_replay_determinism() {
     let final_snapshot_id = res.final_snapshot_id.clone().expect("final snapshot");
 
     let stream = stores
-        .events
-        .read_range(res.run_id, 1, None)
+        .streams
+        .read_range(&StreamId::run(res.run_id), 1, None)
         .await
+        .and_then(|records| event_envelopes_from_stream_records(res.run_id, records))
         .expect("read_range");
     let facts = FactIndex::from_event_stream(&stream);
     let (_manifest_id, initial_snapshot_id) = op_test_support::run_started(&stream);

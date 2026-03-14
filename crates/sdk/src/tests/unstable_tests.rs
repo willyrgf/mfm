@@ -4,10 +4,9 @@ use mfm_machine::config::{
     RunConfig,
 };
 use mfm_machine::errors::{ContextError, StateError};
-use mfm_machine::events::EventEnvelope;
 use mfm_machine::ids::ArtifactId;
 use mfm_machine::runtime::{DefaultExecutionEngine, PlanResolver};
-use mfm_machine::stores::{ArtifactStore, EventStore};
+use mfm_machine::stores::{ArtifactStore, StreamAppend, StreamId, StreamRecord, StreamStore};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -60,30 +59,28 @@ impl DynContext for MapContext {
 
 #[derive(Clone, Default)]
 struct MemEventStore {
-    inner: Arc<Mutex<HashMap<RunId, Vec<EventEnvelope>>>>,
+    inner: Arc<Mutex<HashMap<StreamId, Vec<StreamRecord>>>>,
 }
 
 #[async_trait]
-impl EventStore for MemEventStore {
-    async fn head_seq(&self, run_id: RunId) -> Result<u64, mfm_machine::errors::StorageError> {
+impl StreamStore for MemEventStore {
+    async fn head_seq(
+        &self,
+        stream_id: &StreamId,
+    ) -> Result<u64, mfm_machine::errors::StorageError> {
         let inner = self.inner.lock().await;
         Ok(inner
-            .get(&run_id)
+            .get(stream_id)
             .and_then(|v| v.last())
-            .map(|e| e.seq)
+            .map(|record| record.seq)
             .unwrap_or(0))
     }
 
-    async fn append(
-        &self,
-        run_id: RunId,
-        expected_seq: u64,
-        events: Vec<EventEnvelope>,
-    ) -> Result<u64, mfm_machine::errors::StorageError> {
+    async fn append(&self, append: StreamAppend) -> Result<u64, mfm_machine::errors::StorageError> {
         let mut inner = self.inner.lock().await;
-        let stream = inner.entry(run_id).or_default();
-        let head = stream.last().map(|e| e.seq).unwrap_or(0);
-        if head != expected_seq {
+        let stream = inner.entry(append.stream_id.clone()).or_default();
+        let head = stream.last().map(|record| record.seq).unwrap_or(0);
+        if head != append.expected_seq {
             return Err(mfm_machine::errors::StorageError::Concurrency(info(
                 "event_store_concurrency",
                 ErrorCategory::Storage,
@@ -91,18 +88,74 @@ impl EventStore for MemEventStore {
                 "head seq did not match expected seq",
             )));
         }
-        stream.extend(events);
-        Ok(stream.last().map(|e| e.seq).unwrap_or(head))
+        let mut next_seq = append.expected_seq + 1;
+        for record in append.records {
+            stream.push(StreamRecord {
+                stream_id: append.stream_id.clone(),
+                seq: next_seq,
+                ts_millis: record.ts_millis,
+                kind: record.kind,
+                payload: record.payload,
+            });
+            next_seq += 1;
+        }
+        Ok(stream.last().map(|record| record.seq).unwrap_or(head))
+    }
+
+    async fn append_batch(
+        &self,
+        appends: Vec<StreamAppend>,
+    ) -> Result<mfm_machine::stores::AppendBatchResult, mfm_machine::errors::StorageError> {
+        let mut inner = self.inner.lock().await;
+        let mut stream_heads = Vec::with_capacity(appends.len());
+
+        for append in &appends {
+            let head = inner
+                .get(&append.stream_id)
+                .and_then(|records| records.last())
+                .map(|record| record.seq)
+                .unwrap_or(0);
+            if head != append.expected_seq {
+                return Err(mfm_machine::errors::StorageError::Concurrency(info(
+                    "event_store_concurrency",
+                    ErrorCategory::Storage,
+                    false,
+                    "head seq did not match expected seq",
+                )));
+            }
+        }
+
+        for append in appends {
+            let stream = inner.entry(append.stream_id.clone()).or_default();
+            let mut next_seq = append.expected_seq + 1;
+            for record in append.records {
+                stream.push(StreamRecord {
+                    stream_id: append.stream_id.clone(),
+                    seq: next_seq,
+                    ts_millis: record.ts_millis,
+                    kind: record.kind,
+                    payload: record.payload,
+                });
+                next_seq += 1;
+            }
+            let head = stream
+                .last()
+                .map(|record| record.seq)
+                .unwrap_or(append.expected_seq);
+            stream_heads.push((append.stream_id, head));
+        }
+
+        Ok(mfm_machine::stores::AppendBatchResult { stream_heads })
     }
 
     async fn read_range(
         &self,
-        run_id: RunId,
+        stream_id: &StreamId,
         from_seq: u64,
         to_seq: Option<u64>,
-    ) -> Result<Vec<EventEnvelope>, mfm_machine::errors::StorageError> {
+    ) -> Result<Vec<StreamRecord>, mfm_machine::errors::StorageError> {
         let inner = self.inner.lock().await;
-        let Some(stream) = inner.get(&run_id) else {
+        let Some(stream) = inner.get(stream_id) else {
             return Ok(Vec::new());
         };
         let from = from_seq.max(1);
@@ -539,7 +592,7 @@ async fn launcher_rejects_secrets_in_manifest_input() {
     let engine: Arc<dyn ExecutionEngine> =
         Arc::new(DefaultExecutionEngine::new(Arc::new(NeverResolver)));
     let stores = Stores {
-        events: Arc::new(MemEventStore::default()),
+        streams: Arc::new(MemEventStore::default()),
         artifacts: Arc::new(MemArtifactStore::default()),
     };
 
@@ -640,7 +693,7 @@ async fn namespacing_prevents_context_collisions_and_wires_imports() {
     let engine: Arc<dyn ExecutionEngine> =
         Arc::new(DefaultExecutionEngine::new(Arc::new(NeverResolver)));
     let stores = Stores {
-        events: Arc::new(MemEventStore::default()),
+        streams: Arc::new(MemEventStore::default()),
         artifacts: Arc::new(MemArtifactStore::default()),
     };
 
@@ -673,7 +726,7 @@ async fn namespacing_prevents_context_collisions_and_wires_imports() {
         .start_pipeline(
             engine,
             Stores {
-                events: Arc::clone(&stores.events),
+                streams: Arc::clone(&stores.streams),
                 artifacts: Arc::clone(&stores.artifacts),
             },
             Arc::new(reg),
@@ -788,7 +841,7 @@ async fn single_op_report_returns_typed_report() {
     ));
     let engine: Arc<dyn ExecutionEngine> = Arc::new(DefaultExecutionEngine::new(resolver));
     let stores = Stores {
-        events: Arc::new(MemEventStore::default()),
+        streams: Arc::new(MemEventStore::default()),
         artifacts: Arc::new(MemArtifactStore::default()),
     };
 
@@ -833,7 +886,7 @@ async fn single_op_report_errors_when_report_key_missing() {
     ));
     let engine: Arc<dyn ExecutionEngine> = Arc::new(DefaultExecutionEngine::new(resolver));
     let stores = Stores {
-        events: Arc::new(MemEventStore::default()),
+        streams: Arc::new(MemEventStore::default()),
         artifacts: Arc::new(MemArtifactStore::default()),
     };
 
@@ -942,7 +995,7 @@ async fn single_op_report_maps_failed_run_state_error() {
     ));
     let engine: Arc<dyn ExecutionEngine> = Arc::new(DefaultExecutionEngine::new(resolver));
     let stores = Stores {
-        events: Arc::new(MemEventStore::default()),
+        streams: Arc::new(MemEventStore::default()),
         artifacts: Arc::new(MemArtifactStore::default()),
     };
 

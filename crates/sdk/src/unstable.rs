@@ -51,7 +51,7 @@ use mfm_machine::engine::{ExecutionEngine, RunPhase, RunResult, StartRun, Stores
 use mfm_machine::errors::{
     ContextError, ErrorCategory, ErrorInfo, IoError, RunError, StorageError,
 };
-use mfm_machine::events::{Event, KernelEvent};
+use mfm_machine::events::{event_envelopes_from_stream_records, Event, KernelEvent};
 use mfm_machine::hashing::{
     artifact_id_for_bytes, artifact_id_for_json, canonical_json_bytes, CanonicalJsonError,
 };
@@ -61,7 +61,7 @@ use mfm_machine::meta::{Idempotency, SideEffectKind, StateMeta};
 use mfm_machine::plan::{DependencyEdge, ExecutionPlan, StateGraph, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{DynState, State, StateOutcome};
-use mfm_machine::stores::ArtifactKind;
+use mfm_machine::stores::{ArtifactKind, StreamId};
 
 use crate::errors::SdkError;
 use crate::ids::{MachineId, PortKey, StepId};
@@ -950,7 +950,11 @@ async fn single_op_report_error_from_failed_run(
     stores: &Stores,
     run: &RunResult,
 ) -> SingleOpReportError {
-    let events = stores.events.read_range(run.run_id, 1, None).await;
+    let events = stores
+        .streams
+        .read_range(&StreamId::run(run.run_id), 1, None)
+        .await
+        .and_then(|records| event_envelopes_from_stream_records(run.run_id, records));
     let Ok(events) = events else {
         return SingleOpReportError::new(
             "RunFailed",
@@ -1005,7 +1009,7 @@ pub async fn execute_single_op_report<T: serde::de::DeserializeOwned>(
         .start_pipeline(
             engine,
             Stores {
-                events: Arc::clone(&stores.events),
+                streams: Arc::clone(&stores.streams),
                 artifacts: Arc::clone(&stores.artifacts),
             },
             registry,

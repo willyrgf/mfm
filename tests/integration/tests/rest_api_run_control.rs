@@ -10,9 +10,11 @@ use tower::ServiceExt;
 use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_event_store_mem::MemEventStore;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
-use mfm_machine::events::EventEnvelope;
-use mfm_machine::ids::{ArtifactId, ErrorCode, RunId};
-use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+use mfm_machine::ids::{ArtifactId, ErrorCode};
+use mfm_machine::stores::{
+    AppendBatchResult, ArtifactKind, ArtifactStore, StreamAppend, StreamId, StreamRecord,
+    StreamStore,
+};
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -122,20 +124,25 @@ fn storage_other(code: &str, message: &str) -> StorageError {
 struct FailingEventStore;
 
 #[async_trait]
-impl EventStore for FailingEventStore {
-    async fn head_seq(&self, _run_id: RunId) -> Result<u64, StorageError> {
+impl StreamStore for FailingEventStore {
+    async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
         Err(storage_other(
             "event_store_unavailable",
             "event store unavailable",
         ))
     }
 
-    async fn append(
+    async fn append(&self, _append: StreamAppend) -> Result<u64, StorageError> {
+        Err(storage_other(
+            "event_store_unavailable",
+            "event store unavailable",
+        ))
+    }
+
+    async fn append_batch(
         &self,
-        _run_id: RunId,
-        _expected_seq: u64,
-        _events: Vec<EventEnvelope>,
-    ) -> Result<u64, StorageError> {
+        _appends: Vec<StreamAppend>,
+    ) -> Result<AppendBatchResult, StorageError> {
         Err(storage_other(
             "event_store_unavailable",
             "event store unavailable",
@@ -144,10 +151,10 @@ impl EventStore for FailingEventStore {
 
     async fn read_range(
         &self,
-        _run_id: RunId,
+        _stream_id: &StreamId,
         _from_seq: u64,
         _to_seq: Option<u64>,
-    ) -> Result<Vec<EventEnvelope>, StorageError> {
+    ) -> Result<Vec<StreamRecord>, StorageError> {
         Err(storage_other(
             "event_store_unavailable",
             "event store unavailable",
@@ -183,7 +190,7 @@ impl ArtifactStore for FailingArtifactStore {
 
 #[tokio::test]
 async fn health_endpoint_reports_liveness() {
-    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -214,7 +221,7 @@ async fn health_endpoint_reports_liveness() {
 
 #[tokio::test]
 async fn ready_endpoint_reports_readiness_when_stores_are_usable() {
-    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -247,7 +254,7 @@ async fn ready_endpoint_reports_readiness_when_stores_are_usable() {
 
 #[tokio::test]
 async fn ready_endpoint_returns_503_when_event_store_is_unavailable() {
-    let events: Arc<dyn EventStore> = Arc::new(FailingEventStore);
+    let events: Arc<dyn StreamStore> = Arc::new(FailingEventStore);
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -279,7 +286,7 @@ async fn ready_endpoint_returns_503_when_event_store_is_unavailable() {
 
 #[tokio::test]
 async fn ready_endpoint_returns_503_when_artifact_store_is_unavailable() {
-    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(FailingArtifactStore);
 
     let bundle = mfm_rest_api::make_engine_bundle();
@@ -309,7 +316,7 @@ async fn ready_endpoint_returns_503_when_artifact_store_is_unavailable() {
 
 #[tokio::test]
 async fn start_status_resume_happy_path() {
-    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -427,7 +434,7 @@ async fn start_status_resume_happy_path() {
 
 #[tokio::test]
 async fn start_pipeline_payload_happy_path() {
-    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -470,7 +477,7 @@ async fn start_pipeline_payload_happy_path() {
 
 #[tokio::test]
 async fn artifacts_not_found_is_404() {
-    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -500,7 +507,7 @@ async fn artifacts_not_found_is_404() {
 
 #[tokio::test]
 async fn status_invalid_uuid_is_stable_error() {
-    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -531,7 +538,7 @@ async fn status_invalid_uuid_is_stable_error() {
 
 #[tokio::test]
 async fn start_invalid_json_is_stable_error() {
-    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -563,7 +570,7 @@ async fn start_invalid_json_is_stable_error() {
 
 #[tokio::test]
 async fn features_list_exposes_builtin_catalog() {
-    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -601,7 +608,7 @@ async fn features_list_exposes_builtin_catalog() {
 
 #[tokio::test]
 async fn feature_execute_run_start_happy_path() {
-    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));
@@ -641,7 +648,7 @@ async fn feature_execute_portfolio_snapshot_missing_rpc_url_is_stable_error() {
     let _rpc = EnvVarGuard::remove("MFM_EVM_RPC_URL");
     let _rpc_sources = EnvVarGuard::remove("MFM_EVM_RPC_SOURCES_JSON");
 
-    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> =
         Arc::new(FsArtifactStore::new(tmp.path().to_path_buf()));

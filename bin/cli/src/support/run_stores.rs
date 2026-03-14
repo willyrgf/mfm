@@ -9,7 +9,7 @@ use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_event_store_mem::MemEventStore;
 use mfm_event_store_postgres::PostgresEventStore;
 use mfm_machine::engine::Stores;
-use mfm_machine::stores::{ArtifactStore, EventStore};
+use mfm_machine::stores::{ArtifactStore, StreamStore};
 
 /// Shared store selection arguments for commands that access persisted runs.
 #[derive(Args, Debug, Clone)]
@@ -31,7 +31,7 @@ pub(crate) fn make_artifact_store(artifact_root: Option<PathBuf>) -> Arc<dyn Art
 
 async fn make_event_store(
     database_url: Option<String>,
-) -> Result<Arc<dyn EventStore>, CommandError> {
+) -> Result<Arc<dyn StreamStore>, CommandError> {
     let database_url = match database_url.or_else(|| std::env::var("DATABASE_URL").ok()) {
         Some(s) => s,
         None => {
@@ -64,13 +64,19 @@ pub(crate) async fn make_stores(
     let artifacts = make_artifact_store(artifact_root);
     let events = make_event_store(database_url).await?;
 
-    Ok(Stores { events, artifacts })
+    Ok(Stores {
+        streams: events,
+        artifacts,
+    })
 }
 
 /// Builds in-memory event storage with the standard artifact store for ephemeral commands.
 pub(crate) fn make_ephemeral_stores(artifact_root: Option<PathBuf>) -> Stores {
     let artifacts = make_artifact_store(artifact_root);
-    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
 
-    Stores { events, artifacts }
+    Stores {
+        streams: events,
+        artifacts,
+    }
 }

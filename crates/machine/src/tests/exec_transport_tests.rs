@@ -2,10 +2,12 @@ use super::*;
 
 use crate::engine::Stores;
 use crate::errors::StorageError;
-use crate::events::EventEnvelope;
 use crate::ids::{ArtifactId, RunId, StateId};
 use crate::live_io::LiveIoEnv;
-use crate::stores::{ArtifactKind, ArtifactStore, EventStore};
+use crate::stores::{
+    AppendBatchResult, ArtifactKind, ArtifactStore, StreamAppend, StreamId, StreamRecord,
+    StreamStore,
+};
 use async_trait::async_trait;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -16,26 +18,30 @@ use std::sync::Arc;
 struct NoopEventStore;
 
 #[async_trait]
-impl EventStore for NoopEventStore {
-    async fn head_seq(&self, _run_id: RunId) -> Result<u64, StorageError> {
+impl StreamStore for NoopEventStore {
+    async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
         Ok(0)
     }
 
-    async fn append(
-        &self,
-        _run_id: RunId,
-        _expected_seq: u64,
-        _events: Vec<EventEnvelope>,
-    ) -> Result<u64, StorageError> {
+    async fn append(&self, _append: StreamAppend) -> Result<u64, StorageError> {
         Ok(0)
+    }
+
+    async fn append_batch(
+        &self,
+        _appends: Vec<StreamAppend>,
+    ) -> Result<AppendBatchResult, StorageError> {
+        Ok(AppendBatchResult {
+            stream_heads: Vec::new(),
+        })
     }
 
     async fn read_range(
         &self,
-        _run_id: RunId,
+        _stream_id: &StreamId,
         _from_seq: u64,
         _to_seq: Option<u64>,
-    ) -> Result<Vec<EventEnvelope>, StorageError> {
+    ) -> Result<Vec<StreamRecord>, StorageError> {
         Ok(Vec::new())
     }
 }
@@ -61,7 +67,7 @@ impl ArtifactStore for NoopArtifactStore {
 fn env() -> LiveIoEnv {
     LiveIoEnv {
         stores: Stores {
-            events: Arc::new(NoopEventStore),
+            streams: Arc::new(NoopEventStore),
             artifacts: Arc::new(NoopArtifactStore),
         },
         run_id: RunId(uuid::Uuid::new_v4()),

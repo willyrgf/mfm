@@ -20,11 +20,11 @@ use mfm_machine::config::{
 use mfm_machine::context::DynContext;
 use mfm_machine::engine::{RunPhase, Stores};
 use mfm_machine::errors::{ContextError, IoError};
-use mfm_machine::events::{Event, KernelEvent};
+use mfm_machine::events::{event_envelopes_from_stream_records, Event, KernelEvent};
 use mfm_machine::ids::{ContextKey, OpId, RunId, StateId};
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransportFactory};
-use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+use mfm_machine::stores::{ArtifactKind, ArtifactStore, StreamId, StreamStore};
 use mfm_machine_test_support::init_test_observability;
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
@@ -576,7 +576,7 @@ fn balance_of_calldata(owner: &str) -> String {
 
 async fn rpc_call(
     rpc_url: &str,
-    events: Arc<dyn EventStore>,
+    events: Arc<dyn StreamStore>,
     artifacts: Arc<dyn ArtifactStore>,
     method: &str,
     params: serde_json::Value,
@@ -593,7 +593,10 @@ async fn rpc_call(
         ..EvmJsonRpcHttpConfig::default()
     });
     let env = LiveIoEnv {
-        stores: Stores { events, artifacts },
+        stores: Stores {
+            streams: events,
+            artifacts,
+        },
         run_id: RunId(uuid::Uuid::new_v4()),
         state_id: StateId::must_new("rpc.helper.call".to_string()),
         attempt: 0,
@@ -620,7 +623,7 @@ async fn rpc_call(
 
 async fn erc20_balance_u64(
     rpc_url: &str,
-    events: Arc<dyn EventStore>,
+    events: Arc<dyn StreamStore>,
     artifacts: Arc<dyn ArtifactStore>,
     token: &str,
     owner: &str,
@@ -723,8 +726,12 @@ fn read_reth_probe_diagnostics() -> Option<String> {
     }
 }
 
-async fn run_failure_diagnostics(events: Arc<dyn EventStore>, run_id: RunId) -> String {
-    let stream = match events.read_range(run_id, 1, None).await {
+async fn run_failure_diagnostics(events: Arc<dyn StreamStore>, run_id: RunId) -> String {
+    let stream = match events
+        .read_range(&StreamId::run(run_id), 1, None)
+        .await
+        .and_then(|records| event_envelopes_from_stream_records(run_id, records))
+    {
         Ok(stream) => stream,
         Err(err) => {
             return format!("run_id={} read_range_failed={err:?}", run_id.0);
@@ -985,7 +992,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     init_test_observability();
 
     let pg = connect_postgres_with_retry(20, 250).await;
-    let events: Arc<dyn EventStore> = Arc::new(pg);
+    let events: Arc<dyn StreamStore> = Arc::new(pg);
 
     let s3 = S3ArtifactStore::from_env().expect("s3 config");
     s3.ensure_bucket_exists().await.expect("bucket exists");
@@ -1058,7 +1065,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .start_pipeline(
             Arc::clone(&bundle.engine),
             Stores {
-                events: Arc::clone(&events),
+                streams: Arc::clone(&events),
                 artifacts: Arc::clone(&artifacts),
             },
             Arc::clone(&bundle.registry),
@@ -1145,7 +1152,7 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .start_pipeline(
             Arc::clone(&bundle.engine),
             Stores {
-                events: Arc::clone(&events),
+                streams: Arc::clone(&events),
                 artifacts: Arc::clone(&artifacts),
             },
             Arc::clone(&bundle.registry),

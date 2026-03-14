@@ -20,10 +20,12 @@
 use std::sync::Once;
 
 use mfm_machine::errors::StorageError;
-use mfm_machine::events::{Event, EventEnvelope, KernelEvent, RunStatus};
 use mfm_machine::hashing::artifact_id_for_bytes;
-use mfm_machine::ids::{ArtifactId, OpId, RunId, StateId};
-use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+use mfm_machine::ids::ArtifactId;
+use mfm_machine::stores::{
+    AppendBatchResult, ArtifactKind, ArtifactStore, NewStreamRecord, StreamAppend, StreamId,
+    StreamRecord, StreamStore,
+};
 
 const TEST_FILTER_DEFAULT: &str = "warn,mfm=debug";
 const TEST_FILTER_VERBOSE: &str = "debug,mfm=trace";
@@ -89,17 +91,19 @@ pub async fn artifact_store_contract_tests(store: &dyn ArtifactStore) {
     exists_and_not_found(store).await;
 }
 
-/// Runs the shared `EventStore` contract suite against a backend.
+/// Runs the shared `StreamStore` contract suite against a backend.
 ///
 /// The suite currently verifies:
 /// - append/read round trips
 /// - optimistic concurrency via `expected_seq`
+/// - atomic multi-stream batch append semantics
 ///
 /// The supplied store should start from an isolated test database or namespace so the sequence and
 /// concurrency assertions do not interact with events written by other tests.
-pub async fn event_store_contract_tests(store: &dyn EventStore) {
+pub async fn stream_store_contract_tests(store: &dyn StreamStore) {
     append_and_read(store).await;
     expected_seq_concurrency(store).await;
+    append_batch_atomicity(store).await;
 }
 
 async fn put_get_roundtrip(store: &dyn ArtifactStore) {
@@ -142,88 +146,86 @@ async fn exists_and_not_found(store: &dyn ArtifactStore) {
     }
 }
 
-async fn append_and_read(store: &dyn EventStore) {
-    let run_id = RunId(uuid::Uuid::new_v4());
+fn test_stream_id(family: &str) -> StreamId {
+    StreamId::must_new(format!("{family}:{}", uuid::Uuid::new_v4()))
+}
 
-    assert_eq!(store.head_seq(run_id).await.expect("head_seq"), 0);
+fn record(kind: &str, seq: u64) -> NewStreamRecord {
+    NewStreamRecord {
+        ts_millis: Some(seq),
+        kind: kind.to_string(),
+        payload: serde_json::json!({ "seq": seq }),
+    }
+}
 
-    let e1 = EventEnvelope {
-        run_id,
-        seq: 1,
-        ts_millis: Some(1),
-        event: Event::Kernel(KernelEvent::RunStarted {
-            op_id: OpId::must_new("op".to_string()),
-            manifest_id: ArtifactId("0".repeat(64)),
-            initial_snapshot_id: ArtifactId("1".repeat(64)),
-        }),
-    };
+fn assert_record(record: &StreamRecord, stream_id: &StreamId, seq: u64, kind: &str) {
+    assert_eq!(&record.stream_id, stream_id);
+    assert_eq!(record.seq, seq);
+    assert_eq!(record.ts_millis, Some(seq));
+    assert_eq!(record.kind, kind);
+    assert_eq!(record.payload, serde_json::json!({ "seq": seq }));
+}
+
+async fn append_and_read(store: &dyn StreamStore) {
+    let stream_id = test_stream_id("contract");
+
+    assert_eq!(store.head_seq(&stream_id).await.expect("head_seq"), 0);
 
     let head = store
-        .append(run_id, 0, vec![e1.clone()])
+        .append(StreamAppend::new(
+            stream_id.clone(),
+            0,
+            vec![record("test", 1)],
+        ))
         .await
         .expect("append");
     assert_eq!(head, 1);
-    assert_eq!(store.head_seq(run_id).await.expect("head_seq"), 1);
+    assert_eq!(store.head_seq(&stream_id).await.expect("head_seq"), 1);
 
-    let got = store.read_range(run_id, 1, None).await.expect("read_range");
-    assert_eq!(got, vec![e1.clone()]);
-
-    let e2 = EventEnvelope {
-        run_id,
-        seq: 2,
-        ts_millis: Some(2),
-        event: Event::Kernel(KernelEvent::StateEntered {
-            state_id: StateId::must_new("machine.main.setup".to_string()),
-            attempt: 0,
-            base_snapshot_id: ArtifactId("2".repeat(64)),
-        }),
-    };
-    let e3 = EventEnvelope {
-        run_id,
-        seq: 3,
-        ts_millis: Some(3),
-        event: Event::Kernel(KernelEvent::RunCompleted {
-            status: RunStatus::Completed,
-            final_snapshot_id: None,
-        }),
-    };
+    let got = store
+        .read_range(&stream_id, 1, None)
+        .await
+        .expect("read_range");
+    assert_eq!(got.len(), 1);
+    assert_record(&got[0], &stream_id, 1, "test");
 
     let head = store
-        .append(run_id, 1, vec![e2.clone(), e3.clone()])
+        .append(StreamAppend::new(
+            stream_id.clone(),
+            1,
+            vec![record("test", 2), record("test", 3)],
+        ))
         .await
         .expect("append");
     assert_eq!(head, 3);
 
     let got = store
-        .read_range(run_id, 2, Some(2))
+        .read_range(&stream_id, 2, Some(2))
         .await
         .expect("read_range");
-    assert_eq!(got, vec![e2]);
+    assert_eq!(got.len(), 1);
+    assert_record(&got[0], &stream_id, 2, "test");
 }
 
-async fn expected_seq_concurrency(store: &dyn EventStore) {
-    let run_id = RunId(uuid::Uuid::new_v4());
-
-    let e1 = EventEnvelope {
-        run_id,
-        seq: 1,
-        ts_millis: None,
-        event: Event::Kernel(KernelEvent::RunStarted {
-            op_id: OpId::must_new("op".to_string()),
-            manifest_id: ArtifactId("0".repeat(64)),
-            initial_snapshot_id: ArtifactId("1".repeat(64)),
-        }),
-    };
+async fn expected_seq_concurrency(store: &dyn StreamStore) {
+    let stream_id = test_stream_id("concurrency");
 
     let head = store
-        .append(run_id, 0, vec![e1.clone()])
+        .append(StreamAppend::new(
+            stream_id.clone(),
+            0,
+            vec![record("test", 1)],
+        ))
         .await
         .expect("append");
     assert_eq!(head, 1);
 
-    // ExpectedSeq concurrency: appending with an old expected seq must fail and must not change head.
     let err = store
-        .append(run_id, 0, vec![e1])
+        .append(StreamAppend::new(
+            stream_id.clone(),
+            0,
+            vec![record("test", 2)],
+        ))
         .await
         .expect_err("append should fail");
     match err {
@@ -231,7 +233,54 @@ async fn expected_seq_concurrency(store: &dyn EventStore) {
         other => panic!("expected Concurrency error, got: {other:?}"),
     }
 
-    assert_eq!(store.head_seq(run_id).await.expect("head_seq"), 1);
+    assert_eq!(store.head_seq(&stream_id).await.expect("head_seq"), 1);
+}
+
+async fn append_batch_atomicity(store: &dyn StreamStore) {
+    let left = test_stream_id("batch_left");
+    let right = test_stream_id("batch_right");
+
+    let success = store
+        .append_batch(vec![
+            StreamAppend::new(left.clone(), 0, vec![record("left", 1)]),
+            StreamAppend::new(
+                right.clone(),
+                0,
+                vec![record("right", 1), record("right", 2)],
+            ),
+        ])
+        .await
+        .expect("append_batch");
+    assert_batch_head(&success, &left, 1);
+    assert_batch_head(&success, &right, 2);
+
+    let err = store
+        .append_batch(vec![
+            StreamAppend::new(left.clone(), 0, vec![record("left", 2)]),
+            StreamAppend::new(right.clone(), 2, vec![record("right", 3)]),
+        ])
+        .await
+        .expect_err("batch should fail");
+    match err {
+        StorageError::Concurrency(_) => {}
+        other => panic!("expected Concurrency error, got: {other:?}"),
+    }
+
+    assert_eq!(store.head_seq(&left).await.expect("head_seq"), 1);
+    assert_eq!(store.head_seq(&right).await.expect("head_seq"), 2);
+
+    let left_records = store.read_range(&left, 1, None).await.expect("read_range");
+    assert_eq!(left_records.len(), 1);
+    assert_record(&left_records[0], &left, 1, "left");
+
+    let right_records = store.read_range(&right, 1, None).await.expect("read_range");
+    assert_eq!(right_records.len(), 2);
+    assert_record(&right_records[0], &right, 1, "right");
+    assert_record(&right_records[1], &right, 2, "right");
+}
+
+fn assert_batch_head(result: &AppendBatchResult, stream_id: &StreamId, expected: u64) {
+    assert_eq!(result.head_for(stream_id), Some(expected));
 }
 
 #[cfg(test)]

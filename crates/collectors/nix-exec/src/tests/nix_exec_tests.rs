@@ -8,7 +8,10 @@ use mfm_machine::engine::Stores;
 use mfm_machine::errors::StorageError;
 use mfm_machine::events::{Event, EventEnvelope, KernelEvent};
 use mfm_machine::ids::{ArtifactId, OpId, RunId, StateId};
-use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+use mfm_machine::stores::{
+    AppendBatchResult, ArtifactKind, ArtifactStore, StreamAppend, StreamId, StreamRecord,
+    StreamStore,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -17,24 +20,27 @@ use tokio::sync::Mutex;
 struct NoopEventStore;
 
 #[async_trait]
-impl EventStore for NoopEventStore {
-    async fn head_seq(&self, _run_id: RunId) -> Result<u64, StorageError> {
+impl StreamStore for NoopEventStore {
+    async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
         Ok(0)
     }
-    async fn append(
-        &self,
-        _run_id: RunId,
-        _expected_seq: u64,
-        _events: Vec<EventEnvelope>,
-    ) -> Result<u64, StorageError> {
+    async fn append(&self, _append: StreamAppend) -> Result<u64, StorageError> {
         Ok(0)
+    }
+    async fn append_batch(
+        &self,
+        _appends: Vec<StreamAppend>,
+    ) -> Result<AppendBatchResult, StorageError> {
+        Ok(AppendBatchResult {
+            stream_heads: Vec::new(),
+        })
     }
     async fn read_range(
         &self,
-        _run_id: RunId,
+        _stream_id: &StreamId,
         _from_seq: u64,
         _to_seq: Option<u64>,
-    ) -> Result<Vec<EventEnvelope>, StorageError> {
+    ) -> Result<Vec<StreamRecord>, StorageError> {
         Ok(Vec::new())
     }
 }
@@ -58,7 +64,7 @@ impl ArtifactStore for NoopArtifactStore {
 fn env() -> LiveIoEnv {
     LiveIoEnv {
         stores: Stores {
-            events: Arc::new(NoopEventStore),
+            streams: Arc::new(NoopEventStore),
             artifacts: Arc::new(NoopArtifactStore),
         },
         run_id: RunId(uuid::Uuid::new_v4()),
@@ -91,33 +97,51 @@ struct FixedEventStore {
 }
 
 #[async_trait]
-impl EventStore for FixedEventStore {
-    async fn head_seq(&self, _run_id: RunId) -> Result<u64, StorageError> {
+impl StreamStore for FixedEventStore {
+    async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
         Ok(self.stream.last().map(|e| e.seq).unwrap_or(0))
     }
 
-    async fn append(
-        &self,
-        _run_id: RunId,
-        _expected_seq: u64,
-        _events: Vec<EventEnvelope>,
-    ) -> Result<u64, StorageError> {
+    async fn append(&self, _append: StreamAppend) -> Result<u64, StorageError> {
         Ok(self.stream.last().map(|e| e.seq).unwrap_or(0))
+    }
+
+    async fn append_batch(
+        &self,
+        _appends: Vec<StreamAppend>,
+    ) -> Result<AppendBatchResult, StorageError> {
+        Ok(AppendBatchResult {
+            stream_heads: Vec::new(),
+        })
     }
 
     async fn read_range(
         &self,
-        _run_id: RunId,
+        _stream_id: &StreamId,
         from_seq: u64,
         to_seq: Option<u64>,
-    ) -> Result<Vec<EventEnvelope>, StorageError> {
+    ) -> Result<Vec<StreamRecord>, StorageError> {
         let to = to_seq.unwrap_or(u64::MAX);
-        Ok(self
-            .stream
+        self.stream
             .iter()
             .filter(|e| e.seq >= from_seq && e.seq <= to)
             .cloned()
-            .collect())
+            .map(|envelope| {
+                Ok(StreamRecord {
+                    stream_id: StreamId::run(envelope.run_id),
+                    seq: envelope.seq,
+                    ts_millis: envelope.ts_millis,
+                    kind: mfm_machine::events::STREAM_RECORD_KIND_MACHINE_EVENT.to_string(),
+                    payload: serde_json::to_value(envelope.event).map_err(|_| {
+                        StorageError::Other(info(
+                            "event_encode_failed",
+                            ErrorCategory::Storage,
+                            "failed to encode event payload",
+                        ))
+                    })?,
+                })
+            })
+            .collect()
     }
 }
 
@@ -192,7 +216,7 @@ async fn env_with_manifest_allowlist(prefixes: Vec<String>) -> LiveIoEnv {
 
     LiveIoEnv {
         stores: Stores {
-            events: Arc::new(FixedEventStore {
+            streams: Arc::new(FixedEventStore {
                 stream: Arc::new(stream),
             }),
             artifacts,

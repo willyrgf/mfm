@@ -16,12 +16,14 @@ use crate::config::{BackoffPolicy, ExecutionMode, RunConfig, RunManifest};
 use crate::context_runtime::write_full_snapshot_value;
 use crate::engine::{ExecutionEngine, RunPhase, RunResult, StartRun, Stores};
 use crate::errors::{ContextError, ErrorCategory, ErrorInfo, RunError, StorageError};
-use crate::events::{Event, EventEnvelope, KernelEvent, RunStatus};
+use crate::events::{
+    event_envelopes_from_stream_records, Event, EventEnvelope, KernelEvent, RunStatus,
+};
 use crate::hashing::artifact_id_for_json;
 use crate::ids::{ArtifactId, ErrorCode, OpId, RunId, StateId};
 use crate::live_io::{FactIndex, LiveIoTransportFactory, UnimplementedLiveIoTransportFactory};
 use crate::plan::{DependencyEdge, ExecutionPlan, PlanValidationError, StateNode};
-use crate::stores::ArtifactStore;
+use crate::stores::{ArtifactStore, StreamId};
 
 mod attempt;
 mod child_runs;
@@ -112,6 +114,30 @@ fn storage_not_found(code: &'static str, message: &'static str) -> StorageError 
 
 fn context_err(code: &'static str, message: &'static str) -> ContextError {
     ContextError::Serialization(info(code, ErrorCategory::Context, message))
+}
+
+pub(super) fn run_stream_id(run_id: RunId) -> StreamId {
+    StreamId::run(run_id)
+}
+
+pub(super) async fn run_stream_head(stores: &Stores, run_id: RunId) -> Result<u64, RunError> {
+    stores
+        .streams
+        .head_seq(&run_stream_id(run_id))
+        .await
+        .map_err(RunError::Storage)
+}
+
+pub(super) async fn read_run_stream(
+    stores: &Stores,
+    run_id: RunId,
+) -> Result<Vec<EventEnvelope>, RunError> {
+    let records = stores
+        .streams
+        .read_range(&run_stream_id(run_id), 1, None)
+        .await
+        .map_err(RunError::Storage)?;
+    event_envelopes_from_stream_records(run_id, records).map_err(RunError::Storage)
 }
 
 fn compute_backoff(policy: &BackoffPolicy, attempt: u32) -> Duration {
@@ -617,7 +643,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
             write_full_snapshot_value(stores.artifacts.as_ref(), initial_snapshot).await?;
 
         let writer: SharedEventWriter = Arc::new(Mutex::new(
-            EventWriter::new(Arc::clone(&stores.events), run_id)
+            EventWriter::new(Arc::clone(&stores.streams), run_id)
                 .await
                 .map_err(RunError::Storage)?,
         ));
@@ -660,11 +686,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
 
     #[instrument(level = "info", skip(self, stores), fields(run_id = %run_id.0))]
     async fn resume(&self, stores: Stores, run_id: RunId) -> Result<RunResult, RunError> {
-        let head = stores
-            .events
-            .head_seq(run_id)
-            .await
-            .map_err(RunError::Storage)?;
+        let head = run_stream_head(&stores, run_id).await?;
         if head == 0 {
             return Err(RunError::Storage(storage_not_found(
                 "run_not_found",
@@ -673,11 +695,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
         }
         debug!(head_seq = head, "resuming run from event stream");
 
-        let stream = stores
-            .events
-            .read_range(run_id, 1, None)
-            .await
-            .map_err(RunError::Storage)?;
+        let stream = read_run_stream(&stores, run_id).await?;
 
         let facts = FactIndex::from_event_stream(&stream);
         let history = read_run_history(run_id, &stream)?;
@@ -724,7 +742,7 @@ impl ExecutionEngine for DefaultExecutionEngine {
         }
 
         let writer: SharedEventWriter = Arc::new(Mutex::new(
-            EventWriter::new(Arc::clone(&stores.events), run_id)
+            EventWriter::new(Arc::clone(&stores.streams), run_id)
                 .await
                 .map_err(RunError::Storage)?,
         ));

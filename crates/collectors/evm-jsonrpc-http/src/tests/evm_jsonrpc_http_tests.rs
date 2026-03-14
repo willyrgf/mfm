@@ -3,10 +3,12 @@ use super::*;
 use async_trait::async_trait;
 use mfm_machine::engine::Stores;
 use mfm_machine::errors::StorageError;
-use mfm_machine::events::EventEnvelope;
 use mfm_machine::ids::{ArtifactId, RunId, StateId};
 use mfm_machine::live_io::LiveIoEnv;
-use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+use mfm_machine::stores::{
+    AppendBatchResult, ArtifactKind, ArtifactStore, StreamAppend, StreamId, StreamRecord,
+    StreamStore,
+};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -17,26 +19,30 @@ use tokio::sync::oneshot;
 struct NoopEventStore;
 
 #[async_trait]
-impl EventStore for NoopEventStore {
-    async fn head_seq(&self, _run_id: RunId) -> Result<u64, StorageError> {
+impl StreamStore for NoopEventStore {
+    async fn head_seq(&self, _stream_id: &StreamId) -> Result<u64, StorageError> {
         Ok(0)
     }
 
-    async fn append(
-        &self,
-        _run_id: RunId,
-        _expected_seq: u64,
-        _events: Vec<EventEnvelope>,
-    ) -> Result<u64, StorageError> {
+    async fn append(&self, _append: StreamAppend) -> Result<u64, StorageError> {
         Ok(0)
+    }
+
+    async fn append_batch(
+        &self,
+        _appends: Vec<StreamAppend>,
+    ) -> Result<AppendBatchResult, StorageError> {
+        Ok(AppendBatchResult {
+            stream_heads: Vec::new(),
+        })
     }
 
     async fn read_range(
         &self,
-        _run_id: RunId,
+        _stream_id: &StreamId,
         _from_seq: u64,
         _to_seq: Option<u64>,
-    ) -> Result<Vec<EventEnvelope>, StorageError> {
+    ) -> Result<Vec<StreamRecord>, StorageError> {
         Ok(Vec::new())
     }
 }
@@ -62,7 +68,7 @@ impl ArtifactStore for NoopArtifactStore {
 fn env() -> LiveIoEnv {
     LiveIoEnv {
         stores: Stores {
-            events: Arc::new(NoopEventStore),
+            streams: Arc::new(NoopEventStore),
             artifacts: Arc::new(NoopArtifactStore),
         },
         run_id: serde_json::from_str::<RunId>("\"00000000-0000-0000-0000-000000000000\"")

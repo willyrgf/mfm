@@ -4,11 +4,15 @@ use crate::context_runtime::JsonContext;
 use crate::errors::StateError;
 use crate::errors::StorageError;
 use crate::errors::{ErrorCategory, ErrorInfo, IoError};
-use crate::events::{DomainEvent, FactRecorded, DOMAIN_EVENT_FACT_RECORDED};
+use crate::events::{
+    event_envelopes_from_stream_records, new_stream_record_for_event, DomainEvent, EventEnvelope,
+    FactRecorded, DOMAIN_EVENT_FACT_RECORDED,
+};
 use crate::hashing::artifact_id_for_bytes;
 use crate::ids::ContextKey;
 use crate::ids::ErrorCode;
 use crate::ids::FactKey;
+use crate::ids::RunId;
 use crate::io::IoCall;
 use crate::io::IoProvider;
 use crate::live_io::{LiveIoTransport, LiveIoTransportFactory};
@@ -16,37 +20,85 @@ use crate::meta::{standard_tags, DependencyStrategy, Idempotency, SideEffectKind
 use crate::plan::StateGraph;
 use crate::recorder::EventRecorder;
 use crate::state::State;
-use crate::stores::{ArtifactKind, ArtifactStore, EventStore};
+use crate::stores::{
+    ArtifactKind, ArtifactStore, StreamAppend, StreamId, StreamRecord, StreamStore,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 #[derive(Clone, Default)]
 struct MemEventStore {
-    inner: Arc<Mutex<HashMap<RunId, Vec<EventEnvelope>>>>,
+    inner: Arc<Mutex<HashMap<StreamId, Vec<StreamRecord>>>>,
 }
 
-#[async_trait]
-impl EventStore for MemEventStore {
-    async fn head_seq(&self, run_id: RunId) -> Result<u64, StorageError> {
-        let inner = self.inner.lock().await;
-        Ok(inner
-            .get(&run_id)
-            .and_then(|v| v.last())
-            .map(|e| e.seq)
-            .unwrap_or(0))
-    }
-
-    async fn append(
+impl MemEventStore {
+    async fn append_run_events(
         &self,
         run_id: RunId,
         expected_seq: u64,
         events: Vec<EventEnvelope>,
     ) -> Result<u64, StorageError> {
+        let mut records = Vec::with_capacity(events.len());
+        for (idx, envelope) in events.into_iter().enumerate() {
+            if envelope.run_id != run_id {
+                return Err(StorageError::Other(info(
+                    "machine_event_stream_invalid",
+                    ErrorCategory::Storage,
+                    "event run_id did not match append run_id",
+                )));
+            }
+            let want_seq = expected_seq + (idx as u64) + 1;
+            if envelope.seq != want_seq {
+                return Err(StorageError::Other(info(
+                    "machine_event_stream_invalid",
+                    ErrorCategory::Storage,
+                    "event seq did not match expected contiguous sequence",
+                )));
+            }
+            records.push(new_stream_record_for_event(
+                envelope.event,
+                envelope.ts_millis,
+            )?);
+        }
+
+        self.append(StreamAppend::new(
+            StreamId::run(run_id),
+            expected_seq,
+            records,
+        ))
+        .await
+    }
+
+    async fn read_run_stream(
+        &self,
+        run_id: RunId,
+        from_seq: u64,
+        to_seq: Option<u64>,
+    ) -> Result<Vec<EventEnvelope>, StorageError> {
+        let records = self
+            .read_range(&StreamId::run(run_id), from_seq, to_seq)
+            .await?;
+        event_envelopes_from_stream_records(run_id, records)
+    }
+}
+
+#[async_trait]
+impl StreamStore for MemEventStore {
+    async fn head_seq(&self, stream_id: &StreamId) -> Result<u64, StorageError> {
+        let inner = self.inner.lock().await;
+        Ok(inner
+            .get(stream_id)
+            .and_then(|v| v.last())
+            .map(|record| record.seq)
+            .unwrap_or(0))
+    }
+
+    async fn append(&self, append: StreamAppend) -> Result<u64, StorageError> {
         let mut inner = self.inner.lock().await;
-        let stream = inner.entry(run_id).or_default();
-        let head = stream.last().map(|e| e.seq).unwrap_or(0);
-        if head != expected_seq {
+        let stream = inner.entry(append.stream_id.clone()).or_default();
+        let head = stream.last().map(|record| record.seq).unwrap_or(0);
+        if head != append.expected_seq {
             return Err(StorageError::Concurrency(info(
                 "event_store_concurrency",
                 ErrorCategory::Storage,
@@ -54,18 +106,74 @@ impl EventStore for MemEventStore {
             )));
         }
 
-        stream.extend(events);
-        Ok(stream.last().map(|e| e.seq).unwrap_or(head))
+        let mut next_seq = append.expected_seq + 1;
+        for record in append.records {
+            stream.push(StreamRecord {
+                stream_id: append.stream_id.clone(),
+                seq: next_seq,
+                ts_millis: record.ts_millis,
+                kind: record.kind,
+                payload: record.payload,
+            });
+            next_seq += 1;
+        }
+
+        Ok(stream.last().map(|record| record.seq).unwrap_or(head))
+    }
+
+    async fn append_batch(
+        &self,
+        appends: Vec<StreamAppend>,
+    ) -> Result<crate::stores::AppendBatchResult, StorageError> {
+        let mut inner = self.inner.lock().await;
+        let mut stream_heads = Vec::with_capacity(appends.len());
+
+        for append in &appends {
+            let head = inner
+                .get(&append.stream_id)
+                .and_then(|records| records.last())
+                .map(|record| record.seq)
+                .unwrap_or(0);
+            if head != append.expected_seq {
+                return Err(StorageError::Concurrency(info(
+                    "event_store_concurrency",
+                    ErrorCategory::Storage,
+                    "head seq did not match expected seq",
+                )));
+            }
+        }
+
+        for append in appends {
+            let stream = inner.entry(append.stream_id.clone()).or_default();
+            let mut next_seq = append.expected_seq + 1;
+            for record in append.records {
+                stream.push(StreamRecord {
+                    stream_id: append.stream_id.clone(),
+                    seq: next_seq,
+                    ts_millis: record.ts_millis,
+                    kind: record.kind,
+                    payload: record.payload,
+                });
+                next_seq += 1;
+            }
+            let head = stream
+                .last()
+                .map(|record| record.seq)
+                .unwrap_or(append.expected_seq);
+            stream_heads.push((append.stream_id, head));
+        }
+
+        Ok(crate::stores::AppendBatchResult { stream_heads })
     }
 
     async fn read_range(
         &self,
-        run_id: RunId,
+        stream_id: &StreamId,
         from_seq: u64,
         to_seq: Option<u64>,
-    ) -> Result<Vec<EventEnvelope>, StorageError> {
+    ) -> Result<Vec<StreamRecord>, StorageError> {
         let inner = self.inner.lock().await;
-        let Some(stream) = inner.get(&run_id) else {
+        let Some(stream) = inner.get(stream_id) else {
             return Ok(Vec::new());
         };
 
@@ -433,7 +541,7 @@ async fn secrets_in_initial_context_are_rejected_and_not_persisted() {
     let events = Arc::new(MemEventStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = Stores {
-        events: events.clone(),
+        streams: events.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -508,7 +616,7 @@ async fn state_failed_error_messages_are_redacted_before_persisting() {
     let events = Arc::new(MemEventStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = Stores {
-        events: events.clone(),
+        streams: events.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -560,7 +668,10 @@ async fn state_failed_error_messages_are_redacted_before_persisting() {
 
     assert_eq!(r.phase, RunPhase::Failed);
 
-    let stream = events.read_range(r.run_id, 1, None).await.expect("read");
+    let stream = events
+        .read_run_stream(r.run_id, 1, None)
+        .await
+        .expect("read");
     let failed = stream.iter().find_map(|e| match &e.event {
         Event::Kernel(KernelEvent::StateFailed { error, .. }) => Some(error.clone()),
         _ => None,
@@ -581,7 +692,7 @@ async fn domain_events_with_secrets_are_rejected() {
     let events = Arc::new(MemEventStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = Stores {
-        events: events.clone(),
+        streams: events.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -634,7 +745,10 @@ async fn domain_events_with_secrets_are_rejected() {
 
     assert_eq!(r.phase, RunPhase::Failed);
 
-    let stream = events.read_range(r.run_id, 1, None).await.expect("read");
+    let stream = events
+        .read_run_stream(r.run_id, 1, None)
+        .await
+        .expect("read");
     assert!(!stream.iter().any(|e| matches!(e.event, Event::Domain(_))));
 
     let serialized = serde_json::to_string(&stream).unwrap();
@@ -647,7 +761,7 @@ async fn fact_payloads_with_secrets_are_rejected() {
     let events = Arc::new(MemEventStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = Stores {
-        events: events.clone(),
+        streams: events.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -701,7 +815,10 @@ async fn fact_payloads_with_secrets_are_rejected() {
 
     assert_eq!(r.phase, RunPhase::Failed);
 
-    let stream = events.read_range(r.run_id, 1, None).await.expect("read");
+    let stream = events
+        .read_run_stream(r.run_id, 1, None)
+        .await
+        .expect("read");
     assert!(!stream.iter().any(|e| match &e.event {
         Event::Domain(de) => de.name == DOMAIN_EVENT_FACT_RECORDED,
         _ => false,
@@ -718,7 +835,7 @@ async fn start_then_resume_retries_orphan_attempt_from_base_snapshot() {
     let events = Arc::new(MemEventStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        events: events.clone(),
+        streams: events.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -785,7 +902,10 @@ async fn start_then_resume_retries_orphan_attempt_from_base_snapshot() {
             .expect("read snapshot");
     assert_eq!(snapshot, serde_json::json!({"x": 1}));
 
-    let stream = events.read_range(r1.run_id, 1, None).await.expect("read");
+    let stream = events
+        .read_run_stream(r1.run_id, 1, None)
+        .await
+        .expect("read");
     let entered: Vec<u32> = stream
         .iter()
         .filter_map(|e| match &e.event {
@@ -847,7 +967,7 @@ async fn retry_policy_retries_retryable_errors() {
     let events = Arc::new(MemEventStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        events: events.clone(),
+        streams: events.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -900,7 +1020,10 @@ async fn retry_policy_retries_retryable_errors() {
         .expect("start");
     assert_eq!(r.phase, RunPhase::Completed);
 
-    let stream = events.read_range(r.run_id, 1, None).await.expect("read");
+    let stream = events
+        .read_run_stream(r.run_id, 1, None)
+        .await
+        .expect("read");
     let entered: Vec<u32> = stream
         .iter()
         .filter_map(|e| match &e.event {
@@ -920,7 +1043,7 @@ async fn rejects_fanout_join_execution_mode() {
     let events = Arc::new(MemEventStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        events: events.clone(),
+        streams: events.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -981,7 +1104,7 @@ async fn skip_tags_skips_tagged_states_without_running_handler() {
     let events = Arc::new(MemEventStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        events: events.clone(),
+        streams: events.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1060,7 +1183,10 @@ async fn skip_tags_skips_tagged_states_without_running_handler() {
             .expect("read snapshot");
     assert_eq!(snapshot, serde_json::json!({"x": 1}));
 
-    let stream = events.read_range(r.run_id, 1, None).await.expect("read");
+    let stream = events
+        .read_run_stream(r.run_id, 1, None)
+        .await
+        .expect("read");
     let mut s1_snapshot = None;
     let mut s2_enter_base = None;
     let mut s2_completed_snapshot = None;
@@ -1101,7 +1227,7 @@ async fn crash_resume_orphan_attempt_reuses_facts() {
     let events = Arc::new(MemEventStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        events: events.clone(),
+        streams: events.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1176,7 +1302,10 @@ async fn crash_resume_orphan_attempt_reuses_facts() {
             .expect("read snapshot");
     assert_eq!(snapshot, serde_json::json!({"x": 1}));
 
-    let stream = events.read_range(r1.run_id, 1, None).await.expect("read");
+    let stream = events
+        .read_run_stream(r1.run_id, 1, None)
+        .await
+        .expect("read");
     let entered: Vec<u32> = stream
         .iter()
         .filter_map(|e| match &e.event {
@@ -1322,7 +1451,7 @@ async fn facts_are_single_assignment_and_reused_across_retries() {
     let events = Arc::new(MemEventStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        events: events.clone(),
+        streams: events.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1385,7 +1514,10 @@ async fn facts_are_single_assignment_and_reused_across_retries() {
         "transport call should be deduped by fact key"
     );
 
-    let stream = events.read_range(r.run_id, 1, None).await.expect("read");
+    let stream = events
+        .read_run_stream(r.run_id, 1, None)
+        .await
+        .expect("read");
     let facts: Vec<FactRecorded> = stream
         .iter()
         .filter_map(|e| match &e.event {
@@ -1436,7 +1568,7 @@ async fn time_and_random_are_recorded_as_facts() {
     let events = Arc::new(MemEventStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        events: events.clone(),
+        streams: events.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1487,7 +1619,10 @@ async fn time_and_random_are_recorded_as_facts() {
         .expect("start");
     assert_eq!(r.phase, RunPhase::Completed);
 
-    let stream = events.read_range(r.run_id, 1, None).await.expect("read");
+    let stream = events
+        .read_run_stream(r.run_id, 1, None)
+        .await
+        .expect("read");
     let facts: Vec<FactRecorded> = stream
         .iter()
         .filter_map(|e| match &e.event {
@@ -1513,7 +1648,7 @@ async fn replay_mode_serves_recorded_facts_without_live_io() {
     let events = Arc::new(MemEventStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        events: events.clone(),
+        streams: events.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1559,7 +1694,7 @@ async fn replay_mode_serves_recorded_facts_without_live_io() {
 
     let run_id = RunId(uuid::Uuid::new_v4());
     events
-        .append(
+        .append_run_events(
             run_id,
             0,
             vec![
@@ -1659,7 +1794,7 @@ async fn replay_mode_missing_fact_fails_without_live_io() {
     let events = Arc::new(MemEventStore::default());
     let artifacts = Arc::new(MemArtifactStore::default());
     let stores = || Stores {
-        events: events.clone(),
+        streams: events.clone(),
         artifacts: artifacts.clone(),
     };
 
@@ -1686,7 +1821,7 @@ async fn replay_mode_missing_fact_fails_without_live_io() {
 
     let run_id = RunId(uuid::Uuid::new_v4());
     events
-        .append(
+        .append_run_events(
             run_id,
             0,
             vec![EventEnvelope {

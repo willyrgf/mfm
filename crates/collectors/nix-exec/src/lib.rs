@@ -40,7 +40,7 @@ use mfm_machine::ids::ErrorCode;
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::process_exec::{run_command, ProcessRunError, ProcessRunResult, StreamLimit};
-use mfm_machine::stores::{ArtifactStore, EventStore};
+use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
 
 /// Namespace group handled by the Nix flake transport factory.
 pub const NAMESPACE_NIX_EXEC: &str = "nix.exec";
@@ -128,7 +128,7 @@ impl LiveIoTransportFactory for NixFlakeTransportFactory {
     fn make(&self, env: LiveIoEnv) -> Box<dyn LiveIoTransport> {
         Box::new(NixFlakeTransport {
             fallback_policy: self.policy.clone(),
-            events: Arc::clone(&env.stores.events),
+            streams: Arc::clone(&env.stores.streams),
             artifacts: Arc::clone(&env.stores.artifacts),
             run_id: env.run_id,
             resolved_policy: None,
@@ -138,7 +138,7 @@ impl LiveIoTransportFactory for NixFlakeTransportFactory {
 
 struct NixFlakeTransport {
     fallback_policy: NixFlakePolicy,
-    events: Arc<dyn EventStore>,
+    streams: Arc<dyn StreamStore>,
     artifacts: Arc<dyn ArtifactStore>,
     run_id: mfm_machine::ids::RunId,
     resolved_policy: Option<NixFlakePolicy>,
@@ -337,14 +337,22 @@ fn run_started_manifest_id(
 impl NixFlakeTransport {
     async fn load_manifest_policy(&self) -> Result<Option<NixFlakePolicy>, IoError> {
         let stream = self
-            .events
-            .read_range(self.run_id, 1, None)
+            .streams
+            .read_range(&StreamId::run(self.run_id), 1, None)
             .await
             .map_err(|_| {
                 IoError::Other(info(
                     CODE_NIX_MANIFEST_LOOKUP_FAILED,
                     ErrorCategory::Storage,
                     "failed to read run events for nix policy",
+                ))
+            })?;
+        let stream = mfm_machine::events::event_envelopes_from_stream_records(self.run_id, stream)
+            .map_err(|_| {
+                IoError::Other(info(
+                    CODE_NIX_MANIFEST_LOOKUP_FAILED,
+                    ErrorCategory::Storage,
+                    "run event stream was invalid",
                 ))
             })?;
 

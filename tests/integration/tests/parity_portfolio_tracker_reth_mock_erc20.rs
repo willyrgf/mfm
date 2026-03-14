@@ -24,7 +24,7 @@ use mfm_machine::errors::{ContextError, IoError};
 use mfm_machine::ids::{ContextKey, OpId, RunId, StateId};
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransportFactory};
-use mfm_machine::stores::{ArtifactStore, EventStore};
+use mfm_machine::stores::{ArtifactStore, StreamStore};
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
@@ -234,7 +234,7 @@ fn contract_artifact_program_path_mock_erc20() -> String {
 
 async fn rpc_call(
     rpc_url: &str,
-    events: Arc<dyn EventStore>,
+    events: Arc<dyn StreamStore>,
     artifacts: Arc<dyn ArtifactStore>,
     method: &str,
     params: serde_json::Value,
@@ -251,7 +251,10 @@ async fn rpc_call(
         ..EvmJsonRpcHttpConfig::default()
     });
     let env = LiveIoEnv {
-        stores: Stores { events, artifacts },
+        stores: Stores {
+            streams: events,
+            artifacts,
+        },
         run_id: RunId(uuid::Uuid::new_v4()),
         state_id: StateId::must_new("rpc.helper.call".to_string()),
         attempt: 0,
@@ -301,7 +304,7 @@ const RETH_DEV_ACCOUNT0_PRIVATE_KEY: &str =
 #[tokio::test]
 async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
     let pg = connect_postgres_with_retry(20, 250).await;
-    let events: Arc<dyn EventStore> = Arc::new(pg);
+    let events: Arc<dyn StreamStore> = Arc::new(pg);
 
     let s3 = S3ArtifactStore::from_env().expect("s3 config");
     s3.ensure_bucket_exists().await.expect("bucket exists");
@@ -405,7 +408,7 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
         .start_pipeline(
             Arc::clone(&bundle.engine),
             Stores {
-                events: Arc::clone(&events),
+                streams: Arc::clone(&events),
                 artifacts: Arc::clone(&artifacts),
             },
             Arc::clone(&bundle.registry),

@@ -9,5 +9,6 @@ readme = "README.md"
 
 [dependencies]
 mfm-machine = { path = "../machine", version = "0.1.0" }
+serde_json = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }

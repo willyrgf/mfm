@@ -8,9 +8,9 @@ use std::time::Duration;
 use mfm_event_store_postgres::PostgresEventStore;
 use mfm_integration_tests::parity_run_ids::{read_parity_aave_run_ids, read_parity_evm_run_id};
 use mfm_machine::errors::StorageError;
-use mfm_machine::events::{Event, KernelEvent, RunStatus};
+use mfm_machine::events::{event_envelopes_from_stream_records, Event, KernelEvent, RunStatus};
 use mfm_machine::ids::RunId;
-use mfm_machine::stores::EventStore;
+use mfm_machine::stores::{StreamId, StreamStore};
 use mfm_machine_test_support::init_test_observability;
 use tracing::info;
 
@@ -78,21 +78,25 @@ fn assert_required_state_order(
 }
 
 async fn audit_run_events(
-    events: Arc<dyn EventStore>,
+    events: Arc<dyn StreamStore>,
     run_id: RunId,
     machine_id: &str,
     required_states: &[&str],
     min_state_count: usize,
 ) {
-    let head_seq = events.head_seq(run_id).await.expect("head seq");
+    let head_seq = events
+        .head_seq(&StreamId::run(run_id))
+        .await
+        .expect("head seq");
     assert!(
         head_seq > 0,
         "run `{machine_id}` must emit at least one event"
     );
 
     let stream = events
-        .read_range(run_id, 1, None)
+        .read_range(&StreamId::run(run_id), 1, None)
         .await
+        .and_then(|records| event_envelopes_from_stream_records(run_id, records))
         .expect("event stream");
     assert_eq!(
         stream.len() as u64,
@@ -210,7 +214,7 @@ async fn parity_postgres_state_events_audit_for_multi_state_pipelines() {
     init_test_observability();
 
     let pg = connect_postgres_with_retry(20, 250).await;
-    let events: Arc<dyn EventStore> = Arc::new(pg);
+    let events: Arc<dyn StreamStore> = Arc::new(pg);
 
     let evm_run_id = read_parity_evm_run_id();
     let (aave_phase_a_run_id, aave_phase_b_run_id) = read_parity_aave_run_ids();

@@ -1,9 +1,9 @@
 #![allow(clippy::disallowed_methods)]
 #![warn(missing_docs)]
-//! PostgreSQL `EventStore` for parity tests and durable deployments.
+//! PostgreSQL `StreamStore` for parity tests and durable deployments.
 //!
-//! This backend persists append-only run event streams in PostgreSQL while preserving the runtime
-//! optimistic-concurrency contract.
+//! This backend persists append-only streams in PostgreSQL while preserving optimistic concurrency
+//! and atomic multi-stream append semantics.
 //!
 //! # Examples
 //!
@@ -21,9 +21,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
-use mfm_machine::events::{Event, EventEnvelope};
-use mfm_machine::ids::{ErrorCode, RunId};
-use mfm_machine::stores::EventStore;
+use mfm_machine::ids::ErrorCode;
+use mfm_machine::stores::{AppendBatchResult, StreamAppend, StreamId, StreamRecord, StreamStore};
 use tokio::sync::Mutex;
 use tokio_postgres::{Client, NoTls, Transaction};
 use tracing::{debug, info, warn};
@@ -64,20 +63,20 @@ impl PostgresEventStore {
     }
 
     async fn init(&self) -> Result<(), StorageError> {
-        // Minimal schema: per-run head + per-run append-only events.
         let ddl = r#"
-CREATE TABLE IF NOT EXISTS mfm_runs (
-  run_id UUID PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS mfm_streams (
+  stream_id TEXT PRIMARY KEY,
   head_seq BIGINT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS mfm_events (
-  run_id UUID NOT NULL,
+CREATE TABLE IF NOT EXISTS mfm_stream_records (
+  stream_id TEXT NOT NULL,
   seq BIGINT NOT NULL,
   ts_millis BIGINT NULL,
-  event JSONB NOT NULL,
-  PRIMARY KEY (run_id, seq),
-  CONSTRAINT mfm_events_run_fk FOREIGN KEY (run_id) REFERENCES mfm_runs(run_id) ON DELETE CASCADE
+  kind TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  PRIMARY KEY (stream_id, seq),
+  CONSTRAINT mfm_stream_records_stream_fk FOREIGN KEY (stream_id) REFERENCES mfm_streams(stream_id) ON DELETE CASCADE
 );
 "#;
 
@@ -109,23 +108,26 @@ CREATE TABLE IF NOT EXISTS mfm_events (
         StorageError::Other(Self::info(code, message))
     }
 
-    fn validate_append(
-        run_id: RunId,
-        expected_seq: u64,
-        events: &[EventEnvelope],
-    ) -> Result<(), StorageError> {
-        for (idx, e) in events.iter().enumerate() {
-            if e.run_id != run_id {
+    fn validate_append(append: &StreamAppend) -> Result<(), StorageError> {
+        for record in &append.records {
+            if record.kind.is_empty() {
                 return Err(Self::other(
                     "pg_append_invalid",
-                    "event run_id did not match append run_id",
+                    "stream record kind must not be empty",
                 ));
             }
-            let want_seq = expected_seq + (idx as u64) + 1;
-            if e.seq != want_seq {
+        }
+        Ok(())
+    }
+
+    fn validate_batch(appends: &[StreamAppend]) -> Result<(), StorageError> {
+        let mut seen = std::collections::HashSet::new();
+        for append in appends {
+            Self::validate_append(append)?;
+            if !seen.insert(append.stream_id.clone()) {
                 return Err(Self::other(
                     "pg_append_invalid",
-                    "event seq did not match expected contiguous sequence",
+                    "append_batch contained duplicate stream ids",
                 ));
             }
         }
@@ -134,12 +136,12 @@ CREATE TABLE IF NOT EXISTS mfm_events (
 
     async fn read_head_for_update(
         tx: &Transaction<'_>,
-        run_id: RunId,
+        stream_id: &StreamId,
     ) -> Result<u64, StorageError> {
         let row = tx
             .query_one(
-                "SELECT head_seq FROM mfm_runs WHERE run_id = $1 FOR UPDATE",
-                &[&run_id.0],
+                "SELECT head_seq FROM mfm_streams WHERE stream_id = $1 FOR UPDATE",
+                &[&stream_id.as_str()],
             )
             .await
             .map_err(|_| Self::other("pg_query_failed", "failed to read head_seq"))?;
@@ -150,121 +152,133 @@ CREATE TABLE IF NOT EXISTS mfm_events (
 }
 
 #[async_trait]
-impl EventStore for PostgresEventStore {
-    async fn head_seq(&self, run_id: RunId) -> Result<u64, StorageError> {
+impl StreamStore for PostgresEventStore {
+    async fn head_seq(&self, stream_id: &StreamId) -> Result<u64, StorageError> {
         let row = self
             .client
             .lock()
             .await
             .query_opt(
-                "SELECT head_seq FROM mfm_runs WHERE run_id = $1",
-                &[&run_id.0],
+                "SELECT head_seq FROM mfm_streams WHERE stream_id = $1",
+                &[&stream_id.as_str()],
             )
             .await
             .map_err(|_| Self::other("pg_query_failed", "failed to query head_seq"))?;
 
         let Some(row) = row else {
-            debug!(run_id = %run_id.0, head_seq = 0, "head_seq resolved");
+            debug!(stream_id = %stream_id, head_seq = 0, "head_seq resolved");
             return Ok(0);
         };
 
         let head: i64 = row.get(0);
-        debug!(run_id = %run_id.0, head_seq = head.max(0) as u64, "head_seq resolved");
+        debug!(stream_id = %stream_id, head_seq = head.max(0) as u64, "head_seq resolved");
         Ok(head.max(0) as u64)
     }
 
-    async fn append(
+    async fn append(&self, append: StreamAppend) -> Result<u64, StorageError> {
+        let result = self.append_batch(vec![append.clone()]).await?;
+        result.head_for(&append.stream_id).ok_or_else(|| {
+            Self::other(
+                "pg_append_failed",
+                "append_batch result did not contain the appended stream head",
+            )
+        })
+    }
+
+    async fn append_batch(
         &self,
-        run_id: RunId,
-        expected_seq: u64,
-        events: Vec<EventEnvelope>,
-    ) -> Result<u64, StorageError> {
-        Self::validate_append(run_id, expected_seq, &events)?;
-        debug!(
-            run_id = %run_id.0,
-            expected_seq,
-            event_count = events.len(),
-            "append called"
-        );
+        mut appends: Vec<StreamAppend>,
+    ) -> Result<AppendBatchResult, StorageError> {
+        Self::validate_batch(&appends)?;
+        appends.sort_by(|left, right| left.stream_id.as_str().cmp(right.stream_id.as_str()));
+
+        debug!(stream_count = appends.len(), "append_batch called");
 
         let mut client = self.client.lock().await;
-
         let tx = client
             .transaction()
             .await
             .map_err(|_| Self::other("pg_tx_failed", "failed to start transaction"))?;
 
-        tx.execute(
-            "INSERT INTO mfm_runs (run_id, head_seq) VALUES ($1, 0) ON CONFLICT (run_id) DO NOTHING",
-            &[&run_id.0],
-        )
-        .await
-        .map_err(|_| Self::other("pg_insert_failed", "failed to insert run"))?;
-
-        let head = Self::read_head_for_update(&tx, run_id).await?;
-        if head != expected_seq {
-            warn!(
-                run_id = %run_id.0,
-                expected_seq,
-                actual_head = head,
-                "append concurrency conflict"
-            );
-            return Err(Self::concurrency("head seq did not match expected seq"));
-        }
-
-        for e in events.iter() {
-            let event_json = serde_json::to_value(&e.event)
-                .map_err(|_| Self::other("pg_serde_failed", "failed to serialize event"))?;
-
+        for append in &appends {
             tx.execute(
-                "INSERT INTO mfm_events (run_id, seq, ts_millis, event) VALUES ($1, $2, $3, $4)",
-                &[
-                    &run_id.0,
-                    &(e.seq as i64),
-                    &e.ts_millis.map(|v| v as i64),
-                    &event_json,
-                ],
+                "INSERT INTO mfm_streams (stream_id, head_seq) VALUES ($1, 0) ON CONFLICT (stream_id) DO NOTHING",
+                &[&append.stream_id.as_str()],
             )
             .await
-            .map_err(|_| Self::other("pg_insert_failed", "failed to insert event"))?;
+            .map_err(|_| Self::other("pg_insert_failed", "failed to insert stream"))?;
         }
 
-        let new_head = expected_seq + (events.len() as u64);
-        tx.execute(
-            "UPDATE mfm_runs SET head_seq = $2 WHERE run_id = $1",
-            &[&run_id.0, &(new_head as i64)],
-        )
-        .await
-        .map_err(|_| Self::other("pg_update_failed", "failed to update head_seq"))?;
+        for append in &appends {
+            let head = Self::read_head_for_update(&tx, &append.stream_id).await?;
+            if head != append.expected_seq {
+                warn!(
+                    stream_id = %append.stream_id,
+                    expected_seq = append.expected_seq,
+                    actual_head = head,
+                    "append_batch concurrency conflict"
+                );
+                return Err(Self::concurrency("head seq did not match expected seq"));
+            }
+        }
+
+        let mut stream_heads = Vec::with_capacity(appends.len());
+        for append in appends {
+            let mut seq = append.expected_seq + 1;
+            for record in append.records {
+                tx.execute(
+                    "INSERT INTO mfm_stream_records (stream_id, seq, ts_millis, kind, payload) VALUES ($1, $2, $3, $4, $5)",
+                    &[
+                        &append.stream_id.as_str(),
+                        &(seq as i64),
+                        &record.ts_millis.map(|value| value as i64),
+                        &record.kind,
+                        &record.payload,
+                    ],
+                )
+                .await
+                .map_err(|_| Self::other("pg_insert_failed", "failed to insert stream record"))?;
+                seq += 1;
+            }
+
+            let new_head = append.expected_seq + (seq - append.expected_seq - 1);
+            tx.execute(
+                "UPDATE mfm_streams SET head_seq = $2 WHERE stream_id = $1",
+                &[&append.stream_id.as_str(), &(new_head as i64)],
+            )
+            .await
+            .map_err(|_| Self::other("pg_update_failed", "failed to update head_seq"))?;
+            stream_heads.push((append.stream_id, new_head));
+        }
 
         tx.commit()
             .await
             .map_err(|_| Self::other("pg_tx_failed", "failed to commit transaction"))?;
-        debug!(run_id = %run_id.0, new_head, "append committed");
+        debug!(stream_count = stream_heads.len(), "append_batch committed");
 
-        Ok(new_head)
+        Ok(AppendBatchResult { stream_heads })
     }
 
     async fn read_range(
         &self,
-        run_id: RunId,
+        stream_id: &StreamId,
         from_seq: u64,
         to_seq: Option<u64>,
-    ) -> Result<Vec<EventEnvelope>, StorageError> {
+    ) -> Result<Vec<StreamRecord>, StorageError> {
         let client = self.client.lock().await;
         let from = from_seq.max(1) as i64;
         let rows = if let Some(to) = to_seq {
             client
                 .query(
-                    "SELECT seq, ts_millis, event FROM mfm_events WHERE run_id = $1 AND seq >= $2 AND seq <= $3 ORDER BY seq ASC",
-                    &[&run_id.0, &from, &(to as i64)],
+                    "SELECT seq, ts_millis, kind, payload FROM mfm_stream_records WHERE stream_id = $1 AND seq >= $2 AND seq <= $3 ORDER BY seq ASC",
+                    &[&stream_id.as_str(), &from, &(to as i64)],
                 )
                 .await
         } else {
             client
                 .query(
-                    "SELECT seq, ts_millis, event FROM mfm_events WHERE run_id = $1 AND seq >= $2 ORDER BY seq ASC",
-                    &[&run_id.0, &from],
+                    "SELECT seq, ts_millis, kind, payload FROM mfm_stream_records WHERE stream_id = $1 AND seq >= $2 ORDER BY seq ASC",
+                    &[&stream_id.as_str(), &from],
                 )
                 .await
         }
@@ -274,23 +288,22 @@ impl EventStore for PostgresEventStore {
         for row in rows {
             let seq: i64 = row.get(0);
             let ts_millis: Option<i64> = row.get(1);
-            let event_json: serde_json::Value = row.get(2);
+            let kind: String = row.get(2);
+            let payload: serde_json::Value = row.get(3);
 
-            let event: Event = serde_json::from_value(event_json)
-                .map_err(|_| Self::other("pg_serde_failed", "failed to deserialize event"))?;
-
-            out.push(EventEnvelope {
-                run_id,
+            out.push(StreamRecord {
+                stream_id: stream_id.clone(),
                 seq: seq.max(0) as u64,
                 ts_millis: ts_millis.map(|v| v.max(0) as u64),
-                event,
+                kind,
+                payload,
             });
         }
         debug!(
-            run_id = %run_id.0,
+            stream_id = %stream_id,
             from_seq,
             to_seq = ?to_seq,
-            event_count = out.len(),
+            record_count = out.len(),
             "read_range completed"
         );
 

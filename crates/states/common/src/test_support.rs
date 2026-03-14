@@ -15,10 +15,15 @@ use mfm_machine::config::{
 use mfm_machine::context::DynContext;
 use mfm_machine::engine::{ExecutionEngine, RunResult, Stores};
 use mfm_machine::errors::{ContextError, ErrorCategory, ErrorInfo, StorageError};
-use mfm_machine::events::{Event, EventEnvelope, KernelEvent};
+use mfm_machine::events::{
+    event_envelopes_from_stream_records, new_stream_record_for_event, Event, EventEnvelope,
+    KernelEvent,
+};
 use mfm_machine::hashing::artifact_id_for_bytes;
 use mfm_machine::ids::{ArtifactId, ContextKey, ErrorCode, RunId};
-use mfm_machine::stores::{ArtifactKind, ArtifactStore, EventStore};
+use mfm_machine::stores::{
+    ArtifactKind, ArtifactStore, StreamAppend, StreamId, StreamRecord, StreamStore,
+};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::op::{DynOperation, OperationRegistry};
@@ -126,7 +131,7 @@ pub async fn start_pipeline_with_defaults(
         .start_pipeline(
             engine,
             Stores {
-                events: Arc::clone(&stores.events),
+                streams: Arc::clone(&stores.streams),
                 artifacts: Arc::clone(&stores.artifacts),
             },
             registry,
@@ -155,7 +160,7 @@ pub async fn resume_pipeline_with_defaults(
         .resume(
             engine,
             Stores {
-                events: Arc::clone(&stores.events),
+                streams: Arc::clone(&stores.streams),
                 artifacts: Arc::clone(&stores.artifacts),
             },
             registry,
@@ -223,51 +228,151 @@ fn lock_map<'a, T>(mutex: &'a Mutex<T>) -> Result<MutexGuard<'a, T>, StorageErro
     })
 }
 
-/// In-memory [`EventStore`] used by tests.
+/// In-memory [`StreamStore`] used by tests.
 #[derive(Clone, Default)]
 pub struct MemEventStore {
-    inner: Arc<Mutex<HashMap<RunId, Vec<EventEnvelope>>>>,
+    inner: Arc<Mutex<HashMap<StreamId, Vec<StreamRecord>>>>,
 }
 
-#[async_trait]
-impl EventStore for MemEventStore {
-    async fn head_seq(&self, run_id: RunId) -> Result<u64, StorageError> {
-        let inner = lock_map(&self.inner)?;
-        Ok(inner
-            .get(&run_id)
-            .and_then(|v| v.last())
-            .map(|e| e.seq)
-            .unwrap_or(0))
+impl MemEventStore {
+    /// Reads one run stream and decodes it back into machine event envelopes.
+    pub async fn read_run_stream(
+        &self,
+        run_id: RunId,
+        from_seq: u64,
+        to_seq: Option<u64>,
+    ) -> Result<Vec<EventEnvelope>, StorageError> {
+        let records = self
+            .read_range(&StreamId::run(run_id), from_seq, to_seq)
+            .await?;
+        event_envelopes_from_stream_records(run_id, records)
     }
 
-    async fn append(
+    /// Appends machine event envelopes into one `run:*` stream.
+    pub async fn append_run_events(
         &self,
         run_id: RunId,
         expected_seq: u64,
         events: Vec<EventEnvelope>,
     ) -> Result<u64, StorageError> {
+        let mut records = Vec::with_capacity(events.len());
+        for (idx, envelope) in events.into_iter().enumerate() {
+            if envelope.run_id != run_id {
+                return Err(StorageError::Other(storage_info(
+                    "machine_event_stream_invalid",
+                    "event run_id did not match append run_id",
+                )));
+            }
+            let want_seq = expected_seq + (idx as u64) + 1;
+            if envelope.seq != want_seq {
+                return Err(StorageError::Other(storage_info(
+                    "machine_event_stream_invalid",
+                    "event seq did not match expected contiguous sequence",
+                )));
+            }
+            records.push(new_stream_record_for_event(
+                envelope.event,
+                envelope.ts_millis,
+            )?);
+        }
+
+        self.append(StreamAppend::new(
+            StreamId::run(run_id),
+            expected_seq,
+            records,
+        ))
+        .await
+    }
+}
+
+#[async_trait]
+impl StreamStore for MemEventStore {
+    async fn head_seq(&self, stream_id: &StreamId) -> Result<u64, StorageError> {
+        let inner = lock_map(&self.inner)?;
+        Ok(inner
+            .get(stream_id)
+            .and_then(|v| v.last())
+            .map(|record| record.seq)
+            .unwrap_or(0))
+    }
+
+    async fn append(&self, append: StreamAppend) -> Result<u64, StorageError> {
         let mut inner = lock_map(&self.inner)?;
-        let stream = inner.entry(run_id).or_default();
-        let head = stream.last().map(|e| e.seq).unwrap_or(0);
-        if head != expected_seq {
+        let stream = inner.entry(append.stream_id.clone()).or_default();
+        let head = stream.last().map(|record| record.seq).unwrap_or(0);
+        if head != append.expected_seq {
             return Err(StorageError::Concurrency(storage_info(
                 "event_store_concurrency",
                 "head seq did not match expected seq",
             )));
         }
 
-        stream.extend(events);
-        Ok(stream.last().map(|e| e.seq).unwrap_or(head))
+        let mut next_seq = append.expected_seq + 1;
+        for record in append.records {
+            stream.push(StreamRecord {
+                stream_id: append.stream_id.clone(),
+                seq: next_seq,
+                ts_millis: record.ts_millis,
+                kind: record.kind,
+                payload: record.payload,
+            });
+            next_seq += 1;
+        }
+        Ok(stream.last().map(|record| record.seq).unwrap_or(head))
+    }
+
+    async fn append_batch(
+        &self,
+        appends: Vec<StreamAppend>,
+    ) -> Result<mfm_machine::stores::AppendBatchResult, StorageError> {
+        let mut inner = lock_map(&self.inner)?;
+        let mut stream_heads = Vec::with_capacity(appends.len());
+
+        for append in &appends {
+            let head = inner
+                .get(&append.stream_id)
+                .and_then(|records| records.last())
+                .map(|record| record.seq)
+                .unwrap_or(0);
+            if head != append.expected_seq {
+                return Err(StorageError::Concurrency(storage_info(
+                    "event_store_concurrency",
+                    "head seq did not match expected seq",
+                )));
+            }
+        }
+
+        for append in appends {
+            let stream = inner.entry(append.stream_id.clone()).or_default();
+            let mut next_seq = append.expected_seq + 1;
+            for record in append.records {
+                stream.push(StreamRecord {
+                    stream_id: append.stream_id.clone(),
+                    seq: next_seq,
+                    ts_millis: record.ts_millis,
+                    kind: record.kind,
+                    payload: record.payload,
+                });
+                next_seq += 1;
+            }
+            let head = stream
+                .last()
+                .map(|record| record.seq)
+                .unwrap_or(append.expected_seq);
+            stream_heads.push((append.stream_id, head));
+        }
+
+        Ok(mfm_machine::stores::AppendBatchResult { stream_heads })
     }
 
     async fn read_range(
         &self,
-        run_id: RunId,
+        stream_id: &StreamId,
         from_seq: u64,
         to_seq: Option<u64>,
-    ) -> Result<Vec<EventEnvelope>, StorageError> {
+    ) -> Result<Vec<StreamRecord>, StorageError> {
         let inner = lock_map(&self.inner)?;
-        let Some(stream) = inner.get(&run_id) else {
+        let Some(stream) = inner.get(stream_id) else {
             return Ok(Vec::new());
         };
         let from = from_seq.max(1);
@@ -309,7 +414,7 @@ impl ArtifactStore for MemArtifactStore {
 /// Returns a [`Stores`] bundle backed by in-memory event and artifact stores.
 pub fn in_memory_stores() -> Stores {
     Stores {
-        events: Arc::new(MemEventStore::default()),
+        streams: Arc::new(MemEventStore::default()),
         artifacts: Arc::new(MemArtifactStore::default()),
     }
 }

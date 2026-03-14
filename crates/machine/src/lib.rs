@@ -106,7 +106,7 @@ pub mod ids {
     }
 
     impl IdValidationError {
-        fn new(kind: &'static str, value: impl Into<String>) -> Self {
+        pub(crate) fn new(kind: &'static str, value: impl Into<String>) -> Self {
             Self {
                 kind,
                 value: value.into(),
@@ -821,8 +821,9 @@ pub mod context {
 /// Event types emitted by the engine and by state handlers during a run.
 pub mod events {
     use super::*;
-    use crate::errors::StateError;
+    use crate::errors::{ErrorCategory, ErrorInfo, StateError, StorageError};
     use crate::ids::{ArtifactId, OpId, OpPath, RunId, StateId};
+    use crate::stores::{NewStreamRecord, StreamRecord};
 
     /// Recommended stable `DomainEvent.name` values.
     pub const DOMAIN_EVENT_FACT_RECORDED: &str = "fact_recorded";
@@ -834,6 +835,8 @@ pub mod events {
     pub const DOMAIN_EVENT_CHILD_RUN_SPAWNED: &str = "child_run_spawned";
     /// Recommended `DomainEvent.name` for child-run completion notifications.
     pub const DOMAIN_EVENT_CHILD_RUN_COMPLETED: &str = "child_run_completed";
+    /// Stream record kind used for machine run events persisted in `run:*` streams.
+    pub const STREAM_RECORD_KIND_MACHINE_EVENT: &str = "machine_event";
 
     /// Run completion status.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -936,6 +939,83 @@ pub mod events {
 
         /// Event payload stored at this sequence number.
         pub event: Event,
+    }
+
+    fn stream_decode_error(code: &'static str, message: &'static str) -> StorageError {
+        StorageError::Corruption(ErrorInfo {
+            code: crate::ids::ErrorCode(code.to_string()),
+            category: ErrorCategory::Storage,
+            retryable: false,
+            message: message.to_string(),
+            details: None,
+        })
+    }
+
+    fn stream_encode_error(code: &'static str, message: &'static str) -> StorageError {
+        StorageError::Other(ErrorInfo {
+            code: crate::ids::ErrorCode(code.to_string()),
+            category: ErrorCategory::Storage,
+            retryable: false,
+            message: message.to_string(),
+            details: None,
+        })
+    }
+
+    /// Encodes a machine event into a generic stream record for `run:*` streams.
+    pub fn new_stream_record_for_event(
+        event: Event,
+        ts_millis: Option<u64>,
+    ) -> Result<NewStreamRecord, StorageError> {
+        let payload = serde_json::to_value(event).map_err(|_| {
+            stream_encode_error(
+                "machine_event_encode_failed",
+                "failed to encode machine event payload",
+            )
+        })?;
+
+        Ok(NewStreamRecord {
+            ts_millis,
+            kind: STREAM_RECORD_KIND_MACHINE_EVENT.to_string(),
+            payload,
+        })
+    }
+
+    /// Decodes one generic stream record from a `run:*` stream into an [`EventEnvelope`].
+    pub fn event_envelope_from_stream_record(
+        run_id: RunId,
+        record: StreamRecord,
+    ) -> Result<EventEnvelope, StorageError> {
+        if record.kind != STREAM_RECORD_KIND_MACHINE_EVENT {
+            return Err(stream_decode_error(
+                "machine_event_record_kind_mismatch",
+                "unexpected record kind in run event stream",
+            ));
+        }
+
+        let event = serde_json::from_value::<Event>(record.payload).map_err(|_| {
+            stream_decode_error(
+                "machine_event_decode_failed",
+                "failed to decode machine event payload",
+            )
+        })?;
+
+        Ok(EventEnvelope {
+            run_id,
+            seq: record.seq,
+            ts_millis: record.ts_millis,
+            event,
+        })
+    }
+
+    /// Decodes a run stream slice into the event envelopes expected by machine runtime logic.
+    pub fn event_envelopes_from_stream_records(
+        run_id: RunId,
+        records: Vec<StreamRecord>,
+    ) -> Result<Vec<EventEnvelope>, StorageError> {
+        records
+            .into_iter()
+            .map(|record| event_envelope_from_stream_record(run_id, record))
+            .collect()
     }
 
     /// Recommended standard domain event payloads (not required by engine).
@@ -1241,8 +1321,8 @@ pub mod plan {
 pub mod stores {
     use super::*;
     use crate::errors::StorageError;
-    use crate::events::EventEnvelope;
-    use crate::ids::{ArtifactId, RunId};
+    use crate::ids::{is_valid_id_segment, ArtifactId, RunId};
+    use std::fmt;
 
     /// Artifact classification used for retention, validation, and output handling.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1263,27 +1343,183 @@ pub mod stores {
         Other(String),
     }
 
-    /// Append-only event store with optimistic concurrency.
+    /// Stable identifier for one append-only stream.
+    ///
+    /// Format:
+    /// - `<family>:<key>`
+    /// - `family` must satisfy the same identifier contract as [`crate::ids::OpId`]
+    /// - `key` must be non-empty and must not contain ASCII control characters or whitespace
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(try_from = "String", into = "String")]
+    pub struct StreamId(String);
+
+    impl StreamId {
+        /// Creates a stream identifier after validating the storage naming contract.
+        pub fn new(value: impl Into<String>) -> Result<Self, crate::ids::IdValidationError> {
+            let value = value.into();
+            let Some((family, key)) = value.split_once(':') else {
+                return Err(crate::ids::IdValidationError::new("stream_id", value));
+            };
+            if !is_valid_id_segment(family)
+                || key.is_empty()
+                || key
+                    .chars()
+                    .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
+            {
+                return Err(crate::ids::IdValidationError::new("stream_id", value));
+            }
+            Ok(Self(value))
+        }
+
+        /// Creates a [`StreamId`] and panics if the value is invalid.
+        pub fn must_new(value: impl Into<String>) -> Self {
+            Self::new(value).expect("stream id must satisfy <family>:<key>")
+        }
+
+        /// Returns the stream family prefix.
+        pub fn family(&self) -> &str {
+            self.0
+                .split_once(':')
+                .map(|(family, _)| family)
+                .unwrap_or("")
+        }
+
+        /// Returns the stream key suffix.
+        pub fn key(&self) -> &str {
+            self.0.split_once(':').map(|(_, key)| key).unwrap_or("")
+        }
+
+        /// Returns the validated stream identifier as a borrowed string slice.
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+
+        /// Returns the canonical stream identifier for one machine run.
+        pub fn run(run_id: RunId) -> Self {
+            Self(format!("run:{}", run_id.0))
+        }
+    }
+
+    impl TryFrom<String> for StreamId {
+        type Error = crate::ids::IdValidationError;
+
+        fn try_from(value: String) -> Result<Self, Self::Error> {
+            Self::new(value)
+        }
+    }
+
+    impl TryFrom<&str> for StreamId {
+        type Error = crate::ids::IdValidationError;
+
+        fn try_from(value: &str) -> Result<Self, Self::Error> {
+            Self::new(value)
+        }
+    }
+
+    impl From<StreamId> for String {
+        fn from(value: StreamId) -> Self {
+            value.0
+        }
+    }
+
+    impl fmt::Display for StreamId {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    /// Persisted record in an append-only stream.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct StreamRecord {
+        /// Stream to which the record belongs.
+        pub stream_id: StreamId,
+        /// Monotonic per-stream sequence number.
+        pub seq: u64,
+        /// Informational timestamp carried with the record, if any.
+        pub ts_millis: Option<u64>,
+        /// Stable record kind discriminator scoped by the caller.
+        pub kind: String,
+        /// JSON payload for the record.
+        pub payload: serde_json::Value,
+    }
+
+    /// Record to append into a stream.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct NewStreamRecord {
+        /// Informational timestamp carried with the record, if any.
+        pub ts_millis: Option<u64>,
+        /// Stable record kind discriminator scoped by the caller.
+        pub kind: String,
+        /// JSON payload for the record.
+        pub payload: serde_json::Value,
+    }
+
+    /// Atomic compare-and-append request for one stream.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct StreamAppend {
+        /// Stream to append to.
+        pub stream_id: StreamId,
+        /// Expected current head sequence for optimistic concurrency.
+        pub expected_seq: u64,
+        /// Records to append in order.
+        pub records: Vec<NewStreamRecord>,
+    }
+
+    impl StreamAppend {
+        /// Creates a stream append request.
+        pub fn new(stream_id: StreamId, expected_seq: u64, records: Vec<NewStreamRecord>) -> Self {
+            Self {
+                stream_id,
+                expected_seq,
+                records,
+            }
+        }
+    }
+
+    /// Head sequences returned by an atomic multi-stream append.
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct AppendBatchResult {
+        /// Final head sequence for each stream touched by the batch.
+        pub stream_heads: Vec<(StreamId, u64)>,
+    }
+
+    impl AppendBatchResult {
+        /// Returns the recorded head for `stream_id`, if present.
+        pub fn head_for(&self, stream_id: &StreamId) -> Option<u64> {
+            self.stream_heads.iter().find_map(
+                |(id, head)| {
+                    if id == stream_id {
+                        Some(*head)
+                    } else {
+                        None
+                    }
+                },
+            )
+        }
+    }
+
+    /// Append-only stream store with optimistic concurrency.
     #[async_trait]
-    pub trait EventStore: Send + Sync {
-        /// Returns the current head sequence for `run_id`.
-        async fn head_seq(&self, run_id: RunId) -> Result<u64, StorageError>;
+    pub trait StreamStore: Send + Sync {
+        /// Returns the current head sequence for `stream_id`.
+        async fn head_seq(&self, stream_id: &StreamId) -> Result<u64, StorageError>;
 
-        /// Appends events atomically if `expected_seq` matches the current head.
-        async fn append(
+        /// Appends records atomically if `expected_seq` matches the current head.
+        async fn append(&self, append: StreamAppend) -> Result<u64, StorageError>;
+
+        /// Appends records to multiple streams atomically.
+        async fn append_batch(
             &self,
-            run_id: RunId,
-            expected_seq: u64,
-            events: Vec<EventEnvelope>,
-        ) -> Result<u64, StorageError>;
+            appends: Vec<StreamAppend>,
+        ) -> Result<AppendBatchResult, StorageError>;
 
-        /// Reads a contiguous event range starting at `from_seq`.
+        /// Reads a contiguous record range starting at `from_seq`.
         async fn read_range(
             &self,
-            run_id: RunId,
+            stream_id: &StreamId,
             from_seq: u64,
             to_seq: Option<u64>,
-        ) -> Result<Vec<EventEnvelope>, StorageError>;
+        ) -> Result<Vec<StreamRecord>, StorageError>;
     }
 
     /// Immutable, content-addressed artifact store.
@@ -1307,7 +1543,7 @@ pub mod engine {
     use crate::errors::RunError;
     use crate::ids::{ArtifactId, RunId};
     use crate::plan::ExecutionPlan;
-    use crate::stores::{ArtifactStore, EventStore};
+    use crate::stores::{ArtifactStore, StreamStore};
 
     /// Current run phase (observability).
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1366,8 +1602,8 @@ pub mod engine {
     /// without threading each store separately through every engine constructor.
     #[derive(Clone)]
     pub struct Stores {
-        /// Event store used for append-only kernel and domain events.
-        pub events: Arc<dyn EventStore>,
+        /// Stream store used for append-only run events and other stream families.
+        pub streams: Arc<dyn StreamStore>,
         /// Artifact store used for manifests, snapshots, facts, and outputs.
         pub artifacts: Arc<dyn ArtifactStore>,
     }

@@ -2169,6 +2169,7 @@ name = "mfm-machine-test-support"
 version = "0.1.0"
 dependencies = [
  "mfm-machine",
+ "serde_json",
  "tracing-subscriber",
  "uuid",
 ]

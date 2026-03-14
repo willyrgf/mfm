@@ -32,7 +32,7 @@ use mfm_app::{
     RunsEventsQuery, RunsStartRequest,
 };
 use mfm_machine::ids::{ArtifactId, RunId};
-use mfm_machine::stores::{ArtifactStore, EventStore};
+use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
@@ -134,7 +134,7 @@ pub async fn make_default_artifact_store() -> Result<Arc<dyn ArtifactStore>, Api
 }
 
 /// Builds the default event store used by the REST API.
-pub async fn make_default_event_store() -> Result<Arc<dyn EventStore>, ApiError> {
+pub async fn make_default_event_store() -> Result<Arc<dyn StreamStore>, ApiError> {
     mfm_app::make_default_event_store()
         .await
         .map_err(Into::into)
@@ -151,7 +151,7 @@ pub struct AppState {
     /// Engine bundle used for planning and execution.
     pub bundle: EngineBundle,
     /// Event store used for run queries.
-    pub events: Arc<dyn EventStore>,
+    pub events: Arc<dyn StreamStore>,
     /// Artifact store used for snapshot and output retrieval.
     pub artifacts: Arc<dyn ArtifactStore>,
 }
@@ -243,7 +243,7 @@ async fn ready(State(state): State<RouterState>) -> Result<Json<serde_json::Valu
     state
         .app
         .events
-        .head_seq(RunId(uuid::Uuid::nil()))
+        .head_seq(&StreamId::run(RunId(uuid::Uuid::nil())))
         .await
         .map_err(|_| {
             ApiError::new(

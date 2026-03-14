@@ -19,12 +19,12 @@ use crate::events::RunStatus;
 use crate::ids::{ArtifactId, ErrorCode, OpId, RunId};
 use crate::io::IoCall;
 use crate::live_io::{FactIndex, LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
-use crate::stores::ArtifactKind;
+use crate::stores::{ArtifactKind, StreamId};
 
 use super::{
-    invalid_plan, next_attempt, read_manifest, read_run_history, run_states, storage_not_found,
-    topological_order, validate_execution_mode, validate_start_run_contract, EngineFailpoints,
-    EventWriter, PlanResolver, SharedEventWriter,
+    invalid_plan, next_attempt, read_manifest, read_run_history, read_run_stream, run_states,
+    run_stream_head, storage_not_found, topological_order, validate_execution_mode,
+    validate_start_run_contract, EngineFailpoints, EventWriter, PlanResolver, SharedEventWriter,
 };
 
 const NAMESPACE_CHILD_RUN_SPAWN: &str = "machine.child_run.spawn";
@@ -89,11 +89,7 @@ impl ChildRunEngine {
             )));
         }
 
-        let head = stores
-            .events
-            .head_seq(run_id)
-            .await
-            .map_err(RunError::Storage)?;
+        let head = run_stream_head(&stores, run_id).await?;
         if head != 0 {
             return Err(RunError::Storage(StorageError::Concurrency(super::info(
                 "run_already_exists",
@@ -107,7 +103,7 @@ impl ChildRunEngine {
             write_full_snapshot_value(stores.artifacts.as_ref(), initial_snapshot).await?;
 
         let writer: SharedEventWriter = Arc::new(Mutex::new(
-            EventWriter::new(Arc::clone(&stores.events), run_id)
+            EventWriter::new(Arc::clone(&stores.streams), run_id)
                 .await
                 .map_err(RunError::Storage)?,
         ));
@@ -140,11 +136,7 @@ impl ChildRunEngine {
     }
 
     async fn resume(&self, stores: Stores, run_id: RunId) -> Result<RunResult, RunError> {
-        let head = stores
-            .events
-            .head_seq(run_id)
-            .await
-            .map_err(RunError::Storage)?;
+        let head = run_stream_head(&stores, run_id).await?;
         if head == 0 {
             return Err(RunError::Storage(storage_not_found(
                 "run_not_found",
@@ -152,11 +144,7 @@ impl ChildRunEngine {
             )));
         }
 
-        let stream = stores
-            .events
-            .read_range(run_id, 1, None)
-            .await
-            .map_err(RunError::Storage)?;
+        let stream = read_run_stream(&stores, run_id).await?;
 
         let facts = FactIndex::from_event_stream(&stream);
         let history = read_run_history(run_id, &stream)?;
@@ -193,7 +181,7 @@ impl ChildRunEngine {
         }
 
         let writer: SharedEventWriter = Arc::new(Mutex::new(
-            EventWriter::new(Arc::clone(&stores.events), run_id)
+            EventWriter::new(Arc::clone(&stores.streams), run_id)
                 .await
                 .map_err(RunError::Storage)?,
         ));
@@ -570,8 +558,8 @@ impl ChildRunLiveIoTransport {
         let head = self
             .env
             .stores
-            .events
-            .head_seq(child_run_id)
+            .streams
+            .head_seq(&StreamId::run(child_run_id))
             .await
             .map_err(|_| {
                 child_io_error(
@@ -623,17 +611,25 @@ impl ChildRunLiveIoTransport {
                 })
                 .await;
         } else {
-            let stream = self
+            let records = self
                 .env
                 .stores
-                .events
-                .read_range(child_run_id, 1, None)
+                .streams
+                .read_range(&StreamId::run(child_run_id), 1, None)
                 .await
                 .map_err(|_| {
                     child_io_error(
                         CODE_CHILD_RUN_ENGINE_FAILED,
                         ErrorCategory::Storage,
                         "failed to read child run event stream",
+                    )
+                })?;
+            let stream = crate::events::event_envelopes_from_stream_records(child_run_id, records)
+                .map_err(|_| {
+                    child_io_error(
+                        CODE_CHILD_RUN_ENGINE_FAILED,
+                        ErrorCategory::Storage,
+                        "invalid child run event stream",
                     )
                 })?;
             let history = read_run_history(child_run_id, &stream).map_err(|_| {

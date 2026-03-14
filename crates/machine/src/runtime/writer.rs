@@ -6,27 +6,30 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::errors::{RunError, StorageError};
-use crate::events::{Event, EventEnvelope, KernelEvent};
+use crate::events::{new_stream_record_for_event, Event, KernelEvent};
 use crate::ids::RunId;
-use crate::stores::EventStore;
+use crate::stores::{StreamAppend, StreamId, StreamStore};
 
 pub(super) type SharedEventWriter = Arc<Mutex<EventWriter>>;
 
 pub(super) struct EventWriter {
     run_id: RunId,
-    store: Arc<dyn EventStore>,
+    stream_id: StreamId,
+    store: Arc<dyn StreamStore>,
     next_seq: u64,
 }
 
 impl EventWriter {
     pub(super) async fn new(
-        store: Arc<dyn EventStore>,
+        store: Arc<dyn StreamStore>,
         run_id: RunId,
     ) -> Result<Self, StorageError> {
-        let head = store.head_seq(run_id).await?;
+        let stream_id = StreamId::run(run_id);
+        let head = store.head_seq(&stream_id).await?;
         debug!(run_id = %run_id.0, head_seq = head, "initialized event writer");
         Ok(Self {
             run_id,
+            stream_id,
             store,
             next_seq: head + 1,
         })
@@ -44,19 +47,18 @@ impl EventWriter {
             event_count = events.len(),
             "appending events"
         );
-        let mut envelopes = Vec::with_capacity(events.len());
-        for (idx, event) in events.into_iter().enumerate() {
-            envelopes.push(EventEnvelope {
-                run_id: self.run_id,
-                seq: expected_seq + (idx as u64) + 1,
-                ts_millis: None,
-                event,
-            });
+        let mut records = Vec::with_capacity(events.len());
+        for event in events {
+            records.push(new_stream_record_for_event(event, None)?);
         }
 
         let head = self
             .store
-            .append(self.run_id, expected_seq, envelopes)
+            .append(StreamAppend::new(
+                self.stream_id.clone(),
+                expected_seq,
+                records,
+            ))
             .await?;
         debug!(run_id = %self.run_id.0, new_head = head, "append completed");
         self.next_seq = head + 1;

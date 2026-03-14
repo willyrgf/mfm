@@ -24,7 +24,7 @@ use mfm_machine::live_io::{
     FactIndex, LiveIo, LiveIoEnv, LiveIoTransportFactory, NoopFactRecorder,
 };
 use mfm_machine::replay_io::ReplayIo;
-use mfm_machine::stores::{ArtifactStore, EventStore};
+use mfm_machine::stores::{ArtifactStore, StreamStore};
 
 #[derive(Clone)]
 enum StubBehavior {
@@ -136,12 +136,15 @@ fn build_transport(
         ..EvmJsonRpcHttpConfig::default()
     });
 
-    let events: Arc<dyn EventStore> = Arc::new(MemEventStore::new());
+    let events: Arc<dyn StreamStore> = Arc::new(MemEventStore::new());
     let temp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(temp.path()));
 
     factory.make(LiveIoEnv {
-        stores: Stores { events, artifacts },
+        stores: Stores {
+            streams: events,
+            artifacts,
+        },
         run_id: RunId(uuid::Uuid::new_v4()),
         state_id: StateId::must_new("parity.evm_pool.transport".to_string()),
         attempt: 0,
