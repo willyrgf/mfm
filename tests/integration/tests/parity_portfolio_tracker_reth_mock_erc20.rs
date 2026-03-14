@@ -18,8 +18,9 @@ use mfm_machine::config::{
 use mfm_machine::context::DynContext;
 use mfm_machine::engine::{RunPhase, Stores};
 use mfm_machine::errors::ContextError;
-use mfm_machine::ids::{ContextKey, OpId};
-use mfm_machine::stores::{ArtifactStore, StreamStore};
+use mfm_machine::events::{event_envelopes_from_stream_records, Event, KernelEvent};
+use mfm_machine::ids::{ContextKey, OpId, RunId};
+use mfm_machine::stores::{ArtifactStore, StreamId, StreamStore};
 use mfm_sdk::ids::{MachineId, StepId};
 use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
@@ -256,6 +257,89 @@ async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> Postgr
     );
 }
 
+fn summarize_exec_error_details(details: Option<&serde_json::Value>) -> Option<String> {
+    let obj = details?.as_object()?;
+    let mut parts = Vec::new();
+
+    if let Some(program_path) = obj.get("program_path").and_then(|v| v.as_str()) {
+        parts.push(format!("program_path={program_path}"));
+    }
+    if let Some(timeout_ms) = obj.get("timeout_ms").and_then(|v| v.as_u64()) {
+        parts.push(format!("timeout_ms={timeout_ms}"));
+    }
+    if let Some(exit_code) = obj.get("exit_code").and_then(|v| v.as_i64()) {
+        parts.push(format!("exit_code={exit_code}"));
+    }
+    if let Some(signal) = obj.get("signal").and_then(|v| v.as_i64()) {
+        parts.push(format!("signal={signal}"));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+async fn run_failure_diagnostics(streams: Arc<dyn StreamStore>, run_id: RunId) -> String {
+    let stream = match streams
+        .read_range(&StreamId::run(run_id), 1, None)
+        .await
+        .and_then(|records| event_envelopes_from_stream_records(run_id, records))
+    {
+        Ok(stream) => stream,
+        Err(err) => {
+            return format!("run_id={} read_range_failed={err:?}", run_id.0);
+        }
+    };
+
+    let mut last_state_entered: Option<(u64, String, u32)> = None;
+    let mut last_state_failed: Option<(u64, String, String, bool, String, Option<String>)> = None;
+
+    for envelope in stream {
+        match envelope.event {
+            Event::Kernel(KernelEvent::StateEntered {
+                state_id,
+                attempt,
+                ..
+            }) => {
+                last_state_entered = Some((envelope.seq, state_id.to_string(), attempt));
+            }
+            Event::Kernel(KernelEvent::StateFailed {
+                state_id, error, ..
+            }) => {
+                let detail_summary = summarize_exec_error_details(error.info.details.as_ref());
+                last_state_failed = Some((
+                    envelope.seq,
+                    state_id.to_string(),
+                    error.info.code.0,
+                    error.info.retryable,
+                    error.info.message,
+                    detail_summary,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let mut parts = vec![format!("run_id={}", run_id.0)];
+    if let Some((seq, state_id, attempt)) = last_state_entered {
+        parts.push(format!("last_state_entered={state_id} attempt={attempt} seq={seq}"));
+    }
+    if let Some((seq, state_id, code, retryable, message, detail_summary)) = last_state_failed {
+        parts.push(format!(
+            "state_failed={state_id} seq={seq} code={code} retryable={retryable} message={message}"
+        ));
+        if let Some(details) = detail_summary {
+            parts.push(format!("state_failed_details={details}"));
+        }
+    } else {
+        parts.push("no_state_failed_event_found".to_string());
+    }
+
+    parts.join("; ")
+}
+
 const RETH_DEV_ACCOUNT0_PRIVATE_KEY: &str =
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
@@ -389,7 +473,11 @@ async fn parity_portfolio_tracker_snapshot_with_mock_erc20_mint() {
         .await
         .expect("start setup pipeline");
 
-    assert_eq!(setup_run.phase, RunPhase::Completed);
+    if setup_run.phase != RunPhase::Completed {
+        let diagnostics = run_failure_diagnostics(Arc::clone(&streams), setup_run.run_id).await;
+        panic!("setup pipeline failed: {diagnostics}");
+    }
+
     let setup_snapshot_id = setup_run.final_snapshot_id.expect("final snapshot");
 
     let snapshot_bytes = artifacts
