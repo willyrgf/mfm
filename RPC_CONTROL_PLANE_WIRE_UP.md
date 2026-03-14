@@ -27,9 +27,21 @@ Scope: implementation-ready plan for making the control plane the canonical rout
 - Offline/direct signer tools may still exist explicitly.
   - `keystore tx-sign` may remain as an offline/direct signing surface.
   - It is not the canonical managed write path.
+- Raw-send bypass tools are not canonical.
+  - `keystore tx-send-raw` does not remain a normal managed surface.
+  - If a raw-send bypass is retained, it must be renamed to an explicit direct name such as
+    `keystore tx-send-raw-direct` and documented as bypassing control-plane guarantees.
 - The control plane must own write ordering, source choice, admission, durability, and replay-safe planning.
 - The control plane accepts signer references and signer capabilities.
   - It must not persist secrets, private keys, auth headers, or full private URLs.
+- Canonical managed submit must always execute with a stable internal intent key.
+  - Callers may provide an explicit idempotency key.
+  - If they do not, the typed client must derive one from the canonical immutable write input.
+- Canonical control-plane behavior requires persistent storage.
+  - `MemStreamStore` remains test-only and may only back explicitly offline/direct tools.
+- Anchored read-session opening is correctness-side-effect-free in v1.
+  - If future read admission requires correctness-critical durable mutation, add a dedicated durable
+    read-session or read-admission family first.
 - Documentation updates are part of the milestone, not follow-up work.
 
 ## Important Framing
@@ -291,6 +303,21 @@ raw transports / protocols
   - supported networks
   - supported tx types
 
+### Runtime Resolution Rule
+
+- Canonical managed submit resolves `signer_ref` through a runtime signer registry or resolver.
+- That resolver may use local runtime config such as:
+  - process env
+  - app wiring
+  - local config files
+- Canonical managed requests must not require a raw keystore filesystem path.
+- In v1:
+  - `local_keystore` is resolved from runtime-only configuration
+  - keystore locator details stay out of manifests, events, facts, snapshots, outputs, and error
+    details
+- Explicit offline/direct tools may still accept concrete local filesystem paths because they are not
+  the canonical managed path.
+
 ### Persistence Rules
 
 - Persist signer references and capabilities only.
@@ -331,10 +358,13 @@ raw transports / protocols
   - data/value
   - fee policy
   - broadcast policy
-  - optional idempotency key
+  - optional caller-supplied idempotency key
 - Inputs should not include:
   - caller-supplied nonce
   - caller-selected source id
+- The typed client must always produce a stable internal intent key.
+  - If the caller supplies an idempotency key, use it after normalization.
+  - Otherwise derive the key from canonical immutable intent input before any reservation happens.
 
 ### Low-Level Read Tool Contract
 
@@ -350,6 +380,9 @@ raw transports / protocols
 - Offline/direct tools may remain only when they are explicitly named and documented as non-canonical.
 - First example:
   - `keystore tx-sign`
+- Existing `keystore tx-sign` is grandfathered if docs and help text explicitly describe it as an
+  offline/direct escape hatch.
+- If a raw-send bypass remains, it must use an explicitly direct name.
 - These tools:
   - do not define the canonical write contract
   - do not choose canonical routing policy
@@ -379,6 +412,35 @@ raw transports / protocols
   - EVM broadcast planning
   - EVM receipt reconciliation
   - EVM signer integration
+
+### State-Facing Typed Client And Live Transport
+
+- The Layer 1 typed `rpc.control` client must live in a domain-adapter crate, not in shared state
+  code.
+- Recommended shape:
+  - `crates/collectors/rpc-control` or `crates/collectors/network-control`
+- Responsibilities:
+  - typed request and response models
+  - fact-key and `record_value` policy
+  - replay-safe wrapper behavior over `IoProvider`
+- The live `namespace = "rpc.control"` transport is an internal runtime transport, not an external
+  collector.
+- Recommended shape:
+  - `crates/transports/rpc-control`
+- Responsibilities:
+  - register the `rpc.control` namespace
+  - bridge typed calls into the durable control-plane backend
+  - delegate concrete EVM execution to internal executor surfaces
+
+### Shared State Placement Rule
+
+- New executable `State::handle` implementations that consume the typed client remain in shared-state
+  crates such as:
+  - `crates/states/common`
+  - `crates/evm-runtime`
+  - other domain shared-state crates as needed
+- Do not move reusable execution logic into the transport or control-plane crates.
+- Do not put the typed client inside a shared-state crate.
 
 ### Reusable State Layer
 
@@ -434,8 +496,16 @@ raw transports / protocols
 - Stream append and projection updates must commit in one DB transaction.
 - This must not be built on `crates/storages/indexer` as-is.
   - That crate is explicitly derived-only and not suitable for correctness-critical state.
-- This likely requires a dedicated Postgres-backed control-plane storage layer.
-  - Do not bury control-plane semantics inside `crates/machine`.
+- This milestone uses the shared Postgres stream-store substrate plus control-plane projection tables
+  in the same database and transaction boundary.
+- This is not a second durable coordination system.
+  - it is an extension or wrapper around the shared stream-store substrate
+  - it may live in a sibling Postgres-backed control-plane storage crate
+  - it may extend the existing Postgres stream-store implementation
+- The storage boundary must be explicit before implementation starts:
+  - either expose transactional helpers around the shared Postgres stream store
+  - or provide a control-plane Postgres storage layer that shares the same DB transaction boundary
+- Do not bury control-plane semantics inside `crates/machine`.
 
 ## Read-Session Contract
 
@@ -443,6 +513,13 @@ raw transports / protocols
 
 - Anchored read sessions are fact-captured and reused within the run.
 - V1 does not require a dedicated durable read-session stream family.
+- `open_anchored_read_session` is correctness-side-effect-free in v1.
+  - it may read durable source and pool state
+  - it must not commit correctness-critical control-plane mutations before the session fact is
+    durably captured
+- If fact capture fails, the session is treated as not opened and may be recomputed on retry.
+- Durable read admission and durable read-budget reservation are deferred until there is a dedicated
+  durable session or admission family.
 
 ### Required Session Output
 
@@ -456,8 +533,27 @@ raw transports / protocols
 
 - Session planning must be captured as facts in a way replay can reproduce exactly.
 - Downstream canonical read states must consume pinned session outputs, not calculate route choice again.
+- The typed client must use a stable session fact key derived from:
+  - state identity
+  - network identity
+  - session purpose or profile
+  - any explicit anchor inputs
+- Replay mode must fail with a stable missing-fact error if a canonical downstream read asks for a
+  session that was not durably captured.
 
 ## Write-Intent Contract
+
+### Required Identity
+
+- Every managed write must resolve to one stable `intent_key`.
+- `intent_key` is the uniqueness boundary for:
+  - reservation
+  - resume
+  - replay-safe submit behavior
+  - `tx_intent:<intent_key>`
+- Public API may accept an explicit idempotency key.
+- If the caller omits it, the typed client must derive `intent_key` from canonical immutable intent
+  input before any control-plane mutation happens.
 
 ### Required Lifecycle
 
@@ -468,6 +564,23 @@ raw transports / protocols
 - reconcile
 - terminal success or terminal failure
 
+### Signed Payload Rule
+
+- After the `sign` step succeeds, v1 stores the raw signed transaction as an immutable artifact and
+  records only its artifact reference in intent state.
+- Do not inline the raw signed payload into:
+  - events
+  - error details
+  - CLI/API outputs
+- `tx_intent_state` must include at least:
+  - unsigned intent identity
+  - reserved nonce
+  - `signed_payload_id` when signing succeeded
+  - current tx hash when broadcast succeeded
+- Resume after crash-before-broadcast must reuse `signed_payload_id` when present.
+  - It must not allocate a new nonce.
+  - It must not re-sign unless the intent is still in a pre-sign state.
+
 ### Failure Semantics Must Be Explicit
 
 - Define behavior for:
@@ -477,6 +590,13 @@ raw transports / protocols
   - resume of an already-broadcast intent
   - abandoned or orphaned reservations
 - Do not leave reclaim or reuse behavior to implementation intuition.
+- Required v1 decisions:
+  - reservation without `signed_payload_id` may be resumed in-place or reclaimed only by explicit
+    documented rule
+  - reservation with `signed_payload_id` but no broadcast must resume by reusing the same signed
+    payload
+  - already-broadcast intents must poll or reconcile existing tx hashes before any replacement logic
+  - automatic fee-bump replacement is out of scope for this milestone
 
 ## Helios As Composite Supervision
 
@@ -513,6 +633,10 @@ raw transports / protocols
 - Implement durable source quality first.
 - Implement source cooldown first.
 - Implement pool ranking and budgets first.
+- Add a temporary bridge so current `namespace = "evm"` execution can consult and update durable
+  source quality and cooldown while `rpc.control` is not yet canonical ingress.
+  - This bridge is transitional only.
+  - Delete it once canonical ingress is rebound.
 
 ### Phase 2: Land `rpc.control` Namespace And Typed Client
 
@@ -522,6 +646,11 @@ raw transports / protocols
   - anchored read sessions
   - write-intent planning
   - intent observation and resume
+- The typed client contract must explicitly define:
+  - fact keys
+  - when `IoProvider::call(...)` is used
+  - when `IoProvider::record_value(...)` is used
+  - replay behavior for every canonical `rpc.control` operation
 
 ### Phase 3: Rebind Production Routing
 
@@ -567,6 +696,7 @@ raw transports / protocols
 - Stop exposing `rpc_source_id` and `source_id` in canonical request models.
 - Stop documenting direct routed EVM transport as the normal surface.
 - Keep only explicitly named offline/direct tools that remain intentional.
+- Remove the temporary Phase 1 bridge from direct `evm` execution into durable source-quality state.
 
 ## Legacy Surfaces To Delete Or Demote
 
@@ -604,6 +734,12 @@ raw transports / protocols
 - `docs/ops-and-states.md`
 - `bin/cli/README.md`
 - `bin/rest-api/README.md`
+- relevant crate READMEs and rustdoc examples that still publish the old canonical contract,
+  especially any public example that mentions:
+  - `namespace = "evm"` as canonical ingress
+  - `route.source_id`
+  - `rpc_source_id`
+  - direct raw-send as the normal managed path
 
 ### Rewrite Or Remove
 
@@ -623,12 +759,16 @@ raw transports / protocols
 - Route choice survives restart because quality and cooldown are durable.
 - Two concurrent writes from the same EVM wallet reserve ordered nonces without duplication.
 - Canonical write APIs no longer require caller nonce or caller source id.
+- Canonical managed submit always uses a stable internal intent key.
 - Canonical read APIs no longer accept `rpc_source_id`.
 - Portfolio snapshot reads run through anchored read sessions.
 - Helios is preferred only when fresh and healthy, and automatically bypassed when stale.
 - Default CLI, REST, and app flows use persistent store-backed control-plane behavior.
+- Canonical managed submit fails fast when persistent control-plane storage is unavailable.
 - If `evm_read` remains public, it uses the control plane.
 - Offline/direct signing tools are explicitly documented as non-canonical.
+- If a raw-send bypass remains, it is explicitly named as direct and is not documented as the normal
+  managed path.
 
 ## Test Plan
 
@@ -687,6 +827,9 @@ raw transports / protocols
 - EVM is the first implementation, not the shape of the whole design.
 - If `evm_read` remains, it must route through the control plane.
 - Signing must be modeled as wallet plus signer, not a one-off keystore shortcut.
+- Managed writes always resolve to one stable intent key and one durable reservation lifecycle.
+- V1 read-session opening is fact-backed and correctness-side-effect-free until a dedicated durable
+  read-admission family exists.
 - The milestone is complete only when canonical reads and writes cannot bypass the control plane.
 
 ## Validation Notes
