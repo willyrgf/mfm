@@ -153,7 +153,6 @@ rec {
       "docs/redesign.md"
       "docs/ops-and-states.md"
       "docs/UPGRADE.md"
-      "RPC_CONTROL_PLANE_WIRE_UP.md"
     ];
   };
 

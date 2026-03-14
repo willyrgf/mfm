@@ -39,12 +39,6 @@
       "exists": true
     },
     {
-      "path": "RPC_CONTROL_PLANE_WIRE_UP.md",
-      "purpose": "Project documentation.",
-      "priority": 20,
-      "exists": true
-    },
-    {
       "path": "docs/architecture.md",
       "purpose": "Project documentation.",
       "priority": 20,

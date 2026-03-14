@@ -12,7 +12,6 @@ This document is the operator and contributor runbook for two related surfaces:
 Normative architecture references:
 - `docs/redesign.md`
 - `docs/architecture.md`
-- `RPC_CONTROL_PLANE_WIRE_UP.md`
 
 ## 1. Canonical Runtime Contract
 

@@ -9,7 +9,6 @@ Generated from `docs/repo-index.json`.
 - `docs/DETAILED.md` - Detailed model architecture and contracts.
 - `docs/UPGRADE.md` - Downstream upgrade notes for behavioral and path contract changes.
 - `AGENTS.md` - Agent instructions and collaboration constraints.
-- `RPC_CONTROL_PLANE_WIRE_UP.md` - Project documentation.
 - `docs/architecture.md` - Project documentation.
 - `docs/ops-and-states.md` - Project documentation.
 - `docs/redesign.md` - Project documentation.
