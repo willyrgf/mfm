@@ -17,28 +17,57 @@ Scope: implementation-ready plan for making the control plane the canonical rout
 ## Final Design Decisions For This Milestone
 
 - `rpc.control` is the only new canonical state-facing runtime namespace.
+- Canonical cutover is a hard cut.
+  - No compatibility aliases remain for old canonical CLI commands, REST surfaces, op ids, or
+    report fields.
+  - Retained bypass tools are renamed in the same change to explicit `*-direct` names.
 - A typed client layer must sit on top of `rpc.control`.
   - States and reusable runtime helpers should use the typed client, not hand-roll `IoCall`s.
 - `namespace = "evm"` remains in the repo, but only as an internal EVM data-plane executor surface.
   - It must stop being the canonical state-facing routing authority.
+- All state-facing RPC callers migrate to the new boundary.
+  - This includes portfolio, symbol, Aave, `evm_read`, reusable EVM runtime read helpers, Aave
+    deploy/configure flows, node-managed-account flows, and any other shared-state caller that
+    currently uses `namespace = "evm"` or `EvmIoClient`.
 - If `evm_read` is kept, it stays public only as a control-plane-backed read tool.
   - It must not remain source-pinned or bypass the control plane.
   - It must not be renamed to `*_direct`.
 - Offline/direct signer tools may still exist explicitly.
-  - `keystore tx-sign` may remain as an offline/direct signing surface.
+  - `keystore tx-sign` does not remain grandfathered under the old name.
+  - If retained, it becomes an explicit direct surface such as `keystore tx-sign-direct`.
   - It is not the canonical managed write path.
 - Raw-send bypass tools are not canonical.
   - `keystore tx-send-raw` does not remain a normal managed surface.
-  - If a raw-send bypass is retained, it must be renamed to an explicit direct name such as
-    `keystore tx-send-raw-direct` and documented as bypassing control-plane guarantees.
+  - If a raw-send bypass is retained, it becomes `keystore tx-send-raw-direct` /
+    `keystore_tx_send_raw_direct` only.
+- Canonical managed submit signs once per intent and performs true multi-source broadcast of the
+  same signed payload.
+  - The control plane derives one canonical tx hash from the signed payload before broadcast.
+  - Broadcast attempts every eligible source in the ordered broadcast set and persists one outcome
+    record per source attempt.
+  - Broadcast-step success requires at least one success-equivalent acknowledgement of the canonical
+    tx hash.
+  - Terminal intent success still requires observation and reconciliation.
 - The control plane must own write ordering, source choice, admission, durability, and replay-safe planning.
 - The control plane accepts signer references and signer capabilities.
+  - This milestone covers current `local_keystore`, `node_managed_account`, and future external
+    signer classes behind the same managed contract.
   - It must not persist secrets, private keys, auth headers, or full private URLs.
+- Endpoint URLs remain runtime bootstrap config, not caller-facing routing inputs.
+  - `MFM_EVM_RPC_URL` and `MFM_EVM_RPC_SOURCES_JSON` may register available sources at process
+    start.
+  - Callers, ops, and parity tests must not select raw URLs directly.
+  - Canonical callers use source ids and control-plane-backed routing only.
+- The control plane does not need to be a separate HTTP proxy service.
+  - The routed transport may consult durable control-plane state, select the correct source, and
+    then execute the HTTP request directly against that endpoint.
 - Canonical managed submit must always execute with a stable internal intent key.
   - Callers may provide an explicit idempotency key.
   - If they do not, the typed client must derive one from the canonical immutable write input.
 - Canonical control-plane behavior requires persistent storage.
   - `MemStreamStore` remains test-only and may only back explicitly offline/direct tools.
+  - The v1 storage choice is a dedicated Postgres control-plane storage layer that shares the same
+    physical database and SQL transaction boundary as the shared stream-store tables.
 - Anchored read-session opening is correctness-side-effect-free in v1.
   - If future read admission requires correctness-critical durable mutation, add a dedicated durable
     read-session or read-admission family first.
@@ -269,6 +298,9 @@ raw transports / protocols
 - idempotency and replay rules
 - per-source outcome journal
 - common storage transaction helpers
+- v1 rate-budget handling is observational only.
+  - Correctness-critical budget reservation is deferred until a dedicated durable admission family
+    lands.
 
 ### Can Be Network-Specific In The First Milestone
 
@@ -296,6 +328,7 @@ raw transports / protocols
   - stable signer identity used by the control plane
 - `signer_kind`
   - local keystore
+  - node managed account
   - future remote or external signer classes
 - `signer_capabilities`
   - local-only vs remote
@@ -312,8 +345,8 @@ raw transports / protocols
   - local config files
 - Canonical managed requests must not require a raw keystore filesystem path.
 - In v1:
-  - `local_keystore` is resolved from runtime-only configuration
-  - keystore locator details stay out of manifests, events, facts, snapshots, outputs, and error
+  - `local_keystore` and `node_managed_account` are resolved from runtime-only configuration
+  - signer locator details stay out of manifests, events, facts, snapshots, outputs, and error
     details
 - Explicit offline/direct tools may still accept concrete local filesystem paths because they are not
   the canonical managed path.
@@ -329,8 +362,9 @@ raw transports / protocols
 
 ### V1 Scope
 
-- Support `local_keystore` as the first managed signer.
-- Keep offline/direct `keystore tx-sign` as a non-canonical signer tool.
+- Support `local_keystore` and `node_managed_account` in v1.
+- Keep offline/direct `keystore tx-sign-direct` as a non-canonical signer tool if that bypass is
+  retained.
 - Do not design v1 around interactive browser signers.
   - MetaMask-style signers may be added later behind the same abstraction.
   - They should not drive the core contract for this milestone.
@@ -379,22 +413,19 @@ raw transports / protocols
 
 - Offline/direct tools may remain only when they are explicitly named and documented as non-canonical.
 - First example:
-  - `keystore tx-sign`
-- Existing `keystore tx-sign` is grandfathered if docs and help text explicitly describe it as an
-  offline/direct escape hatch.
+  - `keystore tx-sign-direct`
 - If a raw-send bypass remains, it must use an explicitly direct name.
 - These tools:
   - do not define the canonical write contract
   - do not choose canonical routing policy
   - do not replace managed submit
 
-## Recommended New Ownership
+## Chosen Ownership
 
 ### Generic Control-Plane Core
 
-- New crate, suggested names:
+- New crate:
   - `crates/control-plane`
-  - `crates/network-control`
 - Responsibilities:
   - generic source and pool projections
   - idempotent intent interfaces
@@ -403,9 +434,8 @@ raw transports / protocols
 
 ### EVM Control-Plane Adapter
 
-- New crate, suggested names:
+- New crate:
   - `crates/control-plane-evm`
-  - `crates/network-control-evm`
 - Responsibilities:
   - EVM read-session planning
   - EVM wallet-lane reservation
@@ -417,20 +447,39 @@ raw transports / protocols
 
 - The Layer 1 typed `rpc.control` client must live in a domain-adapter crate, not in shared state
   code.
-- Recommended shape:
-  - `crates/collectors/rpc-control` or `crates/collectors/network-control`
+- Chosen crate:
+  - `crates/collectors/rpc-control`
 - Responsibilities:
   - typed request and response models
   - fact-key and `record_value` policy
   - replay-safe wrapper behavior over `IoProvider`
 - The live `namespace = "rpc.control"` transport is an internal runtime transport, not an external
   collector.
-- Recommended shape:
+- Chosen crate:
   - `crates/transports/rpc-control`
 - Responsibilities:
   - register the `rpc.control` namespace
   - bridge typed calls into the durable control-plane backend
-  - delegate concrete EVM execution to internal executor surfaces
+  - delegate concrete EVM execution through an injected executor trait, not through nested
+    namespace-to-namespace router dispatch
+- V1 transport composition rule:
+  - `rpc.control` embeds network-specific executor traits directly.
+  - For EVM, this means an internal executor trait implemented by an adapter over extracted
+    `evm-jsonrpc-http` execution internals.
+  - `rpc.control` must not call back into the router with nested `namespace = "evm"` dispatch.
+
+### Control-Plane Storage
+
+- New crate:
+  - `crates/storages/control-plane-postgres`
+- Responsibilities:
+  - own SQL transactions for control-plane stream-family appends plus projection-table updates
+  - write control-plane family records into the shared append-only stream tables
+  - maintain control-plane projection tables in the same SQL transaction
+- Storage boundary rule:
+  - `crates/machine` and the generic `StreamStore` trait remain unchanged in this milestone.
+  - `run:*` execution continues to use the existing shared `StreamStore`.
+  - Control-plane family writes use the dedicated Postgres control-plane storage crate.
 
 ### Shared State Placement Rule
 
@@ -491,6 +540,39 @@ raw transports / protocols
   - replacement generation
   - per-source broadcast outcomes summary
 
+### Stream Record Model
+
+- Projection tables are derived state only.
+  - They must be fully rebuildable from append-only stream-family records.
+  - Dropping and rebuilding projections must not change control-plane semantics.
+- V1 generic record kinds:
+  - `rpc_source:*`
+    - `source_observed`
+    - `source_probed`
+  - `source_pool:*`
+    - `pool_membership_declared`
+    - `pool_ranked`
+    - `budget_observed`
+- V1 EVM record kinds:
+  - `wallet_lane:*`
+    - `nonce_reserved`
+    - `broadcast_acknowledged`
+    - `receipt_confirmed`
+    - `lane_reconciled`
+  - `tx_intent:*`
+    - `intent_registered`
+    - `signing_succeeded`
+    - `broadcast_attempted`
+    - `broadcast_acknowledged`
+    - `receipt_observed`
+    - `intent_finalized`
+- V1 rebuild rules:
+  - `rpc_source_state` derives only from `source_observed` and `source_probed`.
+  - `source_pool_state` derives only from `pool_membership_declared`, `pool_ranked`, and
+    observational `budget_observed`.
+  - `wallet_lane_state` derives only from lane-family records plus referenced terminal intent state.
+  - `tx_intent_state` derives only from intent-family records.
+
 ### Correctness Rule
 
 - Stream append and projection updates must commit in one DB transaction.
@@ -499,12 +581,9 @@ raw transports / protocols
 - This milestone uses the shared Postgres stream-store substrate plus control-plane projection tables
   in the same database and transaction boundary.
 - This is not a second durable coordination system.
-  - it is an extension or wrapper around the shared stream-store substrate
-  - it may live in a sibling Postgres-backed control-plane storage crate
-  - it may extend the existing Postgres stream-store implementation
-- The storage boundary must be explicit before implementation starts:
-  - either expose transactional helpers around the shared Postgres stream store
-  - or provide a control-plane Postgres storage layer that shares the same DB transaction boundary
+  - it is a sibling Postgres-backed control-plane storage crate that writes into the same durable
+    append-only stream substrate and shares the same SQL transaction boundary
+  - it does not extend the generic `StreamStore` trait for v1
 - Do not bury control-plane semantics inside `crates/machine`.
 
 ## Read-Session Contract
@@ -541,6 +620,16 @@ raw transports / protocols
 - Replay mode must fail with a stable missing-fact error if a canonical downstream read asks for a
   session that was not durably captured.
 
+### Typed Client Contract
+
+- `open_anchored_read_session` uses `IoProvider::call(...)` with a stable session fact key.
+- The typed client may use `IoProvider::record_value(...)` only for deterministic derived payloads
+  computed from already recorded control-plane results.
+  - `record_value(...)` is not the mutation path for durable control-plane state.
+- If a live session-planning attempt returns after probing or reading durable control-plane state,
+  but fact recording fails, the attempt is treated as failed.
+  - No correctness-critical durable mutation is allowed before the session fact is durably bound.
+
 ## Write-Intent Contract
 
 ### Required Identity
@@ -564,6 +653,19 @@ raw transports / protocols
 - reconcile
 - terminal success or terminal failure
 
+### Broadcast Policy
+
+- V1 canonical managed submit uses ordered eager fanout across the full eligible broadcast set.
+- The same signed payload is attempted against every eligible source in order.
+- Success-equivalent outcomes are:
+  - explicit acceptance returning the canonical tx hash
+  - duplicate/already-known style acknowledgement that can be tied to the canonical tx hash
+- A source response that claims success with a different tx hash is a data-plane failure.
+- Broadcast-step success requires at least one success-equivalent outcome.
+- Broadcast-step failure means zero success-equivalent outcomes were recorded.
+- Terminal intent success still depends on receipt observation and reconciliation, not on broadcast
+  acknowledgement alone.
+
 ### Signed Payload Rule
 
 - After the `sign` step succeeds, v1 stores the raw signed transaction as an immutable artifact and
@@ -576,7 +678,8 @@ raw transports / protocols
   - unsigned intent identity
   - reserved nonce
   - `signed_payload_id` when signing succeeded
-  - current tx hash when broadcast succeeded
+  - canonical tx hash derived from the signed payload
+  - per-source broadcast outcomes
 - Resume after crash-before-broadcast must reuse `signed_payload_id` when present.
   - It must not allocate a new nonce.
   - It must not re-sign unless the intent is still in a pre-sign state.
@@ -597,6 +700,14 @@ raw transports / protocols
     payload
   - already-broadcast intents must poll or reconcile existing tx hashes before any replacement logic
   - automatic fee-bump replacement is out of scope for this milestone
+  - control-plane reservation, signing, and broadcast commands are idempotent by stable
+    `intent_key` plus explicit generation inputs where applicable
+  - if durable control-plane mutation succeeds but fact recording fails, retrying the same live call
+    with the same stable fact key must return the already-materialized durable result and must not
+    create a second reservation, second signed payload, or second logical broadcast generation
+  - replay mode never recomputes a missing successful mutation
+    - if the fact was durably bound, replay uses it
+    - if the fact was not durably bound, the failed attempt is retried live from the last checkpoint
 
 ## Helios As Composite Supervision
 
@@ -621,21 +732,34 @@ raw transports / protocols
   - `evm` is internal executor-only
   - `evm_read` remains public only if it uses the control plane
   - signer model is wallet plus signer, not wallet equals signer
+  - cutover is a hard cut with no compatibility aliases
+  - direct tools are explicitly renamed with `-direct` / `_direct`
+  - canonical managed submit is true multi-source broadcast
+  - all state-facing RPC callers migrate, including current Aave write paths and node-managed
+    account flows
 
 ### Phase 1: Land The Control-Plane Backend
 
 - Implement correctness-critical projection tables and transactional update path.
+- Implement the chosen storage boundary:
+  - new `crates/storages/control-plane-postgres`
+  - same physical Postgres database as the shared stream store
+  - one SQL transaction for control-plane stream-family appends plus projection updates
 - Add typed stream-family helpers for:
   - `rpc_source`
   - `source_pool`
   - `wallet_lane`
   - `tx_intent`
+- Land the v1 stream record kinds and projection rebuild logic before higher-level state migration.
 - Implement durable source quality first.
 - Implement source cooldown first.
 - Implement pool ranking and budgets first.
 - Add a temporary bridge so current `namespace = "evm"` execution can consult and update durable
   source quality and cooldown while `rpc.control` is not yet canonical ingress.
   - This bridge is transitional only.
+  - It may update only source-observation and cooldown records.
+  - It must not allocate wallet-lane reservations, create intents, or own canonical route
+    selection.
   - Delete it once canonical ingress is rebound.
 
 ### Phase 2: Land `rpc.control` Namespace And Typed Client
@@ -651,6 +775,10 @@ raw transports / protocols
   - when `IoProvider::call(...)` is used
   - when `IoProvider::record_value(...)` is used
   - replay behavior for every canonical `rpc.control` operation
+  - idempotent retry behavior when durable mutation succeeded before fact binding failed
+- Use the chosen composition model:
+  - `rpc.control` embeds executor traits directly
+  - it does not use nested router dispatch into `namespace = "evm"`
 
 ### Phase 3: Rebind Production Routing
 
@@ -658,6 +786,11 @@ raw transports / protocols
 - Register `rpc.control` as the canonical ingress in `crates/app/src/lib.rs`.
 - `evm-jsonrpc-http` becomes an internal executor used by the EVM control plane.
 - Canonical shared states must enter through the typed `rpc.control` client.
+- Execute the hard cut in the same change:
+  - old canonical command names and op ids are removed
+  - retained direct tools are renamed explicitly
+  - compatibility report fields such as `rpc_url_host` are removed or replaced with new explicit
+    shapes rather than aliased
 
 ### Phase 4: Migrate Canonical Writes
 
@@ -669,7 +802,11 @@ raw transports / protocols
   - persist outcomes
   - reconcile to terminal state
 - Replace canonical write surfaces with one managed intent API.
-- Keep offline/direct `keystore tx-sign` as non-canonical.
+- Migrate all state-facing write callers, including:
+  - Aave deploy/configure flows
+  - node-managed-account paths
+  - current reusable EVM write helpers in shared-state crates
+- Retained offline/direct tools remain non-canonical and explicitly renamed.
 - Remove canonical use of:
   - `eth_getTransactionCount("pending")`
   - `eth_sendTransaction`
@@ -681,6 +818,10 @@ raw transports / protocols
 - `PinPortfolioNetworksState` should open one anchored session per network.
 - Downstream states should consume pinned session data, not choose route ids.
 - Remove `rpc_source_id` from canonical portfolio, symbol, and Aave runtime models.
+- Migrate all remaining state-facing read callers, including:
+  - reusable EVM runtime read helpers
+  - reusable EVM price/oracle helpers
+  - `evm_read`
 - If `evm_read` remains, migrate it to the control-plane-backed contract in the same phase.
 
 ### Phase 6: Rework Helios As Composite Supervision
@@ -695,7 +836,6 @@ raw transports / protocols
 
 - Stop exposing `rpc_source_id` and `source_id` in canonical request models.
 - Stop documenting direct routed EVM transport as the normal surface.
-- Keep only explicitly named offline/direct tools that remain intentional.
 - Remove the temporary Phase 1 bridge from direct `evm` execution into durable source-quality state.
 
 ## Legacy Surfaces To Delete Or Demote
@@ -708,6 +848,17 @@ raw transports / protocols
 - direct `eth_getTransactionCount("pending")` for canonical nonce allocation
 - default `MFM_EVM_RPC_SOURCE_ID` contract for canonical routing
 - ephemeral `MemStreamStore` for canonical tx commands
+- old canonical direct-tool names and op ids:
+  - `keystore tx-sign`
+  - `keystore tx-send-raw`
+  - `keystore_tx_sign`
+  - `keystore_tx_send_raw`
+- compatibility report field names that encode the old routing model:
+  - `rpc_url_host`
+- state-facing direct use of:
+  - `namespace = "evm"`
+  - `mfm_collectors_evm::EvmIoClient`
+  - `JsonRpcCall::with_route_source_id(...)`
 
 ## Enforcement Plan
 
@@ -719,11 +870,16 @@ raw transports / protocols
   - `eth_sendTransaction`
 - Do not use `EvmIoClient::new` itself as the enforcement boundary.
   - `EvmIoClient` is a typed adapter over `IoProvider`, not a live transport bypass by itself.
+- Add crate-level allowlist checks that fail on state-facing uses of:
+  - `mfm_collectors_evm::EvmIoClient`
+  - `namespace = "evm"`
+  - `JsonRpcCall::with_route_source_id(...)`
 - Allowlist only:
   - internal EVM executor implementation
   - explicit offline/direct modules
   - tests that intentionally exercise direct transport behavior
-- Add a small audit script or CI grep task rather than relying on convention.
+- Add a small audit script or CI task with explicit allowlisted paths rather than relying on
+  convention or raw string grep alone.
 
 ## Documentation Plan
 
@@ -766,9 +922,16 @@ raw transports / protocols
 - Default CLI, REST, and app flows use persistent store-backed control-plane behavior.
 - Canonical managed submit fails fast when persistent control-plane storage is unavailable.
 - If `evm_read` remains public, it uses the control plane.
-- Offline/direct signing tools are explicitly documented as non-canonical.
+- Managed submit signs once, derives one canonical tx hash, and records per-source outcomes for the
+  full ordered broadcast set.
+- Broadcast-step success requires at least one success-equivalent source acknowledgement.
+- All state-facing RPC callers are migrated, including current Aave write flows and node-managed
+  account paths.
+- Offline/direct signing tools are explicitly renamed and documented as non-canonical.
 - If a raw-send bypass remains, it is explicitly named as direct and is not documented as the normal
   managed path.
+- Old canonical command names, op ids, and compatibility report fields are removed in the hard-cut
+  change.
 
 ## Test Plan
 
@@ -776,6 +939,7 @@ raw transports / protocols
 
 - source-quality projection updates
 - cooldown persistence
+- projection rebuild from stream-family records
 - lane reservation idempotency
 - `max_inflight_per_lane = 1`
 - multi-stream CAS conflict handling
@@ -786,12 +950,18 @@ raw transports / protocols
 ### Integration
 
 - two concurrent writes from the same wallet serialize correctly
-- managed submit broadcasts to multiple sources and records outcomes
+- managed submit signs once, broadcasts to multiple sources, and records outcomes
+- managed submit succeeds when at least one source acknowledges the canonical hash and other sources
+  fail
+- managed submit fails the broadcast step when zero sources acknowledge the canonical hash
 - restart preserves score and cooldown
 - anchored snapshot session pins block and reuses it across reads
 - stale Helios is bypassed automatically
 - canonical CLI and REST flows require persistent store-backed control-plane wiring
 - retained `evm_read` path uses the control plane and not direct source hints
+- old canonical CLI/op names are absent after the hard cut
+- Aave deploy/configure and node-managed-account write paths execute through managed control-plane
+  submit rather than direct `eth_sendTransaction`
 
 ### Replay And Resume
 
@@ -799,6 +969,8 @@ raw transports / protocols
 - resuming an in-flight intent polls existing hash rather than allocating a new nonce
 - replayed snapshot reads use recorded session facts rather than recalculating routing
 - orphaned pre-broadcast reservations follow the explicit reclaim or reuse rule
+- retry after durable mutation succeeded but fact binding failed returns the same durable result
+  without allocating a second reservation, second signed payload, or second broadcast generation
 
 ## Risks
 
