@@ -38,7 +38,8 @@ let
   # Keep shell fallbacks like ${XDG_DATA_HOME:-...} live for the generated
   # executor script instead of freezing them into literal strings.
   runtimeDirBaseShell =
-    lib.replaceStrings [ "\\" "\"" "`" ] [ "\\\\" "\\\"" "\\`" ] model.runtime.directories.base;
+    lib.replaceStrings [ "\\" "\"" "`" ] [ "\\\\" "\\\"" "\\`" ]
+      model.runtime.directories.base;
 
   staticRuntimeEnvOffsetCase = lib.concatStringsSep "\n" (
     map (envName: ''
@@ -160,7 +161,7 @@ in
         NIXFIED_EXECUTOR_BIN|NIXFIED_ORCHESTRATOR_BIN|NIXFIED_EXECUTOR_SELF|NIXFIED_ORCHESTRATOR_SELF)
           return 0
           ;;
-        NIXFIED_EXECUTION_EPHEMERAL|NIXFIED_ORCHESTRATOR_RUN_ID|NIXFIED_ORCHESTRATOR_PROCESS_MODE|NIXFIED_ORCHESTRATOR_WORKFLOW_ID|NIXFIED_PARENT_WORKFLOW_ID)
+        NIXFIED_EXECUTION_EPHEMERAL|NIXFIED_ORCHESTRATOR_RUN_ID|NIXFIED_ORCHESTRATOR_PROCESS_MODE|NIXFIED_ORCHESTRATOR_WORKFLOW_ID|NIXFIED_PARENT_WORKFLOW_ID|NIXFIED_TASK_ID)
           return 0
           ;;
         NIXFIED_WORKFLOW_SETUP_STARTED_AT|NIXFIED_WORKFLOW_SETUP_STARTED_EPOCH)
@@ -770,6 +771,9 @@ in
       fi
       if [ -n "''${NIXFIED_PARENT_WORKFLOW_ID:-}" ]; then
         env_cmd+=("NIXFIED_PARENT_WORKFLOW_ID=$NIXFIED_PARENT_WORKFLOW_ID")
+      fi
+      if [ -n "''${NIXFIED_TASK_ID:-}" ]; then
+        env_cmd+=("NIXFIED_TASK_ID=$NIXFIED_TASK_ID")
       fi
       if [ -n "''${NIXFIED_WORKFLOW_SETUP_STARTED_AT:-}" ]; then
         env_cmd+=("NIXFIED_WORKFLOW_SETUP_STARTED_AT=$NIXFIED_WORKFLOW_SETUP_STARTED_AT")

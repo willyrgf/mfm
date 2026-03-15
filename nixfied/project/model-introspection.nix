@@ -35,12 +35,9 @@ let
 in
 {
   system = system;
-  taskIds = builtins.sort builtins.lessThan (
-    map stripContext (builtins.attrNames compiled.tasks)
-  );
+  taskIds = builtins.sort builtins.lessThan (map stripContext (builtins.attrNames compiled.tasks));
   workflowPlanTaskIds = builtins.mapAttrs (
-    _: workflow:
-    map (unit: stripContext unit.taskId) (workflow.plan or [ ])
+    _: workflow: map (unit: stripContext unit.taskId) (workflow.plan or [ ])
   ) compiled.workflows;
   inherit
     workflowIds

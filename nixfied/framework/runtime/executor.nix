@@ -341,12 +341,12 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     append_event "$run_id" "$workflow_id" "$task_id" "running" '{}'
 
     if [ -n "$workflow_id" ]; then
-      if NIXFIED_PARENT_WORKFLOW_ID="$workflow_id" execute_task_body "$task_id" "$@"; then
+      if NIXFIED_TASK_ID="$task_id" NIXFIED_PARENT_WORKFLOW_ID="$workflow_id" execute_task_body "$task_id" "$@"; then
         exit_code=0
       else
         exit_code="$?"
       fi
-    elif execute_task_body "$task_id" "$@"; then
+    elif NIXFIED_TASK_ID="$task_id" execute_task_body "$task_id" "$@"; then
       exit_code=0
     else
       exit_code="$?"
@@ -809,7 +809,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       append_event "$run_id" "$workflow_id" "$unit_task" "running" '{}'
 
       (
-        NIXFIED_PARENT_WORKFLOW_ID="$workflow_id" execute_task_body "$unit_task" "''${passthrough_args[@]}"
+        NIXFIED_TASK_ID="$unit_task" NIXFIED_PARENT_WORKFLOW_ID="$workflow_id" execute_task_body "$unit_task" "''${passthrough_args[@]}"
       ) &
       pid="$!"
 

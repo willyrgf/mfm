@@ -115,36 +115,36 @@ let
   rethService = configuredServices.reth or { };
   heliosService = configuredServices.helios or { };
   mergeLocalSourceDefaults =
-    localDefaults: serviceSources:
-    lib.recursiveUpdate { local = localDefaults; } serviceSources;
+    localDefaults: serviceSources: lib.recursiveUpdate { local = localDefaults; } serviceSources;
 
   # The upgraded framework resolves service packages from the selected source.
-  postgresSources = mergeLocalSourceDefaults
-    (lib.optionalAttrs ((conf.modules.postgres.package or null) != null) {
+  postgresSources = mergeLocalSourceDefaults (lib.optionalAttrs
+    ((conf.modules.postgres.package or null) != null)
+    {
       package = conf.modules.postgres.package;
-    })
-    (postgresService.sources or { });
+    }
+  ) (postgresService.sources or { });
   nginxSources = mergeLocalSourceDefaults { } (nginxService.sources or { });
-  minioSources = mergeLocalSourceDefaults
-    (
-      (lib.optionalAttrs ((conf.modules.minio.package or null) != null) {
-        package = conf.modules.minio.package;
-      })
-      // (lib.optionalAttrs ((conf.modules.minio.clientPackage or null) != null) {
-        clientPackage = conf.modules.minio.clientPackage;
-      })
-    )
-    (minioService.sources or { });
-  rethSources = mergeLocalSourceDefaults
-    (lib.optionalAttrs ((conf.modules.reth.package or null) != null) {
+  minioSources = mergeLocalSourceDefaults (
+    (lib.optionalAttrs ((conf.modules.minio.package or null) != null) {
+      package = conf.modules.minio.package;
+    })
+    // (lib.optionalAttrs ((conf.modules.minio.clientPackage or null) != null) {
+      clientPackage = conf.modules.minio.clientPackage;
+    })
+  ) (minioService.sources or { });
+  rethSources = mergeLocalSourceDefaults (lib.optionalAttrs
+    ((conf.modules.reth.package or null) != null)
+    {
       package = conf.modules.reth.package;
-    })
-    (rethService.sources or { });
-  heliosSources = mergeLocalSourceDefaults
-    (lib.optionalAttrs ((conf.modules.helios.package or null) != null) {
+    }
+  ) (rethService.sources or { });
+  heliosSources = mergeLocalSourceDefaults (lib.optionalAttrs
+    ((conf.modules.helios.package or null) != null)
+    {
       package = conf.modules.helios.package;
-    })
-    (heliosService.sources or { });
+    }
+  ) (heliosService.sources or { });
 
   sharedPassThroughEnv = [
     project.envVar
@@ -222,7 +222,13 @@ let
 
     # Keep Cargo artifacts outside the workspace root so parallel CI steps do
     # not race with flake/model evaluation over mutable target/ files.
-    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-''${TMPDIR:-/tmp}/mfm-ci-target/''${NIX_ENV:-0}}"
+    run_id_component="''${NIXFIED_ORCHESTRATOR_RUN_ID:-''${NIXFIED_RUN_ID:-''${NIX_ENV:-0}}}"
+    workflow_id_component="''${NIXFIED_PARENT_WORKFLOW_ID:-''${NIXFIED_ORCHESTRATOR_WORKFLOW_ID:-workflow}}"
+    task_id_component="''${NIXFIED_TASK_ID:-orchestrator}"
+    run_id_component="$(printf '%s' "$run_id_component" | tr './:' '__')"
+    workflow_id_component="$(printf '%s' "$workflow_id_component" | tr './:' '__')"
+    task_id_component="$(printf '%s' "$task_id_component" | tr './:' '__')"
+    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-''${TMPDIR:-/tmp}/mfm-ci-target/$run_id_component/$workflow_id_component/$task_id_component}"
     mkdir -p "$CARGO_TARGET_DIR"
 
     run_with_log() {
@@ -271,11 +277,11 @@ let
     portVarName =
       portKey:
       frameworkPortVarNames.${portKey}
-      or (throw "unsupported framework service port key for snapshot task: ${portKey}");
+        or (throw "unsupported framework service port key for snapshot task: ${portKey}");
     getServiceDir =
       dataDirName:
       frameworkServiceDirExprs.${dataDirName}
-      or (throw "unsupported framework service data dir for snapshot task: ${dataDirName}");
+        or (throw "unsupported framework service data dir for snapshot task: ${dataDirName}");
   };
   frameworkPostgresService = import ../framework/runtime/services/postgres/default.nix {
     inherit pkgs;
@@ -743,8 +749,7 @@ in
         ready.enable = true;
       };
 
-      tasks =
-        {
+      tasks = {
         dev = mkCommandTask {
           id = "task.dev";
           appName = "dev";
@@ -791,13 +796,11 @@ in
             kind = "internal";
             summary = "Start or reuse portfolio snapshot services";
             description = "Internal task that starts or reuses Postgres and Helios for the portfolio snapshot app.";
-            runtimeInputs =
-              commonRuntimeInputs
-              ++ [
-                postgresPackage
-                pkgs.curl
-                pkgs.lsof
-              ];
+            runtimeInputs = commonRuntimeInputs ++ [
+              postgresPackage
+              pkgs.curl
+              pkgs.lsof
+            ];
             allowUnknownArgs = false;
             contractArgs = [
               {
@@ -1490,7 +1493,9 @@ in
 
               HELIOS_RPC_PORT="$HELIOSRPC_PORT"
               export HELIOS_RPC_PORT
-              export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/${conf.modules.postgres.database or "mfm"}"
+              export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/${
+                conf.modules.postgres.database or "mfm"
+              }"
               export MFM_EVM_RPC_URL="http://127.0.0.1:$HELIOS_RPC_PORT"
               export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"helios_local\",\"rpc_url\":\"http://127.0.0.1:$HELIOS_RPC_PORT\",\"kind\":\"local\"}]"
               export MFM_EVM_RPC_PREFERRED_ORDER="helios_local"
@@ -2898,8 +2903,7 @@ in
       // frameworkTestPreset.tasks
       // frameworkSelfhostPreset.tasks;
 
-      workflows =
-        {
+      workflows = {
         ci-basic = {
           id = "workflow.ci.basic";
           summary = "Basic CI workflow";

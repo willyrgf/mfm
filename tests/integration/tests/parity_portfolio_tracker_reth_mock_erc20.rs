@@ -299,9 +299,7 @@ async fn run_failure_diagnostics(streams: Arc<dyn StreamStore>, run_id: RunId) -
     for envelope in stream {
         match envelope.event {
             Event::Kernel(KernelEvent::StateEntered {
-                state_id,
-                attempt,
-                ..
+                state_id, attempt, ..
             }) => {
                 last_state_entered = Some((envelope.seq, state_id.to_string(), attempt));
             }
@@ -324,7 +322,9 @@ async fn run_failure_diagnostics(streams: Arc<dyn StreamStore>, run_id: RunId) -
 
     let mut parts = vec![format!("run_id={}", run_id.0)];
     if let Some((seq, state_id, attempt)) = last_state_entered {
-        parts.push(format!("last_state_entered={state_id} attempt={attempt} seq={seq}"));
+        parts.push(format!(
+            "last_state_entered={state_id} attempt={attempt} seq={seq}"
+        ));
     }
     if let Some((seq, state_id, code, retryable, message, detail_summary)) = last_state_failed {
         parts.push(format!(
