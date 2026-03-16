@@ -15,15 +15,28 @@
 
 ## Decisions Locked In
 
+- Replay/cutover:
+  - no backward compatibility for pre-refactor `rpc.control` fact identity
+  - this is a dev-branch hard cutover
+  - old runs that depend on pre-scope `rpc.control` facts are not expected to resume/replay after rollout
 - Long-term model:
   - `rpc.control` gets a first-class `control_scope` concept as a production surface.
   - `control_scope` is request-visible and participates in durable fact identity.
+- Network identity:
+  - canonical managed `rpc.control` calls must provide explicit `network_id`
+  - no canonical managed fallback to a synthetic global/networkless scope such as `__default__`
+  - states/ops that currently omit `network_id` must be updated in the same change
 - Rollout/migration:
   - use an explicit control-plane reset
+  - do a targeted delete of `rpc_source:*` and `source_pool:*` records/heads from the shared stream tables
+  - drop and recreate control-plane projection tables so the new schema is applied cleanly
   - do not migrate or rewrite old `__default__`-keyed control-plane streams
 - Catalog safety:
   - same-scope different-catalog usage is a hard error
-  - fingerprint validation is per `(control_scope, network_id)`, not just per scope
+  - route-pinned calls must validate that the pinned source belongs to the effective scope/network catalog before execution
+  - catalog identity is durably declared append-only in `source_pool:*`
+  - fingerprint validation is per `(control_scope, network_id, pool_kind)`
+  - current slice uses `pool_kind = default`, so operationally this is still one catalog per scope/network today
 
 ## What failed
 
@@ -50,6 +63,10 @@
   - global fallback `__default__`
 - Fallback logic lives in:
   - [crates/transports/rpc-control/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/transports/rpc-control/src/lib.rs)
+- Some current production states still issue canonical managed reads without `network_id`:
+  - [crates/evm-runtime/src/states/read.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/evm-runtime/src/states/read.rs)
+  - [crates/ops/evm-read-op/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/ops/evm-read-op/src/lib.rs)
+- This refactor intentionally removes that canonical managed fallback behavior.
 
 ### Test helper behavior
 
@@ -99,6 +116,10 @@
   - canonical name: `control_scope`
 - Keep `network_id` with its existing meaning:
   - which blockchain/network the request targets
+- Require `network_id` for canonical managed `rpc.control` requests:
+  - `RpcControlRequest::EvmCall`
+  - `RpcControlRequest::PrepareSources`
+  - if a canonical managed request omits `network_id`, return a structured error instead of resolving a synthetic fallback scope
 - `control_scope` must be explicit in every effective `rpc.control` request shape:
   - `RpcControlRequest::EvmCall`
   - `RpcControlRequest::PrepareSources`
@@ -117,6 +138,9 @@
   - stable shared value such as `shared`
 - If a caller omits scope and the system chooses `shared`, that effective value must still be stamped into the request before hashing/fact recording.
 - Allow explicit per-session or per-workflow scopes when desired.
+- `network_id` does not get a default:
+  - canonical managed callers must provide it
+  - remove canonical managed dependence on `__default__`
 
 ### Why this matters in production
 
@@ -135,24 +159,42 @@
 - Shared scope across incompatible source catalogs is dangerous even without visible failures.
 - Two sessions with different source sets can overwrite membership/ranking for the same pool.
 - Recommended guard:
-  - compute/store a catalog fingerprint per `(control_scope, network_id)`
-  - reject writes or initialization when a process tries to use the same `(control_scope, network_id)` with a different effective catalog
-- Fingerprint input should be the effective non-secret routing catalog for that `(control_scope, network_id)`:
+  - compute/store a catalog fingerprint per `(control_scope, network_id, pool_kind)`
+  - reject writes or initialization when a process tries to use the same `(control_scope, network_id, pool_kind)` with a different effective catalog
+- Store catalog identity durably as a new append-only `source_pool:*` record kind:
+  - canonical record name: `pool_catalog_declared`
+  - do not store catalog identity only in a mutable projection row or side table
+  - the record should live on the same `source_pool:<control_scope>:<network_id>:<pool_kind>` stream family that already carries membership/ranking
+- Fingerprint input should be the effective non-secret routing catalog for that `(control_scope, network_id, pool_kind)`:
   - fingerprint schema version
   - `control_scope`
   - `network_id`
+  - `pool_kind`
   - effective candidate sources for that network
   - per-source non-secret routing fields:
     - `id`
     - `kind`
     - `require_get_proof_probe`
   - effective preferred order projected onto those candidate source ids
+- Persist not only the digest but also the normalized non-secret catalog snapshot inside the append-only record payload:
+  - this keeps the catalog identity auditable/retrievable without consulting ambient runtime config
+  - it also preserves rebuildability from stream history alone
 - Do not persist raw endpoint credentials in the fingerprint:
   - do not include `authorization`
   - do not include raw `rpc_url`
 - If future safety requires distinguishing two sources with the same public routing metadata but different backends:
   - add an explicit non-secret source identity/revision field
   - do not persist raw URLs as a shortcut
+- Validation flow should be:
+  - derive the effective normalized catalog snapshot for `(control_scope, network_id, pool_kind)`
+  - load the current `source_pool` projection
+  - if no catalog declaration exists yet, append `pool_catalog_declared`
+  - if the existing declared fingerprint matches, continue
+  - if the existing declared fingerprint differs, fail before any membership/ranking/source writes
+  - route-pinned calls must also validate their pinned source against the effective declared catalog before execution/observation writes
+- If other states/ops need to consume this metadata later:
+  - expose it through typed `rpc.control` request/response surfaces
+  - do not let states/ops read storage crates directly
 
 ## Explicit Reset Strategy
 
@@ -163,9 +205,14 @@
   - `source_pool:<network_id>:<pool_kind>`
   - `__default__`
 - Reset scope:
-  - clear control-plane stream families `rpc_source:*` and `source_pool:*`
-  - clear matching projection rows/tables derived from those families
+  - targeted delete only the control-plane stream families `rpc_source:*` and `source_pool:*` from the shared stream tables
+  - do not wipe unrelated stream families
+  - drop and recreate `mfm_rpc_source_state` and `mfm_source_pool_state`
+  - recreate the projection schema with `control_scope`-aware identities and any new catalog-declaration fields
 - After reset, the new scope-aware identities become the only supported durable shape.
+- This reset also defines the replay cutover:
+  - pre-refactor `rpc.control` fact identity is not preserved
+  - pre-cutover runs that depend on old `rpc.control` facts are not expected to resume/replay
 
 ## Proposed test model
 
@@ -191,6 +238,8 @@
   - same `state_id + method + params + network_id`
   - different `control_scope`
   - must not alias to the same durable fact binding
+- Add an explicit cutover regression test for the new canonical behavior:
+  - canonical managed calls without `network_id` must fail with a structured error
 - Add coverage for both control-plane persistence backends:
   - dedicated Postgres control-plane store
   - `StreamStore` mode over the shared stream substrate
@@ -200,6 +249,10 @@
   - different effective catalogs
   - must not trip catalog-fingerprint mismatch
 - Add a same `(control_scope, network_id)` different-catalog rejection test.
+- Add a same `(control_scope, network_id, pool_kind)` same-catalog idempotence test:
+  - repeated declaration of the same normalized catalog must be accepted
+- Add a route-pinned validation test:
+  - pinned source outside the effective scope/network catalog must be rejected before execution
 
 ## What not to do
 
@@ -207,9 +260,13 @@
   - `network_id` already has domain meaning in request models and runtime states.
 - Do not hide `control_scope` only in transport-local configuration.
   - effective scope must participate in serialized request identity and replay facts
+- Do not keep canonical managed support for synthetic networkless/global routing.
+  - canonical managed callers must supply `network_id`
 - Do not rely on Cargo target isolation for control-plane races.
 - Do not assume fresh process/object instances imply fresh control-plane state.
 - Do not persist raw RPC URLs or authorization material in scope/catalog fingerprints.
+- Do not store catalog fingerprint state only in mutable SQL projections/side tables.
+- Do not let states/ops bypass `rpc.control` and read control-plane storage crates directly.
 
 ## Likely implementation shape
 
@@ -224,6 +281,11 @@
   - transport factory configuration / env-derived defaulting
 - Hard requirement:
   - if defaults are used, they must be normalized into the request before fact-key derivation
+- Hard requirement:
+  - canonical managed requests must provide `network_id`
+  - update current states/ops that omit `network_id` in the same change
+- Hard requirement:
+  - route-pinned calls must validate the pinned source against the effective `(control_scope, network_id, pool_kind)` catalog before execution
 - The exact shape should preserve crate boundaries and avoid smuggling ambient globals into state logic.
 
 ### Storage layer
@@ -234,13 +296,22 @@
 - Update both persistence paths together:
   - dedicated Postgres control-plane store
   - `StreamStore`-backed control-plane store
-- Add durable catalog-fingerprint validation per `(control_scope, network_id)`.
+- Extend `source_pool:*` with append-only catalog declaration:
+  - add `pool_catalog_declared`
+  - persist both the fingerprint and the normalized non-secret catalog snapshot
+  - rebuild projection state from stream history only
+- Add durable catalog-fingerprint validation per `(control_scope, network_id, pool_kind)`.
+- Apply the rollout as a reset plus schema recreation:
+  - targeted delete control-plane stream families
+  - drop/recreate projection tables
+  - no in-place migration of old disposable state
 
 ### Integration helper
 
 - Update the integration helper in:
   - [tests/integration/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/src/lib.rs)
 - Add a way to pass explicit scope.
+- Make helper-driven canonical managed calls require explicit `network_id`.
 - Use unique per-test scope in Postgres-backed parity tests.
 
 ### Retry behavior
@@ -265,22 +336,37 @@
 - [tests/integration/tests/parity_portfolio_tracker_reth_mock_erc20.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/tests/parity_portfolio_tracker_reth_mock_erc20.rs)
 - [tests/integration/tests/parity_rest_api_evm_reth_pipeline.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/tests/parity_rest_api_evm_reth_pipeline.rs)
 - [tests/integration/tests/parity_aave_v3_reth_scenario.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/tests/parity_aave_v3_reth_scenario.rs)
+- [tests/integration/tests/evm_rpc_pool_failover.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/tests/evm_rpc_pool_failover.rs)
+- [tests/integration/tests/evm_rpc_getlogs_chunking.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/tests/evm_rpc_getlogs_chunking.rs)
+- [crates/evm-runtime/src/states/read.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/evm-runtime/src/states/read.rs)
+- [crates/ops/evm-read-op/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/ops/evm-read-op/src/lib.rs)
+- [docs/architecture.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/docs/architecture.md)
+- [docs/redesign.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/docs/redesign.md)
 
 ## Suggested implementation order
 
 1. Add first-class request-visible `control_scope` to `rpc.control` request/response/client surfaces.
-2. Make `control_scope` part of durable fact identity by normalizing defaults into serialized requests before hashing.
-3. Key persisted control-plane identities by `control_scope` plus existing network/source dimensions.
-4. Update both control-plane persistence backends to the new identity shape.
-5. Add catalog fingerprint validation per `(control_scope, network_id)` using non-secret effective catalog fields only.
-6. Plumb explicit scope through integration helpers and any app-facing configuration surfaces.
-7. Define and execute the explicit control-plane reset for old `rpc_source:*` and `source_pool:*` state.
-8. Give each shared parity test/session a unique scope where isolation is required.
-9. Add:
+2. Require explicit `network_id` for canonical managed calls and update current states/ops that omit it.
+3. Make `control_scope` part of durable fact identity by normalizing defaults into serialized requests before hashing.
+4. Treat this as a hard cutover:
+   - no backward compatibility for pre-refactor `rpc.control` fact identity
+5. Key persisted control-plane identities by `control_scope` plus existing network/source dimensions.
+6. Extend `source_pool:*` with append-only `pool_catalog_declared` and projection support.
+7. Add catalog validation per `(control_scope, network_id, pool_kind)` and enforce it for route-pinned calls too.
+8. Update both control-plane persistence backends to the new identity shape.
+9. Define and execute the explicit control-plane reset:
+   - targeted delete of `rpc_source:*` / `source_pool:*`
+   - drop/recreate projection tables
+10. Plumb explicit scope through integration helpers and any app-facing configuration surfaces.
+11. Give each shared parity test/session a unique scope where isolation is required.
+12. Add:
    - one intentional shared-scope integration test
    - one cross-network shared-scope test
    - one replay/fact-key isolation regression test
-10. Consider whether same-scope retry/backoff should be improved.
+   - one no-`network_id` canonical rejection test
+   - one same-catalog idempotence test
+   - one route-pinned catalog rejection test
+13. Consider whether same-scope retry/backoff should be improved.
 
 ## Useful commands
 
@@ -300,7 +386,17 @@
   - default to `shared` when callers do not ask for isolation
   - services that need independent control-plane behavior should still set explicit scopes
 - Should same-scope different-catalog usage be a hard error or a separate scope derivation rule?
-  - hard error at `(control_scope, network_id)`
+  - hard error at `(control_scope, network_id, pool_kind)`
+- Do pre-cutover runs need to replay/resume after this lands?
+  - no
+  - this is a dev-branch hard cutover with no backward compatibility for old `rpc.control` fact identity
+- Are networkless canonical managed calls still supported?
+  - no
+  - canonical managed callers must provide `network_id`
+- Where should catalog identity live durably?
+  - as an append-only `pool_catalog_declared` record on `source_pool:*`
+  - persist both the fingerprint and the normalized non-secret catalog snapshot
+  - rebuild projection state from stream history rather than relying on mutable side tables only
 
 ## Recommended next step
 
