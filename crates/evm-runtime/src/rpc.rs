@@ -73,38 +73,22 @@ fn receipt_poll_fact_key(
     ))
 }
 
+fn legacy_network_required_error(helper_name: &'static str) -> StateError {
+    op_errors::state_unknown_msg(
+        "rpc_control_network_required",
+        format!(
+            "{helper_name} requires an explicit network_id; use the *_for_network helper instead"
+        ),
+    )
+}
+
 /// Submits a transaction through `eth_sendTransaction`, filling gas and gas price when absent.
 pub async fn send_transaction(
     client: &mut EvmIoClient<'_>,
-    mut tx_obj: serde_json::Value,
+    _tx_obj: serde_json::Value,
 ) -> Result<String, StateError> {
-    if tx_obj.get("gas").is_none() {
-        let gas = estimate_gas_hex(client, &tx_obj).await?;
-        tx_obj["gas"] = serde_json::json!(gas);
-    }
-    if tx_obj.get("gasPrice").is_none() && tx_obj.get("maxFeePerGas").is_none() {
-        let gas_price = gas_price_hex(client).await?;
-        tx_obj["gasPrice"] = serde_json::json!(gas_price);
-    }
-
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_sendTransaction",
-            serde_json::json!([tx_obj]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-    let tx_hash = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_sendTransaction returned non-string tx hash",
-    )?;
-    shared_dcv::normalize_hex_str(&tx_hash).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendTransaction returned invalid tx hash",
-        )
-    })
+    let _ = client;
+    Err(legacy_network_required_error("send_transaction"))
 }
 
 /// Submits a transaction through `eth_sendTransaction` for the supplied managed network and scope.
@@ -148,27 +132,10 @@ pub async fn send_transaction_for_network(
 /// Submits a raw signed transaction through `eth_sendRawTransaction`.
 pub async fn send_raw_transaction(
     client: &mut EvmIoClient<'_>,
-    raw_tx_hex: &str,
+    _raw_tx_hex: &str,
 ) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_sendRawTransaction",
-            serde_json::json!([raw_tx_hex]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let tx_hash = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_sendRawTransaction returned non-string tx hash",
-    )?;
-    shared_dcv::normalize_hex_str(&tx_hash).map_err(|_| {
-        op_errors::state_unknown(
-            "evm_response_invalid",
-            "eth_sendRawTransaction returned invalid tx hash",
-        )
-    })
+    let _ = client;
+    Err(legacy_network_required_error("send_raw_transaction"))
 }
 
 /// Submits a raw signed transaction through `eth_sendRawTransaction` for the supplied managed network and scope.
@@ -204,22 +171,10 @@ pub async fn send_raw_transaction_for_network(
 /// Estimates gas for the supplied transaction object and returns a canonical hex quantity.
 pub async fn estimate_gas_hex(
     client: &mut EvmIoClient<'_>,
-    tx_obj: &serde_json::Value,
+    _tx_obj: &serde_json::Value,
 ) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_estimateGas",
-            serde_json::json!([tx_obj]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let gas = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_estimateGas returned non-string gas value",
-    )?;
-    normalize_quantity_hex(&gas, "eth_estimateGas returned invalid hex gas value")
+    let _ = client;
+    Err(legacy_network_required_error("estimate_gas_hex"))
 }
 
 /// Estimates gas for the supplied transaction object within the supplied managed network and scope.
@@ -249,17 +204,8 @@ pub async fn estimate_gas_hex_for_network(
 
 /// Fetches the current gas price as a canonical hex quantity.
 pub async fn gas_price_hex(client: &mut EvmIoClient<'_>) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new("eth_gasPrice", serde_json::json!([])))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let gas_price = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_gasPrice returned non-string gas price",
-    )?;
-    normalize_quantity_hex(&gas_price, "eth_gasPrice returned invalid hex gas price")
+    let _ = client;
+    Err(legacy_network_required_error("gas_price_hex"))
 }
 
 /// Fetches the current gas price for the supplied managed network and scope.
@@ -289,22 +235,10 @@ pub async fn gas_price_hex_for_network(
 /// Fetches the pending transaction count for `from` as a canonical hex quantity.
 pub async fn transaction_count_hex(
     client: &mut EvmIoClient<'_>,
-    from: &str,
+    _from: &str,
 ) -> Result<String, StateError> {
-    let res = client
-        .call(JsonRpcCall::new(
-            "eth_getTransactionCount",
-            serde_json::json!([from, "pending"]),
-        ))
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let nonce = op_rpc::expect_string(
-        &res.response,
-        "evm_response_invalid",
-        "eth_getTransactionCount returned non-string nonce",
-    )?;
-    normalize_quantity_hex(&nonce, "eth_getTransactionCount returned invalid hex nonce")
+    let _ = client;
+    Err(legacy_network_required_error("transaction_count_hex"))
 }
 
 /// Fetches the pending transaction count for `from` within the supplied managed network and scope.
@@ -336,14 +270,10 @@ pub async fn transaction_count_hex_for_network(
 pub async fn pending_nonce_u128(
     io: &mut dyn IoProvider,
     state_id: &StateId,
-    from: &str,
+    _from: &str,
 ) -> Result<u128, StateError> {
-    let mut client = EvmIoClient::new(state_id.clone(), io);
-    let nonce_hex = transaction_count_hex(&mut client, from).await?;
-    parse_quantity_hex_u128(
-        &nonce_hex,
-        "eth_getTransactionCount returned invalid hex nonce",
-    )
+    let _ = (io, state_id);
+    Err(legacy_network_required_error("pending_nonce_u128"))
 }
 
 /// Resolves the pending nonce for `from` within the supplied managed network and scope.
@@ -409,21 +339,15 @@ pub async fn local_sign_legacy_create_raw_tx(
 /// Signs and submits a contract-creation transaction using the next pending nonce.
 pub async fn send_signed_create_transaction(
     client: &mut EvmIoClient<'_>,
-    signing_key_env: &str,
-    from: &str,
-    constructor_payload: &[u8],
-    value_hex: Option<&str>,
+    _signing_key_env: &str,
+    _from: &str,
+    _constructor_payload: &[u8],
+    _value_hex: Option<&str>,
 ) -> Result<String, StateError> {
-    let nonce_hex = transaction_count_hex(client, from).await?;
-    send_signed_create_transaction_with_nonce(
-        client,
-        signing_key_env,
-        from,
-        &nonce_hex,
-        constructor_payload,
-        value_hex,
-    )
-    .await
+    let _ = client;
+    Err(legacy_network_required_error(
+        "send_signed_create_transaction",
+    ))
 }
 
 /// Signs and submits a contract-creation transaction for the supplied managed network and scope using the next pending nonce.
@@ -454,54 +378,16 @@ pub async fn send_signed_create_transaction_for_network(
 /// Signs and submits a contract-creation transaction using the supplied nonce.
 pub async fn send_signed_create_transaction_with_nonce(
     client: &mut EvmIoClient<'_>,
-    signing_key_env: &str,
-    from: &str,
-    nonce_hex: &str,
-    constructor_payload: &[u8],
-    value_hex: Option<&str>,
+    _signing_key_env: &str,
+    _from: &str,
+    _nonce_hex: &str,
+    _constructor_payload: &[u8],
+    _value_hex: Option<&str>,
 ) -> Result<String, StateError> {
-    let configured_from = shared_dcv::normalize_address(from).map_err(|_| {
-        op_errors::state_unknown("invalid_from_address", "from address was invalid")
-    })?;
-    let nonce_hex = normalize_quantity_hex(
-        nonce_hex,
-        "signed deploy nonce must be a valid hex quantity",
-    )?;
-
-    let tx_obj = {
-        let mut tx = serde_json::json!({
-            "from": configured_from,
-            "data": shared_dcv::bytes_to_hex_prefixed(constructor_payload),
-        });
-        if let Some(v) = value_hex {
-            tx["value"] = serde_json::json!(v);
-        }
-        tx
-    };
-
-    let gas_hex = estimate_gas_hex(client, &tx_obj).await?;
-    let gas_price_hex = gas_price_hex(client).await?;
-    let chain_id = client
-        .chain_id_u64()
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let raw_tx_hex = local_sign_legacy_create_raw_tx(
-        client,
-        LegacyCreateTxSigningRequest {
-            signing_key_env,
-            from: &configured_from,
-            chain_id,
-            nonce_hex: &nonce_hex,
-            gas_price_hex: &gas_price_hex,
-            gas_limit_hex: &gas_hex,
-            value_hex: value_hex.unwrap_or("0x0"),
-            constructor_payload,
-        },
-    )
-    .await?;
-
-    send_raw_transaction(client, &raw_tx_hex).await
+    let _ = client;
+    Err(legacy_network_required_error(
+        "send_signed_create_transaction_with_nonce",
+    ))
 }
 
 /// Signs and submits a contract-creation transaction for the supplied managed network, scope, and nonce.
@@ -581,47 +467,12 @@ pub async fn send_signed_create_transaction_with_nonce_for_network(
 pub async fn wait_for_receipt(
     state_id: &StateId,
     io: &mut dyn IoProvider,
-    tx_hash: &str,
-    poll_interval_ms: u64,
-    max_receipt_polls: u64,
+    _tx_hash: &str,
+    _poll_interval_ms: u64,
+    _max_receipt_polls: u64,
 ) -> Result<serde_json::Value, StateError> {
-    if max_receipt_polls == 0 {
-        return Err(op_errors::state_unknown(
-            "invalid_op_config",
-            "max_receipt_polls must be > 0",
-        ));
-    }
-
-    let normalized_tx = shared_dcv::normalize_hex_str(tx_hash)
-        .map_err(|_| op_errors::state_unknown("invalid_tx_hash", "tx hash was invalid hex"))?;
-    let mut client = EvmIoClient::new(state_id.clone(), io);
-
-    for poll_index in 0..max_receipt_polls {
-        let res = client
-            .call_with_fact_key(
-                JsonRpcCall::new(
-                    "eth_getTransactionReceipt",
-                    serde_json::json!([normalized_tx.clone()]),
-                ),
-                FactKey(format!(
-                    "mfm:evm|state:{}|receipt_poll:{}|tx:{}",
-                    state_id.as_str(),
-                    poll_index,
-                    normalized_tx
-                )),
-            )
-            .await
-            .map_err(op_errors::state_from_io)?;
-        if !res.response.is_null() {
-            return Ok(res.response);
-        }
-        tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
-    }
-
-    Err(op_errors::state_unknown(
-        "evm_receipt_timeout",
-        "timed out waiting for transaction receipt",
-    ))
+    let _ = (state_id, io);
+    Err(legacy_network_required_error("wait_for_receipt"))
 }
 
 /// Polls until a transaction receipt is available within the supplied managed network and scope.
@@ -739,9 +590,26 @@ pub async fn rpc_accounts(
     io: &mut dyn IoProvider,
     state_id: &StateId,
 ) -> Result<Vec<String>, StateError> {
+    let _ = (io, state_id);
+    Err(legacy_network_required_error("rpc_accounts"))
+}
+
+/// Fetches and normalizes the account list returned by `eth_accounts` for the supplied managed
+/// network and scope.
+pub async fn rpc_accounts_for_network(
+    io: &mut dyn IoProvider,
+    state_id: &StateId,
+    network_id: &str,
+    control_scope: &str,
+) -> Result<Vec<String>, StateError> {
     let mut client = EvmIoClient::new(state_id.clone(), io);
     let res = client
-        .call(JsonRpcCall::new("eth_accounts", serde_json::json!([])))
+        .call(managed_call(
+            network_id,
+            control_scope,
+            "eth_accounts",
+            serde_json::json!([]),
+        ))
         .await
         .map_err(op_errors::state_from_io)?;
     let arr = op_rpc::expect_array(
@@ -784,9 +652,21 @@ pub fn account_at(accounts: &[String], idx: usize) -> Result<String, StateError>
 pub async fn resolve_account_by_index(
     io: &mut dyn IoProvider,
     state_id: &StateId,
+    _idx: usize,
+) -> Result<String, StateError> {
+    let _ = (io, state_id);
+    Err(legacy_network_required_error("resolve_account_by_index"))
+}
+
+/// Resolves an account by index through `eth_accounts` for the supplied managed network and scope.
+pub async fn resolve_account_by_index_for_network(
+    io: &mut dyn IoProvider,
+    state_id: &StateId,
+    network_id: &str,
+    control_scope: &str,
     idx: usize,
 ) -> Result<String, StateError> {
-    let accounts = rpc_accounts(io, state_id).await?;
+    let accounts = rpc_accounts_for_network(io, state_id, network_id, control_scope).await?;
     account_at(&accounts, idx)
 }
 
@@ -807,11 +687,161 @@ pub async fn resolve_signing_key_address(
 pub async fn resolve_deployer_address(
     io: &mut dyn IoProvider,
     state_id: &StateId,
+    _deployer_account_index: usize,
+    signing_key_env: Option<&str>,
+) -> Result<String, StateError> {
+    if let Some(env_name) = signing_key_env {
+        return resolve_signing_key_address(io, state_id, env_name).await;
+    }
+    Err(legacy_network_required_error("resolve_deployer_address"))
+}
+
+/// Resolves the deployer address from either a signing key or an account index for the supplied
+/// managed network and scope.
+pub async fn resolve_deployer_address_for_network(
+    io: &mut dyn IoProvider,
+    state_id: &StateId,
+    network_id: &str,
+    control_scope: &str,
     deployer_account_index: usize,
     signing_key_env: Option<&str>,
 ) -> Result<String, StateError> {
     if let Some(env_name) = signing_key_env {
         return resolve_signing_key_address(io, state_id, env_name).await;
     }
-    resolve_account_by_index(io, state_id, deployer_account_index).await
+    resolve_account_by_index_for_network(
+        io,
+        state_id,
+        network_id,
+        control_scope,
+        deployer_account_index,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use serde_json::Value;
+
+    use mfm_machine::errors::IoError;
+    use mfm_machine::ids::ArtifactId;
+    use mfm_machine::io::{IoCall, IoProvider, IoResult};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct FixedIo {
+        calls: Vec<IoCall>,
+        responses: Vec<Value>,
+    }
+
+    #[async_trait]
+    impl IoProvider for FixedIo {
+        async fn call(&mut self, call: IoCall) -> Result<IoResult, IoError> {
+            self.calls.push(call);
+            let response = if self.responses.is_empty() {
+                Value::Null
+            } else {
+                self.responses.remove(0)
+            };
+            Ok(IoResult {
+                response,
+                recorded_payload_id: Some(ArtifactId("1".repeat(64))),
+            })
+        }
+
+        async fn record_value(
+            &mut self,
+            _key: FactKey,
+            _value: Value,
+        ) -> Result<ArtifactId, IoError> {
+            Ok(ArtifactId("2".repeat(64)))
+        }
+
+        async fn get_recorded_fact(
+            &mut self,
+            _key: &FactKey,
+        ) -> Result<Option<ArtifactId>, IoError> {
+            Ok(None)
+        }
+
+        async fn now_millis(&mut self) -> Result<u64, IoError> {
+            Ok(0)
+        }
+
+        async fn random_bytes(&mut self, n: usize) -> Result<Vec<u8>, IoError> {
+            Ok(vec![0_u8; n])
+        }
+    }
+
+    #[test]
+    fn receipt_poll_fact_key_differs_across_scope_and_network() {
+        let state_id = StateId::must_new("rpc.receipt.scope".to_string());
+        let tx_hash = "0x1234";
+
+        let shared = receipt_poll_fact_key(&state_id, "shared", "ethereum-mainnet", 0, tx_hash);
+        let isolated =
+            receipt_poll_fact_key(&state_id, "isolated", "ethereum-mainnet", 0, tx_hash);
+        let arbitrum =
+            receipt_poll_fact_key(&state_id, "shared", "arbitrum-mainnet", 0, tx_hash);
+
+        assert_ne!(shared, isolated);
+        assert_ne!(shared, arbitrum);
+        assert_ne!(isolated, arbitrum);
+    }
+
+    #[tokio::test]
+    async fn wait_for_receipt_for_network_stamps_scope_into_request_and_fact_key() {
+        let state_id = StateId::must_new("rpc.receipt.wait".to_string());
+        let mut io = FixedIo {
+            calls: Vec::new(),
+            responses: vec![Value::Null, serde_json::json!({ "status": "0x1" })],
+        };
+
+        let receipt = wait_for_receipt_for_network(
+            &state_id,
+            &mut io,
+            "ethereum-mainnet",
+            "",
+            "0x1234",
+            0,
+            2,
+        )
+        .await
+        .expect("receipt should resolve");
+
+        assert_eq!(receipt, serde_json::json!({ "status": "0x1" }));
+        assert_eq!(io.calls.len(), 2);
+        assert_eq!(
+            io.calls[0].request,
+            serde_json::json!({
+                "kind": "evm_call",
+                "control_scope": "shared",
+                "network_id": "ethereum-mainnet",
+                "method": "eth_getTransactionReceipt",
+                "params": ["0x1234"],
+            })
+        );
+        assert_eq!(
+            io.calls[0].fact_key,
+            Some(receipt_poll_fact_key(
+                &state_id,
+                "shared",
+                "ethereum-mainnet",
+                0,
+                "0x1234",
+            ))
+        );
+        assert_eq!(
+            io.calls[1].fact_key,
+            Some(receipt_poll_fact_key(
+                &state_id,
+                "shared",
+                "ethereum-mainnet",
+                1,
+                "0x1234",
+            ))
+        );
+    }
 }
