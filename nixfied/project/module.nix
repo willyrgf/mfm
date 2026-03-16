@@ -1683,92 +1683,6 @@ in
           '';
         };
 
-        mfm-rpc-control-reset =
-          mkCommandTask {
-            id = "task.mfm.rpc-control.reset";
-            appName = "mfm-rpc-control-reset";
-            summary = "Reset rpc.control durable state for the scope cutover";
-            description = ''
-              Deletes the append-only rpc.control stream families and recreates the
-              scoped projection tables required by the control-scope refactor.
-              Run this exactly once after the final refactor code lands and before
-              any refactor-era service, parity, or CI process starts against the
-              shared database.
-            '';
-            tags = [
-              "mfm"
-              "rpc-control"
-              "postgres"
-            ];
-            usage = [ "nix run .#run-task -- task.mfm.rpc-control.reset [--dry-run]" ];
-            examples = [
-              "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mfm nix run .#run-task -- task.mfm.rpc-control.reset"
-              "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mfm nix run .#run-task -- task.mfm.rpc-control.reset --dry-run"
-            ];
-            runtimeInputs = commonRuntimeInputs ++ [ postgresPackage ];
-            allowUnknownArgs = false;
-            contractArgs = [
-              {
-                name = "dry_run";
-                kind = "flag";
-                long = "--dry-run";
-                description = "Print the reset SQL without executing it.";
-              }
-            ];
-            command = ''
-              set -euo pipefail
-
-              find_workspace_root() {
-                local dir="''${NIXFIED_CALLER_PWD:-$PWD}"
-                while [ "$dir" != "/" ]; do
-                  if [ -f "$dir/nixfied/project/sql/rpc-control-reset.sql" ]; then
-                    printf '%s' "$dir"
-                    return 0
-                  fi
-                  dir="$(dirname "$dir")"
-                done
-                echo "ERROR: unable to locate workspace root containing nixfied/project/sql/rpc-control-reset.sql" >&2
-                exit 3
-              }
-
-              dry_run=0
-              while [ "$#" -gt 0 ]; do
-                case "$1" in
-                  --dry-run)
-                    dry_run=1
-                    ;;
-                  --help|-h)
-                    echo "usage: nix run .#run-task -- task.mfm.rpc-control.reset [--dry-run]" >&2
-                    exit 0
-                    ;;
-                  *)
-                    echo "ERROR: unknown argument '$1'" >&2
-                    exit 2
-                    ;;
-                esac
-                shift
-              done
-
-              if [ -z "''${DATABASE_URL:-}" ]; then
-                echo "ERROR: DATABASE_URL must be set for task.mfm.rpc-control.reset" >&2
-                exit 1
-              fi
-
-              workspace_root="$(find_workspace_root)"
-              sql_file="$workspace_root/nixfied/project/sql/rpc-control-reset.sql"
-
-              if [ "$dry_run" = "1" ]; then
-                echo "INFO: dry-run for rpc.control reset using configured DATABASE_URL" >&2
-                cat "$sql_file"
-                exit 0
-              fi
-
-              echo "WARN: resetting rpc.control stream families and projection tables using configured DATABASE_URL" >&2
-              ${postgresPackage}/bin/psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$sql_file"
-              echo "INFO: rpc.control reset completed" >&2
-            '';
-          };
-
         mfm_cli = mkCommandTask {
           id = "task.mfm_cli";
           appName = "mfm_cli";
@@ -1924,7 +1838,7 @@ in
             fi
 
             echo "INFO: resetting rpc.control durable state via $sql_file"
-            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$sql_file"
+            ${postgresPackage}/bin/psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$sql_file"
             echo "OK: rpc.control durable state reset completed"
           '';
         };
@@ -2213,6 +2127,7 @@ in
                 require_app "mfm_cli"
                 require_app "mfm::portfolio::snapshot"
                 require_app "mfm_rest_api"
+                require_app "rpc-control-scope-reset"
 
                 require_task "task.ci"
                 require_task "task.ci.services-start"
@@ -2220,9 +2135,9 @@ in
                 require_task "task.ci.workflow-basic"
                 require_task "task.ci.workflow-parity"
                 require_task "task.mfm_cli"
-                require_task "task.mfm.rpc-control.reset"
                 require_task "task.mfm.portfolio.snapshot"
                 require_task "task.mfm_rest_api"
+                require_task "task.rpc-control-scope-reset"
 
                 require_workflow "workflow.ci.full"
                 require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-basic"

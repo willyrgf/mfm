@@ -251,8 +251,8 @@
   - drop and recreate `mfm_rpc_source_state` and `mfm_source_pool_state`
   - recreate the projection schema with `control_scope`-aware identities and any new catalog-declaration fields
 - Repo-owned reset task:
-  - `nix run .#run-task -- task.mfm.rpc-control.reset`
-  - review-only mode: `nix run .#run-task -- task.mfm.rpc-control.reset --dry-run`
+  - `DATABASE_URL=postgresql://... nix run .#rpc-control-scope-reset -- --yes`
+  - review-only mode: `nix run .#rpc-control-scope-reset -- --print-sql`
 - After reset, the new scope-aware identities become the only supported durable shape.
 - This reset also defines the replay cutover:
   - pre-refactor `rpc.control` fact identity is not preserved
