@@ -33,6 +33,7 @@ use tokio_postgres::{Client, NoTls, Row, Transaction};
 use tracing::{debug, info};
 
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, StorageError};
+use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::ErrorCode;
 use mfm_machine::stores::{NewStreamRecord, StreamId, StreamRecord};
 
@@ -43,8 +44,12 @@ pub const SOURCE_POOL_STREAM_FAMILY: &str = "source_pool";
 
 const RECORD_KIND_SOURCE_OBSERVED: &str = "source_observed";
 const RECORD_KIND_SOURCE_PROBED: &str = "source_probed";
+const RECORD_KIND_POOL_CATALOG_DECLARED: &str = "pool_catalog_declared";
 const RECORD_KIND_POOL_MEMBERSHIP_DECLARED: &str = "pool_membership_declared";
 const RECORD_KIND_POOL_RANKED: &str = "pool_ranked";
+
+/// Canonical fingerprint schema version for source-pool catalog snapshots.
+pub const SOURCE_POOL_CATALOG_SCHEMA_VERSION: u64 = 1;
 
 fn storage_info(code: &'static str, message: impl Into<String>) -> ErrorInfo {
     ErrorInfo {
@@ -709,9 +714,146 @@ pub struct SourcePoolRankedRecord {
     pub ranked_source_ids: Vec<String>,
 }
 
+/// Non-secret routing summary for one source inside a declared pool catalog.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourcePoolCatalogSource {
+    /// Stable source identifier.
+    pub id: String,
+    /// Stable source kind label.
+    pub kind: String,
+    /// Whether the source requires a `eth_getProof` probe for healthy selection.
+    pub require_get_proof_probe: bool,
+}
+
+/// Canonical non-secret routing catalog snapshot for one scoped source pool.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourcePoolCatalogSnapshot {
+    /// Fingerprint schema version.
+    pub schema_version: u64,
+    /// Stable control-plane scope.
+    pub control_scope: String,
+    /// Stable network identifier.
+    pub network_id: String,
+    /// Stable pool kind.
+    pub pool_kind: String,
+    /// Effective candidate sources for the pool, sorted by source id.
+    pub sources: Vec<SourcePoolCatalogSource>,
+    /// Effective preferred order projected onto the candidate-source ids.
+    pub preferred_source_ids: Vec<String>,
+}
+
+impl SourcePoolCatalogSnapshot {
+    /// Validates catalog-shape invariants used for storage and hashing.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != SOURCE_POOL_CATALOG_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported source_pool catalog schema version `{}`",
+                self.schema_version
+            ));
+        }
+        validate_component("control_scope", self.control_scope.clone()).map_err(|err| match err {
+            RpcSourceRefError::InvalidComponent { value, .. } => {
+                format!("invalid control_scope `{value}` in catalog snapshot")
+            }
+            RpcSourceRefError::InvalidStreamId(value) => {
+                format!("invalid control_scope `{value}` in catalog snapshot")
+            }
+        })?;
+        validate_component("network_id", self.network_id.clone()).map_err(|err| match err {
+            RpcSourceRefError::InvalidComponent { value, .. } => {
+                format!("invalid network_id `{value}` in catalog snapshot")
+            }
+            RpcSourceRefError::InvalidStreamId(value) => {
+                format!("invalid network_id `{value}` in catalog snapshot")
+            }
+        })?;
+        validate_component("pool_kind", self.pool_kind.clone()).map_err(|err| match err {
+            RpcSourceRefError::InvalidComponent { value, .. } => {
+                format!("invalid pool_kind `{value}` in catalog snapshot")
+            }
+            RpcSourceRefError::InvalidStreamId(value) => {
+                format!("invalid pool_kind `{value}` in catalog snapshot")
+            }
+        })?;
+
+        let mut seen = BTreeSet::new();
+        for source in &self.sources {
+            validate_component("source_id", source.id.clone()).map_err(|err| match err {
+                RpcSourceRefError::InvalidComponent { value, .. } => {
+                    format!("invalid source_id `{value}` in catalog snapshot")
+                }
+                RpcSourceRefError::InvalidStreamId(value) => {
+                    format!("invalid source_id `{value}` in catalog snapshot")
+                }
+            })?;
+            if source.kind.trim().is_empty() {
+                return Err(format!(
+                    "source `{}` in catalog snapshot must declare kind",
+                    source.id
+                ));
+            }
+            if !seen.insert(source.id.clone()) {
+                return Err(format!(
+                    "duplicate source_id `{}` in catalog snapshot",
+                    source.id
+                ));
+            }
+        }
+
+        let source_ids = self
+            .sources
+            .iter()
+            .map(|source| source.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut preferred_seen = BTreeSet::new();
+        for source_id in &self.preferred_source_ids {
+            validate_component("source_id", source_id.clone()).map_err(|err| match err {
+                RpcSourceRefError::InvalidComponent { value, .. } => {
+                    format!("invalid preferred source_id `{value}` in catalog snapshot")
+                }
+                RpcSourceRefError::InvalidStreamId(value) => {
+                    format!("invalid preferred source_id `{value}` in catalog snapshot")
+                }
+            })?;
+            if !source_ids.contains(source_id.as_str()) {
+                return Err(format!(
+                    "preferred source_id `{source_id}` not present in catalog snapshot"
+                ));
+            }
+            if !preferred_seen.insert(source_id.clone()) {
+                return Err(format!(
+                    "duplicate preferred source_id `{source_id}` in catalog snapshot"
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns the canonical SHA-256 fingerprint for this catalog snapshot.
+    pub fn fingerprint(&self) -> Result<String, CanonicalJsonError> {
+        let value = serde_json::to_value(self)
+            .expect("SourcePoolCatalogSnapshot should always serialize to JSON");
+        Ok(artifact_id_for_json(&value)?.0)
+    }
+}
+
+/// Durable `pool_catalog_declared` payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourcePoolCatalogDeclaredRecord {
+    /// Declaration timestamp in milliseconds since the Unix epoch.
+    pub declared_at_ms: u64,
+    /// Canonical fingerprint for the declared non-secret routing catalog.
+    pub catalog_fingerprint: String,
+    /// Canonical non-secret routing catalog snapshot.
+    pub catalog_snapshot: SourcePoolCatalogSnapshot,
+}
+
 /// Typed `source_pool:*` stream-family record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourcePoolRecord {
+    /// `pool_catalog_declared`
+    CatalogDeclared(SourcePoolCatalogDeclaredRecord),
     /// `pool_membership_declared`
     MembershipDeclared(SourcePoolMembershipDeclaredRecord),
     /// `pool_ranked`
@@ -721,6 +863,7 @@ pub enum SourcePoolRecord {
 impl SourcePoolRecord {
     fn kind(&self) -> &'static str {
         match self {
+            SourcePoolRecord::CatalogDeclared(_) => RECORD_KIND_POOL_CATALOG_DECLARED,
             SourcePoolRecord::MembershipDeclared(_) => RECORD_KIND_POOL_MEMBERSHIP_DECLARED,
             SourcePoolRecord::Ranked(_) => RECORD_KIND_POOL_RANKED,
         }
@@ -728,6 +871,7 @@ impl SourcePoolRecord {
 
     fn recorded_at_ms(&self) -> u64 {
         match self {
+            SourcePoolRecord::CatalogDeclared(record) => record.declared_at_ms,
             SourcePoolRecord::MembershipDeclared(record) => record.declared_at_ms,
             SourcePoolRecord::Ranked(record) => record.ranked_at_ms,
         }
@@ -735,6 +879,20 @@ impl SourcePoolRecord {
 
     fn validate(&self) -> Result<(), String> {
         match self {
+            SourcePoolRecord::CatalogDeclared(record) => {
+                record.catalog_snapshot.validate()?;
+                let actual_fingerprint = record
+                    .catalog_snapshot
+                    .fingerprint()
+                    .map_err(|err| format!("catalog snapshot was not canonical-json-hashable: {err}"))?;
+                if record.catalog_fingerprint != actual_fingerprint {
+                    return Err(format!(
+                        "catalog fingerprint `{}` did not match canonical snapshot fingerprint `{actual_fingerprint}`",
+                        record.catalog_fingerprint
+                    ));
+                }
+                Ok(())
+            }
             SourcePoolRecord::MembershipDeclared(record) => {
                 validate_source_id_snapshot(&record.member_source_ids)
             }
@@ -754,6 +912,7 @@ impl SourcePoolRecord {
         })?;
 
         let payload = match self {
+            SourcePoolRecord::CatalogDeclared(record) => serde_json::to_value(record),
             SourcePoolRecord::MembershipDeclared(record) => serde_json::to_value(record),
             SourcePoolRecord::Ranked(record) => serde_json::to_value(record),
         }
@@ -773,6 +932,12 @@ impl SourcePoolRecord {
 
     fn from_stream_record(record: &StreamRecord) -> Result<Self, SourcePoolProjectionError> {
         match record.kind.as_str() {
+            RECORD_KIND_POOL_CATALOG_DECLARED => serde_json::from_value(record.payload.clone())
+                .map(SourcePoolRecord::CatalogDeclared)
+                .map_err(|err| SourcePoolProjectionError::InvalidPayload {
+                    kind: record.kind.clone(),
+                    message: err.to_string(),
+                }),
             RECORD_KIND_POOL_MEMBERSHIP_DECLARED => serde_json::from_value(record.payload.clone())
                 .map(SourcePoolRecord::MembershipDeclared)
                 .map_err(|err| SourcePoolProjectionError::InvalidPayload {
@@ -807,6 +972,12 @@ pub struct SourcePoolState {
     pub last_membership_declared_at_ms: Option<u64>,
     /// Timestamp of the most recent `pool_ranked` record.
     pub last_ranked_at_ms: Option<u64>,
+    /// Timestamp of the most recent `pool_catalog_declared` record.
+    pub last_catalog_declared_at_ms: Option<u64>,
+    /// Fingerprint for the declared non-secret routing catalog.
+    pub catalog_fingerprint: Option<String>,
+    /// Declared non-secret routing catalog snapshot.
+    pub catalog_snapshot: Option<SourcePoolCatalogSnapshot>,
     /// Latest membership snapshot for this pool.
     pub member_source_ids: Vec<String>,
     /// Latest raw ranking snapshot for this pool.
@@ -824,6 +995,9 @@ impl SourcePoolState {
             last_recorded_at_ms: None,
             last_membership_declared_at_ms: None,
             last_ranked_at_ms: None,
+            last_catalog_declared_at_ms: None,
+            catalog_fingerprint: None,
+            catalog_snapshot: None,
             member_source_ids: Vec::new(),
             ranked_source_ids: Vec::new(),
         }
@@ -834,18 +1008,72 @@ impl SourcePoolState {
         seq: u64,
         record: &SourcePoolRecord,
     ) -> Result<(), SourcePoolProjectionError> {
-        record
-            .validate()
-            .map_err(SourcePoolProjectionError::InvalidSourceSnapshot)?;
+        record.validate().map_err(|message| match record {
+            SourcePoolRecord::CatalogDeclared(_) => {
+                SourcePoolProjectionError::InvalidCatalogSnapshot(message)
+            }
+            SourcePoolRecord::MembershipDeclared(_) | SourcePoolRecord::Ranked(_) => {
+                SourcePoolProjectionError::InvalidSourceSnapshot(message)
+            }
+        })?;
         self.head_seq = seq;
         self.last_recorded_at_ms = Some(record.recorded_at_ms());
 
         match record {
+            SourcePoolRecord::CatalogDeclared(declared) => {
+                if declared.catalog_snapshot.control_scope != self.pool_ref.control_scope()
+                    || declared.catalog_snapshot.network_id != self.pool_ref.network_id()
+                    || declared.catalog_snapshot.pool_kind != self.pool_ref.pool_kind()
+                {
+                    return Err(SourcePoolProjectionError::InvalidCatalogSnapshot(format!(
+                        "catalog snapshot identity `{}/{}/{}` did not match pool `{}`",
+                        declared.catalog_snapshot.control_scope,
+                        declared.catalog_snapshot.network_id,
+                        declared.catalog_snapshot.pool_kind,
+                        self.pool_ref
+                    )));
+                }
+                self.last_catalog_declared_at_ms = Some(declared.declared_at_ms);
+                self.catalog_fingerprint = Some(declared.catalog_fingerprint.clone());
+                self.catalog_snapshot = Some(declared.catalog_snapshot.clone());
+            }
             SourcePoolRecord::MembershipDeclared(declared) => {
+                if let Some(snapshot) = &self.catalog_snapshot {
+                    let declared_source_ids = snapshot
+                        .sources
+                        .iter()
+                        .map(|source| source.id.as_str())
+                        .collect::<BTreeSet<_>>();
+                    for source_id in &declared.member_source_ids {
+                        if !declared_source_ids.contains(source_id.as_str()) {
+                            return Err(SourcePoolProjectionError::InvalidCatalogSnapshot(
+                                format!(
+                                    "membership source_id `{source_id}` was not declared in the pool catalog"
+                                ),
+                            ));
+                        }
+                    }
+                }
                 self.last_membership_declared_at_ms = Some(declared.declared_at_ms);
                 self.member_source_ids = declared.member_source_ids.clone();
             }
             SourcePoolRecord::Ranked(ranked) => {
+                if let Some(snapshot) = &self.catalog_snapshot {
+                    let declared_source_ids = snapshot
+                        .sources
+                        .iter()
+                        .map(|source| source.id.as_str())
+                        .collect::<BTreeSet<_>>();
+                    for source_id in &ranked.ranked_source_ids {
+                        if !declared_source_ids.contains(source_id.as_str()) {
+                            return Err(SourcePoolProjectionError::InvalidCatalogSnapshot(
+                                format!(
+                                    "ranked source_id `{source_id}` was not declared in the pool catalog"
+                                ),
+                            ));
+                        }
+                    }
+                }
                 self.last_ranked_at_ms = Some(ranked.ranked_at_ms);
                 self.ranked_source_ids = ranked.ranked_source_ids.clone();
             }
@@ -914,7 +1142,7 @@ pub enum SourcePoolProjectionError {
         /// Observed sequence number.
         actual: u64,
     },
-    /// The stream id did not parse as `source_pool:<network_id>:<pool_kind>`.
+    /// The stream id did not parse as `source_pool:<control_scope>:<network_id>:<pool_kind>`.
     InvalidStreamId(String),
     /// The record kind was not one of the v1 `source_pool:*` kinds.
     UnsupportedRecordKind(String),
@@ -925,6 +1153,8 @@ pub enum SourcePoolProjectionError {
         /// Serde error message.
         message: String,
     },
+    /// The catalog snapshot carried invalid non-secret routing metadata.
+    InvalidCatalogSnapshot(String),
     /// The membership or ranking snapshot carried invalid source ids.
     InvalidSourceSnapshot(String),
 }
@@ -948,6 +1178,9 @@ impl fmt::Display for SourcePoolProjectionError {
             }
             SourcePoolProjectionError::InvalidPayload { kind, message } => {
                 write!(f, "invalid `{kind}` payload: {message}")
+            }
+            SourcePoolProjectionError::InvalidCatalogSnapshot(message) => {
+                write!(f, "invalid catalog snapshot: {message}")
             }
             SourcePoolProjectionError::InvalidSourceSnapshot(message) => {
                 write!(f, "invalid source snapshot: {message}")
@@ -1067,8 +1300,11 @@ CREATE TABLE IF NOT EXISTS mfm_source_pool_state (
   stream_id TEXT NOT NULL UNIQUE,
   head_seq BIGINT NOT NULL,
   last_recorded_at_ms BIGINT NULL,
+  last_catalog_declared_at_ms BIGINT NULL,
   last_membership_declared_at_ms BIGINT NULL,
   last_ranked_at_ms BIGINT NULL,
+  catalog_fingerprint TEXT NULL,
+  catalog_snapshot JSONB NULL,
   member_source_ids JSONB NOT NULL,
   ranked_source_ids JSONB NOT NULL,
   PRIMARY KEY (control_scope, network_id, pool_kind),
@@ -1261,8 +1497,11 @@ SELECT
   stream_id,
   head_seq,
   last_recorded_at_ms,
+  last_catalog_declared_at_ms,
   last_membership_declared_at_ms,
   last_ranked_at_ms,
+  catalog_fingerprint,
+  catalog_snapshot,
   member_source_ids,
   ranked_source_ids
 FROM mfm_source_pool_state
@@ -1301,6 +1540,64 @@ WHERE control_scope = $1 AND network_id = $2 AND pool_kind = $3
                 format!("invalid source_pool projection stream id: {err}"),
             )
         })?;
+        let catalog_fingerprint: Option<String> = row.get(9);
+        let catalog_snapshot = row
+            .get::<_, Option<serde_json::Value>>(10)
+            .map(|value| {
+                let snapshot: SourcePoolCatalogSnapshot =
+                    serde_json::from_value(value).map_err(|err| {
+                        storage_corruption(
+                            "control_plane_projection_invalid",
+                            format!(
+                                "invalid mfm_source_pool_state.catalog_snapshot JSON shape: {err}"
+                            ),
+                        )
+                    })?;
+                snapshot.validate().map_err(|message| {
+                    storage_corruption(
+                        "control_plane_projection_invalid",
+                        format!("invalid mfm_source_pool_state.catalog_snapshot: {message}"),
+                    )
+                })?;
+                Ok(snapshot)
+            })
+            .transpose()?;
+        if catalog_fingerprint.is_some() != catalog_snapshot.is_some() {
+            return Err(storage_corruption(
+                "control_plane_projection_invalid",
+                "mfm_source_pool_state catalog fingerprint and snapshot must be present together",
+            ));
+        }
+        if let (Some(catalog_fingerprint), Some(catalog_snapshot)) =
+            (&catalog_fingerprint, &catalog_snapshot)
+        {
+            let expected = catalog_snapshot.fingerprint().map_err(|err| {
+                storage_corruption(
+                    "control_plane_projection_invalid",
+                    format!(
+                        "mfm_source_pool_state catalog snapshot was not canonical-json-hashable: {err}"
+                    ),
+                )
+            })?;
+            if catalog_fingerprint != &expected {
+                return Err(storage_corruption(
+                    "control_plane_projection_invalid",
+                    format!(
+                        "mfm_source_pool_state catalog fingerprint `{catalog_fingerprint}` did not match canonical snapshot fingerprint `{expected}`"
+                    ),
+                ));
+            }
+            if catalog_snapshot.control_scope != pool_ref.control_scope()
+                || catalog_snapshot.network_id != pool_ref.network_id()
+                || catalog_snapshot.pool_kind != pool_ref.pool_kind()
+            {
+                return Err(storage_corruption(
+                    "control_plane_projection_invalid",
+                    "mfm_source_pool_state catalog snapshot identity did not match pool identity",
+                ));
+            }
+        }
+
         Ok(SourcePoolState {
             pool_ref,
             stream_id,
@@ -1310,19 +1607,25 @@ WHERE control_scope = $1 AND network_id = $2 AND pool_kind = $3
                 "mfm_source_pool_state.last_recorded_at_ms",
             )?,
             last_membership_declared_at_ms: opt_i64_to_u64(
-                row.get::<_, Option<i64>>(6),
+                row.get::<_, Option<i64>>(7),
                 "mfm_source_pool_state.last_membership_declared_at_ms",
             )?,
             last_ranked_at_ms: opt_i64_to_u64(
-                row.get::<_, Option<i64>>(7),
+                row.get::<_, Option<i64>>(8),
                 "mfm_source_pool_state.last_ranked_at_ms",
             )?,
+            last_catalog_declared_at_ms: opt_i64_to_u64(
+                row.get::<_, Option<i64>>(6),
+                "mfm_source_pool_state.last_catalog_declared_at_ms",
+            )?,
+            catalog_fingerprint,
+            catalog_snapshot,
             member_source_ids: Self::source_id_snapshot_from_json(
-                row.get::<_, serde_json::Value>(8),
+                row.get::<_, serde_json::Value>(11),
                 "mfm_source_pool_state.member_source_ids",
             )?,
             ranked_source_ids: Self::source_id_snapshot_from_json(
-                row.get::<_, serde_json::Value>(9),
+                row.get::<_, serde_json::Value>(12),
                 "mfm_source_pool_state.ranked_source_ids",
             )?,
         })
@@ -1441,19 +1744,25 @@ INSERT INTO mfm_source_pool_state (
   stream_id,
   head_seq,
   last_recorded_at_ms,
+  last_catalog_declared_at_ms,
   last_membership_declared_at_ms,
   last_ranked_at_ms,
+  catalog_fingerprint,
+  catalog_snapshot,
   member_source_ids,
   ranked_source_ids
 ) VALUES (
-  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
 )
 ON CONFLICT (control_scope, network_id, pool_kind) DO UPDATE SET
   stream_id = EXCLUDED.stream_id,
   head_seq = EXCLUDED.head_seq,
   last_recorded_at_ms = EXCLUDED.last_recorded_at_ms,
+  last_catalog_declared_at_ms = EXCLUDED.last_catalog_declared_at_ms,
   last_membership_declared_at_ms = EXCLUDED.last_membership_declared_at_ms,
   last_ranked_at_ms = EXCLUDED.last_ranked_at_ms,
+  catalog_fingerprint = EXCLUDED.catalog_fingerprint,
+  catalog_snapshot = EXCLUDED.catalog_snapshot,
   member_source_ids = EXCLUDED.member_source_ids,
   ranked_source_ids = EXCLUDED.ranked_source_ids
 "#,
@@ -1468,6 +1777,10 @@ ON CONFLICT (control_scope, network_id, pool_kind) DO UPDATE SET
                     .map(|value| u64_to_i64(value, "last_recorded_at_ms"))
                     .transpose()?,
                 &state
+                    .last_catalog_declared_at_ms
+                    .map(|value| u64_to_i64(value, "last_catalog_declared_at_ms"))
+                    .transpose()?,
+                &state
                     .last_membership_declared_at_ms
                     .map(|value| u64_to_i64(value, "last_membership_declared_at_ms"))
                     .transpose()?,
@@ -1475,6 +1788,26 @@ ON CONFLICT (control_scope, network_id, pool_kind) DO UPDATE SET
                     .last_ranked_at_ms
                     .map(|value| u64_to_i64(value, "last_ranked_at_ms"))
                     .transpose()?,
+                &state.catalog_fingerprint,
+                &state
+                    .catalog_snapshot
+                    .as_ref()
+                    .map(|snapshot| {
+                        snapshot.validate().map_err(|message| {
+                            storage_other(
+                                "control_plane_projection_invalid",
+                                format!("invalid catalog_snapshot: {message}"),
+                            )
+                        })?;
+                        serde_json::to_value(snapshot).map_err(|err| {
+                            storage_other(
+                                "control_plane_record_encode_failed",
+                                format!("failed to encode catalog_snapshot: {err}"),
+                            )
+                        })
+                    })
+                    .transpose()
+                    ?,
                 &member_source_ids,
                 &ranked_source_ids,
             ],
@@ -1793,8 +2126,11 @@ SELECT
   stream_id,
   head_seq,
   last_recorded_at_ms,
+  last_catalog_declared_at_ms,
   last_membership_declared_at_ms,
   last_ranked_at_ms,
+  catalog_fingerprint,
+  catalog_snapshot,
   member_source_ids,
   ranked_source_ids
 FROM mfm_source_pool_state
@@ -1833,8 +2169,11 @@ SELECT
   stream_id,
   head_seq,
   last_recorded_at_ms,
+  last_catalog_declared_at_ms,
   last_membership_declared_at_ms,
   last_ranked_at_ms,
+  catalog_fingerprint,
+  catalog_snapshot,
   member_source_ids,
   ranked_source_ids
 FROM mfm_source_pool_state
@@ -2059,6 +2398,43 @@ mod tests {
         SourcePoolRef::new("shared", "eth-mainnet", "default").expect("valid source pool ref")
     }
 
+    fn catalog_snapshot() -> SourcePoolCatalogSnapshot {
+        SourcePoolCatalogSnapshot {
+            schema_version: SOURCE_POOL_CATALOG_SCHEMA_VERSION,
+            control_scope: "shared".to_string(),
+            network_id: "eth-mainnet".to_string(),
+            pool_kind: "default".to_string(),
+            sources: vec![
+                SourcePoolCatalogSource {
+                    id: "archive_local".to_string(),
+                    kind: "local".to_string(),
+                    require_get_proof_probe: false,
+                },
+                SourcePoolCatalogSource {
+                    id: "fallback_local".to_string(),
+                    kind: "remote_public".to_string(),
+                    require_get_proof_probe: false,
+                },
+                SourcePoolCatalogSource {
+                    id: "helios_local".to_string(),
+                    kind: "local".to_string(),
+                    require_get_proof_probe: false,
+                },
+                SourcePoolCatalogSource {
+                    id: "reth_local".to_string(),
+                    kind: "local".to_string(),
+                    require_get_proof_probe: false,
+                },
+                SourcePoolCatalogSource {
+                    id: "unknown_local".to_string(),
+                    kind: "remote_public".to_string(),
+                    require_get_proof_probe: false,
+                },
+            ],
+            preferred_source_ids: vec!["reth_local".to_string(), "helios_local".to_string()],
+        }
+    }
+
     #[test]
     fn rpc_source_ref_round_trips_through_stream_id() {
         let source_ref = source_ref();
@@ -2249,30 +2625,43 @@ mod tests {
     fn rebuild_source_pool_state_applies_membership_and_ranking() {
         let pool_ref = pool_ref();
         let stream_id = pool_ref.stream_id();
+        let catalog_snapshot = catalog_snapshot();
+        let catalog_fingerprint = catalog_snapshot.fingerprint().expect("catalog fingerprint");
         let records = vec![
             StreamRecord {
                 stream_id: stream_id.clone(),
                 seq: 1,
                 ts_millis: Some(100),
-                kind: RECORD_KIND_POOL_MEMBERSHIP_DECLARED.to_string(),
+                kind: RECORD_KIND_POOL_CATALOG_DECLARED.to_string(),
                 payload: serde_json::json!({
                     "declared_at_ms": 100_u64,
-                    "member_source_ids": ["reth_local", "helios_local", "fallback_local"],
+                    "catalog_fingerprint": catalog_fingerprint,
+                    "catalog_snapshot": catalog_snapshot,
                 }),
             },
             StreamRecord {
                 stream_id: stream_id.clone(),
                 seq: 2,
+                ts_millis: Some(100),
+                kind: RECORD_KIND_POOL_MEMBERSHIP_DECLARED.to_string(),
+                payload: serde_json::json!({
+                    "declared_at_ms": 100_u64,
+                    "member_source_ids": ["reth_local", "helios_local", "archive_local"],
+                }),
+            },
+            StreamRecord {
+                stream_id: stream_id.clone(),
+                seq: 3,
                 ts_millis: Some(110),
                 kind: RECORD_KIND_POOL_RANKED.to_string(),
                 payload: serde_json::json!({
                     "ranked_at_ms": 110_u64,
-                    "ranked_source_ids": ["helios_local", "reth_local", "unknown_local"],
+                    "ranked_source_ids": ["helios_local", "reth_local"],
                 }),
             },
             StreamRecord {
                 stream_id,
-                seq: 3,
+                seq: 4,
                 ts_millis: Some(120),
                 kind: RECORD_KIND_POOL_MEMBERSHIP_DECLARED.to_string(),
                 payload: serde_json::json!({
@@ -2283,10 +2672,16 @@ mod tests {
         ];
 
         let state = rebuild_source_pool_state(pool_ref, &records).expect("rebuild succeeds");
-        assert_eq!(state.head_seq, 3);
+        assert_eq!(state.head_seq, 4);
         assert_eq!(state.last_recorded_at_ms, Some(120));
+        assert_eq!(state.last_catalog_declared_at_ms, Some(100));
         assert_eq!(state.last_membership_declared_at_ms, Some(120));
         assert_eq!(state.last_ranked_at_ms, Some(110));
+        assert_eq!(
+            state.catalog_fingerprint.as_deref(),
+            Some(catalog_fingerprint.as_str())
+        );
+        assert!(state.catalog_snapshot.is_some());
         assert_eq!(
             state.member_source_ids,
             vec![
@@ -2297,11 +2692,7 @@ mod tests {
         );
         assert_eq!(
             state.ranked_source_ids,
-            vec![
-                "helios_local".to_string(),
-                "reth_local".to_string(),
-                "unknown_local".to_string()
-            ]
+            vec!["helios_local".to_string(), "reth_local".to_string()]
         );
         assert_eq!(
             state.ordered_source_ids(),
@@ -2320,6 +2711,77 @@ mod tests {
                 RpcSourceRef::new("shared", "eth-mainnet", "reth_local").expect("valid"),
                 RpcSourceRef::new("shared", "eth-mainnet", "archive_local").expect("valid"),
             ]
+        );
+    }
+
+    #[test]
+    fn rebuild_source_pool_state_rejects_catalog_fingerprint_mismatch() {
+        let pool_ref = pool_ref();
+        let snapshot = catalog_snapshot();
+        let expected_fingerprint = snapshot.fingerprint().expect("catalog fingerprint");
+        let err = rebuild_source_pool_state(
+            pool_ref.clone(),
+            &[StreamRecord {
+                stream_id: pool_ref.stream_id(),
+                seq: 1,
+                ts_millis: Some(100),
+                kind: RECORD_KIND_POOL_CATALOG_DECLARED.to_string(),
+                payload: serde_json::json!({
+                    "declared_at_ms": 100_u64,
+                    "catalog_fingerprint": "bad-fingerprint",
+                    "catalog_snapshot": snapshot,
+                }),
+            }],
+        )
+        .expect_err("bad catalog fingerprint must fail");
+        assert_eq!(
+            err,
+            SourcePoolProjectionError::InvalidCatalogSnapshot(
+                format!(
+                    "catalog fingerprint `bad-fingerprint` did not match canonical snapshot fingerprint `{expected_fingerprint}`"
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn rebuild_source_pool_state_rejects_membership_outside_declared_catalog() {
+        let pool_ref = pool_ref();
+        let snapshot = catalog_snapshot();
+        let fingerprint = snapshot.fingerprint().expect("catalog fingerprint");
+        let err = rebuild_source_pool_state(
+            pool_ref.clone(),
+            &[
+                StreamRecord {
+                    stream_id: pool_ref.stream_id(),
+                    seq: 1,
+                    ts_millis: Some(100),
+                    kind: RECORD_KIND_POOL_CATALOG_DECLARED.to_string(),
+                    payload: serde_json::json!({
+                        "declared_at_ms": 100_u64,
+                        "catalog_fingerprint": fingerprint,
+                        "catalog_snapshot": snapshot,
+                    }),
+                },
+                StreamRecord {
+                    stream_id: pool_ref.stream_id(),
+                    seq: 2,
+                    ts_millis: Some(110),
+                    kind: RECORD_KIND_POOL_MEMBERSHIP_DECLARED.to_string(),
+                    payload: serde_json::json!({
+                        "declared_at_ms": 110_u64,
+                        "member_source_ids": ["reth_local", "rogue_local"],
+                    }),
+                },
+            ],
+        )
+        .expect_err("membership outside declared catalog must fail");
+        assert_eq!(
+            err,
+            SourcePoolProjectionError::InvalidCatalogSnapshot(
+                "membership source_id `rogue_local` was not declared in the pool catalog"
+                    .to_string()
+            )
         );
     }
 
