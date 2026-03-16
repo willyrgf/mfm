@@ -2551,6 +2551,7 @@ dependencies = [
  "mfm-collectors-rpc-control",
  "mfm-control-plane-postgres",
  "mfm-machine",
+ "mfm-stream-store-mem",
  "serde",
  "serde_json",
  "tokio",

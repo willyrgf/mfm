@@ -30,9 +30,11 @@ use mfm_collectors_rpc_control::{
 };
 use mfm_control_plane_postgres::{
     rebuild_rpc_source_state, rebuild_source_pool_state, ControlPlanePostgresStore,
+    SourcePoolCatalogDeclaredRecord, SourcePoolCatalogSnapshot, SourcePoolCatalogSource,
     RpcSourceObservedRecord, RpcSourceOutcome, RpcSourceProbeKind, RpcSourceProbedRecord,
     RpcSourceRecord, RpcSourceRef, RpcSourceState, SourcePoolMembershipDeclaredRecord,
     SourcePoolRankedRecord, SourcePoolRecord, SourcePoolRef, SourcePoolState,
+    SOURCE_POOL_CATALOG_SCHEMA_VERSION,
 };
 use mfm_machine::errors::{ErrorCategory, ErrorInfo, IoError, StorageError};
 use mfm_machine::ids::ErrorCode;
@@ -212,6 +214,14 @@ fn kind_rank(kind: EvmSourceKind) -> u8 {
         EvmSourceKind::Local => 0,
         EvmSourceKind::RemoteUser => 1,
         EvmSourceKind::RemotePublic => 2,
+    }
+}
+
+fn source_kind_label(kind: EvmSourceKind) -> &'static str {
+    match kind {
+        EvmSourceKind::Local => "local",
+        EvmSourceKind::RemoteUser => "remote_user",
+        EvmSourceKind::RemotePublic => "remote_public",
     }
 }
 
@@ -844,6 +854,101 @@ impl RpcControlTransport {
         Ok(ordered)
     }
 
+    fn catalog_snapshot_for_pool(
+        &self,
+        control_scope: &str,
+        network_id: &str,
+        pool_kind: &str,
+        candidates: &[RpcControlBootstrapSource],
+    ) -> Result<SourcePoolCatalogSnapshot, IoError> {
+        let candidate_ids = candidates
+            .iter()
+            .map(|source| source.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut sources = candidates
+            .iter()
+            .map(|source| SourcePoolCatalogSource {
+                id: source.id.clone(),
+                kind: source_kind_label(source.kind).to_string(),
+                require_get_proof_probe: source.require_get_proof_probe,
+            })
+            .collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.id.cmp(&right.id));
+
+        let preferred_source_ids = self
+            .catalog
+            .preferred_order
+            .iter()
+            .filter(|source_id| candidate_ids.contains(source_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let snapshot = SourcePoolCatalogSnapshot {
+            schema_version: SOURCE_POOL_CATALOG_SCHEMA_VERSION,
+            control_scope: control_scope.to_string(),
+            network_id: network_id.to_string(),
+            pool_kind: pool_kind.to_string(),
+            sources,
+            preferred_source_ids,
+        };
+        snapshot.validate().map_err(|message| {
+            io_transport(
+                "rpc_control_catalog_invalid",
+                ErrorCategory::ParsingInput,
+                false,
+                format!("invalid rpc.control catalog snapshot: {message}"),
+            )
+        })?;
+        Ok(snapshot)
+    }
+
+    async fn ensure_declared_catalog(
+        &mut self,
+        pool_ref: &SourcePoolRef,
+        catalog_snapshot: &SourcePoolCatalogSnapshot,
+    ) -> Result<SourcePoolState, IoError> {
+        let catalog_fingerprint = catalog_snapshot.fingerprint().map_err(|err| {
+            io_transport(
+                "rpc_control_catalog_invalid",
+                ErrorCategory::ParsingInput,
+                false,
+                format!("rpc.control catalog snapshot was not canonical-json-hashable: {err}"),
+            )
+        })?;
+        let current_pool = self.control_plane_store.source_pool_state(pool_ref).await?;
+        if let Some(current_pool) = current_pool {
+            match current_pool.catalog_fingerprint.as_deref() {
+                Some(current) if current == catalog_fingerprint => return Ok(current_pool),
+                Some(current) => {
+                    return Err(io_other(
+                        "rpc_control_catalog_mismatch",
+                        ErrorCategory::Storage,
+                        false,
+                        format!(
+                            "rpc.control catalog mismatch for scope `{}` network `{}` pool `{}`: declared fingerprint `{current}` did not match current fingerprint `{catalog_fingerprint}`",
+                            pool_ref.control_scope(),
+                            pool_ref.network_id(),
+                            pool_ref.pool_kind(),
+                        ),
+                    ));
+                }
+                None => {}
+            }
+        }
+
+        self.append_source_pool_records_retry(
+            pool_ref,
+            vec![SourcePoolRecord::CatalogDeclared(
+                SourcePoolCatalogDeclaredRecord {
+                    declared_at_ms: now_ms()?,
+                    catalog_fingerprint,
+                    catalog_snapshot: catalog_snapshot.clone(),
+                },
+            )],
+        )
+        .await
+    }
+
     fn resolve_network_scope(&self, requested_network_id: Option<&str>) -> Result<String, IoError> {
         if let Some(network_id) = requested_network_id {
             let trimmed = network_id.trim();
@@ -1249,10 +1354,13 @@ impl RpcControlTransport {
                 )
             })?;
 
-        let current_pool = self
-            .control_plane_store
-            .source_pool_state(&pool_ref)
-            .await?;
+        let catalog_snapshot = self.catalog_snapshot_for_pool(
+            control_scope,
+            network_scope,
+            DEFAULT_POOL_KIND,
+            &candidates,
+        )?;
+        let current_pool = Some(self.ensure_declared_catalog(&pool_ref, &catalog_snapshot).await?);
         if current_pool
             .as_ref()
             .map(|state| state.member_source_ids.as_slice())
@@ -1472,6 +1580,32 @@ impl LiveIoTransport for RpcControlTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use mfm_stream_store_mem::MemStreamStore;
+
+    struct StubExecutor;
+
+    #[async_trait]
+    impl LiveIoTransport for StubExecutor {
+        async fn call(&mut self, call: IoCall) -> Result<serde_json::Value, IoError> {
+            let method = call
+                .request
+                .get("method")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            match method {
+                "eth_blockNumber" => Ok(serde_json::json!("0x1")),
+                "eth_getProof" => Ok(serde_json::json!({"accountProof": []})),
+                other => Err(io_transport(
+                    "stub_executor_unsupported",
+                    ErrorCategory::Unknown,
+                    false,
+                    format!("stub executor does not support `{other}`"),
+                )),
+            }
+        }
+    }
 
     fn source(
         id: &str,
@@ -1494,6 +1628,24 @@ mod tests {
         RpcControlTransport {
             executor: None,
             control_plane_store: ControlPlaneStore::PostgresEnv { store: None },
+            catalog: BootstrapCatalog {
+                sources,
+                preferred_order,
+            },
+            config_error: None,
+        }
+    }
+
+    fn stream_backed_transport_for_tests(
+        streams: Arc<MemStreamStore>,
+        sources: Vec<RpcControlBootstrapSource>,
+    ) -> RpcControlTransport {
+        let preferred_order = sources.iter().map(|source| source.id.clone()).collect();
+        RpcControlTransport {
+            executor: Some(Box::new(StubExecutor)),
+            control_plane_store: ControlPlaneStore::StreamBacked(
+                StreamBackedControlPlaneStore::new(streams),
+            ),
             catalog: BootstrapCatalog {
                 sources,
                 preferred_order,
@@ -1659,5 +1811,113 @@ mod tests {
             .await
             .expect_err("networkless managed calls must fail");
         assert_eq!(io_error_code(&err), "rpc_control_network_required");
+    }
+
+    #[tokio::test]
+    async fn same_scope_different_catalog_is_rejected() {
+        let streams = Arc::new(MemStreamStore::new());
+        let mut first = stream_backed_transport_for_tests(
+            Arc::clone(&streams),
+            vec![source(
+                "primary",
+                Some("ethereum-mainnet"),
+                EvmSourceKind::Local,
+                false,
+            )],
+        );
+        first
+            .prepare_sources_impl("shared", "ethereum-mainnet")
+            .await
+            .expect("first catalog declaration should succeed");
+
+        let mut second = stream_backed_transport_for_tests(
+            Arc::clone(&streams),
+            vec![
+                source(
+                    "primary",
+                    Some("ethereum-mainnet"),
+                    EvmSourceKind::Local,
+                    false,
+                ),
+                source(
+                    "secondary",
+                    Some("ethereum-mainnet"),
+                    EvmSourceKind::RemotePublic,
+                    false,
+                ),
+            ],
+        );
+        let err = second
+            .prepare_sources_impl("shared", "ethereum-mainnet")
+            .await
+            .expect_err("mismatched catalog must fail");
+        assert_eq!(io_error_code(&err), "rpc_control_catalog_mismatch");
+    }
+
+    #[tokio::test]
+    async fn same_catalog_declaration_is_idempotent() {
+        let streams = Arc::new(MemStreamStore::new());
+        let sources = vec![source(
+            "primary",
+            Some("ethereum-mainnet"),
+            EvmSourceKind::Local,
+            false,
+        )];
+        let mut first = stream_backed_transport_for_tests(Arc::clone(&streams), sources.clone());
+        let first_prepared = first
+            .prepare_sources_impl("shared", "ethereum-mainnet")
+            .await
+            .expect("first declaration should succeed");
+
+        let mut second = stream_backed_transport_for_tests(Arc::clone(&streams), sources);
+        let second_prepared = second
+            .prepare_sources_impl("shared", "ethereum-mainnet")
+            .await
+            .expect("matching declaration should succeed");
+
+        assert_eq!(
+            first_prepared.available_source_ids,
+            second_prepared.available_source_ids
+        );
+        assert_eq!(
+            first_prepared.ranked_source_ids,
+            second_prepared.ranked_source_ids
+        );
+    }
+
+    #[tokio::test]
+    async fn same_scope_across_different_networks_does_not_collide() {
+        let streams = Arc::new(MemStreamStore::new());
+        let mut mainnet = stream_backed_transport_for_tests(
+            Arc::clone(&streams),
+            vec![source(
+                "mainnet_primary",
+                Some("ethereum-mainnet"),
+                EvmSourceKind::Local,
+                false,
+            )],
+        );
+        mainnet
+            .prepare_sources_impl("shared", "ethereum-mainnet")
+            .await
+            .expect("mainnet declaration should succeed");
+
+        let mut arbitrum = stream_backed_transport_for_tests(
+            Arc::clone(&streams),
+            vec![source(
+                "arb_primary",
+                Some("arbitrum-mainnet"),
+                EvmSourceKind::RemotePublic,
+                false,
+            )],
+        );
+        let prepared = arbitrum
+            .prepare_sources_impl("shared", "arbitrum-mainnet")
+            .await
+            .expect("different network should not collide");
+        assert_eq!(
+            prepared.available_source_ids,
+            vec!["arb_primary".to_string()]
+        );
     }
 }

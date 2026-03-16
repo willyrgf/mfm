@@ -20,3 +20,4 @@ mfm-control-plane-postgres = { path = "../../storages/control-plane-postgres", v
 
 [dev-dependencies]
 tokio = { workspace = true }
+mfm-stream-store-mem = { path = "../../storages/stream-store-mem", version = "0.1.0" }
