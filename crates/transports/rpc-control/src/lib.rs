@@ -40,13 +40,10 @@ use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{LiveIoEnv, LiveIoTransport, LiveIoTransportFactory};
 use mfm_machine::stores::{StreamAppend, StreamStore};
 
-const ENV_EVM_RPC_URL: &str = "MFM_EVM_RPC_URL";
-const ENV_EVM_RPC_AUTHORIZATION: &str = "MFM_EVM_RPC_AUTHORIZATION";
 const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
 const ENV_EVM_RPC_PREFERRED_ORDER: &str = "MFM_EVM_RPC_PREFERRED_ORDER";
 const ENV_EVM_RPC_REQUIRE_GET_PROOF_IDS: &str = "MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS";
 
-const DEFAULT_NETWORK_SCOPE: &str = "__default__";
 const DEFAULT_POOL_KIND: &str = "default";
 const PROBE_REFRESH_INTERVAL_MS: u64 = 15_000;
 const FAILURE_COOLDOWN_MS: u64 = 15_000;
@@ -228,8 +225,7 @@ fn normalize_optional_field(raw: Option<String>) -> Option<String> {
 pub struct RpcControlBootstrapSource {
     /// Stable source identifier.
     pub id: String,
-    /// Optional stable network identifier. When omitted, the source belongs to the default/global
-    /// scope and can be used when no network-specific sources exist.
+    /// Stable network identifier.
     pub network_id: Option<String>,
     /// Full RPC URL.
     pub rpc_url: String,
@@ -512,6 +508,8 @@ pub enum RpcControlConfigError {
     DuplicateSourceId(String),
     /// Preferred ordering referenced an unknown source id.
     UnknownPreferredSourceId(String),
+    /// A configured source omitted `network_id`.
+    MissingNetworkId(String),
 }
 
 impl std::fmt::Display for RpcControlConfigError {
@@ -528,6 +526,9 @@ impl std::fmt::Display for RpcControlConfigError {
             }
             RpcControlConfigError::UnknownPreferredSourceId(source_id) => {
                 write!(f, "preferred source id not found in registry: {source_id}")
+            }
+            RpcControlConfigError::MissingNetworkId(source_id) => {
+                write!(f, "rpc.control source `{source_id}` must declare network_id")
             }
         }
     }
@@ -558,6 +559,15 @@ fn validate_catalog(catalog: &BootstrapCatalog) -> Result<(), RpcControlConfigEr
     for source in &catalog.sources {
         if source.id.trim().is_empty() {
             return Err(RpcControlConfigError::EmptySourceId);
+        }
+        if source
+            .network_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            return Err(RpcControlConfigError::MissingNetworkId(source.id.clone()));
         }
         if !seen.insert(source.id.as_str()) {
             return Err(RpcControlConfigError::DuplicateSourceId(source.id.clone()));
@@ -615,25 +625,6 @@ pub fn resolve_rpc_control_bootstrap_sources_from_env() -> Vec<RpcControlBootstr
     } else {
         Vec::new()
     };
-
-    if sources.is_empty() {
-        let rpc_url = std::env::var(ENV_EVM_RPC_URL)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        if let Some(rpc_url) = rpc_url {
-            sources.push(RpcControlBootstrapSource {
-                id: "user_primary".to_string(),
-                network_id: None,
-                rpc_url,
-                authorization: normalize_optional_field(
-                    std::env::var(ENV_EVM_RPC_AUTHORIZATION).ok(),
-                ),
-                kind: EvmSourceKind::RemoteUser,
-                require_get_proof_probe: false,
-            });
-        }
-    }
 
     let require_get_proof_ids = parse_csv_env(ENV_EVM_RPC_REQUIRE_GET_PROOF_IDS)
         .into_iter()
@@ -811,45 +802,23 @@ impl RpcControlTransport {
         }
     }
 
-    fn global_sources(&self) -> Vec<RpcControlBootstrapSource> {
-        self.catalog
-            .sources
-            .iter()
-            .filter(|source| source.network_id.is_none())
-            .cloned()
-            .collect()
-    }
-
-    fn sources_for_scope(&self, network_scope: &str) -> Vec<RpcControlBootstrapSource> {
-        if network_scope == DEFAULT_NETWORK_SCOPE {
-            return self.global_sources();
-        }
-
-        let specific = self
+    fn ordered_candidate_sources(
+        &self,
+        network_id: &str,
+    ) -> Result<Vec<RpcControlBootstrapSource>, IoError> {
+        let sources = self
             .catalog
             .sources
             .iter()
-            .filter(|source| source.network_id.as_deref() == Some(network_scope))
+            .filter(|source| source.network_id.as_deref() == Some(network_id))
             .cloned()
             .collect::<Vec<_>>();
-        if !specific.is_empty() {
-            return specific;
-        }
-
-        self.global_sources()
-    }
-
-    fn ordered_candidate_sources(
-        &self,
-        network_scope: &str,
-    ) -> Result<Vec<RpcControlBootstrapSource>, IoError> {
-        let sources = self.sources_for_scope(network_scope);
         if sources.is_empty() {
             return Err(io_transport(
                 "rpc_control_no_sources",
                 ErrorCategory::Unknown,
                 false,
-                format!("no bootstrap sources configured for network scope `{network_scope}`"),
+                format!("no bootstrap sources configured for network `{network_id}`"),
             ));
         }
 
@@ -884,29 +853,11 @@ impl RpcControlTransport {
             return Ok(trimmed.to_string());
         }
 
-        let global_sources = self.global_sources();
-        if !global_sources.is_empty() {
-            return Ok(DEFAULT_NETWORK_SCOPE.to_string());
-        }
-
-        let networks = self
-            .catalog
-            .sources
-            .iter()
-            .filter_map(|source| source.network_id.clone())
-            .collect::<BTreeSet<_>>();
-        if networks.len() == 1 {
-            return Ok(networks
-                .into_iter()
-                .next()
-                .expect("single network set should contain one value"));
-        }
-
         Err(io_transport(
             "rpc_control_network_required",
             ErrorCategory::ParsingInput,
             false,
-            "network_id is required when multiple network-specific rpc source catalogs exist",
+            "network_id is required for canonical rpc.control managed calls",
         ))
     }
 
@@ -1423,7 +1374,7 @@ impl RpcControlTransport {
                     "rpc_control_no_sources",
                     ErrorCategory::Unknown,
                     false,
-                    format!("no managed rpc sources available for network scope `{network_scope}`"),
+                    format!("no managed rpc sources available for network `{network_scope}`"),
                 )
             })
     }
@@ -1541,30 +1492,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_env_fallback_maps_to_user_primary() {
+    fn bootstrap_catalog_rejects_missing_network_id() {
         std::env::remove_var(ENV_EVM_RPC_SOURCES_JSON);
-        std::env::set_var(ENV_EVM_RPC_URL, "http://127.0.0.1:8545");
-        std::env::remove_var(ENV_EVM_RPC_REQUIRE_GET_PROOF_IDS);
-
-        let sources = resolve_rpc_control_bootstrap_sources_from_env();
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].id, "user_primary");
-        assert_eq!(sources[0].network_id, None);
-        assert_eq!(sources[0].rpc_url, "http://127.0.0.1:8545");
-
-        std::env::remove_var(ENV_EVM_RPC_URL);
-    }
-
-    #[test]
-    fn network_scope_defaults_to_global_when_available() {
-        let transport = transport_for_tests(vec![
-            source("global_primary", None, EvmSourceKind::RemoteUser, false),
-            source("global_backup", None, EvmSourceKind::RemotePublic, false),
-        ]);
-        let scope = transport
-            .resolve_network_scope(None)
-            .expect("global scope should resolve");
-        assert_eq!(scope, DEFAULT_NETWORK_SCOPE);
+        let catalog = BootstrapCatalog {
+            sources: vec![source("primary", None, EvmSourceKind::RemoteUser, false)],
+            preferred_order: vec!["primary".to_string()],
+        };
+        let err = validate_catalog(&catalog).expect_err("missing network_id must be rejected");
+        assert_eq!(err, RpcControlConfigError::MissingNetworkId("primary".to_string()));
     }
 
     #[test]
@@ -1658,7 +1593,9 @@ mod tests {
         );
 
         let ranked = transport.rank_sources(
-            transport.sources_for_scope("ethereum-mainnet"),
+            transport
+                .ordered_candidate_sources("ethereum-mainnet")
+                .expect("network sources should resolve"),
             &states,
             1_000,
         );
@@ -1689,6 +1626,24 @@ mod tests {
         let err = transport
             .resolve_network_scope(None)
             .expect_err("multi-network catalog should require network");
+        assert_eq!(io_error_code(&err), "rpc_control_network_required");
+    }
+
+    #[tokio::test]
+    async fn managed_call_without_network_id_is_rejected() {
+        let mut transport = transport_for_tests(vec![source(
+            "mainnet",
+            Some("ethereum-mainnet"),
+            EvmSourceKind::Local,
+            false,
+        )]);
+        let err = transport
+            .handle_evm_call(mfm_collectors_rpc_control::JsonRpcCall::new(
+                "eth_chainId",
+                serde_json::json!([]),
+            ))
+            .await
+            .expect_err("networkless managed calls must fail");
         assert_eq!(io_error_code(&err), "rpc_control_network_required");
     }
 }
