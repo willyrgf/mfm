@@ -24,8 +24,19 @@
   - `control_scope` is request-visible and participates in durable fact identity.
 - Network identity:
   - canonical managed `rpc.control` calls must provide explicit `network_id`
+  - canonical managed `rpc.control` calls must carry explicit effective `control_scope`
   - no canonical managed fallback to a synthetic global/networkless scope such as `__default__`
+  - no caller-controlled `rpc_source_id` / `route.source_id` in the canonical managed request surface
+  - bootstrap sources that omit `network_id` are invalid in this cutover
   - states/ops that currently omit `network_id` must be updated in the same change
+- Surface cleanup:
+  - remove public/direct EVM write ingress that bypasses or competes with `rpc.control`
+  - keep legitimate deploy/configure/send workflow behavior only as callers of canonical `rpc.control`
+  - remove raw-send compatibility surfaces instead of preserving them
+  - remove `keystore_tx_send_raw`
+  - remove `mfm keystore tx-send-raw`
+  - remove `MFM_EVM_RPC_SOURCE_ID`
+  - remove legacy single-source bootstrap fallback `MFM_EVM_RPC_URL` / `MFM_EVM_RPC_AUTHORIZATION`
 - Rollout/migration:
   - use an explicit control-plane reset
   - do a targeted delete of `rpc_source:*` and `source_pool:*` records/heads from the shared stream tables
@@ -33,9 +44,9 @@
   - do not migrate or rewrite old `__default__`-keyed control-plane streams
 - Catalog safety:
   - same-scope different-catalog usage is a hard error
-  - route-pinned calls must validate that the pinned source belongs to the effective scope/network catalog before execution
   - catalog identity is durably declared append-only in `source_pool:*`
   - fingerprint validation is per `(control_scope, network_id, pool_kind)`
+  - `rpc.control` owns source selection internally; execution must only use sources inside the effective declared catalog
   - current slice uses `pool_kind = default`, so operationally this is still one catalog per scope/network today
 
 ## What failed
@@ -63,9 +74,18 @@
   - global fallback `__default__`
 - Fallback logic lives in:
   - [crates/transports/rpc-control/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/transports/rpc-control/src/lib.rs)
-- Some current production states still issue canonical managed reads without `network_id`:
+- Current public/request bootstrap surface still includes transitional compatibility that this refactor removes:
+  - caller-controlled `route.source_id`
+  - networkless/bootstrap-global sources with `network_id: None`
+  - legacy single-source env fallback `MFM_EVM_RPC_URL` / `MFM_EVM_RPC_AUTHORIZATION`
+- Some current production states/ops still issue canonical managed calls without `network_id`:
   - [crates/evm-runtime/src/states/read.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/evm-runtime/src/states/read.rs)
+  - [crates/evm-runtime/src/states/write.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/evm-runtime/src/states/write.rs)
+  - [crates/evm-runtime/src/rpc.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/evm-runtime/src/rpc.rs)
   - [crates/ops/evm-read-op/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/ops/evm-read-op/src/lib.rs)
+  - [crates/ops/evm-write-op/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/ops/evm-write-op/src/lib.rs)
+  - [crates/states/keystore-submit/src/tx.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/states/keystore-submit/src/tx.rs)
+  - [crates/ops/keystore-tx-op/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/ops/keystore-tx-op/src/lib.rs)
 - This refactor intentionally removes that canonical managed fallback behavior.
 
 ### Test helper behavior
@@ -123,6 +143,12 @@
 - `control_scope` must be explicit in every effective `rpc.control` request shape:
   - `RpcControlRequest::EvmCall`
   - `RpcControlRequest::PrepareSources`
+- Canonical managed request models must not expose caller-controlled source selection:
+  - remove `route.source_id` / `rpc_source_id` from the public `rpc.control` request contract
+  - `rpc.control` remains responsible for choosing the concrete executor source internally
+- Canonical send flows stay inside `rpc.control`:
+  - if `eth_sendRawTransaction` is still needed internally, it remains an internal `rpc.control` execution detail
+  - do not preserve dedicated raw-send compatibility ops/CLI flows as a public surface
 - Client/session defaults are allowed only as a convenience:
   - they must materialize the effective `control_scope` into the serialized request before fact-key hashing and `IoCall` emission
 - Any response surface that echoes identity must keep the fields separate:
@@ -141,6 +167,13 @@
 - `network_id` does not get a default:
   - canonical managed callers must provide it
   - remove canonical managed dependence on `__default__`
+- Bootstrap sources do not get a wildcard/default network:
+  - every configured source must declare explicit `network_id`
+  - remove networkless/bootstrap-global source support in this cutover
+- Legacy single-source bootstrap fallback is removed:
+  - do not keep `MFM_EVM_RPC_URL`
+  - do not keep `MFM_EVM_RPC_AUTHORIZATION`
+  - runtime bootstrap comes from explicit catalog entries only
 
 ### Why this matters in production
 
@@ -191,7 +224,8 @@
   - if no catalog declaration exists yet, append `pool_catalog_declared`
   - if the existing declared fingerprint matches, continue
   - if the existing declared fingerprint differs, fail before any membership/ranking/source writes
-  - route-pinned calls must also validate their pinned source against the effective declared catalog before execution/observation writes
+  - managed source selection/execution must only use sources that belong to the effective declared catalog
+  - there is no public route-pinned compatibility path after this cutover
 - If other states/ops need to consume this metadata later:
   - expose it through typed `rpc.control` request/response surfaces
   - do not let states/ops read storage crates directly
@@ -199,6 +233,8 @@
 ## Explicit Reset Strategy
 
 - This refactor assumes an explicit control-plane reset before rollout.
+- This reset is operationally mandatory:
+  - it must complete before any refactor-era process starts against the shared database/stream store
 - Existing persisted `rpc_source:*` and `source_pool:*` state is disposable for this change.
 - Do not attempt in-place migration from old identities such as:
   - `rpc_source:<network_id>:<source_id>`
@@ -240,6 +276,8 @@
   - must not alias to the same durable fact binding
 - Add an explicit cutover regression test for the new canonical behavior:
   - canonical managed calls without `network_id` must fail with a structured error
+- Add an explicit regression test for custom/manual fact-key paths:
+  - receipt polling and any remaining send helpers must not alias across different `control_scope`
 - Add coverage for both control-plane persistence backends:
   - dedicated Postgres control-plane store
   - `StreamStore` mode over the shared stream substrate
@@ -251,8 +289,12 @@
 - Add a same `(control_scope, network_id)` different-catalog rejection test.
 - Add a same `(control_scope, network_id, pool_kind)` same-catalog idempotence test:
   - repeated declaration of the same normalized catalog must be accepted
-- Add a route-pinned validation test:
-  - pinned source outside the effective scope/network catalog must be rejected before execution
+- Add a config-validation test:
+  - bootstrap sources that omit `network_id` must be rejected
+- Add a surface-removal test:
+  - canonical `rpc.control` requests do not expose caller-controlled `route.source_id`
+- Add a cutover/removal test:
+  - raw-send compatibility op/CLI surfaces are removed rather than preserved
 
 ## What not to do
 
@@ -262,6 +304,15 @@
   - effective scope must participate in serialized request identity and replay facts
 - Do not keep canonical managed support for synthetic networkless/global routing.
   - canonical managed callers must supply `network_id`
+- Do not keep networkless/bootstrap-global source config.
+  - every configured source must declare explicit `network_id`
+- Do not keep caller-controlled source selection on canonical `rpc.control`.
+  - remove `route.source_id` / `rpc_source_id` from the public request surface
+- Do not keep raw-send compatibility surfaces.
+  - remove the dedicated raw-send op/CLI/docs/tests instead of carrying them forward
+- Do not interpret this refactor as deleting legitimate deploy/configure/send workflow behavior.
+  - the change is to collapse public EVM network ingress onto `rpc.control`, not to remove write workflows entirely
+- Do not keep `MFM_EVM_RPC_URL`, `MFM_EVM_RPC_AUTHORIZATION`, or `MFM_EVM_RPC_SOURCE_ID`.
 - Do not rely on Cargo target isolation for control-plane races.
 - Do not assume fresh process/object instances imply fresh control-plane state.
 - Do not persist raw RPC URLs or authorization material in scope/catalog fingerprints.
@@ -283,10 +334,31 @@
   - if defaults are used, they must be normalized into the request before fact-key derivation
 - Hard requirement:
   - canonical managed requests must provide `network_id`
-  - update current states/ops that omit `network_id` in the same change
+  - update current read/write states/ops that omit `network_id` in the same change
 - Hard requirement:
-  - route-pinned calls must validate the pinned source against the effective `(control_scope, network_id, pool_kind)` catalog before execution
+  - remove `JsonRpcRoute` / `route.source_id` from the public `rpc.control` request model
+- Hard requirement:
+  - remove transport logic that derives effective scope/network from caller-selected source ids
+- Hard requirement:
+  - reject bootstrap sources that omit `network_id`
+- Hard requirement:
+  - remove legacy single-source env fallback `MFM_EVM_RPC_URL` / `MFM_EVM_RPC_AUTHORIZATION`
+- Hard requirement:
+  - there is no dedicated raw-send compatibility request/CLI/op after this cutover
 - The exact shape should preserve crate boundaries and avoid smuggling ambient globals into state logic.
+
+### Caller and fact-key updates
+
+- Update reusable EVM read/write state configs and helper functions so canonical managed calls carry explicit `network_id`.
+- Update public send surfaces so any surviving EVM send path is routed through canonical `rpc.control` with explicit `network_id` and `control_scope`.
+- Remove raw-send compatibility surfaces instead of porting them:
+  - `keystore_tx_send_raw`
+  - `mfm keystore tx-send-raw`
+  - related CLI/default-env helpers and compatibility docs/tests
+- Update custom fact-key paths that currently bypass `fact_key_for_request`:
+  - receipt polling
+  - any remaining send helpers
+  - no scope/network aliasing is allowed after cutover
 
 ### Storage layer
 
@@ -327,10 +399,12 @@
 - [crates/collectors/rpc-control/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/collectors/rpc-control/src/lib.rs)
 - [crates/transports/rpc-control/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/transports/rpc-control/src/lib.rs)
 - [crates/storages/control-plane-postgres/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/storages/control-plane-postgres/src/lib.rs)
+- [crates/evm-runtime/src/rpc.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/evm-runtime/src/rpc.rs)
 - [tests/integration/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/src/lib.rs)
 - [docs/evm-rpc-routing.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/docs/evm-rpc-routing.md)
 - [bin/rest-api/README.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/bin/rest-api/README.md)
 - [bin/cli/README.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/bin/cli/README.md)
+- [docs/ops-and-states.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/docs/ops-and-states.md)
 - [crates/collectors/rpc-control/README.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/collectors/rpc-control/README.md)
 - [crates/transports/rpc-control/README.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/transports/rpc-control/README.md)
 - [tests/integration/tests/parity_portfolio_tracker_reth_mock_erc20.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/tests/parity_portfolio_tracker_reth_mock_erc20.rs)
@@ -339,34 +413,265 @@
 - [tests/integration/tests/evm_rpc_pool_failover.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/tests/evm_rpc_pool_failover.rs)
 - [tests/integration/tests/evm_rpc_getlogs_chunking.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/tests/evm_rpc_getlogs_chunking.rs)
 - [crates/evm-runtime/src/states/read.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/evm-runtime/src/states/read.rs)
+- [crates/evm-runtime/src/states/write.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/evm-runtime/src/states/write.rs)
 - [crates/ops/evm-read-op/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/ops/evm-read-op/src/lib.rs)
+- [crates/ops/evm-write-op/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/ops/evm-write-op/src/lib.rs)
+- [crates/ops/keystore-tx-op/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/ops/keystore-tx-op/src/lib.rs)
+- [crates/states/keystore-submit/src/tx.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/states/keystore-submit/src/tx.rs)
+- [bin/cli/src/commands/keystore/tx_send_raw.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/bin/cli/src/commands/keystore/tx_send_raw.rs)
+- [bin/cli/src/support/command_defaults.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/bin/cli/src/support/command_defaults.rs)
 - [docs/architecture.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/docs/architecture.md)
 - [docs/redesign.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/docs/redesign.md)
 
 ## Suggested implementation order
 
-1. Add first-class request-visible `control_scope` to `rpc.control` request/response/client surfaces.
-2. Require explicit `network_id` for canonical managed calls and update current states/ops that omit it.
-3. Make `control_scope` part of durable fact identity by normalizing defaults into serialized requests before hashing.
-4. Treat this as a hard cutover:
+1. Remove caller-controlled source selection from the public `rpc.control` surface:
+   - remove `route.source_id` / `rpc_source_id`
+   - remove dedicated raw-send compatibility surfaces
+2. Add first-class request-visible `control_scope` to `rpc.control` request/response/client surfaces.
+3. Require explicit `network_id` for canonical managed calls and update current read/write states/ops that omit it.
+4. Remove networkless/bootstrap-global source support and legacy single-source env fallback:
+   - every configured source must declare `network_id`
+   - remove `MFM_EVM_RPC_URL` / `MFM_EVM_RPC_AUTHORIZATION`
+5. Make `control_scope` part of durable fact identity by normalizing defaults into serialized requests before hashing.
+6. Update custom/manual fact-key paths so they do not alias across different `control_scope` / `network_id`.
+7. Treat this as a hard cutover:
    - no backward compatibility for pre-refactor `rpc.control` fact identity
-5. Key persisted control-plane identities by `control_scope` plus existing network/source dimensions.
-6. Extend `source_pool:*` with append-only `pool_catalog_declared` and projection support.
-7. Add catalog validation per `(control_scope, network_id, pool_kind)` and enforce it for route-pinned calls too.
-8. Update both control-plane persistence backends to the new identity shape.
-9. Define and execute the explicit control-plane reset:
+8. Key persisted control-plane identities by `control_scope` plus existing network/source dimensions.
+9. Extend `source_pool:*` with append-only `pool_catalog_declared` and projection support.
+10. Add catalog validation per `(control_scope, network_id, pool_kind)`.
+11. Update both control-plane persistence backends to the new identity shape.
+12. Define and execute the explicit control-plane reset:
    - targeted delete of `rpc_source:*` / `source_pool:*`
    - drop/recreate projection tables
-10. Plumb explicit scope through integration helpers and any app-facing configuration surfaces.
-11. Give each shared parity test/session a unique scope where isolation is required.
-12. Add:
+13. Plumb explicit scope through integration helpers and any app-facing configuration surfaces.
+14. Give each shared parity test/session a unique scope where isolation is required.
+15. Add:
    - one intentional shared-scope integration test
    - one cross-network shared-scope test
    - one replay/fact-key isolation regression test
    - one no-`network_id` canonical rejection test
+   - one networkless-source config rejection test
    - one same-catalog idempotence test
-   - one route-pinned catalog rejection test
-13. Consider whether same-scope retry/backoff should be improved.
+   - one removed-surface regression for raw-send/source-pin compatibility removal
+16. Consider whether same-scope retry/backoff should be improved.
+
+## Commit-by-commit checklist
+
+The sequence below is the recommended implementation plan for landing this refactor on `dev`.
+Each commit is intended to be reviewable and to leave the tree in a coherent state.
+Commit subjects below follow the repo convention and are written in lower case.
+
+### Commit 1
+
+- Subject:
+  - `remove raw-send and route-pinned rpc-control compatibility surfaces`
+- Goal:
+  - cut the non-canonical public ingress first so every surviving caller is aligned around managed `rpc.control`
+- Required changes:
+  - remove `JsonRpcRoute` / `route.source_id` from the public `rpc.control` request model
+  - remove `keystore_tx_send_raw`
+  - remove `mfm keystore tx-send-raw`
+  - remove `MFM_EVM_RPC_SOURCE_ID`
+  - unregister the raw-send op from the default app bundle
+  - delete compatibility docs/tests that only exist for route-pinned/raw-send behavior
+- Primary files:
+  - [crates/collectors/rpc-control/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/collectors/rpc-control/src/lib.rs)
+  - [crates/ops/keystore-tx-op/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/ops/keystore-tx-op/src/lib.rs)
+  - [crates/states/keystore-submit/src/tx.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/states/keystore-submit/src/tx.rs)
+  - [bin/cli/src/commands/keystore/tx_send_raw.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/bin/cli/src/commands/keystore/tx_send_raw.rs)
+  - [bin/cli/src/support/command_defaults.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/bin/cli/src/support/command_defaults.rs)
+  - [crates/app/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/app/src/lib.rs)
+  - [docs/ops-and-states.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/docs/ops-and-states.md)
+- Verification:
+  - `nix run .#check`
+  - targeted grep confirms no remaining public `tx-send-raw`, `keystore_tx_send_raw`, or `MFM_EVM_RPC_SOURCE_ID` surfaces in app-facing code/docs
+
+### Commit 2
+
+- Subject:
+  - `add control_scope to rpc-control request identity`
+- Goal:
+  - make `control_scope` a first-class caller-visible field before storage changes
+- Required changes:
+  - add `control_scope` to `JsonRpcCall`
+  - add `control_scope` to `RpcControlRequest::PrepareSources`
+  - add `control_scope` to any response surface that echoes control-plane identity
+  - add typed client helpers/defaulting that stamp the effective scope into the serialized request before hashing
+  - default production scope remains `shared`
+- Primary files:
+  - [crates/collectors/rpc-control/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/collectors/rpc-control/src/lib.rs)
+  - [crates/collectors/rpc-control/README.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/collectors/rpc-control/README.md)
+- Verification:
+  - unit tests for `fact_key_for_request` show same request with different `control_scope` hashes differently
+  - `nix run .#check`
+
+### Commit 3
+
+- Subject:
+  - `require network_id on canonical evm read and write ops`
+- Goal:
+  - hard-cut built-in managed callers to always carry explicit blockchain identity
+- Required changes:
+  - add `network_id` to `evm_read` op config
+  - add `network_id` to deploy/configure/validate op/state configs
+  - plumb `network_id` through reusable read/write states and helper functions
+  - update validation/reporting code so managed selection happens against declared network instead of probing first and checking chain id later
+- Primary files:
+  - [crates/ops/evm-read-op/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/ops/evm-read-op/src/lib.rs)
+  - [crates/ops/evm-write-op/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/ops/evm-write-op/src/lib.rs)
+  - [crates/evm-runtime/src/states/read.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/evm-runtime/src/states/read.rs)
+  - [crates/evm-runtime/src/states/write.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/evm-runtime/src/states/write.rs)
+  - [crates/evm-runtime/src/states/price.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/evm-runtime/src/states/price.rs)
+- Verification:
+  - op/unit tests updated for new required config shape
+  - one regression test proves canonical managed calls without `network_id` now fail
+  - `nix run .#check`
+
+### Commit 4
+
+- Subject:
+  - `fix rpc-control fact keys for scope-aware replay`
+- Goal:
+  - eliminate replay aliasing across `control_scope` / `network_id`
+- Required changes:
+  - update custom/manual fact-key paths in `crates/evm-runtime/src/rpc.rs`
+  - ensure receipt polling keys include effective `network_id` and `control_scope`
+  - ensure any remaining send/helper keys include effective `network_id` and `control_scope`
+  - remove any ambient defaulting that happens after fact-key derivation
+- Primary files:
+  - [crates/evm-runtime/src/rpc.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/evm-runtime/src/rpc.rs)
+  - [crates/collectors/rpc-control/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/collectors/rpc-control/src/lib.rs)
+- Verification:
+  - regression test: same `state_id + method + params + network_id` with different `control_scope` does not alias
+  - regression test: receipt polling fact keys do not alias across scope/network
+  - `nix run .#check`
+
+### Commit 5
+
+- Subject:
+  - `remove rpc-control default network fallback and legacy bootstrap env`
+- Goal:
+  - remove `__default__` and all networkless/bootstrap-global routing behavior from the transport layer
+- Required changes:
+  - reject canonical managed requests without `network_id`
+  - reject bootstrap sources that omit `network_id`
+  - remove `MFM_EVM_RPC_URL` / `MFM_EVM_RPC_AUTHORIZATION`
+  - remove transport logic that derives effective scope/network from global fallback behavior
+  - keep `shared` scope defaulting only as stamped request identity, not ambient routing state
+- Primary files:
+  - [crates/transports/rpc-control/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/transports/rpc-control/src/lib.rs)
+  - [crates/app/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/app/src/lib.rs)
+  - [tests/integration/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/src/lib.rs)
+- Verification:
+  - regression test: networkless bootstrap source config is rejected
+  - regression test: canonical managed call without `network_id` fails with structured error
+  - `nix run .#check`
+
+### Commit 6
+
+- Subject:
+  - `key rpc-control state by control_scope`
+- Goal:
+  - cut over both persistence backends to scope-aware durable identity
+- Required changes:
+  - add `control_scope` to `RpcSourceRef` and `SourcePoolRef`
+  - change stream ids to `rpc_source:<control_scope>:<network_id>:<source_id>`
+  - change stream ids to `source_pool:<control_scope>:<network_id>:<pool_kind>`
+  - update Postgres projection PKs and load/upsert queries to include `control_scope`
+  - update stream-backed rebuild paths to the same identity shape
+- Primary files:
+  - [crates/storages/control-plane-postgres/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/storages/control-plane-postgres/src/lib.rs)
+  - [crates/storages/control-plane-postgres/README.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/storages/control-plane-postgres/README.md)
+  - [crates/transports/rpc-control/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/transports/rpc-control/src/lib.rs)
+- Verification:
+  - unit tests for stream-id parsing/building
+  - regression coverage for both Postgres control-plane store and `StreamStore` mode
+  - `nix run .#check`
+
+### Commit 7
+
+- Subject:
+  - `declare rpc-control catalogs per scope and network`
+- Goal:
+  - prevent same-scope different-catalog corruption
+- Required changes:
+  - add append-only `pool_catalog_declared`
+  - persist both fingerprint and normalized non-secret catalog snapshot
+  - extend source-pool projections with catalog declaration fields
+  - reject mismatched catalog reuse for the same `(control_scope, network_id, pool_kind)` before membership/ranking/source writes
+  - ensure managed execution only uses sources inside the declared catalog
+- Primary files:
+  - [crates/storages/control-plane-postgres/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/storages/control-plane-postgres/src/lib.rs)
+  - [crates/transports/rpc-control/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/crates/transports/rpc-control/src/lib.rs)
+- Verification:
+  - regression test: same `(control_scope, network_id)` with different catalogs fails
+  - regression test: same catalog declaration is idempotent
+  - regression test: same `control_scope` across different `network_id` values does not collide
+  - `nix run .#check`
+
+### Commit 8
+
+- Subject:
+  - `add rpc-control reset task for scope cutover`
+- Goal:
+  - provide the explicit one-shot rollout mechanism required by this refactor
+- Required changes:
+  - add a repo-owned reset entrypoint outside app startup
+  - recommended shape: a Nixfied task wrapping repo-owned SQL that:
+    - deletes `rpc_source:%` and `source_pool:%` rows from `mfm_stream_records`
+    - deletes matching heads from `mfm_streams`
+    - drops and recreates `mfm_rpc_source_state`
+    - drops and recreates `mfm_source_pool_state`
+  - document that this reset must run exactly once after the final refactor commit lands and before any refactor-era process starts
+- Primary files:
+  - [nixfied/project/module.nix](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/nixfied/project/module.nix)
+  - [nixfied/project/default.nix](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/nixfied/project/default.nix)
+  - repo-owned SQL/script file to be added alongside the task wiring
+- Verification:
+  - dry-run or documented operator command path is reviewed
+  - reset instructions are explicit about execution timing
+
+### Commit 9
+
+- Subject:
+  - `update rpc-control integration helpers parity tests and docs`
+- Goal:
+  - align test fixtures, parity flows, and docs with the hard cutover
+- Required changes:
+  - update integration helper to require explicit `network_id` and support explicit `control_scope`
+  - give shared parity tests unique scopes where isolation is required
+  - convert parity/bootstrap users away from `MFM_EVM_RPC_URL`
+  - update CLI/REST/architecture/routing docs to describe the final surface only
+  - update inventories and READMEs for removed raw-send op and new scope-aware behavior
+- Primary files:
+  - [tests/integration/src/lib.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/src/lib.rs)
+  - [tests/integration/tests/parity_portfolio_tracker_reth_mock_erc20.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/tests/parity_portfolio_tracker_reth_mock_erc20.rs)
+  - [tests/integration/tests/parity_rest_api_evm_reth_pipeline.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/tests/parity_rest_api_evm_reth_pipeline.rs)
+  - [tests/integration/tests/parity_aave_v3_reth_scenario.rs](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/tests/integration/tests/parity_aave_v3_reth_scenario.rs)
+  - [docs/evm-rpc-routing.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/docs/evm-rpc-routing.md)
+  - [bin/cli/README.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/bin/cli/README.md)
+  - [bin/rest-api/README.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/bin/rest-api/README.md)
+  - [docs/ops-and-states.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/docs/ops-and-states.md)
+  - [docs/helios.md](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/docs/helios.md)
+- Verification:
+  - intentional shared-scope integration test passes
+  - isolated parity tests use unique scopes
+  - targeted parity/bootstrap tests no longer depend on removed env/CLI surfaces
+
+### Final validation commit or pre-push gate
+
+- Subject:
+  - no extra code changes unless the earlier commits uncover fallout
+- Required full verification before pushing to `dev`:
+  - `nix run .#check`
+  - `nix run .#test`
+  - `nix run .#ci -- --mode basic --summary`
+  - `nix run .#ci -- --mode full --summary`
+- Rollout order:
+  - merge/push the final code commits
+  - run the explicit control-plane reset once
+  - only then allow parity/CI/services to start against the shared database
 
 ## Useful commands
 
@@ -387,12 +692,24 @@
   - services that need independent control-plane behavior should still set explicit scopes
 - Should same-scope different-catalog usage be a hard error or a separate scope derivation rule?
   - hard error at `(control_scope, network_id, pool_kind)`
+- Should caller-controlled source pinning remain on the public `rpc.control` surface?
+  - no
+  - remove `route.source_id` / `rpc_source_id` from the canonical managed contract
+- Should raw-send compatibility surfaces be preserved?
+  - no
+  - all surviving send behavior must route through canonical `rpc.control`
 - Do pre-cutover runs need to replay/resume after this lands?
   - no
   - this is a dev-branch hard cutover with no backward compatibility for old `rpc.control` fact identity
 - Are networkless canonical managed calls still supported?
   - no
   - canonical managed callers must provide `network_id`
+- Are networkless bootstrap sources still supported?
+  - no
+  - every configured bootstrap source must declare explicit `network_id`
+- Is legacy single-source bootstrap fallback retained?
+  - no
+  - remove `MFM_EVM_RPC_URL` / `MFM_EVM_RPC_AUTHORIZATION`
 - Where should catalog identity live durably?
   - as an append-only `pool_catalog_declared` record on `source_pool:*`
   - persist both the fingerprint and the normalized non-secret catalog snapshot
