@@ -728,6 +728,11 @@ impl RpcControlTransportFactory {
         self.executor_tuning = tuning;
         self
     }
+
+    /// Returns the bootstrap configuration error, if any.
+    pub fn config_error(&self) -> Option<&RpcControlConfigError> {
+        self.config_error.as_ref()
+    }
 }
 
 impl Default for RpcControlTransportFactory {
@@ -956,12 +961,13 @@ impl RpcControlTransport {
 
     async fn append_runtime_observation(
         &mut self,
+        control_scope: &str,
         network_scope: &str,
         source_id: &str,
         method: &str,
         response: Result<(&serde_json::Value, u64), (&IoError, u64)>,
     ) {
-        let Ok(source_ref) = RpcSourceRef::new(network_scope, source_id) else {
+        let Ok(source_ref) = RpcSourceRef::new(control_scope, network_scope, source_id) else {
             return;
         };
 
@@ -1025,17 +1031,19 @@ impl RpcControlTransport {
 
     async fn probe_source(
         &mut self,
+        control_scope: &str,
         network_scope: &str,
         source: &RpcControlBootstrapSource,
     ) -> Result<RpcSourceState, IoError> {
-        let source_ref = RpcSourceRef::new(network_scope, source.id.clone()).map_err(|err| {
-            io_transport(
-                "rpc_control_source_invalid",
-                ErrorCategory::ParsingInput,
-                false,
-                err.to_string(),
-            )
-        })?;
+        let source_ref = RpcSourceRef::new(control_scope, network_scope, source.id.clone())
+            .map_err(|err| {
+                io_transport(
+                    "rpc_control_source_invalid",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    err.to_string(),
+                )
+            })?;
 
         let probed_at_ms = now_ms()?;
         let mut records = Vec::new();
@@ -1231,14 +1239,15 @@ impl RpcControlTransport {
             .iter()
             .map(|source| source.id.clone())
             .collect::<Vec<_>>();
-        let pool_ref = SourcePoolRef::new(network_scope, DEFAULT_POOL_KIND).map_err(|err| {
-            io_transport(
-                "rpc_control_pool_invalid",
-                ErrorCategory::ParsingInput,
-                false,
-                err.to_string(),
-            )
-        })?;
+        let pool_ref = SourcePoolRef::new(control_scope, network_scope, DEFAULT_POOL_KIND)
+            .map_err(|err| {
+                io_transport(
+                    "rpc_control_pool_invalid",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    err.to_string(),
+                )
+            })?;
 
         let current_pool = self
             .control_plane_store
@@ -1264,8 +1273,8 @@ impl RpcControlTransport {
         let mut states = HashMap::new();
         let current_ms = now_ms()?;
         for source in &candidates {
-            let source_ref =
-                RpcSourceRef::new(network_scope, source.id.clone()).map_err(|err| {
+            let source_ref = RpcSourceRef::new(control_scope, network_scope, source.id.clone())
+                .map_err(|err| {
                     io_transport(
                         "rpc_control_source_invalid",
                         ErrorCategory::ParsingInput,
@@ -1278,7 +1287,7 @@ impl RpcControlTransport {
                 .rpc_source_state(&source_ref)
                 .await?;
             let state = if self.needs_probe(source, existing.as_ref(), current_ms) {
-                self.probe_source(network_scope, source).await?
+                self.probe_source(control_scope, network_scope, source).await?
             } else {
                 existing.expect("existing state checked above")
             };
@@ -1402,6 +1411,7 @@ impl RpcControlTransport {
         match result {
             Ok(response) => {
                 self.append_runtime_observation(
+                    &managed_call.control_scope,
                     &network_scope,
                     &source_id,
                     &managed_call.method,
@@ -1412,6 +1422,7 @@ impl RpcControlTransport {
             }
             Err(err) => {
                 self.append_runtime_observation(
+                    &managed_call.control_scope,
                     &network_scope,
                     &source_id,
                     &managed_call.method,
@@ -1528,8 +1539,9 @@ mod tests {
         states.insert(
             "local_fast".to_string(),
             RpcSourceState {
-                source_ref: RpcSourceRef::new("ethereum-mainnet", "local_fast").unwrap(),
-                stream_id: RpcSourceRef::new("ethereum-mainnet", "local_fast")
+                source_ref: RpcSourceRef::new("shared", "ethereum-mainnet", "local_fast")
+                    .unwrap(),
+                stream_id: RpcSourceRef::new("shared", "ethereum-mainnet", "local_fast")
                     .unwrap()
                     .stream_id(),
                 head_seq: 1,
@@ -1550,8 +1562,9 @@ mod tests {
         states.insert(
             "remote_slow".to_string(),
             RpcSourceState {
-                source_ref: RpcSourceRef::new("ethereum-mainnet", "remote_slow").unwrap(),
-                stream_id: RpcSourceRef::new("ethereum-mainnet", "remote_slow")
+                source_ref: RpcSourceRef::new("shared", "ethereum-mainnet", "remote_slow")
+                    .unwrap(),
+                stream_id: RpcSourceRef::new("shared", "ethereum-mainnet", "remote_slow")
                     .unwrap()
                     .stream_id(),
                 head_seq: 1,
@@ -1572,8 +1585,9 @@ mod tests {
         states.insert(
             "proof_missing".to_string(),
             RpcSourceState {
-                source_ref: RpcSourceRef::new("ethereum-mainnet", "proof_missing").unwrap(),
-                stream_id: RpcSourceRef::new("ethereum-mainnet", "proof_missing")
+                source_ref: RpcSourceRef::new("shared", "ethereum-mainnet", "proof_missing")
+                    .unwrap(),
+                stream_id: RpcSourceRef::new("shared", "ethereum-mainnet", "proof_missing")
                     .unwrap()
                     .stream_id(),
                 head_seq: 1,

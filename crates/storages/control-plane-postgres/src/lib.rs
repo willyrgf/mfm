@@ -16,7 +16,8 @@
 //! # async fn main() -> Result<(), mfm_machine::errors::StorageError> {
 //! let store =
 //!     ControlPlanePostgresStore::connect("postgres://postgres:postgres@localhost/mfm").await?;
-//! let source = RpcSourceRef::new("eth-mainnet", "primary").expect("valid source ref");
+//! let source =
+//!     RpcSourceRef::new("shared", "eth-mainnet", "primary").expect("valid source ref");
 //! let _state = store.rpc_source_state(&source).await?;
 //! # Ok(())
 //! # }
@@ -115,7 +116,7 @@ pub enum RpcSourceRefError {
         /// The invalid value.
         value: String,
     },
-    /// The stream id did not follow the `rpc_source:<network_id>:<source_id>` shape.
+    /// The stream id did not follow the `rpc_source:<control_scope>:<network_id>:<source_id>` shape.
     InvalidStreamId(String),
 }
 
@@ -127,7 +128,7 @@ impl fmt::Display for RpcSourceRefError {
             }
             RpcSourceRefError::InvalidStreamId(value) => write!(
                 f,
-                "rpc source stream id must follow `rpc_source:<network_id>:<source_id>` (got `{value}`)"
+                "rpc source stream id must follow `rpc_source:<control_scope>:<network_id>:<source_id>` (got `{value}`)"
             ),
         }
     }
@@ -138,6 +139,7 @@ impl std::error::Error for RpcSourceRefError {}
 /// Stable identity for one control-plane-managed RPC source.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RpcSourceRef {
+    control_scope: String,
     network_id: String,
     source_id: String,
 }
@@ -145,10 +147,12 @@ pub struct RpcSourceRef {
 impl RpcSourceRef {
     /// Creates a validated source reference.
     pub fn new(
+        control_scope: impl Into<String>,
         network_id: impl Into<String>,
         source_id: impl Into<String>,
     ) -> Result<Self, RpcSourceRefError> {
         Ok(Self {
+            control_scope: validate_component("control_scope", control_scope)?,
             network_id: validate_component("network_id", network_id)?,
             source_id: validate_component("source_id", source_id)?,
         })
@@ -161,12 +165,20 @@ impl RpcSourceRef {
                 stream_id.as_str().to_string(),
             ));
         }
-        let Some((network_id, source_id)) = stream_id.key().split_once(':') else {
+        let mut parts = stream_id.key().split(':');
+        let (Some(control_scope), Some(network_id), Some(source_id), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
             return Err(RpcSourceRefError::InvalidStreamId(
                 stream_id.as_str().to_string(),
             ));
         };
-        Self::new(network_id, source_id)
+        Self::new(control_scope, network_id, source_id)
+    }
+
+    /// Returns the control-scope identifier.
+    pub fn control_scope(&self) -> &str {
+        &self.control_scope
     }
 
     /// Returns the network identifier.
@@ -182,15 +194,19 @@ impl RpcSourceRef {
     /// Returns the canonical stream id for this source.
     pub fn stream_id(&self) -> StreamId {
         StreamId::must_new(format!(
-            "{RPC_SOURCE_STREAM_FAMILY}:{}:{}",
-            self.network_id, self.source_id
+            "{RPC_SOURCE_STREAM_FAMILY}:{}:{}:{}",
+            self.control_scope, self.network_id, self.source_id
         ))
     }
 }
 
 impl fmt::Display for RpcSourceRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.network_id, self.source_id)
+        write!(
+            f,
+            "{}:{}:{}",
+            self.control_scope, self.network_id, self.source_id
+        )
     }
 }
 
@@ -204,7 +220,7 @@ pub enum SourcePoolRefError {
         /// The invalid value.
         value: String,
     },
-    /// The stream id did not follow the `source_pool:<network_id>:<pool_kind>` shape.
+    /// The stream id did not follow the `source_pool:<control_scope>:<network_id>:<pool_kind>` shape.
     InvalidStreamId(String),
 }
 
@@ -216,7 +232,7 @@ impl fmt::Display for SourcePoolRefError {
             }
             SourcePoolRefError::InvalidStreamId(value) => write!(
                 f,
-                "source pool stream id must follow `source_pool:<network_id>:<pool_kind>` (got `{value}`)"
+                "source pool stream id must follow `source_pool:<control_scope>:<network_id>:<pool_kind>` (got `{value}`)"
             ),
         }
     }
@@ -227,6 +243,7 @@ impl std::error::Error for SourcePoolRefError {}
 /// Stable identity for one control-plane-managed source pool.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SourcePoolRef {
+    control_scope: String,
     network_id: String,
     pool_kind: String,
 }
@@ -234,10 +251,21 @@ pub struct SourcePoolRef {
 impl SourcePoolRef {
     /// Creates a validated source-pool reference.
     pub fn new(
+        control_scope: impl Into<String>,
         network_id: impl Into<String>,
         pool_kind: impl Into<String>,
     ) -> Result<Self, SourcePoolRefError> {
         Ok(Self {
+            control_scope: validate_component("control_scope", control_scope).map_err(
+                |err| match err {
+                    RpcSourceRefError::InvalidComponent { name, value } => {
+                        SourcePoolRefError::InvalidComponent { name, value }
+                    }
+                    RpcSourceRefError::InvalidStreamId(value) => {
+                        SourcePoolRefError::InvalidStreamId(value)
+                    }
+                },
+            )?,
             network_id: validate_component("network_id", network_id).map_err(|err| match err {
                 RpcSourceRefError::InvalidComponent { name, value } => {
                     SourcePoolRefError::InvalidComponent { name, value }
@@ -264,12 +292,20 @@ impl SourcePoolRef {
                 stream_id.as_str().to_string(),
             ));
         }
-        let Some((network_id, pool_kind)) = stream_id.key().split_once(':') else {
+        let mut parts = stream_id.key().split(':');
+        let (Some(control_scope), Some(network_id), Some(pool_kind), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
             return Err(SourcePoolRefError::InvalidStreamId(
                 stream_id.as_str().to_string(),
             ));
         };
-        Self::new(network_id, pool_kind)
+        Self::new(control_scope, network_id, pool_kind)
+    }
+
+    /// Returns the control-scope identifier.
+    pub fn control_scope(&self) -> &str {
+        &self.control_scope
     }
 
     /// Returns the network identifier.
@@ -285,15 +321,19 @@ impl SourcePoolRef {
     /// Returns the canonical stream id for this pool.
     pub fn stream_id(&self) -> StreamId {
         StreamId::must_new(format!(
-            "{SOURCE_POOL_STREAM_FAMILY}:{}:{}",
-            self.network_id, self.pool_kind
+            "{SOURCE_POOL_STREAM_FAMILY}:{}:{}:{}",
+            self.control_scope, self.network_id, self.pool_kind
         ))
     }
 }
 
 impl fmt::Display for SourcePoolRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.network_id, self.pool_kind)
+        write!(
+            f,
+            "{}:{}:{}",
+            self.control_scope, self.network_id, self.pool_kind
+        )
     }
 }
 
@@ -846,7 +886,13 @@ impl SourcePoolState {
     pub fn ordered_source_refs(&self) -> Result<Vec<RpcSourceRef>, RpcSourceRefError> {
         self.ordered_source_ids()
             .into_iter()
-            .map(|source_id| RpcSourceRef::new(self.pool_ref.network_id(), source_id))
+            .map(|source_id| {
+                RpcSourceRef::new(
+                    self.pool_ref.control_scope(),
+                    self.pool_ref.network_id(),
+                    source_id,
+                )
+            })
             .collect()
     }
 }
@@ -993,6 +1039,7 @@ CREATE TABLE IF NOT EXISTS mfm_stream_records (
 );
 
 CREATE TABLE IF NOT EXISTS mfm_rpc_source_state (
+  control_scope TEXT NOT NULL,
   network_id TEXT NOT NULL,
   source_id TEXT NOT NULL,
   stream_id TEXT NOT NULL UNIQUE,
@@ -1009,11 +1056,12 @@ CREATE TABLE IF NOT EXISTS mfm_rpc_source_state (
   consecutive_failures BIGINT NOT NULL,
   cooldown_until_ms BIGINT NULL,
   last_error_code TEXT NULL,
-  PRIMARY KEY (network_id, source_id),
+  PRIMARY KEY (control_scope, network_id, source_id),
   CONSTRAINT mfm_rpc_source_state_stream_fk FOREIGN KEY (stream_id) REFERENCES mfm_streams(stream_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS mfm_source_pool_state (
+  control_scope TEXT NOT NULL,
   network_id TEXT NOT NULL,
   pool_kind TEXT NOT NULL,
   stream_id TEXT NOT NULL UNIQUE,
@@ -1023,7 +1071,7 @@ CREATE TABLE IF NOT EXISTS mfm_source_pool_state (
   last_ranked_at_ms BIGINT NULL,
   member_source_ids JSONB NOT NULL,
   ranked_source_ids JSONB NOT NULL,
-  PRIMARY KEY (network_id, pool_kind),
+  PRIMARY KEY (control_scope, network_id, pool_kind),
   CONSTRAINT mfm_source_pool_state_stream_fk FOREIGN KEY (stream_id) REFERENCES mfm_streams(stream_id) ON DELETE CASCADE
 );
 "#;
@@ -1066,6 +1114,7 @@ CREATE TABLE IF NOT EXISTS mfm_source_pool_state (
             .query_opt(
                 r#"
 SELECT
+  control_scope,
   network_id,
   source_id,
   stream_id,
@@ -1083,9 +1132,13 @@ SELECT
   cooldown_until_ms,
   last_error_code
 FROM mfm_rpc_source_state
-WHERE network_id = $1 AND source_id = $2
+WHERE control_scope = $1 AND network_id = $2 AND source_id = $3
 "#,
-                &[&source_ref.network_id(), &source_ref.source_id()],
+                &[
+                    &source_ref.control_scope(),
+                    &source_ref.network_id(),
+                    &source_ref.source_id(),
+                ],
             )
             .await
             .map_err(|_| {
@@ -1099,15 +1152,16 @@ WHERE network_id = $1 AND source_id = $2
     }
 
     fn rpc_source_state_from_row(row: Row) -> Result<RpcSourceState, StorageError> {
-        let network_id: String = row.get(0);
-        let source_id: String = row.get(1);
-        let source_ref = RpcSourceRef::new(network_id, source_id).map_err(|err| {
+        let control_scope: String = row.get(0);
+        let network_id: String = row.get(1);
+        let source_id: String = row.get(2);
+        let source_ref = RpcSourceRef::new(control_scope, network_id, source_id).map_err(|err| {
             storage_corruption(
                 "control_plane_projection_invalid",
                 format!("invalid rpc_source projection identity: {err}"),
             )
         })?;
-        let stream_id = StreamId::new(row.get::<_, String>(2)).map_err(|err| {
+        let stream_id = StreamId::new(row.get::<_, String>(3)).map_err(|err| {
             storage_corruption(
                 "control_plane_projection_invalid",
                 format!("invalid rpc_source projection stream id: {err}"),
@@ -1116,43 +1170,43 @@ WHERE network_id = $1 AND source_id = $2
         Ok(RpcSourceState {
             source_ref,
             stream_id,
-            head_seq: i64_to_u64(row.get::<_, i64>(3), "mfm_rpc_source_state.head_seq")?,
+            head_seq: i64_to_u64(row.get::<_, i64>(4), "mfm_rpc_source_state.head_seq")?,
             last_recorded_at_ms: opt_i64_to_u64(
-                row.get::<_, Option<i64>>(4),
+                row.get::<_, Option<i64>>(5),
                 "mfm_rpc_source_state.last_recorded_at_ms",
             )?,
             last_observed_at_ms: opt_i64_to_u64(
-                row.get::<_, Option<i64>>(5),
+                row.get::<_, Option<i64>>(6),
                 "mfm_rpc_source_state.last_observed_at_ms",
             )?,
             last_probed_at_ms: opt_i64_to_u64(
-                row.get::<_, Option<i64>>(6),
+                row.get::<_, Option<i64>>(7),
                 "mfm_rpc_source_state.last_probed_at_ms",
             )?,
             last_observed_head: opt_i64_to_u64(
-                row.get::<_, Option<i64>>(7),
+                row.get::<_, Option<i64>>(8),
                 "mfm_rpc_source_state.last_observed_head",
             )?,
             last_latency_ms: opt_i64_to_u64(
-                row.get::<_, Option<i64>>(8),
+                row.get::<_, Option<i64>>(9),
                 "mfm_rpc_source_state.last_latency_ms",
             )?,
             last_probe_latency_ms: opt_i64_to_u64(
-                row.get::<_, Option<i64>>(9),
+                row.get::<_, Option<i64>>(10),
                 "mfm_rpc_source_state.last_probe_latency_ms",
             )?,
-            supports_get_proof: row.get(10),
-            success_count: i64_to_u64(row.get::<_, i64>(11), "mfm_rpc_source_state.success_count")?,
-            failure_count: i64_to_u64(row.get::<_, i64>(12), "mfm_rpc_source_state.failure_count")?,
+            supports_get_proof: row.get(11),
+            success_count: i64_to_u64(row.get::<_, i64>(12), "mfm_rpc_source_state.success_count")?,
+            failure_count: i64_to_u64(row.get::<_, i64>(13), "mfm_rpc_source_state.failure_count")?,
             consecutive_failures: i64_to_u64(
-                row.get::<_, i64>(13),
+                row.get::<_, i64>(14),
                 "mfm_rpc_source_state.consecutive_failures",
             )?,
             cooldown_until_ms: opt_i64_to_u64(
-                row.get::<_, Option<i64>>(14),
+                row.get::<_, Option<i64>>(15),
                 "mfm_rpc_source_state.cooldown_until_ms",
             )?,
-            last_error_code: row.get(15),
+            last_error_code: row.get(16),
         })
     }
 
@@ -1201,6 +1255,7 @@ WHERE network_id = $1 AND source_id = $2
             .query_opt(
                 r#"
 SELECT
+  control_scope,
   network_id,
   pool_kind,
   stream_id,
@@ -1211,9 +1266,13 @@ SELECT
   member_source_ids,
   ranked_source_ids
 FROM mfm_source_pool_state
-WHERE network_id = $1 AND pool_kind = $2
+WHERE control_scope = $1 AND network_id = $2 AND pool_kind = $3
 "#,
-                &[&pool_ref.network_id(), &pool_ref.pool_kind()],
+                &[
+                    &pool_ref.control_scope(),
+                    &pool_ref.network_id(),
+                    &pool_ref.pool_kind(),
+                ],
             )
             .await
             .map_err(|_| {
@@ -1227,15 +1286,16 @@ WHERE network_id = $1 AND pool_kind = $2
     }
 
     fn source_pool_state_from_row(row: Row) -> Result<SourcePoolState, StorageError> {
-        let network_id: String = row.get(0);
-        let pool_kind: String = row.get(1);
-        let pool_ref = SourcePoolRef::new(network_id, pool_kind).map_err(|err| {
+        let control_scope: String = row.get(0);
+        let network_id: String = row.get(1);
+        let pool_kind: String = row.get(2);
+        let pool_ref = SourcePoolRef::new(control_scope, network_id, pool_kind).map_err(|err| {
             storage_corruption(
                 "control_plane_projection_invalid",
                 format!("invalid source_pool projection identity: {err}"),
             )
         })?;
-        let stream_id = StreamId::new(row.get::<_, String>(2)).map_err(|err| {
+        let stream_id = StreamId::new(row.get::<_, String>(3)).map_err(|err| {
             storage_corruption(
                 "control_plane_projection_invalid",
                 format!("invalid source_pool projection stream id: {err}"),
@@ -1244,25 +1304,25 @@ WHERE network_id = $1 AND pool_kind = $2
         Ok(SourcePoolState {
             pool_ref,
             stream_id,
-            head_seq: i64_to_u64(row.get::<_, i64>(3), "mfm_source_pool_state.head_seq")?,
+            head_seq: i64_to_u64(row.get::<_, i64>(4), "mfm_source_pool_state.head_seq")?,
             last_recorded_at_ms: opt_i64_to_u64(
-                row.get::<_, Option<i64>>(4),
+                row.get::<_, Option<i64>>(5),
                 "mfm_source_pool_state.last_recorded_at_ms",
             )?,
             last_membership_declared_at_ms: opt_i64_to_u64(
-                row.get::<_, Option<i64>>(5),
+                row.get::<_, Option<i64>>(6),
                 "mfm_source_pool_state.last_membership_declared_at_ms",
             )?,
             last_ranked_at_ms: opt_i64_to_u64(
-                row.get::<_, Option<i64>>(6),
+                row.get::<_, Option<i64>>(7),
                 "mfm_source_pool_state.last_ranked_at_ms",
             )?,
             member_source_ids: Self::source_id_snapshot_from_json(
-                row.get::<_, serde_json::Value>(7),
+                row.get::<_, serde_json::Value>(8),
                 "mfm_source_pool_state.member_source_ids",
             )?,
             ranked_source_ids: Self::source_id_snapshot_from_json(
-                row.get::<_, serde_json::Value>(8),
+                row.get::<_, serde_json::Value>(9),
                 "mfm_source_pool_state.ranked_source_ids",
             )?,
         })
@@ -1275,6 +1335,7 @@ WHERE network_id = $1 AND pool_kind = $2
         tx.execute(
             r#"
 INSERT INTO mfm_rpc_source_state (
+  control_scope,
   network_id,
   source_id,
   stream_id,
@@ -1293,9 +1354,9 @@ INSERT INTO mfm_rpc_source_state (
   last_error_code
 ) VALUES (
   $1, $2, $3, $4, $5, $6, $7, $8,
-  $9, $10, $11, $12, $13, $14, $15, $16
+  $9, $10, $11, $12, $13, $14, $15, $16, $17
 )
-ON CONFLICT (network_id, source_id) DO UPDATE SET
+ON CONFLICT (control_scope, network_id, source_id) DO UPDATE SET
   stream_id = EXCLUDED.stream_id,
   head_seq = EXCLUDED.head_seq,
   last_recorded_at_ms = EXCLUDED.last_recorded_at_ms,
@@ -1312,6 +1373,7 @@ ON CONFLICT (network_id, source_id) DO UPDATE SET
   last_error_code = EXCLUDED.last_error_code
 "#,
             &[
+                &state.source_ref.control_scope(),
                 &state.source_ref.network_id(),
                 &state.source_ref.source_id(),
                 &state.stream_id.as_str(),
@@ -1373,6 +1435,7 @@ ON CONFLICT (network_id, source_id) DO UPDATE SET
         tx.execute(
             r#"
 INSERT INTO mfm_source_pool_state (
+  control_scope,
   network_id,
   pool_kind,
   stream_id,
@@ -1383,9 +1446,9 @@ INSERT INTO mfm_source_pool_state (
   member_source_ids,
   ranked_source_ids
 ) VALUES (
-  $1, $2, $3, $4, $5, $6, $7, $8, $9
+  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 )
-ON CONFLICT (network_id, pool_kind) DO UPDATE SET
+ON CONFLICT (control_scope, network_id, pool_kind) DO UPDATE SET
   stream_id = EXCLUDED.stream_id,
   head_seq = EXCLUDED.head_seq,
   last_recorded_at_ms = EXCLUDED.last_recorded_at_ms,
@@ -1395,6 +1458,7 @@ ON CONFLICT (network_id, pool_kind) DO UPDATE SET
   ranked_source_ids = EXCLUDED.ranked_source_ids
 "#,
             &[
+                &state.pool_ref.control_scope(),
                 &state.pool_ref.network_id(),
                 &state.pool_ref.pool_kind(),
                 &state.stream_id.as_str(),
@@ -1631,6 +1695,7 @@ ON CONFLICT (network_id, pool_kind) DO UPDATE SET
             .query_opt(
                 r#"
 SELECT
+  control_scope,
   network_id,
   source_id,
   stream_id,
@@ -1648,9 +1713,13 @@ SELECT
   cooldown_until_ms,
   last_error_code
 FROM mfm_rpc_source_state
-WHERE network_id = $1 AND source_id = $2
+WHERE control_scope = $1 AND network_id = $2 AND source_id = $3
 "#,
-                &[&source_ref.network_id(), &source_ref.source_id()],
+                &[
+                    &source_ref.control_scope(),
+                    &source_ref.network_id(),
+                    &source_ref.source_id(),
+                ],
             )
             .await
             .map_err(|_| {
@@ -1665,6 +1734,7 @@ WHERE network_id = $1 AND source_id = $2
     /// Lists all RPC-source projections for one network.
     pub async fn list_rpc_source_states(
         &self,
+        control_scope: &str,
         network_id: &str,
     ) -> Result<Vec<RpcSourceState>, StorageError> {
         let client = self.client.lock().await;
@@ -1672,6 +1742,7 @@ WHERE network_id = $1 AND source_id = $2
             .query(
                 r#"
 SELECT
+  control_scope,
   network_id,
   source_id,
   stream_id,
@@ -1689,10 +1760,10 @@ SELECT
   cooldown_until_ms,
   last_error_code
 FROM mfm_rpc_source_state
-WHERE network_id = $1
+WHERE control_scope = $1 AND network_id = $2
 ORDER BY source_id ASC
 "#,
-                &[&network_id],
+                &[&control_scope, &network_id],
             )
             .await
             .map_err(|_| {
@@ -1716,6 +1787,7 @@ ORDER BY source_id ASC
             .query_opt(
                 r#"
 SELECT
+  control_scope,
   network_id,
   pool_kind,
   stream_id,
@@ -1726,9 +1798,13 @@ SELECT
   member_source_ids,
   ranked_source_ids
 FROM mfm_source_pool_state
-WHERE network_id = $1 AND pool_kind = $2
+WHERE control_scope = $1 AND network_id = $2 AND pool_kind = $3
 "#,
-                &[&pool_ref.network_id(), &pool_ref.pool_kind()],
+                &[
+                    &pool_ref.control_scope(),
+                    &pool_ref.network_id(),
+                    &pool_ref.pool_kind(),
+                ],
             )
             .await
             .map_err(|_| {
@@ -1743,6 +1819,7 @@ WHERE network_id = $1 AND pool_kind = $2
     /// Lists all source-pool projections for one network.
     pub async fn list_source_pool_states(
         &self,
+        control_scope: &str,
         network_id: &str,
     ) -> Result<Vec<SourcePoolState>, StorageError> {
         let client = self.client.lock().await;
@@ -1750,6 +1827,7 @@ WHERE network_id = $1 AND pool_kind = $2
             .query(
                 r#"
 SELECT
+  control_scope,
   network_id,
   pool_kind,
   stream_id,
@@ -1760,10 +1838,10 @@ SELECT
   member_source_ids,
   ranked_source_ids
 FROM mfm_source_pool_state
-WHERE network_id = $1
+WHERE control_scope = $1 AND network_id = $2
 ORDER BY pool_kind ASC
 "#,
-                &[&network_id],
+                &[&control_scope, &network_id],
             )
             .await
             .map_err(|_| {
@@ -1974,11 +2052,11 @@ mod tests {
     use super::*;
 
     fn source_ref() -> RpcSourceRef {
-        RpcSourceRef::new("eth-mainnet", "primary").expect("valid source ref")
+        RpcSourceRef::new("shared", "eth-mainnet", "primary").expect("valid source ref")
     }
 
     fn pool_ref() -> SourcePoolRef {
-        SourcePoolRef::new("eth-mainnet", "default").expect("valid source pool ref")
+        SourcePoolRef::new("shared", "eth-mainnet", "default").expect("valid source pool ref")
     }
 
     #[test]
@@ -1987,12 +2065,13 @@ mod tests {
         let stream_id = source_ref.stream_id();
         let decoded = RpcSourceRef::from_stream_id(&stream_id).expect("decode stream id");
         assert_eq!(decoded, source_ref);
-        assert_eq!(stream_id.as_str(), "rpc_source:eth-mainnet:primary");
+        assert_eq!(stream_id.as_str(), "rpc_source:shared:eth-mainnet:primary");
     }
 
     #[test]
     fn rpc_source_ref_rejects_reserved_characters() {
-        let err = RpcSourceRef::new("eth:mainnet", "primary").expect_err("invalid network id");
+        let err =
+            RpcSourceRef::new("shared", "eth:mainnet", "primary").expect_err("invalid network id");
         assert_eq!(
             err,
             RpcSourceRefError::InvalidComponent {
@@ -2008,12 +2087,13 @@ mod tests {
         let stream_id = pool_ref.stream_id();
         let decoded = SourcePoolRef::from_stream_id(&stream_id).expect("decode stream id");
         assert_eq!(decoded, pool_ref);
-        assert_eq!(stream_id.as_str(), "source_pool:eth-mainnet:default");
+        assert_eq!(stream_id.as_str(), "source_pool:shared:eth-mainnet:default");
     }
 
     #[test]
     fn source_pool_ref_rejects_reserved_characters() {
-        let err = SourcePoolRef::new("eth-mainnet", "default pool").expect_err("invalid pool kind");
+        let err = SourcePoolRef::new("shared", "eth-mainnet", "default pool")
+            .expect_err("invalid pool kind");
         assert_eq!(
             err,
             SourcePoolRefError::InvalidComponent {
@@ -2236,9 +2316,9 @@ mod tests {
                 .ordered_source_refs()
                 .expect("ordered source refs should be valid"),
             vec![
-                RpcSourceRef::new("eth-mainnet", "helios_local").expect("valid"),
-                RpcSourceRef::new("eth-mainnet", "reth_local").expect("valid"),
-                RpcSourceRef::new("eth-mainnet", "archive_local").expect("valid"),
+                RpcSourceRef::new("shared", "eth-mainnet", "helios_local").expect("valid"),
+                RpcSourceRef::new("shared", "eth-mainnet", "reth_local").expect("valid"),
+                RpcSourceRef::new("shared", "eth-mainnet", "archive_local").expect("valid"),
             ]
         );
     }
