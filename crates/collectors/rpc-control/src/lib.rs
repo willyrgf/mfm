@@ -7,7 +7,7 @@
 //! transport URLs directly.
 //!
 //! The current slice keeps the public caller contract small:
-//! - managed EVM JSON-RPC calls with optional network context
+//! - managed EVM JSON-RPC calls with explicit network context
 //! - explicit control-plane source preparation for setup/probe/rank preflight
 //!
 //! # Examples
@@ -44,11 +44,9 @@ pub struct JsonRpcCall {
     /// Stable control-plane scope used to isolate managed source state.
     #[serde(default = "default_control_scope")]
     pub control_scope: String,
-    /// Optional stable network identifier.
+    /// Required stable network identifier.
     ///
-    /// Callers that know the canonical network should supply it. Transitional
-    /// single-network callers may omit it and rely on default bootstrap
-    /// resolution.
+    /// Callers must set this before deriving fact keys or dispatching the request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_id: Option<String>,
     /// JSON-RPC method name such as `eth_call`.
@@ -169,6 +167,14 @@ fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> E
 
 fn io_other(code: &'static str, category: ErrorCategory, message: &'static str) -> IoError {
     IoError::Other(info(code, category, message))
+}
+
+fn missing_network_id_error() -> IoError {
+    io_other(
+        "rpc_control_network_required",
+        ErrorCategory::ParsingInput,
+        "rpc.control managed requests require a non-empty network_id",
+    )
 }
 
 fn request_json(request: &RpcControlRequest) -> serde_json::Value {
@@ -294,6 +300,13 @@ impl<'a> EvmIoClient<'a> {
         call
     }
 
+    fn validate_call(&self, call: &JsonRpcCall) -> Result<(), IoError> {
+        match call.network_id.as_deref() {
+            Some(network_id) if !network_id.trim().is_empty() => Ok(()),
+            _ => Err(missing_network_id_error()),
+        }
+    }
+
     /// Executes a managed JSON-RPC call through the generic IO provider with an
     /// explicit fact key.
     pub async fn call_with_fact_key(
@@ -302,6 +315,7 @@ impl<'a> EvmIoClient<'a> {
         fact_key: FactKey,
     ) -> Result<IoResult, IoError> {
         let call = self.stamp_control_scope(call);
+        self.validate_call(&call)?;
         self.io
             .call(rpc_control_io_call(
                 RpcControlRequest::EvmCall { call },
@@ -313,6 +327,7 @@ impl<'a> EvmIoClient<'a> {
     /// Executes a managed JSON-RPC call through the generic IO provider.
     pub async fn call(&mut self, call: JsonRpcCall) -> Result<IoResult, IoError> {
         let call = self.stamp_control_scope(call);
+        self.validate_call(&call)?;
         let request = RpcControlRequest::EvmCall { call: call.clone() };
         let key = fact_key_for_request(&self.state_id, &request).map_err(|err| match err {
             FactKeyDerivationError::NotCanonical(CanonicalJsonError::FloatNotAllowed) => io_other(
@@ -347,13 +362,17 @@ impl<'a> EvmIoClient<'a> {
         network_id: impl Into<String>,
     ) -> Result<PrepareSourcesResponse, IoError> {
         let control_scope = control_scope.into();
+        let network_id = network_id.into();
+        if network_id.trim().is_empty() {
+            return Err(missing_network_id_error());
+        }
         let request = RpcControlRequest::PrepareSources {
             control_scope: if control_scope.trim().is_empty() {
                 self.default_control_scope.clone()
             } else {
                 control_scope
             },
-            network_id: network_id.into(),
+            network_id,
         };
         let key = fact_key_for_request(&self.state_id, &request).map_err(|err| match err {
             FactKeyDerivationError::NotCanonical(CanonicalJsonError::FloatNotAllowed) => io_other(
@@ -625,7 +644,11 @@ mod tests {
                 .with_default_control_scope("workspace-a");
 
         let result = client
-            .call(JsonRpcCall::new("eth_chainId", serde_json::json!([])).with_control_scope(""))
+            .call(
+                JsonRpcCall::new("eth_chainId", serde_json::json!([]))
+                    .with_control_scope("")
+                    .with_network_id("ethereum-mainnet"),
+            )
             .await
             .expect("call");
         assert_eq!(result.response, serde_json::json!("0x1"));
@@ -634,9 +657,28 @@ mod tests {
             serde_json::json!({
                 "kind": "evm_call",
                 "control_scope": "workspace-a",
+                "network_id": "ethereum-mainnet",
                 "method": "eth_chainId",
                 "params": [],
             })
         );
+    }
+
+    #[tokio::test]
+    async fn client_rejects_missing_network_id_before_hashing() {
+        let mut io = FixedIo::default();
+        let mut client =
+            EvmIoClient::new(StateId::must_new("m.main.chain_id".to_string()), &mut io);
+
+        let err = client
+            .call(JsonRpcCall::new("eth_chainId", serde_json::json!([])))
+            .await
+            .expect_err("missing network should fail");
+
+        match err {
+            IoError::Other(info) => assert_eq!(info.code.0, "rpc_control_network_required"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(io.calls.is_empty());
     }
 }
