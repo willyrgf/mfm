@@ -95,8 +95,14 @@ impl State for PinPortfolioNetworksState {
                 ));
             };
 
-            let chain_id =
-                read_u64_rpc(&self.state_id, io, &network.network_id, "eth_chainId").await?;
+            let chain_id = read_u64_rpc(
+                &self.state_id,
+                io,
+                &network.network_id,
+                &network.control_scope,
+                "eth_chainId",
+            )
+            .await?;
             if chain_id != network.chain_id {
                 return Err(state_error_with_state(
                     self.state_id.clone(),
@@ -110,8 +116,14 @@ impl State for PinPortfolioNetworksState {
                 ));
             }
 
-            let block_number =
-                read_u64_rpc(&self.state_id, io, &network.network_id, "eth_blockNumber").await?;
+            let block_number = read_u64_rpc(
+                &self.state_id,
+                io,
+                &network.network_id,
+                &network.control_scope,
+                "eth_blockNumber",
+            )
+            .await?;
             pins.push(NetworkPin {
                 network_id: network.network_id.clone(),
                 chain_id,
@@ -598,10 +610,16 @@ async fn read_u64_rpc(
     state_id: &StateId,
     io: &mut dyn IoProvider,
     network_id: &str,
+    control_scope: &str,
     method: &'static str,
 ) -> Result<u64, StateError> {
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let call = JsonRpcCall::new(method, serde_json::json!([])).with_network_id(network_id);
+    let call = JsonRpcCall::for_scope_and_network(
+        control_scope,
+        network_id,
+        method,
+        serde_json::json!([]),
+    );
     let res = client.call(call).await.map_err(state_from_io)?;
     parse_u64_hex_value(&res.response).map_err(|_| {
         state_unknown_msg(
@@ -1099,6 +1117,7 @@ mod tests {
             .iter()
             .map(|network| NetworkRouteConfig {
                 network_id: network.network_id.clone(),
+                control_scope: network.control_scope.clone(),
             })
             .collect()
     }
@@ -1111,11 +1130,13 @@ mod tests {
                 crate::model::NetworkConfig {
                     network_id: "ethereum-mainnet".to_string(),
                     chain_id: 1,
+                    control_scope: mfm_collectors_rpc_control::DEFAULT_CONTROL_SCOPE.to_string(),
                     metadata: BTreeMap::new(),
                 },
                 crate::model::NetworkConfig {
                     network_id: "arbitrum-mainnet".to_string(),
                     chain_id: 42161,
+                    control_scope: mfm_collectors_rpc_control::DEFAULT_CONTROL_SCOPE.to_string(),
                     metadata: BTreeMap::new(),
                 },
             ],

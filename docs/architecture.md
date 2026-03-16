@@ -67,6 +67,11 @@ Execution unit model:
 10. EVM network transport boundary.
 - Runtime EVM network calls must enter through the `rpc.control` transport
   wiring in `crates/app`.
+- Canonical managed `rpc.control` requests must carry explicit `network_id`.
+- Managed request identity includes `control_scope`; callers may default it to
+  `shared`, but the effective value must be stamped into the serialized request
+  before hashing or replay lookup.
+- Managed bootstrap source catalogs must declare `network_id` for every source.
 - `namespace: "evm"` remains an internal/direct executor surface used by
   `rpc.control` and explicit low-level tests; it is not the contributor-facing
   routing authority.

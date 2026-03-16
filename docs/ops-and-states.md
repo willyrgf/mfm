@@ -53,6 +53,8 @@ Notes:
 - Built-in feature entry points are owned by `FeatureCatalog` in `crates/app/src/lib.rs`.
 - The default app transport bundle exposes `rpc.control` as the canonical state-facing EVM ingress;
   the raw `evm` executor is kept for internal/direct use only.
+- Built-in `evm_*` ops and canonical `rpc.control` requests require explicit `network_id`;
+  `control_scope` defaults to `shared` unless the caller opts into isolation.
 - CLI/API transport layers stay thin; dedicated CLI commands exist only for a subset of ops.
 
 ## Shared Production States

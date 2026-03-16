@@ -644,7 +644,6 @@ async fn feature_execute_run_start_happy_path() {
 #[tokio::test]
 async fn feature_execute_portfolio_snapshot_missing_rpc_sources_is_stable_error() {
     let _guard = ENV_LOCK.lock().expect("env lock");
-    let _rpc = EnvVarGuard::remove("MFM_EVM_RPC_URL");
     let _rpc_sources = EnvVarGuard::remove("MFM_EVM_RPC_SOURCES_JSON");
 
     let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());

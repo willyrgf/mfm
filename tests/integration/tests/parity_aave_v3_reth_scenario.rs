@@ -26,6 +26,7 @@ use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::DefaultRunLauncher;
 use mfm_stream_store_postgres::PostgresStreamStore;
+use mfm_transports_rpc_control::RpcControlBootstrapSource;
 use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 
@@ -46,6 +47,8 @@ const USDC_SUPPLY_AMOUNT: u64 = 1_000_000_000_000;
 const WBTC_COLLATERAL_AMOUNT: u64 = 1_000_000_000;
 const USDC_BORROW_AMOUNT: u64 = 1_000_000;
 const BORROW_RATE_MODE: u64 = 2;
+const NETWORK_ID: &str = "reth-local";
+const CONTROL_SCOPE: &str = "parity.aave_v3_reth_scenario";
 
 #[derive(Default)]
 struct MapContext {
@@ -209,6 +212,7 @@ fn aave_portfolio_snapshot_payload(
     chain_id: u64,
     deploy_manifest: &AaveDeployManifest,
     actors: &ScenarioActors,
+    control_scope: &str,
 ) -> serde_json::Value {
     let pool = contract_from_manifest(deploy_manifest, CONTRACT_POOL);
     let usdc = contract_from_manifest(deploy_manifest, CONTRACT_USDC);
@@ -234,6 +238,7 @@ fn aave_portfolio_snapshot_payload(
                 {
                     "network_id": "reth-local",
                     "chain_id": chain_id,
+                    "control_scope": control_scope,
                     "metadata": {}
                 }
             ],
@@ -570,24 +575,36 @@ fn balance_of_calldata(owner: &str) -> String {
 }
 
 async fn rpc_call(
-    rpc_url: &str,
+    rpc_sources: &[RpcControlBootstrapSource],
+    control_scope: &str,
     streams: Arc<dyn StreamStore>,
     artifacts: Arc<dyn ArtifactStore>,
     method: &str,
     params: serde_json::Value,
 ) -> serde_json::Value {
-    rpc_control::call(rpc_url, streams, artifacts, method, params).await
+    rpc_control::call_in_scope(
+        rpc_sources,
+        NETWORK_ID,
+        control_scope,
+        streams,
+        artifacts,
+        method,
+        params,
+    )
+    .await
 }
 
 async fn erc20_balance_u64(
-    rpc_url: &str,
+    rpc_sources: &[RpcControlBootstrapSource],
+    control_scope: &str,
     streams: Arc<dyn StreamStore>,
     artifacts: Arc<dyn ArtifactStore>,
     token: &str,
     owner: &str,
 ) -> u64 {
     let value = rpc_call(
-        rpc_url,
+        rpc_sources,
+        control_scope,
         streams,
         artifacts,
         "eth_call",
@@ -815,6 +832,7 @@ fn phase_b_pipeline(
     deploy_manifest: &AaveDeployManifest,
     actors: &ScenarioActors,
     expected_chain_id: u64,
+    control_scope: &str,
 ) -> Pipeline {
     let pool = contract_from_manifest(deploy_manifest, CONTRACT_POOL);
     let usdc = contract_from_manifest(deploy_manifest, CONTRACT_USDC);
@@ -838,6 +856,8 @@ fn phase_b_pipeline(
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact": usdc_artifact,
+                    "network_id": NETWORK_ID,
+                    "control_scope": control_scope,
                     "from": supplier.clone(),
                     "contract_address": usdc_address.clone(),
                     "calls": [{
@@ -854,6 +874,8 @@ fn phase_b_pipeline(
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact": wbtc_artifact,
+                    "network_id": NETWORK_ID,
+                    "control_scope": control_scope,
                     "from": borrower.clone(),
                     "contract_address": wbtc_address.clone(),
                     "calls": [{
@@ -870,6 +892,8 @@ fn phase_b_pipeline(
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact": pool_artifact.clone(),
+                    "network_id": NETWORK_ID,
+                    "control_scope": control_scope,
                     "from": supplier.clone(),
                     "contract_address": pool_address.clone(),
                     "calls": [{
@@ -891,6 +915,8 @@ fn phase_b_pipeline(
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact": pool_artifact.clone(),
+                    "network_id": NETWORK_ID,
+                    "control_scope": control_scope,
                     "from": borrower.clone(),
                     "contract_address": pool_address.clone(),
                     "calls": [{
@@ -912,6 +938,8 @@ fn phase_b_pipeline(
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact": pool_artifact.clone(),
+                    "network_id": NETWORK_ID,
+                    "control_scope": control_scope,
                     "from": borrower.clone(),
                     "contract_address": pool_address.clone(),
                     "calls": [{
@@ -935,6 +963,8 @@ fn phase_b_pipeline(
                 op_config: serde_json::json!({
                     "artifact": pool_artifact,
                     "contract_address": pool_address,
+                    "network_id": NETWORK_ID,
+                    "control_scope": control_scope,
                     "expected_chain_id": expected_chain_id,
                     "require_client_substring": "reth",
                     "read_assertions": [],
@@ -956,9 +986,12 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
     s3.ensure_bucket_exists().await.expect("bucket exists");
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(s3);
 
-    let rpc_url = std::env::var("MFM_EVM_RPC_URL").expect("MFM_EVM_RPC_URL is required");
+    let rpc_sources = rpc_control::required_bootstrap_sources_from_env_for_network(NETWORK_ID);
+    let control_scope = format!("{CONTROL_SCOPE}.{}", uuid::Uuid::new_v4().simple());
+    let bootstrap_control_scope = format!("{control_scope}.bootstrap");
     let chain_id_hex = rpc_call(
-        &rpc_url,
+        &rpc_sources,
+        &bootstrap_control_scope,
         Arc::clone(&streams),
         Arc::clone(&artifacts),
         "eth_chainId",
@@ -970,7 +1003,8 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .map(parse_u64_hex)
         .expect("eth_chainId hex");
     let accounts_json = rpc_call(
-        &rpc_url,
+        &rpc_sources,
+        &bootstrap_control_scope,
         Arc::clone(&streams),
         Arc::clone(&artifacts),
         "eth_accounts",
@@ -1116,7 +1150,12 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
             Arc::clone(&bundle.registry),
             Arc::clone(&bundle.planner),
             LaunchPipeline {
-                pipeline: phase_b_pipeline(&deploy_manifest, &actors, expected_chain_id),
+                pipeline: phase_b_pipeline(
+                    &deploy_manifest,
+                    &actors,
+                    expected_chain_id,
+                    &control_scope,
+                ),
                 input: serde_json::json!({}),
                 run_config: run_config_with_allowlist(
                     mfm_machine::config::default_nix_flake_allowlist(),
@@ -1152,7 +1191,8 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
 
     let positions = AaveScenarioPositionSnapshot {
         supplier_supplied_usdc: erc20_balance_u64(
-            &rpc_url,
+            &rpc_sources,
+            &control_scope,
             Arc::clone(&streams),
             Arc::clone(&artifacts),
             &usdc_a_token.address,
@@ -1160,7 +1200,8 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         )
         .await,
         borrower_collateral_wbtc: erc20_balance_u64(
-            &rpc_url,
+            &rpc_sources,
+            &control_scope,
             Arc::clone(&streams),
             Arc::clone(&artifacts),
             &wbtc_a_token.address,
@@ -1168,7 +1209,8 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         )
         .await,
         borrower_borrowed_usdc: erc20_balance_u64(
-            &rpc_url,
+            &rpc_sources,
+            &control_scope,
             Arc::clone(&streams),
             Arc::clone(&artifacts),
             &usdc_variable_debt.address,
@@ -1176,7 +1218,8 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         )
         .await,
         borrower_usdc_balance: erc20_balance_u64(
-            &rpc_url,
+            &rpc_sources,
+            &control_scope,
             Arc::clone(&streams),
             Arc::clone(&artifacts),
             &usdc.address,
@@ -1184,7 +1227,8 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         )
         .await,
         pool_usdc_balance: erc20_balance_u64(
-            &rpc_url,
+            &rpc_sources,
+            &control_scope,
             Arc::clone(&streams),
             Arc::clone(&artifacts),
             &usdc.address,
@@ -1255,7 +1299,12 @@ async fn parity_aave_v3_reth_scenario_pipeline() {
         .oneshot(json_post(
             "/v1/features/portfolio.snapshot/execute",
             serde_json::json!({
-                "payload": aave_portfolio_snapshot_payload(expected_chain_id, &deploy_manifest, &actors)
+                "payload": aave_portfolio_snapshot_payload(
+                    expected_chain_id,
+                    &deploy_manifest,
+                    &actors,
+                    &control_scope
+                )
             }),
         ))
         .await

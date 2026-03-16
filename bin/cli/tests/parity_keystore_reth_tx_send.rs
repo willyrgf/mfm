@@ -363,7 +363,25 @@ fn parse_success_json(stdout: &[u8]) -> Value {
 }
 
 fn parse_error_json(stderr: &[u8]) -> Value {
-    let parsed: Value = serde_json::from_slice(stderr).expect("stderr must be valid json");
+    let stderr = std::str::from_utf8(stderr).expect("stderr utf8");
+    let trimmed = stderr.trim();
+    let parsed = serde_json::from_str::<Value>(trimmed)
+        .or_else(|_| {
+            let start = trimmed.find('{').ok_or_else(|| {
+                serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "missing json object start",
+                ))
+            })?;
+            let end = trimmed.rfind('}').ok_or_else(|| {
+                serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "missing json object end",
+                ))
+            })?;
+            serde_json::from_str::<Value>(&trimmed[start..=end])
+        })
+        .unwrap_or_else(|_| panic!("stderr must contain valid json: {stderr}"));
     assert_eq!(parsed["status"], "error");
     parsed["error"].clone()
 }

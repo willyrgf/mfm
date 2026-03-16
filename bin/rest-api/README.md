@@ -27,7 +27,7 @@ Environment variables:
   ```json
   [
     {"id":"helios_local","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:8545","kind":"local"},
-    {"id":"drpc_public","rpc_url":"https://eth.drpc.org","kind":"remote_public"}
+    {"id":"drpc_public","network_id":"ethereum-mainnet","rpc_url":"https://eth.drpc.org","kind":"remote_public"}
   ]
   ```
 - `MFM_EVM_RPC_PREFERRED_ORDER`: optional comma-separated source IDs used as bootstrap preference.
@@ -40,9 +40,7 @@ Environment variables:
   - `MFM_EVM_RPC_LOGS_MAX_BLOCK_SPAN`: optional initial max block span for `eth_getLogs` chunking
   - `MFM_EVM_RPC_LOGS_MIN_BLOCK_SPAN`: optional minimum block span for adaptive `eth_getLogs` splitting
   - `MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL`: optional chunk/retry budget cap for a single `eth_getLogs` request
-- Legacy compatibility:
-  - `MFM_EVM_RPC_URL`: single-source fallback endpoint (mapped to source id `user_primary`)
-  - `MFM_EVM_RPC_AUTHORIZATION`: optional Authorization header for that legacy single source
+- Every `MFM_EVM_RPC_SOURCES_JSON` source must declare a `network_id`.
 
 ## API
 
@@ -66,6 +64,7 @@ Endpoints:
 `rpc.control` routing notes:
 
 - Canonical EVM reads route through `namespace="rpc.control"` with `network_id`.
+- `control_scope` defaults to `shared` unless the caller explicitly isolates the request flow.
 - Canonical managed requests do not expose caller-controlled source pinning.
 - Per-request `rpc_url` override is rejected for managed calls.
 - EVM routing runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)
@@ -112,6 +111,10 @@ Successful `portfolio.snapshot` responses include the canonical `report` when th
 `report.wallet_summaries[*].totals_by_quote[*]` and `report.totals_by_quote[*]` carry the derived
 per-quote `assets_value_dec`, `collateral_value_dec`, `debt_value_dec`, `staked_value_dec`, and
 `net_value_dec` summary fields.
+
+`payload.portfolio.networks[*].control_scope` is optional and defaults to `shared`. Set it when
+one portfolio flow must isolate managed `rpc.control` source state from another flow on the same
+network.
 
 Supported `op_id` values (current):
 

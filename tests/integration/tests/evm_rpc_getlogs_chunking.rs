@@ -27,6 +27,8 @@ use mfm_transports_rpc_control::{
     RpcControlExecutorTuning, RpcControlPlaneStorageMode, RpcControlTransportFactory,
 };
 
+const NETWORK_ID: &str = "ethereum-mainnet";
+
 #[derive(Clone)]
 enum StubBehavior {
     AlwaysStatus(u16),
@@ -184,8 +186,8 @@ fn build_transport(
     max_chunks: u64,
 ) -> Box<dyn mfm_machine::live_io::LiveIoTransport> {
     let sources = vec![
-        rpc_control::single_remote_user_source("primary", &primary.url),
-        rpc_control::single_remote_user_source("secondary", &secondary.url),
+        rpc_control::single_remote_user_source("primary", NETWORK_ID, &primary.url),
+        rpc_control::single_remote_user_source("secondary", NETWORK_ID, &secondary.url),
     ];
 
     let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
@@ -249,7 +251,8 @@ async fn evm_getlogs_chunking_succeeds_with_adaptive_split_and_failover() {
     let response = live
         .call(rpc_control_io_call(
             RpcControlRequest::EvmCall {
-                call: JsonRpcCall::new(
+                call: JsonRpcCall::for_network(
+                    NETWORK_ID,
                     "eth_getLogs",
                     serde_json::json!([{
                         "address": "0x0000000000000000000000000000000000000000",
@@ -308,7 +311,8 @@ async fn evm_getlogs_chunking_returns_exhausted_when_retryable_failures_persist(
     let err = live
         .call(rpc_control_io_call(
             RpcControlRequest::EvmCall {
-                call: JsonRpcCall::new(
+                call: JsonRpcCall::for_network(
+                    NETWORK_ID,
                     "eth_getLogs",
                     serde_json::json!([{
                         "address": "0x0000000000000000000000000000000000000000",
@@ -366,7 +370,8 @@ async fn evm_getlogs_chunking_live_then_replay_is_network_quiet() {
     let live_result = live
         .call(rpc_control_io_call(
             RpcControlRequest::EvmCall {
-                call: JsonRpcCall::new(
+                call: JsonRpcCall::for_network(
+                    NETWORK_ID,
                     "eth_getLogs",
                     serde_json::Value::Array(
                         request["params"].as_array().cloned().unwrap_or_default(),
@@ -392,7 +397,8 @@ async fn evm_getlogs_chunking_live_then_replay_is_network_quiet() {
         .call(IoCall {
             namespace: "rpc.control".to_string(),
             request: serde_json::to_value(RpcControlRequest::EvmCall {
-                call: JsonRpcCall::new(
+                call: JsonRpcCall::for_network(
+                    NETWORK_ID,
                     "eth_getLogs",
                     serde_json::Value::Array(
                         request["params"].as_array().cloned().unwrap_or_default(),

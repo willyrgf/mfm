@@ -362,7 +362,7 @@ Starts the canonical portfolio snapshot flow from a full request object containi
 
 **Requirements:**
 - `DATABASE_URL` (stream store)
-- managed RPC bootstrap configuration (`MFM_EVM_RPC_SOURCES_JSON`, or legacy `MFM_EVM_RPC_URL`)
+- managed RPC bootstrap configuration (`MFM_EVM_RPC_SOURCES_JSON`)
 
 **Usage:**
 ```sh
@@ -382,6 +382,10 @@ The request JSON must use the same in-place contract as the `portfolio.snapshot`
   "valuation_source_registry": { "...": "canonical ValuationSourceRegistry" }
 }
 ```
+
+`portfolio.networks[*].control_scope` is optional and defaults to `shared`. Set it when one
+portfolio flow must not share managed `rpc.control` source state with another flow on the same
+network.
 
 **Output Notes:**
 - Result metadata includes run ids and snapshot ids.
@@ -429,7 +433,7 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   ```sh
   export MFM_EVM_RPC_SOURCES_JSON='[
     {"id":"helios_local","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:8545","kind":"local"},
-    {"id":"drpc_public","rpc_url":"https://eth.drpc.org","kind":"remote_public"}
+    {"id":"drpc_public","network_id":"ethereum-mainnet","rpc_url":"https://eth.drpc.org","kind":"remote_public"}
   ]'
   ```
 
@@ -443,9 +447,9 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   export MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS="helios_local"
   ```
 
-- Legacy compatibility:
-  - **`MFM_EVM_RPC_URL`**: single-source bootstrap endpoint mapped as source id `user_primary`.
-  - **`MFM_EVM_RPC_AUTHORIZATION`**: optional Authorization header for that legacy single source.
+- Managed `rpc.control` bootstrap requires `network_id` on every configured source.
+- Canonical managed requests require an explicit `network_id`; `control_scope` defaults to
+  `shared` unless an op config overrides it.
 
 - Direct-executor compatibility knobs:
   These still affect the internal `namespace="evm"` executor and direct executor tests. Canonical

@@ -183,6 +183,9 @@ let
     "MFM_CI_ENABLE_PARITY"
     "MFM_CI_ENABLE_MAINNET"
     "DATABASE_URL"
+    "MFM_EVM_RPC_SOURCES_JSON"
+    "MFM_EVM_RPC_PREFERRED_ORDER"
+    "MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS"
     "MFM_EVM_RPC_URL"
     "MFM_S3_ENDPOINT"
     "MFM_S3_REGION"
@@ -220,15 +223,15 @@ let
     artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
     mkdir -p "$artifacts_dir"
 
-    # Keep Cargo artifacts outside the workspace root so parallel CI steps do
-    # not race with flake/model evaluation over mutable target/ files.
+    # Keep Cargo artifacts outside the workspace root so flake/model
+    # evaluation does not trip over mutable target/ files.  All tasks
+    # within the same workflow share a single target dir; Cargo's own
+    # file-lock serialises any parallel builds automatically.
     run_id_component="''${NIXFIED_ORCHESTRATOR_RUN_ID:-''${NIXFIED_RUN_ID:-''${NIX_ENV:-0}}}"
     workflow_id_component="''${NIXFIED_PARENT_WORKFLOW_ID:-''${NIXFIED_ORCHESTRATOR_WORKFLOW_ID:-workflow}}"
-    task_id_component="''${NIXFIED_TASK_ID:-orchestrator}"
     run_id_component="$(printf '%s' "$run_id_component" | tr './:' '__')"
     workflow_id_component="$(printf '%s' "$workflow_id_component" | tr './:' '__')"
-    task_id_component="$(printf '%s' "$task_id_component" | tr './:' '__')"
-    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-''${TMPDIR:-/tmp}/mfm-ci-target/$run_id_component/$workflow_id_component/$task_id_component}"
+    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-''${TMPDIR:-/tmp}/mfm-ci-target/$run_id_component/$workflow_id_component}"
     mkdir -p "$CARGO_TARGET_DIR"
 
     run_with_log() {
@@ -337,6 +340,8 @@ let
     export MFM_PARITY_AAVE_V3_RETH_PROBE_PATH="''${MFM_PARITY_AAVE_V3_RETH_PROBE_PATH:-$artifacts_dir/parity-aave-v3-reth-probe.json}"
     export DATABASE_URL="''${DATABASE_URL:-postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test}"
     export MFM_EVM_RPC_URL="''${MFM_EVM_RPC_URL:-http://127.0.0.1:$RETH_HTTP_PORT}"
+    export MFM_EVM_RPC_SOURCES_JSON="''${MFM_EVM_RPC_SOURCES_JSON:-[{\"id\":\"reth_ethereum_mainnet\",\"network_id\":\"ethereum-mainnet\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"},{\"id\":\"reth_local\",\"network_id\":\"reth-local\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"}]}"
+    export MFM_EVM_RPC_PREFERRED_ORDER="''${MFM_EVM_RPC_PREFERRED_ORDER:-reth_ethereum_mainnet,reth_local}"
     export MFM_S3_ENDPOINT="''${MFM_S3_ENDPOINT:-http://127.0.0.1:$MINIO_API_PORT}"
     export MFM_S3_REGION="''${MFM_S3_REGION:-us-east-1}"
     export MFM_S3_BUCKET="''${MFM_S3_BUCKET:-mfm-test}"
@@ -778,6 +783,12 @@ in
 
             if [ -z "''${MFM_EVM_RPC_URL:-}" ]; then
               export MFM_EVM_RPC_URL="http://127.0.0.1:8545"
+            fi
+            if [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ]; then
+              export MFM_EVM_RPC_SOURCES_JSON='[{"id":"reth_ethereum_mainnet","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:8545","kind":"local"},{"id":"reth_local","network_id":"reth-local","rpc_url":"http://127.0.0.1:8545","kind":"local"}]'
+            fi
+            if [ -z "''${MFM_EVM_RPC_PREFERRED_ORDER:-}" ]; then
+              export MFM_EVM_RPC_PREFERRED_ORDER="reth_ethereum_mainnet,reth_local"
             fi
 
             if [ -z "''${MFM_REST_API_ADDR:-}" ]; then
@@ -1496,11 +1507,10 @@ in
               export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/${
                 conf.modules.postgres.database or "mfm"
               }"
-              export MFM_EVM_RPC_URL="http://127.0.0.1:$HELIOS_RPC_PORT"
-              export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"helios_local\",\"rpc_url\":\"http://127.0.0.1:$HELIOS_RPC_PORT\",\"kind\":\"local\"}]"
+              export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"helios_local\",\"network_id\":\"ethereum-mainnet\",\"rpc_url\":\"http://127.0.0.1:$HELIOS_RPC_PORT\",\"kind\":\"local\"}]"
               export MFM_EVM_RPC_PREFERRED_ORDER="helios_local"
 
-              echo "INFO: launching packaged mfm_cli portfolio snapshot request_file=$MFM_SNAPSHOT_REQUEST_FILE rpc=$MFM_EVM_RPC_URL"
+              echo "INFO: launching packaged mfm_cli portfolio snapshot request_file=$MFM_SNAPSHOT_REQUEST_FILE rpc_sources=helios_local"
               "$mfm_cli_bin" --output-format json portfolio snapshot --request-file "$MFM_SNAPSHOT_REQUEST_FILE" >"$MFM_SNAPSHOT_RESULT_FILE"
             '';
           }
@@ -1770,76 +1780,6 @@ in
             ${cargoClippyCmd}
 
             echo "OK: quality checks completed"
-          '';
-        };
-
-        rpc-control-scope-reset = mkCommandTask {
-          id = "task.rpc-control-scope-reset";
-          appName = "rpc-control-scope-reset";
-          summary = "Reset rpc.control durable state for the scope cutover";
-          description = ''
-            Executes the one-shot rpc.control scope-cutover reset against `DATABASE_URL`.
-            This task deletes only the `rpc_source:*` and `source_pool:*` stream families and
-            recreates the scoped projection tables. Run it exactly once after the final refactor
-            code lands and before any refactor-era service, parity job, or local app process starts.
-          '';
-          tags = [
-            "ops"
-            "rpc-control"
-            "postgres"
-          ];
-          usage = [
-            "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mfm nix run .#rpc-control-scope-reset -- --yes"
-            "nix run .#rpc-control-scope-reset -- --print-sql"
-          ];
-          runtimeInputs = commonRuntimeInputs ++ [ postgresPackage ];
-          argParser = "passthrough";
-          allowUnknownArgs = true;
-          command = ''
-            set -euo pipefail
-
-            sql_file=${./sql/rpc-control-scope-reset.sql}
-            print_sql=0
-            confirm=0
-
-            while [ "$#" -gt 0 ]; do
-              case "$1" in
-                --yes)
-                  confirm=1
-                  shift
-                  ;;
-                --print-sql)
-                  print_sql=1
-                  shift
-                  ;;
-                *)
-                  echo "ERROR: unsupported argument: $1" >&2
-                  echo "usage: nix run .#rpc-control-scope-reset -- [--print-sql] [--yes]" >&2
-                  exit 2
-                  ;;
-              esac
-            done
-
-            if [ "$print_sql" -eq 1 ]; then
-              cat "$sql_file"
-              exit 0
-            fi
-
-            if [ "$confirm" -ne 1 ]; then
-              echo "ERROR: refusing to run without --yes" >&2
-              echo "INFO: this task is a one-shot reset for the rpc.control scope cutover" >&2
-              echo "usage: DATABASE_URL=... nix run .#rpc-control-scope-reset -- --yes" >&2
-              exit 2
-            fi
-
-            if [ -z "''${DATABASE_URL:-}" ]; then
-              echo "ERROR: DATABASE_URL is required" >&2
-              exit 2
-            fi
-
-            echo "INFO: resetting rpc.control durable state via $sql_file"
-            ${postgresPackage}/bin/psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$sql_file"
-            echo "OK: rpc.control durable state reset completed"
           '';
         };
 
@@ -2127,7 +2067,6 @@ in
                 require_app "mfm_cli"
                 require_app "mfm::portfolio::snapshot"
                 require_app "mfm_rest_api"
-                require_app "rpc-control-scope-reset"
 
                 require_task "task.ci"
                 require_task "task.ci.services-start"
@@ -2137,7 +2076,6 @@ in
                 require_task "task.mfm_cli"
                 require_task "task.mfm.portfolio.snapshot"
                 require_task "task.mfm_rest_api"
-                require_task "task.rpc-control-scope-reset"
 
                 require_workflow "workflow.ci.full"
                 require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-basic"

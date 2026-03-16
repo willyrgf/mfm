@@ -261,16 +261,16 @@ impl SourcePoolRef {
         pool_kind: impl Into<String>,
     ) -> Result<Self, SourcePoolRefError> {
         Ok(Self {
-            control_scope: validate_component("control_scope", control_scope).map_err(
-                |err| match err {
+            control_scope: validate_component("control_scope", control_scope).map_err(|err| {
+                match err {
                     RpcSourceRefError::InvalidComponent { name, value } => {
                         SourcePoolRefError::InvalidComponent { name, value }
                     }
                     RpcSourceRefError::InvalidStreamId(value) => {
                         SourcePoolRefError::InvalidStreamId(value)
                     }
-                },
-            )?,
+                }
+            })?,
             network_id: validate_component("network_id", network_id).map_err(|err| match err {
                 RpcSourceRefError::InvalidComponent { name, value } => {
                     SourcePoolRefError::InvalidComponent { name, value }
@@ -751,14 +751,16 @@ impl SourcePoolCatalogSnapshot {
                 self.schema_version
             ));
         }
-        validate_component("control_scope", self.control_scope.clone()).map_err(|err| match err {
-            RpcSourceRefError::InvalidComponent { value, .. } => {
-                format!("invalid control_scope `{value}` in catalog snapshot")
-            }
-            RpcSourceRefError::InvalidStreamId(value) => {
-                format!("invalid control_scope `{value}` in catalog snapshot")
-            }
-        })?;
+        validate_component("control_scope", self.control_scope.clone()).map_err(
+            |err| match err {
+                RpcSourceRefError::InvalidComponent { value, .. } => {
+                    format!("invalid control_scope `{value}` in catalog snapshot")
+                }
+                RpcSourceRefError::InvalidStreamId(value) => {
+                    format!("invalid control_scope `{value}` in catalog snapshot")
+                }
+            },
+        )?;
         validate_component("network_id", self.network_id.clone()).map_err(|err| match err {
             RpcSourceRefError::InvalidComponent { value, .. } => {
                 format!("invalid network_id `{value}` in catalog snapshot")
@@ -881,10 +883,9 @@ impl SourcePoolRecord {
         match self {
             SourcePoolRecord::CatalogDeclared(record) => {
                 record.catalog_snapshot.validate()?;
-                let actual_fingerprint = record
-                    .catalog_snapshot
-                    .fingerprint()
-                    .map_err(|err| format!("catalog snapshot was not canonical-json-hashable: {err}"))?;
+                let actual_fingerprint = record.catalog_snapshot.fingerprint().map_err(|err| {
+                    format!("catalog snapshot was not canonical-json-hashable: {err}")
+                })?;
                 if record.catalog_fingerprint != actual_fingerprint {
                     return Err(format!(
                         "catalog fingerprint `{}` did not match canonical snapshot fingerprint `{actual_fingerprint}`",
@@ -1391,12 +1392,13 @@ WHERE control_scope = $1 AND network_id = $2 AND source_id = $3
         let control_scope: String = row.get(0);
         let network_id: String = row.get(1);
         let source_id: String = row.get(2);
-        let source_ref = RpcSourceRef::new(control_scope, network_id, source_id).map_err(|err| {
-            storage_corruption(
-                "control_plane_projection_invalid",
-                format!("invalid rpc_source projection identity: {err}"),
-            )
-        })?;
+        let source_ref =
+            RpcSourceRef::new(control_scope, network_id, source_id).map_err(|err| {
+                storage_corruption(
+                    "control_plane_projection_invalid",
+                    format!("invalid rpc_source projection identity: {err}"),
+                )
+            })?;
         let stream_id = StreamId::new(row.get::<_, String>(3)).map_err(|err| {
             storage_corruption(
                 "control_plane_projection_invalid",
@@ -1806,8 +1808,7 @@ ON CONFLICT (control_scope, network_id, pool_kind) DO UPDATE SET
                             )
                         })
                     })
-                    .transpose()
-                    ?,
+                    .transpose()?,
                 &member_source_ids,
                 &ranked_source_ids,
             ],

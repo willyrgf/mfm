@@ -150,6 +150,7 @@ impl State for CollectAaveObservationsState {
                         symbol,
                         pin,
                         &route.network_id,
+                        &route.control_scope,
                         &direct_prices,
                     )
                     .await?,
@@ -175,6 +176,7 @@ impl State for CollectAaveObservationsState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_aave_observation(
     state_id: &StateId,
     io: &mut dyn IoProvider,
@@ -182,6 +184,7 @@ async fn build_aave_observation(
     symbol: &SymbolConfig,
     pin: &PinnedNetwork,
     network_id: &str,
+    control_scope: &str,
     direct_prices: &[DirectPriceValue],
 ) -> Result<Observation, StateError> {
     let cfg = decode_aave_protocol_position_config(symbol).map_err(|err| {
@@ -212,6 +215,7 @@ async fn build_aave_observation(
                         state_id,
                         io,
                         network_id,
+                        control_scope,
                         reserve_cfg.market.pool_address.as_str(),
                         &wallet.address,
                         reserve.reserve_index,
@@ -230,6 +234,7 @@ async fn build_aave_observation(
                         state_id,
                         io,
                         network_id,
+                        control_scope,
                         reserve.a_token_address.as_str(),
                         &wallet.address,
                         pin.block_number,
@@ -294,6 +299,7 @@ async fn build_aave_observation(
                 state_id,
                 io,
                 network_id,
+                control_scope,
                 token_address,
                 &wallet.address,
                 pin.block_number,
@@ -325,7 +331,15 @@ async fn build_aave_observation(
     let decimals = match symbol.decimals {
         Some(decimals) => decimals,
         None => {
-            read_token_decimals(state_id, io, network_id, token_address, pin.block_number).await?
+            read_token_decimals(
+                state_id,
+                io,
+                network_id,
+                control_scope,
+                token_address,
+                pin.block_number,
+            )
+            .await?
         }
     };
     let amount_dec = format_u256_units(&raw, decimals);
@@ -358,11 +372,14 @@ async fn read_token_decimals(
     state_id: &StateId,
     io: &mut dyn IoProvider,
     network_id: &str,
+    control_scope: &str,
     token_address: &str,
     block_number: u64,
 ) -> Result<u8, StateError> {
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let call = JsonRpcCall::new(
+    let call = JsonRpcCall::for_scope_and_network(
+        control_scope,
+        network_id,
         "eth_call",
         serde_json::json!([
             {
@@ -371,8 +388,7 @@ async fn read_token_decimals(
             },
             u64_hex_quantity(block_number)
         ]),
-    )
-    .with_network_id(network_id);
+    );
     let res = client.call(call).await.map_err(state_from_io)?;
     let raw = parse_u256_hex_value(&res.response).map_err(|err| {
         state_unknown_msg(
@@ -392,6 +408,7 @@ async fn read_erc20_balance(
     state_id: &StateId,
     io: &mut dyn IoProvider,
     network_id: &str,
+    control_scope: &str,
     token_address: &str,
     wallet_address: &str,
     block_number: u64,
@@ -403,14 +420,15 @@ async fn read_erc20_balance(
         )
     })?;
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let call = JsonRpcCall::new(
+    let call = JsonRpcCall::for_scope_and_network(
+        control_scope,
+        network_id,
         "eth_call",
         serde_json::json!([
             {"to": token_address, "data": encode_erc20_balance_of(&wallet)},
             u64_hex_quantity(block_number)
         ]),
-    )
-    .with_network_id(network_id);
+    );
     let res = client.call(call).await.map_err(state_from_io)?;
     parse_u256_hex_value(&res.response).map_err(|err| {
         state_unknown_msg(
@@ -420,10 +438,12 @@ async fn read_erc20_balance(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn read_user_collateral_enabled(
     state_id: &StateId,
     io: &mut dyn IoProvider,
     network_id: &str,
+    control_scope: &str,
     pool_address: &str,
     wallet_address: &str,
     reserve_index: u16,
@@ -436,14 +456,15 @@ async fn read_user_collateral_enabled(
         )
     })?;
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let call = JsonRpcCall::new(
+    let call = JsonRpcCall::for_scope_and_network(
+        control_scope,
+        network_id,
         "eth_call",
         serde_json::json!([
             {"to": pool_address, "data": encode_get_user_configuration(&wallet)},
             u64_hex_quantity(block_number)
         ]),
-    )
-    .with_network_id(network_id);
+    );
     let res = client.call(call).await.map_err(state_from_io)?;
     let raw = parse_u256_hex_value(&res.response).map_err(|err| {
         state_unknown_msg(
@@ -812,6 +833,7 @@ mod tests {
             symbols,
             networks: vec![NetworkRouteConfig {
                 network_id: "ethereum-mainnet".to_string(),
+                control_scope: mfm_collectors_rpc_control::DEFAULT_CONTROL_SCOPE.to_string(),
             }],
             resolved_wallets_key: ContextKey("resolved_wallets".to_string()),
             network_pins_key: ContextKey("network_pins".to_string()),
@@ -897,6 +919,7 @@ mod tests {
             &symbol,
             &pin,
             "ethereum-mainnet",
+            mfm_collectors_rpc_control::DEFAULT_CONTROL_SCOPE,
             &[],
         )
         .await

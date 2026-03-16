@@ -78,10 +78,9 @@ expects that alias.
 Runtime bootstrap reconstructed inside `task.mfm.portfolio.snapshot.exec`:
 
 - `DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm`
-- `MFM_EVM_RPC_URL=http://127.0.0.1:$HELIOS_RPC_PORT`
 - `MFM_SNAPSHOT_REQUEST_FILE=/absolute/path/to/portfolio-request.json`
 - managed RPC bootstrap:
-  - `MFM_EVM_RPC_SOURCES_JSON`
+  - `MFM_EVM_RPC_SOURCES_JSON=[{"id":"helios_local","network_id":"ethereum-mainnet","rpc_url":"http://127.0.0.1:$HELIOS_RPC_PORT","kind":"local"}]`
   - `MFM_EVM_RPC_PREFERRED_ORDER=helios_local`
 
 Secret-bearing env is reconstructed per task and is not persisted in the

@@ -1,6 +1,6 @@
 # MFM Design Contract
 
-> Last updated: 2026-02-14
+> Last updated: 2026-03-16
 > Status: Authoritative design contract.
 >
 > This document defines non-negotiable architecture and execution semantics.
@@ -26,6 +26,15 @@ Contributor read order:
 This contract remains the normative source of truth for semantics, invariants, and allowed boundaries.
 For concrete `rpc.control` routing, bootstrap, and executor-boundary behavior, use
 [`docs/evm-rpc-routing.md`](evm-rpc-routing.md) alongside this document.
+
+Normative `rpc.control` contract:
+- canonical managed requests MUST carry explicit `network_id`
+- managed request identity MUST include the effective `control_scope`
+- the default `shared` scope is allowed only as a caller-side convenience that is
+  stamped into the serialized request before fact-key derivation
+- managed bootstrap source catalogs MUST declare `network_id` on every source
+- durable control-plane identities for `rpc_source:*` and `source_pool:*` MUST be
+  keyed by `control_scope` plus the existing network/source dimensions
 
 ## 2. Guiding Priorities
 

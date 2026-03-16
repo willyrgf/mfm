@@ -22,6 +22,7 @@ Managed EVM read/write request envelope:
 ```json
 {
   "kind": "evm_call",
+  "control_scope": "shared",
   "network_id": "ethereum-mainnet",
   "method": "eth_chainId",
   "params": []
@@ -33,12 +34,15 @@ Control-plane preflight/setup request envelope:
 ```json
 {
   "kind": "prepare_sources",
+  "control_scope": "shared",
   "network_id": "ethereum-mainnet"
 }
 ```
 
 Notes:
-- Canonical callers should supply `network_id` whenever they know the stable network context.
+- Canonical callers must supply `network_id`.
+- `control_scope` is part of durable request identity; omit it only when the default `shared`
+  scope is intended.
 - Canonical managed requests do not expose caller-controlled source pinning.
 - Per-request raw `rpc_url` overrides are rejected.
 - Canonical app wiring no longer exposes the raw `evm` transport as the default state-facing
@@ -50,21 +54,14 @@ The control plane bootstraps its source catalog from runtime-only environment va
 
 - `MFM_EVM_RPC_SOURCES_JSON`: JSON array of source objects:
   - `id`
+  - `network_id`
   - `rpc_url`
   - optional `authorization`
   - optional `kind` (`local`, `remote_user`, `remote_public`)
-  - optional `network_id`
   - optional `require_get_proof_probe`
 - `MFM_EVM_RPC_PREFERRED_ORDER`: comma-separated source IDs used as base ordering hints.
 - `MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS`: comma-separated source IDs that must pass `eth_getProof`
   probing.
-
-Compatibility fallback:
-- `MFM_EVM_RPC_URL`
-- `MFM_EVM_RPC_AUTHORIZATION`
-
-When only the legacy single-source fallback is configured, the control plane maps it to source id
-`user_primary`.
 
 ## 3. Runtime Behavior
 
@@ -73,6 +70,7 @@ When only the legacy single-source fallback is configured, the control plane map
 - source-pool membership bootstrap
 - source probing and capability checks
 - durable ranking snapshots
+- catalog declaration and mismatch protection per `(control_scope, network_id, pool_kind)`
 - managed source selection for unpinned EVM calls
 - best-effort runtime observation writes after live calls
 
@@ -80,7 +78,9 @@ Current managed behavior:
 - `prepare_sources` syncs membership, probes stale or missing sources, computes ranked order, and
   persists source-pool state in the Postgres control-plane store.
 - `evm_call` selects a source from the durable pool; callers do not pin source ids directly.
-- If multiple network-specific bootstrap catalogs exist, managed callers must provide `network_id`.
+- Managed callers must provide `network_id` even when only one catalog is configured.
+- `control_scope` isolates durable source state; use an explicit scope when two flows must not
+  share ranking or catalog history.
 
 The raw `evm` transport remains useful for:
 
@@ -95,6 +95,7 @@ Common `rpc.control` error codes include:
 - `rpc_control_no_sources`
 - `rpc_control_network_required`
 - `rpc_control_network_invalid`
+- `rpc_control_catalog_mismatch`
 - `rpc_control_source_unknown`
 - `rpc_control_source_invalid`
 - `rpc_control_pool_invalid`
@@ -109,6 +110,7 @@ Common `rpc.control` error codes include:
 
 - Shared runtime states should use the typed `mfm-collectors-rpc-control` client.
 - New canonical read APIs should pass `network_id`, not `rpc_source_id`.
+- New canonical callers that need isolation should stamp an explicit `control_scope`.
 - New canonical write APIs should not introduce fresh caller-controlled source selection.
 - If you need to test raw executor behavior directly, do so explicitly and document that it is a
   direct/internal test rather than a canonical app-routing path.

@@ -21,6 +21,8 @@ use mfm_machine::replay_io::ReplayIo;
 use mfm_machine::stores::{ArtifactStore, StreamStore};
 use mfm_stream_store_mem::MemStreamStore;
 
+const NETWORK_ID: &str = "ethereum-mainnet";
+
 #[derive(Clone)]
 enum StubBehavior {
     JsonResult(Value),
@@ -113,8 +115,8 @@ fn build_transport(
     state_id: StateId,
 ) -> Box<dyn mfm_machine::live_io::LiveIoTransport> {
     let sources = vec![
-        rpc_control::single_remote_user_source("primary", &primary.url),
-        rpc_control::single_remote_user_source("secondary", &secondary.url),
+        rpc_control::single_remote_user_source("primary", NETWORK_ID, &primary.url),
+        rpc_control::single_remote_user_source("secondary", NETWORK_ID, &secondary.url),
     ];
 
     let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
@@ -176,7 +178,8 @@ async fn evm_rpc_pool_failover_live_then_replay_keeps_network_quiet() {
     let live_result = live
         .call(rpc_control_io_call(
             RpcControlRequest::EvmCall {
-                call: JsonRpcCall::new(
+                call: JsonRpcCall::for_network(
+                    NETWORK_ID,
                     request["method"].as_str().unwrap_or("eth_getLogs"),
                     request["params"].clone(),
                 ),
@@ -198,7 +201,8 @@ async fn evm_rpc_pool_failover_live_then_replay_keeps_network_quiet() {
         .call(IoCall {
             namespace: "rpc.control".to_string(),
             request: serde_json::to_value(RpcControlRequest::EvmCall {
-                call: JsonRpcCall::new(
+                call: JsonRpcCall::for_network(
+                    NETWORK_ID,
                     request["method"].as_str().unwrap_or("eth_getLogs"),
                     request["params"].clone(),
                 ),
@@ -238,7 +242,7 @@ async fn evm_rpc_pool_failover_uses_secondary_when_primary_is_429() {
     let live_result = live
         .call(rpc_control_io_call(
             RpcControlRequest::EvmCall {
-                call: JsonRpcCall::new("eth_getLogs", serde_json::json!([])),
+                call: JsonRpcCall::for_network(NETWORK_ID, "eth_getLogs", serde_json::json!([])),
             },
             fact_key,
         ))
@@ -264,10 +268,10 @@ async fn evm_replay_missing_fact_key_behavior_is_unchanged() {
             namespace: "rpc.control".to_string(),
             request: json!({
                 "kind": "evm_call",
-                "call": {
-                    "method": "eth_chainId",
-                    "params": serde_json::json!([]),
-                },
+                "control_scope": "shared",
+                "network_id": NETWORK_ID,
+                "method": "eth_chainId",
+                "params": serde_json::json!([]),
             }),
             fact_key: None,
         })

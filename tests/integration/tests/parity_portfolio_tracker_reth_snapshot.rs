@@ -11,6 +11,10 @@ use mfm_artifact_store_fs::FsArtifactStore;
 use mfm_integration_tests::rpc_control;
 use mfm_machine::stores::{ArtifactStore, StreamStore};
 use mfm_stream_store_mem::MemStreamStore;
+use mfm_transports_rpc_control::RpcControlBootstrapSource;
+
+const NETWORK_ID: &str = "ethereum-mainnet";
+const CONTROL_SCOPE: &str = "parity.portfolio_snapshot.eth_only";
 
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
     let s = serde_json::to_string(&body).expect("json request must serialize");
@@ -22,7 +26,11 @@ fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
         .expect("request")
 }
 
-fn canonical_portfolio_snapshot_payload(wallet_address: &str, chain_id: u64) -> serde_json::Value {
+fn canonical_portfolio_snapshot_payload(
+    wallet_address: &str,
+    chain_id: u64,
+    control_scope: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "portfolio": {
             "portfolio_id": "reth-eth-only",
@@ -31,6 +39,7 @@ fn canonical_portfolio_snapshot_payload(wallet_address: &str, chain_id: u64) -> 
                 {
                     "network_id": "ethereum-mainnet",
                     "chain_id": chain_id,
+                    "control_scope": control_scope,
                     "metadata": {}
                 }
             ],
@@ -110,18 +119,40 @@ fn parse_u64_hex(s: &str) -> u64 {
     u64::from_str_radix(rest, 16).expect("hex u64")
 }
 
-async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> serde_json::Value {
+async fn rpc_call(
+    rpc_sources: &[RpcControlBootstrapSource],
+    control_scope: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(FsArtifactStore::new(tmp.path()));
     let streams: Arc<dyn StreamStore> = Arc::new(MemStreamStore::new());
-    rpc_control::call(rpc_url, streams, artifacts, method, params).await
+    rpc_control::call_in_scope(
+        rpc_sources,
+        NETWORK_ID,
+        control_scope,
+        streams,
+        artifacts,
+        method,
+        params,
+    )
+    .await
 }
 
 #[tokio::test]
 async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
-    let rpc_url = std::env::var("MFM_EVM_RPC_URL").expect("MFM_EVM_RPC_URL is required");
+    let rpc_sources = rpc_control::required_bootstrap_sources_from_env_for_network(NETWORK_ID);
+    let control_scope = format!("{CONTROL_SCOPE}.{}", uuid::Uuid::new_v4().simple());
+    let bootstrap_control_scope = format!("{control_scope}.bootstrap");
 
-    let chain_id_hex = rpc_call(&rpc_url, "eth_chainId", serde_json::json!([])).await;
+    let chain_id_hex = rpc_call(
+        &rpc_sources,
+        &bootstrap_control_scope,
+        "eth_chainId",
+        serde_json::json!([]),
+    )
+    .await;
     let chain_id = chain_id_hex
         .as_str()
         .map(parse_u64_hex)
@@ -147,7 +178,11 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
         .oneshot(json_post(
             "/v1/features/portfolio.snapshot/execute",
             serde_json::json!({
-                "payload": canonical_portfolio_snapshot_payload(wallet_address, chain_id)
+                "payload": canonical_portfolio_snapshot_payload(
+                    wallet_address,
+                    chain_id,
+                    &control_scope
+                )
             }),
         ))
         .await

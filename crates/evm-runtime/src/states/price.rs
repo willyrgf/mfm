@@ -33,14 +33,22 @@ pub async fn read_evm_oracle_unit_price(
     state_id: &StateId,
     io: &mut dyn IoProvider,
     network_id: &str,
+    control_scope: &str,
     oracle_kind: &str,
     config: &BTreeMap<String, Value>,
     block_number: u64,
 ) -> Result<OracleUnitPrice, StateError> {
     match oracle_kind {
         "chainlink_aggregator_v3" => {
-            read_chainlink_aggregator_v3_unit_price(state_id, io, network_id, config, block_number)
-                .await
+            read_chainlink_aggregator_v3_unit_price(
+                state_id,
+                io,
+                network_id,
+                control_scope,
+                config,
+                block_number,
+            )
+            .await
         }
         _ => Err(state_error_with_state(
             state_id.clone(),
@@ -56,6 +64,7 @@ async fn read_chainlink_aggregator_v3_unit_price(
     state_id: &StateId,
     io: &mut dyn IoProvider,
     network_id: &str,
+    control_scope: &str,
     config: &BTreeMap<String, Value>,
     block_number: u64,
 ) -> Result<OracleUnitPrice, StateError> {
@@ -66,6 +75,7 @@ async fn read_chainlink_aggregator_v3_unit_price(
         state_id,
         io,
         network_id,
+        control_scope,
         &contract_address,
         &crate::states::read::encode_erc20_decimals(),
         block.clone(),
@@ -88,6 +98,7 @@ async fn read_chainlink_aggregator_v3_unit_price(
         state_id,
         io,
         network_id,
+        control_scope,
         &contract_address,
         &encode_latest_round_data(),
         block,
@@ -120,19 +131,21 @@ async fn eth_call_with_route(
     state_id: &StateId,
     io: &mut dyn IoProvider,
     network_id: &str,
+    control_scope: &str,
     to: &str,
     data: &str,
     block: Value,
 ) -> Result<Value, StateError> {
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let call = JsonRpcCall::new(
+    let call = JsonRpcCall::for_scope_and_network(
+        control_scope,
+        network_id,
         "eth_call",
         serde_json::json!([
             {"to": to, "data": data},
             block
         ]),
-    )
-    .with_network_id(network_id);
+    );
     let res = client.call(call).await.map_err(state_from_io)?;
     Ok(res.response)
 }
@@ -290,6 +303,7 @@ mod tests {
             &state_id,
             &mut io,
             "ethereum-mainnet",
+            "shared",
             "chainlink_aggregator_v3",
             &config,
             123,
@@ -321,6 +335,7 @@ mod tests {
             &state_id,
             &mut io,
             "ethereum-mainnet",
+            "shared",
             "unknown_oracle",
             &BTreeMap::new(),
             1,

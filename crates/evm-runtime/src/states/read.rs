@@ -61,6 +61,7 @@ trait RpcResponseParser {
     ) -> Result<serde_json::Value, StateError>;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_rpc_read<P: RpcResponseParser>(
     state_id: &StateId,
     network_id: &str,
@@ -713,6 +714,7 @@ pub struct TokenBalanceState {
 
 impl TokenBalanceState {
     /// Creates a token-balance state.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         state_id: StateId,
         network_id: impl Into<String>,

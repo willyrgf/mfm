@@ -391,6 +391,7 @@ pub async fn send_signed_create_transaction_with_nonce(
 }
 
 /// Signs and submits a contract-creation transaction for the supplied managed network, scope, and nonce.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_signed_create_transaction_with_nonce_for_network(
     client: &mut EvmIoClient<'_>,
     network_id: &str,
@@ -781,10 +782,8 @@ mod tests {
         let tx_hash = "0x1234";
 
         let shared = receipt_poll_fact_key(&state_id, "shared", "ethereum-mainnet", 0, tx_hash);
-        let isolated =
-            receipt_poll_fact_key(&state_id, "isolated", "ethereum-mainnet", 0, tx_hash);
-        let arbitrum =
-            receipt_poll_fact_key(&state_id, "shared", "arbitrum-mainnet", 0, tx_hash);
+        let isolated = receipt_poll_fact_key(&state_id, "isolated", "ethereum-mainnet", 0, tx_hash);
+        let arbitrum = receipt_poll_fact_key(&state_id, "shared", "arbitrum-mainnet", 0, tx_hash);
 
         assert_ne!(shared, isolated);
         assert_ne!(shared, arbitrum);

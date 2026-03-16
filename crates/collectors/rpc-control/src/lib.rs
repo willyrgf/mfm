@@ -15,8 +15,11 @@
 //! ```rust
 //! use mfm_collectors_rpc_control::JsonRpcCall;
 //!
-//! let call = JsonRpcCall::new("eth_chainId", serde_json::json!([]))
-//!     .with_network_id("ethereum-mainnet");
+//! let call = JsonRpcCall::for_network(
+//!     "ethereum-mainnet",
+//!     "eth_chainId",
+//!     serde_json::json!([]),
+//! );
 //!
 //! assert_eq!(call.network_id.as_deref(), Some("ethereum-mainnet"));
 //! assert_eq!(call.control_scope, "shared");
@@ -64,6 +67,27 @@ impl JsonRpcCall {
             method: method.into(),
             params,
         }
+    }
+
+    /// Creates a new managed EVM JSON-RPC request for `network_id` in the default shared scope.
+    pub fn for_network(
+        network_id: impl Into<String>,
+        method: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Self {
+        Self::for_scope_and_network(DEFAULT_CONTROL_SCOPE, network_id, method, params)
+    }
+
+    /// Creates a new managed EVM JSON-RPC request for `network_id` in `control_scope`.
+    pub fn for_scope_and_network(
+        control_scope: impl Into<String>,
+        network_id: impl Into<String>,
+        method: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Self {
+        Self::new(method, params)
+            .with_control_scope(control_scope)
+            .with_network_id(network_id)
     }
 
     /// Returns a copy of the request scoped to `control_scope`.
@@ -398,21 +422,20 @@ impl<'a> EvmIoClient<'a> {
         })
     }
 
-    /// Fetches the remote chain ID and parses it as `u64`.
-    pub async fn chain_id_u64(&mut self) -> Result<u64, IoError> {
-        self.chain_id_u64_for_network(None).await
-    }
-
-    /// Fetches the remote chain ID for `network_id` and parses it as `u64`.
-    pub async fn chain_id_u64_for_network(
+    /// Fetches the remote chain ID for `network_id` within `control_scope` and parses it as `u64`.
+    pub async fn chain_id_u64(
         &mut self,
-        network_id: Option<&str>,
+        network_id: &str,
+        control_scope: &str,
     ) -> Result<u64, IoError> {
-        let mut call = JsonRpcCall::new("eth_chainId", serde_json::json!([]));
-        if let Some(network_id) = network_id {
-            call = call.with_network_id(network_id.to_string());
-        }
-        let res = self.call(call).await?;
+        let res = self
+            .call(JsonRpcCall::for_scope_and_network(
+                control_scope,
+                network_id,
+                "eth_chainId",
+                serde_json::json!([]),
+            ))
+            .await?;
         parse_u64_hex_value(&res.response).map_err(|_| {
             io_other(
                 "evm_response_invalid",
@@ -422,21 +445,20 @@ impl<'a> EvmIoClient<'a> {
         })
     }
 
-    /// Fetches the latest block number and parses it as `u64`.
-    pub async fn block_number_u64(&mut self) -> Result<u64, IoError> {
-        self.block_number_u64_for_network(None).await
-    }
-
-    /// Fetches the latest block number for `network_id` and parses it as `u64`.
-    pub async fn block_number_u64_for_network(
+    /// Fetches the latest block number for `network_id` within `control_scope` and parses it as `u64`.
+    pub async fn block_number_u64(
         &mut self,
-        network_id: Option<&str>,
+        network_id: &str,
+        control_scope: &str,
     ) -> Result<u64, IoError> {
-        let mut call = JsonRpcCall::new("eth_blockNumber", serde_json::json!([]));
-        if let Some(network_id) = network_id {
-            call = call.with_network_id(network_id.to_string());
-        }
-        let res = self.call(call).await?;
+        let res = self
+            .call(JsonRpcCall::for_scope_and_network(
+                control_scope,
+                network_id,
+                "eth_blockNumber",
+                serde_json::json!([]),
+            ))
+            .await?;
         parse_u64_hex_value(&res.response).map_err(|_| {
             io_other(
                 "evm_response_invalid",
@@ -457,8 +479,11 @@ mod tests {
     fn fact_key_is_stable_for_same_request() {
         let sid = StateId::must_new("m.main.chain_id".to_string());
         let request = RpcControlRequest::EvmCall {
-            call: JsonRpcCall::new("eth_chainId", serde_json::json!([]))
-                .with_network_id("ethereum-mainnet"),
+            call: JsonRpcCall::for_network(
+                "ethereum-mainnet",
+                "eth_chainId",
+                serde_json::json!([]),
+            ),
         };
 
         let k1 = fact_key_for_request(&sid, &request).expect("key");
@@ -470,14 +495,20 @@ mod tests {
     fn fact_key_differs_across_control_scope() {
         let sid = StateId::must_new("m.main.chain_id".to_string());
         let left = RpcControlRequest::EvmCall {
-            call: JsonRpcCall::new("eth_chainId", serde_json::json!([]))
-                .with_control_scope("shared")
-                .with_network_id("ethereum-mainnet"),
+            call: JsonRpcCall::for_scope_and_network(
+                "shared",
+                "ethereum-mainnet",
+                "eth_chainId",
+                serde_json::json!([]),
+            ),
         };
         let right = RpcControlRequest::EvmCall {
-            call: JsonRpcCall::new("eth_chainId", serde_json::json!([]))
-                .with_control_scope("isolated")
-                .with_network_id("ethereum-mainnet"),
+            call: JsonRpcCall::for_scope_and_network(
+                "isolated",
+                "ethereum-mainnet",
+                "eth_chainId",
+                serde_json::json!([]),
+            ),
         };
 
         let left = fact_key_for_request(&sid, &left).expect("left key");
@@ -509,8 +540,11 @@ mod tests {
     #[test]
     fn call_serializes_network_without_route() {
         let request = serde_json::to_value(RpcControlRequest::EvmCall {
-            call: JsonRpcCall::new("eth_sendRawTransaction", serde_json::json!(["0x01"]))
-                .with_network_id("reth-local"),
+            call: JsonRpcCall::for_network(
+                "reth-local",
+                "eth_sendRawTransaction",
+                serde_json::json!(["0x01"]),
+            ),
         })
         .expect("request json");
 
@@ -604,7 +638,7 @@ mod tests {
             EvmIoClient::new(StateId::must_new("m.main.chain_id".to_string()), &mut io);
 
         let result = client
-            .chain_id_u64_for_network(Some("ethereum-mainnet"))
+            .chain_id_u64("ethereum-mainnet", DEFAULT_CONTROL_SCOPE)
             .await
             .expect("chain id");
         assert_eq!(result, 1);

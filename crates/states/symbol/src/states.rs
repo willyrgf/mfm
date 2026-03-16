@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use alloy_primitives::{Address, U256};
 use async_trait::async_trait;
-use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall};
+use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall, DEFAULT_CONTROL_SCOPE};
 use mfm_evm_core::encoding::{
     encode_erc20_balance_of, format_u256_units, parse_u256_hex_value, parse_u8_u256,
     u64_hex_quantity,
@@ -28,11 +28,18 @@ use crate::model::{
     ValuationSourceReaderConfig, ValuationSourceRegistry,
 };
 
+fn default_control_scope() -> String {
+    DEFAULT_CONTROL_SCOPE.to_string()
+}
+
 /// Minimal network routing surface required by symbol runtime states.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkRouteConfig {
     /// Stable network identifier.
     pub network_id: String,
+    /// Stable control-plane scope used for managed rpc.control reads on this network.
+    #[serde(default = "default_control_scope")]
+    pub control_scope: String,
 }
 
 /// Minimal pinned-network view consumed by symbol runtime states.
@@ -174,6 +181,7 @@ impl State for ReadDirectPricesState {
                         &self.state_id,
                         io,
                         &network.network_id,
+                        &network.control_scope,
                         oracle_kind,
                         config,
                         pin.block_number,
@@ -336,6 +344,7 @@ impl State for CollectObservationsState {
                         symbol,
                         pin,
                         &route.network_id,
+                        &route.control_scope,
                         &direct_prices_by_id,
                     )
                     .await?,
@@ -415,6 +424,7 @@ impl State for MergeObservationsState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_observation(
     state_id: &StateId,
     io: &mut dyn IoProvider,
@@ -422,13 +432,20 @@ async fn build_observation(
     symbol: &SymbolConfig,
     pin: &PinnedNetwork,
     network_id: &str,
+    control_scope: &str,
     direct_prices_by_id: &HashMap<&str, &DirectPriceValue>,
 ) -> Result<Observation, StateError> {
     let (raw_dec, decimals, amount_dec, balance_reader_kind) = match &symbol.balance_reader {
         BalanceReaderConfig::NativeBalance {} => {
-            let raw =
-                read_native_balance(state_id, io, network_id, &wallet.address, pin.block_number)
-                    .await?;
+            let raw = read_native_balance(
+                state_id,
+                io,
+                network_id,
+                control_scope,
+                &wallet.address,
+                pin.block_number,
+            )
+            .await?;
             let decimals = symbol.decimals.unwrap_or(18);
             (
                 raw.to_string(),
@@ -441,14 +458,22 @@ async fn build_observation(
             let decimals = match symbol.decimals {
                 Some(decimals) => decimals,
                 None => {
-                    read_token_decimals(state_id, io, network_id, token_address, pin.block_number)
-                        .await?
+                    read_token_decimals(
+                        state_id,
+                        io,
+                        network_id,
+                        control_scope,
+                        token_address,
+                        pin.block_number,
+                    )
+                    .await?
                 }
             };
             let raw = read_erc20_balance(
                 state_id,
                 io,
                 network_id,
+                control_scope,
                 token_address,
                 &wallet.address,
                 pin.block_number,
@@ -587,15 +612,17 @@ async fn read_native_balance(
     state_id: &StateId,
     io: &mut dyn IoProvider,
     network_id: &str,
+    control_scope: &str,
     wallet_address: &str,
     block_number: u64,
 ) -> Result<U256, StateError> {
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let call = JsonRpcCall::new(
+    let call = JsonRpcCall::for_scope_and_network(
+        control_scope,
+        network_id,
         "eth_getBalance",
         serde_json::json!([wallet_address, u64_hex_quantity(block_number)]),
-    )
-    .with_network_id(network_id);
+    );
     let res = client.call(call).await.map_err(state_from_io)?;
     parse_u256_hex_value(&res.response).map_err(|err| {
         state_unknown_msg(
@@ -609,18 +636,20 @@ async fn read_token_decimals(
     state_id: &StateId,
     io: &mut dyn IoProvider,
     network_id: &str,
+    control_scope: &str,
     token_address: &str,
     block_number: u64,
 ) -> Result<u8, StateError> {
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let call = JsonRpcCall::new(
+    let call = JsonRpcCall::for_scope_and_network(
+        control_scope,
+        network_id,
         "eth_call",
         serde_json::json!([
             {"to": token_address, "data": mfm_evm_runtime::states::read::encode_erc20_decimals()},
             u64_hex_quantity(block_number)
         ]),
-    )
-    .with_network_id(network_id);
+    );
     let res = client.call(call).await.map_err(state_from_io)?;
     let raw = parse_u256_hex_value(&res.response).map_err(|err| {
         state_unknown_msg(
@@ -640,6 +669,7 @@ async fn read_erc20_balance(
     state_id: &StateId,
     io: &mut dyn IoProvider,
     network_id: &str,
+    control_scope: &str,
     token_address: &str,
     wallet_address: &str,
     block_number: u64,
@@ -651,14 +681,15 @@ async fn read_erc20_balance(
         )
     })?;
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    let call = JsonRpcCall::new(
+    let call = JsonRpcCall::for_scope_and_network(
+        control_scope,
+        network_id,
         "eth_call",
         serde_json::json!([
             {"to": token_address, "data": encode_erc20_balance_of(&wallet)},
             u64_hex_quantity(block_number)
         ]),
-    )
-    .with_network_id(network_id);
+    );
     let res = client.call(call).await.map_err(state_from_io)?;
     parse_u256_hex_value(&res.response).map_err(|err| {
         state_unknown_msg(

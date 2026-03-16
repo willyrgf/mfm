@@ -30,9 +30,9 @@ use mfm_collectors_rpc_control::{
 };
 use mfm_control_plane_postgres::{
     rebuild_rpc_source_state, rebuild_source_pool_state, ControlPlanePostgresStore,
-    SourcePoolCatalogDeclaredRecord, SourcePoolCatalogSnapshot, SourcePoolCatalogSource,
     RpcSourceObservedRecord, RpcSourceOutcome, RpcSourceProbeKind, RpcSourceProbedRecord,
-    RpcSourceRecord, RpcSourceRef, RpcSourceState, SourcePoolMembershipDeclaredRecord,
+    RpcSourceRecord, RpcSourceRef, RpcSourceState, SourcePoolCatalogDeclaredRecord,
+    SourcePoolCatalogSnapshot, SourcePoolCatalogSource, SourcePoolMembershipDeclaredRecord,
     SourcePoolRankedRecord, SourcePoolRecord, SourcePoolRef, SourcePoolState,
     SOURCE_POOL_CATALOG_SCHEMA_VERSION,
 };
@@ -538,7 +538,10 @@ impl std::fmt::Display for RpcControlConfigError {
                 write!(f, "preferred source id not found in registry: {source_id}")
             }
             RpcControlConfigError::MissingNetworkId(source_id) => {
-                write!(f, "rpc.control source `{source_id}` must declare network_id")
+                write!(
+                    f,
+                    "rpc.control source `{source_id}` must declare network_id"
+                )
             }
         }
     }
@@ -1360,7 +1363,10 @@ impl RpcControlTransport {
             DEFAULT_POOL_KIND,
             &candidates,
         )?;
-        let current_pool = Some(self.ensure_declared_catalog(&pool_ref, &catalog_snapshot).await?);
+        let current_pool = Some(
+            self.ensure_declared_catalog(&pool_ref, &catalog_snapshot)
+                .await?,
+        );
         if current_pool
             .as_ref()
             .map(|state| state.member_source_ids.as_slice())
@@ -1395,7 +1401,8 @@ impl RpcControlTransport {
                 .rpc_source_state(&source_ref)
                 .await?;
             let state = if self.needs_probe(source, existing.as_ref(), current_ms) {
-                self.probe_source(control_scope, network_scope, source).await?
+                self.probe_source(control_scope, network_scope, source)
+                    .await?
             } else {
                 existing.expect("existing state checked above")
             };
@@ -1662,7 +1669,10 @@ mod tests {
             preferred_order: vec!["primary".to_string()],
         };
         let err = validate_catalog(&catalog).expect_err("missing network_id must be rejected");
-        assert_eq!(err, RpcControlConfigError::MissingNetworkId("primary".to_string()));
+        assert_eq!(
+            err,
+            RpcControlConfigError::MissingNetworkId("primary".to_string())
+        );
     }
 
     #[test]
@@ -1691,8 +1701,7 @@ mod tests {
         states.insert(
             "local_fast".to_string(),
             RpcSourceState {
-                source_ref: RpcSourceRef::new("shared", "ethereum-mainnet", "local_fast")
-                    .unwrap(),
+                source_ref: RpcSourceRef::new("shared", "ethereum-mainnet", "local_fast").unwrap(),
                 stream_id: RpcSourceRef::new("shared", "ethereum-mainnet", "local_fast")
                     .unwrap()
                     .stream_id(),
@@ -1714,8 +1723,7 @@ mod tests {
         states.insert(
             "remote_slow".to_string(),
             RpcSourceState {
-                source_ref: RpcSourceRef::new("shared", "ethereum-mainnet", "remote_slow")
-                    .unwrap(),
+                source_ref: RpcSourceRef::new("shared", "ethereum-mainnet", "remote_slow").unwrap(),
                 stream_id: RpcSourceRef::new("shared", "ethereum-mainnet", "remote_slow")
                     .unwrap()
                     .stream_id(),

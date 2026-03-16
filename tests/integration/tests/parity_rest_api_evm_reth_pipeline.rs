@@ -24,6 +24,10 @@ use mfm_sdk::launcher::{LaunchPipeline, RunLauncher};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::DefaultRunLauncher;
 use mfm_stream_store_postgres::PostgresStreamStore;
+use mfm_transports_rpc_control::RpcControlBootstrapSource;
+
+const NETWORK_ID: &str = "ethereum-mainnet";
+const CONTROL_SCOPE: &str = "parity.evm_reth_pipeline";
 
 #[derive(Default)]
 struct MapContext {
@@ -93,13 +97,23 @@ fn contract_artifact_program_path() -> String {
 }
 
 async fn rpc_call(
-    rpc_url: &str,
+    rpc_sources: &[RpcControlBootstrapSource],
+    control_scope: &str,
     streams: Arc<dyn StreamStore>,
     artifacts: Arc<dyn ArtifactStore>,
     method: &str,
     params: serde_json::Value,
 ) -> serde_json::Value {
-    rpc_control::call(rpc_url, streams, artifacts, method, params).await
+    rpc_control::call_in_scope(
+        rpc_sources,
+        NETWORK_ID,
+        control_scope,
+        streams,
+        artifacts,
+        method,
+        params,
+    )
+    .await
 }
 
 async fn connect_postgres_with_retry(max_attempts: u32, delay_ms: u64) -> PostgresStreamStore {
@@ -135,10 +149,13 @@ async fn parity_reth_pipeline_contract_from_nix() {
     s3.ensure_bucket_exists().await.expect("bucket exists");
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(s3);
 
-    let rpc_url = std::env::var("MFM_EVM_RPC_URL").expect("MFM_EVM_RPC_URL is required");
+    let rpc_sources = rpc_control::required_bootstrap_sources_from_env_for_network(NETWORK_ID);
+    let control_scope = format!("{CONTROL_SCOPE}.{}", uuid::Uuid::new_v4().simple());
+    let bootstrap_control_scope = format!("{control_scope}.bootstrap");
 
     let accounts = rpc_call(
-        &rpc_url,
+        &rpc_sources,
+        &bootstrap_control_scope,
         Arc::clone(&streams),
         Arc::clone(&artifacts),
         "eth_accounts",
@@ -155,7 +172,8 @@ async fn parity_reth_pipeline_contract_from_nix() {
     std::env::set_var(signing_key_env, RETH_DEV_ACCOUNT0_PRIVATE_KEY);
 
     let chain_id_hex = rpc_call(
-        &rpc_url,
+        &rpc_sources,
+        &bootstrap_control_scope,
         Arc::clone(&streams),
         Arc::clone(&artifacts),
         "eth_chainId",
@@ -198,6 +216,8 @@ async fn parity_reth_pipeline_contract_from_nix() {
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact_port": "contract_artifact",
+                    "network_id": NETWORK_ID,
+                    "control_scope": control_scope.as_str(),
                     "from": from,
                     "signing_key_env": signing_key_env,
                     "constructor_args": [1],
@@ -211,6 +231,8 @@ async fn parity_reth_pipeline_contract_from_nix() {
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact_port": "contract_artifact",
+                    "network_id": NETWORK_ID,
+                    "control_scope": control_scope.as_str(),
                     "from": from,
                     "calls": [
                         {"function": "setValue", "args": [7]}
@@ -225,6 +247,8 @@ async fn parity_reth_pipeline_contract_from_nix() {
                 op_version: "v1".to_string(),
                 op_config: serde_json::json!({
                     "artifact_port": "contract_artifact",
+                    "network_id": NETWORK_ID,
+                    "control_scope": control_scope.as_str(),
                     "expected_chain_id": expected_chain_id,
                     "require_client_substring": "reth",
                     "read_assertions": [

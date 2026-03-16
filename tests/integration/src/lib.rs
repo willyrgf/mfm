@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mfm_collectors_evm_jsonrpc_http::EvmSourceKind;
-use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall};
+use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall, DEFAULT_CONTROL_SCOPE};
 use mfm_machine::engine::Stores;
 use mfm_machine::ids::{FactKey, RunId, StateId};
 use mfm_machine::live_io::{
@@ -24,7 +24,8 @@ use mfm_machine::live_io::{
 };
 use mfm_machine::stores::{ArtifactStore, StreamStore};
 use mfm_transports_rpc_control::{
-    RpcControlBootstrapSource, RpcControlPlaneStorageMode, RpcControlTransportFactory,
+    resolve_rpc_control_bootstrap_sources_from_env, RpcControlBootstrapSource,
+    RpcControlPlaneStorageMode, RpcControlTransportFactory,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
@@ -159,16 +160,114 @@ pub mod parity_run_ids {
 pub mod rpc_control {
     use super::*;
 
-    /// Builds a control-plane source using a single remote-user RPC endpoint.
-    pub fn single_remote_user_source(id: &str, rpc_url: &str) -> RpcControlBootstrapSource {
+    const DEFAULT_PARITY_RETH_HTTP_PORT: &str = "8565";
+    const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
+
+    fn single_source(
+        id: &str,
+        network_id: &str,
+        rpc_url: &str,
+        kind: EvmSourceKind,
+    ) -> RpcControlBootstrapSource {
         RpcControlBootstrapSource {
             id: id.to_string(),
-            network_id: None,
+            network_id: Some(network_id.to_string()),
             rpc_url: rpc_url.to_string(),
             authorization: None,
-            kind: EvmSourceKind::RemoteUser,
+            kind,
             require_get_proof_probe: false,
         }
+    }
+
+    fn source_kind_name(kind: EvmSourceKind) -> &'static str {
+        match kind {
+            EvmSourceKind::Local => "local",
+            EvmSourceKind::RemoteUser => "remote_user",
+            EvmSourceKind::RemotePublic => "remote_public",
+        }
+    }
+
+    /// Builds a control-plane source using a single remote-user RPC endpoint.
+    pub fn single_remote_user_source(
+        id: &str,
+        network_id: &str,
+        rpc_url: &str,
+    ) -> RpcControlBootstrapSource {
+        single_source(id, network_id, rpc_url, EvmSourceKind::RemoteUser)
+    }
+
+    fn default_local_reth_sources_from_env() -> Vec<RpcControlBootstrapSource> {
+        let port = std::env::var("RETH_HTTP_PORT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_PARITY_RETH_HTTP_PORT.to_string());
+        if port.is_empty() {
+            return Vec::new();
+        }
+
+        let rpc_url = format!("http://127.0.0.1:{port}");
+        vec![
+            single_source(
+                "reth_ethereum_mainnet",
+                "ethereum-mainnet",
+                &rpc_url,
+                EvmSourceKind::Local,
+            ),
+            single_source("reth_local", "reth-local", &rpc_url, EvmSourceKind::Local),
+        ]
+    }
+
+    /// Loads bootstrap sources from the canonical `rpc.control` env surface.
+    ///
+    /// Parity CI runs a local Reth service on a fixed port; when the JSON bootstrap catalog is
+    /// unexpectedly missing in the test process, synthesize the canonical two-network local
+    /// source catalog so parity suites still exercise managed routing through explicit source
+    /// declarations.
+    pub fn bootstrap_sources_from_env() -> Vec<RpcControlBootstrapSource> {
+        let sources = resolve_rpc_control_bootstrap_sources_from_env();
+        if !sources.is_empty() {
+            return sources;
+        }
+        let fallback = default_local_reth_sources_from_env();
+        if !fallback.is_empty() {
+            let raw_json = serde_json::Value::Array(
+                fallback
+                    .iter()
+                    .map(|source| {
+                        serde_json::json!({
+                            "id": source.id,
+                            "network_id": source.network_id,
+                            "rpc_url": source.rpc_url,
+                            "authorization": source.authorization,
+                            "kind": source_kind_name(source.kind),
+                            "require_get_proof_probe": source.require_get_proof_probe,
+                        })
+                    })
+                    .collect(),
+            )
+            .to_string();
+            std::env::set_var(ENV_EVM_RPC_SOURCES_JSON, raw_json);
+        }
+        fallback
+    }
+
+    /// Loads bootstrap sources from env and asserts at least one source exists for `network_id`.
+    pub fn required_bootstrap_sources_from_env_for_network(
+        network_id: &str,
+    ) -> Vec<RpcControlBootstrapSource> {
+        let sources = bootstrap_sources_from_env();
+        assert!(
+            !sources.is_empty(),
+            "MFM_EVM_RPC_SOURCES_JSON must include at least one bootstrap source"
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.network_id.as_deref() == Some(network_id)),
+            "MFM_EVM_RPC_SOURCES_JSON must include at least one source for network `{network_id}`"
+        );
+        sources
     }
 
     /// Returns a single-source control transport for a specific state and run.
@@ -192,7 +291,30 @@ pub mod rpc_control {
 
     /// Executes a managed RPC call through `rpc.control` and returns the response payload.
     pub async fn call(
-        rpc_url: &str,
+        sources: &[RpcControlBootstrapSource],
+        network_id: &str,
+        streams: Arc<dyn StreamStore>,
+        artifacts: Arc<dyn ArtifactStore>,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        call_in_scope(
+            sources,
+            network_id,
+            DEFAULT_CONTROL_SCOPE,
+            streams,
+            artifacts,
+            method,
+            params,
+        )
+        .await
+    }
+
+    /// Executes a managed RPC call through `rpc.control` within an explicit control scope.
+    pub async fn call_in_scope(
+        sources: &[RpcControlBootstrapSource],
+        network_id: &str,
+        control_scope: &str,
         streams: Arc<dyn StreamStore>,
         artifacts: Arc<dyn ArtifactStore>,
         method: &str,
@@ -207,7 +329,7 @@ pub mod rpc_control {
             artifacts_store,
             run_id,
             state_id.clone(),
-            vec![single_remote_user_source("helper_primary", rpc_url)],
+            sources.to_vec(),
         );
         let mut live = LiveIo::new(
             run_id,
@@ -220,7 +342,12 @@ pub mod rpc_control {
         );
         let mut client = EvmIoClient::new(state_id, &mut live);
         client
-            .call(JsonRpcCall::new(method, params))
+            .call(JsonRpcCall::for_scope_and_network(
+                control_scope,
+                network_id,
+                method,
+                params,
+            ))
             .await
             .unwrap_or_else(|err| {
                 panic!("rpc.control call failed: {err:?}");
@@ -229,8 +356,37 @@ pub mod rpc_control {
     }
 
     /// Convenience alias for making a control-plane call with an explicit fact key.
+    #[allow(clippy::too_many_arguments)]
     pub async fn call_with_fact_key(
-        rpc_url: &str,
+        sources: &[RpcControlBootstrapSource],
+        network_id: &str,
+        streams: Arc<dyn StreamStore>,
+        artifacts: Arc<dyn ArtifactStore>,
+        state_id: StateId,
+        fact_key: FactKey,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        call_with_fact_key_in_scope(
+            sources,
+            network_id,
+            DEFAULT_CONTROL_SCOPE,
+            streams,
+            artifacts,
+            state_id,
+            fact_key,
+            method,
+            params,
+        )
+        .await
+    }
+
+    /// Convenience alias for making a control-plane call with an explicit fact key and scope.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn call_with_fact_key_in_scope(
+        sources: &[RpcControlBootstrapSource],
+        network_id: &str,
+        control_scope: &str,
         streams: Arc<dyn StreamStore>,
         artifacts: Arc<dyn ArtifactStore>,
         state_id: StateId,
@@ -246,7 +402,7 @@ pub mod rpc_control {
             artifacts_store,
             run_id,
             state_id.clone(),
-            vec![single_remote_user_source("helper_primary", rpc_url)],
+            sources.to_vec(),
         );
         let mut live = LiveIo::new(
             run_id,
@@ -259,7 +415,10 @@ pub mod rpc_control {
         );
         let mut client = EvmIoClient::new(state_id, &mut live);
         client
-            .call_with_fact_key(JsonRpcCall::new(method, params), fact_key)
+            .call_with_fact_key(
+                JsonRpcCall::for_scope_and_network(control_scope, network_id, method, params),
+                fact_key,
+            )
             .await
             .unwrap_or_else(|err| {
                 panic!("rpc.control call failed: {err:?}");

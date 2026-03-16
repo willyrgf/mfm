@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use mfm_collectors_rpc_control::DEFAULT_CONTROL_SCOPE;
 use mfm_machine::hashing::{canonical_json_bytes, CanonicalJsonError};
 use mfm_state_symbol::model::{
     validate_symbol_config, validate_valuation_source_registry, Observation, PriceSourceRef,
@@ -10,6 +11,10 @@ use mfm_state_wallet::model::{validate_wallet_config, WalletConfig, WalletConfig
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+
+fn default_control_scope() -> String {
+    DEFAULT_CONTROL_SCOPE.to_string()
+}
 
 /// Canonical top-level portfolio configuration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -61,6 +66,9 @@ pub struct NetworkConfig {
     pub network_id: String,
     /// EVM chain id for the network.
     pub chain_id: u64,
+    /// Stable control-plane scope used for managed rpc.control reads on this network.
+    #[serde(default = "default_control_scope")]
+    pub control_scope: String,
     /// Canonical metadata surface.
     #[serde(default)]
     pub metadata: BTreeMap<String, Value>,
@@ -255,6 +263,12 @@ pub enum PortfolioConfigError {
     /// One of the network ids was empty.
     #[error("network_id must be non-empty")]
     EmptyNetworkId,
+    /// One of the network control scopes was empty.
+    #[error("network `{network_id}` control_scope must be non-empty")]
+    EmptyNetworkControlScope {
+        /// Network id associated with the failure.
+        network_id: String,
+    },
     /// Two networks shared the same network id.
     #[error("network_id `{network_id}` must be unique")]
     DuplicateNetworkId {
@@ -610,6 +624,11 @@ pub fn validate_portfolio_bundle(
 fn validate_network_config(network: &NetworkConfig) -> Result<(), PortfolioConfigError> {
     if network.network_id.trim().is_empty() {
         return Err(PortfolioConfigError::EmptyNetworkId);
+    }
+    if network.control_scope.trim().is_empty() {
+        return Err(PortfolioConfigError::EmptyNetworkControlScope {
+            network_id: network.network_id.clone(),
+        });
     }
     validate_canonical_json_map(&network.metadata).map_err(|reason| {
         PortfolioConfigError::NetworkMetadataNotCanonical {

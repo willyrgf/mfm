@@ -81,9 +81,7 @@ use mfm_transports_local_evm::LocalEvmIoTransportFactory;
 use mfm_transports_local_fs::LocalFsIoTransportFactory;
 use mfm_transports_local_keystore::LocalKeystoreIoTransportFactory;
 use mfm_transports_proof::ProofIoTransportFactory;
-use mfm_transports_rpc_control::{
-    RpcControlConfigError, RpcControlTransportFactory,
-};
+use mfm_transports_rpc_control::{RpcControlConfigError, RpcControlTransportFactory};
 
 const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
 const ENV_ARTIFACT_ROOT: &str = "MFM_ARTIFACT_ROOT";
