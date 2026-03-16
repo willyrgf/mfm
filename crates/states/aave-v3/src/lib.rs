@@ -16,6 +16,8 @@
 //! use mfm_state_aave_v3::manifest::AaveDeployRuntimeConfig;
 //!
 //! let _cfg = AaveDeployRuntimeConfig {
+//!     network_id: "ethereum-mainnet".to_string(),
+//!     control_scope: "shared".to_string(),
 //!     compile_manifest_port: "result".to_string(),
 //!     deployer_account_index: 0,
 //!     signing_key_env: None,

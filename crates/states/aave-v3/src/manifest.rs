@@ -60,6 +60,10 @@ fn default_configure_from_account_index() -> usize {
     0
 }
 
+fn default_control_scope() -> String {
+    "shared".to_string()
+}
+
 /// JSON artifact payload that contains contract ABI and bytecode.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContractArtifactJson {
@@ -186,6 +190,13 @@ pub struct AaveConfigReport {
 /// Runtime configuration for the Aave deploy flow.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AaveDeployRuntimeConfig {
+    /// Stable managed RPC network identifier used for deploy-time control-plane calls.
+    pub network_id: String,
+
+    #[serde(default = "default_control_scope")]
+    /// Stable managed RPC control scope used to isolate deploy-time control-plane state.
+    pub control_scope: String,
+
     #[serde(default = "default_compile_manifest_port")]
     /// Context port that contains the compile manifest input.
     pub compile_manifest_port: String,
@@ -214,6 +225,13 @@ pub struct AaveDeployRuntimeConfig {
 /// Runtime configuration for the Aave configure flow.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AaveConfigureRuntimeConfig {
+    /// Stable managed RPC network identifier used for configure-time control-plane calls.
+    pub network_id: String,
+
+    #[serde(default = "default_control_scope")]
+    /// Stable managed RPC control scope used to isolate configure-time control-plane state.
+    pub control_scope: String,
+
     #[serde(default = "default_deploy_manifest_port")]
     /// Context port that contains the deploy manifest input.
     pub deploy_manifest_port: String,
@@ -237,6 +255,12 @@ pub struct AaveConfigureRuntimeConfig {
 
 /// Validates deploy runtime configuration before planning or execution.
 pub fn validate_deploy_runtime_config(cfg: &AaveDeployRuntimeConfig) -> Result<(), String> {
+    if cfg.network_id.trim().is_empty() {
+        return Err("network_id must be non-empty".to_string());
+    }
+    if cfg.control_scope.trim().is_empty() {
+        return Err("control_scope must be non-empty".to_string());
+    }
     if cfg.compile_manifest_port.trim().is_empty() {
         return Err("compile_manifest_port must be non-empty".to_string());
     }
@@ -251,6 +275,12 @@ pub fn validate_deploy_runtime_config(cfg: &AaveDeployRuntimeConfig) -> Result<(
 
 /// Validates configure runtime configuration before planning or execution.
 pub fn validate_configure_runtime_config(cfg: &AaveConfigureRuntimeConfig) -> Result<(), String> {
+    if cfg.network_id.trim().is_empty() {
+        return Err("network_id must be non-empty".to_string());
+    }
+    if cfg.control_scope.trim().is_empty() {
+        return Err("control_scope must be non-empty".to_string());
+    }
     if cfg.deploy_manifest_port.trim().is_empty() {
         return Err("deploy_manifest_port must be non-empty".to_string());
     }

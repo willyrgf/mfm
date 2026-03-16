@@ -94,6 +94,10 @@ pub struct DeployContractState {
 pub struct WaitForReceiptState {
     /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Stable managed RPC network identifier used for receipt polling.
+    pub network_id: String,
+    /// Stable managed RPC control scope used to isolate receipt polling state.
+    pub control_scope: String,
     /// Delay between receipt polls in milliseconds.
     pub poll_interval_ms: u64,
     /// Maximum number of receipt polls before timing out.
@@ -150,6 +154,10 @@ pub struct ConfigureRuntimeCallState {
 pub struct WaitForConfigReceiptState {
     /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Stable managed RPC network identifier used for receipt polling.
+    pub network_id: String,
+    /// Stable managed RPC control scope used to isolate receipt polling state.
+    pub control_scope: String,
     /// Delay between receipt polls in milliseconds.
     pub poll_interval_ms: u64,
     /// Maximum number of receipt polls before timing out.
@@ -226,15 +234,26 @@ impl State for DeployContractState {
     ) -> Result<StateOutcome, StateError> {
         let manifest = read_compile_manifest(ctx)?;
         let signing_key_env = self.cfg.signing_key_env.as_deref();
-        let deployer = evm_rpc::resolve_deployer_address(
+        let deployer = evm_rpc::resolve_deployer_address_for_network(
             io,
             &self.state_id,
+            &self.cfg.network_id,
+            &self.cfg.control_scope,
             self.cfg.deployer_account_index,
             signing_key_env,
         )
         .await?;
         let mut next_nonce = if signing_key_env.is_some() {
-            Some(evm_rpc::pending_nonce_u128(io, &self.state_id, &deployer).await?)
+            Some(
+                evm_rpc::pending_nonce_u128_for_network(
+                    io,
+                    &self.state_id,
+                    &self.cfg.network_id,
+                    &self.cfg.control_scope,
+                    &deployer,
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -255,8 +274,10 @@ impl State for DeployContractState {
                 let nonce = next_nonce.as_mut().expect("nonce initialized");
                 let nonce_hex = format!("0x{:x}", *nonce);
                 let mut client = EvmIoClient::new(self.state_id.clone(), io);
-                let tx_hash = evm_rpc::send_signed_create_transaction_with_nonce(
+                let tx_hash = evm_rpc::send_signed_create_transaction_with_nonce_for_network(
                     &mut client,
+                    &self.cfg.network_id,
+                    &self.cfg.control_scope,
                     env_name,
                     &deployer,
                     &nonce_hex,
@@ -273,8 +294,10 @@ impl State for DeployContractState {
                 tx_hash
             } else {
                 let mut client = EvmIoClient::new(self.state_id.clone(), io);
-                evm_rpc::send_transaction(
+                evm_rpc::send_transaction_for_network(
                     &mut client,
+                    &self.cfg.network_id,
+                    &self.cfg.control_scope,
                     serde_json::json!({
                         "from": deployer,
                         "data": shared_dcv::bytes_to_hex_prefixed(&constructor_payload),
@@ -330,9 +353,11 @@ impl State for WaitForReceiptState {
 
         let mut completed: Vec<DeploymentReceipt> = Vec::with_capacity(pending.len());
         for p in pending {
-            let receipt = evm_rpc::wait_for_receipt(
+            let receipt = evm_rpc::wait_for_receipt_for_network(
                 &self.state_id,
                 io,
+                &self.network_id,
+                &self.control_scope,
                 &p.tx_hash,
                 self.poll_interval_ms,
                 self.max_receipt_polls,
@@ -555,9 +580,14 @@ impl State for ConfigureRuntimeCallState {
         _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
         let manifest = read_deploy_manifest_loaded(ctx)?;
-        let from =
-            evm_rpc::resolve_account_by_index(io, &self.state_id, self.cfg.from_account_index)
-                .await?;
+        let from = evm_rpc::resolve_account_by_index_for_network(
+            io,
+            &self.state_id,
+            &self.cfg.network_id,
+            &self.cfg.control_scope,
+            self.cfg.from_account_index,
+        )
+        .await?;
         let pool = contract_from_manifest(&manifest, CONTRACT_POOL)?;
         let usdc = contract_from_manifest(&manifest, CONTRACT_USDC)?;
         let wbtc = contract_from_manifest(&manifest, CONTRACT_WBTC)?;
@@ -565,6 +595,8 @@ impl State for ConfigureRuntimeCallState {
         let tx_hash = send_contract_transaction(
             io,
             &self.state_id,
+            &self.cfg.network_id,
+            &self.cfg.control_scope,
             &from,
             pool,
             ContractCallSpec {
@@ -623,9 +655,11 @@ impl State for WaitForConfigReceiptState {
 
         let mut calls = Vec::with_capacity(pending.len());
         for p in pending {
-            let receipt = evm_rpc::wait_for_receipt(
+            let receipt = evm_rpc::wait_for_receipt_for_network(
                 &self.state_id,
                 io,
+                &self.network_id,
+                &self.control_scope,
                 &p.tx_hash,
                 self.poll_interval_ms,
                 self.max_receipt_polls,
@@ -781,6 +815,8 @@ struct ContractCallSpec<'a> {
 async fn send_contract_transaction(
     io: &mut dyn IoProvider,
     state_id: &StateId,
+    network_id: &str,
+    control_scope: &str,
     from: &str,
     contract: &AaveDeployManifestContract,
     spec: ContractCallSpec<'_>,
@@ -804,7 +840,7 @@ async fn send_contract_transaction(
     }
 
     let mut client = EvmIoClient::new(state_id.clone(), io);
-    evm_rpc::send_transaction(&mut client, tx)
+    evm_rpc::send_transaction_for_network(&mut client, network_id, control_scope, tx)
         .await
         .map_err(|_| {
             op_errors::state_error(
@@ -929,10 +965,16 @@ mod tests {
         let state_id = StateId::must_new("m.test.resolve_deployer".to_string());
         let mut io = ResolveDeployerTestIo::default();
 
-        let deployer =
-            evm_rpc::resolve_deployer_address(&mut io, &state_id, 9, Some("MFM_TEST_SIGNING_KEY"))
-                .await
-                .expect("resolve deployer");
+        let deployer = evm_rpc::resolve_deployer_address_for_network(
+            &mut io,
+            &state_id,
+            "ethereum-mainnet",
+            "shared",
+            9,
+            Some("MFM_TEST_SIGNING_KEY"),
+        )
+        .await
+        .expect("resolve deployer");
         assert_eq!(deployer, "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf");
         assert!(io.saw_local_signer_address());
         assert!(!io.saw_eth_accounts());
@@ -943,9 +985,16 @@ mod tests {
         let state_id = StateId::must_new("m.test.resolve_deployer".to_string());
         let mut io = ResolveDeployerTestIo::default();
 
-        let deployer = evm_rpc::resolve_deployer_address(&mut io, &state_id, 0, None)
-            .await
-            .expect("resolve deployer");
+        let deployer = evm_rpc::resolve_deployer_address_for_network(
+            &mut io,
+            &state_id,
+            "ethereum-mainnet",
+            "shared",
+            0,
+            None,
+        )
+        .await
+        .expect("resolve deployer");
         assert_eq!(deployer, "0x1111111111111111111111111111111111111111");
         assert!(!io.saw_local_signer_address());
         assert!(io.saw_eth_accounts());
