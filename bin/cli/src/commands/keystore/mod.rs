@@ -8,8 +8,6 @@ mod delete;
 mod import;
 /// List-keys command implementation.
 mod list;
-/// Raw-transaction submission command implementation.
-mod tx_send_raw;
 /// Transaction signing command implementation.
 mod tx_sign;
 
@@ -40,12 +38,6 @@ pub(crate) enum KeystoreCommand {
         #[command(flatten)]
         args: tx_sign::TxSignArgs,
     },
-    /// Submit a signed raw transaction via JSON-RPC
-    TxSendRaw {
-        /// Parsed arguments for the raw-transaction submission command.
-        #[command(flatten)]
-        args: tx_send_raw::TxSendRawArgs,
-    },
 }
 
 impl KeystoreCommand {
@@ -63,9 +55,6 @@ impl KeystoreCommand {
             }
             KeystoreCommand::TxSign { args } => {
                 tx_sign::execute(ctx, args).await;
-            }
-            KeystoreCommand::TxSendRaw { args } => {
-                tx_send_raw::execute(ctx, args).await;
             }
         }
     }

@@ -12,11 +12,3 @@ mfm-machine = { path = "../../machine" }
 mfm-sdk = { path = "../../sdk" }
 mfm-state-common = { path = "../../states/common" }
 mfm-state-keystore = { path = "../../states/keystore" }
-mfm-state-keystore-submit = { path = "../../states/keystore-submit" }
-
-[dev-dependencies]
-async-trait = { workspace = true }
-tokio = { workspace = true }
-tempfile = "3.0"
-mfm-transports-local-fs = { path = "../../transports/local-fs" }
-mfm-transports-local-keystore = { path = "../../transports/local-keystore" }

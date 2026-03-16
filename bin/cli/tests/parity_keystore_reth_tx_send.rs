@@ -5,7 +5,6 @@ use assert_cmd::Command;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::time::Duration;
 use tempfile::TempDir;
 
 #[cfg(unix)]
@@ -13,30 +12,15 @@ use std::os::unix::fs::PermissionsExt;
 
 const TEST_PASSWORD: &str = "parity-test-password";
 
-#[tokio::test]
-async fn parity_keystore_cli_tx_sign_and_send_on_reth() {
-    let rpc_url = std::env::var("MFM_EVM_RPC_URL").expect("MFM_EVM_RPC_URL is required");
+#[test]
+fn parity_keystore_cli_tx_sign_writes_eip1559_payload() {
     let temp = TempDir::new().expect("temp dir");
     let keystore_path = temp.path().join("parity.keystore");
     let password_file = write_password_file(temp.path(), TEST_PASSWORD);
     let signed_tx_path = temp.path().join("signed.tx");
-
-    let chain_id = rpc_hex_u64(&rpc_url, "eth_chainId", serde_json::json!([])).await;
-    let accounts = rpc_call(&rpc_url, "eth_accounts", serde_json::json!([])).await;
-    let funder = accounts
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(Value::as_str)
-        .map(normalize_address)
-        .expect("reth must expose account[0]");
-    let recipient = accounts
-        .as_array()
-        .and_then(|arr| arr.get(1))
-        .and_then(Value::as_str)
-        .map(normalize_address)
-        .unwrap_or_else(|| funder.clone());
-
+    let recipient = "0x1111111111111111111111111111111111111111";
     let private_key = random_private_key_hex();
+
     let import_output = run_import_private_key(
         &keystore_path,
         &password_file,
@@ -55,59 +39,16 @@ async fn parity_keystore_cli_tx_sign_and_send_on_reth() {
         .map(normalize_address)
         .expect("imported address");
 
-    let funding_gas_price = rpc_call(&rpc_url, "eth_gasPrice", serde_json::json!([]))
-        .await
-        .as_str()
-        .map(str::to_owned)
-        .expect("funding gas price");
-    let funding_hash = rpc_call(
-        &rpc_url,
-        "eth_sendTransaction",
-        serde_json::json!([{
-            "from": funder.clone(),
-            "to": sender.clone(),
-            "value": "0xde0b6b3a7640000",
-            "gas": "0x5208",
-            "gasPrice": funding_gas_price,
-        }]),
-    )
-    .await
-    .as_str()
-    .map(str::to_owned)
-    .expect("funding tx hash");
-    let funding_receipt = wait_for_receipt(&rpc_url, &funding_hash, 120).await;
-    assert_eq!(funding_receipt["status"], "0x1");
-
-    let recipient_before = rpc_hex_u128(
-        &rpc_url,
-        "eth_getBalance",
-        serde_json::json!([recipient.clone(), "latest"]),
-    )
-    .await;
-    let sender_nonce = rpc_hex_u64(
-        &rpc_url,
-        "eth_getTransactionCount",
-        serde_json::json!([sender.clone(), "pending"]),
-    )
-    .await;
-    let gas_price = rpc_hex_u128(&rpc_url, "eth_gasPrice", serde_json::json!([])).await;
-    let priority_fee =
-        rpc_hex_u128_optional(&rpc_url, "eth_maxPriorityFeePerGas", serde_json::json!([]))
-            .await
-            .unwrap_or_else(|| std::cmp::max(gas_price / 10, 1));
-    let max_fee = std::cmp::max(gas_price.saturating_mul(2), priority_fee.saturating_add(1));
-    let send_value: u128 = 1_000_000_000_000_000;
-
     let sign_output = run_tx_sign(
         &keystore_path,
         &password_file,
         &key_id,
-        &recipient,
-        send_value,
-        chain_id,
-        sender_nonce,
-        max_fee,
-        priority_fee,
+        recipient,
+        1_000_000_000_000_000,
+        31_337,
+        0,
+        2_000_000_000,
+        1_000_000_000,
         21_000,
         &signed_tx_path,
     );
@@ -123,19 +64,22 @@ async fn parity_keystore_cli_tx_sign_and_send_on_reth() {
     );
     assert_eq!(
         normalize_address(sign_json["to"].as_str().expect("to")),
-        recipient
+        normalize_address(recipient)
     );
     assert_eq!(sign_json["tx_type"].as_str(), Some("0x2"));
-    assert_eq!(sign_json["chain_id"].as_u64(), Some(chain_id));
-    assert_eq!(sign_json["nonce"].as_u64(), Some(sender_nonce));
+    assert_eq!(sign_json["chain_id"].as_u64(), Some(31_337));
+    assert_eq!(sign_json["nonce"].as_u64(), Some(0));
     assert!(sign_json["payload_hash"]
         .as_str()
         .is_some_and(|v| v.starts_with("0x")));
     assert!(!stdout_string(&sign_output).contains("raw_tx_hex"));
+    assert!(!stdout_string(&sign_output).contains(&private_key));
+    assert!(!stderr_string(&sign_output).contains(&private_key));
 
     let raw_tx = std::fs::read_to_string(&signed_tx_path).expect("read signed tx file");
     assert!(raw_tx.starts_with("0x02"));
     assert!(raw_tx.len() > 10);
+    assert!(!raw_tx.contains(&sender));
 
     #[cfg(unix)]
     {
@@ -146,65 +90,6 @@ async fn parity_keystore_cli_tx_sign_and_send_on_reth() {
             & 0o777;
         assert_eq!(mode, 0o600, "signed tx file must be 0600");
     }
-
-    let send_output = run_tx_send_raw(&signed_tx_path, "user_primary");
-    assert!(
-        send_output.status.success(),
-        "{}",
-        stderr_string(&send_output)
-    );
-    let send_json = parse_success_json(&send_output.stdout);
-    let sent_hash = send_json["tx_hash"]
-        .as_str()
-        .map(str::to_owned)
-        .expect("tx hash");
-    assert!(sent_hash.starts_with("0x"));
-    assert_eq!(
-        send_json["rpc_url_host"].as_str().map(str::to_owned),
-        Some("user_primary".to_string())
-    );
-    assert!(send_json["submitted_at"].as_str().is_some());
-
-    let send_receipt = wait_for_receipt(&rpc_url, &sent_hash, 120).await;
-    assert_eq!(send_receipt["status"], "0x1");
-    assert_eq!(
-        normalize_address(send_receipt["from"].as_str().expect("receipt from")),
-        sender
-    );
-    assert_eq!(
-        normalize_address(send_receipt["to"].as_str().expect("receipt to")),
-        recipient
-    );
-
-    let tx_by_hash = rpc_call(
-        &rpc_url,
-        "eth_getTransactionByHash",
-        serde_json::json!([sent_hash]),
-    )
-    .await;
-    assert_eq!(tx_by_hash["type"].as_str(), Some("0x2"));
-
-    let recipient_after = rpc_hex_u128(
-        &rpc_url,
-        "eth_getBalance",
-        serde_json::json!([recipient.clone(), "latest"]),
-    )
-    .await;
-    assert!(
-        recipient_after > recipient_before,
-        "recipient balance must increase"
-    );
-
-    let sign_stdout = stdout_string(&sign_output);
-    let send_stdout = stdout_string(&send_output);
-    assert!(
-        !sign_stdout.contains(&private_key),
-        "private key leaked in sign output"
-    );
-    assert!(
-        !send_stdout.contains(&raw_tx),
-        "raw tx leaked in send output"
-    );
 }
 
 #[test]
@@ -343,43 +228,6 @@ fn parity_keystore_tx_sign_fails_with_ambiguous_label() {
     assert_eq!(err["code"].as_str(), Some("AmbiguousLabel"));
 }
 
-#[test]
-fn parity_keystore_tx_send_raw_fails_with_malformed_input_file() {
-    let temp = TempDir::new().expect("temp dir");
-    let raw_file = temp.path().join("invalid.raw");
-    std::fs::write(&raw_file, "not-hex").expect("write malformed payload");
-
-    let output = run_tx_send_raw(&raw_file, "user_primary");
-    assert!(!output.status.success());
-    let err = parse_error_json(&output.stderr);
-    assert_eq!(err["code"].as_str(), Some("InvalidRawTransaction"));
-}
-
-#[test]
-fn parity_keystore_tx_send_raw_fails_without_source_id() {
-    let temp = TempDir::new().expect("temp dir");
-    let raw_file = temp.path().join("valid.raw");
-    std::fs::write(&raw_file, "0x0201").expect("write payload");
-
-    let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
-    let output = sanitize_machine_readable_cli_env(&mut cmd)
-        .env_remove("MFM_EVM_RPC_SOURCE_ID")
-        .args([
-            "--output-format",
-            "json",
-            "keystore",
-            "tx-send-raw",
-            "--in",
-            raw_file.to_str().expect("path"),
-        ])
-        .output()
-        .expect("execute tx-send-raw without rpc");
-
-    assert!(!output.status.success());
-    let err = parse_error_json(&output.stderr);
-    assert_eq!(err["code"].as_str(), Some("MissingArgument"));
-}
-
 fn run_import_private_key(
     keystore_path: &Path,
     password_file: &Path,
@@ -494,92 +342,6 @@ fn run_tx_sign_with_selector(
     cmd.output().expect("execute tx-sign")
 }
 
-fn run_tx_send_raw(input_path: &Path, source_id: &str) -> Output {
-    let artifact_root = test_artifact_root(input_path);
-    let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
-    sanitize_machine_readable_cli_env(&mut cmd)
-        .env("MFM_ARTIFACT_ROOT", artifact_root)
-        .args([
-            "--output-format",
-            "json",
-            "keystore",
-            "tx-send-raw",
-            "--source-id",
-            source_id,
-            "--in",
-            input_path.to_str().expect("path"),
-        ])
-        .output()
-        .expect("execute tx-send-raw")
-}
-
-async fn wait_for_receipt(rpc_url: &str, tx_hash: &str, max_polls: usize) -> Value {
-    for _ in 0..max_polls {
-        let receipt = rpc_call(
-            rpc_url,
-            "eth_getTransactionReceipt",
-            serde_json::json!([tx_hash]),
-        )
-        .await;
-        if !receipt.is_null() {
-            return receipt;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    panic!("timed out waiting for transaction receipt");
-}
-
-async fn rpc_call(rpc_url: &str, method: &str, params: Value) -> Value {
-    let payload = rpc_request(rpc_url, method, params).await;
-    if let Some(error) = payload.get("error") {
-        panic!(
-            "rpc call {} failed: {}",
-            method,
-            serde_json::to_string(error).expect("rpc error json")
-        );
-    }
-    payload
-        .get("result")
-        .cloned()
-        .expect("rpc result must exist")
-}
-
-async fn rpc_hex_u64(rpc_url: &str, method: &str, params: Value) -> u64 {
-    let value = rpc_call(rpc_url, method, params).await;
-    parse_hex_u64(value.as_str().expect("hex result"))
-}
-
-async fn rpc_hex_u128(rpc_url: &str, method: &str, params: Value) -> u128 {
-    let value = rpc_call(rpc_url, method, params).await;
-    parse_hex_u128(value.as_str().expect("hex result"))
-}
-
-async fn rpc_hex_u128_optional(rpc_url: &str, method: &str, params: Value) -> Option<u128> {
-    let payload = rpc_request(rpc_url, method, params).await;
-    if payload.get("error").is_some() {
-        return None;
-    }
-    let raw = payload.get("result")?.as_str()?;
-    Some(parse_hex_u128(raw))
-}
-
-async fn rpc_request(rpc_url: &str, method: &str, params: Value) -> Value {
-    let client = reqwest::Client::new();
-    let response = client
-        .post(rpc_url)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        }))
-        .send()
-        .await
-        .expect("rpc send");
-    assert!(response.status().is_success(), "rpc status must be success");
-    response.json::<Value>().await.expect("rpc json")
-}
-
 fn write_password_file(dir: &Path, password: &str) -> PathBuf {
     let path = dir.join(format!("password-{}.txt", uuid::Uuid::new_v4()));
     std::fs::write(&path, password).expect("write password file");
@@ -625,17 +387,6 @@ fn normalize_address(address: &str) -> String {
     format!("0x{}", rest.to_ascii_lowercase())
 }
 
-fn parse_hex_u64(raw: &str) -> u64 {
-    let hex = raw
-        .strip_prefix("0x")
-        .or_else(|| raw.strip_prefix("0X"))
-        .expect("hex prefix");
-    if hex.is_empty() {
-        return 0;
-    }
-    u64::from_str_radix(hex, 16).expect("u64 hex parse")
-}
-
 fn test_artifact_root(path: &Path) -> PathBuf {
     path.parent()
         .unwrap_or_else(|| Path::new("."))
@@ -652,15 +403,4 @@ fn sanitize_machine_readable_cli_env(cmd: &mut Command) -> &mut Command {
         .env_remove("LOG_FORMAT")
         .env_remove("MFM_LOG_SPAN_EVENTS")
         .env_remove("LOG_SPAN_EVENTS")
-}
-
-fn parse_hex_u128(raw: &str) -> u128 {
-    let hex = raw
-        .strip_prefix("0x")
-        .or_else(|| raw.strip_prefix("0X"))
-        .expect("hex prefix");
-    if hex.is_empty() {
-        return 0;
-    }
-    u128::from_str_radix(hex, 16).expect("u128 hex parse")
 }

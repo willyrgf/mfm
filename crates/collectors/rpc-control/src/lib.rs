@@ -19,6 +19,7 @@
 //!     .with_network_id("ethereum-mainnet");
 //!
 //! assert_eq!(call.network_id.as_deref(), Some("ethereum-mainnet"));
+//! assert_eq!(call.control_scope, "shared");
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -30,20 +31,19 @@ use mfm_machine::io::{IoCall, IoProvider, IoResult};
 
 /// Canonical namespace used for managed RPC control-plane `IoCall`s.
 pub const NAMESPACE_RPC_CONTROL: &str = "rpc.control";
+/// Default shared control-plane scope used by production callers unless they opt into an isolated scope.
+pub const DEFAULT_CONTROL_SCOPE: &str = "shared";
 
-/// Optional route selector for a managed EVM request.
-///
-/// This remains a migration surface only. Final canonical request models should
-/// stop pinning sources directly and let the control plane choose internally.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct JsonRpcRoute {
-    /// Stable control-plane source identifier.
-    pub source_id: String,
+fn default_control_scope() -> String {
+    DEFAULT_CONTROL_SCOPE.to_string()
 }
 
 /// Managed EVM JSON-RPC request shape emitted through `rpc.control`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsonRpcCall {
+    /// Stable control-plane scope used to isolate managed source state.
+    #[serde(default = "default_control_scope")]
+    pub control_scope: String,
     /// Optional stable network identifier.
     ///
     /// Callers that know the canonical network should supply it. Transitional
@@ -55,33 +55,28 @@ pub struct JsonRpcCall {
     pub method: String,
     /// JSON-RPC params array or object payload.
     pub params: serde_json::Value,
-    /// Optional transitional source pin.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub route: Option<JsonRpcRoute>,
 }
 
 impl JsonRpcCall {
     /// Creates a new managed EVM JSON-RPC request.
     pub fn new(method: impl Into<String>, params: serde_json::Value) -> Self {
         Self {
+            control_scope: default_control_scope(),
             network_id: None,
             method: method.into(),
             params,
-            route: None,
         }
+    }
+
+    /// Returns a copy of the request scoped to `control_scope`.
+    pub fn with_control_scope(mut self, control_scope: impl Into<String>) -> Self {
+        self.control_scope = control_scope.into();
+        self
     }
 
     /// Returns a copy of the request scoped to `network_id`.
     pub fn with_network_id(mut self, network_id: impl Into<String>) -> Self {
         self.network_id = Some(network_id.into());
-        self
-    }
-
-    /// Returns a copy of the request with an explicit source pin.
-    pub fn with_route_source_id(mut self, source_id: impl Into<String>) -> Self {
-        self.route = Some(JsonRpcRoute {
-            source_id: source_id.into(),
-        });
         self
     }
 }
@@ -98,6 +93,9 @@ pub enum RpcControlRequest {
     },
     /// Idempotent source setup/probe/rank preflight for one network.
     PrepareSources {
+        /// Stable control-plane scope used to isolate managed source state.
+        #[serde(default = "default_control_scope")]
+        control_scope: String,
         /// Stable network identifier whose configured sources should be synced,
         /// probed, and ranked.
         network_id: String,
@@ -126,6 +124,9 @@ pub struct PreparedSourceSummary {
 /// Response returned after preparing one network's control-plane source pool.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrepareSourcesResponse {
+    /// Stable control-plane scope.
+    #[serde(default = "default_control_scope")]
+    pub control_scope: String,
     /// Stable network identifier.
     pub network_id: String,
     /// Stable pool kind used by the current control-plane slice.
@@ -251,13 +252,29 @@ pub fn parse_u64_hex_value(v: &serde_json::Value) -> Result<u64, ParseHexError> 
 /// Canonical runtime states should use this client for managed EVM RPC behavior.
 pub struct EvmIoClient<'a> {
     state_id: StateId,
+    default_control_scope: String,
     io: &'a mut dyn IoProvider,
 }
 
 impl<'a> EvmIoClient<'a> {
     /// Creates a new client for the given state and IO provider.
     pub fn new(state_id: StateId, io: &'a mut dyn IoProvider) -> Self {
-        Self { state_id, io }
+        Self {
+            state_id,
+            default_control_scope: default_control_scope(),
+            io,
+        }
+    }
+
+    /// Overrides the default control scope stamped into requests before hashing.
+    pub fn with_default_control_scope(mut self, control_scope: impl Into<String>) -> Self {
+        let control_scope = control_scope.into();
+        self.default_control_scope = if control_scope.trim().is_empty() {
+            default_control_scope()
+        } else {
+            control_scope
+        };
+        self
     }
 
     /// Returns the state identifier used when deriving fact keys.
@@ -270,6 +287,13 @@ impl<'a> EvmIoClient<'a> {
         self.io
     }
 
+    fn stamp_control_scope(&self, mut call: JsonRpcCall) -> JsonRpcCall {
+        if call.control_scope.trim().is_empty() {
+            call.control_scope = self.default_control_scope.clone();
+        }
+        call
+    }
+
     /// Executes a managed JSON-RPC call through the generic IO provider with an
     /// explicit fact key.
     pub async fn call_with_fact_key(
@@ -277,6 +301,7 @@ impl<'a> EvmIoClient<'a> {
         call: JsonRpcCall,
         fact_key: FactKey,
     ) -> Result<IoResult, IoError> {
+        let call = self.stamp_control_scope(call);
         self.io
             .call(rpc_control_io_call(
                 RpcControlRequest::EvmCall { call },
@@ -287,6 +312,7 @@ impl<'a> EvmIoClient<'a> {
 
     /// Executes a managed JSON-RPC call through the generic IO provider.
     pub async fn call(&mut self, call: JsonRpcCall) -> Result<IoResult, IoError> {
+        let call = self.stamp_control_scope(call);
         let request = RpcControlRequest::EvmCall { call: call.clone() };
         let key = fact_key_for_request(&self.state_id, &request).map_err(|err| match err {
             FactKeyDerivationError::NotCanonical(CanonicalJsonError::FloatNotAllowed) => io_other(
@@ -310,7 +336,23 @@ impl<'a> EvmIoClient<'a> {
         &mut self,
         network_id: impl Into<String>,
     ) -> Result<PrepareSourcesResponse, IoError> {
+        self.prepare_sources_in_scope(self.default_control_scope.clone(), network_id)
+            .await
+    }
+
+    /// Executes idempotent source setup/probe/rank preflight for one network within `control_scope`.
+    pub async fn prepare_sources_in_scope(
+        &mut self,
+        control_scope: impl Into<String>,
+        network_id: impl Into<String>,
+    ) -> Result<PrepareSourcesResponse, IoError> {
+        let control_scope = control_scope.into();
         let request = RpcControlRequest::PrepareSources {
+            control_scope: if control_scope.trim().is_empty() {
+                self.default_control_scope.clone()
+            } else {
+                control_scope
+            },
             network_id: network_id.into(),
         };
         let key = fact_key_for_request(&self.state_id, &request).map_err(|err| match err {
@@ -406,6 +448,25 @@ mod tests {
     }
 
     #[test]
+    fn fact_key_differs_across_control_scope() {
+        let sid = StateId::must_new("m.main.chain_id".to_string());
+        let left = RpcControlRequest::EvmCall {
+            call: JsonRpcCall::new("eth_chainId", serde_json::json!([]))
+                .with_control_scope("shared")
+                .with_network_id("ethereum-mainnet"),
+        };
+        let right = RpcControlRequest::EvmCall {
+            call: JsonRpcCall::new("eth_chainId", serde_json::json!([]))
+                .with_control_scope("isolated")
+                .with_network_id("ethereum-mainnet"),
+        };
+
+        let left = fact_key_for_request(&sid, &left).expect("left key");
+        let right = fact_key_for_request(&sid, &right).expect("right key");
+        assert_ne!(left, right);
+    }
+
+    #[test]
     fn parse_u64_hex_basic() {
         assert_eq!(parse_u64_hex("0x0").unwrap(), 0);
         assert_eq!(parse_u64_hex("0x1").unwrap(), 1);
@@ -427,11 +488,10 @@ mod tests {
     }
 
     #[test]
-    fn routed_call_serializes_network_and_route() {
+    fn call_serializes_network_without_route() {
         let request = serde_json::to_value(RpcControlRequest::EvmCall {
             call: JsonRpcCall::new("eth_sendRawTransaction", serde_json::json!(["0x01"]))
-                .with_network_id("reth-local")
-                .with_route_source_id("reth_local"),
+                .with_network_id("reth-local"),
         })
         .expect("request json");
 
@@ -439,12 +499,10 @@ mod tests {
             request,
             serde_json::json!({
                 "kind": "evm_call",
+                "control_scope": "shared",
                 "network_id": "reth-local",
                 "method": "eth_sendRawTransaction",
                 "params": ["0x01"],
-                "route": {
-                    "source_id": "reth_local",
-                },
             })
         );
     }
@@ -452,6 +510,7 @@ mod tests {
     #[test]
     fn prepare_sources_request_serializes() {
         let request = serde_json::to_value(RpcControlRequest::PrepareSources {
+            control_scope: "shared".to_string(),
             network_id: "ethereum-mainnet".to_string(),
         })
         .expect("request json");
@@ -460,6 +519,7 @@ mod tests {
             request,
             serde_json::json!({
                 "kind": "prepare_sources",
+                "control_scope": "shared",
                 "network_id": "ethereum-mainnet",
             })
         );
@@ -476,6 +536,7 @@ mod tests {
             self.calls.push(call.clone());
             let response = match call.request.get("kind").and_then(serde_json::Value::as_str) {
                 Some("prepare_sources") => serde_json::json!({
+                    "control_scope": "shared",
                     "network_id": "ethereum-mainnet",
                     "pool_kind": "default",
                     "available_source_ids": ["reth_local"],
@@ -534,6 +595,7 @@ mod tests {
             io.calls[0].request,
             serde_json::json!({
                 "kind": "evm_call",
+                "control_scope": "shared",
                 "network_id": "ethereum-mainnet",
                 "method": "eth_chainId",
                 "params": [],
@@ -550,7 +612,31 @@ mod tests {
             .prepare_sources("ethereum-mainnet")
             .await
             .expect("prepare");
+        assert_eq!(result.control_scope, "shared");
         assert_eq!(result.network_id, "ethereum-mainnet");
         assert_eq!(result.ranked_source_ids, vec!["reth_local".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn client_stamps_default_control_scope_before_hashing() {
+        let mut io = FixedIo::default();
+        let mut client =
+            EvmIoClient::new(StateId::must_new("m.main.chain_id".to_string()), &mut io)
+                .with_default_control_scope("workspace-a");
+
+        let result = client
+            .call(JsonRpcCall::new("eth_chainId", serde_json::json!([])).with_control_scope(""))
+            .await
+            .expect("call");
+        assert_eq!(result.response, serde_json::json!("0x1"));
+        assert_eq!(
+            io.calls[0].request,
+            serde_json::json!({
+                "kind": "evm_call",
+                "control_scope": "workspace-a",
+                "method": "eth_chainId",
+                "params": [],
+            })
+        );
     }
 }

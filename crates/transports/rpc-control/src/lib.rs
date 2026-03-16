@@ -811,14 +811,6 @@ impl RpcControlTransport {
         }
     }
 
-    fn source_by_id(&self, source_id: &str) -> Option<RpcControlBootstrapSource> {
-        self.catalog
-            .sources
-            .iter()
-            .find(|source| source.id == source_id)
-            .cloned()
-    }
-
     fn global_sources(&self) -> Vec<RpcControlBootstrapSource> {
         self.catalog
             .sources
@@ -878,11 +870,7 @@ impl RpcControlTransport {
         Ok(ordered)
     }
 
-    fn resolve_network_scope(
-        &self,
-        requested_network_id: Option<&str>,
-        route_source_id: Option<&str>,
-    ) -> Result<String, IoError> {
+    fn resolve_network_scope(&self, requested_network_id: Option<&str>) -> Result<String, IoError> {
         if let Some(network_id) = requested_network_id {
             let trimmed = network_id.trim();
             if trimmed.is_empty() {
@@ -894,20 +882,6 @@ impl RpcControlTransport {
                 ));
             }
             return Ok(trimmed.to_string());
-        }
-
-        if let Some(source_id) = route_source_id {
-            let Some(source) = self.source_by_id(source_id) else {
-                return Err(io_transport(
-                    "rpc_control_source_unknown",
-                    ErrorCategory::ParsingInput,
-                    false,
-                    format!("unknown rpc source id `{source_id}`"),
-                ));
-            };
-            return Ok(source
-                .network_id
-                .unwrap_or_else(|| DEFAULT_NETWORK_SCOPE.to_string()));
         }
 
         let global_sources = self.global_sources();
@@ -1298,6 +1272,7 @@ impl RpcControlTransport {
 
     async fn prepare_sources_impl(
         &mut self,
+        control_scope: &str,
         network_scope: &str,
     ) -> Result<PrepareSourcesResponse, IoError> {
         let candidates = self.ordered_candidate_sources(network_scope)?;
@@ -1404,6 +1379,7 @@ impl RpcControlTransport {
             .collect::<Vec<_>>();
 
         Ok(PrepareSourcesResponse {
+            control_scope: control_scope.to_string(),
             network_id: network_scope.to_string(),
             pool_kind: DEFAULT_POOL_KIND.to_string(),
             available_source_ids,
@@ -1414,9 +1390,10 @@ impl RpcControlTransport {
 
     async fn handle_prepare_sources(
         &mut self,
+        control_scope: &str,
         network_id: &str,
     ) -> Result<serde_json::Value, IoError> {
-        let response = self.prepare_sources_impl(network_id).await?;
+        let response = self.prepare_sources_impl(control_scope, network_id).await?;
         serde_json::to_value(response).map_err(|_| {
             io_transport(
                 "rpc_control_response_encode_failed",
@@ -1427,8 +1404,14 @@ impl RpcControlTransport {
         })
     }
 
-    async fn select_managed_source(&mut self, network_scope: &str) -> Result<String, IoError> {
-        let prepared = self.prepare_sources_impl(network_scope).await?;
+    async fn select_managed_source(
+        &mut self,
+        control_scope: &str,
+        network_scope: &str,
+    ) -> Result<String, IoError> {
+        let prepared = self
+            .prepare_sources_impl(control_scope, network_scope)
+            .await?;
         prepared
             .sources
             .iter()
@@ -1450,25 +1433,10 @@ impl RpcControlTransport {
         managed_call: mfm_collectors_rpc_control::JsonRpcCall,
     ) -> Result<serde_json::Value, IoError> {
         let requested_network_id = managed_call.network_id.as_deref();
-        let route_source_id = managed_call
-            .route
-            .as_ref()
-            .map(|route| route.source_id.as_str());
-        let network_scope = self.resolve_network_scope(requested_network_id, route_source_id)?;
-
-        let source_id = if let Some(source_id) = route_source_id {
-            let Some(_) = self.source_by_id(source_id) else {
-                return Err(io_transport(
-                    "rpc_control_source_unknown",
-                    ErrorCategory::ParsingInput,
-                    false,
-                    format!("unknown rpc source id `{source_id}`"),
-                ));
-            };
-            source_id.to_string()
-        } else {
-            self.select_managed_source(&network_scope).await?
-        };
+        let network_scope = self.resolve_network_scope(requested_network_id)?;
+        let source_id = self
+            .select_managed_source(&managed_call.control_scope, &network_scope)
+            .await?;
 
         let start = Instant::now();
         let result = self
@@ -1528,8 +1496,12 @@ impl LiveIoTransport for RpcControlTransport {
 
         match request {
             RpcControlRequest::EvmCall { call } => self.handle_evm_call(call).await,
-            RpcControlRequest::PrepareSources { network_id } => {
-                self.handle_prepare_sources(&network_id).await
+            RpcControlRequest::PrepareSources {
+                control_scope,
+                network_id,
+            } => {
+                self.handle_prepare_sources(&control_scope, &network_id)
+                    .await
             }
         }
     }
@@ -1590,31 +1562,9 @@ mod tests {
             source("global_backup", None, EvmSourceKind::RemotePublic, false),
         ]);
         let scope = transport
-            .resolve_network_scope(None, None)
+            .resolve_network_scope(None)
             .expect("global scope should resolve");
         assert_eq!(scope, DEFAULT_NETWORK_SCOPE);
-    }
-
-    #[test]
-    fn route_source_can_imply_specific_network_scope() {
-        let transport = transport_for_tests(vec![
-            source(
-                "reth_local",
-                Some("reth-local"),
-                EvmSourceKind::Local,
-                false,
-            ),
-            source(
-                "archive_local",
-                Some("reth-local"),
-                EvmSourceKind::Local,
-                false,
-            ),
-        ]);
-        let scope = transport
-            .resolve_network_scope(None, Some("reth_local"))
-            .expect("route source should resolve network");
-        assert_eq!(scope, "reth-local");
     }
 
     #[test]
@@ -1737,7 +1687,7 @@ mod tests {
             source("arb", Some("arbitrum-mainnet"), EvmSourceKind::Local, false),
         ]);
         let err = transport
-            .resolve_network_scope(None, None)
+            .resolve_network_scope(None)
             .expect_err("multi-network catalog should require network");
         assert_eq!(io_error_code(&err), "rpc_control_network_required");
     }

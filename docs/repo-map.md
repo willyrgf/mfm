@@ -46,7 +46,6 @@ Generated from `docs/repo-index.json`.
 - `crates/sdk/Cargo.toml` (rust-cargo)
 - `crates/states/aave-v3/Cargo.toml` (rust-cargo)
 - `crates/states/common/Cargo.toml` (rust-cargo)
-- `crates/states/keystore-submit/Cargo.toml` (rust-cargo)
 - `crates/states/keystore/Cargo.toml` (rust-cargo)
 - `crates/states/portfolio/Cargo.toml` (rust-cargo)
 - `crates/states/symbol/Cargo.toml` (rust-cargo)

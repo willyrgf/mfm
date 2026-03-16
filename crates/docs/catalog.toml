@@ -83,15 +83,6 @@ docs_policy = "docs-rs"
 umbrella_policy = "when-published"
 
 [[packages]]
-name = "mfm-state-keystore-submit"
-workspace_path = "crates/states/keystore-submit"
-visibility = "public"
-section = "states"
-summary = "Shared raw-transaction submission state with remote EVM routing."
-docs_policy = "docs-rs"
-umbrella_policy = "when-published"
-
-[[packages]]
 name = "mfm-state-aave-v3"
 workspace_path = "crates/states/aave-v3"
 visibility = "public"

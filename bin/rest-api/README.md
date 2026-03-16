@@ -66,7 +66,7 @@ Endpoints:
 `rpc.control` routing notes:
 
 - Canonical EVM reads route through `namespace="rpc.control"` with `network_id`.
-- `route.source_id` remains transitional for low-level pinning and raw-send flows only.
+- Canonical managed requests do not expose caller-controlled source pinning.
 - Per-request `rpc_url` override is rejected for managed calls.
 - EVM routing runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)
 
@@ -118,14 +118,11 @@ Supported `op_id` values (current):
 - `proof` (default)
 - `evm_read`
 - `keystore_tx_sign`
-- `keystore_tx_send_raw`
 - `portfolio_tracker`
 - `nix_app`
 
 Notes:
 - `evm_read` executes through the shared `rpc.control`-backed EVM read states.
-- `keystore_tx_send_raw` remains a low-level compatibility op rather than the final managed submit
-  API.
 
 There are no dedicated keystore tx endpoints. Use generic run APIs (`/v1/runs/start`,
 `/v1/runs/:run_id/resume`) with those `op_id` values.

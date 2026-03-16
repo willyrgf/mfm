@@ -1,9 +1,7 @@
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall};
 use mfm_machine::errors::{ErrorCategory, StateError};
-use mfm_machine::hashing::{artifact_id_for_json, CanonicalJsonError};
 use mfm_machine::ids::{FactKey, StateId};
 use mfm_machine::io::IoProvider;
 use mfm_state_common::errors as op_errors;
@@ -11,17 +9,6 @@ use mfm_state_common::rpc as op_rpc;
 use mfm_transports_local_evm::{LocalEvmIoClient, LocalEvmSignLegacyCreateCall};
 
 use crate::dcv as shared_dcv;
-
-/// Result payload returned after submitting a raw transaction through routed IO.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RpcRawTxSubmission {
-    /// Submitted transaction hash.
-    pub tx_hash: String,
-    /// RPC source identifier selected for the submission.
-    pub rpc_source_id: String,
-    /// RFC3339 timestamp recorded at submission time.
-    pub submitted_at: String,
-}
 
 /// Normalizes an RPC hex quantity into canonical lowercase `0x` form.
 pub fn normalize_quantity_hex(raw: &str, message: &'static str) -> Result<String, StateError> {
@@ -484,141 +471,4 @@ pub async fn resolve_deployer_address(
         return resolve_signing_key_address(io, state_id, env_name).await;
     }
     resolve_account_by_index(io, state_id, deployer_account_index).await
-}
-
-/// Submits a raw transaction through routed IO and records a replay fact key for the request.
-pub async fn send_raw_transaction_via_io(
-    state_id: &StateId,
-    io: &mut dyn IoProvider,
-    route_source_id: &str,
-    raw_tx_hex: &str,
-) -> Result<RpcRawTxSubmission, StateError> {
-    let source_id = route_source_id.trim();
-    if source_id.is_empty() {
-        return Err(op_errors::state_error_with_state(
-            state_id.clone(),
-            "InvalidRpcSourceId",
-            ErrorCategory::ParsingInput,
-            false,
-            "route source id must not be empty",
-        ));
-    }
-    validate_raw_transaction_hex(raw_tx_hex).map_err(|_| {
-        op_errors::state_error_with_state(
-            state_id.clone(),
-            "InvalidRawTransaction",
-            ErrorCategory::ParsingInput,
-            false,
-            "raw transaction must be 0x-prefixed valid hex",
-        )
-    })?;
-
-    let fact_key = send_raw_fact_key(state_id, raw_tx_hex)?;
-    let mut client = EvmIoClient::new(state_id.clone(), io);
-    let response = client
-        .call_with_fact_key(
-            JsonRpcCall::new("eth_sendRawTransaction", serde_json::json!([raw_tx_hex]))
-                .with_route_source_id(source_id),
-            fact_key,
-        )
-        .await
-        .map_err(op_errors::state_from_io)?;
-
-    let tx_hash = response
-        .response
-        .as_str()
-        .ok_or_else(|| {
-            op_errors::state_error_with_state(
-                state_id.clone(),
-                "RpcInvalidResponse",
-                ErrorCategory::ParsingInput,
-                false,
-                "eth_sendRawTransaction returned a non-string result",
-            )
-        })?
-        .to_string();
-    validate_tx_hash(&tx_hash).map_err(|_| {
-        op_errors::state_error_with_state(
-            state_id.clone(),
-            "RpcInvalidResponse",
-            ErrorCategory::ParsingInput,
-            false,
-            "eth_sendRawTransaction returned an invalid tx hash",
-        )
-    })?;
-
-    let submitted_at = now_rfc3339(io, state_id).await?;
-
-    Ok(RpcRawTxSubmission {
-        tx_hash,
-        rpc_source_id: source_id.to_string(),
-        submitted_at,
-    })
-}
-
-fn validate_raw_transaction_hex(raw_tx_hex: &str) -> Result<(), ()> {
-    let value = raw_tx_hex.trim();
-    if !value.starts_with("0x") {
-        return Err(());
-    }
-    if value.len() <= 2 || !value.len().is_multiple_of(2) {
-        return Err(());
-    }
-    if !value[2..].chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(());
-    }
-    Ok(())
-}
-
-fn validate_tx_hash(tx_hash: &str) -> Result<(), ()> {
-    if tx_hash.len() != 66 || !tx_hash.starts_with("0x") {
-        return Err(());
-    }
-    if !tx_hash[2..].chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(());
-    }
-    Ok(())
-}
-
-async fn now_rfc3339(io: &mut dyn IoProvider, state_id: &StateId) -> Result<String, StateError> {
-    let now_ms = io.now_millis().await.map_err(op_errors::state_from_io)?;
-    let timestamp = DateTime::<Utc>::from_timestamp_millis(now_ms as i64).ok_or_else(|| {
-        op_errors::state_error_with_state(
-            state_id.clone(),
-            "InvalidTimestamp",
-            ErrorCategory::Unknown,
-            false,
-            "failed to convert timestamp to RFC3339",
-        )
-    })?;
-    Ok(timestamp.to_rfc3339())
-}
-
-fn send_raw_fact_key(state_id: &StateId, raw_tx_hex: &str) -> Result<FactKey, StateError> {
-    let key_request = serde_json::json!({
-        "method": "eth_sendRawTransaction",
-        "params": [raw_tx_hex],
-    });
-    let req_id = artifact_id_for_json(&key_request).map_err(|err| match err {
-        CanonicalJsonError::FloatNotAllowed => op_errors::state_error_with_state(
-            state_id.clone(),
-            "evm_request_not_canonical",
-            ErrorCategory::ParsingInput,
-            false,
-            "raw tx request was not canonical-json-hashable (floats are forbidden)",
-        ),
-        CanonicalJsonError::SecretsNotAllowed => op_errors::state_error_with_state(
-            state_id.clone(),
-            "secrets_detected",
-            ErrorCategory::Unknown,
-            false,
-            "raw tx request contained secrets (policy forbids persisting secrets)",
-        ),
-    })?;
-
-    Ok(FactKey(format!(
-        "mfm:evm_send_raw|state:{}|req:{}",
-        state_id.as_str(),
-        req_id.0
-    )))
 }

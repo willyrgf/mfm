@@ -39,8 +39,7 @@ Control-plane preflight/setup request envelope:
 
 Notes:
 - Canonical callers should supply `network_id` whenever they know the stable network context.
-- `route.source_id` remains available only as a migration/compatibility escape hatch. It is not the
-  final canonical read contract.
+- Canonical managed requests do not expose caller-controlled source pinning.
 - Per-request raw `rpc_url` overrides are rejected.
 - Canonical app wiring no longer exposes the raw `evm` transport as the default state-facing
   routing authority.
@@ -67,10 +66,6 @@ Compatibility fallback:
 When only the legacy single-source fallback is configured, the control plane maps it to source id
 `user_primary`.
 
-Legacy compatibility surface:
-- `MFM_EVM_RPC_SOURCE_ID` remains only for the low-level `keystore tx-send-raw` compatibility
-  command. It is not part of the canonical portfolio/symbol/Aave read contract.
-
 ## 3. Runtime Behavior
 
 `rpc.control` owns the managed path for:
@@ -84,8 +79,7 @@ Legacy compatibility surface:
 Current managed behavior:
 - `prepare_sources` syncs membership, probes stale or missing sources, computes ranked order, and
   persists source-pool state in the Postgres control-plane store.
-- `evm_call` selects a source from the durable pool unless the call is explicitly route-pinned for
-  compatibility reasons.
+- `evm_call` selects a source from the durable pool; callers do not pin source ids directly.
 - If multiple network-specific bootstrap catalogs exist, managed callers must provide `network_id`.
 
 The raw `evm` transport remains useful for:

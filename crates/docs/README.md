@@ -47,7 +47,6 @@ The live runtime inventory still lives in the repository docs:
 | `mfm-state-aave-v3` | Shared Aave V3 deploy and configure states. | pending | `crates/states/aave-v3` |
 | `mfm-state-common` | Cross-domain reusable execution states. | pending | `crates/states/common` |
 | `mfm-state-keystore` | Shared keystore administration and local signing states. | pending | `crates/states/keystore` |
-| `mfm-state-keystore-submit` | Shared raw-transaction submission state with remote EVM routing. | pending | `crates/states/keystore-submit` |
 
 ## Ops
 

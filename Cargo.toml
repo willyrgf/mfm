@@ -27,7 +27,6 @@ members = [
 	"crates/sdk",
 	"crates/states/common",
 	"crates/states/keystore",
-	"crates/states/keystore-submit",
 	"crates/states/aave-v3",
 	"crates/states/portfolio",
 	"crates/states/symbol",

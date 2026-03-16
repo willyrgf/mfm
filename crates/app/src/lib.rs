@@ -59,7 +59,7 @@ use mfm_op_evm_deploy_configure_validate::{
 use mfm_op_evm_read::EvmReadOp;
 use mfm_op_evm_write::{EvmConfigureOp, EvmContractFromNixOp, EvmDeployOp, EvmValidateOp};
 use mfm_op_keystore_admin::{KeystoreDeleteOp, KeystoreImportOp, KeystoreListOp};
-use mfm_op_keystore_tx::{KeystoreTxSendRawOp, KeystoreTxSignOp};
+use mfm_op_keystore_tx::KeystoreTxSignOp;
 use mfm_op_nix_app::NixAppOp;
 use mfm_op_portfolio_tracker::{
     portfolio_snapshot_artifact_id_context_key, portfolio_snapshot_report_context_key,
@@ -431,7 +431,6 @@ impl OperationPlugin for DefaultOperationPlugin {
         registry.register(Arc::new(KeystoreListOp));
         registry.register(Arc::new(KeystoreDeleteOp));
         registry.register(Arc::new(KeystoreTxSignOp));
-        registry.register(Arc::new(KeystoreTxSendRawOp));
         registry.register(Arc::new(EvmReadOp));
         registry.register(Arc::new(EvmContractFromNixOp));
         registry.register(Arc::new(EvmDeployOp));

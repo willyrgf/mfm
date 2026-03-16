@@ -2103,7 +2103,6 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "async-trait",
- "chrono",
  "mfm-collectors-rpc-control",
  "mfm-evm-core",
  "mfm-machine",
@@ -2256,19 +2255,13 @@ dependencies = [
 name = "mfm-op-keystore-tx"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "hex",
  "mfm-machine",
  "mfm-sdk",
  "mfm-state-common",
  "mfm-state-keystore",
- "mfm-state-keystore-submit",
- "mfm-transports-local-fs",
- "mfm-transports-local-keystore",
  "serde",
  "serde_json",
- "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -2414,19 +2407,6 @@ dependencies = [
  "serde_json",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "mfm-state-keystore-submit"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "hex",
- "mfm-collectors-local-fs",
- "mfm-evm-runtime",
- "mfm-machine",
- "mfm-state-common",
- "serde_json",
 ]
 
 [[package]]

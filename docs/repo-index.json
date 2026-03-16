@@ -219,11 +219,6 @@
       "kind": "rust-cargo"
     },
     {
-      "name": "keystore-submit",
-      "path": "crates/states/keystore-submit/Cargo.toml",
-      "kind": "rust-cargo"
-    },
-    {
       "name": "keystore",
       "path": "crates/states/keystore/Cargo.toml",
       "kind": "rust-cargo"

@@ -92,12 +92,6 @@
       "docs_rs": "https://docs.rs/mfm-state-keystore"
     },
     {
-      "name": "mfm-state-keystore-submit",
-      "group": "state-consumers",
-      "workspace_path": "crates/states/keystore-submit",
-      "docs_rs": "https://docs.rs/mfm-state-keystore-submit"
-    },
-    {
       "name": "mfm-state-aave-v3",
       "group": "state-consumers",
       "workspace_path": "crates/states/aave-v3",

@@ -41,7 +41,6 @@ Current near-term release chain:
    - `mfm-evm-runtime`
 5. State consumers:
    - `mfm-state-keystore`
-   - `mfm-state-keystore-submit`
    - `mfm-state-aave-v3`
 6. Umbrella landing page:
    - `mfm-docs`
@@ -107,7 +106,7 @@ This section tracks publish readiness, not runtime inventory.
 
 Current publish-wave framing:
 
-- `Wave 1`: `mfm-evm-runtime`, `mfm-state-keystore`, `mfm-state-keystore-submit`, `mfm-state-common`
+- `Wave 1`: `mfm-evm-runtime`, `mfm-state-keystore`, `mfm-state-common`
 - `Wave 2`: `mfm-state-aave-v3`
 
 Remaining work in this tier:

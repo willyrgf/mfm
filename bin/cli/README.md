@@ -30,7 +30,7 @@ mfm_cli/
 │   ├── commands/
 │   │   ├── mod.rs         # Top-level clap CLI + dispatch
 │   │   ├── result.rs      # Shared command result/error types
-│   │   ├── keystore/      # `keystore` subcommands (import, list, delete, tx-sign, tx-send-raw)
+│   │   ├── keystore/      # `keystore` subcommands (import, list, delete, tx-sign)
 │   │   └── run/           # `run` subcommands
 │   ├── support/
 │   │   ├── app_services.rs # Shared AppServices + error-adapter helpers
@@ -224,32 +224,6 @@ mfm_cli --output-format json keystore tx-sign \
   --max-priority-fee-per-gas 1000000000 \
   --gas-limit 21000 \
   --out /tmp/signed.tx
-```
-
-### `keystore tx-send-raw`
-
-Submits a signed raw transaction from file using `eth_sendRawTransaction`.
-
-This is a low-level compatibility command, not the final managed control-plane submit API.
-
-Implementation note: this command is a thin wrapper over a run-backed op (`op_id = "keystore_tx_send_raw"`, `op_version = "v1"`). The CLI maps args to op input and calls `mfm_sdk::unstable::execute_single_op_report` to launch and decode the final report payload.
-
-The command output includes `tx_hash`, `rpc_url_host`, and `submitted_at`; it does not print raw tx payload contents. For compatibility, `rpc_url_host` now carries the routed source ID.
-
-**Usage:**
-```sh
-mfm_cli keystore tx-send-raw --in <PATH> [--source-id <ID>]
-```
-
-**Key options:**
-- `--in <PATH>`: file containing 0x-prefixed raw signed tx hex
-- `--source-id <ID>`: EVM source ID (the CLI resolves `MFM_EVM_RPC_SOURCE_ID` before starting the op when this flag is omitted)
-
-**Example:**
-```sh
-mfm_cli --output-format json keystore tx-send-raw \
-  --source-id user_primary \
-  --in /tmp/signed.tx
 ```
 
 ## Run Commands (Experimental)
@@ -451,11 +425,6 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   mfm_cli run artifacts get "<ARTIFACT_ID>"
   ```
 
-- **`MFM_EVM_RPC_SOURCE_ID`**: Default source ID for `mfm_cli keystore tx-send-raw` when `--source-id` is not provided. The CLI resolves this before launching the underlying op.
-  ```sh
-  export MFM_EVM_RPC_SOURCE_ID="user_primary"
-  ```
-
 - **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON array of source objects used to bootstrap the canonical `rpc.control` source catalog. Runtime-only and never persisted.
   ```sh
   export MFM_EVM_RPC_SOURCES_JSON='[
@@ -497,7 +466,7 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   export MFM_EVM_RPC_LOGS_MAX_CHUNKS_PER_CALL="256"
   ```
 
-- Managed RPC note: per-request `rpc_url` override is not supported. Canonical routing enters through `rpc.control`; migration-only write paths may still pin `source_id`.
+- Managed RPC note: per-request `rpc_url` override is not supported. Canonical routing enters through `rpc.control`.
 - Managed RPC runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)
 
 ## Best Practices
