@@ -235,6 +235,11 @@
 - This refactor assumes an explicit control-plane reset before rollout.
 - This reset is operationally mandatory:
   - it must complete before any refactor-era process starts against the shared database/stream store
+- Repo-owned execution path:
+  - inspect SQL only:
+    - `nix run .#rpc-control-scope-reset -- --print-sql`
+  - execute once against the target database:
+    - `DATABASE_URL=postgresql://... nix run .#rpc-control-scope-reset -- --yes`
 - Existing persisted `rpc_source:*` and `source_pool:*` state is disposable for this change.
 - Do not attempt in-place migration from old identities such as:
   - `rpc_source:<network_id>:<source_id>`
@@ -245,6 +250,9 @@
   - do not wipe unrelated stream families
   - drop and recreate `mfm_rpc_source_state` and `mfm_source_pool_state`
   - recreate the projection schema with `control_scope`-aware identities and any new catalog-declaration fields
+- Repo-owned reset task:
+  - `nix run .#run-task -- task.mfm.rpc-control.reset`
+  - review-only mode: `nix run .#run-task -- task.mfm.rpc-control.reset --dry-run`
 - After reset, the new scope-aware identities become the only supported durable shape.
 - This reset also defines the replay cutover:
   - pre-refactor `rpc.control` fact identity is not preserved
@@ -624,6 +632,9 @@ Commit subjects below follow the repo convention and are written in lower case.
     - drops and recreates `mfm_rpc_source_state`
     - drops and recreates `mfm_source_pool_state`
   - document that this reset must run exactly once after the final refactor commit lands and before any refactor-era process starts
+- Implemented task:
+  - `nix run .#rpc-control-scope-reset -- --print-sql`
+  - `DATABASE_URL=postgresql://... nix run .#rpc-control-scope-reset -- --yes`
 - Primary files:
   - [nixfied/project/module.nix](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/nixfied/project/module.nix)
   - [nixfied/project/default.nix](/Users/willyrgf/dev/rust/src/github.com/willyrgf/2/mfm/nixfied/project/default.nix)
