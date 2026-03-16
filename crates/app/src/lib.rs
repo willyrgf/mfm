@@ -82,7 +82,7 @@ use mfm_transports_local_fs::LocalFsIoTransportFactory;
 use mfm_transports_local_keystore::LocalKeystoreIoTransportFactory;
 use mfm_transports_proof::ProofIoTransportFactory;
 use mfm_transports_rpc_control::{
-    resolve_rpc_control_bootstrap_sources_from_env, RpcControlTransportFactory,
+    RpcControlConfigError, RpcControlTransportFactory,
 };
 
 const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
@@ -878,12 +878,19 @@ impl AppServices {
         //
         // Note: the underlying op can still be started via `run.start` and may end in `phase=failed`,
         // but the feature is intended to behave like a request-level RPC dependency.
-        if resolve_rpc_control_bootstrap_sources_from_env().is_empty() {
-            return Err(AppError::new(
-                ErrorClass::BadGateway,
-                "rpc_control_no_sources",
-                "rpc.control bootstrap sources are not configured",
-            ));
+        let rpc_control_factory = RpcControlTransportFactory::from_env();
+        if let Some(err) = rpc_control_factory.config_error() {
+            let (code, message) = match err {
+                RpcControlConfigError::NoSources => (
+                    "rpc_control_no_sources",
+                    "rpc.control bootstrap sources are not configured".to_string(),
+                ),
+                other => (
+                    "rpc_control_config_invalid",
+                    format!("invalid rpc.control bootstrap config: {other}"),
+                ),
+            };
+            return Err(AppError::new(ErrorClass::BadGateway, code, message));
         }
 
         const OP_ID: &str = "portfolio_tracker";
