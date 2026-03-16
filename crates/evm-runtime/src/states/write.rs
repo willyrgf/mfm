@@ -6,7 +6,7 @@
 //! Thin op crates should compose these states rather than reimplementing write-path behavior.
 
 use async_trait::async_trait;
-use mfm_collectors_rpc_control::{EvmIoClient, JsonRpcCall};
+use mfm_collectors_rpc_control::{parse_u64_hex_value, EvmIoClient, JsonRpcCall};
 use mfm_machine::context::DynContext;
 use mfm_machine::errors::StateError;
 use mfm_machine::ids::{ContextKey, StateId};
@@ -34,6 +34,17 @@ const KEY_VALIDATED: &str = "validated";
 const KEY_CHAIN_ID: &str = "chain_id";
 const KEY_CLIENT_VERSION: &str = "client_version";
 
+fn managed_call(
+    network_id: &str,
+    control_scope: &str,
+    method: impl Into<String>,
+    params: serde_json::Value,
+) -> JsonRpcCall {
+    JsonRpcCall::new(method, params)
+        .with_control_scope(control_scope.to_string())
+        .with_network_id(network_id.to_string())
+}
+
 /// Runtime configuration for [`EvmDeployState`].
 ///
 /// # Examples
@@ -42,6 +53,8 @@ const KEY_CLIENT_VERSION: &str = "client_version";
 /// use mfm_evm_runtime::states::write::EvmDeployStateConfig;
 ///
 /// let cfg = EvmDeployStateConfig {
+///     network_id: "ethereum-mainnet".to_string(),
+///     control_scope: "shared".to_string(),
 ///     artifact: None,
 ///     artifact_port: "contract_artifact".to_string(),
 ///     from: "0x0000000000000000000000000000000000000001".to_string(),
@@ -61,6 +74,10 @@ pub struct EvmDeployStateConfig {
     pub artifact: Option<shared_dcv::ContractArtifactConfig>,
     /// Context key used to load the contract artifact when `artifact` is absent.
     pub artifact_port: String,
+    /// Stable network identifier targeted by the managed RPC calls.
+    pub network_id: String,
+    /// Stable control-plane scope used to isolate managed source state.
+    pub control_scope: String,
     /// Deployer address or sender address.
     pub from: String,
     /// Constructor arguments passed during deployment.
@@ -93,6 +110,10 @@ pub struct EvmConfigureStateConfig {
     pub artifact: Option<shared_dcv::ContractArtifactConfig>,
     /// Context key used to load the contract artifact when `artifact` is absent.
     pub artifact_port: String,
+    /// Stable network identifier targeted by the managed RPC calls.
+    pub network_id: String,
+    /// Stable control-plane scope used to isolate managed source state.
+    pub control_scope: String,
     /// Sender address used for configuration transactions.
     pub from: String,
     /// Optional inline contract address; falls back to context when absent.
@@ -114,6 +135,10 @@ pub struct EvmValidateStateConfig {
     pub artifact: Option<shared_dcv::ContractArtifactConfig>,
     /// Context key used to load the contract artifact when `artifact` is absent.
     pub artifact_port: String,
+    /// Stable network identifier targeted by the managed RPC calls.
+    pub network_id: String,
+    /// Stable control-plane scope used to isolate managed source state.
+    pub control_scope: String,
     /// Optional inline contract address; falls back to context when absent.
     pub contract_address: Option<String>,
     /// Expected chain id for the connected RPC endpoint.
@@ -260,8 +285,10 @@ impl State for EvmDeployState {
         }
 
         let tx_hash = if let Some(env_name) = self.cfg.signing_key_env.as_deref() {
-            evm_rpc::send_signed_create_transaction(
+            evm_rpc::send_signed_create_transaction_for_network(
                 &mut client,
+                &self.cfg.network_id,
+                &self.cfg.control_scope,
                 env_name,
                 &self.cfg.from,
                 &constructor_payload,
@@ -269,13 +296,21 @@ impl State for EvmDeployState {
             )
             .await?
         } else {
-            evm_rpc::send_transaction(&mut client, tx).await?
+            evm_rpc::send_transaction_for_network(
+                &mut client,
+                &self.cfg.network_id,
+                &self.cfg.control_scope,
+                tx,
+            )
+            .await?
         };
         drop(client);
 
-        let receipt = evm_rpc::wait_for_receipt(
+        let receipt = evm_rpc::wait_for_receipt_for_network(
             &self.state_id,
             io,
+            &self.cfg.network_id,
+            &self.cfg.control_scope,
             &tx_hash,
             self.cfg.poll_interval_ms,
             self.cfg.max_receipt_polls,
@@ -343,11 +378,19 @@ impl State for EvmConfigureState {
             }
 
             let mut client = EvmIoClient::new(self.state_id.clone(), io);
-            let tx_hash = evm_rpc::send_transaction(&mut client, tx).await?;
+            let tx_hash = evm_rpc::send_transaction_for_network(
+                &mut client,
+                &self.cfg.network_id,
+                &self.cfg.control_scope,
+                tx,
+            )
+            .await?;
             drop(client);
-            let receipt = evm_rpc::wait_for_receipt(
+            let receipt = evm_rpc::wait_for_receipt_for_network(
                 &self.state_id,
                 io,
+                &self.cfg.network_id,
+                &self.cfg.control_scope,
                 &tx_hash,
                 self.cfg.poll_interval_ms,
                 self.cfg.max_receipt_polls,
@@ -410,7 +453,9 @@ impl State for EvmValidateState {
         let mut client = EvmIoClient::new(self.state_id.clone(), io);
 
         let client_version_res = client
-            .call(JsonRpcCall::new(
+            .call(managed_call(
+                &self.cfg.network_id,
+                &self.cfg.control_scope,
                 "web3_clientVersion",
                 serde_json::json!([]),
             ))
@@ -430,9 +475,22 @@ impl State for EvmValidateState {
         )?;
 
         let chain_id = client
-            .chain_id_u64()
+            .call(managed_call(
+                &self.cfg.network_id,
+                &self.cfg.control_scope,
+                "eth_chainId",
+                serde_json::json!([]),
+            ))
             .await
-            .map_err(op_errors::state_from_io)?;
+            .map_err(op_errors::state_from_io)
+            .and_then(|res| {
+                parse_u64_hex_value(&res.response).map_err(|_| {
+                    op_errors::state_unknown(
+                        "evm_response_invalid",
+                        "eth_chainId returned invalid hex chain id",
+                    )
+                })
+            })?;
         op_rpc::assert_condition(
             chain_id == self.cfg.expected_chain_id,
             "chain_id_mismatch",
@@ -443,7 +501,9 @@ impl State for EvmValidateState {
 
         for ra in &read_assertions {
             let res = client
-                .call(JsonRpcCall::new(
+                .call(managed_call(
+                    &self.cfg.network_id,
+                    &self.cfg.control_scope,
                     "eth_call",
                     serde_json::json!([{ "to": to, "data": ra.data_hex }, "latest"]),
                 ))
@@ -473,7 +533,9 @@ impl State for EvmValidateState {
 
         for ea in &event_assertions {
             let logs_res = client
-                .call(JsonRpcCall::new(
+                .call(managed_call(
+                    &self.cfg.network_id,
+                    &self.cfg.control_scope,
                     "eth_getLogs",
                     serde_json::json!([{
                         "address": to,

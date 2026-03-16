@@ -50,8 +50,17 @@ fn default_true() -> bool {
     true
 }
 
+fn default_control_scope() -> String {
+    "shared".to_string()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct EvmReadConfig {
+    network_id: String,
+
+    #[serde(default = "default_control_scope")]
+    control_scope: String,
+
     #[serde(default = "default_true")]
     include_chain_id: bool,
 
@@ -62,6 +71,8 @@ struct EvmReadConfig {
 impl Default for EvmReadConfig {
     fn default() -> Self {
         Self {
+            network_id: "ethereum-mainnet".to_string(),
+            control_scope: default_control_scope(),
             include_chain_id: true,
             include_block_number: true,
         }
@@ -99,6 +110,9 @@ impl Operation for EvmReadOp {
     ) -> Result<StateGraph, SdkError> {
         let cfg: EvmReadConfig = serde_json::from_value(op_config.clone())
             .map_err(|_| sdk_err("invalid_op_config", "invalid evm_read op_config"))?;
+        if cfg.network_id.trim().is_empty() {
+            return Err(sdk_err("invalid_op_config", "network_id must be non-empty"));
+        }
         if !cfg.include_chain_id && !cfg.include_block_number {
             return Err(sdk_err(
                 "invalid_op_config",
@@ -113,12 +127,16 @@ impl Operation for EvmReadOp {
 
         if cfg.include_chain_id {
             let id = StateId::must_new(format!("{}.chain_id", op_path.0));
-            let st = Arc::new(ReadU64HexState::new(
-                id.clone(),
-                "eth_chainId",
-                serde_json::json!([]),
-                ctx_key(&op_path, "chain_id"),
-            ));
+            let st = Arc::new(
+                ReadU64HexState::new(
+                    id.clone(),
+                    cfg.network_id.clone(),
+                    "eth_chainId",
+                    serde_json::json!([]),
+                    ctx_key(&op_path, "chain_id"),
+                )
+                .with_control_scope(cfg.control_scope.clone()),
+            );
             states.push(StateNode {
                 id: id.clone(),
                 state: st,
@@ -128,12 +146,16 @@ impl Operation for EvmReadOp {
 
         if cfg.include_block_number {
             let id = StateId::must_new(format!("{}.block_number", op_path.0));
-            let st = Arc::new(ReadU64HexState::new(
-                id.clone(),
-                "eth_blockNumber",
-                serde_json::json!([]),
-                ctx_key(&op_path, "block_number"),
-            ));
+            let st = Arc::new(
+                ReadU64HexState::new(
+                    id.clone(),
+                    cfg.network_id.clone(),
+                    "eth_blockNumber",
+                    serde_json::json!([]),
+                    ctx_key(&op_path, "block_number"),
+                )
+                .with_control_scope(cfg.control_scope.clone()),
+            );
             if let Some(prev) = &last {
                 edges.push(DependencyEdge {
                     from: prev.clone(),

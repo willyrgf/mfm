@@ -81,6 +81,7 @@ fn deploy_io_exports_contract_address() {
     let io = op
         .io(&serde_json::json!({
             "artifact": sample_artifact(),
+            "network_id": "ethereum-mainnet",
             "from": "0x1111111111111111111111111111111111111111"
         }))
         .expect("io");
@@ -96,6 +97,7 @@ fn deploy_io_imports_artifact_port_when_artifact_is_unset() {
     let io = op
         .io(&serde_json::json!({
             "artifact_port": "contract_artifact",
+            "network_id": "ethereum-mainnet",
             "from": "0x1111111111111111111111111111111111111111"
         }))
         .expect("io");
@@ -111,6 +113,7 @@ fn configure_io_imports_contract_address_when_unset() {
     let io = op
         .io(&serde_json::json!({
             "artifact": sample_artifact(),
+            "network_id": "ethereum-mainnet",
             "from": "0x1111111111111111111111111111111111111111",
             "calls": [{"function":"setValue","args":[1]}]
         }))
@@ -146,6 +149,7 @@ fn validate_expand_builds_read_and_event_assertions() {
             OpPath("m.validate".to_string()),
             &serde_json::json!({
                 "artifact": sample_artifact(),
+                "network_id": "ethereum-mainnet",
                 "contract_address": "0x1111111111111111111111111111111111111111",
                 "expected_chain_id": 1337,
                 "read_assertions": [

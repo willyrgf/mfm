@@ -9,7 +9,9 @@
 use async_trait::async_trait;
 
 use alloy_primitives::Address;
-use mfm_collectors_rpc_control::{parse_u64_hex_value, EvmIoClient, JsonRpcCall};
+use mfm_collectors_rpc_control::{
+    parse_u64_hex_value, EvmIoClient, JsonRpcCall, DEFAULT_CONTROL_SCOPE,
+};
 use mfm_evm_core::encoding::{
     format_u256_units, parse_hex_string_response, parse_u256_hex_response, parse_u256_hex_value,
     parse_u8_u256, u64_hex_quantity,
@@ -36,6 +38,21 @@ fn parse_error(err: UtilError) -> StateError {
     state_unknown_msg(err.code, err.message)
 }
 
+fn default_control_scope() -> String {
+    DEFAULT_CONTROL_SCOPE.to_string()
+}
+
+fn managed_call(
+    network_id: &str,
+    control_scope: &str,
+    method: impl Into<String>,
+    params: serde_json::Value,
+) -> JsonRpcCall {
+    JsonRpcCall::new(method, params)
+        .with_control_scope(control_scope.to_string())
+        .with_network_id(network_id.to_string())
+}
+
 trait RpcResponseParser {
     fn parse(
         &self,
@@ -46,6 +63,8 @@ trait RpcResponseParser {
 
 async fn execute_rpc_read<P: RpcResponseParser>(
     state_id: &StateId,
+    network_id: &str,
+    control_scope: &str,
     method: &str,
     params: &serde_json::Value,
     output_key: &ContextKey,
@@ -55,7 +74,12 @@ async fn execute_rpc_read<P: RpcResponseParser>(
 ) -> Result<StateOutcome, StateError> {
     let mut client = EvmIoClient::new(state_id.clone(), io);
     let res = client
-        .call(JsonRpcCall::new(method.to_string(), params.clone()))
+        .call(managed_call(
+            network_id,
+            control_scope,
+            method.to_string(),
+            params.clone(),
+        ))
         .await
         .map_err(state_from_io)?;
     let parsed = parser.parse(state_id, &res.response)?;
@@ -178,6 +202,10 @@ impl U64Expectation {
 pub struct ReadHexStringState {
     /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Stable network identifier that owns the RPC call.
+    pub network_id: String,
+    /// Stable control-plane scope used to isolate managed source state.
+    pub control_scope: String,
     /// JSON-RPC method to invoke.
     pub method: String,
     /// JSON-RPC params to pass to `method`.
@@ -197,6 +225,7 @@ impl ReadHexStringState {
     ///
     /// let state = ReadHexStringState::new(
     ///     StateId::must_new("evm.main.client_version".to_string()),
+    ///     "ethereum-mainnet",
     ///     "web3_clientVersion",
     ///     serde_json::json!([]),
     ///     ContextKey("client_version".to_string()),
@@ -207,16 +236,25 @@ impl ReadHexStringState {
     /// ```
     pub fn new(
         state_id: StateId,
+        network_id: impl Into<String>,
         method: impl Into<String>,
         params: serde_json::Value,
         output_key: ContextKey,
     ) -> Self {
         Self {
             state_id,
+            network_id: network_id.into(),
+            control_scope: default_control_scope(),
             method: method.into(),
             params,
             output_key,
         }
+    }
+
+    /// Overrides the control-plane scope used for the RPC call.
+    pub fn with_control_scope(mut self, control_scope: impl Into<String>) -> Self {
+        self.control_scope = control_scope.into();
+        self
     }
 }
 
@@ -234,6 +272,8 @@ impl State for ReadHexStringState {
     ) -> Result<StateOutcome, StateError> {
         execute_rpc_read(
             &self.state_id,
+            &self.network_id,
+            &self.control_scope,
             &self.method,
             &self.params,
             &self.output_key,
@@ -250,6 +290,10 @@ impl State for ReadHexStringState {
 pub struct ReadU256HexState {
     /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Stable network identifier that owns the RPC call.
+    pub network_id: String,
+    /// Stable control-plane scope used to isolate managed source state.
+    pub control_scope: String,
     /// JSON-RPC method to invoke.
     pub method: String,
     /// JSON-RPC params to pass to `method`.
@@ -262,16 +306,25 @@ impl ReadU256HexState {
     /// Creates a new U256-hex read state.
     pub fn new(
         state_id: StateId,
+        network_id: impl Into<String>,
         method: impl Into<String>,
         params: serde_json::Value,
         output_key: ContextKey,
     ) -> Self {
         Self {
             state_id,
+            network_id: network_id.into(),
+            control_scope: default_control_scope(),
             method: method.into(),
             params,
             output_key,
         }
+    }
+
+    /// Overrides the control-plane scope used for the RPC call.
+    pub fn with_control_scope(mut self, control_scope: impl Into<String>) -> Self {
+        self.control_scope = control_scope.into();
+        self
     }
 }
 
@@ -289,6 +342,8 @@ impl State for ReadU256HexState {
     ) -> Result<StateOutcome, StateError> {
         execute_rpc_read(
             &self.state_id,
+            &self.network_id,
+            &self.control_scope,
             &self.method,
             &self.params,
             &self.output_key,
@@ -317,6 +372,10 @@ pub enum EthCallDecode {
 pub struct EthCallState {
     /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Stable network identifier that owns the RPC call.
+    pub network_id: String,
+    /// Stable control-plane scope used to isolate managed source state.
+    pub control_scope: String,
     /// Contract address targeted by the call.
     pub to: String,
     /// Hex-encoded calldata.
@@ -340,6 +399,7 @@ impl EthCallState {
     ///
     /// let state = EthCallState::new(
     ///     StateId::must_new("evm.main.call".to_string()),
+    ///     "ethereum-mainnet",
     ///     "0x0000000000000000000000000000000000000001",
     ///     "0x70a08231",
     ///     ContextKey("call_result".to_string()),
@@ -351,18 +411,27 @@ impl EthCallState {
     /// ```
     pub fn new(
         state_id: StateId,
+        network_id: impl Into<String>,
         to: impl Into<String>,
         data: impl Into<String>,
         output_key: ContextKey,
     ) -> Self {
         Self {
             state_id,
+            network_id: network_id.into(),
+            control_scope: default_control_scope(),
             to: to.into(),
             data: data.into(),
             block: serde_json::json!("latest"),
             output_key,
             decode: EthCallDecode::HexString,
         }
+    }
+
+    /// Overrides the control-plane scope used for the RPC call.
+    pub fn with_control_scope(mut self, control_scope: impl Into<String>) -> Self {
+        self.control_scope = control_scope.into();
+        self
     }
 
     /// Overrides the block selector used by the `eth_call`.
@@ -392,7 +461,9 @@ impl State for EthCallState {
     ) -> Result<StateOutcome, StateError> {
         let mut client = EvmIoClient::new(self.state_id.clone(), io);
         let res = client
-            .call(JsonRpcCall::new(
+            .call(managed_call(
+                &self.network_id,
+                &self.control_scope,
                 "eth_call",
                 serde_json::json!([
                     {"to": self.to.clone(), "data": self.data.clone()},
@@ -427,6 +498,10 @@ impl State for EthCallState {
 pub struct ReadU64HexState {
     /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Stable network identifier that owns the RPC call.
+    pub network_id: String,
+    /// Stable control-plane scope used to isolate managed source state.
+    pub control_scope: String,
     /// JSON-RPC method to invoke.
     pub method: String,
     /// JSON-RPC params to pass to `method`.
@@ -441,17 +516,26 @@ impl ReadU64HexState {
     /// Creates a new `u64`-hex read state.
     pub fn new(
         state_id: StateId,
+        network_id: impl Into<String>,
         method: impl Into<String>,
         params: serde_json::Value,
         output_key: ContextKey,
     ) -> Self {
         Self {
             state_id,
+            network_id: network_id.into(),
+            control_scope: default_control_scope(),
             method: method.into(),
             params,
             output_key,
             expectation: None,
         }
+    }
+
+    /// Overrides the control-plane scope used for the RPC call.
+    pub fn with_control_scope(mut self, control_scope: impl Into<String>) -> Self {
+        self.control_scope = control_scope.into();
+        self
     }
 
     /// Configures an exact-value expectation for the parsed response.
@@ -475,6 +559,8 @@ impl State for ReadU64HexState {
     ) -> Result<StateOutcome, StateError> {
         execute_rpc_read(
             &self.state_id,
+            &self.network_id,
+            &self.control_scope,
             &self.method,
             &self.params,
             &self.output_key,
@@ -493,6 +579,10 @@ impl State for ReadU64HexState {
 pub struct NativeBalanceState {
     /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Stable network identifier that owns the RPC call.
+    pub network_id: String,
+    /// Stable control-plane scope used to isolate managed source state.
+    pub control_scope: String,
     /// Wallet address whose native balance should be queried.
     pub wallet: Address,
     /// Context key that contains the block number to query against.
@@ -517,6 +607,7 @@ impl NativeBalanceState {
     ///
     /// let state = NativeBalanceState::new(
     ///     StateId::must_new("evm.main.native_balance".to_string()),
+    ///     "ethereum-mainnet",
     ///     Address::from([0u8; 20]),
     ///     ContextKey("block_number".to_string()),
     ///     ContextKey("native_balance".to_string()),
@@ -527,18 +618,27 @@ impl NativeBalanceState {
     /// ```
     pub fn new(
         state_id: StateId,
+        network_id: impl Into<String>,
         wallet: Address,
         block_key: ContextKey,
         output_key: ContextKey,
     ) -> Self {
         Self {
             state_id,
+            network_id: network_id.into(),
+            control_scope: default_control_scope(),
             wallet,
             block_key,
             output_key,
             symbol: "ETH".to_string(),
             decimals: 18,
         }
+    }
+
+    /// Overrides the control-plane scope used for the RPC call.
+    pub fn with_control_scope(mut self, control_scope: impl Into<String>) -> Self {
+        self.control_scope = control_scope.into();
+        self
     }
 }
 
@@ -563,7 +663,9 @@ impl State for NativeBalanceState {
 
         let mut client = EvmIoClient::new(self.state_id.clone(), io);
         let res = client
-            .call(JsonRpcCall::new(
+            .call(managed_call(
+                &self.network_id,
+                &self.control_scope,
                 "eth_getBalance",
                 serde_json::json!([address_hex_lower(&self.wallet), u64_hex_quantity(block)]),
             ))
@@ -591,6 +693,10 @@ impl State for NativeBalanceState {
 pub struct TokenBalanceState {
     /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
+    /// Stable network identifier that owns the RPC call.
+    pub network_id: String,
+    /// Stable control-plane scope used to isolate managed source state.
+    pub control_scope: String,
     /// Token contract address.
     pub token: Address,
     /// Wallet address whose token balance should be queried.
@@ -609,6 +715,7 @@ impl TokenBalanceState {
     /// Creates a token-balance state.
     pub fn new(
         state_id: StateId,
+        network_id: impl Into<String>,
         token: Address,
         wallet: Address,
         symbol: Option<String>,
@@ -618,6 +725,8 @@ impl TokenBalanceState {
     ) -> Self {
         Self {
             state_id,
+            network_id: network_id.into(),
+            control_scope: default_control_scope(),
             token,
             wallet,
             symbol,
@@ -625,6 +734,12 @@ impl TokenBalanceState {
             block_key,
             output_key,
         }
+    }
+
+    /// Overrides the control-plane scope used for the RPC call.
+    pub fn with_control_scope(mut self, control_scope: impl Into<String>) -> Self {
+        self.control_scope = control_scope.into();
+        self
     }
 }
 
@@ -655,7 +770,9 @@ impl State for TokenBalanceState {
             Some(d) => d,
             None => {
                 let res = client
-                    .call(JsonRpcCall::new(
+                    .call(managed_call(
+                        &self.network_id,
+                        &self.control_scope,
                         "eth_call",
                         serde_json::json!([
                             {"to": token_to, "data": encode_erc20_decimals()},
@@ -670,7 +787,9 @@ impl State for TokenBalanceState {
         };
 
         let res = client
-            .call(JsonRpcCall::new(
+            .call(managed_call(
+                &self.network_id,
+                &self.control_scope,
                 "eth_call",
                 serde_json::json!([
                     {"to": address_hex_lower(&self.token), "data": encode_erc20_balance_of(&self.wallet)},

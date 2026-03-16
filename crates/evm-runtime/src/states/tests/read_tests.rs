@@ -90,6 +90,8 @@ impl IoProvider for FixedIo {
 
 struct NoopRecorder;
 
+const NETWORK_ID: &str = "ethereum-mainnet";
+
 #[async_trait]
 impl EventRecorder for NoopRecorder {
     async fn emit(&mut self, _event: DomainEvent) -> Result<(), RunError> {
@@ -105,6 +107,7 @@ impl EventRecorder for NoopRecorder {
 async fn reads_u64_and_writes_context() {
     let state = ReadU64HexState::new(
         StateId::must_new("m.main.chain_id".to_string()),
+        NETWORK_ID,
         "eth_chainId",
         serde_json::json!([]),
         ContextKey("chain_id".to_string()),
@@ -131,6 +134,7 @@ async fn reads_u64_and_writes_context() {
 async fn invalid_hex_response_fails_with_stable_code() {
     let state = ReadU64HexState::new(
         StateId::must_new("m.main.chain_id".to_string()),
+        NETWORK_ID,
         "eth_chainId",
         serde_json::json!([]),
         ContextKey("chain_id".to_string()),
@@ -153,6 +157,7 @@ async fn invalid_hex_response_fails_with_stable_code() {
 async fn expectation_mismatch_fails_with_state_scoped_error() {
     let state = ReadU64HexState::new(
         StateId::must_new("m.main.chain_id".to_string()),
+        NETWORK_ID,
         "eth_chainId",
         serde_json::json!([]),
         ContextKey("chain_id".to_string()),
@@ -198,6 +203,7 @@ fn io_error_mapping_preserves_error_info() {
 async fn read_hex_string_writes_string_value() {
     let state = ReadHexStringState::new(
         StateId::must_new("m.main.client_version".to_string()),
+        NETWORK_ID,
         "web3_clientVersion",
         serde_json::json!([]),
         ContextKey("client_version".to_string()),
@@ -226,6 +232,7 @@ async fn read_hex_string_writes_string_value() {
 async fn read_u256_hex_rejects_overflow() {
     let state = ReadU256HexState::new(
         StateId::must_new("m.main.balance".to_string()),
+        NETWORK_ID,
         "eth_getBalance",
         serde_json::json!(["0xabc", "latest"]),
         ContextKey("balance".to_string()),
@@ -250,6 +257,7 @@ async fn read_u256_hex_rejects_overflow() {
 async fn eth_call_u64_decode_writes_numeric_value() {
     let state = EthCallState::new(
         StateId::must_new("m.main.eth_call".to_string()),
+        NETWORK_ID,
         "0x0000000000000000000000000000000000000000",
         "0x313ce567",
         ContextKey("decimals".to_string()),

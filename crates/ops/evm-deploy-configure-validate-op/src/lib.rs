@@ -216,15 +216,18 @@ mod tests {
     fn sample_config() -> serde_json::Value {
         serde_json::json!({
             "deploy": {
+                "network_id": "ethereum-mainnet",
                 "from": "0x000000000000000000000000000000000000dead"
             },
             "configure": {
+                "network_id": "ethereum-mainnet",
                 "from": "0x000000000000000000000000000000000000dead",
                 "calls": [
                     {"function": "noop", "args": []}
                 ]
             },
             "validate": {
+                "network_id": "ethereum-mainnet",
                 "expected_chain_id": 1
             }
         })

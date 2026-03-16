@@ -29,6 +29,8 @@ fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> E
     }
 }
 
+const NETWORK_ID: &str = "ethereum-mainnet";
+
 #[derive(Clone)]
 struct CountingTransportFactory {
     counts: Arc<Mutex<HashMap<String, u64>>>,
@@ -125,8 +127,13 @@ async fn at_live_then_replay_determinism() {
         Arc::new(CountingTransportFactory::new(Arc::clone(&counts)));
 
     let op: mfm_sdk::op::DynOperation = Arc::new(EvmReadOp);
-    let (registry, planner, pipeline) =
-        op_test_support::single_op_plan(op, serde_json::json!({})).expect("pipeline");
+    let (registry, planner, pipeline) = op_test_support::single_op_plan(
+        op,
+        serde_json::json!({
+            "network_id": NETWORK_ID,
+        }),
+    )
+    .expect("pipeline");
 
     let resolver = Arc::new(SdkPlanResolver::new(
         Arc::clone(&registry),
@@ -228,8 +235,13 @@ async fn at_crash_resume_orphan_attempt_reuses_facts() {
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
     let op: mfm_sdk::op::DynOperation = Arc::new(EvmReadOp);
-    let (registry, planner, pipeline) =
-        op_test_support::single_op_plan(op, serde_json::json!({})).expect("pipeline");
+    let (registry, planner, pipeline) = op_test_support::single_op_plan(
+        op,
+        serde_json::json!({
+            "network_id": NETWORK_ID,
+        }),
+    )
+    .expect("pipeline");
 
     let resolver = Arc::new(SdkPlanResolver::new(
         Arc::clone(&registry),

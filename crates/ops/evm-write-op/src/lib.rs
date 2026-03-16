@@ -97,6 +97,10 @@ fn default_artifact_port() -> String {
     KEY_CONTRACT_ARTIFACT.to_string()
 }
 
+fn default_control_scope() -> String {
+    "shared".to_string()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct ContractArtifactConfig {
     abi: serde_json::Value,
@@ -116,6 +120,11 @@ struct EvmDeployConfig {
 
     #[serde(default = "default_artifact_port")]
     artifact_port: String,
+
+    network_id: String,
+
+    #[serde(default = "default_control_scope")]
+    control_scope: String,
 
     from: String,
 
@@ -153,6 +162,11 @@ struct EvmConfigureConfig {
 
     #[serde(default = "default_artifact_port")]
     artifact_port: String,
+
+    network_id: String,
+
+    #[serde(default = "default_control_scope")]
+    control_scope: String,
 
     from: String,
 
@@ -206,6 +220,11 @@ struct EvmValidateConfig {
 
     #[serde(default = "default_artifact_port")]
     artifact_port: String,
+
+    network_id: String,
+
+    #[serde(default = "default_control_scope")]
+    control_scope: String,
 
     #[serde(default)]
     contract_address: Option<String>,
@@ -750,6 +769,12 @@ impl Operation for EvmDeployOp {
         let cfg: EvmDeployConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "invalid evm_deploy op_config")
         })?;
+        if cfg.network_id.trim().is_empty() {
+            return Err(op_errors::sdk_parse_error(
+                "invalid_op_config",
+                "network_id must be non-empty",
+            ));
+        }
         shared_dcv::ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
         })?;
@@ -818,6 +843,8 @@ impl Operation for EvmDeployOp {
                     bytecode: a.bytecode,
                 }),
                 artifact_port: cfg.artifact_port,
+                network_id: cfg.network_id,
+                control_scope: cfg.control_scope,
                 from,
                 constructor_args: cfg.constructor_args,
                 value_hex,
@@ -854,6 +881,12 @@ impl Operation for EvmConfigureOp {
         let cfg: EvmConfigureConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "invalid evm_configure op_config")
         })?;
+        if cfg.network_id.trim().is_empty() {
+            return Err(op_errors::sdk_parse_error(
+                "invalid_op_config",
+                "network_id must be non-empty",
+            ));
+        }
         shared_dcv::ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
         })?;
@@ -954,6 +987,8 @@ impl Operation for EvmConfigureOp {
                     bytecode: a.bytecode,
                 }),
                 artifact_port: cfg.artifact_port,
+                network_id: cfg.network_id,
+                control_scope: cfg.control_scope,
                 from,
                 contract_address,
                 calls: calls
@@ -996,6 +1031,12 @@ impl Operation for EvmValidateOp {
         let cfg: EvmValidateConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "invalid evm_validate op_config")
         })?;
+        if cfg.network_id.trim().is_empty() {
+            return Err(op_errors::sdk_parse_error(
+                "invalid_op_config",
+                "network_id must be non-empty",
+            ));
+        }
         shared_dcv::ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
         })?;
@@ -1076,6 +1117,8 @@ impl Operation for EvmValidateOp {
                     bytecode: a.bytecode,
                 }),
                 artifact_port: cfg.artifact_port,
+                network_id: cfg.network_id,
+                control_scope: cfg.control_scope,
                 contract_address,
                 expected_chain_id: cfg.expected_chain_id,
                 require_client_substring: cfg.require_client_substring,
