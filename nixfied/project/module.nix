@@ -649,6 +649,7 @@ in
           max = conf.slots.max;
           stride = conf.slots.stride;
         };
+        ephemeral = conf.ephemeral;
 
         env = {
           var = project.envVar;
