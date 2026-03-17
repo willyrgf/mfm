@@ -2,7 +2,7 @@ diff --git a/ethereum/src/consensus.rs b/ethereum/src/consensus.rs
 index c91dcf9..9fdba2c 100644
 --- a/ethereum/src/consensus.rs
 +++ b/ethereum/src/consensus.rs
-@@ -440,11 +440,23 @@ impl<S: ConsensusSpec, R: ConsensusRpc<S>, DB: Database> Consensus<S> for Consen
+@@ -439,10 +439,20 @@ impl<S: ConsensusSpec, R: ConsensusRpc<S>, DB: Database> Consensus<S> for Consen
              }
          }
  
@@ -10,24 +10,20 @@ index c91dcf9..9fdba2c 100644
 -            .rpc
 -            .get_updates(next_update_fetch_period, MAX_REQUEST_LIGHT_CLIENT_UPDATES)
 -            .await?;
--        updates.extend(update);
-+        // Only request completed sync periods; some public endpoints return 500 if the request
-+        // spans into the current period before its partial update is available.
-+        let count: u8 = if expected_current_period > next_update_fetch_period {
-+            let remaining_complete_periods = expected_current_period - next_update_fetch_period;
++        // Only request what's needed to reach the expected current period; some public endpoints
++        // error if `count` includes future periods.
++        let count: u8 = if expected_current_period >= next_update_fetch_period {
++            let remaining = expected_current_period - next_update_fetch_period;
 +            let wanted: u64 = std::cmp::min(
-+                remaining_complete_periods,
++                remaining.saturating_add(1),
 +                MAX_REQUEST_LIGHT_CLIENT_UPDATES.into(),
 +            );
 +            wanted.try_into().unwrap_or(MAX_REQUEST_LIGHT_CLIENT_UPDATES)
 +        } else {
-+            0
++            1
 +        };
 +
-+        if count > 0 {
-+            let update: Vec<Update<S>> = self.rpc.get_updates(next_update_fetch_period, count).await?;
-+            updates.extend(update);
-+        }
++        let update: Vec<Update<S>> = self.rpc.get_updates(next_update_fetch_period, count).await?;
+         updates.extend(update);
  
          Ok(updates)
-     }

@@ -1,6 +1,7 @@
 { lib, ... }:
 let
   t = lib.types;
+  probeLib = import ./probes.nix { inherit lib; };
   sourceSpec = t.submodule {
     options = {
       package = lib.mkOption {
@@ -56,5 +57,6 @@ in
       type = t.str;
       default = "";
     };
+    probes = probeLib.probeOptions;
   };
 }

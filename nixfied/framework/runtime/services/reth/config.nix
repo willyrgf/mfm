@@ -17,4 +17,7 @@ in
   network = cfg.network or "local";
   devMode = cfg.devMode or false;
   extraArgs = cfg.extraArgs or [ ];
+  defaultSource = cfg.defaultSource or "";
+  probePlans = cfg.resolved.probePlans or cfg.resolved.operationProbes or { };
+  resolvedEndpoints = cfg.resolved.endpoints or { };
 }

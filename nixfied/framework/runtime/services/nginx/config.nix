@@ -13,4 +13,7 @@ in
   portKeyHttp = cfg.portKeyHttp or "http";
   portKeyHttps = cfg.portKeyHttps or "https";
   dataDirName = cfg.dataDirName or "nginx";
+  defaultSource = cfg.defaultSource or "";
+  probePlans = cfg.resolved.probePlans or cfg.resolved.operationProbes or { };
+  resolvedEndpoints = cfg.resolved.endpoints or { };
 }

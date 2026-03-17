@@ -9,56 +9,37 @@ let
   runtime = config.nixfied.runtime;
   services = config.nixfied.services;
   probeCommands = import ../framework/runtime/helpers/probe-commands.nix { inherit pkgs; };
-  probeRuntime = import ../framework/runtime/helpers/operations-probe-runtime.nix {
+  probePlanRuntime = import ../framework/runtime/helpers/probe-plan-runtime.nix {
     inherit
-      lib
       pkgs
       probeCommands
-      resolveServicePortBase
       ;
+    inherit lib;
     inherit postgresProbePkg;
-    runtimeStride = runtime.slot.stride;
   };
   serviceConfigLib = import ../framework/core/service-config.nix { inherit lib; };
   testIsolationRuntime = import ../framework/runtime/helpers/test-isolation-runtime.nix {
     inherit lib pkgs;
   };
 
-  postgresCfg = services.postgres;
-  nginxCfg = services.nginx;
-  minioCfg = services.minio;
-  rethCfg = services.reth;
-  heliosCfg = services.helios;
+  configuredServiceNames = builtins.attrNames services;
+  serviceNames = builtins.filter (
+    serviceName: builtins.elem serviceName configuredServiceNames
+  ) serviceConfigLib.supportedServiceNames;
 
-  postgresEnabled = postgresCfg.enable;
-  nginxEnabled = nginxCfg.enable;
-  minioEnabled = minioCfg.enable;
-  rethEnabled = rethCfg.enable;
-  heliosEnabled = heliosCfg.enable;
+  serviceEnabledByName = builtins.listToAttrs (
+    map (serviceName: {
+      name = serviceName;
+      value = services.${serviceName}.enable or false;
+    }) serviceNames
+  );
 
-  serviceNames = [
-    "postgres"
-    "nginx"
-    "minio"
-    "reth"
-    "helios"
-  ];
-
-  serviceEnabledByName = {
-    postgres = postgresEnabled;
-    nginx = nginxEnabled;
-    minio = minioEnabled;
-    reth = rethEnabled;
-    helios = heliosEnabled;
-  };
-
-  serviceConfigByName = {
-    postgres = postgresCfg;
-    nginx = nginxCfg;
-    minio = minioCfg;
-    reth = rethCfg;
-    helios = heliosCfg;
-  };
+  serviceConfigByName = builtins.listToAttrs (
+    map (serviceName: {
+      name = serviceName;
+      value = services.${serviceName};
+    }) serviceNames
+  );
 
   resolvedServiceConfigByName = builtins.mapAttrs (
     serviceName: serviceCfg:
@@ -472,21 +453,40 @@ let
 
   probePlan =
     mode: serviceName:
-    resolvedServiceConfigByName.${serviceName}.resolved.operationProbes.${mode} or {
-      count = 0;
-      steps = [ ];
-    };
-  renderProbeStep = probeRuntime.renderProbeStep;
+    resolvedServiceConfigByName.${serviceName}.resolved.probePlans.${mode}
+      or resolvedServiceConfigByName.${serviceName}.resolved.operationProbes.${mode} or {
+        count = 0;
+        steps = [ ];
+        wait = { };
+      };
 
   mkServiceProbeSpec =
     mode: serviceName:
     let
       plan = probePlan mode serviceName;
-      steps = plan.steps or [ ];
     in
     {
-      count = if plan ? count then plan.count else builtins.length steps;
-      body = builtins.concatStringsSep "\n" (map (step: renderProbeStep mode serviceName step) steps);
+      count = if plan ? count then plan.count else builtins.length (plan.steps or [ ]);
+      body = ''
+        service_source="$(resolve_service_source "${serviceName}")"
+        if [ -z "$service_source" ]; then
+          service_source="unspecified"
+        fi
+        ${probePlanRuntime.renderPlanBody {
+          inherit
+            mode
+            serviceName
+            plan
+            ;
+          endpoints = resolvedServiceConfigByName.${serviceName}.resolved.endpoints or { };
+          portExprForEndpoint =
+            endpointName:
+            let
+              portBase = resolveServicePortBase serviceName endpointName;
+            in
+            "$(( ${toString portBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))";
+        }}
+      '';
     };
 
   healthProbeSpecs = builtins.listToAttrs (

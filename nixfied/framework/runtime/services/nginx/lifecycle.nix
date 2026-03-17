@@ -11,6 +11,14 @@
 let
   serviceScripts = import ../../helpers/managed-service-lifecycle.nix { inherit pkgs; };
   probeCommands = import ../../helpers/probe-commands.nix { inherit pkgs; };
+  probePlanRuntime = import ../../helpers/probe-plan-runtime.nix {
+    lib = pkgs.lib;
+    inherit
+      pkgs
+      probeCommands
+      ;
+    postgresProbePkg = if pkgs ? postgresql_16 then pkgs.postgresql_16 else pkgs.postgresql;
+  };
   slotEnvRuntime = import ../../helpers/slot-env-runtime.nix { inherit pkgs; };
   runtimeEvents = import ../../helpers/runtime-events.nix { inherit pkgs project; };
   observability = import ../../helpers/service-observability.nix {
@@ -25,6 +33,33 @@ let
   portVarHttps = slots.portVarName (config.portKeyHttps or "https");
   dataDirName = config.dataDirName or "nginx";
   nginxDirExpr = slots.getServiceDir dataDirName;
+  serviceSource = if (config.defaultSource or "") == "" then "unspecified" else config.defaultSource;
+  healthPlan = config.probePlans.health or { steps = [ ]; };
+  readyPlan =
+    config.probePlans.ready or {
+      steps = [ ];
+      wait = null;
+    };
+  renderPlanBody =
+    mode: plan:
+    probePlanRuntime.renderPlanBody {
+      inherit
+        mode
+        plan
+        ;
+      serviceName = "nginx";
+      endpoints = config.resolvedEndpoints or { };
+      portExprForEndpoint =
+        endpointName:
+        if endpointName == "http" then
+          "$HTTP_PORT"
+        else if endpointName == "https" then
+          "$HTTPS_PORT"
+        else
+          throw "nginx lifecycle: unsupported probe endpoint '${endpointName}'";
+    };
+  healthPlanBody = renderPlanBody "health" healthPlan;
+  readyPlanBody = renderPlanBody "ready" readyPlan;
   emitHelper = observability.mkEmitServiceEventFunction "nginx";
   runtimePrelude = ''
     ${slotEnvRuntime.loadJsonFromCommand {
@@ -165,19 +200,27 @@ let
         "https_port=$HTTPS_PORT"
       ];
     };
-    healthBody = serviceScripts.mkSimpleProbeBody {
-      probeCommand = probeCommands.tcpOpenCmd { portExpr = "$HTTP_PORT"; };
-      successMessage = "nginx healthy http_port=$HTTP_PORT";
-      failureMessage = "nginx unhealthy http_port=$HTTP_PORT";
+    healthBody = serviceScripts.mkPlanProbeBody {
+      planBody = ''
+        service_source=${pkgs.lib.escapeShellArg serviceSource}
+        ${healthPlanBody}
+      '';
+      skipMessage = "SKIP: nginx health check has no probe steps";
     };
-    readyBody = serviceScripts.mkSimpleProbeBody {
-      probeCommand = probeCommands.tcpOpenCmd { portExpr = "$HTTP_PORT"; };
+    readyBody = serviceScripts.mkPlanProbeBody {
+      planBody = ''
+        service_source=${pkgs.lib.escapeShellArg serviceSource}
+        ${readyPlanBody}
+      '';
+      skipMessage = "SKIP: nginx readiness check has no probe steps";
+      wait = readyPlan.wait or null;
+      timeoutMessage = "nginx not ready after ${
+        toString ((readyPlan.wait or { }).timeoutSeconds or 300)
+      } s";
       successBody = ''
         PID=$(cat "$NGINX_PID_FILE" 2>/dev/null || true)
         emit_service_event service_ready ready --pid "$PID" --log-path "$NGINX_LOG_FILE"
       '';
-      successMessage = "nginx ready http_port=$HTTP_PORT pid=\${PID:-unknown}";
-      failureMessage = "nginx not ready http_port=$HTTP_PORT";
     };
     stopWaitAttempts = 40;
     stopWaitInterval = "0.25";

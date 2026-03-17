@@ -10,6 +10,14 @@
 let
   managedServiceLifecycle = import ../../helpers/managed-service-lifecycle.nix { inherit pkgs; };
   probeCommands = import ../../helpers/probe-commands.nix { inherit pkgs; };
+  probePlanRuntime = import ../../helpers/probe-plan-runtime.nix {
+    lib = pkgs.lib;
+    inherit
+      pkgs
+      probeCommands
+      ;
+    postgresProbePkg = if pkgs ? postgresql_16 then pkgs.postgresql_16 else pkgs.postgresql;
+  };
   slotEnvRuntime = import ../../helpers/slot-env-runtime.nix { inherit pkgs; };
   runtimeEvents = import ../../helpers/runtime-events.nix { inherit pkgs project; };
   observability = import ../../helpers/service-observability.nix {
@@ -24,6 +32,33 @@ let
   consolePortVar = slots.portVarName config.portKeyConsole;
   minioDirExpr = slots.getServiceDir config.dataDirName;
   browserValue = if config.browser then "on" else "off";
+  serviceSource = if (config.defaultSource or "") == "" then "unspecified" else config.defaultSource;
+  healthPlan = config.probePlans.health or { steps = [ ]; };
+  readyPlan =
+    config.probePlans.ready or {
+      steps = [ ];
+      wait = null;
+    };
+  renderPlanBody =
+    mode: plan:
+    probePlanRuntime.renderPlanBody {
+      inherit
+        mode
+        plan
+        ;
+      serviceName = "minio";
+      endpoints = config.resolvedEndpoints or { };
+      portExprForEndpoint =
+        endpointName:
+        if endpointName == "api" then
+          "$MINIO_API_PORT"
+        else if endpointName == "console" then
+          "$MINIO_CONSOLE_PORT"
+        else
+          throw "minio lifecycle: unsupported probe endpoint '${endpointName}'";
+    };
+  healthPlanBody = renderPlanBody "health" healthPlan;
+  readyPlanBody = renderPlanBody "ready" readyPlan;
   emitHelper = observability.mkEmitServiceEventFunction "minio";
   runtimePrelude = ''
     ${slotEnvRuntime.loadJsonFromCommand {
@@ -124,19 +159,23 @@ let
         "console_port=$MINIO_CONSOLE_PORT"
       ];
     };
-    healthBody = managedServiceLifecycle.mkSimpleProbeBody {
-      probeCommand = probeCommands.httpGetOkCmd {
-        urlExpr = "http://127.0.0.1:$MINIO_API_PORT/minio/health/live";
-      };
-      successMessage = "minio healthy api_port=$MINIO_API_PORT";
-      failureMessage = "minio unhealthy api_port=$MINIO_API_PORT";
+    healthBody = managedServiceLifecycle.mkPlanProbeBody {
+      planBody = ''
+        service_source=${pkgs.lib.escapeShellArg serviceSource}
+        ${healthPlanBody}
+      '';
+      skipMessage = "SKIP: minio health check has no probe steps";
     };
-    readyBody = managedServiceLifecycle.mkSimpleProbeBody {
-      probeCommand = probeCommands.httpGetOkCmd {
-        urlExpr = "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready";
-      };
-      successMessage = "minio ready api_port=$MINIO_API_PORT";
-      failureMessage = "minio not ready api_port=$MINIO_API_PORT";
+    readyBody = managedServiceLifecycle.mkPlanProbeBody {
+      planBody = ''
+        service_source=${pkgs.lib.escapeShellArg serviceSource}
+        ${readyPlanBody}
+      '';
+      skipMessage = "SKIP: minio readiness check has no probe steps";
+      wait = readyPlan.wait or null;
+      timeoutMessage = "minio not ready after ${
+        toString ((readyPlan.wait or { }).timeoutSeconds or 300)
+      } s";
     };
   };
 

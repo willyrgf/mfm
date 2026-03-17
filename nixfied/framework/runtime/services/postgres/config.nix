@@ -92,6 +92,9 @@ in
     testConf
     pgHbaConf
     ;
+  defaultSource = cfg.defaultSource or "";
+  probePlans = cfg.resolved.probePlans or cfg.resolved.operationProbes or { };
+  resolvedEndpoints = cfg.resolved.endpoints or { };
   devConfFile = mkEnvConfFile "dev" devConf;
   prodConfFile = mkEnvConfFile "prod" prodConf;
   testConfFile = mkEnvConfFile "test" testConf;

@@ -335,10 +335,18 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     local detail_json
     local exit_code
+    local effective_workflow_id
 
     detail_json="$(${pkgs.jq}/bin/jq -cn --arg mode "task" '{mode: $mode}')"
     append_event "$run_id" "$workflow_id" "$task_id" "queued" "$detail_json"
     append_event "$run_id" "$workflow_id" "$task_id" "running" '{}'
+
+    if [ -z "$workflow_id" ]; then
+      effective_workflow_id="task-root"
+    else
+      effective_workflow_id="$workflow_id"
+    fi
+    echo "INFO: task context runId=$run_id workflowId=$effective_workflow_id taskId=$task_id"
 
     if [ -n "$workflow_id" ]; then
       if NIXFIED_TASK_ID="$task_id" NIXFIED_PARENT_WORKFLOW_ID="$workflow_id" execute_task_body "$task_id" "$@"; then

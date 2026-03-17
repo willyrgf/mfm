@@ -152,6 +152,7 @@ let
       hermetic = taskRuntime.hermetic;
       runtimeInputs = (taskRuntime.runtimeInputs or [ ]) ++ (hook.runtimeInputs or [ ]);
       passThroughEnv = (taskRuntime.passThroughEnv or [ ]) ++ (hook.passThroughEnv or [ ]);
+      allowSensitivePassThrough = taskRuntime.allowSensitivePassThrough or false;
       env = (taskRuntime.env or { }) // (hook.env or { });
       umask = taskRuntime.umask or "022";
       locale = taskRuntime.locale or "C.UTF-8";

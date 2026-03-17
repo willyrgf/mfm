@@ -69,6 +69,97 @@ let
       exit 1
     '';
 
+  mkPlanProbeBody =
+    {
+      planBody,
+      skipMessage,
+      successBody ? "",
+      wait ? null,
+      timeoutMessage ? "probe timed out",
+      progressBody ? "",
+      preflightBody ? "",
+    }:
+    if planBody == "" then
+      ''
+        echo "${skipMessage}"
+        exit 0
+      ''
+    else if wait == null || !(wait.enabled or false) then
+      ''
+        ${planBody}
+        ${successBody}
+        exit 0
+      ''
+    else
+      ''
+        ${preflightBody}
+        run_probe_once() {
+          ${planBody}
+        }
+
+        plan_probe_timeout_secs=${toString (wait.timeoutSeconds or 300)}
+        plan_probe_interval_secs=${toString (wait.intervalSeconds or 1)}
+        ${lib.optionalString ((wait.timeoutEnvVar or null) != null) ''
+          plan_probe_timeout_var=${lib.escapeShellArg wait.timeoutEnvVar}
+          plan_probe_timeout_override="$(${pkgs.coreutils}/bin/printenv "$plan_probe_timeout_var" 2>/dev/null || true)"
+          if [ -n "$plan_probe_timeout_override" ]; then
+            plan_probe_timeout_secs="$plan_probe_timeout_override"
+          fi
+        ''}
+        ${lib.optionalString ((wait.intervalEnvVar or null) != null) ''
+          plan_probe_interval_var=${lib.escapeShellArg wait.intervalEnvVar}
+          plan_probe_interval_override="$(${pkgs.coreutils}/bin/printenv "$plan_probe_interval_var" 2>/dev/null || true)"
+          if [ -n "$plan_probe_interval_override" ]; then
+            plan_probe_interval_secs="$plan_probe_interval_override"
+          fi
+        ''}
+
+        case "$plan_probe_timeout_secs" in
+          *[!0-9]*|"")
+            log_error "probe timeout must be an integer seconds value (got '$plan_probe_timeout_secs')"
+            exit 1
+            ;;
+        esac
+
+        case "$plan_probe_interval_secs" in
+          *[!0-9]*|"")
+            log_error "probe interval must be an integer seconds value (got '$plan_probe_interval_secs')"
+            exit 1
+            ;;
+        esac
+
+        start_ts="$(${pkgs.coreutils}/bin/date +%s)"
+        attempt=0
+
+        while true; do
+          attempt=$((attempt + 1))
+
+          set +e
+          ( run_probe_once ) >/dev/null 2>&1
+          probe_rc=$?
+          set -e
+
+          if [ "$probe_rc" -eq 0 ]; then
+            ( run_probe_once )
+            ${successBody}
+            exit 0
+          fi
+
+          ${progressBody}
+
+          now_ts="$(${pkgs.coreutils}/bin/date +%s)"
+          if [ $((now_ts - start_ts)) -ge "$plan_probe_timeout_secs" ]; then
+            set +e
+            ( run_probe_once )
+            set -e
+            log_error "${timeoutMessage}"
+            exit 1
+          fi
+
+          ${pkgs.coreutils}/bin/sleep "$plan_probe_interval_secs"
+        done
+      '';
+
   mkStartupReadinessBody =
     {
       probeCommand,
@@ -430,6 +521,7 @@ in
     mkProcessExitFailureBody
     mkReadyOutcomeBody
     mkSimpleProbeBody
+    mkPlanProbeBody
     mkStartupReadinessBody
     mkWrappedScript
     mkObservedStatusScript

@@ -10,6 +10,14 @@
 let
   managedServiceLifecycle = import ../../helpers/managed-service-lifecycle.nix { inherit pkgs; };
   probeCommands = import ../../helpers/probe-commands.nix { inherit pkgs; };
+  probePlanRuntime = import ../../helpers/probe-plan-runtime.nix {
+    lib = pkgs.lib;
+    inherit
+      pkgs
+      probeCommands
+      ;
+    postgresProbePkg = if pkgs ? postgresql_16 then pkgs.postgresql_16 else pkgs.postgresql;
+  };
   slotEnvRuntime = import ../../helpers/slot-env-runtime.nix { inherit pkgs; };
   runtimeEvents = import ../../helpers/runtime-events.nix { inherit pkgs project; };
   observability = import ../../helpers/service-observability.nix {
@@ -27,6 +35,31 @@ let
   database = config.database or "app";
   testDatabase = config.testDatabase or "${database}_test";
   extensions = config.extensions or [ ];
+  serviceSource = if (config.defaultSource or "") == "" then "unspecified" else config.defaultSource;
+  healthPlan = config.probePlans.health or { steps = [ ]; };
+  readyPlan =
+    config.probePlans.ready or {
+      steps = [ ];
+      wait = null;
+    };
+  renderPlanBody =
+    mode: plan:
+    probePlanRuntime.renderPlanBody {
+      inherit
+        mode
+        plan
+        ;
+      serviceName = "postgres";
+      endpoints = config.resolvedEndpoints or { };
+      portExprForEndpoint =
+        endpointName:
+        if endpointName == "primary" then
+          "$PGPORT"
+        else
+          throw "postgres lifecycle: unsupported probe endpoint '${endpointName}'";
+    };
+  healthPlanBody = renderPlanBody "health" healthPlan;
+  readyPlanBody = renderPlanBody "ready" readyPlan;
   mkWrappedScript =
     {
       name,
@@ -293,44 +326,28 @@ let
 
   health = mkPgScript {
     name = "postgres-health";
-    body = managedServiceLifecycle.mkSimpleProbeBody {
-      probeCommand = probeCommands.pgIsReadyCmd {
-        inherit postgres;
-        portExpr = "$PGPORT";
-      };
-      successMessage = "PostgreSQL healthy port=$PGPORT";
-      failureMessage = "PostgreSQL unhealthy port=$PGPORT";
+    body = managedServiceLifecycle.mkPlanProbeBody {
+      planBody = ''
+        service_source=${pkgs.lib.escapeShellArg serviceSource}
+        ${healthPlanBody}
+      '';
+      skipMessage = "SKIP: postgres health check has no probe steps";
     };
   };
 
   ready = mkPgScript {
     name = "postgres-ready";
-    body = ''
-      if ! ${
-        probeCommands.pgIsReadyCmd {
-          inherit postgres;
-          portExpr = "$PGPORT";
-        }
-      } then
-        log_error "PostgreSQL not ready port=$PGPORT (pg_isready failed)"
-        exit 1
-      fi
-
-      if ${
-        probeCommands.psqlQueryCmd {
-          inherit postgres;
-          portExpr = "$PGPORT";
-          databaseExpr = "postgres";
-          query = "select 1;";
-        }
-      } >/dev/null 2>&1; then
-        log_ok "PostgreSQL ready port=$PGPORT"
-        exit 0
-      fi
-
-      log_error "PostgreSQL not ready port=$PGPORT (query failed)"
-      exit 1
-    '';
+    body = managedServiceLifecycle.mkPlanProbeBody {
+      planBody = ''
+        service_source=${pkgs.lib.escapeShellArg serviceSource}
+        ${readyPlanBody}
+      '';
+      skipMessage = "SKIP: postgres readiness check has no probe steps";
+      wait = readyPlan.wait or null;
+      timeoutMessage = "PostgreSQL not ready after ${
+        toString ((readyPlan.wait or { }).timeoutSeconds or 300)
+      } s";
+    };
   };
 
   readyTest = mkPgScript {

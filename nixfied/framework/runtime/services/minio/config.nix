@@ -17,4 +17,7 @@ in
   portKeyConsole = cfg.portKeyConsole or "minioConsole";
   dataDirName = cfg.dataDirName or "minio";
   browser = cfg.browser or true;
+  defaultSource = cfg.defaultSource or "";
+  probePlans = cfg.resolved.probePlans or cfg.resolved.operationProbes or { };
+  resolvedEndpoints = cfg.resolved.endpoints or { };
 }

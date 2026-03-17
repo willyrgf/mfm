@@ -11,6 +11,14 @@ let
   lib = pkgs.lib;
   managedServiceLifecycle = import ../../helpers/managed-service-lifecycle.nix { inherit pkgs; };
   probeCommands = import ../../helpers/probe-commands.nix { inherit pkgs; };
+  probePlanRuntime = import ../../helpers/probe-plan-runtime.nix {
+    inherit
+      lib
+      pkgs
+      probeCommands
+      ;
+    postgresProbePkg = if pkgs ? postgresql_16 then pkgs.postgresql_16 else pkgs.postgresql;
+  };
   slotEnvRuntime = import ../../helpers/slot-env-runtime.nix { inherit pkgs; };
   runtimeEvents = import ../../helpers/runtime-events.nix { inherit pkgs project; };
   observability = import ../../helpers/service-observability.nix {
@@ -25,6 +33,39 @@ let
   executionRpcPortVar = slots.portVarName config.executionRpcPortKey;
   heliosDirExpr = slots.getServiceDir config.dataDirName;
   extraArgs = lib.escapeShellArgs (config.extraArgs or [ ]);
+  serviceSource = if (config.defaultSource or "") == "" then "unspecified" else config.defaultSource;
+  healthPlan = config.probePlans.health or { steps = [ ]; };
+  readyPlan =
+    config.probePlans.ready or {
+      steps = [ ];
+      wait = null;
+    };
+  renderPlanBody =
+    mode: plan:
+    probePlanRuntime.renderPlanBody {
+      inherit
+        mode
+        plan
+        ;
+      serviceName = "helios";
+      endpoints = config.resolvedEndpoints or { };
+      portExprForEndpoint =
+        endpointName:
+        if endpointName == "rpc" then
+          "$HELIOS_RPC_PORT"
+        else if endpointName == "execution" then
+          "$HELIOS_EXECUTION_PORT"
+        else
+          throw "helios lifecycle: unsupported probe endpoint '${endpointName}'";
+    };
+  healthPlanBody = renderPlanBody "health" healthPlan;
+  readyPlanBody = renderPlanBody "ready" readyPlan;
+  readyWait =
+    readyPlan.wait or {
+      enabled = false;
+      timeoutSeconds = 300;
+      intervalSeconds = 1;
+    };
 
   runtimePrelude = ''
     ${slotEnvRuntime.loadJsonFromCommand {
@@ -285,118 +326,110 @@ let
         "network=$HELIOS_NETWORK"
       ];
     };
-    healthBody = managedServiceLifecycle.mkSimpleProbeBody {
-      probeCommand = healthCheck;
-      successMessage = "helios healthy rpc_port=$HELIOS_RPC_PORT";
-      failureMessage = "helios unhealthy rpc_port=$HELIOS_RPC_PORT";
+    healthBody = managedServiceLifecycle.mkPlanProbeBody {
+      planBody = ''
+        service_source=${lib.escapeShellArg serviceSource}
+        ${healthPlanBody}
+      '';
+      skipMessage = "SKIP: helios health check has no probe steps";
     };
-    readyBody = ''
-      TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-300}"
-      INTERVAL_SECS="''${HELIOS_READY_INTERVAL_SECS:-1}"
+    readyBody =
+      if !(readyWait.enabled or false) then
+        managedServiceLifecycle.mkPlanProbeBody {
+          planBody = ''
+            service_source=${lib.escapeShellArg serviceSource}
+            ${readyPlanBody}
+          '';
+          skipMessage = "SKIP: helios readiness check has no probe steps";
+        }
+      else
+        ''
+          TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-${toString (readyWait.timeoutSeconds or 300)}}"
+          INTERVAL_SECS="''${HELIOS_READY_INTERVAL_SECS:-${toString (readyWait.intervalSeconds or 1)}}"
 
-      case "$TIMEOUT_SECS" in
-        *[!0-9]*|"")
-          log_error "HELIOS_READY_TIMEOUT_SECS must be an integer seconds value (got '$TIMEOUT_SECS')"
-          exit 1
-          ;;
-      esac
+          case "$TIMEOUT_SECS" in
+            *[!0-9]*|"")
+              log_error "HELIOS_READY_TIMEOUT_SECS must be an integer seconds value (got '$TIMEOUT_SECS')"
+              exit 1
+              ;;
+          esac
 
-      start_ts="$(${pkgs.coreutils}/bin/date +%s)"
+          start_ts="$(${pkgs.coreutils}/bin/date +%s)"
 
-      # HELIOS_START runs asynchronously in tests/helpers; wait for pid file creation
-      # so readiness checks do not fail before startup has finished writing runtime state.
-      while true; do
-        PID=""
-        PID_STATE="missing"
-        if [ -f "$HELIOS_PID_FILE" ]; then
-          PID=$(cat "$HELIOS_PID_FILE" 2>/dev/null || true)
-          if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-            break
-          fi
-          PID_STATE="stale"
-        fi
+          # HELIOS_START runs asynchronously in tests/helpers; wait for pid file creation
+          # so readiness checks do not fail before startup has finished writing runtime state.
+          while true; do
+            PID=""
+            PID_STATE="missing"
+            if [ -f "$HELIOS_PID_FILE" ]; then
+              PID=$(cat "$HELIOS_PID_FILE" 2>/dev/null || true)
+              if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+                break
+              fi
+              PID_STATE="stale"
+            fi
 
-        now_ts="$(${pkgs.coreutils}/bin/date +%s)"
-        if [ $((now_ts - start_ts)) -ge "$TIMEOUT_SECS" ]; then
-          if [ "$PID_STATE" = "stale" ]; then
-            log_error "helios not running (stale pid file) pid_file=$HELIOS_PID_FILE pid=''${PID:-unknown}"
-          else
-            log_error "helios not running (missing pid file) pid_file=$HELIOS_PID_FILE"
-          fi
-          exit 1
-        fi
+            now_ts="$(${pkgs.coreutils}/bin/date +%s)"
+            if [ $((now_ts - start_ts)) -ge "$TIMEOUT_SECS" ]; then
+              if [ "$PID_STATE" = "stale" ]; then
+                log_error "helios not running (stale pid file) pid_file=$HELIOS_PID_FILE pid=''${PID:-unknown}"
+              else
+                log_error "helios not running (missing pid file) pid_file=$HELIOS_PID_FILE"
+              fi
+              exit 1
+            fi
 
-        ${pkgs.coreutils}/bin/sleep "$INTERVAL_SECS"
-      done
+            ${pkgs.coreutils}/bin/sleep "$INTERVAL_SECS"
+          done
 
-      attempt=0
+          attempt=0
 
-      while true; do
-        attempt=$((attempt + 1))
+          while true; do
+            attempt=$((attempt + 1))
 
-        RESP="$(${
-          probeCommands.jsonRpcRequestCmd {
-            urlExpr = heliosRpcUrlExpr;
-            method = "eth_blockNumber";
-          }
-        } 2>/dev/null || true)"
+            set +e
+            (
+              service_source=${lib.escapeShellArg serviceSource}
+              ${readyPlanBody}
+            ) >/dev/null 2>&1
+            probe_rc=$?
+            set -e
 
-        if [ -n "$RESP" ] && echo "$RESP" | ${pkgs.jq}/bin/jq -e '.result | strings' >/dev/null 2>&1; then
-          log_ok "helios ready rpc_port=$HELIOS_RPC_PORT"
-          exit 0
-        fi
+            if [ "$probe_rc" -eq 0 ]; then
+              service_source=${lib.escapeShellArg serviceSource}
+              ${readyPlanBody}
+              exit 0
+            fi
 
-        if [ "$HELIOS_NETWORK" = "local" ]; then
-          if ${healthCheck}
-          then
-            log_ok "helios ready rpc_port=$HELIOS_RPC_PORT mode=local_chainid_fallback"
-            exit 0
-          fi
-        fi
+            if [ $((attempt % 10)) -eq 0 ]; then
+              ${runtimeEvents.emitEvent} \
+                --event-type readiness_progress \
+                --service helios \
+                --state waiting \
+                --slot "$SLOT" \
+                --env "$ENV" \
+                --pid "$PID" \
+                --log-path "$HELIOS_LOG_FILE" \
+                --wait-reason "helios_ready_attempt=$attempt" >/dev/null 2>&1 || true
+              log_info "helios not ready yet attempt=$attempt"
+            fi
 
-        if [ $((attempt % 10)) -eq 0 ]; then
-          ${runtimeEvents.emitEvent} \
-            --event-type readiness_progress \
-            --service helios \
-            --state waiting \
-            --slot "$SLOT" \
-            --env "$ENV" \
-            --pid "$PID" \
-            --log-path "$HELIOS_LOG_FILE" \
-            --wait-reason "helios_ready_attempt=$attempt" >/dev/null 2>&1 || true
+            now_ts="$(${pkgs.coreutils}/bin/date +%s)"
+            if [ $((now_ts - start_ts)) -ge "$TIMEOUT_SECS" ]; then
+              set +e
+              (
+                service_source=${lib.escapeShellArg serviceSource}
+                ${readyPlanBody}
+              )
+              set -e
+              log_error "helios not ready after $TIMEOUT_SECS s"
+              log_hint "set HELIOS_CHECKPOINT and HELIOS_CONSENSUS_RPC_URL explicitly for mainnet."
+              exit 1
+            fi
 
-          ERR_MSG=""
-          if [ -n "$RESP" ]; then
-            ERR_MSG="$(echo "$RESP" | ${pkgs.jq}/bin/jq -r '.error.message // empty' 2>/dev/null || true)"
-          fi
-
-          SYNC_STATUS="$(${
-            probeCommands.jsonRpcFieldCmd {
-              urlExpr = heliosRpcUrlExpr;
-              method = "eth_syncing";
-              jqExpr = ".result | if type == \"object\" then \"\\(.currentBlock)/\\(.highestBlock)\" else \"not_syncing\" end";
-            }
-          } 2>/dev/null || true)"
-
-          if [ -n "''${ERR_MSG:-}" ] && [ -n "''${SYNC_STATUS:-}" ]; then
-            log_info "helios not ready yet: $ERR_MSG (eth_syncing=$SYNC_STATUS)"
-          elif [ -n "''${ERR_MSG:-}" ]; then
-            log_info "helios not ready yet: $ERR_MSG"
-          elif [ -n "''${SYNC_STATUS:-}" ]; then
-            log_info "helios eth_syncing=$SYNC_STATUS"
-          fi
-        fi
-
-        now_ts="$(${pkgs.coreutils}/bin/date +%s)"
-        if [ $((now_ts - start_ts)) -ge "$TIMEOUT_SECS" ]; then
-          log_error "helios not ready after $TIMEOUT_SECS s (eth_blockNumber still failing) rpc_port=$HELIOS_RPC_PORT"
-          log_hint "set HELIOS_CHECKPOINT and HELIOS_CONSENSUS_RPC_URL explicitly for mainnet."
-          exit 1
-        fi
-
-        ${pkgs.coreutils}/bin/sleep "$INTERVAL_SECS"
-      done
-    '';
+            ${pkgs.coreutils}/bin/sleep "$INTERVAL_SECS"
+          done
+        '';
     stopWaitAttempts = 40;
     stopWaitInterval = "0.25";
   };

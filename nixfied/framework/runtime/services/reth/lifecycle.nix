@@ -11,6 +11,14 @@ let
   lib = pkgs.lib;
   managedServiceLifecycle = import ../../helpers/managed-service-lifecycle.nix { inherit pkgs; };
   probeCommands = import ../../helpers/probe-commands.nix { inherit pkgs; };
+  probePlanRuntime = import ../../helpers/probe-plan-runtime.nix {
+    inherit
+      lib
+      pkgs
+      probeCommands
+      ;
+    postgresProbePkg = if pkgs ? postgresql_16 then pkgs.postgresql_16 else pkgs.postgresql;
+  };
   slotEnvRuntime = import ../../helpers/slot-env-runtime.nix { inherit pkgs; };
   runtimeEvents = import ../../helpers/runtime-events.nix { inherit pkgs project; };
   observability = import ../../helpers/service-observability.nix {
@@ -27,6 +35,35 @@ let
   rethDirExpr = slots.getServiceDir config.dataDirName;
   useDevMode = config.devMode or false;
   extraArgs = lib.escapeShellArgs (config.extraArgs or [ ]);
+  serviceSource = if (config.defaultSource or "") == "" then "unspecified" else config.defaultSource;
+  healthPlan = config.probePlans.health or { steps = [ ]; };
+  readyPlan =
+    config.probePlans.ready or {
+      steps = [ ];
+      wait = null;
+    };
+  renderPlanBody =
+    mode: plan:
+    probePlanRuntime.renderPlanBody {
+      inherit
+        mode
+        plan
+        ;
+      serviceName = "reth";
+      endpoints = config.resolvedEndpoints or { };
+      portExprForEndpoint =
+        endpointName:
+        if endpointName == "http" then
+          "$RETH_HTTP_PORT"
+        else if endpointName == "ws" then
+          "$RETH_WS_PORT"
+        else if endpointName == "auth" then
+          "$RETH_AUTH_PORT"
+        else
+          throw "reth lifecycle: unsupported probe endpoint '${endpointName}'";
+    };
+  healthPlanBody = renderPlanBody "health" healthPlan;
+  readyPlanBody = renderPlanBody "ready" readyPlan;
   emitHelper = observability.mkEmitServiceEventFunction "reth";
 
   runtimePrelude = ''
@@ -176,15 +213,23 @@ let
         "network=$RETH_NETWORK"
       ];
     };
-    healthBody = managedServiceLifecycle.mkSimpleProbeBody {
-      probeCommand = healthCheck;
-      successMessage = "reth healthy http_port=$RETH_HTTP_PORT";
-      failureMessage = "reth unhealthy http_port=$RETH_HTTP_PORT";
+    healthBody = managedServiceLifecycle.mkPlanProbeBody {
+      planBody = ''
+        service_source=${lib.escapeShellArg serviceSource}
+        ${healthPlanBody}
+      '';
+      skipMessage = "SKIP: reth health check has no probe steps";
     };
-    readyBody = managedServiceLifecycle.mkSimpleProbeBody {
-      probeCommand = healthCheck;
-      successMessage = "reth ready http_port=$RETH_HTTP_PORT";
-      failureMessage = "reth not ready http_port=$RETH_HTTP_PORT";
+    readyBody = managedServiceLifecycle.mkPlanProbeBody {
+      planBody = ''
+        service_source=${lib.escapeShellArg serviceSource}
+        ${readyPlanBody}
+      '';
+      skipMessage = "SKIP: reth readiness check has no probe steps";
+      wait = readyPlan.wait or null;
+      timeoutMessage = "reth not ready after ${
+        toString ((readyPlan.wait or { }).timeoutSeconds or 300)
+      } s";
     };
     stopWaitAttempts = 40;
     stopWaitInterval = "0.25";
