@@ -10,6 +10,9 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+        mkShellApp = import ./nixfied/framework/core/mk-shell-app.nix {
+          inherit pkgs;
+        };
         nixfiedLib = import ./nixfied/framework/core/default.nix {
           inherit
             pkgs
@@ -26,11 +29,23 @@
           extraModules = [ ];
           inherit frameworkSourceRevision;
         };
+        snapshotAppName = "mfm::portfolio::snapshot";
+        snapshotAppNameRaw = "mfm-portfolio-snapshot-internal";
       in {
-        apps = compiled.apps;
+        apps =
+          compiled.apps
+          // {
+            "${snapshotAppNameRaw}" = compiled.apps."${snapshotAppName}";
+            "${snapshotAppName}" = mkShellApp {
+              appName = snapshotAppName;
+              body = ''
+                exec ${pkgs.nix}/bin/nix \
+                  run --impure --accept-flake-config ${toString ./.}#${snapshotAppNameRaw} -- "$@"
+              '';
+            };
+          };
         packages = compiled.packages;
         checks = compiled.checks;
         devShells = compiled.devShells;
       });
 }
-

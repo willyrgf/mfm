@@ -336,36 +336,15 @@ let
   };
   resolvePackagedMfmCliShell = ''
     resolve_packaged_mfm_cli_binary() {
-      local flake_root=""
-      local flake_ref=""
-      local out_path=""
-      local bin_path=""
-
-      if [ -n "''${NIXFIED_CALLER_PWD:-}" ] && [ -d "''${NIXFIED_CALLER_PWD:-}" ]; then
-        flake_root="$(cd "$NIXFIED_CALLER_PWD" && pwd -P)"
-      else
-        flake_root="$(pwd -P)"
+      local packaged_mfm_cli_binary='${conf.packages."mfm-cli"}/bin/mfm_cli'
+      if [ -x "$packaged_mfm_cli_binary" ]; then
+        printf '%s' "$packaged_mfm_cli_binary"
+        return 0
       fi
 
-      flake_ref="path:$flake_root"
-      echo "INFO: resolving packaged mfm-cli from $flake_ref#mfm-cli" >&2
-      echo "INFO: packaged mfm-cli resolution may trigger a local nix build; build logs will stream if realization is needed" >&2
-
-      if ! out_path="$(${pkgs.nix}/bin/nix build -L --no-link --print-out-paths "$flake_ref#mfm-cli")"; then
-        echo "ERROR: failed to resolve packaged mfm-cli from $flake_ref#mfm-cli" >&2
-        return 1
-      fi
-
-      out_path="$(printf '%s\n' "$out_path" | tail -n1)"
-      bin_path="$out_path/bin/mfm_cli"
-      if [ -z "$out_path" ] || [ ! -x "$bin_path" ]; then
-        echo "ERROR: packaged mfm_cli binary missing after build path=$out_path" >&2
-        return 1
-      fi
-
-      echo "INFO: packaged mfm-cli ready path=$bin_path" >&2
-
-      printf '%s' "$bin_path"
+      echo "ERROR: packaged mfm_cli binary not present at packaged mfm-cli path=$packaged_mfm_cli_binary" >&2
+      echo "INFO: ensure '#mfm-cli' is built in the current flake before running snapshot workflow" >&2
+      return 1
     }
   '';
 
@@ -1567,7 +1546,7 @@ in
             kind = "internal";
             summary = "Run the packaged snapshot CLI";
             description = "Internal task that runs the packaged mfm_cli binary and writes the raw JSON result file.";
-            runtimeInputs = leanRuntimeInputs;
+            runtimeInputs = leanRuntimeInputs ++ [ conf.packages."mfm-cli" ];
             allowUnknownArgs = false;
             command = ''
               set -euo pipefail
@@ -1825,7 +1804,7 @@ in
             "nix run .#mfm_cli -- --help"
             "nix run .#mfm_cli -- keystore list"
           ];
-          runtimeInputs = leanRuntimeInputs;
+          runtimeInputs = leanRuntimeInputs ++ [ conf.packages."mfm-cli" ];
           argParser = "passthrough";
           allowUnknownArgs = true;
           command = ''
@@ -2867,7 +2846,7 @@ in
               "ci"
               "mainnet"
             ];
-            runtimeInputs = leanRuntimeInputs;
+            runtimeInputs = leanRuntimeInputs ++ [ conf.packages."mfm-cli" ];
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
