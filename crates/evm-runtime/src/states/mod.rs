@@ -8,5 +8,7 @@
 pub mod price;
 /// Reusable EVM read/query states.
 pub mod read;
+/// Reusable rpc.control source preparation helpers.
+pub mod rpc_control;
 /// Reusable EVM deploy/configure/validate states.
 pub mod write;

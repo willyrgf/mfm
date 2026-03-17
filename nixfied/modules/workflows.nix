@@ -40,6 +40,10 @@ let
         type = t.listOf t.str;
         default = [ ];
       };
+      serviceName = lib.mkOption {
+        type = t.str;
+        default = "";
+      };
     };
   };
 in

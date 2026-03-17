@@ -45,8 +45,10 @@ use mfm_machine::events::{
     event_envelopes_from_stream_records, Event, EventEnvelope, KernelEvent, RunStatus,
 };
 use mfm_machine::exec_transport::ExecProgramTransportFactory;
-use mfm_machine::ids::{ArtifactId, ContextKey, OpId, RunId};
-use mfm_machine::live_io::LiveIoTransportFactory;
+use mfm_machine::ids::{ArtifactId, ContextKey, OpId, RunId, StateId};
+use mfm_machine::live_io::{
+    LiveIoEnv, LiveIoTransportFactory,
+};
 use mfm_machine::live_io_registry::{HashMapTransportRegistry, TransportRegistry};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
@@ -81,7 +83,7 @@ use mfm_transports_local_evm::LocalEvmIoTransportFactory;
 use mfm_transports_local_fs::LocalFsIoTransportFactory;
 use mfm_transports_local_keystore::LocalKeystoreIoTransportFactory;
 use mfm_transports_proof::ProofIoTransportFactory;
-use mfm_transports_rpc_control::{RpcControlConfigError, RpcControlTransportFactory};
+use mfm_transports_rpc_control::RpcControlTransportFactory;
 
 const ENV_ARTIFACT_BACKEND: &str = "MFM_ARTIFACT_BACKEND";
 const ENV_ARTIFACT_ROOT: &str = "MFM_ARTIFACT_ROOT";
@@ -872,25 +874,6 @@ impl AppServices {
         &self,
         req: PortfolioSnapshotRequest,
     ) -> Result<PortfolioSnapshotResponse, AppError> {
-        // Fail fast for the higher-level feature surface when RPC is not configured.
-        //
-        // Note: the underlying op can still be started via `run.start` and may end in `phase=failed`,
-        // but the feature is intended to behave like a request-level RPC dependency.
-        let rpc_control_factory = RpcControlTransportFactory::from_env();
-        if let Some(err) = rpc_control_factory.config_error() {
-            let (code, message) = match err {
-                RpcControlConfigError::NoSources => (
-                    "rpc_control_no_sources",
-                    "rpc.control bootstrap sources are not configured".to_string(),
-                ),
-                other => (
-                    "rpc_control_config_invalid",
-                    format!("invalid rpc.control bootstrap config: {other}"),
-                ),
-            };
-            return Err(AppError::new(ErrorClass::BadGateway, code, message));
-        }
-
         const OP_ID: &str = "portfolio_tracker";
         const OP_VERSION: &str = "v1";
 

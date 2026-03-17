@@ -74,6 +74,31 @@ Service configuration and selectors:
 - `nix run .#ready -- --service <name|all> [--source <key>]`
 - See `docs/modules/README.md` for service-specific configuration details.
 
+Service skip controls:
+
+- Set any service to skip at runtime with `SKIP_<SERVICE_NAME>=...`.
+- Accepted truthy values: `1`, `true`, `TRUE`, `yes`, `on`.
+- Service names are normalized with:
+  - upper-casing
+  - non-alphanumerics converted to `_`
+- A true skip suppresses service build/setup/ready/health and prevents service-specific operations work from running.
+
+Examples:
+
+```bash
+# Skip API service during workflow execution.
+SKIP_API=true nix run .#run-workflow -- workflow.ci.full
+
+# Skip cache service in a single task run.
+SKIP_CACHE=yes nix run .#run-task -- <task-id>
+
+# Skip health probes for Redis when checking all services.
+SKIP_REDIS=on nix run .#health -- --service all
+```
+
+If a workflow unit depends on a skipped service unit, the workflow exits non-zero and dependents are marked skipped as dependency failures.
+Covered by `tests/framework/skip-service-smoke`.
+
 Ephemeral execution defaults (configured in `nixfied/project/conf.nix`):
 
 - `ephemeral.copyMode = "git-files"`: copies tracked + non-ignored untracked files.

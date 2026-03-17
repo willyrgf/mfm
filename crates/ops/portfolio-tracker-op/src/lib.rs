@@ -30,6 +30,7 @@ use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
+use mfm_evm_runtime::states::rpc_control::{PrepareSourcesState, RpcControlNetworkRoute};
 use mfm_state_aave_v3::portfolio::model::{
     is_aave_protocol_position, validate_aave_portfolio_config,
 };
@@ -225,7 +226,30 @@ impl Operation for PortfolioTrackerOp {
         let mut states = Vec::new();
         let mut edges = Vec::new();
 
+        let rpc_sources = cfg
+            .portfolio
+            .networks
+            .iter()
+            .map(|network| RpcControlNetworkRoute {
+                network_id: network.network_id.clone(),
+                control_scope: network.control_scope.clone(),
+            })
+            .collect();
+
+        let prepare_sources_sid = StateId::must_new(format!("{}.prepare_sources", op_path.0));
+        states.push(StateNode {
+            id: prepare_sources_sid.clone(),
+            state: Arc::new(PrepareSourcesState {
+                state_id: prepare_sources_sid.clone(),
+                networks: rpc_sources,
+            }),
+        });
+
         let pin_networks_sid = StateId::must_new(format!("{}.pin_networks", op_path.0));
+        edges.push(DependencyEdge {
+            from: prepare_sources_sid,
+            to: pin_networks_sid.clone(),
+        });
         states.push(StateNode {
             id: pin_networks_sid.clone(),
             state: Arc::new(PinPortfolioNetworksState {

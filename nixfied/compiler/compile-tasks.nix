@@ -43,6 +43,7 @@ let
         ;
 
       kind = raw.kind;
+      serviceName = raw.serviceName;
       summary = raw.summary;
       description = raw.description;
       tags = raw.tags;

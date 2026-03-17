@@ -23,7 +23,7 @@ Use `docs/redesign.md` for normative semantics and invariants.
 Current snapshot:
 
 - Built-in registered ops: `14`
-- Shared production `State` impls: `32`
+- Shared production `State` impls: `33`
 - Intentional op-local production `State` impls: `3`
 
 ## Built-In Ops
@@ -43,7 +43,7 @@ The built-in app bundle registers these ops in `DefaultOperationPlugin::register
 | `evm_configure` | `v1` | `crates/ops/evm-write-op` | Execute post-deploy runtime calls | `EvmConfigureState` | `mfm run start`, feature `run.start` |
 | `evm_validate` | `v1` | `crates/ops/evm-write-op` | Enforce read/event/client assertions | `EvmValidateState` | `mfm run start`, feature `run.start` |
 | `evm_deploy_configure_validate` | `v1` | `crates/ops/evm-deploy-configure-validate-op` | Compose deploy/configure/validate into one op boundary | Child ops `evm_deploy`, `evm_configure`, `evm_validate` | `mfm run pipeline deploy-configure-validate`, feature `pipeline.deploy_configure_validate.start`, feature `run.start` |
-| `portfolio_tracker` | `v1` | `crates/ops/portfolio-tracker-op` | Produce a canonical replayable multi-network portfolio snapshot and typed report | `PinPortfolioNetworksState`, `ResolveWalletsState`, `ReadDirectPricesState`, `CollectObservationsState`, `CollectAaveObservationsState`, `MergeObservationsState`, `WritePortfolioSnapshotState`, `WritePortfolioReportState` | `mfm portfolio snapshot`, feature `portfolio.snapshot`, feature `run.start` |
+| `portfolio_tracker` | `v1` | `crates/ops/portfolio-tracker-op` | Produce a canonical replayable multi-network portfolio snapshot and typed report | `PrepareSourcesState`, `PinPortfolioNetworksState`, `ResolveWalletsState`, `ReadDirectPricesState`, `CollectObservationsState`, `CollectAaveObservationsState`, `MergeObservationsState`, `WritePortfolioSnapshotState`, `WritePortfolioReportState` | `mfm portfolio snapshot`, feature `portfolio.snapshot`, feature `run.start` |
 | `nix_app` | `v1` | `crates/ops/nix-app-op` | Run a nix-resolved program via the exec namespace | `NixExecState` | `mfm run start`, feature `run.start` |
 | `aave_v3_origin_adapt_deploy` | `v1` | `crates/ops/aave-v3-origin-adapt-op` | Adapt Origin deploy output into an Aave V3 deploy manifest | `AdaptOriginDeployOutputState` | `mfm run start`, feature `run.start` |
 
@@ -69,6 +69,7 @@ runtime behavior reused by thin ops.
 | `crates/states/keystore/src/states/admin.rs` | `KeystoreImportState`, `KeystoreListState`, `KeystoreDeleteState` | Reusable keystore administration flows | `keystore_import`, `keystore_list`, `keystore_delete` |
 | `crates/states/keystore/src/states/tx.rs` | `KeystoreTxSignState` | Reusable local keystore signing flow | `keystore_tx_sign` |
 | `crates/evm-runtime/src/states/read.rs` | `ReadHexStringState`, `ReadU256HexState`, `EthCallState`, `ReadU64HexState`, `NativeBalanceState`, `TokenBalanceState` | Reusable control-plane-backed chain read/query states | `evm_read`, `portfolio_tracker` |
+| `crates/evm-runtime/src/states/rpc_control.rs` | `PrepareSourcesState` | Reusable `rpc.control` source preparation and responsiveness preflight | `portfolio_tracker` |
 | `crates/evm-runtime/src/states/price.rs` | `read_evm_oracle_unit_price` | Reusable control-plane-backed EVM oracle price reads for valuation source execution | `portfolio_tracker` |
 | `crates/states/wallet/src/states.rs` | `ResolveWalletsState` | Reusable wallet-resolution flow for canonical portfolio execution | `portfolio_tracker` |
 | `crates/states/symbol/src/states.rs` | `ReadDirectPricesState`, `CollectObservationsState`, `MergeObservationsState` | Reusable valuation-source execution plus canonical observation normalization/merge | `portfolio_tracker` |

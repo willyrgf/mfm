@@ -171,6 +171,10 @@ in
               type = t.str;
               default = name;
             };
+            serviceName = lib.mkOption {
+              type = t.str;
+              default = "";
+            };
             description = lib.mkOption {
               type = t.str;
               default = "";

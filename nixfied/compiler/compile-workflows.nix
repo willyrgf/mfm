@@ -25,6 +25,7 @@ let
     locks = listUtils.uniquePreserveOrder unit.locks;
     when = unit.when;
     skipIfMissingEnv = listUtils.uniquePreserveOrder unit.skipIfMissingEnv;
+    serviceName = unit.serviceName or "";
   };
 
   unitsFromStages =
@@ -53,6 +54,7 @@ let
                   envPresent = [ ];
                 };
                 skipIfMissingEnv = [ ];
+                serviceName = "";
               };
             }) stageUnits
           );
@@ -194,6 +196,7 @@ let
       unitName: unit:
       let
         task = tasks.${unit.taskId};
+        taskServiceName = task.serviceName or "";
         taskScheduling = task.scheduling;
         taskDeps = task.deps;
         taskProduces = task.produces;
@@ -212,6 +215,7 @@ let
       // {
         needs = listUtils.uniquePreserveOrder (unit.needs ++ hardNeeds ++ softNeeds);
         locks = listUtils.uniquePreserveOrder (unit.locks ++ (taskScheduling.locks or [ ]));
+        serviceName = if unit.serviceName != "" then unit.serviceName else taskServiceName;
         priority = taskScheduling.priority or 100;
         scheduling = {
           maxAttempts = taskScheduling.maxAttempts or 1;
@@ -293,6 +297,7 @@ let
                 locks = unit.locks;
                 when = unit.when;
                 skipIfMissingEnv = unit.skipIfMissingEnv;
+                serviceName = unit.serviceName;
                 priority = unit.priority;
                 scheduling = unit.scheduling;
                 deps = unit.deps;

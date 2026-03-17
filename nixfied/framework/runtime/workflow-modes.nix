@@ -235,6 +235,7 @@ let
           allowUnknown = if argsContract.allowUnknown or false then "true" else "false";
           hasPositional = if builtins.any (spec: spec.kind == "positional") specs then "true" else "false";
           hookCount = toString (builtins.length preHookIds + builtins.length postHookIds);
+          serviceName = task.serviceName or "";
           runnerCommand = if (task.runner.command or null) == null then "" else task.runner.command;
           runnerPackage = if packagePath == null then "" else packagePath;
           runtimeJson = builtins.toJSON (mergeTaskRuntimeWithRunnerPackage task);
@@ -774,6 +775,17 @@ in
       local task_id="$1"
       case "$task_id" in
   ${renderCaseReturn (entry: entry.value.runnerWorkflowId) taskCases}
+        *)
+          printf '%s' ""
+          return 0
+          ;;
+      esac
+    }
+
+    task_service_name() {
+      local task_id="$1"
+      case "$task_id" in
+  ${renderCaseReturn (entry: entry.value.serviceName) taskCases}
         *)
           printf '%s' ""
           return 0

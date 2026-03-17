@@ -403,6 +403,7 @@ fn expand_uses_canonical_multi_network_graph() {
     assert_eq!(
         ids,
         vec![
+            "portfolio_tracker.main.prepare_sources",
             "portfolio_tracker.main.pin_networks",
             "portfolio_tracker.main.resolve_wallets",
             "portfolio_tracker.main.read_direct_prices",
@@ -422,6 +423,10 @@ fn expand_uses_canonical_multi_network_graph() {
     assert!(edges.contains(&(
         "portfolio_tracker.main.pin_networks".to_string(),
         "portfolio_tracker.main.resolve_wallets".to_string()
+    )));
+    assert!(edges.contains(&(
+        "portfolio_tracker.main.prepare_sources".to_string(),
+        "portfolio_tracker.main.pin_networks".to_string()
     )));
     assert!(edges.contains(&(
         "portfolio_tracker.main.pin_networks".to_string(),

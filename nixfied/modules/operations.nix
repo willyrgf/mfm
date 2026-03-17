@@ -103,6 +103,15 @@ let
       envName: "    ${envName}) env_offset=${toString (runtime.env.offsets.${envName} or 0)} ;;"
     ) envNames
   );
+  serviceSkipEnvVars = lib.unique (
+    builtins.map (
+      serviceName:
+      let
+        safeServiceName = lib.toUpper (lib.replaceStrings [ "." "-" ] [ "_" "_" ] serviceName);
+      in
+      "SKIP_${safeServiceName}"
+    ) serviceNames
+  );
 
   slotEnvPrelude = ''
         slot_var=${lib.escapeShellArg runtime.slot.var}
@@ -330,6 +339,63 @@ let
           return 1
         }
 
+        service_skip_env_var_name() {
+          local service_name="$1"
+          local safe_service_name
+          if [ -z "$service_name" ]; then
+            printf '%s' ""
+            return 0
+          fi
+
+          safe_service_name="$(printf '%s' "$service_name" | ${pkgs.coreutils}/bin/tr '[:lower:]' '[:upper:]' | ${pkgs.coreutils}/bin/tr -cs 'A-Z0-9_' '_')"
+          if [ -z "$safe_service_name" ]; then
+            printf '%s' ""
+            return 0
+          fi
+          printf 'SKIP_%s' "$safe_service_name"
+        }
+
+        is_truthy_skip_value() {
+          local raw_value="$1"
+          local normalized_value
+
+          normalized_value="$(printf '%s' "$raw_value" | ${pkgs.coreutils}/bin/tr '[:upper:]' '[:lower:]' | ${pkgs.coreutils}/bin/tr -d '[:space:]')"
+          case "$normalized_value" in
+            1|true|yes|on)
+              return 0
+              ;;
+            *)
+              return 1
+              ;;
+          esac
+        }
+
+        service_is_skipped() {
+          local service_name="$1"
+          local env_name
+          local env_value
+
+          env_name="$(service_skip_env_var_name "$service_name")"
+          if [ -z "$env_name" ]; then
+            return 1
+          fi
+          env_value="''${!env_name:-}"
+          is_truthy_skip_value "$env_value"
+        }
+
+        filter_skipped_services() {
+          local -a filtered_services=()
+          local candidate_service
+
+          for candidate_service in "''${selected_services[@]}"; do
+            if service_is_skipped "$candidate_service"; then
+              continue
+            fi
+            filtered_services+=("$candidate_service")
+          done
+          selected_services=("''${filtered_services[@]}")
+        }
+
         source_kind_disallowed() {
           local source_kind="$1"
           shift
@@ -387,6 +453,7 @@ let
           fi
           selected_services=("$target_service")
         fi
+        filter_skipped_services
 
         if [ -n "$target_source" ]; then
           if [ "$target_service" = "all" ]; then
@@ -562,7 +629,8 @@ let
         passThroughEnv = [
           runtime.env.var
           runtime.slot.var
-        ];
+        ]
+        ++ serviceSkipEnvVars;
         env = { };
         umask = "022";
         locale = "C.UTF-8";
