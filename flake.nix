@@ -32,12 +32,11 @@
         snapshotAppName = "mfm::portfolio::snapshot";
         snapshotAppNameRaw = "mfm-portfolio-snapshot-internal";
         ciAppName = "ci";
-        ciAppNameRaw = "mfm-ci-internal";
+        ciAppNameRaw = "ci-internal";
       in {
         apps =
           compiled.apps
           // {
-            "${snapshotAppNameRaw}" = compiled.apps."${snapshotAppName}";
             "${snapshotAppName}" = mkShellApp {
               appName = snapshotAppName;
               body = ''
@@ -46,7 +45,6 @@
               '';
             };
 
-            "${ciAppNameRaw}" = compiled.apps."${ciAppName}";
             "${ciAppName}" = mkShellApp {
               appName = ciAppName;
               body = ''

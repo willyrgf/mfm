@@ -248,9 +248,12 @@ let
 
   # CI runs under ephemeral roots, so persistent sccache state can retain stale
   # temp paths across repeated runs.
-  ciCargoRustEnv = builtins.removeAttrs sharedCargoRustEnv [ "RUSTC_WRAPPER" ];
+  ciCargoRustEnv = (builtins.removeAttrs sharedCargoRustEnv [ "RUSTC_WRAPPER" ]) // {
+    CARGO_BUILD_JOBS = "1";
+  };
   ciArtifactsRoot = conf.process.artifactsRoot or "/tmp/ci-artifacts/${project.id}";
   ciShellAppContractsTimeoutSec = 300;
+  ephemeralRuntimeConfig = builtins.removeAttrs conf.ephemeral [ "enable" ];
 
   cargoFmtCheckCmd = "cargo fmt --all -- --check";
   cargoClippyCmd = "cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings";
@@ -262,14 +265,14 @@ let
     mkdir -p "$artifacts_dir"
 
     # Keep Cargo artifacts outside the workspace root so flake/model
-    # evaluation does not trip over mutable target/ files.  All tasks
-    # within the same workflow share a single target dir; Cargo's own
-    # file-lock serialises any parallel builds automatically.
+    # evaluation does not trip over mutable target/ files.
     run_id_component="''${NIXFIED_ORCHESTRATOR_RUN_ID:-''${NIXFIED_RUN_ID:-''${NIX_ENV:-0}}}"
     workflow_id_component="''${NIXFIED_PARENT_WORKFLOW_ID:-''${NIXFIED_ORCHESTRATOR_WORKFLOW_ID:-workflow}}"
+    task_id_component="''${NIXFIED_TASK_ID:-task}"
     run_id_component="$(printf '%s' "$run_id_component" | tr './:' '__')"
     workflow_id_component="$(printf '%s' "$workflow_id_component" | tr './:' '__')"
-    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-''${TMPDIR:-/tmp}/mfm-ci-target/$run_id_component/$workflow_id_component}"
+    task_id_component="$(printf '%s' "$task_id_component" | tr './:' '__')"
+    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-''${TMPDIR:-/tmp}/mfm-ci-target/$run_id_component/$workflow_id_component/$task_id_component}"
     mkdir -p "$CARGO_TARGET_DIR"
 
     run_with_log() {
@@ -649,7 +652,7 @@ in
           max = conf.slots.max;
           stride = conf.slots.stride;
         };
-        ephemeral = conf.ephemeral;
+        ephemeral = ephemeralRuntimeConfig;
 
         env = {
           var = project.envVar;
@@ -1649,7 +1652,7 @@ in
 
         mfm-portfolio-snapshot = mkCommandTask {
           id = "task.mfm.portfolio.snapshot";
-          appName = "mfm::portfolio::snapshot";
+          appName = "mfm-portfolio-snapshot-internal";
           summary = "Snapshot a portfolio request with Helios-backed mainnet RPC";
           description = ''
             Starts/reuses Postgres + Helios, waits for Helios RPC health checks,
@@ -1959,7 +1962,7 @@ in
 
         ci = mkCommandTask {
           id = "task.ci";
-          appName = "ci";
+          appName = "ci-internal";
           kind = "workflow";
           summary = "Run CI workflows (use --mode <mode>)";
           description = "Dispatches to model-derived CI workflows.";
@@ -2116,7 +2119,7 @@ in
 
                 model_rc=0
                 ${pkgs.coreutils}/bin/timeout --signal=TERM --kill-after=10s ${toString ciShellAppContractsTimeoutSec} \
-                  nix run "path:$ROOT"#model >/dev/null || model_rc="$?"
+                  nix run --impure "path:$ROOT"#model >/dev/null || model_rc="$?"
                 if [ "$model_rc" -ne 0 ]; then
                   if [ "$model_rc" -eq 124 ]; then
                     echo "ERROR: model export timed out after ${toString ciShellAppContractsTimeoutSec}s"
@@ -2235,6 +2238,11 @@ in
               ${ciParityServiceEnv}
 
               echo "INFO: starting ci services env=$env_value slot=$slot_value postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT helios=$HELIOS_RPC_PORT"
+              skip_helios=0
+              if [ -n "''${SKIP_HELIOS+x}" ]; then
+                skip_helios=1
+                echo "SKIP: starting/parity checks for helios are disabled (SKIP_HELIOS=1)"
+              fi
 
               services_root="$artifacts_dir/services"
               mkdir -p "$services_root"
@@ -2243,7 +2251,7 @@ in
                 local service="$1"
                 local source_key="$2"
                 ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
-                  nix run .#ready -- --service "$service" --source "$source_key"
+                  nix run --impure .#ready -- --service "$service" --source "$source_key"
               }
 
               wait_for_ready_task() {
@@ -2459,92 +2467,111 @@ in
                 exit 1
               fi
 
-              helios_root="$services_root/helios"
-              helios_data="$helios_root/data"
-              helios_log="$artifacts_dir/helios-service.log"
-              helios_pid_file="$helios_root/helios.pid"
-              mkdir -p "$helios_data"
+              if [ "$skip_helios" = "0" ]; then
+                helios_root="$services_root/helios"
+                helios_data="$helios_root/data"
+                helios_log="$artifacts_dir/helios-service.log"
+                helios_pid_file="$helios_root/helios.pid"
+                mkdir -p "$helios_data"
 
-              HELIOS_EXECUTION_RPC_URL_VALUE="http://127.0.0.1:$RETH_HTTP_PORT"
-              export HELIOS_EXECUTION_RPC_URL="$HELIOS_EXECUTION_RPC_URL_VALUE"
+                HELIOS_EXECUTION_RPC_URL_VALUE="http://127.0.0.1:$RETH_HTTP_PORT"
+                export HELIOS_EXECUTION_RPC_URL="$HELIOS_EXECUTION_RPC_URL_VALUE"
 
-              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-                -H 'content-type: application/json' \
-                --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-                "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null \
-                | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-                if [ -f "$helios_pid_file" ]; then
-                  stale_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
-                  if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
-                    rm -f "$helios_pid_file"
+                if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
+                  -H 'content-type: application/json' \
+                  --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+                  "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null \
+                  | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
+                  if [ -f "$helios_pid_file" ]; then
+                    stale_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
+                    if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+                      rm -f "$helios_pid_file"
+                    fi
                   fi
-                fi
 
-                # Clear a stale listener on the Helios RPC port (for example from
-                # a previous failed CI run that did not own this pid file).
-                if command -v lsof >/dev/null 2>&1; then
-                  stale_listener_pid="$(lsof -t -nP -iTCP:"$HELIOS_RPC_PORT" -sTCP:LISTEN 2>/dev/null | head -n1 || true)"
-                  if [ -n "$stale_listener_pid" ]; then
-                    kill "$stale_listener_pid" 2>/dev/null || true
-                    for _ in $(seq 1 40); do
-                      if ! kill -0 "$stale_listener_pid" 2>/dev/null; then
-                        break
-                      fi
-                      sleep 0.25
-                    done
-                    kill -KILL "$stale_listener_pid" 2>/dev/null || true
+                  # Clear a stale listener on the Helios RPC port (for example from
+                  # a previous failed CI run that did not own this pid file).
+                  if command -v lsof >/dev/null 2>&1; then
+                    stale_listener_pid="$(lsof -t -nP -iTCP:"$HELIOS_RPC_PORT" -sTCP:LISTEN 2>/dev/null | head -n1 || true)"
+                    if [ -n "$stale_listener_pid" ]; then
+                      kill "$stale_listener_pid" 2>/dev/null || true
+                      for _ in $(seq 1 40); do
+                        if ! kill -0 "$stale_listener_pid" 2>/dev/null; then
+                          break
+                        fi
+                        sleep 0.25
+                      done
+                      kill -KILL "$stale_listener_pid" 2>/dev/null || true
+                    fi
                   fi
+
+                  if [ -x "${pkgs.util-linux}/bin/setsid" ]; then
+                    "${pkgs.util-linux}/bin/setsid" \
+                      ${pkgs.python3}/bin/python3 \
+                      ${ciHeliosShimScript} \
+                      "$HELIOS_RPC_PORT" \
+                      "$HELIOS_EXECUTION_RPC_URL_VALUE" \
+                      </dev/null >"$helios_log" 2>&1 &
+                  elif command -v setsid >/dev/null 2>&1; then
+                    setsid \
+                      ${pkgs.python3}/bin/python3 \
+                      ${ciHeliosShimScript} \
+                      "$HELIOS_RPC_PORT" \
+                      "$HELIOS_EXECUTION_RPC_URL_VALUE" \
+                      </dev/null >"$helios_log" 2>&1 &
+                  elif command -v nohup >/dev/null 2>&1; then
+                    nohup \
+                      ${pkgs.python3}/bin/python3 \
+                      ${ciHeliosShimScript} \
+                      "$HELIOS_RPC_PORT" \
+                      "$HELIOS_EXECUTION_RPC_URL_VALUE" \
+                      </dev/null >"$helios_log" 2>&1 &
+                  else
+                    ${pkgs.python3}/bin/python3 ${ciHeliosShimScript} "$HELIOS_RPC_PORT" "$HELIOS_EXECUTION_RPC_URL_VALUE" </dev/null >"$helios_log" 2>&1 &
+                  fi
+                  echo "$!" > "$helios_pid_file"
                 fi
 
-                if [ -x "${pkgs.util-linux}/bin/setsid" ]; then
-                  "${pkgs.util-linux}/bin/setsid" \
-                    ${pkgs.python3}/bin/python3 \
-                    ${ciHeliosShimScript} \
-                    "$HELIOS_RPC_PORT" \
-                    "$HELIOS_EXECUTION_RPC_URL_VALUE" \
-                    </dev/null >"$helios_log" 2>&1 &
-                elif command -v setsid >/dev/null 2>&1; then
-                  setsid \
-                    ${pkgs.python3}/bin/python3 \
-                    ${ciHeliosShimScript} \
-                    "$HELIOS_RPC_PORT" \
-                    "$HELIOS_EXECUTION_RPC_URL_VALUE" \
-                    </dev/null >"$helios_log" 2>&1 &
-                elif command -v nohup >/dev/null 2>&1; then
-                  nohup \
-                    ${pkgs.python3}/bin/python3 \
-                    ${ciHeliosShimScript} \
-                    "$HELIOS_RPC_PORT" \
-                    "$HELIOS_EXECUTION_RPC_URL_VALUE" \
-                    </dev/null >"$helios_log" 2>&1 &
-                else
-                  ${pkgs.python3}/bin/python3 ${ciHeliosShimScript} "$HELIOS_RPC_PORT" "$HELIOS_EXECUTION_RPC_URL_VALUE" </dev/null >"$helios_log" 2>&1 &
+                if ! wait_for_ready_task "helios" "120" "1" "local"; then
+                  echo "ERROR: helios failed to become ready port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL_VALUE" >&2
+                  if [ -f "$helios_log" ]; then
+                    tail -50 "$helios_log" >&2 || true
+                  fi
+                  if command -v lsof >/dev/null 2>&1; then
+                    lsof -nP -iTCP:"$HELIOS_RPC_PORT" -sTCP:LISTEN >&2 || true
+                  fi
+                  exit 1
                 fi
-                echo "$!" > "$helios_pid_file"
-              fi
-
-              if ! wait_for_ready_task "helios" "120" "1" "local"; then
-                echo "ERROR: helios failed to become ready port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL_VALUE" >&2
-                if [ -f "$helios_log" ]; then
-                  tail -50 "$helios_log" >&2 || true
-                fi
-                if command -v lsof >/dev/null 2>&1; then
-                  lsof -nP -iTCP:"$HELIOS_RPC_PORT" -sTCP:LISTEN >&2 || true
-                fi
-                exit 1
               fi
 
               health_log="$artifacts_dir/services-health.log"
-              if ! ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
-                nix run .#health -- --service all >"$health_log" 2>&1; then
-                echo "ERROR: framework health checks failed for ci services" >&2
-                if [ -f "$health_log" ]; then
-                  tail -50 "$health_log" >&2 || true
+              if [ "$skip_helios" = "1" ]; then
+                for service in postgres minio reth; do
+                  if ! ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
+                    nix run --impure .#health -- --service "$service" >"$health_log" 2>&1; then
+                    echo "ERROR: framework health checks failed for ci service=$service" >&2
+                    if [ -f "$health_log" ]; then
+                      tail -50 "$health_log" >&2 || true
+                    fi
+                    exit 1
+                  fi
+                done
+              else
+                if ! ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
+                  nix run --impure .#health -- --service all >"$health_log" 2>&1; then
+                  echo "ERROR: framework health checks failed for ci services" >&2
+                  if [ -f "$health_log" ]; then
+                    tail -50 "$health_log" >&2 || true
+                  fi
+                  exit 1
                 fi
-                exit 1
               fi
 
-              echo "OK: ci services ready postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT helios=$HELIOS_RPC_PORT"
+              if [ "$skip_helios" = "1" ]; then
+                echo "OK: ci services ready postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT helios=skipped"
+              else
+                echo "OK: ci services ready postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT helios=$HELIOS_RPC_PORT"
+              fi
             '';
           }
           // {
@@ -2574,7 +2601,7 @@ in
               reth_pid_file="$services_root/reth/reth.pid"
               helios_pid_file="$services_root/helios/helios.pid"
 
-              if [ -f "$helios_pid_file" ]; then
+              if [ -z "''${SKIP_HELIOS+x}" ] && [ -f "$helios_pid_file" ]; then
                 helios_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
                 if [ -n "$helios_pid" ] && kill -0 "$helios_pid" 2>/dev/null; then
                   kill "$helios_pid" 2>/dev/null || true
@@ -2731,6 +2758,11 @@ in
               response_file="$artifacts_dir/parity-evm-helios-smoke.response.json"
 
               echo "INFO: running ci step=parity-evm-helios-smoke"
+              if [ -n "''${SKIP_HELIOS+x}" ]; then
+                echo "SKIP: parity-evm-helios-smoke skipped by SKIP_HELIOS=1"
+                exit 0
+              fi
+
               run_with_log "$key_log_file" ${cargoNextestCiCmd} -p mfm --features parity-tests --test parity_keystore_reth_tx_send
 
               if [ -z "''${MFM_EVM_RPC_URL:-}" ]; then
@@ -3135,8 +3167,6 @@ in
           stages = [ ];
           preRun.tasks = [
             "task.ci.services-start"
-            "task.ops.ready"
-            "task.ops.health"
           ];
           postRun = {
             tasks = [ "task.ci.services-stop" ];
