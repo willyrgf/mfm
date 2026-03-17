@@ -31,6 +31,8 @@
         };
         snapshotAppName = "mfm::portfolio::snapshot";
         snapshotAppNameRaw = "mfm-portfolio-snapshot-internal";
+        ciAppName = "ci";
+        ciAppNameRaw = "mfm-ci-internal";
       in {
         apps =
           compiled.apps
@@ -41,6 +43,43 @@
               body = ''
                 exec ${pkgs.nix}/bin/nix \
                   run --impure --accept-flake-config ${toString ./.}#${snapshotAppNameRaw} -- "$@"
+              '';
+            };
+
+            "${ciAppNameRaw}" = compiled.apps."${ciAppName}";
+            "${ciAppName}" = mkShellApp {
+              appName = ciAppName;
+              body = ''
+                set -euo pipefail
+
+                mode_arg_mainnet=0
+                saw_mode=0
+
+                for arg in "$@"; do
+                  if [ "$saw_mode" = "1" ]; then
+                    saw_mode=0
+                    if [ "$arg" = "mainnet" ]; then
+                      mode_arg_mainnet=1
+                    fi
+                    continue
+                  fi
+
+                  case "$arg" in
+                    --mode)
+                      saw_mode=1
+                      ;;
+                    --mode=mainnet)
+                      mode_arg_mainnet=1
+                      ;;
+                  esac
+                done
+
+                if [ "$mode_arg_mainnet" = "0" ] && [ -z "''${SKIP_HELIOS+x}" ]; then
+                  export SKIP_HELIOS=1
+                fi
+
+                exec ${pkgs.nix}/bin/nix \
+                  run --impure --accept-flake-config ${toString ./.}#${ciAppNameRaw} -- "$@"
               '';
             };
           };
