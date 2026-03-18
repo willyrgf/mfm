@@ -81,6 +81,11 @@ impl LiveIoTransport for CountingTransport {
             .get("method")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown");
+        let kind = call
+            .request
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
         let network_id = call
             .request
             .get("network_id")
@@ -94,10 +99,37 @@ impl LiveIoTransport for CountingTransport {
             .cloned()
             .unwrap_or_default();
 
-        let count_key = classify_call(method, network_id, &params);
+        let count_key = match kind {
+            "prepare_sources" => format!("prepare_sources@{network_id}"),
+            _ => classify_call(method, network_id, &params),
+        };
         {
             let mut counts = self.counts.lock().await;
             *counts.entry(count_key).or_default() += 1;
+        }
+
+        if kind == "prepare_sources" {
+            let network_id = call
+                .request
+                .get("network_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let control_scope = call
+                .request
+                .get("control_scope")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("shared");
+            return Ok(serde_json::json!({
+                "control_scope": control_scope,
+                "network_id": network_id,
+                "pool_kind": "test",
+                "available_source_ids": ["source-1"],
+                "ranked_source_ids": ["source-1"],
+                "sources": [{
+                    "source_id": "source-1",
+                    "healthy": true
+                }]
+            }));
         }
 
         match method {

@@ -253,7 +253,64 @@ let
   };
   ciArtifactsRoot = conf.process.artifactsRoot or "/tmp/ci-artifacts/${project.id}";
   ciShellAppContractsTimeoutSec = 300;
-  ephemeralRuntimeConfig = builtins.removeAttrs conf.ephemeral [ "enable" ];
+  ephemeralRuntimeConfig =
+    let
+      runtimeEphemeral = conf.ephemeral or { };
+    in
+    if builtins.isAttrs runtimeEphemeral then
+      {
+        copyMode = runtimeEphemeral.copyMode or "nix-source";
+        includeUntracked = runtimeEphemeral.includeUntracked or false;
+        excludePatterns = runtimeEphemeral.excludePatterns or [
+          ".git"
+          "node_modules"
+          ".next"
+          "dist"
+          ".turbo"
+          ".cache"
+          "target"
+          "result"
+          "result-*"
+          "*.log"
+          "test-results"
+          "coverage"
+        ];
+        extraDirs = runtimeEphemeral.extraDirs or [ ];
+        keepFailures = runtimeEphemeral.keepFailures or true;
+        maxFailedRoots = runtimeEphemeral.maxFailedRoots or 8;
+        maxFailedRootAgeHours = runtimeEphemeral.maxFailedRootAgeHours or 72;
+        maxCopyBytes = runtimeEphemeral.maxCopyBytes or 0;
+        minFreeBytesAfterCopy = runtimeEphemeral.minFreeBytesAfterCopy or 0;
+        envFileMode = runtimeEphemeral.envFileMode or "disabled";
+        envFilePath = runtimeEphemeral.envFilePath or ".env";
+      }
+    else
+      {
+        copyMode = "nix-source";
+        includeUntracked = false;
+        excludePatterns = [
+          ".git"
+          "node_modules"
+          ".next"
+          "dist"
+          ".turbo"
+          ".cache"
+          "target"
+          "result"
+          "result-*"
+          "*.log"
+          "test-results"
+          "coverage"
+        ];
+        extraDirs = [ ];
+        keepFailures = true;
+        maxFailedRoots = 8;
+        maxFailedRootAgeHours = 72;
+        maxCopyBytes = 0;
+        minFreeBytesAfterCopy = 0;
+        envFileMode = "disabled";
+        envFilePath = ".env";
+      };
 
   cargoFmtCheckCmd = "cargo fmt --all -- --check";
   cargoClippyCmd = "cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings";
@@ -272,6 +329,10 @@ let
     run_id_component="$(printf '%s' "$run_id_component" | tr './:' '__')"
     workflow_id_component="$(printf '%s' "$workflow_id_component" | tr './:' '__')"
     task_id_component="$(printf '%s' "$task_id_component" | tr './:' '__')"
+    # Separate Cargo index/source cache per task so parallel CI steps cannot
+    # race while unpacking registry crates.
+    export CARGO_HOME="''${CARGO_HOME:-''${TMPDIR:-/tmp}/mfm-ci-cargo-home/$run_id_component/$workflow_id_component/$task_id_component}"
+    mkdir -p "$CARGO_HOME"
     export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-''${TMPDIR:-/tmp}/mfm-ci-target/$run_id_component/$workflow_id_component/$task_id_component}"
     mkdir -p "$CARGO_TARGET_DIR"
 
@@ -682,7 +743,7 @@ in
         devShellHook = conf.tooling.devShellHook;
       };
 
-      packages = conf.packages;
+      packages = lib.removeAttrs conf.packages [ "helios" ];
 
       services = {
         postgres = {

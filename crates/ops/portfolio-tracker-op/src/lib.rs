@@ -23,6 +23,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use mfm_evm_runtime::states::rpc_control::{PrepareSourcesState, RpcControlNetworkRoute};
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
@@ -30,7 +31,6 @@ use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
 use mfm_sdk::op::{OpIo, Operation};
-use mfm_evm_runtime::states::rpc_control::{PrepareSourcesState, RpcControlNetworkRoute};
 use mfm_state_aave_v3::portfolio::model::{
     is_aave_protocol_position, validate_aave_portfolio_config,
 };

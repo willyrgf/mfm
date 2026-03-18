@@ -45,10 +45,8 @@ use mfm_machine::events::{
     event_envelopes_from_stream_records, Event, EventEnvelope, KernelEvent, RunStatus,
 };
 use mfm_machine::exec_transport::ExecProgramTransportFactory;
-use mfm_machine::ids::{ArtifactId, ContextKey, OpId, RunId, StateId};
-use mfm_machine::live_io::{
-    LiveIoEnv, LiveIoTransportFactory,
-};
+use mfm_machine::ids::{ArtifactId, ContextKey, OpId, RunId};
+use mfm_machine::live_io::LiveIoTransportFactory;
 use mfm_machine::live_io_registry::{HashMapTransportRegistry, TransportRegistry};
 use mfm_machine::live_io_router::RouterLiveIoTransportFactory;
 use mfm_machine::runtime::{ChildRunLiveIoTransportFactory, DefaultExecutionEngine, PlanResolver};
@@ -253,6 +251,24 @@ pub fn app_error_from_run_error(err: RunError) -> AppError {
     };
 
     AppError::new(class, info.code.0, info.message)
+}
+
+fn app_error_from_error_info(info: &mfm_machine::errors::ErrorInfo) -> AppError {
+    let class = if info.code.0.starts_with("rpc_control_") {
+        ErrorClass::BadGateway
+    } else {
+        match info.category {
+            ErrorCategory::ParsingInput => ErrorClass::BadRequest,
+            ErrorCategory::OnChain | ErrorCategory::OffChain | ErrorCategory::Rpc => {
+                ErrorClass::BadGateway
+            }
+            ErrorCategory::Storage | ErrorCategory::Context | ErrorCategory::Unknown => {
+                ErrorClass::Internal
+            }
+        }
+    };
+
+    AppError::new(class, info.code.0.clone(), info.message.clone())
 }
 
 /// In-memory context implementation used by default request flows.
@@ -668,6 +684,31 @@ impl AppServices {
         })
     }
 
+    async fn failed_run_error(&self, run_id: &str) -> Result<AppError, AppError> {
+        let run_id = uuid::Uuid::parse_str(run_id).map_err(|_| {
+            AppError::new(
+                ErrorClass::Internal,
+                "InvalidRunId",
+                "run_id is not a valid UUID",
+            )
+        })?;
+        let run_id = RunId(run_id);
+
+        let events = read_run_stream_events(self.streams.as_ref(), run_id, 1, None).await?;
+
+        for envelope in events.iter().rev() {
+            if let Event::Kernel(KernelEvent::StateFailed { error, .. }) = &envelope.event {
+                return Ok(app_error_from_error_info(&error.info));
+            }
+        }
+
+        Ok(AppError::new(
+            ErrorClass::Internal,
+            "RunFailed".to_string(),
+            format!("run {} finished with phase failed", run_id.0),
+        ))
+    }
+
     #[instrument(level = "info", skip(self), fields(run_id = run_id))]
     /// Resumes a previously started run by UUID string.
     pub async fn resume_run(&self, run_id: &str) -> Result<RunResumeResponse, AppError> {
@@ -892,6 +933,10 @@ impl AppServices {
                 op_config,
             }))
             .await?;
+
+        if run.phase == "failed" {
+            return Err(self.failed_run_error(&run.run_id).await?);
+        }
 
         let mut snapshot_artifact_id = None;
         let mut report = None;

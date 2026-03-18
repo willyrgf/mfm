@@ -121,13 +121,13 @@ mod tests {
     use std::collections::HashMap;
 
     use async_trait::async_trait;
-    use serde_json::Value;
     use mfm_machine::context::DynContext;
-    use mfm_machine::errors::{ContextError, ErrorCategory, ErrorInfo, IoError, IoResult, RunError};
+    use mfm_machine::errors::{ContextError, ErrorCategory, ErrorInfo, IoError, RunError};
     use mfm_machine::events::DomainEvent;
     use mfm_machine::ids::{ArtifactId, ErrorCode, FactKey};
+    use mfm_machine::io::{IoCall, IoResult};
     use mfm_machine::recorder::EventRecorder;
-    use mfm_machine::io::IoCall;
+    use serde_json::Value;
 
     fn info(code: &'static str, category: ErrorCategory, message: &'static str) -> ErrorInfo {
         ErrorInfo {
@@ -139,7 +139,11 @@ mod tests {
         }
     }
 
-    fn prepared_response(network_id: &str, control_scope: &str, healthy: bool) -> serde_json::Value {
+    fn prepared_response(
+        network_id: &str,
+        control_scope: &str,
+        healthy: bool,
+    ) -> serde_json::Value {
         serde_json::json!({
             "control_scope": control_scope,
             "network_id": network_id,
@@ -161,7 +165,10 @@ mod tests {
     }
 
     impl DynContext for MapContext {
-        fn read(&self, key: &mfm_machine::ids::ContextKey) -> Result<Option<serde_json::Value>, ContextError> {
+        fn read(
+            &self,
+            key: &mfm_machine::ids::ContextKey,
+        ) -> Result<Option<serde_json::Value>, ContextError> {
             Ok(self.values.get(&key.0).cloned())
         }
 
