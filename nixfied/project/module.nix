@@ -316,6 +316,8 @@ let
   cargoClippyCmd = "cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings";
   cargoNextestCiCmd = "cargo nextest run --cargo-profile ci";
   cargoNextestWorkspaceCiCmd = "${cargoNextestCiCmd} --workspace";
+  parityNextestArgs = "-p mfm-integration-tests --features parity-tests -p mfm --features parity-tests";
+  parityNextestCmd = "${cargoNextestCiCmd} ${parityNextestArgs}";
 
   ciStepPreamble = ''
     artifacts_dir="''${CI_ARTIFACTS_DIR:-${ciArtifactsRoot}}"
@@ -324,16 +326,12 @@ let
     # Keep Cargo artifacts outside the workspace root so flake/model
     # evaluation does not trip over mutable target/ files.
     run_id_component="''${NIXFIED_ORCHESTRATOR_RUN_ID:-''${NIXFIED_RUN_ID:-''${NIX_ENV:-0}}}"
-    workflow_id_component="''${NIXFIED_PARENT_WORKFLOW_ID:-''${NIXFIED_ORCHESTRATOR_WORKFLOW_ID:-workflow}}"
-    task_id_component="''${NIXFIED_TASK_ID:-task}"
     run_id_component="$(printf '%s' "$run_id_component" | tr './:' '__')"
-    workflow_id_component="$(printf '%s' "$workflow_id_component" | tr './:' '__')"
-    task_id_component="$(printf '%s' "$task_id_component" | tr './:' '__')"
-    # Separate Cargo index/source cache per task so parallel CI steps cannot
-    # race while unpacking registry crates.
-    export CARGO_HOME="''${CARGO_HOME:-''${TMPDIR:-/tmp}/mfm-ci-cargo-home/$run_id_component/$workflow_id_component/$task_id_component}"
+    cache_root="''${TMPDIR:-/tmp}/mfm-ci-cache/$run_id_component"
+    # Share Cargo cache per CI run to avoid rebuilding identical crates/tests.
+    export CARGO_HOME="''${CARGO_HOME:-$cache_root/cargo-home}"
     mkdir -p "$CARGO_HOME"
-    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-''${TMPDIR:-/tmp}/mfm-ci-target/$run_id_component/$workflow_id_component/$task_id_component}"
+    export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$cache_root/cargo-target}"
     mkdir -p "$CARGO_TARGET_DIR"
 
     run_with_log() {
@@ -2762,7 +2760,7 @@ in
 
               log_file="$artifacts_dir/parity-compile.log"
               echo "INFO: running ci step=parity-compile"
-              run_with_log "$log_file" ${cargoNextestCiCmd} --no-run -p mfm-integration-tests --features parity-tests -p mfm --features parity-tests
+              run_with_log "$log_file" ${parityNextestCmd} --no-run
               echo "OK: ci step passed step=parity-compile log=$log_file"
             '';
           }
@@ -2789,7 +2787,7 @@ in
 
               log_file="$artifacts_dir/parity-rest-api-smoke.log"
               echo "INFO: running ci step=parity-rest-api-smoke"
-              run_with_log "$log_file" ${cargoNextestCiCmd} --jobs 1 -p mfm-integration-tests --features parity-tests --test parity_event_store_postgres_contract --test parity_artifact_store_s3_contract --test parity_rest_api_postgres_s3_smoke
+              run_with_log "$log_file" ${parityNextestCmd} --jobs 1 --test parity_event_store_postgres_contract --test parity_artifact_store_s3_contract --test parity_rest_api_postgres_s3_smoke
               echo "OK: ci step passed step=parity-rest-api-smoke log=$log_file"
             '';
           }
@@ -2824,7 +2822,7 @@ in
                 exit 0
               fi
 
-              run_with_log "$key_log_file" ${cargoNextestCiCmd} -p mfm --features parity-tests --test parity_keystore_reth_tx_send
+              run_with_log "$key_log_file" ${parityNextestCmd} --test parity_keystore_reth_tx_send
 
               if [ -z "''${MFM_EVM_RPC_URL:-}" ]; then
                 echo "SKIP: MFM_EVM_RPC_URL is unset; skipping helios RPC curl probe"
@@ -2868,7 +2866,7 @@ in
 
               log_file="$artifacts_dir/parity-evm-reth.log"
               echo "INFO: running ci step=parity-evm-reth"
-              run_with_log "$log_file" ${cargoNextestCiCmd} --jobs 1 -p mfm-integration-tests --features parity-tests --test evm_rpc_pool_failover --test evm_rpc_getlogs_chunking --test parity_rest_api_evm_reth_pipeline --test parity_portfolio_tracker_reth_mock_erc20 --test parity_portfolio_tracker_reth_snapshot
+              run_with_log "$log_file" ${parityNextestCmd} --jobs 1 --test evm_rpc_pool_failover --test evm_rpc_getlogs_chunking --test parity_rest_api_evm_reth_pipeline --test parity_portfolio_tracker_reth_mock_erc20 --test parity_portfolio_tracker_reth_snapshot
               echo "OK: ci step passed step=parity-evm-reth log=$log_file"
             '';
           }
@@ -2895,7 +2893,7 @@ in
 
               log_file="$artifacts_dir/parity-aave-v3-reth.log"
               echo "INFO: running ci step=parity-aave-v3-reth"
-              run_with_log "$log_file" ${cargoNextestCiCmd} -p mfm-integration-tests --features parity-tests --test parity_aave_v3_reth_scenario
+              run_with_log "$log_file" ${parityNextestCmd} --test parity_aave_v3_reth_scenario
               echo "OK: ci step passed step=parity-aave-v3-reth log=$log_file"
             '';
           }
@@ -2922,7 +2920,7 @@ in
 
               log_file="$artifacts_dir/parity-postgres-state-events-audit.log"
               echo "INFO: running ci step=parity-postgres-state-events-audit"
-              run_with_log "$log_file" ${cargoNextestCiCmd} -p mfm-integration-tests --features parity-tests --test parity_postgres_state_events_audit
+              run_with_log "$log_file" ${parityNextestCmd} --test parity_postgres_state_events_audit
               echo "OK: ci step passed step=parity-postgres-state-events-audit log=$log_file"
             '';
           }
