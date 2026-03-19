@@ -135,6 +135,14 @@ let
       log_info "Parallelism max_workers=$PAR_MAX_WORKERS peak_workers=$PAR_PEAK_WORKERS canceled_count=$PAR_CANCELED_COUNT"
     fi
 
+    SKIPPED_COUNT=""
+    if [ -n "$SUMMARY_JSON" ] && command -v ${pkgs.jq}/bin/jq >/dev/null 2>&1; then
+      SKIPPED_COUNT="$(${pkgs.jq}/bin/jq -r '.counts.skipped // ""' "$SUMMARY_JSON" 2>/dev/null || true)"
+    fi
+    if _is_nonneg_int "$SKIPPED_COUNT" && [ "$SKIPPED_COUNT" -gt 0 ]; then
+      log_info "SKIP: $SKIPPED_COUNT task(s) skipped"
+    fi
+
     if [ "$EXIT_CODE" -ne 0 ] 2>/dev/null; then
       log_error "Exit code: $EXIT_CODE" 2>&1
 

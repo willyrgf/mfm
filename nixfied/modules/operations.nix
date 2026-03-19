@@ -9,6 +9,7 @@ let
   runtime = config.nixfied.runtime;
   services = config.nixfied.services;
   probeCommands = import ../framework/runtime/helpers/probe-commands.nix { inherit pkgs; };
+  skipPolicy = import ../framework/runtime/helpers/skip-policy.nix { inherit pkgs; };
   probePlanRuntime = import ../framework/runtime/helpers/probe-plan-runtime.nix {
     inherit
       pkgs
@@ -23,8 +24,10 @@ let
   };
 
   configuredServiceNames = builtins.attrNames services;
+  excludedServices = config.nixfied.graph.excludedServices or [ ];
   serviceNames = builtins.filter (
-    serviceName: builtins.elem serviceName configuredServiceNames
+    serviceName:
+    builtins.elem serviceName configuredServiceNames && !(builtins.elem serviceName excludedServices)
   ) serviceConfigLib.supportedServiceNames;
 
   serviceEnabledByName = builtins.listToAttrs (
@@ -339,49 +342,9 @@ let
           return 1
         }
 
-        service_skip_env_var_name() {
-          local service_name="$1"
-          local safe_service_name
-          if [ -z "$service_name" ]; then
-            printf '%s' ""
-            return 0
-          fi
-
-          safe_service_name="$(printf '%s' "$service_name" | ${pkgs.coreutils}/bin/tr '[:lower:]' '[:upper:]' | ${pkgs.coreutils}/bin/tr -cs 'A-Z0-9_' '_')"
-          if [ -z "$safe_service_name" ]; then
-            printf '%s' ""
-            return 0
-          fi
-          printf 'SKIP_%s' "$safe_service_name"
-        }
-
-        is_truthy_skip_value() {
-          local raw_value="$1"
-          local normalized_value
-
-          normalized_value="$(printf '%s' "$raw_value" | ${pkgs.coreutils}/bin/tr '[:upper:]' '[:lower:]' | ${pkgs.coreutils}/bin/tr -d '[:space:]')"
-          case "$normalized_value" in
-            1|true|yes|on)
-              return 0
-              ;;
-            *)
-              return 1
-              ;;
-          esac
-        }
-
-        service_is_skipped() {
-          local service_name="$1"
-          local env_name
-          local env_value
-
-          env_name="$(service_skip_env_var_name "$service_name")"
-          if [ -z "$env_name" ]; then
-            return 1
-          fi
-          env_value="''${!env_name:-}"
-          is_truthy_skip_value "$env_value"
-        }
+        ${skipPolicy.skipPolicyFunctions}
+        service_skip_env_var_name() { workflow_service_skip_env_var "$@"; }
+        service_is_skipped() { is_service_skipped "$@"; }
 
         filter_skipped_services() {
           local -a filtered_services=()

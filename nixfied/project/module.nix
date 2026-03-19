@@ -14,6 +14,7 @@ let
       project
       ;
   };
+  skipPolicy = import ../framework/runtime/helpers/skip-policy.nix { inherit pkgs; };
 
   envNames = builtins.attrNames conf.envs;
   envOffsets = lib.mapAttrs (_: value: value.offset or 0) conf.envs;
@@ -146,41 +147,34 @@ let
     }
   ) (heliosService.sources or { });
 
-  # Auto-compute SKIP_<SERVICE> env vars from service config (mirrors operations.nix:106-114)
-  serviceSkipEnvVars = lib.unique (
-    builtins.map (
-      serviceName:
-      let
-        safeServiceName = lib.toUpper (lib.replaceStrings [ "." "-" ] [ "_" "_" ] serviceName);
-      in
-      "SKIP_${safeServiceName}"
+  serviceSkipEnvVarName =
+    serviceName:
+    let
+      safeServiceName = lib.toUpper (lib.replaceStrings [ "." "-" ] [ "_" "_" ] serviceName);
+    in
+    "SKIP_${safeServiceName}";
+
+  normalizeSkipEnvValue =
+    value:
+    lib.toLower (builtins.replaceStrings [ " " "\n" "\r" "\t" ] [ "" "" "" "" ] value);
+
+  isTruthySkipEnvValue = value: builtins.elem (normalizeSkipEnvValue value) [
+    "1"
+    "true"
+    "yes"
+    "on"
+  ];
+
+  excludedServices = builtins.sort builtins.lessThan (
+    builtins.filter (
+      serviceName: isTruthySkipEnvValue (builtins.getEnv (serviceSkipEnvVarName serviceName))
     ) (builtins.attrNames conf.services)
   );
 
-  # Reusable shell helpers mirroring the framework's skip-service primitives
-  # (executor-runtime.nix:350-378, operations.nix:342-384)
-  serviceSkipShellHelpers = ''
-    is_truthy_skip_value() {
-      local raw_value="$1"
-      local normalized_value
-      normalized_value="$(printf '%s' "$raw_value" | ${pkgs.coreutils}/bin/tr '[:upper:]' '[:lower:]' | ${pkgs.coreutils}/bin/tr -d '[:space:]')"
-      case "$normalized_value" in
-        1|true|yes|on) return 0 ;;
-        *) return 1 ;;
-      esac
-    }
-
-    is_service_skipped() {
-      local service_name="$1"
-      local safe_service_name
-      local env_name
-      local env_value
-      safe_service_name="$(printf '%s' "$service_name" | ${pkgs.coreutils}/bin/tr '[:lower:]' '[:upper:]' | ${pkgs.coreutils}/bin/tr -cs 'A-Z0-9_' '_')"
-      env_name="SKIP_$safe_service_name"
-      env_value="''${!env_name:-}"
-      is_truthy_skip_value "$env_value"
-    }
-  '';
+  # Auto-compute SKIP_<SERVICE> env vars from service config (mirrors operations.nix:106-114)
+  serviceSkipEnvVars = lib.unique (
+    builtins.map serviceSkipEnvVarName (builtins.attrNames conf.services)
+  );
 
   sharedPassThroughEnv = [
     project.envVar
@@ -555,6 +549,7 @@ let
       outputChannels ? "stdout",
       effects ? [ "writes-state" ],
       idempotent ? false,
+      requirements ? { services = [ ]; },
       passThroughEnv ? sharedPassThroughEnv,
       allowSensitivePassThrough ? true,
       env ? { },
@@ -568,11 +563,15 @@ let
         tags
         ;
 
+      requirements = requirements // {
+        services = lib.unique (requirements.services or [ ]);
+      };
+
       runner =
         if workflowId == null then
           {
             type = "shell";
-            command = command;
+            command = skipPolicy.skipPolicyFunctions + "\n" + command;
           }
         else
           {
@@ -655,6 +654,7 @@ let
       taskId,
       needs ? [ ],
       skipIfMissingEnv ? [ ],
+      requirements ? { services = [ ]; },
     }:
     {
       inherit
@@ -663,6 +663,9 @@ let
         skipIfMissingEnv
         ;
       locks = [ ];
+      requirements = requirements // {
+        services = lib.unique (requirements.services or [ ]);
+      };
       when = {
         envEquals = { };
         envPresent = [ ];
@@ -703,6 +706,8 @@ in
         projectName = project.name;
         description = project.description;
       };
+
+      graph.excludedServices = excludedServices;
 
       runtime = {
         slot = {
@@ -883,15 +888,18 @@ in
         mfm-portfolio-services-start =
           mkCommandTask {
             id = "task.mfm.portfolio.services-start";
-            appName = "mfm-portfolio-services-start";
+            appName = "mfm-portfolio-postgres-start";
             kind = "internal";
-            summary = "Start or reuse portfolio snapshot services";
-            description = "Internal task that starts or reuses Postgres and Helios for the portfolio snapshot app.";
+            summary = "Start or reuse portfolio snapshot postgres";
+            description = "Internal task that starts or reuses Postgres for the portfolio snapshot app and writes shared handoff metadata.";
             runtimeInputs = commonRuntimeInputs ++ [
               postgresPackage
               pkgs.curl
               pkgs.lsof
             ];
+            requirements = {
+              services = [ "postgres" ];
+            };
             allowUnknownArgs = false;
             contractArgs = [
               {
@@ -905,7 +913,6 @@ in
             ];
             command = ''
               set -euo pipefail
-              ${serviceSkipShellHelpers}
               if [ -w /dev/tty ]; then
                 exec >/dev/tty 2>&1
               fi
@@ -939,13 +946,6 @@ in
                 exit 1
               fi
 
-              if ! is_service_skipped helios; then
-                if [ -z "''${HELIOSRPC_PORT:-}" ]; then
-                  echo "ERROR: HELIOSRPC_PORT is not set for snapshot service startup" >&2
-                  exit 1
-                fi
-              fi
-
               if [ -z "''${NIXFIED_RUNTIME_DIR_SCOPE:-}" ]; then
                 :
               fi
@@ -955,20 +955,10 @@ in
                 exit 1
               fi
 
-              if ! is_service_skipped helios; then
-                if [ -z "''${NIXFIED_SERVICE_HELIOS_DATA_DIR:-}" ] || [ -z "''${NIXFIED_SERVICE_HELIOS_STATE_DIR:-}" ] || [ -z "''${NIXFIED_SERVICE_HELIOS_LOG_DIR:-}" ]; then
-                  echo "ERROR: helios runtime directories are unavailable in snapshot runtime" >&2
-                  exit 1
-                fi
-              fi
-
               mkdir -p "$(dirname "$handoff_file")"
               runtime_root="$(cd "$(dirname "$handoff_file")/../.." && pwd -P)"
               export NIXFIED_RUNTIME_DIR_SCOPE="$runtime_root"
               export NIXFIED_SERVICE_ROOT="$runtime_root/services"
-              if ! is_service_skipped helios; then
-                export HELIOS_RPC_PORT="$HELIOSRPC_PORT"
-              fi
               mkdir -p "$NIXFIED_SERVICE_ROOT"
               mkdir -p "$runtime_root/run"
 
@@ -1159,17 +1149,9 @@ in
               export NIXFIED_SERVICE_POSTGRES_DATA_DIR="$service_root/postgres/data"
               export NIXFIED_SERVICE_POSTGRES_STATE_DIR="$service_root/postgres/state"
               export NIXFIED_SERVICE_POSTGRES_LOG_DIR="$service_root/postgres/log"
-              if ! is_service_skipped helios; then
-                export NIXFIED_SERVICE_HELIOS_DATA_DIR="$service_root/helios/data"
-                export NIXFIED_SERVICE_HELIOS_STATE_DIR="$service_root/helios/state"
-                export NIXFIED_SERVICE_HELIOS_LOG_DIR="$service_root/helios/log"
-              fi
 
               mkdir -p "$NIXFIED_SERVICE_ROOT"
               mkdir -p "$NIXFIED_SERVICE_POSTGRES_DATA_DIR" "$NIXFIED_SERVICE_POSTGRES_STATE_DIR" "$NIXFIED_SERVICE_POSTGRES_LOG_DIR"
-              if ! is_service_skipped helios; then
-                mkdir -p "$NIXFIED_SERVICE_HELIOS_DATA_DIR" "$NIXFIED_SERVICE_HELIOS_STATE_DIR" "$NIXFIED_SERVICE_HELIOS_LOG_DIR"
-              fi
 
               echo "INFO: snapshot service scope root=$service_scope_root service_root=$service_root"
 
@@ -1232,128 +1214,6 @@ in
               fi
               echo "OK: postgres readiness validated service=postgres source=local"
 
-              helios_owned=0
-              helios_pid_file=""
-              helios_log=""
-
-              if is_service_skipped helios; then
-                echo "INFO: helios skipped (SKIP_HELIOS=1)"
-              else
-                HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
-                if [ "$HELIOS_NETWORK" != "mainnet" ]; then
-                  echo "ERROR: HELIOS_NETWORK must be 'mainnet' for mfm::portfolio::snapshot" >&2
-                  exit 1
-                fi
-
-                export HELIOS_RPC_PORT="$HELIOSRPC_PORT"
-                export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
-                  conf.modules.helios.executionRpcUrl or "https://ethereum-rpc.publicnode.com"
-                }}"
-                export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-}"
-                export HELIOS_CHECKPOINT="''${HELIOS_CHECKPOINT:-}"
-
-                if [ -z "$HELIOS_EXECUTION_RPC_URL" ]; then
-                  echo "ERROR: HELIOS_EXECUTION_RPC_URL is required for snapshot startup" >&2
-                  exit 1
-                fi
-
-                helios_root="$service_root/helios"
-                helios_log="$helios_root/logs/helios.log"
-                helios_pid_file="$helios_root/run/helios.pid"
-                helios_health_timeout_seconds="''${HELIOS_HEALTH_TIMEOUT_SECS:-''${HELIOS_READY_TIMEOUT_SECS:-300}}"
-                helios_health_interval_seconds="''${HELIOS_HEALTH_INTERVAL_SECS:-''${HELIOS_READY_INTERVAL_SECS:-1}}"
-
-                helios_is_running() {
-                  local pid=""
-                  if [ ! -f "$helios_pid_file" ]; then
-                    return 1
-                  fi
-                  pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
-                  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
-                }
-
-                helios_port_ready() {
-                  ${frameworkHeliosService.health} >/dev/null 2>&1
-                }
-
-                wait_for_helios_health() {
-                  local timeout="$helios_health_timeout_seconds"
-                  local interval="$helios_health_interval_seconds"
-                  local start_ts
-                  local now_ts
-                  local attempt=0
-
-                  case "$timeout" in
-                    *[!0-9]*|"")
-                      echo "ERROR: HELIOS_HEALTH_TIMEOUT_SECS must be an integer seconds value (got '$timeout')" >&2
-                      return 1
-                      ;;
-                  esac
-
-                  case "$interval" in
-                    *[!0-9]*|"")
-                      echo "ERROR: HELIOS_HEALTH_INTERVAL_SECS must be an integer seconds value (got '$interval')" >&2
-                      return 1
-                      ;;
-                  esac
-
-                  start_ts="$(${pkgs.coreutils}/bin/date +%s)"
-                  while true; do
-                    attempt=$((attempt + 1))
-
-                    if ${frameworkHeliosService.health} >/dev/null 2>&1; then
-                      return 0
-                    fi
-
-                    if [ $((attempt % 10)) -eq 0 ]; then
-                      log_info "helios health checks not ready yet attempt=$attempt"
-                    fi
-
-                    now_ts="$(${pkgs.coreutils}/bin/date +%s)"
-                    if [ $((now_ts - start_ts)) -ge "$timeout" ]; then
-                      return 1
-                    fi
-
-                    ${pkgs.coreutils}/bin/sleep "$interval"
-                  done
-                }
-
-                if helios_is_running; then
-                  if [ "$reuse_policy" = "never" ]; then
-                    echo "ERROR: helios already managed for this slot and reuse policy is 'never'" >&2
-                    exit 1
-                  fi
-                  echo "INFO: reusing framework-managed helios port=$HELIOS_RPC_PORT root=$helios_root"
-                elif helios_port_ready; then
-                  if [ "$reuse_policy" = "never" ]; then
-                    echo "ERROR: helios already serving on port $HELIOS_RPC_PORT and reuse policy is 'never'" >&2
-                    exit 1
-                  fi
-                  echo "INFO: reusing healthy helios on slot port=$HELIOS_RPC_PORT outside expected pid file=$helios_pid_file"
-                else
-                  helios_owned=1
-                  echo "INFO: starting framework-managed helios port=$HELIOS_RPC_PORT root=$helios_root execution_rpc=$HELIOS_EXECUTION_RPC_URL"
-                fi
-
-                if [ "$helios_owned" = "1" ]; then
-                  if ! ${frameworkHeliosService.fullStart}; then
-                    echo "ERROR: helios full-start failed port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
-                    if [ -f "$helios_log" ]; then
-                      tail -50 "$helios_log" >&2 || true
-                    fi
-                    exit 1
-                  fi
-                fi
-
-                if ! wait_for_helios_health; then
-                  echo "ERROR: helios failed snapshot health checks after $helios_health_timeout_seconds s port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
-                  if [ -f "$helios_log" ]; then
-                    tail -50 "$helios_log" >&2 || true
-                  fi
-                  exit 1
-                fi
-              fi
-
               ${pkgs.jq}/bin/jq -n \
                 --arg reuse_policy "$reuse_policy" \
                 --arg owner_scope "$owner_scope" \
@@ -1361,12 +1221,10 @@ in
                 --arg cleanup_required "$cleanup_required" \
                 --arg service_scope_root "$service_scope_root" \
                 --arg service_root "$service_root" \
+                --arg slot_info_json_script "$slot_info_json_script" \
                 --arg postgres_owned "$postgres_owned" \
-                --arg helios_owned "$helios_owned" \
                 --arg postgres_data "$postgres_data" \
                 --arg postgres_log "$postgres_log" \
-                --arg helios_pid_file "$helios_pid_file" \
-                --arg helios_log "$helios_log" \
                 '{
                   reuse_policy: $reuse_policy,
                   owner_scope: $owner_scope,
@@ -1374,15 +1232,231 @@ in
                   cleanup_required: ($cleanup_required == "1"),
                   service_scope_root: $service_scope_root,
                   service_root: $service_root,
+                  slot_info_json_script: $slot_info_json_script,
                   postgres_owned: ($postgres_owned == "1"),
-                  helios_owned: ($helios_owned == "1"),
+                  helios_owned: false,
                   postgres_data: $postgres_data,
                   postgres_log: $postgres_log,
-                  helios_pid_file: $helios_pid_file,
-                  helios_log: $helios_log
+                  helios_pid_file: "",
+                  helios_log: ""
                 }' > "$handoff_file"
 
-              echo "OK: snapshot services ready postgres=$POSTGRES_PORT helios=''${HELIOS_RPC_PORT:-skipped} handoff=$handoff_file"
+              echo "OK: snapshot postgres ready port=$POSTGRES_PORT handoff=$handoff_file"
+            '';
+          }
+          // {
+            ui.app.expose = false;
+          };
+
+        mfm-portfolio-helios-start =
+          mkCommandTask {
+            id = "task.mfm.portfolio.helios-start";
+            appName = "mfm-portfolio-helios-start";
+            kind = "internal";
+            summary = "Start or reuse portfolio snapshot helios";
+            description = "Internal task that starts or reuses Helios for the portfolio snapshot app and updates the shared handoff file.";
+            runtimeInputs = commonRuntimeInputs ++ [
+              pkgs.curl
+              pkgs.lsof
+            ];
+            requirements = {
+              services = [ "helios" ];
+            };
+            allowUnknownArgs = false;
+            contractArgs = [
+              {
+                name = "handoff-file";
+                kind = "option";
+                long = "--handoff-file";
+                type = "string";
+                required = true;
+                description = "Path to a non-secret handoff JSON file.";
+              }
+            ];
+            command = ''
+              set -euo pipefail
+
+              handoff_file=""
+              while [ "$#" -gt 0 ]; do
+                case "$1" in
+                  --handoff-file)
+                    shift
+                    handoff_file="''${1:-}"
+                    ;;
+                  --help|-h)
+                    echo "usage: run-task task.mfm.portfolio.helios-start --handoff-file <PATH>" >&2
+                    exit 0
+                    ;;
+                  *)
+                    echo "ERROR: unknown argument '$1'" >&2
+                    exit 2
+                    ;;
+                esac
+                shift
+              done
+
+              if [ -z "$handoff_file" ]; then
+                echo "ERROR: --handoff-file is required" >&2
+                exit 2
+              fi
+
+              if [ ! -f "$handoff_file" ]; then
+                echo "ERROR: snapshot handoff file is missing path=$handoff_file" >&2
+                exit 1
+              fi
+
+              if [ -z "''${HELIOSRPC_PORT:-}" ]; then
+                echo "ERROR: HELIOSRPC_PORT is not set for snapshot helios startup" >&2
+                exit 1
+              fi
+
+              service_scope_root="$(${pkgs.jq}/bin/jq -r '.service_scope_root // empty' "$handoff_file")"
+              service_root="$(${pkgs.jq}/bin/jq -r '.service_root // empty' "$handoff_file")"
+              slot_info_json_script="$(${pkgs.jq}/bin/jq -r '.slot_info_json_script // empty' "$handoff_file")"
+              reuse_policy="$(${pkgs.jq}/bin/jq -r '.reuse_policy // empty' "$handoff_file")"
+
+              if [ -z "$service_scope_root" ] || [ -z "$service_root" ] || [ -z "$slot_info_json_script" ]; then
+                echo "ERROR: snapshot handoff file is missing shared service metadata" >&2
+                exit 1
+              fi
+
+              export SLOT_INFO_JSON="$slot_info_json_script"
+              export NIXFIED_RUNTIME_DIR_SCOPE="$service_scope_root"
+              export NIXFIED_SERVICE_ROOT="$service_root"
+              export NIXFIED_SERVICE_HELIOS_DATA_DIR="$service_root/helios/data"
+              export NIXFIED_SERVICE_HELIOS_STATE_DIR="$service_root/helios/state"
+              export NIXFIED_SERVICE_HELIOS_LOG_DIR="$service_root/helios/log"
+              export HELIOS_RPC_PORT="$HELIOSRPC_PORT"
+
+              mkdir -p "$NIXFIED_SERVICE_HELIOS_DATA_DIR" "$NIXFIED_SERVICE_HELIOS_STATE_DIR" "$NIXFIED_SERVICE_HELIOS_LOG_DIR"
+
+              HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
+              if [ "$HELIOS_NETWORK" != "mainnet" ]; then
+                echo "ERROR: HELIOS_NETWORK must be 'mainnet' for mfm::portfolio::snapshot" >&2
+                exit 1
+              fi
+
+              export HELIOS_NETWORK
+              export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
+                conf.modules.helios.executionRpcUrl or "https://ethereum-rpc.publicnode.com"
+              }}"
+              export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-}"
+              export HELIOS_CHECKPOINT="''${HELIOS_CHECKPOINT:-}"
+
+              if [ -z "$HELIOS_EXECUTION_RPC_URL" ]; then
+                echo "ERROR: HELIOS_EXECUTION_RPC_URL is required for snapshot helios startup" >&2
+                exit 1
+              fi
+
+              helios_root="$service_root/helios"
+              helios_log="$helios_root/logs/helios.log"
+              helios_pid_file="$helios_root/run/helios.pid"
+              helios_owned=0
+              helios_health_timeout_seconds="''${HELIOS_HEALTH_TIMEOUT_SECS:-''${HELIOS_READY_TIMEOUT_SECS:-300}}"
+              helios_health_interval_seconds="''${HELIOS_HEALTH_INTERVAL_SECS:-''${HELIOS_READY_INTERVAL_SECS:-1}}"
+
+              helios_is_running() {
+                local pid=""
+                if [ ! -f "$helios_pid_file" ]; then
+                  return 1
+                fi
+                pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
+                [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+              }
+
+              helios_port_ready() {
+                ${frameworkHeliosService.health} >/dev/null 2>&1
+              }
+
+              wait_for_helios_health() {
+                local timeout="$helios_health_timeout_seconds"
+                local interval="$helios_health_interval_seconds"
+                local start_ts
+                local now_ts
+                local attempt=0
+
+                case "$timeout" in
+                  *[!0-9]*|"")
+                    echo "ERROR: HELIOS_HEALTH_TIMEOUT_SECS must be an integer seconds value (got '$timeout')" >&2
+                    return 1
+                    ;;
+                esac
+
+                case "$interval" in
+                  *[!0-9]*|"")
+                    echo "ERROR: HELIOS_HEALTH_INTERVAL_SECS must be an integer seconds value (got '$interval')" >&2
+                    return 1
+                    ;;
+                esac
+
+                start_ts="$(${pkgs.coreutils}/bin/date +%s)"
+                while true; do
+                  attempt=$((attempt + 1))
+
+                  if ${frameworkHeliosService.health} >/dev/null 2>&1; then
+                    return 0
+                  fi
+
+                  if [ $((attempt % 10)) -eq 0 ]; then
+                    echo "INFO: helios health checks not ready yet attempt=$attempt"
+                  fi
+
+                  now_ts="$(${pkgs.coreutils}/bin/date +%s)"
+                  if [ $((now_ts - start_ts)) -ge "$timeout" ]; then
+                    return 1
+                  fi
+
+                  ${pkgs.coreutils}/bin/sleep "$interval"
+                done
+              }
+
+              if helios_is_running; then
+                if [ "$reuse_policy" = "never" ]; then
+                  echo "ERROR: helios already managed for this slot and reuse policy is 'never'" >&2
+                  exit 1
+                fi
+                echo "INFO: reusing framework-managed helios port=$HELIOS_RPC_PORT root=$helios_root"
+              elif helios_port_ready; then
+                if [ "$reuse_policy" = "never" ]; then
+                  echo "ERROR: helios already serving on port $HELIOS_RPC_PORT and reuse policy is 'never'" >&2
+                  exit 1
+                fi
+                echo "INFO: reusing healthy helios on slot port=$HELIOS_RPC_PORT outside expected pid file=$helios_pid_file"
+              else
+                helios_owned=1
+                echo "INFO: starting framework-managed helios port=$HELIOS_RPC_PORT root=$helios_root execution_rpc=$HELIOS_EXECUTION_RPC_URL"
+              fi
+
+              if [ "$helios_owned" = "1" ]; then
+                if ! ${frameworkHeliosService.fullStart}; then
+                  echo "ERROR: helios full-start failed port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
+                  if [ -f "$helios_log" ]; then
+                    tail -50 "$helios_log" >&2 || true
+                  fi
+                  exit 1
+                fi
+              fi
+
+              if ! wait_for_helios_health; then
+                echo "ERROR: helios failed snapshot health checks after $helios_health_timeout_seconds s port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
+                if [ -f "$helios_log" ]; then
+                  tail -50 "$helios_log" >&2 || true
+                fi
+                exit 1
+              fi
+
+              handoff_tmp="$(mktemp "''${TMPDIR:-/tmp}/mfm-portfolio-helios-handoff.XXXXXX")"
+              ${pkgs.jq}/bin/jq \
+                --arg helios_owned "$helios_owned" \
+                --arg helios_pid_file "$helios_pid_file" \
+                --arg helios_log "$helios_log" \
+                '.helios_owned = ($helios_owned == "1")
+                | .helios_pid_file = $helios_pid_file
+                | .helios_log = $helios_log' \
+                "$handoff_file" > "$handoff_tmp"
+              mv "$handoff_tmp" "$handoff_file"
+
+              echo "OK: snapshot helios ready port=$HELIOS_RPC_PORT handoff=$handoff_file"
             '';
           }
           // {
@@ -1392,11 +1466,14 @@ in
         mfm-portfolio-services-stop =
           mkCommandTask {
             id = "task.mfm.portfolio.services-stop";
-            appName = "mfm-portfolio-services-stop";
+            appName = "mfm-portfolio-postgres-stop";
             kind = "internal";
-            summary = "Stop owned portfolio snapshot services";
-            description = "Internal task that stops only Postgres and Helios processes owned by the current snapshot invocation.";
+            summary = "Stop owned portfolio snapshot postgres";
+            description = "Internal task that stops only Postgres owned by the current snapshot invocation.";
             runtimeInputs = commonRuntimeInputs ++ [ postgresPackage ];
+            requirements = {
+              services = [ "postgres" ];
+            };
             allowUnknownArgs = false;
             contractArgs = [
               {
@@ -1442,14 +1519,86 @@ in
 
               cleanup_required="$(${pkgs.jq}/bin/jq -r 'if .cleanup_required then "1" else "0" end' "$handoff_file")"
               postgres_owned="$(${pkgs.jq}/bin/jq -r 'if .postgres_owned then "1" else "0" end' "$handoff_file")"
-              helios_owned="$(${pkgs.jq}/bin/jq -r 'if .helios_owned then "1" else "0" end' "$handoff_file")"
               postgres_data="$(${pkgs.jq}/bin/jq -r '.postgres_data // empty' "$handoff_file")"
               postgres_log="$(${pkgs.jq}/bin/jq -r '.postgres_log // empty' "$handoff_file")"
-              helios_pid_file="$(${pkgs.jq}/bin/jq -r '.helios_pid_file // empty' "$handoff_file")"
-              helios_log="$(${pkgs.jq}/bin/jq -r '.helios_log // empty' "$handoff_file")"
 
               if [ "$cleanup_required" != "1" ]; then
-                echo "SKIP: snapshot services preserved by policy handoff=$handoff_file"
+                echo "SKIP: snapshot postgres preserved by policy handoff=$handoff_file"
+                exit 0
+              fi
+
+              if [ "$postgres_owned" = "1" ] && [ -n "$postgres_data" ] && [ -d "$postgres_data" ]; then
+                echo "INFO: stopping owned postgres data=$postgres_data"
+                ${postgresPackage}/bin/pg_ctl -D "$postgres_data" stop -m fast >/dev/null 2>&1 || true
+              fi
+
+              echo "OK: snapshot postgres stopped handoff=$handoff_file"
+            '';
+          }
+          // {
+            ui.app.expose = false;
+          };
+
+        mfm-portfolio-helios-stop =
+          mkCommandTask {
+            id = "task.mfm.portfolio.helios-stop";
+            appName = "mfm-portfolio-helios-stop";
+            kind = "internal";
+            summary = "Stop owned portfolio snapshot helios";
+            description = "Internal task that stops only Helios owned by the current snapshot invocation.";
+            runtimeInputs = commonRuntimeInputs;
+            requirements = {
+              services = [ "helios" ];
+            };
+            allowUnknownArgs = false;
+            contractArgs = [
+              {
+                name = "handoff-file";
+                kind = "option";
+                long = "--handoff-file";
+                type = "string";
+                required = true;
+                description = "Path to a non-secret handoff JSON file.";
+              }
+            ];
+            command = ''
+              set -euo pipefail
+
+              handoff_file=""
+              while [ "$#" -gt 0 ]; do
+                case "$1" in
+                  --handoff-file)
+                    shift
+                    handoff_file="''${1:-}"
+                    ;;
+                  --help|-h)
+                    echo "usage: run-task task.mfm.portfolio.helios-stop --handoff-file <PATH>" >&2
+                    exit 0
+                    ;;
+                  *)
+                    echo "ERROR: unknown argument '$1'" >&2
+                    exit 2
+                    ;;
+                esac
+                shift
+              done
+
+              if [ -z "$handoff_file" ]; then
+                echo "ERROR: --handoff-file is required" >&2
+                exit 2
+              fi
+
+              if [ ! -f "$handoff_file" ]; then
+                echo "SKIP: snapshot handoff file is missing path=$handoff_file"
+                exit 0
+              fi
+
+              cleanup_required="$(${pkgs.jq}/bin/jq -r 'if .cleanup_required then "1" else "0" end' "$handoff_file")"
+              helios_owned="$(${pkgs.jq}/bin/jq -r 'if .helios_owned then "1" else "0" end' "$handoff_file")"
+              helios_pid_file="$(${pkgs.jq}/bin/jq -r '.helios_pid_file // empty' "$handoff_file")"
+
+              if [ "$cleanup_required" != "1" ]; then
+                echo "SKIP: snapshot helios preserved by policy handoff=$handoff_file"
                 exit 0
               fi
 
@@ -1469,12 +1618,7 @@ in
                 rm -f "$helios_pid_file"
               fi
 
-              if [ "$postgres_owned" = "1" ] && [ -n "$postgres_data" ] && [ -d "$postgres_data" ]; then
-                echo "INFO: stopping owned postgres data=$postgres_data"
-                ${postgresPackage}/bin/pg_ctl -D "$postgres_data" stop -m fast >/dev/null 2>&1 || true
-              fi
-
-              echo "OK: snapshot services stopped handoff=$handoff_file"
+              echo "OK: snapshot helios stopped handoff=$handoff_file"
             '';
           }
           // {
@@ -1489,10 +1633,12 @@ in
             summary = "Validate snapshot workflow inputs";
             description = "Internal task that validates env and temp paths for the portfolio snapshot workflow.";
             runtimeInputs = leanRuntimeInputs;
+            requirements = {
+              services = [ "postgres" ];
+            };
             allowUnknownArgs = false;
             command = ''
               set -euo pipefail
-              ${serviceSkipShellHelpers}
 
               if [ "$#" -ne 0 ]; then
                 echo "ERROR: task.mfm.portfolio.snapshot.preflight does not accept arguments" >&2
@@ -1576,6 +1722,9 @@ in
             summary = "Start snapshot workflow services";
             description = "Internal task that delegates to the portfolio snapshot service bootstrap task.";
             runtimeInputs = leanRuntimeInputs;
+            requirements = {
+              services = [ "postgres" ];
+            };
             allowUnknownArgs = false;
             command = ''
               set -euo pipefail
@@ -1596,6 +1745,9 @@ in
               fi
 
               NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.mfm.portfolio.services-start --handoff-file "$MFM_SNAPSHOT_HANDOFF_FILE"
+              if ! is_service_skipped helios; then
+                NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.mfm.portfolio.helios-start --handoff-file "$MFM_SNAPSHOT_HANDOFF_FILE"
+              fi
             '';
           }
           // {
@@ -1610,10 +1762,12 @@ in
             summary = "Run the packaged snapshot CLI";
             description = "Internal task that runs the packaged mfm_cli binary and writes the raw JSON result file.";
             runtimeInputs = leanRuntimeInputs ++ [ conf.packages."mfm-cli" ];
+            requirements = {
+              services = [ "postgres" ];
+            };
             allowUnknownArgs = false;
             command = ''
               set -euo pipefail
-              ${serviceSkipShellHelpers}
               if [ -w /dev/tty ]; then
                 exec >/dev/tty 2>&1
               fi
@@ -1640,7 +1794,7 @@ in
               fi
 
               if is_service_skipped helios && [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ]; then
-                echo "ERROR: MFM_EVM_RPC_SOURCES_JSON is required when SKIP_HELIOS=1" >&2
+                echo "ERROR: MFM_EVM_RPC_SOURCES_JSON is required when helios is skipped"
                 exit 1
               fi
               if [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ] && [ -z "''${HELIOSRPC_PORT:-}" ]; then
@@ -1680,6 +1834,9 @@ in
             summary = "Stop snapshot workflow services";
             description = "Internal task that delegates to the portfolio snapshot service teardown task.";
             runtimeInputs = leanRuntimeInputs;
+            requirements = {
+              services = [ "postgres" ];
+            };
             allowUnknownArgs = false;
             command = ''
               set -euo pipefail
@@ -1702,6 +1859,9 @@ in
                 exit 1
               fi
 
+              if ! is_service_skipped helios; then
+                NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.mfm.portfolio.helios-stop --handoff-file "$MFM_SNAPSHOT_HANDOFF_FILE"
+              fi
               NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.mfm.portfolio.services-stop --handoff-file "$MFM_SNAPSHOT_HANDOFF_FILE"
             '';
           }
@@ -1711,7 +1871,7 @@ in
 
         mfm-portfolio-snapshot = mkCommandTask {
           id = "task.mfm.portfolio.snapshot";
-          appName = "mfm-portfolio-snapshot-internal";
+          appName = "mfm::portfolio::snapshot";
           summary = "Snapshot a portfolio request with Helios-backed mainnet RPC";
           description = ''
             Starts/reuses Postgres + Helios, waits for Helios RPC health checks,
@@ -1727,6 +1887,9 @@ in
             "MFM_ENV=dev HELIOS_NETWORK=mainnet SERVICE_REUSE_POLICY=same-slot nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json"
           ];
           runtimeInputs = leanRuntimeInputs;
+          requirements = {
+            services = [ "postgres" ];
+          };
           argParser = "typed";
           allowUnknownArgs = false;
           outputFormat = "json";
@@ -1747,9 +1910,8 @@ in
               description = "Path to the canonical portfolio snapshot request JSON file.";
             }
           ];
-          command = ''
+            command = ''
             set -euo pipefail
-            ${serviceSkipShellHelpers}
 
             # Reserve stdout for the final JSON payload and route progress logs to
             # the controlling terminal when available, because nested nixfied task
@@ -2021,7 +2183,7 @@ in
 
         ci = mkCommandTask {
           id = "task.ci";
-          appName = "ci-internal";
+          appName = "ci";
           kind = "workflow";
           summary = "Run CI workflows (use --mode <mode>)";
           description = "Dispatches to model-derived CI workflows.";
@@ -2298,9 +2460,9 @@ in
 
               echo "INFO: starting ci services env=$env_value slot=$slot_value postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT helios=$HELIOS_RPC_PORT"
               skip_helios=0
-              if [ -n "''${SKIP_HELIOS+x}" ]; then
+              if is_service_skipped helios; then
                 skip_helios=1
-                echo "SKIP: starting/parity checks for helios are disabled (SKIP_HELIOS=1)"
+                echo "SKIP: starting/parity checks for helios are disabled"
               fi
 
               services_root="$artifacts_dir/services"
@@ -2660,7 +2822,7 @@ in
               reth_pid_file="$services_root/reth/reth.pid"
               helios_pid_file="$services_root/helios/helios.pid"
 
-              if [ -z "''${SKIP_HELIOS+x}" ] && [ -f "$helios_pid_file" ]; then
+              if ! is_service_skipped helios && [ -f "$helios_pid_file" ]; then
                 helios_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
                 if [ -n "$helios_pid" ] && kill -0 "$helios_pid" 2>/dev/null; then
                   kill "$helios_pid" 2>/dev/null || true
@@ -2807,6 +2969,9 @@ in
             ];
             runtimeInputs = rustRuntimeInputs;
             env = ciCargoRustEnv;
+            requirements = {
+              services = [ "helios" ];
+            };
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
@@ -2817,10 +2982,6 @@ in
               response_file="$artifacts_dir/parity-evm-helios-smoke.response.json"
 
               echo "INFO: running ci step=parity-evm-helios-smoke"
-              if [ -n "''${SKIP_HELIOS+x}" ]; then
-                echo "SKIP: parity-evm-helios-smoke skipped by SKIP_HELIOS=1"
-                exit 0
-              fi
 
               run_with_log "$key_log_file" ${parityNextestCmd} --test parity_keystore_reth_tx_send
 
@@ -2939,6 +3100,9 @@ in
               "mainnet"
             ];
             runtimeInputs = leanRuntimeInputs ++ [ conf.packages."mfm-cli" ];
+            requirements = {
+              services = [ "helios" ];
+            };
             command = ''
               set -euo pipefail
               ${ciStepPreamble}

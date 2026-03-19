@@ -26,17 +26,6 @@ let
       ];
 
   aaveOriginTools = if pkgs == null then null else import ./aave-origin-tools.nix { inherit pkgs; };
-  skipHelios = builtins.getEnv "SKIP_HELIOS" == "1";
-  heliosPackage =
-    if skipHelios then
-      pkgs.writeShellScriptBin "helios" ''
-        echo "ERROR: helios is disabled (SKIP_HELIOS=1)" >&2
-        exit 1
-      ''
-    else if pkgs == null then
-      null
-    else
-      pkgs.callPackage ../framework/runtime/services/helios/package.nix { };
 in
 rec {
   project = {
@@ -254,7 +243,7 @@ rec {
 
     helios = {
       enable = true;
-      package = heliosPackage;
+      package = if pkgs != null then pkgs.callPackage ../framework/runtime/services/helios/package.nix { } else null;
       portKeyRpc = "heliosRpc";
       dataDirName = "helios";
       network = "local";

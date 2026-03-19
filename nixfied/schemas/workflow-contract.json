@@ -28,7 +28,36 @@
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": [ "taskId", "needs", "locks", "when", "skipIfMissingEnv" ]
+        "required": [ "taskId", "needs", "locks", "when", "skipIfMissingEnv" ],
+        "properties": {
+          "taskId": { "type": "string" },
+          "needs": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "locks": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "when": { "type": "object" },
+          "skipIfMissingEnv": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "requirements": {
+            "type": "object",
+            "properties": {
+              "services": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [ "postgres", "nginx", "minio", "reth", "helios" ]
+                }
+              }
+            },
+            "additionalProperties": true
+          }
+        }
       }
     },
     "stages": {

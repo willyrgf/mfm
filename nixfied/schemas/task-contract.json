@@ -27,6 +27,19 @@
     },
     "summary": { "type": "string" },
     "description": { "type": "string" },
+    "requirements": {
+      "type": "object",
+      "properties": {
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [ "postgres", "nginx", "minio", "reth", "helios" ]
+          }
+        }
+      },
+      "additionalProperties": true
+    },
     "tags": {
       "type": "array",
       "items": { "type": "string" }

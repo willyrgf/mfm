@@ -86,14 +86,20 @@ in
         resolved = resolvedModuleGraph.config;
       };
 
-      tasks = compileTasks {
+      taskCompilation = compileTasks {
         resolved = resolvedModuleGraph.config;
         inherit runtime;
       };
 
+      tasks = taskCompilation.tasks;
+
       workflows = compileWorkflows {
         resolved = resolvedModuleGraph.config;
         inherit tasks;
+        allTasks = taskCompilation.allTasks;
+        declaredTaskIds = taskCompilation.declaredTaskIds;
+        prunedTaskIds = taskCompilation.prunedTaskIds;
+        pruneReasonsByTaskId = taskCompilation.pruneReasonsByTaskId;
       };
 
       features = compileFeatures {

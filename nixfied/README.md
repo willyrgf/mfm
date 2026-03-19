@@ -81,7 +81,9 @@ Service skip controls:
 - Service names are normalized with:
   - upper-casing
   - non-alphanumerics converted to `_`
-- A true skip suppresses service build/setup/ready/health and prevents service-specific operations work from running.
+- A true skip only affects runtime execution. It suppresses service build/setup/ready/health operations for that run and prevents service-specific operations work from running.
+- To exclude a service from the compiled graph entirely, set `nixfied.graph.excludedServices = [ "<service>" ]`.
+- Graph exclusion happens before project service projection and is the correct mechanism when a service branch must not be evaluated at all.
 
 Examples:
 
@@ -96,8 +98,13 @@ SKIP_CACHE=yes nix run .#run-task -- <task-id>
 SKIP_REDIS=on nix run .#health -- --service all
 ```
 
-If a workflow unit depends on a skipped service unit, the workflow exits non-zero and dependents are marked skipped as dependency failures.
+If a workflow unit depends on a skipped service unit, its dependents are cascade-skipped with reason `dependency-skipped`. A skip-only workflow exits 0.
 Covered by `tests/framework/skip-service-smoke`.
+
+Task and workflow service requirements:
+
+- Use `requirements.services = [ "<service>" ... ]` on tasks and workflow units to declare hard service capability requirements.
+- Compile-time graph exclusion and runtime `SKIP_<SERVICE>` both use those requirements.
 
 Ephemeral execution defaults (configured in `nixfied/project/conf.nix`):
 

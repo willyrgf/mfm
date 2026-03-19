@@ -6,11 +6,30 @@
 {
   resolved,
   tasks,
+  allTasks ? tasks,
+  declaredTaskIds ? builtins.sort builtins.lessThan (builtins.attrNames allTasks),
+  prunedTaskIds ? [ ],
+  pruneReasonsByTaskId ? { },
 }:
 let
   listUtils = import ../framework/core/list-utils.nix;
   rawWorkflows = resolved.workflows or { };
+  excludedServices = resolved.graph.excludedServices or [ ];
   names = builtins.sort builtins.lessThan (builtins.attrNames rawWorkflows);
+
+  declaredTaskIdSet = builtins.listToAttrs (
+    map (taskId: {
+      name = taskId;
+      value = true;
+    }) declaredTaskIds
+  );
+
+  prunedTaskIdSet = builtins.listToAttrs (
+    map (taskId: {
+      name = taskId;
+      value = true;
+    }) prunedTaskIds
+  );
 
   normalizeWorkflowId =
     name: rawId:
@@ -19,13 +38,27 @@ let
     in
     idLib.ensurePrefix "workflow" effective;
 
+  resolveDeclaredTaskId =
+    rawTaskId:
+    if rawTaskId == "" then
+      rawTaskId
+    else if builtins.hasAttr rawTaskId declaredTaskIdSet then
+      rawTaskId
+    else
+      idLib.ensurePrefix "task" rawTaskId;
+
+  isDeclaredTaskId = taskId: builtins.hasAttr taskId declaredTaskIdSet;
+  isPrunedTaskId = taskId: builtins.hasAttr taskId prunedTaskIdSet;
+
   normalizeUnit = unit: {
-    taskId = unit.taskId;
+    taskId = resolveDeclaredTaskId unit.taskId;
     needs = listUtils.uniquePreserveOrder unit.needs;
     locks = listUtils.uniquePreserveOrder unit.locks;
     when = unit.when;
     skipIfMissingEnv = listUtils.uniquePreserveOrder unit.skipIfMissingEnv;
-    serviceName = unit.serviceName or "";
+    requirements = unit.requirements or { } // {
+      services = listUtils.uniquePreserveOrder (unit.requirements.services or [ ]);
+    };
   };
 
   unitsFromStages =
@@ -45,8 +78,7 @@ let
             map (stageEntry: {
               name = stageEntry;
               value = {
-                taskId =
-                  if builtins.hasAttr stageEntry tasks then stageEntry else idLib.ensurePrefix "task" stageEntry;
+                taskId = resolveDeclaredTaskId stageEntry;
                 needs = state.previous;
                 locks = [ ];
                 when = {
@@ -54,7 +86,9 @@ let
                   envPresent = [ ];
                 };
                 skipIfMissingEnv = [ ];
-                serviceName = "";
+                requirements = {
+                  services = [ ];
+                };
               };
             }) stageUnits
           );
@@ -82,7 +116,7 @@ let
         let
           unit = units.${unitName};
           _taskRef =
-            if builtins.hasAttr unit.taskId tasks then
+            if isDeclaredTaskId unit.taskId then
               true
             else
               throw "workflow '${workflowId}' references unknown task '${unit.taskId}'";
@@ -97,6 +131,21 @@ let
         true;
     in
     map validateUnit unitNames;
+
+  normalizePhaseTaskRefs =
+    workflowId: phaseName: taskIds:
+    listUtils.uniquePreserveOrder (
+      map (
+        rawTaskId:
+        let
+          taskId = resolveDeclaredTaskId rawTaskId;
+        in
+        if isDeclaredTaskId taskId then
+          taskId
+        else
+          throw "workflow '${workflowId}' ${phaseName}.tasks references unknown task '${rawTaskId}'"
+      ) taskIds
+    );
 
   topoSort =
     workflowId: units:
@@ -187,46 +236,6 @@ let
 
   resolveSoftTaskDeps = unitsByTask: depTaskId: unitsByTask.${depTaskId} or [ ];
 
-  mergeTaskMetadata =
-    workflowId: units:
-    let
-      unitsByTask = unitNamesByTask units;
-    in
-    builtins.mapAttrs (
-      unitName: unit:
-      let
-        task = tasks.${unit.taskId};
-        taskServiceName = task.serviceName or "";
-        taskScheduling = task.scheduling;
-        taskDeps = task.deps;
-        taskProduces = task.produces;
-
-        hardNeeds = builtins.concatLists (
-          map (depTaskId: resolveHardTaskDeps workflowId unitsByTask unitName depTaskId) (
-            taskDeps.needs or [ ]
-          )
-        );
-
-        softNeeds = builtins.concatLists (
-          map (depTaskId: resolveSoftTaskDeps unitsByTask depTaskId) (taskDeps.softNeeds or [ ])
-        );
-      in
-      unit
-      // {
-        needs = listUtils.uniquePreserveOrder (unit.needs ++ hardNeeds ++ softNeeds);
-        locks = listUtils.uniquePreserveOrder (unit.locks ++ (taskScheduling.locks or [ ]));
-        serviceName = if unit.serviceName != "" then unit.serviceName else taskServiceName;
-        priority = taskScheduling.priority or 100;
-        scheduling = {
-          maxAttempts = taskScheduling.maxAttempts or 1;
-          retryBackoffSec = taskScheduling.retryBackoffSec or [ ];
-          priority = taskScheduling.priority or 100;
-        };
-        deps = taskDeps;
-        produces = taskProduces;
-      }
-    ) units;
-
   compileWorkflow =
     name:
     let
@@ -249,16 +258,189 @@ let
         else
           unitsFromStages raw.stages;
 
-      unitMap = mergeTaskMetadata workflowId authoredUnits;
+      _validated = validateUnits workflowId authoredUnits;
 
-      _validated = validateUnits workflowId unitMap;
-      order = topoSort workflowId unitMap;
+      normalizedPreRunTasks = normalizePhaseTaskRefs workflowId "preRun" (raw.preRun.tasks or [ ]);
+      normalizedPostRunTasks = normalizePhaseTaskRefs workflowId "postRun" (raw.postRun.tasks or [ ]);
 
-      workflowStages =
-        if usesStages then
-          map (stage: builtins.sort builtins.lessThan stage) raw.stages
+      authoredUnitsByTask = unitNamesByTask authoredUnits;
+
+      unitCompilation = builtins.mapAttrs (
+        unitName: unit:
+        let
+          task = allTasks.${unit.taskId};
+          taskRequiredServices = task.requirements.services or [ ];
+          unitRequiredServices = unit.requirements.services or [ ];
+          effectiveRequiredServices = listUtils.uniquePreserveOrder (
+            taskRequiredServices ++ unitRequiredServices
+          );
+          excludedRequirements = builtins.filter (
+            serviceName: builtins.elem serviceName excludedServices
+          ) effectiveRequiredServices;
+          initialPruneReason =
+            if isPrunedTaskId unit.taskId then
+              {
+                reason = "task-pruned";
+                taskId = unit.taskId;
+                taskReason = pruneReasonsByTaskId.${unit.taskId} or null;
+              }
+            else if excludedRequirements != [ ] then
+              {
+                reason = "service-excluded";
+                serviceName = builtins.head excludedRequirements;
+                serviceNames = excludedRequirements;
+              }
+            else
+              null;
+          taskScheduling = task.scheduling;
+          taskDeps = task.deps;
+          taskProduces = task.produces;
+          hardTaskNeeds =
+            if initialPruneReason != null then
+              [ ]
+            else
+              builtins.concatLists (
+                map (depTaskId: resolveHardTaskDeps workflowId authoredUnitsByTask unitName depTaskId) (
+                  taskDeps.needs or [ ]
+                )
+              );
+          softTaskNeeds =
+            if initialPruneReason != null then
+              [ ]
+            else
+              builtins.concatLists (
+                map (depTaskId: resolveSoftTaskDeps authoredUnitsByTask depTaskId) (taskDeps.softNeeds or [ ])
+              );
+        in
+        {
+          taskId = unit.taskId;
+          explicitNeeds = unit.needs;
+          hardNeeds = listUtils.uniquePreserveOrder (unit.needs ++ hardTaskNeeds);
+          softNeeds = listUtils.uniquePreserveOrder softTaskNeeds;
+          locks = listUtils.uniquePreserveOrder (unit.locks ++ (taskScheduling.locks or [ ]));
+          when = unit.when;
+          skipIfMissingEnv = unit.skipIfMissingEnv;
+          requirements = {
+            services = effectiveRequiredServices;
+          };
+          priority = taskScheduling.priority or 100;
+          scheduling = {
+            maxAttempts = taskScheduling.maxAttempts or 1;
+            retryBackoffSec = taskScheduling.retryBackoffSec or [ ];
+            priority = taskScheduling.priority or 100;
+          };
+          deps = taskDeps;
+          produces = taskProduces;
+          initialPruneReason = initialPruneReason;
+        }
+      ) authoredUnits;
+
+      unitNames = builtins.sort builtins.lessThan (builtins.attrNames unitCompilation);
+
+      initialPruneReasonsByUnit = builtins.listToAttrs (
+        builtins.concatLists (
+          map (
+            unitName:
+            let
+              unit = unitCompilation.${unitName};
+            in
+            if unit.initialPruneReason == null then
+              [ ]
+            else
+              [
+                {
+                  name = unitName;
+                  value = unit.initialPruneReason;
+                }
+              ]
+          ) unitNames
+        )
+      );
+
+      pruneUnitsUntilStable =
+        pruneReasonsByUnit:
+        let
+          nextPruneReasons = builtins.listToAttrs (
+            builtins.concatLists (
+              map (
+                unitName:
+                if builtins.hasAttr unitName pruneReasonsByUnit then
+                  [ ]
+                else
+                  let
+                    unit = unitCompilation.${unitName};
+                    blockingNeeds = builtins.filter (
+                      depUnitName: builtins.hasAttr depUnitName pruneReasonsByUnit
+                    ) unit.hardNeeds;
+                  in
+                  if blockingNeeds == [ ] then
+                    [ ]
+                  else
+                    [
+                      {
+                        name = unitName;
+                        value = {
+                          reason = "required-unit-pruned";
+                          dependency = builtins.head blockingNeeds;
+                        };
+                      }
+                    ]
+              ) unitNames
+            )
+          );
+        in
+        if nextPruneReasons == { } then
+          pruneReasonsByUnit
         else
-          deriveStages workflowId unitMap;
+          pruneUnitsUntilStable (pruneReasonsByUnit // nextPruneReasons);
+
+      pruneReasonsByUnit = pruneUnitsUntilStable initialPruneReasonsByUnit;
+      survivingUnitNames = builtins.filter (
+        unitName: !(builtins.hasAttr unitName pruneReasonsByUnit)
+      ) unitNames;
+      survivingUnitSet = builtins.listToAttrs (
+        map (unitName: {
+          name = unitName;
+          value = true;
+        }) survivingUnitNames
+      );
+
+      finalUnits = builtins.listToAttrs (
+        map (
+          unitName:
+          let
+            unit = unitCompilation.${unitName};
+            softNeeds = builtins.filter (
+              depUnitName: builtins.hasAttr depUnitName survivingUnitSet
+            ) unit.softNeeds;
+          in
+          {
+            name = unitName;
+            value = canonical.canonicalize {
+              taskId = unit.taskId;
+              needs = listUtils.uniquePreserveOrder (unit.hardNeeds ++ softNeeds);
+              locks = unit.locks;
+              when = unit.when;
+              skipIfMissingEnv = unit.skipIfMissingEnv;
+              requirements = unit.requirements;
+              priority = unit.priority;
+              scheduling = unit.scheduling;
+              deps = unit.deps;
+              produces = unit.produces;
+            };
+          }
+        ) survivingUnitNames
+      );
+
+      survivingPreRunTasks = builtins.filter (
+        taskId: builtins.hasAttr taskId tasks
+      ) normalizedPreRunTasks;
+      survivingPostRunTasks = builtins.filter (
+        taskId: builtins.hasAttr taskId tasks
+      ) normalizedPostRunTasks;
+
+      order = topoSort workflowId finalUnits;
+      workflowStages = deriveStages workflowId finalUnits;
 
       stageIndexByUnit = builtins.listToAttrs (
         builtins.concatLists (
@@ -287,7 +469,7 @@ let
             map (
               unitName:
               let
-                unit = unitMap.${unitName};
+                unit = finalUnits.${unitName};
               in
               {
                 name = unitName;
@@ -297,7 +479,7 @@ let
                 locks = unit.locks;
                 when = unit.when;
                 skipIfMissingEnv = unit.skipIfMissingEnv;
-                serviceName = unit.serviceName;
+                requirements = unit.requirements;
                 priority = unit.priority;
                 scheduling = unit.scheduling;
                 deps = unit.deps;
@@ -313,10 +495,14 @@ let
       mode = raw.mode;
       maxWorkers = if raw.maxWorkers < 1 then 1 else raw.maxWorkers;
       logging = raw.logging;
-      units = unitMap;
+      units = finalUnits;
       stages = workflowStages;
-      preRun = raw.preRun;
-      postRun = raw.postRun;
+      preRun = (raw.preRun or { }) // {
+        tasks = survivingPreRunTasks;
+      };
+      postRun = (raw.postRun or { }) // {
+        tasks = survivingPostRunTasks;
+      };
       artifacts = raw.artifacts;
       execution = raw.execution;
       plan = plan;

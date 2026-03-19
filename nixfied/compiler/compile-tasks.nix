@@ -12,6 +12,7 @@ let
   rawTasks = resolved.tasks or { };
   names = builtins.sort builtins.lessThan (builtins.attrNames rawTasks);
   globalRuntimeInputs = map builtins.toString (resolved.tooling.runtimePackages or [ ]);
+  excludedServices = resolved.graph.excludedServices or [ ];
 
   normalizeHooks =
     hooks:
@@ -31,19 +32,20 @@ let
     in
     idLib.ensurePrefix "task" effective;
 
-  normalizeTask =
+  normalizeTaskBase =
     name:
     let
       raw = rawTasks.${name};
       id = normalizeId name raw.id;
+      requiredServices = listUtils.uniquePreserveOrder (raw.requirements.services or [ ]);
     in
     canonical.canonicalize {
-      inherit
-        id
-        ;
+      inherit id;
 
       kind = raw.kind;
-      serviceName = raw.serviceName;
+      requirements = raw.requirements // {
+        services = requiredServices;
+      };
       summary = raw.summary;
       description = raw.description;
       tags = raw.tags;
@@ -85,7 +87,7 @@ let
   addTask =
     acc: name:
     let
-      task = normalizeTask name;
+      task = normalizeTaskBase name;
       id = task.id;
     in
     if builtins.hasAttr id acc then
@@ -99,12 +101,124 @@ let
         ${id} = task;
       };
 
-  tasksById = builtins.foldl' addTask { } names;
+  tasksByIdRaw = builtins.foldl' addTask { } names;
+
+  normalizeTaskDepId =
+    depTaskId:
+    if depTaskId == "" then
+      depTaskId
+    else if builtins.hasAttr depTaskId tasksByIdRaw then
+      depTaskId
+    else
+      idLib.ensurePrefix "task" depTaskId;
+
+  tasksById = builtins.mapAttrs (
+    _: task:
+    let
+      normalizedNeeds = listUtils.uniquePreserveOrder (map normalizeTaskDepId (task.deps.needs or [ ]));
+      normalizedSoftNeeds = listUtils.uniquePreserveOrder (
+        map normalizeTaskDepId (task.deps.softNeeds or [ ])
+      );
+    in
+    canonical.canonicalize (
+      task
+      // {
+        deps = task.deps // {
+          needs = normalizedNeeds;
+          softNeeds = normalizedSoftNeeds;
+        };
+      }
+    )
+  ) tasksByIdRaw;
+
   ids = builtins.sort builtins.lessThan (builtins.attrNames tasksById);
+
+  _validateDependencies = map (
+    taskId:
+    let
+      task = tasksById.${taskId};
+      validateDep =
+        depTaskId:
+        if builtins.hasAttr depTaskId tasksById then
+          true
+        else
+          throw "task '${taskId}' depends on unknown task '${depTaskId}'";
+    in
+    map validateDep ((task.deps.needs or [ ]) ++ (task.deps.softNeeds or [ ]))
+  ) ids;
+
+  initialPruneReasons = builtins.listToAttrs (
+    builtins.concatLists (
+      map (
+        taskId:
+        let
+          task = tasksById.${taskId};
+          excludedRequirements = builtins.filter (
+            serviceName: builtins.elem serviceName excludedServices
+          ) task.requirements.services;
+        in
+        if excludedRequirements != [ ] then
+          [
+            {
+              name = taskId;
+              value = {
+                reason = "service-excluded";
+                serviceName = builtins.head excludedRequirements;
+                serviceNames = excludedRequirements;
+              };
+            }
+          ]
+        else
+          [ ]
+      ) ids
+    )
+  );
+
+  pruneTasksUntilStable =
+    pruneReasonsByTaskId:
+    let
+      nextPruneReasons = builtins.listToAttrs (
+        builtins.concatLists (
+          map (
+            taskId:
+            if builtins.hasAttr taskId pruneReasonsByTaskId then
+              [ ]
+            else
+              let
+                task = tasksById.${taskId};
+                blockingNeeds = builtins.filter (depTaskId: builtins.hasAttr depTaskId pruneReasonsByTaskId) (
+                  task.deps.needs or [ ]
+                );
+              in
+              if blockingNeeds == [ ] then
+                [ ]
+              else
+                [
+                  {
+                    name = taskId;
+                    value = {
+                      reason = "required-task-pruned";
+                      dependency = builtins.head blockingNeeds;
+                    };
+                  }
+                ]
+          ) ids
+        )
+      );
+    in
+    if nextPruneReasons == { } then
+      pruneReasonsByTaskId
+    else
+      pruneTasksUntilStable (pruneReasonsByTaskId // nextPruneReasons);
+
+  pruneReasonsByTaskId = pruneTasksUntilStable initialPruneReasons;
+  prunedTaskIds = builtins.sort builtins.lessThan (builtins.attrNames pruneReasonsByTaskId);
+  survivingTasks = lib.removeAttrs tasksById prunedTaskIds;
 in
-builtins.listToAttrs (
-  map (id: {
-    name = id;
-    value = tasksById.${id};
-  }) ids
-)
+{
+  allTasks = tasksById;
+  tasks = survivingTasks;
+  declaredTaskIds = ids;
+  prunedTaskIds = prunedTaskIds;
+  pruneReasonsByTaskId = pruneReasonsByTaskId;
+}

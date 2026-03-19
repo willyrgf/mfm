@@ -4,6 +4,7 @@
 }:
 let
   lib = pkgs.lib;
+  listUtils = import ../core/list-utils.nix;
 
   uniqueSorted = values: builtins.sort builtins.lessThan (lib.unique values);
 
@@ -173,6 +174,9 @@ let
         packagePath = task.runner.package or null;
         preHookIds = uniqueSorted (builtins.attrNames (task.runtime.preHooks or { }));
         postHookIds = uniqueSorted (builtins.attrNames (task.runtime.postHooks or { }));
+        requiredServices = listUtils.uniquePreserveOrder (
+          (task.requirements or { services = [ ]; }).services
+        );
         displayName = if (app.expose or false) && (app.name or "") != "" then app.name else taskId;
         usageLines =
           let
@@ -235,7 +239,7 @@ let
           allowUnknown = if argsContract.allowUnknown or false then "true" else "false";
           hasPositional = if builtins.any (spec: spec.kind == "positional") specs then "true" else "false";
           hookCount = toString (builtins.length preHookIds + builtins.length postHookIds);
-          serviceName = task.serviceName or "";
+          requiredServices = requiredServices;
           runnerCommand = if (task.runner.command or null) == null then "" else task.runner.command;
           runnerPackage = if packagePath == null then "" else packagePath;
           runtimeJson = builtins.toJSON (mergeTaskRuntimeWithRunnerPackage task);
@@ -342,6 +346,11 @@ let
   taskCases = map (taskId: {
     key = taskId;
     value = taskDescriptorById.${taskId};
+  }) taskIds;
+
+  taskRequiredServiceCases = map (taskId: {
+    key = taskId;
+    value = taskDescriptorById.${taskId}.requiredServices;
   }) taskIds;
 
   taskLongKindCases = builtins.concatLists (
@@ -782,12 +791,11 @@ in
       esac
     }
 
-    task_service_name() {
+    task_required_services() {
       local task_id="$1"
       case "$task_id" in
-  ${renderCaseReturn (entry: entry.value.serviceName) taskCases}
+  ${renderCasePrintLines (entry: entry.value) taskRequiredServiceCases}
         *)
-          printf '%s' ""
           return 0
           ;;
       esac

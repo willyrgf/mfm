@@ -4,11 +4,11 @@ Vendored Framework
 This repository vendors the Nixfied framework under `nixfied/`.
 
 Framework source revision (install/upgrade):
-- 84cd53ff2ba477840be18c0be1023c0cd07888ea
+- 8c9defce6bddd4dcfc057f95e927813e177c76bf
 
-Changes since previous vendored revision (fc79d95ee9bebbc739a49ba514e821de1d82f753..84cd53ff2ba477840be18c0be1023c0cd07888ea):
+Changes since previous vendored revision (4eab3c839de4fa448c78500fc842ca66c05cbc1a..8c9defce6bddd4dcfc057f95e927813e177c76bf):
 - exact git history unavailable from packaged source
-- compare: https://github.com/willyrgf/nixfied/compare/fc79d95ee9bebbc739a49ba514e821de1d82f753...84cd53ff2ba477840be18c0be1023c0cd07888ea
+- compare: https://github.com/willyrgf/nixfied/compare/4eab3c839de4fa448c78500fc842ca66c05cbc1a...8c9defce6bddd4dcfc057f95e927813e177c76bf
 
 Framework source revision workflow:
 - initialized via `framework::install`

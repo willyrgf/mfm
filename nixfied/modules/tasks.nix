@@ -1,6 +1,8 @@
 { lib, ... }:
 let
   t = lib.types;
+  serviceConfigLib = import ../framework/core/service-config.nix { inherit lib; };
+  serviceRequirementType = t.enum serviceConfigLib.supportedServiceNames;
   runtimeWorkdirType = t.enum [
     "projectRoot"
     "stateRoot"
@@ -143,6 +145,7 @@ let
       };
     };
   };
+
 in
 {
   options.nixfied.tasks = lib.mkOption {
@@ -171,10 +174,6 @@ in
               type = t.str;
               default = name;
             };
-            serviceName = lib.mkOption {
-              type = t.str;
-              default = "";
-            };
             description = lib.mkOption {
               type = t.str;
               default = "";
@@ -182,6 +181,14 @@ in
             tags = lib.mkOption {
               type = t.listOf t.str;
               default = [ ];
+            };
+
+            requirements = {
+              services = lib.mkOption {
+                type = t.listOf serviceRequirementType;
+                default = [ ];
+                description = "Hard service capability requirements used for graph exclusion and runtime skip.";
+              };
             };
 
             runner = {

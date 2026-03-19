@@ -5,7 +5,10 @@ in
 { resolved }:
 let
   services = resolved.services or { };
-  names = builtins.sort builtins.lessThan (builtins.attrNames services);
+  excludedServices = resolved.graph.excludedServices or [ ];
+  names = builtins.sort builtins.lessThan (
+    builtins.filter (name: !(builtins.elem name excludedServices)) (builtins.attrNames services)
+  );
 in
 builtins.listToAttrs (
   map (name: {

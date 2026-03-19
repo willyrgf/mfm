@@ -1,6 +1,7 @@
 { lib, ... }:
 let
   t = lib.types;
+  serviceConfigLib = import ../framework/core/service-config.nix { inherit lib; };
 in
 {
   imports = [
@@ -73,6 +74,14 @@ in
     packages = lib.mkOption {
       type = t.attrsOf t.package;
       default = { };
+    };
+
+    graph = {
+      excludedServices = lib.mkOption {
+        type = t.listOf (t.enum serviceConfigLib.supportedServiceNames);
+        default = [ ];
+        description = "Pure graph-time service exclusions applied before project service projection.";
+      };
     };
   };
 }
