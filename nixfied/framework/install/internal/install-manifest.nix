@@ -3,6 +3,7 @@
 
 let
   lib = pkgs.lib;
+  exitCodes = import ../../core/exit-codes.nix;
 
   assertUnique =
     label: values:
@@ -99,13 +100,7 @@ let
           outputs = {
             mode = "text";
           };
-          failureCodes = {
-            generic = 1;
-            usage = 2;
-            precondition = 3;
-            unavailable = 4;
-            timeout = 5;
-          };
+          failureCodes = builtins.removeAttrs exitCodes [ "canceled" ];
           idempotent = false;
         };
       };
@@ -147,7 +142,26 @@ let
       order = 60;
     }
   ];
-  projectTemplates = lib.sort (a: b: a.order < b.order) (map mkTemplate templateSpecs);
+  projectTemplates =
+    let
+      templates = lib.sort (a: b: a.order < b.order) (map mkTemplate templateSpecs);
+      templateKeys = map (t: t.key) templates;
+      templateFiles = map (t: t.file) templates;
+      templateFilterTokens = builtins.concatLists (map (t: [ t.key ] ++ (t.aliases or [ ])) templates);
+      displayTokens = builtins.concatLists (
+        map (t: if t.filterDisplay == null then [ t.key ] else t.filterDisplay) templates
+      );
+      unknownDisplayTokens = builtins.filter (
+        token: !(builtins.elem token templateFilterTokens)
+      ) displayTokens;
+    in
+    assert assertUnique "template key" templateKeys == null;
+    assert assertUnique "template file" templateFiles == null;
+    assert assertUnique "template filter token" templateFilterTokens == null;
+    if unknownDisplayTokens == [ ] then
+      templates
+    else
+      throw "Install manifest invalid: filterDisplay includes unknown tokens: ${builtins.concatStringsSep ", " unknownDisplayTokens}";
 
   requiredTemplateKeys = map (t: t.key) (builtins.filter (t: t.required or false) projectTemplates);
   optionalTemplatePlans = map (t: {
@@ -158,11 +172,6 @@ let
       ;
   }) (builtins.filter (t: !(t.required or false)) projectTemplates);
 
-  templateKeys = map (t: t.key) projectTemplates;
-  templateFiles = map (t: t.file) projectTemplates;
-  templateFilterTokens = builtins.concatLists (
-    map (t: [ t.key ] ++ (t.aliases or [ ])) projectTemplates
-  );
   templateTokenToKey = builtins.listToAttrs (
     builtins.concatLists (
       map (
@@ -183,21 +192,6 @@ let
     optionalTemplates = optionalTemplatePlans;
     tokenToKey = templateTokenToKey;
   };
-
-  _templateKeysUnique = assertUnique "template key" templateKeys;
-  _templateFilesUnique = assertUnique "template file" templateFiles;
-  _templateFilterTokensUnique = assertUnique "template filter token" templateFilterTokens;
-
-  _displayTokensValid =
-    let
-      unknown = builtins.filter (
-        token: !(builtins.elem token templateFilterTokens)
-      ) templateFilterDisplayTokens;
-    in
-    if unknown == [ ] then
-      null
-    else
-      throw "Install manifest invalid: filterDisplay includes unknown tokens: ${builtins.concatStringsSep ", " unknown}";
 
   frameworkHelperSpecs = [
     {
@@ -227,25 +221,24 @@ let
       usage = [ "nix run .#framework::prompt-plan -- [--force] [--output=PATH]" ];
     }
   ];
-  frameworkHelpers = map mkFrameworkHelper frameworkHelperSpecs;
-
-  helperNames = map (h: h.name) frameworkHelpers;
-  helperRunners = map (h: h.runner) frameworkHelpers;
-  allowedRunners = [
-    "install"
-    "prompt-plan"
-  ];
-
-  _helperNamesUnique = assertUnique "framework helper name" helperNames;
-
-  _helperRunnersValid =
+  frameworkHelpers =
     let
-      invalid = builtins.filter (runner: !(builtins.elem runner allowedRunners)) helperRunners;
+      helpers = map mkFrameworkHelper frameworkHelperSpecs;
+      helperNames = map (h: h.name) helpers;
+      helperRunners = map (h: h.runner) helpers;
+      invalidRunners = builtins.filter (
+        runner:
+        !(builtins.elem runner [
+          "install"
+          "prompt-plan"
+        ])
+      ) helperRunners;
     in
-    if invalid == [ ] then
-      null
+    assert assertUnique "framework helper name" helperNames == null;
+    if invalidRunners == [ ] then
+      helpers
     else
-      throw "Install manifest invalid: unknown framework helper runners: ${builtins.concatStringsSep ", " invalid}";
+      throw "Install manifest invalid: unknown framework helper runners: ${builtins.concatStringsSep ", " invalidRunners}";
 in
 {
   inherit

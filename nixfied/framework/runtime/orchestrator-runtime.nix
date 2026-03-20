@@ -352,6 +352,42 @@ in
     esac
   }
 
+  invocation_root_dir() {
+    local caller_pwd="''${NIXFIED_CALLER_PWD:-}"
+
+    if [ -n "$caller_pwd" ] && [ -d "$caller_pwd" ]; then
+      (
+        cd "$caller_pwd"
+        pwd -P
+      )
+      return 0
+    fi
+
+    pwd -P
+  }
+
+  absolutize_artifacts_base_dir() {
+    local base_dir="$1"
+    local invocation_root
+
+    case "$base_dir" in
+      "")
+        printf '%s' ""
+        ;;
+      /*)
+        printf '%s' "$base_dir"
+        ;;
+      *)
+        invocation_root="$(invocation_root_dir)"
+        if [ "$base_dir" = "." ]; then
+          printf '%s' "$invocation_root"
+        else
+          printf '%s/%s' "$invocation_root" "$base_dir"
+        fi
+        ;;
+    esac
+  }
+
   resolve_run_artifacts_dir() {
     local run_id="$1"
     local workflow_id="$2"
@@ -378,6 +414,8 @@ in
     else
       base_dir="$ARTIFACTS_ROOT_DEFAULT"
     fi
+
+    base_dir="$(absolutize_artifacts_base_dir "$base_dir")"
 
     normalize_run_artifacts_dir "$base_dir" "$run_id"
   }

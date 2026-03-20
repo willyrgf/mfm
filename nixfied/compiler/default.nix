@@ -24,6 +24,7 @@ let
   };
 
   normalizeRuntime = import ./normalize-runtime.nix { inherit lib; };
+  compileServiceCatalog = import ./compile-service-catalog.nix { inherit lib; };
   compileServices = import ./compile-services.nix { inherit lib; };
 
   compileTasks = import ./compile-tasks.nix {
@@ -82,7 +83,12 @@ in
         resolved = resolvedModuleGraph.config;
       };
 
+      serviceCatalog = compileServiceCatalog {
+        resolved = resolvedModuleGraph.config;
+      };
+
       services = compileServices {
+        inherit pkgs;
         resolved = resolvedModuleGraph.config;
       };
 
@@ -106,10 +112,10 @@ in
         inherit
           projectRoot
           runtime
-          services
           tasks
           workflows
           ;
+        services = serviceCatalog;
       };
 
       views = compileViews {
@@ -118,10 +124,10 @@ in
         inherit
           features
           runtime
-          services
           tasks
           workflows
           ;
+        services = serviceCatalog;
       };
 
       finalized = finalizeModel {
@@ -130,6 +136,7 @@ in
           projectRoot
           runtime
           services
+          serviceCatalog
           tasks
           workflows
           features
@@ -146,6 +153,7 @@ in
       views = views;
       runtime = runtime;
       services = services;
+      serviceCatalog = serviceCatalog;
       features = features;
     };
 }

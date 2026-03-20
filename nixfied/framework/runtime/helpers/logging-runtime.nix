@@ -2,6 +2,7 @@
 { pkgs }:
 
 let
+  shellCommon = import ../../core/shell-common.nix { inherit pkgs; };
   loggingPrelude = ''
     _nixfied_level_num() {
       case "''${1:-info}" in
@@ -164,6 +165,8 @@ let
     _NIXFIED_LOG_LEVEL_RAW=""
     _NIXFIED_LOG_LEVEL_NUM="2"
     _nixfied_refresh_log_level
+
+    ${shellCommon}
   '';
 in
 {

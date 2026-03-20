@@ -34,20 +34,6 @@ let
   envVar = projectMeta.envVar or "PROJECT_ENV";
 
   ephemeralCfg = project.ephemeral or { };
-  excludePatterns =
-    ephemeralCfg.excludePatterns or [
-      ".git"
-      "node_modules"
-      ".next"
-      "dist"
-      ".turbo"
-      ".cache"
-      "result"
-      "result-*"
-      "*.log"
-      "test-results"
-      "coverage"
-    ];
   extraDirs = ephemeralCfg.extraDirs or [ ];
   keepFailures = ephemeralCfg.keepFailures or true;
   maxFailedRoots = ephemeralCfg.maxFailedRoots or 8;

@@ -125,7 +125,12 @@ let
       package = conf.modules.postgres.package;
     }
   ) (postgresService.sources or { });
-  nginxSources = mergeLocalSourceDefaults { } (nginxService.sources or { });
+  nginxSources = mergeLocalSourceDefaults (lib.optionalAttrs
+    ((conf.modules.nginx.package or null) != null)
+    {
+      package = conf.modules.nginx.package;
+    }
+  ) (nginxService.sources or { });
   minioSources = mergeLocalSourceDefaults (
     (lib.optionalAttrs ((conf.modules.minio.package or null) != null) {
       package = conf.modules.minio.package;

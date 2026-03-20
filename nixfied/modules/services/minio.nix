@@ -2,17 +2,9 @@
 let
   t = lib.types;
   probeLib = import ./probes.nix { inherit lib; };
-  sourceSpec = t.submodule {
-    options = {
-      package = lib.mkOption {
-        type = t.nullOr t.package;
-        default = null;
-      };
-      clientPackage = lib.mkOption {
-        type = t.nullOr t.package;
-        default = null;
-      };
-    };
+  sourceOptions = import ./source-options.nix { inherit lib; };
+  sourceSpec = sourceOptions.mkSourceSpec {
+    withClientPackage = true;
   };
 in
 {

@@ -6,7 +6,10 @@
 
 let
   lib = pkgs.lib;
-  serviceConfig = import ../../core/service-config.nix { inherit lib; };
+  runtimeDefaults = import ../../core/runtime-defaults.nix;
+  serviceConfig = import ../../core/service-config.nix {
+    inherit lib pkgs;
+  };
   servicePolicy = import ./service-policy.nix { inherit pkgs; };
 
   postgresCfg = serviceConfig.getProjectServiceConfig {
@@ -69,6 +72,22 @@ let
       serviceSpec;
 
   quote = v: lib.escapeShellArg (toString v);
+
+  mkPortValueExportFromPortVar = key: portVar: valueExpr: ''
+    _fixture_port_var="${portVar}"
+    _fixture_port_val="''${!_fixture_port_var:-}"
+    export ${key}="${valueExpr}"
+  '';
+
+  mkLocalPostgresUrlExportFromPortVar =
+    key: portVar: dbName:
+    mkPortValueExportFromPortVar key portVar
+      "postgresql://postgres:postgres@${runtimeDefaults.hosts.loopbackIp}:\${_fixture_port_val}/${dbName}";
+
+  mkLocalHttpUrlExportFromPortVar =
+    key: portVar:
+    mkPortValueExportFromPortVar key portVar
+      "http://${runtimeDefaults.hosts.loopbackIp}:\${_fixture_port_val}";
 
   mkMinioExportScript =
     serviceSpec:
@@ -193,17 +212,13 @@ let
         let
           dbName = value.database or defaultPostgresDatabase;
         in
-        ''
-          _fixture_port_var="${postgresPortVar}"
-          _fixture_port_val="''${!_fixture_port_var:-}"
-          export ${key}="postgresql://postgres:postgres@127.0.0.1:''${_fixture_port_val}/${dbName}"
-        ''
+        mkLocalPostgresUrlExportFromPortVar key postgresPortVar dbName
       else if from == "reth.httpUrl" then
-        mkHttpUrlExportFromPortVar key rethHttpPortVar
+        mkLocalHttpUrlExportFromPortVar key rethHttpPortVar
       else if from == "helios.rpcUrl" then
-        mkHttpUrlExportFromPortVar key heliosRpcPortVar
+        mkLocalHttpUrlExportFromPortVar key heliosRpcPortVar
       else if from == "minio.endpoint" then
-        mkHttpUrlExportFromPortVar key minioApiPortVar
+        mkLocalHttpUrlExportFromPortVar key minioApiPortVar
       else if from == "minio.bucket" then
         ''
           export ${key}="''${MINIO_BUCKET:-}"
@@ -227,12 +242,6 @@ let
         throw "Unsupported fixtures.env.${key}.from value: ${from}"
     else
       throw "fixtures.env.${key} must be a scalar or attrset";
-
-  mkHttpUrlExportFromPortVar = key: portVar: ''
-    _fixture_port_var="${portVar}"
-    _fixture_port_val="''${!_fixture_port_var:-}"
-    export ${key}="http://127.0.0.1:''${_fixture_port_val}"
-  '';
 
   keepRunningFromPolicy = ''
     ${servicePolicy.policyRuntimeFunctions}

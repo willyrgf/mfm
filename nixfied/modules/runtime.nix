@@ -71,6 +71,13 @@ in
       };
     };
 
+    orchestrator = {
+      stopTimeoutSec = lib.mkOption {
+        type = t.ints.unsigned;
+        default = 5;
+      };
+    };
+
     primitives = {
       version = lib.mkOption {
         type = t.int;

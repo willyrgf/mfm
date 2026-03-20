@@ -5,6 +5,7 @@
   projectModules,
   extraModules ? [ ],
   localOverrides ? [ ],
+  selectedServices ? null,
   frameworkSourceRevision ? import ./framework-revision.nix {
     sourcePath = ../../.;
     metadataPath = ../../VENDORED.txt;
@@ -13,6 +14,7 @@
 let
   lib = pkgs.lib;
   mkShellApp = import ./mk-shell-app.nix { inherit pkgs; };
+  frameworkSourceFlakeRef = null;
 
   modules = import ../../modules;
 
@@ -43,6 +45,22 @@ let
       ;
   };
 
+  serviceSelection = import ../runtime/service-selection.nix {
+    inherit
+      lib
+      ;
+    model = compiled.model;
+  };
+
+  serviceRuntimeSurfaces = import ./mkServiceRuntimeSurfaces.nix {
+    inherit
+      pkgs
+      selectedServices
+      ;
+    model = compiled.model;
+    services = compiled.services;
+  };
+
   runner = import ../runtime {
     inherit
       pkgs
@@ -53,10 +71,17 @@ let
 
   baseApps = runner.mkApps {
     model = compiled.model;
+    services = compiled.services;
+    runtimeHash = compiled.runtimeHash or compiled.model.identity.evalHash;
+    inherit frameworkSourceFlakeRef;
+    serviceApps = serviceRuntimeSurfaces.serviceApps;
+    serviceHookEnv = serviceRuntimeSurfaces.serviceHookEnv;
   };
 
+  serviceCatalog = compiled.model.serviceCatalog;
+
   taskIds = builtins.sort builtins.lessThan (builtins.attrNames compiled.model.tasks);
-  serviceIds = builtins.sort builtins.lessThan (builtins.attrNames compiled.model.services);
+  serviceIds = builtins.sort builtins.lessThan (builtins.attrNames serviceCatalog);
   featureIds = builtins.sort builtins.lessThan (builtins.attrNames compiled.model.features);
 
   modelCanonical = canonical.toCanonicalNix compiled.model;
@@ -67,7 +92,7 @@ let
     map (
       serviceId:
       let
-        service = compiled.model.services.${serviceId};
+        service = serviceCatalog.${serviceId};
       in
       "${service.id}\t${service.name}\t${if service.enable then "enabled" else "disabled"}"
     ) serviceIds
@@ -235,10 +260,15 @@ in
 {
   model = compiled.model;
   stateHash = compiled.stateHash;
+  runtimeHash = compiled.runtimeHash or compiled.model.identity.evalHash;
   tasks = compiled.model.tasks;
-  services = compiled.model.services;
+  services = compiled.services;
+  inherit serviceCatalog;
   workflows = compiled.model.workflows;
   features = compiled.model.features;
+  serviceApis = serviceRuntimeSurfaces.serviceApis;
+  serviceHookEnv = serviceRuntimeSurfaces.serviceHookEnv;
+  inherit serviceSelection;
 
   apps = apps;
   packages = packages;

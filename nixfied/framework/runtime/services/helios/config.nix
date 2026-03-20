@@ -2,7 +2,10 @@
 { pkgs, project }:
 
 let
-  serviceConfig = import ../../../core/service-config.nix { lib = pkgs.lib; };
+  serviceConfig = import ../../../core/service-config.nix {
+    lib = pkgs.lib;
+    inherit pkgs;
+  };
   cfg = serviceConfig.getProjectServiceConfig {
     inherit project;
     name = "helios";

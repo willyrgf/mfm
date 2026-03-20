@@ -30,18 +30,20 @@ if vendorPath == null then
                 rev
               else
                 fallbackRevision;
-            compiled = nixfied.lib.mkNixfied {
+            frameworkOutputs = nixfied.lib.mkFlakeOutputs {
               inherit system;
               projectRoot = ./.;
               projectModules = [ ./nixfied/project/module.nix ];
               extraModules = [ ];
+              localOverrides = [ ];
               inherit frameworkSourceRevision;
             };
           in {
-            apps = compiled.apps;
-            packages = compiled.packages;
-            checks = compiled.checks;
-            devShells = compiled.devShells;
+            apps = frameworkOutputs.apps;
+            packages = frameworkOutputs.packages;
+            legacyPackages = frameworkOutputs.legacyPackages;
+            checks = frameworkOutputs.checks;
+            devShells = frameworkOutputs.devShells;
           });
     }
   ''
@@ -69,17 +71,19 @@ else
               sourcePath = ./nixfied;
               metadataPath = ./nixfied/VENDORED.txt;
             };
-            compiled = nixfiedLib.mkNixfied {
+            frameworkOutputs = nixfiedLib.mkFlakeOutputs {
               projectRoot = ./.;
               projectModules = [ ./nixfied/project/module.nix ];
               extraModules = [ ];
+              localOverrides = [ ];
               inherit frameworkSourceRevision;
             };
           in {
-            apps = compiled.apps;
-            packages = compiled.packages;
-            checks = compiled.checks;
-            devShells = compiled.devShells;
+            apps = frameworkOutputs.apps;
+            packages = frameworkOutputs.packages;
+            legacyPackages = frameworkOutputs.legacyPackages;
+            checks = frameworkOutputs.checks;
+            devShells = frameworkOutputs.devShells;
           });
     }
   ''

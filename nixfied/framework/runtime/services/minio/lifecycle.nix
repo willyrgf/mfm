@@ -8,6 +8,7 @@
 }:
 
 let
+  runtimeDefaults = import ../../../core/runtime-defaults.nix;
   managedServiceLifecycle = import ../../helpers/managed-service-lifecycle.nix { inherit pkgs; };
   probeCommands = import ../../helpers/probe-commands.nix { inherit pkgs; };
   probePlanRuntime = import ../../helpers/probe-plan-runtime.nix {
@@ -127,8 +128,8 @@ let
     '';
     startCommand = ''
       ${minio}/bin/minio server "$MINIO_DIR/data" \
-        --address "127.0.0.1:$MINIO_API_PORT" \
-        --console-address "127.0.0.1:$MINIO_CONSOLE_PORT" \
+        --address "${runtimeDefaults.hosts.loopbackIp}:$MINIO_API_PORT" \
+        --console-address "${runtimeDefaults.hosts.loopbackIp}:$MINIO_CONSOLE_PORT" \
         --config-dir "$MINIO_DIR/config" \
         > "$LOG_FILE" 2>&1 &
     '';
@@ -174,23 +175,10 @@ let
       skipMessage = "SKIP: minio readiness check has no probe steps";
       wait = readyPlan.wait or null;
       timeoutMessage = "minio not ready after ${
-        toString ((readyPlan.wait or { }).timeoutSeconds or 300)
+        toString ((readyPlan.wait or { }).timeoutSeconds or runtimeDefaults.probes.wait.timeoutSeconds)
       } s";
     };
   };
-
-  inherit (managedLifecycle)
-    init
-    start
-    stop
-    restart
-    status
-    checkConfig
-    health
-    ready
-    fullStart
-    fullStartTest
-    ;
 
   exportS3Env = pkgs.writeShellScript "minio-export-s3-env" ''
     ${loggingPrelude}
@@ -208,11 +196,11 @@ let
     echo "export AWS_ACCESS_KEY_ID=\"$ROOT_USER\""
     echo "export AWS_SECRET_ACCESS_KEY=\"$ROOT_PASSWORD\""
     echo "export AWS_EC2_METADATA_DISABLED=\"true\""
-    echo "export MINIO_ENDPOINT=\"http://127.0.0.1:$MINIO_API_PORT\""
+    echo "export MINIO_ENDPOINT=\"${probeCommands.localHttpUrlExpr "$MINIO_API_PORT"}\""
     echo "export MINIO_REGION=\"$REGION\""
     echo "export MINIO_BUCKET=\"$BUCKET\""
     echo "export MINIO_PREFIX=\"$PREFIX\""
-    echo "export S3_ENDPOINT=\"http://127.0.0.1:$MINIO_API_PORT\""
+    echo "export S3_ENDPOINT=\"${probeCommands.localHttpUrlExpr "$MINIO_API_PORT"}\""
     echo "export S3_REGION=\"$REGION\""
     echo "export S3_BUCKET=\"$BUCKET\""
     echo "export S3_PREFIX=\"$PREFIX\""

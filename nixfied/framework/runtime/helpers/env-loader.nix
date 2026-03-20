@@ -7,8 +7,7 @@
 
 let
   lib = pkgs.lib;
-  validation = import ./validation.nix { inherit pkgs; };
-  inherit (validation)
+  inherit (import ./validation.nix { inherit pkgs; })
     expect
     renderErrors
     isEnvVarName
@@ -83,9 +82,9 @@ let
       }
   ) allowSpecsRaw;
 
-  _ =
+  validatedAllowSpecs =
     if allErrs == [ ] then
-      null
+      normalizedAllowSpecs
     else
       throw ''
         Nixfied env-file config violated:
@@ -102,7 +101,7 @@ let
       toString value;
 
   allowSpecNames = map (spec: spec.name) (
-    builtins.filter (spec: spec.name != "") normalizedAllowSpecs
+    builtins.filter (spec: spec.name != "") validatedAllowSpecs
   );
 
   allowSpecsRuntime = pkgs.writeText "nixfied-env-file-specs.sh" ''
@@ -129,7 +128,7 @@ let
           }
           NIXFIED_ENV_SPEC_DEFAULT[${lib.escapeShellArg name}]=${lib.escapeShellArg (valueToString spec.default)}
         ''
-      ) (builtins.filter (spec: spec.name != "") normalizedAllowSpecs)
+      ) (builtins.filter (spec: spec.name != "") validatedAllowSpecs)
     )}
   '';
 

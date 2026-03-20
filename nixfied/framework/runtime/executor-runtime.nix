@@ -291,11 +291,28 @@ in
       return 0
     fi
 
-    parent_dir="$(dirname "$target_file")"
-    mkdir -p "$parent_dir"
-    tmp="$(mktemp "$target_file.tmp.XXXXXX")"
-    ${pkgs.coreutils}/bin/cp "$source_file" "$tmp"
-    mv "$tmp" "$target_file"
+    parent_dir="$(dirname "$target_file")" || {
+      echo "ERROR: unable to determine parent directory for '$target_file'" >&2
+      return 1
+    }
+    mkdir -p "$parent_dir" || {
+      echo "ERROR: unable to create directory '$parent_dir'" >&2
+      return 1
+    }
+    tmp="$(mktemp "$target_file.tmp.XXXXXX")" || {
+      echo "ERROR: unable to create temp file for '$target_file'" >&2
+      return 1
+    }
+    if ! ${pkgs.coreutils}/bin/cp "$source_file" "$tmp"; then
+      rm -f "$tmp"
+      echo "ERROR: failed to copy '$source_file' to temp file for '$target_file'" >&2
+      return 1
+    fi
+    if ! mv "$tmp" "$target_file"; then
+      rm -f "$tmp"
+      echo "ERROR: failed to move temp file into '$target_file'" >&2
+      return 1
+    fi
   }
 
   workflow_unit_name() {

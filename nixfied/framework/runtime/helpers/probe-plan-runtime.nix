@@ -6,7 +6,7 @@
 }:
 
 let
-  shellVar = name: "$" + name;
+  runtimeDefaults = import ../../core/runtime-defaults.nix;
 
   normalizeEnvToken =
     value: lib.toUpper (lib.replaceStrings [ "-" "." ":" "/" " " ] [ "_" "_" "_" "_" "_" ] value);
@@ -75,7 +75,13 @@ let
     }:
     let
       scheme = endpointProtocol endpoints step.endpoint;
-      urlExpr = "${scheme}://127.0.0.1:${portExpr}${step.path}";
+      urlExpr = probeCommands.endpointUrlExpr {
+        inherit
+          scheme
+          portExpr
+          ;
+        path = step.path;
+      };
     in
     ''
       probe_source="''${service_source:-unspecified}"
@@ -103,7 +109,7 @@ let
       if ${
         probeCommands.pgIsReadyCmd {
           postgres = postgresProbePkg;
-          host = step.host or "127.0.0.1";
+          host = step.host or runtimeDefaults.hosts.loopbackIp;
           portExpr = portExpr;
         }
       } then
@@ -125,7 +131,7 @@ let
       if ${
         probeCommands.psqlQueryCmd {
           postgres = postgresProbePkg;
-          host = step.host or "127.0.0.1";
+          host = step.host or runtimeDefaults.hosts.loopbackIp;
           portExpr = portExpr;
           databaseExpr = step.database;
           query = step.query;
@@ -144,7 +150,7 @@ let
       portExpr,
     }:
     let
-      urlExpr = "http://127.0.0.1:${portExpr}";
+      urlExpr = probeCommands.localHttpUrlExpr portExpr;
     in
     ''
       probe_source="''${service_source:-unspecified}"
@@ -201,7 +207,7 @@ let
 
             helios_block_json="$(${
               probeCommands.jsonRpcRequestCmd {
-                urlExpr = "http://127.0.0.1:${portExpr}";
+                urlExpr = probeCommands.localHttpUrlExpr portExpr;
                 method = "eth_blockNumber";
               }
             })" || true
@@ -209,7 +215,7 @@ let
             if [ -z "$helios_block_number" ] || ! [[ "$helios_block_number" =~ ^0x[0-9a-fA-F]+$ ]]; then
               if [ "${if step.allowLocalHealthFallback or false then "1" else "0"}" = "1" ] && ${
                 probeCommands.jsonRpcHasResultCmd {
-                  urlExpr = "http://127.0.0.1:${portExpr}";
+                  urlExpr = probeCommands.localHttpUrlExpr portExpr;
                   method = "eth_chainId";
                 }
               }
@@ -225,7 +231,7 @@ let
             if [ "$helios_require_not_syncing" = "1" ]; then
               helios_syncing_result="$(${
                 probeCommands.jsonRpcFieldCmd {
-                  urlExpr = "http://127.0.0.1:${portExpr}";
+                  urlExpr = probeCommands.localHttpUrlExpr portExpr;
                   method = "eth_syncing";
                   jqExpr = ".result";
                   raw = false;

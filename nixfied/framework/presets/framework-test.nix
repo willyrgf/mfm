@@ -7,6 +7,7 @@
 }:
 let
   plainShellLogging = import ../core/plain-shell-logging.nix;
+  shellCommon = import ../core/shell-common.nix { inherit pkgs; };
   frameworkTestMaxParallelShardsRaw = conf.frameworkTest.maxParallelShards or "auto";
   frameworkTestMaxParallelShards =
     if builtins.isInt frameworkTestMaxParallelShardsRaw then
@@ -42,6 +43,7 @@ in
       examples = [
         "nix run .#framework::test -- --list-shards"
         "nix run .#framework::test -- --shard flake-check"
+        "nix run .#framework::test -- --shard launcher-pruning"
         "nix run .#framework::test -- --shard isolation"
         "nix run .#framework::test -- --shard self-host"
       ];
@@ -74,6 +76,7 @@ in
           type = "string";
           values = [
             "flake-check"
+            "launcher-pruning"
             "help"
             "workflow-ci"
             "isolation"
@@ -153,6 +156,7 @@ in
         SERIAL=0
         SHARDS=(
           "flake-check"
+          "launcher-pruning"
           "help"
           "workflow-ci"
           "isolation"
@@ -166,6 +170,7 @@ in
         START_EPOCH="$(date +%s)"
 
         ${plainShellLogging { }}
+        ${shellCommon}
 
         usage() {
           cat <<'EOF'
@@ -173,6 +178,7 @@ in
 
         Shards:
           flake-check   Evaluate nix flake checks for the current project root.
+          launcher-pruning  Build the launcher pruning and help fast-path smoke checks.
           help          Validate generated help output.
           workflow-ci   Run the CI workflow surface in selected mode.
           isolation     Run isolation checks.
@@ -241,14 +247,59 @@ in
         }
 
         shard_flake_check() {
-          nix flake check path:. --no-build
+          nix flake check . --no-build
+        }
+
+        verify_public_launcher_help() {
+          local output_file="$1"
+          shift
+          local rc
+
+          if "$@" >"$output_file" 2>&1; then
+            :
+          else
+            rc="$?"
+            log_error "public launcher help command failed rc=$rc"
+            cat "$output_file"
+            return "$rc"
+          fi
+
+          if ! grep -Fq "ci - Run the CI pipeline" "$output_file"; then
+            log_error "public launcher help output missing ci summary"
+            cat "$output_file"
+            return 1
+          fi
+
+          if ! grep -Fq "Usage:" "$output_file"; then
+            log_error "public launcher help output missing usage block"
+            cat "$output_file"
+            return 1
+          fi
+
+          if grep -Fq "nixfied-selected-app-" "$output_file"; then
+            log_error "public launcher help output hit selected-app path"
+            cat "$output_file"
+            return 1
+          fi
+        }
+
+        shard_launcher_pruning() {
+          local help_out
+          help_out="$(mktemp)"
+
+          nix build .#checks.${pkgs.system}.disabled-service-runtime-surface-smoke
+          nix build .#checks.${pkgs.system}.launcher-skip-service-pruning-smoke
+          nix build .#checks.${pkgs.system}.launcher-help-fast-path-smoke
+          verify_public_launcher_help "$help_out" nix run .#ci -- --help
+          verify_public_launcher_help "$help_out" env SKIP_HELIOS=1 nix run .#ci -- --help
+          rm -f "$help_out"
         }
 
         shard_help() {
           local help_stderr
           local rc
           help_stderr="$(mktemp)"
-          if nix run path:.#help >/dev/null 2>"$help_stderr"; then
+          if nix run .#help >/dev/null 2>"$help_stderr"; then
             rm -f "$help_stderr"
             return 0
           fi
@@ -262,7 +313,7 @@ in
         shard_workflow_ci() {
           if [ -z "''${NIXFIED_EXECUTOR_SELF:-}" ]; then
             log_error "NIXFIED_EXECUTOR_SELF is not set"
-            return 3
+            return "$NIXFIED_EXIT_PRECONDITION"
           fi
           NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.ci --mode "$MODE" --summary
         }
@@ -273,7 +324,7 @@ in
 
           if [ -z "''${NIXFIED_EXECUTOR_SELF:-}" ]; then
             log_error "NIXFIED_EXECUTOR_SELF is not set"
-            return 3
+            return "$NIXFIED_EXIT_PRECONDITION"
           fi
 
           if [ "$SERIAL" -eq 1 ] || [ "''${CI:-}" = "1" ] || [ "''${CI:-}" = "true" ]; then
@@ -286,7 +337,7 @@ in
         shard_self_host() {
           if [ -z "''${NIXFIED_EXECUTOR_SELF:-}" ]; then
             log_error "NIXFIED_EXECUTOR_SELF is not set"
-            return 3
+            return "$NIXFIED_EXIT_PRECONDITION"
           fi
           NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-workflow workflow.test.framework.selfhost --summary
         }
@@ -296,6 +347,9 @@ in
           case "$shard_name" in
             flake-check)
               run_shard "$shard_name" shard_flake_check
+              ;;
+            launcher-pruning)
+              run_shard "$shard_name" shard_launcher_pruning
               ;;
             help)
               run_shard "$shard_name" shard_help
@@ -311,7 +365,7 @@ in
               ;;
             *)
               log_error "unknown shard '$shard_name'"
-              return 2
+              return "$NIXFIED_EXIT_USAGE"
               ;;
           esac
         }
@@ -404,7 +458,7 @@ in
               kill -TERM "$active_pid" 2>/dev/null || true
             done
 
-            sleep 5
+            sleep "$NIXFIED_RETRY_INTERVAL_DEFAULT"
             for active_pid in "''${!PID_TO_SHARD[@]}"; do
               if kill -0 "$active_pid" 2>/dev/null; then
                 kill -KILL "$active_pid" 2>/dev/null || true
@@ -472,19 +526,11 @@ in
         while [ "$#" -gt 0 ]; do
           case "$1" in
             --profile)
-              if [ "$#" -lt 2 ]; then
-                log_error "--profile requires a value"
-                exit 2
-              fi
-              PROFILE="$2"
+              PROFILE="$(nixfied_require_next_arg --profile "a value" "$@")"
               shift 2
               ;;
             --mode)
-              if [ "$#" -lt 2 ]; then
-                log_error "--mode requires a value"
-                exit 2
-              fi
-              MODE="$2"
+              MODE="$(nixfied_require_next_arg --mode "a value" "$@")"
               shift 2
               ;;
             --basic|--app|--env|--full)
@@ -496,27 +542,15 @@ in
               shift
               ;;
             --summary-json)
-              if [ "$#" -lt 2 ]; then
-                log_error "--summary-json requires a value"
-                exit 2
-              fi
-              SUMMARY_JSON="$2"
+              SUMMARY_JSON="$(nixfied_require_next_arg --summary-json "a value" "$@")"
               shift 2
               ;;
             --shard)
-              if [ "$#" -lt 2 ]; then
-                log_error "--shard requires a value"
-                exit 2
-              fi
-              SHARD="$2"
+              SHARD="$(nixfied_require_next_arg --shard "a value" "$@")"
               shift 2
               ;;
             --max-parallel-shards)
-              if [ "$#" -lt 2 ]; then
-                log_error "--max-parallel-shards requires a value"
-                exit 2
-              fi
-              MAX_PARALLEL_SHARDS="$2"
+              MAX_PARALLEL_SHARDS="$(nixfied_require_next_arg --max-parallel-shards "a value" "$@")"
               shift 2
               ;;
             --serial)
@@ -536,28 +570,23 @@ in
               break
               ;;
             *)
-              log_error "unknown option '$1'"
-              usage >&2
-              exit 2
+              nixfied_unknown_arg_with_usage usage "$1"
               ;;
           esac
         done
 
-        if [ "$#" -gt 0 ]; then
-          log_error "unexpected positional arguments: $*"
-          exit 2
-        fi
+        nixfied_unexpected_positional_args_with_usage usage "$@"
 
         case "$PROFILE" in
           ci)
             ;;
           full)
             log_error "profile 'full' is no longer supported; use --profile ci."
-            exit 2
+            exit "$NIXFIED_EXIT_USAGE"
             ;;
           *)
             log_error "unknown profile '$PROFILE' (expected: ci)"
-            exit 2
+            exit "$NIXFIED_EXIT_USAGE"
             ;;
         esac
 
@@ -566,7 +595,7 @@ in
             ;;
           *)
             log_error "unknown mode '$MODE' (expected: basic|app|env|full)"
-            exit 2
+            exit "$NIXFIED_EXIT_USAGE"
             ;;
         esac
 
@@ -576,11 +605,11 @@ in
           *)
             if ! [[ "$MAX_PARALLEL_SHARDS" =~ ^[0-9]+$ ]]; then
               log_error "invalid --max-parallel-shards '$MAX_PARALLEL_SHARDS' (expected: auto|positive-integer)"
-              exit 2
+              exit "$NIXFIED_EXIT_USAGE"
             fi
             if [ "$MAX_PARALLEL_SHARDS" -lt 1 ]; then
               log_error "invalid --max-parallel-shards '$MAX_PARALLEL_SHARDS' (expected: auto|positive-integer)"
-              exit 2
+              exit "$NIXFIED_EXIT_USAGE"
             fi
             ;;
         esac
@@ -593,7 +622,7 @@ in
         if [ -n "$SHARD" ] && ! shard_exists "$SHARD"; then
           log_error "unknown shard '$SHARD'"
           log_info "valid shards: $(print_shards | tr '\n' ' ')"
-          exit 2
+          exit "$NIXFIED_EXIT_USAGE"
         fi
 
         cleanup() {

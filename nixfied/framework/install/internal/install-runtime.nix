@@ -10,16 +10,10 @@
 
 pkgs.writeText "nixfied-install-runtime.sh" ''
   require_next_arg() {
-    local flag="$1"
-    local requirement="$2"
-    shift 2 || true
-    if [ "$#" -lt 2 ]; then
-      log_error "$flag requires $requirement"
-      exit 1
-    fi
-    printf '%s\n' "$2"
+    nixfied_require_next_arg "$@"
   }
 
+  FRAMEWORK_ROOT=${pkgs.lib.escapeShellArg frameworkRoot}
   PROJECT_TEMPLATE_FILTER_PLAN_DATA_JSON=${pkgs.lib.escapeShellArg templateFilterPlanDataJson}
 
   compute_template_filter_plan() {
@@ -148,8 +142,7 @@ pkgs.writeText "nixfied-install-runtime.sh" ''
           shift
           ;;
         --sync)
-          log_error "unsupported option: --sync (removed; run without --sync)."
-          exit 1
+          nixfied_exit_usage "unsupported option: --sync (removed; run without --sync)."
           ;;
         --prompt-plan)
           PROMPT_PLAN=true
@@ -189,14 +182,12 @@ pkgs.writeText "nixfied-install-runtime.sh" ''
   resolve_install_repo_root() {
     GIT="${pkgs.git}/bin/git"
     if [ ! -x "$GIT" ]; then
-      log_error "git is required to install/upgrade."
-      exit 1
+      nixfied_exit_unavailable "git is required to install/upgrade."
     fi
 
     ROOT=$("$GIT" rev-parse --show-toplevel 2>/dev/null || true)
     if [ -z "$ROOT" ]; then
-      log_error "Not inside a git repository."
-      exit 1
+      nixfied_exit_precondition "Not inside a git repository."
     fi
     ROOT=$(cd "$ROOT" && pwd -P)
     INSTALL_BRANCH="''${NIXFIED_INSTALL_BRANCH:-nixfied}"
@@ -207,8 +198,7 @@ pkgs.writeText "nixfied-install-runtime.sh" ''
       TARGET="''${TARGET_PATH:-''${ROOT}_''${INSTALL_BRANCH}}"
       case "$TARGET" in
         "$ROOT"/*)
-          log_error "Target must not be inside the source repo (got: $TARGET)"
-          exit 1
+          nixfied_exit_precondition "Target must not be inside the source repo (got: $TARGET)"
           ;;
       esac
 
@@ -219,14 +209,14 @@ pkgs.writeText "nixfied-install-runtime.sh" ''
         else
           log_error "Target already exists: $TARGET"
           echo "   Remove it or pass --force to reuse." >&2
-          exit 1
+          exit "$NIXFIED_EXIT_PRECONDITION"
         fi
       else
         DIRTY=$("$GIT" -C "$ROOT" status --porcelain 2>/dev/null || true)
         if [ -n "$DIRTY" ] && [ "$FORCE" != "true" ]; then
           log_error "Working tree is dirty; refusing to create a worktree without --force"
           echo "   (uncommitted changes would not be present in the worktree)" >&2
-          exit 1
+          exit "$NIXFIED_EXIT_PRECONDITION"
         fi
         log_info "Creating git worktree at $TARGET (branch: $INSTALL_BRANCH)..."
         if "$GIT" -C "$ROOT" show-ref --verify --quiet "refs/heads/$INSTALL_BRANCH"; then
@@ -237,8 +227,7 @@ pkgs.writeText "nixfied-install-runtime.sh" ''
       fi
 
       if ! "$GIT" -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        log_error "Target exists but is not a git worktree: $TARGET"
-        exit 1
+        nixfied_exit_precondition "Target exists but is not a git worktree: $TARGET"
       fi
 
       log_ok "Worktree ready. Re-running installer in $TARGET"
@@ -272,11 +261,10 @@ pkgs.writeText "nixfied-install-runtime.sh" ''
       if [ ! -d "$ROOT/nixfied" ]; then
         log_error "No nixfied/ directory found in $ROOT"
         echo "   Run install first: nix run github:willyrgf/nixfied#framework::install" >&2
-        exit 1
+        exit "$NIXFIED_EXIT_PRECONDITION"
       fi
       if [ "$TARGET_BRANCH" = "$INSTALL_BRANCH" ] && [ "$HEAD_REF" != "refs/heads/$INSTALL_BRANCH" ] && ! "$GIT" -C "$ROOT" show-ref --verify --quiet "refs/heads/$INSTALL_BRANCH"; then
-        log_error "Upgrade requires an existing branch: $INSTALL_BRANCH"
-        exit 1
+        nixfied_exit_precondition "Upgrade requires an existing branch: $INSTALL_BRANCH"
       fi
     fi
 
@@ -286,14 +274,13 @@ pkgs.writeText "nixfied-install-runtime.sh" ''
         if [ -n "$DIRTY" ] && [ "$FORCE" != "true" ]; then
           log_error "Working tree is dirty; refusing to switch to '$TARGET_BRANCH' without --force"
           echo "   (commit/stash your changes, or pass --worktree)" >&2
-          exit 1
+          exit "$NIXFIED_EXIT_PRECONDITION"
         fi
         log_info "Switching to $TARGET_BRANCH branch..."
         "$GIT" -C "$ROOT" switch "$TARGET_BRANCH" >/dev/null
       else
         if [ "$MODE" = "upgrade" ]; then
-          log_error "Upgrade requires an existing branch: $TARGET_BRANCH"
-          exit 1
+          nixfied_exit_precondition "Upgrade requires an existing branch: $TARGET_BRANCH"
         fi
         log_info "Creating and switching to $TARGET_BRANCH branch..."
         "$GIT" -C "$ROOT" switch -c "$TARGET_BRANCH" >/dev/null
@@ -333,11 +320,10 @@ pkgs.writeText "nixfied-install-runtime.sh" ''
         read -r REPLY
         if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
           echo "Aborted."
-          exit 1
+          exit "$NIXFIED_EXIT_PRECONDITION"
         fi
       else
-        log_error "Existing Nix files found. Re-run with NIXFIED_INSTALL_FORCE=1 to overwrite."
-        exit 1
+        nixfied_exit_precondition "Existing Nix files found. Re-run with NIXFIED_INSTALL_FORCE=1 to overwrite."
       fi
     fi
   }

@@ -9,6 +9,7 @@
 
 let
   lib = pkgs.lib;
+  runtimeDefaults = import ../../../core/runtime-defaults.nix;
   managedServiceLifecycle = import ../../helpers/managed-service-lifecycle.nix { inherit pkgs; };
   probeCommands = import ../../helpers/probe-commands.nix { inherit pkgs; };
   probePlanRuntime = import ../../helpers/probe-plan-runtime.nix {
@@ -115,7 +116,7 @@ let
   '';
 
   healthCheck = probeCommands.jsonRpcHasResultCmd {
-    urlExpr = "http://127.0.0.1:$RETH_HTTP_PORT";
+    urlExpr = probeCommands.localHttpUrlExpr "$RETH_HTTP_PORT";
     method = "web3_clientVersion";
   };
   managedLifecycle = managedServiceLifecycle.mkPidFileManagedLifecycle {
@@ -158,12 +159,12 @@ let
         --datadir "$RETH_DIR/data"
         --ipcpath "$RETH_DIR/run/reth.ipc"
         --http
-        --http.addr 127.0.0.1
+        --http.addr ${runtimeDefaults.hosts.loopbackIp}
         --http.port "$RETH_HTTP_PORT"
         --ws
-        --ws.addr 127.0.0.1
+        --ws.addr ${runtimeDefaults.hosts.loopbackIp}
         --ws.port "$RETH_WS_PORT"
-        --authrpc.addr 127.0.0.1
+        --authrpc.addr ${runtimeDefaults.hosts.loopbackIp}
         --authrpc.port "$RETH_AUTH_PORT"
         --authrpc.jwtsecret "$RETH_JWT_FILE"
       )
@@ -190,7 +191,7 @@ let
     startPostLaunchBody = managedServiceLifecycle.mkStartupReadinessBody {
       probeCommand = healthCheck;
       serviceLabel = "reth";
-      probeAttempts = 80;
+      probeAttempts = runtimeDefaults.probes.startupReadiness.extendedAttempts;
       degradedWaitReason = "failed_readiness";
       degradedLastError = "reth failed health check during startup";
       failureMessage = "reth failed to become healthy";
@@ -228,11 +229,11 @@ let
       skipMessage = "SKIP: reth readiness check has no probe steps";
       wait = readyPlan.wait or null;
       timeoutMessage = "reth not ready after ${
-        toString ((readyPlan.wait or { }).timeoutSeconds or 300)
+        toString ((readyPlan.wait or { }).timeoutSeconds or runtimeDefaults.probes.wait.timeoutSeconds)
       } s";
     };
-    stopWaitAttempts = 40;
-    stopWaitInterval = "0.25";
+    stopWaitAttempts = runtimeDefaults.probes.managedStop.extendedWaitAttempts;
+    stopWaitInterval = runtimeDefaults.probes.managedStop.extendedWaitIntervalSeconds;
   };
 in
 {

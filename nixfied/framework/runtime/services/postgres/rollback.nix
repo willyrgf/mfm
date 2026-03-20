@@ -8,7 +8,6 @@
 }:
 
 let
-  postgres = config.package or pkgs.postgresql_16;
   portKey = config.portKey or "postgres";
   portVar = slots.portVarName portKey;
 

@@ -3,6 +3,7 @@
 
 let
   lib = pkgs.lib;
+  exitCodes = import ../../core/exit-codes.nix;
   validation = import ./validation.nix { inherit pkgs; };
   inherit (validation)
     expect
@@ -44,13 +45,7 @@ let
     "batch-runner"
   ];
 
-  defaultFailureCodes = {
-    generic = 1;
-    usage = 2;
-    precondition = 3;
-    unavailable = 4;
-    timeout = 5;
-  };
+  defaultFailureCodes = builtins.removeAttrs exitCodes [ "canceled" ];
 
   runtimeLogLevels = [
     "error"

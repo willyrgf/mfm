@@ -6,6 +6,7 @@
 }:
 
 let
+  runtimeDefaults = import ../../../core/runtime-defaults.nix;
   summary = import ../../helpers/summary.nix { inherit pkgs project; };
   helpers = import ../../helpers/helpers.nix {
     inherit pkgs project;
@@ -84,7 +85,7 @@ let
     PGPORT="''${!PORT_VAR}"
     PGDATABASE="''${PGDATABASE:-${pgDatabase}}"
 
-    exec ${pgPackage}/bin/psql "postgresql://localhost:$PGPORT/$PGDATABASE" "$@"
+    exec ${pgPackage}/bin/psql "postgresql://${runtimeDefaults.hosts.localhost}:$PGPORT/$PGDATABASE" "$@"
   '';
 in
 serviceModule.mkServiceModule {

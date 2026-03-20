@@ -1,12 +1,18 @@
 {
   pkgs,
   model,
+  services,
+  runtimeHash ? model.identity.evalHash,
   projectRoot,
   registry,
+  frameworkSourceFlakeRef ? null,
+  serviceApps ? { },
+  serviceHookEnv ? { },
 }:
 let
   lib = pkgs.lib;
   mkShellApp = import ../core/mk-shell-app.nix { inherit pkgs; };
+  shellCommon = import ../core/shell-common.nix { inherit pkgs; };
   workspaceMarker = import ../workspace-marker.nix;
   workspaceMarkerPresent = workspaceMarker.isPresent projectRoot;
 
@@ -14,8 +20,11 @@ let
     inherit
       pkgs
       model
+      services
+      runtimeHash
       registry
       projectRoot
+      serviceHookEnv
       ;
   };
 
@@ -105,6 +114,25 @@ let
 
   frameworkInstallHelpFile = mkTaskHelpFile "task.framework.install";
   frameworkUpgradeHelpFile = mkTaskHelpFile "task.framework.upgrade";
+  frameworkSourceFlakeRefValue =
+    if frameworkSourceFlakeRef != null && frameworkSourceFlakeRef != "" then
+      frameworkSourceFlakeRef
+    else
+      "github:willyrgf/nixfied/dev";
+  frameworkSourceFlakeRefShell = lib.escapeShellArg frameworkSourceFlakeRefValue;
+  proxyFrameworkCommand = taskId: helpFile: ''
+    if [ "$#" -gt 0 ]; then
+      case "$1" in
+        --help|-h)
+          cat ${helpFile}
+          exit 0
+          ;;
+      esac
+    fi
+
+    framework_source_flake_ref="''${NIXFIED_FRAMEWORK_SOURCE_FLAKE:-${frameworkSourceFlakeRefShell}}"
+    NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run "''${framework_source_flake_ref}#run-task" --refresh -- ${lib.escapeShellArg taskId} "$@"
+  '';
 
   taskApps = builtins.listToAttrs (
     map (
@@ -139,32 +167,12 @@ let
       {
         "framework::install" = mkShellApp {
           appName = "framework::install";
-          body = ''
-            if [ "$#" -gt 0 ]; then
-              case "$1" in
-                --help|-h)
-                  cat ${frameworkInstallHelpFile}
-                  exit 0
-                  ;;
-              esac
-            fi
-            NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#framework::install --refresh -- "$@"
-          '';
+          body = proxyFrameworkCommand "task.framework.install" frameworkInstallHelpFile;
         };
 
         "framework::upgrade" = mkShellApp {
           appName = "framework::upgrade";
-          body = ''
-            if [ "$#" -gt 0 ]; then
-              case "$1" in
-                --help|-h)
-                  cat ${frameworkUpgradeHelpFile}
-                  exit 0
-                  ;;
-              esac
-            fi
-            NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run github:willyrgf/nixfied/dev#framework::upgrade --refresh -- "$@"
-          '';
+          body = proxyFrameworkCommand "task.framework.upgrade" frameworkUpgradeHelpFile;
         };
       };
 in
@@ -172,9 +180,9 @@ in
   "run-task" = mkShellApp {
     appName = "run-task";
     body = ''
+      ${shellCommon}
       if [ "$#" -lt 1 ]; then
-        echo "ERROR: usage: run-task <task-id> [-- ...]"
-        exit 2
+        nixfied_exit_usage "usage: run-task <task-id> [-- ...]"
       fi
       NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-task "$@"
     '';
@@ -183,9 +191,9 @@ in
   "run-workflow" = mkShellApp {
     appName = "run-workflow";
     body = ''
+      ${shellCommon}
       if [ "$#" -lt 1 ]; then
-        echo "ERROR: usage: run-workflow <workflow-id> [-- ...]"
-        exit 2
+        nixfied_exit_usage "usage: run-workflow <workflow-id> [-- ...]"
       fi
       NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-workflow "$@"
     '';
@@ -194,9 +202,9 @@ in
   "run-workflow-parallel" = mkShellApp {
     appName = "run-workflow-parallel";
     body = ''
+      ${shellCommon}
       if [ "$#" -lt 1 ]; then
-        echo "ERROR: usage: run-workflow-parallel <workflow-id> [-- ...]"
-        exit 2
+        nixfied_exit_usage "usage: run-workflow-parallel <workflow-id> [-- ...]"
       fi
       NIXFIED_WORKFLOW_PARALLEL=1 NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-workflow "$@"
     '';
@@ -212,9 +220,9 @@ in
   "stop-run" = mkShellApp {
     appName = "stop-run";
     body = ''
+      ${shellCommon}
       if [ "$#" -ne 1 ]; then
-        echo "ERROR: usage: stop-run <run-id>"
-        exit 2
+        nixfied_exit_usage "usage: stop-run <run-id>"
       fi
       NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} stop-run "$@"
     '';
@@ -223,9 +231,9 @@ in
   "stop-all-runs" = mkShellApp {
     appName = "stop-all-runs";
     body = ''
+      ${shellCommon}
       if [ "$#" -ne 0 ]; then
-        echo "ERROR: usage: stop-all-runs"
-        exit 2
+        nixfied_exit_usage "usage: stop-all-runs"
       fi
       NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} stop-all-runs
     '';
@@ -253,6 +261,7 @@ in
   };
 }
 // taskApps
+// serviceApps
 // frameworkProxyApps
 // {
   default =

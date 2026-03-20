@@ -3,6 +3,8 @@
 }:
 
 let
+  runtimeDefaults = import ../../core/runtime-defaults.nix;
+
   netcatPkg =
     if pkgs ? netcat then
       pkgs.netcat
@@ -26,10 +28,21 @@ let
     };
 in
 rec {
+  endpointUrlExpr =
+    {
+      portExpr,
+      scheme ? "http",
+      host ? runtimeDefaults.hosts.loopbackIp,
+      path ? "",
+    }:
+    "${scheme}://${host}:${portExpr}${path}";
+
+  localHttpUrlExpr = portExpr: endpointUrlExpr { inherit portExpr; };
+
   tcpOpenCmd =
     {
       portExpr,
-      host ? "127.0.0.1",
+      host ? runtimeDefaults.hosts.loopbackIp,
     }:
     ''
       ${netcatPkg}/bin/nc -z ${host} "${portExpr}" >/dev/null 2>&1
@@ -38,7 +51,7 @@ rec {
   httpGetOkCmd =
     {
       urlExpr,
-      maxTime ? 2,
+      maxTime ? runtimeDefaults.probes.httpMaxTimeSeconds,
     }:
     ''
       ${pkgs.curl}/bin/curl -fsS --max-time ${toString maxTime} "${urlExpr}" >/dev/null 2>&1
@@ -49,7 +62,7 @@ rec {
       urlExpr,
       method,
       params ? [ ],
-      maxTime ? 2,
+      maxTime ? runtimeDefaults.probes.httpMaxTimeSeconds,
     }:
     ''
       ${pkgs.curl}/bin/curl -fsS --max-time ${toString maxTime} \
@@ -63,7 +76,7 @@ rec {
       urlExpr,
       method,
       params ? [ ],
-      maxTime ? 2,
+      maxTime ? runtimeDefaults.probes.httpMaxTimeSeconds,
     }:
     ''
       (
@@ -85,7 +98,7 @@ rec {
       params ? [ ],
       jqExpr ? ".result // empty",
       raw ? true,
-      maxTime ? 2,
+      maxTime ? runtimeDefaults.probes.httpMaxTimeSeconds,
     }:
     ''
       (
@@ -104,7 +117,7 @@ rec {
     {
       postgres,
       portExpr,
-      host ? "localhost",
+      host ? runtimeDefaults.hosts.localhost,
       user ? "postgres",
       quiet ? true,
     }:
@@ -118,7 +131,7 @@ rec {
       portExpr,
       databaseExpr,
       query,
-      host ? "localhost",
+      host ? runtimeDefaults.hosts.localhost,
       user ? "postgres",
       extraArgs ? "-Atqc",
     }:

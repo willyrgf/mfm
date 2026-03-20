@@ -20,17 +20,19 @@
           sourcePath = ./nixfied;
           metadataPath = ./nixfied/VENDORED.txt;
         };
-        compiled = nixfiedLib.mkNixfied {
+        frameworkOutputs = nixfiedLib.mkFlakeOutputs {
           projectRoot = ./.;
           projectModules = [ ./nixfied/project/module.nix ];
           extraModules = [ ];
+          localOverrides = [ ];
           inherit frameworkSourceRevision;
         };
       in {
-        apps = compiled.apps;
-        packages = compiled.packages;
-        checks = compiled.checks;
-        devShells = compiled.devShells;
+        apps = frameworkOutputs.apps;
+        packages = frameworkOutputs.packages;
+        legacyPackages = frameworkOutputs.legacyPackages;
+        checks = frameworkOutputs.checks;
+        devShells = frameworkOutputs.devShells;
       });
 }
 

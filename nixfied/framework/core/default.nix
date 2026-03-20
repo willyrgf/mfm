@@ -16,4 +16,16 @@
       }
       // args
     );
+
+  mkFlakeOutputs =
+    args:
+    import ./mkFlakeOutputs.nix (
+      {
+        inherit
+          pkgs
+          system
+          ;
+      }
+      // args
+    );
 }

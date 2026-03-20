@@ -1,11 +1,15 @@
 {
   pkgs,
   model,
+  services,
+  runtimeHash ? model.identity.evalHash,
   registry,
   projectRoot,
+  serviceHookEnv ? { },
 }:
 let
   modelFile = pkgs.writeText "nixfied-model.json" (builtins.toJSON model);
+  shellCommon = import ../core/shell-common.nix { inherit pkgs; };
   registryShell = registry.events.mkShellLib { };
   workflowModesShell = import ./workflow-modes.nix {
     inherit
@@ -18,12 +22,15 @@ let
       pkgs
       projectRoot
       model
+      services
+      serviceHookEnv
       ;
   };
   executorRuntimeShell = import ./executor-runtime.nix { inherit pkgs; };
 in
 pkgs.writeShellScriptBin "nixfied-executor" ''
   set -euo pipefail
+  ${shellCommon}
   export NIXFIED_EXECUTOR_BIN="$0"
   export NIXFIED_EXECUTOR_SELF="$0"
 
@@ -57,6 +64,110 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     ${pkgs.coreutils}/bin/env | ${pkgs.coreutils}/bin/sort | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.gawk}/bin/awk '{print $1}'
   }
 
+  selected_services_csv_from_lines() {
+    local service_name=""
+    local services_csv=""
+
+    services_csv="$(
+      while IFS= read -r service_name; do
+        if [ -n "$service_name" ]; then
+          printf '%s\n' "$service_name"
+        fi
+      done | ${pkgs.coreutils}/bin/sort -u | ${pkgs.coreutils}/bin/paste -sd, -
+    )"
+
+    printf '%s' "$services_csv"
+  }
+
+  workflow_mode_override_from_args() {
+    local workflow_id="$1"
+    shift
+
+    local parse_options=1
+    local arg=""
+    local shorthand_mode=""
+    local mode_override=""
+
+    while [ "$#" -gt 0 ]; do
+      arg="$1"
+      shift
+
+      if [ "$parse_options" -eq 0 ]; then
+        continue
+      fi
+
+      case "$arg" in
+        --mode)
+          if [ "$#" -lt 1 ]; then
+            break
+          fi
+          mode_override="$1"
+          shift
+          ;;
+        --mode=*)
+          mode_override="''${arg#--mode=}"
+          ;;
+        --summary)
+          ;;
+        --)
+          parse_options=0
+          ;;
+        --*)
+          shorthand_mode="''${arg#--}"
+          if workflow_simple_shorthand_exists_for_family "$workflow_id" "$shorthand_mode"; then
+            mode_override="$shorthand_mode"
+          fi
+          ;;
+      esac
+    done
+
+    printf '%s' "$mode_override"
+  }
+
+  task_selected_services_csv() {
+    local task_id="$1"
+    shift
+
+    local runner_type=""
+    local workflow_id=""
+    local mode_override=""
+    local resolved_workflow_id=""
+
+    runner_type="$(task_runner_type "$task_id")"
+    if [ "$runner_type" = "workflowRef" ]; then
+      workflow_id="$(task_runner_workflow_id "$task_id")"
+      if [ -n "$workflow_id" ]; then
+        mode_override="$(workflow_mode_override_from_args "$workflow_id" "$@")"
+        resolved_workflow_id="$(resolve_workflow_mode "$workflow_id" "$mode_override")" || return $?
+      fi
+    fi
+
+    task_invocation_selected_services "$task_id" "$resolved_workflow_id" | selected_services_csv_from_lines
+  }
+
+  workflow_unit_selected_services_csv() {
+    local unit_json="$1"
+    local task_id=""
+    local runner_type=""
+    local workflow_id=""
+
+    task_id="$(workflow_unit_task_id "$unit_json")"
+
+    {
+      workflow_unit_required_services "$unit_json"
+
+      if [ -n "$task_id" ]; then
+        runner_type="$(task_runner_type "$task_id")"
+        if [ "$runner_type" = "workflowRef" ]; then
+          workflow_id="$(task_runner_workflow_id "$task_id")"
+        else
+          workflow_id=""
+        fi
+        task_invocation_selected_services "$task_id" "$workflow_id"
+      fi
+    } | selected_services_csv_from_lines
+  }
+
   RUN_SUFFIX_REASON=""
   LAST_WORKFLOW_SUMMARY_FILE=""
 
@@ -85,7 +196,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     args_hash="$(normalize_args_hash "$args_payload")"
     env_hash="$(normalize_env_hash)"
 
-    run_input="run-id|${model.identity.evalHash}|$workflow_id|$task_id|$mode|$slot_value|$env_value|$args_hash|$env_hash"
+    run_input="run-id|${runtimeHash}|$workflow_id|$task_id|$mode|$slot_value|$env_value|$args_hash|$env_hash"
     run_base="$(sha256_text "$run_input")"
     run_id="run-''${run_base:0:24}"
     RUN_SUFFIX_REASON=""
@@ -296,7 +407,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     if ! task_descriptor_exists "$task_id"; then
       echo "ERROR: unknown task '$task_id'"
-      return 2
+      return "$NIXFIED_EXIT_USAGE"
     fi
 
     max_attempts="$(task_max_attempts "$task_id")"
@@ -336,6 +447,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local detail_json
     local exit_code
     local effective_workflow_id
+    local selected_services_csv="''${NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE:-}"
 
     detail_json="$(${pkgs.jq}/bin/jq -cn --arg mode "task" '{mode: $mode}')"
     append_event "$run_id" "$workflow_id" "$task_id" "queued" "$detail_json"
@@ -348,13 +460,17 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     fi
     echo "INFO: task context runId=$run_id workflowId=$effective_workflow_id taskId=$task_id"
 
+    if [ -z "$selected_services_csv" ]; then
+      selected_services_csv="$(task_selected_services_csv "$task_id" "$@")"
+    fi
+
     if [ -n "$workflow_id" ]; then
-      if NIXFIED_TASK_ID="$task_id" NIXFIED_PARENT_WORKFLOW_ID="$workflow_id" execute_task_body "$task_id" "$@"; then
+      if NIXFIED_TASK_ID="$task_id" NIXFIED_PARENT_WORKFLOW_ID="$workflow_id" NIXFIED_SELECTED_SERVICES_CSV="$selected_services_csv" execute_task_body "$task_id" "$@"; then
         exit_code=0
       else
         exit_code="$?"
       fi
-    elif NIXFIED_TASK_ID="$task_id" execute_task_body "$task_id" "$@"; then
+    elif NIXFIED_TASK_ID="$task_id" NIXFIED_SELECTED_SERVICES_CSV="$selected_services_csv" execute_task_body "$task_id" "$@"; then
       exit_code=0
     else
       exit_code="$?"
@@ -401,7 +517,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   run_task() {
     if [ "$#" -lt 1 ]; then
       echo "ERROR: usage: run-task <task-id> [-- ...]"
-      return 2
+      return "$NIXFIED_EXIT_USAGE"
     fi
 
     local task_id="$1"
@@ -424,12 +540,12 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     if ! task_descriptor_exists "$task_id"; then
       echo "ERROR: unknown task '$task_id'"
-      return 2
+      return "$NIXFIED_EXIT_USAGE"
     fi
     if task_help_requested "''${filtered_args[@]}"; then
       if ! task_print_help "$task_id"; then
         echo "ERROR: unknown task '$task_id'"
-        return 2
+        return "$NIXFIED_EXIT_USAGE"
       fi
       return 0
     fi
@@ -437,11 +553,11 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     if [ "$runner_type" != "workflowRef" ] && [ -n "$MACHINE_SUMMARY_FILE" ]; then
       echo "ERROR: --summary-file is only supported for workflow runs"
-      return 2
+      return "$NIXFIED_EXIT_USAGE"
     fi
     if [ "$runner_type" != "workflowRef" ] && [ "$MACHINE_JSON" = "1" ]; then
       echo "ERROR: --json is only supported for workflow runs"
-      return 2
+      return "$NIXFIED_EXIT_USAGE"
     fi
 
     if [ -n "''${NIXFIED_ORCHESTRATOR_RUN_ID:-}" ]; then
@@ -488,7 +604,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
       if ! task_descriptor_exists "$current_task"; then
         echo "ERROR: unknown task '$current_task'"
-        return 2
+        return "$NIXFIED_EXIT_USAGE"
       fi
 
       current_task_skip_service="$(task_first_skipped_required_service "$current_task" || true)"
@@ -610,7 +726,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         fi
       else
         echo "ERROR: $override_name must be an integer >= 1 (got '$override_value')" >&2
-        return 2
+        return "$NIXFIED_EXIT_USAGE"
       fi
     fi
 
@@ -693,6 +809,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       local failed_dependency=""
       local blocked_reason=""
       local missing=""
+      local unit_selected_services_csv=""
 
       unit_task="$(workflow_unit_task_id "$unit_json")"
       missing="$(workflow_unit_missing_env_csv "$unit_json")"
@@ -766,7 +883,8 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         continue
       fi
 
-      if execute_task "$run_id" "$workflow_id" "$unit_task" "''${passthrough_args[@]}"; then
+      unit_selected_services_csv="$(workflow_unit_selected_services_csv "$unit_json")"
+      if NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE="$unit_selected_services_csv" execute_task "$run_id" "$workflow_id" "$unit_task" "''${passthrough_args[@]}"; then
         status=0
       else
         status="$?"
@@ -921,14 +1039,16 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       local unit_task
       local detail_json
       local pid
+      local unit_selected_services_csv
 
       unit_task="''${UNIT_TASK[$unit_name]}"
+      unit_selected_services_csv="$(workflow_unit_selected_services_csv "''${UNIT_JSON[$unit_name]}")"
       detail_json="$(${pkgs.jq}/bin/jq -cn --arg mode "task" '{mode: $mode}')"
       append_event "$run_id" "$workflow_id" "$unit_task" "queued" "$detail_json"
       append_event "$run_id" "$workflow_id" "$unit_task" "running" '{}'
 
       (
-        NIXFIED_TASK_ID="$unit_task" NIXFIED_PARENT_WORKFLOW_ID="$workflow_id" execute_task_body "$unit_task" "''${passthrough_args[@]}"
+        NIXFIED_TASK_ID="$unit_task" NIXFIED_PARENT_WORKFLOW_ID="$workflow_id" NIXFIED_SELECTED_SERVICES_CSV="$unit_selected_services_csv" execute_task_body "$unit_task" "''${passthrough_args[@]}"
       ) &
       pid="$!"
 
@@ -953,7 +1073,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         kill -TERM "$pid" 2>/dev/null || true
       done
 
-      sleep 5
+      sleep "$NIXFIED_RETRY_INTERVAL_DEFAULT"
       for pid in "''${!PID_UNIT[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
           kill -KILL "$pid" 2>/dev/null || true
@@ -1727,7 +1847,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   run_workflow() {
     if [ "$#" -lt 1 ]; then
       echo "ERROR: usage: run-workflow <workflow-id> [-- ...]"
-      return 2
+      return "$NIXFIED_EXIT_USAGE"
     fi
 
     local workflow_id="$1"
@@ -1762,7 +1882,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         --mode)
           if [ "$#" -lt 1 ]; then
             echo "ERROR: --mode requires a value"
-            return 2
+            return "$NIXFIED_EXIT_USAGE"
           fi
           mode_override="$1"
           shift
@@ -1782,12 +1902,12 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
             mode_override="$shorthand_mode"
           else
             echo "ERROR: unknown option '$arg'"
-            return 2
+            return "$NIXFIED_EXIT_USAGE"
           fi
           ;;
         -*)
           echo "ERROR: unknown option '$arg'"
-          return 2
+          return "$NIXFIED_EXIT_USAGE"
           ;;
         *)
           passthrough_args+=("$arg")
@@ -1799,7 +1919,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     if [ "$print_summary" -eq 1 ] && [ "$MACHINE_JSON" = "1" ]; then
       echo "ERROR: --json and --summary cannot be combined"
-      return 2
+      return "$NIXFIED_EXIT_USAGE"
     fi
 
     local args_payload
@@ -1826,7 +1946,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     if ! workflow_id_exists "$workflow_id"; then
       echo "ERROR: unknown workflow '$workflow_id'"
-      return 2
+      return "$NIXFIED_EXIT_USAGE"
     fi
     NIXFIED_WORKFLOW_LOG_LEVEL_DEFAULT="$(workflow_logging_level_default "$workflow_id")"
     NIXFIED_WORKFLOW_OUTPUT_MODE_DEFAULT="$(workflow_logging_output_default "$workflow_id")"
@@ -1861,7 +1981,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       local parallel_cap_error=""
       if parallel_cap_error="$(parallel_worker_cap_override_error)"; then
         printf '%s\n' "$parallel_cap_error"
-        return 2
+        return "$NIXFIED_EXIT_USAGE"
       fi
     fi
 
@@ -1968,7 +2088,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   main() {
     if [ "$#" -lt 1 ]; then
       echo "ERROR: usage: nixfied-executor <run-task|run-workflow> ..."
-      exit 2
+      exit "$NIXFIED_EXIT_USAGE"
     fi
 
     local subcommand="$1"
@@ -1983,7 +2103,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         ;;
       *)
         echo "ERROR: unknown subcommand '$subcommand'"
-        exit 2
+        exit "$NIXFIED_EXIT_USAGE"
         ;;
     esac
   }

@@ -4,11 +4,13 @@
 }:
 {
   name ? "nix-checks",
-  flakeRef ? "path:.",
+  flakeRef ? ".",
   formatterPkg ? (if pkgs ? nixfmt then pkgs.nixfmt else pkgs.nixfmt-rfc-style),
+  nilPkg ? (if pkgs ? nil then pkgs.nil else throw "pkgs.nil is required for nix-checks"),
 }:
 let
   plainShellLogging = import ./plain-shell-logging.nix;
+  shellCommon = import ./shell-common.nix { inherit pkgs; };
 in
 pkgs.writeShellScriptBin name ''
     set -euo pipefail
@@ -20,23 +22,26 @@ pkgs.writeShellScriptBin name ''
       includeWarn = false;
       errorToStderr = true;
     }}
+    ${shellCommon}
 
     usage() {
       cat <<'EOF'
   Usage: nix-checks [--mode <quick|full>] [--quick] [--full] [--flake <ref>] [--help]
 
   Modes:
-    quick  Run nixfmt --check, nix flake show, and nix run .#help.
+    quick  Run nixfmt --check, nil diagnostics, nix flake show, and nix run .#help.
     full   Run quick mode plus nix flake check.
   EOF
+    }
+
+    list_nix_files() {
+      ${pkgs.findutils}/bin/find . -type f -name '*.nix' | ${pkgs.coreutils}/bin/sort
     }
 
     run_nixfmt_check() {
       local -a nix_files
 
-      mapfile -t nix_files < <(
-        ${pkgs.findutils}/bin/find . -type f -name '*.nix' | ${pkgs.coreutils}/bin/sort
-      )
+      mapfile -t nix_files < <(list_nix_files)
 
       if [ "''${#nix_files[@]}" -eq 0 ]; then
         log_skip "no nix files found for formatting check"
@@ -46,6 +51,59 @@ pkgs.writeShellScriptBin name ''
       log_info "checking nix formatting files=''${#nix_files[@]}"
       ${formatterPkg}/bin/nixfmt --check "''${nix_files[@]}"
       log_ok "nix formatting check passed files=''${#nix_files[@]}"
+    }
+
+    run_nil_diagnostics_check() {
+      local -a nix_files
+      local -a issue_files
+      local nix_file
+      local aggregate_output
+      local file_output
+      local aggregate_status
+      local file_status
+
+      mapfile -t nix_files < <(list_nix_files)
+
+      if [ "''${#nix_files[@]}" -eq 0 ]; then
+        log_skip "no nix files found for nil diagnostics"
+        return 0
+      fi
+
+      log_info "checking nil diagnostics files=''${#nix_files[@]}"
+      if aggregate_output="$(${nilPkg}/bin/nil diagnostics "''${nix_files[@]}" 2>&1)"; then
+        aggregate_status=0
+      else
+        aggregate_status=$?
+      fi
+
+      if [ "$aggregate_status" -eq 0 ] && [ -z "$aggregate_output" ]; then
+        log_ok "nil diagnostics check passed files=''${#nix_files[@]}"
+        return 0
+      fi
+
+      issue_files=()
+      for nix_file in "''${nix_files[@]}"; do
+        if file_output="$(${nilPkg}/bin/nil diagnostics "$nix_file" 2>&1)"; then
+          file_status=0
+        else
+          file_status=$?
+        fi
+
+        if [ "$file_status" -ne 0 ] || [ -n "$file_output" ]; then
+          issue_files+=("$nix_file")
+        fi
+      done
+
+      if [ "''${#issue_files[@]}" -eq 0 ]; then
+        log_error "nil diagnostics reported issues files=unknown"
+        return 1
+      fi
+
+      log_error "nil diagnostics reported issues files=''${#issue_files[@]}"
+      for nix_file in "''${issue_files[@]}"; do
+        log_error "nil diagnostics reported file=$nix_file"
+      done
+      return 1
     }
 
     run_flake_show_check() {
@@ -75,12 +133,7 @@ pkgs.writeShellScriptBin name ''
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --mode)
-          if [ "$#" -lt 2 ]; then
-            log_error "--mode requires a value"
-            usage >&2
-            exit 2
-          fi
-          mode="$2"
+          mode="$(nixfied_require_next_arg_with_usage usage --mode "a value" "$@")"
           shift 2
           ;;
         --quick)
@@ -92,12 +145,7 @@ pkgs.writeShellScriptBin name ''
           shift
           ;;
         --flake)
-          if [ "$#" -lt 2 ]; then
-            log_error "--flake requires a value"
-            usage >&2
-            exit 2
-          fi
-          flake_ref="$2"
+          flake_ref="$(nixfied_require_next_arg_with_usage usage --flake "a value" "$@")"
           shift 2
           ;;
         --help)
@@ -105,9 +153,7 @@ pkgs.writeShellScriptBin name ''
           exit 0
           ;;
         *)
-          log_error "unknown argument: $1"
-          usage >&2
-          exit 2
+          nixfied_unknown_arg_with_usage usage "$1"
           ;;
       esac
     done
@@ -116,14 +162,13 @@ pkgs.writeShellScriptBin name ''
       quick|full)
         ;;
       *)
-        log_error "unsupported mode: $mode"
-        usage >&2
-        exit 2
+        nixfied_exit_usage_with_usage usage "unsupported mode: $mode"
         ;;
     esac
 
     log_info "running nix checks mode=$mode flake=$flake_ref"
     run_nixfmt_check
+    run_nil_diagnostics_check
     run_flake_show_check
     run_help_check
 

@@ -2,6 +2,8 @@
   pkgs,
   projectRoot,
   model,
+  services,
+  serviceHookEnv ? { },
 }:
 let
   lib = pkgs.lib;
@@ -30,7 +32,7 @@ let
   runtimePortNames = builtins.sort builtins.lessThan (
     builtins.attrNames (model.runtime.ports or { })
   );
-  serviceIds = builtins.sort builtins.lessThan (builtins.attrNames (model.services or { }));
+  serviceIds = builtins.sort builtins.lessThan (builtins.attrNames (services));
 
   staticRuntimePackagesPath = lib.concatStringsSep ":" (
     map (runtimeInput: "${runtimeInput}/bin") model.runtime.runtimePackages
@@ -61,14 +63,49 @@ let
   );
 
   staticServiceNames = lib.concatStringsSep "\n" (
-    map (serviceId: model.services.${serviceId}.name) serviceIds
+    map (
+      serviceId:
+      let
+        service = services.${serviceId};
+      in
+      "${service.name}\t${service.config.dataDirName or service.name}"
+    ) serviceIds
+  );
+
+  serviceHookEntries = builtins.concatLists (
+    map (
+      serviceId:
+      let
+        service = services.${serviceId};
+        serviceName = service.name;
+        serviceToken = normalizeStaticToken serviceName;
+        hookNames = builtins.filter (hookName: lib.hasPrefix "SVC_${serviceToken}_" hookName) (
+          builtins.attrNames serviceHookEnv
+        );
+      in
+      map (hookName: {
+        inherit
+          serviceName
+          hookName
+          ;
+        value = serviceHookEnv.${hookName};
+      }) hookNames
+    ) serviceIds
+  );
+
+  staticServiceHookEnvCmds = lib.concatStringsSep "\n" (
+    map (entry: ''
+      if runtime_service_selected ${lib.escapeShellArg entry.serviceName}; then
+        env_cmd+=(${lib.escapeShellArg "${entry.hookName}=${entry.value}"})
+      fi
+    '') serviceHookEntries
   );
 
   staticServiceEnvCmds = lib.concatStringsSep "\n" (
     map (
       serviceId:
       let
-        service = model.services.${serviceId};
+        service = services.${serviceId};
         serviceToken = normalizeStaticToken service.name;
         configKeys = builtins.sort builtins.lessThan (builtins.attrNames (service.config or { }));
         configCmds = lib.concatStringsSep "\n" (
@@ -82,10 +119,14 @@ let
         );
       in
       ''
-        env_cmd+=(${lib.escapeShellArg "NIXFIED_SERVICE_${serviceToken}_ENABLED=${if service.enable then "1" else "0"}"})
+        if runtime_service_selected ${lib.escapeShellArg service.name}; then
+          env_cmd+=(${lib.escapeShellArg "NIXFIED_SERVICE_${serviceToken}_ENABLED=${if service.enable then "1" else "0"}"})
       ''
       + lib.optionalString (configCmds != "") ''
         ${configCmds}
+      ''
+      + ''
+        fi
       ''
     ) serviceIds
   );
@@ -117,6 +158,31 @@ in
 
     normalize_env_token() {
       printf '%s' "$1" | ${pkgs.coreutils}/bin/tr '[:lower:].-' '[:upper:]__' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_'
+    }
+
+    runtime_service_selected() {
+      local service_name="$1"
+      local selected_services_csv="''${NIXFIED_SELECTED_SERVICES_CSV:-}"
+      local selected_service=""
+      local old_ifs="$IFS"
+      local selected_parts=()
+
+      if [ -z "$selected_services_csv" ]; then
+        return 1
+      fi
+
+      IFS=','
+      read -r -a selected_parts <<< "$selected_services_csv"
+      IFS="$old_ifs"
+
+      for selected_service in "''${selected_parts[@]}"; do
+        selected_service="$(printf '%s' "$selected_service" | ${pkgs.coreutils}/bin/tr -d '[:space:]')"
+        if [ -n "$selected_service" ] && [ "$selected_service" = "$service_name" ]; then
+          return 0
+        fi
+      done
+
+      return 1
     }
 
     is_sensitive_env_name() {
@@ -160,6 +226,9 @@ in
           return 0
           ;;
         NIXFIED_WORKFLOW_SETUP_STARTED_AT|NIXFIED_WORKFLOW_SETUP_STARTED_EPOCH)
+          return 0
+          ;;
+        SVC_*)
           return 0
           ;;
         *)
@@ -823,7 +892,7 @@ in
 
   ${staticServiceEnvCmds}
 
-      while IFS= read -r service_name || [ -n "$service_name" ]; do
+      while IFS=$'\t' read -r service_name service_data_dir_name || [ -n "$service_name" ]; do
         local service_token
         local service_root
         local service_data_dir
@@ -833,9 +902,15 @@ in
         if [ -z "$service_name" ]; then
           continue
         fi
+        if ! runtime_service_selected "$service_name"; then
+          continue
+        fi
 
         service_token="$(normalize_env_token "$service_name")"
-        service_root="$services_root/$service_name"
+        if [ -z "$service_data_dir_name" ]; then
+          service_data_dir_name="$service_name"
+        fi
+        service_root="$services_root/$service_data_dir_name"
         service_data_dir="$service_root/data"
         service_state_dir="$service_root/state"
         service_log_dir="$service_root/log"
@@ -848,6 +923,8 @@ in
         env_cmd+=("NIXFIED_SERVICE_''${service_token}_STATE_DIR=$service_state_dir")
         env_cmd+=("NIXFIED_SERVICE_''${service_token}_LOG_DIR=$service_log_dir")
       done <<< "$ENV_SANDBOX_STATIC_SERVICE_NAMES"
+
+  ${staticServiceHookEnvCmds}
 
       while IFS= read -r pass_name || [ -n "$pass_name" ]; do
         if [ -z "$pass_name" ]; then

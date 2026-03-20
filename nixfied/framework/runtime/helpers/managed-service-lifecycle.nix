@@ -5,6 +5,7 @@
 
 let
   lib = pkgs.lib;
+  runtimeDefaults = import ../../core/runtime-defaults.nix;
 
   mkStopOutcomeBody =
     {
@@ -97,8 +98,12 @@ let
           ${planBody}
         }
 
-        plan_probe_timeout_secs=${toString (wait.timeoutSeconds or 300)}
-        plan_probe_interval_secs=${toString (wait.intervalSeconds or 1)}
+        plan_probe_timeout_secs=${
+          toString (wait.timeoutSeconds or runtimeDefaults.probes.wait.timeoutSeconds)
+        }
+        plan_probe_interval_secs=${
+          toString (wait.intervalSeconds or runtimeDefaults.probes.wait.intervalSeconds)
+        }
         ${lib.optionalString ((wait.timeoutEnvVar or null) != null) ''
           plan_probe_timeout_var=${lib.escapeShellArg wait.timeoutEnvVar}
           plan_probe_timeout_override="$(${pkgs.coreutils}/bin/printenv "$plan_probe_timeout_var" 2>/dev/null || true)"
@@ -168,9 +173,9 @@ let
       failureMessage,
       degradedWaitReason,
       degradedLastError,
-      probeAttempts ? 40,
-      probeInterval ? "0.25",
-      tailLines ? 50,
+      probeAttempts ? runtimeDefaults.probes.startupReadiness.attempts,
+      probeInterval ? runtimeDefaults.probes.startupReadiness.intervalSeconds,
+      tailLines ? runtimeDefaults.probes.startupReadiness.tailLines,
       successBody ? "",
     }:
     ''
@@ -306,8 +311,8 @@ let
       statusBody,
       healthBody,
       readyBody,
-      stopWaitAttempts ? 20,
-      stopWaitInterval ? "0.2",
+      stopWaitAttempts ? runtimeDefaults.probes.managedStop.waitAttempts,
+      stopWaitInterval ? runtimeDefaults.probes.managedStop.waitIntervalSeconds,
       fullStartBody ? null,
       fullStartTestBody ? null,
     }:

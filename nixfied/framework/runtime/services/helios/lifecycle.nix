@@ -9,6 +9,7 @@
 
 let
   lib = pkgs.lib;
+  runtimeDefaults = import ../../../core/runtime-defaults.nix;
   managedServiceLifecycle = import ../../helpers/managed-service-lifecycle.nix { inherit pkgs; };
   probeCommands = import ../../helpers/probe-commands.nix { inherit pkgs; };
   probePlanRuntime = import ../../helpers/probe-plan-runtime.nix {
@@ -60,12 +61,7 @@ let
     };
   healthPlanBody = renderPlanBody "health" healthPlan;
   readyPlanBody = renderPlanBody "ready" readyPlan;
-  readyWait =
-    readyPlan.wait or {
-      enabled = false;
-      timeoutSeconds = 300;
-      intervalSeconds = 1;
-    };
+  readyWait = readyPlan.wait or runtimeDefaults.probes.wait;
 
   runtimePrelude = ''
     ${slotEnvRuntime.loadJsonFromCommand {
@@ -103,7 +99,7 @@ let
     HELIOS_CHECKPOINT="''${HELIOS_CHECKPOINT:-${config.checkpoint or ""}}"
 
     if [ -z "$HELIOS_EXECUTION_RPC_URL" ] && [ -n "$HELIOS_EXECUTION_PORT" ]; then
-      HELIOS_EXECUTION_RPC_URL="http://127.0.0.1:$HELIOS_EXECUTION_PORT"
+      HELIOS_EXECUTION_RPC_URL="${probeCommands.localHttpUrlExpr "$HELIOS_EXECUTION_PORT"}"
     fi
 
     # Default consensus endpoint for mainnet if not explicitly configured.
@@ -129,7 +125,7 @@ let
     ${observability.mkEmitServiceEventFunction "helios"}
   '';
 
-  heliosRpcUrlExpr = "http://127.0.0.1:$HELIOS_RPC_PORT";
+  heliosRpcUrlExpr = probeCommands.localHttpUrlExpr "$HELIOS_RPC_PORT";
   healthCheck = probeCommands.jsonRpcHasResultCmd {
     urlExpr = heliosRpcUrlExpr;
     method = "eth_chainId";
@@ -275,7 +271,7 @@ let
       ARGS=(
         ethereum
         --network "$HELIOS_NETWORK"
-        --rpc-bind-ip 127.0.0.1
+        --rpc-bind-ip ${runtimeDefaults.hosts.loopbackIp}
         --rpc-port "$HELIOS_RPC_PORT"
         --data-dir "$HELIOS_DIR/data"
         --execution-rpc "$HELIOS_EXECUTION_RPC_URL"
@@ -305,7 +301,7 @@ let
     startPostLaunchBody = managedServiceLifecycle.mkStartupReadinessBody {
       probeCommand = healthCheck;
       serviceLabel = "helios";
-      probeAttempts = 80;
+      probeAttempts = runtimeDefaults.probes.startupReadiness.extendedAttempts;
       degradedWaitReason = "failed_startup_health";
       degradedLastError = "helios failed initial health checks";
       failureMessage = "helios failed to become healthy";
@@ -344,8 +340,8 @@ let
         }
       else
         ''
-          TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-${toString (readyWait.timeoutSeconds or 300)}}"
-          INTERVAL_SECS="''${HELIOS_READY_INTERVAL_SECS:-${toString (readyWait.intervalSeconds or 1)}}"
+          TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-${toString readyWait.timeoutSeconds}}"
+          INTERVAL_SECS="''${HELIOS_READY_INTERVAL_SECS:-${toString readyWait.intervalSeconds}}"
 
           case "$TIMEOUT_SECS" in
             *[!0-9]*|"")
@@ -430,22 +426,9 @@ let
             ${pkgs.coreutils}/bin/sleep "$INTERVAL_SECS"
           done
         '';
-    stopWaitAttempts = 40;
-    stopWaitInterval = "0.25";
+    stopWaitAttempts = runtimeDefaults.probes.managedStop.extendedWaitAttempts;
+    stopWaitInterval = runtimeDefaults.probes.managedStop.extendedWaitIntervalSeconds;
   };
-
-  inherit (managedLifecycle)
-    init
-    start
-    stop
-    restart
-    status
-    checkConfig
-    health
-    ready
-    fullStart
-    fullStartTest
-    ;
 in
 {
   inherit helios;

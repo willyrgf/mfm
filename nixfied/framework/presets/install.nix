@@ -6,6 +6,7 @@
 }:
 let
   plainShellLogging = import ../core/plain-shell-logging.nix;
+  shellCommon = import ../core/shell-common.nix { inherit pkgs; };
   vendoredMetadataRuntime = import ../install/internal/vendored-metadata.nix { inherit pkgs; };
 
   thinWrapperFlake = import ../install/wrapper-flake.nix {
@@ -117,6 +118,7 @@ let
               nix run .#framework::upgrade -- --target . --reset-local
 
             Upgrade vendored wrapper in-place while preserving nixfied/project and nixfied/local by default.
+            Do not target a framework workspace root itself; use a downstream repo or another target path.
 
             Options:
               --vendor          Generate a vendored wrapper flake (default for framework::upgrade).
@@ -152,6 +154,7 @@ let
               includeSkip = false;
               errorToStderr = true;
             }}
+            ${shellCommon}
             source ${vendoredMetadataRuntime}
 
             while [ "$#" -gt 0 ]; do
@@ -174,11 +177,7 @@ let
                   shift
                   ;;
                 --target)
-                  if [ "$#" -lt 2 ]; then
-                    log_error "--target requires a value"
-                    exit 2
-                  fi
-                  target="$2"
+                  target="$(nixfied_require_next_arg --target "a value" "$@")"
                   shift 2
                   ;;
                 --help|-h)
@@ -190,20 +189,15 @@ let
                   break
                   ;;
                 *)
-                  log_error "unknown argument '$1'"
-                  exit 2
+                  nixfied_unknown_arg "$1"
                   ;;
               esac
             done
 
-            if [ "$#" -gt 0 ]; then
-              log_error "unexpected positional arguments: $*"
-              exit 2
-            fi
+            nixfied_unexpected_positional_args "$@"
 
             if [ "$vendor" -eq 0 ] && { [ "$reset_project" -eq 1 ] || [ "$reset_local" -eq 1 ]; }; then
-              log_error "--reset-project/--reset-local require --vendor"
-              exit 2
+              nixfied_exit_usage "--reset-project/--reset-local require --vendor"
             fi
 
             if [ -z "$FRAMEWORK_REVISION" ] || [ "$FRAMEWORK_REVISION" = "unknown" ]; then
@@ -211,6 +205,30 @@ let
             fi
             if [ -z "$FRAMEWORK_REVISION" ]; then
               FRAMEWORK_REVISION="unknown"
+            fi
+
+            target_abs="$target"
+            case "$target_abs" in
+              /*)
+                ;;
+              *)
+                target_abs="$(pwd -P)/$target_abs"
+                ;;
+            esac
+            if target_abs_resolved="$(cd "$target_abs" 2>/dev/null && pwd -P)"; then
+              target_abs="$target_abs_resolved"
+            else
+              target_abs_dir="$(dirname "$target_abs")"
+              target_abs_name="$(basename "$target_abs")"
+              if target_abs_dir_resolved="$(cd "$target_abs_dir" 2>/dev/null && pwd -P)"; then
+                target_abs="$target_abs_dir_resolved/$target_abs_name"
+              fi
+            fi
+
+            if [ "$upgrade" -eq 1 ] && [ -f "$target_abs/.workspace" ]; then
+              log_error "framework::upgrade refuses to target a framework workspace root: $target_abs"
+              echo "   Run it from a downstream repo or choose a different --target path." >&2
+              exit "$NIXFIED_EXIT_USAGE"
             fi
 
             mkdir -p "$target"
@@ -316,7 +334,11 @@ in
       appName = "framework::upgrade";
       kind = "utility";
       summary = "Upgrade vendored wrapper in-place";
-      description = "Upgrades framework files while preserving nixfied/project and nixfied/local by default. Use --reset-project/--reset-local to overwrite those paths.";
+      description = ''
+        Upgrades framework files while preserving nixfied/project and nixfied/local by default.
+        Use --reset-project/--reset-local to overwrite those paths.
+        Do not target a framework workspace root itself; use a downstream repo or another target path.
+      '';
       runtimeInputs = frameworkInstallRuntimeInputs;
       usage = [
         "nix run .#framework::upgrade -- --target ."

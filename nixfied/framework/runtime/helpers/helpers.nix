@@ -292,7 +292,7 @@ let
             return 0
           fi
         elif command -v nc >/dev/null 2>&1; then
-          if nc -z localhost "$port" >/dev/null 2>&1; then
+          if nc -z "$NIXFIED_LOCALHOST_NAME" "$port" >/dev/null 2>&1; then
             return 0
           fi
         fi

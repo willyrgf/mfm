@@ -34,10 +34,27 @@
       return 0
     fi
 
-    parent_dir="$(dirname "$target")"
-    mkdir -p "$parent_dir"
-    tmp="$(mktemp "$target.tmp.XXXXXX")"
-    printf '%s\n' "$value" > "$tmp"
-    mv "$tmp" "$target"
+    parent_dir="$(dirname "$target")" || {
+      echo "ERROR: unable to determine parent directory for '$target'" >&2
+      return 1
+    }
+    mkdir -p "$parent_dir" || {
+      echo "ERROR: unable to create directory '$parent_dir'" >&2
+      return 1
+    }
+    tmp="$(mktemp "$target.tmp.XXXXXX")" || {
+      echo "ERROR: unable to create temp file for '$target'" >&2
+      return 1
+    }
+    if ! printf '%s\n' "$value" > "$tmp"; then
+      rm -f "$tmp"
+      echo "ERROR: failed to write temp file for '$target'" >&2
+      return 1
+    fi
+    if ! mv "$tmp" "$target"; then
+      rm -f "$tmp"
+      echo "ERROR: failed to move temp file into '$target'" >&2
+      return 1
+    fi
   }
 ''

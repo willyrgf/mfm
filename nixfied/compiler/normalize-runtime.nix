@@ -29,6 +29,10 @@ in
     outputDefault = resolved.runtime.logging.outputDefault;
   };
 
+  orchestrator = {
+    stopTimeoutSec = resolved.runtime.orchestrator.stopTimeoutSec;
+  };
+
   primitives = {
     version = resolved.runtime.primitives.version;
     defs = resolved.runtime.primitives.defs;

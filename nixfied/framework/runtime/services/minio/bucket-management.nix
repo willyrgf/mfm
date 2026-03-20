@@ -8,21 +8,22 @@
 }:
 
 let
+  runtimeDefaults = import ../../../core/runtime-defaults.nix;
   mc = config.clientPackage or pkgs.minio-client;
   apiPortVar = slots.portVarName config.portKeyApi;
   minioDirExpr = slots.getServiceDir config.dataDirName;
+  minioEndpointExpr = "http://${runtimeDefaults.hosts.loopbackIp}:$MINIO_API_PORT";
 
-  bucketCreate = pkgs.writeShellScript "minio-bucket-create" ''
-    ${loggingPrelude}
+  mkBucketScript =
+    name: body:
+    pkgs.writeShellScript name ''
+      ${loggingPrelude}
 
-    set -euo pipefail
+      set -euo pipefail
+      ${body}
+    '';
 
-    BUCKET="''${1:-}"
-    if [ -z "$BUCKET" ]; then
-      echo "usage: minio-bucket-create <bucket>" >&2
-      exit 1
-    fi
-
+  bucketRuntimePrelude = ''
     source <(${slots.getSlotInfo})
     API_PORT_VAR="${apiPortVar}"
     MINIO_API_PORT="''${!API_PORT_VAR}"
@@ -30,111 +31,67 @@ let
 
     ROOT_USER="''${MINIO_ROOT_USER:-${config.rootUser}}"
     ROOT_PASSWORD="''${MINIO_ROOT_PASSWORD:-${config.rootPassword}}"
+  '';
 
+  mcAliasSetup = ''
     export MC_CONFIG_DIR="$MINIO_DIR/config/mc"
-    ${mc}/bin/mc alias set local "http://127.0.0.1:$MINIO_API_PORT" "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null
+    ${mc}/bin/mc alias set local "${minioEndpointExpr}" "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null
+  '';
+
+  requireBucketArg = commandName: ''
+    BUCKET="''${1:-}"
+    if [ -z "$BUCKET" ]; then
+      nixfied_exit_usage "usage: ${commandName} <bucket>"
+    fi
+  '';
+
+  bucketCreate = mkBucketScript "minio-bucket-create" ''
+    ${requireBucketArg "minio-bucket-create"}
+    ${bucketRuntimePrelude}
+    ${mcAliasSetup}
     ${mc}/bin/mc mb --ignore-existing "local/$BUCKET"
 
     log_ok "minio bucket created bucket=$BUCKET"
   '';
 
-  bucketEnsure = pkgs.writeShellScript "minio-bucket-ensure" ''
-    ${loggingPrelude}
-
-    set -euo pipefail
-
-    BUCKET="''${1:-}"
-    if [ -z "$BUCKET" ]; then
-      echo "usage: minio-bucket-ensure <bucket>" >&2
-      exit 1
-    fi
-
-    source <(${slots.getSlotInfo})
-    API_PORT_VAR="${apiPortVar}"
-    MINIO_API_PORT="''${!API_PORT_VAR}"
-    MINIO_DIR="${minioDirExpr}"
-
-    ROOT_USER="''${MINIO_ROOT_USER:-${config.rootUser}}"
-    ROOT_PASSWORD="''${MINIO_ROOT_PASSWORD:-${config.rootPassword}}"
-
-    export MC_CONFIG_DIR="$MINIO_DIR/config/mc"
-    ${mc}/bin/mc alias set local "http://127.0.0.1:$MINIO_API_PORT" "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null
+  bucketEnsure = mkBucketScript "minio-bucket-ensure" ''
+    ${requireBucketArg "minio-bucket-ensure"}
+    ${bucketRuntimePrelude}
+    ${mcAliasSetup}
     ${mc}/bin/mc mb --ignore-existing "local/$BUCKET" >/dev/null
 
     log_ok "minio bucket ensured bucket=$BUCKET"
   '';
 
-  bucketDelete = pkgs.writeShellScript "minio-bucket-delete" ''
-    ${loggingPrelude}
-
-    set -euo pipefail
-
-    BUCKET="''${1:-}"
-    if [ -z "$BUCKET" ]; then
-      echo "usage: minio-bucket-delete <bucket>" >&2
-      exit 1
-    fi
-
-    source <(${slots.getSlotInfo})
-    API_PORT_VAR="${apiPortVar}"
-    MINIO_API_PORT="''${!API_PORT_VAR}"
-    MINIO_DIR="${minioDirExpr}"
-
-    ROOT_USER="''${MINIO_ROOT_USER:-${config.rootUser}}"
-    ROOT_PASSWORD="''${MINIO_ROOT_PASSWORD:-${config.rootPassword}}"
-
-    export MC_CONFIG_DIR="$MINIO_DIR/config/mc"
-    ${mc}/bin/mc alias set local "http://127.0.0.1:$MINIO_API_PORT" "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null
+  bucketDelete = mkBucketScript "minio-bucket-delete" ''
+    ${requireBucketArg "minio-bucket-delete"}
+    ${bucketRuntimePrelude}
+    ${mcAliasSetup}
     ${mc}/bin/mc rb --force "local/$BUCKET"
 
     log_ok "minio bucket deleted bucket=$BUCKET"
   '';
 
-  bucketList = pkgs.writeShellScript "minio-bucket-list" ''
-    set -euo pipefail
-
-    source <(${slots.getSlotInfo})
-    API_PORT_VAR="${apiPortVar}"
-    MINIO_API_PORT="''${!API_PORT_VAR}"
-    MINIO_DIR="${minioDirExpr}"
-
-    ROOT_USER="''${MINIO_ROOT_USER:-${config.rootUser}}"
-    ROOT_PASSWORD="''${MINIO_ROOT_PASSWORD:-${config.rootPassword}}"
-
-    export MC_CONFIG_DIR="$MINIO_DIR/config/mc"
-    ${mc}/bin/mc alias set local "http://127.0.0.1:$MINIO_API_PORT" "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null
-
+  bucketList = mkBucketScript "minio-bucket-list" ''
+    ${bucketRuntimePrelude}
+    ${mcAliasSetup}
     ${mc}/bin/mc ls local
   '';
 
-  policyApply = pkgs.writeShellScript "minio-policy-apply" ''
-    ${loggingPrelude}
-
-    set -euo pipefail
-
+  policyApply = mkBucketScript "minio-policy-apply" ''
     BUCKET="''${1:-}"
     POLICY_FILE="''${2:-}"
 
     if [ -z "$BUCKET" ] || [ -z "$POLICY_FILE" ]; then
-      echo "usage: minio-policy-apply <bucket> <policy-file>" >&2
-      exit 1
+      nixfied_exit_usage "usage: minio-policy-apply <bucket> <policy-file>"
     fi
 
     if [ ! -f "$POLICY_FILE" ]; then
-      log_error "policy file not found: $POLICY_FILE"
-      exit 1
+      nixfied_exit_precondition "policy file not found: $POLICY_FILE"
     fi
 
-    source <(${slots.getSlotInfo})
-    API_PORT_VAR="${apiPortVar}"
-    MINIO_API_PORT="''${!API_PORT_VAR}"
-    MINIO_DIR="${minioDirExpr}"
-
-    ROOT_USER="''${MINIO_ROOT_USER:-${config.rootUser}}"
-    ROOT_PASSWORD="''${MINIO_ROOT_PASSWORD:-${config.rootPassword}}"
-
-    export MC_CONFIG_DIR="$MINIO_DIR/config/mc"
-    ${mc}/bin/mc alias set local "http://127.0.0.1:$MINIO_API_PORT" "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null
+    ${bucketRuntimePrelude}
+    ${mcAliasSetup}
     ${mc}/bin/mc anonymous set-json "$POLICY_FILE" "local/$BUCKET"
 
     log_ok "minio policy applied bucket=$BUCKET file=$POLICY_FILE"

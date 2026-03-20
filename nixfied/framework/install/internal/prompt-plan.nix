@@ -13,14 +13,7 @@ pkgs.writeShellScript "nixfied-prompt-plan" ''
     OUT_PATH=""
 
     require_next_arg() {
-      local flag="$1"
-      local requirement="$2"
-      shift 2 || true
-      if [ "$#" -lt 2 ]; then
-        log_error "$flag requires $requirement"
-        exit 1
-      fi
-      printf '%s\n' "$2"
+      nixfied_require_next_arg "$@"
     }
 
     while [ "$#" -gt 0 ]; do
@@ -57,8 +50,7 @@ pkgs.writeShellScript "nixfied-prompt-plan" ''
 
     ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
     if [ -z "$ROOT" ]; then
-      log_error "Not inside a git repository."
-      exit 1
+      nixfied_exit_precondition "Not inside a git repository."
     fi
 
     OUT_PATH="''${OUT_PATH:-$ROOT/NIXFIED_PROMPT_PLAN.md}"
@@ -70,8 +62,7 @@ pkgs.writeShellScript "nixfied-prompt-plan" ''
     fi
 
     if ! command -v nix >/dev/null 2>&1; then
-      log_error "nix is required to run dump2llm."
-      exit 1
+      nixfied_exit_unavailable "nix is required to run dump2llm."
     fi
 
     CONTEXT_FILE=$(mktemp)

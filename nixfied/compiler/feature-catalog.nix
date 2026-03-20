@@ -95,6 +95,34 @@
     docs = [ ];
   };
 
+  "runtime.service-hooks" = {
+    kind = "runtime";
+    summary = "Generated service hook env vars and service operation apps";
+    surfaces = [
+      {
+        kind = "dispatcher";
+        name = "run-task/run-workflow";
+      }
+      {
+        kind = "app";
+        name = "svc::<service>::<op>";
+      }
+    ];
+    ownerFiles = [
+      "nixfied/framework/core/mkServiceRuntimeSurfaces.nix"
+      "nixfied/framework/runtime/helpers/service-api.nix"
+      "nixfied/framework/runtime/env-sandbox.nix"
+    ];
+    modelPaths = [ "services" ];
+    status = "stable";
+    defaults = {
+      hookPrefix = "SVC_";
+      appPrefix = "svc::";
+    };
+    coverageRequired = true;
+    docs = [ ];
+  };
+
   "runtime.output.prefix-contract" = {
     kind = "runtime";
     summary = "Stable ASCII log prefix contract";

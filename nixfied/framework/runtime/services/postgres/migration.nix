@@ -8,9 +8,9 @@
 }:
 
 let
+  runtimeDefaults = import ../../../core/runtime-defaults.nix;
   postgres = config.package or pkgs.postgresql_16;
   migrationsCfg = config.migrations or { };
-  migrationsDir = migrationsCfg.dir or "migrations";
   migrateCommand = migrationsCfg.command or "";
   sourceDatabase = migrationsCfg.sourceDatabase or null;
   portKey = config.portKey or "postgres";
@@ -42,7 +42,7 @@ let
     log_info "Testing migrations against copy of '$SOURCE_DB'"
 
     # Create test database as copy of source
-    ${postgres}/bin/createdb -h localhost -p "$PGPORT" -U postgres -T "$SOURCE_DB" "$TEST_DB" 2>/dev/null || {
+    ${postgres}/bin/createdb -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres -T "$SOURCE_DB" "$TEST_DB" 2>/dev/null || {
       log_error "Failed to copy database '$SOURCE_DB'"
       exit 1
     }
@@ -56,7 +56,7 @@ let
     ) || MIGRATION_EXIT=$?
 
     # Drop the test database
-    ${postgres}/bin/dropdb -h localhost -p "$PGPORT" -U postgres "$TEST_DB" 2>/dev/null || true
+    ${postgres}/bin/dropdb -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres "$TEST_DB" 2>/dev/null || true
 
     if [ $MIGRATION_EXIT -ne 0 ]; then
       log_error "Migration test failed (exit code: $MIGRATION_EXIT)"

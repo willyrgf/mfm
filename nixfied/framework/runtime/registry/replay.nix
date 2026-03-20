@@ -1,6 +1,7 @@
 { pkgs }:
 let
   events = import ./events.nix { inherit pkgs; };
+  shellCommon = import ../../core/shell-common.nix { inherit pkgs; };
 in
 {
   mkReplayTool =
@@ -11,14 +12,14 @@ in
       set -euo pipefail
 
       ${events.mkShellLib { }}
+      ${shellCommon}
 
       root="''${REGISTRY_ROOT:-}"
       if [ -z "$root" ] && [ "$#" -gt 0 ]; then
         root="$1"
       fi
       if [ -z "$root" ]; then
-        echo "ERROR: usage: ${name} <registry-root>"
-        exit 2
+        nixfied_exit_usage "usage: ${name} <registry-root>"
       fi
 
       events_file="$(registry_events_snapshot "$root")"

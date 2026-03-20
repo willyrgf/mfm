@@ -8,6 +8,8 @@ let
   cfg = config.nixfied.operations;
   runtime = config.nixfied.runtime;
   services = config.nixfied.services;
+  exitCodes = import ../framework/core/exit-codes.nix;
+  shellCommon = import ../framework/core/shell-common.nix { inherit pkgs; };
   probeCommands = import ../framework/runtime/helpers/probe-commands.nix { inherit pkgs; };
   skipPolicy = import ../framework/runtime/helpers/skip-policy.nix { inherit pkgs; };
   probePlanRuntime = import ../framework/runtime/helpers/probe-plan-runtime.nix {
@@ -117,6 +119,7 @@ let
   );
 
   slotEnvPrelude = ''
+        ${shellCommon}
         slot_var=${lib.escapeShellArg runtime.slot.var}
         env_var=${lib.escapeShellArg runtime.env.var}
         slot_default=${toString runtime.slot.default}
@@ -126,15 +129,13 @@ let
         env_value="''${!env_var:-$env_default}"
 
         if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
-          echo "ERROR: $slot_var must be an integer"
-          exit 3
+          nixfied_exit_precondition "$slot_var must be an integer"
         fi
 
         case "$env_value" in
     ${envOffsetCase}
           *)
-            echo "ERROR: unsupported $env_var '$env_value'"
-            exit 3
+            nixfied_exit_precondition "unsupported $env_var '$env_value'"
             ;;
         esac
   '';
@@ -270,11 +271,7 @@ let
         while [ "$#" -gt 0 ]; do
           case "$1" in
             --service)
-              if [ "$#" -lt 2 ]; then
-                echo "ERROR: --service requires a value"
-                exit 2
-              fi
-              target_service="$2"
+              target_service="$(nixfied_require_next_arg --service "a value" "$@")"
               shift 2
               ;;
             --service=*)
@@ -282,11 +279,7 @@ let
               shift
               ;;
             --source)
-              if [ "$#" -lt 2 ]; then
-                echo "ERROR: --source requires a value"
-                exit 2
-              fi
-              target_source="$2"
+              target_source="$(nixfied_require_next_arg --source "a value" "$@")"
               shift 2
               ;;
             --source=*)
@@ -298,16 +291,12 @@ let
               break
               ;;
             *)
-              echo "ERROR: unknown argument '$1'"
-              exit 2
+              nixfied_unknown_arg "$1"
               ;;
           esac
         done
 
-        if [ "$#" -gt 0 ]; then
-          echo "ERROR: unexpected positional arguments: $*"
-          exit 2
-        fi
+        nixfied_unexpected_positional_args "$@"
 
         is_known_service() {
           case "$1" in
@@ -403,16 +392,14 @@ let
         }
 
         if [ "$target_service" != "all" ] && ! is_known_service "$target_service"; then
-          echo "ERROR: unknown --service '$target_service'"
-          exit 2
+          nixfied_exit_usage "unknown --service '$target_service'"
         fi
 
         if [ "$target_service" = "all" ]; then
           ${enabledServiceArrayInit}
         else
           if [ "$(is_service_enabled "$target_service")" != "1" ]; then
-            echo "ERROR: selected service '$target_service' is disabled"
-            exit 3
+            nixfied_exit_precondition "selected service '$target_service' is disabled"
           fi
           selected_services=("$target_service")
         fi
@@ -420,12 +407,10 @@ let
 
         if [ -n "$target_source" ]; then
           if [ "$target_service" = "all" ]; then
-            echo "ERROR: --source requires --service"
-            exit 2
+            nixfied_exit_usage "--source requires --service"
           fi
           if ! service_has_source "$target_service" "$target_source"; then
-            echo "ERROR: unknown source '$target_source' for service '$target_service'"
-            exit 3
+            nixfied_exit_precondition "unknown source '$target_source' for service '$target_service'"
           fi
         fi
 
@@ -578,11 +563,11 @@ let
           effects = [ "none" ];
           timeoutSec = 0;
         };
-        errors.codes = {
-          generic = 1;
-          usage = 2;
-          precondition = 3;
-        };
+        errors.codes = builtins.removeAttrs exitCodes [
+          "canceled"
+          "unavailable"
+          "timeout"
+        ];
       };
       runtime = {
         slotEnv = "optional";
@@ -625,6 +610,7 @@ let
 
   validateScript = ''
     set -euo pipefail
+    ${shellCommon}
 
     slot_var=${lib.escapeShellArg runtime.slot.var}
     env_var=${lib.escapeShellArg runtime.env.var}
@@ -637,20 +623,17 @@ let
     env_value="''${!env_var:-$env_default}"
 
     if ! [[ "$slot_value" =~ ^[0-9]+$ ]]; then
-      echo "ERROR: $slot_var must be an integer"
-      exit 3
+      nixfied_exit_precondition "$slot_var must be an integer"
     fi
 
     if [ "$slot_value" -gt "$slot_max" ]; then
-      echo "ERROR: $slot_var exceeds max slot ($slot_max)"
-      exit 3
+      nixfied_exit_precondition "$slot_var exceeds max slot ($slot_max)"
     fi
 
     case "$env_value" in
       ${envPattern}) ;;
       *)
-        echo "ERROR: unsupported $env_var '$env_value'"
-        exit 3
+        nixfied_exit_precondition "unsupported $env_var '$env_value'"
         ;;
     esac
 
@@ -659,6 +642,7 @@ let
 
   portsScript = ''
         set -euo pipefail
+        ${shellCommon}
 
         slot_var=${lib.escapeShellArg runtime.slot.var}
         env_var=${lib.escapeShellArg runtime.env.var}
@@ -671,8 +655,7 @@ let
         case "$env_value" in
     ${envOffsetCase}
           *)
-            echo "ERROR: unsupported $env_var '$env_value'"
-            exit 3
+            nixfied_exit_precondition "unsupported $env_var '$env_value'"
             ;;
         esac
 

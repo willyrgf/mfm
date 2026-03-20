@@ -5,6 +5,7 @@
 }:
 let
   lib = pkgs.lib;
+  exitCodes = import ../../core/exit-codes.nix;
 
   runtimeEnvSpecs = [
     {
@@ -56,11 +57,11 @@ let
       idempotent ? false,
       allowUnknownArgs ? class == "passthrough",
       outputs ? null,
-      failureCodes ? {
-        generic = 1;
-        usage = 2;
-        precondition = 3;
-      },
+      failureCodes ? builtins.removeAttrs exitCodes [
+        "canceled"
+        "unavailable"
+        "timeout"
+      ],
     }:
     let
       resolvedOutputs =

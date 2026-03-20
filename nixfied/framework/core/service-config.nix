@@ -1,5 +1,10 @@
-{ lib }:
+{
+  lib,
+  pkgs ? null,
+}:
 let
+  runtimeDefaults = import ./runtime-defaults.nix;
+
   packagePath =
     {
       discardContext ? false,
@@ -21,33 +26,123 @@ let
 
   sortUnique = values: builtins.sort builtins.lessThan (lib.unique values);
 
+  hasNonNullAttr = attrs: name: builtins.hasAttr name attrs && builtins.getAttr name attrs != null;
+
+  resolveAttrPath =
+    {
+      serviceName,
+      sourceKey,
+      fieldName,
+      attrPath,
+    }:
+    let
+      segments = lib.splitString "." attrPath;
+      step =
+        current: remaining:
+        if remaining == [ ] then
+          current
+        else
+          let
+            key = builtins.head remaining;
+          in
+          if !(builtins.isAttrs current) || !(builtins.hasAttr key current) then
+            throw ''
+              service '${serviceName}' source '${sourceKey}' ${fieldName} '${attrPath}' is not defined in pkgs
+            ''
+          else
+            step (builtins.getAttr key current) (builtins.tail remaining);
+    in
+    if pkgs == null then null else step pkgs segments;
+
+  resolveSourcePackage =
+    {
+      serviceName,
+      sourceKey,
+      source,
+      fieldName,
+      attrFieldName,
+      factoryFieldName,
+    }:
+    let
+      selectorFields = [
+        fieldName
+        attrFieldName
+        factoryFieldName
+      ];
+      configuredSelectors = builtins.filter (name: hasNonNullAttr source name) selectorFields;
+      selectedField = if configuredSelectors == [ ] then null else builtins.head configuredSelectors;
+    in
+    if builtins.length configuredSelectors > 1 then
+      throw ''
+        service '${serviceName}' source '${sourceKey}' defines multiple selectors for ${fieldName}: ${builtins.concatStringsSep ", " configuredSelectors}
+      ''
+    else if selectedField == null then
+      null
+    else if selectedField == fieldName then
+      builtins.getAttr fieldName source
+    else if selectedField == attrFieldName then
+      resolveAttrPath {
+        inherit
+          serviceName
+          sourceKey
+          fieldName
+          ;
+        attrPath = builtins.getAttr attrFieldName source;
+      }
+    else if pkgs == null then
+      null
+    else
+      pkgs.callPackage (builtins.getAttr factoryFieldName source) { };
+
   normalizeSource =
-    discardContext: source:
+    discardContext: serviceName: sourceKey: source:
+    let
+      package = resolveSourcePackage {
+        inherit
+          serviceName
+          sourceKey
+          source
+          ;
+        fieldName = "package";
+        attrFieldName = "packageAttr";
+        factoryFieldName = "packageFactory";
+      };
+      clientPackage = resolveSourcePackage {
+        inherit
+          serviceName
+          sourceKey
+          source
+          ;
+        fieldName = "clientPackage";
+        attrFieldName = "clientPackageAttr";
+        factoryFieldName = "clientPackageFactory";
+      };
+    in
     dropNulls {
       package =
-        if (source ? package) && source.package != null then
+        if package != null then
           packagePath {
             inherit discardContext;
-            pkg = source.package;
+            pkg = package;
           }
         else
           null;
       clientPackage =
-        if (source ? clientPackage) && source.clientPackage != null then
+        if clientPackage != null then
           packagePath {
             inherit discardContext;
-            pkg = source.clientPackage;
+            pkg = clientPackage;
           }
         else
           null;
     };
 
   normalizeSources =
-    discardContext: keys: sources:
+    discardContext: serviceName: keys: sources:
     builtins.listToAttrs (
       map (key: {
         name = key;
-        value = normalizeSource discardContext (sources.${key} or { });
+        value = normalizeSource discardContext serviceName key (sources.${key} or { });
       }) keys
     );
 
@@ -63,10 +158,9 @@ let
   sourceKeys = cfg: sortUnique ((cfg.sourceKeys or [ ]) ++ builtins.attrNames (cfg.sources or { }));
 
   sourceValue =
-    serviceName: cfg:
+    serviceName: cfg: sources:
     let
       keys = sourceKeys cfg;
-      sources = cfg.sources or { };
       selectedSource = resolveSelectedSource serviceName keys (cfg.defaultSource or "");
     in
     if selectedSource == "" then
@@ -80,13 +174,7 @@ let
         value = sources.${selectedSource} or { };
       };
 
-  defaultWait = {
-    enabled = false;
-    timeoutSeconds = 300;
-    intervalSeconds = 1;
-    timeoutEnvVar = null;
-    intervalEnvVar = null;
-  };
+  defaultWait = runtimeDefaults.probes.wait;
 
   normalizeWait =
     wait:
@@ -181,7 +269,7 @@ let
           field = "endpoint";
           value = step.endpoint or null;
         };
-        host = step.host or "127.0.0.1";
+        host = step.host or runtimeDefaults.hosts.loopbackIp;
         failureSuffix = "";
       }
     else if kind == "postgres-query" then
@@ -192,7 +280,7 @@ let
           field = "endpoint";
           value = step.endpoint or null;
         };
-        host = step.host or "127.0.0.1";
+        host = step.host or runtimeDefaults.hosts.loopbackIp;
         database = requireValue {
           inherit serviceName mode kind;
           field = "database";
@@ -303,16 +391,11 @@ let
         };
       };
       keys = sourceKeys cfgWithDefaults;
-      normalizedSources = normalizeSources discardContext keys (cfgWithDefaults.sources or { });
-      selected = sourceValue "postgres" cfgWithDefaults;
-      package =
-        if (selected.value ? package) && selected.value.package != null then
-          packagePath {
-            inherit discardContext;
-            pkg = selected.value.package;
-          }
-        else
-          null;
+      normalizedSources = normalizeSources discardContext "postgres" keys (
+        cfgWithDefaults.sources or { }
+      );
+      selected = sourceValue "postgres" cfgWithDefaults normalizedSources;
+      package = selected.value.package or null;
       defaultProbePlans = {
         health = {
           count = 1;
@@ -324,7 +407,7 @@ let
               phaseLabel = "health";
               successLabel = "healthy";
               failureLabel = "unhealthy";
-              host = "127.0.0.1";
+              host = runtimeDefaults.hosts.loopbackIp;
               failureSuffix = "";
             }
           ];
@@ -340,7 +423,7 @@ let
               phaseLabel = "readiness";
               successLabel = "ready";
               failureLabel = "not ready";
-              host = "127.0.0.1";
+              host = runtimeDefaults.hosts.loopbackIp;
               failureSuffix = " (pg_isready failed)";
             }
             {
@@ -350,7 +433,7 @@ let
               phaseLabel = "readiness";
               successLabel = "ready";
               failureLabel = "not ready";
-              host = "127.0.0.1";
+              host = runtimeDefaults.hosts.loopbackIp;
               database = cfgWithDefaults.database;
               query = "select 1;";
               failureSuffix = " (query failed)";
@@ -406,16 +489,9 @@ let
         dataDirName = cfg.dataDirName or "nginx";
       };
       keys = sourceKeys cfgWithDefaults;
-      normalizedSources = normalizeSources discardContext keys (cfgWithDefaults.sources or { });
-      selected = sourceValue "nginx" cfgWithDefaults;
-      package =
-        if (selected.value ? package) && selected.value.package != null then
-          packagePath {
-            inherit discardContext;
-            pkg = selected.value.package;
-          }
-        else
-          null;
+      normalizedSources = normalizeSources discardContext "nginx" keys (cfgWithDefaults.sources or { });
+      selected = sourceValue "nginx" cfgWithDefaults normalizedSources;
+      package = selected.value.package or null;
       defaultProbePlans = {
         health = {
           count = 2;
@@ -507,24 +583,10 @@ let
         browser = if cfg ? browser then cfg.browser else true;
       };
       keys = sourceKeys cfgWithDefaults;
-      normalizedSources = normalizeSources discardContext keys (cfgWithDefaults.sources or { });
-      selected = sourceValue "minio" cfgWithDefaults;
-      package =
-        if (selected.value ? package) && selected.value.package != null then
-          packagePath {
-            inherit discardContext;
-            pkg = selected.value.package;
-          }
-        else
-          null;
-      clientPackage =
-        if (selected.value ? clientPackage) && selected.value.clientPackage != null then
-          packagePath {
-            inherit discardContext;
-            pkg = selected.value.clientPackage;
-          }
-        else
-          null;
+      normalizedSources = normalizeSources discardContext "minio" keys (cfgWithDefaults.sources or { });
+      selected = sourceValue "minio" cfgWithDefaults normalizedSources;
+      package = selected.value.package or null;
+      clientPackage = selected.value.clientPackage or null;
       defaultProbePlans = {
         health = {
           count = 2;
@@ -620,16 +682,9 @@ let
         devMode = cfg.devMode or false;
       };
       keys = sourceKeys cfgWithDefaults;
-      normalizedSources = normalizeSources discardContext keys (cfgWithDefaults.sources or { });
-      selected = sourceValue "reth" cfgWithDefaults;
-      package =
-        if (selected.value ? package) && selected.value.package != null then
-          packagePath {
-            inherit discardContext;
-            pkg = selected.value.package;
-          }
-        else
-          null;
+      normalizedSources = normalizeSources discardContext "reth" keys (cfgWithDefaults.sources or { });
+      selected = sourceValue "reth" cfgWithDefaults normalizedSources;
+      package = selected.value.package or null;
       defaultProbePlans = {
         health = {
           count = 3;
@@ -759,16 +814,9 @@ let
         };
       };
       keys = sourceKeys cfgWithDefaults;
-      normalizedSources = normalizeSources discardContext keys (cfgWithDefaults.sources or { });
-      selected = sourceValue "helios" cfgWithDefaults;
-      package =
-        if (selected.value ? package) && selected.value.package != null then
-          packagePath {
-            inherit discardContext;
-            pkg = selected.value.package;
-          }
-        else
-          null;
+      normalizedSources = normalizeSources discardContext "helios" keys (cfgWithDefaults.sources or { });
+      selected = sourceValue "helios" cfgWithDefaults normalizedSources;
+      package = selected.value.package or null;
       defaultHeliosReadyStep = {
         kind = "helios-ready";
         endpoint = "rpc";
@@ -829,10 +877,8 @@ let
               method = "eth_chainId";
             }
           ];
-          wait = {
+          wait = defaultWait // {
             enabled = true;
-            timeoutSeconds = 300;
-            intervalSeconds = 1;
             timeoutEnvVar = "HELIOS_READY_TIMEOUT_SECS";
             intervalEnvVar = "HELIOS_READY_INTERVAL_SECS";
           };

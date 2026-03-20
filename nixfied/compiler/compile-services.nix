@@ -1,9 +1,12 @@
 { lib }:
+{
+  resolved,
+  pkgs,
+}:
 let
-  serviceConfig = import ../framework/core/service-config.nix { inherit lib; };
-in
-{ resolved }:
-let
+  serviceConfig = import ../framework/core/service-config.nix {
+    inherit lib pkgs;
+  };
   services = resolved.services or { };
   excludedServices = resolved.graph.excludedServices or [ ];
   names = builtins.sort builtins.lessThan (

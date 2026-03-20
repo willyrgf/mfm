@@ -1,6 +1,7 @@
 { lib, ... }:
 let
   t = lib.types;
+  exitCodes = import ../framework/core/exit-codes.nix;
   serviceConfigLib = import ../framework/core/service-config.nix { inherit lib; };
   serviceRequirementType = t.enum serviceConfigLib.supportedServiceNames;
   runtimeWorkdirType = t.enum [
@@ -297,13 +298,7 @@ in
               errors = {
                 codes = lib.mkOption {
                   type = t.attrsOf t.int;
-                  default = {
-                    generic = 1;
-                    usage = 2;
-                    precondition = 3;
-                    unavailable = 4;
-                    timeout = 5;
-                  };
+                  default = builtins.removeAttrs exitCodes [ "canceled" ];
                 };
               };
             };

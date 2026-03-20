@@ -5,12 +5,21 @@
   resolved,
   runtime,
   services,
+  serviceCatalog,
   tasks,
   workflows,
   features,
   views,
 }:
 let
+  runtimeHash = canonical.hashCanonical {
+    schema = {
+      kind = "nixfied-runtime";
+      version = 1;
+    };
+    services = services;
+  };
+
   evalHash = canonical.hashCanonical {
     schema = {
       kind = "nixfied-model-eval";
@@ -18,7 +27,7 @@ let
     };
     identity = resolved.identity;
     runtime = runtime;
-    services = services;
+    services = serviceCatalog;
     tasks = tasks;
     workflows = workflows;
     features = features;
@@ -27,7 +36,7 @@ let
   model = canonical.canonicalize {
     schema = {
       kind = "nixfied-model";
-      version = 1;
+      version = 2;
     };
 
     identity = {
@@ -41,7 +50,7 @@ let
 
     runtime = runtime;
 
-    services = services;
+    serviceCatalog = serviceCatalog;
     tasks = tasks;
     workflows = workflows;
     features = features;
@@ -71,5 +80,6 @@ in
   inherit
     model
     stateHash
+    runtimeHash
     ;
 }

@@ -8,6 +8,7 @@
 }:
 
 let
+  runtimeDefaults = import ../../../core/runtime-defaults.nix;
   dataDirName = config.dataDirName or "postgres";
   pgdataExpr = slots.getServiceDir dataDirName;
   postgres = config.package or pkgs.postgresql_16;
@@ -81,7 +82,7 @@ let
     CREATED_AT="$(${pkgs.coreutils}/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     log_info "Creating base backup: $BACKUP_NAME"
-    ${postgres}/bin/pg_basebackup -h localhost -p "$PGPORT" -U postgres -D "$BACKUP_PATH" -Ft -z -P
+    ${postgres}/bin/pg_basebackup -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres -D "$BACKUP_PATH" -Ft -z -P
 
     # Write backup manifest
     ${pkgs.jq}/bin/jq -n \

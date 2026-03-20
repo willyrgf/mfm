@@ -9,6 +9,7 @@
 }:
 
 let
+  runtimeDefaults = import ../../../core/runtime-defaults.nix;
   serviceScripts = import ../../helpers/managed-service-lifecycle.nix { inherit pkgs; };
   probeCommands = import ../../helpers/probe-commands.nix { inherit pkgs; };
   probePlanRuntime = import ../../helpers/probe-plan-runtime.nix {
@@ -215,29 +216,16 @@ let
       skipMessage = "SKIP: nginx readiness check has no probe steps";
       wait = readyPlan.wait or null;
       timeoutMessage = "nginx not ready after ${
-        toString ((readyPlan.wait or { }).timeoutSeconds or 300)
+        toString ((readyPlan.wait or { }).timeoutSeconds or runtimeDefaults.probes.wait.timeoutSeconds)
       } s";
       successBody = ''
         PID=$(cat "$NGINX_PID_FILE" 2>/dev/null || true)
         emit_service_event service_ready ready --pid "$PID" --log-path "$NGINX_LOG_FILE"
       '';
     };
-    stopWaitAttempts = 40;
-    stopWaitInterval = "0.25";
+    stopWaitAttempts = runtimeDefaults.probes.managedStop.extendedWaitAttempts;
+    stopWaitInterval = runtimeDefaults.probes.managedStop.extendedWaitIntervalSeconds;
   };
-
-  inherit (managedLifecycle)
-    init
-    start
-    stop
-    restart
-    status
-    checkConfig
-    health
-    ready
-    fullStart
-    fullStartTest
-    ;
 
   reload = serviceScripts.mkWrappedScript {
     name = "nginx-reload";

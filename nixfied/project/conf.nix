@@ -211,6 +211,7 @@ rec {
 
     nginx = {
       enable = false;
+      package = if pkgs != null then pkgs.nginx else null;
       portKeyHttp = "http";
       portKeyHttps = "https";
       dataDirName = "nginx";
@@ -304,7 +305,13 @@ rec {
       enable = modules.nginx.enable;
       portKeyHttp = modules.nginx.portKeyHttp;
       portKeyHttps = modules.nginx.portKeyHttps;
-      sources.local = { };
+      sources.local =
+        if modules.nginx.package != null then
+          {
+            package = modules.nginx.package;
+          }
+        else
+          { };
       defaultSource = "local";
     };
 

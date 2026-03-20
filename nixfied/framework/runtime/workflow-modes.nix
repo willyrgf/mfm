@@ -5,6 +5,12 @@
 let
   lib = pkgs.lib;
   listUtils = import ../core/list-utils.nix;
+  serviceSelection = import ./service-selection.nix {
+    inherit
+      lib
+      model
+      ;
+  };
 
   uniqueSorted = values: builtins.sort builtins.lessThan (lib.unique values);
 
@@ -352,6 +358,26 @@ let
     key = taskId;
     value = taskDescriptorById.${taskId}.requiredServices;
   }) taskIds;
+
+  taskClosureServiceCases = map (taskId: {
+    key = taskId;
+    value = serviceSelection.taskClosureServicesById.${taskId} or [ ];
+  }) taskIds;
+
+  taskBaseClosureServiceCases = map (taskId: {
+    key = taskId;
+    value = serviceSelection.taskBaseClosureServicesById.${taskId} or [ ];
+  }) taskIds;
+
+  workflowClosureServiceCases = map (workflowId: {
+    key = workflowId;
+    value = serviceSelection.workflowClosureServicesById.${workflowId} or [ ];
+  }) workflowIds;
+
+  workflowReferenceClosureServiceCases = map (workflowId: {
+    key = workflowId;
+    value = serviceSelection.workflowReferenceClosureServicesById.${workflowId} or [ ];
+  }) workflowIds;
 
   taskLongKindCases = builtins.concatLists (
     map (
@@ -799,6 +825,56 @@ in
           return 0
           ;;
       esac
+    }
+
+    task_closure_selected_services() {
+      local task_id="$1"
+      case "$task_id" in
+  ${renderCasePrintLines (entry: entry.value) taskClosureServiceCases}
+        *)
+          return 0
+          ;;
+      esac
+    }
+
+    task_base_closure_selected_services() {
+      local task_id="$1"
+      case "$task_id" in
+  ${renderCasePrintLines (entry: entry.value) taskBaseClosureServiceCases}
+        *)
+          return 0
+          ;;
+      esac
+    }
+
+    workflow_closure_selected_services() {
+      local workflow_id="$1"
+      case "$workflow_id" in
+  ${renderCasePrintLines (entry: entry.value) workflowClosureServiceCases}
+        *)
+          return 0
+          ;;
+      esac
+    }
+
+    workflow_reference_closure_selected_services() {
+      local workflow_id="$1"
+      case "$workflow_id" in
+  ${renderCasePrintLines (entry: entry.value) workflowReferenceClosureServiceCases}
+        *)
+          return 0
+          ;;
+      esac
+    }
+
+    task_invocation_selected_services() {
+      local task_id="$1"
+      local resolved_workflow_id="''${2:-}"
+
+      task_base_closure_selected_services "$task_id"
+      if [ -n "$resolved_workflow_id" ]; then
+        workflow_closure_selected_services "$resolved_workflow_id"
+      fi
     }
 
     task_runner_command() {

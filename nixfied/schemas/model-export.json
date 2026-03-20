@@ -7,7 +7,7 @@
     "schema",
     "identity",
     "runtime",
-    "services",
+    "serviceCatalog",
     "tasks",
     "workflows",
     "features",
@@ -20,12 +20,12 @@
       "required": [ "kind", "version" ],
       "properties": {
         "kind": { "const": "nixfied-model" },
-        "version": { "const": 1 }
+        "version": { "const": 2 }
       }
     },
     "identity": { "type": "object" },
     "runtime": { "type": "object" },
-    "services": { "type": "object" },
+    "serviceCatalog": { "type": "object" },
     "tasks": { "type": "object" },
     "workflows": { "type": "object" },
     "features": { "type": "object" },

@@ -8,6 +8,7 @@
 }:
 
 let
+  runtimeDefaults = import ../../../core/runtime-defaults.nix;
   managedServiceLifecycle = import ../../helpers/managed-service-lifecycle.nix { inherit pkgs; };
   probeCommands = import ../../helpers/probe-commands.nix { inherit pkgs; };
   probePlanRuntime = import ../../helpers/probe-plan-runtime.nix {
@@ -106,9 +107,12 @@ let
     export PGDATA="''${PGDATA:-${pgdataExpr}}"
     # Keep the unix socket path short. In CI (and on some systems with long TMPDIR paths),
     # putting sockets under $PGDATA can exceed the 107-byte sockaddr_un.sun_path limit and
-    # prevent PostgreSQL from starting.
+    # prevent PostgreSQL from starting. Scope the directory by uid as well so separate Nix
+    # sandbox users do not collide on an existing /tmp/nixfied-pg-* directory they cannot
+    # write.
     SOCKET_HASH=$(printf '%s' "''${RUN_DIR:-$PGDATA}" | ${pkgs.coreutils}/bin/cksum | ${pkgs.coreutils}/bin/cut -d ' ' -f1)
-    export PGSOCKET_DIR="''${PGSOCKET_DIR:-/tmp/nixfied-pg-$SOCKET_HASH}"
+    SOCKET_UID="$(${pkgs.coreutils}/bin/id -u)"
+    export PGSOCKET_DIR="''${PGSOCKET_DIR:-/tmp/nixfied-pg-$SOCKET_UID-$SOCKET_HASH}"
     export PGDATABASE="''${PGDATABASE:-${defaultDb}}"
 
     if [ -z "''${PGPORT:-}" ] || [ -z "''${PGDATA:-}" ]; then
@@ -277,10 +281,31 @@ let
       if [ -n "''${PGDATA:-}" ] && [ -f "$PGDATA/postmaster.pid" ]; then
         RUN_PID=$(head -1 "$PGDATA/postmaster.pid" 2>/dev/null || true)
         log_stop "PostgreSQL at $PGDATA"
-        ${postgres}/bin/pg_ctl -D "$PGDATA" stop -m fast 2>/dev/null || true
-        emit_service_event service_stopped stopped --pid "$RUN_PID" --log-path "$PGDATA/postgres.log"
+        if ! ${postgres}/bin/pg_ctl -D "$PGDATA" stop -m fast -w -t 60 >/dev/null 2>&1; then
+          log_error "PostgreSQL failed to stop at $PGDATA"
+          exit 1
+        fi
+
+        for i in $(seq 1 60); do
+          if ${
+            probeCommands.pgIsReadyCmd {
+              inherit postgres;
+              portExpr = "$PGPORT";
+            }
+          }
+          then
+            sleep 0.5
+          else
+            emit_service_event service_stopped stopped --pid "$RUN_PID" --log-path "$PGDATA/postgres.log"
+            exit 0
+          fi
+        done
+
+        log_error "PostgreSQL still responds on port $PGPORT after stop"
+        exit 1
       else
         emit_service_event service_stopped stopped
+        exit 0
       fi
     '';
   };
@@ -345,7 +370,7 @@ let
       skipMessage = "SKIP: postgres readiness check has no probe steps";
       wait = readyPlan.wait or null;
       timeoutMessage = "PostgreSQL not ready after ${
-        toString ((readyPlan.wait or { }).timeoutSeconds or 300)
+        toString ((readyPlan.wait or { }).timeoutSeconds or runtimeDefaults.probes.wait.timeoutSeconds)
       } s";
     };
   };
@@ -418,14 +443,14 @@ let
     body = ''
       log_info "Setting up database '$PGDATABASE'"
 
-      ${postgres}/bin/psql -h localhost -p "$PGPORT" -U postgres -d postgres -c \
+      ${postgres}/bin/psql -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres -d postgres -c \
         "DO \$\$ BEGIN CREATE ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'postgres'; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;" 2>/dev/null || true
 
-      ${postgres}/bin/createdb -h localhost -p "$PGPORT" -U postgres "$PGDATABASE" 2>/dev/null || true
+      ${postgres}/bin/createdb -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres "$PGDATABASE" 2>/dev/null || true
 
       if [ -n "${pkgs.lib.concatStringsSep " " extensions}" ]; then
         for ext in ${pkgs.lib.concatStringsSep " " extensions}; do
-          ${postgres}/bin/psql -h localhost -p "$PGPORT" -U postgres -d "$PGDATABASE" \
+          ${postgres}/bin/psql -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres -d "$PGDATABASE" \
             -c "CREATE EXTENSION IF NOT EXISTS $ext;" 2>/dev/null || true
         done
       fi

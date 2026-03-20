@@ -68,12 +68,8 @@ let
         state: stage:
         let
           stageUnits = builtins.sort builtins.lessThan stage;
+          emptyEntries = builtins.filter (item: item == "") stageUnits;
           dupes = builtins.filter (item: builtins.elem item state.seen) stageUnits;
-          _ =
-            if dupes == [ ] then
-              true
-            else
-              throw "workflow stage entries are duplicated: ${builtins.concatStringsSep ", " dupes}";
           unitsForStage = builtins.listToAttrs (
             map (stageEntry: {
               name = stageEntry;
@@ -93,11 +89,16 @@ let
             }) stageUnits
           );
         in
-        {
-          units = state.units // unitsForStage;
-          previous = stageUnits;
-          seen = state.seen ++ stageUnits;
-        };
+        if emptyEntries != [ ] then
+          throw "workflow stage entries must not be empty"
+        else if dupes != [ ] then
+          throw "workflow stage entries are duplicated: ${builtins.concatStringsSep ", " dupes}"
+        else
+          {
+            units = state.units // unitsForStage;
+            previous = stageUnits;
+            seen = state.seen ++ stageUnits;
+          };
       folded = builtins.foldl' foldStage {
         units = { };
         previous = [ ];
@@ -115,20 +116,23 @@ let
         unitName:
         let
           unit = units.${unitName};
-          _taskRef =
-            if isDeclaredTaskId unit.taskId then
-              true
-            else
-              throw "workflow '${workflowId}' references unknown task '${unit.taskId}'";
-          _needsRef = map (
+        in
+        if unit.taskId == "" then
+          throw "workflow '${workflowId}' unit '${unitName}' has an empty taskId"
+        else if !(isDeclaredTaskId unit.taskId) then
+          throw "workflow '${workflowId}' references unknown task '${unit.taskId}'"
+        else if
+          !(builtins.all (
             dep:
             if builtins.hasAttr dep units then
               true
             else
               throw "workflow '${workflowId}' unit '${unitName}' depends on unknown unit '${dep}'"
-          ) unit.needs;
-        in
-        true;
+          ) unit.needs)
+        then
+          false
+        else
+          true;
     in
     map validateUnit unitNames;
 
@@ -140,7 +144,9 @@ let
         let
           taskId = resolveDeclaredTaskId rawTaskId;
         in
-        if isDeclaredTaskId taskId then
+        if rawTaskId == "" then
+          throw "workflow '${workflowId}' ${phaseName}.tasks references an empty task id"
+        else if isDeclaredTaskId taskId then
           taskId
         else
           throw "workflow '${workflowId}' ${phaseName}.tasks references unknown task '${rawTaskId}'"
@@ -244,21 +250,21 @@ let
       usesUnits = raw.units != { };
       usesStages = raw.stages != [ ];
 
-      _styleCheck =
+      authoredUnitsRaw =
         if usesUnits && usesStages then
           throw "workflow '${workflowId}' must use exactly one authoring style: units or stages"
         else if (!usesUnits) && (!usesStages) then
           throw "workflow '${workflowId}' must define units or stages"
-        else
-          true;
-
-      authoredUnits =
-        if usesUnits then
+        else if usesUnits then
           builtins.mapAttrs (_: unit: normalizeUnit unit) raw.units
         else
           unitsFromStages raw.stages;
 
-      _validated = validateUnits workflowId authoredUnits;
+      authoredUnits =
+        let
+          _validated = validateUnits workflowId authoredUnitsRaw;
+        in
+        if builtins.all (value: value) _validated then authoredUnitsRaw else authoredUnitsRaw;
 
       normalizedPreRunTasks = normalizePhaseTaskRefs workflowId "preRun" (raw.preRun.tasks or [ ]);
       normalizedPostRunTasks = normalizePhaseTaskRefs workflowId "postRun" (raw.postRun.tasks or [ ]);

@@ -1,5 +1,8 @@
 { lib, pkgs }:
 
+let
+  shellCommon = import ../../core/shell-common.nix { inherit pkgs; };
+in
 {
   mkIsolationScript =
     {
@@ -20,6 +23,7 @@
     }:
     ''
       set -euo pipefail
+      ${shellCommon}
       slot_var=${lib.escapeShellArg slotVar}
       env_var=${lib.escapeShellArg envVar}
       slot_max=${toString slotMax}
@@ -57,11 +61,7 @@
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --slot)
-            if [ "$#" -lt 2 ]; then
-              echo "ERROR: --slot requires a value"
-              exit 2
-            fi
-            selected_slot="$2"
+            selected_slot="$(nixfied_require_next_arg --slot "a value" "$@")"
             shift 2
             ;;
           --slot=*)
@@ -69,11 +69,7 @@
             shift
             ;;
           --env)
-            if [ "$#" -lt 2 ]; then
-              echo "ERROR: --env requires a value"
-              exit 2
-            fi
-            selected_env="$2"
+            selected_env="$(nixfied_require_next_arg --env "a value" "$@")"
             shift 2
             ;;
           --env=*)
@@ -81,11 +77,7 @@
             shift
             ;;
           --max-parallel)
-            if [ "$#" -lt 2 ]; then
-              echo "ERROR: --max-parallel requires a value"
-              exit 2
-            fi
-            max_parallel_override="$2"
+            max_parallel_override="$(nixfied_require_next_arg --max-parallel "a value" "$@")"
             shift 2
             ;;
           --max-parallel=*)
@@ -97,40 +89,31 @@
             break
             ;;
           *)
-            echo "ERROR: unknown argument '$1'"
-            exit 2
+            nixfied_unknown_arg "$1"
             ;;
         esac
       done
 
-      if [ "$#" -gt 0 ]; then
-        echo "ERROR: unexpected positional arguments: $*"
-        exit 2
-      fi
+      nixfied_unexpected_positional_args "$@"
 
       if [ -n "$selected_slot" ] && [ -z "$selected_env" ]; then
-        echo "ERROR: --slot requires --env"
-        exit 2
+        nixfied_exit_usage "--slot requires --env"
       fi
 
       if [ -n "$selected_env" ] && [ -z "$selected_slot" ]; then
-        echo "ERROR: --env requires --slot"
-        exit 2
+        nixfied_exit_usage "--env requires --slot"
       fi
 
       if [ -z "$run_task_id" ]; then
-        echo "ERROR: test-isolation runTaskId is empty"
-        exit 3
+        nixfied_exit_precondition "test-isolation runTaskId is empty"
       fi
 
       if [ -z "$validate_task_id" ]; then
-        echo "ERROR: test-isolation validateTaskId is empty"
-        exit 3
+        nixfied_exit_precondition "test-isolation validateTaskId is empty"
       fi
 
       if [ -z "$executor_bin" ]; then
-        echo "ERROR: test-isolation requires NIXFIED_EXECUTOR_SELF or NIXFIED_EXECUTOR_BIN"
-        exit 3
+        nixfied_exit_precondition "test-isolation requires NIXFIED_EXECUTOR_SELF or NIXFIED_EXECUTOR_BIN"
       fi
 
       effective_max_parallel="$max_parallel_default"
@@ -143,13 +126,11 @@
       fi
 
       if ! [[ "$effective_max_parallel" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: test-isolation maxParallel is not an integer: $effective_max_parallel"
-        exit 3
+        nixfied_exit_precondition "test-isolation maxParallel is not an integer: $effective_max_parallel"
       fi
 
       if [ "$effective_max_parallel" -lt 1 ]; then
-        echo "ERROR: test-isolation maxParallel must be >= 1"
-        exit 3
+        nixfied_exit_precondition "test-isolation maxParallel must be >= 1"
       fi
 
       mapfile -t isolation_slots < <(${pkgs.jq}/bin/jq -r '.[]' <<<"$slots_json")
@@ -159,8 +140,7 @@
 
       if [ -n "$selected_slot" ]; then
         if ! [[ "$selected_slot" =~ ^[0-9]+$ ]]; then
-          echo "ERROR: --slot must be an integer"
-          exit 2
+          nixfied_exit_usage "--slot must be an integer"
         fi
         filtered_slots=()
         for slot_value in "''${isolation_slots[@]}"; do
@@ -170,8 +150,7 @@
         done
         isolation_slots=("''${filtered_slots[@]}")
         if [ "''${#isolation_slots[@]}" -eq 0 ]; then
-          echo "ERROR: selected slot is not in the isolation matrix: $selected_slot"
-          exit 3
+          nixfied_exit_precondition "selected slot is not in the isolation matrix: $selected_slot"
         fi
       fi
 
@@ -184,19 +163,16 @@
         done
         isolation_envs=("''${filtered_envs[@]}")
         if [ "''${#isolation_envs[@]}" -eq 0 ]; then
-          echo "ERROR: selected environment is not in the isolation matrix: $selected_env"
-          exit 3
+          nixfied_exit_precondition "selected environment is not in the isolation matrix: $selected_env"
         fi
       fi
 
       if [ "''${#isolation_slots[@]}" -eq 0 ]; then
-        echo "ERROR: test-isolation matrix has no slots"
-        exit 3
+        nixfied_exit_precondition "test-isolation matrix has no slots"
       fi
 
       if [ "''${#isolation_envs[@]}" -eq 0 ]; then
-        echo "ERROR: test-isolation matrix has no environments"
-        exit 3
+        nixfied_exit_precondition "test-isolation matrix has no environments"
       fi
 
       run_scope="''${NIXFIED_RUN_ID:-run-$(${pkgs.coreutils}/bin/date -u +%Y%m%d-%H%M%S)-$$}"
@@ -354,8 +330,7 @@
       rm -rf "$statuses_dir"
 
       if [ "$total" -eq 0 ]; then
-        echo "ERROR: test-isolation matrix did not execute any cells"
-        exit 3
+        nixfied_exit_precondition "test-isolation matrix did not execute any cells"
       fi
 
       if [ "$failed" -ne 0 ]; then
@@ -363,7 +338,7 @@
         if [ "$keep_logs_failure" -eq 0 ]; then
           rm -rf "$logs_root"
         fi
-        exit 1
+        exit "$NIXFIED_EXIT_GENERIC"
       fi
 
       if [ "$keep_logs_success" -eq 1 ]; then
