@@ -44,6 +44,7 @@ in
         "nix run .#framework::test -- --list-shards"
         "nix run .#framework::test -- --shard flake-check"
         "nix run .#framework::test -- --shard launcher-pruning"
+        "nix run .#framework::test -- --shard services"
         "nix run .#framework::test -- --shard isolation"
         "nix run .#framework::test -- --shard self-host"
       ];
@@ -79,6 +80,7 @@ in
             "launcher-pruning"
             "help"
             "workflow-ci"
+            "services"
             "isolation"
             "self-host"
           ];
@@ -159,6 +161,7 @@ in
           "launcher-pruning"
           "help"
           "workflow-ci"
+          "services"
           "isolation"
           "self-host"
         )
@@ -178,9 +181,10 @@ in
 
         Shards:
           flake-check   Evaluate nix flake checks for the current project root.
-          launcher-pruning  Build the launcher pruning and help fast-path smoke checks.
+          launcher-pruning  Build the launcher/runtime split regression checks and help fast paths.
           help          Validate generated help output.
           workflow-ci   Run the CI workflow surface in selected mode.
+          services      Build service lifecycle, readiness, and teardown checks.
           isolation     Run isolation checks.
           self-host     Run a workflow that exercises framework entry points.
         EOF
@@ -287,9 +291,31 @@ in
           local help_out
           help_out="$(mktemp)"
 
-          nix build .#checks.${pkgs.system}.disabled-service-runtime-surface-smoke
-          nix build .#checks.${pkgs.system}.launcher-skip-service-pruning-smoke
-          nix build .#checks.${pkgs.system}.launcher-help-fast-path-smoke
+          nix build --no-link \
+            .#checks.${pkgs.system}.launcher-surface-contract \
+            .#checks.${pkgs.system}.framework-utility-launcher-contract \
+            .#checks.${pkgs.system}.service-surface-catalog-contract \
+            .#checks.${pkgs.system}.service-api-surface-contract \
+            .#checks.${pkgs.system}.framework-install-no-caller-compile-smoke \
+            .#checks.${pkgs.system}.framework-test-no-caller-compile-smoke \
+            .#checks.${pkgs.system}.framework-upgrade-no-caller-compile-smoke \
+            .#checks.${pkgs.system}.runtime-control-launcher-contract \
+            .#checks.${pkgs.system}.runtime-controls-no-service-materialization-smoke \
+            .#checks.${pkgs.system}.flake-show-no-service-materialization-smoke \
+            .#checks.${pkgs.system}.run-id-noise-stability-smoke \
+            .#checks.${pkgs.system}.run-id-semantic-inputs-contract \
+            .#checks.${pkgs.system}.run-id-active-collision-suffix-smoke \
+            .#checks.${pkgs.system}.unselected-service-no-package-resolution-smoke \
+            .#checks.${pkgs.system}.unselected-service-public-launcher-smoke \
+            .#checks.${pkgs.system}.selected-source-only-resolution-smoke \
+            .#checks.${pkgs.system}.disabled-service-no-package-resolution-smoke \
+            .#checks.${pkgs.system}.disabled-service-runtime-surface-smoke \
+            .#checks.${pkgs.system}.launcher-skip-service-pruning-smoke \
+            .#checks.${pkgs.system}.launcher-help-fast-path-smoke \
+            .#checks.${pkgs.system}.dispatcher-help-fast-path-smoke \
+            .#checks.${pkgs.system}.orchestrator-arg-forwarding-smoke \
+            .#checks.${pkgs.system}.service-hook-env-smoke \
+            .#checks.${pkgs.system}.runtime-service-selection-contract
           verify_public_launcher_help "$help_out" nix run .#ci -- --help
           verify_public_launcher_help "$help_out" env SKIP_HELIOS=1 nix run .#ci -- --help
           rm -f "$help_out"
@@ -316,6 +342,17 @@ in
             return "$NIXFIED_EXIT_PRECONDITION"
           fi
           NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.ci --mode "$MODE" --summary
+        }
+
+        shard_services() {
+          nix build --no-link \
+            .#checks.${pkgs.system}.managed-service-lifecycle-contract \
+            .#checks.${pkgs.system}.service-lifecycle-matrix-smoke \
+            .#checks.${pkgs.system}.ready-health-matrix-smoke \
+            .#checks.${pkgs.system}.ready-health-shutdown-smoke \
+            .#checks.${pkgs.system}.ready-helios-sync-gate-smoke \
+            .#checks.${pkgs.system}.supervisor-lifecycle-smoke \
+            .#checks.${pkgs.system}.supervisor-runtime-contract
         }
 
         shard_isolation() {
@@ -356,6 +393,9 @@ in
               ;;
             workflow-ci)
               run_shard "$shard_name" shard_workflow_ci
+              ;;
+            services)
+              run_shard "$shard_name" shard_services
               ;;
             isolation)
               run_shard "$shard_name" shard_isolation

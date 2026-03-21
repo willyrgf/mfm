@@ -23,10 +23,6 @@ in
       type = t.str;
       default = "rethAuth";
     };
-    portKeyP2p = lib.mkOption {
-      type = t.str;
-      default = "rethP2p";
-    };
     dataDirName = lib.mkOption {
       type = t.str;
       default = "reth";

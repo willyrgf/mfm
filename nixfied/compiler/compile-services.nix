@@ -3,7 +3,7 @@
   resolved,
   pkgs,
   selectedServices ? null,
-  discardContext ? true,
+  enabledServiceFlags ? { },
 }:
 let
   serviceConfig = import ../framework/core/service-config.nix {
@@ -39,17 +39,25 @@ let
   );
 in
 builtins.listToAttrs (
-  map (name: {
-    name = "service.${name}";
+  map (
+    name:
+    let
+      serviceEnabled = enabledServiceFlags.${name} or (services.${name}.enable or false);
+      rawConfig = lib.removeAttrs services.${name} [ "enable" ];
+      configInput = if serviceEnabled then rawConfig else rawConfig // { defaultSource = ""; };
+    in
+    {
+      name = "service.${name}";
       value = {
         id = "service.${name}";
         name = name;
-        enable = services.${name}.enable or false;
+        enable = serviceEnabled;
         config = serviceConfig.normalizeServiceConfig {
-          inherit discardContext;
+          discardContext = true;
           inherit name;
-          config = lib.removeAttrs services.${name} [ "enable" ];
+          config = configInput;
         };
       };
-  }) names
+    }
+  ) names
 )

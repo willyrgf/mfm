@@ -9,11 +9,11 @@ let
   registrySeqLockFileName = "seq.lock";
   registryEventsFileName = "events.ndjson";
   registryEventsLockFileName = "events.lock";
-  registryEventSchemaVersion = 1;
+  registryEventSchemaVersion = 2;
   registryTimestampFormat = "%Y-%m-%dT%H:%M:%SZ";
   registrySnapshotTemplate = "nixfied-events-snapshot.XXXXXX";
   registryDefaultLockTimeoutSeconds = 30;
-  registryEventPayloadExpr = "{detail: $detail, runId: $runId, schemaVersion: $schemaVersion, seq: $seq, state: $state, taskId: $taskId, ts: $ts, workflowId: $workflowId}";
+  registryEventPayloadExpr = "{attemptId: $attemptId, detail: $detail, runId: $runId, schemaVersion: $schemaVersion, seq: $seq, state: $state, taskId: $taskId, ts: $ts, workflowId: $workflowId}";
   registryAppendShell = import ./events-append.nix {
     inherit
       pkgs

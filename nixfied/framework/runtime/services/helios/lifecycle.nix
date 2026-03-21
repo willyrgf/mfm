@@ -91,23 +91,27 @@ let
     SERVICE_LOG_FILE="$HELIOS_LOG_FILE"
 
     HELIOS_NETWORK="''${HELIOS_NETWORK:-${config.network or "local"}}"
-    # Empty exports are meaningful here: parity and local workflows clear
-    # project-level mainnet defaults explicitly and rely on service-level fallbacks.
-    HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL-${config.executionRpcUrl or ""}}"
-    HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL-${config.consensusRpcUrl or ""}}"
-    HELIOS_DEFAULT_CONSENSUS_RPC_URL="''${HELIOS_DEFAULT_CONSENSUS_RPC_URL-${
+    HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${config.executionRpcUrl or ""}}"
+    HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${config.consensusRpcUrl or ""}}"
+    HELIOS_DEFAULT_CONSENSUS_RPC_URL="''${HELIOS_DEFAULT_CONSENSUS_RPC_URL:-${
       config.defaultConsensusRpcUrl or ""
     }}"
-    HELIOS_CHECKPOINT="''${HELIOS_CHECKPOINT-${config.checkpoint or ""}}"
+    HELIOS_CHECKPOINT="''${HELIOS_CHECKPOINT:-${config.checkpoint or ""}}"
 
     if [ -z "$HELIOS_EXECUTION_RPC_URL" ] && [ -n "$HELIOS_EXECUTION_PORT" ]; then
       HELIOS_EXECUTION_RPC_URL="${probeCommands.localHttpUrlExpr "$HELIOS_EXECUTION_PORT"}"
     fi
 
-    # Helios currently requires a consensus RPC even for `network=local`, so keep
-    # the explicit URL override separate from the service-level fallback source.
-    if [ -z "$HELIOS_CONSENSUS_RPC_URL" ] && [ -n "$HELIOS_DEFAULT_CONSENSUS_RPC_URL" ]; then
+    # Default consensus endpoint for mainnet if not explicitly configured.
+    # This keeps testnets and other networks explicit to avoid accidentally mixing networks.
+    if [ "$HELIOS_NETWORK" = "mainnet" ] && [ -z "$HELIOS_CONSENSUS_RPC_URL" ] && [ -n "$HELIOS_DEFAULT_CONSENSUS_RPC_URL" ]; then
       HELIOS_CONSENSUS_RPC_URL="$HELIOS_DEFAULT_CONSENSUS_RPC_URL"
+    fi
+
+    # Helios local profile expects a consensus endpoint; default to execution RPC
+    # so local dev/testing can run without a separate consensus client.
+    if [ "$HELIOS_NETWORK" = "local" ] && [ -z "$HELIOS_CONSENSUS_RPC_URL" ] && [ -n "$HELIOS_EXECUTION_RPC_URL" ]; then
+      HELIOS_CONSENSUS_RPC_URL="$HELIOS_EXECUTION_RPC_URL"
     fi
 
     # Normalize for composing paths.
@@ -146,8 +150,8 @@ let
         exit 1
       fi
 
-      if [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
-        log_error "HELIOS_CONSENSUS_RPC_URL is required (or set HELIOS_DEFAULT_CONSENSUS_RPC_URL)"
+      if [ "$HELIOS_NETWORK" != "local" ] && [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
+        log_error "HELIOS_CONSENSUS_RPC_URL is required when network is not local"
         exit 1
       fi
 
@@ -175,16 +179,16 @@ let
       #
       # This avoids a common failure mode where Helios stays "healthy" but remains unable to answer
       # `eth_blockNumber` because the consensus light client never bootstrapped.
-      if [ -z "$HELIOS_CHECKPOINT" ]; then
+      if [ "$HELIOS_NETWORK" != "local" ] && [ -z "$HELIOS_CHECKPOINT" ]; then
         if [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
           log_error "cannot derive HELIOS_CHECKPOINT: HELIOS_CONSENSUS_RPC_URL is empty"
           exit 1
         fi
 
-        # lightclientdata can be temporarily unavailable (e.g. 503).
-        # Prefer the configured/default endpoint first, then try a known public Lodestar endpoint.
+        # Mainnet fallback: lightclientdata can be temporarily unavailable (e.g. 503).
+        # Prefer it first (Helios upstream default), then try a known public Lodestar endpoint.
         CONS_CANDIDATES=("$HELIOS_CONSENSUS_RPC_URL")
-        if [ "$HELIOS_CONSENSUS_RPC_URL" = "https://www.lightclientdata.org" ]; then
+        if [ "$HELIOS_NETWORK" = "mainnet" ] && [ "$HELIOS_CONSENSUS_RPC_URL" = "https://www.lightclientdata.org" ]; then
           CONS_CANDIDATES+=("https://lodestar-mainnet.chainsafe.io")
         fi
 
@@ -259,8 +263,8 @@ let
         fi
       fi
 
-      if [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
-        log_error "HELIOS_CONSENSUS_RPC_URL is required (or set HELIOS_DEFAULT_CONSENSUS_RPC_URL)"
+      if [ "$HELIOS_NETWORK" != "local" ] && [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
+        log_error "HELIOS_CONSENSUS_RPC_URL is required when network is not local"
         exit 1
       fi
 
@@ -287,16 +291,7 @@ let
       ''}
     '';
     startCommand = ''
-      env \
-        HTTP_PROXY= \
-        HTTPS_PROXY= \
-        ALL_PROXY= \
-        NO_PROXY='*' \
-        http_proxy= \
-        https_proxy= \
-        all_proxy= \
-        no_proxy='*' \
-        "${helios}/bin/helios" "''${ARGS[@]}" > "$LOG_FILE" 2>&1 &
+      "${helios}/bin/helios" "''${ARGS[@]}" > "$LOG_FILE" 2>&1 &
     '';
     startAlreadyRunningBody = managedServiceLifecycle.mkReadyOutcomeBody {
       level = "ok";

@@ -104,16 +104,10 @@
       fi
 
       if has_hook "$init_hook"; then
-        if ! run_hook "$init_hook"; then
-          log_error "fixture init hook failed service=$service hook=$init_hook"
-          return 1
-        fi
+        run_hook "$init_hook"
       fi
       if has_hook "$check_hook"; then
-        if ! run_hook "$check_hook"; then
-          log_error "fixture config check failed service=$service hook=$check_hook"
-          return 1
-        fi
+        run_hook "$check_hook"
       fi
 
       local pid=""
@@ -160,23 +154,16 @@
             break
           fi
 
-          # FULL_START/FULL_START_TEST hooks may complete and exit after handing off
-          # to the managed service process. Accept READY or STATUS after wrapper exit
-          # before treating that handoff as a failure.
+          # If the wrapper process died, fail fast unless STATUS indicates service is up.
           if ! kill -0 "$pid" 2>/dev/null; then
-            local service_up=0
-            if [ -n "$wait_hook" ]; then
-              if run_hook "$wait_hook" >/dev/null 2>&1; then
-                service_up=1
-              fi
-            fi
+            local status_ok=0
             if has_hook "$status_hook"; then
-              if [ "$service_up" -ne 1 ] && run_hook "$status_hook" >/dev/null 2>&1; then
-                service_up=1
+              if run_hook "$status_hook" >/dev/null 2>&1; then
+                status_ok=1
               fi
             fi
 
-            if [ "$service_up" -ne 1 ]; then
+            if [ "$status_ok" -ne 1 ]; then
               log_error "fixture service start exited early service=$service pid=$pid hook=$start_hook"
               if [ -n "$logfile" ]; then
                 print_log_tail "$logfile" 200
@@ -187,8 +174,6 @@
               stop_service "$pid" "$service" >/dev/null 2>&1 || true
               return 1
             fi
-
-            break
           fi
 
           if [ $(( $(date +%s) - start_ts )) -ge "$timeout" ]; then

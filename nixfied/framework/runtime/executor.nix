@@ -268,7 +268,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     printf '%s' "$mode_override"
   }
 
-  task_selected_services_lines() {
+  task_selected_services_csv() {
     local task_id="$1"
     shift
 
@@ -286,14 +286,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       fi
     fi
 
-    task_invocation_selected_services "$task_id" "$resolved_workflow_id"
-  }
-
-  task_selected_services_csv() {
-    local task_id="$1"
-    shift
-
-    task_selected_services_lines "$task_id" "$@" | selected_services_csv_from_lines
+    task_invocation_selected_services "$task_id" "$resolved_workflow_id" | selected_services_csv_from_lines
   }
 
   workflow_unit_selected_services_csv() {
@@ -321,6 +314,17 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
   RUN_SUFFIX_REASON=""
   LAST_WORKFLOW_SUMMARY_FILE=""
+  LAST_WORKFLOW_ATTEMPT_ID=""
+
+  compute_attempt_id() {
+    local attempt_dir
+    local attempt_name
+
+    attempt_dir="$(mktemp -d "''${TMPDIR:-/tmp}/nixfied-attempt.XXXXXX")" || return 1
+    attempt_name="$(basename "$attempt_dir")"
+    rmdir "$attempt_dir"
+    printf '%s' "attempt-''${attempt_name#nixfied-attempt.}"
+  }
 
   compute_run_id() {
     local run_kind="$1"
@@ -339,6 +343,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local run_input
     local run_base
     local run_id
+    local attempt_id=""
 
     slot_value="''${!slot_var:-$slot_default}"
     env_value="''${!env_var:-$env_default}"
@@ -389,8 +394,9 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local task_id="$3"
     local state="$4"
     local detail_json="$5"
+    local attempt_id="''${NIXFIED_ATTEMPT_ID:-}"
 
-    registry_append_event "$REGISTRY_ROOT" "$run_id" "$workflow_id" "$task_id" "$state" "$detail_json"
+    registry_append_event "$REGISTRY_ROOT" "$run_id" "$attempt_id" "$workflow_id" "$task_id" "$state" "$detail_json"
   }
 
   task_has_hooks() {
@@ -674,6 +680,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     shift
 
     local run_id
+    local attempt_id=""
     local detail_json
     local status
     local runner_type
@@ -711,16 +718,22 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     if [ -n "''${NIXFIED_ORCHESTRATOR_RUN_ID:-}" ]; then
       run_id="$NIXFIED_ORCHESTRATOR_RUN_ID"
+      attempt_id="''${NIXFIED_ORCHESTRATOR_ATTEMPT_ID:-}"
       RUN_SUFFIX_REASON="''${NIXFIED_ORCHESTRATOR_RUN_SUFFIX_REASON:-orchestrator}"
       managed_by_orchestrator=1
     else
       run_id="$(compute_run_id "task" "" "$task_id" "''${filtered_args[@]}")"
+      attempt_id="$(compute_attempt_id)"
       activate_run "$run_id"
       trap "deactivate_run '$run_id'" EXIT
+    fi
+    if [ -z "$attempt_id" ]; then
+      attempt_id="$(compute_attempt_id)"
     fi
 
     ensure_run_artifacts_dir "$run_id" "" "$managed_by_orchestrator" || return $?
     export NIXFIED_RUN_ID="$run_id"
+    export NIXFIED_ATTEMPT_ID="$attempt_id"
 
     if [ "$runner_type" != "workflowRef" ] && [ -n "$MACHINE_RUN_ID_FILE" ]; then
       write_text_file_atomic "$MACHINE_RUN_ID_FILE" "$run_id" || return $?
@@ -1428,16 +1441,13 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         continue
       fi
 
-      phase_task_selected_services_csv="$(
-        {
-          if [ "''${#passthrough_args[@]}" -gt 0 ]; then
-            task_selected_services_lines "$phase_task" "''${passthrough_args[@]}"
-          else
-            task_selected_services_lines "$phase_task"
-          fi
-          workflow_unit_closure_selected_services "$workflow_id"
-        } | selected_services_csv_from_lines
-      )"
+      case "$phase_task" in
+        task.ops.ready|task.ops.health)
+          phase_task_selected_services_csv="$(
+            workflow_unit_closure_selected_services "$workflow_id" | selected_services_csv_from_lines
+          )"
+          ;;
+      esac
 
       phase_task_skip_service="$(task_first_skipped_required_service "$phase_task" || true)"
       if [ -n "$phase_task_skip_service" ]; then
@@ -1447,14 +1457,23 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         continue
       fi
 
-      if [ "''${#passthrough_args[@]}" -gt 0 ]; then
-        if NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE="$phase_task_selected_services_csv" execute_task "$run_id" "$workflow_id" "$phase_task" "''${passthrough_args[@]}"; then
+      if [ "$phase_task" = "task.ops.ready" ] || [ "$phase_task" = "task.ops.health" ]; then
+        if [ "''${#passthrough_args[@]}" -gt 0 ]; then
+          if NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE="$phase_task_selected_services_csv" execute_task "$run_id" "$workflow_id" "$phase_task" "''${passthrough_args[@]}"; then
+            phase_status=0
+          else
+            phase_status="$?"
+            break
+          fi
+        elif NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE="$phase_task_selected_services_csv" execute_task "$run_id" "$workflow_id" "$phase_task"; then
           phase_status=0
         else
           phase_status="$?"
           break
         fi
-      elif NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE="$phase_task_selected_services_csv" execute_task "$run_id" "$workflow_id" "$phase_task"; then
+      elif [ "''${#passthrough_args[@]}" -gt 0 ] && execute_task "$run_id" "$workflow_id" "$phase_task" "''${passthrough_args[@]}"; then
+        phase_status=0
+      elif execute_task "$run_id" "$workflow_id" "$phase_task"; then
         phase_status=0
       else
         phase_status="$?"
@@ -1518,15 +1537,17 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
   workflow_step_records_tsv() {
     local run_id="$1"
     local events_file="$2"
+    local attempt_id="''${NIXFIED_ATTEMPT_ID:-}"
 
     if [ ! -f "$events_file" ]; then
       return 0
     fi
 
-    ${pkgs.jq}/bin/jq -r -s --arg runId "$run_id" '
+    ${pkgs.jq}/bin/jq -r -s --arg runId "$run_id" --arg attemptId "$attempt_id" '
       map(
         select(
           .runId == $runId
+          and ($attemptId == "" or (.attemptId // "") == $attemptId)
           and (.taskId // "") != ""
           and (
             .state == "queued"
@@ -1693,16 +1714,18 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local run_id="$1"
     local events_file="$2"
     local leaf_task_ids_json="$3"
+    local attempt_id="''${NIXFIED_ATTEMPT_ID:-}"
 
     if [ ! -f "$events_file" ]; then
       printf '%s' "0"
       return 0
     fi
 
-    ${pkgs.jq}/bin/jq -r -s --arg runId "$run_id" --argjson taskIds "$leaf_task_ids_json" '
+    ${pkgs.jq}/bin/jq -r -s --arg runId "$run_id" --arg attemptId "$attempt_id" --argjson taskIds "$leaf_task_ids_json" '
       map(
         select(
           .runId == $runId
+          and ($attemptId == "" or (.attemptId // "") == $attemptId)
           and (.taskId // "") != ""
           and ((.taskId as $id | ($taskIds | index($id)) != null))
           and (
@@ -1867,8 +1890,10 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     local leaf_task_ids_json="[]"
     local events_file=""
     local setup_timing_fields
+    local attempt_id="''${NIXFIED_ATTEMPT_ID:-}"
 
     LAST_WORKFLOW_SUMMARY_FILE=""
+    LAST_WORKFLOW_ATTEMPT_ID="$attempt_id"
 
     should_write="$(workflow_write_summary "$workflow_id")"
     if [ "$should_write" != "true" ]; then
@@ -1950,6 +1975,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       local target_file="$1"
       ${pkgs.jq}/bin/jq -n -S \
         --arg runId "$run_id" \
+        --arg attemptId "$attempt_id" \
         --arg workflowId "$workflow_id" \
         --arg mode "$mode" \
         --argjson exitCode "$exit_code" \
@@ -1971,6 +1997,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         --argjson parallelCanceledCount "$parallel_canceled_count_json" \
         '{
           run_id: $runId,
+          attempt_id: $attemptId,
           workflow_id: $workflowId,
           mode: $mode,
           exit_code: $exitCode,
@@ -2134,12 +2161,17 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     if [ -n "''${NIXFIED_ORCHESTRATOR_RUN_ID:-}" ]; then
       run_id="$NIXFIED_ORCHESTRATOR_RUN_ID"
+      attempt_id="''${NIXFIED_ORCHESTRATOR_ATTEMPT_ID:-}"
       RUN_SUFFIX_REASON="''${NIXFIED_ORCHESTRATOR_RUN_SUFFIX_REASON:-orchestrator}"
       managed_by_orchestrator=1
     else
       run_id="$(compute_run_id "workflow" "$workflow_id" "" "''${passthrough_args[@]}")"
+      attempt_id="$(compute_attempt_id)"
       activate_run "$run_id"
       trap "deactivate_run '$run_id'" EXIT
+    fi
+    if [ -z "$attempt_id" ]; then
+      attempt_id="$(compute_attempt_id)"
     fi
 
     if [ -n "$MACHINE_RUN_ID_FILE" ]; then
@@ -2148,6 +2180,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
 
     ensure_run_artifacts_dir "$run_id" "$workflow_id" "$managed_by_orchestrator" || return $?
     export NIXFIED_RUN_ID="$run_id"
+    export NIXFIED_ATTEMPT_ID="$attempt_id"
 
     detail_json="$(${pkgs.jq}/bin/jq -cn --arg suffix "$RUN_SUFFIX_REASON" --arg mode "workflow" '{mode: $mode, suffixReason: (if $suffix == "" then null else $suffix end)}')"
     append_event "$run_id" "$workflow_id" "" "queued" "$detail_json"

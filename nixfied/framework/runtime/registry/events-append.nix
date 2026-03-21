@@ -32,10 +32,11 @@ in
   registry_append_event() {
     local root="$1"
     local run_id="$2"
-    local workflow_id="$3"
-    local task_id="$4"
-    local state="$5"
-    local detail_json="$6"
+    local attempt_id="$3"
+    local workflow_id="$4"
+    local task_id="$5"
+    local state="$6"
+    local detail_json="$7"
 
     local events_file
     local seq_file
@@ -67,6 +68,7 @@ in
       --argjson seq "$seq" \
       --arg ts "$ts" \
       --arg runId "$run_id" \
+      --arg attemptId "$attempt_id" \
       --arg workflowId "$workflow_id" \
       --arg taskId "$task_id" \
       --arg state "$state" \

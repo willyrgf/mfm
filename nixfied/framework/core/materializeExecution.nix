@@ -11,12 +11,25 @@ let
   registry = import ../runtime/registry { inherit pkgs; };
   compileServices = import ../../compiler/compile-services.nix { inherit lib; };
 
+  enabledServiceFlags = builtins.listToAttrs (
+    map (
+      serviceId:
+      let
+        service = compiledCore.model.serviceCatalog.${serviceId};
+      in
+      {
+        name = service.name or (lib.removePrefix "service." serviceId);
+        value = service.enable or false;
+      }
+    ) (builtins.attrNames compiledCore.model.serviceCatalog)
+  );
+
   services = compileServices {
     inherit
       pkgs
       selectedServices
+      enabledServiceFlags
       ;
-    discardContext = false;
     resolved = compiledCore.resolved;
   };
 

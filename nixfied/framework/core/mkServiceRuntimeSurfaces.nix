@@ -141,37 +141,7 @@ let
     SLOT_RUNTIME_DIR_BASE=${lib.escapeShellArg model.runtime.directories.base}
 
     normalize_slot_runtime_token() {
-      local normalized="$1"
-      normalized="''${normalized//./_}"
-      normalized="''${normalized//-/_}"
-      normalized="''${normalized//:/_}"
-      normalized="''${normalized//\//_}"
-      normalized="''${normalized// /_}"
-      printf '%s' "$normalized" | ${pkgs.coreutils}/bin/tr '[:lower:]' '[:upper:]' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_'
-    }
-
-    expand_slot_runtime_dir_base() {
-      local raw_value="$1"
-
-      if [ -n "''${NIXFIED_RUNTIME_DIR_BASE:-}" ]; then
-        printf '%s' "''${NIXFIED_RUNTIME_DIR_BASE}"
-        return 0
-      fi
-
-      if [ -z "$raw_value" ]; then
-        printf '%s' ""
-        return 0
-      fi
-
-      if [[ "$raw_value" == *"$"* ]]; then
-        # Runtime directory templates are trusted project config values.
-        # Expand them once here so downstream services do not create literal
-        # shell-template directory names inside the workspace.
-        eval "printf '%s' \"$raw_value\""
-        return 0
-      fi
-
-      printf '%s' "$raw_value"
+      printf '%s' "$1" | ${pkgs.coreutils}/bin/tr '[:lower:].-:/ ' '[:upper:]______' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_'
     }
 
     resolve_slot_runtime_context() {
@@ -207,7 +177,9 @@ let
         exit 3
       fi
 
-      runtime_dir_base="$(expand_slot_runtime_dir_base "$runtime_dir_base")"
+      if [ -z "$runtime_dir_base" ] || [[ "$runtime_dir_base" == *"$"* ]]; then
+        runtime_dir_base="''${NIXFIED_RUNTIME_DIR_BASE:-$runtime_dir_base}"
+      fi
 
       SLOT_RUNTIME_SCOPE_ROOT="''${NIXFIED_RUNTIME_DIR_SCOPE:-''${NIXFIED_RUNTIME_DIR_SCOPE_OVERRIDE:-}}"
       if [ -z "$SLOT_RUNTIME_SCOPE_ROOT" ]; then

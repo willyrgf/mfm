@@ -33,7 +33,6 @@ let
   httpPortVar = slots.portVarName config.portKeyHttp;
   wsPortVar = slots.portVarName config.portKeyWs;
   authPortVar = slots.portVarName config.portKeyAuth;
-  p2pPortVar = slots.portVarName config.portKeyP2p;
   rethDirExpr = slots.getServiceDir config.dataDirName;
   useDevMode = config.devMode or false;
   extraArgs = lib.escapeShellArgs (config.extraArgs or [ ]);
@@ -78,7 +77,6 @@ let
     HTTP_PORT_VAR="${httpPortVar}"
     WS_PORT_VAR="${wsPortVar}"
     AUTH_PORT_VAR="${authPortVar}"
-    P2P_PORT_VAR="${p2pPortVar}"
 
     ${slotEnvRuntime.readPortFromJson {
       targetVar = "RETH_HTTP_PORT";
@@ -95,11 +93,6 @@ let
       jsonVar = "SLOT_INFO_JSON_OUT";
       keyExpr = "$AUTH_PORT_VAR";
     }}
-    ${slotEnvRuntime.readPortFromJson {
-      targetVar = "RETH_P2P_PORT";
-      jsonVar = "SLOT_INFO_JSON_OUT";
-      keyExpr = "$P2P_PORT_VAR";
-    }}
     RETH_DIR="${rethDirExpr}"
     RETH_PID_FILE="$RETH_DIR/run/reth.pid"
     RETH_LOG_FILE="$RETH_DIR/logs/reth.log"
@@ -114,8 +107,8 @@ let
       RETH_USE_DEV="1"
     fi
 
-    if [ -z "$RETH_HTTP_PORT" ] || [ -z "$RETH_WS_PORT" ] || [ -z "$RETH_AUTH_PORT" ] || [ -z "$RETH_P2P_PORT" ]; then
-      log_error "reth port variables are not set (http/ws/auth/p2p)"
+    if [ -z "$RETH_HTTP_PORT" ] || [ -z "$RETH_WS_PORT" ] || [ -z "$RETH_AUTH_PORT" ]; then
+      log_error "reth port variables are not set (http/ws/auth)"
       exit 1
     fi
 
@@ -164,7 +157,6 @@ let
       ARGS=(
         node
         --datadir "$RETH_DIR/data"
-        --port "$RETH_P2P_PORT"
         --ipcpath "$RETH_DIR/run/reth.ipc"
         --http
         --http.addr ${runtimeDefaults.hosts.loopbackIp}
@@ -219,7 +211,6 @@ let
         "http_port=$RETH_HTTP_PORT"
         "ws_port=$RETH_WS_PORT"
         "auth_port=$RETH_AUTH_PORT"
-        "p2p_port=$RETH_P2P_PORT"
         "network=$RETH_NETWORK"
       ];
     };

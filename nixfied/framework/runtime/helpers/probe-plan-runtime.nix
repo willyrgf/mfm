@@ -187,18 +187,6 @@ let
       );
     in
     ''
-            source_kind_disallowed() {
-              local source_kind="$1"
-              shift
-              local blocked_kind
-              for blocked_kind in "$@"; do
-                if [ "$blocked_kind" = "$source_kind" ]; then
-                  return 0
-                fi
-              done
-              return 1
-            }
-
             probe_source="''${service_source:-unspecified}"
             helios_source_kind_value="unknown"
             case "$probe_source" in

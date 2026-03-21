@@ -33,7 +33,6 @@ let
     selectionIndex = resolvedSelectionIndex;
   };
   orchestratorRuntimeShell = import ./orchestrator-runtime.nix { inherit pkgs; };
-  executorRuntimeShell = import ./executor-runtime.nix { inherit pkgs; };
   executor = import ./executor.nix {
     inherit
       pkgs
@@ -125,7 +124,6 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
   ${registryShell}
   ${workflowModesShell}
   ${orchestratorRuntimeShell}
-  ${executorRuntimeShell}
 
   mkdir -p "$RUNS_DIR" "$RUN_LOCKS_DIR" "$RUN_LOG_DIR"
 
@@ -141,6 +139,16 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
   sha256_text() {
     printf '%s' "$1" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.gawk}/bin/awk '{print $1}'
+  }
+
+  compute_attempt_id() {
+    local attempt_dir
+    local attempt_name
+
+    attempt_dir="$(mktemp -d "''${TMPDIR:-/tmp}/nixfied-attempt.XXXXXX")" || return 1
+    attempt_name="$(basename "$attempt_dir")"
+    rmdir "$attempt_dir"
+    printf '%s' "attempt-''${attempt_name#nixfied-attempt.}"
   }
 
   canonical_run_id_envelope() {
@@ -516,17 +524,24 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local workflow_id="$2"
     local task_id="$3"
     local signal_name="$4"
+    local attempt_id=""
     local detail_json
+    local run_file=""
 
     if [ -z "$workflow_id" ] && [ -z "$task_id" ]; then
       return 0
     fi
 
+    run_file="$(run_file_for "$run_id")"
+    if [ -f "$run_file" ]; then
+      attempt_id="$(run_file_attempt_id "$run_file")"
+    fi
+
     detail_json="$(${pkgs.jq}/bin/jq -cn --arg reason "orchestrator-interrupted" --arg signal "$signal_name" '{reason: $reason, signal: $signal}')"
     if [ -n "$workflow_id" ]; then
-      registry_append_event "$REGISTRY_ROOT" "$run_id" "$workflow_id" "" "canceled" "$detail_json"
+      registry_append_event "$REGISTRY_ROOT" "$run_id" "$attempt_id" "$workflow_id" "" "canceled" "$detail_json"
     else
-      registry_append_event "$REGISTRY_ROOT" "$run_id" "" "$task_id" "canceled" "$detail_json"
+      registry_append_event "$REGISTRY_ROOT" "$run_id" "$attempt_id" "" "$task_id" "canceled" "$detail_json"
     fi
   }
 
@@ -552,13 +567,14 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
   create_run_record() {
     local run_id="$1"
-    local command_name="$2"
-    local workflow_id="$3"
-    local task_id="$4"
-    local execution_mode="$5"
-    local process_mode="$6"
-    local ephemeral_enabled="$7"
-    local args_json="$8"
+    local attempt_id="$2"
+    local command_name="$3"
+    local workflow_id="$4"
+    local task_id="$5"
+    local execution_mode="$6"
+    local process_mode="$7"
+    local ephemeral_enabled="$8"
+    local args_json="$9"
 
     local run_file
     local now
@@ -574,6 +590,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
     if ! ${pkgs.jq}/bin/jq -cnS \
       --arg runId "$run_id" \
+      --arg attemptId "$attempt_id" \
       --arg command "$command_name" \
       --arg workflowId "$workflow_id" \
       --arg taskId "$task_id" \
@@ -584,6 +601,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
       --arg ts "$now" \
       '{
         run_id: $runId,
+        attempt_id: $attemptId,
         command: $command,
         workflow_id: $workflowId,
         task_id: $taskId,
@@ -678,6 +696,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
   terminal_from_events() {
     local run_id="$1"
+    local attempt_id="$2"
     local events_file
     local terminal_state
     local exit_code
@@ -692,8 +711,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
       return
     fi
 
-    terminal_state="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" '
-      select(.runId == $runId and (.state == "passed" or .state == "failed" or .state == "canceled"))
+    terminal_state="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" --arg attemptId "$attempt_id" '
+      select(.runId == $runId and ($attemptId == "" or (.attemptId // "") == $attemptId) and (.state == "passed" or .state == "failed" or .state == "canceled"))
       | .state
     ' "$events_file" | ${pkgs.coreutils}/bin/tail -n 1)"
 
@@ -713,8 +732,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
         echo "canceled 130"
         ;;
       failed)
-        exit_code="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" '
-          select(.runId == $runId and .state == "failed")
+        exit_code="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" --arg attemptId "$attempt_id" '
+          select(.runId == $runId and ($attemptId == "" or (.attemptId // "") == $attemptId) and .state == "failed")
           | .detail.exitCode // empty
         ' "$events_file" | ${pkgs.coreutils}/bin/tail -n 1)"
         if [ -z "$exit_code" ]; then
@@ -735,6 +754,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local run_file
     local state
     local pid
+    local attempt_id=""
     local terminal_state
     local terminal_code
 
@@ -753,7 +773,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
       return 0
     fi
 
-    read -r terminal_state terminal_code <<<"$(terminal_from_events "$run_id")"
+    attempt_id="$(run_file_attempt_id "$run_file")"
+    read -r terminal_state terminal_code <<<"$(terminal_from_events "$run_id" "$attempt_id")"
     if ! map_terminal_state "$terminal_state"; then
       terminal_state="failed"
       terminal_code="1"
@@ -789,15 +810,17 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local terminal_state
     local terminal_code
     local stop_reason
+    local attempt_id=""
 
     timeout_seconds="$(stop_timeout_seconds)"
     terminate_run_process "$pid" "$pgid" "$timeout_seconds"
 
     run_file="$(run_file_for "$run_id")"
     if [ -f "$run_file" ]; then
+      attempt_id="$(run_file_attempt_id "$run_file")"
       current_state="$(run_file_state "$run_file")"
       if ! run_state_is_terminal "$current_state"; then
-        read -r terminal_state terminal_code <<<"$(terminal_from_events "$run_id")"
+        read -r terminal_state terminal_code <<<"$(terminal_from_events "$run_id" "$attempt_id")"
         if map_terminal_state "$terminal_state"; then
           update_run_state "$run_id" "$terminal_state" "$terminal_code" "" "$pid" "$pgid" || true
         else
@@ -1110,6 +1133,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local execution_mode="task"
     local ephemeral_enabled="0"
     local run_id
+    local attempt_id
     local args_json
     local -a run_id_args
     run_id_args=()
@@ -1149,16 +1173,18 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
     mapfile -t run_id_args < <(call_with_array_args FORWARD_ARGS filter_run_id_args)
     run_id="$(call_with_array_args run_id_args compute_run_id "task" "$workflow_ref" "$task_id")"
+    attempt_id="$(compute_attempt_id)"
     if [ -n "$MACHINE_RUN_ID_FILE" ]; then
       write_text_file_atomic "$MACHINE_RUN_ID_FILE" "$run_id"
     fi
     args_json="$(call_with_array_args FORWARD_ARGS jq_positional_args_json)"
-    create_run_record "$run_id" "run-task" "$workflow_ref" "$task_id" "$execution_mode" "$PROCESS_MODE" "$ephemeral_enabled" "$args_json" || {
+    create_run_record "$run_id" "$attempt_id" "run-task" "$workflow_ref" "$task_id" "$execution_mode" "$PROCESS_MODE" "$ephemeral_enabled" "$args_json" || {
       deactivate_run_id "$run_id"
       return 1
     }
 
     export NIXFIED_ORCHESTRATOR_RUN_ID="$run_id"
+    export NIXFIED_ORCHESTRATOR_ATTEMPT_ID="$attempt_id"
     export NIXFIED_ORCHESTRATOR_RUN_SUFFIX_REASON="$RUN_SUFFIX_REASON"
     export NIXFIED_ORCHESTRATOR_PROCESS_MODE="$PROCESS_MODE"
     export NIXFIED_ORCHESTRATOR_WORKFLOW_ID="$workflow_ref"
@@ -1187,6 +1213,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local command_started_epoch
     local mode="workflow"
     local run_id
+    local attempt_id
     local args_json
     local ephemeral_enabled
     local -a run_id_args
@@ -1210,16 +1237,18 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     ephemeral_enabled="$(workflow_ephemeral_flag "$workflow_id")"
     mapfile -t run_id_args < <(call_with_array_args FORWARD_ARGS filter_run_id_args)
     run_id="$(call_with_array_args run_id_args compute_run_id "workflow" "$workflow_id" "")"
+    attempt_id="$(compute_attempt_id)"
     if [ -n "$MACHINE_RUN_ID_FILE" ]; then
       write_text_file_atomic "$MACHINE_RUN_ID_FILE" "$run_id"
     fi
     args_json="$(call_with_array_args FORWARD_ARGS jq_positional_args_json)"
-    create_run_record "$run_id" "run-workflow" "$workflow_id" "" "$mode" "$PROCESS_MODE" "$ephemeral_enabled" "$args_json" || {
+    create_run_record "$run_id" "$attempt_id" "run-workflow" "$workflow_id" "" "$mode" "$PROCESS_MODE" "$ephemeral_enabled" "$args_json" || {
       deactivate_run_id "$run_id"
       return 1
     }
 
     export NIXFIED_ORCHESTRATOR_RUN_ID="$run_id"
+    export NIXFIED_ORCHESTRATOR_ATTEMPT_ID="$attempt_id"
     export NIXFIED_ORCHESTRATOR_RUN_SUFFIX_REASON="$RUN_SUFFIX_REASON"
     export NIXFIED_ORCHESTRATOR_PROCESS_MODE="$PROCESS_MODE"
     export NIXFIED_ORCHESTRATOR_WORKFLOW_ID="$workflow_id"

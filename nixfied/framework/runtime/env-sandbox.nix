@@ -8,13 +8,6 @@
 let
   lib = pkgs.lib;
   commonRuntimeShell = import ./common-runtime.nix { inherit pkgs; };
-  sandboxHelpers = import ./helpers/helpers.nix {
-    inherit pkgs;
-    project = { };
-    hooks = { };
-    summaryParser = "";
-  };
-  helpersScriptPath = builtins.toString sandboxHelpers.helpersScript;
 
   valueToString =
     value:
@@ -120,7 +113,6 @@ in
         pkgs.lib.toUpper (pkgs.lib.replaceStrings [ "-" "." ] [ "_" "_" ] model.identity.projectId)
       )
     }
-    ENV_SANDBOX_HELPERS_SCRIPT=${lib.escapeShellArg helpersScriptPath}
     RUNTIME_DIR_BASE_DEFAULT=${pkgs.lib.escapeShellArg model.runtime.directories.base}
     ENV_SANDBOX_STATIC_RUNTIME_PACKAGES_PATH=${lib.escapeShellArg staticRuntimePackagesPath}
     ENV_SANDBOX_STATIC_RUNTIME_SLOT_VAR=${lib.escapeShellArg model.runtime.slot.var}
@@ -136,36 +128,7 @@ in
     ENV_SANDBOX_STATIC_SERVICE_NAMES=${lib.escapeShellArg staticServiceNames}
 
     normalize_env_token() {
-      local normalized="$1"
-      normalized="''${normalized//./_}"
-      normalized="''${normalized//-/_}"
-      normalized="''${normalized//:/_}"
-      normalized="''${normalized//\//_}"
-      normalized="''${normalized// /_}"
-      printf '%s' "$normalized" | ${pkgs.coreutils}/bin/tr '[:lower:]' '[:upper:]' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_'
-    }
-
-    expand_runtime_dir_base_template() {
-      local raw_value="$1"
-
-      if [ -n "''${NIXFIED_RUNTIME_DIR_BASE:-}" ]; then
-        printf '%s' "''${NIXFIED_RUNTIME_DIR_BASE}"
-        return 0
-      fi
-
-      if [ -z "$raw_value" ]; then
-        printf '%s' ""
-        return 0
-      fi
-
-      if [[ "$raw_value" == *"$"* ]]; then
-        # Expand trusted project-config templates once so runtime scopes resolve
-        # to real filesystem paths instead of literal shell-template directories.
-        eval "printf '%s' \"$raw_value\""
-        return 0
-      fi
-
-      printf '%s' "$raw_value"
+      printf '%s' "$1" | ${pkgs.coreutils}/bin/tr '[:lower:].-' '[:upper:]__' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_'
     }
 
     runtime_service_selected() {
@@ -327,7 +290,6 @@ in
       local host_sdkroot=""
       local pass_through_env_tsv=""
       local runtime_env_tsv=""
-      local command_script=""
 
       local slot_var
       local env_var
@@ -502,7 +464,9 @@ in
       log_level_default="$ENV_SANDBOX_STATIC_LOG_LEVEL_DEFAULT"
       output_mode_default="$ENV_SANDBOX_STATIC_OUTPUT_MODE_DEFAULT"
 
-      runtime_dir_base="$(expand_runtime_dir_base_template "$runtime_dir_base")"
+      if [ -z "$runtime_dir_base" ] || [[ "$runtime_dir_base" == *"$"* ]]; then
+        runtime_dir_base="$RUNTIME_DIR_BASE_DEFAULT"
+      fi
       if [ -n "$runtime_scope_override" ]; then
         runtime_scope_root="$runtime_scope_override"
       elif [ -n "$ephemeral_root" ]; then
@@ -765,8 +729,6 @@ in
         "LANG=$locale"
         "LC_ALL=$locale"
         "TZ=$timezone"
-        "''${slot_var}=$slot_value"
-        "''${env_var}=$env_value"
         "HOME=$home_value"
         "TMPDIR=$tmp_value"
         "XDG_DATA_HOME=$xdg_data_value"
@@ -983,11 +945,10 @@ in
       done <<< "$runtime_env_tsv"
 
       umask "$umask_value"
-      command_script="$(printf 'source %s\n%s' "$ENV_SANDBOX_HELPERS_SCRIPT" "$command")"
 
       (
         cd "$workdir"
-        "''${env_cmd[@]}" ${pkgs.bash}/bin/bash -euo pipefail -c "$command_script" -- "$@"
+        "''${env_cmd[@]}" ${pkgs.bash}/bin/bash -euo pipefail -c "$command" -- "$@"
       )
     }
 

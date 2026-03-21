@@ -10,13 +10,21 @@ in
   normalize_run_artifacts_dir() {
     local base_dir="$1"
     local run_id="$2"
+    local attempt_id="$3"
+
+    if [ -z "$attempt_id" ]; then
+      attempt_id="$run_id"
+    fi
 
     case "$base_dir" in
-      */"$run_id")
+      */"$attempt_id")
         printf '%s' "$base_dir"
         ;;
+      */"$run_id")
+        printf '%s/%s' "$base_dir" "$attempt_id"
+        ;;
       *)
-        printf '%s/%s' "$base_dir" "$run_id"
+        printf '%s/%s/%s' "$base_dir" "$run_id" "$attempt_id"
         ;;
     esac
   }
@@ -26,6 +34,7 @@ in
     local workflow_id="$2"
     local caller_root="''${CI_ARTIFACTS_ROOT:-}"
     local caller_dir="''${CI_ARTIFACTS_DIR:-}"
+    local attempt_id="''${NIXFIED_ATTEMPT_ID:-''${NIXFIED_ORCHESTRATOR_ATTEMPT_ID:-}}"
     local configured_root=""
     local base_dir=""
 
@@ -50,7 +59,7 @@ in
       base_dir="$ARTIFACTS_ROOT_DEFAULT"
     fi
 
-    normalize_run_artifacts_dir "$base_dir" "$run_id"
+    normalize_run_artifacts_dir "$base_dir" "$run_id" "$attempt_id"
   }
 
   ensure_run_artifacts_dir() {
@@ -81,16 +90,19 @@ in
     local workflow_id="$2"
     local summary_file="$3"
     local exit_code="$4"
+    local attempt_id="''${NIXFIED_ATTEMPT_ID:-''${NIXFIED_ORCHESTRATOR_ATTEMPT_ID:-}}"
 
     if [ -n "$summary_file" ] && [ -f "$summary_file" ]; then
       ${pkgs.jq}/bin/jq -cnS \
         --arg runId "$run_id" \
+        --arg attemptId "$attempt_id" \
         --arg workflowId "$workflow_id" \
         --arg summaryJson "$summary_file" \
         --argjson exitCode "$exit_code" \
         --slurpfile summary "$summary_file" \
         '{
           run_id: $runId,
+          attempt_id: $attemptId,
           workflow_id: $workflowId,
           exit_code: $exitCode,
           summary_json: $summaryJson,
@@ -101,10 +113,12 @@ in
 
     ${pkgs.jq}/bin/jq -cnS \
       --arg runId "$run_id" \
+      --arg attemptId "$attempt_id" \
       --arg workflowId "$workflow_id" \
       --argjson exitCode "$exit_code" \
       '{
         run_id: $runId,
+        attempt_id: $attemptId,
         workflow_id: $workflowId,
         exit_code: $exitCode,
         summary_json: null,

@@ -32,7 +32,6 @@ rustPlatform.buildRustPackage rec {
     "helios"
   ];
 
-  cargoInstallFlags = cargoBuildFlags;
   cargoTestFlags = cargoBuildFlags;
   doCheck = false;
 

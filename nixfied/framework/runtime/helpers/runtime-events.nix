@@ -345,7 +345,7 @@ let
       }
       ')
 
-    if ! registry_append_event "$REGISTRY_ROOT" "$EVENT_RUN_ID" "" "" "$EVENT_STATE" "$DETAIL_JSON"; then
+    if ! registry_append_event "$REGISTRY_ROOT" "$EVENT_RUN_ID" "''${NIXFIED_ATTEMPT_ID:-}" "" "" "$EVENT_STATE" "$DETAIL_JSON"; then
       log_error "failed to record runtime event event_type=$EVENT_TYPE run_id=$EVENT_RUN_ID"
       exit 1
     fi

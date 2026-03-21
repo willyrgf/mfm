@@ -122,6 +122,11 @@ in
     ${pkgs.jq}/bin/jq -r '.pgid // empty' "$run_file"
   }
 
+  run_file_attempt_id() {
+    local run_file="$1"
+    ${pkgs.jq}/bin/jq -r '.attempt_id // empty' "$run_file"
+  }
+
   run_file_command() {
     local run_file="$1"
     ${pkgs.jq}/bin/jq -r '.command' "$run_file"
@@ -341,13 +346,21 @@ in
   normalize_run_artifacts_dir() {
     local base_dir="$1"
     local run_id="$2"
+    local attempt_id="$3"
+
+    if [ -z "$attempt_id" ]; then
+      attempt_id="$run_id"
+    fi
 
     case "$base_dir" in
-      */"$run_id")
+      */"$attempt_id")
         printf '%s' "$base_dir"
         ;;
+      */"$run_id")
+        printf '%s/%s' "$base_dir" "$attempt_id"
+        ;;
       *)
-        printf '%s/%s' "$base_dir" "$run_id"
+        printf '%s/%s/%s' "$base_dir" "$run_id" "$attempt_id"
         ;;
     esac
   }
@@ -391,6 +404,7 @@ in
   resolve_run_artifacts_dir() {
     local run_id="$1"
     local workflow_id="$2"
+    local attempt_id="''${NIXFIED_ATTEMPT_ID:-''${NIXFIED_ORCHESTRATOR_ATTEMPT_ID:-}}"
     local configured_root
     local caller_root="''${CI_ARTIFACTS_ROOT:-}"
     local caller_dir="''${CI_ARTIFACTS_DIR:-}"
@@ -417,7 +431,7 @@ in
 
     base_dir="$(absolutize_artifacts_base_dir "$base_dir")"
 
-    normalize_run_artifacts_dir "$base_dir" "$run_id"
+    normalize_run_artifacts_dir "$base_dir" "$run_id" "$attempt_id"
   }
 
   resolve_task_workflow_ref() {

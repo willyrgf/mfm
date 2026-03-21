@@ -180,6 +180,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator-control" ''
 
   terminal_from_events() {
     local run_id="$1"
+    local attempt_id="$2"
     local events_file
     local terminal_state
     local exit_code
@@ -194,8 +195,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator-control" ''
       return
     fi
 
-    terminal_state="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" '
-      select(.runId == $runId and (.state == "passed" or .state == "failed" or .state == "canceled"))
+    terminal_state="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" --arg attemptId "$attempt_id" '
+      select(.runId == $runId and ($attemptId == "" or (.attemptId // "") == $attemptId) and (.state == "passed" or .state == "failed" or .state == "canceled"))
       | .state
     ' "$events_file" | ${pkgs.coreutils}/bin/tail -n 1)"
 
@@ -215,8 +216,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator-control" ''
         echo "canceled 130"
         ;;
       failed)
-        exit_code="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" '
-          select(.runId == $runId and .state == "failed")
+        exit_code="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" --arg attemptId "$attempt_id" '
+          select(.runId == $runId and ($attemptId == "" or (.attemptId // "") == $attemptId) and .state == "failed")
           | .detail.exitCode // empty
         ' "$events_file" | ${pkgs.coreutils}/bin/tail -n 1)"
         if [ -z "$exit_code" ]; then
@@ -237,6 +238,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator-control" ''
     local run_file
     local state
     local pid
+    local attempt_id=""
     local terminal_state
     local terminal_code
 
@@ -255,7 +257,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator-control" ''
       return 0
     fi
 
-    read -r terminal_state terminal_code <<<"$(terminal_from_events "$run_id")"
+    attempt_id="$(run_file_attempt_id "$run_file")"
+    read -r terminal_state terminal_code <<<"$(terminal_from_events "$run_id" "$attempt_id")"
     if ! map_terminal_state "$terminal_state"; then
       terminal_state="failed"
       terminal_code="1"
