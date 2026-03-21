@@ -58,7 +58,11 @@ nix run .#health -- --service helios --source local
 Legacy `MFM_KEEP_SERVICES` is rejected.
 
 The helper tasks are internal implementation details. This repo does not expose
-public `service::*::start` apps for Postgres or Helios.
+custom project-owned `service::*::start` wrappers for Postgres or Helios.
+Lifecycle now flows through the vendored Nixfied service primitives:
+
+- `svc::postgres::*`
+- `svc::helios::*`
 
 ## Runtime Environment
 
@@ -67,13 +71,14 @@ Important Helios env vars:
 - `HELIOS_NETWORK`
 - `HELIOS_EXECUTION_RPC_URL`
 - `HELIOS_CONSENSUS_RPC_URL`
+- `HELIOS_DEFAULT_CONSENSUS_RPC_URL`
 - `HELIOS_CHECKPOINT`
 - `HELIOS_READY_TIMEOUT_SECS`
 - `HELIOS_READY_INTERVAL_SECS`
 
-Model-derived executor env uses `HELIOSRPC_PORT`. Internal snapshot tasks export
-`HELIOS_RPC_PORT` locally only where Helios process wiring or CLI routing still
-expects that alias.
+Model-derived executor env uses `HELIOSRPC_PORT`. Internal snapshot tasks still
+export `HELIOS_RPC_PORT` locally only where CLI routing expects that alias, but
+service lifecycle hooks resolve the canonical model port keys directly.
 
 Runtime bootstrap reconstructed inside `task.mfm.portfolio.snapshot.exec`:
 
@@ -102,9 +107,17 @@ Canonical service metadata now lives in `nixfied/project/conf.nix` under `servic
 - The local source is explicitly marked `real`, and framework readiness uses the `strict`
   profile so `ready -- --service helios --source local` rejects shim or unknown source kinds.
 
-`task.mfm.portfolio.snapshot.services-start` currently remains the coarse lifecycle task.
-It reuses framework `task.ops.ready` for both Postgres and Helios, while the
-public wrapper keeps stdout clean and the internal workflow manages sequencing.
+`task.mfm.portfolio.snapshot.services-start` remains the coarse lifecycle task,
+but it now delegates service lifecycle to `SVC_POSTGRES_*` / `SVC_HELIOS_*`
+hooks exported by Nixfied instead of importing service scripts directly into
+`nixfied/project/module.nix`. The snapshot workflow selects the Helios hook path
+from workflow requirements rather than a project-local service catalog branch.
+
+The parity CI path also uses `SVC_HELIOS_FULL_START_TEST`, `SVC_HELIOS_READY`,
+and `SVC_HELIOS_STOP`; the repo no longer carries the previous Python Helios
+shim for parity startup. Parity clears explicit `HELIOS_CONSENSUS_RPC_URL` /
+`HELIOS_CHECKPOINT` overrides and relies on the service-level
+`HELIOS_DEFAULT_CONSENSUS_RPC_URL` fallback instead.
 
 Execution endpoint inputs resolve in this order:
 

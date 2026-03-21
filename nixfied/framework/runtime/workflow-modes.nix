@@ -1,44 +1,43 @@
 {
   pkgs,
   model,
+  selectionIndex ? null,
 }:
 let
   lib = pkgs.lib;
   listUtils = import ../core/list-utils.nix;
-  serviceSelection = import ./service-selection.nix {
-    inherit
-      lib
-      model
-      ;
-  };
+  resolvedSelectionIndex =
+    if selectionIndex != null then
+      selectionIndex
+    else
+      import ../../compiler/compile-selection-index.nix
+        {
+          inherit (pkgs) lib;
+        }
+        {
+          tasks = model.tasks or { };
+          workflows = model.workflows or { };
+          serviceCatalog = model.serviceCatalog or { };
+        };
 
   uniqueSorted = values: builtins.sort builtins.lessThan (lib.unique values);
 
   workflows = model.workflows or { };
   tasks = model.tasks or { };
 
-  workflowIds = uniqueSorted (builtins.attrNames workflows);
-
-  workflowModesByFamily = builtins.foldl' (
-    acc: workflowId:
-    let
-      match = builtins.match "^workflow\\.([^.]+)\\.(.+)$" workflowId;
-    in
-    if match == null then
-      acc
+  workflowIds =
+    if resolvedSelectionIndex ? workflowIds then
+      resolvedSelectionIndex.workflowIds
     else
-      let
-        family = builtins.elemAt match 0;
-        mode = builtins.elemAt match 1;
-        existing = acc.${family} or [ ];
-      in
-      acc
-      // {
-        ${family} = uniqueSorted (existing ++ [ mode ]);
-      }
-  ) { } workflowIds;
+      uniqueSorted (builtins.attrNames workflows);
 
-  workflowFamilies = uniqueSorted (builtins.attrNames workflowModesByFamily);
+  workflowModesByFamily = resolvedSelectionIndex.workflowModesByFamily or { };
+
+  workflowFamilies =
+    if resolvedSelectionIndex ? workflowFamilies then
+      resolvedSelectionIndex.workflowFamilies
+    else
+      uniqueSorted (builtins.attrNames workflowModesByFamily);
 
   workflowDescriptorById = builtins.listToAttrs (
     map (
@@ -166,7 +165,11 @@ let
       timezone = taskRuntime.timezone or "UTC";
     };
 
-  taskIds = uniqueSorted (builtins.attrNames tasks);
+  taskIds =
+    if resolvedSelectionIndex ? taskIds then
+      resolvedSelectionIndex.taskIds
+    else
+      uniqueSorted (builtins.attrNames tasks);
 
   taskDescriptorById = builtins.listToAttrs (
     map (
@@ -361,22 +364,27 @@ let
 
   taskClosureServiceCases = map (taskId: {
     key = taskId;
-    value = serviceSelection.taskClosureServicesById.${taskId} or [ ];
+    value = resolvedSelectionIndex.taskClosureServicesById.${taskId} or [ ];
   }) taskIds;
 
   taskBaseClosureServiceCases = map (taskId: {
     key = taskId;
-    value = serviceSelection.taskBaseClosureServicesById.${taskId} or [ ];
+    value = resolvedSelectionIndex.taskBaseClosureServicesById.${taskId} or [ ];
   }) taskIds;
 
   workflowClosureServiceCases = map (workflowId: {
     key = workflowId;
-    value = serviceSelection.workflowClosureServicesById.${workflowId} or [ ];
+    value = resolvedSelectionIndex.workflowClosureServicesById.${workflowId} or [ ];
+  }) workflowIds;
+
+  workflowUnitClosureServiceCases = map (workflowId: {
+    key = workflowId;
+    value = resolvedSelectionIndex.workflowUnitClosureServicesById.${workflowId} or [ ];
   }) workflowIds;
 
   workflowReferenceClosureServiceCases = map (workflowId: {
     key = workflowId;
-    value = serviceSelection.workflowReferenceClosureServicesById.${workflowId} or [ ];
+    value = resolvedSelectionIndex.workflowReferenceClosureServicesById.${workflowId} or [ ];
   }) workflowIds;
 
   taskLongKindCases = builtins.concatLists (
@@ -851,6 +859,16 @@ in
       local workflow_id="$1"
       case "$workflow_id" in
   ${renderCasePrintLines (entry: entry.value) workflowClosureServiceCases}
+        *)
+          return 0
+          ;;
+      esac
+    }
+
+    workflow_unit_closure_selected_services() {
+      local workflow_id="$1"
+      case "$workflow_id" in
+  ${renderCasePrintLines (entry: entry.value) workflowUnitClosureServiceCases}
         *)
           return 0
           ;;

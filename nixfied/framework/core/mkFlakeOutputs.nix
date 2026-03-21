@@ -14,10 +14,22 @@ let
   lib = pkgs.lib;
   mkShellApp = import ./mk-shell-app.nix { inherit pkgs; };
   skipPolicy = import ../runtime/helpers/skip-policy.nix { inherit pkgs; };
+  canonical = import ./canonical.nix { inherit lib; };
+  workspaceMarker = import ../workspace-marker.nix;
+  registry = import ../runtime/registry { inherit pkgs; };
 
   frameworkRoot = ../../.;
+  frameworkRepoRoot = ../../../.;
+  frameworkUtilityCommand = import ../install/wrapper-command.nix {
+    inherit
+      pkgs
+      frameworkSourceRevision
+      ;
+    sourceRoot = frameworkRoot;
+    repoRoot = frameworkRepoRoot;
+  };
 
-  compiled = import ./mkNixfied.nix {
+  compiledCore = import ./mkCompiledCore.nix {
     inherit
       pkgs
       system
@@ -27,6 +39,14 @@ let
       localOverrides
       frameworkSourceRevision
       ;
+  };
+
+  coreSurfaces = import ./mkCoreSurfaces.nix {
+    inherit
+      pkgs
+      canonical
+      ;
+    compiledCore = compiledCore;
   };
 
   toAbsString =
@@ -75,37 +95,21 @@ let
   extraModuleSpecsJson = builtins.toJSON (map encodeModuleSpec extraModules);
   localOverrideSpecsJson = builtins.toJSON (map encodeModuleSpec localOverrides);
 
-  serviceNames = builtins.sort builtins.lessThan (
-    lib.unique (
-      map (
-        serviceId:
-        let
-          service = compiled.services.${serviceId};
-        in
-        service.name or serviceId
-      ) (builtins.attrNames (compiled.services or { }))
-    )
-  );
-  viewAppNames = builtins.sort builtins.lessThan (
-    builtins.attrNames (compiled.model.views.apps or { })
-  );
-  serviceAppNames = builtins.filter (name: lib.hasPrefix "svc::" name) (
-    builtins.attrNames (compiled.apps or { })
-  );
-  dispatcherAppNames = builtins.filter (name: builtins.hasAttr name compiled.apps) [
-    "run-task"
-    "run-workflow"
-    "run-workflow-parallel"
-  ];
-  nonSelectorAppNames = [
-    "framework::install"
-    "framework::upgrade"
-  ];
-  wrappedAppNames = builtins.sort builtins.lessThan (
-    builtins.filter (appName: !(builtins.elem appName nonSelectorAppNames)) (
-      lib.unique (viewAppNames ++ serviceAppNames ++ dispatcherAppNames)
-    )
-  );
+  workspaceMarkerPresent = workspaceMarker.isPresent projectRoot;
+  launcherMetadata = import ./mkLauncherMetadata.nix {
+    inherit
+      lib
+      workspaceMarkerPresent
+      ;
+    model = compiledCore.model;
+    selectionIndex = compiledCore.selectionIndex;
+    serviceSurfaceCatalog = compiledCore.serviceSurfaceCatalog;
+  };
+  serviceNames = launcherMetadata.enabledServices;
+  runtimeControlAppNames = launcherMetadata.runtimeControlAppNames;
+  viewWrappedAppNames = launcherMetadata.viewWrappedAppNames;
+  serviceWrappedAppNames = launcherMetadata.serviceWrappedAppNames;
+  runtimeAppNames = launcherMetadata.runtimeAppNames;
   internalBaseTargetName =
     appName: "base${builtins.substring 0 10 (builtins.hashString "sha256" appName)}";
 
@@ -119,7 +123,7 @@ let
     map (serviceName: "    ${lib.escapeShellArg serviceName}") serviceNames
   );
 
-  taskIds = builtins.sort builtins.lessThan (builtins.attrNames (compiled.model.tasks or { }));
+  taskIds = launcherMetadata.taskIds;
 
   normalizeTaskArgSpec =
     spec:
@@ -167,7 +171,7 @@ let
   renderTaskHelpText =
     taskId:
     let
-      task = compiled.model.tasks.${taskId};
+      task = compiledCore.model.tasks.${taskId};
       app = task.ui.app or { };
       argsContract = (((task.contract or { }).input or { }).args or { });
       specs = map normalizeTaskArgSpec (argsContract.spec or [ ]);
@@ -218,6 +222,77 @@ let
     }) taskIds
   );
 
+  mkStaticHelpFile =
+    name: text:
+    pkgs.writeText "nixfied-help-${builtins.substring 0 10 (builtins.hashString "sha256" name)}.txt" ''
+      ${text}
+    '';
+
+  dispatcherHelpFiles = {
+    "run-task" = mkStaticHelpFile "run-task" ''
+      run-task - Run a compiled task by id
+
+      Usage:
+        nix run .#run-task -- <task-id> [-- ...]
+
+      Options:
+        -h, --help: Show this help.
+    '';
+
+    "run-workflow" = mkStaticHelpFile "run-workflow" ''
+      run-workflow - Run a compiled workflow by id
+
+      Usage:
+        nix run .#run-workflow -- <workflow-id> [-- ...]
+
+      Options:
+        -h, --help: Show this help.
+    '';
+
+    "run-workflow-parallel" = mkStaticHelpFile "run-workflow-parallel" ''
+      run-workflow-parallel - Run a compiled workflow by id with parallel execution enabled
+
+      Usage:
+        nix run .#run-workflow-parallel -- <workflow-id> [-- ...]
+
+      Options:
+        -h, --help: Show this help.
+    '';
+  };
+
+  runtimeControlHelpFiles = {
+    "runs" = mkStaticHelpFile "runs" ''
+      runs - List runs or show one run by id
+
+      Usage:
+        nix run .#runs
+        nix run .#runs -- <run-id>
+
+      Options:
+        -h, --help: Show this help.
+    '';
+
+    "stop-run" = mkStaticHelpFile "stop-run" ''
+      stop-run - Stop one running or queued run
+
+      Usage:
+        nix run .#stop-run -- <run-id>
+
+      Options:
+        -h, --help: Show this help.
+    '';
+
+    "stop-all-runs" = mkStaticHelpFile "stop-all-runs" ''
+      stop-all-runs - Stop all running or queued runs
+
+      Usage:
+        nix run .#stop-all-runs
+
+      Options:
+        -h, --help: Show this help.
+    '';
+  };
+
   renderTaskHelpCases = builtins.concatStringsSep "\n" (
     map (taskId: ''
       ${lib.escapeShellArg taskId})
@@ -227,74 +302,31 @@ let
     '') taskIds
   );
 
-  workflowIds = builtins.sort builtins.lessThan (
-    builtins.attrNames (compiled.model.workflows or { })
-  );
-
-  workflowFamilyFromId =
-    workflowId:
-    let
-      match = builtins.match "^workflow\\.([^.]+)\\..+$" workflowId;
-    in
-    if match == null then null else builtins.elemAt match 0;
-
-  workflowModesByFamily = builtins.foldl' (
-    acc: workflowId:
-    let
-      family = workflowFamilyFromId workflowId;
-      modeMatch = builtins.match "^workflow\\.[^.]+\\.(.+)$" workflowId;
-      mode = if modeMatch == null then null else builtins.elemAt modeMatch 0;
-      existing = acc.${family} or [ ];
-    in
-    if family == null || mode == null then
-      acc
-    else
-      acc
-      // {
-        ${family} = builtins.sort builtins.lessThan (lib.unique (existing ++ [ mode ]));
-      }
-  ) { } workflowIds;
-
-  workflowFamilies = builtins.sort builtins.lessThan (builtins.attrNames workflowModesByFamily);
-
-  taskBaseClosureCsvById = builtins.listToAttrs (
-    map (taskId: {
-      name = taskId;
-      value = compiled.serviceSelection.servicesToCsv (
-        compiled.serviceSelection.taskBaseClosureServicesById.${taskId} or [ ]
-      );
-    }) taskIds
-  );
-
-  taskRunnerWorkflowIdById = builtins.listToAttrs (
-    map (taskId: {
-      name = taskId;
-      value = compiled.model.tasks.${taskId}.runner.workflowId or "";
-    }) taskIds
-  );
-
-  workflowClosureCsvById = builtins.listToAttrs (
-    map (workflowId: {
-      name = workflowId;
-      value = compiled.serviceSelection.servicesToCsv (
-        compiled.serviceSelection.workflowClosureServicesById.${workflowId} or [ ]
-      );
-    }) workflowIds
-  );
+  workflowIds = launcherMetadata.workflowIds;
+  workflowModesByFamily = launcherMetadata.workflowModesByFamily;
+  workflowFamilies = launcherMetadata.workflowFamilies;
+  taskBaseClosureCsvById = launcherMetadata.taskBaseClosureCsvById;
+  taskRunnerWorkflowIdById = launcherMetadata.taskRunnerWorkflowIdById;
+  workflowClosureCsvById = launcherMetadata.workflowClosureCsvById;
 
   mkSelectorAwareLauncher =
     appName:
     let
       launcherTaskId =
-        if builtins.hasAttr appName (compiled.model.views.apps or { }) then
-          compiled.model.views.apps.${appName}.taskId
+        if builtins.hasAttr appName (compiledCore.model.views.apps or { }) then
+          compiledCore.model.views.apps.${appName}.taskId
         else
           "";
       serviceAppMatch = builtins.match "^svc::([^:]+)::.+$" appName;
       launcherServiceName = if serviceAppMatch == null then "" else builtins.elemAt serviceAppMatch 0;
       viewHelpFile =
-        if builtins.hasAttr appName (compiled.model.views.apps or { }) then
-          builtins.toString taskHelpFiles.${compiled.model.views.apps.${appName}.taskId}
+        if builtins.hasAttr appName (compiledCore.model.views.apps or { }) then
+          builtins.toString taskHelpFiles.${compiledCore.model.views.apps.${appName}.taskId}
+        else
+          "";
+      dispatcherHelpFile =
+        if builtins.hasAttr appName dispatcherHelpFiles then
+          builtins.toString dispatcherHelpFiles.${appName}
         else
           "";
     in
@@ -413,6 +445,21 @@ let
                   done
 
                   return 1
+                }
+
+                forwarded_args_only_help_flag() {
+                  if [ "$#" -ne 1 ]; then
+                    return 1
+                  fi
+
+                  case "$1" in
+                    --help|-h)
+                      return 0
+                      ;;
+                    *)
+                      return 1
+                      ;;
+                  esac
                 }
 
                 print_fast_task_help() {
@@ -767,6 +814,12 @@ let
                 excluded_services_csv="$(build_excluded_services_csv)"
                 selected_services_csv="$(launcher_selected_services_csv "''${forwarded_args[@]}")"
 
+                if [ -n ${lib.escapeShellArg dispatcherHelpFile} ] \
+                  && forwarded_args_only_help_flag "''${forwarded_args[@]}"; then
+                  cat ${lib.escapeShellArg dispatcherHelpFile}
+                  exit 0
+                fi
+
                 if forwarded_args_request_help "''${forwarded_args[@]}"; then
                   if [ -n ${lib.escapeShellArg viewHelpFile} ]; then
                     cat ${lib.escapeShellArg viewHelpFile}
@@ -834,7 +887,76 @@ let
       '';
     };
 
-  launcherApps =
+  mkRuntimeAppLauncher =
+    appName:
+    mkShellApp {
+      inherit appName;
+      binPrefix = "nixfied-runtime-launch";
+      body = ''
+        find_flake_root() {
+          local dir="''${NIXFIED_FLAKE_ROOT:-''${NIXFIED_CALLER_PWD:-$PWD}}"
+          while [ "$dir" != "/" ]; do
+            if [ -f "$dir/flake.nix" ]; then
+              printf '%s' "$dir"
+              return 0
+            fi
+            dir="$(${pkgs.coreutils}/bin/dirname "$dir")"
+          done
+
+          echo "ERROR: unable to locate flake root from ''${NIXFIED_FLAKE_ROOT:-''${NIXFIED_CALLER_PWD:-$PWD}}" >&2
+          exit 3
+        }
+
+        flake_root="$(find_flake_root)"
+
+        runtime_cmd=(
+          "${pkgs.nix}/bin/nix-build"
+          "--no-out-link"
+          "${frameworkRoot}/framework/launch/run-runtime-app.nix"
+          "--argstr"
+          "system"
+          ${lib.escapeShellArg system}
+          "--argstr"
+          "projectRoot"
+          "$flake_root"
+          "--argstr"
+          "frameworkRoot"
+          ${lib.escapeShellArg frameworkRootAbs}
+          "--argstr"
+          "nixpkgsPath"
+          ${lib.escapeShellArg nixpkgsPathAbs}
+          "--argstr"
+          "frameworkSourceRevision"
+          ${lib.escapeShellArg frameworkSourceRevision}
+          "--argstr"
+          "appName"
+          ${lib.escapeShellArg appName}
+          "--argstr"
+          "projectModuleSpecsJson"
+          ${lib.escapeShellArg projectModuleSpecsJson}
+          "--argstr"
+          "extraModuleSpecsJson"
+          ${lib.escapeShellArg extraModuleSpecsJson}
+          "--argstr"
+          "localOverrideSpecsJson"
+          ${lib.escapeShellArg localOverrideSpecsJson}
+        )
+
+        selected_launcher="$("''${runtime_cmd[@]}")"
+        shopt -s nullglob
+        selected_programs=("$selected_launcher"/bin/*)
+        shopt -u nullglob
+
+        if [ "''${#selected_programs[@]}" -ne 1 ]; then
+          echo "ERROR: expected exactly one selected launcher binary for app ${appName}" >&2
+          exit 3
+        fi
+
+        exec "''${selected_programs[0]}" "$@"
+      '';
+    };
+
+  viewSelectorLauncherApps =
     if !launchersSupported then
       { }
     else
@@ -842,8 +964,148 @@ let
         map (appName: {
           name = appName;
           value = mkSelectorAwareLauncher appName;
-        }) wrappedAppNames
+        }) viewWrappedAppNames
       );
+  serviceSelectorLauncherApps =
+    if !launchersSupported then
+      { }
+    else
+      builtins.listToAttrs (
+        map (appName: {
+          name = appName;
+          value = mkSelectorAwareLauncher appName;
+        }) serviceWrappedAppNames
+      );
+  runtimeLauncherApps =
+    if !launchersSupported then
+      { }
+    else
+      builtins.listToAttrs (
+        map (appName: {
+          name = appName;
+          value = mkRuntimeAppLauncher appName;
+        }) runtimeAppNames
+      );
+  frameworkUtilityApps = {
+    "framework::install" = mkShellApp {
+      appName = "framework::install";
+      binPrefix = "nixfied-framework";
+      body = ''
+        if [ "$#" -gt 0 ]; then
+          case "$1" in
+            --help|-h)
+              cat ${lib.escapeShellArg (builtins.toString taskHelpFiles."task.framework.install")}
+              exit 0
+              ;;
+          esac
+        fi
+
+        ${frameworkUtilityCommand { }}
+      '';
+    };
+
+    "framework::upgrade" = mkShellApp {
+      appName = "framework::upgrade";
+      binPrefix = "nixfied-framework";
+      body = ''
+        if [ "$#" -gt 0 ]; then
+          case "$1" in
+            --help|-h)
+              cat ${lib.escapeShellArg (builtins.toString taskHelpFiles."task.framework.upgrade")}
+              exit 0
+              ;;
+          esac
+        fi
+
+        ${frameworkUtilityCommand {
+          upgradeDefault = true;
+        }}
+      '';
+    };
+  };
+  orchestratorControl = import ../runtime/orchestrator-control.nix {
+    inherit
+      pkgs
+      registry
+      ;
+    model = compiledCore.model;
+  };
+  runtimeControlProgram = "${orchestratorControl}/bin/nixfied-orchestrator-control";
+  runtimeControlApps = builtins.listToAttrs (
+    map (appName: {
+      name = appName;
+      value = mkShellApp {
+        inherit appName;
+        binPrefix = "nixfied-control";
+        body = ''
+          if [ "$#" -eq 1 ]; then
+            case "$1" in
+              --help|-h)
+                cat ${lib.escapeShellArg (builtins.toString runtimeControlHelpFiles.${appName})}
+                exit 0
+                ;;
+            esac
+          fi
+
+          exec ${lib.escapeShellArg runtimeControlProgram} ${lib.escapeShellArg appName} "$@"
+        '';
+      };
+    }) runtimeControlAppNames
+  );
+  heavyOutputs =
+    let
+      materializedExecution = import ./materializeExecution.nix {
+        inherit
+          pkgs
+          projectRoot
+          ;
+        compiledCore = compiledCore;
+        frameworkSourceFlakeRef = null;
+      };
+    in
+    {
+      runtimeHash = materializedExecution.runtimeHash or compiledCore.model.identity.evalHash;
+      services = materializedExecution.services;
+      serviceApis = materializedExecution.serviceApis;
+      serviceHookEnv = materializedExecution.serviceHookEnv;
+      directApps =
+        materializedExecution.baseApps
+        // coreSurfaces.apps
+        // {
+          default =
+            if builtins.hasAttr "help" coreSurfaces.apps then
+              coreSurfaces.apps.help
+            else if builtins.hasAttr "default" materializedExecution.baseApps then
+              materializedExecution.baseApps.default
+            else
+              materializedExecution.baseApps.help;
+        };
+      frameworkWorkspaceApps =
+        if
+          workspaceMarkerPresent && builtins.hasAttr "framework::test" (compiledCore.model.views.apps or { })
+        then
+          {
+            "framework::test" = mkShellApp {
+              appName = "framework::test";
+              binPrefix = "nixfied-framework";
+              body = ''
+                if [ "$#" -gt 0 ]; then
+                  case "$1" in
+                    --help|-h)
+                      cat ${lib.escapeShellArg (builtins.toString taskHelpFiles."task.framework.test")}
+                      exit 0
+                      ;;
+                  esac
+                fi
+
+                cd ${lib.escapeShellArg projectRootAbs}
+                exec ${lib.escapeShellArg materializedExecution.baseApps."framework::test".program} "$@"
+              '';
+            };
+          }
+        else
+          { };
+    };
   internalBasePackages =
     if !launchersSupported then
       { }
@@ -853,14 +1115,60 @@ let
           name = internalBaseTargetName appName;
           value = pkgs.writeShellScriptBin (internalBaseTargetName appName) ''
             set -euo pipefail
-            exec ${compiled.apps.${appName}.program} "$@"
+              exec ${
+                if builtins.elem appName viewWrappedAppNames then
+                  viewSelectorLauncherApps.${appName}.program
+                else
+                  serviceSelectorLauncherApps.${appName}.program
+              } "$@"
           '';
-        }) wrappedAppNames
+        }) (viewWrappedAppNames ++ serviceWrappedAppNames)
       );
 in
-compiled
-// {
-  apps = compiled.apps // launcherApps;
+{
+  model = compiledCore.model;
+  stateHash = compiledCore.stateHash;
+  runtimeHash = heavyOutputs.runtimeHash;
+  tasks = compiledCore.model.tasks;
+  services = heavyOutputs.services;
+  serviceCatalog = compiledCore.model.serviceCatalog;
+  workflows = compiledCore.model.workflows;
+  features = compiledCore.model.features;
+  selectionIndex = compiledCore.selectionIndex;
+  serviceSurfaceCatalog = compiledCore.serviceSurfaceCatalog;
+  serviceApis = heavyOutputs.serviceApis;
+  serviceHookEnv = heavyOutputs.serviceHookEnv;
+  packages = coreSurfaces.packages // {
+    default = pkgs.runCommand "nixfied-default" { } ''
+      mkdir -p "$out/bin"
+      ln -s ${
+        if launchersSupported then
+          coreSurfaces.apps.help.program
+        else
+          heavyOutputs.directApps.default.program
+      } "$out/bin/default"
+    '';
+  };
+  checks = coreSurfaces.checks;
+  devShells = coreSurfaces.devShells;
+  schema = coreSurfaces.schema;
+  apps =
+    if launchersSupported then
+      serviceSelectorLauncherApps
+      // coreSurfaces.apps
+      // viewSelectorLauncherApps
+      // runtimeLauncherApps
+      // runtimeControlApps
+      // frameworkUtilityApps
+      // heavyOutputs.frameworkWorkspaceApps
+      // {
+        default = coreSurfaces.apps.help;
+      }
+    else
+      heavyOutputs.directApps
+      // runtimeControlApps
+      // frameworkUtilityApps
+      // heavyOutputs.frameworkWorkspaceApps;
   legacyPackages = {
     _nixfied = {
       baseApps = internalBasePackages;

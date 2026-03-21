@@ -517,6 +517,7 @@ let
 in
 {
   inherit
+    collectServiceOps
     validateServiceApi
     validateServiceApis
     validateEnabledServicesHaveContracts

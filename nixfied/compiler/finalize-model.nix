@@ -4,7 +4,7 @@
   projectRoot,
   resolved,
   runtime,
-  services,
+  services ? null,
   serviceCatalog,
   tasks,
   workflows,
@@ -12,13 +12,17 @@
   views,
 }:
 let
-  runtimeHash = canonical.hashCanonical {
-    schema = {
-      kind = "nixfied-runtime";
-      version = 1;
-    };
-    services = services;
-  };
+  runtimeHash =
+    if services == null then
+      null
+    else
+      canonical.hashCanonical {
+        schema = {
+          kind = "nixfied-runtime";
+          version = 1;
+        };
+        services = services;
+      };
 
   evalHash = canonical.hashCanonical {
     schema = {

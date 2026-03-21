@@ -25,6 +25,7 @@ let
 
   normalizeRuntime = import ./normalize-runtime.nix { inherit lib; };
   compileServiceCatalog = import ./compile-service-catalog.nix { inherit lib; };
+  compileServiceSurfaceCatalog = import ./compile-service-surface-catalog.nix { inherit lib; };
   compileServices = import ./compile-services.nix { inherit lib; };
 
   compileTasks = import ./compile-tasks.nix {
@@ -51,6 +52,7 @@ let
   };
 
   compileViews = import ./compile-views.nix { inherit lib; };
+  compileSelectionIndex = import ./compile-selection-index.nix { inherit lib; };
 
   finalizeModel = import ./finalize-model.nix {
     inherit
@@ -59,8 +61,8 @@ let
       ;
   };
 in
-{
-  compile =
+rec {
+  compileCore =
     {
       projectModules,
       extraModules ? [ ],
@@ -87,9 +89,8 @@ in
         resolved = resolvedModuleGraph.config;
       };
 
-      services = compileServices {
-        inherit pkgs;
-        resolved = resolvedModuleGraph.config;
+      serviceSurfaceCatalog = compileServiceSurfaceCatalog {
+        inherit serviceCatalog;
       };
 
       taskCompilation = compileTasks {
@@ -106,6 +107,14 @@ in
         declaredTaskIds = taskCompilation.declaredTaskIds;
         prunedTaskIds = taskCompilation.prunedTaskIds;
         pruneReasonsByTaskId = taskCompilation.pruneReasonsByTaskId;
+      };
+
+      selectionIndex = compileSelectionIndex {
+        inherit
+          tasks
+          workflows
+          serviceCatalog
+          ;
       };
 
       features = compileFeatures {
@@ -135,7 +144,6 @@ in
           system
           projectRoot
           runtime
-          services
           serviceCatalog
           tasks
           workflows
@@ -152,8 +160,36 @@ in
       workflows = workflows;
       views = views;
       runtime = runtime;
-      services = services;
       serviceCatalog = serviceCatalog;
+      serviceSurfaceCatalog = serviceSurfaceCatalog;
       features = features;
+      selectionIndex = selectionIndex;
+    };
+
+  compileServicesResolved =
+    resolved:
+    compileServices {
+      inherit pkgs resolved;
+    };
+
+  compile =
+    args:
+    let
+      core = compileCore args;
+      services = compileServicesResolved core.resolved;
+      runtimeHash = canonical.hashCanonical {
+        schema = {
+          kind = "nixfied-runtime";
+          version = 1;
+        };
+        services = services;
+      };
+    in
+    core
+    // {
+      inherit
+        services
+        runtimeHash
+        ;
     };
 }

@@ -10,16 +10,7 @@ let
   services = config.nixfied.services;
   exitCodes = import ../framework/core/exit-codes.nix;
   shellCommon = import ../framework/core/shell-common.nix { inherit pkgs; };
-  probeCommands = import ../framework/runtime/helpers/probe-commands.nix { inherit pkgs; };
   skipPolicy = import ../framework/runtime/helpers/skip-policy.nix { inherit pkgs; };
-  probePlanRuntime = import ../framework/runtime/helpers/probe-plan-runtime.nix {
-    inherit
-      pkgs
-      probeCommands
-      ;
-    inherit lib;
-    inherit postgresProbePkg;
-  };
   serviceConfigLib = import ../framework/core/service-config.nix { inherit lib; };
   testIsolationRuntime = import ../framework/runtime/helpers/test-isolation-runtime.nix {
     inherit lib pkgs;
@@ -32,43 +23,12 @@ let
     builtins.elem serviceName configuredServiceNames && !(builtins.elem serviceName excludedServices)
   ) serviceConfigLib.supportedServiceNames;
 
-  serviceEnabledByName = builtins.listToAttrs (
-    map (serviceName: {
-      name = serviceName;
-      value = services.${serviceName}.enable or false;
-    }) serviceNames
-  );
-
-  serviceConfigByName = builtins.listToAttrs (
-    map (serviceName: {
-      name = serviceName;
-      value = services.${serviceName};
-    }) serviceNames
-  );
-
-  resolvedServiceConfigByName = builtins.mapAttrs (
-    serviceName: serviceCfg:
-    serviceConfigLib.normalizeServiceConfig {
-      name = serviceName;
-      config = serviceCfg;
-    }
-  ) serviceConfigByName;
-
-  enabledServiceNames = builtins.filter (
-    serviceName: serviceEnabledByName.${serviceName}
-  ) serviceNames;
-
   resolvePortBase =
     key:
     if builtins.hasAttr key runtime.ports then
       runtime.ports.${key}
     else
       throw "nixfied.operations: port key '${key}' is not defined in nixfied.runtime.ports";
-
-  resolveServicePortBase =
-    serviceName: endpointName:
-    resolvePortBase
-      resolvedServiceConfigByName.${serviceName}.resolved.endpoints.${endpointName}.portKey;
 
   netcatPkg =
     if pkgs ? netcat then
@@ -176,24 +136,6 @@ let
     ) portNames
   );
 
-  serviceSelectionContractArgs = [
-    {
-      name = "service";
-      kind = "option";
-      long = "--service";
-      type = "enum";
-      values = serviceNames ++ [ "all" ];
-      description = "Select one enabled service or 'all' (default).";
-    }
-    {
-      name = "source";
-      kind = "option";
-      long = "--source";
-      type = "string";
-      description = "Override source key for selected service (requires --service).";
-    }
-  ];
-
   testIsolationContractArgs = [
     {
       name = "slot";
@@ -220,303 +162,23 @@ let
     }
   ];
 
-  knownServiceCase = builtins.concatStringsSep "\n" (
-    map (serviceName: "      ${serviceName}) return 0 ;;") serviceNames
-  );
+  probeHelpers = import ./operations/probes.nix {
+    inherit
+      lib
+      pkgs
+      runtime
+      services
+      serviceNames
+      resolvePortBase
+      shellCommon
+      slotEnvPrelude
+      skipPolicy
+      serviceConfigLib
+      ;
+  };
 
-  serviceEnabledCase = builtins.concatStringsSep "\n" (
-    map (
-      serviceName:
-      "      ${serviceName}) echo ${if serviceEnabledByName.${serviceName} then "1" else "0"} ;;"
-    ) serviceNames
-  );
-
-  serviceDefaultSourceCase = builtins.concatStringsSep "\n" (
-    map (
-      serviceName:
-      "      ${serviceName}) printf '%s' ${
-              lib.escapeShellArg (resolvedServiceConfigByName.${serviceName}.defaultSource or "")
-            } ;;"
-    ) serviceNames
-  );
-
-  serviceHasSourceCase = builtins.concatStringsSep "\n" (
-    map (
-      serviceName:
-      let
-        sourceKeys = resolvedServiceConfigByName.${serviceName}.sourceKeys or [ ];
-        sourceArgs = builtins.concatStringsSep " " (map lib.escapeShellArg sourceKeys);
-      in
-      ''
-        ${serviceName})
-          source_key_matches "$source"${if sourceArgs == "" then "" else " ${sourceArgs}"}
-          return $?
-          ;;
-      ''
-    ) serviceNames
-  );
-
-  enabledServiceArrayInit =
-    if enabledServiceNames == [ ] then
-      "selected_services=()"
-    else
-      "selected_services=("
-      + builtins.concatStringsSep " " (map lib.escapeShellArg enabledServiceNames)
-      + ")";
-
-  serviceSelectionPrelude = ''
-        target_service="all"
-        target_source=""
-
-        while [ "$#" -gt 0 ]; do
-          case "$1" in
-            --service)
-              target_service="$(nixfied_require_next_arg --service "a value" "$@")"
-              shift 2
-              ;;
-            --service=*)
-              target_service="''${1#--service=}"
-              shift
-              ;;
-            --source)
-              target_source="$(nixfied_require_next_arg --source "a value" "$@")"
-              shift 2
-              ;;
-            --source=*)
-              target_source="''${1#--source=}"
-              shift
-              ;;
-            --)
-              shift
-              break
-              ;;
-            *)
-              nixfied_unknown_arg "$1"
-              ;;
-          esac
-        done
-
-        nixfied_unexpected_positional_args "$@"
-
-        is_known_service() {
-          case "$1" in
-    ${knownServiceCase}
-            *) return 1 ;;
-          esac
-        }
-
-        is_service_enabled() {
-          case "$1" in
-    ${serviceEnabledCase}
-            *) echo "0" ;;
-          esac
-        }
-
-        service_default_source() {
-          case "$1" in
-    ${serviceDefaultSourceCase}
-            *) printf '%s' "" ;;
-          esac
-        }
-
-        source_key_matches() {
-          local wanted="$1"
-          shift
-          local candidate
-          for candidate in "$@"; do
-            if [ "$candidate" = "$wanted" ]; then
-              return 0
-            fi
-          done
-          return 1
-        }
-
-        ${skipPolicy.skipPolicyFunctions}
-        service_skip_env_var_name() { workflow_service_skip_env_var "$@"; }
-        service_is_skipped() { is_service_skipped "$@"; }
-
-        filter_skipped_services() {
-          local -a filtered_services=()
-          local candidate_service
-
-          for candidate_service in "''${selected_services[@]}"; do
-            if service_is_skipped "$candidate_service"; then
-              continue
-            fi
-            filtered_services+=("$candidate_service")
-          done
-          selected_services=("''${filtered_services[@]}")
-        }
-
-        source_kind_disallowed() {
-          local source_kind="$1"
-          shift
-          local blocked_kind
-          for blocked_kind in "$@"; do
-            if [ "$blocked_kind" = "$source_kind" ]; then
-              return 0
-            fi
-          done
-          return 1
-        }
-
-        service_has_source() {
-          local service="$1"
-          local source="$2"
-          case "$service" in
-    ${serviceHasSourceCase}
-            *)
-              return 1
-              ;;
-          esac
-        }
-
-        service_selected() {
-          local service="$1"
-          local selected
-          for selected in "''${selected_services[@]}"; do
-            if [ "$selected" = "$service" ]; then
-              return 0
-            fi
-          done
-          return 1
-        }
-
-        resolve_service_source() {
-          local service="$1"
-          if [ -n "$target_source" ]; then
-            printf '%s' "$target_source"
-            return 0
-          fi
-          service_default_source "$service"
-        }
-
-        if [ "$target_service" != "all" ] && ! is_known_service "$target_service"; then
-          nixfied_exit_usage "unknown --service '$target_service'"
-        fi
-
-        if [ "$target_service" = "all" ]; then
-          ${enabledServiceArrayInit}
-        else
-          if [ "$(is_service_enabled "$target_service")" != "1" ]; then
-            nixfied_exit_precondition "selected service '$target_service' is disabled"
-          fi
-          selected_services=("$target_service")
-        fi
-        filter_skipped_services
-
-        if [ -n "$target_source" ]; then
-          if [ "$target_service" = "all" ]; then
-            nixfied_exit_usage "--source requires --service"
-          fi
-          if ! service_has_source "$target_service" "$target_source"; then
-            nixfied_exit_precondition "unknown source '$target_source' for service '$target_service'"
-          fi
-        fi
-
-  '';
-
-  mkServiceProbeSection =
-    mode: serviceName: spec:
-    let
-      modeLabel = if mode == "health" then "health" else "readiness";
-      skipMessage = spec.skipMessage or "SKIP: ${serviceName} ${modeLabel} check not selected";
-    in
-    ''
-      if service_selected "${serviceName}"; then
-        service_source="$(resolve_service_source "${serviceName}")"
-        if [ -z "$service_source" ]; then
-          service_source="unspecified"
-        fi
-        checks=$((checks + ${toString spec.count}))
-        ${spec.body}
-      else
-        echo ${lib.escapeShellArg skipMessage}
-      fi
-    '';
-
-  mkProbeScript =
-    {
-      mode,
-      serviceSpecs,
-      emptyMessage,
-      successMessage,
-    }:
-    ''
-      set -euo pipefail
-      ${slotEnvPrelude}
-      ${serviceSelectionPrelude}
-
-      if [ "$target_service" = "all" ] && [ ${toString (builtins.length enabledServiceNames)} -eq 0 ]; then
-        echo ${lib.escapeShellArg emptyMessage}
-        exit 0
-      fi
-
-      checks=0
-
-      ${builtins.concatStringsSep "\n\n" (
-        map (serviceName: mkServiceProbeSection mode serviceName serviceSpecs.${serviceName}) serviceNames
-      )}
-
-      if [ "$checks" -eq 0 ]; then
-        echo ${lib.escapeShellArg emptyMessage}
-        exit 0
-      fi
-
-      printf '%s services=%s\n' ${lib.escapeShellArg successMessage} "$checks"
-    '';
-
-  probePlan =
-    mode: serviceName:
-    resolvedServiceConfigByName.${serviceName}.resolved.probePlans.${mode}
-      or resolvedServiceConfigByName.${serviceName}.resolved.operationProbes.${mode} or {
-        count = 0;
-        steps = [ ];
-        wait = { };
-      };
-
-  mkServiceProbeSpec =
-    mode: serviceName:
-    let
-      plan = probePlan mode serviceName;
-    in
-    {
-      count = if plan ? count then plan.count else builtins.length (plan.steps or [ ]);
-      body = ''
-        service_source="$(resolve_service_source "${serviceName}")"
-        if [ -z "$service_source" ]; then
-          service_source="unspecified"
-        fi
-        ${probePlanRuntime.renderPlanBody {
-          inherit
-            mode
-            serviceName
-            plan
-            ;
-          endpoints = resolvedServiceConfigByName.${serviceName}.resolved.endpoints or { };
-          portExprForEndpoint =
-            endpointName:
-            let
-              portBase = resolveServicePortBase serviceName endpointName;
-            in
-            "$(( ${toString portBase} + env_offset + (slot_value * ${toString runtime.slot.stride}) ))";
-        }}
-      '';
-    };
-
-  healthProbeSpecs = builtins.listToAttrs (
-    map (serviceName: {
-      name = serviceName;
-      value = mkServiceProbeSpec "health" serviceName;
-    }) serviceNames
-  );
-
-  readyProbeSpecs = builtins.listToAttrs (
-    map (serviceName: {
-      name = serviceName;
-      value = mkServiceProbeSpec "ready" serviceName;
-    }) serviceNames
-  );
+  serviceSelectionContractArgs = probeHelpers.serviceSelectionContractArgs;
+  mkProbeScript = probeHelpers.mkProbeScript;
 
   mkTask =
     {
@@ -674,14 +336,12 @@ let
 
   healthScript = mkProbeScript {
     mode = "health";
-    serviceSpecs = healthProbeSpecs;
     emptyMessage = "SKIP: no enabled services for health checks";
     successMessage = "OK: health checks passed";
   };
 
   readyScript = mkProbeScript {
     mode = "ready";
-    serviceSpecs = readyProbeSpecs;
     emptyMessage = "SKIP: no enabled services for readiness checks";
     successMessage = "OK: readiness checks passed";
   };

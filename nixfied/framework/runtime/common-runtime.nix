@@ -24,6 +24,28 @@
     esac
   }
 
+  jq_positional_args_json() {
+    if [ "$#" -eq 0 ]; then
+      ${pkgs.jq}/bin/jq -cn '$ARGS.positional'
+    else
+      ${pkgs.jq}/bin/jq -cn '$ARGS.positional' --args -- "$@"
+    fi
+  }
+
+  call_with_array_args() {
+    local array_name="$1"
+    shift
+    local fn_name="$1"
+    shift
+    local -n array_ref="$array_name"
+
+    if [ "''${#array_ref[@]}" -gt 0 ]; then
+      "$fn_name" "$@" "''${array_ref[@]}"
+    else
+      "$fn_name" "$@"
+    fi
+  }
+
   write_text_file_atomic() {
     local target="$1"
     local value="$2"

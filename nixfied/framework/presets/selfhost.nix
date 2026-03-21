@@ -3,6 +3,15 @@
   commonRuntimeInputs,
   ownerFile ? "nixfied/framework/presets/selfhost.nix",
 }:
+let
+  workflowProbePhases = {
+    preRun.tasks = [ "task.ops.ready" ];
+    postRun = {
+      tasks = [ "task.ops.health" ];
+      alwaysRun = true;
+    };
+  };
+in
 {
   tasks = {
     test-framework-selfhost =
@@ -81,11 +90,8 @@
         };
       };
       stages = [ ];
-      preRun.tasks = [ "task.ops.ready" ];
-      postRun = {
-        tasks = [ "task.ops.health" ];
-        alwaysRun = true;
-      };
+      preRun = workflowProbePhases.preRun;
+      postRun = workflowProbePhases.postRun;
       artifacts = {
         root = "/tmp/ci-artifacts";
         keepOnSuccess = false;

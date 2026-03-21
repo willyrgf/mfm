@@ -816,11 +816,14 @@ fn is_retryable(err: &IoError) -> bool {
 
 fn failure_detail(source_id: &str, err: &IoError) -> serde_json::Value {
     let info = err_info(err);
-    json!({
-        "source_id": source_id,
-        "code": info.code.0,
-        "retryable": info.retryable,
-    })
+    let mut obj = serde_json::Map::new();
+    obj.insert("source_id".to_string(), json!(source_id));
+    obj.insert("code".to_string(), json!(info.code.0));
+    obj.insert("retryable".to_string(), json!(info.retryable));
+    if let Some(details) = &info.details {
+        obj.insert("details".to_string(), details.clone());
+    }
+    serde_json::Value::Object(obj)
 }
 
 fn io_error_summary(err: &IoError) -> serde_json::Value {
@@ -1884,6 +1887,7 @@ impl EvmJsonRpcHttpTransport {
             } else {
                 "transport"
             };
+            let err_message = truncate_message(&err.to_string());
             debug!(
                 source_id = %source_id,
                 source_kind = source_kind,
@@ -1900,7 +1904,10 @@ impl EvmJsonRpcHttpTransport {
                 "evm http request failed",
                 source_error_details(
                     &source_id,
-                    Some(json!({ "transport_error_class": err_class })),
+                    Some(json!({
+                        "transport_error_class": err_class,
+                        "transport_error_message": err_message,
+                    })),
                 ),
             ))
         })?;

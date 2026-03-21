@@ -361,40 +361,6 @@ let
   '';
 
   ciServicePortPrelude = ciRuntime.servicePortPrelude;
-  frameworkProject = conf.project // {
-    services = conf.services;
-    logging = conf.logging;
-  };
-  frameworkPortVarNames = {
-    postgres = "POSTGRES_PORT";
-    rethHttp = "RETH_HTTP_PORT";
-    heliosRpc = "HELIOS_RPC_PORT";
-  };
-  frameworkServiceDirExprs = {
-    postgres = "$NIXFIED_RUNTIME_DIR_SCOPE/services/postgres/data";
-    helios = "$NIXFIED_RUNTIME_DIR_SCOPE/services/helios";
-  };
-  frameworkServiceSlots = {
-    getSlotInfoJson = "$SLOT_INFO_JSON";
-    portVarName =
-      portKey:
-      frameworkPortVarNames.${portKey}
-        or (throw "unsupported framework service port key for snapshot task: ${portKey}");
-    getServiceDir =
-      dataDirName:
-      frameworkServiceDirExprs.${dataDirName}
-        or (throw "unsupported framework service data dir for snapshot task: ${dataDirName}");
-  };
-  frameworkPostgresService = import ../framework/runtime/services/postgres/default.nix {
-    inherit pkgs;
-    project = frameworkProject;
-    slots = frameworkServiceSlots;
-  };
-  frameworkHeliosService = import ../framework/runtime/services/helios/default.nix {
-    inherit pkgs;
-    project = frameworkProject;
-    slots = frameworkServiceSlots;
-  };
   resolvePackagedMfmCliShell = ''
     resolve_packaged_mfm_cli_binary() {
       local packaged_mfm_cli_binary='${conf.packages."mfm-cli"}/bin/mfm_cli'
@@ -416,10 +382,12 @@ let
     export MFM_PARITY_EVM_RETH_RUN_IDS_PATH="''${MFM_PARITY_EVM_RETH_RUN_IDS_PATH:-$artifacts_dir/parity-evm-reth-run-ids.json}"
     export MFM_PARITY_AAVE_V3_RUN_IDS_PATH="''${MFM_PARITY_AAVE_V3_RUN_IDS_PATH:-$artifacts_dir/parity-aave-v3-run-ids.json}"
     export MFM_PARITY_AAVE_V3_RETH_PROBE_PATH="''${MFM_PARITY_AAVE_V3_RETH_PROBE_PATH:-$artifacts_dir/parity-aave-v3-reth-probe.json}"
-    export DATABASE_URL="''${DATABASE_URL:-postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/mfm_test}"
-    export MFM_EVM_RPC_URL="''${MFM_EVM_RPC_URL:-http://127.0.0.1:$RETH_HTTP_PORT}"
-    export MFM_EVM_RPC_SOURCES_JSON="''${MFM_EVM_RPC_SOURCES_JSON:-[{\"id\":\"reth_ethereum_mainnet\",\"network_id\":\"ethereum-mainnet\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"},{\"id\":\"reth_local\",\"network_id\":\"reth-local\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"}]}"
-    export MFM_EVM_RPC_PREFERRED_ORDER="''${MFM_EVM_RPC_PREFERRED_ORDER:-reth_ethereum_mainnet,reth_local}"
+    export PGDATABASE="''${PGDATABASE:-${conf.modules.postgres.testDatabase or "app_test"}}"
+    export DATABASE_URL="''${DATABASE_URL:-postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/$PGDATABASE}"
+    export MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_HTTP_PORT"
+    export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"reth_ethereum_mainnet\",\"network_id\":\"ethereum-mainnet\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"},{\"id\":\"reth_local\",\"network_id\":\"reth-local\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"}]"
+    export MFM_EVM_RPC_PREFERRED_ORDER="reth_ethereum_mainnet,reth_local"
+    export MFM_EVM_RPC_REQUIRE_GET_PROOF_IDS=""
     export MFM_S3_ENDPOINT="''${MFM_S3_ENDPOINT:-http://127.0.0.1:$MINIO_API_PORT}"
     export MFM_S3_REGION="''${MFM_S3_REGION:-us-east-1}"
     export MFM_S3_BUCKET="''${MFM_S3_BUCKET:-mfm-test}"
@@ -429,109 +397,19 @@ let
     export AWS_REGION="''${AWS_REGION:-''${MFM_S3_REGION}}"
     export AWS_DEFAULT_REGION="''${AWS_DEFAULT_REGION:-''${MFM_S3_REGION}}"
     export AWS_EC2_METADATA_DISABLED="''${AWS_EC2_METADATA_DISABLED:-true}"
+    # Parity always uses the local Helios<->Reth pair; clear explicit mainnet
+    # overrides that may be auto-loaded from `.env` for snapshot workflows.
+    export HELIOS_NETWORK="local"
+    export HELIOS_EXECUTION_RPC_URL=""
+    export HELIOS_CONSENSUS_RPC_URL=""
+    export HELIOS_CHECKPOINT=""
   '';
   ciServicesRuntimeInputs = commonRuntimeInputs ++ [
     postgresPackage
     minioPackage
     minioClientPackage
     rethPackage
-    pkgs.python3
   ];
-  ciHeliosShimScript = pkgs.writeText "mfm-ci-helios-shim.py" ''
-    import json
-    import sys
-    import urllib.error
-    import urllib.request
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-    PORT = int(sys.argv[1])
-    UPSTREAM = sys.argv[2]
-
-
-    def stub(payload):
-        method = payload.get("method")
-        req_id = payload.get("id")
-        if method in {"eth_chainId", "net_version"}:
-            value = "0x1" if method == "eth_chainId" else "1"
-            return {"jsonrpc": "2.0", "id": req_id, "result": value}
-        if method == "eth_blockNumber":
-            return {"jsonrpc": "2.0", "id": req_id, "result": "0x1"}
-        if method == "eth_syncing":
-            return {"jsonrpc": "2.0", "id": req_id, "result": False}
-        return None
-
-
-    class Handler(BaseHTTPRequestHandler):
-        server_version = "helios-ci-shim/1.0"
-
-        def do_POST(self):
-            status = 200
-            ctype = "application/json"
-            try:
-                length = int(self.headers.get("content-length", "0"))
-                body = self.rfile.read(length)
-                payload = json.loads(body.decode("utf-8"))
-
-                if isinstance(payload, list):
-                    out = []
-                    for item in payload:
-                        stubbed = stub(item)
-                        if stubbed is not None:
-                            out.append(stubbed)
-                            continue
-                        req = urllib.request.Request(
-                            UPSTREAM,
-                            data=json.dumps(item).encode("utf-8"),
-                            headers={"content-type": "application/json"},
-                            method="POST",
-                        )
-                        with urllib.request.urlopen(req, timeout=15) as resp:
-                            out.append(json.loads(resp.read().decode("utf-8")))
-                    raw = json.dumps(out).encode("utf-8")
-                else:
-                    stubbed = stub(payload)
-                    if stubbed is not None:
-                        raw = json.dumps(stubbed).encode("utf-8")
-                    else:
-                        req = urllib.request.Request(
-                            UPSTREAM,
-                            data=body,
-                            headers={"content-type": "application/json"},
-                            method="POST",
-                        )
-                        with urllib.request.urlopen(req, timeout=15) as resp:
-                            raw = resp.read()
-                            status = getattr(resp, "status", 200)
-                            ctype = resp.headers.get("content-type", "application/json")
-            except urllib.error.HTTPError as exc:
-                raw = exc.read() or b'{"jsonrpc":"2.0","error":{"code":-32000,"message":"upstream http error"}}'
-                status = exc.code
-                ctype = exc.headers.get("content-type", "application/json")
-            except Exception as exc:  # noqa: BLE001
-                raw = (
-                    '{"jsonrpc":"2.0","error":{"code":-32000,"message":"ci helios shim proxy error: %s"}}'
-                    % str(exc).replace('"', "'")
-                ).encode("utf-8")
-                status = 502
-
-            self.send_response(status)
-            self.send_header("content-type", ctype)
-            self.send_header("content-length", str(len(raw)))
-            self.end_headers()
-            self.wfile.write(raw)
-
-        def log_message(self, *_args):
-            return
-
-
-    def main():
-        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-        server.serve_forever()
-
-
-    if __name__ == "__main__":
-        main()
-  '';
 
   mkCommandTask =
     {
@@ -789,30 +667,41 @@ in
           portKeyHttp = rethService.portKeyHttp or (conf.modules.reth.portKeyHttp or "rethHttp");
           portKeyWs = rethService.portKeyWs or (conf.modules.reth.portKeyWs or "rethWs");
           portKeyAuth = rethService.portKeyAuth or (conf.modules.reth.portKeyAuth or "rethAuth");
+          portKeyP2p = rethService.portKeyP2p or (conf.modules.reth.portKeyP2p or "rethP2p");
           sources = rethSources;
           sourceKeys = rethService.sourceKeys or builtins.attrNames rethSources;
           defaultSource = rethService.defaultSource or "local";
         };
 
-        helios = {
-          enable = heliosService.enable or (conf.modules.helios.enable or false);
-          portKeyRpc = heliosService.portKeyRpc or (conf.modules.helios.portKeyRpc or "heliosRpc");
-          executionRpcPortKey =
-            heliosService.executionRpcPortKey or (conf.modules.helios.executionRpcPortKey or "rethHttp");
-          dataDirName = heliosService.dataDirName or (conf.modules.helios.dataDirName or "helios");
-          network = heliosService.network or (conf.modules.helios.network or "local");
-          executionRpcUrl = heliosService.executionRpcUrl or (conf.modules.helios.executionRpcUrl or "");
-          consensusRpcUrl = heliosService.consensusRpcUrl or (conf.modules.helios.consensusRpcUrl or "");
-          defaultConsensusRpcUrl =
-            heliosService.defaultConsensusRpcUrl or (conf.modules.helios.defaultConsensusRpcUrl or "");
-          checkpoint = heliosService.checkpoint or (conf.modules.helios.checkpoint or "");
-          extraArgs = heliosService.extraArgs or (conf.modules.helios.extraArgs or [ ]);
-          sources = heliosSources;
-          sourceKeys = heliosService.sourceKeys or builtins.attrNames heliosSources;
-          defaultSource = heliosService.defaultSource or "local";
-          sourceKinds = heliosService.sourceKinds or { };
-          readiness = heliosService.readiness or { };
-        };
+        helios =
+          let
+            heliosNetwork = heliosService.network or (conf.modules.helios.network or "local");
+            useRemoteHeliosDefaults = heliosNetwork != "local";
+          in
+          {
+            enable = heliosService.enable or (conf.modules.helios.enable or false);
+            portKeyRpc = heliosService.portKeyRpc or (conf.modules.helios.portKeyRpc or "heliosRpc");
+            executionRpcPortKey =
+              heliosService.executionRpcPortKey or (conf.modules.helios.executionRpcPortKey or "rethHttp");
+            dataDirName = heliosService.dataDirName or (conf.modules.helios.dataDirName or "helios");
+            network = heliosNetwork;
+            executionRpcUrl =
+              heliosService.executionRpcUrl
+              or (if useRemoteHeliosDefaults then (conf.modules.helios.executionRpcUrl or "") else "");
+            consensusRpcUrl =
+              heliosService.consensusRpcUrl
+              or (if useRemoteHeliosDefaults then (conf.modules.helios.consensusRpcUrl or "") else "");
+            defaultConsensusRpcUrl =
+              heliosService.defaultConsensusRpcUrl
+              or (conf.modules.helios.defaultConsensusRpcUrl or (conf.modules.helios.consensusRpcUrl or ""));
+            checkpoint = heliosService.checkpoint or (conf.modules.helios.checkpoint or "");
+            extraArgs = heliosService.extraArgs or (conf.modules.helios.extraArgs or [ ]);
+            sources = heliosSources;
+            sourceKeys = heliosService.sourceKeys or builtins.attrNames heliosSources;
+            defaultSource = heliosService.defaultSource or "local";
+            sourceKinds = heliosService.sourceKinds or { };
+            readiness = heliosService.readiness or { };
+          };
       };
 
       operations = {
@@ -974,8 +863,8 @@ in
                 --arg env "''${MFM_ENV:-dev}" \
                 --arg run_dir "$runtime_root/run" \
                 --arg postgres_port "$POSTGRES_PORT" \
-                --arg helios_rpc_port "''${HELIOS_RPC_PORT:-}" \
-                --arg reth_http_port "''${RETH_HTTP_PORT:-}" \
+                --arg helios_rpc_port "''${HELIOSRPC_PORT:-''${HELIOS_RPC_PORT:-}}" \
+                --arg reth_http_port "''${RETHHTTP_PORT:-''${RETH_HTTP_PORT:-}}" \
                 '{
                   slot: $slot,
                   env: $env,
@@ -986,8 +875,8 @@ in
                     {
                       POSTGRES_PORT: $postgres_port
                     }
-                    + (if $helios_rpc_port == "" then {} else { HELIOS_RPC_PORT: $helios_rpc_port } end)
-                    + (if $reth_http_port == "" then {} else { RETH_HTTP_PORT: $reth_http_port } end)
+                    + (if $helios_rpc_port == "" then {} else { HELIOSRPC_PORT: $helios_rpc_port } end)
+                    + (if $reth_http_port == "" then {} else { RETHHTTP_PORT: $reth_http_port } end)
                   )
                 }' > "$slot_info_json_path"
               cat > "$slot_info_json_script" <<EOF
@@ -1195,7 +1084,7 @@ in
               fi
 
               if [ "$postgres_owned" = "1" ]; then
-                if ! ${frameworkPostgresService.fullStart}; then
+                if ! "$SVC_POSTGRES_FULL_START"; then
                   echo "ERROR: postgres full-start failed port=$POSTGRES_PORT data=$postgres_data" >&2
                   if [ -f "$postgres_log" ]; then
                     tail -50 "$postgres_log" >&2 || true
@@ -1204,7 +1093,7 @@ in
                 fi
               fi
 
-              if ! ${frameworkPostgresService.ready}; then
+              if ! "$SVC_POSTGRES_READY"; then
                 echo "ERROR: postgres failed framework readiness checks port=$POSTGRES_PORT" >&2
                 if [ -f "$postgres_log" ]; then
                   tail -50 "$postgres_log" >&2 || true
@@ -1212,7 +1101,7 @@ in
                 exit 1
               fi
               if [ "$postgres_owned" != "1" ]; then
-                if ! ${frameworkPostgresService.setupDb}; then
+                if ! "$SVC_POSTGRES_SETUP_DB"; then
                   echo "ERROR: postgres setup-db failed on reused instance port=$POSTGRES_PORT" >&2
                   exit 1
                 fi
@@ -1353,12 +1242,13 @@ in
                 exit 1
               fi
 
-              helios_root="$service_root/helios"
-              helios_log="$helios_root/logs/helios.log"
-              helios_pid_file="$helios_root/run/helios.pid"
+              helios_dir="$NIXFIED_SERVICE_HELIOS_DATA_DIR"
+              helios_log="$helios_dir/logs/helios.log"
+              helios_pid_file="$helios_dir/run/helios.pid"
+              helios_start_log="$helios_dir/logs/helios-start.log"
               helios_owned=0
-              helios_health_timeout_seconds="''${HELIOS_HEALTH_TIMEOUT_SECS:-''${HELIOS_READY_TIMEOUT_SECS:-300}}"
-              helios_health_interval_seconds="''${HELIOS_HEALTH_INTERVAL_SECS:-''${HELIOS_READY_INTERVAL_SECS:-1}}"
+              helios_ready_timeout_seconds="''${HELIOS_READY_TIMEOUT_SECS:-300}"
+              helios_ready_interval_seconds="''${HELIOS_READY_INTERVAL_SECS:-1}"
 
               helios_is_running() {
                 local pid=""
@@ -1370,49 +1260,7 @@ in
               }
 
               helios_port_ready() {
-                ${frameworkHeliosService.health} >/dev/null 2>&1
-              }
-
-              wait_for_helios_health() {
-                local timeout="$helios_health_timeout_seconds"
-                local interval="$helios_health_interval_seconds"
-                local start_ts
-                local now_ts
-                local attempt=0
-
-                case "$timeout" in
-                  *[!0-9]*|"")
-                    echo "ERROR: HELIOS_HEALTH_TIMEOUT_SECS must be an integer seconds value (got '$timeout')" >&2
-                    return 1
-                    ;;
-                esac
-
-                case "$interval" in
-                  *[!0-9]*|"")
-                    echo "ERROR: HELIOS_HEALTH_INTERVAL_SECS must be an integer seconds value (got '$interval')" >&2
-                    return 1
-                    ;;
-                esac
-
-                start_ts="$(${pkgs.coreutils}/bin/date +%s)"
-                while true; do
-                  attempt=$((attempt + 1))
-
-                  if ${frameworkHeliosService.health} >/dev/null 2>&1; then
-                    return 0
-                  fi
-
-                  if [ $((attempt % 10)) -eq 0 ]; then
-                    echo "INFO: helios health checks not ready yet attempt=$attempt"
-                  fi
-
-                  now_ts="$(${pkgs.coreutils}/bin/date +%s)"
-                  if [ $((now_ts - start_ts)) -ge "$timeout" ]; then
-                    return 1
-                  fi
-
-                  ${pkgs.coreutils}/bin/sleep "$interval"
-                done
+                "$SVC_HELIOS_READY" >/dev/null 2>&1
               }
 
               if helios_is_running; then
@@ -1420,7 +1268,7 @@ in
                   echo "ERROR: helios already managed for this slot and reuse policy is 'never'" >&2
                   exit 1
                 fi
-                echo "INFO: reusing framework-managed helios port=$HELIOS_RPC_PORT root=$helios_root"
+                echo "INFO: reusing framework-managed helios port=$HELIOS_RPC_PORT dir=$helios_dir"
               elif helios_port_ready; then
                 if [ "$reuse_policy" = "never" ]; then
                   echo "ERROR: helios already serving on port $HELIOS_RPC_PORT and reuse policy is 'never'" >&2
@@ -1429,23 +1277,30 @@ in
                 echo "INFO: reusing healthy helios on slot port=$HELIOS_RPC_PORT outside expected pid file=$helios_pid_file"
               else
                 helios_owned=1
-                echo "INFO: starting framework-managed helios port=$HELIOS_RPC_PORT root=$helios_root execution_rpc=$HELIOS_EXECUTION_RPC_URL"
+                echo "INFO: starting framework-managed helios port=$HELIOS_RPC_PORT dir=$helios_dir execution_rpc=$HELIOS_EXECUTION_RPC_URL"
               fi
 
               if [ "$helios_owned" = "1" ]; then
-                if ! ${frameworkHeliosService.fullStart}; then
+                if ! NIXFIED_START_SERVICE_MANAGED_CLEANUP=1 \
+                  start_service_into helios_start_pid helios --log "$helios_start_log" -- "$SVC_HELIOS_FULL_START"; then
                   echo "ERROR: helios full-start failed port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
                   if [ -f "$helios_log" ]; then
                     tail -50 "$helios_log" >&2 || true
+                  elif [ -f "$helios_start_log" ]; then
+                    tail -50 "$helios_start_log" >&2 || true
                   fi
                   exit 1
                 fi
               fi
 
-              if ! wait_for_helios_health; then
-                echo "ERROR: helios failed snapshot health checks after $helios_health_timeout_seconds s port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
+              if ! HELIOS_READY_TIMEOUT_SECS="$helios_ready_timeout_seconds" \
+                HELIOS_READY_INTERVAL_SECS="$helios_ready_interval_seconds" \
+                "$SVC_HELIOS_READY"; then
+                echo "ERROR: helios failed snapshot readiness checks after $helios_ready_timeout_seconds s port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
                 if [ -f "$helios_log" ]; then
                   tail -50 "$helios_log" >&2 || true
+                elif [ -f "$helios_start_log" ]; then
+                  tail -50 "$helios_start_log" >&2 || true
                 fi
                 exit 1
               fi
@@ -1534,7 +1389,7 @@ in
 
               if [ "$postgres_owned" = "1" ] && [ -n "$postgres_data" ] && [ -d "$postgres_data" ]; then
                 echo "INFO: stopping owned postgres data=$postgres_data"
-                ${postgresPackage}/bin/pg_ctl -D "$postgres_data" stop -m fast >/dev/null 2>&1 || true
+                "$SVC_POSTGRES_STOP" >/dev/null 2>&1 || true
               fi
 
               echo "OK: snapshot postgres stopped handoff=$handoff_file"
@@ -1608,19 +1463,7 @@ in
               fi
 
               if [ "$helios_owned" = "1" ] && [ -n "$helios_pid_file" ] && [ -f "$helios_pid_file" ]; then
-                helios_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
-                if [ -n "$helios_pid" ] && kill -0 "$helios_pid" 2>/dev/null; then
-                  echo "INFO: stopping owned helios pid=$helios_pid"
-                  kill "$helios_pid" 2>/dev/null || true
-                  for _ in $(seq 1 40); do
-                    if ! kill -0 "$helios_pid" 2>/dev/null; then
-                      break
-                    fi
-                    sleep 0.25
-                  done
-                  kill -KILL "$helios_pid" 2>/dev/null || true
-                fi
-                rm -f "$helios_pid_file"
+                "$SVC_HELIOS_STOP" >/dev/null 2>&1 || true
               fi
 
               echo "OK: snapshot helios stopped handoff=$handoff_file"
@@ -1750,7 +1593,7 @@ in
               fi
 
               NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.mfm.portfolio.services-start --handoff-file "$MFM_SNAPSHOT_HANDOFF_FILE"
-              if ! is_service_skipped helios; then
+              if [ -n "''${SVC_HELIOS_FULL_START:-}" ]; then
                 NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.mfm.portfolio.helios-start --handoff-file "$MFM_SNAPSHOT_HANDOFF_FILE"
               fi
             '';
@@ -1864,7 +1707,7 @@ in
                 exit 1
               fi
 
-              if ! is_service_skipped helios; then
+              if [ -n "''${SVC_HELIOS_STOP:-}" ]; then
                 NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.mfm.portfolio.helios-stop --handoff-file "$MFM_SNAPSHOT_HANDOFF_FILE"
               fi
               NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.mfm.portfolio.services-stop --handoff-file "$MFM_SNAPSHOT_HANDOFF_FILE"
@@ -2451,349 +2294,176 @@ in
             appName = "ci-services-start";
             kind = "ci-step";
             summary = "Start local CI parity services";
-            description = "Boots local postgres/minio/reth/helios dependencies for deterministic parity checks.";
+            description = "Boots local postgres/minio/reth/helios dependencies for deterministic parity checks via framework service hooks.";
             tags = [
               "ci"
               "parity"
               "services"
             ];
             runtimeInputs = ciServicesRuntimeInputs;
+            requirements = {
+              services = [
+                "postgres"
+                "minio"
+                "reth"
+                "helios"
+              ];
+            };
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
               ${ciParityServiceEnv}
 
               echo "INFO: starting ci services env=$env_value slot=$slot_value postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT helios=$HELIOS_RPC_PORT"
-              skip_helios=0
-              if is_service_skipped helios; then
-                skip_helios=1
+              selected_helios=0
+              if [ -n "''${SVC_HELIOS_FULL_START_TEST:-}" ]; then
+                selected_helios=1
+              else
                 echo "SKIP: starting/parity checks for helios are disabled"
               fi
 
-              services_root="$artifacts_dir/services"
-              mkdir -p "$services_root"
+              if [ -z "''${NIXFIED_SERVICE_ROOT:-}" ]; then
+                echo "ERROR: NIXFIED_SERVICE_ROOT is required for CI parity service bootstrap" >&2
+                exit 1
+              fi
+              services_root="$NIXFIED_SERVICE_ROOT"
+              if ! mkdir -p "$services_root"; then
+                echo "ERROR: failed to create CI service root path=$services_root" >&2
+                exit 1
+              fi
 
-              run_ready_task() {
-                local service="$1"
-                local source_key="$2"
-                ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
-                  nix run --impure .#ready -- --service "$service" --source "$source_key"
+              require_hook() {
+                local hook_var="$1"
+                if ! has_hook "$hook_var"; then
+                  echo "ERROR: required hook missing: $hook_var services=''${NIXFIED_SELECTED_SERVICES_CSV:-}" >&2
+                  exit 1
+                fi
               }
 
-              wait_for_ready_task() {
-                local service="$1"
-                local timeout_secs="$2"
-                local interval_secs="$3"
-                local source_key="''${4:-local}"
-                local ready_log="$artifacts_dir/''${service}-ready.log"
-                local start_ts
-                local now_ts
-
-                case "$timeout_secs" in
-                  *[!0-9]*|"")
-                    echo "ERROR: timeout for service '$service' must be integer seconds (got '$timeout_secs')" >&2
-                    return 1
-                    ;;
-                esac
-
-                case "$interval_secs" in
-                  *[!0-9.]*|""|*.*.*|.*|*.)
-                    echo "ERROR: interval for service '$service' must be a positive number (got '$interval_secs')" >&2
-                    return 1
-                    ;;
-                esac
-
-                start_ts=$(date +%s)
-
-                while true; do
-                  if run_ready_task "$service" "$source_key" >"$ready_log" 2>&1; then
-                    return 0
-                  fi
-
-                  now_ts=$(date +%s)
-                  if [ $((now_ts - start_ts)) -ge "$timeout_secs" ]; then
-                    echo "ERROR: service '$service' failed readiness checks after $timeout_secs s" >&2
-                    if [ -f "$ready_log" ]; then
-                      tail -50 "$ready_log" >&2 || true
-                    fi
-                    return 1
-                  fi
-
-                  sleep "$interval_secs"
-                done
+              tail_log_if_present() {
+                local log_path="$1"
+                if [ -n "$log_path" ] && [ -f "$log_path" ]; then
+                  tail -50 "$log_path" >&2 || true
+                fi
               }
 
-              postgres_root="$services_root/postgres"
-              postgres_data="$postgres_root/data"
-              postgres_run="$postgres_root/run"
-              postgres_log="$artifacts_dir/postgres-service.log"
-              mkdir -p "$postgres_data" "$postgres_run"
-
-              if ! ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
-                if [ ! -f "$postgres_data/PG_VERSION" ]; then
-                  if ! ${postgresPackage}/bin/initdb -D "$postgres_data" -U postgres --no-locale --encoding=UTF8 -A trust >/dev/null; then
-                    echo "ERROR: postgres initdb failed port=$POSTGRES_PORT data=$postgres_data"
-                    if [ -f "$postgres_log" ]; then
-                      tail -50 "$postgres_log" >&2 || true
-                    fi
-                    exit 1
-                  fi
-                  cat > "$postgres_data/pg_hba.conf" <<'EOF'
-              # TYPE  DATABASE        USER  ADDRESS       METHOD
-              local   all             all                 trust
-              host    all             all   127.0.0.1/32  trust
-              host    all             all   ::1/128       trust
-              EOF
-                fi
-
-                if [ -f "$postgres_data/postmaster.pid" ]; then
-                  stale_pid="$(head -1 "$postgres_data/postmaster.pid" 2>/dev/null || true)"
-                  if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
-                    rm -f "$postgres_data/postmaster.pid"
-                  fi
-                fi
-
-                if ! ${postgresPackage}/bin/pg_ctl -D "$postgres_data" -l "$postgres_log" -o "-p $POSTGRES_PORT -h 127.0.0.1 -k $postgres_run" start; then
-                  echo "ERROR: postgres failed to start port=$POSTGRES_PORT data=$postgres_data"
-                  if [ -f "$postgres_log" ]; then
-                    tail -50 "$postgres_log" >&2 || true
-                  fi
-                  if command -v lsof >/dev/null 2>&1; then
-                    lsof -nP -iTCP:"$POSTGRES_PORT" -sTCP:LISTEN >&2 || true
-                  fi
-                  exit 1
-                fi
-              fi
-
-              for _ in $(seq 1 120); do
-                if ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
-                  break
-                fi
-                sleep 0.25
-              done
-
-              if ! ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null; then
-                echo "ERROR: postgres failed to become ready port=$POSTGRES_PORT"
-                if [ -f "$postgres_log" ]; then
-                  tail -50 "$postgres_log" >&2 || true
-                fi
-                if command -v lsof >/dev/null 2>&1; then
-                  lsof -nP -iTCP:"$POSTGRES_PORT" -sTCP:LISTEN >&2 || true
-                fi
-                exit 1
-              fi
-
-              ${postgresPackage}/bin/createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres mfm >/dev/null 2>&1 || true
-              ${postgresPackage}/bin/createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres mfm_test >/dev/null 2>&1 || true
-
-              if ! wait_for_ready_task "postgres" "30" "1" "local"; then
-                echo "ERROR: postgres failed framework readiness checks port=$POSTGRES_PORT" >&2
-                if [ -f "$postgres_log" ]; then
-                  tail -50 "$postgres_log" >&2 || true
-                fi
-                if command -v lsof >/dev/null 2>&1; then
-                  lsof -nP -iTCP:"$POSTGRES_PORT" -sTCP:LISTEN >&2 || true
-                fi
-                exit 1
-              fi
-
-              minio_root="$services_root/minio"
-              minio_data="$minio_root/data"
-              minio_log="$artifacts_dir/minio-service.log"
-              mkdir -p "$minio_data"
-
-              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready" >/dev/null 2>&1; then
-                export MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID"
-                export MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY"
-                ${minioPackage}/bin/minio server "$minio_data" \
-                  --address "127.0.0.1:$MINIO_API_PORT" \
-                  --console-address "127.0.0.1:$MINIO_CONSOLE_PORT" \
-                  >"$minio_log" 2>&1 &
-                echo "$!" > "$minio_root/minio.pid"
-              fi
-
-              if ! wait_for_ready_task "minio" "45" "1" "local"; then
-                echo "ERROR: minio failed to become ready port=$MINIO_API_PORT" >&2
-                if [ -f "$minio_log" ]; then
-                  tail -50 "$minio_log" >&2 || true
-                fi
-                if command -v lsof >/dev/null 2>&1; then
-                  lsof -nP -iTCP:"$MINIO_API_PORT" -sTCP:LISTEN >&2 || true
-                  lsof -nP -iTCP:"$MINIO_CONSOLE_PORT" -sTCP:LISTEN >&2 || true
-                fi
-                exit 1
-              fi
-
-              if ! ${minioClientPackage}/bin/mc alias set ci "http://127.0.0.1:$MINIO_API_PORT" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" >/dev/null; then
-                echo "ERROR: failed to configure minio alias endpoint=http://127.0.0.1:$MINIO_API_PORT"
-                if [ -f "$minio_log" ]; then
-                  tail -50 "$minio_log" >&2 || true
-                fi
-                if command -v lsof >/dev/null 2>&1; then
-                  lsof -nP -iTCP:"$MINIO_API_PORT" -sTCP:LISTEN >&2 || true
-                fi
-                exit 1
-              fi
-
-              if ! ${minioClientPackage}/bin/mc mb --ignore-existing "ci/$MFM_S3_BUCKET" >/dev/null; then
-                echo "ERROR: failed to ensure minio bucket bucket=$MFM_S3_BUCKET"
-                if [ -f "$minio_log" ]; then
-                  tail -50 "$minio_log" >&2 || true
-                fi
-                if command -v lsof >/dev/null 2>&1; then
-                  lsof -nP -iTCP:"$MINIO_API_PORT" -sTCP:LISTEN >&2 || true
-                fi
-                exit 1
-              fi
-
-              reth_root="$services_root/reth"
-              reth_data="$reth_root/data"
-              reth_run="$reth_root/run"
-              reth_log="$artifacts_dir/reth-service.log"
-              mkdir -p "$reth_data" "$reth_run"
-
-              reth_jwt="$reth_root/jwt.hex"
-              if [ ! -f "$reth_jwt" ]; then
-                printf '%064x\n' 0 > "$reth_jwt"
-              fi
-              chmod 600 "$reth_jwt" 2>/dev/null || true
-
-              if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-                -H 'content-type: application/json' \
-                --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
-                "http://127.0.0.1:$RETH_HTTP_PORT" 2>/dev/null \
-                | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-                ${rethPackage}/bin/reth node \
-                  --dev \
-                  --datadir "$reth_data" \
-                  --ipcpath "$reth_run/reth.ipc" \
-                  --http \
-                  --http.addr 127.0.0.1 \
-                  --http.port "$RETH_HTTP_PORT" \
-                  --ws \
-                  --ws.addr 127.0.0.1 \
-                  --ws.port "$RETH_WS_PORT" \
-                  --authrpc.addr 127.0.0.1 \
-                  --authrpc.port "$RETH_AUTH_PORT" \
-                  --authrpc.jwtsecret "$reth_jwt" \
-                  >"$reth_log" 2>&1 &
-                echo "$!" > "$reth_root/reth.pid"
-              fi
-
-              if ! wait_for_ready_task "reth" "60" "1" "local"; then
-                echo "ERROR: reth failed to become ready port=$RETH_HTTP_PORT" >&2
-                if [ -f "$reth_log" ]; then
-                  tail -50 "$reth_log" >&2 || true
-                fi
-                if command -v lsof >/dev/null 2>&1; then
-                  lsof -nP -iTCP:"$RETH_HTTP_PORT" -sTCP:LISTEN >&2 || true
-                  lsof -nP -iTCP:"$RETH_WS_PORT" -sTCP:LISTEN >&2 || true
-                  lsof -nP -iTCP:"$RETH_AUTH_PORT" -sTCP:LISTEN >&2 || true
-                fi
-                exit 1
-              fi
-
-              if [ "$skip_helios" = "0" ]; then
-                helios_root="$services_root/helios"
-                helios_data="$helios_root/data"
-                helios_log="$artifacts_dir/helios-service.log"
-                helios_pid_file="$helios_root/helios.pid"
-                mkdir -p "$helios_data"
-
-                HELIOS_EXECUTION_RPC_URL_VALUE="http://127.0.0.1:$RETH_HTTP_PORT"
-                export HELIOS_EXECUTION_RPC_URL="$HELIOS_EXECUTION_RPC_URL_VALUE"
-
-                if ! ${pkgs.curl}/bin/curl -fsS --max-time 2 \
-                  -H 'content-type: application/json' \
-                  --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-                  "http://127.0.0.1:$HELIOS_RPC_PORT" 2>/dev/null \
-                  | ${pkgs.gnugrep}/bin/grep -q '"result"'; then
-                  if [ -f "$helios_pid_file" ]; then
-                    stale_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
-                    if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
-                      rm -f "$helios_pid_file"
-                    fi
-                  fi
-
-                  # Clear a stale listener on the Helios RPC port (for example from
-                  # a previous failed CI run that did not own this pid file).
-                  if command -v lsof >/dev/null 2>&1; then
-                    stale_listener_pid="$(lsof -t -nP -iTCP:"$HELIOS_RPC_PORT" -sTCP:LISTEN 2>/dev/null | head -n1 || true)"
-                    if [ -n "$stale_listener_pid" ]; then
-                      kill "$stale_listener_pid" 2>/dev/null || true
-                      for _ in $(seq 1 40); do
-                        if ! kill -0 "$stale_listener_pid" 2>/dev/null; then
-                          break
-                        fi
-                        sleep 0.25
-                      done
-                      kill -KILL "$stale_listener_pid" 2>/dev/null || true
-                    fi
-                  fi
-
-                  if [ -x "${pkgs.util-linux}/bin/setsid" ]; then
-                    "${pkgs.util-linux}/bin/setsid" \
-                      ${pkgs.python3}/bin/python3 \
-                      ${ciHeliosShimScript} \
-                      "$HELIOS_RPC_PORT" \
-                      "$HELIOS_EXECUTION_RPC_URL_VALUE" \
-                      </dev/null >"$helios_log" 2>&1 &
-                  elif command -v setsid >/dev/null 2>&1; then
-                    setsid \
-                      ${pkgs.python3}/bin/python3 \
-                      ${ciHeliosShimScript} \
-                      "$HELIOS_RPC_PORT" \
-                      "$HELIOS_EXECUTION_RPC_URL_VALUE" \
-                      </dev/null >"$helios_log" 2>&1 &
-                  elif command -v nohup >/dev/null 2>&1; then
-                    nohup \
-                      ${pkgs.python3}/bin/python3 \
-                      ${ciHeliosShimScript} \
-                      "$HELIOS_RPC_PORT" \
-                      "$HELIOS_EXECUTION_RPC_URL_VALUE" \
-                      </dev/null >"$helios_log" 2>&1 &
-                  else
-                    ${pkgs.python3}/bin/python3 ${ciHeliosShimScript} "$HELIOS_RPC_PORT" "$HELIOS_EXECUTION_RPC_URL_VALUE" </dev/null >"$helios_log" 2>&1 &
-                  fi
-                  echo "$!" > "$helios_pid_file"
-                fi
-
-                if ! wait_for_ready_task "helios" "120" "1" "local"; then
-                  echo "ERROR: helios failed to become ready port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL_VALUE" >&2
-                  if [ -f "$helios_log" ]; then
-                    tail -50 "$helios_log" >&2 || true
-                  fi
-                  if command -v lsof >/dev/null 2>&1; then
-                    lsof -nP -iTCP:"$HELIOS_RPC_PORT" -sTCP:LISTEN >&2 || true
-                  fi
-                  exit 1
-                fi
-              fi
-
-              health_log="$artifacts_dir/services-health.log"
-              if [ "$skip_helios" = "1" ]; then
-                for service in postgres minio reth; do
-                  if ! ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
-                    nix run --impure .#health -- --service "$service" >"$health_log" 2>&1; then
-                    echo "ERROR: framework health checks failed for ci service=$service" >&2
-                    if [ -f "$health_log" ]; then
-                      tail -50 "$health_log" >&2 || true
-                    fi
-                    exit 1
-                  fi
+              fail_with_logs() {
+                local message="$1"
+                shift || true
+                echo "$message" >&2
+                while [ "$#" -gt 0 ]; do
+                  tail_log_if_present "$1"
+                  shift || true
                 done
-              else
-                if ! ${project.envVar}="$env_value" ${project.slotVar}="$slot_value" \
-                  nix run --impure .#health -- --service all >"$health_log" 2>&1; then
-                  echo "ERROR: framework health checks failed for ci services" >&2
-                  if [ -f "$health_log" ]; then
-                    tail -50 "$health_log" >&2 || true
-                  fi
-                  exit 1
-                fi
+                exit 1
+              }
+
+              require_hook "SVC_POSTGRES_FULL_START_TEST"
+              require_hook "SVC_POSTGRES_READY_TEST"
+              require_hook "SVC_POSTGRES_STOP"
+              require_hook "SVC_MINIO_FULL_START_TEST"
+              require_hook "SVC_MINIO_READY"
+              require_hook "SVC_MINIO_BUCKET_ENSURE"
+              require_hook "SVC_MINIO_STOP"
+              require_hook "SVC_RETH_FULL_START_TEST"
+              require_hook "SVC_RETH_READY"
+              require_hook "SVC_RETH_STOP"
+
+              postgres_log="$services_root/postgres/data/postgres.log"
+              postgres_start_log="$artifacts_dir/postgres-start.log"
+              postgres_ready_log="$artifacts_dir/postgres-ready.log"
+              echo "INFO: starting postgres via selected full-start-test hook port=$POSTGRES_PORT"
+              if ! run_with_log "$postgres_start_log" run_hook SVC_POSTGRES_FULL_START_TEST; then
+                fail_with_logs \
+                  "ERROR: postgres full-start-test failed port=$POSTGRES_PORT" \
+                  "$postgres_start_log" \
+                  "$postgres_log"
+              fi
+              if ! wait_hook_ok SVC_POSTGRES_READY_TEST 30 1; then
+                run_with_log "$postgres_ready_log" run_hook SVC_POSTGRES_READY_TEST || true
+                fail_with_logs \
+                  "ERROR: postgres ready-test failed port=$POSTGRES_PORT" \
+                  "$postgres_ready_log" \
+                  "$postgres_log"
               fi
 
-              if [ "$skip_helios" = "1" ]; then
+              minio_log="$services_root/minio/data/logs/minio.log"
+              minio_start_log="$artifacts_dir/minio-start.log"
+              minio_ready_log="$artifacts_dir/minio-ready.log"
+              minio_bucket_log="$artifacts_dir/minio-bucket-ensure.log"
+              export MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID"
+              export MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY"
+              echo "INFO: starting minio via selected full-start-test hook api_port=$MINIO_API_PORT console_port=$MINIO_CONSOLE_PORT"
+              if ! NIXFIED_START_SERVICE_MANAGED_CLEANUP=1 \
+                start_service_into minio_start_pid minio --log "$minio_start_log" -- "$SVC_MINIO_FULL_START_TEST"; then
+                fail_with_logs \
+                  "ERROR: minio full-start-test failed api_port=$MINIO_API_PORT console_port=$MINIO_CONSOLE_PORT" \
+                  "$minio_start_log" \
+                  "$minio_log"
+              fi
+              if ! wait_hook_ok SVC_MINIO_READY 45 1; then
+                run_with_log "$minio_ready_log" run_hook SVC_MINIO_READY || true
+                fail_with_logs \
+                  "ERROR: minio failed readiness checks api_port=$MINIO_API_PORT console_port=$MINIO_CONSOLE_PORT" \
+                  "$minio_ready_log" \
+                  "$minio_start_log" \
+                  "$minio_log"
+              fi
+              if ! run_with_log "$minio_bucket_log" run_hook SVC_MINIO_BUCKET_ENSURE "$MFM_S3_BUCKET"; then
+                fail_with_logs \
+                  "ERROR: failed to ensure minio bucket bucket=$MFM_S3_BUCKET" \
+                  "$minio_bucket_log" \
+                  "$minio_log"
+              fi
+
+              reth_log="$services_root/reth/data/logs/reth.log"
+              reth_start_log="$artifacts_dir/reth-start.log"
+              reth_ready_log="$artifacts_dir/reth-ready.log"
+              echo "INFO: starting reth via selected full-start-test hook http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT"
+              if ! NIXFIED_START_SERVICE_MANAGED_CLEANUP=1 \
+                start_service_into reth_start_pid reth --log "$reth_start_log" -- "$SVC_RETH_FULL_START_TEST"; then
+                fail_with_logs \
+                  "ERROR: reth full-start-test failed http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT" \
+                  "$reth_start_log" \
+                  "$reth_log"
+              fi
+              if ! wait_hook_ok SVC_RETH_READY 60 1; then
+                run_with_log "$reth_ready_log" run_hook SVC_RETH_READY || true
+                fail_with_logs \
+                  "ERROR: reth failed readiness checks http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT" \
+                  "$reth_ready_log" \
+                  "$reth_start_log" \
+                  "$reth_log"
+              fi
+
+              if [ "$selected_helios" = "1" ]; then
+                require_hook "SVC_HELIOS_READY"
+                export HELIOS_EXECUTION_RPC_URL="http://127.0.0.1:$RETH_HTTP_PORT"
+                helios_log="$services_root/helios/data/logs/helios.log"
+                helios_start_log="$artifacts_dir/helios-start.log"
+                helios_ready_timeout_seconds="''${HELIOS_READY_TIMEOUT_SECS:-300}"
+                helios_ready_interval_seconds="''${HELIOS_READY_INTERVAL_SECS:-1}"
+                echo "INFO: starting helios via selected full-start-test hook port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL"
+
+                if ! NIXFIED_START_SERVICE_MANAGED_CLEANUP=1 \
+                  start_service_into helios_start_pid helios --log "$helios_start_log" -- "$SVC_HELIOS_FULL_START_TEST"; then
+                  fail_with_logs \
+                    "ERROR: helios full-start-test failed port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" \
+                    "$helios_start_log" \
+                    "$helios_log"
+                fi
+                if ! HELIOS_READY_TIMEOUT_SECS="$helios_ready_timeout_seconds" \
+                  HELIOS_READY_INTERVAL_SECS="$helios_ready_interval_seconds" \
+                  "$SVC_HELIOS_READY"; then
+                  fail_with_logs \
+                    "ERROR: helios failed to become ready port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" \
+                    "$helios_start_log" \
+                    "$helios_log"
+                fi
+                echo "INFO: helios selected full-start-test hook completed port=$HELIOS_RPC_PORT"
+              fi
+
+              if [ "$selected_helios" = "0" ]; then
                 echo "OK: ci services ready postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT helios=skipped"
               else
                 echo "OK: ci services ready postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT helios=$HELIOS_RPC_PORT"
@@ -2810,70 +2480,36 @@ in
             appName = "ci-services-stop";
             kind = "ci-step";
             summary = "Stop local CI parity services";
-            description = "Stops local postgres/minio/reth/helios service processes started for CI.";
+            description = "Stops local postgres/minio/reth/helios service processes started for CI via framework service hooks.";
             tags = [
               "ci"
               "parity"
               "services"
             ];
             runtimeInputs = ciServicesRuntimeInputs;
+            requirements = {
+              services = [
+                "postgres"
+                "minio"
+                "reth"
+                "helios"
+              ];
+            };
             command = ''
               set -euo pipefail
               ${ciStepPreamble}
 
-              services_root="$artifacts_dir/services"
-              postgres_data="$services_root/postgres/data"
-              minio_pid_file="$services_root/minio/minio.pid"
-              reth_pid_file="$services_root/reth/reth.pid"
-              helios_pid_file="$services_root/helios/helios.pid"
-
-              if ! is_service_skipped helios && [ -f "$helios_pid_file" ]; then
-                helios_pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
-                if [ -n "$helios_pid" ] && kill -0 "$helios_pid" 2>/dev/null; then
-                  kill "$helios_pid" 2>/dev/null || true
-                  for _ in $(seq 1 40); do
-                    if ! kill -0 "$helios_pid" 2>/dev/null; then
-                      break
-                    fi
-                    sleep 0.25
-                  done
-                  kill -KILL "$helios_pid" 2>/dev/null || true
-                fi
-                rm -f "$helios_pid_file"
+              if has_hook "SVC_HELIOS_STOP"; then
+                run_hook SVC_HELIOS_STOP >/dev/null 2>&1 || true
               fi
-
-              if [ -f "$reth_pid_file" ]; then
-                reth_pid="$(cat "$reth_pid_file" 2>/dev/null || true)"
-                if [ -n "$reth_pid" ] && kill -0 "$reth_pid" 2>/dev/null; then
-                  kill "$reth_pid" 2>/dev/null || true
-                  for _ in $(seq 1 40); do
-                    if ! kill -0 "$reth_pid" 2>/dev/null; then
-                      break
-                    fi
-                    sleep 0.25
-                  done
-                  kill -KILL "$reth_pid" 2>/dev/null || true
-                fi
-                rm -f "$reth_pid_file"
+              if has_hook "SVC_RETH_STOP"; then
+                run_hook SVC_RETH_STOP >/dev/null 2>&1 || true
               fi
-
-              if [ -f "$minio_pid_file" ]; then
-                minio_pid="$(cat "$minio_pid_file" 2>/dev/null || true)"
-                if [ -n "$minio_pid" ] && kill -0 "$minio_pid" 2>/dev/null; then
-                  kill "$minio_pid" 2>/dev/null || true
-                  for _ in $(seq 1 40); do
-                    if ! kill -0 "$minio_pid" 2>/dev/null; then
-                      break
-                    fi
-                    sleep 0.25
-                  done
-                  kill -KILL "$minio_pid" 2>/dev/null || true
-                fi
-                rm -f "$minio_pid_file"
+              if has_hook "SVC_MINIO_STOP"; then
+                run_hook SVC_MINIO_STOP >/dev/null 2>&1 || true
               fi
-
-              if [ -f "$postgres_data/postmaster.pid" ]; then
-                ${postgresPackage}/bin/pg_ctl -D "$postgres_data" stop -m fast >/dev/null 2>&1 || true
+              if has_hook "SVC_POSTGRES_STOP"; then
+                run_hook SVC_POSTGRES_STOP >/dev/null 2>&1 || true
               fi
 
               echo "OK: ci services stopped"
@@ -2990,11 +2626,7 @@ in
 
               run_with_log "$key_log_file" ${parityNextestCmd} --test parity_keystore_reth_tx_send
 
-              if [ -z "''${MFM_EVM_RPC_URL:-}" ]; then
-                echo "SKIP: MFM_EVM_RPC_URL is unset; skipping helios RPC curl probe"
-                exit 0
-              fi
-
+              helios_rpc_url="http://127.0.0.1:$HELIOS_RPC_PORT"
               run_with_log "$smoke_log_file" bash -euo pipefail -c '
                 response_file="$1"
                 rpc_url="$2"
@@ -3003,7 +2635,7 @@ in
                   --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[]}" \
                   "$rpc_url" \
                   | tee "$response_file"
-              ' _ "$response_file" "$MFM_EVM_RPC_URL"
+              ' _ "$response_file" "$helios_rpc_url"
 
               jq -e '.result | strings' "$response_file" >/dev/null
               echo "OK: ci step passed step=parity-evm-helios-smoke log=$smoke_log_file"
@@ -3491,6 +3123,9 @@ in
           units = {
             services-start = mkWorkflowUnit {
               taskId = "task.mfm.portfolio.snapshot.services-start";
+              requirements = {
+                services = [ "helios" ];
+              };
             };
 
             snapshot-exec = mkWorkflowUnit {

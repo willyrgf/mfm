@@ -7,6 +7,7 @@
   mkApps =
     {
       model,
+      selectionIndex,
       services,
       runtimeHash ? model.identity.evalHash,
       frameworkSourceFlakeRef ? null,
@@ -17,6 +18,7 @@
       inherit
         pkgs
         model
+        selectionIndex
         services
         runtimeHash
         projectRoot

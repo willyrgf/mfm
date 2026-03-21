@@ -137,12 +137,16 @@ let
           null;
     };
 
-  normalizeSources =
-    discardContext: serviceName: keys: sources:
+  normalizeSelectedSources =
+    discardContext: serviceName: keys: selectedSource: sources:
     builtins.listToAttrs (
       map (key: {
         name = key;
-        value = normalizeSource discardContext serviceName key (sources.${key} or { });
+        value =
+          if selectedSource != "" && key == selectedSource then
+            normalizeSource discardContext serviceName key (sources.${key} or { })
+          else
+            { };
       }) keys
     );
 
@@ -391,7 +395,8 @@ let
         };
       };
       keys = sourceKeys cfgWithDefaults;
-      normalizedSources = normalizeSources discardContext "postgres" keys (
+      selectedSourceName = resolveSelectedSource "postgres" keys (cfgWithDefaults.defaultSource or "");
+      normalizedSources = normalizeSelectedSources discardContext "postgres" keys selectedSourceName (
         cfgWithDefaults.sources or { }
       );
       selected = sourceValue "postgres" cfgWithDefaults normalizedSources;
@@ -489,7 +494,10 @@ let
         dataDirName = cfg.dataDirName or "nginx";
       };
       keys = sourceKeys cfgWithDefaults;
-      normalizedSources = normalizeSources discardContext "nginx" keys (cfgWithDefaults.sources or { });
+      selectedSourceName = resolveSelectedSource "nginx" keys (cfgWithDefaults.defaultSource or "");
+      normalizedSources = normalizeSelectedSources discardContext "nginx" keys selectedSourceName (
+        cfgWithDefaults.sources or { }
+      );
       selected = sourceValue "nginx" cfgWithDefaults normalizedSources;
       package = selected.value.package or null;
       defaultProbePlans = {
@@ -583,7 +591,10 @@ let
         browser = if cfg ? browser then cfg.browser else true;
       };
       keys = sourceKeys cfgWithDefaults;
-      normalizedSources = normalizeSources discardContext "minio" keys (cfgWithDefaults.sources or { });
+      selectedSourceName = resolveSelectedSource "minio" keys (cfgWithDefaults.defaultSource or "");
+      normalizedSources = normalizeSelectedSources discardContext "minio" keys selectedSourceName (
+        cfgWithDefaults.sources or { }
+      );
       selected = sourceValue "minio" cfgWithDefaults normalizedSources;
       package = selected.value.package or null;
       clientPackage = selected.value.clientPackage or null;
@@ -677,12 +688,16 @@ let
         portKeyHttp = cfg.portKeyHttp or "rethHttp";
         portKeyWs = cfg.portKeyWs or "rethWs";
         portKeyAuth = cfg.portKeyAuth or "rethAuth";
+        portKeyP2p = cfg.portKeyP2p or "rethP2p";
         dataDirName = cfg.dataDirName or "reth";
         network = cfg.network or "local";
         devMode = cfg.devMode or false;
       };
       keys = sourceKeys cfgWithDefaults;
-      normalizedSources = normalizeSources discardContext "reth" keys (cfgWithDefaults.sources or { });
+      selectedSourceName = resolveSelectedSource "reth" keys (cfgWithDefaults.defaultSource or "");
+      normalizedSources = normalizeSelectedSources discardContext "reth" keys selectedSourceName (
+        cfgWithDefaults.sources or { }
+      );
       selected = sourceValue "reth" cfgWithDefaults normalizedSources;
       package = selected.value.package or null;
       defaultProbePlans = {
@@ -772,6 +787,10 @@ let
             protocol = "http";
             portKey = cfgWithDefaults.portKeyAuth;
           };
+          p2p = {
+            protocol = "tcp";
+            portKey = cfgWithDefaults.portKeyP2p;
+          };
         };
         probes = {
           health = resolveProbeSummary "health" "jsonrpc:web3_clientVersion" (
@@ -814,7 +833,10 @@ let
         };
       };
       keys = sourceKeys cfgWithDefaults;
-      normalizedSources = normalizeSources discardContext "helios" keys (cfgWithDefaults.sources or { });
+      selectedSourceName = resolveSelectedSource "helios" keys (cfgWithDefaults.defaultSource or "");
+      normalizedSources = normalizeSelectedSources discardContext "helios" keys selectedSourceName (
+        cfgWithDefaults.sources or { }
+      );
       selected = sourceValue "helios" cfgWithDefaults normalizedSources;
       package = selected.value.package or null;
       defaultHeliosReadyStep = {

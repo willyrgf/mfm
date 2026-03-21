@@ -331,6 +331,7 @@ rec {
       portKeyHttp = modules.reth.portKeyHttp;
       portKeyWs = modules.reth.portKeyWs;
       portKeyAuth = modules.reth.portKeyAuth;
+      portKeyP2p = modules.reth.portKeyP2p;
       sources.local = {
         package = modules.reth.package;
       };

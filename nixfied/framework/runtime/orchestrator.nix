@@ -1,6 +1,7 @@
 {
   pkgs,
   model,
+  selectionIndex ? null,
   services,
   runtimeHash ? model.identity.evalHash,
   registry,
@@ -9,6 +10,19 @@
 }:
 let
   lib = pkgs.lib;
+  resolvedSelectionIndex =
+    if selectionIndex != null then
+      selectionIndex
+    else
+      import ../../compiler/compile-selection-index.nix
+        {
+          inherit (pkgs) lib;
+        }
+        {
+          tasks = model.tasks or { };
+          workflows = model.workflows or { };
+          serviceCatalog = model.serviceCatalog or { };
+        };
   shellCommon = import ../core/shell-common.nix { inherit pkgs; };
   registryShell = registry.events.mkShellLib { };
   workflowModesShell = import ./workflow-modes.nix {
@@ -16,8 +30,10 @@ let
       pkgs
       model
       ;
+    selectionIndex = resolvedSelectionIndex;
   };
   orchestratorRuntimeShell = import ./orchestrator-runtime.nix { inherit pkgs; };
+  executorRuntimeShell = import ./executor-runtime.nix { inherit pkgs; };
   executor = import ./executor.nix {
     inherit
       pkgs
@@ -27,6 +43,7 @@ let
       projectRoot
       serviceHookEnv
       ;
+    selectionIndex = resolvedSelectionIndex;
   };
   frameworkEphemeral = import ./ephemeral.nix {
     inherit
@@ -100,15 +117,17 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
   RUNS_DIR="$REGISTRY_ROOT/orchestrator/runs"
   RUN_LOCKS_DIR="$REGISTRY_ROOT/orchestrator/locks"
   RUN_LOG_DIR="$REGISTRY_ROOT/orchestrator/logs"
-  RUN_COUNTER_ROOT="$REGISTRY_ROOT/orchestrator/counter"
+  RUN_ID_ACTIVE_ROOT="$REGISTRY_ROOT/active"
+  RUN_ID_COUNTER_ROOT="$REGISTRY_ROOT/counters"
   SETSID_BIN=${lib.escapeShellArg setsidBin}
   ORCHESTRATOR_STOP_TIMEOUT_SEC_DEFAULT=${lib.escapeShellArg (toString model.runtime.orchestrator.stopTimeoutSec)}
 
   ${registryShell}
   ${workflowModesShell}
   ${orchestratorRuntimeShell}
+  ${executorRuntimeShell}
 
-  mkdir -p "$RUNS_DIR" "$RUN_LOCKS_DIR" "$RUN_LOG_DIR" "$RUN_COUNTER_ROOT"
+  mkdir -p "$RUNS_DIR" "$RUN_LOCKS_DIR" "$RUN_LOG_DIR"
 
   FOREGROUND_RUN_ACTIVE=0
   FOREGROUND_RUN_ID=""
@@ -118,9 +137,259 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
   FOREGROUND_RUN_TASK_ID=""
   FOREGROUND_SIGNAL_FILE=""
   FOREGROUND_SIGNAL_NAME=""
+  RUN_SUFFIX_REASON=""
 
   sha256_text() {
     printf '%s' "$1" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.gawk}/bin/awk '{print $1}'
+  }
+
+  canonical_run_id_envelope() {
+    local run_kind="$1"
+    local workflow_id="$2"
+    local task_id="$3"
+    local slot_value="$4"
+    local env_value="$5"
+    local pass_through_env_json="$6"
+    local argv_json
+    shift 6
+
+    argv_json="$(jq_positional_args_json "$@")" || return 1
+
+    ${pkgs.jq}/bin/jq -cnS \
+      --arg modelEvalHash "${model.identity.evalHash}" \
+      --arg runtimeHash "${runtimeHash}" \
+      --arg runKind "$run_kind" \
+      --arg workflowId "$workflow_id" \
+      --arg taskId "$task_id" \
+      --arg slot "$slot_value" \
+      --arg env "$env_value" \
+      --argjson passThroughEnv "$pass_through_env_json" \
+      --argjson argv "$argv_json" \
+      '{
+        model_eval_hash: $modelEvalHash,
+        runtime_hash: $runtimeHash,
+        run_kind: $runKind,
+        workflow_id: (if $workflowId == "" then null else $workflowId end),
+        task_id: (if $taskId == "" then null else $taskId end),
+        slot: $slot,
+        env: $env,
+        pass_through_env: $passThroughEnv,
+        argv: $argv
+      }'
+  }
+
+  filter_run_id_args() {
+    local parse_options=1
+    local arg=""
+    local -a filtered_args=()
+
+    while [ "$#" -gt 0 ]; do
+      arg="$1"
+      shift
+
+      if [ "$parse_options" -eq 0 ]; then
+        filtered_args+=("$arg")
+        continue
+      fi
+
+      case "$arg" in
+        --summary)
+          ;;
+        --log-level)
+          if [ "$#" -lt 1 ]; then
+            echo "ERROR: --log-level requires a value"
+            return 2
+          fi
+          shift
+          ;;
+        --log-level=*)
+          ;;
+        --output-mode)
+          if [ "$#" -lt 1 ]; then
+            echo "ERROR: --output-mode requires a value"
+            return 2
+          fi
+          shift
+          ;;
+        --output-mode=*)
+          ;;
+        --)
+          parse_options=0
+          filtered_args+=("--")
+          ;;
+        *)
+          filtered_args+=("$arg")
+          ;;
+      esac
+    done
+
+    printf '%s\n' "''${filtered_args[@]}"
+  }
+
+  emit_runtime_pass_through_env_names() {
+    local runtime_json="$1"
+    printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '(.passThroughEnv // [])[]?'
+  }
+
+  run_id_pass_through_env_json() {
+    local run_kind="$1"
+    local workflow_id="$2"
+    local task_id="$3"
+    local env_name=""
+    local dep_task_id=""
+    local phase=""
+    local hook_id=""
+    local runner_type=""
+    local nested_workflow_id=""
+    local unit_json=""
+    local unit_task_id=""
+    local -A seen_tasks
+    local -A seen_workflows
+
+    collect_task_env_names() {
+      local current_task_id="$1"
+
+      if [ -z "$current_task_id" ] || [ -n "''${seen_tasks[$current_task_id]:-}" ]; then
+        return 0
+      fi
+      seen_tasks[$current_task_id]=1
+
+      emit_runtime_pass_through_env_names "$(task_runtime_json "$current_task_id")"
+
+      for phase in pre post; do
+        while IFS= read -r hook_id; do
+          [ -n "$hook_id" ] || continue
+          emit_runtime_pass_through_env_names "$(task_hook_runtime_json "$current_task_id" "$phase" "$hook_id")"
+        done < <(task_hook_ids "$current_task_id" "$phase" 2>/dev/null || true)
+      done
+
+      while IFS= read -r dep_task_id; do
+        [ -n "$dep_task_id" ] || continue
+        collect_task_env_names "$dep_task_id"
+      done < <(task_needs "$current_task_id" 2>/dev/null || true)
+
+      while IFS= read -r dep_task_id; do
+        [ -n "$dep_task_id" ] || continue
+        collect_task_env_names "$dep_task_id"
+      done < <(task_soft_needs "$current_task_id" 2>/dev/null || true)
+
+      runner_type="$(task_runner_type "$current_task_id")"
+      if [ "$runner_type" = "workflowRef" ]; then
+        nested_workflow_id="$(task_runner_workflow_id "$current_task_id")"
+        if [ -n "$nested_workflow_id" ]; then
+          collect_workflow_env_names "$nested_workflow_id"
+        fi
+      fi
+    }
+
+    collect_workflow_env_names() {
+      local current_workflow_id="$1"
+
+      if [ -z "$current_workflow_id" ] || [ -n "''${seen_workflows[$current_workflow_id]:-}" ]; then
+        return 0
+      fi
+      seen_workflows[$current_workflow_id]=1
+
+      while IFS= read -r dep_task_id; do
+        [ -n "$dep_task_id" ] || continue
+        collect_task_env_names "$dep_task_id"
+      done < <(workflow_phase_tasks "$current_workflow_id" preRun 2>/dev/null || true)
+
+      while IFS= read -r unit_json; do
+        [ -n "$unit_json" ] || continue
+        unit_task_id="$(workflow_unit_task_id "$unit_json")"
+        if [ -n "$unit_task_id" ] && [ "$unit_task_id" != "null" ]; then
+          collect_task_env_names "$unit_task_id"
+        fi
+      done < <(workflow_plan_records "$current_workflow_id" 2>/dev/null || true)
+
+      while IFS= read -r dep_task_id; do
+        [ -n "$dep_task_id" ] || continue
+        collect_task_env_names "$dep_task_id"
+      done < <(workflow_phase_tasks "$current_workflow_id" postRun 2>/dev/null || true)
+    }
+
+    {
+      while IFS= read -r env_name; do
+        [ -n "$env_name" ] || continue
+        if [ -n "''${!env_name+x}" ]; then
+          ${pkgs.jq}/bin/jq -cn --arg key "$env_name" --arg value "''${!env_name}" '{key: $key, value: $value}'
+        fi
+      done < <(
+        case "$run_kind" in
+          task)
+            collect_task_env_names "$task_id"
+            ;;
+          workflow)
+            collect_workflow_env_names "$workflow_id"
+            ;;
+        esac | ${pkgs.coreutils}/bin/sort -u
+      )
+    } | ${pkgs.jq}/bin/jq -cs 'from_entries'
+  }
+
+  compute_run_id() {
+    local run_kind="$1"
+    local workflow_id="$2"
+    local task_id="$3"
+    shift 3
+
+    local slot_var=${pkgs.lib.escapeShellArg model.runtime.slot.var}
+    local env_var=${pkgs.lib.escapeShellArg model.runtime.env.var}
+    local slot_default=${toString model.runtime.slot.default}
+    local env_default=${pkgs.lib.escapeShellArg model.runtime.env.default}
+
+    local slot_value
+    local env_value
+    local pass_through_env_json
+    local run_input
+    local run_base
+    local run_id
+    local lock_file
+    local counter_file
+    local lock_fd
+    local counter="0"
+
+    slot_value="''${!slot_var:-$slot_default}"
+    env_value="''${!env_var:-$env_default}"
+    pass_through_env_json="$(run_id_pass_through_env_json "$run_kind" "$workflow_id" "$task_id")"
+
+    run_input="$(canonical_run_id_envelope "$run_kind" "$workflow_id" "$task_id" "$slot_value" "$env_value" "$pass_through_env_json" "$@")"
+    run_base="$(sha256_text "$run_input")"
+    run_id="run-''${run_base:0:24}"
+    RUN_SUFFIX_REASON=""
+
+    mkdir -p "$RUN_ID_ACTIVE_ROOT" "$RUN_ID_COUNTER_ROOT"
+    lock_file="$RUN_ID_COUNTER_ROOT/$run_base.lock"
+    counter_file="$RUN_ID_COUNTER_ROOT/$run_base"
+    lock_fd="$(registry_lock_acquire "$lock_file" "orchestrator-run-counter:$run_base" 30)" || return 1
+
+    if [ -e "$RUN_ID_ACTIVE_ROOT/$run_id" ]; then
+      if [ -f "$counter_file" ]; then
+        counter="$(cat "$counter_file")"
+      fi
+      counter="$(( counter + 1 ))"
+      printf '%s' "$counter" > "$counter_file"
+
+      run_id="$run_id-$(printf 'c%03d' "$counter")"
+      RUN_SUFFIX_REASON="active-collision"
+    fi
+
+    : > "$RUN_ID_ACTIVE_ROOT/$run_id"
+    registry_lock_release "$lock_fd" "$lock_file"
+
+    printf '%s' "$run_id"
+  }
+
+  activate_run_id() {
+    local run_id="$1"
+    mkdir -p "$RUN_ID_ACTIVE_ROOT"
+    : > "$RUN_ID_ACTIVE_ROOT/$run_id"
+  }
+
+  deactivate_run_id() {
+    local run_id="$1"
+    rm -f "$RUN_ID_ACTIVE_ROOT/$run_id"
   }
 
   iso_now() {
@@ -281,16 +550,6 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     FOREGROUND_RUN_TASK_ID="$5"
   }
 
-  next_run_id() {
-    local seq
-    local seed
-    local digest
-    seq="$(registry_next_seq "$RUN_COUNTER_ROOT")"
-    seed="orchestrator|${runtimeHash}|$seq|$$|$RANDOM|$(iso_now)"
-    digest="$(sha256_text "$seed")"
-    printf 'run-%s' "''${digest:0:24}"
-  }
-
   create_run_record() {
     local run_id="$1"
     local command_name="$2"
@@ -355,6 +614,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
     mv "$tmp" "$run_file"
     registry_lock_release "$lock_fd" "$lock_file"
+
   }
 
   update_run_state() {
@@ -407,6 +667,12 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
     mv "$tmp" "$run_file"
     registry_lock_release "$lock_fd" "$lock_file"
+
+    case "$state" in
+      passed|failed|canceled)
+        deactivate_run_id "$run_id"
+        ;;
+    esac
     return 0
   }
 
@@ -845,6 +1111,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local ephemeral_enabled="0"
     local run_id
     local args_json
+    local -a run_id_args
+    run_id_args=()
 
     command_started_at="$(iso_now)"
     command_started_epoch="$(date +%s)"
@@ -857,7 +1125,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     workflow_ref="$(resolve_task_workflow_ref "$task_id")"
 
     split_process_mode "$@"
-    if task_help_requested "''${FORWARD_ARGS[@]}"; then
+    if call_with_array_args FORWARD_ARGS task_help_requested; then
       if ! task_print_help "$task_id"; then
         echo "ERROR: unknown task '$task_id'"
         return "$NIXFIED_EXIT_USAGE"
@@ -865,9 +1133,9 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
       return 0
     fi
     if [ -n "$workflow_ref" ]; then
-      validate_workflow_args "$workflow_ref" "''${FORWARD_ARGS[@]}"
+      call_with_array_args FORWARD_ARGS validate_workflow_args "$workflow_ref"
     else
-      validate_typed_task_args "$task_id" "''${FORWARD_ARGS[@]}"
+      call_with_array_args FORWARD_ARGS validate_typed_task_args "$task_id"
     fi
 
     if [ -n "$workflow_ref" ]; then
@@ -879,14 +1147,19 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
       ephemeral_enabled=1
     fi
 
-    run_id="$(next_run_id)"
+    mapfile -t run_id_args < <(call_with_array_args FORWARD_ARGS filter_run_id_args)
+    run_id="$(call_with_array_args run_id_args compute_run_id "task" "$workflow_ref" "$task_id")"
     if [ -n "$MACHINE_RUN_ID_FILE" ]; then
       write_text_file_atomic "$MACHINE_RUN_ID_FILE" "$run_id"
     fi
-    args_json="$(${pkgs.jq}/bin/jq -cn '$ARGS.positional' --args -- "''${FORWARD_ARGS[@]}")"
-    create_run_record "$run_id" "run-task" "$workflow_ref" "$task_id" "$execution_mode" "$PROCESS_MODE" "$ephemeral_enabled" "$args_json"
+    args_json="$(call_with_array_args FORWARD_ARGS jq_positional_args_json)"
+    create_run_record "$run_id" "run-task" "$workflow_ref" "$task_id" "$execution_mode" "$PROCESS_MODE" "$ephemeral_enabled" "$args_json" || {
+      deactivate_run_id "$run_id"
+      return 1
+    }
 
     export NIXFIED_ORCHESTRATOR_RUN_ID="$run_id"
+    export NIXFIED_ORCHESTRATOR_RUN_SUFFIX_REASON="$RUN_SUFFIX_REASON"
     export NIXFIED_ORCHESTRATOR_PROCESS_MODE="$PROCESS_MODE"
     export NIXFIED_ORCHESTRATOR_WORKFLOW_ID="$workflow_ref"
     export NIXFIED_WORKFLOW_SETUP_STARTED_AT="$command_started_at"
@@ -895,9 +1168,9 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     ensure_artifacts_root "$run_id" "$ephemeral_enabled" "$workflow_ref"
 
     if [ "$ephemeral_enabled" = "1" ]; then
-      launch_command "$run_id" "$PROCESS_MODE" "$workflow_ref" "$task_id" "$EPHEMERAL_EXECUTOR_WRAPPER" "$EXECUTOR_PROGRAM" run-task "$task_id" "''${FORWARD_ARGS[@]}"
+      call_with_array_args FORWARD_ARGS launch_command "$run_id" "$PROCESS_MODE" "$workflow_ref" "$task_id" "$EPHEMERAL_EXECUTOR_WRAPPER" "$EXECUTOR_PROGRAM" run-task "$task_id"
     else
-      launch_command "$run_id" "$PROCESS_MODE" "$workflow_ref" "$task_id" "$EXECUTOR_PROGRAM" run-task "$task_id" "''${FORWARD_ARGS[@]}"
+      call_with_array_args FORWARD_ARGS launch_command "$run_id" "$PROCESS_MODE" "$workflow_ref" "$task_id" "$EXECUTOR_PROGRAM" run-task "$task_id"
     fi
   }
 
@@ -916,6 +1189,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     local run_id
     local args_json
     local ephemeral_enabled
+    local -a run_id_args
+    run_id_args=()
 
     command_started_at="$(iso_now)"
     command_started_epoch="$(date +%s)"
@@ -926,21 +1201,26 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     fi
 
     split_process_mode "$@"
-    validate_workflow_args "$workflow_id" "''${FORWARD_ARGS[@]}"
+    call_with_array_args FORWARD_ARGS validate_workflow_args "$workflow_id"
 
     if [ "''${NIXFIED_WORKFLOW_PARALLEL:-}" = "1" ]; then
       mode="workflow-parallel"
     fi
 
     ephemeral_enabled="$(workflow_ephemeral_flag "$workflow_id")"
-    run_id="$(next_run_id)"
+    mapfile -t run_id_args < <(call_with_array_args FORWARD_ARGS filter_run_id_args)
+    run_id="$(call_with_array_args run_id_args compute_run_id "workflow" "$workflow_id" "")"
     if [ -n "$MACHINE_RUN_ID_FILE" ]; then
       write_text_file_atomic "$MACHINE_RUN_ID_FILE" "$run_id"
     fi
-    args_json="$(${pkgs.jq}/bin/jq -cn '$ARGS.positional' --args -- "''${FORWARD_ARGS[@]}")"
-    create_run_record "$run_id" "run-workflow" "$workflow_id" "" "$mode" "$PROCESS_MODE" "$ephemeral_enabled" "$args_json"
+    args_json="$(call_with_array_args FORWARD_ARGS jq_positional_args_json)"
+    create_run_record "$run_id" "run-workflow" "$workflow_id" "" "$mode" "$PROCESS_MODE" "$ephemeral_enabled" "$args_json" || {
+      deactivate_run_id "$run_id"
+      return 1
+    }
 
     export NIXFIED_ORCHESTRATOR_RUN_ID="$run_id"
+    export NIXFIED_ORCHESTRATOR_RUN_SUFFIX_REASON="$RUN_SUFFIX_REASON"
     export NIXFIED_ORCHESTRATOR_PROCESS_MODE="$PROCESS_MODE"
     export NIXFIED_ORCHESTRATOR_WORKFLOW_ID="$workflow_id"
     export NIXFIED_WORKFLOW_SETUP_STARTED_AT="$command_started_at"
@@ -949,9 +1229,9 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     ensure_artifacts_root "$run_id" "$ephemeral_enabled" "$workflow_id"
 
     if [ "$ephemeral_enabled" = "1" ]; then
-      launch_command "$run_id" "$PROCESS_MODE" "$workflow_id" "" "$EPHEMERAL_EXECUTOR_WRAPPER" "$EXECUTOR_PROGRAM" run-workflow "$workflow_id" "''${FORWARD_ARGS[@]}"
+      call_with_array_args FORWARD_ARGS launch_command "$run_id" "$PROCESS_MODE" "$workflow_id" "" "$EPHEMERAL_EXECUTOR_WRAPPER" "$EXECUTOR_PROGRAM" run-workflow "$workflow_id"
     else
-      launch_command "$run_id" "$PROCESS_MODE" "$workflow_id" "" "$EXECUTOR_PROGRAM" run-workflow "$workflow_id" "''${FORWARD_ARGS[@]}"
+      call_with_array_args FORWARD_ARGS launch_command "$run_id" "$PROCESS_MODE" "$workflow_id" "" "$EXECUTOR_PROGRAM" run-workflow "$workflow_id"
     fi
   }
 
