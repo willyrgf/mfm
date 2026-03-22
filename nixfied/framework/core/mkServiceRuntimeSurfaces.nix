@@ -144,6 +144,29 @@ let
       printf '%s' "$1" | ${pkgs.coreutils}/bin/tr '[:lower:].-:/ ' '[:upper:]______' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_'
     }
 
+    expand_slot_runtime_dir_base() {
+      local raw_value="$1"
+
+      if [ -n "''${NIXFIED_RUNTIME_DIR_BASE:-}" ]; then
+        printf '%s' "''${NIXFIED_RUNTIME_DIR_BASE}"
+        return 0
+      fi
+
+      if [ -z "$raw_value" ]; then
+        printf '%s' ""
+        return 0
+      fi
+
+      if [[ "$raw_value" == *"$"* ]]; then
+        # Runtime directory templates are trusted project config values.
+        # Expand them once so runtime surfaces resolve concrete paths.
+        eval "printf '%s' \"$raw_value\""
+        return 0
+      fi
+
+      printf '%s' "$raw_value"
+    }
+
     resolve_slot_runtime_context() {
       local slot_var="$SLOT_RUNTIME_SLOT_VAR"
       local env_var="$SLOT_RUNTIME_ENV_VAR"
@@ -177,9 +200,7 @@ let
         exit 3
       fi
 
-      if [ -z "$runtime_dir_base" ] || [[ "$runtime_dir_base" == *"$"* ]]; then
-        runtime_dir_base="''${NIXFIED_RUNTIME_DIR_BASE:-$runtime_dir_base}"
-      fi
+      runtime_dir_base="$(expand_slot_runtime_dir_base "$runtime_dir_base")"
 
       SLOT_RUNTIME_SCOPE_ROOT="''${NIXFIED_RUNTIME_DIR_SCOPE:-''${NIXFIED_RUNTIME_DIR_SCOPE_OVERRIDE:-}}"
       if [ -z "$SLOT_RUNTIME_SCOPE_ROOT" ]; then

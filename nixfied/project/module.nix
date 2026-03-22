@@ -160,15 +160,16 @@ let
     "SKIP_${safeServiceName}";
 
   normalizeSkipEnvValue =
-    value:
-    lib.toLower (builtins.replaceStrings [ " " "\n" "\r" "\t" ] [ "" "" "" "" ] value);
+    value: lib.toLower (builtins.replaceStrings [ " " "\n" "\r" "\t" ] [ "" "" "" "" ] value);
 
-  isTruthySkipEnvValue = value: builtins.elem (normalizeSkipEnvValue value) [
-    "1"
-    "true"
-    "yes"
-    "on"
-  ];
+  isTruthySkipEnvValue =
+    value:
+    builtins.elem (normalizeSkipEnvValue value) [
+      "1"
+      "true"
+      "yes"
+      "on"
+    ];
 
   excludedServices = builtins.sort builtins.lessThan (
     builtins.filter (
@@ -233,7 +234,8 @@ let
     "AWS_REGION"
     "AWS_DEFAULT_REGION"
     "AWS_EC2_METADATA_DISABLED"
-  ] ++ serviceSkipEnvVars;
+  ]
+  ++ serviceSkipEnvVars;
 
   sharedCargoRustEnv = {
     RUSTC_WRAPPER = "sccache";
@@ -260,20 +262,21 @@ let
       {
         copyMode = runtimeEphemeral.copyMode or "nix-source";
         includeUntracked = runtimeEphemeral.includeUntracked or false;
-        excludePatterns = runtimeEphemeral.excludePatterns or [
-          ".git"
-          "node_modules"
-          ".next"
-          "dist"
-          ".turbo"
-          ".cache"
-          "target"
-          "result"
-          "result-*"
-          "*.log"
-          "test-results"
-          "coverage"
-        ];
+        excludePatterns =
+          runtimeEphemeral.excludePatterns or [
+            ".git"
+            "node_modules"
+            ".next"
+            "dist"
+            ".turbo"
+            ".cache"
+            "target"
+            "result"
+            "result-*"
+            "*.log"
+            "test-results"
+            "coverage"
+          ];
         extraDirs = runtimeEphemeral.extraDirs or [ ];
         keepFailures = runtimeEphemeral.keepFailures or true;
         maxFailedRoots = runtimeEphemeral.maxFailedRoots or 8;
@@ -432,7 +435,9 @@ let
       outputChannels ? "stdout",
       effects ? [ "writes-state" ],
       idempotent ? false,
-      requirements ? { services = [ ]; },
+      requirements ? {
+        services = [ ];
+      },
       passThroughEnv ? sharedPassThroughEnv,
       allowSensitivePassThrough ? true,
       env ? { },
@@ -537,7 +542,9 @@ let
       taskId,
       needs ? [ ],
       skipIfMissingEnv ? [ ],
-      requirements ? { services = [ ]; },
+      requirements ? {
+        services = [ ];
+      },
     }:
     {
       inherit
@@ -667,7 +674,6 @@ in
           portKeyHttp = rethService.portKeyHttp or (conf.modules.reth.portKeyHttp or "rethHttp");
           portKeyWs = rethService.portKeyWs or (conf.modules.reth.portKeyWs or "rethWs");
           portKeyAuth = rethService.portKeyAuth or (conf.modules.reth.portKeyAuth or "rethAuth");
-          portKeyP2p = rethService.portKeyP2p or (conf.modules.reth.portKeyP2p or "rethP2p");
           sources = rethSources;
           sourceKeys = rethService.sourceKeys or builtins.attrNames rethSources;
           defaultSource = rethService.defaultSource or "local";
@@ -687,13 +693,13 @@ in
             network = heliosNetwork;
             executionRpcUrl =
               heliosService.executionRpcUrl
-              or (if useRemoteHeliosDefaults then (conf.modules.helios.executionRpcUrl or "") else "");
+                or (if useRemoteHeliosDefaults then (conf.modules.helios.executionRpcUrl or "") else "");
             consensusRpcUrl =
               heliosService.consensusRpcUrl
-              or (if useRemoteHeliosDefaults then (conf.modules.helios.consensusRpcUrl or "") else "");
+                or (if useRemoteHeliosDefaults then (conf.modules.helios.consensusRpcUrl or "") else "");
             defaultConsensusRpcUrl =
               heliosService.defaultConsensusRpcUrl
-              or (conf.modules.helios.defaultConsensusRpcUrl or (conf.modules.helios.consensusRpcUrl or ""));
+                or (conf.modules.helios.defaultConsensusRpcUrl or (conf.modules.helios.consensusRpcUrl or ""));
             checkpoint = heliosService.checkpoint or (conf.modules.helios.checkpoint or "");
             extraArgs = heliosService.extraArgs or (conf.modules.helios.extraArgs or [ ]);
             sources = heliosSources;
@@ -1758,7 +1764,7 @@ in
               description = "Path to the canonical portfolio snapshot request JSON file.";
             }
           ];
-            command = ''
+          command = ''
             set -euo pipefail
 
             # Reserve stdout for the final JSON payload and route progress logs to

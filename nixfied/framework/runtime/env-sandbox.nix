@@ -8,6 +8,13 @@
 let
   lib = pkgs.lib;
   commonRuntimeShell = import ./common-runtime.nix { inherit pkgs; };
+  sandboxHelpers = import ./helpers/helpers.nix {
+    inherit pkgs;
+    project = { };
+    hooks = { };
+    summaryParser = "";
+  };
+  helpersScriptPath = builtins.toString sandboxHelpers.helpersScript;
 
   valueToString =
     value:
@@ -113,6 +120,7 @@ in
         pkgs.lib.toUpper (pkgs.lib.replaceStrings [ "-" "." ] [ "_" "_" ] model.identity.projectId)
       )
     }
+    ENV_SANDBOX_HELPERS_SCRIPT=${lib.escapeShellArg helpersScriptPath}
     RUNTIME_DIR_BASE_DEFAULT=${pkgs.lib.escapeShellArg model.runtime.directories.base}
     ENV_SANDBOX_STATIC_RUNTIME_PACKAGES_PATH=${lib.escapeShellArg staticRuntimePackagesPath}
     ENV_SANDBOX_STATIC_RUNTIME_SLOT_VAR=${lib.escapeShellArg model.runtime.slot.var}
@@ -129,6 +137,29 @@ in
 
     normalize_env_token() {
       printf '%s' "$1" | ${pkgs.coreutils}/bin/tr '[:lower:].-' '[:upper:]__' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_'
+    }
+
+    expand_runtime_dir_base_template() {
+      local raw_value="$1"
+
+      if [ -n "''${NIXFIED_RUNTIME_DIR_BASE:-}" ]; then
+        printf '%s' "''${NIXFIED_RUNTIME_DIR_BASE}"
+        return 0
+      fi
+
+      if [ -z "$raw_value" ]; then
+        printf '%s' ""
+        return 0
+      fi
+
+      if [[ "$raw_value" == *"$"* ]]; then
+        # Runtime directory templates come from trusted project config.
+        # Expand them once so downstream tasks see concrete filesystem paths.
+        eval "printf '%s' \"$raw_value\""
+        return 0
+      fi
+
+      printf '%s' "$raw_value"
     }
 
     runtime_service_selected() {
@@ -187,13 +218,13 @@ in
         NIXFIED_RUNTIME_REGISTRY_ROOT|NIXFIED_RUNTIME_ARTIFACTS_DIR|NIXFIED_RUNTIME_SERVICE_ROOT)
           return 0
           ;;
-        NIXFIED_MODEL_FILE|NIXFIED_RUN_ID)
+        NIXFIED_MODEL_FILE|NIXFIED_RUN_ID|NIXFIED_ATTEMPT_ID)
           return 0
           ;;
         NIXFIED_EXECUTOR_BIN|NIXFIED_ORCHESTRATOR_BIN|NIXFIED_EXECUTOR_SELF|NIXFIED_ORCHESTRATOR_SELF)
           return 0
           ;;
-        NIXFIED_EXECUTION_EPHEMERAL|NIXFIED_ORCHESTRATOR_RUN_ID|NIXFIED_ORCHESTRATOR_PROCESS_MODE|NIXFIED_ORCHESTRATOR_WORKFLOW_ID|NIXFIED_PARENT_WORKFLOW_ID|NIXFIED_TASK_ID)
+        NIXFIED_EXECUTION_EPHEMERAL|NIXFIED_ORCHESTRATOR_RUN_ID|NIXFIED_ORCHESTRATOR_ATTEMPT_ID|NIXFIED_ORCHESTRATOR_PROCESS_MODE|NIXFIED_ORCHESTRATOR_WORKFLOW_ID|NIXFIED_PARENT_WORKFLOW_ID|NIXFIED_TASK_ID)
           return 0
           ;;
         NIXFIED_WORKFLOW_SETUP_STARTED_AT|NIXFIED_WORKFLOW_SETUP_STARTED_EPOCH)
@@ -290,6 +321,7 @@ in
       local host_sdkroot=""
       local pass_through_env_tsv=""
       local runtime_env_tsv=""
+      local command_script=""
 
       local slot_var
       local env_var
@@ -464,9 +496,7 @@ in
       log_level_default="$ENV_SANDBOX_STATIC_LOG_LEVEL_DEFAULT"
       output_mode_default="$ENV_SANDBOX_STATIC_OUTPUT_MODE_DEFAULT"
 
-      if [ -z "$runtime_dir_base" ] || [[ "$runtime_dir_base" == *"$"* ]]; then
-        runtime_dir_base="$RUNTIME_DIR_BASE_DEFAULT"
-      fi
+      runtime_dir_base="$(expand_runtime_dir_base_template "$runtime_dir_base")"
       if [ -n "$runtime_scope_override" ]; then
         runtime_scope_root="$runtime_scope_override"
       elif [ -n "$ephemeral_root" ]; then
@@ -729,6 +759,8 @@ in
         "LANG=$locale"
         "LC_ALL=$locale"
         "TZ=$timezone"
+        "''${slot_var}=$slot_value"
+        "''${env_var}=$env_value"
         "HOME=$home_value"
         "TMPDIR=$tmp_value"
         "XDG_DATA_HOME=$xdg_data_value"
@@ -791,6 +823,9 @@ in
       if [ -n "''${NIXFIED_ORCHESTRATOR_RUN_ID:-}" ]; then
         env_cmd+=("NIXFIED_ORCHESTRATOR_RUN_ID=$NIXFIED_ORCHESTRATOR_RUN_ID")
       fi
+      if [ -n "''${NIXFIED_ORCHESTRATOR_ATTEMPT_ID:-}" ]; then
+        env_cmd+=("NIXFIED_ORCHESTRATOR_ATTEMPT_ID=$NIXFIED_ORCHESTRATOR_ATTEMPT_ID")
+      fi
       if [ -n "''${NIXFIED_ORCHESTRATOR_PROCESS_MODE:-}" ]; then
         env_cmd+=("NIXFIED_ORCHESTRATOR_PROCESS_MODE=$NIXFIED_ORCHESTRATOR_PROCESS_MODE")
       fi
@@ -817,6 +852,9 @@ in
       fi
       if [ -n "''${NIXFIED_RUN_ID:-}" ]; then
         env_cmd+=("NIXFIED_RUN_ID=$NIXFIED_RUN_ID")
+      fi
+      if [ -n "''${NIXFIED_ATTEMPT_ID:-}" ]; then
+        env_cmd+=("NIXFIED_ATTEMPT_ID=$NIXFIED_ATTEMPT_ID")
       fi
       if [ -n "''${NIX_BUILD_TOP:-}" ]; then
         env_cmd+=("NIX_BUILD_TOP=$NIX_BUILD_TOP")
@@ -945,10 +983,11 @@ in
       done <<< "$runtime_env_tsv"
 
       umask "$umask_value"
+      command_script="$(printf 'source %s\n%s' "$ENV_SANDBOX_HELPERS_SCRIPT" "$command")"
 
       (
         cd "$workdir"
-        "''${env_cmd[@]}" ${pkgs.bash}/bin/bash -euo pipefail -c "$command" -- "$@"
+        "''${env_cmd[@]}" ${pkgs.bash}/bin/bash -euo pipefail -c "$command_script" -- "$@"
       )
     }
 

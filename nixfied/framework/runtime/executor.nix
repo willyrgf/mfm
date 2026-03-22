@@ -268,7 +268,7 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
     printf '%s' "$mode_override"
   }
 
-  task_selected_services_csv() {
+  task_selected_services_lines() {
     local task_id="$1"
     shift
 
@@ -286,7 +286,14 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
       fi
     fi
 
-    task_invocation_selected_services "$task_id" "$resolved_workflow_id" | selected_services_csv_from_lines
+    task_invocation_selected_services "$task_id" "$resolved_workflow_id"
+  }
+
+  task_selected_services_csv() {
+    local task_id="$1"
+    shift
+
+    task_selected_services_lines "$task_id" "$@" | selected_services_csv_from_lines
   }
 
   workflow_unit_selected_services_csv() {
@@ -1441,13 +1448,16 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         continue
       fi
 
-      case "$phase_task" in
-        task.ops.ready|task.ops.health)
-          phase_task_selected_services_csv="$(
-            workflow_unit_closure_selected_services "$workflow_id" | selected_services_csv_from_lines
-          )"
-          ;;
-      esac
+      phase_task_selected_services_csv="$(
+        {
+          if [ "''${#passthrough_args[@]}" -gt 0 ]; then
+            task_selected_services_lines "$phase_task" "''${passthrough_args[@]}"
+          else
+            task_selected_services_lines "$phase_task"
+          fi
+          workflow_unit_closure_selected_services "$workflow_id"
+        } | selected_services_csv_from_lines
+      )"
 
       phase_task_skip_service="$(task_first_skipped_required_service "$phase_task" || true)"
       if [ -n "$phase_task_skip_service" ]; then
@@ -1457,23 +1467,14 @@ pkgs.writeShellScriptBin "nixfied-executor" ''
         continue
       fi
 
-      if [ "$phase_task" = "task.ops.ready" ] || [ "$phase_task" = "task.ops.health" ]; then
-        if [ "''${#passthrough_args[@]}" -gt 0 ]; then
-          if NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE="$phase_task_selected_services_csv" execute_task "$run_id" "$workflow_id" "$phase_task" "''${passthrough_args[@]}"; then
-            phase_status=0
-          else
-            phase_status="$?"
-            break
-          fi
-        elif NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE="$phase_task_selected_services_csv" execute_task "$run_id" "$workflow_id" "$phase_task"; then
+      if [ "''${#passthrough_args[@]}" -gt 0 ]; then
+        if NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE="$phase_task_selected_services_csv" execute_task "$run_id" "$workflow_id" "$phase_task" "''${passthrough_args[@]}"; then
           phase_status=0
         else
           phase_status="$?"
           break
         fi
-      elif [ "''${#passthrough_args[@]}" -gt 0 ] && execute_task "$run_id" "$workflow_id" "$phase_task" "''${passthrough_args[@]}"; then
-        phase_status=0
-      elif execute_task "$run_id" "$workflow_id" "$phase_task"; then
+      elif NIXFIED_SELECTED_SERVICES_CSV_OVERRIDE="$phase_task_selected_services_csv" execute_task "$run_id" "$workflow_id" "$phase_task"; then
         phase_status=0
       else
         phase_status="$?"

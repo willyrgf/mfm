@@ -4,6 +4,7 @@
   pkgs,
   selectedServices ? null,
   enabledServiceFlags ? { },
+  discardContext ? false,
 }:
 let
   serviceConfig = import ../framework/core/service-config.nix {
@@ -53,7 +54,7 @@ builtins.listToAttrs (
         name = name;
         enable = serviceEnabled;
         config = serviceConfig.normalizeServiceConfig {
-          discardContext = true;
+          inherit discardContext;
           inherit name;
           config = configInput;
         };

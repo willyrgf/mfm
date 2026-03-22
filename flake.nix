@@ -6,8 +6,14 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = import nixpkgs { inherit system; };
         nixfiedLib = import ./nixfied/framework/core/default.nix {
@@ -27,12 +33,13 @@
           localOverrides = [ ];
           inherit frameworkSourceRevision;
         };
-      in {
+      in
+      {
         apps = frameworkOutputs.apps;
         packages = frameworkOutputs.packages;
         legacyPackages = frameworkOutputs.legacyPackages;
         checks = frameworkOutputs.checks;
         devShells = frameworkOutputs.devShells;
-      });
+      }
+    );
 }
-
