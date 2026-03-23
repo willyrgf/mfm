@@ -499,9 +499,44 @@ let
             fullStartBody
           else
             ''
-              ${init}
-              ${checkConfig}
-              exec ${start}
+              start_log_file="$(mktemp "''${TMPDIR:-/tmp}/${service}-full-start-test.XXXXXX.log")"
+              START_SUPERVISOR_PID=""
+              READY=0
+
+              cleanup_full_start_test() {
+                if [ -n "$START_SUPERVISOR_PID" ] && kill -0 "$START_SUPERVISOR_PID" 2>/dev/null; then
+                  kill "$START_SUPERVISOR_PID" 2>/dev/null || true
+                  wait "$START_SUPERVISOR_PID" 2>/dev/null || true
+                fi
+              }
+
+              trap cleanup_full_start_test EXIT INT TERM
+
+              ${start} >"$start_log_file" 2>&1 &
+              START_SUPERVISOR_PID="$!"
+
+              for _ in $(seq 1 ${toString runtimeDefaults.probes.startupReadiness.attempts}); do
+                if ! kill -0 "$START_SUPERVISOR_PID" 2>/dev/null; then
+                  break
+                fi
+                if ${ready} >/dev/null 2>&1; then
+                  READY=1
+                  break
+                fi
+                sleep ${toString runtimeDefaults.probes.startupReadiness.intervalSeconds}
+              done
+
+              if [ "$READY" -ne 1 ]; then
+                cat "$start_log_file" >&2 || true
+                exit 1
+              fi
+
+              ${ready}
+              cat "$start_log_file" || true
+              trap - EXIT INT TERM
+              if command -v disown >/dev/null 2>&1; then
+                disown "$START_SUPERVISOR_PID" 2>/dev/null || true
+              fi
             ''
         }
       '';
