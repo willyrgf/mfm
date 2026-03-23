@@ -330,6 +330,10 @@ let
             type = task.runner.type or "shell";
             workflowId = task.runner.workflowId or "";
           };
+          runtimeReferences = {
+            taskIds = task.runtime.references.taskIds or [ ];
+            workflowIds = task.runtime.references.workflowIds or [ ];
+          };
         };
         execution = {
           launcherClass = "dispatcher";
@@ -341,6 +345,8 @@ let
         };
         closure = {
           directTaskDeps = uniqueSorted ((task.deps.needs or [ ]) ++ (task.deps.softNeeds or [ ]));
+          directRuntimeTaskRefs = task.runtime.references.taskIds or [ ];
+          directRuntimeWorkflowRefs = task.runtime.references.workflowIds or [ ];
           directPackageNames = uniqueSorted (map (ref: ref.name) (taskPackageRefs taskId));
           directServices = selectionIndex.taskDirectServicesById.${taskId} or [ ];
           baseClosureServices = selectionIndex.taskBaseClosureServicesById.${taskId} or [ ];
@@ -788,6 +794,24 @@ let
             reason = "task '${taskId}' soft-depends on task '${depTaskId}'";
           }
         ) (task.deps.softNeeds or [ ]);
+        runtimeTaskEdges = map (
+          refTaskId:
+          mkEdge {
+            from = "task:${taskId}";
+            to = "task:${refTaskId}";
+            kind = "task-runtime-task";
+            reason = "task '${taskId}' invokes task '${refTaskId}' through the executor at runtime";
+          }
+        ) (task.runtime.references.taskIds or [ ]);
+        runtimeWorkflowEdges = map (
+          workflowId:
+          mkEdge {
+            from = "task:${taskId}";
+            to = "workflow:${workflowId}";
+            kind = "task-runtime-workflow";
+            reason = "task '${taskId}' invokes workflow '${workflowId}' through the executor at runtime";
+          }
+        ) (task.runtime.references.workflowIds or [ ]);
         workflowEdges =
           lib.optionals ((task.runner.type or "") == "workflowRef" && (task.runner.workflowId or "") != "")
             [
@@ -818,7 +842,13 @@ let
           }
         ) (taskPackageRefs taskId);
       in
-      depEdges ++ softDepEdges ++ workflowEdges ++ serviceEdges ++ packageEdges
+      depEdges
+      ++ softDepEdges
+      ++ runtimeTaskEdges
+      ++ runtimeWorkflowEdges
+      ++ workflowEdges
+      ++ serviceEdges
+      ++ packageEdges
     ) taskIds
   );
 

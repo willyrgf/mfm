@@ -68,6 +68,10 @@ let
           map builtins.toString raw.runtime.runtimeInputs ++ globalRuntimeInputs
         );
         passThroughEnv = raw.runtime.passThroughEnv;
+        references = {
+          taskIds = raw.runtime.references.taskIds or [ ];
+          workflowIds = raw.runtime.references.workflowIds or [ ];
+        };
         allowSensitivePassThrough = raw.runtime.allowSensitivePassThrough;
         logging = raw.runtime.logging;
         env = raw.runtime.env;
@@ -111,12 +115,21 @@ let
     else
       idLib.ensurePrefix "task" depTaskId;
 
+  normalizeWorkflowId =
+    workflowId: if workflowId == "" then workflowId else idLib.ensurePrefix "workflow" workflowId;
+
   tasksById = builtins.mapAttrs (
     _: task:
     let
       normalizedNeeds = listUtils.uniquePreserveOrder (map normalizeTaskDepId (task.deps.needs or [ ]));
       normalizedSoftNeeds = listUtils.uniquePreserveOrder (
         map normalizeTaskDepId (task.deps.softNeeds or [ ])
+      );
+      normalizedRuntimeTaskRefs = listUtils.uniquePreserveOrder (
+        map normalizeTaskDepId (task.runtime.references.taskIds or [ ])
+      );
+      normalizedRuntimeWorkflowRefs = listUtils.uniquePreserveOrder (
+        map normalizeWorkflowId (task.runtime.references.workflowIds or [ ])
       );
     in
     canonical.canonicalize (
@@ -125,6 +138,12 @@ let
         deps = task.deps // {
           needs = normalizedNeeds;
           softNeeds = normalizedSoftNeeds;
+        };
+        runtime = task.runtime // {
+          references = {
+            taskIds = normalizedRuntimeTaskRefs;
+            workflowIds = normalizedRuntimeWorkflowRefs;
+          };
         };
       }
     )
@@ -142,8 +161,15 @@ let
           true
         else
           throw "task '${taskId}' depends on unknown task '${depTaskId}'";
+      validateRuntimeTaskRef =
+        refTaskId:
+        if builtins.hasAttr refTaskId tasksById then
+          true
+        else
+          throw "task '${taskId}' runtime references unknown task '${refTaskId}'";
     in
     map validateDep ((task.deps.needs or [ ]) ++ (task.deps.softNeeds or [ ]))
+    ++ map validateRuntimeTaskRef (task.runtime.references.taskIds or [ ])
   ) ids;
 
   initialPruneReasons = builtins.listToAttrs (

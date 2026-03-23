@@ -252,8 +252,19 @@ let
   ciCargoRustEnv = (builtins.removeAttrs sharedCargoRustEnv [ "RUSTC_WRAPPER" ]) // {
     CARGO_BUILD_JOBS = "1";
   };
-  ciArtifactsRoot = conf.process.artifactsRoot or "/tmp/ci-artifacts/${project.id}";
+  ciArtifactsRoot = conf.process.artifactsRoot or "/tmp/nixfied-artifacts-${project.id}";
   ciShellAppContractsTimeoutSec = 300;
+  sharedStatePolicy = {
+    workspace = {
+      mode = "literal";
+      value = project.id;
+    };
+    roots = {
+      runtimeBase = conf.directories.base;
+      registryRoot = conf.process.registryRoot;
+      artifactsRoot = ciArtifactsRoot;
+    };
+  };
   ephemeralRuntimeConfig =
     let
       runtimeEphemeral = conf.ephemeral or { };
@@ -417,7 +428,6 @@ let
   mkCommandTask =
     {
       id,
-      appName,
       ownerFile ? null,
       summary,
       description ? "",
@@ -526,15 +536,27 @@ let
         artifacts = [ ];
         stateKeys = [ ];
       };
+    };
 
-      ui.app = {
-        expose = true;
-        name = appName;
-        inherit ownerFile;
-        category = "core";
-        usage = usage;
-        examples = examples;
-      };
+  mkTaskApp =
+    {
+      taskId,
+      appId,
+      category ? "core",
+      usage ? [ "nix run .#${appId}" ],
+      examples ? [ ],
+      ownerFile ? null,
+    }:
+    {
+      id = appId;
+      kind = "taskRef";
+      inherit
+        taskId
+        category
+        usage
+        examples
+        ownerFile
+        ;
     };
 
   mkWorkflowUnit =
@@ -565,6 +587,7 @@ let
   frameworkInstallPreset = import ../framework/presets/install.nix {
     inherit
       mkCommandTask
+      mkTaskApp
       pkgs
       frameworkSourceRevision
       ;
@@ -575,6 +598,7 @@ let
       pkgs
       conf
       mkCommandTask
+      mkTaskApp
       ;
   };
   frameworkSelfhostPreset = import ../framework/presets/selfhost.nix {
@@ -587,6 +611,8 @@ in
 {
   imports = [
     ../modules/profiles/webapp.nix
+    ../framework/presets/state-policies/project-shared.nix
+    ../local/default.nix
   ];
 
   config = {
@@ -621,13 +647,26 @@ in
         };
 
         ports = conf.ports;
-        directories.base = conf.directories.base;
       };
 
-      state = {
-        workspaceId = conf.process.workspaceId or project.id;
-        registryRoot = conf.process.registryRoot;
-        artifactsRoot = ciArtifactsRoot;
+      state.policy = sharedStatePolicy;
+
+      serviceSets = {
+        ci-parity = {
+          id = "service-set.ci-parity";
+          summary = "CI parity services";
+          description = "Managed postgres, minio, and reth instances used by parity CI workflows.";
+          services.required = [
+            "postgres"
+            "minio"
+            "reth"
+          ];
+          failureLogs = {
+            capture = true;
+            tailLines = 50;
+          };
+          ownerFile = "nixfied/project/module.nix";
+        };
       };
 
       tooling = {
@@ -742,7 +781,6 @@ in
       tasks = {
         dev = mkCommandTask {
           id = "task.dev";
-          appName = "dev";
           summary = "Start the MFM REST API in dev mode";
           description = ''
             Runs mfm_rest_api via cargo with developer-friendly defaults.
@@ -785,947 +823,8 @@ in
           '';
         };
 
-        mfm-portfolio-services-start =
-          mkCommandTask {
-            id = "task.mfm.portfolio.services-start";
-            appName = "mfm-portfolio-postgres-start";
-            kind = "internal";
-            summary = "Start or reuse portfolio snapshot postgres";
-            description = "Internal task that starts or reuses Postgres for the portfolio snapshot app and writes shared handoff metadata.";
-            runtimeInputs = commonRuntimeInputs ++ [
-              postgresPackage
-              pkgs.curl
-              pkgs.lsof
-            ];
-            requirements = {
-              services = [ "postgres" ];
-            };
-            allowUnknownArgs = false;
-            contractArgs = [
-              {
-                name = "handoff-file";
-                kind = "option";
-                long = "--handoff-file";
-                type = "string";
-                required = true;
-                description = "Path to a non-secret handoff JSON file.";
-              }
-            ];
-            command = ''
-              set -euo pipefail
-              if [ -w /dev/tty ]; then
-                exec >/dev/tty 2>&1
-              fi
-
-              handoff_file=""
-              while [ "$#" -gt 0 ]; do
-                case "$1" in
-                  --handoff-file)
-                    shift
-                    handoff_file="''${1:-}"
-                    ;;
-                  --help|-h)
-                    echo "usage: run-task task.mfm.portfolio.services-start --handoff-file <PATH>" >&2
-                    exit 0
-                    ;;
-                  *)
-                    echo "ERROR: unknown argument '$1'" >&2
-                    exit 2
-                    ;;
-                esac
-                shift
-              done
-
-              if [ -z "$handoff_file" ]; then
-                echo "ERROR: --handoff-file is required" >&2
-                exit 2
-              fi
-
-              if [ -z "''${POSTGRES_PORT:-}" ]; then
-                echo "ERROR: POSTGRES_PORT is not set for snapshot service startup" >&2
-                exit 1
-              fi
-
-              if [ -z "''${NIXFIED_RUNTIME_DIR_SCOPE:-}" ]; then
-                :
-              fi
-
-              if [ -z "''${NIXFIED_SERVICE_POSTGRES_DATA_DIR:-}" ] || [ -z "''${NIXFIED_SERVICE_POSTGRES_STATE_DIR:-}" ] || [ -z "''${NIXFIED_SERVICE_POSTGRES_LOG_DIR:-}" ]; then
-                echo "ERROR: postgres runtime directories are unavailable in snapshot runtime" >&2
-                exit 1
-              fi
-
-              mkdir -p "$(dirname "$handoff_file")"
-              runtime_root="$(cd "$(dirname "$handoff_file")/../.." && pwd -P)"
-              export NIXFIED_RUNTIME_DIR_SCOPE="$runtime_root"
-              export NIXFIED_SERVICE_ROOT="$runtime_root/services"
-              mkdir -p "$NIXFIED_SERVICE_ROOT"
-              mkdir -p "$runtime_root/run"
-
-              slot_info_json_path="$runtime_root/slot-info.json"
-              slot_info_json_script="$runtime_root/slot-info-json.sh"
-              ${pkgs.jq}/bin/jq -n \
-                --arg slot "''${NIX_ENV:-0}" \
-                --arg env "''${MFM_ENV:-dev}" \
-                --arg run_dir "$runtime_root/run" \
-                --arg postgres_port "$POSTGRES_PORT" \
-                --arg helios_rpc_port "''${HELIOSRPC_PORT:-''${HELIOS_RPC_PORT:-}}" \
-                --arg reth_http_port "''${RETHHTTP_PORT:-''${RETH_HTTP_PORT:-}}" \
-                '{
-                  slot: $slot,
-                  env: $env,
-                  directories: {
-                    run: $run_dir
-                  },
-                  ports: (
-                    {
-                      POSTGRES_PORT: $postgres_port
-                    }
-                    + (if $helios_rpc_port == "" then {} else { HELIOSRPC_PORT: $helios_rpc_port } end)
-                    + (if $reth_http_port == "" then {} else { RETHHTTP_PORT: $reth_http_port } end)
-                  )
-                }' > "$slot_info_json_path"
-              cat > "$slot_info_json_script" <<EOF
-              #!/bin/sh
-              cat "$slot_info_json_path"
-              EOF
-              chmod +x "$slot_info_json_script"
-              export SLOT_INFO_JSON="$slot_info_json_script"
-
-              resolve_owner_scope() {
-                if [ -n "''${SERVICE_OWNER_SCOPE:-}" ]; then
-                  printf '%s' "$SERVICE_OWNER_SCOPE"
-                  return 0
-                fi
-
-                case "''${SERVICE_REUSE_POLICY:-}" in
-                  same-slot|cross-run)
-                    printf '%s' "persistent"
-                    return 0
-                    ;;
-                  same-root)
-                    printf '%s' "ephemeral"
-                    return 0
-                    ;;
-                esac
-
-                case "''${SERVICE_DISCOVERY_SCOPE:-}" in
-                  global)
-                    printf '%s' "persistent"
-                    ;;
-                  *)
-                    printf '%s' "ephemeral"
-                    ;;
-                esac
-              }
-
-              resolve_discovery_scope() {
-                local owner_scope="$1"
-                if [ -n "''${SERVICE_DISCOVERY_SCOPE:-}" ]; then
-                  printf '%s' "$SERVICE_DISCOVERY_SCOPE"
-                  return 0
-                fi
-
-                case "''${SERVICE_REUSE_POLICY:-}" in
-                  same-slot|cross-run)
-                    printf '%s' "global"
-                    return 0
-                    ;;
-                  same-root)
-                    printf '%s' "local"
-                    return 0
-                    ;;
-                esac
-
-                case "$owner_scope" in
-                  persistent)
-                    printf '%s' "global"
-                    ;;
-                  *)
-                    printf '%s' "local"
-                    ;;
-                esac
-              }
-
-              resolve_reuse_policy() {
-                local owner_scope="$1"
-                local discovery_scope="$2"
-                if [ -n "''${SERVICE_REUSE_POLICY:-}" ]; then
-                  printf '%s' "$SERVICE_REUSE_POLICY"
-                  return 0
-                fi
-
-                if [ "$owner_scope" = "persistent" ] || [ "$discovery_scope" = "global" ]; then
-                  printf '%s' "same-slot"
-                else
-                  printf '%s' "same-root"
-                fi
-              }
-
-              validate_policy_matrix() {
-                local reuse="$1"
-                local owner="$2"
-                local discovery="$3"
-
-                case "$reuse" in
-                  never|same-root|same-slot|cross-run) ;;
-                  *)
-                    echo "ERROR: SERVICE_REUSE_POLICY must be one of never|same-root|same-slot|cross-run (got '$reuse')" >&2
-                    return 1
-                    ;;
-                esac
-
-                case "$owner" in
-                  ephemeral|persistent) ;;
-                  *)
-                    echo "ERROR: SERVICE_OWNER_SCOPE must be ephemeral|persistent (got '$owner')" >&2
-                    return 1
-                    ;;
-                esac
-
-                case "$discovery" in
-                  local|global) ;;
-                  *)
-                    echo "ERROR: SERVICE_DISCOVERY_SCOPE must be local|global (got '$discovery')" >&2
-                    return 1
-                    ;;
-                esac
-
-                if [ "$reuse" = "cross-run" ] && { [ "$owner" != "persistent" ] || [ "$discovery" != "global" ]; }; then
-                  echo "ERROR: cross-run reuse requires SERVICE_OWNER_SCOPE=persistent and SERVICE_DISCOVERY_SCOPE=global" >&2
-                  return 1
-                fi
-
-                if [ "$reuse" = "same-root" ] && { [ "$owner" != "ephemeral" ] || [ "$discovery" != "local" ]; }; then
-                  echo "ERROR: same-root reuse requires SERVICE_OWNER_SCOPE=ephemeral and SERVICE_DISCOVERY_SCOPE=local" >&2
-                  return 1
-                fi
-
-                if [ "$owner" = "persistent" ] && [ "$discovery" != "global" ]; then
-                  echo "ERROR: persistent owner scope requires SERVICE_DISCOVERY_SCOPE=global" >&2
-                  return 1
-                fi
-
-                if [ "$owner" = "ephemeral" ] && [ "$discovery" != "local" ]; then
-                  echo "ERROR: ephemeral owner scope requires SERVICE_DISCOVERY_SCOPE=local" >&2
-                  return 1
-                fi
-              }
-
-              owner_scope="$(resolve_owner_scope)"
-              discovery_scope="$(resolve_discovery_scope "$owner_scope")"
-              reuse_policy="$(resolve_reuse_policy "$owner_scope" "$discovery_scope")"
-              validate_policy_matrix "$reuse_policy" "$owner_scope" "$discovery_scope"
-
-              cleanup_required=1
-              if [ "$owner_scope" = "persistent" ]; then
-                cleanup_required=0
-              fi
-
-              echo "INFO: snapshot service policy reuse=$reuse_policy owner=$owner_scope discovery=$discovery_scope"
-
-              service_scope_root="$runtime_root"
-              if [ "$owner_scope" = "persistent" ] || [ "$discovery_scope" = "global" ]; then
-                service_env_name="''${MFM_ENV:-''${ENV:-dev}}"
-                service_slot="''${NIX_ENV:-''${SLOT:-0}}"
-                service_runtime_base="''${MFM_SNAPSHOT_RUNTIME_DIR_BASE:-}"
-                if [ -z "$service_runtime_base" ]; then
-                  service_user_name="$(id -un 2>/dev/null || true)"
-                  if [ -n "$service_user_name" ]; then
-                    service_user_home="$(eval printf '%s' "~$service_user_name")"
-                    if [ -n "$service_user_home" ] && [ "$service_user_home" != "~$service_user_name" ]; then
-                      service_runtime_base="$service_user_home/.local/share/${project.id}"
-                    fi
-                  fi
-                fi
-                if [ -n "$service_runtime_base" ]; then
-                  service_scope_root="$service_runtime_base/$service_env_name/slot-$service_slot"
-                fi
-              fi
-              service_root="$service_scope_root/services"
-
-              export NIXFIED_RUNTIME_DIR_SCOPE="$service_scope_root"
-              export NIXFIED_SERVICE_ROOT="$service_root"
-              export NIXFIED_SERVICE_POSTGRES_DATA_DIR="$service_root/postgres/data"
-              export NIXFIED_SERVICE_POSTGRES_STATE_DIR="$service_root/postgres/state"
-              export NIXFIED_SERVICE_POSTGRES_LOG_DIR="$service_root/postgres/log"
-
-              mkdir -p "$NIXFIED_SERVICE_ROOT"
-              mkdir -p "$NIXFIED_SERVICE_POSTGRES_DATA_DIR" "$NIXFIED_SERVICE_POSTGRES_STATE_DIR" "$NIXFIED_SERVICE_POSTGRES_LOG_DIR"
-
-              echo "INFO: snapshot service scope root=$service_scope_root service_root=$service_root"
-
-              postgres_data="$NIXFIED_SERVICE_POSTGRES_DATA_DIR"
-              postgres_log="$postgres_data/postgres.log"
-              postgres_owned=0
-
-              postgres_is_running() {
-                local pid=""
-                if [ ! -f "$postgres_data/postmaster.pid" ]; then
-                  return 1
-                fi
-                pid="$(head -1 "$postgres_data/postmaster.pid" 2>/dev/null || true)"
-                [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
-              }
-
-              postgres_port_ready() {
-                ${postgresPackage}/bin/pg_isready -U postgres -h 127.0.0.1 -p "$POSTGRES_PORT" -q 2>/dev/null
-              }
-
-              if postgres_is_running; then
-                if [ "$reuse_policy" = "never" ]; then
-                  echo "ERROR: postgres already managed for this slot and reuse policy is 'never'" >&2
-                  exit 1
-                fi
-                echo "INFO: reusing framework-managed postgres port=$POSTGRES_PORT data=$postgres_data"
-              elif postgres_port_ready; then
-                if [ "$reuse_policy" = "never" ]; then
-                  echo "ERROR: postgres already listening on port $POSTGRES_PORT and reuse policy is 'never'" >&2
-                  exit 1
-                fi
-                echo "INFO: reusing healthy postgres on slot port=$POSTGRES_PORT outside expected data dir=$postgres_data"
-              else
-                postgres_owned=1
-                echo "INFO: starting framework-managed postgres port=$POSTGRES_PORT data=$postgres_data"
-              fi
-
-              if [ "$postgres_owned" = "1" ]; then
-                if ! "$SVC_POSTGRES_FULL_START"; then
-                  echo "ERROR: postgres full-start failed port=$POSTGRES_PORT data=$postgres_data" >&2
-                  if [ -f "$postgres_log" ]; then
-                    tail -50 "$postgres_log" >&2 || true
-                  fi
-                  exit 1
-                fi
-              fi
-
-              if ! "$SVC_POSTGRES_READY"; then
-                echo "ERROR: postgres failed framework readiness checks port=$POSTGRES_PORT" >&2
-                if [ -f "$postgres_log" ]; then
-                  tail -50 "$postgres_log" >&2 || true
-                fi
-                exit 1
-              fi
-              if [ "$postgres_owned" != "1" ]; then
-                if ! "$SVC_POSTGRES_SETUP_DB"; then
-                  echo "ERROR: postgres setup-db failed on reused instance port=$POSTGRES_PORT" >&2
-                  exit 1
-                fi
-              fi
-              echo "OK: postgres readiness validated service=postgres source=local"
-
-              ${pkgs.jq}/bin/jq -n \
-                --arg reuse_policy "$reuse_policy" \
-                --arg owner_scope "$owner_scope" \
-                --arg discovery_scope "$discovery_scope" \
-                --arg cleanup_required "$cleanup_required" \
-                --arg service_scope_root "$service_scope_root" \
-                --arg service_root "$service_root" \
-                --arg slot_info_json_script "$slot_info_json_script" \
-                --arg postgres_owned "$postgres_owned" \
-                --arg postgres_data "$postgres_data" \
-                --arg postgres_log "$postgres_log" \
-                '{
-                  reuse_policy: $reuse_policy,
-                  owner_scope: $owner_scope,
-                  discovery_scope: $discovery_scope,
-                  cleanup_required: ($cleanup_required == "1"),
-                  service_scope_root: $service_scope_root,
-                  service_root: $service_root,
-                  slot_info_json_script: $slot_info_json_script,
-                  postgres_owned: ($postgres_owned == "1"),
-                  helios_owned: false,
-                  postgres_data: $postgres_data,
-                  postgres_log: $postgres_log,
-                  helios_pid_file: "",
-                  helios_log: ""
-                }' > "$handoff_file"
-
-              echo "OK: snapshot postgres ready port=$POSTGRES_PORT handoff=$handoff_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        mfm-portfolio-helios-start =
-          mkCommandTask {
-            id = "task.mfm.portfolio.helios-start";
-            appName = "mfm-portfolio-helios-start";
-            kind = "internal";
-            summary = "Start or reuse portfolio snapshot helios";
-            description = "Internal task that starts or reuses Helios for the portfolio snapshot app and updates the shared handoff file.";
-            runtimeInputs = commonRuntimeInputs ++ [
-              pkgs.curl
-              pkgs.lsof
-            ];
-            requirements = {
-              services = [ "helios" ];
-            };
-            allowUnknownArgs = false;
-            contractArgs = [
-              {
-                name = "handoff-file";
-                kind = "option";
-                long = "--handoff-file";
-                type = "string";
-                required = true;
-                description = "Path to a non-secret handoff JSON file.";
-              }
-            ];
-            command = ''
-              set -euo pipefail
-
-              handoff_file=""
-              while [ "$#" -gt 0 ]; do
-                case "$1" in
-                  --handoff-file)
-                    shift
-                    handoff_file="''${1:-}"
-                    ;;
-                  --help|-h)
-                    echo "usage: run-task task.mfm.portfolio.helios-start --handoff-file <PATH>" >&2
-                    exit 0
-                    ;;
-                  *)
-                    echo "ERROR: unknown argument '$1'" >&2
-                    exit 2
-                    ;;
-                esac
-                shift
-              done
-
-              if [ -z "$handoff_file" ]; then
-                echo "ERROR: --handoff-file is required" >&2
-                exit 2
-              fi
-
-              if [ ! -f "$handoff_file" ]; then
-                echo "ERROR: snapshot handoff file is missing path=$handoff_file" >&2
-                exit 1
-              fi
-
-              if [ -z "''${HELIOSRPC_PORT:-}" ]; then
-                echo "ERROR: HELIOSRPC_PORT is not set for snapshot helios startup" >&2
-                exit 1
-              fi
-
-              service_scope_root="$(${pkgs.jq}/bin/jq -r '.service_scope_root // empty' "$handoff_file")"
-              service_root="$(${pkgs.jq}/bin/jq -r '.service_root // empty' "$handoff_file")"
-              slot_info_json_script="$(${pkgs.jq}/bin/jq -r '.slot_info_json_script // empty' "$handoff_file")"
-              reuse_policy="$(${pkgs.jq}/bin/jq -r '.reuse_policy // empty' "$handoff_file")"
-
-              if [ -z "$service_scope_root" ] || [ -z "$service_root" ] || [ -z "$slot_info_json_script" ]; then
-                echo "ERROR: snapshot handoff file is missing shared service metadata" >&2
-                exit 1
-              fi
-
-              export SLOT_INFO_JSON="$slot_info_json_script"
-              export NIXFIED_RUNTIME_DIR_SCOPE="$service_scope_root"
-              export NIXFIED_SERVICE_ROOT="$service_root"
-              export NIXFIED_SERVICE_HELIOS_DATA_DIR="$service_root/helios/data"
-              export NIXFIED_SERVICE_HELIOS_STATE_DIR="$service_root/helios/state"
-              export NIXFIED_SERVICE_HELIOS_LOG_DIR="$service_root/helios/log"
-              export HELIOS_RPC_PORT="$HELIOSRPC_PORT"
-
-              mkdir -p "$NIXFIED_SERVICE_HELIOS_DATA_DIR" "$NIXFIED_SERVICE_HELIOS_STATE_DIR" "$NIXFIED_SERVICE_HELIOS_LOG_DIR"
-
-              HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
-              if [ "$HELIOS_NETWORK" != "mainnet" ]; then
-                echo "ERROR: HELIOS_NETWORK must be 'mainnet' for mfm::portfolio::snapshot" >&2
-                exit 1
-              fi
-
-              export HELIOS_NETWORK
-              export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
-                conf.modules.helios.executionRpcUrl or "https://ethereum-rpc.publicnode.com"
-              }}"
-              export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-}"
-              export HELIOS_CHECKPOINT="''${HELIOS_CHECKPOINT:-}"
-
-              if [ -z "$HELIOS_EXECUTION_RPC_URL" ]; then
-                echo "ERROR: HELIOS_EXECUTION_RPC_URL is required for snapshot helios startup" >&2
-                exit 1
-              fi
-
-              helios_dir="$NIXFIED_SERVICE_HELIOS_DATA_DIR"
-              helios_log="$helios_dir/logs/helios.log"
-              helios_pid_file="$helios_dir/run/helios.pid"
-              helios_start_log="$helios_dir/logs/helios-start.log"
-              helios_owned=0
-              helios_ready_timeout_seconds="''${HELIOS_READY_TIMEOUT_SECS:-300}"
-              helios_ready_interval_seconds="''${HELIOS_READY_INTERVAL_SECS:-1}"
-
-              helios_is_running() {
-                local pid=""
-                if [ ! -f "$helios_pid_file" ]; then
-                  return 1
-                fi
-                pid="$(cat "$helios_pid_file" 2>/dev/null || true)"
-                [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
-              }
-
-              helios_port_ready() {
-                "$SVC_HELIOS_READY" >/dev/null 2>&1
-              }
-
-              if helios_is_running; then
-                if [ "$reuse_policy" = "never" ]; then
-                  echo "ERROR: helios already managed for this slot and reuse policy is 'never'" >&2
-                  exit 1
-                fi
-                echo "INFO: reusing framework-managed helios port=$HELIOS_RPC_PORT dir=$helios_dir"
-              elif helios_port_ready; then
-                if [ "$reuse_policy" = "never" ]; then
-                  echo "ERROR: helios already serving on port $HELIOS_RPC_PORT and reuse policy is 'never'" >&2
-                  exit 1
-                fi
-                echo "INFO: reusing healthy helios on slot port=$HELIOS_RPC_PORT outside expected pid file=$helios_pid_file"
-              else
-                helios_owned=1
-                echo "INFO: starting framework-managed helios port=$HELIOS_RPC_PORT dir=$helios_dir execution_rpc=$HELIOS_EXECUTION_RPC_URL"
-              fi
-
-              if [ "$helios_owned" = "1" ]; then
-                if ! NIXFIED_START_SERVICE_MANAGED_CLEANUP=1 \
-                  start_service_into helios_start_pid helios --log "$helios_start_log" -- "$SVC_HELIOS_FULL_START"; then
-                  echo "ERROR: helios full-start failed port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
-                  if [ -f "$helios_log" ]; then
-                    tail -50 "$helios_log" >&2 || true
-                  elif [ -f "$helios_start_log" ]; then
-                    tail -50 "$helios_start_log" >&2 || true
-                  fi
-                  exit 1
-                fi
-              fi
-
-              if ! HELIOS_READY_TIMEOUT_SECS="$helios_ready_timeout_seconds" \
-                HELIOS_READY_INTERVAL_SECS="$helios_ready_interval_seconds" \
-                "$SVC_HELIOS_READY"; then
-                echo "ERROR: helios failed snapshot readiness checks after $helios_ready_timeout_seconds s port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" >&2
-                if [ -f "$helios_log" ]; then
-                  tail -50 "$helios_log" >&2 || true
-                elif [ -f "$helios_start_log" ]; then
-                  tail -50 "$helios_start_log" >&2 || true
-                fi
-                exit 1
-              fi
-
-              handoff_tmp="$(mktemp "''${TMPDIR:-/tmp}/mfm-portfolio-helios-handoff.XXXXXX")"
-              ${pkgs.jq}/bin/jq \
-                --arg helios_owned "$helios_owned" \
-                --arg helios_pid_file "$helios_pid_file" \
-                --arg helios_log "$helios_log" \
-                '.helios_owned = ($helios_owned == "1")
-                | .helios_pid_file = $helios_pid_file
-                | .helios_log = $helios_log' \
-                "$handoff_file" > "$handoff_tmp"
-              mv "$handoff_tmp" "$handoff_file"
-
-              echo "OK: snapshot helios ready port=$HELIOS_RPC_PORT handoff=$handoff_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        mfm-portfolio-services-stop =
-          mkCommandTask {
-            id = "task.mfm.portfolio.services-stop";
-            appName = "mfm-portfolio-postgres-stop";
-            kind = "internal";
-            summary = "Stop owned portfolio snapshot postgres";
-            description = "Internal task that stops only Postgres owned by the current snapshot invocation.";
-            runtimeInputs = commonRuntimeInputs ++ [ postgresPackage ];
-            requirements = {
-              services = [ "postgres" ];
-            };
-            allowUnknownArgs = false;
-            contractArgs = [
-              {
-                name = "handoff-file";
-                kind = "option";
-                long = "--handoff-file";
-                type = "string";
-                required = true;
-                description = "Path to a non-secret handoff JSON file.";
-              }
-            ];
-            command = ''
-              set -euo pipefail
-
-              handoff_file=""
-              while [ "$#" -gt 0 ]; do
-                case "$1" in
-                  --handoff-file)
-                    shift
-                    handoff_file="''${1:-}"
-                    ;;
-                  --help|-h)
-                    echo "usage: run-task task.mfm.portfolio.services-stop --handoff-file <PATH>" >&2
-                    exit 0
-                    ;;
-                  *)
-                    echo "ERROR: unknown argument '$1'" >&2
-                    exit 2
-                    ;;
-                esac
-                shift
-              done
-
-              if [ -z "$handoff_file" ]; then
-                echo "ERROR: --handoff-file is required" >&2
-                exit 2
-              fi
-
-              if [ ! -f "$handoff_file" ]; then
-                echo "SKIP: snapshot handoff file is missing path=$handoff_file"
-                exit 0
-              fi
-
-              cleanup_required="$(${pkgs.jq}/bin/jq -r 'if .cleanup_required then "1" else "0" end' "$handoff_file")"
-              postgres_owned="$(${pkgs.jq}/bin/jq -r 'if .postgres_owned then "1" else "0" end' "$handoff_file")"
-              postgres_data="$(${pkgs.jq}/bin/jq -r '.postgres_data // empty' "$handoff_file")"
-              postgres_log="$(${pkgs.jq}/bin/jq -r '.postgres_log // empty' "$handoff_file")"
-
-              if [ "$cleanup_required" != "1" ]; then
-                echo "SKIP: snapshot postgres preserved by policy handoff=$handoff_file"
-                exit 0
-              fi
-
-              if [ "$postgres_owned" = "1" ] && [ -n "$postgres_data" ] && [ -d "$postgres_data" ]; then
-                echo "INFO: stopping owned postgres data=$postgres_data"
-                "$SVC_POSTGRES_STOP" >/dev/null 2>&1 || true
-              fi
-
-              echo "OK: snapshot postgres stopped handoff=$handoff_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        mfm-portfolio-helios-stop =
-          mkCommandTask {
-            id = "task.mfm.portfolio.helios-stop";
-            appName = "mfm-portfolio-helios-stop";
-            kind = "internal";
-            summary = "Stop owned portfolio snapshot helios";
-            description = "Internal task that stops only Helios owned by the current snapshot invocation.";
-            runtimeInputs = commonRuntimeInputs;
-            requirements = {
-              services = [ "helios" ];
-            };
-            allowUnknownArgs = false;
-            contractArgs = [
-              {
-                name = "handoff-file";
-                kind = "option";
-                long = "--handoff-file";
-                type = "string";
-                required = true;
-                description = "Path to a non-secret handoff JSON file.";
-              }
-            ];
-            command = ''
-              set -euo pipefail
-
-              handoff_file=""
-              while [ "$#" -gt 0 ]; do
-                case "$1" in
-                  --handoff-file)
-                    shift
-                    handoff_file="''${1:-}"
-                    ;;
-                  --help|-h)
-                    echo "usage: run-task task.mfm.portfolio.helios-stop --handoff-file <PATH>" >&2
-                    exit 0
-                    ;;
-                  *)
-                    echo "ERROR: unknown argument '$1'" >&2
-                    exit 2
-                    ;;
-                esac
-                shift
-              done
-
-              if [ -z "$handoff_file" ]; then
-                echo "ERROR: --handoff-file is required" >&2
-                exit 2
-              fi
-
-              if [ ! -f "$handoff_file" ]; then
-                echo "SKIP: snapshot handoff file is missing path=$handoff_file"
-                exit 0
-              fi
-
-              cleanup_required="$(${pkgs.jq}/bin/jq -r 'if .cleanup_required then "1" else "0" end' "$handoff_file")"
-              helios_owned="$(${pkgs.jq}/bin/jq -r 'if .helios_owned then "1" else "0" end' "$handoff_file")"
-              helios_pid_file="$(${pkgs.jq}/bin/jq -r '.helios_pid_file // empty' "$handoff_file")"
-
-              if [ "$cleanup_required" != "1" ]; then
-                echo "SKIP: snapshot helios preserved by policy handoff=$handoff_file"
-                exit 0
-              fi
-
-              if [ "$helios_owned" = "1" ] && [ -n "$helios_pid_file" ] && [ -f "$helios_pid_file" ]; then
-                "$SVC_HELIOS_STOP" >/dev/null 2>&1 || true
-              fi
-
-              echo "OK: snapshot helios stopped handoff=$handoff_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        mfm-portfolio-snapshot-preflight =
-          mkCommandTask {
-            id = "task.mfm.portfolio.snapshot.preflight";
-            appName = "mfm-portfolio-snapshot-preflight";
-            kind = "internal";
-            summary = "Validate snapshot workflow inputs";
-            description = "Internal task that validates env and temp paths for the portfolio snapshot workflow.";
-            runtimeInputs = leanRuntimeInputs;
-            requirements = {
-              services = [ "postgres" ];
-            };
-            allowUnknownArgs = false;
-            command = ''
-              set -euo pipefail
-
-              if [ "$#" -ne 0 ]; then
-                echo "ERROR: task.mfm.portfolio.snapshot.preflight does not accept arguments" >&2
-                exit 2
-              fi
-
-              if [ -z "''${MFM_SNAPSHOT_REQUEST_FILE:-}" ]; then
-                echo "ERROR: MFM_SNAPSHOT_REQUEST_FILE is required for the snapshot workflow" >&2
-                exit 1
-              fi
-
-              if [ ! -f "$MFM_SNAPSHOT_REQUEST_FILE" ]; then
-                echo "ERROR: MFM_SNAPSHOT_REQUEST_FILE does not exist: $MFM_SNAPSHOT_REQUEST_FILE" >&2
-                exit 1
-              fi
-
-              if [ ! -r "$MFM_SNAPSHOT_REQUEST_FILE" ]; then
-                echo "ERROR: MFM_SNAPSHOT_REQUEST_FILE is not readable: $MFM_SNAPSHOT_REQUEST_FILE" >&2
-                exit 1
-              fi
-
-              if [ -z "''${MFM_SNAPSHOT_HANDOFF_FILE:-}" ]; then
-                echo "ERROR: MFM_SNAPSHOT_HANDOFF_FILE is required for the snapshot workflow" >&2
-                exit 1
-              fi
-
-              if [ -z "''${MFM_SNAPSHOT_RESULT_FILE:-}" ]; then
-                echo "ERROR: MFM_SNAPSHOT_RESULT_FILE is required for the snapshot workflow" >&2
-                exit 1
-              fi
-
-              if [ -z "''${POSTGRES_PORT:-}" ]; then
-                echo "ERROR: POSTGRES_PORT is not set for snapshot" >&2
-                exit 1
-              fi
-
-              if ! is_service_skipped helios; then
-                if [ -z "''${HELIOSRPC_PORT:-}" ]; then
-                  echo "ERROR: HELIOSRPC_PORT is not set for snapshot" >&2
-                  exit 1
-                fi
-              fi
-
-              if [ -z "''${NIXFIED_EXECUTOR_SELF:-}" ]; then
-                echo "ERROR: NIXFIED_EXECUTOR_SELF is not available in the snapshot runtime" >&2
-                exit 1
-              fi
-
-              if [ "''${MFM_KEEP_SERVICES+x}" = "x" ]; then
-                echo "ERROR: MFM_KEEP_SERVICES has been removed from mfm::portfolio::snapshot" >&2
-                echo "Use process-first controls instead:" >&2
-                echo "  SERVICE_REUSE_POLICY=never|same-root|same-slot|cross-run" >&2
-                echo "  SERVICE_OWNER_SCOPE=ephemeral|persistent" >&2
-                echo "  SERVICE_DISCOVERY_SCOPE=local|global" >&2
-                exit 1
-              fi
-
-              if ! is_service_skipped helios; then
-                export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
-                if [ "$HELIOS_NETWORK" != "mainnet" ]; then
-                  echo "ERROR: HELIOS_NETWORK must be 'mainnet' for mfm::portfolio::snapshot" >&2
-                  exit 1
-                fi
-              fi
-
-              mkdir -p "$(dirname "$MFM_SNAPSHOT_HANDOFF_FILE")"
-              mkdir -p "$(dirname "$MFM_SNAPSHOT_RESULT_FILE")"
-
-              echo "OK: snapshot preflight request_file=$MFM_SNAPSHOT_REQUEST_FILE"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        mfm-portfolio-snapshot-services-start =
-          mkCommandTask {
-            id = "task.mfm.portfolio.snapshot.services-start";
-            appName = "mfm-portfolio-snapshot-services-start";
-            kind = "internal";
-            summary = "Start snapshot workflow services";
-            description = "Internal task that delegates to the portfolio snapshot service bootstrap task.";
-            runtimeInputs = leanRuntimeInputs;
-            requirements = {
-              services = [ "postgres" ];
-            };
-            allowUnknownArgs = false;
-            command = ''
-              set -euo pipefail
-
-              if [ "$#" -ne 0 ]; then
-                echo "ERROR: task.mfm.portfolio.snapshot.services-start does not accept arguments" >&2
-                exit 2
-              fi
-
-              if [ -z "''${MFM_SNAPSHOT_HANDOFF_FILE:-}" ]; then
-                echo "ERROR: MFM_SNAPSHOT_HANDOFF_FILE is required for snapshot service startup" >&2
-                exit 1
-              fi
-
-              if [ -z "''${NIXFIED_EXECUTOR_SELF:-}" ]; then
-                echo "ERROR: NIXFIED_EXECUTOR_SELF is required for snapshot service startup" >&2
-                exit 1
-              fi
-
-              NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.mfm.portfolio.services-start --handoff-file "$MFM_SNAPSHOT_HANDOFF_FILE"
-              if [ -n "''${SVC_HELIOS_FULL_START:-}" ]; then
-                NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.mfm.portfolio.helios-start --handoff-file "$MFM_SNAPSHOT_HANDOFF_FILE"
-              fi
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        mfm-portfolio-snapshot-exec =
-          mkCommandTask {
-            id = "task.mfm.portfolio.snapshot.exec";
-            appName = "mfm-portfolio-snapshot-exec";
-            kind = "internal";
-            summary = "Run the packaged snapshot CLI";
-            description = "Internal task that runs the packaged mfm_cli binary and writes the raw JSON result file.";
-            runtimeInputs = leanRuntimeInputs ++ [ conf.packages."mfm-cli" ];
-            requirements = {
-              services = [ "postgres" ];
-            };
-            allowUnknownArgs = false;
-            command = ''
-              set -euo pipefail
-              if [ -w /dev/tty ]; then
-                exec >/dev/tty 2>&1
-              fi
-              ${resolvePackagedMfmCliShell}
-
-              if [ "$#" -ne 0 ]; then
-                echo "ERROR: task.mfm.portfolio.snapshot.exec does not accept arguments" >&2
-                exit 2
-              fi
-
-              if [ -z "''${MFM_SNAPSHOT_REQUEST_FILE:-}" ]; then
-                echo "ERROR: MFM_SNAPSHOT_REQUEST_FILE is required for snapshot execution" >&2
-                exit 1
-              fi
-
-              if [ -z "''${MFM_SNAPSHOT_RESULT_FILE:-}" ]; then
-                echo "ERROR: MFM_SNAPSHOT_RESULT_FILE is required for snapshot execution" >&2
-                exit 1
-              fi
-
-              if [ -z "''${POSTGRES_PORT:-}" ]; then
-                echo "ERROR: POSTGRES_PORT is not set for snapshot execution" >&2
-                exit 1
-              fi
-
-              if is_service_skipped helios && [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ]; then
-                echo "ERROR: MFM_EVM_RPC_SOURCES_JSON is required when helios is skipped"
-                exit 1
-              fi
-              if [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ] && [ -z "''${HELIOSRPC_PORT:-}" ]; then
-                echo "ERROR: either HELIOSRPC_PORT or MFM_EVM_RPC_SOURCES_JSON is required for snapshot execution" >&2
-                exit 1
-              fi
-
-              echo "INFO: snapshot exec preparing packaged mfm_cli request_file=$MFM_SNAPSHOT_REQUEST_FILE result_file=$MFM_SNAPSHOT_RESULT_FILE"
-              mfm_cli_bin="$(resolve_packaged_mfm_cli_binary)" || exit 1
-
-              export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/${
-                conf.modules.postgres.database or "mfm"
-              }"
-              if [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ]; then
-                if [ -z "''${HELIOSRPC_PORT:-}" ]; then
-                  echo "ERROR: HELIOSRPC_PORT is required when MFM_EVM_RPC_SOURCES_JSON is not set" >&2
-                  exit 1
-                fi
-                export HELIOS_RPC_PORT="$HELIOSRPC_PORT"
-                export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"helios_local\",\"network_id\":\"ethereum-mainnet\",\"rpc_url\":\"http://127.0.0.1:$HELIOS_RPC_PORT\",\"kind\":\"local\"}]"
-                export MFM_EVM_RPC_PREFERRED_ORDER="helios_local"
-              fi
-
-              echo "INFO: launching packaged mfm_cli portfolio snapshot request_file=$MFM_SNAPSHOT_REQUEST_FILE rpc_sources=helios_local"
-              "$mfm_cli_bin" --output-format json portfolio snapshot --request-file "$MFM_SNAPSHOT_REQUEST_FILE" >"$MFM_SNAPSHOT_RESULT_FILE"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        mfm-portfolio-snapshot-services-stop =
-          mkCommandTask {
-            id = "task.mfm.portfolio.snapshot.services-stop";
-            appName = "mfm-portfolio-snapshot-services-stop";
-            kind = "internal";
-            summary = "Stop snapshot workflow services";
-            description = "Internal task that delegates to the portfolio snapshot service teardown task.";
-            runtimeInputs = leanRuntimeInputs;
-            requirements = {
-              services = [ "postgres" ];
-            };
-            allowUnknownArgs = false;
-            command = ''
-              set -euo pipefail
-              if [ -w /dev/tty ]; then
-                exec >/dev/tty 2>&1
-              fi
-
-              if [ "$#" -ne 0 ]; then
-                echo "ERROR: task.mfm.portfolio.snapshot.services-stop does not accept arguments" >&2
-                exit 2
-              fi
-
-              if [ -z "''${MFM_SNAPSHOT_HANDOFF_FILE:-}" ]; then
-                echo "ERROR: MFM_SNAPSHOT_HANDOFF_FILE is required for snapshot service teardown" >&2
-                exit 1
-              fi
-
-              if [ -z "''${NIXFIED_EXECUTOR_SELF:-}" ]; then
-                echo "ERROR: NIXFIED_EXECUTOR_SELF is required for snapshot service teardown" >&2
-                exit 1
-              fi
-
-              if [ -n "''${SVC_HELIOS_STOP:-}" ]; then
-                NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.mfm.portfolio.helios-stop --handoff-file "$MFM_SNAPSHOT_HANDOFF_FILE"
-              fi
-              NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.mfm.portfolio.services-stop --handoff-file "$MFM_SNAPSHOT_HANDOFF_FILE"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
         mfm-portfolio-snapshot = mkCommandTask {
           id = "task.mfm.portfolio.snapshot";
-          appName = "mfm::portfolio::snapshot";
           summary = "Snapshot a portfolio request with Helios-backed mainnet RPC";
           description = ''
             Starts/reuses Postgres + Helios, waits for Helios RPC health checks,
@@ -1766,18 +865,7 @@ in
           ];
           command = ''
             set -euo pipefail
-
-            # Reserve stdout for the final JSON payload and route progress logs to
-            # the controlling terminal when available, because nested nixfied task
-            # stderr is otherwise swallowed by the app launcher.
-            exec 3>&1
-            if [ -w /dev/tty ]; then
-              exec 4>/dev/tty
-            else
-              exec 4>&2
-            fi
-            exec 1>&4
-            exec 2>&4
+            ${resolvePackagedMfmCliShell}
 
             if [ "''${1:-}" = "--help" ] || [ "''${1:-}" = "-h" ]; then
               echo "usage: nix run .#mfm::portfolio::snapshot -- <REQUEST_FILE>" >&2
@@ -1789,88 +877,206 @@ in
               exit 2
             fi
 
+            request_file="$1"
+            if [ "''${request_file#/}" = "$request_file" ]; then
+              request_file="$PWD/$request_file"
+            fi
+            if [ ! -f "$request_file" ]; then
+              echo "ERROR: request file does not exist: $request_file" >&2
+              exit 1
+            fi
+            if [ ! -r "$request_file" ]; then
+              echo "ERROR: request file is not readable: $request_file" >&2
+              exit 1
+            fi
             if [ -z "''${POSTGRES_PORT:-}" ]; then
               echo "ERROR: POSTGRES_PORT is not set for snapshot" >&2
               exit 1
             fi
-
-            if ! is_service_skipped helios; then
-              if [ -z "''${HELIOSRPC_PORT:-}" ]; then
-                echo "ERROR: HELIOSRPC_PORT is not set for managed snapshot services" >&2
-                exit 1
-              fi
+            if [ "''${MFM_KEEP_SERVICES+x}" = "x" ]; then
+              echo "ERROR: MFM_KEEP_SERVICES has been removed from mfm::portfolio::snapshot" >&2
+              echo "Use SERVICE_REUSE_POLICY / SERVICE_OWNER_SCOPE / SERVICE_DISCOVERY_SCOPE instead." >&2
+              exit 1
             fi
-
-            if [ -z "''${NIXFIED_EXECUTOR_SELF:-}" ]; then
-              echo "ERROR: NIXFIED_EXECUTOR_SELF is not available in the snapshot runtime" >&2
+            if [ -z "''${SVC_POSTGRES_FULL_START:-}" ] || [ -z "''${SVC_POSTGRES_READY:-}" ] || [ -z "''${SVC_POSTGRES_STOP:-}" ]; then
+              echo "ERROR: postgres lifecycle hooks are unavailable in the snapshot runtime" >&2
               exit 1
             fi
 
-            if ! is_service_skipped helios; then
-              export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
-              if [ "$HELIOS_NETWORK" != "mainnet" ]; then
-                echo "ERROR: HELIOS_NETWORK must be 'mainnet' for mfm::portfolio::snapshot" >&2
-                exit 1
+            infer_owner_scope() {
+              if [ -n "''${SERVICE_OWNER_SCOPE:-}" ]; then
+                printf '%s' "$SERVICE_OWNER_SCOPE"
+                return 0
               fi
-            fi
 
-            REQUEST_FILE="$1"
-            if [ "''${REQUEST_FILE#/}" = "$REQUEST_FILE" ]; then
-              REQUEST_FILE="$PWD/$REQUEST_FILE"
-            fi
-            session_dir="$(mktemp -d "''${TMPDIR:-/tmp}/mfm-portfolio-snapshot.XXXXXX")"
-            handoff_file="$session_dir/services.json"
-            out_file="$session_dir/result.json"
-            snapshot_runtime_dir_base="''${MFM_SNAPSHOT_RUNTIME_DIR_BASE:-}"
-            if [ -z "$snapshot_runtime_dir_base" ]; then
-              snapshot_user_name="$(id -un 2>/dev/null || true)"
-              if [ -n "$snapshot_user_name" ]; then
-                snapshot_user_home="$(eval printf '%s' "~$snapshot_user_name")"
-                if [ -n "$snapshot_user_home" ] && [ "$snapshot_user_home" != "~$snapshot_user_name" ]; then
-                  snapshot_runtime_dir_base="$snapshot_user_home/.local/share/${project.id}"
-                fi
+              case "''${SERVICE_REUSE_POLICY:-}" in
+                same-slot|cross-run)
+                  printf '%s' "persistent"
+                  ;;
+                same-root|never)
+                  printf '%s' "ephemeral"
+                  ;;
+                *)
+                  printf '%s' ""
+                  ;;
+              esac
+            }
+
+            infer_discovery_scope() {
+              local owner_scope="$1"
+              if [ -n "''${SERVICE_DISCOVERY_SCOPE:-}" ]; then
+                printf '%s' "$SERVICE_DISCOVERY_SCOPE"
+                return 0
               fi
-            fi
-            export MFM_SNAPSHOT_REQUEST_FILE="$REQUEST_FILE"
-            export MFM_SNAPSHOT_HANDOFF_FILE="$handoff_file"
-            export MFM_SNAPSHOT_RESULT_FILE="$out_file"
-            export MFM_SNAPSHOT_RUNTIME_DIR_BASE="$snapshot_runtime_dir_base"
+
+              case "''${SERVICE_REUSE_POLICY:-}" in
+                same-slot|cross-run)
+                  printf '%s' "global"
+                  ;;
+                same-root|never)
+                  printf '%s' "local"
+                  ;;
+                *)
+                  case "$owner_scope" in
+                    persistent)
+                      printf '%s' "global"
+                      ;;
+                    ephemeral)
+                      printf '%s' "local"
+                      ;;
+                    *)
+                      printf '%s' ""
+                      ;;
+                  esac
+                  ;;
+              esac
+            }
+
+            infer_reuse_policy() {
+              local owner_scope="$1"
+              local discovery_scope="$2"
+              if [ -n "''${SERVICE_REUSE_POLICY:-}" ]; then
+                printf '%s' "$SERVICE_REUSE_POLICY"
+                return 0
+              fi
+
+              if [ "$owner_scope" = "persistent" ] || [ "$discovery_scope" = "global" ]; then
+                printf '%s' "same-slot"
+              else
+                printf '%s' "same-root"
+              fi
+            }
+
+            postgres_owned=0
+            helios_owned=0
+            result_file="$(mktemp "''${TMPDIR:-/tmp}/mfm-portfolio-snapshot.XXXXXX.json")"
+            owner_scope="$(infer_owner_scope)"
+            discovery_scope="$(infer_discovery_scope "$owner_scope")"
+            reuse_policy="$(infer_reuse_policy "$owner_scope" "$discovery_scope")"
+            cleanup_required=1
+            case "$reuse_policy" in
+              same-slot|cross-run)
+                cleanup_required=0
+                ;;
+            esac
 
             cleanup() {
               local rc=$?
-              if [ -n "''${NIXFIED_EXECUTOR_SELF:-}" ] && [ -n "''${MFM_SNAPSHOT_HANDOFF_FILE:-}" ]; then
-                NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.mfm.portfolio.snapshot.services-stop >/dev/null 2>&1 || true
+              if [ "$cleanup_required" = "1" ]; then
+                if [ "$helios_owned" = "1" ] && [ -n "''${SVC_HELIOS_STOP:-}" ]; then
+                  "$SVC_HELIOS_STOP" >/dev/null 2>&1 || true
+                fi
+                if [ "$postgres_owned" = "1" ]; then
+                  "$SVC_POSTGRES_STOP" >/dev/null 2>&1 || true
+                fi
               fi
-              rm -rf "$session_dir" 2>/dev/null || true
+              rm -f "$result_file" 2>/dev/null || true
               return "$rc"
             }
             trap cleanup EXIT
             trap 'exit 130' INT
             trap 'exit 143' TERM
 
-            echo "INFO: snapshot workflow bootstrap request_file=$REQUEST_FILE postgres_port=$POSTGRES_PORT heliosrpc_port=$HELIOSRPC_PORT reuse=''${SERVICE_REUSE_POLICY:-default}"
-            echo "INFO: snapshot workflow session_dir=$session_dir handoff_file=$handoff_file result_file=$out_file"
-            echo "INFO: snapshot workflow phases: preflight -> services-start/reuse -> snapshot.exec -> services-stop"
-            NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-workflow workflow.mfm.portfolio.snapshot
+            echo "INFO: snapshot service policy reuse=$reuse_policy owner=''${owner_scope:-unset} discovery=''${discovery_scope:-unset} cleanup=$cleanup_required" >&2
 
-            echo "INFO: snapshot workflow finished; validating JSON envelope"
+            if "$SVC_POSTGRES_READY" >/dev/null 2>&1; then
+              echo "INFO: reusing postgres on port=$POSTGRES_PORT" >&2
+            else
+              postgres_owned=1
+              echo "INFO: starting postgres on port=$POSTGRES_PORT" >&2
+              "$SVC_POSTGRES_FULL_START" >&2
+              "$SVC_POSTGRES_READY" >&2
+            fi
+
+            helios_available=0
+            if ! is_service_skipped helios && [ -n "''${SVC_HELIOS_FULL_START:-}" ] && [ -n "''${SVC_HELIOS_READY:-}" ]; then
+              helios_available=1
+            fi
+
+            if [ "$helios_available" = "1" ]; then
+              if [ -z "''${HELIOSRPC_PORT:-}" ]; then
+                echo "ERROR: HELIOSRPC_PORT is not set for snapshot" >&2
+                exit 1
+              fi
+              export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
+              if [ "$HELIOS_NETWORK" != "mainnet" ]; then
+                echo "ERROR: HELIOS_NETWORK must be 'mainnet' for mfm::portfolio::snapshot" >&2
+                exit 1
+              fi
+              export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
+                conf.modules.helios.executionRpcUrl or ""
+              }}"
+              export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${
+                conf.modules.helios.consensusRpcUrl or ""
+              }}"
+              export HELIOS_CHECKPOINT="''${HELIOS_CHECKPOINT:-${conf.modules.helios.checkpoint or ""}}"
+
+              if "$SVC_HELIOS_READY" >/dev/null 2>&1; then
+                echo "INFO: reusing helios on port=$HELIOSRPC_PORT" >&2
+              else
+                helios_owned=1
+                echo "INFO: starting helios on port=$HELIOSRPC_PORT network=$HELIOS_NETWORK" >&2
+                "$SVC_HELIOS_FULL_START" >&2
+                HELIOS_READY_TIMEOUT_SECS="''${HELIOS_READY_TIMEOUT_SECS:-300}" \
+                  HELIOS_READY_INTERVAL_SECS="''${HELIOS_READY_INTERVAL_SECS:-1}" \
+                  "$SVC_HELIOS_READY" >&2
+              fi
+
+              if [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ]; then
+                export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"helios_local\",\"network_id\":\"ethereum-mainnet\",\"rpc_url\":\"http://127.0.0.1:$HELIOSRPC_PORT\",\"kind\":\"local\"}]"
+              fi
+              if [ -z "''${MFM_EVM_RPC_PREFERRED_ORDER:-}" ]; then
+                export MFM_EVM_RPC_PREFERRED_ORDER="helios_local"
+              fi
+            elif [ -z "''${MFM_EVM_RPC_SOURCES_JSON:-}" ]; then
+              echo "ERROR: MFM_EVM_RPC_SOURCES_JSON is required when Helios is unavailable or skipped" >&2
+              exit 1
+            fi
+
+            export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/${
+              conf.modules.postgres.database or "mfm"
+            }"
+            mfm_cli_bin="$(resolve_packaged_mfm_cli_binary)" || exit 1
+
+            echo "INFO: running packaged portfolio snapshot request_file=$request_file" >&2
+            "$mfm_cli_bin" --output-format json portfolio snapshot --request-file "$request_file" >"$result_file"
+
             if ! ${pkgs.jq}/bin/jq -e '
               .status == "success"
               and .data.feature_id == "portfolio.snapshot"
               and (.data | has("result"))
-            ' "$out_file" >/dev/null; then
+            ' "$result_file" >/dev/null; then
               echo "ERROR: snapshot output did not match the expected JSON envelope" >&2
-              cat "$out_file" >&2 || true
+              cat "$result_file" >&2 || true
               exit 1
             fi
 
-            cat "$out_file" >&3
+            cat "$result_file"
           '';
         };
 
         mfm_cli = mkCommandTask {
           id = "task.mfm_cli";
-          appName = "mfm_cli";
           summary = "Run the mfm_cli compatibility wrapper";
           description = ''
             Passthrough entrypoint that forwards all CLI arguments to mfm_cli.
@@ -1898,7 +1104,6 @@ in
 
         mfm_rest_api = mkCommandTask {
           id = "task.mfm_rest_api";
-          appName = "mfm_rest_api";
           summary = "Run the mfm_rest_api server";
           description = ''
             Typed entrypoint for launching the REST API process.
@@ -1921,7 +1126,6 @@ in
 
         build = mkCommandTask {
           id = "task.build";
-          appName = "build";
           summary = "Build release artifacts";
           description = "Builds the workspace in release mode with all features enabled.";
           usage = [ "nix run .#build" ];
@@ -1938,7 +1142,6 @@ in
 
         check = mkCommandTask {
           id = "task.check";
-          appName = "check";
           summary = "Run fmt + clippy";
           description = "Runs quality checks for the workspace.";
           usage = [ "nix run .#check" ];
@@ -1960,7 +1163,6 @@ in
 
         publish-docs = mkCommandTask {
           id = "task.publish-docs";
-          appName = "publish-docs";
           summary = "Plan or publish the docs.rs crate wave with exact crates.io observation";
           description = ''
             Runs the Rust Phase-1 publish-docs tool against `crates/docs/publish-wave.json`.
@@ -2004,7 +1206,6 @@ in
 
         format = mkCommandTask {
           id = "task.format";
-          appName = "format";
           summary = "Format Rust and Nix files";
           usage = [ "nix run .#format" ];
           runtimeInputs = rustRuntimeInputs;
@@ -2019,7 +1220,6 @@ in
 
         test = mkCommandTask {
           id = "task.test";
-          appName = "test";
           summary = "Run workspace tests";
           description = "Runs the full workspace test suite using cargo-nextest.";
           usage = [ "nix run .#test" ];
@@ -2037,7 +1237,6 @@ in
 
         ci = mkCommandTask {
           id = "task.ci";
-          appName = "ci";
           kind = "workflow";
           summary = "Run CI workflows (use --mode <mode>)";
           description = "Dispatches to model-derived CI workflows.";
@@ -2080,833 +1279,782 @@ in
           ];
         };
 
-        ci-workflow-basic =
-          mkCommandTask {
-            id = "task.ci.workflow-basic";
-            appName = "ci-workflow-basic";
-            kind = "internal";
-            summary = "Run workflow.ci.basic";
-            description = "Internal workflow reference used to compose workflow.ci.full.";
-            runtimeInputs = rustRuntimeInputs;
-            workflowId = "workflow.ci.basic";
-          }
-          // {
-            ui.app.expose = false;
-          };
+        ci-workflow-basic = mkCommandTask {
+          id = "task.ci.workflow-basic";
+          kind = "internal";
+          summary = "Run workflow.ci.basic";
+          description = "Internal workflow reference used to compose workflow.ci.full.";
+          runtimeInputs = rustRuntimeInputs;
+          workflowId = "workflow.ci.basic";
+        };
 
-        ci-workflow-parity =
-          mkCommandTask {
-            id = "task.ci.workflow-parity";
-            appName = "ci-workflow-parity";
-            kind = "internal";
-            summary = "Run workflow.ci.parity";
-            description = "Internal workflow reference used to compose workflow.ci.full.";
-            runtimeInputs = rustRuntimeInputs;
-            workflowId = "workflow.ci.parity";
-          }
-          // {
-            ui.app.expose = false;
-          };
+        ci-workflow-parity = mkCommandTask {
+          id = "task.ci.workflow-parity";
+          kind = "internal";
+          summary = "Run workflow.ci.parity";
+          description = "Internal workflow reference used to compose workflow.ci.full.";
+          runtimeInputs = rustRuntimeInputs;
+          workflowId = "workflow.ci.parity";
+        };
 
-        ci-fmt =
-          mkCommandTask {
-            id = "task.ci.fmt";
-            appName = "ci-fmt";
-            kind = "ci-step";
-            summary = "CI formatting step";
-            tags = [
-              "ci"
-              "quality"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            env = ciCargoRustEnv;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
+        ci-fmt = mkCommandTask {
+          id = "task.ci.fmt";
+          kind = "ci-step";
+          summary = "CI formatting step";
+          tags = [
+            "ci"
+            "quality"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
 
-              log_file="$artifacts_dir/fmt.log"
-              echo "INFO: running ci step=fmt"
-              run_with_log "$log_file" ${cargoFmtCheckCmd}
-              echo "OK: ci step passed step=fmt log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
+            log_file="$artifacts_dir/fmt.log"
+            echo "INFO: running ci step=fmt"
+            run_with_log "$log_file" ${cargoFmtCheckCmd}
+            echo "OK: ci step passed step=fmt log=$log_file"
+          '';
+        };
 
-        ci-clippy =
-          mkCommandTask {
-            id = "task.ci.clippy";
-            appName = "ci-clippy";
-            kind = "ci-step";
-            summary = "CI clippy step";
-            tags = [
-              "ci"
-              "quality"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            env = ciCargoRustEnv;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
+        ci-clippy = mkCommandTask {
+          id = "task.ci.clippy";
+          kind = "ci-step";
+          summary = "CI clippy step";
+          tags = [
+            "ci"
+            "quality"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
 
-              log_file="$artifacts_dir/clippy.log"
-              echo "INFO: running ci step=clippy"
-              run_with_log "$log_file" ${cargoClippyCmd}
-              echo "OK: ci step passed step=clippy log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
+            log_file="$artifacts_dir/clippy.log"
+            echo "INFO: running ci step=clippy"
+            run_with_log "$log_file" ${cargoClippyCmd}
+            echo "OK: ci step passed step=clippy log=$log_file"
+          '';
+        };
 
-        ci-shell-app-contracts =
-          mkCommandTask {
-            id = "task.ci.shell-app-contracts";
-            appName = "ci-shell-app-contracts";
-            kind = "ci-step";
-            summary = "CI shell/model surface contract checks";
-            tags = [
-              "ci"
-              "quality"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            env = ciCargoRustEnv;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
+        ci-shell-app-contracts = mkCommandTask {
+          id = "task.ci.shell-app-contracts";
+          kind = "ci-step";
+          summary = "CI shell/model surface contract checks";
+          tags = [
+            "ci"
+            "quality"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
 
-              ROOT="$(pwd -P)"
-              export ROOT
+            ROOT="$(pwd -P)"
+            export ROOT
 
-              log_file="$artifacts_dir/shell-app-contracts.log"
-              echo "INFO: running ci step=shell-app-contracts"
-              run_with_log "$log_file" bash -euo pipefail -c '
-                test -f "$ROOT/flake.nix"
-                test -f "$ROOT/nixfied/schemas/task-contract.json"
-                test -f "$ROOT/nixfied/schemas/workflow-contract.json"
-                test -f "$ROOT/nixfied/schemas/model-export.json"
-                test -f "$ROOT/nixfied/project/model-introspection.nix"
+            log_file="$artifacts_dir/shell-app-contracts.log"
+            echo "INFO: running ci step=shell-app-contracts"
+            run_with_log "$log_file" bash -euo pipefail -c '
+              test -f "$ROOT/flake.nix"
+              test -f "$ROOT/nixfied/schemas/task-contract.json"
+              test -f "$ROOT/nixfied/schemas/workflow-contract.json"
+              test -f "$ROOT/nixfied/schemas/model-export.json"
+              test -f "$ROOT/nixfied/project/model-introspection.nix"
 
-                jq -e "." "$ROOT/nixfied/schemas/task-contract.json" >/dev/null
-                jq -e "." "$ROOT/nixfied/schemas/workflow-contract.json" >/dev/null
-                jq -e "." "$ROOT/nixfied/schemas/model-export.json" >/dev/null
+              jq -e "." "$ROOT/nixfied/schemas/task-contract.json" >/dev/null
+              jq -e "." "$ROOT/nixfied/schemas/workflow-contract.json" >/dev/null
+              jq -e "." "$ROOT/nixfied/schemas/model-export.json" >/dev/null
 
-                model_rc=0
-                ${pkgs.coreutils}/bin/timeout --signal=TERM --kill-after=10s ${toString ciShellAppContractsTimeoutSec} \
-                  nix run --impure "path:$ROOT"#model >/dev/null || model_rc="$?"
-                if [ "$model_rc" -ne 0 ]; then
-                  if [ "$model_rc" -eq 124 ]; then
-                    echo "ERROR: model export timed out after ${toString ciShellAppContractsTimeoutSec}s"
-                  fi
-                  exit "$model_rc"
+              model_rc=0
+              ${pkgs.coreutils}/bin/timeout --signal=TERM --kill-after=10s ${toString ciShellAppContractsTimeoutSec} \
+                nix build --no-link --impure "path:$ROOT#introspectionGraph" >/dev/null || model_rc="$?"
+              if [ "$model_rc" -ne 0 ]; then
+                if [ "$model_rc" -eq 124 ]; then
+                  echo "ERROR: introspection graph build timed out after ${toString ciShellAppContractsTimeoutSec}s"
                 fi
-
-                MODEL_INFO_JSON="$(nix eval --impure --json --file "$ROOT/nixfied/project/model-introspection.nix")"
-                SYSTEM="$(jq -r ".system" <<<"$MODEL_INFO_JSON")"
-                APPS_JSON="$(nix eval --json "path:$ROOT#apps.$SYSTEM")"
-
-                require_app() {
-                  local app_name="$1"
-                  if ! jq -e --arg name "$app_name" "has(\$name) and .[\$name].type == \"app\"" <<<"$APPS_JSON" >/dev/null; then
-                    echo "ERROR: missing required app surface app=$app_name system=$SYSTEM"
-                    exit 1
-                  fi
-                }
-
-                require_task() {
-                  local task_id="$1"
-                  if ! jq -e --arg id "$task_id" ".taskIds | index(\$id) != null" <<<"$MODEL_INFO_JSON" >/dev/null; then
-                    echo "ERROR: missing required compiled task id=$task_id"
-                    exit 1
-                  fi
-                }
-
-                require_workflow() {
-                  local workflow_id="$1"
-                  if ! jq -e --arg id "$workflow_id" ".workflowIds | index(\$id) != null" <<<"$MODEL_INFO_JSON" >/dev/null; then
-                    echo "ERROR: missing required compiled workflow id=$workflow_id"
-                    exit 1
-                  fi
-                }
-
-                require_workflow_plan_task() {
-                  local workflow_id="$1"
-                  local task_id="$2"
-                  if ! jq -e --arg workflow "$workflow_id" --arg task "$task_id" "(.workflowPlanTaskIds[\$workflow] // []) | index(\$task) != null" <<<"$MODEL_INFO_JSON" >/dev/null; then
-                    echo "ERROR: workflow plan missing task workflow=$workflow_id task=$task_id"
-                    exit 1
-                  fi
-                }
-
-                require_app "mfm_cli"
-                require_app "mfm::portfolio::snapshot"
-                require_app "mfm_rest_api"
-
-                require_task "task.ci"
-                require_task "task.ci.services-start"
-                require_task "task.ci.services-stop"
-                require_task "task.ci.workflow-basic"
-                require_task "task.ci.workflow-parity"
-                require_task "task.mfm_cli"
-                require_task "task.mfm.portfolio.snapshot"
-                require_task "task.mfm_rest_api"
-
-                require_workflow "workflow.ci.full"
-                require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-basic"
-                require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-parity"
-
-                if grep -R -n "[.]framework/" "$ROOT/nixfied/project" --include="*.nix" >/dev/null; then
-                  echo "ERROR: project layer references framework-private paths"
-                  exit 1
-                fi
-              '
-              echo "OK: ci step passed step=shell-app-contracts log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-tests =
-          mkCommandTask {
-            id = "task.ci.tests";
-            appName = "ci-tests";
-            kind = "ci-step";
-            summary = "CI tests step";
-            tags = [
-              "ci"
-              "tests"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            env = ciCargoRustEnv;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-
-              log_file="$artifacts_dir/tests.log"
-              echo "INFO: running ci step=tests"
-              run_with_log "$log_file" ${cargoNextestWorkspaceCiCmd}
-              echo "OK: ci step passed step=tests log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-services-start =
-          mkCommandTask {
-            id = "task.ci.services-start";
-            appName = "ci-services-start";
-            kind = "ci-step";
-            summary = "Start local CI parity services";
-            description = "Boots local postgres/minio/reth/helios dependencies for deterministic parity checks via framework service hooks.";
-            tags = [
-              "ci"
-              "parity"
-              "services"
-            ];
-            runtimeInputs = ciServicesRuntimeInputs;
-            requirements = {
-              services = [
-                "postgres"
-                "minio"
-                "reth"
-                "helios"
-              ];
-            };
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-              ${ciParityServiceEnv}
-
-              echo "INFO: starting ci services env=$env_value slot=$slot_value postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT helios=$HELIOS_RPC_PORT"
-              selected_helios=0
-              if [ -n "''${SVC_HELIOS_FULL_START_TEST:-}" ]; then
-                selected_helios=1
-              else
-                echo "SKIP: starting/parity checks for helios are disabled"
+                exit "$model_rc"
               fi
 
-              if [ -z "''${NIXFIED_SERVICE_ROOT:-}" ]; then
-                echo "ERROR: NIXFIED_SERVICE_ROOT is required for CI parity service bootstrap" >&2
-                exit 1
-              fi
-              services_root="$NIXFIED_SERVICE_ROOT"
-              if ! mkdir -p "$services_root"; then
-                echo "ERROR: failed to create CI service root path=$services_root" >&2
-                exit 1
-              fi
+              MODEL_INFO_JSON="$(nix eval --impure --json --file "$ROOT/nixfied/project/model-introspection.nix")"
+              SYSTEM="$(jq -r ".system" <<<"$MODEL_INFO_JSON")"
+              APPS_JSON="$(nix eval --json "path:$ROOT#apps.$SYSTEM")"
 
-              require_hook() {
-                local hook_var="$1"
-                if ! has_hook "$hook_var"; then
-                  echo "ERROR: required hook missing: $hook_var services=''${NIXFIED_SELECTED_SERVICES_CSV:-}" >&2
+              require_app() {
+                local app_name="$1"
+                if ! jq -e --arg name "$app_name" "has(\$name) and .[\$name].type == \"app\"" <<<"$APPS_JSON" >/dev/null; then
+                  echo "ERROR: missing required app surface app=$app_name system=$SYSTEM"
                   exit 1
                 fi
               }
 
-              tail_log_if_present() {
-                local log_path="$1"
-                if [ -n "$log_path" ] && [ -f "$log_path" ]; then
-                  tail -50 "$log_path" >&2 || true
+              require_task() {
+                local task_id="$1"
+                if ! jq -e --arg id "$task_id" ".taskIds | index(\$id) != null" <<<"$MODEL_INFO_JSON" >/dev/null; then
+                  echo "ERROR: missing required compiled task id=$task_id"
+                  exit 1
                 fi
               }
 
-              fail_with_logs() {
-                local message="$1"
-                shift || true
-                echo "$message" >&2
-                while [ "$#" -gt 0 ]; do
-                  tail_log_if_present "$1"
-                  shift || true
-                done
+              require_workflow() {
+                local workflow_id="$1"
+                if ! jq -e --arg id "$workflow_id" ".workflowIds | index(\$id) != null" <<<"$MODEL_INFO_JSON" >/dev/null; then
+                  echo "ERROR: missing required compiled workflow id=$workflow_id"
+                  exit 1
+                fi
+              }
+
+              require_workflow_plan_task() {
+                local workflow_id="$1"
+                local task_id="$2"
+                if ! jq -e --arg workflow "$workflow_id" --arg task "$task_id" "(.workflowPlanTaskIds[\$workflow] // []) | index(\$task) != null" <<<"$MODEL_INFO_JSON" >/dev/null; then
+                  echo "ERROR: workflow plan missing task workflow=$workflow_id task=$task_id"
+                  exit 1
+                fi
+              }
+
+              require_app "mfm_cli"
+              require_app "mfm::portfolio::snapshot"
+              require_app "mfm_rest_api"
+              require_app "dev"
+              require_app "build"
+              require_app "check"
+              require_app "publish-docs"
+              require_app "format"
+              require_app "test"
+              require_app "ci"
+              require_app "svcset::ci-parity::start"
+              require_app "svcset::ci-parity::stop"
+              require_app "svcset::ci-parity::export"
+
+              require_task "task.ci"
+              require_task "task.ci.services-start"
+              require_task "task.ci.workflow-basic"
+              require_task "task.ci.workflow-parity"
+              require_task "task.mfm_cli"
+              require_task "task.mfm.portfolio.snapshot"
+              require_task "task.mfm_rest_api"
+
+              require_workflow "workflow.ci.full"
+              require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-basic"
+              require_workflow_plan_task "workflow.ci.full" "task.ci.workflow-parity"
+
+              if grep -R -n "[.]framework/" "$ROOT/nixfied/project" --include="*.nix" >/dev/null; then
+                echo "ERROR: project layer references framework-private paths"
                 exit 1
-              }
+              fi
+            '
+            echo "OK: ci step passed step=shell-app-contracts log=$log_file"
+          '';
+        };
 
-              require_hook "SVC_POSTGRES_FULL_START_TEST"
-              require_hook "SVC_POSTGRES_READY_TEST"
-              require_hook "SVC_POSTGRES_STOP"
-              require_hook "SVC_MINIO_FULL_START_TEST"
-              require_hook "SVC_MINIO_READY"
-              require_hook "SVC_MINIO_BUCKET_ENSURE"
-              require_hook "SVC_MINIO_STOP"
-              require_hook "SVC_RETH_FULL_START_TEST"
-              require_hook "SVC_RETH_READY"
-              require_hook "SVC_RETH_STOP"
+        ci-tests = mkCommandTask {
+          id = "task.ci.tests";
+          kind = "ci-step";
+          summary = "CI tests step";
+          tags = [
+            "ci"
+            "tests"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
 
-              postgres_log="$services_root/postgres/data/postgres.log"
-              postgres_start_log="$artifacts_dir/postgres-start.log"
-              postgres_ready_log="$artifacts_dir/postgres-ready.log"
-              echo "INFO: starting postgres via selected full-start-test hook port=$POSTGRES_PORT"
-              if ! run_with_log "$postgres_start_log" run_hook SVC_POSTGRES_FULL_START_TEST; then
-                fail_with_logs \
-                  "ERROR: postgres full-start-test failed port=$POSTGRES_PORT" \
-                  "$postgres_start_log" \
-                  "$postgres_log"
-              fi
-              if ! wait_hook_ok SVC_POSTGRES_READY_TEST 30 1; then
-                run_with_log "$postgres_ready_log" run_hook SVC_POSTGRES_READY_TEST || true
-                fail_with_logs \
-                  "ERROR: postgres ready-test failed port=$POSTGRES_PORT" \
-                  "$postgres_ready_log" \
-                  "$postgres_log"
-              fi
+            log_file="$artifacts_dir/tests.log"
+            echo "INFO: running ci step=tests"
+            run_with_log "$log_file" ${cargoNextestWorkspaceCiCmd}
+            echo "OK: ci step passed step=tests log=$log_file"
+          '';
+        };
 
-              minio_log="$services_root/minio/data/logs/minio.log"
-              minio_start_log="$artifacts_dir/minio-start.log"
-              minio_ready_log="$artifacts_dir/minio-ready.log"
-              minio_bucket_log="$artifacts_dir/minio-bucket-ensure.log"
-              export MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID"
-              export MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY"
-              echo "INFO: starting minio via selected full-start-test hook api_port=$MINIO_API_PORT console_port=$MINIO_CONSOLE_PORT"
-              if ! NIXFIED_START_SERVICE_MANAGED_CLEANUP=1 \
-                start_service_into minio_start_pid minio --log "$minio_start_log" -- "$SVC_MINIO_FULL_START_TEST"; then
-                fail_with_logs \
-                  "ERROR: minio full-start-test failed api_port=$MINIO_API_PORT console_port=$MINIO_CONSOLE_PORT" \
-                  "$minio_start_log" \
-                  "$minio_log"
-              fi
-              if ! wait_hook_ok SVC_MINIO_READY 45 1; then
-                run_with_log "$minio_ready_log" run_hook SVC_MINIO_READY || true
-                fail_with_logs \
-                  "ERROR: minio failed readiness checks api_port=$MINIO_API_PORT console_port=$MINIO_CONSOLE_PORT" \
-                  "$minio_ready_log" \
-                  "$minio_start_log" \
-                  "$minio_log"
-              fi
-              if ! run_with_log "$minio_bucket_log" run_hook SVC_MINIO_BUCKET_ENSURE "$MFM_S3_BUCKET"; then
-                fail_with_logs \
-                  "ERROR: failed to ensure minio bucket bucket=$MFM_S3_BUCKET" \
-                  "$minio_bucket_log" \
-                  "$minio_log"
-              fi
+        ci-services-start = mkCommandTask {
+          id = "task.ci.services-start";
+          kind = "ci-step";
+          summary = "Bootstrap local CI parity services";
+          description = "Starts local postgres/minio/reth dependencies through public lifecycle hooks and prepares MinIO state for parity checks.";
+          tags = [
+            "ci"
+            "parity"
+            "services"
+          ];
+          runtimeInputs = ciServicesRuntimeInputs;
+          requirements = {
+            services = [
+              "postgres"
+              "minio"
+              "reth"
+            ];
+          };
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+            ${ciParityServiceEnv}
 
-              reth_log="$services_root/reth/data/logs/reth.log"
-              reth_start_log="$artifacts_dir/reth-start.log"
-              reth_ready_log="$artifacts_dir/reth-ready.log"
-              echo "INFO: starting reth via selected full-start-test hook http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT"
-              if ! NIXFIED_START_SERVICE_MANAGED_CLEANUP=1 \
-                start_service_into reth_start_pid reth --log "$reth_start_log" -- "$SVC_RETH_FULL_START_TEST"; then
-                fail_with_logs \
-                  "ERROR: reth full-start-test failed http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT" \
-                  "$reth_start_log" \
-                  "$reth_log"
+            echo "INFO: starting ci services env=$env_value slot=$slot_value postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT"
+
+            has_service_hook() {
+              local hook_var="$1"
+              if [ -z "$hook_var" ]; then
+                return 1
               fi
-              if ! wait_hook_ok SVC_RETH_READY 60 1; then
-                run_with_log "$reth_ready_log" run_hook SVC_RETH_READY || true
-                fail_with_logs \
-                  "ERROR: reth failed readiness checks http_port=$RETH_HTTP_PORT ws_port=$RETH_WS_PORT auth_port=$RETH_AUTH_PORT" \
-                  "$reth_ready_log" \
-                  "$reth_start_log" \
-                  "$reth_log"
+              [ -n "''${!hook_var:-}" ]
+            }
+
+            run_service_hook() {
+              local hook_var="$1"
+              shift || true
+
+              local hook_cmd="''${!hook_var:-}"
+              if [ -z "$hook_cmd" ]; then
+                echo "ERROR: hook command is not available: $hook_var"
+                return 1
               fi
 
-              if [ "$selected_helios" = "1" ]; then
-                require_hook "SVC_HELIOS_READY"
-                export HELIOS_EXECUTION_RPC_URL="http://127.0.0.1:$RETH_HTTP_PORT"
-                helios_log="$services_root/helios/data/logs/helios.log"
-                helios_start_log="$artifacts_dir/helios-start.log"
-                helios_ready_timeout_seconds="''${HELIOS_READY_TIMEOUT_SECS:-300}"
-                helios_ready_interval_seconds="''${HELIOS_READY_INTERVAL_SECS:-1}"
-                echo "INFO: starting helios via selected full-start-test hook port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL"
+              "$hook_cmd" "$@"
+            }
 
-                if ! NIXFIED_START_SERVICE_MANAGED_CLEANUP=1 \
-                  start_service_into helios_start_pid helios --log "$helios_start_log" -- "$SVC_HELIOS_FULL_START_TEST"; then
-                  fail_with_logs \
-                    "ERROR: helios full-start-test failed port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" \
-                    "$helios_start_log" \
-                    "$helios_log"
-                fi
-                if ! HELIOS_READY_TIMEOUT_SECS="$helios_ready_timeout_seconds" \
-                  HELIOS_READY_INTERVAL_SECS="$helios_ready_interval_seconds" \
-                  "$SVC_HELIOS_READY"; then
-                  fail_with_logs \
-                    "ERROR: helios failed to become ready port=$HELIOS_RPC_PORT execution_rpc=$HELIOS_EXECUTION_RPC_URL" \
-                    "$helios_start_log" \
-                    "$helios_log"
-                fi
-                echo "INFO: helios selected full-start-test hook completed port=$HELIOS_RPC_PORT"
+            require_hook() {
+              local hook_var="$1"
+              if ! has_service_hook "$hook_var"; then
+                local available_hooks
+                available_hooks="$(env | grep '^SVC_' | cut -d= -f1 | tr '\n' ',')"
+                echo "ERROR: required hook missing: $hook_var services=''${NIXFIED_SELECTED_SERVICES_CSV:-} hooks=''${available_hooks:-<none>}"
+                exit 1
               fi
+            }
 
-              if [ "$selected_helios" = "0" ]; then
-                echo "OK: ci services ready postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT helios=skipped"
+            run_logged_hook() {
+              local step_name="$1"
+              local log_file="$2"
+              shift 2
+
+              echo "INFO: running ci bootstrap step=$step_name"
+              if run_with_log "$log_file" "$@"; then
+                echo "OK: ci bootstrap step passed step=$step_name log=$log_file"
               else
-                echo "OK: ci services ready postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT helios=$HELIOS_RPC_PORT"
+                local rc=$?
+                echo "ERROR: ci bootstrap step failed step=$step_name log=$log_file rc=$rc" >&2
+                exit "$rc"
               fi
-            '';
-          }
-          // {
-            ui.app.expose = false;
+            }
+
+            require_hook "SVC_POSTGRES_FULL_START_TEST"
+            require_hook "SVC_MINIO_FULL_START_TEST"
+            require_hook "SVC_MINIO_BUCKET_ENSURE"
+            require_hook "SVC_RETH_FULL_START_TEST"
+            export MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID"
+            export MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY"
+            run_logged_hook "postgres-full-start-test" "$artifacts_dir/postgres-full-start.log" run_service_hook SVC_POSTGRES_FULL_START_TEST
+            run_logged_hook "minio-full-start-test" "$artifacts_dir/minio-full-start.log" run_service_hook SVC_MINIO_FULL_START_TEST
+            run_logged_hook "reth-full-start-test" "$artifacts_dir/reth-full-start.log" run_service_hook SVC_RETH_FULL_START_TEST
+
+            run_logged_hook "minio-bucket-ensure" "$artifacts_dir/minio-bucket-ensure.log" run_service_hook SVC_MINIO_BUCKET_ENSURE "$MFM_S3_BUCKET"
+
+            echo "OK: ci services ready postgres=$POSTGRES_PORT minio=$MINIO_API_PORT reth=$RETH_HTTP_PORT"
+          '';
+        };
+
+        ci-audit = mkCommandTask {
+          id = "task.ci.audit";
+          kind = "ci-step";
+          summary = "CI security audit step";
+          tags = [
+            "ci"
+            "audit"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+
+            log_file="$artifacts_dir/audit.log"
+            echo "INFO: running ci step=audit"
+            run_with_log "$log_file" cargo audit
+            echo "OK: ci step passed step=audit log=$log_file"
+          '';
+        };
+
+        ci-parity-compile = mkCommandTask {
+          id = "task.ci.parity-compile";
+          kind = "ci-step";
+          summary = "CI parity precompile step";
+          tags = [
+            "ci"
+            "parity"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+
+            log_file="$artifacts_dir/parity-compile.log"
+            echo "INFO: running ci step=parity-compile"
+            run_with_log "$log_file" ${parityNextestCmd} --no-run
+            echo "OK: ci step passed step=parity-compile log=$log_file"
+          '';
+        };
+
+        ci-parity-rest-api-smoke = mkCommandTask {
+          id = "task.ci.parity-rest-api-smoke";
+          kind = "ci-step";
+          summary = "CI parity REST API smoke tests";
+          tags = [
+            "ci"
+            "parity"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+            ${ciParityServiceEnv}
+
+            log_file="$artifacts_dir/parity-rest-api-smoke.log"
+            echo "INFO: running ci step=parity-rest-api-smoke"
+            run_with_log "$log_file" ${parityNextestCmd} --jobs 1 --test parity_event_store_postgres_contract --test parity_artifact_store_s3_contract --test parity_rest_api_postgres_s3_smoke
+            echo "OK: ci step passed step=parity-rest-api-smoke log=$log_file"
+          '';
+        };
+
+        ci-parity-evm-helios-smoke = mkCommandTask {
+          id = "task.ci.parity-evm-helios-smoke";
+          kind = "ci-step";
+          summary = "CI parity helios smoke tests";
+          tags = [
+            "ci"
+            "parity"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          requirements = {
+            services = [ "helios" ];
           };
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+            ${ciParityServiceEnv}
 
-        ci-services-stop =
-          mkCommandTask {
-            id = "task.ci.services-stop";
-            appName = "ci-services-stop";
-            kind = "ci-step";
-            summary = "Stop local CI parity services";
-            description = "Stops local postgres/minio/reth/helios service processes started for CI via framework service hooks.";
-            tags = [
-              "ci"
-              "parity"
-              "services"
-            ];
-            runtimeInputs = ciServicesRuntimeInputs;
-            requirements = {
-              services = [
-                "postgres"
-                "minio"
-                "reth"
-                "helios"
-              ];
-            };
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-
-              if has_hook "SVC_HELIOS_STOP"; then
-                run_hook SVC_HELIOS_STOP >/dev/null 2>&1 || true
+            has_service_hook() {
+              local hook_var="$1"
+              if [ -z "$hook_var" ]; then
+                return 1
               fi
-              if has_hook "SVC_RETH_STOP"; then
-                run_hook SVC_RETH_STOP >/dev/null 2>&1 || true
+              [ -n "''${!hook_var:-}" ]
+            }
+
+            run_service_hook() {
+              local hook_var="$1"
+              shift || true
+
+              local hook_cmd="''${!hook_var:-}"
+              if [ -z "$hook_cmd" ]; then
+                echo "ERROR: hook command is not available: $hook_var"
+                return 1
               fi
-              if has_hook "SVC_MINIO_STOP"; then
-                run_hook SVC_MINIO_STOP >/dev/null 2>&1 || true
+
+              "$hook_cmd" "$@"
+            }
+
+            require_hook() {
+              local hook_var="$1"
+              if ! has_service_hook "$hook_var"; then
+                local available_hooks
+                available_hooks="$(env | grep '^SVC_' | cut -d= -f1 | tr '\n' ',')"
+                echo "ERROR: required hook missing: $hook_var services=''${NIXFIED_SELECTED_SERVICES_CSV:-} hooks=''${available_hooks:-<none>}"
+                exit 1
               fi
-              if has_hook "SVC_POSTGRES_STOP"; then
-                run_hook SVC_POSTGRES_STOP >/dev/null 2>&1 || true
+            }
+
+            run_logged_hook() {
+              local step_name="$1"
+              local log_file="$2"
+              shift 2
+
+              echo "INFO: running ci bootstrap step=$step_name"
+              if run_with_log "$log_file" "$@"; then
+                echo "OK: ci bootstrap step passed step=$step_name log=$log_file"
+              else
+                local rc=$?
+                echo "ERROR: ci bootstrap step failed step=$step_name log=$log_file rc=$rc" >&2
+                exit "$rc"
               fi
+            }
 
-              echo "OK: ci services stopped"
-            '';
-          }
-          // {
-            ui.app.expose = false;
+            smoke_log_file="$artifacts_dir/parity-evm-helios-smoke.log"
+            response_file="$artifacts_dir/parity-evm-helios-smoke.response.json"
+
+            echo "INFO: running ci step=parity-evm-helios-smoke"
+
+            require_hook "SVC_HELIOS_FULL_START_TEST"
+            require_hook "SVC_HELIOS_READY"
+            export HELIOS_EXECUTION_RPC_URL="http://127.0.0.1:$RETH_HTTP_PORT"
+
+            if run_service_hook SVC_HELIOS_READY >/dev/null 2>&1; then
+              echo "INFO: reusing helios rpc_port=$HELIOS_RPC_PORT"
+            else
+              run_logged_hook "helios-full-start-test" "$artifacts_dir/helios-full-start.log" run_service_hook SVC_HELIOS_FULL_START_TEST
+            fi
+
+            helios_rpc_url="http://127.0.0.1:$HELIOS_RPC_PORT"
+            run_with_log "$smoke_log_file" bash -euo pipefail -c '
+              response_file="$1"
+              rpc_url="$2"
+              curl -fsS \
+                -H "content-type: application/json" \
+                --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[]}" \
+                "$rpc_url" \
+                | tee "$response_file"
+            ' _ "$response_file" "$helios_rpc_url"
+
+            jq -e '.result | strings' "$response_file" >/dev/null
+            echo "OK: ci step passed step=parity-evm-helios-smoke log=$smoke_log_file"
+          '';
+        };
+
+        ci-parity-evm-reth = mkCommandTask {
+          id = "task.ci.parity-evm-reth";
+          kind = "ci-step";
+          summary = "CI parity EVM + portfolio tracker tests";
+          tags = [
+            "ci"
+            "parity"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+            ${ciParityServiceEnv}
+
+            log_file="$artifacts_dir/parity-evm-reth.log"
+            echo "INFO: running ci step=parity-evm-reth"
+            run_with_log "$log_file" ${parityNextestCmd} --jobs 1 --test parity_keystore_reth_tx_send --test evm_rpc_pool_failover --test evm_rpc_getlogs_chunking --test parity_rest_api_evm_reth_pipeline --test parity_portfolio_tracker_reth_mock_erc20 --test parity_portfolio_tracker_reth_snapshot
+            echo "OK: ci step passed step=parity-evm-reth log=$log_file"
+          '';
+        };
+
+        ci-parity-aave-v3-reth = mkCommandTask {
+          id = "task.ci.parity-aave-v3-reth";
+          kind = "ci-step";
+          summary = "CI parity Aave v3 scenario tests";
+          tags = [
+            "ci"
+            "parity"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+            ${ciParityServiceEnv}
+
+            log_file="$artifacts_dir/parity-aave-v3-reth.log"
+            echo "INFO: running ci step=parity-aave-v3-reth"
+            run_with_log "$log_file" ${parityNextestCmd} --test parity_aave_v3_reth_scenario
+            echo "OK: ci step passed step=parity-aave-v3-reth log=$log_file"
+          '';
+        };
+
+        ci-parity-postgres-state-events-audit = mkCommandTask {
+          id = "task.ci.parity-postgres-state-events-audit";
+          kind = "ci-step";
+          summary = "CI parity postgres state event audit";
+          tags = [
+            "ci"
+            "parity"
+          ];
+          runtimeInputs = rustRuntimeInputs;
+          env = ciCargoRustEnv;
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+            ${ciParityServiceEnv}
+
+            log_file="$artifacts_dir/parity-postgres-state-events-audit.log"
+            echo "INFO: running ci step=parity-postgres-state-events-audit"
+            run_with_log "$log_file" ${parityNextestCmd} --test parity_postgres_state_events_audit
+            echo "OK: ci step passed step=parity-postgres-state-events-audit log=$log_file"
+          '';
+        };
+
+        ci-mainnet-portfolio-snapshot-helios = mkCommandTask {
+          id = "task.ci.mainnet-portfolio-snapshot-helios";
+          kind = "ci-step";
+          summary = "CI mainnet portfolio snapshot validation";
+          tags = [
+            "ci"
+            "mainnet"
+          ];
+          runtimeInputs = leanRuntimeInputs ++ [ conf.packages."mfm-cli" ];
+          requirements = {
+            services = [ "helios" ];
           };
+          command = ''
+            set -euo pipefail
+            ${ciStepPreamble}
+            ${resolvePackagedMfmCliShell}
 
-        ci-audit =
-          mkCommandTask {
-            id = "task.ci.audit";
-            appName = "ci-audit";
-            kind = "ci-step";
-            summary = "CI security audit step";
-            tags = [
-              "ci"
-              "audit"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            env = ciCargoRustEnv;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
+            address="''${MFM_CI_MAINNET_ADDRESS:-0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045}"
+            log_file="$artifacts_dir/mainnet-portfolio-snapshot.log"
+            out_file="$artifacts_dir/mainnet-portfolio-snapshot.json"
+            request_file="$artifacts_dir/mainnet-portfolio-snapshot-request.json"
 
-              log_file="$artifacts_dir/audit.log"
-              echo "INFO: running ci step=audit"
-              run_with_log "$log_file" cargo audit
-              echo "OK: ci step passed step=audit log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
+            export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
+            export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
+              conf.modules.helios.executionRpcUrl or "https://ethereum-rpc.publicnode.com"
+            }}"
+            export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${
+              conf.modules.helios.consensusRpcUrl or "https://lodestar-mainnet.chainsafe.io"
+            }}"
 
-        ci-parity-compile =
-          mkCommandTask {
-            id = "task.ci.parity-compile";
-            appName = "ci-parity-compile";
-            kind = "ci-step";
-            summary = "CI parity precompile step";
-            tags = [
-              "ci"
-              "parity"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            env = ciCargoRustEnv;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
+            echo "INFO: running ci step=mainnet-portfolio-snapshot-helios address=$address"
 
-              log_file="$artifacts_dir/parity-compile.log"
-              echo "INFO: running ci step=parity-compile"
-              run_with_log "$log_file" ${parityNextestCmd} --no-run
-              echo "OK: ci step passed step=parity-compile log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-parity-rest-api-smoke =
-          mkCommandTask {
-            id = "task.ci.parity-rest-api-smoke";
-            appName = "ci-parity-rest-api-smoke";
-            kind = "ci-step";
-            summary = "CI parity REST API smoke tests";
-            tags = [
-              "ci"
-              "parity"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            env = ciCargoRustEnv;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-              ${ciParityServiceEnv}
-
-              log_file="$artifacts_dir/parity-rest-api-smoke.log"
-              echo "INFO: running ci step=parity-rest-api-smoke"
-              run_with_log "$log_file" ${parityNextestCmd} --jobs 1 --test parity_event_store_postgres_contract --test parity_artifact_store_s3_contract --test parity_rest_api_postgres_s3_smoke
-              echo "OK: ci step passed step=parity-rest-api-smoke log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-parity-evm-helios-smoke =
-          mkCommandTask {
-            id = "task.ci.parity-evm-helios-smoke";
-            appName = "ci-parity-evm-helios-smoke";
-            kind = "ci-step";
-            summary = "CI parity helios smoke tests";
-            tags = [
-              "ci"
-              "parity"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            env = ciCargoRustEnv;
-            requirements = {
-              services = [ "helios" ];
-            };
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-              ${ciParityServiceEnv}
-
-              key_log_file="$artifacts_dir/parity-keystore-reth-tx-sign-send.log"
-              smoke_log_file="$artifacts_dir/parity-evm-helios-smoke.log"
-              response_file="$artifacts_dir/parity-evm-helios-smoke.response.json"
-
-              echo "INFO: running ci step=parity-evm-helios-smoke"
-
-              run_with_log "$key_log_file" ${parityNextestCmd} --test parity_keystore_reth_tx_send
-
-              helios_rpc_url="http://127.0.0.1:$HELIOS_RPC_PORT"
-              run_with_log "$smoke_log_file" bash -euo pipefail -c '
-                response_file="$1"
-                rpc_url="$2"
-                curl -fsS \
-                  -H "content-type: application/json" \
-                  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[]}" \
-                  "$rpc_url" \
-                  | tee "$response_file"
-              ' _ "$response_file" "$helios_rpc_url"
-
-              jq -e '.result | strings' "$response_file" >/dev/null
-              echo "OK: ci step passed step=parity-evm-helios-smoke log=$smoke_log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-parity-evm-reth =
-          mkCommandTask {
-            id = "task.ci.parity-evm-reth";
-            appName = "ci-parity-evm-reth";
-            kind = "ci-step";
-            summary = "CI parity EVM + portfolio tracker tests";
-            tags = [
-              "ci"
-              "parity"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            env = ciCargoRustEnv;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-              ${ciParityServiceEnv}
-
-              log_file="$artifacts_dir/parity-evm-reth.log"
-              echo "INFO: running ci step=parity-evm-reth"
-              run_with_log "$log_file" ${parityNextestCmd} --jobs 1 --test evm_rpc_pool_failover --test evm_rpc_getlogs_chunking --test parity_rest_api_evm_reth_pipeline --test parity_portfolio_tracker_reth_mock_erc20 --test parity_portfolio_tracker_reth_snapshot
-              echo "OK: ci step passed step=parity-evm-reth log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-parity-aave-v3-reth =
-          mkCommandTask {
-            id = "task.ci.parity-aave-v3-reth";
-            appName = "ci-parity-aave-v3-reth";
-            kind = "ci-step";
-            summary = "CI parity Aave v3 scenario tests";
-            tags = [
-              "ci"
-              "parity"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            env = ciCargoRustEnv;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-              ${ciParityServiceEnv}
-
-              log_file="$artifacts_dir/parity-aave-v3-reth.log"
-              echo "INFO: running ci step=parity-aave-v3-reth"
-              run_with_log "$log_file" ${parityNextestCmd} --test parity_aave_v3_reth_scenario
-              echo "OK: ci step passed step=parity-aave-v3-reth log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-parity-postgres-state-events-audit =
-          mkCommandTask {
-            id = "task.ci.parity-postgres-state-events-audit";
-            appName = "ci-parity-postgres-state-events-audit";
-            kind = "ci-step";
-            summary = "CI parity postgres state event audit";
-            tags = [
-              "ci"
-              "parity"
-            ];
-            runtimeInputs = rustRuntimeInputs;
-            env = ciCargoRustEnv;
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-              ${ciParityServiceEnv}
-
-              log_file="$artifacts_dir/parity-postgres-state-events-audit.log"
-              echo "INFO: running ci step=parity-postgres-state-events-audit"
-              run_with_log "$log_file" ${parityNextestCmd} --test parity_postgres_state_events_audit
-              echo "OK: ci step passed step=parity-postgres-state-events-audit log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
-
-        ci-mainnet-portfolio-snapshot-helios =
-          mkCommandTask {
-            id = "task.ci.mainnet-portfolio-snapshot-helios";
-            appName = "ci-mainnet-portfolio-snapshot-helios";
-            kind = "ci-step";
-            summary = "CI mainnet portfolio snapshot validation";
-            tags = [
-              "ci"
-              "mainnet"
-            ];
-            runtimeInputs = leanRuntimeInputs ++ [ conf.packages."mfm-cli" ];
-            requirements = {
-              services = [ "helios" ];
-            };
-            command = ''
-              set -euo pipefail
-              ${ciStepPreamble}
-              ${resolvePackagedMfmCliShell}
-
-              address="''${MFM_CI_MAINNET_ADDRESS:-0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045}"
-              log_file="$artifacts_dir/mainnet-portfolio-snapshot.log"
-              out_file="$artifacts_dir/mainnet-portfolio-snapshot.json"
-              request_file="$artifacts_dir/mainnet-portfolio-snapshot-request.json"
-
-              export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
-              export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
-                conf.modules.helios.executionRpcUrl or "https://ethereum-rpc.publicnode.com"
-              }}"
-              export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${
-                conf.modules.helios.consensusRpcUrl or "https://lodestar-mainnet.chainsafe.io"
-              }}"
-
-              echo "INFO: running ci step=mainnet-portfolio-snapshot-helios address=$address"
-
-              cat >"$request_file" <<EOF
-              {
-                "portfolio": {
-                  "portfolio_id": "ci-mainnet-portfolio",
-                  "quote_codes": ["USD", "BTC"],
-                  "networks": [
-                    {
-                      "network_id": "ethereum-mainnet",
-                      "chain_id": 1,
-                      "metadata": {}
-                    }
-                  ],
-                  "wallets": [
-                    {
-                      "wallet_id": "wallet_mainnet",
-                      "address": "$address",
-                      "network_id": "ethereum-mainnet",
-                      "implementation": { "kind": "address_only" },
-                      "symbol_ids": ["eth.native.ethereum-mainnet"],
-                      "metadata": {}
-                    }
-                  ],
-                  "symbol_configs": [
-                    {
-                      "symbol_id": "eth.native.ethereum-mainnet",
-                      "display_symbol": "ETH",
-                      "kind": "native_balance",
-                      "role": "native",
-                      "network_id": "ethereum-mainnet",
-                      "protocol": null,
-                      "balance_reader": { "kind": "native_balance" },
-                      "valuation": {
-                        "quotes": [
-                          {
-                            "quote": "USD",
-                            "priced_symbol_id": "eth.native.ethereum-mainnet",
-                            "reader": {
-                              "kind": "direct_price",
-                              "source": {
-                                "source_id": "chainlink_eth_usd_mainnet",
-                                "network_id": "ethereum-mainnet",
-                                "base_symbol_id": "eth.native.ethereum-mainnet",
-                                "quote": "USD"
-                              }
-                            }
-                          },
-                          {
-                            "quote": "BTC",
-                            "priced_symbol_id": "eth.native.ethereum-mainnet",
-                            "reader": {
-                              "kind": "derived_unit_price",
-                              "numerator": {
-                                "source_id": "chainlink_eth_usd_mainnet",
-                                "network_id": "ethereum-mainnet",
-                                "base_symbol_id": "eth.native.ethereum-mainnet",
-                                "quote": "USD"
-                              },
-                              "denominator": {
-                                "source_id": "chainlink_btc_usd_mainnet",
-                                "network_id": "ethereum-mainnet",
-                                "base_symbol_id": "btc.native.ethereum-mainnet",
-                                "quote": "USD"
-                              }
+            cat >"$request_file" <<EOF
+            {
+              "portfolio": {
+                "portfolio_id": "ci-mainnet-portfolio",
+                "quote_codes": ["USD", "BTC"],
+                "networks": [
+                  {
+                    "network_id": "ethereum-mainnet",
+                    "chain_id": 1,
+                    "metadata": {}
+                  }
+                ],
+                "wallets": [
+                  {
+                    "wallet_id": "wallet_mainnet",
+                    "address": "$address",
+                    "network_id": "ethereum-mainnet",
+                    "implementation": { "kind": "address_only" },
+                    "symbol_ids": ["eth.native.ethereum-mainnet"],
+                    "metadata": {}
+                  }
+                ],
+                "symbol_configs": [
+                  {
+                    "symbol_id": "eth.native.ethereum-mainnet",
+                    "display_symbol": "ETH",
+                    "kind": "native_balance",
+                    "role": "native",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": null,
+                    "balance_reader": { "kind": "native_balance" },
+                    "valuation": {
+                      "quotes": [
+                        {
+                          "quote": "USD",
+                          "priced_symbol_id": "eth.native.ethereum-mainnet",
+                          "reader": {
+                            "kind": "direct_price",
+                            "source": {
+                              "source_id": "chainlink_eth_usd_mainnet",
+                              "network_id": "ethereum-mainnet",
+                              "base_symbol_id": "eth.native.ethereum-mainnet",
+                              "quote": "USD"
                             }
                           }
-                        ]
-                      },
-                      "decimals": 18,
-                      "underlying_symbol_id": null,
-                      "metadata": {}
-                    }
-                  ],
-                  "metadata": {}
-                },
-                "valuation_source_registry": {
-                  "sources": [
-                    {
-                      "source_id": "chainlink_eth_usd_mainnet",
-                      "network_id": "ethereum-mainnet",
-                      "base_symbol_id": "eth.native.ethereum-mainnet",
-                      "quote": "USD",
-                      "reader": {
-                        "kind": "evm_oracle",
-                        "oracle_kind": "chainlink_aggregator_v3",
-                        "config": {
-                          "contract_address": "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419"
+                        },
+                        {
+                          "quote": "BTC",
+                          "priced_symbol_id": "eth.native.ethereum-mainnet",
+                          "reader": {
+                            "kind": "derived_unit_price",
+                            "numerator": {
+                              "source_id": "chainlink_eth_usd_mainnet",
+                              "network_id": "ethereum-mainnet",
+                              "base_symbol_id": "eth.native.ethereum-mainnet",
+                              "quote": "USD"
+                            },
+                            "denominator": {
+                              "source_id": "chainlink_btc_usd_mainnet",
+                              "network_id": "ethereum-mainnet",
+                              "base_symbol_id": "btc.native.ethereum-mainnet",
+                              "quote": "USD"
+                            }
+                          }
                         }
-                      },
-                      "metadata": {}
+                      ]
                     },
-                    {
-                      "source_id": "chainlink_btc_usd_mainnet",
-                      "network_id": "ethereum-mainnet",
-                      "base_symbol_id": "btc.native.ethereum-mainnet",
-                      "quote": "USD",
-                      "reader": {
-                        "kind": "evm_oracle",
-                        "oracle_kind": "chainlink_aggregator_v3",
-                        "config": {
-                          "contract_address": "0xf4030086522a5beea4988f8ca5b36dbc97bee88c"
-                        }
-                      },
-                      "metadata": {}
-                    }
-                  ]
-                }
+                    "decimals": 18,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                  }
+                ],
+                "metadata": {}
+              },
+              "valuation_source_registry": {
+                "sources": [
+                  {
+                    "source_id": "chainlink_eth_usd_mainnet",
+                    "network_id": "ethereum-mainnet",
+                    "base_symbol_id": "eth.native.ethereum-mainnet",
+                    "quote": "USD",
+                    "reader": {
+                      "kind": "evm_oracle",
+                      "oracle_kind": "chainlink_aggregator_v3",
+                      "config": {
+                        "contract_address": "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419"
+                      }
+                    },
+                    "metadata": {}
+                  },
+                  {
+                    "source_id": "chainlink_btc_usd_mainnet",
+                    "network_id": "ethereum-mainnet",
+                    "base_symbol_id": "btc.native.ethereum-mainnet",
+                    "quote": "USD",
+                    "reader": {
+                      "kind": "evm_oracle",
+                      "oracle_kind": "chainlink_aggregator_v3",
+                      "config": {
+                        "contract_address": "0xf4030086522a5beea4988f8ca5b36dbc97bee88c"
+                      }
+                    },
+                    "metadata": {}
+                  }
+                ]
               }
-              EOF
+            }
+            EOF
 
-              run_packaged_mfm_cli_snapshot() {
-                local mfm_cli_bin=""
-                mfm_cli_bin="$(resolve_packaged_mfm_cli_binary)" || return 1
-                "$mfm_cli_bin" --output-format json portfolio snapshot --request-file "$request_file"
-              }
+            run_packaged_mfm_cli_snapshot() {
+              local mfm_cli_bin=""
+              mfm_cli_bin="$(resolve_packaged_mfm_cli_binary)" || return 1
+              "$mfm_cli_bin" --output-format json portfolio snapshot --request-file "$request_file"
+            }
 
-              mode="$(printf '%s' "''${OUTPUT_MODE:-stdout}" | tr '[:upper:]' '[:lower:]')"
-              case "$mode" in
-                logs)
-                  run_packaged_mfm_cli_snapshot >"$out_file" 2>"$log_file"
-                  ;;
-                stdout|both|"")
-                  run_packaged_mfm_cli_snapshot > >(tee "$out_file") 2> >(tee "$log_file" >&2)
-                  ;;
-                *)
-                  run_packaged_mfm_cli_snapshot >"$out_file" 2>"$log_file"
-                  ;;
-              esac
+            mode="$(printf '%s' "''${OUTPUT_MODE:-stdout}" | tr '[:upper:]' '[:lower:]')"
+            case "$mode" in
+              logs)
+                run_packaged_mfm_cli_snapshot >"$out_file" 2>"$log_file"
+                ;;
+              stdout|both|"")
+                run_packaged_mfm_cli_snapshot > >(tee "$out_file") 2> >(tee "$log_file" >&2)
+                ;;
+              *)
+                run_packaged_mfm_cli_snapshot >"$out_file" 2>"$log_file"
+                ;;
+            esac
 
-              jq -e '.status == "success"' "$out_file" >/dev/null
-              jq -e '.data.result.phase == "completed"' "$out_file" >/dev/null
-              echo "OK: ci step passed step=mainnet-portfolio-snapshot-helios log=$log_file"
-            '';
-          }
-          // {
-            ui.app.expose = false;
-          };
+            jq -e '.status == "success"' "$out_file" >/dev/null
+            jq -e '.data.result.phase == "completed"' "$out_file" >/dev/null
+            echo "OK: ci step passed step=mainnet-portfolio-snapshot-helios log=$log_file"
+          '';
+        };
 
       }
       // frameworkInstallPreset.tasks
       // frameworkTestPreset.tasks
       // frameworkSelfhostPreset.tasks;
+
+      apps = {
+        dev = mkTaskApp {
+          taskId = "task.dev";
+          appId = "dev";
+          usage = [ "MFM_ENV=dev NIX_ENV=0 nix run .#dev" ];
+          examples = [
+            "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mfm nix run .#dev"
+          ];
+          ownerFile = "nixfied/project/module.nix";
+        };
+
+        "mfm::portfolio::snapshot" = mkTaskApp {
+          taskId = "task.mfm.portfolio.snapshot";
+          appId = "mfm::portfolio::snapshot";
+          usage = [ "nix run .#mfm::portfolio::snapshot -- <REQUEST_FILE>" ];
+          examples = [
+            "MFM_ENV=dev HELIOS_NETWORK=mainnet SERVICE_REUSE_POLICY=same-slot nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json"
+          ];
+          ownerFile = "nixfied/project/module.nix";
+        };
+
+        mfm_cli = mkTaskApp {
+          taskId = "task.mfm_cli";
+          appId = "mfm_cli";
+          usage = [
+            "nix run .#mfm_cli -- --help"
+            "nix run .#mfm_cli -- keystore list"
+          ];
+          ownerFile = "nixfied/project/module.nix";
+        };
+
+        mfm_rest_api = mkTaskApp {
+          taskId = "task.mfm_rest_api";
+          appId = "mfm_rest_api";
+          usage = [ "nix run .#mfm_rest_api" ];
+          ownerFile = "nixfied/project/module.nix";
+        };
+
+        build = mkTaskApp {
+          taskId = "task.build";
+          appId = "build";
+          usage = [ "nix run .#build" ];
+          ownerFile = "nixfied/project/module.nix";
+        };
+
+        check = mkTaskApp {
+          taskId = "task.check";
+          appId = "check";
+          usage = [ "nix run .#check" ];
+          ownerFile = "nixfied/project/module.nix";
+        };
+
+        "publish-docs" = mkTaskApp {
+          taskId = "task.publish-docs";
+          appId = "publish-docs";
+          usage = [
+            "nix run .#publish-docs -- --dry-run"
+            "nix run .#publish-docs -- plan --json"
+            "nix run .#publish-docs -- --from mfm-state-common"
+            "nix run .#publish-docs -- --only mfm-docs"
+            "nix run .#publish-docs"
+          ];
+          examples = [
+            "nix run .#publish-docs -- --dry-run"
+            "nix run .#publish-docs -- apply --json"
+            "nix run .#publish-docs -- --from mfm-evm-runtime"
+          ];
+          ownerFile = "nixfied/project/module.nix";
+        };
+
+        format = mkTaskApp {
+          taskId = "task.format";
+          appId = "format";
+          usage = [ "nix run .#format" ];
+          ownerFile = "nixfied/project/module.nix";
+        };
+
+        test = mkTaskApp {
+          taskId = "task.test";
+          appId = "test";
+          usage = [ "nix run .#test" ];
+          ownerFile = "nixfied/project/module.nix";
+        };
+
+        ci = mkTaskApp {
+          taskId = "task.ci";
+          appId = "ci";
+          usage = [
+            "nix run .#ci -- --mode basic --summary"
+            "nix run .#ci -- --mode audit --summary"
+            "nix run .#ci -- --mode parity --summary"
+            "nix run .#ci -- --mode full --summary"
+            "nix run .#ci -- --mode mainnet --summary"
+          ];
+          ownerFile = "nixfied/project/module.nix";
+        };
+      }
+      // frameworkInstallPreset.apps
+      // frameworkTestPreset.apps
+      // frameworkSelfhostPreset.apps;
 
       workflows = {
         ci-basic = {
@@ -3011,10 +2159,7 @@ in
 
             parity-evm-reth = mkWorkflowUnit {
               taskId = "task.ci.parity-evm-reth";
-              needs = [
-                "parity-rest-api-smoke"
-                "parity-evm-helios-smoke"
-              ];
+              needs = [ "parity-rest-api-smoke" ];
             };
 
             parity-aave-v3-reth = mkWorkflowUnit {
@@ -3031,11 +2176,18 @@ in
             };
           };
           stages = [ ];
-          preRun.tasks = [
-            "task.ci.services-start"
-          ];
+          preRun = {
+            tasks = [ "task.ci.services-start" ];
+            serviceSets = [ ];
+          };
           postRun = {
-            tasks = [ "task.ci.services-stop" ];
+            tasks = [ ];
+            serviceSets = [
+              {
+                serviceSetId = "service-set.ci-parity";
+                operation = "stop";
+              }
+            ];
             alwaysRun = true;
           };
           artifacts = {
@@ -3114,45 +2266,6 @@ in
           };
           execution = {
             parallel = true;
-            failFast = true;
-            lockPolicy = "exclusive";
-            emitRegistryEvents = true;
-          };
-        };
-
-        mfm-portfolio-snapshot = {
-          id = "workflow.mfm.portfolio.snapshot";
-          summary = "Internal portfolio snapshot workflow";
-          description = "Bootstraps Postgres and Helios, runs the packaged snapshot CLI, and tears down owned services.";
-          mode = "custom";
-          maxWorkers = 1;
-          units = {
-            services-start = mkWorkflowUnit {
-              taskId = "task.mfm.portfolio.snapshot.services-start";
-              requirements = {
-                services = [ "helios" ];
-              };
-            };
-
-            snapshot-exec = mkWorkflowUnit {
-              taskId = "task.mfm.portfolio.snapshot.exec";
-              needs = [ "services-start" ];
-            };
-          };
-          stages = [ ];
-          preRun.tasks = [ "task.mfm.portfolio.snapshot.preflight" ];
-          postRun = {
-            tasks = [ "task.mfm.portfolio.snapshot.services-stop" ];
-            alwaysRun = true;
-          };
-          artifacts = {
-            root = ciArtifactsRoot;
-            keepOnSuccess = false;
-            keepOnFailure = true;
-            writeSummary = true;
-          };
-          execution = {
-            parallel = false;
             failFast = true;
             lockPolicy = "exclusive";
             emitRegistryEvents = true;

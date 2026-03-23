@@ -181,7 +181,7 @@ rec {
 
   process = {
     registryRoot = "/tmp/nixfied-runtime/${project.id}";
-    artifactsRoot = "/tmp/ci-artifacts/${project.id}";
+    artifactsRoot = "/tmp/nixfied-artifacts-${project.id}";
     workspaceId = project.id;
   };
 

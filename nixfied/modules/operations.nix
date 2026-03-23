@@ -238,6 +238,10 @@ let
           runtime.slot.var
         ]
         ++ serviceSkipEnvVars;
+        references = {
+          taskIds = [ ];
+          workflowIds = [ ];
+        };
         env = { };
         umask = "022";
         locale = "C.UTF-8";
@@ -491,17 +495,24 @@ in
     })
 
     (lib.mkIf (cfg.enable && cfg.testIsolation.enable) {
-      nixfied.tasks."test-isolation" = mkTask {
-        id = "task.ops.test-isolation";
-        summary = "Run isolation checks";
-        description = "Runs deterministic isolation smoke checks from model metadata.";
-        command = isolationScript;
-        contractArgs = testIsolationContractArgs;
-        runtimeInputs = [
-          pkgs.coreutils
-          pkgs.jq
-        ];
-      };
+      nixfied.tasks."test-isolation" =
+        mkTask {
+          id = "task.ops.test-isolation";
+          summary = "Run isolation checks";
+          description = "Runs deterministic isolation smoke checks from model metadata.";
+          command = isolationScript;
+          contractArgs = testIsolationContractArgs;
+          runtimeInputs = [
+            pkgs.coreutils
+            pkgs.jq
+          ];
+        }
+        // {
+          runtime.references.taskIds = [
+            isolationValidateTaskId
+            isolationRunTaskId
+          ];
+        };
 
       nixfied.apps."test-isolation" = mkApp {
         taskId = "task.ops.test-isolation";

@@ -332,6 +332,18 @@ in
                 type = t.listOf t.str;
                 default = [ ];
               };
+              references = {
+                taskIds = lib.mkOption {
+                  type = t.listOf t.str;
+                  default = [ ];
+                  description = "Additional task ids invoked through dispatcher/executor at runtime.";
+                };
+                workflowIds = lib.mkOption {
+                  type = t.listOf t.str;
+                  default = [ ];
+                  description = "Additional workflow ids invoked through dispatcher/executor at runtime.";
+                };
+              };
               allowSensitivePassThrough = lib.mkOption {
                 type = t.bool;
                 default = false;

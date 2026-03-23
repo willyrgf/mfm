@@ -9,6 +9,7 @@ let
     projectModules = [ ../../nixfied/project/default.nix ];
     extraModules = [ ];
   };
+  graph = compiled.introspectionGraph;
   stripContext = value: builtins.unsafeDiscardStringContext (toString value);
 
   hasPrefix =
@@ -19,9 +20,9 @@ let
 
   ciWorkflowPrefix = "workflow.ci.";
   ciWorkflowPrefixLen = builtins.stringLength ciWorkflowPrefix;
-  workflowIds = builtins.sort builtins.lessThan (
-    map stripContext (builtins.attrNames compiled.workflows)
-  );
+  appIds = map stripContext (graph.resolution.appIds or [ ]);
+  taskIds = map stripContext (graph.resolution.taskIds or [ ]);
+  workflowIds = map stripContext (graph.resolution.workflowIds or [ ]);
   ciModes = builtins.sort builtins.lessThan (
     pkgs.lib.unique (
       map (
@@ -32,13 +33,27 @@ let
       ) (builtins.filter (workflowId: hasPrefix ciWorkflowPrefix workflowId) workflowIds)
     )
   );
+  workflowPlanTaskIds = builtins.listToAttrs (
+    map (
+      workflowId:
+      let
+        workflowNode = graph.nodes."workflow:${workflowId}" or null;
+      in
+      {
+        name = workflowId;
+        value =
+          if workflowNode == null then [ ] else map stripContext (workflowNode.closure.unitTaskIds or [ ]);
+      }
+    ) workflowIds
+  );
 in
 {
   system = system;
-  taskIds = builtins.sort builtins.lessThan (map stripContext (builtins.attrNames compiled.tasks));
-  workflowPlanTaskIds = builtins.mapAttrs (
-    _: workflow: map (unit: stripContext unit.taskId) (workflow.plan or [ ])
-  ) compiled.workflows;
+  inherit
+    appIds
+    taskIds
+    workflowPlanTaskIds
+    ;
   inherit
     workflowIds
     ciModes

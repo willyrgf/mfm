@@ -112,7 +112,7 @@ rec {
       legacyLocalDefault =
         let
           relativePath = "nixfied/local/default.nix";
-          projectPath = "${builtins.toString projectRoot}/${relativePath}";
+          projectPath = builtins.unsafeDiscardStringContext "${builtins.toString projectRoot}/${relativePath}";
           templateContents = builtins.readFile ../local/default.nix;
           present = builtins.pathExists projectPath;
           contents = if present then builtins.readFile projectPath else "";
@@ -128,9 +128,9 @@ rec {
             if !present then
               "legacy local/default.nix is absent"
             else if customized then
-              "legacy local/default.nix differs from the framework template but is not loaded by flake outputs"
+              "legacy local/default.nix differs from the framework template and is not loaded by nixfied"
             else
-              "legacy local/default.nix matches the framework template and is not loaded by flake outputs";
+              "legacy local/default.nix matches the framework template and is not loaded by nixfied";
         in
         {
           path = relativePath;
