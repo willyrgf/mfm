@@ -188,6 +188,26 @@ in
       exec 9<>"$semaphore_fifo"
       rm -f "$semaphore_fifo"
 
+      run_isolated_executor_command() {
+        unset \
+          NIXFIED_ORCHESTRATOR_RUN_ID \
+          NIXFIED_ORCHESTRATOR_ATTEMPT_ID \
+          NIXFIED_ORCHESTRATOR_RUN_SUFFIX_REASON \
+          NIXFIED_ORCHESTRATOR_PROCESS_MODE \
+          NIXFIED_ORCHESTRATOR_WORKFLOW_ID \
+          NIXFIED_WORKFLOW_SETUP_STARTED_AT \
+          NIXFIED_WORKFLOW_SETUP_STARTED_EPOCH \
+          NIXFIED_RUN_ID \
+          NIXFIED_ATTEMPT_ID \
+          NIXFIED_PARENT_WORKFLOW_ID \
+          NIXFIED_TASK_ID \
+          NIXFIED_WORKFLOW_NESTED \
+          NIXFIED_JSON_OUTPUT_OVERRIDE \
+          NIXFIED_RUN_ID_FILE_OVERRIDE \
+          NIXFIED_SUMMARY_FILE_OVERRIDE || true
+        NIXFIED_CALLER_PWD="$PWD" "$executor_bin" "$@"
+      }
+
       token_count=0
       while [ "$token_count" -lt "$effective_max_parallel" ]; do
         printf 'token\n' >&9
@@ -283,10 +303,10 @@ in
               export "$run_env_key=$run_env_value"
             done
 
-            NIXFIED_CALLER_PWD="$PWD" "$executor_bin" run-task "$validate_task_id" --run-id-file "$validate_run_id_file" > "$validate_log" 2>&1
+            run_isolated_executor_command run-task "$validate_task_id" --run-id-file "$validate_run_id_file" > "$validate_log" 2>&1
             rc="$?"
             if [ "$rc" -eq 0 ]; then
-              NIXFIED_CALLER_PWD="$PWD" "$executor_bin" run-task "$run_task_id" "''${run_args[@]}" --run-id-file "$run_id_file" --summary-file "$summary_file" > "$run_log" 2>&1
+              run_isolated_executor_command run-task "$run_task_id" "''${run_args[@]}" --run-id-file "$run_id_file" --summary-file "$summary_file" > "$run_log" 2>&1
               rc="$?"
             fi
 

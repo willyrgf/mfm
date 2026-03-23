@@ -96,7 +96,10 @@ serviceModule.mkServiceModule {
   artifacts = {
     portKey = portKey;
     portVar = portVar;
+    serviceDir = pgdataExpr;
     dataDir = pgdataExpr;
+    logFile = "${pgdataExpr}/postgres.log";
+    pidFile = "${pgdataExpr}/postmaster.pid";
     defaultDatabase = pgDatabase;
     testDatabase = testDatabase;
   };

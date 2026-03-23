@@ -22,16 +22,26 @@ let
   envVar = projectMeta.envVar or "PROJECT_ENV";
   processCfg = project.process or { };
   registryRoot =
-    if project ? state && project.state ? registry && project.state.registry ? root then
+    if project ? state && project.state ? policy && project.state.policy ? registryRoot then
+      project.state.policy.registryRoot
+    else if project ? state && project.state ? registry && project.state.registry ? root then
       project.state.registry.root
     else if project ? state && project.state ? registryRoot then
       project.state.registryRoot
     else
       processCfg.registryRoot or "/tmp/nixfied-runtime/${projectId}/registry";
-  baseDirExpr = (project.directories.base or "\${XDG_DATA_HOME:-$HOME/.local/share}/${projectId}");
+  baseDirExpr =
+    if project ? state && project.state ? policy && project.state.policy ? runtimeBase then
+      project.state.policy.runtimeBase
+    else
+      (project.directories.base or "\${XDG_DATA_HOME:-$HOME/.local/share}/${projectId}");
   ciCfg = project.ci or { };
   artifactsCfg = ciCfg.artifacts or { };
-  artifactsRootExpr = artifactsCfg.dir or "/tmp/ci-artifacts";
+  artifactsRootExpr =
+    if project ? state && project.state ? policy && project.state.policy ? artifactsRoot then
+      project.state.policy.artifactsRoot
+    else
+      artifactsCfg.dir or "/tmp/ci-artifacts";
   ephemeralPrefix = "/tmp/${projectId}-ephemeral-";
   resolvedLoggingPrelude =
     if loggingPrelude != null && loggingPrelude != "" then

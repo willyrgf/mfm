@@ -193,13 +193,20 @@ let
     }
 
     # artifact_dir
-    # - return the current CI artifacts dir (CI_ARTIFACTS_DIR or /tmp/ci-artifacts).
+    # - return the current CI artifacts dir (CI_ARTIFACTS_DIR or the configured policy root).
     artifact_dir() {
       if [ -n "''${CI_ARTIFACTS_DIR:-}" ]; then
         echo "$CI_ARTIFACTS_DIR"
         return 0
       fi
-      echo "/tmp/ci-artifacts"
+      echo ${
+        pkgs.lib.escapeShellArg (
+          if project ? state && project.state ? policy && project.state.policy ? artifactsRoot then
+            project.state.policy.artifactsRoot
+          else
+            "/tmp/ci-artifacts"
+        )
+      }
       return 0
     }
 

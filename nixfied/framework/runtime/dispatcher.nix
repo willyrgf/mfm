@@ -7,6 +7,8 @@
   projectRoot,
   registry,
   frameworkSourceFlakeRef ? null,
+  appPrograms ? { },
+  serviceSetPrograms ? { },
   serviceApps ? { },
   serviceHookEnv ? { },
 }:
@@ -26,6 +28,7 @@ let
       runtimeHash
       registry
       projectRoot
+      serviceSetPrograms
       serviceHookEnv
       ;
   };
@@ -34,16 +37,36 @@ let
 
   viewApps = model.views.apps;
   viewAppNames = builtins.sort builtins.lessThan (builtins.attrNames viewApps);
+  appModels = model.apps or { };
   taskModels = model.tasks or { };
+
+  taskAppIds =
+    taskId:
+    builtins.sort builtins.lessThan (
+      builtins.filter (
+        appId:
+        let
+          app = appModels.${appId};
+        in
+        (app.kind or "") == "taskRef" && (app.taskId or "") == taskId
+      ) (builtins.attrNames appModels)
+    );
+
+  preferredTaskApp =
+    taskId:
+    let
+      appIds = taskAppIds taskId;
+    in
+    if appIds == [ ] then null else appModels.${builtins.head appIds};
 
   renderTaskHelpText =
     taskId:
     let
       task = taskModels.${taskId};
-      app = task.ui.app or { };
+      app = preferredTaskApp taskId;
       argsContract = (((task.contract or { }).input or { }).args or { });
-      usageLines = app.usage or [ ];
-      exampleLines = app.examples or [ ];
+      usageLines = if app == null then [ ] else app.usage or [ ];
+      exampleLines = if app == null then [ ] else app.examples or [ ];
       argSpecs = argsContract.spec or [ ];
       renderOptionLine =
         spec:
@@ -75,9 +98,10 @@ let
       optionLines = builtins.filter (line: line != null) (map renderOptionLine argSpecs) ++ [
         "  -h, --help: Show this help."
       ];
-      appName = app.name or taskId;
-      summary = task.summary or "";
-      description = task.description or "";
+      appName = if app == null then taskId else app.id or taskId;
+      summary = if app == null then task.summary or "" else app.summary or task.summary or "";
+      description =
+        if app == null then task.description or "" else app.description or task.description or "";
     in
     builtins.concatStringsSep "\n" (
       [ "${appName} - ${summary}" ]
@@ -136,18 +160,26 @@ let
     NIXFIED_CALLER_PWD="$PWD" exec ${pkgs.nix}/bin/nix run "''${framework_source_flake_ref}#run-task" --refresh -- ${lib.escapeShellArg taskId} "$@"
   '';
 
-  taskApps = builtins.listToAttrs (
+  viewLaunchApps = builtins.listToAttrs (
     map (
       appName:
       let
-        taskId = viewApps.${appName}.taskId;
+        appModel = appModels.${appName} or null;
+        launchCommand =
+          if appModel == null then
+            throw "dispatcher: missing app model for '${appName}'"
+          else
+            ''
+              exec ${appPrograms.${appName}} "$@"
+            '';
       in
       {
         name = appName;
         value = mkShellApp {
           inherit appName;
           body = ''
-            NIXFIED_CALLER_PWD="$PWD" exec ${orchestratorProgram} run-task ${lib.escapeShellArg taskId} "$@"
+            export NIXFIED_CALLER_PWD="$PWD"
+            ${launchCommand}
           '';
         };
       }
@@ -262,13 +294,13 @@ in
     '';
   };
 }
-// taskApps
+// viewLaunchApps
 // serviceApps
 // frameworkProxyApps
 // {
   default =
-    if builtins.hasAttr "help" taskApps then
-      taskApps.help
+    if builtins.hasAttr "help" viewLaunchApps then
+      viewLaunchApps.help
     else
       mkShellApp {
         appName = "default-help";

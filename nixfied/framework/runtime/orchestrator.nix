@@ -6,6 +6,7 @@
   runtimeHash ? model.identity.evalHash,
   registry,
   projectRoot,
+  serviceSetPrograms ? { },
   serviceHookEnv ? { },
 }:
 let
@@ -32,6 +33,7 @@ let
       ;
     selectionIndex = resolvedSelectionIndex;
   };
+  executorRuntimeShell = import ./executor-runtime.nix { inherit pkgs; };
   orchestratorRuntimeShell = import ./orchestrator-runtime.nix { inherit pkgs; };
   executor = import ./executor.nix {
     inherit
@@ -40,6 +42,7 @@ let
       services
       registry
       projectRoot
+      serviceSetPrograms
       serviceHookEnv
       ;
     selectionIndex = resolvedSelectionIndex;
@@ -56,9 +59,7 @@ let
         envVar = model.runtime.env.var;
       };
       state = {
-        registry = {
-          root = model.state.registry.root;
-        };
+        policy = model.state.policy;
       };
       slots = {
         max = model.runtime.slot.max;
@@ -104,8 +105,8 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
   export NIXFIED_EXECUTOR_BIN="$EXECUTOR_PROGRAM"
   EPHEMERAL_EXECUTOR_WRAPPER=${lib.escapeShellArg (builtins.toString ephemeralExecutorWrapper)}
   PROJECT_ROOT=${lib.escapeShellArg (builtins.toString projectRoot)}
-  REGISTRY_ROOT_DEFAULT=${lib.escapeShellArg model.state.registry.root}
-  ARTIFACTS_ROOT_DEFAULT=${lib.escapeShellArg model.state.artifacts.root}
+  REGISTRY_ROOT_DEFAULT=${lib.escapeShellArg model.state.policy.registryRoot}
+  ARTIFACTS_ROOT_DEFAULT=${lib.escapeShellArg model.state.policy.artifactsRoot}
   if [ -n "''${REGISTRY_ROOT+x}" ]; then
     REGISTRY_ROOT_EXPLICIT=1
   else
@@ -123,6 +124,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
 
   ${registryShell}
   ${workflowModesShell}
+  ${executorRuntimeShell}
   ${orchestratorRuntimeShell}
 
   mkdir -p "$RUNS_DIR" "$RUN_LOCKS_DIR" "$RUN_LOG_DIR"
@@ -1186,6 +1188,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     export NIXFIED_ORCHESTRATOR_RUN_ID="$run_id"
     export NIXFIED_ORCHESTRATOR_ATTEMPT_ID="$attempt_id"
     export NIXFIED_ORCHESTRATOR_RUN_SUFFIX_REASON="$RUN_SUFFIX_REASON"
+    export NIXFIED_ORCHESTRATOR_MANAGED=1
     export NIXFIED_ORCHESTRATOR_PROCESS_MODE="$PROCESS_MODE"
     export NIXFIED_ORCHESTRATOR_WORKFLOW_ID="$workflow_ref"
     export NIXFIED_WORKFLOW_SETUP_STARTED_AT="$command_started_at"
@@ -1250,6 +1253,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator" ''
     export NIXFIED_ORCHESTRATOR_RUN_ID="$run_id"
     export NIXFIED_ORCHESTRATOR_ATTEMPT_ID="$attempt_id"
     export NIXFIED_ORCHESTRATOR_RUN_SUFFIX_REASON="$RUN_SUFFIX_REASON"
+    export NIXFIED_ORCHESTRATOR_MANAGED=1
     export NIXFIED_ORCHESTRATOR_PROCESS_MODE="$PROCESS_MODE"
     export NIXFIED_ORCHESTRATOR_WORKFLOW_ID="$workflow_id"
     export NIXFIED_WORKFLOW_SETUP_STARTED_AT="$command_started_at"

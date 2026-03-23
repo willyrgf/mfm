@@ -89,7 +89,10 @@ serviceModule.mkServiceModule {
     httpPortVar = slots.portVarName config.portKeyHttp;
     wsPortVar = slots.portVarName config.portKeyWs;
     authPortVar = slots.portVarName config.portKeyAuth;
+    serviceDir = slots.getServiceDir config.dataDirName;
     dataDir = slots.getServiceDir config.dataDirName;
+    logFile = "${slots.getServiceDir config.dataDirName}/logs/reth.log";
+    pidFile = "${slots.getServiceDir config.dataDirName}/run/reth.pid";
     network = config.network;
     devMode = config.devMode;
   };

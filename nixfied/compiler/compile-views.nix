@@ -2,9 +2,11 @@
 {
   projectRoot,
   resolved,
+  statePolicy,
   features,
   runtime,
   services,
+  apps,
   tasks,
   workflows,
 }:
@@ -19,43 +21,49 @@ let
 
   isFrameworkHiddenApp = appName: builtins.elem appName frameworkHiddenApps;
 
-  taskIds = builtins.sort builtins.lessThan (builtins.attrNames tasks);
-
-  addApp =
-    acc: taskId:
+  appIds = builtins.sort builtins.lessThan (builtins.attrNames apps);
+  visibleApps = builtins.foldl' (
+    acc: appId:
     let
-      task = tasks.${taskId};
-      app = task.ui.app;
-      appName = app.name;
+      app = apps.${appId};
       ownerFile =
         if (app.ownerFile or null) == null || app.ownerFile == "" then
           "nixfied/project/module.nix"
         else
           app.ownerFile;
     in
-    if !app.expose then
+    if (!workspaceMarkerPresent) && isFrameworkHiddenApp appId then
       acc
-    else if (!workspaceMarkerPresent) && isFrameworkHiddenApp appName then
-      acc
-    else if builtins.hasAttr appName acc then
-      throw "duplicate app name '${appName}' generated from tasks '${acc.${appName}.taskId}' and '${taskId}'"
     else
       acc
       // {
-        ${appName} = {
-          kind = "task";
-          taskId = taskId;
-          summary = task.summary;
-          description = task.description;
-          category = app.category;
-          usage = app.usage;
-          examples = app.examples;
+        ${appId} = {
+          kind =
+            if app.kind == "taskRef" then
+              "task"
+            else if app.kind == "workflowRef" then
+              "workflow"
+            else if app.kind == "serviceSetRef" then
+              "service-set"
+            else if app.kind == "machineOutput" then
+              "machine-output"
+            else
+              app.kind;
+          taskId = app.taskId or null;
+          workflowId = app.workflowId or null;
+          serviceSetId = app.serviceSetId or null;
+          operation = app.operation or null;
+          targetAppId = app.targetAppId or null;
+          summary = app.summary;
+          description = app.description;
+          category = app.category or "core";
+          usage = app.usage or [ ];
+          examples = app.examples or [ ];
           ownerFile = ownerFile;
         };
-      };
-
-  apps = builtins.foldl' addApp { } taskIds;
-  appNames = builtins.sort builtins.lessThan (builtins.attrNames apps);
+      }
+  ) { } appIds;
+  appNames = builtins.sort builtins.lessThan (builtins.attrNames visibleApps);
   featureIds = builtins.sort builtins.lessThan (builtins.attrNames features);
 
   upgradeFallbackSummary = "Upgrade framework bundle in-place";
@@ -65,8 +73,8 @@ let
     let
       fromApps = map (appName: {
         name = appName;
-        summary = apps.${appName}.summary;
-        owner_file = apps.${appName}.ownerFile;
+        summary = visibleApps.${appName}.summary;
+        owner_file = visibleApps.${appName}.ownerFile;
       }) appNames;
 
       withFallback =
@@ -86,6 +94,11 @@ let
 
   introspectionCommands = [
     {
+      name = "introspect";
+      summary = "Query compiled apps, tasks, workflows, services, and packages";
+      owner_file = "nixfied/framework/core/mkCoreSurfaces.nix";
+    }
+    {
       name = "docs";
       summary = "Render detailed model documentation";
       owner_file = "nixfied/framework/runtime/dispatcher.nix";
@@ -96,28 +109,13 @@ let
       owner_file = "nixfied/framework/runtime/dispatcher.nix";
     }
     {
-      name = "model";
-      summary = "Print canonical compiled model";
-      owner_file = "nixfied/framework/core/mkNixfied.nix";
-    }
-    {
       name = "schema";
       summary = "Print bundled export schemas";
       owner_file = "nixfied/framework/core/mkNixfied.nix";
     }
     {
-      name = "services";
-      summary = "List compiled services";
-      owner_file = "nixfied/framework/core/mkNixfied.nix";
-    }
-    {
       name = "stateHash";
       summary = "Print canonical model hash";
-      owner_file = "nixfied/framework/core/mkNixfied.nix";
-    }
-    {
-      name = "tasks";
-      summary = "List compiled tasks";
       owner_file = "nixfied/framework/core/mkNixfied.nix";
     }
   ];
@@ -168,7 +166,10 @@ let
     "- Project id: ${resolved.identity.projectId}"
     "- Project name: ${resolved.identity.projectName}"
     "- Description: ${resolved.identity.description}"
-    "- Workspace id: ${resolved.state.workspaceId}"
+    "- State policy id: ${statePolicy.id}"
+    "- State policy kind: ${statePolicy.kind}"
+    "- State policy source: ${statePolicy.source}"
+    "- Workspace id: ${statePolicy.workspaceId}"
     ""
     "## Runtime"
     ""
@@ -177,6 +178,8 @@ let
     "- Environment variable: ${runtime.env.var}"
     "- Environment names: ${builtins.concatStringsSep ", " runtime.env.names}"
     "- Runtime directory base: ${runtime.directories.base}"
+    "- Registry root: ${statePolicy.registryRoot}"
+    "- Artifacts root: ${statePolicy.artifactsRoot}"
     "- Enabled services: ${enabledServicesLine}"
     "- Feature count: ${toString (builtins.length featureIds)}"
     ""
@@ -199,7 +202,7 @@ let
     ""
     "## Exposed Apps"
   ]
-  ++ map (appName: "- ${appName}: ${apps.${appName}.summary}") appNames
+  ++ map (appName: "- ${appName}: ${visibleApps.${appName}.summary}") appNames
   ++ [
     ""
     "## Workflows"
@@ -229,7 +232,7 @@ let
   ) featureIds;
 in
 {
-  inherit apps;
+  apps = visibleApps;
 
   help = {
     lines = helpLines;

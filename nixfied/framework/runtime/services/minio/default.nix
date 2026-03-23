@@ -144,7 +144,10 @@ serviceModule.mkServiceModule {
   artifacts = {
     apiPortVar = slots.portVarName config.portKeyApi;
     consolePortVar = slots.portVarName config.portKeyConsole;
+    serviceDir = slots.getServiceDir config.dataDirName;
     dataDir = slots.getServiceDir config.dataDirName;
+    logFile = "${slots.getServiceDir config.dataDirName}/logs/minio.log";
+    pidFile = "${slots.getServiceDir config.dataDirName}/run/minio.pid";
   };
   inherit
     config

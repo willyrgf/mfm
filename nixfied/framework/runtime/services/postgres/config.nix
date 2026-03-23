@@ -24,14 +24,18 @@ let
     # Keep a static valid fallback so fresh initdb config always parses.
     port = 5432
     unix_socket_directories = '/tmp'
+    # Keep framework defaults on file-backed shared memory so local/dev setups
+    # depend less on host-level SysV shared-memory limits.
+    shared_memory_type = mmap
+    dynamic_shared_memory_type = mmap
     log_destination = 'stderr'
     logging_collector = off
   '';
 
   # Environment-specific defaults
   devDefaults = ''
-    max_connections = 50
-    shared_buffers = 128MB
+    max_connections = 20
+    shared_buffers = 32MB
     fsync = off
     synchronous_commit = off
     full_page_writes = off
@@ -40,8 +44,8 @@ let
   '';
 
   prodDefaults = ''
-    max_connections = 100
-    shared_buffers = 256MB
+    max_connections = 50
+    shared_buffers = 128MB
     fsync = on
     synchronous_commit = on
     wal_level = replica
@@ -50,8 +54,8 @@ let
   '';
 
   testDefaults = ''
-    max_connections = 50
-    shared_buffers = 128MB
+    max_connections = 20
+    shared_buffers = 32MB
     fsync = off
     synchronous_commit = off
     full_page_writes = off

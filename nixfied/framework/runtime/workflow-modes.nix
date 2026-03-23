@@ -171,13 +171,33 @@ let
     else
       uniqueSorted (builtins.attrNames tasks);
 
+  appModels = model.apps or { };
+
+  taskAppIds =
+    taskId:
+    builtins.sort builtins.lessThan (
+      builtins.filter (
+        appId:
+        let
+          app = appModels.${appId};
+        in
+        (app.kind or "") == "taskRef" && (app.taskId or "") == taskId
+      ) (builtins.attrNames appModels)
+    );
+
+  preferredTaskApp =
+    taskId:
+    let
+      appIds = taskAppIds taskId;
+    in
+    if appIds == [ ] then null else appModels.${builtins.head appIds};
+
   taskDescriptorById = builtins.listToAttrs (
     map (
       taskId:
       let
         task = tasks.${taskId};
-        ui = task.ui or { };
-        app = ui.app or { };
+        app = preferredTaskApp taskId;
         argsContract = (((task.contract or { }).input or { }).args or { });
         specs = map normalizeTaskArgSpec (argsContract.spec or [ ]);
         packagePath = task.runner.package or null;
@@ -186,20 +206,23 @@ let
         requiredServices = listUtils.uniquePreserveOrder (
           (task.requirements or { services = [ ]; }).services
         );
-        displayName = if (app.expose or false) && (app.name or "") != "" then app.name else taskId;
+        displayName = if app == null then taskId else app.id or taskId;
         usageLines =
           let
-            configuredUsage = app.usage or [ ];
+            configuredUsage = if app == null then [ ] else app.usage or [ ];
           in
           if configuredUsage != [ ] then configuredUsage else [ "nix run .#run-task -- ${taskId} [-- ...]" ];
-        exampleLines = app.examples or [ ];
+        exampleLines = if app == null then [ ] else app.examples or [ ];
         taskHelpLines = [
-          "${displayName} - ${task.summary}"
+          "${displayName} - ${if app == null then task.summary else app.summary or task.summary}"
         ]
-        ++ lib.optionals (task.description or "" != "") [
-          ""
-          task.description
-        ]
+        ++
+          lib.optionals
+            ((if app == null then task.description or "" else app.description or task.description or "") != "")
+            [
+              ""
+              (if app == null then task.description or "" else app.description or task.description or "")
+            ]
         ++ [
           ""
           "Usage:"
@@ -347,6 +370,27 @@ let
         {
           key = "${workflowId}:postRun";
           value = postRun.tasks or [ ];
+        }
+      ]
+    ) workflowIds
+  );
+
+  workflowPhaseServiceSetCases = builtins.concatLists (
+    map (
+      workflowId:
+      let
+        workflow = workflows.${workflowId};
+        preRun = workflow.preRun or { };
+        postRun = workflow.postRun or { };
+      in
+      [
+        {
+          key = "${workflowId}:preRun";
+          value = map builtins.toJSON (preRun.serviceSets or [ ]);
+        }
+        {
+          key = "${workflowId}:postRun";
+          value = map builtins.toJSON (postRun.serviceSets or [ ]);
         }
       ]
     ) workflowIds
@@ -636,6 +680,17 @@ in
       local phase_key="$2"
       case "$workflow_id:$phase_key" in
   ${renderCasePrintLines (entry: entry.value) workflowPhaseTaskCases}
+        *)
+          return 0
+          ;;
+      esac
+    }
+
+    workflow_phase_service_sets() {
+      local workflow_id="$1"
+      local phase_key="$2"
+      case "$workflow_id:$phase_key" in
+  ${renderCasePrintLines (entry: entry.value) workflowPhaseServiceSetCases}
         *)
           return 0
           ;;

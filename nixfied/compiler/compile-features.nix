@@ -6,6 +6,7 @@
   projectRoot,
   runtime,
   services,
+  apps,
   tasks,
   workflows,
 }:
@@ -23,12 +24,27 @@ let
   taskOwnerFiles =
     taskId:
     let
-      task = tasks.${taskId};
-      app = task.ui.app or { };
-      appOwner = if (app.ownerFile or null) == null then "" else app.ownerFile;
+      appOwners =
+        map
+          (
+            appId:
+            let
+              app = apps.${appId};
+            in
+            if (app.ownerFile or null) == null then "" else app.ownerFile
+          )
+          (
+            builtins.filter (
+              appId:
+              let
+                app = apps.${appId};
+              in
+              (app.kind or "") == "taskRef" && (app.taskId or "") == taskId
+            ) (builtins.attrNames apps)
+          );
     in
     listUtils.uniqueNonEmptyPreserveOrder (
-      maybeExistingPaths [ appOwner ]
+      maybeExistingPaths appOwners
       ++ maybeExistingPaths [
         "nixfied/project/module.nix"
         "nixfied/modules/operations.nix"
@@ -39,9 +55,16 @@ let
     taskId:
     let
       task = tasks.${taskId};
-      app = task.ui.app or { };
-      appName = app.name or "";
-      appExpose = app.expose or false;
+      taskAppIds = builtins.sort builtins.lessThan (
+        builtins.filter (
+          appId:
+          let
+            app = apps.${appId};
+          in
+          (app.kind or "") == "taskRef" && (app.taskId or "") == taskId
+        ) (builtins.attrNames apps)
+      );
+      appExpose = taskAppIds != [ ];
     in
     canonical.canonicalize {
       id = taskId;
@@ -49,12 +72,10 @@ let
       summary = task.summary;
       surfaces =
         if appExpose then
-          [
-            {
-              kind = "app";
-              name = appName;
-            }
-          ]
+          map (appId: {
+            kind = "app";
+            name = appId;
+          }) taskAppIds
         else
           [
             {
@@ -66,7 +87,7 @@ let
       modelPaths = [ "tasks.${taskId}" ];
       status = if appExpose then "stable" else "internal";
       defaults = {
-        appName = appName;
+        appNames = taskAppIds;
         expose = appExpose;
       };
       coverageRequired = appExpose;

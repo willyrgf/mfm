@@ -411,7 +411,7 @@ let
           echo '- `stop-run -- <run-id>` from `nixfied/framework/runtime/dispatcher.nix`'
           echo '- `stop-all-runs` from `nixfied/framework/runtime/dispatcher.nix`'
           echo '- `features` from `nixfied/framework/runtime/dispatcher.nix`'
-          echo '- `model`, `stateHash`, `tasks`, `services`, `task::<id>`, `schema` from `nixfied/framework/core/mkNixfied.nix`'
+          echo '- `introspect`, `stateHash`, `schema` from `nixfied/framework/core/mkNixfied.nix`'
           echo ""
           echo "## Sensitive Zones"
           ${pkgs.jq}/bin/jq -r '

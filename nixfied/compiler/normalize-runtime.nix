@@ -1,5 +1,8 @@
 { lib }:
-{ resolved }:
+{
+  resolved,
+  statePolicy,
+}:
 let
   envNames =
     if resolved.runtime.env.names == [ ] then
@@ -41,7 +44,7 @@ in
   ports = resolved.runtime.ports;
 
   directories = {
-    base = resolved.runtime.directories.base;
+    base = statePolicy.runtimeBase;
   };
 
   ephemeral = {

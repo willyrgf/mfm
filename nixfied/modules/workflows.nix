@@ -3,6 +3,25 @@ let
   t = lib.types;
   serviceConfigLib = import ../framework/core/service-config.nix { inherit lib; };
   serviceRequirementType = t.enum serviceConfigLib.supportedServiceNames;
+  serviceSetPhaseEntry = t.submodule {
+    options = {
+      serviceSetId = lib.mkOption {
+        type = t.str;
+      };
+      operation = lib.mkOption {
+        type = t.nullOr (
+          t.enum [
+            "start"
+            "stop"
+            "status"
+            "health"
+            "ready"
+          ]
+        );
+        default = null;
+      };
+    };
+  };
 
   whenSpec = t.submodule {
     options = {
@@ -101,9 +120,15 @@ in
               default = [ ];
             };
 
-            preRun.tasks = lib.mkOption {
-              type = t.listOf t.str;
-              default = [ ];
+            preRun = {
+              tasks = lib.mkOption {
+                type = t.listOf t.str;
+                default = [ ];
+              };
+              serviceSets = lib.mkOption {
+                type = t.listOf serviceSetPhaseEntry;
+                default = [ ];
+              };
             };
 
             logging = {
@@ -136,6 +161,10 @@ in
                 type = t.listOf t.str;
                 default = [ ];
               };
+              serviceSets = lib.mkOption {
+                type = t.listOf serviceSetPhaseEntry;
+                default = [ ];
+              };
               alwaysRun = lib.mkOption {
                 type = t.bool;
                 default = true;
@@ -145,7 +174,7 @@ in
             artifacts = {
               root = lib.mkOption {
                 type = t.str;
-                default = "/tmp/ci-artifacts";
+                default = "";
               };
               keepOnSuccess = lib.mkOption {
                 type = t.bool;

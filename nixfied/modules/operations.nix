@@ -183,14 +183,11 @@ let
   mkTask =
     {
       id,
-      appName,
       summary,
       description,
       command,
       runtimeInputs ? [ ],
       contractArgs ? [ ],
-      usage ? [ "nix run .#${appName}" ],
-      examples ? [ ],
     }:
     {
       inherit
@@ -260,14 +257,25 @@ let
         artifacts = [ ];
         stateKeys = [ ];
       };
-      ui.app = {
-        expose = true;
-        name = appName;
-        category = "ops";
-        usage = usage;
-        examples = examples;
-        ownerFile = "nixfied/modules/operations.nix";
-      };
+    };
+
+  mkApp =
+    {
+      taskId,
+      appId,
+      usage ? [ "nix run .#${appId}" ],
+      examples ? [ ],
+    }:
+    {
+      id = appId;
+      kind = "taskRef";
+      inherit
+        taskId
+        usage
+        examples
+        ;
+      category = "ops";
+      ownerFile = "nixfied/modules/operations.nix";
     };
 
   validateScript = ''
@@ -471,17 +479,20 @@ in
     (lib.mkIf (cfg.enable && cfg.validateEnv.enable) {
       nixfied.tasks."validate-env" = mkTask {
         id = "task.ops.validate-env";
-        appName = "validate-env";
         summary = "Validate slot/env settings";
         description = "Validates PROJECT_ENV and NIX_ENV values against model runtime constraints.";
         command = validateScript;
+      };
+
+      nixfied.apps."validate-env" = mkApp {
+        taskId = "task.ops.validate-env";
+        appId = "validate-env";
       };
     })
 
     (lib.mkIf (cfg.enable && cfg.testIsolation.enable) {
       nixfied.tasks."test-isolation" = mkTask {
         id = "task.ops.test-isolation";
-        appName = "test-isolation";
         summary = "Run isolation checks";
         description = "Runs deterministic isolation smoke checks from model metadata.";
         command = isolationScript;
@@ -491,22 +502,30 @@ in
           pkgs.jq
         ];
       };
+
+      nixfied.apps."test-isolation" = mkApp {
+        taskId = "task.ops.test-isolation";
+        appId = "test-isolation";
+      };
     })
 
     (lib.mkIf (cfg.enable && cfg.ports.enable) {
       nixfied.tasks."ports" = mkTask {
         id = "task.ops.ports";
-        appName = "ports";
         summary = "Print model-derived port assignments";
         description = "Prints computed per-slot/per-env ports from compiled runtime data.";
         command = portsScript;
+      };
+
+      nixfied.apps."ports" = mkApp {
+        taskId = "task.ops.ports";
+        appId = "ports";
       };
     })
 
     (lib.mkIf (cfg.enable && cfg.checkPorts.enable) {
       nixfied.tasks."check-ports" = mkTask {
         id = "task.ops.check-ports";
-        appName = "check-ports";
         summary = "Check model-derived port availability";
         description = "Checks if computed per-slot/per-env ports are listening or free.";
         command = checkPortsScript;
@@ -517,12 +536,16 @@ in
           (if pkgs ? lsof then pkgs.lsof else pkgs.coreutils)
         ];
       };
+
+      nixfied.apps."check-ports" = mkApp {
+        taskId = "task.ops.check-ports";
+        appId = "check-ports";
+      };
     })
 
     (lib.mkIf (cfg.enable && cfg.health.enable) {
       nixfied.tasks."health" = mkTask {
         id = "task.ops.health";
-        appName = "health";
         summary = "Run service health checks";
         description = ''
           Runs health checks for selected enabled services:
@@ -534,6 +557,11 @@ in
         command = healthScript;
         runtimeInputs = serviceProbeRuntimeInputs;
         contractArgs = serviceSelectionContractArgs;
+      };
+
+      nixfied.apps."health" = mkApp {
+        taskId = "task.ops.health";
+        appId = "health";
         usage = [
           "nix run .#health"
           "nix run .#health -- --service postgres"
@@ -549,7 +577,6 @@ in
     (lib.mkIf (cfg.enable && cfg.ready.enable) {
       nixfied.tasks."ready" = mkTask {
         id = "task.ops.ready";
-        appName = "ready";
         summary = "Run service readiness checks";
         description = ''
           Runs readiness checks for selected enabled services:
@@ -561,6 +588,11 @@ in
         command = readyScript;
         runtimeInputs = serviceProbeRuntimeInputs;
         contractArgs = serviceSelectionContractArgs;
+      };
+
+      nixfied.apps."ready" = mkApp {
+        taskId = "task.ops.ready";
+        appId = "ready";
         usage = [
           "nix run .#ready"
           "nix run .#ready -- --service postgres"

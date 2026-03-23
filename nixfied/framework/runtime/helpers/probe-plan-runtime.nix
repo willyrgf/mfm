@@ -128,15 +128,15 @@ let
     ''
       probe_source="''${service_source:-unspecified}"
       echo "INFO: checking ${step.serviceLabel} ${step.phaseLabel} port=${portExpr} source=$probe_source"
-      if (
-        ${probeCommands.psqlQueryCmd {
+      if ${
+        probeCommands.psqlQueryCmd {
           postgres = postgresProbePkg;
           host = step.host or runtimeDefaults.hosts.loopbackIp;
           portExpr = portExpr;
           databaseExpr = step.database;
           query = step.query;
-        }}
-      ) >/dev/null 2>&1; then
+        }
+      } >/dev/null 2>&1; then
         echo "OK: ${step.serviceLabel} ${step.successLabel} port=${portExpr}"
       else
         echo "ERROR: ${step.serviceLabel} ${step.failureLabel} port=${portExpr}${step.failureSuffix or ""}"

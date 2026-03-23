@@ -1,5 +1,6 @@
 {
   mkCommandTask,
+  mkTaskApp,
   pkgs,
   frameworkSourceRevision ? "unknown",
   ownerFile ? "nixfied/framework/presets/install.nix",
@@ -89,17 +90,10 @@ in
   tasks = {
     framework-install = mkCommandTask {
       id = "task.framework.install";
-      appName = "framework::install";
       kind = "utility";
       summary = "Install thin or vendored wrapper flake";
       description = "Creates a thin wrapper flake by default, or a vendored wrapper with --vendor. Re-running with --vendor preserves nixfied/project and nixfied/local by default.";
       runtimeInputs = frameworkInstallRuntimeInputs;
-      usage = [
-        "nix run .#framework::install"
-        "nix run .#framework::install -- --vendor"
-        "nix run .#framework::install -- --vendor --target ."
-        "nix run .#framework::install -- --vendor --upgrade --target ."
-      ];
       contractArgs = frameworkInstallContractArgs;
       command = mkFrameworkInstallCommand { };
       inherit ownerFile;
@@ -107,7 +101,6 @@ in
 
     framework-upgrade = mkCommandTask {
       id = "task.framework.upgrade";
-      appName = "framework::upgrade";
       kind = "utility";
       summary = "Upgrade vendored wrapper in-place";
       description = ''
@@ -116,15 +109,37 @@ in
         Do not target a framework workspace root itself; use a downstream repo or another target path.
       '';
       runtimeInputs = frameworkInstallRuntimeInputs;
+      contractArgs = frameworkUpgradeContractArgs;
+      command = mkFrameworkInstallCommand {
+        upgradeDefault = true;
+      };
+      inherit ownerFile;
+    };
+  };
+
+  apps = {
+    "framework::install" = mkTaskApp {
+      taskId = "task.framework.install";
+      appId = "framework::install";
+      category = "framework";
+      usage = [
+        "nix run .#framework::install"
+        "nix run .#framework::install -- --vendor"
+        "nix run .#framework::install -- --vendor --target ."
+        "nix run .#framework::install -- --vendor --upgrade --target ."
+      ];
+      inherit ownerFile;
+    };
+
+    "framework::upgrade" = mkTaskApp {
+      taskId = "task.framework.upgrade";
+      appId = "framework::upgrade";
+      category = "framework";
       usage = [
         "nix run .#framework::upgrade -- --target ."
         "nix run .#framework::upgrade -- --target . --reset-project"
         "nix run .#framework::upgrade -- --target . --reset-local"
       ];
-      contractArgs = frameworkUpgradeContractArgs;
-      command = mkFrameworkInstallCommand {
-        upgradeDefault = true;
-      };
       inherit ownerFile;
     };
   };

@@ -432,35 +432,6 @@ in
                 default = [ ];
               };
             };
-
-            ui = {
-              app = {
-                expose = lib.mkOption {
-                  type = t.bool;
-                  default = false;
-                };
-                name = lib.mkOption {
-                  type = t.str;
-                  default = name;
-                };
-                category = lib.mkOption {
-                  type = t.str;
-                  default = "core";
-                };
-                usage = lib.mkOption {
-                  type = t.listOf t.str;
-                  default = [ ];
-                };
-                examples = lib.mkOption {
-                  type = t.listOf t.str;
-                  default = [ ];
-                };
-                ownerFile = lib.mkOption {
-                  type = t.nullOr t.str;
-                  default = null;
-                };
-              };
-            };
           };
         }
       )

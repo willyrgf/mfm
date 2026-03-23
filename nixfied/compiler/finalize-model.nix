@@ -3,9 +3,12 @@
   system,
   projectRoot,
   resolved,
+  statePolicy,
   runtime,
   services ? null,
   serviceCatalog,
+  serviceSets,
+  apps,
   tasks,
   workflows,
   features,
@@ -32,6 +35,8 @@ let
     identity = resolved.identity;
     runtime = runtime;
     services = serviceCatalog;
+    serviceSets = serviceSets;
+    apps = apps;
     tasks = tasks;
     workflows = workflows;
     features = features;
@@ -40,14 +45,13 @@ let
   model = canonical.canonicalize {
     schema = {
       kind = "nixfied-model";
-      version = 2;
+      version = 5;
     };
 
     identity = {
       projectId = resolved.identity.projectId;
       projectName = resolved.identity.projectName;
       description = resolved.identity.description;
-      workspaceId = resolved.state.workspaceId;
       system = system;
       evalHash = evalHash;
     };
@@ -55,6 +59,8 @@ let
     runtime = runtime;
 
     serviceCatalog = serviceCatalog;
+    serviceSets = serviceSets;
+    apps = apps;
     tasks = tasks;
     workflows = workflows;
     features = features;
@@ -67,13 +73,9 @@ let
     };
 
     state = {
-      workspaceId = resolved.state.workspaceId;
+      policy = statePolicy;
       registry = {
         schemaVersion = 1;
-        root = resolved.state.registryRoot;
-      };
-      artifacts = {
-        root = resolved.state.artifactsRoot;
       };
     };
   };

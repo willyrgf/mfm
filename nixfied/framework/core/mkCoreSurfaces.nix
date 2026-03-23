@@ -6,36 +6,22 @@
 let
   mkShellApp = import ./mk-shell-app.nix { inherit pkgs; };
 
-  taskIds = builtins.sort builtins.lessThan (builtins.attrNames compiledCore.model.tasks);
-  serviceIds = builtins.sort builtins.lessThan (builtins.attrNames compiledCore.model.serviceCatalog);
   featureIds = builtins.sort builtins.lessThan (builtins.attrNames compiledCore.model.features);
-
-  modelCanonical = canonical.toCanonicalNix compiledCore.model;
-  tasksTable = builtins.concatStringsSep "\n" (
-    map (taskId: "${taskId}\t${compiledCore.model.tasks.${taskId}.summary}") taskIds
-  );
-  servicesTable = builtins.concatStringsSep "\n" (
-    map (
-      serviceId:
-      let
-        service = compiledCore.model.serviceCatalog.${serviceId};
-      in
-      "${service.id}\t${service.name}\t${if service.enable then "enabled" else "disabled"}"
-    ) serviceIds
-  );
-  featuresTable = builtins.concatStringsSep "\n" (
-    map (
-      featureId:
-      let
-        feature = compiledCore.model.features.${featureId};
-        coverageFlag = if feature.coverageRequired or false then "required" else "optional";
-      in
-      "${feature.id}\t${feature.kind}\t${coverageFlag}\t${feature.summary}"
-    ) featureIds
-  );
   helpText = builtins.concatStringsSep "\n" (compiledCore.model.views.help.lines or [ ]);
   docsText = builtins.concatStringsSep "\n" (compiledCore.model.views.docs.lines or [ ]);
   featureText = builtins.concatStringsSep "\n" (compiledCore.model.views.features.lines or [ ]);
+  featureRows = map (
+    featureId:
+    let
+      feature = compiledCore.model.features.${featureId};
+      coverageFlag = if feature.coverageRequired or false then "required" else "optional";
+    in
+    "${feature.id}\t${feature.kind}\t${coverageFlag}\t${feature.summary}"
+  ) featureIds;
+  featuresTable = builtins.concatStringsSep "\n" featureRows;
+
+  introspectionGraphJson = builtins.toJSON compiledCore.introspectionGraph;
+  introspectionQueryScript = ./introspection-query.py;
 
   taskSchema = builtins.fromJSON (builtins.readFile ../../schemas/task-contract.json);
   workflowSchema = builtins.fromJSON (builtins.readFile ../../schemas/workflow-contract.json);
@@ -51,6 +37,7 @@ let
   helpFile = pkgs.writeText "nixfied-help.txt" "${helpText}\n";
   docsFile = pkgs.writeText "nixfied-docs.md" "${docsText}\n";
   featureFile = pkgs.writeText "nixfied-features.txt" "${featureText}\n";
+  introspectionGraphFile = pkgs.writeText "nixfied-introspection-graph.json" "${introspectionGraphJson}\n";
 
   schemaDir = pkgs.runCommand "nixfied-schemas" { } ''
     mkdir -p "$out"
@@ -59,33 +46,20 @@ let
     cp ${../../schemas/model-export.json} "$out/model-export.json"
   '';
 
-  taskApps = builtins.listToAttrs (
-    map (
-      taskId:
-      let
-        taskFile = pkgs.writeText "task-${builtins.substring 0 10 (builtins.hashString "sha256" taskId)}.nix" "${
-          canonical.toCanonicalNix compiledCore.model.tasks.${taskId}
-        }\n";
-      in
-      {
-        name = "task::${taskId}";
-        value = mkShellApp {
-          appName = "task::${taskId}";
-          binPrefix = "nixfied-introspect";
-          body = ''
-            cat ${taskFile}
-          '';
-        };
-      }
-    ) taskIds
-  );
-
   introspectionApps = {
     help = mkShellApp {
       appName = "help";
       binPrefix = "nixfied-introspect";
       body = ''
         cat ${helpFile}
+      '';
+    };
+
+    introspect = mkShellApp {
+      appName = "introspect";
+      binPrefix = "nixfied-introspect";
+      body = ''
+        exec ${pkgs.python3}/bin/python3 ${introspectionQueryScript} ${introspectionGraphFile} "$@"
       '';
     };
 
@@ -105,41 +79,11 @@ let
       '';
     };
 
-    model = mkShellApp {
-      appName = "model";
-      binPrefix = "nixfied-introspect";
-      body = ''
-              cat <<'NIXFIED_MODEL'
-        ${modelCanonical}
-        NIXFIED_MODEL
-      '';
-    };
-
     stateHash = mkShellApp {
       appName = "stateHash";
       binPrefix = "nixfied-introspect";
       body = ''
         echo ${pkgs.lib.escapeShellArg compiledCore.stateHash}
-      '';
-    };
-
-    tasks = mkShellApp {
-      appName = "tasks";
-      binPrefix = "nixfied-introspect";
-      body = ''
-              cat <<'NIXFIED_TASKS'
-        ${tasksTable}
-        NIXFIED_TASKS
-      '';
-    };
-
-    services = mkShellApp {
-      appName = "services";
-      binPrefix = "nixfied-introspect";
-      body = ''
-              cat <<'NIXFIED_SERVICES'
-        ${servicesTable}
-        NIXFIED_SERVICES
       '';
     };
 
@@ -150,27 +94,16 @@ let
         cat ${schemaBundleFile}
       '';
     };
-  }
-  // taskApps;
+  };
 
   packages = {
     help = helpFile;
     docs = docsFile;
-    model = pkgs.writeText "nixfied-model.nix" "${modelCanonical}\n";
+    introspectionGraph = introspectionGraphFile;
     stateHash = pkgs.writeText "nixfied-state-hash.txt" "${compiledCore.stateHash}\n";
-    tasks = pkgs.writeText "nixfied-tasks.txt" "${tasksTable}\n";
-    services = pkgs.writeText "nixfied-services.txt" "${servicesTable}\n";
     features = pkgs.writeText "nixfied-features.txt" "${featuresTable}\n";
     schema = schemaDir;
   }
-  // builtins.listToAttrs (
-    map (taskId: {
-      name = "task::${taskId}";
-      value = pkgs.writeText "task-spec-${builtins.substring 0 10 (builtins.hashString "sha256" taskId)}.nix" "${
-        canonical.toCanonicalNix compiledCore.model.tasks.${taskId}
-      }\n";
-    }) taskIds
-  )
   // compiledCore.resolved.packages;
 
   checks = {
@@ -182,7 +115,8 @@ let
 
     introspection-schema = pkgs.runCommand "schema-bundle" { } ''
       ${pkgs.jq}/bin/jq -e '.task and .workflow and .model' ${schemaBundleFile} > /dev/null
-      echo "OK: schema bundle is valid" > "$out"
+      ${pkgs.jq}/bin/jq -e '.schema.kind == "nixfied-introspection-graph"' ${introspectionGraphFile} > /dev/null
+      echo "OK: schema bundle and introspection graph are valid" > "$out"
     '';
   };
 
@@ -194,6 +128,7 @@ let
         pkgs.nixfmt-rfc-style
         pkgs.gnugrep
         pkgs.gnused
+        pkgs.python3
       ]
       ++ compiledCore.resolved.tooling.devShellPackages;
 

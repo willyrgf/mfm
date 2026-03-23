@@ -150,13 +150,6 @@ in
       description = "Base port numbers keyed by logical role.";
     };
 
-    directories = {
-      base = lib.mkOption {
-        type = t.str;
-        default = "/tmp/nixfied-runtime/nixfied-project/runtime";
-      };
-    };
-
     ephemeral = {
       copyMode = lib.mkOption {
         type = t.enum [

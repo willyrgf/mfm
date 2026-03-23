@@ -391,26 +391,26 @@ let
         exit 1
       fi
 
-      if ! (
-        ${probeCommands.psqlQueryCmd {
+      if ! ${
+        probeCommands.psqlQueryCmd {
           inherit postgres;
           portExpr = "$PGPORT";
           databaseExpr = "postgres";
           query = "select 1;";
-        }}
-      ) >/dev/null 2>&1; then
+        }
+      } >/dev/null 2>&1; then
         log_error "PostgreSQL not ready for test db port=$PGPORT database=$PGDATABASE (maintenance query failed)"
         exit 1
       fi
 
-      if (
-        ${probeCommands.psqlQueryCmd {
+      if ${
+        probeCommands.psqlQueryCmd {
           inherit postgres;
           portExpr = "$PGPORT";
           databaseExpr = "$PGDATABASE";
           query = "select 1;";
-        }}
-      ) >/dev/null 2>&1; then
+        }
+      } >/dev/null 2>&1; then
         log_ok "PostgreSQL ready for test db port=$PGPORT database=$PGDATABASE"
         exit 0
       fi

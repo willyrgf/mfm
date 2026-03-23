@@ -35,6 +35,8 @@ if vendorPath == null then
               projectRoot = ./.;
               projectModules = [ ./nixfied/project/module.nix ];
               extraModules = [ ];
+              # Module overrides only. ./nixfied/local/default.nix is a legacy
+              # extension file and is not loaded by the default flake outputs.
               localOverrides = [ ];
               inherit frameworkSourceRevision;
             };
@@ -75,6 +77,8 @@ else
               projectRoot = ./.;
               projectModules = [ ./nixfied/project/module.nix ];
               extraModules = [ ];
+              # Module overrides only. ./nixfied/local/default.nix is a legacy
+              # extension file and is not loaded by the default flake outputs.
               localOverrides = [ ];
               inherit frameworkSourceRevision;
             };

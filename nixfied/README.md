@@ -46,11 +46,8 @@ Introspection surfaces:
 
 - `nix run .#docs`
 - `nix run .#features`
-- `nix run .#model`
+- `nix run .#introspect -- <query>`
 - `nix run .#stateHash`
-- `nix run .#services`
-- `nix run .#tasks`
-- `nix run .#task::<id>`
 - `nix run .#schema`
 
 ## Configuration Surface

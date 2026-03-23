@@ -69,7 +69,10 @@ serviceModule.mkServiceModule {
   artifacts = {
     httpPortVar = portVarHttp;
     httpsPortVar = portVarHttps;
+    serviceDir = nginxDirExpr;
     dataDir = nginxDirExpr;
+    logFile = "${nginxDirExpr}/logs/error.log";
+    pidFile = "${nginxDirExpr}/run/nginx.pid";
   };
   inherit config;
   operations = {

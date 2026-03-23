@@ -6,6 +6,7 @@
 {
   resolved,
   tasks,
+  serviceSets ? { },
   allTasks ? tasks,
   declaredTaskIds ? builtins.sort builtins.lessThan (builtins.attrNames allTasks),
   prunedTaskIds ? [ ],
@@ -31,6 +32,14 @@ let
     }) prunedTaskIds
   );
 
+  declaredServiceSetIds = builtins.sort builtins.lessThan (builtins.attrNames serviceSets);
+  declaredServiceSetIdSet = builtins.listToAttrs (
+    map (serviceSetId: {
+      name = serviceSetId;
+      value = true;
+    }) declaredServiceSetIds
+  );
+
   normalizeWorkflowId =
     name: rawId:
     let
@@ -46,6 +55,15 @@ let
       rawTaskId
     else
       idLib.ensurePrefix "task" rawTaskId;
+
+  resolveDeclaredServiceSetId =
+    rawServiceSetId:
+    if rawServiceSetId == "" then
+      rawServiceSetId
+    else if builtins.hasAttr rawServiceSetId declaredServiceSetIdSet then
+      rawServiceSetId
+    else
+      idLib.ensurePrefix "service-set" rawServiceSetId;
 
   isDeclaredTaskId = taskId: builtins.hasAttr taskId declaredTaskIdSet;
   isPrunedTaskId = taskId: builtins.hasAttr taskId prunedTaskIdSet;
@@ -152,6 +170,57 @@ let
           throw "workflow '${workflowId}' ${phaseName}.tasks references unknown task '${rawTaskId}'"
       ) taskIds
     );
+
+  normalizePhaseServiceSetRefs =
+    workflowId: phaseName: entries:
+    let
+      addEntry =
+        acc: rawEntry:
+        let
+          rawServiceSetId = rawEntry.serviceSetId or "";
+          serviceSetId = resolveDeclaredServiceSetId rawServiceSetId;
+          serviceSet =
+            if serviceSetId != "" && builtins.hasAttr serviceSetId serviceSets then
+              serviceSets.${serviceSetId}
+            else
+              null;
+          operation =
+            if (rawEntry.operation or null) != null then
+              rawEntry.operation
+            else if serviceSet != null then
+              serviceSet.defaultOperation
+            else
+              null;
+          dedupeKey = "${serviceSetId}:${operation}";
+        in
+        if rawServiceSetId == "" then
+          throw "workflow '${workflowId}' ${phaseName}.serviceSets references an empty serviceSetId"
+        else if serviceSet == null then
+          throw "workflow '${workflowId}' ${phaseName}.serviceSets references unknown service set '${rawServiceSetId}'"
+        else if operation == null then
+          throw "workflow '${workflowId}' ${phaseName}.serviceSets could not resolve an operation for '${serviceSetId}'"
+        else if builtins.hasAttr dedupeKey acc.seen then
+          acc
+        else
+          {
+            seen = acc.seen // {
+              ${dedupeKey} = true;
+            };
+            entries = acc.entries ++ [
+              (canonical.canonicalize {
+                serviceSetId = serviceSet.id;
+                serviceSetName = serviceSet.name;
+                operation = operation;
+                selectedServices = serviceSet.services.all or [ ];
+              })
+            ];
+          };
+      normalized = builtins.foldl' addEntry {
+        seen = { };
+        entries = [ ];
+      } entries;
+    in
+    normalized.entries;
 
   topoSort =
     workflowId: units:
@@ -268,6 +337,12 @@ let
 
       normalizedPreRunTasks = normalizePhaseTaskRefs workflowId "preRun" (raw.preRun.tasks or [ ]);
       normalizedPostRunTasks = normalizePhaseTaskRefs workflowId "postRun" (raw.postRun.tasks or [ ]);
+      normalizedPreRunServiceSets = normalizePhaseServiceSetRefs workflowId "preRun" (
+        raw.preRun.serviceSets or [ ]
+      );
+      normalizedPostRunServiceSets = normalizePhaseServiceSetRefs workflowId "postRun" (
+        raw.postRun.serviceSets or [ ]
+      );
 
       authoredUnitsByTask = unitNamesByTask authoredUnits;
 
@@ -505,9 +580,11 @@ let
       stages = workflowStages;
       preRun = (raw.preRun or { }) // {
         tasks = survivingPreRunTasks;
+        serviceSets = normalizedPreRunServiceSets;
       };
       postRun = (raw.postRun or { }) // {
         tasks = survivingPostRunTasks;
+        serviceSets = normalizedPostRunServiceSets;
       };
       artifacts = raw.artifacts;
       execution = raw.execution;

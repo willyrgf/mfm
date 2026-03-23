@@ -3,6 +3,7 @@
   pkgs,
   conf,
   mkCommandTask,
+  mkTaskApp,
   ownerFile ? "nixfied/framework/presets/framework-test.nix",
 }:
 let
@@ -21,7 +22,6 @@ in
   tasks = {
     framework-test = mkCommandTask {
       id = "task.framework.test";
-      appName = "framework::test";
       kind = "utility";
       summary = "Run framework validation in the model";
       description = ''
@@ -35,19 +35,7 @@ in
         pkgs.gnused
         pkgs.nix
       ];
-      usage = [
-        "nix run .#framework::test"
-        "nix run .#framework::test -- --summary"
-        "nix run .#framework::test -- --mode env --summary-json /tmp/framework-summary.json"
-      ];
-      examples = [
-        "nix run .#framework::test -- --list-shards"
-        "nix run .#framework::test -- --shard flake-check"
-        "nix run .#framework::test -- --shard launcher-pruning"
-        "nix run .#framework::test -- --shard services"
-        "nix run .#framework::test -- --shard isolation"
-        "nix run .#framework::test -- --shard self-host"
-      ];
+      passThroughEnv = [ "NIXFIED_FRAMEWORK_TEST_FORCE_FAIL_SHARD" ];
       contractArgs = [
         {
           name = "summary";
@@ -180,7 +168,7 @@ in
         Usage: nix run .#framework::test [-- --profile ci] [--mode <basic|app|env|full>] [--summary] [--summary-json <path>] [--shard <name>] [--max-parallel-shards <n|auto>] [--serial] [--list-shards]
 
         Shards:
-          flake-check   Evaluate nix flake checks for the current project root.
+          flake-check   Build and run the full registered framework check suite.
           launcher-pruning  Build the launcher/runtime split regression checks and help fast paths.
           help          Validate generated help output.
           workflow-ci   Run the CI workflow surface in selected mode.
@@ -240,6 +228,10 @@ in
           local shard_name="$1"
           shift
           log_info "running shard=$shard_name"
+          if [ -n "''${NIXFIED_FRAMEWORK_TEST_FORCE_FAIL_SHARD:-}" ] && [ "$shard_name" = "$NIXFIED_FRAMEWORK_TEST_FORCE_FAIL_SHARD" ]; then
+            log_error "shard failed name=$shard_name rc=17"
+            return 17
+          fi
           if "$@"; then
             log_ok "shard passed name=$shard_name"
             return 0
@@ -251,7 +243,7 @@ in
         }
 
         shard_flake_check() {
-          nix flake check . --no-build
+          nix flake check .
         }
 
         verify_public_launcher_help() {
@@ -337,11 +329,7 @@ in
         }
 
         shard_workflow_ci() {
-          if [ -z "''${NIXFIED_EXECUTOR_SELF:-}" ]; then
-            log_error "NIXFIED_EXECUTOR_SELF is not set"
-            return "$NIXFIED_EXIT_PRECONDITION"
-          fi
-          NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.ci --mode "$MODE" --summary
+          nix run .#run-workflow -- "workflow.ci.$MODE" --summary
         }
 
         shard_services() {
@@ -359,24 +347,15 @@ in
           local -a isolation_args
           isolation_args=()
 
-          if [ -z "''${NIXFIED_EXECUTOR_SELF:-}" ]; then
-            log_error "NIXFIED_EXECUTOR_SELF is not set"
-            return "$NIXFIED_EXIT_PRECONDITION"
-          fi
-
           if [ "$SERIAL" -eq 1 ] || [ "''${CI:-}" = "1" ] || [ "''${CI:-}" = "true" ]; then
             isolation_args+=(--max-parallel 1)
           fi
 
-          NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-task task.ops.test-isolation "''${isolation_args[@]}"
+          nix run .#run-task -- task.ops.test-isolation "''${isolation_args[@]}"
         }
 
         shard_self_host() {
-          if [ -z "''${NIXFIED_EXECUTOR_SELF:-}" ]; then
-            log_error "NIXFIED_EXECUTOR_SELF is not set"
-            return "$NIXFIED_EXIT_PRECONDITION"
-          fi
-          NIXFIED_CALLER_PWD="$PWD" "$NIXFIED_EXECUTOR_SELF" run-workflow workflow.test.framework.selfhost --summary
+          nix run .#run-workflow -- workflow.test.framework.selfhost --summary
         }
 
         run_named_shard() {
@@ -709,7 +688,7 @@ in
           fi
         fi
 
-        if [ "$SUMMARY" -eq 1 ]; then
+        if [ "$SUMMARY" -eq 1 ] || [ "$run_rc" -ne 0 ]; then
           log_info "summary profile=$PROFILE mode=$MODE executed_shards=$EXECUTED failed_shards=$FAILED_SHARDS exit_1_shards=$EXIT_1_SHARDS canceled_shards=$CANCELED_SHARDS"
         fi
 
@@ -719,6 +698,28 @@ in
 
         log_ok "framework::test completed"
       '';
+      inherit ownerFile;
+    };
+  };
+
+  apps = {
+    "framework::test" = mkTaskApp {
+      taskId = "task.framework.test";
+      appId = "framework::test";
+      category = "framework";
+      usage = [
+        "nix run .#framework::test"
+        "nix run .#framework::test -- --summary"
+        "nix run .#framework::test -- --mode env --summary-json /tmp/framework-summary.json"
+      ];
+      examples = [
+        "nix run .#framework::test -- --list-shards"
+        "nix run .#framework::test -- --shard flake-check"
+        "nix run .#framework::test -- --shard launcher-pruning"
+        "nix run .#framework::test -- --shard services"
+        "nix run .#framework::test -- --shard isolation"
+        "nix run .#framework::test -- --shard self-host"
+      ];
       inherit ownerFile;
     };
   };

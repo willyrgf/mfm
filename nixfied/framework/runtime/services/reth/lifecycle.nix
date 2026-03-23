@@ -97,7 +97,6 @@ let
     RETH_PID_FILE="$RETH_DIR/run/reth.pid"
     RETH_LOG_FILE="$RETH_DIR/logs/reth.log"
     RETH_JWT_FILE="$RETH_DIR/config/jwt.hex"
-    RETH_IPC_PATH="''${RETH_IPC_PATH:-/tmp/nixfied-reth-$ENV-$SLOT.ipc}"
     SERVICE_DIR="$RETH_DIR"
     SERVICE_PID_FILE="$RETH_PID_FILE"
     SERVICE_LOG_FILE="$RETH_LOG_FILE"
@@ -155,12 +154,10 @@ let
         exit 1
       fi
 
-      rm -f "$RETH_IPC_PATH" 2>/dev/null || true
-
       ARGS=(
         node
         --datadir "$RETH_DIR/data"
-        --ipcpath "$RETH_IPC_PATH"
+        --ipcpath "$RETH_DIR/run/reth.ipc"
         --http
         --http.addr ${runtimeDefaults.hosts.loopbackIp}
         --http.port "$RETH_HTTP_PORT"

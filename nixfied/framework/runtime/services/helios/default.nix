@@ -102,7 +102,10 @@ serviceModule.mkServiceModule {
   artifacts = {
     rpcPortVar = slots.portVarName config.portKeyRpc;
     executionPortVar = slots.portVarName config.executionRpcPortKey;
+    serviceDir = slots.getServiceDir config.dataDirName;
     dataDir = slots.getServiceDir config.dataDirName;
+    logFile = "${slots.getServiceDir config.dataDirName}/logs/helios.log";
+    pidFile = "${slots.getServiceDir config.dataDirName}/run/helios.pid";
     network = config.network;
   };
   inherit

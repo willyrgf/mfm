@@ -23,8 +23,15 @@ let
       ;
   };
 
+  compileStatePolicy = import ./compile-state-policy.nix { inherit lib; };
   normalizeRuntime = import ./normalize-runtime.nix { inherit lib; };
   compileServiceCatalog = import ./compile-service-catalog.nix { inherit lib; };
+  compileServiceSets = import ./compile-service-sets.nix {
+    inherit
+      lib
+      canonical
+      ;
+  };
   compileServiceSurfaceCatalog = import ./compile-service-surface-catalog.nix { inherit lib; };
   compileServices = import ./compile-services.nix { inherit lib; };
 
@@ -45,6 +52,27 @@ let
   };
 
   compileFeatures = import ./compile-features.nix {
+    inherit
+      lib
+      canonical
+      ;
+  };
+
+  compileApps = import ./compile-apps.nix {
+    inherit
+      lib
+      canonical
+      ;
+  };
+
+  compileAppExecutionManifests = import ./compile-app-execution-manifests.nix {
+    inherit
+      lib
+      canonical
+      ;
+  };
+
+  compileIntrospectionGraph = import ./compile-introspection-graph.nix {
     inherit
       lib
       canonical
@@ -81,11 +109,63 @@ rec {
           ;
       };
 
-      runtime = normalizeRuntime {
+      legacyLocalDefault =
+        let
+          relativePath = "nixfied/local/default.nix";
+          projectPath = "${builtins.toString projectRoot}/${relativePath}";
+          templateContents = builtins.readFile ../local/default.nix;
+          present = builtins.pathExists projectPath;
+          contents = if present then builtins.readFile projectPath else "";
+          customized = present && contents != templateContents;
+          status =
+            if !present then
+              "missing"
+            else if customized then
+              "customized-inactive"
+            else
+              "template-inactive";
+          message =
+            if !present then
+              "legacy local/default.nix is absent"
+            else if customized then
+              "legacy local/default.nix differs from the framework template but is not loaded by flake outputs"
+            else
+              "legacy local/default.nix matches the framework template and is not loaded by flake outputs";
+        in
+        {
+          path = relativePath;
+          inherit
+            present
+            customized
+            status
+            message
+            ;
+          active = false;
+        };
+
+      statePolicy = compileStatePolicy {
+        inherit
+          projectRoot
+          ;
         resolved = resolvedModuleGraph.config;
       };
 
+      runtime = normalizeRuntime {
+        resolved = resolvedModuleGraph.config;
+        inherit statePolicy;
+      };
+
       serviceCatalog = compileServiceCatalog {
+        resolved = resolvedModuleGraph.config;
+      };
+
+      serviceSets = compileServiceSets {
+        inherit
+          projectRoot
+          serviceCatalog
+          ;
+        resolvedIdentity = resolvedModuleGraph.config.identity;
+        baseStatePolicy = statePolicy;
         resolved = resolvedModuleGraph.config;
       };
 
@@ -103,10 +183,20 @@ rec {
       workflows = compileWorkflows {
         resolved = resolvedModuleGraph.config;
         inherit tasks;
+        inherit serviceSets;
         allTasks = taskCompilation.allTasks;
         declaredTaskIds = taskCompilation.declaredTaskIds;
         prunedTaskIds = taskCompilation.prunedTaskIds;
         pruneReasonsByTaskId = taskCompilation.pruneReasonsByTaskId;
+      };
+
+      apps = compileApps {
+        resolved = resolvedModuleGraph.config;
+        inherit
+          serviceSets
+          tasks
+          workflows
+          ;
       };
 
       selectionIndex = compileSelectionIndex {
@@ -117,22 +207,64 @@ rec {
           ;
       };
 
+      appExecutionManifests = compileAppExecutionManifests {
+        resolvedIdentity = resolvedModuleGraph.config.identity;
+        runtime = runtime;
+        state = {
+          policy = statePolicy;
+          registry = {
+            schemaVersion = 1;
+          };
+        };
+        inherit
+          serviceCatalog
+          apps
+          tasks
+          workflows
+          selectionIndex
+          ;
+      };
+
       features = compileFeatures {
         inherit
           projectRoot
           runtime
+          apps
           tasks
           workflows
           ;
         services = serviceCatalog;
       };
 
+      introspectionGraph = compileIntrospectionGraph {
+        inherit
+          projectRoot
+          statePolicy
+          runtime
+          apps
+          appExecutionManifests
+          serviceSets
+          tasks
+          workflows
+          serviceCatalog
+          serviceSurfaceCatalog
+          features
+          selectionIndex
+          ;
+        resolved = resolvedModuleGraph.config;
+        localOverridesActive = localOverrides != [ ];
+        localOverrideCount = builtins.length localOverrides;
+        inherit legacyLocalDefault;
+      };
+
       views = compileViews {
         inherit projectRoot;
         resolved = resolvedModuleGraph.config;
         inherit
+          statePolicy
           features
           runtime
+          apps
           tasks
           workflows
           ;
@@ -143,8 +275,11 @@ rec {
         inherit
           system
           projectRoot
+          statePolicy
           runtime
           serviceCatalog
+          serviceSets
+          apps
           tasks
           workflows
           features
@@ -158,12 +293,18 @@ rec {
       resolved = resolvedModuleGraph.config;
       tasks = tasks;
       workflows = workflows;
+      apps = apps;
+      appExecutionManifests = appExecutionManifests;
+      introspectionGraph = introspectionGraph;
       views = views;
       runtime = runtime;
+      statePolicy = statePolicy;
       serviceCatalog = serviceCatalog;
+      serviceSets = serviceSets;
       serviceSurfaceCatalog = serviceSurfaceCatalog;
       features = features;
       selectionIndex = selectionIndex;
+      legacyLocalDefault = legacyLocalDefault;
     };
 
   compileServicesResolved =

@@ -109,8 +109,13 @@ let
         );
         phaseTaskIds = (workflow.preRun.tasks or [ ]) ++ (workflow.postRun.tasks or [ ]);
         phaseTaskServices = builtins.concatLists (map (taskId: goTask nextSeen taskId) phaseTaskIds);
+        phaseServiceSetServices = builtins.concatLists (
+          map (entry: entry.selectedServices or [ ]) (
+            (workflow.preRun.serviceSets or [ ]) ++ (workflow.postRun.serviceSets or [ ])
+          )
+        );
       in
-      uniquePreserveOrder (unitServices ++ phaseTaskServices);
+      uniquePreserveOrder (unitServices ++ phaseTaskServices ++ phaseServiceSetServices);
 
   goWorkflowUnitsOnly =
     seen: workflowId:

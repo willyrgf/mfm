@@ -81,7 +81,6 @@ let
       scheduling = raw.scheduling;
       deps = raw.deps;
       produces = raw.produces;
-      ui = raw.ui;
     };
 
   addTask =
