@@ -883,6 +883,7 @@ in
             if [ "''${request_file#/}" = "$request_file" ]; then
               request_file="$PWD/$request_file"
             fi
+            snapshot_database="${conf.modules.postgres.database or "mfm"}"
             if [ ! -f "$request_file" ]; then
               echo "ERROR: request file does not exist: $request_file" >&2
               exit 1
@@ -902,6 +903,10 @@ in
             fi
             if [ -z "''${SVC_POSTGRES_FULL_START:-}" ] || [ -z "''${SVC_POSTGRES_READY:-}" ] || [ -z "''${SVC_POSTGRES_STOP:-}" ]; then
               echo "ERROR: postgres lifecycle hooks are unavailable in the snapshot runtime" >&2
+              exit 1
+            fi
+            if [ -z "''${SVC_POSTGRES_SETUP_DB:-}" ]; then
+              echo "ERROR: postgres setup hook is unavailable in the snapshot runtime" >&2
               exit 1
             fi
 
@@ -1010,6 +1015,10 @@ in
               "$SVC_POSTGRES_READY" >&2
             fi
 
+            # Reused slots can have a live server without the task's configured database.
+            echo "INFO: ensuring postgres database=$snapshot_database" >&2
+            PGDATABASE="$snapshot_database" "$SVC_POSTGRES_SETUP_DB" >&2
+
             helios_available=0
             if ! is_service_skipped helios && [ -n "''${SVC_HELIOS_FULL_START:-}" ] && [ -n "''${SVC_HELIOS_READY:-}" ]; then
               helios_available=1
@@ -1055,9 +1064,7 @@ in
               exit 1
             fi
 
-            export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/${
-              conf.modules.postgres.database or "mfm"
-            }"
+            export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/$snapshot_database"
             mfm_cli_bin="$(resolve_packaged_mfm_cli_binary)" || exit 1
 
             echo "INFO: running packaged portfolio snapshot request_file=$request_file" >&2

@@ -516,17 +516,29 @@ let
   setupDb = mkPgScript {
     name = "postgres-setup-db";
     body = ''
+      create_db_output=""
+
       log_info "Setting up database '$PGDATABASE'"
 
       ${postgres}/bin/psql -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres -d postgres -c \
-        "DO \$\$ BEGIN CREATE ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'postgres'; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;" 2>/dev/null || true
+        "DO \$\$ BEGIN CREATE ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'postgres'; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;" \
+        -v ON_ERROR_STOP=1
 
-      ${postgres}/bin/createdb -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres "$PGDATABASE" 2>/dev/null || true
+      if ! create_db_output="$(
+        # Connect through a stable maintenance database instead of the target database.
+        ${postgres}/bin/createdb -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres \
+          --maintenance-db=postgres "$PGDATABASE" 2>&1
+      )"; then
+        if ! printf '%s' "$create_db_output" | ${pkgs.gnugrep}/bin/grep -qi "already exists"; then
+          printf '%s\n' "$create_db_output" >&2
+          exit 1
+        fi
+      fi
 
       if [ -n "${pkgs.lib.concatStringsSep " " extensions}" ]; then
         for ext in ${pkgs.lib.concatStringsSep " " extensions}; do
           ${postgres}/bin/psql -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres -d "$PGDATABASE" \
-            -c "CREATE EXTENSION IF NOT EXISTS $ext;" 2>/dev/null || true
+            -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS $ext;"
         done
       fi
 
