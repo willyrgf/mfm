@@ -76,8 +76,9 @@ async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+# Canonical Rust compilation profile for nix run .#ci workflows.
 [profile.ci]
 inherits = "test"
-debug = 1
+debug = 0
 incremental = true
 codegen-units = 256

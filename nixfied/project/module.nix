@@ -239,7 +239,6 @@ let
 
   sharedCargoRustEnv = {
     RUSTC_WRAPPER = "sccache";
-    CARGO_PROFILE_CI_DEBUG = "0";
   }
   // lib.optionalAttrs pkgs.stdenv.isDarwin {
     LIBRARY_PATH = "${pkgs.libiconv}/lib";
@@ -327,6 +326,9 @@ let
 
   cargoFmtCheckCmd = "cargo fmt --all -- --check";
   cargoClippyCmd = "cargo clippy --workspace --lib --examples --tests --benches --all-features -- -D warnings";
+  # Keep CI linting on the same Cargo profile as nextest to avoid profile drift
+  # within .#ci. Clippy still uses its own driver, so reuse remains partial.
+  cargoCiClippyCmd = "cargo clippy --profile ci --workspace --lib --examples --tests --benches --all-features -- -D warnings";
   cargoNextestCiCmd = "cargo nextest run --cargo-profile ci";
   cargoNextestWorkspaceCiCmd = "${cargoNextestCiCmd} --workspace";
   parityNextestArgs = "-p mfm-integration-tests --features parity-tests -p mfm --features parity-tests";
@@ -1334,7 +1336,7 @@ in
 
             log_file="$artifacts_dir/clippy.log"
             echo "INFO: running ci step=clippy"
-            run_with_log "$log_file" ${cargoClippyCmd}
+            run_with_log "$log_file" ${cargoCiClippyCmd}
             echo "OK: ci step passed step=clippy log=$log_file"
           '';
         };
