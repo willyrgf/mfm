@@ -397,6 +397,7 @@ struct DynamicWriteOp {
     key: &'static str,
     value: serde_json::Value,
     interface: OpIo,
+    planner_payload: Option<serde_json::Value>,
 }
 
 impl DynamicWriteOp {
@@ -415,7 +416,13 @@ impl DynamicWriteOp {
             key,
             value,
             interface,
+            planner_payload: None,
         }
+    }
+
+    fn with_planner_payload(mut self, payload: serde_json::Value) -> Self {
+        self.planner_payload = Some(payload);
+        self
     }
 }
 
@@ -448,6 +455,15 @@ impl crate::op::Operation for DynamicWriteOp {
                 edges: Vec::new(),
             }),
         })
+    }
+
+    fn planner_payload(
+        &self,
+        _op_path: OpPath,
+        _op_config: &serde_json::Value,
+        _run_config: &RunConfig,
+    ) -> Result<Option<serde_json::Value>, SdkError> {
+        Ok(self.planner_payload.clone())
     }
 }
 
@@ -1505,6 +1521,53 @@ fn planner_emits_deterministic_compiled_execution_spec() {
     assert_eq!(spec_a.root_exports[0].export, "payload");
     assert_eq!(spec_a.root_exports[0].slot.op_path, "root.main.producer");
     assert_eq!(spec_a.root_exports[0].slot.slot, "out.payload");
+}
+
+#[test]
+fn planner_records_op_planner_payloads_in_compiled_execution_spec() {
+    let mut reg = HashMapOperationRegistry::default();
+    reg.register(Arc::new(
+        DynamicWriteOp::new(
+            "producer_leaf",
+            "v1",
+            "write",
+            "payload",
+            serde_json::json!("v1"),
+            OpIo {
+                imports: Vec::new(),
+                exports: vec![PortKey("payload".to_string())],
+            },
+        )
+        .with_planner_payload(serde_json::json!({
+            "semantic_execution_spec": {
+                "portfolio_id": "portfolio_main"
+            }
+        })),
+    ));
+
+    let pipeline = single_op_pipeline(
+        OpId::must_new("producer_leaf".to_string()),
+        "v1".to_string(),
+        serde_json::json!({}),
+    )
+    .expect("pipeline");
+
+    let spec = DefaultPipelinePlanner
+        .build_planned_execution(Arc::new(reg), &pipeline, &run_config_live())
+        .expect("planned execution")
+        .compiled_execution_spec
+        .expect("compiled execution spec");
+
+    assert_eq!(
+        spec.planner_payloads,
+        serde_json::json!({
+            "producer_leaf.main": {
+                "semantic_execution_spec": {
+                    "portfolio_id": "portfolio_main"
+                }
+            }
+        })
+    );
 }
 
 #[tokio::test]
