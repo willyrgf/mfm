@@ -6,6 +6,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+mod catalog;
+
+pub use catalog::{
+    ExecutionAnchor, ObservationPlanRequest, ObservationPlannerAdapter, ObservationRuntimeAdapter,
+    ObservationRuntimeInput, PinnedNetworkView, PlannerAdapter, PlanningError, ResolvedSubject,
+    ResolvedUnitPrice, RuntimeAdapter, SemanticCatalog, SemanticCatalogError, SemanticCatalogParts,
+    SubjectPlanRequest, SubjectPlannerAdapter, SubjectRuntimeAdapter, SubjectRuntimeInput,
+    ValuationPlanRequest, ValuationPlannerAdapter, ValuationRuntimeAdapter, ValuationRuntimeInput,
+    ViewPlanRequest, ViewPlannerAdapter, ViewRuntimeAdapter, ViewRuntimeInput,
+};
 /// Canonical observation read model emitted by semantic portfolio execution.
 ///
 /// The semantic cutover keeps the existing observation artifact shape so snapshot/report
