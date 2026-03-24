@@ -27,13 +27,13 @@ use serde_json::Value;
 
 use crate::semantic::{
     AdapterId, BitcoinResolvedSubjectValue, BitcoinRoutePolicy, BitcoinSubjectLocator,
-    BitcoinUtxoSetObservationPayload, DerivedUnitPriceValuationPayload,
-    DirectPriceSourcePayload, DirectPriceValuationPayload, EvmResolvedSubjectValue,
-    EvmRoutePolicy, EvmSubjectLocator, ExecutionAnchor, FixedUnitPriceValuationPayload,
-    NativeBalanceObservationPayload, ObservationRuntimeAdapter, ObservationRuntimeInput,
-    PinnedNetworkView, ResolvedSubject, ResolvedUnitPrice, RuntimeAdapter, SubjectKind,
-    SubjectResolutionTask, SubjectRuntimeAdapter, SubjectRuntimeInput, ValuationRuntimeAdapter,
-    ValuationRuntimeInput, ValuationTask, ViewPinTask, ViewRuntimeAdapter, ViewRuntimeInput,
+    BitcoinUtxoSetObservationPayload, DerivedUnitPriceValuationPayload, DirectPriceSourcePayload,
+    DirectPriceValuationPayload, EvmResolvedSubjectValue, EvmRoutePolicy, EvmSubjectLocator,
+    ExecutionAnchor, FixedUnitPriceValuationPayload, NativeBalanceObservationPayload,
+    ObservationRuntimeAdapter, ObservationRuntimeInput, PinnedNetworkView, ResolvedSubject,
+    ResolvedUnitPrice, RuntimeAdapter, SubjectKind, SubjectResolutionTask, SubjectRuntimeAdapter,
+    SubjectRuntimeInput, ValuationRuntimeAdapter, ValuationRuntimeInput, ValuationTask,
+    ViewPinTask, ViewRuntimeAdapter, ViewRuntimeInput,
 };
 
 const ADAPTER_RESOLVE_SUBJECT_EVM_ADDRESS: &str = "resolve_subject/evm_address";

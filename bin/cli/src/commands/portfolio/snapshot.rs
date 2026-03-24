@@ -93,7 +93,7 @@ mod tests {
     use super::*;
 
     use mfm_state_portfolio::model::{
-        NetworkPin, PortfolioQuoteTotal, PortfolioReport, WalletReport,
+        ExecutionAnchor, NetworkPin, PortfolioQuoteTotal, PortfolioReport, WalletReport,
     };
     use mfm_state_symbol::model::QuoteCode;
     use serde_json::json;
@@ -117,12 +117,15 @@ mod tests {
                 final_snapshot_id: Some("snapshot_ctx_123".to_string()),
                 snapshot_artifact_id: Some("artifact_123".to_string()),
                 report: Some(PortfolioReport {
+                    schema_version: 2,
                     portfolio_id: request.portfolio.portfolio_id,
                     generated_at_ms: 1234,
                     network_pins: vec![NetworkPin {
                         network_id: "ethereum-mainnet".to_string(),
-                        chain_id: 1,
-                        block_number: 100,
+                        anchor: ExecutionAnchor::Evm {
+                            chain_id: 1,
+                            block_number: 100,
+                        },
                     }],
                     wallet_summaries: vec![WalletReport {
                         wallet_id: "wallet_main".to_string(),

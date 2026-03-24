@@ -1,10 +1,10 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
 #![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
-//! Shared portfolio-domain schema and validation helpers for canonical portfolio snapshots.
+//! Shared portfolio-domain schema and semantic runtime for canonical portfolio snapshots.
 //!
-//! This crate owns the canonical portfolio-domain schema plus the reusable runtime states that pin
-//! networks and assemble deterministic snapshot/report artifacts for the portfolio flow.
+//! This crate owns the canonical portfolio-domain schema plus the fixed semantic runtime,
+//! planner/runtime payloads, and runtime adapters used by `portfolio_tracker v2`.
 //!
 //! # Examples
 //!
@@ -78,5 +78,3 @@ pub mod semantic;
 pub mod semantic_adapters;
 /// Fixed semantic runtime state family for compiled portfolio execution.
 pub mod semantic_states;
-/// Reusable portfolio-domain runtime states for canonical portfolio execution.
-pub mod states;

@@ -26,9 +26,9 @@ pub use compiler::{PortfolioRequest, PortfolioSemanticCompiler};
 pub use mfm_state_symbol::model::Observation;
 pub use payloads::{
     BitcoinResolvedSubjectValue, BitcoinRoutePolicy, BitcoinSubjectLocator,
-    BitcoinUtxoSetObservationPayload, DerivedUnitPriceValuationPayload,
-    DirectPriceSourcePayload, DirectPriceValuationPayload, Erc20BalanceObservationPayload,
-    EvmResolvedSubjectValue, EvmRoutePolicy, EvmSubjectLocator, FixedUnitPriceValuationPayload,
+    BitcoinUtxoSetObservationPayload, DerivedUnitPriceValuationPayload, DirectPriceSourcePayload,
+    DirectPriceValuationPayload, Erc20BalanceObservationPayload, EvmResolvedSubjectValue,
+    EvmRoutePolicy, EvmSubjectLocator, FixedUnitPriceValuationPayload,
     NativeBalanceObservationPayload, ObservationProjection, QuantitySchema,
 };
 
@@ -62,8 +62,6 @@ pub enum SubjectKind {
     EvmAddress,
     /// A Bitcoin address subject.
     BitcoinAddress,
-    /// A Bitcoin descriptor-backed subject.
-    BitcoinDescriptor,
 }
 
 /// One semantic subject in the planner-owned portfolio model.

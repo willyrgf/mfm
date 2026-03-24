@@ -185,9 +185,11 @@ pub fn validate_wallet_config(cfg: &WalletConfig) -> Result<(), WalletConfigErro
             }
         }
         WalletSubjectKind::BitcoinAddress => {
-            validate_bitcoin_address(&cfg.address).map_err(|_| WalletConfigError::InvalidAddress {
-                address: cfg.address.clone(),
-                subject_kind: cfg.subject_kind,
+            validate_bitcoin_address(&cfg.address).map_err(|_| {
+                WalletConfigError::InvalidAddress {
+                    address: cfg.address.clone(),
+                    subject_kind: cfg.subject_kind,
+                }
             })?;
         }
     }

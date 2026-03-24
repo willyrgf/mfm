@@ -15,15 +15,18 @@ use mfm_state_common::ctx::{read_typed, write_json};
 use mfm_state_common::errors::{
     state_error_with_state, state_from_io, state_unknown, state_unknown_msg,
 };
+use mfm_state_common::local_io_helpers::emit_report_event;
 use mfm_state_common::output::write_output_artifact;
 use mfm_state_common::states::meta;
-use mfm_state_symbol::model::Observation;
+use mfm_state_symbol::model::{Observation, QuoteCode, SymbolRole};
+use num_bigint::BigInt;
+use num_traits::{Signed, Zero};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::model::{
-    ExecutionAnchor as SnapshotExecutionAnchor, NetworkPin, PortfolioConfig, PortfolioSnapshot,
-    PortfolioSnapshotError, WalletSnapshot,
+    ExecutionAnchor as SnapshotExecutionAnchor, NetworkPin, PortfolioConfig, PortfolioQuoteTotal,
+    PortfolioReport, PortfolioSnapshot, PortfolioSnapshotError, WalletReport, WalletSnapshot,
 };
 use crate::semantic::{
     CompiledObservationBatch, ExecutionAnchor, NetworkFamily, ObservationRuntimeInput,
@@ -600,15 +603,37 @@ impl State for MergeObservationsState {
     async fn handle(
         &self,
         ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
-        rec: &mut dyn EventRecorder,
+        _io: &mut dyn IoProvider,
+        _rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let inner = mfm_state_symbol::states::MergeObservationsState {
-            state_id: self.state_id.clone(),
-            input_keys: self.input_keys.clone(),
-            output_key: self.output_key.clone(),
-        };
-        inner.handle(ctx, io, rec).await
+        let mut observations = Vec::new();
+        for input_key in &self.input_keys {
+            let mut next: Vec<Observation> = read_typed(
+                ctx,
+                input_key,
+                "missing_observations",
+                "missing observations in context",
+                "observations_decode_failed",
+                "failed to decode observations",
+            )?;
+            observations.append(&mut next);
+        }
+
+        observations.sort_by(|left, right| {
+            (left.wallet_id.as_str(), left.symbol_id.as_str())
+                .cmp(&(right.wallet_id.as_str(), right.symbol_id.as_str()))
+        });
+        let value = serde_json::to_value(&observations).map_err(|_| {
+            state_unknown(
+                "observations_serialize_failed",
+                "failed to serialize observations",
+            )
+        })?;
+        write_json(ctx, self.output_key.clone(), value)?;
+
+        Ok(StateOutcome {
+            snapshot: SnapshotPolicy::OnSuccess,
+        })
     }
 }
 
@@ -617,7 +642,7 @@ impl State for MergeObservationsState {
 pub struct AssembleSnapshotState {
     /// Stable state identifier assigned by the execution plan.
     pub state_id: StateId,
-    /// Canonical portfolio config preserved for snapshot/report projection compatibility.
+    /// Canonical portfolio config used for snapshot/report projection.
     pub portfolio: PortfolioConfig,
     /// Context key that contains resolved subjects.
     pub resolved_subjects_key: ContextKey,
@@ -673,26 +698,25 @@ impl State for AssembleSnapshotState {
 
         let mut network_pins_by_id = BTreeMap::new();
         for pinned in pinned_views.values() {
-            let network_pin =
-                match &pinned.anchor {
-                    ExecutionAnchor::Evm {
-                        chain_id,
-                        block_number,
-                    } => NetworkPin {
-                        network_id: pinned.network_id.clone(),
-                        anchor: SnapshotExecutionAnchor::Evm {
-                            chain_id: *chain_id,
-                            block_number: *block_number,
-                        },
+            let network_pin = match &pinned.anchor {
+                ExecutionAnchor::Evm {
+                    chain_id,
+                    block_number,
+                } => NetworkPin {
+                    network_id: pinned.network_id.clone(),
+                    anchor: SnapshotExecutionAnchor::Evm {
+                        chain_id: *chain_id,
+                        block_number: *block_number,
                     },
-                    ExecutionAnchor::Bitcoin { height, block_hash } => NetworkPin {
-                        network_id: pinned.network_id.clone(),
-                        anchor: SnapshotExecutionAnchor::Bitcoin {
-                            height: *height,
-                            block_hash: block_hash.clone(),
-                        },
+                },
+                ExecutionAnchor::Bitcoin { height, block_hash } => NetworkPin {
+                    network_id: pinned.network_id.clone(),
+                    anchor: SnapshotExecutionAnchor::Bitcoin {
+                        height: *height,
+                        block_hash: block_hash.clone(),
                     },
-                };
+                },
+            };
             if network_pins_by_id
                 .insert(network_pin.network_id.clone(), network_pin)
                 .is_some()
@@ -744,12 +768,6 @@ impl State for AssembleSnapshotState {
                         resolved.network_id,
                         WalletSubjectKind::BitcoinAddress,
                     )
-                }
-                SubjectKind::BitcoinDescriptor => {
-                    return Err(state_unknown_msg(
-                        "unsupported_subject_kind",
-                        "bitcoin descriptor subjects are not wired into snapshot assembly yet",
-                    ))
                 }
             };
             wallets.push(WalletSnapshot {
@@ -832,16 +850,57 @@ impl State for ProjectReportState {
     async fn handle(
         &self,
         ctx: &mut dyn DynContext,
-        io: &mut dyn IoProvider,
+        _io: &mut dyn IoProvider,
         rec: &mut dyn EventRecorder,
     ) -> Result<StateOutcome, StateError> {
-        let inner = crate::states::WritePortfolioReportState {
-            state_id: self.state_id.clone(),
-            snapshot_key: self.snapshot_key.clone(),
-            output_key: self.output_key.clone(),
-            event_name: self.event_name,
+        let snapshot: PortfolioSnapshot = read_typed(
+            ctx,
+            &self.snapshot_key,
+            "missing_snapshot",
+            "missing snapshot in context",
+            "snapshot_decode_failed",
+            "failed to decode portfolio snapshot",
+        )?;
+
+        let report_quotes = collect_report_quotes(&snapshot);
+        let mut portfolio_totals = initialized_quote_totals(&report_quotes);
+        let wallet_summaries = snapshot
+            .wallets
+            .iter()
+            .map(|wallet| {
+                let wallet_totals = derive_quote_totals(&report_quotes, &wallet.observations)?;
+                merge_quote_totals(&mut portfolio_totals, &wallet_totals);
+                Ok(WalletReport {
+                    wallet_id: wallet.wallet_id.clone(),
+                    network_id: wallet.network_id.clone(),
+                    totals_by_quote: quote_totals_to_vec(wallet_totals),
+                })
+            })
+            .collect::<Result<Vec<_>, StateError>>()?;
+
+        let mut report = PortfolioReport {
+            schema_version: 2,
+            portfolio_id: snapshot.portfolio_id.clone(),
+            generated_at_ms: snapshot.generated_at_ms,
+            network_pins: snapshot.network_pins.clone(),
+            wallet_summaries,
+            totals_by_quote: quote_totals_to_vec(portfolio_totals),
+            error_count: snapshot.errors.len() as u64,
         };
-        inner.handle(ctx, io, rec).await
+        report.normalize();
+
+        let report_value = serde_json::to_value(&report).map_err(|_| {
+            state_unknown(
+                "portfolio_report_serialize_failed",
+                "failed to serialize portfolio report",
+            )
+        })?;
+        write_json(ctx, self.output_key.clone(), report_value.clone())?;
+        emit_report_event(rec, self.event_name, report_value).await?;
+
+        Ok(StateOutcome {
+            snapshot: SnapshotPolicy::OnSuccess,
+        })
     }
 }
 
@@ -962,6 +1021,257 @@ fn group_observations_by_wallet(
             .push(observation);
     }
     grouped
+}
+
+fn collect_report_quotes(snapshot: &PortfolioSnapshot) -> Vec<QuoteCode> {
+    let mut quotes = std::collections::BTreeSet::new();
+    for symbol in &snapshot.symbol_configs {
+        for quote in &symbol.valuation.quotes {
+            quotes.insert(quote.quote);
+        }
+    }
+    for wallet in &snapshot.wallets {
+        for observation in &wallet.observations {
+            for value in &observation.values {
+                quotes.insert(value.quote);
+            }
+        }
+    }
+    quotes.into_iter().collect()
+}
+
+fn derive_quote_totals(
+    report_quotes: &[QuoteCode],
+    observations: &[Observation],
+) -> Result<BTreeMap<QuoteCode, QuoteTotalsAccumulator>, StateError> {
+    let mut totals = initialized_quote_totals(report_quotes);
+    for observation in observations {
+        for value in &observation.values {
+            let entry = totals.entry(value.quote).or_default();
+            match observation.role {
+                SymbolRole::Native | SymbolRole::Asset => {
+                    entry.assets_value = entry
+                        .assets_value
+                        .add(&DecimalValue::parse(&value.value_dec)?);
+                }
+                SymbolRole::Collateral => {
+                    entry.collateral_value = entry
+                        .collateral_value
+                        .add(&DecimalValue::parse(&value.value_dec)?);
+                }
+                SymbolRole::Debt => {
+                    entry.debt_value = entry
+                        .debt_value
+                        .add(&DecimalValue::parse(&value.value_dec)?);
+                }
+                SymbolRole::Staked => {
+                    entry.staked_value = entry
+                        .staked_value
+                        .add(&DecimalValue::parse(&value.value_dec)?);
+                }
+            }
+        }
+    }
+    Ok(totals)
+}
+
+fn initialized_quote_totals(
+    report_quotes: &[QuoteCode],
+) -> BTreeMap<QuoteCode, QuoteTotalsAccumulator> {
+    report_quotes
+        .iter()
+        .copied()
+        .map(|quote| (quote, QuoteTotalsAccumulator::default()))
+        .collect()
+}
+
+fn merge_quote_totals(
+    target: &mut BTreeMap<QuoteCode, QuoteTotalsAccumulator>,
+    source: &BTreeMap<QuoteCode, QuoteTotalsAccumulator>,
+) {
+    for (quote, totals) in source {
+        target
+            .entry(*quote)
+            .and_modify(|acc| acc.merge(totals))
+            .or_insert_with(|| totals.clone());
+    }
+}
+
+fn quote_totals_to_vec(
+    totals: BTreeMap<QuoteCode, QuoteTotalsAccumulator>,
+) -> Vec<PortfolioQuoteTotal> {
+    totals
+        .into_iter()
+        .map(|(quote, totals)| totals.into_report_total(quote))
+        .collect()
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct QuoteTotalsAccumulator {
+    assets_value: DecimalValue,
+    collateral_value: DecimalValue,
+    debt_value: DecimalValue,
+    staked_value: DecimalValue,
+}
+
+impl QuoteTotalsAccumulator {
+    fn merge(&mut self, other: &Self) {
+        self.assets_value = self.assets_value.add(&other.assets_value);
+        self.collateral_value = self.collateral_value.add(&other.collateral_value);
+        self.debt_value = self.debt_value.add(&other.debt_value);
+        self.staked_value = self.staked_value.add(&other.staked_value);
+    }
+
+    fn into_report_total(self, quote: QuoteCode) -> PortfolioQuoteTotal {
+        let positive_value = self
+            .assets_value
+            .add(&self.collateral_value)
+            .add(&self.staked_value);
+        let net_value = positive_value.sub(&self.debt_value);
+        PortfolioQuoteTotal {
+            quote,
+            assets_value_dec: self.assets_value.to_canonical_string(),
+            collateral_value_dec: self.collateral_value.to_canonical_string(),
+            debt_value_dec: self.debt_value.to_canonical_string(),
+            staked_value_dec: self.staked_value.to_canonical_string(),
+            net_value_dec: net_value.to_canonical_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DecimalValue {
+    digits: BigInt,
+    scale: u32,
+}
+
+impl Default for DecimalValue {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+impl DecimalValue {
+    fn zero() -> Self {
+        Self {
+            digits: BigInt::ZERO,
+            scale: 0,
+        }
+    }
+
+    fn parse(input: &str) -> Result<Self, StateError> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(state_unknown_msg(
+                "invalid_decimal_string",
+                format!("invalid decimal string `{input}`"),
+            ));
+        }
+
+        let (negative, digits_part) = match trimmed.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, trimmed),
+        };
+        let parts: Vec<_> = digits_part.split('.').collect();
+        if parts.len() > 2
+            || parts
+                .iter()
+                .any(|part| !part.is_empty() && !part.chars().all(|ch| ch.is_ascii_digit()))
+        {
+            return Err(state_unknown_msg(
+                "invalid_decimal_string",
+                format!("invalid decimal string `{input}`"),
+            ));
+        }
+
+        let whole = parts[0];
+        let frac = parts.get(1).copied().unwrap_or("");
+        let digits = format!("{whole}{frac}");
+        let digits = if digits.is_empty() {
+            "0"
+        } else {
+            digits.as_str()
+        };
+        let mut parsed: BigInt = digits.parse().map_err(|_| {
+            state_unknown_msg(
+                "invalid_decimal_string",
+                format!("invalid decimal string `{input}`"),
+            )
+        })?;
+        if negative && !parsed.is_zero() {
+            parsed = -parsed;
+        }
+        Ok(Self {
+            digits: parsed,
+            scale: frac.len() as u32,
+        })
+    }
+
+    fn add(&self, other: &Self) -> Self {
+        let scale = self.scale.max(other.scale);
+        Self {
+            digits: self.scaled_digits(scale) + other.scaled_digits(scale),
+            scale,
+        }
+    }
+
+    fn sub(&self, other: &Self) -> Self {
+        let scale = self.scale.max(other.scale);
+        Self {
+            digits: self.scaled_digits(scale) - other.scaled_digits(scale),
+            scale,
+        }
+    }
+
+    fn scaled_digits(&self, scale: u32) -> BigInt {
+        if self.scale == scale {
+            self.digits.clone()
+        } else {
+            &self.digits * ten_pow(scale - self.scale)
+        }
+    }
+
+    fn to_canonical_string(&self) -> String {
+        self.to_string_with_min_scale(self.scale)
+    }
+
+    fn to_string_with_min_scale(&self, min_scale: u32) -> String {
+        let negative = self.digits.is_negative();
+        let digits = self.digits.abs().to_string();
+        let scale = self.scale as usize;
+        let mut out = if scale == 0 {
+            digits
+        } else if digits.len() <= scale {
+            format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
+        } else {
+            let split = digits.len() - scale;
+            format!("{}.{}", &digits[..split], &digits[split..])
+        };
+
+        if let Some((whole, frac)) = out.split_once('.') {
+            let mut frac = frac.to_string();
+            while frac.len() > min_scale as usize && frac.ends_with('0') {
+                frac.pop();
+            }
+            if frac.len() < min_scale as usize {
+                frac.push_str(&"0".repeat(min_scale as usize - frac.len()));
+            }
+            out = format!("{whole}.{frac}");
+        } else if min_scale > 0 {
+            out.push('.');
+            out.push_str(&"0".repeat(min_scale as usize));
+        }
+
+        if negative && out != "0" {
+            format!("-{out}")
+        } else {
+            out
+        }
+    }
+}
+
+fn ten_pow(n: u32) -> BigInt {
+    BigInt::from(10u8).pow(n)
 }
 
 #[cfg(test)]
@@ -1648,5 +1958,203 @@ mod tests {
         .expect_err("must fail");
 
         assert_eq!(err.info.code.0, "duplicate_snapshot_network_pin");
+    }
+
+    #[tokio::test]
+    async fn merge_observations_orders_inputs_canonically() {
+        let mut ctx = MapContext::default();
+        ctx.write(
+            ContextKey("work.observations.a".to_string()),
+            serde_json::json!([observation_with_value(
+                "wallet_b",
+                "eth.native.ethereum-mainnet",
+                SymbolRole::Native,
+                QuoteCode::Usd,
+                "2.5"
+            ),]),
+        )
+        .expect("write");
+        ctx.write(
+            ContextKey("work.observations.b".to_string()),
+            serde_json::json!([
+                observation_with_value(
+                    "wallet_a",
+                    "usdc.wallet.ethereum-mainnet",
+                    SymbolRole::Asset,
+                    QuoteCode::Usd,
+                    "1.0"
+                ),
+                observation_with_value(
+                    "wallet_a",
+                    "eth.native.ethereum-mainnet",
+                    SymbolRole::Native,
+                    QuoteCode::Usd,
+                    "3.0"
+                ),
+            ]),
+        )
+        .expect("write");
+
+        MergeObservationsState {
+            state_id: StateId::must_new("portfolio.semantic.merge".to_string()),
+            input_keys: vec![
+                ContextKey("work.observations.a".to_string()),
+                ContextKey("work.observations.b".to_string()),
+            ],
+            output_key: ContextKey("work.observations".to_string()),
+        }
+        .handle(&mut ctx, &mut TestIo::default(), &mut NoopRecorder)
+        .await
+        .expect("merge");
+
+        let observations: Vec<Observation> = serde_json::from_value(
+            ctx.read(&ContextKey("work.observations".to_string()))
+                .expect("read")
+                .expect("observations"),
+        )
+        .expect("typed");
+        assert_eq!(observations.len(), 3);
+        assert_eq!(observations[0].wallet_id, "wallet_a");
+        assert_eq!(observations[0].symbol_id, "eth.native.ethereum-mainnet");
+        assert_eq!(observations[1].wallet_id, "wallet_a");
+        assert_eq!(observations[1].symbol_id, "usdc.wallet.ethereum-mainnet");
+        assert_eq!(observations[2].wallet_id, "wallet_b");
+        assert_eq!(observations[2].symbol_id, "eth.native.ethereum-mainnet");
+    }
+
+    #[tokio::test]
+    async fn project_report_derives_net_exposure_buckets() {
+        let snapshot = PortfolioSnapshot {
+            schema_version: 2,
+            portfolio_id: "portfolio_roles".to_string(),
+            generated_at_ms: 1234,
+            network_pins: vec![NetworkPin {
+                network_id: "ethereum-mainnet".to_string(),
+                anchor: SnapshotExecutionAnchor::Evm {
+                    chain_id: 1,
+                    block_number: 100,
+                },
+            }],
+            wallets: vec![WalletSnapshot {
+                wallet_id: "wallet_main".to_string(),
+                address: "0x000000000000000000000000000000000000dead".to_string(),
+                subject_kind: WalletSubjectKind::EvmAddress,
+                network_id: "ethereum-mainnet".to_string(),
+                observations: vec![
+                    observation_with_value(
+                        "wallet_main",
+                        "asset.main",
+                        SymbolRole::Asset,
+                        QuoteCode::Usd,
+                        "12.50",
+                    ),
+                    observation_with_value(
+                        "wallet_main",
+                        "collateral.main",
+                        SymbolRole::Collateral,
+                        QuoteCode::Usd,
+                        "7.25",
+                    ),
+                    observation_with_value(
+                        "wallet_main",
+                        "debt.main",
+                        SymbolRole::Debt,
+                        QuoteCode::Usd,
+                        "30.00",
+                    ),
+                    observation_with_value(
+                        "wallet_main",
+                        "staked.main",
+                        SymbolRole::Staked,
+                        QuoteCode::Usd,
+                        "1.25",
+                    ),
+                ],
+            }],
+            symbol_configs: vec![],
+            errors: vec![],
+        };
+
+        let mut ctx = MapContext::default();
+        ctx.write(
+            ContextKey("snapshot".to_string()),
+            serde_json::to_value(&snapshot).expect("snapshot json"),
+        )
+        .expect("write snapshot");
+
+        ProjectReportState {
+            state_id: StateId::must_new("portfolio.semantic.report".to_string()),
+            snapshot_key: ContextKey("snapshot".to_string()),
+            output_key: ContextKey("report".to_string()),
+            event_name: "portfolio_tracker.completed",
+        }
+        .handle(&mut ctx, &mut TestIo::default(), &mut NoopRecorder)
+        .await
+        .expect("project report");
+
+        let report: PortfolioReport = serde_json::from_value(
+            ctx.read(&ContextKey("report".to_string()))
+                .expect("read")
+                .expect("report"),
+        )
+        .expect("typed report");
+        let wallet_usd =
+            find_quote_total(&report.wallet_summaries[0].totals_by_quote, QuoteCode::Usd);
+        assert_eq!(wallet_usd.assets_value_dec, "12.50");
+        assert_eq!(wallet_usd.collateral_value_dec, "7.25");
+        assert_eq!(wallet_usd.debt_value_dec, "30.00");
+        assert_eq!(wallet_usd.staked_value_dec, "1.25");
+        assert_eq!(wallet_usd.net_value_dec, "-9.00");
+
+        let portfolio_usd = find_quote_total(&report.totals_by_quote, QuoteCode::Usd);
+        assert_eq!(portfolio_usd, wallet_usd);
+    }
+
+    fn observation_with_value(
+        wallet_id: &str,
+        symbol_id: &str,
+        role: SymbolRole,
+        quote: QuoteCode,
+        value_dec: &str,
+    ) -> Observation {
+        Observation {
+            wallet_id: wallet_id.to_string(),
+            symbol_id: symbol_id.to_string(),
+            display_symbol: None,
+            kind: SymbolKind::NativeBalance,
+            role,
+            network_id: "ethereum-mainnet".to_string(),
+            protocol: None,
+            quantity: ObservationQuantity {
+                raw_dec: "1".to_string(),
+                decimals: 18,
+                amount_dec: "1".to_string(),
+            },
+            values: vec![ObservationValue {
+                quote,
+                priced_symbol_id: symbol_id.to_string(),
+                value_dec: value_dec.to_string(),
+                unit_price_dec: value_dec.to_string(),
+                valuation_reader_kind: "fixed_unit_price".to_string(),
+                source_refs: vec![],
+            }],
+            source: ObservationSource {
+                balance_reader_kind: "native_balance".to_string(),
+                network_id: "ethereum-mainnet".to_string(),
+                anchor: mfm_state_symbol::model::ObservationAnchor::Evm {
+                    chain_id: 1,
+                    block_number: 100,
+                },
+            },
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    fn find_quote_total(totals: &[PortfolioQuoteTotal], quote: QuoteCode) -> PortfolioQuoteTotal {
+        totals
+            .iter()
+            .find(|total| total.quote == quote)
+            .cloned()
+            .expect("quote total")
     }
 }

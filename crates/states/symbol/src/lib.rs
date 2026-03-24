@@ -3,8 +3,8 @@
 #![warn(missing_docs)]
 //! Shared symbol-domain schema and validation helpers for canonical portfolio snapshots.
 //!
-//! This crate owns the canonical symbol-domain schema plus reusable valuation and observation
-//! runtime states used by the portfolio flow.
+//! This crate owns the canonical symbol-domain schema consumed by semantic portfolio planners,
+//! adapters, and projections.
 //!
 //! # Examples
 //!
@@ -48,5 +48,3 @@
 //! ```
 /// Canonical symbol-domain models, validation helpers, and normalization utilities.
 pub mod model;
-/// Reusable symbol-domain runtime states for canonical portfolio observations and valuation.
-pub mod states;

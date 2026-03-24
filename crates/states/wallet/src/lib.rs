@@ -3,8 +3,8 @@
 #![warn(missing_docs)]
 //! Shared wallet-domain schema and validation helpers for canonical portfolio snapshots.
 //!
-//! This crate owns the canonical wallet-domain schema plus reusable wallet-resolution runtime
-//! states used by the portfolio flow.
+//! This crate owns the canonical wallet-domain schema consumed by semantic portfolio planners and
+//! runtime adapters.
 //!
 //! # Examples
 //!
@@ -26,5 +26,3 @@
 //! ```
 /// Canonical wallet-domain models, validation helpers, and normalization utilities.
 pub mod model;
-/// Reusable wallet-domain runtime states for canonical portfolio execution.
-pub mod states;

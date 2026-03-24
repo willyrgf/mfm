@@ -5,7 +5,7 @@
 //!
 //! This crate holds reusable manifest contracts and execution states for:
 //! - Aave V3 deploy/configure flows
-//! - canonical Aave V3 `protocol_position` portfolio collection
+//! - compiled Aave V3 semantic portfolio adapters
 //!
 //! Operations should wire these states into plans rather than reimplementing the runtime behavior
 //! in binary or op layers.

@@ -403,15 +403,14 @@ pub fn validate_aave_portfolio_config(
             });
         };
 
-        let network_chain_id = (*network_chain_id).ok_or_else(|| {
-            AavePortfolioConfigError::InvalidMarketConfig {
+        let network_chain_id =
+            (*network_chain_id).ok_or_else(|| AavePortfolioConfigError::InvalidMarketConfig {
                 symbol_id: symbol.symbol_id.clone(),
                 reason: format!(
                     "portfolio network `{}` did not declare an evm chain_id",
                     symbol.network_id
                 ),
-            }
-        })?;
+            })?;
 
         validate_market_config(symbol, cfg.market(), network_chain_id)?;
         let reserve = cfg.market().reserve(cfg.reserve_id()).ok_or_else(|| {
