@@ -128,8 +128,9 @@ pub mod ids {
     #[serde(try_from = "String", into = "String")]
     pub struct OpId(String);
 
-    /// Enforced: "<machine_id>.<step_id>"
+    /// Enforced: "<machine_id>.<step_id>(.<child_op_local_id>)*"
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(try_from = "String", into = "String")]
     pub struct OpPath(pub String);
 
     /// Enforced: "<machine_id>.<step_id>.<state_local_id>"
@@ -242,7 +243,6 @@ pub mod ids {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn validate_op_path(value: &str) -> bool {
         let mut it = value.split('.');
         let Some(machine_id) = it.next() else {
@@ -251,10 +251,63 @@ pub mod ids {
         let Some(step_id) = it.next() else {
             return false;
         };
-        if it.next().is_some() {
+        if !is_valid_id_segment(machine_id) || !is_valid_id_segment(step_id) {
             return false;
         }
-        is_valid_id_segment(machine_id) && is_valid_id_segment(step_id)
+        it.all(is_valid_id_segment)
+    }
+
+    impl OpPath {
+        /// Creates an operation path after validating the hierarchical naming contract.
+        ///
+        /// Accepted values match `<machine_id>.<step_id>(.<child_op_local_id>)*` where each
+        /// segment satisfies the same naming contract as [`OpId`].
+        pub fn new(value: impl Into<String>) -> Result<Self, IdValidationError> {
+            let value = value.into();
+            if !validate_op_path(&value) {
+                return Err(IdValidationError::new("op_path", value));
+            }
+            Ok(Self(value))
+        }
+
+        /// Creates an [`OpPath`] and panics if the value is invalid.
+        pub fn must_new(value: impl Into<String>) -> Self {
+            Self::new(value)
+                .expect("op path must satisfy <machine_id>.<step_id>(.<child_op_local_id>)*")
+        }
+
+        /// Returns the validated path as a borrowed string slice.
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    impl TryFrom<String> for OpPath {
+        type Error = IdValidationError;
+
+        fn try_from(value: String) -> Result<Self, Self::Error> {
+            Self::new(value)
+        }
+    }
+
+    impl TryFrom<&str> for OpPath {
+        type Error = IdValidationError;
+
+        fn try_from(value: &str) -> Result<Self, Self::Error> {
+            Self::new(value)
+        }
+    }
+
+    impl From<OpPath> for String {
+        fn from(value: OpPath) -> Self {
+            value.0
+        }
+    }
+
+    impl fmt::Display for OpPath {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0)
+        }
     }
 
     #[allow(dead_code)]

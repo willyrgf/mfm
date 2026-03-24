@@ -28,11 +28,14 @@ use mfm_evm_runtime::states::read::ReadU64HexState;
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
 use mfm_machine::ids::{ContextKey, OpId, OpPath, StateId};
-use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
+use mfm_machine::plan::DependencyEdge;
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
-use mfm_sdk::op::{OpIo, Operation};
+use mfm_sdk::op::{
+    leaf_state_id, leaf_state_node, LeafOpSpec, LeafStateNode, OpInterface, Operation, PlannedOp,
+    PlannedOpKind,
+};
 use mfm_state_common::errors;
 
 const OP_ID: &str = "evm_read";
@@ -92,22 +95,12 @@ impl Operation for EvmReadOp {
         OP_VERSION.to_string()
     }
 
-    fn io(&self, _op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        Ok(OpIo {
-            imports: Vec::new(),
-            exports: vec![
-                PortKey("chain_id".to_string()),
-                PortKey("block_number".to_string()),
-            ],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
+    ) -> Result<PlannedOp, SdkError> {
         let cfg: EvmReadConfig = serde_json::from_value(op_config.clone())
             .map_err(|_| sdk_err("invalid_op_config", "invalid evm_read op_config"))?;
         if cfg.network_id.trim().is_empty() {
@@ -120,13 +113,13 @@ impl Operation for EvmReadOp {
             ));
         }
 
-        let mut states: Vec<StateNode> = Vec::new();
+        let mut states: Vec<LeafStateNode> = Vec::new();
         let mut edges: Vec<DependencyEdge> = Vec::new();
 
         let mut last: Option<StateId> = None;
 
         if cfg.include_chain_id {
-            let id = StateId::must_new(format!("{}.chain_id", op_path.0));
+            let id = leaf_state_id(&op_path, "chain_id")?;
             let st = Arc::new(
                 ReadU64HexState::new(
                     id.clone(),
@@ -137,15 +130,12 @@ impl Operation for EvmReadOp {
                 )
                 .with_control_scope(cfg.control_scope.clone()),
             );
-            states.push(StateNode {
-                id: id.clone(),
-                state: st,
-            });
+            states.push(leaf_state_node(&op_path, "chain_id", st)?);
             last = Some(id);
         }
 
         if cfg.include_block_number {
-            let id = StateId::must_new(format!("{}.block_number", op_path.0));
+            let id = leaf_state_id(&op_path, "block_number")?;
             let st = Arc::new(
                 ReadU64HexState::new(
                     id.clone(),
@@ -162,13 +152,19 @@ impl Operation for EvmReadOp {
                     to: id.clone(),
                 });
             }
-            states.push(StateNode {
-                id: id.clone(),
-                state: st,
-            });
+            states.push(leaf_state_node(&op_path, "block_number", st)?);
         }
 
-        Ok(StateGraph { states, edges })
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports: Vec::new(),
+                exports: vec![
+                    PortKey("chain_id".to_string()),
+                    PortKey("block_number".to_string()),
+                ],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec { states, edges }),
+        })
     }
 }
 

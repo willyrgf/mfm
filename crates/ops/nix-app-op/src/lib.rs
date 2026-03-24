@@ -24,14 +24,15 @@ use async_trait::async_trait;
 
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
-use mfm_machine::ids::{OpId, OpPath, StateId};
-use mfm_machine::plan::StateGraph;
+use mfm_machine::ids::{OpId, OpPath};
 use mfm_state_common::errors as op_errors;
 use mfm_state_common::states::nix::{validate_nix_exec_config, NixExecState, NixExecStateConfig};
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
-use mfm_sdk::op::{OpIo, Operation};
+use mfm_sdk::op::{
+    leaf_state_id, leaf_state_node, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind,
+};
 
 const OP_ID: &str = "nix_app";
 const OP_VERSION: &str = "v1";
@@ -49,19 +50,12 @@ impl Operation for NixAppOp {
         OP_VERSION.to_string()
     }
 
-    fn io(&self, _op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        Ok(OpIo {
-            imports: Vec::new(),
-            exports: vec![PortKey("result".to_string())],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
+    ) -> Result<PlannedOp, SdkError> {
         let cfg: NixExecStateConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
             op_errors::sdk_unknown_error("invalid_op_config", "invalid nix_app op_config")
         })?;
@@ -69,15 +63,21 @@ impl Operation for NixAppOp {
             op_errors::sdk_error("invalid_op_config", ErrorCategory::Unknown, false, msg)
         })?;
 
-        let sid = StateId::must_new(format!("{}.run", op_path.0));
+        let sid = leaf_state_id(&op_path, "run")?;
         let state = Arc::new(NixExecState {
             state_id: sid.clone(),
             cfg,
         });
 
-        Ok(StateGraph {
-            states: vec![mfm_machine::plan::StateNode { id: sid, state }],
-            edges: Vec::new(),
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports: Vec::new(),
+                exports: vec![PortKey("result".to_string())],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![leaf_state_node(&op_path, "run", state)?],
+                edges: Vec::new(),
+            }),
         })
     }
 }

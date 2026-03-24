@@ -14,7 +14,7 @@ use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::{ArtifactId, RunId, StateId};
 use mfm_machine::io::IoCall;
 use mfm_machine::live_io::{FactIndex, LiveIoTransport, LiveIoTransportFactory};
-use mfm_machine::plan::ExecutionPlan;
+use mfm_machine::plan::{ExecutionPlan, StateNode};
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::replay_io::ReplayIo;
 use mfm_machine::runtime::{
@@ -23,6 +23,7 @@ use mfm_machine::runtime::{
 use mfm_machine::stores::StreamId;
 use mfm_state_common::test_support as op_test_support;
 
+use mfm_sdk::op::{leaf_state_id, leaf_state_node, LeafOpSpec, OpIo, PlannedOp, PlannedOpKind};
 use mfm_sdk::unstable::SdkPlanResolver;
 
 #[derive(Clone)]
@@ -245,22 +246,14 @@ impl Operation for ChildParentOp {
         CHILD_PARENT_OP_VERSION.to_string()
     }
 
-    fn io(&self, _op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        Ok(OpIo {
-            imports: Vec::new(),
-            exports: vec![PortKey("joined".to_string())],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         _op_config: &serde_json::Value,
         run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
-        let spawn_sid =
-            mfm_machine::ids::StateId::must_new(format!("{}.spawn_children", op_path.0));
-        let join_sid = mfm_machine::ids::StateId::must_new(format!("{}.join_children", op_path.0));
+    ) -> Result<PlannedOp, SdkError> {
+        let spawn_sid = leaf_state_id(&op_path, "spawn_children")?;
+        let join_sid = leaf_state_id(&op_path, "join_children")?;
 
         let spawn = Arc::new(SpawnChildrenState {
             state_id: spawn_sid.clone(),
@@ -273,21 +266,21 @@ impl Operation for ChildParentOp {
             orphan_after_join: self.orphan_after_join.clone(),
         });
 
-        Ok(StateGraph {
-            states: vec![
-                StateNode {
-                    id: spawn_sid.clone(),
-                    state: spawn,
-                },
-                StateNode {
-                    id: join_sid.clone(),
-                    state: join,
-                },
-            ],
-            edges: vec![DependencyEdge {
-                from: spawn_sid,
-                to: join_sid,
-            }],
+        Ok(PlannedOp {
+            interface: OpIo {
+                imports: Vec::new(),
+                exports: vec![PortKey("joined".to_string())],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![
+                    leaf_state_node(&op_path, "spawn_children", spawn)?,
+                    leaf_state_node(&op_path, "join_children", join)?,
+                ],
+                edges: vec![DependencyEdge {
+                    from: spawn_sid,
+                    to: join_sid,
+                }],
+            }),
         })
     }
 }

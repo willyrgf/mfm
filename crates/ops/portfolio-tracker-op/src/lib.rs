@@ -26,11 +26,13 @@ use std::sync::Arc;
 use mfm_evm_runtime::states::rpc_control::{PrepareSourcesState, RpcControlNetworkRoute};
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
-use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath, StateId};
-use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
+use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
+use mfm_machine::plan::DependencyEdge;
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
-use mfm_sdk::op::{OpIo, Operation};
+use mfm_sdk::op::{
+    leaf_state_id, leaf_state_node, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind,
+};
 use mfm_state_aave_v3::portfolio::model::{
     is_aave_protocol_position, validate_aave_portfolio_config,
 };
@@ -193,22 +195,12 @@ impl Operation for PortfolioTrackerOp {
         OP_VERSION.to_string()
     }
 
-    fn io(&self, _op_config: &Value) -> Result<OpIo, SdkError> {
-        Ok(OpIo {
-            imports: Vec::new(),
-            exports: vec![
-                PortKey(KEY_SNAPSHOT_ARTIFACT_ID.to_string()),
-                PortKey(KEY_REPORT.to_string()),
-            ],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         op_config: &Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
+    ) -> Result<PlannedOp, SdkError> {
         let cfg = parse_config(op_config)?;
         let routes = network_routes(&cfg.portfolio);
         let (base_symbols, aave_symbols) = split_symbols(&cfg.portfolio);
@@ -236,52 +228,56 @@ impl Operation for PortfolioTrackerOp {
             })
             .collect();
 
-        let prepare_sources_sid = StateId::must_new(format!("{}.prepare_sources", op_path.0));
-        states.push(StateNode {
-            id: prepare_sources_sid.clone(),
-            state: Arc::new(PrepareSourcesState {
+        let prepare_sources_sid = leaf_state_id(&op_path, "prepare_sources")?;
+        states.push(leaf_state_node(
+            &op_path,
+            "prepare_sources",
+            Arc::new(PrepareSourcesState {
                 state_id: prepare_sources_sid.clone(),
                 networks: rpc_sources,
             }),
-        });
+        )?);
 
-        let pin_networks_sid = StateId::must_new(format!("{}.pin_networks", op_path.0));
+        let pin_networks_sid = leaf_state_id(&op_path, "pin_networks")?;
         edges.push(DependencyEdge {
             from: prepare_sources_sid,
             to: pin_networks_sid.clone(),
         });
-        states.push(StateNode {
-            id: pin_networks_sid.clone(),
-            state: Arc::new(PinPortfolioNetworksState {
+        states.push(leaf_state_node(
+            &op_path,
+            "pin_networks",
+            Arc::new(PinPortfolioNetworksState {
                 state_id: pin_networks_sid.clone(),
                 portfolio: cfg.portfolio.clone(),
                 valuation_sources: cfg.valuation_source_registry.clone(),
                 output_key: ctx_key(KEY_NETWORK_PINS),
             }),
-        });
+        )?);
 
-        let resolve_wallets_sid = StateId::must_new(format!("{}.resolve_wallets", op_path.0));
+        let resolve_wallets_sid = leaf_state_id(&op_path, "resolve_wallets")?;
         edges.push(DependencyEdge {
             from: pin_networks_sid.clone(),
             to: resolve_wallets_sid.clone(),
         });
-        states.push(StateNode {
-            id: resolve_wallets_sid.clone(),
-            state: Arc::new(ResolveWalletsState {
+        states.push(leaf_state_node(
+            &op_path,
+            "resolve_wallets",
+            Arc::new(ResolveWalletsState {
                 state_id: resolve_wallets_sid.clone(),
                 wallets: cfg.portfolio.wallets.clone(),
                 output_key: ctx_key(KEY_RESOLVED_WALLETS),
             }),
-        });
+        )?);
 
-        let read_direct_prices_sid = StateId::must_new(format!("{}.read_direct_prices", op_path.0));
+        let read_direct_prices_sid = leaf_state_id(&op_path, "read_direct_prices")?;
         edges.push(DependencyEdge {
             from: pin_networks_sid,
             to: read_direct_prices_sid.clone(),
         });
-        states.push(StateNode {
-            id: read_direct_prices_sid.clone(),
-            state: Arc::new(ReadDirectPricesState {
+        states.push(leaf_state_node(
+            &op_path,
+            "read_direct_prices",
+            Arc::new(ReadDirectPricesState {
                 state_id: read_direct_prices_sid.clone(),
                 symbols: cfg.portfolio.symbol_configs.clone(),
                 valuation_sources: cfg.valuation_source_registry.clone(),
@@ -289,10 +285,9 @@ impl Operation for PortfolioTrackerOp {
                 network_pins_key: ctx_key(KEY_NETWORK_PINS),
                 output_key: ctx_key(KEY_DIRECT_PRICES),
             }),
-        });
+        )?);
 
-        let collect_observations_sid =
-            StateId::must_new(format!("{}.collect_observations", op_path.0));
+        let collect_observations_sid = leaf_state_id(&op_path, "collect_observations")?;
         edges.push(DependencyEdge {
             from: resolve_wallets_sid.clone(),
             to: collect_observations_sid.clone(),
@@ -301,9 +296,10 @@ impl Operation for PortfolioTrackerOp {
             from: read_direct_prices_sid.clone(),
             to: collect_observations_sid.clone(),
         });
-        states.push(StateNode {
-            id: collect_observations_sid.clone(),
-            state: Arc::new(CollectObservationsState {
+        states.push(leaf_state_node(
+            &op_path,
+            "collect_observations",
+            Arc::new(CollectObservationsState {
                 state_id: collect_observations_sid.clone(),
                 wallets: base_wallets,
                 symbols: base_symbols,
@@ -313,10 +309,9 @@ impl Operation for PortfolioTrackerOp {
                 direct_prices_key: ctx_key(KEY_DIRECT_PRICES),
                 output_key: ctx_key(KEY_BASE_OBSERVATIONS),
             }),
-        });
+        )?);
 
-        let collect_aave_observations_sid =
-            StateId::must_new(format!("{}.collect_aave_observations", op_path.0));
+        let collect_aave_observations_sid = leaf_state_id(&op_path, "collect_aave_observations")?;
         edges.push(DependencyEdge {
             from: resolve_wallets_sid.clone(),
             to: collect_aave_observations_sid.clone(),
@@ -325,9 +320,10 @@ impl Operation for PortfolioTrackerOp {
             from: read_direct_prices_sid.clone(),
             to: collect_aave_observations_sid.clone(),
         });
-        states.push(StateNode {
-            id: collect_aave_observations_sid.clone(),
-            state: Arc::new(CollectAaveObservationsState {
+        states.push(leaf_state_node(
+            &op_path,
+            "collect_aave_observations",
+            Arc::new(CollectAaveObservationsState {
                 state_id: collect_aave_observations_sid.clone(),
                 wallets: aave_wallets,
                 symbols: aave_symbols,
@@ -337,9 +333,9 @@ impl Operation for PortfolioTrackerOp {
                 direct_prices_key: ctx_key(KEY_DIRECT_PRICES),
                 output_key: ctx_key(KEY_AAVE_OBSERVATIONS),
             }),
-        });
+        )?);
 
-        let merge_observations_sid = StateId::must_new(format!("{}.merge_observations", op_path.0));
+        let merge_observations_sid = leaf_state_id(&op_path, "merge_observations")?;
         edges.push(DependencyEdge {
             from: collect_observations_sid,
             to: merge_observations_sid.clone(),
@@ -348,9 +344,10 @@ impl Operation for PortfolioTrackerOp {
             from: collect_aave_observations_sid,
             to: merge_observations_sid.clone(),
         });
-        states.push(StateNode {
-            id: merge_observations_sid.clone(),
-            state: Arc::new(MergeObservationsState {
+        states.push(leaf_state_node(
+            &op_path,
+            "merge_observations",
+            Arc::new(MergeObservationsState {
                 state_id: merge_observations_sid.clone(),
                 input_keys: vec![
                     ctx_key(KEY_BASE_OBSERVATIONS),
@@ -358,16 +355,17 @@ impl Operation for PortfolioTrackerOp {
                 ],
                 output_key: ctx_key(KEY_OBSERVATIONS),
             }),
-        });
+        )?);
 
-        let write_snapshot_sid = StateId::must_new(format!("{}.write_snapshot", op_path.0));
+        let write_snapshot_sid = leaf_state_id(&op_path, "write_snapshot")?;
         edges.push(DependencyEdge {
             from: merge_observations_sid,
             to: write_snapshot_sid.clone(),
         });
-        states.push(StateNode {
-            id: write_snapshot_sid.clone(),
-            state: Arc::new(WritePortfolioSnapshotState {
+        states.push(leaf_state_node(
+            &op_path,
+            "write_snapshot",
+            Arc::new(WritePortfolioSnapshotState {
                 state_id: write_snapshot_sid.clone(),
                 portfolio: cfg.portfolio,
                 resolved_wallets_key: ctx_key(KEY_RESOLVED_WALLETS),
@@ -377,24 +375,34 @@ impl Operation for PortfolioTrackerOp {
                 artifact_id_output_key: ctx_key(KEY_SNAPSHOT_ARTIFACT_ID),
                 snapshot_output_key: ctx_key(KEY_SNAPSHOT),
             }),
-        });
+        )?);
 
-        let write_report_sid = StateId::must_new(format!("{}.write_report", op_path.0));
+        let write_report_sid = leaf_state_id(&op_path, "write_report")?;
         edges.push(DependencyEdge {
             from: write_snapshot_sid,
             to: write_report_sid.clone(),
         });
-        states.push(StateNode {
-            id: write_report_sid.clone(),
-            state: Arc::new(WritePortfolioReportState {
+        states.push(leaf_state_node(
+            &op_path,
+            "write_report",
+            Arc::new(WritePortfolioReportState {
                 state_id: write_report_sid,
                 snapshot_key: ctx_key(KEY_SNAPSHOT),
                 output_key: ctx_key(KEY_REPORT),
                 event_name: "portfolio_tracker.completed",
             }),
-        });
+        )?);
 
-        Ok(StateGraph { states, edges })
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports: Vec::new(),
+                exports: vec![
+                    PortKey(KEY_SNAPSHOT_ARTIFACT_ID.to_string()),
+                    PortKey(KEY_REPORT.to_string()),
+                ],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec { states, edges }),
+        })
     }
 }
 

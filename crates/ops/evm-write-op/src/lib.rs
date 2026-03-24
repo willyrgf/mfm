@@ -45,14 +45,15 @@ use mfm_evm_runtime::states::write::{
 use mfm_machine::config::RunConfig;
 #[cfg(test)]
 use mfm_machine::errors::StateError;
-use mfm_machine::ids::{OpId, OpPath, StateId};
-use mfm_machine::plan::{StateGraph, StateNode};
+use mfm_machine::ids::{OpId, OpPath};
 use mfm_state_common::errors as op_errors;
 use mfm_state_common::rpc as op_rpc;
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
-use mfm_sdk::op::{OpIo, Operation};
+use mfm_sdk::op::{
+    leaf_state_id, leaf_state_node, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind,
+};
 
 const OP_ID_CONTRACT_FROM_NIX: &str = "evm_contract_from_nix";
 const OP_ID_DEPLOY: &str = "evm_deploy";
@@ -696,33 +697,12 @@ impl Operation for EvmContractFromNixOp {
         OP_VERSION.to_string()
     }
 
-    fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        let cfg: EvmContractFromNixConfig =
-            serde_json::from_value(op_config.clone()).map_err(|_| {
-                op_errors::sdk_parse_error(
-                    "invalid_op_config",
-                    "invalid evm_contract_from_nix op_config",
-                )
-            })?;
-        if !cfg.result_pointer.is_empty() && !cfg.result_pointer.starts_with('/') {
-            return Err(op_errors::sdk_parse_error(
-                "invalid_op_config",
-                "result_pointer must be empty or start with '/'",
-            ));
-        }
-
-        Ok(OpIo {
-            imports: vec![PortKey(KEY_NIX_RESULT.to_string())],
-            exports: vec![PortKey(KEY_CONTRACT_ARTIFACT.to_string())],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
+    ) -> Result<PlannedOp, SdkError> {
         let cfg: EvmContractFromNixConfig =
             serde_json::from_value(op_config.clone()).map_err(|_| {
                 op_errors::sdk_parse_error(
@@ -737,17 +717,19 @@ impl Operation for EvmContractFromNixOp {
             ));
         }
 
-        let state_id = StateId::must_new(format!("{}.adapt", op_path.0));
         let state = Arc::new(NixArtifactToEvmContractState {
             result_pointer: cfg.result_pointer,
         });
 
-        Ok(StateGraph {
-            states: vec![StateNode {
-                id: state_id,
-                state,
-            }],
-            edges: Vec::new(),
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports: vec![PortKey(KEY_NIX_RESULT.to_string())],
+                exports: vec![PortKey(KEY_CONTRACT_ARTIFACT.to_string())],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![leaf_state_node(&op_path, "adapt", state)?],
+                edges: Vec::new(),
+            }),
         })
     }
 }
@@ -765,47 +747,12 @@ impl Operation for EvmDeployOp {
         OP_VERSION.to_string()
     }
 
-    fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        let cfg: EvmDeployConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
-            op_errors::sdk_parse_error("invalid_op_config", "invalid evm_deploy op_config")
-        })?;
-        if cfg.network_id.trim().is_empty() {
-            return Err(op_errors::sdk_parse_error(
-                "invalid_op_config",
-                "network_id must be non-empty",
-            ));
-        }
-        shared_dcv::ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
-            op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
-        })?;
-        if let Some(env_name) = cfg.signing_key_env.as_deref() {
-            ensure_nonempty_env_name(env_name).map_err(|_| {
-                op_errors::sdk_parse_error("invalid_op_config", "signing_key_env must be non-empty")
-            })?;
-        }
-
-        let imports = if cfg.artifact.is_none() {
-            vec![PortKey(cfg.artifact_port)]
-        } else {
-            Vec::new()
-        };
-
-        Ok(OpIo {
-            imports,
-            exports: vec![
-                PortKey(KEY_CONTRACT_ADDRESS.to_string()),
-                PortKey(KEY_DEPLOY_TX_HASH.to_string()),
-                PortKey(KEY_DEPLOY_RECEIPT.to_string()),
-            ],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
+    ) -> Result<PlannedOp, SdkError> {
         let cfg: EvmDeployConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "invalid evm_deploy op_config")
         })?;
@@ -833,8 +780,10 @@ impl Operation for EvmDeployOp {
 
         let value_hex = shared_dcv::parse_value_wei_to_hex(&cfg.value_wei)
             .map_err(|_| op_errors::sdk_parse_error("invalid_op_config", "invalid value_wei"))?;
+        let artifact_from_port = cfg.artifact.is_none();
+        let artifact_port = cfg.artifact_port.clone();
 
-        let state_id = StateId::must_new(format!("{}.deploy", op_path.0));
+        let state_id = leaf_state_id(&op_path, "deploy")?;
         let state = Arc::new(SharedDeployState {
             state_id: state_id.clone(),
             cfg: SharedDeployStateConfig {
@@ -854,12 +803,25 @@ impl Operation for EvmDeployOp {
             },
         });
 
-        Ok(StateGraph {
-            states: vec![StateNode {
-                id: state_id,
-                state,
-            }],
-            edges: Vec::new(),
+        let imports = if artifact_from_port {
+            vec![PortKey(artifact_port)]
+        } else {
+            Vec::new()
+        };
+
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports,
+                exports: vec![
+                    PortKey(KEY_CONTRACT_ADDRESS.to_string()),
+                    PortKey(KEY_DEPLOY_TX_HASH.to_string()),
+                    PortKey(KEY_DEPLOY_RECEIPT.to_string()),
+                ],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![leaf_state_node(&op_path, "deploy", state)?],
+                edges: Vec::new(),
+            }),
         })
     }
 }
@@ -877,43 +839,12 @@ impl Operation for EvmConfigureOp {
         OP_VERSION.to_string()
     }
 
-    fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        let cfg: EvmConfigureConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
-            op_errors::sdk_parse_error("invalid_op_config", "invalid evm_configure op_config")
-        })?;
-        if cfg.network_id.trim().is_empty() {
-            return Err(op_errors::sdk_parse_error(
-                "invalid_op_config",
-                "network_id must be non-empty",
-            ));
-        }
-        shared_dcv::ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
-            op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
-        })?;
-
-        let mut imports = Vec::new();
-        if cfg.artifact.is_none() {
-            imports.push(PortKey(cfg.artifact_port.clone()));
-        }
-        if cfg.contract_address.is_none() {
-            imports.push(PortKey(KEY_CONTRACT_ADDRESS.to_string()));
-        }
-
-        Ok(OpIo {
-            imports,
-            exports: vec![
-                PortKey(KEY_CONFIGURE_TX_HASHES.to_string()),
-                PortKey(KEY_CONFIGURE_RECEIPTS.to_string()),
-            ],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
+    ) -> Result<PlannedOp, SdkError> {
         let cfg: EvmConfigureConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "invalid evm_configure op_config")
         })?;
@@ -953,6 +884,9 @@ impl Operation for EvmConfigureOp {
         shared_dcv::ensure_nonzero_polls(cfg.max_receipt_polls).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "max_receipt_polls must be > 0")
         })?;
+        let artifact_from_port = cfg.artifact.is_none();
+        let contract_address_from_port = cfg.contract_address.is_none();
+        let artifact_port = cfg.artifact_port.clone();
 
         let mut calls = Vec::with_capacity(cfg.calls.len());
         for c in &cfg.calls {
@@ -978,7 +912,7 @@ impl Operation for EvmConfigureOp {
             });
         }
 
-        let state_id = StateId::must_new(format!("{}.configure", op_path.0));
+        let state_id = leaf_state_id(&op_path, "configure")?;
         let state = Arc::new(SharedConfigureState {
             state_id: state_id.clone(),
             cfg: SharedConfigureStateConfig {
@@ -1004,12 +938,26 @@ impl Operation for EvmConfigureOp {
             },
         });
 
-        Ok(StateGraph {
-            states: vec![StateNode {
-                id: state_id,
-                state,
-            }],
-            edges: Vec::new(),
+        let mut imports = Vec::new();
+        if artifact_from_port {
+            imports.push(PortKey(artifact_port));
+        }
+        if contract_address_from_port {
+            imports.push(PortKey(KEY_CONTRACT_ADDRESS.to_string()));
+        }
+
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports,
+                exports: vec![
+                    PortKey(KEY_CONFIGURE_TX_HASHES.to_string()),
+                    PortKey(KEY_CONFIGURE_RECEIPTS.to_string()),
+                ],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![leaf_state_node(&op_path, "configure", state)?],
+                edges: Vec::new(),
+            }),
         })
     }
 }
@@ -1027,44 +975,12 @@ impl Operation for EvmValidateOp {
         OP_VERSION.to_string()
     }
 
-    fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        let cfg: EvmValidateConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
-            op_errors::sdk_parse_error("invalid_op_config", "invalid evm_validate op_config")
-        })?;
-        if cfg.network_id.trim().is_empty() {
-            return Err(op_errors::sdk_parse_error(
-                "invalid_op_config",
-                "network_id must be non-empty",
-            ));
-        }
-        shared_dcv::ensure_nonempty_artifact_port(&cfg.artifact_port).map_err(|_| {
-            op_errors::sdk_parse_error("invalid_op_config", "artifact_port must be non-empty")
-        })?;
-
-        let mut imports = Vec::new();
-        if cfg.artifact.is_none() {
-            imports.push(PortKey(cfg.artifact_port.clone()));
-        }
-        if cfg.contract_address.is_none() {
-            imports.push(PortKey(KEY_CONTRACT_ADDRESS.to_string()));
-        }
-
-        Ok(OpIo {
-            imports,
-            exports: vec![
-                PortKey(KEY_VALIDATED.to_string()),
-                PortKey(KEY_CHAIN_ID.to_string()),
-                PortKey(KEY_CLIENT_VERSION.to_string()),
-            ],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
+    ) -> Result<PlannedOp, SdkError> {
         let cfg: EvmValidateConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "invalid evm_validate op_config")
         })?;
@@ -1107,8 +1023,11 @@ impl Operation for EvmValidateOp {
                     )
                 })?;
         }
+        let artifact_from_port = cfg.artifact.is_none();
+        let contract_address_from_port = cfg.contract_address.is_none();
+        let artifact_port = cfg.artifact_port.clone();
 
-        let state_id = StateId::must_new(format!("{}.validate", op_path.0));
+        let state_id = leaf_state_id(&op_path, "validate")?;
         let state = Arc::new(SharedValidateState {
             state_id: state_id.clone(),
             cfg: SharedValidateStateConfig {
@@ -1150,12 +1069,27 @@ impl Operation for EvmValidateOp {
             },
         });
 
-        Ok(StateGraph {
-            states: vec![StateNode {
-                id: state_id,
-                state,
-            }],
-            edges: Vec::new(),
+        let mut imports = Vec::new();
+        if artifact_from_port {
+            imports.push(PortKey(artifact_port));
+        }
+        if contract_address_from_port {
+            imports.push(PortKey(KEY_CONTRACT_ADDRESS.to_string()));
+        }
+
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports,
+                exports: vec![
+                    PortKey(KEY_VALIDATED.to_string()),
+                    PortKey(KEY_CHAIN_ID.to_string()),
+                    PortKey(KEY_CLIENT_VERSION.to_string()),
+                ],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![leaf_state_node(&op_path, "validate", state)?],
+                edges: Vec::new(),
+            }),
         })
     }
 }

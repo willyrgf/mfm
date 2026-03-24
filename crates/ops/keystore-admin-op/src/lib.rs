@@ -24,11 +24,12 @@ use serde::{Deserialize, Serialize};
 
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
-use mfm_machine::ids::{ContextKey, OpId, OpPath, StateId};
-use mfm_machine::plan::{StateGraph, StateNode};
+use mfm_machine::ids::{ContextKey, OpId, OpPath};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
-use mfm_sdk::op::{OpIo, Operation};
+use mfm_sdk::op::{
+    leaf_state_id, leaf_state_node, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind,
+};
 use mfm_state_common::errors as op_errors;
 use mfm_state_keystore::states::admin::{
     decode_optional_hex_string, sdk_error_from_helper, KeystoreAdminError, KeystoreDeleteState,
@@ -163,19 +164,12 @@ impl Operation for KeystoreImportOp {
         KEYSTORE_ADMIN_OP_VERSION.to_string()
     }
 
-    fn io(&self, _op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        Ok(OpIo {
-            imports: Vec::new(),
-            exports: vec![PortKey("report".to_string())],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
+    ) -> Result<PlannedOp, SdkError> {
         let cfg: KeystoreImportOpConfig =
             serde_json::from_value(op_config.clone()).map_err(|_| {
                 op_errors::sdk_parse_error("invalid_op_config", "invalid keystore_import op_config")
@@ -187,7 +181,7 @@ impl Operation for KeystoreImportOp {
         let label = decode_optional_hex_string(cfg.label, cfg.label_hex, "label")
             .map_err(sdk_error_from_helper)?;
 
-        let state_id = StateId::must_new(format!("{}.import", op_path.0));
+        let state_id = leaf_state_id(&op_path, "import")?;
         let state = KeystoreImportState::new(
             state_id.clone(),
             KEYSTORE_IMPORT_OP_ID,
@@ -203,12 +197,15 @@ impl Operation for KeystoreImportOp {
             },
         );
 
-        Ok(StateGraph {
-            states: vec![StateNode {
-                id: state_id,
-                state: Arc::new(state),
-            }],
-            edges: Vec::new(),
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports: Vec::new(),
+                exports: vec![PortKey("report".to_string())],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![leaf_state_node(&op_path, "import", Arc::new(state))?],
+                edges: Vec::new(),
+            }),
         })
     }
 }
@@ -226,19 +223,12 @@ impl Operation for KeystoreListOp {
         KEYSTORE_ADMIN_OP_VERSION.to_string()
     }
 
-    fn io(&self, _op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        Ok(OpIo {
-            imports: Vec::new(),
-            exports: vec![PortKey("report".to_string())],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
+    ) -> Result<PlannedOp, SdkError> {
         let cfg: KeystoreListOpConfig =
             serde_json::from_value(op_config.clone()).map_err(|_| {
                 op_errors::sdk_parse_error("invalid_op_config", "invalid keystore_list op_config")
@@ -262,7 +252,7 @@ impl Operation for KeystoreListOp {
         let keystore_path =
             decode_optional_hex_string(cfg.keystore_path, cfg.keystore_path_hex, "keystore_path")
                 .map_err(sdk_error_from_helper)?;
-        let state_id = StateId::must_new(format!("{}.list", op_path.0));
+        let state_id = leaf_state_id(&op_path, "list")?;
         let state = KeystoreListState::new(
             state_id.clone(),
             KEYSTORE_LIST_OP_ID,
@@ -277,12 +267,15 @@ impl Operation for KeystoreListOp {
             },
         );
 
-        Ok(StateGraph {
-            states: vec![StateNode {
-                id: state_id,
-                state: Arc::new(state),
-            }],
-            edges: Vec::new(),
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports: Vec::new(),
+                exports: vec![PortKey("report".to_string())],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![leaf_state_node(&op_path, "list", Arc::new(state))?],
+                edges: Vec::new(),
+            }),
         })
     }
 }
@@ -300,19 +293,12 @@ impl Operation for KeystoreDeleteOp {
         KEYSTORE_ADMIN_OP_VERSION.to_string()
     }
 
-    fn io(&self, _op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        Ok(OpIo {
-            imports: Vec::new(),
-            exports: vec![PortKey("report".to_string())],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
+    ) -> Result<PlannedOp, SdkError> {
         let cfg: KeystoreDeleteOpConfig =
             serde_json::from_value(op_config.clone()).map_err(|_| {
                 op_errors::sdk_parse_error("invalid_op_config", "invalid keystore_delete op_config")
@@ -323,7 +309,7 @@ impl Operation for KeystoreDeleteOp {
             decode_optional_hex_string(cfg.keystore_path, cfg.keystore_path_hex, "keystore_path")
                 .map_err(sdk_error_from_helper)?;
 
-        let state_id = StateId::must_new(format!("{}.delete", op_path.0));
+        let state_id = leaf_state_id(&op_path, "delete")?;
         let state = KeystoreDeleteState::new(
             state_id.clone(),
             KEYSTORE_DELETE_OP_ID,
@@ -338,12 +324,15 @@ impl Operation for KeystoreDeleteOp {
             },
         );
 
-        Ok(StateGraph {
-            states: vec![StateNode {
-                id: state_id,
-                state: Arc::new(state),
-            }],
-            edges: Vec::new(),
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports: Vec::new(),
+                exports: vec![PortKey("report".to_string())],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![leaf_state_node(&op_path, "delete", Arc::new(state))?],
+                edges: Vec::new(),
+            }),
         })
     }
 }

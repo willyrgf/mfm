@@ -19,7 +19,7 @@ use mfm_machine::replay_io::ReplayIo;
 use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_sdk::ids::{MachineId, PortKey, StepId};
-use mfm_sdk::op::{OpIo, Operation};
+use mfm_sdk::op::{leaf_state_node, LeafOpSpec, OpIo, Operation, PlannedOp, PlannedOpKind};
 use mfm_sdk::pipeline::{Pipeline, PipelineStep};
 use mfm_sdk::unstable::SdkPlanResolver;
 use mfm_state_common::test_support as op_test_support;
@@ -29,17 +29,26 @@ use mfm_collectors_nix_exec::{NixFlakePolicy, NixFlakeTransportFactory, NAMESPAC
 use mfm_machine::events::event_envelopes_from_stream_records;
 use mfm_machine::stores::StreamId;
 
+fn into_leaf(planned: PlannedOp) -> LeafOpSpec {
+    match planned.kind {
+        PlannedOpKind::Leaf(spec) => spec,
+        PlannedOpKind::Composite(_) => panic!("expected leaf planned op"),
+    }
+}
+
 #[test]
 fn expand_accepts_flake_app_ref_config() {
     let op = NixAppOp;
     let cfg = op_test_support::run_config_live();
-    let graph = mfm_sdk::op::Operation::expand(
-        &op,
-        OpPath("machine.main".to_string()),
-        &serde_json::json!({"app": "github:willyrgf/mfm#jq_fmt_example"}),
-        &cfg,
-    )
-    .expect("expand");
+    let graph = into_leaf(
+        mfm_sdk::op::Operation::expand(
+            &op,
+            OpPath("machine.main".to_string()),
+            &serde_json::json!({"app": "github:willyrgf/mfm#jq_fmt_example"}),
+            &cfg,
+        )
+        .expect("expand"),
+    );
     assert_eq!(graph.states.len(), 1);
 }
 
@@ -162,22 +171,12 @@ impl Operation for MarkerOp {
         "v1".to_string()
     }
 
-    fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, mfm_sdk::errors::SdkError> {
-        let cfg: MarkerConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
-            op_errors::sdk_unknown_error("invalid_op_config", "invalid marker op_config")
-        })?;
-        Ok(OpIo {
-            imports: Vec::new(),
-            exports: vec![PortKey(cfg.key)],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<mfm_machine::plan::StateGraph, mfm_sdk::errors::SdkError> {
+    ) -> Result<PlannedOp, mfm_sdk::errors::SdkError> {
         let cfg: MarkerConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
             op_errors::sdk_unknown_error("invalid_op_config", "invalid marker op_config")
         })?;
@@ -188,16 +187,23 @@ impl Operation for MarkerOp {
             ));
         }
 
-        let state_id = StateId::must_new(format!("{}.write", op_path.0));
-        Ok(mfm_machine::plan::StateGraph {
-            states: vec![mfm_machine::plan::StateNode {
-                id: state_id,
-                state: Arc::new(MarkerState {
-                    key: cfg.key,
-                    value: cfg.value,
-                }),
-            }],
-            edges: Vec::new(),
+        let export_key = cfg.key.clone();
+        Ok(PlannedOp {
+            interface: OpIo {
+                imports: Vec::new(),
+                exports: vec![PortKey(export_key)],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![leaf_state_node(
+                    &op_path,
+                    "write",
+                    Arc::new(MarkerState {
+                        key: cfg.key,
+                        value: cfg.value,
+                    }),
+                )?],
+                edges: Vec::new(),
+            }),
         })
     }
 }
