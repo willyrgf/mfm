@@ -63,7 +63,7 @@ use mfm_op_keystore_tx::KeystoreTxSignOp;
 use mfm_op_nix_app::NixAppOp;
 use mfm_op_portfolio_tracker::{
     portfolio_snapshot_artifact_id_context_key, portfolio_snapshot_report_context_key,
-    PortfolioTrackerOp,
+    portfolio_tracker_ops,
 };
 use mfm_op_proof::ProofOp;
 use mfm_sdk::ids::{MachineId, StepId};
@@ -470,7 +470,9 @@ impl OperationPlugin for DefaultOperationPlugin {
         registry.register(Arc::new(EvmConfigureOp));
         registry.register(Arc::new(EvmValidateOp));
         registry.register(Arc::new(EvmDeployConfigureValidateOp));
-        registry.register(Arc::new(PortfolioTrackerOp));
+        for op in portfolio_tracker_ops() {
+            registry.register(op);
+        }
         registry.register(Arc::new(NixAppOp));
         registry.register(Arc::new(AaveV3OriginAdaptDeployOp));
     }
