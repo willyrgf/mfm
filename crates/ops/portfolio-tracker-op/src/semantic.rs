@@ -8,25 +8,28 @@ use mfm_state_aave_v3::portfolio::model::{
 use mfm_state_aave_v3::portfolio::semantic::{
     AaveDebtObservationPayload, AaveReserveObservationPayload,
 };
-use mfm_state_portfolio::semantic_adapters::{
-    DerivedUnitPriceRuntimeAdapter, EvmAddressSubjectRuntimeAdapter,
-    EvmOracleDirectPriceRuntimeAdapter, EvmViewRuntimeAdapter,
-    FixedUnitPriceRuntimeAdapter,
+use mfm_state_aave_v3::portfolio::semantic_adapters::{
+    AaveDebtObservationRuntimeAdapter, AaveReserveObservationRuntimeAdapter,
 };
 use mfm_state_portfolio::model::{validate_portfolio_bundle, NetworkConfig};
 use mfm_state_portfolio::semantic::{
-    AdapterId, CompiledObservationBatch, CompiledObservationBinding, Instrument,
+    AdapterId, CompiledObservationBatch, CompiledObservationBinding,
     DerivedUnitPriceValuationPayload, DirectPriceSourcePayload, DirectPriceValuationPayload,
     Erc20BalanceObservationPayload, EvmRoutePolicy, EvmSubjectLocator,
-    FixedUnitPriceValuationPayload, InstrumentSemantics, NativeBalanceObservationPayload,
-    NetworkFamily, NetworkView, ObservationPlanRequest, ObservationProjection, ObservationTarget,
-    PlannerAdapter, PlanningError, PortfolioExecutionSpec, PortfolioRequest,
-    PortfolioSemanticCompiler, PortfolioSemanticConfig, Position, PositionSemantics,
-    QuantitySchema, SemanticCatalog, SemanticCatalogError, SemanticCatalogParts,
-    SourcePreparationTask, Subject, SubjectKind, SubjectPlanRequest, SubjectPlannerAdapter,
-    SubjectResolutionTask, Valuation, ValuationPlanRequest, ValuationPlannerAdapter,
-    ValuationSemantics, ValuationTask, Venue, VenueId, ViewPinTask, ViewPlanRequest,
-    ViewPlannerAdapter,
+    FixedUnitPriceValuationPayload, Instrument, InstrumentSemantics,
+    NativeBalanceObservationPayload, NetworkFamily, NetworkView, ObservationPlanRequest,
+    ObservationProjection, ObservationTarget, PlannerAdapter, PlanningError,
+    PortfolioExecutionSpec, PortfolioRequest, PortfolioSemanticCompiler, PortfolioSemanticConfig,
+    Position, PositionSemantics, QuantitySchema, SemanticCatalog, SemanticCatalogError,
+    SemanticCatalogParts, SourcePreparationTask, Subject, SubjectKind, SubjectPlanRequest,
+    SubjectPlannerAdapter, SubjectResolutionTask, Valuation, ValuationPlanRequest,
+    ValuationPlannerAdapter, ValuationSemantics, ValuationTask, Venue, VenueId, ViewPinTask,
+    ViewPlanRequest, ViewPlannerAdapter,
+};
+use mfm_state_portfolio::semantic_adapters::{
+    DerivedUnitPriceRuntimeAdapter, EvmAddressSubjectRuntimeAdapter,
+    EvmErc20BalanceObservationRuntimeAdapter, EvmNativeBalanceObservationRuntimeAdapter,
+    EvmOracleDirectPriceRuntimeAdapter, EvmViewRuntimeAdapter, FixedUnitPriceRuntimeAdapter,
 };
 use mfm_state_symbol::model::{
     BalanceReaderConfig, PriceSourceRef, QuoteValuationConfig, SymbolConfig, SymbolKind,
@@ -74,7 +77,12 @@ pub fn builtin_semantic_catalog() -> Result<SemanticCatalog, SemanticCatalogErro
             Arc::new(EvmOracleDirectPriceRuntimeAdapter),
             Arc::new(DerivedUnitPriceRuntimeAdapter),
         ],
-        ..SemanticCatalogParts::default()
+        observation_runtimes: vec![
+            Arc::new(EvmNativeBalanceObservationRuntimeAdapter),
+            Arc::new(EvmErc20BalanceObservationRuntimeAdapter),
+            Arc::new(AaveReserveObservationRuntimeAdapter),
+            Arc::new(AaveDebtObservationRuntimeAdapter),
+        ],
     })
 }
 
@@ -546,7 +554,7 @@ fn build_instrument(symbol: &SymbolConfig) -> Result<Instrument, PlanningError> 
             | SymbolKind::StakedPosition => InstrumentSemantics::FungibleToken,
         },
         quantity_schema: to_value(&QuantitySchema {
-            decimals: symbol.decimals.unwrap_or(18),
+            decimals: symbol.decimals,
         })?,
         metadata: symbol.metadata.clone(),
     })
@@ -827,7 +835,7 @@ fn observation_projection(symbol: &SymbolConfig) -> ObservationProjection {
         role: symbol.role,
         network_id: symbol.network_id.clone(),
         protocol: symbol.protocol.clone(),
-        decimals: symbol.decimals.unwrap_or(18),
+        decimals: symbol.decimals,
     }
 }
 
