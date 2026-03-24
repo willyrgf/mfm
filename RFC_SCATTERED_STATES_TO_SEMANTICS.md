@@ -368,6 +368,53 @@ Rules:
   - compiled semantic payloads such as observation batches and valuation tasks
 - if persisted or hashed, it must obey canonical JSON and secret-safety invariants
 - the compiled execution spec artifact is not the authoritative runtime resume input in v1
+- if persisted, the artifact kind should be `ArtifactKind::Other("compiled_execution_spec")`
+
+Minimum compiled execution spec schema for v1:
+
+```rust
+struct CompiledExecutionSpec {
+    schema_version: String, // "compiled_execution_spec/v1"
+    root_op_id: String,
+    root_op_version: String,
+    root_op_path: String,
+    ops: Vec<CompiledOpRecord>,
+    root_exports: Vec<CompiledRootExport>,
+    state_lineage: Vec<CompiledStateLineage>,
+    planner_payloads: serde_json::Value,
+}
+
+struct CompiledOpRecord {
+    op_path: String,
+    op_id: String,
+    op_version: String,
+    imports: Vec<String>,
+    exports: Vec<String>,
+    import_bindings: Vec<CompiledImportBinding>,
+    after: Vec<CompiledAfterEdge>,
+    re_exports: Vec<CompiledReExport>,
+}
+
+struct CompiledRootExport {
+    export: String,
+    slot: QualifiedSlotRef,
+}
+
+struct CompiledStateLineage {
+    state_id: String,
+    op_path: String,
+    state_local_id: String,
+}
+```
+
+Rules:
+
+- `schema_version` MUST equal `compiled_execution_spec/v1` in the first cut
+- `planner_payloads` is where planner-owned semantic payloads such as compiled observation batches
+  and valuation tasks live
+- emitted arrays MUST already be in deterministic planner order; consumers must not rely on
+  hash-iteration order
+- v1 does not require a generic engine/runtime consumer for this artifact; it is audit/debug data
 
 ### Batches are planner products, not runtime discoveries
 
@@ -785,8 +832,14 @@ This is the important distinction:
 Recommended lowering rule:
 
 - derive runtime `StateId`s deterministically from canonical `StateAddr`
-- allow short human hints if useful
-- collision-check the fully flattened plan
+- use:
+  - `<machine_id>.<step_id>.<flattened_state_local_id>`
+  - where `flattened_state_local_id` is the `__`-joined sequence of:
+    - `op_path` segments after the root `<machine_id>.<step_id>`
+    - followed by `state_local_id`
+  - if the leaf op is the root step, `flattened_state_local_id = state_local_id`
+- do not escape underscores during lowering; any resulting collision is a planner error
+- collision-check the fully flattened plan after lowering
 - do not require `StateId` to be reversible into lineage
 
 ### Compiled observation binding shape
@@ -2494,8 +2547,15 @@ Exit criteria:
 - widen execution pins beyond `block_number`
 - widen wallet subject surfaces beyond normalized EVM address only
 
-This likely requires a versioned schema cut such as `portfolio_tracker v2` if the snapshot artifact
-surface changes.
+If this requires a breaking change to any persisted or public portfolio JSON surface
+(`PortfolioSnapshotRequest`, `PortfolioSnapshotResponse`, `PortfolioSnapshot`, or
+`PortfolioReport`), the same commit must:
+
+- cut the op version to `portfolio_tracker v2`
+- add a top-level `schema_version` field to each changed JSON object and set it to `2`
+- update CLI/REST/docs in the same change
+
+Purely additive changes that preserve existing field meaning do not require the version cut above.
 
 ### Phase 5: Add non-EVM support
 
