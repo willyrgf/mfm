@@ -163,8 +163,26 @@ let
     }
   '';
 
-  init = mkPgScript {
-    name = "postgres-init";
+  preflightInit = mkPgScript {
+    name = "postgres-preflight-init";
+    body = ''
+      ${selectConfigTemplate}
+
+      CONF_ENV="''${ENV:-dev}"
+      PGCONF_TEMPLATE="$(select_config_template "$CONF_ENV")"
+
+      if [ ! -f "$PGCONF_TEMPLATE" ]; then
+        nixfied_exit_precondition "missing PostgreSQL config template path=$PGCONF_TEMPLATE env=$CONF_ENV"
+      fi
+
+      if [ ! -f "${config.pgHbaConfFile}" ]; then
+        nixfied_exit_precondition "missing PostgreSQL pg_hba.conf template path=${config.pgHbaConfFile}"
+      fi
+    '';
+  };
+
+  initLeaf = mkPgScript {
+    name = "postgres-init-leaf";
     body = ''
       ${ensureConfigPort}
       ${selectConfigTemplate}
@@ -194,8 +212,42 @@ let
     '';
   };
 
-  start = mkPgScript {
-    name = "postgres-start";
+  init = mkPgScript {
+    name = "postgres-init";
+    body = ''
+      ${preflightInit}
+      exec ${initLeaf}
+    '';
+  };
+
+  preflightStart = mkPgScript {
+    name = "postgres-preflight-start";
+    body = ''
+      ${ensureConfigPort}
+
+      if [ ! -f "$PGDATA/postgresql.conf" ]; then
+        nixfied_exit_precondition "PostgreSQL not initialized at $PGDATA (missing postgresql.conf)"
+      fi
+
+      ensure_config_port "$PGDATA/postgresql.conf"
+
+      if [ "$(${pkgs.coreutils}/bin/uname -s)" = "Darwin" ]; then
+        SHARED_MEMORY_TYPE="$(${postgres}/bin/postgres -D "$PGDATA" -C shared_memory_type 2>/dev/null || true)"
+        DYNAMIC_SHARED_MEMORY_TYPE="$(${postgres}/bin/postgres -D "$PGDATA" -C dynamic_shared_memory_type 2>/dev/null || true)"
+
+        if [ "$SHARED_MEMORY_TYPE" != "mmap" ]; then
+          nixfied_exit_precondition "Darwin PostgreSQL start requires shared_memory_type=mmap (effective '$SHARED_MEMORY_TYPE')"
+        fi
+
+        if [ "$DYNAMIC_SHARED_MEMORY_TYPE" != "mmap" ]; then
+          nixfied_exit_precondition "Darwin PostgreSQL start requires dynamic_shared_memory_type=mmap (effective '$DYNAMIC_SHARED_MEMORY_TYPE')"
+        fi
+      fi
+    '';
+  };
+
+  startLeaf = mkPgScript {
+    name = "postgres-start-leaf";
     body = ''
       ${ensureConfigPort}
 
@@ -272,6 +324,16 @@ let
       log_error "PostgreSQL failed to start. Check $PGDATA/postgres.log"
       print_log_tail "$PGDATA/postgres.log" 20 "postgres"
       exit 1
+    '';
+  };
+
+  start = mkPgScript {
+    name = "postgres-start";
+    body = ''
+      ${init}
+      ${checkConfig}
+      ${preflightStart}
+      exec ${startLeaf}
     '';
   };
 
@@ -424,8 +486,7 @@ let
     name = "postgres-check-config";
     body = ''
       if [ ! -f "$PGDATA/postgresql.conf" ]; then
-        log_error "missing postgresql.conf at $PGDATA"
-        exit 1
+        nixfied_exit_precondition "missing postgresql.conf at $PGDATA"
       fi
 
       if ${postgres}/bin/postgres -D "$PGDATA" -C port >/dev/null 2>&1; then
@@ -433,8 +494,7 @@ let
         exit 0
       fi
 
-      log_error "PostgreSQL configuration invalid pgdata=$PGDATA"
-      exit 1
+      nixfied_exit_precondition "PostgreSQL configuration invalid pgdata=$PGDATA"
     '';
   };
 
@@ -459,13 +519,11 @@ let
     '';
   };
 
-  fullStart = mkPgScript {
-    name = "postgres-full-start";
+  fullStartLeaf = mkPgScript {
+    name = "postgres-full-start-leaf";
     body = ''
       log_info "Slot $SLOT, env $ENV (PGPORT=$PGPORT)"
 
-      ${init}
-      ${start}
       ${setupDb}
 
       echo "PGPORT=$PGPORT"
@@ -474,15 +532,30 @@ let
     '';
   };
 
-  fullStartTest = mkPgScript {
-    name = "postgres-full-start-test";
+  fullStart = mkPgScript {
+    name = "postgres-full-start";
+    body = ''
+      ${start}
+      exec ${fullStartLeaf}
+    '';
+  };
+
+  fullStartTestLeaf = mkPgScript {
+    name = "postgres-full-start-test-leaf";
     defaultDb = testDatabase;
     body = ''
       export PGDATABASE="''${PGDATABASE:-${testDatabase}}"
 
-      ${init}
-      ${start}
       ${setupDb}
+    '';
+  };
+
+  fullStartTest = mkPgScript {
+    name = "postgres-full-start-test";
+    defaultDb = testDatabase;
+    body = ''
+      ${start}
+      exec ${fullStartTestLeaf}
     '';
   };
 
@@ -509,7 +582,11 @@ in
 {
   inherit
     postgres
+    preflightInit
+    initLeaf
     init
+    preflightStart
+    startLeaf
     start
     stop
     restart
@@ -519,7 +596,9 @@ in
     readyTest
     checkConfig
     setupDb
+    fullStartLeaf
     fullStart
+    fullStartTestLeaf
     fullStartTest
     listInstances
     ;

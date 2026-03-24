@@ -39,8 +39,20 @@ let
       summary = "Initialize MinIO data directories";
       details = "Creates MinIO runtime directories for the current slot and environment.";
     };
+    preflight-start = {
+      script = lifecycle.preflightStart;
+      summary = "Validate MinIO start preconditions";
+      details = "Checks deterministic blockers before MinIO startup for the current slot and environment.";
+      exposeApp = false;
+      exposeHook = false;
+    };
     start = {
-      script = lifecycle.start;
+      script = lifecycle.startLeaf;
+      preOps = [
+        "init"
+        "check-config"
+        "preflight-start"
+      ];
       summary = "Start MinIO server";
       details = "Starts MinIO with API and console listeners for the current slot and environment.";
     };
@@ -50,7 +62,10 @@ let
       details = "Stops MinIO for the current slot and environment.";
     };
     restart = {
-      script = lifecycle.restart;
+      preOps = [
+        "stop"
+        "start"
+      ];
       summary = "Restart MinIO server";
       details = "Stops then starts MinIO for the current slot and environment.";
     };
@@ -70,14 +85,24 @@ let
       details = "Validates MinIO binary and runtime configuration directories.";
     };
     full-start = {
-      script = lifecycle.fullStart;
+      script = lifecycle.fullStartLeaf;
       hook = "FULL_START";
+      preOps = [
+        "init"
+        "check-config"
+        "preflight-start"
+      ];
       summary = "Init/check/start MinIO";
       details = "Performs init + check-config + start for MinIO.";
     };
     full-start-test = {
-      script = lifecycle.fullStartTest;
+      script = lifecycle.fullStartTestLeaf;
       hook = "FULL_START_TEST";
+      preOps = [
+        "init"
+        "check-config"
+        "preflight-start"
+      ];
       summary = "Init/check/start MinIO for test profile";
       details = "Performs init + check-config + start for MinIO (test profile).";
     };

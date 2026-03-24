@@ -148,20 +148,25 @@ let
       CONF="$NGINX_DIR/conf/nginx.conf"
 
       if [ ! -f "$CONF" ]; then
-        log_error "missing nginx config at $CONF"
-        exit 1
+        nixfied_exit_precondition "missing nginx config at $CONF"
       fi
 
-      ${nginx}/bin/nginx -c "$CONF" -t 2>&1
-      log_ok "nginx configuration valid conf=$CONF"
+      if ${nginx}/bin/nginx -c "$CONF" -t 2>&1; then
+        log_ok "nginx configuration valid conf=$CONF"
+        exit 0
+      fi
+
+      nixfied_exit_precondition "nginx configuration invalid conf=$CONF"
     '';
-    startPreflight = ''
+    startPreflightBody = ''
       CONF="$NGINX_DIR/conf/nginx.conf"
 
       if [ ! -f "$CONF" ]; then
-        log_error "Nginx not initialized. Run nginx-init first."
-        exit 1
+        nixfied_exit_precondition "nginx not initialized at $NGINX_DIR (missing $CONF)"
       fi
+    '';
+    startPrepareBody = ''
+      CONF="$NGINX_DIR/conf/nginx.conf"
     '';
     startCommand = ''
       ${nginx}/bin/nginx -c "$CONF" -g 'daemon off;' > "$LOG_FILE" 2>&1 &
@@ -281,6 +286,8 @@ in
     ;
   inherit (managedLifecycle)
     init
+    preflightStart
+    startLeaf
     start
     stop
     restart
@@ -288,6 +295,8 @@ in
     health
     checkConfig
     ready
+    fullStartLeaf
+    fullStartTestLeaf
     fullStart
     fullStartTest
     ;

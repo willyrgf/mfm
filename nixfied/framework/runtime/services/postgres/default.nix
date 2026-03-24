@@ -106,12 +106,32 @@ serviceModule.mkServiceModule {
   inherit config;
   operations = {
     init = {
-      script = lifecycle.init;
+      script = lifecycle.initLeaf;
+      preOps = [ "preflight-init" ];
       summary = "Initialize PostgreSQL data directory";
       details = "Initializes PGDATA and writes environment-specific PostgreSQL configuration.";
     };
+    preflight-init = {
+      script = lifecycle.preflightInit;
+      summary = "Validate PostgreSQL init preconditions";
+      details = "Checks deterministic blockers before PostgreSQL initialization for the current slot and environment.";
+      exposeApp = false;
+      exposeHook = false;
+    };
+    preflight-start = {
+      script = lifecycle.preflightStart;
+      summary = "Validate PostgreSQL start preconditions";
+      details = "Checks deterministic blockers before PostgreSQL startup for the current slot and environment.";
+      exposeApp = false;
+      exposeHook = false;
+    };
     start = {
-      script = lifecycle.start;
+      script = lifecycle.startLeaf;
+      preOps = [
+        "init"
+        "check-config"
+        "preflight-start"
+      ];
       summary = "Start PostgreSQL server";
       details = "Starts PostgreSQL for the current slot and environment.";
     };
@@ -121,7 +141,10 @@ serviceModule.mkServiceModule {
       details = "Stops PostgreSQL for the current slot and environment.";
     };
     restart = {
-      script = lifecycle.restart;
+      preOps = [
+        "stop"
+        "start"
+      ];
       summary = "Restart PostgreSQL server";
       details = "Stops then starts PostgreSQL for the current slot and environment.";
     };
@@ -147,14 +170,16 @@ serviceModule.mkServiceModule {
       details = "Creates the configured database and required extensions.";
     };
     full-start = {
-      script = lifecycle.fullStart;
+      script = lifecycle.fullStartLeaf;
       hook = "FULL_START";
+      preOps = [ "start" ];
       summary = "Init, start, and set up PostgreSQL";
       details = "Performs init/start/setup-db in one operation.";
     };
     full-start-test = {
-      script = lifecycle.fullStartTest;
+      script = lifecycle.fullStartTestLeaf;
       hook = "FULL_START_TEST";
+      preOps = [ "start" ];
       summary = "Init/start/setup for test database";
       details = "Performs init/start/setup-db using the configured test database.";
     };

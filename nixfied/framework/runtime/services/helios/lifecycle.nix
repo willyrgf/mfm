@@ -146,35 +146,39 @@ let
     '';
     checkConfigBody = ''
       if [ ! -x "${helios}/bin/helios" ]; then
-        log_error "missing helios binary at ${helios}/bin/helios"
-        exit 1
+        nixfied_exit_precondition "missing helios binary at ${helios}/bin/helios"
       fi
 
       if [ "$HELIOS_NETWORK" != "local" ] && [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
-        log_error "HELIOS_CONSENSUS_RPC_URL is required when network is not local"
-        exit 1
+        nixfied_exit_precondition "HELIOS_CONSENSUS_RPC_URL is required when network is not local"
       fi
 
       if [ -z "$HELIOS_EXECUTION_RPC_URL" ]; then
-        log_error "HELIOS_EXECUTION_RPC_URL is required (or set executionRpcPortKey to a valid port key)"
-        exit 1
+        nixfied_exit_precondition "HELIOS_EXECUTION_RPC_URL is required (or set executionRpcPortKey to a valid port key)"
       fi
 
       # Ensure the expected Helios subcommand exists; CLI shape changes should fail fast here.
-      ${helios}/bin/helios ethereum --help >/dev/null 2>&1
-      log_ok "helios configuration valid dir=$HELIOS_DIR network=$HELIOS_NETWORK"
+      if ${helios}/bin/helios ethereum --help >/dev/null 2>&1; then
+        log_ok "helios configuration valid dir=$HELIOS_DIR network=$HELIOS_NETWORK"
+        exit 0
+      fi
+
+      nixfied_exit_precondition "helios CLI validation failed at ${helios}/bin/helios"
     '';
-    startPreflight = ''
+    startPreflightBody = ''
       if [ ! -x "${helios}/bin/helios" ]; then
-        log_error "missing helios binary at ${helios}/bin/helios"
-        exit 1
+        nixfied_exit_precondition "missing helios binary at ${helios}/bin/helios"
       fi
 
       if [ -z "$HELIOS_EXECUTION_RPC_URL" ]; then
-        log_error "HELIOS_EXECUTION_RPC_URL is required (or set executionRpcPortKey to a valid port key)"
-        exit 1
+        nixfied_exit_precondition "HELIOS_EXECUTION_RPC_URL is required (or set executionRpcPortKey to a valid port key)"
       fi
 
+      if [ "$HELIOS_NETWORK" != "local" ] && [ -z "$HELIOS_CONSENSUS_RPC_URL" ]; then
+        nixfied_exit_precondition "HELIOS_CONSENSUS_RPC_URL is required when network is not local"
+      fi
+    '';
+    startPrepareBody = ''
       # Derive a recent weak-subjectivity checkpoint when not pinned explicitly.
       #
       # This avoids a common failure mode where Helios stays "healthy" but remains unable to answer
@@ -434,6 +438,8 @@ in
   inherit helios;
   inherit (managedLifecycle)
     init
+    preflightStart
+    startLeaf
     start
     stop
     restart
@@ -441,6 +447,8 @@ in
     health
     checkConfig
     ready
+    fullStartLeaf
+    fullStartTestLeaf
     fullStart
     fullStartTest
     ;

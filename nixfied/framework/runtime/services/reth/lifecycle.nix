@@ -140,20 +140,27 @@ let
     '';
     checkConfigBody = ''
       if [ ! -x "${reth}/bin/reth" ]; then
-        log_error "missing reth binary at ${reth}/bin/reth"
-        exit 1
+        nixfied_exit_precondition "missing reth binary at ${reth}/bin/reth"
       fi
 
       mkdir -p "$RETH_DIR/config"
-      ${reth}/bin/reth --version >/dev/null 2>&1
-      log_ok "reth configuration valid dir=$RETH_DIR network=$RETH_NETWORK"
-    '';
-    startPreflight = ''
-      if [ ! -x "${reth}/bin/reth" ]; then
-        log_error "reth binary not executable at ${reth}/bin/reth"
-        exit 1
+      if ${reth}/bin/reth --version >/dev/null 2>&1; then
+        log_ok "reth configuration valid dir=$RETH_DIR network=$RETH_NETWORK"
+        exit 0
       fi
 
+      nixfied_exit_precondition "reth binary failed validation at ${reth}/bin/reth"
+    '';
+    startPreflightBody = ''
+      if [ ! -f "$RETH_JWT_FILE" ]; then
+        nixfied_exit_precondition "missing reth JWT secret at $RETH_JWT_FILE"
+      fi
+
+      if [ ! -s "$RETH_JWT_FILE" ]; then
+        nixfied_exit_precondition "reth JWT secret is empty path=$RETH_JWT_FILE"
+      fi
+    '';
+    startPrepareBody = ''
       ARGS=(
         node
         --datadir "$RETH_DIR/data"
@@ -240,6 +247,8 @@ in
   inherit reth;
   inherit (managedLifecycle)
     init
+    preflightStart
+    startLeaf
     start
     stop
     restart
@@ -247,6 +256,8 @@ in
     health
     checkConfig
     ready
+    fullStartLeaf
+    fullStartTestLeaf
     fullStart
     fullStartTest
     ;

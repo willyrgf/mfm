@@ -263,7 +263,8 @@ let
       runtimePrelude,
       initBody,
       checkConfigBody,
-      startPreflight ? "",
+      startPreflightBody ? "",
+      startPrepareBody ? "",
       startCommand,
       startAlreadyRunningBody,
       startOnSpawnBody ? ''
@@ -313,8 +314,8 @@ let
       readyBody,
       stopWaitAttempts ? runtimeDefaults.probes.managedStop.waitAttempts,
       stopWaitInterval ? runtimeDefaults.probes.managedStop.waitIntervalSeconds,
-      fullStartBody ? null,
-      fullStartTestBody ? null,
+      fullStartLeafBody ? null,
+      fullStartTestLeafBody ? null,
     }:
     let
       init = mkWrappedScript {
@@ -326,16 +327,23 @@ let
         body = initBody;
       };
 
-      start = mkWrappedScript {
-        name = "${service}-start";
+      preflightStart = mkWrappedScript {
+        name = "${service}-preflight-start";
+        inherit
+          loggingPrelude
+          runtimePrelude
+          ;
+        body = if startPreflightBody == "" then ":" else startPreflightBody;
+      };
+
+      startLeaf = mkWrappedScript {
+        name = "${service}-start-leaf";
         inherit
           loggingPrelude
           runtimePrelude
           ;
         body = ''
           LOG_FILE="$SERVICE_LOG_FILE"
-
-          ${init}
 
           if [ -f "$SERVICE_PID_FILE" ]; then
             PID=$(cat "$SERVICE_PID_FILE" 2>/dev/null || true)
@@ -346,7 +354,7 @@ let
             rm -f "$SERVICE_PID_FILE"
           fi
 
-          ${startPreflight}
+          ${startPrepareBody}
           ${startCommand}
           CHILD_PID=$!
           echo "$CHILD_PID" > "$SERVICE_PID_FILE"
@@ -387,6 +395,17 @@ let
           exit "$RC"
         '';
       };
+
+      start = pkgs.writeShellScript "${service}-start" ''
+        ${loggingPrelude}
+
+        set -euo pipefail
+
+        ${init}
+        ${checkConfig}
+        ${preflightStart}
+        exec ${startLeaf}
+      '';
 
       stop = mkWrappedScript {
         name = "${service}-stop";
@@ -481,9 +500,30 @@ let
       };
 
       defaultFullStartBody = ''
-        ${init}
-        ${checkConfig}
-        NIXFIED_START_RETURN_AFTER_READY=1 exec ${start}
+        NIXFIED_START_RETURN_AFTER_READY=1 exec ${startLeaf}
+      '';
+
+      fullStartLeaf = pkgs.writeShellScript "${service}-full-start-leaf" ''
+        ${loggingPrelude}
+
+        set -euo pipefail
+
+        ${if fullStartLeafBody != null then fullStartLeafBody else defaultFullStartBody}
+      '';
+
+      fullStartTestLeaf = pkgs.writeShellScript "${service}-full-start-test-leaf" ''
+        ${loggingPrelude}
+
+        set -euo pipefail
+
+        ${
+          if fullStartTestLeafBody != null then
+            fullStartTestLeafBody
+          else if fullStartLeafBody != null then
+            fullStartLeafBody
+          else
+            defaultFullStartBody
+        }
       '';
 
       fullStart = pkgs.writeShellScript "${service}-full-start" ''
@@ -491,7 +531,10 @@ let
 
         set -euo pipefail
 
-        ${if fullStartBody != null then fullStartBody else defaultFullStartBody}
+        ${init}
+        ${checkConfig}
+        ${preflightStart}
+        exec ${fullStartLeaf}
       '';
 
       fullStartTest = pkgs.writeShellScript "${service}-full-start-test" ''
@@ -499,19 +542,17 @@ let
 
         set -euo pipefail
 
-        ${
-          if fullStartTestBody != null then
-            fullStartTestBody
-          else if fullStartBody != null then
-            fullStartBody
-          else
-            defaultFullStartBody
-        }
+        ${init}
+        ${checkConfig}
+        ${preflightStart}
+        exec ${fullStartTestLeaf}
       '';
     in
     {
       inherit
         init
+        preflightStart
+        startLeaf
         start
         stop
         restart
@@ -519,6 +560,8 @@ let
         checkConfig
         health
         ready
+        fullStartLeaf
+        fullStartTestLeaf
         fullStart
         fullStartTest
         ;

@@ -81,8 +81,20 @@ serviceModule.mkServiceModule {
       summary = "Initialize nginx directories and config";
       details = "Creates nginx runtime directories and base configuration.";
     };
+    preflight-start = {
+      script = lifecycle.preflightStart;
+      summary = "Validate nginx start preconditions";
+      details = "Checks deterministic blockers before nginx startup for the current slot and environment.";
+      exposeApp = false;
+      exposeHook = false;
+    };
     start = {
-      script = lifecycle.start;
+      script = lifecycle.startLeaf;
+      preOps = [
+        "init"
+        "check-config"
+        "preflight-start"
+      ];
       summary = "Start nginx server";
       details = "Starts nginx for the current slot and environment.";
     };
@@ -92,7 +104,10 @@ serviceModule.mkServiceModule {
       details = "Stops nginx for the current slot and environment.";
     };
     restart = {
-      script = lifecycle.restart;
+      preOps = [
+        "stop"
+        "start"
+      ];
       summary = "Restart nginx server";
       details = "Stops then starts nginx for the current slot and environment.";
     };
@@ -115,6 +130,17 @@ serviceModule.mkServiceModule {
       script = lifecycle.reload;
       summary = "Reload nginx configuration";
       details = "Tests and reloads nginx configuration.";
+    };
+    full-start = {
+      script = lifecycle.fullStartLeaf;
+      hook = "FULL_START";
+      preOps = [
+        "init"
+        "check-config"
+        "preflight-start"
+      ];
+      summary = "Init/check/start nginx";
+      details = "Performs init + check-config + start for nginx.";
     };
     ready = {
       script = lifecycle.ready;

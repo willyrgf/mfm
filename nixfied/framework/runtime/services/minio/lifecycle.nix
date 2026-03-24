@@ -111,14 +111,29 @@ let
     '';
     checkConfigBody = ''
       if [ ! -d "$MINIO_DIR/config" ]; then
-        log_error "missing minio config directory at $MINIO_DIR/config"
-        exit 1
+        nixfied_exit_precondition "missing minio config directory at $MINIO_DIR/config"
       fi
 
-      ${minio}/bin/minio --help >/dev/null
-      log_ok "minio configuration valid dir=$MINIO_DIR"
+      if ${minio}/bin/minio --help >/dev/null; then
+        log_ok "minio configuration valid dir=$MINIO_DIR"
+        exit 0
+      fi
+
+      nixfied_exit_precondition "minio binary failed validation at ${minio}/bin/minio"
     '';
-    startPreflight = ''
+    startPreflightBody = ''
+      ROOT_USER="''${MINIO_ROOT_USER:-${config.rootUser}}"
+      ROOT_PASSWORD="''${MINIO_ROOT_PASSWORD:-${config.rootPassword}}"
+
+      if [ -z "$ROOT_USER" ]; then
+        nixfied_exit_precondition "MINIO_ROOT_USER must not be empty"
+      fi
+
+      if [ -z "$ROOT_PASSWORD" ]; then
+        nixfied_exit_precondition "MINIO_ROOT_PASSWORD must not be empty"
+      fi
+    '';
+    startPrepareBody = ''
       ROOT_USER="''${MINIO_ROOT_USER:-${config.rootUser}}"
       ROOT_PASSWORD="''${MINIO_ROOT_PASSWORD:-${config.rootPassword}}"
 
@@ -213,6 +228,8 @@ in
     ;
   inherit (managedLifecycle)
     init
+    preflightStart
+    startLeaf
     start
     stop
     restart
@@ -220,6 +237,8 @@ in
     health
     checkConfig
     ready
+    fullStartLeaf
+    fullStartTestLeaf
     fullStart
     fullStartTest
     ;

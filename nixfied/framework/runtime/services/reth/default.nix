@@ -30,8 +30,20 @@ let
       summary = "Initialize Reth runtime directories";
       details = "Creates Reth runtime directories and JWT auth material for the current slot/environment.";
     };
+    preflight-start = {
+      script = lifecycle.preflightStart;
+      summary = "Validate Reth start preconditions";
+      details = "Checks deterministic blockers before Reth startup for the current slot and environment.";
+      exposeApp = false;
+      exposeHook = false;
+    };
     start = {
-      script = lifecycle.start;
+      script = lifecycle.startLeaf;
+      preOps = [
+        "init"
+        "check-config"
+        "preflight-start"
+      ];
       summary = "Start Reth node";
       details = "Starts Reth with HTTP, WS, and auth RPC listeners for the current slot/environment.";
     };
@@ -41,7 +53,10 @@ let
       details = "Stops the running Reth process for the current slot/environment.";
     };
     restart = {
-      script = lifecycle.restart;
+      preOps = [
+        "stop"
+        "start"
+      ];
       summary = "Restart Reth node";
       details = "Stops then starts Reth for the current slot/environment.";
     };
@@ -61,14 +76,24 @@ let
       details = "Validates Reth binary availability and runtime configuration basics.";
     };
     full-start = {
-      script = lifecycle.fullStart;
+      script = lifecycle.fullStartLeaf;
       hook = "FULL_START";
+      preOps = [
+        "init"
+        "check-config"
+        "preflight-start"
+      ];
       summary = "Init/check/start Reth";
       details = "Performs init + check-config + start for Reth.";
     };
     full-start-test = {
-      script = lifecycle.fullStartTest;
+      script = lifecycle.fullStartTestLeaf;
       hook = "FULL_START_TEST";
+      preOps = [
+        "init"
+        "check-config"
+        "preflight-start"
+      ];
       summary = "Init/check/start Reth for test profile";
       details = "Performs init + check-config + start for Reth (test profile).";
     };

@@ -35,8 +35,20 @@ let
       summary = "Initialize Helios runtime directories";
       details = "Creates Helios runtime directories for the current slot/environment.";
     };
+    preflight-start = {
+      script = lifecycle.preflightStart;
+      summary = "Validate Helios start preconditions";
+      details = "Checks deterministic blockers before Helios startup for the current slot/environment.";
+      exposeApp = false;
+      exposeHook = false;
+    };
     start = {
-      script = lifecycle.start;
+      script = lifecycle.startLeaf;
+      preOps = [
+        "init"
+        "check-config"
+        "preflight-start"
+      ];
       summary = "Start Helios node";
       details = "Starts Helios RPC for the current slot/environment.";
     };
@@ -46,7 +58,10 @@ let
       details = "Stops the running Helios process for the current slot/environment.";
     };
     restart = {
-      script = lifecycle.restart;
+      preOps = [
+        "stop"
+        "start"
+      ];
       summary = "Restart Helios node";
       details = "Stops then starts Helios for the current slot/environment.";
     };
@@ -66,14 +81,24 @@ let
       details = "Validates Helios binary availability and required runtime configuration.";
     };
     full-start = {
-      script = lifecycle.fullStart;
+      script = lifecycle.fullStartLeaf;
       hook = "FULL_START";
+      preOps = [
+        "init"
+        "check-config"
+        "preflight-start"
+      ];
       summary = "Init/check/start Helios";
       details = "Performs init + check-config + start for Helios.";
     };
     full-start-test = {
-      script = lifecycle.fullStartTest;
+      script = lifecycle.fullStartTestLeaf;
       hook = "FULL_START_TEST";
+      preOps = [
+        "init"
+        "check-config"
+        "preflight-start"
+      ];
       summary = "Init/check/start Helios for test profile";
       details = "Performs init + check-config + start for Helios (test profile).";
     };

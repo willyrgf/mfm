@@ -46,8 +46,13 @@ let
     x: pkgs.lib.strings.toUpper (pkgs.lib.replaceStrings [ "-" "." ":" ] [ "_" "_" "_" ] x);
   normalizeStringSet = values: pkgs.lib.sort (a: b: a < b) (pkgs.lib.unique values);
   sameStringSet = expected: actual: normalizeStringSet expected == normalizeStringSet actual;
+  isListOfOpNames = values: builtins.isList values && isListOfNonEmptyStrings values;
 
   isScriptLike = x: (builtins.isString x) || (builtins.isPath x) || (builtins.isAttrs x);
+  opPreRefs = op: op.preOps or [ ];
+  opPostRefs = op: op.postOps or [ ];
+  opRefs = op: (opPreRefs op) ++ (opPostRefs op);
+  opHasComposition = op: opRefs op != [ ];
 
   validateOpErrors =
     {
@@ -61,12 +66,22 @@ let
     if !isAttrs op then
       [ "${prefix}: op must be an attribute set" ]
     else
-      expect (op ? script) "${prefix}: script is required"
-      ++ expect (isScriptLike (op.script or null)) "${prefix}: script must be string/path/derivation"
+      expect (
+        (op ? script) || opHasComposition op
+      ) "${prefix}: script is required when preOps/postOps are not defined"
+      ++ expect (
+        !(op ? script) || isScriptLike (op.script or null)
+      ) "${prefix}: script must be string/path/derivation"
       ++ expect (op ? summary) "${prefix}: summary is required"
       ++ expect (isNonEmptyString (op.summary or "")) "${prefix}: summary must be a non-empty string"
       ++ expect (op ? details) "${prefix}: details is required"
       ++ expect (builtins.isString (op.details or null)) "${prefix}: details must be a string"
+      ++ expect (optionalAttrSatisfies op "preOps"
+        isListOfOpNames
+      ) "${prefix}: preOps must be a list of non-empty strings"
+      ++ expect (optionalAttrSatisfies op "postOps"
+        isListOfOpNames
+      ) "${prefix}: postOps must be a list of non-empty strings"
       ++ expect (optionalAttrSatisfies op "usage"
         isListOfNonEmptyStrings
       ) "${prefix}: usage must be a list of non-empty strings"
@@ -94,12 +109,62 @@ let
       ++ expect (optionalAttrSatisfies op "exposeApp"
         builtins.isBool
       ) "${prefix}: exposeApp must be a boolean"
+      ++ expect (optionalAttrSatisfies op "exposeHook"
+        builtins.isBool
+      ) "${prefix}: exposeHook must be a boolean"
       ++ expect (optionalAttrSatisfies op "appName"
         isNonEmptyString
       ) "${prefix}: appName must be a non-empty string"
       ++ expect (optionalAttrSatisfies op "hook"
         isNonEmptyString
       ) "${prefix}: hook must be a non-empty string";
+
+  validateOpCompositionErrors =
+    {
+      serviceName,
+      ops,
+    }:
+    let
+      names = opNames ops;
+      nameSet = builtins.listToAttrs (
+        map (name: {
+          inherit name;
+          value = true;
+        }) names
+      );
+      refErrorsFor =
+        opName: field:
+        let
+          refs = ops.${opName}.${field} or [ ];
+          unknown = builtins.filter (ref: !(builtins.hasAttr ref nameSet)) refs;
+        in
+        map (ref: "${serviceName}.${opName}: ${field} references unknown op '${ref}'") unknown;
+      refErrs = builtins.concatLists (
+        map (opName: (refErrorsFor opName "preOps") ++ (refErrorsFor opName "postOps")) names
+      );
+      cycleErrorsFor =
+        path: current:
+        let
+          refs = builtins.filter (ref: builtins.hasAttr ref nameSet) (opRefs ops.${current});
+        in
+        builtins.concatLists (
+          map (
+            ref:
+            if builtins.elem ref path then
+              [
+                "${serviceName}.${current}: op composition contains a cycle: ${
+                  builtins.concatStringsSep " -> " (path ++ [ ref ])
+                }"
+              ]
+            else
+              cycleErrorsFor (path ++ [ ref ]) ref
+          ) refs
+        );
+      cycleErrs = pkgs.lib.unique (
+        builtins.concatLists (map (opName: cycleErrorsFor [ opName ] opName) names)
+      );
+    in
+    refErrs ++ cycleErrs;
 
   validateRuntimePrimitiveSpecErrors =
     {
@@ -217,6 +282,7 @@ let
           }
         ) (opNames ops)
       );
+      compositionErrs = validateOpCompositionErrors { inherit serviceName ops; };
       runtimeErrs = validateRuntimePrimitivesErrors { inherit serviceName runtimePrimitives; };
     in
     if api == null then
@@ -258,6 +324,7 @@ let
         api.artifacts or null
       )) "${serviceName}: publicApi.artifacts must be an attribute set"
       ++ opErrs
+      ++ compositionErrs
       ++ runtimeErrs;
 
   validateServiceApi =
@@ -390,16 +457,60 @@ let
   launcherNameFor =
     serviceName: opName: "service-op-${sanitizeScriptToken serviceName}-${sanitizeScriptToken opName}";
 
+  noopScriptFor =
+    serviceName: opName:
+    pkgs.writeShellScript (launcherNameFor serviceName "${opName}-noop") ''
+      exit 0
+    '';
+
+  scriptForOp =
+    serviceName: opName: opCfg:
+    if opCfg ? script then opCfg.script else noopScriptFor serviceName opName;
+
+  buildExecutionPlan =
+    {
+      serviceName,
+      ops,
+      opName,
+      passArgs ? true,
+    }:
+    let
+      opCfg = ops.${opName};
+      mkNestedPlan =
+        ref:
+        buildExecutionPlan {
+          inherit
+            serviceName
+            ops
+            ;
+          opName = ref;
+          passArgs = false;
+        };
+    in
+    builtins.concatLists (map mkNestedPlan (opPreRefs opCfg))
+    ++ [
+      {
+        inherit
+          opName
+          passArgs
+          ;
+        script = scriptForOp serviceName opName opCfg;
+      }
+    ]
+    ++ builtins.concatLists (map mkNestedPlan (opPostRefs opCfg));
+
   mkServiceOpLauncher =
     {
       serviceName,
       opName,
-      opCfg,
+      plan,
       runtimePrimitives,
     }:
     let
       logLevelDefault = runtimePrimitives.logLevel.default or runtimeLogLevelDefault;
       outputModeDefault = runtimePrimitives.outputMode.default or runtimeOutputModeDefault;
+      renderPlanStep =
+        step: if step.passArgs then ''${toString step.script} "$@"'' else "${toString step.script}";
     in
     pkgs.writeShellScript (launcherNameFor serviceName opName) ''
       set -euo pipefail
@@ -407,7 +518,7 @@ let
       source ${toString shellContract.runtime}
       nixfied_contract_resolve_runtime_primitives "${logLevelDefault}" "${outputModeDefault}"
 
-      exec ${toString opCfg.script} "$@"
+      ${builtins.concatStringsSep "\n" (map renderPlanStep plan)}
     '';
 
   collectServiceOps =
@@ -427,6 +538,9 @@ let
             opCfg = ops.${opName};
             appName = if opCfg ? appName then opCfg.appName else "svc::${serviceName}::${opName}";
             opRuntimePrimitives = validated.${serviceName}.runtimePrimitives;
+            plan = buildExecutionPlan {
+              inherit serviceName ops opName;
+            };
           in
           {
             inherit
@@ -434,6 +548,7 @@ let
               opName
               opCfg
               appName
+              plan
               ;
             hookName = hookNameFor serviceName opName opCfg;
             includeApp = opCfg.exposeApp or true;
@@ -441,12 +556,13 @@ let
             category = if opCfg ? category then opCfg.category else serviceName;
             class = opCfg.class or "passthrough";
             idempotent = opCfg.idempotent or false;
+            includeHook = opCfg.exposeHook or true;
             runtimePrimitives = opRuntimePrimitives;
             launcher = mkServiceOpLauncher {
               inherit
                 serviceName
                 opName
-                opCfg
+                plan
                 ;
               runtimePrimitives = opRuntimePrimitives;
             };
@@ -458,7 +574,7 @@ let
   mkServiceHookEnvFromContract =
     serviceApis:
     let
-      ops = collectServiceOps serviceApis;
+      ops = builtins.filter (op: op.includeHook) (collectServiceOps serviceApis);
       pairs = map (op: {
         name = op.hookName;
         value = toString op.launcher;
