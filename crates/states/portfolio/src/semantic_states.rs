@@ -1084,6 +1084,7 @@ mod tests {
             Ok(ResolvedUnitPrice {
                 valuation_id: task.valuation_id.clone(),
                 instrument_id: task.instrument_id.clone(),
+                priced_symbol_id: task.instrument_id.clone(),
                 quote: task.quote,
                 unit_price_dec: "2.5".to_string(),
                 valuation_reader_kind: "fixed_unit_price".to_string(),

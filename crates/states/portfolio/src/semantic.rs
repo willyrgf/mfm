@@ -19,17 +19,17 @@ pub use catalog::{
     ViewPlanRequest, ViewPlannerAdapter, ViewRuntimeAdapter, ViewRuntimeInput,
 };
 pub use compiler::{PortfolioRequest, PortfolioSemanticCompiler};
+/// Canonical observation read model emitted by semantic portfolio execution.
+///
+/// The semantic cutover keeps the existing observation artifact shape so snapshot/report
+/// projections remain stable while planner/runtime internals move to semantic compilation.
+pub use mfm_state_symbol::model::Observation;
 pub use payloads::{
     DerivedUnitPriceValuationPayload, DirectPriceSourcePayload, DirectPriceValuationPayload,
     Erc20BalanceObservationPayload, EvmResolvedSubjectValue, EvmRoutePolicy, EvmSubjectLocator,
     FixedUnitPriceValuationPayload, NativeBalanceObservationPayload, ObservationProjection,
     QuantitySchema,
 };
-/// Canonical observation read model emitted by semantic portfolio execution.
-///
-/// The semantic cutover keeps the existing observation artifact shape so snapshot/report
-/// projections remain stable while planner/runtime internals move to semantic compilation.
-pub use mfm_state_symbol::model::Observation;
 
 /// Stable semantic venue identifier authored by portfolio config.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

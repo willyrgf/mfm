@@ -42,8 +42,8 @@ pub struct EvmRoutePolicy {
 /// Planner-owned quantity rendering schema for one instrument.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuantitySchema {
-    /// Decimals used when formatting raw integer quantities.
-    pub decimals: u8,
+    /// Optional planner-configured decimals. Runtime adapters resolve missing decimals when needed.
+    pub decimals: Option<u8>,
 }
 
 /// Stable observation projection used to preserve current read-model fields.
@@ -61,8 +61,8 @@ pub struct ObservationProjection {
     pub network_id: String,
     /// Optional protocol identifier rendered in observation outputs.
     pub protocol: Option<String>,
-    /// Decimals used to format raw quantities.
-    pub decimals: u8,
+    /// Optional planner-configured decimals used to format raw quantities.
+    pub decimals: Option<u8>,
 }
 
 /// Planner/runtime payload for one native-balance observation binding.

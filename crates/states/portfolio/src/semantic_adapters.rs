@@ -1,7 +1,12 @@
 use std::collections::BTreeMap;
 
+use alloy_primitives::{Address, U256};
 use async_trait::async_trait;
 use mfm_collectors_rpc_control::{EvmIoClient, PrepareSourcesResponse, DEFAULT_CONTROL_SCOPE};
+use mfm_evm_core::encoding::{
+    encode_erc20_balance_of, format_u256_units, parse_u256_hex_value, parse_u8_u256,
+    u64_hex_quantity,
+};
 use mfm_evm_runtime::states::price::read_evm_oracle_unit_price;
 use mfm_machine::errors::{ErrorCategory, StateError};
 use mfm_machine::ids::StateId;
@@ -9,7 +14,10 @@ use mfm_machine::io::IoProvider;
 use mfm_state_common::errors::{
     state_error_with_state, state_from_io, state_unknown, state_unknown_msg,
 };
-use mfm_state_symbol::model::{ObservationValueSourceRef, ValuationSourceReaderConfig};
+use mfm_state_symbol::model::{
+    Observation, ObservationQuantity, ObservationSource, ObservationValue,
+    ObservationValueSourceRef, ValuationSourceReaderConfig,
+};
 use mfm_state_wallet::model::{WalletCapabilities, WalletImplementationConfig};
 use num_bigint::BigInt;
 use num_traits::Zero;
@@ -17,12 +25,13 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::semantic::{
-    AdapterId, DirectPriceSourcePayload, DirectPriceValuationPayload,
-    DerivedUnitPriceValuationPayload, EvmResolvedSubjectValue, EvmRoutePolicy,
-    EvmSubjectLocator, ExecutionAnchor, FixedUnitPriceValuationPayload, PinnedNetworkView,
-    ResolvedSubject, ResolvedUnitPrice, RuntimeAdapter, SubjectKind, SubjectResolutionTask,
-    SubjectRuntimeAdapter, SubjectRuntimeInput, ValuationRuntimeAdapter, ValuationRuntimeInput,
-    ValuationTask, ViewPinTask, ViewRuntimeAdapter, ViewRuntimeInput,
+    AdapterId, DerivedUnitPriceValuationPayload, DirectPriceSourcePayload,
+    DirectPriceValuationPayload, EvmResolvedSubjectValue, EvmRoutePolicy, EvmSubjectLocator,
+    ExecutionAnchor, FixedUnitPriceValuationPayload, NativeBalanceObservationPayload,
+    ObservationRuntimeAdapter, ObservationRuntimeInput, PinnedNetworkView, ResolvedSubject,
+    ResolvedUnitPrice, RuntimeAdapter, SubjectKind, SubjectResolutionTask, SubjectRuntimeAdapter,
+    SubjectRuntimeInput, ValuationRuntimeAdapter, ValuationRuntimeInput, ValuationTask,
+    ViewPinTask, ViewRuntimeAdapter, ViewRuntimeInput,
 };
 
 const ADAPTER_RESOLVE_SUBJECT_EVM_ADDRESS: &str = "resolve_subject/evm_address";
@@ -30,6 +39,8 @@ const ADAPTER_PIN_VIEW_EVM: &str = "pin_view/evm";
 const ADAPTER_RESOLVE_VALUATION_FIXED: &str = "resolve_valuation/fixed_unit_price";
 const ADAPTER_RESOLVE_VALUATION_EVM_ORACLE: &str = "resolve_valuation/evm_oracle_direct_price";
 const ADAPTER_RESOLVE_VALUATION_DERIVED: &str = "resolve_valuation/derived_unit_price";
+const ADAPTER_OBSERVE_EVM_NATIVE_BALANCE: &str = "observe_position/evm/native_balance";
+const ADAPTER_OBSERVE_EVM_ERC20_BALANCE: &str = "observe_position/evm/erc20_balance";
 
 /// Runtime adapter for compiled EVM address subjects.
 #[derive(Clone, Debug, Default)]
@@ -217,6 +228,7 @@ impl ValuationRuntimeAdapter for FixedUnitPriceRuntimeAdapter {
         Ok(ResolvedUnitPrice {
             valuation_id: task.valuation_id.clone(),
             instrument_id: task.instrument_id.clone(),
+            priced_symbol_id: payload.priced_symbol_id,
             quote: task.quote,
             unit_price_dec: payload.unit_price_dec,
             valuation_reader_kind: "fixed_unit_price".to_string(),
@@ -252,6 +264,7 @@ impl ValuationRuntimeAdapter for EvmOracleDirectPriceRuntimeAdapter {
         Ok(ResolvedUnitPrice {
             valuation_id: task.valuation_id.clone(),
             instrument_id: task.instrument_id.clone(),
+            priced_symbol_id: payload.priced_symbol_id,
             quote: task.quote,
             unit_price_dec,
             valuation_reader_kind: "direct_price".to_string(),
@@ -289,13 +302,163 @@ impl ValuationRuntimeAdapter for DerivedUnitPriceRuntimeAdapter {
         Ok(ResolvedUnitPrice {
             valuation_id: task.valuation_id.clone(),
             instrument_id: task.instrument_id.clone(),
+            priced_symbol_id: payload.priced_symbol_id,
             quote: task.quote,
-            unit_price_dec: divide_decimal_strings(
-                numerator.as_str(),
-                denominator.as_str(),
-            )?,
+            unit_price_dec: divide_decimal_strings(numerator.as_str(), denominator.as_str())?,
             valuation_reader_kind: "derived_unit_price".to_string(),
             source_refs: vec![numerator_ref, denominator_ref],
+        })
+    }
+}
+
+/// Runtime adapter for compiled EVM native-balance observations.
+#[derive(Clone, Debug, Default)]
+pub struct EvmNativeBalanceObservationRuntimeAdapter;
+
+impl RuntimeAdapter for EvmNativeBalanceObservationRuntimeAdapter {
+    fn id(&self) -> &AdapterId {
+        static ID: std::sync::OnceLock<AdapterId> = std::sync::OnceLock::new();
+        ID.get_or_init(|| AdapterId(ADAPTER_OBSERVE_EVM_NATIVE_BALANCE.to_string()))
+    }
+}
+
+#[async_trait]
+impl ObservationRuntimeAdapter for EvmNativeBalanceObservationRuntimeAdapter {
+    async fn observe(
+        &self,
+        state_id: &StateId,
+        io: &mut dyn IoProvider,
+        binding: &crate::semantic::CompiledObservationBinding,
+        input: ObservationRuntimeInput<'_>,
+    ) -> Result<Observation, StateError> {
+        let payload: NativeBalanceObservationPayload = decode_object_map(
+            "compiled_observation_binding",
+            &binding.binding_id,
+            &binding.payload,
+        )?;
+        let subject = resolved_evm_subject_for_binding(binding, input.resolved_subjects)?;
+        let pinned =
+            pinned_evm_view_for_binding(binding, input.pinned_views, &payload.route_policy)?;
+        let block_number = match pinned.anchor {
+            ExecutionAnchor::Evm { block_number, .. } => block_number,
+            ExecutionAnchor::Bitcoin { .. } => {
+                unreachable!("validated by pinned_evm_view_for_binding")
+            }
+        };
+        let raw = read_native_balance(
+            state_id,
+            io,
+            payload.route_policy.network_id.as_str(),
+            normalized_control_scope(payload.route_policy.control_scope.as_str()),
+            subject.address.as_str(),
+            block_number,
+        )
+        .await?;
+        let decimals = payload.projection.decimals.unwrap_or(18);
+        let amount_dec = format_u256_units(&raw, decimals);
+        Ok(Observation {
+            wallet_id: binding.observation_key.subject_id.clone(),
+            symbol_id: payload.projection.symbol_id,
+            display_symbol: payload.projection.display_symbol,
+            kind: payload.projection.kind,
+            role: payload.projection.role,
+            network_id: payload.projection.network_id,
+            protocol: payload.projection.protocol,
+            quantity: ObservationQuantity {
+                raw_dec: raw.to_string(),
+                decimals,
+                amount_dec: amount_dec.clone(),
+            },
+            values: build_observation_values_from_resolved(binding, &amount_dec, input)?,
+            source: ObservationSource {
+                balance_reader_kind: "native_balance".to_string(),
+                network_id: pinned.network_id.clone(),
+                block_number,
+            },
+            metadata: BTreeMap::new(),
+        })
+    }
+}
+
+/// Runtime adapter for compiled EVM ERC-20 balance observations.
+#[derive(Clone, Debug, Default)]
+pub struct EvmErc20BalanceObservationRuntimeAdapter;
+
+impl RuntimeAdapter for EvmErc20BalanceObservationRuntimeAdapter {
+    fn id(&self) -> &AdapterId {
+        static ID: std::sync::OnceLock<AdapterId> = std::sync::OnceLock::new();
+        ID.get_or_init(|| AdapterId(ADAPTER_OBSERVE_EVM_ERC20_BALANCE.to_string()))
+    }
+}
+
+#[async_trait]
+impl ObservationRuntimeAdapter for EvmErc20BalanceObservationRuntimeAdapter {
+    async fn observe(
+        &self,
+        state_id: &StateId,
+        io: &mut dyn IoProvider,
+        binding: &crate::semantic::CompiledObservationBinding,
+        input: ObservationRuntimeInput<'_>,
+    ) -> Result<Observation, StateError> {
+        let payload: crate::semantic::Erc20BalanceObservationPayload = decode_object_map(
+            "compiled_observation_binding",
+            &binding.binding_id,
+            &binding.payload,
+        )?;
+        let subject = resolved_evm_subject_for_binding(binding, input.resolved_subjects)?;
+        let pinned =
+            pinned_evm_view_for_binding(binding, input.pinned_views, &payload.route_policy)?;
+        let block_number = match pinned.anchor {
+            ExecutionAnchor::Evm { block_number, .. } => block_number,
+            ExecutionAnchor::Bitcoin { .. } => {
+                unreachable!("validated by pinned_evm_view_for_binding")
+            }
+        };
+        let decimals = match payload.projection.decimals {
+            Some(decimals) => decimals,
+            None => {
+                read_token_decimals(
+                    state_id,
+                    io,
+                    payload.route_policy.network_id.as_str(),
+                    normalized_control_scope(payload.route_policy.control_scope.as_str()),
+                    payload.token_address.as_str(),
+                    block_number,
+                )
+                .await?
+            }
+        };
+        let raw = read_erc20_balance(
+            state_id,
+            io,
+            payload.route_policy.network_id.as_str(),
+            normalized_control_scope(payload.route_policy.control_scope.as_str()),
+            payload.token_address.as_str(),
+            subject.address.as_str(),
+            block_number,
+        )
+        .await?;
+        let amount_dec = format_u256_units(&raw, decimals);
+        Ok(Observation {
+            wallet_id: binding.observation_key.subject_id.clone(),
+            symbol_id: payload.projection.symbol_id,
+            display_symbol: payload.projection.display_symbol,
+            kind: payload.projection.kind,
+            role: payload.projection.role,
+            network_id: payload.projection.network_id,
+            protocol: payload.projection.protocol,
+            quantity: ObservationQuantity {
+                raw_dec: raw.to_string(),
+                decimals,
+                amount_dec: amount_dec.clone(),
+            },
+            values: build_observation_values_from_resolved(binding, &amount_dec, input)?,
+            source: ObservationSource {
+                balance_reader_kind: "erc20_balance".to_string(),
+                network_id: pinned.network_id.clone(),
+                block_number,
+            },
+            metadata: BTreeMap::new(),
         })
     }
 }
@@ -350,6 +513,150 @@ async fn resolve_direct_source(
             ))
         }
     }
+}
+
+fn resolved_evm_subject_for_binding(
+    binding: &crate::semantic::CompiledObservationBinding,
+    resolved_subjects: &BTreeMap<String, ResolvedSubject>,
+) -> Result<EvmResolvedSubjectValue, StateError> {
+    let subject = resolved_subjects
+        .get(binding.observation_key.subject_id.as_str())
+        .ok_or_else(|| {
+            state_unknown_msg(
+                "missing_resolved_subject",
+                format!(
+                    "missing resolved subject `{}` for observation binding `{}`",
+                    binding.observation_key.subject_id, binding.binding_id
+                ),
+            )
+        })?;
+    if subject.kind != SubjectKind::EvmAddress {
+        return Err(state_unknown_msg(
+            "observation_subject_kind_mismatch",
+            format!(
+                "observation binding `{}` required an EVM subject but got `{:?}`",
+                binding.binding_id, subject.kind
+            ),
+        ));
+    }
+    serde_json::from_value(subject.value.clone()).map_err(|err| {
+        state_unknown_msg(
+            "semantic_runtime_subject_decode_failed",
+            format!(
+                "resolved subject `{}` decode failed for observation binding `{}`: {err}",
+                subject.subject_id, binding.binding_id
+            ),
+        )
+    })
+}
+
+fn pinned_evm_view_for_binding<'a>(
+    binding: &crate::semantic::CompiledObservationBinding,
+    pinned_views: &'a BTreeMap<String, PinnedNetworkView>,
+    route_policy: &EvmRoutePolicy,
+) -> Result<&'a PinnedNetworkView, StateError> {
+    let pinned = pinned_views
+        .get(binding.observation_key.network_view_id.as_str())
+        .ok_or_else(|| {
+            state_unknown_msg(
+                "missing_pinned_view",
+                format!(
+                    "missing pinned execution view `{}` for observation binding `{}`",
+                    binding.observation_key.network_view_id, binding.binding_id
+                ),
+            )
+        })?;
+    if pinned.network_id != route_policy.network_id {
+        return Err(state_unknown_msg(
+            "pinned_view_network_mismatch",
+            format!(
+                "pinned execution view `{}` targeted network `{}` but binding `{}` required `{}`",
+                pinned.network_view_id,
+                pinned.network_id,
+                binding.binding_id,
+                route_policy.network_id
+            ),
+        ));
+    }
+    match pinned.anchor {
+        ExecutionAnchor::Evm { chain_id, .. } => {
+            if chain_id != route_policy.chain_id {
+                Err(state_unknown_msg(
+                    "pinned_view_chain_id_mismatch",
+                    format!(
+                        "pinned execution view `{}` chain_id `{chain_id}` did not match expected chain_id `{}`",
+                        pinned.network_view_id, route_policy.chain_id
+                    ),
+                ))
+            } else {
+                Ok(pinned)
+            }
+        }
+        ExecutionAnchor::Bitcoin { .. } => Err(state_unknown_msg(
+            "pinned_view_family_mismatch",
+            format!(
+                "observation binding `{}` expected an EVM execution view",
+                binding.binding_id
+            ),
+        )),
+    }
+}
+
+fn build_observation_values_from_resolved(
+    binding: &crate::semantic::CompiledObservationBinding,
+    amount_dec: &str,
+    input: ObservationRuntimeInput<'_>,
+) -> Result<Vec<ObservationValue>, StateError> {
+    let mut seen_quotes = BTreeMap::new();
+    let mut values = Vec::with_capacity(binding.valuation_ids.len());
+    for valuation_id in &binding.valuation_ids {
+        let value = input
+            .resolved_valuations
+            .get(valuation_id.as_str())
+            .ok_or_else(|| {
+                state_unknown_msg(
+                    "missing_resolved_valuation",
+                    format!(
+                        "missing resolved valuation `{valuation_id}` for observation binding `{}`",
+                        binding.binding_id
+                    ),
+                )
+            })?;
+        if value.instrument_id != binding.observation_key.instrument_id {
+            return Err(state_unknown_msg(
+                "observation_valuation_instrument_mismatch",
+                format!(
+                    "resolved valuation `{}` targeted instrument `{}` but observation binding `{}` targeted `{}`",
+                    value.valuation_id,
+                    value.instrument_id,
+                    binding.binding_id,
+                    binding.observation_key.instrument_id,
+                ),
+            ));
+        }
+        if seen_quotes
+            .insert(value.quote, value.valuation_id.clone())
+            .is_some()
+        {
+            return Err(state_unknown_msg(
+                "duplicate_observation_quote",
+                format!(
+                    "observation binding `{}` resolved multiple valuations for quote `{}`",
+                    binding.binding_id, value.quote
+                ),
+            ));
+        }
+        values.push(ObservationValue {
+            quote: value.quote,
+            priced_symbol_id: value.priced_symbol_id.clone(),
+            value_dec: multiply_decimal_strings(amount_dec, value.unit_price_dec.as_str())?,
+            unit_price_dec: value.unit_price_dec.clone(),
+            valuation_reader_kind: value.valuation_reader_kind.clone(),
+            source_refs: value.source_refs.clone(),
+        });
+    }
+    values.sort_by(|left, right| left.quote.cmp(&right.quote));
+    Ok(values)
 }
 
 fn pinned_evm_view_for_network<'a>(
@@ -425,6 +732,107 @@ fn unsupported_wallet_impl(state_id: &StateId, kind: &'static str) -> StateError
         false,
         format!("wallet implementation kind `{kind}` is not supported in the semantic runtime"),
     )
+}
+
+async fn read_native_balance(
+    state_id: &StateId,
+    io: &mut dyn IoProvider,
+    network_id: &str,
+    control_scope: &str,
+    wallet_address: &str,
+    block_number: u64,
+) -> Result<U256, StateError> {
+    let mut client = EvmIoClient::new(state_id.clone(), io);
+    let call = mfm_collectors_rpc_control::JsonRpcCall::for_scope_and_network(
+        control_scope,
+        network_id,
+        "eth_getBalance",
+        serde_json::json!([wallet_address, u64_hex_quantity(block_number)]),
+    );
+    let res = client.call(call).await.map_err(state_from_io)?;
+    parse_u256_hex_value(&res.response).map_err(|err| {
+        state_unknown_msg(
+            "evm_response_invalid",
+            format!("native balance response was invalid: {}", err.message),
+        )
+    })
+}
+
+async fn read_token_decimals(
+    state_id: &StateId,
+    io: &mut dyn IoProvider,
+    network_id: &str,
+    control_scope: &str,
+    token_address: &str,
+    block_number: u64,
+) -> Result<u8, StateError> {
+    let mut client = EvmIoClient::new(state_id.clone(), io);
+    let call = mfm_collectors_rpc_control::JsonRpcCall::for_scope_and_network(
+        control_scope,
+        network_id,
+        "eth_call",
+        serde_json::json!([
+            {"to": token_address, "data": mfm_evm_runtime::states::read::encode_erc20_decimals()},
+            u64_hex_quantity(block_number)
+        ]),
+    );
+    let res = client.call(call).await.map_err(state_from_io)?;
+    let raw = parse_u256_hex_value(&res.response).map_err(|err| {
+        state_unknown_msg(
+            "evm_response_invalid",
+            format!("token decimals response was invalid: {}", err.message),
+        )
+    })?;
+    parse_u8_u256(raw).map_err(|err| {
+        state_unknown_msg(
+            "evm_response_invalid",
+            format!("token decimals response was invalid: {}", err.message),
+        )
+    })
+}
+
+async fn read_erc20_balance(
+    state_id: &StateId,
+    io: &mut dyn IoProvider,
+    network_id: &str,
+    control_scope: &str,
+    token_address: &str,
+    wallet_address: &str,
+    block_number: u64,
+) -> Result<U256, StateError> {
+    let wallet: Address = wallet_address.parse().map_err(|_| {
+        state_unknown(
+            "invalid_wallet_address",
+            "wallet address was invalid for ERC-20 balance read",
+        )
+    })?;
+    let mut client = EvmIoClient::new(state_id.clone(), io);
+    let call = mfm_collectors_rpc_control::JsonRpcCall::for_scope_and_network(
+        control_scope,
+        network_id,
+        "eth_call",
+        serde_json::json!([
+            {"to": token_address, "data": encode_erc20_balance_of(&wallet)},
+            u64_hex_quantity(block_number)
+        ]),
+    );
+    let res = client.call(call).await.map_err(state_from_io)?;
+    parse_u256_hex_value(&res.response).map_err(|err| {
+        state_unknown_msg(
+            "evm_response_invalid",
+            format!("token balance response was invalid: {}", err.message),
+        )
+    })
+}
+
+fn multiply_decimal_strings(left: &str, right: &str) -> Result<String, StateError> {
+    let left = DecimalValue::parse(left)?;
+    let right = DecimalValue::parse(right)?;
+    let product = DecimalValue {
+        digits: left.digits * right.digits,
+        scale: left.scale + right.scale,
+    };
+    Ok(product.to_string_with_min_scale(left.scale.max(right.scale)))
 }
 
 fn divide_decimal_strings(numerator: &str, denominator: &str) -> Result<String, StateError> {
@@ -658,10 +1066,7 @@ mod tests {
 
         let value: EvmResolvedSubjectValue = serde_json::from_value(subject.value).expect("typed");
         assert_eq!(value.network_id, "ethereum-mainnet");
-        assert_eq!(
-            value.address,
-            "0x000000000000000000000000000000000000dead"
-        );
+        assert_eq!(value.address, "0x000000000000000000000000000000000000dead");
     }
 
     #[tokio::test]
@@ -728,14 +1133,12 @@ mod tests {
             responses: BTreeMap::from([
                 (
                     mfm_evm_runtime::states::read::encode_erc20_decimals(),
-                    json!(
-                        "0x0000000000000000000000000000000000000000000000000000000000000008"
-                    ),
+                    json!("0x0000000000000000000000000000000000000000000000000000000000000008"),
                 ),
                 (
                     "0xfeaf968c".to_string(),
                     json!(
-                    "0x\
+                        "0x\
 0000000000000000000000000000000000000000000000000000000000000001\
 000000000000000000000000000000000000000000000000000000000bebc200\
 0000000000000000000000000000000000000000000000000000000000000001\
@@ -870,5 +1273,229 @@ mod tests {
             .expect("derived");
         assert_eq!(derived_value.valuation_reader_kind, "derived_unit_price");
         assert_eq!(derived_value.source_refs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn native_observation_runtime_reads_balance_and_projects_values() {
+        let adapter = EvmNativeBalanceObservationRuntimeAdapter;
+        let mut io = TestIo {
+            responses: BTreeMap::from([(
+                "eth_getBalance".to_string(),
+                json!("0x0de0b6b3a7640000"),
+            )]),
+        };
+        let binding = crate::semantic::CompiledObservationBinding {
+            binding_id: "binding.wallet_main.eth".to_string(),
+            observation_key: crate::semantic::ObservationKey {
+                subject_id: "wallet_main".to_string(),
+                network_view_id: "ethereum-mainnet".to_string(),
+                instrument_id: "eth.native.ethereum-mainnet".to_string(),
+                position_kind: crate::semantic::PositionSemantics::SpotBalance,
+                venue_id: None,
+                discriminator: Some("eth.native.ethereum-mainnet".to_string()),
+            },
+            adapter: AdapterId(ADAPTER_OBSERVE_EVM_NATIVE_BALANCE.to_string()),
+            valuation_ids: vec!["eth.quote.usd".to_string()],
+            payload: BTreeMap::from([
+                (
+                    "projection".to_string(),
+                    json!({
+                        "symbol_id": "eth.native.ethereum-mainnet",
+                        "display_symbol": "ETH",
+                        "kind": "native_balance",
+                        "role": "native",
+                        "network_id": "ethereum-mainnet",
+                        "protocol": null,
+                        "decimals": 18
+                    }),
+                ),
+                (
+                    "route_policy".to_string(),
+                    json!({
+                        "network_id": "ethereum-mainnet",
+                        "chain_id": 1u64,
+                        "control_scope": "rpc.mainnet"
+                    }),
+                ),
+            ]),
+        };
+        let observation = adapter
+            .observe(
+                &StateId::must_new("portfolio.main.observe_native".to_string()),
+                &mut io,
+                &binding,
+                ObservationRuntimeInput {
+                    resolved_subjects: &BTreeMap::from([(
+                        "wallet_main".to_string(),
+                        ResolvedSubject {
+                            subject_id: "wallet_main".to_string(),
+                            kind: SubjectKind::EvmAddress,
+                            value: serde_json::to_value(EvmResolvedSubjectValue {
+                                network_id: "ethereum-mainnet".to_string(),
+                                address: "0x000000000000000000000000000000000000dead".to_string(),
+                                implementation_kind: "address_only".to_string(),
+                                capabilities: WalletCapabilities {
+                                    can_resolve_address: true,
+                                    can_sign: false,
+                                    can_submit: false,
+                                },
+                            })
+                            .expect("subject"),
+                        },
+                    )]),
+                    pinned_views: &BTreeMap::from([(
+                        "ethereum-mainnet".to_string(),
+                        PinnedNetworkView {
+                            network_view_id: "ethereum-mainnet".to_string(),
+                            network_id: "ethereum-mainnet".to_string(),
+                            family: crate::semantic::NetworkFamily::Evm,
+                            anchor: ExecutionAnchor::Evm {
+                                chain_id: 1,
+                                block_number: 100,
+                            },
+                        },
+                    )]),
+                    resolved_valuations: &BTreeMap::from([(
+                        "eth.quote.usd".to_string(),
+                        ResolvedUnitPrice {
+                            valuation_id: "eth.quote.usd".to_string(),
+                            instrument_id: "eth.native.ethereum-mainnet".to_string(),
+                            priced_symbol_id: "eth.native.ethereum-mainnet".to_string(),
+                            quote: mfm_state_symbol::model::QuoteCode::Usd,
+                            unit_price_dec: "2.00".to_string(),
+                            valuation_reader_kind: "fixed_unit_price".to_string(),
+                            source_refs: Vec::new(),
+                        },
+                    )]),
+                },
+            )
+            .await
+            .expect("observation");
+
+        assert_eq!(observation.wallet_id, "wallet_main");
+        assert_eq!(observation.quantity.decimals, 18);
+        assert_eq!(observation.quantity.amount_dec, "1.000000000000000000");
+        assert_eq!(
+            observation.values[0].priced_symbol_id,
+            "eth.native.ethereum-mainnet"
+        );
+        assert_eq!(observation.values[0].value_dec, "2.000000000000000000");
+        assert_eq!(observation.source.balance_reader_kind, "native_balance");
+    }
+
+    #[tokio::test]
+    async fn erc20_observation_runtime_fetches_missing_decimals() {
+        let adapter = EvmErc20BalanceObservationRuntimeAdapter;
+        let wallet: Address = "0x000000000000000000000000000000000000dead"
+            .parse()
+            .expect("wallet");
+        let mut io = TestIo {
+            responses: BTreeMap::from([
+                (
+                    mfm_evm_runtime::states::read::encode_erc20_decimals(),
+                    json!("0x0000000000000000000000000000000000000000000000000000000000000006"),
+                ),
+                (
+                    encode_erc20_balance_of(&wallet),
+                    json!("0x0000000000000000000000000000000000000000000000000000000000989680"),
+                ),
+            ]),
+        };
+        let binding = crate::semantic::CompiledObservationBinding {
+            binding_id: "binding.wallet_main.usdc".to_string(),
+            observation_key: crate::semantic::ObservationKey {
+                subject_id: "wallet_main".to_string(),
+                network_view_id: "ethereum-mainnet".to_string(),
+                instrument_id: "usdc.wallet.ethereum-mainnet".to_string(),
+                position_kind: crate::semantic::PositionSemantics::SpotBalance,
+                venue_id: None,
+                discriminator: Some("usdc.wallet.ethereum-mainnet".to_string()),
+            },
+            adapter: AdapterId(ADAPTER_OBSERVE_EVM_ERC20_BALANCE.to_string()),
+            valuation_ids: vec!["usdc.quote.usd".to_string()],
+            payload: BTreeMap::from([
+                (
+                    "projection".to_string(),
+                    json!({
+                        "symbol_id": "usdc.wallet.ethereum-mainnet",
+                        "display_symbol": "USDC",
+                        "kind": "erc20_balance",
+                        "role": "asset",
+                        "network_id": "ethereum-mainnet",
+                        "protocol": null,
+                        "decimals": null
+                    }),
+                ),
+                (
+                    "route_policy".to_string(),
+                    json!({
+                        "network_id": "ethereum-mainnet",
+                        "chain_id": 1u64,
+                        "control_scope": "rpc.mainnet"
+                    }),
+                ),
+                (
+                    "token_address".to_string(),
+                    json!("0x0000000000000000000000000000000000000001"),
+                ),
+            ]),
+        };
+        let observation = adapter
+            .observe(
+                &StateId::must_new("portfolio.main.observe_erc20".to_string()),
+                &mut io,
+                &binding,
+                ObservationRuntimeInput {
+                    resolved_subjects: &BTreeMap::from([(
+                        "wallet_main".to_string(),
+                        ResolvedSubject {
+                            subject_id: "wallet_main".to_string(),
+                            kind: SubjectKind::EvmAddress,
+                            value: serde_json::to_value(EvmResolvedSubjectValue {
+                                network_id: "ethereum-mainnet".to_string(),
+                                address: "0x000000000000000000000000000000000000dead".to_string(),
+                                implementation_kind: "address_only".to_string(),
+                                capabilities: WalletCapabilities {
+                                    can_resolve_address: true,
+                                    can_sign: false,
+                                    can_submit: false,
+                                },
+                            })
+                            .expect("subject"),
+                        },
+                    )]),
+                    pinned_views: &BTreeMap::from([(
+                        "ethereum-mainnet".to_string(),
+                        PinnedNetworkView {
+                            network_view_id: "ethereum-mainnet".to_string(),
+                            network_id: "ethereum-mainnet".to_string(),
+                            family: crate::semantic::NetworkFamily::Evm,
+                            anchor: ExecutionAnchor::Evm {
+                                chain_id: 1,
+                                block_number: 100,
+                            },
+                        },
+                    )]),
+                    resolved_valuations: &BTreeMap::from([(
+                        "usdc.quote.usd".to_string(),
+                        ResolvedUnitPrice {
+                            valuation_id: "usdc.quote.usd".to_string(),
+                            instrument_id: "usdc.wallet.ethereum-mainnet".to_string(),
+                            priced_symbol_id: "usdc.wallet.ethereum-mainnet".to_string(),
+                            quote: mfm_state_symbol::model::QuoteCode::Usd,
+                            unit_price_dec: "1.00".to_string(),
+                            valuation_reader_kind: "fixed_unit_price".to_string(),
+                            source_refs: Vec::new(),
+                        },
+                    )]),
+                },
+            )
+            .await
+            .expect("observation");
+
+        assert_eq!(observation.quantity.decimals, 6);
+        assert_eq!(observation.quantity.amount_dec, "10.000000");
+        assert_eq!(observation.values[0].value_dec, "10.000000");
+        assert_eq!(observation.source.balance_reader_kind, "erc20_balance");
     }
 }

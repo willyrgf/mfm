@@ -67,6 +67,8 @@ pub struct ResolvedUnitPrice {
     pub valuation_id: String,
     /// Instrument valued by this result.
     pub instrument_id: String,
+    /// Symbol identity whose unit price was resolved.
+    pub priced_symbol_id: String,
     /// Quote unit emitted by the valuation.
     pub quote: QuoteCode,
     /// Canonical decimal unit price.

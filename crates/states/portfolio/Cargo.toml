@@ -11,9 +11,11 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+alloy-primitives = { workspace = true }
 num-bigint = "0.4"
 num-traits = "0.2"
 
+mfm-evm-core = { path = "../../evm-core", version = "0.1.0" }
 mfm-evm-runtime = { path = "../../evm-runtime", version = "0.1.0" }
 mfm-collectors-rpc-control = { path = "../../collectors/rpc-control", version = "0.1.0" }
 mfm-machine = { path = "../../machine", version = "0.1.0" }
