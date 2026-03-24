@@ -74,5 +74,7 @@
 pub mod model;
 /// Semantic portfolio vocabulary, compiled execution specs, and validation helpers.
 pub mod semantic;
+/// Fixed semantic runtime state family for compiled portfolio execution.
+pub mod semantic_states;
 /// Reusable portfolio-domain runtime states for canonical portfolio execution.
 pub mod states;
