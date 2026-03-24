@@ -157,6 +157,8 @@ Rule of thumb:
 - The planner must flatten the result into one final `ExecutionPlan` before runtime starts.
 - Runtime executes states only.
 - States must never invoke ops or reshape the graph.
+- The exact operation API may evolve to represent child-op expansion explicitly; the invariant is
+  flatten-before-runtime, not a specific helper signature.
 
 ### Flattened pipelines
 - Multiple ops are flattened into one execution plan and one run.

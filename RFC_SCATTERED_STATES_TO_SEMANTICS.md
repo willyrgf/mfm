@@ -106,6 +106,9 @@ in runtime graph-shaping logic.
   recursive planning.
 - This RFC does not change the current executor contract that execution remains sequential in v1;
   graph independence may express future parallelism, but fan-out/join remains deferred.
+- This RFC does not preserve backward compatibility for the internal portfolio execution model,
+  internal planner surfaces, or the current protocol-first semantic vocabulary. The implementation
+  is a deliberate hard cutover.
 
 ## Central Semantic Model
 
@@ -319,11 +322,14 @@ Graph independence may express future parallelism, but executor behavior remains
 ## Initial Decisions Locked In By This RFC
 
 - `Subject` replaces `Wallet` in the semantic core.
-- Portfolio observation remains fail-fast in v1 for easier debugging and clearer migration.
+- Portfolio observation remains fail-fast in v1 for easier debugging and a clearer cutover.
 - Venue identifiers are user-authored stable semantic ids.
 - `ContractRef` remains adapter-owned and must not become a first-class planner semantic.
 - At least one non-EVM portfolio source must be implemented as part of this refactor so the new
   semantic core is validated beyond the EVM slice.
+- The implementation strategy is a hard cutover, not a compatibility-preserving migration.
+- Work should be decomposed into commit-scoped logical changes on the current branch, not into
+  backward-compatibility phases.
 
 ## Target Architecture
 
@@ -380,6 +386,92 @@ These names describe semantic planner boundaries, not mandatory public op ids. T
 internal composite-op boundaries while the transport layer still points at the existing public
 feature surface.
 
+### Portfolio semantic input model
+
+The portfolio refactor should stop treating `wallet`, `symbol`, and `protocol_position` as the
+primary semantic center.
+
+Those are current config and implementation surfaces, not the right long-term semantic model.
+
+The target semantic input model should separate:
+
+- subjects
+- execution views
+- instruments
+- venues
+- positions
+- valuations
+- observation targets
+
+In pseudocode:
+
+```rust
+struct PortfolioSemanticConfig {
+    portfolio_id: String,
+    quote_codes: Vec<String>,
+    execution_views: Vec<ExecutionViewConfig>,
+    subjects: Vec<SubjectConfig>,
+    instruments: Vec<InstrumentConfig>,
+    venues: Vec<VenueConfig>,
+    positions: Vec<PositionConfig>,
+    valuations: Vec<ValuationConfig>,
+    observation_targets: Vec<ObservationTargetConfig>,
+}
+
+struct SubjectConfig {
+    subject_id: String,
+    subject_kind: String,
+    locator: serde_json::Value,
+}
+
+struct ExecutionViewConfig {
+    execution_view_id: String,
+    network_id: String,
+    family: String,
+    route_policy: serde_json::Value,
+}
+
+struct InstrumentConfig {
+    instrument_id: String,
+    display_symbol: Option<String>,
+    quantity_schema: serde_json::Value,
+}
+
+struct PositionConfig {
+    position_id: String,
+    instrument_id: String,
+    position_kind: String,
+    venue_id: Option<String>,
+    reader_hint: Option<String>,
+}
+
+struct ValuationConfig {
+    valuation_id: String,
+    instrument_id: String,
+    quote: String,
+    strategy: serde_json::Value,
+}
+
+struct ObservationTargetConfig {
+    target_id: String,
+    subject_id: String,
+    execution_view_id: String,
+    position_id: String,
+    valuation_ids: Vec<String>,
+}
+```
+
+This does not require the first implementation to land exactly with these type names. It does
+require the planner to think in these terms.
+
+The current config should be treated as a migration surface into this semantic model:
+
+- `wallet` becomes `subject`
+- `network` becomes `execution view input`
+- `symbol` splits into instrument, position, and valuation concerns
+- `protocol_position` becomes a position plus venue plus adapter payload concern
+- `valuation_source_registry` remains part of valuation planning
+
 ### Portfolio observation sub-op expansion
 
 The two observation sub-ops are where most protocol and ledger variation should be compiled away.
@@ -403,6 +495,180 @@ The batch partitioning key should be semantic and planner-owned. It will typical
 - pinned execution view
 - compatible venue or position reader shape
 - any additional deterministic batch-compatibility dimensions
+
+### Composite operation shape
+
+This RFC does not require a specific Rust trait signature change immediately, but it does require a
+concrete planning model.
+
+Conceptually, every operation should expand into one of two things:
+
+- child operations plus dependency structure
+- executable states plus dependency structure
+
+In pseudocode:
+
+```rust
+enum PlannedExpansion {
+    ChildOps(PlannedOpGraph),
+    States(StateGraph),
+}
+
+struct PlannedOpGraph {
+    ops: Vec<PlannedOpNode>,
+    edges: Vec<PlannedOpEdge>,
+}
+
+struct PlannedOpNode {
+    op_id: String,
+    op_version: String,
+    op_path: String,
+    op_config: serde_json::Value,
+}
+```
+
+The SDK planner is responsible for recursively flattening that structure until only one final
+`StateGraph` remains.
+
+The important rule is semantic, not syntactic:
+
+- recursive op composition is allowed
+- runtime-visible execution units are always states
+
+### Planning API direction
+
+The most direct code-facing evolution is to make recursive expansion explicit in the operation API.
+
+Conceptually:
+
+```rust
+trait Operation {
+    fn expand(
+        &self,
+        op_path: OpPath,
+        op_config: &Value,
+        run_config: &RunConfig,
+    ) -> Result<OpExpansion, SdkError>;
+}
+
+enum OpExpansion {
+    States(StateGraph),
+    ChildOps(PlannedOpGraph),
+}
+```
+
+The SDK flattening algorithm should work like this:
+
+1. expand the root op
+2. if the result is `States`, validate and keep the graph
+3. if the result is `ChildOps`, assign deterministic child op paths
+4. recursively expand every child op
+5. flatten the resulting child graphs into one final `StateGraph`
+6. preserve declared dependency ordering between child ops
+7. apply the normal namespacing and import/export wiring rules
+
+That is the correct place to solve the current two-planner split.
+
+The exact Rust surface may differ, but the invariant must hold:
+
+- recursive op composition is a planner concern
+- the final planner output before runtime is one flat `StateGraph`
+
+### State identity in the first cut
+
+The first cut should avoid widening `crates/machine` just to represent nested op lineage.
+
+Current state ids are validated as a flat three-segment shape in the SDK. The first implementation
+of recursive op planning should preserve that external shape and encode nested lineage into the
+local state segment as needed.
+
+Example:
+
+- `portfolio_snapshot.main.observe_holdings__evm_mainnet_batch_01`
+
+This is less elegant than true hierarchical state ids, but it keeps the refactor focused on
+planning semantics rather than machine-runtime surgery.
+
+### Compiled observation binding shape
+
+Observation planning should compile raw semantic config into stable executable bindings before
+runtime starts.
+
+The minimum compiled binding should carry:
+
+```rust
+struct CompiledObservationBinding {
+    binding_id: String,
+    subject_id: String,
+    network_view_id: String,
+    instrument_id: String,
+    position_kind: String,
+    venue_id: Option<String>,
+    valuation_ids: Vec<String>,
+    adapter_family: String,
+    adapter_payload: serde_json::Value,
+}
+```
+
+Rules:
+
+- `adapter_family` is planner-selected and deterministic
+- `adapter_payload` is opaque to generic states
+- `adapter_payload` may contain contract refs or ledger-specific execution details
+- if a compiled binding is persisted or hashed, it must obey the repo-wide canonical JSON and
+  secret-safety invariants
+
+### Compiled observation batch shape
+
+The runtime-facing batch unit should be explicit and planner-owned.
+
+```rust
+struct CompiledObservationBatch {
+    batch_id: String,
+    adapter_family: String,
+    network_view_id: String,
+    bindings: Vec<CompiledObservationBinding>,
+}
+```
+
+Recommended invariants:
+
+- one batch uses exactly one `adapter_family`
+- one batch targets exactly one pinned `network_view_id`
+- every binding in the batch is executable by the same runtime state implementation
+- batch ordering is deterministic
+
+This is the unit consumed by `ObserveCompiledBatchState`.
+
+### Stable venue identity shape
+
+Venue identity should be semantic, stable, and user-authored.
+
+It should not be derived from opaque contract refs at runtime.
+
+The minimum venue identity should support:
+
+```rust
+struct VenueId {
+    venue_id: String,
+    venue_kind: String,
+    network_id: Option<String>,
+    parent_venue_id: Option<String>,
+}
+```
+
+Examples:
+
+- `venue_id = "aave-v3-mainnet"`
+- `venue_kind = "lending_market"`
+- `parent_venue_id = None`
+
+- `venue_id = "aave-v3-mainnet/usdc"`
+- `venue_kind = "reserve"`
+- `parent_venue_id = Some("aave-v3-mainnet")`
+
+Contract addresses, selectors, and token refs may still live inside adapter payloads, but they do
+not define venue identity.
 
 ### State topology for the first cut
 
@@ -442,6 +708,197 @@ The first cut remains fail-fast.
 
 If any required source preparation, execution-view pinning, valuation input resolution, or
 observation batch fails, the run fails immediately. Partial portfolio snapshots are deferred.
+
+## Implementation Plan
+
+This RFC assumes a full break-change implementation.
+
+There is no requirement to preserve:
+
+- old internal semantic type names
+- old op-local planner structure
+- compatibility aliases
+- dual old/new planner paths
+- compatibility re-exports
+- temporary adapter layers whose only purpose is to preserve the old architecture
+
+The implementation should be a sequence of hard cutovers, each kept to one logical commit on the
+current branch.
+
+### Commit decomposition policy
+
+Each commit should satisfy all of the following:
+
+- one architectural outcome
+- no compatibility shim added only to ease transition
+- in-repo consumers updated in the same commit
+- docs updated in the same commit when contract language changes
+
+This RFC is intentionally commit-oriented, not PR-oriented.
+
+The goal is a clean final architecture, not a long-lived migration surface.
+
+### Recommended commit sequence
+
+#### Commit 1: planner contract groundwork
+
+Goal:
+
+- establish recursive op planning as the project-wide target model in code-facing planner surfaces
+
+Scope:
+
+- introduce the planner-facing representation for child-op expansion
+- add recursive flattening support in the SDK planner layer
+- preserve final runtime output as one flat `ExecutionPlan`
+- keep runtime behavior state-only
+
+Must be true at the end of the commit:
+
+- root ops can compile child ops
+- planner flattening happens before runtime
+- states still execute exactly as runtime units
+
+#### Commit 2: semantic portfolio model cutover
+
+Goal:
+
+- replace the current portfolio-centered internal semantic model with
+  subject/view/instrument/position/venue/valuation/observation terms
+
+Scope:
+
+- introduce new semantic config/model types
+- remove the current overloaded internal center around wallet/symbol/protocol_position
+- re-express portfolio validation in terms of the new semantic model
+
+Must be true at the end of the commit:
+
+- planner code thinks in semantic-first terms
+- old internal vocabulary is no longer the architectural source of truth
+
+#### Commit 3: compiled binding and batch model
+
+Goal:
+
+- make compiled observation bindings and compiled homogeneous batches explicit
+
+Scope:
+
+- introduce compiled binding types
+- introduce compiled batch types
+- make adapter-family selection planner-owned
+- make batch partitioning planner-owned
+
+Must be true at the end of the commit:
+
+- runtime batch states consume compiled units, not raw user config
+
+#### Commit 4: portfolio op refactor into composite planning
+
+Goal:
+
+- replace the current protocol-shaped `portfolio_tracker` expansion with semantic recursive op
+  planning
+
+Scope:
+
+- remove planner branching shaped like base-vs-Aave special cases
+- introduce semantic child-op or internal composite-op boundaries
+- flatten to the new state topology:
+  - `PrepareExecutionSources`
+  - `PinExecutionViews`
+  - `ResolveSubjects`
+  - `ResolveValuationInputs`
+  - `ObserveCompiledBatchState x N`
+  - `MergeObservations`
+  - `AssembleSnapshot`
+  - `ProjectReport`
+
+Must be true at the end of the commit:
+
+- portfolio planning is semantic-first
+- runtime graph shape is not protocol-specific
+
+#### Commit 5: generic observation runtime cutover
+
+Goal:
+
+- remove protocol-specific runtime graph shaping from observation execution
+
+Scope:
+
+- replace `CollectObservationsState` / `CollectAaveObservationsState` style architectural splits
+  with compiled-batch execution
+- keep protocol-specific acquisition logic behind adapter-family execution code
+- preserve one canonical `Observation` output shape
+
+Must be true at the end of the commit:
+
+- observation merge, snapshot assembly, and report projection are generic
+- protocol-specific growth happens in adapter execution paths, not in graph topology
+
+#### Commit 6: non-EVM source landing
+
+Goal:
+
+- prove the semantic model is not just renamed EVM architecture
+
+Scope:
+
+- add at least one real non-EVM portfolio source
+- thread it through subject resolution, execution-view pinning, compiled binding, batch execution,
+  valuation, and observation assembly
+
+Recommended first source:
+
+- Bitcoin spot / UTXO-backed holdings
+
+Must be true at the end of the commit:
+
+- the semantic architecture is forced through at least one non-EVM path
+
+#### Commit 7: naming and dead-code cleanup
+
+Goal:
+
+- remove obsolete protocol-first names and old architecture leftovers
+
+Scope:
+
+- delete superseded model types and states
+- rename root ops, states, and modules where needed so the codebase matches the RFC vocabulary
+- update docs and inventories to reflect the new steady state
+
+Must be true at the end of the commit:
+
+- the repo no longer presents the old architecture as current
+
+### Explicit hard-cutover rules
+
+The implementation should follow these rules:
+
+- do not keep both old and new planner models alive longer than necessary
+- do not add deprecated aliases for internal crate paths or internal semantic types
+- do not add compatibility re-exports for superseded internal modules
+- do not preserve protocol-first planner branching just to ease review
+- do not preserve the old semantic vocabulary as a parallel internal API
+
+All in-repo consumers should be updated in the same commit that introduces the new internal source
+of truth.
+
+### What should remain stable during the cutover
+
+Even though the implementation is a hard cutover, these invariants remain non-negotiable:
+
+- append-only run semantics
+- per-append atomicity
+- content-addressed artifacts
+- canonical JSON hashing rules
+- no ambient IO in state logic
+- no secrets in persisted surfaces
+- transport-only binaries
+- runtime executes states only
 
 ## The Problem
 

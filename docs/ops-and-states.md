@@ -26,9 +26,20 @@ Current snapshot:
 - Shared production `State` impls: `33`
 - Intentional op-local production `State` impls: `3`
 
+Planning model note:
+
+- This inventory is intentionally focused on built-in/public root ops registered in the default app
+  bundle and on production runtime states.
+- Under the target recursive planning model, internal composite sub-ops may exist without becoming
+  new public entry points.
+- Runtime execution units remain states only; internal recursive op expansion must flatten before
+  runtime starts.
+- This document does not attempt to enumerate every future internal composite planning boundary.
+
 ## Built-In Ops
 
-The built-in app bundle registers these ops in `DefaultOperationPlugin::register_operations`.
+The built-in app bundle registers these public root ops in
+`DefaultOperationPlugin::register_operations`.
 
 | Op ID | Version | Owner | Purpose | Primary states | Entry points |
 |---|---|---|---|---|---|
@@ -61,6 +72,9 @@ Notes:
 
 These modules live under the documented shared-state roots and currently define the production
 runtime behavior reused by thin ops.
+
+Even under recursive op planning, these remain the runtime execution units after planner
+flattening.
 
 | Module | State types | Purpose | Used by built-in ops |
 |---|---|---|---|
@@ -96,6 +110,13 @@ Update this document in the same change whenever any of the following happen:
 - a new production `impl State for` lands under the shared-state modules documented above
 - a new intentional op-local production state is introduced
 - a CLI command or built-in feature becomes a first-class entry point for an op
+
+For future recursive planner cutovers:
+
+- if an internal composite sub-op becomes a built-in/public root op, add it to the built-in ops
+  table
+- if a recursive planning change does not alter the public built-in root op set or production state
+  inventory, this document does not need to enumerate the internal sub-op tree
 
 Minimum code locations to check when updating:
 
