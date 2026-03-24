@@ -281,6 +281,14 @@ pub enum PlanningError {
         /// Field that was empty.
         field: &'static str,
     },
+    /// Compiler-owned planning failure not attributable to one adapter implementation.
+    #[error("{code}: {message}")]
+    Compile {
+        /// Stable compiler error code.
+        code: &'static str,
+        /// Safe human-readable message.
+        message: String,
+    },
     /// Adapter-owned planner failure.
     #[error("{adapter}: {message}")]
     Adapter {
@@ -298,6 +306,14 @@ impl PlanningError {
     pub fn adapter(adapter: AdapterId, code: &'static str, message: impl Into<String>) -> Self {
         Self::Adapter {
             adapter,
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// Creates a compiler-owned planning error.
+    pub fn compile(code: &'static str, message: impl Into<String>) -> Self {
+        Self::Compile {
             code,
             message: message.into(),
         }
@@ -729,6 +745,8 @@ mod tests {
                 venue_id: super::super::VenueId("wallet".to_string()),
                 display_name: Some("wallet".to_string()),
                 kind: "wallet".to_string(),
+                network_id: Some("ethereum-mainnet".to_string()),
+                parent_venue_id: None,
                 metadata: BTreeMap::new(),
             },
             vec![
