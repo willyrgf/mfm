@@ -324,18 +324,25 @@ planning semantics to converge.
 Planner-time responsibilities:
 
 - semantic validation
-- adapter-family selection
 - stable venue-id resolution
+- adapter-family selection
+- child-op identity assignment or validation
+- parent-owned port binding validation
+- explicit dataflow versus ordering shaping
 - batch partitioning
 - dependency and ordering shaping
 - compilation of opaque adapter payloads
+- lowering planner-visible state identity into flat runtime-visible `StateId`s
+- optional compiled execution spec artifact emission
 
 Runtime-time responsibilities:
 
 - execute only compiled states
 - execute only compiled homogeneous batches
+- use planned adapter ids and compiled payloads only
+- resolve imported slots through planner-supplied bindings only
 - use `IoProvider` only for side effects and data acquisition
-- never rediscover graph topology or choose new adapter families
+- never rediscover graph topology, choose new adapter families, or arbitrate exports
 
 ### Resume and auditability
 
@@ -353,6 +360,12 @@ content-addressed artifact.
 Rules:
 
 - the compiled execution spec artifact is optional but recommended in v1
+- the compiled execution spec should capture:
+  - the resolved child-op tree and full hierarchical `OpPath`s
+  - explicit import/export bindings and re-export aliases
+  - the root export resolution table
+  - planner-visible state lineage plus the lowered runtime `StateId` mapping
+  - compiled semantic payloads such as observation batches and valuation tasks
 - if persisted or hashed, it must obey canonical JSON and secret-safety invariants
 - the compiled execution spec artifact is not the authoritative runtime resume input in v1
 
@@ -551,46 +564,81 @@ The batch partitioning key should be semantic and planner-owned. It will typical
 
 ### Composite operation shape
 
-This RFC does not require a specific Rust trait signature change immediately, but it does require a
-concrete planning model.
+This RFC now recommends a scoped composite-op intermediate representation.
 
-Conceptually, every operation should expand into one of two things:
+The key rule is:
 
-- child operations plus dependency structure
-- executable states plus dependency structure
+- op instance identity is hierarchical and planner-owned
+- interface wiring is explicit and parent-owned
+- runtime-visible execution units are still states only
+
+Conceptually, every operation expands to a planned op that is either:
+
+- a leaf op with executable states
+- a composite op with child ops plus explicit interface bindings
 
 In pseudocode:
 
 ```rust
-enum PlannedExpansion {
-    ChildOps(PlannedOpGraph),
-    States(StateGraph),
+struct PlannedOp {
+    interface: OpInterface,
+    kind: PlannedOpKind,
 }
 
-struct PlannedOpGraph {
-    ops: Vec<PlannedOpNode>,
-    edges: Vec<PlannedOpEdge>,
+struct OpInterface {
+    imports: BTreeSet<PortName>,
+    exports: BTreeSet<PortName>,
 }
 
-struct PlannedOpNode {
-    child_op_local_id: String,
+enum PlannedOpKind {
+    Leaf(LeafOpSpec),
+    Composite(CompositeOpSpec),
+}
+
+struct LeafOpSpec {
+    states: Vec<LeafStateNode>,
+    edges: Vec<LeafStateEdge>,
+}
+
+struct CompositeOpSpec {
+    children: BTreeMap<ChildOpLocalId, ChildOpInstance>,
+    bindings: Vec<ImportBinding>,
+    order: Vec<AfterEdge>,
+    re_exports: BTreeMap<PortName, PortSource>,
+}
+
+struct ChildOpInstance {
     op_id: String,
     op_version: String,
     op_config: serde_json::Value,
 }
+
+struct ImportBinding {
+    to_child: ChildOpLocalId,
+    import: PortName,
+    source: PortSource,
+}
+
+enum PortSource {
+    ParentImport(PortName),
+    ChildExport {
+        child: ChildOpLocalId,
+        export: PortName,
+    },
+}
 ```
 
-The SDK planner is responsible for recursively flattening that structure until only one final
-`StateGraph` remains.
+This representation keeps the planner semantics explicit:
 
-The important rule is semantic, not syntactic:
-
-- recursive op composition is allowed
-- runtime-visible execution units are always states
+- children are instances with parent-local identity
+- bindings express data flow
+- `AfterEdge` expresses pure ordering
+- parents re-export explicitly instead of inheriting child exports implicitly
 
 ### Planning API direction
 
-The most direct code-facing evolution is to make recursive expansion explicit in the operation API.
+The most direct code-facing evolution is to make recursive expansion explicit in the operation API
+and to return interface plus shape together.
 
 Conceptually:
 
@@ -601,25 +649,30 @@ trait Operation {
         op_path: OpPath,
         op_config: &Value,
         run_config: &RunConfig,
-    ) -> Result<OpExpansion, SdkError>;
-}
-
-enum OpExpansion {
-    States(StateGraph),
-    ChildOps(PlannedOpGraph),
+    ) -> Result<PlannedOp, SdkError>;
 }
 ```
+
+This RFC no longer recommends a separate planner surface that discovers imports/exports independently
+from `expand()`. Because internal backward compatibility is not required, the cleaner target is:
+
+- one expansion result
+- one interface contract
+- one recursive flattening algorithm
 
 The SDK flattening algorithm should work like this:
 
 1. expand the root op
-2. if the result is `States`, validate and keep the graph
-3. if the result is `ChildOps`, assign deterministic child op paths
-4. recursively expand every child op
-5. flatten the resulting child graphs into one final `StateGraph`
-6. preserve declared dependency ordering between child ops
-7. apply the normal namespacing and import/export wiring rules using full child op paths
-8. reject duplicate child-op identities, duplicate flattened state ids, and duplicate exported ports
+2. if the result is `Leaf`, validate leaf-state structure and keep it
+3. if the result is `Composite`, validate child identities, interface bindings, and re-exports
+4. assign deterministic child `OpPath`s
+5. recursively expand every child op
+6. build the child dependency graph from:
+   - explicit `AfterEdge`s
+   - dataflow implied by `ImportBinding`s
+7. topologically order children with lexical `child_op_local_id` tie-breaks
+8. lower every leaf state from planner-visible lineage into one flat runtime `StateGraph`
+9. emit one final `StateGraph` plus an optional serializable compiled execution spec
 
 That is the correct place to solve the current two-planner split.
 
@@ -640,41 +693,101 @@ Rules:
 - the planner assigns the full child op path as:
   - `<parent_op_path>.<child_op_local_id>`
 - full child op paths must be unique within the flattened planning tree
-- context namespacing uses the full hierarchical child op path, not only the root step path
-- child-op imports and exports are resolved against that full child op path
-- duplicate exported ports in one flattened planning scope are planner errors
+- context namespacing must use the full hierarchical child op path, not only the root step path
+- authored import/export wiring should be port-based, not path-based
+- resolved compiled plans may record path-based slot references after flattening
 - there is no implicit "last writer wins" export policy for recursive child-op composition
+- there is no implicit promotion of child exports into the parent interface
+- every child import must be bound exactly once
+- pure ordering and dataflow must remain distinct planner concepts even if they lower to similar
+  runtime edges in v1
 
-Flattening order must also be deterministic.
+Export collision rules must be scoped correctly.
 
-Recommended rule:
+- duplicate import names are invalid within one op interface
+- duplicate export names are invalid within one op interface
+- duplicate bindings to the same child import are invalid
+- duplicate parent re-export names are invalid
+- siblings may each expose the same export name because those exports are child-scoped until the
+  parent binds or re-exports them
 
-- topologically order child-op dependencies
-- use lexical order of full child op path as the stable tie-breaker
-- apply the same rule recursively before emitting final flattened state nodes
+Deterministic flattening rules:
+
+- child dependencies are the union of:
+  - explicit `AfterEdge`s
+  - implied dependencies from `ImportBinding` sources to bound children
+- topologically order child dependencies
+- use lexical `child_op_local_id` as the stable tie-breaker
+- recursively apply the same rule before emitting final flattened state nodes
+- within a leaf state graph, use topological order with lexical `state_local_id` tie-breaks for
+  deterministic compiled-spec emission
+- persisted or serialized planner structures should use deterministic ordered collections, not
+  hash-iteration order
+
+### Context namespacing after flattening
+
+Only leaf ops materialize context at runtime.
+
+Recommended slot convention:
+
+- imported ports are read locally as `in.<port>`
+- op-private working data is read and written under `work.*`
+- exported ports are written locally as `out.<port>`
+
+After flattening:
+
+- a leaf state's runtime context keys are qualified as `<full_op_path>.<slot>`
+- imported slots resolve to planner-supplied source slots
+- private `work.*` data never crosses op boundaries
+- composite op re-exports are aliases in the compiled execution spec, not hidden runtime copies
+
+This means namespacing survives flattening through full leaf `OpPath`s even though runtime executes
+one flat state graph.
 
 ### State identity in the first cut
 
-The first cut should avoid widening `crates/machine` just to represent nested op lineage.
+The first cut should keep `crates/machine` small while still making planner identity explicit.
 
-Current state ids are validated as a flat three-segment shape in the SDK. The first implementation
-of recursive op planning should preserve that external shape and encode nested lineage into the
-local state segment as needed.
-
-Example:
-
-- `portfolio_snapshot.main.observe_holdings__evm_mainnet__batch_01`
-
-This is less elegant than true hierarchical state ids, but it keeps the refactor focused on
-planning semantics rather than machine-runtime surgery.
-
-The important distinction is:
+The recommended contract is:
 
 - full hierarchical child-op identity lives in `OpPath`
+- planner-visible state identity lives in a first-class `StateAddr`
 - flat runtime-visible `StateId` remains a three-segment id in v1
-- nested lineage is encoded into `state_local_id` using deterministic `__`-joined local ids
-- context namespacing and import/export resolution must still use the full hierarchical child-op
-  path, not the flattened `StateId`
+- `StateId` must be treated as a lowered execution handle, not as the semantic lineage carrier
+
+In pseudocode:
+
+```rust
+struct StateAddr {
+    op_path: OpPath,
+    state_local_id: String,
+}
+
+struct QualifiedSlotRef {
+    op_path: OpPath,
+    slot: String,
+}
+
+struct CompiledExecutionSpec {
+    root_exports: BTreeMap<PortName, QualifiedSlotRef>,
+    state_lineage: BTreeMap<StateId, StateAddr>,
+}
+```
+
+This is the important distinction:
+
+- hierarchical `OpPath` plus flat runtime `StateId` is sufficient only if `StateAddr` is the
+  planner source of truth
+- attempting to encode nested lineage only inside `StateId` is an unstable compromise because it
+  overloads a runtime handle with planner semantics
+- compiled execution specs should preserve the exact lineage map for audit and debugging
+
+Recommended lowering rule:
+
+- derive runtime `StateId`s deterministically from canonical `StateAddr`
+- allow short human hints if useful
+- collision-check the fully flattened plan
+- do not require `StateId` to be reversible into lineage
 
 ### Compiled observation binding shape
 
