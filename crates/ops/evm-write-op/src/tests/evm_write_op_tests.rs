@@ -1,5 +1,18 @@
 use super::*;
 use mfm_collectors_evm::parse_u64_hex_value;
+use mfm_sdk::op::{LeafOpSpec, OpInterface, PlannedOp, PlannedOpKind};
+use mfm_state_common::test_support as op_test_support;
+
+fn planned_interface(planned: PlannedOp) -> OpInterface {
+    planned.interface
+}
+
+fn into_leaf(planned: PlannedOp) -> LeafOpSpec {
+    match planned.kind {
+        PlannedOpKind::Leaf(spec) => spec,
+        PlannedOpKind::Composite(_) => panic!("expected leaf planned op"),
+    }
+}
 
 fn sample_artifact() -> serde_json::Value {
     serde_json::json!({
@@ -78,13 +91,18 @@ fn resolve_function_call_works() {
 #[test]
 fn deploy_io_exports_contract_address() {
     let op = EvmDeployOp;
-    let io = op
-        .io(&serde_json::json!({
+    let io = planned_interface(
+        op.expand(
+            OpPath("m.main".to_string()),
+            &serde_json::json!({
             "artifact": sample_artifact(),
             "network_id": "ethereum-mainnet",
             "from": "0x1111111111111111111111111111111111111111"
-        }))
-        .expect("io");
+            }),
+            &op_test_support::run_config_live(),
+        )
+        .expect("expand"),
+    );
     assert!(io
         .exports
         .iter()
@@ -94,13 +112,18 @@ fn deploy_io_exports_contract_address() {
 #[test]
 fn deploy_io_imports_artifact_port_when_artifact_is_unset() {
     let op = EvmDeployOp;
-    let io = op
-        .io(&serde_json::json!({
+    let io = planned_interface(
+        op.expand(
+            OpPath("m.main".to_string()),
+            &serde_json::json!({
             "artifact_port": "contract_artifact",
             "network_id": "ethereum-mainnet",
             "from": "0x1111111111111111111111111111111111111111"
-        }))
-        .expect("io");
+            }),
+            &op_test_support::run_config_live(),
+        )
+        .expect("expand"),
+    );
     assert!(io
         .imports
         .iter()
@@ -110,14 +133,19 @@ fn deploy_io_imports_artifact_port_when_artifact_is_unset() {
 #[test]
 fn configure_io_imports_contract_address_when_unset() {
     let op = EvmConfigureOp;
-    let io = op
-        .io(&serde_json::json!({
+    let io = planned_interface(
+        op.expand(
+            OpPath("m.main".to_string()),
+            &serde_json::json!({
             "artifact": sample_artifact(),
             "network_id": "ethereum-mainnet",
             "from": "0x1111111111111111111111111111111111111111",
             "calls": [{"function":"setValue","args":[1]}]
-        }))
-        .expect("io");
+            }),
+            &op_test_support::run_config_live(),
+        )
+        .expect("expand"),
+    );
 
     assert!(io
         .imports
@@ -128,11 +156,16 @@ fn configure_io_imports_contract_address_when_unset() {
 #[test]
 fn contract_from_nix_io_imports_result_and_exports_artifact() {
     let op = EvmContractFromNixOp;
-    let io = op
-        .io(&serde_json::json!({
+    let io = planned_interface(
+        op.expand(
+            OpPath("m.main".to_string()),
+            &serde_json::json!({
             "result_pointer": "/artifact"
-        }))
-        .expect("io");
+            }),
+            &op_test_support::run_config_live(),
+        )
+        .expect("expand"),
+    );
 
     assert!(io.imports.iter().any(|k| k.0.as_str() == KEY_NIX_RESULT));
     assert!(io
@@ -144,8 +177,8 @@ fn contract_from_nix_io_imports_result_and_exports_artifact() {
 #[test]
 fn validate_expand_builds_read_and_event_assertions() {
     let op = EvmValidateOp;
-    let plan = op
-        .expand(
+    let plan = into_leaf(
+        op.expand(
             OpPath("m.validate".to_string()),
             &serde_json::json!({
                 "artifact": sample_artifact(),
@@ -175,7 +208,8 @@ fn validate_expand_builds_read_and_event_assertions() {
                 skip_tags: Vec::new(),
             },
         )
-        .expect("expand");
+        .expect("expand"),
+    );
 
     assert_eq!(plan.states.len(), 1);
     assert!(plan.edges.is_empty());

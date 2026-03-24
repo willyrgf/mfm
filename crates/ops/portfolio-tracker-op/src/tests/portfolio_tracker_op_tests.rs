@@ -18,6 +18,7 @@ use mfm_machine::recorder::EventRecorder;
 use mfm_machine::replay_io::ReplayIo;
 use mfm_machine::runtime::{DefaultExecutionEngine, EngineFailpoints};
 use mfm_machine::stores::StreamId;
+use mfm_sdk::op::{LeafOpSpec, PlannedOp, PlannedOpKind};
 use mfm_sdk::unstable::SdkPlanResolver;
 use mfm_state_common::test_support as op_test_support;
 use mfm_state_portfolio::model::{PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot};
@@ -26,6 +27,13 @@ use tokio::sync::Mutex;
 const ERC20_DECIMALS_SELECTOR: &str = "0x313ce567";
 const LATEST_ROUND_DATA_SELECTOR: &str = "0xfeaf968c";
 const BALANCE_OF_SELECTOR_PREFIX: &str = "0x70a08231";
+
+fn into_leaf(planned: PlannedOp) -> LeafOpSpec {
+    match planned.kind {
+        PlannedOpKind::Leaf(spec) => spec,
+        PlannedOpKind::Composite(_) => panic!("expected leaf planned op"),
+    }
+}
 
 struct Harness {
     engine: Arc<dyn ExecutionEngine>,
@@ -419,18 +427,19 @@ impl EventRecorder for NoopRecorder {
 #[test]
 fn expand_uses_canonical_multi_network_graph() {
     let op = PortfolioTrackerOp;
-    let graph = op
-        .expand(
+    let graph = into_leaf(
+        op.expand(
             OpPath("portfolio_tracker.main".to_string()),
             &canonical_op_config(),
             &op_test_support::run_config_live(),
         )
-        .expect("expand");
+        .expect("expand"),
+    );
 
     let ids: Vec<_> = graph
         .states
         .iter()
-        .map(|state| state.id.as_str().to_string())
+        .map(|state| state.state_id.as_str().to_string())
         .collect();
     assert_eq!(
         ids,

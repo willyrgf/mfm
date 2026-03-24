@@ -29,7 +29,7 @@ use mfm_machine::errors::StateError;
 use mfm_machine::ids::{ContextKey, FactKey, OpId, OpPath};
 use mfm_machine::io::IoProvider;
 use mfm_machine::meta::StateMeta;
-use mfm_machine::plan::{DependencyEdge, StateGraph, StateNode};
+use mfm_machine::plan::DependencyEdge;
 use mfm_machine::recorder::EventRecorder;
 use mfm_machine::state::{SnapshotPolicy, State, StateOutcome};
 use mfm_state_common::ctx as op_ctx;
@@ -40,7 +40,9 @@ use mfm_state_common::states::side_effect::TriggerOnce;
 
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
-use mfm_sdk::op::{OpIo, Operation};
+use mfm_sdk::op::{
+    leaf_state_id, leaf_state_node, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind,
+};
 
 #[cfg(test)]
 use mfm_machine::errors::ErrorCategory;
@@ -100,26 +102,15 @@ impl Operation for ProofOp {
         OP_VERSION.to_string()
     }
 
-    fn io(&self, _op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        Ok(OpIo {
-            imports: Vec::new(),
-            exports: vec![PortKey("output".to_string())],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         _op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
-        let read_id = format!("{}.read_facts", op_path.0);
-        let side_id = format!("{}.apply_side_effect", op_path.0);
-        let out_id = format!("{}.write_output", op_path.0);
-
-        let read_sid = mfm_machine::ids::StateId::must_new(read_id);
-        let side_sid = mfm_machine::ids::StateId::must_new(side_id);
-        let out_sid = mfm_machine::ids::StateId::must_new(out_id);
+    ) -> Result<PlannedOp, SdkError> {
+        let read_sid = leaf_state_id(&op_path, "read_facts")?;
+        let side_sid = leaf_state_id(&op_path, "apply_side_effect")?;
+        let out_sid = leaf_state_id(&op_path, "write_output")?;
 
         let read = Arc::new(ProofReadState {
             state_id: read_sid.clone(),
@@ -142,31 +133,28 @@ impl Operation for ProofOp {
             op_path: op_path.clone(),
         });
 
-        Ok(StateGraph {
-            states: vec![
-                StateNode {
-                    id: read_sid.clone(),
-                    state: read,
-                },
-                StateNode {
-                    id: side_sid.clone(),
-                    state: side,
-                },
-                StateNode {
-                    id: out_sid.clone(),
-                    state: out,
-                },
-            ],
-            edges: vec![
-                DependencyEdge {
-                    from: read_sid.clone(),
-                    to: side_sid.clone(),
-                },
-                DependencyEdge {
-                    from: side_sid,
-                    to: out_sid,
-                },
-            ],
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports: Vec::new(),
+                exports: vec![PortKey("output".to_string())],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![
+                    leaf_state_node(&op_path, "read_facts", read)?,
+                    leaf_state_node(&op_path, "apply_side_effect", side)?,
+                    leaf_state_node(&op_path, "write_output", out)?,
+                ],
+                edges: vec![
+                    DependencyEdge {
+                        from: read_sid.clone(),
+                        to: side_sid.clone(),
+                    },
+                    DependencyEdge {
+                        from: side_sid,
+                        to: out_sid,
+                    },
+                ],
+            }),
         })
     }
 }

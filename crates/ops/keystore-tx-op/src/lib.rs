@@ -21,11 +21,12 @@ use std::sync::Arc;
 
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
-use mfm_machine::ids::{ContextKey, OpId, OpPath, StateId};
-use mfm_machine::plan::{StateGraph, StateNode};
+use mfm_machine::ids::{ContextKey, OpId, OpPath};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
-use mfm_sdk::op::{OpIo, Operation};
+use mfm_sdk::op::{
+    leaf_state_id, leaf_state_node, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind,
+};
 use mfm_state_common::errors as op_errors;
 use mfm_state_keystore::states::tx::{KeystoreTxSignState, KeystoreTxSignStateConfig};
 use mfm_state_keystore::tx::{
@@ -123,19 +124,12 @@ impl Operation for KeystoreTxSignOp {
         TX_OP_VERSION.to_string()
     }
 
-    fn io(&self, _op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        Ok(OpIo {
-            imports: Vec::new(),
-            exports: vec![PortKey("report".to_string())],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
+    ) -> Result<PlannedOp, SdkError> {
         let cfg: TxSignOpConfig = serde_json::from_value(op_config.clone()).map_err(|_| {
             op_errors::sdk_parse_error("invalid_op_config", "invalid keystore_tx_sign op_config")
         })?;
@@ -161,7 +155,7 @@ impl Operation for KeystoreTxSignOp {
             data,
         };
 
-        let state_id = StateId::must_new(format!("{}.sign_and_write", op_path.0));
+        let state_id = leaf_state_id(&op_path, "sign_and_write")?;
         let by_label =
             decode_selector_label(cfg.by_label, cfg.by_label_hex).map_err(sdk_error_from_helper)?;
         let keystore_path =
@@ -180,12 +174,19 @@ impl Operation for KeystoreTxSignOp {
             },
         };
 
-        Ok(StateGraph {
-            states: vec![StateNode {
-                id: state_id,
-                state: Arc::new(state),
-            }],
-            edges: Vec::new(),
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports: Vec::new(),
+                exports: vec![PortKey("report".to_string())],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![leaf_state_node(
+                    &op_path,
+                    "sign_and_write",
+                    Arc::new(state),
+                )?],
+                edges: Vec::new(),
+            }),
         })
     }
 }

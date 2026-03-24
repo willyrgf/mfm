@@ -1,4 +1,5 @@
 use super::*;
+use crate::op::OpIo;
 use mfm_machine::config::{
     BackoffPolicy, ContextCheckpointing, EventProfile, ExecutionMode, IoMode, RetryPolicy,
     RunConfig,
@@ -299,8 +300,24 @@ impl State for ReadThenWriteState {
 struct TestOp {
     op_id: OpId,
     op_version: String,
-    io: OpIo,
-    graph: StateGraph,
+    planned: crate::op::PlannedOp,
+}
+
+fn test_leaf_state(state_id: &str, state: DynState) -> crate::op::LeafStateNode {
+    let mut segments = state_id.split('.');
+    let machine_id = segments.next().expect("machine segment");
+    let step_id = segments.next().expect("step segment");
+    let state_local_id = segments.next().expect("local segment");
+    assert!(segments.next().is_none(), "test state ids stay flat");
+
+    crate::op::LeafStateNode {
+        addr: crate::ids::StateAddr {
+            op_path: OpPath::must_new(format!("{machine_id}.{step_id}")),
+            state_local_id: crate::ids::StateLocalId(state_local_id.to_string()),
+        },
+        state_id: StateId::must_new(state_id.to_string()),
+        state,
+    }
 }
 
 impl TestOp {
@@ -316,13 +333,12 @@ impl TestOp {
         Self {
             op_id: OpId::must_new(op_id.to_string()),
             op_version: op_version.to_string(),
-            io,
-            graph: StateGraph {
-                states: vec![StateNode {
-                    id: StateId::must_new(state_id.to_string()),
-                    state,
-                }],
-                edges: Vec::new(),
+            planned: crate::op::PlannedOp {
+                interface: io,
+                kind: crate::op::PlannedOpKind::Leaf(crate::op::LeafOpSpec {
+                    states: vec![test_leaf_state(state_id, state)],
+                    edges: Vec::new(),
+                }),
             },
         }
     }
@@ -342,13 +358,12 @@ impl TestOp {
         Self {
             op_id: OpId::must_new(op_id.to_string()),
             op_version: op_version.to_string(),
-            io,
-            graph: StateGraph {
-                states: vec![StateNode {
-                    id: StateId::must_new(state_id.to_string()),
-                    state,
-                }],
-                edges: Vec::new(),
+            planned: crate::op::PlannedOp {
+                interface: io,
+                kind: crate::op::PlannedOpKind::Leaf(crate::op::LeafOpSpec {
+                    states: vec![test_leaf_state(state_id, state)],
+                    edges: Vec::new(),
+                }),
             },
         }
     }
@@ -363,17 +378,13 @@ impl crate::op::Operation for TestOp {
         self.op_version.clone()
     }
 
-    fn io(&self, _op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        Ok(self.io.clone())
-    }
-
     fn expand(
         &self,
         _op_path: OpPath,
         _op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
-        Ok(self.graph.clone())
+    ) -> Result<crate::op::PlannedOp, SdkError> {
+        Ok(self.planned.clone())
     }
 }
 
@@ -468,16 +479,15 @@ fn planner_rejects_apply_side_effect_without_idempotency_key() {
     reg.register(Arc::new(TestOp {
         op_id: OpId::must_new("op".to_string()),
         op_version: "v1".to_string(),
-        io: OpIo {
-            imports: Vec::new(),
-            exports: Vec::new(),
-        },
-        graph: StateGraph {
-            states: vec![StateNode {
-                id: StateId::must_new("op.main.s1".to_string()),
-                state: Arc::new(ApplyNoIdemState),
-            }],
-            edges: Vec::new(),
+        planned: crate::op::PlannedOp {
+            interface: OpIo {
+                imports: Vec::new(),
+                exports: Vec::new(),
+            },
+            kind: crate::op::PlannedOpKind::Leaf(crate::op::LeafOpSpec {
+                states: vec![test_leaf_state("op.main.s1", Arc::new(ApplyNoIdemState))],
+                edges: Vec::new(),
+            }),
         },
     }));
 
@@ -956,28 +966,27 @@ impl crate::op::Operation for FailOp {
         "v1".to_string()
     }
 
-    fn io(&self, _op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        Ok(OpIo {
-            imports: Vec::new(),
-            exports: Vec::new(),
-        })
-    }
-
     fn expand(
         &self,
         _op_path: OpPath,
         _op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
-        Ok(StateGraph {
-            states: vec![StateNode {
-                id: StateId::must_new("fail_op.main.s1".to_string()),
-                state: Arc::new(FailingState {
-                    code: "IntentionalFailure",
-                    message: "intentional test failure",
-                }),
-            }],
-            edges: Vec::new(),
+    ) -> Result<crate::op::PlannedOp, SdkError> {
+        Ok(crate::op::PlannedOp {
+            interface: OpIo {
+                imports: Vec::new(),
+                exports: Vec::new(),
+            },
+            kind: crate::op::PlannedOpKind::Leaf(crate::op::LeafOpSpec {
+                states: vec![test_leaf_state(
+                    "fail_op.main.s1",
+                    Arc::new(FailingState {
+                        code: "IntentionalFailure",
+                        message: "intentional test failure",
+                    }),
+                )],
+                edges: Vec::new(),
+            }),
         })
     }
 }

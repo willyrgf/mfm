@@ -21,11 +21,12 @@ use std::sync::Arc;
 
 use mfm_machine::config::RunConfig;
 use mfm_machine::errors::ErrorCategory;
-use mfm_machine::ids::{OpId, OpPath, StateId};
-use mfm_machine::plan::{StateGraph, StateNode};
+use mfm_machine::ids::{OpId, OpPath};
 use mfm_sdk::errors::SdkError;
 use mfm_sdk::ids::PortKey;
-use mfm_sdk::op::{OpIo, Operation};
+use mfm_sdk::op::{
+    leaf_state_id, leaf_state_node, LeafOpSpec, OpInterface, Operation, PlannedOp, PlannedOpKind,
+};
 use mfm_state_aave_v3::states::AdaptOriginDeployOutputState;
 use mfm_state_common::errors as op_errors;
 use serde::Deserialize;
@@ -77,30 +78,12 @@ impl Operation for AaveV3OriginAdaptDeployOp {
         AAVE_V3_ORIGIN_ADAPT_DEPLOY_OP_VERSION.to_string()
     }
 
-    fn io(&self, op_config: &serde_json::Value) -> Result<OpIo, SdkError> {
-        let cfg: AaveV3OriginAdaptDeployConfig = serde_json::from_value(op_config.clone())
-            .map_err(|_| {
-                op_errors::sdk_parse_error(
-                    "invalid_op_config",
-                    "invalid aave_v3_origin_adapt_deploy op_config",
-                )
-            })?;
-        validate_config(&cfg).map_err(|msg| {
-            op_errors::sdk_error("invalid_op_config", ErrorCategory::ParsingInput, false, msg)
-        })?;
-
-        Ok(OpIo {
-            imports: vec![PortKey(cfg.origin_deploy_port)],
-            exports: vec![PortKey(cfg.deploy_manifest_export_key)],
-        })
-    }
-
     fn expand(
         &self,
         op_path: OpPath,
         op_config: &serde_json::Value,
         _run_config: &RunConfig,
-    ) -> Result<StateGraph, SdkError> {
+    ) -> Result<PlannedOp, SdkError> {
         let cfg: AaveV3OriginAdaptDeployConfig = serde_json::from_value(op_config.clone())
             .map_err(|_| {
                 op_errors::sdk_parse_error(
@@ -112,17 +95,24 @@ impl Operation for AaveV3OriginAdaptDeployOp {
             op_errors::sdk_error("invalid_op_config", ErrorCategory::ParsingInput, false, msg)
         })?;
 
-        let state_id = StateId::must_new(format!("{}.adapt_origin_deploy", op_path.0));
-        Ok(StateGraph {
-            states: vec![StateNode {
-                id: state_id.clone(),
-                state: Arc::new(AdaptOriginDeployOutputState {
-                    state_id,
-                    origin_deploy_port: cfg.origin_deploy_port,
-                    deploy_manifest_export_key: cfg.deploy_manifest_export_key,
-                }),
-            }],
-            edges: Vec::new(),
+        let state_id = leaf_state_id(&op_path, "adapt_origin_deploy")?;
+        Ok(PlannedOp {
+            interface: OpInterface {
+                imports: vec![PortKey(cfg.origin_deploy_port.clone())],
+                exports: vec![PortKey(cfg.deploy_manifest_export_key.clone())],
+            },
+            kind: PlannedOpKind::Leaf(LeafOpSpec {
+                states: vec![leaf_state_node(
+                    &op_path,
+                    "adapt_origin_deploy",
+                    Arc::new(AdaptOriginDeployOutputState {
+                        state_id,
+                        origin_deploy_port: cfg.origin_deploy_port,
+                        deploy_manifest_export_key: cfg.deploy_manifest_export_key,
+                    }),
+                )?],
+                edges: Vec::new(),
+            }),
         })
     }
 }

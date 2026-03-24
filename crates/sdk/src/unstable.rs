@@ -66,7 +66,9 @@ use mfm_machine::stores::{ArtifactKind, StreamId};
 use crate::errors::SdkError;
 use crate::ids::{MachineId, PortKey, StepId};
 use crate::launcher::{LaunchPipeline, RunLauncher};
-use crate::op::{DynOperation, OpIo, OperationRegistry};
+use crate::op::{
+    leaf_state_id, DynOperation, LeafOpSpec, OpInterface, OperationRegistry, PlannedOpKind,
+};
 use crate::pipeline::{Pipeline, PipelineManifestInput, PipelinePlanner, PipelineStep};
 
 fn info(
@@ -169,70 +171,19 @@ fn validate_pipeline(p: &Pipeline) -> Result<(), SdkError> {
 }
 
 fn op_path(machine_id: &MachineId, step_id: &StepId) -> OpPath {
-    OpPath(format!("{}.{}", machine_id.0, step_id.0))
+    OpPath::must_new(format!("{}.{}", machine_id.0, step_id.0))
 }
 
-fn validate_state_id_shape(
-    state_id: &StateId,
-    machine_id: &MachineId,
-    step_id: &StepId,
-) -> Result<(), SdkError> {
-    let mut it = state_id.as_str().split('.');
-    let Some(m) = it.next() else {
-        return Err(sdk_error(
-            "invalid_state_id",
-            ErrorCategory::ParsingInput,
-            "state_id must have 3 dot-separated segments",
-        ));
-    };
-    let Some(s) = it.next() else {
-        return Err(sdk_error(
-            "invalid_state_id",
-            ErrorCategory::ParsingInput,
-            "state_id must have 3 dot-separated segments",
-        ));
-    };
-    let Some(local) = it.next() else {
-        return Err(sdk_error(
-            "invalid_state_id",
-            ErrorCategory::ParsingInput,
-            "state_id must have 3 dot-separated segments",
-        ));
-    };
-    if it.next().is_some() {
-        return Err(sdk_error(
-            "invalid_state_id",
-            ErrorCategory::ParsingInput,
-            "state_id must have 3 dot-separated segments",
-        ));
-    }
-
-    if m != machine_id.0 || s != step_id.0 {
-        return Err(sdk_error(
-            "invalid_state_id",
-            ErrorCategory::ParsingInput,
-            "state_id did not match the expected <machine_id>.<step_id> prefix",
-        ));
-    }
-
-    // Enforce segment rules.
-    validate_machine_id(machine_id)?;
-    validate_step_id(step_id)?;
-    validate_segment(
-        "invalid_state_local_id",
-        local,
-        "state_local_id must match ^[a-z][a-z0-9_]{0,62}$",
-    )?;
-
-    Ok(())
+fn op_path_is_nested_within(step_root: &OpPath, candidate: &OpPath) -> bool {
+    candidate.as_str() == step_root.as_str()
+        || candidate
+            .as_str()
+            .strip_prefix(&format!("{}.", step_root.as_str()))
+            .is_some()
 }
 
-fn validate_state_graph(
-    g: &StateGraph,
-    machine_id: &MachineId,
-    step_id: &StepId,
-) -> Result<(), SdkError> {
-    if g.states.is_empty() {
+fn validate_leaf_op_spec(spec: &LeafOpSpec, step_root: &OpPath) -> Result<(), SdkError> {
+    if spec.states.is_empty() {
         return Err(sdk_error(
             "empty_state_graph",
             ErrorCategory::ParsingInput,
@@ -241,9 +192,26 @@ fn validate_state_graph(
     }
 
     let mut ids = HashSet::new();
-    for n in &g.states {
-        validate_state_id_shape(&n.id, machine_id, step_id)?;
-        let meta = n.state.meta();
+    for node in &spec.states {
+        if !op_path_is_nested_within(step_root, &node.addr.op_path) {
+            return Err(sdk_error(
+                "invalid_state_addr",
+                ErrorCategory::ParsingInput,
+                "leaf state lineage must stay within the owning pipeline step op path",
+            ));
+        }
+
+        let expected_state_id =
+            leaf_state_id(&node.addr.op_path, node.addr.state_local_id.0.clone())?;
+        if expected_state_id != node.state_id {
+            return Err(sdk_error(
+                "invalid_state_id",
+                ErrorCategory::ParsingInput,
+                "leaf state id did not match the deterministic lowering rule",
+            ));
+        }
+
+        let meta = node.state.meta();
         if meta.side_effects == SideEffectKind::ApplySideEffect {
             let ok = matches!(&meta.idempotency, Idempotency::Key(k) if !k.is_empty());
             if !ok {
@@ -254,14 +222,14 @@ fn validate_state_graph(
                         retryable: false,
                         message: format!(
                             "apply_side_effect state must declare Idempotency::Key: {}",
-                            n.id.as_str()
+                            node.state_id.as_str()
                         ),
                         details: None,
                     },
                 });
             }
         }
-        if !ids.insert(n.id.clone()) {
+        if !ids.insert(node.state_id.clone()) {
             return Err(sdk_error(
                 "duplicate_state_id",
                 ErrorCategory::ParsingInput,
@@ -270,7 +238,7 @@ fn validate_state_graph(
         }
     }
 
-    for DependencyEdge { from, to } in &g.edges {
+    for DependencyEdge { from, to } in &spec.edges {
         if !ids.contains(from) || !ids.contains(to) {
             return Err(sdk_error(
                 "missing_state_for_edge",
@@ -283,30 +251,28 @@ fn validate_state_graph(
     Ok(())
 }
 
-fn sources_and_sinks(g: &StateGraph) -> (Vec<StateId>, Vec<StateId>) {
+fn sources_and_sinks(states: &[StateId], edges: &[DependencyEdge]) -> (Vec<StateId>, Vec<StateId>) {
     let mut indeg: HashMap<StateId, usize> = HashMap::new();
     let mut outdeg: HashMap<StateId, usize> = HashMap::new();
 
-    for s in &g.states {
-        indeg.insert(s.id.clone(), 0);
-        outdeg.insert(s.id.clone(), 0);
+    for state_id in states {
+        indeg.insert(state_id.clone(), 0);
+        outdeg.insert(state_id.clone(), 0);
     }
-    for DependencyEdge { from, to } in &g.edges {
+    for DependencyEdge { from, to } in edges {
         *outdeg.get_mut(from).expect("from exists") += 1;
         *indeg.get_mut(to).expect("to exists") += 1;
     }
 
-    let sources: Vec<StateId> = g
-        .states
+    let sources: Vec<StateId> = states
         .iter()
-        .filter(|n| indeg.get(&n.id).copied().unwrap_or(0) == 0)
-        .map(|n| n.id.clone())
+        .filter(|state_id| indeg.get(*state_id).copied().unwrap_or(0) == 0)
+        .cloned()
         .collect();
-    let sinks: Vec<StateId> = g
-        .states
+    let sinks: Vec<StateId> = states
         .iter()
-        .filter(|n| outdeg.get(&n.id).copied().unwrap_or(0) == 0)
-        .map(|n| n.id.clone())
+        .filter(|state_id| outdeg.get(*state_id).copied().unwrap_or(0) == 0)
+        .cloned()
         .collect();
 
     (sources, sinks)
@@ -375,7 +341,8 @@ impl PipelinePlanner for DefaultPipelinePlanner {
         let mut all_edges: Vec<DependencyEdge> = Vec::new();
         let mut seen_state_ids: HashSet<StateId> = HashSet::new();
 
-        // For cross-op wiring: PortKey -> exporting OpPath (last writer wins).
+        // For cross-op wiring: PortKey -> exporting OpPath (last writer wins until the
+        // composite-root lowering lands in the next planner cutover).
         let mut exports_by_port: HashMap<String, String> = HashMap::new();
 
         // For step-order enforcement:
@@ -392,9 +359,8 @@ impl PipelinePlanner for DefaultPipelinePlanner {
         {
             let op = registry.resolve(op_id, op_version)?;
             let op_path = op_path(&pipeline.machine_id, step_id);
-
-            // Discover imports/exports for wiring validation.
-            let OpIo { imports, exports } = op.io(op_config)?;
+            let planned = op.expand(op_path.clone(), op_config, run_config)?;
+            let OpInterface { imports, exports } = planned.interface.clone();
 
             let mut import_sources: HashMap<String, String> = HashMap::new();
             for PortKey(k) in imports {
@@ -408,12 +374,24 @@ impl PipelinePlanner for DefaultPipelinePlanner {
                 import_sources.insert(k, src.clone());
             }
 
-            let g = op.expand(op_path.clone(), op_config, run_config)?;
-            validate_state_graph(&g, &pipeline.machine_id, step_id)?;
+            let PlannedOpKind::Leaf(spec) = planned.kind else {
+                return Err(sdk_error(
+                    "composite_op_not_supported",
+                    ErrorCategory::ParsingInput,
+                    "composite planned ops are not supported until recursive flattening lands",
+                ));
+            };
+            validate_leaf_op_spec(&spec, &op_path)?;
+
+            let state_ids: Vec<StateId> = spec
+                .states
+                .iter()
+                .map(|node| node.state_id.clone())
+                .collect();
 
             // Wrap states to enforce default context namespacing and import wiring.
-            for n in &g.states {
-                if !seen_state_ids.insert(n.id.clone()) {
+            for node in spec.states {
+                if !seen_state_ids.insert(node.state_id.clone()) {
                     return Err(sdk_error(
                         "duplicate_state_id",
                         ErrorCategory::ParsingInput,
@@ -422,17 +400,17 @@ impl PipelinePlanner for DefaultPipelinePlanner {
                 }
 
                 all_states.push(StateNode {
-                    id: n.id.clone(),
+                    id: node.state_id.clone(),
                     state: Arc::new(NamespacedState {
                         op_path: op_path.clone(),
                         import_sources: import_sources.clone(),
-                        inner: Arc::clone(&n.state),
+                        inner: node.state,
                     }),
                 });
             }
-            all_edges.extend(g.edges.clone());
+            all_edges.extend(spec.edges.clone());
 
-            let (sources, sinks) = sources_and_sinks(&g);
+            let (sources, sinks) = sources_and_sinks(&state_ids, &spec.edges);
             step_sources.push(sources);
             step_sinks.push(sinks);
 
