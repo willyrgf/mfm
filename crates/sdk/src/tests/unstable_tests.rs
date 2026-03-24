@@ -5,6 +5,7 @@ use mfm_machine::config::{
     RunConfig,
 };
 use mfm_machine::errors::{ContextError, StateError};
+use mfm_machine::hashing::artifact_id_for_json;
 use mfm_machine::ids::ArtifactId;
 use mfm_machine::runtime::{DefaultExecutionEngine, PlanResolver};
 use mfm_machine::stores::{ArtifactStore, StreamAppend, StreamId, StreamRecord, StreamStore};
@@ -1268,13 +1269,13 @@ async fn namespacing_prevents_context_collisions_and_wires_imports() {
     let obj = v.as_object().expect("object");
 
     // step1 writes x, but it must be namespaced.
-    assert_eq!(obj.get("m.step1.x"), Some(&serde_json::json!("v1")));
+    assert_eq!(obj.get("m.step1.out.x"), Some(&serde_json::json!("v1")));
 
     // step2 reads imported x (from step1) and writes y in its own namespace.
-    assert_eq!(obj.get("m.step2.y"), Some(&serde_json::json!("v1")));
+    assert_eq!(obj.get("m.step2.work.y"), Some(&serde_json::json!("v1")));
 
     // step3 writes x too; it must not collide with step1.
-    assert_eq!(obj.get("m.step3.x"), Some(&serde_json::json!("v2")));
+    assert_eq!(obj.get("m.step3.work.x"), Some(&serde_json::json!("v2")));
 }
 
 #[tokio::test]
@@ -1396,11 +1397,268 @@ async fn recursive_composite_imports_flow_through_parent_bindings() {
     let v = serde_json::from_slice::<serde_json::Value>(&bytes).expect("json");
     let obj = v.as_object().expect("object");
 
-    assert_eq!(obj.get("m.step1.payload"), Some(&serde_json::json!("v1")));
     assert_eq!(
-        obj.get("m.step2.consumer.seen"),
+        obj.get("m.step1.out.payload"),
         Some(&serde_json::json!("v1"))
     );
+    assert_eq!(
+        obj.get("m.step2.consumer.work.seen"),
+        Some(&serde_json::json!("v1"))
+    );
+}
+
+#[test]
+fn planner_emits_deterministic_compiled_execution_spec() {
+    let mut reg = HashMapOperationRegistry::default();
+    reg.register(Arc::new(DynamicWriteOp::new(
+        "producer_leaf",
+        "v1",
+        "write",
+        "payload",
+        serde_json::json!("v1"),
+        OpIo {
+            imports: Vec::new(),
+            exports: vec![PortKey("payload".to_string())],
+        },
+    )));
+    reg.register(Arc::new(CompositeTestOp::new(
+        "root",
+        "v1",
+        crate::op::PlannedOp {
+            interface: OpIo {
+                imports: Vec::new(),
+                exports: vec![PortKey("payload".to_string())],
+            },
+            kind: crate::op::PlannedOpKind::Composite(crate::op::CompositeOpSpec {
+                children: vec![child_instance("producer", "producer_leaf", "v1")],
+                bindings: Vec::new(),
+                order: Vec::new(),
+                re_exports: vec![crate::op::ReExportBinding {
+                    export: PortKey("payload".to_string()),
+                    source: child_export("producer", "payload"),
+                }],
+            }),
+        },
+    )));
+
+    let pipeline = single_op_pipeline(
+        OpId::must_new("root".to_string()),
+        "v1".to_string(),
+        serde_json::json!({}),
+    )
+    .expect("pipeline");
+
+    let planned_a = DefaultPipelinePlanner
+        .build_planned_execution(Arc::new(reg), &pipeline, &run_config_live())
+        .expect("planned execution");
+    let spec_a = planned_a
+        .compiled_execution_spec
+        .expect("compiled execution spec");
+
+    let mut reg = HashMapOperationRegistry::default();
+    reg.register(Arc::new(DynamicWriteOp::new(
+        "producer_leaf",
+        "v1",
+        "write",
+        "payload",
+        serde_json::json!("v1"),
+        OpIo {
+            imports: Vec::new(),
+            exports: vec![PortKey("payload".to_string())],
+        },
+    )));
+    reg.register(Arc::new(CompositeTestOp::new(
+        "root",
+        "v1",
+        crate::op::PlannedOp {
+            interface: OpIo {
+                imports: Vec::new(),
+                exports: vec![PortKey("payload".to_string())],
+            },
+            kind: crate::op::PlannedOpKind::Composite(crate::op::CompositeOpSpec {
+                children: vec![child_instance("producer", "producer_leaf", "v1")],
+                bindings: Vec::new(),
+                order: Vec::new(),
+                re_exports: vec![crate::op::ReExportBinding {
+                    export: PortKey("payload".to_string()),
+                    source: child_export("producer", "payload"),
+                }],
+            }),
+        },
+    )));
+    let planned_b = DefaultPipelinePlanner
+        .build_planned_execution(Arc::new(reg), &pipeline, &run_config_live())
+        .expect("planned execution");
+    let spec_b = planned_b
+        .compiled_execution_spec
+        .expect("compiled execution spec");
+
+    assert_eq!(
+        serde_json::to_value(&spec_a).unwrap(),
+        serde_json::to_value(&spec_b).unwrap()
+    );
+    assert_eq!(
+        spec_a.schema_version,
+        crate::pipeline::COMPILED_EXECUTION_SPEC_SCHEMA_V1
+    );
+    assert_eq!(spec_a.root_exports.len(), 1);
+    assert_eq!(spec_a.root_exports[0].export, "payload");
+    assert_eq!(spec_a.root_exports[0].slot.op_path, "root.main.producer");
+    assert_eq!(spec_a.root_exports[0].slot.slot, "out.payload");
+}
+
+#[tokio::test]
+async fn launcher_persists_compiled_execution_spec_artifact() {
+    let mut reg = HashMapOperationRegistry::default();
+    reg.register(Arc::new(DynamicWriteOp::new(
+        "producer_leaf",
+        "v1",
+        "write",
+        "payload",
+        serde_json::json!("v1"),
+        OpIo {
+            imports: Vec::new(),
+            exports: vec![PortKey("payload".to_string())],
+        },
+    )));
+    reg.register(Arc::new(CompositeTestOp::new(
+        "root",
+        "v1",
+        crate::op::PlannedOp {
+            interface: OpIo {
+                imports: Vec::new(),
+                exports: vec![PortKey("payload".to_string())],
+            },
+            kind: crate::op::PlannedOpKind::Composite(crate::op::CompositeOpSpec {
+                children: vec![child_instance("producer", "producer_leaf", "v1")],
+                bindings: Vec::new(),
+                order: Vec::new(),
+                re_exports: vec![crate::op::ReExportBinding {
+                    export: PortKey("payload".to_string()),
+                    source: child_export("producer", "payload"),
+                }],
+            }),
+        },
+    )));
+
+    let pipeline = single_op_pipeline(
+        OpId::must_new("root".to_string()),
+        "v1".to_string(),
+        serde_json::json!({}),
+    )
+    .expect("pipeline");
+    let planner = DefaultPipelinePlanner;
+    let planned = planner
+        .build_planned_execution(Arc::new(reg), &pipeline, &run_config_live())
+        .expect("planned execution");
+    let spec = planned
+        .compiled_execution_spec
+        .clone()
+        .expect("compiled execution spec");
+    let spec_id = artifact_id_for_json(&serde_json::to_value(&spec).unwrap()).expect("artifact id");
+
+    let mut reg = HashMapOperationRegistry::default();
+    reg.register(Arc::new(DynamicWriteOp::new(
+        "producer_leaf",
+        "v1",
+        "write",
+        "payload",
+        serde_json::json!("v1"),
+        OpIo {
+            imports: Vec::new(),
+            exports: vec![PortKey("payload".to_string())],
+        },
+    )));
+    reg.register(Arc::new(CompositeTestOp::new(
+        "root",
+        "v1",
+        crate::op::PlannedOp {
+            interface: OpIo {
+                imports: Vec::new(),
+                exports: vec![PortKey("payload".to_string())],
+            },
+            kind: crate::op::PlannedOpKind::Composite(crate::op::CompositeOpSpec {
+                children: vec![child_instance("producer", "producer_leaf", "v1")],
+                bindings: Vec::new(),
+                order: Vec::new(),
+                re_exports: vec![crate::op::ReExportBinding {
+                    export: PortKey("payload".to_string()),
+                    source: child_export("producer", "payload"),
+                }],
+            }),
+        },
+    )));
+
+    let launcher: Arc<dyn RunLauncher> = Arc::new(DefaultRunLauncher);
+    let planner: Arc<dyn PipelinePlanner> = Arc::new(DefaultPipelinePlanner);
+
+    struct NeverResolver;
+    impl mfm_machine::runtime::PlanResolver for NeverResolver {
+        fn resolve(&self, _manifest: &RunManifest) -> Result<ExecutionPlan, RunError> {
+            Err(RunError::InvalidPlan(info(
+                "resolver_unavailable",
+                ErrorCategory::Unknown,
+                false,
+                "resolver unavailable",
+            )))
+        }
+    }
+
+    let engine: Arc<dyn ExecutionEngine> =
+        Arc::new(DefaultExecutionEngine::new(Arc::new(NeverResolver)));
+    let stores = Stores {
+        streams: Arc::new(MemStreamStore::default()),
+        artifacts: Arc::new(MemArtifactStore::default()),
+    };
+
+    let run = launcher
+        .start_pipeline(
+            engine,
+            Stores {
+                streams: Arc::clone(&stores.streams),
+                artifacts: Arc::clone(&stores.artifacts),
+            },
+            Arc::new(reg),
+            planner,
+            LaunchPipeline {
+                pipeline,
+                input: serde_json::json!({}),
+                run_config: run_config_live(),
+                build: mfm_machine::config::BuildProvenance {
+                    git_commit: None,
+                    cargo_lock_hash: None,
+                    flake_lock_hash: None,
+                    rustc_version: None,
+                    target_triple: None,
+                    env_allowlist: Vec::new(),
+                },
+                initial_context: Box::new(MapContext::default()),
+            },
+        )
+        .await
+        .expect("run should succeed");
+
+    let final_snapshot_id = run.final_snapshot_id.expect("snapshot id");
+    let snapshot_bytes = stores
+        .artifacts
+        .get(&final_snapshot_id)
+        .await
+        .expect("snapshot");
+    let snapshot = serde_json::from_slice::<serde_json::Value>(&snapshot_bytes).expect("snapshot");
+    assert_eq!(
+        snapshot.get("mfm.compiled_execution_spec_artifact_id"),
+        Some(&serde_json::json!(spec_id.0))
+    );
+
+    let stored_bytes = stores
+        .artifacts
+        .get(&ArtifactId(spec_id.0.clone()))
+        .await
+        .expect("compiled execution spec artifact");
+    let stored_spec =
+        serde_json::from_slice::<crate::pipeline::CompiledExecutionSpec>(&stored_bytes)
+            .expect("compiled execution spec");
+    assert_eq!(stored_spec, spec);
 }
 
 #[tokio::test]

@@ -88,6 +88,23 @@ const ENV_ARTIFACT_ROOT: &str = "MFM_ARTIFACT_ROOT";
 const ENV_DATABASE_URL: &str = "DATABASE_URL";
 const ENV_S3_ENSURE_BUCKET: &str = "MFM_S3_ENSURE_BUCKET";
 
+fn context_value_with_slot_fallback(
+    snapshot: &serde_json::Value,
+    key: &ContextKey,
+) -> Option<serde_json::Value> {
+    let mut candidates = vec![key.0.clone()];
+    if !key.0.contains(".in.") && !key.0.contains(".out.") && !key.0.contains(".work.") {
+        if let Some((prefix, leaf)) = key.0.rsplit_once('.') {
+            candidates.push(format!("{prefix}.out.{leaf}"));
+            candidates.push(format!("{prefix}.work.{leaf}"));
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find_map(|candidate| snapshot.get(&candidate).cloned())
+}
+
 /// High-level error classes used by application-facing APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorClass {
@@ -958,7 +975,9 @@ impl AppServices {
                 )
             })?;
 
-            if let Some(snapshot_artifact_id_value) = v.get(&snapshot_artifact_id_key.0).cloned() {
+            if let Some(snapshot_artifact_id_value) =
+                context_value_with_slot_fallback(&v, &snapshot_artifact_id_key)
+            {
                 snapshot_artifact_id = Some(
                     serde_json::from_value(snapshot_artifact_id_value).map_err(|_| {
                         AppError::new(
@@ -970,7 +989,7 @@ impl AppServices {
                 );
             }
 
-            if let Some(report_value) = v.get(&report_key.0).cloned() {
+            if let Some(report_value) = context_value_with_slot_fallback(&v, &report_key) {
                 report = Some(serde_json::from_value(report_value).map_err(|_| {
                     AppError::new(
                         ErrorClass::Internal,

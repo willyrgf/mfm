@@ -453,7 +453,9 @@ async fn at_flake_app_mode_real_preflight_and_exec_local_path_ref() {
     let result = snapshot
         .get("nix_app.main.nix_app.main.result")
         .cloned()
+        .or_else(|| snapshot.get("nix_app.main.out.result").cloned())
         .or_else(|| snapshot.get("nix_app.main.result").cloned())
+        .or_else(|| snapshot.get("machine.main.out.result").cloned())
         .or_else(|| snapshot.get("machine.main.result").cloned())
         .or_else(|| snapshot.get("machine.main.machine.main.result").cloned());
     assert_eq!(result, Some(serde_json::json!({"a": 2, "b": 1})));
@@ -588,19 +590,20 @@ async fn at_multi_step_pipeline_runs_nix_jq_fmt_example() {
     let snapshot = serde_json::from_slice::<serde_json::Value>(&bytes).expect("json snapshot");
 
     assert_eq!(
-        snapshot.get("nix_multi.prep.prep"),
+        snapshot.get("nix_multi.prep.out.prep"),
         Some(&serde_json::json!({"stage": "prep"}))
     );
     let formatted = snapshot
         .get("nix_multi.fmt.nix_multi.fmt.result")
         .cloned()
+        .or_else(|| snapshot.get("nix_multi.fmt.out.result").cloned())
         .or_else(|| snapshot.get("nix_multi.fmt.result").cloned());
     assert_eq!(
         formatted,
         Some(serde_json::json!({"a": {"x": 3, "y": 2}, "z": 1}))
     );
     assert_eq!(
-        snapshot.get("nix_multi.post.post"),
+        snapshot.get("nix_multi.post.out.post"),
         Some(&serde_json::json!({"stage": "post"}))
     );
 

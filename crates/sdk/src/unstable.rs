@@ -70,7 +70,12 @@ use crate::op::{
     child_op_path, leaf_state_id, DynOperation, LeafOpSpec, LeafStateNode, OpInterface,
     OperationRegistry, PlannedOp, PlannedOpKind, PortSource,
 };
-use crate::pipeline::{Pipeline, PipelineManifestInput, PipelinePlanner, PipelineStep};
+use crate::pipeline::{
+    CompiledAfterEdge, CompiledExecutionSpec, CompiledImportBinding, CompiledOpRecord,
+    CompiledReExport, CompiledRootExport, CompiledStateLineage, Pipeline, PipelineManifestInput,
+    PipelinePlanner, PipelineStep, PlannedPipelineExecution, QualifiedSlotRef,
+    COMPILED_EXECUTION_SPEC_SCHEMA_V1,
+};
 
 fn info(
     code: &'static str,
@@ -183,15 +188,9 @@ fn op_path_is_nested_within(step_root: &OpPath, candidate: &OpPath) -> bool {
             .is_some()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct QualifiedPortRef {
-    op_path: OpPath,
-    port: String,
-}
-
-impl QualifiedPortRef {
+impl QualifiedSlotRef {
     fn context_key(&self) -> ContextKey {
-        ContextKey(format!("{}.{}", self.op_path.as_str(), self.port))
+        ContextKey(format!("{}.{}", self.op_path, self.slot))
     }
 }
 
@@ -200,7 +199,9 @@ struct FlattenedFragment {
     edges: Vec<DependencyEdge>,
     sources: Vec<StateId>,
     sinks: Vec<StateId>,
-    exports: BTreeMap<String, QualifiedPortRef>,
+    exports: BTreeMap<String, QualifiedSlotRef>,
+    compiled_ops: Vec<CompiledOpRecord>,
+    state_lineage: Vec<CompiledStateLineage>,
 }
 
 fn validate_unique_ports(
@@ -478,14 +479,47 @@ fn sources_and_sinks(states: &[StateId], edges: &[DependencyEdge]) -> (Vec<State
     (sources, sinks)
 }
 
+fn sorted_port_names(ports: &[PortKey]) -> Vec<String> {
+    let mut names: Vec<String> = ports.iter().map(|port| port.0.clone()).collect();
+    names.sort();
+    names
+}
+
+fn out_slot_ref(op_path: &OpPath, export: &str) -> QualifiedSlotRef {
+    QualifiedSlotRef {
+        op_path: op_path.as_str().to_string(),
+        slot: format!("out.{export}"),
+    }
+}
+
+struct FlattenEnv<'a> {
+    registry: Arc<dyn OperationRegistry>,
+    step_root: &'a OpPath,
+    run_config: &'a RunConfig,
+}
+
+struct PlannedOpRef<'a> {
+    op_id: &'a OpId,
+    op_version: &'a str,
+    op_path: &'a OpPath,
+}
+
+struct FlattenInput<'a> {
+    op_id: OpId,
+    op_version: String,
+    op_path: OpPath,
+    planned: PlannedOp,
+    resolved_imports: &'a BTreeMap<String, QualifiedSlotRef>,
+}
+
 fn flatten_leaf_op(
+    env: &FlattenEnv<'_>,
+    planned_op: PlannedOpRef<'_>,
     interface: OpInterface,
     spec: LeafOpSpec,
-    op_path: &OpPath,
-    step_root: &OpPath,
-    resolved_imports: &BTreeMap<String, QualifiedPortRef>,
+    resolved_imports: &BTreeMap<String, QualifiedSlotRef>,
 ) -> Result<FlattenedFragment, SdkError> {
-    validate_leaf_op_spec(&spec, op_path, step_root)?;
+    validate_leaf_op_spec(&spec, planned_op.op_path, env.step_root)?;
 
     let declared_imports: BTreeSet<String> = interface
         .imports
@@ -508,10 +542,23 @@ fn flatten_leaf_op(
         .map(|node| node.state_id.clone())
         .collect();
     let (sources, sinks) = sources_and_sinks(&state_ids, &edges);
+    let state_lineage: Vec<CompiledStateLineage> = ordered_states
+        .iter()
+        .map(|node| CompiledStateLineage {
+            state_id: node.state_id.as_str().to_string(),
+            op_path: node.addr.op_path.as_str().to_string(),
+            state_local_id: node.addr.state_local_id.0.clone(),
+        })
+        .collect();
 
     let import_sources: HashMap<String, ContextKey> = resolved_imports
         .iter()
         .map(|(port, source)| (port.clone(), source.context_key()))
+        .collect();
+    let export_ports: BTreeSet<String> = interface
+        .exports
+        .iter()
+        .map(|port| port.0.clone())
         .collect();
 
     let mut states = Vec::with_capacity(ordered_states.len());
@@ -519,8 +566,9 @@ fn flatten_leaf_op(
         states.push(StateNode {
             id: node.state_id.clone(),
             state: Arc::new(NamespacedState {
-                op_path: op_path.clone(),
+                op_path: planned_op.op_path.clone(),
                 import_sources: import_sources.clone(),
+                export_ports: export_ports.clone(),
                 inner: node.state,
             }),
         });
@@ -528,14 +576,18 @@ fn flatten_leaf_op(
 
     let mut exports = BTreeMap::new();
     for PortKey(export) in interface.exports {
-        exports.insert(
-            export.clone(),
-            QualifiedPortRef {
-                op_path: op_path.clone(),
-                port: export,
-            },
-        );
+        exports.insert(export.clone(), out_slot_ref(planned_op.op_path, &export));
     }
+
+    let compiled_import_bindings: Vec<CompiledImportBinding> = resolved_imports
+        .iter()
+        .map(|(import, source)| CompiledImportBinding {
+            to_op_path: planned_op.op_path.as_str().to_string(),
+            import: import.clone(),
+            source: source.clone(),
+        })
+        .collect();
+    let compiled_exports: Vec<String> = exports.keys().cloned().collect();
 
     Ok(FlattenedFragment {
         states,
@@ -543,14 +595,25 @@ fn flatten_leaf_op(
         sources,
         sinks,
         exports,
+        compiled_ops: vec![CompiledOpRecord {
+            op_path: planned_op.op_path.as_str().to_string(),
+            op_id: planned_op.op_id.as_str().to_string(),
+            op_version: planned_op.op_version.to_string(),
+            imports: sorted_port_names(&interface.imports),
+            exports: compiled_exports,
+            import_bindings: compiled_import_bindings,
+            after: Vec::new(),
+            re_exports: Vec::new(),
+        }],
+        state_lineage,
     })
 }
 
 fn resolve_port_source(
     source: &PortSource,
-    parent_imports: &BTreeMap<String, QualifiedPortRef>,
+    parent_imports: &BTreeMap<String, QualifiedSlotRef>,
     child_fragments: &BTreeMap<String, FlattenedFragment>,
-) -> Result<QualifiedPortRef, SdkError> {
+) -> Result<QualifiedSlotRef, SdkError> {
     match source {
         PortSource::ParentImport(PortKey(port)) => {
             parent_imports.get(port).cloned().ok_or_else(|| {
@@ -576,13 +639,11 @@ fn resolve_port_source(
 }
 
 fn flatten_composite_op(
-    registry: Arc<dyn OperationRegistry>,
+    env: &FlattenEnv<'_>,
+    planned_op: PlannedOpRef<'_>,
     interface: OpInterface,
     spec: crate::op::CompositeOpSpec,
-    op_path: &OpPath,
-    step_root: &OpPath,
-    run_config: &RunConfig,
-    resolved_imports: &BTreeMap<String, QualifiedPortRef>,
+    resolved_imports: &BTreeMap<String, QualifiedSlotRef>,
 ) -> Result<FlattenedFragment, SdkError> {
     let declared_parent_imports: BTreeSet<String> = interface
         .imports
@@ -607,13 +668,22 @@ fn flatten_composite_op(
         }
     }
 
-    let mut expanded_children: BTreeMap<String, (OpPath, PlannedOp)> = BTreeMap::new();
+    let mut expanded_children: BTreeMap<String, (OpPath, OpId, String, PlannedOp)> =
+        BTreeMap::new();
     for (child_id, child) in &children_by_id {
-        let child_op = registry.resolve(&child.op_id, &child.op_version)?;
-        let child_op_path = child_op_path(op_path, child_id.clone())?;
-        let planned = child_op.expand(child_op_path.clone(), &child.op_config, run_config)?;
+        let child_op = env.registry.resolve(&child.op_id, &child.op_version)?;
+        let child_op_path = child_op_path(planned_op.op_path, child_id.clone())?;
+        let planned = child_op.expand(child_op_path.clone(), &child.op_config, env.run_config)?;
         validate_op_interface(&planned.interface)?;
-        expanded_children.insert(child_id.clone(), (child_op_path, planned));
+        expanded_children.insert(
+            child_id.clone(),
+            (
+                child_op_path,
+                child.op_id.clone(),
+                child.op_version.clone(),
+                planned,
+            ),
+        );
     }
 
     let mut bindings_by_child: BTreeMap<String, BTreeMap<String, PortSource>> = BTreeMap::new();
@@ -653,7 +723,7 @@ fn flatten_composite_op(
         child_dependencies.insert((from, to));
     }
 
-    for (child_id, (_child_path, planned)) in &expanded_children {
+    for (child_id, (_child_path, _child_op_id, _child_op_version, planned)) in &expanded_children {
         let declared_child_imports: BTreeSet<String> = planned
             .interface
             .imports
@@ -692,7 +762,8 @@ fn flatten_composite_op(
                 PortSource::ChildExport { child, export } => {
                     child_dependencies.insert((child.0.clone(), child_id.clone()));
 
-                    let Some((_source_path, source_planned)) = expanded_children.get(&child.0)
+                    let Some((_source_path, _source_op_id, _source_op_version, source_planned)) =
+                        expanded_children.get(&child.0)
                     else {
                         return Err(sdk_error(
                             "unknown_child_op",
@@ -779,7 +850,9 @@ fn flatten_composite_op(
                 }
             }
             PortSource::ChildExport { child, export } => {
-                let Some((_child_path, planned)) = expanded_children.get(&child.0) else {
+                let Some((_child_path, _child_op_id, _child_op_version, planned)) =
+                    expanded_children.get(&child.0)
+                else {
                     return Err(sdk_error(
                         "unknown_child_op",
                         ErrorCategory::ParsingInput,
@@ -813,26 +886,30 @@ fn flatten_composite_op(
     let mut all_states = Vec::new();
     let mut all_edges = Vec::new();
     let mut seen_state_ids = HashSet::new();
+    let mut compiled_ops = Vec::new();
+    let mut state_lineage = Vec::new();
 
     for child_id in &ordered_children {
-        let (child_path, planned) = expanded_children
+        let (child_path, child_op_id, child_op_version, planned) = expanded_children
             .get(child_id)
             .expect("child exists")
             .clone();
         let child_bindings = bindings_by_child.get(child_id).cloned().unwrap_or_default();
-        let mut child_imports: BTreeMap<String, QualifiedPortRef> = BTreeMap::new();
+        let mut child_imports: BTreeMap<String, QualifiedSlotRef> = BTreeMap::new();
         for (import, source) in child_bindings {
             let resolved = resolve_port_source(&source, resolved_imports, &child_fragments)?;
             child_imports.insert(import, resolved);
         }
 
         let fragment = flatten_planned_op(
-            Arc::clone(&registry),
-            child_path,
-            planned,
-            step_root,
-            run_config,
-            &child_imports,
+            env,
+            FlattenInput {
+                op_id: child_op_id,
+                op_version: child_op_version,
+                op_path: child_path,
+                planned,
+                resolved_imports: &child_imports,
+            },
         )?;
 
         for state in &fragment.states {
@@ -847,6 +924,8 @@ fn flatten_composite_op(
 
         all_edges.extend(fragment.edges.iter().cloned());
         all_states.extend(fragment.states.iter().cloned());
+        compiled_ops.extend(fragment.compiled_ops.iter().cloned());
+        state_lineage.extend(fragment.state_lineage.iter().cloned());
         child_fragments.insert(child_id.clone(), fragment);
     }
 
@@ -868,13 +947,55 @@ fn flatten_composite_op(
     let (sources, sinks) = sources_and_sinks(&state_ids, &edges);
 
     let mut exports = BTreeMap::new();
+    let mut compiled_re_exports = Vec::new();
     for export in &interface.exports {
         let source = re_exports
             .get(&export.0)
             .expect("validated re-export exists");
         let resolved = resolve_port_source(source, resolved_imports, &child_fragments)?;
         exports.insert(export.0.clone(), resolved);
+        compiled_re_exports.push(CompiledReExport {
+            export: export.0.clone(),
+            source: exports.get(&export.0).expect("export exists").clone(),
+        });
     }
+
+    let mut compiled_import_bindings: Vec<CompiledImportBinding> = Vec::new();
+    for (child_id, child_bindings) in &bindings_by_child {
+        let child_path = child_op_path(planned_op.op_path, child_id.clone())
+            .expect("validated child path")
+            .as_str()
+            .to_string();
+        for (import, source) in child_bindings {
+            let resolved = resolve_port_source(source, resolved_imports, &child_fragments)
+                .expect("validated binding resolves");
+            compiled_import_bindings.push(CompiledImportBinding {
+                to_op_path: child_path.clone(),
+                import: import.clone(),
+                source: resolved,
+            });
+        }
+    }
+    let compiled_after: Vec<CompiledAfterEdge> = child_dependencies
+        .iter()
+        .map(|(from_child, to_child)| CompiledAfterEdge {
+            from_op_path: format!("{}.{}", planned_op.op_path.as_str(), from_child),
+            to_op_path: format!("{}.{}", planned_op.op_path.as_str(), to_child),
+        })
+        .collect();
+    compiled_ops.insert(
+        0,
+        CompiledOpRecord {
+            op_path: planned_op.op_path.as_str().to_string(),
+            op_id: planned_op.op_id.as_str().to_string(),
+            op_version: planned_op.op_version.to_string(),
+            imports: sorted_port_names(&interface.imports),
+            exports: sorted_port_names(&interface.exports),
+            import_bindings: compiled_import_bindings,
+            after: compiled_after,
+            re_exports: compiled_re_exports,
+        },
+    );
 
     Ok(FlattenedFragment {
         states: all_states,
@@ -882,33 +1003,30 @@ fn flatten_composite_op(
         sources,
         sinks,
         exports,
+        compiled_ops,
+        state_lineage,
     })
 }
 
 fn flatten_planned_op(
-    registry: Arc<dyn OperationRegistry>,
-    op_path: OpPath,
-    planned: PlannedOp,
-    step_root: &OpPath,
-    run_config: &RunConfig,
-    resolved_imports: &BTreeMap<String, QualifiedPortRef>,
+    env: &FlattenEnv<'_>,
+    input: FlattenInput<'_>,
 ) -> Result<FlattenedFragment, SdkError> {
-    validate_op_interface(&planned.interface)?;
+    validate_op_interface(&input.planned.interface)?;
 
-    let interface = planned.interface;
-    match planned.kind {
+    let planned_op = PlannedOpRef {
+        op_id: &input.op_id,
+        op_version: &input.op_version,
+        op_path: &input.op_path,
+    };
+    let PlannedOp { interface, kind } = input.planned;
+    match kind {
         PlannedOpKind::Leaf(spec) => {
-            flatten_leaf_op(interface, spec, &op_path, step_root, resolved_imports)
+            flatten_leaf_op(env, planned_op, interface, spec, input.resolved_imports)
         }
-        PlannedOpKind::Composite(spec) => flatten_composite_op(
-            registry,
-            interface,
-            spec,
-            &op_path,
-            step_root,
-            run_config,
-            resolved_imports,
-        ),
+        PlannedOpKind::Composite(spec) => {
+            flatten_composite_op(env, planned_op, interface, spec, input.resolved_imports)
+        }
     }
 }
 
@@ -963,21 +1081,23 @@ impl OperationRegistry for HashMapOperationRegistry {
 pub struct DefaultPipelinePlanner;
 
 impl PipelinePlanner for DefaultPipelinePlanner {
-    fn build_execution_plan(
+    fn build_planned_execution(
         &self,
         registry: Arc<dyn OperationRegistry>,
         pipeline: &Pipeline,
         run_config: &RunConfig,
-    ) -> Result<ExecutionPlan, SdkError> {
+    ) -> Result<PlannedPipelineExecution, SdkError> {
         validate_pipeline(pipeline)?;
 
         let mut all_states: Vec<StateNode> = Vec::new();
         let mut all_edges: Vec<DependencyEdge> = Vec::new();
         let mut seen_state_ids: HashSet<StateId> = HashSet::new();
 
-        let mut exports_by_port: BTreeMap<String, QualifiedPortRef> = BTreeMap::new();
+        let mut exports_by_port: BTreeMap<String, QualifiedSlotRef> = BTreeMap::new();
         let mut step_sources: Vec<Vec<StateId>> = Vec::new();
         let mut step_sinks: Vec<Vec<StateId>> = Vec::new();
+        let mut compiled_ops = Vec::new();
+        let mut state_lineage = Vec::new();
 
         for PipelineStep {
             step_id,
@@ -991,7 +1111,7 @@ impl PipelinePlanner for DefaultPipelinePlanner {
             let planned = op.expand(op_path.clone(), op_config, run_config)?;
             validate_op_interface(&planned.interface)?;
 
-            let mut import_sources: BTreeMap<String, QualifiedPortRef> = BTreeMap::new();
+            let mut import_sources: BTreeMap<String, QualifiedSlotRef> = BTreeMap::new();
             for PortKey(import) in &planned.interface.imports {
                 let Some(source) = exports_by_port.get(import) else {
                     return Err(sdk_error(
@@ -1003,13 +1123,20 @@ impl PipelinePlanner for DefaultPipelinePlanner {
                 import_sources.insert(import.clone(), source.clone());
             }
 
-            let fragment = flatten_planned_op(
-                Arc::clone(&registry),
-                op_path.clone(),
-                planned,
-                &op_path,
+            let flatten_env = FlattenEnv {
+                registry: Arc::clone(&registry),
+                step_root: &op_path,
                 run_config,
-                &import_sources,
+            };
+            let fragment = flatten_planned_op(
+                &flatten_env,
+                FlattenInput {
+                    op_id: op_id.clone(),
+                    op_version: op_version.clone(),
+                    op_path: op_path.clone(),
+                    planned,
+                    resolved_imports: &import_sources,
+                },
             )?;
 
             for state in &fragment.states {
@@ -1026,6 +1153,8 @@ impl PipelinePlanner for DefaultPipelinePlanner {
             all_edges.extend(fragment.edges.clone());
             step_sources.push(fragment.sources);
             step_sinks.push(fragment.sinks);
+            compiled_ops.extend(fragment.compiled_ops);
+            state_lineage.extend(fragment.state_lineage);
 
             for (export, source) in fragment.exports {
                 if exports_by_port.insert(export, source).is_some() {
@@ -1049,12 +1178,32 @@ impl PipelinePlanner for DefaultPipelinePlanner {
             }
         }
 
-        Ok(ExecutionPlan {
-            op_id: OpId::must_new(pipeline.machine_id.0.clone()),
-            graph: StateGraph {
-                states: all_states,
-                edges: dedupe_sorted_edges(all_edges),
+        let root_exports: Vec<CompiledRootExport> = exports_by_port
+            .iter()
+            .map(|(export, slot)| CompiledRootExport {
+                export: export.clone(),
+                slot: slot.clone(),
+            })
+            .collect();
+
+        Ok(PlannedPipelineExecution {
+            execution_plan: ExecutionPlan {
+                op_id: OpId::must_new(pipeline.machine_id.0.clone()),
+                graph: StateGraph {
+                    states: all_states,
+                    edges: dedupe_sorted_edges(all_edges),
+                },
             },
+            compiled_execution_spec: Some(CompiledExecutionSpec {
+                schema_version: COMPILED_EXECUTION_SPEC_SCHEMA_V1.to_string(),
+                root_op_id: pipeline.machine_id.0.clone(),
+                root_op_version: pipeline.pipeline_version.clone(),
+                root_op_path: pipeline.machine_id.0.clone(),
+                ops: compiled_ops,
+                root_exports,
+                state_lineage,
+                planner_payloads: serde_json::json!({}),
+            }),
         })
     }
 }
@@ -1062,19 +1211,52 @@ impl PipelinePlanner for DefaultPipelinePlanner {
 struct NamespacedContext<'a> {
     op_path: &'a OpPath,
     import_sources: &'a HashMap<String, ContextKey>,
+    export_ports: &'a BTreeSet<String>,
     inner: &'a mut dyn DynContext,
 }
 
 impl NamespacedContext<'_> {
-    fn qualify_local(&self, key: &ContextKey) -> ContextKey {
-        ContextKey(format!("{}.{}", self.op_path.0, key.0))
+    fn qualify_slot(&self, slot: &str) -> ContextKey {
+        ContextKey(format!("{}.{}", self.op_path.0, slot))
+    }
+
+    fn explicit_slot(key: &ContextKey) -> Option<(&str, &str)> {
+        key.0.split_once('.').filter(|(prefix, suffix)| {
+            matches!(*prefix, "in" | "out" | "work") && !suffix.is_empty()
+        })
     }
 
     fn qualify_read(&self, key: &ContextKey) -> ContextKey {
-        if let Some(source) = self.import_sources.get(&key.0) {
+        if let Some((prefix, suffix)) = Self::explicit_slot(key) {
+            return match prefix {
+                "in" => self
+                    .import_sources
+                    .get(suffix)
+                    .cloned()
+                    .unwrap_or_else(|| self.qualify_slot(&key.0)),
+                "out" | "work" => self.qualify_slot(&key.0),
+                _ => unreachable!("validated explicit slot prefix"),
+            };
+        }
+
+        if self.export_ports.contains(&key.0) {
+            self.qualify_slot(&format!("out.{}", key.0))
+        } else if let Some(source) = self.import_sources.get(&key.0) {
             source.clone()
         } else {
-            self.qualify_local(key)
+            self.qualify_slot(&format!("work.{}", key.0))
+        }
+    }
+
+    fn qualify_write(&self, key: &ContextKey) -> ContextKey {
+        if Self::explicit_slot(key).is_some() {
+            return self.qualify_slot(&key.0);
+        }
+
+        if self.export_ports.contains(&key.0) {
+            self.qualify_slot(&format!("out.{}", key.0))
+        } else {
+            self.qualify_slot(&format!("work.{}", key.0))
         }
     }
 }
@@ -1092,11 +1274,11 @@ impl DynContext for NamespacedContext<'_> {
         key: ContextKey,
         value: serde_json::Value,
     ) -> Result<(), mfm_machine::errors::ContextError> {
-        self.inner.write(self.qualify_local(&key), value)
+        self.inner.write(self.qualify_write(&key), value)
     }
 
     fn delete(&mut self, key: &ContextKey) -> Result<(), mfm_machine::errors::ContextError> {
-        self.inner.delete(&self.qualify_local(key))
+        self.inner.delete(&self.qualify_write(key))
     }
 
     fn dump(&self) -> Result<serde_json::Value, mfm_machine::errors::ContextError> {
@@ -1119,6 +1301,7 @@ impl DynContext for NamespacedContext<'_> {
 struct NamespacedState {
     op_path: OpPath,
     import_sources: HashMap<String, ContextKey>,
+    export_ports: BTreeSet<String>,
     inner: DynState,
 }
 
@@ -1137,6 +1320,7 @@ impl State for NamespacedState {
         let mut ns = NamespacedContext {
             op_path: &self.op_path,
             import_sources: &self.import_sources,
+            export_ports: &self.export_ports,
             inner: ctx,
         };
         self.inner.handle(&mut ns, io, rec).await
@@ -1151,6 +1335,10 @@ impl State for NamespacedState {
 #[derive(Clone, Default)]
 pub struct DefaultRunLauncher;
 
+const COMPILED_EXECUTION_SPEC_ARTIFACT_KIND: &str = "compiled_execution_spec";
+const COMPILED_EXECUTION_SPEC_ARTIFACT_ID_CONTEXT_KEY: &str =
+    "mfm.compiled_execution_spec_artifact_id";
+
 #[async_trait]
 impl RunLauncher for DefaultRunLauncher {
     async fn start_pipeline(
@@ -1161,13 +1349,23 @@ impl RunLauncher for DefaultRunLauncher {
         planner: Arc<dyn PipelinePlanner>,
         req: LaunchPipeline,
     ) -> Result<RunResult, RunError> {
-        let plan = planner
-            .build_execution_plan(Arc::clone(&registry), &req.pipeline, &req.run_config)
+        let planned_execution = planner
+            .build_planned_execution(Arc::clone(&registry), &req.pipeline, &req.run_config)
             .map_err(|e| RunError::InvalidPlan(e.info))?;
+        let plan = planned_execution.execution_plan;
+        let compiled_execution_spec = planned_execution.compiled_execution_spec;
+
+        let LaunchPipeline {
+            pipeline,
+            input,
+            run_config,
+            build,
+            mut initial_context,
+        } = req;
 
         let input_params = serde_json::to_value(PipelineManifestInput {
-            pipeline: req.pipeline.clone(),
-            input: req.input,
+            pipeline: pipeline.clone(),
+            input,
         })
         .map_err(|_| {
             RunError::InvalidPlan(info(
@@ -1179,11 +1377,11 @@ impl RunLauncher for DefaultRunLauncher {
         })?;
 
         let manifest = RunManifest {
-            op_id: OpId::must_new(req.pipeline.machine_id.0.clone()),
-            op_version: req.pipeline.pipeline_version.clone(),
+            op_id: OpId::must_new(pipeline.machine_id.0.clone()),
+            op_version: pipeline.pipeline_version.clone(),
             input_params,
-            run_config: req.run_config.clone(),
-            build: req.build,
+            run_config: run_config.clone(),
+            build,
         };
 
         let value = serde_json::to_value(&manifest).map_err(|_| {
@@ -1243,6 +1441,56 @@ impl RunLauncher for DefaultRunLauncher {
             ));
         }
 
+        if let Some(spec) = compiled_execution_spec {
+            let spec_value = serde_json::to_value(&spec).map_err(|_| {
+                RunError::InvalidPlan(info(
+                    "compiled_execution_spec_serialize_failed",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    "failed to serialize compiled execution spec",
+                ))
+            })?;
+            let spec_bytes = canonical_json_bytes(&spec_value).map_err(|e| match e {
+                CanonicalJsonError::FloatNotAllowed => RunError::InvalidPlan(info(
+                    "compiled_execution_spec_not_canonical",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    "compiled execution spec is not canonical-json-hashable (floats are forbidden)",
+                )),
+                CanonicalJsonError::SecretsNotAllowed => RunError::InvalidPlan(info(
+                    "secrets_detected",
+                    ErrorCategory::ParsingInput,
+                    false,
+                    "compiled execution spec contained secrets (policy forbids persisting secrets)",
+                )),
+            })?;
+            let computed_spec_id = artifact_id_for_bytes(&spec_bytes);
+            let stored_spec_id = stores
+                .artifacts
+                .put(
+                    ArtifactKind::Other(COMPILED_EXECUTION_SPEC_ARTIFACT_KIND.to_string()),
+                    spec_bytes,
+                )
+                .await
+                .map_err(RunError::Storage)?;
+            if stored_spec_id != computed_spec_id {
+                return Err(RunError::Storage(
+                    mfm_machine::errors::StorageError::Corruption(info(
+                        "compiled_execution_spec_id_mismatch",
+                        ErrorCategory::Storage,
+                        false,
+                        "artifact store returned unexpected compiled execution spec id",
+                    )),
+                ));
+            }
+            initial_context
+                .write(
+                    ContextKey(COMPILED_EXECUTION_SPEC_ARTIFACT_ID_CONTEXT_KEY.to_string()),
+                    serde_json::json!(stored_spec_id.0),
+                )
+                .map_err(RunError::Context)?;
+        }
+
         engine
             .start(
                 stores,
@@ -1250,8 +1498,8 @@ impl RunLauncher for DefaultRunLauncher {
                     manifest,
                     manifest_id: stored_id,
                     plan,
-                    run_config: req.run_config,
-                    initial_context: req.initial_context,
+                    run_config,
+                    initial_context,
                 },
             )
             .await
@@ -1463,6 +1711,19 @@ fn single_op_report_error_from_sdk(err: SdkError) -> SingleOpReportError {
     SingleOpReportError::new(err.info.code.0, err.info.message)
 }
 
+fn context_key_candidates(key: &str) -> Vec<String> {
+    let mut candidates = vec![key.to_string()];
+    if key.contains(".in.") || key.contains(".out.") || key.contains(".work.") {
+        return candidates;
+    }
+    let Some((prefix, leaf)) = key.rsplit_once('.') else {
+        return candidates;
+    };
+    candidates.push(format!("{prefix}.out.{leaf}"));
+    candidates.push(format!("{prefix}.work.{leaf}"));
+    candidates
+}
+
 fn run_phase_label(phase: &RunPhase) -> &'static str {
     match phase {
         RunPhase::Running => "running",
@@ -1641,9 +1902,9 @@ pub async fn execute_single_op_report<T: serde::de::DeserializeOwned>(
         SingleOpReportError::new("InvalidSnapshot", "final snapshot artifact was not JSON")
     })?;
 
-    let report_value = snapshot
-        .get(&req.report_context_key)
-        .cloned()
+    let report_value = context_key_candidates(&req.report_context_key)
+        .into_iter()
+        .find_map(|candidate| snapshot.get(&candidate).cloned())
         .ok_or_else(|| {
             SingleOpReportError::new(
                 "MissingReport",

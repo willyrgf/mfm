@@ -11,7 +11,7 @@
 //!
 //! assert_eq!(parse_data_hex("0x").unwrap(), Vec::<u8>::new());
 //! validate_raw_transaction_hex("0x00").unwrap();
-//! assert_eq!(output_context_key("keystore_tx.sign").0, "keystore_tx.sign.report");
+//! assert_eq!(output_context_key("keystore_tx.sign").0, "keystore_tx.sign.out.report");
 //! ```
 
 use alloy_primitives::{keccak256, Address, PrimitiveSignature, B256};
@@ -294,7 +294,7 @@ pub fn sign_eip1559_transaction(
 
 /// Returns the standard context key used to store a keystore transaction report.
 pub fn output_context_key(op_path: &str) -> ContextKey {
-    ContextKey(format!("{op_path}.report"))
+    ContextKey(format!("{op_path}.out.report"))
 }
 
 fn derive_signature_with_matching_recovery_id(

@@ -72,17 +72,17 @@ fn ctx_key(suffix: &'static str) -> ContextKey {
 
 /// Returns the context key that stores the canonical portfolio snapshot JSON.
 pub fn portfolio_snapshot_context_key() -> ContextKey {
-    ContextKey(format!("{MAIN_OP_PATH}.{KEY_SNAPSHOT}"))
+    ContextKey(format!("{MAIN_OP_PATH}.out.{KEY_SNAPSHOT}"))
 }
 
 /// Returns the context key that stores the canonical portfolio snapshot artifact id.
 pub fn portfolio_snapshot_artifact_id_context_key() -> ContextKey {
-    ContextKey(format!("{MAIN_OP_PATH}.{KEY_SNAPSHOT_ARTIFACT_ID}"))
+    ContextKey(format!("{MAIN_OP_PATH}.out.{KEY_SNAPSHOT_ARTIFACT_ID}"))
 }
 
 /// Returns the context key that stores the canonical portfolio report JSON.
 pub fn portfolio_snapshot_report_context_key() -> ContextKey {
-    ContextKey(format!("{MAIN_OP_PATH}.{KEY_REPORT}"))
+    ContextKey(format!("{MAIN_OP_PATH}.out.{KEY_REPORT}"))
 }
 
 #[derive(Clone, Debug)]
