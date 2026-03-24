@@ -935,7 +935,7 @@ impl AppServices {
         req: PortfolioSnapshotRequest,
     ) -> Result<PortfolioSnapshotResponse, AppError> {
         const OP_ID: &str = "portfolio_tracker";
-        const OP_VERSION: &str = "v1";
+        const OP_VERSION: &str = "v2";
 
         validate_portfolio_bundle(&req.portfolio, &req.valuation_source_registry).map_err(
             |err| AppError::invalid_request(format!("invalid portfolio snapshot request: {err}")),

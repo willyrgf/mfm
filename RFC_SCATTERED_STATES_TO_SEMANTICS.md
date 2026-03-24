@@ -1,6 +1,6 @@
 # RFC: From Scattered States To Semantic Execution And Recursive Operation Planning
 
-Status: draft
+Status: implemented
 
 Last updated: 2026-03-24
 
@@ -8,6 +8,10 @@ Last updated: 2026-03-24
 
 This RFC proposes restructuring MFM execution away from protocol-specific state proliferation and
 toward a semantics-first runtime plus a single recursive planning model for the whole project.
+
+This design is implemented on the current `portfolio_tracker v2` runtime path. The built-in
+portfolio flow now runs through the fixed semantic state family, recursive op flattening, and the
+semantic adapter catalogs described below.
 
 `mfm::portfolio::snapshot` is the first proving ground, not the only target.
 
@@ -995,7 +999,7 @@ This RFC is intentionally commit-oriented, not PR-oriented.
 
 The goal is a clean final architecture, not a long-lived migration surface.
 
-### Recommended commit sequence
+### Implemented commit sequence on this branch
 
 #### Commit 1: planner contract groundwork
 
@@ -1177,7 +1181,7 @@ The most important finding is that the current live code path is:
 2. `task.mfm.portfolio.snapshot` shell wrapper
 3. packaged `mfm_cli --output-format json portfolio snapshot --request-file ...`
 4. `AppServices::start_portfolio_snapshot`
-5. single-op run for `portfolio_tracker v1`
+5. single-op run for `portfolio_tracker v2`
 6. namespaced state graph
 7. final context snapshot extraction
 8. raw JSON envelope emitted unchanged to stdout
@@ -1343,7 +1347,7 @@ Store semantics:
 - starts `RunsStartRequest::Single`
 - uses:
   - `op_id = "portfolio_tracker"`
-  - `op_version = "v1"`
+  - `op_version = "v2"`
 
 Default run config semantics:
 
@@ -2116,8 +2120,8 @@ Examples:
   - `InstrumentSemantics::FungibleToken`
   - `PositionSemantics::LendingDeposit`
   - a concrete semantic `VenueId` for the market and reserve
-- a wallet declaration becomes an `EvmAddressSubject` today, and later may become a
-  `BitcoinDescriptorSubject`
+- a wallet declaration becomes an address-backed subject in the currently supported semantic
+  families (`EvmAddressSubject` or `BitcoinAddressSubject`)
 
 This phase should not choose transports and should not perform IO.
 

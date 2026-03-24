@@ -281,40 +281,40 @@ fn classify_call(
             format!("bitcoin_scan_utxos:{address}@{network_id}")
         }
         _ => match method {
-        "eth_chainId" | "eth_blockNumber" => format!("{method}@{network_id}"),
-        "eth_getBalance" => {
-            let wallet = params
-                .first()
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown");
-            format!("{method}:{wallet}@{network_id}")
-        }
-        "eth_call" => {
-            let target = params
-                .first()
-                .and_then(serde_json::Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            let to = target
-                .get("to")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown");
-            let data = target
-                .get("data")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown");
-            let label = if data == ERC20_DECIMALS_SELECTOR {
-                "decimals"
-            } else if data == LATEST_ROUND_DATA_SELECTOR {
-                "latest_round_data"
-            } else if data.starts_with(BALANCE_OF_SELECTOR_PREFIX) {
-                "balance_of"
-            } else {
-                "unknown"
-            };
-            format!("eth_call:{label}:{to}@{network_id}")
-        }
-        _ => format!("{method}@{network_id}"),
+            "eth_chainId" | "eth_blockNumber" => format!("{method}@{network_id}"),
+            "eth_getBalance" => {
+                let wallet = params
+                    .first()
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                format!("{method}:{wallet}@{network_id}")
+            }
+            "eth_call" => {
+                let target = params
+                    .first()
+                    .and_then(serde_json::Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                let to = target
+                    .get("to")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let data = target
+                    .get("data")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let label = if data == ERC20_DECIMALS_SELECTOR {
+                    "decimals"
+                } else if data == LATEST_ROUND_DATA_SELECTOR {
+                    "latest_round_data"
+                } else if data.starts_with(BALANCE_OF_SELECTOR_PREFIX) {
+                    "balance_of"
+                } else {
+                    "unknown"
+                };
+                format!("eth_call:{label}:{to}@{network_id}")
+            }
+            _ => format!("{method}@{network_id}"),
         },
     }
 }
@@ -496,8 +496,9 @@ fn expand_uses_canonical_multi_network_graph() {
     assert!(child_ids.contains(&MERGE_OBSERVATIONS_CHILD_ID.to_string()));
     assert!(child_ids.contains(&ASSEMBLE_SNAPSHOT_CHILD_ID.to_string()));
     assert!(child_ids.contains(&PROJECT_REPORT_CHILD_ID.to_string()));
-    let semantic_spec = compile_semantic_execution(&parse_config(&canonical_op_config()).expect("cfg"))
-        .expect("semantic spec");
+    let semantic_spec =
+        compile_semantic_execution(&parse_config(&canonical_op_config()).expect("cfg"))
+            .expect("semantic spec");
     assert_eq!(
         child_ids
             .iter()
@@ -759,8 +760,8 @@ async fn mixed_evm_and_bitcoin_wallets_share_the_semantic_runtime() {
         btc_pin.anchor,
         ExecutionAnchor::Bitcoin {
             height: 840000,
-            block_hash:
-                "00000000000000000000000000000000000000000000000000000000000000aa".to_string(),
+            block_hash: "00000000000000000000000000000000000000000000000000000000000000aa"
+                .to_string(),
         }
     );
 
@@ -825,11 +826,9 @@ async fn mixed_evm_and_bitcoin_wallets_share_the_semantic_runtime() {
         1
     );
     assert_eq!(
-        got.get(
-            "bitcoin_scan_utxos:1BoatSLRHtKNngkdXEeobR76b53LETtpyT@bitcoin-mainnet"
-        )
-        .copied()
-        .unwrap_or(0),
+        got.get("bitcoin_scan_utxos:1BoatSLRHtKNngkdXEeobR76b53LETtpyT@bitcoin-mainnet")
+            .copied()
+            .unwrap_or(0),
         1
     );
 }

@@ -11,9 +11,7 @@ use mfm_state_aave_v3::portfolio::semantic::{
 use mfm_state_aave_v3::portfolio::semantic_adapters::{
     AaveDebtObservationRuntimeAdapter, AaveReserveObservationRuntimeAdapter,
 };
-use mfm_state_portfolio::model::{
-    validate_portfolio_bundle, NetworkConfig, NetworkFamilyConfig,
-};
+use mfm_state_portfolio::model::{validate_portfolio_bundle, NetworkConfig, NetworkFamilyConfig};
 use mfm_state_portfolio::semantic::{
     AdapterId, BitcoinRoutePolicy, BitcoinSubjectLocator, BitcoinUtxoSetObservationPayload,
     CompiledObservationBatch, CompiledObservationBinding, DerivedUnitPriceValuationPayload,
@@ -84,8 +82,14 @@ pub fn builtin_semantic_catalog() -> Result<SemanticCatalog, SemanticCatalogErro
             Arc::new(EvmAddressSubjectRuntimeAdapter),
             Arc::new(BitcoinAddressSubjectRuntimeAdapter),
         ],
-        view_planners: vec![Arc::new(EvmViewPlannerAdapter), Arc::new(BitcoinViewPlannerAdapter)],
-        view_runtimes: vec![Arc::new(EvmViewRuntimeAdapter), Arc::new(BitcoinViewRuntimeAdapter)],
+        view_planners: vec![
+            Arc::new(EvmViewPlannerAdapter),
+            Arc::new(BitcoinViewPlannerAdapter),
+        ],
+        view_runtimes: vec![
+            Arc::new(EvmViewRuntimeAdapter),
+            Arc::new(BitcoinViewRuntimeAdapter),
+        ],
         valuation_runtimes: vec![
             Arc::new(FixedUnitPriceRuntimeAdapter),
             Arc::new(EvmOracleDirectPriceRuntimeAdapter),

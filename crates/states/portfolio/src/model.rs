@@ -772,7 +772,10 @@ fn wallet_subject_matches_network_family(
     matches!(
         (subject_kind, network_family),
         (WalletSubjectKind::EvmAddress, NetworkFamilyConfig::Evm)
-            | (WalletSubjectKind::BitcoinAddress, NetworkFamilyConfig::Bitcoin)
+            | (
+                WalletSubjectKind::BitcoinAddress,
+                NetworkFamilyConfig::Bitcoin
+            )
     )
 }
 

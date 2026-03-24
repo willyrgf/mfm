@@ -1,8 +1,9 @@
-//! Shared Aave V3 portfolio-position config and runtime states.
+//! Shared Aave V3 portfolio-position config and semantic adapters.
 //!
 //! The portfolio module owns the typed meaning of `protocol = "aave_v3"` for canonical
 //! `protocol_position` symbols. It validates the config blob carried by the generic symbol model
-//! and normalizes Aave reserve and debt token reads into the canonical `Observation` surface.
+//! and lowers Aave reserve and debt token reads into semantic planner payloads and runtime
+//! adapters that emit the canonical `Observation` surface.
 //!
 //! # Examples
 //!
@@ -44,5 +45,3 @@ pub mod model;
 pub mod semantic;
 /// Runtime adapters for compiled Aave V3 semantic portfolio observations.
 pub mod semantic_adapters;
-/// Reusable Aave V3 portfolio-position runtime states.
-pub mod states;
