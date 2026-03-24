@@ -487,7 +487,11 @@ pub mod pipeline {
     pub trait PipelinePlanner: Send + Sync {
         /// Implementations MUST:
         /// - resolve ops via `OperationRegistry`
-        /// - ensure all `StateId`s are unique and match "<machine_id>.<step_id>.<state_local_id>"
+        /// - support recursive child-op expansion before runtime starts
+        /// - assign deterministic hierarchical child `OpPath`s during flattening
+        /// - ensure all flattened `StateId`s are unique and match the
+        ///   "<machine_id>.<step_id>.<flattened_state_local_id>" convention
+        /// - reject duplicate child-op paths and duplicate exported ports
         /// - enforce step order by adding dependency edges between step graphs (flattened composition)
         ///
         /// Returns the executable plan for the supplied pipeline and run config.

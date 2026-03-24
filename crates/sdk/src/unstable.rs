@@ -37,7 +37,7 @@
 //! # Ok::<(), mfm_sdk::errors::SdkError>(())
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -67,7 +67,8 @@ use crate::errors::SdkError;
 use crate::ids::{MachineId, PortKey, StepId};
 use crate::launcher::{LaunchPipeline, RunLauncher};
 use crate::op::{
-    leaf_state_id, DynOperation, LeafOpSpec, OpInterface, OperationRegistry, PlannedOpKind,
+    child_op_path, leaf_state_id, DynOperation, LeafOpSpec, LeafStateNode, OpInterface,
+    OperationRegistry, PlannedOp, PlannedOpKind, PortSource,
 };
 use crate::pipeline::{Pipeline, PipelineManifestInput, PipelinePlanner, PipelineStep};
 
@@ -182,7 +183,193 @@ fn op_path_is_nested_within(step_root: &OpPath, candidate: &OpPath) -> bool {
             .is_some()
 }
 
-fn validate_leaf_op_spec(spec: &LeafOpSpec, step_root: &OpPath) -> Result<(), SdkError> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QualifiedPortRef {
+    op_path: OpPath,
+    port: String,
+}
+
+impl QualifiedPortRef {
+    fn context_key(&self) -> ContextKey {
+        ContextKey(format!("{}.{}", self.op_path.as_str(), self.port))
+    }
+}
+
+struct FlattenedFragment {
+    states: Vec<StateNode>,
+    edges: Vec<DependencyEdge>,
+    sources: Vec<StateId>,
+    sinks: Vec<StateId>,
+    exports: BTreeMap<String, QualifiedPortRef>,
+}
+
+fn validate_unique_ports(
+    ports: &[PortKey],
+    code: &'static str,
+    message: &'static str,
+) -> Result<(), SdkError> {
+    let mut seen = HashSet::new();
+    for PortKey(port) in ports {
+        if !seen.insert(port.clone()) {
+            return Err(sdk_error(code, ErrorCategory::ParsingInput, message));
+        }
+    }
+    Ok(())
+}
+
+fn validate_op_interface(interface: &OpInterface) -> Result<(), SdkError> {
+    validate_unique_ports(
+        &interface.imports,
+        "duplicate_import_port",
+        "operation interface contained duplicate import ports",
+    )?;
+    validate_unique_ports(
+        &interface.exports,
+        "duplicate_export_port",
+        "operation interface contained duplicate export ports",
+    )?;
+    Ok(())
+}
+
+fn state_local_id_order_key(node: &LeafStateNode) -> (String, String) {
+    (
+        node.addr.state_local_id.0.clone(),
+        node.state_id.as_str().to_string(),
+    )
+}
+
+fn ordered_leaf_states(spec: &LeafOpSpec) -> Result<Vec<LeafStateNode>, SdkError> {
+    let mut nodes_by_id: HashMap<String, LeafStateNode> = HashMap::new();
+    let mut indegree: HashMap<String, usize> = HashMap::new();
+    let mut edges_from: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+    for node in &spec.states {
+        let state_id = node.state_id.as_str().to_string();
+        nodes_by_id.insert(state_id.clone(), node.clone());
+        indegree.insert(state_id.clone(), 0);
+        edges_from.entry(state_id).or_default();
+    }
+
+    for edge in &spec.edges {
+        let from = edge.from.as_str().to_string();
+        let to = edge.to.as_str().to_string();
+        if edges_from.entry(from).or_default().insert(to.clone()) {
+            *indegree.entry(to).or_default() += 1;
+        }
+    }
+
+    let mut ready: BTreeSet<(String, String)> = indegree
+        .iter()
+        .filter(|(_state_id, deg)| **deg == 0)
+        .map(|(state_id, _deg)| {
+            let node = nodes_by_id.get(state_id).expect("node exists");
+            state_local_id_order_key(node)
+        })
+        .collect();
+
+    let mut ordered = Vec::with_capacity(spec.states.len());
+    while let Some(order_key) = ready.pop_first() {
+        let state_id = order_key.1.clone();
+        let node = nodes_by_id.get(&state_id).expect("node exists").clone();
+        ordered.push(node);
+
+        if let Some(next_ids) = edges_from.get(&state_id) {
+            for next in next_ids {
+                let deg = indegree.get_mut(next).expect("next exists");
+                *deg -= 1;
+                if *deg == 0 {
+                    let next_node = nodes_by_id.get(next).expect("node exists");
+                    ready.insert(state_local_id_order_key(next_node));
+                }
+            }
+        }
+    }
+
+    if ordered.len() != spec.states.len() {
+        return Err(sdk_error(
+            "state_graph_cycle",
+            ErrorCategory::ParsingInput,
+            "operation expanded to a cyclic state graph",
+        ));
+    }
+
+    Ok(ordered)
+}
+
+fn dedupe_sorted_edges(edges: impl IntoIterator<Item = DependencyEdge>) -> Vec<DependencyEdge> {
+    let mut ordered: BTreeSet<(String, String)> = BTreeSet::new();
+    for edge in edges {
+        ordered.insert((edge.from.as_str().to_string(), edge.to.as_str().to_string()));
+    }
+
+    ordered
+        .into_iter()
+        .map(|(from, to)| DependencyEdge {
+            from: StateId::must_new(from),
+            to: StateId::must_new(to),
+        })
+        .collect()
+}
+
+fn stable_topological_order(
+    node_ids: impl IntoIterator<Item = String>,
+    edges: &BTreeSet<(String, String)>,
+    cycle_code: &'static str,
+    cycle_message: &'static str,
+) -> Result<Vec<String>, SdkError> {
+    let mut indegree: BTreeMap<String, usize> = BTreeMap::new();
+    let mut edges_from: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+    for node_id in node_ids {
+        indegree.entry(node_id.clone()).or_insert(0);
+        edges_from.entry(node_id).or_default();
+    }
+
+    for (from, to) in edges {
+        if edges_from
+            .entry(from.clone())
+            .or_default()
+            .insert(to.clone())
+        {
+            *indegree.entry(to.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let mut ready: BTreeSet<String> = indegree
+        .iter()
+        .filter_map(|(node_id, deg)| (*deg == 0).then_some(node_id.clone()))
+        .collect();
+
+    let mut ordered = Vec::with_capacity(indegree.len());
+    while let Some(node_id) = ready.pop_first() {
+        ordered.push(node_id.clone());
+        if let Some(next_ids) = edges_from.get(&node_id) {
+            for next in next_ids {
+                let deg = indegree.get_mut(next).expect("node exists");
+                *deg -= 1;
+                if *deg == 0 {
+                    ready.insert(next.clone());
+                }
+            }
+        }
+    }
+
+    if ordered.len() != indegree.len() {
+        return Err(sdk_error(
+            cycle_code,
+            ErrorCategory::ParsingInput,
+            cycle_message,
+        ));
+    }
+
+    Ok(ordered)
+}
+
+fn validate_leaf_op_spec(
+    spec: &LeafOpSpec,
+    owning_op_path: &OpPath,
+    step_root: &OpPath,
+) -> Result<(), SdkError> {
     if spec.states.is_empty() {
         return Err(sdk_error(
             "empty_state_graph",
@@ -193,6 +380,14 @@ fn validate_leaf_op_spec(spec: &LeafOpSpec, step_root: &OpPath) -> Result<(), Sd
 
     let mut ids = HashSet::new();
     for node in &spec.states {
+        if node.addr.op_path != *owning_op_path {
+            return Err(sdk_error(
+                "invalid_state_addr",
+                ErrorCategory::ParsingInput,
+                "leaf state lineage must match the owning leaf op path exactly",
+            ));
+        }
+
         if !op_path_is_nested_within(step_root, &node.addr.op_path) {
             return Err(sdk_error(
                 "invalid_state_addr",
@@ -248,6 +443,8 @@ fn validate_leaf_op_spec(spec: &LeafOpSpec, step_root: &OpPath) -> Result<(), Sd
         }
     }
 
+    ordered_leaf_states(spec)?;
+
     Ok(())
 }
 
@@ -264,18 +461,455 @@ fn sources_and_sinks(states: &[StateId], edges: &[DependencyEdge]) -> (Vec<State
         *indeg.get_mut(to).expect("to exists") += 1;
     }
 
-    let sources: Vec<StateId> = states
+    let mut sources: Vec<StateId> = states
         .iter()
         .filter(|state_id| indeg.get(*state_id).copied().unwrap_or(0) == 0)
         .cloned()
         .collect();
-    let sinks: Vec<StateId> = states
+    let mut sinks: Vec<StateId> = states
         .iter()
         .filter(|state_id| outdeg.get(*state_id).copied().unwrap_or(0) == 0)
         .cloned()
         .collect();
 
+    sources.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    sinks.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+
     (sources, sinks)
+}
+
+fn flatten_leaf_op(
+    interface: OpInterface,
+    spec: LeafOpSpec,
+    op_path: &OpPath,
+    step_root: &OpPath,
+    resolved_imports: &BTreeMap<String, QualifiedPortRef>,
+) -> Result<FlattenedFragment, SdkError> {
+    validate_leaf_op_spec(&spec, op_path, step_root)?;
+
+    let declared_imports: BTreeSet<String> = interface
+        .imports
+        .iter()
+        .map(|port| port.0.clone())
+        .collect();
+    let resolved_import_names: BTreeSet<String> = resolved_imports.keys().cloned().collect();
+    if declared_imports != resolved_import_names {
+        return Err(sdk_error(
+            "missing_import_binding",
+            ErrorCategory::ParsingInput,
+            "leaf operation imports were not fully resolved by the planner",
+        ));
+    }
+
+    let ordered_states = ordered_leaf_states(&spec)?;
+    let edges = dedupe_sorted_edges(spec.edges);
+    let state_ids: Vec<StateId> = ordered_states
+        .iter()
+        .map(|node| node.state_id.clone())
+        .collect();
+    let (sources, sinks) = sources_and_sinks(&state_ids, &edges);
+
+    let import_sources: HashMap<String, ContextKey> = resolved_imports
+        .iter()
+        .map(|(port, source)| (port.clone(), source.context_key()))
+        .collect();
+
+    let mut states = Vec::with_capacity(ordered_states.len());
+    for node in ordered_states {
+        states.push(StateNode {
+            id: node.state_id.clone(),
+            state: Arc::new(NamespacedState {
+                op_path: op_path.clone(),
+                import_sources: import_sources.clone(),
+                inner: node.state,
+            }),
+        });
+    }
+
+    let mut exports = BTreeMap::new();
+    for PortKey(export) in interface.exports {
+        exports.insert(
+            export.clone(),
+            QualifiedPortRef {
+                op_path: op_path.clone(),
+                port: export,
+            },
+        );
+    }
+
+    Ok(FlattenedFragment {
+        states,
+        edges,
+        sources,
+        sinks,
+        exports,
+    })
+}
+
+fn resolve_port_source(
+    source: &PortSource,
+    parent_imports: &BTreeMap<String, QualifiedPortRef>,
+    child_fragments: &BTreeMap<String, FlattenedFragment>,
+) -> Result<QualifiedPortRef, SdkError> {
+    match source {
+        PortSource::ParentImport(PortKey(port)) => {
+            parent_imports.get(port).cloned().ok_or_else(|| {
+                sdk_error(
+                    "unsatisfied_import",
+                    ErrorCategory::ParsingInput,
+                    "composite op referenced an unsatisfied parent import",
+                )
+            })
+        }
+        PortSource::ChildExport { child, export } => child_fragments
+            .get(&child.0)
+            .and_then(|fragment| fragment.exports.get(&export.0))
+            .cloned()
+            .ok_or_else(|| {
+                sdk_error(
+                    "unknown_child_export",
+                    ErrorCategory::ParsingInput,
+                    "composite op referenced an unknown child export",
+                )
+            }),
+    }
+}
+
+fn flatten_composite_op(
+    registry: Arc<dyn OperationRegistry>,
+    interface: OpInterface,
+    spec: crate::op::CompositeOpSpec,
+    op_path: &OpPath,
+    step_root: &OpPath,
+    run_config: &RunConfig,
+    resolved_imports: &BTreeMap<String, QualifiedPortRef>,
+) -> Result<FlattenedFragment, SdkError> {
+    let declared_parent_imports: BTreeSet<String> = interface
+        .imports
+        .iter()
+        .map(|port| port.0.clone())
+        .collect();
+    let declared_parent_exports: BTreeSet<String> = interface
+        .exports
+        .iter()
+        .map(|port| port.0.clone())
+        .collect();
+
+    let mut children_by_id: BTreeMap<String, crate::op::ChildOpInstance> = BTreeMap::new();
+    for child in spec.children {
+        let child_id = child.child_op_local_id.0.clone();
+        if children_by_id.insert(child_id, child).is_some() {
+            return Err(sdk_error(
+                "duplicate_child_op_local_id",
+                ErrorCategory::ParsingInput,
+                "composite op declared duplicate child_op_local_id values",
+            ));
+        }
+    }
+
+    let mut expanded_children: BTreeMap<String, (OpPath, PlannedOp)> = BTreeMap::new();
+    for (child_id, child) in &children_by_id {
+        let child_op = registry.resolve(&child.op_id, &child.op_version)?;
+        let child_op_path = child_op_path(op_path, child_id.clone())?;
+        let planned = child_op.expand(child_op_path.clone(), &child.op_config, run_config)?;
+        validate_op_interface(&planned.interface)?;
+        expanded_children.insert(child_id.clone(), (child_op_path, planned));
+    }
+
+    let mut bindings_by_child: BTreeMap<String, BTreeMap<String, PortSource>> = BTreeMap::new();
+    let child_ids: BTreeSet<String> = children_by_id.keys().cloned().collect();
+    for binding in spec.bindings {
+        let child_id = binding.to_child.0.clone();
+        if !child_ids.contains(&child_id) {
+            return Err(sdk_error(
+                "unknown_child_op",
+                ErrorCategory::ParsingInput,
+                "composite op binding referenced an unknown child",
+            ));
+        }
+
+        let import = binding.import.0.clone();
+        let child_bindings = bindings_by_child.entry(child_id).or_default();
+        if child_bindings.insert(import, binding.source).is_some() {
+            return Err(sdk_error(
+                "duplicate_child_import_binding",
+                ErrorCategory::ParsingInput,
+                "composite op bound the same child import more than once",
+            ));
+        }
+    }
+
+    let mut child_dependencies: BTreeSet<(String, String)> = BTreeSet::new();
+    for after in spec.order {
+        let from = after.from_child.0.clone();
+        let to = after.to_child.0.clone();
+        if !child_ids.contains(&from) || !child_ids.contains(&to) {
+            return Err(sdk_error(
+                "unknown_child_op",
+                ErrorCategory::ParsingInput,
+                "composite op order edge referenced an unknown child",
+            ));
+        }
+        child_dependencies.insert((from, to));
+    }
+
+    for (child_id, (_child_path, planned)) in &expanded_children {
+        let declared_child_imports: BTreeSet<String> = planned
+            .interface
+            .imports
+            .iter()
+            .map(|port| port.0.clone())
+            .collect();
+        let declared_child_exports: BTreeSet<String> = planned
+            .interface
+            .exports
+            .iter()
+            .map(|port| port.0.clone())
+            .collect();
+        let child_bindings = bindings_by_child.get(child_id);
+
+        for import in &declared_child_imports {
+            let Some(source) = child_bindings.and_then(|bindings| bindings.get(import)) else {
+                return Err(sdk_error(
+                    "missing_child_import_binding",
+                    ErrorCategory::ParsingInput,
+                    "composite op did not bind every child import exactly once",
+                ));
+            };
+
+            match source {
+                PortSource::ParentImport(PortKey(parent_import)) => {
+                    if !declared_parent_imports.contains(parent_import)
+                        || !resolved_imports.contains_key(parent_import)
+                    {
+                        return Err(sdk_error(
+                            "unsatisfied_import",
+                            ErrorCategory::ParsingInput,
+                            "composite op referenced an unsatisfied parent import",
+                        ));
+                    }
+                }
+                PortSource::ChildExport { child, export } => {
+                    child_dependencies.insert((child.0.clone(), child_id.clone()));
+
+                    let Some((_source_path, source_planned)) = expanded_children.get(&child.0)
+                    else {
+                        return Err(sdk_error(
+                            "unknown_child_op",
+                            ErrorCategory::ParsingInput,
+                            "composite op binding referenced an unknown child",
+                        ));
+                    };
+                    if !source_planned
+                        .interface
+                        .exports
+                        .iter()
+                        .any(|candidate| candidate.0 == export.0)
+                    {
+                        return Err(sdk_error(
+                            "unknown_child_export",
+                            ErrorCategory::ParsingInput,
+                            "composite op binding referenced an unknown child export",
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(child_bindings) = child_bindings {
+            for import in child_bindings.keys() {
+                if !declared_child_imports.contains(import) {
+                    return Err(sdk_error(
+                        "unknown_child_import",
+                        ErrorCategory::ParsingInput,
+                        "composite op binding referenced an unknown child import",
+                    ));
+                }
+            }
+        }
+
+        let _ = declared_child_exports;
+    }
+
+    let mut re_exports: BTreeMap<String, PortSource> = BTreeMap::new();
+    for re_export in spec.re_exports {
+        let export = re_export.export.0.clone();
+        if re_exports
+            .insert(export.clone(), re_export.source)
+            .is_some()
+        {
+            return Err(sdk_error(
+                "duplicate_re_export",
+                ErrorCategory::ParsingInput,
+                "composite op declared duplicate re-export names",
+            ));
+        }
+    }
+
+    for export in re_exports.keys() {
+        if !declared_parent_exports.contains(export) {
+            return Err(sdk_error(
+                "undeclared_re_export",
+                ErrorCategory::ParsingInput,
+                "composite op re-exported a port that is not part of its interface",
+            ));
+        }
+    }
+    for export in &declared_parent_exports {
+        if !re_exports.contains_key(export) {
+            return Err(sdk_error(
+                "missing_re_export_binding",
+                ErrorCategory::ParsingInput,
+                "composite op did not bind every declared export",
+            ));
+        }
+    }
+
+    for source in re_exports.values() {
+        match source {
+            PortSource::ParentImport(PortKey(parent_import)) => {
+                if !declared_parent_imports.contains(parent_import)
+                    || !resolved_imports.contains_key(parent_import)
+                {
+                    return Err(sdk_error(
+                        "unsatisfied_import",
+                        ErrorCategory::ParsingInput,
+                        "composite op referenced an unsatisfied parent import",
+                    ));
+                }
+            }
+            PortSource::ChildExport { child, export } => {
+                let Some((_child_path, planned)) = expanded_children.get(&child.0) else {
+                    return Err(sdk_error(
+                        "unknown_child_op",
+                        ErrorCategory::ParsingInput,
+                        "composite op re-export referenced an unknown child",
+                    ));
+                };
+                if !planned
+                    .interface
+                    .exports
+                    .iter()
+                    .any(|candidate| candidate.0 == export.0)
+                {
+                    return Err(sdk_error(
+                        "unknown_child_export",
+                        ErrorCategory::ParsingInput,
+                        "composite op re-export referenced an unknown child export",
+                    ));
+                }
+            }
+        }
+    }
+
+    let ordered_children = stable_topological_order(
+        children_by_id.keys().cloned().collect::<Vec<_>>(),
+        &child_dependencies,
+        "composite_cycle",
+        "composite op dependency graph contained a cycle",
+    )?;
+
+    let mut child_fragments: BTreeMap<String, FlattenedFragment> = BTreeMap::new();
+    let mut all_states = Vec::new();
+    let mut all_edges = Vec::new();
+    let mut seen_state_ids = HashSet::new();
+
+    for child_id in &ordered_children {
+        let (child_path, planned) = expanded_children
+            .get(child_id)
+            .expect("child exists")
+            .clone();
+        let child_bindings = bindings_by_child.get(child_id).cloned().unwrap_or_default();
+        let mut child_imports: BTreeMap<String, QualifiedPortRef> = BTreeMap::new();
+        for (import, source) in child_bindings {
+            let resolved = resolve_port_source(&source, resolved_imports, &child_fragments)?;
+            child_imports.insert(import, resolved);
+        }
+
+        let fragment = flatten_planned_op(
+            Arc::clone(&registry),
+            child_path,
+            planned,
+            step_root,
+            run_config,
+            &child_imports,
+        )?;
+
+        for state in &fragment.states {
+            if !seen_state_ids.insert(state.id.clone()) {
+                return Err(sdk_error(
+                    "duplicate_state_id",
+                    ErrorCategory::ParsingInput,
+                    "duplicate lowered StateId in recursively flattened plan",
+                ));
+            }
+        }
+
+        all_edges.extend(fragment.edges.iter().cloned());
+        all_states.extend(fragment.states.iter().cloned());
+        child_fragments.insert(child_id.clone(), fragment);
+    }
+
+    for (from_child, to_child) in &child_dependencies {
+        let from_fragment = child_fragments.get(from_child).expect("child exists");
+        let to_fragment = child_fragments.get(to_child).expect("child exists");
+        for from in &from_fragment.sinks {
+            for to in &to_fragment.sources {
+                all_edges.push(DependencyEdge {
+                    from: from.clone(),
+                    to: to.clone(),
+                });
+            }
+        }
+    }
+
+    let edges = dedupe_sorted_edges(all_edges);
+    let state_ids: Vec<StateId> = all_states.iter().map(|state| state.id.clone()).collect();
+    let (sources, sinks) = sources_and_sinks(&state_ids, &edges);
+
+    let mut exports = BTreeMap::new();
+    for export in &interface.exports {
+        let source = re_exports
+            .get(&export.0)
+            .expect("validated re-export exists");
+        let resolved = resolve_port_source(source, resolved_imports, &child_fragments)?;
+        exports.insert(export.0.clone(), resolved);
+    }
+
+    Ok(FlattenedFragment {
+        states: all_states,
+        edges,
+        sources,
+        sinks,
+        exports,
+    })
+}
+
+fn flatten_planned_op(
+    registry: Arc<dyn OperationRegistry>,
+    op_path: OpPath,
+    planned: PlannedOp,
+    step_root: &OpPath,
+    run_config: &RunConfig,
+    resolved_imports: &BTreeMap<String, QualifiedPortRef>,
+) -> Result<FlattenedFragment, SdkError> {
+    validate_op_interface(&planned.interface)?;
+
+    let interface = planned.interface;
+    match planned.kind {
+        PlannedOpKind::Leaf(spec) => {
+            flatten_leaf_op(interface, spec, &op_path, step_root, resolved_imports)
+        }
+        PlannedOpKind::Composite(spec) => flatten_composite_op(
+            registry,
+            interface,
+            spec,
+            &op_path,
+            step_root,
+            run_config,
+            resolved_imports,
+        ),
+    }
 }
 
 /// A simple [`crate::op::OperationRegistry`] implementation backed by a hash map.
@@ -318,13 +952,13 @@ impl OperationRegistry for HashMapOperationRegistry {
 ///
 /// The planner is responsible for:
 /// - validating stable machine/step/state identifier shapes
-/// - enforcing import/export wiring between adjacent pipeline steps
-/// - wrapping step-local states in a namespaced context view
+/// - recursively flattening composite child ops before runtime starts
+/// - enforcing deterministic import/export wiring across child ops and pipeline steps
+/// - wrapping leaf states in a namespaced context view
 /// - preserving deterministic step ordering by linking sink states to the next step's sources
 ///
-/// Use this planner for the repository's default flattened-composition contract: each pipeline
-/// step expands independently, exports feed later imports, and cross-step ordering is enforced by
-/// dependency edges between sink and source states.
+/// Use this planner for the repository's default flatten-before-runtime contract: pipelines and
+/// composite ops converge to one final flat execution graph, and runtime executes states only.
 #[derive(Clone, Default)]
 pub struct DefaultPipelinePlanner;
 
@@ -333,7 +967,7 @@ impl PipelinePlanner for DefaultPipelinePlanner {
         &self,
         registry: Arc<dyn OperationRegistry>,
         pipeline: &Pipeline,
-        run_config: &mfm_machine::config::RunConfig,
+        run_config: &RunConfig,
     ) -> Result<ExecutionPlan, SdkError> {
         validate_pipeline(pipeline)?;
 
@@ -341,12 +975,7 @@ impl PipelinePlanner for DefaultPipelinePlanner {
         let mut all_edges: Vec<DependencyEdge> = Vec::new();
         let mut seen_state_ids: HashSet<StateId> = HashSet::new();
 
-        // For cross-op wiring: PortKey -> exporting OpPath (last writer wins until the
-        // composite-root lowering lands in the next planner cutover).
-        let mut exports_by_port: HashMap<String, String> = HashMap::new();
-
-        // For step-order enforcement:
-        // Step i sinks must all happen before step i+1 sources.
+        let mut exports_by_port: BTreeMap<String, QualifiedPortRef> = BTreeMap::new();
         let mut step_sources: Vec<Vec<StateId>> = Vec::new();
         let mut step_sinks: Vec<Vec<StateId>> = Vec::new();
 
@@ -360,67 +989,55 @@ impl PipelinePlanner for DefaultPipelinePlanner {
             let op = registry.resolve(op_id, op_version)?;
             let op_path = op_path(&pipeline.machine_id, step_id);
             let planned = op.expand(op_path.clone(), op_config, run_config)?;
-            let OpInterface { imports, exports } = planned.interface.clone();
+            validate_op_interface(&planned.interface)?;
 
-            let mut import_sources: HashMap<String, String> = HashMap::new();
-            for PortKey(k) in imports {
-                let Some(src) = exports_by_port.get(&k) else {
+            let mut import_sources: BTreeMap<String, QualifiedPortRef> = BTreeMap::new();
+            for PortKey(import) in &planned.interface.imports {
+                let Some(source) = exports_by_port.get(import) else {
                     return Err(sdk_error(
                         "unsatisfied_import",
                         ErrorCategory::ParsingInput,
                         "pipeline import was not satisfiable by previous exports",
                     ));
                 };
-                import_sources.insert(k, src.clone());
+                import_sources.insert(import.clone(), source.clone());
             }
 
-            let PlannedOpKind::Leaf(spec) = planned.kind else {
-                return Err(sdk_error(
-                    "composite_op_not_supported",
-                    ErrorCategory::ParsingInput,
-                    "composite planned ops are not supported until recursive flattening lands",
-                ));
-            };
-            validate_leaf_op_spec(&spec, &op_path)?;
+            let fragment = flatten_planned_op(
+                Arc::clone(&registry),
+                op_path.clone(),
+                planned,
+                &op_path,
+                run_config,
+                &import_sources,
+            )?;
 
-            let state_ids: Vec<StateId> = spec
-                .states
-                .iter()
-                .map(|node| node.state_id.clone())
-                .collect();
-
-            // Wrap states to enforce default context namespacing and import wiring.
-            for node in spec.states {
-                if !seen_state_ids.insert(node.state_id.clone()) {
+            for state in &fragment.states {
+                if !seen_state_ids.insert(state.id.clone()) {
                     return Err(sdk_error(
                         "duplicate_state_id",
                         ErrorCategory::ParsingInput,
                         "duplicate StateId across pipeline steps",
                     ));
                 }
-
-                all_states.push(StateNode {
-                    id: node.state_id.clone(),
-                    state: Arc::new(NamespacedState {
-                        op_path: op_path.clone(),
-                        import_sources: import_sources.clone(),
-                        inner: node.state,
-                    }),
-                });
             }
-            all_edges.extend(spec.edges.clone());
 
-            let (sources, sinks) = sources_and_sinks(&state_ids, &spec.edges);
-            step_sources.push(sources);
-            step_sinks.push(sinks);
+            all_states.extend(fragment.states);
+            all_edges.extend(fragment.edges.clone());
+            step_sources.push(fragment.sources);
+            step_sinks.push(fragment.sinks);
 
-            // Update exports after expanding to keep "last writer wins" semantics stable.
-            for PortKey(k) in exports {
-                exports_by_port.insert(k, op_path.0.clone());
+            for (export, source) in fragment.exports {
+                if exports_by_port.insert(export, source).is_some() {
+                    return Err(sdk_error(
+                        "duplicate_export_port",
+                        ErrorCategory::ParsingInput,
+                        "pipeline composition produced duplicate exported ports",
+                    ));
+                }
             }
         }
 
-        // Enforce step order: sinks(step i) -> sources(step i+1).
         for i in 0..step_sources.len().saturating_sub(1) {
             for from in &step_sinks[i] {
                 for to in &step_sources[i + 1] {
@@ -436,7 +1053,7 @@ impl PipelinePlanner for DefaultPipelinePlanner {
             op_id: OpId::must_new(pipeline.machine_id.0.clone()),
             graph: StateGraph {
                 states: all_states,
-                edges: all_edges,
+                edges: dedupe_sorted_edges(all_edges),
             },
         })
     }
@@ -444,7 +1061,7 @@ impl PipelinePlanner for DefaultPipelinePlanner {
 
 struct NamespacedContext<'a> {
     op_path: &'a OpPath,
-    import_sources: &'a HashMap<String, String>,
+    import_sources: &'a HashMap<String, ContextKey>,
     inner: &'a mut dyn DynContext,
 }
 
@@ -454,8 +1071,8 @@ impl NamespacedContext<'_> {
     }
 
     fn qualify_read(&self, key: &ContextKey) -> ContextKey {
-        if let Some(src) = self.import_sources.get(&key.0) {
-            ContextKey(format!("{src}.{}", key.0))
+        if let Some(source) = self.import_sources.get(&key.0) {
+            source.clone()
         } else {
             self.qualify_local(key)
         }
@@ -501,7 +1118,7 @@ impl DynContext for NamespacedContext<'_> {
 
 struct NamespacedState {
     op_path: OpPath,
-    import_sources: HashMap<String, String>,
+    import_sources: HashMap<String, ContextKey>,
     inner: DynState,
 }
 
