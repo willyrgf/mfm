@@ -24,12 +24,90 @@
     esac
   }
 
-  jq_positional_args_json() {
-    if [ "$#" -eq 0 ]; then
-      ${pkgs.jq}/bin/jq -cn '$ARGS.positional'
-    else
-      ${pkgs.jq}/bin/jq -cn '$ARGS.positional' --args -- "$@"
+  json_escape_string() {
+    local value="$1"
+    value="''${value//\\/\\\\}"
+    value="''${value//\"/\\\"}"
+    value="''${value//$'\n'/\\n}"
+    value="''${value//$'\r'/\\r}"
+    value="''${value//$'\t'/\\t}"
+    value="''${value//$'\f'/\\f}"
+    value="''${value//$'\b'/\\b}"
+    printf '%s' "$value"
+  }
+
+  json_quote_string() {
+    printf '"%s"' "$(json_escape_string "$1")"
+  }
+
+  json_string_or_null() {
+    local value="$1"
+    if [ -z "$value" ]; then
+      printf '%s' "null"
+      return 0
     fi
+    json_quote_string "$value"
+  }
+
+  json_number_or_null() {
+    local value="$1"
+    case "$value" in
+      ""|null)
+        printf '%s' "null"
+        ;;
+      -*[!0-9]*|*[!0-9]*)
+        printf '%s' "null"
+        ;;
+      *)
+        printf '%s' "$value"
+        ;;
+    esac
+  }
+
+  json_bool_or_null() {
+    local value="$1"
+    case "$value" in
+      true|false)
+        printf '%s' "$value"
+        ;;
+      *)
+        printf '%s' "null"
+        ;;
+    esac
+  }
+
+  json_object_from_named_env_values() {
+    local env_name=""
+    local first=1
+
+    printf '{'
+    while IFS= read -r env_name; do
+      [ -n "$env_name" ] || continue
+      if [ -z "''${!env_name+x}" ]; then
+        continue
+      fi
+      if [ "$first" -eq 0 ]; then
+        printf ','
+      fi
+      printf '%s:%s' "$(json_quote_string "$env_name")" "$(json_quote_string "''${!env_name}")"
+      first=0
+    done
+    printf '}'
+  }
+
+  positional_args_json() {
+    local first=1
+
+    printf '['
+    while [ "$#" -gt 0 ]; do
+      if [ "$first" -eq 0 ]; then
+        printf ','
+      fi
+      json_quote_string "$1"
+      first=0
+      shift
+    done
+    printf ']'
   }
 
   call_with_array_args() {

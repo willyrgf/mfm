@@ -54,6 +54,8 @@ let
 
     # Prefer summary.json if available
     SUMMARY_JSON=""
+    SUMMARY_FIELDS_FILE=""
+    SUMMARY_STEPS_FILE=""
     TIMING_TOTAL=""
     TIMING_SETUP=""
     TIMING_STEPS=""
@@ -72,51 +74,41 @@ let
       fi
     fi
 
-    if [ -n "$SUMMARY_JSON" ] && command -v ${pkgs.jq}/bin/jq >/dev/null 2>&1; then
+    if [ -n "$SUMMARY_JSON" ]; then
+      SUMMARY_DIR="$(dirname "$SUMMARY_JSON" 2>/dev/null || true)"
+      SUMMARY_FIELDS_FILE="$SUMMARY_DIR/summary.fields"
+      SUMMARY_STEPS_FILE="$SUMMARY_DIR/summary.steps.tsv"
+    fi
+
+    if [ -n "$SUMMARY_JSON" ] && [ -f "$SUMMARY_FIELDS_FILE" ]; then
       echo "Source: $SUMMARY_JSON"
-      ${pkgs.jq}/bin/jq -r '
-        if .steps then
-          .steps[] | "  [\(if .status == "passed" then "PASS" elif .status == "skipped" then "SKIP" elif .status == "failed" then "FAIL" elif .status == "canceled" then "FAIL" else "FAIL" end)] \(.name) (\(.duration // "?")s)"
-        else
-          empty
-        end
-      ' "$SUMMARY_JSON" 2>/dev/null || true
-
-      TIMING_FIELDS=$(${pkgs.jq}/bin/jq -r '
-        if (.timing and (.timing | type == "object")) then
-          [
-            (.timing.total_duration // ""),
-            (.timing.setup_duration // ""),
-            (.timing.steps_duration // ""),
-            (.timing.teardown_duration // ""),
-            (.timing.accounted_duration // ""),
-            (.timing.untracked_duration // "")
-          ] | @tsv
-        else
-          ""
-        end
-      ' "$SUMMARY_JSON" 2>/dev/null || true)
-      if [ -n "$TIMING_FIELDS" ]; then
-        IFS=$'\t' read -r TIMING_TOTAL TIMING_SETUP TIMING_STEPS TIMING_TEARDOWN TIMING_ACCOUNTED TIMING_UNTRACKED <<< "$TIMING_FIELDS"
-        if _is_nonneg_int "$TIMING_TOTAL"; then
-          DURATION="$TIMING_TOTAL"
-        fi
+      . "$SUMMARY_FIELDS_FILE"
+      if [ -f "$SUMMARY_STEPS_FILE" ]; then
+        while IFS=$'\t' read -r step_name step_status step_duration; do
+          [ -n "$step_name" ] || continue
+          case "$step_status" in
+            passed) step_marker="PASS" ;;
+            skipped) step_marker="SKIP" ;;
+            failed|canceled) step_marker="FAIL" ;;
+            *) step_marker="FAIL" ;;
+          esac
+          echo "  [$step_marker] $step_name (''${step_duration:-?}s)"
+        done < "$SUMMARY_STEPS_FILE"
       fi
 
-      PAR_FIELDS=$(${pkgs.jq}/bin/jq -r '
-        if (.timing.parallelism and (.timing.parallelism | type == "object")) then
-          [
-            (.timing.parallelism.max_workers // ""),
-            (.timing.parallelism.peak_workers // ""),
-            (.timing.parallelism.canceled_count // "")
-          ] | @tsv
-        else
-          ""
-        end
-      ' "$SUMMARY_JSON" 2>/dev/null || true)
-      if [ -n "$PAR_FIELDS" ]; then
-        IFS=$'\t' read -r PAR_MAX_WORKERS PAR_PEAK_WORKERS PAR_CANCELED_COUNT <<< "$PAR_FIELDS"
+      TIMING_TOTAL="''${SUMMARY_TOTAL_DURATION:-}"
+      TIMING_SETUP="''${SUMMARY_SETUP_DURATION:-}"
+      TIMING_STEPS="''${SUMMARY_STEPS_DURATION:-}"
+      TIMING_TEARDOWN="''${SUMMARY_TEARDOWN_DURATION:-}"
+      TIMING_ACCOUNTED="''${SUMMARY_ACCOUNTED_DURATION:-}"
+      TIMING_UNTRACKED="''${SUMMARY_UNTRACKED_DURATION:-}"
+      if _is_nonneg_int "$TIMING_TOTAL"; then
+        DURATION="$TIMING_TOTAL"
       fi
+
+      PAR_MAX_WORKERS="''${SUMMARY_PARALLEL_MAX_WORKERS:-}"
+      PAR_PEAK_WORKERS="''${SUMMARY_PARALLEL_PEAK_WORKERS:-}"
+      PAR_CANCELED_COUNT="''${SUMMARY_PARALLEL_CANCELED_COUNT:-}"
     fi
 
     if _is_nonneg_int "$DURATION"; then
@@ -136,8 +128,8 @@ let
     fi
 
     SKIPPED_COUNT=""
-    if [ -n "$SUMMARY_JSON" ] && command -v ${pkgs.jq}/bin/jq >/dev/null 2>&1; then
-      SKIPPED_COUNT="$(${pkgs.jq}/bin/jq -r '.counts.skipped // ""' "$SUMMARY_JSON" 2>/dev/null || true)"
+    if [ -n "$SUMMARY_FIELDS_FILE" ] && [ -f "$SUMMARY_FIELDS_FILE" ]; then
+      SKIPPED_COUNT="''${SUMMARY_SKIPPED_COUNT:-}"
     fi
     if _is_nonneg_int "$SKIPPED_COUNT" && [ "$SKIPPED_COUNT" -gt 0 ]; then
       log_info "SKIP: $SKIPPED_COUNT task(s) skipped"

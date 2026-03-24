@@ -31,6 +31,10 @@ let
     _nixfied_emit_to_terminal() {
       local to_stderr="$1"
       local message="$2"
+      if [ -n "''${NIXFIED_MACHINE_OUTPUT_FILE:-}" ] || [ -n "''${NIXFIED_MACHINE_OUTPUT_FD:-}" ]; then
+        printf '%s\n' "$message" >&2
+        return 0
+      fi
       if [ "$to_stderr" = "1" ]; then
         printf '%s\n' "$message" >&2
       else

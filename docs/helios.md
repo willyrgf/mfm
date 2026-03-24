@@ -8,7 +8,8 @@ Helios is consumed by the restored Nixfied app:
 
 ```bash
 export MFM_ENV=dev
-export SERVICE_REUSE_POLICY=same-slot
+export SERVICE_OWNER_SCOPE=persistent
+export SERVICE_DISCOVERY_SCOPE=global
 export HELIOS_NETWORK=mainnet
 nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json
 ```
@@ -51,11 +52,10 @@ nix run .#health -- --service helios --source local
 
 `mfm::portfolio::snapshot` respects process policy envs:
 
-- `SERVICE_REUSE_POLICY=never|same-root|same-slot|cross-run`
 - `SERVICE_OWNER_SCOPE=ephemeral|persistent`
 - `SERVICE_DISCOVERY_SCOPE=local|global`
 
-Legacy `MFM_KEEP_SERVICES` is rejected.
+`SERVICE_REUSE_POLICY` and legacy `MFM_KEEP_SERVICES` are rejected by this command.
 
 The helper tasks are internal implementation details. This repo does not expose
 custom project-owned `service::*::start` wrappers for Postgres or Helios.
@@ -98,12 +98,12 @@ packaged once through `conf.packages."mfm-cli"` and reused by both
 
 ## Project Wiring
 
-Helios configuration lives in `nixfied/project/conf.nix` under `modules.helios`.
-Canonical service metadata now lives in `nixfied/project/conf.nix` under `services.helios`
-(`sources`, `defaultSource`, `sourceKinds`, readiness policy, and port keys).
+Helios configuration lives in `nixfied/project/conf.nix` under `services.helios`
+(`sources`, `defaultSource`, `sourceKinds`, readiness policy, port keys, and
+network defaults).
 
-- `services.helios` in `nixfied/project/module.nix` is sourced from `conf.services.helios` (with module fallbacks).
-- `modules.helios.package` defaults to `pkgs.helios` when available.
+- `services.helios` in `nixfied/project/module.nix` is sourced directly from `conf.services.helios`.
+- `services.helios.sources.local.package` is the authoritative local Helios package setting.
 - The local source is explicitly marked `real`, and framework readiness uses the `strict`
   profile so `ready -- --service helios --source local` rejects shim or unknown source kinds.
 

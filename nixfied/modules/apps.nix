@@ -65,12 +65,7 @@ in
             };
 
             validation = {
-              schema = lib.mkOption {
-                type = t.nullOr t.anything;
-                default = null;
-              };
-
-              command = lib.mkOption {
+              contractRef = lib.mkOption {
                 type = t.str;
                 default = "";
               };

@@ -7,6 +7,7 @@
   serviceSets,
   tasks,
   workflows,
+  contractBundle,
 }:
 let
   rawApps = resolved.apps or { };
@@ -71,9 +72,14 @@ let
       targetArgs = raw.targetArgs or [ ];
       setupAppIds = normalizeAppRefs (raw.setupAppIds or [ ]);
       teardownAppIds = normalizeAppRefs (raw.teardownAppIds or [ ]);
+      contractRef = ((raw.validation or { }).contractRef or "");
       validationSchema =
-        if (((raw.validation or { }).schema or null)) == null then null else (raw.validation or { }).schema;
-      validationCommand = ((raw.validation or { }).command or "");
+        if contractRef == "" then
+          null
+        else if builtins.hasAttr contractRef contractBundle.validationSchemas then
+          contractBundle.validationSchemas.${contractRef}
+        else
+          throw "nixfied apps: machineOutput app '${appId}' references unknown contractRef '${contractRef}'";
       targetPreview = if targetAppId != "" && appExists targetAppId then appPreview targetAppId else null;
       referencedAppIds =
         setupAppIds ++ teardownAppIds ++ lib.optionals (targetAppId != "") [ targetAppId ];
@@ -141,6 +147,8 @@ let
     else if kind == "machineOutput" then
       if targetAppId == "" then
         throw "nixfied apps: machineOutput app '${appId}' must set targetAppId"
+      else if contractRef == "" then
+        throw "nixfied apps: machineOutput app '${appId}' must set validation.contractRef"
       else if targetAppId == appId then
         throw "nixfied apps: machineOutput app '${appId}' cannot target itself"
       else if unknownReferencedAppIds != [ ] then
@@ -156,8 +164,10 @@ let
           setupAppIds = setupAppIds;
           teardownAppIds = teardownAppIds;
           validation = {
+            inherit contractRef;
+          }
+          // lib.optionalAttrs (validationSchema != null) {
             schema = validationSchema;
-            command = validationCommand;
           };
           summary = if (raw.summary or "") != "" then raw.summary else machineSummary;
           description =

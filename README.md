@@ -137,11 +137,10 @@ nix run .#ci -- --mode <mode> --summary
   - `nix run .#ready -- --service helios --source local`
   - `nix run .#health -- --service all`
 - Policy controls (optional overrides):
-  - `SERVICE_REUSE_POLICY=never|same-root|same-slot|cross-run`
   - `SERVICE_OWNER_SCOPE=ephemeral|persistent`
   - `SERVICE_DISCOVERY_SCOPE=local|global`
 - Migration note:
-  - `MFM_KEEP_SERVICES` has been removed from `mfm::portfolio::snapshot`.
+  - `SERVICE_REUSE_POLICY` and `MFM_KEEP_SERVICES` are rejected by `mfm::portfolio::snapshot`.
   - Preserve or tear down snapshot-managed services via `SERVICE_*` policy envs on `mfm::portfolio::snapshot`; the underlying workflow and lifecycle tasks are internal.
 
 ### Run binaries:

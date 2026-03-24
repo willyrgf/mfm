@@ -25,6 +25,11 @@
     printf '%s/%s' "$root" "$REGISTRY_EVENTS_FILE_NAME"
   }
 
+  registry_events_index_file() {
+    local root="$1"
+    printf '%s/%s' "$root" "$REGISTRY_EVENTS_INDEX_FILE_NAME"
+  }
+
   registry_events_lock_file() {
     local root="$1"
     printf '%s/%s' "$(registry_locks_dir "$root")" "$REGISTRY_EVENTS_LOCK_FILE_NAME"

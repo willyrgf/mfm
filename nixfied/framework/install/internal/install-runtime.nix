@@ -5,7 +5,9 @@
   frameworkRevision ? "unknown",
   frameworkRoot,
   promptPlanScript,
-  templateFilterPlanDataJson,
+  templateFilterRequiredKeysShell,
+  templateFilterOptionalEntriesShell,
+  templateFilterTokenEntriesShell,
 }:
 
 pkgs.writeText "nixfied-install-runtime.sh" ''
@@ -14,65 +16,120 @@ pkgs.writeText "nixfied-install-runtime.sh" ''
   }
 
   FRAMEWORK_ROOT=${pkgs.lib.escapeShellArg frameworkRoot}
-  PROJECT_TEMPLATE_FILTER_PLAN_DATA_JSON=${pkgs.lib.escapeShellArg templateFilterPlanDataJson}
+  PROJECT_TEMPLATE_REQUIRED_KEYS=( ${templateFilterRequiredKeysShell} )
+  PROJECT_TEMPLATE_OPTIONAL_ENTRIES=( ${templateFilterOptionalEntriesShell} )
+  PROJECT_TEMPLATE_TOKEN_ENTRIES=( ${templateFilterTokenEntriesShell} )
+
+  array_contains() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+      if [ "$item" = "$needle" ]; then
+        return 0
+      fi
+    done
+    return 1
+  }
+
+  token_key_from_entry() {
+    local entry="$1"
+    printf '%s' "''${entry%%$'\t'*}"
+  }
+
+  value_key_from_entry() {
+    local entry="$1"
+    printf '%s' "''${entry#*$'\t'}"
+  }
+
+  template_key_for_token() {
+    local token="$1"
+    local entry entry_token entry_key
+    for entry in "''${PROJECT_TEMPLATE_TOKEN_ENTRIES[@]}"; do
+      entry_token="$(token_key_from_entry "$entry")"
+      entry_key="$(value_key_from_entry "$entry")"
+      if [ "$entry_token" = "$token" ]; then
+        printf '%s' "$entry_key"
+        return 0
+      fi
+    done
+    return 1
+  }
 
   compute_template_filter_plan() {
     local filters_raw="$1"
+    local raw_token token matched_key entry template_key template_file
+    local selected_keys=()
+    local keep_keys=()
+    local default_nix_lines=()
 
-    printf '%s' "$PROJECT_TEMPLATE_FILTER_PLAN_DATA_JSON" | ${pkgs.jq}/bin/jq -c --arg filtersRaw "$filters_raw" '
-      . as $data
-      | ($data.requiredKeys // []) as $requiredKeys
-      | ($data.optionalTemplates // []) as $optionalTemplates
-      | ($data.tokenToKey // {}) as $tokenToKey
-      | ($filtersRaw | split(",") | map(ascii_downcase) | map(select(length > 0))) as $tokens
-      | reduce $tokens[] as $token (
-          {
-            unknown: [],
-            selectedKeys: []
-          };
-          ([ $tokenToKey[$token] ] | map(select(. != null)) | first) as $matchedKey
-          | if $matchedKey == null then
-              .unknown += [ $token ]
-            else
-              .selectedKeys += [ $matchedKey ]
-            end
-        )
-      | .selectedKeys |= (unique | sort)
-      | .keepKeys = (($requiredKeys + .selectedKeys) | unique | sort)
-      | .keepKeys as $keepKeys
-      | .pruneFiles = [
-          $optionalTemplates[]
-          | .key as $templateKey
-          | select(($keepKeys | index($templateKey)) == null)
-          | .file
-        ]
-      | .defaultNix = (
-          [
-            "{ pkgs ? null }:",
-            "",
-            "let",
-            "  conf = import ./conf.nix { inherit pkgs; };",
-            "  project = conf.project or { };",
-            "  frameworkLib = import ../framework/runtime/helpers { inherit pkgs; project = conf; };",
-            "  commandLib = import ./lib/command.nix { inherit project; appApi = frameworkLib.appApi; };",
-            "  mkPart = path: import path { inherit pkgs project commandLib; };",
-            "  parts = [",
-            "    conf"
-          ]
-          + [
-            $optionalTemplates[]
-            | .key as $templateKey
-            | select(($keepKeys | index($templateKey)) != null)
-            | "    (mkPart ./\(.file))"
-          ]
-          + [
-            "  ];",
-            "in",
-            "pkgs.lib.foldl\u0027 pkgs.lib.recursiveUpdate { } parts"
-          ]
-          | join("\n")
-        )
-    '
+    FILTER_PLAN_UNKNOWN=()
+    FILTER_PLAN_PRUNE_FILES=()
+    FILTER_PLAN_DEFAULT_NIX=""
+
+    if [ -n "$filters_raw" ]; then
+      local IFS=','
+      # shellcheck disable=SC2206
+      local tokens=( $filters_raw )
+      for raw_token in "''${tokens[@]}"; do
+        token="''${raw_token,,}"
+        if [ -z "$token" ]; then
+          continue
+        fi
+        if matched_key="$(template_key_for_token "$token")"; then
+          if ! array_contains "$matched_key" "''${selected_keys[@]}"; then
+            selected_keys+=("$matched_key")
+          fi
+        else
+          FILTER_PLAN_UNKNOWN+=("$token")
+        fi
+      done
+    fi
+
+    for matched_key in "''${PROJECT_TEMPLATE_REQUIRED_KEYS[@]}"; do
+      keep_keys+=("$matched_key")
+    done
+    for matched_key in "''${selected_keys[@]}"; do
+      if ! array_contains "$matched_key" "''${keep_keys[@]}"; then
+        keep_keys+=("$matched_key")
+      fi
+    done
+
+    default_nix_lines=(
+      "{ pkgs ? null }:"
+      ""
+      "let"
+      "  conf = import ./conf.nix { inherit pkgs; };"
+      "  project = conf.project or { };"
+      "  frameworkLib = import ../framework/runtime/helpers { inherit pkgs; project = conf; };"
+      "  commandLib = import ./lib/command.nix { inherit project; appApi = frameworkLib.appApi; };"
+      "  mkPart = path: import path { inherit pkgs project commandLib; };"
+      "  parts = ["
+      "    conf"
+    )
+
+    for entry in "''${PROJECT_TEMPLATE_OPTIONAL_ENTRIES[@]}"; do
+      template_key="$(token_key_from_entry "$entry")"
+      template_file="$(value_key_from_entry "$entry")"
+      if array_contains "$template_key" "''${keep_keys[@]}"; then
+        default_nix_lines+=("    (mkPart ./$template_file)")
+      else
+        FILTER_PLAN_PRUNE_FILES+=("$template_file")
+      fi
+    done
+
+    default_nix_lines+=(
+      "  ];"
+      "in"
+      "pkgs.lib.foldl' pkgs.lib.recursiveUpdate { } parts"
+    )
+
+    for entry in "''${default_nix_lines[@]}"; do
+      if [ -n "$FILTER_PLAN_DEFAULT_NIX" ]; then
+        FILTER_PLAN_DEFAULT_NIX="$FILTER_PLAN_DEFAULT_NIX"$'\n'
+      fi
+      FILTER_PLAN_DEFAULT_NIX="$FILTER_PLAN_DEFAULT_NIX$entry"
+    done
   }
 
   print_install_usage() {

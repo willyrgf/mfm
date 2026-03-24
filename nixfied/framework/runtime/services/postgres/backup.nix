@@ -8,12 +8,49 @@
 }:
 
 let
+  commonRuntimeShell = import ../../common-runtime.nix { inherit pkgs; };
   runtimeDefaults = import ../../../core/runtime-defaults.nix;
   dataDirName = config.dataDirName or "postgres";
   pgdataExpr = slots.getServiceDir dataDirName;
   postgres = config.package or pkgs.postgresql_16;
   portKey = config.portKey or "postgres";
   portVar = slots.portVarName portKey;
+  backupManifestShell = ''
+    ${commonRuntimeShell}
+
+    write_backup_manifest_fields() {
+      local path="$1"
+      shift
+      local content=""
+      local key=""
+      local value=""
+      local line=""
+
+      while [ "$#" -gt 1 ]; do
+        key="$1"
+        value="$2"
+        shift 2
+        printf -v line '%s=%q' "$key" "$value"
+        if [ -n "$content" ]; then
+          content="$content"$'\n'
+        fi
+        content="$content$line"
+      done
+
+      write_text_file_atomic "$path" "$content"
+    }
+
+    load_backup_manifest_fields() {
+      local path="$1"
+      if [ ! -f "$path" ]; then
+        return 1
+      fi
+
+      unset name timestamp git_commit git_branch pgport slot env created_at
+      # shellcheck disable=SC1090
+      source "$path"
+    }
+  '';
 
   archiveWal = pkgs.writeShellScript "postgres-archive-wal" ''
     ${loggingPrelude}
@@ -59,6 +96,7 @@ let
 
   backup = pkgs.writeShellScript "postgres-backup" ''
     ${loggingPrelude}
+    ${backupManifestShell}
 
     set -euo pipefail
     source <(${slots.getSlotInfo})
@@ -85,27 +123,28 @@ let
     ${postgres}/bin/pg_basebackup -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres -D "$BACKUP_PATH" -Ft -z -P
 
     # Write backup manifest
-    ${pkgs.jq}/bin/jq -n \
-      --arg name "$BACKUP_NAME" \
-      --arg timestamp "$TIMESTAMP" \
-      --arg git_commit "$GIT_COMMIT" \
-      --arg git_branch "$GIT_BRANCH" \
-      --arg pgport "$PGPORT" \
-      --arg slot "''${SLOT:-}" \
-      --arg env "''${ENV:-}" \
-      --arg created_at "$CREATED_AT" \
-      '
-      {
-        name: $name,
-        timestamp: $timestamp,
-        git_commit: $git_commit,
-        git_branch: $git_branch,
-        pgport: $pgport,
-        slot: (if $slot == "" then null else $slot end),
-        env: (if $env == "" then null else $env end),
-        created_at: $created_at
-      }
-      ' > "$BACKUP_PATH.manifest.json"
+    {
+      printf '{'
+      printf '"name":%s' "$(json_quote_string "$BACKUP_NAME")"
+      printf ',"timestamp":%s' "$(json_quote_string "$TIMESTAMP")"
+      printf ',"git_commit":%s' "$(json_quote_string "$GIT_COMMIT")"
+      printf ',"git_branch":%s' "$(json_quote_string "$GIT_BRANCH")"
+      printf ',"pgport":%s' "$(json_quote_string "$PGPORT")"
+      printf ',"slot":%s' "$(json_string_or_null "''${SLOT:-}")"
+      printf ',"env":%s' "$(json_string_or_null "''${ENV:-}")"
+      printf ',"created_at":%s' "$(json_quote_string "$CREATED_AT")"
+      printf '}\n'
+    } > "$BACKUP_PATH.manifest.json"
+    write_backup_manifest_fields \
+      "$BACKUP_PATH.manifest.fields" \
+      name "$BACKUP_NAME" \
+      timestamp "$TIMESTAMP" \
+      git_commit "$GIT_COMMIT" \
+      git_branch "$GIT_BRANCH" \
+      pgport "$PGPORT" \
+      slot "''${SLOT:-}" \
+      env "''${ENV:-}" \
+      created_at "$CREATED_AT"
 
     log_ok "Backup created: $BACKUP_PATH"
     echo "   Manifest: $BACKUP_PATH.manifest.json"
@@ -222,6 +261,7 @@ let
   '';
 
   listBackups = pkgs.writeShellScript "postgres-list-backups" ''
+    ${backupManifestShell}
     set -euo pipefail
     source <(${slots.getSlotInfo})
 
@@ -234,11 +274,16 @@ let
 
     echo "PostgreSQL backups (slot $SLOT, env $ENV):"
     echo ""
-    for manifest in "$BACKUP_DIR"/*.manifest.json; do
-      [ -f "$manifest" ] || continue
-      NAME=$(basename "$manifest" .manifest.json)
-      CREATED=$(${pkgs.jq}/bin/jq -r '.created_at // "unknown"' "$manifest" 2>/dev/null || echo "unknown")
-      COMMIT=$(${pkgs.jq}/bin/jq -r '.git_commit // "unknown"' "$manifest" 2>/dev/null || echo "unknown")
+    for manifest_fields in "$BACKUP_DIR"/*.manifest.fields; do
+      [ -f "$manifest_fields" ] || continue
+      NAME=$(basename "$manifest_fields" .manifest.fields)
+      if load_backup_manifest_fields "$manifest_fields"; then
+        CREATED="''${created_at:-unknown}"
+        COMMIT="''${git_commit:-unknown}"
+      else
+        CREATED="unknown"
+        COMMIT="unknown"
+      fi
       echo "  $NAME (created: $CREATED, commit: $COMMIT)"
     done
   '';
@@ -301,7 +346,7 @@ let
     TO_REMOVE=$((BACKUP_COUNT - KEEP))
     log_info "Removing $TO_REMOVE old backups (keeping newest $KEEP)"
     ls -dt "$BACKUP_DIR"/backup-* | tail -n "$TO_REMOVE" | while read -r dir; do
-      rm -rf "$dir" "$dir.manifest.json"
+      rm -rf "$dir" "$dir.manifest.json" "$dir.manifest.fields"
       echo "   Removed: $(basename "$dir")"
     done
   '';

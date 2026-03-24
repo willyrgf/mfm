@@ -187,7 +187,7 @@ in
         NIXFIED_RUNTIME_REGISTRY_ROOT|NIXFIED_RUNTIME_ARTIFACTS_DIR|NIXFIED_RUNTIME_SERVICE_ROOT)
           return 0
           ;;
-        NIXFIED_MODEL_FILE|NIXFIED_RUN_ID)
+        NIXFIED_MODEL_FILE|NIXFIED_RUN_ID|NIXFIED_MACHINE_OUTPUT_FILE|NIXFIED_MACHINE_OUTPUT_FD)
           return 0
           ;;
         NIXFIED_EXECUTOR_BIN|NIXFIED_ORCHESTRATOR_BIN|NIXFIED_EXECUTOR_SELF|NIXFIED_ORCHESTRATOR_SELF)
@@ -225,53 +225,16 @@ in
     }
 
     load_runtime_plan() {
-      local runtime_json="$1"
-      local runtime_plan_shell=""
+      local runtime_plan_shell="$1"
 
-      runtime_plan_shell="$(
-        printf '%s' "$runtime_json" | ${pkgs.jq}/bin/jq -r '
-          def emit($name; $value): "\($name)=\($value | @sh)";
-          . as $runtime
-          | ($runtime.env // {}) as $env
-          | [
-              emit("runtime_inputs_path"; (($runtime.runtimeInputs // []) | map(. + "/bin") | join(":"))),
-              emit("locale"; ($runtime.locale // "C.UTF-8")),
-              emit("timezone"; ($runtime.timezone // "UTC")),
-              emit("umask_value"; ($runtime.umask // "022")),
-              emit("allow_sensitive_pass_through"; (if ($runtime.allowSensitivePassThrough // false) then "1" else "0" end)),
-              emit("workdir_kind"; ($runtime.workdir // "projectRoot")),
-              emit("custom_workdir"; ($runtime.customWorkdir // "")),
-              emit("task_log_level_default"; ($runtime.logging.levelDefault // "")),
-              emit("task_output_mode_default"; ($runtime.logging.outputDefault // "")),
-              emit("runtime_env_tsv"; (($env | to_entries | map([.key, (.value | tostring)] | @tsv) | join("\n")))),
-              emit("pass_through_env_tsv"; (($runtime.passThroughEnv // []) | join("\n"))),
-              emit("runtime_log_level_set"; (if ($env | has("LOG_LEVEL")) then "1" else "0" end)),
-              emit("runtime_log_level_alias_set"; (if ($env | has("NIXFIED_LOG_LEVEL")) then "1" else "0" end)),
-              emit("runtime_log_level_value"; (if ($env | has("LOG_LEVEL")) then ($env.LOG_LEVEL | tostring) else "" end)),
-              emit("runtime_log_level_alias_value"; (if ($env | has("NIXFIED_LOG_LEVEL")) then ($env.NIXFIED_LOG_LEVEL | tostring) else "" end)),
-              emit("runtime_output_mode_set"; (if ($env | has("OUTPUT_MODE")) then "1" else "0" end)),
-              emit("runtime_output_mode_alias_set"; (if ($env | has("NIXFIED_OUTPUT_MODE")) then "1" else "0" end)),
-              emit("runtime_output_mode_value"; (if ($env | has("OUTPUT_MODE")) then ($env.OUTPUT_MODE | tostring) else "" end)),
-              emit("runtime_output_mode_alias_value"; (if ($env | has("NIXFIED_OUTPUT_MODE")) then ($env.NIXFIED_OUTPUT_MODE | tostring) else "" end)),
-              emit("runtime_log_file_set"; (if ($env | has("NIXFIED_LOG_FILE")) then "1" else "0" end)),
-              emit("runtime_log_file_value"; (if ($env | has("NIXFIED_LOG_FILE")) then ($env.NIXFIED_LOG_FILE | tostring) else "" end)),
-              emit("runtime_has_rust_log"; (if ($env | has("RUST_LOG")) then "1" else "0" end)),
-              emit("runtime_has_mfm_log"; (if ($env | has("MFM_LOG")) then "1" else "0" end)),
-              emit("runtime_has_mfm_test_log_filter"; (if ($env | has("MFM_TEST_LOG_FILTER")) then "1" else "0" end)),
-              emit("runtime_has_mfm_test_log"; (if ($env | has("MFM_TEST_LOG")) then "1" else "0" end))
-            ]
-          | .[]
-        '
-      )" || {
-        echo "ERROR: failed to parse runtime plan"
+      if ! eval "$runtime_plan_shell"; then
+        echo "ERROR: failed to load runtime plan"
         return 1
-      }
-
-      eval "$runtime_plan_shell"
+      fi
     }
 
     run_in_sandbox_runtime() {
-      local runtime_json="$1"
+      local runtime_plan_shell="$1"
       shift
       local command="$1"
       shift
@@ -419,7 +382,7 @@ in
         printf '%s' "$effective_root"
       }
 
-      load_runtime_plan "$runtime_json" || return 1
+      load_runtime_plan "$runtime_plan_shell" || return 1
 
       runtime_path="$ENV_SANDBOX_STATIC_RUNTIME_PACKAGES_PATH"
       if [ -n "$runtime_inputs_path" ]; then
@@ -430,7 +393,7 @@ in
         fi
       fi
 
-      base_path="${pkgs.coreutils}/bin:${pkgs.findutils}/bin:${pkgs.gnused}/bin:${pkgs.gnugrep}/bin:${pkgs.jq}/bin:${pkgs.bash}/bin"
+      base_path="${pkgs.coreutils}/bin:${pkgs.findutils}/bin:${pkgs.gnused}/bin:${pkgs.gnugrep}/bin:${pkgs.bash}/bin"
       if [ -n "$runtime_path" ]; then
         final_path="$runtime_path:$base_path"
       else
@@ -803,6 +766,12 @@ in
       if [ -n "''${NIXFIED_RUN_ID:-}" ]; then
         env_cmd+=("NIXFIED_RUN_ID=$NIXFIED_RUN_ID")
       fi
+      if [ -n "''${NIXFIED_MACHINE_OUTPUT_FILE:-}" ]; then
+        env_cmd+=("NIXFIED_MACHINE_OUTPUT_FILE=$NIXFIED_MACHINE_OUTPUT_FILE")
+      fi
+      if [ -n "''${NIXFIED_MACHINE_OUTPUT_FD:-}" ]; then
+        env_cmd+=("NIXFIED_MACHINE_OUTPUT_FD=$NIXFIED_MACHINE_OUTPUT_FD")
+      fi
       if [ -n "''${NIX_BUILD_TOP:-}" ]; then
         env_cmd+=("NIX_BUILD_TOP=$NIX_BUILD_TOP")
       fi
@@ -938,12 +907,10 @@ in
     }
 
     run_in_sandbox() {
-      local task_json="$1"
+      local runtime_plan_shell="$1"
       shift
       local command="$1"
       shift
-      local runtime_json
-      runtime_json="$(printf '%s' "$task_json" | ${pkgs.jq}/bin/jq -c '.runtime')"
-      run_in_sandbox_runtime "$runtime_json" "$command" "$@"
+      run_in_sandbox_runtime "$runtime_plan_shell" "$command" "$@"
     }
 ''

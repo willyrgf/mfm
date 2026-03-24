@@ -62,6 +62,20 @@ in
       default = { };
     };
 
+    contracts = {
+      version = lib.mkOption {
+        type = t.int;
+        default = 1;
+        description = "Version for the compiled contract bundle.";
+      };
+
+      definitions = lib.mkOption {
+        type = t.attrsOf t.anything;
+        default = { };
+        description = "Project-owned machine contract definitions compiled into the shared contract bundle.";
+      };
+    };
+
     graph = {
       excludedServices = lib.mkOption {
         type = t.listOf (t.enum serviceConfigLib.supportedServiceNames);

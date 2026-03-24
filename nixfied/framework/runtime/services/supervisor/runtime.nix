@@ -37,13 +37,13 @@ let
   slotPrelude = ''
     ${slotEnvRuntime.loadJsonFromCommand {
       outVar = "SLOT_INFO_JSON_OUT";
-      command = toString slots.getSlotInfoJson;
+      command = toString slots.getSlotInfo;
       exportVars = false;
     }}
     ${slotEnvRuntime.readJsonField {
       targetVar = "RUN_DIR";
       jsonVar = "SLOT_INFO_JSON_OUT";
-      jqExpr = ".directories.run";
+      fieldExpr = ".directories.run";
     }}
   '';
 
@@ -51,7 +51,7 @@ let
     ${slotEnvRuntime.readJsonField {
       targetVar = "LOG_DIR";
       jsonVar = "SLOT_INFO_JSON_OUT";
-      jqExpr = ".directories.log";
+      fieldExpr = ".directories.log";
     }}
   '';
 

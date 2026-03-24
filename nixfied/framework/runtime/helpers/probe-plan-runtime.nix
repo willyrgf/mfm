@@ -233,7 +233,7 @@ let
                 probeCommands.jsonRpcFieldCmd {
                   urlExpr = probeCommands.localHttpUrlExpr portExpr;
                   method = "eth_syncing";
-                  jqExpr = ".result";
+                  fieldExpr = ".result";
                   raw = false;
                 }
               })" || true

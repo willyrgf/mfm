@@ -6,8 +6,9 @@
     builtins.foldl' (
       acc: event:
       let
-        taskId = event.taskId or "";
-        workflowId = event.workflowId or "";
+        payload = event.payload or { };
+        taskId = payload.taskId or "";
+        workflowId = payload.workflowId or "";
         key = if taskId != "" then "task:${taskId}" else "workflow:${workflowId}";
       in
       if taskId == "" && workflowId == "" then
@@ -15,7 +16,7 @@
       else
         acc
         // {
-          ${key} = event.state;
+          ${key} = payload.state;
         }
     ) { } events;
 }

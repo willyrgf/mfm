@@ -1,11 +1,18 @@
-# Shared shell snippets for loading slot/env runtime context from JSON helpers.
+# Shared shell snippets for loading slot/env runtime context from compiled shell assignments.
 { pkgs }:
 
 let
   lib = pkgs.lib;
-  jqBin = "${pkgs.jq}/bin/jq";
 in
 rec {
+  evalAssignments =
+    {
+      assignmentsVar,
+    }:
+    ''
+      eval "${"$" + assignmentsVar}"
+    '';
+
   loadSlotEnvFromJson =
     {
       jsonVar,
@@ -13,19 +20,13 @@ rec {
       envVar ? "ENV",
     }:
     ''
-      eval "$(
-        ${jqBin} -r \
-          --arg slotVar ${lib.escapeShellArg slotVar} \
-          --arg envVar ${lib.escapeShellArg envVar} \
-          '
-            def emit($name; $value): "\($name)=\($value | @sh)";
-            [
-              emit($slotVar; (.slot // "")),
-              emit($envVar; (.env // ""))
-            ]
-            | .[]
-          ' <<<"${"$" + jsonVar}"
-      )"
+      ${evalAssignments { assignmentsVar = jsonVar; }}
+      ${lib.optionalString (slotVar != "SLOT") ''
+        ${slotVar}="''${SLOT:-}"
+      ''}
+      ${lib.optionalString (envVar != "ENV") ''
+        ${envVar}="''${ENV:-}"
+      ''}
     '';
 
   exportVarsFromJson =
@@ -33,14 +34,7 @@ rec {
       jsonVar,
     }:
     ''
-      eval "$(
-        ${jqBin} -r '
-          (.vars // {})
-          | to_entries
-          | map("export " + .key + "=" + (.value | tostring | @sh))
-          | .[]
-        ' <<<"${"$" + jsonVar}"
-      )"
+      ${evalAssignments { assignmentsVar = jsonVar; }}
     '';
 
   loadSlotEnvAndVarsFromJson =
@@ -94,10 +88,33 @@ rec {
     {
       targetVar,
       jsonVar,
-      jqExpr,
+      fieldExpr,
     }:
     ''
-      ${targetVar}="$(${jqBin} -r ${lib.escapeShellArg jqExpr} <<<"${"$" + jsonVar}")"
+      ${evalAssignments { assignmentsVar = jsonVar; }}
+      __slot_info_field_var=""
+      case ${lib.escapeShellArg fieldExpr} in
+        .slot)
+          __slot_info_field_var="SLOT"
+          ;;
+        .env)
+          __slot_info_field_var="ENV"
+          ;;
+        .directories.run)
+          __slot_info_field_var="RUN_DIR"
+          ;;
+        .directories.log)
+          __slot_info_field_var="LOG_DIR"
+          ;;
+        .directories.config)
+          __slot_info_field_var="CONFIG_DIR"
+          ;;
+        *)
+          echo "ERROR: unsupported slot info expression ${fieldExpr}" >&2
+          exit 1
+          ;;
+      esac
+      ${targetVar}="''${!__slot_info_field_var:-}"
     '';
 
   readPortFromJson =
@@ -107,7 +124,9 @@ rec {
       keyExpr,
     }:
     ''
-      ${targetVar}="$(${jqBin} -r --arg key "${keyExpr}" '.ports[$key] // empty' <<<"${"$" + jsonVar}")"
+      ${evalAssignments { assignmentsVar = jsonVar; }}
+      __slot_info_port_var="${keyExpr}"
+      ${targetVar}="''${!__slot_info_port_var:-}"
     '';
 
   requireSlotEnvJson =

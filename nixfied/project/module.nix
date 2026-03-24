@@ -15,6 +15,7 @@ let
       ;
   };
   skipPolicy = import ../framework/runtime/helpers/skip-policy.nix { inherit pkgs; };
+  servicePolicy = import ../framework/runtime/helpers/service-policy.nix { inherit pkgs; };
 
   envNames = builtins.attrNames conf.envs;
   envOffsets = lib.mapAttrs (_: value: value.offset or 0) conf.envs;
@@ -102,55 +103,34 @@ let
     mockErc20ArtifactProgram
   ];
   leanRuntimeInputs = coreRuntimeInputs;
-  postgresPackage = conf.modules.postgres.package or pkgs.postgresql_16;
-  minioPackage = conf.modules.minio.package or pkgs.minio;
-  minioClientPackage = conf.modules.minio.clientPackage or pkgs.minio-client;
-  rethPackage = conf.modules.reth.package or pkgs.reth;
-
-  minioRootUser = conf.modules.minio.rootUser or "minio";
-  minioRootPassword = conf.modules.minio.rootPassword or "minio123456";
   configuredServices = conf.services or { };
   postgresService = configuredServices.postgres or { };
   nginxService = configuredServices.nginx or { };
   minioService = configuredServices.minio or { };
   rethService = configuredServices.reth or { };
   heliosService = configuredServices.helios or { };
-  mergeLocalSourceDefaults =
-    localDefaults: serviceSources: lib.recursiveUpdate { local = localDefaults; } serviceSources;
-
-  # The upgraded framework resolves service packages from the selected source.
-  postgresSources = mergeLocalSourceDefaults (lib.optionalAttrs
-    ((conf.modules.postgres.package or null) != null)
-    {
-      package = conf.modules.postgres.package;
-    }
-  ) (postgresService.sources or { });
-  nginxSources = mergeLocalSourceDefaults (lib.optionalAttrs
-    ((conf.modules.nginx.package or null) != null)
-    {
-      package = conf.modules.nginx.package;
-    }
-  ) (nginxService.sources or { });
-  minioSources = mergeLocalSourceDefaults (
-    (lib.optionalAttrs ((conf.modules.minio.package or null) != null) {
-      package = conf.modules.minio.package;
-    })
-    // (lib.optionalAttrs ((conf.modules.minio.clientPackage or null) != null) {
-      clientPackage = conf.modules.minio.clientPackage;
-    })
-  ) (minioService.sources or { });
-  rethSources = mergeLocalSourceDefaults (lib.optionalAttrs
-    ((conf.modules.reth.package or null) != null)
-    {
-      package = conf.modules.reth.package;
-    }
-  ) (rethService.sources or { });
-  heliosSources = mergeLocalSourceDefaults (lib.optionalAttrs
-    ((conf.modules.helios.package or null) != null)
-    {
-      package = conf.modules.helios.package;
-    }
-  ) (heliosService.sources or { });
+  postgresSources = postgresService.sources or { };
+  nginxSources = nginxService.sources or { };
+  minioSources = minioService.sources or { };
+  rethSources = rethService.sources or { };
+  heliosSources = heliosService.sources or { };
+  postgresLocalSource = postgresSources.local or { };
+  minioLocalSource = minioSources.local or { };
+  rethLocalSource = rethSources.local or { };
+  postgresPackage = postgresLocalSource.package or pkgs.postgresql_16;
+  minioPackage = minioLocalSource.package or pkgs.minio;
+  minioClientPackage = minioLocalSource.clientPackage or pkgs.minio-client;
+  rethPackage = rethLocalSource.package or pkgs.reth;
+  postgresDatabase = postgresService.database or "mfm";
+  postgresTestDatabase = postgresService.testDatabase or "${postgresDatabase}_test";
+  minioRootUser = minioService.rootUser or "minio";
+  minioRootPassword = minioService.rootPassword or "minio123456";
+  heliosConfiguredNetwork = heliosService.network or "local";
+  heliosConfiguredExecutionRpcUrl = heliosService.executionRpcUrl or "";
+  heliosConfiguredConsensusRpcUrl = heliosService.consensusRpcUrl or "";
+  heliosConfiguredDefaultConsensusRpcUrl =
+    heliosService.defaultConsensusRpcUrl or heliosConfiguredConsensusRpcUrl;
+  heliosConfiguredCheckpoint = heliosService.checkpoint or "";
 
   serviceSkipEnvVarName =
     serviceName:
@@ -211,10 +191,8 @@ let
     "HELIOS_HEALTH_TIMEOUT_SECS"
     "HELIOS_READY_INTERVAL_SECS"
     "HELIOS_HEALTH_INTERVAL_SECS"
-    "SERVICE_REUSE_POLICY"
     "SERVICE_OWNER_SCOPE"
     "SERVICE_DISCOVERY_SCOPE"
-    "MFM_KEEP_SERVICES"
     "MFM_SNAPSHOT_REQUEST_FILE"
     "MFM_SNAPSHOT_HANDOFF_FILE"
     "MFM_SNAPSHOT_RESULT_FILE"
@@ -398,7 +376,7 @@ let
     export MFM_PARITY_EVM_RETH_RUN_IDS_PATH="''${MFM_PARITY_EVM_RETH_RUN_IDS_PATH:-$artifacts_dir/parity-evm-reth-run-ids.json}"
     export MFM_PARITY_AAVE_V3_RUN_IDS_PATH="''${MFM_PARITY_AAVE_V3_RUN_IDS_PATH:-$artifacts_dir/parity-aave-v3-run-ids.json}"
     export MFM_PARITY_AAVE_V3_RETH_PROBE_PATH="''${MFM_PARITY_AAVE_V3_RETH_PROBE_PATH:-$artifacts_dir/parity-aave-v3-reth-probe.json}"
-    export PGDATABASE="''${PGDATABASE:-${conf.modules.postgres.testDatabase or "app_test"}}"
+    export PGDATABASE="''${PGDATABASE:-${postgresTestDatabase}}"
     export DATABASE_URL="''${DATABASE_URL:-postgresql://postgres:postgres@127.0.0.1:$POSTGRES_PORT/$PGDATABASE}"
     export MFM_EVM_RPC_URL="http://127.0.0.1:$RETH_HTTP_PORT"
     export MFM_EVM_RPC_SOURCES_JSON="[{\"id\":\"reth_ethereum_mainnet\",\"network_id\":\"ethereum-mainnet\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"},{\"id\":\"reth_local\",\"network_id\":\"reth-local\",\"rpc_url\":\"http://127.0.0.1:$RETH_HTTP_PORT\",\"kind\":\"local\"}]"
@@ -681,40 +659,52 @@ in
 
       services = {
         postgres = {
-          enable = postgresService.enable or (conf.modules.postgres.enable or false);
-          database = postgresService.database or (conf.modules.postgres.database or "app");
-          testDatabase = postgresService.testDatabase or (conf.modules.postgres.testDatabase or "app_test");
-          portKey = postgresService.portKey or (conf.modules.postgres.portKey or "postgres");
-          dataDirName = postgresService.dataDirName or (conf.modules.postgres.dataDirName or "postgres");
+          enable = postgresService.enable or false;
+          database = postgresDatabase;
+          testDatabase = postgresTestDatabase;
+          portKey = postgresService.portKey or "postgres";
+          dataDirName = postgresService.dataDirName or "postgres";
+          extensions = postgresService.extensions or [ ];
+          extraConfig = postgresService.extraConfig or "";
+          envConfigs = postgresService.envConfigs or { };
+          migrations = postgresService.migrations or { };
           sources = postgresSources;
           sourceKeys = postgresService.sourceKeys or builtins.attrNames postgresSources;
           defaultSource = postgresService.defaultSource or "local";
         };
 
         nginx = {
-          enable = nginxService.enable or (conf.modules.nginx.enable or false);
-          portKeyHttp = nginxService.portKeyHttp or (conf.modules.nginx.portKeyHttp or "http");
-          portKeyHttps = nginxService.portKeyHttps or (conf.modules.nginx.portKeyHttps or "https");
+          enable = nginxService.enable or false;
+          portKeyHttp = nginxService.portKeyHttp or "http";
+          portKeyHttps = nginxService.portKeyHttps or "https";
+          dataDirName = nginxService.dataDirName or "nginx";
           sources = nginxSources;
           sourceKeys = nginxService.sourceKeys or builtins.attrNames nginxSources;
           defaultSource = nginxService.defaultSource or "local";
         };
 
         minio = {
-          enable = minioService.enable or (conf.modules.minio.enable or false);
-          portKeyApi = minioService.portKeyApi or (conf.modules.minio.portKeyApi or "minioApi");
-          portKeyConsole =
-            minioService.portKeyConsole or (conf.modules.minio.portKeyConsole or "minioConsole");
+          enable = minioService.enable or false;
+          portKeyApi = minioService.portKeyApi or "minioApi";
+          portKeyConsole = minioService.portKeyConsole or "minioConsole";
+          dataDirName = minioService.dataDirName or "minio";
+          rootUser = minioRootUser;
+          rootPassword = minioRootPassword;
+          browser = minioService.browser or true;
           sources = minioSources;
           sourceKeys = minioService.sourceKeys or builtins.attrNames minioSources;
           defaultSource = minioService.defaultSource or "local";
         };
 
         reth = {
-          enable = rethService.enable or (conf.modules.reth.enable or false);
-          portKeyHttp = rethService.portKeyHttp or (conf.modules.reth.portKeyHttp or "rethHttp");
-          portKeyWs = rethService.portKeyWs or (conf.modules.reth.portKeyWs or "rethWs");
-          portKeyAuth = rethService.portKeyAuth or (conf.modules.reth.portKeyAuth or "rethAuth");
+          enable = rethService.enable or false;
+          portKeyHttp = rethService.portKeyHttp or "rethHttp";
+          portKeyWs = rethService.portKeyWs or "rethWs";
+          portKeyAuth = rethService.portKeyAuth or "rethAuth";
+          dataDirName = rethService.dataDirName or "reth";
+          network = rethService.network or "local";
+          devMode = rethService.devMode or false;
+          extraArgs = rethService.extraArgs or [ ];
           sources = rethSources;
           sourceKeys = rethService.sourceKeys or builtins.attrNames rethSources;
           defaultSource = rethService.defaultSource or "local";
@@ -722,27 +712,20 @@ in
 
         helios =
           let
-            heliosNetwork = heliosService.network or (conf.modules.helios.network or "local");
+            heliosNetwork = heliosConfiguredNetwork;
             useRemoteHeliosDefaults = heliosNetwork != "local";
           in
           {
-            enable = heliosService.enable or (conf.modules.helios.enable or false);
-            portKeyRpc = heliosService.portKeyRpc or (conf.modules.helios.portKeyRpc or "heliosRpc");
-            executionRpcPortKey =
-              heliosService.executionRpcPortKey or (conf.modules.helios.executionRpcPortKey or "rethHttp");
-            dataDirName = heliosService.dataDirName or (conf.modules.helios.dataDirName or "helios");
+            enable = heliosService.enable or false;
+            portKeyRpc = heliosService.portKeyRpc or "heliosRpc";
+            executionRpcPortKey = heliosService.executionRpcPortKey or "rethHttp";
+            dataDirName = heliosService.dataDirName or "helios";
             network = heliosNetwork;
-            executionRpcUrl =
-              heliosService.executionRpcUrl
-                or (if useRemoteHeliosDefaults then (conf.modules.helios.executionRpcUrl or "") else "");
-            consensusRpcUrl =
-              heliosService.consensusRpcUrl
-                or (if useRemoteHeliosDefaults then (conf.modules.helios.consensusRpcUrl or "") else "");
-            defaultConsensusRpcUrl =
-              heliosService.defaultConsensusRpcUrl
-                or (conf.modules.helios.defaultConsensusRpcUrl or (conf.modules.helios.consensusRpcUrl or ""));
-            checkpoint = heliosService.checkpoint or (conf.modules.helios.checkpoint or "");
-            extraArgs = heliosService.extraArgs or (conf.modules.helios.extraArgs or [ ]);
+            executionRpcUrl = if useRemoteHeliosDefaults then heliosConfiguredExecutionRpcUrl else "";
+            consensusRpcUrl = if useRemoteHeliosDefaults then heliosConfiguredConsensusRpcUrl else "";
+            defaultConsensusRpcUrl = heliosConfiguredDefaultConsensusRpcUrl;
+            checkpoint = heliosConfiguredCheckpoint;
+            extraArgs = heliosService.extraArgs or [ ];
             sources = heliosSources;
             sourceKeys = heliosService.sourceKeys or builtins.attrNames heliosSources;
             defaultSource = heliosService.defaultSource or "local";
@@ -839,9 +822,13 @@ in
           ];
           usage = [ "nix run .#mfm::portfolio::snapshot -- <REQUEST_FILE>" ];
           examples = [
-            "MFM_ENV=dev HELIOS_NETWORK=mainnet SERVICE_REUSE_POLICY=same-slot nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json"
+            "MFM_ENV=dev HELIOS_NETWORK=mainnet SERVICE_OWNER_SCOPE=persistent SERVICE_DISCOVERY_SCOPE=global nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json"
           ];
           runtimeInputs = leanRuntimeInputs;
+          passThroughEnv = sharedPassThroughEnv ++ [
+            "MFM_KEEP_SERVICES"
+            "SERVICE_REUSE_POLICY"
+          ];
           requirements = {
             services = [ "postgres" ];
           };
@@ -868,6 +855,11 @@ in
           command = ''
             set -euo pipefail
             ${resolvePackagedMfmCliShell}
+            ${servicePolicy.policyRuntimeFunctions}
+
+            log_error() {
+              echo "ERROR: $*" >&2
+            }
 
             if [ "''${1:-}" = "--help" ] || [ "''${1:-}" = "-h" ]; then
               echo "usage: nix run .#mfm::portfolio::snapshot -- <REQUEST_FILE>" >&2
@@ -883,7 +875,7 @@ in
             if [ "''${request_file#/}" = "$request_file" ]; then
               request_file="$PWD/$request_file"
             fi
-            snapshot_database="${conf.modules.postgres.database or "mfm"}"
+            snapshot_database="${postgresDatabase}"
             if [ ! -f "$request_file" ]; then
               echo "ERROR: request file does not exist: $request_file" >&2
               exit 1
@@ -898,7 +890,12 @@ in
             fi
             if [ "''${MFM_KEEP_SERVICES+x}" = "x" ]; then
               echo "ERROR: MFM_KEEP_SERVICES has been removed from mfm::portfolio::snapshot" >&2
-              echo "Use SERVICE_REUSE_POLICY / SERVICE_OWNER_SCOPE / SERVICE_DISCOVERY_SCOPE instead." >&2
+              echo "Use SERVICE_OWNER_SCOPE=ephemeral|persistent and SERVICE_DISCOVERY_SCOPE=local|global instead." >&2
+              exit 1
+            fi
+            if [ -n "''${SERVICE_REUSE_POLICY:-}" ]; then
+              echo "ERROR: SERVICE_REUSE_POLICY is no longer accepted by mfm::portfolio::snapshot" >&2
+              echo "Use SERVICE_OWNER_SCOPE=ephemeral|persistent and SERVICE_DISCOVERY_SCOPE=local|global instead." >&2
               exit 1
             fi
             if [ -z "''${SVC_POSTGRES_FULL_START:-}" ] || [ -z "''${SVC_POSTGRES_READY:-}" ] || [ -z "''${SVC_POSTGRES_STOP:-}" ]; then
@@ -910,82 +907,43 @@ in
               exit 1
             fi
 
-            infer_owner_scope() {
-              if [ -n "''${SERVICE_OWNER_SCOPE:-}" ]; then
-                printf '%s' "$SERVICE_OWNER_SCOPE"
-                return 0
-              fi
-
-              case "''${SERVICE_REUSE_POLICY:-}" in
-                same-slot|cross-run)
-                  printf '%s' "persistent"
-                  ;;
-                same-root|never)
-                  printf '%s' "ephemeral"
-                  ;;
-                *)
-                  printf '%s' ""
-                  ;;
-              esac
-            }
-
-            infer_discovery_scope() {
-              local owner_scope="$1"
-              if [ -n "''${SERVICE_DISCOVERY_SCOPE:-}" ]; then
-                printf '%s' "$SERVICE_DISCOVERY_SCOPE"
-                return 0
-              fi
-
-              case "''${SERVICE_REUSE_POLICY:-}" in
-                same-slot|cross-run)
-                  printf '%s' "global"
-                  ;;
-                same-root|never)
-                  printf '%s' "local"
-                  ;;
-                *)
-                  case "$owner_scope" in
-                    persistent)
-                      printf '%s' "global"
-                      ;;
-                    ephemeral)
-                      printf '%s' "local"
-                      ;;
-                    *)
-                      printf '%s' ""
-                      ;;
-                  esac
-                  ;;
-              esac
-            }
-
-            infer_reuse_policy() {
-              local owner_scope="$1"
-              local discovery_scope="$2"
-              if [ -n "''${SERVICE_REUSE_POLICY:-}" ]; then
-                printf '%s' "$SERVICE_REUSE_POLICY"
-                return 0
-              fi
-
-              if [ "$owner_scope" = "persistent" ] || [ "$discovery_scope" = "global" ]; then
-                printf '%s' "same-slot"
-              else
-                printf '%s' "same-root"
-              fi
-            }
-
             postgres_owned=0
             helios_owned=0
             result_file="$(mktemp "''${TMPDIR:-/tmp}/mfm-portfolio-snapshot.XXXXXX.json")"
-            owner_scope="$(infer_owner_scope)"
-            discovery_scope="$(infer_discovery_scope "$owner_scope")"
-            reuse_policy="$(infer_reuse_policy "$owner_scope" "$discovery_scope")"
+            owner_scope="''${SERVICE_OWNER_SCOPE:-}"
+            discovery_scope="''${SERVICE_DISCOVERY_SCOPE:-}"
+
+            if [ -z "$owner_scope" ]; then
+              case "$discovery_scope" in
+                global)
+                  owner_scope="persistent"
+                  ;;
+                local)
+                  owner_scope="ephemeral"
+                  ;;
+                *)
+                  owner_scope="ephemeral"
+                  ;;
+              esac
+            fi
+
+            if [ -z "$discovery_scope" ]; then
+              case "$owner_scope" in
+                persistent)
+                  discovery_scope="global"
+                  ;;
+                *)
+                  discovery_scope="local"
+                  ;;
+              esac
+            fi
+
+            nixfied_policy_validate_matrix "" "$owner_scope" "$discovery_scope" 0 1 || exit 1
+            policy_mode="$(nixfied_policy_infer_reuse_policy "" "$owner_scope" "$discovery_scope" "same-root")"
             cleanup_required=1
-            case "$reuse_policy" in
-              same-slot|cross-run)
-                cleanup_required=0
-                ;;
-            esac
+            if [ "$owner_scope" = "persistent" ]; then
+              cleanup_required=0
+            fi
 
             cleanup() {
               local rc=$?
@@ -1004,7 +962,7 @@ in
             trap 'exit 130' INT
             trap 'exit 143' TERM
 
-            echo "INFO: snapshot service policy reuse=$reuse_policy owner=''${owner_scope:-unset} discovery=''${discovery_scope:-unset} cleanup=$cleanup_required" >&2
+            echo "INFO: snapshot service policy mode=$policy_mode owner=$owner_scope discovery=$discovery_scope cleanup=$cleanup_required" >&2
 
             if "$SVC_POSTGRES_READY" >/dev/null 2>&1; then
               echo "INFO: reusing postgres on port=$POSTGRES_PORT" >&2
@@ -1034,13 +992,9 @@ in
                 echo "ERROR: HELIOS_NETWORK must be 'mainnet' for mfm::portfolio::snapshot" >&2
                 exit 1
               fi
-              export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
-                conf.modules.helios.executionRpcUrl or ""
-              }}"
-              export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${
-                conf.modules.helios.consensusRpcUrl or ""
-              }}"
-              export HELIOS_CHECKPOINT="''${HELIOS_CHECKPOINT:-${conf.modules.helios.checkpoint or ""}}"
+              export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${heliosConfiguredExecutionRpcUrl}}"
+              export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${heliosConfiguredConsensusRpcUrl}}"
+              export HELIOS_CHECKPOINT="''${HELIOS_CHECKPOINT:-${heliosConfiguredCheckpoint}}"
 
               if "$SVC_HELIOS_READY" >/dev/null 2>&1; then
                 echo "INFO: reusing helios on port=$HELIOSRPC_PORT" >&2
@@ -1372,37 +1326,41 @@ in
               test -f "$ROOT/nixfied/schemas/task-contract.json"
               test -f "$ROOT/nixfied/schemas/workflow-contract.json"
               test -f "$ROOT/nixfied/schemas/model-export.json"
-              test -f "$ROOT/nixfied/project/model-introspection.nix"
 
               jq -e "." "$ROOT/nixfied/schemas/task-contract.json" >/dev/null
               jq -e "." "$ROOT/nixfied/schemas/workflow-contract.json" >/dev/null
               jq -e "." "$ROOT/nixfied/schemas/model-export.json" >/dev/null
 
-              model_rc=0
-              ${pkgs.coreutils}/bin/timeout --signal=TERM --kill-after=10s ${toString ciShellAppContractsTimeoutSec} \
-                nix build --no-link --impure "path:$ROOT#introspectionGraph" >/dev/null || model_rc="$?"
-              if [ "$model_rc" -ne 0 ]; then
-                if [ "$model_rc" -eq 124 ]; then
-                  echo "ERROR: introspection graph build timed out after ${toString ciShellAppContractsTimeoutSec}s"
-                fi
-                exit "$model_rc"
-              fi
+              build_output_with_timeout() {
+                local ref="$1"
+                local label="$2"
+                local rc=0
+                local output=""
 
-              MODEL_INFO_JSON="$(nix eval --impure --json --file "$ROOT/nixfied/project/model-introspection.nix")"
-              SYSTEM="$(jq -r ".system" <<<"$MODEL_INFO_JSON")"
-              APPS_JSON="$(nix eval --json "path:$ROOT#apps.$SYSTEM")"
+                output="$(${pkgs.coreutils}/bin/timeout --signal=TERM --kill-after=10s ${toString ciShellAppContractsTimeoutSec} nix build --no-link --print-out-paths "$ref")" || rc="$?"
+                if [ "$rc" -ne 0 ]; then
+                  if [ "$rc" -eq 124 ]; then
+                    echo "ERROR: $label build timed out after ${toString ciShellAppContractsTimeoutSec}s"
+                  fi
+                  exit "$rc"
+                fi
+
+                printf "%s" "$output"
+              }
+
+              INTROSPECTION_BUNDLE_PATH="$(build_output_with_timeout "path:$ROOT#introspectionBundle" "introspection bundle")"
 
               require_app() {
                 local app_name="$1"
-                if ! jq -e --arg name "$app_name" "has(\$name) and .[\$name].type == \"app\"" <<<"$APPS_JSON" >/dev/null; then
-                  echo "ERROR: missing required app surface app=$app_name system=$SYSTEM"
+                if ! jq -e --arg node "app:$app_name" --arg id "$app_name" ".nodeViews[\$node].jsonByMode.default.resolved.kind == \"app\" and .nodeViews[\$node].jsonByMode.default.resolved.id == \$id" "$INTROSPECTION_BUNDLE_PATH" >/dev/null; then
+                  echo "ERROR: missing required app surface app=$app_name"
                   exit 1
                 fi
               }
 
               require_task() {
                 local task_id="$1"
-                if ! jq -e --arg id "$task_id" ".taskIds | index(\$id) != null" <<<"$MODEL_INFO_JSON" >/dev/null; then
+                if ! jq -e --arg node "task:$task_id" --arg id "$task_id" ".nodeViews[\$node].jsonByMode.default.resolved.kind == \"task\" and .nodeViews[\$node].jsonByMode.default.resolved.id == \$id" "$INTROSPECTION_BUNDLE_PATH" >/dev/null; then
                   echo "ERROR: missing required compiled task id=$task_id"
                   exit 1
                 fi
@@ -1410,7 +1368,7 @@ in
 
               require_workflow() {
                 local workflow_id="$1"
-                if ! jq -e --arg id "$workflow_id" ".workflowIds | index(\$id) != null" <<<"$MODEL_INFO_JSON" >/dev/null; then
+                if ! jq -e --arg node "workflow:$workflow_id" --arg id "$workflow_id" ".nodeViews[\$node].jsonByMode.default.resolved.kind == \"workflow\" and .nodeViews[\$node].jsonByMode.default.resolved.id == \$id" "$INTROSPECTION_BUNDLE_PATH" >/dev/null; then
                   echo "ERROR: missing required compiled workflow id=$workflow_id"
                   exit 1
                 fi
@@ -1419,7 +1377,7 @@ in
               require_workflow_plan_task() {
                 local workflow_id="$1"
                 local task_id="$2"
-                if ! jq -e --arg workflow "$workflow_id" --arg task "$task_id" "(.workflowPlanTaskIds[\$workflow] // []) | index(\$task) != null" <<<"$MODEL_INFO_JSON" >/dev/null; then
+                if ! jq -e --arg node "workflow:$workflow_id" --arg task "$task_id" ".nodeViews[\$node].jsonByMode.default.closure.summary.unitTaskIds | index(\$task) != null" "$INTROSPECTION_BUNDLE_PATH" >/dev/null; then
                   echo "ERROR: workflow plan missing task workflow=$workflow_id task=$task_id"
                   exit 1
                 fi
@@ -1817,10 +1775,16 @@ in
 
             export HELIOS_NETWORK="''${HELIOS_NETWORK:-mainnet}"
             export HELIOS_EXECUTION_RPC_URL="''${HELIOS_EXECUTION_RPC_URL:-${
-              conf.modules.helios.executionRpcUrl or "https://ethereum-rpc.publicnode.com"
+              if heliosConfiguredExecutionRpcUrl != "" then
+                heliosConfiguredExecutionRpcUrl
+              else
+                "https://ethereum-rpc.publicnode.com"
             }}"
             export HELIOS_CONSENSUS_RPC_URL="''${HELIOS_CONSENSUS_RPC_URL:-${
-              conf.modules.helios.consensusRpcUrl or "https://lodestar-mainnet.chainsafe.io"
+              if heliosConfiguredConsensusRpcUrl != "" then
+                heliosConfiguredConsensusRpcUrl
+              else
+                "https://lodestar-mainnet.chainsafe.io"
             }}"
 
             echo "INFO: running ci step=mainnet-portfolio-snapshot-helios address=$address"
@@ -1980,7 +1944,7 @@ in
           appId = "mfm::portfolio::snapshot";
           usage = [ "nix run .#mfm::portfolio::snapshot -- <REQUEST_FILE>" ];
           examples = [
-            "MFM_ENV=dev HELIOS_NETWORK=mainnet SERVICE_REUSE_POLICY=same-slot nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json"
+            "MFM_ENV=dev HELIOS_NETWORK=mainnet SERVICE_OWNER_SCOPE=persistent SERVICE_DISCOVERY_SCOPE=global nix run .#mfm::portfolio::snapshot -- ./portfolio-request.json"
           ];
           ownerFile = "nixfied/project/module.nix";
         };

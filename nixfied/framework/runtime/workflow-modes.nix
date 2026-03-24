@@ -165,6 +165,85 @@ let
       timezone = taskRuntime.timezone or "UTC";
     };
 
+  valueToString =
+    value:
+    if value == null then
+      ""
+    else if builtins.isBool value then
+      if value then "1" else "0"
+    else if builtins.isAttrs value || builtins.isList value then
+      builtins.toJSON value
+    else
+      toString value;
+
+  renderRuntimePlanShell =
+    runtime:
+    let
+      env = runtime.env or { };
+      envNames = builtins.sort builtins.lessThan (builtins.attrNames env);
+      runtimeEnvTsv = builtins.concatStringsSep "\n" (
+        map (name: "${name}\t${valueToString env.${name}}") envNames
+      );
+      passThroughEnvTsv = builtins.concatStringsSep "\n" (runtime.passThroughEnv or [ ]);
+    in
+    builtins.concatStringsSep "\n" [
+      "runtime_inputs_path=${
+        lib.escapeShellArg (
+          builtins.concatStringsSep ":" (map (path: "${path}/bin") (runtime.runtimeInputs or [ ]))
+        )
+      }"
+      "locale=${lib.escapeShellArg (runtime.locale or "C.UTF-8")}"
+      "timezone=${lib.escapeShellArg (runtime.timezone or "UTC")}"
+      "umask_value=${lib.escapeShellArg (runtime.umask or "022")}"
+      "allow_sensitive_pass_through=${
+        lib.escapeShellArg (if runtime.allowSensitivePassThrough or false then "1" else "0")
+      }"
+      "workdir_kind=${lib.escapeShellArg (runtime.workdir or "projectRoot")}"
+      "custom_workdir=${lib.escapeShellArg (runtime.customWorkdir or "")}"
+      "task_log_level_default=${lib.escapeShellArg (runtime.logging.levelDefault or "")}"
+      "task_output_mode_default=${lib.escapeShellArg (runtime.logging.outputDefault or "")}"
+      "runtime_env_tsv=${lib.escapeShellArg runtimeEnvTsv}"
+      "pass_through_env_tsv=${lib.escapeShellArg passThroughEnvTsv}"
+      "runtime_log_level_set=${lib.escapeShellArg (if env ? LOG_LEVEL then "1" else "0")}"
+      "runtime_log_level_alias_set=${lib.escapeShellArg (if env ? NIXFIED_LOG_LEVEL then "1" else "0")}"
+      "runtime_log_level_value=${
+        lib.escapeShellArg (if env ? LOG_LEVEL then valueToString env.LOG_LEVEL else "")
+      }"
+      "runtime_log_level_alias_value=${
+        lib.escapeShellArg (if env ? NIXFIED_LOG_LEVEL then valueToString env.NIXFIED_LOG_LEVEL else "")
+      }"
+      "runtime_output_mode_set=${lib.escapeShellArg (if env ? OUTPUT_MODE then "1" else "0")}"
+      "runtime_output_mode_alias_set=${
+        lib.escapeShellArg (if env ? NIXFIED_OUTPUT_MODE then "1" else "0")
+      }"
+      "runtime_output_mode_value=${
+        lib.escapeShellArg (if env ? OUTPUT_MODE then valueToString env.OUTPUT_MODE else "")
+      }"
+      "runtime_output_mode_alias_value=${
+        lib.escapeShellArg (if env ? NIXFIED_OUTPUT_MODE then valueToString env.NIXFIED_OUTPUT_MODE else "")
+      }"
+      "runtime_log_file_set=${lib.escapeShellArg (if env ? NIXFIED_LOG_FILE then "1" else "0")}"
+      "runtime_log_file_value=${
+        lib.escapeShellArg (if env ? NIXFIED_LOG_FILE then valueToString env.NIXFIED_LOG_FILE else "")
+      }"
+      "runtime_has_rust_log=${lib.escapeShellArg (if env ? RUST_LOG then "1" else "0")}"
+      "runtime_has_mfm_log=${lib.escapeShellArg (if env ? MFM_LOG then "1" else "0")}"
+      "runtime_has_mfm_test_log_filter=${
+        lib.escapeShellArg (if env ? MFM_TEST_LOG_FILTER then "1" else "0")
+      }"
+      "runtime_has_mfm_test_log=${lib.escapeShellArg (if env ? MFM_TEST_LOG then "1" else "0")}"
+    ];
+
+  renderPhaseServiceSetRecord =
+    entry:
+    let
+      selectedServices = builtins.sort builtins.lessThan (lib.unique (entry.selectedServices or [ ]));
+      serviceSetId = entry.serviceSetId or "";
+      serviceSetName = entry.serviceSetName or serviceSetId;
+      operation = entry.operation or "";
+    in
+    "${serviceSetId}\t${serviceSetName}\t${operation}\t${builtins.concatStringsSep "," selectedServices}";
+
   taskIds =
     if resolvedSelectionIndex ? taskIds then
       resolvedSelectionIndex.taskIds
@@ -266,40 +345,45 @@ let
       in
       {
         name = taskId;
-        value = {
-          parser = argsContract.parser or "typed";
-          allowUnknown = if argsContract.allowUnknown or false then "true" else "false";
-          hasPositional = if builtins.any (spec: spec.kind == "positional") specs then "true" else "false";
-          hookCount = toString (builtins.length preHookIds + builtins.length postHookIds);
-          requiredServices = requiredServices;
-          runnerCommand = if (task.runner.command or null) == null then "" else task.runner.command;
-          runnerPackage = if packagePath == null then "" else packagePath;
-          runtimeJson = builtins.toJSON (mergeTaskRuntimeWithRunnerPackage task);
-          producesJson = builtins.toJSON {
-            artifacts = task.produces.artifacts or [ ];
-            stateKeys = task.produces.stateKeys or [ ];
+        value =
+          let
+            runtimePlan = mergeTaskRuntimeWithRunnerPackage task;
+          in
+          {
+            parser = argsContract.parser or "typed";
+            allowUnknown = if argsContract.allowUnknown or false then "true" else "false";
+            hasPositional = if builtins.any (spec: spec.kind == "positional") specs then "true" else "false";
+            hookCount = toString (builtins.length preHookIds + builtins.length postHookIds);
+            requiredServices = requiredServices;
+            runnerCommand = if (task.runner.command or null) == null then "" else task.runner.command;
+            runnerPackage = if packagePath == null then "" else packagePath;
+            runtimePlanShell = renderRuntimePlanShell runtimePlan;
+            passThroughEnvNames = runtimePlan.passThroughEnv or [ ];
+            producesJson = builtins.toJSON {
+              artifacts = task.produces.artifacts or [ ];
+              stateKeys = task.produces.stateKeys or [ ];
+            };
+            maxAttempts = toString (
+              let
+                attempts = task.scheduling.maxAttempts or 1;
+              in
+              if attempts < 1 then 1 else attempts
+            );
+            retryBackoffValues = map toString (task.scheduling.retryBackoffSec or [ ]);
+            needs = task.deps.needs or [ ];
+            softNeeds = task.deps.softNeeds or [ ];
+            inherit
+              preHookIds
+              postHookIds
+              ;
+            inherit
+              longKinds
+              shortKinds
+              ;
+            helpLines = taskHelpLines;
+            runnerType = task.runner.type or "shell";
+            runnerWorkflowId = task.runner.workflowId or "";
           };
-          maxAttempts = toString (
-            let
-              attempts = task.scheduling.maxAttempts or 1;
-            in
-            if attempts < 1 then 1 else attempts
-          );
-          retryBackoffJson = builtins.toJSON (task.scheduling.retryBackoffSec or [ ]);
-          needs = task.deps.needs or [ ];
-          softNeeds = task.deps.softNeeds or [ ];
-          inherit
-            preHookIds
-            postHookIds
-            ;
-          inherit
-            longKinds
-            shortKinds
-            ;
-          helpLines = taskHelpLines;
-          runnerType = task.runner.type or "shell";
-          runnerWorkflowId = task.runner.workflowId or "";
-        };
       }
     ) taskIds
   );
@@ -351,7 +435,9 @@ let
 
   workflowPlanCases = map (workflowId: {
     key = workflowId;
-    value = map builtins.toJSON (workflows.${workflowId}.plan or [ ]);
+    value = map (unit: "workflow-unit:${workflowId}:${unit.name}") (
+      workflows.${workflowId}.plan or [ ]
+    );
   }) workflowIds;
 
   workflowPhaseTaskCases = builtins.concatLists (
@@ -386,11 +472,11 @@ let
       [
         {
           key = "${workflowId}:preRun";
-          value = map builtins.toJSON (preRun.serviceSets or [ ]);
+          value = map renderPhaseServiceSetRecord (preRun.serviceSets or [ ]);
         }
         {
           key = "${workflowId}:postRun";
-          value = map builtins.toJSON (postRun.serviceSets or [ ]);
+          value = map renderPhaseServiceSetRecord (postRun.serviceSets or [ ]);
         }
       ]
     ) workflowIds
@@ -464,12 +550,14 @@ let
             hookId:
             let
               hook = hooks.${hookId};
+              runtimePlan = mergeHookRuntime task hook;
             in
             {
               key = "${taskId}:${phase}:${hookId}";
               value = {
                 command = hook.command;
-                runtimeJson = builtins.toJSON (mergeHookRuntime task hook);
+                runtimePlanShell = renderRuntimePlanShell runtimePlan;
+                passThroughEnvNames = runtimePlan.passThroughEnv or [ ];
               };
             }
           ) (uniqueSorted (builtins.attrNames hooks));
@@ -972,10 +1060,20 @@ in
       esac
     }
 
-    task_runtime_json() {
+    task_runtime_plan_shell() {
       local task_id="$1"
       case "$task_id" in
-  ${renderCaseReturn (entry: entry.value.runtimeJson) taskCases}
+  ${renderCaseReturn (entry: entry.value.runtimePlanShell) taskCases}
+        *)
+          return 1
+          ;;
+      esac
+    }
+
+    task_runtime_pass_through_env_names() {
+      local task_id="$1"
+      case "$task_id" in
+  ${renderCasePrintLines (entry: entry.value.passThroughEnvNames) taskCases}
         *)
           return 1
           ;;
@@ -1003,12 +1101,11 @@ in
       esac
     }
 
-    task_retry_backoff_json() {
+    task_retry_backoff_values() {
       local task_id="$1"
       case "$task_id" in
-  ${renderCaseReturn (entry: entry.value.retryBackoffJson) taskCases}
+  ${renderCasePrintLines (entry: entry.value.retryBackoffValues) taskCases}
         *)
-          printf '%s' "[]"
           return 0
           ;;
       esac
@@ -1079,12 +1176,24 @@ in
       esac
     }
 
-    task_hook_runtime_json() {
+    task_hook_runtime_plan_shell() {
       local task_id="$1"
       local phase="$2"
       local hook_id="$3"
       case "$task_id:$phase:$hook_id" in
-  ${renderCaseReturn (entry: entry.value.runtimeJson) taskHookCases}
+  ${renderCaseReturn (entry: entry.value.runtimePlanShell) taskHookCases}
+        *)
+          return 1
+          ;;
+      esac
+    }
+
+    task_hook_runtime_pass_through_env_names() {
+      local task_id="$1"
+      local phase="$2"
+      local hook_id="$3"
+      case "$task_id:$phase:$hook_id" in
+  ${renderCasePrintLines (entry: entry.value.passThroughEnvNames) taskHookCases}
         *)
           return 1
           ;;

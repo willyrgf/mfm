@@ -250,6 +250,7 @@ let
           serviceSetId = app.serviceSetId or null;
           operation = app.operation or null;
           targetAppId = app.targetAppId or null;
+          contractRef = ((app.validation or { }).contractRef or null);
           setupAppIds = app.setupAppIds or [ ];
           teardownAppIds = app.teardownAppIds or [ ];
           usage = app.usage or [ ];
@@ -572,17 +573,9 @@ let
             ];
             data = {
               targetAppId = app.targetAppId;
+              contractRef = ((app.validation or { }).contractRef or null);
               setupAppIds = app.setupAppIds or [ ];
               teardownAppIds = app.teardownAppIds or [ ];
-              validationMode =
-                if ((app.validation.schema or null) != null) && ((app.validation.command or "") != "") then
-                  "schema+command"
-                else if (app.validation.schema or null) != null then
-                  "schema"
-                else if (app.validation.command or "") != "" then
-                  "command"
-                else
-                  "none";
             };
             execution = null;
             closure = null;

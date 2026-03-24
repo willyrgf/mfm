@@ -12,7 +12,20 @@ let
   projectTemplates = installManifest.projectTemplates;
   frameworkHelpers = installManifest.frameworkHelpers;
   optionalTemplates = builtins.filter (t: !(t.required or false)) projectTemplates;
-  templateFilterPlanDataJson = builtins.toJSON installManifest.templateFilterPlanData;
+  renderShellWords = values: builtins.concatStringsSep " " (map pkgs.lib.escapeShellArg values);
+  templateFilterRequiredKeysShell = renderShellWords installManifest.templateFilterPlanData.requiredKeys;
+  templateFilterOptionalEntriesShell = renderShellWords (
+    map (
+      template: "${template.key}\t${template.file}"
+    ) installManifest.templateFilterPlanData.optionalTemplates
+  );
+  templateFilterTokenEntriesShell = renderShellWords (
+    builtins.concatLists (
+      map (
+        template: map (token: "${token}\t${template.key}") ([ template.key ] ++ (template.aliases or [ ]))
+      ) projectTemplates
+    )
+  );
   filterHelpValues = builtins.concatStringsSep "," installManifest.templateFilterDisplayTokens;
   filterAliasNotes = builtins.concatStringsSep "; " (
     builtins.concatLists (
@@ -38,7 +51,9 @@ let
       frameworkRevision
       frameworkRoot
       promptPlanScript
-      templateFilterPlanDataJson
+      templateFilterRequiredKeysShell
+      templateFilterOptionalEntriesShell
+      templateFilterTokenEntriesShell
       ;
   };
 
@@ -142,24 +157,20 @@ let
                                     rm -f "$ROOT/.workspace"
 
                                     if [ -n "$FILTERS_RAW" ]; then
-                                      FILTER_PLAN_JSON="$(compute_template_filter_plan "$FILTERS_RAW")"
-                                      FIRST_UNKNOWN_FILTER="$(
-                                        printf '%s' "$FILTER_PLAN_JSON" | ${pkgs.jq}/bin/jq -r '.unknown[0] // empty'
-                                      )"
+                                      compute_template_filter_plan "$FILTERS_RAW"
+                                      FIRST_UNKNOWN_FILTER="''${FILTER_PLAN_UNKNOWN[0]:-}"
                                       if [ -n "$FIRST_UNKNOWN_FILTER" ]; then
                                         log_error "Unknown filter: $FIRST_UNKNOWN_FILTER"
                                         exit 1
                                       fi
 
-                                      while IFS= read -r template_file; do
+                                      for template_file in "''${FILTER_PLAN_PRUNE_FILES[@]}"; do
                                         if [ -n "$template_file" ]; then
                                           rm -f "$ROOT/nixfied/project/$template_file" 2>/dev/null || true
                                         fi
-                                      done < <(
-                                        printf '%s' "$FILTER_PLAN_JSON" | ${pkgs.jq}/bin/jq -r '.pruneFiles[]?'
-                                      )
+                                      done
 
-                                      printf '%s' "$FILTER_PLAN_JSON" | ${pkgs.jq}/bin/jq -r '.defaultNix' > "$ROOT/nixfied/project/default.nix"
+                                      printf '%s\n' "$FILTER_PLAN_DEFAULT_NIX" > "$ROOT/nixfied/project/default.nix"
                                     fi
 
     maybe_generate_prompt_plan

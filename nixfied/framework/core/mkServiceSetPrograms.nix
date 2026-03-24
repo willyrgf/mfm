@@ -9,6 +9,15 @@
 let
   lib = pkgs.lib;
   shellCommon = import ./shell-common.nix { inherit pkgs; };
+  commonRuntimeShell = import ../runtime/common-runtime.nix { inherit pkgs; };
+  runtimeArtifactContracts = import ../contracts/runtime-artifact-contracts.nix { inherit pkgs; };
+  serviceSetExportValidator = import ../contracts/mkValidator.nix {
+    inherit
+      pkgs
+      ;
+    contractBundle = runtimeArtifactContracts;
+    contractRef = "runtime.serviceSetExport";
+  };
   skipPolicy = import ../runtime/helpers/skip-policy.nix { inherit pkgs; };
   serviceConfigLib = import ./service-config.nix {
     inherit
@@ -103,6 +112,39 @@ let
       map (value: "      ${lib.escapeShellArg value}) return 0 ;;") values
     );
 
+  renderCaseReturn =
+    valueExpr: entries:
+    builtins.concatStringsSep "\n" (
+      map (entry: ''
+        ${lib.escapeShellArg entry.key})
+          printf '%s' ${lib.escapeShellArg (valueExpr entry)}
+          return 0
+          ;;
+      '') entries
+    );
+
+  renderCasePrintLines =
+    valuesExpr: entries:
+    builtins.concatStringsSep "\n" (
+      map (
+        entry:
+        let
+          values = valuesExpr entry;
+        in
+        ''
+          ${lib.escapeShellArg entry.key})
+            ${
+              if values == [ ] then
+                ":"
+              else
+                "printf '%s\\n' " + lib.concatStringsSep " " (map lib.escapeShellArg values)
+            }
+            return 0
+            ;;
+        ''
+      ) entries
+    );
+
   renderServiceProgramCases =
     operation: members:
     builtins.concatStringsSep "\n" (
@@ -143,28 +185,24 @@ let
       ) members
     );
 
-  renderExportRecordLines =
-    members:
-    builtins.concatStringsSep "\n" (
-      map (
-        serviceName:
-        let
-          api = serviceRuntimeSurfaces.serviceApis.${serviceName};
-        in
-        ''
-          printf '%s\n' ${
-            lib.escapeShellArg (
-              builtins.toJSON {
-                service = serviceName;
-                required = builtins.elem serviceName requiredServices;
-                artifacts = api.artifacts or { };
-                operations = builtins.sort builtins.lessThan (builtins.attrNames (api.operations or { }));
-              }
-            )
-          }
-        ''
-      ) members
-    );
+  serviceSetExportCases = map (
+    serviceName:
+    let
+      api = serviceRuntimeSurfaces.serviceApis.${serviceName};
+      artifacts = api.artifacts or { };
+      artifactKeys = builtins.sort builtins.lessThan (builtins.attrNames artifacts);
+    in
+    {
+      key = serviceName;
+      value = {
+        required = if builtins.elem serviceName requiredServices then "1" else "0";
+        operationNames = builtins.sort builtins.lessThan (builtins.attrNames (api.operations or { }));
+        artifactLines = map (
+          artifactKey: "${artifactKey}\t${toString artifacts.${artifactKey}}"
+        ) artifactKeys;
+      };
+    }
+  ) runtimeRequiredServices;
 
   renderOperationHelp =
     {
@@ -406,11 +444,11 @@ let
   exportScript =
     appName:
     let
-      exportLines = renderExportRecordLines runtimeRequiredServices;
       scriptName = "nixfied-service-set-${normalizeToken serviceSet.name}-export";
       drv = pkgs.writeShellScriptBin scriptName ''
               set -euo pipefail
               ${shellCommon}
+              ${commonRuntimeShell}
               source <(${serviceRuntimeSurfaces.slots.getSlotInfo})
 
               render_usage() {
@@ -439,11 +477,6 @@ let
                 defaultFormat = serviceSet.export.defaultFormat;
               }}
 
-              emit_records() {
-                :
-        ${exportLines}
-              }
-
               resolve_artifact_value() {
                 local key="$1"
                 local raw="$2"
@@ -465,79 +498,129 @@ let
                 esac
               }
 
-              selected_json="$(${pkgs.jq}/bin/jq -cn '[]')"
-              for service_name in "''${selected_services[@]}"; do
-                selected_json="$(${pkgs.jq}/bin/jq -cn --argjson current "$selected_json" --arg value "$service_name" '$current + [$value]')"
-              done
+              service_record_required() {
+                case "$1" in
+        ${renderCaseReturn (entry: entry.value.required) serviceSetExportCases}
+                  *)
+                    printf '%s' "0"
+                    return 0
+                    ;;
+                esac
+              }
 
-              records_json="$(
-                emit_records | ${pkgs.jq}/bin/jq -cs --argjson selected "$selected_json" '
-                  map(select(.service as $service | $selected | index($service)))
-                '
-              )"
+              service_record_operation_names() {
+                case "$1" in
+        ${renderCasePrintLines (entry: entry.value.operationNames) serviceSetExportCases}
+                  *)
+                    return 0
+                    ;;
+                esac
+              }
 
-              resolved_records="$(${pkgs.jq}/bin/jq -cn '[]')"
-              while IFS= read -r record_json; do
-                [ -n "$record_json" ] || continue
-                resolved_artifacts="$(${pkgs.jq}/bin/jq -cn '{}')"
+              service_record_artifact_raw_lines() {
+                case "$1" in
+        ${renderCasePrintLines (entry: entry.value.artifactLines) serviceSetExportCases}
+                  *)
+                    return 0
+                    ;;
+                esac
+              }
+
+              service_operations_json() {
+                local service_name="$1"
+                local operation_name=""
+                local json=""
+                local separator=""
+
+                while IFS= read -r operation_name; do
+                  [ -n "$operation_name" ] || continue
+                  json="''${json}''${separator}$(json_quote_string "$operation_name")"
+                  separator=","
+                done < <(service_record_operation_names "$service_name")
+
+                printf '[%s]' "$json"
+              }
+
+              service_artifacts_json() {
+                local service_name="$1"
+                local mode="$2"
+                local artifact_key=""
+                local artifact_raw=""
+                local artifact_value=""
+                local json=""
+                local separator=""
+
                 while IFS=$'\t' read -r artifact_key artifact_raw || [ -n "$artifact_key" ]; do
                   [ -n "$artifact_key" ] || continue
-                  artifact_value="$(resolve_artifact_value "$artifact_key" "$artifact_raw")"
-                  resolved_artifacts="$(
-                    ${pkgs.jq}/bin/jq -cn \
-                      --argjson current "$resolved_artifacts" \
-                      --arg key "$artifact_key" \
-                      --arg value "$artifact_value" \
-                      '$current + {($key): $value}'
-                  )"
-                done < <(printf '%s' "$record_json" | ${pkgs.jq}/bin/jq -r '.artifacts | to_entries[]? | [.key, (.value | tostring)] | @tsv')
+                  if [ "$mode" = "resolved" ]; then
+                    artifact_value="$(resolve_artifact_value "$artifact_key" "$artifact_raw")"
+                  else
+                    artifact_value="$artifact_raw"
+                  fi
+                  json="''${json}''${separator}$(json_quote_string "$artifact_key"):$(json_quote_string "$artifact_value")"
+                  separator=","
+                done < <(service_record_artifact_raw_lines "$service_name")
 
-                resolved_record="$(
-                  ${pkgs.jq}/bin/jq -cn \
-                    --argjson record "$record_json" \
-                    --argjson artifacts "$resolved_artifacts" \
-                    --arg serviceSetId ${lib.escapeShellArg serviceSet.id} \
-                    --arg policyId ${lib.escapeShellArg serviceSet.state.policy.id} \
-                    --arg policyKind ${lib.escapeShellArg serviceSet.state.policy.kind} \
-                    --arg runtimeBase ${lib.escapeShellArg serviceSet.state.policy.runtimeBase} \
-                    --arg registryRoot ${lib.escapeShellArg serviceSet.state.policy.registryRoot} \
-                    --arg artifactsRoot ${lib.escapeShellArg serviceSet.state.policy.artifactsRoot} \
-                    '
-                      $record
-                      + {
-                          serviceSetId: $serviceSetId,
-                          statePolicy: {
-                            id: $policyId,
-                            kind: $policyKind,
-                            runtimeBase: $runtimeBase,
-                            registryRoot: $registryRoot,
-                            artifactsRoot: $artifactsRoot
-                          },
-                          resolvedArtifacts: $artifacts
-                        }
-                    '
-                )"
-                resolved_records="$(${pkgs.jq}/bin/jq -cn --argjson current "$resolved_records" --argjson record "$resolved_record" '$current + [$record]')"
-              done < <(printf '%s' "$records_json" | ${pkgs.jq}/bin/jq -c '.[]')
+                printf '{%s}' "$json"
+              }
 
               case "$output_format" in
                 json)
-                  printf '%s\n' "$resolved_records"
+                  json_records=""
+                  json_separator=""
+                  payload_file="$(mktemp "$TMPDIR/service-set-${serviceSet.name}-export.XXXXXX")"
+                  validate_stderr="$(mktemp "$TMPDIR/service-set-${serviceSet.name}-export.validate.XXXXXX")"
+                  for service_name in "''${selected_services[@]}"; do
+                    required_json="false"
+                    if [ "$(service_record_required "$service_name")" = "1" ]; then
+                      required_json="true"
+                    fi
+                    record_json="$(
+                      printf '{'
+                      printf '"service":%s' "$(json_quote_string "$service_name")"
+                      printf ',"required":%s' "$required_json"
+                      printf ',"artifacts":%s' "$(service_artifacts_json "$service_name" raw)"
+                      printf ',"operations":%s' "$(service_operations_json "$service_name")"
+                      printf ',"resolvedArtifacts":%s' "$(service_artifacts_json "$service_name" resolved)"
+                      printf '}'
+                    )"
+                    json_records="''${json_records}''${json_separator}''${record_json}"
+                    json_separator=","
+                  done
+                  {
+                    printf '{'
+                    printf '"kind":"service-set-export","version":1,"payload":{'
+                    printf '"serviceSetId":%s' ${lib.escapeShellArg (builtins.toJSON serviceSet.id)}
+                    printf ',"statePolicy":{"id":%s,"kind":%s,"runtimeBase":%s,"registryRoot":%s,"artifactsRoot":%s}' \
+                      ${lib.escapeShellArg (builtins.toJSON serviceSet.state.policy.id)} \
+                      ${lib.escapeShellArg (builtins.toJSON serviceSet.state.policy.kind)} \
+                      ${lib.escapeShellArg (builtins.toJSON serviceSet.state.policy.runtimeBase)} \
+                      ${lib.escapeShellArg (builtins.toJSON serviceSet.state.policy.registryRoot)} \
+                      ${lib.escapeShellArg (builtins.toJSON serviceSet.state.policy.artifactsRoot)}
+                    printf ',"services":[%s]' "$json_records"
+                    printf '}}\n'
+                  } > "$payload_file"
+                  if ! ${serviceSetExportValidator} "$payload_file" >/dev/null 2>"$validate_stderr"; then
+                    cat "$validate_stderr" >&2 || true
+                    rm -f "$payload_file" "$validate_stderr"
+                    exit 1
+                  fi
+                  cat "$payload_file"
+                  rm -f "$payload_file" "$validate_stderr"
                   ;;
                 env)
                   printf 'NIXFIED_SERVICE_SET_ID=%s\n' ${lib.escapeShellArg serviceSet.id}
                   printf 'NIXFIED_SERVICE_SET_POLICY_ID=%s\n' ${lib.escapeShellArg serviceSet.state.policy.id}
-                  while IFS= read -r record_json; do
-                    [ -n "$record_json" ] || continue
-                    service_name="$(printf '%s' "$record_json" | ${pkgs.jq}/bin/jq -r '.service')"
+                  for service_name in "''${selected_services[@]}"; do
                     service_token="$(printf '%s' "$service_name" | ${pkgs.coreutils}/bin/tr '[:lower:].-:/ ' '[:upper:]______' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_')"
                     printf 'NIXFIED_SERVICE_SET_%s_SERVICE=%s\n' "$service_token" "$service_name"
-                    while IFS=$'\t' read -r artifact_key artifact_value || [ -n "$artifact_key" ]; do
+                    while IFS=$'\t' read -r artifact_key artifact_raw || [ -n "$artifact_key" ]; do
                       [ -n "$artifact_key" ] || continue
+                      artifact_value="$(resolve_artifact_value "$artifact_key" "$artifact_raw")"
                       artifact_token="$(printf '%s' "$artifact_key" | ${pkgs.coreutils}/bin/tr '[:lower:].-:/ ' '[:upper:]______' | ${pkgs.coreutils}/bin/tr -c 'A-Z0-9_' '_')"
                       printf 'NIXFIED_SERVICE_SET_%s_%s=%s\n' "$service_token" "$artifact_token" "$artifact_value"
-                    done < <(printf '%s' "$record_json" | ${pkgs.jq}/bin/jq -r '.resolvedArtifacts | to_entries[]? | [.key, (.value | tostring)] | @tsv')
-                  done < <(printf '%s' "$resolved_records" | ${pkgs.jq}/bin/jq -c '.[]')
+                    done < <(service_record_artifact_raw_lines "$service_name")
+                  done
                   ;;
                 *)
                   nixfied_exit_usage "--format must be json or env"

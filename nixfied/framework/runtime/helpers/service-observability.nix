@@ -14,7 +14,7 @@ let
       set -euo pipefail
       ${slotEnvRuntime.loadJsonFromCommand {
         outVar = "SLOT_INFO_JSON_OUT";
-        command = toString slots.getSlotInfoJson;
+        command = toString slots.getSlotInfo;
         exportVars = false;
       }}
       exec ${runtimeEvents.serviceLogs} --service ${service} --slot "$SLOT" --env "$ENV" "$@"
@@ -26,7 +26,7 @@ let
       set -euo pipefail
       ${slotEnvRuntime.loadJsonFromCommand {
         outVar = "SLOT_INFO_JSON_OUT";
-        command = toString slots.getSlotInfoJson;
+        command = toString slots.getSlotInfo;
         exportVars = false;
       }}
       exec ${runtimeEvents.serviceEvents} --service ${service} --slot "$SLOT" --env "$ENV" "$@"

@@ -103,10 +103,10 @@ Nixfied is vendored under `nixfied/`. Vendoring boundaries (canonical doc: `nixf
 
 Prefer editing `nixfied/project/` and `nixfied/local/` (not `flake.nix` or framework code under `nixfied/framework/`) for workflow changes:
 
-- `nixfied/project/conf.nix`: project identity, env vars, envs/ports, module toggles, slot behavior.
+- `nixfied/project/conf.nix`: project identity, env vars, envs/ports, service defaults, slot behavior.
 - `nixfied/project/module.nix`: `nix run .#dev`, `nix run .#mfm_cli`, `nix run .#mfm_rest_api`, `nix run .#build`, `nix run .#check`, `nix run .#test`, and `nix run .#ci` task/workflow wiring including `mfm::portfolio::snapshot`.
 - `nixfied/project/ci-runtime.nix`: CI runtime environment helpers and command assembly used by the CI task/workflow layer.
-- `nixfied/project/model-introspection.nix`: generated model export/introspection surfaces used by `nix run .#model`, `.#tasks`, and related tooling.
+- Framework introspection surfaces such as `.#introspect`, `.#schema`, `.#features`, and package outputs like `.#introspectionBundle`: compiled model surfaces that project CI checks should consume directly.
 - `nixfied/project/default.nix`: merges project files; update it if you add a new `nixfied/project/*.nix` part.
 - `nixfied/local/default.nix`: optional extension point for extra flake `apps`/`packages`/`devShells` that should survive framework upgrades.
 Environment variables you should expect:

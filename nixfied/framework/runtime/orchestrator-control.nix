@@ -8,6 +8,14 @@ let
   shellCommon = import ../core/shell-common.nix { inherit pkgs; };
   registryShell = registry.events.mkShellLib { };
   orchestratorRuntimeShell = import ./orchestrator-runtime.nix { inherit pkgs; };
+  runtimeArtifactContracts = import ../contracts/runtime-artifact-contracts.nix { inherit pkgs; };
+  runRecordValidator = import ../contracts/mkValidator.nix {
+    inherit
+      pkgs
+      ;
+    contractBundle = runtimeArtifactContracts;
+    contractRef = "runtime.runRecord";
+  };
 in
 pkgs.writeShellScriptBin "nixfied-orchestrator-control" ''
   set -euo pipefail
@@ -132,6 +140,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator-control" ''
     local lock_fd
     local tmp
     local now
+    local validate_stderr
 
     run_file="$(run_file_for "$run_id")"
     lock_file="$(run_lock_for "$run_id")"
@@ -143,31 +152,57 @@ pkgs.writeShellScriptBin "nixfied-orchestrator-control" ''
 
     lock_fd="$(registry_lock_acquire "$lock_file" "orchestrator-update-run-state:$run_id" 30)" || return 1
     tmp="$(mktemp "$run_file.tmp.XXXXXX")"
+    validate_stderr="$(mktemp "$run_file.validate.XXXXXX")"
 
-    if ! ${pkgs.jq}/bin/jq -cS \
-      --arg state "$state" \
-      --arg ts "$now" \
-      --argjson exitCode "$exit_code_json" \
-      --arg stopReason "$stop_reason" \
-      --arg pid "$pid" \
-      --arg pgid "$pgid" \
-      '
-      .state = $state
-      | .updated_at = $ts
-      | .history += [{state: $state, at: $ts}]
-      | .pid = (if $pid == "" then .pid else ($pid | tonumber) end)
-      | .pgid = (if $pgid == "" then .pgid else ($pgid | tonumber) end)
-      | .started_at = (if (.started_at == null and $state == "running") then $ts else .started_at end)
-      | .finished_at = (if ($state == "passed" or $state == "failed" or $state == "canceled") then $ts else .finished_at end)
-      | .exit_code = (if $exitCode == null then .exit_code else $exitCode end)
-      | .stop_reason = (if $stopReason == "" then .stop_reason else $stopReason end)
-      ' "$run_file" > "$tmp"; then
-      rm -f "$tmp"
+    if ! load_run_record_fields "$run_file"; then
+      rm -f "$tmp" "$validate_stderr"
       registry_lock_release "$lock_fd" "$lock_file"
       return 1
     fi
 
+    RUN_RECORD_STATE="$state"
+    RUN_RECORD_UPDATED_AT="$now"
+    run_record_history_append "$state" "$now"
+    if [ -n "$pid" ]; then
+      RUN_RECORD_PID="$pid"
+    fi
+    if [ -n "$pgid" ]; then
+      RUN_RECORD_PGID="$pgid"
+    fi
+    if [ -z "$RUN_RECORD_STARTED_AT" ] && [ "$state" = "running" ]; then
+      RUN_RECORD_STARTED_AT="$now"
+    fi
+    case "$state" in
+      passed|failed|canceled)
+        RUN_RECORD_FINISHED_AT="$now"
+        ;;
+    esac
+    if [ -n "$exit_code_json" ] && [ "$exit_code_json" != "null" ]; then
+      RUN_RECORD_EXIT_CODE="$exit_code_json"
+    fi
+    if [ -n "$stop_reason" ]; then
+      RUN_RECORD_STOP_REASON="$stop_reason"
+    fi
+
+    if ! write_run_record_json_file "$tmp"; then
+      rm -f "$tmp" "$validate_stderr"
+      registry_lock_release "$lock_fd" "$lock_file"
+      return 1
+    fi
+
+    if ! ${runRecordValidator} "$tmp" >/dev/null 2>"$validate_stderr"; then
+      cat "$validate_stderr" >&2 || true
+      rm -f "$tmp" "$validate_stderr"
+      registry_lock_release "$lock_fd" "$lock_file"
+      return 1
+    fi
+
+    rm -f "$validate_stderr"
     mv "$tmp" "$run_file"
+    if ! write_run_record_fields "$run_file"; then
+      registry_lock_release "$lock_fd" "$lock_file"
+      return 1
+    fi
     registry_lock_release "$lock_fd" "$lock_file"
 
     case "$state" in
@@ -181,53 +216,69 @@ pkgs.writeShellScriptBin "nixfied-orchestrator-control" ''
   terminal_from_events() {
     local run_id="$1"
     local attempt_id="$2"
-    local events_file
-    local terminal_state
-    local exit_code
+    local events_index_file
+    local terminal_state=""
+    local exit_code=""
+    local seq=""
+    local ts_epoch=""
+    local ts=""
+    local event_run_id=""
+    local event_attempt_id=""
+    local workflow_id=""
+    local task_id=""
+    local state=""
+    local reason=""
+    local event_exit_code=""
 
-    events_file="$(registry_events_snapshot "$REGISTRY_ROOT")" || {
+    events_index_file="$(registry_events_index_snapshot "$REGISTRY_ROOT")" || {
       echo "unknown 1"
       return
     }
 
-    if [ -z "$events_file" ] || [ ! -f "$events_file" ]; then
+    if [ -z "$events_index_file" ] || [ ! -f "$events_index_file" ]; then
       echo "unknown 1"
       return
     fi
 
-    terminal_state="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" --arg attemptId "$attempt_id" '
-      select(.runId == $runId and ($attemptId == "" or (.attemptId // "") == $attemptId) and (.state == "passed" or .state == "failed" or .state == "canceled"))
-      | .state
-    ' "$events_file" | ${pkgs.coreutils}/bin/tail -n 1)"
+    while IFS=$'\t' read -r seq ts_epoch ts event_run_id event_attempt_id workflow_id task_id state reason event_exit_code; do
+      if [ "$event_run_id" != "$run_id" ]; then
+        continue
+      fi
+      if [ -n "$attempt_id" ] && [ "$event_attempt_id" != "$attempt_id" ]; then
+        continue
+      fi
+      case "$state" in
+        passed|failed|canceled)
+          terminal_state="$state"
+          exit_code="$event_exit_code"
+          ;;
+      esac
+    done < "$events_index_file"
 
     if [ -z "$terminal_state" ]; then
-      registry_snapshot_cleanup "$events_file"
+      registry_snapshot_cleanup "$events_index_file"
       echo "unknown 1"
       return
     fi
 
     case "$terminal_state" in
       passed)
-        registry_snapshot_cleanup "$events_file"
+        registry_snapshot_cleanup "$events_index_file"
         echo "passed 0"
         ;;
       canceled)
-        registry_snapshot_cleanup "$events_file"
+        registry_snapshot_cleanup "$events_index_file"
         echo "canceled 130"
         ;;
       failed)
-        exit_code="$(${pkgs.jq}/bin/jq -r --arg runId "$run_id" --arg attemptId "$attempt_id" '
-          select(.runId == $runId and ($attemptId == "" or (.attemptId // "") == $attemptId) and .state == "failed")
-          | .detail.exitCode // empty
-        ' "$events_file" | ${pkgs.coreutils}/bin/tail -n 1)"
         if [ -z "$exit_code" ]; then
           exit_code=1
         fi
-        registry_snapshot_cleanup "$events_file"
+        registry_snapshot_cleanup "$events_index_file"
         echo "failed $exit_code"
         ;;
       *)
-        registry_snapshot_cleanup "$events_file"
+        registry_snapshot_cleanup "$events_index_file"
         echo "unknown 1"
         ;;
     esac
@@ -326,7 +377,7 @@ pkgs.writeShellScriptBin "nixfied-orchestrator-control" ''
     fi
 
     refresh_one_run "$run_id" || true
-    ${pkgs.jq}/bin/jq -cS '.' "$run_file"
+    cat "$run_file"
   }
 
   stop_single_run() {

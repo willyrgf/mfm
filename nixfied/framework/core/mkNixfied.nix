@@ -70,6 +70,7 @@ in
   workflows = compiledCore.model.workflows;
   features = compiledCore.model.features;
   introspectionGraph = compiledCore.introspectionGraph;
+  introspectionBundle = compiledCore.introspectionBundle;
   selectionIndex = compiledCore.selectionIndex;
   serviceSurfaceCatalog = compiledCore.serviceSurfaceCatalog;
   serviceApis = execution.serviceApis;

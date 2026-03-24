@@ -26,6 +26,16 @@ let
       ];
 
   aaveOriginTools = if pkgs == null then null else import ./aave-origin-tools.nix { inherit pkgs; };
+  postgresLocalPackage = if pkgs != null then pkgs.postgresql_16 else null;
+  nginxLocalPackage = if pkgs != null then pkgs.nginx else null;
+  minioLocalPackage = if pkgs != null then pkgs.minio else null;
+  minioLocalClientPackage = if pkgs != null then pkgs.minio-client else null;
+  rethLocalPackage = if pkgs != null then pkgs.reth else null;
+  heliosLocalPackage =
+    if pkgs != null then
+      pkgs.callPackage ../framework/runtime/services/helios/package.nix { }
+    else
+      null;
 in
 rec {
   project = {
@@ -185,80 +195,6 @@ rec {
     workspaceId = project.id;
   };
 
-  modules = {
-    postgres = {
-      enable = true;
-      database = "mfm";
-      testDatabase = "mfm_test";
-      extensions = [ ];
-      package = if pkgs != null then pkgs.postgresql_16 else null;
-      portKey = "postgres";
-      dataDirName = "postgres";
-      extraConfig = "";
-      envConfigs = {
-        dev = { };
-        prod = { };
-        test = { };
-      };
-      migrations = {
-        dir = "migrations";
-        command = "";
-        sourceDatabase = null;
-      };
-    };
-
-    nginx = {
-      enable = false;
-      package = if pkgs != null then pkgs.nginx else null;
-      portKeyHttp = "http";
-      portKeyHttps = "https";
-      dataDirName = "nginx";
-    };
-
-    minio = {
-      enable = true;
-      package = if pkgs != null then pkgs.minio else null;
-      clientPackage = if pkgs != null then pkgs.minio-client else null;
-      portKeyApi = "minio";
-      portKeyConsole = "minio_console";
-      dataDirName = "minio";
-      rootUser = "minio";
-      rootPassword = "minio123456";
-      browser = true;
-    };
-
-    reth = {
-      enable = true;
-      package = if pkgs != null then pkgs.reth else null;
-      portKeyHttp = "rethHttp";
-      portKeyWs = "rethWs";
-      portKeyAuth = "rethAuth";
-      dataDirName = "reth";
-      network = "local";
-      devMode = true;
-      extraArgs = [ ];
-    };
-
-    helios = {
-      enable = true;
-      package =
-        if pkgs != null then
-          pkgs.callPackage ../framework/runtime/services/helios/package.nix { }
-        else
-          null;
-      portKeyRpc = "heliosRpc";
-      dataDirName = "helios";
-      network = "local";
-      executionRpcPortKey = "rethHttp";
-      # Mainnet default for workflows that do not set HELIOS_EXECUTION_RPC_URL explicitly.
-      executionRpcUrl = "https://ethereum-rpc.publicnode.com";
-      # Mainnet default consensus endpoint used by Helios snapshot workflows.
-      consensusRpcUrl = "https://lodestar-mainnet.chainsafe.io";
-      checkpoint = "";
-      extraArgs = [ ];
-    };
-  };
-
   # Isolation test runner configuration (nix run .#test-isolation)
   isolation = {
     enable = true;
@@ -293,58 +229,85 @@ rec {
 
   services = {
     postgres = {
-      enable = modules.postgres.enable;
-      database = modules.postgres.database;
-      portKey = modules.postgres.portKey;
+      enable = true;
+      database = "mfm";
+      testDatabase = "mfm_test";
+      portKey = "postgres";
+      dataDirName = "postgres";
+      extensions = [ ];
+      extraConfig = "";
+      envConfigs = {
+        dev = { };
+        prod = { };
+        test = { };
+      };
+      migrations = {
+        dir = "migrations";
+        command = "";
+        sourceDatabase = null;
+      };
       sources.local = {
-        package = modules.postgres.package;
+        package = postgresLocalPackage;
       };
       defaultSource = "local";
     };
 
     nginx = {
-      enable = modules.nginx.enable;
-      portKeyHttp = modules.nginx.portKeyHttp;
-      portKeyHttps = modules.nginx.portKeyHttps;
-      sources.local =
-        if modules.nginx.package != null then
-          {
-            package = modules.nginx.package;
-          }
-        else
-          { };
+      enable = false;
+      portKeyHttp = "http";
+      portKeyHttps = "https";
+      dataDirName = "nginx";
+      sources.local = {
+        package = nginxLocalPackage;
+      };
       defaultSource = "local";
     };
 
     minio = {
-      enable = modules.minio.enable;
-      portKeyApi = modules.minio.portKeyApi;
-      portKeyConsole = modules.minio.portKeyConsole;
+      enable = true;
+      portKeyApi = "minio";
+      portKeyConsole = "minio_console";
+      dataDirName = "minio";
+      rootUser = "minio";
+      rootPassword = "minio123456";
+      browser = true;
       sources.local = {
-        package = modules.minio.package;
-        clientPackage = modules.minio.clientPackage;
+        package = minioLocalPackage;
+        clientPackage = minioLocalClientPackage;
       };
       defaultSource = "local";
     };
 
     reth = {
-      enable = modules.reth.enable;
-      portKeyHttp = modules.reth.portKeyHttp;
-      portKeyWs = modules.reth.portKeyWs;
-      portKeyAuth = modules.reth.portKeyAuth;
-      portKeyP2p = modules.reth.portKeyP2p;
+      enable = true;
+      portKeyHttp = "rethHttp";
+      portKeyWs = "rethWs";
+      portKeyAuth = "rethAuth";
+      dataDirName = "reth";
+      network = "local";
+      devMode = true;
+      extraArgs = [ ];
       sources.local = {
-        package = modules.reth.package;
+        package = rethLocalPackage;
       };
       defaultSource = "local";
     };
 
     helios = {
-      enable = modules.helios.enable;
-      portKeyRpc = modules.helios.portKeyRpc;
-      executionRpcPortKey = modules.helios.executionRpcPortKey;
+      enable = true;
+      portKeyRpc = "heliosRpc";
+      executionRpcPortKey = "rethHttp";
+      dataDirName = "helios";
+      network = "local";
+      # Mainnet default for workflows that do not set HELIOS_EXECUTION_RPC_URL explicitly.
+      executionRpcUrl = "https://ethereum-rpc.publicnode.com";
+      # Mainnet default consensus endpoint used by Helios snapshot workflows.
+      consensusRpcUrl = "https://lodestar-mainnet.chainsafe.io";
+      defaultConsensusRpcUrl = "https://lodestar-mainnet.chainsafe.io";
+      checkpoint = "";
+      extraArgs = [ ];
       sources.local = {
-        package = modules.helios.package;
+        package = heliosLocalPackage;
       };
       defaultSource = "local";
       sourceKinds.local = "real";
@@ -357,7 +320,7 @@ rec {
       { }
     else
       {
-        helios = modules.helios.package;
+        helios = (((services.helios.sources or { }).local or { }).package or null);
         "mfm-cli" = pkgs.rustPlatform.buildRustPackage rec {
           pname = "mfm-cli";
           version = "0.1.29";

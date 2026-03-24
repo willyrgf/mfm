@@ -6,6 +6,7 @@
 }:
 
 let
+  commonRuntimeShell = import ../common-runtime.nix { inherit pkgs; };
   projectId = (project.project or { }).id or "project";
   runsRoot = (project.ci or { }).runsRoot or "/tmp/${projectId}-runs";
   id = import ./id.nix {
@@ -14,6 +15,7 @@ let
 
   runRegistryStart = pkgs.writeShellScript "run-registry-start" ''
     ${loggingPrelude}
+    ${commonRuntimeShell}
 
     set -euo pipefail
 
@@ -52,33 +54,99 @@ let
     } > "$RUN_DIR/runner.sh"
     chmod +x "$RUN_DIR/runner.sh"
 
+    meta_fields_file() {
+      printf '%s/meta.fields' "$RUN_DIR"
+    }
+
+    write_meta_fields() {
+      local fields_file
+      local tmp
+
+      fields_file="$(meta_fields_file)"
+      tmp="$RUN_DIR/meta.fields.tmp.$$"
+      {
+        printf 'META_RUN_ID=%q\n' "$META_RUN_ID"
+        printf 'META_PLAN_ID=%q\n' "$META_PLAN_ID"
+        printf 'META_TARGET=%q\n' "$META_TARGET"
+        printf 'META_STATUS=%q\n' "$META_STATUS"
+        printf 'META_STARTED_AT=%q\n' "$META_STARTED_AT"
+        printf 'META_PID=%q\n' "$META_PID"
+        printf 'META_SLOT=%q\n' "$META_SLOT"
+        printf 'META_ENV=%q\n' "$META_ENV"
+        printf 'META_EXIT_CODE=%q\n' "$META_EXIT_CODE"
+        printf 'META_DURATION=%q\n' "$META_DURATION"
+      } > "$tmp"
+      mv "$tmp" "$fields_file"
+    }
+
+    load_meta_fields() {
+      local fields_file
+
+      fields_file="$(meta_fields_file)"
+      if [ ! -f "$fields_file" ]; then
+        echo "ERROR: missing run registry metadata for '$RUN_DIR'" >&2
+        return 1
+      fi
+
+      unset \
+        META_RUN_ID \
+        META_PLAN_ID \
+        META_TARGET \
+        META_STATUS \
+        META_STARTED_AT \
+        META_PID \
+        META_SLOT \
+        META_ENV \
+        META_EXIT_CODE \
+        META_DURATION || true
+      . "$fields_file"
+    }
+
+    write_meta_json() {
+      local target_file="$1"
+      local slot_json="null"
+
+      if [[ "$META_SLOT" =~ ^[0-9]+$ ]]; then
+        slot_json="$META_SLOT"
+      else
+        slot_json="$(json_string_or_null "$META_SLOT")"
+      fi
+
+      {
+        printf '{'
+        printf '"run_id":%s' "$(json_quote_string "$META_RUN_ID")"
+        printf ',"plan_id":%s' "$(json_string_or_null "$META_PLAN_ID")"
+        printf ',"target":%s' "$(json_quote_string "$META_TARGET")"
+        printf ',"status":%s' "$(json_quote_string "$META_STATUS")"
+        printf ',"started_at":%s' "$(json_quote_string "$META_STARTED_AT")"
+        printf ',"pid":%s' "$(json_number_or_null "$META_PID")"
+        printf ',"slot":%s' "$slot_json"
+        printf ',"env":%s' "$(json_string_or_null "$META_ENV")"
+        printf ',"exit_code":%s' "$(json_number_or_null "$META_EXIT_CODE")"
+        printf ',"duration":%s' "$(json_number_or_null "$META_DURATION")"
+        printf '}\n'
+      } > "$target_file"
+    }
+
     # Write initial meta.json
     SLOT_INFO=""
     if [ -n "''${SLOT:-}" ]; then SLOT_INFO="$SLOT"; fi
     ENV_INFO=""
     if [ -n "''${ENV:-}" ]; then ENV_INFO="$ENV"; fi
 
-    ${pkgs.jq}/bin/jq -n \
-      --arg run_id "$RUN_ID" \
-      --arg target "$NAME" \
-      --arg started_at "$(${pkgs.coreutils}/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      --arg plan_id "$PLAN_ID" \
-      --arg slot "$SLOT_INFO" \
-      --arg env "$ENV_INFO" \
-      '
-      {
-        run_id: $run_id,
-        plan_id: (if $plan_id == "" then null else $plan_id end),
-        target: $target,
-        status: "starting",
-        started_at: $started_at,
-        pid: null,
-        slot: (if $slot == "" then null else (try ($slot | tonumber) catch $slot) end),
-        env: (if $env == "" then null else $env end),
-        exit_code: null,
-        duration: null
-      }
-      ' > "$RUN_DIR/meta.json"
+    META_RUN_ID="$RUN_ID"
+    META_PLAN_ID="$PLAN_ID"
+    META_TARGET="$NAME"
+    META_STATUS="starting"
+    META_STARTED_AT="$(${pkgs.coreutils}/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+    META_PID=""
+    META_SLOT="$SLOT_INFO"
+    META_ENV="$ENV_INFO"
+    META_EXIT_CODE=""
+    META_DURATION=""
+
+    write_meta_json "$RUN_DIR/meta.json"
+    write_meta_fields
 
     export RUN_DIR="$RUN_DIR"
     export RUN_ID="$RUN_ID"
@@ -94,16 +162,18 @@ let
       (
         exec 9>"$LOCK"
         ${pkgs.flock}/bin/flock -x 9
-        ${pkgs.jq}/bin/jq \
-          --arg s "$status" \
-          --arg ec "$exit_code" \
-          --arg d "$duration" \
-          --arg pid "$$" \
-          '.status = $s
-           | .pid = ($pid | tonumber)
-           | .exit_code = (if $ec == "null" then null else ($ec | tonumber) end)
-           | .duration = (if $d == "null" then null else ($d | tonumber) end)' \
-          "$RUN_DIR/meta.json" > "$TMP_META" && mv "$TMP_META" "$RUN_DIR/meta.json"
+        load_meta_fields
+        META_STATUS="$status"
+        META_PID="$$"
+        if [ -n "$exit_code" ] && [ "$exit_code" != "null" ]; then
+          META_EXIT_CODE="$exit_code"
+        fi
+        if [ -n "$duration" ] && [ "$duration" != "null" ]; then
+          META_DURATION="$duration"
+        fi
+        write_meta_json "$TMP_META"
+        mv "$TMP_META" "$RUN_DIR/meta.json"
+        write_meta_fields
       )
     }
 

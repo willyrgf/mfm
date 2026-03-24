@@ -201,6 +201,7 @@ let
           appId
           app
           ;
+        contractBundle = compiledCore.contractBundle;
         targetProgram = appPrograms.${app.targetAppId};
         setupPrograms = map (setupAppId: appPrograms.${setupAppId}) (app.setupAppIds or [ ]);
         teardownPrograms = map (teardownAppId: appPrograms.${teardownAppId}) (app.teardownAppIds or [ ]);

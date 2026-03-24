@@ -96,7 +96,7 @@ rec {
       urlExpr,
       method,
       params ? [ ],
-      jqExpr ? ".result // empty",
+      fieldExpr ? ".result // empty",
       raw ? true,
       maxTime ? runtimeDefaults.probes.httpMaxTimeSeconds,
     }:
@@ -110,7 +110,7 @@ rec {
             maxTime
             ;
         }}
-      ) | ${pkgs.jq}/bin/jq -${if raw then "r" else "c"} '${jqExpr}'
+      ) | ${pkgs.jq}/bin/jq -${if raw then "r" else "c"} '${fieldExpr}'
     '';
 
   pgIsReadyCmd =

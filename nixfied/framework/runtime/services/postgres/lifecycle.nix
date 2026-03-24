@@ -88,13 +88,13 @@ let
   pgRuntimePrelude = defaultDb: ''
     ${slotEnvRuntime.loadJsonFromCommand {
       outVar = "SLOT_INFO_JSON_OUT";
-      command = toString slots.getSlotInfoJson;
+      command = toString slots.getSlotInfo;
       exportVars = false;
     }}
     ${slotEnvRuntime.readJsonField {
       targetVar = "RUN_DIR";
       jsonVar = "SLOT_INFO_JSON_OUT";
-      jqExpr = ".directories.run";
+      fieldExpr = ".directories.run";
     }}
 
     PORT_VAR="${portVar}"
@@ -128,77 +128,6 @@ let
     esac
 
     ${observability.mkEmitServiceEventFunction "postgres"}
-  '';
-
-  darwinSysvShmPreflight = ''
-    darwin_sysv_shm_preflight() {
-      local phase="''${1:-postgres}"
-      local sysctl_bin="/usr/sbin/sysctl"
-      local ipcs_bin="/usr/bin/ipcs"
-      local awk_bin="/usr/bin/awk"
-      local ps_bin="/bin/ps"
-      local shmmni=""
-      local shmseg=""
-      local shmall=""
-      local shmmax=""
-      local allocated_segments=""
-      local free_segments=""
-      local suggested_shmmni=""
-      local postgres_masters=""
-
-      if [ "$(${pkgs.coreutils}/bin/uname -s)" != "Darwin" ]; then
-        return 0
-      fi
-
-      if [ "''${POSTGRES_SKIP_DARWIN_SHM_PREFLIGHT:-0}" = "1" ]; then
-        return 0
-      fi
-
-      if [ ! -x "$sysctl_bin" ] || [ ! -x "$ipcs_bin" ] || [ ! -x "$awk_bin" ]; then
-        return 0
-      fi
-
-      shmmni="$($sysctl_bin -n kern.sysv.shmmni 2>/dev/null || true)"
-      shmseg="$($sysctl_bin -n kern.sysv.shmseg 2>/dev/null || true)"
-      shmall="$($sysctl_bin -n kern.sysv.shmall 2>/dev/null || true)"
-      shmmax="$($sysctl_bin -n kern.sysv.shmmax 2>/dev/null || true)"
-      allocated_segments="$($ipcs_bin -m 2>/dev/null | $awk_bin '/^m / {c++} END{print c+0}')"
-
-      case "$shmmni" in
-        *[!0-9]*|"")
-          return 0
-          ;;
-      esac
-
-      case "$allocated_segments" in
-        *[!0-9]*|"")
-          return 0
-          ;;
-      esac
-
-      free_segments=$((shmmni - allocated_segments))
-      if [ "$free_segments" -gt 0 ]; then
-        return 0
-      fi
-
-      suggested_shmmni=$((shmmni < 128 ? 128 : shmmni * 2))
-      if [ -x "$ps_bin" ]; then
-        postgres_masters="$($ps_bin -axo pid=,command= 2>/dev/null | $awk_bin '/\/postgres -D / {print "   "$0}')"
-      fi
-
-      log_error "Darwin SysV shared-memory segment table is exhausted before postgres $phase"
-      log_detail "allocated_segments=$allocated_segments shmmni=$shmmni free_segments=$free_segments shmseg=$shmseg shmall=$shmall shmmax=$shmmax"
-      log_hint "This failure is segment-table exhaustion, not shared-memory byte exhaustion; kern.sysv.shmmni is the primary knob to raise."
-      log_hint "PostgreSQL still needs at least one free System V shared-memory segment even when shared_memory_type=mmap."
-      log_hint "Stop stale local PostgreSQL instances or free other SysV shared-memory users."
-      log_hint "As admin, temporarily raise the system-wide segment cap with: sudo sysctl kern.sysv.shmmni=$suggested_shmmni"
-      log_hint "To persist it across boots, add 'kern.sysv.shmmni=$suggested_shmmni' to /etc/sysctl.conf and reload or reboot."
-      if [ -n "$postgres_masters" ]; then
-        echo "DETAIL: running postgres masters:" >&2
-        echo "$postgres_masters" >&2
-      fi
-      exit 1
-    }
   '';
 
   ensureConfigPort = ''
@@ -239,7 +168,6 @@ let
     body = ''
       ${ensureConfigPort}
       ${selectConfigTemplate}
-      ${darwinSysvShmPreflight}
 
       mkdir -p "$PGDATA"
 
@@ -248,7 +176,6 @@ let
         exit 0
       fi
 
-      darwin_sysv_shm_preflight "init"
       log_info "Initializing PostgreSQL at $PGDATA"
       ${postgres}/bin/initdb -D "$PGDATA" -U postgres --no-locale --encoding=UTF8 -A trust
 
@@ -271,7 +198,6 @@ let
     name = "postgres-start";
     body = ''
       ${ensureConfigPort}
-      ${darwinSysvShmPreflight}
 
       if [ ! -f "$PGDATA/postgresql.conf" ]; then
         log_error "PostgreSQL not initialized at $PGDATA (missing postgresql.conf)"
@@ -320,7 +246,6 @@ let
       mkdir -p "$PGSOCKET_DIR"
       chmod 700 "$PGSOCKET_DIR" 2>/dev/null || true
 
-      darwin_sysv_shm_preflight "start"
       log_info "Starting PostgreSQL on port $PGPORT"
       emit_service_event service_starting starting --log-path "$PGDATA/postgres.log"
       ${postgres}/bin/pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -o "-p $PGPORT -k $PGSOCKET_DIR" start
@@ -516,29 +441,17 @@ let
   setupDb = mkPgScript {
     name = "postgres-setup-db";
     body = ''
-      create_db_output=""
-
       log_info "Setting up database '$PGDATABASE'"
 
       ${postgres}/bin/psql -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres -d postgres -c \
-        "DO \$\$ BEGIN CREATE ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'postgres'; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;" \
-        -v ON_ERROR_STOP=1
+        "DO \$\$ BEGIN CREATE ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'postgres'; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;" 2>/dev/null || true
 
-      if ! create_db_output="$(
-        # Connect through a stable maintenance database instead of the target database.
-        ${postgres}/bin/createdb -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres \
-          --maintenance-db=postgres "$PGDATABASE" 2>&1
-      )"; then
-        if ! printf '%s' "$create_db_output" | ${pkgs.gnugrep}/bin/grep -qi "already exists"; then
-          printf '%s\n' "$create_db_output" >&2
-          exit 1
-        fi
-      fi
+      ${postgres}/bin/createdb -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres "$PGDATABASE" 2>/dev/null || true
 
       if [ -n "${pkgs.lib.concatStringsSep " " extensions}" ]; then
         for ext in ${pkgs.lib.concatStringsSep " " extensions}; do
           ${postgres}/bin/psql -h ${runtimeDefaults.hosts.localhost} -p "$PGPORT" -U postgres -d "$PGDATABASE" \
-            -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS $ext;"
+            -c "CREATE EXTENSION IF NOT EXISTS $ext;" 2>/dev/null || true
         done
       fi
 

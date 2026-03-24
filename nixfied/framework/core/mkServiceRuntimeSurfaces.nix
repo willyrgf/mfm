@@ -7,6 +7,7 @@
 let
   lib = pkgs.lib;
   serviceModulePath = import ./serviceModulePath.nix;
+  commonRuntimeShell = import ../runtime/common-runtime.nix { inherit pkgs; };
 
   normalizeToken =
     value: lib.toUpper (lib.replaceStrings [ "." "-" ":" "/" " " ] [ "_" "_" "_" "_" "_" ] value);
@@ -247,73 +248,70 @@ let
 
   slotInfoJson = pkgs.writeShellScript "nixfied-slot-info-json" ''
     set -euo pipefail
+    ${commonRuntimeShell}
     ${slotRuntimePrelude}
 
     resolve_slot_runtime_context
 
-    ports_json="$(
-      while IFS=$'\t' read -r port_name port_base || [ -n "$port_name" ]; do
-        port_var=""
-        port_value=""
+    printf '{'
+    printf '"slot":%s' "$(json_quote_string "$SLOT_RUNTIME_SLOT_VALUE")"
+    printf ',"env":%s' "$(json_quote_string "$SLOT_RUNTIME_ENV_VALUE")"
+    printf ',"ports":{'
+    first_port=1
+    while IFS=$'\t' read -r port_name port_base || [ -n "$port_name" ]; do
+      port_var=""
+      port_value=""
 
-        if [ -z "$port_name" ]; then
-          continue
-        fi
+      if [ -z "$port_name" ]; then
+        continue
+      fi
 
-        port_var="$(normalize_slot_runtime_token "$port_name")_PORT"
-        port_value="$(resolve_slot_runtime_port_value "$port_name")"
-        printf '%s\t%s\n' "$port_var" "$port_value"
-      done <<< "$SLOT_RUNTIME_PORT_BASES_TSV" \
-        | ${pkgs.jq}/bin/jq -Rn '
-            [inputs | select(length > 0) | split("\t")]
-            | map({ key: .[0], value: (.[1] | tonumber) })
-            | from_entries
-          '
-    )"
-
-    ${pkgs.jq}/bin/jq -n \
-      --arg slot "$SLOT_RUNTIME_SLOT_VALUE" \
-      --arg env "$SLOT_RUNTIME_ENV_VALUE" \
-      --arg run_dir "$SLOT_RUNTIME_RUN_DIR" \
-      --arg log_dir "$SLOT_RUNTIME_LOG_DIR" \
-      --arg config_dir "$SLOT_RUNTIME_CONFIG_DIR" \
-      --arg runtime_scope "$SLOT_RUNTIME_SCOPE_ROOT" \
-      --arg service_root "$SLOT_RUNTIME_SERVICE_ROOT" \
-      --argjson ports "$ports_json" \
-      '{
-        slot: $slot,
-        env: $env,
-        ports: $ports,
-        directories: {
-          run: $run_dir,
-          log: $log_dir,
-          config: $config_dir
-        },
-        vars: {
-          NIXFIED_RUNTIME_DIR_SCOPE: $runtime_scope,
-          NIXFIED_SERVICE_ROOT: $service_root
-        }
-      }'
+      port_var="$(normalize_slot_runtime_token "$port_name")_PORT"
+      port_value="$(resolve_slot_runtime_port_value "$port_name")"
+      if [ "$first_port" -eq 0 ]; then
+        printf ','
+      fi
+      printf '%s:%s' "$(json_quote_string "$port_var")" "$port_value"
+      first_port=0
+    done <<< "$SLOT_RUNTIME_PORT_BASES_TSV"
+    printf '}'
+    printf ',"directories":{'
+    printf '"run":%s' "$(json_quote_string "$SLOT_RUNTIME_RUN_DIR")"
+    printf ',"log":%s' "$(json_quote_string "$SLOT_RUNTIME_LOG_DIR")"
+    printf ',"config":%s' "$(json_quote_string "$SLOT_RUNTIME_CONFIG_DIR")"
+    printf '}'
+    printf ',"vars":{'
+    printf '"NIXFIED_RUNTIME_DIR_SCOPE":%s' "$(json_quote_string "$SLOT_RUNTIME_SCOPE_ROOT")"
+    printf ',"NIXFIED_SERVICE_ROOT":%s' "$(json_quote_string "$SLOT_RUNTIME_SERVICE_ROOT")"
+    printf '}'
+    printf '}\n'
   '';
 
   slotInfo = pkgs.writeShellScript "nixfied-slot-info" ''
     set -euo pipefail
+    ${slotRuntimePrelude}
 
-    SLOT_INFO_JSON="$(${slotInfoJson})"
-    printf '%s\n' "$SLOT_INFO_JSON" | ${pkgs.jq}/bin/jq -r '
-      def emit($name; $value): "\($name)=\($value | @sh)";
-      [
-        emit("SLOT"; (.slot // "")),
-        emit("ENV"; (.env // "")),
-        emit("RUN_DIR"; (.directories.run // "")),
-        emit("LOG_DIR"; (.directories.log // "")),
-        emit("CONFIG_DIR"; (.directories.config // "")),
-        emit("NIXFIED_RUNTIME_DIR_SCOPE"; (.vars.NIXFIED_RUNTIME_DIR_SCOPE // "")),
-        emit("NIXFIED_SERVICE_ROOT"; (.vars.NIXFIED_SERVICE_ROOT // ""))
-      ]
-      + ((.ports // {}) | to_entries | map(emit(.key; (.value | tostring))))
-      | .[]
-    '
+    resolve_slot_runtime_context
+
+    printf 'SLOT=%q\n' "$SLOT_RUNTIME_SLOT_VALUE"
+    printf 'ENV=%q\n' "$SLOT_RUNTIME_ENV_VALUE"
+    printf 'RUN_DIR=%q\n' "$SLOT_RUNTIME_RUN_DIR"
+    printf 'LOG_DIR=%q\n' "$SLOT_RUNTIME_LOG_DIR"
+    printf 'CONFIG_DIR=%q\n' "$SLOT_RUNTIME_CONFIG_DIR"
+    printf 'NIXFIED_RUNTIME_DIR_SCOPE=%q\n' "$SLOT_RUNTIME_SCOPE_ROOT"
+    printf 'NIXFIED_SERVICE_ROOT=%q\n' "$SLOT_RUNTIME_SERVICE_ROOT"
+    while IFS=$'\t' read -r port_name port_base || [ -n "$port_name" ]; do
+      port_var=""
+      port_value=""
+
+      if [ -z "$port_name" ]; then
+        continue
+      fi
+
+      port_var="$(normalize_slot_runtime_token "$port_name")_PORT"
+      port_value="$(resolve_slot_runtime_port_value "$port_name")"
+      printf '%s=%q\n' "$port_var" "$port_value"
+    done <<< "$SLOT_RUNTIME_PORT_BASES_TSV"
   '';
 
   serviceDirResolver = pkgs.writeShellScript "nixfied-service-dir" ''

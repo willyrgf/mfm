@@ -21,7 +21,15 @@ let
   featuresTable = builtins.concatStringsSep "\n" featureRows;
 
   introspectionGraphJson = builtins.toJSON compiledCore.introspectionGraph;
-  introspectionQueryScript = ./introspection-query.py;
+  introspectionBundleJson = builtins.toJSON compiledCore.introspectionBundle;
+  introspectionAssets = import ../introspection/assets.nix {
+    inherit pkgs canonical;
+    bundle = compiledCore.introspectionBundle;
+  };
+  introspectionRuntime = import ../introspection/runtime.nix {
+    inherit pkgs;
+    assetsDir = introspectionAssets;
+  };
 
   taskSchema = builtins.fromJSON (builtins.readFile ../../schemas/task-contract.json);
   workflowSchema = builtins.fromJSON (builtins.readFile ../../schemas/workflow-contract.json);
@@ -38,6 +46,7 @@ let
   docsFile = pkgs.writeText "nixfied-docs.md" "${docsText}\n";
   featureFile = pkgs.writeText "nixfied-features.txt" "${featureText}\n";
   introspectionGraphFile = pkgs.writeText "nixfied-introspection-graph.json" "${introspectionGraphJson}\n";
+  introspectionBundleFile = pkgs.writeText "nixfied-introspection-bundle.json" "${introspectionBundleJson}\n";
 
   schemaDir = pkgs.runCommand "nixfied-schemas" { } ''
     mkdir -p "$out"
@@ -59,7 +68,7 @@ let
       appName = "introspect";
       binPrefix = "nixfied-introspect";
       body = ''
-        exec ${pkgs.python3}/bin/python3 ${introspectionQueryScript} ${introspectionGraphFile} "$@"
+        exec ${introspectionRuntime} "$@"
       '';
     };
 
@@ -100,6 +109,8 @@ let
     help = helpFile;
     docs = docsFile;
     introspectionGraph = introspectionGraphFile;
+    introspectionBundle = introspectionBundleFile;
+    introspectionAssets = introspectionAssets;
     stateHash = pkgs.writeText "nixfied-state-hash.txt" "${compiledCore.stateHash}\n";
     features = pkgs.writeText "nixfied-features.txt" "${featuresTable}\n";
     schema = schemaDir;
@@ -116,6 +127,7 @@ let
     introspection-schema = pkgs.runCommand "schema-bundle" { } ''
       ${pkgs.jq}/bin/jq -e '.task and .workflow and .model' ${schemaBundleFile} > /dev/null
       ${pkgs.jq}/bin/jq -e '.schema.kind == "nixfied-introspection-graph"' ${introspectionGraphFile} > /dev/null
+      ${pkgs.jq}/bin/jq -e '.schema.kind == "nixfied-introspection-bundle"' ${introspectionBundleFile} > /dev/null
       echo "OK: schema bundle and introspection graph are valid" > "$out"
     '';
   };

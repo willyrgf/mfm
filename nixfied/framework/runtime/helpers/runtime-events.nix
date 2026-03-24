@@ -8,6 +8,7 @@
 let
   projectMeta = project.project or { };
   projectId = projectMeta.id or "project";
+  commonRuntimeShell = import ../common-runtime.nix { inherit pkgs; };
   id = import ./id.nix {
     inherit pkgs project;
   };
@@ -71,6 +72,7 @@ let
     EPHEMERAL_ROOT_VAR="${projectIdUpper}_EPHEMERAL_ROOT"
 
     ${registryShell}
+    ${commonRuntimeShell}
 
     normalize_bool() {
       case "''${1:-}" in
@@ -150,6 +152,139 @@ let
         ""|*[!0-9]*) return 1 ;;
         *) return 0 ;;
       esac
+    }
+
+    runtime_index_segment() {
+      local value="$1"
+      if [ -z "$value" ]; then
+        printf '%s' "__empty__"
+        return 0
+      fi
+      value="''${value//\//_}"
+      value="''${value//$'\n'/_}"
+      value="''${value//$'\r'/_}"
+      value="''${value//$'\t'/_}"
+      printf '%s' "$value"
+    }
+
+    runtime_events_index_root() {
+      printf '%s/runtime-events' "$REGISTRY_ROOT"
+    }
+
+    service_events_root_for() {
+      local service_name="$1"
+      printf '%s/services/%s' "$(runtime_events_index_root)" "$(runtime_index_segment "$service_name")"
+    }
+
+    service_events_index_file_for() {
+      local service_name="$1"
+      local slot_name="$2"
+      local env_name="$3"
+      printf '%s/%s/%s/events.tsv' \
+        "$(service_events_root_for "$service_name")" \
+        "$(runtime_index_segment "$slot_name")" \
+        "$(runtime_index_segment "$env_name")"
+    }
+
+    service_status_file_for() {
+      local service_name="$1"
+      local slot_name="$2"
+      local env_name="$3"
+      printf '%s/%s/%s/status.env' \
+        "$(service_events_root_for "$service_name")" \
+        "$(runtime_index_segment "$slot_name")" \
+        "$(runtime_index_segment "$env_name")"
+    }
+
+    slot_status_file_for() {
+      local slot_name="$1"
+      local env_name="$2"
+      printf '%s/slots/%s/%s/status.env' \
+        "$(runtime_events_index_root)" \
+        "$(runtime_index_segment "$slot_name")" \
+        "$(runtime_index_segment "$env_name")"
+    }
+
+    write_shell_vars_file() {
+      local target_file="$1"
+      shift
+      local parent_dir
+      local tmp
+
+      parent_dir="$(dirname "$target_file")" || return 1
+      mkdir -p "$parent_dir" || return 1
+      tmp="$(mktemp "$target_file.tmp.XXXXXX")" || return 1
+      while [ "$#" -gt 1 ]; do
+        printf '%s=%q\n' "$1" "$2" >> "$tmp" || {
+          rm -f "$tmp"
+          return 1
+        }
+        shift 2
+      done
+      if ! mv "$tmp" "$target_file"; then
+        rm -f "$tmp"
+        return 1
+      fi
+    }
+
+    append_index_line_locked() {
+      local target_file="$1"
+      local line="$2"
+      local lock_file="$target_file.lock"
+      local lock_fd
+      local parent_dir
+
+      parent_dir="$(dirname "$target_file")" || return 1
+      mkdir -p "$parent_dir" || return 1
+      lock_fd="$(registry_lock_acquire "$lock_file" "runtime-events-index:$target_file" "$REGISTRY_DEFAULT_LOCK_TIMEOUT_SECONDS")" || return 1
+      if ! printf '%s\n' "$line" >> "$target_file"; then
+        registry_lock_release "$lock_fd" "$lock_file"
+        return 1
+      fi
+      registry_lock_release "$lock_fd" "$lock_file"
+    }
+
+    write_service_status_index() {
+      local service_name="$1"
+      local slot_name="$2"
+      local env_name="$3"
+      local registry_state="$4"
+      local owner_run_id="$5"
+      local owner_scope="$6"
+      local ephemeral_root="$7"
+      local wait_reason="$8"
+      local log_path="$9"
+      local status_file
+
+      status_file="$(service_status_file_for "$service_name" "$slot_name" "$env_name")"
+      write_shell_vars_file \
+        "$status_file" \
+        SERVICE_STATUS_STATE "$registry_state" \
+        SERVICE_STATUS_OWNER_RUN_ID "$owner_run_id" \
+        SERVICE_STATUS_OWNER_SCOPE "$owner_scope" \
+        SERVICE_STATUS_EPHEMERAL_ROOT "$ephemeral_root" \
+        SERVICE_STATUS_WAIT_REASON "$wait_reason" \
+        SERVICE_STATUS_LOG_PATH "$log_path"
+    }
+
+    write_slot_owner_index() {
+      local slot_name="$1"
+      local env_name="$2"
+      local owner_run_id="$3"
+      local status_file
+
+      status_file="$(slot_status_file_for "$slot_name" "$env_name")"
+      write_shell_vars_file "$status_file" SLOT_STATUS_OWNER_RUN_ID "$owner_run_id"
+    }
+
+    load_shell_vars_file() {
+      local source_file="$1"
+
+      if [ ! -f "$source_file" ]; then
+        return 1
+      fi
+
+      . "$source_file"
     }
   '';
 
@@ -303,62 +438,79 @@ let
       EVENT_KIND="serviceLifecycle"
     fi
 
-    DETAIL_JSON=$(${pkgs.jq}/bin/jq -cnS \
-      --arg kind "$EVENT_KIND" \
-      --arg eventType "$EVENT_TYPE" \
-      --arg commandName "$EVENT_COMMAND" \
-      --arg projectId "$PROJECT_ID" \
-      --arg service "$EVENT_SERVICE" \
-      --arg slot "$EVENT_SLOT" \
-      --arg env "$EVENT_ENV" \
-      --arg profile "$EVENT_PROFILE" \
-      --arg pid "$EVENT_PID" \
-      --arg pgid "$EVENT_PGID" \
-      --arg planId "$EVENT_PLAN_ID" \
-      --arg unitId "$EVENT_UNIT_ID" \
-      --arg attempt "$EVENT_ATTEMPT" \
-      --arg ownerScope "$EVENT_OWNER_SCOPE" \
-      --arg reusePolicy "$EVENT_REUSE_POLICY" \
-      --arg discoveryScope "$EVENT_DISCOVERY_SCOPE" \
-      --arg ephemeralRoot "$EVENT_EPHEMERAL_ROOT" \
-      --arg waitReason "$EVENT_WAIT_REASON" \
-      --arg logPath "$EVENT_LOG_PATH" \
-      --arg lastError "$EVENT_LAST_ERROR" \
-      --arg readinessHealth "$EVENT_READINESS_HEALTH_NORM" \
-      --arg readinessReady "$EVENT_READINESS_READY_NORM" \
-      '
-      {
-        kind: $kind,
-        eventType: $eventType,
-        commandName: (if $commandName == "" then null else $commandName end),
-        projectId: $projectId,
-        service: (if $service == "" then null else $service end),
-        slot: (if $slot == "" then null else $slot end),
-        env: (if $env == "" then null else $env end),
-        profile: (if $profile == "" then null else $profile end),
-        pid: (if $pid == "" then null else (try ($pid | tonumber) catch $pid) end),
-        pgid: (if $pgid == "" then null else (try ($pgid | tonumber) catch $pgid) end),
-        planId: (if $planId == "" then null else $planId end),
-        unitId: (if $unitId == "" then null else $unitId end),
-        attempt: (if $attempt == "" then null else (try ($attempt | tonumber) catch null) end),
-        ownerScope: (if $ownerScope == "" then null else $ownerScope end),
-        reusePolicy: (if $reusePolicy == "" then null else $reusePolicy end),
-        discoveryScope: (if $discoveryScope == "" then null else $discoveryScope end),
-        ephemeralRoot: (if $ephemeralRoot == "" then null else $ephemeralRoot end),
-        readiness: {
-          healthOk: (if $readinessHealth == "null" then null else ($readinessHealth == "true") end),
-          readyOk: (if $readinessReady == "null" then null else ($readinessReady == "true") end),
-          lastError: (if $lastError == "" then null else $lastError end)
-        },
-        waitReason: (if $waitReason == "" then null else $waitReason end),
-        logPath: (if $logPath == "" then null else $logPath end)
-      }
-      ')
+    DETAIL_JSON="$(
+      printf '{'
+      printf '"kind":'
+      json_quote_string "$EVENT_KIND"
+      printf ',"eventType":'
+      json_quote_string "$EVENT_TYPE"
+      printf ',"commandName":%s' "$(json_string_or_null "$EVENT_COMMAND")"
+      printf ',"projectId":'
+      json_quote_string "$PROJECT_ID"
+      printf ',"service":%s' "$(json_string_or_null "$EVENT_SERVICE")"
+      printf ',"slot":%s' "$(json_string_or_null "$EVENT_SLOT")"
+      printf ',"env":%s' "$(json_string_or_null "$EVENT_ENV")"
+      printf ',"profile":%s' "$(json_string_or_null "$EVENT_PROFILE")"
+      printf ',"pid":%s' "$(json_number_or_null "$EVENT_PID")"
+      printf ',"pgid":%s' "$(json_number_or_null "$EVENT_PGID")"
+      printf ',"planId":%s' "$(json_string_or_null "$EVENT_PLAN_ID")"
+      printf ',"unitId":%s' "$(json_string_or_null "$EVENT_UNIT_ID")"
+      printf ',"attempt":%s' "$(json_number_or_null "$EVENT_ATTEMPT")"
+      printf ',"ownerScope":%s' "$(json_string_or_null "$EVENT_OWNER_SCOPE")"
+      printf ',"reusePolicy":%s' "$(json_string_or_null "$EVENT_REUSE_POLICY")"
+      printf ',"discoveryScope":%s' "$(json_string_or_null "$EVENT_DISCOVERY_SCOPE")"
+      printf ',"ephemeralRoot":%s' "$(json_string_or_null "$EVENT_EPHEMERAL_ROOT")"
+      printf ',"readiness":{'
+      printf '"healthOk":%s' "$(json_bool_or_null "$EVENT_READINESS_HEALTH_NORM")"
+      printf ',"readyOk":%s' "$(json_bool_or_null "$EVENT_READINESS_READY_NORM")"
+      printf ',"lastError":%s' "$(json_string_or_null "$EVENT_LAST_ERROR")"
+      printf '}'
+      printf ',"waitReason":%s' "$(json_string_or_null "$EVENT_WAIT_REASON")"
+      printf ',"logPath":%s' "$(json_string_or_null "$EVENT_LOG_PATH")"
+      printf '}'
+    )"
 
     if ! registry_append_event "$REGISTRY_ROOT" "$EVENT_RUN_ID" "''${NIXFIED_ATTEMPT_ID:-}" "" "" "$EVENT_STATE" "$DETAIL_JSON"; then
       log_error "failed to record runtime event event_type=$EVENT_TYPE run_id=$EVENT_RUN_ID"
       exit 1
     fi
+
+    if [ -n "$EVENT_SERVICE" ] && [ -n "''${REGISTRY_APPEND_LAST_SEQ:-}" ] && [ -n "''${REGISTRY_APPEND_LAST_EVENT_JSON:-}" ]; then
+      append_index_line_locked \
+        "$(service_events_index_file_for "$EVENT_SERVICE" "$EVENT_SLOT" "$EVENT_ENV")" \
+        "''${REGISTRY_APPEND_LAST_SEQ}	''${REGISTRY_APPEND_LAST_EVENT_JSON}" || {
+        log_error "failed to update service event index service=$EVENT_SERVICE"
+        exit 1
+      }
+      write_service_status_index \
+        "$EVENT_SERVICE" \
+        "$EVENT_SLOT" \
+        "$EVENT_ENV" \
+        "$EVENT_STATE" \
+        "$EVENT_RUN_ID" \
+        "$EVENT_OWNER_SCOPE" \
+        "$EVENT_EPHEMERAL_ROOT" \
+        "$EVENT_WAIT_REASON" \
+        "$EVENT_LOG_PATH" || {
+        log_error "failed to update service status index service=$EVENT_SERVICE"
+        exit 1
+      }
+    fi
+
+    case "$EVENT_KIND:$EVENT_TYPE" in
+      slotLifecycle:slot_acquired)
+        write_slot_owner_index "$EVENT_SLOT" "$EVENT_ENV" "$EVENT_RUN_ID" || {
+          log_error "failed to update slot owner index slot=$EVENT_SLOT env=$EVENT_ENV"
+          exit 1
+        }
+        ;;
+      slotLifecycle:slot_released)
+        write_slot_owner_index "$EVENT_SLOT" "$EVENT_ENV" "" || {
+          log_error "failed to clear slot owner index slot=$EVENT_SLOT env=$EVENT_ENV"
+          exit 1
+        }
+        ;;
+    esac
 
     log_ok "runtime event recorded event_type=$EVENT_TYPE run_id=$EVENT_RUN_ID service=''${EVENT_SERVICE:-none} state=$EVENT_STATE"
   '';
@@ -398,35 +550,33 @@ let
         ;;
     esac
 
-    EVENTS_FILE="$(registry_events_snapshot "$REGISTRY_ROOT" 2>/dev/null || true)"
-    if [ -z "$EVENTS_FILE" ] || [ ! -f "$EVENTS_FILE" ]; then
-      log_ok "no events found service=$SERVICE project_id=$PROJECT_ID"
-      exit 0
-    fi
-    trap 'registry_snapshot_cleanup "''${EVENTS_FILE:-}"' EXIT INT TERM
+    collect_service_event_files() {
+      local search_root
 
-    OUT=$(${pkgs.jq}/bin/jq -c -s \
-      --arg service "$SERVICE" \
-      --arg slot "$SLOT_FILTER" \
-      --arg env "$ENV_FILTER" \
-      --arg limit "$LIMIT" '
-      [ .[]
-        | select((.detail.kind // "") == "serviceLifecycle")
-        | select((.detail.service // "") == $service)
-        | select(($slot == "") or (((.detail.slot // "") | tostring) == $slot))
-        | select(($env == "") or ((.detail.env // "") == $env))
-      ]
-      | sort_by((.seq // 0), (.ts // ""))
-      | if (($limit | tonumber?) // 0) > 0 then
-          .[-(($limit | tonumber?) // 0):]
-        else
-          .
-        end
-      | .[]
-    ' "$EVENTS_FILE")
+      search_root="$(service_events_root_for "$SERVICE")"
+      if [ -n "$SLOT_FILTER" ]; then
+        search_root="$search_root/$(runtime_index_segment "$SLOT_FILTER")"
+      fi
+      if [ -n "$ENV_FILTER" ]; then
+        search_root="$search_root/$(runtime_index_segment "$ENV_FILTER")"
+      fi
+
+      if [ ! -d "$search_root" ]; then
+        return 0
+      fi
+
+      ${pkgs.findutils}/bin/find "$search_root" -type f -name 'events.tsv' | ${pkgs.coreutils}/bin/sort
+    }
+
+    OUT="$(
+      while IFS= read -r events_file; do
+        [ -f "$events_file" ] || continue
+        cat "$events_file"
+      done < <(collect_service_event_files) | ${pkgs.coreutils}/bin/sort -t $'\t' -k1,1n | ${pkgs.coreutils}/bin/tail -n "$LIMIT" | ${pkgs.coreutils}/bin/cut -f2-
+    )"
 
     if [ -z "$OUT" ]; then
-      log_ok "no events matched service=$SERVICE slot=''${SLOT_FILTER:-any} env=''${ENV_FILTER:-any}"
+      log_ok "no events found service=$SERVICE project_id=$PROJECT_ID"
       exit 0
     fi
 
@@ -477,27 +627,12 @@ let
       ENV_FILTER="''${ENV:-''${!ENV_VAR:-}}"
     fi
 
-    EVENTS_FILE="$(registry_events_snapshot "$REGISTRY_ROOT" 2>/dev/null || true)"
-    if [ -z "$EVENTS_FILE" ] || [ ! -f "$EVENTS_FILE" ]; then
+    STATUS_FILE="$(service_status_file_for "$SERVICE" "$SLOT_FILTER" "$ENV_FILTER")"
+    if ! load_shell_vars_file "$STATUS_FILE"; then
       log_error "no registry events found; cannot resolve log path service=$SERVICE"
       exit 1
     fi
-    trap 'registry_snapshot_cleanup "''${EVENTS_FILE:-}"' EXIT INT TERM
-
-    LOG_PATH=$(${pkgs.jq}/bin/jq -r -s \
-      --arg service "$SERVICE" \
-      --arg slot "$SLOT_FILTER" \
-      --arg env "$ENV_FILTER" '
-      [ .[]
-        | select((.detail.kind // "") == "serviceLifecycle")
-        | select((.detail.service // "") == $service)
-        | select(($slot == "") or (((.detail.slot // "") | tostring) == $slot))
-        | select(($env == "") or ((.detail.env // "") == $env))
-        | select((.detail.logPath // "") != "")
-      ]
-      | sort_by((.seq // 0), (.ts // ""))
-      | (last | .detail.logPath) // ""
-    ' "$EVENTS_FILE")
+    LOG_PATH="''${SERVICE_STATUS_LOG_PATH:-}"
 
     if [ -z "$LOG_PATH" ]; then
       log_error "no log path recorded for service=$SERVICE slot=''${SLOT_FILTER:-any} env=''${ENV_FILTER:-any}"
@@ -640,8 +775,10 @@ let
       exit 0
     fi
 
-    EVENTS_FILE="$(registry_events_snapshot "$REGISTRY_ROOT" 2>/dev/null || true)"
-    if [ -z "$EVENTS_FILE" ] || [ ! -f "$EVENTS_FILE" ]; then
+    STATUS_FILE="$(service_status_file_for "$SERVICE" "$SLOT_FILTER" "$ENV_FILTER")"
+    SLOT_STATUS_FILE="$(slot_status_file_for "$SLOT_FILTER" "$ENV_FILTER")"
+
+    if ! load_shell_vars_file "$STATUS_FILE"; then
       emit_var "REGISTRY_FOUND" "0"
       emit_var "REGISTRY_RUNNING" "false"
       emit_var "REGISTRY_SCOPE" "global"
@@ -654,55 +791,17 @@ let
       emit_var "SLOT_OWNER" ""
       exit 0
     fi
-    trap 'registry_snapshot_cleanup "''${EVENTS_FILE:-}"' EXIT INT TERM
+    STATE="''${SERVICE_STATUS_STATE:-unknown}"
+    OWNER_RUN_ID="''${SERVICE_STATUS_OWNER_RUN_ID:-}"
+    OWNER_SCOPE="''${SERVICE_STATUS_OWNER_SCOPE:-}"
+    EPHEMERAL_ROOT="''${SERVICE_STATUS_EPHEMERAL_ROOT:-}"
+    WAIT_REASON="''${SERVICE_STATUS_WAIT_REASON:-}"
+    LOG_PATH="''${SERVICE_STATUS_LOG_PATH:-}"
 
-    MATCH=$(${pkgs.jq}/bin/jq -c -s \
-      --arg service "$SERVICE" \
-      --arg slot "$SLOT_FILTER" \
-      --arg env "$ENV_FILTER" '
-      [ .[]
-        | select((.detail.kind // "") == "serviceLifecycle")
-        | select((.detail.service // "") == $service)
-        | select(($slot == "") or (((.detail.slot // "") | tostring) == $slot))
-        | select(($env == "") or ((.detail.env // "") == $env))
-      ]
-      | sort_by((.seq // 0), (.ts // ""))
-      | (last // {})
-    ' "$EVENTS_FILE")
-
-    if [ "$MATCH" = "{}" ]; then
-      emit_var "REGISTRY_FOUND" "0"
-      emit_var "REGISTRY_RUNNING" "false"
-      emit_var "REGISTRY_SCOPE" "global"
-      emit_var "REGISTRY_STATE" "unknown"
-      emit_var "OWNER_RUN_ID" ""
-      emit_var "OWNER_SCOPE" ""
-      emit_var "EPHEMERAL_ROOT" ""
-      emit_var "WAIT_REASON" ""
-      emit_var "LOG_PATH" ""
-      emit_var "SLOT_OWNER" ""
-      exit 0
+    SLOT_OWNER=""
+    if load_shell_vars_file "$SLOT_STATUS_FILE"; then
+      SLOT_OWNER="''${SLOT_STATUS_OWNER_RUN_ID:-}"
     fi
-
-    STATE=$(echo "$MATCH" | ${pkgs.jq}/bin/jq -r '.state // "unknown"')
-    OWNER_RUN_ID=$(echo "$MATCH" | ${pkgs.jq}/bin/jq -r '.runId // ""')
-    OWNER_SCOPE=$(echo "$MATCH" | ${pkgs.jq}/bin/jq -r '.detail.ownerScope // ""')
-    EPHEMERAL_ROOT=$(echo "$MATCH" | ${pkgs.jq}/bin/jq -r '.detail.ephemeralRoot // ""')
-    WAIT_REASON=$(echo "$MATCH" | ${pkgs.jq}/bin/jq -r '.detail.waitReason // ""')
-    LOG_PATH=$(echo "$MATCH" | ${pkgs.jq}/bin/jq -r '.detail.logPath // ""')
-
-    SLOT_OWNER=$(${pkgs.jq}/bin/jq -r -s \
-      --arg slot "$SLOT_FILTER" \
-      --arg env "$ENV_FILTER" '
-      [ .[]
-        | select((.detail.kind // "") == "slotLifecycle")
-        | select((.detail.eventType // "") == "slot_acquired" or (.detail.eventType // "") == "slot_released")
-        | select(($slot == "") or (((.detail.slot // "") | tostring) == $slot))
-        | select(($env == "") or ((.detail.env // "") == $env))
-      ]
-      | sort_by((.seq // 0), (.ts // ""))
-      | (last | .runId) // ""
-    ' "$EVENTS_FILE")
 
     REGISTRY_RUNNING="false"
     case "$STATE" in

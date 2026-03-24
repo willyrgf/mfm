@@ -8,6 +8,12 @@
 }:
 let
   lib = pkgs.lib;
+  contracts = import ../contracts {
+    inherit
+      lib
+      canonical
+      ;
+  };
 
   idLib = import ./id.nix {
     inherit
@@ -78,9 +84,25 @@ let
       canonical
       ;
   };
+  compileIntrospectionBundle = import ./compile-introspection-bundle.nix {
+    inherit
+      lib
+      canonical
+      ;
+  };
 
   compileViews = import ./compile-views.nix { inherit lib; };
   compileSelectionIndex = import ./compile-selection-index.nix { inherit lib; };
+  compileContractBundle = import ./compile-contract-bundle.nix {
+    inherit
+      lib
+      canonical
+      contracts
+      ;
+  };
+  frameworkContractDefinitions = import ../framework/contracts/default-definitions.nix {
+    contracts = contracts.types;
+  };
 
   finalizeModel = import ./finalize-model.nix {
     inherit
@@ -190,12 +212,18 @@ rec {
         pruneReasonsByTaskId = taskCompilation.pruneReasonsByTaskId;
       };
 
+      contractBundle = compileContractBundle {
+        resolved = resolvedModuleGraph.config;
+        frameworkDefinitions = frameworkContractDefinitions;
+      };
+
       apps = compileApps {
         resolved = resolvedModuleGraph.config;
         inherit
           serviceSets
           tasks
           workflows
+          contractBundle
           ;
       };
 
@@ -257,6 +285,10 @@ rec {
         inherit legacyLocalDefault;
       };
 
+      introspectionBundle = compileIntrospectionBundle {
+        inherit introspectionGraph;
+      };
+
       views = compileViews {
         inherit projectRoot;
         resolved = resolvedModuleGraph.config;
@@ -296,6 +328,7 @@ rec {
       apps = apps;
       appExecutionManifests = appExecutionManifests;
       introspectionGraph = introspectionGraph;
+      introspectionBundle = introspectionBundle;
       views = views;
       runtime = runtime;
       statePolicy = statePolicy;
@@ -304,6 +337,7 @@ rec {
       serviceSurfaceCatalog = serviceSurfaceCatalog;
       features = features;
       selectionIndex = selectionIndex;
+      contractBundle = contractBundle;
       legacyLocalDefault = legacyLocalDefault;
     };
 

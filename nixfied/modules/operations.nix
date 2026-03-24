@@ -56,12 +56,26 @@ let
   isolationSlotVar = runtime.slot.var;
   isolationEnvVar = runtime.env.var;
   isolationMaxSlot = runtime.slot.max;
-  isolationSlotsJson = builtins.toJSON cfg.testIsolation.slots;
-  isolationEnvsJson = builtins.toJSON cfg.testIsolation.envs;
   isolationRunTaskId = cfg.testIsolation.runTaskId;
   isolationValidateTaskId = cfg.testIsolation.validateTaskId;
-  isolationRunArgsJson = builtins.toJSON cfg.testIsolation.runArgs;
-  isolationRunEnvJson = builtins.toJSON cfg.testIsolation.runEnv;
+  renderShellArray =
+    name: values:
+    ''
+      ${name}=()
+    ''
+    + builtins.concatStringsSep "\n" (
+      map (value: "${name}+=(${lib.escapeShellArg (toString value)})") values
+    )
+    + "\n";
+  renderEnvValue = value: if builtins.isString value then value else builtins.toJSON value;
+  isolationSlotsShell = renderShellArray "isolation_slots" cfg.testIsolation.slots;
+  isolationEnvsShell = renderShellArray "isolation_envs" cfg.testIsolation.envs;
+  isolationRunArgsShell = renderShellArray "run_args" cfg.testIsolation.runArgs;
+  isolationRunEnvEntriesShell = renderShellArray "run_env_entries" (
+    map (key: "${key}\t${renderEnvValue cfg.testIsolation.runEnv.${key}}") (
+      builtins.sort builtins.lessThan (builtins.attrNames cfg.testIsolation.runEnv)
+    )
+  );
 
   envOffsetCase = builtins.concatStringsSep "\n" (
     map (
@@ -368,10 +382,10 @@ let
     validateTaskId = isolationValidateTaskId;
     keepLogsSuccess = cfg.testIsolation.keepLogsOnSuccess;
     keepLogsFailure = cfg.testIsolation.keepLogsOnFailure;
-    slotsJson = isolationSlotsJson;
-    envsJson = isolationEnvsJson;
-    runArgsJson = isolationRunArgsJson;
-    runEnvJson = isolationRunEnvJson;
+    slotsShell = isolationSlotsShell;
+    envsShell = isolationEnvsShell;
+    runArgsShell = isolationRunArgsShell;
+    runEnvEntriesShell = isolationRunEnvEntriesShell;
     inherit envPattern;
   };
 in
