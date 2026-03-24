@@ -401,6 +401,8 @@ pub mod op {
     /// - `expand()` MUST be deterministic and MUST NOT perform IO.
     /// - `expand()` returns one planner-owned operation instance with explicit interface +
     ///   leaf/composite shape.
+    /// - `planner_payload()` MAY emit canonical-json-safe audit/debug payloads derived from the
+    ///   same deterministic planning inputs; runtime MUST NOT depend on them.
     pub trait Operation: Send + Sync {
         /// Returns the stable operation identifier used in manifests and registries.
         fn op_id(&self) -> OpId;
@@ -414,6 +416,16 @@ pub mod op {
             op_config: &serde_json::Value,
             run_config: &RunConfig,
         ) -> Result<PlannedOp, SdkError>;
+
+        /// Returns optional planner-owned audit/debug payload for compiled execution specs.
+        fn planner_payload(
+            &self,
+            _op_path: OpPath,
+            _op_config: &serde_json::Value,
+            _run_config: &RunConfig,
+        ) -> Result<Option<serde_json::Value>, SdkError> {
+            Ok(None)
+        }
     }
 
     /// Shared trait-object form for storing heterogeneous operations in registries.

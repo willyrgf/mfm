@@ -202,6 +202,20 @@ struct FlattenedFragment {
     exports: BTreeMap<String, QualifiedSlotRef>,
     compiled_ops: Vec<CompiledOpRecord>,
     state_lineage: Vec<CompiledStateLineage>,
+    planner_payloads: BTreeMap<String, serde_json::Value>,
+}
+
+fn planned_op_payloads(
+    op_path: &OpPath,
+    planner_payload: Option<serde_json::Value>,
+) -> BTreeMap<String, serde_json::Value> {
+    planner_payload
+        .map(|payload| BTreeMap::from([(op_path.as_str().to_string(), payload)]))
+        .unwrap_or_default()
+}
+
+fn planner_payloads_value(payloads: BTreeMap<String, serde_json::Value>) -> serde_json::Value {
+    serde_json::Value::Object(payloads.into_iter().collect())
 }
 
 fn validate_unique_ports(
@@ -509,6 +523,7 @@ struct FlattenInput<'a> {
     op_version: String,
     op_path: OpPath,
     planned: PlannedOp,
+    planner_payload: Option<serde_json::Value>,
     resolved_imports: &'a BTreeMap<String, QualifiedSlotRef>,
 }
 
@@ -517,6 +532,7 @@ fn flatten_leaf_op(
     planned_op: PlannedOpRef<'_>,
     interface: OpInterface,
     spec: LeafOpSpec,
+    planner_payload: Option<serde_json::Value>,
     resolved_imports: &BTreeMap<String, QualifiedSlotRef>,
 ) -> Result<FlattenedFragment, SdkError> {
     validate_leaf_op_spec(&spec, planned_op.op_path, env.step_root)?;
@@ -606,6 +622,7 @@ fn flatten_leaf_op(
             re_exports: Vec::new(),
         }],
         state_lineage,
+        planner_payloads: planned_op_payloads(planned_op.op_path, planner_payload),
     })
 }
 
@@ -643,6 +660,7 @@ fn flatten_composite_op(
     planned_op: PlannedOpRef<'_>,
     interface: OpInterface,
     spec: crate::op::CompositeOpSpec,
+    planner_payload: Option<serde_json::Value>,
     resolved_imports: &BTreeMap<String, QualifiedSlotRef>,
 ) -> Result<FlattenedFragment, SdkError> {
     let declared_parent_imports: BTreeSet<String> = interface
@@ -668,12 +686,16 @@ fn flatten_composite_op(
         }
     }
 
-    let mut expanded_children: BTreeMap<String, (OpPath, OpId, String, PlannedOp)> =
-        BTreeMap::new();
+    let mut expanded_children: BTreeMap<
+        String,
+        (OpPath, OpId, String, PlannedOp, Option<serde_json::Value>),
+    > = BTreeMap::new();
     for (child_id, child) in &children_by_id {
         let child_op = env.registry.resolve(&child.op_id, &child.op_version)?;
         let child_op_path = child_op_path(planned_op.op_path, child_id.clone())?;
         let planned = child_op.expand(child_op_path.clone(), &child.op_config, env.run_config)?;
+        let child_planner_payload =
+            child_op.planner_payload(child_op_path.clone(), &child.op_config, env.run_config)?;
         validate_op_interface(&planned.interface)?;
         expanded_children.insert(
             child_id.clone(),
@@ -682,6 +704,7 @@ fn flatten_composite_op(
                 child.op_id.clone(),
                 child.op_version.clone(),
                 planned,
+                child_planner_payload,
             ),
         );
     }
@@ -723,7 +746,9 @@ fn flatten_composite_op(
         child_dependencies.insert((from, to));
     }
 
-    for (child_id, (_child_path, _child_op_id, _child_op_version, planned)) in &expanded_children {
+    for (child_id, (_child_path, _child_op_id, _child_op_version, planned, _planner_payload)) in
+        &expanded_children
+    {
         let declared_child_imports: BTreeSet<String> = planned
             .interface
             .imports
@@ -762,8 +787,13 @@ fn flatten_composite_op(
                 PortSource::ChildExport { child, export } => {
                     child_dependencies.insert((child.0.clone(), child_id.clone()));
 
-                    let Some((_source_path, _source_op_id, _source_op_version, source_planned)) =
-                        expanded_children.get(&child.0)
+                    let Some((
+                        _source_path,
+                        _source_op_id,
+                        _source_op_version,
+                        source_planned,
+                        _source_planner_payload,
+                    )) = expanded_children.get(&child.0)
                     else {
                         return Err(sdk_error(
                             "unknown_child_op",
@@ -850,8 +880,13 @@ fn flatten_composite_op(
                 }
             }
             PortSource::ChildExport { child, export } => {
-                let Some((_child_path, _child_op_id, _child_op_version, planned)) =
-                    expanded_children.get(&child.0)
+                let Some((
+                    _child_path,
+                    _child_op_id,
+                    _child_op_version,
+                    planned,
+                    _child_planner_payload,
+                )) = expanded_children.get(&child.0)
                 else {
                     return Err(sdk_error(
                         "unknown_child_op",
@@ -888,12 +923,14 @@ fn flatten_composite_op(
     let mut seen_state_ids = HashSet::new();
     let mut compiled_ops = Vec::new();
     let mut state_lineage = Vec::new();
+    let mut planner_payloads = planned_op_payloads(planned_op.op_path, planner_payload);
 
     for child_id in &ordered_children {
-        let (child_path, child_op_id, child_op_version, planned) = expanded_children
-            .get(child_id)
-            .expect("child exists")
-            .clone();
+        let (child_path, child_op_id, child_op_version, planned, child_planner_payload) =
+            expanded_children
+                .get(child_id)
+                .expect("child exists")
+                .clone();
         let child_bindings = bindings_by_child.get(child_id).cloned().unwrap_or_default();
         let mut child_imports: BTreeMap<String, QualifiedSlotRef> = BTreeMap::new();
         for (import, source) in child_bindings {
@@ -908,6 +945,7 @@ fn flatten_composite_op(
                 op_version: child_op_version,
                 op_path: child_path,
                 planned,
+                planner_payload: child_planner_payload,
                 resolved_imports: &child_imports,
             },
         )?;
@@ -926,6 +964,12 @@ fn flatten_composite_op(
         all_states.extend(fragment.states.iter().cloned());
         compiled_ops.extend(fragment.compiled_ops.iter().cloned());
         state_lineage.extend(fragment.state_lineage.iter().cloned());
+        planner_payloads.extend(
+            fragment
+                .planner_payloads
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
         child_fragments.insert(child_id.clone(), fragment);
     }
 
@@ -1005,6 +1049,7 @@ fn flatten_composite_op(
         exports,
         compiled_ops,
         state_lineage,
+        planner_payloads,
     })
 }
 
@@ -1019,14 +1064,25 @@ fn flatten_planned_op(
         op_version: &input.op_version,
         op_path: &input.op_path,
     };
+    let planner_payload = input.planner_payload;
     let PlannedOp { interface, kind } = input.planned;
     match kind {
-        PlannedOpKind::Leaf(spec) => {
-            flatten_leaf_op(env, planned_op, interface, spec, input.resolved_imports)
-        }
-        PlannedOpKind::Composite(spec) => {
-            flatten_composite_op(env, planned_op, interface, spec, input.resolved_imports)
-        }
+        PlannedOpKind::Leaf(spec) => flatten_leaf_op(
+            env,
+            planned_op,
+            interface,
+            spec,
+            planner_payload,
+            input.resolved_imports,
+        ),
+        PlannedOpKind::Composite(spec) => flatten_composite_op(
+            env,
+            planned_op,
+            interface,
+            spec,
+            planner_payload,
+            input.resolved_imports,
+        ),
     }
 }
 
@@ -1098,6 +1154,7 @@ impl PipelinePlanner for DefaultPipelinePlanner {
         let mut step_sinks: Vec<Vec<StateId>> = Vec::new();
         let mut compiled_ops = Vec::new();
         let mut state_lineage = Vec::new();
+        let mut planner_payloads = BTreeMap::new();
 
         for PipelineStep {
             step_id,
@@ -1109,6 +1166,8 @@ impl PipelinePlanner for DefaultPipelinePlanner {
             let op = registry.resolve(op_id, op_version)?;
             let op_path = op_path(&pipeline.machine_id, step_id);
             let planned = op.expand(op_path.clone(), op_config, run_config)?;
+            let step_planner_payload =
+                op.planner_payload(op_path.clone(), op_config, run_config)?;
             validate_op_interface(&planned.interface)?;
 
             let mut import_sources: BTreeMap<String, QualifiedSlotRef> = BTreeMap::new();
@@ -1135,6 +1194,7 @@ impl PipelinePlanner for DefaultPipelinePlanner {
                     op_version: op_version.clone(),
                     op_path: op_path.clone(),
                     planned,
+                    planner_payload: step_planner_payload,
                     resolved_imports: &import_sources,
                 },
             )?;
@@ -1155,6 +1215,7 @@ impl PipelinePlanner for DefaultPipelinePlanner {
             step_sinks.push(fragment.sinks);
             compiled_ops.extend(fragment.compiled_ops);
             state_lineage.extend(fragment.state_lineage);
+            planner_payloads.extend(fragment.planner_payloads);
 
             for (export, source) in fragment.exports {
                 if exports_by_port.insert(export, source).is_some() {
@@ -1202,7 +1263,7 @@ impl PipelinePlanner for DefaultPipelinePlanner {
                 ops: compiled_ops,
                 root_exports,
                 state_lineage,
-                planner_payloads: serde_json::json!({}),
+                planner_payloads: planner_payloads_value(planner_payloads),
             }),
         })
     }
