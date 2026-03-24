@@ -8,6 +8,7 @@ use thiserror::Error;
 
 mod catalog;
 mod compiler;
+mod payloads;
 
 pub use catalog::{
     ExecutionAnchor, ObservationPlanRequest, ObservationPlannerAdapter, ObservationRuntimeAdapter,
@@ -18,6 +19,12 @@ pub use catalog::{
     ViewPlanRequest, ViewPlannerAdapter, ViewRuntimeAdapter, ViewRuntimeInput,
 };
 pub use compiler::{PortfolioRequest, PortfolioSemanticCompiler};
+pub use payloads::{
+    DerivedUnitPriceValuationPayload, DirectPriceSourcePayload, DirectPriceValuationPayload,
+    Erc20BalanceObservationPayload, EvmResolvedSubjectValue, EvmRoutePolicy, EvmSubjectLocator,
+    FixedUnitPriceValuationPayload, NativeBalanceObservationPayload, ObservationProjection,
+    QuantitySchema,
+};
 /// Canonical observation read model emitted by semantic portfolio execution.
 ///
 /// The semantic cutover keeps the existing observation artifact shape so snapshot/report

@@ -175,6 +175,8 @@ impl State for ResolveSubjectsState {
             })?;
             let subject = runtime
                 .resolve_subject(
+                    &self.state_id,
+                    _io,
                     &task,
                     SubjectRuntimeInput {
                         prepared_sources: &prepared_sources,
@@ -276,6 +278,8 @@ impl State for PinExecutionViewsState {
             })?;
             let view = runtime
                 .pin_view(
+                    &self.state_id,
+                    _io,
                     &task,
                     ViewRuntimeInput {
                         prepared_sources: &prepared_sources,
@@ -377,6 +381,8 @@ impl State for ResolveValuationInputsState {
                 })?;
             let value = runtime
                 .resolve(
+                    &self.state_id,
+                    _io,
                     &task,
                     ValuationRuntimeInput {
                         pinned_views: &pinned_views,
@@ -505,6 +511,8 @@ impl State for ObserveCompiledBatchState {
         for binding in &self.batch.bindings {
             let mut observation = runtime
                 .observe(
+                    &self.state_id,
+                    _io,
                     binding,
                     ObservationRuntimeInput {
                         resolved_subjects: &resolved_subjects,
@@ -1002,6 +1010,8 @@ mod tests {
     impl SubjectRuntimeAdapter for StubSubjectRuntime {
         async fn resolve_subject(
             &self,
+            _state_id: &StateId,
+            _io: &mut dyn IoProvider,
             task: &SubjectResolutionTask,
             _input: SubjectRuntimeInput<'_>,
         ) -> Result<ResolvedSubject, StateError> {
@@ -1034,6 +1044,8 @@ mod tests {
     impl ViewRuntimeAdapter for StubViewRuntime {
         async fn pin_view(
             &self,
+            _state_id: &StateId,
+            _io: &mut dyn IoProvider,
             task: &ViewPinTask,
             _input: ViewRuntimeInput<'_>,
         ) -> Result<PinnedNetworkView, StateError> {
@@ -1064,6 +1076,8 @@ mod tests {
     impl ValuationRuntimeAdapter for StubValuationRuntime {
         async fn resolve(
             &self,
+            _state_id: &StateId,
+            _io: &mut dyn IoProvider,
             task: &ValuationTask,
             _input: ValuationRuntimeInput<'_>,
         ) -> Result<ResolvedUnitPrice, StateError> {
@@ -1072,6 +1086,8 @@ mod tests {
                 instrument_id: task.instrument_id.clone(),
                 quote: task.quote,
                 unit_price_dec: "2.5".to_string(),
+                valuation_reader_kind: "fixed_unit_price".to_string(),
+                source_refs: Vec::new(),
             })
         }
     }
@@ -1091,6 +1107,8 @@ mod tests {
     impl ObservationRuntimeAdapter for StubObservationRuntime {
         async fn observe(
             &self,
+            _state_id: &StateId,
+            _io: &mut dyn IoProvider,
             _binding: &crate::semantic::CompiledObservationBinding,
             _input: ObservationRuntimeInput<'_>,
         ) -> Result<Observation, StateError> {
