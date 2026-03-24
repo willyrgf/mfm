@@ -72,5 +72,7 @@
 //! ```
 /// Canonical portfolio-domain models, validation helpers, and normalization utilities.
 pub mod model;
+/// Semantic portfolio vocabulary, compiled execution specs, and validation helpers.
+pub mod semantic;
 /// Reusable portfolio-domain runtime states for canonical portfolio execution.
 pub mod states;
