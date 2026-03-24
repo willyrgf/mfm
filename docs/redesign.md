@@ -245,6 +245,8 @@ Normative rules:
 - runtime executes states only
 - states MUST NOT invoke operations or request planner re-entry
 - caller-visible pipelines, when used, MUST converge to the same flattening semantics
+- the exact SDK or `Operation` helper surface MAY evolve, but flatten-before-runtime is the
+  invariant that implementations MUST preserve
 
 ### 6.4 Live IO adapter model
 Canonical layering:
