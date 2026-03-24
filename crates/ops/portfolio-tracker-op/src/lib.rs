@@ -52,6 +52,10 @@ use mfm_state_wallet::model::WalletConfig;
 use mfm_state_wallet::states::ResolveWalletsState;
 use serde_json::Value;
 
+mod semantic;
+
+use semantic::{builtin_semantic_catalog, DefaultPortfolioSemanticCompiler};
+
 const OP_ID: &str = "portfolio_tracker";
 const OP_VERSION: &str = "v1";
 const MAIN_OP_PATH: &str = "portfolio_tracker.main";
@@ -202,6 +206,28 @@ impl Operation for PortfolioTrackerOp {
         _run_config: &RunConfig,
     ) -> Result<PlannedOp, SdkError> {
         let cfg = parse_config(op_config)?;
+        let semantic_catalog = builtin_semantic_catalog().map_err(|err| {
+            sdk_input_error(
+                "semantic_catalog_construction_failed",
+                format!("failed to construct semantic adapter catalog: {err}"),
+            )
+        })?;
+        let semantic_request = mfm_state_portfolio::semantic::PortfolioRequest {
+            portfolio: cfg.portfolio.clone(),
+            valuation_source_registry: cfg.valuation_source_registry.clone(),
+        };
+        mfm_state_portfolio::semantic::PortfolioSemanticCompiler::compile(
+            &DefaultPortfolioSemanticCompiler,
+            &semantic_request,
+            &semantic_catalog,
+        )
+        .map_err(|err| {
+            sdk_input_error(
+                "semantic_compilation_failed",
+                format!("failed to compile semantic execution spec: {err}"),
+            )
+        })?;
+
         let routes = network_routes(&cfg.portfolio);
         let (base_symbols, aave_symbols) = split_symbols(&cfg.portfolio);
         let base_symbol_ids: HashSet<_> = base_symbols

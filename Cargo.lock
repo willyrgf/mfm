@@ -2291,6 +2291,7 @@ dependencies = [
  "mfm-state-portfolio",
  "mfm-state-symbol",
  "mfm-state-wallet",
+ "serde",
  "serde_json",
  "tokio",
 ]

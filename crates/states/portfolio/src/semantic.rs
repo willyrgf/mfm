@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 mod catalog;
+mod compiler;
 
 pub use catalog::{
     ExecutionAnchor, ObservationPlanRequest, ObservationPlannerAdapter, ObservationRuntimeAdapter,
@@ -16,6 +17,7 @@ pub use catalog::{
     ValuationPlanRequest, ValuationPlannerAdapter, ValuationRuntimeAdapter, ValuationRuntimeInput,
     ViewPlanRequest, ViewPlannerAdapter, ViewRuntimeAdapter, ViewRuntimeInput,
 };
+pub use compiler::{PortfolioRequest, PortfolioSemanticCompiler};
 /// Canonical observation read model emitted by semantic portfolio execution.
 ///
 /// The semantic cutover keeps the existing observation artifact shape so snapshot/report
@@ -147,6 +149,10 @@ pub enum PositionSemantics {
     LendingDeposit,
     /// Lending-market debt position.
     LendingDebt,
+    /// Liquidity-provider share position.
+    LiquidityShare,
+    /// Staked claim or receipt position.
+    StakedClaim,
     /// UTXO-backed balance set.
     UtxoSet,
 }
@@ -160,6 +166,10 @@ pub struct Venue {
     pub display_name: Option<String>,
     /// Semantic venue kind.
     pub kind: String,
+    /// Optional network identifier associated with the venue.
+    pub network_id: Option<String>,
+    /// Optional parent venue for hierarchical semantic venues.
+    pub parent_venue_id: Option<VenueId>,
     /// Stable semantic metadata.
     #[serde(default)]
     pub metadata: BTreeMap<String, Value>,
@@ -1066,6 +1076,8 @@ mod tests {
                 venue_id: VenueId("wallet".to_string()),
                 display_name: Some("wallet".to_string()),
                 kind: "wallet".to_string(),
+                network_id: Some("ethereum-mainnet".to_string()),
+                parent_venue_id: None,
                 metadata: BTreeMap::new(),
             }],
             positions: vec![Position {
@@ -1182,6 +1194,8 @@ mod tests {
             venue_id: VenueId("wallet".to_string()),
             display_name: None,
             kind: "wallet".to_string(),
+            network_id: Some("ethereum-mainnet".to_string()),
+            parent_venue_id: None,
             metadata: BTreeMap::new(),
         });
 
