@@ -157,14 +157,28 @@ Rule of thumb:
 - The planner must flatten the result into one final `ExecutionPlan` before runtime starts.
 - Runtime executes states only.
 - States must never invoke ops or reshape the graph.
+- Child ops need deterministic hierarchical identities during planning even if runtime-visible
+  `StateId`s stay flat in v1.
+- Context namespacing and import/export wiring must use full child-op paths.
+- Duplicate child-op paths, duplicate exported ports, and duplicate flattened `StateId`s are plan
+  errors.
 - The exact operation API may evolve to represent child-op expansion explicitly; the invariant is
   flatten-before-runtime, not a specific helper signature.
+
+Practical dispatch split:
+- planner-time dispatch owns semantic validation, exact adapter selection, batch partitioning,
+  child-op path assignment, import/export validation, and optional compiled-plan artifact emission
+  for audit/inspection
+- runtime-time dispatch owns exact adapter lookup by planned id plus IO execution
+- runtime must not rerun capability matching, rediscover batch topology, or reshape the graph
 
 ### Flattened pipelines
 - Multiple ops are flattened into one execution plan and one run.
 - The same flattening rule should apply whether composition came from caller-supplied pipelines or
   recursive op expansion.
-- Shared context is namespaced; cross-op imports/exports are explicit.
+- Shared context is namespaced by full op path; cross-op imports/exports are explicit.
+- Recursive child-op composition must use the same collision rules as pipelines: no implicit
+  "last writer wins" export behavior.
 
 ### Nested child runs
 - Supported conceptually, but engine-managed child runs are deferred.
@@ -187,6 +201,9 @@ Must not own:
 ### `crates/sdk/`
 Owns orchestration ergonomics:
 - operation registry and planner helpers
+- recursive child-op flattening and hierarchical op-path assignment
+- context namespace wiring and import/export validation
+- optional compiled-plan artifact emission for audit and inspection
 - launch/resume glue over machine + stores
 - machine-friendly pipeline interfaces
 
