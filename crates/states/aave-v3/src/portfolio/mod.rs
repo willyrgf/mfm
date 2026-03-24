@@ -40,5 +40,7 @@
 
 /// Typed Aave V3 config models and validation helpers for portfolio positions.
 pub mod model;
+/// Shared semantic payloads for compiled Aave V3 portfolio execution.
+pub mod semantic;
 /// Reusable Aave V3 portfolio-position runtime states.
 pub mod states;

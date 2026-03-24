@@ -4,6 +4,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mfm_machine::errors::StateError;
 use mfm_machine::hashing::{canonical_json_bytes, CanonicalJsonError};
+use mfm_machine::ids::StateId;
+use mfm_machine::io::IoProvider;
+use mfm_state_symbol::model::ObservationValueSourceRef;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -68,6 +71,10 @@ pub struct ResolvedUnitPrice {
     pub quote: QuoteCode,
     /// Canonical decimal unit price.
     pub unit_price_dec: String,
+    /// Stable valuation reader kind used for read-model projection.
+    pub valuation_reader_kind: String,
+    /// Concrete source refs used for this valuation.
+    pub source_refs: Vec<ObservationValueSourceRef>,
 }
 
 /// Planner request for compiling one observation binding.
@@ -196,6 +203,8 @@ pub trait SubjectRuntimeAdapter: RuntimeAdapter {
     /// Resolves one semantic subject into a runtime subject payload.
     async fn resolve_subject(
         &self,
+        state_id: &StateId,
+        io: &mut dyn IoProvider,
         task: &super::SubjectResolutionTask,
         input: SubjectRuntimeInput<'_>,
     ) -> Result<ResolvedSubject, StateError>;
@@ -207,6 +216,8 @@ pub trait ViewRuntimeAdapter: RuntimeAdapter {
     /// Pins one semantic execution view into a replayable runtime anchor.
     async fn pin_view(
         &self,
+        state_id: &StateId,
+        io: &mut dyn IoProvider,
         task: &super::ViewPinTask,
         input: ViewRuntimeInput<'_>,
     ) -> Result<PinnedNetworkView, StateError>;
@@ -218,6 +229,8 @@ pub trait ValuationRuntimeAdapter: RuntimeAdapter {
     /// Resolves one planner-owned valuation task into a concrete unit price.
     async fn resolve(
         &self,
+        state_id: &StateId,
+        io: &mut dyn IoProvider,
         task: &super::ValuationTask,
         input: ValuationRuntimeInput<'_>,
     ) -> Result<ResolvedUnitPrice, StateError>;
@@ -229,6 +242,8 @@ pub trait ObservationRuntimeAdapter: RuntimeAdapter {
     /// Executes one compiled observation binding and returns the canonical observation read model.
     async fn observe(
         &self,
+        state_id: &StateId,
+        io: &mut dyn IoProvider,
         binding: &CompiledObservationBinding,
         input: ObservationRuntimeInput<'_>,
     ) -> Result<Observation, StateError>;
@@ -668,6 +683,8 @@ mod tests {
     impl ObservationRuntimeAdapter for StubObservationRuntime {
         async fn observe(
             &self,
+            _state_id: &StateId,
+            _io: &mut dyn IoProvider,
             _binding: &CompiledObservationBinding,
             _input: ObservationRuntimeInput<'_>,
         ) -> Result<Observation, StateError> {

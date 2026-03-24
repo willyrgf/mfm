@@ -3,25 +3,36 @@ use std::sync::Arc;
 
 use mfm_state_aave_v3::portfolio::model::{
     decode_aave_protocol_position_config, is_aave_protocol_position,
-    validate_aave_portfolio_config, AaveDebtPositionConfig, AaveProtocolPositionConfig,
-    AaveReservePositionConfig,
+    validate_aave_portfolio_config, AaveProtocolPositionConfig,
+};
+use mfm_state_aave_v3::portfolio::semantic::{
+    AaveDebtObservationPayload, AaveReserveObservationPayload,
+};
+use mfm_state_portfolio::semantic_adapters::{
+    DerivedUnitPriceRuntimeAdapter, EvmAddressSubjectRuntimeAdapter,
+    EvmOracleDirectPriceRuntimeAdapter, EvmViewRuntimeAdapter,
+    FixedUnitPriceRuntimeAdapter,
 };
 use mfm_state_portfolio::model::{validate_portfolio_bundle, NetworkConfig};
 use mfm_state_portfolio::semantic::{
     AdapterId, CompiledObservationBatch, CompiledObservationBinding, Instrument,
-    InstrumentSemantics, NetworkFamily, NetworkView, ObservationPlanRequest, ObservationTarget,
+    DerivedUnitPriceValuationPayload, DirectPriceSourcePayload, DirectPriceValuationPayload,
+    Erc20BalanceObservationPayload, EvmRoutePolicy, EvmSubjectLocator,
+    FixedUnitPriceValuationPayload, InstrumentSemantics, NativeBalanceObservationPayload,
+    NetworkFamily, NetworkView, ObservationPlanRequest, ObservationProjection, ObservationTarget,
     PlannerAdapter, PlanningError, PortfolioExecutionSpec, PortfolioRequest,
     PortfolioSemanticCompiler, PortfolioSemanticConfig, Position, PositionSemantics,
-    SemanticCatalog, SemanticCatalogError, SemanticCatalogParts, SourcePreparationTask, Subject,
-    SubjectKind, SubjectPlanRequest, SubjectPlannerAdapter, SubjectResolutionTask, Valuation,
-    ValuationPlanRequest, ValuationPlannerAdapter, ValuationSemantics, ValuationTask, Venue,
-    VenueId, ViewPinTask, ViewPlanRequest, ViewPlannerAdapter,
+    QuantitySchema, SemanticCatalog, SemanticCatalogError, SemanticCatalogParts,
+    SourcePreparationTask, Subject, SubjectKind, SubjectPlanRequest, SubjectPlannerAdapter,
+    SubjectResolutionTask, Valuation, ValuationPlanRequest, ValuationPlannerAdapter,
+    ValuationSemantics, ValuationTask, Venue, VenueId, ViewPinTask, ViewPlanRequest,
+    ViewPlannerAdapter,
 };
 use mfm_state_symbol::model::{
     BalanceReaderConfig, PriceSourceRef, QuoteValuationConfig, SymbolConfig, SymbolKind,
-    SymbolRole, ValuationReaderConfig, ValuationSourceConfig, ValuationSourceReaderConfig,
+    ValuationReaderConfig, ValuationSourceConfig, ValuationSourceReaderConfig,
 };
-use mfm_state_wallet::model::{WalletConfig, WalletImplementationConfig};
+use mfm_state_wallet::model::WalletConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -55,7 +66,14 @@ pub fn builtin_semantic_catalog() -> Result<SemanticCatalog, SemanticCatalogErro
             Arc::new(DerivedUnitPricePlannerAdapter),
         ],
         subject_planners: vec![Arc::new(EvmAddressSubjectPlannerAdapter)],
+        subject_runtimes: vec![Arc::new(EvmAddressSubjectRuntimeAdapter)],
         view_planners: vec![Arc::new(EvmViewPlannerAdapter)],
+        view_runtimes: vec![Arc::new(EvmViewRuntimeAdapter)],
+        valuation_runtimes: vec![
+            Arc::new(FixedUnitPriceRuntimeAdapter),
+            Arc::new(EvmOracleDirectPriceRuntimeAdapter),
+            Arc::new(DerivedUnitPriceRuntimeAdapter),
+        ],
         ..SemanticCatalogParts::default()
     })
 }
@@ -272,6 +290,12 @@ impl PortfolioSemanticCompiler for DefaultPortfolioSemanticCompiler {
 fn lower_semantic_config(
     request: &PortfolioRequest,
 ) -> Result<PortfolioSemanticConfig, PlanningError> {
+    let networks_by_id: HashMap<&str, &NetworkConfig> = request
+        .portfolio
+        .networks
+        .iter()
+        .map(|network| (network.network_id.as_str(), network))
+        .collect();
     let symbols_by_id: HashMap<&str, &SymbolConfig> = request
         .portfolio
         .symbol_configs
@@ -307,6 +331,7 @@ fn lower_semantic_config(
     for symbol in &request.portfolio.symbol_configs {
         let lowering = lower_symbol(
             symbol,
+            &networks_by_id,
             &symbols_by_id,
             &valuation_sources_by_id,
             &mut instruments_by_id,
@@ -405,6 +430,7 @@ struct LoweredSymbol {
 
 fn lower_symbol(
     symbol: &SymbolConfig,
+    networks_by_id: &HashMap<&str, &NetworkConfig>,
     symbols_by_id: &HashMap<&str, &SymbolConfig>,
     valuation_sources_by_id: &HashMap<&str, &ValuationSourceConfig>,
     instruments_by_id: &mut BTreeMap<String, Instrument>,
@@ -439,7 +465,7 @@ fn lower_symbol(
     let instrument = build_instrument(instrument_source)?;
     insert_instrument(instruments_by_id, instrument)?;
 
-    let (position, additional_venues) = build_position(symbol)?;
+    let (position, additional_venues) = build_position(symbol, networks_by_id)?;
     for venue in additional_venues {
         insert_venue(venues_by_id, venue)?;
     }
@@ -453,6 +479,7 @@ fn lower_symbol(
                 symbol,
                 instrument_source.symbol_id.clone(),
                 quote,
+                networks_by_id,
                 valuation_sources_by_id,
             )
         })
@@ -488,6 +515,23 @@ fn lower_subject(wallet: &WalletConfig) -> Result<Subject, PlanningError> {
             implementation: wallet.implementation.clone(),
         })?,
         metadata: wallet.metadata.clone(),
+    })
+}
+
+fn route_policy_for_network(
+    networks_by_id: &HashMap<&str, &NetworkConfig>,
+    network_id: &str,
+) -> Result<EvmRoutePolicy, PlanningError> {
+    let network = networks_by_id.get(network_id).copied().ok_or_else(|| {
+        compile_error(
+            "missing_network_for_route_policy",
+            format!("network `{network_id}` was not found for semantic route policy lowering"),
+        )
+    })?;
+    Ok(EvmRoutePolicy {
+        network_id: network.network_id.clone(),
+        chain_id: network.chain_id,
+        control_scope: network.control_scope.clone(),
     })
 }
 
@@ -548,12 +592,16 @@ fn insert_venue(
     }
 }
 
-fn build_position(symbol: &SymbolConfig) -> Result<(Position, Vec<Venue>), PlanningError> {
+fn build_position(
+    symbol: &SymbolConfig,
+    networks_by_id: &HashMap<&str, &NetworkConfig>,
+) -> Result<(Position, Vec<Venue>), PlanningError> {
     if is_aave_protocol_position(symbol) {
-        return build_aave_position(symbol);
+        return build_aave_position(symbol, networks_by_id);
     }
 
     let projection = observation_projection(symbol);
+    let route_policy = route_policy_for_network(networks_by_id, &symbol.network_id)?;
     match &symbol.balance_reader {
         BalanceReaderConfig::NativeBalance {} => Ok((
             Position {
@@ -562,7 +610,10 @@ fn build_position(symbol: &SymbolConfig) -> Result<(Position, Vec<Venue>), Plann
                 semantics: PositionSemantics::SpotBalance,
                 venue_id: None,
                 reader_hint: Some(READER_HINT_EVM_NATIVE_BALANCE.to_string()),
-                metadata: to_object_map(&NativeBalanceObservationPlanPayload { projection })?,
+                metadata: to_object_map(&NativeBalanceObservationPayload {
+                    projection,
+                    route_policy,
+                })?,
             },
             Vec::new(),
         )),
@@ -573,8 +624,9 @@ fn build_position(symbol: &SymbolConfig) -> Result<(Position, Vec<Venue>), Plann
                 semantics: PositionSemantics::SpotBalance,
                 venue_id: None,
                 reader_hint: Some(READER_HINT_EVM_ERC20_BALANCE.to_string()),
-                metadata: to_object_map(&Erc20BalanceObservationPlanPayload {
+                metadata: to_object_map(&Erc20BalanceObservationPayload {
                     projection,
+                    route_policy,
                     token_address: token_address.clone(),
                 })?,
             },
@@ -592,7 +644,10 @@ fn build_position(symbol: &SymbolConfig) -> Result<(Position, Vec<Venue>), Plann
     }
 }
 
-fn build_aave_position(symbol: &SymbolConfig) -> Result<(Position, Vec<Venue>), PlanningError> {
+fn build_aave_position(
+    symbol: &SymbolConfig,
+    networks_by_id: &HashMap<&str, &NetworkConfig>,
+) -> Result<(Position, Vec<Venue>), PlanningError> {
     let projection = observation_projection(symbol);
     let underlying_symbol_id = symbol.underlying_symbol_id.clone().ok_or_else(|| {
         compile_error(
@@ -606,6 +661,7 @@ fn build_aave_position(symbol: &SymbolConfig) -> Result<(Position, Vec<Venue>), 
     let cfg = decode_aave_protocol_position_config(symbol)
         .map_err(|err| compile_error("invalid_aave_symbol", err.to_string()))?;
     let market = cfg.market().clone();
+    let route_policy = route_policy_for_network(networks_by_id, &market.network_id)?;
     let reserve_id = cfg.reserve_id().to_string();
     let market_venue_id = VenueId(format!("aave_v3/{}", market.market_id));
     let reserve_venue_id = VenueId(format!("{}/{}", market_venue_id.0, reserve_id));
@@ -638,8 +694,9 @@ fn build_aave_position(symbol: &SymbolConfig) -> Result<(Position, Vec<Venue>), 
                 semantics: PositionSemantics::LendingDeposit,
                 venue_id: Some(reserve_venue_id),
                 reader_hint: Some(READER_HINT_AAVE_RESERVE.to_string()),
-                metadata: to_object_map(&AaveReserveObservationPlanPayload {
+                metadata: to_object_map(&AaveReserveObservationPayload {
                     projection,
+                    route_policy,
                     underlying_symbol_id,
                     config: cfg,
                 })?,
@@ -653,8 +710,9 @@ fn build_aave_position(symbol: &SymbolConfig) -> Result<(Position, Vec<Venue>), 
                 semantics: PositionSemantics::LendingDebt,
                 venue_id: Some(reserve_venue_id),
                 reader_hint: Some(READER_HINT_AAVE_DEBT.to_string()),
-                metadata: to_object_map(&AaveDebtObservationPlanPayload {
+                metadata: to_object_map(&AaveDebtObservationPayload {
                     projection,
+                    route_policy,
                     underlying_symbol_id,
                     config: cfg,
                 })?,
@@ -668,6 +726,7 @@ fn build_valuation(
     symbol: &SymbolConfig,
     instrument_id: String,
     quote: &QuoteValuationConfig,
+    networks_by_id: &HashMap<&str, &NetworkConfig>,
     valuation_sources_by_id: &HashMap<&str, &ValuationSourceConfig>,
 ) -> Result<Valuation, PlanningError> {
     let valuation_id = format!(
@@ -678,7 +737,7 @@ fn build_valuation(
     let (semantics, strategy) = match &quote.reader {
         ValuationReaderConfig::FixedUnitPrice { unit_price_dec } => (
             ValuationSemantics::FixedUnitPrice,
-            to_value(&FixedUnitPricePlanPayload {
+            to_value(&FixedUnitPriceValuationPayload {
                 priced_symbol_id: quote.priced_symbol_id.clone(),
                 unit_price_dec: unit_price_dec.clone(),
             })?,
@@ -688,10 +747,13 @@ fn build_valuation(
                 lookup_valuation_source(valuation_sources_by_id, &valuation_id, source)?;
             (
                 ValuationSemantics::DirectUnitPrice,
-                to_value(&DirectPricePlanPayload {
+                to_value(&DirectPriceValuationPayload {
                     priced_symbol_id: quote.priced_symbol_id.clone(),
-                    source: source.clone(),
-                    source_reader: source_cfg.reader.clone(),
+                    source: DirectPriceSourcePayload {
+                        source: source.clone(),
+                        route_policy: route_policy_for_network(networks_by_id, &source.network_id)?,
+                        source_reader: source_cfg.reader.clone(),
+                    },
                 })?,
             )
         }
@@ -705,14 +767,22 @@ fn build_valuation(
                 lookup_valuation_source(valuation_sources_by_id, &valuation_id, denominator)?;
             (
                 ValuationSemantics::DerivedUnitPrice,
-                to_value(&DerivedUnitPricePlanPayload {
+                to_value(&DerivedUnitPriceValuationPayload {
                     priced_symbol_id: quote.priced_symbol_id.clone(),
-                    numerator: DirectPriceSourcePlanPayload {
+                    numerator: DirectPriceSourcePayload {
                         source: numerator.clone(),
+                        route_policy: route_policy_for_network(
+                            networks_by_id,
+                            &numerator.network_id,
+                        )?,
                         source_reader: numerator_cfg.reader.clone(),
                     },
-                    denominator: DirectPriceSourcePlanPayload {
+                    denominator: DirectPriceSourcePayload {
                         source: denominator.clone(),
+                        route_policy: route_policy_for_network(
+                            networks_by_id,
+                            &denominator.network_id,
+                        )?,
                         source_reader: denominator_cfg.reader.clone(),
                     },
                 })?,
@@ -849,87 +919,6 @@ fn build_observation_binding(
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct EvmSubjectLocator {
-    network_id: String,
-    address: String,
-    implementation: WalletImplementationConfig,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct EvmRoutePolicy {
-    network_id: String,
-    chain_id: u64,
-    control_scope: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct QuantitySchema {
-    decimals: u8,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct ObservationProjection {
-    symbol_id: String,
-    display_symbol: Option<String>,
-    kind: SymbolKind,
-    role: SymbolRole,
-    network_id: String,
-    protocol: Option<String>,
-    decimals: u8,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct NativeBalanceObservationPlanPayload {
-    projection: ObservationProjection,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Erc20BalanceObservationPlanPayload {
-    projection: ObservationProjection,
-    token_address: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct AaveReserveObservationPlanPayload {
-    projection: ObservationProjection,
-    underlying_symbol_id: String,
-    config: AaveReservePositionConfig,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct AaveDebtObservationPlanPayload {
-    projection: ObservationProjection,
-    underlying_symbol_id: String,
-    config: AaveDebtPositionConfig,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct FixedUnitPricePlanPayload {
-    priced_symbol_id: String,
-    unit_price_dec: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct DirectPricePlanPayload {
-    priced_symbol_id: String,
-    source: PriceSourceRef,
-    source_reader: ValuationSourceReaderConfig,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct DirectPriceSourcePlanPayload {
-    source: PriceSourceRef,
-    source_reader: ValuationSourceReaderConfig,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct DerivedUnitPricePlanPayload {
-    priced_symbol_id: String,
-    numerator: DirectPriceSourcePlanPayload,
-    denominator: DirectPriceSourcePlanPayload,
-}
-
 struct EvmAddressSubjectPlannerAdapter;
 
 impl PlannerAdapter for EvmAddressSubjectPlannerAdapter {
@@ -1010,7 +999,7 @@ impl ValuationPlannerAdapter for FixedUnitPricePlannerAdapter {
 
     fn plan(&self, req: ValuationPlanRequest<'_>) -> Result<ValuationTask, PlanningError> {
         let adapter = self.id();
-        let payload: FixedUnitPricePlanPayload =
+        let payload: FixedUnitPriceValuationPayload =
             decode_value(&adapter, "valuation_strategy", &req.valuation.strategy)?;
         Ok(ValuationTask {
             valuation_id: req.valuation.valuation_id.clone(),
@@ -1035,10 +1024,10 @@ impl ValuationPlannerAdapter for EvmOracleDirectPricePlannerAdapter {
         if req.valuation.semantics != ValuationSemantics::DirectUnitPrice {
             return false;
         }
-        serde_json::from_value::<DirectPricePlanPayload>(req.valuation.strategy.clone())
+        serde_json::from_value::<DirectPriceValuationPayload>(req.valuation.strategy.clone())
             .map(|payload| {
                 matches!(
-                    payload.source_reader,
+                    payload.source.source_reader,
                     ValuationSourceReaderConfig::EvmOracle { .. }
                 )
             })
@@ -1047,7 +1036,7 @@ impl ValuationPlannerAdapter for EvmOracleDirectPricePlannerAdapter {
 
     fn plan(&self, req: ValuationPlanRequest<'_>) -> Result<ValuationTask, PlanningError> {
         let adapter = self.id();
-        let payload: DirectPricePlanPayload =
+        let payload: DirectPriceValuationPayload =
             decode_value(&adapter, "valuation_strategy", &req.valuation.strategy)?;
         Ok(ValuationTask {
             valuation_id: req.valuation.valuation_id.clone(),
@@ -1074,7 +1063,7 @@ impl ValuationPlannerAdapter for DerivedUnitPricePlannerAdapter {
 
     fn plan(&self, req: ValuationPlanRequest<'_>) -> Result<ValuationTask, PlanningError> {
         let adapter = self.id();
-        let payload: DerivedUnitPricePlanPayload =
+        let payload: DerivedUnitPriceValuationPayload =
             decode_value(&adapter, "valuation_strategy", &req.valuation.strategy)?;
         Ok(ValuationTask {
             valuation_id: req.valuation.valuation_id.clone(),
@@ -1108,7 +1097,7 @@ impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
         req: ObservationPlanRequest<'_>,
     ) -> Result<CompiledObservationBinding, PlanningError> {
         let adapter = self.id();
-        let payload: NativeBalanceObservationPlanPayload =
+        let payload: NativeBalanceObservationPayload =
             decode_object_map(&adapter, "position_payload", &req.position.metadata)?;
         Ok(build_observation_binding(
             ADAPTER_OBSERVE_EVM_NATIVE_BALANCE,
@@ -1141,7 +1130,7 @@ impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
         req: ObservationPlanRequest<'_>,
     ) -> Result<CompiledObservationBinding, PlanningError> {
         let adapter = self.id();
-        let payload: Erc20BalanceObservationPlanPayload =
+        let payload: Erc20BalanceObservationPayload =
             decode_object_map(&adapter, "position_payload", &req.position.metadata)?;
         Ok(build_observation_binding(
             ADAPTER_OBSERVE_EVM_ERC20_BALANCE,
@@ -1174,7 +1163,7 @@ impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
         req: ObservationPlanRequest<'_>,
     ) -> Result<CompiledObservationBinding, PlanningError> {
         let adapter = self.id();
-        let payload: AaveReserveObservationPlanPayload =
+        let payload: AaveReserveObservationPayload =
             decode_object_map(&adapter, "position_payload", &req.position.metadata)?;
         Ok(build_observation_binding(
             ADAPTER_OBSERVE_AAVE_RESERVE,
@@ -1207,7 +1196,7 @@ impl mfm_state_portfolio::semantic::ObservationPlannerAdapter
         req: ObservationPlanRequest<'_>,
     ) -> Result<CompiledObservationBinding, PlanningError> {
         let adapter = self.id();
-        let payload: AaveDebtObservationPlanPayload =
+        let payload: AaveDebtObservationPayload =
             decode_object_map(&adapter, "position_payload", &req.position.metadata)?;
         Ok(build_observation_binding(
             ADAPTER_OBSERVE_AAVE_DEBT,
@@ -1394,9 +1383,9 @@ mod tests {
                     "quote": "USD",
                     "reader": {
                         "kind": "evm_oracle",
-                        "oracle_kind": "chainlink",
+                        "oracle_kind": "chainlink_aggregator_v3",
                         "config": {
-                            "feed_address": "0x0000000000000000000000000000000000000010"
+                            "contract_address": "0x0000000000000000000000000000000000000010"
                         }
                     }
                 },
@@ -1407,9 +1396,9 @@ mod tests {
                     "quote": "BTC",
                     "reader": {
                         "kind": "evm_oracle",
-                        "oracle_kind": "chainlink",
+                        "oracle_kind": "chainlink_aggregator_v3",
                         "config": {
-                            "feed_address": "0x0000000000000000000000000000000000000011"
+                            "contract_address": "0x0000000000000000000000000000000000000011"
                         }
                     }
                 }
